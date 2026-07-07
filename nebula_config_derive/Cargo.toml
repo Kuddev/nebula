@@ -1,0 +1,26 @@
+[package]
+name = "nebula_config_derive"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+description = "Failure resistant deserialization derive"
+homepage = "https://github.com/Kuddev/nebulaTerminal"
+repository = "https://github.com/Kuddev/nebulaTerminal"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.24"
+quote = "1.0.7"
+syn = { version = "2.0.16", features = ["derive", "parsing", "proc-macro", "printing"], default-features = false }
+
+[dev-dependencies.nebula_config]
+path = "../nebula_config"
+version = "0.1.0"
+
+[dev-dependencies]
+log = "0.4.11"
+serde = { version = "1.0.117", features = ["derive"] }
+toml.workspace = true
