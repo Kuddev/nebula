@@ -148,15 +148,15 @@ experience that works without extra setup.
 ### 📥 Install
 
 > **⚠️ Install the bundled font first.** Nebula's powerline prompt, program
-> icons and AI brand marks are drawn with **Maple Mono NF CN** (a Nerd Font).
+> icons and AI brand marks are drawn with **Maple Mono Normal NF CN** (a Nerd Font).
 > Without it, those glyphs render as `□` boxes. The font ships in the release
-> zip and the repo at `assets/fonts/MapleMono-NF-CN-Regular.ttf` — double-click
+> zip and the repo at `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` — double-click
 > it and press **Install**, then launch Nebula. (Licensed under SIL OFL 1.1.)
 
 **Release build (recommended)** — download
-`NebulaTerminal-v0.1.0-windows-x64.zip` from
+`NebulaTerminal-v0.2.0-windows-x64.zip` from
 [Releases](https://github.com/Kuddev/nebula/releases), unzip
-anywhere, install `MapleMono-NF-CN-Regular.ttf`, then run `nebula.exe`. Keep
+anywhere, install `MapleMonoNormal-NF-CN-Regular.ttf`, then run `nebula.exe`. Keep
 the bundled files next to the exe (`nebula-hook.exe` powers AI notifications;
 `conpty.dll` + `OpenConsole.exe` provide the modern ConPTY host).
 
@@ -175,7 +175,7 @@ cargo build --release   # artifacts land in target/release/
 | Terminal core | GPU grid + VTE parsing on an Alacritty-derived foundation |
 | Session model | Resident mux process, loopback attach protocol |
 | Shell integration | PowerShell + PSReadLine, Git Bash; OSC 7/8/9/133/1337 |
-| Fonts | Maple Mono NF CN (Nerd Font glyphs, CJK-aware) |
+| Fonts | Maple Mono Normal NF CN (Nerd Font glyphs, CJK-aware) |
 
 ### 🙏 Acknowledgments
 
@@ -288,15 +288,15 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 ### 📥 安装
 
 > **⚠️ 请先安装随附字体。** Nebula 的 powerline 提示符、程序图标与 AI 品牌
-> 标识都用 **Maple Mono NF CN**（一款 Nerd Font）绘制。不装的话这些字形会显
+> 标识都用 **Maple Mono Normal NF CN**（一款 Nerd Font）绘制。不装的话这些字形会显
 > 示成 `□` 方框。字体在 release 包内、仓库里也有：
-> `assets/fonts/MapleMono-NF-CN-Regular.ttf` —— 双击它点**安装**，再启动
+> `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` —— 双击它点**安装**，再启动
 > Nebula。（SIL OFL 1.1 许可。）
 
 **Release 包（推荐）** — 从
 [Releases](https://github.com/Kuddev/nebula/releases) 下载
-`NebulaTerminal-v0.1.0-windows-x64.zip`，解压到任意目录，先安装
-`MapleMono-NF-CN-Regular.ttf`，再运行 `nebula.exe`。请保持随包文件与 exe
+`NebulaTerminal-v0.2.0-windows-x64.zip`，解压到任意目录，先安装
+`MapleMonoNormal-NF-CN-Regular.ttf`，再运行 `nebula.exe`。请保持随包文件与 exe
 同目录（`nebula-hook.exe` 驱动 AI 通知；`conpty.dll` + `OpenConsole.exe`
 提供现代 ConPTY 宿主）。
 
@@ -315,7 +315,7 @@ cargo build --release   # 产物在 target/release/
 | 终端内核 | GPU 网格 + VTE 解析，基于 Alacritty 衍生的地基 |
 | 会话模型 | 常驻 mux 进程，环回 attach 协议 |
 | Shell 集成 | PowerShell + PSReadLine、Git Bash；OSC 7/8/9/133/1337 |
-| 字体 | Maple Mono NF CN（Nerd Font 图标，支持 CJK） |
+| 字体 | Maple Mono Normal NF CN（Nerd Font 图标，支持 CJK） |
 
 ### 🙏 致谢
 

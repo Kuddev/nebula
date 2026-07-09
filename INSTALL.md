@@ -2,10 +2,10 @@
 
 ## Release package (recommended)
 
-1. Download `NebulaTerminal-v0.1.0-windows-x64.zip` from the
+1. Download `NebulaTerminal-v0.2.0-windows-x64.zip` from the
    [Releases](https://github.com/Kuddev/nebula/releases) page.
 2. Unzip anywhere (no installer, no admin rights).
-3. **Install the font**: double-click `MapleMono-NF-CN-Regular.ttf` and press
+3. **Install the font**: double-click `MapleMonoNormal-NF-CN-Regular.ttf` and press
    *Install*. Nebula's powerline prompt and icons need this Nerd Font —
    without it they render as `□` boxes.
 4. Run `nebula.exe`.
@@ -17,7 +17,7 @@ Keep these files together in one directory:
 | `nebula.exe` | the terminal |
 | `nebula-hook.exe` | AI turn-notification bridge (Claude Code / Codex) |
 | `conpty.dll` + `OpenConsole.exe` | modern ConPTY host (correct resize, fast tab spawn) |
-| `MapleMono-NF-CN-Regular.ttf` | Nerd Font for powerline/icons — install once (SIL OFL 1.1) |
+| `MapleMonoNormal-NF-CN-Regular.ttf` | Nerd Font for powerline/icons — install once (SIL OFL 1.1) |
 
 ## Build from source
 

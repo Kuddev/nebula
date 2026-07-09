@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0 — 2026-07-10
+
+### 🐚 Shell experience
+
+- **Ctrl+V paste** — Windows/Linux users can paste with the expected shortcut, while the existing bracketed-paste and multi-line paste confirmation flow stays intact.
+- **Safer pane spawning** — new tabs and splits validate inherited cwd before spawning, avoiding `os error 267` when the shell reports a deleted or virtual directory.
+- **SSH passthrough** — `nebula ssh user@host` can bootstrap Nebula shell integration on Linux bash/zsh remotes while preserving forwarding/query forms such as `-N -L`, `-W`, `-G`, and explicit remote commands.
+
+### 🤖 AI workflow
+
+- **opencode integration** — Nebula can install an opencode plugin and route its turn state through the same sidebar/toast bridge as Claude Code and Codex.
+- **Remote AI awareness** — OSC cwd and command-state signals from a bootstrapped SSH session flow back into the local sidebar.
+
+### 🎨 UI / UX
+
+- **Right-side Files/Git drawer** — adds a floating file tree / git drawer with filtering, selection, drag-to-paste, git staging/commit/push actions, and geometry aligned with the left TABS panel.
+- **Chrome refactor** — extracts chrome and side-panel drawing into dedicated modules, keeping hit-testing and rendering geometry in sync.
+- **0.2 default font** — switches the release package to `MapleMonoNormal-NF-CN-Regular.ttf` / Maple Mono Normal NF CN for the default packaged Nerd Font.
+- **Cleaner release docs** — README/INSTALL now point at the v0.2.0 package and GPL-3.0-only license text.
+
 ## 0.1.0 — 2026-07-07
 
 Nebula Terminal 的第一个公开版本 / First public release.
