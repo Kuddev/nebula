@@ -1082,6 +1082,7 @@ name = "nebula"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "base64",
  "bitflags 2.9.4",
  "clap",
  "clap_complete",

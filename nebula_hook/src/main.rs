@@ -1,8 +1,10 @@
 //! nebula-hook — the bridge between AI-CLI lifecycle hooks and Nebula.
 //!
-//! Claude Code (`Stop` / `Notification` / `UserPromptSubmit` hooks) and Codex
-//! (`notify` program) invoke this for every turn event. It forwards the raw
-//! payload to the hosting Nebula instance over a named pipe and exits.
+//! Claude Code (`Stop` / `Notification` / `UserPromptSubmit` hooks), Codex
+//! (`notify` program), and opencode (a bundled plugin, shelling out on
+//! `session.idle` / `permission.updated` / user-prompt) invoke this for every
+//! turn event. It forwards the raw payload to the hosting Nebula instance over
+//! a named pipe and exits.
 //! Design constraints, in order:
 //!
 //! 1. INVISIBLE: a Stop hook's exit code is meaningful to claude (non-zero
@@ -22,10 +24,15 @@
 //! nebula-hook claude                              # payload on stdin
 //! nebula-hook codex <json>                        # payload as last arg
 //! nebula-hook codex --chain <exe> <fixed…> <json> # + exec previous notifier
+//! nebula-hook opencode <json>                     # payload as last arg
 //! ```
 //! `--chain` exists because codex has a single `notify` slot which may
 //! already be taken (e.g. OpenAI's own computer-use notifier): we forward to
 //! Nebula and then invoke the original program with the same payload.
+//!
+//! `opencode` is fed by a Nebula-authored plugin (dropped into the user's
+//! opencode plugin dir) that subscribes to opencode's event bus and shells out
+//! here with a normalized `{"kind":...}` payload — same wire shape as codex.
 
 use std::io::{Read, Write};
 
@@ -36,11 +43,14 @@ fn main() {
 
 fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(source) = args.first().filter(|s| matches!(s.as_str(), "claude" | "codex")) else {
+    let Some(source) =
+        args.first().filter(|s| matches!(s.as_str(), "claude" | "codex" | "opencode"))
+    else {
         return;
     };
 
-    // Payload: claude streams JSON on stdin; codex appends it as the last arg.
+    // Payload: claude streams JSON on stdin; codex and opencode append it as
+    // the last arg.
     let payload = match source.as_str() {
         "claude" => {
             let mut buf = Vec::with_capacity(4096);

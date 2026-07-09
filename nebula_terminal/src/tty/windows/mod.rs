@@ -280,7 +280,6 @@ $global:NebFolderIcon = [char]0xE70F
 $global:NebGitBranchIcon = [char]0xF418
 $global:NebClockIcon = [char]0xF017
 $global:NebulaPromptCount = 0
-$global:NebulaThemeFile = Join-Path ([System.IO.Path]::GetTempPath()) 'nebula_theme.txt'
 $global:NebulaSettingsFile = if ($env:APPDATA) {
     Join-Path $env:APPDATA 'Nebula\nebula_settings.txt'
 } elseif ($env:HOME) {
@@ -324,24 +323,6 @@ function global:Get-NebulaBoolSetting {
     }
 }
 
-function global:Get-NebulaThemeName {
-    try {
-        if (Test-Path -LiteralPath $NebulaThemeFile) {
-            $name = (Get-Content -LiteralPath $NebulaThemeFile -Raw -ErrorAction SilentlyContinue).Trim()
-            switch ($name) {
-                'SilverLight'    { return 'SilverLight' }
-                'SteelDark'      { return 'SteelDark' }
-                'LimestoneLight' { return 'LimestoneLight' }
-                'CoalDark'       { return 'CoalDark' }
-                'LinenLight'     { return 'LinenLight' }
-                'MossDark'       { return 'MossDark' }
-                'Nebula'         { return 'Nebula' }
-            }
-        }
-    } catch {}
-    'Nebula'
-}
-
 function global:prompt {
     # Same principle as Oh My Posh: prompt rendering may execute external
     # commands, so preserve the previous command status. Errors inside the
@@ -377,116 +358,37 @@ function global:prompt {
         if ($global:NebulaPromptCount -gt 1) { $leadingNewline = "`n" }
     }
 
-    # Always initialize the default palette before reading the shared theme
-    # bridge. The theme file is written by the UI process; if it is missing,
-    # being replaced, or contains an unknown value, the prompt must still emit
-    # valid ANSI instead of falling back to PowerShell's plain `PS>`.
-    # ANSI has no alpha channel; soften the prompt by mixing every
-    # segment background toward the terminal background.
-    $icon0=@(57,75,112);   $icon1=@(46,60,90);   $iconFg=@(192,202,245)
-    $path0=@(41,52,82);    $path1=@(33,42,66);   $pathFg=@(169,177,214)
-    $branch0=@(47,79,79);  $branch1=@(38,63,63); $branchFg=@(139,213,202)
-    $time0=@(29,33,46);    $time1=@(19,23,34);   $timeFg=@(100,116,139)
-    $termbg=@(15,17,26)
-
-    $theme = Get-NebulaThemeName
-    switch ($theme) {
-        'SilverLight' {
-            # Premium-light sheet: neutral badge chips on a white terminal,
-            # blue-tinted branch badge (#e0f2fe/#0369a1), violet prompt (#8250df).
-            $icon0=@(229,231,235); $icon1=@(209,213,219); $iconFg=@(55,65,81)
-            $path0=@(243,244,246); $path1=@(229,231,235); $pathFg=@(55,65,81)
-            $branch0=@(224,242,254); $branch1=@(186,230,253); $branchFg=@(3,105,161)
-            $time0=@(249,250,251); $time1=@(243,244,246); $timeFg=@(107,114,128)
-            $termbg=@(255,255,255)
-        }
-        'SteelDark' {
-            $icon0=@(71,85,105);  $icon1=@(57,68,84);   $iconFg=@(241,245,249)
-            $path0=@(51,65,85);   $path1=@(41,52,68);   $pathFg=@(203,213,225)
-            $branch0=@(59,82,73); $branch1=@(47,66,58); $branchFg=@(163,184,153)
-            $time0=@(40,44,56);   $time1=@(30,34,44);   $timeFg=@(148,163,184)
-            $termbg=@(26,28,36)
-        }
-        'LimestoneLight' {
-            $icon0=@(214,211,209); $icon1=@(193,190,188); $iconFg=@(250,250,249)
-            $path0=@(231,229,228); $path1=@(212,210,208); $pathFg=@(68,64,60)
-            $branch0=@(200,198,167); $branch1=@(178,176,146); $branchFg=@(41,37,36)
-            $time0=@(235,233,230); $time1=@(220,218,214); $timeFg=@(163,160,151)
-            $termbg=@(255,255,255)
-        }
-        'CoalDark' {
-            $icon0=@(82,82,82);   $icon1=@(66,66,66);   $iconFg=@(245,245,245)
-            $path0=@(64,64,64);   $path1=@(51,51,51);   $pathFg=@(212,212,212)
-            $branch0=@(74,79,65); $branch1=@(59,63,52); $branchFg=@(181,181,166)
-            $time0=@(48,48,48);   $time1=@(38,38,38);   $timeFg=@(115,115,115)
-            $termbg=@(23,23,23)
-        }
-        'LinenLight' {
-            $icon0=@(212,212,208); $icon1=@(191,191,187); $iconFg=@(255,255,255)
-            $path0=@(229,229,223); $path1=@(210,210,204); $pathFg=@(63,63,63)
-            $branch0=@(181,196,177); $branch1=@(159,176,155); $branchFg=@(45,45,45)
-            $time0=@(236,236,230); $time1=@(221,221,215); $timeFg=@(176,179,176)
-            $termbg=@(255,255,255)
-        }
-        'MossDark' {
-            $icon0=@(75,85,72);   $icon1=@(60,68,58);   $iconFg=@(240,253,244)
-            $path0=@(59,66,56);   $path1=@(47,53,45);   $pathFg=@(220,252,231)
-            $branch0=@(60,79,60); $branch1=@(48,63,48); $branchFg=@(187,247,208)
-            $time0=@(42,47,42);   $time1=@(34,38,34);   $timeFg=@(107,114,107)
-            $termbg=@(30,33,30)
-        }
-    }
+    # Segment colors come from the terminal's 256-color palette, slots
+    # 16..=23 (icon bg/fg, path bg/fg, branch bg/fg, time bg/fg), published
+    # per-theme by Nebula (theme.rs::apply_term_colors). Indexed colors mean a
+    # theme switch recolors every prompt already in scrollback — truecolor
+    # (the old scheme) is frozen the moment it prints. No theme file, no polling.
 
     if (-not (Get-NebulaBoolSetting 'powerline' $true)) {
         $branchText = if ($branch) { " ($branch)" } else { "" }
-        $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$loc|$branch$([char]7)$e[38;2;$($pathFg[0]);$($pathFg[1]);$($pathFg[2])m$loc$branchText $e[35m$NebPromptArrow $reset"
+        $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$loc|$branch$([char]7)$e[38;5;19m$loc$branchText $e[35m$NebPromptArrow $reset"
         try { Set-PSReadLineOption -ExtraPromptLineCount (($output | Measure-Object -Line).Lines - 1) } catch {}
         $global:LASTEXITCODE = $originalLastExitCode
         return $output
     }
 
     $segs = New-Object System.Collections.ArrayList
-    [void]$segs.Add(@{ c0=$icon0; c1=$icon1; fg=$iconFg; t=" $NebFolderIcon " })
-    [void]$segs.Add(@{ c0=$path0; c1=$path1; fg=$pathFg; t="  $loc  " })
-    if ($branch) { [void]$segs.Add(@{ c0=$branch0; c1=$branch1; fg=$branchFg; t=" $NebGitBranchIcon $branch  " }) }
-    [void]$segs.Add(@{ c0=$time0; c1=$time1; fg=$timeFg; t=" $NebClockIcon $time  " })
+    [void]$segs.Add(@{ bg=16; fg=17; t=" $NebFolderIcon " })
+    [void]$segs.Add(@{ bg=18; fg=19; t="  $loc  " })
+    if ($branch) { [void]$segs.Add(@{ bg=20; fg=21; t=" $NebGitBranchIcon $branch  " }) }
+    [void]$segs.Add(@{ bg=22; fg=23; t=" $NebClockIcon $time  " })
 
-    $out = ''
-    if ($segs.Count -gt 0) {
-        $first = @($segs[0].c0)
-        if ($first.Count -lt 3) { $first = $termbg }
-        # 49 = default background: the cap cell's square corners always match the
-        # real terminal bg (any theme / wallpaper), no hardcoded colour seams.
-        $out += "$reset$e[38;2;$($first[0]);$($first[1]);$($first[2])m$e[49m$NebLeftRound$reset"
-    }
+    # 49 = default background on both caps: the cap cell's square corners
+    # always match the real terminal bg (any theme / wallpaper).
+    $out = "$reset$e[38;5;$($segs[0].bg)m$e[49m$NebLeftRound$reset"
     for ($i = 0; $i -lt $segs.Count; $i++) {
-        $s = $segs[$i]; $t = $s.t; $n = $t.Length
-        $c0 = @($s.c0); $c1 = @($s.c1); $fg = @($s.fg)
-        if ($c0.Count -lt 3) { $c0 = $termbg }
-        if ($c1.Count -lt 3) { $c1 = $c0 }
-        if ($fg.Count -lt 3) { $fg = @(210,218,238) }
-        $out += "$e[38;2;$($fg[0]);$($fg[1]);$($fg[2])m"
-        for ($j = 0; $j -lt $n; $j++) {
-            if ($n -le 1) {
-                $f = 0.0
-            } else {
-                $t01 = [double]$j / [double]($n - 1)
-                # Non-linear smootherstep easing (6t^5 - 15t^4 + 10t^3):
-                # slow at both ends, faster in the middle, closer to a soft glass transition.
-                $f = $t01 * $t01 * $t01 * ($t01 * ($t01 * 6.0 - 15.0) + 10.0)
-            }
-            $r  = [int][Math]::Round($c0[0] + ($c1[0] - $c0[0]) * $f)
-            $g  = [int][Math]::Round($c0[1] + ($c1[1] - $c0[1]) * $f)
-            $bl = [int][Math]::Round($c0[2] + ($c1[2] - $c0[2]) * $f)
-            $out += "$e[48;2;$r;$g;${bl}m" + $t[$j]
-        }
+        $s = $segs[$i]
+        $out += "$e[48;5;$($s.bg)m$e[38;5;$($s.fg)m$($s.t)"
         if ($i -lt $segs.Count - 1) {
-            $nb = @($segs[$i + 1].c0)
-            if ($nb.Count -lt 3) { $nb = $termbg }
-            $out += "$reset$e[38;2;$($c1[0]);$($c1[1]);$($c1[2])m$e[48;2;$($nb[0]);$($nb[1]);$($nb[2])m$NebArrow$reset"
+            $nb = $segs[$i + 1].bg
+            $out += "$reset$e[38;5;$($s.bg)m$e[48;5;${nb}m$NebArrow$reset"
         } else {
-            # 49 = default background, same reason as the left cap above.
-            $out += "$reset$e[38;2;$($c1[0]);$($c1[1]);$($c1[2])m$e[49m$NebRightRound$reset"
+            $out += "$reset$e[38;5;$($s.bg)m$e[49m$NebRightRound$reset"
         }
     }
     $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$loc|$branch$([char]7)$out`n`n$e[35m$NebPromptArrow $reset"

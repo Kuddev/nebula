@@ -532,6 +532,10 @@ impl WindowContext {
                 self.spawn_tab();
                 false
             },
+            TabRequest::NewProfile(index) => {
+                self.spawn_tab_profile(index);
+                false
+            },
             TabRequest::Close => {
                 let id = self.focused_pane_id();
                 // A pending confirm for this pane means the user re-triggered
@@ -575,10 +579,11 @@ impl WindowContext {
             TabRequest::CloseWindow => {
                 // A normal window close DETACHES: the PTYs live on in the
                 // resident process, so a running claude/build is not lost
-                // and needs no confirmation. The quick terminal
-                // (session_exempt) is scratch — closing it really kills its
-                // shells, so the busy-process confirm stays for it.
-                if self.session_exempt {
+                // and needs no confirmation. When the close actually KILLS
+                // the shells — the quick terminal (session_exempt), or the
+                // user turned residency off in 设置→高级 — a busy process
+                // (claude, a build…) gets the confirm dialog first.
+                if self.session_exempt || !self.display.nebula_keep_session {
                     let confirmed = matches!(
                         self.display.nebula_confirm,
                         Some(NebulaConfirm::CloseWindow { .. })
@@ -615,6 +620,12 @@ impl WindowContext {
                 self.select_tab(index);
                 false
             },
+            TabRequest::SelectLast => {
+                if !self.tabs.is_empty() {
+                    self.select_tab(self.tabs.len() - 1);
+                }
+                false
+            },
             TabRequest::Move { from, to } => {
                 self.move_tab(from, to);
                 false
@@ -645,6 +656,7 @@ impl WindowContext {
                             .map(Self::chrome_tab_label)
                             .unwrap_or_else(|| "Tab".to_owned())
                     };
+                    self.display.nebula_tab_rename_caret = current_label.chars().count();
                     self.display.nebula_tab_rename = Some((index, current_label));
                     self.display.nebula_tab_rename_select_all = true;
                     self.dirty = true;
@@ -706,6 +718,33 @@ impl WindowContext {
             self.resize_active_layout();
             self.dirty = true;
             self.run_fastfetch_intro(id);
+        }
+    }
+
+    /// Open a new tab running the quick-launch profile at `index` (custom
+    /// command instead of the default shell). The tab is pre-named after the
+    /// profile so an `ssh host` entry reads as its destination, not "ssh".
+    fn spawn_tab_profile(&mut self, index: usize) {
+        let Some(profile) = self.config.profiles.get(index).cloned() else { return };
+        // Profile cwd wins when it exists; else inherit the focused pane's.
+        let cwd = profile
+            .cwd
+            .as_ref()
+            .filter(|p| p.is_dir())
+            .cloned()
+            .or_else(|| self.focused_cwd());
+        let shell = profile.shell();
+        if let Some(id) = self.spawn_pane_detached_with(cwd, self.display.size_info, Some(shell)) {
+            let at = (self.active_tab + 1).min(self.tabs.len());
+            self.tabs.insert(at, TabEntry {
+                layout: Layout::Leaf(id),
+                active_pane: id,
+                has_bell: false,
+                custom_name: Some(profile.name),
+            });
+            self.active_tab = at;
+            self.resize_active_layout();
+            self.dirty = true;
         }
     }
 
@@ -906,6 +945,17 @@ impl WindowContext {
         cwd: Option<std::path::PathBuf>,
         size_info: crate::display::SizeInfo,
     ) -> Option<PaneId> {
+        self.spawn_pane_detached_with(cwd, size_info, None)
+    }
+
+    /// Like [`Self::spawn_pane_detached`] with an optional shell override
+    /// (quick-launch profiles run their own command instead of the default).
+    fn spawn_pane_detached_with(
+        &mut self,
+        cwd: Option<std::path::PathBuf>,
+        size_info: crate::display::SizeInfo,
+        shell: Option<nebula_terminal::tty::Shell>,
+    ) -> Option<PaneId> {
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
 
@@ -915,6 +965,10 @@ impl WindowContext {
         // `tty::windows::cmdline` from `nebula_settings.txt` whenever
         // `pty_config.shell` is `None` — it must NOT be overridden here, or the
         // bash path would lose its Nebula rcfile (OSC 7 cwd / prompt contract).
+        // A profile override (`shell` param) intentionally bypasses that.
+        if shell.is_some() {
+            pty_config.shell = shell;
+        }
         if cwd.is_some() {
             pty_config.working_directory = cwd;
         }
@@ -1259,11 +1313,17 @@ impl WindowContext {
     pub fn draw(&mut self, scheduler: &mut Scheduler) {
         self.display.window.requested_redraw = false;
         self.sync_chrome_tabs();
+        // Right-side drawer follows the focused pane's cwd (throttled inside).
+        let panel_cwd = self.focused_cwd();
+        self.display.side_panel_sync(panel_cwd);
 
         // Chrome clock: 1 Hz normally, 8 fps while a sidebar spinner is
         // animating. Re-arm on cadence change.
         let clock_timer = TimerId::new(Topic::NebulaClock, self.display.window.id());
-        let interval = if self.display.any_tab_running() {
+        let interval = if self.display.any_tab_running()
+            || self.display.chrome_editor_active()
+            || self.display.chrome_animating()
+        {
             Duration::from_millis(125)
         } else {
             Duration::from_secs(1)
@@ -1290,6 +1350,15 @@ impl WindowContext {
         if !self.display.visual_bell.completed() {
             // We can get an OS redraw which bypasses nebula's frame throttling, thus
             // marking the window as dirty when we don't have frame yet.
+            if self.display.window.has_frame {
+                self.display.window.request_redraw();
+            } else {
+                self.dirty = true;
+            }
+        }
+
+        // Chrome sidebar/drawer transitions need display-rate frames until settled.
+        if self.display.chrome_animating() {
             if self.display.window.has_frame {
                 self.display.window.request_redraw();
             } else {

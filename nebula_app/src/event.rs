@@ -751,8 +751,14 @@ impl ApplicationHandler<Event> for Processor {
                             // (multiplexer-style): the PTYs keep running in this
                             // resident process, ready for re-attach. Quitting
                             // tab by tab reaches here with zero panes and
-                            // falls through to a plain close.
-                            if closed.has_live_panes() && !closed.session_exempt {
+                            // falls through to a plain close. 设置→高级 lets
+                            // users opt out: with keep_session off, closing
+                            // the window kills its shells like a plain
+                            // terminal (no resident server).
+                            if closed.has_live_panes()
+                                && !closed.session_exempt
+                                && closed.display.nebula_keep_session
+                            {
                                 self.detached.push(closed.detach_panes());
                             }
                             // Same reclaim dance as the Exit path above: the
@@ -929,12 +935,17 @@ pub enum EventType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabRequest {
     New,
+    /// Open a new tab running the quick-launch profile at this config index
+    /// (custom command instead of the default shell, e.g. an ssh jump).
+    NewProfile(usize),
     Close,
     CloseIndex(usize),
     CloseWindow,
     SelectNext,
     SelectPrev,
     Select(usize),
+    /// Jump to the rightmost tab.
+    SelectLast,
     /// Reorder: move the tab at displayed index `from` to displayed index `to`.
     Move { from: usize, to: usize },
     /// Toggle a split (left/right or top/bottom) with an independent shell.
@@ -1677,9 +1688,18 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         *self.dirty = true;
     }
 
+    /// Open a filesystem path with the system default handler (the drawer's
+    /// double-click). `explorer.exe` handles files AND folders, and sidesteps
+    /// `cmd /c start` mangling spaces/unicode (same as file:// hints).
+    fn open_path(&mut self, path: &std::path::Path) {
+        #[cfg(windows)]
+        self.spawn_daemon("explorer.exe", &[path.as_os_str()]);
+        #[cfg(not(windows))]
+        self.spawn_daemon("xdg-open", &[path.as_os_str()]);
+    }
+
     /// Trigger a hint action.
-    fn trigger_hint(&mut self, hint: &HintMatch) {
-        crate::display::nebula_link_log(format!(
+    fn trigger_hint(&mut self, hint: &HintMatch) {        crate::display::nebula_link_log(format!(
             "trigger_hint block={} hyperlink={}",
             self.mouse.block_hint_launcher,
             hint.hyperlink().is_some()
@@ -2281,6 +2301,12 @@ pub struct Mouse {
     pub drag_origin: Option<(usize, usize)>,
     /// Whether the current press crossed the drag threshold.
     pub drag_active: bool,
+    /// Selection armed by the left press but not yet started (Windows
+    /// Terminal model: a click never creates a selection — only a drag past
+    /// the threshold does). Holds the would-be type/anchor so `mouse_moved`
+    /// can start the selection from the ORIGINAL press cell once the pointer
+    /// commits to a drag. Cleared on release.
+    pub pending_selection: Option<(nebula_terminal::selection::SelectionType, Point, Side)>,
     pub x: usize,
     pub y: usize,
 }
@@ -2301,6 +2327,7 @@ impl Default for Mouse {
             accumulated_scroll: Default::default(),
             drag_origin: Default::default(),
             drag_active: Default::default(),
+            pending_selection: Default::default(),
             x: Default::default(),
             y: Default::default(),
         }
@@ -2382,11 +2409,26 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 EventType::Terminal(event) => match event {
                     TerminalEvent::Title(title) => {
                         // Nebula encodes cwd/branch in a `NEBULA|cwd|branch` title
-                        // for the glass powerline instead of the window title.
+                        // for the glass powerline instead of the window title. A
+                        // remote `nebula ssh` shell appends a 4th `program` field
+                        // (`NEBULA|cwd|branch|program`): the local screen-scrape
+                        // that normally feeds `running_program` can't see through
+                        // the SSH pipe, so the remote reports the program identity
+                        // here instead — empty at the prompt, the command name
+                        // while one runs. A local shell sends only 3 fields, so
+                        // the 4th is absent and `running_program` is left to the
+                        // existing OSC-133;C/last_committed path untouched.
                         if let Some(rest) = title.strip_prefix("NEBULA|") {
-                            let mut parts = rest.splitn(2, '|');
+                            let mut parts = rest.splitn(3, '|');
                             self.ctx.nebula_state.cwd = parts.next().unwrap_or("").to_owned();
                             self.ctx.nebula_state.branch = parts.next().unwrap_or("").to_owned();
+                            if let Some(program) = parts.next() {
+                                self.ctx.nebula_state.running_program = if program.is_empty() {
+                                    None
+                                } else {
+                                    Some(program.to_owned())
+                                };
+                            }
                             *self.ctx.dirty = true;
                         } else if !self.ctx.preserve_title && self.ctx.config.window.dynamic_title {
                             self.ctx.window().set_title(title);
@@ -2627,6 +2669,19 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         log::info!("WindowEvent::Focused({})", is_focused);
                         self.ctx.terminal.is_focused = is_focused;
 
+                        // Losing window focus ends any chrome text editing —
+                        // a rename box left open under another window reads
+                        // as a hang (its caret froze), and stray keystrokes
+                        // later would edit a name the user forgot about.
+                        if !is_focused {
+                            if self.ctx.display.nebula_tab_rename.take().is_some() {
+                                self.ctx.display.nebula_tab_rename_select_all = false;
+                            }
+                            let panel = &mut self.ctx.display.nebula_side_panel;
+                            panel.search_unfocus(false);
+                            panel.commit_focus = false;
+                        }
+
                         // Nebula: always redraw on focus change, and clear the
                         // occluded flag when refocused. On Windows `Occluded(false)`
                         // is unreliable, so without this the draw path stays gated
@@ -2679,14 +2734,22 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             // delivered here, NOT through key_input — so the
                             // rename buffer must consume them here or typing
                             // silently pastes into the shell behind the box.
-                            if let Some((_, buf)) = self.ctx.display.nebula_tab_rename.as_mut() {
-                                // First commit over a select-all replaces the
-                                // whole name (type-to-overwrite); then appends.
-                                if self.ctx.display.nebula_tab_rename_select_all {
-                                    buf.clear();
-                                    self.ctx.display.nebula_tab_rename_select_all = false;
-                                }
-                                buf.push_str(&text);
+                            if self.ctx.display.nebula_tab_rename.is_some() {
+                                // Caret-aware insert (type-to-overwrite on a
+                                // pending select-all) — same code path as the
+                                // non-IME keyboard fallback.
+                                self.ctx.display.tab_rename_insert(&text);
+                            } else if self.ctx.display.nebula_side_panel.search_focus {
+                                // Side-panel filter box: same IME contract as
+                                // tab rename — committed text must land in the
+                                // box, not paste into the shell behind it.
+                                self.ctx.display.nebula_side_panel.search_input(&text);
+                            } else if self.ctx.display.nebula_side_panel.commit_focus {
+                                self.ctx
+                                    .display
+                                    .nebula_side_panel
+                                    .commit_msg
+                                    .extend(text.chars().filter(|c| !c.is_control()));
                             } else {
                                 // Don't use bracketed paste for single char input.
                                 self.ctx.paste(&text, text.chars().count() > 1);

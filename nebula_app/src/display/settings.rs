@@ -41,6 +41,10 @@ pub enum NebulaSettingsSection {
     Appearance,
     /// Completion behaviour plus the raw `nebula_settings.txt` config file.
     Profiles,
+    /// Read-only shortcut sheet + pointer to `[[keyboard.bindings]]` remapping.
+    Keymap,
+    /// Power-user switches (session residency on close, …).
+    Advanced,
 }
 
 impl NebulaSettingsSection {
@@ -48,9 +52,32 @@ impl NebulaSettingsSection {
         match self {
             Self::Appearance => "外观",
             Self::Profiles => "配置文件",
+            Self::Keymap => "按键映射",
+            Self::Advanced => "高级",
         }
     }
 }
+
+/// Shortcut sheet shown in 设置→按键映射. Read-only for now: the combos on the
+/// right are Nebula's effective defaults; `[[keyboard.bindings]]` in the config
+/// file (设置→配置文件→打开配置文件) remaps the standard actions.
+pub(super) const KEYMAP_ROWS: &[(&str, &str)] = &[
+    ("新建标签页", "Ctrl+Shift+T"),
+    ("关闭标签页 / 分屏", "Ctrl+Shift+W"),
+    ("下一个 / 上一个标签页", "Ctrl+Tab / Ctrl+Shift+Tab"),
+    ("切换到第 N 个标签页", "Alt+1..9 或 Ctrl+1..9"),
+    ("新建窗口", "Ctrl+Shift+E"),
+    ("命令面板", "Ctrl+Shift+P"),
+    ("左右 / 上下分屏", "Ctrl+Shift+D / Ctrl+Shift+S"),
+    ("分屏焦点切换", "Ctrl+Alt+方向键"),
+    ("放大当前分屏", "Ctrl+Shift+Enter"),
+    ("启动 Profile N", "Ctrl+Shift+1..9"),
+    ("目录树 / Git 面板", "Ctrl+Shift+O / Ctrl+Shift+G"),
+    ("搜索（向前 / 向后）", "Ctrl+Shift+F / Ctrl+Shift+B"),
+    ("复制 / 粘贴", "Ctrl+Shift+C / Ctrl+V"),
+    ("字号 增 / 减 / 重置", "Ctrl+= / Ctrl+- / Ctrl+0"),
+    ("全屏", "Alt+Enter"),
+];
 
 /// Hit result for the top-left Nebula settings affordance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +99,8 @@ pub enum SettingsHit {
     BackgroundImage,
     OpenConfigFile,
     Reset,
+    /// 高级: keep the resident server (detach) on window close.
+    KeepSessionToggle,
 }
 
 // ---- runtime settings store (`Nebula/nebula_settings.txt`) ----
@@ -82,6 +111,9 @@ pub(super) struct NebulaRuntimeSettings {
     pub(super) shell: NebulaShell,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
+    /// Window close keeps the PTYs alive in the resident process (detach /
+    /// re-attach session restore). Off = closing a window kills its shells.
+    pub(super) keep_session: bool,
     pub(super) opacity: f32,
     pub(super) background: Option<Rgb>,
     pub(super) background_image: Option<String>,
@@ -106,6 +138,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         // the critical path (user ruling: startup speed outranks the art).
         fetch: false,
         powerline: true,
+        keep_session: true,
         opacity: config.window_opacity(),
         background: None,
         background_image: None,
@@ -131,6 +164,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 },
                 Some(("fetch", v)) => settings.fetch = parse_bool(v, true),
                 Some(("powerline", v)) => settings.powerline = parse_bool(v, true),
+                Some(("keep_session", v)) => settings.keep_session = parse_bool(v, true),
                 Some(("opacity", v)) => {
                     if let Ok(opacity) = v.trim().parse::<f32>() {
                         settings.opacity = opacity.clamp(0.35, 1.0);
@@ -197,10 +231,11 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let _ = std::fs::write(
         path,
         format!(
-            "theme={theme}\nghost={}\naccept={accept}\nshell={shell}\nfetch={}\npowerline={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\n",
+            "theme={theme}\nghost={}\naccept={accept}\nshell={shell}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\n",
             settings.ghost as u8,
             settings.fetch as u8,
             settings.powerline as u8,
+            settings.keep_session as u8,
             settings.opacity,
             settings.background_image_opacity
         ),
@@ -215,7 +250,7 @@ struct SettingsGeometry {
     popup: (f32, f32, f32, f32),
     sidebar: (f32, f32, f32, f32),
     content: (f32, f32, f32, f32),
-    nav: [(NebulaSettingsSection, f32, f32, f32, f32); 2],
+    nav: [(NebulaSettingsSection, f32, f32, f32, f32); 4],
     options: [(NebulaTheme, f32, f32, f32, f32); 7],
     shell: (f32, f32, f32, f32),
     fetch: (f32, f32, f32, f32),
@@ -238,6 +273,12 @@ struct SettingsGeometry {
     /// `content_top`). `max_scroll = (height - viewport).max(0)`.
     appearance_h: f32,
     profiles_h: f32,
+    keymap_h: f32,
+    /// First keymap row rect; row `i` sits `i * row_h` below it.
+    keymap_row0: (f32, f32, f32, f32),
+    keymap_row_h: f32,
+    advanced_h: f32,
+    keep_session: (f32, f32, f32, f32),
 }
 
 /// Scrollable-content viewport height for the settings modal.
@@ -257,6 +298,8 @@ pub(super) fn settings_max_scroll(
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
         NebulaSettingsSection::Profiles => geometry.profiles_h,
+        NebulaSettingsSection::Keymap => geometry.keymap_h,
+        NebulaSettingsSection::Advanced => geometry.advanced_h,
     };
     (content_h - settings_viewport_h(ph, scale_factor)).max(0.0)
 }
@@ -334,6 +377,8 @@ fn settings_geometry(size_info: &SizeInfo, scale_factor: f32, scroll: f32) -> Se
     let nav = [
         (NebulaSettingsSection::Appearance, nav_x, nav_y0, nav_w, nav_h),
         (NebulaSettingsSection::Profiles, nav_x, nav_y0 + nav_h + nav_gap, nav_w, nav_h),
+        (NebulaSettingsSection::Keymap, nav_x, nav_y0 + 2.0 * (nav_h + nav_gap), nav_w, nav_h),
+        (NebulaSettingsSection::Advanced, nav_x, nav_y0 + 3.0 * (nav_h + nav_gap), nav_w, nav_h),
     ];
 
     // Profiles: three groups — terminal (3 rows), completion (2), config file.
@@ -341,6 +386,16 @@ fn settings_geometry(size_info: &SizeInfo, scale_factor: f32, scroll: f32) -> Se
     let ghost_y0 = shell_y0 + 3.0 * ROW_H + GROUP_ADVANCE;
     let open_y0 = ghost_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let profiles_h = s(open_y0 + ROW_H + 32.0 - 72.0);
+
+    // Keymap: one contiguous group of read-only shortcut rows.
+    let keymap_y0 = 146.0;
+    let keymap_h = s(keymap_y0 + KEYMAP_ROWS.len() as f32 * ROW_H + 32.0 - 72.0);
+    let keymap_row0 = (row_x, at(keymap_y0), row_w, row_h);
+
+    // Advanced: a single session-residency toggle row.
+    let advanced_y0 = 146.0;
+    let advanced_h = s(advanced_y0 + ROW_H + 32.0 - 72.0);
+    let keep_session = (row_x, at(advanced_y0), row_w, row_h);
 
     SettingsGeometry {
         gear,
@@ -372,6 +427,11 @@ fn settings_geometry(size_info: &SizeInfo, scale_factor: f32, scroll: f32) -> Se
         content_top,
         appearance_h,
         profiles_h,
+        keymap_h,
+        keymap_row0,
+        keymap_row_h: row_h,
+        advanced_h,
+        keep_session,
     }
 }
 
@@ -454,6 +514,12 @@ pub fn settings_hit(
                     return SettingsHit::OpenConfigFile;
                 }
             },
+            NebulaSettingsSection::Keymap => {},
+            NebulaSettingsSection::Advanced => {
+                if contains_rect(geometry.keep_session, x, y) {
+                    return SettingsHit::KeepSessionToggle;
+                }
+            },
         }
     }
 
@@ -474,6 +540,7 @@ pub(super) struct SettingsView {
     pub(super) shell: NebulaShell,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
+    pub(super) keep_session: bool,
     pub(super) opacity: f32,
     pub(super) background: Option<Rgb>,
     pub(super) background_image: Option<String>,
@@ -724,6 +791,14 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
                 toggle(quads, rect, on);
             }
         },
+        NebulaSettingsSection::Keymap => {
+            group_frame(quads, geometry.keymap_row0, KEYMAP_ROWS.len());
+        },
+        NebulaSettingsSection::Advanced => {
+            group_frame(quads, geometry.keep_session, 1);
+            row_hover(quads, geometry.keep_session, view.hover == SettingsHit::KeepSessionToggle);
+            toggle(quads, geometry.keep_session, view.keep_session);
+        },
     }
 
     // Overlay scrollbar on the content viewport's right edge, only when the
@@ -732,6 +807,8 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
         NebulaSettingsSection::Profiles => geometry.profiles_h,
+        NebulaSettingsSection::Keymap => geometry.keymap_h,
+        NebulaSettingsSection::Advanced => geometry.advanced_h,
     };
     let viewport_h = settings_viewport_h(ph, scale);
     if content_h > viewport_h {
@@ -997,6 +1074,39 @@ pub(super) fn draw_text(
             }
             if visible(ocy, och) {
                 r.draw_chrome_text(size, ocx + s(16.0), ocy + (och - cell_h) / 2.0, sk.accent, "打开配置文件", gc);
+            }
+        },
+        NebulaSettingsSection::Keymap => {
+            let (kx, ky, kw, kh) = geometry.keymap_row0;
+            if visible(group_y(ky), title_h) {
+                section_title(r, gc, size, scale, &sk, kx, group_y(ky), "快捷键（可在配置文件 [[keyboard.bindings]] 中自定义）");
+            }
+            for (i, (label, combo)) in KEYMAP_ROWS.iter().enumerate() {
+                let rect = (kx, ky + i as f32 * geometry.keymap_row_h, kw, kh);
+                if visible(rect.1, rect.3) {
+                    row_label(r, gc, size, scale, &sk, rect, label, combo, sk.ink_dim);
+                }
+            }
+        },
+        NebulaSettingsSection::Advanced => {
+            let (ax, ay, _, ah) = geometry.keep_session;
+            if visible(group_y(ay), title_h) {
+                section_title(r, gc, size, scale, &sk, ax, group_y(ay), "会话");
+            }
+            if visible(ay, ah) {
+                // The switch (drawn in `push_quads`) carries the state; the
+                // label says what closing a window keeps alive while it is ON.
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.keep_session,
+                    "关闭窗口后保留会话（后台驻留，可恢复对话）",
+                    "",
+                    sk.ink,
+                );
             }
         },
     }

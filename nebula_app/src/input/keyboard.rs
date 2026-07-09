@@ -51,37 +51,90 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.nebula_tab(crate::event::TabRequest::CancelRename);
                 },
                 Key::Named(NamedKey::Backspace) => {
-                    // A select-all pending state means the whole name is
-                    // "selected" (blue highlight): the first Backspace clears
-                    // it wholesale, like any text field. Otherwise delete one.
-                    let display = self.ctx.display();
-                    if let Some((_, text)) = &mut display.nebula_tab_rename {
-                        if display.nebula_tab_rename_select_all {
-                            text.clear();
-                            display.nebula_tab_rename_select_all = false;
-                        } else {
-                            text.pop();
-                        }
-                        self.ctx.mark_dirty();
-                    }
+                    self.ctx.display().tab_rename_backspace();
+                    self.ctx.mark_dirty();
+                },
+                // Real text-field navigation: click already places the caret
+                // (mouse path); arrows/Home/End move it, edits happen at it.
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.ctx.display().tab_rename_move_caret(-1);
+                    self.ctx.mark_dirty();
+                },
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.ctx.display().tab_rename_move_caret(1);
+                    self.ctx.mark_dirty();
+                },
+                Key::Named(NamedKey::Home) => {
+                    self.ctx.display().tab_rename_caret_edge(false);
+                    self.ctx.mark_dirty();
+                },
+                Key::Named(NamedKey::End) => {
+                    self.ctx.display().tab_rename_caret_edge(true);
+                    self.ctx.mark_dirty();
                 },
                 Key::Character(s) if mods.is_empty() || mods.shift_key() => {
-                    // First keystroke over a select-all replaces the whole
-                    // name (type to overwrite); later ones append. Note: on
-                    // Windows/IME, printable text arrives via Ime::Commit, not
-                    // here — this path is the non-IME fallback.
-                    let display = self.ctx.display();
-                    if let Some((_, text)) = &mut display.nebula_tab_rename {
-                        if display.nebula_tab_rename_select_all {
-                            text.clear();
-                            display.nebula_tab_rename_select_all = false;
-                        }
-                        text.push_str(s);
-                        self.ctx.mark_dirty();
-                    }
+                    // Insert at the caret (type-to-overwrite on select-all).
+                    // Note: on Windows/IME, printable text arrives via
+                    // Ime::Commit, not here — this is the non-IME fallback.
+                    let text = s.clone();
+                    self.ctx.display().tab_rename_insert(&text);
+                    self.ctx.mark_dirty();
                 },
                 _ => {},
             }
+            return;
+        }
+
+        // Side-panel filter box: consume keyboard while it has focus, same
+        // modal contract as tab rename. Printable text arrives via Ime::Commit
+        // on Windows/IME; the Character arm is the non-IME fallback.
+        if self.ctx.display().nebula_side_panel.search_focus {
+            match &key.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    // Esc: clear the filter and leave the box.
+                    self.ctx.display().nebula_side_panel.search_unfocus(true);
+                },
+                Key::Named(NamedKey::Enter) => {
+                    self.ctx.display().nebula_side_panel.search_unfocus(false);
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().nebula_side_panel.search_backspace();
+                },
+                Key::Character(s) if mods.is_empty() || mods.shift_key() => {
+                    let text = s.clone();
+                    self.ctx.display().nebula_side_panel.search_input(&text);
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
+        // Git commit-message box: same modal keyboard contract.
+        if self.ctx.display().nebula_side_panel.commit_focus {
+            match &key.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    let panel = &mut self.ctx.display().nebula_side_panel;
+                    panel.commit_focus = false;
+                    panel.commit_msg.clear();
+                },
+                Key::Named(NamedKey::Enter) => {
+                    self.ctx.display().nebula_side_panel.git_commit_submit();
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().nebula_side_panel.commit_msg.pop();
+                },
+                Key::Character(s) if mods.is_empty() || mods.shift_key() => {
+                    let text = s.clone();
+                    self.ctx
+                        .display()
+                        .nebula_side_panel
+                        .commit_msg
+                        .extend(text.chars().filter(|c| !c.is_control()));
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
             return;
         }
 
@@ -153,9 +206,49 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             // Ctrl+Shift+P: toggle the command palette.
             if shift && matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("p"))
             {
-                self.ctx.display().toggle_command_palette();
+                let profiles: Vec<String> =
+                    self.ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
+                self.ctx.display().toggle_command_palette(&profiles);
                 self.ctx.mark_dirty();
                 return;
+            }
+            // Ctrl+Shift+O / Ctrl+Shift+G: toggle the right-side drawer's
+            // directory-tree / git view.
+            if shift && matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("o"))
+            {
+                self.ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Files);
+                self.ctx.mark_dirty();
+                return;
+            }
+            if shift && matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("g"))
+            {
+                self.ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Git);
+                self.ctx.mark_dirty();
+                return;
+            }
+            // Ctrl+Shift+1..9: launch the quick-launch profile at that index
+            // (Windows Terminal parity). Physical digit codes — Shift turns the
+            // logical key into "!" "@" … so `logical_key` can't be matched.
+            if shift {
+                use winit::keyboard::{KeyCode, PhysicalKey};
+                let profile = match key.physical_key {
+                    PhysicalKey::Code(KeyCode::Digit1) => Some(0),
+                    PhysicalKey::Code(KeyCode::Digit2) => Some(1),
+                    PhysicalKey::Code(KeyCode::Digit3) => Some(2),
+                    PhysicalKey::Code(KeyCode::Digit4) => Some(3),
+                    PhysicalKey::Code(KeyCode::Digit5) => Some(4),
+                    PhysicalKey::Code(KeyCode::Digit6) => Some(5),
+                    PhysicalKey::Code(KeyCode::Digit7) => Some(6),
+                    PhysicalKey::Code(KeyCode::Digit8) => Some(7),
+                    PhysicalKey::Code(KeyCode::Digit9) => Some(8),
+                    _ => None,
+                };
+                if let Some(i) = profile {
+                    if i < self.ctx.config().profiles.len() {
+                        self.ctx.nebula_tab(crate::event::TabRequest::NewProfile(i));
+                        return;
+                    }
+                }
             }
             // Ctrl+Shift+Up/Down: jump to the previous/next shell prompt
             // (OSC 133 semantic marks; needs shell integration or Nushell).
@@ -212,11 +305,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     Some(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Down))
                 },
                 Key::Character(c) if !shift => match c.as_str() {
+                    // Ctrl+1..9 direct tab select (Windows Terminal parity).
                     "1" => Some(crate::event::TabRequest::Select(0)),
                     "2" => Some(crate::event::TabRequest::Select(1)),
                     "3" => Some(crate::event::TabRequest::Select(2)),
                     "4" => Some(crate::event::TabRequest::Select(3)),
                     "5" => Some(crate::event::TabRequest::Select(4)),
+                    "6" => Some(crate::event::TabRequest::Select(5)),
+                    "7" => Some(crate::event::TabRequest::Select(6)),
+                    "8" => Some(crate::event::TabRequest::Select(7)),
+                    "9" => Some(crate::event::TabRequest::Select(8)),
                     _ => None,
                 },
                 _ => None,
@@ -224,6 +322,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             if let Some(request) = request {
                 self.ctx.nebula_tab(request);
                 return;
+            }
+        }
+
+        // Alt+1..9: direct tab select (Windows Terminal style). Alt-only —
+        // Ctrl+Alt (AltGr) must stay clear so layouts that type digits/symbols
+        // via AltGr keep working, and plain Alt+letter chords still reach the
+        // shell as ESC-prefixed input below.
+        if mods.alt_key() && !mods.control_key() && !mods.shift_key() && !mods.super_key() {
+            if let Key::Character(c) = &key.logical_key {
+                if let Some(digit @ 1..=9) = c.chars().next().and_then(|ch| ch.to_digit(10)) {
+                    self.ctx.nebula_tab(crate::event::TabRequest::Select(digit as usize - 1));
+                    return;
+                }
             }
         }
 
@@ -372,7 +483,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// both the window context (tab / split / window requests) and the display
     /// (theme / settings / appearance) — the input layer is the only place with
     /// access to both.
-    fn run_palette_action(&mut self, action: crate::display::command_palette::PaletteAction) {
+    pub(super) fn run_palette_action(&mut self, action: crate::display::command_palette::PaletteAction) {
         use crate::display::command_palette::PaletteAction::*;
         use crate::event::TabRequest;
         match action {
@@ -400,6 +511,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             CycleBackground => self.ctx.display().cycle_background_color(),
             ResetAppearance => self.ctx.display().reset_appearance_settings(),
             SelectTheme(theme) => self.ctx.display().select_nebula_theme(theme),
+            LaunchProfile(i) => self.ctx.nebula_tab(TabRequest::NewProfile(i)),
+            ToggleFilesPanel => self
+                .ctx
+                .display()
+                .toggle_side_panel(crate::display::side_panel::PanelView::Files),
+            ToggleGitPanel => {
+                self.ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Git)
+            },
         }
         self.ctx.mark_dirty();
     }

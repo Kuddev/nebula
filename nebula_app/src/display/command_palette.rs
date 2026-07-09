@@ -9,7 +9,7 @@
 //! and the window context. Keeping the model here makes it self-contained and
 //! keeps the giant `mod.rs` free of the item table.
 
-use super::NebulaTheme;
+use super::{NebulaTheme, SizeInfo};
 
 /// A single executable action reachable from the command palette.
 ///
@@ -34,6 +34,10 @@ pub enum PaletteAction {
     CycleBackground,
     ResetAppearance,
     SelectTheme(NebulaTheme),
+    /// Launch the quick-launch profile at this config index in a new tab.
+    LaunchProfile(usize),
+    ToggleFilesPanel,
+    ToggleGitPanel,
 }
 
 /// One palette row.
@@ -96,6 +100,18 @@ const ITEMS: &[PaletteItem] = &[
         hint: "Ctrl+Shift+S",
         search: "上下分屏 split down horizontal shangxia fenping",
         action: PaletteAction::SplitDown,
+    },
+    PaletteItem {
+        label: "目录树面板",
+        hint: "Ctrl+Shift+O",
+        search: "目录树面板 files tree explorer panel mulushu wenjian",
+        action: PaletteAction::ToggleFilesPanel,
+    },
+    PaletteItem {
+        label: "Git 面板",
+        hint: "Ctrl+Shift+G",
+        search: "git 面板 status branch panel mianban",
+        action: PaletteAction::ToggleGitPanel,
     },
     PaletteItem {
         label: "打开设置",
@@ -190,13 +206,20 @@ const RECENT_MAX: usize = 6;
 pub struct CommandPalette {
     open: bool,
     query: String,
-    /// Indices into `ITEMS`, best match first. Rebuilt on every query change.
+    /// Indices into the combined item space — `0..ITEMS.len()` are the static
+    /// actions, `ITEMS.len()..` map onto `profiles`. Best match first.
     filtered: Vec<usize>,
     /// Selected row *within `filtered`*.
     selected: usize,
     /// Recently-run `ITEMS` indices, most-recent first (deduped, capped at
     /// `RECENT_MAX`). Lifts frequent actions to the top of an empty query.
+    /// Static items only: profile indices shift whenever the config changes.
     recent: Vec<usize>,
+    /// Dynamic quick-launch rows `(label, search)`, one per config profile,
+    /// refreshed on every open so live config reloads are picked up.
+    profiles: Vec<(String, String)>,
+    /// Show ONLY profile rows — the "+"-button right-click menu mode.
+    profiles_only: bool,
 }
 
 impl CommandPalette {
@@ -207,6 +230,8 @@ impl CommandPalette {
             filtered: Vec::new(),
             selected: 0,
             recent: Vec::new(),
+            profiles: Vec::new(),
+            profiles_only: false,
         };
         palette.refilter();
         palette
@@ -216,15 +241,39 @@ impl CommandPalette {
         self.open
     }
 
+    /// Refresh the dynamic quick-launch rows from the config's profile names.
+    /// Called by every open path so a reloaded config is always reflected.
+    pub fn set_profiles(&mut self, names: &[String]) {
+        self.profiles = names
+            .iter()
+            .map(|name| {
+                // The label carries a glyph-free prefix so profile rows read
+                // distinctly from built-in actions; the haystack adds latin
+                // aliases (matching the static items' convention).
+                (format!("启动：{name}"), format!("启动 {name} profile launch connect qidong"))
+            })
+            .collect();
+    }
+
     /// Open (or re-open) the palette with a cleared query and the full list.
     pub fn open(&mut self) {
         self.open = true;
+        self.profiles_only = false;
+        self.query.clear();
+        self.refilter();
+    }
+
+    /// Open showing only the quick-launch profiles (the "+" context menu).
+    pub fn open_profiles(&mut self) {
+        self.open = true;
+        self.profiles_only = true;
         self.query.clear();
         self.refilter();
     }
 
     pub fn close(&mut self) {
         self.open = false;
+        self.profiles_only = false;
     }
 
     pub fn toggle(&mut self) {
@@ -262,9 +311,27 @@ impl CommandPalette {
     /// and returns the action to run, or `None` when nothing matches.
     pub fn confirm(&mut self) -> Option<PaletteAction> {
         let idx = *self.filtered.get(self.selected)?;
-        self.record_recent(idx);
         self.close();
+        if let Some(profile) = idx.checked_sub(ITEMS.len()) {
+            return Some(PaletteAction::LaunchProfile(profile));
+        }
+        self.record_recent(idx);
         Some(ITEMS[idx].action)
+    }
+
+    /// Confirm the visible row at `row` (0 = topmost visible line, mirroring
+    /// [`Self::visible`]'s scroll window) — the mouse-click path.
+    pub fn click(&mut self, row: usize, max_rows: usize) -> Option<PaletteAction> {
+        if self.filtered.is_empty() || max_rows == 0 {
+            return None;
+        }
+        let start = self.selected.saturating_sub(max_rows - 1);
+        let idx = start + row;
+        if idx >= self.filtered.len() {
+            return None;
+        }
+        self.selected = idx;
+        self.confirm()
     }
 
     /// Remember `idx` as the most-recently run command (deduped, capped), so a
@@ -278,18 +345,28 @@ impl CommandPalette {
     /// Re-score every item against the query and rebuild `filtered`. With a
     /// query: fuzzy score, best first, ties in declaration order. Empty query:
     /// recently-run first, then declaration order (a stable sort keeps the
-    /// declared order for the un-recent tail). Resets the selection to the top.
+    /// declared order for the un-recent tail), then profiles. Resets the
+    /// selection to the top.
     fn refilter(&mut self) {
+        // Candidate indices in combined space: static actions first (skipped
+        // entirely in profiles-only mode), then the dynamic profile rows.
+        let candidates: Vec<usize> = if self.profiles_only {
+            (ITEMS.len()..ITEMS.len() + self.profiles.len()).collect()
+        } else {
+            (0..ITEMS.len() + self.profiles.len()).collect()
+        };
+        let combined_search = |idx: usize| -> &str {
+            if idx < ITEMS.len() { ITEMS[idx].search } else { &self.profiles[idx - ITEMS.len()].1 }
+        };
         let query = self.query.trim();
         if query.is_empty() {
-            let mut order: Vec<usize> = (0..ITEMS.len()).collect();
+            let mut order = candidates;
             order.sort_by_key(|&i| self.recent.iter().position(|&r| r == i).unwrap_or(usize::MAX));
             self.filtered = order;
         } else {
-            let mut scored: Vec<(i32, usize)> = ITEMS
-                .iter()
-                .enumerate()
-                .filter_map(|(i, item)| fuzzy_score(query, item.search).map(|score| (score, i)))
+            let mut scored: Vec<(i32, usize)> = candidates
+                .into_iter()
+                .filter_map(|i| fuzzy_score(query, combined_search(i)).map(|score| (score, i)))
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
             self.filtered = scored.into_iter().map(|(_, i)| i).collect();
@@ -307,8 +384,8 @@ impl CommandPalette {
 
     /// The at-most `max_rows` visible rows, scrolled so the selection stays in
     /// view, plus the selected row's index *within that window* (`None` when the
-    /// list is empty). Collected so the result borrows nothing (all `&'static`).
-    pub fn visible(&self, max_rows: usize) -> (Vec<(&'static str, &'static str)>, Option<usize>) {
+    /// list is empty). Collected so the result borrows nothing.
+    pub fn visible(&self, max_rows: usize) -> (Vec<(String, String)>, Option<usize>) {
         if self.filtered.is_empty() || max_rows == 0 {
             return (Vec::new(), None);
         }
@@ -320,7 +397,10 @@ impl CommandPalette {
             .iter()
             .skip(start)
             .take(max_rows)
-            .map(|&idx| (ITEMS[idx].label, ITEMS[idx].hint))
+            .map(|&idx| match idx.checked_sub(ITEMS.len()) {
+                Some(p) => (self.profiles[p].0.clone(), String::new()),
+                None => (ITEMS[idx].label.to_string(), ITEMS[idx].hint.to_string()),
+            })
             .collect();
         (rows, Some(self.selected - start))
     }
@@ -389,6 +469,141 @@ pub fn palette_layout(win_w: f32, win_h: f32, scale: f32) -> PaletteLayout {
     let list_y = py + pad + input_h + s(8.0);
 
     PaletteLayout { panel: (px, py, pw, ph), input, row_h, list_y, max_rows }
+}
+
+// ---- rendering (the parent `display::mod` hands in the model + renderer;
+// this module owns the palette's pixels — same split as `side_panel.rs`) ----
+
+use crate::renderer::ui::{Gradient, Rgba, UiQuad};
+use crate::renderer::{GlyphCache, Renderer};
+
+/// Push the palette's background quads: a dim veil over the window, the glass
+/// panel (glow + gradient border + fill, matching the settings modal), the
+/// query input box, and the selected-row highlight. No-op while closed.
+pub(super) fn push_quads(
+    model: &CommandPalette,
+    theme: &NebulaTheme,
+    quads: &mut Vec<UiQuad>,
+    size: &SizeInfo,
+    scale: f32,
+) {
+    if !model.is_open() {
+        return;
+    }
+    let w = size.width();
+    let h = size.height();
+    let s = |v: f32| v * scale;
+    let palette = theme.palette();
+    let sk = theme.skin();
+    let layout = palette_layout(w, h, scale);
+    let (px, py, pw, ph) = layout.panel;
+    let (ix, iy, iw, ih) = layout.input;
+
+    quads.push(UiQuad::solid(0.0, 0.0, w, h, 0.0, Rgba::new(0, 0, 0, 150)));
+    quads.push(UiQuad::glow(
+        px - s(24.0),
+        py - s(22.0),
+        pw + s(48.0),
+        ph + s(48.0),
+        palette.edge_glow_l,
+    ));
+    quads.push(UiQuad::gradient(
+        px - s(1.0),
+        py - s(1.0),
+        pw + s(2.0),
+        ph + s(2.0),
+        s(15.0),
+        palette.tab_stroke_l,
+        palette.edge_r,
+        Gradient::Axis([0.9, 0.35]),
+    ));
+    quads.push(UiQuad::gradient(
+        px,
+        py,
+        pw,
+        ph,
+        s(14.0),
+        palette.panel,
+        sk.panel_grad_to,
+        Gradient::Axis([0.25, 0.95]),
+    ));
+    // Query input box.
+    quads.push(UiQuad::solid(ix, iy, iw, ih, s(10.0), sk.input));
+
+    // Highlight pill behind the selected row (list scrolls to keep it shown).
+    let (_, selected_row) = model.visible(layout.max_rows);
+    if let Some(row) = selected_row {
+        let ry = layout.list_y + row as f32 * layout.row_h;
+        quads.push(UiQuad::gradient(
+            ix,
+            ry,
+            iw,
+            layout.row_h - s(4.0),
+            s(8.0),
+            palette.tab_bg_l,
+            palette.tab_bg_r,
+            Gradient::Horizontal,
+        ));
+    }
+}
+
+/// Draw the palette's text: the query line (with a caret) or a placeholder,
+/// then the result rows with right-aligned shortcut hints. No-op while closed.
+pub(super) fn draw_text(
+    model: &CommandPalette,
+    theme: &NebulaTheme,
+    r: &mut Renderer,
+    gc: &mut GlyphCache,
+    size: &SizeInfo,
+    scale: f32,
+) {
+    if !model.is_open() {
+        return;
+    }
+    let s = |v: f32| v * scale;
+    let w = size.width();
+    let h = size.height();
+    let cell_w = size.cell_width();
+    let cell_h = size.cell_height();
+    let layout = palette_layout(w, h, scale);
+    let (ix, iy, iw, ih) = layout.input;
+
+    // Inks from the theme skin: dark text on light panels, pale on dark.
+    let sk = theme.skin();
+
+    let text_x = ix + s(14.0);
+    let text_y = iy + (ih - cell_h) / 2.0;
+    let query = model.query();
+    if query.is_empty() {
+        r.draw_chrome_text(
+            size,
+            text_x,
+            text_y,
+            sk.ink_faint,
+            "输入命令进行搜索…    Esc 关闭 · ↑↓ 选择 · Enter 执行",
+            gc,
+        );
+    } else {
+        let shown = format!("{query}▏");
+        r.draw_chrome_text(size, text_x, text_y, sk.ink_strong, &shown, gc);
+    }
+
+    if model.is_empty() {
+        r.draw_chrome_text(size, text_x, layout.list_y + s(8.0), sk.ink_dim, "无匹配命令", gc);
+        return;
+    }
+
+    let (rows, selected_row) = model.visible(layout.max_rows);
+    for (row, (label, hint)) in rows.into_iter().enumerate() {
+        let ry =
+            layout.list_y + row as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0 - s(2.0);
+        let fg = if Some(row) == selected_row { sk.ink_strong } else { sk.ink };
+        r.draw_chrome_text(size, text_x, ry, fg, &label, gc);
+        if !hint.is_empty() {
+            let hint_w = hint.chars().count() as f32 * cell_w;
+            r.draw_chrome_text(size, ix + iw - s(14.0) - hint_w, ry, sk.ink_dim, &hint, gc);
+        }
+    }
 }
 
 #[cfg(test)]

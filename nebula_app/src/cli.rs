@@ -243,6 +243,11 @@ pub enum Subcommands {
     /// real-time AI turn notifications.
     #[cfg(windows)]
     SetupAi(SetupAiOptions),
+    /// SSH with Nebula shell integration bootstrapped on the remote host, so
+    /// tab icons / spinner / cwd track the program running over the connection
+    /// (claude, vim, cargo…). All arguments are forwarded to the system `ssh`.
+    #[cfg(windows)]
+    Ssh(SshOptions),
 }
 
 /// Options for the `setup-ai` subcommand.
@@ -253,6 +258,17 @@ pub struct SetupAiOptions {
     /// installing them.
     #[clap(long)]
     pub remove: bool,
+}
+
+/// Options for the `ssh` subcommand: every token after `ssh` is captured raw
+/// and handed to the system `ssh` binary (host, `-p`, `-i`, `-L`, …), so
+/// `nebula ssh -p 2222 user@host` behaves exactly like the real client.
+#[cfg(windows)]
+#[derive(Args, Debug)]
+pub struct SshOptions {
+    /// All arguments forwarded verbatim to `ssh` (destination and flags).
+    #[clap(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub args: Vec<String>,
 }
 
 /// Send a message to the Nebula socket.

@@ -22,6 +22,12 @@ use crate::display::color::{List, Rgb};
 use crate::renderer::ui::Rgba;
 use nebula_terminal::vte::ansi::NamedColor;
 
+/// First 256-color palette slot claimed for the powerline prompt chips
+/// (16..=23: icon bg/fg, path bg/fg, branch bg/fg, time bg/fg). Chosen at the
+/// very start of the 6×6×6 cube — the darkest corner, rarely load-bearing for
+/// TUIs — so hijacking eight slots stays invisible in practice.
+pub(crate) const POWERLINE_SLOT0: usize = 16;
+
 /// Built-in Nebula chrome themes exposed from the settings panel — the seven
 /// looks from the design sheet: the deep-blue default plus three light/dark
 /// low-saturation pairs (silver/steel, limestone/coal, linen/moss).
@@ -125,6 +131,14 @@ impl NebulaTheme {
         *colors = *defaults;
         let p = self.palette();
         colors[NamedColor::Background] = p.term_bg;
+        // Powerline prompt slots: the injected prompt paints its segment chips
+        // with indexed colors 16..=23 instead of baked-in truecolor, so a
+        // theme switch remaps the palette and every chip ALREADY PRINTED in
+        // scrollback recolors instantly — indexed cells resolve the palette at
+        // draw time; truecolor is frozen the moment it is printed.
+        for (i, rgb) in self.powerline_colors().into_iter().enumerate() {
+            colors[POWERLINE_SLOT0 + i] = rgb;
+        }
         if !p.is_light {
             return;
         }
@@ -153,6 +167,86 @@ impl NebulaTheme {
         ];
         for (name, rgb) in LIGHT_ANSI {
             colors[name] = rgb;
+        }
+    }
+
+    /// Segment colors for the injected powerline prompt, published into the
+    /// 256-color palette at [`POWERLINE_SLOT0`]`..+8` by [`Self::apply_term_colors`].
+    /// Order: icon bg/fg, path bg/fg, branch bg/fg, time bg/fg — one flat color
+    /// per chip (the old per-character truecolor gradient could never follow a
+    /// theme switch retroactively, which users read as "the prompt is stuck").
+    pub(crate) fn powerline_colors(self) -> [Rgb; 8] {
+        match self {
+            Self::Nebula => [
+                Rgb::new(57, 75, 112),
+                Rgb::new(192, 202, 245),
+                Rgb::new(41, 52, 82),
+                Rgb::new(169, 177, 214),
+                Rgb::new(47, 79, 79),
+                Rgb::new(139, 213, 202),
+                Rgb::new(29, 33, 46),
+                Rgb::new(100, 116, 139),
+            ],
+            Self::SilverLight => [
+                Rgb::new(229, 231, 235),
+                Rgb::new(55, 65, 81),
+                Rgb::new(243, 244, 246),
+                Rgb::new(55, 65, 81),
+                Rgb::new(224, 242, 254),
+                Rgb::new(3, 105, 161),
+                Rgb::new(249, 250, 251),
+                Rgb::new(107, 114, 128),
+            ],
+            Self::SteelDark => [
+                Rgb::new(71, 85, 105),
+                Rgb::new(241, 245, 249),
+                Rgb::new(51, 65, 85),
+                Rgb::new(203, 213, 225),
+                Rgb::new(59, 82, 73),
+                Rgb::new(163, 184, 153),
+                Rgb::new(40, 44, 56),
+                Rgb::new(148, 163, 184),
+            ],
+            Self::LimestoneLight => [
+                Rgb::new(214, 211, 209),
+                Rgb::new(250, 250, 249),
+                Rgb::new(231, 229, 228),
+                Rgb::new(68, 64, 60),
+                Rgb::new(200, 198, 167),
+                Rgb::new(41, 37, 36),
+                Rgb::new(235, 233, 230),
+                Rgb::new(163, 160, 151),
+            ],
+            Self::CoalDark => [
+                Rgb::new(82, 82, 82),
+                Rgb::new(245, 245, 245),
+                Rgb::new(64, 64, 64),
+                Rgb::new(212, 212, 212),
+                Rgb::new(74, 79, 65),
+                Rgb::new(181, 181, 166),
+                Rgb::new(48, 48, 48),
+                Rgb::new(115, 115, 115),
+            ],
+            Self::LinenLight => [
+                Rgb::new(212, 212, 208),
+                Rgb::new(255, 255, 255),
+                Rgb::new(229, 229, 223),
+                Rgb::new(63, 63, 63),
+                Rgb::new(181, 196, 177),
+                Rgb::new(45, 45, 45),
+                Rgb::new(236, 236, 230),
+                Rgb::new(176, 179, 176),
+            ],
+            Self::MossDark => [
+                Rgb::new(75, 85, 72),
+                Rgb::new(240, 253, 244),
+                Rgb::new(59, 66, 56),
+                Rgb::new(220, 252, 231),
+                Rgb::new(60, 79, 60),
+                Rgb::new(187, 247, 208),
+                Rgb::new(42, 47, 42),
+                Rgb::new(107, 114, 107),
+            ],
         }
     }
 

@@ -54,6 +54,8 @@ mod scheduler;
 mod session;
 #[cfg(windows)]
 mod mux;
+#[cfg(windows)]
+mod ssh;
 mod string;
 mod window_context;
 
@@ -101,6 +103,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(Subcommands::SetupAi(options)) => {
             std::process::exit(crate::ai_hook::setup_ai_cli(options.remove))
         },
+        #[cfg(windows)]
+        Some(Subcommands::Ssh(options)) => std::process::exit(crate::ssh::run(options.args)),
         None => nebula(options)?,
     }
 

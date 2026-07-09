@@ -122,8 +122,8 @@ impl Default for FontDescription {
             #[cfg(target_os = "macos")]
             family: "Menlo".into(),
             #[cfg(windows)]
-            family: "Maple Mono NF CN".into(),
-            style: None,
+            family: "Maple Mono Normal NF CN".into(),
+            style: Some("Regular".into()),
         }
     }
 }

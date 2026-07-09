@@ -72,12 +72,33 @@ pub mod hint;
 pub mod window;
 
 pub mod command_palette;
+pub mod side_panel;
+mod chrome;
+
+pub use chrome::{ChromeHit, TabDropAction, in_chrome_bar, resize_edge};
+pub(crate) use chrome::chrome_settings_button_rect;
+use chrome::{
+    ChromeTabLayout, TabDrag, chrome_hit_with_tabs, chrome_tab_layout, contains_rect,
+    truncate_tab_label,
+};
 
 mod settings;
 mod theme;
 
 pub use theme::NebulaTheme;
 pub(crate) use theme::write_nebula_prompt_theme;
+
+/// Shared caret blink phase for the chrome text editors (rename / filter /
+/// commit boxes): 500ms on / 500ms off wall-clock, same time source as the
+/// sidebar spinner. The fast tick (armed while an editor is focused) keeps
+/// frames coming so the phase is actually visible instead of looking frozen.
+pub(crate) fn caret_blink_on() -> bool {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    (millis / 500) % 2 == 0
+}
 pub use settings::{NebulaSettingsSection, SettingsHit, settings_hit};
 
 mod bell;
@@ -173,6 +194,75 @@ pub fn sidebar_width(scale_factor: f32, collapsed: bool) -> f32 {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct UiAnim {
+    value: f32,
+    target: f32,
+    last_step: Option<Instant>,
+}
+
+impl UiAnim {
+    fn new(value: f32) -> Self {
+        let value = value.clamp(0.0, 1.0);
+        Self { value, target: value, last_step: None }
+    }
+
+    fn value(self) -> f32 {
+        self.value
+    }
+
+    fn visible(self, target_open: bool) -> bool {
+        target_open || self.value > 0.004
+    }
+
+    fn animating_to(self, target: f32) -> bool {
+        (self.value - target.clamp(0.0, 1.0)).abs() > 0.004
+    }
+
+    fn step(&mut self, target: f32) {
+        let target = target.clamp(0.0, 1.0);
+        if (self.target - target).abs() > f32::EPSILON {
+            self.target = target;
+            self.last_step = None;
+        }
+        if !self.animating_to(target) {
+            self.value = target;
+            self.last_step = None;
+            return;
+        }
+
+        let now = Instant::now();
+        let dt = self.last_step.replace(now).map_or(1.0 / 60.0, |t| (now - t).as_secs_f32().min(0.1));
+        self.value += (target - self.value) * (1.0 - (-16.0 * dt).exp());
+        if (self.value - target).abs() < 0.004 {
+            self.value = target;
+            self.last_step = None;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NebulaUiAnims {
+    left_sidebar: UiAnim,
+    right_drawer: UiAnim,
+}
+
+impl NebulaUiAnims {
+    fn new() -> Self {
+        Self { left_sidebar: UiAnim::new(1.0), right_drawer: UiAnim::new(0.0) }
+    }
+
+    fn step(&mut self, left_open: bool, right_open: bool) {
+        self.left_sidebar.step(if left_open { 1.0 } else { 0.0 });
+        self.right_drawer.step(if right_open { 1.0 } else { 0.0 });
+    }
+
+    fn animating(&self, left_open: bool, right_open: bool) -> bool {
+        self.left_sidebar.animating_to(if left_open { 1.0 } else { 0.0 })
+            || self.right_drawer.animating_to(if right_open { 1.0 } else { 0.0 })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 enum NebulaPowerlineIconKind {
     Folder,
     GitBranch,
@@ -239,62 +329,6 @@ fn nebula_pick_image_file(owner: RawWindowHandle) -> Option<String> {
         return None;
     }
     Some(String::from_utf16_lossy(&file_buf[..len]))
-}
-
-/// Result of hit-testing a pixel against the Nebula top chrome bar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChromeHit {
-    None,
-    TitleBar,
-    NewTab,
-    Tab(usize),
-    TabClose(usize),
-    /// The sidebar icon in the top bar that folds the left tab sidebar away and
-    /// back. Lives in the title bar so it stays reachable while collapsed.
-    SidebarToggle,
-    Minimize,
-    Maximize,
-    Close,
-}
-
-/// An in-progress tab-bar reorder drag.
-///
-/// Armed when the pointer presses a tab and promoted to `active` only once it
-/// travels past a small threshold, so an ordinary click still selects the tab
-/// without nudging the order. While active, the grabbed pill follows the
-/// pointer and the drop slot is derived from where its centre lands.
-#[derive(Debug, Clone, Copy)]
-struct TabDrag {
-    /// Displayed index of the grabbed tab.
-    source: usize,
-    /// Pointer X (physical px) when armed — crossing the horizontal threshold
-    /// also activates the drag, so pulling a tab straight toward the terminal
-    /// area (little Y motion) still engages docking.
-    origin_x: f32,
-    /// Pointer coordinate along the tab axis (physical px) when armed. The tabs
-    /// stack vertically, so this is the pointer Y.
-    origin: f32,
-    /// Latest pointer coordinate along the tab axis (physical px, i.e. Y).
-    current: f32,
-    /// Whether the move threshold has been crossed.
-    active: bool,
-    /// Dock target while the pointer hovers the terminal area: dropping here
-    /// splits the ACTIVE tab's layout on that side and moves the dragged tab's
-    /// whole pane tree into it (VS Code-style edge docking).
-    dock: Option<SplitNav>,
-}
-
-/// What releasing a tab drag should do. `Click` covers the no-drag case: tab
-/// selection is deferred from press to release, so the terminal area keeps
-/// showing the ACTIVE tab while another tab is being dragged over it to dock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TabDropAction {
-    /// Plain click (never crossed the drag threshold): select the tab.
-    Click(usize),
-    /// Reorder within the sidebar: move displayed `from` to displayed `to`.
-    Reorder { from: usize, to: usize },
-    /// Dock the dragged tab's layout into the active tab on `nav`'s side.
-    Dock { source: usize, nav: SplitNav },
 }
 
 /// Which key accepts an inline ghost suggestion.
@@ -470,11 +504,17 @@ pub enum AiLogo {
     Claude,
     /// OpenAI's blossom knot (codex).
     OpenAi,
+    /// opencode's terminal-frame mark (sst). Two-tone: bright frame + dimmer
+    /// inner screen block, encoded as luma and multiplied by the theme ink.
+    OpenCode,
 }
 
 /// Official logo assets (Wikimedia SVG renders, 64 px, alpha-transparent).
 const AI_LOGO_CLAUDE_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_claude.png");
 const AI_LOGO_OPENAI_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_openai.png");
+/// opencode's mark, rasterized from their `favicon.svg`. RGB carries luma
+/// (frame=255, block=90), alpha the shape; tinted `ink × luma/255` at runtime.
+const AI_LOGO_OPENCODE_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_opencode.png");
 
 /// Texture ids for chrome logos live far above the inline-image counter
 /// (which starts at 1), so the two id spaces can share the renderer cache.
@@ -490,6 +530,7 @@ pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
     match program {
         "claude" => Some(AiLogo::Claude),
         "codex" => Some(AiLogo::OpenAi),
+        "opencode" => Some(AiLogo::OpenCode),
         _ => None,
     }
 }
@@ -829,290 +870,6 @@ fn nebula_path_wants_directory(line: &str) -> bool {
         command.to_ascii_lowercase().as_str(),
         "cd" | "chdir" | "pushd" | "sl" | "set-location"
     )
-}
-
-#[derive(Debug, Clone)]
-/// Geometry for the left tab sidebar. Tabs are stacked vertically inside the
-/// `panel` rect; each `tabs[i]` row carries a `closes[i]` × button, and `plus`
-/// is the "new tab" row beneath the last tab. `toggle` is the sidebar icon in the
-/// top bar (always present, the only tab affordance left when collapsed). All
-/// rects are physical pixels — the same geometry drives drawing and hit-test.
-struct ChromeTabLayout {
-    tabs: Vec<(f32, f32, f32, f32)>,
-    closes: Vec<(f32, f32, f32, f32)>,
-    plus: (f32, f32, f32, f32),
-    toggle: (f32, f32, f32, f32),
-    /// Full sidebar panel background rect. Zero-width when collapsed.
-    panel: (f32, f32, f32, f32),
-}
-
-fn contains_rect((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f32) -> bool {
-    x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
-}
-
-/// Truncate `label` so its terminal display width fits within `max_cols`
-/// columns, appending an ellipsis when clipped. CJK glyphs count as two columns,
-/// matching how `draw_chrome_text` lays them out — callers already compute
-/// `max_cols` as the available pixel span divided by `cell_w`, i.e. columns.
-fn truncate_tab_label(label: &str, max_cols: usize) -> String {
-    let total: usize = label.chars().map(|c| c.width().unwrap_or(0)).sum();
-    if total <= max_cols {
-        return label.to_owned();
-    }
-    if max_cols <= 1 {
-        return "…".to_owned();
-    }
-    // Reserve one column for the trailing ellipsis.
-    let budget = max_cols - 1;
-    let mut used = 0usize;
-    let mut text = String::new();
-    for ch in label.chars() {
-        let w = ch.width().unwrap_or(0);
-        if used + w > budget {
-            break;
-        }
-        used += w;
-        text.push(ch);
-    }
-    text.push('…');
-    text
-}
-
-/// Shared geometry for the custom Windows-style titlebar controls.
-///
-/// The hit targets are intentionally wider than the visible glyphs: the design
-/// follows the sample mockup's sparse controls, but the clickable area remains
-/// comfortable for daily use.
-#[inline]
-fn chrome_control_centers(
-    width: f32,
-    top: f32,
-    bar_h: f32,
-    scale_factor: f32,
-) -> [(ChromeHit, f32, f32); 3] {
-    let s = |v: f32| v * scale_factor;
-    let margin = s(8.0);
-    let inner_pad = s(6.0);
-    let center_y = top + bar_h / 2.0;
-    let close_x = width - margin - inner_pad - s(18.0);
-    let max_x = close_x - s(46.0);
-    let min_x = max_x - s(46.0);
-
-    [
-        (ChromeHit::Minimize, min_x, center_y),
-        (ChromeHit::Maximize, max_x, center_y),
-        (ChromeHit::Close, close_x, center_y),
-    ]
-}
-
-/// Top-left settings trigger. It occupies the old product-mark slot beside the
-/// sidebar toggle; keeping this geometry in one helper keeps drawing and
-/// hit-testing aligned.
-#[inline]
-pub(crate) fn chrome_settings_button_rect(
-    _size_info: &SizeInfo,
-    scale_factor: f32,
-) -> (f32, f32, f32, f32) {
-    let s = |v: f32| v * scale_factor;
-    let margin = s(8.0);
-    let top = margin;
-    let bar_h = s(40.0);
-    let inner_pad = s(6.0);
-    let pill_h = bar_h - 2.0 * inner_pad;
-    let toggle_x = margin + inner_pad;
-    let x = toggle_x + pill_h + s(8.0);
-    (x, top + inner_pad, pill_h, pill_h)
-}
-
-/// Lay out the vertical tab sidebar plus its top-bar affordances. When
-/// `collapsed`, the panel folds to zero width and the "new tab" pill moves up
-/// beside the sidebar icon in the top bar, so both stay reachable. Geometry is in
-/// physical pixels and shared verbatim by drawing and hit-testing, so the two
-/// can never drift across DPI scales.
-fn chrome_tab_layout(
-    size_info: &SizeInfo,
-    scale_factor: f32,
-    tab_count: usize,
-    collapsed: bool,
-) -> ChromeTabLayout {
-    let s = |v: f32| v * scale_factor;
-    let h = size_info.height();
-    let margin = s(8.0);
-    let bar_h = s(40.0);
-    let inner_pad = s(6.0);
-    let pill_h = bar_h - 2.0 * inner_pad;
-    let top = margin;
-    let count = tab_count.max(1);
-
-    // Sidebar toggle: leftmost square in the top bar, always present.
-    let toggle = (margin + inner_pad, top + inner_pad, pill_h, pill_h);
-
-    if collapsed {
-        // Folded: no panel, no per-tab rows. The new-tab pill parks just right
-        // of the top-left settings button so opening tabs still works with the
-        // sidebar hidden.
-        let gear = chrome_settings_button_rect(size_info, scale_factor);
-        let plus = (gear.0 + gear.2 + s(8.0), top + inner_pad, pill_h, pill_h);
-        return ChromeTabLayout {
-            tabs: Vec::new(),
-            closes: Vec::new(),
-            plus,
-            toggle,
-            panel: (0.0, 0.0, 0.0, 0.0),
-        };
-    }
-
-    // Expanded panel: fills the left gutter between the top and bottom bars,
-    // leaving a small breathing gap before the terminal grid on its right.
-    let sw = SIDEBAR_W_LOGICAL * scale_factor;
-    let panel_x = margin;
-    let panel_w = (sw - margin - s(12.0)).max(s(120.0));
-    let panel_top = top + bar_h + s(12.0);
-    let panel_bottom = h - margin - s(12.0);
-    let panel_h = (panel_bottom - panel_top).max(0.0);
-    let panel = (panel_x, panel_top, panel_w, panel_h);
-
-    // Vertical tab rows: full panel width minus inner padding, stacked below
-    // the "TABS" header. The new-tab affordance is a small square at the right
-    // end of that header row (revealed on sidebar hover), not a trailing row.
-    let tab_pad = s(14.0);
-    let tab_x = panel_x + tab_pad;
-    let tab_w = panel_w - 2.0 * tab_pad;
-    let row_h = s(34.0);
-    let gap = s(8.0);
-    let header = s(42.0); // room for a "TABS" caption at the panel top
-
-    // "+" square, vertically centred in the header band, pinned to the right.
-    let plus_sz = s(20.0);
-    let plus = (
-        panel_x + panel_w - tab_pad - plus_sz,
-        panel_top + (header - plus_sz) * 0.5,
-        plus_sz,
-        plus_sz,
-    );
-
-    let mut y = panel_top + header;
-    let mut tabs = Vec::with_capacity(count);
-    let mut closes = Vec::with_capacity(count);
-    for _ in 0..count {
-        tabs.push((tab_x, y, tab_w, row_h));
-        let close_size = (row_h * 0.58).max(s(16.0));
-        closes.push((
-            tab_x + tab_w - close_size - s(10.0),
-            y + (row_h - close_size) * 0.5,
-            close_size,
-            close_size,
-        ));
-        y += row_h + gap;
-    }
-
-    ChromeTabLayout { tabs, closes, plus, toggle, panel }
-}
-
-fn chrome_hit_with_tabs(
-    size_info: &SizeInfo,
-    scale_factor: f32,
-    tab_count: usize,
-    collapsed: bool,
-    x: f32,
-    y: f32,
-) -> ChromeHit {
-    let s = |v: f32| v * scale_factor;
-    let w = size_info.width();
-    let margin = s(8.0);
-    let bar_h = s(40.0);
-    let top = margin;
-
-    let layout = chrome_tab_layout(size_info, scale_factor, tab_count, collapsed);
-
-    // Toggle + new-tab + vertical tab rows are checked before the bar regions,
-    // since the sidebar lives outside the top bar's vertical band.
-    if contains_rect(layout.toggle, x, y) {
-        return ChromeHit::SidebarToggle;
-    }
-    if contains_rect(layout.plus, x, y) {
-        return ChromeHit::NewTab;
-    }
-    for (index, rect) in layout.closes.iter().copied().enumerate() {
-        if contains_rect(rect, x, y) {
-            return ChromeHit::TabClose(index);
-        }
-    }
-    for (index, rect) in layout.tabs.iter().copied().enumerate() {
-        if contains_rect(rect, x, y) {
-            return ChromeHit::Tab(index);
-        }
-    }
-
-    // Top bar: window controls first, then the rest drags the window.
-    if y >= top && y <= top + bar_h && x >= margin && x <= w - margin {
-        let hit_half = s(18.0);
-        for (hit, cx, cy) in chrome_control_centers(w, top, bar_h, scale_factor) {
-            if x >= cx - hit_half && x <= cx + hit_half && y >= cy - hit_half && y <= cy + hit_half
-            {
-                return hit;
-            }
-        }
-        return ChromeHit::TitleBar;
-    }
-
-    ChromeHit::None
-}
-
-/// Whether a window-space pixel falls within either Nebula chrome bar (top
-/// title bar or left sidebar), used to pick the right mouse cursor.
-pub fn in_chrome_bar(size_info: &SizeInfo, scale_factor: f32, x: f32, y: f32) -> bool {
-    let s = |v: f32| v * scale_factor;
-    let w = size_info.width();
-    let h = size_info.height();
-    let margin = s(8.0);
-    let bar_h = s(40.0);
-
-    // Left tab sidebar: everything from the window edge up to the grid's left
-    // origin (padding_x) is chrome, so vertical tabs get hover feedback and the
-    // arrow cursor rather than the text I-beam. When collapsed the gutter
-    // shrinks to the ordinary padding and this band is effectively just margin.
-    if x >= margin && x < size_info.padding_x() && y > margin + bar_h && y < h - margin {
-        return true;
-    }
-
-    if x < margin || x > w - margin {
-        return false;
-    }
-    let in_top = y >= margin && y <= margin + bar_h;
-    in_top
-}
-
-/// Resize direction when the pixel is within the window's resize border, used
-/// to drive interactive edge/corner resizing on the borderless window.
-pub fn resize_edge(
-    size_info: &SizeInfo,
-    scale_factor: f32,
-    x: f32,
-    y: f32,
-) -> Option<winit::window::ResizeDirection> {
-    use winit::window::ResizeDirection::*;
-
-    let b = 6.0 * scale_factor;
-    let w = size_info.width();
-    let h = size_info.height();
-    let l = x <= b;
-    let r = x >= w - b;
-    let t = y <= b;
-    let bo = y >= h - b;
-
-    let dir = match (t, bo, l, r) {
-        (true, _, true, _) => NorthWest,
-        (true, _, _, true) => NorthEast,
-        (_, true, true, _) => SouthWest,
-        (_, true, _, true) => SouthEast,
-        (true, _, _, _) => North,
-        (_, true, _, _) => South,
-        (_, _, true, _) => West,
-        (_, _, _, true) => East,
-        _ => return None,
-    };
-    Some(dir)
 }
 
 #[derive(Debug)]
@@ -1494,6 +1251,11 @@ pub struct Display {
     nebula_settings_scroll: f32,
     /// Command palette (Ctrl+Shift+P): fuzzy launcher model + UI state.
     nebula_palette: command_palette::CommandPalette,
+    /// Right-side drawer: directory tree / git status of the focused cwd.
+    pub nebula_side_panel: side_panel::SidePanel,
+    /// Shared chrome animation state. All sidebar/drawer transitions step here
+    /// so easing/timing does not get scattered across render code.
+    nebula_ui_anims: NebulaUiAnims,
     /// Active sidebar section inside the settings panel.
     nebula_settings_section: NebulaSettingsSection,
     nebula_chrome_hover: ChromeHit,
@@ -1537,6 +1299,9 @@ pub struct Display {
     pub nebula_fetch_enabled: bool,
     /// Whether the injected prompt uses Nebula's powerline segments.
     pub nebula_powerline_enabled: bool,
+    /// Closing a window detaches its panes into the resident process for
+    /// re-attach (multiplexer restore). Off = close kills the shells.
+    pub nebula_keep_session: bool,
     /// Runtime window opacity controlled from Nebula settings.
     pub nebula_window_opacity: f32,
     /// Optional runtime clear/background color controlled from settings.
@@ -1556,6 +1321,15 @@ pub struct Display {
     /// reads as "selected" (nushell-style blue fill) and the first typed
     /// character replaces it wholesale. Cleared on the first edit.
     pub nebula_tab_rename_select_all: bool,
+    /// Insertion caret inside the rename buffer, as a CHAR index (0..=chars).
+    /// Click-to-place, arrow keys, and mid-string insert/delete all go
+    /// through this — a rename is a real text field, not append-only.
+    pub nebula_tab_rename_caret: usize,
+    /// Left pixel of the rename buffer's first glyph, stashed by `draw_chrome`
+    /// each frame the box shows. Click-to-place-caret maps pointer X through
+    /// this — recomputing the draw-side layout in the input path would just
+    /// let the two drift.
+    pub nebula_tab_rename_text_x: f32,
 
     pub visual_bell: VisualBell,
 
@@ -1790,6 +1564,8 @@ impl Display {
             nebula_settings_open: false,
             nebula_settings_scroll: 0.0,
             nebula_palette: command_palette::CommandPalette::new(),
+            nebula_side_panel: side_panel::SidePanel::new(),
+            nebula_ui_anims: NebulaUiAnims::new(),
             nebula_settings_section: NebulaSettingsSection::default(),
             nebula_chrome_hover: ChromeHit::None,
             nebula_settings_hover: SettingsHit::None,
@@ -1805,12 +1581,15 @@ impl Display {
             nebula_sidebar_collapsed: false,
             nebula_tab_rename: None,
             nebula_tab_rename_select_all: false,
+            nebula_tab_rename_caret: 0,
+            nebula_tab_rename_text_x: 0.0,
             nebula_pty_resize_pending: false,
             nebula_ghost_enabled: settings_init.ghost,
             nebula_accept: settings_init.accept,
             nebula_shell: settings_init.shell,
             nebula_fetch_enabled: settings_init.fetch,
             nebula_powerline_enabled: settings_init.powerline,
+            nebula_keep_session: settings_init.keep_session,
             nebula_window_opacity: settings_init.opacity,
             nebula_background: settings_init.background,
             nebula_background_image: settings_init.background_image,
@@ -1896,6 +1675,15 @@ impl Display {
         self.nebula_tab_running.iter().any(|running| *running)
     }
 
+    /// A chrome text editor (tab rename / drawer filter / commit message) has
+    /// keyboard focus — the window context bumps the redraw tick to the fast
+    /// cadence so the insertion caret visibly blinks.
+    pub fn chrome_editor_active(&self) -> bool {
+        self.nebula_tab_rename.is_some()
+            || self.nebula_side_panel.search_focus
+            || self.nebula_side_panel.commit_focus
+    }
+
     /// Decoded (and theme-tinted) pixels for an AI brand logo, plus a stable
     /// texture id for the renderer's inline cache. Decode + tint run once per
     /// (logo, ink); the GPU upload happens lazily inside the renderer.
@@ -1910,7 +1698,7 @@ impl Display {
         // every theme.
         let key = match logo {
             AiLogo::Claude => (logo, [0, 0, 0]),
-            AiLogo::OpenAi => (logo, [ink.r, ink.g, ink.b]),
+            AiLogo::OpenAi | AiLogo::OpenCode => (logo, [ink.r, ink.g, ink.b]),
         };
         if let Some(cached) = self.nebula_ai_logo_cache.get(&key) {
             return Some(cached.clone());
@@ -1918,6 +1706,7 @@ impl Display {
         let bytes: &[u8] = match logo {
             AiLogo::Claude => AI_LOGO_CLAUDE_PNG,
             AiLogo::OpenAi => AI_LOGO_OPENAI_PNG,
+            AiLogo::OpenCode => AI_LOGO_OPENCODE_PNG,
         };
         let (width, height, mut rgba) = match crate::renderer::image::decode_png_bytes(bytes) {
             Ok(decoded) => decoded,
@@ -1927,10 +1716,24 @@ impl Display {
                 return None;
             },
         };
-        if logo == AiLogo::OpenAi {
-            for px in rgba.chunks_exact_mut(4) {
-                (px[0], px[1], px[2]) = (ink.r, ink.g, ink.b);
-            }
+        match logo {
+            AiLogo::OpenAi => {
+                for px in rgba.chunks_exact_mut(4) {
+                    (px[0], px[1], px[2]) = (ink.r, ink.g, ink.b);
+                }
+            },
+            AiLogo::OpenCode => {
+                // Stored grayscale = luma map (frame 255, screen-block 90).
+                // Tint to theme ink scaled by luma: frame → full ink, inner
+                // block → ~35% ink, keeping the two-tone mark on every theme.
+                for px in rgba.chunks_exact_mut(4) {
+                    let luma = px[0] as u16; // R==G==B in the asset
+                    px[0] = (ink.r as u16 * luma / 255) as u8;
+                    px[1] = (ink.g as u16 * luma / 255) as u8;
+                    px[2] = (ink.b as u16 * luma / 255) as u8;
+                }
+            },
+            AiLogo::Claude => {},
         }
         let id = AI_LOGO_ID_BASE + self.nebula_ai_logo_cache.len() as u64;
         let entry = (id, std::sync::Arc::new(rgba), (width, height));
@@ -2045,11 +1848,12 @@ impl Display {
     /// correct remove-then-insert target index for a single-tab move.
     fn tab_drop_index(&self, source: usize, y: f32) -> usize {
         let scale = self.window.scale_factor as f32;
+        let sidebar_expand = self.left_sidebar_progress();
         let layout = chrome_tab_layout(
             &self.size_info,
             scale,
             self.nebula_tab_labels.len(),
-            self.nebula_sidebar_collapsed,
+            sidebar_expand,
         );
         // Tabs stack vertically now: count rows whose vertical centre the
         // pointer has passed to get the remove-then-insert target slot.
@@ -2116,6 +1920,7 @@ impl Display {
         self.nebula_sidebar_collapsed = !self.nebula_sidebar_collapsed;
         let size = PhysicalSize::new(self.size_info.width() as u32, self.size_info.height() as u32);
         self.pending_update.set_dimensions(size);
+        self.window.request_redraw();
         self.pending_update.dirty = true;
     }
 
@@ -2131,6 +1936,7 @@ impl Display {
             shell: self.nebula_shell,
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
+            keep_session: self.nebula_keep_session,
             opacity: self.nebula_window_opacity,
             background: self.nebula_background,
             background_image: self.nebula_background_image.clone(),
@@ -2196,6 +2002,14 @@ impl Display {
 
     pub fn toggle_powerline(&mut self) {
         self.nebula_powerline_enabled = !self.nebula_powerline_enabled;
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+    }
+
+    /// 高级→会话: whether closing a window keeps its shells in the resident
+    /// process (detach / re-attach restore) or kills them outright.
+    pub fn toggle_keep_session(&mut self) {
+        self.nebula_keep_session = !self.nebula_keep_session;
         self.persist_nebula_settings();
         self.pending_update.dirty = true;
     }
@@ -2270,9 +2084,20 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
-    /// Toggle the command palette (Ctrl+Shift+P).
-    pub fn toggle_command_palette(&mut self) {
+    /// Toggle the command palette (Ctrl+Shift+P). `profiles` are the config's
+    /// quick-launch profile names, refreshed on every open so live config
+    /// reloads are reflected.
+    pub fn toggle_command_palette(&mut self, profiles: &[String]) {
+        self.nebula_palette.set_profiles(profiles);
         self.nebula_palette.toggle();
+        self.pending_update.dirty = true;
+    }
+
+    /// Open the palette restricted to quick-launch profiles — the context menu
+    /// behind right-clicking the sidebar "+" button.
+    pub fn open_profile_menu(&mut self, profiles: &[String]) {
+        self.nebula_palette.set_profiles(profiles);
+        self.nebula_palette.open_profiles();
         self.pending_update.dirty = true;
     }
 
@@ -2308,6 +2133,157 @@ impl Display {
         action
     }
 
+    /// Mouse click on the palette's visible row `row` (0 = topmost visible):
+    /// select and confirm it, returning the action to dispatch.
+    pub fn palette_click(
+        &mut self,
+        row: usize,
+        max_rows: usize,
+    ) -> Option<command_palette::PaletteAction> {
+        let action = self.nebula_palette.click(row, max_rows);
+        self.pending_update.dirty = true;
+        action
+    }
+
+    /// Toggle the right-side drawer (directory tree / git status).
+    pub fn toggle_side_panel(&mut self, view: side_panel::PanelView) {
+        self.nebula_side_panel.toggle(view);
+        self.window.request_redraw();
+        self.pending_update.dirty = true;
+    }
+
+    // ---- tab rename caret editing (the rename box is a real text field) ----
+
+    /// Insert `text` at the caret. A pending select-all is replaced wholesale
+    /// (type-to-overwrite), matching every native text field.
+    pub fn tab_rename_insert(&mut self, text: &str) {
+        let select_all = self.nebula_tab_rename_select_all;
+        let caret = self.nebula_tab_rename_caret;
+        let Some((_, buf)) = self.nebula_tab_rename.as_mut() else { return };
+        if select_all {
+            buf.clear();
+            self.nebula_tab_rename_select_all = false;
+            self.nebula_tab_rename_caret = 0;
+        }
+        let caret = if select_all { 0 } else { caret.min(buf.chars().count()) };
+        let byte = buf.char_indices().nth(caret).map(|(b, _)| b).unwrap_or(buf.len());
+        buf.insert_str(byte, text);
+        self.nebula_tab_rename_caret = caret + text.chars().count();
+        self.pending_update.dirty = true;
+    }
+
+    /// Backspace at the caret; a pending select-all clears the whole name.
+    pub fn tab_rename_backspace(&mut self) {
+        let select_all = self.nebula_tab_rename_select_all;
+        let caret = self.nebula_tab_rename_caret;
+        let Some((_, buf)) = self.nebula_tab_rename.as_mut() else { return };
+        if select_all {
+            buf.clear();
+            self.nebula_tab_rename_select_all = false;
+            self.nebula_tab_rename_caret = 0;
+        } else if caret > 0 {
+            let caret = caret.min(buf.chars().count());
+            if let Some((byte, _)) = buf.char_indices().nth(caret - 1) {
+                buf.remove(byte);
+                self.nebula_tab_rename_caret = caret - 1;
+            }
+        }
+        self.pending_update.dirty = true;
+    }
+
+    /// Move the caret by `delta` chars. A select-all collapses to the matching
+    /// end first (left → start, right → end) without moving further.
+    pub fn tab_rename_move_caret(&mut self, delta: i32) {
+        let Some((_, buf)) = self.nebula_tab_rename.as_ref() else { return };
+        let len = buf.chars().count();
+        if self.nebula_tab_rename_select_all {
+            self.nebula_tab_rename_select_all = false;
+            self.nebula_tab_rename_caret = if delta < 0 { 0 } else { len };
+        } else {
+            let caret = self.nebula_tab_rename_caret.min(len) as i64 + delta as i64;
+            self.nebula_tab_rename_caret = caret.clamp(0, len as i64) as usize;
+        }
+        self.pending_update.dirty = true;
+    }
+
+    /// Jump the caret to the start/end (Home/End).
+    pub fn tab_rename_caret_edge(&mut self, end: bool) {
+        let Some((_, buf)) = self.nebula_tab_rename.as_ref() else { return };
+        self.nebula_tab_rename_select_all = false;
+        self.nebula_tab_rename_caret = if end { buf.chars().count() } else { 0 };
+        self.pending_update.dirty = true;
+    }
+
+    /// Place the caret from a pointer press at window-space `x`: map the
+    /// pixel offset from the buffer's first glyph (stashed by `draw_chrome`)
+    /// into a char index, honoring CJK double-width glyphs. This is what lets
+    /// users click where they want to edit instead of retyping the name.
+    pub fn tab_rename_click(&mut self, x: f32) {
+        let text_x = self.nebula_tab_rename_text_x;
+        let cell_w = self.size_info.cell_width();
+        let Some((_, buf)) = self.nebula_tab_rename.as_ref() else { return };
+        let mut col = ((x - text_x) / cell_w).round().max(0.0) as usize;
+        let mut caret = 0usize;
+        for c in buf.chars() {
+            let w = c.width().unwrap_or(0).max(1);
+            if col < w {
+                break;
+            }
+            col -= w;
+            caret += 1;
+        }
+        self.nebula_tab_rename_select_all = false;
+        self.nebula_tab_rename_caret = caret;
+        self.pending_update.dirty = true;
+    }
+
+    /// Adopt the focused pane's cwd into the drawer (per drawn frame; cheap
+    /// no-op unless the drawer is open and something changed).
+    pub fn side_panel_sync(&mut self, cwd: Option<std::path::PathBuf>) {
+        if self.nebula_side_panel.sync(cwd) {
+            self.pending_update.dirty = true;
+        }
+    }
+
+    /// Geometry of the drawer for the current window size.
+    pub fn side_panel_layout(&self) -> side_panel::PanelLayout {
+        let size = self.size_info;
+        let scale = self.window.scale_factor as f32;
+        let reserve = chrome_reserve(scale);
+        side_panel::panel_layout(
+            size.width(),
+            size.height(),
+            reserve,
+            reserve,
+            scale,
+            self.nebula_ui_anims.right_drawer.value(),
+        )
+    }
+
+    pub fn step_chrome_anims(&mut self) {
+        self.nebula_ui_anims
+            .step(!self.nebula_sidebar_collapsed, self.nebula_side_panel.open);
+    }
+
+    pub fn chrome_animating(&self) -> bool {
+        self.nebula_ui_anims
+            .animating(!self.nebula_sidebar_collapsed, self.nebula_side_panel.open)
+    }
+
+    pub fn left_sidebar_progress(&self) -> f32 {
+        self.nebula_ui_anims.left_sidebar.value()
+    }
+
+    pub fn left_sidebar_visible(&self) -> bool {
+        self.nebula_ui_anims
+            .left_sidebar
+            .visible(!self.nebula_sidebar_collapsed)
+    }
+
+    pub fn side_panel_visible(&self) -> bool {
+        self.nebula_ui_anims.right_drawer.visible(self.nebula_side_panel.open)
+    }
+
     fn persist_nebula_settings(&mut self) {
         settings::nebula_settings_write(&settings::NebulaRuntimeSettings {
             ghost: self.nebula_ghost_enabled,
@@ -2315,6 +2291,7 @@ impl Display {
             shell: self.nebula_shell,
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
+            keep_session: self.nebula_keep_session,
             opacity: self.nebula_window_opacity,
             background: self.nebula_background,
             background_image: self.nebula_background_image.clone(),
@@ -2345,6 +2322,7 @@ impl Display {
         self.nebula_shell = settings.shell;
         self.nebula_fetch_enabled = settings.fetch;
         self.nebula_powerline_enabled = settings.powerline;
+        self.nebula_keep_session = settings.keep_session;
         self.nebula_window_opacity = settings.opacity;
         self.nebula_background = settings.background;
         self.nebula_background_image = settings.background_image;
@@ -2659,7 +2637,11 @@ impl Display {
         let custom_background = self.nebula_background;
         let mut content = RenderableContent::new(config, self, &terminal, search_state, &view);
         let mut grid_cells = Vec::new();
+        let mut grid_pad_bg = None;
         for cell in &mut content {
+            if grid_pad_bg.is_none() && cell.bg_alpha > 0.0 {
+                grid_pad_bg = Some(cell.bg);
+            }
             grid_cells.push(cell);
         }
         let selection_range = content.selection_range();
@@ -2872,6 +2854,22 @@ impl Display {
         }
 
         let mut rects = lines.rects(&metrics, &size_info);
+
+        if alt_screen {
+            if let Some(pad_bg) = grid_pad_bg {
+                let x = size_info.padding_x();
+                let w = size_info.width() - size_info.padding_x() - size_info.padding_right();
+                let top_h = size_info.padding_y();
+                let bottom_y = size_info.padding_y() + size_info.screen_lines() as f32 * size_info.cell_height();
+                let bottom_h = (size_info.height() - bottom_y).max(0.0);
+                if top_h > 0.0 {
+                    rects.push(RenderRect::new(x, 0.0, w, top_h, pad_bg, 1.0));
+                }
+                if bottom_h > 0.0 {
+                    rects.push(RenderRect::new(x, bottom_y, w, bottom_h, pad_bg, 1.0));
+                }
+            }
+        }
 
         if let Some(vi_cursor_point) = vi_cursor_point {
             // Indicate vi mode by showing the cursor's position in the top right corner.
@@ -3494,7 +3492,7 @@ impl Display {
         }
 
         // Draw Nebula window chrome (title bar and tab sidebar).
-        self.draw_chrome();
+        chrome::draw_chrome(self);
 
         // AI brand logos staged by the chrome pass: drawn only now, after the
         // last chrome text flush, because draw_inline_image's viewport/blend
@@ -4330,780 +4328,6 @@ impl Display {
         );
     }
 
-    /// Draw the Nebula window chrome: top title bar and left tab sidebar.
-    ///
-    /// This is the first chrome milestone: it paints the rounded, gradient
-    /// panels and pills with the dedicated UI renderer to validate the native
-    /// (egui-free) chrome pipeline. Text labels and interactivity follow.
-    fn draw_chrome(&mut self) {
-        // Chrome colors come from the theme skin (hover washes flip to dark
-        // smoke on the light themes); close-hover red stays semantic.
-        let palette = self.nebula_theme.palette();
-        let sk = self.nebula_theme.skin();
-        #[allow(non_snake_case)]
-        let (HOVER_FILL, HOVER_FILL_STRONG) = (sk.hover, sk.hover_strong);
-        const CLOSE_HOVER_FILL: Rgba = Rgba::new(240, 80, 104, 96);
-
-        let size = self.size_info;
-        let scale = self.window.scale_factor as f32;
-        let w = size.width();
-        let h = size.height();
-
-        // Logical-pixel helper.
-        let s = |v: f32| v * scale;
-
-        let margin = s(8.0);
-        let bar_h = s(40.0);
-        let inner_pad = s(6.0);
-        let radius = s(UI_CORNER_RADIUS_LOGICAL);
-        let pill_h = bar_h - 2.0 * inner_pad;
-        let pill_r = s(UI_CORNER_RADIUS_LOGICAL);
-        let hairline_w = s(UI_HAIRLINE_LOGICAL).max(1.0);
-
-        let mut quads: Vec<UiQuad> = Vec::new();
-
-        // ---- Background ambient light (very subtle, drawn first) ----
-        // Purple bloom in the lower-left, cool blue in the upper-right, giving
-        // the flat backdrop a sense of depth without competing with content.
-        // Light themes ship zero-alpha glows (8-bit banding on pale ground) —
-        // skip the fill-rate cost entirely.
-        let glow_r = w * 0.62;
-        if palette.glow_l.a > 0 {
-            quads.push(UiQuad::glow(
-                -glow_r * 0.45,
-                h - glow_r * 0.55,
-                glow_r * 2.0,
-                glow_r * 2.0,
-                palette.glow_l,
-            ));
-        }
-        if palette.glow_r.a > 0 {
-            quads.push(UiQuad::glow(
-                w - glow_r * 1.55,
-                -glow_r * 0.45,
-                glow_r * 2.0,
-                glow_r * 2.0,
-                palette.glow_r,
-            ));
-        }
-
-        // ---- Window border: same as the window background ----
-        // The border is painted in the actual background color (custom override
-        // or the scheme background) so the window edge reads as one cohesive
-        // surface — no bright accent outline floating around the chrome.
-        let bg = self.nebula_background.unwrap_or_else(|| self.colors[NamedColor::Background]);
-        let border = Rgba::opaque(bg);
-        let glow_b = s(8.0);
-        quads.push(UiQuad::solid(0.0, 0.0, w, glow_b, 0.0, border));
-        quads.push(UiQuad::solid(0.0, h - glow_b, w, glow_b, 0.0, border));
-        quads.push(UiQuad::solid(0.0, 0.0, glow_b, h, 0.0, border));
-        quads.push(UiQuad::solid(w - glow_b, 0.0, glow_b, h, 0.0, border));
-        let t_b = s(1.5);
-        quads.push(UiQuad::solid(0.0, 0.0, w, t_b, 0.0, border));
-        quads.push(UiQuad::solid(0.0, h - t_b, w, t_b, 0.0, border));
-        quads.push(UiQuad::solid(0.0, 0.0, t_b, h, 0.0, border));
-        quads.push(UiQuad::solid(w - t_b, 0.0, t_b, h, 0.0, border));
-
-        // ---- Top title / tab bar ----
-        let top_y = margin;
-        quads.push(UiQuad::solid(margin, top_y, w - 2.0 * margin, bar_h, radius, palette.panel));
-
-        let tab_layout = chrome_tab_layout(
-            &size,
-            scale,
-            self.nebula_tab_labels.len(),
-            self.nebula_sidebar_collapsed,
-        );
-
-        // Sidebar toggle at the far left of the top bar folds the tab sidebar
-        // away and back; it's the one tab affordance that survives collapse.
-        let (tog_x, tog_y, tog_w, tog_h) = tab_layout.toggle;
-        let toggle_hovered = self.nebula_chrome_hover == ChromeHit::SidebarToggle;
-        if toggle_hovered {
-            quads.push(UiQuad::solid(tog_x, tog_y, tog_w, tog_h, pill_r, HOVER_FILL_STRONG));
-        }
-
-        // Settings moved into the old product-mark slot.
-        let (set_x, set_y, set_w, set_h) = chrome_settings_button_rect(&size, scale);
-        let settings_hovered = self.nebula_settings_hover == SettingsHit::Toggle;
-        if settings_hovered {
-            quads.push(UiQuad::solid(set_x, set_y, set_w, set_h, pill_r, HOVER_FILL_STRONG));
-        }
-
-        // Sidebar panel background (only when expanded).
-        if !self.nebula_sidebar_collapsed {
-            let (pnl_x, pnl_y, pnl_w, pnl_h) = tab_layout.panel;
-            quads.push(UiQuad::solid(pnl_x, pnl_y, pnl_w, pnl_h, radius, palette.panel));
-        }
-
-        // Dock preview: while a dragged tab hovers the terminal area, glow the
-        // half where dropping would split the active tab (VS Code edge dock).
-        if let Some(nav) = self.nebula_tab_drag.as_ref().filter(|d| d.active).and_then(|d| d.dock)
-        {
-            let gx = size.padding_x();
-            let gy = size.padding_y();
-            let gw = size.width() - gx - size.padding_right();
-            let gh = size.height() - 2.0 * gy;
-            let (px2, py2, pw2, ph2) = match nav {
-                SplitNav::Left => (gx, gy, gw / 2.0, gh),
-                SplitNav::Right => (gx + gw / 2.0, gy, gw / 2.0, gh),
-                SplitNav::Up => (gx, gy, gw, gh / 2.0),
-                SplitNav::Down => (gx, gy + gh / 2.0, gw, gh / 2.0),
-            };
-            // Brand-cyan wash + hairline, same tokens as the settings shell.
-            quads.push(UiQuad::solid(px2, py2, pw2, ph2, radius, Rgba::new(120, 200, 230, 32)));
-            quads.push(UiQuad::solid(
-                px2 + hairline_w,
-                py2 + hairline_w,
-                pw2 - 2.0 * hairline_w,
-                ph2 - 2.0 * hairline_w,
-                (radius - hairline_w).max(0.0),
-                Rgba::new(120, 200, 230, 18),
-            ));
-        }
-
-        // Ease each row toward its target draw-y (reorder "make way") instead of
-        // snapping; a tab-count change resets to the freshly laid-out positions.
-        if self.nebula_tab_anim.len() != tab_layout.tabs.len() {
-            self.nebula_tab_anim = tab_layout.tabs.iter().map(|t| t.1).collect();
-        }
-        let mut tab_anim_active = false;
-
-        for (index, (tab_x, row_y, tab_w, tab_h)) in tab_layout.tabs.iter().copied().enumerate() {
-            let target_y = self.tab_drag_draw_y(index, row_y, &tab_layout);
-            let cur = self.nebula_tab_anim[index];
-            // The grabbed pill tracks the pointer 1:1 (easing it would feel
-            // laggy); only the rows making way ease toward their slots.
-            let dragging_this =
-                self.nebula_tab_drag.as_ref().is_some_and(|d| d.active && d.source == index);
-            let tab_y = if dragging_this || (target_y - cur).abs() < 0.5 {
-                target_y
-            } else {
-                tab_anim_active = true;
-                cur + (target_y - cur) * 0.28
-            };
-            self.nebula_tab_anim[index] = tab_y;
-            let tab_hovered = matches!(
-                self.nebula_chrome_hover,
-                ChromeHit::Tab(i) | ChromeHit::TabClose(i) if i == index
-            );
-            let close_hovered =
-                matches!(self.nebula_chrome_hover, ChromeHit::TabClose(i) if i == index);
-            if index == self.nebula_active_tab {
-                // Floating-pill active tab (design language): a soft accent
-                // wash over the pill plus a hairline accent border — no
-                // accent bar, state is carried by brightness alone.
-                let accent = palette.edge_r;
-                quads.push(UiQuad::solid(
-                    tab_x - s(1.0),
-                    tab_y - s(1.0),
-                    tab_w + s(2.0),
-                    tab_h + s(2.0),
-                    pill_r + s(1.0),
-                    Rgba::new(accent.r, accent.g, accent.b, 40),
-                ));
-                quads.push(UiQuad::solid(tab_x, tab_y, tab_w, tab_h, pill_r, palette.tab_bg_l));
-                quads.push(UiQuad::solid(
-                    tab_x,
-                    tab_y,
-                    tab_w,
-                    tab_h,
-                    pill_r,
-                    Rgba::new(accent.r, accent.g, accent.b, 26),
-                ));
-            } else {
-                quads.push(UiQuad::solid(tab_x, tab_y, tab_w, tab_h, pill_r, palette.pill));
-            }
-
-            if tab_hovered {
-                quads.push(UiQuad::solid(tab_x, tab_y, tab_w, tab_h, pill_r, HOVER_FILL));
-            }
-            let (close_x, _, close_w, close_h) = tab_layout.closes[index];
-            let close_y = tab_y + (tab_h - close_h) / 2.0;
-            if close_hovered {
-                quads.push(UiQuad::solid(
-                    close_x,
-                    close_y,
-                    close_w,
-                    close_h,
-                    pill_r,
-                    HOVER_FILL_STRONG,
-                ));
-            }
-            if !tab_hovered {
-                let has_dot = self.nebula_tab_bells.get(index).copied().unwrap_or(false);
-                let running = self.nebula_tab_running.get(index).copied().unwrap_or(false);
-                if has_dot {
-                    // The one state that earns a dot: an unseen result (bell
-                    // in a background tab / long command finished unseen).
-                    // Design-spec blue with a soft glow halo.
-                    let dot_d = s(6.0);
-                    let dot_x = close_x + (close_w - dot_d) / 2.0;
-                    let dot_y = close_y + (close_h - dot_d) / 2.0;
-                    let halo = dot_d * 3.0;
-                    quads.push(UiQuad::glow(
-                        dot_x + dot_d / 2.0 - halo / 2.0,
-                        dot_y + dot_d / 2.0 - halo / 2.0,
-                        halo,
-                        halo,
-                        Rgba::new(82, 168, 255, 80),
-                    ));
-                    quads.push(UiQuad::solid(
-                        dot_x,
-                        dot_y,
-                        dot_d,
-                        dot_d,
-                        dot_d / 2.0,
-                        Rgba::new(82, 168, 255, 230),
-                    ));
-                } else if running {
-                    // Spinner: three orbiting dots, head bright / tail dim —
-                    // state expressed through brightness, per the design
-                    // language. Phase derives from wall-clock millis, so no
-                    // frame counter has to live anywhere.
-                    let millis = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.subsec_millis())
-                        .unwrap_or(0);
-                    let phase = (millis / 100) % 8; // one revolution ≈ 800ms
-                    let cx = close_x + close_w / 2.0;
-                    let cy = close_y + close_h / 2.0;
-                    let radius = s(4.5);
-                    for k in 0..3u32 {
-                        let step = (phase + 8 - k) % 8;
-                        let angle = step as f32 * std::f32::consts::FRAC_PI_4;
-                        let alpha = [225u8, 140, 70][k as usize];
-                        let d = s(2.4);
-                        quads.push(UiQuad::solid(
-                            cx + radius * angle.cos() - d / 2.0,
-                            cy + radius * angle.sin() - d / 2.0,
-                            d,
-                            d,
-                            d / 2.0,
-                            Rgba::new(
-                                palette.edge_r.r,
-                                palette.edge_r.g,
-                                palette.edge_r.b,
-                                alpha,
-                            ),
-                        ));
-                    }
-                }
-                // Idle tab → nothing: the row stays clean by default.
-            }
-        }
-        if tab_anim_active {
-            self.window.request_redraw();
-        }
-
-        // "New tab" pill (a wide row when expanded, a square beside the toggle
-        // when collapsed — both come straight from the layout).
-        let (plus_x, plus_y, plus_w, plus_h) = tab_layout.plus;
-        quads.push(UiQuad::solid(plus_x, plus_y, plus_w, plus_h, pill_r, palette.pill));
-        if self.nebula_chrome_hover == ChromeHit::NewTab {
-            quads.push(UiQuad::solid(plus_x, plus_y, plus_w, plus_h, pill_r, HOVER_FILL_STRONG));
-        }
-
-        // Window controls keep native-size hit targets; icons are rendered in
-        // the chrome text layer with Maple Nerd / Codicons.
-        for (hit, cx, _cy) in chrome_control_centers(w, top_y, bar_h, scale) {
-            let hovered = self.nebula_chrome_hover == hit;
-            if hovered {
-                let hit_w = s(42.0);
-                quads.push(UiQuad::solid(
-                    cx - hit_w / 2.0,
-                    top_y + inner_pad,
-                    hit_w,
-                    pill_h,
-                    pill_r,
-                    if hit == ChromeHit::Close { CLOSE_HOVER_FILL } else { HOVER_FILL_STRONG },
-                ));
-            }
-        }
-
-        // Soft accent glow beneath the title bar: 1px, fading in from the left,
-        // blue-purple through the middle to cyan on the right (like edge light).
-        let underline_y = top_y + bar_h - s(1.0);
-        let half = (w - 2.0 * margin) / 2.0;
-        let glow_l = Rgba::new(palette.edge_l.r, palette.edge_l.g, palette.edge_l.b, 0);
-        let glow_m = Rgba::new(
-            ((palette.edge_l.r as u16 + palette.edge_r.r as u16) / 2) as u8,
-            ((palette.edge_l.g as u16 + palette.edge_r.g as u16) / 2) as u8,
-            ((palette.edge_l.b as u16 + palette.edge_r.b as u16) / 2) as u8,
-            48,
-        );
-        let glow_r = Rgba::new(palette.edge_r.r, palette.edge_r.g, palette.edge_r.b, 18);
-        quads.push(UiQuad::gradient(
-            margin,
-            underline_y,
-            half,
-            s(1.0),
-            0.0,
-            glow_l,
-            glow_m,
-            Gradient::Horizontal,
-        ));
-        quads.push(UiQuad::gradient(
-            margin + half,
-            underline_y,
-            half,
-            s(1.0),
-            0.0,
-            glow_m,
-            glow_r,
-            Gradient::Horizontal,
-        ));
-
-        // No base pill behind the gear — just the icon (hover still fills).
-        // Nebula settings modal (dim veil, glass panel, controls) below the palette.
-        if self.nebula_settings_open {
-            settings::push_quads(&self.settings_view(), &mut quads, &size, scale);
-        }
-
-        // Nebula command palette floats above the chrome; add its quads last.
-        self.push_command_palette_quads(&mut quads);
-
-        // Paint the panels and pills first.
-        self.renderer.draw_ui(&size, &quads);
-
-        // ---- Chrome text labels, drawn on top of the pills ----
-        // The ink set comes from the skin and flips with the theme: light
-        // chrome needs dark text.
-        #[allow(non_snake_case)]
-        let (TXT, TXT_ON_ACCENT, TXT_DIM, ICON, ICON_HOVER) =
-            (sk.ink, sk.ink_strong, sk.ink_dim, sk.icon, sk.icon_hover);
-        const ICON_SIDEBAR: &str = "\u{ebf3}";
-        const ICON_SETTINGS: &str = "\u{eb51}";
-        const ICON_ADD: &str = "\u{ea60}";
-        const ICON_CLOSE: &str = "\u{ea76}";
-        const ICON_CHROME_MINIMIZE: &str = "\u{eaba}";
-        const ICON_CHROME_MAXIMIZE: &str = "\u{eab9}";
-        const ICON_CHROME_CLOSE: &str = "\u{eab8}";
-
-        let cell_w = size.cell_width();
-        let cell_h = size.cell_height();
-        // Top-bar text baseline used by the collapsed title.
-        let cy_top = top_y + (bar_h - cell_h) / 2.0;
-        let center_x = |px: f32, pw: f32, n: usize| px + (pw - n as f32 * cell_w) / 2.0;
-        fn draw_centered_icon(
-            renderer: &mut Renderer,
-            glyph_cache: &mut GlyphCache,
-            size: &SizeInfo,
-            cell_w: f32,
-            cell_h: f32,
-            rect: (f32, f32, f32, f32),
-            fg: Rgb,
-            icon: &str,
-        ) {
-            let cols = icon.chars().map(|ch| ch.width().unwrap_or(1)).sum::<usize>().max(1);
-            let x = rect.0 + (rect.2 - cols as f32 * cell_w) / 2.0;
-            let y = rect.1 + (rect.3 - cell_h) / 2.0;
-            renderer.draw_chrome_text(size, x, y, fg, icon, glyph_cache);
-        }
-
-        draw_centered_icon(
-            &mut self.renderer,
-            &mut self.glyph_cache,
-            &size,
-            cell_w,
-            cell_h,
-            tab_layout.toggle,
-            if toggle_hovered { ICON_HOVER } else { ICON },
-            ICON_SIDEBAR,
-        );
-        draw_centered_icon(
-            &mut self.renderer,
-            &mut self.glyph_cache,
-            &size,
-            cell_w,
-            cell_h,
-            (set_x, set_y, set_w, set_h),
-            if settings_hovered { ICON_HOVER } else { ICON },
-            ICON_SETTINGS,
-        );
-        // The settings modal veils the sidebar, so its "+" must not float on
-        // top of the glass (the veil lives in the quad layer below text).
-        if !self.nebula_settings_open {
-            draw_centered_icon(
-                &mut self.renderer,
-                &mut self.glyph_cache,
-                &size,
-                cell_w,
-                cell_h,
-                tab_layout.plus,
-                if self.nebula_chrome_hover == ChromeHit::NewTab { ICON_HOVER } else { ICON },
-                ICON_ADD,
-            );
-        }
-        for (hit, cx, cy) in chrome_control_centers(w, top_y, bar_h, scale) {
-            let hovered = self.nebula_chrome_hover == hit;
-            let icon = match hit {
-                ChromeHit::Minimize => ICON_CHROME_MINIMIZE,
-                ChromeHit::Maximize => ICON_CHROME_MAXIMIZE,
-                ChromeHit::Close => ICON_CHROME_CLOSE,
-                _ => continue,
-            };
-            draw_centered_icon(
-                &mut self.renderer,
-                &mut self.glyph_cache,
-                &size,
-                cell_w,
-                cell_h,
-                (cx - s(21.0), cy - pill_h / 2.0, s(42.0), pill_h),
-                if hovered { ICON_HOVER } else { ICON },
-                icon,
-            );
-        }
-
-        // Vertical tab labels. Each row's Y comes from the eased anim slot; the
-        // label is left-aligned after the accent gutter, the × pinned right.
-        let row_text_cy = |ry: f32, rh: f32| ry + (rh - cell_h) / 2.0;
-        // Sidebar text (caption, labels, × buttons) also stays under the
-        // settings glass — skip it entirely while the modal is up.
-        if !self.nebula_sidebar_collapsed && !self.nebula_settings_open {
-            // "TABS" caption at the panel head.
-            let (pnl_x, pnl_y, _, _) = tab_layout.panel;
-            self.renderer.draw_chrome_text(
-                &size,
-                pnl_x + s(16.0),
-                pnl_y + s(11.0),
-                TXT_DIM,
-                "TABS",
-                &mut self.glyph_cache,
-            );
-            for (index, (tab_x, row_y, tab_w, tab_h)) in tab_layout.tabs.iter().copied().enumerate()
-            {
-                let row_y = self.nebula_tab_anim.get(index).copied().unwrap_or(row_y);
-                let tab_hovered = matches!(
-                    self.nebula_chrome_hover,
-                    ChromeHit::Tab(i) | ChromeHit::TabClose(i) if i == index
-                );
-                let close_hovered =
-                    matches!(self.nebula_chrome_hover, ChromeHit::TabClose(i) if i == index);
-                let color = if index == self.nebula_active_tab || tab_hovered {
-                    TXT_ON_ACCENT
-                } else {
-                    TXT
-                };
-                let cy = row_text_cy(row_y, tab_h);
-                // Real AI brand logo (claude/codex): a textured quad in the
-                // icon slot, sized to the glyph ink height so it reads like
-                // an icon, not a sticker. Staged here, drawn after ALL chrome
-                // text (see nebula_chrome_logo_draws). Other programs keep
-                // their Nerd Font glyph inside the label text.
-                let mut text_x = tab_x + s(14.0);
-                let mut reserved = s(60.0);
-                if let Some(logo) = self.nebula_tab_logos.get(index).copied().flatten() {
-                    let icon_s = (cell_h * 0.72).round();
-                    if let Some((id, rgba, px)) = self.ai_logo_pixels(logo, color) {
-                        let icon_y = (row_y + (tab_h - icon_s) / 2.0).round();
-                        self.nebula_chrome_logo_draws.push((
-                            id,
-                            rgba,
-                            px,
-                            (text_x, icon_y, icon_s, icon_s),
-                        ));
-                    }
-                    text_x += icon_s + s(6.0);
-                    reserved += icon_s + s(6.0);
-                }
-                // When renaming this tab, show the edit buffer instead of the label
-                let label = if self.nebula_tab_rename.as_ref().is_some_and(|(i, _)| *i == index) {
-                    self.nebula_tab_rename.as_ref().map(|(_, text)| text.as_str()).unwrap_or(".")
-                } else {
-                    self.nebula_tab_labels.get(index).map(String::as_str).unwrap_or(".")
-                };
-                let max_chars = ((tab_w - reserved).max(cell_w) / cell_w).floor() as usize;
-                let label = truncate_tab_label(label, max_chars.max(1));
-                
-                // Input box + selection/caret when renaming this tab. These
-                // MUST be flushed here, immediately, not pushed onto the shared
-                // `quads` batch: that batch was already painted at the top of
-                // draw_chrome (the draw_ui call above), so any quad appended in
-                // this text phase would silently never render — which is exactly
-                // why the rename box was invisible. Draw them now, before the
-                // label glyphs, so box/selection sit under the text.
-                let renaming_this =
-                    self.nebula_tab_rename.as_ref().is_some_and(|(i, _)| *i == index);
-                let select_all = renaming_this && self.nebula_tab_rename_select_all;
-                if renaming_this {
-                    let input_pad = s(4.0);
-                    let input_x = text_x - input_pad;
-                    let input_y = row_y + s(4.0);
-                    let input_w = tab_w - (text_x - tab_x) - s(8.0) + input_pad;
-                    let input_h = tab_h - s(8.0);
-                    let accent = palette.edge_r;
-                    let mut box_quads = vec![
-                        // White base fill.
-                        UiQuad::solid(
-                            input_x, input_y, input_w, input_h, s(4.0),
-                            Rgba::new(255, 255, 255, 250),
-                        ),
-                        // Accent wash over the whole box; the inner white below
-                        // then leaves it showing only as a border ring.
-                        UiQuad::solid(
-                            input_x, input_y, input_w, input_h, s(4.0),
-                            Rgba::new(accent.r, accent.g, accent.b, 120),
-                        ),
-                        // Inner white, inset by a hairline → accent ring border.
-                        UiQuad::solid(
-                            input_x + hairline_w, input_y + hairline_w,
-                            input_w - 2.0 * hairline_w, input_h - 2.0 * hairline_w,
-                            s(3.0), Rgba::new(255, 255, 255, 250),
-                        ),
-                    ];
-                    // Text metrics (monospace: char count × cell width).
-                    let text_chars = label.chars().count();
-                    let text_w = text_chars as f32 * cell_w;
-                    let text_top = row_y + (tab_h - cell_h) / 2.0;
-                    if select_all {
-                        // nushell-style "everything selected" — a blue fill
-                        // behind the whole name; the first keystroke replaces it.
-                        let sel_w = (text_w + s(2.0)).min(input_w - 2.0 * hairline_w - s(2.0));
-                        box_quads.push(UiQuad::solid(
-                            text_x - s(1.0),
-                            text_top - s(1.0),
-                            sel_w,
-                            cell_h + s(2.0),
-                            s(2.0),
-                            Rgba::new(38, 120, 220, 235),
-                        ));
-                    } else {
-                        // Insertion caret: a thin beam at the end of the text.
-                        box_quads.push(UiQuad::solid(
-                            (text_x + text_w).min(input_x + input_w - s(4.0)),
-                            text_top,
-                            (2.0 * scale).max(1.0),
-                            cell_h,
-                            0.0,
-                            Rgba::new(accent.r, accent.g, accent.b, 255),
-                        ));
-                    }
-                    self.renderer.draw_ui(&size, &box_quads);
-                    // Anchor the IME candidate window to the caret inside the
-                    // box, not the terminal grid cursor (which the grid pass set
-                    // earlier this frame). draw_chrome runs last, so this wins.
-                    let caret_px = if select_all { text_x } else { text_x + text_w };
-                    self.window.set_ime_cursor_area_px(
-                        caret_px,
-                        row_y,
-                        cell_w,
-                        tab_h,
-                    );
-                }
-                
-                self.renderer.draw_chrome_text(
-                    &size,
-                    text_x,
-                    cy,
-                    if renaming_this {
-                        if select_all {
-                            Rgb::new(255, 255, 255) // White on the blue selection
-                        } else {
-                            Rgb::new(0, 0, 0) // Black on white input
-                        }
-                    } else {
-                        color
-                    },
-                    &label,
-                    &mut self.glyph_cache,
-                );
-                if tab_hovered {
-                    let (close_x, _, close_w, close_h) = tab_layout.closes[index];
-                    let close_y = row_y + (tab_h - close_h) / 2.0;
-                    draw_centered_icon(
-                        &mut self.renderer,
-                        &mut self.glyph_cache,
-                        &size,
-                        cell_w,
-                        cell_h,
-                        (close_x, close_y, close_w, close_h),
-                        if close_hovered { ICON_HOVER } else { ICON },
-                        ICON_CLOSE,
-                    );
-                }
-                #[cfg(any())]
-                self.renderer.draw_chrome_text(
-                    &size,
-                    tab_x + tab_w - s(20.0),
-                    cy,
-                    TXT_DIM,
-                    "×",
-                    &mut self.glyph_cache,
-                );
-            }
-        } else {
-            // Collapsed: show the active tab's name centred in the top bar so the
-            // user still knows where they are without the sidebar open.
-            let title = self
-                .nebula_tab_labels
-                .get(self.nebula_active_tab)
-                .map(String::as_str)
-                .unwrap_or(".");
-            let avail = ((w - 2.0 * margin - s(320.0)).max(cell_w) / cell_w).floor() as usize;
-            let title = truncate_tab_label(title, avail.max(1));
-            self.renderer.draw_chrome_text(
-                &size,
-                center_x(margin, w - 2.0 * margin, title.chars().count()),
-                cy_top,
-                TXT_ON_ACCENT,
-                &title,
-                &mut self.glyph_cache,
-            );
-        }
-        // Nebula settings modal text labels, above its quads.
-        if self.nebula_settings_open {
-            let view = self.settings_view();
-            settings::draw_text(&view, &mut self.renderer, &mut self.glyph_cache, &size, scale);
-        }
-
-        // Palette text (query + result rows) sits on top of every chrome label.
-        self.draw_command_palette_text();
-    }
-
-    /// Push the command palette's background quads: a dim veil over the window,
-    /// the glass panel (glow + gradient border + fill, matching the settings
-    /// modal), the query input box, and the selected-row highlight. No-op while
-    /// the palette is closed.
-    fn push_command_palette_quads(&self, quads: &mut Vec<UiQuad>) {
-        if !self.nebula_palette.is_open() {
-            return;
-        }
-        let size = self.size_info;
-        let scale = self.window.scale_factor as f32;
-        let w = size.width();
-        let h = size.height();
-        let s = |v: f32| v * scale;
-        let palette = self.nebula_theme.palette();
-        let sk = self.nebula_theme.skin();
-        let layout = command_palette::palette_layout(w, h, scale);
-        let (px, py, pw, ph) = layout.panel;
-        let (ix, iy, iw, ih) = layout.input;
-
-        quads.push(UiQuad::solid(0.0, 0.0, w, h, 0.0, Rgba::new(0, 0, 0, 150)));
-        quads.push(UiQuad::glow(
-            px - s(24.0),
-            py - s(22.0),
-            pw + s(48.0),
-            ph + s(48.0),
-            palette.edge_glow_l,
-        ));
-        quads.push(UiQuad::gradient(
-            px - s(1.0),
-            py - s(1.0),
-            pw + s(2.0),
-            ph + s(2.0),
-            s(15.0),
-            palette.tab_stroke_l,
-            palette.edge_r,
-            Gradient::Axis([0.9, 0.35]),
-        ));
-        quads.push(UiQuad::gradient(
-            px,
-            py,
-            pw,
-            ph,
-            s(14.0),
-            palette.panel,
-            sk.panel_grad_to,
-            Gradient::Axis([0.25, 0.95]),
-        ));
-        // Query input box.
-        quads.push(UiQuad::solid(ix, iy, iw, ih, s(10.0), sk.input));
-
-        // Highlight pill behind the selected row (list scrolls to keep it shown).
-        let (_, selected_row) = self.nebula_palette.visible(layout.max_rows);
-        if let Some(row) = selected_row {
-            let ry = layout.list_y + row as f32 * layout.row_h;
-            quads.push(UiQuad::gradient(
-                ix,
-                ry,
-                iw,
-                layout.row_h - s(4.0),
-                s(8.0),
-                palette.tab_bg_l,
-                palette.tab_bg_r,
-                Gradient::Horizontal,
-            ));
-        }
-    }
-
-    /// Draw the command palette's text: the query line (with a caret) or a
-    /// placeholder, then the result rows with right-aligned shortcut hints.
-    /// No-op while the palette is closed.
-    fn draw_command_palette_text(&mut self) {
-        if !self.nebula_palette.is_open() {
-            return;
-        }
-        let size = self.size_info;
-        let scale = self.window.scale_factor as f32;
-        let s = |v: f32| v * scale;
-        let w = size.width();
-        let h = size.height();
-        let cell_w = size.cell_width();
-        let cell_h = size.cell_height();
-        let layout = command_palette::palette_layout(w, h, scale);
-        let (ix, iy, iw, ih) = layout.input;
-
-        // Inks from the theme skin: dark text on light panels, pale on dark.
-        let sk = self.nebula_theme.skin();
-
-        let text_x = ix + s(14.0);
-        let text_y = iy + (ih - cell_h) / 2.0;
-        let query = self.nebula_palette.query().to_string();
-        if query.is_empty() {
-            self.renderer.draw_chrome_text(
-                &size,
-                text_x,
-                text_y,
-                sk.ink_faint,
-                "输入命令进行搜索…    Esc 关闭 · ↑↓ 选择 · Enter 执行",
-                &mut self.glyph_cache,
-            );
-        } else {
-            let shown = format!("{query}▏");
-            self.renderer.draw_chrome_text(
-                &size,
-                text_x,
-                text_y,
-                sk.ink_strong,
-                &shown,
-                &mut self.glyph_cache,
-            );
-        }
-
-        if self.nebula_palette.is_empty() {
-            self.renderer.draw_chrome_text(
-                &size,
-                text_x,
-                layout.list_y + s(8.0),
-                sk.ink_dim,
-                "无匹配命令",
-                &mut self.glyph_cache,
-            );
-            return;
-        }
-
-        // Collect first so no borrow of `nebula_palette` is held while drawing.
-        let (rows, selected_row) = self.nebula_palette.visible(layout.max_rows);
-        for (row, (label, hint)) in rows.into_iter().enumerate() {
-            let ry =
-                layout.list_y + row as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0 - s(2.0);
-            let fg = if Some(row) == selected_row { sk.ink_strong } else { sk.ink };
-            self.renderer.draw_chrome_text(&size, text_x, ry, fg, label, &mut self.glyph_cache);
-            if !hint.is_empty() {
-                let hint_w = hint.chars().count() as f32 * cell_w;
-                self.renderer.draw_chrome_text(
-                    &size,
-                    ix + iw - s(14.0) - hint_w,
-                    ry,
-                    sk.ink_dim,
-                    hint,
-                    &mut self.glyph_cache,
-                );
-            }
-        }
-    }
 
     /// Draw render timer.
     #[inline(never)]

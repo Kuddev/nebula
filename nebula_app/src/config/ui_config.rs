@@ -86,6 +86,12 @@ pub struct UiConfig {
     /// Config for the nebula_terminal itself.
     pub terminal: Terminal,
 
+    /// Quick-launch profiles (Windows Terminal style): named commands, each
+    /// opening a new tab running that command instead of the default shell
+    /// (e.g. an `ssh host` jump entry). Reachable from the command palette,
+    /// right-clicking the sidebar "+" button, and Ctrl+Shift+1..9.
+    pub profiles: Vec<Profile>,
+
     /// Keyboard configuration.
     keyboard: Keyboard,
 
@@ -661,6 +667,37 @@ impl From<Program> for Shell {
             Program::Just(program) => Shell::new(program, Vec::new()),
             Program::WithArgs { program, args } => Shell::new(program, args),
         }
+    }
+}
+
+/// One quick-launch profile: a named command opened as a new tab.
+///
+/// ```toml
+/// [[profiles]]
+/// name = "dev server"
+/// command = "ssh"
+/// args = ["user@dev.example.com"]
+/// # cwd = "D:/repos/proj"   # optional startup directory
+/// ```
+#[derive(SerdeReplace, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    /// Display name (tab title, palette row).
+    pub name: String,
+    /// Program to run.
+    pub command: String,
+    /// Program arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional startup directory; falls back to the focused pane's cwd.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+}
+
+impl Profile {
+    /// The PTY shell override this profile launches.
+    pub fn shell(&self) -> Shell {
+        Shell::new(self.command.clone(), self.args.clone())
     }
 }
 

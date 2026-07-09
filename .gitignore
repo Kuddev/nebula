@@ -2,6 +2,7 @@ target
 
 # Local debug/release build bundles produced by packaging scripts
 dist/
+trellis/
 
 # Local/generated visual assets and scratch files.
 docs/ui_mockups/

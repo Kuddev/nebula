@@ -90,6 +90,16 @@ experience that works without extra setup.
   notifier keeps firing.
 - **Fallback signals** — OSC 133 command tracking + BEL still cover every
   other CLI: long builds toast on completion, with their duration.
+- **AI-aware over SSH** — `nebula ssh user@host` bootstraps Nebula's shell
+  integration on the *remote* host, so a `claude` / `vim` / `cargo` running on
+  the server shows the same sidebar icon, spinner and cwd as if it were local.
+  SSH is a transparent pipe: the remote shell's OSC escapes travel back and are
+  parsed exactly like local ones. Forwarding and query forms
+  (`ssh -N -L …`, `-W`, `-G`, an explicit remote command) pass straight through
+  untouched — including settings resolved from `~/.ssh/config`. v1 targets Linux
+  remotes with bash/zsh; anything else falls back to a plain login shell (the
+  connection is never lost to a bootstrap problem). To make plain `ssh`
+  transparent, alias it in your Nebula shell: `alias ssh='nebula ssh'`.
 
 **Performance & correctness**
 
@@ -183,10 +193,6 @@ Nebula would not exist without their work.
 
 Released under the [GNU General Public License v3.0](LICENSE).
 
-Portions of Nebula derive from upstream open-source projects; their original
-license notices are retained in [LICENSE-APACHE](LICENSE-APACHE) and
-[LICENSE-MIT](LICENSE-MIT). The combined work is distributed under GPL-3.0.
-
 ---
 
 ## 简体中文
@@ -232,6 +238,14 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
   `--chain` 包装而非顶掉：原有通知程序照常触发。
 - **兜底信号** — OSC 133 命令跟踪 + BEL 覆盖其余所有 CLI：长构建完成也
   弹通知，并带耗时。
+- **SSH 里也 AI 感知** — `nebula ssh user@host` 会把 Nebula 的 shell 集成
+  引导到*远程*主机，让服务器上跑的 `claude` / `vim` / `cargo` 像在本地一样
+  显示侧栏图标、转圈和 cwd。原理：SSH 是透明管道，远程 shell 发的 OSC 转义
+  原样穿回本地，被同一套解析器处理。转发与查询形态（`ssh -N -L …`、`-W`、
+  `-G`、显式远程命令）原样透传不注入 —— 包括从 `~/.ssh/config` 解析出的
+  设置。v1 面向 Linux + bash/zsh 远端；其余降级为普通登录 shell（连接绝不
+  因引导失败而丢）。想让直接打的 `ssh` 也透明，在 Nebula 的 shell 里加个
+  别名：`alias ssh='nebula ssh'`。
 
 **性能与正确性**
 
@@ -317,10 +331,6 @@ Nebula 的渲染与 PTY 地基衍生自
 ### 📜 许可证
 
 基于 [GNU 通用公共许可证 v3.0（GPL-3.0）](LICENSE) 发布。
-
-Nebula 的部分代码衍生自上游开源项目，其原始许可声明保留于
-[LICENSE-APACHE](LICENSE-APACHE) 与 [LICENSE-MIT](LICENSE-MIT)。整体作品以
-GPL-3.0 分发。
 
 ---
 

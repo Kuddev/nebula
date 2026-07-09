@@ -113,6 +113,8 @@ pub trait ActionContext<T: EventListener> {
     fn spawn_new_instance(&mut self) {}
     /// Send a Nebula tab management request for this window.
     fn nebula_tab(&self, _request: crate::event::TabRequest) {}
+    /// Open a filesystem path with the system handler (drawer double-click).
+    fn open_path(&mut self, _path: &std::path::Path) {}
     #[cfg(target_os = "macos")]
     fn create_new_window(&mut self, _tabbing_id: Option<String>) {}
     #[cfg(not(target_os = "macos"))]
@@ -433,6 +435,39 @@ impl<T: EventListener> Execute<T> for Action {
                     ctx.create_new_window(tabbing_id);
                 }
             },
+            // Elsewhere the tab actions drive Nebula's own tab bar, so config
+            // `[[keyboard.bindings]]` can remap them freely (设置→按键映射).
+            #[cfg(not(target_os = "macos"))]
+            Action::CreateNewTab => ctx.nebula_tab(crate::event::TabRequest::New),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectNextTab => ctx.nebula_tab(crate::event::TabRequest::SelectNext),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectPreviousTab => ctx.nebula_tab(crate::event::TabRequest::SelectPrev),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab1 => ctx.nebula_tab(crate::event::TabRequest::Select(0)),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab2 => ctx.nebula_tab(crate::event::TabRequest::Select(1)),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab3 => ctx.nebula_tab(crate::event::TabRequest::Select(2)),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab4 => ctx.nebula_tab(crate::event::TabRequest::Select(3)),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab5 => ctx.nebula_tab(crate::event::TabRequest::Select(4)),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab6 => ctx.nebula_tab(crate::event::TabRequest::Select(5)),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab7 => ctx.nebula_tab(crate::event::TabRequest::Select(6)),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab8 => ctx.nebula_tab(crate::event::TabRequest::Select(7)),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectTab9 => ctx.nebula_tab(crate::event::TabRequest::Select(8)),
+            #[cfg(not(target_os = "macos"))]
+            Action::SelectLastTab => {
+                // The window context clamps out-of-range indices; usize::MAX
+                // is "last" only via SelectTab-specific handling, so send a
+                // large index the clamp folds to the final tab.
+                ctx.nebula_tab(crate::event::TabRequest::SelectLast)
+            },
             #[cfg(target_os = "macos")]
             Action::SelectNextTab => ctx.window().select_next_tab(),
             #[cfg(target_os = "macos")]
@@ -574,6 +609,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::ShellCycle
             | crate::display::SettingsHit::FetchToggle
             | crate::display::SettingsHit::PowerlineToggle
+            | crate::display::SettingsHit::KeepSessionToggle
             | crate::display::SettingsHit::OpacityDown
             | crate::display::SettingsHit::OpacityUp
             | crate::display::SettingsHit::BackgroundColor
@@ -597,6 +633,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 | crate::display::ChromeHit::NewTab
                 | crate::display::ChromeHit::Tab(_)
                 | crate::display::ChromeHit::TabClose(_)
+                | crate::display::ChromeHit::PanelFiles
+                | crate::display::ChromeHit::PanelGit
                 | crate::display::ChromeHit::SidebarToggle => CursorIcon::Pointer,
                 _ => CursorIcon::Default,
             };
@@ -604,8 +642,67 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        // Drawer hover: rows / header tabs / action buttons light up, and the
+        // pointer picks the matching cursor. The drawer overlays the grid, so
+        // while the pointer is on it nothing below may react (no link hover,
+        // no beam cursor bleeding through). Skipped while the left button is
+        // down — an in-progress text drag-selection sweeping across the drawer
+        // must keep updating, not freeze at its edge.
+        if self.ctx.display().nebula_side_panel.open
+            && self.ctx.mouse().left_button_state != ElementState::Pressed
+        {
+            use crate::display::side_panel::{PanelHit, PanelView, panel_hit};
+            let px = x as f32;
+            let py = y as f32;
+            let layout = self.ctx.display().side_panel_layout();
+            let hit = panel_hit(&layout, px, py);
+            let panel = &mut self.ctx.display().nebula_side_panel;
+            if hit != panel.hover || (hit != PanelHit::None && panel.hover_pos != (px, py)) {
+                panel.hover = hit;
+                panel.hover_pos = (px, py);
+                self.ctx.mark_dirty();
+            }
+            if hit != PanelHit::None {
+                let files = self.ctx.display().nebula_side_panel.view == PanelView::Files;
+                let icon = match hit {
+                    PanelHit::ViewFiles | PanelHit::ViewGit | PanelHit::Row(_) => {
+                        CursorIcon::Pointer
+                    },
+                    PanelHit::Search if files => CursorIcon::Text,
+                    PanelHit::Search => CursorIcon::Pointer,
+                    _ => CursorIcon::Default,
+                };
+                self.ctx.window().set_mouse_cursor(icon);
+                return;
+            }
+        } else if self.ctx.display().nebula_side_panel.hover
+            != crate::display::side_panel::PanelHit::None
+        {
+            self.ctx.display().nebula_side_panel.hover = crate::display::side_panel::PanelHit::None;
+            self.ctx.mark_dirty();
+        }
+
         let inside_text_area = size_info.contains_point(x, y);
         let cell_side = self.cell_side(x);
+
+        // Activate a pending tree-file drag once the pointer travels; while
+        // active, the ghost chip follows the pointer and the copy cursor
+        // shows the drop affordance.
+        if let Some(drag) = self.ctx.display().nebula_side_panel.drag_file.as_mut() {
+            drag.pos = (x as f32, y as f32);
+            if !drag.active {
+                let (ox, oy) = drag.origin;
+                if (x as f32 - ox).abs() >= 8.0 || (y as f32 - oy).abs() >= 8.0 {
+                    drag.active = true;
+                }
+            }
+            let active = drag.active;
+            if active {
+                self.ctx.mark_dirty();
+                self.ctx.window().set_mouse_cursor(CursorIcon::Grabbing);
+                return;
+            }
+        }
 
         let point = self.ctx.mouse().point(&size_info, display_offset);
         let cell_changed = old_point != point;
@@ -631,21 +728,34 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         if (lmb_pressed || rmb_pressed)
             && (self.ctx.modifiers().state().shift_key() || !self.ctx.mouse_mode())
         {
-            // Engage drag-selection only past a small travel threshold
-            // (Windows SM_CXDRAG-style). Sub-threshold jitter during a click
-            // must NOT create a selection: the stray one-cell selection is
-            // what used to block link hover/click until the next clear —
-            // Windows Terminal never leaves one behind either.
+            // Engage drag-selection only past a real drag distance: at least
+            // half a cell (and never under 8px). The old 4px threshold was
+            // inside ordinary click jitter, so a plain click kept leaving a
+            // one-cell selection behind — Windows Terminal only selects once
+            // the pointer actually travels, a click never does.
             let dragging = self.ctx.mouse().drag_active
                 || self.ctx.mouse().drag_origin.is_some_and(|(ox, oy)| {
-                    let threshold = 4.0 * self.ctx.window().scale_factor;
-                    (x as f64 - ox as f64).abs() >= threshold
-                        || (y as f64 - oy as f64).abs() >= threshold
+                    let scale = self.ctx.window().scale_factor as f32;
+                    let tx = (8.0 * scale).max(size_info.cell_width() * 0.5) as f64;
+                    let ty = (8.0 * scale).max(size_info.cell_height() * 0.5) as f64;
+                    (x as f64 - ox as f64).abs() >= tx || (y as f64 - oy as f64).abs() >= ty
                 });
             if dragging {
+                let first = !self.ctx.mouse().drag_active;
                 self.ctx.mouse_mut().drag_active = true;
                 // A real drag is in progress — don't launch hints on release.
                 self.ctx.mouse_mut().block_hint_launcher = true;
+                // Crossing the threshold is what STARTS the selection (WT
+                // model): anchor at the original press cell, not wherever the
+                // pointer is by now. Double/triple clicks selected at press
+                // and carry no pending entry — they just extend below.
+                if first {
+                    if let Some((ty, anchor, anchor_side)) =
+                        self.ctx.mouse_mut().pending_selection.take()
+                    {
+                        self.ctx.start_selection(ty, anchor, anchor_side);
+                    }
+                }
                 self.ctx.update_selection(point, cell_side);
             }
         } else if cell_changed
@@ -787,6 +897,181 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_press(&mut self, button: MouseButton) {
+        // A left press anywhere OUTSIDE the rename box ends the edit
+        // (canceling, like Esc) — the click itself still lands wherever it
+        // was aimed. Clicking inside the box is caret placement (below).
+        if button == MouseButton::Left {
+            if let Some((idx, _)) = self.ctx.display().nebula_tab_rename.clone() {
+                let x = self.ctx.mouse().x as f32;
+                let y = self.ctx.mouse().y as f32;
+                if self.ctx.display().chrome_hit(x, y) != crate::display::ChromeHit::Tab(idx) {
+                    self.ctx.nebula_tab(crate::event::TabRequest::CancelRename);
+                }
+            }
+        }
+
+        // Nebula command palette: clicking a row runs it, clicking outside
+        // dismisses — same modal semantics as the keyboard path.
+        if button == MouseButton::Left && self.ctx.display().command_palette_open() {
+            let x = self.ctx.mouse().x as f32;
+            let y = self.ctx.mouse().y as f32;
+            let size = self.ctx.display().size_info;
+            let scale = self.ctx.window().scale_factor as f32;
+            let layout =
+                crate::display::command_palette::palette_layout(size.width(), size.height(), scale);
+            let (px, py, pw, ph) = layout.panel;
+            if x >= px && x < px + pw && y >= py && y < py + ph {
+                if y >= layout.list_y {
+                    let row = ((y - layout.list_y) / layout.row_h) as usize;
+                    if let Some(action) = self.ctx.display().palette_click(row, layout.max_rows) {
+                        self.run_palette_action(action);
+                    }
+                }
+            } else {
+                self.ctx.display().close_command_palette();
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
+        // Right-side drawer (directory tree / git): header tabs switch views,
+        // directory rows expand/collapse. Sits under the modal layers, so
+        // only when no modal owns the pointer.
+        if button == MouseButton::Left
+            && self.ctx.display().nebula_side_panel.open
+            && !self.ctx.display().settings_open()
+            && self.ctx.display().nebula_confirm.is_none()
+        {
+            use crate::display::side_panel::{PanelHit, PanelView, panel_hit};
+            let x = self.ctx.mouse().x as f32;
+            let y = self.ctx.mouse().y as f32;
+            let layout = self.ctx.display().side_panel_layout();
+            match panel_hit(&layout, x, y) {
+                PanelHit::None => {
+                    // Clicking anywhere outside the drawer drops search focus
+                    // and the persistent file selection.
+                    let panel = &mut self.ctx.display().nebula_side_panel;
+                    if panel.search_focus || panel.selected.is_some() {
+                        panel.search_unfocus(false);
+                        panel.selected = None;
+                        self.ctx.mark_dirty();
+                    }
+                },
+                hit => {
+                    match hit {
+                        PanelHit::ViewFiles => {
+                            self.ctx.display().toggle_side_panel(PanelView::Files)
+                        },
+                        PanelHit::ViewGit => self.ctx.display().toggle_side_panel(PanelView::Git),
+                        PanelHit::Search => {
+                            let files =
+                                self.ctx.display().nebula_side_panel.view == PanelView::Files;
+                            if files {
+                                // The Files view's filter box takes focus.
+                                self.ctx.display().nebula_side_panel.search_focus = true;
+                            } else {
+                                // Git view: that strip is the 暂存/提交/推送
+                                // button row (or the commit-message input,
+                                // which the keyboard owns — clicks are inert).
+                                if !self.ctx.display().nebula_side_panel.commit_focus {
+                                    let (sx, _, sw, _) = layout.search;
+                                    let gap = 8.0 * self.ctx.window().scale_factor as f32;
+                                    let rects =
+                                        crate::display::side_panel::git_button_rects(sx, sw, gap);
+                                    let panel = &mut self.ctx.display().nebula_side_panel;
+                                    if x < rects[0].0 + rects[0].1 {
+                                        panel.git_stage_all();
+                                    } else if x < rects[1].0 + rects[1].1 {
+                                        panel.git_begin_commit();
+                                    } else {
+                                        panel.git_push();
+                                    }
+                                }
+                            }
+                        },
+                        PanelHit::Row(row) => {
+                            self.ctx.display().nebula_side_panel.search_unfocus(false);
+                            let info = self
+                                .ctx
+                                .display()
+                                .nebula_side_panel
+                                .visible_row(row)
+                                .map(|r| (r.path.clone(), r.is_dir));
+                            match info {
+                                // Directories expand/collapse on click.
+                                Some((_, true)) | None => {
+                                    self.ctx.display().nebula_side_panel.click_row(row);
+                                },
+                                // Files: double-click opens with the system
+                                // handler; a single press arms a drag toward
+                                // the terminal (drop pastes the path).
+                                Some((path, false)) => {
+                                    use crate::display::side_panel::FileDrag;
+                                    let now = std::time::Instant::now();
+                                    let dbl = {
+                                        let panel = &mut self.ctx.display().nebula_side_panel;
+                                        // Click = persistent selection (until
+                                        // clicking off the panel / closing it).
+                                        panel.selected = Some(path.clone());
+                                        let dbl = panel.last_file_click.as_ref().is_some_and(
+                                            |(p, t)| {
+                                                *p == path
+                                                    && t.elapsed()
+                                                        < std::time::Duration::from_millis(400)
+                                            },
+                                        );
+                                        if dbl {
+                                            panel.last_file_click = None;
+                                            panel.drag_file = None;
+                                        } else {
+                                            panel.last_file_click = Some((path.clone(), now));
+                                            let name = path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().into_owned())
+                                                .unwrap_or_default();
+                                            panel.drag_file = Some(FileDrag {
+                                                path: path.clone(),
+                                                name,
+                                                origin: (x, y),
+                                                pos: (x, y),
+                                                active: false,
+                                            });
+                                        }
+                                        dbl
+                                    };
+                                    if dbl {
+                                        self.ctx.open_path(&path);
+                                    }
+                                },
+                            }
+                        },
+                        _ => {
+                            self.ctx.display().nebula_side_panel.search_unfocus(false);
+                        },
+                    }
+                    self.ctx.mark_dirty();
+                    return;
+                },
+            }
+        }
+
+        // Right-clicking the sidebar "+" opens the quick-launch profile menu
+        // (Windows Terminal's profile dropdown); left-click keeps opening the
+        // default shell.
+        if button == MouseButton::Right {
+            let x = self.ctx.mouse().x as f32;
+            let y = self.ctx.mouse().y as f32;
+            if self.ctx.display().chrome_hit(x, y) == crate::display::ChromeHit::NewTab {
+                let profiles: Vec<String> =
+                    self.ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
+                if !profiles.is_empty() {
+                    self.ctx.display().open_profile_menu(&profiles);
+                    self.ctx.mark_dirty();
+                    return;
+                }
+            }
+        }
+
         // Nebula chrome: intercept clicks on the custom title bar and window
         // controls before any terminal handling.
         if button == MouseButton::Left {
@@ -870,6 +1155,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.mark_dirty();
                     return;
                 },
+                crate::display::SettingsHit::KeepSessionToggle => {
+                    self.ctx.display().toggle_keep_session();
+                    self.ctx.mark_dirty();
+                    return;
+                },
                 crate::display::SettingsHit::OpacityDown => {
                     self.ctx.display().adjust_window_opacity(-0.05);
                     self.ctx.mark_dirty();
@@ -939,6 +1229,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     return;
                 },
                 crate::display::ChromeHit::Tab(index) => {
+                    // Clicking inside the rename box places the caret there
+                    // (real text-field behaviour) instead of starting a drag.
+                    if self
+                        .ctx
+                        .display()
+                        .nebula_tab_rename
+                        .as_ref()
+                        .is_some_and(|(i, _)| *i == index)
+                    {
+                        self.ctx.display().tab_rename_click(x);
+                        self.ctx.mark_dirty();
+                        return;
+                    }
                     // Double-click a tab to start renaming (Windows Terminal style).
                     if state == ClickState::DoubleClick {
                         self.ctx.nebula_tab(crate::event::TabRequest::BeginRename(index));
@@ -953,6 +1256,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 },
                 crate::display::ChromeHit::SidebarToggle => {
                     self.ctx.display().toggle_sidebar();
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::ChromeHit::PanelFiles => {
+                    self.ctx
+                        .display()
+                        .toggle_side_panel(crate::display::side_panel::PanelView::Files);
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::ChromeHit::PanelGit => {
+                    self.ctx
+                        .display()
+                        .toggle_side_panel(crate::display::side_panel::PanelView::Git);
                     self.ctx.mark_dirty();
                     return;
                 },
@@ -1062,7 +1379,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let inside_text_area =
                     self.ctx.size_info().contains_point(self.ctx.mouse().x, self.ctx.mouse().y);
                 let mut hint_hit = false;
-                if !had_selection && !control && inside_text_area {
+                if inside_text_area {
                     let mods = self.ctx.modifiers().state();
                     // Query the hint with the SAME viewport the hover path uses
                     // (`pane_view`), not `ctx.size_info()`: the two disagree by
@@ -1079,8 +1396,6 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         hint_point,
                         mods,
                     ) {
-                        // 链接点击不应先创建一个零长度选择；否则下一帧 hint
-                        // 高亮会因 selection 非空被清掉，释放时就无法打开链接。
                         hint_hit = true;
                         self.ctx.display().highlighted_hint = Some(hint);
                         self.ctx.mouse_mut().block_hint_launcher = false;
@@ -1093,25 +1408,37 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.mouse().x,
                     self.ctx.mouse().y,
                 ));
-                if hint_hit {
-                    return;
+
+                // Windows Terminal model: a single click never CREATES a
+                // selection — it only clears an existing one. The would-be
+                // selection is merely armed here; `mouse_moved` starts it for
+                // real once the pointer travels past the drag threshold.
+                //
+                // Don't launch URLs if this click cleared a selection.
+                self.ctx.mouse_mut().block_hint_launcher = had_selection && !hint_hit;
+                if had_selection {
+                    self.ctx.clear_selection();
                 }
 
-                // Don't launch URLs if this click cleared the selection.
-                self.ctx.mouse_mut().block_hint_launcher = had_selection;
-
-                self.ctx.clear_selection();
-
-                // Start new empty selection.
-                if control {
-                    self.ctx.start_selection(SelectionType::Block, point, side);
-                } else {
-                    self.ctx.start_selection(SelectionType::Simple, point, side);
+                // Ctrl+click on a highlighted link is a link-open gesture, not
+                // the start of a block selection: hint hit-testing outranks
+                // selection arming (WT parity). A plain click over a link
+                // still arms — dragging across a URL must select its text.
+                if !(control && hint_hit) {
+                    let ty = if control { SelectionType::Block } else { SelectionType::Simple };
+                    self.ctx.mouse_mut().pending_selection = Some((ty, point, side));
                 }
             },
             ClickState::DoubleClick if !control => {
-                self.ctx.mouse_mut().block_hint_launcher = true;
-                self.ctx.start_selection(SelectionType::Semantic, point, side);
+                // Double-click selects the word under the pointer — but on an
+                // EMPTY cell there is no word, and semantically selecting the
+                // blank used to paint a stray one-cell block that read as "a
+                // click leaves a cursor behind" (WT selects nothing there).
+                let cell_char = self.ctx.terminal().grid()[point].c;
+                if cell_char != ' ' && cell_char != '\t' && cell_char != '\0' {
+                    self.ctx.mouse_mut().block_hint_launcher = true;
+                    self.ctx.start_selection(SelectionType::Semantic, point, side);
+                }
             },
             ClickState::TripleClick if !control => {
                 self.ctx.mouse_mut().block_hint_launcher = true;
@@ -1132,6 +1459,28 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // even while a TUI has grabbed the mouse. A plain click (never dragged)
         // returns `None` here and falls through to normal release handling.
         if button == MouseButton::Left {
+            // Drop a dragged tree file: released over the terminal (anywhere
+            // off the drawer) pastes its full path, quoted when needed —
+            // Explorer-onto-terminal semantics.
+            if let Some(drag) = self.ctx.display().nebula_side_panel.drag_file.take() {
+                if drag.active {
+                    let x = self.ctx.mouse().x as f32;
+                    let y = self.ctx.mouse().y as f32;
+                    let layout = self.ctx.display().side_panel_layout();
+                    if crate::display::side_panel::panel_hit(&layout, x, y)
+                        == crate::display::side_panel::PanelHit::None
+                    {
+                        let mut text = drag.path.display().to_string();
+                        if text.contains(' ') {
+                            text = format!("\"{text}\"");
+                        }
+                        text.push(' ');
+                        self.ctx.write_to_pty(text.into_bytes());
+                    }
+                    self.ctx.mark_dirty();
+                    return;
+                }
+            }
             // Let go of the scrollback thumb.
             if self.ctx.display().nebula_scrollbar_drag.take().is_some() {
                 self.ctx.mark_dirty();
@@ -1218,6 +1567,32 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         let multiplier = self.ctx.config().scrolling.multiplier;
+
+        // The right-side drawer captures the wheel while the pointer hovers it.
+        if self.ctx.display().nebula_side_panel.open {
+            let x = self.ctx.mouse().x as f32;
+            let y = self.ctx.mouse().y as f32;
+            let layout = self.ctx.display().side_panel_layout();
+            if crate::display::side_panel::panel_hit(&layout, x, y)
+                != crate::display::side_panel::PanelHit::None
+            {
+                let rows = match delta {
+                    MouseScrollDelta::LineDelta(_, lines) => -lines as i32 * 3,
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        (-pos.y as f32 / layout.row_h.max(1.0)).round() as i32
+                    },
+                };
+                if rows != 0 {
+                    self.ctx
+                        .display()
+                        .nebula_side_panel
+                        .scroll_by(rows, layout.max_rows);
+                    self.ctx.mark_dirty();
+                }
+                return;
+            }
+        }
+
         match delta {
             MouseScrollDelta::LineDelta(columns, lines) => {
                 let new_scroll_px_x = columns * self.ctx.size_info().cell_width();
@@ -1498,10 +1873,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 ElementState::Pressed => {
                     mouse.drag_origin = Some(origin);
                     mouse.drag_active = false;
+                    mouse.pending_selection = None;
                 },
                 ElementState::Released => {
                     mouse.drag_origin = None;
                     mouse.drag_active = false;
+                    mouse.pending_selection = None;
                 },
             }
         }
