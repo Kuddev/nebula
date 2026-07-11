@@ -1,0 +1,18 @@
+[package]
+name = "nebula_config"
+version = "0.2.1"
+license = "GPL-3.0-or-later"
+description = "Nebula configuration abstractions"
+homepage = "https://github.com/Kuddev/nebulaTerminal"
+repository = "https://github.com/Kuddev/nebulaTerminal"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+log = { version = "0.4.17", features = ["serde"] }
+serde = "1.0.163"
+toml.workspace = true
+
+[dev-dependencies]
+nebula_config_derive = { version = "0.2.1", path = "../nebula_config_derive" }
+serde = { version = "1.0.163", features = ["derive"] }

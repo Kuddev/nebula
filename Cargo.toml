@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "nebula_app",
+    "nebula_terminal",
+    "nebula_config",
+    "nebula_config_derive",
+    "nebula-completions",
+    "nebula_hook",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85.0"
+
+[profile.release]
+lto = "thin"
+debug = 1
+incremental = false
+
+[workspace.dependencies]
+toml = "0.9.11"
+toml_edit = "0.24.0"
+
+# TODO: Drop this pin and return to the crates.io release once the fix ships there.
+[patch.crates-io]
+x11-clipboard = { git = "https://github.com/quininer/x11-clipboard.git", rev = "19ab2163cf0bd0db607e827a5214571990307866" }

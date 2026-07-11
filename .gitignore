@@ -1,0 +1,59 @@
+target
+
+# Local debug/release build bundles produced by packaging scripts
+dist/
+trellis/
+
+# Local/generated visual assets and scratch files.
+docs/ui_mockups/
+tmp/
+
+# Optional local ConPTY runtime bundle; the app falls back when absent.
+assets/windows/conhost/
+
+# Internal agent/session artifacts (review drafts, scratch notes — never publish)
+.claude/
+.tocodex/
+tocodex-docs/
+.codex/
+*.internal.md
+
+# Secrets / credentials / environment — must never be committed
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.keystore
+id_rsa*
+*.credentials
+secrets.*
+*_secret*
+*.token
+
+# Editor / IDE local settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS-generated junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build/debug scratch: parked-exe copies (Windows locked-file workaround),
+# logs, crash dumps, profiling output
+*.locked
+*.log
+*.tmp
+*.orig
+*.rej
+*.stackdump
+*.pdb.old
+
+# Scratch notes and locally downloaded font archives
+body.txt
+JetBrainsMono-*.zip

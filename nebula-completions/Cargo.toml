@@ -1,0 +1,15 @@
+[package]
+name = "nebula-completions"
+version = "0.2.1"
+edition.workspace = true
+
+[features]
+default = ["color"]
+color = ["dep:nu-ansi-term", "dep:lscolors"]
+
+[dependencies]
+nucleo-matcher = "0.3"
+unicase = "2.9"
+unicode-segmentation = "1.13"
+nu-ansi-term = { version = "0.50", optional = true, default-features = false }
+lscolors = { version = "0.21", optional = true, default-features = false, features = ["nu-ansi-term"] }

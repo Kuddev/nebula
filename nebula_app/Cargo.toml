@@ -1,0 +1,139 @@
+[package]
+name = "nebula"
+version = "0.2.1"
+license = "GPL-3.0-or-later"
+description = "Nebula Terminal — a premium GPU-accelerated terminal emulator"
+readme = "README.md"
+homepage = "https://github.com/Kuddev/nebulaTerminal"
+repository = "https://github.com/Kuddev/nebulaTerminal"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "nebula"
+path = "src/main.rs"
+
+[dependencies.nebula_terminal]
+path = "../nebula_terminal"
+version = "0.2.1"
+
+[dependencies.nebula_config_derive]
+path = "../nebula_config_derive"
+version = "0.2.1"
+
+[dependencies.nebula_config]
+path = "../nebula_config"
+version = "0.2.1"
+
+[dependencies.nebula-completions]
+path = "../nebula-completions"
+version = "0.2.1"
+
+[dependencies]
+ahash = { version = "0.8.6", features = ["no-rng"] }
+base64 = "0.22.0"
+bitflags = "2.2.1"
+clap = { version = "4.2.7", features = ["derive", "env"] }
+copypasta = { version = "0.10.1", default-features = false }
+crossfont = "0.8.1"
+glutin = { version = "0.32.2", default-features = false, features = ["egl", "wgl"] }
+home = "0.5.5"
+libc = "0.2"
+log = { version = "0.4", features = ["std", "serde"] }
+notify = "8.0.0"
+parking_lot = "0.12.0"
+polling = "3.11.0"
+# preserve_order: we rewrite the user's claude settings.json (ai_hook
+# self-heal) and must not alphabetize their keys in the process.
+serde_json = { version = "1", features = ["preserve_order"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9.25"
+signal-hook = { version = "0.4.3", default-features = false }
+tempfile = "3.12.0"
+toml.workspace = true
+toml_edit.workspace = true
+unicode-width = "0.2.0"
+winit = { version = "0.30.9", default-features = false, features = ["rwh_06", "serde"] }
+global-hotkey = "0.8.0"
+
+[build-dependencies]
+gl_generator = "0.14.0"
+
+[dev-dependencies]
+clap_complete = "4.2.3"
+
+[target.'cfg(not(windows))'.dependencies]
+xdg = "3.0.0"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+png = { version = "0.17.5", default-features = false, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.1"
+objc2-foundation = { version = "0.3.1", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSLocale",
+    "NSUserDefaults",
+] }
+objc2-app-kit = { version = "0.3.1", default-features = false, features = [
+    "std",
+    "NSColorSpace",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+
+[target.'cfg(windows)'.dependencies]
+dirs = "6.0.0"
+# Native WinRT toast (right-corner / Action Center). Zero user setup: it fires
+# under Nebula's own AppUserModelID, which we register silently on first run
+# (see `notify::win`), so the banner shows "Nebula" instead of "PowerShell".
+tauri-winrt-notification = "0.7.3"
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls_Dialogs",
+    # COM + Shell: build the Start-menu shortcut that carries our AUMID so the
+    # toast is attributed to Nebula (IShellLink + IPersistFile + IPropertyStore).
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_System_Variant",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_Registry",
+    "Win32_System_Console",
+    # Named pipe server for nebula-hook (AI-CLI turn events). IO/Security
+    # gate ConnectNamedPipe/ReadFile/CreateNamedPipeW's OVERLAPPED/DACL params.
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+]}
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.2"
+
+[features]
+default = ["wayland", "x11"]
+x11 = [
+    "copypasta/x11",
+    "winit/x11",
+    "glutin/x11",
+    "glutin/glx",
+    "png",
+]
+wayland = [
+    "copypasta/wayland",
+    "glutin/wayland",
+    "winit/wayland",
+    "winit/wayland-dlopen",
+    "winit/wayland-csd-adwaita-crossfont",
+]
+nightly = []
