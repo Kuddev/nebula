@@ -152,8 +152,16 @@ pub(crate) const NEBULA_UNFOCUSED_SPLIT_DIM: f32 = 0.30;
 /// bar while the symmetric `SizeInfo` padding model is still in use.
 pub const CHROME_BAR_LOGICAL: f32 = 56.0;
 
-/// Shared chrome/control corner radius.
+/// Shared chrome/control corner radius. Used for the small in-shell affordances
+/// (window-control hover pills, tab pills, the "+" square) — kept modest so the
+/// controls stay crisp.
 pub(super) const UI_CORNER_RADIUS_LOGICAL: f32 = 8.0;
+
+/// Outer radius of the connected chrome shell (the L-frame formed by the top
+/// bar + left sidebar). Larger than the control radius so the whole window
+/// chrome reads as one soft-cornered card while the affordances inside keep
+/// their tighter [`UI_CORNER_RADIUS_LOGICAL`] curve.
+pub(super) const UI_SHELL_RADIUS_LOGICAL: f32 = 14.0;
 
 /// Shared quiet outline thickness.
 pub(super) const UI_HAIRLINE_LOGICAL: f32 = 1.0;

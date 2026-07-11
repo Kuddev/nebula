@@ -213,16 +213,20 @@ pub(super) fn chrome_tab_layout(
         };
     }
 
-    // Expanded panel: fills the left gutter between the top and bottom bars,
-    // leaving a small breathing gap before the terminal grid on its right.
+    // Expanded panel: the left leg of the connected chrome L-frame. It shares
+    // the top bar's left edge (`margin`) and abuts its bottom edge with NO gap
+    // (`panel_top = top + bar_h`) so the two read as one panel; the join corners
+    // are squared off in `draw_chrome`. It runs down to the window's bottom
+    // margin (symmetric with the top bar's top at `margin`), leaving only a
+    // breathing gap before the terminal grid on its right.
     let sw = SIDEBAR_W_LOGICAL * scale_factor;
     let t = expand.clamp(0.0, 1.0);
     let eased = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
     let slide = (1.0 - eased) * sw;
     let panel_x = margin - slide;
     let panel_w = (sw - margin - s(12.0)).max(s(120.0));
-    let panel_top = top + bar_h + s(12.0);
-    let panel_bottom = h - margin - s(12.0);
+    let panel_top = top + bar_h;
+    let panel_bottom = h - margin;
     let panel_h = (panel_bottom - panel_top).max(0.0);
     let panel = (panel_x, panel_top, panel_w, panel_h);
 
@@ -234,7 +238,10 @@ pub(super) fn chrome_tab_layout(
     let tab_w = panel_w - 2.0 * tab_pad;
     let row_h = s(34.0);
     let gap = s(8.0);
-    let header = s(42.0); // room for a "TABS" caption at the panel top
+    // Header band below the top-bar join: the panel now abuts the top bar with
+    // no gap, so this carries the seam clearance (the old +12 panel gap) plus
+    // room for the "TABS" caption and the "+" square.
+    let header = s(54.0);
 
     // "+" square, vertically centred in the header band, pinned to the right.
     let plus_sz = s(20.0);
@@ -399,6 +406,9 @@ pub(super) fn draw_chrome(d: &mut Display) {
     let bar_h = s(40.0);
     let inner_pad = s(6.0);
     let radius = s(UI_CORNER_RADIUS_LOGICAL);
+    // Larger outer radius for the connected chrome shell (top bar + sidebar
+    // L-frame); pills/controls keep the smaller `radius`.
+    let shell_r = s(UI_SHELL_RADIUS_LOGICAL);
     let pill_h = bar_h - 2.0 * inner_pad;
     let pill_r = s(UI_CORNER_RADIUS_LOGICAL);
     let hairline_w = s(UI_HAIRLINE_LOGICAL).max(1.0);
@@ -430,28 +440,26 @@ pub(super) fn draw_chrome(d: &mut Display) {
         ));
     }
 
-    // ---- Window border: same as the window background ----
-    // The border is painted in the actual background color (custom override
-    // or the scheme background) so the window edge reads as one cohesive
-    // surface — no bright accent outline floating around the chrome.
-    let bg = d.nebula_background.unwrap_or_else(|| d.colors[NamedColor::Background]);
-    let border = Rgba::opaque(bg);
-    let glow_b = s(8.0);
-    quads.push(UiQuad::solid(0.0, 0.0, w, glow_b, 0.0, border));
-    quads.push(UiQuad::solid(0.0, h - glow_b, w, glow_b, 0.0, border));
-    quads.push(UiQuad::solid(0.0, 0.0, glow_b, h, 0.0, border));
-    quads.push(UiQuad::solid(w - glow_b, 0.0, glow_b, h, 0.0, border));
-    let t_b = s(1.5);
-    quads.push(UiQuad::solid(0.0, 0.0, w, t_b, 0.0, border));
-    quads.push(UiQuad::solid(0.0, h - t_b, w, t_b, 0.0, border));
-    quads.push(UiQuad::solid(0.0, 0.0, t_b, h, 0.0, border));
-    quads.push(UiQuad::solid(w - t_b, 0.0, t_b, h, 0.0, border));
-
     // ---- Top title / tab bar ----
-    let top_y = margin;
-    quads.push(UiQuad::solid(margin, top_y, w - 2.0 * margin, bar_h, radius, palette.panel));
-
+    // The top bar and the left sidebar form one connected chrome shell (an
+    // L-frame): the top bar's bottom-left corner is squared so the sidebar
+    // abuts it seamlessly, while the three outer corners keep the larger shell
+    // radius. Collapsed (no sidebar) the bar is a standalone card, all four
+    // corners shell-rounded.
+    let shell_r = s(UI_SHELL_RADIUS_LOGICAL);
     let sidebar_expand = d.left_sidebar_progress();
+    let top_y = margin;
+    // The bottom-left corner closes toward square as the sidebar slides in, so
+    // the join seals smoothly instead of the corner popping from round to square
+    // the instant the panel becomes visible. `expand` is 0 collapsed → 1 open.
+    let join_r = shell_r * (1.0 - sidebar_expand.clamp(0.0, 1.0));
+    // [top-left, top-right, bottom-right, bottom-left]
+    let top_bar_corners = [shell_r, shell_r, shell_r, join_r];
+    quads.push(
+        UiQuad::solid(margin, top_y, w - 2.0 * margin, bar_h, radius, palette.panel)
+            .with_corners(top_bar_corners),
+    );
+
     let tab_layout = chrome_tab_layout(
         &size,
         scale,
@@ -499,10 +507,27 @@ pub(super) fn draw_chrome(d: &mut Display) {
         quads.push(UiQuad::solid(set_x, set_y, set_w, set_h, pill_r, HOVER_FILL_STRONG));
     }
 
-    // Sidebar panel background (draws through slide-out so folding is visible).
+    // Sidebar panel background — the left leg of the chrome shell. Its top
+    // corners are squared so it abuts the top bar's squared bottom-left into
+    // one continuous L; only the two outer bottom corners keep the shell
+    // radius. Draws through slide-out so folding stays visible.
+    //
+    // Seam seal: the sidebar is painted AFTER the top bar and in the same
+    // panel color, so we extend its top edge UP by a couple of physical pixels
+    // to tuck under the top bar. Without this, the top bar's bottom edge and
+    // the sidebar's top edge each carry a 1px antialiasing falloff; where two
+    // translucent edges merely abut, both are under-covered and the dark
+    // background bleeds through as a hairline "black edge". Overlapping turns
+    // that transition into panel-over-panel (≈1.5% delta, invisible) and the
+    // gap is gone.
     if d.left_sidebar_visible() {
         let (pnl_x, pnl_y, pnl_w, pnl_h) = tab_layout.panel;
-        quads.push(UiQuad::solid(pnl_x, pnl_y, pnl_w, pnl_h, radius, palette.panel));
+        let seam = s(2.0).max(1.0);
+        quads.push(
+            UiQuad::solid(pnl_x, pnl_y - seam, pnl_w, pnl_h + seam, radius, palette.panel)
+                // [top-left, top-right, bottom-right, bottom-left]
+                .with_corners([0.0, 0.0, shell_r, shell_r]),
+        );
     }
 
     // Dock preview: while a dragged tab hovers the terminal area, glow the
@@ -576,17 +601,24 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 Rgba::new(accent.r, accent.g, accent.b, 40),
             ));
             quads.push(UiQuad::solid(tab_draw_x, tab_draw_y, tab_w, tab_h, pill_r, palette.tab_bg_l));
-            quads.push(UiQuad::solid(
-                tab_draw_x,
-                tab_draw_y,
-                tab_w,
-                tab_h,
-                pill_r,
-                Rgba::new(accent.r, accent.g, accent.b, 26),
-            ));
-        } else {
-            quads.push(UiQuad::solid(tab_draw_x, tab_draw_y, tab_w, tab_h, pill_r, palette.pill));
+            // The accent wash on top is a DARK-theme depth cue: the white pill
+            // (`tab_bg_l`) is the state on the light themes, so tinting it just
+            // grays the white the user asked to keep pure. Only the dark themes
+            // layer the wash over their (dark) active pill.
+            if !palette.is_light {
+                quads.push(UiQuad::solid(
+                    tab_draw_x,
+                    tab_draw_y,
+                    tab_w,
+                    tab_h,
+                    pill_r,
+                    Rgba::new(accent.r, accent.g, accent.b, 26),
+                ));
+            }
         }
+        // Inactive tabs carry no standalone fill — they sit flush on the
+        // sidebar surface and only light up on hover (below). State is the
+        // white active pill, not a per-row background.
 
         if tab_hovered {
             quads.push(UiQuad::solid(tab_draw_x, tab_draw_y, tab_w, tab_h, pill_r, HOVER_FILL));
@@ -670,9 +702,10 @@ pub(super) fn draw_chrome(d: &mut Display) {
     }
 
     // "New tab" pill (a wide row when expanded, a square beside the toggle
-    // when collapsed — both come straight from the layout).
+    // when collapsed — both come straight from the layout). No resting fill:
+    // the "+" is just an icon until the pointer arrives, then a hover pill
+    // lifts under it (matches the top-bar window controls).
     let (plus_x, plus_y, plus_w, plus_h) = tab_layout.plus;
-    quads.push(UiQuad::solid(plus_x, plus_y, plus_w, plus_h, pill_r, palette.pill));
     if d.nebula_chrome_hover == ChromeHit::NewTab {
         quads.push(UiQuad::solid(plus_x, plus_y, plus_w, plus_h, pill_r, HOVER_FILL_STRONG));
     }
@@ -863,12 +896,14 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // Sidebar text (caption, labels, × buttons) also stays under the
     // settings glass — skip it entirely while the modal is up.
     if d.left_sidebar_visible() && tab_layout.panel.2 > 0.0 && !d.nebula_settings_open {
-        // "TABS" caption at the panel head.
+        // "TABS" caption at the panel head. The panel now abuts the top bar
+        // with no gap, so the caption is pushed down inside the header band to
+        // keep clearance from the (invisible) join seam.
         let (pnl_x, pnl_y, _, _) = tab_layout.panel;
         d.renderer.draw_chrome_text(
             &size,
             pnl_x + s(16.0),
-            pnl_y + s(11.0),
+            pnl_y + s(18.0),
             TXT_DIM,
             "TABS",
             &mut d.glyph_cache,
