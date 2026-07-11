@@ -1,0 +1,1198 @@
+//! Right-side drawer: directory tree / git status for the focused pane's cwd
+//! (otty-style). This module owns only the *model* — tree flattening, git
+//! parsing, layout maths, and hit-testing. Rendering lives in `display::mod`
+//! (mirroring the command palette split), and input dispatch in `input::mod`.
+//!
+//! The panel is an overlay drawer: it floats above the terminal's right edge
+//! instead of reflowing the PTY, so toggling it never resizes the shell.
+//!
+//! Refresh model: cheap and synchronous, but *only* on toggle, on a cwd/root
+//! change, or when the throttle window (a few seconds) has elapsed — never on
+//! every frame. `git --no-optional-locks` keeps the status call from touching
+//! the index lock, so it can't corrupt or stall a concurrent git operation.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// Which view the drawer shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelView {
+    /// Directory tree of the focused pane's cwd.
+    Files,
+    /// Git branch + working-tree changes of the enclosing repository.
+    Git,
+}
+
+/// One flattened row of the directory tree.
+#[derive(Debug, Clone)]
+pub struct FileRow {
+    pub path: PathBuf,
+    pub name: String,
+    pub depth: usize,
+    pub is_dir: bool,
+    pub expanded: bool,
+}
+
+/// Parsed `git status` snapshot.
+#[derive(Debug, Clone, Default)]
+pub struct GitInfo {
+    /// Current branch (or short detached-HEAD description).
+    pub branch: String,
+    /// Working-tree line insertions/deletions (unstaged + staged).
+    pub plus: u64,
+    pub minus: u64,
+    /// Commits ahead of upstream — what a push would publish. 0 = nothing to
+    /// push (the push button keys off this: only committed work is pushable).
+    pub ahead: u32,
+    /// Worktree changes not yet staged (`??` counts here as `?`).
+    pub unstaged: Vec<(char, String)>,
+    /// Index changes ready to commit.
+    pub staged: Vec<(char, String)>,
+}
+
+/// Result of hit-testing a pixel against the open drawer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelHit {
+    None,
+    /// The "文件" view tab in the header.
+    ViewFiles,
+    /// The "Git" view tab in the header.
+    ViewGit,
+    /// The Files view's filter input box.
+    Search,
+    /// A list row (index into the *visible* rows of the current view).
+    Row(usize),
+    /// Inside the panel but on nothing interactive.
+    Inside,
+}
+
+/// An in-progress drag of a tree file toward the terminal (drop = paste the
+/// full path into the shell, like dropping a file from Explorer).
+#[derive(Debug, Clone)]
+pub struct FileDrag {
+    pub path: PathBuf,
+    /// Display name for the drag ghost that follows the pointer.
+    pub name: String,
+    /// Pointer position at press; the drag activates past a small threshold
+    /// so plain clicks (and double-clicks) don't count as drags.
+    pub origin: (f32, f32),
+    /// Latest pointer position (physical px) — anchors the drag ghost.
+    pub pos: (f32, f32),
+    pub active: bool,
+}
+
+/// Re-run the (throttled) refresh at most this often while the panel is open.
+const REFRESH_EVERY: Duration = Duration::from_secs(4);
+/// Hard cap on flattened tree rows, bounding both fs walking and rendering.
+const MAX_ROWS: usize = 400;
+/// Hard cap on entries listed per directory.
+const MAX_PER_DIR: usize = 200;
+/// Total directory entries the filter index may VISIT while being built.
+/// This bounds the walk itself (a `target/` or `node_modules/` tree has
+/// hundreds of thousands of entries — walking it per keystroke froze the UI),
+/// not just the matches kept.
+const SEARCH_VISIT_BUDGET: usize = 20_000;
+/// Entries kept in the filter index.
+const SEARCH_INDEX_CAP: usize = 10_000;
+/// Directories that are all bulk and no signal — never indexed for filtering.
+const SEARCH_SKIP_DIRS: &[&str] = &["target", "node_modules", ".git", ".cache", ".gradle", "build", "trellis"];
+
+pub struct SidePanel {
+    pub open: bool,
+    pub view: PanelView,
+    /// Root the tree/git snapshot was built from (the focused pane's cwd).
+    root: Option<PathBuf>,
+    /// Flattened visible tree rows for the Files view.
+    rows: Vec<FileRow>,
+    /// Directories the user expanded (persists across refreshes).
+    expanded: HashSet<PathBuf>,
+    /// Git snapshot, `None` when the root isn't inside a work tree.
+    git: Option<GitInfo>,
+    /// Scroll offset in rows.
+    pub scroll: usize,
+    /// Files-view filter query; non-empty switches the tree to a flat list of
+    /// deep matches (VS Code's explorer filter).
+    pub search: String,
+    /// Whether the filter box owns the keyboard.
+    pub search_focus: bool,
+    /// Flat, budget-bounded index of the tree used by the filter. Built ONCE
+    /// on the first filtering keystroke and reused for the rest of the query
+    /// (each keystroke then only string-matches in memory); dropped whenever
+    /// the root changes or a refresh rebuilds the snapshot.
+    search_index: Option<Vec<FileRow>>,
+    /// Commit-message input (Git view): buffer + focus, same modal keyboard
+    /// contract as the Files filter box.
+    pub commit_msg: String,
+    pub commit_focus: bool,
+    /// Last clicked file row (path + when), for double-click-to-open.
+    pub last_file_click: Option<(PathBuf, Instant)>,
+    /// In-progress drag of a file row toward the terminal.
+    pub drag_file: Option<FileDrag>,
+    /// Persistently selected file (row highlight). Cleared by clicking off
+    /// the panel, closing the drawer, or the root changing.
+    pub selected: Option<PathBuf>,
+    /// What the pointer currently hovers (rows/buttons/header tabs light up).
+    pub hover: PanelHit,
+    /// Pointer position of the last hover update — disambiguates WHICH git
+    /// action button is under the pointer inside the shared strip.
+    pub hover_pos: (f32, f32),
+    /// A git mutation (add/commit/push) is running on a worker thread; the
+    /// action buttons gray out and re-arm when it lands.
+    op_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the worker when it finishes — `sync` folds it into a refresh.
+    op_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Last operation's error (empty = success), shown on the summary line.
+    op_error: std::sync::Arc<std::sync::Mutex<String>>,
+    last_refresh: Option<Instant>,
+    needs_refresh: bool,
+}
+
+impl SidePanel {
+    pub fn new() -> Self {
+        Self {
+            open: false,
+            view: PanelView::Files,
+            root: None,
+            rows: Vec::new(),
+            expanded: HashSet::new(),
+            git: None,
+            scroll: 0,
+            search: String::new(),
+            search_focus: false,
+            search_index: None,
+            commit_msg: String::new(),
+            commit_focus: false,
+            last_file_click: None,
+            drag_file: None,
+            selected: None,
+            hover: PanelHit::None,
+            hover_pos: (0.0, 0.0),
+            op_running: Default::default(),
+            op_done: Default::default(),
+            op_error: Default::default(),
+            last_refresh: None,
+            needs_refresh: false,
+        }
+    }
+
+    /// Toggle the drawer. Re-invoking with the *other* view while open only
+    /// switches views (VS Code sidebar behaviour) instead of closing.
+    pub fn toggle(&mut self, view: PanelView) {
+        if self.open && self.view == view {
+            self.open = false;
+            self.selected = None;
+            self.drag_file = None;
+            return;
+        }
+        self.open = true;
+        self.view = view;
+        self.scroll = 0;
+        self.needs_refresh = true;
+    }
+
+    /// Adopt the focused pane's cwd, refreshing when the root changed, a
+    /// refresh was requested (toggle), or the throttle window has elapsed.
+    /// Called once per drawn frame from the window context; cheap when nothing
+    /// changed. Returns whether the snapshot was rebuilt (i.e. needs redraw).
+    pub fn sync(&mut self, cwd: Option<PathBuf>) -> bool {
+        if !self.open {
+            return false;
+        }
+        let root_changed = cwd != self.root;
+        // While a filter query is live, skip the periodic re-snapshot: it
+        // would drop and rebuild the search index under the user's fingers.
+        let stale = self.search.trim().is_empty()
+            && self.last_refresh.is_none_or(|t| t.elapsed() >= REFRESH_EVERY);
+        // A finished git mutation forces a refresh so the new state (staged
+        // list, ahead count) shows on the next frame.
+        if self.op_done.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.needs_refresh = true;
+        }
+        if !(root_changed || stale || self.needs_refresh) {
+            return false;
+        }
+        if root_changed {
+            self.root = cwd;
+            self.expanded.clear();
+            self.scroll = 0;
+            self.selected = None;
+        }
+        self.refresh();
+        true
+    }
+
+    /// Rebuild the tree and git snapshot from `root`.
+    fn refresh(&mut self) {
+        self.needs_refresh = false;
+        self.last_refresh = Some(Instant::now());
+        // New snapshot → the filter index is stale; rebuild lazily on demand.
+        self.search_index = None;
+        self.rebuild_rows();
+        self.git = None;
+        if let Some(root) = self.root.clone() {
+            self.git = read_git(&root);
+        }
+    }
+
+    /// Rebuild only the flattened rows (tree shape / filter changes; the git
+    /// snapshot stays).
+    fn rebuild_rows(&mut self) {
+        self.rows.clear();
+        let Some(root) = self.root.clone() else { return };
+        let needle = self.search.trim().to_lowercase();
+        if needle.is_empty() {
+            self.flatten_dir(&root, 0);
+            return;
+        }
+        // Filter mode: string-match against the cached flat index. The index
+        // is built at most once per snapshot (budget-bounded walk); each
+        // keystroke after that is pure in-memory filtering — walking the tree
+        // per keystroke froze the UI on big checkouts.
+        if self.search_index.is_none() {
+            let mut index = Vec::new();
+            let mut budget = SEARCH_VISIT_BUDGET;
+            build_search_index(&root, 0, &mut index, &mut budget);
+            self.search_index = Some(index);
+        }
+        let index = self.search_index.as_ref().unwrap();
+        self.rows.extend(
+            index
+                .iter()
+                .filter(|row| row.name.to_lowercase().contains(&needle))
+                .take(MAX_ROWS)
+                .cloned(),
+        );
+    }
+
+    /// Append typed text to the filter query and re-derive the rows.
+    pub fn search_input(&mut self, text: &str) {
+        for c in text.chars().filter(|c| !c.is_control()) {
+            self.search.push(c);
+        }
+        self.scroll = 0;
+        self.rebuild_rows();
+    }
+
+    pub fn search_backspace(&mut self) {
+        self.search.pop();
+        self.scroll = 0;
+        self.rebuild_rows();
+    }
+
+    /// Leave the filter box; `clear` also resets the query (Esc).
+    pub fn search_unfocus(&mut self, clear: bool) {
+        self.search_focus = false;
+        if clear && !self.search.is_empty() {
+            self.search.clear();
+            self.scroll = 0;
+            self.rebuild_rows();
+        }
+    }
+
+    // ---- git mutations (add / commit / push) ----
+
+    /// Whether a git mutation is in flight (buttons gray out).
+    pub fn op_running(&self) -> bool {
+        self.op_running.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Last mutation's error, if any (cleared by the next successful op).
+    pub fn op_error(&self) -> Option<String> {
+        let e = self.op_error.lock().ok()?;
+        (!e.is_empty()).then(|| e.clone())
+    }
+
+    /// Run `git <args>` on a worker thread; UI stays live (a push can take
+    /// seconds over the network). Completion flips `op_done`, which the next
+    /// drawn frame folds into a refresh.
+    fn spawn_git(&mut self, args: Vec<String>) {
+        use std::sync::atomic::Ordering;
+        let Some(root) = self.root.clone() else { return };
+        if self.op_running.swap(true, Ordering::Relaxed) {
+            return; // one at a time
+        }
+        let running = self.op_running.clone();
+        let done = self.op_done.clone();
+        let error = self.op_error.clone();
+        std::thread::Builder::new()
+            .name("nebula-git-op".into())
+            .spawn(move || {
+                let mut cmd = std::process::Command::new("git");
+                cmd.args(&args).current_dir(&root);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+                }
+                let msg = match cmd.output() {
+                    Ok(out) if out.status.success() => String::new(),
+                    Ok(out) => {
+                        let err = String::from_utf8_lossy(&out.stderr);
+                        // First meaningful line is enough for a status strip.
+                        err.lines().find(|l| !l.trim().is_empty()).unwrap_or("git 失败").to_string()
+                    },
+                    Err(e) => format!("git: {e}"),
+                };
+                if let Ok(mut slot) = error.lock() {
+                    *slot = msg;
+                }
+                running.store(false, Ordering::Relaxed);
+                done.store(true, Ordering::Relaxed);
+            })
+            .ok();
+    }
+
+    /// `git add -A`: stage everything (the ⊕ button).
+    pub fn git_stage_all(&mut self) {
+        if self.git.as_ref().is_some_and(|g| !g.unstaged.is_empty()) && !self.op_running() {
+            self.spawn_git(vec!["add".into(), "-A".into()]);
+        }
+    }
+
+    /// Commit button: with staged changes, open the message input (Enter then
+    /// commits via [`Self::git_commit_submit`]).
+    pub fn git_begin_commit(&mut self) {
+        if self.git.as_ref().is_some_and(|g| !g.staged.is_empty()) && !self.op_running() {
+            self.commit_focus = true;
+        }
+    }
+
+    /// Enter in the message box: run `git commit -m <msg>`.
+    pub fn git_commit_submit(&mut self) {
+        let msg = self.commit_msg.trim().to_string();
+        if msg.is_empty() || self.op_running() {
+            return;
+        }
+        self.commit_focus = false;
+        self.commit_msg.clear();
+        self.spawn_git(vec!["commit".into(), "-m".into(), msg]);
+    }
+
+    /// Push button — only enabled with committed-but-unpushed work (`ahead`).
+    pub fn git_push(&mut self) {
+        if self.git.as_ref().is_some_and(|g| g.ahead > 0) && !self.op_running() {
+            self.spawn_git(vec!["push".into()]);
+        }
+    }
+
+    /// Depth-first flatten of `dir` into `rows`, following `expanded`.
+    fn flatten_dir(&mut self, dir: &Path, depth: usize) {
+        if self.rows.len() >= MAX_ROWS {
+            return;
+        }
+        let Ok(read) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<(bool, String, PathBuf)> = read
+            .flatten()
+            .take(MAX_PER_DIR)
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                // `.git` is noise in a file tree; everything else shows.
+                if name == ".git" {
+                    return None;
+                }
+                let is_dir = e.file_type().ok()?.is_dir();
+                Some((is_dir, name, e.path()))
+            })
+            .collect();
+        // Directories first, then case-insensitive alphabetical (Explorer/
+        // VS Code convention).
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+        for (is_dir, name, path) in entries {
+            if self.rows.len() >= MAX_ROWS {
+                return;
+            }
+            let expanded = is_dir && self.expanded.contains(&path);
+            self.rows.push(FileRow { path: path.clone(), name, depth, is_dir, expanded });
+            if expanded {
+                self.flatten_dir(&path, depth + 1);
+            }
+        }
+    }
+
+    /// Click on visible row `index` (post-scroll). Directories toggle their
+    /// expansion; files are inert (v1). Returns whether anything changed.
+    pub fn click_row(&mut self, index: usize) -> bool {
+        if self.view != PanelView::Files || !self.search.trim().is_empty() {
+            return false;
+        }
+        let Some(row) = self.rows.get(self.scroll + index) else { return false };
+        if !row.is_dir {
+            return false;
+        }
+        let path = row.path.clone();
+        if !self.expanded.remove(&path) {
+            self.expanded.insert(path);
+        }
+        // Re-flatten only (no git re-run): tree shape changed, content didn't.
+        self.rebuild_rows();
+        true
+    }
+
+    /// Scroll by `delta` rows (positive = down), clamped to the list length.
+    pub fn scroll_by(&mut self, delta: i32, visible_rows: usize) {
+        let len = match self.view {
+            PanelView::Files => self.rows.len(),
+            // Two section headers + both file lists.
+            PanelView::Git => {
+                self.git.as_ref().map_or(0, |g| g.unstaged.len() + g.staged.len() + 2)
+            },
+        };
+        let max = len.saturating_sub(visible_rows);
+        self.scroll = (self.scroll as i64 + delta as i64).clamp(0, max as i64) as usize;
+    }
+
+    pub fn file_rows(&self) -> &[FileRow] {
+        &self.rows
+    }
+
+    /// The tree row currently shown at visible index `idx` (post-scroll).
+    pub fn visible_row(&self, idx: usize) -> Option<&FileRow> {
+        if self.view != PanelView::Files {
+            return None;
+        }
+        self.rows.get(self.scroll + idx)
+    }
+
+    pub fn git(&self) -> Option<&GitInfo> {
+        self.git.as_ref()
+    }
+
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+}
+
+/// Panel geometry, physical pixels: `(x, y, w, h)` of the drawer, plus the
+/// header strip height and one list row height.
+pub struct PanelLayout {
+    pub panel: (f32, f32, f32, f32),
+    pub header_h: f32,
+    pub row_h: f32,
+    /// Files-view filter input box (between the summary line and the list).
+    pub search: (f32, f32, f32, f32),
+    /// Y of the first list row (below header, summary line and search box).
+    pub list_y: f32,
+    pub max_rows: usize,
+}
+
+/// Drawer layout: a floating panel pinned to the SAME vertical band as the
+/// left tab sidebar (`chrome_tab_layout`) — top at `margin + bar_h + 12`,
+/// bottom at `win_h - margin - 12` — and inset from the right window edge by
+/// `margin`, so both chrome panels share one height, one baseline, and float
+/// with all four corners in open space (a flush edge squares off the corners).
+/// The `_top`/`_bottom` chrome reserves the caller passes are no longer used
+/// for the band: the constants here are locked to the sidebar's so the two can
+/// never drift. `slide` is the open-animation progress (0 = fully off-screen
+/// right, 1 = resting position); the whole drawer rides it.
+pub fn panel_layout(
+    win_w: f32,
+    win_h: f32,
+    _top: f32,
+    _bottom: f32,
+    scale: f32,
+    slide: f32,
+) -> PanelLayout {
+    let s = |v: f32| v * scale;
+    // Same margin / bar height / breathing gap as `chrome_tab_layout`.
+    let margin = s(8.0);
+    let bar_h = s(40.0);
+    let gap = s(12.0);
+    let w = s(300.0).min(win_w * 0.42);
+    // Swift-out easing (design sheet's cubic-bezier(0.2, 0.8, 0.2, 1) feel):
+    // fast launch, soft landing.
+    let t = slide.clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+    // Resting x is inset by `margin` (mirroring the left panel's left inset);
+    // closed, it rides fully off the right edge. Travel = the panel width plus
+    // its margin so nothing peeks while closed.
+    let rest_x = win_w - margin - w;
+    let x = rest_x + (1.0 - eased) * (w + margin);
+    let y = margin + bar_h + gap;
+    let h = (win_h - margin - gap - y).max(0.0);
+    let header_h = s(40.0);
+    let row_h = s(34.0);
+    let search = (x + s(14.0), y + header_h + s(34.0), w - s(28.0), s(34.0));
+    let list_y = search.1 + search.3 + s(16.0); // header + summary + filter box
+    let max_rows = (((y + h) - list_y) / row_h).max(0.0) as usize;
+    PanelLayout { panel: (x, y, w, h), header_h, row_h, search, list_y, max_rows }
+}
+
+/// Hit-test a pixel against the open drawer (`layout` from [`panel_layout`]).
+pub fn panel_hit(layout: &PanelLayout, x: f32, y: f32) -> PanelHit {
+    let (px, py, pw, ph) = layout.panel;
+    if x < px || x >= px + pw || y < py || y >= py + ph {
+        return PanelHit::None;
+    }
+    if y < py + layout.header_h {
+        // Header: two half-width view tabs.
+        return if x < px + pw * 0.5 { PanelHit::ViewFiles } else { PanelHit::ViewGit };
+    }
+    let (sx, sy, sw, sh) = layout.search;
+    if x >= sx && x < sx + sw && y >= sy && y < sy + sh {
+        return PanelHit::Search;
+    }
+    if y >= layout.list_y {
+        let row = ((y - layout.list_y) / layout.row_h) as usize;
+        if row < layout.max_rows {
+            return PanelHit::Row(row);
+        }
+    }
+    PanelHit::Inside
+}
+
+/// Budget-bounded deep walk building the flat filter index. `budget` counts
+/// every entry VISITED (not kept), so a huge build tree can't stall the UI;
+/// bulk directories (`target/`, `node_modules/`, …) are skipped outright, and
+/// symlinks/junctions are never followed (cycle safety).
+fn build_search_index(dir: &Path, depth: usize, index: &mut Vec<FileRow>, budget: &mut usize) {
+    if *budget == 0 || depth > 8 || index.len() >= SEARCH_INDEX_CAP {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else { return };
+    for entry in read.flatten() {
+        if *budget == 0 || index.len() >= SEARCH_INDEX_CAP {
+            return;
+        }
+        *budget -= 1;
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = ft.is_dir();
+        if is_dir && (name.starts_with('.') || SEARCH_SKIP_DIRS.contains(&name.as_str())) {
+            continue;
+        }
+        let path = entry.path();
+        index.push(FileRow { path: path.clone(), name, depth: 0, is_dir, expanded: false });
+        if is_dir {
+            build_search_index(&path, depth + 1, index, budget);
+        }
+    }
+}
+
+/// Snapshot git state for `root`: branch, ±line counts, changed files./// `None` when git is missing or `root` isn't inside a work tree. Runs
+/// synchronously — callers throttle (see [`SidePanel::sync`]).
+fn read_git(root: &Path) -> Option<GitInfo> {
+    use std::process::Command;
+    let run = |args: &[&str]| -> Option<String> {
+        let mut cmd = Command::new("git");
+        cmd.arg("--no-optional-locks").args(args).current_dir(root);
+        // Suppress the console window that `Command` flashes on Windows GUI apps.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let out = cmd.output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+
+    // `-b --porcelain` yields `## branch...upstream [ahead N]` + one `XY path`
+    // per change, X = index (staged) status, Y = worktree status.
+    let status = run(&["status", "--porcelain", "-b"])?;
+    let mut info = GitInfo::default();
+    for line in status.lines() {
+        if let Some(head) = line.strip_prefix("## ") {
+            // `main...origin/main [ahead 1]` → `main`; detached prints as-is.
+            info.branch = head.split("...").next().unwrap_or(head).to_string();
+            if let Some(idx) = head.find("ahead ") {
+                info.ahead = head[idx + 6..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0);
+            }
+        } else if line.len() > 3 {
+            let x = line.as_bytes()[0] as char;
+            let y = line.as_bytes()[1] as char;
+            let path = line[3..].trim().to_string();
+            if x == '?' || y == '?' {
+                info.unstaged.push(('?', path));
+                continue;
+            }
+            // One file can be in BOTH lists (partially staged).
+            if x != ' ' {
+                info.staged.push((x, path.clone()));
+            }
+            if y != ' ' {
+                info.unstaged.push((y, path));
+            }
+        }
+    }
+
+    // `x files changed, 140 insertions(+), 69 deletions(-)` → (140, 69).
+    if let Some(stat) = run(&["diff", "--shortstat", "HEAD"]) {
+        for part in stat.split(',') {
+            let num: u64 =
+                part.trim().split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            if part.contains("insertion") {
+                info.plus = num;
+            } else if part.contains("deletion") {
+                info.minus = num;
+            }
+        }
+    }
+    Some(info)
+}
+
+
+// ---- rendering (mirrors the `settings.rs` split: the parent `display::mod`
+// hands in a snapshot + renderer; this module owns the drawer's pixels) ----
+
+use crate::display::color::Rgb;
+use crate::renderer::ui::{Rgba, UiQuad};
+use crate::renderer::{GlyphCache, Renderer};
+
+use super::{NebulaTheme, SizeInfo, UI_CORNER_RADIUS_LOGICAL};
+
+// Codicon glyphs (same family as the chrome's sidebar/settings icons).
+const ICON_FOLDER: &str = "\u{ea83}";
+const ICON_FOLDER_OPEN: &str = "\u{eaf7}";
+const ICON_FILE: &str = "\u{ea7b}";
+const ICON_CHEVRON_RIGHT: &str = "\u{eab6}";
+const ICON_CHEVRON_DOWN: &str = "\u{eab4}";
+const ICON_BRANCH: &str = "\u{ea68}";
+const ICON_SEARCH: &str = "\u{ea6d}";
+
+/// Git status colors (GitHub Primer hues), picked per theme brightness so
+/// they hold contrast on both surface families.
+fn status_color(status: char, is_light: bool) -> Option<Rgb> {
+    Some(match (status, is_light) {
+        ('M' | 'R' | 'C', false) => Rgb::new(210, 153, 34),
+        ('M' | 'R' | 'C', true) => Rgb::new(154, 103, 0),
+        ('A', false) => Rgb::new(63, 185, 80),
+        ('A', true) => Rgb::new(26, 127, 55),
+        ('D', false) => Rgb::new(248, 81, 73),
+        ('D', true) => Rgb::new(207, 34, 46),
+        _ => None?, // '?' and friends fall back to dim ink.
+    })
+}
+
+/// The terminal palette colors the tree rows share with `ls` (Nebula-List
+/// paints dirs with ANSI Blue and executables with ANSI Green — the drawer
+/// must agree with what the user sees in the grid, including theme switches).
+#[derive(Clone, Copy)]
+pub struct LsColors {
+    pub dir: Rgb,
+    pub exec: Rgb,
+}
+
+/// Executable extensions, matching Nebula-List's green set.
+fn is_executable(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    ["exe", "dll", "bat", "cmd", "ps1", "com", "msi", "sh"]
+        .iter()
+        .any(|ext| lower.rsplit('.').next() == Some(*ext) && lower.contains('.'))
+}
+
+/// Push the drawer's background quads: the flat panel surface (same 底色 as
+/// the left tab sidebar), the active header view-tab pill, and the filter input
+/// box — all curved with the shared chrome radius.
+pub(super) fn push_quads(
+    panel: &SidePanel,
+    layout: &PanelLayout,
+    theme: &NebulaTheme,
+    quads: &mut Vec<UiQuad>,
+    scale: f32,
+) {
+    let s = |v: f32| v * scale;
+    let palette = theme.palette();
+    let sk = theme.skin();
+    let (px, py, pw, ph) = layout.panel;
+    // Shared chrome radius + the tab sidebar's accent (edge_r) — so the drawer
+    // curves and lights up exactly like the left vertical tabs.
+    let radius = s(UI_CORNER_RADIUS_LOGICAL);
+    let accent = palette.edge_r;
+
+    // Panel surface: the SAME flat 底色 as the left tab sidebar (`palette.panel`,
+    // not a gradient — the gradient budget belongs to the brand art, chrome
+    // stays flat).
+    quads.push(UiQuad::solid(px, py, pw, ph, radius, palette.panel));
+
+    // Header: two half-width view tabs. The active one wears the left
+    // sidebar's floating-pill language — an accent halo, the tab 底色, and a
+    // soft accent wash — no accent bar (state is brightness, per the sheet).
+    // A hovered inactive tab gets the quiet hover wash.
+    let tab_w = pw * 0.5 - s(8.0);
+    let tab_h = layout.header_h - s(8.0);
+    let (fx, gx) = (px + s(6.0), px + pw * 0.5 + s(2.0));
+    let active_x = match panel.view {
+        PanelView::Files => fx,
+        PanelView::Git => gx,
+    };
+    let ty = py + s(4.0);
+    quads.push(UiQuad::solid(
+        active_x - s(1.0),
+        ty - s(1.0),
+        tab_w + s(2.0),
+        tab_h + s(2.0),
+        radius + s(1.0),
+        Rgba::new(accent.r, accent.g, accent.b, 40),
+    ));
+    quads.push(UiQuad::solid(active_x, ty, tab_w, tab_h, radius, palette.tab_bg_l));
+    quads.push(UiQuad::solid(
+        active_x,
+        ty,
+        tab_w,
+        tab_h,
+        radius,
+        Rgba::new(accent.r, accent.g, accent.b, 26),
+    ));
+    let hovered_tab_x = match panel.hover {
+        PanelHit::ViewFiles if panel.view != PanelView::Files => Some(fx),
+        PanelHit::ViewGit if panel.view != PanelView::Git => Some(gx),
+        _ => None,
+    };
+    if let Some(hx) = hovered_tab_x {
+        quads.push(UiQuad::solid(hx, ty, tab_w, tab_h, radius, sk.hover));
+    }
+
+    // Hovered list row: a quiet wash under the pointer (never on top of the
+    // selected pill — selection outranks hover).
+    if let PanelHit::Row(i) = panel.hover {
+        if i < layout.max_rows {
+            let hover_ok = match panel.view {
+                PanelView::Files => panel
+                    .file_rows()
+                    .get(panel.scroll + i)
+                    .is_some_and(|row| panel.selected.as_ref() != Some(&row.path)),
+                PanelView::Git => true,
+            };
+            if hover_ok {
+                let ry = layout.list_y + i as f32 * layout.row_h;
+                quads.push(UiQuad::solid(
+                    px + s(10.0),
+                    ry - s(1.0),
+                    pw - s(20.0),
+                    layout.row_h - s(4.0),
+                    radius,
+                    sk.hover,
+                ));
+            }
+        }
+    }
+
+    // Files-view filter box (input surface; accent ring while focused).
+    if panel.view == PanelView::Files {
+        let (sx, sy, sw, sh) = layout.search;
+        if panel.search_focus {
+            let a = sk.accent;
+            quads.push(UiQuad::solid(
+                sx - s(1.0),
+                sy - s(1.0),
+                sw + s(2.0),
+                sh + s(2.0),
+                radius + s(1.0),
+                Rgba::new(a.r, a.g, a.b, 200),
+            ));
+        }
+        quads.push(UiQuad::solid(sx, sy, sw, sh, radius, sk.input));
+
+        // The selected file row wears the tab's floating-pill language: an
+        // accent halo + the tab 底色 + a soft accent wash — the same treatment
+        // the left sidebar's active tab and the header view-tab use, so a
+        // picked row reads as "selected" identically across the whole chrome.
+        // The dragged row shares it, so the drag has a visible subject from press.
+        let marked = panel.drag_file.as_ref().map(|d| &d.path).or(panel.selected.as_ref());
+        if let Some(mark) = marked {
+            if let Some(i) = panel
+                .file_rows()
+                .iter()
+                .skip(panel.scroll)
+                .take(layout.max_rows)
+                .position(|row| &row.path == mark)
+            {
+                let ry = layout.list_y + i as f32 * layout.row_h - s(1.0);
+                let (px, _, pw, _) = layout.panel;
+                let rx = px + s(10.0);
+                let rw = pw - s(20.0);
+                let rh = layout.row_h - s(2.0);
+                quads.push(UiQuad::solid(
+                    rx - s(1.0),
+                    ry - s(1.0),
+                    rw + s(2.0),
+                    rh + s(2.0),
+                    radius + s(1.0),
+                    Rgba::new(accent.r, accent.g, accent.b, 40),
+                ));
+                quads.push(UiQuad::solid(rx, ry, rw, rh, radius, palette.tab_bg_l));
+                quads.push(UiQuad::solid(
+                    rx,
+                    ry,
+                    rw,
+                    rh,
+                    radius,
+                    Rgba::new(accent.r, accent.g, accent.b, 26),
+                ));
+            }
+        }
+
+        // Drag ghost: a floating chip beside the pointer while a file is in
+        // flight — the pointer alone was invisible feedback.
+        if let Some(drag) = panel.drag_file.as_ref().filter(|d| d.active) {
+            let (mx, my) = drag.pos;
+            let chip_w = ((drag.name.chars().count() as f32 + 4.0) * s(8.0)).min(s(220.0));
+            quads.push(UiQuad::solid(
+                mx + s(12.0),
+                my + s(14.0),
+                chip_w,
+                s(26.0),
+                s(8.0),
+                sk.accent_soft,
+            ));
+            quads.push(UiQuad::solid(
+                mx + s(12.0),
+                my + s(14.0),
+                s(2.0),
+                s(26.0),
+                s(1.0),
+                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 190),
+            ));
+        }
+    } else if panel.git().is_some() {
+        // Git view: the strip is either the commit-message input (accent
+        // ring) or the three action buttons (暂存 / 提交 / 推送). Outside a
+        // repository there is nothing to act on — no strip at all.
+        let (sx, sy, sw, sh) = layout.search;
+        if panel.commit_focus {
+            let a = sk.accent;
+            quads.push(UiQuad::solid(
+                sx - s(1.0),
+                sy - s(1.0),
+                sw + s(2.0),
+                sh + s(2.0),
+                radius + s(1.0),
+                Rgba::new(a.r, a.g, a.b, 200),
+            ));
+            quads.push(UiQuad::solid(sx, sy, sw, sh, radius, sk.input));
+        } else {
+            for (bx, bw) in git_button_rects(sx, sw, s(8.0)) {
+                quads.push(UiQuad::solid(bx, sy, bw, sh, radius, sk.input));
+            }
+            // Hovered action button brightens (hover wash over the pill).
+            if panel.hover == PanelHit::Search {
+                let (hx, _) = panel.hover_pos;
+                for (bx, bw) in git_button_rects(sx, sw, s(8.0)) {
+                    if hx >= bx && hx < bx + bw {
+                        quads.push(UiQuad::solid(bx, sy, bw, sh, radius, sk.hover));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The three git action buttons' `(x, w)` spans inside the strip at `sx..sx+sw`
+/// (暂存 / 提交 / 推送). Shared by quads, text and hit-testing.
+pub fn git_button_rects(sx: f32, sw: f32, gap: f32) -> [(f32, f32); 3] {
+    let bw = (sw - 2.0 * gap) / 3.0;
+    [(sx, bw), (sx + bw + gap, bw), (sx + 2.0 * (bw + gap), bw)]
+}
+
+/// Draw the drawer's text: header tabs, the summary line (cwd tail or the
+/// branch ± counts), the filter box content, then the visible rows.
+pub(super) fn draw_text(
+    panel: &SidePanel,
+    layout: &PanelLayout,
+    theme: &NebulaTheme,
+    ls: LsColors,
+    r: &mut Renderer,
+    gc: &mut GlyphCache,
+    size: &SizeInfo,
+    scale: f32,
+) {
+    let s = |v: f32| v * scale;
+    let cell_w = size.cell_width();
+    let cell_h = size.cell_height();
+    let sk = theme.skin();
+    let is_light = theme.palette().is_light;
+    let (px, py, pw, _) = layout.panel;
+    let text_pad = s(12.0);
+    // Left-truncate to the panel width (paths overflow on the left, names on
+    // the right — keeping the discriminating tail visible). `reserve` frees
+    // columns already eaten by icons/indent on that row.
+    let max_chars = (((pw - 2.0 * text_pad) / cell_w) as usize).max(8);
+    let clip_tail = |t: &str, reserve: usize| -> String {
+        let budget = max_chars.saturating_sub(reserve).max(4);
+        let n = t.chars().count();
+        if n <= budget {
+            t.to_string()
+        } else {
+            let skip = n - (budget - 1);
+            format!("…{}", t.chars().skip(skip).collect::<String>())
+        }
+    };
+
+    // Header tabs: icon + label.
+    let header_ty = py + (layout.header_h - cell_h) / 2.0;
+    let files_hover = panel.hover == PanelHit::ViewFiles;
+    let git_hover = panel.hover == PanelHit::ViewGit;
+    let files_lift = if files_hover && panel.view != PanelView::Files { -s(1.0) } else { 0.0 };
+    let git_lift = if git_hover && panel.view != PanelView::Git { -s(1.0) } else { 0.0 };
+    let (files_ink, git_ink) = match panel.view {
+        PanelView::Files => (sk.ink_strong, sk.ink_dim),
+        PanelView::Git => (sk.ink_dim, sk.ink_strong),
+    };
+    let fx = px + s(6.0) + s(12.0);
+    r.draw_chrome_text(size, fx, header_ty + files_lift, files_ink, ICON_FOLDER, gc);
+    r.draw_chrome_text(size, fx + cell_w * 1.8, header_ty + files_lift, files_ink, "文件", gc);
+    let gx = px + pw * 0.5 + s(2.0) + s(12.0);
+    r.draw_chrome_text(size, gx, header_ty + git_lift, git_ink, ICON_BRANCH, gc);
+    r.draw_chrome_text(size, gx + cell_w * 1.8, header_ty + git_lift, git_ink, "Git", gc);
+
+    let summary_y = py + layout.header_h + (s(30.0) - cell_h) / 2.0;
+    let scroll = panel.scroll;
+    let row_ty =
+        |i: usize| layout.list_y + i as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0;
+
+    match panel.view {
+        PanelView::Files => {
+            let summary = panel
+                .root()
+                .map(|root| clip_tail(&root.display().to_string(), 0))
+                .unwrap_or_else(|| "（无目录）".into());
+            r.draw_chrome_text(size, px + text_pad, summary_y, sk.ink_dim, &summary, gc);
+
+            // Filter box: magnifier + query (caret while focused) or hint.
+            let (sx, sy, _, sh) = layout.search;
+            let search_ty = sy + (sh - cell_h) / 2.0;
+            r.draw_chrome_text(size, sx + s(8.0), search_ty, sk.ink_faint, ICON_SEARCH, gc);
+            let qx = sx + s(8.0) + cell_w * 1.8;
+            if panel.search.is_empty() && !panel.search_focus {
+                r.draw_chrome_text(size, qx, search_ty, sk.ink_faint, "筛选文件…", gc);
+            } else {
+                let shown = if panel.search_focus && super::caret_blink_on() {
+                    format!("{}▏", panel.search)
+                } else {
+                    panel.search.clone()
+                };
+                r.draw_chrome_text(size, qx, search_ty, sk.ink_strong, &shown, gc);
+            }
+
+            // Tree rows: chevron (dirs, tree mode only) + folder/file icon + name.
+            let filtering = !panel.search.trim().is_empty();
+            for (i, row) in
+                panel.file_rows().iter().skip(scroll).take(layout.max_rows).enumerate()
+            {
+                let hovered = matches!(panel.hover, PanelHit::Row(h) if h == i);
+                let selected = panel.selected.as_ref() == Some(&row.path)
+                    || panel.drag_file.as_ref().is_some_and(|d| d.path == row.path);
+                let lift_x = if hovered || selected { s(1.0) } else { 0.0 };
+                let lift_y = if hovered { -s(1.0) } else { 0.0 };
+                let ry = row_ty(i) + lift_y;
+                let mut x = px + text_pad + row.depth as f32 * cell_w * 2.4 + lift_x;
+                if !filtering {
+                    if row.is_dir {
+                        let chev =
+                            if row.expanded { ICON_CHEVRON_DOWN } else { ICON_CHEVRON_RIGHT };
+                        r.draw_chrome_text(size, x, ry, sk.ink_faint, chev, gc);
+                    }
+                    x += cell_w * 1.9;
+                }
+                let (icon, icon_ink, name_ink) = if row.is_dir {
+                    // `ls` parity: directories in the terminal's ANSI blue.
+                    (if row.expanded { ICON_FOLDER_OPEN } else { ICON_FOLDER }, ls.dir, ls.dir)
+                } else if is_executable(&row.name) {
+                    // Executables in ANSI green, same as Nebula-List.
+                    (ICON_FILE, ls.exec, ls.exec)
+                } else {
+                    (ICON_FILE, sk.ink_dim, sk.ink)
+                };
+                r.draw_chrome_text(size, x, ry, icon_ink, icon, gc);
+                let reserve = row.depth * 3 + if filtering { 4 } else { 6 };
+                let name = clip_tail(&row.name, reserve);
+                r.draw_chrome_text(size, x + cell_w * 2.2, ry, name_ink, &name, gc);
+            }
+
+            // Drag ghost label, riding the chip pushed by `push_quads`.
+            if let Some(drag) = panel.drag_file.as_ref().filter(|d| d.active) {
+                let (mx, my) = drag.pos;
+                let ty = my + s(12.0) + (s(26.0) - cell_h) / 2.0;
+                r.draw_chrome_text(
+                    size,
+                    mx + s(10.0) + s(12.0),
+                    ty,
+                    sk.ink_strong,
+                    &drag.name,
+                    gc,
+                );
+            }
+        },
+        PanelView::Git => match panel.git() {
+            Some(git) => {
+                // Branch line: icon + name strong; ↑ahead + line counts on the
+                // right (an op error takes the line over instead).
+                let bx = px + text_pad;
+                r.draw_chrome_text(size, bx, summary_y, sk.ink_dim, ICON_BRANCH, gc);
+                let branch = clip_tail(
+                    if git.branch.is_empty() { "(no branch)" } else { &git.branch },
+                    18,
+                );
+                r.draw_chrome_text(size, bx + cell_w * 1.8, summary_y, sk.ink_strong, &branch, gc);
+                if let Some(err) = panel.op_error() {
+                    let msg = clip_tail(&err, branch.chars().count() + 4);
+                    let ex = px + pw - text_pad - msg.chars().count() as f32 * cell_w;
+                    let c_del = status_color('D', is_light).unwrap();
+                    r.draw_chrome_text(size, ex, summary_y, c_del, &msg, gc);
+                } else {
+                    let c_add = status_color('A', is_light).unwrap();
+                    let c_del = status_color('D', is_light).unwrap();
+                    let minus = format!("\u{2212}{}", git.minus);
+                    let plus = format!("+{}", git.plus);
+                    let ahead = if git.ahead > 0 { format!("↑{} ", git.ahead) } else { String::new() };
+                    let minus_x = px + pw - text_pad - minus.chars().count() as f32 * cell_w;
+                    let plus_x = minus_x - (plus.chars().count() + 1) as f32 * cell_w;
+                    let ahead_x = plus_x - (ahead.chars().count() + 1) as f32 * cell_w;
+                    if !ahead.is_empty() {
+                        r.draw_chrome_text(size, ahead_x, summary_y, sk.accent, &ahead, gc);
+                    }
+                    r.draw_chrome_text(size, plus_x, summary_y, c_add, &plus, gc);
+                    r.draw_chrome_text(size, minus_x, summary_y, c_del, &minus, gc);
+                }
+
+                // Action strip: commit-message input while composing, else the
+                // 暂存 / 提交 / 推送 buttons (disabled = dim ink).
+                let (sx, sy, sw, sh) = layout.search;
+                let strip_ty = sy + (sh - cell_h) / 2.0;
+                if panel.commit_focus {
+                    let caret = if super::caret_blink_on() { "▏" } else { "" };
+                    let shown = format!("{}{caret}", panel.commit_msg);
+                    let hint = if panel.commit_msg.is_empty() { "提交信息…  Enter 提交 · Esc 取消" } else { "" };
+                    if hint.is_empty() {
+                        r.draw_chrome_text(size, sx + s(8.0), strip_ty, sk.ink_strong, &shown, gc);
+                    } else {
+                        r.draw_chrome_text(size, sx + s(8.0), strip_ty, sk.ink_faint, hint, gc);
+                    }
+                } else {
+                    let busy = panel.op_running();
+                    let stage_on = !busy && !git.unstaged.is_empty();
+                    let commit_on = !busy && !git.staged.is_empty();
+                    let push_on = !busy && git.ahead > 0;
+                    let push_label =
+                        if git.ahead > 0 { format!("推送 ↑{}", git.ahead) } else { "推送".to_string() };
+                    let labels: [(&str, bool); 3] = [
+                        (if busy { "…" } else { "暂存全部" }, stage_on),
+                        ("提交", commit_on),
+                        (&push_label, push_on),
+                    ];
+                    for ((bx, bw), (label, enabled)) in git_button_rects(sx, sw, s(8.0)).into_iter().zip(labels)
+                    {
+                        let hovered = panel.hover == PanelHit::Search
+                            && panel.hover_pos.0 >= bx
+                            && panel.hover_pos.0 < bx + bw;
+                        let cols: usize =
+                            label.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+                        let lx = bx + (bw - cols as f32 * cell_w).max(0.0) / 2.0;
+                        let ink = if enabled { sk.ink_strong } else { sk.ink_faint };
+                        r.draw_chrome_text(size, lx, strip_ty + if hovered { -s(1.0) } else { 0.0 }, ink, label, gc);
+                    }
+                }
+
+                // Sectioned rows: 未暂存 header, its files, 已暂存 header, its
+                // files — one flat scroll space.
+                enum GLine<'a> {
+                    Header(String),
+                    File(char, &'a String),
+                }
+                let mut lines: Vec<GLine<'_>> = Vec::new();
+                if git.unstaged.is_empty() && git.staged.is_empty() {
+                    lines.push(GLine::Header("工作区干净".into()));
+                } else {
+                    lines.push(GLine::Header(format!("未暂存 ({})", git.unstaged.len())));
+                    for (c, p) in &git.unstaged {
+                        lines.push(GLine::File(*c, p));
+                    }
+                    lines.push(GLine::Header(format!("已暂存 ({})", git.staged.len())));
+                    for (c, p) in &git.staged {
+                        lines.push(GLine::File(*c, p));
+                    }
+                }
+                for (i, line) in lines.iter().skip(scroll).take(layout.max_rows).enumerate() {
+                    let ry = row_ty(i);
+                    match line {
+                        GLine::Header(t) => {
+                            r.draw_chrome_text(size, px + text_pad, ry, sk.ink_dim, t, gc)
+                        },
+                        GLine::File(status, path) => {
+                            let sc = status_color(*status, is_light).unwrap_or(sk.ink_dim);
+                            r.draw_chrome_text(size, px + text_pad, ry, sc, &status.to_string(), gc);
+                            let text = clip_tail(path, 3);
+                            r.draw_chrome_text(
+                                size,
+                                px + text_pad + cell_w * 2.0,
+                                ry,
+                                sk.ink,
+                                &text,
+                                gc,
+                            );
+                        },
+                    }
+                }
+            },
+            None => {
+                r.draw_chrome_text(size, px + text_pad, summary_y, sk.ink_dim, "不在 git 仓库中", gc);
+            },
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_switches_views_without_closing() {
+        let mut p = SidePanel::new();
+        p.toggle(PanelView::Files);
+        assert!(p.open);
+        p.toggle(PanelView::Git);
+        assert!(p.open, "switching views keeps the drawer open");
+        assert_eq!(p.view, PanelView::Git);
+        p.toggle(PanelView::Git);
+        assert!(!p.open, "re-toggling the current view closes");
+    }
+
+    #[test]
+    fn sync_noops_while_closed() {
+        let mut p = SidePanel::new();
+        assert!(!p.sync(Some(std::env::temp_dir())));
+    }
+
+    #[test]
+    fn tree_lists_dirs_first_and_expands_on_click() {
+        let base = std::env::temp_dir().join(format!("nebula-panel-test-{}", std::process::id()));
+        let sub = base.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(base.join("a.txt"), "x").unwrap();
+        std::fs::write(sub.join("inner.txt"), "y").unwrap();
+
+        let mut p = SidePanel::new();
+        p.toggle(PanelView::Files);
+        assert!(p.sync(Some(base.clone())));
+        let rows = p.file_rows();
+        assert_eq!(rows[0].name, "sub", "directory sorts before file");
+        assert!(rows[0].is_dir);
+        assert_eq!(rows.len(), 2, "collapsed dir hides children");
+
+        assert!(p.click_row(0), "clicking a dir toggles expansion");
+        let rows = p.file_rows();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].name, "inner.txt");
+        assert_eq!(rows[1].depth, 1);
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn hit_test_maps_header_and_rows() {
+        let l = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0);
+        let (px, py, pw, _) = l.panel;
+        assert_eq!(panel_hit(&l, px - 1.0, py + 5.0), PanelHit::None);
+        assert_eq!(panel_hit(&l, px + 5.0, py + 5.0), PanelHit::ViewFiles);
+        assert_eq!(panel_hit(&l, px + pw - 5.0, py + 5.0), PanelHit::ViewGit);
+        assert_eq!(panel_hit(&l, px + 5.0, l.list_y + l.row_h * 1.5), PanelHit::Row(1));
+    }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "nebula_hook"
+version = "0.2.1"
+license = "GPL-3.0-or-later"
+description = "Tiny bridge: AI-CLI lifecycle hooks -> Nebula named pipe"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+# Pure std on purpose: this binary runs once per AI turn event, so process
+# startup IS the latency budget. No deps = minimal imports = <15 ms cold.
+
+[[bin]]
+name = "nebula-hook"
+path = "src/main.rs"
