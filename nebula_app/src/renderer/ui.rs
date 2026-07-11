@@ -80,6 +80,12 @@ pub struct UiQuad {
     pub width: f32,
     pub height: f32,
     pub radius: f32,
+    /// Per-corner radii in pixels `[top-left, top-right, bottom-right,
+    /// bottom-left]`. Defaults to `[radius; 4]`; set via [`UiQuad::with_corners`]
+    /// to round only some corners (e.g. the connected top-bar/sidebar L-frame,
+    /// where the join corners are square and only the outer corners curve).
+    /// `radius` still drives the flat/glow shader flags, so keep it ≥ 0 here.
+    pub corner_radii: [f32; 4],
     /// Soft glow falloff in pixels; `0.0` means a crisp rounded rectangle.
     pub feather: f32,
     /// Explicit corner positions in pixels `[top-left, bottom-left, top-right,
@@ -107,6 +113,7 @@ impl UiQuad {
             width,
             height,
             radius,
+            corner_radii: [radius; 4],
             feather: 0.0,
             corners: None,
             v_range: [0.0, 1.0],
@@ -134,6 +141,7 @@ impl UiQuad {
             width,
             height,
             radius,
+            corner_radii: [radius; 4],
             feather: 0.0,
             corners: None,
             v_range: [0.0, 1.0],
@@ -152,6 +160,7 @@ impl UiQuad {
             width,
             height,
             radius: 0.0,
+            corner_radii: [0.0; 4],
             feather: 1.0,
             corners: None,
             v_range: [0.0, 1.0],
@@ -176,6 +185,7 @@ impl UiQuad {
             width: 0.0,
             height: 0.0,
             radius: -1.0,
+            corner_radii: [0.0; 4],
             feather: 0.0,
             corners: Some(corners),
             v_range: [0.0, 1.0],
@@ -183,6 +193,19 @@ impl UiQuad {
             color1,
             gradient,
         }
+    }
+
+    /// Rounded rectangle with independent per-corner radii, ordered
+    /// `[top-left, top-right, bottom-right, bottom-left]`. Used for the
+    /// connected top-bar / sidebar L-frame, where the two join corners stay
+    /// square (radius 0) and only the outer corners curve. `radius` is kept as
+    /// the max of the four so the shader's flat/glow branch and the geometry's
+    /// AA padding still behave; the fragment shader picks the right corner.
+    #[inline]
+    pub fn with_corners(mut self, corner_radii: [f32; 4]) -> Self {
+        self.corner_radii = corner_radii;
+        self.radius = corner_radii.iter().copied().fold(0.0_f32, f32::max);
+        self
     }
 
     /// Clip the quad to the vertical band `top..bot` (screen px). The visible
@@ -226,6 +249,8 @@ struct UiVertex {
     // Gradient axis in uv space.
     gx: f32,
     gy: f32,
+    // Per-corner radii in pixels: [top-left, top-right, bottom-right, bottom-left].
+    corners: [f32; 4],
     // Endpoint colors.
     c0: [u8; 4],
     c1: [u8; 4],
@@ -275,6 +300,11 @@ impl UiRenderer {
             gl::VertexAttribPointer(3, 2, gl::FLOAT, gl::FALSE, stride, offset as *const _);
             gl::EnableVertexAttribArray(3);
             offset += (mem::size_of::<f32>() * 2) as i32;
+
+            // aCorners (location 6): vec4 per-corner radii (TL, TR, BR, BL).
+            gl::VertexAttribPointer(6, 4, gl::FLOAT, gl::FALSE, stride, offset as *const _);
+            gl::EnableVertexAttribArray(6);
+            offset += (mem::size_of::<f32>() * 4) as i32;
 
             // aColor0 (location 4): normalized ubyte4.
             gl::VertexAttribPointer(4, 4, gl::UNSIGNED_BYTE, gl::TRUE, stride, offset as *const _);
@@ -353,6 +383,7 @@ impl UiRenderer {
             feather: quad.feather,
             gx,
             gy,
+            corners: quad.corner_radii,
             c0,
             c1,
         };
