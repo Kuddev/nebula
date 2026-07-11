@@ -270,14 +270,18 @@ impl NebulaTheme {
             // follow the premium-light sheet: sidebar #f3f4f6 over app-bg
             // #f9fafb, terminal pure white for maximum contrast.
             Self::SilverLight => NebulaPalette {
-                panel: Rgba::new(243, 244, 246, 236),
-                pill: Rgba::new(229, 231, 235, 230),
-                tab_stroke_l: Rgba::new(173, 181, 189, 150),
+                // Neutral silver, blue removed: the panel/tab surfaces sit on a
+                // true-neutral gray ramp (was Tailwind's blue-leaning gray-100),
+                // and the active-tab halo is a soft neutral shadow instead of a
+                // blue wash — a pure-white pill lifting off a flat gray gutter.
+                panel: Rgba::new(245, 245, 246, 236),
+                pill: Rgba::new(233, 233, 234, 230),
+                tab_stroke_l: Rgba::new(198, 198, 200, 150),
                 tab_bg_l: Rgba::new(255, 255, 255, 242),
-                tab_bg_r: Rgba::new(249, 250, 251, 236),
-                edge_l: Rgba::new(73, 80, 87, 170),
-                edge_r: Rgba::new(82, 168, 255, 180),
-                edge_glow_l: Rgba::new(82, 168, 255, 18),
+                tab_bg_r: Rgba::new(250, 250, 251, 236),
+                edge_l: Rgba::new(110, 112, 116, 170),
+                edge_r: Rgba::new(118, 121, 126, 180),
+                edge_glow_l: Rgba::new(118, 121, 126, 18),
                 // Ambient glows are OFF on light themes: a ~4% alpha radial
                 // gradient over a pale backdrop lands on very few 8-bit steps,
                 // and the quantization contours read as blurry gray "lines"
@@ -445,6 +449,10 @@ impl NebulaTheme {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NebulaPalette {
     pub(crate) panel: Rgba,
+    /// Standalone fill for inactive tab rows / the "+" pill. Currently unpainted
+    /// (inactive rows sit flush on the sidebar; state is the white active pill),
+    /// kept for reintroducing a per-row background without re-plumbing the palette.
+    #[allow(dead_code)]
     pub(crate) pill: Rgba,
     pub(crate) tab_stroke_l: Rgba,
     pub(crate) tab_bg_l: Rgba,
