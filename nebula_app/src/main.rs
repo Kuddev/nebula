@@ -40,6 +40,7 @@ mod input;
 mod logging;
 #[cfg(target_os = "macos")]
 mod macos;
+mod markdown;
 mod message_bar;
 mod migrate;
 mod nebula_history;
@@ -52,6 +53,9 @@ mod process_tree;
 mod renderer;
 mod scheduler;
 mod session;
+mod shell_detect;
+#[cfg(windows)]
+mod ssh_credentials;
 #[cfg(windows)]
 mod mux;
 #[cfg(windows)]
@@ -78,6 +82,14 @@ use crate::macos::locale;
 use crate::polling::{IoListener, ipc};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // OpenSSH AskPass reuses the GUI executable as a credential helper. It
+    // must exit before CLI parsing or window initialization because ssh passes
+    // the human-readable prompt as an argument, not as a Nebula subcommand.
+    #[cfg(windows)]
+    if let Some(code) = ssh_credentials::run_askpass_from_env() {
+        std::process::exit(code);
+    }
+
     boot_trace("main enter");
     #[cfg(windows)]
     panic::attach_handler();

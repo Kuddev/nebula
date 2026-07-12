@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "nebula"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "base64",
@@ -1107,6 +1107,7 @@ dependencies = [
  "parking_lot",
  "png",
  "polling",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1118,12 +1119,13 @@ dependencies = [
  "unicode-width",
  "windows-sys 0.59.0",
  "winit",
+ "winreg",
  "xdg",
 ]
 
 [[package]]
 name = "nebula-completions"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "lscolors",
  "nu-ansi-term",
@@ -1134,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "nebula_config"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "log",
  "nebula_config_derive",
@@ -1144,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "nebula_config_derive"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "log",
  "nebula_config",
@@ -1157,11 +1159,11 @@ dependencies = [
 
 [[package]]
 name = "nebula_hook"
-version = "0.2.1"
+version = "0.3.0"
 
 [[package]]
 name = "nebula_terminal"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "bitflags 2.9.4",
@@ -1636,6 +1638,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89ae43fd86e4158d6db51ad8e2b80f313af9cc74f5c0e03ccb87de09998732de"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.9.4",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]

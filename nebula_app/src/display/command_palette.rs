@@ -10,14 +10,65 @@
 //! keeps the giant `mod.rs` free of the item table.
 
 use super::{NebulaTheme, SizeInfo};
+use crate::shell_detect::DetectedShell;
+
+/// A dynamic quick-launch row: a config profile (launched by index) or a
+/// detected shell (spec carried inline). Built fresh on every menu open.
+#[derive(Debug, Clone)]
+enum ProfileRow {
+    /// Config profile at this index — routed through `TabRequest::NewProfile`.
+    Config { label: String, search: String, index: usize },
+    /// Detected shell — routed through `TabRequest::NewShell`. `hint` is the
+    /// program path, shown dimmed (Windows Terminal's profile menu layout).
+    Shell { label: String, hint: String, search: String, shell: DetectedShell },
+}
+
+impl ProfileRow {
+    fn label(&self) -> &str {
+        match self {
+            Self::Config { label, .. } | Self::Shell { label, .. } => label,
+        }
+    }
+
+    fn hint(&self) -> &str {
+        match self {
+            Self::Config { .. } => "",
+            Self::Shell { hint, .. } => hint,
+        }
+    }
+
+    fn search(&self) -> &str {
+        match self {
+            Self::Config { search, .. } | Self::Shell { search, .. } => search,
+        }
+    }
+
+    /// Leading Nerd Font glyph. Detected shells carry their own; config
+    /// profiles get a generic launch mark.
+    fn icon(&self) -> &'static str {
+        match self {
+            Self::Shell { shell, .. } => shell.icon(),
+            Self::Config { .. } => "\u{ea60}",
+        }
+    }
+
+    /// Stable shell id for the full-color brand icon lookup, or `""` for
+    /// config profiles (which have no brand asset and keep their glyph).
+    fn color_id(&self) -> &str {
+        match self {
+            Self::Shell { shell, .. } => &shell.id,
+            Self::Config { .. } => "",
+        }
+    }
+}
 
 /// A single executable action reachable from the command palette.
 ///
-/// Deliberately flat and `Copy` so the input layer can match on it after the
-/// palette closes, without holding any borrow. Each variant maps onto either a
+/// Deliberately flat so the input layer can match on it after the palette
+/// closes, without holding any borrow. Each variant maps onto either a
 /// `TabRequest` (tab / split / window operations) or a `Display` method
 /// (theme / settings / appearance) — see `keyboard.rs::run_palette_action`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteAction {
     NewTab,
     CloseTab,
@@ -36,6 +87,10 @@ pub enum PaletteAction {
     SelectTheme(NebulaTheme),
     /// Launch the quick-launch profile at this config index in a new tab.
     LaunchProfile(usize),
+    /// Launch a detected shell (the new-tab dropdown) in a new tab.
+    LaunchShell(DetectedShell),
+    /// Set a detected shell as the default (the settings "默认 Shell" picker).
+    SetDefaultShell(DetectedShell),
     ToggleFilesPanel,
     ToggleGitPanel,
 }
@@ -209,17 +264,29 @@ pub struct CommandPalette {
     /// Indices into the combined item space — `0..ITEMS.len()` are the static
     /// actions, `ITEMS.len()..` map onto `profiles`. Best match first.
     filtered: Vec<usize>,
-    /// Selected row *within `filtered`*.
-    selected: usize,
+    /// Selected row *within `filtered`*. `None` when nothing is selected yet
+    /// (initial state — keyboard nav or hover will activate selection).
+    selected: Option<usize>,
     /// Recently-run `ITEMS` indices, most-recent first (deduped, capped at
     /// `RECENT_MAX`). Lifts frequent actions to the top of an empty query.
     /// Static items only: profile indices shift whenever the config changes.
     recent: Vec<usize>,
-    /// Dynamic quick-launch rows `(label, search)`, one per config profile,
-    /// refreshed on every open so live config reloads are picked up.
-    profiles: Vec<(String, String)>,
-    /// Show ONLY profile rows — the "+"-button right-click menu mode.
+    /// Dynamic quick-launch rows, refreshed on every open so live config
+    /// reloads and shell (re)detection are picked up. In profiles-only (the
+    /// new-tab dropdown) these are detected shells + config profiles; in the
+    /// full palette they're the config profiles appended after the actions.
+    profiles: Vec<ProfileRow>,
+    /// Show ONLY profile rows — the new-tab dropdown mode.
     profiles_only: bool,
+    /// In profiles-only mode, confirming a detected-shell row SETS it as the
+    /// default shell (the settings "默认 Shell" picker) instead of launching a
+    /// tab. Config-profile rows are hidden in this mode.
+    picking_default: bool,
+    /// Mouse-hovered row within the visible window (`None` when not hovering).
+    hover: Option<usize>,
+    /// Cursor blink animation state for the search input.
+    cursor_visible: bool,
+    cursor_last_toggle: std::time::Instant,
 }
 
 impl CommandPalette {
@@ -228,10 +295,14 @@ impl CommandPalette {
             open: false,
             query: String::new(),
             filtered: Vec::new(),
-            selected: 0,
+            selected: None, // No selection until user navigates
             recent: Vec::new(),
             profiles: Vec::new(),
             profiles_only: false,
+            picking_default: false,
+            hover: None,
+            cursor_visible: true,
+            cursor_last_toggle: std::time::Instant::now(),
         };
         palette.refilter();
         palette
@@ -241,16 +312,61 @@ impl CommandPalette {
         self.open
     }
 
+    /// Whether the palette is in default-shell picking mode (WT-style selector:
+    /// no search box, list from top, shell icons emphasized).
+    pub fn is_picking_default(&self) -> bool {
+        self.picking_default
+    }
+
     /// Refresh the dynamic quick-launch rows from the config's profile names.
-    /// Called by every open path so a reloaded config is always reflected.
+    /// Called by the full-palette open path so a reloaded config is reflected.
     pub fn set_profiles(&mut self, names: &[String]) {
         self.profiles = names
             .iter()
-            .map(|name| {
+            .enumerate()
+            .map(|(index, name)| ProfileRow::Config {
                 // The label carries a glyph-free prefix so profile rows read
                 // distinctly from built-in actions; the haystack adds latin
                 // aliases (matching the static items' convention).
-                (format!("启动：{name}"), format!("启动 {name} profile launch connect qidong"))
+                label: format!("启动：{name}"),
+                search: format!("启动 {name} profile launch connect qidong"),
+                index,
+            })
+            .collect();
+    }
+
+    /// Populate the new-tab dropdown: detected shells first (installed-shell
+    /// order), then config profiles. The label carries no verb prefix here —
+    /// this menu IS the shell picker, so bare names read cleaner.
+    pub fn set_shell_menu(&mut self, shells: &[DetectedShell], profiles: &[String]) {
+        let mut rows: Vec<ProfileRow> = shells
+            .iter()
+            .map(|shell| ProfileRow::Shell {
+                label: shell.name.clone(),
+                hint: shell.program.clone(),
+                search: format!("{} {} shell profile", shell.name, shell.id),
+                shell: shell.clone(),
+            })
+            .collect();
+        rows.extend(profiles.iter().enumerate().map(|(index, name)| ProfileRow::Config {
+            label: name.clone(),
+            search: format!("{name} profile launch connect qidong"),
+            index,
+        }));
+        self.profiles = rows;
+    }
+
+    /// Populate the settings "默认 Shell" picker: detected shells only (no
+    /// config profiles — you can't default to an ssh jump), and confirming
+    /// sets the default instead of launching.
+    pub fn set_default_shell_menu(&mut self, shells: &[DetectedShell]) {
+        self.profiles = shells
+            .iter()
+            .map(|shell| ProfileRow::Shell {
+                label: shell.name.clone(),
+                hint: shell.program.clone(),
+                search: format!("{} {} shell profile", shell.name, shell.id),
+                shell: shell.clone(),
             })
             .collect();
     }
@@ -259,14 +375,26 @@ impl CommandPalette {
     pub fn open(&mut self) {
         self.open = true;
         self.profiles_only = false;
+        self.picking_default = false;
         self.query.clear();
         self.refilter();
     }
 
-    /// Open showing only the quick-launch profiles (the "+" context menu).
+    /// Open showing only the quick-launch profiles (the "+" dropdown).
     pub fn open_profiles(&mut self) {
         self.open = true;
         self.profiles_only = true;
+        self.picking_default = false;
+        self.query.clear();
+        self.refilter();
+    }
+
+    /// Open the default-shell picker (settings row): profile rows only, and
+    /// confirm SETS the default rather than launching.
+    pub fn open_default_picker(&mut self) {
+        self.open = true;
+        self.profiles_only = true;
+        self.picking_default = true;
         self.query.clear();
         self.refilter();
     }
@@ -274,6 +402,32 @@ impl CommandPalette {
     pub fn close(&mut self) {
         self.open = false;
         self.profiles_only = false;
+        self.picking_default = false;
+        self.hover = None;
+    }
+
+    /// Update hover based on mouse position. `row` is the index within the
+    /// visible window (`0..max_rows`), or `None` when the mouse left.
+    pub fn set_hover(&mut self, row: Option<usize>) {
+        self.hover = row;
+    }
+
+    /// The number of filtered results currently shown.
+    pub fn visible_count(&self) -> usize {
+        self.filtered.len()
+    }
+
+    /// Update cursor blink state. Call this each frame while the palette is open.
+    pub fn tick_cursor(&mut self) {
+        const BLINK_INTERVAL_MS: u128 = 530;
+        if self.cursor_last_toggle.elapsed().as_millis() >= BLINK_INTERVAL_MS {
+            self.cursor_visible = !self.cursor_visible;
+            self.cursor_last_toggle = std::time::Instant::now();
+        }
+    }
+
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
     }
 
     pub fn toggle(&mut self) {
@@ -304,19 +458,28 @@ impl CommandPalette {
             return;
         }
         let len = self.filtered.len() as i32;
-        self.selected = (self.selected as i32 + delta).rem_euclid(len) as usize;
+        // Initialize selection on first navigation
+        let current = self.selected.unwrap_or(0) as i32;
+        self.selected = Some(((current + delta).rem_euclid(len)) as usize);
     }
 
     /// Confirm the current selection: records it as recent, closes the palette,
     /// and returns the action to run, or `None` when nothing matches.
     pub fn confirm(&mut self) -> Option<PaletteAction> {
-        let idx = *self.filtered.get(self.selected)?;
+        let selected = self.selected?;
+        let idx = *self.filtered.get(selected)?;
         self.close();
         if let Some(profile) = idx.checked_sub(ITEMS.len()) {
-            return Some(PaletteAction::LaunchProfile(profile));
+            return Some(match &self.profiles[profile] {
+                ProfileRow::Config { index, .. } => PaletteAction::LaunchProfile(*index),
+                ProfileRow::Shell { shell, .. } if self.picking_default => {
+                    PaletteAction::SetDefaultShell(shell.clone())
+                },
+                ProfileRow::Shell { shell, .. } => PaletteAction::LaunchShell(shell.clone()),
+            });
         }
         self.record_recent(idx);
-        Some(ITEMS[idx].action)
+        Some(ITEMS[idx].action.clone())
     }
 
     /// Confirm the visible row at `row` (0 = topmost visible line, mirroring
@@ -325,12 +488,12 @@ impl CommandPalette {
         if self.filtered.is_empty() || max_rows == 0 {
             return None;
         }
-        let start = self.selected.saturating_sub(max_rows - 1);
+        let start = self.selected.unwrap_or(0).saturating_sub(max_rows - 1);
         let idx = start + row;
         if idx >= self.filtered.len() {
             return None;
         }
-        self.selected = idx;
+        self.selected = Some(idx);
         self.confirm()
     }
 
@@ -356,7 +519,11 @@ impl CommandPalette {
             (0..ITEMS.len() + self.profiles.len()).collect()
         };
         let combined_search = |idx: usize| -> &str {
-            if idx < ITEMS.len() { ITEMS[idx].search } else { &self.profiles[idx - ITEMS.len()].1 }
+            if idx < ITEMS.len() {
+                ITEMS[idx].search
+            } else {
+                self.profiles[idx - ITEMS.len()].search()
+            }
         };
         let query = self.query.trim();
         if query.is_empty() {
@@ -371,7 +538,7 @@ impl CommandPalette {
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
             self.filtered = scored.into_iter().map(|(_, i)| i).collect();
         }
-        self.selected = 0;
+        self.selected = None; // Reset selection on refilter
     }
 
     pub fn query(&self) -> &str {
@@ -384,26 +551,56 @@ impl CommandPalette {
 
     /// The at-most `max_rows` visible rows, scrolled so the selection stays in
     /// view, plus the selected row's index *within that window* (`None` when the
-    /// list is empty). Collected so the result borrows nothing.
-    pub fn visible(&self, max_rows: usize) -> (Vec<(String, String)>, Option<usize>) {
+    /// list is empty OR nothing is selected yet). Collected so the result borrows nothing.
+    pub fn visible(&self, max_rows: usize) -> (Vec<PaletteRow>, Option<usize>) {
         if self.filtered.is_empty() || max_rows == 0 {
             return (Vec::new(), None);
         }
+        // No selection yet (initial state) — show first page, no highlight
+        let Some(selected) = self.selected else {
+            let rows =
+                self.filtered.iter().take(max_rows).map(|&idx| self.row_for_idx(idx)).collect();
+            return (rows, None);
+        };
         // Keep the selection visible: once it passes the last row, scroll so it
         // sits on the bottom line of the window.
-        let start = self.selected.saturating_sub(max_rows - 1);
+        let start = selected.saturating_sub(max_rows - 1);
         let rows = self
             .filtered
             .iter()
             .skip(start)
             .take(max_rows)
-            .map(|&idx| match idx.checked_sub(ITEMS.len()) {
-                Some(p) => (self.profiles[p].0.clone(), String::new()),
-                None => (ITEMS[idx].label.to_string(), ITEMS[idx].hint.to_string()),
-            })
+            .map(|&idx| self.row_for_idx(idx))
             .collect();
-        (rows, Some(self.selected - start))
+        (rows, Some(selected - start))
     }
+
+    fn row_for_idx(&self, idx: usize) -> PaletteRow {
+        match idx.checked_sub(ITEMS.len()) {
+            Some(p) => PaletteRow {
+                icon: self.profiles[p].icon().to_string(),
+                color_id: self.profiles[p].color_id().to_string(),
+                label: self.profiles[p].label().to_string(),
+                hint: self.profiles[p].hint().to_string(),
+            },
+            None => PaletteRow {
+                icon: String::new(),
+                color_id: String::new(),
+                label: ITEMS[idx].label.to_string(),
+                hint: ITEMS[idx].hint.to_string(),
+            },
+        }
+    }
+}
+
+/// One rendered palette row. `icon` is the Nerd Font fallback glyph (empty for
+/// built-in action rows); `color_id` names a full-color brand PNG when the row
+/// is a detected shell (empty otherwise, so the glyph shows instead).
+pub struct PaletteRow {
+    pub icon: String,
+    pub color_id: String,
+    pub label: String,
+    pub hint: String,
 }
 
 /// Subsequence fuzzy score, or `None` if the needle isn't a subsequence of the
@@ -451,8 +648,9 @@ pub struct PaletteLayout {
 
 /// Compute the centered popup layout for a window of `win_w` × `win_h`. The
 /// panel height is fixed (sized for `max_rows`) so it doesn't jump as the match
-/// count changes while typing.
-pub fn palette_layout(win_w: f32, win_h: f32, scale: f32) -> PaletteLayout {
+/// count changes while typing. Pass `with_input=false` for the WT-style
+/// shell-picker mode: no search box, list starts at the top.
+pub fn palette_layout(win_w: f32, win_h: f32, scale: f32, with_input: bool) -> PaletteLayout {
     let s = |v: f32| v * scale;
     let margin = s(8.0);
     let pad = s(12.0);
@@ -461,12 +659,17 @@ pub fn palette_layout(win_w: f32, win_h: f32, scale: f32) -> PaletteLayout {
     let max_rows = 8usize;
 
     let pw = s(640.0).min(win_w - 2.0 * margin);
-    let ph = pad + input_h + s(8.0) + max_rows as f32 * row_h + pad;
+    let ph = if with_input {
+        pad + input_h + s(8.0) + max_rows as f32 * row_h + pad
+    } else {
+        // No search box: list fills the whole panel
+        pad + max_rows as f32 * row_h + pad
+    };
     let px = ((win_w - pw) * 0.5).max(margin);
     let py = ((win_h - ph) * 0.5).max(s(48.0));
 
     let input = (px + pad, py + pad, pw - 2.0 * pad, input_h);
-    let list_y = py + pad + input_h + s(8.0);
+    let list_y = if with_input { py + pad + input_h + s(8.0) } else { py + pad };
 
     PaletteLayout { panel: (px, py, pw, ph), input, row_h, list_y, max_rows }
 }
@@ -479,7 +682,8 @@ use crate::renderer::{GlyphCache, Renderer};
 
 /// Push the palette's background quads: a dim veil over the window, the glass
 /// panel (glow + gradient border + fill, matching the settings modal), the
-/// query input box, and the selected-row highlight. No-op while closed.
+/// query input box (hidden in picking_default mode), and the selected-row
+/// highlight. No-op while closed.
 pub(super) fn push_quads(
     model: &CommandPalette,
     theme: &NebulaTheme,
@@ -495,7 +699,8 @@ pub(super) fn push_quads(
     let s = |v: f32| v * scale;
     let palette = theme.palette();
     let sk = theme.skin();
-    let layout = palette_layout(w, h, scale);
+    let with_input = !model.is_picking_default();
+    let layout = palette_layout(w, h, scale, with_input);
     let (px, py, pw, ph) = layout.panel;
     let (ix, iy, iw, ih) = layout.input;
 
@@ -527,8 +732,26 @@ pub(super) fn push_quads(
         sk.panel_grad_to,
         Gradient::Axis([0.25, 0.95]),
     ));
-    // Query input box.
-    quads.push(UiQuad::solid(ix, iy, iw, ih, s(10.0), sk.input));
+
+    // Query input box: only in full palette mode, not the WT-style picker.
+    if with_input {
+        quads.push(UiQuad::solid(ix, iy, iw, ih, s(10.0), sk.input));
+    }
+
+    // Hover background: subtle highlight when the mouse is over a row.
+    if let Some(hover_row) = model.hover {
+        if hover_row < layout.max_rows {
+            let row_y = layout.list_y + hover_row as f32 * layout.row_h;
+            quads.push(UiQuad::solid(
+                ix + s(8.0),
+                row_y + s(2.0),
+                iw - s(16.0),
+                layout.row_h - s(4.0),
+                s(6.0),
+                sk.hover,
+            ));
+        }
+    }
 
     // Highlight pill behind the selected row (list scrolls to keep it shown).
     let (_, selected_row) = model.visible(layout.max_rows);
@@ -549,6 +772,12 @@ pub(super) fn push_quads(
 
 /// Draw the palette's text: the query line (with a caret) or a placeholder,
 /// then the result rows with right-aligned shortcut hints. No-op while closed.
+///
+/// Returns the full-color brand-icon draw requests (`color_id`, pixel rect)
+/// for detected-shell rows: the caller resolves each to a texture and stages
+/// it for the post-text image pass (a textured quad can't be interleaved with
+/// glyph batches). Rows whose id has no brand asset draw the Nerd Font glyph
+/// here and contribute nothing to the returned list.
 pub(super) fn draw_text(
     model: &CommandPalette,
     theme: &NebulaTheme,
@@ -556,54 +785,91 @@ pub(super) fn draw_text(
     gc: &mut GlyphCache,
     size: &SizeInfo,
     scale: f32,
-) {
+) -> Vec<(String, (f32, f32, f32, f32))> {
+    let mut icon_draws = Vec::new();
     if !model.is_open() {
-        return;
+        return icon_draws;
     }
     let s = |v: f32| v * scale;
     let w = size.width();
     let h = size.height();
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let layout = palette_layout(w, h, scale);
+    let with_input = !model.is_picking_default();
+    let layout = palette_layout(w, h, scale, with_input);
     let (ix, iy, iw, ih) = layout.input;
 
     // Inks from the theme skin: dark text on light panels, pale on dark.
     let sk = theme.skin();
 
+    // Left edge for text content (list rows). In full palette mode this is
+    // indented past the search icon; in WT picker mode it starts at the panel pad.
     let text_x = ix + s(14.0);
-    let text_y = iy + (ih - cell_h) / 2.0;
-    let query = model.query();
-    if query.is_empty() {
-        r.draw_chrome_text(
-            size,
-            text_x,
-            text_y,
-            sk.ink_faint,
-            "输入命令进行搜索…    Esc 关闭 · ↑↓ 选择 · Enter 执行",
-            gc,
-        );
-    } else {
-        let shown = format!("{query}▏");
-        r.draw_chrome_text(size, text_x, text_y, sk.ink_strong, &shown, gc);
+
+    // Search icon and query text: only in full palette mode, not WT picker.
+    if with_input {
+        const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
+        r.draw_chrome_text(size, text_x, iy + (ih - cell_h) / 2.0, sk.accent, ICON_SEARCH, gc);
+
+        let query_x = text_x + s(28.0);
+        let text_y = iy + (ih - cell_h) / 2.0;
+        let query = model.query();
+        let cursor = if model.cursor_visible() { "▏" } else { "" };
+
+        if query.is_empty() {
+            // Empty: only show blinking cursor at the start (no placeholder)
+            r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, cursor, gc);
+        } else {
+            // Show query + cursor at the end
+            let shown = format!("{query}{cursor}");
+            r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, &shown, gc);
+        }
     }
 
     if model.is_empty() {
         r.draw_chrome_text(size, text_x, layout.list_y + s(8.0), sk.ink_dim, "无匹配命令", gc);
-        return;
+        return icon_draws;
     }
 
     let (rows, selected_row) = model.visible(layout.max_rows);
-    for (row, (label, hint)) in rows.into_iter().enumerate() {
-        let ry =
-            layout.list_y + row as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0 - s(2.0);
+    for (row, entry) in rows.into_iter().enumerate() {
+        let PaletteRow { icon, color_id, label, hint } = entry;
+        let ry = layout.list_y + row as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0 - s(2.0);
         let fg = if Some(row) == selected_row { sk.ink_strong } else { sk.ink };
-        r.draw_chrome_text(size, text_x, ry, fg, &label, gc);
+        // Leading icon, then the label indented past it. Detected shells with a
+        // brand asset stage a full-color textured quad (drawn later); the rest
+        // fall back to the Nerd Font glyph. Built-in action rows carry an empty
+        // icon and keep the original left edge.
+        let has_color =
+            !color_id.is_empty() && crate::shell_detect::color_icon_png(&color_id).is_some();
+        let label_x = if has_color {
+            // Square icon sized to the glyph ink, vertically centered on the row.
+            let icon_s = (cell_h * 0.92).round();
+            let icon_y = (ry + (cell_h - icon_s) / 2.0).round();
+            icon_draws.push((color_id, (text_x, icon_y, icon_s, icon_s)));
+            text_x + s(26.0)
+        } else if icon.is_empty() {
+            text_x
+        } else {
+            r.draw_chrome_text(size, text_x, ry, sk.accent, &icon, gc);
+            text_x + s(26.0)
+        };
+        r.draw_chrome_text(size, label_x, ry, fg, &label, gc);
         if !hint.is_empty() {
-            let hint_w = hint.chars().count() as f32 * cell_w;
-            r.draw_chrome_text(size, ix + iw - s(14.0) - hint_w, ry, sk.ink_dim, &hint, gc);
+            // Truncate long paths: reserve space for the hint, and if it would
+            // collide with the label, clip the hint with "…" suffix.
+            let max_hint_chars = ((iw - label_x - s(28.0)) / cell_w).floor() as usize;
+            let hint_display = if hint.chars().count() > max_hint_chars && max_hint_chars > 2 {
+                let truncated: String = hint.chars().take(max_hint_chars - 1).collect();
+                format!("{}…", truncated)
+            } else {
+                hint.clone()
+            };
+            let hint_w = hint_display.chars().count() as f32 * cell_w;
+            r.draw_chrome_text(size, ix + iw - s(14.0) - hint_w, ry, sk.ink_dim, &hint_display, gc);
         }
     }
+    icon_draws
 }
 
 #[cfg(test)]
@@ -627,6 +893,26 @@ mod tests {
         assert_eq!(palette.filtered[0], 7);
         assert_eq!(palette.filtered[1], 3);
         assert_eq!(palette.filtered[2], 0);
+    }
+
+    #[test]
+    fn visible_returns_row_struct() {
+        let mut palette = CommandPalette::new();
+        palette.profiles = vec![ProfileRow::Shell {
+            label: "PowerShell".into(),
+            hint: "pwsh.exe".into(),
+            search: "pwsh".into(),
+            shell: DetectedShell {
+                name: "PowerShell".into(),
+                id: "pwsh".into(),
+                program: "pwsh.exe".into(),
+                args: vec![],
+            },
+        }];
+        palette.refilter();
+        let (rows, _) = palette.visible(10);
+        assert!(!rows.is_empty());
+        assert_eq!(rows.last().unwrap().label, "PowerShell");
     }
 
     #[test]
@@ -666,7 +952,7 @@ mod tests {
     fn confirm_records_recent_and_closes() {
         let mut palette = CommandPalette::new();
         palette.open();
-        palette.selected = 2;
+        palette.selected = Some(2);
         let picked = palette.filtered[2];
         let action = palette.confirm();
         assert!(action.is_some());
@@ -693,11 +979,15 @@ mod tests {
     fn move_selection_wraps_both_ends() {
         let mut palette = CommandPalette::new();
         palette.open();
-        assert_eq!(palette.selected, 0);
+        assert_eq!(palette.selected, None);
         palette.move_selection(-1);
-        assert_eq!(palette.selected, palette.filtered.len() - 1, "up from top wraps to bottom");
+        assert_eq!(
+            palette.selected,
+            Some(palette.filtered.len() - 1),
+            "up from top wraps to bottom"
+        );
         palette.move_selection(1);
-        assert_eq!(palette.selected, 0, "down from bottom wraps to top");
+        assert_eq!(palette.selected, Some(0), "down from bottom wraps to top");
     }
 
     #[test]
@@ -713,11 +1003,11 @@ mod tests {
         for _ in 0..7 {
             palette.move_selection(1);
         }
-        assert_eq!(palette.selected, 7);
+        assert_eq!(palette.selected, Some(7));
         let (rows, sel) = palette.visible(max);
         assert_eq!(rows.len(), max);
         assert_eq!(sel, Some(max - 1), "selection pinned to bottom row when scrolled");
-        // The bottom visible row is the actually-selected item.
-        assert_eq!(rows[max - 1].0, ITEMS[palette.filtered[7]].label);
+        // The bottom visible row is the actually-selected item (field .label).
+        assert_eq!(rows[max - 1].label, ITEMS[palette.filtered[7]].label);
     }
 }

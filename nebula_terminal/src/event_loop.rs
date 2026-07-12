@@ -470,6 +470,15 @@ impl EventLoopSender {
         self.sender.send(msg).map_err(EventLoopSendError::Send)?;
         self.poller.notify().map_err(EventLoopSendError::Io)
     }
+
+    /// A sender wired to nothing: the receiving side is dropped on the spot,
+    /// so every `send` errors out and is discarded by the caller's `let _ =`.
+    /// For panes with no PTY behind them (e.g. document-viewer tabs), whose
+    /// input must be swallowed instead of reaching some other pane's shell.
+    pub fn sink() -> Self {
+        let (sender, _) = mpsc::channel();
+        Self { sender, poller: Arc::new(Poller::new().expect("create sink poller")) }
+    }
 }
 
 /// All of the mutable state needed to run the event loop.

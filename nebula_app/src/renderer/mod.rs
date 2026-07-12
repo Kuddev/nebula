@@ -283,6 +283,12 @@ impl Renderer {
         anchor_y: f32,
         mult: f32,
     ) {
+        // Snap the anchor to whole physical pixels. Chrome anchors come out of
+        // layout math full of `* scale` and `/ 2.0` fractions; a fractional
+        // anchor shifts every glyph off the texel grid and the atlas's LINEAR
+        // sampling turns that into blur plus bleed from neighbouring atlas
+        // entries (the "dirty hairline on characters" artifact).
+        let (anchor_x, anchor_y) = (anchor_x.round(), anchor_y.round());
         let w = size_info.width();
         let h = size_info.height();
 
@@ -327,6 +333,22 @@ impl Renderer {
         text: &str,
         glyph_cache: &mut GlyphCache,
     ) {
+        self.draw_chrome_text_styled(size_info, x, y, fg, Flags::empty(), text, glyph_cache);
+    }
+
+    /// [`Self::draw_chrome_text`] with extra cell style flags. `BOLD`/`ITALIC`
+    /// select the real bold/italic faces in `draw_cells` — the document viewer
+    /// uses this so emphasis is carried by the typeface, not just ink color.
+    pub fn draw_chrome_text_styled(
+        &mut self,
+        size_info: &SizeInfo,
+        x: f32,
+        y: f32,
+        fg: Rgb,
+        style: Flags,
+        text: &str,
+        glyph_cache: &mut GlyphCache,
+    ) {
         self.begin_chrome_text(size_info, x, y);
 
         // Lay characters out by their display width. Unlike `draw_string` (which
@@ -341,7 +363,8 @@ impl Renderer {
             if width == 0 {
                 return None; // combining/zero-width marks have no cell of their own
             }
-            let flags = if width == 2 { Flags::WIDE_CHAR } else { Flags::empty() };
+            let flags =
+                if width == 2 { Flags::WIDE_CHAR | style } else { style };
             let cell = RenderableCell {
                 point: Point::new(0, Column(col)),
                 character,
@@ -406,6 +429,86 @@ impl Renderer {
         col as f32 * size_info.cell_width() * mult
     }
 
+    /// Draw document text at `scale` × the terminal font size, rasterized at
+    /// the REAL target size — unlike [`Self::draw_chrome_text_scaled`], which
+    /// stretches base-size atlas bitmaps on the GPU and goes fuzzy past ~1.2×.
+    ///
+    /// `GlyphKey.size` carries the font size per glyph, so scaling is just a
+    /// temporary bump of `glyph_cache.font_size` (distinct sizes cache as
+    /// distinct atlas entries; a handful of heading tiers stays cheap). The
+    /// grid pipeline positions glyphs inside a base-metrics cell, so each char
+    /// is drawn as its own one-cell run at a pixel anchor, advanced by the
+    /// scaled width — headings are a few dozen chars, the extra draws are noise.
+    ///
+    /// Returns the advance width in pixels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_doc_text(
+        &mut self,
+        size_info: &SizeInfo,
+        x: f32,
+        y: f32,
+        scale: f32,
+        fg: Rgb,
+        style: Flags,
+        text: &str,
+        glyph_cache: &mut GlyphCache,
+    ) -> f32 {
+        let cell_w = size_info.cell_width();
+        if (scale - 1.0).abs() < 0.01 {
+            self.draw_chrome_text_styled(size_info, x, y, fg, style, text, glyph_cache);
+            let cols: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
+            return cols as f32 * cell_w;
+        }
+
+        let base_size = glyph_cache.font_size;
+        // `Size::new` takes POINTS; feeding it `as_px()` (pt × 96/72) inflates
+        // every scaled glyph by 1.33× over the advance it's stepped by —
+        // headings rendered as one connected smear of touching glyphs.
+        glyph_cache.font_size = base_size.scale(scale);
+
+        // The shader anchors a glyph to its cell bottom using BASE metrics
+        // (`cellDim.y - glyph.top`, with `top` pre-shifted by the base descent
+        // in `load_glyph`). Push the anchor down by the ascent growth so the
+        // scaled run's baseline lands where a truly scaled cell would put it:
+        // Δ = (cell_h + descent) · (scale − 1) — i.e. ascent · (scale − 1).
+        let metrics = glyph_cache.font_metrics();
+        let anchor_y =
+            (y + (size_info.cell_height() + metrics.descent) * (scale - 1.0)).round();
+
+        // Advance by the UNfloored design advance, scaled. The grid's
+        // `cell_width` is `floor(average_advance)`; at base size the small-ppem
+        // hinting squeezes ink to fit it, but rasterized larger the outline's
+        // true width comes out — stepping by `cell_w × scale` then crams
+        // characters together, a fraction of a pixel per column, cumulatively.
+        let advance = metrics.average_advance as f32 * scale;
+
+        let mut pen_x = x;
+        for character in text.chars() {
+            let width = character.width().unwrap_or(0);
+            if width == 0 {
+                continue;
+            }
+            let flags = if width == 2 { Flags::WIDE_CHAR | style } else { style };
+            self.begin_chrome_text(size_info, pen_x.round(), anchor_y);
+            let cell = RenderableCell {
+                point: Point::new(0, Column(0)),
+                character,
+                extra: None,
+                flags,
+                bg_alpha: 0.0,
+                fg,
+                bg: Rgb::new(0, 0, 0),
+                underline: fg,
+            };
+            self.draw_cells(size_info, glyph_cache, std::iter::once(cell));
+            pen_x += width as f32 * advance;
+        }
+
+        glyph_cache.font_size = base_size;
+        self.end_chrome_text(size_info);
+        pen_x - x
+    }
+
     /// Draw all rectangles simultaneously to prevent excessive program swaps.
     pub fn draw_rects(&mut self, size_info: &SizeInfo, metrics: &Metrics, rects: Vec<RenderRect>) {
         if rects.is_empty() {
@@ -438,6 +541,14 @@ impl Renderer {
             return;
         }
 
+        // Snap every quad's edges to whole physical pixels. Layout math is
+        // full of `* scale_factor` fractions, and a 1px hairline whose top
+        // edge lands on x.5 renders as a 2px half-alpha smear — the "dirty
+        // line" class of artifact. Snapping EDGES (not x/width separately)
+        // keeps stacked quads (code-block bands, quote bars) seamless: a
+        // shared edge coordinate rounds identically on both sides.
+        let quads: Vec<UiQuad> = quads.iter().map(UiQuad::pixel_snapped).collect();
+
         // Prepare UI rendering state.
         unsafe {
             // Draw over the whole window, ignoring grid padding.
@@ -445,7 +556,7 @@ impl Renderer {
             gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);
         }
 
-        self.ui_renderer.draw(size_info, quads);
+        self.ui_renderer.draw(size_info, &quads);
 
         // Activate regular state again.
         unsafe {

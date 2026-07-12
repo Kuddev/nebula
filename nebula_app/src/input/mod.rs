@@ -67,8 +67,38 @@ const SELECTION_SCROLLING_STEP: f64 = 20.;
 /// Distance before a touch input is considered a drag.
 const MAX_TAP_DISTANCE: f64 = 20.;
 
-/// Threshold used for double_click/triple_click.
+/// Fallback double/triple-click interval where the OS setting isn't
+/// available; Windows uses the user's control-panel value instead.
+#[cfg(not(windows))]
 const CLICK_THRESHOLD: Duration = Duration::from_millis(400);
+
+/// Multi-click interval: the user's system double-click time on Windows.
+#[cfg(windows)]
+fn multi_click_time() -> Duration {
+    let ms = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() };
+    Duration::from_millis(u64::from(ms))
+}
+
+#[cfg(not(windows))]
+fn multi_click_time() -> Duration {
+    CLICK_THRESHOLD
+}
+
+/// Half the system double-click rectangle: how far apart two presses may
+/// land (per axis) and still count as one multi-click sequence.
+#[cfg(windows)]
+fn double_click_slop() -> (f32, f32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXDOUBLECLK, SM_CYDOUBLECLK,
+    };
+    let half = |v: i32| (v.max(4) as f32) / 2.0;
+    unsafe { (half(GetSystemMetrics(SM_CXDOUBLECLK)), half(GetSystemMetrics(SM_CYDOUBLECLK))) }
+}
+
+#[cfg(not(windows))]
+fn double_click_slop() -> (f32, f32) {
+    (4.0, 4.0)
+}
 
 /// Processes input from winit.
 ///
@@ -115,6 +145,11 @@ pub trait ActionContext<T: EventListener> {
     fn nebula_tab(&self, _request: crate::event::TabRequest) {}
     /// Open a filesystem path with the system handler (drawer double-click).
     fn open_path(&mut self, _path: &std::path::Path) {}
+    /// The active tab's document view, when it is a viewer tab (no pane):
+    /// wheel and navigation keys scroll this instead of the grid.
+    fn doc_view(&mut self) -> Option<&mut crate::display::markdown_view::DocView> {
+        None
+    }
     #[cfg(target_os = "macos")]
     fn create_new_window(&mut self, _tabbing_id: Option<String>) {}
     #[cfg(not(target_os = "macos"))]
@@ -545,10 +580,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             if lmb_pressed {
                 let total_lines = self.ctx.terminal().total_lines();
                 let display_offset = self.ctx.terminal().grid().display_offset();
-                let target = self
-                    .ctx
-                    .display()
-                    .scrollbar_target_offset(&size_info, total_lines, y as f32, grab);
+                let target = self.ctx.display().scrollbar_target_offset(
+                    &size_info,
+                    total_lines,
+                    y as f32,
+                    grab,
+                );
                 let delta = target as i32 - display_offset as i32;
                 if delta != 0 {
                     self.ctx.scroll(Scroll::Delta(delta));
@@ -567,6 +604,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let settings_open = self.ctx.display().settings_open();
         let settings_section = self.ctx.display().settings_section();
         let settings_scroll = self.ctx.display().settings_scroll();
+        let shell_picker_open = self.ctx.display().nebula_shell_picker_open;
+        let shell_picker_count = self.ctx.display().shell_picker_count();
         let settings_hover = crate::display::settings_hit(
             &window_size,
             scale,
@@ -575,6 +614,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             settings_open,
             settings_section,
             settings_scroll,
+            shell_picker_open,
+            shell_picker_count,
         );
         let chrome_hover = if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32)
         {
@@ -607,6 +648,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::GhostToggle
             | crate::display::SettingsHit::AcceptCycle
             | crate::display::SettingsHit::ShellCycle
+            | crate::display::SettingsHit::ShellPickerRow(_)
             | crate::display::SettingsHit::FetchToggle
             | crate::display::SettingsHit::PowerlineToggle
             | crate::display::SettingsHit::KeepSessionToggle
@@ -631,10 +673,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 | crate::display::ChromeHit::Maximize
                 | crate::display::ChromeHit::Close
                 | crate::display::ChromeHit::NewTab
+                | crate::display::ChromeHit::NewTabMenu
                 | crate::display::ChromeHit::Tab(_)
                 | crate::display::ChromeHit::TabClose(_)
                 | crate::display::ChromeHit::PanelFiles
                 | crate::display::ChromeHit::PanelGit
+                | crate::display::ChromeHit::Host(_)
+                | crate::display::ChromeHit::TabsSection
+                | crate::display::ChromeHit::HostsSection
                 | crate::display::ChromeHit::SidebarToggle => CursorIcon::Pointer,
                 _ => CursorIcon::Default,
             };
@@ -680,6 +726,34 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         {
             self.ctx.display().nebula_side_panel.hover = crate::display::side_panel::PanelHit::None;
             self.ctx.mark_dirty();
+        }
+
+        // Command palette hover: light up the row under the cursor so the user
+        // knows where they'd click. Only track while the palette is open.
+        if self.ctx.display().command_palette_open() {
+            let px = x as f32;
+            let py = y as f32;
+            let with_input = !self.ctx.display().command_palette_picking_default();
+            let layout = crate::display::command_palette::palette_layout(
+                window_size.width(),
+                window_size.height(),
+                scale,
+                with_input,
+            );
+            let (ix, iy, iw, ih) = layout.panel;
+            // Hover detection: the pointer must be inside the panel rectangle,
+            // AND below the input box (list_y), AND the computed row must be a
+            // real item (< visible count). Without the visible-count check, rows
+            // beyond the filtered list — empty space inside the panel — also hover.
+            let hover_row = if px >= ix && px < ix + iw && py >= layout.list_y && py < iy + ih {
+                let row = ((py - layout.list_y) / layout.row_h) as usize;
+                let visible_count =
+                    self.ctx.display().nebula_palette_visible_count().min(layout.max_rows);
+                if row < visible_count { Some(row) } else { None }
+            } else {
+                None
+            };
+            self.ctx.display().palette_hover(hover_row);
         }
 
         let inside_text_area = size_info.contains_point(x, y);
@@ -781,10 +855,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             x.saturating_sub(size_info.padding_x() as usize) % size_info.cell_width() as usize;
         let half_cell_width = (size_info.cell_width() / 2.0) as usize;
 
-        let additional_padding = (size_info.width()
-            - size_info.padding_x()
-            - size_info.padding_right())
-            % size_info.cell_width();
+        let additional_padding =
+            (size_info.width() - size_info.padding_x() - size_info.padding_right())
+                % size_info.cell_width();
         let end_of_grid = size_info.width() - size_info.padding_right() - additional_padding;
 
         if cell_x > half_cell_width
@@ -896,7 +969,45 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
     }
 
+    /// Advance the multi-click state machine for this press — exactly ONCE
+    /// per press, at the top of `on_mouse_press` (WT's `_numberOfClicks`
+    /// model). A press upgrades Click→Double→Triple only when it is the same
+    /// button, within the system double-click time AND within half a cell of
+    /// the previous press; anything else resets to a plain Click. The
+    /// distance gate keeps "click somewhere, then immediately click-drag
+    /// elsewhere" from being misread as a word/line drag.
+    fn advance_click_state(&mut self, button: MouseButton) -> ClickState {
+        let now = Instant::now();
+        let mouse = self.ctx.mouse();
+        let elapsed = now - mouse.last_click_timestamp;
+        let (last_x, last_y) = mouse.last_click_pos;
+        let (slop_x, slop_y) = double_click_slop();
+        let near = (mouse.x as f32 - last_x as f32).abs() <= slop_x
+            && (mouse.y as f32 - last_y as f32).abs() <= slop_y;
+        let state = match mouse.click_state {
+            _ if button != mouse.last_click_button || !near || elapsed >= multi_click_time() => {
+                ClickState::Click
+            },
+            ClickState::Click => ClickState::DoubleClick,
+            ClickState::DoubleClick => ClickState::TripleClick,
+            _ => ClickState::Click,
+        };
+        let pos = (self.ctx.mouse().x, self.ctx.mouse().y);
+        let mouse = self.ctx.mouse_mut();
+        mouse.last_click_timestamp = now;
+        mouse.last_click_button = button;
+        mouse.last_click_pos = pos;
+        mouse.click_state = state;
+        state
+    }
+
     fn on_mouse_press(&mut self, button: MouseButton) {
+        // Multi-click bookkeeping happens here and nowhere else. It used to
+        // be advanced both by the chrome block and the terminal block below;
+        // the second advance saw elapsed≈0 and upgraded EVERY terminal click
+        // to a double/triple — plain drags selected by word or whole line.
+        self.advance_click_state(button);
+
         // A left press anywhere OUTSIDE the rename box ends the edit
         // (canceling, like Esc) — the click itself still lands wherever it
         // was aimed. Clicking inside the box is caret placement (below).
@@ -910,6 +1021,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
         }
 
+        if button == MouseButton::Left && self.ctx.display().nebula_ssh_editor.is_some() {
+            let x = self.ctx.mouse().x as f32;
+            let y = self.ctx.mouse().y as f32;
+            self.ctx.display().ssh_editor_click(x, y);
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // Nebula command palette: clicking a row runs it, clicking outside
         // dismisses — same modal semantics as the keyboard path.
         if button == MouseButton::Left && self.ctx.display().command_palette_open() {
@@ -917,8 +1036,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let y = self.ctx.mouse().y as f32;
             let size = self.ctx.display().size_info;
             let scale = self.ctx.window().scale_factor as f32;
-            let layout =
-                crate::display::command_palette::palette_layout(size.width(), size.height(), scale);
+            let with_input = !self.ctx.display().command_palette_picking_default();
+            let layout = crate::display::command_palette::palette_layout(
+                size.width(),
+                size.height(),
+                scale,
+                with_input,
+            );
             let (px, py, pw, ph) = layout.panel;
             if x >= px && x < px + pw && y >= py && y < py + ph {
                 if y >= layout.list_y {
@@ -1013,13 +1137,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                                         // Click = persistent selection (until
                                         // clicking off the panel / closing it).
                                         panel.selected = Some(path.clone());
-                                        let dbl = panel.last_file_click.as_ref().is_some_and(
-                                            |(p, t)| {
+                                        let dbl =
+                                            panel.last_file_click.as_ref().is_some_and(|(p, t)| {
                                                 *p == path
                                                     && t.elapsed()
                                                         < std::time::Duration::from_millis(400)
-                                            },
-                                        );
+                                            });
                                         if dbl {
                                             panel.last_file_click = None;
                                             panel.drag_file = None;
@@ -1040,7 +1163,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                                         dbl
                                     };
                                     if dbl {
-                                        self.ctx.open_path(&path);
+                                        // Readable text files open in an
+                                        // in-app viewer tab; everything else
+                                        // goes to the system handler.
+                                        if crate::display::markdown_view::viewable_file(&path) {
+                                            self.ctx.nebula_tab(crate::event::TabRequest::OpenDoc(
+                                                path,
+                                            ));
+                                        } else {
+                                            self.ctx.open_path(&path);
+                                        }
                                     }
                                 },
                             }
@@ -1057,18 +1189,34 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         // Right-clicking the sidebar "+" opens the quick-launch profile menu
         // (Windows Terminal's profile dropdown); left-click keeps opening the
-        // default shell.
+        // default shell. Right-clicking a tab or SSH host row pins it to the
+        // top of its section (a second right-click on a host unpins).
         if button == MouseButton::Right {
             let x = self.ctx.mouse().x as f32;
             let y = self.ctx.mouse().y as f32;
-            if self.ctx.display().chrome_hit(x, y) == crate::display::ChromeHit::NewTab {
-                let profiles: Vec<String> =
-                    self.ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
-                if !profiles.is_empty() {
-                    self.ctx.display().open_profile_menu(&profiles);
+            match self.ctx.display().chrome_hit(x, y) {
+                crate::display::ChromeHit::NewTab => {
+                    let profiles: Vec<String> =
+                        self.ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
+                    // Detected shells fill the menu even with no config
+                    // profiles, so always open it.
+                    self.ctx.display().open_shell_menu(&profiles);
                     self.ctx.mark_dirty();
                     return;
-                }
+                },
+                crate::display::ChromeHit::Tab(index) => {
+                    if index > 0 {
+                        self.ctx.nebula_tab(crate::event::TabRequest::Move { from: index, to: 0 });
+                    }
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::ChromeHit::Host(index) => {
+                    self.ctx.display().pin_host(index);
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                _ => {},
             }
         }
 
@@ -1106,6 +1254,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let settings_open = self.ctx.display().settings_open();
             let settings_section = self.ctx.display().settings_section();
             let settings_scroll = self.ctx.display().settings_scroll();
+            let shell_picker_open = self.ctx.display().nebula_shell_picker_open;
+            let shell_picker_count = self.ctx.display().shell_picker_count();
             match crate::display::settings_hit(
                 &size,
                 scale,
@@ -1114,6 +1264,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 settings_open,
                 settings_section,
                 settings_scroll,
+                shell_picker_open,
+                shell_picker_count,
             ) {
                 crate::display::SettingsHit::Toggle => {
                     self.ctx.display().toggle_settings();
@@ -1141,7 +1293,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     return;
                 },
                 crate::display::SettingsHit::ShellCycle => {
-                    self.ctx.display().cycle_shell();
+                    // Toggle inline shell picker (expand/collapse the list).
+                    self.ctx.display().toggle_shell_picker();
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::SettingsHit::ShellPickerRow(index) => {
+                    self.ctx.display().set_default_shell_by_index(index);
                     self.ctx.mark_dirty();
                     return;
                 },
@@ -1199,29 +1357,31 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 crate::display::SettingsHit::None => {},
             }
             let chrome_hit = self.ctx.display().chrome_hit(x, y);
-            // Keep updating click-state tracking for its side effects (used by
-            // text selection double/triple-click), but the value is unused here
-            // now that double-click no longer closes tabs.
-            let state = {
-                let now = Instant::now();
-                let elapsed = now - self.ctx.mouse().last_click_timestamp;
-                let last_button = self.ctx.mouse().last_click_button;
-                let previous = self.ctx.mouse().click_state;
-                let state = match previous {
-                    _ if button != last_button => ClickState::Click,
-                    ClickState::Click if elapsed < CLICK_THRESHOLD => ClickState::DoubleClick,
-                    ClickState::DoubleClick if elapsed < CLICK_THRESHOLD => ClickState::TripleClick,
-                    _ => ClickState::Click,
-                };
-                let mouse = self.ctx.mouse_mut();
-                mouse.last_click_timestamp = now;
-                mouse.last_click_button = button;
-                mouse.click_state = state;
-                state
-            };
+            // Multi-click state was advanced once at the top of this
+            // function; read it for the tab double-click rename below.
+            let state = self.ctx.mouse().click_state;
             match chrome_hit {
                 crate::display::ChromeHit::NewTab => {
                     self.ctx.nebula_tab(crate::event::TabRequest::New);
+                    return;
+                },
+                crate::display::ChromeHit::NewTabMenu => {
+                    // The chevron opens the shell dropdown (detected shells +
+                    // config profiles), like Windows Terminal's profile menu.
+                    let profiles: Vec<String> =
+                        self.ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
+                    self.ctx.display().open_shell_menu(&profiles);
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::ChromeHit::AddSshHost => {
+                    self.ctx.display().open_ssh_editor();
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::ChromeHit::HostDelete(index) => {
+                    self.ctx.display().delete_ssh_host(index);
+                    self.ctx.mark_dirty();
                     return;
                 },
                 crate::display::ChromeHit::TabClose(index) => {
@@ -1256,6 +1416,24 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 },
                 crate::display::ChromeHit::SidebarToggle => {
                     self.ctx.display().toggle_sidebar();
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::ChromeHit::Host(index) => {
+                    // Open a new tab connected to this ~/.ssh/config host.
+                    let host = self.ctx.display().nebula_ssh_hosts.get(index).cloned();
+                    if let Some(host) = host {
+                        self.ctx.nebula_tab(crate::event::TabRequest::NewSsh(host));
+                    }
+                    return;
+                },
+                crate::display::ChromeHit::TabsSection => {
+                    self.ctx.display().toggle_sidebar_section(false);
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::ChromeHit::HostsSection => {
+                    self.ctx.display().toggle_sidebar_section(true);
                     self.ctx.mark_dirty();
                     return;
                 },
@@ -1301,7 +1479,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.display().scrollbar_grab(&view, display_offset, total_lines, x, y)
             {
                 self.ctx.display().nebula_scrollbar_drag = Some(grab);
-                let target = self.ctx.display().scrollbar_target_offset(&view, total_lines, y, grab);
+                let target =
+                    self.ctx.display().scrollbar_target_offset(&view, total_lines, y, grab);
                 let delta = target as i32 - display_offset as i32;
                 if delta != 0 {
                     self.ctx.scroll(Scroll::Delta(delta));
@@ -1341,23 +1520,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
             self.mouse_report(code, ElementState::Pressed);
         } else {
-            // Calculate time since the last click to handle double/triple clicks.
-            let now = Instant::now();
-            let elapsed = now - self.ctx.mouse().last_click_timestamp;
-            self.ctx.mouse_mut().last_click_timestamp = now;
-
-            // Update multi-click state.
-            self.ctx.mouse_mut().click_state = match self.ctx.mouse().click_state {
-                // Reset click state if button has changed.
-                _ if button != self.ctx.mouse().last_click_button => {
-                    self.ctx.mouse_mut().last_click_button = button;
-                    ClickState::Click
-                },
-                ClickState::Click if elapsed < CLICK_THRESHOLD => ClickState::DoubleClick,
-                ClickState::DoubleClick if elapsed < CLICK_THRESHOLD => ClickState::TripleClick,
-                _ => ClickState::Click,
-            };
-
+            // Multi-click state was advanced once at the top of this function.
             // Load mouse point, treating message bar and padding as the closest cell.
             let display_offset = self.ctx.terminal().grid().display_offset();
             let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
@@ -1376,6 +1539,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         match self.ctx.mouse().click_state {
             ClickState::Click => {
                 let had_selection = !self.ctx.selection_is_empty();
+                // Shift+click extends the existing selection to the clicked
+                // cell (Windows Terminal / native text field behaviour)
+                // instead of clearing it.
+                if self.ctx.modifiers().state().shift_key() && had_selection {
+                    self.ctx.update_selection(point, side);
+                    return;
+                }
                 let inside_text_area =
                     self.ctx.size_info().contains_point(self.ctx.mouse().x, self.ctx.mouse().y);
                 let mut hint_hit = false;
@@ -1583,14 +1753,43 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                 };
                 if rows != 0 {
-                    self.ctx
-                        .display()
-                        .nebula_side_panel
-                        .scroll_by(rows, layout.max_rows);
+                    self.ctx.display().nebula_side_panel.scroll_by(rows, layout.max_rows);
                     self.ctx.mark_dirty();
                 }
                 return;
             }
+        }
+
+        // The left sidebar's sections capture the wheel while hovered: each
+        // (TABS / SSH HOSTS) scrolls independently in whole rows.
+        {
+            let x = self.ctx.mouse().x as f32;
+            let y = self.ctx.mouse().y as f32;
+            let rows = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => -lines.signum() as i32,
+                MouseScrollDelta::PixelDelta(pos) => -(pos.y.signum() as i32),
+            };
+            if rows != 0 && self.ctx.display().sidebar_wheel(x, y, rows) {
+                self.ctx.mark_dirty();
+                return;
+            }
+        }
+
+        // A document-viewer tab owns the remaining wheel: pixel-scroll the
+        // document (no grid behind it to scroll).
+        if self.ctx.doc_view().is_some() {
+            let px = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => {
+                    -lines * 3.0 * self.ctx.size_info().cell_height()
+                },
+                MouseScrollDelta::PixelDelta(pos) => -pos.y as f32,
+            };
+            let viewport_h = self.ctx.display().terminal_card_rect().3;
+            if let Some(doc) = self.ctx.doc_view() {
+                doc.scroll_by(px * multiplier as f32, viewport_h);
+            }
+            self.ctx.mark_dirty();
+            return;
         }
 
         match delta {
@@ -2349,7 +2548,7 @@ mod tests {
             window_id: WindowId::dummy(),
         },
         end_state: ClickState::Click,
-        input_delay: CLICK_THRESHOLD,
+        input_delay: multi_click_time(),
     }
 
     test_clickstate! {
@@ -2381,7 +2580,7 @@ mod tests {
             window_id: WindowId::dummy(),
         },
         end_state: ClickState::Click,
-        input_delay: CLICK_THRESHOLD,
+        input_delay: multi_click_time(),
     }
 
     test_clickstate! {

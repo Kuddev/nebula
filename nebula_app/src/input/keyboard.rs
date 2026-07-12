@@ -138,6 +138,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        if self.ctx.display().nebula_ssh_editor.is_some() {
+            match &key.logical_key {
+                Key::Named(NamedKey::Escape) => self.ctx.display().nebula_ssh_editor = None,
+                Key::Named(NamedKey::Enter) => self.ctx.display().save_ssh_editor(),
+                Key::Named(NamedKey::Tab) => self.ctx.display().ssh_editor_next_field(),
+                Key::Named(NamedKey::Backspace) => self.ctx.display().ssh_editor_backspace(),
+                Key::Character(c) if mods.is_empty() || mods.shift_key() => {
+                    self.ctx.display().ssh_editor_insert(c)
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // Nebula command palette owns the keyboard while open: route typing /
         // navigation / confirm into it and swallow everything else, so no
         // terminal binding fires behind the modal.
@@ -187,6 +202,31 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
             self.ctx.mark_dirty();
             return;
+        }
+
+        // Document-viewer tab: bare navigation keys scroll the document. Only
+        // unmodified keys are taken — chords (Ctrl+Tab, Ctrl+Shift+W, …) fall
+        // through to the normal tab bindings, and any stray text ends in the
+        // doc pane's sink notifier anyway.
+        if self.ctx.doc_view().is_some() && mods.is_empty() {
+            let cell_h = self.ctx.size_info().cell_height();
+            let viewport_h = self.ctx.display().terminal_card_rect().3;
+            let delta = match &key.logical_key {
+                Key::Named(NamedKey::ArrowDown) => Some(3.0 * cell_h),
+                Key::Named(NamedKey::ArrowUp) => Some(-3.0 * cell_h),
+                Key::Named(NamedKey::PageDown | NamedKey::Space) => Some(viewport_h * 0.9),
+                Key::Named(NamedKey::PageUp) => Some(-viewport_h * 0.9),
+                Key::Named(NamedKey::Home) => Some(f32::NEG_INFINITY),
+                Key::Named(NamedKey::End) => Some(f32::INFINITY),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                if let Some(doc) = self.ctx.doc_view() {
+                    doc.scroll_by(delta, viewport_h);
+                }
+                self.ctx.mark_dirty();
+                return;
+            }
         }
 
         // Nebula tab shortcuts: Ctrl+Shift+T new, Ctrl+Shift+W close,
@@ -288,9 +328,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     ))
                 },
                 // Ctrl+Shift+Enter: zoom the focused pane to fill the window (toggle).
-                Key::Named(NamedKey::Enter) if shift => {
-                    Some(crate::event::TabRequest::ToggleZoom)
-                },
+                Key::Named(NamedKey::Enter) if shift => Some(crate::event::TabRequest::ToggleZoom),
                 // Ctrl+Alt+Arrow: move focus between split panes.
                 Key::Named(NamedKey::ArrowLeft) if mods.alt_key() => {
                     Some(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Left))
@@ -483,7 +521,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// both the window context (tab / split / window requests) and the display
     /// (theme / settings / appearance) — the input layer is the only place with
     /// access to both.
-    pub(super) fn run_palette_action(&mut self, action: crate::display::command_palette::PaletteAction) {
+    pub(super) fn run_palette_action(
+        &mut self,
+        action: crate::display::command_palette::PaletteAction,
+    ) {
         use crate::display::command_palette::PaletteAction::*;
         use crate::event::TabRequest;
         match action {
@@ -512,10 +553,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             ResetAppearance => self.ctx.display().reset_appearance_settings(),
             SelectTheme(theme) => self.ctx.display().select_nebula_theme(theme),
             LaunchProfile(i) => self.ctx.nebula_tab(TabRequest::NewProfile(i)),
-            ToggleFilesPanel => self
-                .ctx
-                .display()
-                .toggle_side_panel(crate::display::side_panel::PanelView::Files),
+            LaunchShell(shell) => self.ctx.nebula_tab(TabRequest::NewShell {
+                name: shell.name.clone(),
+                shell: shell.shell(),
+            }),
+            SetDefaultShell(shell) => self.ctx.display().set_default_shell(&shell),
+            ToggleFilesPanel => {
+                self.ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Files)
+            },
             ToggleGitPanel => {
                 self.ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Git)
             },

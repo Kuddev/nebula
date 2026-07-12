@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.3.0 - 2026-07-12
+
+### Highlights
+
+- 全面重设计窗口 UI：顶部栏与左侧栏组成连续 L 形 chrome，统一设置、命令面板、确认框、抽屉和主题视觉。
+- 深度还原 Windows Terminal 标签交互：拖拽排序、拖入当前终端形成分屏、边缘停靠预览、鼠标光标与位移动画反馈。
+- 新增右侧目录树与 Git 抽屉，支持文件筛选、展开、拖拽路径、文件状态、提交与推送操作，并采用新的文件类型彩色图标。
+- 新增 Markdown/GFM 只读查看器，支持标题、列表、表格、任务列表、代码块、引用、链接和滚动浏览。
+- 新增 Shell 探测与彩色品牌图标，覆盖 PowerShell、CMD、Git Bash、Nushell、WSL 及常见 Linux 发行版。
+
+### Terminal And Profiles
+
+- 标签栏 `+` 旁新增 Shell 下拉选择器，可直接使用检测到的执行器或配置 Profile 创建标签页。
+- 设置页“默认 Shell”改为原地展开的内联列表，显示完整彩色图标；选择后立即持久化并用于新会话。
+- 默认 Shell 设置支持富 ID，包括 `cmd`、`pwsh`、`nu` 与 `wsl:<distribution>`，并继续兼容 PowerShell/Git Bash 的 Nebula prompt bootstrap。
+- 新增窗口透明度、背景图片和背景图片透明度控制，设置面板支持分区滚动。
+
+### SSH
+
+- 保存的 SSH host 现在在用户设置的默认 Shell pane 内自动运行，不再把系统 `ssh.exe` 作为外部控制台根进程，因此不会弹出独立黑窗。
+- SSH hosts 标题新增 `+`，可在内部面板输入 `用户名@地址`、端口形式和密码；密码仅在用户选择保存时写入 Windows Credential Manager。
+- SSH host 行新增与标签页一致的删除按钮；删除记录时同步清理 pin 与 Windows 凭据。
+- OpenSSH AskPass 支持已保存密码自动登录、密码失效后重新询问、host key 确认，以及会话结束后的临时状态清理。
+- PowerShell、CMD、Git Bash、Nushell 与 WSL 均使用各自安全转义方式注入 SSH 命令。
+
+### Session And Rendering
+
+- 改进分屏布局、切换动画、侧栏滚动、重命名输入、hover 命中与 resize HUD。
+- 彩色 Shell 图标、AI 品牌标识和 OSC 1337 图片统一进入帧末贴图阶段，避免破坏文字 glyph batch。
+- 扩展 OSC、cwd、进程状态和 pane 事件链路，为目录树、SSH 活动与 AI CLI 状态提供实时数据。
+
+### Notes
+
+- 这是自 0.2.1 以来的大版本更新，涉及 UI、标签/分屏、文件抽屉、Markdown、Shell Profile、SSH 与渲染管线。
+- SSH 密码不会写入 `nebula_settings.txt`、命令行参数、Shell 历史或普通日志。
+
 ## 0.2.1 — 2026-07-11
 
 ### 🐛 Fixes

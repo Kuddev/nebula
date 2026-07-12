@@ -91,6 +91,8 @@ pub enum SettingsHit {
     GhostToggle,
     AcceptCycle,
     ShellCycle,
+    /// One of the expanded shell picker rows (index into detected_shells).
+    ShellPickerRow(usize),
     FetchToggle,
     PowerlineToggle,
     OpacityDown,
@@ -109,6 +111,11 @@ pub(super) struct NebulaRuntimeSettings {
     pub(super) ghost: bool,
     pub(super) accept: AcceptKey,
     pub(super) shell: NebulaShell,
+    /// Raw default-shell id (`shell=<id>`), when the user picked a detected
+    /// shell the 2-value `shell` enum can't represent (cmd, pwsh, nushell, a
+    /// WSL distro). `None` = the enum value is authoritative. Written verbatim
+    /// so `shell_detect::resolve_id` and the PTY layer both see the real id.
+    pub(super) shell_id: Option<String>,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     /// Window close keeps the PTYs alive in the resident process (detach /
@@ -122,6 +129,12 @@ pub(super) struct NebulaRuntimeSettings {
     /// powerline bridge file gets rewritten with the right name on boot
     /// (it used to be reset to the default theme every launch).
     pub(super) theme: NebulaTheme,
+    /// SSH host aliases pinned to the top of the sidebar's "SSH HOSTS"
+    /// section (right-click a host row), in pinned order.
+    pub(super) pinned_hosts: Vec<String>,
+    /// SSH destinations auto-saved after a successful typed `ssh` connection,
+    /// most recent first (see `Display::nebula_save_ssh_host`).
+    pub(super) saved_hosts: Vec<String>,
 }
 
 /// Load runtime UI settings from `Nebula/nebula_settings.txt`; defaults when
@@ -133,17 +146,23 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         ghost: true,
         accept: AcceptKey::Both,
         shell: NebulaShell::PowerShell,
+        shell_id: None,
         // Off by default: the welcome screen pipes a whole script through the
         // fresh shell and repaints on resize — real startup-latency cost on
         // the critical path (user ruling: startup speed outranks the art).
         fetch: false,
         powerline: true,
-        keep_session: true,
+        // Off by default (user ruling 2026-07-12): a plain terminal should die
+        // clean on close. Residency leaves shells running in the background,
+        // which reads as "the app didn't really exit" — opt IN, not out.
+        keep_session: false,
         opacity: config.window_opacity(),
         background: None,
         background_image: None,
         background_image_opacity: 0.38,
         theme: NebulaTheme::default(),
+        pinned_hosts: Vec::new(),
+        saved_hosts: Vec::new(),
     };
     if let Ok(data) = std::fs::read_to_string(path) {
         for line in data.lines() {
@@ -158,13 +177,21 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("accept", "tab")) => settings.accept = AcceptKey::Tab,
                 Some(("accept", "both")) => settings.accept = AcceptKey::Both,
                 Some(("shell" | "executor", v)) => {
+                    let v = v.trim();
                     if let Some(shell) = NebulaShell::from_settings(v) {
                         settings.shell = shell;
+                    }
+                    // Preserve the raw id for detected shells the enum can't
+                    // represent (cmd, pwsh, nushell, wsl:<distro>); the enum
+                    // still tracks the PTY-integrated executor family so the
+                    // prompt bootstrap picks the right base.
+                    if !v.is_empty() {
+                        settings.shell_id = Some(v.to_owned());
                     }
                 },
                 Some(("fetch", v)) => settings.fetch = parse_bool(v, true),
                 Some(("powerline", v)) => settings.powerline = parse_bool(v, true),
-                Some(("keep_session", v)) => settings.keep_session = parse_bool(v, true),
+                Some(("keep_session", v)) => settings.keep_session = parse_bool(v, false),
                 Some(("opacity", v)) => {
                     if let Ok(opacity) = v.trim().parse::<f32>() {
                         settings.opacity = opacity.clamp(0.35, 1.0);
@@ -179,6 +206,22 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                     if let Ok(opacity) = v.trim().parse::<f32>() {
                         settings.background_image_opacity = opacity.clamp(0.0, 1.0);
                     }
+                },
+                Some(("pinned_hosts", v)) => {
+                    settings.pinned_hosts = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                },
+                Some(("saved_hosts", v)) => {
+                    settings.saved_hosts = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect();
                 },
                 _ => {},
             }
@@ -225,13 +268,18 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     };
     let background = settings.background.map(format_hex_rgb).unwrap_or_default();
     let background_image = settings.background_image.as_deref().unwrap_or("");
-    let shell = settings.shell.settings_value();
+    // A picked detected-shell id (cmd/pwsh/nu/wsl:X) is written verbatim; the
+    // 2-value enum is the fallback for the built-in powershell/bash choice.
+    let shell =
+        settings.shell_id.clone().unwrap_or_else(|| settings.shell.settings_value().to_owned());
     let theme = settings.theme.prompt_name();
     let path = nebula_data_dir().join("nebula_settings.txt");
+    let pinned_hosts = settings.pinned_hosts.join(",");
+    let saved_hosts = settings.saved_hosts.join(",");
     let _ = std::fs::write(
         path,
         format!(
-            "theme={theme}\nghost={}\naccept={accept}\nshell={shell}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\n",
+            "theme={theme}\nghost={}\naccept={accept}\nshell={shell}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\n",
             settings.ghost as u8,
             settings.fetch as u8,
             settings.powerline as u8,
@@ -253,6 +301,8 @@ struct SettingsGeometry {
     nav: [(NebulaSettingsSection, f32, f32, f32, f32); 4],
     options: [(NebulaTheme, f32, f32, f32, f32); 7],
     shell: (f32, f32, f32, f32),
+    /// Shell picker expanded rows (when open): first row Y, row height, max visible.
+    shell_picker: (f32, f32, usize),
     fetch: (f32, f32, f32, f32),
     powerline: (f32, f32, f32, f32),
     ghost: (f32, f32, f32, f32),
@@ -292,8 +342,11 @@ pub(super) fn settings_max_scroll(
     size_info: &SizeInfo,
     scale_factor: f32,
     section: NebulaSettingsSection,
+    shell_picker_open: bool,
+    shell_picker_count: usize,
 ) -> f32 {
-    let geometry = settings_geometry(size_info, scale_factor, 0.0);
+    let geometry =
+        settings_geometry(size_info, scale_factor, 0.0, shell_picker_open, shell_picker_count);
     let (_, _, _, ph) = geometry.popup;
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
@@ -304,7 +357,13 @@ pub(super) fn settings_max_scroll(
     (content_h - settings_viewport_h(ph, scale_factor)).max(0.0)
 }
 
-fn settings_geometry(size_info: &SizeInfo, scale_factor: f32, scroll: f32) -> SettingsGeometry {
+fn settings_geometry(
+    size_info: &SizeInfo,
+    scale_factor: f32,
+    scroll: f32,
+    shell_picker_open: bool,
+    shell_picker_count: usize,
+) -> SettingsGeometry {
     let s = |v: f32| v * scale_factor;
     let w = size_info.width();
     let h = size_info.height();
@@ -383,7 +442,8 @@ fn settings_geometry(size_info: &SizeInfo, scale_factor: f32, scroll: f32) -> Se
 
     // Profiles: three groups — terminal (3 rows), completion (2), config file.
     let shell_y0 = 146.0;
-    let ghost_y0 = shell_y0 + 3.0 * ROW_H + GROUP_ADVANCE;
+    let picker_extra = if shell_picker_open { shell_picker_count as f32 * ROW_H } else { 0.0 };
+    let ghost_y0 = shell_y0 + 3.0 * ROW_H + picker_extra + GROUP_ADVANCE;
     let open_y0 = ghost_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let profiles_h = s(open_y0 + ROW_H + 32.0 - 72.0);
 
@@ -418,8 +478,13 @@ fn settings_geometry(size_info: &SizeInfo, scale_factor: f32, scroll: f32) -> Se
         opacity_down,
         opacity_up,
         shell: (row_x, at(shell_y0), row_w, row_h),
-        fetch: (row_x, at(shell_y0 + ROW_H), row_w, row_h),
-        powerline: (row_x, at(shell_y0 + 2.0 * ROW_H), row_w, row_h),
+        shell_picker: (
+            at(shell_y0 + ROW_H),
+            row_h,
+            if shell_picker_open { shell_picker_count } else { 0 },
+        ),
+        fetch: (row_x, at(shell_y0 + ROW_H + picker_extra), row_w, row_h),
+        powerline: (row_x, at(shell_y0 + 2.0 * ROW_H + picker_extra), row_w, row_h),
         ghost: (row_x, at(ghost_y0), row_w, row_h),
         accept: (row_x, at(ghost_y0 + ROW_H), row_w, row_h),
         open_config_file: (row_x, at(open_y0), row_w, row_h),
@@ -446,8 +511,11 @@ pub fn settings_hit(
     popup_open: bool,
     section: NebulaSettingsSection,
     scroll: f32,
+    shell_picker_open: bool,
+    shell_picker_count: usize,
 ) -> SettingsHit {
-    let geometry = settings_geometry(size_info, scale_factor, scroll);
+    let geometry =
+        settings_geometry(size_info, scale_factor, scroll, shell_picker_open, shell_picker_count);
 
     if contains_rect(geometry.gear, x, y) {
         return SettingsHit::Toggle;
@@ -498,6 +566,19 @@ pub fn settings_hit(
                 if contains_rect(geometry.shell, x, y) {
                     return SettingsHit::ShellCycle;
                 }
+                // Hit-test expanded shell picker rows (inline list below shell row).
+                if shell_picker_open && in_viewport {
+                    let (picker_y0, row_h, max) = geometry.shell_picker;
+                    let picker_x = geometry.shell.0;
+                    let picker_w = geometry.shell.2;
+                    // Calculate how many rows based on scroll position
+                    for i in 0..max {
+                        let ry = picker_y0 + i as f32 * row_h;
+                        if contains_rect((picker_x, ry, picker_w, row_h), x, y) {
+                            return SettingsHit::ShellPickerRow(i);
+                        }
+                    }
+                }
                 if contains_rect(geometry.fetch, x, y) {
                     return SettingsHit::FetchToggle;
                 }
@@ -537,7 +618,14 @@ pub(super) struct SettingsView {
     pub(super) theme: NebulaTheme,
     pub(super) ghost: bool,
     pub(super) accept: AcceptKey,
-    pub(super) shell: NebulaShell,
+    /// Pre-rendered "默认 Shell" value (icon + name) — resolved by `Display`
+    /// from the rich `shell_id` when set, else the 2-value enum label.
+    pub(super) shell_label: String,
+    /// Whether the shell picker is expanded (inline list below the shell row).
+    pub(super) shell_picker_open: bool,
+    /// Detected shells for the picker (cached once per process).
+    pub(super) shells: Vec<(String, String, String)>, // (id, name, program)
+    pub(super) shell_id: Option<String>,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     pub(super) keep_session: bool,
@@ -553,13 +641,19 @@ pub(super) struct SettingsView {
 /// Push the settings modal's background quads (dim veil, flat neutral panel,
 /// sidebar separator, nav indicator, rows, theme cards and controls). Caller
 /// guards on the panel being open.
-pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &SizeInfo, scale: f32) {
+pub(super) fn push_quads(
+    view: &SettingsView,
+    quads: &mut Vec<UiQuad>,
+    size: &SizeInfo,
+    scale: f32,
+) {
     let s = |v: f32| v * scale;
     let w = size.width();
     let h = size.height();
     let sk = view.theme.skin();
 
-    let geometry = settings_geometry(size, scale, view.scroll);
+    let geometry =
+        settings_geometry(size, scale, view.scroll, view.shell_picker_open, view.shells.len());
     let (px, py, pw, ph) = geometry.popup;
     // Header band height: the title row sits above the content, and the header
     // separator + big title are all measured from here.
@@ -593,7 +687,14 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
 
     // Hairline edge + near-opaque themed panel (two-layer stroke: 1px larger
     // quad underneath), then a 1px top edge-light — the lit bevel.
-    quads.push(UiQuad::solid(px - s(1.0), py - s(1.0), pw + s(2.0), ph + s(2.0), s(13.0), sk.hairline));
+    quads.push(UiQuad::solid(
+        px - s(1.0),
+        py - s(1.0),
+        pw + s(2.0),
+        ph + s(2.0),
+        s(13.0),
+        sk.hairline,
+    ));
     quads.push(UiQuad::solid(px, py, pw, ph, s(12.0), sk.panel));
     quads.push(UiQuad::solid(
         px + s(12.0),
@@ -610,10 +711,26 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
 
     // Sidebar: no fill of its own — just a hairline separator on its right
     // edge. Hierarchy comes from the nav rows, not a competing surface.
-    quads.push(UiQuad::solid(side_x + side_w - s(1.0), side_y + s(16.0), s(1.0), side_h - s(32.0), 0.0, sk.hairline));
+    quads.push(UiQuad::solid(
+        side_x + side_w - s(1.0),
+        side_y + s(16.0),
+        s(1.0),
+        side_h - s(32.0),
+        0.0,
+        sk.hairline,
+    ));
 
-    // Header separator under the panel title row.
-    quads.push(UiQuad::solid(px + s(1.0), py + header_h, pw - s(2.0), s(1.0), 0.0, sk.hairline));
+    // Header separator under the panel title row, only in the content area
+    // (right of the sidebar). The sidebar's own separator runs full height.
+    let content_x = side_x + side_w;
+    quads.push(UiQuad::solid(
+        content_x,
+        py + header_h,
+        px + pw - content_x - s(1.0),
+        s(1.0),
+        0.0,
+        sk.hairline,
+    ));
 
     // Sidebar navigation: the active row is a floating pill — a soft accent
     // wash inside a hairline accent border (design language: no accent bar,
@@ -639,7 +756,14 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
     // Reset: a quiet ghost button in the header (hairline, no fill until hover).
     {
         let (rx, ry, rw, rh) = geometry.reset;
-        quads.push(UiQuad::solid(rx - s(1.0), ry - s(1.0), rw + s(2.0), rh + s(2.0), s(9.0), sk.hairline));
+        quads.push(UiQuad::solid(
+            rx - s(1.0),
+            ry - s(1.0),
+            rw + s(2.0),
+            rh + s(2.0),
+            s(9.0),
+            sk.hairline,
+        ));
         quads.push(UiQuad::solid(rx, ry, rw, rh, s(8.0), sk.surface));
         if view.hover == SettingsHit::Reset {
             quads.push(UiQuad::solid(rx, ry, rw, rh, s(8.0), sk.hover));
@@ -654,16 +778,32 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
     let group_frame = |quads: &mut Vec<UiQuad>, first_row: (f32, f32, f32, f32), rows: usize| {
         let (gx, gy, gw, _) = first_row;
         let gh = rows as f32 * row_h;
-        clip(quads, UiQuad::solid(gx - s(1.0), gy - s(1.0), gw + s(2.0), gh + s(2.0), s(9.0), sk.hairline));
+        clip(
+            quads,
+            UiQuad::solid(gx - s(1.0), gy - s(1.0), gw + s(2.0), gh + s(2.0), s(9.0), sk.hairline),
+        );
         clip(quads, UiQuad::solid(gx, gy, gw, gh, s(8.0), sk.panel));
         for i in 1..rows {
-            clip(quads, UiQuad::solid(gx + s(1.0), gy + i as f32 * row_h, gw - s(2.0), s(1.0), 0.0, sk.hairline));
+            clip(
+                quads,
+                UiQuad::solid(
+                    gx + s(1.0),
+                    gy + i as f32 * row_h,
+                    gw - s(2.0),
+                    s(1.0),
+                    0.0,
+                    sk.hairline,
+                ),
+            );
         }
     };
     let row_hover = |quads: &mut Vec<UiQuad>, rect: (f32, f32, f32, f32), hovered: bool| {
         if hovered {
             let (rx, ry, rw, rh) = rect;
-            clip(quads, UiQuad::solid(rx + s(2.0), ry + s(2.0), rw - s(4.0), rh - s(4.0), s(6.0), sk.hover));
+            clip(
+                quads,
+                UiQuad::solid(rx + s(2.0), ry + s(2.0), rw - s(4.0), rh - s(4.0), s(6.0), sk.hover),
+            );
         }
     };
 
@@ -675,7 +815,21 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
         let th = s(20.0);
         let tx = rx + rw - s(16.0) - tw;
         let ty = ry + (rh - th) / 2.0;
-        clip(quads, UiQuad::solid(tx, ty, tw, th, th / 2.0, if on { Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255) } else { sk.track_off }));
+        clip(
+            quads,
+            UiQuad::solid(
+                tx,
+                ty,
+                tw,
+                th,
+                th / 2.0,
+                if on {
+                    Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255)
+                } else {
+                    sk.track_off
+                },
+            ),
+        );
         let knob = th - s(6.0);
         let kx = if on { tx + tw - s(3.0) - knob } else { tx + s(3.0) };
         let kcol = if on { sk.knob_on } else { sk.knob_off };
@@ -693,37 +847,50 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
                 let hovered = view.hover == SettingsHit::Theme(theme);
                 let lift = if hovered && !selected { s(2.0) } else { 0.0 };
                 let oy = oy - lift;
-                let stroke = if selected { Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255) } else { sk.hairline };
+                let stroke = if selected {
+                    Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255)
+                } else {
+                    sk.hairline
+                };
                 let stroke_w = if selected { s(2.0) } else { s(1.0) };
                 if selected {
                     // Selected card glows softly: the accent ring plus a
                     // diffuse halo, per the design sheet's lit-control look.
-                    clip(quads, UiQuad::glow(
-                        ox - s(14.0),
-                        oy - s(14.0),
-                        ow + s(28.0),
-                        oh + s(28.0),
-                        Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 66),
-                    ));
+                    clip(
+                        quads,
+                        UiQuad::glow(
+                            ox - s(14.0),
+                            oy - s(14.0),
+                            ow + s(28.0),
+                            oh + s(28.0),
+                            Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 66),
+                        ),
+                    );
                 } else if hovered {
                     // Hover halo: same shape, fainter — enough 辉光 to read
                     // as "lit up" without competing with the selected card.
-                    clip(quads, UiQuad::glow(
-                        ox - s(12.0),
-                        oy - s(10.0),
-                        ow + s(24.0),
-                        oh + s(26.0),
-                        Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 38),
-                    ));
+                    clip(
+                        quads,
+                        UiQuad::glow(
+                            ox - s(12.0),
+                            oy - s(10.0),
+                            ow + s(24.0),
+                            oh + s(26.0),
+                            Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 38),
+                        ),
+                    );
                 }
-                clip(quads, UiQuad::solid(
-                    ox - stroke_w,
-                    oy - stroke_w,
-                    ow + 2.0 * stroke_w,
-                    oh + 2.0 * stroke_w,
-                    s(9.0),
-                    stroke,
-                ));
+                clip(
+                    quads,
+                    UiQuad::solid(
+                        ox - stroke_w,
+                        oy - stroke_w,
+                        ow + 2.0 * stroke_w,
+                        oh + 2.0 * stroke_w,
+                        s(9.0),
+                        stroke,
+                    ),
+                );
                 let mut card_bg = theme.palette().panel;
                 card_bg.a = 255;
                 clip(quads, UiQuad::solid(ox, oy, ow, oh, s(8.0), card_bg));
@@ -742,7 +909,17 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
                 (SettingsHit::OpacityUp, geometry.opacity_up),
             ] {
                 let (bx, by, bw, bh) = rect;
-                clip(quads, UiQuad::solid(bx - s(1.0), by - s(1.0), bw + s(2.0), bh + s(2.0), s(7.0), sk.hairline));
+                clip(
+                    quads,
+                    UiQuad::solid(
+                        bx - s(1.0),
+                        by - s(1.0),
+                        bw + s(2.0),
+                        bh + s(2.0),
+                        s(7.0),
+                        sk.hairline,
+                    ),
+                );
                 clip(quads, UiQuad::solid(bx, by, bw, bh, s(6.0), sk.panel));
                 if view.hover == hit {
                     clip(quads, UiQuad::solid(bx, by, bw, bh, s(6.0), sk.hover));
@@ -756,20 +933,62 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
                 let track_y = down_y + down_h / 2.0 - s(2.0);
                 let frac = ((view.opacity - 0.35) / 0.65).clamp(0.0, 1.0);
                 clip(quads, UiQuad::solid(track_x, track_y, track_w, s(4.0), s(2.0), sk.track_off));
-                clip(quads, UiQuad::solid(track_x, track_y, track_w * frac, s(4.0), s(2.0), Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255)));
-                clip(quads, UiQuad::solid(
-                    track_x + track_w * frac - s(6.0),
-                    track_y - s(4.0),
-                    s(12.0),
-                    s(12.0),
-                    s(6.0),
-                    sk.knob_off,
-                ));
+                clip(
+                    quads,
+                    UiQuad::solid(
+                        track_x,
+                        track_y,
+                        track_w * frac,
+                        s(4.0),
+                        s(2.0),
+                        Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
+                    ),
+                );
+                clip(
+                    quads,
+                    UiQuad::solid(
+                        track_x + track_w * frac - s(6.0),
+                        track_y - s(4.0),
+                        s(12.0),
+                        s(12.0),
+                        s(6.0),
+                        sk.knob_off,
+                    ),
+                );
             }
         },
         NebulaSettingsSection::Profiles => {
             // 终端: 3-row frame; 补全: 2-row frame; 配置文件: 1-row frame.
             group_frame(quads, geometry.shell, 3);
+            let (picker_y, picker_h, picker_count) = geometry.shell_picker;
+            if picker_count > 0 {
+                let picker_rect =
+                    (geometry.shell.0, picker_y, geometry.shell.2, picker_count as f32 * picker_h);
+                group_frame(quads, picker_rect, picker_count);
+                for i in 0..picker_count {
+                    let rect = (
+                        geometry.shell.0,
+                        picker_y + i as f32 * picker_h,
+                        geometry.shell.2,
+                        picker_h,
+                    );
+                    row_hover(quads, rect, view.hover == SettingsHit::ShellPickerRow(i));
+                    if view.shell_id.as_deref() == view.shells.get(i).map(|shell| shell.0.as_str())
+                    {
+                        clip(
+                            quads,
+                            UiQuad::solid(
+                                rect.0 + s(2.0),
+                                rect.1 + s(2.0),
+                                rect.2 - s(4.0),
+                                rect.3 - s(4.0),
+                                s(6.0),
+                                sk.accent_soft,
+                            ),
+                        );
+                    }
+                }
+            }
             group_frame(quads, geometry.ghost, 2);
             group_frame(quads, geometry.open_config_file, 1);
             for (hit, rect) in [
@@ -793,6 +1012,7 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
         },
         NebulaSettingsSection::Keymap => {
             group_frame(quads, geometry.keymap_row0, KEYMAP_ROWS.len());
+            // Keymap rows are read-only — no interaction, no hover.
         },
         NebulaSettingsSection::Advanced => {
             group_frame(quads, geometry.keep_session, 1);
@@ -829,9 +1049,10 @@ pub(super) fn push_quads(view: &SettingsView, quads: &mut Vec<UiQuad>, size: &Si
     }
 }
 
-/// Draw a chrome title at `mult`× the terminal font size. The renderer scales
-/// glyph geometry about the (x, y) top-left anchor, so the title grows down and
-/// to the right from that point — callers position by the top-left corner.
+/// Draw a chrome title at `mult`× the terminal font size. Rasterized at the
+/// REAL target size (`draw_doc_text`), not GPU-stretched from the base atlas —
+/// stretching is what made every modal title fuzzy with ragged edges. The
+/// title still grows down and to the right from the (x, y) top-left anchor.
 fn draw_big_text(
     r: &mut Renderer,
     gc: &mut GlyphCache,
@@ -843,7 +1064,7 @@ fn draw_big_text(
     ink: Rgb,
     text: &str,
 ) {
-    r.draw_chrome_text_scaled(size, x, y, mult, ink, text, gc);
+    r.draw_doc_text(size, x, y, mult, ink, nebula_terminal::term::cell::Flags::empty(), text, gc);
 }
 
 /// A group heading inside the content pane: clearly larger than row labels
@@ -884,7 +1105,8 @@ fn row_label(
     let ty = ry + (rh - cell_h) / 2.0;
     r.draw_chrome_text(size, rx + s(16.0), ty, sk.ink, k, gc);
     let value_left = rx + rw * 0.42;
-    let max_chars = ((rx + rw - s(16.0) - value_left).max(cell_w) / cell_w).floor().max(1.0) as usize;
+    let max_chars =
+        ((rx + rw - s(16.0) - value_left).max(cell_w) / cell_w).floor().max(1.0) as usize;
     let value = truncate_tab_label(v, max_chars);
     let value_cols: usize = value.chars().map(|c| c.width().unwrap_or(0)).sum();
     let vx = rx + rw - s(16.0) - value_cols as f32 * cell_w;
@@ -899,13 +1121,15 @@ pub(super) fn draw_text(
     gc: &mut GlyphCache,
     size: &SizeInfo,
     scale: f32,
-) {
+) -> Vec<(String, (f32, f32, f32, f32))> {
     let s = |v: f32| v * scale;
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
     let sk = view.theme.skin();
 
-    let geometry = settings_geometry(size, scale, view.scroll);
+    let geometry =
+        settings_geometry(size, scale, view.scroll, view.shell_picker_open, view.shells.len());
+    let mut icon_draws = Vec::new();
     let (px, py, _pw, ph) = geometry.popup;
     let (content_x, content_y, _content_w, _) = geometry.content;
     // Text has no scissor, so unlike the quad pass (which cuts quads at the
@@ -921,7 +1145,17 @@ pub(super) fn draw_text(
 
     // Brand title in the sidebar header. Drawn large via the scaled-glyph path
     // so it anchors the panel instead of reading as just another row label.
-    draw_big_text(r, gc, size, scale, px + s(24.0), py + s(22.0), 1.5, sk.ink_strong, "Nebula 设置");
+    draw_big_text(
+        r,
+        gc,
+        size,
+        scale,
+        px + s(24.0),
+        py + s(22.0),
+        1.5,
+        sk.ink_strong,
+        "Nebula 设置",
+    );
     {
         // Center the reset label inside its ghost button.
         let (rx, ry, rw, rh) = geometry.reset;
@@ -953,13 +1187,32 @@ pub(super) fn draw_text(
     // Content header: the big section title alone. (No subtitle — the nav
     // label + title already say everything; the old dim sentence only added
     // noise under the heading.)
-    draw_big_text(r, gc, size, scale, content_x + s(24.0), content_y + s(20.0), 1.6, sk.ink_strong, section.label());
+    draw_big_text(
+        r,
+        gc,
+        size,
+        scale,
+        content_x + s(24.0),
+        content_y + s(20.0),
+        1.6,
+        sk.ink_strong,
+        section.label(),
+    );
 
     match section {
         NebulaSettingsSection::Appearance => {
             let cards_y = geometry.options[0].2;
             if visible(group_y(cards_y), title_h) {
-                section_title(r, gc, size, scale, &sk, content_x + s(24.0), group_y(cards_y), "主题");
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    content_x + s(24.0),
+                    group_y(cards_y),
+                    "主题",
+                );
             }
             for (theme, ox, oy, ow, oh) in geometry.options {
                 let selected = theme == view.theme;
@@ -995,7 +1248,17 @@ pub(super) fn draw_text(
             if visible(bg_y, bg_h) {
                 let background_v =
                     view.background.map(format_hex_rgb).unwrap_or_else(|| "主题默认".to_owned());
-                row_label(r, gc, size, scale, &sk, geometry.background, "背景色", &background_v, sk.accent);
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.background,
+                    "背景色",
+                    &background_v,
+                    sk.accent,
+                );
             }
             let (img_x, img_y, _, img_h) = geometry.background_image;
             let _ = img_x;
@@ -1005,16 +1268,34 @@ pub(super) fn draw_text(
                     .as_deref()
                     .map(|path| format!("{path} · {:.0}%", view.background_image_opacity * 100.0))
                     .unwrap_or_else(|| "未设置".to_owned());
-                row_label(r, gc, size, scale, &sk, geometry.background_image, "背景图片", &image_v, sk.accent);
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.background_image,
+                    "背景图片",
+                    &image_v,
+                    sk.accent,
+                );
             }
             let (or_x, or_y, _, or_h) = geometry.opacity_row;
             if visible(group_y(or_y), title_h) {
                 section_title(r, gc, size, scale, &sk, content_x + s(24.0), group_y(or_y), "界面");
             }
             if visible(or_y, or_h) {
-                r.draw_chrome_text(size, or_x + s(16.0), or_y + (or_h - cell_h) / 2.0, sk.ink, "窗口透明度", gc);
+                r.draw_chrome_text(
+                    size,
+                    or_x + s(16.0),
+                    or_y + (or_h - cell_h) / 2.0,
+                    sk.ink,
+                    "窗口透明度",
+                    gc,
+                );
                 // Center the fullwidth −/＋ glyphs inside their stepper buttons.
-                for (rect, glyph) in [(geometry.opacity_down, "－"), (geometry.opacity_up, "＋")] {
+                for (rect, glyph) in [(geometry.opacity_down, "－"), (geometry.opacity_up, "＋")]
+                {
                     let (bx, by, bw, bh) = rect;
                     r.draw_chrome_text(
                         size,
@@ -1046,7 +1327,52 @@ pub(super) fn draw_text(
                 section_title(r, gc, size, scale, &sk, sh_x, group_y(sh_y), "终端");
             }
             if visible(sh_y, sh_h) {
-                row_label(r, gc, size, scale, &sk, geometry.shell, "默认 Shell", view.shell.label(), sk.accent);
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.shell,
+                    "默认 Shell",
+                    &view.shell_label,
+                    sk.accent,
+                );
+            }
+            let (picker_y, picker_h, picker_count) = geometry.shell_picker;
+            for (i, (id, name, program)) in view.shells.iter().take(picker_count).enumerate() {
+                let rect =
+                    (geometry.shell.0, picker_y + i as f32 * picker_h, geometry.shell.2, picker_h);
+                if !visible(rect.1, rect.3) {
+                    continue;
+                }
+                let selected = view.shell_id.as_deref() == Some(id.as_str());
+                let color = if selected { sk.accent } else { sk.ink };
+                let label = if program.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}  ·  {program}")
+                };
+                r.draw_chrome_text(
+                    size,
+                    rect.0 + s(52.0),
+                    rect.1 + (rect.3 - cell_h) / 2.0,
+                    color,
+                    &label,
+                    gc,
+                );
+                icon_draws
+                    .push((id.clone(), (rect.0 + s(14.0), rect.1 + s(6.0), s(32.0), s(32.0))));
+                if selected {
+                    r.draw_chrome_text(
+                        size,
+                        rect.0 + rect.2 - s(38.0),
+                        rect.1 + (rect.3 - cell_h) / 2.0,
+                        sk.accent,
+                        "✓",
+                        gc,
+                    );
+                }
             }
             // Boolean rows: the switch (drawn in `push_quads`) carries the
             // state; no "On/Off" string next to it.
@@ -1054,7 +1380,17 @@ pub(super) fn draw_text(
                 row_label(r, gc, size, scale, &sk, geometry.fetch, "启动欢迎信息", "", sk.ink);
             }
             if visible(geometry.powerline.1, geometry.powerline.3) {
-                row_label(r, gc, size, scale, &sk, geometry.powerline, "Powerline 提示符", "", sk.ink);
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.powerline,
+                    "Powerline 提示符",
+                    "",
+                    sk.ink,
+                );
             }
 
             let (gh_x, gh_y, _, gh_h) = geometry.ghost;
@@ -1065,7 +1401,17 @@ pub(super) fn draw_text(
                 row_label(r, gc, size, scale, &sk, geometry.ghost, "历史补全灰字", "", sk.ink);
             }
             if visible(geometry.accept.1, geometry.accept.3) {
-                row_label(r, gc, size, scale, &sk, geometry.accept, "补全接受键", view.accept.label(), sk.accent);
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.accept,
+                    "补全接受键",
+                    view.accept.label(),
+                    sk.accent,
+                );
             }
 
             let (ocx, ocy, _ocw, och) = geometry.open_config_file;
@@ -1073,13 +1419,29 @@ pub(super) fn draw_text(
                 section_title(r, gc, size, scale, &sk, ocx, group_y(ocy), "配置文件");
             }
             if visible(ocy, och) {
-                r.draw_chrome_text(size, ocx + s(16.0), ocy + (och - cell_h) / 2.0, sk.accent, "打开配置文件", gc);
+                r.draw_chrome_text(
+                    size,
+                    ocx + s(16.0),
+                    ocy + (och - cell_h) / 2.0,
+                    sk.accent,
+                    "打开配置文件",
+                    gc,
+                );
             }
         },
         NebulaSettingsSection::Keymap => {
             let (kx, ky, kw, kh) = geometry.keymap_row0;
             if visible(group_y(ky), title_h) {
-                section_title(r, gc, size, scale, &sk, kx, group_y(ky), "快捷键（可在配置文件 [[keyboard.bindings]] 中自定义）");
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    kx,
+                    group_y(ky),
+                    "快捷键（可在配置文件 [[keyboard.bindings]] 中自定义）",
+                );
             }
             for (i, (label, combo)) in KEYMAP_ROWS.iter().enumerate() {
                 let rect = (kx, ky + i as f32 * geometry.keymap_row_h, kw, kh);
@@ -1110,4 +1472,5 @@ pub(super) fn draw_text(
             }
         },
     }
+    icon_draws
 }

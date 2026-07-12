@@ -91,6 +91,115 @@ if command -v add-zsh-hook >/dev/null 2>&1; then
 fi
 "#;
 
+/// ssh short options that consume a value (attached or as the next arg).
+const VALUE_OPTS: &[u8] = b"bcDEeFIiJLlmOopQRSWw";
+/// Standalone flags meaning "no interactive login session" (`-N` no remote
+/// command, `-f` background, `-G`/`-V` queries, `-T` no tty, `-W` stdio
+/// forward): never inject into, never worth auto-saving as a host.
+const NO_SESSION_FLAGS: &[u8] = b"NnfGTVW";
+
+/// How long a typed `ssh` session must live before OSC 133;D confirms it as
+/// a real connection worth auto-saving in the sidebar (fast failures — DNS,
+/// connection refused, an aborted auth prompt — die well under this).
+pub const SAVE_MIN_SESSION: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long a typed `ssh` session must live before mere PTY activity counts
+/// as "connected" for the sidebar auto-save. The session-end path above kept
+/// the sidebar empty exactly while the user was USING the connection; remote
+/// output still arriving this far past launch means the login got beyond the
+/// fast-failure window (DNS/refused/instant auth reject), so save right away.
+/// A remote retitle or the `nebula ssh` NEBULA| title confirms sooner still.
+pub const SAVE_CONNECTED_AFTER: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Parse the destination out of a committed command line, when that line is
+/// an *interactive* ssh login (`ssh host`, `ssh -p 2222 user@host`,
+/// `nebula ssh host`). This is what the sidebar auto-save remembers: the
+/// returned string is later handed back to `nebula ssh`, so `-l user` folds
+/// into `user@host` and a non-default `-p` port becomes an `ssh://` URI
+/// (the only port syntax the ssh CLI accepts as a destination).
+///
+/// `None` for everything else — non-ssh commands, forms without a login
+/// session (`-N`/`-f`/`-G`/`-T`/`-V`/`-W`), or an explicit remote command
+/// (`ssh host ls`): none of those confirm as "connected to this host".
+pub fn ssh_destination(line: &str) -> Option<String> {
+    let mut tokens = line.split_whitespace();
+    // Program identity, path/extension-normalized (`/usr/bin/ssh`,
+    // `ssh.exe`); `nebula ssh …` counts too — same wrapper, same semantics.
+    let mut program = crate::display::extract_program(tokens.next()?)?;
+    if program == "nebula" {
+        if tokens.next() != Some("ssh") {
+            return None;
+        }
+        program = "ssh".to_owned();
+    }
+    if program != "ssh" {
+        return None;
+    }
+
+    let (mut login_user, mut port) = (None, None);
+    while let Some(tok) = tokens.next() {
+        if tok == "--" {
+            let dest = tokens.next()?;
+            // A token after the destination is a remote command.
+            return if tokens.next().is_some() {
+                None
+            } else {
+                Some(format_destination(dest, login_user, port))
+            };
+        }
+        let bytes = tok.as_bytes();
+        if bytes.first() == Some(&b'-') && bytes.len() >= 2 {
+            for (idx, &b) in bytes.iter().enumerate().skip(1) {
+                if NO_SESSION_FLAGS.contains(&b) {
+                    return None;
+                }
+                if VALUE_OPTS.contains(&b) {
+                    // Attached value (`-p2222`) or the next token (`-p 2222`).
+                    let attached = &tok[idx + 1..];
+                    let value =
+                        if attached.is_empty() { tokens.next() } else { Some(attached) };
+                    match b {
+                        b'l' => login_user = value,
+                        b'p' => port = value,
+                        _ => {},
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        // First bare token = destination; anything after = remote command.
+        return if tokens.next().is_some() {
+            None
+        } else {
+            Some(format_destination(tok, login_user, port))
+        };
+    }
+    None
+}
+
+/// Fold `-l user` / `-p port` into a destination string that reconnects when
+/// handed back to `nebula ssh` as a single argument.
+fn format_destination(dest: &str, login_user: Option<&str>, port: Option<&str>) -> String {
+    // An ssh:// URI typed by the user already carries everything.
+    if dest.starts_with("ssh://") {
+        return dest.to_owned();
+    }
+    let mut host = dest.to_owned();
+    if let Some(user) = login_user {
+        if !host.contains('@') {
+            host = format!("{user}@{host}");
+        }
+    }
+    match port {
+        // A non-default port only round-trips as an ssh:// URI. Bare IPv6
+        // destinations (they contain ':') can't take the suffix unambiguously
+        // — keep the plain host and lose the port instead of corrupting it.
+        Some(p) if p != "22" && !dest.contains(':') => format!("ssh://{host}:{p}"),
+        _ => host,
+    }
+}
+
 /// Locate the system `ssh`. Windows 10+ ships OpenSSH; prefer the known path,
 /// fall back to whatever `ssh` is on `PATH`.
 #[cfg(windows)]
@@ -138,10 +247,6 @@ enum CliVerdict {
 /// still lands there, so bootstrap injection is valid (the bastion case).
 #[cfg(windows)]
 fn cli_verdict(args: &[String]) -> CliVerdict {
-    // ssh short options that consume a value (attached or as the next arg).
-    const VALUE_OPTS: &[u8] = b"bcDEeFIiJLlmOopQRSWw";
-    // Standalone flags meaning "don't inject".
-    const PASSTHROUGH_FLAGS: &[u8] = b"NnfGTV";
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -161,7 +266,7 @@ fn cli_verdict(args: &[String]) -> CliVerdict {
                 // `-W` (both a value-opt and a trigger) passes through, while a
                 // stray 'W' inside an attached `-oProxyCommand=…W…` value is not
                 // misread as a trigger (the leading `o` breaks the scan first).
-                if PASSTHROUGH_FLAGS.contains(&b) || b == b'W' {
+                if NO_SESSION_FLAGS.contains(&b) {
                     return CliVerdict::Passthrough;
                 }
                 if VALUE_OPTS.contains(&b) {
@@ -283,6 +388,188 @@ fn already_has_tty(args: &[String]) -> bool {
     args.iter().any(|a| a == "-t" || a == "-tt")
 }
 
+/// Concrete host aliases from the user's `~/.ssh/config`, in file order —
+/// the source of the sidebar's "SSH HOSTS" section. Pattern entries (`*`,
+/// `?`) and negations are skipped: they are match rules, not destinations
+/// you can click to connect to. Missing/unreadable config → empty list
+/// (the section simply doesn't render).
+pub fn ssh_config_hosts() -> Vec<String> {
+    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let Ok(data) = std::fs::read_to_string(home.join(".ssh").join("config")) else {
+        return Vec::new();
+    };
+    let mut hosts = Vec::new();
+    for line in data.lines() {
+        let line = line.trim();
+        let Some(rest) = line
+            .strip_prefix("Host ")
+            .or_else(|| line.strip_prefix("host "))
+            .or_else(|| line.strip_prefix("Host\t"))
+        else {
+            continue;
+        };
+        for name in rest.split_whitespace() {
+            if name.contains(['*', '?']) || name.starts_with('!') {
+                continue;
+            }
+            if !hosts.iter().any(|h| h == name) {
+                hosts.push(name.to_owned());
+            }
+        }
+    }
+    hosts
+}
+
+fn askpass_destination_from_args(args: &[String]) -> Option<String> {
+    let (mut login_user, mut port) = (None, None);
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            return args.get(i + 1).map(|dest| {
+                format_destination(dest, login_user.as_deref(), port.as_deref())
+            });
+        }
+        let bytes = arg.as_bytes();
+        if bytes.first() == Some(&b'-') && bytes.len() >= 2 {
+            let mut consumed_next = false;
+            for (index, &option) in bytes.iter().enumerate().skip(1) {
+                if VALUE_OPTS.contains(&option) {
+                    let attached = &arg[index + 1..];
+                    let value = if attached.is_empty() {
+                        consumed_next = true;
+                        args.get(i + 1).map(String::as_str)
+                    } else {
+                        Some(attached)
+                    };
+                    match option {
+                        b'l' => login_user = value.map(ToOwned::to_owned),
+                        b'p' => port = value.map(ToOwned::to_owned),
+                        _ => {},
+                    }
+                    break;
+                }
+            }
+            i += if consumed_next { 2 } else { 1 };
+            continue;
+        }
+        return Some(format_destination(arg, login_user.as_deref(), port.as_deref()));
+    }
+    None
+}
+
+/// Per-pane data for launching SSH from the configured default shell. The
+/// password stays behind OpenSSH's AskPass contract and never enters this
+/// command or the terminal scrollback.
+pub struct SshPaneLaunch {
+    pub command: Vec<u8>,
+}
+
+pub fn build_pane_launch(
+    shell_id: &str,
+    exe: &std::path::Path,
+    destination: &str,
+) -> std::io::Result<SshPaneLaunch> {
+    if !valid_destination(destination) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SSH destination contains unsafe shell characters",
+        ));
+    }
+    let exe_text = exe.to_string_lossy();
+    let shell = shell_id.trim().to_ascii_lowercase();
+    let command = if matches!(shell.as_str(), "pwsh" | "powershell" | "ps") {
+        format!(
+            "& '{}' ssh -- '{}'\r",
+            exe_text.replace('\'', "''"),
+            destination.replace('\'', "''")
+        )
+    } else if shell == "cmd" {
+        format!("\"{exe_text}\" ssh -- {destination}\r")
+    } else if matches!(shell.as_str(), "bash" | "git-bash" | "gitbash") {
+        format!(
+            "'{}' ssh -- '{}'\r",
+            git_bash_path(exe),
+            destination.replace('\'', "'\\''")
+        )
+    } else if shell == "nu" {
+        format!(
+            "^'{}' ssh -- '{}'\r",
+            exe_text.replace('\'', "''"),
+            destination.replace('\'', "''")
+        )
+    } else if shell.starts_with("wsl:") || shell == "wsl" {
+        format!(
+            "'{}' ssh -- '{}'\r",
+            wsl_path(exe),
+            destination.replace('\'', "'\\''")
+        )
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsupported default shell id: {shell_id}"),
+        ));
+    };
+
+    Ok(SshPaneLaunch { command: command.into_bytes() })
+}
+
+pub struct SshAskpassEnv {
+    pub values: std::collections::HashMap<String, String>,
+    pub attempt_path: std::path::PathBuf,
+}
+
+pub fn build_askpass_env(
+    exe: &std::path::Path,
+    destination: &str,
+    session_id: u64,
+) -> SshAskpassEnv {
+    let attempt_path = std::env::temp_dir().join(format!(
+        "nebula-ssh-askpass-{}-{session_id}.flag",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&attempt_path);
+    let mut values = std::collections::HashMap::new();
+    values.insert("SSH_ASKPASS".into(), exe.to_string_lossy().into_owned());
+    values.insert("SSH_ASKPASS_REQUIRE".into(), "force".into());
+    values.insert("DISPLAY".into(), "nebula".into());
+    values.insert("NEBULA_SSH_ASKPASS".into(), "1".into());
+    values.insert("NEBULA_SSH_DESTINATION".into(), destination.into());
+    values.insert(
+        "NEBULA_SSH_ASKPASS_ATTEMPT".into(),
+        attempt_path.display().to_string(),
+    );
+    SshAskpassEnv { values, attempt_path }
+}
+
+fn valid_destination(destination: &str) -> bool {
+    !destination.is_empty()
+        && destination.chars().all(|ch| {
+            !ch.is_control()
+                && !ch.is_whitespace()
+                && !matches!(ch, '\'' | '"' | '`' | '$' | '&' | '|' | ';' | '<' | '>' | '(' | ')')
+        })
+}
+
+fn git_bash_path(path: &std::path::Path) -> String {
+    slash_drive_path(path, "")
+}
+
+fn wsl_path(path: &std::path::Path) -> String {
+    slash_drive_path(path, "/mnt")
+}
+
+fn slash_drive_path(path: &std::path::Path, prefix: &str) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        format!("{prefix}/{drive}{}", &raw[2..])
+    } else {
+        raw
+    }
+}
+
 /// `nebula ssh` entrypoint. Returns the process exit code.
 #[cfg(windows)]
 pub fn run(args: Vec<String>) -> i32 {
@@ -291,6 +578,14 @@ pub fn run(args: Vec<String>) -> i32 {
 
     let ssh = find_ssh();
     let mut cmd = Command::new(&ssh);
+    let askpass = askpass_destination_from_args(&args).and_then(|destination| {
+        std::env::current_exe().ok().map(|exe| {
+            build_askpass_env(&exe, &destination, std::process::id() as u64)
+        })
+    });
+    if let Some(context) = &askpass {
+        cmd.envs(&context.values);
+    }
 
     match plan_for(&ssh, &args) {
         SshPlan::Passthrough => {
@@ -318,13 +613,17 @@ pub fn run(args: Vec<String>) -> i32 {
         },
     }
 
-    match cmd.status() {
+    let result = match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
             eprintln!("nebula ssh: failed to launch ssh: {e}");
             1
         },
+    };
+    if let Some(context) = askpass {
+        let _ = std::fs::remove_file(context.attempt_path);
     }
+    result
 }
 
 #[cfg(all(test, windows))]
@@ -383,5 +682,105 @@ mod tests {
         assert!(!parse_g_says_passthrough("")); // empty = inject
         // Case-insensitive keyword, force TTY is fine to inject into.
         assert!(!parse_g_says_passthrough("RequestTTY force\n"));
+    }
+
+    #[test]
+    fn destination_parsed_from_typed_logins() {
+        let d = ssh_destination;
+        assert_eq!(d("ssh host"), Some("host".into()));
+        assert_eq!(d("ssh user@host"), Some("user@host".into()));
+        assert_eq!(d("  ssh.exe   user@host  "), Some("user@host".into()));
+        assert_eq!(d("/usr/bin/ssh host"), Some("host".into()));
+        assert_eq!(d("nebula ssh host"), Some("host".into()));
+        assert_eq!(d("ssh -i key -t user@host"), Some("user@host".into()));
+        assert_eq!(d("ssh -J jump user@host"), Some("user@host".into()));
+        assert_eq!(d("ssh -- host"), Some("host".into()));
+        assert_eq!(d("ssh ssh://user@host:2200"), Some("ssh://user@host:2200".into()));
+        // -l / -p fold into a reconnectable single-token destination.
+        assert_eq!(d("ssh -l root host"), Some("root@host".into()));
+        assert_eq!(d("ssh -lroot host"), Some("root@host".into()));
+        assert_eq!(d("ssh -p 2222 host"), Some("ssh://host:2222".into()));
+        assert_eq!(d("ssh -p2222 user@host"), Some("ssh://user@host:2222".into()));
+        assert_eq!(d("ssh -p 22 host"), Some("host".into())); // default port
+        // Bare IPv6 can't take an unambiguous port suffix: host survives.
+        assert_eq!(d("ssh -p 2222 ::1"), Some("::1".into()));
+        // -l never overrides an explicit user@.
+        assert_eq!(d("ssh -l root admin@host"), Some("admin@host".into()));
+    }
+
+    #[test]
+    fn destination_rejected_for_non_logins() {
+        let d = ssh_destination;
+        assert_eq!(d(""), None);
+        assert_eq!(d("vim notes.md"), None);
+        assert_eq!(d("nebula run x"), None);
+        assert_eq!(d("ssh"), None); // no destination
+        assert_eq!(d("ssh -p 2222"), None);
+        assert_eq!(d("ssh host ls -la"), None); // explicit remote command
+        assert_eq!(d("ssh -- host ls"), None);
+        assert_eq!(d("ssh -G host"), None); // query / no-session forms
+        assert_eq!(d("ssh -T git@github.com"), None);
+        assert_eq!(d("ssh -N -L 8080:localhost:80 host"), None);
+        assert_eq!(d("ssh -fN host"), None);
+        assert_eq!(d("ssh -W target:22 jump"), None);
+        assert_eq!(d("ssh -V"), None);
+    }
+
+    #[test]
+    fn ssh_pane_launch_uses_shell_specific_quoting() {
+        let exe = std::path::Path::new(r"C:\Program Files\Nebula\nebula.exe");
+        let ps = build_pane_launch("pwsh", exe, "root@example.com").unwrap();
+        assert_eq!(String::from_utf8(ps.command).unwrap(),
+            "& 'C:\\Program Files\\Nebula\\nebula.exe' ssh -- 'root@example.com'\r");
+
+        let cmd = build_pane_launch("cmd", exe, "root@example.com").unwrap();
+        assert_eq!(String::from_utf8(cmd.command).unwrap(),
+            "\"C:\\Program Files\\Nebula\\nebula.exe\" ssh -- root@example.com\r");
+
+        let bash = build_pane_launch("git-bash", exe, "root@example.com").unwrap();
+        assert_eq!(String::from_utf8(bash.command).unwrap(),
+            "'/c/Program Files/Nebula/nebula.exe' ssh -- 'root@example.com'\r");
+
+        let nu = build_pane_launch("nu", exe, "root@example.com").unwrap();
+        assert_eq!(String::from_utf8(nu.command).unwrap(),
+            "^'C:\\Program Files\\Nebula\\nebula.exe' ssh -- 'root@example.com'\r");
+
+        let wsl = build_pane_launch("wsl:Ubuntu", exe, "root@example.com").unwrap();
+        assert_eq!(String::from_utf8(wsl.command).unwrap(),
+            "'/mnt/c/Program Files/Nebula/nebula.exe' ssh -- 'root@example.com'\r");
+    }
+
+    #[test]
+    fn ssh_pane_launch_sets_askpass_environment() {
+        let launch = build_askpass_env(
+            std::path::Path::new(r"C:\Nebula\nebula.exe"),
+            "alice@example.com",
+            42,
+        );
+        assert_eq!(launch.values.get("SSH_ASKPASS").map(String::as_str), Some(r"C:\Nebula\nebula.exe"));
+        assert_eq!(launch.values.get("SSH_ASKPASS_REQUIRE").map(String::as_str), Some("force"));
+        assert_eq!(launch.values.get("NEBULA_SSH_ASKPASS").map(String::as_str), Some("1"));
+        assert_eq!(launch.values.get("NEBULA_SSH_DESTINATION").map(String::as_str), Some("alice@example.com"));
+        assert!(launch.values["NEBULA_SSH_ASKPASS_ATTEMPT"].contains("42"));
+    }
+
+    #[test]
+    fn ssh_pane_launch_rejects_shell_injection() {
+        let exe = std::path::Path::new(r"C:\Nebula\nebula.exe");
+        for bad in ["host name", "host\nwhoami", "host;whoami", "host&whoami", "'host'"] {
+            assert!(build_pane_launch("pwsh", exe, bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn askpass_destination_is_parsed_from_forwarded_argv() {
+        let parse = |args: &[&str]| {
+            askpass_destination_from_args(&args.iter().map(|x| x.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(parse(&["--", "host"]), Some("host".into()));
+        assert_eq!(parse(&["-l", "root", "host"]), Some("root@host".into()));
+        assert_eq!(parse(&["-p", "2222", "user@host"]), Some("ssh://user@host:2222".into()));
+        assert_eq!(parse(&["-i", "key file", "host"]), Some("host".into()));
+        assert_eq!(parse(&["-V"]), None);
     }
 }

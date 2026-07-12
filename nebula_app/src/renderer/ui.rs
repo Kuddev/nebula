@@ -123,6 +123,26 @@ impl UiQuad {
         }
     }
 
+    /// This quad with its edges snapped to whole physical pixels, so thin
+    /// fills (hairlines, underlines, 1px dividers) cover exactly the pixel
+    /// rows they mean to instead of smearing half-alpha across two. Edges are
+    /// snapped as `round(x)..round(x + w)` — two quads sharing an edge stay
+    /// flush after snapping — and a sub-pixel sliver keeps a minimum of 1px
+    /// rather than vanishing. Glows (feathered) and explicit-corner polygons
+    /// are soft/slanted by design and pass through untouched.
+    pub fn pixel_snapped(&self) -> Self {
+        if self.corners.is_some() || self.feather > 0.0 {
+            return *self;
+        }
+        let x1 = (self.x + self.width).round();
+        let y1 = (self.y + self.height).round();
+        let x = self.x.round();
+        let y = self.y.round();
+        let width = if self.width > 0.0 { (x1 - x).max(1.0) } else { 0.0 };
+        let height = if self.height > 0.0 { (y1 - y).max(1.0) } else { 0.0 };
+        Self { x, y, width, height, ..*self }
+    }
+
     /// Gradient-filled rounded rectangle.
     #[inline]
     pub fn gradient(
