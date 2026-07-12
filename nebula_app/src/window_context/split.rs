@@ -499,6 +499,13 @@ impl WindowContext {
         shell: crate::display::NebulaShell,
     ) {
         let window_size: WindowSize = (*view).into();
+        crate::display::nebula_link_log(format!(
+            "pty_resize cols={} lines={} view_px={}x{}",
+            view.columns(),
+            view.screen_lines(),
+            view.width(),
+            view.height(),
+        ));
         pane.notifier.on_resize(window_size);
         if !fetch_enabled {
             pane.intro_cols = None;

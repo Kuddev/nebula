@@ -650,6 +650,10 @@ impl ApplicationHandler<Event> for Processor {
             (EventType::Terminal(TerminalEvent::Wakeup), Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.dirty = true;
+                    // A typed `ssh` login is confirmed by remote output still
+                    // arriving after the fast-failure window — save it to the
+                    // sidebar now, not when the session eventually exits.
+                    window_context.confirm_ssh_on_activity(tab_id);
                     if window_context.display.window.has_frame {
                         window_context.display.window.request_redraw();
                     }
@@ -706,10 +710,7 @@ impl ApplicationHandler<Event> for Processor {
                 }
 
                 // Shutdown if no more terminals are open (and none detached).
-                if self.windows.is_empty()
-                    && self.detached.is_empty()
-                    && !self.cli_options.daemon
-                {
+                if self.windows.is_empty() && self.detached.is_empty() && !self.cli_options.daemon {
                     // Write ref tests of last window to disk.
                     if self.config.debug.ref_test {
                         window_context.write_ref_test_results();
@@ -928,7 +929,9 @@ pub enum EventType {
     AiHook(crate::ai_hook::AiHookEvent),
     /// A toast was clicked: focus the originating window and, when known,
     /// surface the pane's tab. The window rides in `Event::window_id`.
-    FocusWindow { pane: Option<u64> },
+    FocusWindow {
+        pane: Option<u64>,
+    },
 }
 
 /// Nebula tab management actions.
@@ -938,6 +941,18 @@ pub enum TabRequest {
     /// Open a new tab running the quick-launch profile at this config index
     /// (custom command instead of the default shell, e.g. an ssh jump).
     NewProfile(usize),
+    /// Open a new tab running a detected shell (the new-tab dropdown). Carries
+    /// the spec directly — detected shells aren't config-indexed.
+    NewShell {
+        name: String,
+        shell: nebula_terminal::tty::Shell,
+    },
+    /// Open a new tab connected to this `~/.ssh/config` host alias, through
+    /// `nebula ssh` so remote shell integration bootstraps automatically.
+    NewSsh(String),
+    /// Open this file (markdown/text/json) in a read-only viewer tab —
+    /// double-clicking a viewable file in the directory tree lands here.
+    OpenDoc(std::path::PathBuf),
     Close,
     CloseIndex(usize),
     CloseWindow,
@@ -947,12 +962,18 @@ pub enum TabRequest {
     /// Jump to the rightmost tab.
     SelectLast,
     /// Reorder: move the tab at displayed index `from` to displayed index `to`.
-    Move { from: usize, to: usize },
+    Move {
+        from: usize,
+        to: usize,
+    },
     /// Toggle a split (left/right or top/bottom) with an independent shell.
     SplitToggle(crate::display::SplitDirection),
     /// Dock the whole layout of tab `source` into the ACTIVE tab, splitting it
     /// on `nav`'s side (drag a sidebar tab into the terminal area to drop).
-    DockSplit { source: usize, nav: crate::display::SplitNav },
+    DockSplit {
+        source: usize,
+        nav: crate::display::SplitNav,
+    },
     /// Move keyboard focus to the split pane in the given direction.
     FocusSplit(crate::display::SplitNav),
     /// Toggle zoom (temporary full-window) of the focused split pane.
@@ -1076,6 +1097,9 @@ pub struct ActionContext<'a, N, T> {
     pub modifiers: &'a mut Modifiers,
     pub display: &'a mut Display,
     pub nebula_state: &'a mut NebulaPaneState,
+    /// Document shown by the active tab, when it is a viewer tab — wheel and
+    /// navigation keys scroll this instead of a grid. `None` on pane tabs.
+    pub doc: Option<&'a mut crate::display::markdown_view::DocView>,
     pub message_buffer: &'a mut MessageBuffer,
     pub config: &'a UiConfig,
     pub cursor_blink_timed_out: &'a mut bool,
@@ -1099,6 +1123,11 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     #[inline]
     fn write_to_pty<B: Into<Cow<'static, [u8]>>>(&self, val: B) {
         self.notifier.notify(val);
+    }
+
+    #[inline]
+    fn doc_view(&mut self) -> Option<&mut crate::display::markdown_view::DocView> {
+        self.doc.as_deref_mut()
     }
 
     /// Request a redraw.
@@ -1715,7 +1744,8 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     }
 
     /// Trigger a hint action.
-    fn trigger_hint(&mut self, hint: &HintMatch) {        crate::display::nebula_link_log(format!(
+    fn trigger_hint(&mut self, hint: &HintMatch) {
+        crate::display::nebula_link_log(format!(
             "trigger_hint block={} hyperlink={}",
             self.mouse.block_hint_launcher,
             hint.hyperlink().is_some()
@@ -2305,6 +2335,10 @@ pub struct Mouse {
     pub right_button_state: ElementState,
     pub last_click_timestamp: Instant,
     pub last_click_button: MouseButton,
+    /// Pixel where the last press landed, for multi-click detection: a press
+    /// only upgrades to double/triple when it lands within half a cell of the
+    /// previous one (Windows Terminal's `_numberOfClicks` distance gate).
+    pub last_click_pos: (usize, usize),
     pub click_state: ClickState,
     pub accumulated_scroll: AccumulatedScroll,
     pub cell_side: Side,
@@ -2332,6 +2366,7 @@ impl Default for Mouse {
         Mouse {
             last_click_timestamp: Instant::now(),
             last_click_button: MouseButton::Left,
+            last_click_pos: (0, 0),
             left_button_state: ElementState::Released,
             middle_button_state: ElementState::Released,
             right_button_state: ElementState::Released,
@@ -2444,10 +2479,33 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                                 } else {
                                     Some(program.to_owned())
                                 };
+                                // A 4-field title only ever comes from the
+                                // remote `nebula ssh` integration, so the
+                                // typed ssh login is confirmed connected:
+                                // save its destination to the sidebar now
+                                // instead of waiting out SAVE_MIN_SESSION.
+                                if let Some(host) = self.ctx.nebula_state.pending_ssh_host.take() {
+                                    self.ctx.display.nebula_save_ssh_host(&host);
+                                }
                             }
                             *self.ctx.dirty = true;
-                        } else if !self.ctx.preserve_title && self.ctx.config.window.dynamic_title {
-                            self.ctx.window().set_title(title);
+                        } else {
+                            // A non-NEBULA title while a command is in flight
+                            // can only come from the program on the PTY — the
+                            // local shell integration only retitles at its
+                            // prompt. For a typed `ssh` login that means the
+                            // remote shell is up (Ubuntu-style PS1 retitles on
+                            // login): confirm and save the destination without
+                            // waiting for the session to end.
+                            if self.ctx.nebula_state.command_started.is_some() {
+                                if let Some(host) = self.ctx.nebula_state.pending_ssh_host.take() {
+                                    self.ctx.display.nebula_save_ssh_host(&host);
+                                    *self.ctx.dirty = true;
+                                }
+                            }
+                            if !self.ctx.preserve_title && self.ctx.config.window.dynamic_title {
+                                self.ctx.window().set_title(title);
+                            }
                         }
                     },
                     TerminalEvent::ResetTitle => {
@@ -2501,6 +2559,12 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // line captured at Enter (buffers are cleared by now).
                         self.ctx.nebula_state.running_program =
                             crate::display::extract_program(&self.ctx.nebula_state.last_committed);
+                        // Arm the ssh host auto-save: when this command is an
+                        // interactive ssh login, hold its destination until a
+                        // remote NEBULA| title or a long-enough session
+                        // (CommandDone) confirms the connection was real.
+                        self.ctx.nebula_state.pending_ssh_host =
+                            crate::ssh::ssh_destination(&self.ctx.nebula_state.last_committed);
                         self.ctx.nebula_state.awaiting_input = false;
                     },
                     TerminalEvent::CommandDone => {
@@ -2508,11 +2572,20 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // names it, and reading the field after the reset used
                         // to hand the toast a permanent `None`.
                         let program = self.ctx.nebula_state.running_program.take();
+                        let pending_ssh = self.ctx.nebula_state.pending_ssh_host.take();
                         self.ctx.nebula_state.awaiting_input = false;
                         // Long commands (npm/cargo builds...) notify when the
                         // window is in the background; quick ones stay silent.
                         if let Some(started) = self.ctx.nebula_state.command_started.take() {
                             let duration = started.elapsed();
+                            // An ssh session that lived this long was a real
+                            // connection even without the remote integration's
+                            // NEBULA| title: save the host to the sidebar.
+                            if duration >= crate::ssh::SAVE_MIN_SESSION {
+                                if let Some(host) = pending_ssh {
+                                    self.ctx.display.nebula_save_ssh_host(&host);
+                                }
+                            }
                             if duration >= crate::notify::COMMAND_NOTIFY_MIN {
                                 // Sidebar dot until the tab gets looked at
                                 // (cleared instantly for the visible tab).
@@ -2766,6 +2839,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                                     .nebula_side_panel
                                     .commit_msg
                                     .extend(text.chars().filter(|c| !c.is_control()));
+                            } else if self.ctx.display.nebula_ssh_editor.is_some() {
+                                self.ctx.display.ssh_editor_insert(&text);
                             } else {
                                 // Don't use bracketed paste for single char input.
                                 self.ctx.paste(&text, text.chars().count() > 1);

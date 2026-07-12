@@ -1,6 +1,6 @@
 [package]
 name = "nebula"
-version = "0.2.1"
+version = "0.3.0"
 license = "GPL-3.0-or-later"
 description = "Nebula Terminal — a premium GPU-accelerated terminal emulator"
 readme = "README.md"
@@ -15,19 +15,19 @@ path = "src/main.rs"
 
 [dependencies.nebula_terminal]
 path = "../nebula_terminal"
-version = "0.2.1"
+version = "0.3.0"
 
 [dependencies.nebula_config_derive]
 path = "../nebula_config_derive"
-version = "0.2.1"
+version = "0.3.0"
 
 [dependencies.nebula_config]
 path = "../nebula_config"
-version = "0.2.1"
+version = "0.3.0"
 
 [dependencies.nebula-completions]
 path = "../nebula-completions"
-version = "0.2.1"
+version = "0.3.0"
 
 [dependencies]
 ahash = { version = "0.8.6", features = ["no-rng"] }
@@ -43,6 +43,9 @@ log = { version = "0.4", features = ["std", "serde"] }
 notify = "8.0.0"
 parking_lot = "0.12.0"
 polling = "3.11.0"
+# Markdown viewer: CommonMark + GFM (tables / task lists / strikethrough)
+# event parser; `display::markdown_view` renders the folded block AST.
+pulldown-cmark = { version = "0.13", default-features = false }
 # preserve_order: we rewrite the user's claude settings.json (ai_hook
 # self-heal) and must not alphabetize their keys in the process.
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -86,6 +89,10 @@ objc2-app-kit = { version = "0.3.1", default-features = false, features = [
 
 [target.'cfg(windows)'.dependencies]
 dirs = "6.0.0"
+# Registry reads for installed-shell detection (WSL distros under Lxss, Git /
+# PowerShell App Paths) — the new-tab profile dropdown. RegKey wrapper over the
+# windows-sys registry APIs we already depend on.
+winreg = "0.55"
 # Native WinRT toast (right-corner / Action Center). Zero user setup: it fires
 # under Nebula's own AppUserModelID, which we register silently on first run
 # (see `notify::win`), so the banner shows "Nebula" instead of "PowerShell".
@@ -93,6 +100,8 @@ tauri-winrt-notification = "0.7.3"
 windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Controls_Dialogs",
+    # System double-click time for the terminal's multi-click detection.
+    "Win32_UI_Input_KeyboardAndMouse",
     # COM + Shell: build the Start-menu shortcut that carries our AUMID so the
     # toast is attributed to Nebula (IShellLink + IPersistFile + IPropertyStore).
     "Win32_System_Com",
@@ -111,6 +120,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Graphics_Gdi",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Diagnostics_Debug",
     "Win32_Foundation",

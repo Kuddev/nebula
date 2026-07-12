@@ -18,11 +18,22 @@ pub enum ChromeHit {
     None,
     TitleBar,
     NewTab,
+    /// The chevron beside "+" that opens the new-tab shell dropdown (Windows
+    /// Terminal's profile menu).
+    NewTabMenu,
     Tab(usize),
     TabClose(usize),
     /// The sidebar icon in the top bar that folds the left tab sidebar away and
     /// back. Lives in the title bar so it stays reachable while collapsed.
     SidebarToggle,
+    /// A row in the sidebar's "SSH HOSTS" section (index into the host list).
+    Host(usize),
+    AddSshHost,
+    HostDelete(usize),
+    /// The "TABS" section header — click toggles the accordion fold.
+    TabsSection,
+    /// The "SSH HOSTS" section header — click toggles the accordion fold.
+    HostsSection,
     /// Top-bar toggles for the right-side drawer's two views (otty-style).
     PanelFiles,
     PanelGit,
@@ -71,7 +82,6 @@ pub enum TabDropAction {
     Dock { source: usize, nav: SplitNav },
 }
 
-
 #[derive(Debug, Clone)]
 /// Geometry for the left tab sidebar. Tabs are stacked vertically inside the
 /// `panel` rect; each `tabs[i]` row carries a `closes[i]` × button, and `plus`
@@ -82,9 +92,44 @@ pub(super) struct ChromeTabLayout {
     pub(super) tabs: Vec<(f32, f32, f32, f32)>,
     pub(super) closes: Vec<(f32, f32, f32, f32)>,
     pub(super) plus: (f32, f32, f32, f32),
+    /// Chevron beside "+" that opens the new-tab shell dropdown. Zero-width
+    /// when there's no room (never, in practice — it shares the plus band).
+    pub(super) menu: (f32, f32, f32, f32),
     pub(super) toggle: (f32, f32, f32, f32),
     /// Full sidebar panel background rect. Zero-width when collapsed.
     pub(super) panel: (f32, f32, f32, f32),
+    /// SSH host rows, same indexing contract as `tabs`: entry `i` is host `i`,
+    /// scrolled-out rows carry a zero rect (skipped by drawing and hit-tests).
+    pub(super) hosts: Vec<(f32, f32, f32, f32)>,
+    pub(super) host_closes: Vec<(f32, f32, f32, f32)>,
+    pub(super) hosts_add: (f32, f32, f32, f32),
+    /// Accordion headers ("TABS" / "SSH HOSTS" caption bands). Zero when the
+    /// panel is folded; `hosts_header` is zero when there are no hosts at all.
+    pub(super) tabs_header: (f32, f32, f32, f32),
+    pub(super) hosts_header: (f32, f32, f32, f32),
+    /// Per-section overlay scrollbars (track omitted, thumb only), present
+    /// only when that section overflows its elastic share of the panel.
+    pub(super) tabs_scrollbar: Option<(f32, f32, f32, f32)>,
+    pub(super) hosts_scrollbar: Option<(f32, f32, f32, f32)>,
+    /// Vertical band `(y0, y1)` of each section's row area, for wheel routing.
+    pub(super) tabs_band: (f32, f32),
+    pub(super) hosts_band: (f32, f32),
+    /// Scroll clamps: the largest valid row offset for each section.
+    pub(super) tabs_max_scroll: usize,
+    pub(super) hosts_max_scroll: usize,
+}
+
+/// Sidebar content model handed to the layout: everything that changes the
+/// section geometry, read off `Display` in one place (`sidebar_model`) so the
+/// drawing, hit-testing and wheel paths can never disagree.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SidebarModel {
+    pub(super) tab_count: usize,
+    pub(super) host_count: usize,
+    pub(super) tabs_open: bool,
+    pub(super) hosts_open: bool,
+    pub(super) tabs_scroll: usize,
+    pub(super) hosts_scroll: usize,
 }
 
 pub(super) fn contains_rect((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f32) -> bool {
@@ -179,7 +224,7 @@ pub(crate) fn chrome_settings_button_rect(
 pub(super) fn chrome_tab_layout(
     size_info: &SizeInfo,
     scale_factor: f32,
-    tab_count: usize,
+    model: SidebarModel,
     expand: f32,
 ) -> ChromeTabLayout {
     let s = |v: f32| v * scale_factor;
@@ -189,7 +234,8 @@ pub(super) fn chrome_tab_layout(
     let inner_pad = s(6.0);
     let pill_h = bar_h - 2.0 * inner_pad;
     let top = margin;
-    let count = tab_count.max(1);
+    let count = model.tab_count.max(1);
+    let host_count = model.host_count;
 
     // Sidebar toggle: leftmost square in the top bar, always present.
     let toggle = (margin + inner_pad, top + inner_pad, pill_h, pill_h);
@@ -204,12 +250,28 @@ pub(super) fn chrome_tab_layout(
         // sidebar hidden.
         let gear = chrome_settings_button_rect(size_info, scale_factor);
         let plus = (gear.0 + gear.2 + s(8.0), top + inner_pad, pill_h, pill_h);
+        // Chevron dropdown just right of "+", narrower (it's a caret, not a
+        // full pill).
+        let menu_w = s(16.0);
+        let menu = (plus.0 + plus.2 + s(2.0), top + inner_pad, menu_w, pill_h);
         return ChromeTabLayout {
             tabs: Vec::new(),
             closes: Vec::new(),
             plus,
+            menu,
             toggle,
             panel: (0.0, 0.0, 0.0, 0.0),
+            hosts: Vec::new(),
+            host_closes: Vec::new(),
+            hosts_add: (0.0, 0.0, 0.0, 0.0),
+            tabs_header: (0.0, 0.0, 0.0, 0.0),
+            hosts_header: (0.0, 0.0, 0.0, 0.0),
+            tabs_scrollbar: None,
+            hosts_scrollbar: None,
+            tabs_band: (0.0, 0.0),
+            hosts_band: (0.0, 0.0),
+            tabs_max_scroll: 0,
+            hosts_max_scroll: 0,
         };
     }
 
@@ -238,24 +300,66 @@ pub(super) fn chrome_tab_layout(
     let tab_w = panel_w - 2.0 * tab_pad;
     let row_h = s(34.0);
     let gap = s(8.0);
+    let pitch = row_h + gap;
     // Header band below the top-bar join: the panel now abuts the top bar with
     // no gap, so this carries the seam clearance (the old +12 panel gap) plus
     // room for the "TABS" caption and the "+" square.
     let header = s(54.0);
+    // "SSH HOSTS" caption band — always present, so the feature is
+    // discoverable even before the user has any `~/.ssh/config` entries
+    // (an empty section shows a hint instead of vanishing).
+    let hosts_header_h = s(38.0);
+    let bottom_pad = s(10.0);
 
-    // "+" square, vertically centred in the header band, pinned to the right.
+    // "+" square plus its dropdown chevron, vertically centred in the header
+    // band, pinned to the right. The chevron is the rightmost element; the
+    // "+" sits just left of it.
     let plus_sz = s(20.0);
-    let plus = (
-        panel_x + panel_w - tab_pad - plus_sz,
-        panel_top + (header - plus_sz) * 0.5,
-        plus_sz,
-        plus_sz,
-    );
+    let menu_w = s(15.0);
+    let plus_y = panel_top + (header - plus_sz) * 0.5;
+    let menu = (panel_x + panel_w - tab_pad - menu_w, plus_y, menu_w, plus_sz);
+    let plus = (menu.0 - s(2.0) - plus_sz, plus_y, plus_sz, plus_sz);
 
-    let mut y = panel_top + header;
+    let tabs_header = (panel_x, panel_top, panel_w, header);
+
+    // ---- Elastic accordion split ----
+    // Each open section wants `count` rows. If both fit, both get what they
+    // want; if not, the panel's row budget is split so neither section can
+    // starve the other below half of the budget, and every overflowing
+    // section scrolls behind its own scrollbar.
+    let avail_rows = (((panel_h - header - hosts_header_h - bottom_pad + gap) / pitch)
+        .floor()
+        .max(0.0)) as usize;
+    let tabs_want = if model.tabs_open { count } else { 0 };
+    let hosts_want = if model.hosts_open { host_count } else { 0 };
+    let (tabs_show, hosts_show) = if tabs_want + hosts_want <= avail_rows {
+        (tabs_want, hosts_want)
+    } else {
+        let half = avail_rows / 2;
+        let tabs_show = tabs_want.min(avail_rows.saturating_sub(hosts_want).max(half));
+        let hosts_show = hosts_want.min(avail_rows - tabs_show);
+        // Hand any slack back to the tabs section (hosts already capped).
+        (tabs_want.min(avail_rows - hosts_show), hosts_show)
+    };
+    let tabs_max_scroll = tabs_want.saturating_sub(tabs_show);
+    let hosts_max_scroll = hosts_want.saturating_sub(hosts_show);
+    let tabs_scroll = model.tabs_scroll.min(tabs_max_scroll);
+    let hosts_scroll = model.hosts_scroll.min(hosts_max_scroll);
+
+    // Tab rows: real rects only for the visible scroll window; scrolled-out
+    // rows keep their index but carry a zero rect so hit-testing and drawing
+    // skip them without disturbing the index contract.
+    let zero = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+    let tabs_top = panel_top + header;
     let mut tabs = Vec::with_capacity(count);
     let mut closes = Vec::with_capacity(count);
-    for _ in 0..count {
+    for i in 0..count {
+        if !model.tabs_open || i < tabs_scroll || i >= tabs_scroll + tabs_show {
+            tabs.push(zero);
+            closes.push(zero);
+            continue;
+        }
+        let y = tabs_top + (i - tabs_scroll) as f32 * pitch;
         tabs.push((tab_x, y, tab_w, row_h));
         let close_size = (row_h * 0.58).max(s(16.0));
         closes.push((
@@ -264,16 +368,79 @@ pub(super) fn chrome_tab_layout(
             close_size,
             close_size,
         ));
-        y += row_h + gap;
     }
+    let tabs_band_h = if tabs_show > 0 { tabs_show as f32 * pitch - gap } else { 0.0 };
+    let tabs_band = (tabs_top, tabs_top + tabs_band_h);
 
-    ChromeTabLayout { tabs, closes, plus, toggle, panel }
+    // Hosts section stacks right below the tabs band.
+    let hosts_header_y = tabs_band.1 + if tabs_show > 0 { gap } else { 0.0 };
+    let hosts_header = (panel_x, hosts_header_y, panel_w, hosts_header_h);
+    let hosts_top = hosts_header_y + hosts_header_h;
+    let mut hosts = Vec::with_capacity(host_count);
+    let mut host_closes = Vec::with_capacity(host_count);
+    for i in 0..host_count {
+        if !model.hosts_open || i < hosts_scroll || i >= hosts_scroll + hosts_show {
+            hosts.push(zero);
+            host_closes.push(zero);
+            continue;
+        }
+        let y = hosts_top + (i - hosts_scroll) as f32 * pitch;
+        hosts.push((tab_x, y, tab_w, row_h));
+        let close_size = (row_h * 0.58).max(s(16.0));
+        host_closes.push((
+            tab_x + tab_w - close_size - s(10.0),
+            y + (row_h - close_size) * 0.5,
+            close_size,
+            close_size,
+        ));
+    }
+    let hosts_band_h = if hosts_show > 0 { hosts_show as f32 * pitch - gap } else { 0.0 };
+    let hosts_band = (hosts_top, hosts_top + hosts_band_h);
+
+    // Overlay scrollbar thumbs, one per overflowing section: pinned to the
+    // panel's right inner edge, sized to the visible fraction of the list.
+    let thumb = |band: (f32, f32), show: usize, want: usize, scroll: usize| {
+        if show == 0 || want <= show {
+            return None;
+        }
+        let track_h = band.1 - band.0;
+        let th = (track_h * show as f32 / want as f32).max(s(24.0));
+        let ty = band.0 + (track_h - th) * scroll as f32 / (want - show) as f32;
+        Some((panel_x + panel_w - s(6.0), ty, s(3.0), th))
+    };
+    let tabs_scrollbar = thumb(tabs_band, tabs_show, tabs_want, tabs_scroll);
+    let hosts_scrollbar = thumb(hosts_band, hosts_show, hosts_want, hosts_scroll);
+
+    ChromeTabLayout {
+        tabs,
+        closes,
+        plus,
+        menu,
+        toggle,
+        panel,
+        hosts,
+        host_closes,
+        hosts_add: (
+            hosts_header.0 + hosts_header.2 - s(42.0),
+            hosts_header.1 + (hosts_header.3 - s(20.0)) * 0.5,
+            s(20.0),
+            s(20.0),
+        ),
+        tabs_header,
+        hosts_header,
+        tabs_scrollbar,
+        hosts_scrollbar,
+        tabs_band,
+        hosts_band,
+        tabs_max_scroll,
+        hosts_max_scroll,
+    }
 }
 
 pub(super) fn chrome_hit_with_tabs(
     size_info: &SizeInfo,
     scale_factor: f32,
-    tab_count: usize,
+    model: SidebarModel,
     collapsed: bool,
     x: f32,
     y: f32,
@@ -285,15 +452,21 @@ pub(super) fn chrome_hit_with_tabs(
     let top = margin;
 
     let expand = if collapsed { 0.0 } else { 1.0 };
-    let layout = chrome_tab_layout(size_info, scale_factor, tab_count, expand);
+    let layout = chrome_tab_layout(size_info, scale_factor, model, expand);
 
     // Toggle + new-tab + vertical tab rows are checked before the bar regions,
     // since the sidebar lives outside the top bar's vertical band.
     if contains_rect(layout.toggle, x, y) {
         return ChromeHit::SidebarToggle;
     }
+    if contains_rect(layout.menu, x, y) {
+        return ChromeHit::NewTabMenu;
+    }
     if contains_rect(layout.plus, x, y) {
         return ChromeHit::NewTab;
+    }
+    if contains_rect(layout.hosts_add, x, y) {
+        return ChromeHit::AddSshHost;
     }
     for (index, rect) in layout.closes.iter().copied().enumerate() {
         if contains_rect(rect, x, y) {
@@ -304,6 +477,24 @@ pub(super) fn chrome_hit_with_tabs(
         if contains_rect(rect, x, y) {
             return ChromeHit::Tab(index);
         }
+    }
+    for (index, rect) in layout.host_closes.iter().copied().enumerate() {
+        if contains_rect(rect, x, y) {
+            return ChromeHit::HostDelete(index);
+        }
+    }
+    for (index, rect) in layout.hosts.iter().copied().enumerate() {
+        if contains_rect(rect, x, y) {
+            return ChromeHit::Host(index);
+        }
+    }
+    // Section captions toggle the accordion. Checked after the "+" (which
+    // lives inside the TABS header band) and the rows.
+    if layout.tabs_header.2 > 0.0 && contains_rect(layout.tabs_header, x, y) {
+        return ChromeHit::TabsSection;
+    }
+    if layout.hosts_header.2 > 0.0 && contains_rect(layout.hosts_header, x, y) {
+        return ChromeHit::HostsSection;
     }
 
     // Top bar: window controls first, then the rest drags the window.
@@ -377,7 +568,6 @@ pub fn resize_edge(
     Some(dir)
 }
 
-
 // ---- chrome rendering (moved verbatim from `display::mod`; `d` = Display) ----
 
 /// Draw the Nebula window chrome: top title bar and left tab sidebar.
@@ -386,6 +576,11 @@ pub fn resize_edge(
 /// panels and pills with the dedicated UI renderer to validate the native
 /// (egui-free) chrome pipeline. Text labels and interactivity follow.
 pub(super) fn draw_chrome(d: &mut Display) {
+    // Tick command palette cursor animation (blink cycle).
+    if d.nebula_palette.is_open() {
+        d.nebula_palette.tick_cursor();
+    }
+
     // Chrome colors come from the theme skin (hover washes flip to dark
     // smoke on the light themes); close-hover red stays semantic.
     let palette = d.nebula_theme.palette();
@@ -406,9 +601,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
     let bar_h = s(40.0);
     let inner_pad = s(6.0);
     let radius = s(UI_CORNER_RADIUS_LOGICAL);
-    // Larger outer radius for the connected chrome shell (top bar + sidebar
-    // L-frame); pills/controls keep the smaller `radius`.
-    let shell_r = s(UI_SHELL_RADIUS_LOGICAL);
     let pill_h = bar_h - 2.0 * inner_pad;
     let pill_r = s(UI_CORNER_RADIUS_LOGICAL);
     let hairline_w = s(UI_HAIRLINE_LOGICAL).max(1.0);
@@ -460,12 +652,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             .with_corners(top_bar_corners),
     );
 
-    let tab_layout = chrome_tab_layout(
-        &size,
-        scale,
-        d.nebula_tab_labels.len(),
-        sidebar_expand,
-    );
+    let tab_layout = chrome_tab_layout(&size, scale, d.sidebar_model(), sidebar_expand);
 
     // Sidebar toggle at the far left of the top bar folds the tab sidebar
     // away and back; it's the one tab affordance that survives collapse.
@@ -532,8 +719,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
 
     // Dock preview: while a dragged tab hovers the terminal area, glow the
     // half where dropping would split the active tab (VS Code edge dock).
-    if let Some(nav) = d.nebula_tab_drag.as_ref().filter(|d| d.active).and_then(|d| d.dock)
-    {
+    if let Some(nav) = d.nebula_tab_drag.as_ref().filter(|d| d.active).and_then(|d| d.dock) {
         let gx = size.padding_x();
         let gy = size.padding_y();
         let gw = size.width() - gx - size.padding_right();
@@ -564,6 +750,12 @@ pub(super) fn draw_chrome(d: &mut Display) {
     let mut tab_anim_active = false;
 
     for (index, (tab_x, row_y, tab_w, tab_h)) in tab_layout.tabs.iter().copied().enumerate() {
+        // Scrolled-out / folded rows carry a zero rect: skip them, and snap
+        // their eased position so they don't fly in when they reappear.
+        if tab_w <= 0.0 {
+            d.nebula_tab_anim[index] = row_y;
+            continue;
+        }
         let target_y = d.tab_drag_draw_y(index, row_y, &tab_layout);
         let cur = d.nebula_tab_anim[index];
         // The grabbed pill tracks the pointer 1:1 (easing it would feel
@@ -581,12 +773,12 @@ pub(super) fn draw_chrome(d: &mut Display) {
             d.nebula_chrome_hover,
             ChromeHit::Tab(i) | ChromeHit::TabClose(i) if i == index
         );
-        let close_hovered =
-            matches!(d.nebula_chrome_hover, ChromeHit::TabClose(i) if i == index);
-        let hover_lift_x = if tab_hovered && index != d.nebula_active_tab { s(1.0) } else { 0.0 };
-        let hover_lift_y = if tab_hovered && index != d.nebula_active_tab { -s(1.0) } else { 0.0 };
-        let tab_draw_x = tab_x + hover_lift_x;
-        let tab_draw_y = tab_y + hover_lift_y;
+        let close_hovered = matches!(d.nebula_chrome_hover, ChromeHit::TabClose(i) if i == index);
+        // No hover lift: the hover fill must stay pixel-aligned with the row
+        // grid (the "+" square and the × buttons share its right edge; a 1px
+        // offset reads as misalignment, not depth).
+        let tab_draw_x = tab_x;
+        let tab_draw_y = tab_y;
         if index == d.nebula_active_tab {
             // Floating-pill active tab (design language): a soft accent
             // wash over the pill plus a hairline accent border — no
@@ -600,7 +792,14 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 pill_r + s(1.0),
                 Rgba::new(accent.r, accent.g, accent.b, 40),
             ));
-            quads.push(UiQuad::solid(tab_draw_x, tab_draw_y, tab_w, tab_h, pill_r, palette.tab_bg_l));
+            quads.push(UiQuad::solid(
+                tab_draw_x,
+                tab_draw_y,
+                tab_w,
+                tab_h,
+                pill_r,
+                palette.tab_bg_l,
+            ));
             // The accent wash on top is a DARK-theme depth cue: the white pill
             // (`tab_bg_l`) is the state on the light themes, so tinting it just
             // grays the white the user asked to keep pure. Only the dark themes
@@ -685,12 +884,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                         d,
                         d,
                         d / 2.0,
-                        Rgba::new(
-                            palette.edge_r.r,
-                            palette.edge_r.g,
-                            palette.edge_r.b,
-                            alpha,
-                        ),
+                        Rgba::new(palette.edge_r.r, palette.edge_r.g, palette.edge_r.b, alpha),
                     ));
                 }
             }
@@ -708,6 +902,39 @@ pub(super) fn draw_chrome(d: &mut Display) {
     let (plus_x, plus_y, plus_w, plus_h) = tab_layout.plus;
     if d.nebula_chrome_hover == ChromeHit::NewTab {
         quads.push(UiQuad::solid(plus_x, plus_y, plus_w, plus_h, pill_r, HOVER_FILL_STRONG));
+    }
+    // The dropdown chevron beside "+": same hover-only lift.
+    let (menu_x, menu_y, menu_w, menu_h) = tab_layout.menu;
+    if d.nebula_chrome_hover == ChromeHit::NewTabMenu {
+        quads.push(UiQuad::solid(menu_x, menu_y, menu_w, menu_h, pill_r, HOVER_FILL_STRONG));
+    }
+
+    // SSH HOSTS section (quad layer): hover fill per row + the per-section
+    // overlay scrollbar thumbs. Row icons/labels render in the text pass.
+    if d.left_sidebar_visible() && !d.nebula_settings_open {
+        for (index, (hx, hy, hw, hh)) in tab_layout.hosts.iter().copied().enumerate() {
+            if hw <= 0.0 {
+                continue;
+            }
+            if matches!(d.nebula_chrome_hover, ChromeHit::Host(i) | ChromeHit::HostDelete(i) if i == index)
+            {
+                quads.push(UiQuad::solid(hx, hy, hw, hh, pill_r, HOVER_FILL));
+            }
+            if matches!(d.nebula_chrome_hover, ChromeHit::HostDelete(i) if i == index) {
+                if let Some((cx, cy, cw, ch)) = tab_layout.host_closes.get(index).copied() {
+                    quads.push(UiQuad::solid(cx, cy, cw, ch, cw * 0.35, HOVER_FILL_STRONG));
+                }
+            }
+        }
+        if d.nebula_chrome_hover == ChromeHit::AddSshHost {
+            let (ax, ay, aw, ah) = tab_layout.hosts_add;
+            quads.push(UiQuad::solid(ax, ay, aw, ah, s(6.0), HOVER_FILL_STRONG));
+        }
+        let thumb_c = sk.scrollbar_thumb;
+        for bar in [tab_layout.tabs_scrollbar, tab_layout.hosts_scrollbar].into_iter().flatten() {
+            let (bx, by, bw, bh) = bar;
+            quads.push(UiQuad::solid(bx, by, bw, bh, bw * 0.5, thumb_c));
+        }
     }
 
     // Window controls keep native-size hit targets; icons are rendered in
@@ -799,6 +1026,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         (sk.ink, sk.ink_strong, sk.ink_dim, sk.icon, sk.icon_hover);
     const ICON_SETTINGS: &str = "\u{eb51}";
     const ICON_ADD: &str = "\u{ea60}";
+    const ICON_CHEVRON_DOWN: &str = "\u{eab4}";
     const ICON_CLOSE: &str = "\u{ea76}";
     const ICON_CHROME_MINIMIZE: &str = "\u{eaba}";
     const ICON_CHROME_MAXIMIZE: &str = "\u{eab9}";
@@ -848,6 +1076,17 @@ pub(super) fn draw_chrome(d: &mut Display) {
             if d.nebula_chrome_hover == ChromeHit::NewTab { ICON_HOVER } else { ICON },
             ICON_ADD,
         );
+        // The dropdown chevron (codicon chevron-down) beside "+".
+        draw_centered_icon(
+            &mut d.renderer,
+            &mut d.glyph_cache,
+            &size,
+            cell_w,
+            cell_h,
+            tab_layout.menu,
+            if d.nebula_chrome_hover == ChromeHit::NewTabMenu { ICON_HOVER } else { ICON },
+            ICON_CHEVRON_DOWN,
+        );
     }
     for (hit, cx, cy) in chrome_control_centers(w, top_y, bar_h, scale) {
         let hovered = d.nebula_chrome_hover == hit;
@@ -862,12 +1101,10 @@ pub(super) fn draw_chrome(d: &mut Display) {
         // Drawer toggles light up in the accent while their view is open.
         let active = match hit {
             ChromeHit::PanelFiles => {
-                d.nebula_side_panel.open
-                    && d.nebula_side_panel.view == side_panel::PanelView::Files
+                d.nebula_side_panel.open && d.nebula_side_panel.view == side_panel::PanelView::Files
             },
             ChromeHit::PanelGit => {
-                d.nebula_side_panel.open
-                    && d.nebula_side_panel.view == side_panel::PanelView::Git
+                d.nebula_side_panel.open && d.nebula_side_panel.view == side_panel::PanelView::Git
             },
             _ => false,
         };
@@ -896,20 +1133,24 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // Sidebar text (caption, labels, × buttons) also stays under the
     // settings glass — skip it entirely while the modal is up.
     if d.left_sidebar_visible() && tab_layout.panel.2 > 0.0 && !d.nebula_settings_open {
-        // "TABS" caption at the panel head. The panel now abuts the top bar
-        // with no gap, so the caption is pushed down inside the header band to
-        // keep clearance from the (invisible) join seam.
+        // "TABS" caption at the panel head, with an accordion chevron. The
+        // panel abuts the top bar with no gap, so the caption is pushed down
+        // inside the header band to keep clearance from the join.
         let (pnl_x, pnl_y, _, _) = tab_layout.panel;
+        let tabs_chevron = if d.nebula_tabs_section_open { "\u{eab4}" } else { "\u{eab6}" };
         d.renderer.draw_chrome_text(
             &size,
             pnl_x + s(16.0),
             pnl_y + s(18.0),
             TXT_DIM,
-            "TABS",
+            &format!("TABS  {tabs_chevron}"),
             &mut d.glyph_cache,
         );
-        for (index, (tab_x, row_y, tab_w, tab_h)) in tab_layout.tabs.iter().copied().enumerate()
-        {
+        for (index, (tab_x, row_y, tab_w, tab_h)) in tab_layout.tabs.iter().copied().enumerate() {
+            // Scrolled-out / folded rows: zero rect, nothing to draw.
+            if tab_w <= 0.0 {
+                continue;
+            }
             let row_y = d.nebula_tab_anim.get(index).copied().unwrap_or(row_y);
             let tab_hovered = matches!(
                 d.nebula_chrome_hover,
@@ -917,14 +1158,11 @@ pub(super) fn draw_chrome(d: &mut Display) {
             );
             let close_hovered =
                 matches!(d.nebula_chrome_hover, ChromeHit::TabClose(i) if i == index);
-            let hover_lift_x = if tab_hovered && index != d.nebula_active_tab { s(1.0) } else { 0.0 };
-            let hover_lift_y = if tab_hovered && index != d.nebula_active_tab { -s(1.0) } else { 0.0 };
-            let draw_row_y = row_y + hover_lift_y;
-            let color = if index == d.nebula_active_tab || tab_hovered {
-                TXT_ON_ACCENT
-            } else {
-                TXT
-            };
+            // Text follows the quad layer: no hover lift (see draw_chrome).
+            let hover_lift_x = 0.0;
+            let draw_row_y = row_y;
+            let color =
+                if index == d.nebula_active_tab || tab_hovered { TXT_ON_ACCENT } else { TXT };
             let cy = row_text_cy(draw_row_y, tab_h);
             // Real AI brand logo (claude/codex): a textured quad in the
             // icon slot, sized to the glyph ink height so it reads like
@@ -963,8 +1201,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             // this text phase would silently never render — which is exactly
             // why the rename box was invisible. Draw them now, before the
             // label glyphs, so box/selection sit under the text.
-            let renaming_this =
-                d.nebula_tab_rename.as_ref().is_some_and(|(i, _)| *i == index);
+            let renaming_this = d.nebula_tab_rename.as_ref().is_some_and(|(i, _)| *i == index);
             let select_all = renaming_this && d.nebula_tab_rename_select_all;
             if renaming_this {
                 let input_pad = s(4.0);
@@ -976,26 +1213,36 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 let mut box_quads = vec![
                     // White base fill.
                     UiQuad::solid(
-                        input_x, input_y, input_w, input_h, s(4.0),
+                        input_x,
+                        input_y,
+                        input_w,
+                        input_h,
+                        s(4.0),
                         Rgba::new(255, 255, 255, 250),
                     ),
                     // Accent wash over the whole box; the inner white below
                     // then leaves it showing only as a border ring.
                     UiQuad::solid(
-                        input_x, input_y, input_w, input_h, s(4.0),
+                        input_x,
+                        input_y,
+                        input_w,
+                        input_h,
+                        s(4.0),
                         Rgba::new(accent.r, accent.g, accent.b, 120),
                     ),
                     // Inner white, inset by a hairline → accent ring border.
                     UiQuad::solid(
-                        input_x + hairline_w, input_y + hairline_w,
-                        input_w - 2.0 * hairline_w, input_h - 2.0 * hairline_w,
-                        s(3.0), Rgba::new(255, 255, 255, 250),
+                        input_x + hairline_w,
+                        input_y + hairline_w,
+                        input_w - 2.0 * hairline_w,
+                        input_h - 2.0 * hairline_w,
+                        s(3.0),
+                        Rgba::new(255, 255, 255, 250),
                     ),
                 ];
                 // Text metrics (column-based: CJK counts 2, matching
                 // draw_chrome_text's advance).
-                let text_cols: usize =
-                    label.chars().map(|c| c.width().unwrap_or(0).max(1)).sum();
+                let text_cols: usize = label.chars().map(|c| c.width().unwrap_or(0).max(1)).sum();
                 let text_w = text_cols as f32 * cell_w;
                 let text_top = row_y + (tab_h - cell_h) / 2.0;
                 // Publish the buffer's first-glyph X for click-to-place-caret
@@ -1025,8 +1272,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                             .map(|c| c.width().unwrap_or(0).max(1))
                             .sum();
                         box_quads.push(UiQuad::solid(
-                            (text_x + caret_cols as f32 * cell_w)
-                                .min(input_x + input_w - s(4.0)),
+                            (text_x + caret_cols as f32 * cell_w).min(input_x + input_w - s(4.0)),
                             text_top,
                             (2.0 * scale).max(1.0),
                             cell_h,
@@ -1049,12 +1295,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                         .sum();
                     text_x + caret_cols as f32 * cell_w
                 };
-                d.window.set_ime_cursor_area_px(
-                    caret_px,
-                    row_y,
-                    cell_w,
-                    tab_h,
-                );
+                d.window.set_ime_cursor_area_px(caret_px, row_y, cell_w, tab_h);
             }
 
             d.renderer.draw_chrome_text(
@@ -1071,6 +1312,15 @@ pub(super) fn draw_chrome(d: &mut Display) {
                     color
                 },
                 &label,
+                &mut d.glyph_cache,
+            );
+            let (ax, ay, aw, ah) = tab_layout.hosts_add;
+            d.renderer.draw_chrome_text(
+                &size,
+                ax + (aw - cell_w) / 2.0,
+                ay + (ah - cell_h) / 2.0,
+                if d.nebula_chrome_hover == ChromeHit::AddSshHost { sk.accent } else { TXT_DIM },
+                "+",
                 &mut d.glyph_cache,
             );
             if tab_hovered {
@@ -1097,14 +1347,139 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 &mut d.glyph_cache,
             );
         }
+
+        // ---- SSH HOSTS section (text pass) ----
+        // Caption with accordion chevron, then one row per visible host:
+        // remote icon + alias, plus a small pin glyph on pinned entries.
+        if tab_layout.hosts_header.2 > 0.0 {
+            let (hh_x, hh_y, _, hh_h) = tab_layout.hosts_header;
+            let hosts_chevron = if d.nebula_hosts_section_open { "\u{eab4}" } else { "\u{eab6}" };
+            d.renderer.draw_chrome_text(
+                &size,
+                hh_x + s(16.0),
+                hh_y + (hh_h - cell_h) / 2.0,
+                TXT_DIM,
+                &format!("SSH HOSTS  {hosts_chevron}"),
+                &mut d.glyph_cache,
+            );
+            // Empty state: the section stays visible with a hint teaching the
+            // zero-config path — typing `ssh host` in any pane auto-saves the
+            // destination here once the connection confirms (`~/.ssh/config`
+            // aliases still appear automatically too). Styled as helper text,
+            // NOT as content: smaller and fainter than the caption above it,
+            // and indented to the row-label depth (`tab_pad + s(14)`, where
+            // tab/host row text starts) so it reads as a child of the section.
+            // The hint wraps to the sidebar width; drawing it as one line
+            // would bleed across the seam onto the terminal grid.
+            if d.nebula_ssh_hosts.is_empty() && d.nebula_hosts_section_open {
+                use unicode_width::UnicodeWidthChar;
+                const HINT_SCALE: f32 = 0.85;
+                let hint_flags = nebula_terminal::term::cell::Flags::empty();
+                let (pnl_x, _, pnl_w, _) = tab_layout.panel;
+                let text_x = hh_x + s(28.0);
+                // Wrap budget in the TRUE scaled advance (`draw_doc_text`
+                // steps by unfloored `average_advance × scale`, not by the
+                // floored grid cell) or long lines overrun the panel edge.
+                let hint_cell_w = d.glyph_cache.font_metrics().average_advance as f32 * HINT_SCALE;
+                let max_cols =
+                    ((((pnl_x + pnl_w - s(12.0)) - text_x) / hint_cell_w).floor() as usize).max(4);
+                let mut line = String::new();
+                let mut cols = 0;
+                let mut line_y = hh_y + hh_h + s(2.0);
+                for ch in "输入 ssh 命令，连接后自动保存".chars() {
+                    let ch_cols = ch.width().unwrap_or(0);
+                    if cols + ch_cols > max_cols && !line.is_empty() {
+                        d.renderer.draw_doc_text(
+                            &size,
+                            text_x,
+                            line_y,
+                            HINT_SCALE,
+                            sk.ink_faint,
+                            hint_flags,
+                            line.trim_start(),
+                            &mut d.glyph_cache,
+                        );
+                        line.clear();
+                        cols = 0;
+                        line_y += cell_h * HINT_SCALE + s(3.0);
+                    }
+                    line.push(ch);
+                    cols += ch_cols;
+                }
+                if !line.trim_start().is_empty() {
+                    d.renderer.draw_doc_text(
+                        &size,
+                        text_x,
+                        line_y,
+                        HINT_SCALE,
+                        sk.ink_faint,
+                        hint_flags,
+                        line.trim_start(),
+                        &mut d.glyph_cache,
+                    );
+                }
+            }
+            for (index, (hx, hy, hw, hh)) in tab_layout.hosts.iter().copied().enumerate() {
+                if hw <= 0.0 {
+                    continue;
+                }
+                let hovered = matches!(d.nebula_chrome_hover, ChromeHit::Host(i) | ChromeHit::HostDelete(i) if i == index);
+                let color = if hovered { TXT_ON_ACCENT } else { TXT };
+                let cy = row_text_cy(hy, hh);
+                let name = d.nebula_ssh_hosts.get(index).map(String::as_str).unwrap_or("?");
+                let pinned = d.nebula_pinned_hosts.iter().any(|p| p == name);
+                // Label budget from its real start to the row's right edge
+                // (minus the pin marker's slot when pinned), in columns. The
+                // leading remote icon + space cost 2 columns of the drawn
+                // string, so the alias budget subtracts them — a fixed pixel
+                // reserve under-counted at larger font sizes and let long
+                // aliases run past the hover pill.
+                let text_x = hx + s(14.0);
+                let right = hx + hw - s(42.0);
+                let max_cols = (((right - text_x) / cell_w).floor() as usize).saturating_sub(2);
+                let label = truncate_tab_label(name, max_cols.max(1));
+                d.renderer.draw_chrome_text(
+                    &size,
+                    text_x,
+                    cy,
+                    color,
+                    &format!("\u{f489} {label}"),
+                    &mut d.glyph_cache,
+                );
+                if pinned {
+                    // Pin marker pinned to the row's right edge (mirrors the
+                    // × slot on tab rows).
+                    d.renderer.draw_chrome_text(
+                        &size,
+                        hx + hw - s(10.0) - cell_w,
+                        cy,
+                        TXT_DIM,
+                        "\u{eba0}",
+                        &mut d.glyph_cache,
+                    );
+                }
+                if hovered {
+                    if let Some((cx, cy, cw, ch)) = tab_layout.host_closes.get(index).copied() {
+                        d.renderer.draw_chrome_text(
+                            &size,
+                            cx + (cw - cell_w) / 2.0,
+                            cy + (ch - cell_h) / 2.0,
+                            if matches!(d.nebula_chrome_hover, ChromeHit::HostDelete(i) if i == index) {
+                                Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b)
+                            } else {
+                                TXT_DIM
+                            },
+                            "×",
+                            &mut d.glyph_cache,
+                        );
+                    }
+                }
+            }
+        }
     } else {
         // Collapsed: show the active tab's name centred in the top bar so the
         // user still knows where they are without the sidebar open.
-        let title = d
-            .nebula_tab_labels
-            .get(d.nebula_active_tab)
-            .map(String::as_str)
-            .unwrap_or(".");
+        let title = d.nebula_tab_labels.get(d.nebula_active_tab).map(String::as_str).unwrap_or(".");
         let avail = ((w - 2.0 * margin - s(320.0)).max(cell_w) / cell_w).floor() as usize;
         let title = truncate_tab_label(title, avail.max(1));
         d.renderer.draw_chrome_text(
@@ -1119,7 +1494,13 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // Nebula settings modal text labels, above its quads.
     if d.nebula_settings_open {
         let view = d.settings_view();
-        settings::draw_text(&view, &mut d.renderer, &mut d.glyph_cache, &size, scale);
+        let settings_shell_icons =
+            settings::draw_text(&view, &mut d.renderer, &mut d.glyph_cache, &size, scale);
+        for (shell_id, rect) in settings_shell_icons {
+            if let Some((id, rgba, px)) = d.shell_icon_pixels(&shell_id) {
+                d.nebula_chrome_logo_draws.push((id, rgba, px, rect));
+            }
+        }
     }
 
     // Palette text (query + result rows) sits on top of every chrome label.
@@ -1143,7 +1524,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             d.window.scale_factor as f32,
         );
     }
-    command_palette::draw_text(
+    let shell_icon_draws = command_palette::draw_text(
         &d.nebula_palette,
         &d.nebula_theme,
         &mut d.renderer,
@@ -1151,4 +1532,12 @@ pub(super) fn draw_chrome(d: &mut Display) {
         &d.size_info,
         d.window.scale_factor as f32,
     );
+
+    // Palette's full-color shell icons (textured quads) staged after all chrome
+    // text, like AI brand logos. Decode + cache each PNG once per id.
+    for (shell_id, rect) in shell_icon_draws {
+        if let Some((id, rgba, px)) = d.shell_icon_pixels(&shell_id) {
+            d.nebula_chrome_logo_draws.push((id, rgba, px, rect));
+        }
+    }
 }

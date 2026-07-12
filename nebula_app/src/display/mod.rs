@@ -71,12 +71,13 @@ pub mod cursor;
 pub mod hint;
 pub mod window;
 
-pub mod command_palette;
-pub mod side_panel;
 mod chrome;
+pub mod command_palette;
+pub mod markdown_view;
+pub mod side_panel;
 
-pub use chrome::{ChromeHit, TabDropAction, in_chrome_bar, resize_edge};
 pub(crate) use chrome::chrome_settings_button_rect;
+pub use chrome::{ChromeHit, TabDropAction, in_chrome_bar, resize_edge};
 use chrome::{
     ChromeTabLayout, TabDrag, chrome_hit_with_tabs, chrome_tab_layout, contains_rect,
     truncate_tab_label,
@@ -147,10 +148,10 @@ pub(crate) const NEBULA_UNFOCUSED_SPLIT_DIM: f32 = 0.30;
 
 /// Max remembered commands for the history hint.
 
-/// Top chrome reserve, in logical pixels at scale factor 1.0. The bottom bar
-/// was removed; this now reserves only enough breathing room for the title
-/// bar while the symmetric `SizeInfo` padding model is still in use.
-pub const CHROME_BAR_LOGICAL: f32 = 56.0;
+/// Top chrome reserve, in logical pixels at scale factor 1.0. Sized as: top
+/// bar (8 margin + 40 bar) + card seam (8) + 8px of breathing room inside the
+/// terminal card, so the first grid row doesn't touch the card's top edge.
+pub const CHROME_BAR_LOGICAL: f32 = 64.0;
 
 /// Shared chrome/control corner radius. Used for the small in-shell affordances
 /// (window-control hover pills, tab pills, the "+" square) — kept modest so the
@@ -162,6 +163,12 @@ pub(super) const UI_CORNER_RADIUS_LOGICAL: f32 = 8.0;
 /// chrome reads as one soft-cornered card while the affordances inside keep
 /// their tighter [`UI_CORNER_RADIUS_LOGICAL`] curve.
 pub(super) const UI_SHELL_RADIUS_LOGICAL: f32 = 14.0;
+
+/// Gap between the terminal card and the window's right/bottom edges, in
+/// logical pixels — the visible "seam" of shell color that makes the terminal
+/// read as a rounded card floating on the shell backdrop. Top and left carry
+/// no seam of their own: the card tucks up under the top bar and sidebar.
+pub(super) const UI_CARD_SEAM_LOGICAL: f32 = 8.0;
 
 /// Shared quiet outline thickness.
 pub(super) const UI_HAIRLINE_LOGICAL: f32 = 1.0;
@@ -194,11 +201,7 @@ pub const SIDEBAR_W_LOGICAL: f32 = 230.0;
 /// full width; the reveal affordance then lives in the top bar.
 #[inline]
 pub fn sidebar_width(scale_factor: f32, collapsed: bool) -> f32 {
-    if collapsed {
-        0.0
-    } else {
-        (SIDEBAR_W_LOGICAL * scale_factor).round()
-    }
+    if collapsed { 0.0 } else { (SIDEBAR_W_LOGICAL * scale_factor).round() }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -239,7 +242,8 @@ impl UiAnim {
         }
 
         let now = Instant::now();
-        let dt = self.last_step.replace(now).map_or(1.0 / 60.0, |t| (now - t).as_secs_f32().min(0.1));
+        let dt =
+            self.last_step.replace(now).map_or(1.0 / 60.0, |t| (now - t).as_secs_f32().min(0.1));
         self.value += (target - self.value) * (1.0 - (-16.0 * dt).exp());
         if (self.value - target).abs() < 0.004 {
             self.value = target;
@@ -321,11 +325,8 @@ fn nebula_pick_image_file(owner: RawWindowHandle) -> Option<String> {
     ofn.nMaxFile = file_buf.len() as u32;
     ofn.lpstrTitle = title.as_ptr();
     // NOCHANGEDIR: the dialog must not move our process's working directory.
-    ofn.Flags = OFN_EXPLORER
-        | OFN_FILEMUSTEXIST
-        | OFN_PATHMUSTEXIST
-        | OFN_NOCHANGEDIR
-        | OFN_HIDEREADONLY;
+    ofn.Flags =
+        OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY;
 
     let picked = unsafe { GetOpenFileNameW(&mut ofn) };
     if picked == 0 {
@@ -401,13 +402,6 @@ impl NebulaShell {
             _ => None,
         }
     }
-
-    fn cycle(self) -> Self {
-        match self {
-            Self::PowerShell => Self::Bash,
-            Self::Bash => Self::PowerShell,
-        }
-    }
 }
 
 /// A destructive action awaiting user confirmation (Enter 确认 / Esc 取消).
@@ -422,6 +416,29 @@ pub enum NebulaConfirm {
     CloseWindow { process: String },
     /// Paste text that contains newlines (would execute in most shells).
     Paste { text: String, bracketed: bool, lines: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshEditorField {
+    Destination,
+    Password,
+}
+
+#[derive(Debug, Clone)]
+pub struct SshHostEditor {
+    pub destination: String,
+    pub password: String,
+    pub save_password: bool,
+    pub field: SshEditorField,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SshEditorRects {
+    pub destination: (f32, f32, f32, f32),
+    pub password: (f32, f32, f32, f32),
+    pub save_toggle: (f32, f32, f32, f32),
+    pub primary: (f32, f32, f32, f32),
+    pub cancel: (f32, f32, f32, f32),
 }
 
 /// One OSC 1337 inline image, anchored to an absolute grid row (see
@@ -483,6 +500,28 @@ pub struct NebulaPaneState {
     /// A tracked command finished while its tab was in the background; shows
     /// the sidebar dot until the tab is selected.
     pub finished_unseen: bool,
+    /// SSH destination of the command currently running in this pane, armed
+    /// at OSC 133;C when the committed line was an `ssh …` invocation. On a
+    /// confirmed connection (remote `NEBULA|` title, or a session that lived
+    /// long enough at 133;D) the host is auto-saved into the sidebar's
+    /// SSH HOSTS list.
+    pub pending_ssh_host: Option<String>,
+}
+
+/// Sidebar SSH HOSTS content: auto-saved destinations (most recent first) +
+/// `~/.ssh/config` aliases (file order), deduped, pinned entries floated to
+/// the top in pin order. One function so startup and settings hot-reload
+/// build the exact same list.
+fn merge_ssh_hosts(saved: &[String], pinned: &[String]) -> Vec<String> {
+    let mut hosts = saved.to_vec();
+    for host in crate::ssh::ssh_config_hosts() {
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    // Stable sort: pinned first in pin order, the rest keep saved→config order.
+    hosts.sort_by_key(|h| pinned.iter().position(|p| p == h).unwrap_or(usize::MAX));
+    hosts
 }
 
 /// First word of a committed command line, normalized to a program identity
@@ -547,10 +586,7 @@ pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
 /// path in the hover tooltip. On Windows `file:///D:/x` → `D:/x` (the slash
 /// before the drive letter goes too); non-`file:` URIs pass through.
 fn strip_file_scheme(uri: &str) -> String {
-    let rest = uri
-        .strip_prefix("file:///")
-        .or_else(|| uri.strip_prefix("file://"))
-        .unwrap_or(uri);
+    let rest = uri.strip_prefix("file:///").or_else(|| uri.strip_prefix("file://")).unwrap_or(uri);
     // `file:///D:/x` yields `D:/x`; a UNC-ish `file://host/x` keeps `host/x`.
     rest.to_owned()
 }
@@ -588,21 +624,21 @@ fn fit_tail(s: &str, budget: usize) -> String {
 
 pub(crate) fn program_icon(program: &str) -> &'static str {
     match program {
-        "claude" => "\u{f0ce5}",                      // md-star-four-points (Claude spark)
-        "codex" => "\u{f02d8}",                       // md-hexagon (OpenAI mark)
-        "gemini" => "\u{f0ce6}",                      // md-star-four-points-outline
-        "copilot" => "\u{f4b8}",                      // oct-copilot
-        "cursor" | "cursor-agent" => "\u{f0ec3}",     // md-cursor-default-outline
+        "claude" => "\u{f0ce5}", // md-star-four-points (Claude spark)
+        "codex" => "\u{f02d8}",  // md-hexagon (OpenAI mark)
+        "gemini" => "\u{f0ce6}", // md-star-four-points-outline
+        "copilot" => "\u{f4b8}", // oct-copilot
+        "cursor" | "cursor-agent" => "\u{f0ec3}", // md-cursor-default-outline
         "aider" | "goose" | "crush" | "ollama" => "\u{f06a9}", // md-robot
-        "opencode" => "\u{f489}",                     // oct-terminal
-        "git" | "gh" | "lazygit" => "\u{f418}",       // oct-git-branch
+        "opencode" => "\u{f489}", // oct-terminal
+        "git" | "gh" | "lazygit" => "\u{f418}", // oct-git-branch
         "vim" | "nvim" | "vi" | "hx" | "nano" => "\u{e62b}", // custom-vim
-        "ssh" | "mosh" => "\u{f489}",                 // oct-terminal (remote)
-        "cargo" | "rustc" => "\u{e7a8}",              // dev-rust
+        "ssh" | "mosh" => "\u{f489}", // oct-terminal (remote)
+        "cargo" | "rustc" => "\u{e7a8}", // dev-rust
         "node" | "npm" | "pnpm" | "yarn" | "bun" | "deno" => "\u{e718}", // dev-nodejs
         "python" | "python3" | "pip" | "uv" => "\u{e73c}", // dev-python
-        "docker" | "podman" => "\u{e7b0}",            // dev-docker
-        _ => "\u{f04b}",                              // fa-play (generic busy)
+        "docker" | "podman" => "\u{e7b0}", // dev-docker
+        _ => "\u{f04b}",         // fa-play (generic busy)
     }
 }
 
@@ -676,6 +712,17 @@ pub(crate) fn nebula_data_dir() -> PathBuf {
     let dir = base.join("Nebula");
     let _ = std::fs::create_dir_all(&dir);
     dir
+}
+
+/// Read one raw `key=value` from `nebula_settings.txt` (case-insensitive key).
+/// The typed loader is `settings::nebula_settings_load`; this is for the few
+/// callers (e.g. the default-shell id) that want the raw string verbatim.
+pub(crate) fn nebula_settings_value(key: &str) -> Option<String> {
+    let data = std::fs::read_to_string(nebula_data_dir().join("nebula_settings.txt")).ok()?;
+    data.lines().find_map(|line| {
+        let (k, v) = line.split_once('=')?;
+        k.trim().eq_ignore_ascii_case(key).then(|| v.trim().to_owned())
+    })
 }
 
 #[cfg(windows)]
@@ -782,8 +829,7 @@ fn nebula_collect_commands() -> Vec<String> {
 
     #[cfg(windows)]
     {
-        let mut seen: HashSet<String> =
-            commands.iter().map(|c| c.to_ascii_lowercase()).collect();
+        let mut seen: HashSet<String> = commands.iter().map(|c| c.to_ascii_lowercase()).collect();
         for command in nebula_powershell_commands() {
             if seen.insert(command.to_ascii_lowercase()) {
                 commands.push(command);
@@ -1237,8 +1283,7 @@ pub struct Display {
     /// Slide-in reveal for a freshly created split pane: its final rect, the
     /// split direction and the animation start time. Drawn as a shrinking
     /// bg-coloured cover in `draw_split_overlays`; cleared when done.
-    pub nebula_split_reveal:
-        Option<(f32, f32, f32, f32, SplitDirection, std::time::Instant)>,
+    pub nebula_split_reveal: Option<(f32, f32, f32, f32, SplitDirection, std::time::Instant)>,
     /// Pending destructive-action confirmation (close with busy children /
     /// multi-line paste), drawn as a centered modal that owns the keyboard.
     pub nebula_confirm: Option<NebulaConfirm>,
@@ -1246,6 +1291,8 @@ pub struct Display {
     /// by `draw_confirm_modal` each frame so the mouse hit-test can never
     /// drift from what was actually drawn. `None` while no modal shows.
     pub nebula_confirm_buttons: Option<((f32, f32, f32, f32), (f32, f32, f32, f32))>,
+    pub nebula_ssh_editor: Option<SshHostEditor>,
+    pub nebula_ssh_editor_rects: Option<SshEditorRects>,
     /// Inline images visible this frame, collected per pane during
     /// `draw_pane` (grid lock + pane viewport at hand) and drawn in one
     /// full-window pass in `present_frame` — mid-pane GL viewport swaps are
@@ -1259,6 +1306,9 @@ pub struct Display {
     nebula_settings_scroll: f32,
     /// Command palette (Ctrl+Shift+P): fuzzy launcher model + UI state.
     nebula_palette: command_palette::CommandPalette,
+    /// Installed shells, detected once (registry + filesystem scan) and cached
+    /// for the new-tab dropdown. `None` until the first menu open.
+    nebula_detected_shells: Option<Vec<crate::shell_detect::DetectedShell>>,
     /// Right-side drawer: directory tree / git status of the focused cwd.
     pub nebula_side_panel: side_panel::SidePanel,
     /// Shared chrome animation state. All sidebar/drawer transitions step here
@@ -1278,6 +1328,10 @@ pub struct Display {
     /// keyed by (logo, ink). Decode and tint run once per key.
     nebula_ai_logo_cache:
         std::collections::HashMap<(AiLogo, [u8; 3]), (u64, std::sync::Arc<Vec<u8>>, (u32, u32))>,
+    /// Decoded shell icons (full-color PNGs) with stable texture ids, keyed by
+    /// shell id (pwsh/cmd/nu/wsl:Ubuntu). Decode runs once per id.
+    nebula_shell_icon_cache:
+        std::collections::HashMap<String, (u64, std::sync::Arc<Vec<u8>>, (u32, u32))>,
     /// Brand logos staged by the chrome pass, drawn AFTER all chrome text.
     /// draw_inline_image flips viewport/blend around its draw; interleaving
     /// it with chrome text kills every glyph batch after it, so the textured
@@ -1292,6 +1346,23 @@ pub struct Display {
     /// Whether the tab sidebar is folded away. When collapsed the grid
     /// reclaims the full width and only a reveal button remains in the top bar.
     nebula_sidebar_collapsed: bool,
+    /// SSH host aliases from `~/.ssh/config` for the sidebar's "SSH HOSTS"
+    /// section, pinned entries first (see `nebula_pinned_hosts`).
+    pub nebula_ssh_hosts: Vec<String>,
+    /// Host names the user pinned to the top (right-click), persisted in the
+    /// runtime settings file so the order survives restarts.
+    nebula_pinned_hosts: Vec<String>,
+    /// Destinations auto-saved from typed `ssh` commands once the connection
+    /// confirmed (see `NebulaPaneState::pending_ssh_host`), most recent
+    /// first, persisted. Merged into `nebula_ssh_hosts` after the pinned
+    /// block, before the `~/.ssh/config` aliases.
+    nebula_saved_hosts: Vec<String>,
+    /// Accordion fold state of the two sidebar sections.
+    nebula_tabs_section_open: bool,
+    nebula_hosts_section_open: bool,
+    /// Per-section scroll offsets, in whole rows (clamped by the layout).
+    nebula_tabs_scroll: usize,
+    nebula_hosts_scroll: usize,
     /// A grid resize happened whose PTY notification is deferred until the
     /// interactive resize settles (see `Topic::NebulaResizeSettle`): the
     /// in-box ConPTY repaints the whole viewport per resize, so notifying it
@@ -1303,6 +1374,10 @@ pub struct Display {
     pub nebula_accept: AcceptKey,
     /// Default executor used by new sessions when no explicit shell is configured.
     pub nebula_shell: NebulaShell,
+    /// Raw default-shell id when the user picked a detected shell the 2-value
+    /// `nebula_shell` enum can't represent (cmd/pwsh/nu/wsl:X). Drives the
+    /// settings row label and is persisted verbatim.
+    pub nebula_shell_id: Option<String>,
     /// Whether new sessions print the Nebula welcome/fetch screen.
     pub nebula_fetch_enabled: bool,
     /// Whether the injected prompt uses Nebula's powerline segments.
@@ -1312,6 +1387,8 @@ pub struct Display {
     pub nebula_keep_session: bool,
     /// Runtime window opacity controlled from Nebula settings.
     pub nebula_window_opacity: f32,
+    /// Whether the default-shell picker is expanded (inline list below the row).
+    pub nebula_shell_picker_open: bool,
     /// Optional runtime clear/background color controlled from settings.
     pub nebula_background: Option<Rgb>,
     /// Optional background image path drawn as a full-window wallpaper.
@@ -1567,26 +1644,41 @@ impl Display {
             nebula_split_reveal: None,
             nebula_confirm: None,
             nebula_confirm_buttons: None,
+            nebula_ssh_editor: None,
+            nebula_ssh_editor_rects: None,
             nebula_frame_images: Vec::new(),
             nebula_theme: settings_init.theme,
             nebula_settings_open: false,
             nebula_settings_scroll: 0.0,
             nebula_palette: command_palette::CommandPalette::new(),
+            nebula_detected_shells: None,
             nebula_side_panel: side_panel::SidePanel::new(),
             nebula_ui_anims: NebulaUiAnims::new(),
             nebula_settings_section: NebulaSettingsSection::default(),
             nebula_chrome_hover: ChromeHit::None,
             nebula_settings_hover: SettingsHit::None,
+            nebula_shell_picker_open: false,
             nebula_tab_labels: vec![".".to_owned()],
             nebula_tab_bells: vec![false],
             nebula_tab_running: vec![false],
             nebula_tab_logos: vec![None],
             nebula_ai_logo_cache: Default::default(),
+            nebula_shell_icon_cache: Default::default(),
             nebula_chrome_logo_draws: Vec::new(),
             nebula_active_tab: 0,
             nebula_tab_drag: None,
             nebula_tabs_reorderable: true,
             nebula_sidebar_collapsed: false,
+            nebula_ssh_hosts: merge_ssh_hosts(
+                &settings_init.saved_hosts,
+                &settings_init.pinned_hosts,
+            ),
+            nebula_pinned_hosts: settings_init.pinned_hosts.clone(),
+            nebula_saved_hosts: settings_init.saved_hosts.clone(),
+            nebula_tabs_section_open: true,
+            nebula_hosts_section_open: true,
+            nebula_tabs_scroll: 0,
+            nebula_hosts_scroll: 0,
             nebula_tab_rename: None,
             nebula_tab_rename_select_all: false,
             nebula_tab_rename_caret: 0,
@@ -1595,6 +1687,7 @@ impl Display {
             nebula_ghost_enabled: settings_init.ghost,
             nebula_accept: settings_init.accept,
             nebula_shell: settings_init.shell,
+            nebula_shell_id: settings_init.shell_id.clone(),
             nebula_fetch_enabled: settings_init.fetch,
             nebula_powerline_enabled: settings_init.powerline,
             nebula_keep_session: settings_init.keep_session,
@@ -1637,6 +1730,8 @@ impl Display {
             &self.size_info,
             self.window.scale_factor as f32,
             self.nebula_settings_section,
+            self.nebula_shell_picker_open,
+            self.nebula_detected_shells.as_ref().map_or(0, Vec::len),
         );
         let next = (self.nebula_settings_scroll + delta).clamp(0.0, max);
         if (next - self.nebula_settings_scroll).abs() > f32::EPSILON {
@@ -1648,6 +1743,135 @@ impl Display {
 
     pub fn settings_scroll(&self) -> f32 {
         self.nebula_settings_scroll
+    }
+
+    pub fn shell_picker_count(&self) -> usize {
+        self.nebula_detected_shells.as_ref().map_or(0, Vec::len)
+    }
+
+    pub fn open_ssh_editor(&mut self) {
+        self.nebula_ssh_editor = Some(SshHostEditor {
+            destination: String::new(),
+            password: String::new(),
+            save_password: true,
+            field: SshEditorField::Destination,
+        });
+        self.nebula_ssh_editor_rects = None;
+        self.pending_update.dirty = true;
+    }
+
+    pub fn ssh_editor_insert(&mut self, text: &str) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            let field = match editor.field {
+                SshEditorField::Destination => &mut editor.destination,
+                SshEditorField::Password => &mut editor.password,
+            };
+            field.extend(text.chars().filter(|c| !c.is_control()));
+        }
+    }
+
+    pub fn ssh_editor_backspace(&mut self) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            match editor.field {
+                SshEditorField::Destination => {
+                    editor.destination.pop();
+                },
+                SshEditorField::Password => {
+                    editor.password.pop();
+                },
+            }
+        }
+    }
+
+    pub fn ssh_editor_next_field(&mut self) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            editor.field = match editor.field {
+                SshEditorField::Destination => SshEditorField::Password,
+                SshEditorField::Password => SshEditorField::Destination,
+            };
+        }
+    }
+
+    pub fn ssh_editor_toggle_save(&mut self) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            editor.save_password = !editor.save_password;
+        }
+    }
+
+    pub fn ssh_editor_click(&mut self, x: f32, y: f32) -> bool {
+        let Some(rects) = self.nebula_ssh_editor_rects else { return false };
+        let hit = |r: (f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
+        if hit(rects.destination) {
+            if let Some(e) = self.nebula_ssh_editor.as_mut() {
+                e.field = SshEditorField::Destination;
+            }
+            return true;
+        }
+        if hit(rects.password) {
+            if let Some(e) = self.nebula_ssh_editor.as_mut() {
+                e.field = SshEditorField::Password;
+            }
+            return true;
+        }
+        if hit(rects.save_toggle) {
+            self.ssh_editor_toggle_save();
+            return true;
+        }
+        if hit(rects.cancel) {
+            self.nebula_ssh_editor = None;
+            self.nebula_ssh_editor_rects = None;
+            return true;
+        }
+        if hit(rects.primary) {
+            self.save_ssh_editor();
+            return true;
+        }
+        true
+    }
+
+    pub fn save_ssh_editor(&mut self) {
+        let Some(mut editor) = self.nebula_ssh_editor.take() else { return };
+        let destination = editor.destination.trim().to_owned();
+        let valid = !destination.is_empty()
+            && !destination
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || ";&|<>\"'`".contains(c));
+        if !valid {
+            self.nebula_ssh_editor = Some(editor);
+            return;
+        }
+        self.nebula_saved_hosts.retain(|host| host != &destination);
+        self.nebula_saved_hosts.insert(0, destination.clone());
+        self.nebula_saved_hosts.truncate(20);
+        self.nebula_ssh_hosts =
+            merge_ssh_hosts(&self.nebula_saved_hosts, &self.nebula_pinned_hosts);
+        if editor.save_password && !editor.password.is_empty() {
+            #[cfg(windows)]
+            {
+                let _ = crate::ssh_credentials::store_password(
+                    &destination,
+                    editor.password.as_bytes(),
+                );
+            }
+        }
+        editor.password.clear();
+        self.persist_nebula_settings();
+        self.nebula_ssh_editor_rects = None;
+        self.pending_update.dirty = true;
+    }
+
+    pub fn delete_ssh_host(&mut self, index: usize) {
+        let Some(host) = self.nebula_ssh_hosts.get(index).cloned() else { return };
+        self.nebula_saved_hosts.retain(|entry| entry != &host);
+        self.nebula_pinned_hosts.retain(|entry| entry != &host);
+        #[cfg(windows)]
+        {
+            let _ = crate::ssh_credentials::forget_password(&host);
+        }
+        self.nebula_ssh_hosts =
+            merge_ssh_hosts(&self.nebula_saved_hosts, &self.nebula_pinned_hosts);
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
     }
 
     pub fn set_chrome_tabs(
@@ -1749,18 +1973,38 @@ impl Display {
         Some(entry)
     }
 
+    /// Decoded pixels for a full-color shell icon (128×128 PNG embedded from
+    /// extra/shell-icons), plus a stable texture id for the renderer's inline
+    /// cache. Decode runs once per shell id; the GPU upload happens lazily
+    /// inside the renderer. Returns `None` when the id has no brand asset.
+    fn shell_icon_pixels(
+        &mut self,
+        shell_id: &str,
+    ) -> Option<(u64, std::sync::Arc<Vec<u8>>, (u32, u32))> {
+        if let Some(cached) = self.nebula_shell_icon_cache.get(shell_id) {
+            return Some(cached.clone());
+        }
+        let bytes = crate::shell_detect::color_icon_png(shell_id)?;
+        let (width, height, rgba) = match crate::renderer::image::decode_png_bytes(bytes) {
+            Ok(decoded) => decoded,
+            Err(err) => {
+                log::warn!("failed to decode shell icon for {shell_id}: {err}");
+                return None;
+            },
+        };
+        // Shell icons ship in brand colors and are used as-is (no tint).
+        let id = AI_LOGO_ID_BASE + 1000 + self.nebula_shell_icon_cache.len() as u64;
+        let entry = (id, std::sync::Arc::new(rgba), (width, height));
+        self.nebula_shell_icon_cache.insert(shell_id.to_owned(), entry.clone());
+        Some(entry)
+    }
+
     /// Arm a potential tab drag from a press on displayed tab `source`. Always
     /// arms (even single-tab), because the release decides between click /
     /// reorder / dock — selection itself is deferred to the release.
     pub fn arm_tab_drag(&mut self, source: usize, x: f32, y: f32) {
-        self.nebula_tab_drag = Some(TabDrag {
-            source,
-            origin_x: x,
-            origin: y,
-            current: y,
-            active: false,
-            dock: None,
-        });
+        self.nebula_tab_drag =
+            Some(TabDrag { source, origin_x: x, origin: y, current: y, active: false, dock: None });
     }
 
     /// Whether a tab drag is currently armed (pressed, possibly not yet moved).
@@ -1857,12 +2101,8 @@ impl Display {
     fn tab_drop_index(&self, source: usize, y: f32) -> usize {
         let scale = self.window.scale_factor as f32;
         let sidebar_expand = self.left_sidebar_progress();
-        let layout = chrome_tab_layout(
-            &self.size_info,
-            scale,
-            self.nebula_tab_labels.len(),
-            sidebar_expand,
-        );
+        let layout =
+            chrome_tab_layout(&self.size_info, scale, self.sidebar_model(), sidebar_expand);
         // Tabs stack vertically now: count rows whose vertical centre the
         // pointer has passed to get the remove-then-insert target slot.
         let passed = layout
@@ -1914,7 +2154,7 @@ impl Display {
         chrome_hit_with_tabs(
             &self.size_info,
             self.window.scale_factor as f32,
-            self.nebula_tab_labels.len().max(1),
+            self.sidebar_model(),
             self.nebula_sidebar_collapsed,
             x,
             y,
@@ -1941,7 +2181,31 @@ impl Display {
             theme: self.nebula_theme,
             ghost: self.nebula_ghost_enabled,
             accept: self.nebula_accept,
-            shell: self.nebula_shell,
+            shell_label: {
+                // Rich picked id (cmd/pwsh/nu/wsl:X) wins; else the 2-value
+                // enum label. Icon comes from the same table the dropdown
+                // rows use, so the setting always mirrors the menu.
+                let id = self.nebula_shell_id.as_deref();
+                let name = id
+                    .map(crate::shell_detect::display_name_for_id)
+                    .unwrap_or_else(|| self.nebula_shell.label().to_owned());
+                let icon = crate::shell_detect::icon_for_id(
+                    id.unwrap_or_else(|| self.nebula_shell.settings_value()),
+                );
+                format!("{icon}  {name}")
+            },
+            shell_picker_open: self.nebula_shell_picker_open,
+            shells: self
+                .nebula_detected_shells
+                .as_ref()
+                .map(|shells| {
+                    shells
+                        .iter()
+                        .map(|s| (s.id.clone(), s.name.clone(), s.program.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            shell_id: self.nebula_shell_id.clone(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
             keep_session: self.nebula_keep_session,
@@ -1996,9 +2260,48 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
-    pub fn cycle_shell(&mut self) {
-        self.nebula_shell = self.nebula_shell.cycle();
+    /// Open the "默认 Shell" picker (the settings row click): the same
+    /// Toggle the inline shell picker in settings (expand/collapse the list).
+    pub fn toggle_shell_picker(&mut self) {
+        if !self.nebula_shell_picker_open {
+            // Ensure shells are detected before opening.
+            let _ =
+                self.nebula_detected_shells.get_or_insert_with(crate::shell_detect::detect_shells);
+        }
+        self.nebula_shell_picker_open = !self.nebula_shell_picker_open;
+        self.pending_update.dirty = true;
+    }
+
+    /// WT-style default-shell picker (command palette mode). Kept for compatibility.
+    /// detected-shell dropdown as the "+" chevron, but confirming SETS the
+    /// default instead of launching a tab. Replaces the old 2-value cycle.
+    pub fn open_default_shell_picker(&mut self) {
+        let shells =
+            self.nebula_detected_shells.get_or_insert_with(crate::shell_detect::detect_shells);
+        self.nebula_palette.set_default_shell_menu(shells);
+        self.nebula_palette.open_default_picker();
+        self.pending_update.dirty = true;
+    }
+
+    /// Apply a picked default shell: keep the raw id for persistence and the
+    /// spawn override, and track the PTY-integrated executor family in the
+    /// enum so the prompt bootstrap picks the right base.
+    pub fn set_default_shell(&mut self, shell: &crate::shell_detect::DetectedShell) {
+        if let Some(family) = NebulaShell::from_settings(&shell.id) {
+            self.nebula_shell = family;
+        }
+        self.nebula_shell_id = Some(shell.id.clone());
         self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+    }
+
+    pub fn set_default_shell_by_index(&mut self, index: usize) {
+        let shell =
+            self.nebula_detected_shells.as_ref().and_then(|shells| shells.get(index)).cloned();
+        if let Some(shell) = shell {
+            self.set_default_shell(&shell);
+        }
+        self.nebula_shell_picker_open = false;
         self.pending_update.dirty = true;
     }
 
@@ -2101,16 +2404,23 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
-    /// Open the palette restricted to quick-launch profiles — the context menu
-    /// behind right-clicking the sidebar "+" button.
-    pub fn open_profile_menu(&mut self, profiles: &[String]) {
-        self.nebula_palette.set_profiles(profiles);
+    /// Open the new-tab dropdown: detected shells (installed-shell order) plus
+    /// any config profiles. Detection runs once and is cached — the chevron
+    /// beside the "+" opens this, mirroring Windows Terminal's profile menu.
+    pub fn open_shell_menu(&mut self, profiles: &[String]) {
+        let shells =
+            self.nebula_detected_shells.get_or_insert_with(crate::shell_detect::detect_shells);
+        self.nebula_palette.set_shell_menu(shells, profiles);
         self.nebula_palette.open_profiles();
         self.pending_update.dirty = true;
     }
 
     pub fn command_palette_open(&self) -> bool {
         self.nebula_palette.is_open()
+    }
+
+    pub fn command_palette_picking_default(&self) -> bool {
+        self.nebula_palette.is_picking_default()
     }
 
     pub fn close_command_palette(&mut self) {
@@ -2153,9 +2463,29 @@ impl Display {
         action
     }
 
+    /// Update palette hover state. `row` is the visual row index, or `None` when
+    /// the mouse left the palette area.
+    pub fn palette_hover(&mut self, row: Option<usize>) {
+        self.nebula_palette.set_hover(row);
+        self.pending_update.dirty = true;
+    }
+
+    /// The number of visible palette results (for hover boundary checking).
+    pub fn nebula_palette_visible_count(&self) -> usize {
+        self.nebula_palette.visible_count()
+    }
+
     /// Toggle the right-side drawer (directory tree / git status).
     pub fn toggle_side_panel(&mut self, view: side_panel::PanelView) {
+        let was_open = self.nebula_side_panel.open;
         self.nebula_side_panel.toggle(view);
+        // The drawer reserves real grid width, so opening/closing it (not
+        // just switching views) must reflow the grid like the left sidebar.
+        if self.nebula_side_panel.open != was_open {
+            let size =
+                PhysicalSize::new(self.size_info.width() as u32, self.size_info.height() as u32);
+            self.pending_update.set_dimensions(size);
+        }
         self.window.request_redraw();
         self.pending_update.dirty = true;
     }
@@ -2269,13 +2599,11 @@ impl Display {
     }
 
     pub fn step_chrome_anims(&mut self) {
-        self.nebula_ui_anims
-            .step(!self.nebula_sidebar_collapsed, self.nebula_side_panel.open);
+        self.nebula_ui_anims.step(!self.nebula_sidebar_collapsed, self.nebula_side_panel.open);
     }
 
     pub fn chrome_animating(&self) -> bool {
-        self.nebula_ui_anims
-            .animating(!self.nebula_sidebar_collapsed, self.nebula_side_panel.open)
+        self.nebula_ui_anims.animating(!self.nebula_sidebar_collapsed, self.nebula_side_panel.open)
     }
 
     pub fn left_sidebar_progress(&self) -> f32 {
@@ -2283,13 +2611,146 @@ impl Display {
     }
 
     pub fn left_sidebar_visible(&self) -> bool {
-        self.nebula_ui_anims
-            .left_sidebar
-            .visible(!self.nebula_sidebar_collapsed)
+        self.nebula_ui_anims.left_sidebar.visible(!self.nebula_sidebar_collapsed)
+    }
+
+    /// Geometry of the rounded terminal card in physical pixels `(x, y, w, h)`.
+    /// The card floats on the shell backdrop: flush-ish against the sidebar on
+    /// the left and the top bar above (they share the shell color, so no seam
+    /// is needed there), with a visible [`UI_CARD_SEAM_LOGICAL`] gap of shell
+    /// color on the right and bottom edges. The grid's own padding
+    /// (`content_pad_x` / `chrome_reserve`) is larger than the card inset, so
+    /// all cell content lands inside the card.
+    pub(crate) fn terminal_card_rect(&self) -> (f32, f32, f32, f32) {
+        let scale = self.window.scale_factor as f32;
+        let s = |v: f32| (v * scale).round();
+        let seam = s(UI_CARD_SEAM_LOGICAL);
+        // Left edge rides the sidebar's fold animation (same swift-out cubic
+        // as the panel slide in `chrome_tab_layout`), so collapsing the
+        // sidebar reads as the terminal card gliding left to claim the space
+        // instead of snapping. Resting expanded: just past the sidebar
+        // panel's right edge (`sw - 12` logical, see `chrome_tab_layout`);
+        // resting collapsed: the chrome margin.
+        let t = self.left_sidebar_progress().clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+        let sw = (SIDEBAR_W_LOGICAL * scale).round();
+        let x = s(8.0) + eased * (sw - s(4.0) - s(8.0));
+        // Top edge: the top bar's bottom (margin 8 + bar height 40, matching
+        // `draw_chrome`), plus a seam so the card visibly floats below it.
+        let y = s(8.0 + 40.0) + seam;
+        // Right edge follows the file/git drawer the same way: as it slides
+        // in, the card cedes its width (drawer width + margin) plus the seam.
+        let dt = self.nebula_ui_anims.right_drawer.value().clamp(0.0, 1.0);
+        let deased = 1.0 - (1.0 - dt) * (1.0 - dt) * (1.0 - dt);
+        let drawer = deased * (side_panel::PANEL_W_LOGICAL * scale + s(8.0));
+        let w = (self.size_info.width() - drawer - seam - x).max(0.0);
+        let h = (self.size_info.height() - seam - y).max(0.0);
+        (x, y, w, h)
     }
 
     pub fn side_panel_visible(&self) -> bool {
         self.nebula_ui_anims.right_drawer.visible(self.nebula_side_panel.open)
+    }
+
+    /// Sidebar content model for `chrome_tab_layout` — the single place the
+    /// section states are read, so drawing / hit-testing / wheel agree.
+    pub(super) fn sidebar_model(&self) -> chrome::SidebarModel {
+        chrome::SidebarModel {
+            tab_count: self.nebula_tab_labels.len().max(1),
+            host_count: self.nebula_ssh_hosts.len(),
+            tabs_open: self.nebula_tabs_section_open,
+            hosts_open: self.nebula_hosts_section_open,
+            tabs_scroll: self.nebula_tabs_scroll,
+            hosts_scroll: self.nebula_hosts_scroll,
+        }
+    }
+
+    /// Toggle a sidebar section's accordion fold (click on its caption).
+    pub fn toggle_sidebar_section(&mut self, hosts: bool) {
+        if hosts {
+            self.nebula_hosts_section_open = !self.nebula_hosts_section_open;
+        } else {
+            self.nebula_tabs_section_open = !self.nebula_tabs_section_open;
+        }
+        self.pending_update.dirty = true;
+    }
+
+    /// Route a mouse-wheel tick over the sidebar into the section under the
+    /// pointer. Returns true when consumed (pointer was over a section band).
+    pub fn sidebar_wheel(&mut self, x: f32, y: f32, rows: i32) -> bool {
+        if !self.left_sidebar_visible() {
+            return false;
+        }
+        let layout = chrome_tab_layout(
+            &self.size_info,
+            self.window.scale_factor as f32,
+            self.sidebar_model(),
+            self.left_sidebar_progress(),
+        );
+        let (px, _, pw, _) = layout.panel;
+        if pw <= 0.0 || x < px || x > px + pw {
+            return false;
+        }
+        let scroll =
+            |cur: usize, max: usize| -> usize { (cur as i32 + rows).clamp(0, max as i32) as usize };
+        // Band membership includes each section's header so the wheel works
+        // right up against the caption.
+        if y >= layout.tabs_header.1 && y <= layout.tabs_band.1 {
+            self.nebula_tabs_scroll = scroll(self.nebula_tabs_scroll, layout.tabs_max_scroll);
+        } else if y >= layout.hosts_header.1
+            && y <= layout.hosts_band.1.max(layout.hosts_header.1 + layout.hosts_header.3)
+        {
+            self.nebula_hosts_scroll = scroll(self.nebula_hosts_scroll, layout.hosts_max_scroll);
+        } else {
+            return false;
+        }
+        self.pending_update.dirty = true;
+        true
+    }
+
+    /// Pin the host at `index` to the top of the SSH HOSTS section
+    /// (right-click). Pinning an already-pinned host unpins it. The pinned
+    /// set persists in the runtime settings file.
+    pub fn pin_host(&mut self, index: usize) {
+        let Some(name) = self.nebula_ssh_hosts.get(index).cloned() else { return };
+        if let Some(pos) = self.nebula_pinned_hosts.iter().position(|p| *p == name) {
+            self.nebula_pinned_hosts.remove(pos);
+        } else {
+            self.nebula_pinned_hosts.insert(0, name);
+        }
+        // Re-sort: pinned first (in pin order), the rest keep config order.
+        let pinned = self.nebula_pinned_hosts.clone();
+        self.nebula_ssh_hosts
+            .sort_by_key(|h| pinned.iter().position(|p| p == h).unwrap_or(usize::MAX));
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+    }
+
+    /// Auto-save an SSH destination the user typed and successfully connected
+    /// to — armed at OSC 133;C, confirmed by a remote `NEBULA|` title or a
+    /// session that outlived [`crate::ssh::SAVE_MIN_SESSION`]. Tabby-style
+    /// recents: most recent first, deduped, capped. An already-listed host
+    /// only refreshes its recency (for the next launch) — the visible list
+    /// never jumps while the user is looking at it.
+    pub fn nebula_save_ssh_host(&mut self, host: &str) {
+        const SAVED_HOSTS_CAP: usize = 20;
+        if host.is_empty() {
+            return;
+        }
+        self.nebula_saved_hosts.retain(|h| h != host);
+        self.nebula_saved_hosts.insert(0, host.to_owned());
+        self.nebula_saved_hosts.truncate(SAVED_HOSTS_CAP);
+        if !self.nebula_ssh_hosts.iter().any(|h| h == host) {
+            // New host: insert below the pinned block, above everything else.
+            let at = self
+                .nebula_ssh_hosts
+                .iter()
+                .take_while(|h| self.nebula_pinned_hosts.contains(h))
+                .count();
+            self.nebula_ssh_hosts.insert(at, host.to_owned());
+        }
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
     }
 
     fn persist_nebula_settings(&mut self) {
@@ -2297,6 +2758,7 @@ impl Display {
             ghost: self.nebula_ghost_enabled,
             accept: self.nebula_accept,
             shell: self.nebula_shell,
+            shell_id: self.nebula_shell_id.clone(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
             keep_session: self.nebula_keep_session,
@@ -2305,6 +2767,8 @@ impl Display {
             background_image: self.nebula_background_image.clone(),
             background_image_opacity: self.nebula_background_image_opacity,
             theme: self.nebula_theme,
+            pinned_hosts: self.nebula_pinned_hosts.clone(),
+            saved_hosts: self.nebula_saved_hosts.clone(),
         });
         self.nebula_settings_mtime = settings::nebula_settings_mtime();
     }
@@ -2328,6 +2792,7 @@ impl Display {
         self.nebula_ghost_enabled = settings.ghost;
         self.nebula_accept = settings.accept;
         self.nebula_shell = settings.shell;
+        self.nebula_shell_id = settings.shell_id;
         self.nebula_fetch_enabled = settings.fetch;
         self.nebula_powerline_enabled = settings.powerline;
         self.nebula_keep_session = settings.keep_session;
@@ -2335,6 +2800,13 @@ impl Display {
         self.nebula_background = settings.background;
         self.nebula_background_image = settings.background_image;
         self.nebula_background_image_opacity = settings.background_image_opacity;
+        // Sync the host lists too: another window shares the settings file,
+        // and skipping this would let this window's next persist overwrite a
+        // host that window just saved or pinned.
+        self.nebula_pinned_hosts = settings.pinned_hosts;
+        self.nebula_saved_hosts = settings.saved_hosts;
+        self.nebula_ssh_hosts =
+            merge_ssh_hosts(&self.nebula_saved_hosts, &self.nebula_pinned_hosts);
         if image_changed {
             self.renderer.invalidate_background_image();
         }
@@ -2515,13 +2987,21 @@ impl Display {
         let scale = self.window.scale_factor as f32;
         let content_pad = content_pad_x(scale);
         let sidebar = sidebar_width(scale, self.nebula_sidebar_collapsed);
+        // The file/git drawer occupies real layout space: the grid cedes its
+        // width (plus the window margin) on the right, exactly like the left
+        // sidebar reserve — it does not float over the terminal.
+        let drawer = if self.nebula_side_panel.open {
+            (side_panel::PANEL_W_LOGICAL * scale + 8.0 * scale).round()
+        } else {
+            0.0
+        };
         let mut new_size = SizeInfo::new_asymmetric(
             width,
             height,
             cell_width,
             cell_height,
             padding.0 + content_pad + sidebar,
-            padding.0 + content_pad,
+            padding.0 + content_pad + drawer,
             padding.1 + chrome,
         );
 
@@ -2561,6 +3041,17 @@ impl Display {
                     Some((new_size.columns(), new_size.screen_lines(), Instant::now()));
             }
             self.nebula_resize_hud_armed = true;
+            nebula_link_log(format!(
+                "grid_resize {}x{} px={width}x{height} pad_x={} pad_r={} pad_y={} \
+                 cell={cell_width}x{cell_height} drawer={drawer} sidebar={sidebar} \
+                 reserved={}",
+                new_size.columns(),
+                new_size.screen_lines(),
+                new_size.padding_x(),
+                new_size.padding_right(),
+                new_size.padding_y(),
+                message_bar_lines + search_lines,
+            ));
         }
 
         // Check if dimensions have changed.
@@ -2792,8 +3283,20 @@ impl Display {
         // Only the first pane of a frame clears the whole window; subsequent
         // panes paint on top of the shared, already-cleared backdrop.
         if clear_first {
-            self.renderer.clear(background_color, self.nebula_window_opacity);
+            // Layer model: the window clears to the opaque shell color (the
+            // chrome backdrop), then the terminal is painted as a rounded
+            // `term_bg` card floating on it. Default-background cells draw no
+            // background of their own (bg_alpha == 0), so they show the card.
+            let shell_bg = self.nebula_theme.palette().shell_bg;
+            self.renderer.clear(shell_bg, self.nebula_window_opacity);
             self.draw_background_image();
+
+            let (cx, cy, cw, ch) = self.terminal_card_rect();
+            let scale = self.window.scale_factor as f32;
+            let card_r = (UI_SHELL_RADIUS_LOGICAL * scale).round();
+            let card = Rgba::new(background_color.r, background_color.g, background_color.b, 255);
+            let quad = UiQuad::solid(cx, cy, cw, ch, card_r, card);
+            self.renderer.draw_ui(&self.size_info, &[quad]);
         }
 
         // 分屏渲染时每个 pane 都有独立的 viewport/projection；否则右侧内容会沿用上一帧
@@ -2865,13 +3368,18 @@ impl Display {
 
         if alt_screen {
             if let Some(pad_bg) = grid_pad_bg {
+                // Clamp the padding fill to the terminal card so the shell
+                // seam and the card's rounded corners stay visible around
+                // full-screen apps.
+                let (_, card_y, _, card_h) = self.terminal_card_rect();
                 let x = size_info.padding_x();
                 let w = size_info.width() - size_info.padding_x() - size_info.padding_right();
-                let top_h = size_info.padding_y();
-                let bottom_y = size_info.padding_y() + size_info.screen_lines() as f32 * size_info.cell_height();
-                let bottom_h = (size_info.height() - bottom_y).max(0.0);
+                let top_h = (size_info.padding_y() - card_y).max(0.0);
+                let bottom_y = size_info.padding_y()
+                    + size_info.screen_lines() as f32 * size_info.cell_height();
+                let bottom_h = (card_y + card_h - bottom_y).max(0.0);
                 if top_h > 0.0 {
-                    rects.push(RenderRect::new(x, 0.0, w, top_h, pad_bg, 1.0));
+                    rects.push(RenderRect::new(x, card_y, w, top_h, pad_bg, 1.0));
                 }
                 if bottom_h > 0.0 {
                     rects.push(RenderRect::new(x, bottom_y, w, bottom_h, pad_bg, 1.0));
@@ -3086,6 +3594,50 @@ impl Display {
         self.make_current();
     }
 
+    /// Draw a document-viewer tab's frame: the shell backdrop and terminal
+    /// card exactly like a pane frame (same layer model), then the document
+    /// instead of a grid, then the normal chrome via `present_frame`.
+    pub fn draw_doc_frame(
+        &mut self,
+        doc: &mut markdown_view::DocView,
+        view: SizeInfo,
+        scheduler: &mut Scheduler,
+    ) {
+        self.renderer.set_window_height(self.size_info.height());
+
+        let shell_bg = self.nebula_theme.palette().shell_bg;
+        self.renderer.clear(shell_bg, self.nebula_window_opacity);
+        self.draw_background_image();
+
+        let card_bg = self.nebula_background.unwrap_or(self.colors[NamedColor::Background]);
+        let (cx, cy, cw, ch) = self.terminal_card_rect();
+        let scale = self.window.scale_factor as f32;
+        let card_r = (UI_SHELL_RADIUS_LOGICAL * scale).round();
+        let card = Rgba::new(card_bg.r, card_bg.g, card_bg.b, 255);
+        self.renderer.draw_ui(&self.size_info, &[UiQuad::solid(cx, cy, cw, ch, card_r, card)]);
+
+        // The document reads inside the card, inset off its rounded corners.
+        let area = (
+            (cx + 4.0 * scale).max(view.padding_x()),
+            (cy + 4.0 * scale).max(view.padding_y()),
+            (cw - 8.0 * scale).min(view.width()),
+            (ch - 8.0 * scale).min(view.height()),
+        );
+        let skin = self.nebula_theme.skin();
+        let size = self.size_info;
+        markdown_view::draw(
+            doc,
+            &mut self.renderer,
+            &mut self.glyph_cache,
+            &size,
+            &skin,
+            area,
+            scale,
+        );
+
+        self.present_frame(scheduler);
+    }
+
     /// Draw one pane of a multi-pane layout into `view`. `clear_first` clears
     /// the whole window before the first pane; later panes paint on top.
     #[allow(clippy::too_many_arguments)]
@@ -3114,7 +3666,7 @@ impl Display {
 
     /// Overlay split chrome over the drawn panes: dim every unfocused pane and
     /// paint divider hairlines. Rectangles are screen-space `(x, y, w, h)` with
-    /// a top-left origin. Focus reads as a brightness difference 
+    /// a top-left origin. Focus reads as a brightness difference
     /// `unfocused-split-opacity`) rather than an outline.
     pub fn draw_split_overlays(
         &mut self,
@@ -3148,9 +3700,7 @@ impl Display {
                 self.nebula_split_reveal = None;
             } else {
                 let e = 1.0 - (1.0 - t).powi(3); // ease-out cubic
-                let bg = self
-                    .nebula_background
-                    .unwrap_or(Rgb::new(15, 17, 26));
+                let bg = self.nebula_background.unwrap_or(Rgb::new(15, 17, 26));
                 let cover = Rgba::new(bg.r, bg.g, bg.b, 255);
                 let (cx, cy, cw, chh) = match direction {
                     SplitDirection::LeftRight => (x + w * e, y, w * (1.0 - e), h),
@@ -3176,7 +3726,6 @@ impl Display {
     /// `window_context/split.rs`.)
     #[cfg(any())]
     fn _removed_split_helpers() {}
-
 
     /// Overlay scrollbar on the right edge of a pane, shown only while scrolled
     /// up into the scrollback (auto-hides at the bottom).
@@ -3353,9 +3902,7 @@ impl Display {
 
         // Card sized to content, clamped into the window.
         let pad = s(26.0);
-        let content_w = text_w(&title)
-            .max(text_w(&body))
-            .max(primary_w + s(12.0) + cancel_w);
+        let content_w = text_w(&title).max(text_w(&body)).max(primary_w + s(12.0) + cancel_w);
         let box_w = (content_w + 2.0 * pad).max(s(380.0)).min(size.width() - s(32.0));
         let box_h = pad + cell_h + s(10.0) + cell_h + s(24.0) + btn_h + pad * 0.75;
         let bx = ((size.width() - box_w) * 0.5).max(s(16.0));
@@ -3432,6 +3979,180 @@ impl Display {
             on_primary,
             primary_label,
             glyph_cache,
+        );
+    }
+
+    fn draw_ssh_editor_modal(&mut self) {
+        let Some(editor) = self.nebula_ssh_editor.clone() else {
+            self.nebula_ssh_editor_rects = None;
+            return;
+        };
+        let size = self.size_info;
+        let scale = self.window.scale_factor as f32;
+        let s = |v: f32| v * scale;
+        let sk = self.nebula_theme.skin();
+        let editor_focus = Rgba::new(108, 126, 148, 210);
+        let editor_primary = Rgba::new(104, 121, 141, 235);
+        let editor_check = Rgba::new(117, 136, 158, 230);
+        let editor_field_active = Rgba::new(69, 78, 91, 220);
+        let editor_field_idle = Rgba::new(58, 64, 75, 205);
+        let editor_caret = Rgba::new(205, 214, 225, 235);
+        let cell_h = size.cell_height();
+        let cell_w = size.cell_width();
+        let box_w = s(560.0).min(size.width() - s(32.0));
+        let box_h = s(330.0).min(size.height() - s(32.0));
+        let bx = (size.width() - box_w) * 0.5;
+        let by = (size.height() - box_h) * 0.5;
+        let pad = s(28.0);
+        let field_h = s(42.0);
+        let field_w = box_w - pad * 2.0;
+        let destination = (bx + pad, by + s(86.0), field_w, field_h);
+        let password = (bx + pad, by + s(162.0), field_w, field_h);
+        let save_toggle = (bx + pad, by + s(220.0), s(180.0), s(28.0));
+        let primary = (bx + box_w - pad - s(112.0), by + box_h - s(58.0), s(112.0), s(36.0));
+        let cancel = (primary.0 - s(124.0), primary.1, s(112.0), s(36.0));
+        self.nebula_ssh_editor_rects =
+            Some(SshEditorRects { destination, password, save_toggle, primary, cancel });
+
+        let mut quads = vec![
+            UiQuad::solid(0.0, 0.0, size.width(), size.height(), 0.0, Rgba::new(0, 0, 0, 170)),
+            UiQuad::solid(
+                bx - s(1.0),
+                by - s(1.0),
+                box_w + s(2.0),
+                box_h + s(2.0),
+                s(13.0),
+                sk.hairline,
+            ),
+            UiQuad::solid(bx, by, box_w, box_h, s(12.0), sk.panel),
+        ];
+        for (rect, active) in [
+            (destination, editor.field == SshEditorField::Destination),
+            (password, editor.field == SshEditorField::Password),
+        ] {
+            quads.push(UiQuad::solid(
+                rect.0 - s(1.0),
+                rect.1 - s(1.0),
+                rect.2 + s(2.0),
+                rect.3 + s(2.0),
+                s(7.0),
+                if active { editor_focus } else { sk.hairline },
+            ));
+            quads.push(UiQuad::solid(
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                s(6.0),
+                if active { editor_field_active } else { editor_field_idle },
+            ));
+        }
+        quads.push(UiQuad::solid(
+            save_toggle.0,
+            save_toggle.1 + s(5.0),
+            s(18.0),
+            s(18.0),
+            s(4.0),
+            if editor.save_password { editor_check } else { sk.track_off },
+        ));
+        quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), sk.surface));
+        quads.push(UiQuad::solid(
+            primary.0,
+            primary.1,
+            primary.2,
+            primary.3,
+            s(8.0),
+            editor_primary,
+        ));
+        let (caret_rect, caret_cols) = match editor.field {
+            SshEditorField::Destination => (destination, editor.destination.chars().count()),
+            SshEditorField::Password => (password, editor.password.chars().count()),
+        };
+        let caret_x = (caret_rect.0 + s(12.0) + caret_cols as f32 * cell_w)
+            .min(caret_rect.0 + caret_rect.2 - s(10.0));
+        quads.push(UiQuad::solid(
+            caret_x,
+            caret_rect.1 + s(10.0),
+            s(1.5).max(1.0),
+            caret_rect.3 - s(20.0),
+            0.0,
+            editor_caret,
+        ));
+        self.renderer.draw_ui(&size, &quads);
+
+        let gc = &mut self.glyph_cache;
+        self.renderer.draw_doc_text(
+            &size,
+            bx + pad,
+            by + s(24.0),
+            1.35,
+            sk.ink_strong,
+            nebula_terminal::term::cell::Flags::empty(),
+            "添加 SSH 主机",
+            gc,
+        );
+        self.renderer.draw_chrome_text(
+            &size,
+            destination.0,
+            destination.1 - cell_h - s(6.0),
+            sk.ink_dim,
+            "用户名@地址（非 22 端口可用 ssh://user@host:port）",
+            gc,
+        );
+        let destination_text =
+            if editor.destination.is_empty() { "user@example.com" } else { &editor.destination };
+        self.renderer.draw_chrome_text(
+            &size,
+            destination.0 + s(12.0),
+            destination.1 + (field_h - cell_h) / 2.0,
+            if editor.destination.is_empty() { sk.ink_faint } else { sk.ink },
+            destination_text,
+            gc,
+        );
+        self.renderer.draw_chrome_text(
+            &size,
+            password.0,
+            password.1 - cell_h - s(6.0),
+            sk.ink_dim,
+            "密码",
+            gc,
+        );
+        let masked = if editor.password.is_empty() {
+            "连接时询问".to_owned()
+        } else {
+            "•".repeat(editor.password.chars().count())
+        };
+        self.renderer.draw_chrome_text(
+            &size,
+            password.0 + s(12.0),
+            password.1 + (field_h - cell_h) / 2.0,
+            if editor.password.is_empty() { sk.ink_faint } else { sk.ink },
+            &masked,
+            gc,
+        );
+        self.renderer.draw_chrome_text(
+            &size,
+            save_toggle.0 + s(28.0),
+            save_toggle.1 + (save_toggle.3 - cell_h) / 2.0,
+            sk.ink,
+            "保存密码到 Windows 凭据管理器",
+            gc,
+        );
+        self.renderer.draw_chrome_text(
+            &size,
+            cancel.0 + s(30.0),
+            cancel.1 + (cancel.3 - cell_h) / 2.0,
+            sk.ink,
+            "取消 Esc",
+            gc,
+        );
+        self.renderer.draw_chrome_text(
+            &size,
+            primary.0 + s(24.0),
+            primary.1 + (primary.3 - cell_h) / 2.0,
+            sk.ink_on_accent,
+            "保存 Enter",
+            gc,
         );
     }
 
@@ -3515,6 +4236,7 @@ impl Display {
 
         // Transient resize HUD painted on top of the chrome.
         self.draw_resize_hud();
+        self.draw_ssh_editor_modal();
         self.draw_confirm_modal();
 
         // Notify winit that we're about to present.
@@ -3911,7 +4633,10 @@ impl Display {
             if let Ok(commands) = self.nebula_commands.lock() {
                 if let Some(rem) = nebula_command_hint(commands.as_slice(), &line) {
                     state.suggestion = Self::nebula_clamp_ghost(rem);
-                    nebula_debug_log(format!("suggest_result kind=command rem={:?}", state.suggestion));
+                    nebula_debug_log(format!(
+                        "suggest_result kind=command rem={:?}",
+                        state.suggestion
+                    ));
                     return;
                 }
             }
@@ -4365,7 +5090,6 @@ impl Display {
             &mut self.glyph_cache,
         );
     }
-
 
     /// Draw render timer.
     #[inline(never)]

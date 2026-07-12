@@ -154,7 +154,7 @@ experience that works without extra setup.
 > it and press **Install**, then launch Nebula. (Licensed under SIL OFL 1.1.)
 
 **Release build (recommended)** — download
-`NebulaTerminal-v0.2.1-windows-x64.zip` from
+`NebulaTerminal-v0.3.0-windows-x64.zip` from
 [Releases](https://github.com/Kuddev/nebula/releases), unzip
 anywhere, install `MapleMonoNormal-NF-CN-Regular.ttf`, then run `nebula.exe`. Keep
 the bundled files next to the exe (`nebula-hook.exe` powers AI notifications;
@@ -288,7 +288,7 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 
 **Release 包（推荐）** — 从
 [Releases](https://github.com/Kuddev/nebula/releases) 下载
-`NebulaTerminal-v0.2.1-windows-x64.zip`，解压到任意目录，先安装
+`NebulaTerminal-v0.3.0-windows-x64.zip`，解压到任意目录，先安装
 `MapleMonoNormal-NF-CN-Regular.ttf`，再运行 `nebula.exe`。请保持随包文件与 exe
 同目录（`nebula-hook.exe` 驱动 AI 通知；`conpty.dll` + `OpenConsole.exe`
 提供现代 ConPTY 宿主）。
