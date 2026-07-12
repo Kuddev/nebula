@@ -148,21 +148,21 @@ impl NebulaTheme {
         // deep ink hues tuned for a pure-white ground. BrightWhite is a
         // gray on purpose — true white would vanish on the white terminal.
         const LIGHT_ANSI: [(NamedColor, Rgb); 16] = [
-            (NamedColor::Black, Rgb::new(36, 41, 47)),          // #24292f
-            (NamedColor::Red, Rgb::new(207, 34, 46)),           // #cf222e
-            (NamedColor::Green, Rgb::new(26, 127, 55)),         // #1a7f37
-            (NamedColor::Yellow, Rgb::new(154, 103, 0)),        // #9a6700
-            (NamedColor::Blue, Rgb::new(9, 105, 218)),          // #0969da
-            (NamedColor::Magenta, Rgb::new(130, 80, 223)),      // #8250df
-            (NamedColor::Cyan, Rgb::new(27, 124, 131)),         // #1b7c83
-            (NamedColor::White, Rgb::new(110, 119, 129)),       // #6e7781
-            (NamedColor::BrightBlack, Rgb::new(87, 96, 106)),   // #57606a
-            (NamedColor::BrightRed, Rgb::new(164, 14, 38)),     // #a40e26
-            (NamedColor::BrightGreen, Rgb::new(45, 164, 78)),   // #2da44e
-            (NamedColor::BrightYellow, Rgb::new(191, 135, 0)),  // #bf8700
-            (NamedColor::BrightBlue, Rgb::new(33, 139, 255)),   // #218bff
+            (NamedColor::Black, Rgb::new(36, 41, 47)),        // #24292f
+            (NamedColor::Red, Rgb::new(207, 34, 46)),         // #cf222e
+            (NamedColor::Green, Rgb::new(26, 127, 55)),       // #1a7f37
+            (NamedColor::Yellow, Rgb::new(154, 103, 0)),      // #9a6700
+            (NamedColor::Blue, Rgb::new(9, 105, 218)),        // #0969da
+            (NamedColor::Magenta, Rgb::new(130, 80, 223)),    // #8250df
+            (NamedColor::Cyan, Rgb::new(27, 124, 131)),       // #1b7c83
+            (NamedColor::White, Rgb::new(110, 119, 129)),     // #6e7781
+            (NamedColor::BrightBlack, Rgb::new(87, 96, 106)), // #57606a
+            (NamedColor::BrightRed, Rgb::new(164, 14, 38)),   // #a40e26
+            (NamedColor::BrightGreen, Rgb::new(45, 164, 78)), // #2da44e
+            (NamedColor::BrightYellow, Rgb::new(191, 135, 0)), // #bf8700
+            (NamedColor::BrightBlue, Rgb::new(33, 139, 255)), // #218bff
             (NamedColor::BrightMagenta, Rgb::new(164, 117, 249)), // #a475f9
-            (NamedColor::BrightCyan, Rgb::new(49, 146, 170)),   // #3192aa
+            (NamedColor::BrightCyan, Rgb::new(49, 146, 170)), // #3192aa
             (NamedColor::BrightWhite, Rgb::new(140, 149, 159)), // #8c959f
         ];
         for (name, rgb) in LIGHT_ANSI {
@@ -265,6 +265,7 @@ impl NebulaTheme {
                 glow_r: Rgba::new(125, 178, 194, 14),
                 is_light: false,
                 term_bg: Rgb::new(15, 17, 26),
+                shell_bg: Rgb::new(34, 38, 48),
             },
             // Cool silver — the light half of the steel pair. Chrome layers
             // follow the premium-light sheet: sidebar #f3f4f6 over app-bg
@@ -292,6 +293,9 @@ impl NebulaTheme {
                 // Pure white terminal on every light theme (premium-light
                 // sheet): highest contrast for the Primer ANSI ink set.
                 term_bg: Rgb::new(255, 255, 255),
+                // Premium-light app-bg layer (#f3f4f6-ish): the white terminal
+                // card floats on this neutral silver.
+                shell_bg: Rgb::new(243, 244, 246),
             },
             // Warm limestone — the light half of the coal pair.
             Self::LimestoneLight => NebulaPalette {
@@ -308,6 +312,7 @@ impl NebulaTheme {
                 glow_r: Rgba::new(88, 85, 76, 0),
                 is_light: true,
                 term_bg: Rgb::new(255, 255, 255),
+                shell_bg: Rgb::new(240, 239, 235),
             },
             // Soft linen — the light half of the moss pair.
             Self::LinenLight => NebulaPalette {
@@ -324,6 +329,7 @@ impl NebulaTheme {
                 glow_r: Rgba::new(95, 99, 95, 0),
                 is_light: true,
                 term_bg: Rgb::new(255, 255, 255),
+                shell_bg: Rgb::new(242, 242, 236),
             },
             // The three dark themes from the floating-pill design sheet
             // (steel blue-gray / coal warm-gold / moss green), low-saturation
@@ -341,6 +347,7 @@ impl NebulaTheme {
                 glow_r: Rgba::new(82, 168, 255, 12),
                 is_light: false,
                 term_bg: Rgb::new(26, 28, 36),
+                shell_bg: Rgb::new(22, 24, 30),
             },
             Self::CoalDark => NebulaPalette {
                 panel: Rgba::new(22, 22, 22, 224),
@@ -355,6 +362,7 @@ impl NebulaTheme {
                 glow_r: Rgba::new(212, 212, 212, 12),
                 is_light: false,
                 term_bg: Rgb::new(23, 23, 23),
+                shell_bg: Rgb::new(22, 22, 22),
             },
             Self::MossDark => NebulaPalette {
                 panel: Rgba::new(25, 28, 25, 224),
@@ -369,6 +377,7 @@ impl NebulaTheme {
                 glow_r: Rgba::new(163, 179, 163, 12),
                 is_light: false,
                 term_bg: Rgb::new(30, 33, 30),
+                shell_bg: Rgb::new(25, 28, 25),
             },
         }
     }
@@ -389,7 +398,7 @@ impl NebulaTheme {
                 // Light panels stay flat — the gradient-to-dark trick is a
                 // dark-theme depth cue and would read as dirt here.
                 panel_grad_to: Rgba::new(b.r, b.g, b.b, 252),
-                ink: Rgb::new(55, 65, 81),      // #374151 (ui-text-main)
+                ink: Rgb::new(55, 65, 81),        // #374151 (ui-text-main)
                 ink_dim: Rgb::new(107, 114, 128), // #6b7280 (ui-text-muted)
                 ink_strong: Rgb::new(18, 22, 30),
                 ink_faint: Rgb::new(148, 153, 163),
@@ -467,6 +476,11 @@ pub(crate) struct NebulaPalette {
     pub(crate) is_light: bool,
     /// The theme's default terminal background, applied on selection.
     pub(crate) term_bg: Rgb,
+    /// Opaque window shell base color. The whole window clears to this; the
+    /// terminal renders as a rounded [`term_bg`] card floating on top, and the
+    /// chrome (top bar / sidebar) melts into it. Slightly offset from `panel`'s
+    /// RGB so the translucent panels still read on top of it.
+    pub(crate) shell_bg: Rgb,
 }
 
 /// Theme-derived skin for every floating chrome layer: the settings modal,

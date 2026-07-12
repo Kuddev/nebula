@@ -58,6 +58,13 @@ mod split;
 /// terminal's event tag. Panes live in [`WindowContext::panes`].
 type PaneId = u64;
 
+/// Sentinel pane id for document-viewer tabs. A doc tab owns no pane and no
+/// PTY: its `Layout::Leaf(DOC_PANE_ID)` deliberately resolves to `None` in
+/// every `pane()` lookup, which is exactly the degraded behaviour those call
+/// sites already handle (no spinner, no close confirm, no PTY resize) — the
+/// tab's content comes from `TabEntry::doc` instead.
+const DOC_PANE_ID: PaneId = u64::MAX;
+
 /// A single terminal session (one PTY + grid). It is a leaf of a tab's
 /// [`Layout`] tree; the tab bar shows tabs, not panes.
 pub struct Pane {
@@ -115,6 +122,9 @@ struct TabEntry {
     /// Custom user-assigned name for this tab. When `None`, the label is derived
     /// from the working directory (Windows Terminal style).
     custom_name: Option<String>,
+    /// Document viewer content (markdown/text/json). `Some` marks this as a
+    /// doc tab: it has no pane, and the draw/input paths route to the viewer.
+    doc: Option<crate::display::markdown_view::DocView>,
 }
 
 /// How a new window context gets its initial tabs.
@@ -205,6 +215,10 @@ pub struct WindowContext {
     preserve_title: bool,
     window_config: ParsedOptions,
     config: Rc<UiConfig>,
+    /// Stand-in pane for document-viewer tabs (see [`Self::create_doc_pane`]).
+    /// Lives outside `panes` so id lookups keep treating doc tabs as
+    /// pane-less; only the event pipeline borrows it.
+    doc_pane: Pane,
 }
 
 impl WindowContext {
@@ -384,6 +398,7 @@ impl WindowContext {
                         active_pane: first_id,
                         has_bell: false,
                         custom_name: None,
+                        doc: None,
                     }],
                     0,
                     1,
@@ -392,6 +407,10 @@ impl WindowContext {
             },
         };
         let attached = fresh_first.is_none();
+
+        // The pane stub every doc tab's events run against (never in `panes`).
+        let doc_pane =
+            Self::create_doc_pane(&display.size_info, display.window.id(), &config, &proxy);
 
         // Create context for the Nebula window.
         let context = WindowContext {
@@ -405,6 +424,7 @@ impl WindowContext {
             proxy,
             display,
             config,
+            doc_pane,
             cursor_blink_timed_out: Default::default(),
             prev_bell_cmd: Default::default(),
             last_pty_resize: None,
@@ -523,6 +543,37 @@ impl WindowContext {
         })
     }
 
+    /// A pane-shaped stub for document-viewer tabs: a real (empty) `Term` so
+    /// the shared event pipeline has state to borrow, but NO PTY behind it —
+    /// the notifier is a sink, so keystrokes routed here are swallowed
+    /// instead of reaching some other tab's shell. Never inserted into
+    /// `panes`: every `pane(DOC_PANE_ID)` lookup stays `None`, keeping all
+    /// the "no pane" degradations (no spinner, no close confirm, …) intact.
+    fn create_doc_pane(
+        size_info: &crate::display::SizeInfo,
+        window_id: WindowId,
+        config: &UiConfig,
+        proxy: &EventLoopProxy<Event>,
+    ) -> Pane {
+        let window_route = Arc::new(AtomicU64::new(window_id.into()));
+        let event_proxy = EventProxy::new_tab(proxy.clone(), window_route.clone(), DOC_PANE_ID);
+        let terminal = Term::new(config.term_options(), size_info, event_proxy);
+        Pane {
+            terminal: Arc::new(FairMutex::new(terminal)),
+            notifier: Notifier(nebula_terminal::event_loop::EventLoopSender::sink()),
+            search_state: Default::default(),
+            inline_search_state: Default::default(),
+            id: DOC_PANE_ID,
+            title: String::from("doc"),
+            nebula_state: NebulaPaneState::default(),
+            intro_cols: None,
+            shell_pid: 0,
+            window_route,
+            #[cfg(not(windows))]
+            master_fd: -1,
+        }
+    }
+
     /// Handle a Nebula tab request. Returns `true` if the window should close
     /// (i.e. the last tab was closed).
     pub fn handle_tab_request(&mut self, request: TabRequest) -> bool {
@@ -534,6 +585,18 @@ impl WindowContext {
             },
             TabRequest::NewProfile(index) => {
                 self.spawn_tab_profile(index);
+                false
+            },
+            TabRequest::NewShell { name, shell } => {
+                self.spawn_tab_shell(name, shell);
+                false
+            },
+            TabRequest::NewSsh(host) => {
+                self.spawn_tab_ssh(host);
+                false
+            },
+            TabRequest::OpenDoc(path) => {
+                self.open_doc_tab(path);
                 false
             },
             TabRequest::Close => {
@@ -704,7 +767,17 @@ impl WindowContext {
     /// Spawn and activate a new tab (a single-pane layout) using the default shell.
     fn spawn_tab(&mut self) {
         let cwd = self.focused_cwd();
-        if let Some(id) = self.spawn_pane_detached(cwd, self.display.size_info) {
+        // The default-shell setting (`shell=<id>` in nebula_settings.txt) may
+        // name a detected shell the PTY layer doesn't bootstrap itself (cmd,
+        // pwsh, nushell, a WSL distro). `resolve_id` returns `None` for the two
+        // PTY-integrated executors (powershell/bash) so those keep their prompt
+        // injection; anything else spawns as an explicit override here.
+        let override_shell = Self::default_shell_override();
+        let spawned = match override_shell {
+            Some(shell) => self.spawn_pane_detached_with(cwd, self.display.size_info, Some(shell)),
+            None => self.spawn_pane_detached(cwd, self.display.size_info),
+        };
+        if let Some(id) = spawned {
             // Insert right after the current tab (insert right next to the current tab)
             // rather than at the end of the bar.
             let at = (self.active_tab + 1).min(self.tabs.len());
@@ -713,12 +786,21 @@ impl WindowContext {
                 active_pane: id,
                 has_bell: false,
                 custom_name: None,
+                doc: None,
             });
             self.active_tab = at;
             self.resize_active_layout();
             self.dirty = true;
             self.run_fastfetch_intro(id);
         }
+    }
+
+    /// The default-shell override for a plain new tab, or `None` to use the PTY
+    /// layer's own default (which owns the powershell/bash prompt bootstrap).
+    fn default_shell_override() -> Option<nebula_terminal::tty::Shell> {
+        let id = crate::display::nebula_settings_value("shell")
+            .or_else(|| crate::display::nebula_settings_value("executor"))?;
+        crate::shell_detect::resolve_id(&id).map(|shell| shell.shell())
     }
 
     /// Open a new tab running the quick-launch profile at `index` (custom
@@ -741,11 +823,110 @@ impl WindowContext {
                 active_pane: id,
                 has_bell: false,
                 custom_name: Some(profile.name),
+                doc: None,
             });
             self.active_tab = at;
             self.resize_active_layout();
             self.dirty = true;
         }
+    }
+
+    /// Open a new tab running a detected shell (the new-tab dropdown). Like
+    /// `spawn_tab_profile` but the spec is passed in rather than looked up in
+    /// the config, and the cwd inherits the focused pane's.
+    fn spawn_tab_shell(&mut self, name: String, shell: nebula_terminal::tty::Shell) {
+        if let Some(id) =
+            self.spawn_pane_detached_with(self.focused_cwd(), self.display.size_info, Some(shell))
+        {
+            let at = (self.active_tab + 1).min(self.tabs.len());
+            self.tabs.insert(at, TabEntry {
+                layout: Layout::Leaf(id),
+                active_pane: id,
+                has_bell: false,
+                custom_name: Some(name),
+                doc: None,
+            });
+            self.active_tab = at;
+            self.resize_active_layout();
+            self.dirty = true;
+        }
+    }
+
+    /// Open a saved SSH destination inside the configured default shell.
+    /// `nebula ssh` is typed into that shell's PTY so OpenSSH remains inside
+    /// Nebula's ConPTY instead of becoming the pane's GUI-subsystem root.
+    fn spawn_tab_ssh(&mut self, host: String) {
+        let Ok(exe) = std::env::current_exe() else {
+            error!("Cannot locate nebula.exe for the SSH AskPass helper");
+            return;
+        };
+        let shell_id = self.display.nebula_shell_id.clone().unwrap_or_else(|| {
+            match self.display.nebula_shell {
+                crate::display::NebulaShell::PowerShell => "powershell".into(),
+                crate::display::NebulaShell::Bash => "bash".into(),
+            }
+        });
+        let launch = match crate::ssh::build_pane_launch(&shell_id, &exe, &host) {
+            Ok(launch) => launch,
+            Err(err) => {
+                error!("Refusing unsafe SSH destination {host:?}: {err}");
+                return;
+            },
+        };
+        let default_shell = Self::default_shell_override();
+        if let Some(id) = self.spawn_pane_detached_with(
+            self.focused_cwd(),
+            self.display.size_info,
+            default_shell,
+        ) {
+            let at = (self.active_tab + 1).min(self.tabs.len());
+            self.tabs.insert(at, TabEntry {
+                layout: Layout::Leaf(id),
+                active_pane: id,
+                has_bell: false,
+                custom_name: Some(host),
+                doc: None,
+            });
+            self.active_tab = at;
+            self.resize_active_layout();
+            self.dirty = true;
+            if let Some(pane) = self.panes.iter().find(|pane| pane.id == id) {
+                pane.notifier.notify(launch.command);
+            }
+        }
+    }
+
+    /// Open `path` in a read-only document viewer tab. A tab already viewing
+    /// this file is re-focused (and re-read, so the view is fresh) instead of
+    /// duplicated — double-click twice shouldn't litter the bar.
+    fn open_doc_tab(&mut self, path: std::path::PathBuf) {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.doc.as_ref().is_some_and(|doc| doc.path == path))
+        {
+            if let Some(doc) = self.tabs[index].doc.as_mut() {
+                doc.reload();
+            }
+            self.select_tab(index);
+            self.dirty = true;
+            return;
+        }
+        let doc = crate::display::markdown_view::DocView::open(path);
+        // Nerd Font markdown mark in front of the file name; the label IS the
+        // tab identity for doc tabs (no cwd to derive one from). Same codicon
+        // as the file tree's markdown icon, so tab and tree read as one system.
+        let label = format!("\u{eb1d} {}", doc.title);
+        let at = (self.active_tab + 1).min(self.tabs.len());
+        self.tabs.insert(at, TabEntry {
+            layout: Layout::Leaf(DOC_PANE_ID),
+            active_pane: DOC_PANE_ID,
+            has_bell: false,
+            custom_name: Some(label),
+            doc: Some(doc),
+        });
+        self.active_tab = at;
+        self.dirty = true;
     }
 
     /// Rebuild the remaining tabs of a restored session (its first tab became
@@ -761,6 +942,7 @@ impl WindowContext {
                     active_pane: id,
                     has_bell: false,
                     custom_name: None,
+                    doc: None,
                 });
                 self.run_fastfetch_intro(id);
             }
@@ -1162,6 +1344,26 @@ impl WindowContext {
         self.dirty = true;
     }
 
+    /// Confirm a typed-`ssh` login as connected and save its destination to
+    /// the sidebar, once the session shows PTY activity beyond the fast-
+    /// failure window. Called on Wakeup: the old flow only saved when the
+    /// session ENDED (`SAVE_MIN_SESSION` at CommandDone), which left the
+    /// sidebar empty exactly while the user was connected and looking at it.
+    pub fn confirm_ssh_on_activity(&mut self, pane_id: Option<u64>) {
+        let Some(index) = pane_id.and_then(|id| self.pane_index(id)) else { return };
+        let state = &mut self.panes[index].nebula_state;
+        if state.pending_ssh_host.is_some()
+            && state
+                .command_started
+                .is_some_and(|started| started.elapsed() >= crate::ssh::SAVE_CONNECTED_AFTER)
+        {
+            if let Some(host) = state.pending_ssh_host.take() {
+                self.display.nebula_save_ssh_host(&host);
+                self.dirty = true;
+            }
+        }
+    }
+
     /// Close the pane whose shell produced an `Exit` event, or the focused pane
     /// when `pane_id` is `None`. Returns `true` if the last tab closed (the
     /// window should close).
@@ -1372,6 +1574,15 @@ impl WindowContext {
         let pane_rects = self.layout_geometry(false).0;
         let divider_rects = self.layout_geometry(true).1;
         let focused = self.focused_pane_id();
+
+        // Document-viewer tab: no pane, no grid. Draw the doc into the tab's
+        // content rect; `present_frame` inside lays the normal chrome on top.
+        if let Some(doc) = self.tabs.get_mut(self.active_tab).and_then(|tab| tab.doc.as_mut()) {
+            let view = pane_rects.first().map(|(_, view)| *view).unwrap_or(self.display.size_info);
+            self.display.begin_pane_frame(&self.config);
+            self.display.draw_doc_frame(doc, view, scheduler);
+            return;
+        }
 
         if pane_rects.len() <= 1 {
             let id = pane_rects.first().map(|(id, _)| *id).unwrap_or(focused);
@@ -1660,7 +1871,15 @@ impl WindowContext {
         // pane's output drag the batch — keystrokes included — to itself,
         // typing into the wrong PTY.
         let focused_id = self.focused_pane_id();
-        let Some(focused) = self.pane_index(focused_id) else { return };
+        // A doc tab has no pane: its events run against `doc_pane` below so
+        // chrome interaction (tab switching, closing, the sidebar) keeps
+        // working; anything typed lands in the sink notifier.
+        let doc_tab = self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some());
+        let focused = match self.pane_index(focused_id) {
+            Some(index) => Some(index),
+            None if doc_tab => None,
+            None => return,
+        };
 
         // Point input/hint hit-testing at the focused pane's rectangle so mouse
         // coordinates map into its (possibly partial) grid. `None` → full window.
@@ -1672,7 +1891,8 @@ impl WindowContext {
         };
         self.display.nebula_pane_view = pane_view;
 
-        let old_is_searching = self.panes[focused].search_state.history_index.is_some();
+        let old_is_searching = focused
+            .is_some_and(|index| self.panes[index].search_state.history_index.is_some());
 
         let target_of = |event: &WinitEvent<Event>| match event {
             WinitEvent::UserEvent(event) => event.terminal_tab_id().unwrap_or(focused_id),
@@ -1683,16 +1903,22 @@ impl WindowContext {
         let mut events = mem::take(&mut self.event_queue).into_iter().peekable();
         while let Some(event) = events.next() {
             let target_id = target_of(&event);
-            let Some(pane_idx) = self.pane_index(target_id) else {
-                // Source pane is gone (closed with output still in flight):
-                // drop its events, keep the rest of the batch.
-                while events.next_if(|event| target_of(event) == target_id).is_some() {}
-                continue;
+            let (pane, doc) = match self.pane_index(target_id) {
+                Some(pane_idx) => (&mut self.panes[pane_idx], None),
+                None if target_id == DOC_PANE_ID && doc_tab => (
+                    &mut self.doc_pane,
+                    self.tabs.get_mut(self.active_tab).and_then(|tab| tab.doc.as_mut()),
+                ),
+                None => {
+                    // Source pane is gone (closed with output still in flight):
+                    // drop its events, keep the rest of the batch.
+                    while events.next_if(|event| target_of(event) == target_id).is_some() {}
+                    continue;
+                },
             };
 
-            let terminal_arc = self.panes[pane_idx].terminal.clone();
+            let terminal_arc = pane.terminal.clone();
             let mut terminal = terminal_arc.lock();
-            let pane = &mut self.panes[pane_idx];
             let context = ActionContext {
                 cursor_blink_timed_out: &mut self.cursor_blink_timed_out,
                 prev_bell_cmd: &mut self.prev_bell_cmd,
@@ -1700,6 +1926,7 @@ impl WindowContext {
                 inline_search_state: &mut pane.inline_search_state,
                 search_state: &mut pane.search_state,
                 nebula_state: &mut pane.nebula_state,
+                doc,
                 modifiers: &mut self.modifiers,
                 notifier: &mut pane.notifier,
                 display: &mut self.display,
@@ -1727,13 +1954,20 @@ impl WindowContext {
             }
         }
 
-        // Post-batch display housekeeping reads the focused pane's terminal.
-        let terminal_arc = self.panes[focused].terminal.clone();
+        // Post-batch display housekeeping reads the focused pane's terminal
+        // (the doc stub when a doc tab is active).
+        let terminal_arc = match focused {
+            Some(index) => self.panes[index].terminal.clone(),
+            None => self.doc_pane.terminal.clone(),
+        };
         let mut terminal = terminal_arc.lock();
 
         // Process DisplayUpdate events.
         if self.display.pending_update.dirty {
-            let pane = &mut self.panes[focused];
+            let pane = match focused {
+                Some(index) => &mut self.panes[index],
+                None => &mut self.doc_pane,
+            };
             Self::submit_display_update(
                 &mut terminal,
                 &mut self.display,

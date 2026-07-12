@@ -96,7 +96,8 @@ const SEARCH_VISIT_BUDGET: usize = 20_000;
 /// Entries kept in the filter index.
 const SEARCH_INDEX_CAP: usize = 10_000;
 /// Directories that are all bulk and no signal — never indexed for filtering.
-const SEARCH_SKIP_DIRS: &[&str] = &["target", "node_modules", ".git", ".cache", ".gradle", "build", "trellis"];
+const SEARCH_SKIP_DIRS: &[&str] =
+    &["target", "node_modules", ".git", ".cache", ".gradle", "build", "trellis"];
 
 pub struct SidePanel {
     pub open: bool,
@@ -463,6 +464,12 @@ impl SidePanel {
     }
 }
 
+/// Resting drawer width in logical pixels (clamped to 42% of the window in
+/// `panel_layout`). Shared with the grid-padding reserve and the terminal
+/// card's right edge, so the drawer genuinely occupies layout space (the grid
+/// reflows around it) instead of floating over the terminal.
+pub const PANEL_W_LOGICAL: f32 = 300.0;
+
 /// Panel geometry, physical pixels: `(x, y, w, h)` of the drawer, plus the
 /// header strip height and one list row height.
 pub struct PanelLayout {
@@ -498,7 +505,7 @@ pub fn panel_layout(
     let margin = s(8.0);
     let bar_h = s(40.0);
     let gap = s(12.0);
-    let w = s(300.0).min(win_w * 0.42);
+    let w = s(PANEL_W_LOGICAL).min(win_w * 0.42);
     // Swift-out easing (design sheet's cubic-bezier(0.2, 0.8, 0.2, 1) feel):
     // fast launch, soft landing.
     let t = slide.clamp(0.0, 1.0);
@@ -626,8 +633,7 @@ fn read_git(root: &Path) -> Option<GitInfo> {
     // `x files changed, 140 insertions(+), 69 deletions(-)` → (140, 69).
     if let Some(stat) = run(&["diff", "--shortstat", "HEAD"]) {
         for part in stat.split(',') {
-            let num: u64 =
-                part.trim().split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            let num: u64 = part.trim().split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(0);
             if part.contains("insertion") {
                 info.plus = num;
             } else if part.contains("deletion") {
@@ -637,7 +643,6 @@ fn read_git(root: &Path) -> Option<GitInfo> {
     }
     Some(info)
 }
-
 
 // ---- rendering (mirrors the `settings.rs` split: the parent `display::mod`
 // hands in a snapshot + renderer; this module owns the drawer's pixels) ----
@@ -656,6 +661,48 @@ const ICON_CHEVRON_RIGHT: &str = "\u{eab6}";
 const ICON_CHEVRON_DOWN: &str = "\u{eab4}";
 const ICON_BRANCH: &str = "\u{ea68}";
 const ICON_SEARCH: &str = "\u{ea6d}";
+
+/// File-type icon for a tree row, keyed by extension (dotfile names like
+/// `.gitignore` count as their own family). The glyph carries the type; the
+/// ink stays the tree's neutral scheme — no per-type colors in the chrome.
+/// Every codepoint here is verified present in the bundled Maple Mono NF CN
+/// (codicon/seti/devicon/octicon blocks), so nothing can render as tofu.
+fn file_type_icon(name: &str) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with(".git") {
+        return "\u{e65d}"; // seti-git: .gitignore/.gitattributes/.gitmodules
+    }
+    let ext = lower.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    match ext {
+        "md" | "markdown" => "\u{eb1d}",           // cod-markdown
+        "json" | "jsonl" | "ndjson" => "\u{eb0f}", // cod-json
+        "toml" => "\u{e6b2}",
+        "yml" | "yaml" => "\u{e6a8}",
+        "xml" => "\u{e619}",
+        "rs" => "\u{e68b}",
+        "py" => "\u{e606}",
+        "js" | "mjs" | "cjs" | "jsx" => "\u{e60c}",
+        "ts" | "tsx" => "\u{e628}",
+        "html" | "htm" => "\u{e60e}",
+        "css" | "scss" | "less" => "\u{e614}",
+        "c" | "h" => "\u{e61e}",
+        "cpp" | "cc" | "cxx" | "hpp" => "\u{e61d}",
+        "cs" => "\u{e648}",
+        "java" => "\u{e66d}",
+        "go" => "\u{e627}",
+        "sh" | "bash" | "zsh" => "\u{e691}",
+        "ps1" | "psm1" | "psd1" => "\u{e683}",
+        "bat" | "cmd" => "\u{ea85}", // cod-terminal
+        "sql" | "db" | "sqlite" => "\u{e64d}",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg" => "\u{e60d}",
+        "zip" | "7z" | "rar" | "gz" | "tar" | "xz" | "zst" => "\u{f1c6}",
+        "pdf" => "\u{f1c1}",
+        "lock" => "\u{e672}",
+        "log" => "\u{f4ed}",
+        "txt" => "\u{f0f6}",
+        _ => ICON_FILE,
+    }
+}
 
 /// Git status colors (GitHub Primer hues), picked per theme brightness so
 /// they hold contrast on both surface families.
@@ -691,6 +738,14 @@ fn is_executable(name: &str) -> bool {
 /// Push the drawer's background quads: the flat panel surface (same 底色 as
 /// the left tab sidebar), the active header view-tab pill, and the filter input
 /// box — all curved with the shared chrome radius.
+/// Display columns of a drag-chip label (CJK counts 2) — shared by the quad
+/// pass (chip width; it has no cell metrics) and the text pass, so the label
+/// and its chip agree on the same width.
+fn drag_chip_cols(name: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    name.chars().map(|c| c.width().unwrap_or(0).max(1)).sum()
+}
+
 pub(super) fn push_quads(
     panel: &SidePanel,
     layout: &PanelLayout,
@@ -834,7 +889,7 @@ pub(super) fn push_quads(
         // flight — the pointer alone was invisible feedback.
         if let Some(drag) = panel.drag_file.as_ref().filter(|d| d.active) {
             let (mx, my) = drag.pos;
-            let chip_w = ((drag.name.chars().count() as f32 + 4.0) * s(8.0)).min(s(220.0));
+            let chip_w = (drag_chip_cols(&drag.name) as f32 * s(8.0) + s(32.0)).min(s(220.0));
             quads.push(UiQuad::solid(
                 mx + s(12.0),
                 my + s(14.0),
@@ -911,20 +966,35 @@ pub(super) fn draw_text(
     let is_light = theme.palette().is_light;
     let (px, py, pw, _) = layout.panel;
     let text_pad = s(12.0);
-    // Left-truncate to the panel width (paths overflow on the left, names on
-    // the right — keeping the discriminating tail visible). `reserve` frees
-    // columns already eaten by icons/indent on that row.
-    let max_chars = (((pw - 2.0 * text_pad) / cell_w) as usize).max(8);
-    let clip_tail = |t: &str, reserve: usize| -> String {
-        let budget = max_chars.saturating_sub(reserve).max(4);
-        let n = t.chars().count();
-        if n <= budget {
-            t.to_string()
-        } else {
-            let skip = n - (budget - 1);
-            format!("…{}", t.chars().skip(skip).collect::<String>())
+    // Truncation budgets are in display COLUMNS (CJK counts 2), matching
+    // draw_chrome_text's advance — a char-count budget lets a CJK name run
+    // twice as wide as intended, straight across the hover wash.
+    // Paths left-truncate (`…tail` — the discriminating end stays visible);
+    // file names right-truncate (`name…`, see `truncate_tab_label`).
+    let max_cols = (((pw - 2.0 * text_pad) / cell_w) as usize).max(8);
+    let clip_tail = |t: &str, budget_cols: usize| -> String {
+        use unicode_width::UnicodeWidthChar;
+        let budget = budget_cols.max(4);
+        let total: usize = t.chars().map(|c| c.width().unwrap_or(0).max(1)).sum();
+        if total <= budget {
+            return t.to_string();
         }
+        // Walk from the end, keeping the widest tail that fits after the `…`.
+        let mut used = 1usize; // the ellipsis column
+        let mut tail = std::collections::VecDeque::new();
+        for ch in t.chars().rev() {
+            let w = ch.width().unwrap_or(0).max(1);
+            if used + w > budget {
+                break;
+            }
+            used += w;
+            tail.push_front(ch);
+        }
+        format!("…{}", tail.iter().collect::<String>())
     };
+    // Right edge every row's text must stop before: the hover wash ends at
+    // `px + pw - s(10)`, keep a small inset inside it.
+    let row_text_right = px + pw - s(18.0);
 
     // Header tabs: icon + label.
     let header_ty = py + (layout.header_h - cell_h) / 2.0;
@@ -945,14 +1015,13 @@ pub(super) fn draw_text(
 
     let summary_y = py + layout.header_h + (s(30.0) - cell_h) / 2.0;
     let scroll = panel.scroll;
-    let row_ty =
-        |i: usize| layout.list_y + i as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0;
+    let row_ty = |i: usize| layout.list_y + i as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0;
 
     match panel.view {
         PanelView::Files => {
             let summary = panel
                 .root()
-                .map(|root| clip_tail(&root.display().to_string(), 0))
+                .map(|root| clip_tail(&root.display().to_string(), max_cols))
                 .unwrap_or_else(|| "（无目录）".into());
             r.draw_chrome_text(size, px + text_pad, summary_y, sk.ink_dim, &summary, gc);
 
@@ -974,8 +1043,7 @@ pub(super) fn draw_text(
 
             // Tree rows: chevron (dirs, tree mode only) + folder/file icon + name.
             let filtering = !panel.search.trim().is_empty();
-            for (i, row) in
-                panel.file_rows().iter().skip(scroll).take(layout.max_rows).enumerate()
+            for (i, row) in panel.file_rows().iter().skip(scroll).take(layout.max_rows).enumerate()
             {
                 let hovered = matches!(panel.hover, PanelHit::Row(h) if h == i);
                 let selected = panel.selected.as_ref() == Some(&row.path)
@@ -997,26 +1065,35 @@ pub(super) fn draw_text(
                     (if row.expanded { ICON_FOLDER_OPEN } else { ICON_FOLDER }, ls.dir, ls.dir)
                 } else if is_executable(&row.name) {
                     // Executables in ANSI green, same as Nebula-List.
-                    (ICON_FILE, ls.exec, ls.exec)
+                    (file_type_icon(&row.name), ls.exec, ls.exec)
                 } else {
-                    (ICON_FILE, sk.ink_dim, sk.ink)
+                    (file_type_icon(&row.name), sk.ink_dim, sk.ink)
                 };
                 r.draw_chrome_text(size, x, ry, icon_ink, icon, gc);
-                let reserve = row.depth * 3 + if filtering { 4 } else { 6 };
-                let name = clip_tail(&row.name, reserve);
-                r.draw_chrome_text(size, x + cell_w * 2.2, ry, name_ink, &name, gc);
+                // Name budget from its REAL pixel start (indent + chevron +
+                // icon) to the hover wash's right edge — a long name ends in
+                // `…` exactly inside the wash instead of bleeding past it.
+                let name_x = x + cell_w * 2.2;
+                let name_cols = (((row_text_right - name_x) / cell_w).floor() as usize).max(2);
+                let name = super::truncate_tab_label(&row.name, name_cols);
+                r.draw_chrome_text(size, name_x, ry, name_ink, &name, gc);
             }
 
             // Drag ghost label, riding the chip pushed by `push_quads`.
+            // Same chip-width formula as there (that pass has no cell_w), then
+            // truncated against the REAL glyph advance so the label always
+            // ends inside the chip.
             if let Some(drag) = panel.drag_file.as_ref().filter(|d| d.active) {
                 let (mx, my) = drag.pos;
                 let ty = my + s(12.0) + (s(26.0) - cell_h) / 2.0;
+                let chip_w = (drag_chip_cols(&drag.name) as f32 * s(8.0) + s(32.0)).min(s(220.0));
+                let max_cols = (((chip_w - s(26.0)) / cell_w).floor() as usize).max(2);
                 r.draw_chrome_text(
                     size,
                     mx + s(10.0) + s(12.0),
                     ty,
                     sk.ink_strong,
-                    &drag.name,
+                    &super::truncate_tab_label(&drag.name, max_cols),
                     gc,
                 );
             }
@@ -1027,10 +1104,8 @@ pub(super) fn draw_text(
                 // right (an op error takes the line over instead).
                 let bx = px + text_pad;
                 r.draw_chrome_text(size, bx, summary_y, sk.ink_dim, ICON_BRANCH, gc);
-                let branch = clip_tail(
-                    if git.branch.is_empty() { "(no branch)" } else { &git.branch },
-                    18,
-                );
+                let branch =
+                    clip_tail(if git.branch.is_empty() { "(no branch)" } else { &git.branch }, 18);
                 r.draw_chrome_text(size, bx + cell_w * 1.8, summary_y, sk.ink_strong, &branch, gc);
                 if let Some(err) = panel.op_error() {
                     let msg = clip_tail(&err, branch.chars().count() + 4);
@@ -1042,7 +1117,8 @@ pub(super) fn draw_text(
                     let c_del = status_color('D', is_light).unwrap();
                     let minus = format!("\u{2212}{}", git.minus);
                     let plus = format!("+{}", git.plus);
-                    let ahead = if git.ahead > 0 { format!("↑{} ", git.ahead) } else { String::new() };
+                    let ahead =
+                        if git.ahead > 0 { format!("↑{} ", git.ahead) } else { String::new() };
                     let minus_x = px + pw - text_pad - minus.chars().count() as f32 * cell_w;
                     let plus_x = minus_x - (plus.chars().count() + 1) as f32 * cell_w;
                     let ahead_x = plus_x - (ahead.chars().count() + 1) as f32 * cell_w;
@@ -1060,7 +1136,11 @@ pub(super) fn draw_text(
                 if panel.commit_focus {
                     let caret = if super::caret_blink_on() { "▏" } else { "" };
                     let shown = format!("{}{caret}", panel.commit_msg);
-                    let hint = if panel.commit_msg.is_empty() { "提交信息…  Enter 提交 · Esc 取消" } else { "" };
+                    let hint = if panel.commit_msg.is_empty() {
+                        "提交信息…  Enter 提交 · Esc 取消"
+                    } else {
+                        ""
+                    };
                     if hint.is_empty() {
                         r.draw_chrome_text(size, sx + s(8.0), strip_ty, sk.ink_strong, &shown, gc);
                     } else {
@@ -1071,14 +1151,18 @@ pub(super) fn draw_text(
                     let stage_on = !busy && !git.unstaged.is_empty();
                     let commit_on = !busy && !git.staged.is_empty();
                     let push_on = !busy && git.ahead > 0;
-                    let push_label =
-                        if git.ahead > 0 { format!("推送 ↑{}", git.ahead) } else { "推送".to_string() };
+                    let push_label = if git.ahead > 0 {
+                        format!("推送 ↑{}", git.ahead)
+                    } else {
+                        "推送".to_string()
+                    };
                     let labels: [(&str, bool); 3] = [
                         (if busy { "…" } else { "暂存全部" }, stage_on),
                         ("提交", commit_on),
                         (&push_label, push_on),
                     ];
-                    for ((bx, bw), (label, enabled)) in git_button_rects(sx, sw, s(8.0)).into_iter().zip(labels)
+                    for ((bx, bw), (label, enabled)) in
+                        git_button_rects(sx, sw, s(8.0)).into_iter().zip(labels)
                     {
                         let hovered = panel.hover == PanelHit::Search
                             && panel.hover_pos.0 >= bx
@@ -1087,7 +1171,14 @@ pub(super) fn draw_text(
                             label.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
                         let lx = bx + (bw - cols as f32 * cell_w).max(0.0) / 2.0;
                         let ink = if enabled { sk.ink_strong } else { sk.ink_faint };
-                        r.draw_chrome_text(size, lx, strip_ty + if hovered { -s(1.0) } else { 0.0 }, ink, label, gc);
+                        r.draw_chrome_text(
+                            size,
+                            lx,
+                            strip_ty + if hovered { -s(1.0) } else { 0.0 },
+                            ink,
+                            label,
+                            gc,
+                        );
                     }
                 }
 
@@ -1118,22 +1209,32 @@ pub(super) fn draw_text(
                         },
                         GLine::File(status, path) => {
                             let sc = status_color(*status, is_light).unwrap_or(sk.ink_dim);
-                            r.draw_chrome_text(size, px + text_pad, ry, sc, &status.to_string(), gc);
-                            let text = clip_tail(path, 3);
                             r.draw_chrome_text(
                                 size,
-                                px + text_pad + cell_w * 2.0,
+                                px + text_pad,
                                 ry,
-                                sk.ink,
-                                &text,
+                                sc,
+                                &status.to_string(),
                                 gc,
                             );
+                            let path_x = px + text_pad + cell_w * 2.0;
+                            let path_cols =
+                                (((row_text_right - path_x) / cell_w).floor() as usize).max(4);
+                            let text = clip_tail(path, path_cols);
+                            r.draw_chrome_text(size, path_x, ry, sk.ink, &text, gc);
                         },
                     }
                 }
             },
             None => {
-                r.draw_chrome_text(size, px + text_pad, summary_y, sk.ink_dim, "不在 git 仓库中", gc);
+                r.draw_chrome_text(
+                    size,
+                    px + text_pad,
+                    summary_y,
+                    sk.ink_dim,
+                    "不在 git 仓库中",
+                    gc,
+                );
             },
         },
     }
