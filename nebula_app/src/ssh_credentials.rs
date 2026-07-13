@@ -309,6 +309,15 @@ pub fn load_stored_password(destination: &str) -> std::io::Result<Option<Vec<u8>
     windows_store::load_password(destination)
 }
 
+#[cfg(windows)]
+pub fn prompt_password(
+    destination: &str,
+    initial: Option<&[u8]>,
+    allow_save: bool,
+) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    windows_store::prompt_password(destination, initial, allow_save)
+}
+
 #[cfg(not(windows))]
 pub fn load_stored_password(_destination: &str) -> std::io::Result<Option<Vec<u8>>> {
     Ok(None)

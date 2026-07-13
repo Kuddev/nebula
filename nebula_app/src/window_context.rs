@@ -552,7 +552,7 @@ impl WindowContext {
         config: &UiConfig,
         proxy: &EventLoopProxy<Event>,
         pane_id: PaneId,
-        destination: crate::ssh_session::SshDestination,
+        destination: String,
     ) -> Result<Pane, Box<dyn Error>> {
         let window_route = Arc::new(AtomicU64::new(window_id.into()));
         let event_proxy = EventProxy::new_tab(proxy.clone(), window_route.clone(), pane_id);
@@ -561,7 +561,7 @@ impl WindowContext {
             size_info,
             event_proxy.clone(),
         )));
-        let sender = crate::ssh_session::spawn_password_session(
+        let sender = crate::ssh_session::spawn_session(
             destination,
             (*size_info).into(),
             terminal.clone(),
@@ -900,7 +900,7 @@ impl WindowContext {
     /// Nebula's ConPTY instead of becoming the pane's GUI-subsystem root.
     fn spawn_tab_ssh(&mut self, host: String) {
         #[cfg(windows)]
-        if let Ok(destination) = crate::ssh_session::SshDestination::parse(&host) {
+        {
             let pane_id = self.next_pane_id;
             match Self::create_ssh_pane(
                 &self.display.size_info,
@@ -908,7 +908,7 @@ impl WindowContext {
                 &self.config,
                 &self.proxy,
                 pane_id,
-                destination,
+                host.clone(),
             ) {
                 Ok(pane) => {
                     self.next_pane_id += 1;
@@ -926,13 +926,6 @@ impl WindowContext {
                     self.dirty = true;
                     return;
                 },
-                Err(err)
-                    if err
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|err| err.kind() == std::io::ErrorKind::Unsupported) =>
-                {
-                    log::info!("直连 SSH 暂无可用认证方式，回退到兼容连接路径");
-                },
                 Err(err) => {
                     error!("创建直连 SSH Pane 失败: {err}");
                     return;
@@ -940,6 +933,8 @@ impl WindowContext {
             }
         }
 
+        #[cfg(not(windows))]
+        {
         let Ok(exe) = std::env::current_exe() else {
             error!("Cannot locate nebula.exe for the SSH AskPass helper");
             return;
@@ -977,6 +972,7 @@ impl WindowContext {
             if let Some(pane) = self.panes.iter().find(|pane| pane.id == id) {
                 pane.notifier.notify(launch.command);
             }
+        }
         }
     }
 

@@ -35,11 +35,16 @@ pub struct StreamProcessor {
     parser: ansi::Processor,
     cwd_sniffer: crate::osc_cwd::CwdSniffer,
     window_size: Option<WindowSize>,
+    remote_hook_token: Option<String>,
 }
 
 impl StreamProcessor {
     pub fn resize(&mut self, window_size: WindowSize) {
         self.window_size = Some(window_size);
+    }
+
+    pub fn set_remote_hook_token(&mut self, token: String) {
+        self.remote_hook_token = Some(token);
     }
 
     pub fn next_sync_timeout(&self) -> Option<Instant> {
@@ -69,6 +74,11 @@ impl StreamProcessor {
                 OscEvent::CommandStart => event_proxy.send_event(Event::CommandStart),
                 OscEvent::CommandDone => event_proxy.send_event(Event::CommandDone),
                 OscEvent::Notify(text) => event_proxy.send_event(Event::Notify(text)),
+                OscEvent::RemoteHook { token, envelope } => {
+                    if self.remote_hook_token.as_deref() == Some(token.as_str()) {
+                        event_proxy.send_event(Event::AiHookEnvelope(envelope));
+                    }
+                },
                 OscEvent::PromptMark => {
                     self.parser.advance(terminal, &bytes[advanced..offset]);
                     advanced = offset;
