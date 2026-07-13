@@ -139,15 +139,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         if self.ctx.display().nebula_ssh_editor.is_some() {
-            match &key.logical_key {
-                Key::Named(NamedKey::Escape) => self.ctx.display().nebula_ssh_editor = None,
-                Key::Named(NamedKey::Enter) => self.ctx.display().save_ssh_editor(),
-                Key::Named(NamedKey::Tab) => self.ctx.display().ssh_editor_next_field(),
-                Key::Named(NamedKey::Backspace) => self.ctx.display().ssh_editor_backspace(),
-                Key::Character(c) if mods.is_empty() || mods.shift_key() => {
-                    self.ctx.display().ssh_editor_insert(c)
-                },
-                _ => {},
+            if self.ctx.display().ssh_editor_active() {
+                match &key.logical_key {
+                    Key::Named(NamedKey::Escape) => self.ctx.display().close_ssh_editor(),
+                    Key::Named(NamedKey::Enter) => self.ctx.display().save_ssh_editor(),
+                    Key::Named(NamedKey::Tab) => self.ctx.display().ssh_editor_next_field(),
+                    Key::Named(NamedKey::Backspace) => self.ctx.display().ssh_editor_backspace(),
+                    Key::Character(c) if mods.is_empty() || mods.shift_key() => {
+                        self.ctx.display().ssh_editor_insert(c)
+                    },
+                    _ => {},
+                }
             }
             self.ctx.mark_dirty();
             return;

@@ -562,6 +562,30 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         self.ctx.mouse_mut().x = x;
         self.ctx.mouse_mut().y = y;
 
+        // The SSH editor is modal. Its controls own hover/cursor feedback while
+        // open, and the closing animation swallows pointer motion until the
+        // retained editor snapshot is released.
+        if self.ctx.display().nebula_ssh_editor.is_some() {
+            let hit = if self.ctx.display().ssh_editor_active() {
+                self.ctx.display().ssh_editor_hit(x as f32, y as f32)
+            } else {
+                crate::display::SshEditorHit::None
+            };
+            self.ctx.display().set_ssh_editor_hover(hit);
+            let cursor = match hit {
+                crate::display::SshEditorHit::Destination
+                | crate::display::SshEditorHit::Password => CursorIcon::Text,
+                crate::display::SshEditorHit::SaveToggleBox
+                | crate::display::SshEditorHit::SaveToggleLabel
+                | crate::display::SshEditorHit::PasswordToggle
+                | crate::display::SshEditorHit::Primary
+                | crate::display::SshEditorHit::Cancel => CursorIcon::Pointer,
+                crate::display::SshEditorHit::None => CursorIcon::Default,
+            };
+            self.ctx.window().set_mouse_cursor(cursor);
+            return;
+        }
+
         // Nebula: while the left button holds a grabbed tab, pointer motion
         // drives the reorder drag instead of hover / text selection.
         if lmb_pressed && self.ctx.display().tab_drag_armed() {
@@ -1022,9 +1046,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         if button == MouseButton::Left && self.ctx.display().nebula_ssh_editor.is_some() {
-            let x = self.ctx.mouse().x as f32;
-            let y = self.ctx.mouse().y as f32;
-            self.ctx.display().ssh_editor_click(x, y);
+            if self.ctx.display().ssh_editor_active() {
+                let x = self.ctx.mouse().x as f32;
+                let y = self.ctx.mouse().y as f32;
+                self.ctx.display().ssh_editor_click(x, y);
+            }
             self.ctx.mark_dirty();
             return;
         }

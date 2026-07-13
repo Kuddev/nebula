@@ -230,6 +230,10 @@ impl UiAnim {
     }
 
     fn step(&mut self, target: f32) {
+        self.step_with_speed(target, 16.0);
+    }
+
+    fn step_with_speed(&mut self, target: f32, speed: f32) {
         let target = target.clamp(0.0, 1.0);
         if (self.target - target).abs() > f32::EPSILON {
             self.target = target;
@@ -244,7 +248,7 @@ impl UiAnim {
         let now = Instant::now();
         let dt =
             self.last_step.replace(now).map_or(1.0 / 60.0, |t| (now - t).as_secs_f32().min(0.1));
-        self.value += (target - self.value) * (1.0 - (-16.0 * dt).exp());
+        self.value += (target - self.value) * (1.0 - (-speed.max(1.0) * dt).exp());
         if (self.value - target).abs() < 0.004 {
             self.value = target;
             self.last_step = None;
@@ -256,11 +260,16 @@ impl UiAnim {
 struct NebulaUiAnims {
     left_sidebar: UiAnim,
     right_drawer: UiAnim,
+    ssh_editor: UiAnim,
 }
 
 impl NebulaUiAnims {
     fn new() -> Self {
-        Self { left_sidebar: UiAnim::new(1.0), right_drawer: UiAnim::new(0.0) }
+        Self {
+            left_sidebar: UiAnim::new(1.0),
+            right_drawer: UiAnim::new(0.0),
+            ssh_editor: UiAnim::new(0.0),
+        }
     }
 
     fn step(&mut self, left_open: bool, right_open: bool) {
@@ -424,11 +433,24 @@ pub enum SshEditorField {
     Password,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshEditorHit {
+    None,
+    Destination,
+    Password,
+    PasswordToggle,
+    SaveToggleBox,
+    SaveToggleLabel,
+    Primary,
+    Cancel,
+}
+
 #[derive(Debug, Clone)]
 pub struct SshHostEditor {
     pub destination: String,
     pub password: String,
     pub save_password: bool,
+    pub show_password: bool,
     pub field: SshEditorField,
 }
 
@@ -436,6 +458,8 @@ pub struct SshHostEditor {
 pub struct SshEditorRects {
     pub destination: (f32, f32, f32, f32),
     pub password: (f32, f32, f32, f32),
+    pub password_toggle: (f32, f32, f32, f32),
+    pub save_checkbox: (f32, f32, f32, f32),
     pub save_toggle: (f32, f32, f32, f32),
     pub primary: (f32, f32, f32, f32),
     pub cancel: (f32, f32, f32, f32),
@@ -1293,6 +1317,8 @@ pub struct Display {
     pub nebula_confirm_buttons: Option<((f32, f32, f32, f32), (f32, f32, f32, f32))>,
     pub nebula_ssh_editor: Option<SshHostEditor>,
     pub nebula_ssh_editor_rects: Option<SshEditorRects>,
+    nebula_ssh_editor_open: bool,
+    nebula_ssh_editor_hover: SshEditorHit,
     /// Inline images visible this frame, collected per pane during
     /// `draw_pane` (grid lock + pane viewport at hand) and drawn in one
     /// full-window pass in `present_frame` — mid-pane GL viewport swaps are
@@ -1646,6 +1672,8 @@ impl Display {
             nebula_confirm_buttons: None,
             nebula_ssh_editor: None,
             nebula_ssh_editor_rects: None,
+            nebula_ssh_editor_open: false,
+            nebula_ssh_editor_hover: SshEditorHit::None,
             nebula_frame_images: Vec::new(),
             nebula_theme: settings_init.theme,
             nebula_settings_open: false,
@@ -1754,10 +1782,57 @@ impl Display {
             destination: String::new(),
             password: String::new(),
             save_password: true,
+            show_password: false,
             field: SshEditorField::Destination,
         });
         self.nebula_ssh_editor_rects = None;
+        self.nebula_ssh_editor_open = true;
+        self.nebula_ssh_editor_hover = SshEditorHit::None;
+        // 每次打开都从零开始，避免上一次退出动画的残余进度造成闪跳。
+        self.nebula_ui_anims.ssh_editor = UiAnim::new(0.0);
         self.pending_update.dirty = true;
+    }
+
+    pub fn ssh_editor_active(&self) -> bool {
+        self.nebula_ssh_editor_open && self.nebula_ssh_editor.is_some()
+    }
+
+    pub fn close_ssh_editor(&mut self) {
+        if self.nebula_ssh_editor.is_some() {
+            self.nebula_ssh_editor_open = false;
+            self.nebula_ssh_editor_hover = SshEditorHit::None;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn ssh_editor_hit(&self, x: f32, y: f32) -> SshEditorHit {
+        let Some(rects) = self.nebula_ssh_editor_rects else { return SshEditorHit::None };
+        let hit = |r: (f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
+        if hit(rects.destination) {
+            SshEditorHit::Destination
+        } else if hit(rects.password_toggle) {
+            SshEditorHit::PasswordToggle
+        } else if hit(rects.password) {
+            SshEditorHit::Password
+        } else if hit(rects.save_checkbox) {
+            SshEditorHit::SaveToggleBox
+        } else if hit(rects.save_toggle) {
+            SshEditorHit::SaveToggleLabel
+        } else if hit(rects.cancel) {
+            SshEditorHit::Cancel
+        } else if hit(rects.primary) {
+            SshEditorHit::Primary
+        } else {
+            SshEditorHit::None
+        }
+    }
+
+    pub fn set_ssh_editor_hover(&mut self, hover: SshEditorHit) {
+        if self.nebula_ssh_editor_hover != hover {
+            self.nebula_ssh_editor_hover = hover;
+            self.pending_update.dirty = true;
+        }
     }
 
     pub fn ssh_editor_insert(&mut self, text: &str) {
@@ -1807,6 +1882,12 @@ impl Display {
             }
             return true;
         }
+        if hit(rects.password_toggle) {
+            if let Some(e) = self.nebula_ssh_editor.as_mut() {
+                e.show_password = !e.show_password;
+            }
+            return true;
+        }
         if hit(rects.password) {
             if let Some(e) = self.nebula_ssh_editor.as_mut() {
                 e.field = SshEditorField::Password;
@@ -1818,8 +1899,7 @@ impl Display {
             return true;
         }
         if hit(rects.cancel) {
-            self.nebula_ssh_editor = None;
-            self.nebula_ssh_editor_rects = None;
+            self.close_ssh_editor();
             return true;
         }
         if hit(rects.primary) {
@@ -1854,10 +1934,11 @@ impl Display {
                 );
             }
         }
+        // 凭据落盘后立即清除内存中的明文，但保留其余内容完成短退出动画。
         editor.password.clear();
         self.persist_nebula_settings();
-        self.nebula_ssh_editor_rects = None;
-        self.pending_update.dirty = true;
+        self.nebula_ssh_editor = Some(editor);
+        self.close_ssh_editor();
     }
 
     pub fn delete_ssh_host(&mut self, index: usize) {
@@ -3983,6 +4064,16 @@ impl Display {
     }
 
     fn draw_ssh_editor_modal(&mut self) {
+        self.nebula_ui_anims
+            .ssh_editor
+            .step_with_speed(if self.nebula_ssh_editor_open { 1.0 } else { 0.0 }, 26.0);
+        let progress = self.nebula_ui_anims.ssh_editor.value().clamp(0.0, 1.0);
+        if !self.nebula_ssh_editor_open && progress <= 0.004 {
+            self.nebula_ssh_editor = None;
+            self.nebula_ssh_editor_rects = None;
+            self.nebula_ssh_editor_hover = SshEditorHit::None;
+            return;
+        }
         let Some(editor) = self.nebula_ssh_editor.clone() else {
             self.nebula_ssh_editor_rects = None;
             return;
@@ -3991,31 +4082,59 @@ impl Display {
         let scale = self.window.scale_factor as f32;
         let s = |v: f32| v * scale;
         let sk = self.nebula_theme.skin();
-        let editor_focus = Rgba::new(108, 126, 148, 210);
-        let editor_primary = Rgba::new(104, 121, 141, 235);
-        let editor_check = Rgba::new(117, 136, 158, 230);
-        let editor_field_active = Rgba::new(69, 78, 91, 220);
-        let editor_field_idle = Rgba::new(58, 64, 75, 205);
-        let editor_caret = Rgba::new(205, 214, 225, 235);
+        let accent = Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255);
+        let editor_caret = Rgba::new(sk.ink_strong.r, sk.ink_strong.g, sk.ink_strong.b, 235);
         let cell_h = size.cell_height();
         let cell_w = size.cell_width();
+        let text_w = |text: &str| -> f32 {
+            text.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w
+        };
+        let primary_label = "保存 Enter";
+        let cancel_label = "取消 Esc";
+        let save_label = "保存密码到 Windows 凭据管理器";
         let box_w = s(560.0).min(size.width() - s(32.0));
         let box_h = s(330.0).min(size.height() - s(32.0));
         let bx = (size.width() - box_w) * 0.5;
-        let by = (size.height() - box_h) * 0.5;
+        // A short downward settle gives the modal direction without making it
+        // travel across the whole window. Closing reverses the same path upward.
+        let resting_y = (size.height() - box_h) * 0.5;
+        let by = resting_y - (1.0 - progress) * s(14.0);
         let pad = s(28.0);
         let field_h = s(42.0);
         let field_w = box_w - pad * 2.0;
         let destination = (bx + pad, by + s(86.0), field_w, field_h);
         let password = (bx + pad, by + s(162.0), field_w, field_h);
-        let save_toggle = (bx + pad, by + s(220.0), s(180.0), s(28.0));
-        let primary = (bx + box_w - pad - s(112.0), by + box_h - s(58.0), s(112.0), s(36.0));
-        let cancel = (primary.0 - s(124.0), primary.1, s(112.0), s(36.0));
-        self.nebula_ssh_editor_rects =
-            Some(SshEditorRects { destination, password, save_toggle, primary, cancel });
+        let password_toggle =
+            (password.0 + password.2 - s(38.0), password.1 + s(4.0), s(34.0), password.3 - s(8.0));
+        // The whole label remains clickable, while the visual hover target is
+        // deliberately limited to the checkbox itself.
+        let save_toggle =
+            (bx + pad, by + s(220.0), (s(28.0) + text_w(save_label)).min(field_w), s(28.0));
+        let save_checkbox = (save_toggle.0, save_toggle.1 + s(5.0), s(18.0), s(18.0));
+        let button_pad = s(16.0);
+        let primary_w = s(112.0).max(text_w(primary_label) + button_pad * 2.0);
+        let cancel_w = s(112.0).max(text_w(cancel_label) + button_pad * 2.0);
+        let primary = (bx + box_w - pad - primary_w, by + box_h - s(58.0), primary_w, s(36.0));
+        let cancel = (primary.0 - s(12.0) - cancel_w, primary.1, cancel_w, s(36.0));
+        self.nebula_ssh_editor_rects = Some(SshEditorRects {
+            destination,
+            password,
+            password_toggle,
+            save_checkbox,
+            save_toggle,
+            primary,
+            cancel,
+        });
 
         let mut quads = vec![
-            UiQuad::solid(0.0, 0.0, size.width(), size.height(), 0.0, Rgba::new(0, 0, 0, 170)),
+            UiQuad::solid(
+                0.0,
+                0.0,
+                size.width(),
+                size.height(),
+                0.0,
+                Rgba::new(0, 0, 0, (170.0 * progress).round() as u8),
+            ),
             UiQuad::solid(
                 bx - s(1.0),
                 by - s(1.0),
@@ -4030,46 +4149,111 @@ impl Display {
             (destination, editor.field == SshEditorField::Destination),
             (password, editor.field == SshEditorField::Password),
         ] {
+            let hovered = matches!(
+                (rect == destination, self.nebula_ssh_editor_hover),
+                (true, SshEditorHit::Destination) | (false, SshEditorHit::Password)
+            );
             quads.push(UiQuad::solid(
                 rect.0 - s(1.0),
                 rect.1 - s(1.0),
                 rect.2 + s(2.0),
                 rect.3 + s(2.0),
                 s(7.0),
-                if active { editor_focus } else { sk.hairline },
+                if active {
+                    accent
+                } else if hovered {
+                    sk.hover_strong
+                } else {
+                    sk.hairline
+                },
             ));
+            quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(6.0), sk.input));
+            if hovered && !active {
+                quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(6.0), sk.surface));
+            }
+        }
+        if self.nebula_ssh_editor_hover == SshEditorHit::SaveToggleBox {
             quads.push(UiQuad::solid(
-                rect.0,
-                rect.1,
-                rect.2,
-                rect.3,
+                save_checkbox.0 - s(2.0),
+                save_checkbox.1 - s(2.0),
+                save_checkbox.2 + s(4.0),
+                save_checkbox.3 + s(4.0),
                 s(6.0),
-                if active { editor_field_active } else { editor_field_idle },
+                sk.hover_strong,
             ));
         }
+        if self.nebula_ssh_editor_hover == SshEditorHit::PasswordToggle {
+            quads.push(UiQuad::solid(
+                password_toggle.0,
+                password_toggle.1,
+                password_toggle.2,
+                password_toggle.3,
+                s(6.0),
+                sk.hover,
+            ));
+        }
+        // Keep the dark outline requested for the light theme, but use a clean
+        // input-colored interior instead of a solid black status block.
+        let checkbox_edge =
+            if sk.is_light { Rgba::new(sk.ink.r, sk.ink.g, sk.ink.b, 210) } else { sk.hairline };
         quads.push(UiQuad::solid(
-            save_toggle.0,
-            save_toggle.1 + s(5.0),
-            s(18.0),
-            s(18.0),
-            s(4.0),
-            if editor.save_password { editor_check } else { sk.track_off },
+            save_checkbox.0 - s(1.0),
+            save_checkbox.1 - s(1.0),
+            save_checkbox.2 + s(2.0),
+            save_checkbox.3 + s(2.0),
+            s(5.0),
+            checkbox_edge,
         ));
-        quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), sk.surface));
+        quads.push(UiQuad::solid(
+            save_checkbox.0,
+            save_checkbox.1,
+            save_checkbox.2,
+            save_checkbox.3,
+            s(4.0),
+            sk.input,
+        ));
+        for (rect, edge) in
+            [(cancel, sk.hairline), (primary, if sk.is_light { accent } else { sk.hairline })]
+        {
+            quads.push(UiQuad::solid(
+                rect.0 - s(1.0),
+                rect.1 - s(1.0),
+                rect.2 + s(2.0),
+                rect.3 + s(2.0),
+                s(9.0),
+                edge,
+            ));
+        }
+        quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), sk.input));
         quads.push(UiQuad::solid(
             primary.0,
             primary.1,
             primary.2,
             primary.3,
             s(8.0),
-            editor_primary,
+            if sk.is_light { sk.input } else { accent },
         ));
+        if self.nebula_ssh_editor_hover == SshEditorHit::Cancel {
+            quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), sk.hover));
+        }
+        if self.nebula_ssh_editor_hover == SshEditorHit::Primary {
+            quads.push(UiQuad::solid(
+                primary.0,
+                primary.1,
+                primary.2,
+                primary.3,
+                s(8.0),
+                if sk.is_light { sk.hover } else { sk.hover_strong },
+            ));
+        }
         let (caret_rect, caret_cols) = match editor.field {
             SshEditorField::Destination => (destination, editor.destination.chars().count()),
             SshEditorField::Password => (password, editor.password.chars().count()),
         };
-        let caret_x = (caret_rect.0 + s(12.0) + caret_cols as f32 * cell_w)
-            .min(caret_rect.0 + caret_rect.2 - s(10.0));
+        let caret_x = (caret_rect.0 + s(12.0) + caret_cols as f32 * cell_w).min(
+            caret_rect.0 + caret_rect.2
+                - if editor.field == SshEditorField::Password { s(48.0) } else { s(10.0) },
+        );
         quads.push(UiQuad::solid(
             caret_x,
             caret_rect.1 + s(10.0),
@@ -4119,6 +4303,8 @@ impl Display {
         );
         let masked = if editor.password.is_empty() {
             "连接时询问".to_owned()
+        } else if editor.show_password {
+            editor.password.clone()
         } else {
             "•".repeat(editor.password.chars().count())
         };
@@ -4130,30 +4316,65 @@ impl Display {
             &masked,
             gc,
         );
+        const ICON_EYE: &str = "\u{ea70}";
+        const ICON_EYE_CLOSED: &str = "\u{eae7}";
+        let eye_icon = if editor.show_password { ICON_EYE_CLOSED } else { ICON_EYE };
+        self.renderer.draw_chrome_text(
+            &size,
+            password_toggle.0 + (password_toggle.2 - cell_w) * 0.5,
+            password_toggle.1 + (password_toggle.3 - cell_h) * 0.5,
+            if self.nebula_ssh_editor_hover == SshEditorHit::PasswordToggle {
+                sk.icon_hover
+            } else {
+                sk.icon
+            },
+            eye_icon,
+            gc,
+        );
         self.renderer.draw_chrome_text(
             &size,
             save_toggle.0 + s(28.0),
             save_toggle.1 + (save_toggle.3 - cell_h) / 2.0,
             sk.ink,
-            "保存密码到 Windows 凭据管理器",
+            save_label,
             gc,
         );
+        if editor.save_password {
+            const ICON_CHECK: &str = "\u{eab2}";
+            self.renderer.draw_chrome_text(
+                &size,
+                save_checkbox.0 + (save_checkbox.2 - cell_w) * 0.5,
+                save_checkbox.1 + (save_checkbox.3 - cell_h) * 0.5,
+                if sk.is_light { sk.ink_strong } else { sk.icon_hover },
+                ICON_CHECK,
+                gc,
+            );
+        }
         self.renderer.draw_chrome_text(
             &size,
-            cancel.0 + s(30.0),
+            cancel.0 + (cancel.2 - text_w(cancel_label)) * 0.5,
             cancel.1 + (cancel.3 - cell_h) / 2.0,
             sk.ink,
-            "取消 Esc",
+            cancel_label,
             gc,
         );
         self.renderer.draw_chrome_text(
             &size,
-            primary.0 + s(24.0),
+            primary.0 + (primary.2 - text_w(primary_label)) * 0.5,
             primary.1 + (primary.3 - cell_h) / 2.0,
-            sk.ink_on_accent,
-            "保存 Enter",
+            if sk.is_light { sk.accent } else { sk.ink_on_accent },
+            primary_label,
             gc,
         );
+
+        if self.nebula_ui_anims.ssh_editor.animating_to(if self.nebula_ssh_editor_open {
+            1.0
+        } else {
+            0.0
+        }) {
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
     }
 
     /// Draw the window chrome and present the accumulated frame.
