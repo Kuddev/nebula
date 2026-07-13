@@ -60,6 +60,8 @@ mod ssh_credentials;
 mod mux;
 #[cfg(windows)]
 mod ssh;
+#[cfg(windows)]
+mod ssh_session;
 mod string;
 mod window_context;
 

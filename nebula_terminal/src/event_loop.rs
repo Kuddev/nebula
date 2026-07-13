@@ -28,6 +28,83 @@ pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
 /// Max bytes to read from the PTY while the terminal is locked.
 const MAX_LOCKED_READ: usize = u16::MAX as usize;
 
+/// 本地 PTY 与远端传输共用的有状态终端字节流处理器。
+/// OSC 提取必须紧贴 VT 解析，避免两类会话产生不同的目录、命令和图片状态。
+#[derive(Default)]
+pub struct StreamProcessor {
+    parser: ansi::Processor,
+    cwd_sniffer: crate::osc_cwd::CwdSniffer,
+    window_size: Option<WindowSize>,
+}
+
+impl StreamProcessor {
+    pub fn resize(&mut self, window_size: WindowSize) {
+        self.window_size = Some(window_size);
+    }
+
+    pub fn next_sync_timeout(&self) -> Option<Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    pub fn sync_bytes_count(&self) -> usize {
+        self.parser.sync_bytes_count()
+    }
+
+    pub fn stop_sync<U: EventListener>(&mut self, terminal: &mut Term<U>) {
+        self.parser.stop_sync(terminal);
+    }
+
+    pub fn feed<U: EventListener>(
+        &mut self,
+        terminal: &mut Term<U>,
+        event_proxy: &U,
+        bytes: &[u8],
+    ) {
+        let osc_events = self.cwd_sniffer.feed(bytes);
+        let mut latest_cwd = None;
+        let mut advanced = 0;
+        for (offset, event) in osc_events {
+            match event {
+                OscEvent::Cwd(cwd) => latest_cwd = Some(cwd),
+                OscEvent::CommandStart => event_proxy.send_event(Event::CommandStart),
+                OscEvent::CommandDone => event_proxy.send_event(Event::CommandDone),
+                OscEvent::Notify(text) => event_proxy.send_event(Event::Notify(text)),
+                OscEvent::PromptMark => {
+                    self.parser.advance(terminal, &bytes[advanced..offset]);
+                    advanced = offset;
+                    terminal.nebula_add_prompt_mark();
+                },
+                OscEvent::InlineImage { png, width, height } => {
+                    self.parser.advance(terminal, &bytes[advanced..offset]);
+                    advanced = offset;
+                    let (cell_w, cell_h) = self.window_size.map_or((9.0, 20.0), |ws| {
+                        (f32::from(ws.cell_width), f32::from(ws.cell_height))
+                    });
+                    let max_w = terminal.columns() as f32 * cell_w;
+                    let scale = (max_w / width as f32).min(1.0);
+                    let disp_w = width as f32 * scale;
+                    let disp_h = height as f32 * scale;
+                    let rows = (disp_h / cell_h).ceil().max(1.0) as usize;
+                    let abs_line = terminal.nebula_cursor_abs_line();
+                    for _ in 0..=rows {
+                        self.parser.advance(terminal, b"\r\n");
+                    }
+                    event_proxy.send_event(Event::InlineImage {
+                        png: std::sync::Arc::new(png),
+                        abs_line,
+                        width: disp_w,
+                        height: disp_h,
+                    });
+                },
+            }
+        }
+        self.parser.advance(terminal, &bytes[advanced..]);
+        if let Some(cwd) = latest_cwd {
+            event_proxy.send_event(Event::CwdReport(cwd));
+        }
+    }
+}
+
 /// Messages that may be sent to the `EventLoop`.
 #[derive(Debug)]
 pub enum Msg {
@@ -95,7 +172,7 @@ where
             match msg {
                 Msg::Input(input) => state.write_list.push_back(input),
                 Msg::Resize(window_size) => {
-                    state.window_size = Some(window_size);
+                    state.stream.resize(window_size);
                     self.pty.on_resize(window_size);
                 },
                 Msg::Shutdown => return false,
@@ -167,70 +244,7 @@ where
                 writer.write_all(&buf[..unprocessed]).unwrap();
             }
 
-            // Tee the bytes through the OSC sniffer first: vte drops OSC 7 /
-            // 9;9 (cwd) and 133;A (prompt marks). Prompt marks must be applied
-            // while the grid cursor sits exactly at the mark's byte position,
-            // so `parser.advance` is split at each mark offset.
-            let osc_events = state.cwd_sniffer.feed(&buf[..unprocessed]);
-            let mut latest_cwd = None;
-            let mut advanced = 0;
-            for (offset, event) in osc_events {
-                match event {
-                    OscEvent::Cwd(cwd) => latest_cwd = Some(cwd),
-                    // No cursor semantics — just relay upstream.
-                    OscEvent::CommandStart => self.event_proxy.send_event(Event::CommandStart),
-                    OscEvent::CommandDone => self.event_proxy.send_event(Event::CommandDone),
-                    OscEvent::Notify(text) => self.event_proxy.send_event(Event::Notify(text)),
-                    OscEvent::PromptMark => {
-                        state.parser.advance(&mut **terminal, &buf[advanced..offset]);
-                        advanced = offset;
-                        terminal.nebula_add_prompt_mark();
-                    },
-                    OscEvent::InlineImage { png, width, height } => {
-                        state.parser.advance(&mut **terminal, &buf[advanced..offset]);
-                        advanced = offset;
-
-                        // Convert image pixels into grid rows via the cached
-                        // cell size (default matches a typical 14px mono font
-                        // until the first resize lands, which in practice
-                        // happens before any image can arrive).
-                        let (cell_w, cell_h) = state
-                            .window_size
-                            .map_or((9.0, 20.0), |ws| {
-                                (f32::from(ws.cell_width), f32::from(ws.cell_height))
-                            });
-                        let max_w = terminal.columns() as f32 * cell_w;
-                        let scale = (max_w / width as f32).min(1.0);
-                        let disp_w = width as f32 * scale;
-                        let disp_h = height as f32 * scale;
-                        let rows = (disp_h / cell_h).ceil().max(1.0) as usize;
-
-                        // Anchor at the current cursor row, then feed real
-                        // newlines through the parser so the image's rows
-                        // exist in the grid (scrolling included) and the
-                        // prompt continues below the picture.
-                        let abs_line = terminal.nebula_cursor_abs_line();
-                        for _ in 0..=rows {
-                            state.parser.advance(&mut **terminal, b"\r\n");
-                        }
-
-                        self.event_proxy.send_event(Event::InlineImage {
-                            png: std::sync::Arc::new(png),
-                            abs_line,
-                            width: disp_w,
-                            height: disp_h,
-                        });
-                    },
-                }
-            }
-
-            // Parse the remaining bytes (or, without marks, the whole chunk).
-            state.parser.advance(&mut **terminal, &buf[advanced..unprocessed]);
-
-            // New tabs/splits inherit the newest reported directory.
-            if let Some(cwd) = latest_cwd {
-                self.event_proxy.send_event(Event::CwdReport(cwd));
-            }
+            state.stream.feed(&mut **terminal, &self.event_proxy, &buf[..unprocessed]);
 
             processed += unprocessed;
             unprocessed = 0;
@@ -242,7 +256,7 @@ where
         }
 
         // Queue terminal redraw unless all processed bytes were synchronized.
-        if state.parser.sync_bytes_count() < processed && processed > 0 {
+        if state.stream.sync_bytes_count() < processed && processed > 0 {
             self.event_proxy.send_event(Event::Wakeup);
         }
 
@@ -305,9 +319,10 @@ where
 
             'event_loop: loop {
                 // Wakeup the event loop when a synchronized update timeout was reached.
-                let handler = state.parser.sync_timeout();
-                let timeout =
-                    handler.sync_timeout().map(|st| st.saturating_duration_since(Instant::now()));
+                let timeout = state
+                    .stream
+                    .next_sync_timeout()
+                    .map(|st| st.saturating_duration_since(Instant::now()));
 
                 events.clear();
                 if let Err(err) = self.poll.wait(&mut events, timeout) {
@@ -322,7 +337,7 @@ where
 
                 // Handle synchronized update timeout.
                 if events.is_empty() && self.rx.peek().is_none() {
-                    state.parser.stop_sync(&mut *self.terminal.lock());
+                    state.stream.stop_sync(&mut *self.terminal.lock());
                     self.event_proxy.send_event(Event::Wakeup);
                     continue;
                 }
@@ -466,6 +481,12 @@ pub struct EventLoopSender {
 }
 
 impl EventLoopSender {
+    /// 为非 PTY 传输创建消息通道，继续复用应用既有的输入、缩放和关闭协议。
+    pub fn standalone() -> io::Result<(Self, Receiver<Msg>)> {
+        let (sender, receiver) = mpsc::channel();
+        Ok((Self { sender, poller: Arc::new(Poller::new()?) }, receiver))
+    }
+
     pub fn send(&self, msg: Msg) -> Result<(), EventLoopSendError> {
         self.sender.send(msg).map_err(EventLoopSendError::Send)?;
         self.poller.notify().map_err(EventLoopSendError::Io)
@@ -489,12 +510,7 @@ impl EventLoopSender {
 pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
-    parser: ansi::Processor,
-    /// Tees OSC 7 / 9;9 / 133;A / 1337 events out of the byte stream.
-    cwd_sniffer: crate::osc_cwd::CwdSniffer,
-    /// Latest PTY size, cached off `Msg::Resize`: inline images need the cell
-    /// pixel size to convert image pixels into grid rows.
-    window_size: Option<WindowSize>,
+    stream: StreamProcessor,
 }
 
 impl State {

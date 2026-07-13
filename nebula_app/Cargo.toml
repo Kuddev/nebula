@@ -46,6 +46,7 @@ polling = "3.11.0"
 # Markdown viewer: CommonMark + GFM (tables / task lists / strikethrough)
 # event parser; `display::markdown_view` renders the folded block AST.
 pulldown-cmark = { version = "0.13", default-features = false }
+russh = { version = "0.62.2", default-features = false, features = ["ring"] }
 # preserve_order: we rewrite the user's claude settings.json (ai_hook
 # self-heal) and must not alphabetize their keys in the process.
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -55,6 +56,7 @@ signal-hook = { version = "0.4.3", default-features = false }
 tempfile = "3.12.0"
 toml.workspace = true
 toml_edit.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 unicode-width = "0.2.0"
 winit = { version = "0.30.9", default-features = false, features = ["rwh_06", "serde"] }
 global-hotkey = "0.8.0"
