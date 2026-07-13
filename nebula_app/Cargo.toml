@@ -60,6 +60,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 unicode-width = "0.2.0"
 winit = { version = "0.30.9", default-features = false, features = ["rwh_06", "serde"] }
 global-hotkey = "0.8.0"
+getrandom = "0.3.3"
 
 [build-dependencies]
 gl_generator = "0.14.0"

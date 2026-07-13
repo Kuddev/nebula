@@ -2617,6 +2617,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             );
                         }
                     },
+                    TerminalEvent::AiHookEnvelope(_) => (),
                     TerminalEvent::Bell => {
                         // Claude Code / Codex ring BEL when a turn finishes, so
                         // an unfocused bell is the primary "AI task done"
@@ -2933,6 +2934,12 @@ impl EventProxy {
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: TerminalEvent) {
+        if let TerminalEvent::AiHookEnvelope(envelope) = event {
+            if let Some(hook) = crate::ai_hook::parse_remote_envelope(&envelope, self.tab_id) {
+                self.send_event(EventType::AiHook(hook));
+            }
+            return;
+        }
         let _ = self.proxy.send_event(Event {
             window_id: Some(self.target()),
             tab_id: self.tab_id,

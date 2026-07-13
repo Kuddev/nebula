@@ -32,18 +32,22 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### SSH
 
-- **SSH inside the configured default shell** — saved hosts now open a normal Nebula pane rooted in the selected default shell and run SSH inside its PTY, eliminating the external `ssh.exe` console window.
-  **中文：** 保存的 SSH host 现在先创建用户设置的默认 Shell pane，再在其 PTY 内运行 SSH，不再弹出外部 `ssh.exe` 黑窗口。
+- **Native Rust SSH transport** — saved hosts now connect directly to a remote PTY channel without a wrapper shell, injected command, or external `ssh.exe` console window.
+  **中文：** 保存的 SSH host 现在通过 Rust SSH 传输直接连接远端 PTY，不再依赖包装 Shell、命令注入或外部 `ssh.exe` 黑窗口。
+- **Complete authentication chain** — resolves aliases, users, ports and identity files from `~/.ssh/config`, then supports private keys, OpenSSH certificates, encrypted-key passphrases, Windows OpenSSH Agent, Pageant, saved or prompted passwords, and keyboard-interactive/MFA.
+  **中文：** 从 `~/.ssh/config` 解析别名、用户、端口和 IdentityFile，并支持私钥、OpenSSH 证书、加密密钥口令、Windows OpenSSH Agent、Pageant、已保存/现场输入密码以及 keyboard-interactive/MFA。
+- **Connection reuse** — authenticated sessions are pooled by `user@host:port`, so additional SSH tabs open a new shell channel without repeating transport setup and authentication.
+  **中文：** 已认证连接按 `user@host:port` 复用；后续 SSH 标签页直接创建新 Shell channel，无需重复传输握手和认证。
+- **Standard host-key verification** — verifies and learns host keys through the standard `known_hosts` store, prompts on first connection, and rejects changed keys with a security warning.
+  **中文：** 使用标准 `known_hosts` 校验和保存主机密钥；首次连接会确认，密钥变化时会拒绝连接并显示安全警告。
+- **Authenticated remote Hook bridge** — remote AI lifecycle envelopes can travel through a private OSC protected by a random per-channel token; pane identity is always assigned locally before notifications are dispatched.
+  **中文：** 远端 AI 生命周期信封可通过每通道随机令牌保护的私有 OSC 返回；通知分发前始终由本地分配 Pane 身份。
 - **Built-in host editor** — the `SSH HOSTS` header has an add button and an internal form for `user@host`, optional non-default ports, and passwords.
   **中文：** `SSH HOSTS` 标题新增添加按钮和内部编辑面板，可输入 `user@host`、非默认端口和密码。
 - **Secure credential persistence** — passwords are saved only with explicit consent and are stored in Windows Credential Manager, never in Nebula settings, command arguments, shell history, or logs.
   **中文：** 密码仅在用户明确选择保存时写入 Windows Credential Manager，绝不会进入 Nebula 设置、命令参数、Shell 历史或日志。
-- **Host deletion** — SSH host rows expose a tab-style close button; removing a saved record also clears its pin and stored Windows credential.
-  **中文：** SSH host 行新增与标签页一致的关闭按钮；删除保存记录时同步清理置顶状态和 Windows 凭据。
-- **OpenSSH AskPass integration** — supports automatic login with stored passwords, invalid-password recovery, host-key confirmation, and one-time authentication-state cleanup.
-  **中文：** OpenSSH AskPass 支持已保存密码自动登录、密码失效后重新询问、host key 确认和一次性认证状态清理。
-- **Shell-specific command injection** — PowerShell, CMD, Git Bash, Nushell, and WSL use dedicated quoting and environment propagation.
-  **中文：** PowerShell、CMD、Git Bash、Nushell 和 WSL 均使用各自的安全转义与环境传递方式注入 SSH 命令。
+- **Host deletion and cleaner right-click behavior** — SSH rows keep their tab-style delete button and credential cleanup, while right-click no longer silently pins or reorders a host.
+  **中文：** SSH host 行保留标签页式删除按钮和凭据清理；右键不再静默置顶或改变主机顺序。
 
 ### Session And Rendering / 会话与渲染
 

@@ -162,6 +162,28 @@ fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
     Some(AiHookEvent { pane, source, kind, message })
 }
 
+/// 远端会话只能提交事件语义，Pane 身份始终由本地 SSH 通道覆盖，
+/// 防止远端载荷把通知路由到同一窗口中的其他标签页。
+pub(crate) fn parse_remote_envelope(bytes: &[u8], pane: Option<u64>) -> Option<AiHookEvent> {
+    let mut event = parse_envelope(bytes)?;
+    event.pane = pane;
+    Some(event)
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::{AiHookKind, parse_remote_envelope};
+
+    #[test]
+    fn remote_envelope_uses_local_pane_identity() {
+        let raw = b"nebula-hook/1 source=codex pane=999\n{\"type\":\"agent-turn-complete\",\"last-assistant-message\":\"done\"}";
+        let event = parse_remote_envelope(raw, Some(7)).unwrap();
+        assert_eq!(event.pane, Some(7));
+        assert_eq!(event.kind, AiHookKind::TurnDone);
+        assert_eq!(event.message.as_deref(), Some("done"));
+    }
+}
+
 /// Char-boundary-safe cut with an ellipsis (toast bodies are small).
 fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
