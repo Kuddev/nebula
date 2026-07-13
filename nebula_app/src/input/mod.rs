@@ -223,7 +223,10 @@ impl<T: EventListener> Execute<T> for Action {
     #[inline]
     fn execute<A: ActionContext<T>>(&self, ctx: &mut A) {
         match self {
-            Action::Esc(s) => ctx.paste(s, false),
+            // Esc/chars bindings are keystroke sequences (e.g. Shift+Enter → ESC+CR for
+            // Claude Code multiline), not clipboard pastes. paste() gates on \r/\n and
+            // would pop the multi-line confirm modal, so write through paste_now.
+            Action::Esc(s) => ctx.paste_now(s, false),
             Action::Command(program) => ctx.spawn_daemon(program.program(), program.args()),
             Action::Hint(hint) => {
                 ctx.display().hint_state.start(hint.clone());
