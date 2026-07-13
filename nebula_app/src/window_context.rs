@@ -543,6 +543,49 @@ impl WindowContext {
         })
     }
 
+    #[cfg(windows)]
+    /// 创建由远端 PTY 通道驱动的 Pane，并复用本地终端的解析、渲染和事件协议。
+    /// 这样传输层只负责字节流，输入、缩放与终端状态无需维护两套实现。
+    fn create_ssh_pane(
+        size_info: &crate::display::SizeInfo,
+        window_id: WindowId,
+        config: &UiConfig,
+        proxy: &EventLoopProxy<Event>,
+        pane_id: PaneId,
+        destination: crate::ssh_session::SshDestination,
+    ) -> Result<Pane, Box<dyn Error>> {
+        let window_route = Arc::new(AtomicU64::new(window_id.into()));
+        let event_proxy = EventProxy::new_tab(proxy.clone(), window_route.clone(), pane_id);
+        let terminal = Arc::new(FairMutex::new(Term::new(
+            config.term_options(),
+            size_info,
+            event_proxy.clone(),
+        )));
+        let sender = crate::ssh_session::spawn_password_session(
+            destination,
+            (*size_info).into(),
+            terminal.clone(),
+            event_proxy.clone(),
+        )?;
+        if config.cursor.style().blinking {
+            event_proxy.send_event(TerminalEvent::CursorBlinkingChange.into());
+        }
+        Ok(Pane {
+            terminal,
+            notifier: Notifier(sender),
+            search_state: Default::default(),
+            inline_search_state: Default::default(),
+            id: pane_id,
+            title: String::from("ssh"),
+            nebula_state: NebulaPaneState::default(),
+            intro_cols: None,
+            shell_pid: 0,
+            window_route,
+            #[cfg(not(windows))]
+            master_fd: -1,
+        })
+    }
+
     /// A pane-shaped stub for document-viewer tabs: a real (empty) `Term` so
     /// the shared event pipeline has state to borrow, but NO PTY behind it —
     /// the notifier is a sink, so keystrokes routed here are swallowed
@@ -856,6 +899,47 @@ impl WindowContext {
     /// `nebula ssh` is typed into that shell's PTY so OpenSSH remains inside
     /// Nebula's ConPTY instead of becoming the pane's GUI-subsystem root.
     fn spawn_tab_ssh(&mut self, host: String) {
+        #[cfg(windows)]
+        if let Ok(destination) = crate::ssh_session::SshDestination::parse(&host) {
+            let pane_id = self.next_pane_id;
+            match Self::create_ssh_pane(
+                &self.display.size_info,
+                self.display.window.id(),
+                &self.config,
+                &self.proxy,
+                pane_id,
+                destination,
+            ) {
+                Ok(pane) => {
+                    self.next_pane_id += 1;
+                    self.panes.push(pane);
+                    let at = (self.active_tab + 1).min(self.tabs.len());
+                    self.tabs.insert(at, TabEntry {
+                        layout: Layout::Leaf(pane_id),
+                        active_pane: pane_id,
+                        has_bell: false,
+                        custom_name: Some(host),
+                        doc: None,
+                    });
+                    self.active_tab = at;
+                    self.resize_active_layout();
+                    self.dirty = true;
+                    return;
+                },
+                Err(err)
+                    if err
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|err| err.kind() == std::io::ErrorKind::Unsupported) =>
+                {
+                    log::info!("直连 SSH 暂无可用认证方式，回退到兼容连接路径");
+                },
+                Err(err) => {
+                    error!("创建直连 SSH Pane 失败: {err}");
+                    return;
+                },
+            }
+        }
+
         let Ok(exe) = std::env::current_exe() else {
             error!("Cannot locate nebula.exe for the SSH AskPass helper");
             return;

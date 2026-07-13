@@ -305,6 +305,16 @@ pub fn store_password(destination: &str, password: &[u8]) -> std::io::Result<()>
 }
 
 #[cfg(windows)]
+pub fn load_stored_password(destination: &str) -> std::io::Result<Option<Vec<u8>>> {
+    windows_store::load_password(destination)
+}
+
+#[cfg(not(windows))]
+pub fn load_stored_password(_destination: &str) -> std::io::Result<Option<Vec<u8>>> {
+    Ok(None)
+}
+
+#[cfg(windows)]
 pub fn forget_password(destination: &str) -> std::io::Result<()> {
     windows_store::delete_password(destination)
 }
