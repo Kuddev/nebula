@@ -1786,6 +1786,7 @@ dependencies = [
  "crossfont",
  "dirs",
  "embed-resource",
+ "getrandom 0.3.3",
  "gl_generator",
  "global-hotkey",
  "glutin",

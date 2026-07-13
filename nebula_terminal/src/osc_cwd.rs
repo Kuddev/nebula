@@ -29,6 +29,8 @@ const MAX_PAYLOAD: usize = 4096;
 /// Cap for OSC 1337 inline-image payloads (base64 PNG). Anything larger is
 /// dropped rather than buffered forever.
 const MAX_IMAGE_PAYLOAD: usize = 12 * 1024 * 1024;
+/// 远端 Hook JSON 使用 Base64 传输；上限阻止伪造 OSC 长时间占用内存。
+const MAX_HOOK_PAYLOAD: usize = 96 * 1024;
 
 /// An OSC event recognized by the sniffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,8 @@ pub enum OscEvent {
     CommandDone,
     /// OSC 9 — free-text program notification (iTerm style).
     Notify(String),
+    /// Nebula 远端 Hook 私有 OSC：随机通道令牌 + 原始 Hook 信封。
+    RemoteHook { token: String, envelope: Vec<u8> },
     /// OSC 1337 `File=...inline=1:<base64>` — an iTerm2 inline image (PNG).
     /// `width`/`height` come from the PNG header, in pixels.
     InlineImage { png: Vec<u8>, width: u32, height: u32 },
@@ -143,7 +147,13 @@ impl CwdSniffer {
             return;
         }
         // Inline images are the one legitimately huge OSC we buffer.
-        let cap = if self.payload.starts_with(b"1337;") { MAX_IMAGE_PAYLOAD } else { MAX_PAYLOAD };
+        let cap = if self.payload.starts_with(b"1337;") {
+            MAX_IMAGE_PAYLOAD
+        } else if self.payload.starts_with(b"777;nebula-hook;") {
+            MAX_HOOK_PAYLOAD
+        } else {
+            MAX_PAYLOAD
+        };
         if self.payload.len() >= cap {
             self.interested = false;
             return;
@@ -168,6 +178,9 @@ impl CwdSniffer {
         }
         if let Some(rest) = self.payload.strip_prefix(b"1337;") {
             return parse_osc1337_image(rest);
+        }
+        if let Some(rest) = self.payload.strip_prefix(b"777;nebula-hook;") {
+            return parse_remote_hook(rest);
         }
         if let Some(rest) = self.payload.strip_prefix(b"133;") {
             // Semantic prompt zones (FinalTerm). `A` may carry kitty-style
@@ -205,8 +218,26 @@ fn prefix_could_match(payload: &[u8]) -> bool {
     const B: &[u8] = b"9;";
     const C: &[u8] = b"133;";
     const D: &[u8] = b"1337;";
+    const E: &[u8] = b"777;";
     let matches = |target: &[u8]| target.starts_with(payload) || payload.starts_with(target);
-    matches(A) || matches(B) || matches(C) || matches(D)
+    matches(A) || matches(B) || matches(C) || matches(D) || matches(E)
+}
+
+fn parse_remote_hook(rest: &[u8]) -> Option<OscEvent> {
+    use base64::Engine as _;
+
+    let separator = rest.iter().position(|byte| *byte == b';')?;
+    let token = std::str::from_utf8(&rest[..separator]).ok()?.trim();
+    if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let envelope = base64::engine::general_purpose::STANDARD
+        .decode(&rest[separator + 1..])
+        .ok()?;
+    if envelope.is_empty() || envelope.len() > 64 * 1024 {
+        return None;
+    }
+    Some(OscEvent::RemoteHook { token: token.to_owned(), envelope })
 }
 
 /// Parse an OSC 1337 body (`File=key=value;...:<base64>`) into an inline
@@ -421,6 +452,27 @@ mod tests {
             one(b"\x1b]9;9;C:\\w\x07").as_deref(),
             Some("C:\\w")
         );
+    }
+
+    #[test]
+    fn remote_hook_requires_valid_token_and_base64() {
+        use base64::Engine as _;
+        let envelope = b"nebula-hook/1 source=codex pane=999\n{\"type\":\"agent-turn-complete\"}";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(envelope);
+        let seq = format!(
+            "\x1b]777;nebula-hook;0123456789abcdef0123456789abcdef;{encoded}\x07"
+        );
+        assert_eq!(
+            events(seq.as_bytes()),
+            vec![(
+                seq.len(),
+                OscEvent::RemoteHook {
+                    token: "0123456789abcdef0123456789abcdef".into(),
+                    envelope: envelope.to_vec(),
+                }
+            )]
+        );
+        assert!(events(b"\x1b]777;nebula-hook;short;AAAA\x07").is_empty());
     }
 
     #[test]

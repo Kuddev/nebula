@@ -1215,8 +1215,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         // Right-clicking the sidebar "+" opens the quick-launch profile menu
         // (Windows Terminal's profile dropdown); left-click keeps opening the
-        // default shell. Right-clicking a tab or SSH host row pins it to the
-        // top of its section (a second right-click on a host unpins).
+        // default shell. Tab and SSH context menus will replace the old
+        // reorder/pin shortcuts; until that menu lands, SSH right-click is
+        // consumed without changing the saved-host order.
         if button == MouseButton::Right {
             let x = self.ctx.mouse().x as f32;
             let y = self.ctx.mouse().y as f32;
@@ -1237,9 +1238,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.mark_dirty();
                     return;
                 },
-                crate::display::ChromeHit::Host(index) => {
-                    self.ctx.display().pin_host(index);
-                    self.ctx.mark_dirty();
+                crate::display::ChromeHit::Host(_) => {
                     return;
                 },
                 _ => {},

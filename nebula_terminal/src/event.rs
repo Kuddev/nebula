@@ -45,6 +45,9 @@ pub enum Event {
     /// OSC 9 — free-text notification from a program (iTerm style).
     Notify(String),
 
+    /// 已通过 SSH 通道令牌校验的远端 AI Hook 原始信封。
+    AiHookEnvelope(Vec<u8>),
+
     /// Request to store a text string in the clipboard.
     ClipboardStore(ClipboardType, String),
 
@@ -98,6 +101,9 @@ impl Debug for Event {
             Event::CommandStart => write!(f, "CommandStart"),
             Event::CommandDone => write!(f, "CommandDone"),
             Event::Notify(text) => write!(f, "Notify({text})"),
+            Event::AiHookEnvelope(envelope) => {
+                write!(f, "AiHookEnvelope({} bytes)", envelope.len())
+            },
             Event::CursorBlinkingChange => write!(f, "CursorBlinkingChange"),
             Event::MouseCursorDirty => write!(f, "MouseCursorDirty"),
             Event::ResetTitle => write!(f, "ResetTitle"),
