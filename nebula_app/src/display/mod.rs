@@ -73,6 +73,7 @@ pub mod window;
 
 mod chrome;
 mod context_menu;
+pub mod design_tokens;
 pub mod command_palette;
 pub mod markdown_view;
 pub mod side_panel;
@@ -86,9 +87,12 @@ use chrome::{
 };
 
 mod settings;
+mod ssh_ui;
 mod theme;
 mod text_input;
 
+pub use ssh_ui::{SSH_DELETE_UNDO_DURATION, SshEditorField, SshEditorHit, SshEditorRects, SshHostEditor};
+use ssh_ui::SshDeleteUndo;
 pub use theme::NebulaTheme;
 pub(crate) use theme::write_nebula_prompt_theme;
 
@@ -186,6 +190,14 @@ pub const CONTENT_PAD_X_LOGICAL: f32 = 20.0;
 #[inline]
 pub fn chrome_reserve(scale_factor: f32) -> f32 {
     (CHROME_BAR_LOGICAL * scale_factor).round()
+}
+
+/// Bottom grid reserve: card seam plus the same 8px inner breathing room used
+/// above the first row. Unlike [`chrome_reserve`], there is no title bar below
+/// the terminal, so mirroring the 64px top reserve creates a large dead band.
+#[inline]
+pub fn bottom_content_reserve(scale_factor: f32) -> f32 {
+    ((UI_CARD_SEAM_LOGICAL + 8.0) * scale_factor).round()
 }
 
 /// Horizontal content padding, in physical pixels for `scale_factor`.
@@ -432,76 +444,6 @@ pub enum NebulaConfirm {
     /// The source flag lets the dialog explain that Nebula never edits the
     /// user's SSH config file.
     DeleteSsh { host: String, from_config: bool },
-}
-
-/// How long the destructive SSH action stays reversible in the in-app bar.
-pub const SSH_DELETE_UNDO_DURATION: std::time::Duration = std::time::Duration::from_secs(8);
-
-/// Exact list state removed by one SSH deletion. Credential deletion is
-/// deliberately delayed until this value is dropped at undo expiry: Undo can
-/// therefore restore the complete action without retaining a password copy in
-/// Nebula's memory.
-#[derive(Debug)]
-struct SshDeleteUndo {
-    host: String,
-    saved_index: Option<usize>,
-    pinned_index: Option<usize>,
-    was_hidden: bool,
-    from_config: bool,
-    started_at: std::time::Instant,
-    delete_credential_on_drop: bool,
-}
-
-impl Drop for SshDeleteUndo {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        if self.delete_credential_on_drop {
-            let _ = crate::ssh_credentials::forget_password(&self.host);
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SshEditorField {
-    Destination,
-    Password,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SshEditorHit {
-    None,
-    Destination,
-    Password,
-    PasswordToggle,
-    SaveToggleBox,
-    SaveToggleLabel,
-    Primary,
-    Cancel,
-}
-
-#[derive(Debug, Clone)]
-pub struct SshHostEditor {
-    /// Destination before editing, when this modal was opened from a row.
-    /// Kept separately so changing an address can retire the old saved entry.
-    pub original_destination: Option<String>,
-    pub destination: String,
-    pub password: String,
-    pub save_password: bool,
-    pub show_password: bool,
-    pub field: SshEditorField,
-    destination_selection: text_input::SelectAllState,
-    password_selection: text_input::SelectAllState,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SshEditorRects {
-    pub destination: (f32, f32, f32, f32),
-    pub password: (f32, f32, f32, f32),
-    pub password_toggle: (f32, f32, f32, f32),
-    pub save_checkbox: (f32, f32, f32, f32),
-    pub save_toggle: (f32, f32, f32, f32),
-    pub primary: (f32, f32, f32, f32),
-    pub cancel: (f32, f32, f32, f32),
 }
 
 /// One OSC 1337 inline image, anchored to an absolute grid row (see
@@ -1117,8 +1059,12 @@ pub struct SizeInfo<T = f32> {
     /// grid only pays the sidebar cost on one side.
     padding_right: T,
 
-    /// Vertical window padding.
+    /// Top window padding / grid origin.
     padding_y: T,
+
+    /// Bottom window padding. Kept separate because Nebula's title bar exists
+    /// only above the grid; using `padding_y` symmetrically wastes terminal rows.
+    padding_bottom: T,
 
     /// Number of lines in the viewport.
     screen_lines: usize,
@@ -1137,6 +1083,7 @@ impl From<SizeInfo<f32>> for SizeInfo<u32> {
             padding_x: size_info.padding_x as u32,
             padding_right: size_info.padding_right as u32,
             padding_y: size_info.padding_y as u32,
+            padding_bottom: size_info.padding_bottom as u32,
             screen_lines: size_info.screen_lines,
             columns: size_info.columns,
         }
@@ -1189,6 +1136,11 @@ impl<T: Clone + Copy> SizeInfo<T> {
     pub fn padding_y(&self) -> T {
         self.padding_y
     }
+
+    #[inline]
+    pub fn padding_bottom(&self) -> T {
+        self.padding_bottom
+    }
 }
 
 impl SizeInfo<f32> {
@@ -1210,7 +1162,16 @@ impl SizeInfo<f32> {
             padding_y = Self::dynamic_padding(padding_y.floor(), height, cell_height);
         }
 
-        Self::assemble(width, height, cell_width, cell_height, padding_x, padding_right, padding_y)
+        Self::assemble(
+            width,
+            height,
+            cell_width,
+            cell_height,
+            padding_x,
+            padding_right,
+            padding_y,
+            padding_y,
+        )
     }
 
     /// Build a grid whose left and right paddings differ. The left padding is
@@ -1227,7 +1188,42 @@ impl SizeInfo<f32> {
         padding_right: f32,
         padding_y: f32,
     ) -> SizeInfo {
-        Self::assemble(width, height, cell_width, cell_height, padding_x, padding_right, padding_y)
+        Self::assemble(
+            width,
+            height,
+            cell_width,
+            cell_height,
+            padding_x,
+            padding_right,
+            padding_y,
+            padding_y,
+        )
+    }
+
+    /// Build a grid with independent padding on all four sides. This is the
+    /// full-window Nebula path: sidebar/drawer make X asymmetric, while the
+    /// title bar makes Y asymmetric.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_fully_asymmetric(
+        width: f32,
+        height: f32,
+        cell_width: f32,
+        cell_height: f32,
+        padding_x: f32,
+        padding_right: f32,
+        padding_y: f32,
+        padding_bottom: f32,
+    ) -> SizeInfo {
+        Self::assemble(
+            width,
+            height,
+            cell_width,
+            cell_height,
+            padding_x,
+            padding_right,
+            padding_y,
+            padding_bottom,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1239,8 +1235,9 @@ impl SizeInfo<f32> {
         padding_x: f32,
         padding_right: f32,
         padding_y: f32,
+        padding_bottom: f32,
     ) -> SizeInfo {
-        let lines = (height - 2. * padding_y) / cell_height;
+        let lines = (height - padding_y - padding_bottom) / cell_height;
         let screen_lines = cmp::max(lines as usize, MIN_SCREEN_LINES);
 
         let columns = (width - padding_x - padding_right) / cell_width;
@@ -1254,6 +1251,7 @@ impl SizeInfo<f32> {
             padding_x: padding_x.floor(),
             padding_right: padding_right.floor(),
             padding_y: padding_y.floor(),
+            padding_bottom: padding_bottom.floor(),
             screen_lines,
             columns,
         }
@@ -1646,7 +1644,7 @@ impl Display {
         // margin. Dynamic padding is dropped — the sidebar fixes the left edge.
         let scale = window.scale_factor as f32;
         let content_pad = content_pad_x(scale);
-        let size_info = SizeInfo::new_asymmetric(
+        let size_info = SizeInfo::new_fully_asymmetric(
             viewport_size.width as f32,
             viewport_size.height as f32,
             cell_width,
@@ -1654,6 +1652,7 @@ impl Display {
             padding.0 + content_pad + sidebar_width(scale, false),
             padding.0 + content_pad,
             padding.1 + chrome,
+            padding.1 + bottom_content_reserve(scale),
         );
 
         info!("Cell size: {cell_width} x {cell_height}");
@@ -1888,6 +1887,7 @@ impl Display {
     pub fn open_ssh_editor(&mut self) {
         self.nebula_ssh_editor = Some(SshHostEditor {
             original_destination: None,
+            error: None,
             destination_selection: Default::default(),
             password_selection: Default::default(),
             destination: String::new(),
@@ -1908,6 +1908,7 @@ impl Display {
         let Some(destination) = self.nebula_ssh_hosts.get(index).cloned() else { return };
         self.nebula_ssh_editor = Some(SshHostEditor {
             original_destination: Some(destination.clone()),
+            error: None,
             destination_selection: Default::default(),
             password_selection: Default::default(),
             destination,
@@ -1971,6 +1972,7 @@ impl Display {
 
     pub fn ssh_editor_insert(&mut self, text: &str) {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            editor.error = None;
             match editor.field {
                 SshEditorField::Destination => {
                     editor.destination_selection.insert(&mut editor.destination, text)
@@ -2086,7 +2088,15 @@ impl Display {
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control() || ";&|<>\"'`".contains(c));
         if !valid {
+            editor.error = Some(if destination.is_empty() {
+                "请输入 SSH 地址，例如 user@example.com".to_owned()
+            } else {
+                "地址不能包含空白、控制字符或 shell 分隔符".to_owned()
+            });
+            editor.field = SshEditorField::Destination;
             self.nebula_ssh_editor = Some(editor);
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
             return;
         }
         if let Some(original) = editor.original_destination.as_deref() {
@@ -3508,7 +3518,7 @@ impl Display {
         } else {
             0.0
         };
-        let mut new_size = SizeInfo::new_asymmetric(
+        let mut new_size = SizeInfo::new_fully_asymmetric(
             width,
             height,
             cell_width,
@@ -3516,6 +3526,7 @@ impl Display {
             padding.0 + content_pad + sidebar,
             padding.0 + content_pad + drawer,
             padding.1 + chrome,
+            padding.1 + bottom_content_reserve(scale),
         );
 
         // Update number of column/lines in the viewport.
@@ -4752,8 +4763,15 @@ impl Display {
             &size,
             destination.0,
             destination.1 - cell_h - s(6.0),
-            sk.ink_dim,
-            "用户名@地址（非 22 端口可用 ssh://user@host:port）",
+            if editor.error.is_some() {
+                if sk.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) }
+            } else {
+                sk.ink_dim
+            },
+            editor
+                .error
+                .as_deref()
+                .unwrap_or("用户名@地址（非 22 端口可用 ssh://user@host:port）"),
             gc,
         );
         let destination_text =
@@ -6221,14 +6239,18 @@ fn window_size(
     let pad_left = padding.0 + content_pad_x(scale_factor) + sidebar_width(scale_factor, false);
     let pad_right = padding.0 + content_pad_x(scale_factor);
     let width = (grid_width + pad_left + pad_right).floor();
-    let height = (padding.1 + chrome).mul_add(2., grid_height).floor();
+    let pad_top = padding.1 + chrome;
+    let pad_bottom = padding.1 + bottom_content_reserve(scale_factor);
+    let height = (pad_top + grid_height + pad_bottom).floor();
 
     PhysicalSize::new(width as u32, height as u32)
 }
 
 #[cfg(test)]
 mod nebula_ux_tests {
-    use super::{remove_ssh_host_from_lists, restore_ssh_host_to_lists};
+    use nebula_terminal::grid::Dimensions;
+
+    use super::{SizeInfo, remove_ssh_host_from_lists, restore_ssh_host_to_lists};
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -6284,5 +6306,20 @@ mod nebula_ux_tests {
         assert!(saved.is_empty());
         assert!(pinned.is_empty());
         assert!(hidden.is_empty());
+    }
+
+    #[test]
+    fn asymmetric_bottom_reserve_recovers_rows_hidden_by_top_chrome() {
+        let size = SizeInfo::new_fully_asymmetric(
+            1000.0, 1000.0, 10.0, 20.0, 0.0, 0.0, 64.0, 16.0,
+        );
+        assert_eq!(size.screen_lines(), 46);
+        assert_eq!(size.padding_y(), 64.0);
+        assert_eq!(size.padding_bottom(), 16.0);
+
+        let old_symmetric = SizeInfo::new_asymmetric(
+            1000.0, 1000.0, 10.0, 20.0, 0.0, 0.0, 64.0,
+        );
+        assert_eq!(old_symmetric.screen_lines(), 43);
     }
 }

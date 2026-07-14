@@ -793,12 +793,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         if self.ctx.display().command_palette_open() {
             let px = x as f32;
             let py = y as f32;
-            let with_input = !self.ctx.display().command_palette_picker_open();
             let layout = crate::display::command_palette::palette_layout(
                 window_size.width(),
                 window_size.height(),
                 scale,
-                with_input,
             );
             let (ix, iy, iw, ih) = layout.panel;
             // Hover detection: the pointer must be inside the panel rectangle,
@@ -1213,12 +1211,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let y = self.ctx.mouse().y as f32;
             let size = self.ctx.display().size_info;
             let scale = self.ctx.window().scale_factor as f32;
-            let with_input = !self.ctx.display().command_palette_picker_open();
             let layout = crate::display::command_palette::palette_layout(
                 size.width(),
                 size.height(),
                 scale,
-                with_input,
             );
             let (px, py, pw, ph) = layout.panel;
             if x >= px && x < px + pw && y >= py && y < py + ph {

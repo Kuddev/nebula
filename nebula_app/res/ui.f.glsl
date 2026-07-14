@@ -56,6 +56,18 @@ void main() {
         float_t dc = length(p) / max(maxr, 1.0);
         coverage = clamp(1.0 - dc, 0.0, 1.0);
         coverage = coverage * coverage;
+    } else if (quadFeather < -0.5) {
+        // Rounded-rectangle outer shadow. The quad is expanded by `blur` on
+        // every edge; evaluate the original inset card and fade only through
+        // the expansion band. The opaque interior is covered by the card drawn
+        // immediately afterwards.
+        float_t blur = -quadFeather;
+        vec2 innerHalf = max(halfSize - vec2(blur), vec2(1.0));
+        float_t lim = min(innerHalf.x, innerHalf.y);
+        vec4 radii = min(corners, vec4(lim));
+        float_t d = sdRoundedBox(p, innerHalf, radii);
+        float_t edge = clamp(max(d, 0.0) / blur, 0.0, 1.0);
+        coverage = 1.0 - smoothstep(0.0, 1.0, edge);
     } else if (quadRadius < 0.0) {
         // Flat fill: the shape comes from the geometry (e.g. slanted powerline
         // parallelograms), so cover every fragment.

@@ -4,12 +4,10 @@
 //! hit-testing and animation live together here so pointer targets cannot drift
 //! away from the pixels the user sees at non-integer DPI scales.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::*;
-
-const OPEN_DURATION: Duration = Duration::from_millis(120);
-const CLOSE_DURATION: Duration = Duration::from_millis(90);
+use super::design_tokens::{control, elevation, motion, space};
 
 // Maple Mono Normal NF CN ships the stable Codicon block below. Keep menu
 // symbols on that block: newer Codicon additions such as U+EC86 are absent
@@ -99,18 +97,18 @@ impl ContextMenu {
 
     fn progress(&self) -> f32 {
         if let Some(start) = self.closing_at {
-            return (1.0 - start.elapsed().as_secs_f32() / CLOSE_DURATION.as_secs_f32())
+            return (1.0 - start.elapsed().as_secs_f32() / motion::MENU_CLOSE.as_secs_f32())
                 .clamp(0.0, 1.0);
         }
-        (self.opened_at.elapsed().as_secs_f32() / OPEN_DURATION.as_secs_f32()).clamp(0.0, 1.0)
+        (self.opened_at.elapsed().as_secs_f32() / motion::MENU_OPEN.as_secs_f32()).clamp(0.0, 1.0)
     }
 
     pub(super) fn finished(&self) -> bool {
-        self.closing_at.is_some_and(|start| start.elapsed() >= CLOSE_DURATION)
+        self.closing_at.is_some_and(|start| start.elapsed() >= motion::MENU_CLOSE)
     }
 
     pub(super) fn animating(&self) -> bool {
-        self.closing_at.is_some() || self.opened_at.elapsed() < OPEN_DURATION
+        self.closing_at.is_some() || self.opened_at.elapsed() < motion::MENU_OPEN
     }
 
     pub(super) fn interactive(&self) -> bool {
@@ -147,7 +145,15 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
     let row_h = s(38.0);
     let pad = s(7.0);
     let sep_h = s(9.0);
-    let color_h = s(62.0);
+    let color_top_pad = s(space::XS);
+    let color_label_gap = s(space::XS);
+    let swatch = s(control::ICON_BUTTON);
+    let color_bottom_pad = s(10.0);
+    let color_h = color_top_pad
+        + size.cell_height()
+        + color_label_gap
+        + swatch
+        + color_bottom_pad;
     let (row_count, separators, extra) = match menu.target {
         ContextMenuTarget::Tab(_) => (5usize, 2usize, color_h),
         ContextMenuTarget::Ssh(_) => (4usize, 1usize, 0.0),
@@ -240,11 +246,12 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
             ));
             cursor_y += row_h;
 
-            color_label = Some((x + s(14.0), cursor_y + s(8.0)));
-            let swatch = s(20.0);
-            let gap = s(8.0);
+            let label_y = cursor_y + color_top_pad;
+            color_label = Some((x + s(14.0), label_y));
+            let gap = s(space::XS);
             let start_x = x + s(14.0);
-            let swatch_y = cursor_y + s(32.0);
+            // 标签字盒结束后保留完整 XS 间距，避免标题和色板粘连。
+            let swatch_y = label_y + size.cell_height() + color_label_gap;
             let all = std::iter::once(None).chain(TAB_COLORS.into_iter().map(Some));
             for (slot, color) in all.enumerate() {
                 let rect = (start_x + slot as f32 * (swatch + gap), swatch_y, swatch, swatch);
@@ -342,16 +349,33 @@ pub(super) fn draw(display: &mut Display) {
     let radius = s(9.0);
     let (px, py, pw, ph) = layout.panel;
 
+    let shadow_alpha = if sk.is_light {
+        elevation::FLOATING_SHADOW_ALPHA_LIGHT
+    } else {
+        elevation::FLOATING_SHADOW_ALPHA_DARK
+    };
+    let hairline = s(control::HAIRLINE).max(1.0);
     let mut quads = vec![
-        UiQuad::glow(
-            px - s(16.0),
-            py - s(12.0),
-            pw + s(32.0),
-            ph + s(30.0),
-            alpha(Rgba::new(0, 0, 0, 72), progress),
+        UiQuad::shadow(
+            px,
+            py,
+            pw,
+            ph,
+            radius,
+            s(elevation::FLOATING_BLUR),
+            s(elevation::FLOATING_OFFSET_Y),
+            alpha(Rgba::new(0, 0, 0, shadow_alpha), progress),
+        ),
+        // 全周 hairline 在浅色背景上定义边界；外阴影承担 Z 轴层级。
+        UiQuad::solid(
+            px - hairline,
+            py - hairline,
+            pw + hairline * 2.0,
+            ph + hairline * 2.0,
+            radius + hairline,
+            alpha(sk.hairline, progress),
         ),
         UiQuad::solid(px, py, pw, ph, radius, alpha(sk.panel, progress)),
-        UiQuad::solid(px, py, pw, s(1.0).max(1.0), radius, alpha(sk.hairline, progress)),
     ];
     for separator in &layout.separators {
         quads.push(UiQuad::solid(

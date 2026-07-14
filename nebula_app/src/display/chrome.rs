@@ -1229,7 +1229,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         // inside the header band to keep clearance from the join.
         let (pnl_x, pnl_y, _, _) = tab_layout.panel;
         let tabs_chevron = if d.nebula_tabs_section_open { "\u{eab4}" } else { "\u{eab6}" };
-        const SECTION_TITLE_SCALE: f32 = 0.75;
+        const SECTION_TITLE_SCALE: f32 = design_tokens::type_scale::SECTION_CAPTION;
         let section_title_flags = nebula_terminal::term::cell::Flags::BOLD;
         d.renderer.draw_doc_text(
             &size,
@@ -1455,13 +1455,13 @@ pub(super) fn draw_chrome(d: &mut Display) {
             // destination here once the connection confirms (`~/.ssh/config`
             // aliases still appear automatically too). Styled as helper text,
             // NOT as content: smaller and fainter than the caption above it,
-            // and indented to the row-label depth (`tab_pad + s(14)`, where
+                // and indented to the row-label depth (`tab_pad + s(14)`, where
             // tab/host row text starts) so it reads as a child of the section.
             // The hint wraps to the sidebar width; drawing it as one line
             // would bleed across the seam onto the terminal grid.
             if d.nebula_ssh_hosts.is_empty() && d.nebula_hosts_section_open {
                 use unicode_width::UnicodeWidthChar;
-                const HINT_SCALE: f32 = 0.80;
+                const HINT_SCALE: f32 = design_tokens::type_scale::SUPPORTING;
                 let hint_flags = nebula_terminal::term::cell::Flags::empty();
                 let (pnl_x, _, pnl_w, _) = tab_layout.panel;
                 let text_x = hh_x + s(28.0);
@@ -1482,7 +1482,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                             text_x,
                             line_y,
                             HINT_SCALE,
-                            sk.ink_faint,
+                            sk.ink_dim,
                             hint_flags,
                             line.trim_start(),
                             &mut d.glyph_cache,
@@ -1500,7 +1500,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                         text_x,
                         line_y,
                         HINT_SCALE,
-                        sk.ink_faint,
+                        sk.ink_dim,
                         hint_flags,
                         line.trim_start(),
                         &mut d.glyph_cache,

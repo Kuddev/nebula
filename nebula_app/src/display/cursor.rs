@@ -27,9 +27,13 @@ impl IntoRects for RenderableCursor {
         width *= self.width().get() as f32;
 
         match self.shape() {
-            CursorShape::Beam => beam(x, y, height, thickness, self.color()),
-            CursorShape::Underline => underline(x, y, width, height, thickness, self.color()),
-            CursorShape::HollowBlock => hollow(x, y, width, height, thickness, self.color()),
+            CursorShape::Beam => beam(x, y, height, thickness, self.color(), self.opacity()),
+            CursorShape::Underline => {
+                underline(x, y, width, height, thickness, self.color(), self.opacity())
+            },
+            CursorShape::HollowBlock => {
+                hollow(x, y, width, height, thickness, self.color(), self.opacity())
+            },
             _ => CursorRects::default(),
         }
     }
@@ -59,29 +63,45 @@ impl Iterator for CursorRects {
 }
 
 /// Create an iterator yielding a single beam rect.
-fn beam(x: f32, y: f32, height: f32, thickness: f32, color: Rgb) -> CursorRects {
-    RenderRect::new(x, y, thickness, height, color, 1.).into()
+fn beam(x: f32, y: f32, height: f32, thickness: f32, color: Rgb, alpha: f32) -> CursorRects {
+    RenderRect::new(x, y, thickness, height, color, alpha).into()
 }
 
 /// Create an iterator yielding a single underline rect.
-fn underline(x: f32, y: f32, width: f32, height: f32, thickness: f32, color: Rgb) -> CursorRects {
+fn underline(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    thickness: f32,
+    color: Rgb,
+    alpha: f32,
+) -> CursorRects {
     let y = y + height - thickness;
-    RenderRect::new(x, y, width, thickness, color, 1.).into()
+    RenderRect::new(x, y, width, thickness, color, alpha).into()
 }
 
 /// Create an iterator yielding a rect for each side of the hollow block cursor.
-fn hollow(x: f32, y: f32, width: f32, height: f32, thickness: f32, color: Rgb) -> CursorRects {
-    let top_line = RenderRect::new(x, y, width, thickness, color, 1.);
+fn hollow(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    thickness: f32,
+    color: Rgb,
+    alpha: f32,
+) -> CursorRects {
+    let top_line = RenderRect::new(x, y, width, thickness, color, alpha);
 
     let vertical_y = y + thickness;
     let vertical_height = height - 2. * thickness;
-    let left_line = RenderRect::new(x, vertical_y, thickness, vertical_height, color, 1.);
+    let left_line = RenderRect::new(x, vertical_y, thickness, vertical_height, color, alpha);
 
     let bottom_y = y + height - thickness;
-    let bottom_line = RenderRect::new(x, bottom_y, width, thickness, color, 1.);
+    let bottom_line = RenderRect::new(x, bottom_y, width, thickness, color, alpha);
 
     let right_x = x + width - thickness;
-    let right_line = RenderRect::new(right_x, vertical_y, thickness, vertical_height, color, 1.);
+    let right_line = RenderRect::new(right_x, vertical_y, thickness, vertical_height, color, alpha);
 
     CursorRects {
         rects: [Some(top_line), Some(bottom_line), Some(left_line), Some(right_line)],

@@ -13,7 +13,9 @@ use nebula_terminal::term::{self, RenderableContent as TerminalContent, Term, Te
 use nebula_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
 use crate::config::UiConfig;
+use crate::config::color::{InvertedCellColors, NEBULA_DEFAULT_CURSOR};
 use crate::display::color::{CellRgb, DIM_FACTOR, List, Rgb};
+use crate::display::design_tokens::terminal_feedback;
 use crate::display::hint::{self, HintState};
 use crate::display::{Display, SizeInfo};
 use crate::event::SearchState;
@@ -35,6 +37,9 @@ pub struct RenderableContent<'a> {
     colors: &'a List,
     focused_match: Option<&'a Match>,
     size: &'a SizeInfo,
+    theme_anchor: Rgb,
+    theme_is_light: bool,
+    themed_selection: bool,
 }
 
 impl<'a> RenderableContent<'a> {
@@ -48,6 +53,21 @@ impl<'a> RenderableContent<'a> {
         let search = search_state.dfas().map(|dfas| HintMatches::visible_regex_matches(term, dfas));
         let focused_match = search_state.focused_match();
         let terminal_content = term.renderable_content();
+        // The ANSI magenta slot is also used by the prompt caret. Following it
+        // keeps the grid cursor visually tied to the terminal theme instead of
+        // inventing an unrelated fixed chrome color.
+        let theme_is_light = display.nebula_theme.palette().is_light;
+        let neutral_mix = if theme_is_light {
+            terminal_feedback::ANCHOR_NEUTRAL_MIX_LIGHT
+        } else {
+            terminal_feedback::ANCHOR_NEUTRAL_MIX_DARK
+        };
+        let theme_anchor = mix_rgb(
+            display.colors[NamedColor::Magenta],
+            display.nebula_theme.skin().ink_dim,
+            neutral_mix,
+        );
+        let themed_selection = config.colors.selection == InvertedCellColors::default();
 
         // Find terminal cursor shape.
         let cursor_shape = if terminal_content.cursor.shape == CursorShape::Hidden
@@ -85,6 +105,9 @@ impl<'a> RenderableContent<'a> {
             search,
             config,
             hint,
+            theme_anchor,
+            theme_is_light,
+            themed_selection,
         }
     }
 
@@ -118,23 +141,36 @@ impl<'a> RenderableContent<'a> {
         } else {
             self.config.colors.cursor
         };
-        let cursor_color = self.terminal_content.colors[NamedColor::Cursor]
-            .map_or(color.background, |c| CellRgb::Rgb(Rgb(c)));
-        let text_color = color.foreground;
-
-        let insufficient_contrast = (!matches!(cursor_color, CellRgb::Rgb(_))
-            || !matches!(text_color, CellRgb::Rgb(_)))
-            && cell.fg.contrast(*cell.bg) < MIN_CURSOR_CONTRAST;
-
-        // Convert from cell colors to RGB.
-        let mut text_color = text_color.color(cell.fg, cell.bg);
-        let mut cursor_color = cursor_color.color(cell.fg, cell.bg);
-
-        // Invert cursor color with insufficient contrast to prevent invisible cursors.
-        if insufficient_contrast {
-            cursor_color = self.config.colors.primary.foreground;
-            text_color = self.config.colors.primary.background;
-        }
+        let osc_cursor = self.terminal_content.colors[NamedColor::Cursor].map(|c| Rgb(c));
+        let follows_theme = osc_cursor.is_none() && color == NEBULA_DEFAULT_CURSOR;
+        let (cursor_color, text_color, opacity) = if follows_theme {
+            let opacity = if self.cursor_shape == CursorShape::Block {
+                if self.theme_is_light {
+                    terminal_feedback::BLOCK_CURSOR_ALPHA_LIGHT
+                } else {
+                    terminal_feedback::BLOCK_CURSOR_ALPHA_DARK
+                }
+            } else if self.theme_is_light {
+                terminal_feedback::STROKE_CURSOR_ALPHA_LIGHT
+            } else {
+                terminal_feedback::STROKE_CURSOR_ALPHA_DARK
+            };
+            // 半透明方块让原字形直接透出，不再强制翻转文字颜色。
+            (self.theme_anchor, cell.fg, opacity)
+        } else {
+            let cursor_color = osc_cursor.map_or(color.background, CellRgb::Rgb);
+            let text_color = color.foreground;
+            let insufficient_contrast = (!matches!(cursor_color, CellRgb::Rgb(_))
+                || !matches!(text_color, CellRgb::Rgb(_)))
+                && cell.fg.contrast(*cell.bg) < MIN_CURSOR_CONTRAST;
+            let mut text_color = text_color.color(cell.fg, cell.bg);
+            let mut cursor_color = cursor_color.color(cell.fg, cell.bg);
+            if insufficient_contrast {
+                cursor_color = self.config.colors.primary.foreground;
+                text_color = self.config.colors.primary.background;
+            }
+            (cursor_color, text_color, 1.0)
+        };
 
         let width = if cell.flags.contains(Flags::WIDE_CHAR) {
             NonZeroU32::new(2).unwrap()
@@ -147,6 +183,7 @@ impl<'a> RenderableContent<'a> {
             point: self.cursor_point,
             cursor_color,
             text_color,
+            opacity,
         }
     }
 }
@@ -168,12 +205,18 @@ impl Iterator for RenderableContent<'_> {
                 // Store the cursor which should be rendered.
                 self.cursor = self.renderable_cursor(&cell);
                 if self.cursor.shape == CursorShape::Block {
-                    cell.fg = self.cursor.text_color;
-                    cell.bg = self.cursor.cursor_color;
-
-                    // Since we draw Block cursor by drawing cell below it with a proper color,
-                    // we must adjust alpha to make it visible.
-                    cell.bg_alpha = 1.;
+                    if self.cursor.opacity < 1.0 {
+                        (cell.bg, cell.bg_alpha) = composite_overlay(
+                            self.cursor.cursor_color,
+                            self.cursor.opacity,
+                            cell.bg,
+                            cell.bg_alpha,
+                        );
+                    } else {
+                        cell.fg = self.cursor.text_color;
+                        cell.bg = self.cursor.cursor_color;
+                        cell.bg_alpha = 1.0;
+                    }
                 }
 
                 return Some(cell);
@@ -253,9 +296,23 @@ impl RenderableCell {
 
             character = c.unwrap_or(character);
         } else if is_selected {
-            let config_fg = colors.selection.foreground;
-            let config_bg = colors.selection.background;
-            Self::compute_cell_rgb(&mut fg, &mut bg, &mut bg_alpha, config_fg, config_bg);
+            if content.themed_selection {
+                let opacity = if content.theme_is_light {
+                    terminal_feedback::SELECTION_ALPHA_LIGHT
+                } else {
+                    terminal_feedback::SELECTION_ALPHA_DARK
+                };
+                (bg, bg_alpha) = composite_overlay(
+                    content.theme_anchor,
+                    opacity,
+                    bg,
+                    bg_alpha,
+                );
+            } else {
+                let config_fg = colors.selection.foreground;
+                let config_bg = colors.selection.background;
+                Self::compute_cell_rgb(&mut fg, &mut bg, &mut bg_alpha, config_fg, config_bg);
+            }
 
             if fg == bg && !cell.flags.contains(Flags::HIDDEN) {
                 // Reveal inversed text when fg/bg is the same.
@@ -397,14 +454,37 @@ impl RenderableCell {
     }
 }
 
+/// Alpha-compose a theme overlay over the cell's existing background. Keeping
+/// this in the render model preserves explicit ANSI cell backgrounds while
+/// still allowing the default transparent terminal surface/image to show.
+fn composite_overlay(overlay: Rgb, overlay_alpha: f32, base: Rgb, base_alpha: f32) -> (Rgb, f32) {
+    let oa = overlay_alpha.clamp(0.0, 1.0);
+    let ba = base_alpha.clamp(0.0, 1.0);
+    let out_a = oa + ba * (1.0 - oa);
+    if out_a <= f32::EPSILON {
+        return (base, 0.0);
+    }
+    let channel = |o: u8, b: u8| {
+        ((o as f32 * oa + b as f32 * ba * (1.0 - oa)) / out_a).round() as u8
+    };
+    (Rgb::new(channel(overlay.r, base.r), channel(overlay.g, base.g), channel(overlay.b, base.b)), out_a)
+}
+
+fn mix_rgb(color: Rgb, neutral: Rgb, neutral_amount: f32) -> Rgb {
+    let t = neutral_amount.clamp(0.0, 1.0);
+    let channel = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Rgb::new(channel(color.r, neutral.r), channel(color.g, neutral.g), channel(color.b, neutral.b))
+}
+
 /// Cursor storing all information relevant for rendering.
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub struct RenderableCursor {
     shape: CursorShape,
     cursor_color: Rgb,
     text_color: Rgb,
     width: NonZeroU32,
     point: Point<usize>,
+    opacity: f32,
 }
 
 impl RenderableCursor {
@@ -414,7 +494,7 @@ impl RenderableCursor {
         let text_color = Rgb::default();
         let width = NonZeroU32::new(1).unwrap();
         let point = Point::default();
-        Self { shape, cursor_color, text_color, width, point }
+        Self { shape, cursor_color, text_color, width, point, opacity: 0.0 }
     }
 }
 
@@ -425,11 +505,15 @@ impl RenderableCursor {
         cursor_color: Rgb,
         width: NonZeroU32,
     ) -> Self {
-        Self { shape, cursor_color, text_color: cursor_color, width, point }
+        Self { shape, cursor_color, text_color: cursor_color, width, point, opacity: 1.0 }
     }
 
     pub fn color(&self) -> Rgb {
         self.cursor_color
+    }
+
+    pub fn opacity(&self) -> f32 {
+        self.opacity
     }
 
     pub fn shape(&self) -> CursorShape {
@@ -442,6 +526,38 @@ impl RenderableCursor {
 
     pub fn point(&self) -> Point<usize> {
         self.point
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{composite_overlay, mix_rgb};
+    use crate::display::color::Rgb;
+
+    #[test]
+    fn translucent_overlay_preserves_transparent_surface() {
+        let purple = Rgb::new(130, 80, 223);
+        let (color, alpha) = composite_overlay(purple, 0.20, Rgb::new(255, 255, 255), 0.0);
+        assert_eq!(color, purple);
+        assert!((alpha - 0.20).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn translucent_overlay_composites_over_opaque_ansi_background() {
+        let (color, alpha) = composite_overlay(
+            Rgb::new(130, 80, 223),
+            0.20,
+            Rgb::new(255, 255, 255),
+            1.0,
+        );
+        assert_eq!(color, Rgb::new(230, 220, 249));
+        assert!((alpha - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn theme_anchor_is_softened_toward_neutral_ink() {
+        let softened = mix_rgb(Rgb::new(130, 80, 223), Rgb::new(107, 114, 128), 0.28);
+        assert_eq!(softened, Rgb::new(124, 90, 196));
     }
 }
 

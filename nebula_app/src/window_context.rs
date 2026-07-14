@@ -34,6 +34,8 @@ use nebula_terminal::tty;
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::UiConfig;
+use crate::config::ui_config::Profile;
+use crate::display::color::Rgb;
 use crate::display::window::Window;
 use crate::display::{Display, NebulaPaneState};
 use crate::event::{
@@ -122,9 +124,25 @@ struct TabEntry {
     /// Custom user-assigned name for this tab. When `None`, the label is derived
     /// from the working directory (Windows Terminal style).
     custom_name: Option<String>,
+    /// Optional override for the narrow tab light strip. `None` follows the
+    /// active theme, so changing themes never leaves stale default colors.
+    custom_color: Option<Rgb>,
+    /// Runtime launch identity used by "复制标签页". It deliberately stays out
+    /// of session restore: reconnecting SSH automatically after restart would
+    /// be surprising and can trigger credentials/network side effects.
+    launch: TabLaunch,
     /// Document viewer content (markdown/text/json). `Some` marks this as a
     /// doc tab: it has no pane, and the draw/input paths route to the viewer.
     doc: Option<crate::display::markdown_view::DocView>,
+}
+
+#[derive(Clone)]
+enum TabLaunch {
+    Default,
+    Profile(Profile),
+    Shell { name: String, shell: tty::Shell },
+    Ssh(String),
+    Document(std::path::PathBuf),
 }
 
 /// How a new window context gets its initial tabs.
@@ -397,7 +415,15 @@ impl WindowContext {
                         layout: Layout::Leaf(first_id),
                         active_pane: first_id,
                         has_bell: false,
-                        custom_name: None,
+                        custom_name: restore
+                            .as_ref()
+                            .and_then(|session| session.tabs.first())
+                            .and_then(|tab| tab.custom_name.clone()),
+                        custom_color: restore
+                            .as_ref()
+                            .and_then(|session| session.tabs.first())
+                            .and_then(|tab| tab.color),
+                        launch: TabLaunch::Default,
                         doc: None,
                     }],
                     0,
@@ -682,6 +708,10 @@ impl WindowContext {
                 }
                 self.close_tab(index)
             },
+            TabRequest::Duplicate(index) => {
+                self.duplicate_tab(index);
+                false
+            },
             TabRequest::CloseWindow => {
                 // A normal window close DETACHES: the PTYs live on in the
                 // resident process, so a running claude/build is not lost
@@ -740,6 +770,13 @@ impl WindowContext {
                 self.split_focused(direction);
                 false
             },
+            TabRequest::SplitIndex { index, direction } => {
+                if self.tabs.get(index).is_some_and(|tab| tab.doc.is_none()) {
+                    self.select_tab(index);
+                    self.split_focused(direction);
+                }
+                false
+            },
             TabRequest::DockSplit { source, nav } => {
                 self.dock_tab_into_active(source, nav);
                 false
@@ -782,6 +819,15 @@ impl WindowContext {
                         self.sync_chrome_tabs();
                         self.dirty = true;
                     }
+                }
+                false
+            },
+            TabRequest::SetColor { index, color } => {
+                if let Some(tab) = self.tabs.get_mut(index) {
+                    tab.custom_color = color;
+                    self.sync_chrome_tabs();
+                    self.mark_session_dirty();
+                    self.dirty = true;
                 }
                 false
             },
@@ -829,6 +875,8 @@ impl WindowContext {
                 active_pane: id,
                 has_bell: false,
                 custom_name: None,
+                custom_color: None,
+                launch: TabLaunch::Default,
                 doc: None,
             });
             self.active_tab = at;
@@ -851,6 +899,10 @@ impl WindowContext {
     /// profile so an `ssh host` entry reads as its destination, not "ssh".
     fn spawn_tab_profile(&mut self, index: usize) {
         let Some(profile) = self.config.profiles.get(index).cloned() else { return };
+        self.spawn_tab_profile_value(profile);
+    }
+
+    fn spawn_tab_profile_value(&mut self, profile: Profile) {
         // Profile cwd wins when it exists; else inherit the focused pane's.
         let cwd = profile
             .cwd
@@ -865,7 +917,9 @@ impl WindowContext {
                 layout: Layout::Leaf(id),
                 active_pane: id,
                 has_bell: false,
-                custom_name: Some(profile.name),
+                custom_name: Some(profile.name.clone()),
+                custom_color: None,
+                launch: TabLaunch::Profile(profile),
                 doc: None,
             });
             self.active_tab = at;
@@ -879,14 +933,20 @@ impl WindowContext {
     /// the config, and the cwd inherits the focused pane's.
     fn spawn_tab_shell(&mut self, name: String, shell: nebula_terminal::tty::Shell) {
         if let Some(id) =
-            self.spawn_pane_detached_with(self.focused_cwd(), self.display.size_info, Some(shell))
+            self.spawn_pane_detached_with(
+                self.focused_cwd(),
+                self.display.size_info,
+                Some(shell.clone()),
+            )
         {
             let at = (self.active_tab + 1).min(self.tabs.len());
             self.tabs.insert(at, TabEntry {
                 layout: Layout::Leaf(id),
                 active_pane: id,
                 has_bell: false,
-                custom_name: Some(name),
+                custom_name: Some(name.clone()),
+                custom_color: None,
+                launch: TabLaunch::Shell { name, shell },
                 doc: None,
             });
             self.active_tab = at;
@@ -918,7 +978,9 @@ impl WindowContext {
                         layout: Layout::Leaf(pane_id),
                         active_pane: pane_id,
                         has_bell: false,
-                        custom_name: Some(host),
+                        custom_name: Some(host.clone()),
+                        custom_color: None,
+                        launch: TabLaunch::Ssh(host),
                         doc: None,
                     });
                     self.active_tab = at;
@@ -928,6 +990,14 @@ impl WindowContext {
                 },
                 Err(err) => {
                     error!("创建直连 SSH Pane 失败: {err}");
+                    self.message_buffer.push(crate::message_bar::Message::new(
+                        format!(
+                            "SSH {host} 连接创建失败：{err}。请检查地址/SSH 配置，右键编辑后重试。"
+                        ),
+                        crate::message_bar::MessageType::Error,
+                    ));
+                    self.dirty = true;
+                    self.display.window.request_redraw();
                     return;
                 },
             }
@@ -963,7 +1033,9 @@ impl WindowContext {
                 layout: Layout::Leaf(id),
                 active_pane: id,
                 has_bell: false,
-                custom_name: Some(host),
+                custom_name: Some(host.clone()),
+                custom_color: None,
+                launch: TabLaunch::Ssh(host),
                 doc: None,
             });
             self.active_tab = at;
@@ -1003,10 +1075,57 @@ impl WindowContext {
             active_pane: DOC_PANE_ID,
             has_bell: false,
             custom_name: Some(label),
+            custom_color: None,
+            launch: TabLaunch::Document(doc.path.clone()),
             doc: Some(doc),
         });
         self.active_tab = at;
         self.dirty = true;
+    }
+
+    /// Duplicate the selected tab next to itself. We copy the launch identity,
+    /// current cwd, user name and color, but intentionally not the live grid or
+    /// split tree: a duplicate is a fresh process/session, matching Windows
+    /// Terminal and avoiding shared PTY ownership.
+    fn duplicate_tab(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let launch = tab.launch.clone();
+        let custom_name = tab.custom_name.clone();
+        let custom_color = tab.custom_color;
+        self.select_tab(index);
+        let before = self.tabs.len();
+
+        match launch {
+            TabLaunch::Default => self.spawn_tab(),
+            TabLaunch::Profile(profile) => self.spawn_tab_profile_value(profile),
+            TabLaunch::Shell { name, shell } => self.spawn_tab_shell(name, shell),
+            TabLaunch::Ssh(host) => self.spawn_tab_ssh(host),
+            TabLaunch::Document(path) => {
+                let doc = crate::display::markdown_view::DocView::open(path.clone());
+                let label = format!("\u{eb1d} {}", doc.title);
+                let at = (self.active_tab + 1).min(self.tabs.len());
+                self.tabs.insert(at, TabEntry {
+                    layout: Layout::Leaf(DOC_PANE_ID),
+                    active_pane: DOC_PANE_ID,
+                    has_bell: false,
+                    custom_name: Some(label),
+                    custom_color: None,
+                    launch: TabLaunch::Document(path),
+                    doc: Some(doc),
+                });
+                self.active_tab = at;
+                self.dirty = true;
+            },
+        }
+
+        if self.tabs.len() > before {
+            if let Some(duplicate) = self.tabs.get_mut(self.active_tab) {
+                duplicate.custom_name = custom_name;
+                duplicate.custom_color = custom_color;
+            }
+            self.sync_chrome_tabs();
+            self.mark_session_dirty();
+        }
     }
 
     /// Rebuild the remaining tabs of a restored session (its first tab became
@@ -1021,7 +1140,9 @@ impl WindowContext {
                     layout: Layout::Leaf(id),
                     active_pane: id,
                     has_bell: false,
-                    custom_name: None,
+                    custom_name: tab.custom_name.clone(),
+                    custom_color: tab.color,
+                    launch: TabLaunch::Default,
                     doc: None,
                 });
                 self.run_fastfetch_intro(id);
@@ -1102,6 +1223,8 @@ impl WindowContext {
                     .pane(t.active_pane)
                     .map(|p| p.nebula_state.cwd.trim().to_owned())
                     .unwrap_or_default(),
+                custom_name: t.custom_name.clone(),
+                color: t.custom_color,
             })
             .collect();
         session::Session::new(self.active_tab, tabs)
@@ -1761,6 +1884,7 @@ impl WindowContext {
         }
 
         let mut labels = Vec::with_capacity(self.tabs.len());
+        let mut colors = Vec::with_capacity(self.tabs.len());
         let mut dots = Vec::with_capacity(self.tabs.len());
         let mut running = Vec::with_capacity(self.tabs.len());
         let mut logos = Vec::with_capacity(self.tabs.len());
@@ -1786,6 +1910,7 @@ impl WindowContext {
             }
             logos.push(logo);
             labels.push(label);
+            colors.push(tab.custom_color);
             // Unseen-result dot: bell in a background tab, a tracked command
             // that finished unseen, or a tracked program parked at "waiting
             // for input" (claude between turns). The ring collapsing into a
@@ -1802,7 +1927,7 @@ impl WindowContext {
         }
         let active = self.active_tab.min(labels.len().saturating_sub(1));
         // displayed == storage index always holds now, so the bar is reorderable.
-        self.display.set_chrome_tabs(labels, dots, running, logos, active, true);
+        self.display.set_chrome_tabs(labels, colors, dots, running, logos, active, true);
     }
 
     fn chrome_tab_label(pane: &Pane) -> String {
