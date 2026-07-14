@@ -38,8 +38,10 @@ impl Message {
     /// Formatted message text lines.
     pub fn text(&self, size_info: &SizeInfo) -> Vec<String> {
         let num_cols = size_info.columns();
-        let total_lines =
-            (size_info.height() - 2. * size_info.padding_y()) / size_info.cell_height();
+        let total_lines = (size_info.height()
+            - size_info.padding_y()
+            - size_info.padding_bottom())
+            / size_info.cell_height();
         let max_lines = (total_lines as usize).saturating_sub(MIN_FREE_LINES);
         let button_len = CLOSE_BUTTON_TEXT.chars().count();
 

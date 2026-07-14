@@ -1,6 +1,6 @@
 [package]
 name = "nebula_hook"
-version = "0.3.0"
+version = "0.4.0"
 license = "GPL-3.0-or-later"
 description = "Tiny bridge: AI-CLI lifecycle hooks -> Nebula named pipe"
 publish = false

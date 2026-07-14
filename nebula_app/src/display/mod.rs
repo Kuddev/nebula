@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use winit::dpi::PhysicalSize;
 use winit::keyboard::ModifiersState;
 use winit::raw_window_handle::RawWindowHandle;
-use winit::window::CursorIcon;
+use winit::window::{CursorIcon, Theme as WinitTheme};
 
 use crossfont::{Rasterize, Rasterizer, Size as FontSize};
 use unicode_width::UnicodeWidthChar;
@@ -1409,8 +1409,19 @@ pub struct Display {
     /// fragile, one batched pass is not.
     nebula_frame_images: Vec<(u64, std::sync::Arc<Vec<u8>>, (u32, u32), (f32, f32, f32, f32))>,
 
-    /// Runtime-only chrome theme selected from the top-left settings panel.
+    /// Theme currently painted. In automatic mode this is the light/dark
+    /// member resolved from `nebula_theme_preference` and the system state.
     pub nebula_theme: NebulaTheme,
+    /// Theme family explicitly selected by the user and written to settings.
+    /// Kept separate from the painted theme so an automatic light switch does
+    /// not forget which dark theme to restore later.
+    nebula_theme_preference: NebulaTheme,
+    pub nebula_follow_system_theme: bool,
+    nebula_system_theme: Option<WinitTheme>,
+    /// User-configured winit decoration override. Automatic Nebula theming
+    /// temporarily clears it because winit only emits `ThemeChanged` while a
+    /// window is following the operating system.
+    nebula_window_theme_override: Option<WinitTheme>,
     pub nebula_settings_open: bool,
     /// Settings content scroll offset in scaled px (0 = top of the section).
     nebula_settings_scroll: f32,
@@ -1664,7 +1675,27 @@ impl Display {
 
         // Clear screen.
         let settings_init = settings::nebula_settings_load(config);
-        let background_color = settings_init.background.unwrap_or(config.colors.primary.background);
+        let nebula_window_theme_override = config.window.theme();
+        if settings_init.follow_system_theme {
+            window.set_theme(None);
+        }
+        let nebula_system_theme = window.theme();
+        let nebula_theme = if settings_init.follow_system_theme {
+            nebula_system_theme
+                .map(|theme| {
+                    settings_init
+                        .theme
+                        .for_system_appearance(matches!(theme, WinitTheme::Light))
+                })
+                .unwrap_or(settings_init.theme)
+        } else {
+            settings_init.theme
+        };
+        let background_color = if settings_init.follow_system_theme {
+            nebula_theme.palette().term_bg
+        } else {
+            settings_init.background.unwrap_or(config.colors.primary.background)
+        };
         renderer.clear(background_color, settings_init.opacity);
         window.set_transparent(settings_init.opacity < 1.0);
 
@@ -1708,7 +1739,7 @@ impl Display {
         let hint_state = HintState::new(config.hints.alphabet());
         // Publish the RESTORED theme to the prompt bridge (writing the default
         // here used to reset the powerline colors on every launch).
-        write_nebula_prompt_theme(settings_init.theme);
+        write_nebula_prompt_theme(nebula_theme);
 
         let mut damage_tracker = DamageTracker::new(size_info.screen_lines(), size_info.columns());
         damage_tracker.debug = config.debug.highlight_damage;
@@ -1724,7 +1755,7 @@ impl Display {
         // the background OSC 11 reports must match the theme from frame one).
         let nebula_default_colors = List::from(&config.colors);
         let mut initial_colors = nebula_default_colors;
-        settings_init.theme.apply_term_colors(&mut initial_colors, &nebula_default_colors);
+        nebula_theme.apply_term_colors(&mut initial_colors, &nebula_default_colors);
 
         Ok(Self {
             context: ManuallyDrop::new(context),
@@ -1772,7 +1803,11 @@ impl Display {
             nebula_ssh_editor_open: false,
             nebula_ssh_editor_hover: SshEditorHit::None,
             nebula_frame_images: Vec::new(),
-            nebula_theme: settings_init.theme,
+            nebula_theme,
+            nebula_theme_preference: settings_init.theme,
+            nebula_follow_system_theme: settings_init.follow_system_theme,
+            nebula_system_theme,
+            nebula_window_theme_override,
             nebula_settings_open: false,
             nebula_settings_scroll: 0.0,
             nebula_palette: command_palette::CommandPalette::new(),
@@ -1821,7 +1856,11 @@ impl Display {
             nebula_powerline_enabled: settings_init.powerline,
             nebula_keep_session: settings_init.keep_session,
             nebula_window_opacity: settings_init.opacity,
-            nebula_background: settings_init.background,
+            nebula_background: if settings_init.follow_system_theme {
+                Some(nebula_theme.palette().term_bg)
+            } else {
+                settings_init.background
+            },
             nebula_background_image: settings_init.background_image,
             nebula_background_image_opacity: settings_init.background_image_opacity,
             nebula_settings_mtime: settings::nebula_settings_mtime(),
@@ -2428,7 +2467,7 @@ impl Display {
         let gx = self.size_info.padding_x();
         let gy = self.size_info.padding_y();
         let gw = self.size_info.width() - gx - self.size_info.padding_right();
-        let gh = self.size_info.height() - 2.0 * gy;
+        let gh = self.size_info.height() - gy - self.size_info.padding_bottom();
         if gw <= 0.0 || gh <= 0.0 || x < gx || y < gy || x > gx + gw || y > gy + gh {
             return None;
         }
@@ -2637,6 +2676,7 @@ impl Display {
             section: self.nebula_settings_section,
             hover: self.nebula_settings_hover,
             theme: self.nebula_theme,
+            follow_system_theme: self.nebula_follow_system_theme,
             ghost: self.nebula_ghost_enabled,
             accept: self.nebula_accept,
             shell_label: {
@@ -2694,7 +2734,7 @@ impl Display {
         }
     }
 
-    pub fn select_nebula_theme(&mut self, theme: NebulaTheme) {
+    fn apply_nebula_theme(&mut self, theme: NebulaTheme) {
         self.nebula_theme = theme;
         // A theme carries its terminal background (the light themes are
         // unusable without it). Switching theme IS choosing the look, so it
@@ -2706,9 +2746,62 @@ impl Display {
         let defaults = self.nebula_default_colors;
         theme.apply_term_colors(&mut self.colors, &defaults);
         write_nebula_prompt_theme(theme);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn select_nebula_theme(&mut self, theme: NebulaTheme) {
+        self.nebula_theme_preference = theme;
+        // Clicking a concrete theme is an explicit manual choice. Automatic
+        // mode must step aside instead of changing it again on the next OS
+        // appearance event.
+        self.nebula_follow_system_theme = false;
+        self.window.set_theme(self.nebula_window_theme_override);
+        self.apply_nebula_theme(theme);
         self.persist_nebula_settings();
         // Panel stays open so users can adjust several settings at once.
-        self.pending_update.dirty = true;
+    }
+
+    pub fn toggle_system_theme_following(&mut self) {
+        self.nebula_follow_system_theme = !self.nebula_follow_system_theme;
+        if self.nebula_follow_system_theme {
+            // winit explicitly suppresses ThemeChanged for overridden
+            // windows, so automatic mode must let the OS own this value.
+            self.window.set_theme(None);
+            self.nebula_system_theme = self.window.theme();
+        } else {
+            self.window.set_theme(self.nebula_window_theme_override);
+        }
+        let theme = if self.nebula_follow_system_theme {
+            self.nebula_system_theme
+                .map(|system| {
+                    self.nebula_theme_preference
+                        .for_system_appearance(matches!(system, WinitTheme::Light))
+                })
+                .unwrap_or(self.nebula_theme_preference)
+        } else {
+            self.nebula_theme_preference
+        };
+        self.apply_nebula_theme(theme);
+        self.persist_nebula_settings();
+    }
+
+    /// Apply a live operating-system appearance change without rewriting the
+    /// stored theme family. This is intentionally a no-op in manual mode.
+    pub fn system_theme_changed(&mut self, system_theme: WinitTheme) {
+        self.nebula_system_theme = Some(system_theme);
+        if self.nebula_follow_system_theme {
+            let theme = self
+                .nebula_theme_preference
+                .for_system_appearance(matches!(system_theme, WinitTheme::Light));
+            self.apply_nebula_theme(theme);
+        }
+    }
+
+    /// Remember a reloaded window-decoration preference without allowing it
+    /// to suppress OS theme notifications while automatic mode is enabled.
+    pub fn update_window_theme_override(&mut self, theme: Option<WinitTheme>) {
+        self.nebula_window_theme_override = theme;
+        self.window.set_theme(if self.nebula_follow_system_theme { None } else { theme });
     }
 
     pub fn toggle_ghost(&mut self) {
@@ -2881,7 +2974,10 @@ impl Display {
     }
 
     pub fn reset_appearance_settings(&mut self) {
-        self.nebula_theme = NebulaTheme::default();
+        self.nebula_theme_preference = NebulaTheme::default();
+        self.nebula_follow_system_theme = false;
+        self.window.set_theme(self.nebula_window_theme_override);
+        self.nebula_theme = self.nebula_theme_preference;
         let defaults = self.nebula_default_colors;
         self.nebula_theme.apply_term_colors(&mut self.colors, &defaults);
         write_nebula_prompt_theme(self.nebula_theme);
@@ -3284,7 +3380,8 @@ impl Display {
             background: self.nebula_background,
             background_image: self.nebula_background_image.clone(),
             background_image_opacity: self.nebula_background_image_opacity,
-            theme: self.nebula_theme,
+            theme: self.nebula_theme_preference,
+            follow_system_theme: self.nebula_follow_system_theme,
             pinned_hosts: self.nebula_pinned_hosts.clone(),
             saved_hosts: self.nebula_saved_hosts.clone(),
             hidden_hosts: self.nebula_hidden_hosts.clone(),
@@ -3300,13 +3397,30 @@ impl Display {
 
         let settings = settings::nebula_settings_load(config);
         let image_changed = settings.background_image != self.nebula_background_image;
-        if settings.theme != self.nebula_theme {
-            // Hand-edited theme in the config file: apply and re-publish the
-            // prompt bridge just like an in-panel selection would.
-            self.nebula_theme = settings.theme;
-            let defaults = self.nebula_default_colors;
-            settings.theme.apply_term_colors(&mut self.colors, &defaults);
-            write_nebula_prompt_theme(settings.theme);
+        self.nebula_theme_preference = settings.theme;
+        let follow_system_changed = self.nebula_follow_system_theme != settings.follow_system_theme;
+        self.nebula_follow_system_theme = settings.follow_system_theme;
+        if follow_system_changed {
+            self.window.set_theme(if settings.follow_system_theme {
+                None
+            } else {
+                self.nebula_window_theme_override
+            });
+            if settings.follow_system_theme {
+                self.nebula_system_theme = self.window.theme();
+            }
+        }
+        let active_theme = if settings.follow_system_theme {
+            self.nebula_system_theme
+                .map(|system| settings.theme.for_system_appearance(matches!(system, WinitTheme::Light)))
+                .unwrap_or(settings.theme)
+        } else {
+            settings.theme
+        };
+        if active_theme != self.nebula_theme {
+            // Hand-edited theme or automatic-mode setting: apply and publish
+            // it exactly like an in-panel selection would.
+            self.apply_nebula_theme(active_theme);
         }
         self.nebula_ghost_enabled = settings.ghost;
         self.nebula_accept = settings.accept;
@@ -3316,7 +3430,11 @@ impl Display {
         self.nebula_powerline_enabled = settings.powerline;
         self.nebula_keep_session = settings.keep_session;
         self.nebula_window_opacity = settings.opacity;
-        self.nebula_background = settings.background;
+        self.nebula_background = if settings.follow_system_theme {
+            Some(active_theme.palette().term_bg)
+        } else {
+            settings.background
+        };
         self.nebula_background_image = settings.background_image;
         self.nebula_background_image_opacity = settings.background_image_opacity;
         // Sync the host lists too: another window shares the settings file,
@@ -3658,6 +3776,7 @@ impl Display {
 
         // Collect renderable content before the terminal is dropped.
         let custom_background = self.nebula_background;
+        let clickable_matches = hint::visible_clickable_matches(&terminal, config);
         let mut content = RenderableContent::new(config, self, &terminal, search_state, &view);
         let mut grid_cells = Vec::new();
         let mut grid_pad_bg = None;
@@ -3846,6 +3965,7 @@ impl Display {
             let highlighted_hint = &self.highlighted_hint;
             let vi_highlighted_hint = &self.vi_highlighted_hint;
             let damage_tracker = &mut self.damage_tracker;
+            let mut clickable_index = 0usize;
 
             let cells = grid_cells.into_iter().map(|mut cell| {
                 match cell.character {
@@ -3866,9 +3986,28 @@ impl Display {
                     _ => (),
                 }
 
-                // Underline hints hovered by mouse or vi mode cursor.
+                let point = term::viewport_to_point(display_offset, cell.point);
+                while clickable_matches
+                    .get(clickable_index)
+                    .is_some_and(|bounds| bounds.end() < &point)
+                {
+                    clickable_index += 1;
+                }
+                let is_clickable = clickable_matches
+                    .get(clickable_index)
+                    .is_some_and(|bounds| bounds.contains(&point));
+                if is_clickable {
+                    // 点击目标的虚线直接继承每个 cell 的文字色；不能统一成主题色，
+                    // 否则 ls 的目录/可执行文件颜色语义会被下划线悄悄抹平。
+                    cell.flags.remove(Flags::ALL_UNDERLINES);
+                    cell.flags.insert(Flags::DASHED_UNDERLINE);
+                    cell.underline = cell.fg;
+                }
+
+                // Underline hints hovered by mouse or vi mode cursor. Persistent
+                // clickable ranges stay dashed; other hint states retain the
+                // stronger solid underline used by keyboard/vi highlighting.
                 if has_highlighted_hint {
-                    let point = term::viewport_to_point(display_offset, cell.point);
                     let hyperlink = cell.extra.as_ref().and_then(|extra| extra.hyperlink.as_ref());
 
                     let should_highlight = |hint: &Option<HintMatch>| {
@@ -3876,7 +4015,9 @@ impl Display {
                     };
                     if should_highlight(highlighted_hint) || should_highlight(vi_highlighted_hint) {
                         damage_tracker.frame().damage_point(cell.point);
-                        cell.flags.insert(Flags::UNDERLINE);
+                        if !is_clickable {
+                            cell.flags.insert(Flags::UNDERLINE);
+                        }
                     }
                 }
 

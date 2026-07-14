@@ -317,7 +317,13 @@ impl RectRenderer {
         Ok(Self { vao, vbo, programs, vertices: Default::default() })
     }
 
-    pub fn draw(&mut self, size_info: &SizeInfo, metrics: &Metrics, rects: Vec<RenderRect>) {
+    pub fn draw(
+        &mut self,
+        size_info: &SizeInfo,
+        metrics: &Metrics,
+        rects: Vec<RenderRect>,
+        window_height: f32,
+    ) {
         unsafe {
             // Bind VAO to enable vertex attribute slots.
             gl::BindVertexArray(self.vao);
@@ -346,7 +352,7 @@ impl RectRenderer {
 
                 let program = &self.programs[rect_kind as usize];
                 gl::UseProgram(program.id());
-                program.update_uniforms(size_info, metrics);
+                program.update_uniforms(size_info, metrics, window_height);
 
                 // Upload accumulated undercurl vertices.
                 gl::BufferData(
@@ -461,13 +467,13 @@ impl RectShaderProgram {
         self.program.id()
     }
 
-    pub fn update_uniforms(&self, size_info: &SizeInfo, metrics: &Metrics) {
+    pub fn update_uniforms(&self, size_info: &SizeInfo, metrics: &Metrics, window_height: f32) {
         let position = (0.5 * metrics.descent).abs();
         let underline_position = metrics.descent.abs() - metrics.underline_position.abs();
 
-        let viewport_height = size_info.height() - size_info.padding_y();
-        let padding_y = viewport_height
-            - (viewport_height / size_info.cell_height()).floor() * size_info.cell_height();
+        // gl_FragCoord 使用真实 framebuffer 的左下角坐标。这里必须对齐到
+        // 实际网格底边；仅从顶部 padding 取余会在非对称底边和上下分屏时错位。
+        let padding_y = grid_bottom(size_info, window_height);
 
         unsafe {
             if let Some(u_cell_width) = self.u_cell_width {
@@ -492,5 +498,33 @@ impl RectShaderProgram {
                 gl::Uniform1f(u_undercurl_position, position);
             }
         }
+    }
+}
+
+fn grid_bottom(size_info: &SizeInfo, window_height: f32) -> f32 {
+    let framebuffer_height = if window_height > 0.0 { window_height } else { size_info.height() };
+    framebuffer_height
+        - size_info.padding_y()
+        - size_info.screen_lines() as f32 * size_info.cell_height()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grid_bottom_uses_independent_bottom_reserve() {
+        let size = SizeInfo::new_fully_asymmetric(
+            1000.0, 1000.0, 10.0, 20.0, 260.0, 20.0, 64.0, 16.0,
+        );
+        assert_eq!(size.screen_lines(), 46);
+        assert_eq!(grid_bottom(&size, 1000.0), 16.0);
+    }
+
+    #[test]
+    fn grid_bottom_uses_framebuffer_coordinates_for_split_panes() {
+        let pane = SizeInfo::new(900.0, 600.0, 10.0, 20.0, 100.0, 150.0, false);
+        assert_eq!(pane.screen_lines(), 15);
+        assert_eq!(grid_bottom(&pane, 1000.0), 550.0);
     }
 }

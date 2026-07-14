@@ -522,7 +522,7 @@ impl Renderer {
             gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);
         }
 
-        self.rect_renderer.draw(size_info, metrics, rects);
+        self.rect_renderer.draw(size_info, metrics, rects, self.window_height.get());
 
         // Activate regular state again.
         unsafe {
@@ -705,24 +705,9 @@ impl Renderer {
     }
 
     pub fn set_viewport(&self, size: &SizeInfo) {
-        let content_h = size.height() - 2.0 * size.padding_y();
-        // `padding_y` is measured from the top, but glViewport's origin is the
-        // bottom-left. Flip using the full window height so a pane occupying the
-        // top half of the screen isn't drawn in the bottom half. For a full-height
-        // pane (window height == size height) this reduces to `padding_y`.
-        let win_h = self.window_height.get();
-        let gl_y = if win_h > 0.0 {
-            win_h - size.padding_y() - content_h
-        } else {
-            size.padding_y()
-        };
+        let (x, y, width, height) = cell_viewport(size, self.window_height.get());
         unsafe {
-            gl::Viewport(
-                size.padding_x() as i32,
-                gl_y as i32,
-                size.width() as i32 - size.padding_x() as i32 - size.padding_right() as i32,
-                content_h as i32,
-            );
+            gl::Viewport(x, y, width, height);
         }
     }
 
@@ -734,6 +719,25 @@ impl Renderer {
             TextRendererProvider::Glsl3(renderer) => renderer.resize(size_info),
         }
     }
+}
+
+/// Calculate the cell viewport in OpenGL's bottom-left coordinate system.
+fn cell_viewport(size: &SizeInfo, window_height: f32) -> (i32, i32, i32, i32) {
+    let content_width = size.width() - size.padding_x() - size.padding_right();
+    let content_height = size.height() - size.padding_y() - size.padding_bottom();
+
+    // `padding_y` is measured from the top. A pane can encode only a subsection
+    // of the framebuffer, so flip against the real window height when available.
+    // 全窗口路径最终落在独立的 bottom padding 上，不能再镜像顶部标题栏留白。
+    let framebuffer_height = if window_height > 0.0 { window_height } else { size.height() };
+    let y = framebuffer_height - size.padding_y() - content_height;
+
+    (
+        size.padding_x() as i32,
+        y as i32,
+        content_width.max(0.0) as i32,
+        content_height.max(0.0) as i32,
+    )
 }
 
 struct GlExtensions;
@@ -784,4 +788,28 @@ extern "system" fn gl_debug_log(
 ) {
     let msg = unsafe { CStr::from_ptr(msg).to_string_lossy() };
     debug!("[gl_render] {msg}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asymmetric_bottom_padding_is_the_cell_viewport_origin() {
+        let size = SizeInfo::new_fully_asymmetric(
+            1000.0, 1000.0, 10.0, 20.0, 260.0, 20.0, 64.0, 16.0,
+        );
+
+        assert_eq!(cell_viewport(&size, 1000.0), (260, 16, 720, 920));
+        // Startup calls resize before the renderer has recorded the window height.
+        assert_eq!(cell_viewport(&size, 0.0), (260, 16, 720, 920));
+    }
+
+    #[test]
+    fn split_viewport_flips_against_the_real_window_height() {
+        // Pane content rect: y=150, h=300. Split layout encodes it as
+        // height=h+2*y with symmetric local padding.
+        let pane = SizeInfo::new(900.0, 600.0, 10.0, 20.0, 100.0, 150.0, false);
+        assert_eq!(cell_viewport(&pane, 1000.0), (100, 550, 700, 300));
+    }
 }

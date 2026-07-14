@@ -2,7 +2,7 @@
 
 ## Release package (recommended)
 
-1. Download `NebulaTerminal-v0.2.1-windows-x64.zip` from the
+1. Download `NebulaTerminal-v0.4.0-windows-x64.zip` from the
    [Releases](https://github.com/Kuddev/nebula/releases) page.
 2. Unzip anywhere (no installer, no admin rights).
 3. **Install the font**: double-click `MapleMonoNormal-NF-CN-Regular.ttf` and press

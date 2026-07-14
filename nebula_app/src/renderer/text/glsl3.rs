@@ -249,6 +249,14 @@ impl TextRenderApi<Batch> for RenderApi<'_> {
 
         unsafe {
             self.program.set_rendering_pass(RenderingPass::Background);
+            // 选区/主题光标背景是预乘 alpha。直接替换会把透明窗口的目标
+            // alpha 打成 15%/20%，让窗口后的应用透进单元格；应叠加到已绘制的卡片。
+            gl::BlendFuncSeparate(
+                gl::ONE,
+                gl::ONE_MINUS_SRC_ALPHA,
+                gl::ONE,
+                gl::ONE_MINUS_SRC_ALPHA,
+            );
             gl::DrawElementsInstanced(
                 gl::TRIANGLES,
                 6,
@@ -257,6 +265,7 @@ impl TextRenderApi<Batch> for RenderApi<'_> {
                 self.batch.len() as GLsizei,
             );
             self.program.set_rendering_pass(RenderingPass::SubpixelPass1);
+            gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
             gl::DrawElementsInstanced(
                 gl::TRIANGLES,
                 6,

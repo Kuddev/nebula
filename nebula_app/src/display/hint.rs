@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::cmp::Reverse;
+use std::cmp::{self, Reverse};
 use std::collections::HashSet;
 use std::iter;
 use std::rc::Rc;
@@ -368,6 +368,84 @@ pub fn visible_unique_hyperlinks_iter<T>(term: &Term<T>) -> impl Iterator<Item =
     })
 }
 
+/// Collect every visible range which supports the same mouse interaction as a hint.
+///
+/// Unlike keyboard hint labels, persistent link decoration must retain repeated
+/// OSC 8 targets: two files resolving to the same URI are still two affordances.
+pub fn visible_clickable_matches<T>(term: &Term<T>, config: &UiConfig) -> Vec<Match> {
+    let mut matches = Vec::new();
+
+    for hint in config
+        .hints
+        .enabled
+        .iter()
+        .filter(|hint| hint.mouse.as_ref().is_some_and(|mouse| mouse.enabled))
+    {
+        if hint.content.hyperlinks {
+            matches.extend(visible_hyperlinks_iter(term));
+        }
+
+        if let Some(regex) = hint.content.regex.as_ref() {
+            regex.with_compiled(|regex| {
+                let regex_matches = visible_regex_match_iter(term, regex).collect::<Vec<_>>();
+                if hint.post_processing {
+                    for bounds in regex_matches {
+                        matches.extend(HintPostProcessor::new(term, regex, bounds));
+                    }
+                } else {
+                    matches.extend(regex_matches);
+                }
+            });
+        }
+    }
+
+    merge_overlapping_matches(matches)
+}
+
+/// Iterate over every contiguous visible OSC 8 range, including duplicate URIs.
+fn visible_hyperlinks_iter<T>(term: &Term<T>) -> impl Iterator<Item = Match> + '_ {
+    let mut display_iter = term.grid().display_iter().peekable();
+
+    iter::from_fn(move || {
+        let (cell, hyperlink) = display_iter.find_map(|cell| {
+            let hyperlink = cell.hyperlink()?;
+            Some((cell, hyperlink))
+        })?;
+        let start = cell.point;
+        let mut end = start;
+
+        while let Some(next_cell) = display_iter.peek() {
+            if next_cell.hyperlink().as_ref() != Some(&hyperlink) {
+                break;
+            }
+            end = next_cell.point;
+            let _ = display_iter.next();
+        }
+
+        Some(start..=end)
+    })
+}
+
+/// Sort and merge overlaps so render-time membership checks stay linear in cells + links.
+fn merge_overlapping_matches(mut matches: Vec<Match>) -> Vec<Match> {
+    matches.sort_by_key(|bounds| (*bounds.start(), Reverse(*bounds.end())));
+    let mut merged: Vec<Match> = Vec::with_capacity(matches.len());
+
+    for bounds in matches {
+        if let Some(last) = merged.last_mut() {
+            if bounds.start() <= last.end() {
+                let start = *last.start();
+                let end = cmp::max(*last.end(), *bounds.end());
+                *last = start..=end;
+                continue;
+            }
+        }
+        merged.push(bounds);
+    }
+
+    merged
+}
+
 /// Retrieve the match, if the specified point is inside the content matching the regex.
 fn regex_match_at<T>(
     term: &Term<T>,
@@ -697,6 +775,49 @@ mod tests {
             unique_hyperlinks.next()
         );
         assert_eq!(None, unique_hyperlinks.next());
+    }
+
+    #[test]
+    fn visible_hyperlinks_keep_repeated_targets() {
+        let mut term = mock_term("000\r\n111");
+        let hyperlink = Hyperlink::new(Some("same"), String::from("file:///same"));
+
+        term.goto(0, 0);
+        term.set_hyperlink(Some(hyperlink.clone().into()));
+        term.input('a');
+        term.input('b');
+        term.set_hyperlink(None);
+        term.goto(1, 0);
+        term.set_hyperlink(Some(hyperlink.into()));
+        term.input('c');
+        term.input('d');
+        term.set_hyperlink(None);
+
+        let matches = visible_hyperlinks_iter(&term).collect::<Vec<_>>();
+        assert_eq!(
+            matches,
+            vec![
+                Point::new(Line(0), Column(0))..=Point::new(Line(0), Column(1)),
+                Point::new(Line(1), Column(0))..=Point::new(Line(1), Column(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlapping_clickable_ranges_are_merged() {
+        let matches = vec![
+            Point::new(Line(0), Column(2))..=Point::new(Line(0), Column(6)),
+            Point::new(Line(0), Column(0))..=Point::new(Line(0), Column(3)),
+            Point::new(Line(1), Column(0))..=Point::new(Line(1), Column(2)),
+        ];
+
+        assert_eq!(
+            merge_overlapping_matches(matches),
+            vec![
+                Point::new(Line(0), Column(0))..=Point::new(Line(0), Column(6)),
+                Point::new(Line(1), Column(0))..=Point::new(Line(1), Column(2)),
+            ]
+        );
     }
 
     #[test]
