@@ -14,6 +14,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthChar;
 
 /// Which view the drawer shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +118,7 @@ pub struct SidePanel {
     pub search: String,
     /// Whether the filter box owns the keyboard.
     pub search_focus: bool,
+    search_selection: super::text_input::SelectAllState,
     /// Flat, budget-bounded index of the tree used by the filter. Built ONCE
     /// on the first filtering keystroke and reused for the rest of the query
     /// (each keystroke then only string-matches in memory); dropped whenever
@@ -126,6 +128,7 @@ pub struct SidePanel {
     /// contract as the Files filter box.
     pub commit_msg: String,
     pub commit_focus: bool,
+    commit_selection: super::text_input::SelectAllState,
     /// Last clicked file row (path + when), for double-click-to-open.
     pub last_file_click: Option<(PathBuf, Instant)>,
     /// In-progress drag of a file row toward the terminal.
@@ -161,9 +164,11 @@ impl SidePanel {
             scroll: 0,
             search: String::new(),
             search_focus: false,
+            search_selection: Default::default(),
             search_index: None,
             commit_msg: String::new(),
             commit_focus: false,
+            commit_selection: Default::default(),
             last_file_click: None,
             drag_file: None,
             selected: None,
@@ -268,22 +273,33 @@ impl SidePanel {
 
     /// Append typed text to the filter query and re-derive the rows.
     pub fn search_input(&mut self, text: &str) {
-        for c in text.chars().filter(|c| !c.is_control()) {
-            self.search.push(c);
-        }
+        self.search_selection.insert(&mut self.search, text);
         self.scroll = 0;
         self.rebuild_rows();
     }
 
     pub fn search_backspace(&mut self) {
-        self.search.pop();
+        self.search_selection.backspace(&mut self.search);
         self.scroll = 0;
         self.rebuild_rows();
+    }
+
+    pub fn search_select_all(&mut self) {
+        self.search_selection.select(&self.search);
+    }
+
+    pub fn search_selected_text(&self) -> Option<String> {
+        self.search_selection.selected_text(&self.search)
+    }
+
+    pub fn search_all_selected(&self) -> bool {
+        self.search_selection.is_selected()
     }
 
     /// Leave the filter box; `clear` also resets the query (Esc).
     pub fn search_unfocus(&mut self, clear: bool) {
         self.search_focus = false;
+        self.search_selection.clear();
         if clear && !self.search.is_empty() {
             self.search.clear();
             self.scroll = 0;
@@ -356,7 +372,39 @@ impl SidePanel {
     pub fn git_begin_commit(&mut self) {
         if self.git.as_ref().is_some_and(|g| !g.staged.is_empty()) && !self.op_running() {
             self.commit_focus = true;
+            self.commit_selection.clear();
         }
+    }
+
+    pub fn commit_input(&mut self, text: &str) {
+        self.commit_selection.insert(&mut self.commit_msg, text);
+    }
+
+    pub fn commit_backspace(&mut self) {
+        self.commit_selection.backspace(&mut self.commit_msg);
+    }
+
+    pub fn commit_select_all(&mut self) {
+        self.commit_selection.select(&self.commit_msg);
+    }
+
+    pub fn commit_selected_text(&self) -> Option<String> {
+        self.commit_selection.selected_text(&self.commit_msg)
+    }
+
+    pub fn commit_all_selected(&self) -> bool {
+        self.commit_selection.is_selected()
+    }
+
+    pub fn commit_cancel(&mut self) {
+        self.commit_focus = false;
+        self.commit_msg.clear();
+        self.commit_selection.clear();
+    }
+
+    pub fn commit_unfocus(&mut self) {
+        self.commit_focus = false;
+        self.commit_selection.clear();
     }
 
     /// Enter in the message box: run `git commit -m <msg>`.
@@ -367,6 +415,7 @@ impl SidePanel {
         }
         self.commit_focus = false;
         self.commit_msg.clear();
+        self.commit_selection.clear();
         self.spawn_git(vec!["commit".into(), "-m".into(), msg]);
     }
 
@@ -752,6 +801,7 @@ pub(super) fn push_quads(
     theme: &NebulaTheme,
     quads: &mut Vec<UiQuad>,
     scale: f32,
+    cell_w: f32,
 ) {
     let s = |v: f32| v * scale;
     let palette = theme.palette();
@@ -845,6 +895,19 @@ pub(super) fn push_quads(
             ));
         }
         quads.push(UiQuad::solid(sx, sy, sw, sh, radius, sk.input));
+        if panel.search_all_selected() && !panel.search.is_empty() {
+            let columns: usize = panel.search.chars().map(|c| c.width().unwrap_or(0)).sum();
+            let selection_x = sx + s(8.0) + cell_w * 1.8;
+            let selection_w = (columns as f32 * cell_w).min(sw - (selection_x - sx) - s(8.0));
+            quads.push(UiQuad::solid(
+                selection_x - s(2.0),
+                sy + s(6.0),
+                selection_w + s(4.0),
+                sh - s(12.0),
+                s(4.0),
+                sk.accent_soft,
+            ));
+        }
 
         // The selected file row wears the tab's floating-pill language: an
         // accent halo + the tab 底色 + a soft accent wash — the same treatment
@@ -923,6 +986,19 @@ pub(super) fn push_quads(
                 Rgba::new(a.r, a.g, a.b, 200),
             ));
             quads.push(UiQuad::solid(sx, sy, sw, sh, radius, sk.input));
+            if panel.commit_all_selected() && !panel.commit_msg.is_empty() {
+                let columns: usize =
+                    panel.commit_msg.chars().map(|c| c.width().unwrap_or(0)).sum();
+                let selection_w = (columns as f32 * cell_w).min(sw - s(16.0));
+                quads.push(UiQuad::solid(
+                    sx + s(6.0),
+                    sy + s(6.0),
+                    selection_w + s(4.0),
+                    sh - s(12.0),
+                    s(4.0),
+                    sk.accent_soft,
+                ));
+            }
         } else {
             for (bx, bw) in git_button_rects(sx, sw, s(8.0)) {
                 quads.push(UiQuad::solid(bx, sy, bw, sh, radius, sk.input));
@@ -1033,7 +1109,10 @@ pub(super) fn draw_text(
             if panel.search.is_empty() && !panel.search_focus {
                 r.draw_chrome_text(size, qx, search_ty, sk.ink_faint, "筛选文件…", gc);
             } else {
-                let shown = if panel.search_focus && super::caret_blink_on() {
+                let shown = if panel.search_focus
+                    && !panel.search_all_selected()
+                    && super::caret_blink_on()
+                {
                     format!("{}▏", panel.search)
                 } else {
                     panel.search.clone()
@@ -1134,7 +1213,11 @@ pub(super) fn draw_text(
                 let (sx, sy, sw, sh) = layout.search;
                 let strip_ty = sy + (sh - cell_h) / 2.0;
                 if panel.commit_focus {
-                    let caret = if super::caret_blink_on() { "▏" } else { "" };
+                    let caret = if !panel.commit_all_selected() && super::caret_blink_on() {
+                        "▏"
+                    } else {
+                        ""
+                    };
                     let shown = format!("{}{caret}", panel.commit_msg);
                     let hint = if panel.commit_msg.is_empty() {
                         "提交信息…  Enter 提交 · Esc 取消"
@@ -1295,5 +1378,21 @@ mod tests {
         assert_eq!(panel_hit(&l, px + 5.0, py + 5.0), PanelHit::ViewFiles);
         assert_eq!(panel_hit(&l, px + pw - 5.0, py + 5.0), PanelHit::ViewGit);
         assert_eq!(panel_hit(&l, px + 5.0, l.list_y + l.row_h * 1.5), PanelHit::Row(1));
+    }
+
+    #[test]
+    fn self_drawn_fields_replace_select_all_on_paste() {
+        let mut panel = SidePanel::new();
+        panel.search_input("old");
+        panel.search_select_all();
+        assert_eq!(panel.search_selected_text().as_deref(), Some("old"));
+        panel.search_input("new\nvalue");
+        assert_eq!(panel.search, "newvalue");
+
+        panel.commit_input("old commit");
+        panel.commit_select_all();
+        assert_eq!(panel.commit_selected_text().as_deref(), Some("old commit"));
+        panel.commit_input("new commit");
+        assert_eq!(panel.commit_msg, "new commit");
     }
 }

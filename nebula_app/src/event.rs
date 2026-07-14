@@ -743,6 +743,13 @@ impl ApplicationHandler<Event> for Processor {
                     window_context.display.window.request_redraw();
                 }
             },
+            (EventType::SshDeleteUndoExpired, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.display.expire_ssh_delete_undo();
+                    window_context.dirty = true;
+                    window_context.display.window.request_redraw();
+                }
+            },
             (EventType::NebulaTab(request), Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     let close_window = window_context.handle_tab_request(request);
@@ -925,6 +932,8 @@ pub enum EventType {
     /// An interactive resize settled (no size change for the debounce window):
     /// flush the deferred PTY resizes + welcome-intro reprint in one shot.
     NebulaResizeSettled,
+    /// The SSH deletion grace period ended; commit its delayed credential cleanup.
+    SshDeleteUndoExpired,
     /// Typed AI-CLI lifecycle event from the nebula-hook pipe (see `ai_hook`).
     AiHook(crate::ai_hook::AiHookEvent),
     /// A toast was clicked: focus the originating window and, when known,
@@ -955,6 +964,8 @@ pub enum TabRequest {
     OpenDoc(std::path::PathBuf),
     Close,
     CloseIndex(usize),
+    /// Duplicate a tab using the launch identity captured when it was opened.
+    Duplicate(usize),
     CloseWindow,
     SelectNext,
     SelectPrev,
@@ -968,6 +979,12 @@ pub enum TabRequest {
     },
     /// Toggle a split (left/right or top/bottom) with an independent shell.
     SplitToggle(crate::display::SplitDirection),
+    /// Select a specific tab and split it. Context menus can target inactive
+    /// tabs, so this must be atomic rather than relying on two queued events.
+    SplitIndex {
+        index: usize,
+        direction: crate::display::SplitDirection,
+    },
     /// Dock the whole layout of tab `source` into the ACTIVE tab, splitting it
     /// on `nav`'s side (drag a sidebar tab into the terminal area to drop).
     DockSplit {
@@ -982,6 +999,11 @@ pub enum TabRequest {
     BeginRename(usize),
     /// Commit the rename with the provided new name.
     CommitRename(String),
+    /// Set a tab's custom light-strip color; `None` follows the theme accent.
+    SetColor {
+        index: usize,
+        color: Option<crate::display::color::Rgb>,
+    },
     /// Cancel the current rename operation.
     CancelRename,
 }
@@ -2431,7 +2453,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 // Clock ticks are handled at the window-context level.
                 EventType::NebulaTick | EventType::NebulaAttach => (),
                 // Resize settling is handled at the window-context level.
-                EventType::NebulaResizeSettled => (),
+                EventType::NebulaResizeSettled | EventType::SshDeleteUndoExpired => (),
                 // AI hook events are handled at the Processor level (they may
                 // target any window's pane); FocusWindow likewise.
                 EventType::AiHook(_) | EventType::FocusWindow { .. } => (),
@@ -2769,7 +2791,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             }
                             let panel = &mut self.ctx.display.nebula_side_panel;
                             panel.search_unfocus(false);
-                            panel.commit_focus = false;
+                            panel.commit_unfocus();
                         }
 
                         // Nebula: always redraw on focus change, and clear the
@@ -2835,13 +2857,13 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                                 // box, not paste into the shell behind it.
                                 self.ctx.display.nebula_side_panel.search_input(&text);
                             } else if self.ctx.display.nebula_side_panel.commit_focus {
-                                self.ctx
-                                    .display
-                                    .nebula_side_panel
-                                    .commit_msg
-                                    .extend(text.chars().filter(|c| !c.is_control()));
+                                self.ctx.display.nebula_side_panel.commit_input(&text);
                             } else if self.ctx.display.nebula_ssh_editor.is_some() {
                                 self.ctx.display.ssh_editor_insert(&text);
+                            } else if self.ctx.display.command_palette_open()
+                                && !self.ctx.display.command_palette_picker_open()
+                            {
+                                self.ctx.display.palette_input_text(&text);
                             } else {
                                 // Don't use bracketed paste for single char input.
                                 self.ctx.paste(&text, text.chars().count() > 1);

@@ -126,6 +126,12 @@ pub trait ActionContext<T: EventListener> {
     fn scroll(&mut self, _scroll: Scroll) {}
     fn window(&mut self) -> &mut Window;
     fn display(&mut self) -> &mut Display;
+    /// Whether this context owns Nebula's window chrome. Unit tests that only
+    /// exercise terminal selection can turn it off instead of constructing an
+    /// OpenGL Display just to get through unrelated hit-testing.
+    fn nebula_chrome_active(&self) -> bool {
+        true
+    }
     fn terminal(&self) -> &Term<T>;
     fn terminal_mut(&mut self) -> &mut Term<T>;
     fn nebula_accept(&self) -> crate::display::AcceptKey {
@@ -569,6 +575,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // open, and the closing animation swallows pointer motion until the
         // retained editor snapshot is released.
         if self.ctx.display().nebula_ssh_editor.is_some() {
+            self.ctx.display().set_ssh_delete_undo_hover(false);
             let hit = if self.ctx.display().ssh_editor_active() {
                 self.ctx.display().ssh_editor_hit(x as f32, y as f32)
             } else {
@@ -633,6 +640,30 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let settings_scroll = self.ctx.display().settings_scroll();
         let shell_picker_open = self.ctx.display().nebula_shell_picker_open;
         let shell_picker_count = self.ctx.display().shell_picker_count();
+        let hidden_host_count = self.ctx.display().hidden_ssh_host_count();
+        // A native context menu is a pointer-modal overlay: while it is open,
+        // underlying links, tabs and drawer rows must not react to hover.
+        if self.ctx.display().context_menu_interactive() {
+            self.ctx.display().set_ssh_delete_undo_hover(false);
+            let hit = self.ctx.display().context_menu_hover(x as f32, y as f32);
+            self.ctx.window().set_mouse_cursor(if matches!(
+                hit,
+                crate::display::ContextMenuHit::Action(_)
+            ) {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
+            return;
+        }
+        let undo_hover = self.ctx.display().nebula_confirm.is_none()
+            && !self.ctx.display().command_palette_open()
+            && self.ctx.display().ssh_delete_undo_hit(x as f32, y as f32);
+        self.ctx.display().set_ssh_delete_undo_hover(undo_hover);
+        if undo_hover {
+            self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
+            return;
+        }
         let settings_hover = crate::display::settings_hit(
             &window_size,
             scale,
@@ -643,6 +674,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             settings_scroll,
             shell_picker_open,
             shell_picker_count,
+            hidden_host_count,
         );
         let chrome_hover = if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32)
         {
@@ -676,6 +708,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::AcceptCycle
             | crate::display::SettingsHit::ShellCycle
             | crate::display::SettingsHit::ShellPickerRow(_)
+            | crate::display::SettingsHit::RestoreHiddenSsh(_)
             | crate::display::SettingsHit::FetchToggle
             | crate::display::SettingsHit::PowerlineToggle
             | crate::display::SettingsHit::KeepSessionToggle
@@ -760,7 +793,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         if self.ctx.display().command_palette_open() {
             let px = x as f32;
             let py = y as f32;
-            let with_input = !self.ctx.display().command_palette_picking_default();
+            let with_input = !self.ctx.display().command_palette_picker_open();
             let layout = crate::display::command_palette::palette_layout(
                 window_size.width(),
                 window_size.height(),
@@ -993,7 +1026,40 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.display().nebula_confirm = None;
                 self.ctx.paste_now(&text, bracketed);
             },
+            NebulaConfirm::DeleteSsh { host, .. } => {
+                self.ctx.display().nebula_confirm = None;
+                if self.ctx.display().confirm_delete_ssh_host(&host) {
+                    self.schedule_ssh_delete_undo_expiry();
+                }
+            },
         }
+    }
+
+    /// Keep timer creation and cancellation identical across keyboard, mouse,
+    /// and confirm-dialog paths. The delayed event owns only window routing;
+    /// sensitive credential state stays inside `Display`.
+    fn schedule_ssh_delete_undo_expiry(&mut self) {
+        let window_id = self.ctx.window().id();
+        let timer_id = TimerId::new(Topic::SshDeleteUndo, window_id);
+        let event = Event::new(EventType::SshDeleteUndoExpired, window_id);
+        let scheduler = self.ctx.scheduler_mut();
+        scheduler.unschedule(timer_id);
+        scheduler.schedule(
+            event,
+            crate::display::SSH_DELETE_UNDO_DURATION,
+            false,
+            timer_id,
+        );
+    }
+
+    /// Cancel expiry first so a late event cannot immediately dispose a host
+    /// that the user has just restored.
+    fn undo_ssh_delete(&mut self) -> bool {
+        let window_id = self.ctx.window().id();
+        self.ctx
+            .scheduler_mut()
+            .unschedule(TimerId::new(Topic::SshDeleteUndo, window_id));
+        self.ctx.display().undo_delete_ssh_host()
     }
 
     /// Advance the multi-click state machine for this press — exactly ONCE
@@ -1028,12 +1094,94 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         state
     }
 
+    fn run_context_menu_action(&mut self, action: crate::display::ContextMenuAction) {
+        use crate::display::ContextMenuAction::*;
+        match action {
+            DuplicateTab(index) => {
+                self.ctx.nebula_tab(crate::event::TabRequest::Duplicate(index));
+            },
+            SplitTabRight(index) => {
+                self.ctx.nebula_tab(crate::event::TabRequest::SplitIndex {
+                    index,
+                    direction: crate::display::SplitDirection::LeftRight,
+                });
+            },
+            SplitTabDown(index) => {
+                self.ctx.nebula_tab(crate::event::TabRequest::SplitIndex {
+                    index,
+                    direction: crate::display::SplitDirection::TopBottom,
+                });
+            },
+            RenameTab(index) => {
+                self.ctx.nebula_tab(crate::event::TabRequest::BeginRename(index));
+            },
+            CloseTab(index) => {
+                self.ctx.nebula_tab(crate::event::TabRequest::CloseIndex(index));
+            },
+            SetTabColor { index, color } => {
+                self.ctx.nebula_tab(crate::event::TabRequest::SetColor { index, color });
+            },
+            ConnectSsh(index) => {
+                let host = self.ctx.display().nebula_ssh_hosts.get(index).cloned();
+                if let Some(host) = host {
+                    self.ctx.nebula_tab(crate::event::TabRequest::NewSsh(host));
+                }
+            },
+            CopySshAddress(index) => {
+                let host = self.ctx.display().nebula_ssh_hosts.get(index).cloned();
+                if let Some(host) = host {
+                    self.ctx.clipboard_mut().store(ClipboardType::Clipboard, host);
+                }
+            },
+            EditSsh(index) => self.ctx.display().edit_ssh_host(index),
+            DeleteSsh(index) => self.ctx.display().request_delete_ssh_host(index),
+        }
+        self.ctx.mark_dirty();
+    }
+
     fn on_mouse_press(&mut self, button: MouseButton) {
         // Multi-click bookkeeping happens here and nowhere else. It used to
         // be advanced both by the chrome block and the terminal block below;
         // the second advance saw elapsed≈0 and upgraded EVERY terminal click
         // to a double/triple — plain drags selected by word or whole line.
         self.advance_click_state(button);
+
+        // Window chrome is deliberately optional at the input boundary. The
+        // terminal's click-state machine is useful and testable without a GPU
+        // window; real application contexts keep the default `true` value.
+        if self.ctx.nebula_chrome_active() {
+
+        // Non-primary presses also release lightweight menus. Right-click on
+        // a context menu is handled below so it can naturally retarget.
+        if button != MouseButton::Left {
+            if button != MouseButton::Right && self.ctx.display().context_menu_interactive() {
+                self.ctx.display().close_context_menu();
+                self.ctx.mark_dirty();
+                return;
+            }
+            if self.ctx.display().command_palette_picker_open() {
+                self.ctx.display().close_command_palette();
+                self.ctx.mark_dirty();
+                return;
+            }
+            if self.ctx.display().nebula_shell_picker_open {
+                self.ctx.display().close_shell_picker();
+                self.ctx.mark_dirty();
+                return;
+            }
+        }
+
+        if button == MouseButton::Left && self.ctx.display().context_menu_interactive() {
+            let x = self.ctx.mouse().x as f32;
+            let y = self.ctx.mouse().y as f32;
+            if let crate::display::ContextMenuHit::Action(action) =
+                self.ctx.display().context_menu_click(x, y)
+            {
+                self.run_context_menu_action(action);
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
 
         // A left press anywhere OUTSIDE the rename box ends the edit
         // (canceling, like Esc) — the click itself still lands wherever it
@@ -1065,7 +1213,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let y = self.ctx.mouse().y as f32;
             let size = self.ctx.display().size_info;
             let scale = self.ctx.window().scale_factor as f32;
-            let with_input = !self.ctx.display().command_palette_picking_default();
+            let with_input = !self.ctx.display().command_palette_picker_open();
             let layout = crate::display::command_palette::palette_layout(
                 size.width(),
                 size.height(),
@@ -1083,6 +1231,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             } else {
                 self.ctx.display().close_command_palette();
             }
+            self.ctx.mark_dirty();
+            return;
+        }
+
+        // The reversible-action bar floats above drawer/chrome content. True
+        // modals still retain pointer ownership and therefore block this path.
+        let undo_pointer = (self.ctx.mouse().x as f32, self.ctx.mouse().y as f32);
+        if button == MouseButton::Left
+            && self.ctx.display().nebula_confirm.is_none()
+            && self
+                .ctx
+                .display()
+                .ssh_delete_undo_hit(undo_pointer.0, undo_pointer.1)
+        {
+            self.undo_ssh_delete();
             self.ctx.mark_dirty();
             return;
         }
@@ -1224,6 +1387,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         if button == MouseButton::Right {
             let x = self.ctx.mouse().x as f32;
             let y = self.ctx.mouse().y as f32;
+            let menu_was_open = self.ctx.display().context_menu_interactive();
+            if menu_was_open
+                && !matches!(
+                    self.ctx.display().context_menu_hit(x, y),
+                    crate::display::ContextMenuHit::Outside
+                )
+            {
+                return;
+            }
             match self.ctx.display().chrome_hit(x, y) {
                 crate::display::ChromeHit::NewTab => {
                     let profiles: Vec<String> =
@@ -1234,14 +1406,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.mark_dirty();
                     return;
                 },
-                crate::display::ChromeHit::Tab(index) => {
-                    if index > 0 {
-                        self.ctx.nebula_tab(crate::event::TabRequest::Move { from: index, to: 0 });
-                    }
+                crate::display::ChromeHit::Tab(index)
+                | crate::display::ChromeHit::TabClose(index) => {
+                    self.ctx.display().open_tab_context_menu(index, x, y);
                     self.ctx.mark_dirty();
                     return;
                 },
-                crate::display::ChromeHit::Host(_) => {
+                crate::display::ChromeHit::Host(index) => {
+                    self.ctx.display().open_ssh_context_menu(index, x, y);
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                _ if menu_was_open => {
+                    self.ctx.display().close_context_menu();
+                    self.ctx.mark_dirty();
                     return;
                 },
                 _ => {},
@@ -1284,7 +1462,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let settings_scroll = self.ctx.display().settings_scroll();
             let shell_picker_open = self.ctx.display().nebula_shell_picker_open;
             let shell_picker_count = self.ctx.display().shell_picker_count();
-            match crate::display::settings_hit(
+            let hidden_host_count = self.ctx.display().hidden_ssh_host_count();
+            let settings_hit = crate::display::settings_hit(
                 &size,
                 scale,
                 x,
@@ -1294,7 +1473,22 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 settings_scroll,
                 shell_picker_open,
                 shell_picker_count,
-            ) {
+                hidden_host_count,
+            );
+            if shell_picker_open
+                && !matches!(
+                    settings_hit,
+                    crate::display::SettingsHit::ShellCycle
+                        | crate::display::SettingsHit::ShellPickerRow(_)
+                )
+            {
+                // First outside click dismisses the picker without activating
+                // an unrelated control hidden behind its temporary focus scope.
+                self.ctx.display().close_shell_picker();
+                self.ctx.mark_dirty();
+                return;
+            }
+            match settings_hit {
                 crate::display::SettingsHit::Toggle => {
                     self.ctx.display().toggle_settings();
                     self.ctx.mark_dirty();
@@ -1328,6 +1522,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 },
                 crate::display::SettingsHit::ShellPickerRow(index) => {
                     self.ctx.display().set_default_shell_by_index(index);
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::SettingsHit::RestoreHiddenSsh(index) => {
+                    self.ctx.display().restore_hidden_ssh_host(index);
                     self.ctx.mark_dirty();
                     return;
                 },
@@ -1404,11 +1603,6 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 },
                 crate::display::ChromeHit::AddSshHost => {
                     self.ctx.display().open_ssh_editor();
-                    self.ctx.mark_dirty();
-                    return;
-                },
-                crate::display::ChromeHit::HostDelete(index) => {
-                    self.ctx.display().delete_ssh_host(index);
                     self.ctx.mark_dirty();
                     return;
                 },
@@ -1516,6 +1710,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.mark_dirty();
                 return;
             }
+        }
         }
 
         // Nebula: right-click copies the selection, or pastes when there is
@@ -1924,6 +2119,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     pub fn on_focus_change(&mut self, is_focused: bool) {
+        if !is_focused {
+            // Lightweight pointer menus must never remain stranded over an
+            // inactive window. True modals intentionally survive focus loss.
+            self.ctx.display().close_context_menu();
+            self.ctx.display().close_shell_picker();
+            if self.ctx.display().command_palette_picker_open() {
+                self.ctx.display().close_command_palette();
+            }
+            self.ctx.mark_dirty();
+        }
         if self.ctx.terminal().mode().contains(TermMode::FOCUS_IN_OUT) {
             let chr = if is_focused { "I" } else { "O" };
 
@@ -2382,6 +2587,10 @@ mod tests {
 
         fn display(&mut self) -> &mut Display {
             unimplemented!();
+        }
+
+        fn nebula_chrome_active(&self) -> bool {
+            false
         }
 
         fn pop_message(&mut self) {

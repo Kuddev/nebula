@@ -11,6 +11,7 @@
 
 use super::{NebulaTheme, SizeInfo};
 use crate::shell_detect::DetectedShell;
+use unicode_width::UnicodeWidthChar;
 
 /// A dynamic quick-launch row: a config profile (launched by index) or a
 /// detected shell (spec carried inline). Built fresh on every menu open.
@@ -261,6 +262,7 @@ const RECENT_MAX: usize = 6;
 pub struct CommandPalette {
     open: bool,
     query: String,
+    query_selection: super::text_input::SelectAllState,
     /// Indices into the combined item space — `0..ITEMS.len()` are the static
     /// actions, `ITEMS.len()..` map onto `profiles`. Best match first.
     filtered: Vec<usize>,
@@ -294,6 +296,7 @@ impl CommandPalette {
         let mut palette = Self {
             open: false,
             query: String::new(),
+            query_selection: Default::default(),
             filtered: Vec::new(),
             selected: None, // No selection until user navigates
             recent: Vec::new(),
@@ -316,6 +319,12 @@ impl CommandPalette {
     /// no search box, list from top, shell icons emphasized).
     pub fn is_picking_default(&self) -> bool {
         self.picking_default
+    }
+
+    /// Lightweight shell/profile selector mode. Unlike the full command
+    /// palette it has no search field and should release focus naturally.
+    pub fn is_picker(&self) -> bool {
+        self.open && self.profiles_only
     }
 
     /// Refresh the dynamic quick-launch rows from the config's profile names.
@@ -377,6 +386,7 @@ impl CommandPalette {
         self.profiles_only = false;
         self.picking_default = false;
         self.query.clear();
+        self.query_selection.clear();
         self.refilter();
     }
 
@@ -386,6 +396,7 @@ impl CommandPalette {
         self.profiles_only = true;
         self.picking_default = false;
         self.query.clear();
+        self.query_selection.clear();
         self.refilter();
     }
 
@@ -396,6 +407,7 @@ impl CommandPalette {
         self.profiles_only = true;
         self.picking_default = true;
         self.query.clear();
+        self.query_selection.clear();
         self.refilter();
     }
 
@@ -404,6 +416,7 @@ impl CommandPalette {
         self.profiles_only = false;
         self.picking_default = false;
         self.hover = None;
+        self.query_selection.clear();
     }
 
     /// Update hover based on mouse position. `row` is the index within the
@@ -443,13 +456,31 @@ impl CommandPalette {
         if c.is_control() {
             return;
         }
-        self.query.push(c);
+        let mut encoded = [0u8; 4];
+        self.query_selection.insert(&mut self.query, c.encode_utf8(&mut encoded));
+        self.refilter();
+    }
+
+    pub fn input_text(&mut self, text: &str) {
+        self.query_selection.insert(&mut self.query, text);
         self.refilter();
     }
 
     pub fn backspace(&mut self) {
-        self.query.pop();
+        self.query_selection.backspace(&mut self.query);
         self.refilter();
+    }
+
+    pub fn select_all(&mut self) {
+        self.query_selection.select(&self.query);
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.query_selection.selected_text(&self.query)
+    }
+
+    pub fn query_all_selected(&self) -> bool {
+        self.query_selection.is_selected()
     }
 
     /// Move the selection by `delta` rows, wrapping at both ends.
@@ -466,7 +497,10 @@ impl CommandPalette {
     /// Confirm the current selection: records it as recent, closes the palette,
     /// and returns the action to run, or `None` when nothing matches.
     pub fn confirm(&mut self) -> Option<PaletteAction> {
-        let selected = self.selected?;
+        // The first row is visibly selected on a freshly opened palette. Make
+        // Enter execute that same row even before arrow navigation, otherwise
+        // the UI advertises an action that the keyboard cannot confirm.
+        let selected = self.selected.unwrap_or(0);
         let idx = *self.filtered.get(selected)?;
         self.close();
         if let Some(profile) = idx.checked_sub(ITEMS.len()) {
@@ -556,11 +590,13 @@ impl CommandPalette {
         if self.filtered.is_empty() || max_rows == 0 {
             return (Vec::new(), None);
         }
-        // No selection yet (initial state) — show first page, no highlight
+        // No stored selection yet: the first row is the visual/default target.
+        // `selected` stays None until navigation so Up from a fresh palette
+        // still wraps to the last row, matching the existing keyboard model.
         let Some(selected) = self.selected else {
             let rows =
                 self.filtered.iter().take(max_rows).map(|&idx| self.row_for_idx(idx)).collect();
-            return (rows, None);
+            return (rows, Some(0));
         };
         // Keep the selection visible: once it passes the last row, scroll so it
         // sits on the bottom line of the window.
@@ -699,7 +735,7 @@ pub(super) fn push_quads(
     let s = |v: f32| v * scale;
     let palette = theme.palette();
     let sk = theme.skin();
-    let with_input = !model.is_picking_default();
+    let with_input = !model.is_picker();
     let layout = palette_layout(w, h, scale, with_input);
     let (px, py, pw, ph) = layout.panel;
     let (ix, iy, iw, ih) = layout.input;
@@ -736,6 +772,20 @@ pub(super) fn push_quads(
     // Query input box: only in full palette mode, not the WT-style picker.
     if with_input {
         quads.push(UiQuad::solid(ix, iy, iw, ih, s(10.0), sk.input));
+        if model.query_all_selected() && !model.query.is_empty() {
+            let cell_w = size.cell_width();
+            let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
+            let selection_x = ix + s(14.0 + 28.0);
+            let selection_w = (columns as f32 * cell_w).min(iw - s(56.0));
+            quads.push(UiQuad::solid(
+                selection_x - s(2.0),
+                iy + s(7.0),
+                selection_w + s(4.0),
+                ih - s(14.0),
+                s(4.0),
+                sk.accent_soft,
+            ));
+        }
     }
 
     // Hover background: subtle highlight when the mouse is over a row.
@@ -795,7 +845,7 @@ pub(super) fn draw_text(
     let h = size.height();
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let with_input = !model.is_picking_default();
+    let with_input = !model.is_picker();
     let layout = palette_layout(w, h, scale, with_input);
     let (ix, iy, iw, ih) = layout.input;
 
@@ -821,7 +871,11 @@ pub(super) fn draw_text(
             r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, cursor, gc);
         } else {
             // Show query + cursor at the end
-            let shown = format!("{query}{cursor}");
+            let shown = if model.query_all_selected() {
+                query.to_owned()
+            } else {
+                format!("{query}{cursor}")
+            };
             r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, &shown, gc);
         }
     }
@@ -909,7 +963,9 @@ mod tests {
                 args: vec![],
             },
         }];
-        palette.refilter();
+        // Dynamic shell rows belong to the shell/profile picker. The full
+        // command palette deliberately keeps static actions first.
+        palette.open_profiles();
         let (rows, _) = palette.visible(10);
         assert!(!rows.is_empty());
         assert_eq!(rows.last().unwrap().label, "PowerShell");
@@ -1009,5 +1065,35 @@ mod tests {
         assert_eq!(sel, Some(max - 1), "selection pinned to bottom row when scrolled");
         // The bottom visible row is the actually-selected item (field .label).
         assert_eq!(rows[max - 1].label, ITEMS[palette.filtered[7]].label);
+    }
+
+    #[test]
+    fn only_profile_modes_are_lightweight_pickers() {
+        let mut palette = CommandPalette::new();
+        assert!(!palette.is_picker());
+
+        palette.open();
+        assert!(!palette.is_picker(), "full palette keeps its search focus");
+
+        palette.open_profiles();
+        assert!(palette.is_picker(), "new-tab shell menu releases focus naturally");
+
+        palette.close();
+        assert!(!palette.is_picker());
+
+        palette.open_default_picker();
+        assert!(palette.is_picker(), "default-shell selector shares picker semantics");
+    }
+
+    #[test]
+    fn select_all_copy_and_paste_replace_the_query() {
+        let mut palette = CommandPalette::new();
+        palette.open();
+        palette.input_text("old query");
+        palette.select_all();
+        assert_eq!(palette.selected_text().as_deref(), Some("old query"));
+        palette.input_text("new\r\nquery");
+        assert_eq!(palette.query(), "newquery");
+        assert!(!palette.query_all_selected());
     }
 }

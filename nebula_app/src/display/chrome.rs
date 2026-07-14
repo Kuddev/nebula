@@ -29,7 +29,6 @@ pub enum ChromeHit {
     /// A row in the sidebar's "SSH HOSTS" section (index into the host list).
     Host(usize),
     AddSshHost,
-    HostDelete(usize),
     /// The "TABS" section header — click toggles the accordion fold.
     TabsSection,
     /// The "SSH HOSTS" section header — click toggles the accordion fold.
@@ -101,7 +100,6 @@ pub(super) struct ChromeTabLayout {
     /// SSH host rows, same indexing contract as `tabs`: entry `i` is host `i`,
     /// scrolled-out rows carry a zero rect (skipped by drawing and hit-tests).
     pub(super) hosts: Vec<(f32, f32, f32, f32)>,
-    pub(super) host_closes: Vec<(f32, f32, f32, f32)>,
     pub(super) hosts_add: (f32, f32, f32, f32),
     /// Accordion headers ("TABS" / "SSH HOSTS" caption bands). Zero when the
     /// panel is folded; `hosts_header` is zero when there are no hosts at all.
@@ -262,7 +260,6 @@ pub(super) fn chrome_tab_layout(
             toggle,
             panel: (0.0, 0.0, 0.0, 0.0),
             hosts: Vec::new(),
-            host_closes: Vec::new(),
             hosts_add: (0.0, 0.0, 0.0, 0.0),
             tabs_header: (0.0, 0.0, 0.0, 0.0),
             hosts_header: (0.0, 0.0, 0.0, 0.0),
@@ -377,22 +374,13 @@ pub(super) fn chrome_tab_layout(
     let hosts_header = (panel_x, hosts_header_y, panel_w, hosts_header_h);
     let hosts_top = hosts_header_y + hosts_header_h;
     let mut hosts = Vec::with_capacity(host_count);
-    let mut host_closes = Vec::with_capacity(host_count);
     for i in 0..host_count {
         if !model.hosts_open || i < hosts_scroll || i >= hosts_scroll + hosts_show {
             hosts.push(zero);
-            host_closes.push(zero);
             continue;
         }
         let y = hosts_top + (i - hosts_scroll) as f32 * pitch;
         hosts.push((tab_x, y, tab_w, row_h));
-        let close_size = (row_h * 0.58).max(s(16.0));
-        host_closes.push((
-            tab_x + tab_w - close_size - s(10.0),
-            y + (row_h - close_size) * 0.5,
-            close_size,
-            close_size,
-        ));
     }
     let hosts_band_h = if hosts_show > 0 { hosts_show as f32 * pitch - gap } else { 0.0 };
     let hosts_band = (hosts_top, hosts_top + hosts_band_h);
@@ -419,7 +407,6 @@ pub(super) fn chrome_tab_layout(
         toggle,
         panel,
         hosts,
-        host_closes,
         hosts_add: (
             hosts_header.0 + hosts_header.2 - s(42.0),
             hosts_header.1 + (hosts_header.3 - s(20.0)) * 0.5,
@@ -434,6 +421,73 @@ pub(super) fn chrome_tab_layout(
         hosts_band,
         tabs_max_scroll,
         hosts_max_scroll,
+    }
+}
+
+/// Draw the new-tab mark from the same physical rectangle used for its hit and
+/// hover area. Maple's Codicon `add` glyph has asymmetric outline bounds, so
+/// centering it by terminal-cell metrics makes the ink look offset even though
+/// Maple itself is a monospaced text font. A two-stroke primitive keeps this
+/// one control optically and geometrically centered at every DPI.
+fn push_centered_add_icon(
+    quads: &mut Vec<UiQuad>,
+    rect: (f32, f32, f32, f32),
+    scale: f32,
+    color: Rgb,
+) {
+    let (x, y, width, height) = rect;
+    let side = width.min(height);
+    if side <= 0.0 {
+        return;
+    }
+
+    let center_x = x + width * 0.5;
+    let center_y = y + height * 0.5;
+    let stroke = (side * 0.105).clamp((scale * 1.25).max(1.0), scale * 2.0);
+    let arm = side * 0.285;
+    let ink = Rgba::new(color.r, color.g, color.b, 235);
+
+    quads.push(UiQuad::solid(
+        center_x - arm,
+        center_y - stroke * 0.5,
+        arm * 2.0,
+        stroke,
+        stroke * 0.5,
+        ink,
+    ));
+    quads.push(UiQuad::solid(
+        center_x - stroke * 0.5,
+        center_y - arm,
+        stroke,
+        arm * 2.0,
+        stroke * 0.5,
+        ink,
+    ));
+}
+
+/// Native three-dot menu mark. Its geometry comes from the same control rect
+/// as hover/hit-testing, so Maple private-use glyph metrics cannot skew it.
+fn push_centered_more_icon(
+    quads: &mut Vec<UiQuad>,
+    rect: (f32, f32, f32, f32),
+    scale: f32,
+    color: Rgb,
+) {
+    let (x, y, width, height) = rect;
+    let diameter = (2.2 * scale).max(2.0);
+    let gap = (3.2 * scale).max(diameter + scale);
+    let center_x = x + width * 0.5;
+    let center_y = y + height * 0.5;
+    let ink = Rgba::new(color.r, color.g, color.b, 235);
+    for offset in [-gap, 0.0, gap] {
+        quads.push(UiQuad::solid(
+            center_x - diameter * 0.5,
+            center_y + offset - diameter * 0.5,
+            diameter,
+            diameter,
+            diameter * 0.5,
+            ink,
+        ));
     }
 }
 
@@ -476,11 +530,6 @@ pub(super) fn chrome_hit_with_tabs(
     for (index, rect) in layout.tabs.iter().copied().enumerate() {
         if contains_rect(rect, x, y) {
             return ChromeHit::Tab(index);
-        }
-    }
-    for (index, rect) in layout.host_closes.iter().copied().enumerate() {
-        if contains_rect(rect, x, y) {
-            return ChromeHit::HostDelete(index);
         }
     }
     for (index, rect) in layout.hosts.iter().copied().enumerate() {
@@ -780,9 +829,9 @@ pub(super) fn draw_chrome(d: &mut Display) {
         let tab_draw_x = tab_x;
         let tab_draw_y = tab_y;
         if index == d.nebula_active_tab {
-            // Floating-pill active tab (design language): a soft accent
-            // wash over the pill plus a hairline accent border — no
-            // accent bar, state is carried by brightness alone.
+            // Floating-pill active tab: a soft accent wash over the pill plus
+            // a hairline border. The narrow identity light below carries the
+            // optional user-picked color.
             let accent = palette.edge_r;
             quads.push(UiQuad::solid(
                 tab_draw_x - s(1.0),
@@ -821,6 +870,39 @@ pub(super) fn draw_chrome(d: &mut Display) {
 
         if tab_hovered {
             quads.push(UiQuad::solid(tab_draw_x, tab_draw_y, tab_w, tab_h, pill_r, HOVER_FILL));
+        }
+        // 侧边光条仅表示用户明确设置的标签色；默认 Tab 不额外占用视觉层级。
+        if let Some(strip_color) = d.nebula_tab_colors.get(index).copied().flatten() {
+            let strip_x = tab_draw_x + s(4.0);
+            let strip_y = tab_draw_y + s(7.0);
+            let strip_w = s(2.5).max(2.0);
+            let strip_h = (tab_h - s(14.0)).max(s(10.0));
+            let glow = s(12.0);
+            quads.push(UiQuad::glow(
+                strip_x + strip_w * 0.5 - glow * 0.5,
+                strip_y + strip_h * 0.5 - glow * 0.5,
+                glow,
+                glow,
+                Rgba::new(
+                    strip_color.r,
+                    strip_color.g,
+                    strip_color.b,
+                    if index == d.nebula_active_tab { 72 } else { 38 },
+                ),
+            ));
+            quads.push(UiQuad::solid(
+                strip_x,
+                strip_y,
+                strip_w,
+                strip_h,
+                strip_w * 0.5,
+                Rgba::new(
+                    strip_color.r,
+                    strip_color.g,
+                    strip_color.b,
+                    if index == d.nebula_active_tab { 245 } else { 176 },
+                ),
+            ));
         }
         let (close_x, _, close_w, close_h) = tab_layout.closes[index];
         let close_y = tab_draw_y + (tab_h - close_h) / 2.0;
@@ -903,10 +985,36 @@ pub(super) fn draw_chrome(d: &mut Display) {
     if d.nebula_chrome_hover == ChromeHit::NewTab {
         quads.push(UiQuad::solid(plus_x, plus_y, plus_w, plus_h, pill_r, HOVER_FILL_STRONG));
     }
+    let expanded_sidebar = d.left_sidebar_visible() && tab_layout.panel.2 > 0.0;
+    let tabs_plus_visible = !expanded_sidebar
+        || matches!(
+            d.nebula_chrome_hover,
+            ChromeHit::TabsSection | ChromeHit::NewTab | ChromeHit::NewTabMenu
+        );
+    if !d.nebula_settings_open && tabs_plus_visible {
+        let plus_ink = if d.nebula_chrome_hover == ChromeHit::NewTab {
+            sk.icon_hover
+        } else {
+            sk.icon
+        };
+        push_centered_add_icon(&mut quads, tab_layout.plus, scale, plus_ink);
+    }
     // The dropdown chevron beside "+": same hover-only lift.
     let (menu_x, menu_y, menu_w, menu_h) = tab_layout.menu;
     if d.nebula_chrome_hover == ChromeHit::NewTabMenu {
         quads.push(UiQuad::solid(menu_x, menu_y, menu_w, menu_h, pill_r, HOVER_FILL_STRONG));
+    }
+    if !d.nebula_settings_open {
+        push_centered_more_icon(
+            &mut quads,
+            tab_layout.menu,
+            scale,
+            if d.nebula_chrome_hover == ChromeHit::NewTabMenu {
+                sk.icon_hover
+            } else {
+                sk.icon
+            },
+        );
     }
 
     // SSH HOSTS section (quad layer): hover fill per row + the per-section
@@ -916,19 +1024,28 @@ pub(super) fn draw_chrome(d: &mut Display) {
             if hw <= 0.0 {
                 continue;
             }
-            if matches!(d.nebula_chrome_hover, ChromeHit::Host(i) | ChromeHit::HostDelete(i) if i == index)
-            {
+            if matches!(d.nebula_chrome_hover, ChromeHit::Host(i) if i == index) {
                 quads.push(UiQuad::solid(hx, hy, hw, hh, pill_r, HOVER_FILL));
-            }
-            if matches!(d.nebula_chrome_hover, ChromeHit::HostDelete(i) if i == index) {
-                if let Some((cx, cy, cw, ch)) = tab_layout.host_closes.get(index).copied() {
-                    quads.push(UiQuad::solid(cx, cy, cw, ch, cw * 0.35, HOVER_FILL_STRONG));
-                }
             }
         }
         if d.nebula_chrome_hover == ChromeHit::AddSshHost {
             let (ax, ay, aw, ah) = tab_layout.hosts_add;
             quads.push(UiQuad::solid(ax, ay, aw, ah, s(6.0), HOVER_FILL_STRONG));
+        }
+        if matches!(
+            d.nebula_chrome_hover,
+            ChromeHit::HostsSection | ChromeHit::AddSshHost
+        ) {
+            push_centered_add_icon(
+                &mut quads,
+                tab_layout.hosts_add,
+                scale,
+                if d.nebula_chrome_hover == ChromeHit::AddSshHost {
+                    sk.icon_hover
+                } else {
+                    sk.icon
+                },
+            );
         }
         let thumb_c = sk.scrollbar_thumb;
         for bar in [tab_layout.tabs_scrollbar, tab_layout.hosts_scrollbar].into_iter().flatten() {
@@ -997,6 +1114,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             &d.nebula_theme,
             &mut quads,
             scale,
+            size.cell_width(),
         );
     }
 
@@ -1025,8 +1143,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
     let (TXT, TXT_ON_ACCENT, TXT_DIM, ICON, ICON_HOVER) =
         (sk.ink, sk.ink_strong, sk.ink_dim, sk.icon, sk.icon_hover);
     const ICON_SETTINGS: &str = "\u{eb51}";
-    const ICON_ADD: &str = "\u{ea60}";
-    const ICON_CHEVRON_DOWN: &str = "\u{eab4}";
     const ICON_CLOSE: &str = "\u{ea76}";
     const ICON_CHROME_MINIMIZE: &str = "\u{eaba}";
     const ICON_CHROME_MAXIMIZE: &str = "\u{eab9}";
@@ -1063,31 +1179,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
         if settings_hovered { ICON_HOVER } else { ICON },
         ICON_SETTINGS,
     );
-    // The settings modal veils the sidebar, so its "+" must not float on
-    // top of the glass (the veil lives in the quad layer below text).
-    if !d.nebula_settings_open {
-        draw_centered_icon(
-            &mut d.renderer,
-            &mut d.glyph_cache,
-            &size,
-            cell_w,
-            cell_h,
-            tab_layout.plus,
-            if d.nebula_chrome_hover == ChromeHit::NewTab { ICON_HOVER } else { ICON },
-            ICON_ADD,
-        );
-        // The dropdown chevron (codicon chevron-down) beside "+".
-        draw_centered_icon(
-            &mut d.renderer,
-            &mut d.glyph_cache,
-            &size,
-            cell_w,
-            cell_h,
-            tab_layout.menu,
-            if d.nebula_chrome_hover == ChromeHit::NewTabMenu { ICON_HOVER } else { ICON },
-            ICON_CHEVRON_DOWN,
-        );
-    }
     for (hit, cx, cy) in chrome_control_centers(w, top_y, bar_h, scale) {
         let hovered = d.nebula_chrome_hover == hit;
         let icon = match hit {
@@ -1138,11 +1229,15 @@ pub(super) fn draw_chrome(d: &mut Display) {
         // inside the header band to keep clearance from the join.
         let (pnl_x, pnl_y, _, _) = tab_layout.panel;
         let tabs_chevron = if d.nebula_tabs_section_open { "\u{eab4}" } else { "\u{eab6}" };
-        d.renderer.draw_chrome_text(
+        const SECTION_TITLE_SCALE: f32 = 0.75;
+        let section_title_flags = nebula_terminal::term::cell::Flags::BOLD;
+        d.renderer.draw_doc_text(
             &size,
             pnl_x + s(16.0),
-            pnl_y + s(18.0),
+            pnl_y + s(22.0),
+            SECTION_TITLE_SCALE,
             TXT_DIM,
+            section_title_flags,
             &format!("TABS  {tabs_chevron}"),
             &mut d.glyph_cache,
         );
@@ -1314,15 +1409,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 &label,
                 &mut d.glyph_cache,
             );
-            let (ax, ay, aw, ah) = tab_layout.hosts_add;
-            d.renderer.draw_chrome_text(
-                &size,
-                ax + (aw - cell_w) / 2.0,
-                ay + (ah - cell_h) / 2.0,
-                if d.nebula_chrome_hover == ChromeHit::AddSshHost { sk.accent } else { TXT_DIM },
-                "+",
-                &mut d.glyph_cache,
-            );
             if tab_hovered {
                 let (close_x, _, close_w, close_h) = tab_layout.closes[index];
                 let close_y = draw_row_y + (tab_h - close_h) / 2.0;
@@ -1354,11 +1440,13 @@ pub(super) fn draw_chrome(d: &mut Display) {
         if tab_layout.hosts_header.2 > 0.0 {
             let (hh_x, hh_y, _, hh_h) = tab_layout.hosts_header;
             let hosts_chevron = if d.nebula_hosts_section_open { "\u{eab4}" } else { "\u{eab6}" };
-            d.renderer.draw_chrome_text(
+            d.renderer.draw_doc_text(
                 &size,
                 hh_x + s(16.0),
-                hh_y + (hh_h - cell_h) / 2.0,
+                hh_y + (hh_h - cell_h * SECTION_TITLE_SCALE) / 2.0,
+                SECTION_TITLE_SCALE,
                 TXT_DIM,
+                section_title_flags,
                 &format!("SSH HOSTS  {hosts_chevron}"),
                 &mut d.glyph_cache,
             );
@@ -1373,7 +1461,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             // would bleed across the seam onto the terminal grid.
             if d.nebula_ssh_hosts.is_empty() && d.nebula_hosts_section_open {
                 use unicode_width::UnicodeWidthChar;
-                const HINT_SCALE: f32 = 0.85;
+                const HINT_SCALE: f32 = 0.80;
                 let hint_flags = nebula_terminal::term::cell::Flags::empty();
                 let (pnl_x, _, pnl_w, _) = tab_layout.panel;
                 let text_x = hh_x + s(28.0);
@@ -1423,7 +1511,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 if hw <= 0.0 {
                     continue;
                 }
-                let hovered = matches!(d.nebula_chrome_hover, ChromeHit::Host(i) | ChromeHit::HostDelete(i) if i == index);
+                let hovered = matches!(d.nebula_chrome_hover, ChromeHit::Host(i) if i == index);
                 let color = if hovered { TXT_ON_ACCENT } else { TXT };
                 let cy = row_text_cy(hy, hh);
                 let name = d.nebula_ssh_hosts.get(index).map(String::as_str).unwrap_or("?");
@@ -1457,22 +1545,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
                         "\u{eba0}",
                         &mut d.glyph_cache,
                     );
-                }
-                if hovered {
-                    if let Some((cx, cy, cw, ch)) = tab_layout.host_closes.get(index).copied() {
-                        d.renderer.draw_chrome_text(
-                            &size,
-                            cx + (cw - cell_w) / 2.0,
-                            cy + (ch - cell_h) / 2.0,
-                            if matches!(d.nebula_chrome_hover, ChromeHit::HostDelete(i) if i == index) {
-                                Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b)
-                            } else {
-                                TXT_DIM
-                            },
-                            "×",
-                            &mut d.glyph_cache,
-                        );
-                    }
                 }
             }
         }
