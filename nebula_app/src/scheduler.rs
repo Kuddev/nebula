@@ -34,6 +34,8 @@ pub enum Topic {
     /// in-box ConPTY repaints its whole viewport on every resize, so per-tick
     /// notifications flood the scrollback with shredded repaints.
     NebulaResizeSettle,
+    /// Grace-period timer for committing an SSH host deletion after Undo expires.
+    SshDeleteUndo,
 }
 
 /// Event scheduled to be emitted at a specific time.

@@ -72,12 +72,14 @@ pub mod hint;
 pub mod window;
 
 mod chrome;
+mod context_menu;
 pub mod command_palette;
 pub mod markdown_view;
 pub mod side_panel;
 
 pub(crate) use chrome::chrome_settings_button_rect;
 pub use chrome::{ChromeHit, TabDropAction, in_chrome_bar, resize_edge};
+pub use context_menu::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
 use chrome::{
     ChromeTabLayout, TabDrag, chrome_hit_with_tabs, chrome_tab_layout, contains_rect,
     truncate_tab_label,
@@ -85,6 +87,7 @@ use chrome::{
 
 mod settings;
 mod theme;
+mod text_input;
 
 pub use theme::NebulaTheme;
 pub(crate) use theme::write_nebula_prompt_theme;
@@ -425,6 +428,37 @@ pub enum NebulaConfirm {
     CloseWindow { process: String },
     /// Paste text that contains newlines (would execute in most shells).
     Paste { text: String, bracketed: bool, lines: usize },
+    /// Remove a saved host or hide an alias originating in `~/.ssh/config`.
+    /// The source flag lets the dialog explain that Nebula never edits the
+    /// user's SSH config file.
+    DeleteSsh { host: String, from_config: bool },
+}
+
+/// How long the destructive SSH action stays reversible in the in-app bar.
+pub const SSH_DELETE_UNDO_DURATION: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Exact list state removed by one SSH deletion. Credential deletion is
+/// deliberately delayed until this value is dropped at undo expiry: Undo can
+/// therefore restore the complete action without retaining a password copy in
+/// Nebula's memory.
+#[derive(Debug)]
+struct SshDeleteUndo {
+    host: String,
+    saved_index: Option<usize>,
+    pinned_index: Option<usize>,
+    was_hidden: bool,
+    from_config: bool,
+    started_at: std::time::Instant,
+    delete_credential_on_drop: bool,
+}
+
+impl Drop for SshDeleteUndo {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.delete_credential_on_drop {
+            let _ = crate::ssh_credentials::forget_password(&self.host);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,11 +481,16 @@ pub enum SshEditorHit {
 
 #[derive(Debug, Clone)]
 pub struct SshHostEditor {
+    /// Destination before editing, when this modal was opened from a row.
+    /// Kept separately so changing an address can retire the old saved entry.
+    pub original_destination: Option<String>,
     pub destination: String,
     pub password: String,
     pub save_password: bool,
     pub show_password: bool,
     pub field: SshEditorField,
+    destination_selection: text_input::SelectAllState,
+    password_selection: text_input::SelectAllState,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -536,16 +575,58 @@ pub struct NebulaPaneState {
 /// `~/.ssh/config` aliases (file order), deduped, pinned entries floated to
 /// the top in pin order. One function so startup and settings hot-reload
 /// build the exact same list.
-fn merge_ssh_hosts(saved: &[String], pinned: &[String]) -> Vec<String> {
-    let mut hosts = saved.to_vec();
+fn merge_ssh_hosts(saved: &[String], pinned: &[String], hidden: &[String]) -> Vec<String> {
+    let mut hosts: Vec<_> = saved.iter().filter(|host| !hidden.contains(host)).cloned().collect();
     for host in crate::ssh::ssh_config_hosts() {
-        if !hosts.contains(&host) {
+        if !hidden.contains(&host) && !hosts.contains(&host) {
             hosts.push(host);
         }
     }
     // Stable sort: pinned first in pin order, the rest keep saved→config order.
     hosts.sort_by_key(|h| pinned.iter().position(|p| p == h).unwrap_or(usize::MAX));
     hosts
+}
+
+/// Remove one destination while recording exactly enough list state for Undo.
+/// Kept independent from rendering and Credential Manager so the destructive
+/// state transition can be regression-tested without touching real secrets.
+fn remove_ssh_host_from_lists(
+    host: &str,
+    saved: &mut Vec<String>,
+    pinned: &mut Vec<String>,
+    hidden: &mut Vec<String>,
+) -> (Option<usize>, Option<usize>, bool) {
+    let saved_index = saved.iter().position(|entry| entry == host);
+    let pinned_index = pinned.iter().position(|entry| entry == host);
+    let was_hidden = hidden.iter().any(|entry| entry == host);
+    saved.retain(|entry| entry != host);
+    pinned.retain(|entry| entry != host);
+    if !was_hidden {
+        hidden.push(host.to_owned());
+    }
+    (saved_index, pinned_index, was_hidden)
+}
+
+fn restore_ssh_host_to_lists(
+    host: &str,
+    saved_index: Option<usize>,
+    pinned_index: Option<usize>,
+    was_hidden: bool,
+    saved: &mut Vec<String>,
+    pinned: &mut Vec<String>,
+    hidden: &mut Vec<String>,
+) {
+    saved.retain(|entry| entry != host);
+    if let Some(index) = saved_index {
+        saved.insert(index.min(saved.len()), host.to_owned());
+    }
+    pinned.retain(|entry| entry != host);
+    if let Some(index) = pinned_index {
+        pinned.insert(index.min(pinned.len()), host.to_owned());
+    }
+    if !was_hidden {
+        hidden.retain(|entry| entry != host);
+    }
 }
 
 /// First word of a committed command line, normalized to a program identity
@@ -1315,6 +1396,11 @@ pub struct Display {
     /// by `draw_confirm_modal` each frame so the mouse hit-test can never
     /// drift from what was actually drawn. `None` while no modal shows.
     pub nebula_confirm_buttons: Option<((f32, f32, f32, f32), (f32, f32, f32, f32))>,
+    /// Most recently deleted SSH host while its action is still reversible.
+    nebula_ssh_delete_undo: Option<SshDeleteUndo>,
+    /// Undo button geometry published by the draw pass for exact hit-testing.
+    nebula_ssh_delete_undo_rect: Option<(f32, f32, f32, f32)>,
+    nebula_ssh_delete_undo_hover: bool,
     pub nebula_ssh_editor: Option<SshHostEditor>,
     pub nebula_ssh_editor_rects: Option<SshEditorRects>,
     nebula_ssh_editor_open: bool,
@@ -1344,7 +1430,12 @@ pub struct Display {
     nebula_settings_section: NebulaSettingsSection,
     nebula_chrome_hover: ChromeHit,
     nebula_settings_hover: SettingsHit,
+    /// Unified native right-click menu shared by tab and SSH rows. The menu
+    /// owns its short open/close animation so no input path needs timers.
+    nebula_context_menu: Option<context_menu::ContextMenu>,
     nebula_tab_labels: Vec<String>,
+    /// Per-tab custom accent. `None` follows the live theme accent.
+    nebula_tab_colors: Vec<Option<Rgb>>,
     nebula_tab_bells: Vec<bool>,
     /// Per-tab "command is running" flags driving the sidebar spinners.
     nebula_tab_running: Vec<bool>,
@@ -1383,6 +1474,10 @@ pub struct Display {
     /// first, persisted. Merged into `nebula_ssh_hosts` after the pinned
     /// block, before the `~/.ssh/config` aliases.
     nebula_saved_hosts: Vec<String>,
+    /// User-deleted SSH config aliases. Config files remain untouched; hiding
+    /// them here makes Delete stable instead of letting the next merge revive
+    /// the row immediately.
+    nebula_hidden_hosts: Vec<String>,
     /// Accordion fold state of the two sidebar sections.
     nebula_tabs_section_open: bool,
     nebula_hosts_section_open: bool,
@@ -1670,6 +1765,9 @@ impl Display {
             nebula_split_reveal: None,
             nebula_confirm: None,
             nebula_confirm_buttons: None,
+            nebula_ssh_delete_undo: None,
+            nebula_ssh_delete_undo_rect: None,
+            nebula_ssh_delete_undo_hover: false,
             nebula_ssh_editor: None,
             nebula_ssh_editor_rects: None,
             nebula_ssh_editor_open: false,
@@ -1685,8 +1783,10 @@ impl Display {
             nebula_settings_section: NebulaSettingsSection::default(),
             nebula_chrome_hover: ChromeHit::None,
             nebula_settings_hover: SettingsHit::None,
+            nebula_context_menu: None,
             nebula_shell_picker_open: false,
             nebula_tab_labels: vec![".".to_owned()],
+            nebula_tab_colors: vec![None],
             nebula_tab_bells: vec![false],
             nebula_tab_running: vec![false],
             nebula_tab_logos: vec![None],
@@ -1700,9 +1800,11 @@ impl Display {
             nebula_ssh_hosts: merge_ssh_hosts(
                 &settings_init.saved_hosts,
                 &settings_init.pinned_hosts,
+                &settings_init.hidden_hosts,
             ),
             nebula_pinned_hosts: settings_init.pinned_hosts.clone(),
             nebula_saved_hosts: settings_init.saved_hosts.clone(),
+            nebula_hidden_hosts: settings_init.hidden_hosts.clone(),
             nebula_tabs_section_open: true,
             nebula_hosts_section_open: true,
             nebula_tabs_scroll: 0,
@@ -1739,6 +1841,7 @@ impl Display {
     }
 
     pub fn select_settings_section(&mut self, section: NebulaSettingsSection) {
+        self.close_shell_picker();
         if self.nebula_settings_section != section {
             self.nebula_settings_section = section;
             // Each section starts reading from its top.
@@ -1760,6 +1863,7 @@ impl Display {
             self.nebula_settings_section,
             self.nebula_shell_picker_open,
             self.nebula_detected_shells.as_ref().map_or(0, Vec::len),
+            self.nebula_hidden_hosts.len(),
         );
         let next = (self.nebula_settings_scroll + delta).clamp(0.0, max);
         if (next - self.nebula_settings_scroll).abs() > f32::EPSILON {
@@ -1777,8 +1881,15 @@ impl Display {
         self.nebula_detected_shells.as_ref().map_or(0, Vec::len)
     }
 
+    pub fn hidden_ssh_host_count(&self) -> usize {
+        self.nebula_hidden_hosts.len()
+    }
+
     pub fn open_ssh_editor(&mut self) {
         self.nebula_ssh_editor = Some(SshHostEditor {
+            original_destination: None,
+            destination_selection: Default::default(),
+            password_selection: Default::default(),
             destination: String::new(),
             password: String::new(),
             save_password: true,
@@ -1791,6 +1902,29 @@ impl Display {
         // 每次打开都从零开始，避免上一次退出动画的残余进度造成闪跳。
         self.nebula_ui_anims.ssh_editor = UiAnim::new(0.0);
         self.pending_update.dirty = true;
+    }
+
+    pub fn edit_ssh_host(&mut self, index: usize) {
+        let Some(destination) = self.nebula_ssh_hosts.get(index).cloned() else { return };
+        self.nebula_ssh_editor = Some(SshHostEditor {
+            original_destination: Some(destination.clone()),
+            destination_selection: Default::default(),
+            password_selection: Default::default(),
+            destination,
+            // Never pull a stored secret back into a text field. Leaving this
+            // blank preserves the existing credential when the address stays
+            // unchanged; typing a new value explicitly replaces it.
+            password: String::new(),
+            save_password: true,
+            show_password: false,
+            field: SshEditorField::Destination,
+        });
+        self.nebula_ssh_editor_rects = None;
+        self.nebula_ssh_editor_open = true;
+        self.nebula_ssh_editor_hover = SshEditorHit::None;
+        self.nebula_ui_anims.ssh_editor = UiAnim::new(0.0);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     pub fn ssh_editor_active(&self) -> bool {
@@ -1837,29 +1971,60 @@ impl Display {
 
     pub fn ssh_editor_insert(&mut self, text: &str) {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-            let field = match editor.field {
-                SshEditorField::Destination => &mut editor.destination,
-                SshEditorField::Password => &mut editor.password,
-            };
-            field.extend(text.chars().filter(|c| !c.is_control()));
+            match editor.field {
+                SshEditorField::Destination => {
+                    editor.destination_selection.insert(&mut editor.destination, text)
+                },
+                SshEditorField::Password => {
+                    editor.password_selection.insert(&mut editor.password, text)
+                },
+            }
         }
     }
 
     pub fn ssh_editor_backspace(&mut self) {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
             match editor.field {
-                SshEditorField::Destination => {
-                    editor.destination.pop();
-                },
+                SshEditorField::Destination => editor
+                    .destination_selection
+                    .backspace(&mut editor.destination),
                 SshEditorField::Password => {
-                    editor.password.pop();
+                    editor.password_selection.backspace(&mut editor.password)
                 },
             }
         }
     }
 
+    pub fn ssh_editor_select_all(&mut self) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            match editor.field {
+                SshEditorField::Destination => {
+                    editor.destination_selection.select(&editor.destination)
+                },
+                SshEditorField::Password => editor.password_selection.select(&editor.password),
+            }
+        }
+    }
+
+    /// Copying an invisible password would persist a secret in the system
+    /// clipboard without visible intent, so it is enabled only after Reveal.
+    pub fn ssh_editor_selected_text(&self) -> Option<String> {
+        let editor = self.nebula_ssh_editor.as_ref()?;
+        match editor.field {
+            SshEditorField::Destination => {
+                editor.destination_selection.selected_text(&editor.destination)
+            },
+            SshEditorField::Password if editor.show_password => {
+                editor.password_selection.selected_text(&editor.password)
+            },
+            SshEditorField::Password => None,
+        }
+    }
+
     pub fn ssh_editor_next_field(&mut self) {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            editor.destination_selection.clear();
+            editor.password_selection.clear();
             editor.field = match editor.field {
                 SshEditorField::Destination => SshEditorField::Password,
                 SshEditorField::Password => SshEditorField::Destination,
@@ -1878,6 +2043,8 @@ impl Display {
         let hit = |r: (f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
         if hit(rects.destination) {
             if let Some(e) = self.nebula_ssh_editor.as_mut() {
+                e.destination_selection.clear();
+                e.password_selection.clear();
                 e.field = SshEditorField::Destination;
             }
             return true;
@@ -1890,6 +2057,8 @@ impl Display {
         }
         if hit(rects.password) {
             if let Some(e) = self.nebula_ssh_editor.as_mut() {
+                e.destination_selection.clear();
+                e.password_selection.clear();
                 e.field = SshEditorField::Password;
             }
             return true;
@@ -1920,11 +2089,30 @@ impl Display {
             self.nebula_ssh_editor = Some(editor);
             return;
         }
+        if let Some(original) = editor.original_destination.as_deref() {
+            if original != destination {
+                self.nebula_saved_hosts.retain(|host| host != original);
+                self.nebula_pinned_hosts.retain(|host| host != original);
+                if !self.nebula_hidden_hosts.iter().any(|host| host == original) {
+                    self.nebula_hidden_hosts.push(original.to_owned());
+                }
+                #[cfg(windows)]
+                {
+                    let _ = crate::ssh_credentials::forget_password(original);
+                }
+            }
+        }
+        // Saving/editing is an explicit request to surface this destination,
+        // so it also undoes a previous Delete of the same address.
+        self.nebula_hidden_hosts.retain(|host| host != &destination);
         self.nebula_saved_hosts.retain(|host| host != &destination);
         self.nebula_saved_hosts.insert(0, destination.clone());
         self.nebula_saved_hosts.truncate(20);
-        self.nebula_ssh_hosts =
-            merge_ssh_hosts(&self.nebula_saved_hosts, &self.nebula_pinned_hosts);
+        self.nebula_ssh_hosts = merge_ssh_hosts(
+            &self.nebula_saved_hosts,
+            &self.nebula_pinned_hosts,
+            &self.nebula_hidden_hosts,
+        );
         if editor.save_password && !editor.password.is_empty() {
             #[cfg(windows)]
             {
@@ -1941,23 +2129,124 @@ impl Display {
         self.close_ssh_editor();
     }
 
-    pub fn delete_ssh_host(&mut self, index: usize) {
+    /// Ask before removing a saved destination. Config aliases use different
+    /// wording because Delete hides them inside Nebula and never edits
+    /// `~/.ssh/config` itself.
+    pub fn request_delete_ssh_host(&mut self, index: usize) {
         let Some(host) = self.nebula_ssh_hosts.get(index).cloned() else { return };
-        self.nebula_saved_hosts.retain(|entry| entry != &host);
-        self.nebula_pinned_hosts.retain(|entry| entry != &host);
-        #[cfg(windows)]
-        {
-            let _ = crate::ssh_credentials::forget_password(&host);
+        let from_config = crate::ssh::ssh_config_hosts().contains(&host);
+        self.nebula_confirm = Some(NebulaConfirm::DeleteSsh { host, from_config });
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// Apply a confirmed deletion and arm a complete, credential-safe Undo.
+    /// Replacing an older Undo finalizes that older credential deletion first.
+    pub fn confirm_delete_ssh_host(&mut self, host: &str) -> bool {
+        if !self.nebula_ssh_hosts.iter().any(|entry| entry == host) {
+            return false;
         }
-        self.nebula_ssh_hosts =
-            merge_ssh_hosts(&self.nebula_saved_hosts, &self.nebula_pinned_hosts);
+
+        let from_config = crate::ssh::ssh_config_hosts().iter().any(|entry| entry == host);
+
+        // Taking the previous record commits its pending Credential Manager
+        // deletion through Drop. Only the most recent destructive action is
+        // reversible, matching standard snackbar Undo behavior.
+        self.nebula_ssh_delete_undo.take();
+
+        let (saved_index, pinned_index, was_hidden) = remove_ssh_host_from_lists(
+            host,
+            &mut self.nebula_saved_hosts,
+            &mut self.nebula_pinned_hosts,
+            &mut self.nebula_hidden_hosts,
+        );
+        self.nebula_ssh_hosts = merge_ssh_hosts(
+            &self.nebula_saved_hosts,
+            &self.nebula_pinned_hosts,
+            &self.nebula_hidden_hosts,
+        );
+        self.nebula_ssh_delete_undo = Some(SshDeleteUndo {
+            host: host.to_owned(),
+            saved_index,
+            pinned_index,
+            was_hidden,
+            from_config,
+            started_at: std::time::Instant::now(),
+            delete_credential_on_drop: true,
+        });
         self.persist_nebula_settings();
         self.pending_update.dirty = true;
+        self.window.request_redraw();
+        true
+    }
+
+    /// Reverse the complete host-list mutation. The credential was intentionally
+    /// kept alive during the grace period, so disarming Drop restores it without
+    /// ever copying secret bytes into the UI process.
+    pub fn undo_delete_ssh_host(&mut self) -> bool {
+        let Some(mut undo) = self.nebula_ssh_delete_undo.take() else { return false };
+        if undo.started_at.elapsed() >= SSH_DELETE_UNDO_DURATION {
+            // Drop commits the pending credential deletion.
+            return false;
+        }
+
+        undo.delete_credential_on_drop = false;
+        restore_ssh_host_to_lists(
+            &undo.host,
+            undo.saved_index,
+            undo.pinned_index,
+            undo.was_hidden,
+            &mut self.nebula_saved_hosts,
+            &mut self.nebula_pinned_hosts,
+            &mut self.nebula_hidden_hosts,
+        );
+        self.nebula_ssh_hosts = merge_ssh_hosts(
+            &self.nebula_saved_hosts,
+            &self.nebula_pinned_hosts,
+            &self.nebula_hidden_hosts,
+        );
+        self.nebula_ssh_delete_undo_rect = None;
+        self.nebula_ssh_delete_undo_hover = false;
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+        true
+    }
+
+    /// Commit the pending Credential Manager deletion when the Undo timer ends.
+    pub fn expire_ssh_delete_undo(&mut self) {
+        self.nebula_ssh_delete_undo.take();
+        self.nebula_ssh_delete_undo_rect = None;
+        self.nebula_ssh_delete_undo_hover = false;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn ssh_delete_undo_available(&self) -> bool {
+        self.nebula_ssh_delete_undo
+            .as_ref()
+            .is_some_and(|undo| undo.started_at.elapsed() < SSH_DELETE_UNDO_DURATION)
+    }
+
+    pub fn ssh_delete_undo_hit(&self, x: f32, y: f32) -> bool {
+        self.ssh_delete_undo_available()
+            && self.nebula_ssh_delete_undo_rect.is_some_and(|rect| {
+                x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
+            })
+    }
+
+    pub fn set_ssh_delete_undo_hover(&mut self, hovered: bool) {
+        if self.nebula_ssh_delete_undo_hover != hovered {
+            self.nebula_ssh_delete_undo_hover = hovered;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
     }
 
     pub fn set_chrome_tabs(
         &mut self,
         labels: Vec<String>,
+        mut colors: Vec<Option<Rgb>>,
         mut dots: Vec<bool>,
         mut running: Vec<bool>,
         mut logos: Vec<Option<AiLogo>>,
@@ -1965,6 +2254,9 @@ impl Display {
         reorderable: bool,
     ) {
         self.nebula_tab_labels = if labels.is_empty() { vec![".".to_owned()] } else { labels };
+        colors.truncate(self.nebula_tab_labels.len());
+        colors.resize(self.nebula_tab_labels.len(), None);
+        self.nebula_tab_colors = colors;
         dots.truncate(self.nebula_tab_labels.len());
         dots.resize(self.nebula_tab_labels.len(), false);
         self.nebula_tab_bells = dots;
@@ -2231,6 +2523,81 @@ impl Display {
         }
     }
 
+    pub fn context_menu_interactive(&self) -> bool {
+        self.nebula_context_menu.as_ref().is_some_and(context_menu::ContextMenu::interactive)
+    }
+
+    pub fn open_tab_context_menu(&mut self, index: usize, x: f32, y: f32) {
+        if index >= self.nebula_tab_labels.len() {
+            return;
+        }
+        let color = self.nebula_tab_colors.get(index).copied().flatten();
+        self.nebula_context_menu = Some(context_menu::ContextMenu::new(
+            ContextMenuTarget::Tab(index),
+            (x, y),
+            color,
+        ));
+        self.nebula_tab_drag = None;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn open_ssh_context_menu(&mut self, index: usize, x: f32, y: f32) {
+        if index >= self.nebula_ssh_hosts.len() {
+            return;
+        }
+        self.nebula_context_menu = Some(context_menu::ContextMenu::new(
+            ContextMenuTarget::Ssh(index),
+            (x, y),
+            None,
+        ));
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn context_menu_hit(&self, x: f32, y: f32) -> ContextMenuHit {
+        self.nebula_context_menu.as_ref().map_or(ContextMenuHit::Outside, |menu| {
+            context_menu::hit_test(
+                menu,
+                self.size_info,
+                self.window.scale_factor as f32,
+                x,
+                y,
+            )
+        })
+    }
+
+    pub fn context_menu_hover(&mut self, x: f32, y: f32) -> ContextMenuHit {
+        let hit = self.context_menu_hit(x, y);
+        let action = match hit {
+            ContextMenuHit::Action(action) => Some(action),
+            ContextMenuHit::Outside | ContextMenuHit::Panel => None,
+        };
+        if self.nebula_context_menu.as_mut().is_some_and(|menu| menu.set_hover(action)) {
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+        hit
+    }
+
+    /// Resolve one menu click and start the close animation. A click inside
+    /// the panel but between targets is swallowed without dismissing it.
+    pub fn context_menu_click(&mut self, x: f32, y: f32) -> ContextMenuHit {
+        let hit = self.context_menu_hit(x, y);
+        if matches!(hit, ContextMenuHit::Action(_) | ContextMenuHit::Outside) {
+            self.close_context_menu();
+        }
+        hit
+    }
+
+    pub fn close_context_menu(&mut self) {
+        if let Some(menu) = self.nebula_context_menu.as_mut() {
+            menu.begin_close();
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
     pub fn chrome_hit(&self, x: f32, y: f32) -> ChromeHit {
         chrome_hit_with_tabs(
             &self.size_info,
@@ -2287,6 +2654,7 @@ impl Display {
                 })
                 .unwrap_or_default(),
             shell_id: self.nebula_shell_id.clone(),
+            hidden_hosts: self.nebula_hidden_hosts.clone(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
             keep_session: self.nebula_keep_session,
@@ -2300,6 +2668,9 @@ impl Display {
 
     pub fn toggle_settings(&mut self) {
         self.nebula_settings_open = !self.nebula_settings_open;
+        if !self.nebula_settings_open {
+            self.nebula_shell_picker_open = false;
+        }
         // Fresh open always starts at the top.
         self.nebula_settings_scroll = 0.0;
         self.pending_update.dirty = true;
@@ -2308,6 +2679,7 @@ impl Display {
     pub fn dismiss_settings(&mut self) {
         if self.nebula_settings_open {
             self.nebula_settings_open = false;
+            self.nebula_shell_picker_open = false;
             self.pending_update.dirty = true;
         }
     }
@@ -2353,6 +2725,14 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
+    pub fn close_shell_picker(&mut self) {
+        if self.nebula_shell_picker_open {
+            self.nebula_shell_picker_open = false;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
     /// WT-style default-shell picker (command palette mode). Kept for compatibility.
     /// detected-shell dropdown as the "+" chevron, but confirming SETS the
     /// default instead of launching a tab. Replaces the old 2-value cycle.
@@ -2384,6 +2764,34 @@ impl Display {
         }
         self.nebula_shell_picker_open = false;
         self.pending_update.dirty = true;
+    }
+
+    /// Restore a destination after the short Undo period. Config aliases only
+    /// need to leave `hidden_hosts`; manually saved addresses are re-added to
+    /// the saved list. Expired credentials intentionally remain deleted.
+    pub fn restore_hidden_ssh_host(&mut self, index: usize) {
+        let Some(host) = self.nebula_hidden_hosts.get(index).cloned() else { return };
+        let pending_same_host = self
+            .nebula_ssh_delete_undo
+            .as_ref()
+            .is_some_and(|undo| undo.host == host);
+        if pending_same_host && self.undo_delete_ssh_host() {
+            return;
+        }
+
+        self.nebula_hidden_hosts.retain(|entry| entry != &host);
+        let from_config = crate::ssh::ssh_config_hosts().iter().any(|entry| entry == &host);
+        if !from_config && !self.nebula_saved_hosts.iter().any(|entry| entry == &host) {
+            self.nebula_saved_hosts.insert(0, host);
+        }
+        self.nebula_ssh_hosts = merge_ssh_hosts(
+            &self.nebula_saved_hosts,
+            &self.nebula_pinned_hosts,
+            &self.nebula_hidden_hosts,
+        );
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     pub fn toggle_fetch(&mut self) {
@@ -2504,6 +2912,10 @@ impl Display {
         self.nebula_palette.is_picking_default()
     }
 
+    pub fn command_palette_picker_open(&self) -> bool {
+        self.nebula_palette.is_picker()
+    }
+
     pub fn close_command_palette(&mut self) {
         self.nebula_palette.close();
         self.pending_update.dirty = true;
@@ -2512,6 +2924,20 @@ impl Display {
     pub fn palette_input_char(&mut self, c: char) {
         self.nebula_palette.input_char(c);
         self.pending_update.dirty = true;
+    }
+
+    pub fn palette_input_text(&mut self, text: &str) {
+        self.nebula_palette.input_text(text);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn palette_select_all(&mut self) {
+        self.nebula_palette.select_all();
+        self.pending_update.dirty = true;
+    }
+
+    pub fn palette_selected_text(&self) -> Option<String> {
+        self.nebula_palette.selected_text()
     }
 
     pub fn palette_backspace(&mut self) {
@@ -2576,6 +3002,10 @@ impl Display {
     /// Insert `text` at the caret. A pending select-all is replaced wholesale
     /// (type-to-overwrite), matching every native text field.
     pub fn tab_rename_insert(&mut self, text: &str) {
+        let text: String = text.chars().filter(|character| !character.is_control()).collect();
+        if text.is_empty() {
+            return;
+        }
         let select_all = self.nebula_tab_rename_select_all;
         let caret = self.nebula_tab_rename_caret;
         let Some((_, buf)) = self.nebula_tab_rename.as_mut() else { return };
@@ -2586,7 +3016,7 @@ impl Display {
         }
         let caret = if select_all { 0 } else { caret.min(buf.chars().count()) };
         let byte = buf.char_indices().nth(caret).map(|(b, _)| b).unwrap_or(buf.len());
-        buf.insert_str(byte, text);
+        buf.insert_str(byte, &text);
         self.nebula_tab_rename_caret = caret + text.chars().count();
         self.pending_update.dirty = true;
     }
@@ -2608,6 +3038,20 @@ impl Display {
             }
         }
         self.pending_update.dirty = true;
+    }
+
+    pub fn tab_rename_select_all(&mut self) {
+        if let Some((_, text)) = self.nebula_tab_rename.as_ref() {
+            self.nebula_tab_rename_select_all = !text.is_empty();
+            self.nebula_tab_rename_caret = text.chars().count();
+            self.pending_update.dirty = true;
+        }
+    }
+
+    pub fn tab_rename_selected_text(&self) -> Option<String> {
+        self.nebula_tab_rename_select_all
+            .then(|| self.nebula_tab_rename.as_ref().map(|(_, text)| text.clone()))
+            .flatten()
     }
 
     /// Move the caret by `delta` chars. A select-all collapses to the matching
@@ -2789,24 +3233,6 @@ impl Display {
         true
     }
 
-    /// Pin the host at `index` to the top of the SSH HOSTS section
-    /// (right-click). Pinning an already-pinned host unpins it. The pinned
-    /// set persists in the runtime settings file.
-    pub fn pin_host(&mut self, index: usize) {
-        let Some(name) = self.nebula_ssh_hosts.get(index).cloned() else { return };
-        if let Some(pos) = self.nebula_pinned_hosts.iter().position(|p| *p == name) {
-            self.nebula_pinned_hosts.remove(pos);
-        } else {
-            self.nebula_pinned_hosts.insert(0, name);
-        }
-        // Re-sort: pinned first (in pin order), the rest keep config order.
-        let pinned = self.nebula_pinned_hosts.clone();
-        self.nebula_ssh_hosts
-            .sort_by_key(|h| pinned.iter().position(|p| p == h).unwrap_or(usize::MAX));
-        self.persist_nebula_settings();
-        self.pending_update.dirty = true;
-    }
-
     /// Auto-save an SSH destination the user typed and successfully connected
     /// to — armed at OSC 133;C, confirmed by a remote `NEBULA|` title or a
     /// session that outlived [`crate::ssh::SAVE_MIN_SESSION`]. Tabby-style
@@ -2819,6 +3245,7 @@ impl Display {
             return;
         }
         self.nebula_saved_hosts.retain(|h| h != host);
+        self.nebula_hidden_hosts.retain(|h| h != host);
         self.nebula_saved_hosts.insert(0, host.to_owned());
         self.nebula_saved_hosts.truncate(SAVED_HOSTS_CAP);
         if !self.nebula_ssh_hosts.iter().any(|h| h == host) {
@@ -2850,6 +3277,7 @@ impl Display {
             theme: self.nebula_theme,
             pinned_hosts: self.nebula_pinned_hosts.clone(),
             saved_hosts: self.nebula_saved_hosts.clone(),
+            hidden_hosts: self.nebula_hidden_hosts.clone(),
         });
         self.nebula_settings_mtime = settings::nebula_settings_mtime();
     }
@@ -2886,8 +3314,12 @@ impl Display {
         // host that window just saved or pinned.
         self.nebula_pinned_hosts = settings.pinned_hosts;
         self.nebula_saved_hosts = settings.saved_hosts;
-        self.nebula_ssh_hosts =
-            merge_ssh_hosts(&self.nebula_saved_hosts, &self.nebula_pinned_hosts);
+        self.nebula_hidden_hosts = settings.hidden_hosts;
+        self.nebula_ssh_hosts = merge_ssh_hosts(
+            &self.nebula_saved_hosts,
+            &self.nebula_pinned_hosts,
+            &self.nebula_hidden_hosts,
+        );
         if image_changed {
             self.renderer.invalidate_background_image();
         }
@@ -3967,6 +4399,25 @@ impl Display {
                 "粘贴 Enter",
                 false,
             ),
+            NebulaConfirm::DeleteSsh { host, from_config } => {
+                let host = truncate_tab_label(host, 28);
+                if *from_config {
+                    (
+                        format!("隐藏 SSH 主机 {host}？"),
+                        "只从 Nebula 隐藏；~/.ssh/config 不会修改，保存的密码将在撤销期后清除。"
+                            .to_owned(),
+                        "隐藏 Enter",
+                        true,
+                    )
+                } else {
+                    (
+                        format!("删除 SSH 主机 {host}？"),
+                        "会从主机列表移除，保存的 Windows 密码将在撤销期后清除。".to_owned(),
+                        "删除 Enter",
+                        true,
+                    )
+                }
+            },
         };
         let cancel_label = "取消 Esc";
 
@@ -4246,22 +4697,44 @@ impl Display {
                 if sk.is_light { sk.hover } else { sk.hover_strong },
             ));
         }
-        let (caret_rect, caret_cols) = match editor.field {
-            SshEditorField::Destination => (destination, editor.destination.chars().count()),
-            SshEditorField::Password => (password, editor.password.chars().count()),
+        let (caret_rect, caret_cols, all_selected) = match editor.field {
+            SshEditorField::Destination => (
+                destination,
+                editor.destination.chars().count(),
+                editor.destination_selection.is_selected(),
+            ),
+            SshEditorField::Password => (
+                password,
+                editor.password.chars().count(),
+                editor.password_selection.is_selected(),
+            ),
         };
-        let caret_x = (caret_rect.0 + s(12.0) + caret_cols as f32 * cell_w).min(
-            caret_rect.0 + caret_rect.2
-                - if editor.field == SshEditorField::Password { s(48.0) } else { s(10.0) },
-        );
-        quads.push(UiQuad::solid(
-            caret_x,
-            caret_rect.1 + s(10.0),
-            s(1.5).max(1.0),
-            caret_rect.3 - s(20.0),
-            0.0,
-            editor_caret,
-        ));
+        if all_selected && caret_cols > 0 {
+            let right_pad = if editor.field == SshEditorField::Password { s(48.0) } else { s(10.0) };
+            let selection_w = (caret_cols as f32 * cell_w)
+                .min(caret_rect.2 - s(12.0) - right_pad);
+            quads.push(UiQuad::solid(
+                caret_rect.0 + s(10.0),
+                caret_rect.1 + s(7.0),
+                selection_w + s(4.0),
+                caret_rect.3 - s(14.0),
+                s(4.0),
+                sk.accent_soft,
+            ));
+        } else {
+            let caret_x = (caret_rect.0 + s(12.0) + caret_cols as f32 * cell_w).min(
+                caret_rect.0 + caret_rect.2
+                    - if editor.field == SshEditorField::Password { s(48.0) } else { s(10.0) },
+            );
+            quads.push(UiQuad::solid(
+                caret_x,
+                caret_rect.1 + s(10.0),
+                s(1.5).max(1.0),
+                caret_rect.3 - s(20.0),
+                0.0,
+                editor_caret,
+            ));
+        }
         self.renderer.draw_ui(&size, &quads);
 
         let gc = &mut self.glyph_cache;
@@ -4377,6 +4850,132 @@ impl Display {
         }
     }
 
+    /// Bottom-center reversible-action bar for SSH deletion. Its action rect is
+    /// published to input after layout, keeping hover/click geometry identical
+    /// to the pixels on screen.
+    fn draw_ssh_delete_undo(&mut self) {
+        let Some(undo) = self.nebula_ssh_delete_undo.as_ref() else {
+            self.nebula_ssh_delete_undo_rect = None;
+            self.nebula_ssh_delete_undo_hover = false;
+            return;
+        };
+        if undo.started_at.elapsed() >= SSH_DELETE_UNDO_DURATION {
+            self.expire_ssh_delete_undo();
+            return;
+        }
+
+        let size = self.size_info;
+        let scale = self.window.scale_factor as f32;
+        let s = |value: f32| value * scale;
+        let cell_w = size.cell_width();
+        let cell_h = size.cell_height();
+        let sk = self.nebula_theme.skin();
+
+        let fixed_cols = 20usize;
+        let host_budget = (((size.width() - s(300.0)).max(cell_w * 8.0) / cell_w) as usize)
+            .saturating_sub(fixed_cols)
+            .max(8);
+        let host = truncate_tab_label(&undo.host, host_budget.min(28));
+        let message = if undo.from_config {
+            format!("已隐藏 {host}（SSH config 未修改）")
+        } else {
+            format!("已移除 {host}")
+        };
+        let hint = "Ctrl+Z";
+        let action = "撤销";
+        let text_cols = |text: &str| -> usize {
+            text.chars().map(|ch| ch.width().unwrap_or(1).max(1)).sum()
+        };
+
+        let pad = s(14.0);
+        let gap = s(12.0);
+        let action_w = s(76.0);
+        let bar_h = s(48.0).max(cell_h + s(12.0));
+        let content_w = (text_cols(&message) + text_cols(hint) + 2) as f32 * cell_w;
+        let bar_w = (pad * 2.0 + content_w + gap + action_w)
+            .max(s(360.0))
+            .min(size.width() - s(24.0));
+        let bar_x = (size.width() - bar_w) * 0.5;
+        let bar_y = size.height() - bar_h - s(18.0);
+        let action_rect = (
+            bar_x + bar_w - pad - action_w,
+            bar_y + (bar_h - s(34.0)) * 0.5,
+            action_w,
+            s(34.0),
+        );
+        self.nebula_ssh_delete_undo_rect = Some(action_rect);
+
+        let mut quads = vec![
+            UiQuad::glow(
+                bar_x - s(10.0),
+                bar_y - s(8.0),
+                bar_w + s(20.0),
+                bar_h + s(16.0),
+                Rgba::new(0, 0, 0, 72),
+            ),
+            UiQuad::solid(
+                bar_x - s(1.0),
+                bar_y - s(1.0),
+                bar_w + s(2.0),
+                bar_h + s(2.0),
+                s(11.0),
+                sk.hairline,
+            ),
+            UiQuad::solid(bar_x, bar_y, bar_w, bar_h, s(10.0), sk.panel),
+            UiQuad::solid(
+                action_rect.0,
+                action_rect.1,
+                action_rect.2,
+                action_rect.3,
+                s(7.0),
+                if self.nebula_ssh_delete_undo_hover { sk.hover_strong } else { sk.surface },
+            ),
+        ];
+        if self.nebula_ssh_delete_undo_hover {
+            quads.push(UiQuad::solid(
+                action_rect.0,
+                action_rect.1 + action_rect.3 - s(2.0),
+                action_rect.2,
+                s(2.0),
+                s(1.0),
+                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 220),
+            ));
+        }
+        self.renderer.draw_ui(&size, &quads);
+
+        let text_y = bar_y + (bar_h - cell_h) * 0.5;
+        let message_x = bar_x + pad;
+        self.renderer.draw_chrome_text(
+            &size,
+            message_x,
+            text_y,
+            sk.ink,
+            &message,
+            &mut self.glyph_cache,
+        );
+        let hint_x = action_rect.0 - gap - text_cols(hint) as f32 * cell_w;
+        self.renderer.draw_chrome_text(
+            &size,
+            hint_x,
+            text_y,
+            sk.ink_faint,
+            hint,
+            &mut self.glyph_cache,
+        );
+        let action_x =
+            action_rect.0 + (action_rect.2 - text_cols(action) as f32 * cell_w) * 0.5;
+        let action_y = action_rect.1 + (action_rect.3 - cell_h) * 0.5;
+        self.renderer.draw_chrome_text_styled(
+            &size,
+            action_x,
+            action_y,
+            if self.nebula_ssh_delete_undo_hover { sk.ink_strong } else { sk.accent },
+            nebula_terminal::term::cell::Flags::BOLD,
+            action,
+            &mut self.glyph_cache,
+        );
+    }
+
     /// Draw the window chrome and present the accumulated frame.
     /// Overlay a transient, fading "cols × rows" HUD centered in the window,
     /// shown briefly after a resize (a resize overlay HUD). Keeps requesting
@@ -4457,6 +5056,8 @@ impl Display {
 
         // Transient resize HUD painted on top of the chrome.
         self.draw_resize_hud();
+        context_menu::draw(self);
+        self.draw_ssh_delete_undo();
         self.draw_ssh_editor_modal();
         self.draw_confirm_modal();
 
@@ -5623,4 +6224,65 @@ fn window_size(
     let height = (padding.1 + chrome).mul_add(2., grid_height).floor();
 
     PhysicalSize::new(width as u32, height as u32)
+}
+
+#[cfg(test)]
+mod nebula_ux_tests {
+    use super::{remove_ssh_host_from_lists, restore_ssh_host_to_lists};
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn ssh_delete_undo_restores_saved_and_pinned_order() {
+        let mut saved = strings(&["alpha", "target", "omega"]);
+        let mut pinned = strings(&["target", "alpha"]);
+        let mut hidden = strings(&["already-hidden"]);
+
+        let snapshot =
+            remove_ssh_host_from_lists("target", &mut saved, &mut pinned, &mut hidden);
+        assert_eq!(snapshot, (Some(1), Some(0), false));
+        assert_eq!(saved, strings(&["alpha", "omega"]));
+        assert_eq!(pinned, strings(&["alpha"]));
+        assert_eq!(hidden, strings(&["already-hidden", "target"]));
+
+        restore_ssh_host_to_lists(
+            "target",
+            snapshot.0,
+            snapshot.1,
+            snapshot.2,
+            &mut saved,
+            &mut pinned,
+            &mut hidden,
+        );
+        assert_eq!(saved, strings(&["alpha", "target", "omega"]));
+        assert_eq!(pinned, strings(&["target", "alpha"]));
+        assert_eq!(hidden, strings(&["already-hidden"]));
+    }
+
+    #[test]
+    fn ssh_config_only_hide_is_fully_reversible() {
+        let mut saved = Vec::new();
+        let mut pinned = Vec::new();
+        let mut hidden = Vec::new();
+
+        let snapshot =
+            remove_ssh_host_from_lists("config-alias", &mut saved, &mut pinned, &mut hidden);
+        assert_eq!(snapshot, (None, None, false));
+        assert_eq!(hidden, strings(&["config-alias"]));
+
+        restore_ssh_host_to_lists(
+            "config-alias",
+            snapshot.0,
+            snapshot.1,
+            snapshot.2,
+            &mut saved,
+            &mut pinned,
+            &mut hidden,
+        );
+        assert!(saved.is_empty());
+        assert!(pinned.is_empty());
+        assert!(hidden.is_empty());
+    }
 }

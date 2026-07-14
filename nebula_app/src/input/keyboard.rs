@@ -8,7 +8,7 @@ use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 use winit::platform::macos::OptionAsAlt;
 
 use nebula_terminal::event::EventListener;
-use nebula_terminal::term::TermMode;
+use nebula_terminal::term::{ClipboardType, TermMode};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 use crate::config::{Action, BindingKey, BindingMode, KeyBinding};
@@ -34,6 +34,29 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
             self.key_release(key, mode, mods);
             return;
+        }
+
+        // A context menu is a transient focus scope, not a true modal. Esc
+        // only dismisses it; any other key dismisses first and then continues
+        // through the normal shortcut/terminal path.
+        if self.ctx.display().context_menu_interactive() {
+            let escape = matches!(key.logical_key, Key::Named(NamedKey::Escape));
+            self.ctx.display().close_context_menu();
+            self.ctx.mark_dirty();
+            if escape {
+                return;
+            }
+        }
+
+        // The inline default-shell list is a transient picker. Esc only
+        // dismisses; any other key dismisses and then follows its normal path.
+        if self.ctx.display().nebula_shell_picker_open {
+            let escape = matches!(key.logical_key, Key::Named(NamedKey::Escape));
+            self.ctx.display().close_shell_picker();
+            self.ctx.mark_dirty();
+            if escape {
+                return;
+            }
         }
 
         // Tab rename input: consume keyboard when editing a tab name (before
@@ -72,6 +95,26 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.display().tab_rename_caret_edge(true);
                     self.ctx.mark_dirty();
                 },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("a") =>
+                {
+                    self.ctx.display().tab_rename_select_all();
+                    self.ctx.mark_dirty();
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("c") =>
+                {
+                    if let Some(text) = self.ctx.display().tab_rename_selected_text() {
+                        self.ctx.clipboard_mut().store(ClipboardType::Clipboard, text);
+                    }
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("v") =>
+                {
+                    let text = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                    self.ctx.display().tab_rename_insert(&text);
+                    self.ctx.mark_dirty();
+                },
                 Key::Character(s) if mods.is_empty() || mods.shift_key() => {
                     // Insert at the caret (type-to-overwrite on select-all).
                     // Note: on Windows/IME, printable text arrives via
@@ -100,6 +143,25 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 Key::Named(NamedKey::Backspace) => {
                     self.ctx.display().nebula_side_panel.search_backspace();
                 },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("a") =>
+                {
+                    self.ctx.display().nebula_side_panel.search_select_all();
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("c") =>
+                {
+                    let text = self.ctx.display().nebula_side_panel.search_selected_text();
+                    if let Some(text) = text {
+                        self.ctx.clipboard_mut().store(ClipboardType::Clipboard, text);
+                    }
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("v") =>
+                {
+                    let text = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                    self.ctx.display().nebula_side_panel.search_input(&text);
+                },
                 Key::Character(s) if mods.is_empty() || mods.shift_key() => {
                     let text = s.clone();
                     self.ctx.display().nebula_side_panel.search_input(&text);
@@ -114,23 +176,35 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         if self.ctx.display().nebula_side_panel.commit_focus {
             match &key.logical_key {
                 Key::Named(NamedKey::Escape) => {
-                    let panel = &mut self.ctx.display().nebula_side_panel;
-                    panel.commit_focus = false;
-                    panel.commit_msg.clear();
+                    self.ctx.display().nebula_side_panel.commit_cancel();
                 },
                 Key::Named(NamedKey::Enter) => {
                     self.ctx.display().nebula_side_panel.git_commit_submit();
                 },
                 Key::Named(NamedKey::Backspace) => {
-                    self.ctx.display().nebula_side_panel.commit_msg.pop();
+                    self.ctx.display().nebula_side_panel.commit_backspace();
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("a") =>
+                {
+                    self.ctx.display().nebula_side_panel.commit_select_all();
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("c") =>
+                {
+                    let text = self.ctx.display().nebula_side_panel.commit_selected_text();
+                    if let Some(text) = text {
+                        self.ctx.clipboard_mut().store(ClipboardType::Clipboard, text);
+                    }
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("v") =>
+                {
+                    let text = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                    self.ctx.display().nebula_side_panel.commit_input(&text);
                 },
                 Key::Character(s) if mods.is_empty() || mods.shift_key() => {
-                    let text = s.clone();
-                    self.ctx
-                        .display()
-                        .nebula_side_panel
-                        .commit_msg
-                        .extend(text.chars().filter(|c| !c.is_control()));
+                    self.ctx.display().nebula_side_panel.commit_input(s);
                 },
                 _ => {},
             }
@@ -145,6 +219,32 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     Key::Named(NamedKey::Enter) => self.ctx.display().save_ssh_editor(),
                     Key::Named(NamedKey::Tab) => self.ctx.display().ssh_editor_next_field(),
                     Key::Named(NamedKey::Backspace) => self.ctx.display().ssh_editor_backspace(),
+                    Key::Character(c)
+                        if mods.control_key()
+                            && !mods.alt_key()
+                            && c.eq_ignore_ascii_case("a") =>
+                    {
+                        self.ctx.display().ssh_editor_select_all();
+                    },
+                    Key::Character(c)
+                        if mods.control_key()
+                            && !mods.alt_key()
+                            && c.eq_ignore_ascii_case("c") =>
+                    {
+                        if let Some(text) = self.ctx.display().ssh_editor_selected_text() {
+                            self.ctx.clipboard_mut().store(ClipboardType::Clipboard, text);
+                        }
+                    },
+                    Key::Character(c)
+                        if mods.control_key()
+                            && !mods.alt_key()
+                            && c.eq_ignore_ascii_case("v") =>
+                    {
+                        // SSH 编辑器是应用自有文本框。直接写入当前焦点字段，避免后续
+                        // 终端粘贴绑定把地址或密码误发送到后台 PTY。
+                        let text = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                        self.ctx.display().ssh_editor_insert(&text);
+                    },
                     Key::Character(c) if mods.is_empty() || mods.shift_key() => {
                         self.ctx.display().ssh_editor_insert(c)
                     },
@@ -155,7 +255,45 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
-        // Nebula command palette owns the keyboard while open: route typing /
+        // The new-tab shell/profile list is a lightweight menu: navigation and
+        // confirmation stay inside it, while unrelated keys dismiss it and
+        // continue through normal shortcuts/terminal input.
+        if self.ctx.display().command_palette_picker_open() {
+            let handled = match &key.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.display().close_command_palette();
+                    true
+                },
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(action) = self.ctx.display().palette_confirm() {
+                        self.run_palette_action(action);
+                    }
+                    true
+                },
+                Key::Named(NamedKey::Tab) => {
+                    self.ctx.display().palette_move(if mods.shift_key() { -1 } else { 1 });
+                    true
+                },
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.ctx.display().palette_move(1);
+                    true
+                },
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.ctx.display().palette_move(-1);
+                    true
+                },
+                _ => {
+                    self.ctx.display().close_command_palette();
+                    false
+                },
+            };
+            self.ctx.mark_dirty();
+            if handled {
+                return;
+            }
+        }
+
+        // The full command palette owns the keyboard while open: route typing /
         // navigation / confirm into it and swallow everything else, so no
         // terminal binding fires behind the modal.
         if self.ctx.display().command_palette_open() {
@@ -173,9 +311,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 Key::Named(NamedKey::ArrowUp) => self.ctx.display().palette_move(-1),
                 Key::Named(NamedKey::Backspace) => self.ctx.display().palette_backspace(),
                 Key::Character(c) if mods.control_key() => {
-                    // Ctrl+Shift+P (the opener) toggles the palette shut; other
-                    // ctrl-combos are swallowed rather than typed as text.
-                    if mods.shift_key() && c.eq_ignore_ascii_case("p") {
+                    if c.eq_ignore_ascii_case("a") {
+                        self.ctx.display().palette_select_all();
+                    } else if c.eq_ignore_ascii_case("c") {
+                        if let Some(text) = self.ctx.display().palette_selected_text() {
+                            self.ctx.clipboard_mut().store(ClipboardType::Clipboard, text);
+                        }
+                    } else if c.eq_ignore_ascii_case("v") {
+                        let text = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                        self.ctx.display().palette_input_text(&text);
+                    } else if mods.shift_key() && c.eq_ignore_ascii_case("p") {
+                        // Ctrl+Shift+P (the opener) toggles the full palette.
                         self.ctx.display().close_command_palette();
                     }
                 },
@@ -202,6 +348,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 },
                 _ => {},
             }
+            self.ctx.mark_dirty();
+            return;
+        }
+
+        // Ctrl+Z reverses the latest SSH deletion while the action bar lives.
+        // Text-entry and true-modal scopes above retain their own contracts.
+        if mods.control_key()
+            && !mods.alt_key()
+            && !mods.shift_key()
+            && matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("z"))
+            && self.ctx.display().ssh_delete_undo_available()
+        {
+            self.undo_ssh_delete();
             self.ctx.mark_dirty();
             return;
         }

@@ -93,6 +93,8 @@ pub enum SettingsHit {
     ShellCycle,
     /// One of the expanded shell picker rows (index into detected_shells).
     ShellPickerRow(usize),
+    /// Restore one address from the persistent hidden-host list.
+    RestoreHiddenSsh(usize),
     FetchToggle,
     PowerlineToggle,
     OpacityDown,
@@ -135,6 +137,10 @@ pub(super) struct NebulaRuntimeSettings {
     /// SSH destinations auto-saved after a successful typed `ssh` connection,
     /// most recent first (see `Display::nebula_save_ssh_host`).
     pub(super) saved_hosts: Vec<String>,
+    /// SSH aliases explicitly removed from the sidebar. This is separate from
+    /// `saved_hosts` because entries discovered in `~/.ssh/config` would
+    /// otherwise reappear on the very next merge.
+    pub(super) hidden_hosts: Vec<String>,
 }
 
 /// Load runtime UI settings from `Nebula/nebula_settings.txt`; defaults when
@@ -163,6 +169,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         theme: NebulaTheme::default(),
         pinned_hosts: Vec::new(),
         saved_hosts: Vec::new(),
+        hidden_hosts: Vec::new(),
     };
     if let Ok(data) = std::fs::read_to_string(path) {
         for line in data.lines() {
@@ -223,6 +230,14 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                         .map(str::to_owned)
                         .collect();
                 },
+                Some(("hidden_hosts", v)) => {
+                    settings.hidden_hosts = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                },
                 _ => {},
             }
         }
@@ -276,10 +291,11 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let path = nebula_data_dir().join("nebula_settings.txt");
     let pinned_hosts = settings.pinned_hosts.join(",");
     let saved_hosts = settings.saved_hosts.join(",");
+    let hidden_hosts = settings.hidden_hosts.join(",");
     let _ = std::fs::write(
         path,
         format!(
-            "theme={theme}\nghost={}\naccept={accept}\nshell={shell}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\n",
+            "theme={theme}\nghost={}\naccept={accept}\nshell={shell}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n",
             settings.ghost as u8,
             settings.fetch as u8,
             settings.powerline as u8,
@@ -308,6 +324,8 @@ struct SettingsGeometry {
     ghost: (f32, f32, f32, f32),
     accept: (f32, f32, f32, f32),
     open_config_file: (f32, f32, f32, f32),
+    hidden_host_row0: (f32, f32, f32, f32),
+    hidden_host_count: usize,
     /// Full-width "窗口透明度" row (the frame); the stepper buttons below sit
     /// inside it.
     opacity_row: (f32, f32, f32, f32),
@@ -344,9 +362,16 @@ pub(super) fn settings_max_scroll(
     section: NebulaSettingsSection,
     shell_picker_open: bool,
     shell_picker_count: usize,
+    hidden_host_count: usize,
 ) -> f32 {
-    let geometry =
-        settings_geometry(size_info, scale_factor, 0.0, shell_picker_open, shell_picker_count);
+    let geometry = settings_geometry(
+        size_info,
+        scale_factor,
+        0.0,
+        shell_picker_open,
+        shell_picker_count,
+        hidden_host_count,
+    );
     let (_, _, _, ph) = geometry.popup;
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
@@ -363,6 +388,7 @@ fn settings_geometry(
     scroll: f32,
     shell_picker_open: bool,
     shell_picker_count: usize,
+    hidden_host_count: usize,
 ) -> SettingsGeometry {
     let s = |v: f32| v * scale_factor;
     let w = size_info.width();
@@ -445,7 +471,13 @@ fn settings_geometry(
     let picker_extra = if shell_picker_open { shell_picker_count as f32 * ROW_H } else { 0.0 };
     let ghost_y0 = shell_y0 + 3.0 * ROW_H + picker_extra + GROUP_ADVANCE;
     let open_y0 = ghost_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
-    let profiles_h = s(open_y0 + ROW_H + 32.0 - 72.0);
+    let hidden_y0 = open_y0 + ROW_H + GROUP_ADVANCE;
+    let profiles_end = if hidden_host_count == 0 {
+        open_y0 + ROW_H
+    } else {
+        hidden_y0 + hidden_host_count as f32 * ROW_H
+    };
+    let profiles_h = s(profiles_end + 32.0 - 72.0);
 
     // Keymap: one contiguous group of read-only shortcut rows.
     let keymap_y0 = 146.0;
@@ -488,6 +520,8 @@ fn settings_geometry(
         ghost: (row_x, at(ghost_y0), row_w, row_h),
         accept: (row_x, at(ghost_y0 + ROW_H), row_w, row_h),
         open_config_file: (row_x, at(open_y0), row_w, row_h),
+        hidden_host_row0: (row_x, at(hidden_y0), row_w, row_h),
+        hidden_host_count,
         reset: (popup_x + popup_w - s(170.0), popup_y + s(24.0), s(150.0), s(42.0)),
         content_top,
         appearance_h,
@@ -513,9 +547,16 @@ pub fn settings_hit(
     scroll: f32,
     shell_picker_open: bool,
     shell_picker_count: usize,
+    hidden_host_count: usize,
 ) -> SettingsHit {
-    let geometry =
-        settings_geometry(size_info, scale_factor, scroll, shell_picker_open, shell_picker_count);
+    let geometry = settings_geometry(
+        size_info,
+        scale_factor,
+        scroll,
+        shell_picker_open,
+        shell_picker_count,
+        hidden_host_count,
+    );
 
     if contains_rect(geometry.gear, x, y) {
         return SettingsHit::Toggle;
@@ -594,6 +635,13 @@ pub fn settings_hit(
                 if contains_rect(geometry.open_config_file, x, y) {
                     return SettingsHit::OpenConfigFile;
                 }
+                let (row_x, row_y, row_w, row_h) = geometry.hidden_host_row0;
+                for index in 0..geometry.hidden_host_count {
+                    let rect = (row_x, row_y + index as f32 * row_h, row_w, row_h);
+                    if contains_rect(rect, x, y) {
+                        return SettingsHit::RestoreHiddenSsh(index);
+                    }
+                }
             },
             NebulaSettingsSection::Keymap => {},
             NebulaSettingsSection::Advanced => {
@@ -626,6 +674,9 @@ pub(super) struct SettingsView {
     /// Detected shells for the picker (cached once per process).
     pub(super) shells: Vec<(String, String, String)>, // (id, name, program)
     pub(super) shell_id: Option<String>,
+    /// Persistent soft-deleted destinations. Rows provide a discoverable
+    /// recovery path after the short Undo bar has expired.
+    pub(super) hidden_hosts: Vec<String>,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     pub(super) keep_session: bool,
@@ -652,8 +703,14 @@ pub(super) fn push_quads(
     let h = size.height();
     let sk = view.theme.skin();
 
-    let geometry =
-        settings_geometry(size, scale, view.scroll, view.shell_picker_open, view.shells.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.scroll,
+        view.shell_picker_open,
+        view.shells.len(),
+        view.hidden_hosts.len(),
+    );
     let (px, py, pw, ph) = geometry.popup;
     // Header band height: the title row sits above the content, and the header
     // separator + big title are all measured from here.
@@ -991,6 +1048,18 @@ pub(super) fn push_quads(
             }
             group_frame(quads, geometry.ghost, 2);
             group_frame(quads, geometry.open_config_file, 1);
+            if geometry.hidden_host_count > 0 {
+                group_frame(quads, geometry.hidden_host_row0, geometry.hidden_host_count);
+                for index in 0..geometry.hidden_host_count {
+                    let mut rect = geometry.hidden_host_row0;
+                    rect.1 += index as f32 * rect.3;
+                    row_hover(
+                        quads,
+                        rect,
+                        view.hover == SettingsHit::RestoreHiddenSsh(index),
+                    );
+                }
+            }
             for (hit, rect) in [
                 (SettingsHit::ShellCycle, geometry.shell),
                 (SettingsHit::FetchToggle, geometry.fetch),
@@ -1127,8 +1196,14 @@ pub(super) fn draw_text(
     let cell_h = size.cell_height();
     let sk = view.theme.skin();
 
-    let geometry =
-        settings_geometry(size, scale, view.scroll, view.shell_picker_open, view.shells.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.scroll,
+        view.shell_picker_open,
+        view.shells.len(),
+        view.hidden_hosts.len(),
+    );
     let mut icon_draws = Vec::new();
     let (px, py, _pw, ph) = geometry.popup;
     let (content_x, content_y, _content_w, _) = geometry.content;
@@ -1427,6 +1502,28 @@ pub(super) fn draw_text(
                     "打开配置文件",
                     gc,
                 );
+            }
+
+            if geometry.hidden_host_count > 0 {
+                let (hx, hy, hw, hh) = geometry.hidden_host_row0;
+                if visible(group_y(hy), title_h) {
+                    section_title(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        hx,
+                        group_y(hy),
+                        "已隐藏 SSH 主机 · 密码不会恢复",
+                    );
+                }
+                for (index, host) in view.hidden_hosts.iter().enumerate() {
+                    let rect = (hx, hy + index as f32 * hh, hw, hh);
+                    if visible(rect.1, rect.3) {
+                        row_label(r, gc, size, scale, &sk, rect, host, "恢复", sk.accent);
+                    }
+                }
             }
         },
         NebulaSettingsSection::Keymap => {
