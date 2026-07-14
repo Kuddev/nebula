@@ -86,7 +86,9 @@ pub struct UiQuad {
     /// where the join corners are square and only the outer corners curve).
     /// `radius` still drives the flat/glow shader flags, so keep it ≥ 0 here.
     pub corner_radii: [f32; 4],
-    /// Soft glow falloff in pixels; `0.0` means a crisp rounded rectangle.
+    /// Soft-effect parameter: `0.0` is a crisp rounded rectangle, positive is
+    /// the legacy radial glow, and negative is the blur radius of a rounded
+    /// outer shadow. Constructors hide this encoding from call sites.
     pub feather: f32,
     /// Explicit corner positions in pixels `[top-left, bottom-left, top-right,
     /// bottom-right]` for slanted/parallelogram shapes (flat-filled). When set,
@@ -131,7 +133,7 @@ impl UiQuad {
     /// rather than vanishing. Glows (feathered) and explicit-corner polygons
     /// are soft/slanted by design and pass through untouched.
     pub fn pixel_snapped(&self) -> Self {
-        if self.corners.is_some() || self.feather > 0.0 {
+        if self.corners.is_some() || self.feather.abs() > 0.0 {
             return *self;
         }
         let x1 = (self.x + self.width).round();
@@ -182,6 +184,39 @@ impl UiQuad {
             radius: 0.0,
             corner_radii: [0.0; 4],
             feather: 1.0,
+            corners: None,
+            v_range: [0.0, 1.0],
+            color0: color,
+            color1: color,
+            gradient: Gradient::None,
+        }
+    }
+
+    /// Soft shadow following a rounded rectangle instead of radiating from its
+    /// center. The generated geometry includes the blur extent; the shader
+    /// evaluates the original card shape inside it. `offset_y` provides the
+    /// small directional cue expected from a floating surface.
+    #[inline]
+    pub fn shadow(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        blur: f32,
+        offset_y: f32,
+        color: Rgba,
+    ) -> Self {
+        let blur = blur.max(1.0);
+        Self {
+            x: x - blur,
+            y: y - blur + offset_y,
+            width: width + blur * 2.0,
+            height: height + blur * 2.0,
+            radius,
+            corner_radii: [radius; 4],
+            // 负值区分圆角外阴影与既有的中心径向 glow，避免改变旧调用行为。
+            feather: -blur,
             corners: None,
             v_range: [0.0, 1.0],
             color0: color,
@@ -445,5 +480,19 @@ impl Drop for UiRenderer {
             gl::DeleteBuffers(1, &self.vbo);
             gl::DeleteVertexArrays(1, &self.vao);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadow_geometry_includes_blur_and_vertical_offset() {
+        let shadow = UiQuad::shadow(10.0, 20.0, 100.0, 80.0, 8.0, 12.0, 4.0, Rgba::new(0, 0, 0, 54));
+        assert_eq!((shadow.x, shadow.y), (-2.0, 12.0));
+        assert_eq!((shadow.width, shadow.height), (124.0, 104.0));
+        assert_eq!(shadow.corner_radii, [8.0; 4]);
+        assert_eq!(shadow.feather, -12.0);
     }
 }

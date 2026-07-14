@@ -255,47 +255,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
-        // The new-tab shell/profile list is a lightweight menu: navigation and
-        // confirmation stay inside it, while unrelated keys dismiss it and
-        // continue through normal shortcuts/terminal input.
-        if self.ctx.display().command_palette_picker_open() {
-            let handled = match &key.logical_key {
-                Key::Named(NamedKey::Escape) => {
-                    self.ctx.display().close_command_palette();
-                    true
-                },
-                Key::Named(NamedKey::Enter) => {
-                    if let Some(action) = self.ctx.display().palette_confirm() {
-                        self.run_palette_action(action);
-                    }
-                    true
-                },
-                Key::Named(NamedKey::Tab) => {
-                    self.ctx.display().palette_move(if mods.shift_key() { -1 } else { 1 });
-                    true
-                },
-                Key::Named(NamedKey::ArrowDown) => {
-                    self.ctx.display().palette_move(1);
-                    true
-                },
-                Key::Named(NamedKey::ArrowUp) => {
-                    self.ctx.display().palette_move(-1);
-                    true
-                },
-                _ => {
-                    self.ctx.display().close_command_palette();
-                    false
-                },
-            };
-            self.ctx.mark_dirty();
-            if handled {
-                return;
-            }
-        }
-
-        // The full command palette owns the keyboard while open: route typing /
-        // navigation / confirm into it and swallow everything else, so no
-        // terminal binding fires behind the modal.
+        // Command and Shell/Profile palettes both own the keyboard while open:
+        // typing, IME and editing shortcuts target their visible search box, so
+        // nothing is accidentally forwarded to the terminal behind the veil.
         if self.ctx.display().command_palette_open() {
             match &key.logical_key {
                 Key::Named(NamedKey::Escape) => self.ctx.display().close_command_palette(),

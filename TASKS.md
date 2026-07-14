@@ -9,7 +9,9 @@
 - [x] 保存并恢复 Tab 自定义颜色及必要的会话元数据。
 - [x] 自绘输入框统一支持 Ctrl+A / Ctrl+C / Ctrl+V；全选后输入/粘贴替换，选择有可见背景；隐藏密码仅允许粘贴，显示后才允许复制。
 - [x] 侧栏按 `D:/下载/gemini-code-1784017517204.html` 收敛：TABS / SSH HOSTS 使用真实小字号层级，两个加号仅标题 hover 时显现，Tabs 下拉改为竖向三点。
-- [x] `cargo check -p nebula` 与 `cargo test -p nebula` 通过（173 passed，0 failed；2026-07-14）。
+- [x] `cargo check -p nebula` 与 `cargo test -p nebula` 通过（174 passed，0 failed；2026-07-14）。
+- [x] 建立 `display/design_tokens.rs`（4px 空间阶梯、字号、控件尺寸、动画和统一状态枚举），菜单动画与侧栏层级已开始实际引用；SSH UI 状态类型已从 `display/mod.rs` 拆至 `display/ssh_ui.rs`。
+- [ ] 继续把 `display/mod.rs` 中 SSH 方法/绘制、确认弹窗和其他大块职责拆到子模块，并逐屏迁移散落的局部数值到 design tokens。
 - [ ] 完成 Debug 运行检查和真实窗口交互验收（hover-only 控件、菜单脱焦、删除/撤销/恢复、输入框快捷键和 DPI 字体观感）。
 - [ ] 验收完成后重打 0.3.0 Release，并替换现有发布压缩包。
 

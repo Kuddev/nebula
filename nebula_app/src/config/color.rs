@@ -5,6 +5,13 @@ use nebula_config_derive::ConfigDeserialize;
 
 use crate::display::color::{CellRgb, Rgb};
 
+/// Sentinel used by the theme-following cursor path. A user/OSC override that
+/// differs from this value keeps its explicit color and full opacity.
+pub(crate) const NEBULA_DEFAULT_CURSOR: InvertedCellColors = InvertedCellColors {
+    foreground: CellRgb::CellBackground,
+    background: CellRgb::Rgb(Rgb::new(0x49, 0x4d, 0x72)),
+};
+
 #[derive(ConfigDeserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Colors {
     pub primary: PrimaryColors,
@@ -28,10 +35,7 @@ impl Default for Colors {
         // 只定制默认光标，不改 InvertedCellColors::default()：该类型也被
         // selection 复用，直接改会把选区颜色一起染偏。用户显式配置的
         // [colors.cursor] 会继续覆盖这里的默认值。
-        let cursor = InvertedCellColors {
-            foreground: CellRgb::CellBackground,
-            background: CellRgb::Rgb(Rgb::new(0x49, 0x4d, 0x72)),
-        };
+        let cursor = NEBULA_DEFAULT_CURSOR;
 
         Self {
             primary: Default::default(),

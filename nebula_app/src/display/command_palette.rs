@@ -315,14 +315,14 @@ impl CommandPalette {
         self.open
     }
 
-    /// Whether the palette is in default-shell picking mode (WT-style selector:
-    /// no search box, list from top, shell icons emphasized).
+    /// Whether the palette is in default-shell picking mode.
     pub fn is_picking_default(&self) -> bool {
         self.picking_default
     }
 
-    /// Lightweight shell/profile selector mode. Unlike the full command
-    /// palette it has no search field and should release focus naturally.
+    /// Shell/profile selector mode. This identity is used only for natural
+    /// dismissal on window focus loss; the selector remains searchable because
+    /// a long shell/profile list otherwise becomes needlessly hard to scan.
     pub fn is_picker(&self) -> bool {
         self.open && self.profiles_only
     }
@@ -684,28 +684,24 @@ pub struct PaletteLayout {
 
 /// Compute the centered popup layout for a window of `win_w` × `win_h`. The
 /// panel height is fixed (sized for `max_rows`) so it doesn't jump as the match
-/// count changes while typing. Pass `with_input=false` for the WT-style
-/// shell-picker mode: no search box, list starts at the top.
-pub fn palette_layout(win_w: f32, win_h: f32, scale: f32, with_input: bool) -> PaletteLayout {
+/// count changes while typing. Every palette mode uses the same search-input
+/// geometry, keeping rendering, hover and click hit-testing on one contract.
+pub fn palette_layout(win_w: f32, win_h: f32, scale: f32) -> PaletteLayout {
     let s = |v: f32| v * scale;
     let margin = s(8.0);
     let pad = s(12.0);
-    let input_h = s(50.0);
-    let row_h = s(38.0);
+    let row_h = s(super::design_tokens::control::COMPACT_ROW);
+    // 搜索框与结果行等高：输入仍然可发现，但不会压过真正的数据内容。
+    let input_h = row_h;
     let max_rows = 8usize;
 
     let pw = s(640.0).min(win_w - 2.0 * margin);
-    let ph = if with_input {
-        pad + input_h + s(8.0) + max_rows as f32 * row_h + pad
-    } else {
-        // No search box: list fills the whole panel
-        pad + max_rows as f32 * row_h + pad
-    };
+    let ph = pad + input_h + s(8.0) + max_rows as f32 * row_h + pad;
     let px = ((win_w - pw) * 0.5).max(margin);
     let py = ((win_h - ph) * 0.5).max(s(48.0));
 
     let input = (px + pad, py + pad, pw - 2.0 * pad, input_h);
-    let list_y = if with_input { py + pad + input_h + s(8.0) } else { py + pad };
+    let list_y = py + pad + input_h + s(8.0);
 
     PaletteLayout { panel: (px, py, pw, ph), input, row_h, list_y, max_rows }
 }
@@ -718,7 +714,7 @@ use crate::renderer::{GlyphCache, Renderer};
 
 /// Push the palette's background quads: a dim veil over the window, the glass
 /// panel (glow + gradient border + fill, matching the settings modal), the
-/// query input box (hidden in picking_default mode), and the selected-row
+/// query input box, and the selected-row
 /// highlight. No-op while closed.
 pub(super) fn push_quads(
     model: &CommandPalette,
@@ -735,8 +731,7 @@ pub(super) fn push_quads(
     let s = |v: f32| v * scale;
     let palette = theme.palette();
     let sk = theme.skin();
-    let with_input = !model.is_picker();
-    let layout = palette_layout(w, h, scale, with_input);
+    let layout = palette_layout(w, h, scale);
     let (px, py, pw, ph) = layout.panel;
     let (ix, iy, iw, ih) = layout.input;
 
@@ -769,23 +764,27 @@ pub(super) fn push_quads(
         Gradient::Axis([0.25, 0.95]),
     ));
 
-    // Query input box: only in full palette mode, not the WT-style picker.
-    if with_input {
-        quads.push(UiQuad::solid(ix, iy, iw, ih, s(10.0), sk.input));
-        if model.query_all_selected() && !model.query.is_empty() {
-            let cell_w = size.cell_width();
-            let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
-            let selection_x = ix + s(14.0 + 28.0);
-            let selection_w = (columns as f32 * cell_w).min(iw - s(56.0));
-            quads.push(UiQuad::solid(
-                selection_x - s(2.0),
-                iy + s(7.0),
-                selection_w + s(4.0),
-                ih - s(14.0),
-                s(4.0),
-                sk.accent_soft,
-            ));
-        }
+    quads.push(UiQuad::solid(
+        ix,
+        iy,
+        iw,
+        ih,
+        s(super::design_tokens::control::RADIUS),
+        sk.input,
+    ));
+    if model.query_all_selected() && !model.query.is_empty() {
+        let cell_w = size.cell_width();
+        let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
+        let selection_x = ix + s(14.0 + 28.0);
+        let selection_w = (columns as f32 * cell_w).min(iw - s(56.0));
+        quads.push(UiQuad::solid(
+            selection_x - s(2.0),
+            iy + s(7.0),
+            selection_w + s(4.0),
+            ih - s(14.0),
+            s(4.0),
+            sk.accent_soft,
+        ));
     }
 
     // Hover background: subtle highlight when the mouse is over a row.
@@ -845,39 +844,39 @@ pub(super) fn draw_text(
     let h = size.height();
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let with_input = !model.is_picker();
-    let layout = palette_layout(w, h, scale, with_input);
+    let layout = palette_layout(w, h, scale);
     let (ix, iy, iw, ih) = layout.input;
 
     // Inks from the theme skin: dark text on light panels, pale on dark.
     let sk = theme.skin();
 
-    // Left edge for text content (list rows). In full palette mode this is
-    // indented past the search icon; in WT picker mode it starts at the panel pad.
+    // Left edge for result text and the search icon.
     let text_x = ix + s(14.0);
 
-    // Search icon and query text: only in full palette mode, not WT picker.
-    if with_input {
-        const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
-        r.draw_chrome_text(size, text_x, iy + (ih - cell_h) / 2.0, sk.accent, ICON_SEARCH, gc);
+    const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
+    r.draw_chrome_text(size, text_x, iy + (ih - cell_h) / 2.0, sk.accent, ICON_SEARCH, gc);
 
-        let query_x = text_x + s(28.0);
-        let text_y = iy + (ih - cell_h) / 2.0;
-        let query = model.query();
-        let cursor = if model.cursor_visible() { "▏" } else { "" };
+    let query_x = text_x + s(28.0);
+    let text_y = iy + (ih - cell_h) / 2.0;
+    let query = model.query();
+    let cursor = if model.cursor_visible() { "▏" } else { "" };
 
-        if query.is_empty() {
-            // Empty: only show blinking cursor at the start (no placeholder)
-            r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, cursor, gc);
+    if query.is_empty() {
+        // 空态同时给出输入光标和用途提示，避免只有一个空白色块让用户猜测。
+        r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, cursor, gc);
+        let placeholder = if model.profiles_only {
+            "搜索 Shell 或 Profile…"
         } else {
-            // Show query + cursor at the end
-            let shown = if model.query_all_selected() {
-                query.to_owned()
-            } else {
-                format!("{query}{cursor}")
-            };
-            r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, &shown, gc);
-        }
+            "搜索命令、Shell 或 Profile…"
+        };
+        r.draw_chrome_text(size, query_x + s(10.0), text_y, sk.ink_dim, placeholder, gc);
+    } else {
+        let shown = if model.query_all_selected() {
+            query.to_owned()
+        } else {
+            format!("{query}{cursor}")
+        };
+        r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, &shown, gc);
     }
 
     if model.is_empty() {
@@ -1068,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn only_profile_modes_are_lightweight_pickers() {
+    fn profile_modes_keep_their_dismissible_picker_identity() {
         let mut palette = CommandPalette::new();
         assert!(!palette.is_picker());
 
@@ -1076,13 +1075,31 @@ mod tests {
         assert!(!palette.is_picker(), "full palette keeps its search focus");
 
         palette.open_profiles();
-        assert!(palette.is_picker(), "new-tab shell menu releases focus naturally");
+        assert!(palette.is_picker(), "new-tab shell selector dismisses on focus loss");
 
         palette.close();
         assert!(!palette.is_picker());
 
         palette.open_default_picker();
-        assert!(palette.is_picker(), "default-shell selector shares picker semantics");
+        assert!(palette.is_picker(), "default-shell selector shares dismissal semantics");
+    }
+
+    #[test]
+    fn profile_picker_query_filters_rows() {
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(&[], &["Windows PowerShell".into(), "Git Bash".into()]);
+        palette.open_profiles();
+
+        palette.input_text("git");
+        let (rows, _) = palette.visible(8);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Git Bash");
+    }
+
+    #[test]
+    fn search_input_and_result_rows_share_compact_height() {
+        let layout = palette_layout(1600.0, 900.0, 1.5);
+        assert_eq!(layout.input.3, layout.row_h);
     }
 
     #[test]

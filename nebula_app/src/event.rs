@@ -2860,9 +2860,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                                 self.ctx.display.nebula_side_panel.commit_input(&text);
                             } else if self.ctx.display.nebula_ssh_editor.is_some() {
                                 self.ctx.display.ssh_editor_insert(&text);
-                            } else if self.ctx.display.command_palette_open()
-                                && !self.ctx.display.command_palette_picker_open()
-                            {
+                            } else if self.ctx.display.command_palette_open() {
                                 self.ctx.display.palette_input_text(&text);
                             } else {
                                 // Don't use bracketed paste for single char input.

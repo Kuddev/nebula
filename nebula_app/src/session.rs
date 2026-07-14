@@ -7,15 +7,17 @@
 //! restore is attempted and cleared by the first successful autosave, so after
 //! three failed launches Nebula starts clean to break the cycle.
 //!
-//! v1 restores the tab list + per-tab working directory + active tab. Split
-//! trees inside a tab collapse to their focused pane's cwd for now.
+//! v2 additionally preserves each tab's custom name and optional color. Split
+//! trees inside a tab still collapse to their focused pane's cwd for now.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::display::color::Rgb;
+
 /// Highest snapshot format this build understands.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Give up restoring after this many launches that never reached a successful
 /// autosave (i.e. crashed within the first second).
@@ -25,6 +27,12 @@ const MAX_BOOT_ATTEMPTS: u32 = 3;
 pub struct TabSession {
     /// Working directory of the tab's focused pane.
     pub cwd: String,
+    /// User override from inline rename. `None` keeps cwd/title-derived labels.
+    #[serde(default)]
+    pub custom_name: Option<String>,
+    /// User-selected tab light-strip color. `None` follows the current theme.
+    #[serde(default)]
+    pub color: Option<Rgb>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,7 +60,12 @@ fn session_path() -> PathBuf {
 /// Load the previous session, if any and version-compatible.
 pub fn load() -> Option<Session> {
     let data = std::fs::read_to_string(session_path()).ok()?;
-    let session: Session = serde_json::from_str(&data).ok()?;
+    let mut session: Session = serde_json::from_str(&data).ok()?;
+    // v1 has the same outer shape; serde defaults fill the two v2 fields.
+    // Upgrade in memory so the first successful autosave rewrites it as v2.
+    if session.version == 1 {
+        session.version = VERSION;
+    }
     (session.version == VERSION).then_some(session)
 }
 
@@ -87,4 +100,33 @@ pub fn valid_dir(cwd: &str) -> Option<PathBuf> {
 pub fn mark_boot_attempt(session: &mut Session) {
     session.boot_attempts += 1;
     save(session);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_tabs_deserialize_with_default_metadata() {
+        let json = r#"{"version":1,"boot_attempts":0,"active_tab":0,"tabs":[{"cwd":"D:/work"}]}"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.version, 1);
+        assert_eq!(session.tabs[0].custom_name, None);
+        assert_eq!(session.tabs[0].color, None);
+    }
+
+    #[test]
+    fn v2_round_trip_preserves_tab_name_and_color() {
+        let session = Session::new(
+            0,
+            vec![TabSession {
+                cwd: "D:/work".into(),
+                custom_name: Some("Backend".into()),
+                color: Some(Rgb::new(97, 175, 239)),
+            }],
+        );
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, session);
+    }
 }
