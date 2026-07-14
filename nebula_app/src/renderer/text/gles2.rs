@@ -403,7 +403,14 @@ impl TextRenderApi<Batch> for RenderApi<'_> {
 
             // Draw background.
             self.program.set_rendering_pass(RenderingPass::Background);
-            gl::BlendFunc(gl::ONE, gl::ZERO);
+            // 背景着色器输出预乘 alpha；叠加可保住下层卡片的 alpha，避免
+            // 半透明选区在透明窗口中变成能看到其他应用的“洞”。
+            gl::BlendFuncSeparate(
+                gl::ONE,
+                gl::ONE_MINUS_SRC_ALPHA,
+                gl::ONE,
+                gl::ONE_MINUS_SRC_ALPHA,
+            );
             gl::DrawElements(gl::TRIANGLES, num_indices, gl::UNSIGNED_SHORT, ptr::null());
 
             self.program.set_rendering_pass(RenderingPass::SubpixelPass1);

@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "nebula"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "base64",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-completions"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "lscolors",
  "nu-ansi-term",
@@ -1835,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "nebula_config"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "log",
  "nebula_config_derive",
@@ -1845,7 +1845,7 @@ dependencies = [
 
 [[package]]
 name = "nebula_config_derive"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "log",
  "nebula_config",
@@ -1858,11 +1858,11 @@ dependencies = [
 
 [[package]]
 name = "nebula_hook"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "nebula_terminal"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "bitflags 2.9.4",

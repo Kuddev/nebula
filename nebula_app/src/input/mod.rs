@@ -704,6 +704,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             crate::display::SettingsHit::Toggle
             | crate::display::SettingsHit::Nav(_)
             | crate::display::SettingsHit::Theme(_)
+            | crate::display::SettingsHit::SystemThemeToggle
             | crate::display::SettingsHit::GhostToggle
             | crate::display::SettingsHit::AcceptCycle
             | crate::display::SettingsHit::ShellCycle
@@ -1518,6 +1519,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 },
                 crate::display::SettingsHit::ShellPickerRow(index) => {
                     self.ctx.display().set_default_shell_by_index(index);
+                    self.ctx.mark_dirty();
+                    return;
+                },
+                crate::display::SettingsHit::SystemThemeToggle => {
+                    self.ctx.display().toggle_system_theme_following();
                     self.ctx.mark_dirty();
                     return;
                 },

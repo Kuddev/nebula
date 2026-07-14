@@ -49,6 +49,26 @@ impl Default for NebulaTheme {
 }
 
 impl NebulaTheme {
+    /// Resolve the light/dark member of the user's chosen theme family.
+    ///
+    /// Nebula is an intentionally standalone dark theme. When automatic mode
+    /// needs a light counterpart, Silver is the closest neutral match; the
+    /// original Nebula preference is kept separately so switching back to a
+    /// dark system appearance restores it instead of silently changing the
+    /// user's choice to Steel.
+    pub(crate) fn for_system_appearance(self, is_light: bool) -> Self {
+        match (self, is_light) {
+            (Self::Nebula, true) => Self::SilverLight,
+            (Self::Nebula, false) => Self::Nebula,
+            (Self::SilverLight | Self::SteelDark, true) => Self::SilverLight,
+            (Self::SilverLight | Self::SteelDark, false) => Self::SteelDark,
+            (Self::LimestoneLight | Self::CoalDark, true) => Self::LimestoneLight,
+            (Self::LimestoneLight | Self::CoalDark, false) => Self::CoalDark,
+            (Self::LinenLight | Self::MossDark, true) => Self::LinenLight,
+            (Self::LinenLight | Self::MossDark, false) => Self::MossDark,
+        }
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Nebula => "Nebula",
@@ -560,5 +580,22 @@ pub(crate) fn write_nebula_prompt_theme(theme: NebulaTheme) {
             let _ = std::fs::remove_file(&path);
             std::fs::rename(&tmp, &path)
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NebulaTheme;
+
+    #[test]
+    fn system_appearance_keeps_the_selected_theme_family() {
+        assert_eq!(NebulaTheme::Nebula.for_system_appearance(true), NebulaTheme::SilverLight);
+        assert_eq!(NebulaTheme::Nebula.for_system_appearance(false), NebulaTheme::Nebula);
+        assert_eq!(NebulaTheme::SilverLight.for_system_appearance(false), NebulaTheme::SteelDark);
+        assert_eq!(NebulaTheme::SteelDark.for_system_appearance(true), NebulaTheme::SilverLight);
+        assert_eq!(NebulaTheme::LimestoneLight.for_system_appearance(false), NebulaTheme::CoalDark);
+        assert_eq!(NebulaTheme::CoalDark.for_system_appearance(true), NebulaTheme::LimestoneLight);
+        assert_eq!(NebulaTheme::LinenLight.for_system_appearance(false), NebulaTheme::MossDark);
+        assert_eq!(NebulaTheme::MossDark.for_system_appearance(true), NebulaTheme::LinenLight);
     }
 }

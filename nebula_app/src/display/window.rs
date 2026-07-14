@@ -464,6 +464,13 @@ impl Window {
         self.window.set_theme(theme);
     }
 
+    /// Return the operating system's current application appearance when the
+    /// platform exposes it. Keeping this behind the window wrapper avoids
+    /// leaking the underlying winit window into the display state.
+    pub fn theme(&self) -> Option<Theme> {
+        self.window.theme()
+    }
+
     #[cfg(target_os = "macos")]
     pub fn toggle_simple_fullscreen(&self) {
         self.set_simple_fullscreen(!self.window.simple_fullscreen());

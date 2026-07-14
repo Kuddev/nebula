@@ -1635,8 +1635,9 @@ impl WindowContext {
             self.display.pending_update.set_font(font);
         }
 
-        // Always reload the theme to account for auto-theme switching.
-        self.display.window.set_theme(self.config.window.theme());
+        // Keep the decoration override in sync without suppressing winit's
+        // OS theme events while Nebula's automatic theme mode is enabled.
+        self.display.update_window_theme_override(self.config.window.theme());
 
         // Update display if either padding options or resize increments were changed.
         let window_config = &old_config.window;
@@ -1813,7 +1814,7 @@ impl WindowContext {
                         view.padding_x(),
                         view.padding_y(),
                         view.width() - 2.0 * view.padding_x(),
-                        view.height() - 2.0 * view.padding_y(),
+                        view.height() - view.padding_y() - view.padding_bottom(),
                     ));
                 }
                 let pane = &mut self.panes[idx];

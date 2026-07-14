@@ -772,7 +772,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         let gx = size.padding_x();
         let gy = size.padding_y();
         let gw = size.width() - gx - size.padding_right();
-        let gh = size.height() - 2.0 * gy;
+        let gh = size.height() - gy - size.padding_bottom();
         let (px2, py2, pw2, ph2) = match nav {
             SplitNav::Left => (gx, gy, gw / 2.0, gh),
             SplitNav::Right => (gx + gw / 2.0, gy, gw / 2.0, gh),

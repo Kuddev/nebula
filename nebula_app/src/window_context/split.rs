@@ -277,7 +277,7 @@ impl WindowContext {
         // (width - padding_right) — using 2*pad_x here would short the rightmost
         // pane by the sidebar width and leave a grey band down the right edge.
         let vw = (size.width() - pad_x - size.padding_right()).max(0.0);
-        let vh = (size.height() - 2.0 * pad_y).max(0.0);
+        let vh = (size.height() - pad_y - size.padding_bottom()).max(0.0);
 
         let mut panes = Vec::new();
         let mut dividers = Vec::new();
@@ -306,7 +306,7 @@ impl WindowContext {
             let x0 = view.padding_x();
             let y0 = view.padding_y();
             let x1 = view.width() - view.padding_x();
-            let y1 = view.height() - view.padding_y();
+            let y1 = view.height() - view.padding_bottom();
             (x >= x0 && x < x1 && y >= y0 && y < y1).then_some(id)
         })
     }
@@ -323,7 +323,8 @@ impl WindowContext {
         let Some((_, fview)) = rects.iter().find(|(id, _)| *id == focused) else { return };
         let center = |v: &SizeInfo| {
             let cx = v.padding_x() + (v.width() - 2.0 * v.padding_x()) * 0.5;
-            let cy = v.padding_y() + (v.height() - 2.0 * v.padding_y()) * 0.5;
+            let cy =
+                v.padding_y() + (v.height() - v.padding_y() - v.padding_bottom()) * 0.5;
             (cx, cy)
         };
         let (fcx, fcy) = center(fview);
@@ -383,7 +384,7 @@ impl WindowContext {
                     view.padding_x(),
                     view.padding_y(),
                     view.width() - 2.0 * view.padding_x(),
-                    view.height() - 2.0 * view.padding_y(),
+                    view.height() - view.padding_y() - view.padding_bottom(),
                     direction,
                     std::time::Instant::now(),
                 ));

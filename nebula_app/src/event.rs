@@ -436,7 +436,6 @@ impl Processor {
                 | WindowEvent::PanGesture { .. }
                 | WindowEvent::HoveredFileCancelled
                 | WindowEvent::Destroyed
-                | WindowEvent::ThemeChanged(_)
                 | WindowEvent::HoveredFile(_)
                 | WindowEvent::Moved(_)
         )
@@ -2887,6 +2886,10 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             *self.ctx.dirty = true;
                         },
                     },
+                    WindowEvent::ThemeChanged(theme) => {
+                        self.ctx.display.system_theme_changed(theme);
+                        *self.ctx.dirty = true;
+                    },
                     WindowEvent::KeyboardInput { is_synthetic: true, .. }
                     | WindowEvent::ActivationTokenDone { .. }
                     | WindowEvent::DoubleTapGesture { .. }
@@ -2898,7 +2901,6 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     | WindowEvent::PanGesture { .. }
                     | WindowEvent::HoveredFileCancelled
                     | WindowEvent::Destroyed
-                    | WindowEvent::ThemeChanged(_)
                     | WindowEvent::HoveredFile(_)
                     | WindowEvent::RedrawRequested
                     | WindowEvent::Moved(_) => (),

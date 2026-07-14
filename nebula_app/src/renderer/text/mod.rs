@@ -202,10 +202,11 @@ fn update_projection(u_projection: GLint, size: &SizeInfo) {
     let padding_x = size.padding_x();
     let padding_right = size.padding_right();
     let padding_y = size.padding_y();
+    let padding_bottom = size.padding_bottom();
 
     // Bounds check.
     if (width as u32) < (padding_x as u32 + padding_right as u32)
-        || (height as u32) < (2 * padding_y as u32)
+        || (height as u32) < (padding_y as u32 + padding_bottom as u32)
     {
         return;
     }
@@ -216,9 +217,9 @@ fn update_projection(u_projection: GLint, size: &SizeInfo) {
     // padding_x, so the projection only needs the content width, which is why
     // an asymmetric left/right split just works here.
     //   [0, width - padding_x - padding_right] to [-1, 1]
-    //   [height - 2 * padding_y, 0] to [-1, 1]
+    //   [height - padding_y - padding_bottom, 0] to [-1, 1]
     let scale_x = 2. / (width - padding_x - padding_right);
-    let scale_y = -2. / (height - 2. * padding_y);
+    let scale_y = -2. / (height - padding_y - padding_bottom);
     let offset_x = -1.;
     let offset_y = 1.;
 

@@ -88,6 +88,7 @@ pub enum SettingsHit {
     Dismiss,
     Nav(NebulaSettingsSection),
     Theme(NebulaTheme),
+    SystemThemeToggle,
     GhostToggle,
     AcceptCycle,
     ShellCycle,
@@ -131,6 +132,9 @@ pub(super) struct NebulaRuntimeSettings {
     /// powerline bridge file gets rewritten with the right name on boot
     /// (it used to be reset to the default theme every launch).
     pub(super) theme: NebulaTheme,
+    /// Automatically choose the light/dark member of the selected theme
+    /// family when the operating system appearance changes.
+    pub(super) follow_system_theme: bool,
     /// SSH host aliases pinned to the top of the sidebar's "SSH HOSTS"
     /// section (right-click a host row), in pinned order.
     pub(super) pinned_hosts: Vec<String>,
@@ -167,6 +171,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         background_image: None,
         background_image_opacity: 0.38,
         theme: NebulaTheme::default(),
+        // Preserve existing installations: automatic switching is opt-in so
+        // an update never replaces an explicitly selected theme unexpectedly.
+        follow_system_theme: false,
         pinned_hosts: Vec::new(),
         saved_hosts: Vec::new(),
         hidden_hosts: Vec::new(),
@@ -229,6 +236,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
                         .collect();
+                },
+                Some(("follow_system_theme", v)) => {
+                    settings.follow_system_theme = parse_bool(v, false)
                 },
                 Some(("hidden_hosts", v)) => {
                     settings.hidden_hosts = v
@@ -295,7 +305,8 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let _ = std::fs::write(
         path,
         format!(
-            "theme={theme}\nghost={}\naccept={accept}\nshell={shell}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n",
+            "theme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n",
+            settings.follow_system_theme as u8,
             settings.ghost as u8,
             settings.fetch as u8,
             settings.powerline as u8,
@@ -316,6 +327,7 @@ struct SettingsGeometry {
     content: (f32, f32, f32, f32),
     nav: [(NebulaSettingsSection, f32, f32, f32, f32); 4],
     options: [(NebulaTheme, f32, f32, f32, f32); 7],
+    system_theme: (f32, f32, f32, f32),
     shell: (f32, f32, f32, f32),
     /// Shell picker expanded rows (when open): first row Y, row height, max visible.
     shell_picker: (f32, f32, usize),
@@ -443,7 +455,8 @@ fn settings_geometry(
     // Appearance: cards (146..322 design px + label strip), colors group,
     // interface group. The card block spans 2 grid rows of `64 + 48` design
     // px each (card + label strip, matching `card_row_pitch` above).
-    let color_y0 = card_y0 + 2.0 * (64.0 + 48.0) + GROUP_ADVANCE;
+    let system_theme_y0 = card_y0 + 2.0 * (64.0 + 48.0) + GROUP_ADVANCE;
+    let color_y0 = system_theme_y0 + ROW_H + GROUP_ADVANCE;
     let iface_y0 = color_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let appearance_h = s(iface_y0 + ROW_H + 32.0 - 72.0);
     // Opacity row controls, right-aligned with NO overlap: value · − · slider · +.
@@ -504,6 +517,7 @@ fn settings_geometry(
             (NebulaTheme::LinenLight, card(5.0), card_slot_y(5.0), card_w, card_h),
             (NebulaTheme::MossDark, card(6.0), card_slot_y(6.0), card_w, card_h),
         ],
+        system_theme: (row_x, at(system_theme_y0), row_w, row_h),
         background: (row_x, at(color_y0), row_w, row_h),
         background_image: (row_x, at(color_y0 + ROW_H), row_w, row_h),
         opacity_row,
@@ -590,6 +604,9 @@ pub fn settings_hit(
                         return SettingsHit::Theme(theme);
                     }
                 }
+                if contains_rect(geometry.system_theme, x, y) {
+                    return SettingsHit::SystemThemeToggle;
+                }
                 if contains_rect(geometry.background, x, y) {
                     return SettingsHit::BackgroundColor;
                 }
@@ -664,6 +681,7 @@ pub(super) struct SettingsView {
     pub(super) section: NebulaSettingsSection,
     pub(super) hover: SettingsHit,
     pub(super) theme: NebulaTheme,
+    pub(super) follow_system_theme: bool,
     pub(super) ghost: bool,
     pub(super) accept: AcceptKey,
     /// Pre-rendered "默认 Shell" value (icon + name) — resolved by `Display`
@@ -952,6 +970,14 @@ pub(super) fn push_quads(
                 card_bg.a = 255;
                 clip(quads, UiQuad::solid(ox, oy, ow, oh, s(8.0), card_bg));
             }
+
+            group_frame(quads, geometry.system_theme, 1);
+            row_hover(
+                quads,
+                geometry.system_theme,
+                view.hover == SettingsHit::SystemThemeToggle,
+            );
+            toggle(quads, geometry.system_theme, view.follow_system_theme);
 
             // 自定义背景: one 2-row frame. 界面: one single-row frame.
             group_frame(quads, geometry.background, 2);
@@ -1313,6 +1339,20 @@ pub(super) fn draw_text(
                         sk.ink_dim
                     },
                     card_label,
+                    gc,
+                );
+            }
+            let (st_x, st_y, _, st_h) = geometry.system_theme;
+            if visible(group_y(st_y), title_h) {
+                section_title(r, gc, size, scale, &sk, st_x, group_y(st_y), "主题模式");
+            }
+            if visible(st_y, st_h) {
+                r.draw_chrome_text(
+                    size,
+                    st_x + s(16.0),
+                    st_y + (st_h - cell_h) / 2.0,
+                    sk.ink,
+                    "跟随系统明暗模式",
                     gc,
                 );
             }
