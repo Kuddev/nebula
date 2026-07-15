@@ -1,5 +1,7 @@
 #[cfg(windows)]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+#[cfg(windows)]
+use std::path::Path;
 #[cfg(windows)]
 use std::sync::Arc;
 
@@ -59,7 +61,9 @@ impl AsRef<[u8]> for StaticFontData {
 #[cfg(windows)]
 pub(crate) struct Rasterizer {
     system: crossfont::Rasterizer,
-    embedded_collection: FontCollection,
+    private_collection: FontCollection,
+    private_files: Vec<FontFile>,
+    private_paths: HashSet<std::path::PathBuf>,
     embedded_fonts: HashMap<FontKey, EmbeddedFont>,
     embedded_keys: HashMap<FontDesc, FontKey>,
 }
@@ -105,7 +109,7 @@ impl Rasterizer {
         }
 
         let family = self
-            .embedded_collection
+            .private_collection
             .font_family_by_name(family)
             .map_err(directwrite_error)?
             .ok_or_else(|| Error::FontNotFound(description.clone()))?;
@@ -124,6 +128,50 @@ impl Rasterizer {
             .insert(key, EmbeddedFont { face: font.create_font_face(), fallback_key });
         self.embedded_keys.insert(description, key);
         Ok(key)
+    }
+
+    pub(crate) fn private_font_families(&self) -> Vec<String> {
+        let mut families = self
+            .private_collection
+            .families_iter()
+            .filter_map(|family| family.family_name().ok())
+            .collect::<Vec<_>>();
+        families.sort_by_key(|family| family.to_ascii_lowercase());
+        families.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        families
+    }
+
+    pub(crate) fn add_private_font(&mut self, path: &Path) -> Result<Vec<String>, Error> {
+        let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let file = FontFile::new_from_path(path).ok_or_else(|| {
+            Error::PlatformError(format!("DirectWrite rejected {}", path.display()))
+        })?;
+        let probe = private_collection(&[file.clone()]);
+        let families = probe
+            .families_iter()
+            .filter_map(|family| family.family_name().ok())
+            .collect::<Vec<_>>();
+        if families.is_empty() {
+            return Err(Error::PlatformError("font file contains no usable family".to_owned()));
+        }
+        if self.private_paths.contains(&normalized) {
+            return Ok(families);
+        }
+
+        self.private_files.push(file);
+        self.private_paths.insert(normalized);
+        self.private_collection = private_collection(&self.private_files);
+        self.embedded_keys.clear();
+        Ok(families)
+    }
+
+    pub(crate) fn refresh_private_fonts(&mut self) -> Vec<String> {
+        for path in crate::font_install::imported_font_files() {
+            if let Err(error) = self.add_private_font(&path) {
+                log::warn!("failed to refresh imported font {}: {error}", path.display());
+            }
+        }
+        self.private_font_families()
     }
 
     pub(super) fn is_embedded_font(&self, key: FontKey) -> bool {
@@ -222,11 +270,23 @@ impl Rasterize for Rasterizer {
         let file = FontFile::new_from_buffer(data).ok_or_else(|| {
             Error::PlatformError("DirectWrite rejected the embedded Maple Mono font".to_owned())
         })?;
-        let loader = CustomFontCollectionLoaderImpl::new(&[file]);
-        let embedded_collection = FontCollection::from_loader(loader);
+        let mut private_files = vec![file];
+        let mut private_paths = HashSet::new();
+        for path in crate::font_install::imported_font_files() {
+            match FontFile::new_from_path(&path) {
+                Some(file) => {
+                    private_paths.insert(path.canonicalize().unwrap_or(path));
+                    private_files.push(file);
+                },
+                None => log::warn!("DirectWrite ignored imported font {}", path.display()),
+            }
+        }
+        let private_collection = private_collection(&private_files);
         Ok(Self {
             system,
-            embedded_collection,
+            private_collection,
+            private_files,
+            private_paths,
             embedded_fonts: HashMap::new(),
             embedded_keys: HashMap::new(),
         })
@@ -270,6 +330,12 @@ impl Rasterize for Rasterizer {
             self.system.kerning(left, right)
         }
     }
+}
+
+#[cfg(windows)]
+fn private_collection(files: &[FontFile]) -> FontCollection {
+    let loader = CustomFontCollectionLoaderImpl::new(files);
+    FontCollection::from_loader(loader)
 }
 
 #[cfg(windows)]

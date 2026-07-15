@@ -1460,16 +1460,15 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         // Round to pick integral px steps, since fonts look better on them.
         let new_size = self.display.font_size.as_px().round() + delta;
         self.display.font_size = FontSize::from_px(new_size);
-        let font = self.config.font.clone().with_size(self.display.font_size);
+        let font = self.display.effective_font(&self.config.font).with_size(self.display.font_size);
         self.display.pending_update.set_font(font);
     }
 
     fn reset_font_size(&mut self) {
         let scale_factor = self.display.window.scale_factor as f32;
         self.display.font_size = self.config.font.size().scale(scale_factor);
-        self.display
-            .pending_update
-            .set_font(self.config.font.clone().with_size(self.display.font_size));
+        let font = self.display.effective_font(&self.config.font).with_size(self.display.font_size);
+        self.display.pending_update.set_font(font);
     }
 
     #[inline]
@@ -2747,14 +2746,13 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         let old_scale_factor =
                             mem::replace(&mut self.ctx.window().scale_factor, scale_factor);
 
-                        let display_update_pending = &mut self.ctx.display.pending_update;
-
                         // Rescale font size for the new factor.
                         let font_scale = scale_factor as f32 / old_scale_factor as f32;
                         self.ctx.display.font_size = self.ctx.display.font_size.scale(font_scale);
 
-                        let font = self.ctx.config.font.clone();
-                        display_update_pending.set_font(font.with_size(self.ctx.display.font_size));
+                        let font = self.ctx.display.effective_font(&self.ctx.config.font);
+                        let font_size = self.ctx.display.font_size;
+                        self.ctx.display.pending_update.set_font(font.with_size(font_size));
                     },
                     WindowEvent::Resized(size) => {
                         // Ignore unreasonably small resizes. A borderless window on

@@ -94,6 +94,9 @@ pub enum SettingsHit {
     ShellCycle,
     /// One of the expanded shell picker rows (index into detected_shells).
     ShellPickerRow(usize),
+    FontCycle,
+    /// Imported-font picker rows; the final row is always "导入字体…".
+    FontPickerRow(usize),
     /// Restore one address from the persistent hidden-host list.
     RestoreHiddenSsh(usize),
     FetchToggle,
@@ -119,6 +122,7 @@ pub(super) struct NebulaRuntimeSettings {
     /// WSL distro). `None` = the enum value is authoritative. Written verbatim
     /// so `shell_detect::resolve_id` and the PTY layer both see the real id.
     pub(super) shell_id: Option<String>,
+    pub(super) font_family: String,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     /// Window close keeps the PTYs alive in the resident process (detach /
@@ -157,6 +161,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         accept: AcceptKey::Both,
         shell: NebulaShell::PowerShell,
         shell_id: None,
+        font_family: config.font.normal().family.clone(),
         // Off by default: the welcome screen pipes a whole script through the
         // fresh shell and repaints on resize — real startup-latency cost on
         // the critical path (user ruling: startup speed outranks the art).
@@ -201,6 +206,12 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                     // prompt bootstrap picks the right base.
                     if !v.is_empty() {
                         settings.shell_id = Some(v.to_owned());
+                    }
+                },
+                Some(("font_family", v)) => {
+                    let family = v.trim();
+                    if !family.is_empty() {
+                        settings.font_family = family.to_owned();
                     }
                 },
                 Some(("fetch", v)) => settings.fetch = parse_bool(v, true),
@@ -305,9 +316,10 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let _ = std::fs::write(
         path,
         format!(
-            "theme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n",
+            "theme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nfont_family={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n",
             settings.follow_system_theme as u8,
             settings.ghost as u8,
+            settings.font_family,
             settings.fetch as u8,
             settings.powerline as u8,
             settings.keep_session as u8,
@@ -331,6 +343,9 @@ struct SettingsGeometry {
     shell: (f32, f32, f32, f32),
     /// Shell picker expanded rows (when open): first row Y, row height, max visible.
     shell_picker: (f32, f32, usize),
+    font: (f32, f32, f32, f32),
+    /// Font picker expanded rows, including the final import action.
+    font_picker: (f32, f32, usize),
     fetch: (f32, f32, f32, f32),
     powerline: (f32, f32, f32, f32),
     ghost: (f32, f32, f32, f32),
@@ -374,6 +389,8 @@ pub(super) fn settings_max_scroll(
     section: NebulaSettingsSection,
     shell_picker_open: bool,
     shell_picker_count: usize,
+    font_picker_open: bool,
+    font_picker_count: usize,
     hidden_host_count: usize,
 ) -> f32 {
     let geometry = settings_geometry(
@@ -382,6 +399,8 @@ pub(super) fn settings_max_scroll(
         0.0,
         shell_picker_open,
         shell_picker_count,
+        font_picker_open,
+        font_picker_count,
         hidden_host_count,
     );
     let (_, _, _, ph) = geometry.popup;
@@ -400,6 +419,8 @@ fn settings_geometry(
     scroll: f32,
     shell_picker_open: bool,
     shell_picker_count: usize,
+    font_picker_open: bool,
+    font_picker_count: usize,
     hidden_host_count: usize,
 ) -> SettingsGeometry {
     let s = |v: f32| v * scale_factor;
@@ -479,10 +500,16 @@ fn settings_geometry(
         (NebulaSettingsSection::Advanced, nav_x, nav_y0 + 3.0 * (nav_h + nav_gap), nav_w, nav_h),
     ];
 
-    // Profiles: three groups — terminal (3 rows), completion (2), config file.
+    // Profiles: terminal, completion and config groups. Shell/font pickers
+    // expand inline, so every row after them shares the same accumulated offset.
     let shell_y0 = 146.0;
-    let picker_extra = if shell_picker_open { shell_picker_count as f32 * ROW_H } else { 0.0 };
-    let ghost_y0 = shell_y0 + 3.0 * ROW_H + picker_extra + GROUP_ADVANCE;
+    let shell_picker_extra =
+        if shell_picker_open { shell_picker_count as f32 * ROW_H } else { 0.0 };
+    let font_y0 = shell_y0 + ROW_H + shell_picker_extra;
+    let font_picker_extra =
+        if font_picker_open { font_picker_count as f32 * ROW_H } else { 0.0 };
+    let fetch_y0 = font_y0 + ROW_H + font_picker_extra;
+    let ghost_y0 = fetch_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let open_y0 = ghost_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let hidden_y0 = open_y0 + ROW_H + GROUP_ADVANCE;
     let profiles_end = if hidden_host_count == 0 {
@@ -529,8 +556,14 @@ fn settings_geometry(
             row_h,
             if shell_picker_open { shell_picker_count } else { 0 },
         ),
-        fetch: (row_x, at(shell_y0 + ROW_H + picker_extra), row_w, row_h),
-        powerline: (row_x, at(shell_y0 + 2.0 * ROW_H + picker_extra), row_w, row_h),
+        font: (row_x, at(font_y0), row_w, row_h),
+        font_picker: (
+            at(font_y0 + ROW_H),
+            row_h,
+            if font_picker_open { font_picker_count } else { 0 },
+        ),
+        fetch: (row_x, at(fetch_y0), row_w, row_h),
+        powerline: (row_x, at(fetch_y0 + ROW_H), row_w, row_h),
         ghost: (row_x, at(ghost_y0), row_w, row_h),
         accept: (row_x, at(ghost_y0 + ROW_H), row_w, row_h),
         open_config_file: (row_x, at(open_y0), row_w, row_h),
@@ -561,6 +594,8 @@ pub fn settings_hit(
     scroll: f32,
     shell_picker_open: bool,
     shell_picker_count: usize,
+    font_picker_open: bool,
+    font_picker_count: usize,
     hidden_host_count: usize,
 ) -> SettingsHit {
     let geometry = settings_geometry(
@@ -569,6 +604,8 @@ pub fn settings_hit(
         scroll,
         shell_picker_open,
         shell_picker_count,
+        font_picker_open,
+        font_picker_count,
         hidden_host_count,
     );
 
@@ -637,6 +674,23 @@ pub fn settings_hit(
                         }
                     }
                 }
+                if contains_rect(geometry.font, x, y) {
+                    return SettingsHit::FontCycle;
+                }
+                if font_picker_open && in_viewport {
+                    let (picker_y0, row_h, max) = geometry.font_picker;
+                    for i in 0..max {
+                        let rect = (
+                            geometry.font.0,
+                            picker_y0 + i as f32 * row_h,
+                            geometry.font.2,
+                            row_h,
+                        );
+                        if contains_rect(rect, x, y) {
+                            return SettingsHit::FontPickerRow(i);
+                        }
+                    }
+                }
                 if contains_rect(geometry.fetch, x, y) {
                     return SettingsHit::FetchToggle;
                 }
@@ -692,6 +746,11 @@ pub(super) struct SettingsView {
     /// Detected shells for the picker (cached once per process).
     pub(super) shells: Vec<(String, String, String)>, // (id, name, program)
     pub(super) shell_id: Option<String>,
+    pub(super) font_family: String,
+    pub(super) font_picker_open: bool,
+    /// Private families plus Maple; the import action is rendered separately.
+    pub(super) fonts: Vec<String>,
+    pub(super) font_notice: Option<String>,
     /// Persistent soft-deleted destinations. Rows provide a discoverable
     /// recovery path after the short Undo bar has expired.
     pub(super) hidden_hosts: Vec<String>,
@@ -727,6 +786,8 @@ pub(super) fn push_quads(
         view.scroll,
         view.shell_picker_open,
         view.shells.len(),
+        view.font_picker_open,
+        view.fonts.len() + 1,
         view.hidden_hosts.len(),
     );
     let (px, py, pw, ph) = geometry.popup;
@@ -1041,8 +1102,9 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Profiles => {
-            // 终端: 3-row frame; 补全: 2-row frame; 配置文件: 1-row frame.
-            group_frame(quads, geometry.shell, 3);
+            // Pickers expand inside the terminal group, so each contiguous
+            // block owns its own hairline frame instead of drawing through it.
+            group_frame(quads, geometry.shell, 1);
             let (picker_y, picker_h, picker_count) = geometry.shell_picker;
             if picker_count > 0 {
                 let picker_rect =
@@ -1072,6 +1134,40 @@ pub(super) fn push_quads(
                     }
                 }
             }
+            group_frame(quads, geometry.font, 1);
+            let (font_picker_y, font_picker_h, font_picker_count) = geometry.font_picker;
+            if font_picker_count > 0 {
+                let picker_rect = (
+                    geometry.font.0,
+                    font_picker_y,
+                    geometry.font.2,
+                    font_picker_count as f32 * font_picker_h,
+                );
+                group_frame(quads, picker_rect, font_picker_count);
+                for i in 0..font_picker_count {
+                    let rect = (
+                        geometry.font.0,
+                        font_picker_y + i as f32 * font_picker_h,
+                        geometry.font.2,
+                        font_picker_h,
+                    );
+                    row_hover(quads, rect, view.hover == SettingsHit::FontPickerRow(i));
+                    if view.fonts.get(i).is_some_and(|family| family == &view.font_family) {
+                        clip(
+                            quads,
+                            UiQuad::solid(
+                                rect.0 + s(2.0),
+                                rect.1 + s(2.0),
+                                rect.2 - s(4.0),
+                                rect.3 - s(4.0),
+                                s(6.0),
+                                sk.accent_soft,
+                            ),
+                        );
+                    }
+                }
+            }
+            group_frame(quads, geometry.fetch, 2);
             group_frame(quads, geometry.ghost, 2);
             group_frame(quads, geometry.open_config_file, 1);
             if geometry.hidden_host_count > 0 {
@@ -1088,6 +1184,7 @@ pub(super) fn push_quads(
             }
             for (hit, rect) in [
                 (SettingsHit::ShellCycle, geometry.shell),
+                (SettingsHit::FontCycle, geometry.font),
                 (SettingsHit::FetchToggle, geometry.fetch),
                 (SettingsHit::PowerlineToggle, geometry.powerline),
                 (SettingsHit::GhostToggle, geometry.ghost),
@@ -1228,6 +1325,8 @@ pub(super) fn draw_text(
         view.scroll,
         view.shell_picker_open,
         view.shells.len(),
+        view.font_picker_open,
+        view.fonts.len() + 1,
         view.hidden_hosts.len(),
     );
     let mut icon_draws = Vec::new();
@@ -1479,6 +1578,50 @@ pub(super) fn draw_text(
                 icon_draws
                     .push((id.clone(), (rect.0 + s(14.0), rect.1 + s(6.0), s(32.0), s(32.0))));
                 if selected {
+                    r.draw_chrome_text(
+                        size,
+                        rect.0 + rect.2 - s(38.0),
+                        rect.1 + (rect.3 - cell_h) / 2.0,
+                        sk.accent,
+                        "✓",
+                        gc,
+                    );
+                }
+            }
+            if visible(geometry.font.1, geometry.font.3) {
+                let font_value = view.font_notice.as_deref().unwrap_or(&view.font_family);
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.font,
+                    "终端字体",
+                    font_value,
+                    if view.font_notice.is_some() { sk.ink_dim } else { sk.accent },
+                );
+            }
+            let (font_y, font_h, font_count) = geometry.font_picker;
+            for i in 0..font_count {
+                let rect = (geometry.font.0, font_y + i as f32 * font_h, geometry.font.2, font_h);
+                if !visible(rect.1, rect.3) {
+                    continue;
+                }
+                let (label, color) = match view.fonts.get(i) {
+                    Some(family) if family == &view.font_family => (family.as_str(), sk.accent),
+                    Some(family) => (family.as_str(), sk.ink),
+                    None => ("＋  导入字体…", sk.accent),
+                };
+                r.draw_chrome_text(
+                    size,
+                    rect.0 + s(16.0),
+                    rect.1 + (rect.3 - cell_h) / 2.0,
+                    color,
+                    label,
+                    gc,
+                );
+                if view.fonts.get(i).is_some_and(|family| family == &view.font_family) {
                     r.draw_chrome_text(
                         size,
                         rect.0 + rect.2 - s(38.0),

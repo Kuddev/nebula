@@ -1,7 +1,7 @@
 //! nebula-hook — the bridge between AI-CLI lifecycle hooks and Nebula.
 //!
 //! Claude Code (`Stop` / `Notification` / `UserPromptSubmit` hooks), Codex
-//! (`notify` program), and opencode (a bundled plugin, shelling out on
+//! (`notify` program), Pi and opencode (bundled extensions/plugins, shelling out on
 //! `session.idle` / `permission.updated` / user-prompt) invoke this for every
 //! turn event. It forwards the raw payload to the hosting Nebula instance over
 //! a named pipe and exits.
@@ -25,6 +25,7 @@
 //! nebula-hook codex <json>                        # payload as last arg
 //! nebula-hook codex --chain <exe> <fixed…> <json> # + exec previous notifier
 //! nebula-hook opencode <json>                     # payload as last arg
+//! nebula-hook pi <json>                           # payload as last arg
 //! ```
 //! `--chain` exists because codex has a single `notify` slot which may
 //! already be taken (e.g. OpenAI's own computer-use notifier): we forward to
@@ -44,7 +45,7 @@ fn main() {
 fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(source) =
-        args.first().filter(|s| matches!(s.as_str(), "claude" | "codex" | "opencode"))
+        args.first().filter(|s| matches!(s.as_str(), "claude" | "codex" | "opencode" | "pi"))
     else {
         return;
     };
