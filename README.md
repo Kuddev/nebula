@@ -204,6 +204,10 @@ cargo build --release   # artifacts land in target/release/
 - At least OpenGL ES 2.0
 - Windows 10 (1809+) / 11 with ConPTY support
 
+### Contact
+
+Questions and feedback: [fickleheartedkeys@163.com](mailto:fickleheartedkeys@163.com)
+
 ### 📜 License
 
 Released under the [GNU General Public License v3.0](LICENSE).
@@ -351,6 +355,10 @@ cargo build --release   # 产物在 target/release/
 
 - 至少 OpenGL ES 2.0
 - Windows 10（1809+）/ 11，需 ConPTY 支持
+
+### 联系方式
+
+问题与反馈：[fickleheartedkeys@163.com](mailto:fickleheartedkeys@163.com)
 
 ### 📜 许可证
 
