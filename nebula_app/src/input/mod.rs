@@ -693,7 +693,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // window-level, so hit-test against the full window, not the focused
         // pane's viewport — otherwise a band of the terminal area is mistaken
         // for chrome and swallows link hovers (no underline / no click).
-        if let Some(dir) = crate::display::resize_edge(&window_size, scale, x as f32, y as f32) {
+        let resize_enabled = self.ctx.window().allows_drag_resize();
+        if let Some(dir) = crate::display::resize_edge(
+            &window_size,
+            scale,
+            x as f32,
+            y as f32,
+            resize_enabled,
+        ) {
             use winit::window::ResizeDirection::*;
             let icon = match dir {
                 East | West => CursorIcon::EwResize,
@@ -788,11 +795,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         if self.ctx.display().nebula_side_panel.open
             && self.ctx.mouse().left_button_state != ElementState::Pressed
         {
-            use crate::display::side_panel::{PanelHit, PanelView, panel_hit};
+            use crate::display::side_panel::{PanelHit, PanelView, panel_interactive_hit};
             let px = x as f32;
             let py = y as f32;
             let layout = self.ctx.display().side_panel_layout();
-            let hit = panel_hit(&layout, px, py);
+            let view = self.ctx.display().nebula_side_panel.view;
+            let custom_root = self.ctx.display().nebula_side_panel.custom_root_active();
+            let hit = panel_interactive_hit(&layout, view, custom_root, px, py);
             let panel = &mut self.ctx.display().nebula_side_panel;
             if hit != panel.hover || (hit != PanelHit::None && panel.hover_pos != (px, py)) {
                 panel.hover = hit;
@@ -802,9 +811,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             if hit != PanelHit::None {
                 let files = self.ctx.display().nebula_side_panel.view == PanelView::Files;
                 let icon = match hit {
-                    PanelHit::ViewFiles | PanelHit::ViewGit | PanelHit::Row(_) => {
-                        CursorIcon::Pointer
-                    },
+                    PanelHit::ViewFiles
+                    | PanelHit::ViewGit
+                    | PanelHit::OpenDirectory
+                    | PanelHit::FollowCurrentDirectory
+                    | PanelHit::Row(_) => CursorIcon::Pointer,
                     PanelHit::Search if files => CursorIcon::Text,
                     PanelHit::Search => CursorIcon::Pointer,
                     _ => CursorIcon::Default,
@@ -1313,11 +1324,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 && !self.ctx.display().settings_open()
                 && self.ctx.display().nebula_confirm.is_none()
             {
-                use crate::display::side_panel::{PanelHit, PanelView, panel_hit};
+                use crate::display::side_panel::{PanelHit, PanelView, panel_interactive_hit};
                 let x = self.ctx.mouse().x as f32;
                 let y = self.ctx.mouse().y as f32;
                 let layout = self.ctx.display().side_panel_layout();
-                match panel_hit(&layout, x, y) {
+                let view = self.ctx.display().nebula_side_panel.view;
+                let custom_root = self.ctx.display().nebula_side_panel.custom_root_active();
+                match panel_interactive_hit(&layout, view, custom_root, x, y) {
                     PanelHit::None => {
                         // Clicking anywhere outside the drawer drops search focus
                         // and the persistent file selection.
@@ -1335,6 +1348,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                             },
                             PanelHit::ViewGit => {
                                 self.ctx.display().toggle_side_panel(PanelView::Git)
+                            },
+                            PanelHit::OpenDirectory => {
+                                self.ctx.display().choose_side_panel_directory();
+                            },
+                            PanelHit::FollowCurrentDirectory => {
+                                self.ctx.display().follow_focused_directory();
                             },
                             PanelHit::Search => {
                                 let files =
@@ -1506,7 +1525,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let size = self.ctx.display().size_info;
                 let scale = self.ctx.window().scale_factor as f32;
                 // Window border resize takes priority over the chrome controls.
-                if let Some(dir) = crate::display::resize_edge(&size, scale, x, y) {
+                let resize_enabled = self.ctx.window().allows_drag_resize();
+                if let Some(dir) =
+                    crate::display::resize_edge(&size, scale, x, y, resize_enabled)
+                {
                     self.ctx.window().drag_resize(dir);
                     return;
                 }

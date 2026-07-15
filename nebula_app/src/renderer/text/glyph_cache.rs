@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use ahash::RandomState;
 use crossfont::{
     Error as RasterizerError, FontDesc, FontKey, GlyphKey, Metrics, Rasterize, RasterizedGlyph,
-    Rasterizer, Size, Slant, Style, Weight,
+    Size, Slant, Style, Weight,
 };
 use log::{error, info};
 use unicode_width::UnicodeWidthChar;
@@ -13,6 +13,7 @@ use crate::config::ui_config::Delta;
 use crate::gl::types::*;
 
 use super::builtin_font;
+use super::font_rasterizer::Rasterizer;
 
 /// `LoadGlyph` allows for copying a rasterized glyph into graphics memory.
 pub trait LoadGlyph {
@@ -146,7 +147,14 @@ impl GlyphCache {
         // Load regular font.
         let regular_desc = Self::make_desc(font.normal(), Slant::Normal, Weight::Normal);
 
-        let regular = Self::load_regular_font(rasterizer, &regular_desc, size)?;
+        let regular = Self::load_regular_font(
+            rasterizer,
+            &regular_desc,
+            &font.normal().family,
+            Slant::Normal,
+            Weight::Normal,
+            size,
+        )?;
 
         // Helper to load a description if it is not the `regular_desc`.
         let mut load_or_regular = |desc: FontDesc| {
@@ -178,9 +186,18 @@ impl GlyphCache {
     fn load_regular_font(
         rasterizer: &mut Rasterizer,
         description: &FontDesc,
+        family: &str,
+        slant: Slant,
+        weight: Weight,
         size: Size,
     ) -> Result<FontKey, crossfont::Error> {
-        match rasterizer.load_font(description, size) {
+        #[cfg(windows)]
+        let preferred =
+            rasterizer.load_preferred_font(description, family, slant, weight, size);
+        #[cfg(not(windows))]
+        let preferred = rasterizer.load_font(description, size);
+
+        match preferred {
             Ok(font) => Ok(font),
             Err(err) => {
                 error!("{err}");

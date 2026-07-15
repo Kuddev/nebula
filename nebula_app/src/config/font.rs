@@ -80,16 +80,18 @@ impl Default for Font {
     fn default() -> Font {
         // ANSI powerline 的背景色只能填满终端 cell，不能像原生 UI 一样单独加内边距。
         // Windows 默认给 cell 高度补一点空间，让提示符看起来有上下呼吸感。
-        // 参考稿的行距更松、powerline 更高，这里给到 11px（字形上移一半保持居中）。
+        // 但这是不随 DPI 缩放的固定物理像素：给太多会在高 DPI 小窗口里明显吃掉行数
+        // （11px 曾让 920px 窗口从约 28 行压到 20 行）。收敛到 4px：保留轻微呼吸感，
+        // 又把行高比例从 ~3.1 拉回接近自然的 ~2.5，找回被吞掉的行。
         #[cfg(windows)]
-        let offset = Delta { x: 0, y: 11 };
+        let offset = Delta { x: 0, y: 4 };
         #[cfg(not(windows))]
         let offset = Default::default();
 
         // offset.y 增加的是 cell 高度；Nebula 字形默认偏向 cell 底部。
-        // 轻微上移字形，让文字在加高后的 powerline 中更接近视觉居中。
+        // 轻微上移字形（约 offset 的一半），让文字在加高后的 cell 中更接近视觉居中。
         #[cfg(windows)]
-        let glyph_offset = Delta { x: 0, y: 5 };
+        let glyph_offset = Delta { x: 0, y: 2 };
         #[cfg(not(windows))]
         let glyph_offset = Default::default();
 

@@ -33,6 +33,7 @@ pub mod rects;
 pub mod ui;
 mod shader;
 mod text;
+pub(crate) use text::Rasterizer;
 
 pub use text::{GlyphCache, LoaderApi};
 

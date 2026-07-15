@@ -25,7 +25,7 @@ use winit::keyboard::ModifiersState;
 use winit::raw_window_handle::RawWindowHandle;
 use winit::window::{CursorIcon, Theme as WinitTheme};
 
-use crossfont::{Rasterize, Rasterizer, Size as FontSize};
+use crossfont::{Rasterize, Size as FontSize};
 use unicode_width::UnicodeWidthChar;
 
 use nebula_terminal::event::{EventListener, OnResize, WindowSize};
@@ -47,7 +47,6 @@ use crate::config::UiConfig;
 use crate::config::debug::RendererPreference;
 use crate::config::font::Font;
 use crate::config::window::Dimensions;
-#[cfg(not(windows))]
 use crate::config::window::StartupMode;
 use crate::display::bell::VisualBell;
 use crate::display::color::{List, Rgb};
@@ -57,6 +56,7 @@ use crate::display::damage::{DamageTracker, damage_y_to_viewport_y};
 use crate::display::hint::{HintMatch, HintState};
 use crate::display::meter::Meter;
 use crate::display::window::Window;
+use crate::renderer::Rasterizer;
 use crate::event::{Event, EventType, Mouse, SearchState};
 use crate::message_bar::{MessageBuffer, MessageType};
 use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
@@ -1693,7 +1693,7 @@ impl Display {
 
         // Set resize increments for the newly created window.
         if config.window.resize_increments {
-            window.set_resize_increments(PhysicalSize::new(cell_width, cell_height));
+            window.set_resize_increments(Some(PhysicalSize::new(cell_width, cell_height)));
         }
 
         window.set_visible(true);
@@ -1703,13 +1703,13 @@ impl Display {
         #[cfg(target_os = "macos")]
         window.focus_window();
 
-        #[allow(clippy::single_match)]
-        #[cfg(not(windows))]
         if !_tabbed {
             match config.window.startup_mode {
                 #[cfg(target_os = "macos")]
                 StartupMode::SimpleFullscreen => window.set_simple_fullscreen(true),
                 StartupMode::Maximized if !is_wayland => window.set_maximized(true),
+                #[cfg(windows)]
+                StartupMode::Fullscreen => window.set_fullscreen(true),
                 _ => (),
             }
         }
@@ -3269,6 +3269,23 @@ impl Display {
         }
     }
 
+    pub fn choose_side_panel_directory(&mut self) {
+        let Some(path) = file_dialog::pick_side_panel_directory(self.raw_window_handle) else {
+            return;
+        };
+        if self.nebula_side_panel.set_custom_root(path) {
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn follow_focused_directory(&mut self) {
+        if self.nebula_side_panel.clear_custom_root() {
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
     /// Geometry of the drawer for the current window size.
     pub fn side_panel_layout(&self) -> side_panel::PanelLayout {
         let size = self.size_info;
@@ -3869,7 +3886,11 @@ impl Display {
 
         // Update resize increments.
         if config.window.resize_increments {
-            self.window.set_resize_increments(PhysicalSize::new(cell_width, cell_height));
+            let increments = self
+                .window
+                .allows_drag_resize()
+                .then_some(PhysicalSize::new(cell_width, cell_height));
+            self.window.set_resize_increments(increments);
         }
 
         // Resize when terminal when its dimensions have changed.

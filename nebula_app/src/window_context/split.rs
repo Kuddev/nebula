@@ -229,6 +229,14 @@ fn collect_layout(
     }
 }
 
+fn terminal_content_rect(size: &SizeInfo) -> (f32, f32, f32, f32) {
+    let x = size.padding_x();
+    let y = size.padding_y();
+    let width = size.columns() as f32 * size.cell_width();
+    let height = size.screen_lines() as f32 * size.cell_height();
+    (x, y, width, height)
+}
+
 impl WindowContext {
     /// The pane that currently owns keyboard focus (active tab's active pane).
     pub(super) fn focused_pane_id(&self) -> PaneId {
@@ -270,14 +278,11 @@ impl WindowContext {
         let divider = (NEBULA_SPLIT_DIVIDER_GAP * scale).round().max(1.0);
         let cell_w = size.cell_width();
         let cell_h = size.cell_height();
-        let pad_x = size.padding_x();
-        let pad_y = size.padding_y();
-        // Asymmetric layout: the left padding carries the tab sidebar, the right
-        // is the plain content margin. The pane content spans from pad_x to
-        // (width - padding_right) — using 2*pad_x here would short the rightmost
-        // pane by the sidebar width and leave a grey band down the right edge.
-        let vw = (size.width() - pad_x - size.padding_right()).max(0.0);
-        let vh = (size.height() - pad_y - size.padding_bottom()).max(0.0);
+        // Use the final terminal grid extent, not the raw client-area remainder.
+        // `SizeInfo::reserve_lines` has already removed message/search rows;
+        // rebuilding from pixels here would add them back before notifying the
+        // PTY, so ConPTY's cursor and bottom row would disagree with rendering.
+        let (pad_x, pad_y, vw, vh) = terminal_content_rect(&size);
 
         let mut panes = Vec::new();
         let mut dividers = Vec::new();
@@ -772,5 +777,45 @@ impl WindowContext {
             self.dirty = true;
             self.display.window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod resize_layout_tests {
+    use nebula_terminal::grid::Dimensions;
+
+    use super::{Layout, collect_layout, terminal_content_rect};
+    use crate::display::SizeInfo;
+
+    #[test]
+    fn pane_layout_keeps_message_bar_rows_out_of_the_pty_viewport() {
+        let mut size = SizeInfo::new_fully_asymmetric(
+            1000.0, 1000.0, 10.0, 20.0, 100.0, 20.0, 80.0, 20.0,
+        );
+        assert_eq!(size.screen_lines(), 45);
+        size.reserve_lines(2);
+        assert_eq!(size.screen_lines(), 43);
+
+        let (x, y, width, height) = terminal_content_rect(&size);
+        assert_eq!(width, size.columns() as f32 * size.cell_width());
+        assert_eq!(height, 43.0 * size.cell_height());
+
+        let mut panes = Vec::new();
+        collect_layout(
+            &Layout::Leaf(7),
+            size.cell_width(),
+            size.cell_height(),
+            8.0,
+            false,
+            x,
+            y,
+            width,
+            height,
+            &mut Vec::new(),
+            &mut panes,
+            &mut Vec::new(),
+        );
+        assert_eq!(panes[0].1.columns(), size.columns());
+        assert_eq!(panes[0].1.screen_lines(), size.screen_lines());
     }
 }

@@ -592,8 +592,13 @@ pub fn resize_edge(
     scale_factor: f32,
     x: f32,
     y: f32,
+    enabled: bool,
 ) -> Option<winit::window::ResizeDirection> {
     use winit::window::ResizeDirection::*;
+
+    if !enabled {
+        return None;
+    }
 
     let b = 6.0 * scale_factor;
     let w = size_info.width();
@@ -1626,5 +1631,18 @@ pub(super) fn draw_chrome(d: &mut Display) {
         if let Some((id, rgba, px)) = d.shell_icon_pixels(&shell_id) {
             d.nebula_chrome_logo_draws.push((id, rgba, px, rect));
         }
+    }
+}
+
+#[cfg(test)]
+mod resize_edge_tests {
+    use super::resize_edge;
+    use crate::display::SizeInfo;
+
+    #[test]
+    fn maximized_or_fullscreen_windows_do_not_expose_drag_resize_edges() {
+        let size = SizeInfo::new(1000.0, 800.0, 10.0, 20.0, 0.0, 0.0, false);
+        assert!(resize_edge(&size, 1.0, 999.0, 400.0, true).is_some());
+        assert!(resize_edge(&size, 1.0, 999.0, 400.0, false).is_none());
     }
 }

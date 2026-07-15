@@ -62,6 +62,10 @@ pub enum PanelHit {
     ViewGit,
     /// The Files view's filter input box.
     Search,
+    /// Choose a window-local tree root with the native folder picker.
+    OpenDirectory,
+    /// Clear the window-local root and resume following the focused pane cwd.
+    FollowCurrentDirectory,
     /// A list row (index into the *visible* rows of the current view).
     Row(usize),
     /// Inside the panel but on nothing interactive.
@@ -105,6 +109,13 @@ pub struct SidePanel {
     pub view: PanelView,
     /// Root the tree/git snapshot was built from (the focused pane's cwd).
     root: Option<PathBuf>,
+    /// Latest focused pane cwd, retained while a custom root is active so the
+    /// panel can resume following immediately without persisting any setting.
+    followed_cwd: Option<PathBuf>,
+    /// Window-local override selected from the Files view.
+    custom_root: Option<PathBuf>,
+    /// Visible feedback for an invalid/disappeared custom root.
+    root_notice: Option<String>,
     /// Flattened visible tree rows for the Files view.
     rows: Vec<FileRow>,
     /// Directories the user expanded (persists across refreshes).
@@ -162,6 +173,9 @@ impl SidePanel {
             open: false,
             view: PanelView::Files,
             root: None,
+            followed_cwd: None,
+            custom_root: None,
+            root_notice: None,
             rows: Vec::new(),
             expanded: HashSet::new(),
             git: None,
@@ -209,7 +223,14 @@ impl SidePanel {
         if !self.open {
             return false;
         }
-        let root_changed = cwd != self.root;
+        self.followed_cwd = cwd;
+        let custom_invalidated = self.custom_root.as_ref().is_some_and(|root| !root.is_dir());
+        if custom_invalidated {
+            self.custom_root = None;
+            self.root_notice = Some("所选目录不可用，已跟随当前目录".to_owned());
+        }
+        let next_root = self.custom_root.clone().or_else(|| self.followed_cwd.clone());
+        let root_changed = next_root != self.root;
         // While a filter query is live, skip the periodic re-snapshot: it
         // would drop and rebuild the search index under the user's fingers.
         let stale = self.search.trim().is_empty()
@@ -219,17 +240,62 @@ impl SidePanel {
         if self.op_done.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.needs_refresh = true;
         }
-        if !(root_changed || stale || self.needs_refresh) {
+        if !(root_changed || custom_invalidated || stale || self.needs_refresh) {
             return false;
         }
         if root_changed {
-            self.root = cwd;
+            self.root = next_root;
             self.expanded.clear();
             self.scroll = 0;
             self.selected = None;
         }
         self.refresh();
         true
+    }
+
+    /// Override the focused pane cwd for this panel instance only. `SidePanel`
+    /// belongs to one window and this field is deliberately never serialized.
+    pub fn set_custom_root(&mut self, root: PathBuf) -> bool {
+        if !root.is_dir() {
+            self.root_notice = Some("所选目录不可用".to_owned());
+            return false;
+        }
+        let changed = self.custom_root.as_ref() != Some(&root) || self.root.as_ref() != Some(&root);
+        self.custom_root = Some(root.clone());
+        self.root_notice = None;
+        if self.root.as_ref() != Some(&root) {
+            self.root = Some(root);
+            self.expanded.clear();
+            self.scroll = 0;
+            self.selected = None;
+            self.refresh();
+        }
+        changed
+    }
+
+    /// Resume following the most recently observed focused pane cwd.
+    pub fn clear_custom_root(&mut self) -> bool {
+        if self.custom_root.take().is_none() {
+            return false;
+        }
+        self.root_notice = None;
+        let next_root = self.followed_cwd.clone();
+        if self.root != next_root {
+            self.root = next_root;
+            self.expanded.clear();
+            self.scroll = 0;
+            self.selected = None;
+            self.refresh();
+        }
+        true
+    }
+
+    pub fn custom_root_active(&self) -> bool {
+        self.custom_root.is_some()
+    }
+
+    pub fn root_notice(&self) -> Option<&str> {
+        self.root_notice.as_deref()
     }
 
     /// Rebuild the tree and git snapshot from `root`.
@@ -608,6 +674,47 @@ pub fn panel_hit(layout: &PanelLayout, x: f32, y: f32) -> PanelHit {
     PanelHit::Inside
 }
 
+pub fn panel_action_rects(
+    layout: &PanelLayout,
+    custom_root: bool,
+) -> Vec<(PanelHit, (f32, f32, f32, f32))> {
+    let scale = layout.header_h / 40.0;
+    let s = |value: f32| value * scale;
+    let (px, py, pw, _) = layout.panel;
+    let height = s(26.0);
+    let y = py + layout.header_h + s(4.0);
+    let right = px + pw - s(10.0);
+    let open_width = s(30.0);
+    let open_x = right - open_width;
+    let mut actions = vec![(PanelHit::OpenDirectory, (open_x, y, open_width, height))];
+    if custom_root {
+        let follow_width = s(62.0);
+        let follow_x = open_x - s(4.0) - follow_width;
+        actions.push((
+            PanelHit::FollowCurrentDirectory,
+            (follow_x, y, follow_width, height),
+        ));
+    }
+    actions
+}
+
+pub fn panel_interactive_hit(
+    layout: &PanelLayout,
+    view: PanelView,
+    custom_root: bool,
+    x: f32,
+    y: f32,
+) -> PanelHit {
+    if view == PanelView::Files {
+        for (hit, (rx, ry, rw, rh)) in panel_action_rects(layout, custom_root) {
+            if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
+                return hit;
+            }
+        }
+    }
+    panel_hit(layout, x, y)
+}
+
 /// Budget-bounded deep walk building the flat filter index. `budget` counts
 /// every entry VISITED (not kept), so a huge build tree can't stall the UI;
 /// bulk directories (`target/`, `node_modules/`, …) are skipped outright, and
@@ -866,6 +973,13 @@ pub(super) fn push_quads(
         quads.push(UiQuad::solid(hx, ty, tab_w, tab_h, radius, sk.hover));
     }
 
+    if panel.view == PanelView::Files {
+        for (hit, (x, y, w, h)) in panel_action_rects(layout, panel.custom_root_active()) {
+            let fill = if panel.hover == hit { sk.hover_strong } else { sk.input };
+            quads.push(UiQuad::solid(x, y, w, h, radius, fill));
+        }
+    }
+
     // Hovered list row: a quiet wash under the pointer (never on top of the
     // selected pill — selection outranks hover).
     if let PanelHit::Row(i) = panel.hover {
@@ -1056,7 +1170,6 @@ pub(super) fn draw_text(
     // twice as wide as intended, straight across the hover wash.
     // Paths left-truncate (`…tail` — the discriminating end stays visible);
     // file names right-truncate (`name…`, see `truncate_tab_label`).
-    let max_cols = (((pw - 2.0 * text_pad) / cell_w) as usize).max(8);
     let clip_tail = |t: &str, budget_cols: usize| -> String {
         use unicode_width::UnicodeWidthChar;
         let budget = budget_cols.max(4);
@@ -1104,11 +1217,35 @@ pub(super) fn draw_text(
 
     match panel.view {
         PanelView::Files => {
-            let summary = panel
-                .root()
-                .map(|root| clip_tail(&root.display().to_string(), max_cols))
-                .unwrap_or_else(|| "（无目录）".into());
-            r.draw_chrome_text(size, px + text_pad, summary_y, sk.ink_dim, &summary, gc);
+            let action_x = panel_action_rects(layout, panel.custom_root_active())
+                .into_iter()
+                .map(|(_, rect)| rect.0)
+                .fold(px + pw - text_pad, f32::min);
+            let summary_cols = (((action_x - px - 2.0 * text_pad) / cell_w).floor() as usize).max(4);
+            let (summary, summary_ink) = if let Some(notice) = panel.root_notice() {
+                (clip_tail(notice, summary_cols), Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b))
+            } else {
+                (
+                    panel
+                        .root()
+                        .map(|root| clip_tail(&root.display().to_string(), summary_cols))
+                        .unwrap_or_else(|| "（无目录）".into()),
+                    sk.ink_dim,
+                )
+            };
+            r.draw_chrome_text(size, px + text_pad, summary_y, summary_ink, &summary, gc);
+
+            for (hit, (x, y, w, h)) in panel_action_rects(layout, panel.custom_root_active()) {
+                let ink = if panel.hover == hit { sk.ink_strong } else { sk.ink_dim };
+                let (label, columns) = match hit {
+                    PanelHit::OpenDirectory => (ICON_FOLDER_OPEN, 1.0),
+                    PanelHit::FollowCurrentDirectory => ("跟随", 4.0),
+                    _ => continue,
+                };
+                let tx = x + ((w - cell_w * columns) / 2.0).max(0.0);
+                let ty = y + (h - cell_h) / 2.0;
+                r.draw_chrome_text(size, tx, ty, ink, label, gc);
+            }
 
             // Filter box: magnifier + query (caret while focused) or hint.
             let (sx, sy, _, sh) = layout.search;
@@ -1357,6 +1494,78 @@ mod tests {
     }
 
     #[test]
+    fn custom_root_is_window_local_and_ignores_cwd_sync_until_cleared() {
+        let base =
+            std::env::temp_dir().join(format!("nebula-panel-root-test-{}", std::process::id()));
+        let cwd = base.join("cwd");
+        let custom = base.join("custom");
+        let next_cwd = base.join("next-cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::create_dir_all(&next_cwd).unwrap();
+
+        let mut panel = SidePanel::new();
+        panel.toggle(PanelView::Files);
+        assert!(panel.sync(Some(cwd)));
+        assert!(panel.set_custom_root(custom.clone()));
+        assert!(panel.custom_root_active());
+
+        panel.sync(Some(next_cwd.clone()));
+        assert_eq!(panel.root(), Some(custom.as_path()));
+
+        assert!(panel.clear_custom_root());
+        assert!(!panel.custom_root_active());
+        assert_eq!(panel.root(), Some(next_cwd.as_path()));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn missing_custom_root_returns_to_latest_cwd_with_visible_feedback() {
+        let base = std::env::temp_dir().join(format!(
+            "nebula-panel-missing-root-test-{}",
+            std::process::id()
+        ));
+        let cwd = base.join("cwd");
+        let custom = base.join("custom");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&custom).unwrap();
+
+        let mut panel = SidePanel::new();
+        panel.toggle(PanelView::Files);
+        panel.sync(Some(cwd.clone()));
+        assert!(panel.set_custom_root(custom.clone()));
+        std::fs::remove_dir_all(&custom).unwrap();
+
+        assert!(panel.sync(Some(cwd.clone())));
+        assert!(!panel.custom_root_active());
+        assert_eq!(panel.root(), Some(cwd.as_path()));
+        assert_eq!(panel.root_notice(), Some("所选目录不可用，已跟随当前目录"));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn invalid_custom_root_refreshes_notice_when_followed_cwd_is_the_same_path() {
+        let root = std::env::temp_dir().join(format!(
+            "nebula-panel-same-missing-root-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut panel = SidePanel::new();
+        panel.toggle(PanelView::Files);
+        assert!(panel.sync(Some(root.clone())));
+        assert!(panel.set_custom_root(root.clone()));
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert!(panel.sync(Some(root.clone())));
+        assert!(!panel.custom_root_active());
+        assert_eq!(panel.root(), Some(root.as_path()));
+        assert_eq!(panel.root_notice(), Some("所选目录不可用，已跟随当前目录"));
+    }
+
+    #[test]
     fn tree_lists_dirs_first_and_expands_on_click() {
         let base = std::env::temp_dir().join(format!("nebula-panel-test-{}", std::process::id()));
         let sub = base.join("sub");
@@ -1389,6 +1598,42 @@ mod tests {
         assert_eq!(panel_hit(&l, px + 5.0, py + 5.0), PanelHit::ViewFiles);
         assert_eq!(panel_hit(&l, px + pw - 5.0, py + 5.0), PanelHit::ViewGit);
         assert_eq!(panel_hit(&l, px + 5.0, l.list_y + l.row_h * 1.5), PanelHit::Row(1));
+    }
+
+    #[test]
+    fn files_summary_actions_have_distinct_exact_hit_targets() {
+        let layout = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0);
+        let actions = panel_action_rects(&layout, true);
+        let open = actions
+            .iter()
+            .find(|(hit, _)| *hit == PanelHit::OpenDirectory)
+            .expect("open-directory action");
+        let follow = actions
+            .iter()
+            .find(|(hit, _)| *hit == PanelHit::FollowCurrentDirectory)
+            .expect("follow-current-directory action");
+        let center = |rect: (f32, f32, f32, f32)| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+        let (open_x, open_y) = center(open.1);
+        let (follow_x, follow_y) = center(follow.1);
+
+        assert_eq!(
+            panel_interactive_hit(&layout, PanelView::Files, true, open_x, open_y),
+            PanelHit::OpenDirectory
+        );
+        assert_eq!(
+            panel_interactive_hit(&layout, PanelView::Files, true, follow_x, follow_y),
+            PanelHit::FollowCurrentDirectory
+        );
+        assert_eq!(
+            panel_interactive_hit(&layout, PanelView::Files, false, follow_x, follow_y),
+            PanelHit::Inside,
+            "the reset action must not exist while following the terminal cwd"
+        );
+        assert_eq!(
+            panel_interactive_hit(&layout, PanelView::Git, true, open_x, open_y),
+            PanelHit::Inside,
+            "Files-only actions must not create invisible Git hit targets"
+        );
     }
 
     #[test]

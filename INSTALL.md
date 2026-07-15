@@ -7,10 +7,10 @@
 2. Unzip anywhere (no installer, no admin rights).
 3. **Install the font**: open `fonts`, double-click
    `MapleMonoNormal-NF-CN-Regular.ttf`, and press
-   *Install*. Nebula's powerline prompt and icons need this Nerd Font —
-   without it they render as `□` boxes. Nebula checks at every launch and shows
-   a dismissible reminder that can reopen the bundled `fonts` folder; restart
-   Nebula after installing to load the complete icon set.
+   *Install*. Nebula embeds the same font as a runtime fallback, but the normal
+   system installation remains recommended. Nebula checks at every launch and
+   shows a dismissible reminder that can reopen the bundled `fonts` folder;
+   restart Nebula after installing to load the complete icon set.
 4. Run `nebula.exe`.
 
 Keep the extracted directory structure intact:

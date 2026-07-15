@@ -165,11 +165,12 @@ experience that works without extra setup.
 
 > **⚠️ Install the bundled font first.** Nebula's powerline prompt, program
 > icons and AI brand marks are drawn with **Maple Mono Normal NF CN** (a Nerd Font).
-> Without it, those glyphs render as `□` boxes. The font ships in the release
-> zip under `fonts/` and the repo at
+> Nebula embeds the same font as a runtime fallback so forgetting to install it
+> no longer breaks the interface, but a normal system installation is still the
+> intended setup. The font ships in the release zip under `fonts/` and the repo at
 > `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` — double-click
 > it and press **Install**, then launch Nebula. Nebula checks the font on every
-> launch; if Windows cannot load it, a dismissible reminder can open the
+> launch; if the system font is missing, a dismissible reminder can open the
 > bundled `fonts/` folder. Install the font and restart Nebula for the complete
 > icon set. (Licensed under SIL OFL 1.1.)
 
@@ -313,11 +314,12 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 ### 📥 安装
 
 > **⚠️ 请先安装随附字体。** Nebula 的 powerline 提示符、程序图标与 AI 品牌
-> 标识都用 **Maple Mono Normal NF CN**（一款 Nerd Font）绘制。不装的话这些字形会显
-> 示成 `□` 方框。字体在 release 包内、仓库里也有：
+> 标识都用 **Maple Mono Normal NF CN**（一款 Nerd Font）绘制。Nebula 已把同一字体
+> 内置为运行时兜底，忘记安装也不会再让界面显示异常，但正常使用仍建议安装到系统。
+> 字体在 release 包内、仓库里也有：
 > `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf`；压缩包内位于 `fonts/` ——
 > 双击它点**安装**，再启动
-> Nebula。Nebula 每次启动都会检查字体；如果 Windows 还没有正确加载它，会显示一个
+> Nebula。Nebula 每次启动都会检查系统字体；如果还没有正确安装，会显示一个
 > 可关闭的提醒，并提供“打开字体文件夹”按钮。安装完成后重启 Nebula 即可显示完整图
 > 标。（SIL OFL 1.1 许可。）
 
