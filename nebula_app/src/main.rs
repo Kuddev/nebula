@@ -43,6 +43,8 @@ mod macos;
 mod markdown;
 mod message_bar;
 mod migrate;
+#[cfg(windows)]
+mod mux;
 mod nebula_history;
 mod notify;
 #[cfg(windows)]
@@ -55,13 +57,15 @@ mod scheduler;
 mod session;
 mod shell_detect;
 #[cfg(windows)]
-mod ssh_credentials;
-#[cfg(windows)]
-mod mux;
-#[cfg(windows)]
 mod ssh;
 #[cfg(windows)]
+mod ssh_credentials;
+#[cfg(windows)]
+mod ssh_profiles;
+#[cfg(windows)]
 mod ssh_session;
+#[cfg(windows)]
+mod ssh_sftp;
 mod string;
 mod window_context;
 

@@ -33,6 +33,7 @@ version = "0.4.0"
 ahash = { version = "0.8.6", features = ["no-rng"] }
 base64 = "0.22.0"
 bitflags = "2.2.1"
+chrono = "0.4.45"
 clap = { version = "4.2.7", features = ["derive", "env"] }
 copypasta = { version = "0.10.1", default-features = false }
 crossfont = "0.8.1"
@@ -47,16 +48,18 @@ polling = "3.11.0"
 # event parser; `display::markdown_view` renders the folded block AST.
 pulldown-cmark = { version = "0.13", default-features = false }
 russh = { version = "0.62.2", default-features = false, features = ["ring"] }
+russh-sftp = "2.3.0"
 # preserve_order: we rewrite the user's claude settings.json (ai_hook
 # self-heal) and must not alphabetize their keys in the process.
 serde_json = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9.25"
+sha2 = "0.11"
 signal-hook = { version = "0.4.3", default-features = false }
 tempfile = "3.12.0"
 toml.workspace = true
 toml_edit.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
 unicode-width = "0.2.0"
 winit = { version = "0.30.9", default-features = false, features = ["rwh_06", "serde"] }
 global-hotkey = "0.8.0"
@@ -111,6 +114,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Ole",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_Variant",
     "Win32_System_Threading",

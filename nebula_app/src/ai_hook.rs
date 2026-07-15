@@ -224,8 +224,9 @@ mod win {
             let p = helper.display().to_string().replace('\\', "/");
             unsafe { std::env::set_var(HOOK_EXE_ENV, p) };
         }
-        if let Err(err) =
-            std::thread::Builder::new().name("nebula-ai-pipe".into()).spawn(move || serve(&name, proxy))
+        if let Err(err) = std::thread::Builder::new()
+            .name("nebula-ai-pipe".into())
+            .spawn(move || serve(&name, proxy))
         {
             log::warn!("ai_hook: failed to spawn pipe server: {err}");
         }
@@ -336,7 +337,10 @@ mod win {
         let (claude_dir, codex_dir) = loop {
             let claude = claude_config_dir().filter(|d| d.exists());
             let codex = codex_config_dir().filter(|d| d.exists());
-            if claude.is_some() || codex.is_some() || opencode_config_dir().is_some_and(|d| d.exists()) {
+            if claude.is_some()
+                || codex.is_some()
+                || opencode_config_dir().is_some_and(|d| d.exists())
+            {
                 break (claude, codex);
             }
             std::thread::sleep(Duration::from_secs(300));
@@ -373,9 +377,8 @@ mod win {
                         Ok(ev) => {
                             ev.paths.is_empty()
                                 || ev.paths.iter().any(|p| {
-                                    p.file_name().is_some_and(|n| {
-                                        n == "settings.json" || n == "config.toml"
-                                    })
+                                    p.file_name()
+                                        .is_some_and(|n| n == "settings.json" || n == "config.toml")
                                 })
                         },
                         Err(_) => true,
@@ -597,10 +600,7 @@ export const NebulaNotify = async ({ $ }) => {
                     // Mid-rewrite by a concurrent writer, or genuinely broken:
                     // never "repair" by clobbering. The watcher retries on the
                     // next change, the boot pass on the next start.
-                    log::warn!(
-                        "ai_hook: {} is not valid JSON ({err}); left alone",
-                        path.display()
-                    );
+                    log::warn!("ai_hook: {} is not valid JSON ({err}); left alone", path.display());
                     return false;
                 },
             },
@@ -757,7 +757,7 @@ export const NebulaNotify = async ({ $ }) => {
         match helper_command() {
             Some(command) => println!("hook 命令：{command}"),
             None => {
-                eprintln!("nebula-hook.exe 不在 nebula.exe 旁边，无法安装。");
+                eprintln!("runtime/ 和 nebula.exe 同目录中均未找到 nebula-hook.exe，无法安装。");
                 return 1;
             },
         }
@@ -783,7 +783,10 @@ export const NebulaNotify = async ({ $ }) => {
         match opencode_config_dir() {
             Some(cfg) if cfg.exists() => {
                 if ensure_opencode_plugin() {
-                    println!("opencode: 已安装 {}。", cfg.join("plugins").join("nebula.js").display());
+                    println!(
+                        "opencode: 已安装 {}。",
+                        cfg.join("plugins").join("nebula.js").display()
+                    );
                 } else {
                     println!("opencode: 插件已是最新。");
                 }
@@ -858,15 +861,24 @@ export const NebulaNotify = async ({ $ }) => {
         Ok(false)
     }
 
-    /// Absolute path of the bridge exe (must sit next to nebula.exe).
+    /// Absolute path of the bridge exe.
     fn helper_path() -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
-        let helper = exe.parent()?.join("nebula-hook.exe");
-        if !helper.exists() {
-            log::warn!("ai_hook: {} missing; AI integrations not installed", helper.display());
-            return None;
+        let helper = helper_path_from_exe(&exe);
+        if helper.is_none() {
+            log::warn!(
+                "ai_hook: nebula-hook.exe missing from runtime/ and executable directory; AI integrations not installed"
+            );
         }
-        Some(helper)
+        helper
+    }
+
+    fn helper_path_from_exe(exe: &Path) -> Option<PathBuf> {
+        let exe_dir = exe.parent()?;
+        // 新包优先使用分类目录，旧同目录位置仅用于开发构建和兼容历史包。
+        [exe_dir.join("runtime").join("nebula-hook.exe"), exe_dir.join("nebula-hook.exe")]
+            .into_iter()
+            .find(|path| path.is_file())
     }
 
     /// The quoted claude hook command. Forward slashes on purpose: they
@@ -883,5 +895,32 @@ export const NebulaNotify = async ({ $ }) => {
         let tmp = path.with_extension("nebula-tmp");
         std::fs::write(&tmp, data)?;
         std::fs::rename(&tmp, path)
+    }
+
+    #[cfg(test)]
+    mod runtime_asset_tests {
+        use super::helper_path_from_exe;
+
+        #[test]
+        fn hook_helper_prefers_runtime_directory() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = dir.path().join("nebula.exe");
+            let runtime = dir.path().join("runtime");
+            std::fs::create_dir(&runtime).unwrap();
+            std::fs::write(dir.path().join("nebula-hook.exe"), b"legacy").unwrap();
+            std::fs::write(runtime.join("nebula-hook.exe"), b"structured").unwrap();
+
+            assert_eq!(helper_path_from_exe(&exe), Some(runtime.join("nebula-hook.exe")));
+        }
+
+        #[test]
+        fn hook_helper_falls_back_to_legacy_sibling() {
+            let dir = tempfile::tempdir().unwrap();
+            let exe = dir.path().join("nebula.exe");
+            let legacy = dir.path().join("nebula-hook.exe");
+            std::fs::write(&legacy, b"legacy").unwrap();
+
+            assert_eq!(helper_path_from_exe(&exe), Some(legacy));
+        }
     }
 }

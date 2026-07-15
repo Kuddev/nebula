@@ -34,6 +34,18 @@ pub fn credential_target(destination: &str) -> String {
     format!("Nebula/SSH/{destination}")
 }
 
+pub fn private_key_credential_target(private_key: &[u8]) -> String {
+    use sha2::{Digest, Sha512};
+    use std::fmt::Write as _;
+
+    let digest = Sha512::digest(private_key);
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(fingerprint, "{byte:02x}");
+    }
+    format!("Nebula/SSH/KeyPassphrase/{fingerprint}")
+}
+
 pub fn is_askpass_env(mut get: impl FnMut(&str) -> Option<String>) -> bool {
     get(ASKPASS_FLAG).as_deref() == Some("1")
         && get(DESTINATION_ENV).is_some_and(|destination| !destination.trim().is_empty())
@@ -66,8 +78,8 @@ mod windows_store {
         value.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub fn load_password(destination: &str) -> io::Result<Option<Vec<u8>>> {
-        let target = wide(&credential_target(destination));
+    pub fn load_secret(target_name: &str) -> io::Result<Option<Vec<u8>>> {
+        let target = wide(target_name);
         let mut raw = null_mut();
         let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut raw) };
         if ok == 0 {
@@ -95,13 +107,13 @@ mod windows_store {
         Ok(result)
     }
 
-    pub fn save_password(destination: &str, password: &[u8]) -> io::Result<()> {
-        if password.len() > u32::MAX as usize {
+    pub fn save_secret(target_name: &str, username: &str, secret: &[u8]) -> io::Result<()> {
+        if secret.len() > u32::MAX as usize {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "password too long"));
         }
-        let mut target = wide(&credential_target(destination));
-        let mut user = wide(username_hint(destination).as_deref().unwrap_or(""));
-        let mut blob = password.to_vec();
+        let mut target = wide(target_name);
+        let mut user = wide(username);
+        let mut blob = secret.to_vec();
         let cred = CREDENTIALW {
             Flags: 0,
             Type: CRED_TYPE_GENERIC,
@@ -126,8 +138,8 @@ mod windows_store {
         if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
 
-    pub fn delete_password(destination: &str) -> io::Result<()> {
-        let target = wide(&credential_target(destination));
+    pub fn delete_secret(target_name: &str) -> io::Result<()> {
+        let target = wide(target_name);
         let ok = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
         if ok == 0 {
             let code = std::io::Error::last_os_error().raw_os_error().unwrap_or_default();
@@ -137,6 +149,22 @@ mod windows_store {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    pub fn load_password(destination: &str) -> io::Result<Option<Vec<u8>>> {
+        load_secret(&credential_target(destination))
+    }
+
+    pub fn save_password(destination: &str, password: &[u8]) -> io::Result<()> {
+        save_secret(
+            &credential_target(destination),
+            username_hint(destination).as_deref().unwrap_or(""),
+            password,
+        )
+    }
+
+    pub fn delete_password(destination: &str) -> io::Result<()> {
+        delete_secret(&credential_target(destination))
     }
 
     pub fn prompt_password(
@@ -310,6 +338,25 @@ pub fn load_stored_password(destination: &str) -> std::io::Result<Option<Vec<u8>
 }
 
 #[cfg(windows)]
+pub fn store_private_key_passphrase(private_key: &[u8], passphrase: &[u8]) -> std::io::Result<()> {
+    windows_store::save_secret(
+        &private_key_credential_target(private_key),
+        "private-key",
+        passphrase,
+    )
+}
+
+#[cfg(windows)]
+pub fn load_private_key_passphrase(private_key: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
+    windows_store::load_secret(&private_key_credential_target(private_key))
+}
+
+#[cfg(windows)]
+pub fn forget_private_key_passphrase(private_key: &[u8]) -> std::io::Result<()> {
+    windows_store::delete_secret(&private_key_credential_target(private_key))
+}
+
+#[cfg(windows)]
 pub fn prompt_password(
     destination: &str,
     initial: Option<&[u8]>,
@@ -358,6 +405,19 @@ mod tests {
     }
 
     #[test]
+    fn private_key_passphrase_target_depends_on_contents_not_path() {
+        let first = private_key_credential_target(b"encrypted-private-key");
+        let moved = private_key_credential_target(b"encrypted-private-key");
+        let changed = private_key_credential_target(b"different-private-key");
+
+        assert_eq!(first, moved);
+        assert_ne!(first, changed);
+        assert!(first.starts_with("Nebula/SSH/KeyPassphrase/"));
+        assert!(!first.contains("Users"));
+        assert!(!first.contains(".ssh"));
+    }
+
+    #[test]
     fn first_saved_password_is_used_without_prompting() {
         assert_eq!(askpass_action(true, false), AskpassAction::UseStored);
     }
@@ -396,5 +456,21 @@ mod tests {
         );
         windows_store::delete_password(&destination).unwrap();
         assert_eq!(windows_store::load_password(&destination).unwrap(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_key_passphrase_uses_its_own_credential_namespace() {
+        let key = format!("test-private-key-{}", std::process::id()).into_bytes();
+        let passphrase = b"not-a-real-passphrase";
+        let _ = forget_private_key_passphrase(&key);
+
+        store_private_key_passphrase(&key, passphrase).unwrap();
+        assert_eq!(
+            load_private_key_passphrase(&key).unwrap().as_deref(),
+            Some(passphrase.as_slice())
+        );
+        forget_private_key_passphrase(&key).unwrap();
+        assert_eq!(load_private_key_passphrase(&key).unwrap(), None);
     }
 }

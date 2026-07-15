@@ -749,6 +749,12 @@ impl ApplicationHandler<Event> for Processor {
                     window_context.display.window.request_redraw();
                 }
             },
+            (EventType::SftpUpdated, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.dirty = true;
+                    window_context.display.window.request_redraw();
+                }
+            },
             (EventType::NebulaTab(request), Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     let close_window = window_context.handle_tab_request(request);
@@ -933,6 +939,8 @@ pub enum EventType {
     NebulaResizeSettled,
     /// The SSH deletion grace period ended; commit its delayed credential cleanup.
     SshDeleteUndoExpired,
+    /// An SFTP background operation published a new local UI snapshot.
+    SftpUpdated,
     /// Typed AI-CLI lifecycle event from the nebula-hook pipe (see `ai_hook`).
     AiHook(crate::ai_hook::AiHookEvent),
     /// A toast was clicked: focus the originating window and, when known,
@@ -1376,6 +1384,12 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             tab_id: None,
             payload: EventType::NebulaTab(request),
         });
+    }
+
+    fn nebula_open_sftp(&mut self, destination: String) {
+        if let Err(err) = self.display.open_sftp_panel(destination, self.event_proxy.clone()) {
+            log::error!("{err}");
+        }
     }
 
     fn spawn_new_instance(&mut self) {
@@ -2452,7 +2466,9 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 // Clock ticks are handled at the window-context level.
                 EventType::NebulaTick | EventType::NebulaAttach => (),
                 // Resize settling is handled at the window-context level.
-                EventType::NebulaResizeSettled | EventType::SshDeleteUndoExpired => (),
+                EventType::NebulaResizeSettled
+                | EventType::SshDeleteUndoExpired
+                | EventType::SftpUpdated => (),
                 // AI hook events are handled at the Processor level (they may
                 // target any window's pane); FocusWindow likewise.
                 EventType::AiHook(_) | EventType::FocusWindow { .. } => (),
@@ -2791,6 +2807,9 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             let panel = &mut self.ctx.display.nebula_side_panel;
                             panel.search_unfocus(false);
                             panel.commit_unfocus();
+                            if let Some(panel) = self.ctx.display.nebula_sftp_panel.as_mut() {
+                                panel.editor_unfocus();
+                            }
                         }
 
                         // Nebula: always redraw on focus change, and clear the
@@ -2837,54 +2856,63 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             *self.ctx.dirty = true;
                         }
                     },
-                    WindowEvent::Ime(ime) => match ime {
-                        Ime::Commit(text) => {
-                            *self.ctx.dirty = true;
-                            // Tab rename owns committed text while editing: on
-                            // Windows (and any IME), printable characters are
-                            // delivered here, NOT through key_input — so the
-                            // rename buffer must consume them here or typing
-                            // silently pastes into the shell behind the box.
-                            if self.ctx.display.nebula_tab_rename.is_some() {
-                                // Caret-aware insert (type-to-overwrite on a
-                                // pending select-all) — same code path as the
-                                // non-IME keyboard fallback.
-                                self.ctx.display.tab_rename_insert(&text);
-                            } else if self.ctx.display.nebula_side_panel.search_focus {
-                                // Side-panel filter box: same IME contract as
-                                // tab rename — committed text must land in the
-                                // box, not paste into the shell behind it.
-                                self.ctx.display.nebula_side_panel.search_input(&text);
-                            } else if self.ctx.display.nebula_side_panel.commit_focus {
-                                self.ctx.display.nebula_side_panel.commit_input(&text);
-                            } else if self.ctx.display.nebula_ssh_editor.is_some() {
-                                self.ctx.display.ssh_editor_insert(&text);
-                            } else if self.ctx.display.command_palette_open() {
-                                self.ctx.display.palette_input_text(&text);
-                            } else {
-                                // Don't use bracketed paste for single char input.
-                                self.ctx.paste(&text, text.chars().count() > 1);
-                            }
-                            self.ctx.update_cursor_blinking();
-                        },
-                        Ime::Preedit(text, cursor_offset) => {
-                            let preedit =
-                                (!text.is_empty()).then(|| Preedit::new(text, cursor_offset));
-
-                            if self.ctx.display.ime.preedit() != preedit.as_ref() {
-                                self.ctx.display.ime.set_preedit(preedit);
-                                self.ctx.update_cursor_blinking();
+                    WindowEvent::Ime(ime) => {
+                        match ime {
+                            Ime::Commit(text) => {
                                 *self.ctx.dirty = true;
-                            }
-                        },
-                        Ime::Enabled => {
-                            self.ctx.display.ime.set_enabled(true);
-                            *self.ctx.dirty = true;
-                        },
-                        Ime::Disabled => {
-                            self.ctx.display.ime.set_enabled(false);
-                            *self.ctx.dirty = true;
-                        },
+                                // Tab rename owns committed text while editing: on
+                                // Windows (and any IME), printable characters are
+                                // delivered here, NOT through key_input — so the
+                                // rename buffer must consume them here or typing
+                                // silently pastes into the shell behind the box.
+                                if self.ctx.display.nebula_tab_rename.is_some() {
+                                    // Caret-aware insert (type-to-overwrite on a
+                                    // pending select-all) — same code path as the
+                                    // non-IME keyboard fallback.
+                                    self.ctx.display.tab_rename_insert(&text);
+                                } else if self.ctx.display.nebula_sftp_panel.as_ref().is_some_and(
+                                    crate::display::sftp_panel::SftpPanel::editor_active,
+                                ) {
+                                    if let Some(panel) = self.ctx.display.nebula_sftp_panel.as_mut()
+                                    {
+                                        panel.editor_insert(&text);
+                                    }
+                                } else if self.ctx.display.nebula_side_panel.search_focus {
+                                    // Side-panel filter box: same IME contract as
+                                    // tab rename — committed text must land in the
+                                    // box, not paste into the shell behind it.
+                                    self.ctx.display.nebula_side_panel.search_input(&text);
+                                } else if self.ctx.display.nebula_side_panel.commit_focus {
+                                    self.ctx.display.nebula_side_panel.commit_input(&text);
+                                } else if self.ctx.display.nebula_ssh_editor.is_some() {
+                                    self.ctx.display.ssh_editor_insert(&text);
+                                } else if self.ctx.display.command_palette_open() {
+                                    self.ctx.display.palette_input_text(&text);
+                                } else {
+                                    // Don't use bracketed paste for single char input.
+                                    self.ctx.paste(&text, text.chars().count() > 1);
+                                }
+                                self.ctx.update_cursor_blinking();
+                            },
+                            Ime::Preedit(text, cursor_offset) => {
+                                let preedit =
+                                    (!text.is_empty()).then(|| Preedit::new(text, cursor_offset));
+
+                                if self.ctx.display.ime.preedit() != preedit.as_ref() {
+                                    self.ctx.display.ime.set_preedit(preedit);
+                                    self.ctx.update_cursor_blinking();
+                                    *self.ctx.dirty = true;
+                                }
+                            },
+                            Ime::Enabled => {
+                                self.ctx.display.ime.set_enabled(true);
+                                *self.ctx.dirty = true;
+                            },
+                            Ime::Disabled => {
+                                self.ctx.display.ime.set_enabled(false);
+                                *self.ctx.dirty = true;
+                            },
+                        }
                     },
                     WindowEvent::ThemeChanged(theme) => {
                         self.ctx.display.system_theme_changed(theme);

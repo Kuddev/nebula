@@ -17,7 +17,7 @@ use glutin::error::ErrorKind;
 use glutin::prelude::*;
 use glutin::surface::{Surface, SwapInterval, WindowSurface};
 
-use log::{debug, info};
+use log::{debug, info, warn};
 use parking_lot::MutexGuard;
 use serde::{Deserialize, Serialize};
 use winit::dpi::PhysicalSize;
@@ -72,27 +72,32 @@ pub mod hint;
 pub mod window;
 
 mod chrome;
+pub mod command_palette;
 mod context_menu;
 pub mod design_tokens;
-pub mod command_palette;
 pub mod markdown_view;
+pub mod sftp_panel;
 pub mod side_panel;
 
 pub(crate) use chrome::chrome_settings_button_rect;
 pub use chrome::{ChromeHit, TabDropAction, in_chrome_bar, resize_edge};
-pub use context_menu::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
 use chrome::{
     ChromeTabLayout, TabDrag, chrome_hit_with_tabs, chrome_tab_layout, contains_rect,
     truncate_tab_label,
 };
+pub use context_menu::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
 
+mod file_dialog;
 mod settings;
+mod ssh_editor_render;
 mod ssh_ui;
-mod theme;
 mod text_input;
+mod theme;
 
-pub use ssh_ui::{SSH_DELETE_UNDO_DURATION, SshEditorField, SshEditorHit, SshEditorRects, SshHostEditor};
 use ssh_ui::SshDeleteUndo;
+pub use ssh_ui::{
+    SSH_DELETE_UNDO_DURATION, SshEditorField, SshEditorHit, SshEditorRects, SshHostEditor,
+};
 pub use theme::NebulaTheme;
 pub(crate) use theme::write_nebula_prompt_theme;
 
@@ -310,60 +315,6 @@ struct NebulaPowerlineIcon {
     point: Point<usize>,
 }
 
-/// Open the native "open file" dialog so the user can pick a background image.
-///
-/// Returns the chosen path, or `None` if the dialog was cancelled. `owner` is
-/// the host window handle so the dialog is modal to Nebula; a non-Win32 handle
-/// falls back to an unowned dialog. `GetOpenFileNameW` runs its own modal
-/// message pump, so this blocks the caller until the user picks or cancels.
-#[cfg(windows)]
-fn nebula_pick_image_file(owner: RawWindowHandle) -> Option<String> {
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::UI::Controls::Dialogs::{
-        GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR,
-        OFN_PATHMUSTEXIST, OPENFILENAMEW,
-    };
-
-    let hwnd: HWND = match owner {
-        RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
-        _ => std::ptr::null_mut(),
-    };
-
-    // Filter is a flat list of NUL-terminated "label\0pattern\0" pairs ending in
-    // an extra NUL. Keep the patterns in sync with the image loader.
-    let filter: Vec<u16> = "Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp)\0\
-        *.png;*.jpg;*.jpeg;*.webp;*.bmp\0\
-        All files (*.*)\0*.*\0\0"
-        .encode_utf16()
-        .collect();
-    let title: Vec<u16> = "Choose background image\0".encode_utf16().collect();
-
-    // The selected path is written back into this buffer in place.
-    let mut file_buf = vec![0u16; 1024];
-
-    let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
-    ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-    ofn.hwndOwner = hwnd;
-    ofn.lpstrFilter = filter.as_ptr();
-    ofn.lpstrFile = file_buf.as_mut_ptr();
-    ofn.nMaxFile = file_buf.len() as u32;
-    ofn.lpstrTitle = title.as_ptr();
-    // NOCHANGEDIR: the dialog must not move our process's working directory.
-    ofn.Flags =
-        OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY;
-
-    let picked = unsafe { GetOpenFileNameW(&mut ofn) };
-    if picked == 0 {
-        return None;
-    }
-
-    let len = file_buf.iter().position(|&c| c == 0).unwrap_or(file_buf.len());
-    if len == 0 {
-        return None;
-    }
-    Some(String::from_utf16_lossy(&file_buf[..len]))
-}
-
 /// Which key accepts an inline ghost suggestion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AcceptKey {
@@ -444,6 +395,8 @@ pub enum NebulaConfirm {
     /// The source flag lets the dialog explain that Nebula never edits the
     /// user's SSH config file.
     DeleteSsh { host: String, from_config: bool },
+    /// Recursively remove one remote SFTP entry after explicit confirmation.
+    DeleteSftp { entry: crate::ssh_sftp::SftpEntry },
 }
 
 /// One OSC 1337 inline image, anchored to an absolute grid row (see
@@ -1432,6 +1385,8 @@ pub struct Display {
     nebula_detected_shells: Option<Vec<crate::shell_detect::DetectedShell>>,
     /// Right-side drawer: directory tree / git status of the focused cwd.
     pub nebula_side_panel: side_panel::SidePanel,
+    /// Remote file drawer opened from an SSH destination context menu.
+    pub nebula_sftp_panel: Option<sftp_panel::SftpPanel>,
     /// Shared chrome animation state. All sidebar/drawer transitions step here
     /// so easing/timing does not get scattered across render code.
     nebula_ui_anims: NebulaUiAnims,
@@ -1683,9 +1638,7 @@ impl Display {
         let nebula_theme = if settings_init.follow_system_theme {
             nebula_system_theme
                 .map(|theme| {
-                    settings_init
-                        .theme
-                        .for_system_appearance(matches!(theme, WinitTheme::Light))
+                    settings_init.theme.for_system_appearance(matches!(theme, WinitTheme::Light))
                 })
                 .unwrap_or(settings_init.theme)
         } else {
@@ -1813,6 +1766,7 @@ impl Display {
             nebula_palette: command_palette::CommandPalette::new(),
             nebula_detected_shells: None,
             nebula_side_panel: side_panel::SidePanel::new(),
+            nebula_sftp_panel: None,
             nebula_ui_anims: NebulaUiAnims::new(),
             nebula_settings_section: NebulaSettingsSection::default(),
             nebula_chrome_hover: ChromeHit::None,
@@ -1933,6 +1887,8 @@ impl Display {
             password: String::new(),
             save_password: true,
             show_password: false,
+            auth: crate::ssh_profiles::SshAuthMode::Auto,
+            private_keys: Vec::new(),
             field: SshEditorField::Destination,
         });
         self.nebula_ssh_editor_rects = None;
@@ -1945,6 +1901,13 @@ impl Display {
 
     pub fn edit_ssh_host(&mut self, index: usize) {
         let Some(destination) = self.nebula_ssh_hosts.get(index).cloned() else { return };
+        let profile =
+            crate::ssh_profiles::SshProfiles::load(&nebula_data_dir().join("ssh_profiles.json"))
+                .unwrap_or_else(|err| {
+                    warn!("加载 SSH Profile 失败，编辑器使用自动认证: {err}");
+                    crate::ssh_profiles::SshProfiles::default()
+                })
+                .for_destination(&destination);
         self.nebula_ssh_editor = Some(SshHostEditor {
             original_destination: Some(destination.clone()),
             error: None,
@@ -1957,6 +1920,8 @@ impl Display {
             password: String::new(),
             save_password: true,
             show_password: false,
+            auth: profile.auth,
+            private_keys: profile.private_keys,
             field: SshEditorField::Destination,
         });
         self.nebula_ssh_editor_rects = None;
@@ -1981,10 +1946,19 @@ impl Display {
     }
 
     pub fn ssh_editor_hit(&self, x: f32, y: f32) -> SshEditorHit {
-        let Some(rects) = self.nebula_ssh_editor_rects else { return SshEditorHit::None };
+        let Some(rects) = self.nebula_ssh_editor_rects.as_ref() else {
+            return SshEditorHit::None;
+        };
         let hit = |r: (f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
         if hit(rects.destination) {
             SshEditorHit::Destination
+        } else if let Some((mode, _)) = rects.auth.iter().find(|(_, rect)| hit(*rect)) {
+            SshEditorHit::Auth(*mode)
+        } else if hit(rects.add_private_key) {
+            SshEditorHit::AddPrivateKey
+        } else if let Some((index, _)) = rects.private_key_rows.iter().find(|(_, rect)| hit(*rect))
+        {
+            SshEditorHit::RemovePrivateKey(*index)
         } else if hit(rects.password_toggle) {
             SshEditorHit::PasswordToggle
         } else if hit(rects.password) {
@@ -2026,9 +2000,9 @@ impl Display {
     pub fn ssh_editor_backspace(&mut self) {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
             match editor.field {
-                SshEditorField::Destination => editor
-                    .destination_selection
-                    .backspace(&mut editor.destination),
+                SshEditorField::Destination => {
+                    editor.destination_selection.backspace(&mut editor.destination)
+                },
                 SshEditorField::Password => {
                     editor.password_selection.backspace(&mut editor.password)
                 },
@@ -2066,8 +2040,10 @@ impl Display {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
             editor.destination_selection.clear();
             editor.password_selection.clear();
+            let shows_password = ssh_ui::auth_sections(editor.auth).0;
             editor.field = match editor.field {
-                SshEditorField::Destination => SshEditorField::Password,
+                SshEditorField::Destination if shows_password => SshEditorField::Password,
+                SshEditorField::Destination => SshEditorField::Destination,
                 SshEditorField::Password => SshEditorField::Destination,
             };
         }
@@ -2080,42 +2056,64 @@ impl Display {
     }
 
     pub fn ssh_editor_click(&mut self, x: f32, y: f32) -> bool {
-        let Some(rects) = self.nebula_ssh_editor_rects else { return false };
-        let hit = |r: (f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
-        if hit(rects.destination) {
-            if let Some(e) = self.nebula_ssh_editor.as_mut() {
-                e.destination_selection.clear();
-                e.password_selection.clear();
-                e.field = SshEditorField::Destination;
-            }
-            return true;
+        match self.ssh_editor_hit(x, y) {
+            SshEditorHit::Destination => {
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    editor.destination_selection.clear();
+                    editor.password_selection.clear();
+                    editor.field = SshEditorField::Destination;
+                }
+            },
+            SshEditorHit::PasswordToggle => {
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    editor.show_password = !editor.show_password;
+                }
+            },
+            SshEditorHit::Password => {
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    editor.destination_selection.clear();
+                    editor.password_selection.clear();
+                    editor.field = SshEditorField::Password;
+                }
+            },
+            SshEditorHit::Auth(mode) => {
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    editor.auth = mode;
+                    editor.error = None;
+                    if !ssh_ui::auth_sections(mode).0 {
+                        editor.field = SshEditorField::Destination;
+                    }
+                }
+            },
+            SshEditorHit::AddPrivateKey => {
+                if let Some(result) = file_dialog::pick_private_key_file(self.raw_window_handle) {
+                    if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                        match result {
+                            Ok(path) => {
+                                ssh_ui::push_private_key(&mut editor.private_keys, path);
+                                editor.error = None;
+                            },
+                            Err(err) => editor.error = Some(err),
+                        }
+                    }
+                }
+            },
+            SshEditorHit::RemovePrivateKey(index) => {
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    if index < editor.private_keys.len() {
+                        editor.private_keys.remove(index);
+                    }
+                }
+            },
+            SshEditorHit::SaveToggleBox | SshEditorHit::SaveToggleLabel => {
+                self.ssh_editor_toggle_save();
+            },
+            SshEditorHit::Cancel => self.close_ssh_editor(),
+            SshEditorHit::Primary => self.save_ssh_editor(),
+            SshEditorHit::None => return false,
         }
-        if hit(rects.password_toggle) {
-            if let Some(e) = self.nebula_ssh_editor.as_mut() {
-                e.show_password = !e.show_password;
-            }
-            return true;
-        }
-        if hit(rects.password) {
-            if let Some(e) = self.nebula_ssh_editor.as_mut() {
-                e.destination_selection.clear();
-                e.password_selection.clear();
-                e.field = SshEditorField::Password;
-            }
-            return true;
-        }
-        if hit(rects.save_toggle) {
-            self.ssh_editor_toggle_save();
-            return true;
-        }
-        if hit(rects.cancel) {
-            self.close_ssh_editor();
-            return true;
-        }
-        if hit(rects.primary) {
-            self.save_ssh_editor();
-            return true;
-        }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
         true
     }
 
@@ -2162,7 +2160,33 @@ impl Display {
             &self.nebula_pinned_hosts,
             &self.nebula_hidden_hosts,
         );
-        if editor.save_password && !editor.password.is_empty() {
+        let profile_path = nebula_data_dir().join("ssh_profiles.json");
+        let mut profiles =
+            crate::ssh_profiles::SshProfiles::load(&profile_path).unwrap_or_else(|err| {
+                warn!("加载 SSH Profile 失败，将创建新文件: {err}");
+                crate::ssh_profiles::SshProfiles::default()
+            });
+        if let Some(original) = editor.original_destination.as_deref() {
+            if original != destination {
+                profiles.rename(original, &destination);
+            }
+        }
+        profiles.upsert(crate::ssh_profiles::SshProfileAuth {
+            destination: destination.clone(),
+            auth: editor.auth,
+            private_keys: editor.private_keys.clone(),
+        });
+        if let Err(err) = profiles.save(&profile_path) {
+            editor.error = Some(format!("保存 SSH Profile 失败: {err}"));
+            self.nebula_ssh_editor = Some(editor);
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+            return;
+        }
+        if ssh_ui::auth_sections(editor.auth).0
+            && editor.save_password
+            && !editor.password.is_empty()
+        {
             #[cfg(windows)]
             {
                 let _ = crate::ssh_credentials::store_password(
@@ -2336,6 +2360,7 @@ impl Display {
         self.nebula_tab_rename.is_some()
             || self.nebula_side_panel.search_focus
             || self.nebula_side_panel.commit_focus
+            || self.nebula_sftp_panel.as_ref().is_some_and(sftp_panel::SftpPanel::editor_active)
     }
 
     /// Decoded (and theme-tinted) pixels for an AI brand logo, plus a stable
@@ -2581,11 +2606,8 @@ impl Display {
             return;
         }
         let color = self.nebula_tab_colors.get(index).copied().flatten();
-        self.nebula_context_menu = Some(context_menu::ContextMenu::new(
-            ContextMenuTarget::Tab(index),
-            (x, y),
-            color,
-        ));
+        self.nebula_context_menu =
+            Some(context_menu::ContextMenu::new(ContextMenuTarget::Tab(index), (x, y), color));
         self.nebula_tab_drag = None;
         self.pending_update.dirty = true;
         self.window.request_redraw();
@@ -2595,24 +2617,26 @@ impl Display {
         if index >= self.nebula_ssh_hosts.len() {
             return;
         }
-        self.nebula_context_menu = Some(context_menu::ContextMenu::new(
-            ContextMenuTarget::Ssh(index),
-            (x, y),
-            None,
-        ));
+        self.nebula_context_menu =
+            Some(context_menu::ContextMenu::new(ContextMenuTarget::Ssh(index), (x, y), None));
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn open_sftp_context_menu(&mut self, index: usize, x: f32, y: f32) {
+        let Some(panel) = self.nebula_sftp_panel.as_ref() else { return };
+        if panel.visible_entry(index).is_none() {
+            return;
+        }
+        self.nebula_context_menu =
+            Some(context_menu::ContextMenu::new(ContextMenuTarget::Sftp(index), (x, y), None));
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
 
     pub fn context_menu_hit(&self, x: f32, y: f32) -> ContextMenuHit {
         self.nebula_context_menu.as_ref().map_or(ContextMenuHit::Outside, |menu| {
-            context_menu::hit_test(
-                menu,
-                self.size_info,
-                self.window.scale_factor as f32,
-                x,
-                y,
-            )
+            context_menu::hit_test(menu, self.size_info, self.window.scale_factor as f32, x, y)
         })
     }
 
@@ -2874,10 +2898,8 @@ impl Display {
     /// the saved list. Expired credentials intentionally remain deleted.
     pub fn restore_hidden_ssh_host(&mut self, index: usize) {
         let Some(host) = self.nebula_hidden_hosts.get(index).cloned() else { return };
-        let pending_same_host = self
-            .nebula_ssh_delete_undo
-            .as_ref()
-            .is_some_and(|undo| undo.host == host);
+        let pending_same_host =
+            self.nebula_ssh_delete_undo.as_ref().is_some_and(|undo| undo.host == host);
         if pending_same_host && self.undo_delete_ssh_host() {
             return;
         }
@@ -2948,7 +2970,7 @@ impl Display {
     pub fn pick_background_image(&mut self) {
         #[cfg(windows)]
         {
-            if let Some(path) = nebula_pick_image_file(self.raw_window_handle) {
+            if let Some(path) = file_dialog::pick_image_file(self.raw_window_handle) {
                 self.nebula_background_image = Some(path);
                 self.persist_nebula_settings();
                 self.renderer.invalidate_background_image();
@@ -3091,7 +3113,12 @@ impl Display {
     /// Toggle the right-side drawer (directory tree / git status).
     pub fn toggle_side_panel(&mut self, view: side_panel::PanelView) {
         let was_open = self.nebula_side_panel.open;
-        self.nebula_side_panel.toggle(view);
+        if self.nebula_sftp_panel.take().is_some() {
+            self.nebula_side_panel.open = true;
+            self.nebula_side_panel.view = view;
+        } else {
+            self.nebula_side_panel.toggle(view);
+        }
         // The drawer reserves real grid width, so opening/closing it (not
         // just switching views) must reflow the grid like the left sidebar.
         if self.nebula_side_panel.open != was_open {
@@ -3209,6 +3236,9 @@ impl Display {
     /// Adopt the focused pane's cwd into the drawer (per drawn frame; cheap
     /// no-op unless the drawer is open and something changed).
     pub fn side_panel_sync(&mut self, cwd: Option<std::path::PathBuf>) {
+        if self.nebula_sftp_panel.is_some() {
+            return;
+        }
         if self.nebula_side_panel.sync(cwd) {
             self.pending_update.dirty = true;
         }
@@ -3227,6 +3257,163 @@ impl Display {
             scale,
             self.nebula_ui_anims.right_drawer.value(),
         )
+    }
+
+    pub fn open_sftp_panel(
+        &mut self,
+        destination: String,
+        proxy: winit::event_loop::EventLoopProxy<crate::event::Event>,
+    ) -> Result<(), String> {
+        let was_open = self.nebula_side_panel.open;
+        let controller = crate::ssh_sftp::SftpController::new(destination, proxy, self.window.id())
+            .map_err(|err| format!("无法打开 SFTP: {err}"))?;
+        self.nebula_side_panel.search_unfocus(false);
+        self.nebula_side_panel.commit_unfocus();
+        self.nebula_side_panel.open = true;
+        self.nebula_sftp_panel = Some(sftp_panel::SftpPanel::new(controller));
+        if !was_open {
+            let size =
+                PhysicalSize::new(self.size_info.width() as u32, self.size_info.height() as u32);
+            self.pending_update.set_dimensions(size);
+        }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+        Ok(())
+    }
+
+    pub fn close_sftp_panel(&mut self) {
+        if let Some(panel) = self.nebula_sftp_panel.take() {
+            panel.cancel_transfer();
+        }
+        if self.nebula_side_panel.open {
+            self.nebula_side_panel.open = false;
+            let size =
+                PhysicalSize::new(self.size_info.width() as u32, self.size_info.height() as u32);
+            self.pending_update.set_dimensions(size);
+        }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn sftp_layout(&self) -> sftp_panel::SftpLayout {
+        sftp_panel::layout(&self.side_panel_layout(), self.window.scale_factor as f32)
+    }
+
+    pub fn sftp_hit(&self, x: f32, y: f32) -> sftp_panel::SftpHit {
+        let Some(panel) = self.nebula_sftp_panel.as_ref() else {
+            return sftp_panel::SftpHit::None;
+        };
+        let working = panel.snapshot().phase == crate::ssh_sftp::SftpPhase::Working;
+        sftp_panel::hit_test(&self.sftp_layout(), working, x, y)
+    }
+
+    pub fn sftp_set_hover(&mut self, hit: sftp_panel::SftpHit) -> bool {
+        self.nebula_sftp_panel.as_mut().is_some_and(|panel| panel.set_hover(hit))
+    }
+
+    pub fn sftp_click(&mut self, hit: sftp_panel::SftpHit) {
+        use sftp_panel::SftpHit;
+        match hit {
+            SftpHit::Close => self.close_sftp_panel(),
+            SftpHit::Path => {
+                if let Some(panel) = self.nebula_sftp_panel.as_mut() {
+                    panel.begin_path();
+                }
+            },
+            SftpHit::Up => {
+                if let Some(panel) = self.nebula_sftp_panel.as_ref() {
+                    panel.go_up();
+                }
+            },
+            SftpHit::Refresh => {
+                if let Some(panel) = self.nebula_sftp_panel.as_ref() {
+                    panel.refresh();
+                }
+            },
+            SftpHit::UploadFiles => {
+                let paths = file_dialog::pick_upload_files(self.raw_window_handle);
+                if !paths.is_empty() {
+                    if let Some(panel) = self.nebula_sftp_panel.as_ref() {
+                        panel.upload_paths(paths);
+                    }
+                }
+            },
+            SftpHit::UploadDirectory => {
+                if let Some(path) = file_dialog::pick_upload_directory(self.raw_window_handle) {
+                    if let Some(panel) = self.nebula_sftp_panel.as_ref() {
+                        panel.upload_paths(vec![path]);
+                    }
+                }
+            },
+            SftpHit::NewDirectory => {
+                if let Some(panel) = self.nebula_sftp_panel.as_mut() {
+                    panel.begin_create_directory();
+                }
+            },
+            SftpHit::Filter => {
+                if let Some(panel) = self.nebula_sftp_panel.as_mut() {
+                    panel.begin_filter();
+                }
+            },
+            SftpHit::Row(index) => {
+                let selected =
+                    self.nebula_sftp_panel.as_mut().and_then(|panel| panel.select_row(index));
+                if let Some((entry, true)) = selected {
+                    let navigated =
+                        self.nebula_sftp_panel.as_mut().is_some_and(|panel| panel.navigate(&entry));
+                    if !navigated {
+                        self.sftp_download_entry(entry);
+                    }
+                }
+            },
+            SftpHit::Cancel => {
+                if let Some(panel) = self.nebula_sftp_panel.as_ref() {
+                    panel.cancel_transfer();
+                }
+            },
+            SftpHit::None | SftpHit::Inside => {},
+        }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn sftp_download_row(&mut self, index: usize) {
+        if let Some(entry) =
+            self.nebula_sftp_panel.as_ref().and_then(|panel| panel.visible_entry(index))
+        {
+            self.sftp_download_entry(entry);
+        }
+    }
+
+    fn sftp_download_entry(&mut self, entry: crate::ssh_sftp::SftpEntry) {
+        let Some(directory) = file_dialog::pick_download_directory(self.raw_window_handle) else {
+            return;
+        };
+        if let Some(panel) = self.nebula_sftp_panel.as_ref() {
+            panel.download(entry, directory);
+        }
+    }
+
+    pub fn sftp_begin_rename_row(&mut self, index: usize) {
+        let entry = self.nebula_sftp_panel.as_ref().and_then(|panel| panel.visible_entry(index));
+        if let (Some(panel), Some(entry)) = (self.nebula_sftp_panel.as_mut(), entry) {
+            panel.begin_rename(entry);
+        }
+    }
+
+    pub fn sftp_request_delete_row(&mut self, index: usize) {
+        if let Some(entry) =
+            self.nebula_sftp_panel.as_ref().and_then(|panel| panel.visible_entry(index))
+        {
+            self.nebula_confirm = Some(NebulaConfirm::DeleteSftp { entry });
+        }
+    }
+
+    pub fn sftp_confirm_delete(&mut self, entry: crate::ssh_sftp::SftpEntry) {
+        self.nebula_confirm = None;
+        if let Some(panel) = self.nebula_sftp_panel.as_ref() {
+            panel.delete(entry);
+        }
     }
 
     pub fn step_chrome_anims(&mut self) {
@@ -3412,7 +3599,9 @@ impl Display {
         }
         let active_theme = if settings.follow_system_theme {
             self.nebula_system_theme
-                .map(|system| settings.theme.for_system_appearance(matches!(system, WinitTheme::Light)))
+                .map(|system| {
+                    settings.theme.for_system_appearance(matches!(system, WinitTheme::Light))
+                })
                 .unwrap_or(settings.theme)
         } else {
             settings.theme
@@ -4570,6 +4759,16 @@ impl Display {
                     )
                 }
             },
+            NebulaConfirm::DeleteSftp { entry } => (
+                format!("删除远端项目 {}？", truncate_tab_label(&entry.name, 28)),
+                if entry.kind == crate::ssh_sftp::SftpEntryKind::Directory {
+                    "文件夹及其全部远端内容会被递归删除，此操作无法撤销。".to_owned()
+                } else {
+                    "远端文件会被永久删除，此操作无法撤销。".to_owned()
+                },
+                "删除 Enter",
+                true,
+            ),
         };
         let cancel_label = "取消 Esc";
 
@@ -4666,349 +4865,6 @@ impl Display {
         );
     }
 
-    fn draw_ssh_editor_modal(&mut self) {
-        self.nebula_ui_anims
-            .ssh_editor
-            .step_with_speed(if self.nebula_ssh_editor_open { 1.0 } else { 0.0 }, 26.0);
-        let progress = self.nebula_ui_anims.ssh_editor.value().clamp(0.0, 1.0);
-        if !self.nebula_ssh_editor_open && progress <= 0.004 {
-            self.nebula_ssh_editor = None;
-            self.nebula_ssh_editor_rects = None;
-            self.nebula_ssh_editor_hover = SshEditorHit::None;
-            return;
-        }
-        let Some(editor) = self.nebula_ssh_editor.clone() else {
-            self.nebula_ssh_editor_rects = None;
-            return;
-        };
-        let size = self.size_info;
-        let scale = self.window.scale_factor as f32;
-        let s = |v: f32| v * scale;
-        let sk = self.nebula_theme.skin();
-        let accent = Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255);
-        let editor_caret = Rgba::new(sk.ink_strong.r, sk.ink_strong.g, sk.ink_strong.b, 235);
-        let cell_h = size.cell_height();
-        let cell_w = size.cell_width();
-        let text_w = |text: &str| -> f32 {
-            text.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w
-        };
-        let primary_label = "保存 Enter";
-        let cancel_label = "取消 Esc";
-        let save_label = "保存密码到 Windows 凭据管理器";
-        let box_w = s(560.0).min(size.width() - s(32.0));
-        let box_h = s(330.0).min(size.height() - s(32.0));
-        let bx = (size.width() - box_w) * 0.5;
-        // A short downward settle gives the modal direction without making it
-        // travel across the whole window. Closing reverses the same path upward.
-        let resting_y = (size.height() - box_h) * 0.5;
-        let by = resting_y - (1.0 - progress) * s(14.0);
-        let pad = s(28.0);
-        let field_h = s(42.0);
-        let field_w = box_w - pad * 2.0;
-        let destination = (bx + pad, by + s(86.0), field_w, field_h);
-        let password = (bx + pad, by + s(162.0), field_w, field_h);
-        let password_toggle =
-            (password.0 + password.2 - s(38.0), password.1 + s(4.0), s(34.0), password.3 - s(8.0));
-        // The whole label remains clickable, while the visual hover target is
-        // deliberately limited to the checkbox itself.
-        let save_toggle =
-            (bx + pad, by + s(220.0), (s(28.0) + text_w(save_label)).min(field_w), s(28.0));
-        let save_checkbox = (save_toggle.0, save_toggle.1 + s(5.0), s(18.0), s(18.0));
-        let button_pad = s(16.0);
-        let primary_w = s(112.0).max(text_w(primary_label) + button_pad * 2.0);
-        let cancel_w = s(112.0).max(text_w(cancel_label) + button_pad * 2.0);
-        let primary = (bx + box_w - pad - primary_w, by + box_h - s(58.0), primary_w, s(36.0));
-        let cancel = (primary.0 - s(12.0) - cancel_w, primary.1, cancel_w, s(36.0));
-        self.nebula_ssh_editor_rects = Some(SshEditorRects {
-            destination,
-            password,
-            password_toggle,
-            save_checkbox,
-            save_toggle,
-            primary,
-            cancel,
-        });
-
-        let mut quads = vec![
-            UiQuad::solid(
-                0.0,
-                0.0,
-                size.width(),
-                size.height(),
-                0.0,
-                Rgba::new(0, 0, 0, (170.0 * progress).round() as u8),
-            ),
-            UiQuad::solid(
-                bx - s(1.0),
-                by - s(1.0),
-                box_w + s(2.0),
-                box_h + s(2.0),
-                s(13.0),
-                sk.hairline,
-            ),
-            UiQuad::solid(bx, by, box_w, box_h, s(12.0), sk.panel),
-        ];
-        for (rect, active) in [
-            (destination, editor.field == SshEditorField::Destination),
-            (password, editor.field == SshEditorField::Password),
-        ] {
-            let hovered = matches!(
-                (rect == destination, self.nebula_ssh_editor_hover),
-                (true, SshEditorHit::Destination) | (false, SshEditorHit::Password)
-            );
-            quads.push(UiQuad::solid(
-                rect.0 - s(1.0),
-                rect.1 - s(1.0),
-                rect.2 + s(2.0),
-                rect.3 + s(2.0),
-                s(7.0),
-                if active {
-                    accent
-                } else if hovered {
-                    sk.hover_strong
-                } else {
-                    sk.hairline
-                },
-            ));
-            quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(6.0), sk.input));
-            if hovered && !active {
-                quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(6.0), sk.surface));
-            }
-        }
-        if self.nebula_ssh_editor_hover == SshEditorHit::SaveToggleBox {
-            quads.push(UiQuad::solid(
-                save_checkbox.0 - s(2.0),
-                save_checkbox.1 - s(2.0),
-                save_checkbox.2 + s(4.0),
-                save_checkbox.3 + s(4.0),
-                s(6.0),
-                sk.hover_strong,
-            ));
-        }
-        if self.nebula_ssh_editor_hover == SshEditorHit::PasswordToggle {
-            quads.push(UiQuad::solid(
-                password_toggle.0,
-                password_toggle.1,
-                password_toggle.2,
-                password_toggle.3,
-                s(6.0),
-                sk.hover,
-            ));
-        }
-        // Keep the dark outline requested for the light theme, but use a clean
-        // input-colored interior instead of a solid black status block.
-        let checkbox_edge =
-            if sk.is_light { Rgba::new(sk.ink.r, sk.ink.g, sk.ink.b, 210) } else { sk.hairline };
-        quads.push(UiQuad::solid(
-            save_checkbox.0 - s(1.0),
-            save_checkbox.1 - s(1.0),
-            save_checkbox.2 + s(2.0),
-            save_checkbox.3 + s(2.0),
-            s(5.0),
-            checkbox_edge,
-        ));
-        quads.push(UiQuad::solid(
-            save_checkbox.0,
-            save_checkbox.1,
-            save_checkbox.2,
-            save_checkbox.3,
-            s(4.0),
-            sk.input,
-        ));
-        for (rect, edge) in
-            [(cancel, sk.hairline), (primary, if sk.is_light { accent } else { sk.hairline })]
-        {
-            quads.push(UiQuad::solid(
-                rect.0 - s(1.0),
-                rect.1 - s(1.0),
-                rect.2 + s(2.0),
-                rect.3 + s(2.0),
-                s(9.0),
-                edge,
-            ));
-        }
-        quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), sk.input));
-        quads.push(UiQuad::solid(
-            primary.0,
-            primary.1,
-            primary.2,
-            primary.3,
-            s(8.0),
-            if sk.is_light { sk.input } else { accent },
-        ));
-        if self.nebula_ssh_editor_hover == SshEditorHit::Cancel {
-            quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), sk.hover));
-        }
-        if self.nebula_ssh_editor_hover == SshEditorHit::Primary {
-            quads.push(UiQuad::solid(
-                primary.0,
-                primary.1,
-                primary.2,
-                primary.3,
-                s(8.0),
-                if sk.is_light { sk.hover } else { sk.hover_strong },
-            ));
-        }
-        let (caret_rect, caret_cols, all_selected) = match editor.field {
-            SshEditorField::Destination => (
-                destination,
-                editor.destination.chars().count(),
-                editor.destination_selection.is_selected(),
-            ),
-            SshEditorField::Password => (
-                password,
-                editor.password.chars().count(),
-                editor.password_selection.is_selected(),
-            ),
-        };
-        if all_selected && caret_cols > 0 {
-            let right_pad = if editor.field == SshEditorField::Password { s(48.0) } else { s(10.0) };
-            let selection_w = (caret_cols as f32 * cell_w)
-                .min(caret_rect.2 - s(12.0) - right_pad);
-            quads.push(UiQuad::solid(
-                caret_rect.0 + s(10.0),
-                caret_rect.1 + s(7.0),
-                selection_w + s(4.0),
-                caret_rect.3 - s(14.0),
-                s(4.0),
-                sk.accent_soft,
-            ));
-        } else {
-            let caret_x = (caret_rect.0 + s(12.0) + caret_cols as f32 * cell_w).min(
-                caret_rect.0 + caret_rect.2
-                    - if editor.field == SshEditorField::Password { s(48.0) } else { s(10.0) },
-            );
-            quads.push(UiQuad::solid(
-                caret_x,
-                caret_rect.1 + s(10.0),
-                s(1.5).max(1.0),
-                caret_rect.3 - s(20.0),
-                0.0,
-                editor_caret,
-            ));
-        }
-        self.renderer.draw_ui(&size, &quads);
-
-        let gc = &mut self.glyph_cache;
-        self.renderer.draw_doc_text(
-            &size,
-            bx + pad,
-            by + s(24.0),
-            1.35,
-            sk.ink_strong,
-            nebula_terminal::term::cell::Flags::empty(),
-            "添加 SSH 主机",
-            gc,
-        );
-        self.renderer.draw_chrome_text(
-            &size,
-            destination.0,
-            destination.1 - cell_h - s(6.0),
-            if editor.error.is_some() {
-                if sk.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) }
-            } else {
-                sk.ink_dim
-            },
-            editor
-                .error
-                .as_deref()
-                .unwrap_or("用户名@地址（非 22 端口可用 ssh://user@host:port）"),
-            gc,
-        );
-        let destination_text =
-            if editor.destination.is_empty() { "user@example.com" } else { &editor.destination };
-        self.renderer.draw_chrome_text(
-            &size,
-            destination.0 + s(12.0),
-            destination.1 + (field_h - cell_h) / 2.0,
-            if editor.destination.is_empty() { sk.ink_faint } else { sk.ink },
-            destination_text,
-            gc,
-        );
-        self.renderer.draw_chrome_text(
-            &size,
-            password.0,
-            password.1 - cell_h - s(6.0),
-            sk.ink_dim,
-            "密码",
-            gc,
-        );
-        let masked = if editor.password.is_empty() {
-            "连接时询问".to_owned()
-        } else if editor.show_password {
-            editor.password.clone()
-        } else {
-            "•".repeat(editor.password.chars().count())
-        };
-        self.renderer.draw_chrome_text(
-            &size,
-            password.0 + s(12.0),
-            password.1 + (field_h - cell_h) / 2.0,
-            if editor.password.is_empty() { sk.ink_faint } else { sk.ink },
-            &masked,
-            gc,
-        );
-        const ICON_EYE: &str = "\u{ea70}";
-        const ICON_EYE_CLOSED: &str = "\u{eae7}";
-        let eye_icon = if editor.show_password { ICON_EYE_CLOSED } else { ICON_EYE };
-        self.renderer.draw_chrome_text(
-            &size,
-            password_toggle.0 + (password_toggle.2 - cell_w) * 0.5,
-            password_toggle.1 + (password_toggle.3 - cell_h) * 0.5,
-            if self.nebula_ssh_editor_hover == SshEditorHit::PasswordToggle {
-                sk.icon_hover
-            } else {
-                sk.icon
-            },
-            eye_icon,
-            gc,
-        );
-        self.renderer.draw_chrome_text(
-            &size,
-            save_toggle.0 + s(28.0),
-            save_toggle.1 + (save_toggle.3 - cell_h) / 2.0,
-            sk.ink,
-            save_label,
-            gc,
-        );
-        if editor.save_password {
-            const ICON_CHECK: &str = "\u{eab2}";
-            self.renderer.draw_chrome_text(
-                &size,
-                save_checkbox.0 + (save_checkbox.2 - cell_w) * 0.5,
-                save_checkbox.1 + (save_checkbox.3 - cell_h) * 0.5,
-                if sk.is_light { sk.ink_strong } else { sk.icon_hover },
-                ICON_CHECK,
-                gc,
-            );
-        }
-        self.renderer.draw_chrome_text(
-            &size,
-            cancel.0 + (cancel.2 - text_w(cancel_label)) * 0.5,
-            cancel.1 + (cancel.3 - cell_h) / 2.0,
-            sk.ink,
-            cancel_label,
-            gc,
-        );
-        self.renderer.draw_chrome_text(
-            &size,
-            primary.0 + (primary.2 - text_w(primary_label)) * 0.5,
-            primary.1 + (primary.3 - cell_h) / 2.0,
-            if sk.is_light { sk.accent } else { sk.ink_on_accent },
-            primary_label,
-            gc,
-        );
-
-        if self.nebula_ui_anims.ssh_editor.animating_to(if self.nebula_ssh_editor_open {
-            1.0
-        } else {
-            0.0
-        }) {
-            self.pending_update.dirty = true;
-            self.window.request_redraw();
-        }
-    }
-
     /// Bottom-center reversible-action bar for SSH deletion. Its action rect is
     /// published to input after layout, keeping hover/click geometry identical
     /// to the pixels on screen.
@@ -5042,26 +4898,20 @@ impl Display {
         };
         let hint = "Ctrl+Z";
         let action = "撤销";
-        let text_cols = |text: &str| -> usize {
-            text.chars().map(|ch| ch.width().unwrap_or(1).max(1)).sum()
-        };
+        let text_cols =
+            |text: &str| -> usize { text.chars().map(|ch| ch.width().unwrap_or(1).max(1)).sum() };
 
         let pad = s(14.0);
         let gap = s(12.0);
         let action_w = s(76.0);
         let bar_h = s(48.0).max(cell_h + s(12.0));
         let content_w = (text_cols(&message) + text_cols(hint) + 2) as f32 * cell_w;
-        let bar_w = (pad * 2.0 + content_w + gap + action_w)
-            .max(s(360.0))
-            .min(size.width() - s(24.0));
+        let bar_w =
+            (pad * 2.0 + content_w + gap + action_w).max(s(360.0)).min(size.width() - s(24.0));
         let bar_x = (size.width() - bar_w) * 0.5;
         let bar_y = size.height() - bar_h - s(18.0);
-        let action_rect = (
-            bar_x + bar_w - pad - action_w,
-            bar_y + (bar_h - s(34.0)) * 0.5,
-            action_w,
-            s(34.0),
-        );
+        let action_rect =
+            (bar_x + bar_w - pad - action_w, bar_y + (bar_h - s(34.0)) * 0.5, action_w, s(34.0));
         self.nebula_ssh_delete_undo_rect = Some(action_rect);
 
         let mut quads = vec![
@@ -5121,8 +4971,7 @@ impl Display {
             hint,
             &mut self.glyph_cache,
         );
-        let action_x =
-            action_rect.0 + (action_rect.2 - text_cols(action) as f32 * cell_w) * 0.5;
+        let action_x = action_rect.0 + (action_rect.2 - text_cols(action) as f32 * cell_w) * 0.5;
         let action_y = action_rect.1 + (action_rect.3 - cell_h) * 0.5;
         self.renderer.draw_chrome_text_styled(
             &size,
@@ -6403,8 +6252,7 @@ mod nebula_ux_tests {
         let mut pinned = strings(&["target", "alpha"]);
         let mut hidden = strings(&["already-hidden"]);
 
-        let snapshot =
-            remove_ssh_host_from_lists("target", &mut saved, &mut pinned, &mut hidden);
+        let snapshot = remove_ssh_host_from_lists("target", &mut saved, &mut pinned, &mut hidden);
         assert_eq!(snapshot, (Some(1), Some(0), false));
         assert_eq!(saved, strings(&["alpha", "omega"]));
         assert_eq!(pinned, strings(&["alpha"]));
@@ -6451,16 +6299,12 @@ mod nebula_ux_tests {
 
     #[test]
     fn asymmetric_bottom_reserve_recovers_rows_hidden_by_top_chrome() {
-        let size = SizeInfo::new_fully_asymmetric(
-            1000.0, 1000.0, 10.0, 20.0, 0.0, 0.0, 64.0, 16.0,
-        );
+        let size = SizeInfo::new_fully_asymmetric(1000.0, 1000.0, 10.0, 20.0, 0.0, 0.0, 64.0, 16.0);
         assert_eq!(size.screen_lines(), 46);
         assert_eq!(size.padding_y(), 64.0);
         assert_eq!(size.padding_bottom(), 16.0);
 
-        let old_symmetric = SizeInfo::new_asymmetric(
-            1000.0, 1000.0, 10.0, 20.0, 0.0, 0.0, 64.0,
-        );
+        let old_symmetric = SizeInfo::new_asymmetric(1000.0, 1000.0, 10.0, 20.0, 0.0, 0.0, 64.0);
         assert_eq!(old_symmetric.screen_lines(), 43);
     }
 }

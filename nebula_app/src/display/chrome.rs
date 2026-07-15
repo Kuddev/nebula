@@ -992,11 +992,8 @@ pub(super) fn draw_chrome(d: &mut Display) {
             ChromeHit::TabsSection | ChromeHit::NewTab | ChromeHit::NewTabMenu
         );
     if !d.nebula_settings_open && tabs_plus_visible {
-        let plus_ink = if d.nebula_chrome_hover == ChromeHit::NewTab {
-            sk.icon_hover
-        } else {
-            sk.icon
-        };
+        let plus_ink =
+            if d.nebula_chrome_hover == ChromeHit::NewTab { sk.icon_hover } else { sk.icon };
         push_centered_add_icon(&mut quads, tab_layout.plus, scale, plus_ink);
     }
     // The dropdown chevron beside "+": same hover-only lift.
@@ -1009,11 +1006,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             &mut quads,
             tab_layout.menu,
             scale,
-            if d.nebula_chrome_hover == ChromeHit::NewTabMenu {
-                sk.icon_hover
-            } else {
-                sk.icon
-            },
+            if d.nebula_chrome_hover == ChromeHit::NewTabMenu { sk.icon_hover } else { sk.icon },
         );
     }
 
@@ -1032,10 +1025,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             let (ax, ay, aw, ah) = tab_layout.hosts_add;
             quads.push(UiQuad::solid(ax, ay, aw, ah, s(6.0), HOVER_FILL_STRONG));
         }
-        if matches!(
-            d.nebula_chrome_hover,
-            ChromeHit::HostsSection | ChromeHit::AddSshHost
-        ) {
+        if matches!(d.nebula_chrome_hover, ChromeHit::HostsSection | ChromeHit::AddSshHost) {
             push_centered_add_icon(
                 &mut quads,
                 tab_layout.hosts_add,
@@ -1108,14 +1098,26 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // drawing through slide-out; animation stepping is centralized in Display.
     d.step_chrome_anims();
     if d.side_panel_visible() {
-        side_panel::push_quads(
-            &d.nebula_side_panel,
-            &d.side_panel_layout(),
-            &d.nebula_theme,
-            &mut quads,
-            scale,
-            size.cell_width(),
-        );
+        if let Some(panel) = d.nebula_sftp_panel.as_ref() {
+            let layout = sftp_panel::layout(&d.side_panel_layout(), scale);
+            sftp_panel::push_quads(
+                panel,
+                &layout,
+                &d.nebula_theme,
+                &mut quads,
+                scale,
+                size.cell_width(),
+            );
+        } else {
+            side_panel::push_quads(
+                &d.nebula_side_panel,
+                &d.side_panel_layout(),
+                &d.nebula_theme,
+                &mut quads,
+                scale,
+                size.cell_width(),
+            );
+        }
     }
 
     // No base pill behind the gear — just the icon (hover still fills).
@@ -1455,7 +1457,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             // destination here once the connection confirms (`~/.ssh/config`
             // aliases still appear automatically too). Styled as helper text,
             // NOT as content: smaller and fainter than the caption above it,
-                // and indented to the row-label depth (`tab_pad + s(14)`, where
+            // and indented to the row-label depth (`tab_pad + s(14)`, where
             // tab/host row text starts) so it reads as a child of the section.
             // The hint wraps to the sidebar width; drawing it as one line
             // would bleed across the seam onto the terminal grid.
@@ -1578,23 +1580,36 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // Palette text (query + result rows) sits on top of every chrome label.
     // Drawer text stays below settings; otherwise it pierces the modal glass.
     if d.side_panel_visible() && !d.nebula_settings_open {
-        // File-tree rows use the terminal's live ANSI palette so the drawer
-        // matches `ls` colors exactly (dirs blue, executables green) and
-        // follows theme switches with it.
-        let ls_colors = side_panel::LsColors {
-            dir: d.colors[nebula_terminal::vte::ansi::NamedColor::Blue],
-            exec: d.colors[nebula_terminal::vte::ansi::NamedColor::Green],
-        };
-        side_panel::draw_text(
-            &d.nebula_side_panel,
-            &d.side_panel_layout(),
-            &d.nebula_theme,
-            ls_colors,
-            &mut d.renderer,
-            &mut d.glyph_cache,
-            &d.size_info,
-            d.window.scale_factor as f32,
-        );
+        if let Some(panel) = d.nebula_sftp_panel.as_ref() {
+            let scale = d.window.scale_factor as f32;
+            let layout = sftp_panel::layout(&d.side_panel_layout(), scale);
+            sftp_panel::draw_text(
+                panel,
+                &layout,
+                &d.nebula_theme,
+                &mut d.renderer,
+                &mut d.glyph_cache,
+                &d.size_info,
+                scale,
+            );
+        } else {
+            // File-tree rows use the terminal's live ANSI palette so the drawer
+            // matches `ls` colors exactly (dirs blue, executables green).
+            let ls_colors = side_panel::LsColors {
+                dir: d.colors[nebula_terminal::vte::ansi::NamedColor::Blue],
+                exec: d.colors[nebula_terminal::vte::ansi::NamedColor::Green],
+            };
+            side_panel::draw_text(
+                &d.nebula_side_panel,
+                &d.side_panel_layout(),
+                &d.nebula_theme,
+                ls_colors,
+                &mut d.renderer,
+                &mut d.glyph_cache,
+                &d.size_info,
+                d.window.scale_factor as f32,
+            );
+        }
     }
     let shell_icon_draws = command_palette::draw_text(
         &d.nebula_palette,

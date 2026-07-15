@@ -98,6 +98,11 @@ experience that works without extra setup.
   passwords, and keyboard-interactive/MFA. Accepted host keys use the standard
   `known_hosts` store, and additional tabs reuse an already authenticated
   connection to the same `user@host:port` for a faster second shell.
+- **Built-in SFTP transfers** — open a remote file drawer from any saved SSH
+  host and reuse its authenticated connection. Browse or type remote paths,
+  filter entries, upload and download files or folders, create and rename
+  folders, recursively delete, follow symlink targets, and cancel transfers
+  with visible progress and errors.
 - **AI-aware over SSH** — remote Hook envelopes can return through a
   per-channel, randomly authenticated private OSC bridge. Nebula validates the
   channel token, replaces any remote pane identifier with the local pane, and
@@ -146,6 +151,9 @@ experience that works without extra setup.
   persists across restarts.
 - **Tabs & splits** — sidebar tabs with drag-to-reorder and drag-to-dock into
   splits; unfocused panes dim instead of growing borders.
+- **Files, Git and SFTP drawers** — browse local or remote files without
+  leaving the terminal. The Git drawer can stage, commit, pull fast-forward
+  updates, and push.
 - **Quick terminal** — global <kbd>Ctrl</kbd>+<kbd>`</kbd> drops a Quake-style
   terminal from the top edge.
 - **Floating settings panel & command palette** — themes, background
@@ -158,15 +166,17 @@ experience that works without extra setup.
 > **⚠️ Install the bundled font first.** Nebula's powerline prompt, program
 > icons and AI brand marks are drawn with **Maple Mono Normal NF CN** (a Nerd Font).
 > Without it, those glyphs render as `□` boxes. The font ships in the release
-> zip and the repo at `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` — double-click
+> zip under `fonts/` and the repo at
+> `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` — double-click
 > it and press **Install**, then launch Nebula. (Licensed under SIL OFL 1.1.)
 
 **Release build (recommended)** — download
 `NebulaTerminal-v0.4.0-windows-x64.zip` from
 [Releases](https://github.com/Kuddev/nebula/releases), unzip
-anywhere, install `MapleMonoNormal-NF-CN-Regular.ttf`, then run `nebula.exe`. Keep
-the bundled files next to the exe (`nebula-hook.exe` powers AI notifications;
-`conpty.dll` + `OpenConsole.exe` provide the modern ConPTY host).
+anywhere, install `fonts/MapleMonoNormal-NF-CN-Regular.ttf`, then run
+`nebula.exe`. Keep the extracted folders in place: AI and ConPTY helpers live
+under `runtime/`, while fonts, documentation, and notices live under `fonts/`,
+`docs/`, and `licenses/`.
 
 **From source**
 
@@ -245,6 +255,9 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
   口令、Windows OpenSSH Agent、Pageant、Windows 凭据管理器密码以及
   keyboard-interactive/MFA。主机密钥写入标准 `known_hosts`；同一
   `user@host:port` 再开标签页会复用已认证连接，让第二个 Shell 更快出现。
+- **内置 SFTP 传输** — 从已保存 SSH 主机即可打开远端文件抽屉，并复用已认证
+  连接。支持浏览或手动输入远端路径、筛选、上传/下载文件与文件夹、新建与重命名
+  文件夹、递归删除、跟随符号链接目标，以及带进度、取消和错误提示的后台传输。
 - **SSH 里也 AI 感知** — 远端 Hook 信封可通过每通道随机认证的私有 OSC 桥
   返回。Nebula 会校验通道令牌，用本地 Pane 身份覆盖远端字段，再复用现有侧栏
   状态和 Windows 通知链路。需要端口转发、配置查询或显式远程命令时，仍可使用
@@ -286,6 +299,8 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
   系统驱动 chrome、提示符与弹窗，主题选择跨重启持久化。
 - **标签与分屏** — 侧边栏标签支持拖拽排序、拖入终端区四方位分屏；非焦点
   面板压暗而非描边。
+- **文件、Git 与 SFTP 抽屉** — 不离开终端即可浏览本地或远端文件；Git 抽屉
+  支持暂存、提交、仅快进拉取和推送。
 - **快速终端** — 全局 <kbd>Ctrl</kbd>+<kbd>`</kbd> 从屏幕顶部滑出
   Quake 式终端。
 - **悬浮设置面板与命令面板** — 主题、背景图/透明度、shell 选择、补全行为，
@@ -297,15 +312,16 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 > **⚠️ 请先安装随附字体。** Nebula 的 powerline 提示符、程序图标与 AI 品牌
 > 标识都用 **Maple Mono Normal NF CN**（一款 Nerd Font）绘制。不装的话这些字形会显
 > 示成 `□` 方框。字体在 release 包内、仓库里也有：
-> `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` —— 双击它点**安装**，再启动
+> `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf`；压缩包内位于 `fonts/` ——
+> 双击它点**安装**，再启动
 > Nebula。（SIL OFL 1.1 许可。）
 
 **Release 包（推荐）** — 从
 [Releases](https://github.com/Kuddev/nebula/releases) 下载
 `NebulaTerminal-v0.4.0-windows-x64.zip`，解压到任意目录，先安装
-`MapleMonoNormal-NF-CN-Regular.ttf`，再运行 `nebula.exe`。请保持随包文件与 exe
-同目录（`nebula-hook.exe` 驱动 AI 通知；`conpty.dll` + `OpenConsole.exe`
-提供现代 ConPTY 宿主）。
+`fonts/MapleMonoNormal-NF-CN-Regular.ttf`，再运行 `nebula.exe`。请保持解压后的
+目录结构不变：AI 通知与 ConPTY 组件位于 `runtime/`，字体、文档和许可说明分别
+位于 `fonts/`、`docs/` 与 `licenses/`。
 
 **从源码构建**
 
