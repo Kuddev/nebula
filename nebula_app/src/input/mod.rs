@@ -645,6 +645,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let settings_scroll = self.ctx.display().settings_scroll();
         let shell_picker_open = self.ctx.display().nebula_shell_picker_open;
         let shell_picker_count = self.ctx.display().shell_picker_count();
+        let font_picker_open = self.ctx.display().nebula_font_picker_open;
+        let font_picker_count = self.ctx.display().font_picker_count();
         let hidden_host_count = self.ctx.display().hidden_ssh_host_count();
         // A native context menu is a pointer-modal overlay: while it is open,
         // underlying links, tabs and drawer rows must not react to hover.
@@ -678,6 +680,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             settings_scroll,
             shell_picker_open,
             shell_picker_count,
+            font_picker_open,
+            font_picker_count,
             hidden_host_count,
         );
         let chrome_hover = if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32)
@@ -720,6 +724,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::AcceptCycle
             | crate::display::SettingsHit::ShellCycle
             | crate::display::SettingsHit::ShellPickerRow(_)
+            | crate::display::SettingsHit::FontCycle
+            | crate::display::SettingsHit::FontPickerRow(_)
             | crate::display::SettingsHit::RestoreHiddenSsh(_)
             | crate::display::SettingsHit::FetchToggle
             | crate::display::SettingsHit::PowerlineToggle
@@ -814,8 +820,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     PanelHit::ViewFiles
                     | PanelHit::ViewGit
                     | PanelHit::OpenDirectory
-                    | PanelHit::FollowCurrentDirectory
-                    | PanelHit::Row(_) => CursorIcon::Pointer,
+                    | PanelHit::FollowCurrentDirectory => CursorIcon::Pointer,
+                    PanelHit::Row(row)
+                        if self.ctx.display().nebula_side_panel.view == PanelView::Files
+                            || self.ctx.display().nebula_side_panel.git_row_is_file(row) =>
+                    {
+                        CursorIcon::Pointer
+                    },
+                    PanelHit::Row(_) => CursorIcon::Default,
                     PanelHit::Search if files => CursorIcon::Text,
                     PanelHit::Search => CursorIcon::Pointer,
                     _ => CursorIcon::Default,
@@ -1224,6 +1236,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.mark_dirty();
                     return;
                 }
+                if self.ctx.display().nebula_font_picker_open {
+                    self.ctx.display().close_font_picker();
+                    self.ctx.mark_dirty();
+                    return;
+                }
             }
 
             if button == MouseButton::Left && self.ctx.display().context_menu_interactive() {
@@ -1554,6 +1571,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let settings_scroll = self.ctx.display().settings_scroll();
                 let shell_picker_open = self.ctx.display().nebula_shell_picker_open;
                 let shell_picker_count = self.ctx.display().shell_picker_count();
+                let font_picker_open = self.ctx.display().nebula_font_picker_open;
+                let font_picker_count = self.ctx.display().font_picker_count();
                 let hidden_host_count = self.ctx.display().hidden_ssh_host_count();
                 let settings_hit = crate::display::settings_hit(
                     &size,
@@ -1565,6 +1584,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     settings_scroll,
                     shell_picker_open,
                     shell_picker_count,
+                    font_picker_open,
+                    font_picker_count,
                     hidden_host_count,
                 );
                 if shell_picker_open
@@ -1577,6 +1598,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     // First outside click dismisses the picker without activating
                     // an unrelated control hidden behind its temporary focus scope.
                     self.ctx.display().close_shell_picker();
+                    self.ctx.mark_dirty();
+                    return;
+                }
+                if font_picker_open
+                    && !matches!(
+                        settings_hit,
+                        crate::display::SettingsHit::FontCycle
+                            | crate::display::SettingsHit::FontPickerRow(_)
+                    )
+                {
+                    self.ctx.display().close_font_picker();
                     self.ctx.mark_dirty();
                     return;
                 }
@@ -1614,6 +1646,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::ShellPickerRow(index) => {
                         self.ctx.display().set_default_shell_by_index(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::FontCycle => {
+                        self.ctx.display().toggle_font_picker();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::FontPickerRow(index) => {
+                        let base_font = self.ctx.config().font.clone();
+                        self.ctx.display().set_terminal_font_by_index(index, &base_font);
                         self.ctx.mark_dirty();
                         return;
                     },

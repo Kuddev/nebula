@@ -298,6 +298,23 @@ impl SidePanel {
         self.root_notice.as_deref()
     }
 
+    /// Only real Git file rows are interactive. Section headers and the blank
+    /// area below the snapshot must never produce a full-width hover pill.
+    pub fn git_row_is_file(&self, visible_row: usize) -> bool {
+        if self.view != PanelView::Git {
+            return false;
+        }
+        let Some(git) = self.git.as_ref() else { return false };
+        let absolute = self.scroll + visible_row;
+        if git.unstaged.is_empty() && git.staged.is_empty() {
+            return false;
+        }
+        let unstaged = 1..1 + git.unstaged.len();
+        let staged_start = git.unstaged.len() + 2;
+        let staged = staged_start..staged_start + git.staged.len();
+        unstaged.contains(&absolute) || staged.contains(&absolute)
+    }
+
     /// Rebuild the tree and git snapshot from `root`.
     fn refresh(&mut self) {
         self.needs_refresh = false;
@@ -989,7 +1006,7 @@ pub(super) fn push_quads(
                     .file_rows()
                     .get(panel.scroll + i)
                     .is_some_and(|row| panel.selected.as_ref() != Some(&row.path)),
-                PanelView::Git => true,
+                PanelView::Git => panel.git_row_is_file(i),
             };
             if hover_ok {
                 let ry = layout.list_y + i as f32 * layout.row_h;
@@ -1598,6 +1615,31 @@ mod tests {
         assert_eq!(panel_hit(&l, px + 5.0, py + 5.0), PanelHit::ViewFiles);
         assert_eq!(panel_hit(&l, px + pw - 5.0, py + 5.0), PanelHit::ViewGit);
         assert_eq!(panel_hit(&l, px + 5.0, l.list_y + l.row_h * 1.5), PanelHit::Row(1));
+    }
+
+    #[test]
+    fn git_hover_only_accepts_real_file_rows() {
+        let mut panel = SidePanel::new();
+        panel.view = PanelView::Git;
+        panel.git = Some(GitInfo {
+            branch: "main".into(),
+            plus: 0,
+            minus: 0,
+            ahead: 0,
+            unstaged: vec![('?', "one.txt".into()), ('M', "two.txt".into())],
+            staged: vec![('A', "three.txt".into())],
+        });
+
+        assert!(!panel.git_row_is_file(0), "未暂存标题");
+        assert!(panel.git_row_is_file(1));
+        assert!(panel.git_row_is_file(2));
+        assert!(!panel.git_row_is_file(3), "已暂存标题");
+        assert!(panel.git_row_is_file(4));
+        assert!(!panel.git_row_is_file(5), "列表末尾空白行");
+
+        panel.scroll = 2;
+        assert!(panel.git_row_is_file(0), "滚动后的真实文件行");
+        assert!(!panel.git_row_is_file(1), "滚动后的已暂存标题");
     }
 
     #[test]

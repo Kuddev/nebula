@@ -1645,7 +1645,10 @@ impl WindowContext {
                 self.display.font_size = self.config.font.size().scale(scale_factor);
             }
 
-            let font = self.config.font.clone().with_size(self.display.font_size);
+            let font = self
+                .display
+                .effective_font(&self.config.font)
+                .with_size(self.display.font_size);
             self.display.pending_update.set_font(font);
         }
 

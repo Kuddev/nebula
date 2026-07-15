@@ -80,6 +80,24 @@ pub struct GlyphCache {
 }
 
 impl GlyphCache {
+    #[cfg(windows)]
+    pub fn private_font_families(&self) -> Vec<String> {
+        self.rasterizer.private_font_families()
+    }
+
+    #[cfg(windows)]
+    pub fn add_private_font(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<Vec<String>, crossfont::Error> {
+        self.rasterizer.add_private_font(path)
+    }
+
+    #[cfg(windows)]
+    pub fn refresh_private_fonts(&mut self) -> Vec<String> {
+        self.rasterizer.refresh_private_fonts()
+    }
+
     /// Check a system font family without changing the configured terminal font.
     pub fn font_family_available(
         rasterizer: &mut Rasterizer,

@@ -48,6 +48,14 @@ pub(super) fn pick_image_file(owner: RawWindowHandle) -> Option<String> {
     .map(|path| path.to_string_lossy().into_owned())
 }
 
+pub(super) fn pick_font_file(owner: RawWindowHandle) -> Option<PathBuf> {
+    pick_file(
+        owner,
+        "Fonts (*.ttf;*.otf;*.ttc;*.otc)\0*.ttf;*.otf;*.ttc;*.otc\0All files (*.*)\0*.*\0\0",
+        "导入终端字体",
+    )
+}
+
 pub(super) fn pick_private_key_file(owner: RawWindowHandle) -> Option<Result<PathBuf, String>> {
     let path = pick_file(
         owner,

@@ -563,6 +563,8 @@ pub enum AiLogo {
     /// opencode's terminal-frame mark (sst). Two-tone: bright frame + dimmer
     /// inner screen block, encoded as luma and multiplied by the theme ink.
     OpenCode,
+    /// Pi's block-built `pi` mark from pi.dev.
+    Pi,
 }
 
 /// Official logo assets (Wikimedia SVG renders, 64 px, alpha-transparent).
@@ -571,6 +573,7 @@ const AI_LOGO_OPENAI_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_openai.
 /// opencode's mark, rasterized from their `favicon.svg`. RGB carries luma
 /// (frame=255, block=90), alpha the shape; tinted `ink × luma/255` at runtime.
 const AI_LOGO_OPENCODE_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_opencode.png");
+const AI_LOGO_PI_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_pi.png");
 
 /// Texture ids for chrome logos live far above the inline-image counter
 /// (which starts at 1), so the two id spaces can share the renderer cache.
@@ -587,6 +590,7 @@ pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
         "claude" => Some(AiLogo::Claude),
         "codex" => Some(AiLogo::OpenAi),
         "opencode" => Some(AiLogo::OpenCode),
+        "pi" => Some(AiLogo::Pi),
         _ => None,
     }
 }
@@ -640,6 +644,7 @@ pub(crate) fn program_icon(program: &str) -> &'static str {
         "cursor" | "cursor-agent" => "\u{f0ec3}", // md-cursor-default-outline
         "aider" | "goose" | "crush" | "ollama" => "\u{f06a9}", // md-robot
         "opencode" => "\u{f489}", // oct-terminal
+        "pi" => "\u{f135}",       // fa-code
         "git" | "gh" | "lazygit" => "\u{f418}", // oct-git-branch
         "vim" | "nvim" | "vi" | "hx" | "nano" => "\u{e62b}", // custom-vim
         "ssh" | "mosh" => "\u{f489}", // oct-terminal (remote)
@@ -1483,6 +1488,12 @@ pub struct Display {
     pub nebula_window_opacity: f32,
     /// Whether the default-shell picker is expanded (inline list below the row).
     pub nebula_shell_picker_open: bool,
+    /// Inline terminal-font picker; imported faces live in Nebula's private
+    /// DirectWrite collection and do not require system installation.
+    pub nebula_font_picker_open: bool,
+    pub nebula_font_family: String,
+    nebula_font_families: Vec<String>,
+    nebula_font_notice: Option<String>,
     /// Optional runtime clear/background color controlled from settings.
     pub nebula_background: Option<Rgb>,
     /// Optional background image path drawn as a full-window wallpaper.
@@ -1563,6 +1574,7 @@ impl Display {
         let raw_window_handle = window.raw_window_handle();
 
         let scale_factor = window.scale_factor as f32;
+        let settings_init = settings::nebula_settings_load(config);
         let rasterizer = Rasterizer::new()?;
         crate::boot_trace("rasterizer ready");
 
@@ -1583,9 +1595,22 @@ impl Display {
         #[cfg(not(windows))]
         let required_font_install = None;
 
-        debug!("Loading \"{}\" font", &config.font.normal().family);
-        let font = config.font.clone().with_size(font_size);
+        debug!("Loading \"{}\" font", &settings_init.font_family);
+        let font = config
+            .font
+            .clone()
+            .with_family(settings_init.font_family.clone())
+            .with_size(font_size);
         let mut glyph_cache = GlyphCache::new(rasterizer, &font)?;
+        #[cfg(windows)]
+        let mut nebula_font_families = glyph_cache.private_font_families();
+        #[cfg(not(windows))]
+        let mut nebula_font_families = vec![settings_init.font_family.clone()];
+        nebula_font_families.retain(|family| family != crate::font_install::REQUIRED_FONT_FAMILY);
+        nebula_font_families.insert(0, crate::font_install::REQUIRED_FONT_FAMILY.to_owned());
+        if !nebula_font_families.iter().any(|family| family == &settings_init.font_family) {
+            nebula_font_families.push(settings_init.font_family.clone());
+        }
         crate::boot_trace("glyph cache (font faces loaded)");
 
         let metrics = glyph_cache.font_metrics();
@@ -1654,7 +1679,6 @@ impl Display {
         renderer.resize(&size_info);
 
         // Clear screen.
-        let settings_init = settings::nebula_settings_load(config);
         let nebula_window_theme_override = config.window.theme();
         if settings_init.follow_system_theme {
             window.set_theme(None);
@@ -1798,6 +1822,10 @@ impl Display {
             nebula_settings_hover: SettingsHit::None,
             nebula_context_menu: None,
             nebula_shell_picker_open: false,
+            nebula_font_picker_open: false,
+            nebula_font_family: settings_init.font_family,
+            nebula_font_families,
+            nebula_font_notice: None,
             nebula_tab_labels: vec![".".to_owned()],
             nebula_tab_colors: vec![None],
             nebula_tab_bells: vec![false],
@@ -1859,6 +1887,7 @@ impl Display {
 
     pub fn select_settings_section(&mut self, section: NebulaSettingsSection) {
         self.close_shell_picker();
+        self.close_font_picker();
         if self.nebula_settings_section != section {
             self.nebula_settings_section = section;
             // Each section starts reading from its top.
@@ -1880,6 +1909,8 @@ impl Display {
             self.nebula_settings_section,
             self.nebula_shell_picker_open,
             self.nebula_detected_shells.as_ref().map_or(0, Vec::len),
+            self.nebula_font_picker_open,
+            self.font_picker_count(),
             self.nebula_hidden_hosts.len(),
         );
         let next = (self.nebula_settings_scroll + delta).clamp(0.0, max);
@@ -1896,6 +1927,10 @@ impl Display {
 
     pub fn shell_picker_count(&self) -> usize {
         self.nebula_detected_shells.as_ref().map_or(0, Vec::len)
+    }
+
+    pub fn font_picker_count(&self) -> usize {
+        self.nebula_font_families.len() + 1
     }
 
     pub fn hidden_ssh_host_count(&self) -> usize {
@@ -2402,7 +2437,7 @@ impl Display {
         // every theme.
         let key = match logo {
             AiLogo::Claude => (logo, [0, 0, 0]),
-            AiLogo::OpenAi | AiLogo::OpenCode => (logo, [ink.r, ink.g, ink.b]),
+            AiLogo::OpenAi | AiLogo::OpenCode | AiLogo::Pi => (logo, [ink.r, ink.g, ink.b]),
         };
         if let Some(cached) = self.nebula_ai_logo_cache.get(&key) {
             return Some(cached.clone());
@@ -2411,6 +2446,7 @@ impl Display {
             AiLogo::Claude => AI_LOGO_CLAUDE_PNG,
             AiLogo::OpenAi => AI_LOGO_OPENAI_PNG,
             AiLogo::OpenCode => AI_LOGO_OPENCODE_PNG,
+            AiLogo::Pi => AI_LOGO_PI_PNG,
         };
         let (width, height, mut rgba) = match crate::renderer::image::decode_png_bytes(bytes) {
             Ok(decoded) => decoded,
@@ -2421,7 +2457,7 @@ impl Display {
             },
         };
         match logo {
-            AiLogo::OpenAi => {
+            AiLogo::OpenAi | AiLogo::Pi => {
                 for px in rgba.chunks_exact_mut(4) {
                     (px[0], px[1], px[2]) = (ink.r, ink.g, ink.b);
                 }
@@ -2753,6 +2789,10 @@ impl Display {
                 })
                 .unwrap_or_default(),
             shell_id: self.nebula_shell_id.clone(),
+            font_family: self.nebula_font_family.clone(),
+            font_picker_open: self.nebula_font_picker_open,
+            fonts: self.nebula_font_families.clone(),
+            font_notice: self.nebula_font_notice.clone(),
             hidden_hosts: self.nebula_hidden_hosts.clone(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
@@ -2769,6 +2809,7 @@ impl Display {
         self.nebula_settings_open = !self.nebula_settings_open;
         if !self.nebula_settings_open {
             self.nebula_shell_picker_open = false;
+            self.nebula_font_picker_open = false;
         }
         // Fresh open always starts at the top.
         self.nebula_settings_scroll = 0.0;
@@ -2779,6 +2820,7 @@ impl Display {
         if self.nebula_settings_open {
             self.nebula_settings_open = false;
             self.nebula_shell_picker_open = false;
+            self.nebula_font_picker_open = false;
             self.pending_update.dirty = true;
         }
     }
@@ -2873,6 +2915,7 @@ impl Display {
             let _ =
                 self.nebula_detected_shells.get_or_insert_with(crate::shell_detect::detect_shells);
         }
+        self.nebula_font_picker_open = false;
         self.nebula_shell_picker_open = !self.nebula_shell_picker_open;
         self.pending_update.dirty = true;
     }
@@ -2883,6 +2926,83 @@ impl Display {
             self.pending_update.dirty = true;
             self.window.request_redraw();
         }
+    }
+
+    pub fn toggle_font_picker(&mut self) {
+        self.nebula_shell_picker_open = false;
+        self.nebula_font_notice = None;
+        self.nebula_font_picker_open = !self.nebula_font_picker_open;
+        self.pending_update.dirty = true;
+    }
+
+    pub fn close_font_picker(&mut self) {
+        if self.nebula_font_picker_open {
+            self.nebula_font_picker_open = false;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn effective_font(&self, base: &Font) -> Font {
+        base.clone().with_family(self.nebula_font_family.clone())
+    }
+
+    fn apply_font_family(&mut self, family: String, base: &Font) {
+        self.nebula_font_family = family;
+        self.nebula_font_notice = None;
+        let font = self.effective_font(base).with_size(self.font_size);
+        self.pending_update.set_font(font);
+        self.persist_nebula_settings();
+        self.window.request_redraw();
+    }
+
+    pub fn set_terminal_font_by_index(&mut self, index: usize, base: &Font) {
+        if let Some(family) = self.nebula_font_families.get(index).cloned() {
+            self.apply_font_family(family, base);
+            self.nebula_font_picker_open = false;
+            return;
+        }
+        if index != self.nebula_font_families.len() {
+            return;
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(source) = file_dialog::pick_font_file(self.raw_window_handle) else { return };
+            let stored = match crate::font_install::store_imported_font(&source) {
+                Ok(stored) => stored,
+                Err(error) => {
+                    self.nebula_font_notice = Some(error);
+                    self.nebula_font_picker_open = false;
+                    self.pending_update.dirty = true;
+                    return;
+                },
+            };
+            match self.glyph_cache.add_private_font(&stored.path) {
+                Ok(families) => {
+                    for family in &families {
+                        if !self.nebula_font_families.iter().any(|known| known == family) {
+                            self.nebula_font_families.push(family.clone());
+                        }
+                    }
+                    self.nebula_font_families[1..]
+                        .sort_by_key(|family| family.to_ascii_lowercase());
+                    if let Some(family) = families.into_iter().next() {
+                        self.apply_font_family(family, base);
+                    }
+                },
+                Err(error) => {
+                    if stored.created {
+                        let _ = std::fs::remove_file(&stored.path);
+                    }
+                    self.nebula_font_notice = Some(format!("字体无法加载：{error}"));
+                    self.pending_update.dirty = true;
+                },
+            }
+            self.nebula_font_picker_open = false;
+        }
+        #[cfg(not(windows))]
+        self.open_settings_file();
     }
 
     /// WT-style default-shell picker (command palette mode). Kept for compatibility.
@@ -3602,6 +3722,7 @@ impl Display {
             accept: self.nebula_accept,
             shell: self.nebula_shell,
             shell_id: self.nebula_shell_id.clone(),
+            font_family: self.nebula_font_family.clone(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
             keep_session: self.nebula_keep_session,
@@ -3626,6 +3747,7 @@ impl Display {
 
         let settings = settings::nebula_settings_load(config);
         let image_changed = settings.background_image != self.nebula_background_image;
+        let font_changed = settings.font_family != self.nebula_font_family;
         self.nebula_theme_preference = settings.theme;
         let follow_system_changed = self.nebula_follow_system_theme != settings.follow_system_theme;
         self.nebula_follow_system_theme = settings.follow_system_theme;
@@ -3657,6 +3779,19 @@ impl Display {
         self.nebula_accept = settings.accept;
         self.nebula_shell = settings.shell;
         self.nebula_shell_id = settings.shell_id;
+        self.nebula_font_family = settings.font_family;
+        if font_changed {
+            #[cfg(windows)]
+            {
+                self.nebula_font_families = self.glyph_cache.refresh_private_fonts();
+                self.nebula_font_families
+                    .retain(|family| family != crate::font_install::REQUIRED_FONT_FAMILY);
+                self.nebula_font_families
+                    .insert(0, crate::font_install::REQUIRED_FONT_FAMILY.to_owned());
+            }
+            let font = self.effective_font(&config.font).with_size(self.font_size);
+            self.pending_update.set_font(font);
+        }
         self.nebula_fetch_enabled = settings.fetch;
         self.nebula_powerline_enabled = settings.powerline;
         self.nebula_keep_session = settings.keep_session;

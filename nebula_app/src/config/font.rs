@@ -50,6 +50,15 @@ impl Font {
         Font { size: Size(size), ..self }
     }
 
+    /// Override the primary family while preserving size and spacing. The
+    /// secondary faces inherit this family unless the TOML explicitly names
+    /// another one.
+    pub fn with_family(mut self, family: impl Into<String>) -> Font {
+        self.normal.family = family.into();
+        self.normal.style = Some("Regular".into());
+        self
+    }
+
     #[inline]
     pub fn size(&self) -> FontSize {
         self.size.0
