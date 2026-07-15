@@ -379,10 +379,12 @@ impl NebulaShell {
     }
 }
 
-/// A destructive action awaiting user confirmation (Enter 确认 / Esc 取消).
+/// A blocking action awaiting user input.
 /// Drawn as a centered modal; the keyboard is owned by the modal while open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NebulaConfirm {
+    /// The bundled Nerd Font must be installed before the terminal can be used.
+    InstallRequiredFont { directory: PathBuf },
     /// Close one pane whose shell still has a busy child process.
     ClosePane { pane_id: u64, process: String },
     /// Close a whole tab (by displayed index) with a busy process inside.
@@ -397,6 +399,13 @@ pub enum NebulaConfirm {
     DeleteSsh { host: String, from_config: bool },
     /// Recursively remove one remote SFTP entry after explicit confirmation.
     DeleteSftp { entry: crate::ssh_sftp::SftpEntry },
+}
+
+impl NebulaConfirm {
+    /// Every current confirmation can be dismissed without taking its action.
+    pub fn can_dismiss(&self) -> bool {
+        true
+    }
 }
 
 /// One OSC 1337 inline image, anchored to an absolute grid row (see
@@ -1558,6 +1567,22 @@ impl Display {
         crate::boot_trace("rasterizer ready");
 
         let font_size = config.font.size().scale(scale_factor);
+        #[cfg(windows)]
+        let (rasterizer, required_font_install) = {
+            let mut rasterizer = rasterizer;
+            let installed = GlyphCache::font_family_available(
+                &mut rasterizer,
+                crate::font_install::REQUIRED_FONT_FAMILY,
+                font_size,
+            );
+            let required = (!installed).then(|| NebulaConfirm::InstallRequiredFont {
+                directory: crate::font_install::bundled_font_directory(),
+            });
+            (rasterizer, required)
+        };
+        #[cfg(not(windows))]
+        let required_font_install = None;
+
         debug!("Loading \"{}\" font", &config.font.normal().family);
         let font = config.font.clone().with_size(font_size);
         let mut glyph_cache = GlyphCache::new(rasterizer, &font)?;
@@ -1746,7 +1771,7 @@ impl Display {
             nebula_tab_anim: Vec::new(),
             nebula_scrollbar_drag: None,
             nebula_split_reveal: None,
-            nebula_confirm: None,
+            nebula_confirm: required_font_install,
             nebula_confirm_buttons: None,
             nebula_ssh_delete_undo: None,
             nebula_ssh_delete_undo_rect: None,
@@ -4692,9 +4717,7 @@ impl Display {
         history - above
     }
 
-    /// Centered confirmation modal for destructive actions (busy-process close,
-    /// multi-line paste). A dim veil + a rounded box with the question and the
-    /// `Enter 确认 · Esc 取消` hint; the keyboard router owns dismissal.
+    /// Centered modal for confirmations and mandatory setup gates.
     fn draw_confirm_modal(&mut self) {
         let Some(confirm) = self.nebula_confirm.clone() else {
             self.nebula_confirm_buttons = None;
@@ -4715,29 +4738,40 @@ impl Display {
         let txt = sk.ink;
         let dim = sk.ink_dim;
 
-        let (title, body, primary_label, danger) = match &confirm {
+        let (title, body, primary_label, cancel_label, danger) = match &confirm {
+            NebulaConfirm::InstallRequiredFont { .. } => (
+                "建议安装终端字体".to_owned(),
+                "未检测到 Maple Mono Nerd Font；缺少图标时可安装后重启 Nebula。".to_owned(),
+                "打开字体文件夹 Enter",
+                "暂时跳过 Esc",
+                false,
+            ),
             NebulaConfirm::ClosePane { process, .. } => (
                 "关闭此分栏？".to_owned(),
                 format!("{process} 仍在运行，关闭会中止它。"),
                 "关闭 Enter",
+                "取消 Esc",
                 true,
             ),
             NebulaConfirm::CloseTab { process, .. } => (
                 "关闭此标签页？".to_owned(),
                 format!("{process} 仍在运行，关闭会中止它。"),
                 "关闭 Enter",
+                "取消 Esc",
                 true,
             ),
             NebulaConfirm::CloseWindow { process } => (
                 "关闭整个窗口？".to_owned(),
                 format!("{process} 仍在运行，关闭会中止它。"),
                 "关闭 Enter",
+                "取消 Esc",
                 true,
             ),
             NebulaConfirm::Paste { lines, .. } => (
                 format!("粘贴 {lines} 行文本？"),
                 "多行粘贴会被 shell 逐行执行，请确认来源可信。".to_owned(),
                 "粘贴 Enter",
+                "取消 Esc",
                 false,
             ),
             NebulaConfirm::DeleteSsh { host, from_config } => {
@@ -4748,6 +4782,7 @@ impl Display {
                         "只从 Nebula 隐藏；~/.ssh/config 不会修改，保存的密码将在撤销期后清除。"
                             .to_owned(),
                         "隐藏 Enter",
+                        "取消 Esc",
                         true,
                     )
                 } else {
@@ -4755,6 +4790,7 @@ impl Display {
                         format!("删除 SSH 主机 {host}？"),
                         "会从主机列表移除，保存的 Windows 密码将在撤销期后清除。".to_owned(),
                         "删除 Enter",
+                        "取消 Esc",
                         true,
                     )
                 }
@@ -4767,10 +4803,10 @@ impl Display {
                     "远端文件会被永久删除，此操作无法撤销。".to_owned()
                 },
                 "删除 Enter",
+                "取消 Esc",
                 true,
             ),
         };
-        let cancel_label = "取消 Esc";
 
         let text_w = |t: &str| -> f32 {
             let cols: usize = t.chars().map(|c| c.width().unwrap_or(1)).sum();
@@ -6240,7 +6276,7 @@ fn window_size(
 mod nebula_ux_tests {
     use nebula_terminal::grid::Dimensions;
 
-    use super::{SizeInfo, remove_ssh_host_from_lists, restore_ssh_host_to_lists};
+    use super::{NebulaConfirm, SizeInfo, remove_ssh_host_from_lists, restore_ssh_host_to_lists};
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -6306,5 +6342,14 @@ mod nebula_ux_tests {
 
         let old_symmetric = SizeInfo::new_asymmetric(1000.0, 1000.0, 10.0, 20.0, 0.0, 0.0, 64.0);
         assert_eq!(old_symmetric.screen_lines(), 43);
+    }
+
+    #[test]
+    fn missing_font_notice_can_be_dismissed() {
+        let confirm = NebulaConfirm::InstallRequiredFont {
+            directory: std::path::PathBuf::from("fonts"),
+        };
+
+        assert!(confirm.can_dismiss());
     }
 }

@@ -14,11 +14,13 @@ Every release entry is provided in English and Simplified Chinese.
 - **Private-key sign-in** — choose one or more OpenSSH, PEM, or PPK private keys from the host editor. Key paths stay on the local machine, encrypted-key passphrases are stored in Windows Credential Manager by key fingerprint, and public-key files are rejected with a clear message.
 - **SFTP file transfer** — open SFTP from an SSH host's right-click menu and reuse the same authenticated connection. The remote drawer supports editable paths, filtering, refresh, file and folder uploads, file and folder downloads, new folders, rename, recursive delete, symlink targets, progress, cancellation, and visible errors.
 - **Pull from the Git drawer** — the right-side Git view now has a Pull button beside Stage, Commit, and Push. Pulls use fast-forward-only mode so Nebula never creates an unexpected merge commit.
+- **Font installation reminder** — Nebula now checks for Maple Mono Nerd Font at every launch. If it is missing, a dismissible reminder can open the bundled `fonts` folder, making it easier to fix missing icons and square glyphs without blocking the terminal.
 
 #### Improved
 
 - **A cleaner portable archive** — the ZIP root now contains only `nebula.exe` and `README.md`. Runtime helpers, fonts, documentation, and licenses are grouped under `runtime`, `fonts`, `docs`, and `licenses`, and Nebula resolves the new runtime layout automatically.
 - **Safer transfers** — uploads and downloads stream in 256 KiB chunks instead of loading whole files into memory. Files are written to temporary paths first and moved into place only after the transfer succeeds, while failed or cancelled transfers clean up their partial files.
+- **A much smaller download** — the portable ZIP is now about half its previous size, while keeping the bundled font, ConPTY runtime, notification helper, documentation, and licenses intact.
 
 ### 简体中文
 
@@ -28,11 +30,13 @@ Every release entry is provided in English and Simplified Chinese.
 - **私钥登录** — 主机编辑器现在可以选择一把或多把 OpenSSH、PEM 或 PPK 私钥。Nebula 只保存本机密钥路径，加密私钥的口令会按密钥指纹存入 Windows 凭据管理器；如果误选 `.pub` 公钥，也会直接提示重新选择私钥。
 - **SFTP 文件传输** — 在 SSH 主机右键菜单中即可打开 SFTP，并复用同一条已认证连接。远端抽屉支持手动路径、筛选、刷新、上传文件和文件夹、下载文件和文件夹、新建文件夹、重命名、递归删除、符号链接目标、传输进度、取消和可见错误提示。
 - **Git 抽屉可以拉取了** — 右侧 Git 页面在暂存、提交和推送旁新增“拉取”按钮。拉取只接受快进更新，不会在用户不知情时自动生成合并提交。
+- **忘装字体会直接提醒** — Nebula 每次启动都会检查 Maple Mono Nerd Font。没有安装时会弹出可关闭的提醒，也可以一键打开随包提供的 `fonts` 文件夹，不会再让缺失图标和方框字悄悄混进正常界面。
 
 #### 改进
 
 - **便携包不再乱糟糟** — ZIP 根目录现在只保留 `nebula.exe` 和 `README.md`；运行组件、字体、文档和许可证分别放进 `runtime`、`fonts`、`docs` 与 `licenses`，Nebula 会自动识别新的运行组件位置。
 - **传文件更稳妥** — 上传和下载按 256 KiB 分块流式传输，不会把整个大文件一次性塞进内存。文件会先写入临时位置，完整成功后才替换正式文件；失败或取消时也会清理未完成的临时文件。
+- **下载包瘦了一半左右** — 字体、ConPTY 运行组件、通知助手、文档和许可证都还在，便携包体积从约 33.2 MB 降到了约 16.8 MB。
 
 ## 0.4.0 - 2026-07-14
 
