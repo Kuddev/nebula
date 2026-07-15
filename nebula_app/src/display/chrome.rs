@@ -1236,13 +1236,15 @@ pub(super) fn draw_chrome(d: &mut Display) {
         // inside the header band to keep clearance from the join.
         let (pnl_x, pnl_y, _, _) = tab_layout.panel;
         let tabs_chevron = if d.nebula_tabs_section_open { "\u{eab4}" } else { "\u{eab6}" };
-        const SECTION_TITLE_SCALE: f32 = design_tokens::type_scale::SECTION_CAPTION;
+        const SECTION_TITLE_SCALE: f32 = 0.82;
+        let section_title_tracking = s(0.65);
         let section_title_flags = nebula_terminal::term::cell::Flags::BOLD;
-        d.renderer.draw_doc_text(
+        d.renderer.draw_doc_text_tracked(
             &size,
             pnl_x + s(16.0),
             pnl_y + s(22.0),
             SECTION_TITLE_SCALE,
+            section_title_tracking,
             TXT_DIM,
             section_title_flags,
             &format!("TABS  {tabs_chevron}"),
@@ -1293,7 +1295,9 @@ pub(super) fn draw_chrome(d: &mut Display) {
             } else {
                 d.nebula_tab_labels.get(index).map(String::as_str).unwrap_or(".")
             };
-            let max_chars = ((tab_w - reserved).max(cell_w) / cell_w).floor() as usize;
+            let row_tracking = s(0.35);
+            let max_chars =
+                ((tab_w - reserved).max(cell_w) / (cell_w + row_tracking)).floor() as usize;
             let label = truncate_tab_label(label, max_chars.max(1));
 
             // Input box + selection/caret when renaming this tab. These
@@ -1304,6 +1308,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             // why the rename box was invisible. Draw them now, before the
             // label glyphs, so box/selection sit under the text.
             let renaming_this = d.nebula_tab_rename.as_ref().is_some_and(|(i, _)| *i == index);
+            let label_tracking = if renaming_this { 0.0 } else { row_tracking };
             let select_all = renaming_this && d.nebula_tab_rename_select_all;
             if renaming_this {
                 let input_pad = s(4.0);
@@ -1400,10 +1405,12 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 d.window.set_ime_cursor_area_px(caret_px, row_y, cell_w, tab_h);
             }
 
-            d.renderer.draw_chrome_text(
+            d.renderer.draw_doc_text_tracked(
                 &size,
                 text_x,
                 cy,
+                1.0,
+                label_tracking,
                 if renaming_this {
                     if select_all {
                         Rgb::new(255, 255, 255) // White on the blue selection
@@ -1413,6 +1420,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 } else {
                     color
                 },
+                nebula_terminal::term::cell::Flags::empty(),
                 &label,
                 &mut d.glyph_cache,
             );
@@ -1447,11 +1455,12 @@ pub(super) fn draw_chrome(d: &mut Display) {
         if tab_layout.hosts_header.2 > 0.0 {
             let (hh_x, hh_y, _, hh_h) = tab_layout.hosts_header;
             let hosts_chevron = if d.nebula_hosts_section_open { "\u{eab4}" } else { "\u{eab6}" };
-            d.renderer.draw_doc_text(
+            d.renderer.draw_doc_text_tracked(
                 &size,
                 hh_x + s(16.0),
                 hh_y + (hh_h - cell_h * SECTION_TITLE_SCALE) / 2.0,
                 SECTION_TITLE_SCALE,
+                section_title_tracking,
                 TXT_DIM,
                 section_title_flags,
                 &format!("SSH HOSTS  {hosts_chevron}"),
@@ -1531,14 +1540,27 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 // aliases run past the hover pill.
                 let text_x = hx + s(14.0);
                 let right = hx + hw - s(42.0);
-                let max_cols = (((right - text_x) / cell_w).floor() as usize).saturating_sub(2);
+                let row_tracking = s(0.35);
+                let max_cols = (((right - text_x) / (cell_w + row_tracking)).floor() as usize)
+                    .saturating_sub(2);
                 let label = truncate_tab_label(name, max_cols.max(1));
                 d.renderer.draw_chrome_text(
                     &size,
                     text_x,
                     cy,
                     color,
-                    &format!("\u{f489} {label}"),
+                    "\u{f489}",
+                    &mut d.glyph_cache,
+                );
+                d.renderer.draw_doc_text_tracked(
+                    &size,
+                    text_x + cell_w * 2.0,
+                    cy,
+                    1.0,
+                    row_tracking,
+                    color,
+                    nebula_terminal::term::cell::Flags::empty(),
+                    &label,
                     &mut d.glyph_cache,
                 );
                 if pinned {

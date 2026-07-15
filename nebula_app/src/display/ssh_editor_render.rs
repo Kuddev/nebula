@@ -35,27 +35,28 @@ impl Display {
         };
         let (show_password, show_keys) = auth_sections(editor.auth);
 
-        let box_w = s(700.0).min(size.width() - s(32.0));
+        let box_w = s(520.0).min(size.width() - s(32.0));
         let desired_h = if show_password && show_keys {
-            610.0
+            540.0
         } else if show_keys {
-            520.0
+            460.0
         } else if show_password {
-            440.0
+            400.0
         } else {
-            370.0
+            330.0
         };
         let box_h = s(desired_h).min(size.height() - s(32.0));
         let bx = (size.width() - box_w) * 0.5;
         let resting_y = (size.height() - box_h) * 0.5;
         let by = resting_y - (1.0 - progress) * s(14.0);
-        let pad = s(28.0);
-        let field_h = s(42.0);
+        let pad = s(24.0);
+        let field_h = s(40.0);
         let field_w = box_w - pad * 2.0;
         let destination = (bx + pad, by + s(76.0), field_w, field_h);
-        let auth_y = destination.1 + destination.3 + s(42.0);
-        let auth_gap = s(6.0);
-        let auth_w = (field_w - auth_gap * 4.0) / 5.0;
+        let auth_y = destination.1 + destination.3 + s(40.0);
+        let auth_track = (destination.0, auth_y, field_w, s(40.0));
+        let auth_pad = s(3.0);
+        let auth_w = (field_w - auth_pad * 2.0) / 5.0;
         let auth_modes = [
             SshAuthMode::Auto,
             SshAuthMode::Password,
@@ -66,10 +67,15 @@ impl Display {
         let auth = std::array::from_fn(|index| {
             (
                 auth_modes[index],
-                (destination.0 + index as f32 * (auth_w + auth_gap), auth_y, auth_w, s(34.0)),
+                (
+                    auth_track.0 + auth_pad + index as f32 * auth_w,
+                    auth_track.1 + auth_pad,
+                    auth_w,
+                    auth_track.3 - auth_pad * 2.0,
+                ),
             )
         });
-        let content_y = auth_y + s(76.0);
+        let content_y = auth_y + s(72.0);
         let zero = (0.0, 0.0, 0.0, 0.0);
         let password =
             if show_password { (destination.0, content_y, field_w, field_h) } else { zero };
@@ -95,16 +101,17 @@ impl Display {
             zero
         };
 
-        let key_header_y = if show_password { save_toggle.1 + s(56.0) } else { content_y };
+        let key_header_y = if show_password { save_toggle.1 + s(54.0) } else { content_y };
         let add_private_key = if show_keys {
-            (destination.0 + field_w - s(150.0), key_header_y - s(8.0), s(150.0), s(32.0))
+            (destination.0 + field_w - s(126.0), key_header_y - s(8.0), s(126.0), s(32.0))
         } else {
             zero
         };
         let key_rows_y = key_header_y + s(30.0);
         let footer_y = by + box_h - s(58.0);
+        let footer_top = footer_y - s(16.0);
         let available_rows =
-            (((footer_y - s(22.0) - key_rows_y) / s(36.0)).floor() as isize).max(1) as usize;
+            (((footer_top - s(16.0) - key_rows_y) / s(36.0)).floor() as isize).max(1) as usize;
         let visible_start = editor.private_keys.len().saturating_sub(available_rows);
         let visible_keys = if show_keys {
             editor
@@ -128,13 +135,37 @@ impl Display {
             Vec::new()
         };
 
-        let primary_label = "保存 Enter";
-        let cancel_label = "取消 Esc";
-        let button_pad = s(16.0);
-        let primary_w = s(112.0).max(text_width(primary_label) + button_pad * 2.0);
-        let cancel_w = s(112.0).max(text_width(cancel_label) + button_pad * 2.0);
+        let primary_action = "保存";
+        let primary_key = "Enter";
+        let cancel_action = "取消";
+        let cancel_key = "Esc";
+        let key_pad = s(6.0);
+        let label_gap = s(8.0);
+        let button_pad = s(14.0);
+        let primary_key_w = text_width(primary_key) + key_pad * 2.0;
+        let cancel_key_w = text_width(cancel_key) + key_pad * 2.0;
+        let primary_w =
+            s(108.0).max(text_width(primary_action) + label_gap + primary_key_w + button_pad * 2.0);
+        let cancel_w =
+            s(100.0).max(text_width(cancel_action) + label_gap + cancel_key_w + button_pad * 2.0);
         let primary = (bx + box_w - pad - primary_w, footer_y, primary_w, s(36.0));
         let cancel = (primary.0 - s(12.0) - cancel_w, primary.1, cancel_w, s(36.0));
+        let primary_group_w = text_width(primary_action) + label_gap + primary_key_w;
+        let primary_group_x = primary.0 + (primary.2 - primary_group_w) * 0.5;
+        let primary_key_rect = (
+            primary_group_x + text_width(primary_action) + label_gap,
+            primary.1 + s(7.0),
+            primary_key_w,
+            primary.3 - s(14.0),
+        );
+        let cancel_group_w = text_width(cancel_action) + label_gap + cancel_key_w;
+        let cancel_group_x = cancel.0 + (cancel.2 - cancel_group_w) * 0.5;
+        let cancel_key_rect = (
+            cancel_group_x + text_width(cancel_action) + label_gap,
+            cancel.1 + s(7.0),
+            cancel_key_w,
+            cancel.3 - s(14.0),
+        );
 
         self.nebula_ssh_editor_rects = Some(SshEditorRects {
             destination,
@@ -170,6 +201,8 @@ impl Display {
                 skin.hairline,
             ),
             UiQuad::solid(bx, by, box_w, box_h, s(12.0), skin.panel),
+            UiQuad::solid(bx, footer_top, box_w, box_h - (footer_top - by), 0.0, skin.surface),
+            UiQuad::solid(bx, footer_top, box_w, s(1.0), 0.0, skin.hairline),
         ];
         input_quads(
             &mut quads,
@@ -191,31 +224,33 @@ impl Display {
                 scale,
             );
         }
+        quads.push(UiQuad::solid(
+            auth_track.0 - s(1.0),
+            auth_track.1 - s(1.0),
+            auth_track.2 + s(2.0),
+            auth_track.3 + s(2.0),
+            s(9.0),
+            skin.hairline,
+        ));
+        quads.push(UiQuad::solid(
+            auth_track.0,
+            auth_track.1,
+            auth_track.2,
+            auth_track.3,
+            s(8.0),
+            skin.surface,
+        ));
         for (mode, rect) in auth {
             let active = editor.auth == mode;
             let hovered = self.nebula_ssh_editor_hover == SshEditorHit::Auth(mode);
-            quads.push(UiQuad::solid(
-                rect.0,
-                rect.1,
-                rect.2,
-                rect.3,
-                s(7.0),
-                if active {
-                    skin.accent_soft
-                } else if hovered {
-                    skin.hover
-                } else {
-                    skin.input
-                },
-            ));
-            if active {
+            if active || hovered {
                 quads.push(UiQuad::solid(
                     rect.0,
-                    rect.1 + rect.3 - s(2.0),
+                    rect.1,
                     rect.2,
-                    s(2.0),
-                    0.0,
-                    accent,
+                    rect.3,
+                    s(6.0),
+                    if active { skin.hover_strong } else { skin.hover },
                 ));
             }
         }
@@ -249,6 +284,14 @@ impl Display {
         }
         if show_keys {
             quads.push(UiQuad::solid(
+                add_private_key.0 - s(1.0),
+                add_private_key.1 - s(1.0),
+                add_private_key.2 + s(2.0),
+                add_private_key.3 + s(2.0),
+                s(7.0),
+                skin.hairline,
+            ));
+            quads.push(UiQuad::solid(
                 add_private_key.0,
                 add_private_key.1,
                 add_private_key.2,
@@ -257,7 +300,7 @@ impl Display {
                 if self.nebula_ssh_editor_hover == SshEditorHit::AddPrivateKey {
                     skin.hover
                 } else {
-                    skin.input
+                    skin.surface
                 },
             ));
             for (index, row, remove) in &visible_keys {
@@ -283,6 +326,17 @@ impl Display {
             &skin,
             scale,
         );
+        for rect in [cancel_key_rect, primary_key_rect] {
+            quads.push(UiQuad::solid(
+                rect.0 - s(1.0),
+                rect.1 - s(1.0),
+                rect.2 + s(2.0),
+                rect.3 + s(2.0),
+                s(5.0),
+                skin.hairline,
+            ));
+            quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(4.0), skin.input));
+        }
 
         let caret_field = if editor.field == SshEditorField::Password && show_password {
             SshEditorField::Password
@@ -316,7 +370,7 @@ impl Display {
             &size,
             bx + pad,
             by + s(20.0),
-            1.35,
+            1.15,
             skin.ink_strong,
             Flags::empty(),
             if editor.original_destination.is_some() {
@@ -330,12 +384,22 @@ impl Display {
             &size,
             destination.0,
             destination.1 - cell_h - s(5.0),
+            skin.ink,
+            "连接地址",
+            glyph_cache,
+        );
+        self.renderer.draw_doc_text(
+            &size,
+            destination.0 + s(82.0),
+            destination.1 - cell_h - s(3.0),
+            0.72,
             if editor.error.is_some() {
                 if skin.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) }
             } else {
                 skin.ink_dim
             },
-            editor.error.as_deref().unwrap_or("用户名@地址（非 22 端口可用 ssh://user@host:port）"),
+            Flags::empty(),
+            editor.error.as_deref().unwrap_or("user@host · 非 22 端口用 ssh://"),
             glyph_cache,
         );
         self.renderer.draw_chrome_text(
@@ -360,7 +424,11 @@ impl Display {
                 &size,
                 rect.0 + (rect.2 - text_width(label)) * 0.5,
                 rect.1 + (rect.3 - cell_h) / 2.0,
-                if editor.auth == auth_mode_for_label(label) { skin.ink_strong } else { skin.ink },
+                if editor.auth == auth_mode_for_label(label) {
+                    skin.ink_strong
+                } else {
+                    skin.ink_dim
+                },
                 label,
                 glyph_cache,
             );
@@ -456,10 +524,15 @@ impl Display {
             &size,
             cancel,
             primary,
-            cancel_label,
-            primary_label,
+            cancel_group_x,
+            primary_group_x,
+            cancel_key_rect,
+            primary_key_rect,
+            cancel_action,
+            primary_action,
+            cancel_key,
+            primary_key,
             cell_h,
-            &text_width,
             &skin,
         );
 
@@ -501,14 +574,15 @@ fn input_quads(
         rect.3 + s(2.0),
         s(7.0),
         if active {
-            accent
-        } else if hovered {
-            skin.hover_strong
+            Rgba::new(accent.r, accent.g, accent.b, if skin.is_light { 118 } else { 136 })
         } else {
             skin.hairline
         },
     ));
     quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(6.0), skin.input));
+    if hovered && !active {
+        quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(6.0), skin.hover));
+    }
 }
 
 fn button_quads(
@@ -521,7 +595,8 @@ fn button_quads(
     scale: f32,
 ) {
     let s = |value: f32| value * scale;
-    for (rect, edge) in [(cancel, skin.hairline), (primary, accent)] {
+    let primary_edge = Rgba::new(accent.r, accent.g, accent.b, if skin.is_light { 72 } else { 92 });
+    for (rect, edge) in [(cancel, skin.hairline), (primary, primary_edge)] {
         quads.push(UiQuad::solid(
             rect.0 - s(1.0),
             rect.1 - s(1.0),
@@ -531,20 +606,13 @@ fn button_quads(
             edge,
         ));
     }
-    quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.input));
-    quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), accent));
+    quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.surface));
+    quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.accent_soft));
     if hover == SshEditorHit::Cancel {
         quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.hover));
     }
     if hover == SshEditorHit::Primary {
-        quads.push(UiQuad::solid(
-            primary.0,
-            primary.1,
-            primary.2,
-            primary.3,
-            s(8.0),
-            skin.hover_strong,
-        ));
+        quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.hover));
     }
 }
 
@@ -661,26 +729,48 @@ fn draw_button_text(
     size: &SizeInfo,
     cancel: Rect,
     primary: Rect,
-    cancel_label: &str,
-    primary_label: &str,
+    cancel_group_x: f32,
+    primary_group_x: f32,
+    cancel_key_rect: Rect,
+    primary_key_rect: Rect,
+    cancel_action: &str,
+    primary_action: &str,
+    cancel_key: &str,
+    primary_key: &str,
     cell_h: f32,
-    text_width: &impl Fn(&str) -> f32,
     skin: &theme::Skin,
 ) {
     renderer.draw_chrome_text(
         size,
-        cancel.0 + (cancel.2 - text_width(cancel_label)) * 0.5,
+        cancel_group_x,
         cancel.1 + (cancel.3 - cell_h) / 2.0,
         skin.ink,
-        cancel_label,
+        cancel_action,
         glyph_cache,
     );
     renderer.draw_chrome_text(
         size,
-        primary.0 + (primary.2 - text_width(primary_label)) * 0.5,
+        primary_group_x,
         primary.1 + (primary.3 - cell_h) / 2.0,
-        skin.ink_on_accent,
-        primary_label,
+        skin.ink_strong,
+        primary_action,
+        glyph_cache,
+    );
+    renderer.draw_chrome_text(
+        size,
+        cancel_key_rect.0 + (cancel_key_rect.2 - size.cell_width() * cancel_key.len() as f32) * 0.5,
+        cancel_key_rect.1 + (cancel_key_rect.3 - cell_h) / 2.0,
+        skin.ink_dim,
+        cancel_key,
+        glyph_cache,
+    );
+    renderer.draw_chrome_text(
+        size,
+        primary_key_rect.0
+            + (primary_key_rect.2 - size.cell_width() * primary_key.len() as f32) * 0.5,
+        primary_key_rect.1 + (primary_key_rect.3 - cell_h) / 2.0,
+        skin.ink_dim,
+        primary_key,
         glyph_cache,
     );
 }
