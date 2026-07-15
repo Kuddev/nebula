@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::{CStr, CString};
+use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt, ptr};
-use std::path::Path;
 
 use ahash::RandomState;
 use crossfont::Metrics;
@@ -22,17 +22,17 @@ use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::content::RenderableCell;
 use crate::gl;
+use crate::renderer::image::ImageRenderer;
 use crate::renderer::rects::{RectRenderer, RenderRect};
 use crate::renderer::shader::ShaderError;
-use crate::renderer::image::ImageRenderer;
 use crate::renderer::ui::{UiQuad, UiRenderer};
 
 pub mod image;
 pub mod platform;
 pub mod rects;
-pub mod ui;
 mod shader;
 mod text;
+pub mod ui;
 pub(crate) use text::Rasterizer;
 
 pub use text::{GlyphCache, LoaderApi};
@@ -302,12 +302,8 @@ impl Renderer {
         let scale_y = -2.0 / h * mult;
 
         let (id, u_projection) = match &self.text_renderer {
-            TextRendererProvider::Gles2(r) => {
-                (r.program().id(), r.program().projection_uniform())
-            },
-            TextRendererProvider::Glsl3(r) => {
-                (r.program().id(), r.program().projection_uniform())
-            },
+            TextRendererProvider::Gles2(r) => (r.program().id(), r.program().projection_uniform()),
+            TextRendererProvider::Glsl3(r) => (r.program().id(), r.program().projection_uniform()),
         };
 
         unsafe {
@@ -364,8 +360,7 @@ impl Renderer {
             if width == 0 {
                 return None; // combining/zero-width marks have no cell of their own
             }
-            let flags =
-                if width == 2 { Flags::WIDE_CHAR | style } else { style };
+            let flags = if width == 2 { Flags::WIDE_CHAR | style } else { style };
             let cell = RenderableCell {
                 point: Point::new(0, Column(col)),
                 character,
@@ -454,8 +449,26 @@ impl Renderer {
         text: &str,
         glyph_cache: &mut GlyphCache,
     ) -> f32 {
+        self.draw_doc_text_tracked(size_info, x, y, scale, 0.0, fg, style, text, glyph_cache)
+    }
+
+    /// Document text with explicit physical-pixel tracking between glyphs.
+    /// This is reserved for compact UI labels; terminal cells must remain fixed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_doc_text_tracked(
+        &mut self,
+        size_info: &SizeInfo,
+        x: f32,
+        y: f32,
+        scale: f32,
+        tracking: f32,
+        fg: Rgb,
+        style: Flags,
+        text: &str,
+        glyph_cache: &mut GlyphCache,
+    ) -> f32 {
         let cell_w = size_info.cell_width();
-        if (scale - 1.0).abs() < 0.01 {
+        if (scale - 1.0).abs() < 0.01 && tracking.abs() < 0.01 {
             self.draw_chrome_text_styled(size_info, x, y, fg, style, text, glyph_cache);
             let cols: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
             return cols as f32 * cell_w;
@@ -473,8 +486,7 @@ impl Renderer {
         // scaled run's baseline lands where a truly scaled cell would put it:
         // Δ = (cell_h + descent) · (scale − 1) — i.e. ascent · (scale − 1).
         let metrics = glyph_cache.font_metrics();
-        let anchor_y =
-            (y + (size_info.cell_height() + metrics.descent) * (scale - 1.0)).round();
+        let anchor_y = (y + (size_info.cell_height() + metrics.descent) * (scale - 1.0)).round();
 
         // Advance by the UNfloored design advance, scaled. The grid's
         // `cell_width` is `floor(average_advance)`; at base size the small-ppem
@@ -502,7 +514,7 @@ impl Renderer {
                 underline: fg,
             };
             self.draw_cells(size_info, glyph_cache, std::iter::once(cell));
-            pen_x += width as f32 * advance;
+            pen_x += width as f32 * advance + tracking;
         }
 
         glyph_cache.font_size = base_size;
@@ -797,9 +809,8 @@ mod tests {
 
     #[test]
     fn asymmetric_bottom_padding_is_the_cell_viewport_origin() {
-        let size = SizeInfo::new_fully_asymmetric(
-            1000.0, 1000.0, 10.0, 20.0, 260.0, 20.0, 64.0, 16.0,
-        );
+        let size =
+            SizeInfo::new_fully_asymmetric(1000.0, 1000.0, 10.0, 20.0, 260.0, 20.0, 64.0, 16.0);
 
         assert_eq!(cell_viewport(&size, 1000.0), (260, 16, 720, 920));
         // Startup calls resize before the renderer has recorded the window height.
