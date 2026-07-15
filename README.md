@@ -168,7 +168,10 @@ experience that works without extra setup.
 > Without it, those glyphs render as `□` boxes. The font ships in the release
 > zip under `fonts/` and the repo at
 > `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` — double-click
-> it and press **Install**, then launch Nebula. (Licensed under SIL OFL 1.1.)
+> it and press **Install**, then launch Nebula. Nebula checks the font on every
+> launch; if Windows cannot load it, a dismissible reminder can open the
+> bundled `fonts/` folder. Install the font and restart Nebula for the complete
+> icon set. (Licensed under SIL OFL 1.1.)
 
 **Release build (recommended)** — download
 `NebulaTerminal-v0.4.0-windows-x64.zip` from
@@ -314,7 +317,9 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 > 示成 `□` 方框。字体在 release 包内、仓库里也有：
 > `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf`；压缩包内位于 `fonts/` ——
 > 双击它点**安装**，再启动
-> Nebula。（SIL OFL 1.1 许可。）
+> Nebula。Nebula 每次启动都会检查字体；如果 Windows 还没有正确加载它，会显示一个
+> 可关闭的提醒，并提供“打开字体文件夹”按钮。安装完成后重启 Nebula 即可显示完整图
+> 标。（SIL OFL 1.1 许可。）
 
 **Release 包（推荐）** — 从
 [Releases](https://github.com/Kuddev/nebula/releases) 下载

@@ -362,9 +362,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             match &key.logical_key {
                 // Shared with the modal's primary button (mouse path).
                 Key::Named(NamedKey::Enter) => self.nebula_confirm_accept(confirm),
-                Key::Named(NamedKey::Escape) => {
-                    self.ctx.display().nebula_confirm = None;
-                },
+                Key::Named(NamedKey::Escape) => self.nebula_confirm_cancel(confirm),
                 _ => {},
             }
             self.ctx.mark_dirty();

@@ -35,6 +35,8 @@ mod daemon;
 mod display;
 mod event;
 #[cfg(windows)]
+mod font_install;
+#[cfg(windows)]
 mod file_uri;
 mod input;
 mod logging;

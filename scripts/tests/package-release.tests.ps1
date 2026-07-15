@@ -20,6 +20,22 @@ try {
         throw "Packaging script is missing: $packageScript"
     }
 
+    $cargoManifest = Get-Content -LiteralPath (Join-Path $repo 'Cargo.toml') -Raw -Encoding UTF8
+    $releaseProfile = [regex]::Match(
+        $cargoManifest,
+        '(?ms)^\[profile\.release\]\s*(?<body>.*?)(?=^\[|\z)'
+    )
+    if (-not $releaseProfile.Success) {
+        throw 'Cargo.toml is missing [profile.release]'
+    }
+    $releaseBody = $releaseProfile.Groups['body'].Value
+    if ($releaseBody -notmatch '(?m)^debug\s*=\s*0\s*$') {
+        throw 'Release builds must set debug = 0 so DWARF sections do not inflate nebula.exe'
+    }
+    if ($releaseBody -notmatch '(?m)^strip\s*=\s*"debuginfo"\s*$') {
+        throw 'Release builds must strip debuginfo before packaging'
+    }
+
     & $packageScript -Version 'unreleased' -SkipBuild -OutputDirectory $resolvedOutput
     $zipPath = Join-Path $resolvedOutput 'NebulaTerminal-unreleased-windows-x64.zip'
     if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {

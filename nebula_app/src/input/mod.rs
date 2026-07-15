@@ -1064,6 +1064,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             NebulaConfirm::DeleteSftp { entry } => {
                 self.ctx.display().sftp_confirm_delete(entry);
             },
+            NebulaConfirm::InstallRequiredFont { directory } => {
+                self.ctx.display().nebula_confirm = None;
+                self.ctx.open_path(&directory);
+            },
+        }
+    }
+
+    /// Dismiss a confirmation without taking its primary action.
+    pub fn nebula_confirm_cancel(&mut self, confirm: crate::display::NebulaConfirm) {
+        if confirm.can_dismiss() {
+            self.ctx.display().nebula_confirm = None;
         }
     }
 
@@ -1510,7 +1521,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         if hit(primary) {
                             self.nebula_confirm_accept(confirm);
                         } else if hit(cancel) {
-                            self.ctx.display().nebula_confirm = None;
+                            self.nebula_confirm_cancel(confirm);
                         }
                     }
                     self.ctx.mark_dirty();

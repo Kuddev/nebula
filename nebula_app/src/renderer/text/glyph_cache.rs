@@ -79,6 +79,19 @@ pub struct GlyphCache {
 }
 
 impl GlyphCache {
+    /// Check a system font family without changing the configured terminal font.
+    pub fn font_family_available(
+        rasterizer: &mut Rasterizer,
+        family: &str,
+        size: Size,
+    ) -> bool {
+        let description = FontDesc::new(
+            family,
+            Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+        );
+        rasterizer.load_font(&description, size).is_ok()
+    }
+
     pub fn new(mut rasterizer: Rasterizer, font: &Font) -> Result<GlyphCache, crossfont::Error> {
         let (regular, bold, italic, bold_italic) = Self::compute_font_keys(font, &mut rasterizer)?;
 
@@ -321,5 +334,20 @@ impl GlyphCache {
         self.load_glyphs_for_font(self.bold_key, loader);
         self.load_glyphs_for_font(self.italic_key, loader);
         self.load_glyphs_for_font(self.bold_italic_key, loader);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_font_family_is_not_reported_as_available() {
+        let mut rasterizer = Rasterizer::new().expect("DirectWrite rasterizer");
+        assert!(!GlyphCache::font_family_available(
+            &mut rasterizer,
+            "Nebula Missing Font Probe 8C0A651D",
+            Size::new(11.25),
+        ));
     }
 }
