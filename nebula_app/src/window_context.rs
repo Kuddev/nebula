@@ -145,6 +145,14 @@ enum TabLaunch {
     Document(std::path::PathBuf),
 }
 
+fn select_initial_shell(
+    configured: Option<tty::Shell>,
+    user_default: Option<tty::Shell>,
+    cli: Option<tty::Shell>,
+) -> Option<tty::Shell> {
+    cli.or(user_default).or(configured)
+}
+
 /// How a new window context gets its initial tabs.
 pub enum WindowBoot {
     /// Spawn the default shell as a single fresh tab.
@@ -385,6 +393,12 @@ impl WindowContext {
                     restore = Some(session);
                 }
                 let mut pty_config = config.pty_config();
+                let cli_shell = options.terminal_options.command().map(Into::into);
+                pty_config.shell = select_initial_shell(
+                    pty_config.shell.take(),
+                    Self::default_shell_override(),
+                    cli_shell,
+                );
                 options.terminal_options.override_pty_config(&mut pty_config);
                 // Restored session: aim the first pane's shell at the saved
                 // cwd; the remaining tabs are respawned once the context
@@ -2342,5 +2356,36 @@ impl Drop for WindowContext {
         for pane in &self.panes {
             let _ = pane.notifier.0.send(Msg::Shutdown);
         }
+    }
+}
+
+#[cfg(test)]
+mod startup_shell_tests {
+    use nebula_terminal::tty::Shell;
+
+    use super::select_initial_shell;
+
+    fn shell(program: &str) -> Shell {
+        Shell::new(program.to_owned(), Vec::new())
+    }
+
+    #[test]
+    fn startup_shell_uses_user_default_instead_of_the_base_pty_shell() {
+        let selected = select_initial_shell(
+            Some(shell("powershell.exe")),
+            Some(shell("pwsh.exe")),
+            None,
+        );
+        assert_eq!(selected, Some(shell("pwsh.exe")));
+    }
+
+    #[test]
+    fn explicit_cli_command_still_wins_over_the_user_default() {
+        let selected = select_initial_shell(
+            Some(shell("powershell.exe")),
+            Some(shell("pwsh.exe")),
+            Some(shell("nu.exe")),
+        );
+        assert_eq!(selected, Some(shell("nu.exe")));
     }
 }

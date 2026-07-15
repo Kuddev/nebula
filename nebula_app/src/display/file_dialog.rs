@@ -79,6 +79,10 @@ pub(super) fn pick_download_directory(owner: RawWindowHandle) -> Option<PathBuf>
     pick_folder(owner, "选择下载位置")
 }
 
+pub(super) fn pick_side_panel_directory(owner: RawWindowHandle) -> Option<PathBuf> {
+    pick_folder(owner, "选择目录树根目录")
+}
+
 fn pick_file(owner: RawWindowHandle, filter: &str, title: &str) -> Option<PathBuf> {
     pick_files(owner, filter, title, false).into_iter().next()
 }

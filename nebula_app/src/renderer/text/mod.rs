@@ -13,11 +13,13 @@ mod builtin_font;
 mod gles2;
 mod glsl3;
 pub mod glyph_cache;
+mod font_rasterizer;
 
 use atlas::Atlas;
 pub use gles2::Gles2Renderer;
 pub use glsl3::Glsl3Renderer;
 pub use glyph_cache::GlyphCache;
+pub(crate) use font_rasterizer::Rasterizer;
 use glyph_cache::{Glyph, LoadGlyph};
 
 // NOTE: These flags must be in sync with their usage in the text.*.glsl shaders.

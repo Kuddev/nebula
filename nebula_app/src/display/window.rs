@@ -173,14 +173,15 @@ impl Window {
             window_attributes = window_attributes.with_embed_parent_window(parent_window_id);
         }
 
+        let (maximized, fullscreen) = startup_state_for_creation(&config.window);
         window_attributes = window_attributes
             .with_title(&identity.title)
             .with_theme(config.window.theme())
             .with_visible(false)
             .with_transparent(true)
             .with_blur(config.window.blur)
-            .with_maximized(config.window.maximized())
-            .with_fullscreen(config.window.fullscreen())
+            .with_maximized(maximized)
+            .with_fullscreen(fullscreen)
             .with_window_level(config.window.level.into());
 
         let window = event_loop.create_window(window_attributes)?;
@@ -432,6 +433,9 @@ impl Window {
     }
 
     pub fn set_maximized(&self, maximized: bool) {
+        if maximized {
+            self.set_resize_increments(None);
+        }
         self.window.set_maximized(maximized);
     }
 
@@ -439,8 +443,8 @@ impl Window {
         self.window.set_minimized(minimized);
     }
 
-    pub fn set_resize_increments(&self, increments: PhysicalSize<f32>) {
-        self.window.set_resize_increments(Some(increments));
+    pub fn set_resize_increments(&self, increments: Option<PhysicalSize<f32>>) {
+        self.window.set_resize_increments(increments);
     }
 
     /// Toggle the window's fullscreen state.
@@ -451,6 +455,12 @@ impl Window {
     /// Toggle the window's maximized state.
     pub fn toggle_maximized(&self) {
         self.set_maximized(!self.window.is_maximized());
+    }
+
+    /// Custom resize hit targets are invalid while Windows owns the maximized
+    /// or fullscreen bounds; exposing them causes edge clicks to start a drag.
+    pub fn allows_drag_resize(&self) -> bool {
+        !self.window.is_maximized() && self.window.fullscreen().is_none()
     }
 
     /// Inform windowing system about presenting to the window.
@@ -483,6 +493,7 @@ impl Window {
 
     pub fn set_fullscreen(&self, fullscreen: bool) {
         if fullscreen {
+            self.set_resize_increments(None);
             self.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
         } else {
             self.window.set_fullscreen(None);
@@ -585,6 +596,20 @@ impl Window {
     }
 }
 
+fn startup_state_for_creation(window_config: &WindowConfig) -> (bool, Option<Fullscreen>) {
+    #[cfg(windows)]
+    {
+        // winit #1582: hidden undecorated windows created maximized can cover
+        // the taskbar. Nebula applies the requested state after first show.
+        let _ = window_config;
+        (false, None)
+    }
+    #[cfg(not(windows))]
+    {
+        (window_config.maximized(), window_config.fullscreen())
+    }
+}
+
 bitflags! {
     /// IME inhibition sources.
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -639,5 +664,22 @@ fn apply_windows_chrome(window: &WinitWindow) {
             &dark as *const _ as *const core::ffi::c_void,
             size_of::<i32>() as u32,
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_startup_tests {
+    use super::startup_state_for_creation;
+    use crate::config::window::{StartupMode, WindowConfig};
+
+    #[test]
+    fn borderless_windows_defer_maximize_and_fullscreen_until_visible() {
+        for mode in [StartupMode::Maximized, StartupMode::Fullscreen] {
+            let mut config = WindowConfig::default();
+            config.startup_mode = mode;
+            let (maximized, fullscreen) = startup_state_for_creation(&config);
+            assert!(!maximized);
+            assert!(fullscreen.is_none());
+        }
     }
 }
