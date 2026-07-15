@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use log::{Level, Log, Metadata, Record};
 use serde::Deserialize;
 
-use nebula_config::SerdeReplace as _;
+use nebula_config::{DiagnosticKind, SerdeReplace as _, UnknownFieldPolicy, capture_diagnostics};
 use nebula_config_derive::{ConfigDeserialize, SerdeReplace};
 
 #[derive(ConfigDeserialize, Debug, PartialEq, Eq)]
@@ -126,22 +126,49 @@ fn config_deserialize() {
     // Verify all log messages are correct.
     let mut error_logs = logger.error_logs.lock().unwrap();
     error_logs.sort_unstable();
-    assert_eq!(error_logs.as_slice(), [
-        "Config error: enom_error: unknown variant `HugaBuga`, expected one of `One`, `Two`, \
+    assert_eq!(
+        error_logs.as_slice(),
+        [
+            "Config error: enom_error: unknown variant `HugaBuga`, expected one of `One`, `Two`, \
          `Three`",
-        "Config error: field1: invalid type: string \"testing\", expected usize",
-    ]);
+            "Config error: field1: invalid type: string \"testing\", expected usize",
+        ]
+    );
     let mut warn_logs = logger.warn_logs.lock().unwrap();
     warn_logs.sort_unstable();
-    assert_eq!(warn_logs.as_slice(), [
-        "Config warning: enom_error has been deprecated\nUse `nebula migrate` to automatically \
+    assert_eq!(
+        warn_logs.as_slice(),
+        [
+            "Config warning: enom_error has been deprecated\nUse `nebula migrate` to automatically \
          resolve it",
-        "Config warning: field1 has been deprecated; use field2 instead\nUse `nebula migrate` \
+            "Config warning: field1 has been deprecated; use field2 instead\nUse `nebula migrate` \
          to automatically resolve it",
-        "Config warning: gone has been removed; it's gone\nUse `nebula migrate` to \
+            "Config warning: gone has been removed; it's gone\nUse `nebula migrate` to \
          automatically resolve it",
-        "Unused config key: field3",
-    ]);
+            "Unused config key: field3",
+        ]
+    );
+}
+
+#[test]
+fn unknown_fields_are_captured_with_selected_policy() {
+    let (_, warnings) = capture_diagnostics(UnknownFieldPolicy::Warn, || {
+        toml::from_str::<Test>("unused_field = 2").unwrap()
+    });
+    assert!(warnings.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::UnknownField
+            && diagnostic.field.as_deref() == Some("unused_field")
+            && !diagnostic.is_error()
+    }));
+
+    let (_, errors) = capture_diagnostics(UnknownFieldPolicy::Deny, || {
+        toml::from_str::<Test>("unused_field = 2").unwrap()
+    });
+    assert!(errors.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::UnknownField
+            && diagnostic.field.as_deref() == Some("unused_field")
+            && diagnostic.is_error()
+    }));
 }
 
 /// Logger storing all messages for later validation.

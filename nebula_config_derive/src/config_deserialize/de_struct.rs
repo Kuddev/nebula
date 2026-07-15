@@ -56,9 +56,9 @@ pub fn derive_deserialize<T>(
 
                 #flatten
 
-                // Warn about unused keys.
+                // Report unused keys through the active config diagnostic scope.
                 for key in unused.keys() {
-                    log::warn!(target: #LOG_TARGET, "Unused config key: {}", key);
+                    nebula_config::report_unknown_field(#LOG_TARGET, key);
                 }
 
                 Ok(config)
@@ -114,12 +114,7 @@ fn field_deserializer(field_streams: &mut FieldStreams, field: &Field) -> Result
         match serde::Deserialize::deserialize(value) {
             Ok(value) => config.#ident = value,
             Err(err) => {
-                log::error!(
-                    target: #LOG_TARGET,
-                    "Config error: {}: {}",
-                    #literal,
-                    err.to_string().trim(),
-                );
+                nebula_config::report_invalid_value(#LOG_TARGET, #literal, &err.to_string());
             },
         }
     };
@@ -157,9 +152,9 @@ fn field_deserializer(field_streams: &mut FieldStreams, field: &Field) -> Result
                 }
                 message.push_str("\nUse `nebula migrate` to automatically resolve it");
 
-                // Append stream to log deprecation/removal warning.
+                // Append stream to capture or log the deprecation/removal warning.
                 match_assignment_stream.extend(quote! {
-                    log::warn!(target: #LOG_TARGET, #message);
+                    nebula_config::report_deprecated_field(#LOG_TARGET, #literal, #message);
                 });
             },
             // Add aliases to match pattern.

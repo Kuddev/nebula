@@ -16,6 +16,7 @@ pub mod cursor;
 pub mod debug;
 pub mod font;
 pub mod general;
+pub mod lua;
 pub mod monitor;
 pub mod scrolling;
 pub mod selection;
