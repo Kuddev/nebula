@@ -723,7 +723,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 .ctx
                 .nebula_tab(TabRequest::SplitToggle(crate::display::SplitDirection::TopBottom)),
             OpenSettings => self.ctx.display().toggle_settings(),
-            OpenSettingsFile => self.ctx.display().open_settings_file(),
+            OpenSettingsFile => self.ctx.display().open_user_config_file(),
             ToggleGhost => self.ctx.display().toggle_ghost(),
             CycleAccept => self.ctx.display().cycle_accept(),
             PickBackgroundImage => self.ctx.display().pick_background_image(),

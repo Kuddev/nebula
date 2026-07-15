@@ -1390,6 +1390,8 @@ pub struct Display {
     /// window is following the operating system.
     nebula_window_theme_override: Option<WinitTheme>,
     pub nebula_settings_open: bool,
+    /// Paths from the last successful app configuration generation.
+    nebula_config_paths: Vec<PathBuf>,
     /// Settings content scroll offset in scaled px (0 = top of the section).
     nebula_settings_scroll: f32,
     /// Command palette (Ctrl+Shift+P): fuzzy launcher model + UI state.
@@ -1811,6 +1813,7 @@ impl Display {
             nebula_system_theme,
             nebula_window_theme_override,
             nebula_settings_open: false,
+            nebula_config_paths: config.config_paths.clone(),
             nebula_settings_scroll: 0.0,
             nebula_palette: command_palette::CommandPalette::new(),
             nebula_detected_shells: None,
@@ -3002,7 +3005,7 @@ impl Display {
             self.nebula_font_picker_open = false;
         }
         #[cfg(not(windows))]
-        self.open_settings_file();
+        self.open_user_config_file();
     }
 
     /// WT-style default-shell picker (command palette mode). Kept for compatibility.
@@ -3124,13 +3127,41 @@ impl Display {
         }
         #[cfg(not(windows))]
         {
-            self.open_settings_file();
+            self.open_user_config_file();
         }
     }
 
-    pub fn open_settings_file(&mut self) {
+    pub fn open_user_config_file(&mut self) {
         self.persist_nebula_settings();
-        let path = nebula_data_dir().join("nebula_settings.txt");
+        let active_lua = self.nebula_config_paths.first().filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("lua"))
+        });
+        let path = active_lua.cloned().or_else(|| crate::config::source::default_lua_path().ok());
+        let Some(path) = path else {
+            log::error!(
+                target: crate::logging::LOG_TARGET_CONFIG,
+                "Unable to determine Lua config path"
+            );
+            return;
+        };
+        if !path.exists() {
+            let language = crate::config::template::resolve_template_language(
+                None,
+                None,
+                crate::config::template::system_locale().as_deref(),
+            )
+            .unwrap_or(crate::config::template::TemplateLanguage::EnUs);
+            if let Err(error) = crate::config::template::ensure_user_lua_config(&path, language) {
+                log::error!(
+                    target: crate::logging::LOG_TARGET_CONFIG,
+                    "Unable to create Lua config {:?}: {error}",
+                    path
+                );
+                return;
+            }
+        }
         #[cfg(windows)]
         let _ = std::process::Command::new("notepad.exe").arg(&path).spawn();
         #[cfg(target_os = "macos")]
@@ -5301,6 +5332,7 @@ impl Display {
 
     /// Update to a new configuration.
     pub fn update_config(&mut self, config: &UiConfig) {
+        self.nebula_config_paths.clone_from(&config.config_paths);
         self.damage_tracker.debug = config.debug.highlight_damage;
         self.visual_bell.update_config(&config.bell);
         // Refresh the base scheme, then re-apply the active theme's restyle.

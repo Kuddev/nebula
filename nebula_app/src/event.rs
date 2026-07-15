@@ -50,6 +50,7 @@ use nebula_terminal::vte::ansi::NamedColor;
 use crate::cli::{IpcConfig, ParsedOptions};
 use crate::cli::{Options as CliOptions, WindowOptions};
 use crate::clipboard::Clipboard;
+use crate::config::reload::ReloadWorker;
 use crate::config::ui_config::{HintAction, HintInternalAction};
 use crate::config::{self, UiConfig};
 #[cfg(not(windows))]
@@ -101,6 +102,10 @@ pub struct Processor {
     global_ipc_options: ParsedOptions,
     cli_options: CliOptions,
     config: Rc<UiConfig>,
+    // Lua 回调与模块状态属于当前成功代次，失败重载不能提前释放它。
+    lua_generation: Option<config::lua::LuaGeneration>,
+    config_source: Option<config::source::ConfigSource>,
+    config_reload_worker: ReloadWorker,
     /// The quick (Quake) terminal window, once created.
     quick_terminal: Option<WindowId>,
     /// Whether the quick terminal is currently shown (target state).
@@ -121,11 +126,16 @@ pub struct Processor {
 impl Processor {
     /// Create a new event processor.
     pub fn new(
-        config: UiConfig,
+        loaded_config: config::LoadedConfig,
         cli_options: CliOptions,
         event_loop: &EventLoop<Event>,
     ) -> Processor {
         let proxy = event_loop.create_proxy();
+        let reload_proxy = proxy.clone();
+        let config_reload_worker = ReloadWorker::new(move || {
+            let event = Event::new(EventType::ConfigReloadReady, None);
+            let _ = reload_proxy.send_event(event);
+        });
         let scheduler = Scheduler::new(proxy.clone());
         let initial_window_options = Some(cli_options.window_options.clone());
 
@@ -141,10 +151,12 @@ impl Processor {
         // The monitor watches the config file for changes and reloads it. Pending
         // config changes are processed in the main loop.
         let mut config_monitor = None;
-        if config.live_config_reload() {
+        if loaded_config.live_config_reload() {
             config_monitor =
-                ConfigMonitor::new(config.config_paths.clone(), event_loop.create_proxy());
+                ConfigMonitor::new(loaded_config.config_paths.clone(), event_loop.create_proxy());
         }
+
+        let config::LoadedConfig { config, source: config_source, lua_generation } = loaded_config;
 
         // Register the global quick-terminal toggle hotkey (Ctrl+`).
         let (global_hotkey, quick_hotkey_id) = Self::init_quick_hotkey();
@@ -157,6 +169,9 @@ impl Processor {
             scheduler,
             gl_config: None,
             config: Rc::new(config),
+            lua_generation,
+            config_source,
+            config_reload_worker,
             clipboard,
             windows: Default::default(),
             #[cfg(unix)]
@@ -587,9 +602,22 @@ impl ApplicationHandler<Event> for Processor {
                     }
                 }
 
-                // Load config and update each terminal.
-                if let Ok(config) = config::reload(&path, &mut self.cli_options) {
-                    self.config = Rc::new(config);
+                match config::source::source_for_path(path, true) {
+                    Ok(source) => {
+                        self.config_reload_worker.request(source);
+                    },
+                    Err(error) => error!("Unable to reload configuration: {error}"),
+                }
+            },
+            (EventType::ConfigReloadReady, _) => {
+                // 失败结果只产生诊断；当前配置和 Lua 代次保持不变。
+                if let Some(result) = self.config_reload_worker.take_latest()
+                    && let Ok(mut loaded) = result.loaded
+                {
+                    self.cli_options.override_config(&mut loaded.config);
+                    self.lua_generation = loaded.lua_generation;
+                    self.config_source = loaded.source;
+                    self.config = Rc::new(loaded.config);
 
                     // Restart config monitor if imports changed.
                     if let Some(monitor) = self.config_monitor.take() {
@@ -914,6 +942,7 @@ impl From<Event> for WinitEvent<Event> {
 pub enum EventType {
     Terminal(TerminalEvent),
     ConfigReload(PathBuf),
+    ConfigReloadReady,
     Message(Message),
     Scroll(Scroll),
     CreateWindow(WindowOptions),
@@ -2730,6 +2759,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 EventType::IpcConfig(_) | EventType::IpcGetConfig(..) | EventType::Shutdown => (),
                 EventType::Message(_)
                 | EventType::ConfigReload(_)
+                | EventType::ConfigReloadReady
                 | EventType::CreateWindow(_)
                 | EventType::Frame => (),
             },

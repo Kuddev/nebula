@@ -5,7 +5,7 @@ use std::fmt::{self, Debug, Display};
 use bitflags::bitflags;
 use serde::de::{self, Error as SerdeError, MapAccess, Unexpected, Visitor};
 use serde::{Deserialize, Deserializer};
-use std::rc::Rc;
+use std::sync::Arc;
 use toml::Value as SerdeValue;
 use winit::event::MouseButton;
 use winit::keyboard::{
@@ -97,7 +97,7 @@ pub enum Action {
 
     /// Regex keyboard hints.
     #[config(skip)]
-    Hint(Rc<Hint>),
+    Hint(Arc<Hint>),
 
     /// Move vi mode cursor.
     #[config(skip)]

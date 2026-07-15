@@ -22,7 +22,7 @@ Keep the extracted directory structure intact:
 | `runtime/nebula-hook.exe` | AI turn-notification bridge (Claude Code / Codex) |
 | `runtime/conpty.dll` + `runtime/OpenConsole.exe` | modern ConPTY host (correct resize, fast tab spawn) |
 | `fonts/MapleMonoNormal-NF-CN-Regular.ttf` | Nerd Font for powerline/icons — install once (SIL OFL 1.1) |
-| `docs/CHANGELOG.md` + `docs/INSTALL.md` | release changes and installation details |
+| `docs/CHANGELOG.md` + `docs/INSTALL.md` + `docs/lua-configuration.md` | release changes, installation, and Lua configuration |
 | `licenses/` | Nebula and third-party license notices |
 
 ## Build from source
@@ -53,5 +53,11 @@ have already been built and verified.
 - Claude Code / Codex turn notifications are wired on first boot
   (`nebula setup-ai --remove` to undo; `nebula notify-test` to verify the
   toast pipeline).
-- Configuration lives at `%APPDATA%\nebula\nebula.toml` (created on demand);
-  visual settings are in the in-app settings panel.
+- New configuration uses `%APPDATA%\nebula\nebula.lua`. Run
+  `nebula config init --language system` to create an annotated template and
+  `nebula config check` to validate it. Existing `nebula.toml` remains
+  supported when no Lua configuration is present.
+- Linux uses `$XDG_CONFIG_HOME/nebula/nebula.lua` (normally
+  `~/.config/nebula/nebula.lua`) and supports both Wayland and X11. The initial
+  binary baseline is x86_64 glibc on Ubuntu 24.04, Debian 12, and Fedora 42.
+- Visual settings remain available in the in-app settings panel.

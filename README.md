@@ -188,6 +188,17 @@ under `runtime/`, while fonts, documentation, and notices live under `fonts/`,
 cargo build --release   # artifacts land in target/release/
 ```
 
+### Lua Configuration
+
+Nebula ships a vendored Lua 5.4 runtime with `require 'nebula'` and
+`nebula.config_builder()`. Generate an annotated template with
+`nebula config init --language system|zh-CN|en-US`, then validate it without
+opening the GUI using `nebula config check`. Module `require` paths participate
+in live reload; invalid edits keep the last-known-good configuration active.
+Existing TOML files remain supported. See the
+[Lua configuration guide](docs/lua-configuration.md) for APIs, discovery order,
+Windows/Linux paths, arrays, modules, and reload behavior.
+
 ### 🧩 Tech Stack
 
 | Layer | Tech |
@@ -339,6 +350,16 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 ```powershell
 cargo build --release   # 产物在 target/release/
 ```
+
+### Lua 配置
+
+Nebula 内置 Lua 5.4，使用 `require 'nebula'` 与
+`nebula.config_builder()`。运行
+`nebula config init --language system|zh-CN|en-US` 可生成带完整注释的模板，
+`nebula config check` 可在不启动 GUI 的情况下检查语法与字段。通过 `require`
+载入的模块会参与热重载；配置错误时继续使用上一份有效配置。已有 TOML 仍兼容。
+路径优先级、Windows/Linux 位置、数组、模块与重载说明见
+[Lua 配置指南](docs/lua-configuration.md)。
 
 ### 🧩 技术栈
 

@@ -108,6 +108,7 @@ winreg = "0.55"
 tauri-winrt-notification = "0.7.3"
 windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Globalization",
     "Win32_UI_Controls_Dialogs",
     # System double-click time for the terminal's multi-click detection.
     "Win32_UI_Input_KeyboardAndMouse",

@@ -35,7 +35,10 @@ $manifest = [ordered]@{
     'fonts/MapleMonoNormal-NF-CN-Regular.ttf'        = Join-Path $repo 'assets\fonts\MapleMonoNormal-NF-CN-Regular.ttf'
     'docs/CHANGELOG.md'                              = Join-Path $repo 'CHANGELOG.md'
     'docs/INSTALL.md'                                = Join-Path $repo 'INSTALL.md'
+    'docs/lua-configuration.md'                      = Join-Path $repo 'docs\lua-configuration.md'
     'licenses/LICENSE'                               = Join-Path $repo 'LICENSE'
+    'licenses/LICENSE-LUA'                           = Join-Path $repo 'licenses\LICENSE-LUA'
+    'licenses/LICENSE-MLUA'                          = Join-Path $repo 'licenses\LICENSE-MLUA'
     'licenses/THIRD-PARTY-NOTICES'                   = Join-Path $repo 'THIRD-PARTY-NOTICES'
 }
 
