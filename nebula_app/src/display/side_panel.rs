@@ -152,6 +152,10 @@ pub struct SidePanel {
     needs_refresh: bool,
 }
 
+fn git_pull_args() -> Vec<String> {
+    vec!["pull".into(), "--ff-only".into()]
+}
+
 impl SidePanel {
     pub fn new() -> Self {
         Self {
@@ -307,7 +311,7 @@ impl SidePanel {
         }
     }
 
-    // ---- git mutations (add / commit / push) ----
+    // ---- git mutations (add / commit / pull / push) ----
 
     /// Whether a git mutation is in flight (buttons gray out).
     pub fn op_running(&self) -> bool {
@@ -423,6 +427,13 @@ impl SidePanel {
     pub fn git_push(&mut self) {
         if self.git.as_ref().is_some_and(|g| g.ahead > 0) && !self.op_running() {
             self.spawn_git(vec!["push".into()]);
+        }
+    }
+
+    /// Pull only fast-forward updates, never creating an implicit merge commit.
+    pub fn git_pull(&mut self) {
+        if self.git.is_some() && !self.op_running() {
+            self.spawn_git(git_pull_args());
         }
     }
 
@@ -987,8 +998,7 @@ pub(super) fn push_quads(
             ));
             quads.push(UiQuad::solid(sx, sy, sw, sh, radius, sk.input));
             if panel.commit_all_selected() && !panel.commit_msg.is_empty() {
-                let columns: usize =
-                    panel.commit_msg.chars().map(|c| c.width().unwrap_or(0)).sum();
+                let columns: usize = panel.commit_msg.chars().map(|c| c.width().unwrap_or(0)).sum();
                 let selection_w = (columns as f32 * cell_w).min(sw - s(16.0));
                 quads.push(UiQuad::solid(
                     sx + s(6.0),
@@ -1000,13 +1010,13 @@ pub(super) fn push_quads(
                 ));
             }
         } else {
-            for (bx, bw) in git_button_rects(sx, sw, s(8.0)) {
+            for (bx, bw) in git_button_rects(sx, sw, s(6.0)) {
                 quads.push(UiQuad::solid(bx, sy, bw, sh, radius, sk.input));
             }
             // Hovered action button brightens (hover wash over the pill).
             if panel.hover == PanelHit::Search {
                 let (hx, _) = panel.hover_pos;
-                for (bx, bw) in git_button_rects(sx, sw, s(8.0)) {
+                for (bx, bw) in git_button_rects(sx, sw, s(6.0)) {
                     if hx >= bx && hx < bx + bw {
                         quads.push(UiQuad::solid(bx, sy, bw, sh, radius, sk.hover));
                     }
@@ -1016,11 +1026,10 @@ pub(super) fn push_quads(
     }
 }
 
-/// The three git action buttons' `(x, w)` spans inside the strip at `sx..sx+sw`
-/// (暂存 / 提交 / 推送). Shared by quads, text and hit-testing.
-pub fn git_button_rects(sx: f32, sw: f32, gap: f32) -> [(f32, f32); 3] {
-    let bw = (sw - 2.0 * gap) / 3.0;
-    [(sx, bw), (sx + bw + gap, bw), (sx + 2.0 * (bw + gap), bw)]
+/// The four git action buttons' `(x, w)` spans inside `sx..sx+sw`.
+pub fn git_button_rects(sx: f32, sw: f32, gap: f32) -> [(f32, f32); 4] {
+    let bw = (sw - 3.0 * gap) / 4.0;
+    [(sx, bw), (sx + bw + gap, bw), (sx + 2.0 * (bw + gap), bw), (sx + 3.0 * (bw + gap), bw)]
 }
 
 /// Draw the drawer's text: header tabs, the summary line (cwd tail or the
@@ -1233,19 +1242,21 @@ pub(super) fn draw_text(
                     let busy = panel.op_running();
                     let stage_on = !busy && !git.unstaged.is_empty();
                     let commit_on = !busy && !git.staged.is_empty();
+                    let pull_on = !busy;
                     let push_on = !busy && git.ahead > 0;
                     let push_label = if git.ahead > 0 {
                         format!("推送 ↑{}", git.ahead)
                     } else {
                         "推送".to_string()
                     };
-                    let labels: [(&str, bool); 3] = [
-                        (if busy { "…" } else { "暂存全部" }, stage_on),
+                    let labels: [(&str, bool); 4] = [
+                        (if busy { "…" } else { "暂存" }, stage_on),
                         ("提交", commit_on),
+                        ("拉取", pull_on),
                         (&push_label, push_on),
                     ];
                     for ((bx, bw), (label, enabled)) in
-                        git_button_rects(sx, sw, s(8.0)).into_iter().zip(labels)
+                        git_button_rects(sx, sw, s(6.0)).into_iter().zip(labels)
                     {
                         let hovered = panel.hover == PanelHit::Search
                             && panel.hover_pos.0 >= bx
@@ -1394,5 +1405,19 @@ mod tests {
         assert_eq!(panel.commit_selected_text().as_deref(), Some("old commit"));
         panel.commit_input("new commit");
         assert_eq!(panel.commit_msg, "new commit");
+    }
+
+    #[test]
+    fn git_action_strip_has_four_equal_buttons() {
+        let rects = git_button_rects(10.0, 430.0, 10.0);
+        assert_eq!(rects.len(), 4);
+        assert!(rects.windows(2).all(|pair| (pair[0].1 - pair[1].1).abs() < f32::EPSILON));
+        let last = rects.last().expect("at least one git action");
+        assert!((last.0 + last.1 - 440.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn git_pull_is_fast_forward_only() {
+        assert_eq!(git_pull_args(), vec!["pull", "--ff-only"]);
     }
 }

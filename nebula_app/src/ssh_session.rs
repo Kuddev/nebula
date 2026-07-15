@@ -16,12 +16,12 @@ use nebula_terminal::event::{Event as TerminalEvent, WindowSize};
 use nebula_terminal::event_loop::{EventLoopSender, Msg, StreamProcessor};
 use nebula_terminal::sync::FairMutex;
 use nebula_terminal::term::Term;
+use russh::ChannelMsg;
 use russh::client::{self, AuthResult, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::AgentClient;
 use russh::keys::ssh_key;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
-use russh::ChannelMsg;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::event::EventProxy;
@@ -29,6 +29,61 @@ use crate::event::EventProxy;
 type SessionError = Box<dyn std::error::Error + Send + Sync>;
 type ClientSession = client::Handle<ClientHandler>;
 type SharedSession = Arc<tokio::sync::Mutex<ClientSession>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AuthMethod {
+    PrivateKey(PathBuf),
+    Agent,
+    StoredPassword,
+    KeyboardInteractive,
+    PromptPassword,
+}
+
+fn authentication_plan(
+    mode: crate::ssh_profiles::SshAuthMode,
+    explicit_keys: &[PathBuf],
+    resolved_keys: &[PathBuf],
+) -> Vec<AuthMethod> {
+    use crate::ssh_profiles::SshAuthMode;
+
+    let key_methods = || {
+        let mut seen = Vec::<String>::new();
+        explicit_keys
+            .iter()
+            .chain(resolved_keys)
+            .filter(|path| {
+                let normalized = path.to_string_lossy().to_lowercase();
+                if seen.contains(&normalized) {
+                    false
+                } else {
+                    seen.push(normalized);
+                    true
+                }
+            })
+            .cloned()
+            .map(AuthMethod::PrivateKey)
+            .collect::<Vec<_>>()
+    };
+
+    match mode {
+        SshAuthMode::Auto => {
+            let mut methods = key_methods();
+            methods.extend([
+                AuthMethod::Agent,
+                AuthMethod::StoredPassword,
+                AuthMethod::KeyboardInteractive,
+                AuthMethod::PromptPassword,
+            ]);
+            methods
+        },
+        SshAuthMode::Password => {
+            vec![AuthMethod::StoredPassword, AuthMethod::PromptPassword]
+        },
+        SshAuthMode::PublicKey => key_methods(),
+        SshAuthMode::Agent => vec![AuthMethod::Agent],
+        SshAuthMode::KeyboardInteractive => vec![AuthMethod::KeyboardInteractive],
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshDestination {
@@ -106,9 +161,9 @@ impl SshDestination {
 
 fn parse_host_port(host_port: &str) -> io::Result<(String, u16)> {
     let (host, port) = if let Some(rest) = host_port.strip_prefix('[') {
-        let (host, suffix) = rest.split_once(']').ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "无效的 IPv6 SSH 地址")
-        })?;
+        let (host, suffix) = rest
+            .split_once(']')
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "无效的 IPv6 SSH 地址"))?;
         let port = suffix
             .strip_prefix(':')
             .map(str::parse)
@@ -233,12 +288,11 @@ impl client::Handler for ClientHandler {
     }
 }
 
-fn runtime() -> io::Result<&'static tokio::runtime::Runtime> {
+pub(crate) fn runtime() -> io::Result<&'static tokio::runtime::Runtime> {
     static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
     match RUNTIME.get_or_init(|| {
-        let workers = std::thread::available_parallelism()
-            .map(|count| count.get().clamp(2, 4))
-            .unwrap_or(2);
+        let workers =
+            std::thread::available_parallelism().map(|count| count.get().clamp(2, 4)).unwrap_or(2);
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(workers)
@@ -264,12 +318,32 @@ pub fn spawn_session(
     event_proxy: EventProxy,
 ) -> io::Result<EventLoopSender> {
     let (sender, receiver) = EventLoopSender::standalone()?;
+    let profiles_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
     runtime()?.spawn(async move {
         let raw = destination.clone();
-        let resolved = tokio::task::spawn_blocking(move || SshDestination::resolve(&raw)).await;
+        let resolved = tokio::task::spawn_blocking(move || {
+            let resolved = SshDestination::resolve(&raw)?;
+            let profiles = match crate::ssh_profiles::SshProfiles::load(&profiles_path) {
+                Ok(profiles) => profiles,
+                Err(err) => {
+                    warn!("加载 SSH Profile 失败，使用自动认证: {err}");
+                    crate::ssh_profiles::SshProfiles::default()
+                },
+            };
+            Ok::<_, io::Error>((resolved, profiles.for_destination(&raw)))
+        })
+        .await;
         let result = match resolved {
-            Ok(Ok(destination)) => {
-                run_session_async(destination, initial_size, terminal.clone(), event_proxy.clone(), receiver).await
+            Ok(Ok((destination, profile))) => {
+                run_session_async(
+                    destination,
+                    profile,
+                    initial_size,
+                    terminal.clone(),
+                    event_proxy.clone(),
+                    receiver,
+                )
+                .await
             },
             Ok(Err(err)) => Err(err.into()),
             Err(err) => Err(format!("SSH 地址解析任务失败: {err}").into()),
@@ -286,6 +360,7 @@ pub fn spawn_session(
 
 async fn run_session_async(
     destination: SshDestination,
+    profile: crate::ssh_profiles::SshProfileAuth,
     initial_size: WindowSize,
     terminal: Arc<FairMutex<Term<EventProxy>>>,
     event_proxy: EventProxy,
@@ -295,7 +370,7 @@ async fn run_session_async(
         return Err(format!("当前直连模式尚未接入跳板机 {proxy_jump}").into());
     }
 
-    let session = authenticated_session(&destination).await?;
+    let session = authenticated_session(&destination, &profile).await?;
     let mut channel = {
         let session = session.lock().await;
         session.channel_open_session().await?
@@ -312,9 +387,7 @@ async fn run_session_async(
         )
         .await?;
     let hook_token = remote_hook_token()?;
-    channel
-        .set_env(false, "NEBULA_REMOTE_HOOK_TOKEN", hook_token.clone())
-        .await?;
+    channel.set_env(false, "NEBULA_REMOTE_HOOK_TOKEN", hook_token.clone()).await?;
     channel.request_shell(true).await?;
 
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -371,7 +444,10 @@ async fn wait_for_sync(deadline: Option<std::time::Instant>) {
     }
 }
 
-async fn authenticated_session(destination: &SshDestination) -> Result<SharedSession, SessionError> {
+async fn authenticated_session(
+    destination: &SshDestination,
+    profile: &crate::ssh_profiles::SshProfileAuth,
+) -> Result<SharedSession, SessionError> {
     let key = destination.pool_key();
     if let Some(existing) = connection_pool().lock().await.get(&key).cloned() {
         if !existing.lock().await.is_closed() {
@@ -388,13 +464,9 @@ async fn authenticated_session(destination: &SshDestination) -> Result<SharedSes
         ..Default::default()
     });
     let handler = ClientHandler { host: destination.host.clone(), port: destination.port };
-    let mut session = client::connect(
-        config,
-        (destination.host.as_str(), destination.port),
-        handler,
-    )
-    .await?;
-    authenticate(&mut session, destination).await?;
+    let mut session =
+        client::connect(config, (destination.host.as_str(), destination.port), handler).await?;
+    authenticate(&mut session, destination, profile).await?;
 
     let session = Arc::new(tokio::sync::Mutex::new(session));
     let mut pool = connection_pool().lock().await;
@@ -410,50 +482,143 @@ async fn authenticated_session(destination: &SshDestination) -> Result<SharedSes
 async fn authenticate(
     session: &mut ClientSession,
     destination: &SshDestination,
+    profile: &crate::ssh_profiles::SshProfileAuth,
 ) -> Result<(), SessionError> {
     if session.authenticate_none(&destination.user).await?.success() {
         return Ok(());
     }
 
-    for path in &destination.identity_files {
-        if try_private_key(session, destination, path).await? {
-            return Ok(());
+    let plan =
+        authentication_plan(profile.auth, &profile.private_keys, &destination.identity_files);
+    let key_count =
+        plan.iter().filter(|method| matches!(method, AuthMethod::PrivateKey(_))).count();
+    if profile.auth == crate::ssh_profiles::SshAuthMode::Auto && key_count >= 3 {
+        warn!(
+            "自动认证将尝试 {key_count} 把私钥；若服务器触发 MaxAuthTries，请在 SSH Profile 中明确指定密钥"
+        );
+    }
+
+    let mut reusable_password = None;
+    let mut loaded_stored_password = false;
+    let mut stored_password_was_present = false;
+    for method in plan {
+        match method {
+            AuthMethod::PrivateKey(path) => {
+                if try_private_key(session, destination, &path).await? {
+                    clear_secret(&mut reusable_password);
+                    return Ok(());
+                }
+            },
+            AuthMethod::Agent => {
+                if try_windows_agents(session, &destination.user, &profile.private_keys).await {
+                    clear_secret(&mut reusable_password);
+                    return Ok(());
+                }
+            },
+            AuthMethod::StoredPassword => {
+                if !loaded_stored_password {
+                    reusable_password =
+                        crate::ssh_credentials::load_stored_password(&destination.original)?;
+                    loaded_stored_password = true;
+                    stored_password_was_present = reusable_password.is_some();
+                }
+                if let Some(password) = reusable_password.as_deref() {
+                    if authenticate_password(session, &destination.user, password).await? {
+                        clear_secret(&mut reusable_password);
+                        return Ok(());
+                    }
+                }
+            },
+            AuthMethod::KeyboardInteractive => {
+                if try_keyboard_interactive(session, destination, reusable_password.as_deref())
+                    .await?
+                {
+                    clear_secret(&mut reusable_password);
+                    return Ok(());
+                }
+            },
+            AuthMethod::PromptPassword => {
+                if let Some((mut password, save)) =
+                    prompt_secret(destination.original.clone(), None, true).await?
+                {
+                    let accepted =
+                        authenticate_password(session, &destination.user, &password).await?;
+                    if accepted {
+                        if save {
+                            crate::ssh_credentials::store_password(
+                                &destination.original,
+                                &password,
+                            )?;
+                        }
+                        password.fill(0);
+                        clear_secret(&mut reusable_password);
+                        return Ok(());
+                    }
+                    password.fill(0);
+                }
+            },
         }
     }
 
-    if try_windows_agents(session, &destination.user).await {
-        return Ok(());
-    }
-
-    let mut reusable_password = crate::ssh_credentials::load_stored_password(&destination.original)?;
-    if let Some(password) = reusable_password.as_ref() {
-        if authenticate_password(session, &destination.user, password).await? {
-            clear_secret(&mut reusable_password);
-            return Ok(());
-        }
+    if stored_password_was_present {
         crate::ssh_credentials::forget_password(&destination.original)?;
-        clear_secret(&mut reusable_password);
-    }
-
-    if let Some((mut password, save)) = prompt_secret(destination.original.clone(), None, true).await?
-    {
-        let accepted = authenticate_password(session, &destination.user, &password).await?;
-        if accepted {
-            if save {
-                crate::ssh_credentials::store_password(&destination.original, &password)?;
-            }
-            password.fill(0);
-            return Ok(());
-        }
-        reusable_password = Some(password);
-    }
-
-    if try_keyboard_interactive(session, destination, reusable_password.as_deref()).await? {
-        clear_secret(&mut reusable_password);
-        return Ok(());
     }
     clear_secret(&mut reusable_password);
-    Err("服务器拒绝了所有可用的 SSH 认证方式".into())
+    Err(auth_failure(profile.auth, key_count).into())
+}
+
+/// 在现有认证连接上打开独立 SFTP 子系统；连接池和认证策略仍只有一份。
+pub(crate) async fn open_sftp(
+    raw_destination: &str,
+) -> Result<russh_sftp::client::SftpSession, SessionError> {
+    let profiles_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
+    let raw = raw_destination.to_owned();
+    let (destination, profile) = tokio::task::spawn_blocking(move || {
+        let destination = SshDestination::resolve(&raw)?;
+        let profiles = match crate::ssh_profiles::SshProfiles::load(&profiles_path) {
+            Ok(profiles) => profiles,
+            Err(err) => {
+                warn!("加载 SSH Profile 失败，SFTP 使用自动认证: {err}");
+                crate::ssh_profiles::SshProfiles::default()
+            },
+        };
+        Ok::<_, io::Error>((destination, profiles.for_destination(&raw)))
+    })
+    .await
+    .map_err(|err| format!("SSH 地址解析任务失败: {err}"))??;
+
+    if let Some(proxy_jump) = destination.proxy_jump.as_deref() {
+        return Err(format!("当前 SFTP 模式尚未接入跳板机 {proxy_jump}").into());
+    }
+
+    let session = authenticated_session(&destination, &profile).await?;
+    let channel = {
+        let session = session.lock().await;
+        session.channel_open_session().await?
+    };
+    channel.request_subsystem(true, "sftp").await?;
+    Ok(russh_sftp::client::SftpSession::new(channel.into_stream()).await?)
+}
+
+fn auth_failure(mode: crate::ssh_profiles::SshAuthMode, key_count: usize) -> String {
+    use crate::ssh_profiles::SshAuthMode;
+    match mode {
+        SshAuthMode::Auto if key_count >= 3 => format!(
+            "服务器拒绝了自动认证；已尝试 {key_count} 把私钥，可能触发 MaxAuthTries，请明确选择一把密钥"
+        ),
+        SshAuthMode::Auto => "服务器拒绝了所有可用的 SSH 认证方式".to_owned(),
+        SshAuthMode::Password => "服务器拒绝了密码认证，未回退到其他认证方式".to_owned(),
+        SshAuthMode::PublicKey if key_count == 0 => {
+            "密钥认证没有可用的私钥，请选择私钥文件或配置 IdentityFile".to_owned()
+        },
+        SshAuthMode::PublicKey => "服务器拒绝了指定的私钥，未回退到密码认证".to_owned(),
+        SshAuthMode::Agent => {
+            "OpenSSH Agent 与 Pageant 均未提供可用身份，未回退到密码认证".to_owned()
+        },
+        SshAuthMode::KeyboardInteractive => {
+            "服务器拒绝了 keyboard-interactive 认证，未回退到密码认证".to_owned()
+        },
+    }
 }
 
 async fn try_private_key(
@@ -461,11 +626,15 @@ async fn try_private_key(
     destination: &SshDestination,
     path: &Path,
 ) -> Result<bool, SessionError> {
-    if !path.is_file() {
-        return Ok(false);
-    }
-    let target = format!("密钥口令: {}", path.display());
-    let mut stored = crate::ssh_credentials::load_stored_password(&target)?;
+    let private_key = match std::fs::read(path) {
+        Ok(private_key) => private_key,
+        Err(err) => {
+            warn!("无法读取 SSH 私钥 {}: {err}", path.display());
+            return Ok(false);
+        },
+    };
+    let prompt = format!("密钥口令: {}", path.display());
+    let mut stored = crate::ssh_credentials::load_private_key_passphrase(&private_key)?;
     let mut key = stored
         .as_deref()
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
@@ -474,12 +643,12 @@ async fn try_private_key(
 
     if key.is_none() {
         clear_secret(&mut stored);
-        crate::ssh_credentials::forget_password(&target)?;
-        if let Some((mut passphrase, save)) = prompt_secret(target.clone(), None, true).await? {
+        crate::ssh_credentials::forget_private_key_passphrase(&private_key)?;
+        if let Some((mut passphrase, save)) = prompt_secret(prompt, None, true).await? {
             let text = String::from_utf8_lossy(&passphrase).into_owned();
             key = russh::keys::load_secret_key(path, Some(&text)).ok();
             if key.is_some() && save {
-                crate::ssh_credentials::store_password(&target, &passphrase)?;
+                crate::ssh_credentials::store_private_key_passphrase(&private_key, &passphrase)?;
             }
             passphrase.fill(0);
         }
@@ -506,15 +675,32 @@ async fn try_private_key(
     Ok(session.authenticate_publickey(&destination.user, key).await?.success())
 }
 
-async fn try_windows_agents(session: &mut ClientSession, user: &str) -> bool {
+async fn try_windows_agents(
+    session: &mut ClientSession,
+    user: &str,
+    preferred_private_keys: &[PathBuf],
+) -> bool {
+    let preferred_public_keys = preferred_private_keys
+        .iter()
+        .filter_map(|path| {
+            let public_path = PathBuf::from(format!("{}.pub", path.display()));
+            russh::keys::load_public_key(public_path).ok()
+        })
+        .collect::<Vec<_>>();
     const OPENSSH_AGENT: &str = r"\\.\pipe\openssh-ssh-agent";
     if let Ok(mut agent) = AgentClient::connect_named_pipe(OPENSSH_AGENT).await {
-        if authenticate_agent(session, user, &mut agent).await.unwrap_or(false) {
+        if authenticate_agent(session, user, &preferred_public_keys, &mut agent)
+            .await
+            .unwrap_or(false)
+        {
             return true;
         }
     }
     if let Ok(mut agent) = AgentClient::connect_pageant().await {
-        if authenticate_agent(session, user, &mut agent).await.unwrap_or(false) {
+        if authenticate_agent(session, user, &preferred_public_keys, &mut agent)
+            .await
+            .unwrap_or(false)
+        {
             return true;
         }
     }
@@ -524,12 +710,16 @@ async fn try_windows_agents(session: &mut ClientSession, user: &str) -> bool {
 async fn authenticate_agent<S>(
     session: &mut ClientSession,
     user: &str,
+    preferred_public_keys: &[ssh_key::PublicKey],
     agent: &mut AgentClient<S>,
 ) -> Result<bool, SessionError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    let identities = agent.request_identities().await?;
+    let mut identities = agent.request_identities().await?;
+    identities.sort_by_key(|identity| {
+        (!preferred_public_keys.iter().any(|key| key == identity.public_key().as_ref())) as u8
+    });
     for identity in identities.into_iter().take(5) {
         let is_rsa = identity.public_key().algorithm().is_rsa();
         let hash = rsa_hash_for(session, is_rsa).await;
@@ -572,9 +762,8 @@ async fn try_keyboard_interactive(
     destination: &SshDestination,
     password: Option<&[u8]>,
 ) -> Result<bool, SessionError> {
-    let mut state = session
-        .authenticate_keyboard_interactive_start(&destination.user, None::<String>)
-        .await?;
+    let mut state =
+        session.authenticate_keyboard_interactive_start(&destination.user, None::<String>).await?;
     for _ in 0..8 {
         match state {
             KeyboardInteractiveAuthResponse::Success => return Ok(true),
@@ -591,10 +780,7 @@ async fn try_keyboard_interactive(
                     }
                     let label = format!(
                         "{} - {} {} {}",
-                        destination.original,
-                        name,
-                        instructions,
-                        prompt.prompt
+                        destination.original, name, instructions, prompt.prompt
                     );
                     let Some((mut response, _)) = prompt_secret(label, None, false).await? else {
                         return Ok(false);
@@ -700,7 +886,9 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SshDestination, parse_resolved_config};
+    use super::{AuthMethod, SshDestination, authentication_plan, parse_resolved_config};
+    use crate::ssh_profiles::SshAuthMode;
+    use std::path::PathBuf;
 
     #[test]
     fn parses_saved_destinations() {
@@ -722,11 +910,66 @@ mod tests {
 
     #[test]
     fn parses_resolved_ssh_config() {
-        let config = "user deploy\nhostname server.internal\nport 2200\nidentityfile ~/.ssh/id_ed25519\n";
+        let config =
+            "user deploy\nhostname server.internal\nport 2200\nidentityfile ~/.ssh/id_ed25519\n";
         let destination = parse_resolved_config("prod", config).unwrap();
         assert_eq!(destination.user, "deploy");
         assert_eq!(destination.host, "server.internal");
         assert_eq!(destination.port, 2200);
         assert_eq!(destination.identity_files.len(), 1);
+    }
+
+    #[test]
+    fn auto_auth_plan_matches_tabby_order_and_deduplicates_keys() {
+        let explicit = vec![PathBuf::from(r"C:\Keys\chosen"), PathBuf::from(r"c:\keys\CHOSEN")];
+        let resolved = vec![PathBuf::from(r"C:\Keys\config")];
+
+        assert_eq!(
+            authentication_plan(SshAuthMode::Auto, &explicit, &resolved),
+            vec![
+                AuthMethod::PrivateKey(PathBuf::from(r"C:\Keys\chosen")),
+                AuthMethod::PrivateKey(PathBuf::from(r"C:\Keys\config")),
+                AuthMethod::Agent,
+                AuthMethod::StoredPassword,
+                AuthMethod::KeyboardInteractive,
+                AuthMethod::PromptPassword,
+            ]
+        );
+    }
+
+    #[test]
+    fn password_mode_never_falls_back_to_other_methods() {
+        assert_eq!(
+            authentication_plan(
+                SshAuthMode::Password,
+                &[PathBuf::from(r"C:\Keys\ignored")],
+                &[PathBuf::from(r"C:\Keys\ignored-config")],
+            ),
+            vec![AuthMethod::StoredPassword, AuthMethod::PromptPassword]
+        );
+    }
+
+    #[test]
+    fn public_key_mode_uses_only_key_sources() {
+        assert_eq!(
+            authentication_plan(
+                SshAuthMode::PublicKey,
+                &[PathBuf::from(r"C:\Keys\chosen")],
+                &[PathBuf::from(r"C:\Keys\config")],
+            ),
+            vec![
+                AuthMethod::PrivateKey(PathBuf::from(r"C:\Keys\chosen")),
+                AuthMethod::PrivateKey(PathBuf::from(r"C:\Keys\config")),
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_and_interactive_modes_are_strict() {
+        assert_eq!(authentication_plan(SshAuthMode::Agent, &[], &[]), vec![AuthMethod::Agent]);
+        assert_eq!(
+            authentication_plan(SshAuthMode::KeyboardInteractive, &[], &[]),
+            vec![AuthMethod::KeyboardInteractive]
+        );
     }
 }

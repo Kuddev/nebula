@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::io::{Error, Result};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::IntoRawHandle;
+use std::path::{Path, PathBuf};
 use std::{mem, ptr};
 
 use windows_sys::Win32::Foundation::{HANDLE, S_OK};
@@ -83,21 +84,16 @@ impl ConptyApi {
     fn load_conpty() -> Option<Self> {
         type LoadedFn = unsafe extern "system" fn() -> isize;
 
-        // Only sideload when BOTH pieces sit next to nebula.exe, and load the
-        // DLL by absolute path. A stray conpty.dll picked up from the search
-        // path — or one whose OpenConsole.exe is missing — can silently run
-        // the in-box host while `sideloaded` stays true, and then the
-        // pre-primed DA1 answer leaks into the shell as typed input.
+        // 只接受同一候选目录中的完整文件对，避免把半套 runtime 与根目录混用。
+        // DLL 始终按绝对路径加载，不能让 PATH 中的同名文件进入认证边界。
         let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-        if !exe_dir.join("OpenConsole.exe").is_file() {
-            info!("OpenConsole.exe not found beside the executable; using in-box ConPTY");
+        let Some(conpty_dir) = bundled_conpty_dir(&exe_dir) else {
+            info!(
+                "complete conpty.dll/OpenConsole.exe pair not found in runtime/ or executable directory; using in-box ConPTY"
+            );
             return None;
-        }
-        let dll_path = exe_dir.join("conpty.dll");
-        if !dll_path.is_file() {
-            info!("conpty.dll not found beside the executable; using in-box ConPTY");
-            return None;
-        }
+        };
+        let dll_path = conpty_dir.join("conpty.dll");
         let dll_wide: Vec<u16> =
             dll_path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
 
@@ -118,6 +114,12 @@ impl ConptyApi {
             })
         }
     }
+}
+
+fn bundled_conpty_dir(exe_dir: &Path) -> Option<PathBuf> {
+    [exe_dir.join("runtime"), exe_dir.to_path_buf()]
+        .into_iter()
+        .find(|dir| dir.join("conpty.dll").is_file() && dir.join("OpenConsole.exe").is_file())
 }
 
 /// RAII Pseudoconsole.
@@ -370,5 +372,72 @@ impl From<WindowSize> for COORD {
         let lines = window_size.num_lines;
         let columns = window_size.num_cols;
         COORD { X: columns as i16, Y: lines as i16 }
+    }
+}
+
+#[cfg(test)]
+mod runtime_asset_tests {
+    use super::bundled_conpty_dir;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let sequence = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("nebula-conpty-{name}-{}-{sequence}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_pair(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("conpty.dll"), b"dll").unwrap();
+        std::fs::write(dir.join("OpenConsole.exe"), b"host").unwrap();
+    }
+
+    #[test]
+    fn conpty_prefers_complete_runtime_pair() {
+        let dir = TestDir::new("runtime");
+        write_pair(dir.path());
+        write_pair(&dir.path().join("runtime"));
+
+        assert_eq!(bundled_conpty_dir(dir.path()), Some(dir.path().join("runtime")));
+    }
+
+    #[test]
+    fn conpty_does_not_mix_partial_runtime_with_legacy_pair() {
+        let dir = TestDir::new("partial");
+        write_pair(dir.path());
+        let runtime = dir.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::write(runtime.join("conpty.dll"), b"dll-only").unwrap();
+
+        assert_eq!(bundled_conpty_dir(dir.path()), Some(dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn conpty_returns_none_without_complete_pair() {
+        let dir = TestDir::new("missing");
+        let runtime = dir.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::write(runtime.join("OpenConsole.exe"), b"host-only").unwrap();
+
+        assert_eq!(bundled_conpty_dir(dir.path()), None);
     }
 }

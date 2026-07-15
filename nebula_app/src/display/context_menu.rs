@@ -6,8 +6,8 @@
 
 use std::time::Instant;
 
-use super::*;
 use super::design_tokens::{control, elevation, motion, space};
+use super::*;
 
 // Maple Mono Normal NF CN ships the stable Codicon block below. Keep menu
 // symbols on that block: newer Codicon additions such as U+EC86 are absent
@@ -33,6 +33,7 @@ pub const TAB_COLORS: [Rgb; 7] = [
 pub enum ContextMenuTarget {
     Tab(usize),
     Ssh(usize),
+    Sftp(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,9 +45,13 @@ pub enum ContextMenuAction {
     CloseTab(usize),
     SetTabColor { index: usize, color: Option<Rgb> },
     ConnectSsh(usize),
+    OpenSftp(usize),
     CopySshAddress(usize),
     EditSsh(usize),
     DeleteSsh(usize),
+    DownloadSftp(usize),
+    RenameSftp(usize),
+    DeleteSftp(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,14 +154,11 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
     let color_label_gap = s(space::XS);
     let swatch = s(control::ICON_BUTTON);
     let color_bottom_pad = s(10.0);
-    let color_h = color_top_pad
-        + size.cell_height()
-        + color_label_gap
-        + swatch
-        + color_bottom_pad;
+    let color_h = color_top_pad + size.cell_height() + color_label_gap + swatch + color_bottom_pad;
     let (row_count, separators, extra) = match menu.target {
         ContextMenuTarget::Tab(_) => (5usize, 2usize, color_h),
-        ContextMenuTarget::Ssh(_) => (4usize, 1usize, 0.0),
+        ContextMenuTarget::Ssh(_) => (5usize, 1usize, 0.0),
+        ContextMenuTarget::Sftp(_) => (3usize, 1usize, 0.0),
     };
     let height = pad * 2.0 + row_count as f32 * row_h + separators as f32 * sep_h + extra;
     let margin = s(8.0);
@@ -269,6 +271,15 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
             ));
             cursor_y += row_h;
             rows.push(row(
+                ContextMenuAction::OpenSftp(index),
+                "\u{f0c7}",
+                "打开 SFTP",
+                "",
+                cursor_y,
+                false,
+            ));
+            cursor_y += row_h;
+            rows.push(row(
                 ContextMenuAction::CopySshAddress(index),
                 ICON_COPY,
                 "复制地址",
@@ -289,6 +300,35 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
             separator(&mut cursor_y);
             rows.push(row(
                 ContextMenuAction::DeleteSsh(index),
+                "\u{ea81}",
+                "删除",
+                "",
+                cursor_y,
+                true,
+            ));
+        },
+        ContextMenuTarget::Sftp(index) => {
+            rows.push(row(
+                ContextMenuAction::DownloadSftp(index),
+                "\u{eb4a}",
+                "下载",
+                "",
+                cursor_y,
+                false,
+            ));
+            cursor_y += row_h;
+            rows.push(row(
+                ContextMenuAction::RenameSftp(index),
+                ICON_EDIT,
+                "重命名",
+                "F2",
+                cursor_y,
+                false,
+            ));
+            cursor_y += row_h;
+            separator(&mut cursor_y);
+            rows.push(row(
+                ContextMenuAction::DeleteSftp(index),
                 "\u{ea81}",
                 "删除",
                 "",
@@ -509,20 +549,22 @@ mod tests {
         let layout = layout(&menu, size(), 1.0, 0.0);
         let first = layout.rows[0];
         assert_eq!(
-            hit_test(
-                &menu,
-                size(),
-                1.0,
-                first.rect.0 + 2.0,
-                first.rect.1 + 2.0,
-            ),
+            hit_test(&menu, size(), 1.0, first.rect.0 + 2.0, first.rect.1 + 2.0,),
             ContextMenuHit::Action(ContextMenuAction::DuplicateTab(3))
         );
         assert_eq!(layout.colors.len(), 8);
         assert_eq!(layout.colors[0].0, None);
-        assert_eq!(
-            layout.colors[0].1,
-            ContextMenuAction::SetTabColor { index: 3, color: None }
-        );
+        assert_eq!(layout.colors[0].1, ContextMenuAction::SetTabColor { index: 3, color: None });
+    }
+
+    #[test]
+    fn sftp_row_menu_exposes_download_rename_and_delete() {
+        let menu = ContextMenu::new(ContextMenuTarget::Sftp(4), (100.0, 100.0), None);
+        let layout = layout(&menu, size(), 1.0, 0.0);
+
+        assert_eq!(layout.rows.len(), 3);
+        assert_eq!(layout.rows[0].action, ContextMenuAction::DownloadSftp(4));
+        assert_eq!(layout.rows[1].action, ContextMenuAction::RenameSftp(4));
+        assert_eq!(layout.rows[2].action, ContextMenuAction::DeleteSftp(4));
     }
 }

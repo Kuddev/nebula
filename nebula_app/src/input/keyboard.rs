@@ -128,6 +128,69 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        // SFTP path/filter/create/rename fields share the same editing contract.
+        if self
+            .ctx
+            .display()
+            .nebula_sftp_panel
+            .as_ref()
+            .is_some_and(crate::display::sftp_panel::SftpPanel::editor_active)
+        {
+            match &key.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    if let Some(panel) = self.ctx.display().nebula_sftp_panel.as_mut() {
+                        panel.editor_cancel();
+                    }
+                },
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(panel) = self.ctx.display().nebula_sftp_panel.as_mut() {
+                        let _ = panel.editor_submit();
+                    }
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    if let Some(panel) = self.ctx.display().nebula_sftp_panel.as_mut() {
+                        panel.editor_backspace();
+                    }
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("a") =>
+                {
+                    if let Some(panel) = self.ctx.display().nebula_sftp_panel.as_mut() {
+                        panel.editor_select_all();
+                    }
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("c") =>
+                {
+                    let text = self
+                        .ctx
+                        .display()
+                        .nebula_sftp_panel
+                        .as_ref()
+                        .and_then(|panel| panel.editor_selected_text());
+                    if let Some(text) = text {
+                        self.ctx.clipboard_mut().store(ClipboardType::Clipboard, text);
+                    }
+                },
+                Key::Character(c)
+                    if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("v") =>
+                {
+                    let text = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                    if let Some(panel) = self.ctx.display().nebula_sftp_panel.as_mut() {
+                        panel.editor_insert(&text);
+                    }
+                },
+                Key::Character(text) if mods.is_empty() || mods.shift_key() => {
+                    if let Some(panel) = self.ctx.display().nebula_sftp_panel.as_mut() {
+                        panel.editor_insert(text);
+                    }
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // Side-panel filter box: consume keyboard while it has focus, same
         // modal contract as tab rename. Printable text arrives via Ime::Commit
         // on Windows/IME; the Character arm is the non-IME fallback.
@@ -220,25 +283,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     Key::Named(NamedKey::Tab) => self.ctx.display().ssh_editor_next_field(),
                     Key::Named(NamedKey::Backspace) => self.ctx.display().ssh_editor_backspace(),
                     Key::Character(c)
-                        if mods.control_key()
-                            && !mods.alt_key()
-                            && c.eq_ignore_ascii_case("a") =>
+                        if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("a") =>
                     {
                         self.ctx.display().ssh_editor_select_all();
                     },
                     Key::Character(c)
-                        if mods.control_key()
-                            && !mods.alt_key()
-                            && c.eq_ignore_ascii_case("c") =>
+                        if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("c") =>
                     {
                         if let Some(text) = self.ctx.display().ssh_editor_selected_text() {
                             self.ctx.clipboard_mut().store(ClipboardType::Clipboard, text);
                         }
                     },
                     Key::Character(c)
-                        if mods.control_key()
-                            && !mods.alt_key()
-                            && c.eq_ignore_ascii_case("v") =>
+                        if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("v") =>
                     {
                         // SSH 编辑器是应用自有文本框。直接写入当前焦点字段，避免后续
                         // 终端粘贴绑定把地址或密码误发送到后台 PTY。
