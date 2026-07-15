@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::cmp::{self, Reverse};
 use std::collections::HashSet;
 use std::iter;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use ahash::RandomState;
 use winit::keyboard::ModifiersState;
@@ -25,7 +25,7 @@ const HINT_SPLIT_PERCENTAGE: f32 = 0.5;
 /// Keyboard regex hint state.
 pub struct HintState {
     /// Hint currently in use.
-    hint: Option<Rc<Hint>>,
+    hint: Option<Arc<Hint>>,
 
     /// Alphabet for hint labels.
     alphabet: String,
@@ -58,7 +58,7 @@ impl HintState {
     }
 
     /// Start the hint selection process.
-    pub fn start(&mut self, hint: Rc<Hint>) {
+    pub fn start(&mut self, hint: Arc<Hint>) {
         self.hint = Some(hint);
     }
 
@@ -201,7 +201,7 @@ pub struct HintMatch {
     hyperlink: Option<Hyperlink>,
 
     /// Hint which triggered this match.
-    hint: Rc<Hint>,
+    hint: Arc<Hint>,
 }
 
 impl HintMatch {

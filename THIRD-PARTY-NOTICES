@@ -5,6 +5,10 @@ Portions of this software incorporate code originally distributed under
 the Apache License 2.0 and the MIT License. The required license texts
 and copyright notices are reproduced below, as their terms require.
 
+The embedded Lua 5.4 runtime is distributed under the Lua MIT license.
+The Rust binding is mlua 0.11, also distributed under the MIT license.
+Their component-specific license files are included in release packages.
+
 ---------------------------------------------------------------------
 
                               Apache License

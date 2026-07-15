@@ -31,6 +31,7 @@ mod ai_hook;
 mod cli;
 mod clipboard;
 mod config;
+mod config_cli;
 mod daemon;
 mod display;
 mod event;
@@ -117,6 +118,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         #[cfg(unix)]
         Some(Subcommands::Msg(options)) => msg(options)?,
         Some(Subcommands::Migrate(options)) => migrate::migrate(options),
+        Some(Subcommands::Config(options)) => std::process::exit(config_cli::run(options)),
         #[cfg(windows)]
         Some(Subcommands::NotifyTest) => std::process::exit(crate::notify::notify_test()),
         #[cfg(windows)]

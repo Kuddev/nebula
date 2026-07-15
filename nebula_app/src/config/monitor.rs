@@ -172,7 +172,7 @@ impl ConfigMonitor {
     /// This checks the supplied list of files against the monitored files to determine if a
     /// restart is necessary.
     pub fn needs_restart(&self, files: &[PathBuf]) -> bool {
-        Self::hash_paths(files).is_none_or(|hash| Some(hash) == self.watched_hash)
+        Self::hash_paths(files).is_none_or(|hash| Some(hash) != self.watched_hash)
     }
 
     /// Generate the hash for a list of paths.
@@ -194,5 +194,25 @@ impl ConfigMonitor {
         let mut hasher = DefaultHasher::new();
         Hash::hash_slice(&sorted_files, &mut hasher);
         Some(hasher.finish())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_restarts_only_when_watched_paths_change() {
+        let original = vec![PathBuf::from("nebula.lua"), PathBuf::from("theme.lua")];
+        let same_reordered = vec![PathBuf::from("theme.lua"), PathBuf::from("nebula.lua")];
+        let hash = ConfigMonitor::hash_paths(&original);
+        let monitor = ConfigMonitor {
+            thread: std::thread::spawn(|| {}),
+            shutdown_tx: mpsc::channel().0,
+            watched_hash: hash,
+        };
+
+        assert!(!monitor.needs_restart(&same_reordered));
+        assert!(monitor.needs_restart(&[PathBuf::from("nebula.lua")]));
     }
 }

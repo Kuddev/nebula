@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use nebula_config::SerdeReplace;
-use clap::{ArgAction, Args, Parser, Subcommand, ValueHint};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum, ValueHint};
 use log::{LevelFilter, error};
 use serde::{Deserialize, Serialize};
 use toml::Value;
@@ -236,6 +236,8 @@ pub enum Subcommands {
     #[cfg(unix)]
     Msg(MessageOptions),
     Migrate(MigrateOptions),
+    /// Validate or create the Nebula configuration.
+    Config(ConfigOptions),
     /// Test system notification (toast) delivery.
     #[cfg(windows)]
     NotifyTest,
@@ -248,6 +250,62 @@ pub enum Subcommands {
     /// (claude, vim, cargo…). All arguments are forwarded to the system `ssh`.
     #[cfg(windows)]
     Ssh(SshOptions),
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigOptions {
+    #[clap(subcommand)]
+    pub command: ConfigCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Validate a Lua, TOML, or YAML configuration without opening the GUI.
+    Check(ConfigCheckOptions),
+    /// Create an annotated Lua configuration template.
+    Init(ConfigInitOptions),
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigCheckOptions {
+    /// Configuration file to validate; otherwise use normal discovery.
+    #[clap(long, value_hint = ValueHint::FilePath)]
+    pub config_file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigInitOptions {
+    /// Lua configuration path; otherwise use the platform user config directory.
+    #[clap(long, value_hint = ValueHint::FilePath)]
+    pub config_file: Option<PathBuf>,
+
+    /// Comment language for the generated template.
+    #[clap(long, value_enum, default_value = "system")]
+    pub language: ConfigLanguage,
+
+    /// Back up and replace an existing configuration.
+    #[clap(long)]
+    pub force: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigLanguage {
+    #[value(name = "system")]
+    System,
+    #[value(name = "zh-CN")]
+    ZhCn,
+    #[value(name = "en-US")]
+    EnUs,
+}
+
+impl ConfigLanguage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::ZhCn => "zh-CN",
+            Self::EnUs => "en-US",
+        }
+    }
 }
 
 /// Options for the `setup-ai` subcommand.
@@ -517,6 +575,29 @@ mod tests {
     fn invalid_option_as_value() {
         let value = toml::from_str::<Value>("}");
         assert!(value.is_err());
+    }
+
+    #[test]
+    fn parses_config_check_and_init_subcommands() {
+        let check =
+            Options::try_parse_from(["nebula", "config", "check", "--config-file", "sample.lua"])
+                .unwrap();
+        assert!(matches!(
+            check.subcommands,
+            Some(Subcommands::Config(ConfigOptions { command: ConfigCommand::Check(_) }))
+        ));
+
+        let init =
+            Options::try_parse_from(["nebula", "config", "init", "--language", "zh-CN"]).unwrap();
+        assert!(matches!(
+            init.subcommands,
+            Some(Subcommands::Config(ConfigOptions {
+                command: ConfigCommand::Init(ConfigInitOptions {
+                    language: ConfigLanguage::ZhCn,
+                    ..
+                })
+            }))
+        ));
     }
 
     #[test]

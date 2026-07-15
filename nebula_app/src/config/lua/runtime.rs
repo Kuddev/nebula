@@ -19,6 +19,7 @@ impl ReloadSignal {
         self.0.store(true, Ordering::Release);
     }
 
+    #[cfg(test)]
     pub fn take(&self) -> bool {
         self.0.swap(false, Ordering::AcqRel)
     }

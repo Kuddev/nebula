@@ -1,9 +1,10 @@
 use std::fmt::{self, Display, Formatter};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::result::Result as StdResult;
 use std::{env, fs, io};
 
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use serde::Deserialize;
 use serde_yaml::Error as YamlError;
 use toml::de::Error as TomlError;
@@ -18,9 +19,12 @@ pub mod font;
 pub mod general;
 pub mod lua;
 pub mod monitor;
+pub mod reload;
 pub mod scrolling;
 pub mod selection;
 pub mod serde_utils;
+pub mod source;
+pub mod template;
 pub mod terminal;
 pub mod ui_config;
 pub mod window;
@@ -60,6 +64,9 @@ pub enum Error {
 
     /// Invalid yaml.
     Yaml(YamlError),
+
+    /// Lua configuration failed to load or validate.
+    Lua(lua::LuaConfigError),
 }
 
 impl std::error::Error for Error {
@@ -70,6 +77,7 @@ impl std::error::Error for Error {
             Error::Toml(err) => err.source(),
             Error::TomlSe(err) => err.source(),
             Error::Yaml(err) => err.source(),
+            Error::Lua(err) => Some(err),
         }
     }
 }
@@ -84,6 +92,7 @@ impl Display for Error {
             Error::Toml(err) => write!(f, "Config error: {err}"),
             Error::TomlSe(err) => write!(f, "Yaml conversion error: {err}"),
             Error::Yaml(err) => write!(f, "Config error: {err}"),
+            Error::Lua(err) => write!(f, "Lua config error: {err}"),
         }
     }
 }
@@ -118,45 +127,53 @@ impl From<YamlError> for Error {
     }
 }
 
+impl From<lua::LuaConfigError> for Error {
+    fn from(val: lua::LuaConfigError) -> Self {
+        Error::Lua(val)
+    }
+}
+
+pub struct LoadedConfig {
+    pub config: UiConfig,
+    pub source: Option<source::ConfigSource>,
+    pub lua_generation: Option<lua::LuaGeneration>,
+}
+
+impl Deref for LoadedConfig {
+    type Target = UiConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
 /// Load the configuration file.
-pub fn load(options: &mut Options) -> UiConfig {
-    let config_path = options
-        .config_file
-        .clone()
-        .or_else(|| installed_config("toml"))
-        .or_else(|| installed_config("yml"));
+pub fn load(options: &mut Options) -> LoadedConfig {
+    let config_source = match source::discover(options.config_file.clone()) {
+        Ok(source) => source,
+        Err(err) => {
+            error!(target: LOG_TARGET_CONFIG, "Unable to discover configuration: {err}");
+            None
+        },
+    };
 
     // Load the config using the following fallback behavior:
     //  - Config path + CLI overrides
     //  - CLI overrides
     //  - Default
-    let mut config = config_path
-        .as_ref()
-        .and_then(|config_path| load_from(config_path).ok())
-        .unwrap_or_else(|| {
+    let mut loaded =
+        config_source.as_ref().and_then(|source| load_source(source).ok()).unwrap_or_else(|| {
             let mut config = UiConfig::default();
-            match config_path {
-                Some(config_path) => config.config_paths.push(config_path),
+            match config_source.as_ref() {
+                Some(source) => config.config_paths.push(source.primary_path.clone()),
                 None => info!(target: LOG_TARGET_CONFIG, "No config file found; using default"),
             }
-            config
+            LoadedConfig { config, source: config_source.clone(), lua_generation: None }
         });
 
-    after_loading(&mut config, options);
+    after_loading(&mut loaded.config, options);
 
-    config
-}
-
-/// Attempt to reload the configuration file.
-pub fn reload(config_path: &Path, options: &mut Options) -> Result<UiConfig> {
-    debug!("Reloading configuration file: {config_path:?}");
-
-    // Load config, propagating errors.
-    let mut config = load_from(config_path)?;
-
-    after_loading(&mut config, options);
-
-    Ok(config)
+    loaded
 }
 
 /// Modifications after the `UiConfig` object is created.
@@ -166,15 +183,39 @@ fn after_loading(config: &mut UiConfig, options: &mut Options) {
 }
 
 /// Load configuration file and log errors.
-fn load_from(path: &Path) -> Result<UiConfig> {
-    match read_config(path) {
+pub fn load_source(source: &source::ConfigSource) -> Result<LoadedConfig> {
+    let result: Result<LoadedConfig> = match source.format {
+        source::ConfigFormat::Lua => {
+            lua::load_lua_file(&source.primary_path, lua::runtime::ReloadSignal::default())
+                .map(|loaded| {
+                    for diagnostic in &loaded.diagnostics {
+                        warn!(target: LOG_TARGET_CONFIG, "{}", diagnostic.message);
+                    }
+                    LoadedConfig {
+                        config: loaded.config,
+                        source: Some(source.clone()),
+                        lua_generation: Some(loaded.generation),
+                    }
+                })
+                .map_err(Error::Lua)
+        },
+        source::ConfigFormat::Toml | source::ConfigFormat::Yaml => {
+            read_config(&source.primary_path).map(|config| LoadedConfig {
+                config,
+                source: Some(source.clone()),
+                lua_generation: None,
+            })
+        },
+    };
+
+    match result {
         Ok(config) => Ok(config),
         Err(Error::Io(io)) if io.kind() == io::ErrorKind::NotFound => {
-            error!(target: LOG_TARGET_CONFIG, "Unable to load config {path:?}: File not found");
+            error!(target: LOG_TARGET_CONFIG, "Unable to load config {:?}: File not found", source.primary_path);
             Err(Error::Io(io))
         },
         Err(err) => {
-            error!(target: LOG_TARGET_CONFIG, "Unable to load config {path:?}: {err}");
+            error!(target: LOG_TARGET_CONFIG, "Unable to load config {:?}: {err}", source.primary_path);
             Err(err)
         },
     }

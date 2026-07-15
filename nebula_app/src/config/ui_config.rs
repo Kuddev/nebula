@@ -1,10 +1,9 @@
-use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{self, Formatter};
 use std::mem;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use log::{error, warn};
 use serde::de::{Error as SerdeError, MapAccess, Visitor};
@@ -259,14 +258,14 @@ pub struct Hints {
     alphabet: HintsAlphabet,
 
     /// All configured terminal hints.
-    pub enabled: Vec<Rc<Hint>>,
+    pub enabled: Vec<Arc<Hint>>,
 }
 
 impl Default for Hints {
     fn default() -> Self {
         // Add URL hint by default when no other hint is present.
         let pattern = LazyRegexVariant::Pattern(String::from(URL_REGEX));
-        let regex = LazyRegex(Rc::new(RefCell::new(pattern)));
+        let regex = LazyRegex(Arc::new(Mutex::new(pattern)));
         let content = HintContent::new(Some(regex), true);
 
         #[cfg(not(any(target_os = "macos", windows)))]
@@ -280,7 +279,7 @@ impl Default for Hints {
         });
 
         Self {
-            enabled: vec![Rc::new(Hint {
+            enabled: vec![Arc::new(Hint {
                 content,
                 action,
                 persist: false,
@@ -479,12 +478,12 @@ pub struct HintBinding {
 
     /// Cache for on-demand [`HintBinding`] to [`KeyBinding`] conversion.
     #[serde(skip)]
-    cache: OnceCell<KeyBinding>,
+    cache: OnceLock<KeyBinding>,
 }
 
 impl HintBinding {
     /// Get the key binding for a hint.
-    pub fn key_binding(&self, hint: &Rc<Hint>) -> &KeyBinding {
+    pub fn key_binding(&self, hint: &Arc<Hint>) -> &KeyBinding {
         self.cache.get_or_init(|| KeyBinding {
             trigger: self.key.clone(),
             mods: self.mods.0,
@@ -517,8 +516,8 @@ pub struct HintMouse {
 }
 
 /// Lazy regex with interior mutability.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LazyRegex(Rc<RefCell<LazyRegexVariant>>);
+#[derive(Clone, Debug)]
+pub struct LazyRegex(Arc<Mutex<LazyRegexVariant>>);
 
 impl LazyRegex {
     /// Execute a function with the compiled regex DFAs as parameter.
@@ -526,7 +525,7 @@ impl LazyRegex {
     where
         F: FnMut(&mut RegexSearch) -> T,
     {
-        self.0.borrow_mut().compiled().map(f)
+        self.0.lock().unwrap_or_else(|lock| lock.into_inner()).compiled().map(f)
     }
 }
 
@@ -536,7 +535,7 @@ impl<'de> Deserialize<'de> for LazyRegex {
         D: Deserializer<'de>,
     {
         let regex = LazyRegexVariant::Pattern(String::deserialize(deserializer)?);
-        Ok(Self(Rc::new(RefCell::new(regex))))
+        Ok(Self(Arc::new(Mutex::new(regex))))
     }
 }
 
@@ -545,7 +544,7 @@ impl Serialize for LazyRegex {
     where
         S: Serializer,
     {
-        let variant = self.0.borrow();
+        let variant = self.0.lock().unwrap_or_else(|lock| lock.into_inner());
         let regex = match &*variant {
             LazyRegexVariant::Compiled(regex, _) => regex,
             LazyRegexVariant::Uncompilable(regex) => regex,
@@ -554,6 +553,19 @@ impl Serialize for LazyRegex {
         serializer.serialize_str(regex)
     }
 }
+
+impl PartialEq for LazyRegex {
+    fn eq(&self, other: &Self) -> bool {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return true;
+        }
+        let value = self.0.lock().unwrap_or_else(|lock| lock.into_inner());
+        let other = other.0.lock().unwrap_or_else(|lock| lock.into_inner());
+        *value == *other
+    }
+}
+
+impl Eq for LazyRegex {}
 
 /// Regex which is compiled on demand, to avoid expensive computations at startup.
 #[derive(Clone, Debug)]

@@ -1706,7 +1706,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::SettingsHit::OpenConfigFile => {
-                        self.ctx.display().open_settings_file();
+                        self.ctx.display().open_user_config_file();
                         self.ctx.mark_dirty();
                         return;
                     },

@@ -1,0 +1,42 @@
+name: Linux Lua configuration
+
+on:
+  push:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/linux-lua.yml"
+  pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/linux-lua.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-24-04:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config \
+            libfontconfig1-dev libfreetype6-dev \
+            libegl1-mesa-dev libgl1-mesa-dev \
+            libwayland-dev libxkbcommon-dev \
+            libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Test Lua configuration on Wayland and X11 build
+        run: cargo test -p nebula config::
+      - name: Check Linux release build
+        run: cargo check --workspace --release

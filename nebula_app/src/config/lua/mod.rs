@@ -1,6 +1,6 @@
 use std::fmt::{self, Display, Formatter};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use mlua::Value as LuaValue;
 use nebula_config::{ConfigDiagnostic, UnknownFieldPolicy, capture_diagnostics};
@@ -15,8 +15,7 @@ use convert::{LuaValueError, lua_value_to_toml};
 use runtime::{LuaRuntime, ReloadSignal, builder_strict};
 
 pub struct LuaGeneration {
-    pub lua: mlua::Lua,
-    pub watched_paths: Vec<PathBuf>,
+    pub(crate) _lua: mlua::Lua,
 }
 
 pub struct LoadedLuaConfig {
@@ -90,7 +89,11 @@ pub fn load_lua_file(path: &Path, reload: ReloadSignal) -> Result<LoadedLuaConfi
     config.config_paths = watched_paths.clone();
     let lua = runtime.into_lua();
 
-    Ok(LoadedLuaConfig { config, generation: LuaGeneration { lua, watched_paths }, diagnostics })
+    Ok(LoadedLuaConfig {
+        config,
+        generation: LuaGeneration { _lua: lua },
+        diagnostics,
+    })
 }
 
 pub(super) fn validate_config_value(
@@ -133,7 +136,7 @@ mod tests {
         let loaded =
             load_lua_file(&temp.path().join("nebula.lua"), ReloadSignal::default()).unwrap();
         assert_eq!(loaded.config.scrolling.history(), 9876);
-        assert!(loaded.generation.watched_paths.iter().any(|path| path.ends_with("theme.lua")));
+        assert!(loaded.config.config_paths.iter().any(|path| path.ends_with("theme.lua")));
     }
 
     #[test]
