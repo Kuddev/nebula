@@ -300,9 +300,12 @@ fn terminal_content_rect(size: &SizeInfo) -> (f32, f32, f32, f32) {
     (x, y, width, height)
 }
 
-fn terminal_content_contains(size: &SizeInfo, x: f32, y: f32) -> bool {
-    // 分屏 SizeInfo 共享整窗尺寸，只能用网格行列还原当前 Pane 的真实内容边界。
-    let (left, top, width, height) = terminal_content_rect(size);
+fn pane_viewport_contains(size: &SizeInfo, x: f32, y: f32) -> bool {
+    // 分屏 SizeInfo 共享整窗尺寸，Pane 的真实分配范围由四边独立 padding 共同决定。
+    let left = size.padding_x();
+    let top = size.padding_y();
+    let width = size.width() - left - size.padding_right();
+    let height = size.height() - top - size.padding_bottom();
     x >= left && x < left + width && y >= top && y < top + height
 }
 
@@ -375,9 +378,7 @@ impl WindowContext {
     /// The pane whose rectangle contains the screen point `(x, y)`, if any.
     pub(super) fn pane_at_position(&self, x: f32, y: f32) -> Option<PaneId> {
         let (panes, _) = self.layout_geometry(false);
-        panes
-            .into_iter()
-            .find_map(|(id, view)| terminal_content_contains(&view, x, y).then_some(id))
+        panes.into_iter().find_map(|(id, view)| pane_viewport_contains(&view, x, y).then_some(id))
     }
 
     /// Move focus to the nearest pane in direction `nav` from the focused one.
@@ -853,7 +854,7 @@ impl WindowContext {
 mod resize_layout_tests {
     use nebula_terminal::grid::Dimensions;
 
-    use super::{Layout, collect_layout, terminal_content_contains, terminal_content_rect};
+    use super::{Layout, collect_layout, pane_viewport_contains, terminal_content_rect};
     use crate::display::{SizeInfo, SplitDirection};
 
     #[test]
@@ -973,9 +974,11 @@ mod resize_layout_tests {
         let left = panes.iter().find(|(id, _)| *id == 1).unwrap().1;
         let right = panes.iter().find(|(id, _)| *id == 2).unwrap().1;
         let right_center_x = right.padding_x() + right.columns() as f32 * right.cell_width() * 0.5;
+        let right_allocated_edge = right.width() - right.padding_right() - 0.5;
         let center_y = right.padding_y() + right.screen_lines() as f32 * right.cell_height() * 0.5;
 
-        assert!(!terminal_content_contains(&left, right_center_x, center_y));
-        assert!(terminal_content_contains(&right, right_center_x, center_y));
+        assert!(!pane_viewport_contains(&left, right_center_x, center_y));
+        assert!(pane_viewport_contains(&right, right_center_x, center_y));
+        assert!(pane_viewport_contains(&right, right_allocated_edge, center_y));
     }
 }
