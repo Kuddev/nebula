@@ -56,9 +56,9 @@ use crate::display::damage::{DamageTracker, damage_y_to_viewport_y};
 use crate::display::hint::{HintMatch, HintState};
 use crate::display::meter::Meter;
 use crate::display::window::Window;
-use crate::renderer::Rasterizer;
 use crate::event::{Event, EventType, Mouse, SearchState};
 use crate::message_bar::{MessageBuffer, MessageType};
+use crate::renderer::Rasterizer;
 use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
 use crate::renderer::ui::{Gradient, Rgba, UiQuad};
 use crate::renderer::{self, GlyphCache, Renderer, platform};
@@ -75,6 +75,7 @@ mod chrome;
 pub mod command_palette;
 mod context_menu;
 pub mod design_tokens;
+mod i18n;
 pub mod markdown_view;
 pub mod sftp_panel;
 pub mod side_panel;
@@ -86,6 +87,7 @@ use chrome::{
     truncate_tab_label,
 };
 pub use context_menu::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
+pub use i18n::{LanguagePreference, UiLanguage};
 
 mod file_dialog;
 mod settings;
@@ -325,13 +327,6 @@ pub enum AcceptKey {
 }
 
 impl AcceptKey {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Right => "\u{2192}",
-            Self::Tab => "Tab",
-            Self::Both => "\u{2192} / Tab",
-        }
-    }
     fn cycle(self) -> Self {
         match self {
             Self::Right => Self::Tab,
@@ -644,7 +639,7 @@ pub(crate) fn program_icon(program: &str) -> &'static str {
         "cursor" | "cursor-agent" => "\u{f0ec3}", // md-cursor-default-outline
         "aider" | "goose" | "crush" | "ollama" => "\u{f06a9}", // md-robot
         "opencode" => "\u{f489}", // oct-terminal
-        "pi" => "\u{f135}",       // fa-code
+        "pi" => "\u{f135}",      // fa-code
         "git" | "gh" | "lazygit" => "\u{f418}", // oct-git-branch
         "vim" | "nvim" | "vi" | "hx" | "nano" => "\u{e62b}", // custom-vim
         "ssh" | "mosh" => "\u{f489}", // oct-terminal (remote)
@@ -1390,6 +1385,8 @@ pub struct Display {
     /// window is following the operating system.
     nebula_window_theme_override: Option<WinitTheme>,
     pub nebula_settings_open: bool,
+    nebula_language_preference: LanguagePreference,
+    nebula_language: UiLanguage,
     /// Paths from the last successful app configuration generation.
     nebula_config_paths: Vec<PathBuf>,
     /// Settings content scroll offset in scaled px (0 = top of the section).
@@ -1598,11 +1595,8 @@ impl Display {
         let required_font_install = None;
 
         debug!("Loading \"{}\" font", &settings_init.font_family);
-        let font = config
-            .font
-            .clone()
-            .with_family(settings_init.font_family.clone())
-            .with_size(font_size);
+        let font =
+            config.font.clone().with_family(settings_init.font_family.clone()).with_size(font_size);
         let mut glyph_cache = GlyphCache::new(rasterizer, &font)?;
         #[cfg(windows)]
         let mut nebula_font_families = glyph_cache.private_font_families();
@@ -1813,9 +1807,15 @@ impl Display {
             nebula_system_theme,
             nebula_window_theme_override,
             nebula_settings_open: false,
+            nebula_language_preference: settings_init.language,
+            nebula_language: settings_init.language.resolved(),
             nebula_config_paths: config.config_paths.clone(),
             nebula_settings_scroll: 0.0,
-            nebula_palette: command_palette::CommandPalette::new(),
+            nebula_palette: {
+                let mut palette = command_palette::CommandPalette::new();
+                palette.set_language(settings_init.language.resolved());
+                palette
+            },
             nebula_detected_shells: None,
             nebula_side_panel: side_panel::SidePanel::new(),
             nebula_sftp_panel: None,
@@ -1884,6 +1884,10 @@ impl Display {
         self.nebula_settings_open
     }
 
+    pub fn ui_language(&self) -> UiLanguage {
+        self.nebula_language
+    }
+
     pub fn settings_section(&self) -> NebulaSettingsSection {
         self.nebula_settings_section
     }
@@ -1906,9 +1910,11 @@ impl Display {
         if !self.nebula_settings_open {
             return;
         }
+        let area = self.terminal_card_rect();
         let max = settings::settings_max_scroll(
             &self.size_info,
             self.window.scale_factor as f32,
+            area,
             self.nebula_settings_section,
             self.nebula_shell_picker_open,
             self.nebula_detected_shells.as_ref().map_or(0, Vec::len),
@@ -2761,6 +2767,9 @@ impl Display {
     /// path so `draw_chrome` can still borrow `&mut renderer` afterwards.
     fn settings_view(&self) -> settings::SettingsView {
         settings::SettingsView {
+            area: self.terminal_card_rect(),
+            language_preference: self.nebula_language_preference,
+            language: self.nebula_language,
             section: self.nebula_settings_section,
             hover: self.nebula_settings_hover,
             theme: self.nebula_theme,
@@ -2808,24 +2817,31 @@ impl Display {
         }
     }
 
-    pub fn toggle_settings(&mut self) {
-        self.nebula_settings_open = !self.nebula_settings_open;
-        if !self.nebula_settings_open {
+    pub fn set_settings_tab_active(&mut self, active: bool) {
+        if self.nebula_settings_open == active {
+            return;
+        }
+        self.nebula_settings_open = active;
+        if !active {
             self.nebula_shell_picker_open = false;
             self.nebula_font_picker_open = false;
+            self.nebula_settings_hover = SettingsHit::None;
+        } else {
+            // Each explicit visit starts at a predictable page origin.
+            self.nebula_settings_scroll = 0.0;
         }
-        // Fresh open always starts at the top.
-        self.nebula_settings_scroll = 0.0;
         self.pending_update.dirty = true;
     }
 
-    pub fn dismiss_settings(&mut self) {
-        if self.nebula_settings_open {
-            self.nebula_settings_open = false;
-            self.nebula_shell_picker_open = false;
-            self.nebula_font_picker_open = false;
-            self.pending_update.dirty = true;
+    pub fn set_ui_language(&mut self, preference: LanguagePreference) {
+        if self.nebula_language_preference == preference {
+            return;
         }
+        self.nebula_language_preference = preference;
+        self.nebula_language = preference.resolved();
+        self.nebula_palette.set_language(self.nebula_language);
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
     }
 
     fn apply_nebula_theme(&mut self, theme: NebulaTheme) {
@@ -3148,7 +3164,7 @@ impl Display {
         };
         if !path.exists() {
             let language = crate::config::template::resolve_template_language(
-                None,
+                Some(self.nebula_language_preference.as_str()),
                 None,
                 crate::config::template::system_locale().as_deref(),
             )
@@ -3749,6 +3765,7 @@ impl Display {
 
     fn persist_nebula_settings(&mut self) {
         settings::nebula_settings_write(&settings::NebulaRuntimeSettings {
+            language: self.nebula_language_preference,
             ghost: self.nebula_ghost_enabled,
             accept: self.nebula_accept,
             shell: self.nebula_shell,
@@ -3777,6 +3794,9 @@ impl Display {
         }
 
         let settings = settings::nebula_settings_load(config);
+        self.nebula_language_preference = settings.language;
+        self.nebula_language = settings.language.resolved();
+        self.nebula_palette.set_language(self.nebula_language);
         let image_changed = settings.background_image != self.nebula_background_image;
         let font_changed = settings.font_family != self.nebula_font_family;
         self.nebula_theme_preference = settings.theme;
@@ -4700,6 +4720,26 @@ impl Display {
             area,
             scale,
         );
+
+        self.present_frame(scheduler);
+    }
+
+    /// Draw the Settings special tab. Its controls are emitted by the chrome
+    /// pass so they retain the same hit geometry and icon texture pipeline as
+    /// the rest of Nebula, but the base is a normal tab content card.
+    pub fn draw_settings_frame(&mut self, scheduler: &mut Scheduler) {
+        self.renderer.set_window_height(self.size_info.height());
+
+        let shell_bg = self.nebula_theme.palette().shell_bg;
+        self.renderer.clear(shell_bg, self.nebula_window_opacity);
+        self.draw_background_image();
+
+        let card_bg = self.nebula_background.unwrap_or(self.colors[NamedColor::Background]);
+        let (cx, cy, cw, ch) = self.terminal_card_rect();
+        let scale = self.window.scale_factor as f32;
+        let card_r = (UI_SHELL_RADIUS_LOGICAL * scale).round();
+        let card = Rgba::new(card_bg.r, card_bg.g, card_bg.b, 255);
+        self.renderer.draw_ui(&self.size_info, &[UiQuad::solid(cx, cy, cw, ch, card_r, card)]);
 
         self.present_frame(scheduler);
     }
@@ -6534,9 +6574,8 @@ mod nebula_ux_tests {
 
     #[test]
     fn missing_font_notice_can_be_dismissed() {
-        let confirm = NebulaConfirm::InstallRequiredFont {
-            directory: std::path::PathBuf::from("fonts"),
-        };
+        let confirm =
+            NebulaConfirm::InstallRequiredFont { directory: std::path::PathBuf::from("fonts") };
 
         assert!(confirm.can_dismiss());
     }

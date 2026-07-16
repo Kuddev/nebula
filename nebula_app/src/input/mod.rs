@@ -648,6 +648,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let font_picker_open = self.ctx.display().nebula_font_picker_open;
         let font_picker_count = self.ctx.display().font_picker_count();
         let hidden_host_count = self.ctx.display().hidden_ssh_host_count();
+        let settings_area = self.ctx.display().terminal_card_rect();
         // A native context menu is a pointer-modal overlay: while it is open,
         // underlying links, tabs and drawer rows must not react to hover.
         if self.ctx.display().context_menu_interactive() {
@@ -673,6 +674,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let settings_hover = crate::display::settings_hit(
             &window_size,
             scale,
+            settings_area,
             x as f32,
             y as f32,
             settings_open,
@@ -698,13 +700,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // pane's viewport — otherwise a band of the terminal area is mistaken
         // for chrome and swallows link hovers (no underline / no click).
         let resize_enabled = self.ctx.window().allows_drag_resize();
-        if let Some(dir) = crate::display::resize_edge(
-            &window_size,
-            scale,
-            x as f32,
-            y as f32,
-            resize_enabled,
-        ) {
+        if let Some(dir) =
+            crate::display::resize_edge(&window_size, scale, x as f32, y as f32, resize_enabled)
+        {
             use winit::window::ResizeDirection::*;
             let icon = match dir {
                 East | West => CursorIcon::EwResize,
@@ -719,6 +717,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             crate::display::SettingsHit::Toggle
             | crate::display::SettingsHit::Nav(_)
             | crate::display::SettingsHit::Theme(_)
+            | crate::display::SettingsHit::Language(_)
             | crate::display::SettingsHit::SystemThemeToggle
             | crate::display::SettingsHit::GhostToggle
             | crate::display::SettingsHit::AcceptCycle
@@ -743,7 +742,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Default);
                 return;
             },
-            crate::display::SettingsHit::Dismiss | crate::display::SettingsHit::None => {},
+            crate::display::SettingsHit::None => {},
         }
         if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32) {
             let icon = match self.ctx.display().chrome_hit(x as f32, y as f32) {
@@ -1543,9 +1542,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let scale = self.ctx.window().scale_factor as f32;
                 // Window border resize takes priority over the chrome controls.
                 let resize_enabled = self.ctx.window().allows_drag_resize();
-                if let Some(dir) =
-                    crate::display::resize_edge(&size, scale, x, y, resize_enabled)
-                {
+                if let Some(dir) = crate::display::resize_edge(&size, scale, x, y, resize_enabled) {
                     self.ctx.window().drag_resize(dir);
                     return;
                 }
@@ -1574,9 +1571,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let font_picker_open = self.ctx.display().nebula_font_picker_open;
                 let font_picker_count = self.ctx.display().font_picker_count();
                 let hidden_host_count = self.ctx.display().hidden_ssh_host_count();
+                let settings_area = self.ctx.display().terminal_card_rect();
                 let settings_hit = crate::display::settings_hit(
                     &size,
                     scale,
+                    settings_area,
                     x,
                     y,
                     settings_open,
@@ -1614,8 +1613,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 }
                 match settings_hit {
                     crate::display::SettingsHit::Toggle => {
-                        self.ctx.display().toggle_settings();
-                        self.ctx.mark_dirty();
+                        self.ctx.nebula_tab(crate::event::TabRequest::OpenSettings);
                         return;
                     },
                     crate::display::SettingsHit::Nav(section) => {
@@ -1625,6 +1623,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::Theme(theme) => {
                         self.ctx.display().select_nebula_theme(theme);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::Language(language) => {
+                        self.ctx.display().set_ui_language(language);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1716,11 +1719,6 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::SettingsHit::Panel => return,
-                    crate::display::SettingsHit::Dismiss => {
-                        self.ctx.display().dismiss_settings();
-                        self.ctx.mark_dirty();
-                        return;
-                    },
                     crate::display::SettingsHit::None => {},
                 }
                 let chrome_hit = self.ctx.display().chrome_hit(x, y);
@@ -2086,8 +2084,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     pub fn mouse_wheel_input(&mut self, delta: MouseScrollDelta, phase: TouchPhase) {
-        // The settings modal captures the wheel: scroll its content, not the
-        // terminal hiding behind the veil.
+        // The Settings tab captures the wheel: scroll its page instead of the
+        // sink terminal used for special-tab input routing.
         if self.ctx.display().settings_open() {
             let px = match delta {
                 MouseScrollDelta::LineDelta(_, lines) => {

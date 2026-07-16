@@ -639,6 +639,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // smoke on the light themes); close-hover red stays semantic.
     let palette = d.nebula_theme.palette();
     let sk = d.nebula_theme.skin();
+    let language = d.ui_language();
     #[allow(non_snake_case)]
     let (HOVER_FILL, HOVER_FILL_STRONG) = (sk.hover, sk.hover_strong);
     const CLOSE_HOVER_FILL: Rgba = Rgba::new(240, 80, 104, 96);
@@ -996,7 +997,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             d.nebula_chrome_hover,
             ChromeHit::TabsSection | ChromeHit::NewTab | ChromeHit::NewTabMenu
         );
-    if !d.nebula_settings_open && tabs_plus_visible {
+    if tabs_plus_visible {
         let plus_ink =
             if d.nebula_chrome_hover == ChromeHit::NewTab { sk.icon_hover } else { sk.icon };
         push_centered_add_icon(&mut quads, tab_layout.plus, scale, plus_ink);
@@ -1006,18 +1007,16 @@ pub(super) fn draw_chrome(d: &mut Display) {
     if d.nebula_chrome_hover == ChromeHit::NewTabMenu {
         quads.push(UiQuad::solid(menu_x, menu_y, menu_w, menu_h, pill_r, HOVER_FILL_STRONG));
     }
-    if !d.nebula_settings_open {
-        push_centered_more_icon(
-            &mut quads,
-            tab_layout.menu,
-            scale,
-            if d.nebula_chrome_hover == ChromeHit::NewTabMenu { sk.icon_hover } else { sk.icon },
-        );
-    }
+    push_centered_more_icon(
+        &mut quads,
+        tab_layout.menu,
+        scale,
+        if d.nebula_chrome_hover == ChromeHit::NewTabMenu { sk.icon_hover } else { sk.icon },
+    );
 
     // SSH HOSTS section (quad layer): hover fill per row + the per-section
     // overlay scrollbar thumbs. Row icons/labels render in the text pass.
-    if d.left_sidebar_visible() && !d.nebula_settings_open {
+    if d.left_sidebar_visible() {
         for (index, (hx, hy, hw, hh)) in tab_layout.hosts.iter().copied().enumerate() {
             if hw <= 0.0 {
                 continue;
@@ -1099,7 +1098,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         Gradient::Horizontal,
     ));
 
-    // Right-side drawer (directory tree / git) sits below modal layers. Keeps
+    // Right-side drawer (directory tree / git) remains part of the app shell. Keeps
     // drawing through slide-out; animation stepping is centralized in Display.
     d.step_chrome_anims();
     if d.side_panel_visible() {
@@ -1126,7 +1125,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
     }
 
     // No base pill behind the gear — just the icon (hover still fills).
-    // Nebula settings modal (dim veil, glass panel, controls) above the drawer.
+    // The Settings special tab paints its page inside the normal content card.
     if d.nebula_settings_open {
         settings::push_quads(&d.settings_view(), &mut quads, &size, scale);
     }
@@ -1228,9 +1227,8 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // Vertical tab labels. Each row's Y comes from the eased anim slot; the
     // label is left-aligned after the accent gutter, the × pinned right.
     let row_text_cy = |ry: f32, rh: f32| ry + (rh - cell_h) / 2.0;
-    // Sidebar text (caption, labels, × buttons) also stays under the
-    // settings glass — skip it entirely while the modal is up.
-    if d.left_sidebar_visible() && tab_layout.panel.2 > 0.0 && !d.nebula_settings_open {
+    // Sidebar text remains visible because Settings is a normal tab.
+    if d.left_sidebar_visible() && tab_layout.panel.2 > 0.0 {
         // "TABS" caption at the panel head, with an accordion chevron. The
         // panel abuts the top bar with no gap, so the caption is pushed down
         // inside the header band to keep clearance from the join.
@@ -1247,7 +1245,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             section_title_tracking,
             TXT_DIM,
             section_title_flags,
-            &format!("TABS  {tabs_chevron}"),
+            &format!("{}  {tabs_chevron}", language.pick("标签页", "TABS")),
             &mut d.glyph_cache,
         );
         for (index, (tab_x, row_y, tab_w, tab_h)) in tab_layout.tabs.iter().copied().enumerate() {
@@ -1463,7 +1461,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 section_title_tracking,
                 TXT_DIM,
                 section_title_flags,
-                &format!("SSH HOSTS  {hosts_chevron}"),
+                &format!("{}  {hosts_chevron}", language.pick("SSH 主机", "SSH HOSTS")),
                 &mut d.glyph_cache,
             );
             // Empty state: the section stays visible with a hint teaching the
@@ -1490,7 +1488,13 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 let mut line = String::new();
                 let mut cols = 0;
                 let mut line_y = hh_y + hh_h + s(2.0);
-                for ch in "输入 ssh 命令，连接后自动保存".chars() {
+                for ch in language
+                    .pick(
+                        "输入 ssh 命令，连接后自动保存",
+                        "Run an ssh command to save hosts after connecting",
+                    )
+                    .chars()
+                {
                     let ch_cols = ch.width().unwrap_or(0);
                     if cols + ch_cols > max_cols && !line.is_empty() {
                         d.renderer.draw_doc_text(
@@ -1592,7 +1596,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             &mut d.glyph_cache,
         );
     }
-    // Nebula settings modal text labels, above its quads.
+    // Settings tab text labels, above its quads.
     if d.nebula_settings_open {
         let view = d.settings_view();
         let settings_shell_icons =
@@ -1605,8 +1609,8 @@ pub(super) fn draw_chrome(d: &mut Display) {
     }
 
     // Palette text (query + result rows) sits on top of every chrome label.
-    // Drawer text stays below settings; otherwise it pierces the modal glass.
-    if d.side_panel_visible() && !d.nebula_settings_open {
+    // Drawer text remains in its own shell region beside the Settings page.
+    if d.side_panel_visible() {
         if let Some(panel) = d.nebula_sftp_panel.as_ref() {
             let scale = d.window.scale_factor as f32;
             let layout = sftp_panel::layout(&d.side_panel_layout(), scale);

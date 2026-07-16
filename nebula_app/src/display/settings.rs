@@ -1,5 +1,4 @@
-//! Top-left settings modal: a centered floating panel for Nebula's runtime
-//! appearance and completion settings.
+//! Settings special tab for Nebula's runtime appearance and completion settings.
 //!
 //! Mirrors the `command_palette` split, but goes one step further: besides the
 //! *model* (sections, hit-testing, geometry, and the `nebula_settings.txt`
@@ -11,7 +10,7 @@
 //!
 //! Being a descendant module of `display`, this file can freely use the parent's
 //! private helpers (`contains_rect`, `truncate_tab_label`, `nebula_data_dir`,
-//! `NebulaTheme::palette`, `AcceptKey::label`, …) via `super::` — no visibility
+//! `NebulaTheme::palette`, `AcceptKey`, …) via `super::` — no visibility
 //! churn needed in `mod.rs`.
 
 use unicode_width::UnicodeWidthChar;
@@ -23,13 +22,13 @@ use crate::renderer::{GlyphCache, Renderer};
 
 use super::theme::Skin;
 use super::{
-    AcceptKey, NebulaShell, NebulaTheme, SizeInfo, chrome_settings_button_rect, contains_rect,
-    nebula_data_dir, truncate_tab_label,
+    AcceptKey, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
+    chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label,
 };
 
 // Visual language: one flat panel color, one hairline, three text grays, ONE
 // accent — hierarchy comes from typography and spacing. Every color is a
-// [`Skin`] token from `display::theme` (single source of truth), so the modal
+// [`Skin`] token from `display::theme` (single source of truth), so the page
 // flips correctly between the light and dark theme families.
 
 /// Sidebar sections of the settings panel. Deliberately small: only sections
@@ -48,12 +47,12 @@ pub enum NebulaSettingsSection {
 }
 
 impl NebulaSettingsSection {
-    fn label(self) -> &'static str {
+    fn label(self, language: UiLanguage) -> &'static str {
         match self {
-            Self::Appearance => "外观",
-            Self::Profiles => "配置文件",
-            Self::Keymap => "按键映射",
-            Self::Advanced => "高级",
+            Self::Appearance => language.pick("外观", "Appearance"),
+            Self::Profiles => language.pick("配置文件", "Profiles"),
+            Self::Keymap => language.pick("按键映射", "Key bindings"),
+            Self::Advanced => language.pick("高级", "Advanced"),
         }
     }
 }
@@ -61,22 +60,22 @@ impl NebulaSettingsSection {
 /// Shortcut sheet shown in 设置→按键映射. Read-only for now: the combos on the
 /// right are Nebula's effective defaults; `[[keyboard.bindings]]` in the config
 /// file (设置→配置文件→打开配置文件) remaps the standard actions.
-pub(super) const KEYMAP_ROWS: &[(&str, &str)] = &[
-    ("新建标签页", "Ctrl+Shift+T"),
-    ("关闭标签页 / 分屏", "Ctrl+Shift+W"),
-    ("下一个 / 上一个标签页", "Ctrl+Tab / Ctrl+Shift+Tab"),
-    ("切换到第 N 个标签页", "Alt+1..9 或 Ctrl+1..9"),
-    ("新建窗口", "Ctrl+Shift+E"),
-    ("命令面板", "Ctrl+Shift+P"),
-    ("左右 / 上下分屏", "Ctrl+Shift+D / Ctrl+Shift+S"),
-    ("分屏焦点切换", "Ctrl+Alt+方向键"),
-    ("放大当前分屏", "Ctrl+Shift+Enter"),
-    ("启动 Profile N", "Ctrl+Shift+1..9"),
-    ("目录树 / Git 面板", "Ctrl+Shift+O / Ctrl+Shift+G"),
-    ("搜索（向前 / 向后）", "Ctrl+Shift+F / Ctrl+Shift+B"),
-    ("复制 / 粘贴", "Ctrl+Shift+C / Ctrl+V"),
-    ("字号 增 / 减 / 重置", "Ctrl+= / Ctrl+- / Ctrl+0"),
-    ("全屏", "Alt+Enter"),
+pub(super) const KEYMAP_ROWS: &[(&str, &str, &str)] = &[
+    ("新建标签页", "New tab", "Ctrl+Shift+T"),
+    ("关闭标签页 / 分屏", "Close tab / pane", "Ctrl+Shift+W"),
+    ("下一个 / 上一个标签页", "Next / previous tab", "Ctrl+Tab / Ctrl+Shift+Tab"),
+    ("切换到第 N 个标签页", "Select tab N", "Alt+1..9 / Ctrl+1..9"),
+    ("新建窗口", "New window", "Ctrl+Shift+E"),
+    ("命令面板", "Command palette", "Ctrl+Shift+P"),
+    ("左右 / 上下分屏", "Split right / down", "Ctrl+Shift+D / Ctrl+Shift+S"),
+    ("分屏焦点切换", "Move pane focus", "Ctrl+Alt+Arrow"),
+    ("放大当前分屏", "Zoom current pane", "Ctrl+Shift+Enter"),
+    ("启动 Profile N", "Launch Profile N", "Ctrl+Shift+1..9"),
+    ("目录树 / Git 面板", "Files / Git panel", "Ctrl+Shift+O / Ctrl+Shift+G"),
+    ("搜索（向前 / 向后）", "Search forward / backward", "Ctrl+Shift+F / Ctrl+Shift+B"),
+    ("复制 / 粘贴", "Copy / paste", "Ctrl+Shift+C / Ctrl+V"),
+    ("字号 增 / 减 / 重置", "Font size up / down / reset", "Ctrl+= / Ctrl+- / Ctrl+0"),
+    ("全屏", "Fullscreen", "Alt+Enter"),
 ];
 
 /// Hit result for the top-left Nebula settings affordance.
@@ -85,9 +84,9 @@ pub enum SettingsHit {
     None,
     Toggle,
     Panel,
-    Dismiss,
     Nav(NebulaSettingsSection),
     Theme(NebulaTheme),
+    Language(LanguagePreference),
     SystemThemeToggle,
     GhostToggle,
     AcceptCycle,
@@ -114,6 +113,7 @@ pub enum SettingsHit {
 // ---- runtime settings store (`Nebula/nebula_settings.txt`) ----
 
 pub(super) struct NebulaRuntimeSettings {
+    pub(super) language: LanguagePreference,
     pub(super) ghost: bool,
     pub(super) accept: AcceptKey,
     pub(super) shell: NebulaShell,
@@ -157,6 +157,7 @@ pub(super) struct NebulaRuntimeSettings {
 pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
     let path = nebula_data_dir().join("nebula_settings.txt");
     let mut settings = NebulaRuntimeSettings {
+        language: LanguagePreference::System,
         ghost: true,
         accept: AcceptKey::Both,
         shell: NebulaShell::PowerShell,
@@ -186,6 +187,11 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
     if let Ok(data) = std::fs::read_to_string(path) {
         for line in data.lines() {
             match line.split_once('=') {
+                Some(("language", v)) => {
+                    if let Some(language) = LanguagePreference::parse(v) {
+                        settings.language = language;
+                    }
+                },
                 Some(("ghost", v)) => settings.ghost = v.trim() != "0",
                 Some(("theme", v)) => {
                     if let Some(theme) = NebulaTheme::from_prompt_name(v.trim()) {
@@ -316,7 +322,8 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let _ = std::fs::write(
         path,
         format!(
-            "theme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nfont_family={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n",
+            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nfont_family={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n",
+            settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
             settings.font_family,
@@ -355,9 +362,11 @@ struct SettingsGeometry {
     hidden_host_count: usize,
     /// Full-width "窗口透明度" row (the frame); the stepper buttons below sit
     /// inside it.
+    language_row: (f32, f32, f32, f32),
     opacity_row: (f32, f32, f32, f32),
     opacity_down: (f32, f32, f32, f32),
     opacity_up: (f32, f32, f32, f32),
+    language: [(LanguagePreference, f32, f32, f32, f32); 3],
     background: (f32, f32, f32, f32),
     background_image: (f32, f32, f32, f32),
     reset: (f32, f32, f32, f32),
@@ -376,7 +385,7 @@ struct SettingsGeometry {
     keep_session: (f32, f32, f32, f32),
 }
 
-/// Scrollable-content viewport height for the settings modal.
+/// Scrollable-content viewport height for the Settings tab.
 fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
     popup_h - 72.0 * scale_factor
 }
@@ -386,6 +395,7 @@ fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
 pub(super) fn settings_max_scroll(
     size_info: &SizeInfo,
     scale_factor: f32,
+    area: (f32, f32, f32, f32),
     section: NebulaSettingsSection,
     shell_picker_open: bool,
     shell_picker_count: usize,
@@ -396,6 +406,7 @@ pub(super) fn settings_max_scroll(
     let geometry = settings_geometry(
         size_info,
         scale_factor,
+        area,
         0.0,
         shell_picker_open,
         shell_picker_count,
@@ -416,6 +427,7 @@ pub(super) fn settings_max_scroll(
 fn settings_geometry(
     size_info: &SizeInfo,
     scale_factor: f32,
+    area: (f32, f32, f32, f32),
     scroll: f32,
     shell_picker_open: bool,
     shell_picker_count: usize,
@@ -424,23 +436,16 @@ fn settings_geometry(
     hidden_host_count: usize,
 ) -> SettingsGeometry {
     let s = |v: f32| v * scale_factor;
-    let w = size_info.width();
-    let h = size_info.height();
-    let margin = s(8.0);
-    let bar_h = s(40.0);
     let gear = chrome_settings_button_rect(size_info, scale_factor);
 
-    // Floating, centered modal — fixed design size clamped to the window so it
-    // never fills the whole screen, sized to hold the 4+3 theme card grid plus
-    // the compact appearance/profile controls (no large vertical gaps).
-    let popup_w = s(1000.0).min(w - 2.0 * margin);
-    let popup_h = s(640.0).min(h - 2.0 * bar_h - 2.0 * margin);
-    let popup_x = ((w - popup_w) * 0.5).max(margin);
-    let popup_y = ((h - popup_h) * 0.5).max(bar_h + margin);
-    let sidebar_w = s(240.0).min(popup_w * 0.30);
+    // The settings surface is the active tab's content card. Keeping the
+    // geometry rooted in that card makes sidebar/drawer animations and DPI
+    // changes follow the exact same bounds as terminal and document tabs.
+    let (popup_x, popup_y, popup_w, popup_h) = area;
+    let sidebar_w = s(220.0).min(popup_w * 0.30);
     let sidebar = (popup_x, popup_y, sidebar_w, popup_h);
     let content_x = popup_x + sidebar_w + s(16.0);
-    let content_w = (popup_w - sidebar_w - s(16.0)).max(s(520.0));
+    let content_w = (popup_w - sidebar_w - s(16.0)).max(s(240.0));
     let content = (content_x, popup_y, content_w, popup_h);
 
     // The header band (big section title) is fixed; everything below it
@@ -479,11 +484,16 @@ fn settings_geometry(
     let system_theme_y0 = card_y0 + 2.0 * (64.0 + 48.0) + GROUP_ADVANCE;
     let color_y0 = system_theme_y0 + ROW_H + GROUP_ADVANCE;
     let iface_y0 = color_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
-    let appearance_h = s(iface_y0 + ROW_H + 32.0 - 72.0);
+    let opacity_y0 = iface_y0 + ROW_H;
+    let appearance_h = s(opacity_y0 + ROW_H + 32.0 - 72.0);
     // Opacity row controls, right-aligned with NO overlap: value · − · slider · +.
-    let opacity_row = (row_x, at(iface_y0), row_w, row_h);
-    let opacity_down = (row_x + row_w - s(224.0), at(iface_y0) + s(4.0), s(40.0), s(36.0));
-    let opacity_up = (row_x + row_w - s(46.0), at(iface_y0) + s(4.0), s(40.0), s(36.0));
+    let opacity_row = (row_x, at(opacity_y0), row_w, row_h);
+    let opacity_down = (row_x + row_w - s(224.0), at(opacity_y0) + s(4.0), s(40.0), s(36.0));
+    let opacity_up = (row_x + row_w - s(46.0), at(opacity_y0) + s(4.0), s(40.0), s(36.0));
+    let language_track_w = s(360.0).min(row_w * 0.58);
+    let language_w = language_track_w / 3.0;
+    let language_x = row_x + row_w - language_track_w - s(8.0);
+    let language_y = at(iface_y0) + s(5.0);
 
     // Sidebar navigation rows. Only the two wired-up sections are listed; the
     // rects line up with the active-row highlight drawn while rendering.
@@ -506,8 +516,7 @@ fn settings_geometry(
     let shell_picker_extra =
         if shell_picker_open { shell_picker_count as f32 * ROW_H } else { 0.0 };
     let font_y0 = shell_y0 + ROW_H + shell_picker_extra;
-    let font_picker_extra =
-        if font_picker_open { font_picker_count as f32 * ROW_H } else { 0.0 };
+    let font_picker_extra = if font_picker_open { font_picker_count as f32 * ROW_H } else { 0.0 };
     let fetch_y0 = font_y0 + ROW_H + font_picker_extra;
     let ghost_y0 = fetch_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let open_y0 = ghost_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
@@ -547,9 +556,21 @@ fn settings_geometry(
         system_theme: (row_x, at(system_theme_y0), row_w, row_h),
         background: (row_x, at(color_y0), row_w, row_h),
         background_image: (row_x, at(color_y0 + ROW_H), row_w, row_h),
+        language_row: (row_x, at(iface_y0), row_w, row_h),
         opacity_row,
         opacity_down,
         opacity_up,
+        language: [
+            (LanguagePreference::System, language_x, language_y, language_w, s(34.0)),
+            (LanguagePreference::ZhCn, language_x + language_w, language_y, language_w, s(34.0)),
+            (
+                LanguagePreference::EnUs,
+                language_x + language_w * 2.0,
+                language_y,
+                language_w,
+                s(34.0),
+            ),
+        ],
         shell: (row_x, at(shell_y0), row_w, row_h),
         shell_picker: (
             at(shell_y0 + ROW_H),
@@ -587,6 +608,7 @@ fn settings_geometry(
 pub fn settings_hit(
     size_info: &SizeInfo,
     scale_factor: f32,
+    area: (f32, f32, f32, f32),
     x: f32,
     y: f32,
     popup_open: bool,
@@ -601,6 +623,7 @@ pub fn settings_hit(
     let geometry = settings_geometry(
         size_info,
         scale_factor,
+        area,
         scroll,
         shell_picker_open,
         shell_picker_count,
@@ -650,6 +673,11 @@ pub fn settings_hit(
                 if contains_rect(geometry.background_image, x, y) {
                     return SettingsHit::BackgroundImage;
                 }
+                for (language, lx, ly, lw, lh) in geometry.language {
+                    if contains_rect((lx, ly, lw, lh), x, y) {
+                        return SettingsHit::Language(language);
+                    }
+                }
                 if contains_rect(geometry.opacity_down, x, y) {
                     return SettingsHit::OpacityDown;
                 }
@@ -680,12 +708,8 @@ pub fn settings_hit(
                 if font_picker_open && in_viewport {
                     let (picker_y0, row_h, max) = geometry.font_picker;
                     for i in 0..max {
-                        let rect = (
-                            geometry.font.0,
-                            picker_y0 + i as f32 * row_h,
-                            geometry.font.2,
-                            row_h,
-                        );
+                        let rect =
+                            (geometry.font.0, picker_y0 + i as f32 * row_h, geometry.font.2, row_h);
                         if contains_rect(rect, x, y) {
                             return SettingsHit::FontPickerRow(i);
                         }
@@ -723,7 +747,7 @@ pub fn settings_hit(
         }
     }
 
-    if contains_rect(geometry.popup, x, y) { SettingsHit::Panel } else { SettingsHit::Dismiss }
+    if contains_rect(geometry.popup, x, y) { SettingsHit::Panel } else { SettingsHit::None }
 }
 
 // ---- rendering ----
@@ -732,6 +756,11 @@ pub fn settings_hit(
 /// data (notably the wallpaper path) so the caller can hand it in by reference
 /// while still borrowing `&mut renderer` for [`draw_text`].
 pub(super) struct SettingsView {
+    /// The active tab's content card in physical pixels. Settings fills this
+    /// area like any other tab instead of inventing a second floating window.
+    pub(super) area: (f32, f32, f32, f32),
+    pub(super) language_preference: LanguagePreference,
+    pub(super) language: UiLanguage,
     pub(super) section: NebulaSettingsSection,
     pub(super) hover: SettingsHit,
     pub(super) theme: NebulaTheme,
@@ -766,9 +795,7 @@ pub(super) struct SettingsView {
     pub(super) scroll: f32,
 }
 
-/// Push the settings modal's background quads (dim veil, flat neutral panel,
-/// sidebar separator, nav indicator, rows, theme cards and controls). Caller
-/// guards on the panel being open.
+/// Push the Settings tab's background quads, navigation, rows and controls.
 pub(super) fn push_quads(
     view: &SettingsView,
     quads: &mut Vec<UiQuad>,
@@ -776,13 +803,12 @@ pub(super) fn push_quads(
     scale: f32,
 ) {
     let s = |v: f32| v * scale;
-    let w = size.width();
-    let h = size.height();
     let sk = view.theme.skin();
 
     let geometry = settings_geometry(
         size,
         scale,
+        view.area,
         view.scroll,
         view.shell_picker_open,
         view.shells.len(),
@@ -806,31 +832,8 @@ pub(super) fn push_quads(
         }
     };
 
-    // Heavily dim the whole window behind the modal. The panel is now opaque,
-    // so the veil's only job is to push the terminal far back — a strong, near
-    // -black wash reads as "modal focus" instead of the old faint glass tint.
-    quads.push(UiQuad::solid(0.0, 0.0, w, h, 0.0, Rgba::new(0, 0, 0, 205)));
-
-    // Diffuse shadow: one wide, soft glow under the panel sells the Z-depth
-    // (the softer and wider, the higher the panel appears to float).
-    quads.push(UiQuad::glow(
-        px - s(44.0),
-        py - s(26.0),
-        pw + s(88.0),
-        ph + s(96.0),
-        Rgba::new(0, 0, 0, 180),
-    ));
-
-    // Hairline edge + near-opaque themed panel (two-layer stroke: 1px larger
-    // quad underneath), then a 1px top edge-light — the lit bevel.
-    quads.push(UiQuad::solid(
-        px - s(1.0),
-        py - s(1.0),
-        pw + s(2.0),
-        ph + s(2.0),
-        s(13.0),
-        sk.hairline,
-    ));
+    // The page is flush with the active tab card. No veil, drop shadow or
+    // second window outline: depth belongs to the app shell, not this page.
     quads.push(UiQuad::solid(px, py, pw, ph, s(12.0), sk.panel));
     quads.push(UiQuad::solid(
         px + s(12.0),
@@ -1033,18 +1036,36 @@ pub(super) fn push_quads(
             }
 
             group_frame(quads, geometry.system_theme, 1);
-            row_hover(
-                quads,
-                geometry.system_theme,
-                view.hover == SettingsHit::SystemThemeToggle,
-            );
+            row_hover(quads, geometry.system_theme, view.hover == SettingsHit::SystemThemeToggle);
             toggle(quads, geometry.system_theme, view.follow_system_theme);
 
-            // 自定义背景: one 2-row frame. 界面: one single-row frame.
+            // 自定义背景和界面都使用连续分组，避免设置 Tab 内再次出现
+            // 漂浮卡片语言。
             group_frame(quads, geometry.background, 2);
             row_hover(quads, geometry.background, view.hover == SettingsHit::BackgroundColor);
             row_hover(quads, geometry.background_image, view.hover == SettingsHit::BackgroundImage);
-            group_frame(quads, geometry.opacity_row, 1);
+            group_frame(quads, geometry.language_row, 2);
+            for (language, lx, ly, lw, lh) in geometry.language {
+                let selected = language == view.language_preference;
+                let hovered = view.hover == SettingsHit::Language(language);
+                clip(
+                    quads,
+                    UiQuad::solid(
+                        lx,
+                        ly,
+                        lw,
+                        lh,
+                        s(6.0),
+                        if selected {
+                            sk.accent_soft
+                        } else if hovered {
+                            sk.hover
+                        } else {
+                            sk.surface
+                        },
+                    ),
+                );
+            }
 
             // Opacity controls inside the row: ghost stepper buttons flanking
             // a muted rail with a flat accent fill and a round thumb.
@@ -1175,11 +1196,7 @@ pub(super) fn push_quads(
                 for index in 0..geometry.hidden_host_count {
                     let mut rect = geometry.hidden_host_row0;
                     rect.1 += index as f32 * rect.3;
-                    row_hover(
-                        quads,
-                        rect,
-                        view.hover == SettingsHit::RestoreHiddenSsh(index),
-                    );
+                    row_hover(quads, rect, view.hover == SettingsHit::RestoreHiddenSsh(index));
                 }
             }
             for (hit, rect) in [
@@ -1305,8 +1322,7 @@ fn row_label(
     r.draw_chrome_text(size, vx.max(value_left), ty, value_ink, &value, gc);
 }
 
-/// Draw the settings modal's text labels on top of its quads. Caller guards on
-/// the panel being open.
+/// Draw the Settings tab's text labels on top of its quads.
 pub(super) fn draw_text(
     view: &SettingsView,
     r: &mut Renderer,
@@ -1318,10 +1334,12 @@ pub(super) fn draw_text(
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
     let sk = view.theme.skin();
+    let language = view.language;
 
     let geometry = settings_geometry(
         size,
         scale,
+        view.area,
         view.scroll,
         view.shell_picker_open,
         view.shells.len(),
@@ -1354,12 +1372,12 @@ pub(super) fn draw_text(
         py + s(22.0),
         1.5,
         sk.ink_strong,
-        "Nebula 设置",
+        language.pick("Nebula 设置", "Nebula Settings"),
     );
     {
         // Center the reset label inside its ghost button.
         let (rx, ry, rw, rh) = geometry.reset;
-        let label = "恢复默认设置";
+        let label = language.pick("恢复默认设置", "Restore defaults");
         let cols: usize = label.chars().map(|c| c.width().unwrap_or(0)).sum();
         let tx = rx + (rw - cols as f32 * cell_w) / 2.0;
         r.draw_chrome_text(size, tx, ry + (rh - cell_h) / 2.0, sk.ink_dim, label, gc);
@@ -1380,7 +1398,7 @@ pub(super) fn draw_text(
             } else {
                 sk.ink_dim
             },
-            nav_section.label(),
+            nav_section.label(view.language),
             gc,
         );
     }
@@ -1396,7 +1414,7 @@ pub(super) fn draw_text(
         content_y + s(20.0),
         1.6,
         sk.ink_strong,
-        section.label(),
+        section.label(view.language),
     );
 
     match section {
@@ -1411,7 +1429,7 @@ pub(super) fn draw_text(
                     &sk,
                     content_x + s(24.0),
                     group_y(cards_y),
-                    "主题",
+                    language.pick("主题", "Themes"),
                 );
             }
             for (theme, ox, oy, ow, oh) in geometry.options {
@@ -1443,7 +1461,16 @@ pub(super) fn draw_text(
             }
             let (st_x, st_y, _, st_h) = geometry.system_theme;
             if visible(group_y(st_y), title_h) {
-                section_title(r, gc, size, scale, &sk, st_x, group_y(st_y), "主题模式");
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    st_x,
+                    group_y(st_y),
+                    language.pick("主题模式", "Theme mode"),
+                );
             }
             if visible(st_y, st_h) {
                 r.draw_chrome_text(
@@ -1451,17 +1478,28 @@ pub(super) fn draw_text(
                     st_x + s(16.0),
                     st_y + (st_h - cell_h) / 2.0,
                     sk.ink,
-                    "跟随系统明暗模式",
+                    language.pick("跟随系统明暗模式", "Follow system appearance"),
                     gc,
                 );
             }
             let (bg_x, bg_y, _, bg_h) = geometry.background;
             if visible(group_y(bg_y), title_h) {
-                section_title(r, gc, size, scale, &sk, bg_x, group_y(bg_y), "自定义背景");
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    bg_x,
+                    group_y(bg_y),
+                    language.pick("自定义背景", "Custom background"),
+                );
             }
             if visible(bg_y, bg_h) {
-                let background_v =
-                    view.background.map(format_hex_rgb).unwrap_or_else(|| "主题默认".to_owned());
+                let background_v = view
+                    .background
+                    .map(format_hex_rgb)
+                    .unwrap_or_else(|| language.pick("主题默认", "Theme default").to_owned());
                 row_label(
                     r,
                     gc,
@@ -1469,7 +1507,7 @@ pub(super) fn draw_text(
                     scale,
                     &sk,
                     geometry.background,
-                    "背景色",
+                    language.pick("背景色", "Background color"),
                     &background_v,
                     sk.accent,
                 );
@@ -1481,7 +1519,7 @@ pub(super) fn draw_text(
                     .background_image
                     .as_deref()
                     .map(|path| format!("{path} · {:.0}%", view.background_image_opacity * 100.0))
-                    .unwrap_or_else(|| "未设置".to_owned());
+                    .unwrap_or_else(|| language.pick("未设置", "Not set").to_owned());
                 row_label(
                     r,
                     gc,
@@ -1489,14 +1527,50 @@ pub(super) fn draw_text(
                     scale,
                     &sk,
                     geometry.background_image,
-                    "背景图片",
+                    language.pick("背景图片", "Background image"),
                     &image_v,
                     sk.accent,
                 );
             }
             let (or_x, or_y, _, or_h) = geometry.opacity_row;
-            if visible(group_y(or_y), title_h) {
-                section_title(r, gc, size, scale, &sk, content_x + s(24.0), group_y(or_y), "界面");
+            let (lr_x, lr_y, _, lr_h) = geometry.language_row;
+            if visible(group_y(lr_y), title_h) {
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    content_x + s(24.0),
+                    group_y(lr_y),
+                    language.pick("界面", "Interface"),
+                );
+            }
+            if visible(lr_y, lr_h) {
+                r.draw_chrome_text(
+                    size,
+                    lr_x + s(16.0),
+                    lr_y + (lr_h - cell_h) / 2.0,
+                    sk.ink,
+                    language.pick("语言", "Language"),
+                    gc,
+                );
+                for (preference, lx, ly, lw, lh) in geometry.language {
+                    let label = match preference {
+                        LanguagePreference::System => language.pick("跟随系统", "Follow system"),
+                        LanguagePreference::ZhCn => "简体中文",
+                        LanguagePreference::EnUs => "English",
+                    };
+                    let cols: usize = label.chars().map(|c| c.width().unwrap_or(0)).sum();
+                    r.draw_chrome_text(
+                        size,
+                        lx + (lw - cols as f32 * cell_w) / 2.0,
+                        ly + (lh - cell_h) / 2.0,
+                        if preference == view.language_preference { sk.accent } else { sk.ink_dim },
+                        label,
+                        gc,
+                    );
+                }
             }
             if visible(or_y, or_h) {
                 r.draw_chrome_text(
@@ -1504,7 +1578,7 @@ pub(super) fn draw_text(
                     or_x + s(16.0),
                     or_y + (or_h - cell_h) / 2.0,
                     sk.ink,
-                    "窗口透明度",
+                    language.pick("窗口透明度", "Window opacity"),
                     gc,
                 );
                 // Center the fullwidth −/＋ glyphs inside their stepper buttons.
@@ -1538,7 +1612,16 @@ pub(super) fn draw_text(
             // with the next group's title.
             let (sh_x, sh_y, _, sh_h) = geometry.shell;
             if visible(group_y(sh_y), title_h) {
-                section_title(r, gc, size, scale, &sk, sh_x, group_y(sh_y), "终端");
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    sh_x,
+                    group_y(sh_y),
+                    language.pick("终端", "Terminal"),
+                );
             }
             if visible(sh_y, sh_h) {
                 row_label(
@@ -1548,7 +1631,7 @@ pub(super) fn draw_text(
                     scale,
                     &sk,
                     geometry.shell,
-                    "默认 Shell",
+                    language.pick("默认 Shell", "Default shell"),
                     &view.shell_label,
                     sk.accent,
                 );
@@ -1597,7 +1680,7 @@ pub(super) fn draw_text(
                     scale,
                     &sk,
                     geometry.font,
-                    "终端字体",
+                    language.pick("终端字体", "Terminal font"),
                     font_value,
                     if view.font_notice.is_some() { sk.ink_dim } else { sk.accent },
                 );
@@ -1611,7 +1694,7 @@ pub(super) fn draw_text(
                 let (label, color) = match view.fonts.get(i) {
                     Some(family) if family == &view.font_family => (family.as_str(), sk.accent),
                     Some(family) => (family.as_str(), sk.ink),
-                    None => ("＋  导入字体…", sk.accent),
+                    None => (language.pick("＋  导入字体…", "+  Import font..."), sk.accent),
                 };
                 r.draw_chrome_text(
                     size,
@@ -1635,7 +1718,17 @@ pub(super) fn draw_text(
             // Boolean rows: the switch (drawn in `push_quads`) carries the
             // state; no "On/Off" string next to it.
             if visible(geometry.fetch.1, geometry.fetch.3) {
-                row_label(r, gc, size, scale, &sk, geometry.fetch, "启动欢迎信息", "", sk.ink);
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.fetch,
+                    language.pick("启动欢迎信息", "Startup welcome"),
+                    "",
+                    sk.ink,
+                );
             }
             if visible(geometry.powerline.1, geometry.powerline.3) {
                 row_label(
@@ -1645,7 +1738,7 @@ pub(super) fn draw_text(
                     scale,
                     &sk,
                     geometry.powerline,
-                    "Powerline 提示符",
+                    language.pick("Powerline 提示符", "Powerline prompt"),
                     "",
                     sk.ink,
                 );
@@ -1653,10 +1746,29 @@ pub(super) fn draw_text(
 
             let (gh_x, gh_y, _, gh_h) = geometry.ghost;
             if visible(group_y(gh_y), title_h) {
-                section_title(r, gc, size, scale, &sk, gh_x, group_y(gh_y), "补全");
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    gh_x,
+                    group_y(gh_y),
+                    language.pick("补全", "Completion"),
+                );
             }
             if visible(gh_y, gh_h) {
-                row_label(r, gc, size, scale, &sk, geometry.ghost, "历史补全灰字", "", sk.ink);
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.ghost,
+                    language.pick("历史补全灰字", "History ghost text"),
+                    "",
+                    sk.ink,
+                );
             }
             if visible(geometry.accept.1, geometry.accept.3) {
                 row_label(
@@ -1666,15 +1778,28 @@ pub(super) fn draw_text(
                     scale,
                     &sk,
                     geometry.accept,
-                    "补全接受键",
-                    view.accept.label(),
+                    language.pick("补全接受键", "Completion accept key"),
+                    match view.accept {
+                        AcceptKey::Right => language.pick("右方向键", "Right arrow"),
+                        AcceptKey::Tab => "Tab",
+                        AcceptKey::Both => language.pick("Tab 或右方向键", "Tab or Right arrow"),
+                    },
                     sk.accent,
                 );
             }
 
             let (ocx, ocy, _ocw, och) = geometry.open_config_file;
             if visible(group_y(ocy), title_h) {
-                section_title(r, gc, size, scale, &sk, ocx, group_y(ocy), "配置文件");
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    ocx,
+                    group_y(ocy),
+                    language.pick("配置文件", "Configuration"),
+                );
             }
             if visible(ocy, och) {
                 r.draw_chrome_text(
@@ -1682,7 +1807,7 @@ pub(super) fn draw_text(
                     ocx + s(16.0),
                     ocy + (och - cell_h) / 2.0,
                     sk.accent,
-                    "打开配置文件",
+                    language.pick("打开配置文件", "Open configuration file"),
                     gc,
                 );
             }
@@ -1698,13 +1823,26 @@ pub(super) fn draw_text(
                         &sk,
                         hx,
                         group_y(hy),
-                        "已隐藏 SSH 主机 · 密码不会恢复",
+                        language.pick(
+                            "已隐藏 SSH 主机 · 密码不会恢复",
+                            "Hidden SSH hosts · passwords are not restored",
+                        ),
                     );
                 }
                 for (index, host) in view.hidden_hosts.iter().enumerate() {
                     let rect = (hx, hy + index as f32 * hh, hw, hh);
                     if visible(rect.1, rect.3) {
-                        row_label(r, gc, size, scale, &sk, rect, host, "恢复", sk.accent);
+                        row_label(
+                            r,
+                            gc,
+                            size,
+                            scale,
+                            &sk,
+                            rect,
+                            host,
+                            language.pick("恢复", "Restore"),
+                            sk.accent,
+                        );
                     }
                 }
             }
@@ -1720,20 +1858,42 @@ pub(super) fn draw_text(
                     &sk,
                     kx,
                     group_y(ky),
-                    "快捷键（可在配置文件 [[keyboard.bindings]] 中自定义）",
+                    language.pick(
+                        "快捷键（可在配置文件 [[keyboard.bindings]] 中自定义）",
+                        "Shortcuts (customize in [[keyboard.bindings]])",
+                    ),
                 );
             }
-            for (i, (label, combo)) in KEYMAP_ROWS.iter().enumerate() {
+            for (i, (zh_label, en_label, combo)) in KEYMAP_ROWS.iter().enumerate() {
                 let rect = (kx, ky + i as f32 * geometry.keymap_row_h, kw, kh);
                 if visible(rect.1, rect.3) {
-                    row_label(r, gc, size, scale, &sk, rect, label, combo, sk.ink_dim);
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        rect,
+                        view.language.pick(zh_label, en_label),
+                        combo,
+                        sk.ink_dim,
+                    );
                 }
             }
         },
         NebulaSettingsSection::Advanced => {
             let (ax, ay, _, ah) = geometry.keep_session;
             if visible(group_y(ay), title_h) {
-                section_title(r, gc, size, scale, &sk, ax, group_y(ay), "会话");
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    ax,
+                    group_y(ay),
+                    language.pick("会话", "Sessions"),
+                );
             }
             if visible(ay, ah) {
                 // The switch (drawn in `push_quads`) carries the state; the
@@ -1745,7 +1905,10 @@ pub(super) fn draw_text(
                     scale,
                     &sk,
                     geometry.keep_session,
-                    "关闭窗口后保留会话（后台驻留，可恢复对话）",
+                    language.pick(
+                        "关闭窗口后保留会话（后台驻留，可恢复对话）",
+                        "Keep sessions after closing the window (resident and restorable)",
+                    ),
                     "",
                     sk.ink,
                 );
