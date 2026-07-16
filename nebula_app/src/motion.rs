@@ -212,6 +212,10 @@ impl Tween {
     pub fn is_active(self) -> bool {
         self.active
     }
+
+    pub fn target(self) -> f32 {
+        self.target
+    }
 }
 
 /// Allocation-free, interruption-friendly damped spring for interactive UI.
@@ -286,6 +290,87 @@ pub fn lerp(start: f32, end: f32, progress: f32) -> f32 {
     start + (end - start) * progress
 }
 
+pub trait Interpolate: Copy {
+    fn interpolate(self, end: Self, progress: f32) -> Self;
+}
+
+impl Interpolate for f32 {
+    fn interpolate(self, end: Self, progress: f32) -> Self {
+        lerp(self, end, progress)
+    }
+}
+
+impl<const N: usize> Interpolate for [f32; N] {
+    fn interpolate(self, end: Self, progress: f32) -> Self {
+        std::array::from_fn(|index| lerp(self[index], end[index], progress))
+    }
+}
+
+/// Generic allocation-free tween for positions, rectangles and linear color.
+#[derive(Debug, Clone, Copy)]
+pub struct ValueTween<T: Interpolate> {
+    start: T,
+    end: T,
+    progress: Tween,
+}
+
+/// Deterministic phase source for cursor blink, spinners and other loops.
+#[derive(Debug, Clone, Copy)]
+pub struct Pulse {
+    elapsed: Duration,
+    period: Duration,
+}
+
+impl Pulse {
+    pub fn new(period: Duration) -> Self {
+        Self { elapsed: Duration::ZERO, period: period.max(Duration::from_millis(1)) }
+    }
+
+    pub fn step(&mut self, frame: Frame) {
+        self.elapsed += frame.delta;
+        while self.elapsed >= self.period {
+            self.elapsed -= self.period;
+        }
+    }
+
+    pub fn phase(self) -> f32 {
+        self.elapsed.as_secs_f32() / self.period.as_secs_f32()
+    }
+
+    pub fn visible(self, duty_cycle: f32) -> bool {
+        self.phase() < duty_cycle.clamp(0.0, 1.0)
+    }
+
+    pub fn reset(&mut self) {
+        self.elapsed = Duration::ZERO;
+    }
+}
+
+impl<T: Interpolate> ValueTween<T> {
+    pub fn new(value: T) -> Self {
+        Self { start: value, end: value, progress: Tween::new(1.0) }
+    }
+
+    pub fn animate_to(&mut self, end: T, role: MotionRole, policy: MotionPolicy) {
+        self.start = self.value();
+        self.end = end;
+        self.progress.snap_to(0.0);
+        self.progress.animate_role(1.0, role, policy);
+    }
+
+    pub fn step(&mut self, frame: Frame) -> bool {
+        self.progress.step(frame)
+    }
+
+    pub fn value(self) -> T {
+        self.start.interpolate(self.end, self.progress.value())
+    }
+
+    pub fn is_active(self) -> bool {
+        self.progress.is_active()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +438,27 @@ mod tests {
             assert!((0.0..=1.001).contains(&spring.value()));
         }
         assert!((spring.value() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn value_tween_interpolates_rect_without_allocating() {
+        let now = Instant::now();
+        let mut motion = ValueTween::new([0.0, 10.0, 20.0, 30.0]);
+        motion.animate_to([10.0, 20.0, 40.0, 50.0], MotionRole::Relocate, MotionPolicy::Full);
+        motion.step(Frame { now, delta: MotionRole::Relocate.spec().duration / 2 });
+        let value = motion.value();
+        assert!(value[0] > 0.0 && value[0] < 10.0);
+        assert!(value[2] > 20.0 && value[2] < 40.0);
+    }
+
+    #[test]
+    fn pulse_wraps_without_losing_phase_contract() {
+        let now = Instant::now();
+        let mut pulse = Pulse::new(Duration::from_millis(1000));
+        pulse.step(Frame { now, delta: Duration::from_millis(750) });
+        assert!(!pulse.visible(0.5));
+        pulse.step(Frame { now, delta: Duration::from_millis(300) });
+        assert!(pulse.visible(0.5));
+        assert!((pulse.phase() - 0.05).abs() < 0.001);
     }
 }

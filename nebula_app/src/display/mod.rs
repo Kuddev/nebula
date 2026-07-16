@@ -257,6 +257,7 @@ impl UiAnim {
 #[derive(Debug, Clone)]
 struct NebulaUiAnims {
     clock: crate::motion::MotionClock,
+    frame: Option<crate::motion::Frame>,
     left_sidebar: UiAnim,
     right_drawer: UiAnim,
     ssh_editor: UiAnim,
@@ -266,6 +267,7 @@ impl NebulaUiAnims {
     fn new() -> Self {
         Self {
             clock: crate::motion::MotionClock::default(),
+            frame: None,
             left_sidebar: UiAnim::new(1.0),
             right_drawer: UiAnim::new(0.0),
             ssh_editor: UiAnim::new(0.0),
@@ -274,14 +276,64 @@ impl NebulaUiAnims {
 
     fn step(&mut self, left_open: bool, right_open: bool, ssh_open: bool) {
         let frame = self.clock.tick();
+        self.frame = Some(frame);
         self.left_sidebar.step(frame, if left_open { 1.0 } else { 0.0 });
         self.right_drawer.step(frame, if right_open { 1.0 } else { 0.0 });
         self.ssh_editor.step(frame, if ssh_open { 1.0 } else { 0.0 });
     }
 
+    fn frame(&mut self) -> crate::motion::Frame {
+        if let Some(frame) = self.frame {
+            frame
+        } else {
+            let frame = self.clock.tick();
+            self.frame = Some(frame);
+            frame
+        }
+    }
+
     fn animating(&self, left_open: bool, right_open: bool) -> bool {
         self.left_sidebar.animating_to(if left_open { 1.0 } else { 0.0 })
             || self.right_drawer.animating_to(if right_open { 1.0 } else { 0.0 })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResizeHud {
+    columns: usize,
+    rows: usize,
+    opacity: crate::motion::Tween,
+}
+
+impl ResizeHud {
+    fn new(columns: usize, rows: usize) -> Self {
+        let mut opacity = crate::motion::Tween::new(1.0);
+        opacity.animate_to(
+            0.0,
+            Duration::from_millis(900),
+            crate::motion::Easing::Linear,
+            crate::motion::MotionPolicy::Full,
+        );
+        Self { columns, rows, opacity }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SplitReveal {
+    rect: (f32, f32, f32, f32),
+    direction: SplitDirection,
+    motion: crate::motion::Tween,
+}
+
+impl SplitReveal {
+    pub fn new(rect: (f32, f32, f32, f32), direction: SplitDirection) -> Self {
+        let mut motion = crate::motion::Tween::new(0.0);
+        motion.animate_role(
+            1.0,
+            crate::motion::MotionRole::Enter,
+            crate::motion::MotionPolicy::Full,
+        );
+        Self { rect, direction, motion }
     }
 }
 
@@ -1308,7 +1360,7 @@ pub struct Display {
 
     /// Transient "cols × rows" HUD shown briefly after a window resize; it fades
     /// out over ~0.9s. `None` when nothing is showing.
-    nebula_resize_hud: Option<(usize, usize, Instant)>,
+    nebula_resize_hud: Option<ResizeHud>,
     /// Skip the first resize (window creation) so no HUD flashes at startup.
     nebula_resize_hud_armed: bool,
 
@@ -1321,14 +1373,14 @@ pub struct Display {
     nebula_commands: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Per-displayed-tab animated draw-x, eased toward the laid-out / drag
     /// target each frame so tab reorder "make way" slides instead of snapping.
-    nebula_tab_anim: Vec<f32>,
+    nebula_tab_anim: Vec<crate::motion::Spring>,
     /// Active scrollbar drag: the pointer's y-offset inside the thumb captured
     /// at press time, so the thumb tracks the pointer without jumping.
     pub nebula_scrollbar_drag: Option<f32>,
     /// Slide-in reveal for a freshly created split pane: its final rect, the
     /// split direction and the animation start time. Drawn as a shrinking
     /// bg-coloured cover in `draw_split_overlays`; cleared when done.
-    pub nebula_split_reveal: Option<(f32, f32, f32, f32, SplitDirection, std::time::Instant)>,
+    pub nebula_split_reveal: Option<SplitReveal>,
     /// Pending destructive-action confirmation (close with busy children /
     /// multi-line paste), drawn as a centered modal that owns the keyboard.
     pub nebula_confirm: Option<NebulaConfirm>,
@@ -3653,17 +3705,15 @@ impl Display {
         // panel's right edge (`sw - 12` logical, see `chrome_tab_layout`);
         // resting collapsed: the chrome margin.
         let t = self.left_sidebar_progress().clamp(0.0, 1.0);
-        let eased = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
         let sw = (SIDEBAR_W_LOGICAL * scale).round();
-        let x = s(8.0) + eased * (sw - s(4.0) - s(8.0));
+        let x = s(8.0) + t * (sw - s(4.0) - s(8.0));
         // Top edge: the top bar's bottom (margin 8 + bar height 40, matching
         // `draw_chrome`), plus a seam so the card visibly floats below it.
         let y = s(8.0 + 40.0) + seam;
         // Right edge follows the file/git drawer the same way: as it slides
         // in, the card cedes its width (drawer width + margin) plus the seam.
         let dt = self.nebula_ui_anims.right_drawer.value().clamp(0.0, 1.0);
-        let deased = 1.0 - (1.0 - dt) * (1.0 - dt) * (1.0 - dt);
-        let drawer = deased * (side_panel::PANEL_W_LOGICAL * scale + s(8.0));
+        let drawer = dt * (side_panel::PANEL_W_LOGICAL * scale + s(8.0));
         let w = (self.size_info.width() - drawer - seam - x).max(0.0);
         let h = (self.size_info.height() - seam - y).max(0.0);
         (x, y, w, h)
@@ -4095,7 +4145,7 @@ impl Display {
             // resize so nothing flashes when the window is first created.
             if self.nebula_resize_hud_armed {
                 self.nebula_resize_hud =
-                    Some((new_size.columns(), new_size.screen_lines(), Instant::now()));
+                    Some(ResizeHud::new(new_size.columns(), new_size.screen_lines()));
             }
             self.nebula_resize_hud_armed = true;
             nebula_link_log(format!(
@@ -4793,16 +4843,17 @@ impl Display {
         // pane's far edge shrinks away over ~160ms (ease-out), so the new pane
         // wipes in from the divider instead of popping. Timestamp-derived, no
         // per-frame allocation (same discipline as the quick-terminal slide).
-        if let Some((x, y, w, h, direction, start)) = self.nebula_split_reveal {
-            const DUR: f32 = 0.16;
-            let t = (start.elapsed().as_secs_f32() / DUR).min(1.0);
-            if t >= 1.0 {
+        if let Some(mut reveal) = self.nebula_split_reveal {
+            reveal.motion.step(self.nebula_ui_anims.frame());
+            let e = reveal.motion.value();
+            if !reveal.motion.is_active() {
                 self.nebula_split_reveal = None;
             } else {
-                let e = 1.0 - (1.0 - t).powi(3); // ease-out cubic
+                self.nebula_split_reveal = Some(reveal);
+                let (x, y, w, h) = reveal.rect;
                 let bg = self.nebula_background.unwrap_or(Rgb::new(15, 17, 26));
                 let cover = Rgba::new(bg.r, bg.g, bg.b, 255);
-                let (cx, cy, cw, chh) = match direction {
+                let (cx, cy, cw, chh) = match reveal.direction {
                     SplitDirection::LeftRight => (x + w * e, y, w * (1.0 - e), h),
                     SplitDirection::TopBottom => (x, y + h * e, w, h * (1.0 - e)),
                 };
@@ -5246,14 +5297,16 @@ impl Display {
     /// shown briefly after a resize (a resize overlay HUD). Keeps requesting
     /// redraws until it fades out, then clears itself.
     fn draw_resize_hud(&mut self) {
-        let Some((cols, rows, start)) = self.nebula_resize_hud else { return };
-        const HUD_DUR: f32 = 0.9;
-        let elapsed = start.elapsed().as_secs_f32();
-        if elapsed >= HUD_DUR {
+        let Some(mut hud) = self.nebula_resize_hud else { return };
+        hud.opacity.step(self.nebula_ui_anims.frame());
+        if !hud.opacity.is_active() {
             self.nebula_resize_hud = None;
             return;
         }
-        let fade = (1.0 - elapsed / HUD_DUR).clamp(0.0, 1.0);
+        self.nebula_resize_hud = Some(hud);
+        let cols = hud.columns;
+        let rows = hud.rows;
+        let fade = hud.opacity.value().clamp(0.0, 1.0);
 
         let size = self.size_info;
         let scale = self.window.scale_factor as f32;

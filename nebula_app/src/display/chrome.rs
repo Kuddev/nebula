@@ -279,9 +279,7 @@ pub(super) fn chrome_tab_layout(
     // margin (symmetric with the top bar's top at `margin`), leaving only a
     // breathing gap before the terminal grid on its right.
     let sw = SIDEBAR_W_LOGICAL * scale_factor;
-    let t = expand.clamp(0.0, 1.0);
-    let eased = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
-    let slide = (1.0 - eased) * sw;
+    let slide = (1.0 - expand.clamp(0.0, 1.0)) * sw;
     let panel_x = margin - slide;
     let panel_w = (sw - margin - s(12.0)).max(s(120.0));
     let panel_top = top + bar_h;
@@ -630,9 +628,11 @@ pub fn resize_edge(
 /// panels and pills with the dedicated UI renderer to validate the native
 /// (egui-free) chrome pipeline. Text labels and interactivity follow.
 pub(super) fn draw_chrome(d: &mut Display) {
+    d.step_chrome_anims();
+    let motion_frame = d.nebula_ui_anims.frame();
     // Tick command palette cursor animation (blink cycle).
     if d.nebula_palette.is_open() {
-        d.nebula_palette.tick_cursor();
+        d.nebula_palette.tick_cursor(motion_frame);
     }
 
     // Chrome colors come from the theme skin (hover washes flip to dark
@@ -800,7 +800,11 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // Ease each row toward its target draw-y (reorder "make way") instead of
     // snapping; a tab-count change resets to the freshly laid-out positions.
     if d.nebula_tab_anim.len() != tab_layout.tabs.len() {
-        d.nebula_tab_anim = tab_layout.tabs.iter().map(|t| t.1).collect();
+        d.nebula_tab_anim = tab_layout
+            .tabs
+            .iter()
+            .map(|tab| crate::motion::Spring::new(tab.1).with_response(0.14))
+            .collect();
     }
     let mut tab_anim_active = false;
 
@@ -808,22 +812,24 @@ pub(super) fn draw_chrome(d: &mut Display) {
         // Scrolled-out / folded rows carry a zero rect: skip them, and snap
         // their eased position so they don't fly in when they reappear.
         if tab_w <= 0.0 {
-            d.nebula_tab_anim[index] = row_y;
+            d.nebula_tab_anim[index].snap_to(row_y);
             continue;
         }
         let target_y = d.tab_drag_draw_y(index, row_y, &tab_layout);
-        let cur = d.nebula_tab_anim[index];
         // The grabbed pill tracks the pointer 1:1 (easing it would feel
         // laggy); only the rows making way ease toward their slots.
         let dragging_this =
             d.nebula_tab_drag.as_ref().is_some_and(|d| d.active && d.source == index);
-        let tab_y = if dragging_this || (target_y - cur).abs() < 0.5 {
+        let tab_y = if dragging_this {
+            d.nebula_tab_anim[index].snap_to(target_y);
             target_y
         } else {
-            tab_anim_active = true;
-            cur + (target_y - cur) * 0.28
+            let spring = &mut d.nebula_tab_anim[index];
+            spring.set_target(target_y, crate::motion::MotionPolicy::Full);
+            spring.step(motion_frame);
+            tab_anim_active |= spring.is_active();
+            spring.value()
         };
-        d.nebula_tab_anim[index] = tab_y;
         let tab_hovered = matches!(
             d.nebula_chrome_hover,
             ChromeHit::Tab(i) | ChromeHit::TabClose(i) if i == index
@@ -1100,7 +1106,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
 
     // Right-side drawer (directory tree / git) remains part of the app shell. Keeps
     // drawing through slide-out; animation stepping is centralized in Display.
-    d.step_chrome_anims();
     if d.side_panel_visible() {
         if let Some(panel) = d.nebula_sftp_panel.as_ref() {
             let layout = sftp_panel::layout(&d.side_panel_layout(), scale);
@@ -1257,7 +1262,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             if tab_w <= 0.0 {
                 continue;
             }
-            let row_y = d.nebula_tab_anim.get(index).copied().unwrap_or(row_y);
+            let row_y = d.nebula_tab_anim.get(index).map(|motion| motion.value()).unwrap_or(row_y);
             let tab_hovered = matches!(
                 d.nebula_chrome_hover,
                 ChromeHit::Tab(i) | ChromeHit::TabClose(i) if i == index

@@ -110,9 +110,9 @@ pub struct Processor {
     quick_terminal: Option<WindowId>,
     /// Whether the quick terminal is currently shown (target state).
     quick_visible: bool,
-    /// Active slide animation: `(start, sliding_in)`; `None` when idle. Just a
-    /// timestamp + direction — position is computed per frame, no frame cache.
-    quick_anim: Option<(Instant, bool)>,
+    /// Renderer-independent quick-terminal motion state.
+    quick_motion: crate::motion::Tween,
+    quick_motion_clock: crate::motion::MotionClock,
     /// Global hotkey manager, kept alive so its registration stays active.
     global_hotkey: Option<GlobalHotKeyManager>,
     /// Id of the registered quick-terminal toggle hotkey.
@@ -179,7 +179,8 @@ impl Processor {
             config_monitor,
             quick_terminal: None,
             quick_visible: false,
-            quick_anim: None,
+            quick_motion: crate::motion::Tween::new(1.0),
+            quick_motion_clock: crate::motion::MotionClock::default(),
             global_hotkey,
             quick_hotkey_id,
             detached: Vec::new(),
@@ -356,14 +357,26 @@ impl Processor {
                 let show = self.quick_visible;
                 if show {
                     if let Some(wc) = self.windows.get(&id) {
-                        // Park above the top edge, reveal, then slide down.
-                        wc.display.window.set_quick_terminal_slide(1.0);
+                        // A fully hidden window starts above the edge. Reversing
+                        // an active exit keeps its current position.
+                        if !self.quick_motion.is_active() {
+                            wc.display.window.set_quick_terminal_slide(1.0);
+                            self.quick_motion.snap_to(1.0);
+                        }
                         wc.display.window.set_visible(true);
                         wc.display.window.focus_window();
                     }
                 }
                 // Slide-out keeps the window visible until the animation ends.
-                self.quick_anim = Some((Instant::now(), show));
+                self.quick_motion.animate_role(
+                    if show { 0.0 } else { 1.0 },
+                    if show {
+                        crate::motion::MotionRole::Enter
+                    } else {
+                        crate::motion::MotionRole::Exit
+                    },
+                    crate::motion::MotionPolicy::Full,
+                );
                 return;
             }
             // The window was closed by the user; fall through and recreate it.
@@ -387,34 +400,37 @@ impl Processor {
                     wc.display.window.set_quick_terminal_slide(1.0);
                     wc.display.window.focus_window();
                 }
-                self.quick_anim = Some((Instant::now(), true));
+                self.quick_motion.snap_to(1.0);
+                self.quick_motion.animate_role(
+                    0.0,
+                    crate::motion::MotionRole::Enter,
+                    crate::motion::MotionPolicy::Full,
+                );
             },
             Err(err) => error!("Failed to create quick terminal: {err}"),
         }
     }
 
     /// Advance the quick-terminal slide one frame. Returns `true` while
-    /// animating (so the loop keeps polling). Position is derived from a
-    /// timestamp with an ease-out cubic — no frame cache, no allocation.
+    /// animating (so the loop keeps polling). Motion Runtime owns timing and
+    /// easing; this path only applies the resulting normalized position.
     fn animate_quick_terminal(&mut self) -> bool {
-        let Some((start, sliding_in)) = self.quick_anim else { return false };
+        if !self.quick_motion.is_active() {
+            return false;
+        }
         let Some(id) = self.quick_terminal else {
-            self.quick_anim = None;
+            self.quick_motion.snap_to(1.0);
             return false;
         };
-
-        const DURATION: f32 = 0.15;
-        let t = (start.elapsed().as_secs_f32() / DURATION).min(1.0);
-        let eased = 1.0 - (1.0 - t).powi(3); // ease-out cubic
-        let hidden = if sliding_in { 1.0 - eased } else { eased };
+        self.quick_motion.step(self.quick_motion_clock.tick());
+        let hidden = self.quick_motion.value().clamp(0.0, 1.0);
 
         if let Some(wc) = self.windows.get(&id) {
             wc.display.window.set_quick_terminal_slide(hidden);
         }
 
-        if t >= 1.0 {
-            self.quick_anim = None;
-            if !sliding_in {
+        if !self.quick_motion.is_active() {
+            if self.quick_motion.target() >= 1.0 {
                 // Slide-out finished: actually hide the window.
                 if let Some(wc) = self.windows.get(&id) {
                     wc.display.window.set_visible(false);

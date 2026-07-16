@@ -288,8 +288,7 @@ pub struct CommandPalette {
     /// Mouse-hovered row within the visible window (`None` when not hovering).
     hover: Option<usize>,
     /// Cursor blink animation state for the search input.
-    cursor_visible: bool,
-    cursor_last_toggle: std::time::Instant,
+    cursor_pulse: crate::motion::Pulse,
 }
 
 impl CommandPalette {
@@ -306,8 +305,7 @@ impl CommandPalette {
             profiles_only: false,
             picking_default: false,
             hover: None,
-            cursor_visible: true,
-            cursor_last_toggle: std::time::Instant::now(),
+            cursor_pulse: crate::motion::Pulse::new(std::time::Duration::from_millis(1060)),
         };
         palette.refilter();
         palette
@@ -440,16 +438,12 @@ impl CommandPalette {
     }
 
     /// Update cursor blink state. Call this each frame while the palette is open.
-    pub fn tick_cursor(&mut self) {
-        const BLINK_INTERVAL_MS: u128 = 530;
-        if self.cursor_last_toggle.elapsed().as_millis() >= BLINK_INTERVAL_MS {
-            self.cursor_visible = !self.cursor_visible;
-            self.cursor_last_toggle = std::time::Instant::now();
-        }
+    pub fn tick_cursor(&mut self, frame: crate::motion::Frame) {
+        self.cursor_pulse.step(frame);
     }
 
     pub fn cursor_visible(&self) -> bool {
-        self.cursor_visible
+        self.cursor_pulse.visible(0.5)
     }
 
     pub fn toggle(&mut self) {
