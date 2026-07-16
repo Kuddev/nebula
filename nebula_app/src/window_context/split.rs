@@ -154,6 +154,8 @@ impl Layout {
 #[allow(clippy::too_many_arguments)]
 fn collect_layout(
     layout: &Layout,
+    frame_width: f32,
+    frame_height: f32,
     cell_w: f32,
     cell_h: f32,
     divider: f32,
@@ -168,11 +170,22 @@ fn collect_layout(
 ) {
     match layout {
         Layout::Leaf(id) => {
-            // The renderer draws a cell at `padding + i * cell` and uses
-            // `extent - 2 * padding` as the content size, so encoding the
-            // top-left offset as padding places this pane's viewport at
-            // `[vx, vx + vw] x [vy, vy + vh]`.
-            let view = SizeInfo::new(vw + 2.0 * vx, vh + 2.0 * vy, cell_w, cell_h, vx, vy, false);
+            // Every pane renders into the same physical framebuffer. Keep its
+            // real extent and encode the pane rectangle through independent
+            // edge paddings; using `vw + 2*vx` made non-origin panes larger
+            // than the window and distorted OpenGL's viewport projection.
+            let padding_right = (frame_width - vx - vw).max(0.0);
+            let padding_bottom = (frame_height - vy - vh).max(0.0);
+            let view = SizeInfo::new_fully_asymmetric(
+                frame_width,
+                frame_height,
+                cell_w,
+                cell_h,
+                vx,
+                padding_right,
+                vy,
+                padding_bottom,
+            );
             panes.push((*id, view));
         },
         Layout::Split { direction, ratio, preview_ratio, first, second, .. } => {
@@ -192,6 +205,8 @@ fn collect_layout(
                     path.push(false);
                     collect_layout(
                         first,
+                        frame_width,
+                        frame_height,
                         cell_w,
                         cell_h,
                         divider,
@@ -208,6 +223,8 @@ fn collect_layout(
                     path.push(true);
                     collect_layout(
                         second,
+                        frame_width,
+                        frame_height,
                         cell_w,
                         cell_h,
                         divider,
@@ -236,6 +253,8 @@ fn collect_layout(
                     path.push(false);
                     collect_layout(
                         first,
+                        frame_width,
+                        frame_height,
                         cell_w,
                         cell_h,
                         divider,
@@ -252,6 +271,8 @@ fn collect_layout(
                     path.push(true);
                     collect_layout(
                         second,
+                        frame_width,
+                        frame_height,
                         cell_w,
                         cell_h,
                         divider,
@@ -328,6 +349,8 @@ impl WindowContext {
         let mut path = Vec::new();
         collect_layout(
             self.active_layout(),
+            size.width(),
+            size.height(),
             cell_w,
             cell_h,
             divider,
@@ -414,11 +437,7 @@ impl WindowContext {
         // Doc/settings tabs own no real pane: splitting one would graft the
         // DOC sentinel leaf into a split tree, whose draw pass then skips it
         // and leaves that half of the frame stale.
-        if self
-            .tabs
-            .get(self.active_tab)
-            .is_some_and(|tab| tab.doc.is_some() || tab.settings)
-        {
+        if self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some() || tab.settings) {
             return;
         }
         self.zoom = None;
@@ -833,7 +852,7 @@ mod resize_layout_tests {
     use nebula_terminal::grid::Dimensions;
 
     use super::{Layout, collect_layout, terminal_content_rect};
-    use crate::display::SizeInfo;
+    use crate::display::{SizeInfo, SplitDirection};
 
     #[test]
     fn pane_layout_keeps_message_bar_rows_out_of_the_pty_viewport() {
@@ -850,6 +869,8 @@ mod resize_layout_tests {
         let mut panes = Vec::new();
         collect_layout(
             &Layout::Leaf(7),
+            size.width(),
+            size.height(),
             size.cell_width(),
             size.cell_height(),
             8.0,
@@ -864,5 +885,55 @@ mod resize_layout_tests {
         );
         assert_eq!(panes[0].1.columns(), size.columns());
         assert_eq!(panes[0].1.screen_lines(), size.screen_lines());
+    }
+
+    #[test]
+    fn pane_views_keep_the_shared_framebuffer_extent() {
+        let mut size =
+            SizeInfo::new_fully_asymmetric(1000.0, 1000.0, 10.0, 20.0, 100.0, 20.0, 80.0, 20.0);
+        size.reserve_lines(2);
+        let (x, y, width, height) = terminal_content_rect(&size);
+        let layout = Layout::Split {
+            direction: SplitDirection::TopBottom,
+            ratio: 0.5,
+            preview_ratio: None,
+            dragging: false,
+            first: Box::new(Layout::Leaf(1)),
+            second: Box::new(Layout::Leaf(2)),
+        };
+
+        let mut panes = Vec::new();
+        collect_layout(
+            &layout,
+            size.width(),
+            size.height(),
+            size.cell_width(),
+            size.cell_height(),
+            8.0,
+            false,
+            x,
+            y,
+            width,
+            height,
+            &mut Vec::new(),
+            &mut panes,
+            &mut Vec::new(),
+        );
+
+        assert_eq!(panes.len(), 2);
+        for (_, pane) in &panes {
+            assert_eq!(pane.width(), size.width());
+            assert_eq!(pane.height(), size.height());
+            assert!(pane.padding_x() >= 0.0);
+            assert!(pane.padding_y() >= 0.0);
+            assert!(pane.padding_right() >= 0.0);
+            assert!(pane.padding_bottom() >= 0.0);
+        }
+
+        // The lower pane starts below the divider but still projects against
+        // the same framebuffer instead of inflating its height by `2 * y`.
+        assert!(panes[1].1.padding_y() > panes[0].1.padding_y());
+        assert_eq!(panes[1].1.width(), 1000.0);
+        assert_eq!(panes[1].1.height(), 1000.0);
     }
 }
