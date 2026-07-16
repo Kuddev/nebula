@@ -1847,6 +1847,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     crate::display::ChromeHit::None => {},
                 }
 
+                // A press inside the chrome band (top bar / tab sidebar) that
+                // hit no control ends here. Falling through used to reach the
+                // terminal's selection arming, which clamps the point into the
+                // nearest grid cell — dragging from the sidebar then painted a
+                // stray selection across the pane (the "drag ghost").
+                let window_size = self.ctx.display().size_info;
+                let scale = self.ctx.window().scale_factor as f32;
+                if crate::display::in_chrome_bar(&window_size, scale, x, y) {
+                    return;
+                }
+
                 // Nebula: grab the scrollback thumb (or jump on a track press).
                 // Only live while scrolled into history, since the bar auto-hides.
                 let view = self.ctx.size_info();

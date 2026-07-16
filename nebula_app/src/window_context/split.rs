@@ -411,6 +411,16 @@ impl WindowContext {
     /// focus. Works at any depth, so repeated splits nest into a layout tree
     /// (panes close via the close-pane action).
     pub(super) fn split_focused(&mut self, direction: SplitDirection) {
+        // Doc/settings tabs own no real pane: splitting one would graft the
+        // DOC sentinel leaf into a split tree, whose draw pass then skips it
+        // and leaves that half of the frame stale.
+        if self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.doc.is_some() || tab.settings)
+        {
+            return;
+        }
         self.zoom = None;
         let focused = self.focused_pane_id();
         let cwd = self.focused_cwd();
