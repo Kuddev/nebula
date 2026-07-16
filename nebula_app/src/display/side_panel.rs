@@ -649,10 +649,9 @@ pub fn panel_layout(
     let bar_h = s(40.0);
     let gap = s(12.0);
     let w = s(PANEL_W_LOGICAL).min(win_w * 0.42);
-    // Swift-out easing (design sheet's cubic-bezier(0.2, 0.8, 0.2, 1) feel):
-    // fast launch, soft landing.
-    let t = slide.clamp(0.0, 1.0);
-    let eased = 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+    // Motion Runtime already provides the physical response. Applying another
+    // curve here would double-ease the drawer and make its ending feel sticky.
+    let eased = slide.clamp(0.0, 1.0);
     // Resting x is inset by `margin` (mirroring the left panel's left inset);
     // closed, it rides fully off the right edge. Travel = the panel width plus
     // its margin so nothing peeks while closed.
@@ -707,10 +706,7 @@ pub fn panel_action_rects(
     if custom_root {
         let follow_width = s(62.0);
         let follow_x = open_x - s(4.0) - follow_width;
-        actions.push((
-            PanelHit::FollowCurrentDirectory,
-            (follow_x, y, follow_width, height),
-        ));
+        actions.push((PanelHit::FollowCurrentDirectory, (follow_x, y, follow_width, height)));
     }
     actions
 }
@@ -1238,7 +1234,8 @@ pub(super) fn draw_text(
                 .into_iter()
                 .map(|(_, rect)| rect.0)
                 .fold(px + pw - text_pad, f32::min);
-            let summary_cols = (((action_x - px - 2.0 * text_pad) / cell_w).floor() as usize).max(4);
+            let summary_cols =
+                (((action_x - px - 2.0 * text_pad) / cell_w).floor() as usize).max(4);
             let (summary, summary_ink) = if let Some(notice) = panel.root_notice() {
                 (clip_tail(notice, summary_cols), Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b))
             } else {
@@ -1539,10 +1536,8 @@ mod tests {
 
     #[test]
     fn missing_custom_root_returns_to_latest_cwd_with_visible_feedback() {
-        let base = std::env::temp_dir().join(format!(
-            "nebula-panel-missing-root-test-{}",
-            std::process::id()
-        ));
+        let base = std::env::temp_dir()
+            .join(format!("nebula-panel-missing-root-test-{}", std::process::id()));
         let cwd = base.join("cwd");
         let custom = base.join("custom");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -1564,10 +1559,8 @@ mod tests {
 
     #[test]
     fn invalid_custom_root_refreshes_notice_when_followed_cwd_is_the_same_path() {
-        let root = std::env::temp_dir().join(format!(
-            "nebula-panel-same-missing-root-test-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir()
+            .join(format!("nebula-panel-same-missing-root-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
 
         let mut panel = SidePanel::new();

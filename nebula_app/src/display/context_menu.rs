@@ -4,9 +4,7 @@
 //! hit-testing and animation live together here so pointer targets cannot drift
 //! away from the pixels the user sees at non-integer DPI scales.
 
-use std::time::Instant;
-
-use super::design_tokens::{control, elevation, motion, space};
+use super::design_tokens::{control, elevation, space};
 use super::*;
 
 // Maple Mono Normal NF CN ships the stable Codicon block below. Keep menu
@@ -65,8 +63,7 @@ pub enum ContextMenuHit {
 pub(super) struct ContextMenu {
     target: ContextMenuTarget,
     anchor: (f32, f32),
-    opened_at: Instant,
-    closing_at: Option<Instant>,
+    motion: crate::motion::Tween,
     hover: Option<ContextMenuAction>,
     current_color: Option<Rgb>,
 }
@@ -77,18 +74,23 @@ impl ContextMenu {
         anchor: (f32, f32),
         current_color: Option<Rgb>,
     ) -> Self {
-        Self {
-            target,
-            anchor,
-            opened_at: Instant::now(),
-            closing_at: None,
-            hover: None,
-            current_color,
-        }
+        let mut motion = crate::motion::Tween::new(0.0);
+        motion.animate_role(
+            1.0,
+            crate::motion::MotionRole::Enter,
+            crate::motion::MotionPolicy::Full,
+        );
+        Self { target, anchor, motion, hover: None, current_color }
     }
 
     pub(super) fn begin_close(&mut self) {
-        self.closing_at.get_or_insert_with(Instant::now);
+        if self.motion.target() != 0.0 {
+            self.motion.animate_role(
+                0.0,
+                crate::motion::MotionRole::Exit,
+                crate::motion::MotionPolicy::Full,
+            );
+        }
         self.hover = None;
     }
 
@@ -100,24 +102,16 @@ impl ContextMenu {
         true
     }
 
-    fn progress(&self) -> f32 {
-        if let Some(start) = self.closing_at {
-            return (1.0 - start.elapsed().as_secs_f32() / motion::MENU_CLOSE.as_secs_f32())
-                .clamp(0.0, 1.0);
-        }
-        (self.opened_at.elapsed().as_secs_f32() / motion::MENU_OPEN.as_secs_f32()).clamp(0.0, 1.0)
-    }
-
     pub(super) fn finished(&self) -> bool {
-        self.closing_at.is_some_and(|start| start.elapsed() >= motion::MENU_CLOSE)
+        self.motion.target() == 0.0 && !self.motion.is_active()
     }
 
     pub(super) fn animating(&self) -> bool {
-        self.closing_at.is_some() || self.opened_at.elapsed() < motion::MENU_OPEN
+        self.motion.is_active()
     }
 
     pub(super) fn interactive(&self) -> bool {
-        self.closing_at.is_none()
+        self.motion.target() != 0.0
     }
 }
 
@@ -373,18 +367,19 @@ fn fade_ink(base: Rgba, ink: Rgb, opacity: f32) -> Rgb {
 
 /// Paint the menu after the chrome/logo pass and before true modal dialogs.
 pub(super) fn draw(display: &mut Display) {
-    let Some(menu) = display.nebula_context_menu.clone() else { return };
+    let Some(mut menu) = display.nebula_context_menu.clone() else { return };
+    menu.motion.step(display.nebula_ui_anims.frame());
     if menu.finished() {
         display.nebula_context_menu = None;
         return;
     }
 
-    let progress = menu.progress();
-    let eased = 1.0 - (1.0 - progress) * (1.0 - progress) * (1.0 - progress);
+    let progress = menu.motion.value().clamp(0.0, 1.0);
+    display.nebula_context_menu = Some(menu.clone());
     let size = display.size_info;
     let scale = display.window.scale_factor as f32;
     let s = |v: f32| v * scale;
-    let layout = layout(&menu, size, scale, -s(5.0) * (1.0 - eased));
+    let layout = layout(&menu, size, scale, -s(5.0) * (1.0 - progress));
     let sk = display.nebula_theme.skin();
     let radius = s(9.0);
     let (px, py, pw, ph) = layout.panel;

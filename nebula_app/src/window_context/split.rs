@@ -17,7 +17,7 @@ use nebula_terminal::grid::Dimensions;
 use nebula_terminal::term::test::TermSize;
 
 use crate::display::{
-    SizeInfo, SplitDirection, SplitNav, NEBULA_SPLIT_DIVIDER_GAP, NEBULA_SPLIT_HIT_SLOP,
+    NEBULA_SPLIT_DIVIDER_GAP, NEBULA_SPLIT_HIT_SLOP, SizeInfo, SplitDirection, SplitNav,
 };
 
 use super::{Layout, Pane, PaneId, WindowContext};
@@ -180,7 +180,8 @@ fn collect_layout(
             match direction {
                 SplitDirection::LeftRight => {
                     let usable = (vw - divider).max(cell_w);
-                    let first_w = (usable * r).floor().max(cell_w).min((usable - cell_w).max(cell_w));
+                    let first_w =
+                        (usable * r).floor().max(cell_w).min((usable - cell_w).max(cell_w));
                     let second_w = (usable - first_w).max(cell_w);
                     dividers.push(DividerInfo {
                         rect: (vx + first_w, vy, divider, vh),
@@ -190,20 +191,41 @@ fn collect_layout(
                     });
                     path.push(false);
                     collect_layout(
-                        first, cell_w, cell_h, divider, use_preview, vx, vy, first_w, vh, path,
-                        panes, dividers,
+                        first,
+                        cell_w,
+                        cell_h,
+                        divider,
+                        use_preview,
+                        vx,
+                        vy,
+                        first_w,
+                        vh,
+                        path,
+                        panes,
+                        dividers,
                     );
                     path.pop();
                     path.push(true);
                     collect_layout(
-                        second, cell_w, cell_h, divider, use_preview, vx + first_w + divider, vy,
-                        second_w, vh, path, panes, dividers,
+                        second,
+                        cell_w,
+                        cell_h,
+                        divider,
+                        use_preview,
+                        vx + first_w + divider,
+                        vy,
+                        second_w,
+                        vh,
+                        path,
+                        panes,
+                        dividers,
                     );
                     path.pop();
                 },
                 SplitDirection::TopBottom => {
                     let usable = (vh - divider).max(cell_h);
-                    let first_h = (usable * r).floor().max(cell_h).min((usable - cell_h).max(cell_h));
+                    let first_h =
+                        (usable * r).floor().max(cell_h).min((usable - cell_h).max(cell_h));
                     let second_h = (usable - first_h).max(cell_h);
                     dividers.push(DividerInfo {
                         rect: (vx, vy + first_h, vw, divider),
@@ -213,14 +235,34 @@ fn collect_layout(
                     });
                     path.push(false);
                     collect_layout(
-                        first, cell_w, cell_h, divider, use_preview, vx, vy, vw, first_h, path,
-                        panes, dividers,
+                        first,
+                        cell_w,
+                        cell_h,
+                        divider,
+                        use_preview,
+                        vx,
+                        vy,
+                        vw,
+                        first_h,
+                        path,
+                        panes,
+                        dividers,
                     );
                     path.pop();
                     path.push(true);
                     collect_layout(
-                        second, cell_w, cell_h, divider, use_preview, vx, vy + first_h + divider, vw,
-                        second_h, path, panes, dividers,
+                        second,
+                        cell_w,
+                        cell_h,
+                        divider,
+                        use_preview,
+                        vx,
+                        vy + first_h + divider,
+                        vw,
+                        second_h,
+                        path,
+                        panes,
+                        dividers,
                     );
                     path.pop();
                 },
@@ -265,10 +307,7 @@ impl WindowContext {
 
     /// Like [`layout_geometry`], but keeps each divider's owning-node identity
     /// so the drag handler can resize any split, not just the root.
-    fn layout_geometry_ex(
-        &self,
-        use_preview: bool,
-    ) -> (Vec<(PaneId, SizeInfo)>, Vec<DividerInfo>) {
+    fn layout_geometry_ex(&self, use_preview: bool) -> (Vec<(PaneId, SizeInfo)>, Vec<DividerInfo>) {
         // A zoomed pane fills the whole window; splits and dividers are hidden.
         if let Some(zoomed) = self.zoom {
             return (vec![(zoomed, self.display.size_info)], Vec::new());
@@ -328,8 +367,7 @@ impl WindowContext {
         let Some((_, fview)) = rects.iter().find(|(id, _)| *id == focused) else { return };
         let center = |v: &SizeInfo| {
             let cx = v.padding_x() + (v.width() - 2.0 * v.padding_x()) * 0.5;
-            let cy =
-                v.padding_y() + (v.height() - v.padding_y() - v.padding_bottom()) * 0.5;
+            let cy = v.padding_y() + (v.height() - v.padding_y() - v.padding_bottom()) * 0.5;
             (cx, cy)
         };
         let (fcx, fcy) = center(fview);
@@ -385,14 +423,14 @@ impl WindowContext {
             if let Some((_, view)) =
                 self.layout_geometry(false).0.into_iter().find(|(id, _)| *id == new_id)
             {
-                self.display.nebula_split_reveal = Some((
+                let rect = (
                     view.padding_x(),
                     view.padding_y(),
                     view.width() - 2.0 * view.padding_x(),
                     view.height() - view.padding_y() - view.padding_bottom(),
-                    direction,
-                    std::time::Instant::now(),
-                ));
+                );
+                self.display.nebula_split_reveal =
+                    Some(crate::display::SplitReveal::new(rect, direction));
                 self.display.window.request_redraw();
             }
             self.dirty = true;
@@ -789,9 +827,8 @@ mod resize_layout_tests {
 
     #[test]
     fn pane_layout_keeps_message_bar_rows_out_of_the_pty_viewport() {
-        let mut size = SizeInfo::new_fully_asymmetric(
-            1000.0, 1000.0, 10.0, 20.0, 100.0, 20.0, 80.0, 20.0,
-        );
+        let mut size =
+            SizeInfo::new_fully_asymmetric(1000.0, 1000.0, 10.0, 20.0, 100.0, 20.0, 80.0, 20.0);
         assert_eq!(size.screen_lines(), 45);
         size.reserve_lines(2);
         assert_eq!(size.screen_lines(), 43);
