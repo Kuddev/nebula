@@ -8,9 +8,6 @@ type Rect = (f32, f32, f32, f32);
 
 impl Display {
     pub(super) fn draw_ssh_editor_modal(&mut self) {
-        self.nebula_ui_anims
-            .ssh_editor
-            .step_with_speed(if self.nebula_ssh_editor_open { 1.0 } else { 0.0 }, 26.0);
         let progress = self.nebula_ui_anims.ssh_editor.value().clamp(0.0, 1.0);
         if !self.nebula_ssh_editor_open && progress <= 0.004 {
             self.nebula_ssh_editor = None;

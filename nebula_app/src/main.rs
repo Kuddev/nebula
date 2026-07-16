@@ -46,6 +46,7 @@ mod macos;
 mod markdown;
 mod message_bar;
 mod migrate;
+mod motion;
 #[cfg(windows)]
 mod mux;
 mod nebula_history;

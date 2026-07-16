@@ -228,58 +228,35 @@ pub fn sidebar_width(scale_factor: f32, collapsed: bool) -> f32 {
 
 #[derive(Debug, Clone, Copy)]
 struct UiAnim {
-    value: f32,
-    target: f32,
-    last_step: Option<Instant>,
+    spring: crate::motion::Spring,
 }
 
 impl UiAnim {
     fn new(value: f32) -> Self {
-        let value = value.clamp(0.0, 1.0);
-        Self { value, target: value, last_step: None }
+        Self { spring: crate::motion::Spring::new(value.clamp(0.0, 1.0)).with_response(0.14) }
     }
 
     fn value(self) -> f32 {
-        self.value
+        self.spring.value().clamp(0.0, 1.0)
     }
 
     fn visible(self, target_open: bool) -> bool {
-        target_open || self.value > 0.004
+        target_open || self.value() > 0.004
     }
 
     fn animating_to(self, target: f32) -> bool {
-        (self.value - target.clamp(0.0, 1.0)).abs() > 0.004
+        (self.value() - target.clamp(0.0, 1.0)).abs() > 0.004 || self.spring.is_active()
     }
 
-    fn step(&mut self, target: f32) {
-        self.step_with_speed(target, 16.0);
-    }
-
-    fn step_with_speed(&mut self, target: f32, speed: f32) {
-        let target = target.clamp(0.0, 1.0);
-        if (self.target - target).abs() > f32::EPSILON {
-            self.target = target;
-            self.last_step = None;
-        }
-        if !self.animating_to(target) {
-            self.value = target;
-            self.last_step = None;
-            return;
-        }
-
-        let now = Instant::now();
-        let dt =
-            self.last_step.replace(now).map_or(1.0 / 60.0, |t| (now - t).as_secs_f32().min(0.1));
-        self.value += (target - self.value) * (1.0 - (-speed.max(1.0) * dt).exp());
-        if (self.value - target).abs() < 0.004 {
-            self.value = target;
-            self.last_step = None;
-        }
+    fn step(&mut self, frame: crate::motion::Frame, target: f32) {
+        self.spring.set_target(target.clamp(0.0, 1.0), crate::motion::MotionPolicy::Full);
+        self.spring.step(frame);
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct NebulaUiAnims {
+    clock: crate::motion::MotionClock,
     left_sidebar: UiAnim,
     right_drawer: UiAnim,
     ssh_editor: UiAnim,
@@ -288,15 +265,18 @@ struct NebulaUiAnims {
 impl NebulaUiAnims {
     fn new() -> Self {
         Self {
+            clock: crate::motion::MotionClock::default(),
             left_sidebar: UiAnim::new(1.0),
             right_drawer: UiAnim::new(0.0),
             ssh_editor: UiAnim::new(0.0),
         }
     }
 
-    fn step(&mut self, left_open: bool, right_open: bool) {
-        self.left_sidebar.step(if left_open { 1.0 } else { 0.0 });
-        self.right_drawer.step(if right_open { 1.0 } else { 0.0 });
+    fn step(&mut self, left_open: bool, right_open: bool, ssh_open: bool) {
+        let frame = self.clock.tick();
+        self.left_sidebar.step(frame, if left_open { 1.0 } else { 0.0 });
+        self.right_drawer.step(frame, if right_open { 1.0 } else { 0.0 });
+        self.ssh_editor.step(frame, if ssh_open { 1.0 } else { 0.0 });
     }
 
     fn animating(&self, left_open: bool, right_open: bool) -> bool {
@@ -3636,7 +3616,11 @@ impl Display {
     }
 
     pub fn step_chrome_anims(&mut self) {
-        self.nebula_ui_anims.step(!self.nebula_sidebar_collapsed, self.nebula_side_panel.open);
+        self.nebula_ui_anims.step(
+            !self.nebula_sidebar_collapsed,
+            self.nebula_side_panel.open,
+            self.nebula_ssh_editor_open,
+        );
     }
 
     pub fn chrome_animating(&self) -> bool {
