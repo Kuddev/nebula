@@ -1186,6 +1186,10 @@ pub(super) fn draw_chrome(d: &mut Display) {
         ICON_SETTINGS,
     );
     for (hit, cx, cy) in chrome_control_centers(w, top_y, bar_h, scale) {
+        if d.nebula_special_tab_active && matches!(hit, ChromeHit::PanelFiles | ChromeHit::PanelGit)
+        {
+            continue;
+        }
         let hovered = d.nebula_chrome_hover == hit;
         let icon = match hit {
             ChromeHit::Minimize => ICON_CHROME_MINIMIZE,
@@ -1245,7 +1249,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             section_title_tracking,
             TXT_DIM,
             section_title_flags,
-            &format!("{}  {tabs_chevron}", language.pick("标签页", "TABS")),
+            &format!("TABS  {tabs_chevron}"),
             &mut d.glyph_cache,
         );
         for (index, (tab_x, row_y, tab_w, tab_h)) in tab_layout.tabs.iter().copied().enumerate() {
@@ -1461,7 +1465,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 section_title_tracking,
                 TXT_DIM,
                 section_title_flags,
-                &format!("{}  {hosts_chevron}", language.pick("SSH 主机", "SSH HOSTS")),
+                &format!("SSH HOSTS  {hosts_chevron}"),
                 &mut d.glyph_cache,
             );
             // Empty state: the section stays visible with a hint teaching the

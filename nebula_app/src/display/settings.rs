@@ -835,17 +835,6 @@ pub(super) fn push_quads(
     // The page is flush with the active tab card. No veil, drop shadow or
     // second window outline: depth belongs to the app shell, not this page.
     quads.push(UiQuad::solid(px, py, pw, ph, s(12.0), sk.panel));
-    quads.push(UiQuad::solid(
-        px + s(12.0),
-        py,
-        pw - s(24.0),
-        s(1.0),
-        0.0,
-        // Top bevel: a subtle white lift on dark themes; on light panels a
-        // faint dark line reads as the lit edge instead.
-        if sk.is_light { Rgba::new(0, 0, 0, 24) } else { Rgba::new(255, 255, 255, 20) },
-    ));
-
     let (side_x, side_y, side_w, side_h) = geometry.sidebar;
 
     // Sidebar: no fill of its own — just a hairline separator on its right

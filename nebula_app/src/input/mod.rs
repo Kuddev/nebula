@@ -692,6 +692,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         } else {
             crate::display::ChromeHit::None
         };
+        let chrome_hover = if self.ctx.display().nebula_special_tab_active
+            && matches!(
+                chrome_hover,
+                crate::display::ChromeHit::PanelFiles | crate::display::ChromeHit::PanelGit
+            ) {
+            crate::display::ChromeHit::None
+        } else {
+            chrome_hover
+        };
         self.ctx.display().set_chrome_hover(chrome_hover, settings_hover);
 
         // Resize cursor on the window border, arrow over the title bar/sidebar,
@@ -1722,6 +1731,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     crate::display::SettingsHit::None => {},
                 }
                 let chrome_hit = self.ctx.display().chrome_hit(x, y);
+                if self.ctx.display().nebula_special_tab_active
+                    && matches!(
+                        chrome_hit,
+                        crate::display::ChromeHit::PanelFiles | crate::display::ChromeHit::PanelGit
+                    )
+                {
+                    return;
+                }
                 // Multi-click state was advanced once at the top of this
                 // function; read it for the tab double-click rename below.
                 let state = self.ctx.mouse().click_state;
