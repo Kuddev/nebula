@@ -18,6 +18,18 @@ tocodex-docs/
 .codex/
 *.internal.md
 
+# Local design, research, and implementation notes. User-facing guides,
+# release notes, and screenshots under docs/ remain tracked.
+/docs/superpowers/
+/docs/PACKAGING.md
+/docs/WINDOW_RESIZE.md
+/docs/product-positioning.md
+/docs/terminal-competitive-research.md
+/docs/ux-intuition-audit.md
+/docs/nebula-command-center-and-unique-features.md
+/docs/nebula-ui-quality-audit.md
+/docs/wgpu-renderer-and-motion-plan.md
+
 # Secrets / credentials / environment — must never be committed
 .env
 .env.*
