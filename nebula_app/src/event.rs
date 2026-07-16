@@ -998,6 +998,8 @@ pub enum TabRequest {
     /// Open this file (markdown/text/json) in a read-only viewer tab —
     /// double-clicking a viewable file in the directory tree lands here.
     OpenDoc(std::path::PathBuf),
+    /// Open or focus the singleton Settings tab. It owns no PTY.
+    OpenSettings,
     Close,
     CloseIndex(usize),
     /// Duplicate a tab using the launch identity captured when it was opened.

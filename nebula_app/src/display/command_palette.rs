@@ -260,6 +260,7 @@ const RECENT_MAX: usize = 6;
 
 /// Command palette UI + filtering state, embedded in `Display`.
 pub struct CommandPalette {
+    language: super::UiLanguage,
     open: bool,
     query: String,
     query_selection: super::text_input::SelectAllState,
@@ -294,6 +295,7 @@ pub struct CommandPalette {
 impl CommandPalette {
     pub fn new() -> Self {
         let mut palette = Self {
+            language: super::UiLanguage::ZhCn,
             open: false,
             query: String::new(),
             query_selection: Default::default(),
@@ -313,6 +315,13 @@ impl CommandPalette {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub fn set_language(&mut self, language: super::UiLanguage) {
+        self.language = language;
+        if !self.profiles_only {
+            self.refilter();
+        }
     }
 
     /// Whether the palette is in default-shell picking mode.
@@ -337,7 +346,7 @@ impl CommandPalette {
                 // The label carries a glyph-free prefix so profile rows read
                 // distinctly from built-in actions; the haystack adds latin
                 // aliases (matching the static items' convention).
-                label: format!("启动：{name}"),
+                label: format!("{}：{name}", self.language.pick("启动", "Launch")),
                 search: format!("启动 {name} profile launch connect qidong"),
                 index,
             })
@@ -622,10 +631,43 @@ impl CommandPalette {
             None => PaletteRow {
                 icon: String::new(),
                 color_id: String::new(),
-                label: ITEMS[idx].label.to_string(),
+                label: localized_item_label(&ITEMS[idx], self.language).to_owned(),
                 hint: ITEMS[idx].hint.to_string(),
             },
         }
+    }
+}
+
+fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'static str {
+    use PaletteAction::*;
+    if language == super::UiLanguage::ZhCn {
+        return item.label;
+    }
+    match item.action {
+        NewTab => "New tab",
+        CloseTab => "Close tab",
+        NextTab => "Next tab",
+        PrevTab => "Previous tab",
+        NewWindow => "New window",
+        SplitRight => "Split right",
+        SplitDown => "Split down",
+        ToggleFilesPanel => "Files panel",
+        ToggleGitPanel => "Git panel",
+        OpenSettings => "Open settings",
+        OpenSettingsFile => "Open configuration file",
+        ToggleGhost => "Toggle ghost completion",
+        CycleAccept => "Cycle completion accept key",
+        PickBackgroundImage => "Choose background image...",
+        CycleBackground => "Cycle background color",
+        ResetAppearance => "Restore appearance defaults",
+        SelectTheme(NebulaTheme::Nebula) => "Theme: Nebula",
+        SelectTheme(NebulaTheme::SilverLight) => "Theme: Silver Light",
+        SelectTheme(NebulaTheme::SteelDark) => "Theme: Steel Dark",
+        SelectTheme(NebulaTheme::LimestoneLight) => "Theme: Limestone",
+        SelectTheme(NebulaTheme::CoalDark) => "Theme: Coal Dark",
+        SelectTheme(NebulaTheme::LinenLight) => "Theme: Linen Light",
+        SelectTheme(NebulaTheme::MossDark) => "Theme: Moss Dark",
+        LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) => item.label,
     }
 }
 
@@ -764,14 +806,7 @@ pub(super) fn push_quads(
         Gradient::Axis([0.25, 0.95]),
     ));
 
-    quads.push(UiQuad::solid(
-        ix,
-        iy,
-        iw,
-        ih,
-        s(super::design_tokens::control::RADIUS),
-        sk.input,
-    ));
+    quads.push(UiQuad::solid(ix, iy, iw, ih, s(super::design_tokens::control::RADIUS), sk.input));
     if model.query_all_selected() && !model.query.is_empty() {
         let cell_w = size.cell_width();
         let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
@@ -865,22 +900,28 @@ pub(super) fn draw_text(
         // 空态同时给出输入光标和用途提示，避免只有一个空白色块让用户猜测。
         r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, cursor, gc);
         let placeholder = if model.profiles_only {
-            "搜索 Shell 或 Profile…"
+            model.language.pick("搜索 Shell 或 Profile…", "Search shells or profiles...")
         } else {
-            "搜索命令、Shell 或 Profile…"
+            model
+                .language
+                .pick("搜索命令、Shell 或 Profile…", "Search commands, shells or profiles...")
         };
         r.draw_chrome_text(size, query_x + s(10.0), text_y, sk.ink_dim, placeholder, gc);
     } else {
-        let shown = if model.query_all_selected() {
-            query.to_owned()
-        } else {
-            format!("{query}{cursor}")
-        };
+        let shown =
+            if model.query_all_selected() { query.to_owned() } else { format!("{query}{cursor}") };
         r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, &shown, gc);
     }
 
     if model.is_empty() {
-        r.draw_chrome_text(size, text_x, layout.list_y + s(8.0), sk.ink_dim, "无匹配命令", gc);
+        r.draw_chrome_text(
+            size,
+            text_x,
+            layout.list_y + s(8.0),
+            sk.ink_dim,
+            model.language.pick("无匹配命令", "No matching commands"),
+            gc,
+        );
         return icon_draws;
     }
 

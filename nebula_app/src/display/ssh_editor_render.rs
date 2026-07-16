@@ -27,6 +27,7 @@ impl Display {
         let scale = self.window.scale_factor as f32;
         let s = |value: f32| value * scale;
         let skin = self.nebula_theme.skin();
+        let language = self.ui_language();
         let accent = Rgba::new(skin.accent.r, skin.accent.g, skin.accent.b, 255);
         let cell_h = size.cell_height();
         let cell_w = size.cell_width();
@@ -84,7 +85,8 @@ impl Display {
         } else {
             zero
         };
-        let save_label = "保存密码到 Windows 凭据管理器";
+        let save_label = language
+            .pick("保存密码到 Windows 凭据管理器", "Save password in Windows Credential Manager");
         let save_toggle = if show_password {
             (
                 destination.0,
@@ -135,9 +137,9 @@ impl Display {
             Vec::new()
         };
 
-        let primary_action = "保存";
+        let primary_action = language.pick("保存", "Save");
         let primary_key = "Enter";
-        let cancel_action = "取消";
+        let cancel_action = language.pick("取消", "Cancel");
         let cancel_key = "Esc";
         let key_pad = s(6.0);
         let label_gap = s(8.0);
@@ -374,9 +376,9 @@ impl Display {
             skin.ink_strong,
             Flags::empty(),
             if editor.original_destination.is_some() {
-                "编辑 SSH 主机"
+                language.pick("编辑 SSH 主机", "Edit SSH host")
             } else {
-                "添加 SSH 主机"
+                language.pick("添加 SSH 主机", "Add SSH host")
             },
             glyph_cache,
         );
@@ -385,7 +387,7 @@ impl Display {
             destination.0,
             destination.1 - cell_h - s(5.0),
             skin.ink,
-            "连接地址",
+            language.pick("连接地址", "Destination"),
             glyph_cache,
         );
         self.renderer.draw_doc_text(
@@ -399,7 +401,10 @@ impl Display {
                 skin.ink_dim
             },
             Flags::empty(),
-            editor.error.as_deref().unwrap_or("user@host · 非 22 端口用 ssh://"),
+            editor.error.as_deref().unwrap_or(language.pick(
+                "user@host · 非 22 端口用 ssh://",
+                "user@host · use ssh:// for non-22 ports",
+            )),
             glyph_cache,
         );
         self.renderer.draw_chrome_text(
@@ -415,20 +420,20 @@ impl Display {
             destination.0,
             auth_y - cell_h - s(5.0),
             skin.ink_dim,
-            "认证方式",
+            language.pick("认证方式", "Authentication"),
             glyph_cache,
         );
-        let auth_labels = ["自动", "密码", "密钥", "Agent", "交互式"];
-        for ((_, rect), label) in auth.iter().zip(auth_labels) {
+        let auth_labels = if language == super::UiLanguage::ZhCn {
+            ["自动", "密码", "密钥", "Agent", "交互式"]
+        } else {
+            ["Auto", "Password", "Key", "Agent", "Interactive"]
+        };
+        for ((mode, rect), label) in auth.iter().zip(auth_labels) {
             self.renderer.draw_chrome_text(
                 &size,
                 rect.0 + (rect.2 - text_width(label)) * 0.5,
                 rect.1 + (rect.3 - cell_h) / 2.0,
-                if editor.auth == auth_mode_for_label(label) {
-                    skin.ink_strong
-                } else {
-                    skin.ink_dim
-                },
+                if editor.auth == *mode { skin.ink_strong } else { skin.ink_dim },
                 label,
                 glyph_cache,
             );
@@ -445,6 +450,7 @@ impl Display {
                 save_toggle,
                 save_checkbox,
                 save_label,
+                language,
                 field_h,
                 cell_h,
                 cell_w,
@@ -459,15 +465,17 @@ impl Display {
                 destination.0,
                 key_header_y,
                 skin.ink_dim,
-                "私钥",
+                language.pick("私钥", "Private keys"),
                 glyph_cache,
             );
             self.renderer.draw_chrome_text(
                 &size,
-                add_private_key.0 + (add_private_key.2 - text_width("+ 添加私钥")) * 0.5,
+                add_private_key.0
+                    + (add_private_key.2 - text_width(language.pick("+ 添加私钥", "+ Add key")))
+                        * 0.5,
                 add_private_key.1 + (add_private_key.3 - cell_h) / 2.0,
                 skin.ink,
-                "+ 添加私钥",
+                language.pick("+ 添加私钥", "+ Add key"),
                 glyph_cache,
             );
             if editor.private_keys.is_empty() {
@@ -476,7 +484,10 @@ impl Display {
                     destination.0,
                     key_rows_y + s(7.0),
                     skin.ink_faint,
-                    "未指定；将使用 IdentityFile 和默认 id_* 私钥",
+                    language.pick(
+                        "未指定；将使用 IdentityFile 和默认 id_* 私钥",
+                        "None specified; IdentityFile and default id_* keys will be used",
+                    ),
                     glyph_cache,
                 );
             }
@@ -505,7 +516,10 @@ impl Display {
                 destination.0,
                 content_y,
                 skin.ink_dim,
-                "仅使用 Windows OpenSSH Agent 与 Pageant，不回退密码。",
+                language.pick(
+                    "仅使用 Windows OpenSSH Agent 与 Pageant，不回退密码。",
+                    "Use Windows OpenSSH Agent and Pageant only; do not fall back to passwords.",
+                ),
                 glyph_cache,
             );
         } else if editor.auth == SshAuthMode::KeyboardInteractive {
@@ -514,7 +528,10 @@ impl Display {
                 destination.0,
                 content_y,
                 skin.ink_dim,
-                "仅响应服务器的 keyboard-interactive / MFA 提示。",
+                language.pick(
+                    "仅响应服务器的 keyboard-interactive / MFA 提示。",
+                    "Respond only to server keyboard-interactive / MFA prompts.",
+                ),
                 glyph_cache,
             );
         }
@@ -544,16 +561,6 @@ impl Display {
             self.pending_update.dirty = true;
             self.window.request_redraw();
         }
-    }
-}
-
-fn auth_mode_for_label(label: &str) -> SshAuthMode {
-    match label {
-        "密码" => SshAuthMode::Password,
-        "密钥" => SshAuthMode::PublicKey,
-        "Agent" => SshAuthMode::Agent,
-        "交互式" => SshAuthMode::KeyboardInteractive,
-        _ => SshAuthMode::Auto,
     }
 }
 
@@ -662,6 +669,7 @@ fn draw_password_text(
     save_toggle: Rect,
     save_checkbox: Rect,
     save_label: &str,
+    language: super::UiLanguage,
     field_h: f32,
     cell_h: f32,
     cell_w: f32,
@@ -675,11 +683,11 @@ fn draw_password_text(
         password.0,
         password.1 - cell_h - s(5.0),
         skin.ink_dim,
-        "密码",
+        language.pick("密码", "Password"),
         glyph_cache,
     );
     let masked = if editor.password.is_empty() {
-        "连接时询问".to_owned()
+        language.pick("连接时询问", "Ask when connecting").to_owned()
     } else if editor.show_password {
         editor.password.clone()
     } else {

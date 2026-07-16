@@ -48,9 +48,9 @@ use crate::message_bar::MessageBuffer;
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::{input, renderer, session};
 
+mod nebula_fetch_art;
 /// New-tab welcome page (Windows logo + fastfetch intro). Stateless helpers.
 mod welcome;
-mod nebula_fetch_art;
 use welcome::nebula_fastfetch_intro_command_for;
 
 /// Split-pane behaviour (toggle/resize/drag/focus); `impl WindowContext`.
@@ -134,6 +134,9 @@ struct TabEntry {
     /// Document viewer content (markdown/text/json). `Some` marks this as a
     /// doc tab: it has no pane, and the draw/input paths route to the viewer.
     doc: Option<crate::display::markdown_view::DocView>,
+    /// Settings is a singleton special tab. Like a document tab it owns no
+    /// PTY, while its controls and state remain owned by `Display`.
+    settings: bool,
 }
 
 #[derive(Clone)]
@@ -143,6 +146,7 @@ enum TabLaunch {
     Shell { name: String, shell: tty::Shell },
     Ssh(String),
     Document(std::path::PathBuf),
+    Settings,
 }
 
 fn select_initial_shell(
@@ -439,6 +443,7 @@ impl WindowContext {
                             .and_then(|tab| tab.color),
                         launch: TabLaunch::Default,
                         doc: None,
+                        settings: false,
                     }],
                     0,
                     1,
@@ -682,7 +687,18 @@ impl WindowContext {
                 self.open_doc_tab(path);
                 false
             },
+            TabRequest::OpenSettings => {
+                self.open_settings_tab();
+                false
+            },
             TabRequest::Close => {
+                if self
+                    .tabs
+                    .get(self.active_tab)
+                    .is_some_and(|tab| tab.doc.is_some() || tab.settings)
+                {
+                    return self.close_tab(self.active_tab);
+                }
                 let id = self.focused_pane_id();
                 // A pending confirm for this pane means the user re-triggered
                 // the close (or pressed Enter, which re-dispatches this
@@ -785,7 +801,7 @@ impl WindowContext {
                 false
             },
             TabRequest::SplitIndex { index, direction } => {
-                if self.tabs.get(index).is_some_and(|tab| tab.doc.is_none()) {
+                if self.tabs.get(index).is_some_and(|tab| tab.doc.is_none() && !tab.settings) {
                     self.select_tab(index);
                     self.split_focused(direction);
                 }
@@ -884,15 +900,19 @@ impl WindowContext {
             // Insert right after the current tab (insert right next to the current tab)
             // rather than at the end of the bar.
             let at = (self.active_tab + 1).min(self.tabs.len());
-            self.tabs.insert(at, TabEntry {
-                layout: Layout::Leaf(id),
-                active_pane: id,
-                has_bell: false,
-                custom_name: None,
-                custom_color: None,
-                launch: TabLaunch::Default,
-                doc: None,
-            });
+            self.tabs.insert(
+                at,
+                TabEntry {
+                    layout: Layout::Leaf(id),
+                    active_pane: id,
+                    has_bell: false,
+                    custom_name: None,
+                    custom_color: None,
+                    launch: TabLaunch::Default,
+                    doc: None,
+                    settings: false,
+                },
+            );
             self.active_tab = at;
             self.resize_active_layout();
             self.dirty = true;
@@ -918,24 +938,24 @@ impl WindowContext {
 
     fn spawn_tab_profile_value(&mut self, profile: Profile) {
         // Profile cwd wins when it exists; else inherit the focused pane's.
-        let cwd = profile
-            .cwd
-            .as_ref()
-            .filter(|p| p.is_dir())
-            .cloned()
-            .or_else(|| self.focused_cwd());
+        let cwd =
+            profile.cwd.as_ref().filter(|p| p.is_dir()).cloned().or_else(|| self.focused_cwd());
         let shell = profile.shell();
         if let Some(id) = self.spawn_pane_detached_with(cwd, self.display.size_info, Some(shell)) {
             let at = (self.active_tab + 1).min(self.tabs.len());
-            self.tabs.insert(at, TabEntry {
-                layout: Layout::Leaf(id),
-                active_pane: id,
-                has_bell: false,
-                custom_name: Some(profile.name.clone()),
-                custom_color: None,
-                launch: TabLaunch::Profile(profile),
-                doc: None,
-            });
+            self.tabs.insert(
+                at,
+                TabEntry {
+                    layout: Layout::Leaf(id),
+                    active_pane: id,
+                    has_bell: false,
+                    custom_name: Some(profile.name.clone()),
+                    custom_color: None,
+                    launch: TabLaunch::Profile(profile),
+                    doc: None,
+                    settings: false,
+                },
+            );
             self.active_tab = at;
             self.resize_active_layout();
             self.dirty = true;
@@ -946,23 +966,25 @@ impl WindowContext {
     /// `spawn_tab_profile` but the spec is passed in rather than looked up in
     /// the config, and the cwd inherits the focused pane's.
     fn spawn_tab_shell(&mut self, name: String, shell: nebula_terminal::tty::Shell) {
-        if let Some(id) =
-            self.spawn_pane_detached_with(
-                self.focused_cwd(),
-                self.display.size_info,
-                Some(shell.clone()),
-            )
-        {
+        if let Some(id) = self.spawn_pane_detached_with(
+            self.focused_cwd(),
+            self.display.size_info,
+            Some(shell.clone()),
+        ) {
             let at = (self.active_tab + 1).min(self.tabs.len());
-            self.tabs.insert(at, TabEntry {
-                layout: Layout::Leaf(id),
-                active_pane: id,
-                has_bell: false,
-                custom_name: Some(name.clone()),
-                custom_color: None,
-                launch: TabLaunch::Shell { name, shell },
-                doc: None,
-            });
+            self.tabs.insert(
+                at,
+                TabEntry {
+                    layout: Layout::Leaf(id),
+                    active_pane: id,
+                    has_bell: false,
+                    custom_name: Some(name.clone()),
+                    custom_color: None,
+                    launch: TabLaunch::Shell { name, shell },
+                    doc: None,
+                    settings: false,
+                },
+            );
             self.active_tab = at;
             self.resize_active_layout();
             self.dirty = true;
@@ -988,15 +1010,19 @@ impl WindowContext {
                     self.next_pane_id += 1;
                     self.panes.push(pane);
                     let at = (self.active_tab + 1).min(self.tabs.len());
-                    self.tabs.insert(at, TabEntry {
-                        layout: Layout::Leaf(pane_id),
-                        active_pane: pane_id,
-                        has_bell: false,
-                        custom_name: Some(host.clone()),
-                        custom_color: None,
-                        launch: TabLaunch::Ssh(host),
-                        doc: None,
-                    });
+                    self.tabs.insert(
+                        at,
+                        TabEntry {
+                            layout: Layout::Leaf(pane_id),
+                            active_pane: pane_id,
+                            has_bell: false,
+                            custom_name: Some(host.clone()),
+                            custom_color: None,
+                            launch: TabLaunch::Ssh(host),
+                            doc: None,
+                            settings: false,
+                        },
+                    );
                     self.active_tab = at;
                     self.resize_active_layout();
                     self.dirty = true;
@@ -1019,46 +1045,50 @@ impl WindowContext {
 
         #[cfg(not(windows))]
         {
-        let Ok(exe) = std::env::current_exe() else {
-            error!("Cannot locate nebula.exe for the SSH AskPass helper");
-            return;
-        };
-        let shell_id = self.display.nebula_shell_id.clone().unwrap_or_else(|| {
-            match self.display.nebula_shell {
-                crate::display::NebulaShell::PowerShell => "powershell".into(),
-                crate::display::NebulaShell::Bash => "bash".into(),
-            }
-        });
-        let launch = match crate::ssh::build_pane_launch(&shell_id, &exe, &host) {
-            Ok(launch) => launch,
-            Err(err) => {
-                error!("Refusing unsafe SSH destination {host:?}: {err}");
+            let Ok(exe) = std::env::current_exe() else {
+                error!("Cannot locate nebula.exe for the SSH AskPass helper");
                 return;
-            },
-        };
-        let default_shell = Self::default_shell_override();
-        if let Some(id) = self.spawn_pane_detached_with(
-            self.focused_cwd(),
-            self.display.size_info,
-            default_shell,
-        ) {
-            let at = (self.active_tab + 1).min(self.tabs.len());
-            self.tabs.insert(at, TabEntry {
-                layout: Layout::Leaf(id),
-                active_pane: id,
-                has_bell: false,
-                custom_name: Some(host.clone()),
-                custom_color: None,
-                launch: TabLaunch::Ssh(host),
-                doc: None,
+            };
+            let shell_id = self.display.nebula_shell_id.clone().unwrap_or_else(|| {
+                match self.display.nebula_shell {
+                    crate::display::NebulaShell::PowerShell => "powershell".into(),
+                    crate::display::NebulaShell::Bash => "bash".into(),
+                }
             });
-            self.active_tab = at;
-            self.resize_active_layout();
-            self.dirty = true;
-            if let Some(pane) = self.panes.iter().find(|pane| pane.id == id) {
-                pane.notifier.notify(launch.command);
+            let launch = match crate::ssh::build_pane_launch(&shell_id, &exe, &host) {
+                Ok(launch) => launch,
+                Err(err) => {
+                    error!("Refusing unsafe SSH destination {host:?}: {err}");
+                    return;
+                },
+            };
+            let default_shell = Self::default_shell_override();
+            if let Some(id) = self.spawn_pane_detached_with(
+                self.focused_cwd(),
+                self.display.size_info,
+                default_shell,
+            ) {
+                let at = (self.active_tab + 1).min(self.tabs.len());
+                self.tabs.insert(
+                    at,
+                    TabEntry {
+                        layout: Layout::Leaf(id),
+                        active_pane: id,
+                        has_bell: false,
+                        custom_name: Some(host.clone()),
+                        custom_color: None,
+                        launch: TabLaunch::Ssh(host),
+                        doc: None,
+                        settings: false,
+                    },
+                );
+                self.active_tab = at;
+                self.resize_active_layout();
+                self.dirty = true;
+                if let Some(pane) = self.panes.iter().find(|pane| pane.id == id) {
+                    pane.notifier.notify(launch.command);
+                }
             }
-        }
         }
     }
 
@@ -1066,10 +1096,8 @@ impl WindowContext {
     /// this file is re-focused (and re-read, so the view is fresh) instead of
     /// duplicated — double-click twice shouldn't litter the bar.
     fn open_doc_tab(&mut self, path: std::path::PathBuf) {
-        if let Some(index) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.doc.as_ref().is_some_and(|doc| doc.path == path))
+        if let Some(index) =
+            self.tabs.iter().position(|tab| tab.doc.as_ref().is_some_and(|doc| doc.path == path))
         {
             if let Some(doc) = self.tabs[index].doc.as_mut() {
                 doc.reload();
@@ -1084,16 +1112,51 @@ impl WindowContext {
         // as the file tree's markdown icon, so tab and tree read as one system.
         let label = format!("\u{eb1d} {}", doc.title);
         let at = (self.active_tab + 1).min(self.tabs.len());
-        self.tabs.insert(at, TabEntry {
-            layout: Layout::Leaf(DOC_PANE_ID),
-            active_pane: DOC_PANE_ID,
-            has_bell: false,
-            custom_name: Some(label),
-            custom_color: None,
-            launch: TabLaunch::Document(doc.path.clone()),
-            doc: Some(doc),
-        });
+        self.tabs.insert(
+            at,
+            TabEntry {
+                layout: Layout::Leaf(DOC_PANE_ID),
+                active_pane: DOC_PANE_ID,
+                has_bell: false,
+                custom_name: Some(label),
+                custom_color: None,
+                launch: TabLaunch::Document(doc.path.clone()),
+                doc: Some(doc),
+                settings: false,
+            },
+        );
         self.active_tab = at;
+        self.display.set_settings_tab_active(false);
+        self.dirty = true;
+    }
+
+    /// Open Settings as a real singleton tab. Re-focusing the existing tab
+    /// avoids duplicate preference surfaces and never starts a shell process.
+    fn open_settings_tab(&mut self) {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.settings) {
+            self.select_tab(index);
+            self.display.set_settings_tab_active(true);
+            self.dirty = true;
+            return;
+        }
+
+        let at = (self.active_tab + 1).min(self.tabs.len());
+        self.tabs.insert(
+            at,
+            TabEntry {
+                layout: Layout::Leaf(DOC_PANE_ID),
+                active_pane: DOC_PANE_ID,
+                has_bell: false,
+                custom_name: Some("\u{eb51} 设置".to_owned()),
+                custom_color: None,
+                launch: TabLaunch::Settings,
+                doc: None,
+                settings: true,
+            },
+        );
+        self.active_tab = at;
+        self.display.set_settings_tab_active(true);
+        self.sync_chrome_tabs();
         self.dirty = true;
     }
 
@@ -1118,18 +1181,23 @@ impl WindowContext {
                 let doc = crate::display::markdown_view::DocView::open(path.clone());
                 let label = format!("\u{eb1d} {}", doc.title);
                 let at = (self.active_tab + 1).min(self.tabs.len());
-                self.tabs.insert(at, TabEntry {
-                    layout: Layout::Leaf(DOC_PANE_ID),
-                    active_pane: DOC_PANE_ID,
-                    has_bell: false,
-                    custom_name: Some(label),
-                    custom_color: None,
-                    launch: TabLaunch::Document(path),
-                    doc: Some(doc),
-                });
+                self.tabs.insert(
+                    at,
+                    TabEntry {
+                        layout: Layout::Leaf(DOC_PANE_ID),
+                        active_pane: DOC_PANE_ID,
+                        has_bell: false,
+                        custom_name: Some(label),
+                        custom_color: None,
+                        launch: TabLaunch::Document(path),
+                        doc: Some(doc),
+                        settings: false,
+                    },
+                );
                 self.active_tab = at;
                 self.dirty = true;
             },
+            TabLaunch::Settings => self.open_settings_tab(),
         }
 
         if self.tabs.len() > before {
@@ -1158,6 +1226,7 @@ impl WindowContext {
                     custom_color: tab.color,
                     launch: TabLaunch::Default,
                     doc: None,
+                    settings: false,
                 });
                 self.run_fastfetch_intro(id);
             }
@@ -1229,9 +1298,16 @@ impl WindowContext {
 
     /// Current tab list + per-tab cwd as a persistable session.
     fn session_snapshot(&self) -> session::Session {
-        let tabs = self
+        let active_tab = self
             .tabs
             .iter()
+            .take(self.active_tab)
+            .filter(|tab| tab.doc.is_none() && !tab.settings)
+            .count();
+        let tabs: Vec<_> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.doc.is_none() && !tab.settings)
             .map(|t| session::TabSession {
                 cwd: self
                     .pane(t.active_pane)
@@ -1241,7 +1317,7 @@ impl WindowContext {
                 color: t.custom_color,
             })
             .collect();
-        session::Session::new(self.active_tab, tabs)
+        session::Session::new(active_tab.min(tabs.len().saturating_sub(1)), tabs)
     }
 
     /// 1 Hz autosave (piggybacks on the chrome clock tick): persist the session
@@ -1280,7 +1356,14 @@ impl WindowContext {
     fn dock_tab_into_active(&mut self, source: usize, nav: crate::display::SplitNav) {
         use crate::display::{SplitDirection, SplitNav};
 
-        if source >= self.tabs.len() || source == self.active_tab || self.tabs.len() < 2 {
+        if source >= self.tabs.len()
+            || source == self.active_tab
+            || self.tabs.len() < 2
+            || self.tabs[source].doc.is_some()
+            || self.tabs[source].settings
+            || self.tabs[self.active_tab].doc.is_some()
+            || self.tabs[self.active_tab].settings
+        {
             return;
         }
 
@@ -1298,11 +1381,8 @@ impl WindowContext {
             SplitNav::Up => (SplitDirection::TopBottom, true),
             SplitNav::Down => (SplitDirection::TopBottom, false),
         };
-        let (first, second) = if src_first {
-            (src_entry.layout, old)
-        } else {
-            (old, src_entry.layout)
-        };
+        let (first, second) =
+            if src_first { (src_entry.layout, old) } else { (old, src_entry.layout) };
         entry.layout = Layout::Split {
             direction,
             ratio: 0.5,
@@ -1371,8 +1451,14 @@ impl WindowContext {
         if cwd.is_some() {
             pty_config.working_directory = cwd;
         }
-        match Self::create_pane(&size_info, window_id, &self.config, pty_config, &self.proxy, pane_id)
-        {
+        match Self::create_pane(
+            &size_info,
+            window_id,
+            &self.config,
+            pty_config,
+            &self.proxy,
+            pane_id,
+        ) {
             Ok(pane) => {
                 self.panes.push(pane);
                 Some(pane_id)
@@ -1438,9 +1524,8 @@ impl WindowContext {
             // `terminal.is_focused` starts true and may never see a focus
             // event, which would double-ring against the per-pane path.
             if self.display.window.has_focus() {
-                let program = self
-                    .pane(pane_id)
-                    .and_then(|p| p.nebula_state.running_program.clone());
+                let program =
+                    self.pane(pane_id).and_then(|p| p.nebula_state.running_program.clone());
                 crate::notify::deliver(
                     &self.display.window,
                     &crate::notify::Notification::Bell { program },
@@ -1479,8 +1564,7 @@ impl WindowContext {
                 // spinner a start mark so the turn still animates.
                 state.command_started.get_or_insert_with(std::time::Instant::now);
             },
-            crate::ai_hook::AiHookKind::TurnDone
-            | crate::ai_hook::AiHookKind::NeedsAttention => {
+            crate::ai_hook::AiHookKind::TurnDone | crate::ai_hook::AiHookKind::NeedsAttention => {
                 {
                     let state = &mut self.panes[idx].nebula_state;
                     state.awaiting_input = true;
@@ -1556,6 +1640,7 @@ impl WindowContext {
         }
         self.active_tab = index;
         self.tabs[index].has_bell = false;
+        self.display.set_settings_tab_active(self.tabs[index].settings);
         self.zoom = None;
         self.resize_active_layout();
         self.dirty = true;
@@ -1615,6 +1700,9 @@ impl WindowContext {
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
+        self.display.set_settings_tab_active(
+            self.tabs.get(self.active_tab).is_some_and(|tab| tab.settings),
+        );
         self.resize_active_layout();
         self.dirty = true;
         false
@@ -1645,10 +1733,8 @@ impl WindowContext {
                 self.display.font_size = self.config.font.size().scale(scale_factor);
             }
 
-            let font = self
-                .display
-                .effective_font(&self.config.font)
-                .with_size(self.display.font_size);
+            let font =
+                self.display.effective_font(&self.config.font).with_size(self.display.font_size);
             self.display.pending_update.set_font(font);
         }
 
@@ -1796,6 +1882,14 @@ impl WindowContext {
         let divider_rects = self.layout_geometry(true).1;
         let focused = self.focused_pane_id();
 
+        // Settings is rendered inside the normal tab content card; it is not
+        // a modal and therefore keeps the tab/sidebar chrome fully usable.
+        if self.tabs.get(self.active_tab).is_some_and(|tab| tab.settings) {
+            self.display.begin_pane_frame(&self.config);
+            self.display.draw_settings_frame(scheduler);
+            return;
+        }
+
         // Document-viewer tab: no pane, no grid. Draw the doc into the tab's
         // content rect; `present_frame` inside lays the normal chrome on top.
         if let Some(doc) = self.tabs.get_mut(self.active_tab).and_then(|tab| tab.doc.as_mut()) {
@@ -1893,6 +1987,9 @@ impl WindowContext {
     }
 
     fn sync_chrome_tabs(&mut self) {
+        self.display.set_settings_tab_active(
+            self.tabs.get(self.active_tab).is_some_and(|tab| tab.settings),
+        );
         // The visible tab's activity is seen by definition — consume its
         // flag before it can render (dots are for background tabs only).
         if let Some(id) = self.tabs.get(self.active_tab).map(|t| t.active_pane) {
@@ -1906,11 +2003,14 @@ impl WindowContext {
         let mut dots = Vec::with_capacity(self.tabs.len());
         let mut running = Vec::with_capacity(self.tabs.len());
         let mut logos = Vec::with_capacity(self.tabs.len());
+        let ui_language = self.display.ui_language();
         for tab in &self.tabs {
             let pane = self.pane(tab.active_pane);
             let state = pane.map(|p| &p.nebula_state);
             // Use custom name if set, otherwise derive from cwd/title
-            let mut label = if let Some(custom) = &tab.custom_name {
+            let mut label = if tab.settings {
+                format!("\u{eb51} {}", ui_language.pick("设置", "Settings"))
+            } else if let Some(custom) = &tab.custom_name {
                 custom.clone()
             } else {
                 pane.map(Self::chrome_tab_label).unwrap_or_default()
@@ -1934,14 +2034,15 @@ impl WindowContext {
             // for input" (claude between turns). The ring collapsing into a
             // dot IS the "turn finished, your move" signal — also on the
             // visible tab, where a merely-paused ring still read as busy.
-            dots.push(tab.has_bell || state.is_some_and(|s| {
-                s.finished_unseen || (s.command_started.is_some() && s.awaiting_input)
-            }));
+            dots.push(
+                tab.has_bell
+                    || state.is_some_and(|s| {
+                        s.finished_unseen || (s.command_started.is_some() && s.awaiting_input)
+                    }),
+            );
             // Spinner only while the command actually works; once it rang BEL
             // and waits for input the dot above takes over.
-            running.push(
-                state.is_some_and(|s| s.command_started.is_some() && !s.awaiting_input),
-            );
+            running.push(state.is_some_and(|s| s.command_started.is_some() && !s.awaiting_input));
         }
         let active = self.active_tab.min(labels.len().saturating_sub(1));
         // displayed == storage index always holds now, so the bar is reorderable.
@@ -1969,9 +2070,7 @@ impl WindowContext {
 
         std::env::current_dir()
             .ok()
-            .and_then(|path| {
-                path.file_name().map(|n| n.to_string_lossy().into_owned())
-            })
+            .and_then(|path| path.file_name().map(|n| n.to_string_lossy().into_owned()))
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| ".".to_owned())
     }
@@ -2051,7 +2150,8 @@ impl WindowContext {
             // didn't move this batch (then it is already the current position).
             let latest_pos = self.event_queue.iter().rev().find_map(|e| match e {
                 WinitEvent::WindowEvent {
-                    event: WindowEvent::CursorMoved { position, .. }, ..
+                    event: WindowEvent::CursorMoved { position, .. },
+                    ..
                 } => Some((position.x as f32, position.y as f32)),
                 _ => None,
             });
@@ -2097,10 +2197,11 @@ impl WindowContext {
         // A doc tab has no pane: its events run against `doc_pane` below so
         // chrome interaction (tab switching, closing, the sidebar) keeps
         // working; anything typed lands in the sink notifier.
-        let doc_tab = self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some());
+        let special_tab =
+            self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some() || tab.settings);
         let focused = match self.pane_index(focused_id) {
             Some(index) => Some(index),
-            None if doc_tab => None,
+            None if special_tab => None,
             None => return,
         };
 
@@ -2114,8 +2215,8 @@ impl WindowContext {
         };
         self.display.nebula_pane_view = pane_view;
 
-        let old_is_searching = focused
-            .is_some_and(|index| self.panes[index].search_state.history_index.is_some());
+        let old_is_searching =
+            focused.is_some_and(|index| self.panes[index].search_state.history_index.is_some());
 
         let target_of = |event: &WinitEvent<Event>| match event {
             WinitEvent::UserEvent(event) => event.terminal_tab_id().unwrap_or(focused_id),
@@ -2128,7 +2229,7 @@ impl WindowContext {
             let target_id = target_of(&event);
             let (pane, doc) = match self.pane_index(target_id) {
                 Some(pane_idx) => (&mut self.panes[pane_idx], None),
-                None if target_id == DOC_PANE_ID && doc_tab => (
+                None if target_id == DOC_PANE_ID && special_tab => (
                     &mut self.doc_pane,
                     self.tabs.get_mut(self.active_tab).and_then(|tab| tab.doc.as_mut()),
                 ),
@@ -2214,8 +2315,7 @@ impl WindowContext {
                     .last_pty_resize
                     .is_some_and(|t| now.duration_since(t) < Duration::from_millis(300));
                 if dragging {
-                    let timer =
-                        TimerId::new(Topic::NebulaResizeSettle, self.display.window.id());
+                    let timer = TimerId::new(Topic::NebulaResizeSettle, self.display.window.id());
                     scheduler.unschedule(timer);
                     let event =
                         Event::new(EventType::NebulaResizeSettled, self.display.window.id());
@@ -2374,11 +2474,8 @@ mod startup_shell_tests {
 
     #[test]
     fn startup_shell_uses_user_default_instead_of_the_base_pty_shell() {
-        let selected = select_initial_shell(
-            Some(shell("powershell.exe")),
-            Some(shell("pwsh.exe")),
-            None,
-        );
+        let selected =
+            select_initial_shell(Some(shell("powershell.exe")), Some(shell("pwsh.exe")), None);
         assert_eq!(selected, Some(shell("pwsh.exe")));
     }
 
