@@ -1640,6 +1640,8 @@ impl WindowContext {
         }
         self.active_tab = index;
         self.tabs[index].has_bell = false;
+        self.display
+            .set_special_tab_active(self.tabs[index].doc.is_some() || self.tabs[index].settings);
         self.display.set_settings_tab_active(self.tabs[index].settings);
         self.zoom = None;
         self.resize_active_layout();
@@ -1700,6 +1702,9 @@ impl WindowContext {
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
+        let special =
+            self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some() || tab.settings);
+        self.display.set_special_tab_active(special);
         self.display.set_settings_tab_active(
             self.tabs.get(self.active_tab).is_some_and(|tab| tab.settings),
         );
@@ -1987,6 +1992,9 @@ impl WindowContext {
     }
 
     fn sync_chrome_tabs(&mut self) {
+        let special =
+            self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some() || tab.settings);
+        self.display.set_special_tab_active(special);
         self.display.set_settings_tab_active(
             self.tabs.get(self.active_tab).is_some_and(|tab| tab.settings),
         );

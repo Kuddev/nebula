@@ -1385,6 +1385,7 @@ pub struct Display {
     /// window is following the operating system.
     nebula_window_theme_override: Option<WinitTheme>,
     pub nebula_settings_open: bool,
+    pub nebula_special_tab_active: bool,
     nebula_language_preference: LanguagePreference,
     nebula_language: UiLanguage,
     /// Paths from the last successful app configuration generation.
@@ -1807,6 +1808,7 @@ impl Display {
             nebula_system_theme,
             nebula_window_theme_override,
             nebula_settings_open: false,
+            nebula_special_tab_active: false,
             nebula_language_preference: settings_init.language,
             nebula_language: settings_init.language.resolved(),
             nebula_config_paths: config.config_paths.clone(),
@@ -2822,6 +2824,7 @@ impl Display {
             return;
         }
         self.nebula_settings_open = active;
+        self.nebula_special_tab_active = active;
         if !active {
             self.nebula_shell_picker_open = false;
             self.nebula_font_picker_open = false;
@@ -2831,6 +2834,13 @@ impl Display {
             self.nebula_settings_scroll = 0.0;
         }
         self.pending_update.dirty = true;
+    }
+
+    pub fn set_special_tab_active(&mut self, active: bool) {
+        self.nebula_special_tab_active = active;
+        if !active {
+            self.nebula_settings_open = false;
+        }
     }
 
     pub fn set_ui_language(&mut self, preference: LanguagePreference) {
