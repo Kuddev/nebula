@@ -1275,6 +1275,13 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     fn clear_selection(&mut self) {
         // Clear the selection on the terminal.
         let selection = self.terminal.selection.take();
+        if selection.is_some() {
+            crate::display::nebula_debug_log(format!(
+                "pointer_selection_clear id={} non_empty={}",
+                self.mouse.debug_press_id,
+                selection.as_ref().is_some_and(|selection| !selection.is_empty())
+            ));
+        }
         // Mark the terminal as dirty when selection wasn't empty.
         *self.dirty |= selection.is_some_and(|s| !s.is_empty());
     }
@@ -1282,7 +1289,13 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     fn update_selection(&mut self, mut point: Point, side: Side) {
         let mut selection = match self.terminal.selection.take() {
             Some(selection) => selection,
-            None => return,
+            None => {
+                crate::display::nebula_debug_log(format!(
+                    "pointer_selection_update_ignored id={} point={point:?} side={side:?} reason=no-selection",
+                    self.mouse.debug_press_id
+                ));
+                return;
+            },
         };
 
         // Treat motion over message bar like motion over the last line.
@@ -1290,6 +1303,14 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 
         // Update selection.
         selection.update(point, side);
+        self.mouse.debug_selection_updates = self.mouse.debug_selection_updates.saturating_add(1);
+        let update = self.mouse.debug_selection_updates;
+        if update <= 3 || update % 10 == 0 {
+            crate::display::nebula_debug_log(format!(
+                "pointer_selection_update id={} update={} point={point:?} side={side:?} type={:?}",
+                self.mouse.debug_press_id, update, selection.ty
+            ));
+        }
 
         // Move vi cursor and expand selection.
         if self.terminal.mode().contains(TermMode::VI) && !self.search_active() {
@@ -1302,6 +1323,10 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     }
 
     fn start_selection(&mut self, ty: SelectionType, point: Point, side: Side) {
+        crate::display::nebula_debug_log(format!(
+            "pointer_selection_start id={} type={ty:?} point={point:?} side={side:?} xy=({}, {})",
+            self.mouse.debug_press_id, self.mouse.x, self.mouse.y
+        ));
         self.terminal.selection = Some(Selection::new(ty, point, side));
         *self.dirty = true;
 
@@ -2438,6 +2463,12 @@ pub struct Mouse {
     /// can start the selection from the ORIGINAL press cell once the pointer
     /// commits to a drag. Cleared on release.
     pub pending_selection: Option<(nebula_terminal::selection::SelectionType, Point, Side)>,
+    /// Correlates pointer diagnostics across press, motion, selection, and release.
+    pub debug_press_id: u64,
+    /// Limits selection-update diagnostics without losing the drag's progression.
+    pub debug_selection_updates: u32,
+    /// Prevents a promoted tab drag from logging once per pointer-motion event.
+    pub debug_tab_drag_logged: bool,
     pub x: usize,
     pub y: usize,
 }
@@ -2460,6 +2491,9 @@ impl Default for Mouse {
             drag_origin: Default::default(),
             drag_active: Default::default(),
             pending_selection: Default::default(),
+            debug_press_id: Default::default(),
+            debug_selection_updates: Default::default(),
+            debug_tab_drag_logged: Default::default(),
             x: Default::default(),
             y: Default::default(),
         }

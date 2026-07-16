@@ -726,7 +726,7 @@ pub enum SplitNav {
     Down,
 }
 
-fn nebula_debug_log(message: impl AsRef<str>) {
+pub(crate) fn nebula_debug_log(message: impl AsRef<str>) {
     use std::io::Write as _;
 
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -745,7 +745,7 @@ fn nebula_debug_log(message: impl AsRef<str>) {
         .unwrap_or_else(|_| "0.000".to_owned());
     let path = nebula_data_dir().join("nebula_debug.log");
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "[{ts}] {}", message.as_ref());
+        let _ = writeln!(file, "[{ts} pid={}] {}", std::process::id(), message.as_ref());
     }
 }
 
@@ -4310,6 +4310,15 @@ impl Display {
             grid_cells.push(cell);
         }
         let selection_range = content.selection_range();
+        nebula_debug_log(format!(
+            "render_pane clear_first={clear_first} view={}x{} pad=({:.0},{:.0},{:.0},{:.0}) selection={selection_range:?}",
+            view.width(),
+            view.height(),
+            view.padding_x(),
+            view.padding_right(),
+            view.padding_y(),
+            view.padding_bottom(),
+        ));
         let foreground_color = content.color(NamedColor::Foreground as usize);
         let background_color =
             custom_background.unwrap_or_else(|| content.color(NamedColor::Background as usize));
@@ -4454,6 +4463,12 @@ impl Display {
             // `term_bg` card floating on it. Default-background cells draw no
             // background of their own (bg_alpha == 0), so they show the card.
             let shell_bg = self.nebula_theme.palette().shell_bg;
+            nebula_debug_log(format!(
+                "render_clear path=pane window={}x{} alpha={:.3}",
+                self.size_info.width(),
+                self.size_info.height(),
+                self.nebula_window_opacity,
+            ));
             self.renderer.clear(shell_bg, self.nebula_window_opacity);
             self.draw_background_image();
 
@@ -4794,6 +4809,12 @@ impl Display {
         self.renderer.set_window_height(self.size_info.height());
 
         let shell_bg = self.nebula_theme.palette().shell_bg;
+        nebula_debug_log(format!(
+            "render_clear path=document window={}x{} alpha={:.3}",
+            self.size_info.width(),
+            self.size_info.height(),
+            self.nebula_window_opacity,
+        ));
         self.renderer.clear(shell_bg, self.nebula_window_opacity);
         self.draw_background_image();
 
@@ -4833,6 +4854,12 @@ impl Display {
         self.renderer.set_window_height(self.size_info.height());
 
         let shell_bg = self.nebula_theme.palette().shell_bg;
+        nebula_debug_log(format!(
+            "render_clear path=settings window={}x{} alpha={:.3}",
+            self.size_info.width(),
+            self.size_info.height(),
+            self.nebula_window_opacity,
+        ));
         self.renderer.clear(shell_bg, self.nebula_window_opacity);
         self.draw_background_image();
 
@@ -5406,6 +5433,14 @@ impl Display {
     }
 
     fn present_frame(&mut self, scheduler: &mut Scheduler) {
+        nebula_debug_log(format!(
+            "render_present window={}x{} pane_view={} frame_images={} chrome_logos={}",
+            self.size_info.width(),
+            self.size_info.height(),
+            self.nebula_pane_view.is_some(),
+            self.nebula_frame_images.len(),
+            self.nebula_chrome_logo_draws.len(),
+        ));
         // OSC 1337 inline images collected by the pane passes: draw above the
         // cells, below the chrome/modals.
         if !self.nebula_frame_images.is_empty() {
