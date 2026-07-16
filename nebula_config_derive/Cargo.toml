@@ -1,6 +1,6 @@
 [package]
 name = "nebula_config_derive"
-version = "0.4.0"
+version = "0.5.0"
 license = "GPL-3.0-or-later"
 description = "Failure resistant deserialization derive"
 homepage = "https://github.com/Kuddev/nebulaTerminal"
@@ -18,7 +18,7 @@ syn = { version = "2.0.16", features = ["derive", "parsing", "proc-macro", "prin
 
 [dev-dependencies.nebula_config]
 path = "../nebula_config"
-version = "0.4.0"
+version = "0.5.0"
 
 [dev-dependencies]
 log = "0.4.11"
