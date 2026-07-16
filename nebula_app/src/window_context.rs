@@ -1924,7 +1924,12 @@ impl WindowContext {
         } else {
             self.display.begin_pane_frame(&self.config);
             let mut dim_rects = Vec::new();
-            for (i, (id, view)) in pane_rects.iter().enumerate() {
+            // The whole-window clear must not be tied to pane_rects[0]: a
+            // layout leaf whose pane is gone (or a doc sentinel) is skipped
+            // below, and skipping the clearing pane would leave every later
+            // frame compositing over stale buffer contents (ghost frames).
+            let mut cleared = false;
+            for (id, view) in pane_rects.iter() {
                 let Some(idx) = self.pane_index(*id) else { continue };
                 let is_focused = *id == focused;
                 if !is_focused {
@@ -1946,8 +1951,9 @@ impl WindowContext {
                     &mut pane.nebula_state,
                     *view,
                     is_focused,
-                    i == 0,
+                    !cleared,
                 );
+                cleared = true;
             }
             self.display.draw_split_overlays(&dim_rects, &divider_rects);
             self.display.finish_pane_frame(scheduler);
