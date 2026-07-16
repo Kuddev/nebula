@@ -54,12 +54,11 @@ impl Display {
         let auth_y = destination.1 + destination.3 + s(40.0);
         let auth_track = (destination.0, auth_y, field_w, s(40.0));
         let auth_pad = s(3.0);
-        let auth_w = (field_w - auth_pad * 2.0) / 5.0;
+        let auth_w = (field_w - auth_pad * 2.0) / 4.0;
         let auth_modes = [
             SshAuthMode::Auto,
             SshAuthMode::Password,
             SshAuthMode::PublicKey,
-            SshAuthMode::Agent,
             SshAuthMode::KeyboardInteractive,
         ];
         let auth = std::array::from_fn(|index| {
@@ -321,7 +320,6 @@ impl Display {
             cancel,
             primary,
             self.nebula_ssh_editor_hover,
-            accent,
             &skin,
             scale,
             editor.focus.current(),
@@ -423,9 +421,9 @@ impl Display {
             glyph_cache,
         );
         let auth_labels = if language == super::UiLanguage::ZhCn {
-            ["自动", "密码", "密钥", "Agent", "交互式"]
+            ["自动", "密码", "密钥", "交互式"]
         } else {
-            ["Auto", "Password", "Key", "Agent", "Interactive"]
+            ["Auto", "Password", "Key", "Interactive"]
         };
         for ((mode, rect), label) in auth.iter().zip(auth_labels) {
             self.renderer.draw_chrome_text(
@@ -509,18 +507,6 @@ impl Display {
                     glyph_cache,
                 );
             }
-        } else if editor.auth == SshAuthMode::Agent {
-            self.renderer.draw_chrome_text(
-                &size,
-                destination.0,
-                content_y,
-                skin.ink_dim,
-                language.pick(
-                    "仅使用 Windows OpenSSH Agent 与 Pageant，不回退密码。",
-                    "Use Windows OpenSSH Agent and Pageant only; do not fall back to passwords.",
-                ),
-                glyph_cache,
-            );
         } else if editor.auth == SshAuthMode::KeyboardInteractive {
             self.renderer.draw_chrome_text(
                 &size,
@@ -596,22 +582,20 @@ fn button_quads(
     cancel: Rect,
     primary: Rect,
     hover: SshEditorHit,
-    accent: Rgba,
     skin: &theme::Skin,
     scale: f32,
     focus: usize,
     shows_password: bool,
 ) {
     let s = |value: f32| value * scale;
-    let primary_edge = Rgba::new(accent.r, accent.g, accent.b, if skin.is_light { 72 } else { 92 });
-    for (rect, edge) in [(cancel, skin.hairline), (primary, primary_edge)] {
+    for rect in [cancel, primary] {
         quads.push(UiQuad::solid(
             rect.0 - s(1.0),
             rect.1 - s(1.0),
             rect.2 + s(2.0),
             rect.3 + s(2.0),
             s(9.0),
-            edge,
+            skin.hairline,
         ));
     }
     let cancel_focus = if shows_password { 2 } else { 1 };
@@ -627,16 +611,23 @@ fn button_quads(
             rect.2 + s(4.0),
             rect.3 + s(4.0),
             s(10.0),
-            Rgba::new(skin.accent.r, skin.accent.g, skin.accent.b, 255),
+            skin.hover_strong,
         ));
     }
     quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.surface));
-    quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.accent_soft));
+    quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.input));
     if hover == SshEditorHit::Cancel {
         quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.hover));
     }
     if hover == SshEditorHit::Primary {
-        quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.hover));
+        quads.push(UiQuad::solid(
+            primary.0,
+            primary.1,
+            primary.2,
+            primary.3,
+            s(8.0),
+            skin.hover_strong,
+        ));
     }
 }
 

@@ -12,7 +12,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 - **A built-in font fallback** — Maple Mono Normal NF CN is now embedded in Nebula as a runtime fallback, so the interface remains readable when the system font has not been installed. The system-installed font is still preferred, the installation reminder remains dismissible, and the portable archive still includes the original font under `fonts` for normal installation.
 - **Choose the directory shown in Files and Git** — the Files drawer can now select a custom root with the native folder picker, and the Git view follows the same root. The choice lasts until the current window closes; “Follow current directory” immediately returns to the focused terminal directory.
-- **Five SSH sign-in modes** — each saved host can now use Automatic, Password, Private Key, Agent, or Keyboard-interactive authentication. Automatic mode follows Tabby's practical order, while an explicitly selected mode stays strict and does not silently fall back to another method.
+- **Four SSH sign-in modes** — each saved host can now use Automatic, Password, Private Key, or Keyboard-interactive authentication. Automatic mode tries configured keys before password and interactive prompts, while an explicitly selected mode stays strict and does not silently switch methods.
 - **Private-key sign-in** — choose one or more OpenSSH, PEM, or PPK private keys from the host editor. Key paths stay on the local machine, encrypted-key passphrases are stored in Windows Credential Manager by key fingerprint, and public-key files are rejected with a clear message.
 - **SFTP file transfer** — open SFTP from an SSH host's right-click menu and reuse the same authenticated connection. The remote drawer supports editable paths, filtering, refresh, file and folder uploads, file and folder downloads, new folders, rename, recursive delete, symlink targets, progress, cancellation, and visible errors.
 - **Pull from the Git drawer** — the right-side Git view now has a Pull button beside Stage, Commit, and Push. Pulls use fast-forward-only mode so Nebula never creates an unexpected merge commit.
@@ -36,7 +36,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 - **内置了字体显示兜底** — Maple Mono Normal NF CN 现在会随主程序一起内置。即使用户忘了安装系统字体，界面也能正常显示；已经安装的系统字体仍然优先，缺少字体时的提醒依旧可以关闭，便携包里的 `fonts` 目录和原始字体文件也继续保留，方便按正常方式安装。
 - **文件和 Git 可以切换查看目录了** — 文件抽屉新增原生目录选择器，选中的目录也会同步用于 Git 页面。这个选择只保留到当前窗口关闭；点击“跟随”后会立即重新跟随当前终端所在目录。
-- **五种 SSH 登录方式** — 每个已保存主机都可以选择自动、密码、密钥、Agent 或交互式认证。自动模式会按照 Tabby 的实用顺序逐项尝试；手动选择某种方式后则只使用该方式，不会失败后悄悄换成其他登录方式。
+- **四种 SSH 登录方式** — 每个已保存主机都可以选择自动、密码、密钥或交互式认证。自动模式会先尝试配置的私钥，再尝试密码和交互式提示；手动选择某种方式后则只使用该方式，不会失败后悄悄切换。
 - **私钥登录** — 主机编辑器现在可以选择一把或多把 OpenSSH、PEM 或 PPK 私钥。Nebula 只保存本机密钥路径，加密私钥的口令会按密钥指纹存入 Windows 凭据管理器；如果误选 `.pub` 公钥，也会直接提示重新选择私钥。
 - **SFTP 文件传输** — 在 SSH 主机右键菜单中即可打开 SFTP，并复用同一条已认证连接。远端抽屉支持手动路径、筛选、刷新、上传文件和文件夹、下载文件和文件夹、新建文件夹、重命名、递归删除、符号链接目标、传输进度、取消和可见错误提示。
 - **Git 抽屉可以拉取了** — 右侧 Git 页面在暂存、提交和推送旁新增“拉取”按钮。拉取只接受快进更新，不会在用户不知情时自动生成合并提交。

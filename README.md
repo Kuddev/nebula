@@ -94,9 +94,9 @@ experience that works without extra setup.
   transport: no wrapper shell and no external console window. Host aliases,
   usernames, ports and identity files are resolved from `~/.ssh/config`;
   authentication supports standard private keys and certificates, encrypted-key
-  passphrases, Windows OpenSSH Agent, Pageant, Windows Credential Manager
-  passwords, and keyboard-interactive/MFA. Accepted host keys use the standard
-  `known_hosts` store, and additional tabs reuse an already authenticated
+  passphrases, Windows Credential Manager passwords, and keyboard-interactive/MFA.
+  Accepted host keys use the standard `known_hosts` store, and additional tabs
+  reuse an already authenticated
   connection to the same `user@host:port` for a faster second shell.
 - **Built-in SFTP transfers** — open a remote file drawer from any saved SSH
   host and reuse its authenticated connection. Browse or type remote paths,
@@ -275,9 +275,9 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 - **原生 SSH 会话** — 保存的主机现在直接通过 Nebula 的 Rust SSH 传输连接，
   不再经过包装 Shell，也不会弹出外部控制台窗口。主机别名、用户名、端口和
   IdentityFile 会从 `~/.ssh/config` 解析；认证覆盖标准私钥与证书、加密密钥
-  口令、Windows OpenSSH Agent、Pageant、Windows 凭据管理器密码以及
-  keyboard-interactive/MFA。主机密钥写入标准 `known_hosts`；同一
-  `user@host:port` 再开标签页会复用已认证连接，让第二个 Shell 更快出现。
+  口令、Windows 凭据管理器密码以及 keyboard-interactive/MFA。主机密钥写入
+  标准 `known_hosts`；同一 `user@host:port` 再开标签页会复用已认证连接，让第二个
+  Shell 更快出现。
 - **内置 SFTP 传输** — 从已保存 SSH 主机即可打开远端文件抽屉，并复用已认证
   连接。支持浏览或手动输入远端路径、筛选、上传/下载文件与文件夹、新建与重命名
   文件夹、递归删除、跟随符号链接目标，以及带进度、取消和错误提示的后台传输。

@@ -16,7 +16,7 @@ pub fn auth_sections(mode: SshAuthMode) -> (bool, bool) {
         SshAuthMode::Auto => (true, true),
         SshAuthMode::Password => (true, false),
         SshAuthMode::PublicKey => (false, true),
-        SshAuthMode::Agent | SshAuthMode::KeyboardInteractive => (false, false),
+        SshAuthMode::KeyboardInteractive => (false, false),
     }
 }
 
@@ -98,7 +98,7 @@ pub struct SshEditorRects {
     pub destination: (f32, f32, f32, f32),
     pub password: (f32, f32, f32, f32),
     pub password_toggle: (f32, f32, f32, f32),
-    pub auth: [(SshAuthMode, (f32, f32, f32, f32)); 5],
+    pub auth: [(SshAuthMode, (f32, f32, f32, f32)); 4],
     pub add_private_key: (f32, f32, f32, f32),
     pub private_key_rows: Vec<(usize, (f32, f32, f32, f32))>,
     pub save_checkbox: (f32, f32, f32, f32),
@@ -114,11 +114,10 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn auth_modes_show_the_same_sections_as_tabby() {
+    fn auth_modes_show_the_expected_editor_sections() {
         assert_eq!(auth_sections(SshAuthMode::Auto), (true, true));
         assert_eq!(auth_sections(SshAuthMode::Password), (true, false));
         assert_eq!(auth_sections(SshAuthMode::PublicKey), (false, true));
-        assert_eq!(auth_sections(SshAuthMode::Agent), (false, false));
         assert_eq!(auth_sections(SshAuthMode::KeyboardInteractive), (false, false));
     }
 

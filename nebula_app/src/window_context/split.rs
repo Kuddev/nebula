@@ -300,6 +300,12 @@ fn terminal_content_rect(size: &SizeInfo) -> (f32, f32, f32, f32) {
     (x, y, width, height)
 }
 
+fn terminal_content_contains(size: &SizeInfo, x: f32, y: f32) -> bool {
+    // 分屏 SizeInfo 共享整窗尺寸，只能用网格行列还原当前 Pane 的真实内容边界。
+    let (left, top, width, height) = terminal_content_rect(size);
+    x >= left && x < left + width && y >= top && y < top + height
+}
+
 impl WindowContext {
     /// The pane that currently owns keyboard focus (active tab's active pane).
     pub(super) fn focused_pane_id(&self) -> PaneId {
@@ -369,13 +375,9 @@ impl WindowContext {
     /// The pane whose rectangle contains the screen point `(x, y)`, if any.
     pub(super) fn pane_at_position(&self, x: f32, y: f32) -> Option<PaneId> {
         let (panes, _) = self.layout_geometry(false);
-        panes.into_iter().find_map(|(id, view)| {
-            let x0 = view.padding_x();
-            let y0 = view.padding_y();
-            let x1 = view.width() - view.padding_x();
-            let y1 = view.height() - view.padding_bottom();
-            (x >= x0 && x < x1 && y >= y0 && y < y1).then_some(id)
-        })
+        panes
+            .into_iter()
+            .find_map(|(id, view)| terminal_content_contains(&view, x, y).then_some(id))
     }
 
     /// Move focus to the nearest pane in direction `nav` from the focused one.
@@ -389,8 +391,7 @@ impl WindowContext {
         // Centre of the currently focused pane.
         let Some((_, fview)) = rects.iter().find(|(id, _)| *id == focused) else { return };
         let center = |v: &SizeInfo| {
-            let cx = v.padding_x()
-                + (v.width() - v.padding_x() - v.padding_right()) * 0.5;
+            let cx = v.padding_x() + (v.width() - v.padding_x() - v.padding_right()) * 0.5;
             let cy = v.padding_y() + (v.height() - v.padding_y() - v.padding_bottom()) * 0.5;
             (cx, cy)
         };
@@ -852,7 +853,7 @@ impl WindowContext {
 mod resize_layout_tests {
     use nebula_terminal::grid::Dimensions;
 
-    use super::{Layout, collect_layout, terminal_content_rect};
+    use super::{Layout, collect_layout, terminal_content_contains, terminal_content_rect};
     use crate::display::{SizeInfo, SplitDirection};
 
     #[test]
@@ -936,5 +937,45 @@ mod resize_layout_tests {
         assert!(panes[1].1.padding_y() > panes[0].1.padding_y());
         assert_eq!(panes[1].1.width(), 1000.0);
         assert_eq!(panes[1].1.height(), 1000.0);
+    }
+
+    #[test]
+    fn split_hit_testing_respects_each_panes_asymmetric_edges() {
+        let size =
+            SizeInfo::new_fully_asymmetric(1000.0, 700.0, 10.0, 20.0, 100.0, 20.0, 80.0, 20.0);
+        let (x, y, width, height) = terminal_content_rect(&size);
+        let layout = Layout::Split {
+            direction: SplitDirection::LeftRight,
+            ratio: 0.5,
+            preview_ratio: None,
+            dragging: false,
+            first: Box::new(Layout::Leaf(1)),
+            second: Box::new(Layout::Leaf(2)),
+        };
+        let mut panes = Vec::new();
+        collect_layout(
+            &layout,
+            size.width(),
+            size.height(),
+            size.cell_width(),
+            size.cell_height(),
+            8.0,
+            false,
+            x,
+            y,
+            width,
+            height,
+            &mut Vec::new(),
+            &mut panes,
+            &mut Vec::new(),
+        );
+
+        let left = panes.iter().find(|(id, _)| *id == 1).unwrap().1;
+        let right = panes.iter().find(|(id, _)| *id == 2).unwrap().1;
+        let right_center_x = right.padding_x() + right.columns() as f32 * right.cell_width() * 0.5;
+        let center_y = right.padding_y() + right.screen_lines() as f32 * right.cell_height() * 0.5;
+
+        assert!(!terminal_content_contains(&left, right_center_x, center_y));
+        assert!(terminal_content_contains(&right, right_center_x, center_y));
     }
 }

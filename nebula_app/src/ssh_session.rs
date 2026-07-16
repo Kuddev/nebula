@@ -17,12 +17,9 @@ use nebula_terminal::event_loop::{EventLoopSender, Msg, StreamProcessor};
 use nebula_terminal::sync::FairMutex;
 use nebula_terminal::term::Term;
 use russh::ChannelMsg;
-use russh::client::{self, AuthResult, KeyboardInteractiveAuthResponse};
-use russh::keys::agent::AgentIdentity;
-use russh::keys::agent::client::AgentClient;
+use russh::client::{self, KeyboardInteractiveAuthResponse};
 use russh::keys::ssh_key;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
-use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::event::EventProxy;
 
@@ -33,7 +30,6 @@ type SharedSession = Arc<tokio::sync::Mutex<ClientSession>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AuthMethod {
     PrivateKey(PathBuf),
-    Agent,
     StoredPassword,
     KeyboardInteractive,
     PromptPassword,
@@ -69,7 +65,6 @@ fn authentication_plan(
         SshAuthMode::Auto => {
             let mut methods = key_methods();
             methods.extend([
-                AuthMethod::Agent,
                 AuthMethod::StoredPassword,
                 AuthMethod::KeyboardInteractive,
                 AuthMethod::PromptPassword,
@@ -80,7 +75,6 @@ fn authentication_plan(
             vec![AuthMethod::StoredPassword, AuthMethod::PromptPassword]
         },
         SshAuthMode::PublicKey => key_methods(),
-        SshAuthMode::Agent => vec![AuthMethod::Agent],
         SshAuthMode::KeyboardInteractive => vec![AuthMethod::KeyboardInteractive],
     }
 }
@@ -509,12 +503,6 @@ async fn authenticate(
                     return Ok(());
                 }
             },
-            AuthMethod::Agent => {
-                if try_windows_agents(session, &destination.user, &profile.private_keys).await {
-                    clear_secret(&mut reusable_password);
-                    return Ok(());
-                }
-            },
             AuthMethod::StoredPassword => {
                 if !loaded_stored_password {
                     reusable_password =
@@ -612,9 +600,6 @@ fn auth_failure(mode: crate::ssh_profiles::SshAuthMode, key_count: usize) -> Str
             "密钥认证没有可用的私钥，请选择私钥文件或配置 IdentityFile".to_owned()
         },
         SshAuthMode::PublicKey => "服务器拒绝了指定的私钥，未回退到密码认证".to_owned(),
-        SshAuthMode::Agent => {
-            "OpenSSH Agent 与 Pageant 均未提供可用身份，未回退到密码认证".to_owned()
-        },
         SshAuthMode::KeyboardInteractive => {
             "服务器拒绝了 keyboard-interactive 认证，未回退到密码认证".to_owned()
         },
@@ -673,69 +658,6 @@ async fn try_private_key(
     let hash = rsa_hash_for(session, key.algorithm().is_rsa()).await;
     let key = PrivateKeyWithHashAlg::new(key, hash);
     Ok(session.authenticate_publickey(&destination.user, key).await?.success())
-}
-
-async fn try_windows_agents(
-    session: &mut ClientSession,
-    user: &str,
-    preferred_private_keys: &[PathBuf],
-) -> bool {
-    let preferred_public_keys = preferred_private_keys
-        .iter()
-        .filter_map(|path| {
-            let public_path = PathBuf::from(format!("{}.pub", path.display()));
-            russh::keys::load_public_key(public_path).ok()
-        })
-        .collect::<Vec<_>>();
-    const OPENSSH_AGENT: &str = r"\\.\pipe\openssh-ssh-agent";
-    if let Ok(mut agent) = AgentClient::connect_named_pipe(OPENSSH_AGENT).await {
-        if authenticate_agent(session, user, &preferred_public_keys, &mut agent)
-            .await
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    if let Ok(mut agent) = AgentClient::connect_pageant().await {
-        if authenticate_agent(session, user, &preferred_public_keys, &mut agent)
-            .await
-            .unwrap_or(false)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-async fn authenticate_agent<S>(
-    session: &mut ClientSession,
-    user: &str,
-    preferred_public_keys: &[ssh_key::PublicKey],
-    agent: &mut AgentClient<S>,
-) -> Result<bool, SessionError>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
-{
-    let mut identities = agent.request_identities().await?;
-    identities.sort_by_key(|identity| {
-        (!preferred_public_keys.iter().any(|key| key == identity.public_key().as_ref())) as u8
-    });
-    for identity in identities.into_iter().take(5) {
-        let is_rsa = identity.public_key().algorithm().is_rsa();
-        let hash = rsa_hash_for(session, is_rsa).await;
-        let result: AuthResult = match identity {
-            AgentIdentity::PublicKey { key, .. } => {
-                session.authenticate_publickey_with(user, key, hash, agent).await?
-            },
-            AgentIdentity::Certificate { certificate, .. } => {
-                session.authenticate_certificate_with(user, certificate, hash, agent).await?
-            },
-        };
-        if result.success() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 async fn rsa_hash_for(session: &ClientSession, rsa: bool) -> Option<HashAlg> {
@@ -929,7 +851,6 @@ mod tests {
             vec![
                 AuthMethod::PrivateKey(PathBuf::from(r"C:\Keys\chosen")),
                 AuthMethod::PrivateKey(PathBuf::from(r"C:\Keys\config")),
-                AuthMethod::Agent,
                 AuthMethod::StoredPassword,
                 AuthMethod::KeyboardInteractive,
                 AuthMethod::PromptPassword,
@@ -965,8 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_and_interactive_modes_are_strict() {
-        assert_eq!(authentication_plan(SshAuthMode::Agent, &[], &[]), vec![AuthMethod::Agent]);
+    fn interactive_mode_is_strict() {
         assert_eq!(
             authentication_plan(SshAuthMode::KeyboardInteractive, &[], &[]),
             vec![AuthMethod::KeyboardInteractive]
