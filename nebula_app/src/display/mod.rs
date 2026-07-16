@@ -1621,6 +1621,41 @@ pub struct Display {
     meter: Meter,
 }
 
+/// 计算全屏 TUI 在网格之外需要补齐的垂直背景带。内部边缘必须停在 Pane 边界，
+/// 只有接触终端外沿的 Pane 才能继续延伸到圆角卡片边缘。
+fn alt_screen_vertical_padding_bands(
+    window: &SizeInfo,
+    pane: &SizeInfo,
+    card_y: f32,
+    card_height: f32,
+) -> [Option<(f32, f32)>; 2] {
+    const EDGE_EPSILON: f32 = 0.5;
+
+    let window_grid_top = window.padding_y();
+    let window_grid_bottom = window.height() - window.padding_bottom();
+    let pane_top = pane.padding_y();
+    let pane_bottom = pane.height() - pane.padding_bottom();
+    let grid_bottom = pane_top + pane.screen_lines() as f32 * pane.cell_height();
+
+    let band = |start: f32, end: f32| {
+        let height = (end - start).max(0.0);
+        (height > f32::EPSILON).then_some((start, height))
+    };
+
+    let top = if (pane_top - window_grid_top).abs() <= EDGE_EPSILON {
+        band(card_y, pane_top)
+    } else {
+        None
+    };
+    let bottom_limit = if (pane_bottom - window_grid_bottom).abs() <= EDGE_EPSILON {
+        card_y + card_height
+    } else {
+        pane_bottom
+    };
+
+    [top, band(grid_bottom, bottom_limit)]
+}
+
 impl Display {
     pub fn new(
         window: Window,
@@ -4571,21 +4606,17 @@ impl Display {
 
         if alt_screen {
             if let Some(pad_bg) = grid_pad_bg {
-                // Clamp the padding fill to the terminal card so the shell
-                // seam and the card's rounded corners stay visible around
-                // full-screen apps.
                 let (_, card_y, _, card_h) = self.terminal_card_rect();
                 let x = size_info.padding_x();
                 let w = size_info.width() - size_info.padding_x() - size_info.padding_right();
-                let top_h = (size_info.padding_y() - card_y).max(0.0);
-                let bottom_y = size_info.padding_y()
-                    + size_info.screen_lines() as f32 * size_info.cell_height();
-                let bottom_h = (card_y + card_h - bottom_y).max(0.0);
-                if top_h > 0.0 {
-                    rects.push(RenderRect::new(x, card_y, w, top_h, pad_bg, 1.0));
-                }
-                if bottom_h > 0.0 {
-                    rects.push(RenderRect::new(x, bottom_y, w, bottom_h, pad_bg, 1.0));
+                // 备用屏幕会给整张网格着色。补齐背景时只能填当前 Pane 的边缘；
+                // 下方 Pane 若从整张卡片顶部开始填，会在最后绘制时盖住上方 Pane。
+                for (y, height) in
+                    alt_screen_vertical_padding_bands(&self.size_info, &size_info, card_y, card_h)
+                        .into_iter()
+                        .flatten()
+                {
+                    rects.push(RenderRect::new(x, y, w, height, pad_bg, 1.0));
                 }
             }
         }
@@ -6645,8 +6676,8 @@ mod nebula_ux_tests {
     use nebula_terminal::grid::Dimensions;
 
     use super::{
-        NebulaConfirm, SizeInfo, remove_ssh_host_from_lists, replays_untrusted_terminal_output,
-        restore_ssh_host_to_lists,
+        NebulaConfirm, SizeInfo, alt_screen_vertical_padding_bands, remove_ssh_host_from_lists,
+        replays_untrusted_terminal_output, restore_ssh_host_to_lists,
     };
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -6729,6 +6760,25 @@ mod nebula_ux_tests {
 
         let old_symmetric = SizeInfo::new_asymmetric(1000.0, 1000.0, 10.0, 20.0, 0.0, 0.0, 64.0);
         assert_eq!(old_symmetric.screen_lines(), 43);
+    }
+
+    #[test]
+    fn alternate_screen_padding_stays_inside_stacked_panes() {
+        let window =
+            SizeInfo::new_fully_asymmetric(1000.0, 700.0, 10.0, 20.0, 100.0, 20.0, 80.0, 20.0);
+        let top =
+            SizeInfo::new_fully_asymmetric(1000.0, 700.0, 10.0, 20.0, 100.0, 20.0, 80.0, 324.0);
+        let bottom =
+            SizeInfo::new_fully_asymmetric(1000.0, 700.0, 10.0, 20.0, 100.0, 20.0, 384.0, 20.0);
+
+        assert_eq!(
+            alt_screen_vertical_padding_bands(&window, &top, 56.0, 636.0),
+            [Some((56.0, 24.0)), Some((360.0, 16.0))]
+        );
+        assert_eq!(
+            alt_screen_vertical_padding_bands(&window, &bottom, 56.0, 636.0),
+            [None, Some((664.0, 28.0))]
+        );
     }
 
     #[test]
