@@ -156,8 +156,9 @@ experience that works without extra setup.
   updates, and push.
 - **Quick terminal** — global <kbd>Ctrl</kbd>+<kbd>`</kbd> drops a Quake-style
   terminal from the top edge.
-- **Floating settings panel & command palette** — themes, background
-  image/opacity, shell choice, completion behavior; all persisted.
+- **Settings tab & command palette** — settings opens as a normal reusable tab,
+  with themes, language, background image/opacity, shell choice and completion
+  behavior; all persisted.
 - **Inline images** — OSC 1337 image protocol support, lazily anchored to
   scrollback rows.
 
@@ -198,6 +199,9 @@ in live reload; invalid edits keep the last-known-good configuration active.
 Existing TOML files remain supported. See the
 [Lua configuration guide](docs/lua-configuration.md) for APIs, discovery order,
 Windows/Linux paths, arrays, modules, and reload behavior.
+
+See [Product positioning](docs/product-positioning.md) for Nebula's target
+users, core scenarios, and its tradeoffs against Warp, kitty, Tabby and WezTerm.
 
 ### 🧩 Tech Stack
 
@@ -322,8 +326,8 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
   支持暂存、提交、仅快进拉取和推送。
 - **快速终端** — 全局 <kbd>Ctrl</kbd>+<kbd>`</kbd> 从屏幕顶部滑出
   Quake 式终端。
-- **悬浮设置面板与命令面板** — 主题、背景图/透明度、shell 选择、补全行为，
-  全部持久化。
+- **设置标签页与命令面板** — 设置像普通标签页一样打开和复用，支持主题、
+  跟随系统/简体中文/English、背景图/透明度、Shell 与补全行为，并跨重启持久化。
 - **行内图片** — 支持 OSC 1337 图片协议，惰性锚定到回滚行。
 
 ### 📥 安装
@@ -360,6 +364,9 @@ Nebula 内置 Lua 5.4，使用 `require 'nebula'` 与
 载入的模块会参与热重载；配置错误时继续使用上一份有效配置。已有 TOML 仍兼容。
 路径优先级、Windows/Linux 位置、数组、模块与重载说明见
 [Lua 配置指南](docs/lua-configuration.md)。
+
+Nebula 的目标用户、核心场景，以及相对 Warp、kitty、Tabby、WezTerm 的取舍，
+见[产品定位文档](docs/product-positioning.md)。
 
 ### 🧩 技术栈
 
