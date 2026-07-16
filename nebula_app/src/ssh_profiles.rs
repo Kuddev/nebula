@@ -15,7 +15,6 @@ pub enum SshAuthMode {
     Auto,
     Password,
     PublicKey,
-    Agent,
     KeyboardInteractive,
 }
 
@@ -28,7 +27,8 @@ impl<'de> Deserialize<'de> for SshAuthMode {
         Ok(match value.as_str() {
             "password" => Self::Password,
             "public_key" => Self::PublicKey,
-            "agent" => Self::Agent,
+            // v0.5 移除了 Agent；旧配置回退到 Auto，避免升级后配置失效。
+            "agent" => Self::Auto,
             "keyboard_interactive" => Self::KeyboardInteractive,
             _ => Self::Auto,
         })
@@ -220,14 +220,28 @@ mod tests {
         let mut profiles = SshProfiles::default();
         profiles.upsert(SshProfileAuth {
             destination: "old@example.com".to_owned(),
-            auth: SshAuthMode::Agent,
+            auth: SshAuthMode::PublicKey,
             private_keys: vec![PathBuf::from(r"C:\Keys\id_ed25519")],
         });
 
         profiles.rename("old@example.com", "new@example.com");
 
         assert_eq!(profiles.for_destination("old@example.com").auth, SshAuthMode::Auto);
-        assert_eq!(profiles.for_destination("new@example.com").auth, SshAuthMode::Agent);
+        assert_eq!(profiles.for_destination("new@example.com").auth, SshAuthMode::PublicKey);
+    }
+
+    #[test]
+    fn legacy_agent_mode_migrates_to_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ssh_profiles.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"profiles":[{"destination":"dev@example.com","auth":"agent","private_keys":[]}]}"#,
+        )
+        .unwrap();
+
+        let loaded = SshProfiles::load(&path).unwrap();
+        assert_eq!(loaded.for_destination("dev@example.com").auth, SshAuthMode::Auto);
     }
 
     #[test]
