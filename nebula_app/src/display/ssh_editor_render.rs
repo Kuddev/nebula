@@ -148,18 +148,16 @@ impl Display {
             s(100.0).max(text_width(cancel_action) + label_gap + cancel_key_w + button_pad * 2.0);
         let primary = (bx + box_w - pad - primary_w, footer_y, primary_w, s(36.0));
         let cancel = (primary.0 - s(12.0) - cancel_w, primary.1, cancel_w, s(36.0));
-        let primary_group_w = text_width(primary_action) + label_gap + primary_key_w;
-        let primary_group_x = primary.0 + (primary.2 - primary_group_w) * 0.5;
+        let primary_action_x = primary.0 + button_pad;
         let primary_key_rect = (
-            primary_group_x + text_width(primary_action) + label_gap,
+            primary.0 + primary.2 - button_pad - primary_key_w,
             primary.1 + s(7.0),
             primary_key_w,
             primary.3 - s(14.0),
         );
-        let cancel_group_w = text_width(cancel_action) + label_gap + cancel_key_w;
-        let cancel_group_x = cancel.0 + (cancel.2 - cancel_group_w) * 0.5;
+        let cancel_action_x = cancel.0 + button_pad;
         let cancel_key_rect = (
-            cancel_group_x + text_width(cancel_action) + label_gap,
+            cancel.0 + cancel.2 - button_pad - cancel_key_w,
             cancel.1 + s(7.0),
             cancel_key_w,
             cancel.3 - s(14.0),
@@ -379,29 +377,33 @@ impl Display {
             },
             glyph_cache,
         );
+        let destination_label = language.pick("连接地址", "Destination");
+        let destination_label_y = destination.1 - cell_h - s(5.0);
         self.renderer.draw_chrome_text(
             &size,
             destination.0,
-            destination.1 - cell_h - s(5.0),
+            destination_label_y,
             skin.ink,
-            language.pick("连接地址", "Destination"),
+            destination_label,
             glyph_cache,
         );
+        let destination_hint = editor.error.as_deref().unwrap_or(
+            language
+                .pick("user@host · 非 22 端口用 ssh://", "user@host · use ssh:// for non-22 ports"),
+        );
+        let destination_hint_scale = 0.72;
         self.renderer.draw_doc_text(
             &size,
-            destination.0 + s(82.0),
-            destination.1 - cell_h - s(3.0),
-            0.72,
+            destination.0 + destination.2 - text_width(destination_hint) * destination_hint_scale,
+            destination_label_y + cell_h * (1.0 - destination_hint_scale) * 0.5,
+            destination_hint_scale,
             if editor.error.is_some() {
                 if skin.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) }
             } else {
                 skin.ink_dim
             },
             Flags::empty(),
-            editor.error.as_deref().unwrap_or(language.pick(
-                "user@host · 非 22 端口用 ssh://",
-                "user@host · use ssh:// for non-22 ports",
-            )),
+            destination_hint,
             glyph_cache,
         );
         self.renderer.draw_chrome_text(
@@ -526,8 +528,8 @@ impl Display {
             &size,
             cancel,
             primary,
-            cancel_group_x,
-            primary_group_x,
+            cancel_action_x,
+            primary_action_x,
             cancel_key_rect,
             primary_key_rect,
             cancel_action,
@@ -614,20 +616,14 @@ fn button_quads(
             skin.hover_strong,
         ));
     }
-    quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.surface));
-    quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.input));
+    for rect in [cancel, primary] {
+        quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(8.0), skin.surface));
+    }
     if hover == SshEditorHit::Cancel {
         quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.hover));
     }
     if hover == SshEditorHit::Primary {
-        quads.push(UiQuad::solid(
-            primary.0,
-            primary.1,
-            primary.2,
-            primary.3,
-            s(8.0),
-            skin.hover_strong,
-        ));
+        quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.hover));
     }
 }
 
@@ -745,8 +741,8 @@ fn draw_button_text(
     size: &SizeInfo,
     cancel: Rect,
     primary: Rect,
-    cancel_group_x: f32,
-    primary_group_x: f32,
+    cancel_action_x: f32,
+    primary_action_x: f32,
     cancel_key_rect: Rect,
     primary_key_rect: Rect,
     cancel_action: &str,
@@ -758,7 +754,7 @@ fn draw_button_text(
 ) {
     renderer.draw_chrome_text(
         size,
-        cancel_group_x,
+        cancel_action_x,
         cancel.1 + (cancel.3 - cell_h) / 2.0,
         skin.ink,
         cancel_action,
@@ -766,7 +762,7 @@ fn draw_button_text(
     );
     renderer.draw_chrome_text(
         size,
-        primary_group_x,
+        primary_action_x,
         primary.1 + (primary.3 - cell_h) / 2.0,
         skin.ink_strong,
         primary_action,
