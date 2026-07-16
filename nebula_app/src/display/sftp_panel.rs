@@ -565,12 +565,34 @@ pub(super) fn draw_text(
     );
 
     if let Some(error) = panel.editor_error.as_deref().or(snapshot.error.as_deref()) {
+        let user_error = crate::ux::UserFacingError::new(
+            "远端文件操作失败",
+            error,
+            "检查网络和目录权限，然后点击刷新重试。",
+        )
+        .retry(crate::ux::RetryAction::Retry);
         renderer.draw_chrome_text(
             size,
             layout.panel.0 + s(14.0),
             layout.list_y,
             Rgb::new(skin.danger.r, skin.danger.g, skin.danger.b),
-            &super::truncate_tab_label(error, 30),
+            &super::truncate_tab_label(&user_error.title, 30),
+            glyph_cache,
+        );
+        renderer.draw_chrome_text(
+            size,
+            layout.panel.0 + s(14.0),
+            layout.list_y + s(20.0),
+            skin.ink_dim,
+            &super::truncate_tab_label(&format!("原因：{}", user_error.cause), 30),
+            glyph_cache,
+        );
+        renderer.draw_chrome_text(
+            size,
+            layout.panel.0 + s(14.0),
+            layout.list_y + s(40.0),
+            skin.accent,
+            "建议：检查权限后点击刷新",
             glyph_cache,
         );
     } else if matches!(snapshot.phase, SftpPhase::Connecting | SftpPhase::Loading) {
@@ -624,12 +646,41 @@ pub(super) fn draw_text(
             );
         }
         if panel.visible_entries().is_empty() {
+            let empty = if panel.filter.is_empty() {
+                crate::ux::EmptyState::new(
+                    "此目录为空",
+                    "远端目录中还没有文件或子目录。",
+                    "使用上方上传按钮添加第一个文件。",
+                )
+            } else {
+                crate::ux::EmptyState::new(
+                    "没有匹配文件",
+                    "当前筛选条件未匹配任何远端条目。",
+                    "修改筛选词或清空筛选框。",
+                )
+            };
             renderer.draw_chrome_text(
                 size,
                 layout.panel.0 + s(14.0),
                 layout.list_y,
                 skin.ink_faint,
-                if panel.filter.is_empty() { "此目录为空" } else { "没有匹配文件" },
+                &empty.title,
+                glyph_cache,
+            );
+            renderer.draw_chrome_text(
+                size,
+                layout.panel.0 + s(14.0),
+                layout.list_y + s(20.0),
+                skin.ink_dim,
+                &super::truncate_tab_label(&empty.reason, 31),
+                glyph_cache,
+            );
+            renderer.draw_chrome_text(
+                size,
+                layout.panel.0 + s(14.0),
+                layout.list_y + s(40.0),
+                skin.accent,
+                &super::truncate_tab_label(&empty.action, 31),
                 glyph_cache,
             );
         }
