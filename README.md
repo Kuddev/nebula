@@ -200,9 +200,6 @@ Existing TOML files remain supported. See the
 [Lua configuration guide](docs/lua-configuration.md) for APIs, discovery order,
 Windows/Linux paths, arrays, modules, and reload behavior.
 
-See [Product positioning](docs/product-positioning.md) for Nebula's target
-users, core scenarios, and its tradeoffs against Warp, kitty, Tabby and WezTerm.
-
 ### 🧩 Tech Stack
 
 | Layer | Tech |
@@ -366,8 +363,6 @@ Nebula 内置 Lua 5.4，使用 `require 'nebula'` 与
 [Lua 配置指南](docs/lua-configuration.md)。
 
 Nebula 的目标用户、核心场景，以及相对 Warp、kitty、Tabby、WezTerm 的取舍，
-见[产品定位文档](docs/product-positioning.md)。
-
 ### 🧩 技术栈
 
 | 层级 | 技术 |
