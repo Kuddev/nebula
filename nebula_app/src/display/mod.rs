@@ -1671,13 +1671,13 @@ impl Display {
         let (cell_width, cell_height) = compute_cell_size(config, &metrics);
 
         // Resize the window to the user-configured size, or a Windows
-        // Terminal-like default when unset. A slightly narrower 116-column
-        // canvas with 50 rows leaves room for the sidebar without producing
-        // the previous wide, shallow first-launch window.
+        // Terminal-like default when unset. A 116-column by 30-row canvas
+        // leaves room for the sidebar while keeping the first-launch window
+        // compact enough for common laptop displays.
         let dimensions = config
             .window
             .dimensions()
-            .unwrap_or(crate::config::window::Dimensions { columns: 116, lines: 50 });
+            .unwrap_or(crate::config::window::Dimensions { columns: 116, lines: 30 });
         let size = window_size(config, dimensions, cell_width, cell_height, scale_factor);
         window.request_inner_size(size);
 
