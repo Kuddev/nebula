@@ -33,6 +33,8 @@ pub mod rects;
 mod shader;
 mod text;
 pub mod ui;
+#[cfg(feature = "wgpu-foundation")]
+pub mod wgpu_foundation;
 pub(crate) use text::Rasterizer;
 
 pub use text::{GlyphCache, LoaderApi};
