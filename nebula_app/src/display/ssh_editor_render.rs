@@ -616,9 +616,8 @@ fn button_quads(
             skin.hover_strong,
         ));
     }
-    for rect in [cancel, primary] {
-        quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(8.0), skin.surface));
-    }
+    // 取消按钮保持透明，只用边框表达边界；保存按钮才承载中性主题底色。
+    quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.surface));
     if hover == SshEditorHit::Cancel {
         quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.hover));
     }
