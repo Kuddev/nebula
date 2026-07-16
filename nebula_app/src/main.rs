@@ -36,9 +36,9 @@ mod daemon;
 mod display;
 mod event;
 #[cfg(windows)]
-mod font_install;
-#[cfg(windows)]
 mod file_uri;
+#[cfg(windows)]
+mod font_install;
 mod input;
 mod logging;
 #[cfg(target_os = "macos")]
@@ -71,6 +71,7 @@ mod ssh_session;
 #[cfg(windows)]
 mod ssh_sftp;
 mod string;
+mod ux;
 mod window_context;
 
 mod gl {

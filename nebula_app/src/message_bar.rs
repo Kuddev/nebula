@@ -35,12 +35,14 @@ impl Message {
         Message { text, ty, target: None }
     }
 
+    pub fn user_error(error: &crate::ux::UserFacingError) -> Message {
+        Message::new(error.message(), MessageType::Error)
+    }
+
     /// Formatted message text lines.
     pub fn text(&self, size_info: &SizeInfo) -> Vec<String> {
         let num_cols = size_info.columns();
-        let total_lines = (size_info.height()
-            - size_info.padding_y()
-            - size_info.padding_bottom())
+        let total_lines = (size_info.height() - size_info.padding_y() - size_info.padding_bottom())
             / size_info.cell_height();
         let max_lines = (total_lines as usize).saturating_sub(MIN_FREE_LINES);
         let button_len = CLOSE_BUTTON_TEXT.chars().count();
@@ -266,10 +268,10 @@ mod tests {
 
         let lines = message_buffer.message().unwrap().text(&size);
 
-        assert_eq!(lines, vec![
-            String::from("hahahahahahahahaha [X]"),
-            String::from("[MESSAGE TRUNCATED]   ")
-        ]);
+        assert_eq!(
+            lines,
+            vec![String::from("hahahahahahahahaha [X]"), String::from("[MESSAGE TRUNCATED]   ")]
+        );
     }
 
     #[test]
@@ -355,11 +357,10 @@ mod tests {
 
         let lines = message_buffer.message().unwrap().text(&size);
 
-        assert_eq!(lines, vec![
-            String::from("a [X]"),
-            String::from("bc   "),
-            String::from("defg ")
-        ]);
+        assert_eq!(
+            lines,
+            vec![String::from("a [X]"), String::from("bc   "), String::from("defg ")]
+        );
     }
 
     #[test]
@@ -371,11 +372,10 @@ mod tests {
 
         let lines = message_buffer.message().unwrap().text(&size);
 
-        assert_eq!(lines, vec![
-            String::from("ab  [X]"),
-            String::from("c 👩 d  "),
-            String::from("fgh    ")
-        ]);
+        assert_eq!(
+            lines,
+            vec![String::from("ab  [X]"), String::from("c 👩 d  "), String::from("fgh    ")]
+        );
     }
 
     #[test]

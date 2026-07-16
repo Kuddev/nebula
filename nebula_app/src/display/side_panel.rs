@@ -1317,6 +1317,45 @@ pub(super) fn draw_text(
                 let name = super::truncate_tab_label(&row.name, name_cols);
                 r.draw_chrome_text(size, name_x, ry, name_ink, &name, gc);
             }
+            if panel.file_rows().is_empty() {
+                let empty = if filtering {
+                    crate::ux::EmptyState::new(
+                        "没有匹配文件",
+                        "当前筛选词未匹配工作区内容。",
+                        "修改筛选词，或按 Esc 清空筛选。",
+                    )
+                } else if panel.root.is_none() {
+                    crate::ux::EmptyState::new(
+                        "没有可浏览的目录",
+                        "当前终端尚未报告工作目录。",
+                        "在终端中进入一个目录后点击刷新。",
+                    )
+                } else {
+                    crate::ux::EmptyState::new(
+                        "此目录为空",
+                        "当前工作目录中没有可显示的文件。",
+                        "在终端创建文件，或选择其他目录。",
+                    )
+                };
+                let y = layout.list_y + s(8.0);
+                r.draw_chrome_text(size, px + text_pad, y, sk.ink_strong, &empty.title, gc);
+                r.draw_chrome_text(
+                    size,
+                    px + text_pad,
+                    y + s(20.0),
+                    sk.ink_dim,
+                    &super::truncate_tab_label(&empty.reason, 32),
+                    gc,
+                );
+                r.draw_chrome_text(
+                    size,
+                    px + text_pad,
+                    y + s(40.0),
+                    sk.accent,
+                    &super::truncate_tab_label(&empty.action, 32),
+                    gc,
+                );
+            }
 
             // Drag ghost label, riding the chip pushed by `push_quads`.
             // Same chip-width formula as there (that pass has no cell_w), then

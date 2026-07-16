@@ -1030,12 +1030,14 @@ impl WindowContext {
                 },
                 Err(err) => {
                     error!("创建直连 SSH Pane 失败: {err}");
-                    self.message_buffer.push(crate::message_bar::Message::new(
-                        format!(
-                            "SSH {host} 连接创建失败：{err}。请检查地址/SSH 配置，右键编辑后重试。"
-                        ),
-                        crate::message_bar::MessageType::Error,
-                    ));
+                    let user_error = crate::ux::UserFacingError::new(
+                        format!("SSH {host} 连接创建失败"),
+                        "无法创建 SSH 会话，地址、认证方式或本机 SSH 配置可能无效。",
+                        "检查主机地址和认证配置，右键编辑该主机后重试。",
+                    )
+                    .retry(crate::ux::RetryAction::Retry)
+                    .details(err.to_string());
+                    self.message_buffer.push(crate::message_bar::Message::user_error(&user_error));
                     self.dirty = true;
                     self.display.window.request_redraw();
                     return;

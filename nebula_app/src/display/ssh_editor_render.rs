@@ -324,6 +324,8 @@ impl Display {
             accent,
             &skin,
             scale,
+            editor.focus.current(),
+            show_password,
         );
         for rect in [cancel_key_rect, primary_key_rect] {
             quads.push(UiQuad::solid(
@@ -597,6 +599,8 @@ fn button_quads(
     accent: Rgba,
     skin: &theme::Skin,
     scale: f32,
+    focus: usize,
+    shows_password: bool,
 ) {
     let s = |value: f32| value * scale;
     let primary_edge = Rgba::new(accent.r, accent.g, accent.b, if skin.is_light { 72 } else { 92 });
@@ -608,6 +612,22 @@ fn button_quads(
             rect.3 + s(2.0),
             s(9.0),
             edge,
+        ));
+    }
+    let cancel_focus = if shows_password { 2 } else { 1 };
+    let primary_focus = if shows_password { 3 } else { 2 };
+    for rect in
+        [(focus == cancel_focus).then_some(cancel), (focus == primary_focus).then_some(primary)]
+            .into_iter()
+            .flatten()
+    {
+        quads.push(UiQuad::solid(
+            rect.0 - s(2.0),
+            rect.1 - s(2.0),
+            rect.2 + s(4.0),
+            rect.3 + s(4.0),
+            s(10.0),
+            Rgba::new(skin.accent.r, skin.accent.g, skin.accent.b, 255),
         ));
     }
     quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.surface));

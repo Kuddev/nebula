@@ -279,8 +279,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             if self.ctx.display().ssh_editor_active() {
                 match &key.logical_key {
                     Key::Named(NamedKey::Escape) => self.ctx.display().close_ssh_editor(),
-                    Key::Named(NamedKey::Enter) => self.ctx.display().save_ssh_editor(),
-                    Key::Named(NamedKey::Tab) => self.ctx.display().ssh_editor_next_field(),
+                    Key::Named(NamedKey::Enter) => self.ctx.display().ssh_editor_activate_focus(),
+                    Key::Named(NamedKey::Tab) => {
+                        self.ctx.display().ssh_editor_next_field(mods.shift_key())
+                    },
                     Key::Named(NamedKey::Backspace) => self.ctx.display().ssh_editor_backspace(),
                     Key::Character(c)
                         if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("a") =>

@@ -1993,6 +1993,7 @@ impl Display {
             auth: crate::ssh_profiles::SshAuthMode::Auto,
             private_keys: Vec::new(),
             field: SshEditorField::Destination,
+            focus: crate::ux::FocusIndex::default(),
         });
         self.nebula_ssh_editor_rects = None;
         self.nebula_ssh_editor_open = true;
@@ -2026,6 +2027,7 @@ impl Display {
             auth: profile.auth,
             private_keys: profile.private_keys,
             field: SshEditorField::Destination,
+            focus: crate::ux::FocusIndex::default(),
         });
         self.nebula_ssh_editor_rects = None;
         self.nebula_ssh_editor_open = true;
@@ -2139,16 +2141,28 @@ impl Display {
         }
     }
 
-    pub fn ssh_editor_next_field(&mut self) {
+    pub fn ssh_editor_next_field(&mut self, reverse: bool) {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
             editor.destination_selection.clear();
             editor.password_selection.clear();
             let shows_password = ssh_ui::auth_sections(editor.auth).0;
-            editor.field = match editor.field {
-                SshEditorField::Destination if shows_password => SshEditorField::Password,
-                SshEditorField::Destination => SshEditorField::Destination,
-                SshEditorField::Password => SshEditorField::Destination,
+            let count = if shows_password { 4 } else { 3 };
+            editor.focus.advance(count, reverse);
+            editor.field = match (shows_password, editor.focus.current()) {
+                (_, 0) => SshEditorField::Destination,
+                (true, 1) => SshEditorField::Password,
+                _ => editor.field,
             };
+        }
+    }
+
+    pub fn ssh_editor_activate_focus(&mut self) {
+        let Some(editor) = self.nebula_ssh_editor.as_ref() else { return };
+        let shows_password = ssh_ui::auth_sections(editor.auth).0;
+        match (shows_password, editor.focus.current()) {
+            (true, 2) | (false, 1) => self.close_ssh_editor(),
+            (true, 3) | (false, 2) => self.save_ssh_editor(),
+            _ => {},
         }
     }
 
@@ -2162,6 +2176,7 @@ impl Display {
         match self.ssh_editor_hit(x, y) {
             SshEditorHit::Destination => {
                 if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    editor.focus.set(0, 4);
                     editor.destination_selection.clear();
                     editor.password_selection.clear();
                     editor.field = SshEditorField::Destination;
@@ -2174,6 +2189,7 @@ impl Display {
             },
             SshEditorHit::Password => {
                 if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    editor.focus.set(1, 4);
                     editor.destination_selection.clear();
                     editor.password_selection.clear();
                     editor.field = SshEditorField::Password;
@@ -2211,8 +2227,26 @@ impl Display {
             SshEditorHit::SaveToggleBox | SshEditorHit::SaveToggleLabel => {
                 self.ssh_editor_toggle_save();
             },
-            SshEditorHit::Cancel => self.close_ssh_editor(),
-            SshEditorHit::Primary => self.save_ssh_editor(),
+            SshEditorHit::Cancel => {
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    let shows_password = ssh_ui::auth_sections(editor.auth).0;
+                    editor.focus.set(
+                        if shows_password { 2 } else { 1 },
+                        if shows_password { 4 } else { 3 },
+                    );
+                }
+                self.close_ssh_editor();
+            },
+            SshEditorHit::Primary => {
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    let shows_password = ssh_ui::auth_sections(editor.auth).0;
+                    editor.focus.set(
+                        if shows_password { 3 } else { 2 },
+                        if shows_password { 4 } else { 3 },
+                    );
+                }
+                self.save_ssh_editor();
+            },
             SshEditorHit::None => return false,
         }
         self.pending_update.dirty = true;

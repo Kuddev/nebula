@@ -87,6 +87,7 @@ pub struct SshHostEditor {
     pub auth: SshAuthMode,
     pub private_keys: Vec<PathBuf>,
     pub field: SshEditorField,
+    pub focus: crate::ux::FocusIndex,
     pub error: Option<String>,
     pub(super) destination_selection: SelectAllState,
     pub(super) password_selection: SelectAllState,
