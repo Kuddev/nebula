@@ -29,8 +29,8 @@
 </p>
 
 <p align="center">
-  <!-- 📸 SHOT #1 主视觉：深色 Nebula 主题全窗截图（见 docs/screenshots/SHOTLIST.md） -->
-  <img src="docs/screenshots/hero.png" alt="Nebula Terminal" width="920" />
+  <!-- v0.5 主视觉：同一窗口中的 OpenCode、Claude Code 与 Codex 分屏工作流。 -->
+  <img src="docs/screenshots/split-ai-workflows.png" alt="Nebula Terminal with OpenCode, Claude Code, and Codex in split panes" width="920" />
 </p>
 
 ---
