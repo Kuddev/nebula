@@ -293,6 +293,7 @@ fn nebula_find_bash() -> Option<String> {
 /// terminal itself, so colors work regardless of the PowerShell version.
 const NEBULA_PROMPT_PS1: &str = r#"
 $global:NebE = [char]27
+$global:PSDefaultParameterValues['Get-Content:Encoding'] = 'utf8'
 $global:NebArrow = [char]0xE0B0
 $global:NebLeftRound = [char]0xE0B6
 $global:NebRightRound = [char]0xE0B4
@@ -803,8 +804,13 @@ pub fn win32_string<S: AsRef<OsStr> + ?Sized>(value: &S) -> Vec<u16> {
 
 #[cfg(test)]
 mod test {
-    use crate::tty::windows::{cmdline, push_escaped_arg};
+    use crate::tty::windows::{NEBULA_PROMPT_PS1, cmdline, push_escaped_arg};
     use crate::tty::{Options, Shell};
+
+    #[test]
+    fn powershell_cat_defaults_to_utf8() {
+        assert!(NEBULA_PROMPT_PS1.contains("PSDefaultParameterValues['Get-Content:Encoding']"));
+    }
 
     #[test]
     fn test_escape() {

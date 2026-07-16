@@ -576,6 +576,31 @@ pub(crate) fn extract_program(line: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// Log replay commands can contain terminal query sequences captured from a
+/// different process. Replying writes those answers into the shell's stdin,
+/// where they become the next command after the replay process exits.
+pub(crate) fn replays_untrusted_terminal_output(line: &str) -> bool {
+    let words: Vec<String> = line
+        .split_whitespace()
+        .take(4)
+        .map(|word| word.trim_matches(['"', '\'']).to_ascii_lowercase())
+        .collect();
+    matches!(
+        words.as_slice(),
+        [docker, logs, ..] if docker == "docker" && logs == "logs"
+    ) || matches!(
+        words.as_slice(),
+        [docker, compose, logs, ..]
+            if docker == "docker" && compose == "compose" && logs == "logs"
+    ) || matches!(
+        words.as_slice(),
+        [podman, logs, ..] if podman == "podman" && logs == "logs"
+    ) || matches!(
+        words.as_slice(),
+        [kubectl, logs, ..] if kubectl == "kubectl" && logs == "logs"
+    ) || matches!(words.as_slice(), [journalctl, ..] if journalctl == "journalctl")
+}
+
 /// Sidebar icon for a running program — Nerd Font glyphs (the chrome text
 /// layer renders with Maple NF). AI CLIs get distinct marks; everything else
 /// shares a generic "running" play sign.
@@ -1646,14 +1671,13 @@ impl Display {
         let (cell_width, cell_height) = compute_cell_size(config, &metrics);
 
         // Resize the window to the user-configured size, or a Windows
-        // Terminal-like default when unset. 120 columns keeps the default
-        // window compact (user flagged 140 as too wide); 20 lines so the
-        // welcome intro (17-row galaxy + prompt) still fits without
-        // scrolling.
+        // Terminal-like default when unset. A slightly narrower 116-column
+        // canvas with 50 rows leaves room for the sidebar without producing
+        // the previous wide, shallow first-launch window.
         let dimensions = config
             .window
             .dimensions()
-            .unwrap_or(crate::config::window::Dimensions { columns: 120, lines: 20 });
+            .unwrap_or(crate::config::window::Dimensions { columns: 116, lines: 50 });
         let size = window_size(config, dimensions, cell_width, cell_height, scale_factor);
         window.request_inner_size(size);
 
@@ -6585,10 +6609,29 @@ fn window_size(
 mod nebula_ux_tests {
     use nebula_terminal::grid::Dimensions;
 
-    use super::{NebulaConfirm, SizeInfo, remove_ssh_host_from_lists, restore_ssh_host_to_lists};
+    use super::{
+        NebulaConfirm, SizeInfo, remove_ssh_host_from_lists, replays_untrusted_terminal_output,
+        restore_ssh_host_to_lists,
+    };
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn log_replay_commands_do_not_receive_terminal_query_answers() {
+        for command in [
+            "docker logs app",
+            "docker compose logs -f api",
+            "podman logs app",
+            "kubectl logs pod/api",
+            "journalctl -f -u nebula",
+        ] {
+            assert!(replays_untrusted_terminal_output(command), "{command}");
+        }
+        for command in ["docker run app", "kubectl exec pod -- sh", "cargo test", "nvim"] {
+            assert!(!replays_untrusted_terminal_output(command), "{command}");
+        }
     }
 
     #[test]

@@ -2756,6 +2756,11 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         }
                     },
                     TerminalEvent::ColorRequest(index, format) => {
+                        if crate::display::replays_untrusted_terminal_output(
+                            &self.ctx.nebula_state.last_committed,
+                        ) {
+                            return;
+                        }
                         let color = match self.ctx.terminal().colors()[index] {
                             Some(color) => Rgb(color),
                             // Ignore cursor color requests unless it was changed.
