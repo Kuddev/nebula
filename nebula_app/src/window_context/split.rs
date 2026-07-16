@@ -389,7 +389,8 @@ impl WindowContext {
         // Centre of the currently focused pane.
         let Some((_, fview)) = rects.iter().find(|(id, _)| *id == focused) else { return };
         let center = |v: &SizeInfo| {
-            let cx = v.padding_x() + (v.width() - 2.0 * v.padding_x()) * 0.5;
+            let cx = v.padding_x()
+                + (v.width() - v.padding_x() - v.padding_right()) * 0.5;
             let cy = v.padding_y() + (v.height() - v.padding_y() - v.padding_bottom()) * 0.5;
             (cx, cy)
         };
@@ -455,7 +456,7 @@ impl WindowContext {
                 let rect = (
                     view.padding_x(),
                     view.padding_y(),
-                    view.width() - 2.0 * view.padding_x(),
+                    view.width() - view.padding_x() - view.padding_right(),
                     view.height() - view.padding_y() - view.padding_bottom(),
                 );
                 self.display.nebula_split_reveal =

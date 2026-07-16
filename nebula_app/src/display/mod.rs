@@ -1671,9 +1671,9 @@ impl Display {
         let (cell_width, cell_height) = compute_cell_size(config, &metrics);
 
         // Resize the window to the user-configured size, or a Windows
-        // Terminal-like default when unset. A 116-column by 30-row canvas
-        // leaves room for the sidebar while keeping the first-launch window
-        // compact enough for common laptop displays.
+        // Terminal-like default when unset. A 116-column by 30-row canvas is
+        // the requested compact startup size without changing explicitly
+        // configured dimensions.
         let dimensions = config
             .window
             .dimensions()

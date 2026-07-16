@@ -1936,7 +1936,12 @@ impl WindowContext {
                     dim_rects.push((
                         view.padding_x(),
                         view.padding_y(),
-                        view.width() - 2.0 * view.padding_x(),
+                        // Split views use asymmetric padding: the sidebar is
+                        // included on the left while the right keeps only the
+                        // normal content margin. Using `2 * padding_x` here
+                        // dropped the entire asymmetric difference from the
+                        // dim veil, leaving a bright uncovered strip.
+                        view.width() - view.padding_x() - view.padding_right(),
                         view.height() - view.padding_y() - view.padding_bottom(),
                     ));
                 }
