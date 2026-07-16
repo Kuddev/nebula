@@ -1955,6 +1955,14 @@ impl WindowContext {
                 );
                 cleared = true;
             }
+            if !cleared {
+                crate::display::nebula_debug_log(format!(
+                    "render_clear_missing active_tab={} layout_panes={} live_panes={} focused={focused}",
+                    self.active_tab,
+                    pane_rects.len(),
+                    self.panes.len(),
+                ));
+            }
             self.display.draw_split_overlays(&dim_rects, &divider_rects);
             self.display.finish_pane_frame(scheduler);
         }

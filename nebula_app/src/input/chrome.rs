@@ -199,6 +199,31 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // to a double/triple — plain drags selected by word or whole line.
         self.advance_click_state(button);
 
+        let debug_id = self.ctx.mouse().debug_press_id;
+        let debug_x = self.ctx.mouse().x as f32;
+        let debug_y = self.ctx.mouse().y as f32;
+        if self.ctx.nebula_chrome_active() {
+            let window_size = self.ctx.display().size_info;
+            let pane_size = self.ctx.size_info();
+            let scale = self.ctx.window().scale_factor as f32;
+            let chrome_hit = self.ctx.display().chrome_hit(debug_x, debug_y);
+            let in_chrome = crate::display::in_chrome_bar(&window_size, scale, debug_x, debug_y);
+            let tab_drag = self.ctx.display().tab_drag_armed();
+            let selection_empty = self.ctx.selection_is_empty();
+            crate::display::nebula_debug_log(format!(
+                "pointer_press id={debug_id} button={button:?} xy=({debug_x:.0},{debug_y:.0}) scale={scale:.3} window={}x{} pane={}x{} pad=({:.0},{:.0},{:.0},{:.0}) chrome_hit={chrome_hit:?} in_chrome={in_chrome} tab_drag={tab_drag} selection_empty={selection_empty} click={:?}",
+                window_size.width(),
+                window_size.height(),
+                pane_size.width(),
+                pane_size.height(),
+                window_size.padding_x(),
+                window_size.padding_right(),
+                window_size.padding_y(),
+                window_size.padding_bottom(),
+                self.ctx.mouse().click_state,
+            ));
+        }
+
         // Window chrome is deliberately optional at the input boundary. The
         // terminal's click-state machine is useful and testable without a GPU
         // window; real application contexts keep the default `true` value.
@@ -832,6 +857,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let window_size = self.ctx.display().size_info;
                 let scale = self.ctx.window().scale_factor as f32;
                 if crate::display::in_chrome_bar(&window_size, scale, x, y) {
+                    crate::display::nebula_debug_log(format!(
+                        "pointer_route id={} route=chrome-unclaimed-consumed xy=({x:.0},{y:.0})",
+                        self.ctx.mouse().debug_press_id
+                    ));
                     return;
                 }
 
@@ -854,6 +883,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     return;
                 }
             }
+        }
+
+        if button == MouseButton::Left {
+            crate::display::nebula_debug_log(format!(
+                "pointer_route id={} route=terminal-fallthrough xy=({}, {})",
+                self.ctx.mouse().debug_press_id,
+                self.ctx.mouse().x,
+                self.ctx.mouse().y,
+            ));
         }
 
         // Nebula: right-click copies the selection, or pastes when there is

@@ -89,6 +89,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // drives the reorder drag instead of hover / text selection.
         if lmb_pressed && self.ctx.display().tab_drag_armed() {
             let active = self.ctx.display().update_tab_drag(x as f32, y as f32);
+            if active && !self.ctx.mouse().debug_tab_drag_logged {
+                crate::display::nebula_debug_log(format!(
+                    "pointer_tab_drag_active id={} xy=({x},{y})",
+                    self.ctx.mouse().debug_press_id
+                ));
+                self.ctx.mouse_mut().debug_tab_drag_logged = true;
+            }
             let icon = if active { CursorIcon::Grabbing } else { CursorIcon::Pointer };
             self.ctx.window().set_mouse_cursor(icon);
             if active {
@@ -428,6 +435,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 // pointer is by now. Double/triple clicks selected at press
                 // and carry no pending entry — they just extend below.
                 if first {
+                    let (debug_id, drag_origin, pending) = {
+                        let mouse = self.ctx.mouse();
+                        (
+                            mouse.debug_press_id,
+                            mouse.drag_origin,
+                            format!("{:?}", mouse.pending_selection),
+                        )
+                    };
+                    let tab_drag = self.ctx.display().tab_drag_armed();
+                    let selection_empty = self.ctx.selection_is_empty();
+                    crate::display::nebula_debug_log(format!(
+                        "pointer_drag_threshold id={debug_id} origin={drag_origin:?} xy=({x},{y}) pending={pending} tab_drag={tab_drag} selection_empty={selection_empty}",
+                    ));
                     if let Some((ty, anchor, anchor_side)) =
                         self.ctx.mouse_mut().pending_selection.take()
                     {
@@ -619,6 +639,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 if !(control && hint_hit) {
                     let ty = if control { SelectionType::Block } else { SelectionType::Simple };
                     self.ctx.mouse_mut().pending_selection = Some((ty, point, side));
+                    crate::display::nebula_debug_log(format!(
+                        "pointer_selection_armed id={} type={ty:?} point={point:?} side={side:?} xy=({}, {})",
+                        self.ctx.mouse().debug_press_id,
+                        self.ctx.mouse().x,
+                        self.ctx.mouse().y,
+                    ));
                 }
             },
             ClickState::DoubleClick if !control => {
@@ -679,6 +705,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 return;
             }
             if let Some(action) = self.ctx.display().end_tab_drag() {
+                crate::display::nebula_debug_log(format!(
+                    "pointer_tab_drag_end id={} action={action:?}",
+                    self.ctx.mouse().debug_press_id
+                ));
                 use crate::display::TabDropAction;
                 match action {
                     TabDropAction::Click(index) => {
@@ -965,14 +995,35 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // never leaves a stray one-cell selection that eats link clicks.
         if button == MouseButton::Left {
             let origin = (self.ctx.mouse().x, self.ctx.mouse().y);
-            let mouse = self.ctx.mouse_mut();
             match state {
                 ElementState::Pressed => {
+                    let mouse = self.ctx.mouse_mut();
+                    mouse.debug_press_id = mouse.debug_press_id.wrapping_add(1);
+                    mouse.debug_selection_updates = 0;
+                    mouse.debug_tab_drag_logged = false;
                     mouse.drag_origin = Some(origin);
                     mouse.drag_active = false;
                     mouse.pending_selection = None;
                 },
                 ElementState::Released => {
+                    let (debug_id, x, y, drag_origin, drag_active, pending, selection_updates) = {
+                        let mouse = self.ctx.mouse();
+                        (
+                            mouse.debug_press_id,
+                            mouse.x,
+                            mouse.y,
+                            mouse.drag_origin,
+                            mouse.drag_active,
+                            format!("{:?}", mouse.pending_selection),
+                            mouse.debug_selection_updates,
+                        )
+                    };
+                    let tab_drag = self.ctx.display().tab_drag_armed();
+                    let selection_empty = self.ctx.selection_is_empty();
+                    crate::display::nebula_debug_log(format!(
+                        "pointer_release_raw id={debug_id} xy=({x}, {y}) origin={drag_origin:?} drag_active={drag_active} pending={pending} tab_drag={tab_drag} selection_empty={selection_empty} selection_updates={selection_updates}",
+                    ));
+                    let mouse = self.ctx.mouse_mut();
                     mouse.drag_origin = None;
                     mouse.drag_active = false;
                     mouse.pending_selection = None;
