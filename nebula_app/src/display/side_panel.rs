@@ -834,10 +834,10 @@ use crate::renderer::{GlyphCache, Renderer};
 use super::{NebulaTheme, SizeInfo, UI_CORNER_RADIUS_LOGICAL};
 
 // Codicon glyphs (same family as the chrome's sidebar/settings icons).
-const ICON_FOLDER: &str = "\u{ea83}";
-const ICON_FOLDER_OPEN: &str = "\u{eaf7}";
+pub(super) const ICON_FOLDER: &str = "\u{ea83}";
+pub(super) const ICON_FOLDER_OPEN: &str = "\u{eaf7}";
 const ICON_FILE: &str = "\u{ea7b}";
-const ICON_CHEVRON_RIGHT: &str = "\u{eab6}";
+pub(super) const ICON_CHEVRON_RIGHT: &str = "\u{eab6}";
 const ICON_CHEVRON_DOWN: &str = "\u{eab4}";
 const ICON_BRANCH: &str = "\u{ea68}";
 const ICON_SEARCH: &str = "\u{ea6d}";
@@ -847,7 +847,7 @@ const ICON_SEARCH: &str = "\u{ea6d}";
 /// ink stays the tree's neutral scheme — no per-type colors in the chrome.
 /// Every codepoint here is verified present in the bundled Maple Mono NF CN
 /// (codicon/seti/devicon/octicon blocks), so nothing can render as tofu.
-fn file_type_icon(name: &str) -> &'static str {
+pub(super) fn file_type_icon(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     if lower.starts_with(".git") {
         return "\u{e65d}"; // seti-git: .gitignore/.gitattributes/.gitmodules

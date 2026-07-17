@@ -90,6 +90,11 @@ pub trait ActionContext<T: EventListener> {
     fn nebula_tab(&self, _request: crate::event::TabRequest) {}
     /// Open the SFTP drawer through this window's event proxy.
     fn nebula_open_sftp(&mut self, _destination: String) {}
+    /// Stable SSH identity of the pane receiving this input, when it is a
+    /// native SSH pane. Local panes deliberately return `None`.
+    fn nebula_ssh_destination(&self) -> Option<&str> {
+        None
+    }
     /// Open a filesystem path with the system handler (drawer double-click).
     fn open_path(&mut self, _path: &std::path::Path) {}
     /// The active tab's document view, when it is a viewer tab (no pane):

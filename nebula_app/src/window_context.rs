@@ -76,6 +76,9 @@ pub struct Pane {
     pub inline_search_state: InlineSearchState,
     pub id: PaneId,
     pub title: String,
+    /// 原生 SSH Pane 的稳定连接目标。文件面板必须依据会话身份路由到 SFTP，
+    /// 不能从终端标题或用户刚输入的命令反推，否则分屏和全屏 TUI 都会误判。
+    pub ssh_destination: Option<String>,
     pub nebula_state: NebulaPaneState,
     /// Columns the welcome intro was printed at, while the pane is pristine
     /// (no user input yet). Drives a re-print when a resize would reflow it;
@@ -579,6 +582,7 @@ impl WindowContext {
             inline_search_state: Default::default(),
             id: pane_id,
             title: String::from("shell"),
+            ssh_destination: None,
             nebula_state,
             intro_cols: None,
             shell_pid,
@@ -607,7 +611,7 @@ impl WindowContext {
             event_proxy.clone(),
         )));
         let sender = crate::ssh_session::spawn_session(
-            destination,
+            destination.clone(),
             (*size_info).into(),
             terminal.clone(),
             event_proxy.clone(),
@@ -622,6 +626,7 @@ impl WindowContext {
             inline_search_state: Default::default(),
             id: pane_id,
             title: String::from("ssh"),
+            ssh_destination: Some(destination),
             nebula_state: NebulaPaneState::default(),
             intro_cols: None,
             shell_pid: 0,
@@ -653,6 +658,7 @@ impl WindowContext {
             inline_search_state: Default::default(),
             id: DOC_PANE_ID,
             title: String::from("doc"),
+            ssh_destination: None,
             nebula_state: NebulaPaneState::default(),
             intro_cols: None,
             shell_pid: 0,
@@ -2279,6 +2285,7 @@ impl WindowContext {
                 inline_search_state: &mut pane.inline_search_state,
                 search_state: &mut pane.search_state,
                 nebula_state: &mut pane.nebula_state,
+                ssh_destination: pane.ssh_destination.as_deref(),
                 doc,
                 modifiers: &mut self.modifiers,
                 notifier: &mut pane.notifier,

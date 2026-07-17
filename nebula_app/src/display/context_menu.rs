@@ -32,6 +32,7 @@ pub enum ContextMenuTarget {
     Tab(usize),
     Ssh(usize),
     Sftp(usize),
+    SftpPanel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,10 @@ pub enum ContextMenuAction {
     DownloadSftp(usize),
     RenameSftp(usize),
     DeleteSftp(usize),
+    RefreshSftp,
+    UploadFilesSftp,
+    UploadDirectorySftp,
+    NewDirectorySftp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +158,7 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
         ContextMenuTarget::Tab(_) => (5usize, 2usize, color_h),
         ContextMenuTarget::Ssh(_) => (5usize, 1usize, 0.0),
         ContextMenuTarget::Sftp(_) => (3usize, 1usize, 0.0),
+        ContextMenuTarget::SftpPanel => (4usize, 1usize, 0.0),
     };
     let height = pad * 2.0 + row_count as f32 * row_h + separators as f32 * sep_h + extra;
     let margin = s(8.0);
@@ -328,6 +334,44 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
                 "",
                 cursor_y,
                 true,
+            ));
+        },
+        ContextMenuTarget::SftpPanel => {
+            rows.push(row(
+                ContextMenuAction::RefreshSftp,
+                "\u{eb37}",
+                "刷新",
+                "",
+                cursor_y,
+                false,
+            ));
+            cursor_y += row_h;
+            separator(&mut cursor_y);
+            rows.push(row(
+                ContextMenuAction::UploadFilesSftp,
+                "\u{eb4b}",
+                "上传文件",
+                "",
+                cursor_y,
+                false,
+            ));
+            cursor_y += row_h;
+            rows.push(row(
+                ContextMenuAction::UploadDirectorySftp,
+                "\u{ea83}",
+                "上传目录",
+                "",
+                cursor_y,
+                false,
+            ));
+            cursor_y += row_h;
+            rows.push(row(
+                ContextMenuAction::NewDirectorySftp,
+                "\u{eaf7}",
+                "新建目录",
+                "",
+                cursor_y,
+                false,
             ));
         },
     }
@@ -561,5 +605,17 @@ mod tests {
         assert_eq!(layout.rows[0].action, ContextMenuAction::DownloadSftp(4));
         assert_eq!(layout.rows[1].action, ContextMenuAction::RenameSftp(4));
         assert_eq!(layout.rows[2].action, ContextMenuAction::DeleteSftp(4));
+    }
+
+    #[test]
+    fn sftp_panel_menu_exposes_directory_actions() {
+        let menu = ContextMenu::new(ContextMenuTarget::SftpPanel, (100.0, 100.0), None);
+        let layout = layout(&menu, size(), 1.0, 0.0);
+
+        assert_eq!(layout.rows.len(), 4);
+        assert_eq!(layout.rows[0].action, ContextMenuAction::RefreshSftp);
+        assert_eq!(layout.rows[1].action, ContextMenuAction::UploadFilesSftp);
+        assert_eq!(layout.rows[2].action, ContextMenuAction::UploadDirectorySftp);
+        assert_eq!(layout.rows[3].action, ContextMenuAction::NewDirectorySftp);
     }
 }

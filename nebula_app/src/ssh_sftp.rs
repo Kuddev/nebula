@@ -36,6 +36,8 @@ pub struct SftpEntry {
     pub size: u64,
     pub modified: u64,
     pub permissions: String,
+    /// UI-only parent navigation row. Never sent to remote mutation APIs.
+    pub is_parent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +87,8 @@ pub struct SftpController {
     generation: Arc<AtomicU64>,
     proxy: EventLoopProxy<Event>,
     window_id: WindowId,
+    pending_uploads: Arc<Mutex<Vec<PathBuf>>>,
+    upload_debounce_active: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -108,6 +112,7 @@ impl SftpEntry {
             size: 0,
             modified: 0,
             permissions: String::new(),
+            is_parent: false,
         }
     }
 }
@@ -132,6 +137,8 @@ impl SftpController {
             generation: Arc::new(AtomicU64::new(0)),
             proxy,
             window_id,
+            pending_uploads: Arc::new(Mutex::new(Vec::new())),
+            upload_debounce_active: Arc::new(AtomicBool::new(false)),
         };
         controller.refresh(".");
         Ok(controller)
@@ -153,6 +160,28 @@ impl SftpController {
     }
 
     pub fn upload_paths(&self, local_paths: Vec<PathBuf>) {
+        if local_paths.is_empty() {
+            return;
+        }
+        lock(&self.pending_uploads).extend(local_paths);
+        if self.upload_debounce_active.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let controller = self.clone();
+        crate::ssh_session::runtime().expect("SFTP runtime checked at construction").spawn(
+            async move {
+                // Windows sends one DroppedFile event per selected path. A short
+                // debounce folds that burst into one transfer job instead of each
+                // path cancelling the previous generation.
+                tokio::time::sleep(Duration::from_millis(75)).await;
+                let paths = std::mem::take(&mut *lock(&controller.pending_uploads));
+                controller.upload_debounce_active.store(false, Ordering::Release);
+                controller.start_upload_paths(paths);
+            },
+        );
+    }
+
+    fn start_upload_paths(&self, local_paths: Vec<PathBuf>) {
         if local_paths.is_empty() {
             return;
         }
@@ -425,6 +454,7 @@ async fn read_remote_dir(sftp: &SftpSession, path: &str) -> SftpResult<Vec<SftpE
             size: metadata.len(),
             modified: u64::from(metadata.mtime.unwrap_or(0)),
             permissions: format!("{type_prefix}{}", metadata.permissions()),
+            is_parent: false,
         });
     }
     sort_entries(&mut entries);

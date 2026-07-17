@@ -1173,6 +1173,7 @@ pub struct ActionContext<'a, N, T> {
     pub modifiers: &'a mut Modifiers,
     pub display: &'a mut Display,
     pub nebula_state: &'a mut NebulaPaneState,
+    pub ssh_destination: Option<&'a str>,
     /// Document shown by the active tab, when it is a viewer tab — wheel and
     /// navigation keys scroll this instead of a grid. `None` on pane tabs.
     pub doc: Option<&'a mut crate::display::markdown_view::DocView>,
@@ -1462,6 +1463,10 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         if let Err(err) = self.display.open_sftp_panel(destination, self.event_proxy.clone()) {
             log::error!("{err}");
         }
+    }
+
+    fn nebula_ssh_destination(&self) -> Option<&str> {
+        self.ssh_destination
     }
 
     fn spawn_new_instance(&mut self) {
@@ -2927,8 +2932,20 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         }
                     },
                     WindowEvent::DroppedFile(path) => {
-                        let path: String = path.to_string_lossy().into();
-                        self.ctx.paste(&(path + " "), true);
+                        let over_sftp = if self.ctx.display().nebula_sftp_panel.is_some() {
+                            let (x, y, width, height) = self.ctx.display().side_panel_layout().panel;
+                            let px = self.ctx.mouse.x as f32;
+                            let py = self.ctx.mouse.y as f32;
+                            px >= x && px < x + width && py >= y && py < y + height
+                        } else {
+                            false
+                        };
+                        if over_sftp {
+                            self.ctx.display().sftp_upload_dropped_paths(vec![path]);
+                        } else {
+                            let path: String = path.to_string_lossy().into();
+                            self.ctx.paste(&(path + " "), true);
+                        }
                     },
                     WindowEvent::CursorLeft { .. } => {
                         self.ctx.mouse.inside_text_area = false;

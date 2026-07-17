@@ -2831,6 +2831,16 @@ impl Display {
         self.window.request_redraw();
     }
 
+    pub fn open_sftp_panel_context_menu(&mut self, x: f32, y: f32) {
+        if self.nebula_sftp_panel.is_none() {
+            return;
+        }
+        self.nebula_context_menu =
+            Some(context_menu::ContextMenu::new(ContextMenuTarget::SftpPanel, (x, y), None));
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
     pub fn context_menu_hit(&self, x: f32, y: f32) -> ContextMenuHit {
         self.nebula_context_menu.as_ref().map_or(ContextMenuHit::Outside, |menu| {
             context_menu::hit_test(menu, self.size_info, self.window.scale_factor as f32, x, y)
@@ -3664,36 +3674,6 @@ impl Display {
                     panel.begin_path();
                 }
             },
-            SftpHit::Up => {
-                if let Some(panel) = self.nebula_sftp_panel.as_ref() {
-                    panel.go_up();
-                }
-            },
-            SftpHit::Refresh => {
-                if let Some(panel) = self.nebula_sftp_panel.as_ref() {
-                    panel.refresh();
-                }
-            },
-            SftpHit::UploadFiles => {
-                let paths = file_dialog::pick_upload_files(self.raw_window_handle);
-                if !paths.is_empty() {
-                    if let Some(panel) = self.nebula_sftp_panel.as_ref() {
-                        panel.upload_paths(paths);
-                    }
-                }
-            },
-            SftpHit::UploadDirectory => {
-                if let Some(path) = file_dialog::pick_upload_directory(self.raw_window_handle) {
-                    if let Some(panel) = self.nebula_sftp_panel.as_ref() {
-                        panel.upload_paths(vec![path]);
-                    }
-                }
-            },
-            SftpHit::NewDirectory => {
-                if let Some(panel) = self.nebula_sftp_panel.as_mut() {
-                    panel.begin_create_directory();
-                }
-            },
             SftpHit::Filter => {
                 if let Some(panel) = self.nebula_sftp_panel.as_mut() {
                     panel.begin_filter();
@@ -3719,6 +3699,46 @@ impl Display {
         }
         self.pending_update.dirty = true;
         self.window.request_redraw();
+    }
+
+    pub fn sftp_refresh(&mut self) {
+        if let Some(panel) = self.nebula_sftp_panel.as_ref() {
+            panel.refresh();
+        }
+    }
+
+    pub fn sftp_pick_upload_files(&mut self) {
+        let paths = file_dialog::pick_upload_files(self.raw_window_handle);
+        if !paths.is_empty()
+            && let Some(panel) = self.nebula_sftp_panel.as_ref()
+        {
+            panel.upload_paths(paths);
+        }
+    }
+
+    pub fn sftp_pick_upload_directory(&mut self) {
+        if let Some(path) = file_dialog::pick_upload_directory(self.raw_window_handle)
+            && let Some(panel) = self.nebula_sftp_panel.as_ref()
+        {
+            panel.upload_paths(vec![path]);
+        }
+    }
+
+    pub fn sftp_begin_create_directory(&mut self) {
+        if let Some(panel) = self.nebula_sftp_panel.as_mut() {
+            panel.begin_create_directory();
+        }
+    }
+
+    pub fn sftp_upload_dropped_paths(&mut self, paths: Vec<std::path::PathBuf>) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let Some(panel) = self.nebula_sftp_panel.as_ref() else { return false };
+        panel.upload_paths(paths);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+        true
     }
 
     pub fn sftp_download_row(&mut self, index: usize) {
