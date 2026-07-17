@@ -715,6 +715,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         use crate::event::TabRequest;
         match action {
             NewTab => self.ctx.nebula_tab(TabRequest::New),
+            OpenDirectoryPicker => self.ctx.display().open_directory_picker(),
             CloseTab => self.ctx.nebula_tab(TabRequest::Close),
             NextTab => self.ctx.nebula_tab(TabRequest::SelectNext),
             PrevTab => self.ctx.nebula_tab(TabRequest::SelectPrev),
@@ -744,6 +745,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 shell: shell.shell(),
             }),
             SetDefaultShell(shell) => self.ctx.display().set_default_shell(&shell),
+            NewAtDirectory(path) => self.ctx.nebula_tab(TabRequest::NewAtDirectory(path)),
             ToggleFilesPanel => {
                 if let Some(destination) = self.ctx.nebula_ssh_destination().map(str::to_owned) {
                     self.ctx.nebula_open_sftp(destination);
