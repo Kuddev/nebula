@@ -1392,6 +1392,8 @@ pub struct Display {
     /// Indexed, persistent command history used to hint a whole previous
     /// command from its prefix.
     nebula_history: crate::nebula_history::NebulaHistory,
+    /// Process-wide frecency model fed only by successful shell cwd reports.
+    directory_history: crate::directory_history::DirectoryHistory,
     /// Executable commands for first-token completion: PATH executables plus, on
     /// Windows, the shell's cmdlets/functions/aliases. Filled on a background
     /// thread so the PowerShell probe never blocks startup.
@@ -1879,6 +1881,7 @@ impl Display {
                 crate::boot_trace("history loaded");
                 history
             },
+            directory_history: crate::directory_history::global(),
             nebula_commands: nebula_commands_handle(),
             nebula_tab_anim: Vec::new(),
             nebula_scrollbar_drag: None,
@@ -3369,6 +3372,24 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
+    /// Open a terminal-directory picker backed by the same frecency model as
+    /// ghost text and filesystem completion. No shell command is installed.
+    pub fn open_directory_picker(&mut self) {
+        let paths = self.directory_history.search("", 128);
+        self.nebula_palette.set_directories(paths);
+        self.nebula_palette.open_directories();
+        self.pending_update.dirty = true;
+    }
+
+    fn refresh_directory_picker(&mut self) {
+        if !self.nebula_palette.is_picking_directory() {
+            return;
+        }
+        let query = self.nebula_palette.query().to_owned();
+        let paths = self.directory_history.search(&query, 128);
+        self.nebula_palette.set_directories(paths);
+    }
+
     pub fn command_palette_open(&self) -> bool {
         self.nebula_palette.is_open()
     }
@@ -3388,11 +3409,13 @@ impl Display {
 
     pub fn palette_input_char(&mut self, c: char) {
         self.nebula_palette.input_char(c);
+        self.refresh_directory_picker();
         self.pending_update.dirty = true;
     }
 
     pub fn palette_input_text(&mut self, text: &str) {
         self.nebula_palette.input_text(text);
+        self.refresh_directory_picker();
         self.pending_update.dirty = true;
     }
 
@@ -3407,6 +3430,7 @@ impl Display {
 
     pub fn palette_backspace(&mut self) {
         self.nebula_palette.backspace();
+        self.refresh_directory_picker();
         self.pending_update.dirty = true;
     }
 
@@ -5736,6 +5760,11 @@ impl Display {
         Self::nebula_clear_line(state);
     }
 
+    /// Feed the shared directory model from an authoritative shell report.
+    pub fn nebula_record_directory(&self, cwd: &str) {
+        self.directory_history.record(cwd);
+    }
+
     /// Reset the prompt-line buffer (Enter, Ctrl-C, or any non-text key).
     pub fn nebula_clear_line(state: &mut NebulaPaneState) {
         if !state.line_buf.is_empty() || !state.suggestion.is_empty() {
@@ -5905,7 +5934,7 @@ impl Display {
         // slash style/case, so `cd D:\te` can pick a previous
         // `cd D:/temp_build/wuwei` before generic filesystem completion falls
         // back to alphabetic candidates like `D:\Telegram\`.
-        if let Some(rem) = self.nebula_history.dir_hint(&line) {
+        if let Some(rem) = self.directory_history.hint(&line, &state.cwd) {
             state.suggestion = Self::nebula_clamp_ghost(&rem);
             nebula_debug_log(format!("suggest_result kind=dir rem={:?}", state.suggestion));
             return;
@@ -5949,6 +5978,11 @@ impl Display {
         let cwd_slot = [cwd.as_str()];
         let cwds: &[&str] = if cwd.is_empty() { &[] } else { &cwd_slot };
         let matches = complete_item(want_dir, span, token, cwds, &options, false, None);
+        let matches = if want_dir {
+            self.directory_history.rank_file_suggestions(matches, &state.cwd)
+        } else {
+            matches
+        };
         let candidates: Vec<_> = matches
             .iter()
             .take(6)

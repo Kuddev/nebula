@@ -2596,7 +2596,11 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // existing OSC-133;C/last_committed path untouched.
                         if let Some(rest) = title.strip_prefix("NEBULA|") {
                             let mut parts = rest.splitn(3, '|');
-                            self.ctx.nebula_state.cwd = parts.next().unwrap_or("").to_owned();
+                            let cwd = parts.next().unwrap_or("").to_owned();
+                            if self.ctx.nebula_state.cwd != cwd {
+                                self.ctx.nebula_state.cwd.clone_from(&cwd);
+                                self.ctx.display.nebula_record_directory(&cwd);
+                            }
                             self.ctx.nebula_state.branch = parts.next().unwrap_or("").to_owned();
                             if let Some(program) = parts.next() {
                                 self.ctx.nebula_state.running_program = if program.is_empty() {
@@ -2644,7 +2648,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // leaving any branch captured from a `NEBULA|cwd|branch`
                         // title intact, so the two channels coexist.
                         if self.ctx.nebula_state.cwd != cwd {
-                            self.ctx.nebula_state.cwd = cwd;
+                            self.ctx.nebula_state.cwd.clone_from(&cwd);
+                            self.ctx.display.nebula_record_directory(&cwd);
                             *self.ctx.dirty = true;
                         }
                     },
@@ -2936,7 +2941,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     },
                     WindowEvent::DroppedFile(path) => {
                         let over_sftp = if self.ctx.display().nebula_sftp_panel.is_some() {
-                            let (x, y, width, height) = self.ctx.display().side_panel_layout().panel;
+                            let (x, y, width, height) =
+                                self.ctx.display().side_panel_layout().panel;
                             let px = self.ctx.mouse.x as f32;
                             let py = self.ctx.mouse.y as f32;
                             px >= x && px < x + width && py >= y && py < y + height

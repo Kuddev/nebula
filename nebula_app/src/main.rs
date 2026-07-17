@@ -28,11 +28,13 @@ use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use nebula_terminal::tty;
 
 mod ai_hook;
+mod atomic_file;
 mod cli;
 mod clipboard;
 mod config;
 mod config_cli;
 mod daemon;
+mod directory_history;
 mod display;
 mod event;
 #[cfg(windows)]

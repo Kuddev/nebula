@@ -9,6 +9,8 @@
 //! and the window context. Keeping the model here makes it self-contained and
 //! keeps the giant `mod.rs` free of the item table.
 
+use std::path::PathBuf;
+
 use super::{NebulaTheme, SizeInfo};
 use crate::shell_detect::DetectedShell;
 use unicode_width::UnicodeWidthChar;
@@ -63,6 +65,43 @@ impl ProfileRow {
     }
 }
 
+/// 命令面板只负责展示目录；候选的匹配与 frecency 排序由共享目录服务完成，
+/// 避免 UI 再维护一套会逐渐分叉的目录搜索规则。
+#[derive(Debug, Clone)]
+struct DirectoryRow {
+    path: PathBuf,
+    label: String,
+    hint: String,
+}
+
+impl DirectoryRow {
+    fn new(path: PathBuf) -> Self {
+        let label = path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| path.as_os_str())
+            .to_string_lossy()
+            .into_owned();
+        let hint = path.display().to_string();
+        Self { path, label, hint }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PaletteCandidate {
+    Item(usize),
+    Profile(usize),
+    Directory(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteMode {
+    Commands,
+    Profiles,
+    DefaultShell,
+    Directories,
+}
+
 /// A single executable action reachable from the command palette.
 ///
 /// Deliberately flat so the input layer can match on it after the palette
@@ -72,6 +111,9 @@ impl ProfileRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteAction {
     NewTab,
+    /// Open the frecency-ranked directory picker; this is a UI workflow, not a
+    /// shell-specific command or alias.
+    OpenDirectoryPicker,
     CloseTab,
     NextTab,
     PrevTab,
@@ -92,6 +134,8 @@ pub enum PaletteAction {
     LaunchShell(DetectedShell),
     /// Set a detected shell as the default (the settings "默认 Shell" picker).
     SetDefaultShell(DetectedShell),
+    /// Open a local terminal whose PTY starts directly in this directory.
+    NewAtDirectory(PathBuf),
     ToggleFilesPanel,
     ToggleGitPanel,
 }
@@ -120,6 +164,12 @@ const ITEMS: &[PaletteItem] = &[
         hint: "Ctrl+Shift+T",
         search: "新建标签页 new tab xinjian biaoqianye",
         action: PaletteAction::NewTab,
+    },
+    PaletteItem {
+        label: "在常用目录中新建终端…",
+        hint: "",
+        search: "在常用目录中新建终端 new terminal in frequent directory changyong mulu",
+        action: PaletteAction::OpenDirectoryPicker,
     },
     PaletteItem {
         label: "关闭标签页",
@@ -264,9 +314,9 @@ pub struct CommandPalette {
     open: bool,
     query: String,
     query_selection: super::text_input::SelectAllState,
-    /// Indices into the combined item space — `0..ITEMS.len()` are the static
-    /// actions, `ITEMS.len()..` map onto `profiles`. Best match first.
-    filtered: Vec<usize>,
+    /// 已排序的可见候选。显式区分类型，避免动态列表长度变化后用“偏移量索引”
+    /// 把目录误解释成 Profile 或静态命令。
+    filtered: Vec<PaletteCandidate>,
     /// Selected row *within `filtered`*. `None` when nothing is selected yet
     /// (initial state — keyboard nav or hover will activate selection).
     selected: Option<usize>,
@@ -279,12 +329,9 @@ pub struct CommandPalette {
     /// new-tab dropdown) these are detected shells + config profiles; in the
     /// full palette they're the config profiles appended after the actions.
     profiles: Vec<ProfileRow>,
-    /// Show ONLY profile rows — the new-tab dropdown mode.
-    profiles_only: bool,
-    /// In profiles-only mode, confirming a detected-shell row SETS it as the
-    /// default shell (the settings "默认 Shell" picker) instead of launching a
-    /// tab. Config-profile rows are hidden in this mode.
-    picking_default: bool,
+    /// Frecency-ranked directory rows supplied by `DirectoryHistory`.
+    directories: Vec<DirectoryRow>,
+    mode: PaletteMode,
     /// Mouse-hovered row within the visible window (`None` when not hovering).
     hover: Option<usize>,
     /// Cursor blink animation state for the search input.
@@ -302,8 +349,8 @@ impl CommandPalette {
             selected: None, // No selection until user navigates
             recent: Vec::new(),
             profiles: Vec::new(),
-            profiles_only: false,
-            picking_default: false,
+            directories: Vec::new(),
+            mode: PaletteMode::Commands,
             hover: None,
             cursor_pulse: crate::motion::Pulse::new(std::time::Duration::from_millis(1060)),
         };
@@ -317,21 +364,23 @@ impl CommandPalette {
 
     pub fn set_language(&mut self, language: super::UiLanguage) {
         self.language = language;
-        if !self.profiles_only {
-            self.refilter();
-        }
+        self.refilter();
     }
 
     /// Whether the palette is in default-shell picking mode.
     pub fn is_picking_default(&self) -> bool {
-        self.picking_default
+        self.mode == PaletteMode::DefaultShell
     }
 
     /// Shell/profile selector mode. This identity is used only for natural
     /// dismissal on window focus loss; the selector remains searchable because
     /// a long shell/profile list otherwise becomes needlessly hard to scan.
     pub fn is_picker(&self) -> bool {
-        self.open && self.profiles_only
+        self.open && self.mode != PaletteMode::Commands
+    }
+
+    pub fn is_picking_directory(&self) -> bool {
+        self.open && self.mode == PaletteMode::Directories
     }
 
     /// Refresh the dynamic quick-launch rows from the config's profile names.
@@ -387,11 +436,17 @@ impl CommandPalette {
             .collect();
     }
 
+    pub fn set_directories(&mut self, paths: Vec<PathBuf>) {
+        self.directories = paths.into_iter().map(DirectoryRow::new).collect();
+        if self.mode == PaletteMode::Directories {
+            self.refilter();
+        }
+    }
+
     /// Open (or re-open) the palette with a cleared query and the full list.
     pub fn open(&mut self) {
         self.open = true;
-        self.profiles_only = false;
-        self.picking_default = false;
+        self.mode = PaletteMode::Commands;
         self.query.clear();
         self.query_selection.clear();
         self.refilter();
@@ -400,8 +455,7 @@ impl CommandPalette {
     /// Open showing only the quick-launch profiles (the "+" dropdown).
     pub fn open_profiles(&mut self) {
         self.open = true;
-        self.profiles_only = true;
-        self.picking_default = false;
+        self.mode = PaletteMode::Profiles;
         self.query.clear();
         self.query_selection.clear();
         self.refilter();
@@ -411,8 +465,17 @@ impl CommandPalette {
     /// confirm SETS the default rather than launching.
     pub fn open_default_picker(&mut self) {
         self.open = true;
-        self.profiles_only = true;
-        self.picking_default = true;
+        self.mode = PaletteMode::DefaultShell;
+        self.query.clear();
+        self.query_selection.clear();
+        self.refilter();
+    }
+
+    /// Open the generic directory picker. Search results are refreshed by
+    /// `Display` after every query edit so ranking remains owned by one service.
+    pub fn open_directories(&mut self) {
+        self.open = true;
+        self.mode = PaletteMode::Directories;
         self.query.clear();
         self.query_selection.clear();
         self.refilter();
@@ -420,8 +483,7 @@ impl CommandPalette {
 
     pub fn close(&mut self) {
         self.open = false;
-        self.profiles_only = false;
-        self.picking_default = false;
+        self.mode = PaletteMode::Commands;
         self.hover = None;
         self.query_selection.clear();
     }
@@ -504,19 +566,27 @@ impl CommandPalette {
         // Enter execute that same row even before arrow navigation, otherwise
         // the UI advertises an action that the keyboard cannot confirm.
         let selected = self.selected.unwrap_or(0);
-        let idx = *self.filtered.get(selected)?;
-        self.close();
-        if let Some(profile) = idx.checked_sub(ITEMS.len()) {
-            return Some(match &self.profiles[profile] {
+        let candidate = *self.filtered.get(selected)?;
+        // 必须在 close() 清空模式之前计算动作；旧实现先关闭再判断
+        // picking_default，导致“设置默认 Shell”被错误执行成“启动 Shell”。
+        let action = match candidate {
+            PaletteCandidate::Item(index) => ITEMS[index].action.clone(),
+            PaletteCandidate::Profile(profile) => match &self.profiles[profile] {
                 ProfileRow::Config { index, .. } => PaletteAction::LaunchProfile(*index),
-                ProfileRow::Shell { shell, .. } if self.picking_default => {
+                ProfileRow::Shell { shell, .. } if self.mode == PaletteMode::DefaultShell => {
                     PaletteAction::SetDefaultShell(shell.clone())
                 },
                 ProfileRow::Shell { shell, .. } => PaletteAction::LaunchShell(shell.clone()),
-            });
+            },
+            PaletteCandidate::Directory(directory) => {
+                PaletteAction::NewAtDirectory(self.directories[directory].path.clone())
+            },
+        };
+        self.close();
+        if let PaletteCandidate::Item(index) = candidate {
+            self.record_recent(index);
         }
-        self.record_recent(idx);
-        Some(ITEMS[idx].action.clone())
+        Some(action)
     }
 
     /// Confirm the visible row at `row` (0 = topmost visible line, mirroring
@@ -526,11 +596,11 @@ impl CommandPalette {
             return None;
         }
         let start = self.selected.unwrap_or(0).saturating_sub(max_rows - 1);
-        let idx = start + row;
-        if idx >= self.filtered.len() {
+        let filtered_index = start + row;
+        if filtered_index >= self.filtered.len() {
             return None;
         }
-        self.selected = Some(idx);
+        self.selected = Some(filtered_index);
         self.confirm()
     }
 
@@ -548,32 +618,48 @@ impl CommandPalette {
     /// declared order for the un-recent tail), then profiles. Resets the
     /// selection to the top.
     fn refilter(&mut self) {
-        // Candidate indices in combined space: static actions first (skipped
-        // entirely in profiles-only mode), then the dynamic profile rows.
-        let candidates: Vec<usize> = if self.profiles_only {
-            (ITEMS.len()..ITEMS.len() + self.profiles.len()).collect()
-        } else {
-            (0..ITEMS.len() + self.profiles.len()).collect()
+        let candidates: Vec<PaletteCandidate> = match self.mode {
+            PaletteMode::Commands => (0..ITEMS.len())
+                .map(PaletteCandidate::Item)
+                .chain((0..self.profiles.len()).map(PaletteCandidate::Profile))
+                .collect(),
+            PaletteMode::Profiles | PaletteMode::DefaultShell => {
+                (0..self.profiles.len()).map(PaletteCandidate::Profile).collect()
+            },
+            PaletteMode::Directories => {
+                (0..self.directories.len()).map(PaletteCandidate::Directory).collect()
+            },
         };
-        let combined_search = |idx: usize| -> &str {
-            if idx < ITEMS.len() {
-                ITEMS[idx].search
-            } else {
-                self.profiles[idx - ITEMS.len()].search()
+        let combined_search = |candidate: PaletteCandidate| -> &str {
+            match candidate {
+                PaletteCandidate::Item(index) => ITEMS[index].search,
+                PaletteCandidate::Profile(index) => self.profiles[index].search(),
+                // 目录模式已经由 DirectoryHistory 完成匹配和排序；这里
+                // 不再二次模糊排序，以免破坏 frecency 的确定性。
+                PaletteCandidate::Directory(_) => "",
             }
         };
         let query = self.query.trim();
-        if query.is_empty() {
+        if self.mode == PaletteMode::Directories {
+            self.filtered = candidates;
+        } else if query.is_empty() {
             let mut order = candidates;
-            order.sort_by_key(|&i| self.recent.iter().position(|&r| r == i).unwrap_or(usize::MAX));
+            order.sort_by_key(|candidate| match candidate {
+                PaletteCandidate::Item(index) => {
+                    self.recent.iter().position(|recent| recent == index).unwrap_or(usize::MAX)
+                },
+                PaletteCandidate::Profile(_) | PaletteCandidate::Directory(_) => usize::MAX,
+            });
             self.filtered = order;
         } else {
-            let mut scored: Vec<(i32, usize)> = candidates
+            let mut scored: Vec<(i32, PaletteCandidate)> = candidates
                 .into_iter()
-                .filter_map(|i| fuzzy_score(query, combined_search(i)).map(|score| (score, i)))
+                .filter_map(|candidate| {
+                    fuzzy_score(query, combined_search(candidate)).map(|score| (score, candidate))
+                })
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-            self.filtered = scored.into_iter().map(|(_, i)| i).collect();
+            self.filtered = scored.into_iter().map(|(_, candidate)| candidate).collect();
         }
         self.selected = None; // Reset selection on refilter
     }
@@ -597,36 +683,36 @@ impl CommandPalette {
         // `selected` stays None until navigation so Up from a fresh palette
         // still wraps to the last row, matching the existing keyboard model.
         let Some(selected) = self.selected else {
-            let rows =
-                self.filtered.iter().take(max_rows).map(|&idx| self.row_for_idx(idx)).collect();
+            let rows = self.filtered.iter().take(max_rows).map(|&row| self.row_for(row)).collect();
             return (rows, Some(0));
         };
         // Keep the selection visible: once it passes the last row, scroll so it
         // sits on the bottom line of the window.
         let start = selected.saturating_sub(max_rows - 1);
-        let rows = self
-            .filtered
-            .iter()
-            .skip(start)
-            .take(max_rows)
-            .map(|&idx| self.row_for_idx(idx))
-            .collect();
+        let rows =
+            self.filtered.iter().skip(start).take(max_rows).map(|&row| self.row_for(row)).collect();
         (rows, Some(selected - start))
     }
 
-    fn row_for_idx(&self, idx: usize) -> PaletteRow {
-        match idx.checked_sub(ITEMS.len()) {
-            Some(p) => PaletteRow {
-                icon: self.profiles[p].icon().to_string(),
-                color_id: self.profiles[p].color_id().to_string(),
-                label: self.profiles[p].label().to_string(),
-                hint: self.profiles[p].hint().to_string(),
-            },
-            None => PaletteRow {
+    fn row_for(&self, candidate: PaletteCandidate) -> PaletteRow {
+        match candidate {
+            PaletteCandidate::Item(index) => PaletteRow {
                 icon: String::new(),
                 color_id: String::new(),
-                label: localized_item_label(&ITEMS[idx], self.language).to_owned(),
-                hint: ITEMS[idx].hint.to_string(),
+                label: localized_item_label(&ITEMS[index], self.language).to_owned(),
+                hint: ITEMS[index].hint.to_string(),
+            },
+            PaletteCandidate::Profile(index) => PaletteRow {
+                icon: self.profiles[index].icon().to_string(),
+                color_id: self.profiles[index].color_id().to_string(),
+                label: self.profiles[index].label().to_string(),
+                hint: self.profiles[index].hint().to_string(),
+            },
+            PaletteCandidate::Directory(index) => PaletteRow {
+                icon: "\u{f07b}".to_owned(),
+                color_id: String::new(),
+                label: self.directories[index].label.clone(),
+                hint: self.directories[index].hint.clone(),
             },
         }
     }
@@ -639,6 +725,7 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
     }
     match item.action {
         NewTab => "New tab",
+        OpenDirectoryPicker => "New terminal in a frequent directory...",
         CloseTab => "Close tab",
         NextTab => "Next tab",
         PrevTab => "Previous tab",
@@ -661,7 +748,7 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
         SelectTheme(NebulaTheme::CoalDark) => "Theme: Coal Dark",
         SelectTheme(NebulaTheme::LinenLight) => "Theme: Linen Light",
         SelectTheme(NebulaTheme::MossDark) => "Theme: Moss Dark",
-        LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) => item.label,
+        LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) | NewAtDirectory(_) => item.label,
     }
 }
 
@@ -893,12 +980,16 @@ pub(super) fn draw_text(
     if query.is_empty() {
         // 空态同时给出输入光标和用途提示，避免只有一个空白色块让用户猜测。
         r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, cursor, gc);
-        let placeholder = if model.profiles_only {
-            model.language.pick("搜索 Shell 或 Profile…", "Search shells or profiles...")
-        } else {
-            model
+        let placeholder = match model.mode {
+            PaletteMode::Commands => model
                 .language
-                .pick("搜索命令、Shell 或 Profile…", "Search commands, shells or profiles...")
+                .pick("搜索命令、Shell 或 Profile…", "Search commands, shells or profiles..."),
+            PaletteMode::Profiles | PaletteMode::DefaultShell => {
+                model.language.pick("搜索 Shell 或 Profile…", "Search shells or profiles...")
+            },
+            PaletteMode::Directories => {
+                model.language.pick("搜索常用目录…", "Search frequent directories...")
+            },
         };
         r.draw_chrome_text(size, query_x + s(10.0), text_y, sk.ink_dim, placeholder, gc);
     } else {
@@ -913,7 +1004,14 @@ pub(super) fn draw_text(
             text_x,
             layout.list_y + s(8.0),
             sk.ink_dim,
-            model.language.pick("无匹配命令", "No matching commands"),
+            match model.mode {
+                PaletteMode::Directories => {
+                    model.language.pick("没有匹配的已访问目录", "No matching visited directories")
+                },
+                PaletteMode::Commands | PaletteMode::Profiles | PaletteMode::DefaultShell => {
+                    model.language.pick("无匹配命令", "No matching commands")
+                },
+            },
             gc,
         );
         return icon_draws;
@@ -968,7 +1066,11 @@ mod tests {
     fn empty_query_lists_all_in_declaration_order() {
         let palette = CommandPalette::new();
         assert_eq!(palette.filtered.len(), ITEMS.len());
-        assert_eq!(palette.filtered[0], 0, "first declared item leads by default");
+        assert_eq!(
+            palette.filtered[0],
+            PaletteCandidate::Item(0),
+            "first declared item leads by default"
+        );
     }
 
     #[test]
@@ -978,9 +1080,9 @@ mod tests {
         palette.record_recent(7);
         palette.refilter();
         // Most-recent first, then the previous recent, then the declared rest.
-        assert_eq!(palette.filtered[0], 7);
-        assert_eq!(palette.filtered[1], 3);
-        assert_eq!(palette.filtered[2], 0);
+        assert_eq!(palette.filtered[0], PaletteCandidate::Item(7));
+        assert_eq!(palette.filtered[1], PaletteCandidate::Item(3));
+        assert_eq!(palette.filtered[2], PaletteCandidate::Item(0));
     }
 
     #[test]
@@ -1047,6 +1149,7 @@ mod tests {
         let action = palette.confirm();
         assert!(action.is_some());
         assert!(!palette.is_open());
+        let PaletteCandidate::Item(picked) = picked else { panic!("expected static item") };
         assert_eq!(palette.recent.first(), Some(&picked));
     }
 
@@ -1098,7 +1201,10 @@ mod tests {
         assert_eq!(rows.len(), max);
         assert_eq!(sel, Some(max - 1), "selection pinned to bottom row when scrolled");
         // The bottom visible row is the actually-selected item (field .label).
-        assert_eq!(rows[max - 1].label, ITEMS[palette.filtered[7]].label);
+        let PaletteCandidate::Item(index) = palette.filtered[7] else {
+            panic!("expected static item")
+        };
+        assert_eq!(rows[max - 1].label, ITEMS[index].label);
     }
 
     #[test]
@@ -1117,6 +1223,38 @@ mod tests {
 
         palette.open_default_picker();
         assert!(palette.is_picker(), "default-shell selector shares dismissal semantics");
+
+        palette.set_directories(vec![PathBuf::from("D:/workspace")]);
+        palette.open_directories();
+        assert!(palette.is_picker(), "directory selector shares dismissal semantics");
+    }
+
+    #[test]
+    fn default_shell_confirmation_preserves_picker_mode_until_action_is_built() {
+        let shell = DetectedShell {
+            name: "PowerShell".into(),
+            id: "pwsh".into(),
+            program: "pwsh.exe".into(),
+            args: vec![],
+        };
+        let mut palette = CommandPalette::new();
+        palette.set_default_shell_menu(std::slice::from_ref(&shell));
+        palette.open_default_picker();
+
+        assert_eq!(palette.confirm(), Some(PaletteAction::SetDefaultShell(shell)));
+    }
+
+    #[test]
+    fn directory_picker_returns_path_without_inventing_a_shell_command() {
+        let path = PathBuf::from("D:/项目 空间");
+        let mut palette = CommandPalette::new();
+        palette.set_directories(vec![path.clone()]);
+        palette.open_directories();
+        let (rows, selected) = palette.visible(8);
+
+        assert_eq!(selected, Some(0));
+        assert_eq!(rows[0].hint, path.display().to_string());
+        assert_eq!(palette.confirm(), Some(PaletteAction::NewAtDirectory(path)));
     }
 
     #[test]
