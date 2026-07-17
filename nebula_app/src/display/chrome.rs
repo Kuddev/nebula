@@ -1623,10 +1623,15 @@ pub(super) fn draw_chrome(d: &mut Display) {
         if let Some(panel) = d.nebula_sftp_panel.as_ref() {
             let scale = d.window.scale_factor as f32;
             let layout = sftp_panel::layout(&d.side_panel_layout(), scale);
+            let ls_colors = side_panel::LsColors {
+                dir: d.colors[nebula_terminal::vte::ansi::NamedColor::Blue],
+                exec: d.colors[nebula_terminal::vte::ansi::NamedColor::Green],
+            };
             sftp_panel::draw_text(
                 panel,
                 &layout,
                 &d.nebula_theme,
+                ls_colors,
                 &mut d.renderer,
                 &mut d.glyph_cache,
                 &d.size_info,

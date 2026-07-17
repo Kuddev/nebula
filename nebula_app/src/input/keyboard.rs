@@ -436,7 +436,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             // directory-tree / git view.
             if shift && matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("o"))
             {
-                self.ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Files);
+                if let Some(destination) = self.ctx.nebula_ssh_destination().map(str::to_owned) {
+                    self.ctx.nebula_open_sftp(destination);
+                } else {
+                    self.ctx
+                        .display()
+                        .toggle_side_panel(crate::display::side_panel::PanelView::Files);
+                }
                 self.ctx.mark_dirty();
                 return;
             }
@@ -739,7 +745,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }),
             SetDefaultShell(shell) => self.ctx.display().set_default_shell(&shell),
             ToggleFilesPanel => {
-                self.ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Files)
+                if let Some(destination) = self.ctx.nebula_ssh_destination().map(str::to_owned) {
+                    self.ctx.nebula_open_sftp(destination);
+                } else {
+                    self.ctx
+                        .display()
+                        .toggle_side_panel(crate::display::side_panel::PanelView::Files)
+                }
             },
             ToggleGitPanel => {
                 self.ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Git)

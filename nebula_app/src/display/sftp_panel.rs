@@ -26,11 +26,6 @@ pub enum SftpHit {
     None,
     Close,
     Path,
-    Up,
-    Refresh,
-    UploadFiles,
-    UploadDirectory,
-    NewDirectory,
     Filter,
     Row(usize),
     Cancel,
@@ -67,7 +62,20 @@ impl SftpPanel {
     }
 
     pub fn visible_entries(&self) -> Vec<SftpEntry> {
-        filtered_entries(&self.snapshot().entries, &self.filter)
+        let snapshot = self.snapshot();
+        let mut entries = filtered_entries(&snapshot.entries, &self.filter);
+        if snapshot.path != "/" && self.filter.trim().is_empty() {
+            entries.insert(0, SftpEntry {
+                name: "..".to_owned(),
+                path: super::super::ssh_sftp::normalize_remote_path(&snapshot.path, ".."),
+                kind: SftpEntryKind::Directory,
+                size: 0,
+                modified: 0,
+                permissions: String::new(),
+                is_parent: true,
+            });
+        }
+        entries
     }
 
     pub fn visible_entry(&self, index: usize) -> Option<SftpEntry> {
@@ -85,12 +93,6 @@ impl SftpPanel {
     pub fn scroll_by(&mut self, delta: i32, visible_rows: usize) {
         let max = self.visible_entries().len().saturating_sub(visible_rows);
         self.scroll = (self.scroll as i64 + delta as i64).clamp(0, max as i64) as usize;
-    }
-
-    pub fn go_up(&self) {
-        let snapshot = self.snapshot();
-        self.controller
-            .refresh(super::super::ssh_sftp::normalize_remote_path(&snapshot.path, ".."));
     }
 
     pub fn refresh(&self) {
@@ -132,6 +134,9 @@ impl SftpPanel {
     }
 
     pub fn begin_rename(&mut self, entry: SftpEntry) {
+        if entry.is_parent {
+            return;
+        }
         let name = entry.name.clone();
         self.begin_editor(EditorKind::Rename(entry), name);
     }
@@ -236,10 +241,16 @@ impl SftpPanel {
     }
 
     pub fn download(&self, entry: SftpEntry, directory: std::path::PathBuf) {
+        if entry.is_parent {
+            return;
+        }
         self.controller.download(entry, directory);
     }
 
     pub fn delete(&self, entry: SftpEntry) {
+        if entry.is_parent {
+            return;
+        }
         self.controller.delete(entry);
     }
 
@@ -262,7 +273,6 @@ pub struct SftpLayout {
     pub panel: (f32, f32, f32, f32),
     pub close: (f32, f32, f32, f32),
     pub path: (f32, f32, f32, f32),
-    pub toolbar: [(f32, f32, f32, f32); 5],
     pub filter: (f32, f32, f32, f32),
     pub list_y: f32,
     pub row_h: f32,
@@ -274,19 +284,15 @@ pub fn layout(base: &side_panel::PanelLayout, scale: f32) -> SftpLayout {
     let s = |value: f32| value * scale;
     let (x, y, width, height) = base.panel;
     let close = (x + width - s(36.0), y + s(6.0), s(28.0), s(28.0));
-    let path = (x + s(12.0), y + s(46.0), width - s(24.0), s(34.0));
-    let toolbar_y = path.1 + path.3 + s(8.0);
-    let gap = s(5.0);
-    let button_w = (path.2 - gap * 4.0) / 5.0;
-    let toolbar = std::array::from_fn(|index| {
-        (path.0 + index as f32 * (button_w + gap), toolbar_y, button_w, s(30.0))
-    });
-    let filter = (path.0, toolbar_y + s(38.0), path.2, s(34.0));
+    let content_x = x + s(12.0);
+    let content_w = width - s(24.0);
+    let path = (content_x, y + s(46.0), content_w, s(34.0));
+    let filter = (content_x, path.1 + path.3 + s(8.0), content_w, s(34.0));
     let list_y = filter.1 + filter.3 + s(10.0);
-    let row_h = s(48.0);
+    let row_h = s(34.0);
     let cancel = (x + s(12.0), y + height - s(38.0), width - s(24.0), s(28.0));
     let max_rows = ((cancel.1 - s(8.0) - list_y) / row_h).max(0.0) as usize;
-    SftpLayout { panel: base.panel, close, path, toolbar, filter, list_y, row_h, max_rows, cancel }
+    SftpLayout { panel: base.panel, close, path, filter, list_y, row_h, max_rows, cancel }
 }
 
 fn contains(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
@@ -302,18 +308,6 @@ pub fn hit_test(layout: &SftpLayout, working: bool, x: f32, y: f32) -> SftpHit {
     }
     if contains(layout.path, x, y) {
         return SftpHit::Path;
-    }
-    let toolbar_hits = [
-        SftpHit::Up,
-        SftpHit::Refresh,
-        SftpHit::UploadFiles,
-        SftpHit::UploadDirectory,
-        SftpHit::NewDirectory,
-    ];
-    for (rect, hit) in layout.toolbar.iter().zip(toolbar_hits) {
-        if contains(*rect, x, y) {
-            return hit;
-        }
     }
     if contains(layout.filter, x, y) {
         return SftpHit::Filter;
@@ -345,19 +339,6 @@ pub(super) fn push_quads(
     let (x, y, width, height) = layout.panel;
     quads.push(UiQuad::solid(x, y, width, height, radius, palette.panel));
 
-    for (index, rect) in layout.toolbar.iter().enumerate() {
-        let hit = [
-            SftpHit::Up,
-            SftpHit::Refresh,
-            SftpHit::UploadFiles,
-            SftpHit::UploadDirectory,
-            SftpHit::NewDirectory,
-        ][index];
-        quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(6.0), skin.input));
-        if panel.hover == hit {
-            quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(6.0), skin.hover));
-        }
-    }
     for (rect, focused) in [
         (
             layout.path,
@@ -470,6 +451,7 @@ pub(super) fn draw_text(
     panel: &SftpPanel,
     layout: &SftpLayout,
     theme: &NebulaTheme,
+    ls: super::side_panel::LsColors,
     renderer: &mut Renderer,
     glyph_cache: &mut GlyphCache,
     size: &SizeInfo,
@@ -525,19 +507,6 @@ pub(super) fn draw_text(
         &super::truncate_tab_label(&path_shown, 30),
         glyph_cache,
     );
-
-    for (rect, label) in layout.toolbar.iter().zip(["上", "刷新", "传文", "传夹", "新建"])
-    {
-        let width = label.chars().count() as f32 * cell_w;
-        renderer.draw_chrome_text(
-            size,
-            rect.0 + (rect.2 - width) * 0.5,
-            text_y(*rect),
-            skin.ink_dim,
-            label,
-            glyph_cache,
-        );
-    }
 
     let filter_editor =
         panel.editor.as_ref().filter(|editor| !matches!(editor.kind, EditorKind::Path));
@@ -608,40 +577,58 @@ pub(super) fn draw_text(
         for (index, entry) in
             panel.visible_entries().iter().skip(panel.scroll).take(layout.max_rows).enumerate()
         {
-            let y = layout.list_y + index as f32 * layout.row_h + s(3.0);
-            let icon = match entry.kind {
-                SftpEntryKind::Directory => "▸",
-                SftpEntryKind::Symlink => "↗",
-                SftpEntryKind::File => "·",
+            let y = layout.list_y
+                + index as f32 * layout.row_h
+                + (layout.row_h - cell_h) * 0.5;
+            // 与本地 Files 面板共用同一套 Codicon 与 ANSI 颜色。远端列表如果
+            // 单独使用三角形/圆点，会让同一个“文件”入口看起来像两套产品。
+            let (chevron, icon, icon_ink, name_ink) = match entry.kind {
+                SftpEntryKind::Directory => (
+                    Some(super::side_panel::ICON_CHEVRON_RIGHT),
+                    super::side_panel::ICON_FOLDER,
+                    ls.dir,
+                    ls.dir,
+                ),
+                SftpEntryKind::Symlink => (
+                    None,
+                    "\u{ea71}", // codicon-link
+                    skin.ink_dim,
+                    skin.ink_strong,
+                ),
+                SftpEntryKind::File => (
+                    None,
+                    super::side_panel::file_type_icon(&entry.name),
+                    skin.ink_dim,
+                    skin.ink_strong,
+                ),
             };
+            let icon_x = layout.panel.0 + s(14.0);
+            if let Some(chevron) = chevron {
+                renderer.draw_chrome_text(
+                    size,
+                    icon_x,
+                    y,
+                    skin.ink_faint,
+                    chevron,
+                    glyph_cache,
+                );
+            }
+            let file_icon_x = icon_x + cell_w * 1.9;
             renderer.draw_chrome_text(
                 size,
-                layout.panel.0 + s(14.0),
+                file_icon_x,
                 y,
-                skin.accent,
+                icon_ink,
                 icon,
                 glyph_cache,
             );
+            let name_x = file_icon_x + cell_w * 2.2;
             renderer.draw_chrome_text(
                 size,
-                layout.panel.0 + s(34.0),
+                name_x,
                 y,
-                skin.ink_strong,
+                name_ink,
                 &super::truncate_tab_label(&entry.name, 27),
-                glyph_cache,
-            );
-            let details = format!(
-                "{}  {}  {}",
-                entry.permissions,
-                format_size(entry.size),
-                format_time(entry.modified)
-            );
-            renderer.draw_chrome_text(
-                size,
-                layout.panel.0 + s(34.0),
-                y + s(18.0),
-                skin.ink_faint,
-                &super::truncate_tab_label(&details, 31),
                 glyph_cache,
             );
         }
@@ -710,26 +697,6 @@ pub(super) fn draw_text(
     }
 }
 
-fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
-}
-
-fn format_time(timestamp: u64) -> String {
-    if timestamp == 0 {
-        return "-".to_owned();
-    }
-    chrono::DateTime::from_timestamp(timestamp as i64, 0)
-        .map(|time| time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "-".to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +709,7 @@ mod tests {
             size: 0,
             modified: 0,
             permissions: "-rw-r--r--".to_owned(),
+            is_parent: false,
         }
     }
 
@@ -756,13 +724,13 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_hit_targets_share_the_drawn_geometry() {
+    fn filter_hit_uses_the_drawn_geometry_without_a_toolbar_band() {
         let base = side_panel::panel_layout(1000.0, 800.0, 0.0, 0.0, 1.0, 1.0);
         let layout = layout(&base, 1.0);
-        let rect = layout.toolbar[2];
+        let rect = layout.filter;
         assert_eq!(
             hit_test(&layout, false, rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5),
-            SftpHit::UploadFiles
+            SftpHit::Filter
         );
     }
 }

@@ -284,11 +284,6 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     crate::display::sftp_panel::SftpHit::Path
                     | crate::display::sftp_panel::SftpHit::Filter => CursorIcon::Text,
                     crate::display::sftp_panel::SftpHit::Close
-                    | crate::display::sftp_panel::SftpHit::Up
-                    | crate::display::sftp_panel::SftpHit::Refresh
-                    | crate::display::sftp_panel::SftpHit::UploadFiles
-                    | crate::display::sftp_panel::SftpHit::UploadDirectory
-                    | crate::display::sftp_panel::SftpHit::NewDirectory
                     | crate::display::sftp_panel::SftpHit::Row(_)
                     | crate::display::sftp_panel::SftpHit::Cancel => CursorIcon::Pointer,
                     _ => CursorIcon::Default,

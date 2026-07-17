@@ -188,6 +188,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             DownloadSftp(index) => self.ctx.display().sftp_download_row(index),
             RenameSftp(index) => self.ctx.display().sftp_begin_rename_row(index),
             DeleteSftp(index) => self.ctx.display().sftp_request_delete_row(index),
+            RefreshSftp => self.ctx.display().sftp_refresh(),
+            UploadFilesSftp => self.ctx.display().sftp_pick_upload_files(),
+            UploadDirectorySftp => self.ctx.display().sftp_pick_upload_directory(),
+            NewDirectorySftp => self.ctx.display().sftp_begin_create_directory(),
         }
         self.ctx.mark_dirty();
     }
@@ -505,12 +509,30 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 {
                     return;
                 }
-                if let crate::display::sftp_panel::SftpHit::Row(index) =
-                    self.ctx.display().sftp_hit(x, y)
-                {
-                    self.ctx.display().open_sftp_context_menu(index, x, y);
-                    self.ctx.mark_dirty();
-                    return;
+                match self.ctx.display().sftp_hit(x, y) {
+                    crate::display::sftp_panel::SftpHit::Row(index) => {
+                        let entry = self
+                            .ctx
+                            .display()
+                            .nebula_sftp_panel
+                            .as_ref()
+                            .and_then(|panel| panel.visible_entry(index));
+                        match entry {
+                            Some(entry) if !entry.is_parent => {
+                                self.ctx.display().open_sftp_context_menu(index, x, y);
+                            },
+                            Some(_) => {},
+                            None => self.ctx.display().open_sftp_panel_context_menu(x, y),
+                        }
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::sftp_panel::SftpHit::Inside => {
+                        self.ctx.display().open_sftp_panel_context_menu(x, y);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    _ => {},
                 }
                 match self.ctx.display().chrome_hit(x, y) {
                     crate::display::ChromeHit::NewTab => {
@@ -817,9 +839,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::ChromeHit::PanelFiles => {
-                        self.ctx
-                            .display()
-                            .toggle_side_panel(crate::display::side_panel::PanelView::Files);
+                        if let Some(destination) =
+                            self.ctx.nebula_ssh_destination().map(str::to_owned)
+                        {
+                            self.ctx.nebula_open_sftp(destination);
+                        } else {
+                            self.ctx
+                                .display()
+                                .toggle_side_panel(crate::display::side_panel::PanelView::Files);
+                        }
                         self.ctx.mark_dirty();
                         return;
                     },
