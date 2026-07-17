@@ -15,7 +15,7 @@ use glutin::config::Config as GlutinConfig;
 use glutin::display::GetGlDisplay;
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
 use glutin::platform::x11::X11GlConfigExt;
-use log::{error, info};
+use log::{error, info, warn};
 use serde_json as json;
 use winit::event::{ElementState, Event as WinitEvent, Modifiers, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -158,6 +158,13 @@ fn select_initial_shell(
     cli: Option<tty::Shell>,
 ) -> Option<tty::Shell> {
     cli.or(user_default).or(configured)
+}
+
+/// Validate a tree-provided cwd immediately before process creation. The tree
+/// can disappear between drawing the action and handling its click; rejecting
+/// that race avoids a platform-specific PTY/CreateProcess startup failure.
+fn valid_new_tab_directory(path: &std::path::Path) -> bool {
+    path.is_dir()
 }
 
 /// How a new window context gets its initial tabs.
@@ -677,6 +684,17 @@ impl WindowContext {
                 self.spawn_tab();
                 false
             },
+            TabRequest::NewAtDirectory(path) => {
+                if valid_new_tab_directory(&path) {
+                    self.spawn_tab_at(Some(path));
+                } else {
+                    warn!(
+                        "Refusing to open a terminal at a missing or non-directory tree root: \
+                         {path:?}"
+                    );
+                }
+                false
+            },
             TabRequest::NewProfile(index) => {
                 self.spawn_tab_profile(index);
                 false
@@ -891,7 +909,13 @@ impl WindowContext {
 
     /// Spawn and activate a new tab (a single-pane layout) using the default shell.
     fn spawn_tab(&mut self) {
-        let cwd = self.focused_cwd();
+        self.spawn_tab_at(self.focused_cwd());
+    }
+
+    /// Spawn a default-shell tab at an already validated explicit directory,
+    /// or inherit the caller-provided cwd. Keeping this as the only insertion
+    /// path guarantees tree-created terminals behave exactly like Ctrl+Shift+T.
+    fn spawn_tab_at(&mut self, cwd: Option<std::path::PathBuf>) {
         // The default-shell setting (`shell=<id>` in nebula_settings.txt) may
         // name a detected shell the PTY layer doesn't bootstrap itself (cmd,
         // pwsh, nushell, a WSL distro). `resolve_id` returns `None` for the two
@@ -2502,7 +2526,7 @@ impl Drop for WindowContext {
 mod startup_shell_tests {
     use nebula_terminal::tty::Shell;
 
-    use super::select_initial_shell;
+    use super::{select_initial_shell, valid_new_tab_directory};
 
     fn shell(program: &str) -> Shell {
         Shell::new(program.to_owned(), Vec::new())
@@ -2523,5 +2547,18 @@ mod startup_shell_tests {
             Some(shell("nu.exe")),
         );
         assert_eq!(selected, Some(shell("nu.exe")));
+    }
+
+    #[test]
+    fn tree_terminal_cwd_accepts_only_an_existing_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("项目 空间");
+        std::fs::create_dir(&directory).unwrap();
+        let file = temp.path().join("not-a-directory.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        assert!(valid_new_tab_directory(&directory));
+        assert!(!valid_new_tab_directory(&file));
+        assert!(!valid_new_tab_directory(&temp.path().join("missing")));
     }
 }

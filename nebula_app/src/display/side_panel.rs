@@ -64,6 +64,8 @@ pub enum PanelHit {
     Search,
     /// Choose a window-local tree root with the native folder picker.
     OpenDirectory,
+    /// Open a fresh terminal tab whose PTY starts at the current tree root.
+    NewTerminalHere,
     /// Clear the window-local root and resume following the focused pane cwd.
     FollowCurrentDirectory,
     /// A list row (index into the *visible* rows of the current view).
@@ -72,8 +74,8 @@ pub enum PanelHit {
     Inside,
 }
 
-/// An in-progress drag of a tree file toward the terminal (drop = paste the
-/// full path into the shell, like dropping a file from Explorer).
+/// An in-progress drag of a tree entry toward the terminal (drop = paste the
+/// full path into the shell, like dropping an entry from Explorer).
 #[derive(Debug, Clone)]
 pub struct FileDrag {
     pub path: PathBuf,
@@ -84,7 +86,59 @@ pub struct FileDrag {
     pub origin: (f32, f32),
     /// Latest pointer position (physical px) — anchors the drag ghost.
     pub pos: (f32, f32),
+    /// Directories defer their normal expand/collapse click until release, so
+    /// crossing the drag threshold never mutates the tree as a side effect.
+    pub is_dir: bool,
+    /// Visible row at press time. Release validates its path before toggling,
+    /// preventing a throttled tree refresh from acting on a different row.
+    pub source_row: usize,
     pub active: bool,
+}
+
+impl FileDrag {
+    pub fn new(
+        path: PathBuf,
+        name: String,
+        is_dir: bool,
+        source_row: usize,
+        origin: (f32, f32),
+    ) -> Self {
+        Self { path, name, origin, pos: origin, is_dir, source_row, active: false }
+    }
+
+    /// Update the ghost position and cross the small click/drag threshold.
+    /// Once active, a drag never falls back to an expand/collapse click.
+    pub fn update_position(&mut self, pos: (f32, f32)) {
+        self.pos = pos;
+        if !self.active {
+            let (ox, oy) = self.origin;
+            if (pos.0 - ox).abs() >= 8.0 || (pos.1 - oy).abs() >= 8.0 {
+                self.active = true;
+            }
+        }
+    }
+
+    /// Bytes pasted on a valid terminal drop. This intentionally preserves
+    /// the existing cross-shell compatibility boundary: whitespace paths use
+    /// double quotes, but no single literal syntax can safely encode every
+    /// special character for PowerShell, CMD, Bash and NuShell at once.
+    pub fn terminal_drop_text(&self, over_terminal: bool) -> Option<Vec<u8>> {
+        if !self.active || !over_terminal {
+            return None;
+        }
+        let mut text = self.path.display().to_string();
+        // Unix permits control characters (including CR/LF) in file names.
+        // Sending those bytes to a PTY could execute input despite the drop
+        // contract explicitly requiring paste-only behaviour.
+        if text.chars().any(char::is_control) {
+            return None;
+        }
+        if text.contains(char::is_whitespace) {
+            text = format!("\"{text}\"");
+        }
+        text.push(' ');
+        Some(text.into_bytes())
+    }
 }
 
 /// Re-run the (throttled) refresh at most this often while the panel is open.
@@ -142,7 +196,7 @@ pub struct SidePanel {
     commit_selection: super::text_input::SelectAllState,
     /// Last clicked file row (path + when), for double-click-to-open.
     pub last_file_click: Option<(PathBuf, Instant)>,
-    /// In-progress drag of a file row toward the terminal.
+    /// In-progress drag of a file or directory row toward the terminal.
     pub drag_file: Option<FileDrag>,
     /// Persistently selected file (row highlight). Cleared by clicking off
     /// the panel, closing the drawer, or the root changing.
@@ -573,6 +627,19 @@ impl SidePanel {
         true
     }
 
+    /// Complete the plain-click half of a pending directory drag. The source
+    /// path must still occupy the pressed row; otherwise a refresh/scroll
+    /// change could expand an unrelated directory after mouse release.
+    pub fn click_drag_source(&mut self, drag: &FileDrag) -> bool {
+        if drag.active || !drag.is_dir {
+            return false;
+        }
+        let matches_source = self
+            .visible_row(drag.source_row)
+            .is_some_and(|row| row.is_dir && row.path == drag.path);
+        matches_source && self.click_row(drag.source_row)
+    }
+
     /// Scroll by `delta` rows (positive = down), clamped to the list length.
     pub fn scroll_by(&mut self, delta: i32, visible_rows: usize) {
         let len = match self.view {
@@ -693,33 +760,44 @@ pub fn panel_hit(layout: &PanelLayout, x: f32, y: f32) -> PanelHit {
 pub fn panel_action_rects(
     layout: &PanelLayout,
     custom_root: bool,
-) -> Vec<(PanelHit, (f32, f32, f32, f32))> {
+    has_root: bool,
+) -> impl Iterator<Item = (PanelHit, (f32, f32, f32, f32))> {
     let scale = layout.header_h / 40.0;
     let s = |value: f32| value * scale;
     let (px, py, pw, _) = layout.panel;
     let height = s(26.0);
     let y = py + layout.header_h + s(4.0);
     let right = px + pw - s(10.0);
-    let open_width = s(30.0);
-    let open_x = right - open_width;
-    let mut actions = vec![(PanelHit::OpenDirectory, (open_x, y, open_width, height))];
-    if custom_root {
-        let follow_width = s(62.0);
-        let follow_x = open_x - s(4.0) - follow_width;
-        actions.push((PanelHit::FollowCurrentDirectory, (follow_x, y, follow_width, height)));
-    }
-    actions
+    let icon_width = s(30.0);
+    let gap = s(4.0);
+    let open_x = right - icon_width;
+    let terminal_x = open_x - gap - icon_width;
+    let leftmost_icon_x = if has_root { terminal_x } else { open_x };
+    let follow_width = s(62.0);
+    let follow_x = leftmost_icon_x - gap - follow_width;
+
+    // Fixed-size options keep per-frame draw and pointer hit-testing free of
+    // tiny heap allocations while still allowing root-dependent actions.
+    [
+        Some((PanelHit::OpenDirectory, (open_x, y, icon_width, height))),
+        has_root.then_some((PanelHit::NewTerminalHere, (terminal_x, y, icon_width, height))),
+        (custom_root && has_root)
+            .then_some((PanelHit::FollowCurrentDirectory, (follow_x, y, follow_width, height))),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 pub fn panel_interactive_hit(
     layout: &PanelLayout,
     view: PanelView,
     custom_root: bool,
+    has_root: bool,
     x: f32,
     y: f32,
 ) -> PanelHit {
     if view == PanelView::Files {
-        for (hit, (rx, ry, rw, rh)) in panel_action_rects(layout, custom_root) {
+        for (hit, (rx, ry, rw, rh)) in panel_action_rects(layout, custom_root, has_root) {
             if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
                 return hit;
             }
@@ -836,6 +914,7 @@ use super::{NebulaTheme, SizeInfo, UI_CORNER_RADIUS_LOGICAL};
 // Codicon glyphs (same family as the chrome's sidebar/settings icons).
 pub(super) const ICON_FOLDER: &str = "\u{ea83}";
 pub(super) const ICON_FOLDER_OPEN: &str = "\u{eaf7}";
+const ICON_TERMINAL: &str = "\u{ea85}";
 const ICON_FILE: &str = "\u{ea7b}";
 pub(super) const ICON_CHEVRON_RIGHT: &str = "\u{eab6}";
 const ICON_CHEVRON_DOWN: &str = "\u{eab4}";
@@ -987,7 +1066,9 @@ pub(super) fn push_quads(
     }
 
     if panel.view == PanelView::Files {
-        for (hit, (x, y, w, h)) in panel_action_rects(layout, panel.custom_root_active()) {
+        for (hit, (x, y, w, h)) in
+            panel_action_rects(layout, panel.custom_root_active(), panel.root().is_some())
+        {
             let fill = if panel.hover == hit { sk.hover_strong } else { sk.input };
             quads.push(UiQuad::solid(x, y, w, h, radius, fill));
         }
@@ -1230,14 +1311,21 @@ pub(super) fn draw_text(
 
     match panel.view {
         PanelView::Files => {
-            let action_x = panel_action_rects(layout, panel.custom_root_active())
-                .into_iter()
-                .map(|(_, rect)| rect.0)
-                .fold(px + pw - text_pad, f32::min);
+            let action_x =
+                panel_action_rects(layout, panel.custom_root_active(), panel.root().is_some())
+                    .map(|(_, rect)| rect.0)
+                    .fold(px + pw - text_pad, f32::min);
             let summary_cols =
                 (((action_x - px - 2.0 * text_pad) / cell_w).floor() as usize).max(4);
             let (summary, summary_ink) = if let Some(notice) = panel.root_notice() {
                 (clip_tail(notice, summary_cols), Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b))
+            } else if let Some(hint) = match panel.hover {
+                PanelHit::NewTerminalHere => Some("在此新建终端"),
+                PanelHit::OpenDirectory => Some("选择文件树目录"),
+                PanelHit::FollowCurrentDirectory => Some("跟随当前终端"),
+                _ => None,
+            } {
+                (clip_tail(hint, summary_cols), sk.ink_strong)
             } else {
                 (
                     panel
@@ -1249,10 +1337,13 @@ pub(super) fn draw_text(
             };
             r.draw_chrome_text(size, px + text_pad, summary_y, summary_ink, &summary, gc);
 
-            for (hit, (x, y, w, h)) in panel_action_rects(layout, panel.custom_root_active()) {
+            for (hit, (x, y, w, h)) in
+                panel_action_rects(layout, panel.custom_root_active(), panel.root().is_some())
+            {
                 let ink = if panel.hover == hit { sk.ink_strong } else { sk.ink_dim };
                 let (label, columns) = match hit {
                     PanelHit::OpenDirectory => (ICON_FOLDER_OPEN, 1.0),
+                    PanelHit::NewTerminalHere => (ICON_TERMINAL, 1.0),
                     PanelHit::FollowCurrentDirectory => ("跟随", 4.0),
                     _ => continue,
                 };
@@ -1640,6 +1731,56 @@ mod tests {
     }
 
     #[test]
+    fn directory_drag_defers_and_validates_the_plain_click() {
+        let base = std::env::temp_dir()
+            .join(format!("nebula-panel-directory-drag-test-{}", std::process::id()));
+        let sub = base.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let mut panel = SidePanel::new();
+        panel.toggle(PanelView::Files);
+        assert!(panel.sync(Some(base.clone())));
+        let drag = FileDrag::new(sub, "sub".into(), true, 0, (10.0, 10.0));
+
+        assert!(panel.click_drag_source(&drag), "a non-drag release keeps directory click");
+        assert!(panel.file_rows()[0].expanded);
+
+        let mut active = drag.clone();
+        active.update_position((18.0, 10.0));
+        assert!(active.active, "eight physical pixels arm the drag");
+        assert!(!panel.click_drag_source(&active), "an active drag must not toggle the tree");
+        assert!(panel.file_rows()[0].expanded);
+
+        let mut stale = drag;
+        stale.source_row = 1;
+        assert!(!panel.click_drag_source(&stale), "a changed source row must be ignored");
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn terminal_drop_text_requires_an_active_terminal_drop_and_quotes_unicode_whitespace() {
+        let path = PathBuf::from("D:/项目 空间");
+        let mut drag = FileDrag::new(path, "项目 空间".into(), true, 0, (0.0, 0.0));
+
+        assert_eq!(drag.terminal_drop_text(true), None, "plain clicks never paste");
+        drag.update_position((7.0, 7.0));
+        assert!(!drag.active, "diagonal motion below each axis threshold remains a click");
+        drag.update_position((8.0, 7.0));
+        assert!(drag.active);
+        assert_eq!(drag.terminal_drop_text(false), None, "dropping back on the drawer is inert");
+        assert_eq!(
+            String::from_utf8(drag.terminal_drop_text(true).unwrap()).unwrap(),
+            "\"D:/项目 空间\" "
+        );
+
+        let mut control =
+            FileDrag::new(PathBuf::from("unsafe\npath"), "unsafe".into(), true, 0, (0.0, 0.0));
+        control.update_position((8.0, 0.0));
+        assert_eq!(control.terminal_drop_text(true), None, "a drop must never inject Enter");
+    }
+
+    #[test]
     fn hit_test_maps_header_and_rows() {
         let l = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0);
         let (px, py, pw, _) = l.panel;
@@ -1677,7 +1818,7 @@ mod tests {
     #[test]
     fn files_summary_actions_have_distinct_exact_hit_targets() {
         let layout = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0);
-        let actions = panel_action_rects(&layout, true);
+        let actions: Vec<_> = panel_action_rects(&layout, true, true).collect();
         let open = actions
             .iter()
             .find(|(hit, _)| *hit == PanelHit::OpenDirectory)
@@ -1686,28 +1827,50 @@ mod tests {
             .iter()
             .find(|(hit, _)| *hit == PanelHit::FollowCurrentDirectory)
             .expect("follow-current-directory action");
+        let terminal = actions
+            .iter()
+            .find(|(hit, _)| *hit == PanelHit::NewTerminalHere)
+            .expect("new-terminal-here action");
         let center = |rect: (f32, f32, f32, f32)| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
         let (open_x, open_y) = center(open.1);
         let (follow_x, follow_y) = center(follow.1);
+        let (terminal_x, terminal_y) = center(terminal.1);
 
         assert_eq!(
-            panel_interactive_hit(&layout, PanelView::Files, true, open_x, open_y),
+            panel_interactive_hit(&layout, PanelView::Files, true, true, open_x, open_y),
             PanelHit::OpenDirectory
         );
         assert_eq!(
-            panel_interactive_hit(&layout, PanelView::Files, true, follow_x, follow_y),
+            panel_interactive_hit(&layout, PanelView::Files, true, true, terminal_x, terminal_y),
+            PanelHit::NewTerminalHere
+        );
+        assert_eq!(
+            panel_interactive_hit(&layout, PanelView::Files, true, true, follow_x, follow_y),
             PanelHit::FollowCurrentDirectory
         );
         assert_eq!(
-            panel_interactive_hit(&layout, PanelView::Files, false, follow_x, follow_y),
+            panel_interactive_hit(&layout, PanelView::Files, false, true, follow_x, follow_y),
             PanelHit::Inside,
             "the reset action must not exist while following the terminal cwd"
         );
         assert_eq!(
-            panel_interactive_hit(&layout, PanelView::Git, true, open_x, open_y),
+            panel_interactive_hit(&layout, PanelView::Files, false, false, terminal_x, terminal_y),
+            PanelHit::Inside,
+            "the terminal action must not exist without a tree root"
+        );
+        assert_eq!(
+            panel_interactive_hit(&layout, PanelView::Git, true, true, open_x, open_y),
             PanelHit::Inside,
             "Files-only actions must not create invisible Git hit targets"
         );
+
+        for (index, (_, a)) in actions.iter().enumerate() {
+            for (_, b) in actions.iter().skip(index + 1) {
+                let overlaps =
+                    a.0 < b.0 + b.2 && a.0 + a.2 > b.0 && a.1 < b.1 + b.3 && a.1 + a.3 > b.1;
+                assert!(!overlaps, "summary action hit targets must not overlap");
+            }
+        }
     }
 
     #[test]

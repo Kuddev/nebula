@@ -999,6 +999,9 @@ pub enum EventType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabRequest {
     New,
+    /// Open the default shell in a fresh tab with this local directory passed
+    /// directly to the PTY startup configuration (no command injection).
+    NewAtDirectory(std::path::PathBuf),
     /// Open a new tab running the quick-launch profile at this config index
     /// (custom command instead of the default shell, e.g. an ssh jump).
     NewProfile(usize),

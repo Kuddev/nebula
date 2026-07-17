@@ -301,7 +301,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let layout = self.ctx.display().side_panel_layout();
             let view = self.ctx.display().nebula_side_panel.view;
             let custom_root = self.ctx.display().nebula_side_panel.custom_root_active();
-            let hit = panel_interactive_hit(&layout, view, custom_root, px, py);
+            let has_root = self.ctx.display().nebula_side_panel.root().is_some();
+            let hit = panel_interactive_hit(&layout, view, custom_root, has_root, px, py);
             let panel = &mut self.ctx.display().nebula_side_panel;
             if hit != panel.hover || (hit != PanelHit::None && panel.hover_pos != (px, py)) {
                 panel.hover = hit;
@@ -314,6 +315,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     PanelHit::ViewFiles
                     | PanelHit::ViewGit
                     | PanelHit::OpenDirectory
+                    | PanelHit::NewTerminalHere
                     | PanelHit::FollowCurrentDirectory => CursorIcon::Pointer,
                     PanelHit::Row(row)
                         if self.ctx.display().nebula_side_panel.view == PanelView::Files
@@ -365,17 +367,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let inside_text_area = size_info.contains_point(x, y);
         let cell_side = self.cell_side(x);
 
-        // Activate a pending tree-file drag once the pointer travels; while
+        // Activate a pending tree-entry drag once the pointer travels; while
         // active, the ghost chip follows the pointer and the copy cursor
         // shows the drop affordance.
         if let Some(drag) = self.ctx.display().nebula_side_panel.drag_file.as_mut() {
-            drag.pos = (x as f32, y as f32);
-            if !drag.active {
-                let (ox, oy) = drag.origin;
-                if (x as f32 - ox).abs() >= 8.0 || (y as f32 - oy).abs() >= 8.0 {
-                    drag.active = true;
-                }
-            }
+            drag.update_position((x as f32, y as f32));
             let active = drag.active;
             if active {
                 self.ctx.mark_dirty();
@@ -672,24 +668,25 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // even while a TUI has grabbed the mouse. A plain click (never dragged)
         // returns `None` here and falls through to normal release handling.
         if button == MouseButton::Left {
-            // Drop a dragged tree file: released over the terminal (anywhere
-            // off the drawer) pastes its full path, quoted when needed —
-            // Explorer-onto-terminal semantics.
+            // Drop a dragged tree entry: released over the terminal (anywhere
+            // off the drawer) pastes its full path but never presses Enter.
+            // A directory that never crossed the threshold retains its normal
+            // expand/collapse click on release.
             if let Some(drag) = self.ctx.display().nebula_side_panel.drag_file.take() {
                 if drag.active {
                     let x = self.ctx.mouse().x as f32;
                     let y = self.ctx.mouse().y as f32;
                     let layout = self.ctx.display().side_panel_layout();
-                    if crate::display::side_panel::panel_hit(&layout, x, y)
-                        == crate::display::side_panel::PanelHit::None
-                    {
-                        let mut text = drag.path.display().to_string();
-                        if text.contains(' ') {
-                            text = format!("\"{text}\"");
-                        }
-                        text.push(' ');
-                        self.ctx.write_to_pty(text.into_bytes());
+                    let over_terminal = crate::display::side_panel::panel_hit(&layout, x, y)
+                        == crate::display::side_panel::PanelHit::None;
+                    if let Some(text) = drag.terminal_drop_text(over_terminal) {
+                        self.ctx.write_to_pty(text);
                     }
+                    self.ctx.mark_dirty();
+                    return;
+                }
+                if drag.is_dir {
+                    self.ctx.display().nebula_side_panel.click_drag_source(&drag);
                     self.ctx.mark_dirty();
                     return;
                 }

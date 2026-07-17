@@ -361,7 +361,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let layout = self.ctx.display().side_panel_layout();
                 let view = self.ctx.display().nebula_side_panel.view;
                 let custom_root = self.ctx.display().nebula_side_panel.custom_root_active();
-                match panel_interactive_hit(&layout, view, custom_root, x, y) {
+                let has_root = self.ctx.display().nebula_side_panel.root().is_some();
+                match panel_interactive_hit(&layout, view, custom_root, has_root, x, y) {
                     PanelHit::None => {
                         // Clicking anywhere outside the drawer drops search focus
                         // and the persistent file selection.
@@ -382,6 +383,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                             },
                             PanelHit::OpenDirectory => {
                                 self.ctx.display().choose_side_panel_directory();
+                            },
+                            PanelHit::NewTerminalHere => {
+                                let root = self
+                                    .ctx
+                                    .display()
+                                    .nebula_side_panel
+                                    .root()
+                                    .map(std::path::Path::to_path_buf);
+                                if let Some(root) = root {
+                                    self.ctx
+                                        .nebula_tab(crate::event::TabRequest::NewAtDirectory(root));
+                                }
                             },
                             PanelHit::FollowCurrentDirectory => {
                                 self.ctx.display().follow_focused_directory();
@@ -426,9 +439,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                                     .visible_row(row)
                                     .map(|r| (r.path.clone(), r.is_dir));
                                 match info {
-                                    // Directories expand/collapse on click.
-                                    Some((_, true)) | None => {
+                                    None => {
                                         self.ctx.display().nebula_side_panel.click_row(row);
+                                    },
+                                    // Directory clicks are deferred to mouse-up:
+                                    // crossing the threshold turns them into a
+                                    // path drag without first changing the tree.
+                                    Some((path, true)) => {
+                                        use crate::display::side_panel::FileDrag;
+                                        let name = path
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_default();
+                                        self.ctx.display().nebula_side_panel.drag_file =
+                                            Some(FileDrag::new(path, name, true, row, (x, y)));
                                     },
                                     // Files: double-click opens with the system
                                     // handler; a single press arms a drag toward
@@ -457,13 +481,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                                                     .file_name()
                                                     .map(|n| n.to_string_lossy().into_owned())
                                                     .unwrap_or_default();
-                                                panel.drag_file = Some(FileDrag {
-                                                    path: path.clone(),
+                                                panel.drag_file = Some(FileDrag::new(
+                                                    path.clone(),
                                                     name,
-                                                    origin: (x, y),
-                                                    pos: (x, y),
-                                                    active: false,
-                                                });
+                                                    false,
+                                                    row,
+                                                    (x, y),
+                                                ));
                                             }
                                             dbl
                                         };
