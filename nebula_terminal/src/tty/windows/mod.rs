@@ -345,14 +345,52 @@ function global:Get-NebulaBoolSetting {
     }
 }
 
+# 脚本可能在已有集成之后被 source。只在第一次安装时保存原 prompt，
+# 之后重载 Nebula 脚本也不能把自己的 wrapper 当成“用户 prompt”递归调用。
+if (-not $global:NebulaPromptInstalled) {
+    $existingPrompt = Get-Command prompt -CommandType Function -ErrorAction SilentlyContinue
+    $global:NebulaPreviousPrompt = if ($existingPrompt) { $existingPrompt.ScriptBlock } else { $null }
+    $global:NebulaPromptInstalled = $true
+}
+
 function global:prompt {
     # Same principle as Oh My Posh: prompt rendering may execute external
     # commands, so preserve the previous command status. Errors inside the
     # prompt must stay silent — but ONLY inside: assigning here is scoped to
     # this function. (A top-level assignment once silenced the whole session,
     # eating every user-facing error, e.g. a failed `cd`.)
-    $ErrorActionPreference = 'SilentlyContinue'
+    $originalDollarQuestion = $global:?
     $originalLastExitCode = $global:LASTEXITCODE
+    $ErrorActionPreference = 'SilentlyContinue'
+    $global:NebulaLastCommandSucceeded = $originalDollarQuestion
+    $global:NebulaLastCommandExitCode = $originalLastExitCode
+    $global:NebulaLastCommandDurationMs = $null
+    try {
+        $lastHistory = Get-History -Count 1 -ErrorAction SilentlyContinue
+        if ($lastHistory -and $lastHistory.EndExecutionTime -ge $lastHistory.StartExecutionTime) {
+            $global:NebulaLastCommandDurationMs = [math]::Max(
+                0,
+                [math]::Round(($lastHistory.EndExecutionTime - $lastHistory.StartExecutionTime).TotalMilliseconds)
+            )
+        }
+    } catch {}
+
+    # 保留旧 prompt 的环境管理器、历史或目录 hook 等副作用，但丢弃它返回
+    # 的视觉字符串；Nebula 在最后统一渲染，避免两个 prompt 叠在一起。
+    if ($global:NebulaPreviousPrompt -and -not $global:NebulaPreviousPromptRunning) {
+        $global:NebulaPreviousPromptRunning = $true
+        try {
+            $global:LASTEXITCODE = $originalLastExitCode
+            if (-not $originalDollarQuestion) {
+                Write-Error '' -ErrorAction Ignore
+            }
+            $null = & $global:NebulaPreviousPrompt
+        } catch {
+        } finally {
+            $global:NebulaPreviousPromptRunning = $false
+        }
+    }
+
     $e = $NebE
     # OSC 133;D — the previous command just finished (this prompt proves it).
     # Nebula pairs it with the 133;C from the PSConsoleHostReadLine wrapper to
@@ -389,34 +427,42 @@ function global:prompt {
     if (-not (Get-NebulaBoolSetting 'powerline' $true)) {
         $branchText = if ($branch) { " ($branch)" } else { "" }
         $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$loc|$branch$([char]7)$e[38;5;19m$loc$branchText $e[35m$NebPromptArrow $reset"
-        try { Set-PSReadLineOption -ExtraPromptLineCount (($output | Measure-Object -Line).Lines - 1) } catch {}
-        $global:LASTEXITCODE = $originalLastExitCode
-        return $output
+    } else {
+        $segs = New-Object System.Collections.ArrayList
+        [void]$segs.Add(@{ bg=16; fg=17; t=" $NebFolderIcon " })
+        [void]$segs.Add(@{ bg=18; fg=19; t="  $loc  " })
+        if ($branch) { [void]$segs.Add(@{ bg=20; fg=21; t=" $NebGitBranchIcon $branch  " }) }
+        [void]$segs.Add(@{ bg=22; fg=23; t=" $NebClockIcon $time  " })
+
+        # 49 = default background on both caps: the cap cell's square corners
+        # always match the real terminal bg (any theme / wallpaper).
+        $out = "$reset$e[38;5;$($segs[0].bg)m$e[49m$NebLeftRound$reset"
+        for ($i = 0; $i -lt $segs.Count; $i++) {
+            $s = $segs[$i]
+            $out += "$e[48;5;$($s.bg)m$e[38;5;$($s.fg)m$($s.t)"
+            if ($i -lt $segs.Count - 1) {
+                $nb = $segs[$i + 1].bg
+                $out += "$reset$e[38;5;$($s.bg)m$e[48;5;${nb}m$NebArrow$reset"
+            } else {
+                $out += "$reset$e[38;5;$($s.bg)m$e[49m$NebRightRound$reset"
+            }
+        }
+        $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$loc|$branch$([char]7)$out`n`n$e[35m$NebPromptArrow $reset"
     }
 
-    $segs = New-Object System.Collections.ArrayList
-    [void]$segs.Add(@{ bg=16; fg=17; t=" $NebFolderIcon " })
-    [void]$segs.Add(@{ bg=18; fg=19; t="  $loc  " })
-    if ($branch) { [void]$segs.Add(@{ bg=20; fg=21; t=" $NebGitBranchIcon $branch  " }) }
-    [void]$segs.Add(@{ bg=22; fg=23; t=" $NebClockIcon $time  " })
+    try { Set-PSReadLineOption -ExtraPromptLineCount (($output | Measure-Object -Line).Lines - 1) } catch {}
 
-    # 49 = default background on both caps: the cap cell's square corners
-    # always match the real terminal bg (any theme / wallpaper).
-    $out = "$reset$e[38;5;$($segs[0].bg)m$e[49m$NebLeftRound$reset"
-    for ($i = 0; $i -lt $segs.Count; $i++) {
-        $s = $segs[$i]
-        $out += "$e[48;5;$($s.bg)m$e[38;5;$($s.fg)m$($s.t)"
-        if ($i -lt $segs.Count - 1) {
-            $nb = $segs[$i + 1].bg
-            $out += "$reset$e[38;5;$($s.bg)m$e[48;5;${nb}m$NebArrow$reset"
+    # prompt 返回值先输出，状态恢复必须放到整个函数的最后；否则任意一次
+    # Measure-Object、git 或赋值都会让下一条命令看到错误的 $?。
+    $output
+    $global:LASTEXITCODE = $originalLastExitCode
+    if ($global:? -ne $originalDollarQuestion) {
+        if ($originalDollarQuestion) {
+            $null = 1
         } else {
-            $out += "$reset$e[38;5;$($s.bg)m$e[49m$NebRightRound$reset"
+            Write-Error '' -ErrorAction Ignore
         }
     }
-    $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$loc|$branch$([char]7)$out`n`n$e[35m$NebPromptArrow $reset"
-    try { Set-PSReadLineOption -ExtraPromptLineCount (($output | Measure-Object -Line).Lines - 1) } catch {}
-    $global:LASTEXITCODE = $originalLastExitCode
-    $output
 }
 
 # Build a spec-correct file:// URI from a Windows path for OSC 8 hyperlinks.
@@ -591,8 +637,36 @@ if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue) {
     # Enters, spinning Nebula's sidebar spinner for commands that never ran.
     # Defined after the Set-PSReadLineOption calls above so PSReadLine is
     # already imported and this global override sticks.
+    if (-not $global:NebulaReadLineInstalled) {
+        $existingReadLine = Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction SilentlyContinue
+        $global:NebulaPreviousPSConsoleHostReadLine = if ($existingReadLine) {
+            $existingReadLine.ScriptBlock
+        } else {
+            $null
+        }
+        $global:NebulaReadLineInstalled = $true
+    }
+
     function global:PSConsoleHostReadLine {
-        $line = [Microsoft.PowerShell.PSConsoleReadLine]::ReadLine($Host.Runspace, $ExecutionContext)
+        $line = $null
+        if ($global:NebulaPreviousPSConsoleHostReadLine -and -not $global:NebulaPreviousReadLineRunning) {
+            $global:NebulaPreviousReadLineRunning = $true
+            try {
+                $previousResult = @(& $global:NebulaPreviousPSConsoleHostReadLine)
+                $line = if ($previousResult.Count -gt 0) {
+                    [string]$previousResult[-1]
+                } else {
+                    ''
+                }
+            } catch {
+                $line = $null
+            } finally {
+                $global:NebulaPreviousReadLineRunning = $false
+            }
+        }
+        if ($null -eq $line) {
+            $line = [Microsoft.PowerShell.PSConsoleReadLine]::ReadLine($Host.Runspace, $ExecutionContext)
+        }
         # A blank Enter re-renders the prompt without running anything: no C,
         # so the spinner doesn't flash for a no-op.
         if (-not [string]::IsNullOrWhiteSpace($line)) {
@@ -655,9 +729,9 @@ __nebula_setting() {
     local key="$1" default="$2" file
     file="$(__nebula_settings_file)"
     if [ -n "$file" ] && [ -r "$file" ]; then
-        awk -F= -v key="$key" -v default="$default" '
+        awk -F= -v key="$key" -v fallback="$default" '
             $1 == key { sub(/^[ \t]+/, "", $2); sub(/[ \t]+$/, "", $2); print $2; found = 1; exit }
-            END { if (!found) print default }
+            END { if (!found) print fallback }
         ' "$file"
     else
         printf '%s' "$default"
@@ -691,10 +765,60 @@ __nebula_win_path() {
     esac
 }
 
+__nebula_set_return() {
+    return "${1:-0}"
+}
+
+__nebula_now_ms() {
+    local now seconds fraction
+    if [[ -n ${EPOCHREALTIME-} ]]; then
+        now="$EPOCHREALTIME"
+        seconds="${now%%.*}"
+        fraction="${now#*.}000"
+        printf '%s' "$((10#$seconds * 1000 + 10#${fraction:0:3}))"
+    else
+        # Bash 4 没有 EPOCHREALTIME；SECONDS 精度较低但仍保持单调，
+        # 比为了提示符时长每次再启动 date 子进程更稳妥。
+        printf '%s' "$((SECONDS * 1000))"
+    fi
+}
+
+__nebula_run_saved_prompt_command() {
+    local status="$1" command
+    if [[ ${__nebula_saved_prompt_kind-} == array ]]; then
+        for command in "${__nebula_saved_prompt_commands[@]}"; do
+            __nebula_set_return "$status"
+            eval -- "$command"
+        done
+    elif [[ -n ${__nebula_saved_prompt_command-} ]]; then
+        __nebula_set_return "$status"
+        eval -- "$__nebula_saved_prompt_command"
+    fi
+}
+
 __nebula_precmd() {
-    local cwd="$PWD" branch="" loc="${PWD/#$HOME/~}"
-    # OSC 133;D — the previous command finished (see the PowerShell prompt).
+    # 同一个赋值语句会在任何 helper 改写状态前展开两者；分成两行会让
+    # PIPESTATUS 只剩下 local/assignment 的结果，而不是用户的管道结果。
+    NEBULA_CMD_STATUS=$? NEBULA_PIPE_STATUS=("${PIPESTATUS[@]}")
+    local cmd_status="$NEBULA_CMD_STATUS" end_ms=""
+
+    if [[ -n ${NEBULA_COMMAND_START_MS-} ]]; then
+        end_ms="$(__nebula_now_ms)"
+        if [[ $NEBULA_COMMAND_START_MS =~ ^[0-9]+$ && $end_ms =~ ^[0-9]+$ ]]; then
+            NEBULA_COMMAND_DURATION_MS=$((end_ms - NEBULA_COMMAND_START_MS))
+        fi
+        unset NEBULA_COMMAND_START_MS
+    fi
+
+    # OSC 133;D 要尽早发出：用户的旧 precmd 即使较慢，也不应拖延终端
+    # 对“上一条命令已经结束”的判断。
     printf '\033]133;D\007'
+
+    # 旧 PROMPT_COMMAND 的非视觉副作用（历史、环境管理器、目录 hook）
+    # 仍然执行；Nebula 在它之后设置 PS1，保证最终视觉输出只有一个来源。
+    __nebula_run_saved_prompt_command "$cmd_status"
+
+    local cwd="$PWD" branch="" loc="${PWD/#$HOME/~}"
     if command -v git >/dev/null 2>&1; then
         branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
     fi
@@ -709,12 +833,33 @@ __nebula_precmd() {
     else
         PS1='\[\033[90m\]\w \[\033[35m\]❯ \[\033[0m\]'
     fi
+
+    # PROMPT_COMMAND 自身的最终状态会成为交互式 shell 下一次看到的 $?。
+    # 返回原值，`false; echo $?` 才不会被提示符内部的 git/printf 伪装成 0。
+    return "$cmd_status"
 }
 
-PROMPT_COMMAND=__nebula_precmd
-# OSC 133;C right before each command executes (bash >= 4.4), pairing with
-# the 133;D in precmd for Nebula's finished-command notification.
-PS0=$'\033]133;C\a'
+if [[ -z ${NEBULA_PROMPT_INSTALLED-} ]]; then
+    NEBULA_PROMPT_INSTALLED=1
+    __nebula_prompt_decl="$(declare -p PROMPT_COMMAND 2>/dev/null || :)"
+    if [[ $__nebula_prompt_decl == declare\ -a* ]]; then
+        __nebula_saved_prompt_kind=array
+        declare -a __nebula_saved_prompt_commands=("${PROMPT_COMMAND[@]}")
+    else
+        __nebula_saved_prompt_kind=string
+        __nebula_saved_prompt_command="${PROMPT_COMMAND-}"
+    fi
+
+    # 数组变量只给下标 0 赋值不会删除其余元素，必须先 unset，避免旧 hook
+    # 又被 Bash 原生执行一次、再被上面的组合器执行第二次。
+    unset PROMPT_COMMAND
+    PROMPT_COMMAND=__nebula_precmd
+
+    # bash >= 4.4 会在命令执行前展开 PS0。前缀保留用户原 PS0，并用
+    # Starship 同类的参数展开技巧在当前 shell 设置开始时间，不覆盖 DEBUG trap。
+    __nebula_saved_ps0="${PS0-}"
+    PS0='${NEBULA_COMMAND_START_MS:$((NEBULA_COMMAND_START_MS="$(__nebula_now_ms)",0)):0}'$'\033]133;C\a'"$__nebula_saved_ps0"
+fi
 
 # Clickable ls entries via OSC 8 hyperlinks (same mechanism as Nushell's
 # osc8 and Nebula's PowerShell Nebula-List). Guarded: only when this
@@ -804,12 +949,137 @@ pub fn win32_string<S: AsRef<OsStr> + ?Sized>(value: &S) -> Vec<u16> {
 
 #[cfg(test)]
 mod test {
-    use crate::tty::windows::{NEBULA_PROMPT_PS1, cmdline, push_escaped_arg};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    use crate::tty::windows::{
+        NEBULA_BASH_RC, NEBULA_PROMPT_PS1, cmdline, nebula_find_bash, push_escaped_arg,
+    };
     use crate::tty::{Options, Shell};
 
     #[test]
     fn powershell_cat_defaults_to_utf8() {
         assert!(NEBULA_PROMPT_PS1.contains("PSDefaultParameterValues['Get-Content:Encoding']"));
+    }
+
+    #[test]
+    fn powershell_prompt_preserves_previous_hooks_and_both_status_channels() {
+        assert!(NEBULA_PROMPT_PS1.contains("NebulaPreviousPrompt"));
+        assert!(NEBULA_PROMPT_PS1.contains("NebulaPreviousPSConsoleHostReadLine"));
+        assert!(NEBULA_PROMPT_PS1.contains("$originalDollarQuestion = $global:?"));
+        assert!(NEBULA_PROMPT_PS1.contains("$global:LASTEXITCODE = $originalLastExitCode"));
+        assert!(NEBULA_PROMPT_PS1.contains("Write-Error '' -ErrorAction Ignore"));
+        assert!(
+            !NEBULA_PROMPT_PS1.contains("return $output"),
+            "an early return would skip common $? restoration"
+        );
+    }
+
+    #[test]
+    fn bash_prompt_script_contains_composition_and_status_contracts() {
+        for required in [
+            "NEBULA_CMD_STATUS=$? NEBULA_PIPE_STATUS=(\"${PIPESTATUS[@]}\")",
+            "declare -a __nebula_saved_prompt_commands",
+            "__nebula_run_saved_prompt_command \"$cmd_status\"",
+            "return \"$cmd_status\"",
+            "__nebula_saved_ps0=\"${PS0-}\"",
+            "-v fallback=\"$default\"",
+        ] {
+            assert!(
+                NEBULA_BASH_RC.contains(required),
+                "missing Bash lifecycle contract: {required}"
+            );
+        }
+    }
+
+    fn run_bash_integration_case(prelude: &str, checks: &str) {
+        static BASH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = BASH_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(program) = nebula_find_bash() else {
+            // Git Bash is optional; structural assertions still run everywhere.
+            return;
+        };
+        let child = Command::new(program)
+            .args(["--noprofile", "--norc", "-s"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let Ok(mut child) = child else {
+            // Some Windows CI/sandbox tokens can locate Git Bash but cannot
+            // create its MSYS login session (ERROR_NO_SUCH_LOGON_SESSION).
+            return;
+        };
+        let script = format!("{prelude}\n{NEBULA_BASH_RC}\n{checks}\n");
+        child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+        let output = child.wait_with_output().expect("wait for Git Bash");
+        assert!(
+            output.status.success(),
+            "Git Bash integration failed ({}):\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn bash_prompt_composes_string_hook_and_preserves_status_pipeline_and_ps0() {
+        run_bash_integration_case(
+            r#"
+PATH=/usr/bin:/mingw64/bin:$PATH
+NEBULA_BASHRC_SOURCED=1
+HOME=/__nebula_test_missing_home__
+APPDATA=
+PROMPT_COMMAND='user_prompt_hook'
+PS0='user-ps0'
+hook_count=0
+observed_status=99
+user_prompt_hook() { observed_status=$?; hook_count=$((hook_count + 1)); PS1='user'; }
+"#,
+            r#"
+[[ "$(__nebula_setting powerline 1)" == 1 ]] || exit 10
+NEBULA_COMMAND_START_MS=0
+false
+__nebula_precmd >/dev/null
+restored=$?
+[[ $restored -eq 1 ]] || exit 11
+[[ $observed_status -eq 1 ]] || exit 12
+[[ $hook_count -eq 1 ]] || exit 13
+[[ $PS1 == *'❯ '* ]] || exit 14
+[[ $PS0 == *'user-ps0' ]] || exit 15
+[[ ${NEBULA_COMMAND_DURATION_MS-} =~ ^[0-9]+$ ]] || exit 16
+false | true
+__nebula_precmd >/dev/null
+[[ ${NEBULA_PIPE_STATUS[0]} -eq 1 && ${NEBULA_PIPE_STATUS[1]} -eq 0 ]] || exit 17
+"#,
+        );
+    }
+
+    #[test]
+    fn bash_prompt_composes_array_hooks_once_and_gives_each_original_status() {
+        run_bash_integration_case(
+            r#"
+PATH=/usr/bin:/mingw64/bin:$PATH
+NEBULA_BASHRC_SOURCED=1
+HOME=/__nebula_test_missing_home__
+APPDATA=
+declare -a PROMPT_COMMAND=('hook_one' 'hook_two')
+hook_one_count=0
+hook_two_count=0
+hook_one_status=99
+hook_two_status=99
+hook_one() { hook_one_status=$?; hook_one_count=$((hook_one_count + 1)); }
+hook_two() { hook_two_status=$?; hook_two_count=$((hook_two_count + 1)); }
+"#,
+            r#"
+false
+__nebula_precmd >/dev/null
+restored=$?
+[[ $restored -eq 1 ]] || exit 21
+[[ $hook_one_count -eq 1 && $hook_two_count -eq 1 ]] || exit 22
+[[ $hook_one_status -eq 1 && $hook_two_status -eq 1 ]] || exit 23
+[[ ${PROMPT_COMMAND-} == __nebula_precmd ]] || exit 24
+"#,
+        );
     }
 
     #[test]
