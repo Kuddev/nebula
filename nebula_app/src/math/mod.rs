@@ -3,8 +3,11 @@
 //! 该模块不依赖窗口、OpenGL 或主题类型，保证同一份布局可被不同渲染后端复用。
 
 pub(crate) mod font;
+pub(crate) mod ir;
+pub(crate) mod parser;
 pub(crate) mod validate;
 
+pub(crate) use parser::parse_formula;
 pub(crate) use validate::validate;
 
 pub(crate) const DEFAULT_LIMITS: MathLimits = MathLimits {
