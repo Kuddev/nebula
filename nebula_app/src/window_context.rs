@@ -60,6 +60,12 @@ mod split;
 /// terminal's event tag. Panes live in [`WindowContext::panes`].
 type PaneId = u64;
 
+/// Mouse buttons whose press is an interaction with terminal content and must
+/// therefore update split focus before the event is routed to a pane.
+fn pane_focus_button(button: &MouseButton) -> bool {
+    matches!(button, MouseButton::Left | MouseButton::Middle | MouseButton::Right)
+}
+
 /// Sentinel pane id for document-viewer tabs. A doc tab owns no pane and no
 /// PTY: its `Layout::Leaf(DOC_PANE_ID)` deliberately resolves to `None` in
 /// every `pane()` lookup, which is exactly the degraded behaviour those call
@@ -2194,7 +2200,10 @@ impl WindowContext {
             }
         }
 
-        // In a split, a left click moves keyboard focus to the clicked pane.
+        // In a split, a terminal-content mouse press moves keyboard focus to
+        // the clicked pane. Right-click paste and middle-click selection paste
+        // must target the pane under the pointer as well; otherwise they use
+        // the previous keyboard focus and write into a neighbouring terminal.
         // Resolve focus from the click position before routing this batch so the
         // click lands on the pane the user aimed at.
         if !matches!(self.active_layout(), Layout::Leaf(_)) {
@@ -2218,17 +2227,13 @@ impl WindowContext {
                 matches!(
                     e,
                     WinitEvent::WindowEvent {
-                        event: WindowEvent::MouseInput {
-                            state: ElementState::Pressed,
-                            button: MouseButton::Left,
-                            ..
-                        },
+                        event: WindowEvent::MouseInput { state: ElementState::Pressed, button, .. },
                         ..
-                    }
+                    } if pane_focus_button(button)
                 )
             });
-            // A left click always refocuses the clicked pane; focus-follows-mouse
-            // also refocuses on plain pointer motion.
+            // A terminal mouse press always refocuses the clicked pane;
+            // focus-follows-mouse also refocuses on plain pointer motion.
             let target = if clicked {
                 latest_pos.or(Some((self.mouse.x as f32, self.mouse.y as f32)))
             } else if ffm {
