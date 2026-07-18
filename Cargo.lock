@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "ab_glyph_rasterizer"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2136,6 +2142,7 @@ dependencies = [
 name = "nebula"
 version = "0.5.0"
 dependencies = [
+ "ab_glyph_rasterizer",
  "ahash",
  "base64",
  "bitflags 2.13.0",
@@ -2168,6 +2175,7 @@ dependencies = [
  "polling",
  "pollster",
  "pulldown-cmark",
+ "pulldown-latex",
  "russh",
  "russh-sftp",
  "serde",
@@ -2181,6 +2189,7 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit 0.24.0+spec-1.1.0",
+ "ttf-parser",
  "unicode-width",
  "wgpu",
  "windows-sys 0.59.0",
@@ -2996,6 +3005,15 @@ dependencies = [
  "bitflags 2.13.0",
  "memchr",
  "unicase",
+]
+
+[[package]]
+name = "pulldown-latex"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b8bc0583825170e3f560701d966dc2f0e3a16946da371e37d30d3ad7207fb7e"
+dependencies = [
+ "bumpalo",
 ]
 
 [[package]]
@@ -3997,6 +4015,12 @@ name = "tracing-core"
 version = "0.1.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9d12581f227e93f094d3af2ae690a574abb8a2b9b7a96e7cfe9647b2b617678"
+
+[[package]]
+name = "ttf-parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "typeid"

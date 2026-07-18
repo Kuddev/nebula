@@ -9,6 +9,14 @@ The embedded Lua 5.4 runtime is distributed under the Lua MIT license.
 The Rust binding is mlua 0.11, also distributed under the MIT license.
 Their component-specific license files are included in release packages.
 
+Native mathematical formula support uses pulldown-latex 0.7.1 under the
+MIT License, ttf-parser 0.25.1 under the MIT OR Apache-2.0 License, and
+ab_glyph_rasterizer 0.1.10 under the Apache-2.0 License.
+
+The embedded Latin Modern Math font is distributed under the GUST Font
+License 1.0. Its complete license text is included as
+licenses/LICENSE-LATIN-MODERN-MATH.
+
 ---------------------------------------------------------------------
 
                               Apache License

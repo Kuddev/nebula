@@ -46,6 +46,7 @@ mod logging;
 #[cfg(target_os = "macos")]
 mod macos;
 mod markdown;
+mod math;
 mod message_bar;
 mod migrate;
 mod motion;
