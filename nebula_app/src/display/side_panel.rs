@@ -33,6 +33,9 @@ pub struct FileRow {
     pub depth: usize,
     pub is_dir: bool,
     pub expanded: bool,
+    /// 用于切换到上级根目录的合成 `..` 行。必须显式区分，避免普通目录的
+    /// 展开、拖拽和双击逻辑把导航项误认为真实文件系统条目。
+    pub is_parent: bool,
 }
 
 /// Parsed `git status` snapshot.
@@ -389,6 +392,16 @@ impl SidePanel {
         let Some(root) = self.root.clone() else { return };
         let needle = self.search.trim().to_lowercase();
         if needle.is_empty() {
+            if let Some(parent) = root.parent() {
+                self.rows.push(FileRow {
+                    path: parent.to_path_buf(),
+                    name: "..".to_owned(),
+                    depth: 0,
+                    is_dir: true,
+                    expanded: false,
+                    is_parent: true,
+                });
+            }
             self.flatten_dir(&root, 0);
             return;
         }
@@ -601,7 +614,14 @@ impl SidePanel {
                 return;
             }
             let expanded = is_dir && self.expanded.contains(&path);
-            self.rows.push(FileRow { path: path.clone(), name, depth, is_dir, expanded });
+            self.rows.push(FileRow {
+                path: path.clone(),
+                name,
+                depth,
+                is_dir,
+                expanded,
+                is_parent: false,
+            });
             if expanded {
                 self.flatten_dir(&path, depth + 1);
             }
@@ -619,6 +639,11 @@ impl SidePanel {
             return false;
         }
         let path = row.path.clone();
+        if row.is_parent {
+            // 返回上级只改变窗口内的目录树根节点，不能连带修改终端 cwd；
+            // 用户仍可通过现有“跟随”操作回到当前终端目录。
+            return self.set_custom_root(path);
+        }
         if !self.expanded.remove(&path) {
             self.expanded.insert(path);
         }
@@ -636,7 +661,7 @@ impl SidePanel {
         }
         let matches_source = self
             .visible_row(drag.source_row)
-            .is_some_and(|row| row.is_dir && row.path == drag.path);
+            .is_some_and(|row| row.is_dir && !row.is_parent && row.path == drag.path);
         matches_source && self.click_row(drag.source_row)
     }
 
@@ -830,7 +855,14 @@ fn build_search_index(dir: &Path, depth: usize, index: &mut Vec<FileRow>, budget
             continue;
         }
         let path = entry.path();
-        index.push(FileRow { path: path.clone(), name, depth: 0, is_dir, expanded: false });
+        index.push(FileRow {
+            path: path.clone(),
+            name,
+            depth: 0,
+            is_dir,
+            expanded: false,
+            is_parent: false,
+        });
         if is_dir {
             build_search_index(&path, depth + 1, index, budget);
         }
@@ -1383,7 +1415,7 @@ pub(super) fn draw_text(
                 let ry = row_ty(i) + lift_y;
                 let mut x = px + text_pad + row.depth as f32 * cell_w * 2.4 + lift_x;
                 if !filtering {
-                    if row.is_dir {
+                    if row.is_dir && !row.is_parent {
                         let chev =
                             if row.expanded { ICON_CHEVRON_DOWN } else { ICON_CHEVRON_RIGHT };
                         r.draw_chrome_text(size, x, ry, sk.ink_faint, chev, gc);
@@ -1408,7 +1440,8 @@ pub(super) fn draw_text(
                 let name = super::truncate_tab_label(&row.name, name_cols);
                 r.draw_chrome_text(size, name_x, ry, name_ink, &name, gc);
             }
-            if panel.file_rows().is_empty() {
+            let has_real_rows = panel.file_rows().iter().any(|row| !row.is_parent);
+            if !has_real_rows {
                 let empty = if filtering {
                     crate::ux::EmptyState::new(
                         "没有匹配文件",
@@ -1428,7 +1461,13 @@ pub(super) fn draw_text(
                         "在终端创建文件，或选择其他目录。",
                     )
                 };
-                let y = layout.list_y + s(8.0);
+                let parent_row_offset = panel
+                    .file_rows()
+                    .first()
+                    .is_some_and(|row| row.is_parent)
+                    .then_some(layout.row_h)
+                    .unwrap_or(0.0);
+                let y = layout.list_y + parent_row_offset + s(8.0);
                 r.draw_chrome_text(size, px + text_pad, y, sk.ink_strong, &empty.title, gc);
                 r.draw_chrome_text(
                     size,
@@ -1717,15 +1756,42 @@ mod tests {
         p.toggle(PanelView::Files);
         assert!(p.sync(Some(base.clone())));
         let rows = p.file_rows();
-        assert_eq!(rows[0].name, "sub", "directory sorts before file");
-        assert!(rows[0].is_dir);
-        assert_eq!(rows.len(), 2, "collapsed dir hides children");
+        assert_eq!(rows[0].name, "..", "parent navigation stays at the top");
+        assert!(rows[0].is_parent);
+        assert_eq!(rows[1].name, "sub", "directory sorts before file");
+        assert!(rows[1].is_dir);
+        assert_eq!(rows.len(), 3, "collapsed dir hides children");
 
-        assert!(p.click_row(0), "clicking a dir toggles expansion");
+        assert!(p.click_row(1), "clicking a dir toggles expansion");
         let rows = p.file_rows();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[1].name, "inner.txt");
-        assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[2].name, "inner.txt");
+        assert_eq!(rows[2].depth, 1);
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn parent_row_navigates_the_tree_root_without_becoming_draggable() {
+        let base = std::env::temp_dir()
+            .join(format!("nebula-panel-parent-row-test-{}", std::process::id()));
+        let child = base.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+
+        let mut panel = SidePanel::new();
+        panel.toggle(PanelView::Files);
+        assert!(panel.sync(Some(child.clone())));
+        let parent = panel.file_rows().first().expect("parent row").clone();
+        assert_eq!(parent.name, "..");
+        assert!(parent.is_parent);
+        assert!(parent.is_dir);
+        assert_eq!(parent.path, base);
+
+        let drag = FileDrag::new(parent.path.clone(), parent.name, true, 0, (10.0, 10.0));
+        assert!(!panel.click_drag_source(&drag), "the parent row never enters drag dispatch");
+        assert!(panel.click_row(0));
+        assert_eq!(panel.root(), Some(base.as_path()));
+        assert!(panel.custom_root_active(), "upward navigation is window-local");
 
         std::fs::remove_dir_all(&base).unwrap();
     }
@@ -1740,19 +1806,19 @@ mod tests {
         let mut panel = SidePanel::new();
         panel.toggle(PanelView::Files);
         assert!(panel.sync(Some(base.clone())));
-        let drag = FileDrag::new(sub, "sub".into(), true, 0, (10.0, 10.0));
+        let drag = FileDrag::new(sub, "sub".into(), true, 1, (10.0, 10.0));
 
         assert!(panel.click_drag_source(&drag), "a non-drag release keeps directory click");
-        assert!(panel.file_rows()[0].expanded);
+        assert!(panel.file_rows()[1].expanded);
 
         let mut active = drag.clone();
         active.update_position((18.0, 10.0));
         assert!(active.active, "eight physical pixels arm the drag");
         assert!(!panel.click_drag_source(&active), "an active drag must not toggle the tree");
-        assert!(panel.file_rows()[0].expanded);
+        assert!(panel.file_rows()[1].expanded);
 
         let mut stale = drag;
-        stale.source_row = 1;
+        stale.source_row = 2;
         assert!(!panel.click_drag_source(&stale), "a changed source row must be ignored");
 
         std::fs::remove_dir_all(&base).unwrap();
