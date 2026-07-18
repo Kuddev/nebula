@@ -4,8 +4,7 @@ use std::sync::OnceLock;
 
 use ttf_parser::{Face, GlyphId};
 
-pub(crate) static FONT_BYTES: &[u8] =
-    include_bytes!("../../../assets/fonts/LatinModernMath.otf");
+pub(crate) static FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/LatinModernMath.otf");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MathFontError;
@@ -36,10 +35,7 @@ impl MathFont {
         Ok(face()?.tables().math.is_some())
     }
 
-    pub(crate) fn has_vertical_construction(
-        self,
-        character: char,
-    ) -> Result<bool, MathFontError> {
+    pub(crate) fn has_vertical_construction(self, character: char) -> Result<bool, MathFontError> {
         let glyph = self.glyph_id(character)?;
         let Some(variants) = face()?.tables().math.and_then(|math| math.variants) else {
             return Ok(false);
@@ -58,9 +54,9 @@ mod tests {
     use super::{FONT_BYTES, MathFont};
 
     const EXPECTED_SHA256: [u8; 32] = [
-        0x60, 0x75, 0x56, 0x2b, 0x77, 0x1f, 0x8b, 0x82, 0xf0, 0xc1, 0x79, 0xe3, 0x63, 0x38,
-        0x96, 0x84, 0xf2, 0xdd, 0x09, 0xde, 0x30, 0x03, 0x82, 0x69, 0xe2, 0x62, 0x8e, 0x50,
-        0x4b, 0xd7, 0xbe, 0x0f,
+        0x60, 0x75, 0x56, 0x2b, 0x77, 0x1f, 0x8b, 0x82, 0xf0, 0xc1, 0x79, 0xe3, 0x63, 0x38, 0x96,
+        0x84, 0xf2, 0xdd, 0x09, 0xde, 0x30, 0x03, 0x82, 0x69, 0xe2, 0x62, 0x8e, 0x50, 0x4b, 0xd7,
+        0xbe, 0x0f,
     ];
 
     #[test]
