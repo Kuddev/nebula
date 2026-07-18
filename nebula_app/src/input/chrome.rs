@@ -437,15 +437,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                                     .display()
                                     .nebula_side_panel
                                     .visible_row(row)
-                                    .map(|r| (r.path.clone(), r.is_dir));
+                                    .map(|r| (r.path.clone(), r.is_dir, r.is_parent));
                                 match info {
                                     None => {
+                                        self.ctx.display().nebula_side_panel.click_row(row);
+                                    },
+                                    // `..` 是导航项而非可拖拽目录，按下时立即完成；
+                                    // 这样鼠标松开阶段不会误展开切换后的新根目录。
+                                    Some((_, _, true)) => {
                                         self.ctx.display().nebula_side_panel.click_row(row);
                                     },
                                     // Directory clicks are deferred to mouse-up:
                                     // crossing the threshold turns them into a
                                     // path drag without first changing the tree.
-                                    Some((path, true)) => {
+                                    Some((path, true, false)) => {
                                         use crate::display::side_panel::FileDrag;
                                         let name = path
                                             .file_name()
@@ -457,7 +462,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                                     // Files: double-click opens with the system
                                     // handler; a single press arms a drag toward
                                     // the terminal (drop pastes the path).
-                                    Some((path, false)) => {
+                                    Some((path, false, false)) => {
                                         use crate::display::side_panel::FileDrag;
                                         let now = std::time::Instant::now();
                                         let dbl = {
