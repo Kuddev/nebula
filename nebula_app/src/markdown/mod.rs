@@ -12,6 +12,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::ops::Range;
+use std::sync::Arc;
 
 pub mod parser;
 
@@ -42,17 +43,121 @@ impl CustomWeight {
 /// A parsed Markdown document: a flat sequence of block-level lines.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FormattedText {
+    /// Markdown 源码只保留这一份共享字节；fragment 用范围引用它，避免逐层复制。
+    pub source: Arc<str>,
     pub lines: VecDeque<FormattedTextLine>,
 }
 
 impl FormattedText {
     pub fn new(lines: impl Into<VecDeque<FormattedTextLine>>) -> Self {
-        Self { lines: lines.into() }
+        Self { source: Arc::from(""), lines: lines.into() }
     }
 
     /// The document's raw text, without any of the markdown markers.
     pub fn raw_text(&self) -> String {
         self.lines.iter().map(|line| line.raw_text()).collect()
+    }
+}
+
+/// UTF-8 源码中的半开字节范围。文档输入上限在解析入口保证可用 `u32` 表示。
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct SourceRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl SourceRange {
+    pub fn new(range: Range<usize>) -> Option<Self> {
+        Some(Self { start: range.start.try_into().ok()?, end: range.end.try_into().ok()? })
+    }
+
+    pub fn as_usize(self) -> Range<usize> {
+        self.start as usize..self.end as usize
+    }
+}
+
+/// 绝大多数内容引用 Markdown 源码；只有实体解码、软换行等合成文本单独分配。
+#[derive(Clone, Debug)]
+pub enum TextRef {
+    Source { source: Arc<str>, range: SourceRange },
+    Generated(Box<str>),
+}
+
+impl Default for TextRef {
+    fn default() -> Self {
+        Self::Generated(Box::default())
+    }
+}
+
+impl PartialEq for TextRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for TextRef {}
+
+impl TextRef {
+    pub fn source(source: Arc<str>, range: Range<usize>) -> Option<Self> {
+        let range = SourceRange::new(range)?;
+        source.get(range.as_usize())?;
+        Some(Self::Source { source, range })
+    }
+
+    pub fn generated(text: impl Into<Box<str>>) -> Self {
+        Self::Generated(text.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Source { source, range } => &source[range.as_usize()],
+            Self::Generated(text) => text,
+        }
+    }
+
+    /// 只合并同一源码中的连续范围；跨 Markdown 标记的内容保持独立，避免错误扩大范围。
+    fn append(&mut self, next: Self) -> Result<(), Self> {
+        match (self, next) {
+            (
+                Self::Source { source, range },
+                Self::Source { source: next_source, range: next_range },
+            ) if Arc::ptr_eq(source, &next_source) && range.end == next_range.start => {
+                range.end = next_range.end;
+                Ok(())
+            },
+            (slot @ Self::Generated(_), Self::Generated(next)) => {
+                let mut combined = String::from(slot.as_str());
+                combined.push_str(&next);
+                *slot = Self::Generated(combined.into_boxed_str());
+                Ok(())
+            },
+            // 实体解码或反斜杠转义会在同样式文本中留下源码间隙；此时只合成这一小段，
+            // 既保持旧的 fragment 合并语义，也不扩大 range 到 Markdown 标记字节。
+            (slot, next) => {
+                let mut combined = String::from(slot.as_str());
+                combined.push_str(next.as_str());
+                *slot = Self::Generated(combined.into_boxed_str());
+                Ok(())
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MathMode {
+    Inline,
+    Display,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MathSource {
+    pub source: TextRef,
+    pub mode: MathMode,
+}
+
+impl MathSource {
+    pub fn as_str(&self) -> &str {
+        self.source.as_str()
     }
 }
 
@@ -69,16 +174,20 @@ pub enum FormattedTextLine {
     HorizontalRule,
     Image(FormattedImage),
     Table(FormattedTable),
+    DisplayMath(MathSource),
     /// A block nested inside `depth` levels of `>` quoting. Quoting wraps the
     /// inner block instead of forking every variant, so the flat list (and
     /// the virtual scroller's block indexing) survives.
-    Quote { depth: usize, line: Box<FormattedTextLine> },
+    Quote {
+        depth: usize,
+        line: Box<FormattedTextLine>,
+    },
 }
 
 impl FormattedTextLine {
     pub fn raw_text(&self) -> String {
         let join = |inline: &FormattedTextInline| -> String {
-            inline.iter().map(|fragment| fragment.text.as_str()).collect()
+            inline.iter().map(FormattedTextFragment::text).collect()
         };
         let mut text = match self {
             Self::CodeBlock(text) => text.code.clone(),
@@ -90,6 +199,7 @@ impl FormattedTextLine {
             Self::LineBreak | Self::HorizontalRule => "\n".to_string(),
             Self::Image(image) => format!("{}\n", image.alt_text),
             Self::Table(table) => table.to_plain_text(),
+            Self::DisplayMath(math) => math.as_str().to_owned(),
             Self::Quote { line, .. } => line.raw_text(),
         };
         // Each `FormattedTextLine` unit represents a complete line.
@@ -111,7 +221,8 @@ impl FormattedTextLine {
             | FormattedTextLine::LineBreak
             | FormattedTextLine::HorizontalRule
             | FormattedTextLine::Image(_)
-            | FormattedTextLine::Table(_) => None,
+            | FormattedTextLine::Table(_)
+            | FormattedTextLine::DisplayMath(_) => None,
         }
     }
 
@@ -123,7 +234,7 @@ impl FormattedTextLine {
             let mut char_count = 0;
             for fragment in inline_fragments {
                 let range_start = char_count;
-                char_count += fragment.text.chars().count();
+                char_count += fragment.text().chars().count();
                 if let Some(Hyperlink::Url(url)) = &fragment.styles.hyperlink {
                     hyperlinks.push((range_start..char_count, url.clone()));
                 }
@@ -196,7 +307,7 @@ impl FormattedTable {
     /// Serialize to GFM pipe-table markdown (used for raw-text extraction).
     pub fn to_plain_text(&self) -> String {
         fn inline_to_text(inline: &FormattedTextInline) -> String {
-            inline.iter().map(|f| f.text.as_str()).collect()
+            inline.iter().map(FormattedTextFragment::text).collect()
         }
 
         let mut lines = Vec::new();
@@ -222,10 +333,22 @@ impl FormattedTable {
 
 pub type FormattedTextInline = Vec<FormattedTextFragment>;
 
-/// A fragment of formatted text: the text itself plus formatting flags.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum FragmentContent {
+    Text(TextRef),
+    Math(MathSource),
+}
+
+impl Default for FragmentContent {
+    fn default() -> Self {
+        Self::Text(TextRef::default())
+    }
+}
+
+/// A fragment of formatted text or an inline mathematical object plus formatting flags.
 #[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub struct FormattedTextFragment {
-    pub text: String,
+    pub content: FragmentContent,
     pub styles: FormattedTextStyles,
 }
 
@@ -249,29 +372,26 @@ pub struct FormattedTextStyles {
 
 impl FormattedTextFragment {
     pub fn plain_text(text: impl Into<String>) -> Self {
-        Self { text: text.into(), styles: Default::default() }
+        Self::from_generated(text, Default::default())
     }
 
     pub fn bold(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
-            styles: FormattedTextStyles {
-                weight: Some(CustomWeight::Bold),
-                ..Default::default()
-            },
+            content: FragmentContent::Text(TextRef::generated(text.into().into_boxed_str())),
+            styles: FormattedTextStyles { weight: Some(CustomWeight::Bold), ..Default::default() },
         }
     }
 
     pub fn italic(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
+            content: FragmentContent::Text(TextRef::generated(text.into().into_boxed_str())),
             styles: FormattedTextStyles { italic: true, ..Default::default() },
         }
     }
 
     pub fn hyperlink(tag: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
-            text: tag.into(),
+            content: FragmentContent::Text(TextRef::generated(tag.into().into_boxed_str())),
             styles: FormattedTextStyles {
                 hyperlink: Some(Hyperlink::Url(url.into())),
                 ..Default::default()
@@ -281,9 +401,40 @@ impl FormattedTextFragment {
 
     pub fn inline_code(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
+            content: FragmentContent::Text(TextRef::generated(text.into().into_boxed_str())),
             styles: FormattedTextStyles { inline_code: true, ..Default::default() },
         }
+    }
+
+    pub fn from_text(text: TextRef, styles: FormattedTextStyles) -> Self {
+        Self { content: FragmentContent::Text(text), styles }
+    }
+
+    pub fn math(source: MathSource, styles: FormattedTextStyles) -> Self {
+        Self { content: FragmentContent::Math(source), styles }
+    }
+
+    pub fn text(&self) -> &str {
+        match &self.content {
+            FragmentContent::Text(text) => text.as_str(),
+            FragmentContent::Math(math) => math.as_str(),
+        }
+    }
+
+    pub fn is_math(&self) -> bool {
+        matches!(self.content, FragmentContent::Math(_))
+    }
+
+    pub(crate) fn append_text(&mut self, text: TextRef) -> Result<(), TextRef> {
+        match &mut self.content {
+            FragmentContent::Text(current) => current.append(text),
+            FragmentContent::Math(_) => Err(text),
+        }
+    }
+
+    fn from_generated(text: impl Into<String>, styles: FormattedTextStyles) -> Self {
+        let text = text.into().into_boxed_str();
+        Self { content: FragmentContent::Text(TextRef::generated(text)), styles }
     }
 }
 
