@@ -852,10 +852,23 @@ impl WindowContext {
 
 #[cfg(test)]
 mod resize_layout_tests {
+    use winit::event::MouseButton;
+
     use nebula_terminal::grid::Dimensions;
 
     use super::{Layout, collect_layout, pane_viewport_contains, terminal_content_rect};
     use crate::display::{SizeInfo, SplitDirection};
+    use crate::window_context::pane_focus_button;
+
+    #[test]
+    fn all_terminal_mouse_buttons_move_split_focus_before_routing() {
+        assert!(pane_focus_button(&MouseButton::Left));
+        assert!(pane_focus_button(&MouseButton::Middle));
+        assert!(pane_focus_button(&MouseButton::Right));
+        assert!(!pane_focus_button(&MouseButton::Back));
+        assert!(!pane_focus_button(&MouseButton::Forward));
+        assert!(!pane_focus_button(&MouseButton::Other(8)));
+    }
 
     #[test]
     fn pane_layout_keeps_message_bar_rows_out_of_the_pty_viewport() {
