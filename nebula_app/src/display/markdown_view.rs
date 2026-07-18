@@ -262,7 +262,7 @@ fn wrap_inline(inline: &FormattedTextInline, max_cols: usize) -> Vec<Vec<Span>> 
         .iter()
         .enumerate()
         .flat_map(|(frag, fragment)| {
-            fragment.text.chars().map(move |ch| WrapChar {
+            fragment.text().chars().map(move |ch| WrapChar {
                 ch,
                 frag,
                 cols: ch.width().unwrap_or(0).max(1),
@@ -439,6 +439,14 @@ impl LayoutCtx<'_> {
                 }
                 self.y += ch * 0.5;
             },
+            // 原生数学布局接入前保留确定的源码回退，解析失败也不会吞掉文档内容。
+            FormattedTextLine::DisplayMath(math) => {
+                self.y += ch * 0.35;
+                let mut span = Span::label(math.as_str(), false);
+                span.code = true;
+                self.push(ch * BODY_LINE, indent, 1.0, vec![span], decor);
+                self.y += ch * 0.5;
+            },
             FormattedTextLine::UnorderedList(list) => {
                 self.list_item(&list.text, list.indent_level, "•  ", quote_depth, extra_indent);
             },
@@ -546,7 +554,11 @@ impl LayoutCtx<'_> {
     fn table(&mut self, table: &crate::markdown::FormattedTable, quote_depth: usize, indent: f32) {
         let ch = self.cell_h;
         let inline_cols = |inline: &FormattedTextInline| -> usize {
-            inline.iter().flat_map(|f| f.text.chars()).map(|c| c.width().unwrap_or(0).max(1)).sum()
+            inline
+                .iter()
+                .flat_map(|f| f.text().chars())
+                .map(|c| c.width().unwrap_or(0).max(1))
+                .sum()
         };
         let col_count =
             table.headers.len().max(table.rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
@@ -603,7 +615,7 @@ fn cell_spans(
     let mut used = 0usize;
     if let Some(inline) = cell {
         'outer: for (frag, fragment) in inline.iter().enumerate() {
-            for ch in fragment.text.chars() {
+            for ch in fragment.text().chars() {
                 let cols = ch.width().unwrap_or(0).max(1);
                 if used + cols > width {
                     // No room left: truncate with an ellipsis if one fits.

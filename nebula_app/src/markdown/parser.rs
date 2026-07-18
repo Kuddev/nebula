@@ -6,15 +6,16 @@
 //! This file owns ONLY the event folding. The AST lives in `super`, the
 //! on-screen layout (wrapping, virtual scrolling) in `display::markdown_view`.
 
-use pulldown_cmark::{
-    Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd,
-};
+use std::ops::Range;
+use std::sync::Arc;
+
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use super::{
     CodeBlockText, CustomWeight, FormattedImage, FormattedIndentTextInline, FormattedTable,
     FormattedTaskList, FormattedText, FormattedTextFragment, FormattedTextHeader,
-    FormattedTextInline, FormattedTextLine, FormattedTextStyles, Hyperlink,
-    OrderedFormattedIndentTextInline, TableAlignment,
+    FormattedTextInline, FormattedTextLine, FormattedTextStyles, Hyperlink, MathMode, MathSource,
+    OrderedFormattedIndentTextInline, TableAlignment, TextRef,
 };
 
 /// Parse a Markdown document. GFM tables, task lists and strikethrough are
@@ -25,10 +26,11 @@ pub fn parse_markdown(text: &str) -> FormattedText {
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
+    options.insert(Options::ENABLE_MATH);
 
-    let mut fold = Fold::default();
-    for event in Parser::new_ext(text, options) {
-        fold.event(event);
+    let mut fold = Fold::new(Arc::from(text));
+    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        fold.event(event, range);
     }
     fold.finish()
 }
@@ -55,8 +57,8 @@ struct TableFold {
 }
 
 /// Event-stream folding state. One instance per document.
-#[derive(Default)]
 struct Fold {
+    source: Arc<str>,
     out: Vec<FormattedTextLine>,
     /// Inline run being collected for the current paragraph / heading / list
     /// item / table cell.
@@ -83,7 +85,27 @@ struct Fold {
 }
 
 impl Fold {
-    fn event(&mut self, event: Event<'_>) {
+    fn new(source: Arc<str>) -> Self {
+        Self {
+            source,
+            out: Vec::new(),
+            inline: Vec::new(),
+            strong: 0,
+            emphasis: 0,
+            strike: 0,
+            links: Vec::new(),
+            list_stack: Vec::new(),
+            pending_item: None,
+            quote_depth: 0,
+            heading: None,
+            code: None,
+            table: None,
+            image: None,
+            in_metadata: false,
+        }
+    }
+
+    fn event(&mut self, event: Event<'_>, range: Range<usize>) {
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
@@ -96,22 +118,24 @@ impl Fold {
                 } else if let Some(image) = &mut self.image {
                     image.alt_text.push_str(&text);
                 } else {
-                    self.push_text(&text, false);
+                    self.push_source_text(range, &text, false);
                 }
             },
             Event::Code(text) => {
                 if let Some(image) = &mut self.image {
                     image.alt_text.push_str(&text);
                 } else {
-                    self.push_text(&text, true);
+                    self.push_source_text(range, &text, true);
                 }
             },
             // The viewer renders HTML as the literal text the author wrote.
-            Event::Html(html) | Event::InlineHtml(html) => self.push_text(&html, false),
-            Event::SoftBreak => self.push_text(" ", false),
+            Event::Html(html) | Event::InlineHtml(html) => {
+                self.push_source_text(range, &html, false)
+            },
+            Event::SoftBreak => self.push_generated_text(" ", false),
             // A hard break stays inside the paragraph block: the layout pass
             // turns embedded '\n' into a forced visual line break.
-            Event::HardBreak => self.push_text("\n", false),
+            Event::HardBreak => self.push_generated_text("\n", false),
             Event::Rule => {
                 self.flush_inline_as_paragraph();
                 self.push_block(FormattedTextLine::HorizontalRule);
@@ -122,10 +146,23 @@ impl Fold {
                 }
             },
             Event::FootnoteReference(name) => {
-                self.push_text(&format!("[^{name}]"), false);
+                self.push_generated_text(&format!("[^{name}]"), false);
             },
-            Event::InlineMath(math) | Event::DisplayMath(math) => {
-                self.push_text(&math, true);
+            Event::InlineMath(math) => {
+                let source = self.source_ref(range, &math);
+                let styles = self.current_styles(false);
+                self.inline.push(FormattedTextFragment::math(
+                    MathSource { source, mode: MathMode::Inline },
+                    styles,
+                ));
+            },
+            Event::DisplayMath(math) => {
+                let source = self.source_ref(range, &math);
+                self.flush_inline_as_paragraph();
+                self.push_block(FormattedTextLine::DisplayMath(MathSource {
+                    source,
+                    mode: MathMode::Display,
+                }));
             },
         }
     }
@@ -147,11 +184,9 @@ impl Fold {
                 self.flush_pending_item();
                 self.flush_inline_as_paragraph();
                 let lang = match kind {
-                    CodeBlockKind::Fenced(info) => info
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or_default()
-                        .to_owned(),
+                    CodeBlockKind::Fenced(info) => {
+                        info.split_whitespace().next().unwrap_or_default().to_owned()
+                    },
                     CodeBlockKind::Indented => String::new(),
                 };
                 let lang = if lang.is_empty() { "text".to_owned() } else { lang };
@@ -305,25 +340,56 @@ impl Fold {
 
     /// Append text to the current inline run under the active styles,
     /// merging into the previous fragment when the styles are identical.
-    fn push_text(&mut self, text: &str, inline_code: bool) {
-        if text.is_empty() || self.in_metadata {
+    fn push_source_text(&mut self, range: Range<usize>, text: &str, inline_code: bool) {
+        let text = self.source_ref(range, text);
+        self.push_text_ref(text, inline_code);
+    }
+
+    fn push_generated_text(&mut self, text: &str, inline_code: bool) {
+        self.push_text_ref(TextRef::generated(text.to_owned().into_boxed_str()), inline_code);
+    }
+
+    fn push_text_ref(&mut self, text: TextRef, inline_code: bool) {
+        if text.as_str().is_empty() || self.in_metadata {
             return;
         }
-        let styles = FormattedTextStyles {
+        let styles = self.current_styles(inline_code);
+        let text = if let Some(last) = self.inline.last_mut() {
+            if last.styles == styles {
+                match last.append_text(text) {
+                    Ok(()) => return,
+                    Err(text) => text,
+                }
+            } else {
+                text
+            }
+        } else {
+            text
+        };
+        self.inline.push(FormattedTextFragment::from_text(text, styles));
+    }
+
+    fn current_styles(&self, inline_code: bool) -> FormattedTextStyles {
+        FormattedTextStyles {
             weight: (self.strong > 0).then_some(CustomWeight::Bold),
             italic: self.emphasis > 0,
             underline: false,
             strikethrough: self.strike > 0,
             inline_code,
             hyperlink: self.links.last().map(|url| Hyperlink::Url(url.clone())),
-        };
-        if let Some(last) = self.inline.last_mut() {
-            if last.styles == styles {
-                last.text.push_str(text);
-                return;
-            }
         }
-        self.inline.push(FormattedTextFragment { text: text.to_owned(), styles });
+    }
+
+    fn source_ref(&self, outer: Range<usize>, rendered: &str) -> TextRef {
+        let source_range = self.source.get(outer.clone()).and_then(|outer_text| {
+            outer_text.find(rendered).map(|offset| {
+                let start = outer.start + offset;
+                start..start + rendered.len()
+            })
+        });
+        source_range
+            .and_then(|range| TextRef::source(self.source.clone(), range))
+            .unwrap_or_else(|| TextRef::generated(rendered.to_owned().into_boxed_str()))
     }
 
     /// Emit the pending inline run as a plain paragraph block, if any.
@@ -346,8 +412,7 @@ impl Fold {
                 text,
             }),
             None => {
-                let indented_text =
-                    FormattedIndentTextInline { indent_level: item.depth, text };
+                let indented_text = FormattedIndentTextInline { indent_level: item.depth, text };
                 match item.number {
                     Some(number) => {
                         FormattedTextLine::OrderedList(OrderedFormattedIndentTextInline {
@@ -374,13 +439,14 @@ impl Fold {
 
     fn finish(mut self) -> FormattedText {
         self.flush_inline_as_paragraph();
-        FormattedText { lines: self.out.into() }
+        FormattedText { source: self.source, lines: self.out.into() }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown::{FragmentContent, MathMode, TextRef};
 
     fn parse(text: &str) -> Vec<FormattedTextLine> {
         parse_markdown(text).lines.into_iter().collect()
@@ -388,6 +454,39 @@ mod tests {
 
     fn plain(text: &str) -> FormattedTextFragment {
         FormattedTextFragment::plain_text(text)
+    }
+
+    #[test]
+    fn math_events_keep_mode_and_utf8_source_ranges() {
+        let document = parse_markdown("中文 $x^2$\n\n$$\\frac{1}{2}$$");
+        let FormattedTextLine::Line(inline) = &document.lines[0] else {
+            panic!("expected paragraph");
+        };
+        let FragmentContent::Math(inline_math) = &inline[1].content else {
+            panic!("expected inline math fragment: {:?}", inline[1]);
+        };
+        assert_eq!(inline_math.mode, MathMode::Inline);
+        assert_eq!(inline_math.source.as_str(), "x^2");
+
+        let FormattedTextLine::DisplayMath(display_math) = &document.lines[1] else {
+            panic!("expected display math block: {:?}", document.lines[1]);
+        };
+        assert_eq!(display_math.mode, MathMode::Display);
+        assert_eq!(display_math.source.as_str(), r"\frac{1}{2}");
+
+        let TextRef::Source { source, range } = &inline_math.source else {
+            panic!("math source should point into the document");
+        };
+        assert!(std::sync::Arc::ptr_eq(source, &document.source));
+        assert_eq!(&document.source[range.as_usize()], "x^2");
+    }
+
+    #[test]
+    fn escaped_dollars_and_code_do_not_become_math() {
+        let document = parse_markdown(r"escaped \$x$ and `$code$`");
+        let FormattedTextLine::Line(inline) = &document.lines[0] else { panic!() };
+        assert!(inline.iter().all(|fragment| !fragment.is_math()));
+        assert_eq!(document.raw_text().trim_end(), "escaped $x$ and $code$");
     }
 
     #[test]
@@ -410,7 +509,7 @@ mod tests {
         assert_eq!(inline[4], plain(" "));
         assert_eq!(inline[5], FormattedTextFragment::inline_code("code"));
         assert!(inline[7].styles.strikethrough);
-        assert_eq!(inline[7].text, "gone");
+        assert_eq!(inline[7].text(), "gone");
     }
 
     #[test]
@@ -507,7 +606,7 @@ mod tests {
         // A hard break stays inside one paragraph as an embedded newline.
         let lines = parse("one  \ntwo");
         let FormattedTextLine::Line(inline) = &lines[0] else { panic!() };
-        let text: String = inline.iter().map(|f| f.text.as_str()).collect();
+        let text: String = inline.iter().map(FormattedTextFragment::text).collect();
         assert_eq!(text, "one\ntwo");
     }
 
@@ -545,6 +644,6 @@ mod tests {
         let lines = parse("a &amp; b");
         let FormattedTextLine::Line(inline) = &lines[0] else { panic!() };
         assert_eq!(inline.len(), 1);
-        assert_eq!(inline[0].text, "a & b");
+        assert_eq!(inline[0].text(), "a & b");
     }
 }
