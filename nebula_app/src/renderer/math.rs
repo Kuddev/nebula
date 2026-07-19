@@ -195,8 +195,12 @@ impl MathRenderer {
                     }
                 },
             };
-            let x = origin_x + op.x + glyph.left as f32;
-            let y = baseline_y + op.baseline_y - glyph.top as f32;
+            // The atlas already contains antialiased coverage. Sampling it
+            // again from fractional screen coordinates softens every edge a
+            // second time, so snap only the final bitmap origin while keeping
+            // TeX advances and rule geometry at full precision.
+            let x = (origin_x + op.x + glyph.left as f32).round();
+            let y = (baseline_y + op.baseline_y - glyph.top as f32).round();
             self.push_clipped_quad(size, x, y, glyph, clip);
         }
         self.flush(size, color);

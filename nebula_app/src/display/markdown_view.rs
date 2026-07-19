@@ -59,6 +59,9 @@ const OVERSCAN_LINES: usize = 8;
 /// Body line height, in cell heights.
 const BODY_LINE: f32 = 1.55;
 const CODE_LINE: f32 = 1.4;
+/// Below this size a fitted formula stops being readable; the existing
+/// source-text fallback then wraps it normally instead of clipping tiny ink.
+const MIN_FITTED_MATH_PX: f32 = 6.0;
 /// Per-level indent of lists and quotes, in px.
 const LIST_INDENT: f32 = 26.0;
 const QUOTE_INDENT: f32 = 20.0;
@@ -84,6 +87,8 @@ struct Span {
     text: String,
     cols: usize,
     bold: bool,
+    /// Use strong theme ink without selecting a synthetic bold font face.
+    strong_ink: bool,
     italic: bool,
     strike: bool,
     code: bool,
@@ -418,7 +423,19 @@ fn wrap_inline_with_math(
                     pixels_per_point,
                     false,
                     cache,
-                );
+                )
+                .and_then(|run| {
+                    fit_math_run(
+                        source.clone(),
+                        run,
+                        current_id,
+                        pixel_size,
+                        pixels_per_point,
+                        false,
+                        max_width,
+                        cache,
+                    )
+                });
                 match run {
                     Some(run) => {
                         let width = run.metrics.width;
@@ -500,6 +517,31 @@ fn measure_math(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn fit_math_run(
+    source: MathSource,
+    run: MathRun,
+    formula_id: u64,
+    pixel_size: f32,
+    pixels_per_point: f32,
+    display: bool,
+    max_width: f32,
+    cache: &mut MathLayoutCache,
+) -> Option<MathRun> {
+    if run.advance_width <= max_width {
+        return Some(run);
+    }
+
+    // Math layout is linear in pixel size. Leave a small rounding margin so
+    // the rightmost antialiasing pixel stays inside the reading column.
+    let fitted_size = pixel_size * (max_width / run.advance_width) * 0.98;
+    if fitted_size < MIN_FITTED_MATH_PX {
+        return None;
+    }
+    measure_math(source, formula_id, fitted_size, pixels_per_point, display, cache)
+        .filter(|fitted| fitted.advance_width <= max_width)
+}
+
 /// Regroup a wrapped char slice back into style spans. Trailing spaces are
 /// dropped (they carry no width at a break point); leading whitespace stays —
 /// code lines depend on their indentation.
@@ -528,6 +570,7 @@ impl Span {
             text: String::new(),
             cols: 0,
             bold: styles.weight.is_some_and(|weight| weight.is_at_least_bold()),
+            strong_ink: false,
             italic: styles.italic,
             strike: styles.strikethrough,
             code: styles.inline_code,
@@ -556,6 +599,7 @@ impl Span {
             text: String::new(),
             cols: 0,
             bold: false,
+            strong_ink: false,
             italic: false,
             strike: false,
             code: false,
@@ -573,6 +617,7 @@ impl Span {
             text,
             cols,
             bold: false,
+            strong_ink: false,
             italic: false,
             strike: false,
             code: false,
@@ -673,7 +718,11 @@ impl LayoutCtx<'_> {
                 let count = wrapped.len();
                 for (i, mut spans) in wrapped.into_iter().enumerate() {
                     for span in &mut spans {
-                        span.bold = true;
+                        // Windows synthesizes bold when only the bundled
+                        // Regular CJK face is available. Complex glyphs then
+                        // develop visibly uneven strokes, so headings keep the
+                        // real Regular outline and use strong theme ink.
+                        span.strong_ink = true;
                     }
                     let mut decor = decor;
                     // Typora-style underline on H1/H2, on the last wrap line.
@@ -746,14 +795,28 @@ impl LayoutCtx<'_> {
                 self.y += ch * 0.35;
                 let formula_id = self.next_formula_id;
                 self.next_formula_id = self.next_formula_id.wrapping_add(1);
-                if let Some(run) = measure_math(
+                let max_math_width = (self.content_w - indent).max(self.cell_w * 4.0);
+                let run = measure_math(
                     math.clone(),
                     formula_id,
                     self.font_pixel_size,
                     self.pixels_per_point,
                     true,
                     self.math_cache,
-                ) {
+                )
+                .and_then(|run| {
+                    fit_math_run(
+                        math.clone(),
+                        run,
+                        formula_id,
+                        self.font_pixel_size,
+                        self.pixels_per_point,
+                        true,
+                        max_math_width,
+                        self.math_cache,
+                    )
+                });
+                if let Some(run) = run {
                     let top_pad = ch * 0.45;
                     let bottom_pad = ch * 0.45;
                     let baseline = top_pad + run.metrics.height;
@@ -1353,7 +1416,7 @@ pub fn draw(
                 skin.ink_strong
             } else if span.faint {
                 skin.ink_faint
-            } else if span.bold {
+            } else if span.bold || span.strong_ink {
                 skin.ink_strong
             } else if span.italic {
                 skin.ink_dim
@@ -1558,6 +1621,20 @@ mod tests {
     }
 
     #[test]
+    fn oversized_inline_math_is_fitted_before_it_can_cross_the_column() {
+        let parsed = crate::markdown::parse_markdown(r"before $\frac{a+b+c+d+e}{x+y+z+w+q}$ after");
+        let FormattedTextLine::Line(inline) = &parsed.lines[0] else { panic!() };
+        let mut cache = MathLayoutCache::default();
+        let mut formula_id = 0;
+        let max_width = 96.0;
+        let lines =
+            wrap_inline_with_math(inline, max_width, 8.0, &mut formula_id, 16.0, 1.0, &mut cache);
+
+        assert!(lines.iter().flatten().any(|span| span.math.is_some()));
+        assert!(lines.iter().all(|line| { line_width_for_test(line, 8.0) <= max_width }));
+    }
+
+    #[test]
     fn display_math_uses_real_height_and_centers_in_the_column() {
         let markdown = "$$\\frac{x+1}{\\sqrt{y}}$$";
         let mut doc = DocView {
@@ -1577,6 +1654,25 @@ mod tests {
         assert!(line.math_baseline.is_some());
         assert!(line.h > 16.0);
         assert!(line.spans[0].math.is_some());
+    }
+
+    #[test]
+    fn headings_use_strong_ink_without_forcing_synthetic_cjk_bold() {
+        let mut doc = DocView {
+            path: PathBuf::from("heading.md"),
+            title: "heading.md".into(),
+            blocks: crate::markdown::parse_markdown("# 微积分").lines.into_iter().collect(),
+            visual: Vec::new(),
+            wrap_key: WrapKey::default(),
+            scroll: 0.0,
+            content_h: 0.0,
+            math_cache: MathLayoutCache::default(),
+        };
+        doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
+        let span = &doc.visual[0].spans[0];
+
+        assert!(span.strong_ink);
+        assert!(!span.bold);
     }
 
     #[test]
@@ -1655,6 +1751,65 @@ mod tests {
         let layout = doc.math_cache.get(key).expect("layout cached during measurement");
         assert!(!layout.glyphs.is_empty());
         assert!(!layout.text.is_empty());
+    }
+
+    #[test]
+    fn auxiliary_angle_formula_with_blank_rows_and_prose_uses_native_layout() {
+        let markdown = concat!(
+            "#### 辅助角公式\n\n",
+            "$$\n",
+            r"\sin x + \cos x = \sqrt{2} \sin(x + \frac{\pi}{4}) \\",
+            "\n\n",
+            r"\sin x + \cos x = \sqrt{2} \cos(x - \frac{\pi}{4}) \\",
+            "\n\n",
+            r"a \sin x + b \cos x = \sqrt{a^2 + b^2} \cos(x - \varphi) \quad ",
+            r"\left(b > 0, \varphi \in \left(-\frac{\pi}{2}, \frac{\pi}{2}\right), ",
+            r"\tan \varphi = \frac{a}{b}\right)",
+            "\n\n",
+            r"这里使用了和角公式：\\",
+            "\n",
+            r"\sin(a + b) = \sin a \cos b + \cos a \sin b\\",
+            "\n",
+            r"将 a = x 和 b = \frac{\pi}{4} 代入，因为 ",
+            r"\sin\frac{\pi}{4} = \cos\frac{\pi}{4} = \frac{\sqrt{2}}{2}，所以：\\",
+            "\n",
+            r"\sin(a+\frac{\pi}{4})= \sin x \cdot \frac{\sqrt{2}}{2} ",
+            r"+ \cos x \cdot \frac{\sqrt{2}}{2}\\",
+            "\n",
+            r"= \frac{\sqrt{2}}{2}(\sin x + \cos x)\\",
+            "\n",
+            r"(\sin x + \cos x) = \sqrt{2}\sin\left(x + \frac{\pi}{4}\right) \\",
+            "\n",
+            "同时乘以根号 2 即可得出\n",
+            "$$",
+        );
+        let mut doc = DocView {
+            path: PathBuf::from("auxiliary-angle.md"),
+            title: "auxiliary-angle.md".into(),
+            blocks: crate::markdown::parse_markdown(markdown).lines.into_iter().collect(),
+            visual: Vec::new(),
+            wrap_key: WrapKey::default(),
+            scroll: 0.0,
+            content_h: 0.0,
+            math_cache: MathLayoutCache::default(),
+        };
+        doc.relayout(860.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
+
+        assert!(
+            doc.visual.iter().any(|line| {
+                line.center_math && line.spans.iter().any(|span| span.math.is_some())
+            })
+        );
+        assert!(
+            doc.visual
+                .iter()
+                .all(|line| { !line.spans.iter().any(|span| span.text.starts_with("$$")) })
+        );
+        assert!(doc.visual.iter().all(|line| {
+            line.spans
+                .iter()
+                .all(|span| span.math.as_ref().is_none_or(|run| run.advance_width <= 860.0))
+        }));
     }
 
     #[test]
