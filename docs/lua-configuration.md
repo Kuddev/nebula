@@ -1,9 +1,8 @@
 # Nebula Lua Configuration
 
-Nebula uses vendored Lua 5.4 for programmable configuration. The API follows
-the productive shape of WezTerm's configuration experience, but it is a
-Nebula API rather than a compatibility layer: use `require 'nebula'`, and do
-not expect an existing `.wezterm.lua` to run unchanged.
+Nebula uses vendored Lua 5.4 for programmable configuration. It provides a
+native Nebula API rather than a compatibility layer: use `require 'nebula'`
+and generate a configuration with `nebula config init`.
 
 Lua configuration is executable local code. Only use configuration files and
 modules that you trust. Nebula does not download or execute remote

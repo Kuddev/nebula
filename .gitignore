@@ -29,6 +29,7 @@ tocodex-docs/
 /docs/nebula-command-center-and-unique-features.md
 /docs/nebula-ui-quality-audit.md
 /docs/wgpu-renderer-and-motion-plan.md
+/TASKS.md
 
 # Secrets / credentials / environment — must never be committed
 .env

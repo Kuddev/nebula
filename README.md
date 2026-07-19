@@ -399,7 +399,6 @@ Nebula 内置 Lua 5.4，使用 `require 'nebula'` 与
 路径优先级、Windows/Linux 位置、数组、模块与重载说明见
 [Lua 配置指南](docs/lua-configuration.md)。
 
-Nebula 的目标用户、核心场景，以及相对 Warp、kitty、Tabby、WezTerm 的取舍，
 ### 🧩 技术栈
 
 | 层级 | 技术 |
