@@ -25,8 +25,13 @@ use nebula_terminal::term::cell::Flags;
 use unicode_width::UnicodeWidthChar;
 
 use crate::markdown::{
-    self, FormattedTextFragment, FormattedTextInline, FormattedTextLine, TableAlignment,
+    self, FormattedTextFragment, FormattedTextInline, FormattedTextLine, FragmentContent,
+    MathSource, TableAlignment,
 };
+use crate::math::cache::{FormulaCacheKey, MathLayoutCache};
+use crate::math::layout::{MathMetrics, layout_formula};
+use crate::math::{DEFAULT_LIMITS, parse_formula};
+use crate::renderer::math::MathClip;
 use crate::renderer::ui::UiQuad;
 use crate::renderer::{GlyphCache, Renderer};
 
@@ -69,6 +74,9 @@ struct VisualLine {
     scale: f32,
     spans: Vec<Span>,
     decor: Decor,
+    /// 公式行使用显式基线；纯文本保持原来的垂直居中路径。
+    math_baseline: Option<f32>,
+    center_math: bool,
 }
 
 /// Style-resolved run of text within one visual line.
@@ -85,6 +93,30 @@ struct Span {
     /// Source fragment index, so wrapping can regroup chars back into spans
     /// (`usize::MAX` for synthesized labels like bullets and padding).
     frag_key: usize,
+    math: Option<MathRun>,
+}
+
+#[derive(Clone)]
+struct MathRun {
+    source: MathSource,
+    formula_id: u64,
+    pixel_size: f32,
+    pixels_per_point: f32,
+    display: bool,
+    metrics: MathMetrics,
+    advance_width: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct WrapKey {
+    content_width: u32,
+    cell_width: u32,
+    cell_height: u32,
+    text_advance: u32,
+    font_pixel_size: u32,
+    pixels_per_point: u32,
+    text_ascent: u32,
+    scale: u32,
 }
 
 /// Non-text decoration of a visual line.
@@ -110,11 +142,12 @@ pub struct DocView {
     pub title: String,
     blocks: Vec<FormattedTextLine>,
     visual: Vec<VisualLine>,
-    /// (content_w, cell_w×64, cell_h×64) the current layout was built for.
-    wrap_key: (u32, u32, u32),
+    /// 精确覆盖文字与公式度量输入；跨屏 DPI 或字体变化必须触发重排。
+    wrap_key: WrapKey,
     /// Pixel scroll offset from the document top.
     pub scroll: f32,
     content_h: f32,
+    math_cache: MathLayoutCache,
 }
 
 impl DocView {
@@ -136,9 +169,10 @@ impl DocView {
             title,
             blocks,
             visual: Vec::new(),
-            wrap_key: (0, 0, 0),
+            wrap_key: WrapKey::default(),
             scroll: 0.0,
             content_h: 0.0,
+            math_cache: MathLayoutCache::default(),
         }
     }
 
@@ -164,8 +198,28 @@ impl DocView {
     /// UNfloored design advance per column — scaled text steps by it, so its
     /// wrap widths must be measured with it too (`cell_w` under-measures by
     /// the floor loss, compounding per column).
-    fn relayout(&mut self, content_w: f32, cell_w: f32, cell_h: f32, adv_w: f32, scale: f32) {
-        let key = (content_w as u32, (cell_w * 64.0) as u32, (cell_h * 64.0) as u32);
+    #[allow(clippy::too_many_arguments)]
+    fn relayout(
+        &mut self,
+        content_w: f32,
+        cell_w: f32,
+        cell_h: f32,
+        adv_w: f32,
+        font_pixel_size: f32,
+        pixels_per_point: f32,
+        text_ascent: f32,
+        scale: f32,
+    ) {
+        let key = WrapKey {
+            content_width: content_w as u32,
+            cell_width: (cell_w * 64.0) as u32,
+            cell_height: (cell_h * 64.0) as u32,
+            text_advance: (adv_w * 64.0) as u32,
+            font_pixel_size: (font_pixel_size * 64.0) as u32,
+            pixels_per_point: (pixels_per_point * 1024.0) as u32,
+            text_ascent: (text_ascent * 64.0) as u32,
+            scale: (scale * 1024.0) as u32,
+        };
         if key == self.wrap_key && !self.visual.is_empty() {
             return;
         }
@@ -179,7 +233,12 @@ impl DocView {
             cell_w,
             cell_h,
             adv_w,
+            font_pixel_size,
+            pixels_per_point,
+            text_ascent,
             scale,
+            math_cache: &mut self.math_cache,
+            next_formula_id: 0,
         };
         for block in &self.blocks {
             layout.block(block, 0, 0.0);
@@ -317,6 +376,112 @@ fn wrap_inline(inline: &FormattedTextInline, max_cols: usize) -> Vec<Vec<Span>> 
     lines
 }
 
+/// 数学对象按真实像素宽度参与换行，且永远不从 TeX 源码中间拆开。
+fn wrap_inline_with_math(
+    inline: &FormattedTextInline,
+    max_width: f32,
+    text_advance: f32,
+    formula_id: &mut u64,
+    pixel_size: f32,
+    pixels_per_point: f32,
+    cache: &mut MathLayoutCache,
+) -> Vec<Vec<Span>> {
+    if !inline.iter().any(FormattedTextFragment::is_math) {
+        let max_cols = (max_width / text_advance).max(4.0) as usize;
+        return wrap_inline(inline, max_cols);
+    }
+
+    let mut lines = Vec::new();
+    let mut line = Vec::new();
+    let mut line_width = 0.0;
+    for (frag_key, fragment) in inline.iter().enumerate() {
+        match &fragment.content {
+            FragmentContent::Text(_) => {
+                for character in fragment.text().chars() {
+                    let cols = character.width().unwrap_or(0).max(1);
+                    let width = cols as f32 * text_advance;
+                    if line_width + width > max_width && !line.is_empty() {
+                        lines.push(std::mem::take(&mut line));
+                        line_width = 0.0;
+                    }
+                    push_text_character(&mut line, fragment, frag_key, character, cols);
+                    line_width += width;
+                }
+            },
+            FragmentContent::Math(source) => {
+                let current_id = *formula_id;
+                *formula_id = formula_id.wrapping_add(1);
+                let run = measure_math(
+                    source.clone(),
+                    current_id,
+                    pixel_size,
+                    pixels_per_point,
+                    false,
+                    cache,
+                );
+                let width = run.as_ref().map_or_else(
+                    || fragment.text().chars().count() as f32 * text_advance,
+                    |run| run.metrics.width,
+                );
+                if line_width + width > max_width && !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                    line_width = 0.0;
+                }
+                match run {
+                    Some(run) => line.push(Span::from_math(run, fragment, frag_key)),
+                    None => line.push(Span::from_fragment_text(fragment, frag_key)),
+                }
+                line_width += width;
+            },
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn push_text_character(
+    spans: &mut Vec<Span>,
+    fragment: &FormattedTextFragment,
+    frag_key: usize,
+    character: char,
+    cols: usize,
+) {
+    if spans.last().is_none_or(|span| span.frag_key != frag_key || span.math.is_some()) {
+        spans.push(Span::from_fragment(fragment, frag_key));
+    }
+    let span = spans.last_mut().expect("text span inserted");
+    span.text.push(character);
+    span.cols += cols;
+}
+
+fn measure_math(
+    source: MathSource,
+    formula_id: u64,
+    pixel_size: f32,
+    pixels_per_point: f32,
+    display: bool,
+    cache: &mut MathLayoutCache,
+) -> Option<MathRun> {
+    let key = FormulaCacheKey::new(formula_id, pixel_size, pixels_per_point, display);
+    let layout = cache
+        .get_or_insert_with(key, || {
+            let formula = parse_formula(source.as_str(), display, DEFAULT_LIMITS)?;
+            layout_formula(&formula, pixel_size, pixels_per_point, DEFAULT_LIMITS)
+        })
+        .ok()?;
+    Some(MathRun {
+        source,
+        formula_id,
+        pixel_size,
+        pixels_per_point,
+        display,
+        metrics: layout.metrics,
+        advance_width: layout.metrics.width,
+    })
+}
+
 /// Regroup a wrapped char slice back into style spans. Trailing spaces are
 /// dropped (they carry no width at a break point); leading whitespace stays —
 /// code lines depend on their indentation.
@@ -351,6 +516,35 @@ impl Span {
             link: styles.hyperlink.as_ref().map(|crate::markdown::Hyperlink::Url(url)| url.clone()),
             faint: false,
             frag_key,
+            math: None,
+        }
+    }
+
+    fn from_fragment_text(fragment: &FormattedTextFragment, frag_key: usize) -> Self {
+        let mut span = Self::from_fragment(fragment, frag_key);
+        span.text.push_str(fragment.text());
+        span.cols = fragment.text().chars().map(|c| c.width().unwrap_or(0).max(1)).sum();
+        span
+    }
+
+    fn from_math(run: MathRun, fragment: &FormattedTextFragment, frag_key: usize) -> Self {
+        let mut span = Self::from_fragment(fragment, frag_key);
+        span.math = Some(run);
+        span
+    }
+
+    fn display_math(run: MathRun) -> Self {
+        Self {
+            text: String::new(),
+            cols: 0,
+            bold: false,
+            italic: false,
+            strike: false,
+            code: false,
+            link: None,
+            faint: false,
+            frag_key: usize::MAX,
+            math: Some(run),
         }
     }
 
@@ -367,6 +561,7 @@ impl Span {
             link: None,
             faint,
             frag_key: usize::MAX,
+            math: None,
         }
     }
 }
@@ -382,7 +577,12 @@ struct LayoutCtx<'a> {
     /// Unfloored design advance per column (`metrics.average_advance`); the
     /// step scaled text is drawn with, hence measured with.
     adv_w: f32,
+    font_pixel_size: f32,
+    pixels_per_point: f32,
+    text_ascent: f32,
     scale: f32,
+    math_cache: &'a mut MathLayoutCache,
+    next_formula_id: u64,
 }
 
 impl LayoutCtx<'_> {
@@ -391,7 +591,29 @@ impl LayoutCtx<'_> {
     }
 
     fn push(&mut self, h: f32, indent: f32, text_scale: f32, spans: Vec<Span>, decor: Decor) {
-        self.out.push(VisualLine { y: self.y, h, indent, scale: text_scale, spans, decor });
+        self.push_with_math(h, indent, text_scale, spans, decor, None, false);
+    }
+
+    fn push_with_math(
+        &mut self,
+        h: f32,
+        indent: f32,
+        text_scale: f32,
+        spans: Vec<Span>,
+        decor: Decor,
+        math_baseline: Option<f32>,
+        center_math: bool,
+    ) {
+        self.out.push(VisualLine {
+            y: self.y,
+            h,
+            indent,
+            scale: text_scale,
+            spans,
+            decor,
+            math_baseline,
+            center_math,
+        });
         self.y += h;
     }
 
@@ -420,7 +642,16 @@ impl LayoutCtx<'_> {
                     _ => (1.08, 0.7, 0.25),
                 };
                 self.y += ch * top;
-                let wrapped = wrap_inline(&header.text, cols_at(indent, text_scale));
+                let text_advance = self.adv_w * text_scale;
+                let wrapped = wrap_inline_with_math(
+                    &header.text,
+                    (self.content_w - indent).max(text_advance * 4.0),
+                    text_advance,
+                    &mut self.next_formula_id,
+                    self.font_pixel_size * text_scale,
+                    self.pixels_per_point,
+                    self.math_cache,
+                );
                 let count = wrapped.len();
                 for (i, mut spans) in wrapped.into_iter().enumerate() {
                     for span in &mut spans {
@@ -429,22 +660,100 @@ impl LayoutCtx<'_> {
                     let mut decor = decor;
                     // Typora-style underline on H1/H2, on the last wrap line.
                     decor.underline_row = header.heading_size <= 2 && i + 1 == count;
-                    self.push(ch * text_scale * 1.45, indent, text_scale, spans, decor);
+                    let math_height = spans
+                        .iter()
+                        .filter_map(|span| span.math.as_ref())
+                        .map(|run| run.metrics.height)
+                        .fold(0.0f32, f32::max);
+                    let math_depth = spans
+                        .iter()
+                        .filter_map(|span| span.math.as_ref())
+                        .map(|run| run.metrics.depth)
+                        .fold(0.0f32, f32::max);
+                    if math_height > 0.0 || math_depth > 0.0 {
+                        let ascent = self.text_ascent * text_scale;
+                        let baseline = ch * 0.2 + ascent.max(math_height);
+                        let h = (ch * text_scale * 1.45)
+                            .max(baseline + (ch * text_scale - ascent).max(math_depth) + ch * 0.2);
+                        self.push_with_math(
+                            h,
+                            indent,
+                            text_scale,
+                            spans,
+                            decor,
+                            Some(baseline),
+                            false,
+                        );
+                    } else {
+                        self.push(ch * text_scale * 1.45, indent, text_scale, spans, decor);
+                    }
                 }
                 self.y += ch * bottom;
             },
             FormattedTextLine::Line(inline) => {
-                for spans in wrap_inline(inline, cols_at(indent, 1.0)) {
-                    self.push(ch * BODY_LINE, indent, 1.0, spans, decor);
+                let available = (self.content_w - indent).max(self.cell_w * 4.0);
+                let wrapped = wrap_inline_with_math(
+                    inline,
+                    available,
+                    self.cell_w,
+                    &mut self.next_formula_id,
+                    self.font_pixel_size,
+                    self.pixels_per_point,
+                    self.math_cache,
+                );
+                for spans in wrapped {
+                    let math_height = spans
+                        .iter()
+                        .filter_map(|span| span.math.as_ref())
+                        .map(|run| run.metrics.height)
+                        .fold(0.0f32, f32::max);
+                    let math_depth = spans
+                        .iter()
+                        .filter_map(|span| span.math.as_ref())
+                        .map(|run| run.metrics.depth)
+                        .fold(0.0f32, f32::max);
+                    if math_height > 0.0 || math_depth > 0.0 {
+                        let top_pad = ch * 0.2;
+                        let bottom_pad = ch * 0.2;
+                        let baseline = top_pad + self.text_ascent.max(math_height);
+                        let h = baseline + (ch - self.text_ascent).max(math_depth) + bottom_pad;
+                        self.push_with_math(h, indent, 1.0, spans, decor, Some(baseline), false);
+                    } else {
+                        self.push(ch * BODY_LINE, indent, 1.0, spans, decor);
+                    }
                 }
                 self.y += ch * 0.5;
             },
-            // 原生数学布局接入前保留确定的源码回退，解析失败也不会吞掉文档内容。
             FormattedTextLine::DisplayMath(math) => {
                 self.y += ch * 0.35;
-                let mut span = Span::label(math.as_str(), false);
-                span.code = true;
-                self.push(ch * BODY_LINE, indent, 1.0, vec![span], decor);
+                let formula_id = self.next_formula_id;
+                self.next_formula_id = self.next_formula_id.wrapping_add(1);
+                if let Some(run) = measure_math(
+                    math.clone(),
+                    formula_id,
+                    self.font_pixel_size,
+                    self.pixels_per_point,
+                    true,
+                    self.math_cache,
+                ) {
+                    let top_pad = ch * 0.45;
+                    let bottom_pad = ch * 0.45;
+                    let baseline = top_pad + run.metrics.height;
+                    let h = baseline + run.metrics.depth + bottom_pad;
+                    self.push_with_math(
+                        h,
+                        indent,
+                        1.0,
+                        vec![Span::display_math(run)],
+                        decor,
+                        Some(baseline),
+                        true,
+                    );
+                } else {
+                    let mut span = Span::label(math.as_str(), false);
+                    span.code = true;
+                    self.push(ch * BODY_LINE, indent, 1.0, vec![span], decor);
+                }
                 self.y += ch * 0.5;
             },
             FormattedTextLine::UnorderedList(list) => {
@@ -534,7 +843,16 @@ impl LayoutCtx<'_> {
         let marker_px = marker_cols as f32 * self.cell_w;
         let cols = ((self.content_w - indent - marker_px) / self.cell_w).max(4.0) as usize;
         let decor = Decor { quote_depth, ..Decor::default() };
-        for (i, mut spans) in wrap_inline(text, cols).into_iter().enumerate() {
+        let wrapped = wrap_inline_with_math(
+            text,
+            cols as f32 * self.cell_w,
+            self.cell_w,
+            &mut self.next_formula_id,
+            self.font_pixel_size,
+            self.pixels_per_point,
+            self.math_cache,
+        );
+        for (i, mut spans) in wrapped.into_iter().enumerate() {
             let line_indent = if i == 0 {
                 spans.insert(0, Span::label(marker, true));
                 indent
@@ -543,7 +861,24 @@ impl LayoutCtx<'_> {
                 // marker.
                 indent + marker_px
             };
-            self.push(ch * BODY_LINE * 0.98, line_indent, 1.0, spans, decor);
+            let math_height = spans
+                .iter()
+                .filter_map(|span| span.math.as_ref())
+                .map(|run| run.metrics.height)
+                .fold(0.0f32, f32::max);
+            let math_depth = spans
+                .iter()
+                .filter_map(|span| span.math.as_ref())
+                .map(|run| run.metrics.depth)
+                .fold(0.0f32, f32::max);
+            if math_height > 0.0 || math_depth > 0.0 {
+                let baseline = ch * 0.15 + self.text_ascent.max(math_height);
+                let h = (ch * BODY_LINE * 0.98)
+                    .max(baseline + (ch - self.text_ascent).max(math_depth) + ch * 0.15);
+                self.push_with_math(h, line_indent, 1.0, spans, decor, Some(baseline), false);
+            } else {
+                self.push(ch * BODY_LINE * 0.98, line_indent, 1.0, spans, decor);
+            }
         }
         self.y += ch * 0.18;
     }
@@ -553,13 +888,6 @@ impl LayoutCtx<'_> {
     /// one place the viewer truncates instead of wrapping.
     fn table(&mut self, table: &crate::markdown::FormattedTable, quote_depth: usize, indent: f32) {
         let ch = self.cell_h;
-        let inline_cols = |inline: &FormattedTextInline| -> usize {
-            inline
-                .iter()
-                .flat_map(|f| f.text().chars())
-                .map(|c| c.width().unwrap_or(0).max(1))
-                .sum()
-        };
         let col_count =
             table.headers.len().max(table.rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
         let total_cols = ((self.content_w - indent) / self.cell_w) as usize;
@@ -568,11 +896,11 @@ impl LayoutCtx<'_> {
         let fair = usable / col_count;
         let mut widths = vec![0usize; col_count];
         for (i, cell) in table.headers.iter().enumerate() {
-            widths[i] = widths[i].max(inline_cols(cell));
+            widths[i] = widths[i].max(self.inline_columns(cell));
         }
         for row in &table.rows {
             for (i, cell) in row.iter().enumerate() {
-                widths[i] = widths[i].max(inline_cols(cell));
+                widths[i] = widths[i].max(self.inline_columns(cell));
             }
         }
         for width in &mut widths {
@@ -592,16 +920,121 @@ impl LayoutCtx<'_> {
                     spans.push(Span::label(" │ ", true));
                 }
                 let alignment = table.alignments.get(i).copied().unwrap_or(TableAlignment::Left);
-                for mut span in cell_spans(row.get(i), *width, alignment) {
+                for mut span in self.table_cell_spans(row.get(i), *width, alignment) {
                     span.bold |= is_head;
                     spans.push(span);
                 }
             }
             let mut decor = decor;
             decor.underline_row = is_head;
-            self.push(ch * BODY_LINE * 0.95, indent, 1.0, spans, decor);
+            let math_height = spans
+                .iter()
+                .filter_map(|span| span.math.as_ref())
+                .map(|run| run.metrics.height)
+                .fold(0.0f32, f32::max);
+            let math_depth = spans
+                .iter()
+                .filter_map(|span| span.math.as_ref())
+                .map(|run| run.metrics.depth)
+                .fold(0.0f32, f32::max);
+            if math_height > 0.0 || math_depth > 0.0 {
+                let baseline = ch * 0.12 + self.text_ascent.max(math_height);
+                let h = (ch * BODY_LINE * 0.95)
+                    .max(baseline + (ch - self.text_ascent).max(math_depth) + ch * 0.12);
+                self.push_with_math(h, indent, 1.0, spans, decor, Some(baseline), false);
+            } else {
+                self.push(ch * BODY_LINE * 0.95, indent, 1.0, spans, decor);
+            }
         }
         self.y += ch * 0.6;
+    }
+
+    fn inline_columns(&mut self, inline: &FormattedTextInline) -> usize {
+        inline
+            .iter()
+            .map(|fragment| match &fragment.content {
+                FragmentContent::Text(_) => fragment
+                    .text()
+                    .chars()
+                    .map(|character| character.width().unwrap_or(0).max(1))
+                    .sum(),
+                FragmentContent::Math(source) => {
+                    let formula_id = self.next_formula_id;
+                    self.next_formula_id = self.next_formula_id.wrapping_add(1);
+                    measure_math(
+                        source.clone(),
+                        formula_id,
+                        self.font_pixel_size,
+                        self.pixels_per_point,
+                        false,
+                        self.math_cache,
+                    )
+                    .map_or_else(
+                        || fragment.text().chars().count(),
+                        |run| (run.metrics.width / self.cell_w).ceil().max(1.0) as usize,
+                    )
+                },
+            })
+            .sum()
+    }
+
+    fn table_cell_spans(
+        &mut self,
+        cell: Option<&FormattedTextInline>,
+        width: usize,
+        alignment: TableAlignment,
+    ) -> Vec<Span> {
+        if cell.is_none_or(|inline| !inline.iter().any(FormattedTextFragment::is_math)) {
+            return cell_spans(cell, width, alignment);
+        }
+
+        let Some(inline) = cell else { return padded_spans(Vec::new(), 0, width, alignment) };
+        let mut spans = Vec::new();
+        let mut used = 0usize;
+        'outer: for (frag_key, fragment) in inline.iter().enumerate() {
+            match &fragment.content {
+                FragmentContent::Text(_) => {
+                    for character in fragment.text().chars() {
+                        let columns = character.width().unwrap_or(0).max(1);
+                        if used + columns > width {
+                            push_ellipsis(&mut spans, &mut used, width);
+                            break 'outer;
+                        }
+                        push_text_character(&mut spans, fragment, frag_key, character, columns);
+                        used += columns;
+                    }
+                },
+                FragmentContent::Math(source) => {
+                    let formula_id = self.next_formula_id;
+                    self.next_formula_id = self.next_formula_id.wrapping_add(1);
+                    let run = measure_math(
+                        source.clone(),
+                        formula_id,
+                        self.font_pixel_size,
+                        self.pixels_per_point,
+                        false,
+                        self.math_cache,
+                    );
+                    let columns = run.as_ref().map_or_else(
+                        || fragment.text().chars().count(),
+                        |run| (run.metrics.width / self.cell_w).ceil().max(1.0) as usize,
+                    );
+                    if used + columns > width {
+                        push_ellipsis(&mut spans, &mut used, width);
+                        break 'outer;
+                    }
+                    match run {
+                        Some(mut run) => {
+                            run.advance_width = columns as f32 * self.cell_w;
+                            spans.push(Span::from_math(run, fragment, frag_key));
+                        },
+                        None => spans.push(Span::from_fragment_text(fragment, frag_key)),
+                    }
+                    used += columns;
+                },
+            }
+        }
+        padded_spans(spans, used, width, alignment)
     }
 }
 
@@ -619,10 +1052,7 @@ fn cell_spans(
                 let cols = ch.width().unwrap_or(0).max(1);
                 if used + cols > width {
                     // No room left: truncate with an ellipsis if one fits.
-                    if used < width {
-                        spans.push(Span::label("…", true));
-                        used += 1;
-                    }
+                    push_ellipsis(&mut spans, &mut used, width);
                     break 'outer;
                 }
                 let need_new = match spans.last() {
@@ -639,6 +1069,22 @@ fn cell_spans(
             }
         }
     }
+    padded_spans(spans, used, width, alignment)
+}
+
+fn push_ellipsis(spans: &mut Vec<Span>, used: &mut usize, width: usize) {
+    if *used < width {
+        spans.push(Span::label("…", true));
+        *used += 1;
+    }
+}
+
+fn padded_spans(
+    mut spans: Vec<Span>,
+    used: usize,
+    width: usize,
+    alignment: TableAlignment,
+) -> Vec<Span> {
     if used < width {
         let pad = " ".repeat(width - used);
         match alignment {
@@ -666,6 +1112,24 @@ fn column_rect(area: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
     (x, ay + 8.0 * scale, w, ah - 16.0 * scale)
 }
 
+fn span_width(span: &Span, text_advance: f32) -> f32 {
+    span.math.as_ref().map_or(span.cols as f32 * text_advance, |run| run.advance_width)
+}
+
+fn line_width(line: &VisualLine, cell_w: f32, adv_base: f32) -> f32 {
+    let text_advance = if line.scale == 1.0 { cell_w } else { adv_base * line.scale };
+    line.spans.iter().map(|span| span_width(span, text_advance)).sum()
+}
+
+fn line_start_x(line: &VisualLine, cx: f32, cw: f32, cell_w: f32, adv_base: f32) -> f32 {
+    let left = cx + line.indent;
+    if line.center_math {
+        left + ((cw - line.indent - line_width(line, cell_w, adv_base)) * 0.5).max(0.0)
+    } else {
+        left
+    }
+}
+
 /// Draw the whole document view for this frame: background decor quads, then
 /// the visible lines' text, then the overlay scrollbar. `area` is the pane
 /// content region (chrome-exclusive), screen-space.
@@ -683,13 +1147,25 @@ pub fn draw(
     let cell_h = size.cell_height();
     // Unfloored design advance: what scaled text steps by (see relayout).
     let adv_base = glyph_cache.font_metrics().average_advance as f32;
+    let font_pixel_size = glyph_cache.font_size.as_px();
+    let text_ascent = (cell_h + glyph_cache.font_metrics().descent).max(1.0);
+    let pixels_per_point = scale * 96.0 / 72.27;
     let (cx, cy, cw, chh) = column_rect(area, scale);
     // Glyphs must land on whole physical pixels: the layout accumulates
     // fractional heights (1.55 line heights, centered columns), and drawing
     // at sub-pixel offsets bilinear-samples every glyph into a blur.
     let (cx, cy) = (cx.round(), cy.round());
 
-    doc.relayout(cw, cell_w, cell_h, adv_base, scale);
+    doc.relayout(
+        cw,
+        cell_w,
+        cell_h,
+        adv_base,
+        font_pixel_size,
+        pixels_per_point,
+        text_ascent,
+        scale,
+    );
     doc.scroll = doc.scroll.clamp(0.0, doc.max_scroll(chh));
 
     let range = doc.visible_range(chh);
@@ -767,9 +1243,9 @@ pub fn draw(
         // scaled — the widths the glyphs are actually drawn at).
         let text_y = (y + (line.h - cell_h * line.scale) / 2.0).round();
         let span_adv = if line.scale == 1.0 { cell_w } else { adv_base * line.scale };
-        let mut pen_x = cx + line.indent;
+        let mut pen_x = line_start_x(line, cx, cw, cell_w, adv_base);
         for span in &line.spans {
-            let w = span.cols as f32 * span_adv;
+            let w = span_width(span, span_adv);
             let px = pen_x.round();
             if span.code && !decor.code {
                 // Inline code chip.
@@ -841,11 +1317,13 @@ pub fn draw(
     // base-size atlas bitmaps (the old fuzzy-edge artifact).
     for line in &doc.visual[range] {
         let y = (cy + line.y - doc.scroll).round();
-        let text_y = (y + (line.h - cell_h * line.scale) / 2.0).round();
-        if text_y < clip_top || text_y + cell_h * line.scale > clip_bot {
-            continue;
-        }
-        let mut pen_x = cx + line.indent;
+        let text_ascent = (cell_h + glyph_cache.font_metrics().descent).max(1.0) * line.scale;
+        let text_y = line.math_baseline.map_or_else(
+            || (y + (line.h - cell_h * line.scale) / 2.0).round(),
+            |baseline| (y + baseline - text_ascent).round(),
+        );
+        let text_visible = text_y >= clip_top && text_y + cell_h * line.scale <= clip_bot;
+        let mut pen_x = line_start_x(line, cx, cw, cell_w, adv_base);
         for span in &line.spans {
             let ink = if span.link.is_some() {
                 skin.accent
@@ -860,6 +1338,73 @@ pub fn draw(
             } else {
                 skin.ink
             };
+            let span_adv = if line.scale == 1.0 { cell_w } else { adv_base * line.scale };
+            if let Some(run) = &span.math {
+                let key = FormulaCacheKey::new(
+                    run.formula_id,
+                    run.pixel_size,
+                    run.pixels_per_point,
+                    run.display,
+                );
+                let layout = doc.math_cache.get_or_insert_with(key, || {
+                    let formula = parse_formula(run.source.as_str(), run.display, DEFAULT_LIMITS)?;
+                    layout_formula(&formula, run.pixel_size, run.pixels_per_point, DEFAULT_LIMITS)
+                });
+                let baseline_y = y + line.math_baseline.unwrap_or(text_ascent);
+                match layout {
+                    Ok(layout) => {
+                        if renderer
+                            .draw_math(
+                                size,
+                                layout,
+                                pen_x.round(),
+                                baseline_y.round(),
+                                ink,
+                                MathClip {
+                                    left: cx,
+                                    top: clip_top,
+                                    right: cx + cw,
+                                    bottom: clip_bot,
+                                },
+                            )
+                            .is_err()
+                            && text_visible
+                        {
+                            renderer.draw_doc_text(
+                                size,
+                                pen_x.round(),
+                                text_y,
+                                line.scale,
+                                ink,
+                                Flags::empty(),
+                                run.source.as_str(),
+                                glyph_cache,
+                            );
+                        }
+                    },
+                    Err(_) if text_visible => {
+                        renderer.draw_doc_text(
+                            size,
+                            pen_x.round(),
+                            text_y,
+                            line.scale,
+                            ink,
+                            Flags::empty(),
+                            run.source.as_str(),
+                            glyph_cache,
+                        );
+                    },
+                    Err(_) => {},
+                }
+                pen_x += run.advance_width;
+                continue;
+            }
+
+            if !text_visible {
+                pen_x += span.cols as f32 * span_adv;
+                continue;
+            }
+
             // Emphasis is carried by the actual face, not just ink.
             let mut style = Flags::empty();
             if span.bold {
@@ -878,7 +1423,6 @@ pub fn draw(
                 &span.text,
                 glyph_cache,
             );
-            let span_adv = if line.scale == 1.0 { cell_w } else { adv_base * line.scale };
             pen_x += span.cols as f32 * span_adv;
         }
     }
@@ -940,6 +1484,83 @@ mod tests {
     }
 
     #[test]
+    fn inline_math_is_one_wrap_object_with_native_metrics() {
+        let parsed = crate::markdown::parse_markdown("before $\\frac{x}{y}$ after");
+        let FormattedTextLine::Line(inline) = &parsed.lines[0] else { panic!() };
+        let mut cache = MathLayoutCache::default();
+        let mut formula_id = 0;
+        let lines =
+            wrap_inline_with_math(inline, 90.0, 8.0, &mut formula_id, 16.0, 1.0, &mut cache);
+        let math: Vec<&MathRun> = lines
+            .iter()
+            .flat_map(|line| line.iter())
+            .filter_map(|span| span.math.as_ref())
+            .collect();
+        assert_eq!(math.len(), 1);
+        assert_eq!(math[0].source.as_str(), r"\frac{x}{y}");
+        assert!(math[0].metrics.width > 0.0);
+        assert!(math[0].metrics.height > 0.0 && math[0].metrics.depth > 0.0);
+    }
+
+    #[test]
+    fn display_math_uses_real_height_and_centers_in_the_column() {
+        let markdown = "$$\\frac{x+1}{\\sqrt{y}}$$";
+        let mut doc = DocView {
+            path: PathBuf::from("math.md"),
+            title: "math.md".into(),
+            blocks: crate::markdown::parse_markdown(markdown).lines.into_iter().collect(),
+            visual: Vec::new(),
+            wrap_key: WrapKey::default(),
+            scroll: 0.0,
+            content_h: 0.0,
+            math_cache: MathLayoutCache::default(),
+        };
+        doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
+        assert_eq!(doc.visual.len(), 1);
+        let line = &doc.visual[0];
+        assert!(line.center_math);
+        assert!(line.math_baseline.is_some());
+        assert!(line.h > 16.0);
+        assert!(line.spans[0].math.is_some());
+    }
+
+    #[test]
+    fn invalid_math_keeps_source_text_visible() {
+        let parsed = crate::markdown::parse_markdown("before $\\def\\x{1}$ after");
+        let FormattedTextLine::Line(inline) = &parsed.lines[0] else { panic!() };
+        let mut cache = MathLayoutCache::default();
+        let mut formula_id = 0;
+        let lines =
+            wrap_inline_with_math(inline, 500.0, 8.0, &mut formula_id, 16.0, 1.0, &mut cache);
+        assert!(lines.iter().flatten().all(|span| span.math.is_none()));
+        assert!(spans_text(&lines[0]).contains(r"\def\x{1}"));
+    }
+
+    #[test]
+    fn table_cells_keep_math_as_native_objects() {
+        let markdown = "| expression | value |\n| --- | --- |\n| $x^2$ | $\\frac{1}{2}$ |";
+        let mut doc = DocView {
+            path: PathBuf::from("math-table.md"),
+            title: "math-table.md".into(),
+            blocks: crate::markdown::parse_markdown(markdown).lines.into_iter().collect(),
+            visual: Vec::new(),
+            wrap_key: WrapKey::default(),
+            scroll: 0.0,
+            content_h: 0.0,
+            math_cache: MathLayoutCache::default(),
+        };
+        doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
+        let math_runs = doc
+            .visual
+            .iter()
+            .flat_map(|line| &line.spans)
+            .filter(|span| span.math.is_some())
+            .count();
+        assert_eq!(math_runs, 2);
+        assert!(doc.visual.iter().any(|line| line.math_baseline.is_some()));
+    }
+
+    #[test]
     fn visual_layout_is_virtualizable() {
         let markdown = (0..500).map(|i| format!("paragraph {i}\n\n")).collect::<String>();
         let mut doc = DocView {
@@ -947,11 +1568,12 @@ mod tests {
             title: "test.md".into(),
             blocks: crate::markdown::parse_markdown(&markdown).lines.into_iter().collect(),
             visual: Vec::new(),
-            wrap_key: (0, 0, 0),
+            wrap_key: WrapKey::default(),
             scroll: 0.0,
             content_h: 0.0,
+            math_cache: MathLayoutCache::default(),
         };
-        doc.relayout(600.0, 8.0, 16.0, 8.0, 1.0);
+        doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
         assert_eq!(doc.visual.len(), 500);
         // y offsets are strictly increasing (binary search precondition).
         assert!(doc.visual.windows(2).all(|w| w[0].y < w[1].y));

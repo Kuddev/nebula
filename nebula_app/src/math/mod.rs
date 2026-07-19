@@ -50,6 +50,7 @@ pub(crate) enum MathErrorKind {
     Parse,
     MissingGlyph,
     GlyphTooLarge,
+    AtlasFull,
     Font,
 }
 
