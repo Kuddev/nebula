@@ -4,75 +4,63 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
-## Unreleased
+## 0.6.0 - Unreleased / 未发布
 
 ### English
 
 #### Added
 
-- **Native mathematics in Markdown documents** — inline $...$ and display $$...$$ formulas are parsed and laid out entirely in Rust, then drawn as cached glyphs and rule quads with the bundled Latin Modern Math font. Fractions, roots, scripts, limits, matrices, scalable delimiters, Greek letters, common operators, and Unicode prose inside formulas work without a WebView, JavaScript runtime, image export, or external TeX process.
-- **Math rendering screenshot fixture** — the README now shows a verified native-math screenshot, while `docs/math-rendering-test.md` provides its reusable source document covering inline formulas, Greek letters, relations, arrows, fractions, radicals, scripts, calculus, delimiters, matrices, cases, aligned equations, vector calculus, long formulas, blank rows, Unicode prose, and the explicit dollar-fence boundary.
-- **A built-in font fallback** — Maple Mono Normal NF CN is now embedded in Nebula as a runtime fallback, so the interface remains readable when the system font has not been installed. The system-installed font is still preferred, the installation reminder remains dismissible, and the portable archive still includes the original font under `fonts` for normal installation.
-- **Choose the directory shown in Files and Git** — the Files drawer can now select a custom root with the native folder picker, and the Git view follows the same root. The choice lasts until the current window closes; “Follow current directory” immediately returns to the focused terminal directory.
-- **Four SSH sign-in modes** — each saved host can now use Automatic, Password, Private Key, or Keyboard-interactive authentication. Automatic mode tries configured keys before password and interactive prompts, while an explicitly selected mode stays strict and does not silently switch methods.
-- **Private-key sign-in** — choose one or more OpenSSH, PEM, or PPK private keys from the host editor. Key paths stay on the local machine, encrypted-key passphrases are stored in Windows Credential Manager by key fingerprint, and public-key files are rejected with a clear message.
-- **SFTP file transfer** — open SFTP from an SSH host's right-click menu and reuse the same authenticated connection. The remote drawer supports editable paths, filtering, refresh, file and folder uploads, file and folder downloads, new folders, rename, recursive delete, symlink targets, progress, cancellation, and visible errors.
-- **Pull from the Git drawer** — the right-side Git view now has a Pull button beside Stage, Commit, and Push. Pulls use fast-forward-only mode so Nebula never creates an unexpected merge commit.
-- **Font installation reminder** — Nebula now checks for Maple Mono Nerd Font at every launch. If it is missing, a dismissible reminder can open the bundled `fonts` folder, making it easier to fix missing icons and square glyphs without blocking the terminal.
+- **Native math formula support** — Nebula can now display inline $...$ and display $$...$$ formulas directly in Markdown. Fractions, roots, scripts, limits, matrices, scalable brackets, Greek letters, common operators, and Unicode text are supported. Formulas are rendered locally in Rust with the bundled math font, without a web component, formula images, or an external TeX program.
+- **Math formula test document** — the README now includes a verified screenshot, and `docs/math-rendering-test.md` provides a reusable test page covering common symbols, complex formulas, long formulas, blank rows, Unicode text, and dollar-fence boundaries.
+- **File-drawer directory actions** — the Files drawer can move to its parent directory, open a new terminal at the displayed directory, and drag a file or folder into the terminal to insert its safely quoted full path without executing it.
+- **Frequent-directory workflows** — Nebula remembers directories that the shell actually entered. Frequently used locations are promoted in path completion and inline suggestions, and the command palette can open a new terminal directly in a visited directory.
 
 #### Fixed
 
-- **Markdown always stays inside its reading column** — paragraphs wrap at words and CJK characters, overlong unbroken text is hard-wrapped, failed formulas wrap as visible TeX source, and oversized native formulas are fitted to the existing 860 px reading column instead of being clipped.
-- **Multiline display formulas survive blank rows** — standalone $$ fences can now contain blank lines and explanatory Unicode prose. Code fences and YAML metadata remain untouched, while the math block keeps a range into the original UTF-8 source.
-- **Dollar fences define the math boundary** — only paired $...$ and $$...$$ ranges are parsed as mathematics. Bare TeX commands, non-dollar delimiters, and quoted TeX code examples remain ordinary Markdown text and still wrap inside the reading column.
-- **Formula arrows and radicals keep their intended geometry** — ASCII `->` is normalized only after a dollar fence has confirmed a formula, and radical overbars now follow the OpenType/TeX ascender and gap rules without a visible seam at the surd.
-- **Document typography is more consistent and math is clearer** — Markdown headings use the regular CJK outline with strong theme ink instead of uneven synthetic bold, and math glyphs use pixel-aligned placement plus contrast-corrected grayscale coverage for sharper small-size strokes.
-- **Paste stays in the split pane that started it** — right-click paste, Ctrl+V, and multiline-paste confirmation retain the originating pane identity. The confirmation overlay no longer lets mouse coordinates or Enter redirect the text into a neighboring split.
-- **Numpad Enter behaves like the main Enter key** — the numeric keypad Enter key now follows the normal command-submission path instead of being routed through the paste action.
-- **The selected default shell now applies at launch** — the first terminal pane reads the same default-shell setting as a new tab. An explicit command-line command still takes priority, so setting PowerShell 7 no longer starts with Windows PowerShell and switches only after opening another tab.
-- **Resize no longer loses bottom rows or moves the input cursor** — the terminal grid, pane layout, renderer, and ConPTY now share the final row and column count after stretching, maximizing, showing an error, or opening search. Reserved message/search rows are no longer accidentally added back before the PTY resize.
-- **Safer maximized and fullscreen boundaries** — startup maximize/fullscreen is applied only after the first visible frame, character resize increments are cleared for those states, and the invisible resize border no longer captures edge clicks while the window cannot be resized.
+- **Markdown wrapping and formula containment fix** — paragraphs, Chinese text, long unbroken content, failed formula source, and oversized formulas now remain inside the reading column instead of overflowing or being cut off.
+- **Multiline math and recognition boundary fix** — display formulas can contain blank rows and Unicode explanations, while only paired $...$ and $$...$$ ranges are treated as math. Bare TeX and quoted code remain ordinary Markdown.
+- **Formula geometry and clarity fix** — arrows are converted only inside formulas, radical bars connect cleanly to the root symbol, Markdown headings use consistent weight, and small mathematical symbols have clearer edges.
+- **Split-pane paste routing fix** — right-click paste and Ctrl+V always send text to the pane where the paste started, even after the pointer or focus moves across a split.
+- **Enter penetration fix** — while multiline-paste confirmation is visible, Enter handles that confirmation only and never reaches the terminal behind it or a neighboring split. Approved text remains bound to the pane that opened the confirmation.
+- **Split Markdown input penetration fix** — keyboard, pointer, and scrolling input used by a Markdown document no longer reaches a neighboring or background terminal in a split window.
+- **Numpad Enter routing fix** — the numeric keypad Enter key now submits commands in the same way as the main Enter key instead of triggering paste behavior.
+- **SFTP split-session routing fix** — opening the file panel from a split SSH terminal now uses that pane's authenticated destination, so the panel does not connect to a different host after titles, commands, or focus change.
+- **Shell prompt lifecycle fix** — Nebula now preserves existing PowerShell and Bash prompt hooks, command exit status, pipeline status, and prompt behavior while still reporting directory changes and command completion.
+- **Default-shell picker fix** — confirming a shell in the default-shell picker now saves it as the default instead of opening it as a new terminal.
+- **AI integration removal fix** — removing integrations now continues through every supported tool even when one user configuration is damaged, avoiding stale hooks that point to an uninstalled Nebula executable.
 
 #### Improved
 
-- **Bounded math memory and frame cost** — formula parsing, node counts, nesting, matrix cells, draw operations, glyph dimensions, the layout cache, and the fixed-size glyph atlas all have explicit limits. Only visible document lines are expanded into draw work, and repeated formulas reuse cached layouts and glyphs.
-- **A cleaner portable archive** — the ZIP root now contains only `nebula.exe` and `README.md`. Runtime helpers, fonts, documentation, and licenses are grouped under `runtime`, `fonts`, `docs`, and `licenses`, and Nebula resolves the new runtime layout automatically.
-- **Safer transfers** — uploads and downloads stream in 256 KiB chunks instead of loading whole files into memory. Files are written to temporary paths first and moved into place only after the transfer succeeds, while failed or cancelled transfers clean up their partial files.
-- **A much smaller download** — the portable ZIP is now about half its previous size, while keeping the bundled font, ConPTY runtime, notification helper, documentation, and licenses intact.
+- **Large Markdown math document improvements** — Markdown files containing many formulas load quickly and remain responsive while scrolling. Nebula processes the visible area, reuses repeated formulas, and limits unusually complex input so memory use stays stable during long reading sessions.
+- **SFTP workflow improvements** — the SFTP panel now supports parent-directory navigation, drag-and-drop upload, and a background context menu for refresh, uploading files or folders, and creating a directory. Multi-file drops are grouped into one transfer instead of cancelling one another.
 
 ### 简体中文
 
 #### 新增
 
-- **Markdown 文档支持原生数学公式** — 行内 $...$ 和块级 $$...$$ 公式现在全部由 Rust 解析和排版，再使用内置 Latin Modern Math 字体以缓存字形和规则线 quad 直接绘制。分数、根式、上下标、极限、矩阵、伸缩括号、希腊字母、常用运算符以及公式中的 Unicode 说明文字都可以显示，整个过程不依赖 WebView、JavaScript、公式图片或外部 TeX 进程。
-- **数学渲染截图样例** — README 已展示经过验证的原生数学截图，并新增对应的可复用源文档 `docs/math-rendering-test.md`；文档集中覆盖行内公式、希腊字母、关系符号、箭头、分式、根式、上下标、微积分、伸缩括号、矩阵、分段函数、多行对齐、向量分析、长公式、空行、Unicode 说明文字以及美元围栏边界，方便直接打开截图回归。
-- **内置了字体显示兜底** — Maple Mono Normal NF CN 现在会随主程序一起内置。即使用户忘了安装系统字体，界面也能正常显示；已经安装的系统字体仍然优先，缺少字体时的提醒依旧可以关闭，便携包里的 `fonts` 目录和原始字体文件也继续保留，方便按正常方式安装。
-- **文件和 Git 可以切换查看目录了** — 文件抽屉新增原生目录选择器，选中的目录也会同步用于 Git 页面。这个选择只保留到当前窗口关闭；点击“跟随”后会立即重新跟随当前终端所在目录。
-- **四种 SSH 登录方式** — 每个已保存主机都可以选择自动、密码、密钥或交互式认证。自动模式会先尝试配置的私钥，再尝试密码和交互式提示；手动选择某种方式后则只使用该方式，不会失败后悄悄切换。
-- **私钥登录** — 主机编辑器现在可以选择一把或多把 OpenSSH、PEM 或 PPK 私钥。Nebula 只保存本机密钥路径，加密私钥的口令会按密钥指纹存入 Windows 凭据管理器；如果误选 `.pub` 公钥，也会直接提示重新选择私钥。
-- **SFTP 文件传输** — 在 SSH 主机右键菜单中即可打开 SFTP，并复用同一条已认证连接。远端抽屉支持手动路径、筛选、刷新、上传文件和文件夹、下载文件和文件夹、新建文件夹、重命名、递归删除、符号链接目标、传输进度、取消和可见错误提示。
-- **Git 抽屉可以拉取了** — 右侧 Git 页面在暂存、提交和推送旁新增“拉取”按钮。拉取只接受快进更新，不会在用户不知情时自动生成合并提交。
-- **忘装字体会直接提醒** — Nebula 每次启动都会检查 Maple Mono Nerd Font。没有安装时会弹出可关闭的提醒，也可以一键打开随包提供的 `fonts` 文件夹，不会再让缺失图标和方框字悄悄混进正常界面。
+- **Markdown 数学公式支持** — Nebula 现在能够直接显示行内 $...$ 和块级 $$...$$ 公式，支持分数、根式、上下标、极限、矩阵、伸缩括号、希腊字母、常用运算符和 Unicode 文字。公式由 Rust 和内置数学字体在本地完成显示，不需要网页组件、公式图片或外部 TeX 程序。
+- **数学公式测试文档** — README 已加入经过验证的效果截图，`docs/math-rendering-test.md` 提供可重复使用的测试页面，覆盖常用符号、复杂公式、长公式、空行、Unicode 文字和美元围栏边界。
+- **文件目录快捷操作支持** — 文件抽屉可以返回上级目录、在当前显示目录中新建终端，也可以把文件或目录拖入终端，插入经过安全引用的完整路径而不会自动执行。
+- **常用目录支持** — Nebula 会记录 Shell 实际进入过的目录，让常用位置优先出现在路径补全和行内建议中；也可以从命令面板直接在访问过的目录中新建终端。
 
 #### 修复
 
-- **Markdown 内容始终留在阅读列内** — 普通段落会按单词和中文字符换行，连续超长文本会强制折行，解析失败的公式会以可见 TeX 源码继续换行，过宽的原生公式则会收敛到现有 860 px 阅读列内，不再被右侧裁掉。
-- **块级公式可以跨越空行** — 独立 $$ 围栏现在可以包含空行和 Unicode 说明文字；代码围栏与 YAML 元数据保持原样，数学块仍然引用原始 UTF-8 源码范围。
-- **美元围栏明确数学边界** — 只有成对的 $...$ 和 $$...$$ 才会进入数学解析；裸露 TeX、非美元定界符和引用中的 TeX 代码都保持普通 Markdown 文本，同时继续在阅读列内换行。
-- **箭头和根号的几何更准确** — 只有确认处于美元围栏公式内部时才把 ASCII `->` 归一化为数学箭头；根号横线改按 OpenType/TeX 的上升部和间距规则布局，不再与根号字形出现接缝。
-- **文档字重更统一，数学字形更清楚** — Markdown 标题改用规则 CJK 轮廓配合主题强调色，避开局部粗细不一的合成粗体；数学字形增加整像素定位和灰度覆盖补偿，小字号细笔画更清晰。
-- **粘贴会留在发起操作的分屏** — 右键粘贴、Ctrl+V 和多行粘贴确认都会保留原始 pane 身份；确认层显示时，鼠标坐标和 Enter 也不会再把内容重定向到相邻分屏。
-- **数字小键盘 Enter 与主 Enter 一致** — 小键盘最右侧 Enter 现在走正常命令提交路径，不再进入粘贴动作。
-- **启动时也会使用用户选择的默认 Shell** — 第一个终端面板现在和新标签页读取同一份默认 Shell 设置；命令行明确指定的命令仍然优先。选择 PowerShell 7 后，不会再先打开 Windows PowerShell，只有新标签页才变成 7。
-- **拉伸窗口后底部和输入光标不再错位** — 拉伸、最大化、显示错误提示或打开搜索后，终端网格、面板布局、渲染器和 ConPTY 会共用最终行列数；消息栏和搜索栏已经占用的行不会在 PTY resize 前被错误加回来。
-- **最大化和全屏的窗口边界更稳了** — 启动时会等首帧可见后再应用最大化或全屏，这两种状态下会取消字符级拉伸步进，也不会再让不可用的隐藏 resize 边框抢走边缘点击。
+- **Markdown 换行与公式越界修复** — 普通段落、中文、连续长文本、解析失败的公式源码和过宽公式都会留在阅读列内，不再越界或从右侧被裁掉。
+- **多行公式与识别边界修复** — 块级公式可以包含空行和 Unicode 说明文字，同时只有成对的 $...$ 和 $$...$$ 才会识别为数学公式；裸露 TeX 和引用代码仍按普通 Markdown 显示。
+- **公式几何与清晰度修复** — 箭头只在公式内部转换，根号横线能够与根号主体完整连接，Markdown 标题字重保持统一，小字号数学符号的边缘也更加清楚。
+- **分屏粘贴路由修复** — 右键粘贴和 Ctrl+V 始终把内容发送到发起粘贴的分屏，即使鼠标或焦点随后移动到其他分屏也不会改错目标。
+- **Enter 穿透修复** — 多行粘贴确认框显示时，Enter 只处理当前确认，不会再发送到后方终端或相邻分屏；确认后的内容仍然只进入发起粘贴的分屏。
+- **分屏 Markdown 输入穿透修复** — 在分屏窗口中查看 Markdown 文档时，文档使用的键盘、鼠标和滚动操作不再发送到相邻或后方终端。
+- **数字小键盘 Enter 修复** — 小键盘最右侧 Enter 现在与主 Enter 一样提交命令，不再触发粘贴行为。
+- **SFTP 分屏连接修复** — 从 SSH 分屏打开文件面板时，会使用该分屏已经认证的连接目标，不再因标题、命令或焦点变化连接到其他主机。
+- **Shell 提示符生命周期修复** — Nebula 在报告目录变化和命令完成状态时，会保留已有的 PowerShell、Bash 提示符 Hook、命令退出状态和管道状态，不再破坏用户原有提示符工具。
+- **默认 Shell 选择修复** — 在默认 Shell 选择器中确认后会正确保存设置，不再把所选 Shell 当成新终端直接打开。
+- **AI 集成移除修复** — 移除集成时，即使某一项用户配置损坏，Nebula 也会继续清理其他工具，避免残留指向已卸载程序的 Hook。
 
 #### 改进
 
-- **数学内存和每帧开销都有明确上限** — 公式源码、解析事件、节点数、嵌套深度、矩阵单元格、绘制操作、字形尺寸、布局缓存和固定大小字形图集都设置了边界；文档只为可见区域生成绘制工作，重复公式会复用布局与字形缓存。
-- **便携包不再乱糟糟** — ZIP 根目录现在只保留 `nebula.exe` 和 `README.md`；运行组件、字体、文档和许可证分别放进 `runtime`、`fonts`、`docs` 与 `licenses`，Nebula 会自动识别新的运行组件位置。
-- **传文件更稳妥** — 上传和下载按 256 KiB 分块流式传输，不会把整个大文件一次性塞进内存。文件会先写入临时位置，完整成功后才替换正式文件；失败或取消时也会清理未完成的临时文件。
-- **下载包瘦了一半左右** — 字体、ConPTY 运行组件、通知助手、文档和许可证都还在，便携包体积从约 33.2 MB 降到了约 16.8 MB。
+- **大型 Markdown 数学文档加载改进** — 包含大量公式的 Markdown 文档能够快速打开并保持流畅滚动。Nebula 只处理当前可见区域、复用重复公式，并限制异常复杂的输入，让长时间阅读时的内存占用保持稳定。
+- **SFTP 操作改进** — SFTP 面板新增返回上级目录、拖放上传，以及包含刷新、上传文件、上传目录和新建目录的空白区域右键菜单；一次拖入多个文件时会合并为同一批传输，不会互相取消。
 
 ## 0.4.0 - 2026-07-14
 
@@ -123,12 +111,12 @@ Every release entry is provided in English and Simplified Chinese.
 - **Right-click menus feel lighter** — menus now use a soft theme-aware shadow, a subtle border, and a short open/close animation. Tab color labels and swatches also have more natural spacing.
   **中文：** 右键菜单加上了跟随主题的柔和阴影、细边框和短促的开合动画，层次更自然；标签页颜色名称和色块之间也留出了更舒服的间距。
 
-### Architecture, Research, And Verification / 架构、调研与验证
+### Architecture, Reliability, And Verification / 架构、可靠性与验证
 
 - **Cleaner internal structure** — context menus, text editing, SSH UI state, and shared visual values now live in separate modules, making later changes easier to understand and less likely to affect unrelated parts of the app.
   **中文：** 右键菜单、文本输入、SSH 界面状态和通用视觉配置已经拆到各自的模块里，后续修改更容易看懂，也更不容易误伤其他功能。
-- **UX review and competitor research** — added a source-backed review of common user expectations, covering normal, empty, and error states, safe recovery after destructive actions, focus behavior, and font/icon reliability. A separate report compares Kaku, kitty, zap, and Tabby across their interface, workflows, SSH, file tools, protocols, and backup design.
-  **中文：** 新增了一份结合现有代码的体验审查，重点检查正常、空白和出错时是否好理解，误删后能不能找回，焦点是否自然，以及字体和图标能否稳定显示；另一份报告则对比了 Kaku、kitty、zap 和 Tabby 的界面、工作流、SSH、文件工具、协议与备份设计。
+- **Product experience verification** — normal, empty, and error states were reviewed together with destructive-action recovery, focus behavior, and font and icon reliability, making common workflows easier to understand and recover.
+  **中文：** 完成正常、空白和错误状态的产品体验检查，并覆盖误操作恢复、焦点行为、字体和图标可靠性，让常用流程更容易理解，也更容易从错误中恢复。
 - **More regression tests** — new tests cover the terminal bottom edge, split views, link underlines, transparent cursor and selection colors, overlapping links, menu placement, SSH deletion recovery, text editing, theme-family switching, and control-state priority. Current result: **188 passed; 0 failed**.
   **中文：** 新增回归测试，覆盖终端底部显示、分屏、链接下划线、透明窗口中的光标与选区、重叠链接、菜单位置、SSH 删除恢复、文本输入、主题系列切换和操作状态优先级。当前结果：**188 项通过，0 项失败**。
 
@@ -143,8 +131,8 @@ Every release entry is provided in English and Simplified Chinese.
 
 - **Complete UI redesign** — the top bar and left sidebar now form a continuous L-shaped chrome shell, with a unified visual language across settings, the command palette, confirmation dialogs, and drawers.
   **中文：** 全面重设计窗口 UI：顶部栏与左侧栏组成连续 L 形 chrome，并统一设置、命令面板、确认框和抽屉的视觉语言。
-- **Windows Terminal-style tab interaction** — tabs support animated reordering, dragging into the active terminal to create a split, edge docking previews, and matching pointer feedback.
-  **中文：** 深度还原 Windows Terminal 标签交互：支持动画排序、拖入当前终端形成分屏、边缘停靠预览和对应的鼠标反馈。
+- **Flexible tab interaction** — tabs support animated reordering, dragging into the active terminal to create a split, edge docking previews, and matching pointer feedback.
+  **中文：** 标签页支持动画排序、拖入当前终端形成分屏、边缘停靠预览和对应的鼠标反馈。
 - **Files and Git drawer** — adds a right-side directory tree and Git workspace with filtering, expansion, path dragging, file status, commit/push actions, and new full-color file-type icons.
   **中文：** 新增右侧目录树与 Git 工作区，支持筛选、展开、路径拖拽、文件状态、提交/推送操作以及新的彩色文件类型图标。
 - **Markdown/GFM viewer** — adds read-only rendering for headings, lists, tables, task lists, code blocks, block quotes, links, and scrollable documents.
