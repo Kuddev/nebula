@@ -19,5 +19,8 @@ void main() {
 #else
     float coverage = texture(uTexture, uv).a;
 #endif
+    // The atlas stores grayscale coverage rather than premultiplied color.
+    // Keep the RGB fully opaque so the existing straight-alpha blend state
+    // uses the coverage as the glyph's actual opacity.
     FRAG_COLOR = vec4(uColor.rgb, uColor.a * coverage);
 }

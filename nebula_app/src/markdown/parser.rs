@@ -6,6 +6,7 @@
 //! This file owns ONLY the event folding. The AST lives in `super`, the
 //! on-screen layout (wrapping, virtual scrolling) in `display::markdown_view`.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -28,11 +29,92 @@ pub fn parse_markdown(text: &str) -> FormattedText {
     options.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     options.insert(Options::ENABLE_MATH);
 
+    let parser_input = normalize_standalone_display_math(text);
     let mut fold = Fold::new(Arc::from(text));
-    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+    for (event, range) in Parser::new_ext(parser_input.as_ref(), options).into_offset_iter() {
         fold.event(event, range);
     }
     fold.finish()
+}
+
+/// CommonMark paragraphs stop at blank lines, while real-world `$$` blocks
+/// often contain them. Replace only line endings inside paired standalone
+/// math fences with spaces in a temporary, byte-for-byte buffer. This keeps
+/// pulldown-cmark's offsets valid, and the folded document still points at the
+/// untouched UTF-8 source. Fenced code and YAML metadata retain their lines.
+fn normalize_standalone_display_math(text: &str) -> Cow<'_, str> {
+    let source = text.as_bytes();
+    let mut normalized: Option<Vec<u8>> = None;
+    let mut math_content_start = None;
+    let mut code_fence: Option<(u8, usize)> = None;
+    let mut in_metadata = false;
+    let mut line_start = 0usize;
+
+    while line_start < source.len() {
+        let newline = source[line_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(source.len(), |relative| line_start + relative);
+        let content_end = if newline > line_start && source[newline - 1] == b'\r' {
+            newline - 1
+        } else {
+            newline
+        };
+        let line = &text[line_start..content_end];
+        let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+        let block = (indent <= 3).then(|| &line[indent..]);
+
+        if line_start == 0 && block == Some("---") {
+            in_metadata = true;
+        } else if in_metadata {
+            if matches!(block, Some("---" | "...")) {
+                in_metadata = false;
+            }
+        } else if let Some(content_start) = math_content_start {
+            if block == Some("$$") {
+                let output = normalized.get_or_insert_with(|| source.to_vec());
+                for byte in &mut output[content_start..line_start] {
+                    if matches!(*byte, b'\r' | b'\n') {
+                        *byte = b' ';
+                    }
+                }
+                math_content_start = None;
+            }
+        } else if let Some((marker, minimum)) = code_fence {
+            if block.is_some_and(|content| closes_code_fence(content, marker, minimum)) {
+                code_fence = None;
+            }
+        } else if let Some(content) = block {
+            if let Some(fence) = opens_code_fence(content) {
+                code_fence = Some(fence);
+            } else if content == "$$" {
+                math_content_start = Some(content_end);
+            }
+        }
+
+        if newline == source.len() {
+            break;
+        }
+        line_start = newline + 1;
+    }
+
+    normalized.map_or(Cow::Borrowed(text), |bytes| {
+        Cow::Owned(String::from_utf8(bytes).expect("ASCII newline replacement preserves UTF-8"))
+    })
+}
+
+fn opens_code_fence(line: &str) -> Option<(u8, usize)> {
+    let marker = *line.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let length = line.bytes().take_while(|byte| *byte == marker).count();
+    (length >= 3).then_some((marker, length))
+}
+
+fn closes_code_fence(line: &str, marker: u8, minimum: usize) -> bool {
+    let length = line.bytes().take_while(|byte| *byte == marker).count();
+    length >= minimum && line[length..].trim().is_empty()
 }
 
 /// A list item whose first-line text is still being collected. Flushed into
@@ -157,7 +239,7 @@ impl Fold {
                 ));
             },
             Event::DisplayMath(math) => {
-                let source = self.source_ref(range, &math);
+                let source = self.display_math_source_ref(range, &math);
                 self.flush_inline_as_paragraph();
                 self.push_block(FormattedTextLine::DisplayMath(MathSource {
                     source,
@@ -392,6 +474,33 @@ impl Fold {
             .unwrap_or_else(|| TextRef::generated(rendered.to_owned().into_boxed_str()))
     }
 
+    fn display_math_source_ref(&self, outer: Range<usize>, rendered: &str) -> TextRef {
+        if let Some(range) = self.source.get(outer.clone()).and_then(|outer_text| {
+            outer_text.find(rendered).map(|offset| {
+                let start = outer.start + offset;
+                start..start + rendered.len()
+            })
+        }) {
+            return TextRef::source(self.source.clone(), range)
+                .unwrap_or_else(|| TextRef::generated(rendered.to_owned().into_boxed_str()));
+        }
+
+        let Some(outer_text) = self.source.get(outer.clone()) else {
+            return TextRef::generated(rendered.to_owned().into_boxed_str());
+        };
+        let leading = outer_text.len() - outer_text.trim_start().len();
+        let trimmed = outer_text.trim();
+        if !trimmed.starts_with("$$") || !trimmed.ends_with("$$") || trimmed.len() < 4 {
+            return TextRef::generated(rendered.to_owned().into_boxed_str());
+        }
+        let inner = &trimmed[2..trimmed.len() - 2];
+        let inner_leading = inner.len() - inner.trim_start().len();
+        let inner_trimmed = inner.trim();
+        let start = outer.start + leading + 2 + inner_leading;
+        TextRef::source(self.source.clone(), start..start + inner_trimmed.len())
+            .unwrap_or_else(|| TextRef::generated(rendered.to_owned().into_boxed_str()))
+    }
+
     /// Emit the pending inline run as a plain paragraph block, if any.
     fn flush_inline_as_paragraph(&mut self) {
         if self.inline.is_empty() {
@@ -479,6 +588,40 @@ mod tests {
         };
         assert!(std::sync::Arc::ptr_eq(source, &document.source));
         assert_eq!(&document.source[range.as_usize()], "x^2");
+    }
+
+    #[test]
+    fn standalone_display_math_crosses_blank_lines_without_copying_its_source() {
+        let source = concat!(
+            "#### 辅助角公式\n\n",
+            "$$\n",
+            r"\sin x + \cos x = \sqrt{2} \\",
+            "\n",
+            "\n",
+            r"这里使用了和角公式：\\",
+            "\n",
+            "\\sin(a + b) = \\sin a \\cos b + \\cos a \\sin b\n",
+            "$$\n",
+        );
+        let document = parse_markdown(source);
+        let FormattedTextLine::DisplayMath(math) = &document.lines[1] else {
+            panic!("expected one display-math block: {:?}", document.lines);
+        };
+
+        assert!(math.source.as_str().contains("\n\n这里使用了和角公式"));
+        let TextRef::Source { source, .. } = &math.source else {
+            panic!("display math must retain an original source range");
+        };
+        assert!(Arc::ptr_eq(source, &document.source));
+    }
+
+    #[test]
+    fn standalone_math_normalization_skips_fenced_code_and_yaml_metadata() {
+        let source = concat!(
+            "---\nexample: |\n  $$\n  metadata\n  $$\n---\n\n",
+            "```text\n$$\ncode\n\nblock\n$$\n```\n",
+        );
+        assert!(matches!(normalize_standalone_display_math(source), Cow::Borrowed(_)));
     }
 
     #[test]

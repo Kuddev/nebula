@@ -10,6 +10,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Added
 
+- **Native mathematics in Markdown documents** — inline $...$ and display $$...$$ formulas are parsed and laid out entirely in Rust, then drawn as cached glyphs and rule quads with the bundled Latin Modern Math font. Fractions, roots, scripts, limits, matrices, scalable delimiters, Greek letters, common operators, and Unicode prose inside formulas work without a WebView, JavaScript runtime, image export, or external TeX process.
 - **A built-in font fallback** — Maple Mono Normal NF CN is now embedded in Nebula as a runtime fallback, so the interface remains readable when the system font has not been installed. The system-installed font is still preferred, the installation reminder remains dismissible, and the portable archive still includes the original font under `fonts` for normal installation.
 - **Choose the directory shown in Files and Git** — the Files drawer can now select a custom root with the native folder picker, and the Git view follows the same root. The choice lasts until the current window closes; “Follow current directory” immediately returns to the focused terminal directory.
 - **Four SSH sign-in modes** — each saved host can now use Automatic, Password, Private Key, or Keyboard-interactive authentication. Automatic mode tries configured keys before password and interactive prompts, while an explicitly selected mode stays strict and does not silently switch methods.
@@ -20,12 +21,18 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Fixed
 
+- **Markdown always stays inside its reading column** — paragraphs wrap at words and CJK characters, overlong unbroken text is hard-wrapped, failed formulas wrap as visible TeX source, and oversized native formulas are fitted to the existing 860 px reading column instead of being clipped.
+- **Multiline display formulas survive blank rows** — standalone $$ fences can now contain blank lines and explanatory Unicode prose. Code fences and YAML metadata remain untouched, while the math block keeps a range into the original UTF-8 source.
+- **Document typography is more consistent and math is clearer** — Markdown headings use the regular CJK outline with strong theme ink instead of uneven synthetic bold, and math glyphs use pixel-aligned placement plus contrast-corrected grayscale coverage for sharper small-size strokes.
+- **Paste stays in the split pane that started it** — right-click paste, Ctrl+V, and multiline-paste confirmation retain the originating pane identity. The confirmation overlay no longer lets mouse coordinates or Enter redirect the text into a neighboring split.
+- **Numpad Enter behaves like the main Enter key** — the numeric keypad Enter key now follows the normal command-submission path instead of being routed through the paste action.
 - **The selected default shell now applies at launch** — the first terminal pane reads the same default-shell setting as a new tab. An explicit command-line command still takes priority, so setting PowerShell 7 no longer starts with Windows PowerShell and switches only after opening another tab.
 - **Resize no longer loses bottom rows or moves the input cursor** — the terminal grid, pane layout, renderer, and ConPTY now share the final row and column count after stretching, maximizing, showing an error, or opening search. Reserved message/search rows are no longer accidentally added back before the PTY resize.
 - **Safer maximized and fullscreen boundaries** — startup maximize/fullscreen is applied only after the first visible frame, character resize increments are cleared for those states, and the invisible resize border no longer captures edge clicks while the window cannot be resized.
 
 #### Improved
 
+- **Bounded math memory and frame cost** — formula parsing, node counts, nesting, matrix cells, draw operations, glyph dimensions, the layout cache, and the fixed-size glyph atlas all have explicit limits. Only visible document lines are expanded into draw work, and repeated formulas reuse cached layouts and glyphs.
 - **A cleaner portable archive** — the ZIP root now contains only `nebula.exe` and `README.md`. Runtime helpers, fonts, documentation, and licenses are grouped under `runtime`, `fonts`, `docs`, and `licenses`, and Nebula resolves the new runtime layout automatically.
 - **Safer transfers** — uploads and downloads stream in 256 KiB chunks instead of loading whole files into memory. Files are written to temporary paths first and moved into place only after the transfer succeeds, while failed or cancelled transfers clean up their partial files.
 - **A much smaller download** — the portable ZIP is now about half its previous size, while keeping the bundled font, ConPTY runtime, notification helper, documentation, and licenses intact.
@@ -34,6 +41,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### 新增
 
+- **Markdown 文档支持原生数学公式** — 行内 $...$ 和块级 $$...$$ 公式现在全部由 Rust 解析和排版，再使用内置 Latin Modern Math 字体以缓存字形和规则线 quad 直接绘制。分数、根式、上下标、极限、矩阵、伸缩括号、希腊字母、常用运算符以及公式中的 Unicode 说明文字都可以显示，整个过程不依赖 WebView、JavaScript、公式图片或外部 TeX 进程。
 - **内置了字体显示兜底** — Maple Mono Normal NF CN 现在会随主程序一起内置。即使用户忘了安装系统字体，界面也能正常显示；已经安装的系统字体仍然优先，缺少字体时的提醒依旧可以关闭，便携包里的 `fonts` 目录和原始字体文件也继续保留，方便按正常方式安装。
 - **文件和 Git 可以切换查看目录了** — 文件抽屉新增原生目录选择器，选中的目录也会同步用于 Git 页面。这个选择只保留到当前窗口关闭；点击“跟随”后会立即重新跟随当前终端所在目录。
 - **四种 SSH 登录方式** — 每个已保存主机都可以选择自动、密码、密钥或交互式认证。自动模式会先尝试配置的私钥，再尝试密码和交互式提示；手动选择某种方式后则只使用该方式，不会失败后悄悄切换。
@@ -44,12 +52,18 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### 修复
 
+- **Markdown 内容始终留在阅读列内** — 普通段落会按单词和中文字符换行，连续超长文本会强制折行，解析失败的公式会以可见 TeX 源码继续换行，过宽的原生公式则会收敛到现有 860 px 阅读列内，不再被右侧裁掉。
+- **块级公式可以跨越空行** — 独立 $$ 围栏现在可以包含空行和 Unicode 说明文字；代码围栏与 YAML 元数据保持原样，数学块仍然引用原始 UTF-8 源码范围。
+- **文档字重更统一，数学字形更清楚** — Markdown 标题改用规则 CJK 轮廓配合主题强调色，避开局部粗细不一的合成粗体；数学字形增加整像素定位和灰度覆盖补偿，小字号细笔画更清晰。
+- **粘贴会留在发起操作的分屏** — 右键粘贴、Ctrl+V 和多行粘贴确认都会保留原始 pane 身份；确认层显示时，鼠标坐标和 Enter 也不会再把内容重定向到相邻分屏。
+- **数字小键盘 Enter 与主 Enter 一致** — 小键盘最右侧 Enter 现在走正常命令提交路径，不再进入粘贴动作。
 - **启动时也会使用用户选择的默认 Shell** — 第一个终端面板现在和新标签页读取同一份默认 Shell 设置；命令行明确指定的命令仍然优先。选择 PowerShell 7 后，不会再先打开 Windows PowerShell，只有新标签页才变成 7。
 - **拉伸窗口后底部和输入光标不再错位** — 拉伸、最大化、显示错误提示或打开搜索后，终端网格、面板布局、渲染器和 ConPTY 会共用最终行列数；消息栏和搜索栏已经占用的行不会在 PTY resize 前被错误加回来。
 - **最大化和全屏的窗口边界更稳了** — 启动时会等首帧可见后再应用最大化或全屏，这两种状态下会取消字符级拉伸步进，也不会再让不可用的隐藏 resize 边框抢走边缘点击。
 
 #### 改进
 
+- **数学内存和每帧开销都有明确上限** — 公式源码、解析事件、节点数、嵌套深度、矩阵单元格、绘制操作、字形尺寸、布局缓存和固定大小字形图集都设置了边界；文档只为可见区域生成绘制工作，重复公式会复用布局与字形缓存。
 - **便携包不再乱糟糟** — ZIP 根目录现在只保留 `nebula.exe` 和 `README.md`；运行组件、字体、文档和许可证分别放进 `runtime`、`fonts`、`docs` 与 `licenses`，Nebula 会自动识别新的运行组件位置。
 - **传文件更稳妥** — 上传和下载按 256 KiB 分块流式传输，不会把整个大文件一次性塞进内存。文件会先写入临时位置，完整成功后才替换正式文件；失败或取消时也会清理未完成的临时文件。
 - **下载包瘦了一半左右** — 字体、ConPTY 运行组件、通知助手、文档和许可证都还在，便携包体积从约 33.2 MB 降到了约 16.8 MB。

@@ -8,6 +8,10 @@ use super::{MathError, MathErrorKind};
 
 const GLYPH_PADDING: f32 = 1.0;
 const MAX_GLYPH_DIMENSION: u32 = 512;
+/// Grayscale math glyphs do not receive DirectWrite's subpixel contrast.
+/// A modest coverage curve keeps thin Latin Modern strokes legible at the
+/// document's normal text size without allocating a supersampled bitmap.
+const COVERAGE_GAMMA: f32 = 0.75;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct RasterizedMathGlyph {
@@ -77,7 +81,7 @@ impl MathGlyphRasterizer {
             rgba[offset] = 255;
             rgba[offset + 1] = 255;
             rgba[offset + 2] = 255;
-            rgba[offset + 3] = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[offset + 3] = coverage_alpha(alpha);
         });
         Ok(RasterizedMathGlyph {
             width: width as u16,
@@ -87,6 +91,10 @@ impl MathGlyphRasterizer {
             rgba,
         })
     }
+}
+
+fn coverage_alpha(alpha: f32) -> u8 {
+    (alpha.clamp(0.0, 1.0).powf(COVERAGE_GAMMA) * 255.0).round() as u8
 }
 
 fn checked_i16(value: f32) -> Result<i16, MathError> {
@@ -194,5 +202,13 @@ mod tests {
             rasterizer.rasterize(glyph.0, 4096.0).unwrap_err().kind,
             MathErrorKind::GlyphTooLarge
         );
+    }
+
+    #[test]
+    fn coverage_curve_preserves_endpoints_and_strengthens_thin_edges() {
+        assert_eq!(coverage_alpha(0.0), 0);
+        assert_eq!(coverage_alpha(1.0), 255);
+        assert!(coverage_alpha(0.25) > 64);
+        assert!(coverage_alpha(0.25) < coverage_alpha(0.5));
     }
 }
