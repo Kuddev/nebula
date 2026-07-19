@@ -5,7 +5,7 @@ use std::mem::size_of;
 
 use ahash::RandomState;
 
-use super::layout::{MathGlyphOp, MathLayout, MathRuleOp};
+use super::layout::{MathGlyphOp, MathLayout, MathRuleOp, MathTextOp};
 use super::{MathError, MathErrorKind};
 
 pub(crate) const LAYOUT_CACHE_BUDGET: usize = 4 * 1024 * 1024;
@@ -189,6 +189,7 @@ fn layout_charge(layout: &MathLayout) -> usize {
     INDEX_OVERHEAD
         .saturating_add(layout.glyphs.capacity() * size_of::<MathGlyphOp>())
         .saturating_add(layout.rules.capacity() * size_of::<MathRuleOp>())
+        .saturating_add(layout.text.capacity() * size_of::<MathTextOp>())
 }
 
 #[cfg(test)]
@@ -205,6 +206,7 @@ mod tests {
             metrics: MathMetrics::default(),
             glyphs: vec![MathGlyphOp::default(); glyphs],
             rules: Vec::new(),
+            text: Vec::new(),
         }
     }
 

@@ -753,6 +753,12 @@ impl WindowContext {
     /// Consume mouse events used for dragging a split divider before the normal
     /// terminal input processor sees them.
     pub(super) fn preprocess_split_mouse(&mut self) {
+        // A window-level modal owns every pointer event. In particular, a
+        // confirmation button may overlap a divider; treating that click as a
+        // split drag would consume it before the modal can dispatch.
+        if self.display.nebula_confirm.is_some() {
+            return;
+        }
         if matches!(self.active_layout(), Layout::Leaf(_)) && self.split_drag.is_none() {
             return;
         }

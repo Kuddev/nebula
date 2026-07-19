@@ -59,9 +59,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             NebulaConfirm::CloseWindow { .. } => {
                 self.ctx.nebula_tab(crate::event::TabRequest::CloseWindow);
             },
-            NebulaConfirm::Paste { text, bracketed, .. } => {
+            NebulaConfirm::Paste { pane_id, text, bracketed, .. } => {
                 self.ctx.display().nebula_confirm = None;
-                self.ctx.paste_now(&text, bracketed);
+                // The window routes modal input to the originating pane. Keep
+                // this guard at the write boundary as a final invariant: a
+                // stale/reaped pane must never turn into a neighbouring paste.
+                if self.ctx.pane_id() == pane_id {
+                    self.ctx.paste_now(&text, bracketed);
+                }
             },
             NebulaConfirm::DeleteSsh { host, .. } => {
                 self.ctx.display().nebula_confirm = None;

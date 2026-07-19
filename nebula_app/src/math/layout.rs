@@ -2,6 +2,7 @@
 
 use pulldown_latex::event::{Dimension, DimensionUnit};
 use ttf_parser::GlyphId;
+use unicode_width::UnicodeWidthChar;
 
 use super::font::{GlyphMetrics, MathConstant, MathFont, StretchGlyph};
 use super::ir::{
@@ -37,11 +38,23 @@ pub(crate) struct MathRuleOp {
     pub(crate) height: f32,
 }
 
+/// Unicode character absent from the compact math font. The document renderer
+/// draws it through the application's existing cross-platform text cache.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MathTextOp {
+    pub(crate) character: char,
+    pub(crate) x: f32,
+    /// Relative to the formula baseline, positive values point down.
+    pub(crate) baseline_y: f32,
+    pub(crate) pixel_size: f32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct MathLayout {
     pub(crate) metrics: MathMetrics,
     pub(crate) glyphs: Vec<MathGlyphOp>,
     pub(crate) rules: Vec<MathRuleOp>,
+    pub(crate) text: Vec<MathTextOp>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -71,6 +84,7 @@ struct BoxPlan {
     children: Segment,
     glyphs: Segment,
     rules: Segment,
+    text: Segment,
     class: Option<AtomClass>,
     italic_correction: f32,
 }
@@ -96,6 +110,14 @@ struct LocalRule {
     y: f32,
     width: f32,
     height: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LocalText {
+    character: char,
+    x: f32,
+    baseline_y: f32,
+    pixel_size: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -132,6 +154,7 @@ pub(crate) fn layout_formula(
         placements: Vec::with_capacity(formula.arena.nodes.len()),
         glyphs: Vec::new(),
         rules: Vec::new(),
+        text: Vec::new(),
     };
     builder.build_all()?;
     builder.flatten()
@@ -228,6 +251,7 @@ struct LayoutBuilder<'a> {
     placements: Vec<PlacedChild>,
     glyphs: Vec<LocalGlyph>,
     rules: Vec<LocalRule>,
+    text: Vec<LocalText>,
 }
 
 impl LayoutBuilder<'_> {
@@ -237,6 +261,7 @@ impl LayoutBuilder<'_> {
             let child_start = self.placements.len();
             let glyph_start = self.glyphs.len();
             let rule_start = self.rules.len();
+            let text_start = self.text.len();
             let geometry = match node {
                 MathNode::Glyph {
                     character, class, variant, stretchy: _, delimiter_scale, ..
@@ -276,6 +301,7 @@ impl LayoutBuilder<'_> {
                 )?,
                 glyphs: Segment::new(glyph_start, self.glyphs.len(), MathErrorKind::OpLimit)?,
                 rules: Segment::new(rule_start, self.rules.len(), MathErrorKind::OpLimit)?,
+                text: Segment::new(text_start, self.text.len(), MathErrorKind::OpLimit)?,
                 class: geometry.class,
                 italic_correction: geometry.italic_correction,
             });
@@ -288,13 +314,22 @@ impl LayoutBuilder<'_> {
             .plans
             .get(self.formula.root.0 as usize)
             .ok_or_else(|| MathError::new(MathErrorKind::Parse, 0))?;
-        let mut layout =
-            MathLayout { metrics: root_plan.metrics, glyphs: Vec::new(), rules: Vec::new() };
+        let mut layout = MathLayout {
+            metrics: root_plan.metrics,
+            glyphs: Vec::new(),
+            rules: Vec::new(),
+            text: Vec::new(),
+        };
         let mut stack = vec![(self.formula.root, 0.0f32, 0.0f32)];
         while let Some((node, offset_x, offset_y)) = stack.pop() {
             let plan = self.plans[node.0 as usize];
             for glyph in &self.glyphs[plan.glyphs.bounds()] {
-                ensure_op_budget(layout.glyphs.len(), layout.rules.len(), self.limits)?;
+                ensure_op_budget(
+                    layout.glyphs.len(),
+                    layout.rules.len(),
+                    layout.text.len(),
+                    self.limits,
+                )?;
                 layout.glyphs.push(MathGlyphOp {
                     glyph_id: glyph.glyph_id.0,
                     x: offset_x + glyph.x,
@@ -303,12 +338,31 @@ impl LayoutBuilder<'_> {
                 });
             }
             for rule in &self.rules[plan.rules.bounds()] {
-                ensure_op_budget(layout.glyphs.len(), layout.rules.len(), self.limits)?;
+                ensure_op_budget(
+                    layout.glyphs.len(),
+                    layout.rules.len(),
+                    layout.text.len(),
+                    self.limits,
+                )?;
                 layout.rules.push(MathRuleOp {
                     x: offset_x + rule.x,
                     y: offset_y + rule.y,
                     width: rule.width,
                     height: rule.height,
+                });
+            }
+            for text in &self.text[plan.text.bounds()] {
+                ensure_op_budget(
+                    layout.glyphs.len(),
+                    layout.rules.len(),
+                    layout.text.len(),
+                    self.limits,
+                )?;
+                layout.text.push(MathTextOp {
+                    character: text.character,
+                    x: offset_x + text.x,
+                    baseline_y: offset_y + text.baseline_y,
+                    pixel_size: text.pixel_size,
                 });
             }
             for child in self.placements[plan.children.bounds()].iter().rev() {
@@ -327,10 +381,10 @@ impl LayoutBuilder<'_> {
         delimiter_scale: Option<DelimiterScale>,
     ) -> Result<Geometry, MathError> {
         let pixel_size = self.pixel_size(index)?;
-        let glyph = self
-            .font
-            .styled_glyph(character, variant)
-            .map_err(|_| MathError::new(MathErrorKind::MissingGlyph, 0))?;
+        let glyph = match self.font.styled_glyph(character, variant) {
+            Ok(glyph) => glyph,
+            Err(_) => return self.layout_text_character(index, character, class),
+        };
         let mut geometry = if let Some(scale) = delimiter_scale {
             let target = delimiter_scale_factor(scale) * pixel_size;
             self.vertical_glyph_box(glyph, target, pixel_size, self.axis(index)?)?
@@ -349,10 +403,10 @@ impl LayoutBuilder<'_> {
         small: bool,
     ) -> Result<Geometry, MathError> {
         let pixel_size = self.pixel_size(index)?;
-        let glyph = self
-            .font
-            .styled_glyph(character, variant)
-            .map_err(|_| MathError::new(MathErrorKind::MissingGlyph, 0))?;
+        let glyph = match self.font.styled_glyph(character, variant) {
+            Ok(glyph) => glyph,
+            Err(_) => return self.layout_text_character(index, character, AtomClass::Op),
+        };
         let mut geometry = if self.styles[index] == MathStyle::Display && !small {
             let target = self
                 .font
@@ -374,6 +428,27 @@ impl LayoutBuilder<'_> {
             class: Some(class),
             italic_correction: plan.italic_correction,
         }
+    }
+
+    fn layout_text_character(
+        &mut self,
+        index: usize,
+        character: char,
+        class: AtomClass,
+    ) -> Result<Geometry, MathError> {
+        let pixel_size = self.pixel_size(index)?;
+        let columns = character.width().unwrap_or(1).max(1) as f32;
+        // Match the normal terminal font's usual half-em Latin and full-em
+        // wide-character advances without retaining another font/shaper here.
+        let width = pixel_size * 0.52 * columns;
+        let height = pixel_size * 0.78;
+        let depth = pixel_size * 0.22;
+        self.push_text(LocalText { character, x: 0.0, baseline_y: 0.0, pixel_size })?;
+        Ok(Geometry {
+            metrics: MathMetrics { width, height, depth, axis: self.axis(index)? },
+            class: Some(class),
+            italic_correction: 0.0,
+        })
     }
 
     fn layout_row(&mut self, index: usize, range: ChildRange) -> Result<Geometry, MathError> {
@@ -1050,14 +1125,20 @@ impl LayoutBuilder<'_> {
     }
 
     fn push_glyph(&mut self, glyph: LocalGlyph) -> Result<(), MathError> {
-        ensure_op_budget(self.glyphs.len(), self.rules.len(), self.limits)?;
+        ensure_op_budget(self.glyphs.len(), self.rules.len(), self.text.len(), self.limits)?;
         self.glyphs.push(glyph);
         Ok(())
     }
 
     fn push_rule(&mut self, rule: LocalRule) -> Result<(), MathError> {
-        ensure_op_budget(self.glyphs.len(), self.rules.len(), self.limits)?;
+        ensure_op_budget(self.glyphs.len(), self.rules.len(), self.text.len(), self.limits)?;
         self.rules.push(rule);
+        Ok(())
+    }
+
+    fn push_text(&mut self, text: LocalText) -> Result<(), MathError> {
+        ensure_op_budget(self.glyphs.len(), self.rules.len(), self.text.len(), self.limits)?;
+        self.text.push(text);
         Ok(())
     }
 
@@ -1090,8 +1171,13 @@ impl LayoutBuilder<'_> {
     }
 }
 
-fn ensure_op_budget(glyphs: usize, rules: usize, limits: MathLimits) -> Result<(), MathError> {
-    if glyphs.saturating_add(rules) >= limits.max_ops {
+fn ensure_op_budget(
+    glyphs: usize,
+    rules: usize,
+    text: usize,
+    limits: MathLimits,
+) -> Result<(), MathError> {
+    if glyphs.saturating_add(rules).saturating_add(text) >= limits.max_ops {
         Err(MathError::new(MathErrorKind::OpLimit, 0))
     } else {
         Ok(())
