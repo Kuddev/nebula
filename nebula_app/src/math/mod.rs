@@ -2,10 +2,12 @@
 //!
 //! 该模块不依赖窗口、OpenGL 或主题类型，保证同一份布局可被不同渲染后端复用。
 
+pub(crate) mod cache;
 pub(crate) mod font;
 pub(crate) mod ir;
 pub(crate) mod layout;
 pub(crate) mod parser;
+pub(crate) mod rasterizer;
 pub(crate) mod spacing;
 pub(crate) mod validate;
 
@@ -47,6 +49,7 @@ pub(crate) enum MathErrorKind {
     OpLimit,
     Parse,
     MissingGlyph,
+    GlyphTooLarge,
     Font,
 }
 
