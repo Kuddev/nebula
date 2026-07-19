@@ -332,7 +332,7 @@ impl WindowContext {
             renderer::platform::create_gl_context(&gl_display, &gl_config, raw_window_handle)?;
         crate::boot_trace("gl context created");
 
-        let display = Display::new(window, gl_context, &config, false)?;
+        let display = Display::new(window, gl_context, &config, event_loop.system_theme(), false)?;
         crate::boot_trace("display ready (fonts rasterized)");
 
         Self::new(display, config, options, proxy, boot)
@@ -374,7 +374,7 @@ impl WindowContext {
         let gl_context =
             renderer::platform::create_gl_context(&gl_display, gl_config, Some(raw_window_handle))?;
 
-        let display = Display::new(window, gl_context, &config, tabbed)?;
+        let display = Display::new(window, gl_context, &config, event_loop.system_theme(), tabbed)?;
 
         let mut window_context = Self::new(display, config, options, proxy, boot)?;
 
@@ -2158,12 +2158,16 @@ impl WindowContext {
     /// Process events for this terminal window.
     pub fn handle_event(
         &mut self,
-        #[cfg(target_os = "macos")] event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         event_proxy: &EventLoopProxy<Event>,
         clipboard: &mut Clipboard,
         scheduler: &mut Scheduler,
         event: WinitEvent<Event>,
     ) {
+        // `Window::theme()` can retain a stale manual override. The event-loop
+        // query is system-wide and lets automatic mode react immediately.
+        self.display.sync_system_theme(event_loop.system_theme());
+
         match event {
             WinitEvent::AboutToWait
             | WinitEvent::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {

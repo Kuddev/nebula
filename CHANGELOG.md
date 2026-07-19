@@ -27,6 +27,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **SFTP split-session routing fix** — opening the file panel from a split SSH terminal now uses that pane's authenticated destination, so the panel does not connect to a different host after titles, commands, or focus change.
 - **Shell prompt lifecycle fix** — Nebula now preserves existing PowerShell and Bash prompt hooks, command exit status, pipeline status, and prompt behavior while still reporting directory changes and command completion.
 - **Default-shell picker fix** — confirming a shell in the default-shell picker now saves it as the default instead of opening it as a new terminal.
+- **System appearance following fix** — enabling automatic appearance now reads the operating system theme directly instead of reusing a stale manual window theme, so switching from a light theme follows an already-dark system immediately and continues tracking later changes.
 - **AI integration removal fix** — removing integrations now continues through every supported tool even when one user configuration is damaged, avoiding stale hooks that point to an uninstalled Nebula executable.
 
 #### Improved
@@ -55,6 +56,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **SFTP 分屏连接修复** — 从 SSH 分屏打开文件面板时，会使用该分屏已经认证的连接目标，不再因标题、命令或焦点变化连接到其他主机。
 - **Shell 提示符生命周期修复** — Nebula 在报告目录变化和命令完成状态时，会保留已有的 PowerShell、Bash 提示符 Hook、命令退出状态和管道状态，不再破坏用户原有提示符工具。
 - **默认 Shell 选择修复** — 在默认 Shell 选择器中确认后会正确保存设置，不再把所选 Shell 当成新终端直接打开。
+- **系统明暗模式跟随修复** — 开启自动跟随后会直接读取操作系统主题，不再沿用窗口中残留的手动浅色状态；即使系统已经处于深色，也能立即切换并继续响应之后的明暗变化。
 - **AI 集成移除修复** — 移除集成时，即使某一项用户配置损坏，Nebula 也会继续清理其他工具，避免残留指向已卸载程序的 Hook。
 
 #### 改进

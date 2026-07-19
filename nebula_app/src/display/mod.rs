@@ -1670,11 +1670,23 @@ fn alt_screen_vertical_padding_bands(
     [top, band(grid_bottom, bottom_limit)]
 }
 
+/// Prefer the event loop's system-wide appearance over the window theme.
+///
+/// On Windows, `Window::theme()` is a cached per-window value and can still
+/// contain the previous manual override immediately after `set_theme(None)`.
+fn system_theme_snapshot(
+    event_loop_theme: Option<WinitTheme>,
+    window_theme: Option<WinitTheme>,
+) -> Option<WinitTheme> {
+    event_loop_theme.or(window_theme)
+}
+
 impl Display {
     pub fn new(
         window: Window,
         gl_context: NotCurrentContext,
         config: &UiConfig,
+        system_theme: Option<WinitTheme>,
         _tabbed: bool,
     ) -> Result<Display, Error> {
         let raw_window_handle = window.raw_window_handle();
@@ -1785,7 +1797,7 @@ impl Display {
         if settings_init.follow_system_theme {
             window.set_theme(None);
         }
-        let nebula_system_theme = window.theme();
+        let nebula_system_theme = system_theme_snapshot(system_theme, window.theme());
         let nebula_theme = if settings_init.follow_system_theme {
             nebula_system_theme
                 .map(|theme| {
@@ -3037,7 +3049,8 @@ impl Display {
             // winit explicitly suppresses ThemeChanged for overridden
             // windows, so automatic mode must let the OS own this value.
             self.window.set_theme(None);
-            self.nebula_system_theme = self.window.theme();
+            self.nebula_system_theme =
+                system_theme_snapshot(self.nebula_system_theme, self.window.theme());
         } else {
             self.window.set_theme(self.nebula_window_theme_override);
         }
@@ -3058,6 +3071,18 @@ impl Display {
     /// Apply a live operating-system appearance change without rewriting the
     /// stored theme family. This is intentionally a no-op in manual mode.
     pub fn system_theme_changed(&mut self, system_theme: WinitTheme) {
+        self.sync_system_theme(Some(system_theme));
+    }
+
+    /// Refresh the system appearance independently from the window's cached
+    /// theme. This also keeps manual-mode windows ready to switch immediately
+    /// when the user enables automatic following.
+    pub fn sync_system_theme(&mut self, system_theme: Option<WinitTheme>) {
+        let Some(system_theme) = system_theme else { return };
+        if self.nebula_system_theme == Some(system_theme) {
+            return;
+        }
+
         self.nebula_system_theme = Some(system_theme);
         if self.nebula_follow_system_theme {
             let theme = self
@@ -4002,7 +4027,8 @@ impl Display {
                 self.nebula_window_theme_override
             });
             if settings.follow_system_theme {
-                self.nebula_system_theme = self.window.theme();
+                self.nebula_system_theme =
+                    system_theme_snapshot(self.nebula_system_theme, self.window.theme());
             }
         }
         let active_theme = if settings.follow_system_theme {
@@ -6740,10 +6766,11 @@ fn window_size(
 #[cfg(test)]
 mod nebula_ux_tests {
     use nebula_terminal::grid::Dimensions;
+    use winit::window::Theme as WinitTheme;
 
     use super::{
         NebulaConfirm, SizeInfo, alt_screen_vertical_padding_bands, remove_ssh_host_from_lists,
-        replays_untrusted_terminal_output, restore_ssh_host_to_lists,
+        replays_untrusted_terminal_output, restore_ssh_host_to_lists, system_theme_snapshot,
     };
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -6764,6 +6791,15 @@ mod nebula_ux_tests {
         for command in ["docker run app", "kubectl exec pod -- sh", "cargo test", "nvim"] {
             assert!(!replays_untrusted_terminal_output(command), "{command}");
         }
+    }
+
+    #[test]
+    fn system_theme_snapshot_beats_a_stale_window_override() {
+        assert_eq!(
+            system_theme_snapshot(Some(WinitTheme::Dark), Some(WinitTheme::Light)),
+            Some(WinitTheme::Dark)
+        );
+        assert_eq!(system_theme_snapshot(None, Some(WinitTheme::Light)), Some(WinitTheme::Light));
     }
 
     #[test]
