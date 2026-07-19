@@ -1,10 +1,23 @@
 # Installing Nebula
 
-## Release package (recommended)
+## Windows installer (recommended)
 
-1. Download `NebulaTerminal-v0.4.0-windows-x64.zip` from the
+1. Download `NebulaTerminal-<version>-windows-x64-setup.exe` from the
    [Releases](https://github.com/Kuddev/nebula/releases) page.
-2. Unzip anywhere (no installer, no admin rights).
+2. Follow the wizard to choose the installation directory and optional desktop
+   or Windows sign-in shortcuts. The default per-user installation does not
+   require administrator rights.
+3. The installer installs the bundled Maple Mono font and can launch Nebula on
+   the final page.
+
+Uninstalling closes Nebula, runs `nebula setup-ai --remove` before deleting the
+program files, and removes Nebula's Claude, Codex, opencode, and Pi integration.
+Other user-owned hook and notifier entries are preserved.
+
+## Portable archive
+
+1. Download `NebulaTerminal-<version>-windows-x64.zip` from the Releases page.
+2. Unzip it anywhere.
 3. **Install the font**: open `fonts`, double-click
    `MapleMonoNormal-NF-CN-Regular.ttf`, and press
    *Install*. Nebula embeds the same font as a runtime fallback, but the normal
@@ -46,6 +59,17 @@ The script builds the release workspace, verifies every required input, stages
 the directory layout above, creates the ZIP, and prints its file count, packed
 and unpacked sizes, and SHA-256. Use `-SkipBuild` only when the release binaries
 have already been built and verified.
+
+Build the wizard-based installer with Inno Setup 6.7.3:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1 -Force
+```
+
+The installer build validates the same runtime inputs, pins and verifies the
+UTF-8 Simplified Chinese wizard translation, and prints the setup executable's
+size and SHA-256. Pass `-InnoCompiler` when `ISCC.exe` is installed in a custom
+directory.
 
 ## First run
 

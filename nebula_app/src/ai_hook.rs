@@ -782,12 +782,13 @@ export default function (pi: ExtensionAPI) {
         };
         let path = dir.join("settings.json");
         if remove {
+            let mut failed = false;
             match remove_hooks() {
                 Ok(true) => println!("claude: 已从 {} 移除 hooks。", path.display()),
                 Ok(false) => println!("claude: {} 中没有 Nebula 的 hooks。", path.display()),
                 Err(err) => {
                     eprintln!("claude: 移除失败：{err}");
-                    return 1;
+                    failed = true;
                 },
             }
             match remove_codex_notify() {
@@ -795,7 +796,7 @@ export default function (pi: ExtensionAPI) {
                 Ok(false) => println!("codex: notify 不是 Nebula 接管的，未改动。"),
                 Err(err) => {
                     eprintln!("codex: 还原失败：{err}");
-                    return 1;
+                    failed = true;
                 },
             }
             match remove_opencode_plugin() {
@@ -803,7 +804,7 @@ export default function (pi: ExtensionAPI) {
                 Ok(false) => println!("opencode: 没有 Nebula 的插件，未改动。"),
                 Err(err) => {
                     eprintln!("opencode: 删除失败：{err}");
-                    return 1;
+                    failed = true;
                 },
             }
             match remove_pi_extension() {
@@ -811,10 +812,12 @@ export default function (pi: ExtensionAPI) {
                 Ok(false) => println!("pi: 没有 Nebula 的扩展，未改动。"),
                 Err(err) => {
                     eprintln!("pi: 删除失败：{err}");
-                    return 1;
+                    failed = true;
                 },
             }
-            return 0;
+            // 卸载器必须尽最大努力清理所有集成，不能因一个损坏的用户配置
+            // 提前返回而让其他 Hook 永久指向即将被删除的程序目录。
+            return i32::from(failed);
         }
         match helper_command() {
             Some(command) => println!("hook 命令：{command}"),
