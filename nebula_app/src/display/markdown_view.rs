@@ -1839,6 +1839,43 @@ mod tests {
     }
 
     #[test]
+    fn math_rendering_fixture_uses_native_layout_for_every_formula() {
+        let document =
+            crate::markdown::parse_markdown(include_str!("../../../docs/math-rendering-test.md"));
+        let mut formula_count = 0usize;
+        let mut check = |source: &MathSource, display: bool| {
+            let formula = parse_formula(source.as_str(), display, DEFAULT_LIMITS)
+                .unwrap_or_else(|error| panic!("fixture parse failed for {:?}: {error:?}", source));
+            let layout =
+                layout_formula(&formula, 18.0, 1.0, DEFAULT_LIMITS).unwrap_or_else(|error| {
+                    panic!("fixture layout failed for {:?}: {error:?}", source)
+                });
+            assert!(layout.metrics.width.is_finite() && layout.metrics.width > 0.0);
+            formula_count += 1;
+        };
+
+        for line in &document.lines {
+            match line {
+                FormattedTextLine::DisplayMath(source) => check(source, true),
+                FormattedTextLine::Line(inline)
+                | FormattedTextLine::Heading(crate::markdown::FormattedTextHeader {
+                    text: inline,
+                    ..
+                }) => {
+                    for fragment in inline {
+                        if let FragmentContent::Math(source) = &fragment.content {
+                            check(source, false);
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+
+        assert!(formula_count >= 25, "fixture should cover many formulas");
+    }
+
+    #[test]
     fn table_cells_keep_math_as_native_objects() {
         let markdown = "| expression | value |\n| --- | --- |\n| $x^2$ | $\\frac{1}{2}$ |";
         let mut doc = DocView {
