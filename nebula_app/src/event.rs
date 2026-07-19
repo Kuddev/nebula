@@ -515,7 +515,6 @@ impl ApplicationHandler<Event> for Processor {
         let is_redraw = matches!(event, WindowEvent::RedrawRequested);
 
         window_context.handle_event(
-            #[cfg(target_os = "macos")]
             _event_loop,
             &self.proxy,
             &mut self.clipboard,
@@ -681,7 +680,6 @@ impl ApplicationHandler<Event> for Processor {
                 let event = WinitEvent::UserEvent(Event::new(payload, None));
                 for window_context in self.windows.values_mut() {
                     window_context.handle_event(
-                        #[cfg(target_os = "macos")]
                         event_loop,
                         &self.proxy,
                         &mut self.clipboard,
@@ -839,7 +837,6 @@ impl ApplicationHandler<Event> for Processor {
             (payload, Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.handle_event(
-                        #[cfg(target_os = "macos")]
                         event_loop,
                         &self.proxy,
                         &mut self.clipboard,
@@ -869,7 +866,6 @@ impl ApplicationHandler<Event> for Processor {
         // Dispatch event to all windows.
         for window_context in self.windows.values_mut() {
             window_context.handle_event(
-                #[cfg(target_os = "macos")]
                 event_loop,
                 &self.proxy,
                 &mut self.clipboard,
