@@ -23,11 +23,13 @@ use crate::display::color::Rgb;
 use crate::display::content::RenderableCell;
 use crate::gl;
 use crate::renderer::image::ImageRenderer;
+use crate::renderer::math::{MathClip, MathRenderer};
 use crate::renderer::rects::{RectRenderer, RenderRect};
 use crate::renderer::shader::ShaderError;
 use crate::renderer::ui::{UiQuad, UiRenderer};
 
 pub mod image;
+pub(crate) mod math;
 pub mod platform;
 pub mod rects;
 mod shader;
@@ -100,6 +102,7 @@ pub struct Renderer {
     rect_renderer: RectRenderer,
     ui_renderer: UiRenderer,
     image_renderer: ImageRenderer,
+    math_renderer: MathRenderer,
     robustness: bool,
     /// Full window height in physical pixels, used to flip pane viewports from
     /// top-down `SizeInfo` coordinates into OpenGL's bottom-left origin. Set
@@ -165,20 +168,23 @@ impl Renderer {
             None => (shader_version.as_ref() >= "3.3" && !is_gles_context, true),
         };
 
-        let (text_renderer, rect_renderer, ui_renderer, image_renderer) = if use_glsl3 {
-            let text_renderer = TextRendererProvider::Glsl3(Glsl3Renderer::new()?);
-            let rect_renderer = RectRenderer::new(ShaderVersion::Glsl3)?;
-            let ui_renderer = UiRenderer::new(ShaderVersion::Glsl3)?;
-            let image_renderer = ImageRenderer::new(ShaderVersion::Glsl3)?;
-            (text_renderer, rect_renderer, ui_renderer, image_renderer)
-        } else {
-            let text_renderer =
-                TextRendererProvider::Gles2(Gles2Renderer::new(allow_dsb, is_gles_context)?);
-            let rect_renderer = RectRenderer::new(ShaderVersion::Gles2)?;
-            let ui_renderer = UiRenderer::new(ShaderVersion::Gles2)?;
-            let image_renderer = ImageRenderer::new(ShaderVersion::Gles2)?;
-            (text_renderer, rect_renderer, ui_renderer, image_renderer)
-        };
+        let (text_renderer, rect_renderer, ui_renderer, image_renderer, math_renderer) =
+            if use_glsl3 {
+                let text_renderer = TextRendererProvider::Glsl3(Glsl3Renderer::new()?);
+                let rect_renderer = RectRenderer::new(ShaderVersion::Glsl3)?;
+                let ui_renderer = UiRenderer::new(ShaderVersion::Glsl3)?;
+                let image_renderer = ImageRenderer::new(ShaderVersion::Glsl3)?;
+                let math_renderer = MathRenderer::new(ShaderVersion::Glsl3)?;
+                (text_renderer, rect_renderer, ui_renderer, image_renderer, math_renderer)
+            } else {
+                let text_renderer =
+                    TextRendererProvider::Gles2(Gles2Renderer::new(allow_dsb, is_gles_context)?);
+                let rect_renderer = RectRenderer::new(ShaderVersion::Gles2)?;
+                let ui_renderer = UiRenderer::new(ShaderVersion::Gles2)?;
+                let image_renderer = ImageRenderer::new(ShaderVersion::Gles2)?;
+                let math_renderer = MathRenderer::new(ShaderVersion::Gles2)?;
+                (text_renderer, rect_renderer, ui_renderer, image_renderer, math_renderer)
+            };
 
         // Enable debug logging for OpenGL as well.
         if log::max_level() >= LevelFilter::Debug && GlExtensions::contains("GL_KHR_debug") {
@@ -195,6 +201,7 @@ impl Renderer {
             rect_renderer,
             ui_renderer,
             image_renderer,
+            math_renderer,
             robustness,
             window_height: std::cell::Cell::new(0.0),
         })
@@ -581,6 +588,49 @@ impl Renderer {
             // Restore viewport with padding.
             self.set_viewport(size_info);
         }
+    }
+
+    /// Draw one native math layout at a window-pixel baseline. Rules are submitted through the
+    /// existing UI quad batch; glyphs use the single fixed-size math atlas.
+    pub(crate) fn draw_math(
+        &mut self,
+        size_info: &SizeInfo,
+        layout: &crate::math::layout::MathLayout,
+        origin_x: f32,
+        baseline_y: f32,
+        color: Rgb,
+        clip: MathClip,
+    ) -> Result<(), crate::math::MathError> {
+        let rules: Vec<UiQuad> = layout
+            .rules
+            .iter()
+            .filter_map(|rule| {
+                let left = (origin_x + rule.x).max(clip.left);
+                let top = (baseline_y + rule.y).max(clip.top);
+                let right = (origin_x + rule.x + rule.width).min(clip.right);
+                let bottom = (baseline_y + rule.y + rule.height.max(1.0)).min(clip.bottom);
+                (right > left && bottom > top).then(|| UiQuad::solid(
+                    left,
+                    top,
+                    right - left,
+                    bottom - top,
+                    0.0,
+                    crate::renderer::ui::Rgba::opaque(color),
+                ))
+            })
+            .collect();
+        self.draw_ui(size_info, &rules);
+        unsafe {
+            gl::Viewport(0, 0, size_info.width() as i32, size_info.height() as i32);
+            gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);
+        }
+        let result = self.math_renderer.draw(size_info, layout, origin_x, baseline_y, color, clip);
+        self.invalidate_text_texture_cache();
+        unsafe {
+            gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
+            self.set_viewport(size_info);
+        }
+        result
     }
 
     /// Draw a full-window background image using CSS-like `cover` scaling.
