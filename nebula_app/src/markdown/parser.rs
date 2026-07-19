@@ -29,12 +29,139 @@ pub fn parse_markdown(text: &str) -> FormattedText {
     options.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     options.insert(Options::ENABLE_MATH);
 
-    let parser_input = normalize_standalone_display_math(text);
     let mut fold = Fold::new(Arc::from(text));
-    for (event, range) in Parser::new_ext(parser_input.as_ref(), options).into_offset_iter() {
-        fold.event(event, range);
+    let mut cursor = 0usize;
+    for quoted_math in quoted_display_math_blocks(text) {
+        fold_markdown_segment(&mut fold, &text[cursor..quoted_math.outer.start], cursor, options);
+        fold.flush_inline_as_paragraph();
+        fold.out.push(FormattedTextLine::Quote {
+            depth: quoted_math.depth,
+            line: Box::new(FormattedTextLine::DisplayMath(MathSource {
+                source: TextRef::generated(quoted_math.source),
+                mode: MathMode::Display,
+            })),
+        });
+        cursor = quoted_math.outer.end;
     }
+    fold_markdown_segment(&mut fold, &text[cursor..], cursor, options);
     fold.finish()
+}
+
+fn fold_markdown_segment(fold: &mut Fold, text: &str, source_offset: usize, options: Options) {
+    let parser_input = normalize_standalone_display_math(text);
+    for (event, range) in Parser::new_ext(parser_input.as_ref(), options).into_offset_iter() {
+        fold.event(event, range.start + source_offset..range.end + source_offset);
+    }
+}
+
+#[derive(Debug)]
+struct QuotedDisplayMath {
+    outer: Range<usize>,
+    depth: usize,
+    source: Box<str>,
+}
+
+// Extract only explicitly fenced math from block quotes. pulldown-cmark ends
+// a math paragraph at a bare quote row, so quoted formulas containing visual
+// blank lines otherwise expose their delimiters as text. Bare TeX commands
+// outside dollar fences remain normal Markdown text.
+fn quoted_display_math_blocks(text: &str) -> Vec<QuotedDisplayMath> {
+    let bytes = text.as_bytes();
+    let mut blocks = Vec::new();
+    let mut open: Option<(usize, usize, usize)> = None;
+    let mut code_fence: Option<(usize, u8, usize)> = None;
+    let mut in_metadata = false;
+    let mut line_start = 0usize;
+
+    while line_start < bytes.len() {
+        let newline = bytes[line_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |relative| line_start + relative);
+        let line_end = (newline < bytes.len()).then_some(newline + 1).unwrap_or(newline);
+        let content_end =
+            if newline > line_start && bytes[newline - 1] == b'\r' { newline - 1 } else { newline };
+        let line = &text[line_start..content_end];
+        let (quote_depth, quote_content) = quote_line_content(line);
+        let trimmed = quote_content.trim();
+
+        if line_start == 0 && quote_depth == 0 && markdown_block_content(line) == Some("---") {
+            in_metadata = true;
+        } else if in_metadata {
+            if quote_depth == 0 && matches!(markdown_block_content(line), Some("---" | "...")) {
+                in_metadata = false;
+            }
+        } else if let Some((outer_start, content_start, depth)) = open {
+            if quote_depth != depth {
+                // 引用层级已经中断，不能跨到后续引用块寻找闭合符号。
+                open = None;
+            } else if trimmed == "$$" {
+                let source = extract_quoted_math_source(&text[content_start..line_start], depth);
+                blocks.push(QuotedDisplayMath {
+                    outer: outer_start..line_end,
+                    depth,
+                    source: source.into_boxed_str(),
+                });
+                open = None;
+            }
+        } else if let Some((depth, marker, minimum)) = code_fence {
+            if quote_depth != depth {
+                code_fence = None;
+            } else if markdown_block_content(quote_content)
+                .is_some_and(|content| closes_code_fence(content, marker, minimum))
+            {
+                code_fence = None;
+            }
+        } else if quote_depth > 0 {
+            if let Some(content) = markdown_block_content(quote_content) {
+                if let Some((marker, minimum)) = opens_code_fence(content) {
+                    code_fence = Some((quote_depth, marker, minimum));
+                } else if content == "$$" {
+                    open = Some((line_start, line_end, quote_depth));
+                }
+            }
+        }
+
+        if newline == bytes.len() {
+            break;
+        }
+        line_start = newline + 1;
+    }
+
+    blocks
+}
+
+fn markdown_block_content(line: &str) -> Option<&str> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    (indent <= 3).then(|| &line[indent..])
+}
+
+fn quote_line_content(mut line: &str) -> (usize, &str) {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent > 3 {
+        return (0, line);
+    }
+    line = &line[indent..];
+    let mut depth = 0usize;
+    while let Some(rest) = line.strip_prefix('>') {
+        depth += 1;
+        line = rest.strip_prefix([' ', '\t']).unwrap_or(rest);
+    }
+    (depth, line)
+}
+
+fn extract_quoted_math_source(source: &str, depth: usize) -> String {
+    let mut output = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let (line_depth, content) = quote_line_content(line);
+        if line_depth >= depth {
+            output.push_str(content.trim_start());
+        }
+        output.push('\n');
+    }
+    output.trim().to_owned()
 }
 
 /// CommonMark paragraphs stop at blank lines, while real-world `$$` blocks
@@ -622,6 +749,71 @@ mod tests {
             "```text\n$$\ncode\n\nblock\n$$\n```\n",
         );
         assert!(matches!(normalize_standalone_display_math(source), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn quoted_display_math_accepts_indentation_and_blank_quote_rows() {
+        for source in [
+            concat!(
+                ">   $$\n",
+                ">   \\lim_{x \\to x_0} f(x) = A \\iff f(x) = A + \\alpha(x)\n",
+                ">   $$\n",
+            ),
+            concat!(
+                "> $$\n",
+                "> sin(2a)=2sin(a)cos(a) -> sin(a)cos(a)\\\\\n",
+                ">\n",
+                "> cos(2a)=cos^2(a)-sin^2(a)\\\\\n",
+                "> $$\n",
+            ),
+        ] {
+            let document = parse_markdown(source);
+            let Some(FormattedTextLine::Quote { line, .. }) = document.lines.front() else {
+                panic!("expected quoted formula: {:?}", document.lines);
+            };
+            assert!(
+                matches!(line.as_ref(), FormattedTextLine::DisplayMath(_)),
+                "quoted math rendered as text: {:?}",
+                document.lines
+            );
+        }
+    }
+
+    #[test]
+    fn bare_tex_commands_are_plain_text_until_dollar_fenced() {
+        let document = parse_markdown(concat!(
+            "a -> b\n\n",
+            "\\lim_{x \\to 0} f(x)\n\n",
+            "\\frac{1}{2}\n\n",
+            "\\sqrt{x^2}\n",
+            "\\(x^2\\) and \\[y^2\\]\n",
+        ));
+        for line in &document.lines {
+            let FormattedTextLine::Line(inline) = line else {
+                panic!("bare TeX unexpectedly became a block: {line:?}");
+            };
+            assert!(inline.iter().all(|fragment| !fragment.is_math()));
+        }
+        assert!(document.raw_text().contains("a -> b"));
+
+        let fenced = parse_markdown(r"plain $x^2$ and $$\frac{1}{2}$$");
+        assert!(fenced.lines.iter().any(|line| match line {
+            FormattedTextLine::Line(inline) => inline.iter().any(FormattedTextFragment::is_math),
+            FormattedTextLine::DisplayMath(_) => true,
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn quoted_code_fences_never_become_display_math() {
+        let source = concat!("> ```tex\n", "> $$\n", "> \\frac{1}{2}\n", "> $$\n", "> ```\n",);
+        assert!(quoted_display_math_blocks(source).is_empty());
+
+        let document = parse_markdown(source);
+        let Some(FormattedTextLine::Quote { line, .. }) = document.lines.front() else {
+            panic!("expected quoted code block: {:?}", document.lines);
+        };
+        assert!(matches!(line.as_ref(), FormattedTextLine::CodeBlock(_)));
     }
 
     #[test]

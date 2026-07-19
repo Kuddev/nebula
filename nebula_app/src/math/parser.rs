@@ -24,15 +24,16 @@ pub(crate) fn parse_formula(
     validate(source, limits)?;
 
     let style = if display { MathStyle::Display } else { MathStyle::Text };
+    let normalized_source = normalize_ascii_math_arrows(source);
     // pulldown-latex intentionally rejects `\\` outside an alignment
     // environment. Markdown math blocks commonly use it directly, so wrap
     // only formulas that contain an environment-external line break in a
     // one-column gathered environment. Existing matrix/align rows retain
     // their own scope and are not double-wrapped.
-    let parser_source = if display && has_unscoped_line_break(source) {
-        Cow::Owned(format!(r"\begin{{gathered}}{source}\end{{gathered}}"))
+    let parser_source = if display && has_unscoped_line_break(normalized_source.as_ref()) {
+        Cow::Owned(format!(r"\begin{{gathered}}{}\end{{gathered}}", normalized_source.as_ref()))
     } else {
-        Cow::Borrowed(source)
+        Cow::Borrowed(normalized_source.as_ref())
     };
     let storage = Storage::new();
     let mut builder = Builder::new(style, limits);
@@ -47,6 +48,16 @@ pub(crate) fn parse_formula(
     }
     let (arena, root) = builder.finish()?;
     Ok(ParsedFormula { arena, root, style, event_count })
+}
+
+/// 仅对已经由 Markdown dollar fence 确认的公式源码兼容常见 ASCII 箭头。
+/// 普通 Markdown 文本不会进入本函数，因此不会模糊 TeX 的识别边界。
+fn normalize_ascii_math_arrows(source: &str) -> Cow<'_, str> {
+    if source.contains("->") {
+        Cow::Owned(source.replace("->", r"\to "))
+    } else {
+        Cow::Borrowed(source)
+    }
 }
 
 /// Detect `\\` outside `\begin{...}` environments in one linear scan.
@@ -790,6 +801,16 @@ mod tests {
             formula.arena.node(*id),
             MathNode::Glyph { class: AtomClass::Rel, .. }
         )));
+    }
+
+    #[test]
+    fn ascii_arrow_inside_formula_becomes_a_relation_glyph() {
+        let formula = parse("a -> b");
+        assert!(root_children(&formula).iter().any(|id| matches!(
+            formula.arena.node(*id),
+            MathNode::Glyph { character: '→', class: AtomClass::Rel, .. }
+        )));
+        assert!(matches!(normalize_ascii_math_arrows(r"a \to b"), Cow::Borrowed(_)));
     }
 
     #[test]
