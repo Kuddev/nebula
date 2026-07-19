@@ -196,7 +196,7 @@ experience that works without extra setup.
 > icon set. (Licensed under SIL OFL 1.1.)
 
 **Release build (recommended)** — download
-`NebulaTerminal-v0.5.0-windows-x64.zip` from
+`NebulaTerminal-v0.6.0-windows-x64.zip` from
 [Releases](https://github.com/Kuddev/nebula/releases), unzip
 anywhere, install `fonts/MapleMonoNormal-NF-CN-Regular.ttf`, then run
 `nebula.exe`. Keep the extracted folders in place: AI and ConPTY helpers live
@@ -378,7 +378,7 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 
 **Release 包（推荐）** — 从
 [Releases](https://github.com/Kuddev/nebula/releases) 下载
-`NebulaTerminal-v0.5.0-windows-x64.zip`，解压到任意目录，先安装
+`NebulaTerminal-v0.6.0-windows-x64.zip`，解压到任意目录，先安装
 `fonts/MapleMonoNormal-NF-CN-Regular.ttf`，再运行 `nebula.exe`。请保持解压后的
 目录结构不变：AI 通知与 ConPTY 组件位于 `runtime/`，字体、文档和许可说明分别
 位于 `fonts/`、`docs/` 与 `licenses/`。

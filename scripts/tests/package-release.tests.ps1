@@ -37,7 +37,7 @@ try {
     }
 
     & $packageScript -Version 'unreleased' -SkipBuild -OutputDirectory $resolvedOutput
-    $zipPath = Join-Path $resolvedOutput 'NebulaTerminal-unreleased-windows-x64.zip'
+    $zipPath = Join-Path $resolvedOutput 'NebulaTerminal-vunreleased-windows-x64.zip'
     if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
         throw "Packaging script did not create $zipPath"
     }
