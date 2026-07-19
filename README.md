@@ -138,6 +138,26 @@ experience that works without extra setup.
   `$env:KEY=value` assignments are auto-quoted, `ls` gets colors and
   clickable OSC 8 hyperlinks.
 
+**Documents & native mathematics**
+
+<p align="center">
+  <img src="docs/screenshots/native-math-rendering.png" alt="Native mathematics rendered in a Nebula Markdown document" width="920" />
+</p>
+
+- **Markdown/GFM document tabs** — open Markdown, JSON, and plain-text files
+  directly from the file drawer with headings, lists, tables, code blocks,
+  links, quotes, word wrapping, and virtualized scrolling.
+- **Native TeX mathematics** — inline `$...$` and display `$$...$$` formulas
+  are parsed and laid out entirely in Rust, then drawn through cached Latin
+  Modern Math glyphs and GPU rule quads. Fractions, radicals, scripts, limits,
+  integrals, matrices, scalable delimiters, Greek letters, and common symbols
+  render without a WebView, JavaScript runtime, or external TeX process.
+- **Bounded document rendering** — oversized formulas fit the reading column,
+  long prose and failed formulas wrap, and parser, layout, cache, atlas, and
+  per-frame work all have explicit limits. See the
+  [math rendering fixture](docs/math-rendering-test.md) for the screenshot and
+  regression set.
+
 **Interface**
 
 <p align="center">
@@ -209,6 +229,7 @@ Windows/Linux paths, arrays, modules, and reload behavior.
 | Terminal core | GPU-resident grid + VTE escape-sequence parsing |
 | Session model | Resident mux process, loopback attach protocol |
 | Shell integration | PowerShell + PSReadLine, Git Bash; OSC 7/8/9/133/1337 |
+| Document math | pulldown-cmark + pulldown-latex + OpenType MATH (Latin Modern Math) |
 | Fonts | Maple Mono Normal NF CN (Nerd Font glyphs, CJK-aware) |
 
 ### 📦 Requirements
@@ -307,6 +328,22 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 - **顺手的小修正** — 不带引号的 `cd D:/Program Files` 直接可用，裸
   `$env:KEY=value` 自动加引号，`ls` 带颜色和可点击的 OSC 8 超链接。
 
+**文档与原生数学公式**
+
+<p align="center">
+  <img src="docs/screenshots/native-math-rendering.png" alt="Nebula Markdown 文档中的原生数学公式" width="920" />
+</p>
+
+- **Markdown/GFM 文档标签页** — 可以从文件抽屉直接打开 Markdown、JSON 和
+  纯文本文件，原生显示标题、列表、表格、代码块、链接、引用、自动换行和虚拟滚动。
+- **原生 TeX 数学排版** — 行内 `$...$` 与块级 `$$...$$` 公式全部由 Rust
+  解析和布局，再使用缓存的 Latin Modern Math 字形与 GPU 规则线 quad 绘制。
+  分式、根式、上下标、极限、积分、矩阵、伸缩括号、希腊字母和常用符号均不经过
+  WebView、JavaScript 运行时或外部 TeX 进程。
+- **有界文档渲染** — 超宽公式会收敛到阅读列，长文本和失败公式会继续换行；
+  解析、布局、缓存、字形图集和每帧工作量均有明确上限。截图与回归内容见
+  [数学渲染测试文档](docs/math-rendering-test.md)。
+
 **界面**
 
 <p align="center">
@@ -372,6 +409,7 @@ Nebula 的目标用户、核心场景，以及相对 Warp、kitty、Tabby、WezT
 | 终端内核 | GPU 常驻网格 + VTE 转义序列解析 |
 | 会话模型 | 常驻 mux 进程，环回 attach 协议 |
 | Shell 集成 | PowerShell + PSReadLine、Git Bash；OSC 7/8/9/133/1337 |
+| 文档数学 | pulldown-cmark + pulldown-latex + OpenType MATH（Latin Modern Math） |
 | 字体 | Maple Mono Normal NF CN（Nerd Font 图标，支持 CJK） |
 
 ### 📦 环境要求
