@@ -11,6 +11,7 @@ Every release entry is provided in English and Simplified Chinese.
 #### Added
 
 - **Native mathematics in Markdown documents** — inline $...$ and display $$...$$ formulas are parsed and laid out entirely in Rust, then drawn as cached glyphs and rule quads with the bundled Latin Modern Math font. Fractions, roots, scripts, limits, matrices, scalable delimiters, Greek letters, common operators, and Unicode prose inside formulas work without a WebView, JavaScript runtime, image export, or external TeX process.
+- **Math rendering screenshot fixture** — `docs/math-rendering-test.md` now provides a reusable Markdown document covering inline formulas, Greek letters, relations, arrows, fractions, radicals, scripts, calculus, delimiters, matrices, cases, aligned equations, vector calculus, long formulas, blank rows, Unicode prose, and the explicit dollar-fence boundary.
 - **A built-in font fallback** — Maple Mono Normal NF CN is now embedded in Nebula as a runtime fallback, so the interface remains readable when the system font has not been installed. The system-installed font is still preferred, the installation reminder remains dismissible, and the portable archive still includes the original font under `fonts` for normal installation.
 - **Choose the directory shown in Files and Git** — the Files drawer can now select a custom root with the native folder picker, and the Git view follows the same root. The choice lasts until the current window closes; “Follow current directory” immediately returns to the focused terminal directory.
 - **Four SSH sign-in modes** — each saved host can now use Automatic, Password, Private Key, or Keyboard-interactive authentication. Automatic mode tries configured keys before password and interactive prompts, while an explicitly selected mode stays strict and does not silently switch methods.
@@ -44,6 +45,7 @@ Every release entry is provided in English and Simplified Chinese.
 #### 新增
 
 - **Markdown 文档支持原生数学公式** — 行内 $...$ 和块级 $$...$$ 公式现在全部由 Rust 解析和排版，再使用内置 Latin Modern Math 字体以缓存字形和规则线 quad 直接绘制。分数、根式、上下标、极限、矩阵、伸缩括号、希腊字母、常用运算符以及公式中的 Unicode 说明文字都可以显示，整个过程不依赖 WebView、JavaScript、公式图片或外部 TeX 进程。
+- **数学渲染截图样例** — 新增 `docs/math-rendering-test.md`，集中覆盖行内公式、希腊字母、关系符号、箭头、分式、根式、上下标、微积分、伸缩括号、矩阵、分段函数、多行对齐、向量分析、长公式、空行、Unicode 说明文字以及美元围栏边界，方便直接打开截图回归。
 - **内置了字体显示兜底** — Maple Mono Normal NF CN 现在会随主程序一起内置。即使用户忘了安装系统字体，界面也能正常显示；已经安装的系统字体仍然优先，缺少字体时的提醒依旧可以关闭，便携包里的 `fonts` 目录和原始字体文件也继续保留，方便按正常方式安装。
 - **文件和 Git 可以切换查看目录了** — 文件抽屉新增原生目录选择器，选中的目录也会同步用于 Git 页面。这个选择只保留到当前窗口关闭；点击“跟随”后会立即重新跟随当前终端所在目录。
 - **四种 SSH 登录方式** — 每个已保存主机都可以选择自动、密码、密钥或交互式认证。自动模式会先尝试配置的私钥，再尝试密码和交互式提示；手动选择某种方式后则只使用该方式，不会失败后悄悄切换。
