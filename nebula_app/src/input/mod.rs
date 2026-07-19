@@ -65,6 +65,10 @@ pub trait ActionContext<T: EventListener> {
     fn scroll(&mut self, _scroll: Scroll) {}
     fn window(&mut self) -> &mut Window;
     fn display(&mut self) -> &mut Display;
+    /// Stable identity of the pane receiving this processor's terminal input.
+    fn pane_id(&self) -> u64 {
+        u64::MAX
+    }
     /// Whether this context owns Nebula's window chrome. Unit tests that only
     /// exercise terminal selection can turn it off instead of constructing an
     /// OpenGL Display just to get through unrelated hit-testing.

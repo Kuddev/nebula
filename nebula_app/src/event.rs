@@ -1168,6 +1168,7 @@ impl Default for InlineSearchState {
 }
 
 pub struct ActionContext<'a, N, T> {
+    pub pane_id: u64,
     pub notifier: &'a mut N,
     pub terminal: &'a mut Term<T>,
     pub clipboard: &'a mut Clipboard,
@@ -1200,6 +1201,11 @@ pub struct ActionContext<'a, N, T> {
 }
 
 impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionContext<'a, N, T> {
+    #[inline]
+    fn pane_id(&self) -> u64 {
+        self.pane_id
+    }
+
     #[inline]
     fn write_to_pty<B: Into<Cow<'static, [u8]>>>(&self, val: B) {
         self.notifier.notify(val);
@@ -2026,6 +2032,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         {
             let lines = text.lines().count().max(2);
             self.display.nebula_confirm = Some(crate::display::NebulaConfirm::Paste {
+                pane_id: self.pane_id,
                 text: text.to_owned(),
                 bracketed,
                 lines,

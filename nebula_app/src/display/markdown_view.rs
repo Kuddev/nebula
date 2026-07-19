@@ -419,19 +419,37 @@ fn wrap_inline_with_math(
                     false,
                     cache,
                 );
-                let width = run.as_ref().map_or_else(
-                    || fragment.text().chars().count() as f32 * text_advance,
-                    |run| run.metrics.width,
-                );
-                if line_width + width > max_width && !line.is_empty() {
-                    lines.push(std::mem::take(&mut line));
-                    line_width = 0.0;
-                }
                 match run {
-                    Some(run) => line.push(Span::from_math(run, fragment, frag_key)),
-                    None => line.push(Span::from_fragment_text(fragment, frag_key)),
+                    Some(run) => {
+                        let width = run.metrics.width;
+                        if line_width + width > max_width && !line.is_empty() {
+                            lines.push(std::mem::take(&mut line));
+                            line_width = 0.0;
+                        }
+                        line.push(Span::from_math(run, fragment, frag_key));
+                        line_width += width;
+                    },
+                    None => {
+                        // A failed formula is still document text. Treating
+                        // the entire TeX source as one span made long failures
+                        // escape the pane instead of honoring normal wrapping.
+                        for character in fragment.text().chars() {
+                            if character == '\n' {
+                                lines.push(std::mem::take(&mut line));
+                                line_width = 0.0;
+                                continue;
+                            }
+                            let cols = character.width().unwrap_or(0).max(1);
+                            let width = cols as f32 * text_advance;
+                            if line_width + width > max_width && !line.is_empty() {
+                                lines.push(std::mem::take(&mut line));
+                                line_width = 0.0;
+                            }
+                            push_text_character(&mut line, fragment, frag_key, character, cols);
+                            line_width += width;
+                        }
+                    },
                 }
-                line_width += width;
             },
         }
     }
@@ -750,9 +768,13 @@ impl LayoutCtx<'_> {
                         true,
                     );
                 } else {
-                    let mut span = Span::label(math.as_str(), false);
-                    span.code = true;
-                    self.push(ch * BODY_LINE, indent, 1.0, vec![span], decor);
+                    let fallback = vec![FormattedTextFragment::plain_text(math.as_str())];
+                    for mut spans in wrap_inline(&fallback, cols_at(indent, 1.0)) {
+                        for span in &mut spans {
+                            span.code = true;
+                        }
+                        self.push(ch * BODY_LINE, indent, 1.0, spans, decor);
+                    }
                 }
                 self.y += ch * 0.5;
             },
@@ -1353,7 +1375,7 @@ pub fn draw(
                 let baseline_y = y + line.math_baseline.unwrap_or(text_ascent);
                 match layout {
                     Ok(layout) => {
-                        if renderer
+                        let math_drawn = renderer
                             .draw_math(
                                 size,
                                 layout,
@@ -1367,9 +1389,42 @@ pub fn draw(
                                     bottom: clip_bot,
                                 },
                             )
-                            .is_err()
-                            && text_visible
-                        {
+                            .is_ok();
+                        if math_drawn {
+                            // Characters outside Latin Modern Math (notably
+                            // Chinese prose in existing note files) reuse the
+                            // document font cache instead of allocating a
+                            // second formula atlas or raster image.
+                            let base_text_ascent = text_ascent / line.scale.max(f32::EPSILON);
+                            for op in &layout.text {
+                                let op_scale = line.scale * op.pixel_size / run.pixel_size;
+                                let op_baseline = baseline_y + op.baseline_y;
+                                let op_y = (op_baseline - base_text_ascent * op_scale).round();
+                                let op_x = (pen_x + op.x).round();
+                                let op_columns = op.character.width().unwrap_or(1).max(1) as f32;
+                                let op_width = cell_w * op_columns * op_scale;
+                                let op_height = cell_h * op_scale;
+                                if op_x < cx
+                                    || op_x + op_width > cx + cw
+                                    || op_y < clip_top
+                                    || op_y + op_height > clip_bot
+                                {
+                                    continue;
+                                }
+                                let mut buffer = [0u8; 4];
+                                let text = op.character.encode_utf8(&mut buffer);
+                                renderer.draw_doc_text(
+                                    size,
+                                    op_x,
+                                    op_y,
+                                    op_scale,
+                                    ink,
+                                    Flags::empty(),
+                                    text,
+                                    glyph_cache,
+                                );
+                            }
+                        } else if text_visible {
                             renderer.draw_doc_text(
                                 size,
                                 pen_x.round(),
@@ -1534,6 +1589,72 @@ mod tests {
             wrap_inline_with_math(inline, 500.0, 8.0, &mut formula_id, 16.0, 1.0, &mut cache);
         assert!(lines.iter().flatten().all(|span| span.math.is_none()));
         assert!(spans_text(&lines[0]).contains(r"\def\x{1}"));
+    }
+
+    #[test]
+    fn invalid_inline_and_display_math_fallbacks_wrap_to_the_content_width() {
+        let parsed = crate::markdown::parse_markdown("before $\\def\\x{123456789}$ after");
+        let FormattedTextLine::Line(inline) = &parsed.lines[0] else { panic!() };
+        let mut cache = MathLayoutCache::default();
+        let mut formula_id = 0;
+        let lines =
+            wrap_inline_with_math(inline, 48.0, 8.0, &mut formula_id, 16.0, 1.0, &mut cache);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| line_width_for_test(line, 8.0) <= 48.0));
+
+        let mut doc = DocView {
+            path: PathBuf::from("invalid-display.md"),
+            title: "invalid-display.md".into(),
+            blocks: crate::markdown::parse_markdown("$$\\def\\x{12345678901234567890}$$")
+                .lines
+                .into_iter()
+                .collect(),
+            visual: Vec::new(),
+            wrap_key: WrapKey::default(),
+            scroll: 0.0,
+            content_h: 0.0,
+            math_cache: MathLayoutCache::default(),
+        };
+        doc.relayout(80.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
+        assert!(doc.visual.len() > 1);
+        assert!(doc.visual.iter().all(|line| !line.center_math && line.spans[0].code));
+    }
+
+    fn line_width_for_test(line: &[Span], text_advance: f32) -> f32 {
+        line.iter().map(|span| span_width(span, text_advance)).sum()
+    }
+
+    #[test]
+    fn quoted_multiline_chinese_formula_from_real_notes_uses_native_layout() {
+        let markdown = concat!(
+            "> $$\n",
+            "> (\\ln(\\sqrt{1+x^2} + x))是奇函数 \\\\\n",
+            "> e^x+e^{-x}是偶函数\\\\\n",
+            "> f(x)+f(-x)是偶函数，f(x)-f(-x)是奇函数\n",
+            "> $$",
+        );
+        let mut doc = DocView {
+            path: PathBuf::from("real-note.md"),
+            title: "real-note.md".into(),
+            blocks: crate::markdown::parse_markdown(markdown).lines.into_iter().collect(),
+            visual: Vec::new(),
+            wrap_key: WrapKey::default(),
+            scroll: 0.0,
+            content_h: 0.0,
+            math_cache: MathLayoutCache::default(),
+        };
+        doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
+        let run = doc
+            .visual
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find_map(|span| span.math.as_ref())
+            .expect("real note formula should remain native math");
+        let key =
+            FormulaCacheKey::new(run.formula_id, run.pixel_size, run.pixels_per_point, run.display);
+        let layout = doc.math_cache.get(key).expect("layout cached during measurement");
+        assert!(!layout.glyphs.is_empty());
+        assert!(!layout.text.is_empty());
     }
 
     #[test]

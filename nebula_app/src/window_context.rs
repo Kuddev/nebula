@@ -66,6 +66,21 @@ fn pane_focus_button(button: &MouseButton) -> bool {
     matches!(button, MouseButton::Left | MouseButton::Middle | MouseButton::Right)
 }
 
+/// Resolve window input while a modal is open. Multi-line paste is the only
+/// confirmation that carries terminal data, so it stays bound to its source
+/// pane; if that pane was reaped, the caller routes to normal focus and the
+/// write-boundary pane-id guard drops the stale transaction.
+fn routed_input_pane(
+    confirm: Option<&crate::display::NebulaConfirm>,
+    focused: PaneId,
+    pane_exists: impl Fn(PaneId) -> bool,
+) -> PaneId {
+    confirm
+        .and_then(crate::display::NebulaConfirm::paste_pane_id)
+        .filter(|pane_id| pane_exists(*pane_id))
+        .unwrap_or(focused)
+}
+
 /// Sentinel pane id for document-viewer tabs. A doc tab owns no pane and no
 /// PTY: its `Layout::Leaf(DOC_PANE_ID)` deliberately resolves to `None` in
 /// every `pane()` lookup, which is exactly the degraded behaviour those call
@@ -2206,7 +2221,8 @@ impl WindowContext {
         // the previous keyboard focus and write into a neighbouring terminal.
         // Resolve focus from the click position before routing this batch so the
         // click lands on the pane the user aimed at.
-        if !matches!(self.active_layout(), Layout::Leaf(_)) {
+        if self.display.nebula_confirm.is_none() && !matches!(self.active_layout(), Layout::Leaf(_))
+        {
             let ffm = self.config.mouse.focus_follows_mouse;
             // The click's real position is the latest CursorMoved in THIS batch:
             // winit's MouseInput carries no coordinates, and `self.mouse` still
@@ -2257,7 +2273,14 @@ impl WindowContext {
         // tab. Resolving one target for the whole batch let a background
         // pane's output drag the batch — keystrokes included — to itself,
         // typing into the wrong PTY.
-        let focused_id = self.focused_pane_id();
+        // Multi-line paste confirmation is a transaction bound to the pane
+        // that opened it. Route both keyboard Enter and a modal-button click
+        // to that pane even when the centered button lies over another split.
+        let normal_focus = self.focused_pane_id();
+        let focused_id =
+            routed_input_pane(self.display.nebula_confirm.as_ref(), normal_focus, |pane_id| {
+                self.pane_index(pane_id).is_some()
+            });
         // A doc tab has no pane: its events run against `doc_pane` below so
         // chrome interaction (tab switching, closing, the sidebar) keeps
         // working; anything typed lands in the sink notifier.
@@ -2308,6 +2331,7 @@ impl WindowContext {
             let terminal_arc = pane.terminal.clone();
             let mut terminal = terminal_arc.lock();
             let context = ActionContext {
+                pane_id: pane.id,
                 cursor_blink_timed_out: &mut self.cursor_blink_timed_out,
                 prev_bell_cmd: &mut self.prev_bell_cmd,
                 message_buffer: &mut self.message_buffer,
@@ -2531,7 +2555,7 @@ impl Drop for WindowContext {
 mod startup_shell_tests {
     use nebula_terminal::tty::Shell;
 
-    use super::{select_initial_shell, valid_new_tab_directory};
+    use super::{routed_input_pane, select_initial_shell, valid_new_tab_directory};
 
     fn shell(program: &str) -> Shell {
         Shell::new(program.to_owned(), Vec::new())
@@ -2565,5 +2589,21 @@ mod startup_shell_tests {
         assert!(valid_new_tab_directory(&directory));
         assert!(!valid_new_tab_directory(&file));
         assert!(!valid_new_tab_directory(&temp.path().join("missing")));
+    }
+
+    #[test]
+    fn multiline_paste_modal_routes_to_its_originating_pane_only() {
+        let paste = crate::display::NebulaConfirm::Paste {
+            pane_id: 7,
+            text: "one\ntwo".to_owned(),
+            bracketed: true,
+            lines: 2,
+        };
+        assert_eq!(routed_input_pane(Some(&paste), 9, |pane_id| pane_id == 7), 7);
+        assert_eq!(routed_input_pane(Some(&paste), 9, |_| false), 9);
+
+        let close =
+            crate::display::NebulaConfirm::ClosePane { pane_id: 7, process: "cargo".to_owned() };
+        assert_eq!(routed_input_pane(Some(&close), 9, |_| true), 9);
     }
 }

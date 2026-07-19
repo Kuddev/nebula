@@ -1,5 +1,6 @@
 //! pulldown-latex 事件流到有界 Math arena。
 
+use std::borrow::Cow;
 use std::mem;
 
 use pulldown_latex::event::{
@@ -23,10 +24,20 @@ pub(crate) fn parse_formula(
     validate(source, limits)?;
 
     let style = if display { MathStyle::Display } else { MathStyle::Text };
+    // pulldown-latex intentionally rejects `\\` outside an alignment
+    // environment. Markdown math blocks commonly use it directly, so wrap
+    // only formulas that contain an environment-external line break in a
+    // one-column gathered environment. Existing matrix/align rows retain
+    // their own scope and are not double-wrapped.
+    let parser_source = if display && has_unscoped_line_break(source) {
+        Cow::Owned(format!(r"\begin{{gathered}}{source}\end{{gathered}}"))
+    } else {
+        Cow::Borrowed(source)
+    };
     let storage = Storage::new();
     let mut builder = Builder::new(style, limits);
     let mut event_count = 0usize;
-    for event in Parser::new(source, &storage) {
+    for event in Parser::new(parser_source.as_ref(), &storage) {
         if event_count >= limits.max_events {
             return Err(MathError::new(MathErrorKind::EventLimit, source.len()));
         }
@@ -36,6 +47,61 @@ pub(crate) fn parse_formula(
     }
     let (arena, root) = builder.finish()?;
     Ok(ParsedFormula { arena, root, style, event_count })
+}
+
+/// Detect `\\` outside `\begin{...}` environments in one linear scan.
+/// Comments are skipped because a line break command there is inert.
+fn has_unscoped_line_break(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut environment_depth = 0usize;
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'%' => {
+                offset += 1;
+                while offset < bytes.len() && bytes[offset] != b'\n' {
+                    offset += 1;
+                }
+            },
+            b'\\' if bytes.get(offset + 1) == Some(&b'\\') => {
+                if environment_depth == 0 {
+                    return true;
+                }
+                offset += 2;
+            },
+            b'\\' => {
+                offset += 1;
+                let command_start = offset;
+                while offset < bytes.len()
+                    && (bytes[offset].is_ascii_alphabetic() || bytes[offset] == b'@')
+                {
+                    offset += 1;
+                }
+                let command = &source[command_start..offset];
+                if matches!(command, "begin" | "end") {
+                    while offset < bytes.len() && bytes[offset].is_ascii_whitespace() {
+                        offset += 1;
+                    }
+                    if bytes.get(offset) == Some(&b'{') {
+                        if let Some(end) = bytes[offset + 1..].iter().position(|byte| *byte == b'}')
+                        {
+                            offset += end + 2;
+                            if command == "begin" {
+                                environment_depth = environment_depth.saturating_add(1);
+                            } else {
+                                environment_depth = environment_depth.saturating_sub(1);
+                            }
+                        }
+                    }
+                } else if command.is_empty() {
+                    offset += source[offset..].chars().next().map(char::len_utf8).unwrap_or(0);
+                }
+            },
+            byte if byte.is_ascii() => offset += 1,
+            _ => offset += source[offset..].chars().next().map(char::len_utf8).unwrap_or(1),
+        }
+    }
+    false
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -805,5 +871,14 @@ mod tests {
             parse_formula(r"\def\x{1}\x", false, DEFAULT_LIMITS).unwrap_err().kind,
             MathErrorKind::ForbiddenCommand
         );
+    }
+
+    #[test]
+    fn display_math_accepts_unscoped_line_breaks_without_rewriting_nested_matrices() {
+        let multiline = parse_formula(r"x=1\\y=2", true, DEFAULT_LIMITS).unwrap();
+        assert!(multiline.arena.nodes.iter().any(|node| matches!(node, MathNode::Matrix { .. })));
+
+        assert!(!has_unscoped_line_break(r"\begin{matrix}a\\b\end{matrix}"));
+        assert!(has_unscoped_line_break(r"\begin{matrix}a\\b\end{matrix}\\c"));
     }
 }

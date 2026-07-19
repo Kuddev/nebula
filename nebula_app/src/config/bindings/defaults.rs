@@ -103,7 +103,6 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         Backspace, ModifiersState::CONTROL, ~BindingMode::VI, ~BindingMode::SEARCH, ~BindingMode::REPORT_ALL_KEYS_AS_ESC, ~BindingMode::DISAMBIGUATE_ESC_CODES; Action::Esc("\x17".into());
         Backspace, ModifiersState::ALT,     ~BindingMode::VI, ~BindingMode::SEARCH, ~BindingMode::REPORT_ALL_KEYS_AS_ESC, ~BindingMode::DISAMBIGUATE_ESC_CODES; Action::Esc("\x1b\x7f".into());
         Backspace, ModifiersState::SHIFT,   ~BindingMode::VI, ~BindingMode::SEARCH, ~BindingMode::REPORT_ALL_KEYS_AS_ESC, ~BindingMode::DISAMBIGUATE_ESC_CODES; Action::Esc("\x7f".into());
-        Enter => KeyLocation::Numpad, ~BindingMode::VI, ~BindingMode::SEARCH, ~BindingMode::REPORT_ALL_KEYS_AS_ESC, ~BindingMode::DISAMBIGUATE_ESC_CODES; Action::Esc("\n".into());
         // Vi mode.
         Space, ModifiersState::SHIFT | ModifiersState::CONTROL, ~BindingMode::SEARCH; Action::ToggleViMode;
         Space, ModifiersState::SHIFT | ModifiersState::CONTROL, +BindingMode::VI, ~BindingMode::SEARCH; Action::ScrollToBottom;
@@ -185,6 +184,25 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
     bindings.extend(platform_key_bindings());
 
     bindings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_and_numpad_enter_share_the_normal_keyboard_path() {
+        let bindings = default_key_bindings();
+
+        for location in [KeyLocation::Standard, KeyLocation::Numpad] {
+            let enter = BindingKey::Keycode { key: Key::Named(NamedKey::Enter), location };
+            let remapped = bindings.iter().any(|binding| {
+                binding.is_triggered_by(BindingMode::empty(), ModifiersState::empty(), &enter)
+            });
+
+            assert!(!remapped, "{location:?} Enter must use the normal keyboard path");
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "macos", test)))]

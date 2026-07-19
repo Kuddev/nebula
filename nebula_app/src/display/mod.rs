@@ -419,7 +419,11 @@ pub enum NebulaConfirm {
     /// Close the window while some pane still runs `process`.
     CloseWindow { process: String },
     /// Paste text that contains newlines (would execute in most shells).
-    Paste { text: String, bracketed: bool, lines: usize },
+    ///
+    /// `pane_id` binds the confirmation to the terminal that requested it.
+    /// The modal is window-global and can straddle split panes, so resolving
+    /// the destination again from the confirmation click would misroute data.
+    Paste { pane_id: u64, text: String, bracketed: bool, lines: usize },
     /// Remove a saved host or hide an alias originating in `~/.ssh/config`.
     /// The source flag lets the dialog explain that Nebula never edits the
     /// user's SSH config file.
@@ -432,6 +436,14 @@ impl NebulaConfirm {
     /// Every current confirmation can be dismissed without taking its action.
     pub fn can_dismiss(&self) -> bool {
         true
+    }
+
+    /// Terminal that owns a pending multi-line paste transaction.
+    pub fn paste_pane_id(&self) -> Option<u64> {
+        match self {
+            Self::Paste { pane_id, .. } => Some(*pane_id),
+            _ => None,
+        }
     }
 }
 
