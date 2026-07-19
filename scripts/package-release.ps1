@@ -23,8 +23,8 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
 $targetRoot = Join-Path $repo "target\$Configuration"
 $stage = Join-Path $outputRoot ".stage-$Version-$PID"
-$zipPath = Join-Path $outputRoot "NebulaTerminal-$Version-windows-x64.zip"
-$temporaryZip = Join-Path $outputRoot ".NebulaTerminal-$Version-windows-x64-$PID.tmp.zip"
+$zipPath = Join-Path $outputRoot "NebulaTerminal-v$Version-windows-x64.zip"
+$temporaryZip = Join-Path $outputRoot ".NebulaTerminal-v$Version-windows-x64-$PID.tmp.zip"
 
 $manifest = [ordered]@{
     'nebula.exe'                                     = Join-Path $targetRoot 'nebula.exe'
