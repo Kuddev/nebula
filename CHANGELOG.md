@@ -23,6 +23,8 @@ Every release entry is provided in English and Simplified Chinese.
 
 - **Markdown always stays inside its reading column** — paragraphs wrap at words and CJK characters, overlong unbroken text is hard-wrapped, failed formulas wrap as visible TeX source, and oversized native formulas are fitted to the existing 860 px reading column instead of being clipped.
 - **Multiline display formulas survive blank rows** — standalone $$ fences can now contain blank lines and explanatory Unicode prose. Code fences and YAML metadata remain untouched, while the math block keeps a range into the original UTF-8 source.
+- **Dollar fences define the math boundary** — only paired $...$ and $$...$$ ranges are parsed as mathematics. Bare TeX commands, non-dollar delimiters, and quoted TeX code examples remain ordinary Markdown text and still wrap inside the reading column.
+- **Formula arrows and radicals keep their intended geometry** — ASCII `->` is normalized only after a dollar fence has confirmed a formula, and radical overbars now follow the OpenType/TeX ascender and gap rules without a visible seam at the surd.
 - **Document typography is more consistent and math is clearer** — Markdown headings use the regular CJK outline with strong theme ink instead of uneven synthetic bold, and math glyphs use pixel-aligned placement plus contrast-corrected grayscale coverage for sharper small-size strokes.
 - **Paste stays in the split pane that started it** — right-click paste, Ctrl+V, and multiline-paste confirmation retain the originating pane identity. The confirmation overlay no longer lets mouse coordinates or Enter redirect the text into a neighboring split.
 - **Numpad Enter behaves like the main Enter key** — the numeric keypad Enter key now follows the normal command-submission path instead of being routed through the paste action.
@@ -54,6 +56,8 @@ Every release entry is provided in English and Simplified Chinese.
 
 - **Markdown 内容始终留在阅读列内** — 普通段落会按单词和中文字符换行，连续超长文本会强制折行，解析失败的公式会以可见 TeX 源码继续换行，过宽的原生公式则会收敛到现有 860 px 阅读列内，不再被右侧裁掉。
 - **块级公式可以跨越空行** — 独立 $$ 围栏现在可以包含空行和 Unicode 说明文字；代码围栏与 YAML 元数据保持原样，数学块仍然引用原始 UTF-8 源码范围。
+- **美元围栏明确数学边界** — 只有成对的 $...$ 和 $$...$$ 才会进入数学解析；裸露 TeX、非美元定界符和引用中的 TeX 代码都保持普通 Markdown 文本，同时继续在阅读列内换行。
+- **箭头和根号的几何更准确** — 只有确认处于美元围栏公式内部时才把 ASCII `->` 归一化为数学箭头；根号横线改按 OpenType/TeX 的上升部和间距规则布局，不再与根号字形出现接缝。
 - **文档字重更统一，数学字形更清楚** — Markdown 标题改用规则 CJK 轮廓配合主题强调色，避开局部粗细不一的合成粗体；数学字形增加整像素定位和灰度覆盖补偿，小字号细笔画更清晰。
 - **粘贴会留在发起操作的分屏** — 右键粘贴、Ctrl+V 和多行粘贴确认都会保留原始 pane 身份；确认层显示时，鼠标坐标和 Enter 也不会再把内容重定向到相邻分屏。
 - **数字小键盘 Enter 与主 Enter 一致** — 小键盘最右侧 Enter 现在走正常命令提交路径，不再进入粘贴动作。

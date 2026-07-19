@@ -1716,6 +1716,32 @@ mod tests {
         assert!(doc.visual.iter().all(|line| !line.center_math && line.spans[0].code));
     }
 
+    #[test]
+    fn quoted_bare_tex_stays_text_and_wraps_inside_the_reading_column() {
+        let markdown = concat!(
+            "> \\lim_{x \\to x_0} f(x)=A\\iff",
+            "f(x)=A+\\alpha(x)\\frac{123456789}{987654321}\\sqrt{x^2+y^2}",
+        );
+        let mut doc = DocView {
+            path: PathBuf::from("bare-tex.md"),
+            title: "bare-tex.md".into(),
+            blocks: crate::markdown::parse_markdown(markdown).lines.into_iter().collect(),
+            visual: Vec::new(),
+            wrap_key: WrapKey::default(),
+            scroll: 0.0,
+            content_h: 0.0,
+            math_cache: MathLayoutCache::default(),
+        };
+        let content_width = 120.0;
+        doc.relayout(content_width, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
+
+        assert!(doc.visual.len() > 1);
+        assert!(doc.visual.iter().all(|line| {
+            line.spans.iter().all(|span| span.math.is_none())
+                && line.indent + line_width_for_test(&line.spans, 8.0) <= content_width
+        }));
+    }
+
     fn line_width_for_test(line: &[Span], text_advance: f32) -> f32 {
         line.iter().map(|span| span_width(span, text_advance)).sum()
     }

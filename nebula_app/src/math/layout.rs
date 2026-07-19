@@ -711,19 +711,31 @@ impl LayoutBuilder<'_> {
         let root =
             self.font.glyph_id('√').map_err(|_| MathError::new(MathErrorKind::MissingGlyph, 0))?;
         let glyph_start = self.glyphs.len();
-        let target = body_plan.metrics.height + body_plan.metrics.depth + gap + rule + extra;
+        let body_total = body_plan.metrics.height + body_plan.metrics.depth;
+        let target = body_total + gap + rule;
         let mut radical = self.vertical_glyph_box(root, target, pixel_size, self.axis(index)?)?;
-        let shift_y = body_plan.metrics.depth - radical.metrics.depth;
+        let radical_total = radical.metrics.height + radical.metrics.depth;
+        // OpenType 将 extra ascender 定义为根号上方留白。若离散的伸展
+        // 字形高于最低目标，按 TeX 的规则把余量分到上下，横线才会与
+        // 根号字形顶端处在同一高度，而不是悬在它的下方。
+        let gap = gap.max((radical_total - rule - body_total + gap) * 0.5);
+        let radical_ascent = body_plan.metrics.height + gap + rule;
+        let radical_depth = (radical_total - radical_ascent).max(0.0);
+        let shift_y = radical_depth - radical.metrics.depth;
         self.shift_glyphs(glyph_start, 0.0, shift_y);
         radical.metrics.height = (radical.metrics.height - shift_y).max(0.0);
         radical.metrics.depth = (radical.metrics.depth + shift_y).max(0.0);
         let body_x = radical.metrics.width;
         self.place(body, body_x, 0.0);
+        // The rasterized surd and the UI rule are snapped by separate render
+        // paths. Overlap the rule by half a physical pixel so rounding cannot
+        // expose a hairline gap at the surd/radicand junction.
+        let rule_overlap = 0.5;
         let rule_y = -body_plan.metrics.height - gap - rule;
         self.push_rule(LocalRule {
-            x: body_x,
+            x: (body_x - rule_overlap).max(0.0),
             y: rule_y,
-            width: body_plan.metrics.width,
+            width: body_plan.metrics.width + rule_overlap,
             height: rule,
         })?;
         let mut min_x = 0.0;
@@ -755,7 +767,8 @@ impl LayoutBuilder<'_> {
         }
         let mut metrics = self.empty_metrics(index)?;
         metrics.width = x_shift + body_x + body_plan.metrics.width;
-        metrics.height = radical.metrics.height.max(body_plan.metrics.height + gap + rule + extra);
+        metrics.height =
+            (radical.metrics.height + extra).max(body_plan.metrics.height + gap + rule + extra);
         metrics.depth = radical.metrics.depth.max(body_plan.metrics.depth);
         if let Some((degree, x, baseline)) = degree_placement {
             include_child(
@@ -1283,6 +1296,26 @@ mod tests {
         assert!(layout.metrics.width > 0.0);
         assert!(layout.metrics.height > 0.0 && layout.metrics.depth > 0.0);
         assert!(layout.glyphs.iter().all(|glyph| glyph.pixel_size.is_finite()));
+    }
+
+    #[test]
+    fn radical_rule_meets_the_stretched_surd_without_a_rounding_gap() {
+        let layout =
+            layout_formula(&formula(r"\sqrt{x^2}", false), 18.0, 1.0, DEFAULT_LIMITS).unwrap();
+        assert_eq!(layout.rules.len(), 1);
+        let radical = layout.glyphs[0];
+        let glyph_metrics = MathFont::load()
+            .unwrap()
+            .glyph_metrics(GlyphId(radical.glyph_id), radical.pixel_size)
+            .unwrap();
+        let rule = layout.rules[0];
+        let glyph_top = radical.baseline_y - glyph_metrics.height;
+        let glyph_right = radical.x + glyph_metrics.x_max;
+
+        assert!((rule.y - glyph_top).abs() < 0.01);
+        assert!(rule.x <= glyph_right && glyph_right - rule.x <= 0.51);
+        assert!(rule.x + rule.width <= layout.metrics.width + 0.01);
+        assert!(layout.metrics.height > -rule.y);
     }
 
     #[test]
