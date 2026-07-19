@@ -4,7 +4,9 @@
 
 pub(crate) mod font;
 pub(crate) mod ir;
+pub(crate) mod layout;
 pub(crate) mod parser;
+pub(crate) mod spacing;
 pub(crate) mod validate;
 
 pub(crate) use parser::parse_formula;

@@ -37,6 +37,7 @@ pub(crate) struct GlyphMetrics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MathConstant {
     AxisHeight,
+    DelimitedSubFormulaMinHeight,
     FractionNumeratorShiftUp,
     FractionNumeratorDisplayShiftUp,
     FractionDenominatorShiftDown,
@@ -173,6 +174,10 @@ impl MathFont {
         let constants = face.tables().math.and_then(|math| math.constants).ok_or(MathFontError)?;
         let value = match constant {
             MathConstant::AxisHeight => constants.axis_height().value,
+            MathConstant::DelimitedSubFormulaMinHeight => {
+                return Ok(constants.delimited_sub_formula_min_height() as f32 * pixel_size
+                    / face.units_per_em() as f32);
+            },
             MathConstant::FractionNumeratorShiftUp => constants.fraction_numerator_shift_up().value,
             MathConstant::FractionNumeratorDisplayShiftUp => {
                 constants.fraction_numerator_display_style_shift_up().value

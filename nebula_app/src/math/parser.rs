@@ -11,6 +11,7 @@ use pulldown_latex::{Parser, Storage};
 use super::ir::{
     AlignRange, AtomClass, ChildRange, ColumnAlign, DelimiterScale, FontVariant, MathArena,
     MathNode, MathStyle, MatrixRow, NodeId, ParsedFormula, RowRange, ScriptPlacement,
+    StyleOverride,
 };
 use super::{MathError, MathErrorKind, MathLimits, validate};
 
@@ -40,7 +41,7 @@ pub(crate) fn parse_formula(
 #[derive(Clone, Copy, Debug)]
 struct ParseState {
     variant: FontVariant,
-    style: MathStyle,
+    style_override: Option<StyleOverride>,
 }
 
 enum Context {
@@ -51,6 +52,7 @@ enum Context {
 struct Container {
     kind: ContainerKind,
     state: ParseState,
+    structural_style_override: Option<StyleOverride>,
     elements: Vec<NodeId>,
 }
 
@@ -76,11 +78,11 @@ struct Pending {
 }
 
 enum PendingKind {
-    Fraction { bar: bool },
-    SquareRoot,
-    Root,
-    Scripts { ty: ScriptType, placement: ScriptPlacement },
-    Negation,
+    Fraction { bar: bool, style_override: Option<StyleOverride> },
+    SquareRoot { style_override: Option<StyleOverride> },
+    Root { style_override: Option<StyleOverride> },
+    Scripts { ty: ScriptType, placement: ScriptPlacement, style_override: Option<StyleOverride> },
+    Negation { style_override: Option<StyleOverride> },
 }
 
 struct Builder {
@@ -88,13 +90,15 @@ struct Builder {
     contexts: Vec<Context>,
     limits: MathLimits,
     matrix_cell_count: usize,
+    next_style_scope: u16,
 }
 
 impl Builder {
-    fn new(style: MathStyle, limits: MathLimits) -> Self {
+    fn new(_style: MathStyle, limits: MathLimits) -> Self {
         let root = Container {
             kind: ContainerKind::Root,
-            state: ParseState { variant: FontVariant::Normal, style },
+            state: ParseState { variant: FontVariant::Normal, style_override: None },
+            structural_style_override: None,
             elements: Vec::new(),
         };
         Self {
@@ -102,6 +106,7 @@ impl Builder {
             contexts: vec![Context::Container(root)],
             limits,
             matrix_cell_count: 0,
+            next_style_scope: 0,
         }
     }
 
@@ -116,18 +121,24 @@ impl Builder {
             Event::End => self.end(),
             Event::Visual(visual) => self.pending_visual(visual),
             Event::Script { ty, position } => {
+                let style_override = self.current_state()?.style_override;
                 let expected = match ty {
                     ScriptType::Subscript | ScriptType::Superscript => 2,
                     ScriptType::SubSuperscript => 3,
                 };
                 self.push_context(Context::Pending(Pending {
-                    kind: PendingKind::Scripts { ty, placement: script_placement(position) },
+                    kind: PendingKind::Scripts {
+                        ty,
+                        placement: script_placement(position),
+                        style_override,
+                    },
                     children: Vec::with_capacity(expected),
                     expected,
                 }))
             },
             Event::Space { width, height } => {
-                let node = self.add_node(MathNode::Space { width, height })?;
+                let style_override = self.current_state()?.style_override;
+                let node = self.add_node(MathNode::Space { width, height, style_override })?;
                 self.deliver(node)
             },
             Event::StateChange(change) => self.state_change(change),
@@ -171,7 +182,12 @@ impl Builder {
                 })
             },
         };
-        self.push_context(Context::Container(Container { kind, state, elements: Vec::new() }))
+        self.push_context(Context::Container(Container {
+            kind,
+            state,
+            structural_style_override: state.style_override,
+            elements: Vec::new(),
+        }))
     }
 
     fn end(&mut self) -> Result<(), MathError> {
@@ -186,16 +202,18 @@ impl Builder {
     }
 
     fn pending_visual(&mut self, visual: Visual) -> Result<(), MathError> {
+        let style_override = self.current_state()?.style_override;
         let (kind, expected) = match visual {
             Visual::Fraction(thickness) => (
                 PendingKind::Fraction {
                     bar: !matches!(thickness, Some(value) if value.value == 0.0),
+                    style_override,
                 },
                 2,
             ),
-            Visual::SquareRoot => (PendingKind::SquareRoot, 1),
-            Visual::Root => (PendingKind::Root, 2),
-            Visual::Negation => (PendingKind::Negation, 1),
+            Visual::SquareRoot => (PendingKind::SquareRoot { style_override }, 1),
+            Visual::Root => (PendingKind::Root { style_override }, 2),
+            Visual::Negation => (PendingKind::Negation { style_override }, 1),
         };
         self.push_context(Context::Pending(Pending {
             kind,
@@ -216,7 +234,15 @@ impl Builder {
             StateChange::Font(font) => {
                 container.state.variant = font.map(font_variant).unwrap_or(FontVariant::Normal)
             },
-            StateChange::Style(style) => container.state.style = math_style(style),
+            StateChange::Style(style) => {
+                let scope = self.next_style_scope;
+                self.next_style_scope = self
+                    .next_style_scope
+                    .checked_add(1)
+                    .ok_or_else(|| MathError::new(MathErrorKind::EventLimit, 0))?;
+                container.state.style_override =
+                    Some(StyleOverride { style: math_style(style), scope });
+            },
             StateChange::Color(_) => {},
         }
         Ok(())
@@ -307,25 +333,40 @@ impl Builder {
     fn finish_pending(&mut self, pending: Pending) -> Result<NodeId, MathError> {
         let children = pending.children;
         let node = match pending.kind {
-            PendingKind::Fraction { bar } => {
-                MathNode::Fraction { numerator: children[0], denominator: children[1], bar }
+            PendingKind::Fraction { bar, style_override } => MathNode::Fraction {
+                numerator: children[0],
+                denominator: children[1],
+                bar,
+                style_override,
             },
-            PendingKind::SquareRoot => MathNode::Radical { degree: None, body: children[0] },
-            PendingKind::Root => MathNode::Radical { degree: Some(children[1]), body: children[0] },
-            PendingKind::Negation => MathNode::Negation { body: children[0] },
-            PendingKind::Scripts { ty, placement } => {
+            PendingKind::SquareRoot { style_override } => {
+                MathNode::Radical { degree: None, body: children[0], style_override }
+            },
+            PendingKind::Root { style_override } => {
+                MathNode::Radical { degree: Some(children[1]), body: children[0], style_override }
+            },
+            PendingKind::Negation { style_override } => {
+                MathNode::Negation { body: children[0], style_override }
+            },
+            PendingKind::Scripts { ty, placement, style_override } => {
                 if matches!(ty, ScriptType::Superscript)
                     && matches!(placement, ScriptPlacement::AboveBelow)
                     && let Some(accent) = self.single_character(children[1])
                 {
-                    MathNode::Accent { accent, body: children[0] }
+                    MathNode::Accent { accent, body: children[0], style_override }
                 } else {
                     let (subscript, superscript) = match ty {
                         ScriptType::Subscript => (Some(children[1]), None),
                         ScriptType::Superscript => (None, Some(children[1])),
                         ScriptType::SubSuperscript => (Some(children[1]), Some(children[2])),
                     };
-                    MathNode::Scripts { base: children[0], subscript, superscript, placement }
+                    MathNode::Scripts {
+                        base: children[0],
+                        subscript,
+                        superscript,
+                        placement,
+                        style_override,
+                    }
                 }
             },
         };
@@ -350,8 +391,9 @@ impl Builder {
             ContainerKind::Root => Err(MathError::new(MathErrorKind::Parse, 0)),
             ContainerKind::Group => self.add_row(container.elements),
             ContainerKind::LeftRight { open, close } => {
+                let style_override = container.structural_style_override;
                 let body = self.add_row(container.elements)?;
-                self.add_node(MathNode::Fenced { open, close, body })
+                self.add_node(MathNode::Fenced { open, close, body, style_override })
             },
             ContainerKind::Matrix(mut matrix) => {
                 let row_is_open = !container.elements.is_empty()
@@ -370,12 +412,16 @@ impl Builder {
                     }
                     matrix.row_lengths.push(len as u16);
                 }
-                self.add_matrix(matrix)
+                self.add_matrix(matrix, container.structural_style_override)
             },
         }
     }
 
-    fn add_matrix(&mut self, matrix: MatrixBuild) -> Result<NodeId, MathError> {
+    fn add_matrix(
+        &mut self,
+        matrix: MatrixBuild,
+        style_override: Option<StyleOverride>,
+    ) -> Result<NodeId, MathError> {
         let row_start = self.arena.matrix_rows.len();
         let mut cell_start = 0usize;
         for length in &matrix.row_lengths {
@@ -400,9 +446,9 @@ impl Builder {
             len: matrix.alignments.len() as u16,
         };
         self.arena.alignments.extend(matrix.alignments);
-        let node = self.add_node(MathNode::Matrix { rows, alignments })?;
+        let node = self.add_node(MathNode::Matrix { rows, alignments, style_override })?;
         if let Some((open, close)) = matrix.fence {
-            self.add_node(MathNode::Fenced { open, close, body: node })
+            self.add_node(MathNode::Fenced { open, close, body: node, style_override })
         } else {
             Ok(node)
         }
@@ -426,7 +472,11 @@ impl Builder {
                     AtomClass::Ord,
                     ParseState { variant: FontVariant::UpRight, ..state },
                 )?;
-                self.add_node(MathNode::OperatorName { body, limits: is_limit_operator(name) })
+                self.add_node(MathNode::OperatorName {
+                    body,
+                    limits: is_limit_operator(name),
+                    style_override: state.style_override,
+                })
             },
             Content::Ordinary { content, stretchy } => {
                 self.add_glyph(content, AtomClass::Ord, state, stretchy, None)
@@ -434,7 +484,7 @@ impl Builder {
             Content::LargeOp { content, small } => self.add_node(MathNode::Operator {
                 character: content,
                 variant: state.variant,
-                style: state.style,
+                style_override: state.style_override,
                 small,
             }),
             Content::BinaryOp { content, .. } => {
@@ -489,7 +539,7 @@ impl Builder {
             character,
             class,
             variant: state.variant,
-            style: state.style,
+            style_override: state.style_override,
             stretchy,
             delimiter_scale,
         })
@@ -680,7 +730,7 @@ mod tests {
     fn left_right_and_matrix_preserve_structure() {
         let formula = parse(r"\left(\begin{matrix}a&b\\c&d\end{matrix}\right)");
         let [fenced] = root_children(&formula) else { panic!() };
-        let MathNode::Fenced { open: Some('('), close: Some(')'), body } =
+        let MathNode::Fenced { open: Some('('), close: Some(')'), body, .. } =
             formula.arena.node(*fenced)
         else {
             panic!("expected fenced matrix")
@@ -697,11 +747,12 @@ mod tests {
     fn cases_adds_only_the_implicit_left_brace() {
         let formula = parse(r"\begin{cases}x&x>0\\-x&x\le0\end{cases}");
         let [fenced] = root_children(&formula) else { panic!() };
-        let MathNode::Fenced { open: Some('{'), close: None, body } = formula.arena.node(*fenced)
+        let MathNode::Fenced { open: Some('{'), close: None, body, .. } =
+            formula.arena.node(*fenced)
         else {
             panic!("expected implicit cases brace")
         };
-        let MathNode::Matrix { rows, alignments } = formula.arena.node(*body) else { panic!() };
+        let MathNode::Matrix { rows, alignments, .. } = formula.arena.node(*body) else { panic!() };
         assert_eq!(formula.arena.rows(*rows).len(), 2);
         assert_eq!(
             formula.arena.row_alignments(*alignments),
