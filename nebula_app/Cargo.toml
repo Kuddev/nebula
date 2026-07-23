@@ -39,6 +39,7 @@ clap = { version = "4.2.7", features = ["derive", "env"] }
 copypasta = { version = "0.10.1", default-features = false }
 crossfont = "0.8.1"
 glutin = { version = "0.32.2", default-features = false, features = ["egl", "wgl"] }
+html-escape = "0.2.14"
 home = "0.5.5"
 libc = "0.2"
 log = { version = "0.4", features = ["std", "serde"] }
@@ -80,6 +81,9 @@ clap_complete = "4.2.3"
 
 [target.'cfg(not(windows))'.dependencies]
 xdg = "3.0.0"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rfd = "0.17.2"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 png = { version = "0.17.5", default-features = false, optional = true }

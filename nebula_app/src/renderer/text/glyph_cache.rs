@@ -63,6 +63,9 @@ pub struct GlyphCache {
     /// Bold italic font.
     pub bold_italic_key: FontKey,
 
+    /// Embedded Maple face reserved for UI and terminal icon codepoints.
+    pub symbol_key: FontKey,
+
     /// Font size.
     pub font_size: crossfont::Size,
 
@@ -99,11 +102,7 @@ impl GlyphCache {
     }
 
     /// Check a system font family without changing the configured terminal font.
-    pub fn font_family_available(
-        rasterizer: &mut Rasterizer,
-        family: &str,
-        size: Size,
-    ) -> bool {
+    pub fn font_family_available(rasterizer: &mut Rasterizer, family: &str, size: Size) -> bool {
         let description = FontDesc::new(
             family,
             Style::Description { slant: Slant::Normal, weight: Weight::Normal },
@@ -113,6 +112,15 @@ impl GlyphCache {
 
     pub fn new(mut rasterizer: Rasterizer, font: &Font) -> Result<GlyphCache, crossfont::Error> {
         let (regular, bold, italic, bold_italic) = Self::compute_font_keys(font, &mut rasterizer)?;
+        #[cfg(windows)]
+        let symbol_key = rasterizer.load_embedded_font(
+            crate::font_install::REQUIRED_FONT_FAMILY,
+            Slant::Normal,
+            Weight::Normal,
+            font.size(),
+        )?;
+        #[cfg(not(windows))]
+        let symbol_key = regular;
 
         let metrics = GlyphCache::load_font_metrics(&mut rasterizer, font, regular)?;
         Ok(Self {
@@ -123,6 +131,7 @@ impl GlyphCache {
             bold_key: bold,
             italic_key: italic,
             bold_italic_key: bold_italic,
+            symbol_key,
             font_offset: font.offset,
             glyph_offset: font.glyph_offset,
             metrics,
@@ -175,28 +184,35 @@ impl GlyphCache {
         )?;
 
         // Helper to load a description if it is not the `regular_desc`.
-        let mut load_or_regular = |desc: FontDesc| {
+        let mut load_or_regular = |desc: FontDesc, family: &str, slant: Slant, weight: Weight| {
             if desc == regular_desc {
                 regular
             } else {
-                rasterizer.load_font(&desc, size).unwrap_or(regular)
+                Self::load_regular_font(rasterizer, &desc, family, slant, weight, size)
+                    .unwrap_or(regular)
             }
         };
 
         // Load bold font.
-        let bold_desc = Self::make_desc(&font.bold(), Slant::Normal, Weight::Bold);
-
-        let bold = load_or_regular(bold_desc);
+        let bold_font = font.bold();
+        let bold_desc = Self::make_desc(&bold_font, Slant::Normal, Weight::Bold);
+        let bold = load_or_regular(bold_desc, &bold_font.family, Slant::Normal, Weight::Bold);
 
         // Load italic font.
-        let italic_desc = Self::make_desc(&font.italic(), Slant::Italic, Weight::Normal);
-
-        let italic = load_or_regular(italic_desc);
+        let italic_font = font.italic();
+        let italic_desc = Self::make_desc(&italic_font, Slant::Italic, Weight::Normal);
+        let italic =
+            load_or_regular(italic_desc, &italic_font.family, Slant::Italic, Weight::Normal);
 
         // Load bold italic font.
-        let bold_italic_desc = Self::make_desc(&font.bold_italic(), Slant::Italic, Weight::Bold);
-
-        let bold_italic = load_or_regular(bold_italic_desc);
+        let bold_italic_font = font.bold_italic();
+        let bold_italic_desc = Self::make_desc(&bold_italic_font, Slant::Italic, Weight::Bold);
+        let bold_italic = load_or_regular(
+            bold_italic_desc,
+            &bold_italic_font.family,
+            Slant::Italic,
+            Weight::Bold,
+        );
 
         Ok((regular, bold, italic, bold_italic))
     }
@@ -210,8 +226,7 @@ impl GlyphCache {
         size: Size,
     ) -> Result<FontKey, crossfont::Error> {
         #[cfg(windows)]
-        let preferred =
-            rasterizer.load_preferred_font(description, family, slant, weight, size);
+        let preferred = rasterizer.load_preferred_font(description, family, slant, weight, size);
         #[cfg(not(windows))]
         let preferred = rasterizer.load_font(description, size);
 
@@ -241,6 +256,11 @@ impl GlyphCache {
             Style::Description { slant, weight }
         };
         FontDesc::new(desc.family.clone(), style)
+    }
+
+    #[inline]
+    pub fn font_key_for(&self, character: char, text_key: FontKey) -> FontKey {
+        if is_private_use(character) { self.symbol_key } else { text_key }
     }
 
     /// Get a glyph from the font.
@@ -343,6 +363,15 @@ impl GlyphCache {
         // Recompute font keys.
         let (regular, bold, italic, bold_italic) =
             Self::compute_font_keys(font, &mut self.rasterizer)?;
+        #[cfg(windows)]
+        let symbol_key = self.rasterizer.load_embedded_font(
+            crate::font_install::REQUIRED_FONT_FAMILY,
+            Slant::Normal,
+            Weight::Normal,
+            font.size(),
+        )?;
+        #[cfg(not(windows))]
+        let symbol_key = regular;
 
         let metrics = GlyphCache::load_font_metrics(&mut self.rasterizer, font, regular)?;
 
@@ -353,6 +382,7 @@ impl GlyphCache {
         self.bold_key = bold;
         self.italic_key = italic;
         self.bold_italic_key = bold_italic;
+        self.symbol_key = symbol_key;
         self.metrics = metrics;
         self.builtin_box_drawing = font.builtin_box_drawing;
 
@@ -372,6 +402,11 @@ impl GlyphCache {
     }
 }
 
+#[inline]
+fn is_private_use(character: char) -> bool {
+    matches!(character as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
@@ -384,5 +419,17 @@ mod tests {
             "Nebula Missing Font Probe 8C0A651D",
             Size::new(11.25),
         ));
+    }
+
+    #[test]
+    fn private_use_symbols_always_use_the_embedded_maple_key() {
+        let rasterizer = Rasterizer::new().expect("DirectWrite rasterizer");
+        let font = Font::default().with_family("Consolas");
+        let cache = GlyphCache::new(rasterizer, &font).expect("glyph cache");
+
+        assert_ne!(cache.font_key, cache.symbol_key);
+        assert_eq!(cache.font_key_for('A', cache.font_key), cache.font_key);
+        assert_eq!(cache.font_key_for('\u{ea83}', cache.font_key), cache.symbol_key);
+        assert_eq!(cache.font_key_for('\u{f0000}', cache.font_key), cache.symbol_key);
     }
 }

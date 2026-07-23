@@ -9,6 +9,7 @@ use pulldown_latex::event::{
 };
 use pulldown_latex::{Parser, Storage};
 
+use super::compile::normalize_formula_source;
 use super::ir::{
     AlignRange, AtomClass, ChildRange, ColumnAlign, DelimiterScale, FontVariant, MathArena,
     MathNode, MathStyle, MatrixRow, NodeId, ParsedFormula, RowRange, ScriptPlacement,
@@ -21,10 +22,11 @@ pub(crate) fn parse_formula(
     display: bool,
     limits: MathLimits,
 ) -> Result<ParsedFormula, MathError> {
-    validate(source, limits)?;
+    let source = normalize_formula_source(source, limits)?;
+    validate(source.as_ref(), limits)?;
 
     let style = if display { MathStyle::Display } else { MathStyle::Text };
-    let normalized_source = normalize_ascii_math_arrows(source);
+    let normalized_source = normalize_ascii_math_arrows(source.as_ref());
     // pulldown-latex intentionally rejects `\\` outside an alignment
     // environment. Markdown math blocks commonly use it directly, so wrap
     // only formulas that contain an environment-external line break in a

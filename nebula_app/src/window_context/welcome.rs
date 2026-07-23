@@ -6,9 +6,9 @@
 //! 唯一对外入口是 [`nebula_fastfetch_intro_command`]。
 
 #[cfg(windows)]
-use std::sync::OnceLock;
-#[cfg(windows)]
 use crate::display::NebulaShell;
+#[cfg(windows)]
+use std::sync::OnceLock;
 
 #[cfg(windows)]
 fn nebula_fastfetch_text(narrow: bool) -> String {
@@ -38,8 +38,13 @@ fn nebula_fastfetch_text(narrow: bool) -> String {
             "{white}a fast terminal workspace for {cyan}tabs{white}, {cyan}splits{white} and shells.{reset}"
         ),
         String::new(),
-        format!("{icon}\u{f02b}{reset}  {dim}Version:{reset} {green}{}{reset}", env!("CARGO_PKG_VERSION")),
-        format!("{icon}\u{f09b}{reset}  {dim}GitHub:{reset} {cyan}https://github.com/Kuddev/nebulaTerminal{reset}"),
+        format!(
+            "{icon}\u{f02b}{reset}  {dim}Version:{reset} {green}{}{reset}",
+            env!("CARGO_PKG_VERSION")
+        ),
+        format!(
+            "{icon}\u{f09b}{reset}  {dim}GitHub:{reset} {cyan}https://github.com/Kuddev/nebulaTerminal{reset}"
+        ),
         format!(
             "{icon}\u{f11c}{reset}  {dim}Shortcuts:{reset}  {a}{white} new tab · {b}{white} switch tabs{reset}",
             a = kbd("Ctrl+Shift+T"),
@@ -116,21 +121,21 @@ fn nebula_fastfetch_script_path(narrow: bool) -> Option<std::path::PathBuf> {
     cell.get_or_init(|| {
         let path = std::env::temp_dir().join(file);
         let text = nebula_fastfetch_text(narrow).replace("\r\n", "\n").replace('\r', "\n");
-            let script = format!(
-                "$OutputEncoding = [System.Text.Encoding]::UTF8\r\n\
+        let script = format!(
+            "$OutputEncoding = [System.Text.Encoding]::UTF8\r\n\
                  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n\
                  [Console]::Write(@'\r\n{text}\r\n'@)\r\n"
-            );
+        );
 
-            // Windows PowerShell 5.1 会把无 BOM UTF-8 当作本地 ANSI；这里写 BOM，
-            // 保证字符 logo 与 ANSI 序列在脚本文件中稳定解析。
-            let mut bytes = Vec::with_capacity(3 + script.len());
-            bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
-            bytes.extend_from_slice(script.as_bytes());
-            std::fs::write(&path, bytes).ok()?;
-            Some(path)
-        })
-        .clone()
+        // Windows PowerShell 5.1 会把无 BOM UTF-8 当作本地 ANSI；这里写 BOM，
+        // 保证字符 logo 与 ANSI 序列在脚本文件中稳定解析。
+        let mut bytes = Vec::with_capacity(3 + script.len());
+        bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        bytes.extend_from_slice(script.as_bytes());
+        std::fs::write(&path, bytes).ok()?;
+        Some(path)
+    })
+    .clone()
 }
 
 #[cfg(windows)]

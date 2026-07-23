@@ -29,8 +29,8 @@ use crate::markdown::{
     MathSource, TableAlignment,
 };
 use crate::math::cache::{FormulaCacheKey, MathLayoutCache};
-use crate::math::layout::{MathMetrics, layout_formula};
-use crate::math::{DEFAULT_LIMITS, parse_formula};
+use crate::math::layout::MathMetrics;
+use crate::math::{DEFAULT_LIMITS, compile_formula};
 use crate::renderer::math::MathClip;
 use crate::renderer::ui::UiQuad;
 use crate::renderer::{GlyphCache, Renderer};
@@ -502,8 +502,7 @@ fn measure_math(
     let key = FormulaCacheKey::new(formula_id, pixel_size, pixels_per_point, display);
     let layout = cache
         .get_or_insert_with(key, || {
-            let formula = parse_formula(source.as_str(), display, DEFAULT_LIMITS)?;
-            layout_formula(&formula, pixel_size, pixels_per_point, DEFAULT_LIMITS)
+            compile_formula(source.as_str(), display, pixel_size, pixels_per_point, DEFAULT_LIMITS)
         })
         .ok()?;
     Some(MathRun {
@@ -1432,8 +1431,13 @@ pub fn draw(
                     run.display,
                 );
                 let layout = doc.math_cache.get_or_insert_with(key, || {
-                    let formula = parse_formula(run.source.as_str(), run.display, DEFAULT_LIMITS)?;
-                    layout_formula(&formula, run.pixel_size, run.pixels_per_point, DEFAULT_LIMITS)
+                    compile_formula(
+                        run.source.as_str(),
+                        run.display,
+                        run.pixel_size,
+                        run.pixels_per_point,
+                        DEFAULT_LIMITS,
+                    )
                 });
                 let baseline_y = y + line.math_baseline.unwrap_or(text_ascent);
                 match layout {
@@ -1844,11 +1848,9 @@ mod tests {
             crate::markdown::parse_markdown(include_str!("../../../docs/math-rendering-test.md"));
         let mut formula_count = 0usize;
         let mut check = |source: &MathSource, display: bool| {
-            let formula = parse_formula(source.as_str(), display, DEFAULT_LIMITS)
-                .unwrap_or_else(|error| panic!("fixture parse failed for {:?}: {error:?}", source));
-            let layout =
-                layout_formula(&formula, 18.0, 1.0, DEFAULT_LIMITS).unwrap_or_else(|error| {
-                    panic!("fixture layout failed for {:?}: {error:?}", source)
+            let layout = compile_formula(source.as_str(), display, 18.0, 1.0, DEFAULT_LIMITS)
+                .unwrap_or_else(|error| {
+                    panic!("fixture compile failed for {:?}: {error:?}", source)
                 });
             assert!(layout.metrics.width.is_finite() && layout.metrics.width > 0.0);
             formula_count += 1;
@@ -1873,6 +1875,46 @@ mod tests {
         }
 
         assert!(formula_count >= 25, "fixture should cover many formulas");
+    }
+
+    #[test]
+    fn screenshot_markdown_formulas_reach_the_shared_compiler() {
+        let markdown = concat!(
+            "$$\n",
+            "x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}\n",
+            "$$\n\n",
+            "$$\n",
+            "f(x)=\\begin{cases}\n",
+            "x^2,&x\\geq 0\\\\\n",
+            "-x,&x<0\n",
+            "\\end{cases}\n",
+            "$$\n\n",
+            "$$\n",
+            "A=\\begin{pmatrix}\n",
+            "1&amp;2&amp;3\\\\&nbsp;\n",
+            "4&amp;5&amp;6\\\\&#160;\n",
+            "7&amp;8&amp;9\n",
+            "\\end{pmatrix}\n",
+            "$$\n",
+        );
+        let document = crate::markdown::parse_markdown(markdown);
+        let formulas: Vec<_> = document
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                FormattedTextLine::DisplayMath(source) => Some(source),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(formulas.len(), 3);
+        for source in formulas {
+            let layout = compile_formula(source.as_str(), true, 18.0, 1.0, DEFAULT_LIMITS)
+                .unwrap_or_else(|error| {
+                    panic!("Markdown formula failed for {:?}: {error:?}", source)
+                });
+            assert!(layout.metrics.width > 0.0 && layout.metrics.height > 0.0);
+        }
     }
 
     #[test]

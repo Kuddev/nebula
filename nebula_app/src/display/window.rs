@@ -228,6 +228,12 @@ impl Window {
         self.window.window_handle().unwrap().as_raw()
     }
 
+    #[inline]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn native_window(&self) -> &WinitWindow {
+        &self.window
+    }
+
     /// Shared native window handle for renderer backends whose surface must
     /// own the window lifetime, notably wgpu. OpenGL continues borrowing the
     /// same window through the existing raw-handle path.
@@ -244,6 +250,11 @@ impl Window {
     #[inline]
     pub fn inner_size(&self) -> PhysicalSize<u32> {
         self.window.inner_size()
+    }
+
+    #[inline]
+    pub fn current_monitor_size(&self) -> Option<PhysicalSize<u32>> {
+        self.window.current_monitor().map(|monitor| monitor.size())
     }
 
     #[inline]
@@ -446,6 +457,11 @@ impl Window {
             self.set_resize_increments(None);
         }
         self.window.set_maximized(maximized);
+    }
+
+    #[inline]
+    pub fn is_maximized(&self) -> bool {
+        self.window.is_maximized()
     }
 
     pub fn set_minimized(&self, minimized: bool) {

@@ -60,6 +60,8 @@ pub mod terminal_feedback {
     pub const STROKE_CURSOR_ALPHA_DARK: f32 = 0.82;
     pub const SELECTION_ALPHA_LIGHT: f32 = 0.15;
     pub const SELECTION_ALPHA_DARK: f32 = 0.22;
+    /// WCAG AA normal-text floor for application-owned terminal RGB colors.
+    pub const FIXED_TEXT_MIN_CONTRAST: f64 = 4.5;
 }
 
 pub mod motion {

@@ -19,7 +19,6 @@ use glutin::surface::{Surface, SwapInterval, WindowSurface};
 
 use log::{debug, info, warn};
 use parking_lot::MutexGuard;
-use serde::{Deserialize, Serialize};
 use winit::dpi::PhysicalSize;
 use winit::keyboard::ModifiersState;
 use winit::raw_window_handle::RawWindowHandle;
@@ -28,7 +27,7 @@ use winit::window::{CursorIcon, Theme as WinitTheme};
 use crossfont::{Rasterize, Size as FontSize};
 use unicode_width::UnicodeWidthChar;
 
-use nebula_terminal::event::{EventListener, OnResize, WindowSize};
+use nebula_terminal::event::{EventListener, OnResize};
 use nebula_terminal::grid::Dimensions as TermDimensions;
 use nebula_terminal::index::{Column, Direction, Line, Point};
 use nebula_terminal::selection::Selection;
@@ -57,7 +56,7 @@ use crate::display::hint::{HintMatch, HintState};
 use crate::display::meter::Meter;
 use crate::display::window::Window;
 use crate::event::{Event, EventType, Mouse, SearchState};
-use crate::message_bar::{MessageBuffer, MessageType};
+use crate::message_bar::{self, MessageBuffer, MessageType};
 use crate::renderer::Rasterizer;
 use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
 use crate::renderer::ui::{Gradient, Rgba, UiQuad};
@@ -77,8 +76,13 @@ mod context_menu;
 pub mod design_tokens;
 mod i18n;
 pub mod markdown_view;
+mod message_queue_entry;
 pub mod sftp_panel;
 pub mod side_panel;
+mod size_info;
+mod state;
+mod terminal_color;
+mod terminal_math;
 
 pub(crate) use chrome::chrome_settings_button_rect;
 pub use chrome::{ChromeHit, TabDropAction, in_chrome_bar, resize_edge};
@@ -88,6 +92,11 @@ use chrome::{
 };
 pub use context_menu::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
 pub use i18n::{LanguagePreference, UiLanguage};
+pub use size_info::SizeInfo;
+pub use state::{
+    AcceptKey, NebulaConfirm, NebulaInlineImage, NebulaPaneState, NebulaShell, SplitDirection,
+    SplitNav,
+};
 
 mod file_dialog;
 mod settings;
@@ -258,6 +267,10 @@ impl UiAnim {
 struct NebulaUiAnims {
     clock: crate::motion::MotionClock,
     frame: Option<crate::motion::Frame>,
+    /// Continuous sidebar-spinner phase in turns (`0.0..1.0`). Advancing it
+    /// from the shared monotonic frame delta avoids wall-clock jumps and needs
+    /// only four bytes per window.
+    spinner_phase: f32,
     left_sidebar: UiAnim,
     right_drawer: UiAnim,
     ssh_editor: UiAnim,
@@ -268,6 +281,7 @@ impl NebulaUiAnims {
         Self {
             clock: crate::motion::MotionClock::default(),
             frame: None,
+            spinner_phase: 0.0,
             left_sidebar: UiAnim::new(1.0),
             right_drawer: UiAnim::new(0.0),
             ssh_editor: UiAnim::new(0.0),
@@ -347,171 +361,6 @@ enum NebulaPowerlineIconKind {
 struct NebulaPowerlineIcon {
     kind: NebulaPowerlineIconKind,
     point: Point<usize>,
-}
-
-/// Which key accepts an inline ghost suggestion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AcceptKey {
-    Right,
-    Tab,
-    #[default]
-    Both,
-}
-
-impl AcceptKey {
-    fn cycle(self) -> Self {
-        match self {
-            Self::Right => Self::Tab,
-            Self::Tab => Self::Both,
-            Self::Both => Self::Right,
-        }
-    }
-    pub fn accepts_right(self) -> bool {
-        matches!(self, Self::Right | Self::Both)
-    }
-    pub fn accepts_tab(self) -> bool {
-        matches!(self, Self::Tab | Self::Both)
-    }
-}
-
-/// Runtime-selected default executor for new Nebula terminal sessions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NebulaShell {
-    #[default]
-    PowerShell,
-    Bash,
-}
-
-impl NebulaShell {
-    fn label(self) -> &'static str {
-        match self {
-            Self::PowerShell => "PowerShell",
-            Self::Bash => "Bash",
-        }
-    }
-
-    fn settings_value(self) -> &'static str {
-        match self {
-            Self::PowerShell => "powershell",
-            Self::Bash => "bash",
-        }
-    }
-
-    fn from_settings(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "powershell" | "pwsh" | "ps" => Some(Self::PowerShell),
-            "bash" | "git-bash" | "gitbash" | "wsl" => Some(Self::Bash),
-            _ => None,
-        }
-    }
-}
-
-/// A blocking action awaiting user input.
-/// Drawn as a centered modal; the keyboard is owned by the modal while open.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NebulaConfirm {
-    /// The bundled Nerd Font must be installed before the terminal can be used.
-    InstallRequiredFont { directory: PathBuf },
-    /// Close one pane whose shell still has a busy child process.
-    ClosePane { pane_id: u64, process: String },
-    /// Close a whole tab (by displayed index) with a busy process inside.
-    CloseTab { index: usize, process: String },
-    /// Close the window while some pane still runs `process`.
-    CloseWindow { process: String },
-    /// Paste text that contains newlines (would execute in most shells).
-    ///
-    /// `pane_id` binds the confirmation to the terminal that requested it.
-    /// The modal is window-global and can straddle split panes, so resolving
-    /// the destination again from the confirmation click would misroute data.
-    Paste { pane_id: u64, text: String, bracketed: bool, lines: usize },
-    /// Remove a saved host or hide an alias originating in `~/.ssh/config`.
-    /// The source flag lets the dialog explain that Nebula never edits the
-    /// user's SSH config file.
-    DeleteSsh { host: String, from_config: bool },
-    /// Recursively remove one remote SFTP entry after explicit confirmation.
-    DeleteSftp { entry: crate::ssh_sftp::SftpEntry },
-}
-
-impl NebulaConfirm {
-    /// Every current confirmation can be dismissed without taking its action.
-    pub fn can_dismiss(&self) -> bool {
-        true
-    }
-
-    /// Terminal that owns a pending multi-line paste transaction.
-    pub fn paste_pane_id(&self) -> Option<u64> {
-        match self {
-            Self::Paste { pane_id, .. } => Some(*pane_id),
-            _ => None,
-        }
-    }
-}
-
-/// One OSC 1337 inline image, anchored to an absolute grid row (see
-/// `Grid::scrolled_out`). Pixels are shared via `Arc` so pane-state clones
-/// stay cheap; the GPU texture is cached per `id` inside the renderer.
-#[derive(Debug, Clone)]
-pub struct NebulaInlineImage {
-    /// Unique id keying the renderer's texture cache.
-    pub id: u64,
-    /// Top row in absolute grid line numbering.
-    pub abs_line: usize,
-    /// Display size in window pixels (already scaled to the terminal width).
-    pub width: f32,
-    pub height: f32,
-    /// Decoded RGBA8 pixels.
-    pub rgba: std::sync::Arc<Vec<u8>>,
-    /// Pixel dimensions of `rgba`.
-    pub px_w: u32,
-    pub px_h: u32,
-}
-
-/// Per-pane Nebula prompt metadata and inline suggestion state.
-/// 这些状态必须跟随具体 PTY/pane，而不能挂在 `Display` 全局上；否则分屏后右侧
-/// shell 上报的 cwd、用户正在输入的行、ghost suggestion 会污染左侧 pane。
-#[derive(Debug, Default, Clone)]
-pub struct NebulaPaneState {
-    /// Current working directory captured from `NEBULA|cwd|branch`.
-    pub cwd: String,
-    /// Current git branch captured from `NEBULA|cwd|branch`.
-    pub branch: String,
-    /// Inline ghost-text autosuggestion remainder.
-    pub suggestion: String,
-    /// Cache key (`cwd\0token`) for the current suggestion.
-    suggestion_key: String,
-    /// User-typed prompt line tracked from key events.
-    pub line_buf: String,
-    /// Last prompt line read from the raw terminal grid. This mirrors Nu's
-    /// editor buffer more closely after shell-side edits such as Tab completion
-    /// or history recall, where key-event reconstruction has been invalidated.
-    pub(crate) screen_line: String,
-    /// Whether the user has typed anything into this pane. A pristine pane is
-    /// still showing only the welcome intro, so it may be safely re-printed
-    /// (e.g. after a split resize reflows the two-column layout).
-    pub touched: bool,
-    /// OSC 1337 inline images anchored to absolute grid rows, newest last.
-    pub inline_images: Vec<NebulaInlineImage>,
-    /// When the running command started (OSC 133;C), for the finished-command
-    /// notification (133;D). `None` when no command is being tracked.
-    pub command_started: Option<std::time::Instant>,
-    /// Program identity of the running command ("claude", "cargo", …), taken
-    /// from the line committed at Enter. Drives the sidebar tab icon.
-    pub running_program: Option<String>,
-    /// The command line most recently committed with Enter. Captured because
-    /// OSC 133;C arrives from the PTY *after* the prompt buffers were cleared.
-    pub last_committed: String,
-    /// The running program rang BEL and is now waiting for input (AI CLIs
-    /// ring when a turn completes): the spinner pauses until the user types.
-    pub awaiting_input: bool,
-    /// A tracked command finished while its tab was in the background; shows
-    /// the sidebar dot until the tab is selected.
-    pub finished_unseen: bool,
-    /// SSH destination of the command currently running in this pane, armed
-    /// at OSC 133;C when the committed line was an `ssh …` invocation. On a
-    /// confirmed connection (remote `NEBULA|` title, or a session that lived
-    /// long enough at 133;D) the host is auto-saved into the sidebar's
-    /// SSH HOSTS list.
-    pub pending_ssh_host: Option<String>,
 }
 
 /// Sidebar SSH HOSTS content: auto-saved destinations (most recent first) +
@@ -718,24 +567,6 @@ pub(crate) fn program_icon(program: &str) -> &'static str {
         "docker" | "podman" => "\u{e7b0}", // dev-docker
         _ => "\u{f04b}",         // fa-play (generic busy)
     }
-}
-
-/// Orientation of a split between two panes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitDirection {
-    /// Panes side by side, divided by a vertical line.
-    LeftRight,
-    /// Panes stacked, divided by a horizontal line.
-    TopBottom,
-}
-
-/// Cardinal direction for moving keyboard focus between split panes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitNav {
-    Left,
-    Right,
-    Up,
-    Down,
 }
 
 pub(crate) fn nebula_debug_log(message: impl AsRef<str>) {
@@ -976,6 +807,16 @@ fn nebula_command_hint<'a>(commands: &'a [String], prefix: &str) -> Option<&'a s
         return None;
     }
 
+    // 完整命令已经可执行时必须停止补全；否则 `claude` 会跳过自身，继续
+    // 命中 `claude-agent-acp` 这类更长的 PATH 邻居。
+    #[cfg(windows)]
+    let exact = commands.iter().any(|command| command.eq_ignore_ascii_case(prefix));
+    #[cfg(not(windows))]
+    let exact = commands.iter().any(|command| command == prefix);
+    if exact {
+        return None;
+    }
+
     commands.iter().find_map(|command| {
         if command.len() <= prefix.len() || !command.is_char_boundary(prefix.len()) {
             return None;
@@ -1065,271 +906,6 @@ impl From<glutin::error::Error> for Error {
     }
 }
 
-/// Terminal size info.
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
-pub struct SizeInfo<T = f32> {
-    /// Terminal window width.
-    width: T,
-
-    /// Terminal window height.
-    height: T,
-
-    /// Width of individual cell.
-    cell_width: T,
-
-    /// Height of individual cell.
-    cell_height: T,
-
-    /// Horizontal window padding on the left. Doubles as the grid's left
-    /// origin everywhere (cursor/IME/mouse/damage), so the Nebula sidebar makes
-    /// itself room simply by inflating this.
-    padding_x: T,
-
-    /// Horizontal window padding on the right. Equal to `padding_x` in the
-    /// classic symmetric layout; smaller when a left sidebar is present so the
-    /// grid only pays the sidebar cost on one side.
-    padding_right: T,
-
-    /// Top window padding / grid origin.
-    padding_y: T,
-
-    /// Bottom window padding. Kept separate because Nebula's title bar exists
-    /// only above the grid; using `padding_y` symmetrically wastes terminal rows.
-    padding_bottom: T,
-
-    /// Number of lines in the viewport.
-    screen_lines: usize,
-
-    /// Number of columns in the viewport.
-    columns: usize,
-}
-
-impl From<SizeInfo<f32>> for SizeInfo<u32> {
-    fn from(size_info: SizeInfo<f32>) -> Self {
-        Self {
-            width: size_info.width as u32,
-            height: size_info.height as u32,
-            cell_width: size_info.cell_width as u32,
-            cell_height: size_info.cell_height as u32,
-            padding_x: size_info.padding_x as u32,
-            padding_right: size_info.padding_right as u32,
-            padding_y: size_info.padding_y as u32,
-            padding_bottom: size_info.padding_bottom as u32,
-            screen_lines: size_info.screen_lines,
-            columns: size_info.columns,
-        }
-    }
-}
-
-impl From<SizeInfo<f32>> for WindowSize {
-    fn from(size_info: SizeInfo<f32>) -> Self {
-        Self {
-            num_cols: size_info.columns() as u16,
-            num_lines: size_info.screen_lines() as u16,
-            cell_width: size_info.cell_width() as u16,
-            cell_height: size_info.cell_height() as u16,
-        }
-    }
-}
-
-impl<T: Clone + Copy> SizeInfo<T> {
-    #[inline]
-    pub fn width(&self) -> T {
-        self.width
-    }
-
-    #[inline]
-    pub fn height(&self) -> T {
-        self.height
-    }
-
-    #[inline]
-    pub fn cell_width(&self) -> T {
-        self.cell_width
-    }
-
-    #[inline]
-    pub fn cell_height(&self) -> T {
-        self.cell_height
-    }
-
-    #[inline]
-    pub fn padding_x(&self) -> T {
-        self.padding_x
-    }
-
-    #[inline]
-    pub fn padding_right(&self) -> T {
-        self.padding_right
-    }
-
-    #[inline]
-    pub fn padding_y(&self) -> T {
-        self.padding_y
-    }
-
-    #[inline]
-    pub fn padding_bottom(&self) -> T {
-        self.padding_bottom
-    }
-}
-
-impl SizeInfo<f32> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        width: f32,
-        height: f32,
-        cell_width: f32,
-        cell_height: f32,
-        mut padding_x: f32,
-        mut padding_y: f32,
-        dynamic_padding: bool,
-    ) -> SizeInfo {
-        // Symmetric entry point: right padding mirrors the left. Callers that
-        // want an asymmetric layout (the sidebar) use `new_asymmetric`.
-        let padding_right = padding_x;
-        if dynamic_padding {
-            padding_x = Self::dynamic_padding(padding_x.floor(), width, cell_width);
-            padding_y = Self::dynamic_padding(padding_y.floor(), height, cell_height);
-        }
-
-        Self::assemble(
-            width,
-            height,
-            cell_width,
-            cell_height,
-            padding_x,
-            padding_right,
-            padding_y,
-            padding_y,
-        )
-    }
-
-    /// Build a grid whose left and right paddings differ. The left padding is
-    /// the grid origin (and absorbs the sidebar width); the right padding stays
-    /// the ordinary content margin. Dynamic padding is intentionally skipped —
-    /// an asymmetric layout is driven by explicit chrome geometry, not centring.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_asymmetric(
-        width: f32,
-        height: f32,
-        cell_width: f32,
-        cell_height: f32,
-        padding_x: f32,
-        padding_right: f32,
-        padding_y: f32,
-    ) -> SizeInfo {
-        Self::assemble(
-            width,
-            height,
-            cell_width,
-            cell_height,
-            padding_x,
-            padding_right,
-            padding_y,
-            padding_y,
-        )
-    }
-
-    /// Build a grid with independent padding on all four sides. This is the
-    /// full-window Nebula path: sidebar/drawer make X asymmetric, while the
-    /// title bar makes Y asymmetric.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_fully_asymmetric(
-        width: f32,
-        height: f32,
-        cell_width: f32,
-        cell_height: f32,
-        padding_x: f32,
-        padding_right: f32,
-        padding_y: f32,
-        padding_bottom: f32,
-    ) -> SizeInfo {
-        Self::assemble(
-            width,
-            height,
-            cell_width,
-            cell_height,
-            padding_x,
-            padding_right,
-            padding_y,
-            padding_bottom,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn assemble(
-        width: f32,
-        height: f32,
-        cell_width: f32,
-        cell_height: f32,
-        padding_x: f32,
-        padding_right: f32,
-        padding_y: f32,
-        padding_bottom: f32,
-    ) -> SizeInfo {
-        let lines = (height - padding_y - padding_bottom) / cell_height;
-        let screen_lines = cmp::max(lines as usize, MIN_SCREEN_LINES);
-
-        let columns = (width - padding_x - padding_right) / cell_width;
-        let columns = cmp::max(columns as usize, MIN_COLUMNS);
-
-        SizeInfo {
-            width,
-            height,
-            cell_width,
-            cell_height,
-            padding_x: padding_x.floor(),
-            padding_right: padding_right.floor(),
-            padding_y: padding_y.floor(),
-            padding_bottom: padding_bottom.floor(),
-            screen_lines,
-            columns,
-        }
-    }
-
-    #[inline]
-    pub fn reserve_lines(&mut self, count: usize) {
-        self.screen_lines = cmp::max(self.screen_lines.saturating_sub(count), MIN_SCREEN_LINES);
-    }
-
-    /// Check if coordinates are inside the terminal grid.
-    ///
-    /// The padding, message bar or search are not counted as part of the grid.
-    #[inline]
-    pub fn contains_point(&self, x: usize, y: usize) -> bool {
-        x <= (self.padding_x + self.columns as f32 * self.cell_width) as usize
-            && x > self.padding_x as usize
-            // right edge derives from columns, so asymmetric padding is implicit
-
-            && y <= (self.padding_y + self.screen_lines as f32 * self.cell_height) as usize
-            && y > self.padding_y as usize
-    }
-
-    /// Calculate padding to spread it evenly around the terminal content.
-    #[inline]
-    fn dynamic_padding(padding: f32, dimension: f32, cell_dimension: f32) -> f32 {
-        padding + ((dimension - 2. * padding) % cell_dimension) / 2.
-    }
-}
-
-impl TermDimensions for SizeInfo {
-    #[inline]
-    fn columns(&self) -> usize {
-        self.columns
-    }
-
-    #[inline]
-    fn screen_lines(&self) -> usize {
-        self.screen_lines
-    }
-
-    #[inline]
-    fn total_lines(&self) -> usize {
-        self.screen_lines()
-    }
-}
-
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct DisplayUpdate {
     pub dirty: bool,
@@ -1337,6 +913,7 @@ pub struct DisplayUpdate {
     dimensions: Option<PhysicalSize<u32>>,
     cursor_dirty: bool,
     font: Option<Font>,
+    terminal_colors_dirty: bool,
 }
 
 impl DisplayUpdate {
@@ -1352,6 +929,10 @@ impl DisplayUpdate {
         self.cursor_dirty
     }
 
+    pub fn terminal_colors_dirty(&self) -> bool {
+        self.terminal_colors_dirty
+    }
+
     pub fn set_dimensions(&mut self, dimensions: PhysicalSize<u32>) {
         self.dimensions = Some(dimensions);
         self.dirty = true;
@@ -1364,6 +945,11 @@ impl DisplayUpdate {
 
     pub fn set_cursor_dirty(&mut self) {
         self.cursor_dirty = true;
+        self.dirty = true;
+    }
+
+    fn set_terminal_colors_dirty(&mut self) {
+        self.terminal_colors_dirty = true;
         self.dirty = true;
     }
 }
@@ -1478,6 +1064,10 @@ pub struct Display {
     /// Active sidebar section inside the settings panel.
     nebula_settings_section: NebulaSettingsSection,
     nebula_chrome_hover: ChromeHit,
+    /// Bottom-docked queue affordance. The entry state lives separately from
+    /// Tabs/SSH so real Agent events can be connected without changing chrome
+    /// geometry or input contracts again.
+    nebula_message_queue_entry: message_queue_entry::MessageQueueEntry,
     nebula_settings_hover: SettingsHit,
     /// Unified native right-click menu shared by tab and SSH rows. The menu
     /// owns its short open/close animation so no input path needs timers.
@@ -1548,6 +1138,8 @@ pub struct Display {
     /// `nebula_shell` enum can't represent (cmd/pwsh/nu/wsl:X). Drives the
     /// settings row label and is persisted verbatim.
     pub nebula_shell_id: Option<String>,
+    /// User-selected working directory for newly created terminal tabs.
+    pub nebula_startup_directory: Option<PathBuf>,
     /// Whether new sessions print the Nebula welcome/fetch screen.
     pub nebula_fetch_enabled: bool,
     /// Whether the injected prompt uses Nebula's powerline segments.
@@ -1599,6 +1191,9 @@ pub struct Display {
     /// The user's configured color scheme, untouched by theme restyling —
     /// the base every `apply_term_colors` starts from.
     nebula_default_colors: List,
+    /// Draw-time adaptation for application-owned RGB colors. The terminal
+    /// grid retains the original values so protocol state and copying are exact.
+    terminal_color_resolver: terminal_color::TerminalColorResolver,
 
     /// State of the keyboard hints.
     pub hint_state: HintState,
@@ -1688,6 +1283,7 @@ impl Display {
         config: &UiConfig,
         system_theme: Option<WinitTheme>,
         _tabbed: bool,
+        restored_window: Option<crate::session::WindowState>,
     ) -> Result<Display, Error> {
         let raw_window_handle = window.raw_window_handle();
 
@@ -1739,7 +1335,20 @@ impl Display {
             .window
             .dimensions()
             .unwrap_or(crate::config::window::Dimensions { columns: 116, lines: 30 });
-        let size = window_size(config, dimensions, cell_width, cell_height, scale_factor);
+        let size = restored_window
+            .filter(|state| state.valid_size())
+            .map(|state| {
+                let mut size = winit::dpi::LogicalSize::new(state.width, state.height)
+                    .to_physical::<u32>(window.scale_factor);
+                if let Some(monitor) = window.current_monitor_size() {
+                    size.width = size.width.min(monitor.width).max(100);
+                    size.height = size.height.min(monitor.height).max(100);
+                }
+                size
+            })
+            .unwrap_or_else(|| {
+                window_size(config, dimensions, cell_width, cell_height, scale_factor)
+            });
         window.request_inner_size(size);
 
         // Create the GL surface to draw into.
@@ -1848,6 +1457,12 @@ impl Display {
                 StartupMode::Maximized if !is_wayland => window.set_maximized(true),
                 #[cfg(windows)]
                 StartupMode::Fullscreen => window.set_fullscreen(true),
+                _ if restored_window.is_some_and(|state| state.maximized)
+                    && config.window.fullscreen().is_none()
+                    && !is_wayland =>
+                {
+                    window.set_maximized(true)
+                },
                 _ => (),
             }
         }
@@ -1881,6 +1496,7 @@ impl Display {
             surface: ManuallyDrop::new(surface),
             colors: initial_colors,
             nebula_default_colors,
+            terminal_color_resolver: Default::default(),
             frame_timer: FrameTimer::new(),
             raw_window_handle,
             damage_tracker,
@@ -1942,6 +1558,7 @@ impl Display {
             nebula_ui_anims: NebulaUiAnims::new(),
             nebula_settings_section: NebulaSettingsSection::default(),
             nebula_chrome_hover: ChromeHit::None,
+            nebula_message_queue_entry: message_queue_entry::MessageQueueEntry::default(),
             nebula_settings_hover: SettingsHit::None,
             nebula_context_menu: None,
             nebula_shell_picker_open: false,
@@ -1982,6 +1599,7 @@ impl Display {
             nebula_accept: settings_init.accept,
             nebula_shell: settings_init.shell,
             nebula_shell_id: settings_init.shell_id.clone(),
+            nebula_startup_directory: settings_init.startup_directory,
             nebula_fetch_enabled: settings_init.fetch,
             nebula_powerline_enabled: settings_init.powerline,
             nebula_keep_session: settings_init.keep_session,
@@ -2291,7 +1909,7 @@ impl Display {
                 }
             },
             SshEditorHit::AddPrivateKey => {
-                if let Some(result) = file_dialog::pick_private_key_file(self.raw_window_handle) {
+                if let Some(result) = file_dialog::pick_private_key_file(&self.window) {
                     if let Some(editor) = self.nebula_ssh_editor.as_mut() {
                         match result {
                             Ok(path) => {
@@ -2570,8 +2188,8 @@ impl Display {
         }
     }
 
-    /// Whether any sidebar tab currently shows a running spinner — drives
-    /// the fast (8 fps) chrome animation clock instead of the 1 Hz one.
+    /// Whether any sidebar tab currently shows a running spinner. Only this
+    /// state raises the chrome clock to display-rate frames.
     pub fn any_tab_running(&self) -> bool {
         self.nebula_tab_running.iter().any(|running| *running)
     }
@@ -2965,6 +2583,10 @@ impl Display {
                 })
                 .unwrap_or_default(),
             shell_id: self.nebula_shell_id.clone(),
+            startup_directory: self
+                .nebula_startup_directory
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
             font_family: self.nebula_font_family.clone(),
             font_picker_open: self.nebula_font_picker_open,
             fonts: self.nebula_font_families.clone(),
@@ -3017,6 +2639,8 @@ impl Display {
     }
 
     fn apply_nebula_theme(&mut self, theme: NebulaTheme) {
+        let previous_theme = self.nebula_theme;
+        let theme_changed = previous_theme != theme;
         self.nebula_theme = theme;
         // A theme carries its terminal background (the light themes are
         // unusable without it). Switching theme IS choosing the look, so it
@@ -3027,6 +2651,13 @@ impl Display {
         // light ANSI set to stay readable.
         let defaults = self.nebula_default_colors;
         theme.apply_term_colors(&mut self.colors, &defaults);
+        if theme_changed {
+            // 旧 pane 可能持有应用通过 OSC 写入的上一主题颜色；交给窗口层在
+            // 未持有任何终端锁时统一清理，避免只刷新当前焦点 pane。
+            self.terminal_color_resolver
+                .theme_changed(previous_theme.palette().term_bg, theme.palette().term_bg);
+            self.pending_update.set_terminal_colors_dirty();
+        }
         write_nebula_prompt_theme(theme);
         self.pending_update.dirty = true;
     }
@@ -3132,6 +2763,32 @@ impl Display {
         }
     }
 
+    pub fn pick_startup_directory(&mut self) {
+        let Some(path) = file_dialog::pick_startup_directory(&self.window) else { return };
+        if !path.is_dir() {
+            return;
+        }
+
+        self.nebula_startup_directory = Some(path);
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn clear_startup_directory(&mut self) {
+        if self.nebula_startup_directory.take().is_none() {
+            return;
+        }
+
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub(crate) fn startup_directory(&self) -> Option<PathBuf> {
+        self.nebula_startup_directory.as_ref().filter(|path| path.is_dir()).cloned()
+    }
+
     pub fn toggle_font_picker(&mut self) {
         self.nebula_shell_picker_open = false;
         self.nebula_font_notice = None;
@@ -3172,7 +2829,7 @@ impl Display {
 
         #[cfg(windows)]
         {
-            let Some(source) = file_dialog::pick_font_file(self.raw_window_handle) else { return };
+            let Some(source) = file_dialog::pick_font_file(&self.window) else { return };
             let stored = match crate::font_install::store_imported_font(&source) {
                 Ok(stored) => stored,
                 Err(error) => {
@@ -3319,7 +2976,7 @@ impl Display {
     pub fn pick_background_image(&mut self) {
         #[cfg(windows)]
         {
-            if let Some(path) = file_dialog::pick_image_file(self.raw_window_handle) {
+            if let Some(path) = file_dialog::pick_image_file(&self.window) {
                 self.nebula_background_image = Some(path);
                 self.persist_nebula_settings();
                 self.renderer.invalidate_background_image();
@@ -3643,7 +3300,7 @@ impl Display {
     }
 
     pub fn choose_side_panel_directory(&mut self) {
-        let Some(path) = file_dialog::pick_side_panel_directory(self.raw_window_handle) else {
+        let Some(path) = file_dialog::pick_side_panel_directory(&self.window) else {
             return;
         };
         if self.nebula_side_panel.set_custom_root(path) {
@@ -3769,7 +3426,7 @@ impl Display {
     }
 
     pub fn sftp_pick_upload_files(&mut self) {
-        let paths = file_dialog::pick_upload_files(self.raw_window_handle);
+        let paths = file_dialog::pick_upload_files(&self.window);
         if !paths.is_empty()
             && let Some(panel) = self.nebula_sftp_panel.as_ref()
         {
@@ -3778,7 +3435,7 @@ impl Display {
     }
 
     pub fn sftp_pick_upload_directory(&mut self) {
-        if let Some(path) = file_dialog::pick_upload_directory(self.raw_window_handle)
+        if let Some(path) = file_dialog::pick_upload_directory(&self.window)
             && let Some(panel) = self.nebula_sftp_panel.as_ref()
         {
             panel.upload_paths(vec![path]);
@@ -3811,7 +3468,7 @@ impl Display {
     }
 
     fn sftp_download_entry(&mut self, entry: crate::ssh_sftp::SftpEntry) {
-        let Some(directory) = file_dialog::pick_download_directory(self.raw_window_handle) else {
+        let Some(directory) = file_dialog::pick_download_directory(&self.window) else {
             return;
         };
         if let Some(panel) = self.nebula_sftp_panel.as_ref() {
@@ -3920,6 +3577,15 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
+    /// Toggle the queue entry now; the expanded panel will consume the same
+    /// state in the next integration stage, so the entry's hit contract does
+    /// not need to change when real queue content lands.
+    pub fn toggle_message_queue_entry(&mut self) {
+        self.nebula_message_queue_entry.toggle();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
     /// Route a mouse-wheel tick over the sidebar into the section under the
     /// pointer. Returns true when consumed (pointer was over a section band).
     pub fn sidebar_wheel(&mut self, x: f32, y: f32, rows: i32) -> bool {
@@ -3988,6 +3654,7 @@ impl Display {
             accept: self.nebula_accept,
             shell: self.nebula_shell,
             shell_id: self.nebula_shell_id.clone(),
+            startup_directory: self.nebula_startup_directory.clone(),
             font_family: self.nebula_font_family.clone(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
@@ -4049,6 +3716,7 @@ impl Display {
         self.nebula_accept = settings.accept;
         self.nebula_shell = settings.shell;
         self.nebula_shell_id = settings.shell_id;
+        self.nebula_startup_directory = settings.startup_directory;
         self.nebula_font_family = settings.font_family;
         if font_changed {
             #[cfg(windows)]
@@ -4414,6 +4082,8 @@ impl Display {
         // splits, where panes occupy different vertical bands of the window.
         self.renderer.set_window_height(self.size_info.height());
 
+        pane_state.terminal_math.observe_program(pane_state.running_program.as_deref());
+
         // Collect renderable content before the terminal is dropped.
         let custom_background = self.nebula_background;
         let clickable_matches = hint::visible_clickable_matches(&terminal, config);
@@ -4465,6 +4135,28 @@ impl Display {
             None
         } else {
             Some(Self::nebula_raw_grid_row_preview(&terminal, cursor_point))
+        };
+
+        let terminal_math_overlays = if pane_state.terminal_math.inline_dollar_enabled()
+            && !alt_screen
+            && !vi_mode
+            && search_state.regex().is_none()
+            && selection_range.is_none()
+            && self.ime.preedit().is_none()
+        {
+            let visible_cursor = term::point_to_viewport(display_offset, cursor_point);
+            terminal_math::scan_visible(
+                &mut pane_state.terminal_math,
+                &terminal,
+                &view,
+                &grid_cells,
+                true,
+                visible_cursor,
+                foreground_color,
+                background_color,
+            )
+        } else {
+            Vec::new()
         };
 
         // Add damage from the terminal.
@@ -4790,24 +4482,24 @@ impl Display {
 
             // Create a new rectangle for the background.
             let start_line = size_info.screen_lines() + search_offset;
-            let y = size_info.cell_height().mul_add(start_line as f32, size_info.padding_y());
+            let bar = message_bar::message_bar_rect(&size_info, search_offset != 0);
 
             let bg = match message.ty() {
                 MessageType::Error => config.colors.normal.red,
                 MessageType::Warning => config.colors.normal.yellow,
             };
 
-            let x = 0;
-            let width = size_info.width() as i32;
-            let height = (size_info.height() - y) as i32;
-            let message_bar_rect =
-                RenderRect::new(x as f32, y, width as f32, height as f32, bg, 1.);
+            let x = bar.x as i32;
+            let y = bar.y as i32;
+            let width = bar.width as i32;
+            let height = bar.height as i32;
+            let message_bar_rect = RenderRect::new(bar.x, bar.y, bar.width, bar.height, bg, 1.);
 
             // Push message_bar in the end, so it'll be above all other content.
             rects.push(message_bar_rect);
 
             // Always damage message bar, since it could have messages of the same size in it.
-            self.damage_tracker.frame().add_viewport_rect(&size_info, x, y as i32, width, height);
+            self.damage_tracker.frame().add_viewport_rect(&size_info, x, y, width, height);
 
             // Draw rectangles.
             self.renderer.draw_rects(&size_info, &metrics, rects);
@@ -4830,6 +4522,18 @@ impl Display {
             // Draw rectangles.
             self.renderer.draw_rects(&size_info, &metrics, rects);
         }
+
+        let math_pixel_size = self.glyph_cache.font_size.as_px();
+        let pixels_per_point = self.window.scale_factor as f32 * 96.0 / 72.27;
+        terminal_math::draw_overlays(
+            &mut self.renderer,
+            &mut self.glyph_cache,
+            &mut pane_state.terminal_math,
+            &terminal_math_overlays,
+            &size_info,
+            math_pixel_size,
+            pixels_per_point,
+        );
 
         self.draw_powerline_icons(&powerline_icons, size_info);
         // `draw_powerline_icons` uses the full-window UI renderer and restores
@@ -6769,8 +6473,9 @@ mod nebula_ux_tests {
     use winit::window::Theme as WinitTheme;
 
     use super::{
-        NebulaConfirm, SizeInfo, alt_screen_vertical_padding_bands, remove_ssh_host_from_lists,
-        replays_untrusted_terminal_output, restore_ssh_host_to_lists, system_theme_snapshot,
+        NebulaConfirm, SizeInfo, alt_screen_vertical_padding_bands, nebula_command_hint,
+        remove_ssh_host_from_lists, replays_untrusted_terminal_output, restore_ssh_host_to_lists,
+        system_theme_snapshot,
     };
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -6791,6 +6496,16 @@ mod nebula_ux_tests {
         for command in ["docker run app", "kubectl exec pod -- sh", "cargo test", "nvim"] {
             assert!(!replays_untrusted_terminal_output(command), "{command}");
         }
+    }
+
+    #[test]
+    fn exact_path_command_suppresses_longer_neighbor_completion() {
+        let commands = strings(&["claude", "claude-agent-acp"]);
+        assert_eq!(nebula_command_hint(&commands, "clau"), Some("de"));
+        assert_eq!(nebula_command_hint(&commands, "claude"), None);
+
+        #[cfg(windows)]
+        assert_eq!(nebula_command_hint(&commands, "CLAUDE"), None);
     }
 
     #[test]

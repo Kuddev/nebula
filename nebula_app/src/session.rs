@@ -7,8 +7,9 @@
 //! restore is attempted and cleared by the first successful autosave, so after
 //! three failed launches Nebula starts clean to break the cycle.
 //!
-//! v2 additionally preserves each tab's custom name and optional color. Split
-//! trees inside a tab still collapse to their focused pane's cwd for now.
+//! v2 additionally preserves each tab's custom name and optional color. v3
+//! persists the normal logical window size and maximized state. Split trees
+//! inside a tab still collapse to their focused pane's cwd for now.
 
 use std::path::PathBuf;
 
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::display::color::Rgb;
 
 /// Highest snapshot format this build understands.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// Give up restoring after this many launches that never reached a successful
 /// autosave (i.e. crashed within the first second).
@@ -35,6 +36,23 @@ pub struct TabSession {
     pub color: Option<Rgb>,
 }
 
+/// Last normal (non-maximized, non-fullscreen) inner size in logical pixels.
+/// Logical units keep the perceived size stable when the next launch lands on
+/// a monitor with a different DPI scale factor.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowState {
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+impl WindowState {
+    pub fn valid_size(self) -> bool {
+        self.width >= 100 && self.height >= 100
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Session {
     pub version: u32,
@@ -43,11 +61,13 @@ pub struct Session {
     pub boot_attempts: u32,
     pub active_tab: usize,
     pub tabs: Vec<TabSession>,
+    #[serde(default)]
+    pub window: Option<WindowState>,
 }
 
 impl Session {
     pub fn new(active_tab: usize, tabs: Vec<TabSession>) -> Self {
-        Self { version: VERSION, boot_attempts: 0, active_tab, tabs }
+        Self { version: VERSION, boot_attempts: 0, active_tab, tabs, window: None }
     }
 }
 
@@ -61,9 +81,9 @@ fn session_path() -> PathBuf {
 pub fn load() -> Option<Session> {
     let data = std::fs::read_to_string(session_path()).ok()?;
     let mut session: Session = serde_json::from_str(&data).ok()?;
-    // v1 has the same outer shape; serde defaults fill the two v2 fields.
-    // Upgrade in memory so the first successful autosave rewrites it as v2.
-    if session.version == 1 {
+    // Defaults fill fields introduced after v1. Upgrade in memory so the first
+    // successful autosave rewrites the current format.
+    if matches!(session.version, 1 | 2) {
         session.version = VERSION;
     }
     (session.version == VERSION).then_some(session)
@@ -128,5 +148,21 @@ mod tests {
         let json = serde_json::to_string(&session).unwrap();
         let restored: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, session);
+    }
+
+    #[test]
+    fn older_session_without_window_state_stays_compatible() {
+        let json = r#"{"version":2,"boot_attempts":0,"active_tab":0,"tabs":[{"cwd":"D:/work"}]}"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.window, None);
+    }
+
+    #[test]
+    fn window_state_round_trip_preserves_logical_size_and_maximize() {
+        let mut session = Session::new(0, Vec::new());
+        session.window = Some(WindowState { width: 1280, height: 720, maximized: true });
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.window, session.window);
     }
 }

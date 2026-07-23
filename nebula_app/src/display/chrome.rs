@@ -33,6 +33,9 @@ pub enum ChromeHit {
     TabsSection,
     /// The "SSH HOSTS" section header — click toggles the accordion fold.
     HostsSection,
+    /// Fixed entry at the bottom of the sidebar. It owns a separate band and
+    /// never competes with Tabs / SSH rows for height.
+    MessageQueue,
     /// Top-bar toggles for the right-side drawer's two views (otty-style).
     PanelFiles,
     PanelGit,
@@ -175,10 +178,8 @@ pub(super) fn chrome_control_centers(
     scale_factor: f32,
 ) -> [(ChromeHit, f32, f32); 5] {
     let s = |v: f32| v * scale_factor;
-    let margin = s(8.0);
-    let inner_pad = s(6.0);
     let center_y = top + bar_h / 2.0;
-    let close_x = width - margin - inner_pad - s(18.0);
+    let close_x = width - s(23.0);
     let max_x = close_x - s(46.0);
     let min_x = max_x - s(46.0);
     // Drawer view toggles sit left of the window controls, separated by a gap
@@ -193,6 +194,39 @@ pub(super) fn chrome_control_centers(
         (ChromeHit::Maximize, max_x, center_y),
         (ChromeHit::Close, close_x, center_y),
     ]
+}
+
+#[inline]
+fn is_window_control(hit: ChromeHit) -> bool {
+    matches!(hit, ChromeHit::Minimize | ChromeHit::Maximize | ChromeHit::Close)
+}
+
+/// Full caption-button hit target. It deliberately reaches both physical
+/// edges so a maximized/fullscreen window can be closed from the corner.
+#[inline]
+fn window_control_hit_rect(
+    center_x: f32,
+    center_y: f32,
+    scale_factor: f32,
+) -> (f32, f32, f32, f32) {
+    let s = |value: f32| value * scale_factor;
+    // 图标保持标题栏视觉居中，命中区域单独扩展到物理顶边；这样既能与
+    // 文件/分支按钮对齐，也保留最大化窗口右上角的一步关闭操作。
+    (center_x - s(23.0), 0.0, s(46.0), center_y + s(20.0))
+}
+
+/// Visible caption-button band. It shares the hit rect's horizontal geometry
+/// (46px, no gaps, close edge at `width`) while staying vertically centred in
+/// the painted title bar; the invisible hit extension alone reaches `y = 0`.
+#[inline]
+fn window_control_visual_rect(
+    center_x: f32,
+    top: f32,
+    bar_h: f32,
+    scale_factor: f32,
+) -> (f32, f32, f32, f32) {
+    let width = 46.0 * scale_factor;
+    (center_x - width * 0.5, top, width, bar_h)
 }
 
 /// Top-left settings trigger. It occupies the old product-mark slot beside the
@@ -305,6 +339,15 @@ pub(super) fn chrome_tab_layout(
     // (an empty section shows a hint instead of vanishing).
     let hosts_header_h = s(38.0);
     let bottom_pad = s(10.0);
+    let queue_reserved = message_queue_entry::reserved_height(scale_factor);
+    // The empty SSH section still draws a two-line onboarding hint below its
+    // header. Reserve that real content height so it cannot paint through the
+    // bottom-docked message queue when many tabs consume the elastic budget.
+    let empty_hosts_hint_h = if queue_reserved > 0.0 && host_count == 0 && model.hosts_open {
+        s(38.0)
+    } else {
+        0.0
+    };
 
     // "+" square plus its dropdown chevron, vertically centred in the header
     // band, pinned to the right. The chevron is the rightmost element; the
@@ -322,7 +365,15 @@ pub(super) fn chrome_tab_layout(
     // want; if not, the panel's row budget is split so neither section can
     // starve the other below half of the budget, and every overflowing
     // section scrolls behind its own scrollbar.
-    let avail_rows = (((panel_h - header - hosts_header_h - bottom_pad + gap) / pitch)
+    let avail_rows =
+        (((panel_h
+            - queue_reserved
+            - header
+            - hosts_header_h
+            - empty_hosts_hint_h
+            - bottom_pad
+            + gap)
+            / pitch)
         .floor()
         .max(0.0)) as usize;
     let tabs_want = if model.tabs_open { count } else { 0 };
@@ -434,15 +485,17 @@ fn push_centered_add_icon(
     color: Rgb,
 ) {
     let (x, y, width, height) = rect;
-    let side = width.min(height);
-    if side <= 0.0 {
+    if width <= 0.0 || height <= 0.0 {
         return;
     }
 
     let center_x = x + width * 0.5;
     let center_y = y + height * 0.5;
-    let stroke = (side * 0.105).clamp((scale * 1.25).max(1.0), scale * 2.0);
-    let arm = side * 0.285;
+    // 图标墨迹不能跟随命中区缩放：侧栏收起时按钮是 28px，展开时是
+    // 20px，若从 rect 推导尺寸，同一个“新建 Tab”图标会在两种状态间
+    // 忽大忽小。固定为 14px 视觉尺寸，同时保留原来的舒适命中区域。
+    let stroke = (1.5 * scale).max(1.0);
+    let arm = 7.0 * scale;
     let ink = Rgba::new(color.r, color.g, color.b, 235);
 
     quads.push(UiQuad::solid(
@@ -472,8 +525,14 @@ fn push_centered_more_icon(
     color: Rgb,
 ) {
     let (x, y, width, height) = rect;
-    let diameter = (2.2 * scale).max(2.0);
-    let gap = (3.2 * scale).max(diameter + scale);
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+
+    // 三点与 14px 加号使用同一视觉规格：稍大的圆点负责补足视觉重量，
+    // 4.2px 中心距让整枚图标保持紧凑，但不再像原来的 2.2px 圆点那样发虚。
+    let diameter = (2.8 * scale).max(2.0);
+    let gap = 4.2 * scale;
     let center_x = x + width * 0.5;
     let center_y = y + height * 0.5;
     let ink = Rgba::new(color.r, color.g, color.b, 235);
@@ -486,6 +545,103 @@ fn push_centered_more_icon(
             diameter * 0.5,
             ink,
         ));
+    }
+}
+
+fn push_icon_segment(
+    quads: &mut Vec<UiQuad>,
+    from: (f32, f32),
+    to: (f32, f32),
+    thickness: f32,
+    color: Rgba,
+) {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let len = dx.hypot(dy);
+    if len <= f32::EPSILON {
+        return;
+    }
+    let px = -dy / len * thickness * 0.5;
+    let py = dx / len * thickness * 0.5;
+    quads.push(UiQuad::poly(
+        [
+            [from.0 - px, from.1 - py],
+            [from.0 + px, from.1 + py],
+            [to.0 - px, to.1 - py],
+            [to.0 + px, to.1 + py],
+        ],
+        color,
+        color,
+        Gradient::None,
+    ));
+}
+
+/// Draw Windows-style caption marks as native vector strokes. Font glyphs use
+/// different outline boxes for minus / square / close, which made the three
+/// buttons look unrelated and drift at fractional DPI.
+fn push_window_control_icon(
+    quads: &mut Vec<UiQuad>,
+    hit: ChromeHit,
+    center_x: f32,
+    center_y: f32,
+    scale: f32,
+    color: Rgb,
+) {
+    let ink = Rgba::new(color.r, color.g, color.b, 245);
+    let half = 5.0 * scale;
+    let stroke = (1.25 * scale).max(1.0);
+    match hit {
+        ChromeHit::Minimize => {
+            // Windows places the minus slightly below the mathematical centre.
+            let y = center_y + 3.0 * scale;
+            quads.push(UiQuad::solid(
+                center_x - half,
+                y - stroke * 0.5,
+                half * 2.0,
+                stroke,
+                stroke * 0.5,
+                ink,
+            ));
+        },
+        ChromeHit::Maximize => {
+            let left = center_x - half;
+            let top = center_y - half;
+            quads.push(UiQuad::solid(left, top, half * 2.0, stroke, 0.0, ink));
+            quads.push(UiQuad::solid(
+                left,
+                top + half * 2.0 - stroke,
+                half * 2.0,
+                stroke,
+                0.0,
+                ink,
+            ));
+            quads.push(UiQuad::solid(left, top, stroke, half * 2.0, 0.0, ink));
+            quads.push(UiQuad::solid(
+                left + half * 2.0 - stroke,
+                top,
+                stroke,
+                half * 2.0,
+                0.0,
+                ink,
+            ));
+        },
+        ChromeHit::Close => {
+            push_icon_segment(
+                quads,
+                (center_x - half, center_y - half),
+                (center_x + half, center_y + half),
+                stroke,
+                ink,
+            );
+            push_icon_segment(
+                quads,
+                (center_x + half, center_y - half),
+                (center_x - half, center_y + half),
+                stroke,
+                ink,
+            );
+        },
+        _ => {},
     }
 }
 
@@ -517,6 +673,13 @@ pub(super) fn chrome_hit_with_tabs(
     if contains_rect(layout.plus, x, y) {
         return ChromeHit::NewTab;
     }
+    if message_queue_entry::contains(
+        message_queue_entry::layout(layout.panel, scale_factor),
+        x,
+        y,
+    ) {
+        return ChromeHit::MessageQueue;
+    }
     if contains_rect(layout.hosts_add, x, y) {
         return ChromeHit::AddSshHost;
     }
@@ -542,6 +705,17 @@ pub(super) fn chrome_hit_with_tabs(
     }
     if layout.hosts_header.2 > 0.0 && contains_rect(layout.hosts_header, x, y) {
         return ChromeHit::HostsSection;
+    }
+
+    // Caption controls are allowed to escape the inset top-bar band. This is
+    // what makes the rightmost close target reachable at (width - 1, 0) when
+    // the borderless window owns the whole monitor.
+    for (hit, cx, cy) in chrome_control_centers(w, top, bar_h, scale_factor) {
+        if is_window_control(hit)
+            && contains_rect(window_control_hit_rect(cx, cy, scale_factor), x, y)
+        {
+            return hit;
+        }
     }
 
     // Top bar: window controls first, then the rest drags the window.
@@ -574,6 +748,14 @@ pub fn in_chrome_bar(size_info: &SizeInfo, scale_factor: f32, x: f32, y: f32) ->
     // shrinks to the ordinary padding and this band is effectively just margin.
     if x >= margin && x < size_info.padding_x() && y > margin + bar_h && y < h - margin {
         return true;
+    }
+
+    for (hit, cx, cy) in chrome_control_centers(w, margin, bar_h, scale_factor) {
+        if is_window_control(hit)
+            && contains_rect(window_control_hit_rect(cx, cy, scale_factor), x, y)
+        {
+            return true;
+        }
     }
 
     if x < margin || x > w - margin {
@@ -622,6 +804,26 @@ pub fn resize_edge(
 
 // ---- chrome rendering (moved verbatim from `display::mod`; `d` = Display) ----
 
+const SPINNER_PERIOD: std::time::Duration = std::time::Duration::from_millis(800);
+
+#[inline]
+fn advance_spinner_phase(phase: f32, delta: std::time::Duration) -> f32 {
+    (phase + delta.as_secs_f32() / SPINNER_PERIOD.as_secs_f32()).rem_euclid(1.0)
+}
+
+#[inline]
+fn spinner_dot_center(
+    phase: f32,
+    tail_index: u32,
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+) -> (f32, f32) {
+    let angle = phase.rem_euclid(1.0) * std::f32::consts::TAU
+        - tail_index as f32 * std::f32::consts::FRAC_PI_4;
+    (center_x + radius * angle.cos(), center_y + radius * angle.sin())
+}
+
 /// Draw the Nebula window chrome: top title bar and left tab sidebar.
 ///
 /// This is the first chrome milestone: it paints the rounded, gradient
@@ -630,6 +832,12 @@ pub fn resize_edge(
 pub(super) fn draw_chrome(d: &mut Display) {
     d.step_chrome_anims();
     let motion_frame = d.nebula_ui_anims.frame();
+    let any_tab_running = d.any_tab_running();
+    if any_tab_running {
+        d.nebula_ui_anims.spinner_phase =
+            advance_spinner_phase(d.nebula_ui_anims.spinner_phase, motion_frame.delta);
+    }
+    let spinner_phase = d.nebula_ui_anims.spinner_phase;
     // Tick command palette cursor animation (blink cycle).
     if d.nebula_palette.is_open() {
         d.nebula_palette.tick_cursor(motion_frame);
@@ -642,7 +850,9 @@ pub(super) fn draw_chrome(d: &mut Display) {
     let language = d.ui_language();
     #[allow(non_snake_case)]
     let (HOVER_FILL, HOVER_FILL_STRONG) = (sk.hover, sk.hover_strong);
-    const CLOSE_HOVER_FILL: Rgba = Rgba::new(240, 80, 104, 96);
+    // Match the solid Windows caption-close treatment from the reference;
+    // translucent red reads like a generic pill instead of a window control.
+    const CLOSE_HOVER_FILL: Rgba = Rgba::new(232, 17, 35, 242);
 
     let size = d.size_info;
     let scale = d.window.scale_factor as f32;
@@ -956,25 +1166,19 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 ));
             } else if running {
                 // Spinner: three orbiting dots, head bright / tail dim —
-                // state expressed through brightness, per the design
-                // language. Phase derives from wall-clock millis, so no
-                // frame counter has to live anywhere.
-                let millis = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_millis())
-                    .unwrap_or(0);
-                let phase = (millis / 100) % 8; // one revolution ≈ 800ms
+                // phase advances continuously from the shared monotonic frame
+                // clock, so the cycle boundary has no duplicated or skipped
+                // angular step.
                 let cx = close_x + close_w / 2.0;
                 let cy = close_y + close_h / 2.0;
                 let radius = s(4.5);
                 for k in 0..3u32 {
-                    let step = (phase + 8 - k) % 8;
-                    let angle = step as f32 * std::f32::consts::FRAC_PI_4;
+                    let (dot_x, dot_y) = spinner_dot_center(spinner_phase, k, cx, cy, radius);
                     let alpha = [225u8, 140, 70][k as usize];
                     let d = s(2.4);
                     quads.push(UiQuad::solid(
-                        cx + radius * angle.cos() - d / 2.0,
-                        cy + radius * angle.sin() - d / 2.0,
+                        dot_x - d / 2.0,
+                        dot_y - d / 2.0,
                         d,
                         d,
                         d / 2.0,
@@ -984,6 +1188,18 @@ pub(super) fn draw_chrome(d: &mut Display) {
             }
             // Idle tab → nothing: the row stays clean by default.
         }
+    }
+
+    let queue_entry_layout = message_queue_entry::layout(tab_layout.panel, scale);
+    if d.left_sidebar_visible() {
+        message_queue_entry::push_quads(
+            &mut quads,
+            queue_entry_layout,
+            d.nebula_message_queue_entry,
+            sk,
+            scale,
+            d.nebula_chrome_hover == ChromeHit::MessageQueue,
+        );
     }
     if tab_anim_active {
         d.window.request_redraw();
@@ -1054,21 +1270,39 @@ pub(super) fn draw_chrome(d: &mut Display) {
         }
     }
 
-    // Window controls keep native-size hit targets; icons are rendered in
-    // the chrome text layer with Maple Nerd / Codicons.
-    for (hit, cx, _cy) in chrome_control_centers(w, top_y, bar_h, scale) {
+    // The three caption buttons form one continuous Windows-style band: no
+    // inset pill and no dead strip at the right edge. Hit-testing separately
+    // extends the same horizontal rects to the physical top edge.
+    for (hit, cx, cy) in chrome_control_centers(w, top_y, bar_h, scale) {
+        if !is_window_control(hit) {
+            continue;
+        }
         let hovered = d.nebula_chrome_hover == hit;
         if hovered {
-            let hit_w = s(42.0);
+            let (x, y, width, height) = window_control_visual_rect(cx, top_y, bar_h, scale);
             quads.push(UiQuad::solid(
-                cx - hit_w / 2.0,
-                top_y + inner_pad,
-                hit_w,
-                pill_h,
-                pill_r,
+                x,
+                y,
+                width,
+                height,
+                0.0,
                 if hit == ChromeHit::Close { CLOSE_HOVER_FILL } else { HOVER_FILL_STRONG },
             ));
         }
+        push_window_control_icon(
+            &mut quads,
+            hit,
+            cx,
+            cy,
+            scale,
+            if hit == ChromeHit::Close && hovered {
+                Rgb::new(255, 255, 255)
+            } else if hovered {
+                sk.icon_hover
+            } else {
+                sk.icon
+            },
+        );
     }
 
     // Soft accent glow beneath the title bar: 1px, fading in from the left,
@@ -1155,9 +1389,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
         (sk.ink, sk.ink_strong, sk.ink_dim, sk.icon, sk.icon_hover);
     const ICON_SETTINGS: &str = "\u{eb51}";
     const ICON_CLOSE: &str = "\u{ea76}";
-    const ICON_CHROME_MINIMIZE: &str = "\u{eaba}";
-    const ICON_CHROME_MAXIMIZE: &str = "\u{eab9}";
-    const ICON_CHROME_CLOSE: &str = "\u{eab8}";
 
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
@@ -1197,9 +1428,9 @@ pub(super) fn draw_chrome(d: &mut Display) {
         }
         let hovered = d.nebula_chrome_hover == hit;
         let icon = match hit {
-            ChromeHit::Minimize => ICON_CHROME_MINIMIZE,
-            ChromeHit::Maximize => ICON_CHROME_MAXIMIZE,
-            ChromeHit::Close => ICON_CHROME_CLOSE,
+            // Caption icons are vector quads in the UI pass above. Keeping
+            // them out of the font layer makes size/baseline DPI-independent.
+            ChromeHit::Minimize | ChromeHit::Maximize | ChromeHit::Close => continue,
             ChromeHit::PanelFiles => "\u{ea83}",
             ChromeHit::PanelGit => "\u{ea68}",
             _ => continue,
@@ -1617,6 +1848,19 @@ pub(super) fn draw_chrome(d: &mut Display) {
         }
     }
 
+    if d.left_sidebar_visible() {
+        message_queue_entry::draw_text(
+            &mut d.renderer,
+            &mut d.glyph_cache,
+            &size,
+            queue_entry_layout,
+            d.nebula_message_queue_entry,
+            sk,
+            language,
+            scale,
+        );
+    }
+
     // Palette text (query + result rows) sits on top of every chrome label.
     // Drawer text remains in its own shell region beside the Settings page.
     if d.side_panel_visible() {
@@ -1676,7 +1920,10 @@ pub(super) fn draw_chrome(d: &mut Display) {
 
 #[cfg(test)]
 mod resize_edge_tests {
-    use super::resize_edge;
+    use super::{
+        ChromeHit, advance_spinner_phase, chrome_control_centers, contains_rect, in_chrome_bar,
+        resize_edge, spinner_dot_center, window_control_hit_rect, window_control_visual_rect,
+    };
     use crate::display::SizeInfo;
 
     #[test]
@@ -1684,5 +1931,62 @@ mod resize_edge_tests {
         let size = SizeInfo::new(1000.0, 800.0, 10.0, 20.0, 0.0, 0.0, false);
         assert!(resize_edge(&size, 1.0, 999.0, 400.0, true).is_some());
         assert!(resize_edge(&size, 1.0, 999.0, 400.0, false).is_none());
+    }
+
+    #[test]
+    fn close_control_reaches_the_fullscreen_top_right_corner() {
+        let size = SizeInfo::new(1000.0, 800.0, 10.0, 20.0, 0.0, 0.0, false);
+        let controls = chrome_control_centers(size.width(), 8.0, 40.0, 1.0);
+        let (_, close_x, close_y) = controls
+            .into_iter()
+            .find(|(hit, _, _)| *hit == ChromeHit::Close)
+            .expect("close control");
+
+        assert_eq!((close_x, close_y), (977.0, 28.0));
+        assert!(controls.iter().all(|(_, _, center_y)| *center_y == close_y));
+        assert!(contains_rect(window_control_hit_rect(close_x, close_y, 1.0), 999.0, 0.0));
+        assert!(in_chrome_bar(&size, 1.0, 999.0, 0.0));
+    }
+
+    #[test]
+    fn top_right_control_icons_share_one_visual_baseline_at_scaled_dpi() {
+        let controls = chrome_control_centers(1920.0, 12.0, 60.0, 1.5);
+        let baseline = controls[0].2;
+
+        assert_eq!(baseline, 42.0);
+        assert!(controls.iter().all(|(_, _, center_y)| *center_y == baseline));
+    }
+
+    #[test]
+    fn caption_button_rects_are_contiguous_and_flush_right() {
+        let width = 1000.0;
+        let controls = chrome_control_centers(width, 8.0, 40.0, 1.0);
+        let rects: Vec<_> = controls[2..]
+            .iter()
+            .map(|(_, center_x, _)| window_control_visual_rect(*center_x, 8.0, 40.0, 1.0))
+            .collect();
+
+        assert_eq!(rects[0].0 + rects[0].2, rects[1].0);
+        assert_eq!(rects[1].0 + rects[1].2, rects[2].0);
+        assert_eq!(rects[2].0 + rects[2].2, width);
+        assert!(rects.iter().all(|rect| rect.1 == 8.0 && rect.3 == 40.0));
+    }
+
+    #[test]
+    fn spinner_position_is_continuous_across_the_cycle_boundary() {
+        let before = spinner_dot_center(0.999, 0, 0.0, 0.0, 4.5);
+        let after = spinner_dot_center(0.001, 0, 0.0, 0.0, 4.5);
+        let distance = (after.0 - before.0).hypot(after.1 - before.1);
+
+        assert!(distance < 0.1, "cycle boundary jumped by {distance}px");
+    }
+
+    #[test]
+    fn spinner_phase_advances_fractionally_and_preserves_wrap_remainder() {
+        let half_turn = advance_spinner_phase(0.0, std::time::Duration::from_millis(400));
+        let wrapped = advance_spinner_phase(0.99, std::time::Duration::from_millis(16));
+
+        assert!((half_turn - 0.5).abs() < f32::EPSILON);
+        assert!((wrapped - 0.01).abs() < 0.000_001);
     }
 }

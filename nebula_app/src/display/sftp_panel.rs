@@ -65,15 +65,18 @@ impl SftpPanel {
         let snapshot = self.snapshot();
         let mut entries = filtered_entries(&snapshot.entries, &self.filter);
         if snapshot.path != "/" && self.filter.trim().is_empty() {
-            entries.insert(0, SftpEntry {
-                name: "..".to_owned(),
-                path: super::super::ssh_sftp::normalize_remote_path(&snapshot.path, ".."),
-                kind: SftpEntryKind::Directory,
-                size: 0,
-                modified: 0,
-                permissions: String::new(),
-                is_parent: true,
-            });
+            entries.insert(
+                0,
+                SftpEntry {
+                    name: "..".to_owned(),
+                    path: super::super::ssh_sftp::normalize_remote_path(&snapshot.path, ".."),
+                    kind: SftpEntryKind::Directory,
+                    size: 0,
+                    modified: 0,
+                    permissions: String::new(),
+                    is_parent: true,
+                },
+            );
         }
         entries
     }
@@ -577,9 +580,7 @@ pub(super) fn draw_text(
         for (index, entry) in
             panel.visible_entries().iter().skip(panel.scroll).take(layout.max_rows).enumerate()
         {
-            let y = layout.list_y
-                + index as f32 * layout.row_h
-                + (layout.row_h - cell_h) * 0.5;
+            let y = layout.list_y + index as f32 * layout.row_h + (layout.row_h - cell_h) * 0.5;
             // 与本地 Files 面板共用同一套 Codicon 与 ANSI 颜色。远端列表如果
             // 单独使用三角形/圆点，会让同一个“文件”入口看起来像两套产品。
             let (chevron, icon, icon_ink, name_ink) = match entry.kind {
@@ -604,24 +605,10 @@ pub(super) fn draw_text(
             };
             let icon_x = layout.panel.0 + s(14.0);
             if let Some(chevron) = chevron {
-                renderer.draw_chrome_text(
-                    size,
-                    icon_x,
-                    y,
-                    skin.ink_faint,
-                    chevron,
-                    glyph_cache,
-                );
+                renderer.draw_chrome_text(size, icon_x, y, skin.ink_faint, chevron, glyph_cache);
             }
             let file_icon_x = icon_x + cell_w * 1.9;
-            renderer.draw_chrome_text(
-                size,
-                file_icon_x,
-                y,
-                icon_ink,
-                icon,
-                glyph_cache,
-            );
+            renderer.draw_chrome_text(size, file_icon_x, y, icon_ink, icon, glyph_cache);
             let name_x = file_icon_x + cell_w * 2.2;
             renderer.draw_chrome_text(
                 size,

@@ -91,6 +91,8 @@ pub enum SettingsHit {
     GhostToggle,
     AcceptCycle,
     ShellCycle,
+    StartupDirectory,
+    StartupDirectoryClear,
     /// One of the expanded shell picker rows (index into detected_shells).
     ShellPickerRow(usize),
     FontCycle,
@@ -122,6 +124,9 @@ pub(super) struct NebulaRuntimeSettings {
     /// WSL distro). `None` = the enum value is authoritative. Written verbatim
     /// so `shell_detect::resolve_id` and the PTY layer both see the real id.
     pub(super) shell_id: Option<String>,
+    /// Default working directory for fresh terminal tabs. `None` inherits the
+    /// focused pane (or the process cwd for the first window).
+    pub(super) startup_directory: Option<std::path::PathBuf>,
     pub(super) font_family: String,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
@@ -162,6 +167,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         accept: AcceptKey::Both,
         shell: NebulaShell::PowerShell,
         shell_id: None,
+        startup_directory: None,
         font_family: config.font.normal().family.clone(),
         // Off by default: the welcome screen pipes a whole script through the
         // fresh shell and repaints on resize — real startup-latency cost on
@@ -218,6 +224,12 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                     let family = v.trim();
                     if !family.is_empty() {
                         settings.font_family = family.to_owned();
+                    }
+                },
+                Some(("startup_directory", v)) => {
+                    let path = std::path::PathBuf::from(v.trim());
+                    if path.is_dir() {
+                        settings.startup_directory = Some(path);
                     }
                 },
                 Some(("fetch", v)) => settings.fetch = parse_bool(v, true),
@@ -314,6 +326,11 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     // 2-value enum is the fallback for the built-in powershell/bash choice.
     let shell =
         settings.shell_id.clone().unwrap_or_else(|| settings.shell.settings_value().to_owned());
+    let startup_directory = settings
+        .startup_directory
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let theme = settings.theme.prompt_name();
     let path = nebula_data_dir().join("nebula_settings.txt");
     let pinned_hosts = settings.pinned_hosts.join(",");
@@ -322,7 +339,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let _ = std::fs::write(
         path,
         format!(
-            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nfont_family={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n",
+            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -348,6 +365,8 @@ struct SettingsGeometry {
     options: [(NebulaTheme, f32, f32, f32, f32); 7],
     system_theme: (f32, f32, f32, f32),
     shell: (f32, f32, f32, f32),
+    startup_directory: (f32, f32, f32, f32),
+    startup_directory_clear: (f32, f32, f32, f32),
     /// Shell picker expanded rows (when open): first row Y, row height, max visible.
     shell_picker: (f32, f32, usize),
     font: (f32, f32, f32, f32),
@@ -515,7 +534,8 @@ fn settings_geometry(
     let shell_y0 = 146.0;
     let shell_picker_extra =
         if shell_picker_open { shell_picker_count as f32 * ROW_H } else { 0.0 };
-    let font_y0 = shell_y0 + ROW_H + shell_picker_extra;
+    let startup_directory_y0 = shell_y0 + ROW_H + shell_picker_extra;
+    let font_y0 = startup_directory_y0 + ROW_H;
     let font_picker_extra = if font_picker_open { font_picker_count as f32 * ROW_H } else { 0.0 };
     let fetch_y0 = font_y0 + ROW_H + font_picker_extra;
     let ghost_y0 = fetch_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
@@ -576,6 +596,13 @@ fn settings_geometry(
             at(shell_y0 + ROW_H),
             row_h,
             if shell_picker_open { shell_picker_count } else { 0 },
+        ),
+        startup_directory: (row_x, at(startup_directory_y0), row_w, row_h),
+        startup_directory_clear: (
+            row_x + row_w - s(82.0),
+            at(startup_directory_y0) + s(5.0),
+            s(72.0),
+            s(34.0),
         ),
         font: (row_x, at(font_y0), row_w, row_h),
         font_picker: (
@@ -702,6 +729,12 @@ pub fn settings_hit(
                         }
                     }
                 }
+                if contains_rect(geometry.startup_directory_clear, x, y) {
+                    return SettingsHit::StartupDirectoryClear;
+                }
+                if contains_rect(geometry.startup_directory, x, y) {
+                    return SettingsHit::StartupDirectory;
+                }
                 if contains_rect(geometry.font, x, y) {
                     return SettingsHit::FontCycle;
                 }
@@ -775,6 +808,7 @@ pub(super) struct SettingsView {
     /// Detected shells for the picker (cached once per process).
     pub(super) shells: Vec<(String, String, String)>, // (id, name, program)
     pub(super) shell_id: Option<String>,
+    pub(super) startup_directory: Option<String>,
     pub(super) font_family: String,
     pub(super) font_picker_open: bool,
     /// Private families plus Maple; the import action is rendered separately.
@@ -1144,6 +1178,7 @@ pub(super) fn push_quads(
                     }
                 }
             }
+            group_frame(quads, geometry.startup_directory, 1);
             group_frame(quads, geometry.font, 1);
             let (font_picker_y, font_picker_h, font_picker_count) = geometry.font_picker;
             if font_picker_count > 0 {
@@ -1190,6 +1225,7 @@ pub(super) fn push_quads(
             }
             for (hit, rect) in [
                 (SettingsHit::ShellCycle, geometry.shell),
+                (SettingsHit::StartupDirectory, geometry.startup_directory),
                 (SettingsHit::FontCycle, geometry.font),
                 (SettingsHit::FetchToggle, geometry.fetch),
                 (SettingsHit::PowerlineToggle, geometry.powerline),
@@ -1198,6 +1234,13 @@ pub(super) fn push_quads(
                 (SettingsHit::OpenConfigFile, geometry.open_config_file),
             ] {
                 row_hover(quads, rect, view.hover == hit);
+            }
+            if view.startup_directory.is_some() {
+                row_hover(
+                    quads,
+                    geometry.startup_directory_clear,
+                    view.hover == SettingsHit::StartupDirectoryClear,
+                );
             }
             // Boolean rows render a real switch instead of an "On/Off" string.
             for (rect, on) in [
@@ -1656,6 +1699,57 @@ pub(super) fn draw_text(
                         rect.1 + (rect.3 - cell_h) / 2.0,
                         sk.accent,
                         "✓",
+                        gc,
+                    );
+                }
+            }
+            if visible(geometry.startup_directory.1, geometry.startup_directory.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.startup_directory,
+                    language.pick("启动目录", "Startup directory"),
+                    "",
+                    sk.ink,
+                );
+
+                let (dx, dy, dw, dh) = geometry.startup_directory;
+                let value_x = dx + dw * 0.38;
+                let value_right = if view.startup_directory.is_some() {
+                    geometry.startup_directory_clear.0 - s(12.0)
+                } else {
+                    dx + dw - s(16.0)
+                };
+                let max_chars = ((value_right - value_x).max(cell_w) / cell_w).floor() as usize;
+                let value = view
+                    .startup_directory
+                    .as_deref()
+                    .unwrap_or_else(|| language.pick("继承当前目录", "Inherit current directory"));
+                let value = truncate_tab_label(value, max_chars.max(1));
+
+                r.draw_chrome_text(
+                    size,
+                    value_x,
+                    dy + (dh - cell_h) / 2.0,
+                    if view.startup_directory.is_some() { sk.accent } else { sk.ink_dim },
+                    &value,
+                    gc,
+                );
+
+                if view.startup_directory.is_some() {
+                    let (cx, cy, cw, ch) = geometry.startup_directory_clear;
+                    let clear = language.pick("清除", "Clear");
+                    let clear_cols: usize =
+                        clear.chars().map(|character| character.width().unwrap_or(0)).sum();
+                    r.draw_chrome_text(
+                        size,
+                        cx + (cw - clear_cols as f32 * cell_w) / 2.0,
+                        cy + (ch - cell_h) / 2.0,
+                        sk.accent,
+                        clear,
                         gc,
                     );
                 }
