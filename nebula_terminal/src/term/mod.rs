@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::ops::{Index, IndexMut, Range};
 use std::sync::Arc;
-use std::{cmp, mem, ptr, slice, str};
+use std::{cmp, mem, ptr, str};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
 
 use crate::event::{Event, EventListener};
-use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
+use crate::grid::{Dimensions, Grid, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
 use crate::term::cell::{Cell, Flags, LineLength};
@@ -29,7 +29,13 @@ use crate::vte::ansi::{
 
 pub mod cell;
 pub mod color;
+mod damage;
+mod renderable;
 pub mod search;
+
+use damage::TermDamageState;
+pub use damage::{LineDamageBounds, TermDamage, TermDamageIterator};
+pub use renderable::{RenderableContent, RenderableCursor};
 
 /// Minimum number of columns.
 ///
@@ -132,138 +138,6 @@ pub fn point_to_viewport(display_offset: usize, point: Point) -> Option<Point<us
 pub fn viewport_to_point(display_offset: usize, point: Point<usize>) -> Point {
     let line = Line(point.line as i32) - display_offset;
     Point::new(line, point.column)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LineDamageBounds {
-    /// Damaged line number.
-    pub line: usize,
-
-    /// Leftmost damaged column.
-    pub left: usize,
-
-    /// Rightmost damaged column.
-    pub right: usize,
-}
-
-impl LineDamageBounds {
-    #[inline]
-    pub fn new(line: usize, left: usize, right: usize) -> Self {
-        Self { line, left, right }
-    }
-
-    #[inline]
-    pub fn undamaged(line: usize, num_cols: usize) -> Self {
-        Self { line, left: num_cols, right: 0 }
-    }
-
-    #[inline]
-    pub fn reset(&mut self, num_cols: usize) {
-        *self = Self::undamaged(self.line, num_cols);
-    }
-
-    #[inline]
-    pub fn expand(&mut self, left: usize, right: usize) {
-        self.left = cmp::min(self.left, left);
-        self.right = cmp::max(self.right, right);
-    }
-
-    #[inline]
-    pub fn is_damaged(&self) -> bool {
-        self.left <= self.right
-    }
-}
-
-/// Terminal damage information collected since the last [`Term::reset_damage`] call.
-#[derive(Debug)]
-pub enum TermDamage<'a> {
-    /// The entire terminal is damaged.
-    Full,
-
-    /// Iterator over damaged lines in the terminal.
-    Partial(TermDamageIterator<'a>),
-}
-
-/// Iterator over the terminal's viewport damaged lines.
-#[derive(Clone, Debug)]
-pub struct TermDamageIterator<'a> {
-    line_damage: slice::Iter<'a, LineDamageBounds>,
-    display_offset: usize,
-}
-
-impl<'a> TermDamageIterator<'a> {
-    pub fn new(line_damage: &'a [LineDamageBounds], display_offset: usize) -> Self {
-        let num_lines = line_damage.len();
-        // Filter out invisible damage.
-        let line_damage = &line_damage[..num_lines.saturating_sub(display_offset)];
-        Self { display_offset, line_damage: line_damage.iter() }
-    }
-}
-
-impl Iterator for TermDamageIterator<'_> {
-    type Item = LineDamageBounds;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.line_damage.find_map(|line| {
-            line.is_damaged().then_some(LineDamageBounds::new(
-                line.line + self.display_offset,
-                line.left,
-                line.right,
-            ))
-        })
-    }
-}
-
-/// State of the terminal damage.
-struct TermDamageState {
-    /// Hint whether terminal should be damaged entirely regardless of the actual damage changes.
-    full: bool,
-
-    /// Information about damage on terminal lines.
-    lines: Vec<LineDamageBounds>,
-
-    /// Old terminal cursor point.
-    last_cursor: Point,
-}
-
-impl TermDamageState {
-    fn new(num_cols: usize, num_lines: usize) -> Self {
-        let lines =
-            (0..num_lines).map(|line| LineDamageBounds::undamaged(line, num_cols)).collect();
-
-        Self { full: true, lines, last_cursor: Default::default() }
-    }
-
-    #[inline]
-    fn resize(&mut self, num_cols: usize, num_lines: usize) {
-        // Reset point, so old cursor won't end up outside of the viewport.
-        self.last_cursor = Default::default();
-        self.full = true;
-
-        self.lines.clear();
-        self.lines.reserve(num_lines);
-        for line in 0..num_lines {
-            self.lines.push(LineDamageBounds::undamaged(line, num_cols));
-        }
-    }
-
-    /// Damage point inside of the viewport.
-    #[inline]
-    fn damage_point(&mut self, point: Point<usize>) {
-        self.damage_line(point.line, point.column.0, point.column.0);
-    }
-
-    /// Expand `line`'s damage to span at least `left` to `right` column.
-    #[inline]
-    fn damage_line(&mut self, line: usize, left: usize, right: usize) {
-        self.lines[line].expand(left, right);
-    }
-
-    /// Reset information about terminal damage.
-    fn reset(&mut self, num_cols: usize) {
-        self.full = false;
-        self.lines.iter_mut().for_each(|line| line.reset(num_cols));
-    }
 }
 
 pub struct Term<T> {
@@ -1045,6 +919,12 @@ impl<T> Term<T> {
 
     pub fn colors(&self) -> &Colors {
         &self.colors
+    }
+
+    /// Drop application-provided dynamic palette entries after a host theme change.
+    pub fn reset_dynamic_colors(&mut self) {
+        self.colors = Colors::default();
+        self.mark_fully_damaged();
     }
 
     /// Insert a linebreak at the current cursor position.
@@ -2462,58 +2342,6 @@ impl IndexMut<Column> for TabStops {
     }
 }
 
-/// Terminal cursor rendering information.
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub struct RenderableCursor {
-    pub shape: CursorShape,
-    pub point: Point,
-}
-
-impl RenderableCursor {
-    fn new<T>(term: &Term<T>) -> Self {
-        // Cursor position.
-        let vi_mode = term.mode().contains(TermMode::VI);
-        let mut point = if vi_mode { term.vi_mode_cursor.point } else { term.grid.cursor.point };
-        if term.grid[point].flags.contains(Flags::WIDE_CHAR_SPACER) {
-            point.column -= 1;
-        }
-
-        // Cursor shape.
-        let shape = if !vi_mode && !term.mode().contains(TermMode::SHOW_CURSOR) {
-            CursorShape::Hidden
-        } else {
-            term.cursor_style().shape
-        };
-
-        Self { shape, point }
-    }
-}
-
-/// Visible terminal content.
-///
-/// This contains all content required to render the current terminal view.
-pub struct RenderableContent<'a> {
-    pub display_iter: GridIterator<'a, Cell>,
-    pub selection: Option<SelectionRange>,
-    pub cursor: RenderableCursor,
-    pub display_offset: usize,
-    pub colors: &'a color::Colors,
-    pub mode: TermMode,
-}
-
-impl<'a> RenderableContent<'a> {
-    fn new<T>(term: &'a Term<T>) -> Self {
-        Self {
-            display_iter: term.grid().display_iter(),
-            display_offset: term.grid().display_offset(),
-            cursor: RenderableCursor::new(term),
-            selection: term.selection.as_ref().and_then(|s| s.to_range(term)),
-            colors: &term.colors,
-            mode: *term.mode(),
-        }
-    }
-}
-
 /// Terminal test helpers.
 pub mod test {
     use super::*;
@@ -3159,6 +2987,24 @@ mod tests {
             Some(LineDamageBounds { line: display_offset + 1, left: 0, right: 0 })
         );
         assert_eq!(damaged_lines.next(), None);
+    }
+
+    #[test]
+    fn reset_dynamic_colors_clears_overrides_and_marks_full_damage() {
+        let size = TermSize::new(10, 10);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let color = ansi::Rgb { r: 1, g: 2, b: 3 };
+        term.set_color(NamedColor::Foreground as usize, color);
+        term.set_color(NamedColor::Cursor as usize, color);
+        term.set_color(24, color);
+        term.reset_damage();
+
+        term.reset_dynamic_colors();
+
+        assert_eq!(term.colors()[NamedColor::Foreground], None);
+        assert_eq!(term.colors()[NamedColor::Cursor], None);
+        assert_eq!(term.colors()[24], None);
+        assert!(matches!(term.damage(), TermDamage::Full));
     }
 
     #[test]

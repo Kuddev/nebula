@@ -4,18 +4,13 @@ use crate::ConfigMonitor;
 use glutin::config::GetGlConfig;
 use std::borrow::Cow;
 use std::cmp::min;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 #[cfg(not(windows))]
 use std::os::unix::io::RawFd;
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{env, f32, mem};
 
@@ -25,10 +20,8 @@ use glutin::config::Config as GlutinConfig;
 use glutin::display::GetGlDisplay;
 use log::{debug, error, info, warn};
 use winit::application::ApplicationHandler;
-use winit::event::{
-    ElementState, Event as WinitEvent, Ime, Modifiers, MouseButton, StartCause,
-    Touch as TouchEvent, WindowEvent,
-};
+use winit::dpi::LogicalSize;
+use winit::event::{ElementState, Event as WinitEvent, Ime, Modifiers, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::WindowId;
@@ -43,11 +36,11 @@ use nebula_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use nebula_terminal::selection::{Selection, SelectionType};
 use nebula_terminal::term::cell::Flags;
 use nebula_terminal::term::search::{Match, RegexSearch};
-use nebula_terminal::term::{self, ClipboardType, Term, TermMode};
+use nebula_terminal::term::{ClipboardType, Term, TermMode};
 use nebula_terminal::vte::ansi::NamedColor;
 
 #[cfg(unix)]
-use crate::cli::{IpcConfig, ParsedOptions};
+use crate::cli::ParsedOptions;
 use crate::cli::{Options as CliOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::reload::ReloadWorker;
@@ -61,13 +54,23 @@ use crate::display::color::Rgb;
 use crate::display::hint::HintMatch;
 use crate::display::window::{ImeInhibitor, Window};
 use crate::display::{Display, Preedit, SizeInfo};
-use crate::input::{self, ActionContext as _, FONT_SIZE_STEP};
+use crate::input::{self, ActionContext as _};
 use crate::logging::{LOG_TARGET_CONFIG, LOG_TARGET_WINIT};
 use crate::message_bar::{Message, MessageBuffer};
 #[cfg(unix)]
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::window_context::{DetachedWindow, WindowBoot, WindowContext};
+
+mod input_state;
+mod proxy;
+mod search_state;
+mod types;
+
+pub use input_state::{ClickState, Mouse, TouchPurpose, TouchZoom};
+pub use proxy::EventProxy;
+pub use search_state::{InlineSearchState, SearchState};
+pub use types::{Event, EventType, TabRequest};
 
 /// Duration after the last user input until an unlimited search is performed.
 pub const TYPING_SEARCH_DELAY: Duration = Duration::from_millis(500);
@@ -77,9 +80,6 @@ const MAX_SEARCH_WHILE_TYPING: Option<usize> = Some(1000);
 
 /// Maximum number of search terms stored in the history.
 const MAX_SEARCH_HISTORY_SIZE: usize = 255;
-
-/// Touch zoom speed.
-const TOUCH_ZOOM_FACTOR: f32 = 0.01;
 
 /// Cooldown between invocations of the bell command.
 const BELL_CMD_COOLDOWN: Duration = Duration::from_millis(100);
@@ -912,257 +912,6 @@ impl ApplicationHandler<Event> for Processor {
     }
 }
 
-/// Nebula events.
-#[derive(Debug, Clone)]
-pub struct Event {
-    /// Limit event to a specific window.
-    window_id: Option<WindowId>,
-
-    /// Limit event to a specific tab within the window (Nebula tabs).
-    tab_id: Option<u64>,
-
-    /// Event payload.
-    payload: EventType,
-}
-
-impl Event {
-    pub fn new<I: Into<Option<WindowId>>>(payload: EventType, window_id: I) -> Self {
-        Self { window_id: window_id.into(), tab_id: None, payload }
-    }
-
-    /// Tab id attached to a terminal-originated event.
-    pub(crate) fn terminal_tab_id(&self) -> Option<u64> {
-        matches!(self.payload, EventType::Terminal(_)).then_some(self.tab_id).flatten()
-    }
-
-    /// Pane id of a terminal `Bell` event, for per-tab bell indicators.
-    pub(crate) fn terminal_bell_pane(&self) -> Option<u64> {
-        matches!(self.payload, EventType::Terminal(TerminalEvent::Bell))
-            .then_some(self.tab_id)
-            .flatten()
-    }
-}
-
-impl From<Event> for WinitEvent<Event> {
-    fn from(event: Event) -> Self {
-        WinitEvent::UserEvent(event)
-    }
-}
-
-/// Nebula events.
-#[derive(Debug, Clone)]
-pub enum EventType {
-    Terminal(TerminalEvent),
-    ConfigReload(PathBuf),
-    ConfigReloadReady,
-    Message(Message),
-    Scroll(Scroll),
-    CreateWindow(WindowOptions),
-    #[cfg(unix)]
-    IpcConfig(IpcConfig),
-    #[cfg(unix)]
-    IpcGetConfig(Arc<UnixStream>),
-    BlinkCursor,
-    BlinkCursorTimeout,
-    SearchNext,
-    #[cfg(unix)]
-    Shutdown,
-    Frame,
-    /// Nebula tab management request for a window.
-    NebulaTab(TabRequest),
-    /// Periodic tick to redraw the chrome clock.
-    NebulaTick,
-    /// A second `nebula` launch asked the resident instance to surface: re-open
-    /// a window for detached tabs, or focus an existing one (single instance).
-    NebulaAttach,
-    /// An interactive resize settled (no size change for the debounce window):
-    /// flush the deferred PTY resizes + welcome-intro reprint in one shot.
-    NebulaResizeSettled,
-    /// The SSH deletion grace period ended; commit its delayed credential cleanup.
-    SshDeleteUndoExpired,
-    /// An SFTP background operation published a new local UI snapshot.
-    SftpUpdated,
-    /// Typed AI-CLI lifecycle event from the nebula-hook pipe (see `ai_hook`).
-    AiHook(crate::ai_hook::AiHookEvent),
-    /// A toast was clicked: focus the originating window and, when known,
-    /// surface the pane's tab. The window rides in `Event::window_id`.
-    FocusWindow {
-        pane: Option<u64>,
-    },
-}
-
-/// Nebula tab management actions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TabRequest {
-    New,
-    /// Open the default shell in a fresh tab with this local directory passed
-    /// directly to the PTY startup configuration (no command injection).
-    NewAtDirectory(std::path::PathBuf),
-    /// Open a new tab running the quick-launch profile at this config index
-    /// (custom command instead of the default shell, e.g. an ssh jump).
-    NewProfile(usize),
-    /// Open a new tab running a detected shell (the new-tab dropdown). Carries
-    /// the spec directly — detected shells aren't config-indexed.
-    NewShell {
-        name: String,
-        shell: nebula_terminal::tty::Shell,
-    },
-    /// Open a new tab connected to this `~/.ssh/config` host alias, through
-    /// `nebula ssh` so remote shell integration bootstraps automatically.
-    NewSsh(String),
-    /// Open this file (markdown/text/json) in a read-only viewer tab —
-    /// double-clicking a viewable file in the directory tree lands here.
-    OpenDoc(std::path::PathBuf),
-    /// Open or focus the singleton Settings tab. It owns no PTY.
-    OpenSettings,
-    Close,
-    CloseIndex(usize),
-    /// Duplicate a tab using the launch identity captured when it was opened.
-    Duplicate(usize),
-    CloseWindow,
-    SelectNext,
-    SelectPrev,
-    Select(usize),
-    /// Jump to the rightmost tab.
-    SelectLast,
-    /// Reorder: move the tab at displayed index `from` to displayed index `to`.
-    Move {
-        from: usize,
-        to: usize,
-    },
-    /// Toggle a split (left/right or top/bottom) with an independent shell.
-    SplitToggle(crate::display::SplitDirection),
-    /// Select a specific tab and split it. Context menus can target inactive
-    /// tabs, so this must be atomic rather than relying on two queued events.
-    SplitIndex {
-        index: usize,
-        direction: crate::display::SplitDirection,
-    },
-    /// Dock the whole layout of tab `source` into the ACTIVE tab, splitting it
-    /// on `nav`'s side (drag a sidebar tab into the terminal area to drop).
-    DockSplit {
-        source: usize,
-        nav: crate::display::SplitNav,
-    },
-    /// Move keyboard focus to the split pane in the given direction.
-    FocusSplit(crate::display::SplitNav),
-    /// Toggle zoom (temporary full-window) of the focused split pane.
-    ToggleZoom,
-    /// Begin renaming the tab at the given index.
-    BeginRename(usize),
-    /// Commit the rename with the provided new name.
-    CommitRename(String),
-    /// Set a tab's custom light-strip color; `None` follows the theme accent.
-    SetColor {
-        index: usize,
-        color: Option<crate::display::color::Rgb>,
-    },
-    /// Cancel the current rename operation.
-    CancelRename,
-}
-
-impl From<TerminalEvent> for EventType {
-    fn from(event: TerminalEvent) -> Self {
-        Self::Terminal(event)
-    }
-}
-
-/// Regex search state.
-pub struct SearchState {
-    /// Search direction.
-    pub direction: Direction,
-
-    /// Current position in the search history.
-    pub history_index: Option<usize>,
-
-    /// Change in display offset since the beginning of the search.
-    display_offset_delta: i32,
-
-    /// Search origin in viewport coordinates relative to original display offset.
-    origin: Point,
-
-    /// Focused match during active search.
-    focused_match: Option<Match>,
-
-    /// Search regex and history.
-    ///
-    /// During an active search, the first element is the user's current input.
-    ///
-    /// While going through history, the [`SearchState::history_index`] will point to the element
-    /// in history which is currently being previewed.
-    history: VecDeque<String>,
-
-    /// Compiled search automatons.
-    dfas: Option<RegexSearch>,
-}
-
-impl SearchState {
-    /// Search regex text if a search is active.
-    pub fn regex(&self) -> Option<&String> {
-        self.history_index.and_then(|index| self.history.get(index))
-    }
-
-    /// Direction of the search from the search origin.
-    pub fn direction(&self) -> Direction {
-        self.direction
-    }
-
-    /// Focused match during vi-less search.
-    pub fn focused_match(&self) -> Option<&Match> {
-        self.focused_match.as_ref()
-    }
-
-    /// Clear the focused match.
-    pub fn clear_focused_match(&mut self) {
-        self.focused_match = None;
-    }
-
-    /// Active search dfas.
-    pub fn dfas(&mut self) -> Option<&mut RegexSearch> {
-        self.dfas.as_mut()
-    }
-
-    /// Search regex text if a search is active.
-    fn regex_mut(&mut self) -> Option<&mut String> {
-        self.history_index.and_then(move |index| self.history.get_mut(index))
-    }
-}
-
-impl Default for SearchState {
-    fn default() -> Self {
-        Self {
-            direction: Direction::Right,
-            display_offset_delta: Default::default(),
-            focused_match: Default::default(),
-            history_index: Default::default(),
-            history: Default::default(),
-            origin: Default::default(),
-            dfas: Default::default(),
-        }
-    }
-}
-
-/// Vi inline search state.
-pub struct InlineSearchState {
-    /// Whether inline search is currently waiting for search character input.
-    pub char_pending: bool,
-    pub character: Option<char>,
-
-    direction: Direction,
-    stop_short: bool,
-}
-
-impl Default for InlineSearchState {
-    fn default() -> Self {
-        Self {
-            direction: Direction::Right,
-            char_pending: Default::default(),
-            stop_short: Default::default(),
-            character: Default::default(),
-        }
-    }
-}
-
 pub struct ActionContext<'a, N, T> {
     pub pane_id: u64,
     pub notifier: &'a mut N,
@@ -1172,6 +921,7 @@ pub struct ActionContext<'a, N, T> {
     pub touch: &'a mut TouchPurpose,
     pub modifiers: &'a mut Modifiers,
     pub display: &'a mut Display,
+    pub windowed_size: &'a mut LogicalSize<u32>,
     pub nebula_state: &'a mut NebulaPaneState,
     pub ssh_destination: Option<&'a str>,
     /// Document shown by the active tab, when it is a viewer tab — wheel and
@@ -2387,165 +2137,6 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
     }
 }
 
-/// Identified purpose of the touch input.
-#[derive(Default, Debug)]
-pub enum TouchPurpose {
-    #[default]
-    None,
-    Select(TouchEvent),
-    Scroll(TouchEvent),
-    Zoom(TouchZoom),
-    ZoomPendingSlot(TouchEvent),
-    Tap(TouchEvent),
-    Invalid(HashSet<u64, RandomState>),
-}
-
-/// Touch zooming state.
-#[derive(Debug)]
-pub struct TouchZoom {
-    slots: (TouchEvent, TouchEvent),
-    fractions: f32,
-}
-
-impl TouchZoom {
-    pub fn new(slots: (TouchEvent, TouchEvent)) -> Self {
-        Self { slots, fractions: Default::default() }
-    }
-
-    /// Get slot distance change since last update.
-    pub fn font_delta(&mut self, slot: TouchEvent) -> f32 {
-        let old_distance = self.distance();
-
-        // Update touch slots.
-        if slot.id == self.slots.0.id {
-            self.slots.0 = slot;
-        } else {
-            self.slots.1 = slot;
-        }
-
-        // Calculate font change in `FONT_SIZE_STEP` increments.
-        let delta = (self.distance() - old_distance) * TOUCH_ZOOM_FACTOR + self.fractions;
-        let font_delta = (delta.abs() / FONT_SIZE_STEP).floor() * FONT_SIZE_STEP * delta.signum();
-        self.fractions = delta - font_delta;
-
-        font_delta
-    }
-
-    /// Get active touch slots.
-    pub fn slots(&self) -> (TouchEvent, TouchEvent) {
-        self.slots
-    }
-
-    /// Calculate distance between slots.
-    fn distance(&self) -> f32 {
-        let delta_x = self.slots.0.location.x - self.slots.1.location.x;
-        let delta_y = self.slots.0.location.y - self.slots.1.location.y;
-        delta_x.hypot(delta_y) as f32
-    }
-}
-
-/// State of the mouse.
-#[derive(Debug)]
-pub struct Mouse {
-    pub left_button_state: ElementState,
-    pub middle_button_state: ElementState,
-    pub right_button_state: ElementState,
-    pub last_click_timestamp: Instant,
-    pub last_click_button: MouseButton,
-    /// Pixel where the last press landed, for multi-click detection: a press
-    /// only upgrades to double/triple when it lands within half a cell of the
-    /// previous one (Windows Terminal's `_numberOfClicks` distance gate).
-    pub last_click_pos: (usize, usize),
-    pub click_state: ClickState,
-    pub accumulated_scroll: AccumulatedScroll,
-    pub cell_side: Side,
-    pub block_hint_launcher: bool,
-    pub hint_highlight_dirty: bool,
-    pub inside_text_area: bool,
-    /// Pixel where the last left press landed. Drag-selection engages only
-    /// once the pointer travels a threshold away from here, so a plain
-    /// click (with sub-pixel jitter) never leaves a stray selection behind.
-    pub drag_origin: Option<(usize, usize)>,
-    /// Whether the current press crossed the drag threshold.
-    pub drag_active: bool,
-    /// Selection armed by the left press but not yet started (Windows
-    /// Terminal model: a click never creates a selection — only a drag past
-    /// the threshold does). Holds the would-be type/anchor so `mouse_moved`
-    /// can start the selection from the ORIGINAL press cell once the pointer
-    /// commits to a drag. Cleared on release.
-    pub pending_selection: Option<(nebula_terminal::selection::SelectionType, Point, Side)>,
-    /// Correlates pointer diagnostics across press, motion, selection, and release.
-    pub debug_press_id: u64,
-    /// Limits selection-update diagnostics without losing the drag's progression.
-    pub debug_selection_updates: u32,
-    /// Prevents a promoted tab drag from logging once per pointer-motion event.
-    pub debug_tab_drag_logged: bool,
-    pub x: usize,
-    pub y: usize,
-}
-
-impl Default for Mouse {
-    fn default() -> Mouse {
-        Mouse {
-            last_click_timestamp: Instant::now(),
-            last_click_button: MouseButton::Left,
-            last_click_pos: (0, 0),
-            left_button_state: ElementState::Released,
-            middle_button_state: ElementState::Released,
-            right_button_state: ElementState::Released,
-            click_state: ClickState::None,
-            cell_side: Side::Left,
-            hint_highlight_dirty: Default::default(),
-            block_hint_launcher: Default::default(),
-            inside_text_area: Default::default(),
-            accumulated_scroll: Default::default(),
-            drag_origin: Default::default(),
-            drag_active: Default::default(),
-            pending_selection: Default::default(),
-            debug_press_id: Default::default(),
-            debug_selection_updates: Default::default(),
-            debug_tab_drag_logged: Default::default(),
-            x: Default::default(),
-            y: Default::default(),
-        }
-    }
-}
-
-impl Mouse {
-    /// Convert mouse pixel coordinates to viewport point.
-    ///
-    /// If the coordinates are outside of the terminal grid, like positions inside the padding, the
-    /// coordinates will be clamped to the closest grid coordinates.
-    #[inline]
-    pub fn point(&self, size: &SizeInfo, display_offset: usize) -> Point {
-        let col = self.x.saturating_sub(size.padding_x() as usize) / (size.cell_width() as usize);
-        let col = min(Column(col), size.last_column());
-
-        let line = self.y.saturating_sub(size.padding_y() as usize) / (size.cell_height() as usize);
-        let line = min(line, size.bottommost_line().0 as usize);
-
-        term::viewport_to_point(display_offset, Point::new(line, col))
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ClickState {
-    None,
-    Click,
-    DoubleClick,
-    TripleClick,
-}
-
-/// The amount of scroll accumulated from the pointer events.
-#[derive(Default, Debug)]
-pub struct AccumulatedScroll {
-    /// Scroll we should perform along `x` axis.
-    pub x: f64,
-
-    /// Scroll we should perform along `y` axis.
-    pub y: f64,
-}
-
 impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
     /// Handle events from winit.
     pub fn handle_event(&mut self, event: WinitEvent<Event>) {
@@ -2866,6 +2457,11 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             return;
                         }
 
+                        if self.ctx.display.window.allows_drag_resize() {
+                            *self.ctx.windowed_size =
+                                size.to_logical(self.ctx.display.window.scale_factor);
+                        }
+
                         self.ctx.display.pending_update.set_dimensions(size);
                     },
                     WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
@@ -3056,58 +2652,5 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
             | WinitEvent::MemoryWarning
             | WinitEvent::AboutToWait => (),
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct EventProxy {
-    proxy: EventLoopProxy<Event>,
-    /// Routing target: which window this proxy's events address, as a raw
-    /// `WindowId` value. Shared with the owning pane (see
-    /// [`crate::window_context::Pane`]) so a re-attach can re-point every
-    /// clone (Term, PTY I/O loop) at the new window in one atomic store.
-    window_id: Arc<AtomicU64>,
-    tab_id: Option<u64>,
-}
-
-impl EventProxy {
-    pub fn new(proxy: EventLoopProxy<Event>, window_id: WindowId) -> Self {
-        Self { proxy, window_id: Arc::new(AtomicU64::new(window_id.into())), tab_id: None }
-    }
-
-    /// Event proxy bound to a specific Nebula tab. `route` is shared with the
-    /// pane, so detached panes can be re-pointed at an adopting window.
-    pub fn new_tab(proxy: EventLoopProxy<Event>, route: Arc<AtomicU64>, tab_id: u64) -> Self {
-        Self { proxy, window_id: route, tab_id: Some(tab_id) }
-    }
-
-    /// Current routing target.
-    fn target(&self) -> WindowId {
-        WindowId::from(self.window_id.load(Ordering::Relaxed))
-    }
-
-    /// Send an event to the event loop.
-    pub fn send_event(&self, event: EventType) {
-        let _ = self.proxy.send_event(Event {
-            window_id: Some(self.target()),
-            tab_id: self.tab_id,
-            payload: event,
-        });
-    }
-}
-
-impl EventListener for EventProxy {
-    fn send_event(&self, event: TerminalEvent) {
-        if let TerminalEvent::AiHookEnvelope(envelope) = event {
-            if let Some(hook) = crate::ai_hook::parse_remote_envelope(&envelope, self.tab_id) {
-                self.send_event(EventType::AiHook(hook));
-            }
-            return;
-        }
-        let _ = self.proxy.send_event(Event {
-            window_id: Some(self.target()),
-            tab_id: self.tab_id,
-            payload: event.into(),
-        });
     }
 }

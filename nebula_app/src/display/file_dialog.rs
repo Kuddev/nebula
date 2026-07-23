@@ -1,6 +1,52 @@
 use std::path::PathBuf;
 
-use winit::raw_window_handle::RawWindowHandle;
+use super::window::Window;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "file_dialog/desktop.rs"]
+mod platform;
+#[cfg(windows)]
+#[path = "file_dialog/windows.rs"]
+mod platform;
+#[cfg(windows)]
+#[path = "file_dialog/folder.rs"]
+mod windows_folder;
+
+#[derive(Debug, Clone, Copy)]
+struct FileFilter {
+    name: &'static str,
+    #[cfg_attr(windows, allow(dead_code))]
+    extensions: &'static [&'static str],
+    #[cfg_attr(not(windows), allow(dead_code))]
+    patterns: &'static [&'static str],
+}
+
+const ALL_FILES_FILTER: FileFilter =
+    FileFilter { name: "All files", extensions: &["*"], patterns: &["*.*"] };
+const IMAGE_FILTERS: &[FileFilter] = &[
+    FileFilter {
+        name: "Images",
+        extensions: &["png", "jpg", "jpeg", "webp", "bmp"],
+        patterns: &["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp"],
+    },
+    ALL_FILES_FILTER,
+];
+const FONT_FILTERS: &[FileFilter] = &[
+    FileFilter {
+        name: "Fonts",
+        extensions: &["ttf", "otf", "ttc", "otc"],
+        patterns: &["*.ttf", "*.otf", "*.ttc", "*.otc"],
+    },
+    ALL_FILES_FILTER,
+];
+const PRIVATE_KEY_FILTERS: &[FileFilter] = &[
+    FileFilter {
+        name: "SSH private keys",
+        extensions: &["pem", "key", "ppk"],
+        patterns: &["id_*", "*.pem", "*.key", "*.ppk"],
+    },
+    ALL_FILES_FILTER,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PrivateKeyFileKind {
@@ -39,29 +85,17 @@ pub(super) fn classify_private_key_contents(contents: &[u8]) -> PrivateKeyFileKi
     }
 }
 
-pub(super) fn pick_image_file(owner: RawWindowHandle) -> Option<String> {
-    pick_file(
-        owner,
-        "Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp)\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0All files (*.*)\0*.*\0\0",
-        "Choose background image",
-    )
-    .map(|path| path.to_string_lossy().into_owned())
+pub(super) fn pick_image_file(owner: &Window) -> Option<String> {
+    platform::pick_file(owner, "Choose background image", IMAGE_FILTERS)
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
-pub(super) fn pick_font_file(owner: RawWindowHandle) -> Option<PathBuf> {
-    pick_file(
-        owner,
-        "Fonts (*.ttf;*.otf;*.ttc;*.otc)\0*.ttf;*.otf;*.ttc;*.otc\0All files (*.*)\0*.*\0\0",
-        "导入终端字体",
-    )
+pub(super) fn pick_font_file(owner: &Window) -> Option<PathBuf> {
+    platform::pick_file(owner, "导入终端字体", FONT_FILTERS)
 }
 
-pub(super) fn pick_private_key_file(owner: RawWindowHandle) -> Option<Result<PathBuf, String>> {
-    let path = pick_file(
-        owner,
-        "SSH private keys (id_*;*.pem;*.key;*.ppk)\0id_*;*.pem;*.key;*.ppk\0All files (*.*)\0*.*\0\0",
-        "Choose SSH private key",
-    )?;
+pub(super) fn pick_private_key_file(owner: &Window) -> Option<Result<PathBuf, String>> {
+    let path = platform::pick_file(owner, "Choose SSH private key", PRIVATE_KEY_FILTERS)?;
     let contents = match std::fs::read(&path) {
         Ok(contents) => contents,
         Err(err) => return Some(Err(format!("无法读取私钥 {}: {err}", path.display()))),
@@ -75,130 +109,29 @@ pub(super) fn pick_private_key_file(owner: RawWindowHandle) -> Option<Result<Pat
     })
 }
 
-pub(super) fn pick_upload_files(owner: RawWindowHandle) -> Vec<PathBuf> {
-    pick_files(owner, "All files (*.*)\0*.*\0\0", "选择要上传的文件", true)
+pub(super) fn pick_upload_files(owner: &Window) -> Vec<PathBuf> {
+    platform::pick_files(owner, "选择要上传的文件", &[ALL_FILES_FILTER])
 }
 
-pub(super) fn pick_upload_directory(owner: RawWindowHandle) -> Option<PathBuf> {
-    pick_folder(owner, "选择要上传的文件夹")
+pub(super) fn pick_upload_directory(owner: &Window) -> Option<PathBuf> {
+    platform::pick_folder(owner, "选择要上传的文件夹")
 }
 
-pub(super) fn pick_download_directory(owner: RawWindowHandle) -> Option<PathBuf> {
-    pick_folder(owner, "选择下载位置")
+pub(super) fn pick_download_directory(owner: &Window) -> Option<PathBuf> {
+    platform::pick_folder(owner, "选择下载位置")
 }
 
-pub(super) fn pick_side_panel_directory(owner: RawWindowHandle) -> Option<PathBuf> {
-    pick_folder(owner, "选择目录树根目录")
+pub(super) fn pick_side_panel_directory(owner: &Window) -> Option<PathBuf> {
+    platform::pick_folder(owner, "选择目录树根目录")
 }
 
-fn pick_file(owner: RawWindowHandle, filter: &str, title: &str) -> Option<PathBuf> {
-    pick_files(owner, filter, title, false).into_iter().next()
-}
-
-fn pick_files(owner: RawWindowHandle, filter: &str, title: &str, multiple: bool) -> Vec<PathBuf> {
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::UI::Controls::Dialogs::{
-        GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
-        OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
-    };
-
-    let hwnd: HWND = match owner {
-        RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
-        _ => std::ptr::null_mut(),
-    };
-    let filter: Vec<u16> = filter.encode_utf16().collect();
-    let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut file_buffer = vec![0u16; 32768];
-    let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };
-    dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-    dialog.hwndOwner = hwnd;
-    dialog.lpstrFilter = filter.as_ptr();
-    dialog.lpstrFile = file_buffer.as_mut_ptr();
-    dialog.nMaxFile = file_buffer.len() as u32;
-    dialog.lpstrTitle = title.as_ptr();
-    dialog.Flags = OFN_EXPLORER
-        | OFN_FILEMUSTEXIST
-        | OFN_PATHMUSTEXIST
-        | OFN_NOCHANGEDIR
-        | OFN_HIDEREADONLY
-        | if multiple { OFN_ALLOWMULTISELECT } else { 0 };
-
-    if unsafe { GetOpenFileNameW(&mut dialog) } == 0 {
-        return Vec::new();
-    }
-    parse_open_file_buffer(&file_buffer)
-}
-
-fn parse_open_file_buffer(buffer: &[u16]) -> Vec<PathBuf> {
-    let parts = buffer
-        .split(|value| *value == 0)
-        .take_while(|part| !part.is_empty())
-        .map(|part| String::from_utf16_lossy(part))
-        .collect::<Vec<_>>();
-    match parts.as_slice() {
-        [] => Vec::new(),
-        [path] => vec![PathBuf::from(path)],
-        [directory, names @ ..] => {
-            let directory = PathBuf::from(directory);
-            names.iter().map(|name| directory.join(name)).collect()
-        },
-    }
-}
-
-fn pick_folder(owner: RawWindowHandle, title: &str) -> Option<PathBuf> {
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::{
-        BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW,
-        SHGetPathFromIDListW,
-    };
-
-    let hwnd: HWND = match owner {
-        RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
-        _ => std::ptr::null_mut(),
-    };
-    let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut display_name = vec![0u16; 260];
-    let dialog = BROWSEINFOW {
-        hwndOwner: hwnd,
-        pidlRoot: std::ptr::null_mut(),
-        pszDisplayName: display_name.as_mut_ptr(),
-        lpszTitle: title.as_ptr(),
-        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
-        lpfn: None,
-        lParam: 0,
-        iImage: 0,
-    };
-    let item = unsafe { SHBrowseForFolderW(&dialog) };
-    if item.is_null() {
-        return None;
-    }
-
-    let mut path = vec![0u16; 260];
-    let ok = unsafe { SHGetPathFromIDListW(item, path.as_mut_ptr()) } != 0;
-    unsafe { CoTaskMemFree(item.cast()) };
-    if !ok {
-        return None;
-    }
-    let length = path.iter().position(|value| *value == 0).unwrap_or(path.len());
-    (length > 0).then(|| PathBuf::from(String::from_utf16_lossy(&path[..length])))
+pub(super) fn pick_startup_directory(owner: &Window) -> Option<PathBuf> {
+    platform::pick_folder(owner, "选择终端启动目录")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use super::{PrivateKeyFileKind, classify_private_key_contents, parse_open_file_buffer};
-
-    fn wide_parts(parts: &[&str]) -> Vec<u16> {
-        let mut buffer = Vec::new();
-        for part in parts {
-            buffer.extend(part.encode_utf16());
-            buffer.push(0);
-        }
-        buffer.push(0);
-        buffer
-    }
+    use super::{PrivateKeyFileKind, classify_private_key_contents};
 
     #[test]
     fn public_key_text_is_rejected_as_private_key() {
@@ -230,20 +163,5 @@ mod tests {
             classify_private_key_contents(b"this is not an SSH key"),
             PrivateKeyFileKind::Unsupported
         );
-    }
-
-    #[test]
-    fn native_multi_select_buffer_joins_names_to_the_selected_directory() {
-        let buffer = wide_parts(&[r"D:\上传 文件", "alpha.txt", "测试.zip"]);
-        assert_eq!(
-            parse_open_file_buffer(&buffer),
-            vec![PathBuf::from(r"D:\上传 文件\alpha.txt"), PathBuf::from(r"D:\上传 文件\测试.zip"),]
-        );
-    }
-
-    #[test]
-    fn native_single_select_buffer_keeps_the_absolute_path() {
-        let buffer = wide_parts(&[r"D:\release\nebula.zip"]);
-        assert_eq!(parse_open_file_buffer(&buffer), vec![PathBuf::from(r"D:\release\nebula.zip")]);
     }
 }

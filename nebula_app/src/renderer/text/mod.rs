@@ -10,16 +10,16 @@ use crate::gl::types::*;
 
 mod atlas;
 mod builtin_font;
+mod font_rasterizer;
 mod gles2;
 mod glsl3;
 pub mod glyph_cache;
-mod font_rasterizer;
 
 use atlas::Atlas;
+pub(crate) use font_rasterizer::Rasterizer;
 pub use gles2::Gles2Renderer;
 pub use glsl3::Glsl3Renderer;
 pub use glyph_cache::GlyphCache;
-pub(crate) use font_rasterizer::Rasterizer;
 use glyph_cache::{Glyph, LoadGlyph};
 
 // NOTE: These flags must be in sync with their usage in the text.*.glsl shaders.
@@ -141,18 +141,18 @@ pub trait TextRenderApi<T: TextRenderBatch>: LoadGlyph {
         size_info: &SizeInfo,
     ) {
         // Get font key for cell.
-        let font_key = match cell.flags & Flags::BOLD_ITALIC {
+        let text_key = match cell.flags & Flags::BOLD_ITALIC {
             Flags::BOLD_ITALIC => glyph_cache.bold_italic_key,
             Flags::ITALIC => glyph_cache.italic_key,
             Flags::BOLD => glyph_cache.bold_key,
             _ => glyph_cache.font_key,
         };
-
         // Ignore hidden cells and render tabs as spaces to prevent font issues.
         let hidden = cell.flags.contains(Flags::HIDDEN);
         if cell.character == '\t' || hidden {
             cell.character = ' ';
         }
+        let font_key = glyph_cache.font_key_for(cell.character, text_key);
 
         let mut glyph_key =
             GlyphKey { font_key, size: glyph_cache.font_size, character: cell.character };

@@ -66,12 +66,14 @@ pub(crate) struct Rasterizer {
     private_paths: HashSet<std::path::PathBuf>,
     embedded_fonts: HashMap<FontKey, EmbeddedFont>,
     embedded_keys: HashMap<FontDesc, FontKey>,
+    /// Missing glyphs are resolved only after the primary face rejects them.
+    /// The glyph cache stores the result, so this map is not touched per frame.
+    fallback_keys: HashMap<FontKey, FontKey>,
 }
 
 #[cfg(windows)]
 struct EmbeddedFont {
     face: FontFace,
-    fallback_key: Option<FontKey>,
 }
 
 #[cfg(windows)]
@@ -85,15 +87,27 @@ impl Rasterizer {
         size: Size,
     ) -> Result<FontKey, Error> {
         let system = self.system.load_font(description, size);
-        if preferred_font_source(system.is_ok(), true) == Some(FontSource::System) {
-            return system;
+        let primary = if preferred_font_source(system.is_ok(), true) == Some(FontSource::System) {
+            system?
+        } else {
+            let embedded = self.load_embedded_font(family, slant, weight, size);
+            match preferred_font_source(false, embedded.is_ok()) {
+                Some(FontSource::Embedded) => embedded?,
+                _ => return system,
+            }
+        };
+
+        // 自定义字体只负责它实际包含的字形；中文和 Nerd Font 私用区由随程序
+        // 内置的 Maple 托底，避免为了换字体而牺牲终端内容或原生界面图标。
+        if let Ok(fallback) =
+            self.load_embedded_font(crate::font_install::REQUIRED_FONT_FAMILY, slant, weight, size)
+        {
+            if fallback != primary {
+                self.fallback_keys.insert(primary, fallback);
+            }
         }
 
-        let embedded = self.load_embedded_font(family, slant, weight, size);
-        match preferred_font_source(false, embedded.is_ok()) {
-            Some(FontSource::Embedded) => embedded,
-            _ => system,
-        }
+        Ok(primary)
     }
 
     pub(super) fn load_embedded_font(
@@ -101,7 +115,7 @@ impl Rasterizer {
         family: &str,
         slant: Slant,
         weight: Weight,
-        size: Size,
+        _size: Size,
     ) -> Result<FontKey, Error> {
         let description = FontDesc::new(family, Style::Description { slant, weight });
         if let Some(key) = self.embedded_keys.get(&description) {
@@ -116,16 +130,8 @@ impl Rasterizer {
         let font = family
             .first_matching_font(font_weight(weight), FontStretch::Normal, font_style(slant))
             .map_err(directwrite_error)?;
-        let fallback_key = ["Cascadia Code", "Consolas"].into_iter().find_map(|name| {
-            let fallback = FontDesc::new(
-                name,
-                Style::Description { slant: Slant::Normal, weight: Weight::Normal },
-            );
-            self.system.load_font(&fallback, size).ok()
-        });
         let key = FontKey::next();
-        self.embedded_fonts
-            .insert(key, EmbeddedFont { face: font.create_font_face(), fallback_key });
+        self.embedded_fonts.insert(key, EmbeddedFont { face: font.create_font_face() });
         self.embedded_keys.insert(description, key);
         Ok(key)
     }
@@ -172,6 +178,21 @@ impl Rasterizer {
             }
         }
         self.private_font_families()
+    }
+
+    fn rasterize_once(&mut self, glyph: GlyphKey) -> Result<RasterizedGlyph, Error> {
+        let Some(font) = self.embedded_fonts.get(&glyph.font_key) else {
+            return self.system.get_glyph(glyph);
+        };
+        let glyph_index = font
+            .face
+            .glyph_indices(&[glyph.character as u32])
+            .map_err(directwrite_error)?
+            .first()
+            .copied()
+            .unwrap_or(0);
+        let rasterized = Self::rasterize_embedded(font, glyph.size, glyph.character, glyph_index)?;
+        if glyph_index == 0 { Err(Error::MissingGlyph(rasterized)) } else { Ok(rasterized) }
     }
 
     pub(super) fn is_embedded_font(&self, key: FontKey) -> bool {
@@ -289,6 +310,7 @@ impl Rasterize for Rasterizer {
             private_paths,
             embedded_fonts: HashMap::new(),
             embedded_keys: HashMap::new(),
+            fallback_keys: HashMap::new(),
         })
     }
 
@@ -304,23 +326,13 @@ impl Rasterize for Rasterizer {
     }
 
     fn get_glyph(&mut self, glyph: GlyphKey) -> Result<RasterizedGlyph, Error> {
-        let Some(font) = self.embedded_fonts.get(&glyph.font_key) else {
-            return self.system.get_glyph(glyph);
-        };
-        let glyph_index = font
-            .face
-            .glyph_indices(&[glyph.character as u32])
-            .map_err(directwrite_error)?
-            .first()
-            .copied()
-            .unwrap_or(0);
-        if glyph_index == 0 {
-            if let Some(font_key) = font.fallback_key {
-                return self.system.get_glyph(GlyphKey { font_key, ..glyph });
-            }
+        let rasterized = self.rasterize_once(glyph);
+        if matches!(rasterized, Err(Error::MissingGlyph(_)))
+            && let Some(font_key) = self.fallback_keys.get(&glyph.font_key).copied()
+        {
+            return self.rasterize_once(GlyphKey { font_key, ..glyph });
         }
-        let rasterized = Self::rasterize_embedded(font, glyph.size, glyph.character, glyph_index)?;
-        if glyph_index == 0 { Err(Error::MissingGlyph(rasterized)) } else { Ok(rasterized) }
+        rasterized
     }
 
     fn kerning(&mut self, left: GlyphKey, right: GlyphKey) -> (f32, f32) {
@@ -364,7 +376,7 @@ fn font_style(slant: Slant) -> FontStyle {
 mod tests {
     use std::mem;
 
-    use crossfont::{GlyphKey, Rasterize, Size, Slant, Weight};
+    use crossfont::{FontDesc, GlyphKey, Rasterize, Size, Slant, Style, Weight};
 
     use super::{
         EMBEDDED_FONT_BYTES, FontSource, Rasterizer, StaticFontData, preferred_font_source,
@@ -375,6 +387,28 @@ mod tests {
         assert_eq!(preferred_font_source(true, true), Some(FontSource::System));
         assert_eq!(preferred_font_source(false, true), Some(FontSource::Embedded));
         assert_eq!(preferred_font_source(false, false), None);
+    }
+
+    #[test]
+    fn custom_system_font_missing_glyphs_fall_back_to_embedded_maple() {
+        let mut rasterizer = Rasterizer::new().expect("DirectWrite rasterizer");
+        let size = Size::new(11.25);
+        let description = FontDesc::new(
+            "Consolas",
+            Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+        );
+        let key = rasterizer
+            .load_preferred_font(&description, "Consolas", Slant::Normal, Weight::Normal, size)
+            .expect("Consolas");
+
+        assert!(!rasterizer.is_embedded_font(key));
+        for character in ['\u{4e2d}', '\u{ea83}'] {
+            let glyph = rasterizer
+                .get_glyph(GlyphKey { character, font_key: key, size })
+                .unwrap_or_else(|error| panic!("fallback glyph {character:?}: {error}"));
+            assert!(glyph.width > 0);
+            assert!(glyph.height > 0);
+        }
     }
 
     #[test]

@@ -5,8 +5,8 @@ use nebula_config_derive::ConfigDeserialize;
 
 use crate::display::color::{CellRgb, Rgb};
 
-/// Sentinel used by the theme-following cursor path. A user/OSC override that
-/// differs from this value keeps its explicit color and full opacity.
+/// Sentinel used by the theme-following cursor path. A user-configured cursor
+/// that differs from this value keeps its explicit color and full opacity.
 pub(crate) const NEBULA_DEFAULT_CURSOR: InvertedCellColors = InvertedCellColors {
     foreground: CellRgb::CellBackground,
     background: CellRgb::Rgb(Rgb::new(0x49, 0x4d, 0x72)),

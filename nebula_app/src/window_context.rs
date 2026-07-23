@@ -17,6 +17,7 @@ use glutin::display::GetGlDisplay;
 use glutin::platform::x11::X11GlConfigExt;
 use log::{error, info, warn};
 use serde_json as json;
+use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event as WinitEvent, Modifiers, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasDisplayHandle;
@@ -35,12 +36,10 @@ use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::UiConfig;
 use crate::config::ui_config::Profile;
-use crate::display::color::Rgb;
 use crate::display::window::Window;
 use crate::display::{Display, NebulaPaneState};
 use crate::event::{
-    ActionContext, Event, EventProxy, EventType, InlineSearchState, Mouse, SearchState, TabRequest,
-    TouchPurpose,
+    ActionContext, Event, EventProxy, EventType, Mouse, SearchState, TabRequest, TouchPurpose,
 };
 #[cfg(unix)]
 use crate::logging::LOG_TARGET_IPC_CONFIG;
@@ -48,17 +47,17 @@ use crate::message_bar::MessageBuffer;
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::{input, renderer, session};
 
+mod model;
 mod nebula_fetch_art;
 /// New-tab welcome page (Windows logo + fastfetch intro). Stateless helpers.
 mod welcome;
 use welcome::nebula_fastfetch_intro_command_for;
 
+use model::{DOC_PANE_ID, Layout, PaneId, TabEntry, TabLaunch};
+pub use model::{DetachedWindow, Pane, WindowBoot};
+
 /// Split-pane behaviour (toggle/resize/drag/focus); `impl WindowContext`.
 mod split;
-
-/// Identifier for a pane, stable for the pane's lifetime and reused as the
-/// terminal's event tag. Panes live in [`WindowContext::panes`].
-type PaneId = u64;
 
 /// Mouse buttons whose press is an interaction with terminal content and must
 /// therefore update split focus before the event is routed to a pane.
@@ -81,98 +80,6 @@ fn routed_input_pane(
         .unwrap_or(focused)
 }
 
-/// Sentinel pane id for document-viewer tabs. A doc tab owns no pane and no
-/// PTY: its `Layout::Leaf(DOC_PANE_ID)` deliberately resolves to `None` in
-/// every `pane()` lookup, which is exactly the degraded behaviour those call
-/// sites already handle (no spinner, no close confirm, no PTY resize) — the
-/// tab's content comes from `TabEntry::doc` instead.
-const DOC_PANE_ID: PaneId = u64::MAX;
-
-/// A single terminal session (one PTY + grid). It is a leaf of a tab's
-/// [`Layout`] tree; the tab bar shows tabs, not panes.
-pub struct Pane {
-    pub terminal: Arc<FairMutex<Term<EventProxy>>>,
-    pub notifier: Notifier,
-    pub search_state: SearchState,
-    pub inline_search_state: InlineSearchState,
-    pub id: PaneId,
-    pub title: String,
-    /// 原生 SSH Pane 的稳定连接目标。文件面板必须依据会话身份路由到 SFTP，
-    /// 不能从终端标题或用户刚输入的命令反推，否则分屏和全屏 TUI 都会误判。
-    pub ssh_destination: Option<String>,
-    pub nebula_state: NebulaPaneState,
-    /// Columns the welcome intro was printed at, while the pane is pristine
-    /// (no user input yet). Drives a re-print when a resize would reflow it;
-    /// `None` once the user types or for panes without the intro.
-    pub intro_cols: Option<usize>,
-    /// Shell (PTY child) process id, for the close-confirmation process scan.
-    pub shell_pid: u32,
-    /// Which window this pane's PTY events route to (raw `WindowId` value),
-    /// shared with every `EventProxy` clone in the Term + PTY I/O loop. A
-    /// re-attach re-points all of them with one atomic store — the pane
-    /// outlives its original window in detached (mux residency) mode.
-    window_route: Arc<AtomicU64>,
-    #[cfg(not(windows))]
-    pub master_fd: RawFd,
-}
-
-/// A tab's pane layout: a binary tree with panes at the leaves and splits at
-/// the internal nodes (a plain binary tree). A single pane is a bare
-/// `Leaf`; splitting replaces a leaf with a `Split` of two sub-layouts.
-enum Layout {
-    Leaf(PaneId),
-    Split {
-        /// Orientation: panes side by side (left/right) or stacked (top/bottom).
-        direction: crate::display::SplitDirection,
-        /// Fraction of this node's extent assigned to `first` (left/top).
-        ratio: f32,
-        /// Divider preview while dragging this node. Pane PTYs keep `ratio`
-        /// until release, otherwise full-screen TUIs repaint into a viewport
-        /// that was never actually resized.
-        preview_ratio: Option<f32>,
-        /// Whether this node's divider is currently being dragged.
-        dragging: bool,
-        /// Left/top child.
-        first: Box<Layout>,
-        /// Right/bottom child.
-        second: Box<Layout>,
-    },
-}
-
-/// One entry in the tab bar: a pane layout plus which pane owns focus within it.
-struct TabEntry {
-    layout: Layout,
-    active_pane: PaneId,
-    /// A background tab rang its bell; shown as 🔔 in the tab bar until focused.
-    has_bell: bool,
-    /// Custom user-assigned name for this tab. When `None`, the label is derived
-    /// from the working directory (Windows Terminal style).
-    custom_name: Option<String>,
-    /// Optional override for the narrow tab light strip. `None` follows the
-    /// active theme, so changing themes never leaves stale default colors.
-    custom_color: Option<Rgb>,
-    /// Runtime launch identity used by "复制标签页". It deliberately stays out
-    /// of session restore: reconnecting SSH automatically after restart would
-    /// be surprising and can trigger credentials/network side effects.
-    launch: TabLaunch,
-    /// Document viewer content (markdown/text/json). `Some` marks this as a
-    /// doc tab: it has no pane, and the draw/input paths route to the viewer.
-    doc: Option<crate::display::markdown_view::DocView>,
-    /// Settings is a singleton special tab. Like a document tab it owns no
-    /// PTY, while its controls and state remain owned by `Display`.
-    settings: bool,
-}
-
-#[derive(Clone)]
-enum TabLaunch {
-    Default,
-    Profile(Profile),
-    Shell { name: String, shell: tty::Shell },
-    Ssh(String),
-    Document(std::path::PathBuf),
-    Settings,
-}
-
 fn select_initial_shell(
     configured: Option<tty::Shell>,
     user_default: Option<tty::Shell>,
@@ -188,48 +95,43 @@ fn valid_new_tab_directory(path: &std::path::Path) -> bool {
     path.is_dir()
 }
 
-/// How a new window context gets its initial tabs.
-pub enum WindowBoot {
-    /// Spawn the default shell as a single fresh tab.
-    Fresh,
-    /// Cold restore from the session file: first tab's shell starts at the
-    /// saved cwd, the remaining tabs are respawned after construction.
-    Restore(session::Session),
-    /// Adopt live detached panes — multiplexer-style re-attach. Their PTYs never
-    /// stopped, so the window comes back mid-conversation.
-    Attach(DetachedWindow),
+/// Resolve a fresh tab's directory without allowing the global setting to
+/// overwrite an explicit profile/command directory.
+fn preferred_tab_cwd(
+    explicit: Option<std::path::PathBuf>,
+    startup: Option<std::path::PathBuf>,
+    focused: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    explicit.or(startup).or(focused)
 }
 
-/// Tabs stripped off a closed window, parked in the resident process with
-/// their PTYs still running, waiting for a re-attach.
-pub struct DetachedWindow {
-    panes: Vec<Pane>,
-    tabs: Vec<TabEntry>,
-    active_tab: usize,
-    next_pane_id: PaneId,
+/// Initial-window precedence is deliberately different from a normal new
+/// tab: an explicit CLI path and a restored session must survive a global
+/// startup-directory change, while the setting still outranks static config.
+fn preferred_initial_cwd(
+    cli: Option<std::path::PathBuf>,
+    restored: Option<std::path::PathBuf>,
+    startup: Option<std::path::PathBuf>,
+    configured: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    cli.or(restored).or(startup).or(configured)
 }
 
-impl DetachedWindow {
-    /// Drop a pane whose shell exited while detached. Its leaf stays in the
-    /// layout; `finish_attach` prunes stale leaves with the full tree surgery.
-    pub fn reap_pane(&mut self, pane_id: u64) {
-        self.panes.retain(|pane| pane.id != pane_id);
-    }
-
-    /// No live panes left — nothing to re-attach.
-    pub fn is_empty(&self) -> bool {
-        self.panes.is_empty()
-    }
-}
-
-impl Drop for DetachedWindow {
-    fn drop(&mut self) {
-        // Panes that never get re-attached (process quit, failed attach) must
-        // not leak their PTYs. Re-attach empties `panes` first, so this is a
-        // no-op on the happy path.
-        for pane in &self.panes {
-            let _ = pane.notifier.0.send(Msg::Shutdown);
-        }
+/// Keep idle/editor redraw costs low while giving active task spinners a
+/// display-rate clock. This changes only the timer cadence; no worker thread or
+/// per-frame allocation is introduced.
+#[inline]
+fn chrome_clock_interval(
+    any_tab_running: bool,
+    editor_active: bool,
+    chrome_animating: bool,
+) -> Duration {
+    if any_tab_running {
+        Duration::from_micros(16_667)
+    } else if editor_active || chrome_animating {
+        Duration::from_millis(125)
+    } else {
+        Duration::from_secs(1)
     }
 }
 
@@ -260,12 +162,15 @@ pub struct WindowContext {
     /// passes through instantly; only a rapid follow-up — i.e. an interactive
     /// drag — defers to the settle timer.
     last_pty_resize: Option<Instant>,
-    /// Current chrome clock cadence (1 Hz idle, 8 fps while a sidebar
-    /// spinner animates); re-armed in `draw` when it changes.
+    /// Current chrome clock cadence (1 Hz idle, 8 fps for finite chrome
+    /// transitions, 60 fps while a task spinner runs).
     clock_interval: Duration,
     /// Last session snapshot written to disk, so the 1 Hz autosave can skip
     /// the write when nothing changed. `None` forces the next tick to write.
     last_saved_session: Option<session::Session>,
+    /// Last normal inner size. Maximized/fullscreen resize events must not
+    /// overwrite the dimensions Windows restores when leaving that state.
+    windowed_size: LogicalSize<u32>,
     /// Excluded from session persistence (the quick/Quake terminal is scratch
     /// space; its tabs must never overwrite the main window's session).
     pub session_exempt: bool,
@@ -332,7 +237,18 @@ impl WindowContext {
             renderer::platform::create_gl_context(&gl_display, &gl_config, raw_window_handle)?;
         crate::boot_trace("gl context created");
 
-        let display = Display::new(window, gl_context, &config, event_loop.system_theme(), false)?;
+        let restored_window = match &boot {
+            WindowBoot::Restore(session) => session.window,
+            _ => None,
+        };
+        let display = Display::new(
+            window,
+            gl_context,
+            &config,
+            event_loop.system_theme(),
+            false,
+            restored_window,
+        )?;
         crate::boot_trace("display ready (fonts rasterized)");
 
         Self::new(display, config, options, proxy, boot)
@@ -374,7 +290,18 @@ impl WindowContext {
         let gl_context =
             renderer::platform::create_gl_context(&gl_display, gl_config, Some(raw_window_handle))?;
 
-        let display = Display::new(window, gl_context, &config, event_loop.system_theme(), tabbed)?;
+        let restored_window = match &boot {
+            WindowBoot::Restore(session) => session.window,
+            _ => None,
+        };
+        let display = Display::new(
+            window,
+            gl_context,
+            &config,
+            event_loop.system_theme(),
+            tabbed,
+            restored_window,
+        )?;
 
         let mut window_context = Self::new(display, config, options, proxy, boot)?;
 
@@ -403,6 +330,14 @@ impl WindowContext {
         );
 
         let window_id = display.window.id();
+        let windowed_size = match &boot {
+            WindowBoot::Restore(session) => session
+                .window
+                .filter(|state| state.valid_size())
+                .map(|state| LogicalSize::new(state.width, state.height)),
+            _ => None,
+        }
+        .unwrap_or_else(|| display.window.inner_size().to_logical(display.window.scale_factor));
 
         // Bootstrap the tab set: fresh/restored windows spawn their first
         // pane here; an attach adopts the detached panes wholesale.
@@ -428,6 +363,13 @@ impl WindowContext {
                     restore = Some(session);
                 }
                 let mut pty_config = config.pty_config();
+                let configured_cwd = pty_config.working_directory.clone();
+                let cli_cwd = options
+                    .terminal_options
+                    .working_directory
+                    .as_ref()
+                    .filter(|path| path.is_dir())
+                    .cloned();
                 let cli_shell = options.terminal_options.command().map(Into::into);
                 pty_config.shell = select_initial_shell(
                     pty_config.shell.take(),
@@ -435,20 +377,15 @@ impl WindowContext {
                     cli_shell,
                 );
                 options.terminal_options.override_pty_config(&mut pty_config);
-                // Restored session: aim the first pane's shell at the saved
-                // cwd; the remaining tabs are respawned once the context
-                // exists. The CLI gate lives in `create_initial_window`; the
-                // `is_none` check additionally keeps an explicit
-                // --working-directory winning no matter what.
-                if let Some(session) = &restore {
-                    if pty_config.working_directory.is_none() {
-                        if let Some(dir) =
-                            session.tabs.first().and_then(|t| session::valid_dir(&t.cwd))
-                        {
-                            pty_config.working_directory = Some(dir);
-                        }
-                    }
-                }
+                let restored_cwd = restore.as_ref().and_then(|session| {
+                    session.tabs.first().and_then(|tab| session::valid_dir(&tab.cwd))
+                });
+                pty_config.working_directory = preferred_initial_cwd(
+                    cli_cwd,
+                    restored_cwd,
+                    display.startup_directory(),
+                    configured_cwd,
+                );
                 let first_pane = Self::create_pane(
                     &display.size_info,
                     window_id,
@@ -506,6 +443,7 @@ impl WindowContext {
             last_pty_resize: None,
             clock_interval: Duration::from_secs(1),
             last_saved_session: None,
+            windowed_size,
             session_exempt: false,
             message_buffer: Default::default(),
             window_config: Default::default(),
@@ -930,7 +868,7 @@ impl WindowContext {
 
     /// Spawn and activate a new tab (a single-pane layout) using the default shell.
     fn spawn_tab(&mut self) {
-        self.spawn_tab_at(self.focused_cwd());
+        self.spawn_tab_at(self.display.startup_directory().or_else(|| self.focused_cwd()));
     }
 
     /// Spawn a default-shell tab at an already validated explicit directory,
@@ -989,8 +927,11 @@ impl WindowContext {
 
     fn spawn_tab_profile_value(&mut self, profile: Profile) {
         // Profile cwd wins when it exists; else inherit the focused pane's.
-        let cwd =
-            profile.cwd.as_ref().filter(|p| p.is_dir()).cloned().or_else(|| self.focused_cwd());
+        let cwd = preferred_tab_cwd(
+            profile.cwd.as_ref().filter(|p| p.is_dir()).cloned(),
+            self.display.startup_directory(),
+            self.focused_cwd(),
+        );
         let shell = profile.shell();
         if let Some(id) = self.spawn_pane_detached_with(cwd, self.display.size_info, Some(shell)) {
             let at = (self.active_tab + 1).min(self.tabs.len());
@@ -1018,7 +959,7 @@ impl WindowContext {
     /// the config, and the cwd inherits the focused pane's.
     fn spawn_tab_shell(&mut self, name: String, shell: nebula_terminal::tty::Shell) {
         if let Some(id) = self.spawn_pane_detached_with(
-            self.focused_cwd(),
+            self.display.startup_directory().or_else(|| self.focused_cwd()),
             self.display.size_info,
             Some(shell.clone()),
         ) {
@@ -1226,7 +1167,7 @@ impl WindowContext {
         let before = self.tabs.len();
 
         match launch {
-            TabLaunch::Default => self.spawn_tab(),
+            TabLaunch::Default => self.spawn_tab_at(self.focused_cwd()),
             TabLaunch::Profile(profile) => self.spawn_tab_profile_value(profile),
             TabLaunch::Shell { name, shell } => self.spawn_tab_shell(name, shell),
             TabLaunch::Ssh(host) => self.spawn_tab_ssh(host),
@@ -1269,7 +1210,7 @@ impl WindowContext {
         for tab in session.tabs.iter().skip(1) {
             // A vanished directory falls back to the default cwd, keeping the
             // tab count (and thus the saved active index) intact.
-            let cwd = session::valid_dir(&tab.cwd);
+            let cwd = session::valid_dir(&tab.cwd).or_else(|| self.display.startup_directory());
             if let Some(id) = self.spawn_pane_detached(cwd, self.display.size_info) {
                 self.tabs.push(TabEntry {
                     layout: Layout::Leaf(id),
@@ -1370,7 +1311,13 @@ impl WindowContext {
                 color: t.custom_color,
             })
             .collect();
-        session::Session::new(active_tab.min(tabs.len().saturating_sub(1)), tabs)
+        let mut session = session::Session::new(active_tab.min(tabs.len().saturating_sub(1)), tabs);
+        session.window = Some(session::WindowState {
+            width: self.windowed_size.width,
+            height: self.windowed_size.height,
+            maximized: self.display.window.is_maximized(),
+        });
+        session
     }
 
     /// 1 Hz autosave (piggybacks on the chrome clock tick): persist the session
@@ -1884,17 +1831,15 @@ impl WindowContext {
         let panel_cwd = self.focused_cwd();
         self.display.side_panel_sync(panel_cwd);
 
-        // Chrome clock: 1 Hz normally, 8 fps while a sidebar spinner is
-        // animating. Re-arm on cadence change.
+        // Chrome clock: 1 Hz idle, 8 fps for finite UI transitions, and
+        // display-rate only while a task spinner is running. Re-arm whenever
+        // the cadence class changes.
         let clock_timer = TimerId::new(Topic::NebulaClock, self.display.window.id());
-        let interval = if self.display.any_tab_running()
-            || self.display.chrome_editor_active()
-            || self.display.chrome_animating()
-        {
-            Duration::from_millis(125)
-        } else {
-            Duration::from_secs(1)
-        };
+        let interval = chrome_clock_interval(
+            self.display.any_tab_running(),
+            self.display.chrome_editor_active(),
+            self.display.chrome_animating(),
+        );
         if self.clock_interval != interval {
             scheduler.unschedule(clock_timer);
             self.clock_interval = interval;
@@ -2347,6 +2292,7 @@ impl WindowContext {
                 modifiers: &mut self.modifiers,
                 notifier: &mut pane.notifier,
                 display: &mut self.display,
+                windowed_size: &mut self.windowed_size,
                 mouse: &mut self.mouse,
                 touch: &mut self.touch,
                 dirty: &mut self.dirty,
@@ -2369,6 +2315,16 @@ impl WindowContext {
             while let Some(event) = events.next_if(|event| target_of(event) == target_id) {
                 processor.handle_event(event);
             }
+        }
+
+        if self.display.pending_update.terminal_colors_dirty() {
+            // 主题切换必须覆盖所有 tab、分屏和文档占位终端。这里尚未取得焦点
+            // terminal 的锁，可逐个清理 OSC 覆盖而不产生重复加锁死锁。
+            for pane in &self.panes {
+                pane.terminal.lock().reset_dynamic_colors();
+            }
+            self.doc_pane.terminal.lock().reset_dynamic_colors();
+            self.dirty = true;
         }
 
         // Post-batch display housekeeping reads the focused pane's terminal
@@ -2559,10 +2515,30 @@ impl Drop for WindowContext {
 mod startup_shell_tests {
     use nebula_terminal::tty::Shell;
 
-    use super::{routed_input_pane, select_initial_shell, valid_new_tab_directory};
+    use super::{
+        chrome_clock_interval, preferred_initial_cwd, preferred_tab_cwd, routed_input_pane,
+        select_initial_shell, valid_new_tab_directory,
+    };
 
     fn shell(program: &str) -> Shell {
         Shell::new(program.to_owned(), Vec::new())
+    }
+
+    #[test]
+    fn chrome_clock_uses_fast_cadence_only_for_running_tabs() {
+        assert_eq!(
+            chrome_clock_interval(true, false, false),
+            std::time::Duration::from_micros(16_667)
+        );
+        assert_eq!(
+            chrome_clock_interval(false, true, false),
+            std::time::Duration::from_millis(125)
+        );
+        assert_eq!(
+            chrome_clock_interval(false, false, true),
+            std::time::Duration::from_millis(125)
+        );
+        assert_eq!(chrome_clock_interval(false, false, false), std::time::Duration::from_secs(1));
     }
 
     #[test]
@@ -2593,6 +2569,47 @@ mod startup_shell_tests {
         assert!(valid_new_tab_directory(&directory));
         assert!(!valid_new_tab_directory(&file));
         assert!(!valid_new_tab_directory(&temp.path().join("missing")));
+    }
+
+    #[test]
+    fn explicit_tab_directory_precedes_startup_and_focused_directories() {
+        let explicit = std::path::PathBuf::from("D:/profile");
+        let startup = std::path::PathBuf::from("D:/startup");
+        let focused = std::path::PathBuf::from("D:/focused");
+
+        assert_eq!(
+            preferred_tab_cwd(Some(explicit.clone()), Some(startup.clone()), Some(focused.clone())),
+            Some(explicit)
+        );
+        assert_eq!(preferred_tab_cwd(None, Some(startup.clone()), Some(focused)), Some(startup));
+    }
+
+    #[test]
+    fn initial_directory_precedence_keeps_cli_and_restore_before_startup() {
+        let cli = std::path::PathBuf::from("D:/cli");
+        let restored = std::path::PathBuf::from("D:/restore");
+        let startup = std::path::PathBuf::from("D:/startup");
+        let configured = std::path::PathBuf::from("D:/config");
+
+        assert_eq!(
+            preferred_initial_cwd(
+                Some(cli.clone()),
+                Some(restored.clone()),
+                Some(startup.clone()),
+                Some(configured.clone())
+            ),
+            Some(cli)
+        );
+        assert_eq!(
+            preferred_initial_cwd(
+                None,
+                Some(restored.clone()),
+                Some(startup.clone()),
+                Some(configured)
+            ),
+            Some(restored)
+        );
+        assert_eq!(preferred_initial_cwd(None, None, Some(startup.clone()), None), Some(startup));
     }
 
     #[test]

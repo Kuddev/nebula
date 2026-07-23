@@ -6,6 +6,60 @@ Every release entry is provided in English and Simplified Chinese.
 
 ## Unreleased / 未发布
 
+### English
+
+#### Added
+
+- **Configurable startup directory** — Settings now provides a native directory picker for choosing the working directory used by new terminal tabs. The selection is persisted, can be cleared, and otherwise falls back to inheriting the current directory.
+- **Window-state persistence** — Nebula now restores the last normal window size and maximized state on launch. Logical dimensions are stored so the restored size remains consistent across displays with different DPI scaling.
+
+#### Fixed
+
+- **Persistent terminal math rendering** — terminal formulas remain rendered while scrolling instead of exposing their original TeX source. Display formulas are also recovered when the opening `$$` has already moved into scrollback before the closing delimiter arrives, and partially visible formulas keep the geometry of the same complete layout.
+- **Unified Markdown and CLI math compilation** — Markdown documents and terminal overlays now use one shared source-normalization, TeX parsing, and layout entry point. Named and numeric HTML entities are decoded generically before parsing, so standard matrices, `cases`, and aligned formulas no longer expose transport text such as `&nbsp;`; missing TeX row separators are never guessed.
+- **Theme-switch surface colors** — terminal and text-input backgrounds now update with the selected light or dark theme instead of retaining colors from the previous theme. Stale application-provided dynamic palette values are cleared when the host theme changes.
+- **Tab-title synchronization** — ordinary tab titles now follow directory and terminal-title changes when switching locations, while explicitly renamed tabs retain their custom names.
+- **Custom-font glyph routing** — a selected custom font is used for normal text, while bundled Maple remains responsible for interface icons, Nerd Font private-use glyphs, and characters missing from the selected font. This prevents replacement boxes and large runs of corrupted symbols after a font change.
+- **Dismissible SSH warnings** — connection and host warnings now have a reliable close target with matching visual, hover, and pointer bounds. Their background is clipped to the content area and no longer extends through the left Tabs sidebar.
+- **Top-bar control alignment** — Files and Git remain on the shared title-bar centerline, while minimize, maximize, and close now form a contiguous 46px Windows-style caption band aligned flush with the right edge. Fixed vector strokes replace font-dependent glyphs, the close hover uses a solid red block, and its hit target still reaches the physical top-right corner in maximized windows.
+- **New-tab affordance sizing** — The sidebar `+` now keeps a fixed 14px visual size instead of growing and shrinking with its 20px/28px hit areas. The adjacent three-dot menu uses larger dots and balanced spacing so both controls retain consistent visual weight across sidebar states and DPI scales.
+- **Continuous working indicator** — the running-state spinner now uses a monotonic normalized phase and refreshes continuously while active, eliminating visible pauses and jumps between rotations.
+
+#### Improved
+
+- **Bounded terminal-math state** — formula detection scans the visible grid once, keeps persistent overlay anchors, limits retained source to 16 KiB, and caps history reconstruction at 512 rows. Temporary reconstruction storage is released immediately after completion so long sessions keep predictable CPU and memory usage.
+- **Low-overhead font fallback** — missing-glyph decisions are cached with the glyph rasterization result, so the Maple fallback is consulted only after the primary face rejects a character rather than on every frame. This preserves font customization and native glyph quality without maintaining a separate SVG icon pipeline.
+- **Animation scheduling efficiency** — smooth running indicators redraw at approximately 60 FPS only while work is active; finite interface animations use a lower cadence and idle windows fall back to a one-second cadence, without adding a worker thread or per-frame allocations.
+- **Internal module boundaries** — display state, size calculations, terminal color and math handling, file-dialog logic, event actions, window models, and terminal damage/renderable content now live in focused modules to reduce coupling while preserving existing behavior.
+- **Regression coverage** — the no-default-features test suite now contains 384 passing tests, including streamed multiline formulas, window-state compatibility, theme palette reset, custom-font fallback, warning bounds, and chrome alignment. The default-feature check and release build also pass.
+
+### 简体中文
+
+#### 新增
+
+- **可配置启动目录** — 设置中新增原生目录选择器，可以指定新建终端标签页使用的工作目录。该配置会持久保存，也可以随时清除；未配置时继续继承当前目录。
+- **窗口状态持久化** — Nebula 启动时会恢复上次关闭前的普通窗口大小和最大化状态。窗口尺寸按逻辑像素保存，在不同 DPI 缩放的显示器之间也能保持一致的视觉大小。
+
+#### 修复
+
+- **终端公式持久显示修复** — 滚动终端时，已经渲染的公式会持续覆盖原始 TeX 源码，不再重新露出原型。即使开头的 `$$` 在结尾到达前已经进入回滚历史，也能从历史行恢复完整块级公式；公式只显示一部分时仍沿用同一份完整布局，不会发生几何跳变。
+- **Markdown 与 CLI 公式编译统一** — Markdown 文档和终端公式覆盖层现在统一经过同一个源码规范化、TeX 解析与排版入口；命名和数字 HTML 实体会在解析前按通用规则解码，使标准矩阵、`cases` 和多行对齐公式不再显示 `&nbsp;` 等传输文本，同时不会在缺少 TeX 行分隔符时猜测矩阵结构。
+- **主题切换表面颜色修复** — 终端和文本输入框背景会随浅色、深色主题同步更新，不再残留上一个主题的底色；宿主主题变化时也会清理应用曾写入的动态调色板覆盖值。
+- **标签页标题同步修复** — 未重命名的普通标签页会在切换目录或终端标题变化后同步更新；用户明确重命名过的标签页仍保持自定义名称。
+- **自定义字体字形路由修复** — 普通文字使用用户选择的字体，界面图标、Nerd Font 私用区字符以及自定义字体缺失的字形继续由内置 Maple 承担，避免切换字体后出现空心矩形和大批乱码符号。
+- **SSH 警告关闭修复** — 连接与主机警告现在具有可靠的关闭按钮，其显示、悬停和点击范围保持一致；警告背景只覆盖内容区域，不再穿透到左侧 Tabs 栏。
+- **顶部按钮对齐修复** — Files 和 Git 保持标题栏统一中心线，最小化、最大化和关闭按钮改为连续无缝的 46px Windows 风格按钮带，并完整贴齐右边缘。三个按钮使用固定矢量线条替代受字体影响的字形，关闭悬停显示完整红色矩形；窗口最大化时，其点击热区仍延伸到屏幕物理右上角。
+- **新建标签控件尺寸修复** — 侧栏 `+` 固定为 14px 视觉尺寸，不再随 20px/28px 命中区域和侧栏状态忽大忽小；相邻三点菜单增大圆点并重新平衡间距，使两个控件在不同 DPI 下保持一致的视觉重量。
+- **工作状态转圈修复** — 运行状态指示器改用单调时钟生成连续且归一化的旋转相位，消除每轮之间的停顿、回跳和不连贯。
+
+#### 改进
+
+- **终端公式状态有界化** — 公式检测只对可见网格进行一次扫描，持久保存渲染锚点，将公式源码限制在 16 KiB，并把历史重建限制在 512 行以内；完成后立即释放临时重建存储，使长时间终端会话的 CPU 与内存占用保持可预测。
+- **低开销字体回退** — 缺失字形的选择结果会和光栅化结果一起缓存，只有主字体确实缺少字符时才查询 Maple，而不是每帧重复判断。在保留自定义字体和原生字形质量的同时，也不需要维护额外的 SVG 图标管线。
+- **动画调度效率改进** — 只有工作状态活跃时才以约 60 FPS 刷新连续转圈；有限时长的界面动画使用更低频率，空闲窗口降到一秒一次，并且没有增加工作线程或逐帧内存分配。
+- **内部模块边界改进** — 显示状态、尺寸计算、终端颜色与公式、文件选择器、事件动作、窗口模型以及终端损伤与可渲染内容已经拆分到职责集中的模块，在保留现有行为的同时降低后续修改的耦合风险。
+- **回归覆盖改进** — 无默认特性测试套件目前共 384 项通过，覆盖流式多行公式、窗口状态兼容、主题调色板重置、自定义字体回退、警告范围和顶部控件对齐；默认特性检查与 Release 构建也已通过。
+
 ## 0.6.0 - 2026-07-19
 
 ### English

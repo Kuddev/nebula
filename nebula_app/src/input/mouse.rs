@@ -223,6 +223,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::AcceptCycle
             | crate::display::SettingsHit::ShellCycle
             | crate::display::SettingsHit::ShellPickerRow(_)
+            | crate::display::SettingsHit::StartupDirectory
+            | crate::display::SettingsHit::StartupDirectoryClear
             | crate::display::SettingsHit::FontCycle
             | crate::display::SettingsHit::FontPickerRow(_)
             | crate::display::SettingsHit::RestoreHiddenSsh(_)
@@ -258,6 +260,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 | crate::display::ChromeHit::Host(_)
                 | crate::display::ChromeHit::TabsSection
                 | crate::display::ChromeHit::HostsSection
+                | crate::display::ChromeHit::MessageQueue
                 | crate::display::ChromeHit::SidebarToggle => CursorIcon::Pointer,
                 _ => CursorIcon::Default,
             };
@@ -1100,27 +1103,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Check mouse icon state in relation to the message bar.
     fn message_bar_cursor_state(&self) -> Option<CursorIcon> {
-        // Since search is above the message bar, the button is offset by search's height.
-        let search_height = usize::from(self.ctx.search_active());
-
-        // Calculate Y position of the end of the last terminal line.
         let size = self.ctx.size_info();
-        let terminal_end = size.padding_y() as usize
-            + size.cell_height() as usize * (size.screen_lines() + search_height);
-
         let mouse = self.ctx.mouse();
-        let display_offset = self.ctx.terminal().grid().display_offset();
-        let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        let search_active = self.ctx.search_active();
+        self.ctx.message()?;
 
-        if self.ctx.message().is_none() || (mouse.y <= terminal_end) {
-            None
-        } else if mouse.y <= terminal_end + size.cell_height() as usize
-            && point.column + message_bar::CLOSE_BUTTON_TEXT.len() >= size.columns()
+        if message_bar::message_close_button_rect(&size, search_active)
+            .is_some_and(|rect| rect.contains(mouse.x as f32, mouse.y as f32))
         {
-            Some(CursorIcon::Pointer)
-        } else {
-            Some(CursorIcon::Default)
+            return Some(CursorIcon::Pointer);
         }
+
+        message_bar::message_bar_rect(&size, search_active)
+            .contains(mouse.x as f32, mouse.y as f32)
+            .then_some(CursorIcon::Default)
     }
 
     /// Icon state of the cursor.

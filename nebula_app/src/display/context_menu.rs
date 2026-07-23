@@ -337,14 +337,7 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
             ));
         },
         ContextMenuTarget::SftpPanel => {
-            rows.push(row(
-                ContextMenuAction::RefreshSftp,
-                "\u{eb37}",
-                "刷新",
-                "",
-                cursor_y,
-                false,
-            ));
+            rows.push(row(ContextMenuAction::RefreshSftp, "\u{eb37}", "刷新", "", cursor_y, false));
             cursor_y += row_h;
             separator(&mut cursor_y);
             rows.push(row(

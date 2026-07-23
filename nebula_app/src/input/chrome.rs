@@ -719,6 +719,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::StartupDirectory => {
+                        self.ctx.display().pick_startup_directory();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::StartupDirectoryClear => {
+                        self.ctx.display().clear_startup_directory();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::FontCycle => {
                         self.ctx.display().toggle_font_picker();
                         self.ctx.mark_dirty();
@@ -816,6 +826,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::ChromeHit::AddSshHost => {
                         self.ctx.display().open_ssh_editor();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::ChromeHit::MessageQueue => {
+                        self.ctx.display().toggle_message_queue_entry();
                         self.ctx.mark_dirty();
                         return;
                     },
