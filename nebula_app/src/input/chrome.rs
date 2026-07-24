@@ -50,6 +50,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     pub fn nebula_confirm_accept(&mut self, confirm: crate::display::NebulaConfirm) {
         use crate::display::NebulaConfirm;
         match confirm {
+            NebulaConfirm::EnableBackgroundImageCoverChrome => {
+                self.ctx.display().confirm_background_image_cover_chrome();
+            },
             NebulaConfirm::ClosePane { .. } => {
                 self.ctx.nebula_tab(crate::event::TabRequest::Close);
             },
@@ -212,7 +215,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let debug_x = self.ctx.mouse().x as f32;
         let debug_y = self.ctx.mouse().y as f32;
         if self.ctx.nebula_chrome_active() {
-            let window_size = self.ctx.display().size_info;
+            let window_size = self.ctx.display().ui_size_info();
             let pane_size = self.ctx.size_info();
             let scale = self.ctx.window().scale_factor as f32;
             let chrome_hit = self.ctx.display().chrome_hit(debug_x, debug_y);
@@ -250,13 +253,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.mark_dirty();
                     return;
                 }
-                if self.ctx.display().nebula_shell_picker_open {
-                    self.ctx.display().close_shell_picker();
-                    self.ctx.mark_dirty();
-                    return;
-                }
-                if self.ctx.display().nebula_font_picker_open {
-                    self.ctx.display().close_font_picker();
+                if self.ctx.display().close_settings_dropdown() {
                     self.ctx.mark_dirty();
                     return;
                 }
@@ -302,7 +299,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             if button == MouseButton::Left && self.ctx.display().command_palette_open() {
                 let x = self.ctx.mouse().x as f32;
                 let y = self.ctx.mouse().y as f32;
-                let size = self.ctx.display().size_info;
+                let size = self.ctx.display().ui_size_info();
                 let scale = self.ctx.window().scale_factor as f32;
                 let layout = crate::display::command_palette::palette_layout(
                     size.width(),
@@ -605,7 +602,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let y = self.ctx.mouse().y as f32;
                 // Chrome geometry is window-relative; the pane view would misplace
                 // every hit rect in split mode (unclickable gear, wrong tabs).
-                let size = self.ctx.display().size_info;
+                let size = self.ctx.display().ui_size_info();
                 let scale = self.ctx.window().scale_factor as f32;
                 // Window border resize takes priority over the chrome controls.
                 let resize_enabled = self.ctx.window().allows_drag_resize();
@@ -633,9 +630,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let settings_open = self.ctx.display().settings_open();
                 let settings_section = self.ctx.display().settings_section();
                 let settings_scroll = self.ctx.display().settings_scroll();
-                let shell_picker_open = self.ctx.display().nebula_shell_picker_open;
+                let settings_dropdown = self.ctx.display().nebula_settings_dropdown;
                 let shell_picker_count = self.ctx.display().shell_picker_count();
-                let font_picker_open = self.ctx.display().nebula_font_picker_open;
                 let font_picker_count = self.ctx.display().font_picker_count();
                 let hidden_host_count = self.ctx.display().hidden_ssh_host_count();
                 let settings_area = self.ctx.display().terminal_card_rect();
@@ -648,33 +644,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     settings_open,
                     settings_section,
                     settings_scroll,
-                    shell_picker_open,
+                    settings_dropdown,
                     shell_picker_count,
-                    font_picker_open,
                     font_picker_count,
                     hidden_host_count,
                 );
-                if shell_picker_open
-                    && !matches!(
-                        settings_hit,
-                        crate::display::SettingsHit::ShellCycle
-                            | crate::display::SettingsHit::ShellPickerRow(_)
-                    )
-                {
-                    // First outside click dismisses the picker without activating
-                    // an unrelated control hidden behind its temporary focus scope.
-                    self.ctx.display().close_shell_picker();
-                    self.ctx.mark_dirty();
-                    return;
-                }
-                if font_picker_open
-                    && !matches!(
-                        settings_hit,
-                        crate::display::SettingsHit::FontCycle
-                            | crate::display::SettingsHit::FontPickerRow(_)
-                    )
-                {
-                    self.ctx.display().close_font_picker();
+                // 打开的下拉框独占第一击：命中不属于它（选项行或锚行）时，
+                // 这一击只负责关闭浮层，绝不让下层控件借机误触发。
+                if settings_dropdown.is_some() && !settings_dropdown_keeps_open(settings_hit) {
+                    self.ctx.display().close_settings_dropdown();
                     self.ctx.mark_dirty();
                     return;
                 }
@@ -695,6 +673,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::Language(language) => {
                         self.ctx.display().set_ui_language(language);
+                        self.ctx.display().close_settings_dropdown();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::LanguageDropdown => {
+                        self.ctx
+                            .display()
+                            .toggle_settings_dropdown(crate::display::SettingsDropdown::Language);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -704,7 +690,53 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::SettingsHit::AcceptCycle => {
-                        self.ctx.display().cycle_accept();
+                        self.ctx
+                            .display()
+                            .toggle_settings_dropdown(crate::display::SettingsDropdown::Accept);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::AcceptOption(index) => {
+                        self.ctx.display().set_accept_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::CursorShapeDropdown => {
+                        self.ctx
+                            .display()
+                            .toggle_settings_dropdown(crate::display::SettingsDropdown::CursorShape);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::CursorShapeOption(index) => {
+                        if self.ctx.display().set_cursor_shape_option(index) {
+                            self.ctx.apply_default_cursor_style();
+                        }
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::CursorBlinkToggle => {
+                        self.ctx.display().toggle_cursor_blink();
+                        self.ctx.apply_default_cursor_style();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::CopyOnSelectToggle => {
+                        self.ctx.display().toggle_copy_on_select();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::FontSizeUp => {
+                        let ui_scale = self.ctx.display().window.scale_factor as f32;
+                        self.ctx.change_font_size(ui_scale);
+                        self.ctx.display().persist_nebula_settings();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::FontSizeDown => {
+                        let ui_scale = self.ctx.display().window.scale_factor as f32;
+                        self.ctx.change_font_size(-ui_scale);
+                        self.ctx.display().persist_nebula_settings();
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -765,23 +797,80 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
-                    crate::display::SettingsHit::OpacityDown => {
-                        self.ctx.display().adjust_window_opacity(-0.05);
-                        self.ctx.mark_dirty();
-                        return;
-                    },
-                    crate::display::SettingsHit::OpacityUp => {
-                        self.ctx.display().adjust_window_opacity(0.05);
+                    crate::display::SettingsHit::OpacitySlider => {
+                        self.ctx.display().begin_settings_opacity_drag(
+                            crate::display::SettingsOpacityTarget::Terminal,
+                            x,
+                        );
                         self.ctx.mark_dirty();
                         return;
                     },
                     crate::display::SettingsHit::BackgroundColor => {
-                        self.ctx.display().cycle_background_color();
+                        // 打开色板 + 16 进制输入浮层（不再点击循环切换）。
+                        self.ctx.display().open_background_color_picker();
                         self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundSwatch(index) => {
+                        self.ctx.display().set_background_color_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundHexInput => {
+                        self.ctx.display().focus_bg_hex_input();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundPopupPanel => {
+                        // 浮层内部空白：吞掉点击，浮层保持展开。
                         return;
                     },
                     crate::display::SettingsHit::BackgroundImage => {
                         self.ctx.display().pick_background_image();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundImageClear => {
+                        self.ctx.display().clear_background_image();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundImageFit => {
+                        self.ctx
+                            .display()
+                            .toggle_settings_dropdown(
+                                crate::display::SettingsDropdown::BackgroundFit,
+                            );
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::FitOption(index) => {
+                        self.ctx.display().set_background_image_fit_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundImageAlignment => {
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::BackgroundAlignment,
+                        );
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::AlignOption(index) => {
+                        self.ctx.display().set_background_image_alignment_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundImageOpacitySlider => {
+                        self.ctx.display().begin_settings_opacity_drag(
+                            crate::display::SettingsOpacityTarget::BackgroundImage,
+                            x,
+                        );
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundImageCoverChrome => {
+                        self.ctx.display().request_toggle_background_image_cover_chrome();
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -916,7 +1005,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::ChromeHit::Maximize => {
-                        self.ctx.window().toggle_maximized();
+                        self.ctx.window().toggle_maximized_or_restore();
                         return;
                     },
                     crate::display::ChromeHit::TitleBar => {
@@ -931,7 +1020,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 // terminal's selection arming, which clamps the point into the
                 // nearest grid cell — dragging from the sidebar then painted a
                 // stray selection across the pane (the "drag ghost").
-                let window_size = self.ctx.display().size_info;
+                let window_size = self.ctx.display().ui_size_info();
                 let scale = self.ctx.window().scale_factor as f32;
                 if crate::display::in_chrome_bar(&window_size, scale, x, y) {
                     crate::display::nebula_debug_log(format!(
@@ -1011,4 +1100,33 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
         }
     }
+}
+
+/// Hits that must NOT dismiss an expanded settings dropdown: its own option
+/// rows and the anchor rows (the anchor click toggles the dropdown itself).
+/// Everything else closes the floating list first — a press outside a popup
+/// never activates the control underneath it.
+fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
+    use crate::display::SettingsHit as Hit;
+    matches!(
+        hit,
+        Hit::ShellCycle
+            | Hit::ShellPickerRow(_)
+            | Hit::FontCycle
+            | Hit::FontPickerRow(_)
+            | Hit::BackgroundImageFit
+            | Hit::FitOption(_)
+            | Hit::BackgroundImageAlignment
+            | Hit::AlignOption(_)
+            | Hit::LanguageDropdown
+            | Hit::Language(_)
+            | Hit::AcceptCycle
+            | Hit::AcceptOption(_)
+            | Hit::CursorShapeDropdown
+            | Hit::CursorShapeOption(_)
+            | Hit::BackgroundColor
+            | Hit::BackgroundSwatch(_)
+            | Hit::BackgroundHexInput
+            | Hit::BackgroundPopupPanel
+    )
 }

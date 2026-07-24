@@ -37,7 +37,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let size_info = self.ctx.size_info();
         // Chrome (tabs / title bar / settings) is laid out on the *window*,
         // not the focused pane's viewport; in split mode the two differ.
-        let window_size = self.ctx.display().size_info;
+        let window_size = self.ctx.display().ui_size_info();
 
         let (x, y) = position.into();
 
@@ -56,6 +56,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let y = y.clamp(0, window_size.height() as i32 - 1) as usize;
         self.ctx.mouse_mut().x = x;
         self.ctx.mouse_mut().y = y;
+
+        if self.ctx.display().nebula_settings_opacity_drag.is_some() {
+            if lmb_pressed {
+                self.ctx.display().update_settings_opacity_drag(x as f32);
+            } else {
+                self.ctx.display().finish_settings_opacity_drag();
+            }
+            self.ctx.window().set_mouse_cursor(CursorIcon::EwResize);
+            self.ctx.mark_dirty();
+            return;
+        }
 
         // The SSH editor is modal. Its controls own hover/cursor feedback while
         // open, and the closing animation swallows pointer motion until the
@@ -134,9 +145,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let settings_open = self.ctx.display().settings_open();
         let settings_section = self.ctx.display().settings_section();
         let settings_scroll = self.ctx.display().settings_scroll();
-        let shell_picker_open = self.ctx.display().nebula_shell_picker_open;
+        let settings_dropdown = self.ctx.display().nebula_settings_dropdown;
         let shell_picker_count = self.ctx.display().shell_picker_count();
-        let font_picker_open = self.ctx.display().nebula_font_picker_open;
         let font_picker_count = self.ctx.display().font_picker_count();
         let hidden_host_count = self.ctx.display().hidden_ssh_host_count();
         let settings_area = self.ctx.display().terminal_card_rect();
@@ -162,6 +172,42 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
             return;
         }
+        // Command palette is a pointer-modal overlay: rows light up under the
+        // cursor and NOTHING below (settings rows, chrome, links) may react
+        // while it is open. This must run BEFORE the settings/chrome hover
+        // dispatch — those branches `return`, which is exactly how palette
+        // row hover silently died before.
+        if self.ctx.display().command_palette_open() {
+            let px = x as f32;
+            let py = y as f32;
+            let layout = crate::display::command_palette::palette_layout(
+                window_size.width(),
+                window_size.height(),
+                scale,
+            );
+            let (ix, iy, iw, ih) = layout.panel;
+            // Hover detection: the pointer must be inside the panel rectangle,
+            // AND below the input box (list_y), AND the computed row must be a
+            // real item (< visible count). Without the visible-count check, rows
+            // beyond the filtered list — empty space inside the panel — also hover.
+            let hover_row = if px >= ix && px < ix + iw && py >= layout.list_y && py < iy + ih {
+                let row = ((py - layout.list_y) / layout.row_h) as usize;
+                let visible_count =
+                    self.ctx.display().nebula_palette_visible_count().min(layout.max_rows);
+                if row < visible_count { Some(row) } else { None }
+            } else {
+                None
+            };
+            if self.ctx.display().palette_hover(hover_row) {
+                self.ctx.mark_dirty();
+            }
+            self.ctx.window().set_mouse_cursor(if hover_row.is_some() {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
+            return;
+        }
         let settings_hover = crate::display::settings_hit(
             &window_size,
             scale,
@@ -171,9 +217,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             settings_open,
             settings_section,
             settings_scroll,
-            shell_picker_open,
+            settings_dropdown,
             shell_picker_count,
-            font_picker_open,
             font_picker_count,
             hidden_host_count,
         );
@@ -231,16 +276,38 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::FetchToggle
             | crate::display::SettingsHit::PowerlineToggle
             | crate::display::SettingsHit::KeepSessionToggle
-            | crate::display::SettingsHit::OpacityDown
-            | crate::display::SettingsHit::OpacityUp
             | crate::display::SettingsHit::BackgroundColor
             | crate::display::SettingsHit::BackgroundImage
+            | crate::display::SettingsHit::BackgroundImageClear
+            | crate::display::SettingsHit::BackgroundImageFit
+            | crate::display::SettingsHit::BackgroundImageAlignment
+            | crate::display::SettingsHit::FitOption(_)
+            | crate::display::SettingsHit::AlignOption(_)
+            | crate::display::SettingsHit::BackgroundSwatch(_)
+            | crate::display::SettingsHit::BackgroundHexInput
+            | crate::display::SettingsHit::AcceptOption(_)
+            | crate::display::SettingsHit::LanguageDropdown
+            | crate::display::SettingsHit::CursorShapeDropdown
+            | crate::display::SettingsHit::CursorShapeOption(_)
+            | crate::display::SettingsHit::CursorBlinkToggle
+            | crate::display::SettingsHit::CopyOnSelectToggle
+            | crate::display::SettingsHit::FontSizeUp
+            | crate::display::SettingsHit::FontSizeDown
+            | crate::display::SettingsHit::BackgroundImageCoverChrome
             | crate::display::SettingsHit::OpenConfigFile
             | crate::display::SettingsHit::Reset => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
                 return;
             },
-            crate::display::SettingsHit::Panel => {
+            crate::display::SettingsHit::OpacitySlider
+            | crate::display::SettingsHit::BackgroundImageOpacitySlider => {
+                // WT 风格滑块用普通指针：双向箭头(EwResize)让拖动读起来像
+                // 在改窗口大小，是用户报告的"手势不对"。
+                self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
+                return;
+            },
+            crate::display::SettingsHit::Panel
+            | crate::display::SettingsHit::BackgroundPopupPanel => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Default);
                 return;
             },
@@ -341,31 +408,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.ctx.mark_dirty();
         }
 
-        // Command palette hover: light up the row under the cursor so the user
-        // knows where they'd click. Only track while the palette is open.
-        if self.ctx.display().command_palette_open() {
-            let px = x as f32;
-            let py = y as f32;
-            let layout = crate::display::command_palette::palette_layout(
-                window_size.width(),
-                window_size.height(),
-                scale,
-            );
-            let (ix, iy, iw, ih) = layout.panel;
-            // Hover detection: the pointer must be inside the panel rectangle,
-            // AND below the input box (list_y), AND the computed row must be a
-            // real item (< visible count). Without the visible-count check, rows
-            // beyond the filtered list — empty space inside the panel — also hover.
-            let hover_row = if px >= ix && px < ix + iw && py >= layout.list_y && py < iy + ih {
-                let row = ((py - layout.list_y) / layout.row_h) as usize;
-                let visible_count =
-                    self.ctx.display().nebula_palette_visible_count().min(layout.max_rows);
-                if row < visible_count { Some(row) } else { None }
-            } else {
-                None
-            };
-            self.ctx.display().palette_hover(hover_row);
-        }
+        // Command palette hover moved to the TOP of this handler (pointer
+        // modal): earlier hover branches `return` and were silently starving
+        // the palette of hover updates.
 
         let inside_text_area = size_info.contains_point(x, y);
         let cell_side = self.cell_side(x);
@@ -671,6 +716,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // even while a TUI has grabbed the mouse. A plain click (never dragged)
         // returns `None` here and falls through to normal release handling.
         if button == MouseButton::Left {
+            if self.ctx.display().finish_settings_opacity_drag() {
+                self.ctx.mark_dirty();
+                return;
+            }
             // Drop a dragged tree entry: released over the terminal (anywhere
             // off the drawer) pastes its full path but never presses Enter.
             // A directory that never crossed the threshold retains its normal
@@ -770,6 +819,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     pub fn mouse_wheel_input(&mut self, delta: MouseScrollDelta, phase: TouchPhase) {
+        // Ctrl+wheel zooms the terminal font (Windows Terminal / browser
+        // convention). Checked before every scroll consumer so zoom wins over
+        // page/drawer/grid scrolling while the modifier is held.
+        if self.ctx.modifiers().state().control_key() {
+            let steps = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => lines,
+                MouseScrollDelta::PixelDelta(pos) => pos.y.signum() as f32,
+            };
+            if steps != 0.0 {
+                let scale = self.ctx.window().scale_factor as f32;
+                self.ctx.change_font_size(steps.signum() * scale);
+            }
+            return;
+        }
+
         // The Settings tab captures the wheel: scroll its page instead of the
         // sink terminal used for special-tab input routing.
         if self.ctx.display().settings_open() {

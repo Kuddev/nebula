@@ -464,6 +464,11 @@ impl Window {
         self.window.is_maximized()
     }
 
+    #[inline]
+    pub fn is_fullscreen(&self) -> bool {
+        self.window.fullscreen().is_some()
+    }
+
     pub fn set_minimized(&self, minimized: bool) {
         self.window.set_minimized(minimized);
     }
@@ -480,6 +485,18 @@ impl Window {
     /// Toggle the window's maximized state.
     pub fn toggle_maximized(&self) {
         self.set_maximized(!self.window.is_maximized());
+    }
+
+    /// Caption-button semantics: normal windows maximize, while maximized or
+    /// fullscreen windows restore to an ordinary window. Exiting fullscreen
+    /// alone can restore a previously maximized state, so clear both states.
+    pub fn toggle_maximized_or_restore(&self) {
+        if self.is_fullscreen() {
+            self.set_fullscreen(false);
+            self.set_maximized(false);
+        } else {
+            self.toggle_maximized();
+        }
     }
 
     /// Custom resize hit targets are invalid while Windows owns the maximized

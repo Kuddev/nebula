@@ -459,6 +459,29 @@ impl<T> Term<T> {
         self.damage.full = true;
     }
 
+    /// Update the DEFAULT cursor style (shape + blinking) without touching
+    /// the rest of the config. [`Self::cursor_style`] falls back to this when
+    /// no DECSCUSR escape has overridden the style, so the runtime settings
+    /// page can restyle the cursor while vim-style overrides keep working.
+    pub fn set_default_cursor_style(&mut self, style: CursorStyle) {
+        if self.config.default_cursor_style != style {
+            self.config.default_cursor_style = style;
+            self.mark_fully_damaged();
+        }
+    }
+
+    /// Drop any DECSCUSR override so [`Self::cursor_style`] falls back to the
+    /// default again. The runtime settings page calls this when the user picks
+    /// a cursor shape or toggles blinking: shells that pin their own style at
+    /// startup (PSReadLine, starship) would otherwise keep the old look alive
+    /// and the new choice would only show up after a terminal reset.
+    pub fn reset_cursor_style_override(&mut self) {
+        if self.cursor_style.is_some() {
+            self.cursor_style = None;
+            self.mark_fully_damaged();
+        }
+    }
+
     /// Set new options for the [`Term`].
     pub fn set_options(&mut self, options: Config)
     where

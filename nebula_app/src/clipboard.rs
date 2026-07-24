@@ -62,18 +62,25 @@ impl Clipboard {
             _ => &mut self.clipboard,
         };
 
-        // Windows: OpenClipboard races with clipboard listeners (IMEs, cloud
-        // clipboard, managers) and fails with OSError(5) — one short retry
-        // resolves virtually all of them, so don't alarm the user unless the
-        // retry fails too.
+        // Windows: OpenClipboard races with clipboard listeners (IMEs, the
+        // Win+V cloud clipboard, managers, remote-desktop tools) and fails
+        // with OSError(5) 拒绝访问. The holder releases within milliseconds,
+        // so short backoff retries resolve virtually all of these; only a
+        // persistent failure is worth logging.
         let text = text.into();
-        if clipboard.set_contents(text.clone()).is_ok() {
-            return;
+        let mut last_err = None;
+        for delay_ms in [0u64, 15, 40, 80] {
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            match clipboard.set_contents(text.clone()) {
+                Ok(()) => return,
+                Err(err) => last_err = Some(err),
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        clipboard.set_contents(text).unwrap_or_else(|err| {
+        if let Some(err) = last_err {
             warn!("Unable to store text in clipboard: {err}");
-        });
+        }
     }
 
     pub fn load(&mut self, ty: ClipboardType) -> String {

@@ -113,10 +113,16 @@ impl TerminalMathState {
         &mut self,
         grid: &TextGrid,
         allow_inline_dollar: bool,
+        active_edit_rows: Option<&std::ops::RangeInclusive<usize>>,
     ) -> Option<FormulaAnchor> {
         let mut completed_pending = false;
         let scan = scan_grid_result(grid, allow_inline_dollar);
         for overlay in scan.overlays {
+            // 当前光标所在的逻辑行仍由 CLI 编辑器拥有。这里必须在持久化
+            // 之前排除整段换行链，否则公式会先进入缓存，下一帧又覆盖输入。
+            if active_edit_rows.is_some_and(|rows| overlay.intersects_rows(rows)) {
+                continue;
+            }
             let anchor = overlay_anchor(grid, &overlay);
             completed_pending |= self
                 .pending_display
@@ -130,6 +136,9 @@ impl TerminalMathState {
         let Some((position, kind)) = scan.unmatched_display else {
             return None;
         };
+        if active_edit_rows.is_some_and(|rows| rows.contains(&position.row)) {
+            return None;
+        }
         let current = PendingDisplayFormula {
             anchor: FormulaAnchor {
                 row: grid.absolute_top.saturating_add(position.row),
@@ -477,6 +486,13 @@ impl FormulaOverlay {
         })
     }
 
+    fn intersects_rows(&self, rows: &std::ops::RangeInclusive<usize>) -> bool {
+        self.spans
+            .iter()
+            .filter_map(|span| usize::try_from(span.row).ok())
+            .any(|row| rows.contains(&row))
+    }
+
     fn bounds(&self, size: &SizeInfo) -> Option<FormulaBounds> {
         let first = self.spans.first()?;
         let last = self.spans.last()?;
@@ -581,6 +597,24 @@ impl TextGrid {
 
     fn character(&self, position: GridPosition) -> Option<char> {
         self.rows.get(position.row)?.get(position.column).copied().flatten()
+    }
+
+    /// Physical rows joined by terminal wrap flags form one editable logical
+    /// line. Suppressing only the cursor cell lets an earlier formula on the
+    /// same prompt line render while the user is still typing after it.
+    fn logical_rows_containing(&self, row: usize) -> Option<std::ops::RangeInclusive<usize>> {
+        if row >= self.rows.len() {
+            return None;
+        }
+        let mut start = row;
+        while start > 0 && self.wrapped.get(start - 1).copied().unwrap_or(false) {
+            start -= 1;
+        }
+        let mut end = row;
+        while end + 1 < self.rows.len() && self.wrapped.get(end).copied().unwrap_or(false) {
+            end += 1;
+        }
+        Some(start..=end)
     }
 
     fn starts_with(&self, position: GridPosition, delimiter: &[char]) -> bool {
@@ -713,8 +747,11 @@ pub(super) fn scan_visible<T>(
     default_background: Rgb,
 ) -> Vec<FormulaOverlay> {
     let grid = TextGrid::from_term(terminal, size);
+    let active_edit_rows = cursor.and_then(|cursor| grid.logical_rows_containing(cursor.line));
     state.synchronize_grid(&grid);
-    if let Some(anchor) = state.scan_visible_grid(&grid, allow_inline_dollar) {
+    if let Some(anchor) =
+        state.scan_visible_grid(&grid, allow_inline_dollar, active_edit_rows.as_ref())
+    {
         let lookback = grid.absolute_top.saturating_sub(anchor.row);
         // `extract` counts every terminal cell toward the 16 KiB parser limit.
         // Deriving the row cap from the current width keeps this rare temporary
@@ -735,7 +772,9 @@ pub(super) fn scan_visible<T>(
     state
         .visible_overlays(&grid)
         .into_iter()
-        .filter(|overlay| cursor.is_none_or(|cursor| !overlay.contains(cursor)))
+        .filter(|overlay| {
+            active_edit_rows.as_ref().is_none_or(|rows| !overlay.intersects_rows(rows))
+        })
         .filter_map(|mut overlay| {
             overlay.fallback = rendered_cells
                 .iter()
@@ -1216,6 +1255,36 @@ mod tests {
     }
 
     #[test]
+    fn active_cli_input_logical_line_is_never_persisted_as_math_output() {
+        let mut grid =
+            TextGrid::from_rows(&["prompt $$lim_x{x}$$", "continued $x^1$", "assistant $$x^2$$"]);
+        // The first physical row wraps into the cursor row, so both belong to
+        // one live editor buffer and must be excluded together.
+        grid.wrapped[0] = true;
+        let active_rows = grid.logical_rows_containing(1).expect("cursor logical line");
+        assert_eq!(active_rows, 0..=1);
+
+        let mut state = TerminalMathState::default();
+        state.synchronize_grid(&grid);
+        assert!(state.scan_visible_grid(&grid, true, Some(&active_rows)).is_none());
+
+        let overlays = state.visible_overlays(&grid);
+        assert_eq!(overlays.len(), 1);
+        assert_eq!(overlays[0].source.as_ref(), "x^2");
+    }
+
+    #[test]
+    fn unmatched_display_delimiter_on_live_input_does_not_start_history_reconstruction() {
+        let grid = TextGrid::from_rows(&["prompt $$"]);
+        let active_rows = grid.logical_rows_containing(0).expect("cursor row");
+        let mut state = TerminalMathState::default();
+        state.synchronize_grid(&grid);
+
+        assert!(state.scan_visible_grid(&grid, true, Some(&active_rows)).is_none());
+        assert!(state.pending_display.is_none());
+    }
+
+    #[test]
     fn screenshot_cli_formulas_reach_the_shared_compiler() {
         let samples = [
             sources(&["$$", r"x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}", "$$"], false),
@@ -1357,7 +1426,7 @@ d & -b \\
             0,
         );
         state.synchronize_grid(&opening);
-        assert!(state.scan_visible_grid(&opening, false).is_none());
+        assert!(state.scan_visible_grid(&opening, false, None).is_none());
 
         let visible_tail = grid_at(
             &[
@@ -1371,7 +1440,7 @@ d & -b \\
         );
         state.synchronize_grid(&visible_tail);
         let history_anchor = state
-            .scan_visible_grid(&visible_tail, false)
+            .scan_visible_grid(&visible_tail, false, None)
             .expect("closing delimiter requests the pending opening from history");
         assert_eq!(history_anchor, FormulaAnchor { row: 40, column: 0 });
 

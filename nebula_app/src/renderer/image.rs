@@ -24,6 +24,124 @@ use crate::renderer::shader::{ShaderProgram, ShaderVersion};
 const IMAGE_SHADER_F: &str = include_str!("../../res/image.f.glsl");
 const IMAGE_SHADER_V: &str = include_str!("../../res/image.v.glsl");
 
+/// Windows Terminal-compatible wallpaper sizing modes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundImageFit {
+    /// Distort the image to exactly match the window.
+    Fill,
+    /// Preserve aspect ratio and keep the entire image visible.
+    Uniform,
+    /// Preserve aspect ratio and crop the overflow (CSS `cover`).
+    #[default]
+    UniformToFill,
+    /// Draw at the image's native pixel size.
+    None,
+}
+
+impl BackgroundImageFit {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fill" | "stretch" => Some(Self::Fill),
+            "uniform" | "contain" => Some(Self::Uniform),
+            "uniform_to_fill" | "uniformtofill" | "cover" => Some(Self::UniformToFill),
+            "none" | "native" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    pub const fn settings_value(self) -> &'static str {
+        match self {
+            Self::Fill => "fill",
+            Self::Uniform => "uniform",
+            Self::UniformToFill => "uniform_to_fill",
+            Self::None => "none",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Fill => Self::Uniform,
+            Self::Uniform => Self::UniformToFill,
+            Self::UniformToFill => Self::None,
+            Self::None => Self::Fill,
+        }
+    }
+}
+
+/// Anchor used when the fitted wallpaper is larger or smaller than the window.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundImageAlignment {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    #[default]
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl BackgroundImageAlignment {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "top-left" => Some(Self::TopLeft),
+            "top" => Some(Self::Top),
+            "top-right" => Some(Self::TopRight),
+            "left" => Some(Self::Left),
+            "center" | "centre" => Some(Self::Center),
+            "right" => Some(Self::Right),
+            "bottom-left" => Some(Self::BottomLeft),
+            "bottom" => Some(Self::Bottom),
+            "bottom-right" => Some(Self::BottomRight),
+            _ => None,
+        }
+    }
+
+    pub const fn settings_value(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top_left",
+            Self::Top => "top",
+            Self::TopRight => "top_right",
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+            Self::BottomLeft => "bottom_left",
+            Self::Bottom => "bottom",
+            Self::BottomRight => "bottom_right",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::TopLeft => Self::Top,
+            Self::Top => Self::TopRight,
+            Self::TopRight => Self::Left,
+            Self::Left => Self::Center,
+            Self::Center => Self::Right,
+            Self::Right => Self::BottomLeft,
+            Self::BottomLeft => Self::Bottom,
+            Self::Bottom => Self::BottomRight,
+            Self::BottomRight => Self::TopLeft,
+        }
+    }
+
+    const fn factors(self) -> (f32, f32) {
+        match self {
+            Self::TopLeft => (0.0, 0.0),
+            Self::Top => (0.5, 0.0),
+            Self::TopRight => (1.0, 0.0),
+            Self::Left => (0.0, 0.5),
+            Self::Center => (0.5, 0.5),
+            Self::Right => (1.0, 0.5),
+            Self::BottomLeft => (0.0, 1.0),
+            Self::Bottom => (0.5, 1.0),
+            Self::BottomRight => (1.0, 1.0),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 struct ImageVertex {
@@ -43,7 +161,7 @@ struct CachedImage {
 
 impl CachedImage {
     fn load(path: &Path) -> Result<Self, String> {
-        let decoded = decode_png(path)?;
+        let decoded = decode_background_image(path)?;
         let texture = upload_rgba_texture(decoded.width, decoded.height, &decoded.rgba);
         Ok(Self { path: path.to_path_buf(), texture, width: decoded.width, height: decoded.height })
     }
@@ -91,13 +209,25 @@ struct DecodedImage {
     rgba: Vec<u8>,
 }
 
-#[cfg(all(feature = "png", not(target_os = "macos")))]
-fn decode_png(path: &Path) -> Result<DecodedImage, String> {
+#[cfg(not(target_os = "macos"))]
+fn decode_background_image(path: &Path) -> Result<DecodedImage, String> {
     use std::fs::File;
     use std::io::BufReader;
 
     let file = File::open(path).map_err(|err| format!("open {path:?}: {err}"))?;
-    decode_png_reader(BufReader::new(file))
+    decode_background_reader(BufReader::new(file))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn decode_background_reader<R: std::io::BufRead + std::io::Seek>(
+    reader: R,
+) -> Result<DecodedImage, String> {
+    let reader = ::image::ImageReader::new(reader)
+        .with_guessed_format()
+        .map_err(|err| format!("detect image format: {err}"))?;
+    let decoded = reader.decode().map_err(|err| format!("decode image: {err}"))?;
+    let rgba = decoded.to_rgba8();
+    Ok(DecodedImage { width: rgba.width(), height: rgba.height(), rgba: rgba.into_raw() })
 }
 
 /// Decode PNG bytes (an OSC 1337 payload) into RGBA8. Public so the event
@@ -159,9 +289,9 @@ fn decode_png_reader<R: std::io::Read>(reader: R) -> Result<DecodedImage, String
     Ok(DecodedImage { width: info.width, height: info.height, rgba })
 }
 
-#[cfg(any(not(feature = "png"), target_os = "macos"))]
-fn decode_png(_path: &Path) -> Result<DecodedImage, String> {
-    Err("PNG background support is not enabled for this build".to_owned())
+#[cfg(target_os = "macos")]
+fn decode_background_image(_path: &Path) -> Result<DecodedImage, String> {
+    Err("Background image support is not enabled for this build".to_owned())
 }
 
 /// A GPU texture for one inline image, keyed by the image's id.
@@ -185,6 +315,8 @@ pub struct ImageRenderer {
     program: ShaderProgram,
     u_texture: GLint,
     u_opacity: GLint,
+    u_clip_rect: GLint,
+    u_clip_radius: GLint,
     image: Option<CachedImage>,
     failed_path: Option<PathBuf>,
     /// Lazily-uploaded textures for OSC 1337 inline images.
@@ -196,6 +328,8 @@ impl ImageRenderer {
         let program = ShaderProgram::new(shader_version, None, IMAGE_SHADER_V, IMAGE_SHADER_F)?;
         let u_texture = program.get_uniform_location(c"uTexture")?;
         let u_opacity = program.get_uniform_location(c"uOpacity")?;
+        let u_clip_rect = program.get_uniform_location(c"uClipRect")?;
+        let u_clip_radius = program.get_uniform_location(c"uClipRadius")?;
 
         let mut vao: GLuint = 0;
         let mut vbo: GLuint = 0;
@@ -225,6 +359,8 @@ impl ImageRenderer {
             program,
             u_texture,
             u_opacity,
+            u_clip_rect,
+            u_clip_radius,
             image: None,
             failed_path: None,
             inline: HashMap::new(),
@@ -250,9 +386,7 @@ impl ImageRenderer {
         let texture = self
             .inline
             .entry(id)
-            .or_insert_with(|| InlineTexture {
-                texture: upload_rgba_texture(px.0, px.1, rgba),
-            })
+            .or_insert_with(|| InlineTexture { texture: upload_rgba_texture(px.0, px.1, rgba) })
             .texture;
 
         let (x, y, w, h) = rect;
@@ -267,6 +401,9 @@ impl ImageRenderer {
             gl::BindTexture(gl::TEXTURE_2D, texture);
             gl::Uniform1i(self.u_texture, 0);
             gl::Uniform1f(self.u_opacity, 1.0);
+            // Inline images are plain rects; stale wallpaper clip state must
+            // not eat their corners.
+            gl::Uniform1f(self.u_clip_radius, 0.0);
 
             gl::BufferData(
                 gl::ARRAY_BUFFER,
@@ -288,7 +425,18 @@ impl ImageRenderer {
         self.inline.retain(|id, _| alive(*id));
     }
 
-    pub fn draw(&mut self, size_info: &SizeInfo, path: &Path, opacity: f32) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
+        &mut self,
+        size_info: &SizeInfo,
+        path: &Path,
+        opacity: f32,
+        fit: BackgroundImageFit,
+        alignment: BackgroundImageAlignment,
+        target: (f32, f32, f32, f32),
+        clip: (f32, f32, f32, f32),
+        clip_radius: f32,
+    ) {
         if opacity <= 0.0 || !self.ensure_image(path) {
             return;
         }
@@ -298,11 +446,14 @@ impl ImageRenderer {
             None => return,
         };
 
-        let vertices = cover_vertices(
+        let vertices = wallpaper_vertices(
             size_info.width(),
             size_info.height(),
+            target,
             image.width as f32,
             image.height as f32,
+            fit,
+            alignment,
         );
 
         unsafe {
@@ -314,6 +465,15 @@ impl ImageRenderer {
             gl::BindTexture(gl::TEXTURE_2D, image.texture);
             gl::Uniform1i(self.u_texture, 0);
             gl::Uniform1f(self.u_opacity, opacity.clamp(0.0, 1.0));
+            // The card is rounded; clip the wallpaper to a rounded rect
+            // (shader SDF) or its square corners paint over the card radius.
+            // `clip` usually equals `target`, but scrolled previews pass a
+            // sub-band so the image cannot bleed over the settings header.
+            // Rects are top-left-origin window px — gl_FragCoord is
+            // bottom-left, so flip Y here.
+            let (cx, cy, cw, ch) = clip;
+            gl::Uniform4f(self.u_clip_rect, cx, size_info.height() - cy - ch, cw, ch);
+            gl::Uniform1f(self.u_clip_radius, clip_radius.max(0.0));
 
             gl::BufferData(
                 gl::ARRAY_BUFFER,
@@ -375,21 +535,54 @@ impl Drop for ImageRenderer {
     }
 }
 
-fn cover_vertices(window_w: f32, window_h: f32, image_w: f32, image_h: f32) -> [ImageVertex; 6] {
+fn wallpaper_vertices(
+    window_w: f32,
+    window_h: f32,
+    target: (f32, f32, f32, f32),
+    image_w: f32,
+    image_h: f32,
+    fit: BackgroundImageFit,
+    alignment: BackgroundImageAlignment,
+) -> [ImageVertex; 6] {
+    let (target_x, target_y, target_w, target_h) = target;
+    let (x, y, width, height) =
+        wallpaper_rect(target_w, target_h, image_w, image_h, fit, alignment);
+    quad_vertices(window_w.max(1.0), window_h.max(1.0), x, y, width, height).map(|mut vertex| {
+        vertex.x += target_x / (window_w.max(1.0) * 0.5);
+        vertex.y -= target_y / (window_h.max(1.0) * 0.5);
+        vertex
+    })
+}
+
+fn wallpaper_rect(
+    window_w: f32,
+    window_h: f32,
+    image_w: f32,
+    image_h: f32,
+    fit: BackgroundImageFit,
+    alignment: BackgroundImageAlignment,
+) -> (f32, f32, f32, f32) {
     let window_w = window_w.max(1.0);
     let window_h = window_h.max(1.0);
     let image_w = image_w.max(1.0);
     let image_h = image_h.max(1.0);
 
-    // CSS `background-size: cover`: preserve aspect ratio, crop only at the
-    // edges. This avoids the "stretched wallpaper" feel that makes terminals
-    // look cheap.
-    let scale = (window_w / image_w).max(window_h / image_h);
-    let draw_w = image_w * scale;
-    let draw_h = image_h * scale;
-    let x0 = (window_w - draw_w) * 0.5;
-    let y0 = (window_h - draw_h) * 0.5;
-    quad_vertices(window_w, window_h, x0, y0, draw_w, draw_h)
+    let (draw_w, draw_h) = match fit {
+        BackgroundImageFit::Fill => (window_w, window_h),
+        BackgroundImageFit::Uniform => {
+            let scale = (window_w / image_w).min(window_h / image_h);
+            (image_w * scale, image_h * scale)
+        },
+        BackgroundImageFit::UniformToFill => {
+            let scale = (window_w / image_w).max(window_h / image_h);
+            (image_w * scale, image_h * scale)
+        },
+        BackgroundImageFit::None => (image_w, image_h),
+    };
+    let (align_x, align_y) = alignment.factors();
+    let x0 = (window_w - draw_w) * align_x;
+    let y0 = (window_h - draw_h) * align_y;
+    (x0, y0, draw_w, draw_h)
 }
 
 /// Vertices for an image drawn 1:1 at an explicit pixel rect.
@@ -429,4 +622,59 @@ fn quad_vertices(
     br.v = 1.0;
 
     [tl, bl, tr, tr, br, bl]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BackgroundImageAlignment as Align, BackgroundImageFit as Fit, wallpaper_rect};
+
+    #[test]
+    fn uniform_to_fill_crops_and_honors_alignment() {
+        let centered =
+            wallpaper_rect(1000.0, 500.0, 400.0, 400.0, Fit::UniformToFill, Align::Center);
+        let right = wallpaper_rect(1000.0, 500.0, 400.0, 400.0, Fit::UniformToFill, Align::Right);
+
+        assert_eq!(centered, (0.0, -250.0, 1000.0, 1000.0));
+        assert_eq!(right, (0.0, -250.0, 1000.0, 1000.0));
+    }
+
+    #[test]
+    fn uniform_contains_and_bottom_right_anchors_the_spare_space() {
+        let rect = wallpaper_rect(1000.0, 500.0, 400.0, 400.0, Fit::Uniform, Align::BottomRight);
+        assert_eq!(rect, (500.0, 0.0, 500.0, 500.0));
+    }
+
+    #[test]
+    fn native_size_uses_all_nine_alignment_anchors() {
+        let top_left = wallpaper_rect(1000.0, 500.0, 200.0, 100.0, Fit::None, Align::TopLeft);
+        let center = wallpaper_rect(1000.0, 500.0, 200.0, 100.0, Fit::None, Align::Center);
+        let bottom_right =
+            wallpaper_rect(1000.0, 500.0, 200.0, 100.0, Fit::None, Align::BottomRight);
+
+        assert_eq!(top_left, (0.0, 0.0, 200.0, 100.0));
+        assert_eq!(center, (400.0, 200.0, 200.0, 100.0));
+        assert_eq!(bottom_right, (800.0, 400.0, 200.0, 100.0));
+    }
+
+    #[test]
+    fn persisted_aliases_parse_without_case_sensitivity() {
+        assert_eq!(Fit::parse("UniformToFill"), Some(Fit::UniformToFill));
+        assert_eq!(Fit::parse("contain"), Some(Fit::Uniform));
+        assert_eq!(Align::parse("BOTTOM_RIGHT"), Some(Align::BottomRight));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn jpeg_selected_by_the_file_picker_decodes_to_rgba() {
+        let pixels = [255, 0, 0, 0, 255, 0];
+        let mut encoded = Vec::new();
+        ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 90)
+            .encode(&pixels, 2, 1, ::image::ExtendedColorType::Rgb8)
+            .expect("encode fixture");
+
+        let decoded = super::decode_background_reader(std::io::Cursor::new(encoded))
+            .expect("decode JPEG background");
+        assert_eq!((decoded.width, decoded.height), (2, 1));
+        assert_eq!(decoded.rgba.len(), 2 * 4);
+    }
 }

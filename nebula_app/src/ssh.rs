@@ -594,6 +594,17 @@ pub fn run(args: Vec<String>) -> i32 {
         SshPlan::Inject => {
             let b64 = base64::engine::general_purpose::STANDARD;
             let bootstrap = build_bootstrap(&b64.encode(REMOTE_BASH), &b64.encode(REMOTE_ZSH));
+            // Keepalive: long-idle managed sessions (claude/codex runs) were
+            // dropped by NAT/firewall idle timeouts. Application-level pings
+            // every 30s survive those; 6 missed replies ≈ 3 min before the
+            // link is declared dead. Skipped when the user passes their own
+            // ServerAliveInterval on the command line; a value from
+            // ssh_config IS overridden (command line wins in OpenSSH) — the
+            // trade accepted here, since a dead-by-default link is the bug
+            // being fixed.
+            if !args.iter().any(|arg| arg.contains("ServerAliveInterval")) {
+                cmd.args(["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=6"]);
+            }
             // The bootstrap contains quotes and `$` — passing it straight
             // through Windows `Command` arg-escaping → ssh.exe → the remote
             // login shell is a three-layer quoting minefield. Sidestep it:

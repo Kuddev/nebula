@@ -31,7 +31,9 @@ impl Default for Cursor {
             thickness: Percentage::new(0.15),
             unfocused_hollow: true,
             blink_interval: 750,
-            blink_timeout: 5,
+            // 0 = never stop blinking. The old 5s pause read as "闪烁失效" —
+            // the cursor silently froze mid-session (user report 2026-07-23).
+            blink_timeout: 0,
             style: Default::default(),
             vi_mode_style: Default::default(),
         }

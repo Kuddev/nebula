@@ -250,6 +250,44 @@ impl UiQuad {
         }
     }
 
+    /// Shell filler for one corner of a rounded card: an `r × r` block that
+    /// paints only the area OUTSIDE the card's quarter-circle corner. Placed
+    /// over the card's corner, it lets a square shell frame wrap a rounded
+    /// card with complementary antialiasing — same circle center and radius
+    /// as the card's convex corner, so coverage sums to exactly one across
+    /// the arc (no seam, no double cover). `corner` follows the
+    /// `corner_radii` order on the CARD: 0 top-left, 1 top-right,
+    /// 2 bottom-right, 3 bottom-left. Callers pass pre-rounded pixel
+    /// coordinates; `pixel_snapped` skips feathered quads.
+    #[inline]
+    pub fn concave_corner(x: f32, y: f32, r: f32, corner: usize, color: Rgba) -> Self {
+        // Circle center in quad-local px: the block corner pointing INTO the
+        // card (e.g. wrapping the card's top-left arc, the center sits at the
+        // block's bottom-right).
+        let center = match corner {
+            0 => [r, r],
+            1 => [0.0, r],
+            2 => [0.0, 0.0],
+            _ => [r, 0.0],
+        };
+        Self {
+            x,
+            y,
+            width: r,
+            height: r,
+            radius: 0.0,
+            // Repurposed as `[center_x, center_y, radius, 0]` by the concave
+            // fragment branch (`feather == 2.0`).
+            corner_radii: [center[0], center[1], r, 0.0],
+            feather: 2.0,
+            corners: None,
+            v_range: [0.0, 1.0],
+            color0: color,
+            color1: color,
+            gradient: Gradient::None,
+        }
+    }
+
     /// Rounded rectangle with independent per-corner radii, ordered
     /// `[top-left, top-right, bottom-right, bottom-left]`. Used for the
     /// connected top-bar / sidebar L-frame, where the two join corners stay

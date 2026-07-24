@@ -489,9 +489,14 @@ impl CommandPalette {
     }
 
     /// Update hover based on mouse position. `row` is the index within the
-    /// visible window (`0..max_rows`), or `None` when the mouse left.
-    pub fn set_hover(&mut self, row: Option<usize>) {
+    /// visible window (`0..max_rows`), or `None` when the mouse left. Returns
+    /// whether the hover changed, so the caller only redraws on transitions.
+    pub fn set_hover(&mut self, row: Option<usize>) -> bool {
+        if self.hover == row {
+            return false;
+        }
         self.hover = row;
+        true
     }
 
     /// The number of filtered results currently shown.

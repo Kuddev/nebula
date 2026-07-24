@@ -215,9 +215,9 @@ fn window_control_hit_rect(
     (center_x - s(23.0), 0.0, s(46.0), center_y + s(20.0))
 }
 
-/// Visible caption-button band. It shares the hit rect's horizontal geometry
-/// (46px, no gaps, close edge at `width`) while staying vertically centred in
-/// the painted title bar; the invisible hit extension alone reaches `y = 0`.
+/// Visible caption-button band. It reaches the physical top edge while the
+/// glyph remains centred on the inset title bar. This removes the detached
+/// strip visible above Chrome-style caption buttons in a borderless window.
 #[inline]
 fn window_control_visual_rect(
     center_x: f32,
@@ -226,7 +226,7 @@ fn window_control_visual_rect(
     scale_factor: f32,
 ) -> (f32, f32, f32, f32) {
     let width = 46.0 * scale_factor;
-    (center_x - width * 0.5, top, width, bar_h)
+    (center_x - width * 0.5, 0.0, width, top + bar_h)
 }
 
 /// Top-left settings trigger. It occupies the old product-mark slot beside the
@@ -343,11 +343,8 @@ pub(super) fn chrome_tab_layout(
     // The empty SSH section still draws a two-line onboarding hint below its
     // header. Reserve that real content height so it cannot paint through the
     // bottom-docked message queue when many tabs consume the elastic budget.
-    let empty_hosts_hint_h = if queue_reserved > 0.0 && host_count == 0 && model.hosts_open {
-        s(38.0)
-    } else {
-        0.0
-    };
+    let empty_hosts_hint_h =
+        if queue_reserved > 0.0 && host_count == 0 && model.hosts_open { s(38.0) } else { 0.0 };
 
     // "+" square plus its dropdown chevron, vertically centred in the header
     // band, pinned to the right. The chevron is the rightmost element; the
@@ -366,16 +363,11 @@ pub(super) fn chrome_tab_layout(
     // starve the other below half of the budget, and every overflowing
     // section scrolls behind its own scrollbar.
     let avail_rows =
-        (((panel_h
-            - queue_reserved
-            - header
-            - hosts_header_h
-            - empty_hosts_hint_h
-            - bottom_pad
+        (((panel_h - queue_reserved - header - hosts_header_h - empty_hosts_hint_h - bottom_pad
             + gap)
             / pitch)
-        .floor()
-        .max(0.0)) as usize;
+            .floor()
+            .max(0.0)) as usize;
     let tabs_want = if model.tabs_open { count } else { 0 };
     let hosts_want = if model.hosts_open { host_count } else { 0 };
     let (tabs_show, hosts_show) = if tabs_want + hosts_want <= avail_rows {
@@ -473,177 +465,9 @@ pub(super) fn chrome_tab_layout(
     }
 }
 
-/// Draw the new-tab mark from the same physical rectangle used for its hit and
-/// hover area. Maple's Codicon `add` glyph has asymmetric outline bounds, so
-/// centering it by terminal-cell metrics makes the ink look offset even though
-/// Maple itself is a monospaced text font. A two-stroke primitive keeps this
-/// one control optically and geometrically centered at every DPI.
-fn push_centered_add_icon(
-    quads: &mut Vec<UiQuad>,
-    rect: (f32, f32, f32, f32),
-    scale: f32,
-    color: Rgb,
-) {
-    let (x, y, width, height) = rect;
-    if width <= 0.0 || height <= 0.0 {
-        return;
-    }
-
-    let center_x = x + width * 0.5;
-    let center_y = y + height * 0.5;
-    // 图标墨迹不能跟随命中区缩放：侧栏收起时按钮是 28px，展开时是
-    // 20px，若从 rect 推导尺寸，同一个“新建 Tab”图标会在两种状态间
-    // 忽大忽小。固定为 14px 视觉尺寸，同时保留原来的舒适命中区域。
-    let stroke = (1.5 * scale).max(1.0);
-    let arm = 7.0 * scale;
-    let ink = Rgba::new(color.r, color.g, color.b, 235);
-
-    quads.push(UiQuad::solid(
-        center_x - arm,
-        center_y - stroke * 0.5,
-        arm * 2.0,
-        stroke,
-        stroke * 0.5,
-        ink,
-    ));
-    quads.push(UiQuad::solid(
-        center_x - stroke * 0.5,
-        center_y - arm,
-        stroke,
-        arm * 2.0,
-        stroke * 0.5,
-        ink,
-    ));
-}
-
-/// Native three-dot menu mark. Its geometry comes from the same control rect
-/// as hover/hit-testing, so Maple private-use glyph metrics cannot skew it.
-fn push_centered_more_icon(
-    quads: &mut Vec<UiQuad>,
-    rect: (f32, f32, f32, f32),
-    scale: f32,
-    color: Rgb,
-) {
-    let (x, y, width, height) = rect;
-    if width <= 0.0 || height <= 0.0 {
-        return;
-    }
-
-    // 三点与 14px 加号使用同一视觉规格：稍大的圆点负责补足视觉重量，
-    // 4.2px 中心距让整枚图标保持紧凑，但不再像原来的 2.2px 圆点那样发虚。
-    let diameter = (2.8 * scale).max(2.0);
-    let gap = 4.2 * scale;
-    let center_x = x + width * 0.5;
-    let center_y = y + height * 0.5;
-    let ink = Rgba::new(color.r, color.g, color.b, 235);
-    for offset in [-gap, 0.0, gap] {
-        quads.push(UiQuad::solid(
-            center_x - diameter * 0.5,
-            center_y + offset - diameter * 0.5,
-            diameter,
-            diameter,
-            diameter * 0.5,
-            ink,
-        ));
-    }
-}
-
-fn push_icon_segment(
-    quads: &mut Vec<UiQuad>,
-    from: (f32, f32),
-    to: (f32, f32),
-    thickness: f32,
-    color: Rgba,
-) {
-    let dx = to.0 - from.0;
-    let dy = to.1 - from.1;
-    let len = dx.hypot(dy);
-    if len <= f32::EPSILON {
-        return;
-    }
-    let px = -dy / len * thickness * 0.5;
-    let py = dx / len * thickness * 0.5;
-    quads.push(UiQuad::poly(
-        [
-            [from.0 - px, from.1 - py],
-            [from.0 + px, from.1 + py],
-            [to.0 - px, to.1 - py],
-            [to.0 + px, to.1 + py],
-        ],
-        color,
-        color,
-        Gradient::None,
-    ));
-}
-
-/// Draw Windows-style caption marks as native vector strokes. Font glyphs use
-/// different outline boxes for minus / square / close, which made the three
-/// buttons look unrelated and drift at fractional DPI.
-fn push_window_control_icon(
-    quads: &mut Vec<UiQuad>,
-    hit: ChromeHit,
-    center_x: f32,
-    center_y: f32,
-    scale: f32,
-    color: Rgb,
-) {
-    let ink = Rgba::new(color.r, color.g, color.b, 245);
-    let half = 5.0 * scale;
-    let stroke = (1.25 * scale).max(1.0);
-    match hit {
-        ChromeHit::Minimize => {
-            // Windows places the minus slightly below the mathematical centre.
-            let y = center_y + 3.0 * scale;
-            quads.push(UiQuad::solid(
-                center_x - half,
-                y - stroke * 0.5,
-                half * 2.0,
-                stroke,
-                stroke * 0.5,
-                ink,
-            ));
-        },
-        ChromeHit::Maximize => {
-            let left = center_x - half;
-            let top = center_y - half;
-            quads.push(UiQuad::solid(left, top, half * 2.0, stroke, 0.0, ink));
-            quads.push(UiQuad::solid(
-                left,
-                top + half * 2.0 - stroke,
-                half * 2.0,
-                stroke,
-                0.0,
-                ink,
-            ));
-            quads.push(UiQuad::solid(left, top, stroke, half * 2.0, 0.0, ink));
-            quads.push(UiQuad::solid(
-                left + half * 2.0 - stroke,
-                top,
-                stroke,
-                half * 2.0,
-                0.0,
-                ink,
-            ));
-        },
-        ChromeHit::Close => {
-            push_icon_segment(
-                quads,
-                (center_x - half, center_y - half),
-                (center_x + half, center_y + half),
-                stroke,
-                ink,
-            );
-            push_icon_segment(
-                quads,
-                (center_x + half, center_y - half),
-                (center_x - half, center_y + half),
-                stroke,
-                ink,
-            );
-        },
-        _ => {},
-    }
-}
+// Icon geometry (add / more / caption marks / sidebar toggle / chevrons)
+// lives in `display::icons` — a pure rectangle-in, quads-out layer with no
+// Display state, so drawing can never drift from hit-testing.
 
 pub(super) fn chrome_hit_with_tabs(
     size_info: &SizeInfo,
@@ -673,11 +497,8 @@ pub(super) fn chrome_hit_with_tabs(
     if contains_rect(layout.plus, x, y) {
         return ChromeHit::NewTab;
     }
-    if message_queue_entry::contains(
-        message_queue_entry::layout(layout.panel, scale_factor),
-        x,
-        y,
-    ) {
+    if message_queue_entry::contains(message_queue_entry::layout(layout.panel, scale_factor), x, y)
+    {
         return ChromeHit::MessageQueue;
     }
     if contains_rect(layout.hosts_add, x, y) {
@@ -847,6 +668,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // smoke on the light themes); close-hover red stays semantic.
     let palette = d.nebula_theme.palette();
     let sk = d.nebula_theme.skin();
+    let restore_window = d.window.is_maximized() || d.window.is_fullscreen();
     let language = d.ui_language();
     #[allow(non_snake_case)]
     let (HOVER_FILL, HOVER_FILL_STRONG) = (sk.hover, sk.hover_strong);
@@ -854,7 +676,9 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // translucent red reads like a generic pill instead of a window control.
     const CLOSE_HOVER_FILL: Rgba = Rgba::new(232, 17, 35, 242);
 
-    let size = d.size_info;
+    // UI 布局用 ui 版 SizeInfo：cell 尺寸按 UI 锚定比率补偿，与按同一比
+    // 率栅格化的 chrome 文本同源；终端缩放因此不影响侧栏/顶栏/设置布局。
+    let size = d.ui_size_info();
     let scale = d.window.scale_factor as f32;
     let w = size.width();
     let h = size.height();
@@ -872,9 +696,82 @@ pub(super) fn draw_chrome(d: &mut Display) {
 
     let mut quads: Vec<UiQuad> = Vec::new();
 
-    // ---- Background ambient light (very subtle, drawn first) ----
+    // ---- Unified shell frame (一体化外壳，2026-07-23 用户裁定) ----
+    // 顶栏、侧栏与终端卡四周的边框是同一块玻璃：卡以外的整个窗口区域由
+    // 4 条硬边条带 + 4 个凹角块铺出恰好一层壳色，每个像素只涂一次。旧
+    // 分层感的根源（不透明清屏底上又叠半透明面板，叠加区更实、gap 区
+    // 更透）从结构上消除——清屏现在全透明，见 `draw_window_backdrop`。
+    //
+    // 壳色 = panel 在 shell_bg 上的预合成（保住面板 token 的调子），
+    // alpha 直接取用户透明度：滑块驱动整个外壳作为一体变化；cover 壁纸
+    // 时壳浮在壁纸上，半透明壳整体透出壁纸。文字与图标保持不透明。
+    let shell_r = s(UI_SHELL_RADIUS_LOGICAL);
+    let sidebar_expand = d.left_sidebar_progress();
+    let top_y = margin;
+    let shell_alpha = surface_opacity::SurfaceOpacityPolicy::new(d.nebula_window_opacity).chrome;
+    let shell_bg = palette.shell_bg;
+    let pa = palette.panel.a as f32 / 255.0;
+    let comp = |p: u8, b: u8| (p as f32 * pa + b as f32 * (1.0 - pa)).round() as u8;
+    let shell_color = Rgba::new(
+        comp(palette.panel.r, shell_bg.r),
+        comp(palette.panel.g, shell_bg.g),
+        comp(palette.panel.b, shell_bg.b),
+        (shell_alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+    );
+    let (card_x, card_y, card_w, card_h) = d.terminal_card_rect();
+    let card_r = shell_r.round().min(card_w * 0.5).min(card_h * 0.5);
+    // 条带贴卡的直边；凹角块叠在卡矩形四角的 r×r 区域上，只涂圆弧以外
+    // 的部分。凹角的圆与卡片自身圆角同心同径，弧线两侧 coverage 互补相
+    // 加为 1，半透明壳下也不会出现更实或漏底的接缝。
+    quads.push(UiQuad::solid(0.0, 0.0, w, card_y, 0.0, shell_color));
+    quads.push(UiQuad::solid(0.0, card_y, card_x, card_h, 0.0, shell_color));
+    quads.push(UiQuad::solid(
+        card_x + card_w,
+        card_y,
+        (w - card_x - card_w).max(0.0),
+        card_h,
+        0.0,
+        shell_color,
+    ));
+    quads.push(UiQuad::solid(
+        0.0,
+        card_y + card_h,
+        w,
+        (h - card_y - card_h).max(0.0),
+        0.0,
+        shell_color,
+    ));
+    if card_r > 0.0 && card_w > 0.0 && card_h > 0.0 {
+        quads.push(UiQuad::concave_corner(card_x, card_y, card_r, 0, shell_color));
+        quads.push(UiQuad::concave_corner(
+            card_x + card_w - card_r,
+            card_y,
+            card_r,
+            1,
+            shell_color,
+        ));
+        quads.push(UiQuad::concave_corner(
+            card_x + card_w - card_r,
+            card_y + card_h - card_r,
+            card_r,
+            2,
+            shell_color,
+        ));
+        quads.push(UiQuad::concave_corner(
+            card_x,
+            card_y + card_h - card_r,
+            card_r,
+            3,
+            shell_color,
+        ));
+    }
+
+    // ---- Background ambient light ----
     // Purple bloom in the lower-left, cool blue in the upper-right, giving
     // the flat backdrop a sense of depth without competing with content.
+    // Drawn ON TOP of the shell frame: the shell is exactly one layer now,
+    // so ambience is added over it instead of shining through from a layer
+    // below (which would vanish at 100% opacity anyway).
     // Light themes ship zero-alpha glows (8-bit banding on pale ground) —
     // skip the fill-rate cost entirely.
     let glow_r = w * 0.62;
@@ -897,26 +794,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
         ));
     }
 
-    // ---- Top title / tab bar ----
-    // The top bar and the left sidebar form one connected chrome shell (an
-    // L-frame): the top bar's bottom-left corner is squared so the sidebar
-    // abuts it seamlessly, while the three outer corners keep the larger shell
-    // radius. Collapsed (no sidebar) the bar is a standalone card, all four
-    // corners shell-rounded.
-    let shell_r = s(UI_SHELL_RADIUS_LOGICAL);
-    let sidebar_expand = d.left_sidebar_progress();
-    let top_y = margin;
-    // The bottom-left corner closes toward square as the sidebar slides in, so
-    // the join seals smoothly instead of the corner popping from round to square
-    // the instant the panel becomes visible. `expand` is 0 collapsed → 1 open.
-    let join_r = shell_r * (1.0 - sidebar_expand.clamp(0.0, 1.0));
-    // [top-left, top-right, bottom-right, bottom-left]
-    let top_bar_corners = [shell_r, shell_r, shell_r, join_r];
-    quads.push(
-        UiQuad::solid(margin, top_y, w - 2.0 * margin, bar_h, radius, palette.panel)
-            .with_corners(top_bar_corners),
-    );
-
     let tab_layout = chrome_tab_layout(&size, scale, d.sidebar_model(), sidebar_expand);
 
     // Sidebar toggle at the far left of the top bar folds the tab sidebar
@@ -927,30 +804,13 @@ pub(super) fn draw_chrome(d: &mut Display) {
         quads.push(UiQuad::solid(tog_x, tog_y, tog_w, tog_h, pill_r, HOVER_FILL_STRONG));
     }
     let icon_c = if toggle_hovered { sk.icon_hover } else { sk.icon };
-    let line = Rgba::new(icon_c.r, icon_c.g, icon_c.b, 185);
-    let cutout = Rgba::new(palette.panel.r, palette.panel.g, palette.panel.b, 255);
-    let ix = tog_x + (tog_w - s(15.0)) * 0.5;
-    let iy = tog_y + (tog_h - s(15.0)) * 0.5;
-    let iw = s(15.0);
-    let ih = s(15.0);
-    let stroke = s(1.35).max(1.0);
-    quads.push(UiQuad::solid(ix, iy, iw, ih, s(3.2), line));
-    quads.push(UiQuad::solid(
-        ix + stroke,
-        iy + stroke,
-        iw - 2.0 * stroke,
-        ih - 2.0 * stroke,
-        s(2.2),
-        cutout,
-    ));
-    quads.push(UiQuad::solid(
-        ix + s(5.3),
-        iy + stroke,
-        stroke,
-        ih - 2.0 * stroke,
-        stroke * 0.5,
-        line,
-    ));
+    icons::push_sidebar_toggle(
+        &mut quads,
+        tab_layout.toggle,
+        scale,
+        Rgba::new(icon_c.r, icon_c.g, icon_c.b, 185),
+        Rgba::new(palette.panel.r, palette.panel.g, palette.panel.b, 255),
+    );
 
     // Settings moved into the old product-mark slot.
     let (set_x, set_y, set_w, set_h) = chrome_settings_button_rect(&size, scale);
@@ -959,28 +819,10 @@ pub(super) fn draw_chrome(d: &mut Display) {
         quads.push(UiQuad::solid(set_x, set_y, set_w, set_h, pill_r, HOVER_FILL_STRONG));
     }
 
-    // Sidebar panel background — the left leg of the chrome shell. Its top
-    // corners are squared so it abuts the top bar's squared bottom-left into
-    // one continuous L; only the two outer bottom corners keep the shell
-    // radius. Draws through slide-out so folding stays visible.
-    //
-    // Seam seal: the sidebar is painted AFTER the top bar and in the same
-    // panel color, so we extend its top edge UP by a couple of physical pixels
-    // to tuck under the top bar. Without this, the top bar's bottom edge and
-    // the sidebar's top edge each carry a 1px antialiasing falloff; where two
-    // translucent edges merely abut, both are under-covered and the dark
-    // background bleeds through as a hairline "black edge". Overlapping turns
-    // that transition into panel-over-panel (≈1.5% delta, invisible) and the
-    // gap is gone.
-    if d.left_sidebar_visible() {
-        let (pnl_x, pnl_y, pnl_w, pnl_h) = tab_layout.panel;
-        let seam = s(2.0).max(1.0);
-        quads.push(
-            UiQuad::solid(pnl_x, pnl_y - seam, pnl_w, pnl_h + seam, radius, palette.panel)
-                // [top-left, top-right, bottom-right, bottom-left]
-                .with_corners([0.0, 0.0, shell_r, shell_r]),
-        );
-    }
+    // Sidebar/top-bar panel fills are gone: the unified shell frame above
+    // already covers everything outside the terminal card in exactly one
+    // layer. A per-panel fill here would stack a second alpha pass and
+    // re-create the "solid panel on translucent border" split it replaced.
 
     // Dock preview: while a dragged tab hovers the terminal area, glow the
     // half where dropping would split the active tab (VS Code edge dock).
@@ -1222,18 +1064,25 @@ pub(super) fn draw_chrome(d: &mut Display) {
     if tabs_plus_visible {
         let plus_ink =
             if d.nebula_chrome_hover == ChromeHit::NewTab { sk.icon_hover } else { sk.icon };
-        push_centered_add_icon(&mut quads, tab_layout.plus, scale, plus_ink);
+        icons::push_add(
+            &mut quads,
+            tab_layout.plus,
+            scale,
+            Rgba::new(plus_ink.r, plus_ink.g, plus_ink.b, 235),
+        );
     }
     // The dropdown chevron beside "+": same hover-only lift.
     let (menu_x, menu_y, menu_w, menu_h) = tab_layout.menu;
     if d.nebula_chrome_hover == ChromeHit::NewTabMenu {
         quads.push(UiQuad::solid(menu_x, menu_y, menu_w, menu_h, pill_r, HOVER_FILL_STRONG));
     }
-    push_centered_more_icon(
+    let more_ink =
+        if d.nebula_chrome_hover == ChromeHit::NewTabMenu { sk.icon_hover } else { sk.icon };
+    icons::push_more(
         &mut quads,
         tab_layout.menu,
         scale,
-        if d.nebula_chrome_hover == ChromeHit::NewTabMenu { sk.icon_hover } else { sk.icon },
+        Rgba::new(more_ink.r, more_ink.g, more_ink.b, 235),
     );
 
     // SSH HOSTS section (quad layer): hover fill per row + the per-section
@@ -1252,21 +1101,51 @@ pub(super) fn draw_chrome(d: &mut Display) {
             quads.push(UiQuad::solid(ax, ay, aw, ah, s(6.0), HOVER_FILL_STRONG));
         }
         if matches!(d.nebula_chrome_hover, ChromeHit::HostsSection | ChromeHit::AddSshHost) {
-            push_centered_add_icon(
+            let add_ink = if d.nebula_chrome_hover == ChromeHit::AddSshHost {
+                sk.icon_hover
+            } else {
+                sk.icon
+            };
+            icons::push_add(
                 &mut quads,
                 tab_layout.hosts_add,
                 scale,
-                if d.nebula_chrome_hover == ChromeHit::AddSshHost {
-                    sk.icon_hover
-                } else {
-                    sk.icon
-                },
+                Rgba::new(add_ink.r, add_ink.g, add_ink.b, 235),
             );
         }
         let thumb_c = sk.scrollbar_thumb;
         for bar in [tab_layout.tabs_scrollbar, tab_layout.hosts_scrollbar].into_iter().flatten() {
             let (bx, by, bw, bh) = bar;
             quads.push(UiQuad::solid(bx, by, bw, bh, bw * 0.5, thumb_c));
+        }
+    }
+
+    // Directory/Git drawer controls remain compact pills and keep their hover
+    // feedback separate from the contiguous Windows caption-button band.
+    for (hit, cx, cy) in chrome_control_centers(w, top_y, bar_h, scale) {
+        if !matches!(hit, ChromeHit::PanelFiles | ChromeHit::PanelGit) {
+            continue;
+        }
+        let active = match hit {
+            ChromeHit::PanelFiles => {
+                d.nebula_side_panel.open && d.nebula_side_panel.view == side_panel::PanelView::Files
+            },
+            ChromeHit::PanelGit => {
+                d.nebula_side_panel.open && d.nebula_side_panel.view == side_panel::PanelView::Git
+            },
+            _ => false,
+        };
+        if d.nebula_chrome_hover == hit || active {
+            let button_w = s(34.0);
+            let button_h = pill_h;
+            quads.push(UiQuad::solid(
+                cx - button_w / 2.0,
+                cy - button_h / 2.0,
+                button_w,
+                button_h,
+                pill_r,
+                if active { sk.accent_soft } else { HOVER_FILL_STRONG },
+            ));
         }
     }
 
@@ -1277,31 +1156,46 @@ pub(super) fn draw_chrome(d: &mut Display) {
         if !is_window_control(hit) {
             continue;
         }
+        let _ = cy;
         let hovered = d.nebula_chrome_hover == hit;
+        let visual = window_control_visual_rect(cx, top_y, bar_h, scale);
+        let hover_fill =
+            if hit == ChromeHit::Close { CLOSE_HOVER_FILL } else { HOVER_FILL_STRONG };
         if hovered {
-            let (x, y, width, height) = window_control_visual_rect(cx, top_y, bar_h, scale);
-            quads.push(UiQuad::solid(
-                x,
-                y,
-                width,
-                height,
-                0.0,
-                if hit == ChromeHit::Close { CLOSE_HOVER_FILL } else { HOVER_FILL_STRONG },
-            ));
+            quads.push(UiQuad::solid(visual.0, visual.1, visual.2, visual.3, 0.0, hover_fill));
         }
-        push_window_control_icon(
-            &mut quads,
-            hit,
-            cx,
-            cy,
-            scale,
-            if hit == ChromeHit::Close && hovered {
-                Rgb::new(255, 255, 255)
-            } else if hovered {
-                sk.icon_hover
-            } else {
-                sk.icon
+        // The glyph centres on the VISIBLE band (physical top edge → bar
+        // bottom), not on the inset title bar — the old inset centre left the
+        // marks riding ~4px low inside the full-height buttons.
+        let icon_cy = visual.1 + visual.3 * 0.5;
+        let ink_rgb = if hit == ChromeHit::Close && hovered {
+            Rgb::new(255, 255, 255)
+        } else if hovered {
+            sk.icon_hover
+        } else {
+            sk.icon
+        };
+        // The rounded caption squares hollow their interior with the button's
+        // effective surface color. Composited opaquely: on a translucent shell
+        // the tiny interior reads as the shell tint, which is invisible at
+        // everyday opacities and far cheaper than a stroked-quad shader.
+        let base = Rgba::new(palette.panel.r, palette.panel.g, palette.panel.b, 255);
+        let cutout = if hovered { icons::blend_over(base, hover_fill) } else { base };
+        let kind = match hit {
+            ChromeHit::Minimize => icons::WindowControlIcon::Minimize,
+            ChromeHit::Maximize => {
+                icons::WindowControlIcon::Maximize { restore: restore_window }
             },
+            _ => icons::WindowControlIcon::Close,
+        };
+        icons::push_window_control(
+            &mut quads,
+            kind,
+            cx,
+            icon_cy,
+            scale,
+            Rgba::new(ink_rgb.r, ink_rgb.g, ink_rgb.b, 245),
+            cutout,
         );
     }
 
@@ -1369,15 +1263,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
         settings::push_quads(&d.settings_view(), &mut quads, &size, scale);
     }
 
-    // Nebula command palette floats above the chrome; add its quads last.
-    command_palette::push_quads(
-        &d.nebula_palette,
-        &d.nebula_theme,
-        &mut quads,
-        &d.size_info,
-        d.window.scale_factor as f32,
-    );
-
     // Paint the panels and pills first.
     d.renderer.draw_ui(&size, &quads);
 
@@ -1405,6 +1290,22 @@ pub(super) fn draw_chrome(d: &mut Display) {
         fg: Rgb,
         icon: &str,
     ) {
+        let mut chars = icon.chars();
+        let (first, second) = (chars.next(), chars.next());
+        // Single-glyph marks center on the REAL rasterized ink: Nerd icons
+        // ink well outside their 1-column advance, which is why grid-based
+        // centering left the gear/folder/git marks visibly off inside their
+        // hover pills.
+        if let (Some(character), None) = (first, second) {
+            if let Some((left, top, width, height)) =
+                renderer.chrome_glyph_ink(glyph_cache, size, character)
+            {
+                let x = rect.0 + (rect.2 - width) / 2.0 - left;
+                let y = rect.1 + (rect.3 - height) / 2.0 - top;
+                renderer.draw_chrome_text(size, x, y, fg, icon, glyph_cache);
+                return;
+            }
+        }
         let cols = icon.chars().map(|ch| ch.width().unwrap_or(1)).sum::<usize>().max(1);
         let x = rect.0 + (rect.2 - cols as f32 * cell_w) / 2.0;
         let y = rect.1 + (rect.3 - cell_h) / 2.0;
@@ -1839,11 +1740,59 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // Settings tab text labels, above its quads.
     if d.nebula_settings_open {
         let view = d.settings_view();
+        // Appearance 预览卡回显真实壁纸（同一 fit / 对齐 / 不透明度）：预
+        // 览底色 quad 已在主 pass 画过，这里在示例文字之前叠图——文字仍
+        // 浮在壁纸上，所见即所得。
+        if view.section == settings::NebulaSettingsSection::Appearance {
+            if let Some(wallpaper) = d.nebula_background_image.clone() {
+                let trimmed = wallpaper.trim().trim_matches('"');
+                if !trimmed.is_empty() {
+                    if let Some((target, clip)) = settings::appearance_preview_wallpaper_rects(
+                        &size,
+                        scale,
+                        view.area,
+                        view.scroll,
+                        view.hidden_hosts.len(),
+                    ) {
+                        d.renderer.draw_background_image(
+                            &size,
+                            std::path::Path::new(trimmed),
+                            d.nebula_background_image_opacity,
+                            d.nebula_background_image_fit,
+                            d.nebula_background_image_alignment,
+                            target,
+                            clip,
+                            s(10.0),
+                        );
+                    }
+                }
+            }
+        }
         let settings_shell_icons =
             settings::draw_text(&view, &mut d.renderer, &mut d.glyph_cache, &size, scale);
         for (shell_id, rect) in settings_shell_icons {
             if let Some((id, rgba, px)) = d.shell_icon_pixels(&shell_id) {
                 d.nebula_chrome_logo_draws.push((id, rgba, px, rect));
+            }
+        }
+        // The expanded combobox floats ABOVE the page text: popup quads
+        // first, then its option labels — the same base → base-text →
+        // overlay → overlay-text layering the command palette needs.
+        let mut popup_quads = Vec::new();
+        settings::push_popup_quads(&view, &mut popup_quads, &size, scale);
+        if !popup_quads.is_empty() {
+            d.renderer.draw_ui(&size, &popup_quads);
+            let popup_icons = settings::draw_popup_text(
+                &view,
+                &mut d.renderer,
+                &mut d.glyph_cache,
+                &size,
+                scale,
+            );
+            for (shell_id, rect) in popup_icons {
+                if let Some((id, rgba, px)) = d.shell_icon_pixels(&shell_id) {
+                    d.nebula_chrome_logo_draws.push((id, rgba, px, rect));
+                }
             }
         }
     }
@@ -1861,7 +1810,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
         );
     }
 
-    // Palette text (query + result rows) sits on top of every chrome label.
     // Drawer text remains in its own shell region beside the Settings page.
     if d.side_panel_visible() {
         if let Some(panel) = d.nebula_sftp_panel.as_ref() {
@@ -1900,6 +1848,21 @@ pub(super) fn draw_chrome(d: &mut Display) {
             );
         }
     }
+
+    // A modal must be composited as a complete layer after every base label:
+    // base quads → base text → palette quads → palette text. Painting the
+    // palette panel in the first quad batch allowed Settings text to overwrite
+    // it and produced the reported two-layer ghosting.
+    let mut palette_quads = Vec::new();
+    command_palette::push_quads(
+        &d.nebula_palette,
+        &d.nebula_theme,
+        &mut palette_quads,
+        &d.size_info,
+        d.window.scale_factor as f32,
+    );
+    d.renderer.draw_ui(&size, &palette_quads);
+
     let shell_icon_draws = command_palette::draw_text(
         &d.nebula_palette,
         &d.nebula_theme,
@@ -1969,7 +1932,7 @@ mod resize_edge_tests {
         assert_eq!(rects[0].0 + rects[0].2, rects[1].0);
         assert_eq!(rects[1].0 + rects[1].2, rects[2].0);
         assert_eq!(rects[2].0 + rects[2].2, width);
-        assert!(rects.iter().all(|rect| rect.1 == 8.0 && rect.3 == 40.0));
+        assert!(rects.iter().all(|rect| rect.1 == 0.0 && rect.3 == 48.0));
     }
 
     #[test]

@@ -351,6 +351,9 @@ impl RenderableCell {
                     (colors.hints.end.foreground, colors.hints.end.background);
                 Self::compute_cell_rgb(&mut fg, &mut bg, &mut bg_alpha, config_fg, config_bg);
             } else {
+                // 2026-07-23 用户裁定：hover 反馈统一用单下划线——已带下
+                // 划线的链接 hover 时保持直线，不再升级双下划线。
+                flags.remove(Flags::ALL_UNDERLINES);
                 flags.insert(Flags::UNDERLINE);
             }
 

@@ -4,17 +4,29 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
-## Unreleased / 未发布
+## 0.7.0 - 2026-07-24
 
 ### English
 
 #### Added
 
+- **Windows Terminal-style background image controls** — Appearance settings now provide independent wallpaper path, stretch mode, nine-position alignment, and image-opacity controls. Wallpapers stay inside terminal content by default; extending them beneath the title bar and sidebar is an explicit persisted option guarded by a visibility warning.
 - **Configurable startup directory** — Settings now provides a native directory picker for choosing the working directory used by new terminal tabs. The selection is persisted, can be cleared, and otherwise falls back to inheriting the current directory.
 - **Window-state persistence** — Nebula now restores the last normal window size and maximized state on launch. Logical dimensions are stored so the restored size remains consistent across displays with different DPI scaling.
+- **Live appearance preview** — the Appearance page now leads with a terminal preview card that immediately reflects the current colors, font family and size, cursor shape, and cursor blinking as they are changed.
+- **Inline dropdown option lists** — every multi-choice setting (default shell, terminal font, wallpaper stretch and alignment, interface language, completion accept key, cursor shape) now uses one shared Windows 11-style combobox whose floating list shows all options, replacing click-to-cycle rows.
+- **Font size controls** — a numeric spinner in Profiles and Ctrl+mouse-wheel zoom adjust the terminal font size, and the value persists across restarts. Zooming affects only the terminal grid (and document viewers that follow it): chrome, sidebar, and Settings text stay anchored to the configured font size.
+- **Background color palette with hex input** — the background-color row opens a floating picker (same combobox pattern as other multi-choice settings) with a 12-swatch palette and a `#RRGGBB` hex field (Enter applies, Esc closes) instead of cycling colors on click.
+- **Cursor shape and blinking** — the default cursor shape (bar │, underscore _, filled box █, empty box □) is selectable and cursor blinking is on by default; DECSCUSR escapes from programs such as vim still override the shape.
+- **Interaction settings with copy-on-select** — a new Interaction section adds Windows Terminal-style copy-on-select, on by default. With it off, right-click still copies the selection, or pastes when there is none.
+- **SSH keepalive** — managed SSH sessions send application-level keepalives (30s interval, 6 retries) so long-idle remote sessions (claude/codex runs) no longer drop behind NAT/firewall idle timeouts.
 
 #### Fixed
 
+- **Wallpaper formats and opacity controls** — background files accepted by the picker now render consistently for PNG, JPG/JPEG, WebP, and BMP. Terminal-content and wallpaper opacity controls are continuous draggable sliders without plus/minus steppers; values update live and persist once on release.
+- **CLI math input isolation** — native math overlays now ignore the complete wrapped logical line owned by the active terminal cursor. Manually typing TeX in Codex, Claude Code, or another supported AI CLI remains editable source; only committed terminal content is eligible for rendering, without tool-specific exceptions.
+- **Unified window-surface opacity and one-layer shell** — the window now clears fully transparent and every region is painted exactly once: the shell (title bar, sidebar, and the frame around the terminal card) is one continuous layer built from edge strips plus concave corner blocks that wrap the card's rounded corners, so no part of the frame can ever render more solid than another. Without a wallpaper the opacity slider drives the whole window including the terminal area; with a wallpaper the terminal area's translucency comes from the wallpaper's own opacity slider and the main slider shapes only the shell around it.
+- **Caption restore state and modal layering** — caption-button hover fills now reach the physical top edge; maximized/fullscreen windows show the overlapping restore icon and return to a normal window when clicked. Command-palette panels are composited after Settings text, eliminating text ghosting through the overlay.
 - **Persistent terminal math rendering** — terminal formulas remain rendered while scrolling instead of exposing their original TeX source. Display formulas are also recovered when the opening `$$` has already moved into scrollback before the closing delimiter arrives, and partially visible formulas keep the geometry of the same complete layout.
 - **Unified Markdown and CLI math compilation** — Markdown documents and terminal overlays now use one shared source-normalization, TeX parsing, and layout entry point. Named and numeric HTML entities are decoded generically before parsing, so standard matrices, `cases`, and aligned formulas no longer expose transport text such as `&nbsp;`; missing TeX row separators are never guessed.
 - **Theme-switch surface colors** — terminal and text-input backgrounds now update with the selected light or dark theme instead of retaining colors from the previous theme. Stale application-provided dynamic palette values are cleared when the host theme changes.
@@ -24,6 +36,17 @@ Every release entry is provided in English and Simplified Chinese.
 - **Top-bar control alignment** — Files and Git remain on the shared title-bar centerline, while minimize, maximize, and close now form a contiguous 46px Windows-style caption band aligned flush with the right edge. Fixed vector strokes replace font-dependent glyphs, the close hover uses a solid red block, and its hit target still reaches the physical top-right corner in maximized windows.
 - **New-tab affordance sizing** — The sidebar `+` now keeps a fixed 14px visual size instead of growing and shrinking with its 20px/28px hit areas. The adjacent three-dot menu uses larger dots and balanced spacing so both controls retain consistent visual weight across sidebar states and DPI scales.
 - **Continuous working indicator** — the running-state spinner now uses a monotonic normalized phase and refreshes continuously while active, eliminating visible pauses and jumps between rotations.
+- **Wallpaper corner rounding** — a background image no longer paints square corners over the terminal card: the image pass clips to the same rounded rectangle as the card (no rounding in full-window mode), so the shell radius survives setting a wallpaper.
+- **Slider gesture and visuals** — opacity sliders drop the gray hover plate, use a Windows Terminal-style ringed thumb whose inner dot grows on hover/drag, and show a normal pointer instead of the resize cursor that made dragging read like a window resize.
+- **Optical icon centering** — the gear, Files, and Git glyph icons now center on their real rasterized ink inside hover pills (measured from the glyph cache) instead of grid metrics; Nerd Font marks ink outside their nominal column and sat visibly off-center. Maximize/restore caption marks use rounded squares and all caption glyphs center on the visible button band.
+- **Settings value alignment** — the startup-directory value is right-aligned like every other row value.
+- **Command-palette row hover** — palette rows light up under the pointer again: hover updates were silently starved by earlier settings/chrome hover branches, so the palette is now handled first as a pointer-modal overlay.
+- **Hint hover feedback** — hover feedback on links and file paths is a consistent single underline (already-underlined text keeps a straight line instead of upgrading to a double underline), and the "Ctrl+click" tooltip is now a compact small-type bubble anchored to the link's first cell — it no longer wanders with the pointer (read as flicker), and long paths are capped at 48 columns keeping the tail.
+- **Cursor settings apply immediately** — choosing a cursor shape or toggling blinking now clears any style a shell pinned at startup via DECSCUSR (PSReadLine, starship), so the change is visible at once; programs like vim can still override afterwards.
+- **Preview card wallpaper** — the Appearance live-preview card now renders the configured background image with the real fit, alignment, and opacity, clipped to the card and the settings viewport.
+- **Confirm dialogs** — capped at 520 logical px with the body wrapping over multiple lines instead of stretching the card into a banner; buttons are a plain "Yes / No" pair with a minimum width, and Enter/Esc still work.
+- **Caption minimize alignment** — the minimize dash sits on the same horizontal centerline as the maximize and close marks instead of Windows' slightly lowered dash.
+- **Clipboard write resilience** — Windows clipboard writes retry with short backoff while another process briefly holds the clipboard (OSError 5 拒绝访问) and only log after persistent failure, instead of warning on the first transient race.
 
 #### Improved
 
@@ -31,17 +54,29 @@ Every release entry is provided in English and Simplified Chinese.
 - **Low-overhead font fallback** — missing-glyph decisions are cached with the glyph rasterization result, so the Maple fallback is consulted only after the primary face rejects a character rather than on every frame. This preserves font customization and native glyph quality without maintaining a separate SVG icon pipeline.
 - **Animation scheduling efficiency** — smooth running indicators redraw at approximately 60 FPS only while work is active; finite interface animations use a lower cadence and idle windows fall back to a one-second cadence, without adding a worker thread or per-frame allocations.
 - **Internal module boundaries** — display state, size calculations, terminal color and math handling, file-dialog logic, event actions, window models, and terminal damage/renderable content now live in focused modules to reduce coupling while preserving existing behavior.
-- **Regression coverage** — the no-default-features test suite now contains 384 passing tests, including streamed multiline formulas, window-state compatibility, theme palette reset, custom-font fallback, warning bounds, and chrome alignment. The default-feature check and release build also pass.
+- **Reusable UI widget layer** — vector icons (`display/icons.rs`) and interactive controls — slider, toggle, combobox, spinner (`display/widgets.rs`) — are now shared components with one geometry source for layout, drawing, and hit-testing, replacing per-page hand-rolled quads so controls can no longer drift from their hit areas.
 
 ### 简体中文
 
 #### 新增
 
+- **Windows Terminal 风格背景图设置** — 外观设置现已提供独立的背景图路径、拉伸模式、九宫格对齐和图片不透明度控制。背景图默认只覆盖终端正文；扩展到标题栏和侧边栏属于显式持久化选项，并会先显示操作可见度警告。
 - **可配置启动目录** — 设置中新增原生目录选择器，可以指定新建终端标签页使用的工作目录。该配置会持久保存，也可以随时清除；未配置时继续继承当前目录。
 - **窗口状态持久化** — Nebula 启动时会恢复上次关闭前的普通窗口大小和最大化状态。窗口尺寸按逻辑像素保存，在不同 DPI 缩放的显示器之间也能保持一致的视觉大小。
+- **外观实时预览** — 外观页顶部新增终端预览卡片，颜色、字体、字号、光标形状与闪烁的改动立即在预览中可见。
+- **内嵌下拉框选项列表** — 所有多选项设置（默认 Shell、终端字体、背景图拉伸模式与对齐、界面语言、补全接受键、光标形状）统一使用同一个 Windows 11 风格下拉组件，浮层列出全部选项，取代"点击循环切换"。
+- **字号控件** — 配置页新增字号数字步进器，终端区域支持 Ctrl+滚轮缩放字号；数值持久保存，重启后保持。缩放只作用于终端网格（以及跟随它的文档查看器）：侧边栏、顶部栏与设置页文字锚定在配置字号上不受影响。
+- **背景色色盘与 16 进制输入** — 背景色行改为打开浮层选择器（与其他多选项设置同一 combobox 范式）：12 格预设色板 + `#RRGGBB` 手动输入框（回车应用、Esc 关闭），不再点击循环切换。
+- **光标形状与闪烁** — 默认光标形状可选（条形 │、下划线 _、实心框 █、空心框 □），光标闪烁默认开启；vim 等程序通过 DECSCUSR 设置的形状仍然优先。
+- **交互设置与选中即复制** — 新增"交互"设置节，提供 Windows Terminal 风格的"自动将所选内容复制到剪贴板"，默认开启；关闭后右键仍可复制选区、无选区时粘贴。
+- **SSH 保活** — 托管 SSH 会话发送应用层保活（30 秒间隔、6 次重试），长时间空闲的远程会话（claude/codex 运行中）不再被 NAT/防火墙空闲超时掐断。
 
 #### 修复
 
+- **背景图格式与透明度控件修复** — 文件选择器允许的 PNG、JPG/JPEG、WebP 和 BMP 现在均可实际渲染。终端正文与背景图不透明度改为连续可拖拽滑块，移除加减按钮；拖动时实时预览，松手时集中持久化一次。
+- **CLI 公式输入隔离** — 原生公式覆盖层现在会忽略活动终端光标所属的整条换行逻辑行。在 Codex、Claude Code 或其他受支持 AI CLI 中手动输入 TeX 时始终保留可编辑源码；只有已经提交的终端内容才可能渲染，不再按具体工具特调。
+- **窗口表面透明度统一与外壳单层化** — 窗口清屏改为完全透明，每个区域只被绘制一次：外壳（标题栏、侧边栏与终端卡四周的边框）由边缘条带加环抱卡片圆角的凹角块拼成连续的一层，任何透明度下都不会再出现某块比邻块更实的"相框"分裂。无背景图时透明度滑块驱动整个窗口（包括终端区域）；设置背景图后终端区域的透明感由背景图自身的不透明度决定，主滑块只调节终端以外的外壳。
+- **窗口还原状态与浮层层级修复** — 窗口按钮的悬停背景现在延伸到物理顶边；最大化或全屏时显示重叠方框还原图标，点击后回到普通窗口。命令面板改为在设置文字之后完整合成，避免底层文字透入浮层形成重影。
 - **终端公式持久显示修复** — 滚动终端时，已经渲染的公式会持续覆盖原始 TeX 源码，不再重新露出原型。即使开头的 `$$` 在结尾到达前已经进入回滚历史，也能从历史行恢复完整块级公式；公式只显示一部分时仍沿用同一份完整布局，不会发生几何跳变。
 - **Markdown 与 CLI 公式编译统一** — Markdown 文档和终端公式覆盖层现在统一经过同一个源码规范化、TeX 解析与排版入口；命名和数字 HTML 实体会在解析前按通用规则解码，使标准矩阵、`cases` 和多行对齐公式不再显示 `&nbsp;` 等传输文本，同时不会在缺少 TeX 行分隔符时猜测矩阵结构。
 - **主题切换表面颜色修复** — 终端和文本输入框背景会随浅色、深色主题同步更新，不再残留上一个主题的底色；宿主主题变化时也会清理应用曾写入的动态调色板覆盖值。
@@ -51,6 +86,17 @@ Every release entry is provided in English and Simplified Chinese.
 - **顶部按钮对齐修复** — Files 和 Git 保持标题栏统一中心线，最小化、最大化和关闭按钮改为连续无缝的 46px Windows 风格按钮带，并完整贴齐右边缘。三个按钮使用固定矢量线条替代受字体影响的字形，关闭悬停显示完整红色矩形；窗口最大化时，其点击热区仍延伸到屏幕物理右上角。
 - **新建标签控件尺寸修复** — 侧栏 `+` 固定为 14px 视觉尺寸，不再随 20px/28px 命中区域和侧栏状态忽大忽小；相邻三点菜单增大圆点并重新平衡间距，使两个控件在不同 DPI 下保持一致的视觉重量。
 - **工作状态转圈修复** — 运行状态指示器改用单调时钟生成连续且归一化的旋转相位，消除每轮之间的停顿、回跳和不连贯。
+- **背景图圆角修复** — 设置背景图后终端卡片的圆角不再被矩形图片盖掉：图片绘制按卡片同一圆角矩形裁剪（全窗口模式不裁剪）。
+- **滑块手势与外观修复** — 不透明度滑块去掉灰色悬停底块，改为 Windows Terminal 风格圆环把手（悬停/拖动时内圆放大），指针改为普通箭头，不再显示会被误读成调整窗口大小的双向箭头。
+- **图标光学居中修复** — 齿轮、Files、Git 字形图标改按真实栅格墨迹在悬停背景内居中（从字形缓存量取），修复 Nerd 字形墨迹超出名义列宽导致的可见偏移；最大化/还原按钮改为圆角方框，三大键图标在完整按钮带内垂直居中。
+- **设置值对齐修复** — "启动目录"的值与其他行一致右对齐。
+- **命令面板行悬停修复** — 面板候选行重新跟随指针高亮：此前悬停更新被设置/Chrome 的悬停分支提前拦截，现在命令面板作为指针模态浮层最先处理。
+- **链接悬停反馈修复** — 链接与文件路径的 hover 反馈统一为单下划线（已带下划线的文本保持直线，不再升级双下划线）；"Ctrl+点击"提示改为锚定在链接起始格的小字号圆角气泡——不再跟随指针逐格跳动（此前被感知为闪烁），路径最长 48 列并保留尾部文件名。
+- **光标设置即时生效修复** — 在设置里选择光标形状或切换闪烁时，会先清除 shell 启动时通过 DECSCUSR 钉住的样式（PSReadLine、starship 常见），修改立即可见；vim 等程序之后仍可正常覆盖。
+- **预览卡背景图修复** — 外观页实时预览卡现在会按真实的拉伸模式、对齐与不透明度渲染已配置的背景图，并裁剪在预览卡与设置视口内。
+- **确认对话框修复** — 卡片宽度上限 520 逻辑像素，超长正文自动换行而不再把对话框拉成横幅；按钮统一为"是 / 否"两个短按钮（保留最小宽度），Enter / Esc 快捷键继续生效。
+- **三大键减号对齐修复** — 最小化"─"与最大化、关闭图标处于同一水平中线，不再沿用 Windows 略微下沉的画法。
+- **剪贴板写入韧性修复** — Windows 剪贴板被其他进程短暂占用（OSError(5) 拒绝访问）时改为短退避重试，只有持续失败才记录日志，不再对瞬时竞争弹警告。
 
 #### 改进
 
@@ -58,7 +104,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **低开销字体回退** — 缺失字形的选择结果会和光栅化结果一起缓存，只有主字体确实缺少字符时才查询 Maple，而不是每帧重复判断。在保留自定义字体和原生字形质量的同时，也不需要维护额外的 SVG 图标管线。
 - **动画调度效率改进** — 只有工作状态活跃时才以约 60 FPS 刷新连续转圈；有限时长的界面动画使用更低频率，空闲窗口降到一秒一次，并且没有增加工作线程或逐帧内存分配。
 - **内部模块边界改进** — 显示状态、尺寸计算、终端颜色与公式、文件选择器、事件动作、窗口模型以及终端损伤与可渲染内容已经拆分到职责集中的模块，在保留现有行为的同时降低后续修改的耦合风险。
-- **回归覆盖改进** — 无默认特性测试套件目前共 384 项通过，覆盖流式多行公式、窗口状态兼容、主题调色板重置、自定义字体回退、警告范围和顶部控件对齐；默认特性检查与 Release 构建也已通过。
+- **通用 UI 组件层** — 矢量图标（`display/icons.rs`）与交互控件（滑块、开关、下拉框、步进器，`display/widgets.rs`）成为共享组件：布局、绘制与命中测试共用同一几何来源，取代各页面手搓 quad，控件与点击区域从此不会漂移。
 
 ## 0.6.0 - 2026-07-19
 

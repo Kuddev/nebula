@@ -1018,7 +1018,9 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             None => return,
         };
 
-        if ty == ClipboardType::Selection && self.config.selection.save_to_clipboard {
+        // 交互设置「选中即复制」：开启时任何选区立即进系统剪贴板；
+        // 关闭时选择只保留在终端内，复制交给右键（复制/粘贴）路径。
+        if ty == ClipboardType::Selection && self.display.nebula_copy_on_select {
             self.clipboard.store(ClipboardType::Clipboard, text.clone());
         }
         self.clipboard.store(ty, text);
@@ -1301,6 +1303,14 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         self.display.font_size = self.config.font.size().scale(scale_factor);
         let font = self.display.effective_font(&self.config.font).with_size(self.display.font_size);
         self.display.pending_update.set_font(font);
+    }
+
+    fn apply_default_cursor_style(&mut self) {
+        // 用户在设置页显式选了光标样式：先清掉 shell 早前用 DECSCUSR 钉住
+        // 的覆盖（PSReadLine/starship 启动时常发），否则新默认被旧覆盖压
+        // 住、"改了不生效"；之后 vim 等程序再发 DECSCUSR 仍可正常覆盖。
+        self.terminal.reset_cursor_style_override();
+        self.update_cursor_blinking();
     }
 
     #[inline]
@@ -2050,6 +2060,11 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
 
     /// Update the cursor blinking state.
     fn update_cursor_blinking(&mut self) {
+        // Push the settings default (shape + blink) into the terminal first:
+        // `Term::cursor_style()` falls back to it whenever no DECSCUSR escape
+        // has overridden the style, so vim's mode cursor keeps working while
+        // plain shells follow the user's choice immediately.
+        self.terminal.set_default_cursor_style(self.display.nebula_default_cursor_style());
         // Get config cursor style.
         let mut cursor_style = self.config.cursor.style;
         let vi_mode = self.terminal.mode().contains(TermMode::VI);
@@ -2443,6 +2458,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // Rescale font size for the new factor.
                         let font_scale = scale_factor as f32 / old_scale_factor as f32;
                         self.ctx.display.font_size = self.ctx.display.font_size.scale(font_scale);
+                        self.ctx.display.rescale_ui_font(font_scale);
 
                         let font = self.ctx.display.effective_font(&self.ctx.config.font);
                         let font_size = self.ctx.display.font_size;
