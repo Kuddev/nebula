@@ -64,8 +64,7 @@ mod scheduler;
 mod session;
 mod shell_detect;
 #[cfg(windows)]
-mod ssh;
-#[cfg(windows)]
+mod ssh;#[cfg(windows)]
 mod ssh_credentials;
 #[cfg(windows)]
 mod ssh_profiles;
@@ -74,6 +73,7 @@ mod ssh_session;
 #[cfg(windows)]
 mod ssh_sftp;
 mod string;
+mod update_check;
 mod ux;
 mod window_context;
 
@@ -227,6 +227,7 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     // re-installs them whenever another tool (ccswitch…) rewrites the config.
     // The notify proxy powers toast click-to-focus. See ai_hook / notify.
     notify::init_proxy(window_event_loop.create_proxy());
+    update_check::spawn_once(window_event_loop.create_proxy());
     #[cfg(windows)]
     {
         ai_hook::spawn_server(window_event_loop.create_proxy());

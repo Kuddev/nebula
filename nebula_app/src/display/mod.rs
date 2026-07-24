@@ -4482,6 +4482,11 @@ impl Display {
             terminal.is_focused = focused;
         }
 
+        // 把设置页的光标默认值同步进每一个被渲染的终端。事件路径只覆盖
+        // "当前聚焦"的那一个 Term，新建 tab、分屏或后台 pane 都会漏掉；
+        // set_default_cursor_style 内部有相等短路，逐帧调用无重绘代价。
+        terminal.set_default_cursor_style(self.nebula_default_cursor_style());
+
         // Tell the renderer the full window height so pane viewports flip
         // correctly into OpenGL's bottom-left origin — matters for top/bottom
         // splits, where panes occupy different vertical bands of the window.
@@ -4542,12 +4547,13 @@ impl Display {
             Some(Self::nebula_raw_grid_row_preview(&terminal, cursor_point))
         };
 
+        // 打字（含 IME 组词）不影响网格内容，扫描保持开启；一旦这里随
+        // preedit 关断，中文输入的每次拼音组合都会让全部公式闪回原文。
         let terminal_math_overlays = if pane_state.terminal_math.inline_dollar_enabled()
             && !alt_screen
             && !vi_mode
             && search_state.regex().is_none()
             && selection_range.is_none()
-            && self.ime.preedit().is_none()
         {
             let visible_cursor = term::point_to_viewport(display_offset, cursor_point);
             terminal_math::scan_visible(
@@ -4558,11 +4564,21 @@ impl Display {
                 true,
                 visible_cursor,
                 foreground_color,
-                background_color,
             )
         } else {
             Vec::new()
         };
+        let math_pixel_size = self.glyph_cache.font_size.as_px();
+        let math_pixels_per_point = self.window.scale_factor as f32 * 96.0 / 72.27;
+        let prepared_math = terminal_math::prepare_overlays(
+            &mut pane_state.terminal_math,
+            &terminal_math_overlays,
+            &view,
+            math_pixel_size,
+            math_pixels_per_point,
+        );
+        let math_coverage =
+            terminal_math::CoverageMask::build(&terminal_math_overlays, &prepared_math);
 
         // Add damage from the terminal.
         match terminal.damage() {
@@ -4710,7 +4726,12 @@ impl Display {
             let damage_tracker = &mut self.damage_tracker;
             let mut clickable_index = 0usize;
 
-            let cells = grid_cells.into_iter().map(|mut cell| {
+            let cells = grid_cells.into_iter().filter_map(|mut cell| {
+                // 会被公式覆盖的源码字形直接不画：公式落在真实窗口背景上，
+                // 不再需要事后用不透明色块把源文本盖掉。
+                if !math_coverage.is_empty() && math_coverage.covers(cell.point) {
+                    return None;
+                }
                 match cell.character {
                     NEBULA_FOLDER_ICON_MARKER => {
                         powerline_icons.push(NebulaPowerlineIcon {
@@ -4767,7 +4788,7 @@ impl Display {
                 // Update underline/strikeout.
                 lines.update(&cell);
 
-                cell
+                Some(cell)
             });
             self.renderer.draw_cells(&size_info, glyph_cache, cells);
         }
@@ -4919,16 +4940,14 @@ impl Display {
             self.renderer.draw_rects(&size_info, &metrics, rects);
         }
 
-        let math_pixel_size = self.glyph_cache.font_size.as_px();
-        let pixels_per_point = self.window.scale_factor as f32 * 96.0 / 72.27;
         terminal_math::draw_overlays(
             &mut self.renderer,
             &mut self.glyph_cache,
             &mut pane_state.terminal_math,
             &terminal_math_overlays,
+            &prepared_math,
             &size_info,
-            math_pixel_size,
-            pixels_per_point,
+            math_pixels_per_point,
         );
 
         self.draw_powerline_icons(&powerline_icons, size_info);

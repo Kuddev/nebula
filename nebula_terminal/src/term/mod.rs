@@ -181,6 +181,14 @@ pub struct Term<T> {
     /// Current style of the cursor.
     cursor_style: Option<CursorStyle>,
 
+    /// Blinking state requested via DECSET/DECRST 12, tracked separately from
+    /// [`Self::cursor_style`]: folding it into the DECSCUSR override would pin
+    /// the shape that was the default at that moment, and later changes to
+    /// [`Config::default_cursor_style`] (the runtime settings page) would
+    /// silently stop applying. ConPTY shells emit mode 12 on startup, so this
+    /// was the rule rather than the exception on Windows.
+    cursor_blinking_override: Option<bool>,
+
     /// Proxy for sending events to the event loop.
     event_proxy: T,
 
@@ -399,6 +407,7 @@ impl<T> Term<T> {
             active_charset: Default::default(),
             vi_mode_cursor: Default::default(),
             cursor_style: Default::default(),
+            cursor_blinking_override: Default::default(),
             colors: color::Colors::default(),
             title_stack: Default::default(),
             is_focused: Default::default(),
@@ -476,8 +485,9 @@ impl<T> Term<T> {
     /// startup (PSReadLine, starship) would otherwise keep the old look alive
     /// and the new choice would only show up after a terminal reset.
     pub fn reset_cursor_style_override(&mut self) {
-        if self.cursor_style.is_some() {
+        if self.cursor_style.is_some() || self.cursor_blinking_override.is_some() {
             self.cursor_style = None;
+            self.cursor_blinking_override = None;
             self.mark_fully_damaged();
         }
     }
@@ -931,7 +941,10 @@ impl<T> Term<T> {
     /// While vi mode is active, this will automatically return the vi mode cursor style.
     #[inline]
     pub fn cursor_style(&self) -> CursorStyle {
-        let cursor_style = self.cursor_style.unwrap_or(self.config.default_cursor_style);
+        let mut cursor_style = self.cursor_style.unwrap_or(self.config.default_cursor_style);
+        if let Some(blinking) = self.cursor_blinking_override {
+            cursor_style.blinking = blinking;
+        }
 
         if self.mode.contains(TermMode::VI) {
             self.config.vi_mode_cursor_style.unwrap_or(cursor_style)
@@ -1842,6 +1855,7 @@ impl<T: EventListener> Handler for Term<T> {
         }
         self.active_charset = Default::default();
         self.cursor_style = None;
+        self.cursor_blinking_override = None;
         self.grid.reset();
         self.inactive_grid.reset();
         self.nebula_prompt_marks.clear();
@@ -1990,8 +2004,7 @@ impl<T: EventListener> Handler for Term<T> {
             },
             NamedPrivateMode::ColumnMode => self.deccolm(),
             NamedPrivateMode::BlinkingCursor => {
-                let style = self.cursor_style.get_or_insert(self.config.default_cursor_style);
-                style.blinking = true;
+                self.cursor_blinking_override = Some(true);
                 self.event_proxy.send_event(Event::CursorBlinkingChange);
             },
             NamedPrivateMode::SyncUpdate => (),
@@ -2039,8 +2052,7 @@ impl<T: EventListener> Handler for Term<T> {
             NamedPrivateMode::Origin => self.mode.remove(TermMode::ORIGIN),
             NamedPrivateMode::ColumnMode => self.deccolm(),
             NamedPrivateMode::BlinkingCursor => {
-                let style = self.cursor_style.get_or_insert(self.config.default_cursor_style);
-                style.blinking = false;
+                self.cursor_blinking_override = Some(false);
                 self.event_proxy.send_event(Event::CursorBlinkingChange);
             },
             NamedPrivateMode::SyncUpdate => (),
@@ -2056,8 +2068,10 @@ impl<T: EventListener> Handler for Term<T> {
                 NamedPrivateMode::Origin => self.mode.contains(TermMode::ORIGIN).into(),
                 NamedPrivateMode::LineWrap => self.mode.contains(TermMode::LINE_WRAP).into(),
                 NamedPrivateMode::BlinkingCursor => {
-                    let style = self.cursor_style.get_or_insert(self.config.default_cursor_style);
-                    style.blinking.into()
+                    let blinking = self.cursor_blinking_override.unwrap_or_else(|| {
+                        self.cursor_style.unwrap_or(self.config.default_cursor_style).blinking
+                    });
+                    blinking.into()
                 },
                 NamedPrivateMode::ShowCursor => self.mode.contains(TermMode::SHOW_CURSOR).into(),
                 NamedPrivateMode::ReportMouseClicks => {

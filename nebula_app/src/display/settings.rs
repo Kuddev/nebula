@@ -2351,9 +2351,12 @@ pub(super) fn draw_text(
                     &sk,
                     geometry.background,
                     language.pick("背景色", "Background color"),
-                    &background_v,
+                    "",
                     sk.accent,
                 );
+                // 值画进 combobox 控件框内（chevron 井之前），右对齐到行缘
+                // 会压住下拉箭头（浅色模式下重叠尤其明显）。
+                combobox_value(r, gc, geometry.background, &background_v, sk.accent);
             }
             let (img_x, img_y, _, img_h) = geometry.background_image;
             let _ = img_x;
