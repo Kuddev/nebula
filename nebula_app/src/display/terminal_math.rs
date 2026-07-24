@@ -22,7 +22,6 @@ use crate::math::cache::{FormulaCacheKey, MathLayoutCache};
 use crate::math::layout::MathLayout;
 use crate::math::{DEFAULT_LIMITS, compile_formula};
 use crate::renderer::math::MathClip;
-use crate::renderer::ui::{Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
 
 const MAX_VISIBLE_FORMULAS: usize = 64;
@@ -139,25 +138,41 @@ impl TerminalMathState {
         if active_edit_rows.is_some_and(|rows| rows.contains(&position.row)) {
             return None;
         }
-        let current = PendingDisplayFormula {
-            anchor: FormulaAnchor {
-                row: grid.absolute_top.saturating_add(position.row),
-                column: position.column,
-            },
-            kind,
+        let current = FormulaAnchor {
+            row: grid.absolute_top.saturating_add(position.row),
+            column: position.column,
         };
 
         match self.pending_display {
             None => {
-                self.pending_display = Some(current);
+                self.pending_display =
+                    Some(PendingDisplayFormula { anchor: current, kind, attempted_at: None });
                 None
             },
-            Some(pending) if pending == current => None,
-            Some(pending) if pending.kind == current.kind && pending.anchor < current.anchor => {
-                Some(pending.anchor)
+            // 同一位置的孤立定界符稳定存在：它既可能是仍在流式输出的开头，
+            // 也可能是"公式被误删后只剩下的闭合"。对这个位置回看一次历史，
+            // 尝试把完整公式重新组装出来。
+            Some(pending) if pending.anchor == current && pending.kind == kind => {
+                if pending.attempted_at == Some(current) {
+                    None
+                } else {
+                    self.pending_display =
+                        Some(PendingDisplayFormula { attempted_at: Some(current), ..pending });
+                    Some(current)
+                }
+            },
+            Some(pending) if pending.kind == kind && pending.anchor < current => {
+                if pending.attempted_at == Some(current) {
+                    None
+                } else {
+                    self.pending_display =
+                        Some(PendingDisplayFormula { attempted_at: Some(current), ..pending });
+                    Some(pending.anchor)
+                }
             },
             Some(_) => {
-                self.pending_display = Some(current);
+                self.pending_display =
+                    Some(PendingDisplayFormula { anchor: current, kind, attempted_at: None });
                 None
             },
         }
@@ -173,11 +188,31 @@ impl TerminalMathState {
         };
 
         for overlay in scan_grid_result(history, allow_inline_dollar).overlays {
-            if overlay.display && overlay_anchor(history, &overlay) == Some(pending.anchor) {
+            if !overlay.display {
+                continue;
+            }
+            // 原场景：pending 记录的是已滚入历史的开头。孤立闭合场景：
+            // pending 记录的是视口里那个落单的 `$$`，此时要求组装出的公式
+            // 恰好以它收尾，才能证明它确实是被误删公式的闭合定界符。
+            let opens_at_pending = overlay_anchor(history, &overlay) == Some(pending.anchor);
+            let closes_at_pending = overlay.spans.last().is_some_and(|span| {
+                usize::try_from(span.row).ok().and_then(|row| history.absolute_top.checked_add(row))
+                    == Some(pending.anchor.row)
+                    && span.end >= 2
+                    && span.end - 2 == pending.anchor.column
+            });
+            if opens_at_pending || closes_at_pending {
                 self.remember(history, &overlay);
+                // 放回带 attempted 标记的 pending：孤立闭合在网格里仍会被
+                // 扫成 unmatched（persisted 覆盖对扫描不可见），清空会让它
+                // 每两帧重建并再次触发历史回看。
+                self.pending_display = Some(pending);
                 return true;
             }
         }
+        // 失败时放回（保留单次尝试标记），否则同一个孤立定界符每帧都会
+        // 触发一轮历史扫描。
+        self.pending_display = Some(pending);
         false
     }
 
@@ -304,6 +339,11 @@ enum DisplayDelimiterKind {
 struct PendingDisplayFormula {
     anchor: FormulaAnchor,
     kind: DisplayDelimiterKind,
+    /// The unmatched-delimiter position that already triggered one history
+    /// reconstruction. Each position gets a single attempt: without this, a
+    /// delimiter that stays unmatched (e.g. its formula was already persisted)
+    /// would re-scan history every frame.
+    attempted_at: Option<FormulaAnchor>,
 }
 
 fn overlay_anchor(grid: &TextGrid, overlay: &FormulaOverlay) -> Option<FormulaAnchor> {
@@ -389,12 +429,19 @@ impl PersistedFormula {
             if row >= grid.rows.len() {
                 continue;
             }
-            compared = true;
             if grid.span_fingerprint(row, span.start, span.end, span.include_wrap)
-                != Some(span.fingerprint)
+                == Some(span.fingerprint)
             {
-                return false;
+                compared = true;
+                continue;
             }
+            // 整段被清空是 TUI 重绘的中间帧（先清行再重画）：跳过比较，
+            // 让公式在这一两帧里继续渲染，避免输入期间不停闪回原文。
+            // 只要所有可比行都空白（真清屏），compared 保持 false 仍会淘汰。
+            if grid.span_is_blank(row, span.start, span.end) {
+                continue;
+            }
+            return false;
         }
         compared
     }
@@ -415,8 +462,9 @@ impl PersistedFormula {
             formula_id: self.formula_id,
             spans,
             foreground: Rgb::default(),
-            background: Rgb::default(),
             fallback: Vec::new(),
+            expand_top: false,
+            expand_bottom: false,
         }
     }
 }
@@ -474,8 +522,13 @@ pub(super) struct FormulaOverlay {
     formula_id: u64,
     spans: Vec<RowSpan>,
     foreground: Rgb,
-    background: Rgb,
     fallback: Vec<RenderableCell>,
+    /// Half-row breathing room above/below granted when the neighbouring grid
+    /// row is entirely blank. Display sources that fit on one terminal row
+    /// would otherwise squeeze tall layouts (`\sum` limits, fractions) into a
+    /// single cell height, making formula sizes wildly inconsistent.
+    expand_top: bool,
+    expand_bottom: bool,
 }
 
 impl FormulaOverlay {
@@ -500,8 +553,14 @@ impl FormulaOverlay {
         let right_col = self.spans.iter().map(|span| span.end).max()?;
         let left = size.padding_x() + left_col as f32 * size.cell_width();
         let right = size.padding_x() + right_col as f32 * size.cell_width();
-        let top = size.padding_y() + first.row as f32 * size.cell_height();
-        let bottom = size.padding_y() + (last.row + 1) as f32 * size.cell_height();
+        let mut top = size.padding_y() + first.row as f32 * size.cell_height();
+        let mut bottom = size.padding_y() + (last.row + 1) as f32 * size.cell_height();
+        if self.expand_top {
+            top -= size.cell_height() * 0.5;
+        }
+        if self.expand_bottom {
+            bottom += size.cell_height() * 0.5;
+        }
         (right > left && bottom > top).then_some(FormulaBounds { left, top, right, bottom })
     }
 }
@@ -707,6 +766,21 @@ impl TextGrid {
         Some(hasher.finish())
     }
 
+    /// Whether a span currently holds nothing but blanks. TUI redraws clear a
+    /// line before repainting it, so a blank span is treated as a transient
+    /// state rather than proof that a persisted formula is gone.
+    fn span_is_blank(&self, row: usize, start: usize, end: usize) -> bool {
+        self.rows.get(row).and_then(|cells| cells.get(start..end)).is_some_and(|cells| {
+            cells.iter().all(|cell| cell.is_none_or(|character| character == ' '))
+        })
+    }
+
+    fn row_is_blank(&self, row: usize) -> bool {
+        self.rows
+            .get(row)
+            .is_some_and(|cells| cells.iter().all(|cell| cell.is_none_or(|c| c == ' ')))
+    }
+
     fn spans(&self, start: GridPosition, end: GridPosition) -> Vec<RowSpan> {
         if start.row == end.row {
             return vec![RowSpan { row: start.row as i32, start: start.column, end: end.column }];
@@ -744,7 +818,6 @@ pub(super) fn scan_visible<T>(
     allow_inline_dollar: bool,
     cursor: Option<Point<usize>>,
     default_foreground: Rgb,
-    default_background: Rgb,
 ) -> Vec<FormulaOverlay> {
     let grid = TextGrid::from_term(terminal, size);
     let active_edit_rows = cursor.and_then(|cursor| grid.logical_rows_containing(cursor.line));
@@ -752,7 +825,6 @@ pub(super) fn scan_visible<T>(
     if let Some(anchor) =
         state.scan_visible_grid(&grid, allow_inline_dollar, active_edit_rows.as_ref())
     {
-        let lookback = grid.absolute_top.saturating_sub(anchor.row);
         // `extract` counts every terminal cell toward the 16 KiB parser limit.
         // Deriving the row cap from the current width keeps this rare temporary
         // grid near 64 KiB of cell data instead of scanning all scrollback.
@@ -761,6 +833,14 @@ pub(super) fn scan_visible<T>(
             .div_ceil(grid.columns.max(1))
             .saturating_add(4)
             .min(MAX_HISTORY_FORMULA_ROWS);
+        // A viewport anchor means the pending delimiter is an orphan closer
+        // whose opener sits somewhere above; its depth is unknown, so look
+        // back by the full source budget instead of an exact distance.
+        let lookback = if anchor.row >= grid.absolute_top {
+            source_rows
+        } else {
+            grid.absolute_top - anchor.row
+        };
         if lookback <= source_rows {
             let history = TextGrid::from_term_with_lookback(terminal, size, lookback);
             state.complete_pending_from_history(&history, allow_inline_dollar);
@@ -793,11 +873,35 @@ pub(super) fn scan_visible<T>(
                 .iter()
                 .find(|cell| !cell.character.is_whitespace())
                 .map_or(default_foreground, |cell| cell.fg);
-            overlay.background = overlay
-                .fallback
-                .iter()
-                .find(|cell| cell.bg_alpha > 0.0)
-                .map_or(default_background, |cell| cell.bg);
+
+            // Grant tall layouts half a row of blank neighbour space so their
+            // rendered size stays consistent regardless of how many terminal
+            // rows the source happened to occupy. Display formulas may expand
+            // one-sided; inline formulas share a row with prose, so only a
+            // symmetric expansion keeps them optically on the text baseline.
+            if let (Some(first), Some(last)) = (overlay.spans.first(), overlay.spans.last()) {
+                let above_blank = match first.row.checked_sub(1) {
+                    Some(above) if above >= 0 => match usize::try_from(above) {
+                        Ok(row) => grid.row_is_blank(row),
+                        Err(_) => false,
+                    },
+                    // 上一行已滚入历史：clip 会截到视口，扩展无害。
+                    _ => overlay.display,
+                };
+                let below = last.row + 1;
+                let below_blank = match usize::try_from(below) {
+                    Ok(row) if row < grid.rows.len() => grid.row_is_blank(row),
+                    Ok(_) => overlay.display,
+                    Err(_) => false,
+                };
+                if overlay.display {
+                    overlay.expand_top = above_blank;
+                    overlay.expand_bottom = below_blank;
+                } else {
+                    overlay.expand_top = above_blank && below_blank;
+                    overlay.expand_bottom = above_blank && below_blank;
+                }
+            }
             Some(overlay)
         })
         .collect()
@@ -1080,84 +1184,156 @@ fn make_overlay(
         formula_id,
         spans: grid.spans(open, after),
         foreground: Rgb::default(),
-        background: Rgb::default(),
         fallback: Vec::new(),
+        expand_top: false,
+        expand_bottom: false,
     }
 }
 
-/// Draw prepared overlays after terminal rectangles. A layout is fully built
-/// before its source-covering quads are submitted, so parser/layout failures
-/// leave the original grid untouched.
+/// A formula that passed layout pre-flight: the grid pass omits its source
+/// cells and [`draw_overlays`] paints the compiled layout in their place.
+#[derive(Clone, Copy)]
+pub(super) struct PreparedFormula {
+    fitted_pixel_size: f32,
+}
+
+/// Pre-compile every overlay before the cell pass so the renderer knows which
+/// source cells to skip. Returns one entry per overlay; `None` keeps the raw
+/// source visible (layout failure, or the fitted size would be unreadable).
+pub(super) fn prepare_overlays(
+    state: &mut TerminalMathState,
+    overlays: &[FormulaOverlay],
+    size: &SizeInfo,
+    font_pixel_size: f32,
+    pixels_per_point: f32,
+) -> Vec<Option<PreparedFormula>> {
+    overlays
+        .iter()
+        .map(|overlay| {
+            let bounds = overlay.bounds(size)?;
+            let available_width = (bounds.width() - FORMULA_INSET * 2.0).max(1.0);
+            let available_height = (bounds.height() - FORMULA_INSET * 2.0).max(1.0);
+
+            let base_metrics = state
+                .layout(
+                    overlay.formula_id,
+                    &overlay.source,
+                    font_pixel_size,
+                    pixels_per_point,
+                    overlay.display,
+                )
+                .ok()?
+                .metrics;
+            let total_height = (base_metrics.height + base_metrics.depth).max(1.0);
+            let fit = (available_width / base_metrics.width.max(1.0))
+                .min(available_height / total_height)
+                .min(1.0);
+            let fitted_pixel_size = font_pixel_size * fit * 0.96;
+            if !fitted_pixel_size.is_finite() || fitted_pixel_size < MIN_MATH_PIXEL_SIZE {
+                return None;
+            }
+            state
+                .layout(
+                    overlay.formula_id,
+                    &overlay.source,
+                    fitted_pixel_size,
+                    pixels_per_point,
+                    overlay.display,
+                )
+                .ok()?;
+            Some(PreparedFormula { fitted_pixel_size })
+        })
+        .collect()
+}
+
+/// Row→span lookup of cells covered by formulas that WILL render, so the grid
+/// pass can skip those glyphs. Painting them and covering the area with an
+/// opaque patch afterwards is what produced the black/white formula slabs on
+/// transparent and background-image windows.
+pub(super) struct CoverageMask {
+    rows: BTreeMap<usize, Vec<(usize, usize)>>,
+}
+
+impl CoverageMask {
+    pub(super) fn build(
+        overlays: &[FormulaOverlay],
+        prepared: &[Option<PreparedFormula>],
+    ) -> Self {
+        let mut rows: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
+        for (overlay, prepared) in overlays.iter().zip(prepared) {
+            if prepared.is_none() {
+                continue;
+            }
+            for span in &overlay.spans {
+                let Ok(row) = usize::try_from(span.row) else { continue };
+                rows.entry(row).or_default().push((span.start, span.end));
+            }
+        }
+        Self { rows }
+    }
+
+    pub(super) fn covers(&self, point: Point<usize>) -> bool {
+        self.rows.get(&point.line).is_some_and(|spans| {
+            spans.iter().any(|&(start, end)| (start..end).contains(&point.column.0))
+        })
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// Draw prepared overlays after terminal rectangles. The source cells were
+/// already skipped during the grid pass, so the formula renders directly on
+/// the window background — no cover quad, transparency and wallpaper intact.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_overlays(
     renderer: &mut Renderer,
     glyph_cache: &mut GlyphCache,
     state: &mut TerminalMathState,
     overlays: &[FormulaOverlay],
+    prepared: &[Option<PreparedFormula>],
     size: &SizeInfo,
-    font_pixel_size: f32,
     pixels_per_point: f32,
 ) {
-    for overlay in overlays {
+    for (overlay, prepared) in overlays.iter().zip(prepared) {
+        let Some(prepared) = prepared else {
+            continue;
+        };
         let Some(bounds) = overlay.bounds(size) else {
             continue;
         };
-        let available_width = (bounds.width() - FORMULA_INSET * 2.0).max(1.0);
-        let available_height = (bounds.height() - FORMULA_INSET * 2.0).max(1.0);
-
-        let base_metrics = match state.layout(
-            overlay.formula_id,
-            &overlay.source,
-            font_pixel_size,
-            pixels_per_point,
-            overlay.display,
-        ) {
-            Ok(layout) => layout.metrics,
-            Err(_) => continue,
-        };
-        let total_height = (base_metrics.height + base_metrics.depth).max(1.0);
-        let fit = (available_width / base_metrics.width.max(1.0))
-            .min(available_height / total_height)
-            .min(1.0);
-        let fitted_pixel_size = font_pixel_size * fit * 0.96;
-        if !fitted_pixel_size.is_finite() || fitted_pixel_size < MIN_MATH_PIXEL_SIZE {
-            continue;
-        }
 
         let layout = match state.layout(
             overlay.formula_id,
             &overlay.source,
-            fitted_pixel_size,
+            prepared.fitted_pixel_size,
             pixels_per_point,
             overlay.display,
         ) {
             Ok(layout) => layout,
-            Err(_) => continue,
+            Err(_) => {
+                // Pre-flight succeeded, so this is unreachable in practice;
+                // repaint the skipped source cells rather than leave a hole.
+                renderer.draw_cells(size, glyph_cache, overlay.fallback.iter().cloned());
+                continue;
+            },
         };
         let total_height = layout.metrics.height + layout.metrics.depth;
-        let origin_x = bounds.left + (bounds.width() - layout.metrics.width) / 2.0;
+        // Display math centers like block typography. Inline math whose
+        // rendered width is far below its source span (`$\xi$` is five cells
+        // of source, one glyph of output) hugs the preceding prose instead:
+        // centering would strand it in the middle of a large gap, detached
+        // from both sides. Near-full-width results still center so the
+        // leftover cell splits evenly.
+        let centered = overlay.display || layout.metrics.width >= bounds.width() * 0.75;
+        let origin_x = if centered {
+            bounds.left + (bounds.width() - layout.metrics.width) / 2.0
+        } else {
+            bounds.left + FORMULA_INSET
+        };
         let baseline_y =
             bounds.top + (bounds.height() - total_height) / 2.0 + layout.metrics.height;
-
-        let quads: Vec<_> = overlay
-            .spans
-            .iter()
-            .filter(|span| {
-                span.row >= 0
-                    && usize::try_from(span.row).is_ok_and(|row| row < size.screen_lines())
-            })
-            .map(|span| {
-                UiQuad::solid(
-                    size.padding_x() + span.start as f32 * size.cell_width(),
-                    size.padding_y() + span.row as f32 * size.cell_height(),
-                    (span.end - span.start) as f32 * size.cell_width(),
-                    size.cell_height(),
-                    0.0,
-                    Rgba::opaque(overlay.background),
-                )
-            })
-            .collect();
-        renderer.draw_ui(size, &quads);
 
         let viewport_right = size.padding_x() + size.columns() as f32 * size.cell_width();
         let viewport_bottom = size.padding_y() + size.screen_lines() as f32 * size.cell_height();
@@ -1168,6 +1344,7 @@ pub(super) fn draw_overlays(
             bottom: bounds.bottom.min(viewport_bottom),
         };
         if clip.right <= clip.left || clip.bottom <= clip.top {
+            renderer.draw_cells(size, glyph_cache, overlay.fallback.iter().cloned());
             continue;
         }
         if renderer.draw_math(size, layout, origin_x, baseline_y, overlay.foreground, clip).is_err()
@@ -1178,7 +1355,7 @@ pub(super) fn draw_overlays(
 
         let base_ascent = (size.cell_height() + glyph_cache.font_metrics().descent).max(1.0);
         for operation in &layout.text {
-            let scale = operation.pixel_size / fitted_pixel_size;
+            let scale = operation.pixel_size / prepared.fitted_pixel_size;
             let x = origin_x + operation.x;
             let y = baseline_y + operation.baseline_y - base_ascent * scale;
             let width = size.cell_width() * scale;
@@ -1477,6 +1654,54 @@ d & -b \\
         state.synchronize_grid(&changed);
         assert!(state.visible_overlays(&changed).is_empty());
         assert!(state.formulas.is_empty());
+    }
+
+    #[test]
+    fn tui_redraw_blank_interim_frame_keeps_the_persisted_formula() {
+        let mut state = TerminalMathState::default();
+        let initial = grid_at(&["$$   ", "x^2  ", "$$   ", "tail "], 40, 0);
+        remember_visible(&mut state, &initial);
+        assert_eq!(state.formulas.len(), 1);
+
+        // A TUI clears a line before repainting it: a partially blanked frame
+        // must not evict the formula (this was the input-time flicker).
+        let interim = grid_at(&["$$   ", "     ", "$$   ", "tail "], 40, 0);
+        state.synchronize_grid(&interim);
+        assert_eq!(state.visible_overlays(&interim).len(), 1);
+        assert_eq!(state.formulas.len(), 1);
+
+        // Rewritten with different visible content -> genuinely gone.
+        let changed = grid_at(&["other", "words", "here ", "tail "], 40, 0);
+        state.synchronize_grid(&changed);
+        assert!(state.visible_overlays(&changed).is_empty());
+    }
+
+    #[test]
+    fn orphan_closing_delimiter_recovers_the_formula_from_history() {
+        let mut state = TerminalMathState::default();
+        // Viewport starts below the formula opener: only the closing `$$` is
+        // visible (e.g. the persisted copy was evicted by a redraw glitch).
+        let visible = grid_at(&["$$   ", "tail "], 45, 0);
+        state.synchronize_grid(&visible);
+        assert!(state.scan_visible_grid(&visible, false, None).is_none());
+
+        let anchor = state
+            .scan_visible_grid(&visible, false, None)
+            .expect("stable orphan delimiter requests one history pass");
+        assert_eq!(anchor, FormulaAnchor { row: 45, column: 0 });
+
+        let history = grid_at(&["$$   ", "x^2  ", "$$   ", "tail "], 43, 0);
+        assert!(state.complete_pending_from_history(&history, false));
+
+        let overlays = state.visible_overlays(&visible);
+        assert_eq!(overlays.len(), 1);
+        assert_eq!(overlays[0].source.as_ref(), "x^2");
+        assert_eq!(overlays[0].spans.first().map(|span| span.row), Some(-2));
+
+        // The attempt is consumed: the same orphan never re-triggers, even
+        // though the scanner keeps reporting it as unmatched every frame.
+        assert!(state.scan_visible_grid(&visible, false, None).is_none());
+        assert!(state.scan_visible_grid(&visible, false, None).is_none());
     }
 
     #[test]
