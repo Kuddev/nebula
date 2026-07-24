@@ -1,6 +1,6 @@
 [package]
 name = "nebula_config"
-version = "0.6.0"
+version = "0.7.0"
 license = "GPL-3.0-or-later"
 description = "Nebula configuration abstractions"
 homepage = "https://github.com/Kuddev/nebula"
@@ -14,5 +14,5 @@ serde = "1.0.163"
 toml.workspace = true
 
 [dev-dependencies]
-nebula_config_derive = { version = "0.6.0", path = "../nebula_config_derive" }
+nebula_config_derive = { version = "0.7.0", path = "../nebula_config_derive" }
 serde = { version = "1.0.163", features = ["derive"] }

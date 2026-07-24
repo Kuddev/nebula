@@ -70,3 +70,16 @@ desktop.ini
 # Scratch notes and locally downloaded font archives
 body.txt
 JetBrainsMono-*.zip
+
+# Local scratch checkouts, prototypes, and one-off repro scripts
+.build-*/
+target-aligned/
+_nebula-front-stage/
+message-queue-prototype.html
+package.json
+package-lock.json
+node_modules/
+scripts/drawer_repro.ps1
+scripts/ghost_repro/
+scripts/icon-build/
+scripts/render_shell_icon.html

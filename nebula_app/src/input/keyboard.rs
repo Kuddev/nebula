@@ -48,11 +48,38 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
         }
 
-        // The inline default-shell list is a transient picker. Esc only
+        // 背景色浮层的 16 进制输入独占键盘：Enter 应用、Esc 关闭、退格删
+        // 除、hex 字符追加；dropdown 通用的"任意键关闭"对它不适用。
+        if self.ctx.display().nebula_settings_dropdown
+            == Some(crate::display::SettingsDropdown::BackgroundColor)
+            && self.ctx.display().nebula_bg_hex_active
+        {
+            match &key.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    self.ctx.display().bg_hex_commit();
+                },
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.display().close_settings_dropdown();
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().bg_hex_backspace();
+                },
+                Key::Character(text) => {
+                    for ch in text.chars() {
+                        self.ctx.display().bg_hex_push(ch);
+                    }
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
+        // An expanded settings dropdown is a transient picker. Esc only
         // dismisses; any other key dismisses and then follows its normal path.
-        if self.ctx.display().nebula_shell_picker_open {
+        if self.ctx.display().nebula_settings_dropdown.is_some() {
             let escape = matches!(key.logical_key, Key::Named(NamedKey::Escape));
-            self.ctx.display().close_shell_picker();
+            self.ctx.display().close_settings_dropdown();
             self.ctx.mark_dirty();
             if escape {
                 return;

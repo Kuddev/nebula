@@ -67,6 +67,10 @@ impl NebulaShell {
 /// A blocking window action awaiting user input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NebulaConfirm {
+    /// Wallpapers are normally confined to terminal content. Extending them
+    /// under persistent controls is opt-in because low-contrast images can
+    /// make caption buttons, tabs and SSH navigation harder to read.
+    EnableBackgroundImageCoverChrome,
     InstallRequiredFont {
         directory: PathBuf,
     },

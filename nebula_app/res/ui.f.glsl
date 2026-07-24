@@ -50,7 +50,18 @@ void main() {
     vec2 halfSize = quadSize * 0.5;
 
     float_t coverage;
-    if (quadFeather > 0.5) {
+    if (quadFeather > 1.5) {
+        // Concave corner filler: paint OUTSIDE the quarter circle of radius
+        // corners.z centered at corners.xy (quad-local px). This is the piece
+        // of shell frame that hugs one rounded card corner from the outside;
+        // its circular AA is the exact complement of the card quad's convex
+        // corner (same center, same radius), so the two meet at uniform
+        // coverage with no seam. The quad's straight edges stay hard (full
+        // coverage) to butt flush against the shell's edge strips.
+        vec2 pc = uv * quadSize - corners.xy;
+        float_t dc = length(pc) - corners.z;
+        coverage = clamp(dc + 0.5, 0.0, 1.0);
+    } else if (quadFeather > 0.5) {
         // Soft radial glow: smooth falloff from the center outward.
         float_t maxr = min(halfSize.x, halfSize.y);
         float_t dc = length(p) / max(maxr, 1.0);

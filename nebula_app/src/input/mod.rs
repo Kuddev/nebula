@@ -112,6 +112,9 @@ pub trait ActionContext<T: EventListener> {
     fn create_new_window(&mut self) {}
     fn change_font_size(&mut self, _delta: f32) {}
     fn reset_font_size(&mut self) {}
+    /// Re-sync the focused terminal's default cursor style (shape + blink)
+    /// from the Nebula settings and reschedule blinking.
+    fn apply_default_cursor_style(&mut self) {}
     fn pop_message(&mut self) {}
     fn message(&self) -> Option<&Message>;
     fn config(&self) -> &UiConfig;

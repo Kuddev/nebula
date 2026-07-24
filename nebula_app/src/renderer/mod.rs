@@ -22,7 +22,7 @@ use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::content::RenderableCell;
 use crate::gl;
-use crate::renderer::image::ImageRenderer;
+use crate::renderer::image::{BackgroundImageAlignment, BackgroundImageFit, ImageRenderer};
 use crate::renderer::math::{MathClip, MathRenderer};
 use crate::renderer::rects::{RectRenderer, RenderRect};
 use crate::renderer::shader::ShaderError;
@@ -104,6 +104,11 @@ pub struct Renderer {
     image_renderer: ImageRenderer,
     math_renderer: MathRenderer,
     robustness: bool,
+    /// UI 文本补偿比率 = 配置字号 / 当前终端字号，见
+    /// `Display::ui_text_scale`。chrome 系列文本按它真栅格化，配合调用方
+    /// 传入的 ui 化 `SizeInfo`（cell × 同一比率），让 Ctrl+滚轮缩放只改
+    /// 终端网格、UI 字号视觉恒定。1.0 = 无补偿（快路径）。
+    ui_text_scale: f32,
     /// Full window height in physical pixels, used to flip pane viewports from
     /// top-down `SizeInfo` coordinates into OpenGL's bottom-left origin. Set
     /// each frame from the window's `SizeInfo`.
@@ -203,8 +208,14 @@ impl Renderer {
             image_renderer,
             math_renderer,
             robustness,
+            ui_text_scale: 1.0,
             window_height: std::cell::Cell::new(0.0),
         })
+    }
+
+    /// Set the per-frame UI text compensation ratio (1.0 disables it).
+    pub fn set_ui_text_scale(&mut self, scale: f32) {
+        self.ui_text_scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
     }
 
     pub fn draw_cells<I: Iterator<Item = RenderableCell>>(
@@ -330,6 +341,34 @@ impl Renderer {
 
     /// Draw a chrome label at an arbitrary pixel position (top-left of the first
     /// cell), with a transparent background so the underlying pill shows.
+    /// Ink bounds of a single chrome glyph relative to the cell's top-left pen
+    /// origin, in physical px: `(left, top, width, height)`. Nerd Font marks
+    /// often ink outside their nominal 1-column advance, so grid centering
+    /// leaves them visibly off inside their hover pills; this measures the
+    /// REAL raster so callers can optically center.
+    pub fn chrome_glyph_ink(
+        &mut self,
+        glyph_cache: &mut GlyphCache,
+        size_info: &SizeInfo,
+        character: char,
+    ) -> Option<(f32, f32, f32, f32)> {
+        // 量取按 UI 补偿后的真实字号（与 draw_chrome_text 的栅格化一致），
+        // 否则终端缩放时 pill 内的光学居中会按错误的墨迹框计算。
+        let glyph_key = crossfont::GlyphKey {
+            font_key: glyph_cache.font_key,
+            size: glyph_cache.font_size.scale(self.ui_text_scale),
+            character,
+        };
+        let glyph = self.with_loader(|mut api| glyph_cache.get(glyph_key, &mut api, false));
+        if glyph.width <= 0 || glyph.height <= 0 {
+            return None;
+        }
+        // draw_cells places ink at `cell_bottom - glyph.top` (see the gles2 /
+        // glsl3 vertex assembly), so measured from the cell TOP the ink sits:
+        let top = size_info.cell_height() - glyph.top as f32;
+        Some((glyph.left as f32, top, glyph.width as f32, glyph.height as f32))
+    }
+
     pub fn draw_chrome_text(
         &mut self,
         size_info: &SizeInfo,
@@ -345,7 +384,38 @@ impl Renderer {
     /// [`Self::draw_chrome_text`] with extra cell style flags. `BOLD`/`ITALIC`
     /// select the real bold/italic faces in `draw_cells` — the document viewer
     /// uses this so emphasis is carried by the typeface, not just ink color.
+    ///
+    /// When [`Self::ui_text_scale`] is active the glyphs are re-rasterized at
+    /// the compensated size, so UI labels stay visually anchored to the config
+    /// font size while Ctrl+wheel zooms only the terminal grid. Callers pass a
+    /// ui-scaled `SizeInfo` (`Display::ui_size_info`) so the cell advance
+    /// matches the rasterized size.
     pub fn draw_chrome_text_styled(
+        &mut self,
+        size_info: &SizeInfo,
+        x: f32,
+        y: f32,
+        fg: Rgb,
+        style: Flags,
+        text: &str,
+        glyph_cache: &mut GlyphCache,
+    ) {
+        let ratio = self.ui_text_scale;
+        if (ratio - 1.0).abs() < 0.01 {
+            self.draw_chrome_text_at(size_info, x, y, fg, style, text, glyph_cache);
+        } else {
+            let base_size = glyph_cache.font_size;
+            glyph_cache.font_size = base_size.scale(ratio);
+            self.draw_chrome_text_at(size_info, x, y, fg, style, text, glyph_cache);
+            glyph_cache.font_size = base_size;
+        }
+    }
+
+    /// Chrome text at the glyph cache's CURRENT font size, stepped by the
+    /// passed `SizeInfo` cells. Internal: [`Self::draw_chrome_text_styled`]
+    /// wraps this with the UI compensation ratio; [`Self::draw_doc_text_tracked`]
+    /// calls it directly so document text keeps following the terminal zoom.
+    fn draw_chrome_text_at(
         &mut self,
         size_info: &SizeInfo,
         x: f32,
@@ -405,7 +475,10 @@ impl Renderer {
         text: &str,
         glyph_cache: &mut GlyphCache,
     ) -> f32 {
-        self.begin_chrome_text_scaled(size_info, x, y, mult);
+        // The atlas bitmaps are terminal-font-sized: stretch them by the UI
+        // compensation ratio too, so the visual size matches the ui-scaled
+        // cell advance the caller lays out with.
+        self.begin_chrome_text_scaled(size_info, x, y, mult * self.ui_text_scale);
 
         let mut col = 0usize;
         let cells = text.chars().filter_map(|character| {
@@ -478,7 +551,9 @@ impl Renderer {
     ) -> f32 {
         let cell_w = size_info.cell_width();
         if (scale - 1.0).abs() < 0.01 && tracking.abs() < 0.01 {
-            self.draw_chrome_text_styled(size_info, x, y, fg, style, text, glyph_cache);
+            // Document text tracks the terminal zoom by design (md/txt viewers
+            // may scale) — bypass the UI compensation wrapper.
+            self.draw_chrome_text_at(size_info, x, y, fg, style, text, glyph_cache);
             let cols: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
             return cols as f32 * cell_w;
         }
@@ -609,14 +684,16 @@ impl Renderer {
                 let top = (baseline_y + rule.y).max(clip.top);
                 let right = (origin_x + rule.x + rule.width).min(clip.right);
                 let bottom = (baseline_y + rule.y + rule.height.max(1.0)).min(clip.bottom);
-                (right > left && bottom > top).then(|| UiQuad::solid(
-                    left,
-                    top,
-                    right - left,
-                    bottom - top,
-                    0.0,
-                    crate::renderer::ui::Rgba::opaque(color),
-                ))
+                (right > left && bottom > top).then(|| {
+                    UiQuad::solid(
+                        left,
+                        top,
+                        right - left,
+                        bottom - top,
+                        0.0,
+                        crate::renderer::ui::Rgba::opaque(color),
+                    )
+                })
             })
             .collect();
         self.draw_ui(size_info, &rules);
@@ -633,8 +710,23 @@ impl Renderer {
         result
     }
 
-    /// Draw a full-window background image using CSS-like `cover` scaling.
-    pub fn draw_background_image(&mut self, size_info: &SizeInfo, path: &Path, opacity: f32) {
+    /// Draw a background image with Windows Terminal-compatible sizing and
+    /// alignment semantics. `target` is the rect the image is fitted into;
+    /// `clip` is the rect it may actually touch (usually the same, a sub-band
+    /// for scrolled previews). `clip_radius > 0` additionally rounds the
+    /// clip rect's corners via the shader SDF.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_background_image(
+        &mut self,
+        size_info: &SizeInfo,
+        path: &Path,
+        opacity: f32,
+        fit: BackgroundImageFit,
+        alignment: BackgroundImageAlignment,
+        target: (f32, f32, f32, f32),
+        clip: (f32, f32, f32, f32),
+        clip_radius: f32,
+    ) {
         if opacity <= 0.0 {
             return;
         }
@@ -642,14 +734,25 @@ impl Renderer {
         unsafe {
             gl::Viewport(0, 0, size_info.width() as i32, size_info.height() as i32);
             gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);
+            // Cover/native sizing can extend past the selected terminal area.
+            // A scissor keeps the default wallpaper out of persistent chrome.
+            let (x, y, width, height) = clip;
+            gl::Enable(gl::SCISSOR_TEST);
+            gl::Scissor(
+                x.round() as i32,
+                (size_info.height() - y - height).round() as i32,
+                width.round().max(0.0) as i32,
+                height.round().max(0.0) as i32,
+            );
         }
 
-        self.image_renderer.draw(size_info, path, opacity);
+        self.image_renderer.draw(size_info, path, opacity, fit, alignment, target, clip, clip_radius);
         // The image pass rebinds TEXTURE_2D behind the text renderer's back;
         // drop its cached atlas binding or every later glyph goes invisible.
         self.invalidate_text_texture_cache();
 
         unsafe {
+            gl::Disable(gl::SCISSOR_TEST);
             gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
             self.set_viewport(size_info);
         }
