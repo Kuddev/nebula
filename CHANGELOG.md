@@ -20,6 +20,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **Cursor shape and blinking** — the default cursor shape (bar, underscore, filled box, hollow box) is selectable and cursor blinking is on by default. Programs like vim can still change the cursor themselves.
 - **Copy on select** — a new Interaction section adds copy-on-select, on by default. With it off, right-click still copies the selection, or pastes when nothing is selected.
 - **SSH keepalive** — remote sessions that sit idle for a long time no longer get disconnected by routers or firewalls.
+- **Update check** — Nebula now checks GitHub Releases shortly after startup and shows a dismissible in-app banner when a newer version is available. It is a single anonymous version query; nothing else is sent.
 
 #### Fixed
 
@@ -47,6 +48,12 @@ Every release entry is provided in English and Simplified Chinese.
 - Fixed cursor shape and blinking changes not taking effect until a restart.
 - Fixed confirmation dialogs stretching into wide banners; long messages now wrap and the buttons are a simple Yes / No pair.
 - Fixed harmless clipboard warnings that appeared when another program briefly held the clipboard.
+- Fixed the cursor style chosen in Settings never applying when the shell had already touched cursor blinking (ConPTY does this on startup, so on Windows the setting effectively never worked): the choice now takes effect immediately, in every open tab and in new tabs.
+- Fixed rendered formulas sitting on an opaque black (in light mode: white) slab that blocked the wallpaper and window transparency; formulas now draw directly over the real background.
+- Fixed formula sizes depending on how many terminal rows the source text happened to occupy — a one-line `$$...$$` was squeezed tiny while multi-line sources rendered large. Formulas now borrow breathing room from surrounding blank lines and render at one consistent size, and tall inline fractions (`\dfrac`) become readable the same way.
+- Fixed formulas flashing back to raw TeX while typing — including during Chinese IME composition — and sometimes never re-rendering after a TUI repaint; a formula whose closing `$$` is still visible now restores itself from scrollback.
+- Fixed short inline formulas like `$\xi$` being centered inside the width of their source text, leaving them stranded between large gaps; narrow results now sit next to the preceding words.
+- Fixed the background-color value in Settings overlapping the dropdown arrow.
 
 #### Improved
 
@@ -69,6 +76,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **光标形状与闪烁** — 默认光标形状可选（竖线、下划线、实心方块、空心方块），光标闪烁默认开启；vim 等程序仍然可以自己改变光标。
 - **选中即复制** — 新增"交互"设置，提供选中即复制开关，默认开启；关闭后右键仍可复制选中内容，没有选中时则执行粘贴。
 - **SSH 保活** — 长时间没有操作的远程会话不会再被路由器或防火墙断开。
+- **检查更新** — Nebula 启动后会静默检查 GitHub Releases，有新版本时在应用内显示一条可关闭的横幅提示。整个过程只有一次匿名的版本查询，不上传任何数据。
 
 #### 修复
 
@@ -96,6 +104,12 @@ Every release entry is provided in English and Simplified Chinese.
 - 修复光标形状和闪烁设置需要重启才生效的问题。
 - 修复确认对话框被拉成横幅的问题：长文字自动换行，按钮就是简单的"是 / 否"。
 - 修复其他程序短暂占用剪贴板时弹出无意义警告的问题。
+- 修复设置里选择的光标样式始终不生效的问题（Windows 上 shell 启动时会设置光标闪烁，旧逻辑会连形状一起"钉死"）：现在选择立即生效，对所有已打开和新建的标签页都有效。
+- 修复公式渲染带一块不透明底色（深色模式黑块、浅色模式白块）、挡住壁纸和窗口透明效果的问题；公式现在直接绘制在真实背景上。
+- 修复公式大小取决于源码占了几行终端的问题——单行 `$$...$$` 被压得极小、多行的又显得很大。公式现在会向上下空行借用空间，以统一大小渲染；行内的高分数（`\dfrac`）也因此变得可读。
+- 修复输入时（包括中文输入法组词过程中）公式闪回原始文字、TUI 重绘后偶尔再也不渲染的问题；闭合 `$$` 仍在屏幕上的公式现在能从回滚缓冲区自动恢复。
+- 修复 `$\xi$` 这类短公式在源码宽度内居中、两侧留出大片空隙的问题；渲染结果较窄时现在紧贴前面的文字。
+- 修复设置中背景色的当前值文字与下拉箭头重叠的问题。
 
 #### 改进
 
