@@ -1235,7 +1235,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // Right-side drawer (directory tree / git) remains part of the app shell. Keeps
     // drawing through slide-out; animation stepping is centralized in Display.
     if d.side_panel_visible() {
-        if let Some(panel) = d.nebula_sftp_panel.as_ref() {
+        if let Some(panel) = d.nebula_sftp_panel.as_ref().filter(|_| d.sftp_view_active()) {
             let layout = sftp_panel::layout(&d.side_panel_layout(), scale);
             sftp_panel::push_quads(
                 panel,
@@ -1378,7 +1378,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         const SECTION_TITLE_SCALE: f32 = 0.82;
         let section_title_tracking = s(0.65);
         let section_title_flags = nebula_terminal::term::cell::Flags::BOLD;
-        d.renderer.draw_doc_text_tracked(
+        d.renderer.draw_ui_text_tracked(
             &size,
             pnl_x + s(16.0),
             pnl_y + s(22.0),
@@ -1544,7 +1544,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 d.window.set_ime_cursor_area_px(caret_px, row_y, cell_w, tab_h);
             }
 
-            d.renderer.draw_doc_text_tracked(
+            d.renderer.draw_ui_text_tracked(
                 &size,
                 text_x,
                 cy,
@@ -1594,7 +1594,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         if tab_layout.hosts_header.2 > 0.0 {
             let (hh_x, hh_y, _, hh_h) = tab_layout.hosts_header;
             let hosts_chevron = if d.nebula_hosts_section_open { "\u{eab4}" } else { "\u{eab6}" };
-            d.renderer.draw_doc_text_tracked(
+            d.renderer.draw_ui_text_tracked(
                 &size,
                 hh_x + s(16.0),
                 hh_y + (hh_h - cell_h * SECTION_TITLE_SCALE) / 2.0,
@@ -1620,10 +1620,10 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 let hint_flags = nebula_terminal::term::cell::Flags::empty();
                 let (pnl_x, _, pnl_w, _) = tab_layout.panel;
                 let text_x = hh_x + s(28.0);
-                // Wrap budget in the TRUE scaled advance (`draw_doc_text`
+                // Wrap budget in the TRUE scaled advance (`draw_ui_text`
                 // steps by unfloored `average_advance × scale`, not by the
                 // floored grid cell) or long lines overrun the panel edge.
-                let hint_cell_w = d.glyph_cache.font_metrics().average_advance as f32 * HINT_SCALE;
+                let hint_cell_w = d.renderer.ui_text_advance(&d.glyph_cache, HINT_SCALE);
                 let max_cols =
                     ((((pnl_x + pnl_w - s(12.0)) - text_x) / hint_cell_w).floor() as usize).max(4);
                 let mut line = String::new();
@@ -1638,7 +1638,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 {
                     let ch_cols = ch.width().unwrap_or(0);
                     if cols + ch_cols > max_cols && !line.is_empty() {
-                        d.renderer.draw_doc_text(
+                        d.renderer.draw_ui_text(
                             &size,
                             text_x,
                             line_y,
@@ -1656,7 +1656,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                     cols += ch_cols;
                 }
                 if !line.trim_start().is_empty() {
-                    d.renderer.draw_doc_text(
+                    d.renderer.draw_ui_text(
                         &size,
                         text_x,
                         line_y,
@@ -1697,7 +1697,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                     "\u{f489}",
                     &mut d.glyph_cache,
                 );
-                d.renderer.draw_doc_text_tracked(
+                d.renderer.draw_ui_text_tracked(
                     &size,
                     text_x + cell_w * 2.0,
                     cy,
@@ -1812,7 +1812,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
 
     // Drawer text remains in its own shell region beside the Settings page.
     if d.side_panel_visible() {
-        if let Some(panel) = d.nebula_sftp_panel.as_ref() {
+        if let Some(panel) = d.nebula_sftp_panel.as_ref().filter(|_| d.sftp_view_active()) {
             let scale = d.window.scale_factor as f32;
             let layout = sftp_panel::layout(&d.side_panel_layout(), scale);
             let ls_colors = side_panel::LsColors {
@@ -1826,7 +1826,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 ls_colors,
                 &mut d.renderer,
                 &mut d.glyph_cache,
-                &d.size_info,
+                &size,
                 scale,
             );
         } else {
@@ -1843,7 +1843,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 ls_colors,
                 &mut d.renderer,
                 &mut d.glyph_cache,
-                &d.size_info,
+                &size,
                 d.window.scale_factor as f32,
             );
         }
@@ -1858,7 +1858,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         &d.nebula_palette,
         &d.nebula_theme,
         &mut palette_quads,
-        &d.size_info,
+        &size,
         d.window.scale_factor as f32,
     );
     d.renderer.draw_ui(&size, &palette_quads);
@@ -1868,7 +1868,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         &d.nebula_theme,
         &mut d.renderer,
         &mut d.glyph_cache,
-        &d.size_info,
+        &size,
         d.window.scale_factor as f32,
     );
 

@@ -220,6 +220,10 @@ impl TerminalMathState {
         let Some(formula) = PersistedFormula::from_overlay(grid, overlay) else {
             return;
         };
+        // 屏幕上确认出现过块级 TeX 的 pane 视同 AI CLI 在场，解锁行内 $。
+        // WSL/SSH 里跑的 claude/codex 在本机进程树上只留下 wsl.exe/ssh.exe，
+        // 进程探测对它们永远失明；已渲染的 $$/\[ \] 块才是可靠信号。
+        self.ai_cli_seen |= formula.display;
         let anchor = formula.anchor;
         if self.formulas.get(&anchor).is_some_and(|existing| existing.same_content(&formula)) {
             return;
@@ -998,7 +1002,8 @@ fn find_formula(
     let close = grid.find_closing(source_start, closing, same_row)?;
     let after = grid.after(close, closing.len());
     let source = grid.extract(source_start, close)?;
-    if !plausible_math_source(&source) {
+    let display = matches!(kind, DelimiterKind::DollarDisplay | DelimiterKind::BracketDisplay);
+    if !plausible_math_source(&source, display) {
         return None;
     }
     Some((make_overlay(grid, open, after, source, kind), after))
@@ -1029,7 +1034,7 @@ fn find_dollar_formula(
         }
 
         let source = grid.extract(source_start, close)?;
-        if plausible_math_source(&source) {
+        if plausible_math_source(&source, false) {
             return Some((
                 make_overlay(grid, open, after, source, DelimiterKind::DollarInline),
                 after,
@@ -1040,8 +1045,19 @@ fn find_dollar_formula(
     None
 }
 
-fn plausible_math_source(source: &str) -> bool {
+/// Delimiters state intent, content supplies evidence. Display blocks
+/// (`$$…$$`, `\[…\]`) rarely occur outside real math, so lax evidence
+/// suffices; bare `$…$` and `\(…\)` collide with currency, shell variables
+/// and escaped prose, so their evidence must be structurally compact.
+fn plausible_math_source(source: &str, display: bool) -> bool {
     let source = source.trim();
+    !obviously_non_math(source) && has_math_evidence(source, display)
+}
+
+/// Terminal noise that must never render as math regardless of delimiter
+/// strength: comments/URLs (`//`), Windows paths (`:\`), control bytes,
+/// currency amounts, and ALL_CAPS shell variables.
+fn obviously_non_math(source: &str) -> bool {
     if source.is_empty()
         || source.contains("//")
         || source.contains(":\\")
@@ -1049,11 +1065,10 @@ fn plausible_math_source(source: &str) -> bool {
             .chars()
             .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
     {
-        return false;
+        return true;
     }
 
     // Currency and shell variables are the dominant terminal use of dollars.
-    // Reject them before considering mathematical punctuation.
     let currency = source.chars().all(|character| {
         character.is_ascii_digit()
             || character.is_ascii_whitespace()
@@ -1062,17 +1077,21 @@ fn plausible_math_source(source: &str) -> bool {
     let shell_identifier = source.chars().all(|character| {
         character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
     });
-    if currency || (shell_identifier && source.chars().count() > 1) {
-        return false;
-    }
+    currency || (shell_identifier && source.chars().count() > 1)
+}
 
+/// At least one structural sign of mathematics. `lax` (display blocks) lifts
+/// the compact-operand requirement on script bases so implicit products like
+/// `mc^2` qualify; inline keeps it so `$foo^bar$` stays literal text.
+fn has_math_evidence(source: &str, lax: bool) -> bool {
     let chars: Vec<_> = source.chars().collect();
     let single_variable = chars.len() == 1 && chars[0].is_alphabetic();
     let tex_command = chars.windows(2).any(|pair| pair[0] == '\\' && pair[1].is_alphabetic());
     let script = source.find(['^', '_']).is_some_and(|index| {
         let (base, suffix) = source.split_at(index);
         let suffix = &suffix[1..];
-        explicit_operand(base) && !suffix.trim().is_empty()
+        let base_qualifies = if lax { !base.trim().is_empty() } else { explicit_operand(base) };
+        base_qualifies && !suffix.trim().is_empty()
     });
     let relation = ["<=", ">=", "!=", "==", "=", "<", ">"].into_iter().any(|operator| {
         source.find(operator).is_some_and(|index| {
@@ -1530,6 +1549,14 @@ d & -b \\
     }
 
     #[test]
+    fn display_blocks_accept_implicit_products_that_inline_rejects() {
+        // `mc^2` 的上标基座是隐式乘积：inline 的紧凑操作数检查拒绝它
+        // （`$foo^bar$` 在 shell 输出里太常见），块级定界已宣告意图，放行。
+        assert_eq!(sources(&["$$", "E = mc^2", "$$"], false), vec![("E = mc^2".into(), true)]);
+        assert!(sources(&["$mc^2$"], true).is_empty());
+    }
+
+    #[test]
     fn escaped_dollars_currency_and_shell_variables_stay_literal() {
         assert!(sources(&[r"escaped \$x$"], true).is_empty());
         assert!(sources(&["price $5$ and $12.50$"], true).is_empty());
@@ -1567,6 +1594,19 @@ d & -b \\
         let mut state = TerminalMathState::default();
         state.observe_program(Some("codex"));
         state.observe_program(None);
+        assert!(state.inline_dollar_enabled());
+        assert!(state.clone().inline_dollar_enabled());
+    }
+
+    #[test]
+    fn confirmed_display_formula_unlocks_inline_dollar_without_process_detection() {
+        // WSL/SSH 里跑的 AI CLI 在本机进程树上只留下 wsl.exe/ssh.exe，
+        // observe_program 永远不会命中；已确认的块级公式承担同一角色。
+        let mut state = TerminalMathState::default();
+        remember_visible(&mut state, &grid_at(&["中文 \\(x^2+y^2=z^2\\) 行内", "tail "], 40, 0));
+        assert!(!state.inline_dollar_enabled(), "inline-only content must not unlock");
+
+        remember_visible(&mut state, &grid_at(&["$$   ", "x^2  ", "$$   ", "tail "], 44, 0));
         assert!(state.inline_dollar_enabled());
         assert!(state.clone().inline_dollar_enabled());
     }

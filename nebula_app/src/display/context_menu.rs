@@ -11,6 +11,7 @@ use super::*;
 // symbols on that block: newer Codicon additions such as U+EC86 are absent
 // from the installed Maple version and rasterize as a missing-glyph box.
 const ICON_COPY: &str = "\u{ebcc}";
+const ICON_EXPORT: &str = "\u{eb4b}";
 const ICON_SPLIT_RIGHT: &str = "\u{eb56}";
 const ICON_SPLIT_DOWN: &str = "\u{eb57}";
 const ICON_EDIT: &str = "\u{ea73}";
@@ -38,6 +39,7 @@ pub enum ContextMenuTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuAction {
     DuplicateTab(usize),
+    ExportTab(usize),
     SplitTabRight(usize),
     SplitTabDown(usize),
     RenameTab(usize),
@@ -155,7 +157,7 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
     let color_bottom_pad = s(10.0);
     let color_h = color_top_pad + size.cell_height() + color_label_gap + swatch + color_bottom_pad;
     let (row_count, separators, extra) = match menu.target {
-        ContextMenuTarget::Tab(_) => (5usize, 2usize, color_h),
+        ContextMenuTarget::Tab(_) => (6usize, 2usize, color_h),
         ContextMenuTarget::Ssh(_) => (5usize, 1usize, 0.0),
         ContextMenuTarget::Sftp(_) => (3usize, 1usize, 0.0),
         ContextMenuTarget::SftpPanel => (4usize, 1usize, 0.0),
@@ -204,6 +206,15 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
                 ContextMenuAction::DuplicateTab(index),
                 ICON_COPY,
                 "复制标签页",
+                "",
+                cursor_y,
+                false,
+            ));
+            cursor_y += row_h;
+            rows.push(row(
+                ContextMenuAction::ExportTab(index),
+                ICON_EXPORT,
+                "导出为工作区…",
                 "",
                 cursor_y,
                 false,
@@ -413,7 +424,8 @@ pub(super) fn draw(display: &mut Display) {
 
     let progress = menu.motion.value().clamp(0.0, 1.0);
     display.nebula_context_menu = Some(menu.clone());
-    let size = display.size_info;
+    // UI-anchored SizeInfo: menu rows/labels must not follow terminal zoom.
+    let size = display.ui_size_info();
     let scale = display.window.scale_factor as f32;
     let s = |v: f32| v * scale;
     let layout = layout(&menu, size, scale, -s(5.0) * (1.0 - progress));

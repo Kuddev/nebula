@@ -253,11 +253,6 @@ impl Window {
     }
 
     #[inline]
-    pub fn current_monitor_size(&self) -> Option<PhysicalSize<u32>> {
-        self.window.current_monitor().map(|monitor| monitor.size())
-    }
-
-    #[inline]
     pub fn set_visible(&self, visibility: bool) {
         self.window.set_visible(visibility);
     }

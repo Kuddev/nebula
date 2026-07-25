@@ -352,14 +352,17 @@ impl Renderer {
         size_info: &SizeInfo,
         character: char,
     ) -> Option<(f32, f32, f32, f32)> {
-        // 量取按 UI 补偿后的真实字号（与 draw_chrome_text 的栅格化一致），
-        // 否则终端缩放时 pill 内的光学居中会按错误的墨迹框计算。
+        // 量取按 UI 字体角色的精确字号（与 draw_chrome_text 的栅格化同一
+        // 缓存条目），字形锚点也烙的是 UI 域 descent——图标的光学居中因此
+        // 与终端缩放彻底解耦。
         let glyph_key = crossfont::GlyphKey {
             font_key: glyph_cache.font_key,
-            size: glyph_cache.font_size.scale(self.ui_text_scale),
+            size: glyph_cache.ui_font_size(),
             character,
         };
+        glyph_cache.begin_ui_domain();
         let glyph = self.with_loader(|mut api| glyph_cache.get(glyph_key, &mut api, false));
+        glyph_cache.end_ui_domain();
         if glyph.width <= 0 || glyph.height <= 0 {
             return None;
         }
@@ -400,18 +403,144 @@ impl Renderer {
         text: &str,
         glyph_cache: &mut GlyphCache,
     ) {
-        let ratio = self.ui_text_scale;
-        if (ratio - 1.0).abs() < 0.01 {
+        // Chrome text rasterizes at the UI font role's size (wezterm's
+        // Entity::Title pattern) — never at the terminal zoom.
+        let ui_size = glyph_cache.ui_font_size();
+        Self::chrome_text_probe(glyph_cache.font_size, ui_size, size_info.cell_width());
+        if glyph_cache.font_size == ui_size {
             self.draw_chrome_text_at(size_info, x, y, fg, style, text, glyph_cache);
         } else {
             let base_size = glyph_cache.font_size;
-            glyph_cache.font_size = base_size.scale(ratio);
+            glyph_cache.font_size = ui_size;
+            glyph_cache.begin_ui_domain();
             self.draw_chrome_text_at(size_info, x, y, fg, style, text, glyph_cache);
+            glyph_cache.end_ui_domain();
             glyph_cache.font_size = base_size;
         }
     }
 
-    /// Chrome text at the glyph cache's CURRENT font size, stepped by the
+    /// UI-anchored [`Self::draw_doc_text`]: `mult` is measured against the UI
+    /// BASE font size, so the run ignores the terminal zoom. All chrome
+    /// typography (sidebar captions/labels, settings headings, floating
+    /// panels) must go through the `draw_ui_text*` pair or `draw_chrome_text*`
+    /// — the `draw_doc_text*` variants are reserved for content that follows
+    /// the terminal zoom by design (markdown/txt viewers, in-grid fallbacks).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_ui_text(
+        &mut self,
+        size_info: &SizeInfo,
+        x: f32,
+        y: f32,
+        mult: f32,
+        fg: Rgb,
+        style: Flags,
+        text: &str,
+        glyph_cache: &mut GlyphCache,
+    ) -> f32 {
+        self.draw_ui_text_tracked(size_info, x, y, mult, 0.0, fg, style, text, glyph_cache)
+    }
+
+    /// UI-anchored [`Self::draw_doc_text_tracked`]; see [`Self::draw_ui_text`].
+    ///
+    /// Rasterizes at `ui_font_size × scale` — the UI font role, not the
+    /// terminal zoom — and does its baseline math entirely in the UI role's
+    /// own metrics, so labels stay put while the terminal zooms.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_ui_text_tracked(
+        &mut self,
+        size_info: &SizeInfo,
+        x: f32,
+        y: f32,
+        scale: f32,
+        tracking: f32,
+        fg: Rgb,
+        style: Flags,
+        text: &str,
+        glyph_cache: &mut GlyphCache,
+    ) -> f32 {
+        let target = glyph_cache.ui_font_size().scale(scale);
+        let cell_w = size_info.cell_width();
+        if target == glyph_cache.font_size && tracking.abs() < 0.01 {
+            // The target IS the current terminal size (base zoom, 1× scale):
+            // plain chrome text already steps by the passed UI cell.
+            self.draw_chrome_text_at(size_info, x, y, fg, style, text, glyph_cache);
+            let cols: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
+            return cols as f32 * cell_w;
+        }
+
+        let base_size = glyph_cache.font_size;
+        glyph_cache.font_size = target;
+        glyph_cache.begin_ui_domain();
+
+        // Baseline and advance in the UI role's REAL metrics: the passed
+        // SizeInfo carries the UI cell, glyph anchors are baked with the UI
+        // descent (see `load_glyph`), and Δ = (ui_cell_h + ui_descent) ·
+        // (scale − 1) matches the doc formula at the base zoom.
+        let ui_metrics = glyph_cache.ui_font_metrics();
+        let anchor_y =
+            (y + (size_info.cell_height() + ui_metrics.descent) * (scale - 1.0)).round();
+        let advance = ui_metrics.average_advance as f32 * scale;
+
+        let mut pen_x = x;
+        for character in text.chars() {
+            let width = character.width().unwrap_or(0);
+            if width == 0 {
+                continue;
+            }
+            let flags = if width == 2 { Flags::WIDE_CHAR | style } else { style };
+            self.begin_chrome_text(size_info, pen_x.round(), anchor_y);
+            let cell = RenderableCell {
+                point: Point::new(0, Column(0)),
+                character,
+                extra: None,
+                flags,
+                bg_alpha: 0.0,
+                fg,
+                bg: Rgb::new(0, 0, 0),
+                underline: fg,
+            };
+            self.draw_cells(size_info, glyph_cache, std::iter::once(cell));
+            pen_x += width as f32 * advance + tracking;
+        }
+
+        glyph_cache.end_ui_domain();
+        glyph_cache.font_size = base_size;
+        self.end_chrome_text(size_info);
+        pen_x - x
+    }
+
+    /// The advance one column of UI-anchored text steps by at `scale` — the
+    /// wrap/budget counterpart of [`Self::draw_ui_text`].
+    pub fn ui_text_advance(&self, glyph_cache: &GlyphCache, scale: f32) -> f32 {
+        glyph_cache.ui_font_metrics().average_advance as f32 * scale
+    }
+
+/// Sampled breadcrumb for chrome-text rasterization (1/512 calls): records
+/// the terminal font px, the UI role px actually drawn and the cell the text
+/// steps by, into `ui_anchor.log`. Field diagnosis of "the sidebar zooms with
+/// the terminal" needs the ACTUAL rasterized size from user machines.
+fn chrome_text_probe(terminal: crossfont::Size, ui_role: crossfont::Size, cell_w: f32) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNT: AtomicU32 = AtomicU32::new(0);
+    if COUNT.fetch_add(1, Ordering::Relaxed) % 512 != 0 {
+        return;
+    }
+    let line = format!(
+        "[chrome_text] term_px={:.1} drawn_px={:.1} step_cell_w={cell_w:.1}\n",
+        terminal.as_px(),
+        ui_role.as_px(),
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(crate::display::nebula_data_dir().join("ui_anchor.log"))
+    {
+        use std::io::Write as _;
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// Chrome text at the glyph cache's CURRENT font size, stepped by the
     /// passed `SizeInfo` cells. Internal: [`Self::draw_chrome_text_styled`]
     /// wraps this with the UI compensation ratio; [`Self::draw_doc_text_tracked`]
     /// calls it directly so document text keeps following the terminal zoom.

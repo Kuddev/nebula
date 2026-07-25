@@ -138,6 +138,10 @@ pub enum PaletteAction {
     NewAtDirectory(PathBuf),
     ToggleFilesPanel,
     ToggleGitPanel,
+    /// Save every terminal tab as a workspace file.
+    ExportWorkspace,
+    /// Pick a workspace file and append its tabs to this window.
+    ImportWorkspace,
 }
 
 /// One palette row.
@@ -206,6 +210,18 @@ const ITEMS: &[PaletteItem] = &[
         hint: "Ctrl+Shift+S",
         search: "上下分屏 split down horizontal shangxia fenping",
         action: PaletteAction::SplitDown,
+    },
+    PaletteItem {
+        label: "导出工作区…",
+        hint: "",
+        search: "导出工作区 export workspace save session daochu gongzuoqu",
+        action: PaletteAction::ExportWorkspace,
+    },
+    PaletteItem {
+        label: "打开工作区…",
+        hint: "",
+        search: "打开工作区 open import workspace load session dakai daoru gongzuoqu",
+        action: PaletteAction::ImportWorkspace,
     },
     PaletteItem {
         label: "目录树面板",
@@ -753,6 +769,8 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
         SelectTheme(NebulaTheme::CoalDark) => "Theme: Coal Dark",
         SelectTheme(NebulaTheme::LinenLight) => "Theme: Linen Light",
         SelectTheme(NebulaTheme::MossDark) => "Theme: Moss Dark",
+        ExportWorkspace => "Export workspace...",
+        ImportWorkspace => "Open workspace...",
         LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) | NewAtDirectory(_) => item.label,
     }
 }

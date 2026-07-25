@@ -16,6 +16,15 @@ pub(super) fn pick_folder(owner: &Window, title: &str) -> Option<PathBuf> {
     dialog(owner, title, &[]).pick_folder()
 }
 
+pub(super) fn save_file(
+    owner: &Window,
+    title: &str,
+    filters: &[FileFilter],
+    default_name: &str,
+) -> Option<PathBuf> {
+    dialog(owner, title, filters).set_file_name(default_name).save_file()
+}
+
 fn dialog(owner: &Window, title: &str, filters: &[FileFilter]) -> FileDialog {
     let mut dialog = FileDialog::new().set_title(title).set_parent(owner.native_window());
     for filter in filters {

@@ -280,7 +280,12 @@ impl SidePanel {
         if !self.open {
             return false;
         }
-        self.followed_cwd = cwd;
+        // 聚焦 pane 报不出本地有效目录时（SSH 远端路径、未映射的 WSL 路
+        // 径、shell 还没发 OSC）保持现状：跟随的语义是"最后一个已知有效
+        // 目录"，清空只会让切到远程 tab 的瞬间目录树闪成空白。
+        if cwd.is_some() {
+            self.followed_cwd = cwd;
+        }
         let custom_invalidated = self.custom_root.as_ref().is_some_and(|root| !root.is_dir());
         if custom_invalidated {
             self.custom_root = None;

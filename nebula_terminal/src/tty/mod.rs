@@ -56,6 +56,16 @@ impl Shell {
     pub fn new(program: String, args: Vec<String>) -> Self {
         Self { program, args }
     }
+
+    /// Path to the shell program (session persistence reads it back).
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// Arguments passed to the shell.
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
 }
 
 /// Stream read and/or write behavior.
