@@ -4,6 +4,44 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
+## Unreleased
+
+### English
+
+#### Added
+
+- **Workspace export/import** — the command palette gains "Export workspace…" and "Open workspace…", and a tab's right-click menu gains "Export as workspace…". A workspace file (`.nebula-workspace.json`) records the tab list, each tab's full split layout (axis, ratio, per-pane working directory), tab names and colors, and each tab's launch identity: WSL/custom shells reopen with their shell, SSH tabs reconnect to their saved destination automatically. Files are portable across machines and platforms — a directory that does not exist on the importing machine falls back to the default one, and a shell program the machine lacks (e.g. `wsl.exe` on Linux) falls back to the default shell in the saved directory instead of dropping the tab.
+- **Crash recovery now restores split layouts** — the continuously written session snapshot (1 Hz) uses the same schema as workspace files, so after a crash or force-kill Nebula reopens with every tab's split tree, ratios, per-pane directories and SSH/WSL launch identities — not just one pane per tab as before.
+
+#### Fixed
+
+- Nebula now always starts at its standard size — the configured `window.dimensions`, or the default 116×30 grid **priced at the config base font size**. Two regressions could previously blow the first window up to near-fullscreen: the launch replayed the saved window size from the session file (stale or wrong-unit values included), and the new font-size persistence fed the Ctrl+wheel zoom into the startup sizing formula, so 116 columns of an enlarged cell filled the screen. Startup now ignores both; a persisted zoom still renders after launch, it just shows fewer columns in the standard-sized window.
+- Fixed the sidebar and other interface text zooming together with Ctrl+wheel, plus the hairline seams that appeared once the terminal font left its base size. Root cause was architectural: chrome shares the terminal's single font system, and several chrome paths (sidebar captions, tab/host labels, settings headings, the SSH editor, the message-queue entry) drew through the document-text path that follows the terminal zoom **by design**. All chrome typography now goes through a dedicated UI-anchored text path that rasterizes at the UI base size with its own baseline math, layout steps by the base font's actually-rasterized cell metrics, click targets read the same layout the pixels were drawn with, and the anchor state is correct from the very first frame of a restored session.
+- Terminal font zoom is now clamped to a sane range (logical 4–64 px). Previously a stuck modifier key or trackpad burst could scroll the size past 180 px, where each wheel notch changes the size by under 1 % and zooming back out felt broken.
+- Fixed the resize HUD ("80 × 24") drawing its label outside the centered box whenever the sidebar was open: the box was centered in window pixels while the text was centered on the terminal grid, whose origin carries the sidebar's asymmetric padding. Both now share one coordinate system, and the HUD no longer inflates with the terminal zoom it reports.
+- Fixed the directory tree not following tab switches: an open SFTP panel no longer captures the drawer forever — the view routes by the focused pane (local tabs get the directory tree back, the SFTP connection stays warm), switching to a remote pane no longer blanks the tree, and WSL tabs launched as `wsl -d <distro>` now follow the shell's directory through `\\wsl$`.
+- Fixed math rendering in WSL and remote SSH sessions: `$$ … $$` and `\[ … \]` display formulas printed by claude, codex, pi and similar tools running behind `wsl.exe` or `ssh.exe` now render natively — block detection no longer depends on spotting the AI CLI in the local process tree, which cannot see through WSL or SSH.
+- Display blocks now accept physics-style implicit products such as `E = mc^2`; inline `$…$` keeps the stricter shape checks so shell text like `$foo^bar$` stays literal.
+- The first rendered display formula in a pane now unlocks inline `$…$` rendering there, so remote AI sessions get inline math without local process detection.
+
+### 简体中文
+
+#### 新增
+
+- **工作区导出/导入** — 命令面板新增"导出工作区…"和"打开工作区…",标签页右键菜单新增"导出为工作区…"。工作区文件(`.nebula-workspace.json`)记录标签页列表、每个标签页的完整分屏布局(方向、比例、每个 pane 的工作目录)、标签名与颜色,以及每个标签页的启动身份:WSL/自定义 shell 按原 shell 重开,SSH 标签页自动重连保存的目标。文件跨机器、跨平台可移植——导入机器上不存在的目录回落默认目录;缺失的 shell 程序(如 Linux 上的 `wsl.exe`)回落为默认 shell 并保留目录,不会丢掉整个标签页。
+- **崩溃恢复现在还原分屏布局** — 持续写入的会话快照(每秒)与工作区文件共用同一格式,崩溃或强杀后重开时,每个标签页的分屏树、比例、各 pane 目录以及 SSH/WSL 启动身份都会还原,不再是以前的"每个标签页只剩一个 pane"。
+
+#### 修复
+
+- Nebula 现在始终以标准尺寸启动——配置的 `window.dimensions`,或默认的 116×30 网格,且**按配置基准字号计算**。此前有两处回归会把首窗口撑到接近全屏:启动会重放会话文件里保存的窗口尺寸(包括过期或单位错误的值);新增的字号持久化又把 Ctrl+滚轮缩放喂进了启动尺寸公式,116 列放大后的 cell 本身就是一个全屏宽度。启动现在对两者都免疫;持久化的缩放字号启动后照常渲染,只是在标准尺寸的窗口里显示更少的列数。
+- 修复界面文字随 Ctrl+滚轮一起缩放、以及终端字号离开基准后出现的发丝级脏线。根因是架构性的:chrome 与终端共用同一套字体系统,而侧栏标题、tab/主机标签、设置页大标题、SSH 编辑浮层、消息队列条目等多处 chrome 文字走的是**设计上就跟随终端缩放**的文档文字路径。现在全部 chrome 排版统一走专用的 UI 锚定文字路径(按 UI 基准字号栅格化、独立的基线数学),布局按基准字号真实栅格化的 cell 步进,点击目标与绘制读取同一布局,恢复持久化缩放的第一帧锚定即正确。
+- 终端字号缩放现在有硬边界(逻辑 4–64 px)。此前卡住的修饰键或触控板会把字号滚过 180px,那里每档滚轮变化不足 1%,缩回去的手感如同失灵。
+- 修复调整窗口大小的 HUD("80 × 24")在侧栏打开时文字画到居中框外:框按窗口像素居中,文字却按终端网格居中,而网格原点带着侧栏的非对称边距。两者现在共用同一坐标系,HUD 也不再随它所汇报的终端缩放一起变大。
+- 修复目录树不跟随标签页切换:打开过的 SFTP 面板不再永久霸占抽屉——视图按聚焦 pane 路由(切回本地标签页恢复目录树,SFTP 连接保持热连接),切到远程 pane 不再把树清空;`wsl -d <发行版>` 启动的 WSL 标签页现在通过 `\\wsl$` 跟随 shell 目录。
+- 修复 WSL 与远程 SSH 会话中的公式渲染:隔着 `wsl.exe` / `ssh.exe` 运行的 claude、codex、pi 等工具输出的 `$$ … $$`、`\[ … \]` 块级公式现在原生渲染——块级检测不再依赖本机进程树里能否找到 AI CLI(进程探测无法穿透 WSL 和 SSH)。
+- 块级公式接受 `E = mc^2` 这类隐式乘积;行内 `$…$` 保持更严格的形状检查,`$foo^bar$` 之类的 shell 文本仍按字面显示。
+- pane 内首个渲染成功的块级公式会解锁该 pane 的行内 `$…$` 渲染,远程 AI 会话无需本机进程探测即可获得行内公式。
+
 ## 0.7.0 - 2026-07-24
 
 ### English

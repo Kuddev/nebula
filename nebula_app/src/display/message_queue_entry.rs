@@ -261,7 +261,7 @@ pub(crate) fn draw_text(
     }
 
     let text_x = entry_layout.icon.0 + entry_layout.icon.2 + 9.0 * scale;
-    renderer.draw_doc_text_tracked(
+    renderer.draw_ui_text_tracked(
         size,
         text_x,
         y + 8.0 * scale,
@@ -273,7 +273,7 @@ pub(crate) fn draw_text(
         glyph_cache,
     );
     let summary = summary_text(state, language);
-    renderer.draw_doc_text_tracked(
+    renderer.draw_ui_text_tracked(
         size,
         text_x,
         y + 29.0 * scale,
@@ -289,7 +289,7 @@ pub(crate) fn draw_text(
         let label = state.pending.min(99).to_string();
         let (bx, by, bw, bh) = entry_layout.badge;
         let digit_w = size.cell_width() * 0.62 * label.len() as f32;
-        renderer.draw_doc_text_tracked(
+        renderer.draw_ui_text_tracked(
             size,
             bx + (bw - digit_w) * 0.5,
             by + (bh - size.cell_height() * 0.62) * 0.5,

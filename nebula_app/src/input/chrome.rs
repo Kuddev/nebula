@@ -152,6 +152,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             DuplicateTab(index) => {
                 self.ctx.nebula_tab(crate::event::TabRequest::Duplicate(index));
             },
+            ExportTab(index) => {
+                self.ctx.nebula_tab(crate::event::TabRequest::ExportTab(index));
+            },
             SplitTabRight(index) => {
                 self.ctx.nebula_tab(crate::event::TabRequest::SplitIndex {
                     index,

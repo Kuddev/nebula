@@ -103,6 +103,12 @@ pub enum TabRequest {
     CommitRename(String),
     SetColor { index: usize, color: Option<crate::display::color::Rgb> },
     CancelRename,
+    /// Save every terminal tab as a workspace file.
+    ExportWorkspace,
+    /// Save one tab (by index) as a workspace file.
+    ExportTab(usize),
+    /// Pick a workspace file and append its tabs to this window.
+    ImportWorkspace,
 }
 
 impl From<TerminalEvent> for EventType {

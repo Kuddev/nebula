@@ -74,6 +74,7 @@ JetBrainsMono-*.zip
 # Local scratch checkouts, prototypes, and one-off repro scripts
 .build-*/
 target-aligned/
+target-fix/
 _nebula-front-stage/
 message-queue-prototype.html
 package.json

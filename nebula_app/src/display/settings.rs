@@ -2046,7 +2046,7 @@ fn draw_big_text(
     ink: Rgb,
     text: &str,
 ) {
-    r.draw_doc_text(size, x, y, mult, ink, nebula_terminal::term::cell::Flags::empty(), text, gc);
+    r.draw_ui_text(size, x, y, mult, ink, nebula_terminal::term::cell::Flags::empty(), text, gc);
 }
 
 /// A group heading inside the content pane: clearly larger than row labels

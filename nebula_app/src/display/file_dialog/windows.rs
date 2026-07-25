@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Controls::Dialogs::{
-    GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
-    OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST,
+    OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use winit::raw_window_handle::RawWindowHandle;
 
@@ -23,16 +23,50 @@ pub(super) fn pick_folder(owner: &Window, title: &str) -> Option<PathBuf> {
     windows_folder::pick(owner.raw_window_handle(), title)
 }
 
+pub(super) fn save_file(
+    owner: &Window,
+    title: &str,
+    filters: &[FileFilter],
+    default_name: &str,
+) -> Option<PathBuf> {
+    let hwnd = owner_hwnd(owner);
+    let filter = build_filter_buffer(filters);
+    let title = title.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+    let mut file_buffer = vec![0u16; 32768];
+    // Pre-fill the file-name box with the suggested name (NUL-terminated).
+    for (slot, unit) in file_buffer.iter_mut().zip(default_name.encode_utf16()) {
+        *slot = unit;
+    }
+    let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    dialog.hwndOwner = hwnd;
+    dialog.lpstrFilter = filter.as_ptr();
+    dialog.lpstrFile = file_buffer.as_mut_ptr();
+    dialog.nMaxFile = file_buffer.len() as u32;
+    dialog.lpstrTitle = title.as_ptr();
+    dialog.Flags =
+        OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT;
+
+    if unsafe { GetSaveFileNameW(&mut dialog) } == 0 {
+        return None;
+    }
+    parse_open_file_buffer(&file_buffer).into_iter().next()
+}
+
+fn owner_hwnd(owner: &Window) -> HWND {
+    match owner.raw_window_handle() {
+        RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
+        _ => std::ptr::null_mut(),
+    }
+}
+
 fn pick_files_inner(
     owner: &Window,
     title: &str,
     filters: &[FileFilter],
     multiple: bool,
 ) -> Vec<PathBuf> {
-    let hwnd: HWND = match owner.raw_window_handle() {
-        RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
-        _ => std::ptr::null_mut(),
-    };
+    let hwnd: HWND = owner_hwnd(owner);
     let filter = build_filter_buffer(filters);
     let title = title.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
     let mut file_buffer = vec![0u16; 32768];

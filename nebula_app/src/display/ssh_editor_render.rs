@@ -20,7 +20,7 @@ impl Display {
             return;
         };
 
-        let size = self.size_info;
+        let size = self.ui_size_info();
         let scale = self.window.scale_factor as f32;
         let s = |value: f32| value * scale;
         let skin = self.nebula_theme.skin();
@@ -363,7 +363,7 @@ impl Display {
         self.renderer.draw_ui(&size, &quads);
 
         let glyph_cache = &mut self.glyph_cache;
-        self.renderer.draw_doc_text(
+        self.renderer.draw_ui_text(
             &size,
             bx + pad,
             by + s(20.0),
@@ -392,7 +392,7 @@ impl Display {
                 .pick("user@host · 非 22 端口用 ssh://", "user@host · use ssh:// for non-22 ports"),
         );
         let destination_hint_scale = 0.72;
-        self.renderer.draw_doc_text(
+        self.renderer.draw_ui_text(
             &size,
             destination.0 + destination.2 - text_width(destination_hint) * destination_hint_scale,
             destination_label_y + cell_h * (1.0 - destination_hint_scale) * 0.5,

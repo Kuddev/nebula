@@ -237,17 +237,12 @@ impl WindowContext {
             renderer::platform::create_gl_context(&gl_display, &gl_config, raw_window_handle)?;
         crate::boot_trace("gl context created");
 
-        let restored_window = match &boot {
-            WindowBoot::Restore(session) => session.window,
-            _ => None,
-        };
         let display = Display::new(
             window,
             gl_context,
             &config,
             event_loop.system_theme(),
             false,
-            restored_window,
         )?;
         crate::boot_trace("display ready (fonts rasterized)");
 
@@ -290,17 +285,12 @@ impl WindowContext {
         let gl_context =
             renderer::platform::create_gl_context(&gl_display, gl_config, Some(raw_window_handle))?;
 
-        let restored_window = match &boot {
-            WindowBoot::Restore(session) => session.window,
-            _ => None,
-        };
         let display = Display::new(
             window,
             gl_context,
             &config,
             event_loop.system_theme(),
             tabbed,
-            restored_window,
         )?;
 
         let mut window_context = Self::new(display, config, options, proxy, boot)?;
@@ -330,18 +320,16 @@ impl WindowContext {
         );
 
         let window_id = display.window.id();
-        let windowed_size = match &boot {
-            WindowBoot::Restore(session) => session
-                .window
-                .filter(|state| state.valid_size())
-                .map(|state| LogicalSize::new(state.width, state.height)),
-            _ => None,
-        }
-        .unwrap_or_else(|| display.window.inner_size().to_logical(display.window.scale_factor));
+        // Startup no longer replays the saved window size (the session file's
+        // window record is write-only), so the live inner size IS the last
+        // normal size at this point.
+        let windowed_size =
+            display.window.inner_size().to_logical(display.window.scale_factor);
 
         // Bootstrap the tab set: fresh/restored windows spawn their first
         // pane here; an attach adopts the detached panes wholesale.
         let mut restore = None;
+        let mut seed_pinned = false;
         let (panes, tabs, active_tab, next_pane_id, fresh_first) = match boot {
             WindowBoot::Attach(mut detached) => {
                 // Re-point every pane's PTY events at this window before any
@@ -370,6 +358,9 @@ impl WindowContext {
                     .as_ref()
                     .filter(|path| path.is_dir())
                     .cloned();
+                // A CLI-pinned directory means the user asked for this exact
+                // tab: the restore below keeps it instead of dismantling it.
+                seed_pinned = cli_cwd.is_some();
                 let cli_shell = options.terminal_options.command().map(Into::into);
                 pty_config.shell = select_initial_shell(
                     pty_config.shell.take(),
@@ -401,14 +392,8 @@ impl WindowContext {
                         layout: Layout::Leaf(first_id),
                         active_pane: first_id,
                         has_bell: false,
-                        custom_name: restore
-                            .as_ref()
-                            .and_then(|session| session.tabs.first())
-                            .and_then(|tab| tab.custom_name.clone()),
-                        custom_color: restore
-                            .as_ref()
-                            .and_then(|session| session.tabs.first())
-                            .and_then(|tab| tab.color),
+                        custom_name: None,
+                        custom_color: None,
                         launch: TabLaunch::Default,
                         doc: None,
                         settings: false,
@@ -459,7 +444,7 @@ impl WindowContext {
             context.run_fastfetch_intro(first_id);
         }
         if let Some(session) = restore {
-            context.restore_session_tabs(&session);
+            context.restore_session_tabs(&session, seed_pinned);
         }
         if attached {
             context.finish_attach();
@@ -723,6 +708,18 @@ impl WindowContext {
             },
             TabRequest::Duplicate(index) => {
                 self.duplicate_tab(index);
+                false
+            },
+            TabRequest::ExportWorkspace => {
+                self.export_workspace(None);
+                false
+            },
+            TabRequest::ExportTab(index) => {
+                self.export_workspace(Some(index));
+                false
+            },
+            TabRequest::ImportWorkspace => {
+                self.import_workspace();
                 false
             },
             TabRequest::CloseWindow => {
@@ -1204,32 +1201,269 @@ impl WindowContext {
         }
     }
 
-    /// Rebuild the remaining tabs of a restored session (its first tab became
-    /// the initial pane) and refocus the tab that was active at close.
-    fn restore_session_tabs(&mut self, session: &session::Session) {
-        for tab in session.tabs.iter().skip(1) {
-            // A vanished directory falls back to the default cwd, keeping the
-            // tab count (and thus the saved active index) intact.
-            let cwd = session::valid_dir(&tab.cwd).or_else(|| self.display.startup_directory());
-            if let Some(id) = self.spawn_pane_detached(cwd, self.display.size_info) {
-                self.tabs.push(TabEntry {
-                    layout: Layout::Leaf(id),
-                    active_pane: id,
-                    has_bell: false,
-                    custom_name: tab.custom_name.clone(),
-                    custom_color: tab.color,
-                    launch: TabLaunch::Default,
-                    doc: None,
-                    settings: false,
-                });
-                self.run_fastfetch_intro(id);
-            }
+    /// Export the whole window (`None`) or a single tab (`Some(index)`) as a
+    /// workspace file — the same schema the crash-restore session uses, so
+    /// "打开工作区" and session restore share one rebuild path.
+    fn export_workspace(&mut self, tab_index: Option<usize>) {
+        let exportable = |tab: &&TabEntry| tab.doc.is_none() && !tab.settings;
+        let tabs: Vec<_> = match tab_index {
+            Some(index) => {
+                self.tabs.get(index).filter(exportable).map(|tab| self.tab_session(tab)).into_iter().collect()
+            },
+            None => self.tabs.iter().filter(exportable).map(|tab| self.tab_session(tab)).collect(),
+        };
+        let Some(first) = tabs.first() else { return };
+
+        // Single-tab exports name the file after the tab; whole-window exports
+        // after the workspace. Path separators and friends must not leak into
+        // the suggested file name.
+        let stem = match tab_index {
+            Some(_) => first
+                .custom_name
+                .clone()
+                .or_else(|| {
+                    first.cwd.rsplit(['/', '\\']).find(|part| !part.is_empty()).map(str::to_owned)
+                })
+                .unwrap_or_else(|| "tab".to_owned()),
+            None => "workspace".to_owned(),
+        };
+        let stem: String = stem
+            .chars()
+            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c })
+            .collect();
+
+        let Some(path) =
+            self.display.save_workspace_dialog(&format!("{stem}.nebula-workspace.json"))
+        else {
+            return;
+        };
+        let session = session::Session::new(0, tabs);
+        if let Err(err) = session::save_to(&path, &session) {
+            let user_error = crate::ux::UserFacingError::new(
+                "工作区导出失败",
+                "无法写入所选的工作区文件。",
+                "确认该位置可写(或换一个目录)后重试。",
+            )
+            .details(err.to_string());
+            self.message_buffer.push(crate::message_bar::Message::user_error(&user_error));
+            self.dirty = true;
+        }
+    }
+
+    /// Pick a workspace file and append its tabs — launch identity and split
+    /// trees included — to this window, then focus the first imported tab.
+    fn import_workspace(&mut self) {
+        let Some(path) = self.display.pick_workspace_dialog() else { return };
+        let Some(session) = session::load_from(&path) else {
+            let user_error = crate::ux::UserFacingError::new(
+                "工作区导入失败",
+                "所选文件不是可识别的 Nebula 工作区。",
+                "确认选择的是导出生成的 .nebula-workspace.json 文件。",
+            );
+            self.message_buffer.push(crate::message_bar::Message::user_error(&user_error));
+            self.dirty = true;
+            return;
+        };
+
+        let before = self.tabs.len();
+        for tab in &session.tabs {
+            self.append_session_tab(tab);
+        }
+        let added = self.tabs.len() - before;
+        if added > 0 {
+            // append_session_tab leaves the last new tab active; land on the
+            // first one, matching the saved workspace's reading order.
+            self.select_tab(self.active_tab + 1 - added);
+            self.sync_chrome_tabs();
+            self.mark_session_dirty();
+        } else {
+            let user_error = crate::ux::UserFacingError::new(
+                "工作区导入失败",
+                "工作区文件里没有可恢复的标签页。",
+                "该文件可能为空,或其中的会话都无法启动。",
+            );
+            self.message_buffer.push(crate::message_bar::Message::user_error(&user_error));
+            self.dirty = true;
+        }
+    }
+
+    /// Rebuild every saved tab of a restored session and refocus the tab that
+    /// was active at close. The boot path only spawned a seed pane so the
+    /// window exists; the real tabs — launch identity and split tree included
+    /// — are appended here through the same path workspace import uses, then
+    /// the seed is dismantled unless the CLI pinned its working directory.
+    fn restore_session_tabs(&mut self, session: &session::Session, keep_seed: bool) {
+        let first_new = self.tabs.len();
+        for tab in &session.tabs {
+            self.append_session_tab(tab);
+        }
+        let restored = self.tabs.len() - first_new;
+        if restored == 0 {
+            // Every spawn failed: keep the seed rather than an empty window.
+            return;
         }
         // Guarded: a failed spawn above leaves fewer tabs than were saved.
-        if session.active_tab < self.tabs.len() {
-            self.active_tab = session.active_tab;
+        if session.active_tab < restored {
+            self.active_tab = first_new + session.active_tab;
         }
+        if !keep_seed {
+            // The seed is a plain single-pane tab at index 0 that never saw
+            // user state — dismantle it in place instead of going through
+            // close_tab's confirmation and focus logic.
+            let seed = self.tabs.remove(0);
+            let mut ids = Vec::new();
+            seed.layout.leaves(&mut ids);
+            for id in ids {
+                if let Some(i) = self.pane_index(id) {
+                    let pane = self.panes.remove(i);
+                    let _ = pane.notifier.0.send(Msg::Shutdown);
+                }
+            }
+            self.active_tab = self.active_tab.saturating_sub(1).min(self.tabs.len() - 1);
+        }
+        self.resize_active_layout();
+        self.sync_chrome_tabs();
         self.dirty = true;
+    }
+
+    /// Append one saved tab: spawn its first pane per launch identity, rebuild
+    /// its split tree, and re-apply name/color/focus. Returns `false` when the
+    /// first pane could not spawn — the tab is skipped so the session's
+    /// remaining tabs still restore.
+    fn append_session_tab(&mut self, tab: &session::TabSession) -> bool {
+        let before = self.tabs.len();
+        let launch = tab.launch.as_ref().unwrap_or(&session::LaunchSession::Default);
+        match launch {
+            session::LaunchSession::Default => {
+                self.append_default_tab(tab);
+            },
+            session::LaunchSession::Shell { name, program, args } => {
+                let shell = nebula_terminal::tty::Shell::new(program.clone(), args.clone());
+                self.spawn_tab_shell(name.clone(), shell);
+            },
+            session::LaunchSession::Profile { name, command, args, cwd } => {
+                self.spawn_tab_profile_value(crate::config::ui_config::Profile {
+                    name: name.clone(),
+                    command: command.clone(),
+                    args: args.clone(),
+                    cwd: cwd.as_ref().map(std::path::PathBuf::from),
+                });
+            },
+            session::LaunchSession::Ssh { host } => self.spawn_tab_ssh(host.clone()),
+        }
+        if self.tabs.len() == before {
+            // Cross-platform degradation: a workspace made on another OS may
+            // name a program this machine lacks (wsl.exe on Linux, a distro
+            // shell on Windows). The tab must survive as a default shell in
+            // its saved directory rather than silently vanish; the SSH path
+            // reports its own failure and gets no fallback tab.
+            let is_command = matches!(
+                launch,
+                session::LaunchSession::Shell { .. } | session::LaunchSession::Profile { .. }
+            );
+            if !(is_command && self.append_default_tab(tab)) {
+                return false;
+            }
+        }
+
+        // The new tab is active now. Grow the saved split tree around its
+        // first pane, then re-apply the saved presentation.
+        let first_pane = self.tabs[self.active_tab].active_pane;
+        if let Some(saved) = tab.layout.as_ref().filter(|layout| layout.pane_count() > 1) {
+            let mut seed = Some(first_pane);
+            if let Some(built) = self.rebuild_layout(saved, &mut seed) {
+                let entry = &mut self.tabs[self.active_tab];
+                entry.layout = built;
+                let mut leaves = Vec::new();
+                entry.layout.leaves(&mut leaves);
+                entry.active_pane =
+                    leaves.get(tab.active_pane).or(leaves.first()).copied().unwrap_or(first_pane);
+                self.resize_active_layout();
+            }
+        }
+        let entry = &mut self.tabs[self.active_tab];
+        if tab.custom_name.is_some() {
+            // `None` must not clobber the launch-derived label (SSH host,
+            // shell name) that spawn_tab_* already set.
+            entry.custom_name = tab.custom_name.clone();
+        }
+        entry.custom_color = tab.color;
+        true
+    }
+
+    /// Spawn a default-shell tab in a saved tab's first-leaf directory —
+    /// both the `Default` launch path and the cross-platform fallback when a
+    /// saved program does not exist on this machine.
+    fn append_default_tab(&mut self, tab: &session::TabSession) -> bool {
+        // The first pane adopts the tree's first leaf, so it must start in
+        // that leaf's directory, not the focused pane's.
+        let saved_cwd = tab.layout.as_ref().map(|layout| layout.first_cwd()).unwrap_or(&tab.cwd);
+        let cwd = session::valid_dir(saved_cwd).or_else(|| self.display.startup_directory());
+        let Some(id) = self.spawn_pane_detached(cwd, self.display.size_info) else {
+            return false;
+        };
+        let at = (self.active_tab + 1).min(self.tabs.len());
+        self.tabs.insert(
+            at,
+            TabEntry {
+                layout: Layout::Leaf(id),
+                active_pane: id,
+                has_bell: false,
+                custom_name: None,
+                custom_color: None,
+                launch: TabLaunch::Default,
+                doc: None,
+                settings: false,
+            },
+        );
+        self.active_tab = at;
+        self.run_fastfetch_intro(id);
+        true
+    }
+
+    /// Materialize a saved split tree. `seed` is the already-spawned first
+    /// pane, adopted by the depth-first first leaf; every other leaf spawns a
+    /// default shell in its saved cwd — matching live behaviour, where only a
+    /// tab's first pane carries the launch identity. A leaf whose spawn fails
+    /// collapses its parent to the surviving side, so a partially failed
+    /// restore still yields a working tab.
+    fn rebuild_layout(
+        &mut self,
+        node: &session::LayoutSession,
+        seed: &mut Option<PaneId>,
+    ) -> Option<Layout> {
+        match node {
+            session::LayoutSession::Pane { cwd } => {
+                if let Some(id) = seed.take() {
+                    return Some(Layout::Leaf(id));
+                }
+                let cwd =
+                    session::valid_dir(cwd).or_else(|| self.display.startup_directory());
+                self.spawn_pane_detached(cwd, self.display.size_info).map(Layout::Leaf)
+            },
+            session::LayoutSession::Split { axis, ratio_permille, first, second } => {
+                let first = self.rebuild_layout(first, seed);
+                let second = self.rebuild_layout(second, seed);
+                match (first, second) {
+                    (Some(first), Some(second)) => Some(Layout::Split {
+                        direction: match axis {
+                            session::SplitAxis::LeftRight => {
+                                crate::display::SplitDirection::LeftRight
+                            },
+                            session::SplitAxis::TopBottom => {
+                                crate::display::SplitDirection::TopBottom
+                            },
+                        },
+                        ratio: (f32::from(*ratio_permille) / 1000.0).clamp(0.05, 0.95),
+                        preview_ratio: None,
+                        dragging: false,
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    }),
+                    (first, second) => first.or(second),
+                }
+            },
+        }
     }
 
     /// Whether any pane (and its PTY) is still alive in this window.
@@ -1302,22 +1536,91 @@ impl WindowContext {
             .tabs
             .iter()
             .filter(|tab| tab.doc.is_none() && !tab.settings)
-            .map(|t| session::TabSession {
-                cwd: self
-                    .pane(t.active_pane)
-                    .map(|p| p.nebula_state.cwd.trim().to_owned())
-                    .unwrap_or_default(),
-                custom_name: t.custom_name.clone(),
-                color: t.custom_color,
-            })
+            .map(|tab| self.tab_session(tab))
             .collect();
         let mut session = session::Session::new(active_tab.min(tabs.len().saturating_sub(1)), tabs);
-        session.window = Some(session::WindowState {
-            width: self.windowed_size.width,
-            height: self.windowed_size.height,
-            maximized: self.display.window.is_maximized(),
+        let maximized = self.display.window.is_maximized();
+        session.window = Some(if maximized {
+            // Maximized: the live inner size is the whole monitor — remember
+            // the last known NORMAL size instead.
+            session::WindowState {
+                width: self.windowed_size.width,
+                height: self.windowed_size.height,
+                maximized,
+            }
+        } else {
+            // Normal state: take the current size straight from the window.
+            // The cached bookkeeping once picked up a physical-domain value,
+            // and a restored window then ballooned by the DPI factor on
+            // every relaunch.
+            let logical: LogicalSize<u32> =
+                self.display.window.inner_size().to_logical(self.display.window.scale_factor);
+            session::WindowState { width: logical.width, height: logical.height, maximized }
         });
         session
+    }
+
+    /// One tab as a persistable record: focused-pane cwd, launch identity and
+    /// the full split tree. Shared by the session autosave and the workspace
+    /// export so both always describe tabs identically.
+    fn tab_session(&self, tab: &TabEntry) -> session::TabSession {
+        let pane_cwd = |id: PaneId| {
+            self.pane(id).map(|p| p.nebula_state.cwd.trim().to_owned()).unwrap_or_default()
+        };
+        let mut leaves = Vec::new();
+        tab.layout.leaves(&mut leaves);
+        session::TabSession {
+            cwd: pane_cwd(tab.active_pane),
+            custom_name: tab.custom_name.clone(),
+            color: tab.custom_color,
+            launch: Some(Self::launch_session(&tab.launch)),
+            layout: Some(Self::layout_session(&tab.layout, &pane_cwd)),
+            active_pane: leaves.iter().position(|id| *id == tab.active_pane).unwrap_or(0),
+        }
+    }
+
+    /// The persistable subset of a tab's launch identity. Document/settings
+    /// tabs are filtered out before this is called; mapping them to `Default`
+    /// keeps the function total without giving them a session meaning.
+    fn launch_session(launch: &TabLaunch) -> session::LaunchSession {
+        match launch {
+            TabLaunch::Default | TabLaunch::Document(_) | TabLaunch::Settings => {
+                session::LaunchSession::Default
+            },
+            TabLaunch::Shell { name, shell } => session::LaunchSession::Shell {
+                name: name.clone(),
+                program: shell.program().to_owned(),
+                args: shell.args().to_vec(),
+            },
+            TabLaunch::Profile(profile) => session::LaunchSession::Profile {
+                name: profile.name.clone(),
+                command: profile.command.clone(),
+                args: profile.args.clone(),
+                cwd: profile.cwd.as_ref().map(|path| path.to_string_lossy().into_owned()),
+            },
+            TabLaunch::Ssh(host) => session::LaunchSession::Ssh { host: host.clone() },
+        }
+    }
+
+    /// Serialize a layout tree, resolving each leaf to its pane's cwd.
+    fn layout_session(
+        layout: &Layout,
+        pane_cwd: &impl Fn(PaneId) -> String,
+    ) -> session::LayoutSession {
+        match layout {
+            Layout::Leaf(id) => session::LayoutSession::Pane { cwd: pane_cwd(*id) },
+            Layout::Split { direction, ratio, first, second, .. } => {
+                session::LayoutSession::Split {
+                    axis: match direction {
+                        crate::display::SplitDirection::LeftRight => session::SplitAxis::LeftRight,
+                        crate::display::SplitDirection::TopBottom => session::SplitAxis::TopBottom,
+                    },
+                    ratio_permille: (ratio.clamp(0.0, 1.0) * 1000.0).round() as u16,
+                    first: Box::new(Self::layout_session(first, pane_cwd)),
+                    second: Box::new(Self::layout_session(second, pane_cwd)),
+                }
+            },
+        }
     }
 
     /// 1 Hz autosave (piggybacks on the chrome clock tick): persist the session
@@ -1488,6 +1791,43 @@ impl WindowContext {
         // stale or non-filesystem path would otherwise make the new pane's
         // CreateProcessW fail with ERROR_DIRECTORY.
         session::valid_dir(&cwd)
+    }
+
+    /// The focused pane's cwd mapped through `\\wsl$` when the pane belongs
+    /// to a WSL tab reporting a Linux path — so the directory tree can follow
+    /// a WSL shell. Only the drawer uses this: spawning terminals in a UNC
+    /// directory has its own semantics and is deliberately not affected.
+    fn focused_wsl_cwd(&self) -> Option<std::path::PathBuf> {
+        let raw = self.pane(self.focused_pane_id()).map(|p| p.nebula_state.cwd.clone())?;
+        let raw = raw.trim();
+        if !raw.starts_with('/') {
+            return None;
+        }
+        let tab = self.tabs.iter().find(|tab| {
+            let mut ids = Vec::new();
+            tab.layout.leaves(&mut ids);
+            ids.contains(&self.focused_pane_id())
+        })?;
+        let TabLaunch::Shell { shell, .. } = &tab.launch else { return None };
+        let program = std::path::Path::new(shell.program())
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if program != "wsl" {
+            return None;
+        }
+        // `wsl -d <distro>` / `--distribution <distro>`; a bare `wsl` launch
+        // uses the default distro whose name we cannot know — skip mapping
+        // and let the tree keep its last known root.
+        let args = shell.args();
+        let distro = args
+            .iter()
+            .position(|arg| arg == "-d" || arg == "--distribution")
+            .and_then(|index| args.get(index + 1))?;
+        let unc = format!("\\\\wsl$\\{distro}{}", raw.replace('/', "\\"));
+        let path = std::path::PathBuf::from(unc);
+        path.is_dir().then_some(path)
     }
 
     /// First busy (non-whitelisted) process running under any of `pane_ids`'
@@ -1827,8 +2167,13 @@ impl WindowContext {
     pub fn draw(&mut self, scheduler: &mut Scheduler) {
         self.display.window.requested_redraw = false;
         self.sync_chrome_tabs();
-        // Right-side drawer follows the focused pane's cwd (throttled inside).
-        let panel_cwd = self.focused_cwd();
+        // The drawer follows the focused pane: its VIEW routes to SFTP only
+        // while an SSH pane with the matching destination is focused, and the
+        // directory tree follows the focused pane's cwd (throttled inside).
+        let focused_ssh =
+            self.pane(self.focused_pane_id()).and_then(|pane| pane.ssh_destination.clone());
+        self.display.route_side_panel(focused_ssh.as_deref());
+        let panel_cwd = self.focused_cwd().or_else(|| self.focused_wsl_cwd());
         self.display.side_panel_sync(panel_cwd);
 
         // Chrome clock: 1 Hz idle, 8 fps for finite UI transitions, and

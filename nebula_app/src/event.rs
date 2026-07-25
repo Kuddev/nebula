@@ -1291,8 +1291,15 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     }
 
     fn change_font_size(&mut self, delta: f32) {
+        let scale = self.display.window.scale_factor as f32;
+        // Hard bounds keep runaway zooms recoverable. Without them a stuck
+        // modifier or trackpad burst can scroll the terminal to 180 px+,
+        // where a ±1-step notch changes the size by under 1 % and zooming
+        // back out reads as "broken". Logical 4–64 px covers everything from
+        // dense logs to presentations.
+        let (min_px, max_px) = (4.0 * scale, 64.0 * scale);
         // Round to pick integral px steps, since fonts look better on them.
-        let new_size = self.display.font_size.as_px().round() + delta;
+        let new_size = (self.display.font_size.as_px().round() + delta).clamp(min_px, max_px);
         self.display.font_size = FontSize::from_px(new_size);
         let font = self.display.effective_font(&self.config.font).with_size(self.display.font_size);
         self.display.pending_update.set_font(font);

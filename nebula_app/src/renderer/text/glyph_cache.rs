@@ -69,6 +69,12 @@ pub struct GlyphCache {
     /// Font size.
     pub font_size: crossfont::Size,
 
+    /// The UI font role's size (wezterm's `Entity::Title` pattern): chrome
+    /// typography rasterizes at this size and never follows the terminal
+    /// zoom. Kept alongside the terminal size — `GlyphKey` carries the size,
+    /// so both roles share one atlas.
+    ui_font_size: crossfont::Size,
+
     /// Font offset.
     font_offset: Delta<i8>,
 
@@ -77,6 +83,14 @@ pub struct GlyphCache {
 
     /// Font metrics.
     metrics: Metrics,
+
+    /// The UI font role's metrics, truly rasterized at [`Self::ui_font_size`].
+    ui_metrics: Metrics,
+
+    /// While set, [`Self::load_glyph`] bakes the UI role's descent into glyph
+    /// anchors instead of the terminal's. The UI text paths flip this around
+    /// their draws; see [`Self::begin_ui_domain`].
+    ui_domain: bool,
 
     /// Whether to use the built-in font for box drawing characters.
     builtin_box_drawing: bool,
@@ -127,6 +141,10 @@ impl GlyphCache {
             cache: Default::default(),
             rasterizer,
             font_size: font.size(),
+            // The UI role starts at the terminal size; the display pins it to
+            // the config base size right after construction and on every font
+            // change (`set_ui_font_size`).
+            ui_font_size: font.size(),
             font_key: regular,
             bold_key: bold,
             italic_key: italic,
@@ -135,6 +153,8 @@ impl GlyphCache {
             font_offset: font.offset,
             glyph_offset: font.glyph_offset,
             metrics,
+            ui_metrics: metrics,
+            ui_domain: false,
             builtin_box_drawing: font.builtin_box_drawing,
         })
     }
@@ -286,9 +306,14 @@ impl GlyphCache {
         let rasterized = self
             .builtin_box_drawing
             .then(|| {
+                // Built-in glyphs are DRAWN from metrics rather than
+                // rasterized from the face, so they must follow the active
+                // domain like every other glyph — the cursor-shape previews
+                // (│ █ ▁) in the settings dropdown are UI text.
+                let metrics = if self.ui_domain { &self.ui_metrics } else { &self.metrics };
                 builtin_font::builtin_glyph(
                     glyph_key.character,
-                    &self.metrics,
+                    metrics,
                     &self.font_offset,
                     &self.glyph_offset,
                 )
@@ -328,7 +353,12 @@ impl GlyphCache {
     {
         glyph.left += i32::from(self.glyph_offset.x);
         glyph.top += i32::from(self.glyph_offset.y);
-        glyph.top -= self.metrics.descent as i32;
+        // The descent baked into the anchor comes from the glyph's domain:
+        // UI-role text (any scale) anchors in the UI metrics so chrome never
+        // moves with the terminal zoom; everything else (grid cells, doc
+        // text) keeps the terminal domain its baseline math is built on.
+        let metrics = if self.ui_domain { &self.ui_metrics } else { &self.metrics };
+        glyph.top -= metrics.descent as i32;
 
         // The metrics of zero-width characters are based on rendering
         // the character after the current cell, with the anchor at the
@@ -336,7 +366,7 @@ impl GlyphCache {
         // zero-width characters inside the preceding character, the
         // anchor has been moved to the right by one cell.
         if glyph.character.width() == Some(0) {
-            glyph.left += self.metrics.average_advance as i32;
+            glyph.left += metrics.average_advance as i32;
         }
 
         // Add glyph to cache.
@@ -391,6 +421,64 @@ impl GlyphCache {
 
     pub fn font_metrics(&self) -> crossfont::Metrics {
         self.metrics
+    }
+
+    /// Metrics the regular face produces when truly rasterized at `size`.
+    ///
+    /// The UI anchor system steps chrome text by the REAL advance of the UI
+    /// base font size; deriving it by scaling the terminal metrics ignores
+    /// per-size hinting and drifts a fraction of a pixel per column, which
+    /// reads as hairline seams once the terminal is zoomed.
+    pub fn metrics_at(&mut self, size: crossfont::Size) -> Option<crossfont::Metrics> {
+        // A glyph at the target size must be loaded before metrics resolve
+        // (same contract as `load_font_metrics`).
+        self.rasterizer
+            .get_glyph(GlyphKey { font_key: self.font_key, character: 'm', size })
+            .ok()?;
+        self.rasterizer.metrics(self.font_key, size).ok()
+    }
+
+    /// Pin the UI font role to `size` (wezterm's `Entity::Title` pattern):
+    /// chrome typography rasterizes at this size regardless of the terminal
+    /// zoom. Returns the role's metrics; on rasterizer failure the role
+    /// degrades to the terminal font so chrome never goes blank.
+    pub fn set_ui_font_size(&mut self, size: crossfont::Size) -> crossfont::Metrics {
+        match self.metrics_at(size) {
+            Some(metrics) => {
+                self.ui_font_size = size;
+                self.ui_metrics = metrics;
+            },
+            None => {
+                self.ui_font_size = self.font_size;
+                self.ui_metrics = self.metrics;
+            },
+        }
+        self.ui_metrics
+    }
+
+    /// The UI font role's size. Shares the atlas with the terminal font —
+    /// `GlyphKey` carries the size, so both roles' glyphs coexist.
+    pub fn ui_font_size(&self) -> crossfont::Size {
+        self.ui_font_size
+    }
+
+    /// The UI font role's metrics (real rasterized values, not scaled
+    /// approximations of the terminal metrics).
+    pub fn ui_font_metrics(&self) -> crossfont::Metrics {
+        self.ui_metrics
+    }
+
+    /// Glyphs loaded until [`Self::end_ui_domain`] bake the UI role's descent
+    /// into their anchor instead of the terminal's — a UI glyph positioned
+    /// with the terminal descent rides upward as the zoom grows and jitters
+    /// one pixel per zoom notch. The only cache-key overlap between the two
+    /// domains happens at the base zoom, where both descents are equal.
+    pub fn begin_ui_domain(&mut self) {
+        self.ui_domain = true;
+    }
+
+    pub fn end_ui_domain(&mut self) {
+        self.ui_domain = false;
     }
 
     /// Prefetch glyphs that are almost guaranteed to be loaded anyways.

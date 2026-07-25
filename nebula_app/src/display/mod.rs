@@ -603,6 +603,19 @@ pub(crate) fn program_icon(program: &str) -> &'static str {
     }
 }
 
+/// The UI font role (wezterm's `window_frame` pattern): the size chrome
+/// typography rasterizes at and the cell chrome layout steps by. Anchored to
+/// the config font at the window's DPI — never to the terminal zoom. Stage 3
+/// exposes family/size as user config.
+#[derive(Clone, Copy, Debug)]
+struct NebulaUiFont {
+    /// Role size in physical px (config size × DPI scale).
+    px: f32,
+    /// Cell the chrome layout steps by, from the role's REAL rasterized
+    /// metrics (`compute_cell_size` over `GlyphCache::set_ui_font_size`).
+    cell: (f32, f32),
+}
+
 pub(crate) fn nebula_debug_log(message: impl AsRef<str>) {
     use std::io::Write as _;
 
@@ -1267,11 +1280,15 @@ pub struct Display {
     /// Font size used by the window.
     pub font_size: FontSize,
 
-    /// UI 基准字号（配置字号 × 当前 DPI 缩放后的 px）。Ctrl+滚轮 / 设置
-    /// spinner 只改 `font_size`（终端网格与跟随它的文档查看器）；chrome、
-    /// 设置页、侧栏等 UI 的文字与布局通过 [`Self::ui_text_scale`] 锚定在
-    /// 这个基准上，不随终端缩放。
-    nebula_ui_font_px: f32,
+    /// UI 字体角色（wezterm `window_frame` 范式）：chrome 排版锚定在这个
+    /// 状态上，永不跟随终端缩放。Ctrl+滚轮 / 设置 spinner 只改
+    /// `font_size`（终端网格与跟随它的文档查看器）。阶段 3 将把
+    /// family/size 暴露为独立配置。
+    nebula_ui_font: NebulaUiFont,
+
+    /// 抽屉视图是否路由到 SFTP（聚焦 pane 的 SSH 身份与面板连接匹配）。
+    /// 见 [`Self::route_side_panel`]。
+    nebula_sftp_routed: bool,
 
     // Mouse point position when highlighting hints.
     hint_mouse_point: Option<Point>,
@@ -1340,7 +1357,6 @@ impl Display {
         config: &UiConfig,
         system_theme: Option<WinitTheme>,
         _tabbed: bool,
-        restored_window: Option<crate::session::WindowState>,
     ) -> Result<Display, Error> {
         let raw_window_handle = window.raw_window_handle();
 
@@ -1393,26 +1409,24 @@ impl Display {
 
         // Resize the window to the user-configured size, or a Windows
         // Terminal-like default when unset. A 116-column by 30-row canvas is
-        // the requested compact startup size without changing explicitly
-        // configured dimensions.
+        // the standard startup size. Two inputs are deliberately excluded:
+        // the session file's saved window size (stale/wrong-domain values
+        // kept resurfacing as near-fullscreen launches), and the persisted
+        // terminal zoom — the startup grid is priced at the CONFIG base font
+        // size, because 116 columns of a Ctrl+wheel-enlarged cell is itself
+        // a near-fullscreen window. The zoomed font still renders; it just
+        // shows fewer columns in the standard-sized window.
         let dimensions = config
             .window
             .dimensions()
             .unwrap_or(crate::config::window::Dimensions { columns: 116, lines: 30 });
-        let size = restored_window
-            .filter(|state| state.valid_size())
-            .map(|state| {
-                let mut size = winit::dpi::LogicalSize::new(state.width, state.height)
-                    .to_physical::<u32>(window.scale_factor);
-                if let Some(monitor) = window.current_monitor_size() {
-                    size.width = size.width.min(monitor.width).max(100);
-                    size.height = size.height.min(monitor.height).max(100);
-                }
-                size
-            })
-            .unwrap_or_else(|| {
-                window_size(config, dimensions, cell_width, cell_height, scale_factor)
-            });
+        let base_font_size = config.font.size().scale(scale_factor);
+        let (base_cell_width, base_cell_height) = glyph_cache
+            .metrics_at(base_font_size)
+            .map(|base_metrics| compute_cell_size(config, &base_metrics))
+            .unwrap_or((cell_width, cell_height));
+        let size =
+            window_size(config, dimensions, base_cell_width, base_cell_height, scale_factor);
         window.request_inner_size(size);
 
         // Create the GL surface to draw into.
@@ -1521,12 +1535,6 @@ impl Display {
                 StartupMode::Maximized if !is_wayland => window.set_maximized(true),
                 #[cfg(windows)]
                 StartupMode::Fullscreen => window.set_fullscreen(true),
-                _ if restored_window.is_some_and(|state| state.maximized)
-                    && config.window.fullscreen().is_none()
-                    && !is_wayland =>
-                {
-                    window.set_maximized(true)
-                },
                 _ => (),
             }
         }
@@ -1552,7 +1560,7 @@ impl Display {
         let mut initial_colors = nebula_default_colors;
         nebula_theme.apply_term_colors(&mut initial_colors, &nebula_default_colors);
 
-        Ok(Self {
+        let mut display = Self {
             context: ManuallyDrop::new(context),
             visual_bell: VisualBell::from(&config.bell),
             renderer: ManuallyDrop::new(renderer),
@@ -1568,7 +1576,8 @@ impl Display {
             hint_state,
             size_info,
             font_size,
-            nebula_ui_font_px: ui_font_px,
+            nebula_ui_font: NebulaUiFont { px: ui_font_px, cell: (0.0, 0.0) },
+            nebula_sftp_routed: true,
             window,
             pending_renderer_update: Default::default(),
             vi_highlighted_hint_age: Default::default(),
@@ -1688,7 +1697,12 @@ impl Display {
             nebula_bg_hex_active: false,
             meter: Default::default(),
             ime: Default::default(),
-        })
+        };
+        // A persisted zoom means the very first frame already runs off the UI
+        // base size — the font role must be pinned NOW, not after the first
+        // font change funnels through handle_update.
+        display.refresh_ui_font(config);
+        Ok(display)
     }
 
     pub fn settings_open(&self) -> bool {
@@ -2557,7 +2571,7 @@ impl Display {
 
     pub fn context_menu_hit(&self, x: f32, y: f32) -> ContextMenuHit {
         self.nebula_context_menu.as_ref().map_or(ContextMenuHit::Outside, |menu| {
-            context_menu::hit_test(menu, self.size_info, self.window.scale_factor as f32, x, y)
+            context_menu::hit_test(menu, self.ui_size_info(), self.window.scale_factor as f32, x, y)
         })
     }
 
@@ -2593,8 +2607,11 @@ impl Display {
     }
 
     pub fn chrome_hit(&self, x: f32, y: f32) -> ChromeHit {
+        // Hit-testing must read the SAME layout the chrome was drawn with —
+        // the UI-anchored SizeInfo — or clicks drift off their targets as
+        // soon as the terminal is zoomed away from the base font size.
         chrome_hit_with_tabs(
-            &self.size_info,
+            &self.ui_size_info(),
             self.window.scale_factor as f32,
             self.sidebar_model(),
             self.nebula_sidebar_collapsed,
@@ -3227,6 +3244,17 @@ impl Display {
     /// refresh the renderer's cached wallpaper. On non-Windows platforms the
     /// native dialog isn't wired up, so we fall back to opening the settings
     /// file for the path to be entered by hand.
+    /// Native save dialog for a workspace export, pre-filled with
+    /// `default_name`. `None` when the user cancels.
+    pub fn save_workspace_dialog(&self, default_name: &str) -> Option<std::path::PathBuf> {
+        file_dialog::save_workspace_file(&self.window, default_name)
+    }
+
+    /// Native open dialog for a workspace import. `None` when cancelled.
+    pub fn pick_workspace_dialog(&self) -> Option<std::path::PathBuf> {
+        file_dialog::pick_workspace_file(&self.window)
+    }
+
     pub fn pick_background_image(&mut self) {
         #[cfg(windows)]
         {
@@ -3578,11 +3606,35 @@ impl Display {
     /// Adopt the focused pane's cwd into the drawer (per drawn frame; cheap
     /// no-op unless the drawer is open and something changed).
     pub fn side_panel_sync(&mut self, cwd: Option<std::path::PathBuf>) {
-        if self.nebula_sftp_panel.is_some() {
+        if self.sftp_view_active() {
             return;
         }
         if self.nebula_side_panel.sync(cwd) {
             self.pending_update.dirty = true;
+        }
+    }
+
+    /// Whether the drawer currently shows the SFTP view. The SFTP panel is a
+    /// window-level object, but its VIEW follows the focused pane: focusing a
+    /// local tab flips the drawer back to the directory tree (the SFTP
+    /// connection stays warm for the next switch), so the tree keeps
+    /// following tab switches instead of being captured by one SSH session.
+    pub(crate) fn sftp_view_active(&self) -> bool {
+        self.nebula_sftp_panel.is_some() && self.nebula_sftp_routed
+    }
+
+    /// Re-route the drawer to the focused pane's identity, called every draw.
+    /// `focused_ssh` is the pane's stable SSH destination, `None` for local
+    /// panes.
+    pub fn route_side_panel(&mut self, focused_ssh: Option<&str>) {
+        let routed = match (self.nebula_sftp_panel.as_ref(), focused_ssh) {
+            (Some(panel), Some(destination)) => panel.snapshot().destination == destination,
+            _ => false,
+        };
+        if self.nebula_sftp_routed != routed {
+            self.nebula_sftp_routed = routed;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
         }
     }
 
@@ -3659,6 +3711,11 @@ impl Display {
     }
 
     pub fn sftp_hit(&self, x: f32, y: f32) -> sftp_panel::SftpHit {
+        // A hidden SFTP view (drawer re-routed to a local pane) must not eat
+        // clicks that belong to the directory tree drawn in its place.
+        if !self.sftp_view_active() {
+            return sftp_panel::SftpHit::None;
+        }
         let Some(panel) = self.nebula_sftp_panel.as_ref() else {
             return sftp_panel::SftpHit::None;
         };
@@ -3805,37 +3862,70 @@ impl Display {
         self.nebula_ui_anims.left_sidebar.visible(!self.nebula_sidebar_collapsed)
     }
 
-    /// DPI 变化时按同一比例重标 UI 基准字号（等价于配置字号 × 新缩放）。
+    /// DPI 变化时按同一比例重标 UI 角色字号（等价于配置字号 × 新缩放）。
     pub(crate) fn rescale_ui_font(&mut self, factor: f32) {
         if factor.is_finite() && factor > 0.0 {
-            self.nebula_ui_font_px *= factor;
+            self.nebula_ui_font.px *= factor;
         }
     }
 
-    /// UI 文本相对当前终端字号的补偿比率 = UI 基准字号 / 当前字号。
-    /// Ctrl+滚轮与设置里的字号只属于终端网格（以及跟随它的 md/txt 查看
-    /// 器）；chrome、设置页、侧栏、浮层的文字与布局乘此比率反向抵消，
-    /// 视觉上锚定在配置字号。
+    /// UI 角色字号相对当前终端字号的比率。仅供尚未角色化的历史缩放路径
+    /// （`begin_chrome_text_scaled`、链接预览的手动锚定）使用；新代码一律
+    /// 走 `draw_chrome_text*` / `draw_ui_text*`，它们直接从字体角色取真实
+    /// 字号与 metrics。
     pub(crate) fn ui_text_scale(&self) -> f32 {
         let cur = self.font_size.as_px();
-        if cur <= 0.0 || self.nebula_ui_font_px <= 0.0 {
+        if cur <= 0.0 || self.nebula_ui_font.px <= 0.0 {
             return 1.0;
         }
-        self.nebula_ui_font_px / cur
+        self.nebula_ui_font.px / cur
     }
 
-    /// [`Self::size_info`] 的 UI 版本：cell 尺寸按 [`Self::ui_text_scale`]
-    /// 补偿。chrome / 设置 / 浮层的布局与命中测试统一用它，与按同一比率
-    /// 栅格化的 UI 文本严格同源；终端网格、damage、光标继续用原
-    /// `size_info`。
+    /// [`Self::size_info`] 的 UI 版本：cell 尺寸来自 UI 字体角色的真实
+    /// 栅格 metrics（[`Self::refresh_ui_font`] 量取）。chrome / 设置 /
+    /// 浮层的布局与命中测试统一用它，与按同一角色栅格化的 UI 文本严格
+    /// 同源；终端网格、damage、光标继续用原 `size_info`。
     pub(crate) fn ui_size_info(&self) -> SizeInfo {
-        let ratio = self.ui_text_scale();
         let mut ui = self.size_info;
-        if (ratio - 1.0).abs() > 0.001 {
-            ui.cell_width = self.size_info.cell_width * ratio;
-            ui.cell_height = self.size_info.cell_height * ratio;
-        }
+        let (cell_w, cell_h) = self.nebula_ui_font.cell;
+        ui.cell_width = cell_w;
+        ui.cell_height = cell_h;
         ui
+    }
+
+    /// Pin the glyph cache's UI font role to the anchor size and refresh the
+    /// cell the chrome layout steps by. Runs at construction and on every
+    /// terminal font change — zoom, family, DPI all funnel through the font
+    /// update, so this is the single place the role can go stale.
+    fn refresh_ui_font(&mut self, config: &UiConfig) {
+        let ui_size = FontSize::from_px(self.nebula_ui_font.px);
+        let metrics = self.glyph_cache.set_ui_font_size(ui_size);
+        self.nebula_ui_font.cell = compute_cell_size(config, &metrics);
+        let ratio = self.ui_text_scale();
+        // Unconditional breadcrumb (tiny, a handful of lines per session):
+        // diagnosing "the sidebar zooms with the terminal" reports needs this
+        // from USER instances, which never run with NEBULA_DEBUG_LOG set.
+        let line = format!(
+            "[{}] ui_anchor ratio={ratio:.3} ui_font_px={:.1} font_px={:.1} scale={:.2} term_cell={}x{} ui_cell={:?}\n",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            self.nebula_ui_font.px,
+            self.font_size.as_px(),
+            self.window.scale_factor,
+            self.size_info.cell_width,
+            self.size_info.cell_height,
+            self.nebula_ui_font.cell
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(nebula_data_dir().join("ui_anchor.log"))
+        {
+            use std::io::Write as _;
+            let _ = file.write_all(line.as_bytes());
+        }
     }
 
     /// Geometry of the rounded terminal card in physical pixels `(x, y, w, h)`.
@@ -3913,7 +4003,7 @@ impl Display {
             return false;
         }
         let layout = chrome_tab_layout(
-            &self.size_info,
+            &self.ui_size_info(),
             self.window.scale_factor as f32,
             self.sidebar_model(),
             self.left_sidebar_progress(),
@@ -4320,6 +4410,11 @@ impl Display {
 
             info!("Cell size: {cell_width} x {cell_height}");
 
+            // Every zoom / font / DPI change funnels through a font update,
+            // so this is the single point where the UI font role can go
+            // stale.
+            self.refresh_ui_font(config);
+
             // Mark entire terminal as damaged since glyph size could change without cell size
             // changes.
             self.damage_tracker.frame().mark_fully_damaged();
@@ -4549,8 +4644,14 @@ impl Display {
 
         // 打字（含 IME 组词）不影响网格内容，扫描保持开启；一旦这里随
         // preedit 关断，中文输入的每次拼音组合都会让全部公式闪回原文。
-        let terminal_math_overlays = if pane_state.terminal_math.inline_dollar_enabled()
-            && !alt_screen
+        //
+        // 扫描本身不按 AI CLI 探测门控：$$/\[ \]/\( \) 定界符加上
+        // plausible_math_source 已经足够抗误报，而 WSL/SSH 里跑的 AI CLI
+        // 在本机进程树上只留下 wsl.exe/ssh.exe，按进程门控会把远程会话的
+        // 公式全部关掉。只有误报率最高的裸 $…$ 仍要求 AI CLI 上下文
+        // （进程探测命中，或本 pane 已渲染过块级公式）。
+        let allow_inline_dollar = pane_state.terminal_math.inline_dollar_enabled();
+        let terminal_math_overlays = if !alt_screen
             && !vi_mode
             && search_state.regex().is_none()
             && selection_range.is_none()
@@ -4561,7 +4662,7 @@ impl Display {
                 &terminal,
                 &view,
                 &grid_cells,
-                true,
+                allow_inline_dollar,
                 visible_cursor,
                 foreground_color,
             )
@@ -5610,13 +5711,15 @@ impl Display {
         let rows = hud.rows;
         let fade = hud.opacity.value().clamp(0.0, 1.0);
 
-        let size = self.size_info;
+        // UI-anchored metrics: the HUD is chrome, so its box and label must
+        // not inflate with the terminal zoom it is reporting.
+        let size = self.ui_size_info();
         let scale = self.window.scale_factor as f32;
         let cw = size.cell_width();
         let ch = size.cell_height();
 
         let text = format!("{cols} × {rows}");
-        let text_cols = text.chars().count();
+        let text_cols: usize = text.chars().map(|c| c.width().unwrap_or(1)).sum();
 
         // Centered translucent rounded box (fades out), skinned by the theme
         // so it reads as chrome on light panels too.
@@ -5631,17 +5734,24 @@ impl Display {
         let quad = UiQuad::solid(box_x, box_y, box_w, box_h, 8.0 * scale, bg);
         self.renderer.draw_ui(&size, &[quad]);
 
-        // Centered text. `draw_string` paints opaque cell backgrounds, so give it
-        // the box's core color to blend into the rounded quad.
-        let col = size.columns().saturating_sub(text_cols) / 2;
-        let line = size.screen_lines() / 2;
+        // The label shares the box's pixel coordinate system — the old
+        // grid-cell placement centered on the TERMINAL area (whose origin
+        // carries the asymmetric sidebar padding), so the text drifted out of
+        // the window-centered box whenever the sidebar was open. Ink fades
+        // with the box by mixing toward the panel color.
+        let mix = |a: u8, b: u8| (a as f32 * fade + b as f32 * (1.0 - fade)).round() as u8;
+        let ink = Rgb::new(
+            mix(sk.ink_strong.r, hud_rgb.r),
+            mix(sk.ink_strong.g, hud_rgb.g),
+            mix(sk.ink_strong.b, hud_rgb.b),
+        );
         let glyph_cache = &mut self.glyph_cache;
-        self.renderer.draw_string(
-            Point::new(line, Column(col)),
-            sk.ink_strong,
-            hud_rgb,
-            text.chars(),
+        self.renderer.draw_chrome_text(
             &size,
+            box_x + pad,
+            box_y + pad,
+            ink,
+            &text,
             glyph_cache,
         );
 
