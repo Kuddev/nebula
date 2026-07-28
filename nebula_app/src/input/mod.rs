@@ -83,6 +83,16 @@ pub trait ActionContext<T: EventListener> {
     fn nebula_take_suggestion(&mut self) -> String {
         String::new()
     }
+    /// 助手建议条（spec 001）：取走 Ready 状态里的命令（Ctrl+. 贴入用）。
+    /// Pending 不受影响——分析中的请求不因误按 Ctrl+. 而丢。
+    fn nebula_take_ai_fix(&mut self) -> Option<String> {
+        None
+    }
+    /// 撤掉建议条（Esc / 用户开始打字）。返回是否真的撤了东西，调用方以
+    /// 此决定 Esc 是否已被消费。
+    fn nebula_dismiss_ai_fix(&mut self) -> bool {
+        false
+    }
     fn nebula_input_char(&mut self, _c: char) {}
     fn nebula_input_text(&mut self, _text: &str) {}
     fn nebula_input_backspace(&mut self) {}
@@ -92,6 +102,10 @@ pub trait ActionContext<T: EventListener> {
     fn spawn_new_instance(&mut self) {}
     /// Send a Nebula tab management request for this window.
     fn nebula_tab(&self, _request: crate::event::TabRequest) {}
+    /// Kick a WebDAV sync (spec 003). true = push, false = pull.
+    fn nebula_sync(&self, _push: bool) {}
+
+    fn nebula_ssh_test(&mut self) {}
     /// Open the SFTP drawer through this window's event proxy.
     fn nebula_open_sftp(&mut self, _destination: String) {}
     /// Stable SSH identity of the pane receiving this input, when it is a
@@ -101,6 +115,9 @@ pub trait ActionContext<T: EventListener> {
     }
     /// Open a filesystem path with the system handler (drawer double-click).
     fn open_path(&mut self, _path: &std::path::Path) {}
+    /// Open the system file manager with the entry pre-selected (Explorer's
+    /// `/select`), falling back to opening the parent directory.
+    fn reveal_in_file_manager(&mut self, _path: &std::path::Path) {}
     /// The active tab's document view, when it is a viewer tab (no pane):
     /// wheel and navigation keys scroll this instead of the grid.
     fn doc_view(&mut self) -> Option<&mut crate::display::markdown_view::DocView> {

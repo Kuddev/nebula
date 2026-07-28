@@ -27,6 +27,7 @@ use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
 use nebula_terminal::tty;
 
+mod ai_assistant;
 mod ai_hook;
 mod atomic_file;
 mod cli;
@@ -73,6 +74,7 @@ mod ssh_session;
 #[cfg(windows)]
 mod ssh_sftp;
 mod string;
+mod sync;
 mod update_check;
 mod ux;
 mod window_context;
@@ -195,6 +197,16 @@ pub(crate) fn boot_trace(label: &str) {
 /// Creates a window, the terminal state, PTY, I/O event loop, input processor,
 /// config change monitor, and runs the main display loop.
 fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
+    // WebDAV 启动自动拉取（spec 003）：守门函数一次文件读判断是否配置；
+    // 未配置的用户到此为止，加密/网络代码一行不跑。结果静默（warn log），
+    // settings 变化由 mtime 监视生效，避免刚启动就弹消息条。
+    if sync::auto_pull_enabled() {
+        std::thread::spawn(|| {
+            let result = sync::pull();
+            sync::warn_result(&result);
+        });
+    }
+
     // Mux hand-over: a plain re-launch of Nebula does not start a second
     // terminal — the resident instance re-attaches its detached tabs (their
     // PTYs never stopped) or focuses its window. Explicit intent (-e,

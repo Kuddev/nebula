@@ -377,6 +377,16 @@ impl SidePanel {
         unstaged.contains(&absolute) || staged.contains(&absolute)
     }
 
+    /// 外部（右键菜单删除等文件系统变更）请求下一帧重建快照。
+    pub fn request_refresh(&mut self) {
+        self.needs_refresh = true;
+    }
+
+    /// 面板顶部的一句话提示（复用根目录不可用的同一条 UI）。
+    pub fn set_notice(&mut self, message: String) {
+        self.root_notice = Some(message);
+    }
+
     /// Rebuild the tree and git snapshot from `root`.
     fn refresh(&mut self) {
         self.needs_refresh = false;

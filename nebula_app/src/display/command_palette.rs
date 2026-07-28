@@ -142,6 +142,10 @@ pub enum PaletteAction {
     ExportWorkspace,
     /// Pick a workspace file and append its tabs to this window.
     ImportWorkspace,
+    /// WebDAV 同步（spec 003）：推送本机设置到远端。
+    SyncPush,
+    /// WebDAV 同步：拉取远端设置并合并到本机。
+    SyncPull,
 }
 
 /// One palette row.
@@ -248,6 +252,18 @@ const ITEMS: &[PaletteItem] = &[
         action: PaletteAction::OpenSettingsFile,
     },
     PaletteItem {
+        label: "同步：推送设置到云端",
+        hint: "",
+        search: "同步推送设置到云端 webdav sync push upload settings tongbu tuisong",
+        action: PaletteAction::SyncPush,
+    },
+    PaletteItem {
+        label: "同步：从云端拉取设置",
+        hint: "",
+        search: "同步从云端拉取设置 webdav sync pull download settings tongbu laqu",
+        action: PaletteAction::SyncPull,
+    },
+    PaletteItem {
         label: "切换行内补全 (Ghost)",
         hint: "",
         search: "切换行内补全 toggle ghost completion qiehuan buquan",
@@ -350,6 +366,12 @@ pub struct CommandPalette {
     mode: PaletteMode,
     /// Mouse-hovered row within the visible window (`None` when not hovering).
     hover: Option<usize>,
+    /// 打开时武装：指针从首次上报位置真正移动（>2px）前不点亮 hover。
+    /// 「+」的下拉紧贴按钮弹出，首行往往恰在指针正下方——立即点亮会被
+    /// 读成「PowerShell 被默认选中」（2026-07-28 用户反馈：全部待选）。
+    hover_armed: bool,
+    /// 武装期间首次上报的指针位置（解除武装的位移基准）。
+    pointer_baseline: Option<(f32, f32)>,
     /// Cursor blink animation state for the search input.
     cursor_pulse: crate::motion::Pulse,
 }
@@ -368,6 +390,8 @@ impl CommandPalette {
             directories: Vec::new(),
             mode: PaletteMode::Commands,
             hover: None,
+            hover_armed: false,
+            pointer_baseline: None,
             cursor_pulse: crate::motion::Pulse::new(std::time::Duration::from_millis(1060)),
         };
         palette.refilter();
@@ -461,6 +485,7 @@ impl CommandPalette {
 
     /// Open (or re-open) the palette with a cleared query and the full list.
     pub fn open(&mut self) {
+        self.arm_pointer_hover();
         self.open = true;
         self.mode = PaletteMode::Commands;
         self.query.clear();
@@ -470,6 +495,7 @@ impl CommandPalette {
 
     /// Open showing only the quick-launch profiles (the "+" dropdown).
     pub fn open_profiles(&mut self) {
+        self.arm_pointer_hover();
         self.open = true;
         self.mode = PaletteMode::Profiles;
         self.query.clear();
@@ -480,6 +506,7 @@ impl CommandPalette {
     /// Open the default-shell picker (settings row): profile rows only, and
     /// confirm SETS the default rather than launching.
     pub fn open_default_picker(&mut self) {
+        self.arm_pointer_hover();
         self.open = true;
         self.mode = PaletteMode::DefaultShell;
         self.query.clear();
@@ -490,6 +517,7 @@ impl CommandPalette {
     /// Open the generic directory picker. Search results are refreshed by
     /// `Display` after every query edit so ranking remains owned by one service.
     pub fn open_directories(&mut self) {
+        self.arm_pointer_hover();
         self.open = true;
         self.mode = PaletteMode::Directories;
         self.query.clear();
@@ -502,6 +530,36 @@ impl CommandPalette {
         self.mode = PaletteMode::Commands;
         self.hover = None;
         self.query_selection.clear();
+    }
+
+    /// 指针驱动的 hover 更新（武装门在此）：打开后指针必须从首次上报
+    /// 位置移动超过 2px 才开始点亮；解除一次后恢复普通 hover 跟随。
+    pub fn pointer_hover(&mut self, pos: (f32, f32), row: Option<usize>) -> bool {
+        if self.hover_armed {
+            match self.pointer_baseline {
+                None => {
+                    self.pointer_baseline = Some(pos);
+                    return self.set_hover(None);
+                },
+                Some(base)
+                    if (base.0 - pos.0).abs() < 2.0 && (base.1 - pos.1).abs() < 2.0 =>
+                {
+                    return self.set_hover(None);
+                },
+                Some(_) => {
+                    self.hover_armed = false;
+                    self.pointer_baseline = None;
+                },
+            }
+        }
+        self.set_hover(row)
+    }
+
+    /// 每次打开（任何模式）都重新武装 hover。
+    fn arm_pointer_hover(&mut self) {
+        self.hover_armed = true;
+        self.pointer_baseline = None;
+        self.hover = None;
     }
 
     /// Update hover based on mouse position. `row` is the index within the
@@ -771,6 +829,8 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
         SelectTheme(NebulaTheme::MossDark) => "Theme: Moss Dark",
         ExportWorkspace => "Export workspace...",
         ImportWorkspace => "Open workspace...",
+        SyncPush => "Sync: push settings",
+        SyncPull => "Sync: pull settings",
         LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) | NewAtDirectory(_) => item.label,
     }
 }

@@ -80,6 +80,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             NebulaConfirm::DeleteSftp { entry } => {
                 self.ctx.display().sftp_confirm_delete(entry);
             },
+            NebulaConfirm::DeleteFileTreePath { path, .. } => {
+                self.ctx.display().confirm_delete_file_tree(&path);
+            },
             NebulaConfirm::InstallRequiredFont { directory } => {
                 self.ctx.display().nebula_confirm = None;
                 self.ctx.open_path(&directory);
@@ -203,6 +206,31 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             UploadFilesSftp => self.ctx.display().sftp_pick_upload_files(),
             UploadDirectorySftp => self.ctx.display().sftp_pick_upload_directory(),
             NewDirectorySftp => self.ctx.display().sftp_begin_create_directory(),
+            OpenFileTree(row) => {
+                if let Some((path, _)) = self.ctx.display().file_tree_row_path(row) {
+                    self.ctx.open_path(&path);
+                }
+            },
+            RevealFileTree(row) => {
+                if let Some((path, _)) = self.ctx.display().file_tree_row_path(row) {
+                    self.ctx.reveal_in_file_manager(&path);
+                }
+            },
+            TerminalHereFileTree(row) => {
+                if let Some((path, is_dir)) = self.ctx.display().file_tree_row_path(row) {
+                    if is_dir {
+                        self.ctx.nebula_tab(crate::event::TabRequest::NewAtDirectory(path));
+                    }
+                }
+            },
+            CopyFileTreePath(row) => {
+                if let Some((path, _)) = self.ctx.display().file_tree_row_path(row) {
+                    self.ctx
+                        .clipboard_mut()
+                        .store(ClipboardType::Clipboard, path.display().to_string());
+                }
+            },
+            DeleteFileTree(row) => self.ctx.display().request_delete_file_tree(row),
         }
         self.ctx.mark_dirty();
     }
@@ -568,6 +596,36 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     _ => {},
                 }
+                // 本地文件树（Files 视图）：右键行开菜单；面板内空白处
+                // 消费掉——右键落在树上绝不能漏进终端变成粘贴。
+                if self.ctx.display().nebula_side_panel.open
+                    && self.ctx.display().nebula_sftp_panel.is_none()
+                    && !self.ctx.display().settings_open()
+                    && self.ctx.display().nebula_confirm.is_none()
+                {
+                    use crate::display::side_panel::{PanelHit, PanelView, panel_interactive_hit};
+                    let layout = self.ctx.display().side_panel_layout();
+                    let view = self.ctx.display().nebula_side_panel.view;
+                    let custom_root = self.ctx.display().nebula_side_panel.custom_root_active();
+                    let has_root = self.ctx.display().nebula_side_panel.root().is_some();
+                    match panel_interactive_hit(&layout, view, custom_root, has_root, x, y) {
+                        PanelHit::Row(row) if view == PanelView::Files => {
+                            self.ctx.display().open_file_tree_context_menu(row, x, y);
+                            self.ctx.mark_dirty();
+                            return;
+                        },
+                        PanelHit::None => {},
+                        // 面板内非行区域（含 Git 视图、按钮、留白）：右键
+                        // 无菜单，但也不能透传给终端。
+                        _ => {
+                            if menu_was_open {
+                                self.ctx.display().close_context_menu();
+                            }
+                            self.ctx.mark_dirty();
+                            return;
+                        },
+                    }
+                }
                 match self.ctx.display().chrome_hit(x, y) {
                     crate::display::ChromeHit::NewTab => {
                         let profiles: Vec<String> =
@@ -580,6 +638,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::ChromeHit::Tab(index)
                     | crate::display::ChromeHit::TabClose(index) => {
+                        // 右键即选中（Windows 资源管理器/浏览器惯例）：菜单
+                        // 永远作用于当前选中的 tab，不存在「没选中也能右键
+                        // 操作」的歧义状态。
+                        self.ctx.nebula_tab(crate::event::TabRequest::Select(index));
                         self.ctx.display().open_tab_context_menu(index, x, y);
                         self.ctx.mark_dirty();
                         return;
@@ -659,7 +721,23 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.mark_dirty();
                     return;
                 }
+                // 键位捕获态：点击页面任何位置先撤销等待。点中别的行 =
+                // 把捕获转移过去；再点同一行 = 取消（用户要的"取消按键"）。
+                let capturing = self.ctx.display().nebula_keymap_capture;
+                self.ctx.display().keymap_cancel_capture();
+                // 同步输入框的失焦提交：点击页面上任何非本输入框的位置都
+                // 视为编辑结束（点另一个框由 focus_sync_field 内部提交）。
+                if !matches!(settings_hit, crate::display::SettingsHit::SyncInput(_)) {
+                    self.ctx.display().commit_sync_field();
+                }
                 match settings_hit {
+                    crate::display::SettingsHit::KeymapRow(row) => {
+                        if capturing != Some(row) {
+                            self.ctx.display().keymap_begin_capture(row);
+                        }
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::Toggle => {
                         self.ctx.nebula_tab(crate::event::TabRequest::OpenSettings);
                         return;
@@ -726,6 +804,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::CopyOnSelectToggle => {
                         self.ctx.display().toggle_copy_on_select();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::CjkBoldToggle => {
+                        self.ctx.display().toggle_cjk_bold_regular();
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -797,6 +880,30 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::KeepSessionToggle => {
                         self.ctx.display().toggle_keep_session();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SyncInput(index) => {
+                        self.ctx.display().focus_sync_field(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SyncAutoPullToggle => {
+                        self.ctx.display().toggle_sync_auto_pull();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SyncPushButton => {
+                        if self.ctx.display().begin_sync_action() {
+                            self.ctx.nebula_sync(true);
+                        }
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SyncPullButton => {
+                        if self.ctx.display().begin_sync_action() {
+                            self.ctx.nebula_sync(false);
+                        }
                         self.ctx.mark_dirty();
                         return;
                     },

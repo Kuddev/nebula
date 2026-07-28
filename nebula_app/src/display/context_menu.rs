@@ -34,6 +34,9 @@ pub enum ContextMenuTarget {
     Ssh(usize),
     Sftp(usize),
     SftpPanel,
+    /// 本地文件树（侧栏 Files 视图）的一行。`is_dir` 决定首行是「打开」
+    /// 还是「在此处打开终端」。row 是可见行索引，执行时再验证路径。
+    FileTree { row: usize, is_dir: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +60,11 @@ pub enum ContextMenuAction {
     UploadFilesSftp,
     UploadDirectorySftp,
     NewDirectorySftp,
+    OpenFileTree(usize),
+    RevealFileTree(usize),
+    TerminalHereFileTree(usize),
+    CopyFileTreePath(usize),
+    DeleteFileTree(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +115,10 @@ impl ContextMenu {
         }
         self.hover = action;
         true
+    }
+
+    pub(super) fn target(&self) -> ContextMenuTarget {
+        self.target
     }
 
     pub(super) fn finished(&self) -> bool {
@@ -161,6 +173,7 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
         ContextMenuTarget::Ssh(_) => (5usize, 1usize, 0.0),
         ContextMenuTarget::Sftp(_) => (3usize, 1usize, 0.0),
         ContextMenuTarget::SftpPanel => (4usize, 1usize, 0.0),
+        ContextMenuTarget::FileTree { .. } => (4usize, 1usize, 0.0),
     };
     let height = pad * 2.0 + row_count as f32 * row_h + separators as f32 * sep_h + extra;
     let margin = s(8.0);
@@ -376,6 +389,57 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
                 "",
                 cursor_y,
                 false,
+            ));
+        },
+        ContextMenuTarget::FileTree { row: index, is_dir } => {
+            // 目录的「打开」语义已由左键（展开/折叠）承担，首行给终端；
+            // 文件首行交给系统默认程序。
+            if is_dir {
+                rows.push(row(
+                    ContextMenuAction::TerminalHereFileTree(index),
+                    "\u{ea85}",
+                    "在此处打开终端",
+                    "",
+                    cursor_y,
+                    false,
+                ));
+            } else {
+                rows.push(row(
+                    ContextMenuAction::OpenFileTree(index),
+                    "\u{ea7b}",
+                    "打开",
+                    "",
+                    cursor_y,
+                    false,
+                ));
+            }
+            cursor_y += row_h;
+            rows.push(row(
+                ContextMenuAction::RevealFileTree(index),
+                "\u{eaf7}",
+                "在资源管理器中显示",
+                "",
+                cursor_y,
+                false,
+            ));
+            cursor_y += row_h;
+            rows.push(row(
+                ContextMenuAction::CopyFileTreePath(index),
+                ICON_COPY,
+                "复制路径",
+                "",
+                cursor_y,
+                false,
+            ));
+            cursor_y += row_h;
+            separator(&mut cursor_y);
+            rows.push(row(
+                ContextMenuAction::DeleteFileTree(index),
+                "\u{ea81}",
+                "删除",
+                "",
+                cursor_y,
+                true,
             ));
         },
     }
@@ -622,5 +686,29 @@ mod tests {
         assert_eq!(layout.rows[1].action, ContextMenuAction::UploadFilesSftp);
         assert_eq!(layout.rows[2].action, ContextMenuAction::UploadDirectorySftp);
         assert_eq!(layout.rows[3].action, ContextMenuAction::NewDirectorySftp);
+    }
+
+    #[test]
+    fn file_tree_menu_swaps_first_row_by_kind() {
+        let file = ContextMenu::new(
+            ContextMenuTarget::FileTree { row: 7, is_dir: false },
+            (100.0, 100.0),
+            None,
+        );
+        let layout_file = layout(&file, size(), 1.0, 0.0);
+        assert_eq!(layout_file.rows.len(), 4);
+        assert_eq!(layout_file.rows[0].action, ContextMenuAction::OpenFileTree(7));
+        assert_eq!(layout_file.rows[1].action, ContextMenuAction::RevealFileTree(7));
+        assert_eq!(layout_file.rows[2].action, ContextMenuAction::CopyFileTreePath(7));
+        assert_eq!(layout_file.rows[3].action, ContextMenuAction::DeleteFileTree(7));
+        assert!(layout_file.rows[3].danger);
+
+        let dir = ContextMenu::new(
+            ContextMenuTarget::FileTree { row: 2, is_dir: true },
+            (100.0, 100.0),
+            None,
+        );
+        let layout_dir = layout(&dir, size(), 1.0, 0.0);
+        assert_eq!(layout_dir.rows[0].action, ContextMenuAction::TerminalHereFileTree(2));
     }
 }

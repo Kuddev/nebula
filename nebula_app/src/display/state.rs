@@ -100,6 +100,12 @@ pub enum NebulaConfirm {
     DeleteSftp {
         entry: crate::ssh_sftp::SftpEntry,
     },
+    /// 侧栏本地文件树的删除（回收站可撤销，仍需确认——树紧挨终端，误触
+    /// 成本高）。路径在弹确认时已解析并快照，执行时不再回查行索引。
+    DeleteFileTreePath {
+        path: PathBuf,
+        is_dir: bool,
+    },
 }
 
 impl NebulaConfirm {
@@ -144,6 +150,10 @@ pub struct NebulaPaneState {
     pub awaiting_input: bool,
     pub finished_unseen: bool,
     pub pending_ssh_host: Option<String>,
+    /// 助手错误恢复的建议条状态（spec 001）；`None` = 无条。
+    pub ai_fix: Option<crate::ai_assistant::AiFixState>,
+    /// 上次触发修复请求的时刻，实施 [`crate::ai_assistant::COOLDOWN`] 频控。
+    pub ai_fix_cooldown: Option<std::time::Instant>,
     /// 可重建的公式布局缓存跟随 Pane，避免分屏之间复用错误的位置或字体尺寸。
     pub(super) terminal_math: TerminalMathState,
 }

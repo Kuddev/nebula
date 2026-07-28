@@ -1960,6 +1960,47 @@ impl WindowContext {
         true
     }
 
+    /// 后台修复请求（spec 001）的结果落地：pane 归属本窗口即认领（返回
+    /// true，AiHook 同款路由契约）。写入前校验 seq——条子已被用户撤掉、或
+    /// 新失败已顶掉旧请求时，迟到的响应直接丢弃。
+    pub fn handle_ai_fix(
+        &mut self,
+        pane_id: u64,
+        seq: u64,
+        fix: &Option<crate::ai_assistant::AiFix>,
+    ) -> bool {
+        let Some(idx) = self.pane_index(pane_id) else { return false };
+        let state = &mut self.panes[idx].nebula_state;
+        if state.ai_fix.as_ref().is_some_and(|current| current.seq() == seq) {
+            state.ai_fix = fix
+                .clone()
+                .map(|fix| crate::ai_assistant::AiFixState::Ready { seq, fix });
+            self.dirty = true;
+            self.display.window.request_redraw();
+        }
+        true
+    }
+
+    /// 同步线程收尾（spec 003）：消息进 message bar；拉到新历史时热加载
+    /// （ghost 补全立即吃到另一台机器的命令）。settings 变化不用管——
+    /// mtime 监视在下一帧自动 reload。
+    pub fn handle_sync_done(&mut self, message: &str, error: bool, history_changed: bool) {
+        // 设置页的状态行（按钮下方）是第一现场；message_bar 兜底通知
+        // 没开设置页的窗口。
+        self.display.sync_action_done(message, error);
+        let ty = if error {
+            crate::message_bar::MessageType::Error
+        } else {
+            crate::message_bar::MessageType::Warning
+        };
+        self.message_buffer.push(crate::message_bar::Message::new(format!("同步：{message}"), ty));
+        if history_changed {
+            self.display.reload_nebula_history();
+        }
+        self.dirty = true;
+        self.display.window.request_redraw();
+    }
+
     /// Toast click landed: bring this window to the foreground and, when the
     /// toast named a pane, surface its tab and focus that split.
     pub fn focus_from_toast(&mut self, pane: Option<u64>) {
@@ -2240,6 +2281,10 @@ impl WindowContext {
         let pane_rects = self.layout_geometry(false).0;
         let divider_rects = self.layout_geometry(true).1;
         let focused = self.focused_pane_id();
+        // 助手建议条（spec 001）跟随焦点 pane：绘制层只认 Display 自己的
+        // 快照字段（SSH 撤销条同款模式），此处每帧同步一次。
+        self.display.nebula_ai_fix_bar =
+            self.pane_index(focused).and_then(|idx| self.panes[idx].nebula_state.ai_fix.clone());
 
         // Settings is rendered inside the normal tab content card; it is not
         // a modal and therefore keeps the tab/sidebar chrome fully usable.

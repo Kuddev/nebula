@@ -139,6 +139,25 @@ impl NebulaTheme {
         }
     }
 
+    /// Ink set for the settings page's miniature theme cards: each card is a
+    /// tiny terminal window painted in ITS OWN theme's colors, so the picker
+    /// answers "how do background, text and highlights sit together" instead
+    /// of just "what color is the panel".
+    ///
+    /// Light themes reuse the exact inks [`Self::apply_term_colors`] installs.
+    /// Dark themes take their real foreground/ANSI set from the user's scheme
+    /// at runtime — the cards use one fixed neutral stand-in so all dark cards
+    /// preview alike regardless of the configured scheme.
+    pub(crate) fn card_ink(self) -> CardInk {
+        if self.palette().is_light {
+            CardInk {
+                fg: Rgb::new(36, 41, 47), // = light Foreground (#24292f)
+            }
+        } else {
+            CardInk { fg: Rgb::new(214, 219, 227) }
+        }
+    }
+
     /// Rebuild the terminal color table for this theme on top of the user's
     /// configured scheme (`defaults`).
     ///
@@ -476,6 +495,13 @@ impl NebulaTheme {
 /// and glows painted by `draw_chrome`, plus the terminal background the theme
 /// applies on selection.
 #[derive(Debug, Clone, Copy)]
+/// The text ink a miniature theme card draws its fake terminal lines with;
+/// the highlight bars use the theme's own `edge_l`/`edge_r` brand pair.
+/// See [`NebulaTheme::card_ink`].
+pub(crate) struct CardInk {
+    pub(crate) fg: Rgb,
+}
+
 pub(crate) struct NebulaPalette {
     pub(crate) panel: Rgba,
     /// Standalone fill for inactive tab rows / the "+" pill. Currently unpainted

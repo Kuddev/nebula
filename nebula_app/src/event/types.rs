@@ -65,12 +65,38 @@ pub enum EventType {
     Shutdown,
     Frame,
     NebulaTab(TabRequest),
+    /// WebDAV 同步请求（命令面板）。true = 推送，false = 拉取。
+    NebulaSync {
+        push: bool,
+    },
+    /// 后台同步线程完成（spec 003）。`history_changed` 提示各窗口热加载
+    /// 命令历史；settings 变化走 mtime 监视，无需专门通知。
+    NebulaSyncDone {
+        message: String,
+        error: bool,
+        history_changed: bool,
+    },
     NebulaTick,
     NebulaAttach,
     NebulaResizeSettled,
     SshDeleteUndoExpired,
+    /// SSH 编辑器「测试连接」完成（后台 runtime → 窗口线程）。`destination`
+    /// 用于丢弃过期结果：草稿已改就当无事发生。
+    SshTestDone {
+        destination: String,
+        ok: bool,
+        message: String,
+        elapsed_ms: u64,
+    },
     SftpUpdated,
     AiHook(crate::ai_hook::AiHookEvent),
+    /// 助手修复请求完成（后台线程 → 主循环）。`fix: None` = 沉默（失败、
+    /// 无 key、模型认为无解——三者同款处理，建议条直接消失）。
+    AiFixReady {
+        pane: u64,
+        seq: u64,
+        fix: Option<crate::ai_assistant::AiFix>,
+    },
     FocusWindow {
         pane: Option<u64>,
     },

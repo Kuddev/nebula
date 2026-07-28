@@ -48,6 +48,22 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
         }
 
+        // 键位捕获（spec 002）：设置页「按键映射」等待新组合时独占键盘，
+        // 优先于一切快捷键路径——捕获的组合不能同时触发它旧的动作。
+        if let Some(row) = self.ctx.display().nebula_keymap_capture {
+            use crate::display::keymap::{self, CaptureOutcome};
+            match keymap::capture_combo(&key, mods) {
+                // 纯修饰键：实时回显按住的前缀（"Ctrl+…"），松开由
+                // ModifiersChanged 路径清掉。
+                CaptureOutcome::Pending => self.ctx.display().keymap_capture_preview(mods),
+                CaptureOutcome::Cancel => self.ctx.display().keymap_cancel_capture(),
+                CaptureOutcome::ClearCustom => self.ctx.display().keymap_clear_custom(row),
+                CaptureOutcome::Bind(combo) => self.ctx.display().keymap_assign(row, combo),
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // 背景色浮层的 16 进制输入独占键盘：Enter 应用、Esc 关闭、退格删
         // 除、hex 字符追加；dropdown 通用的"任意键关闭"对它不适用。
         if self.ctx.display().nebula_settings_dropdown
@@ -67,6 +83,38 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 Key::Character(text) => {
                     for ch in text.chars() {
                         self.ctx.display().bg_hex_push(ch);
+                    }
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
+        // 设置→高级→同步的输入框独占键盘：Enter/Tab 提交、Esc 还原、
+        // Ctrl+V 粘贴（URL 手打不现实）、其余字符追加。
+        if self.ctx.display().settings_open() && self.ctx.display().nebula_sync_focus.is_some() {
+            match &key.logical_key {
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => {
+                    self.ctx.display().commit_sync_field();
+                },
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.display().cancel_sync_field();
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().sync_field_backspace();
+                },
+                Key::Named(NamedKey::Space) => {
+                    self.ctx.display().sync_field_push(' ');
+                },
+                Key::Character(text) => {
+                    if mods.control_key() && text.eq_ignore_ascii_case("v") {
+                        let paste = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                        self.ctx.display().sync_field_paste(&paste);
+                    } else if !mods.control_key() {
+                        for ch in text.chars() {
+                            self.ctx.display().sync_field_push(ch);
+                        }
                     }
                 },
                 _ => {},
@@ -411,6 +459,35 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        // 助手建议条（spec 001）：Ctrl+. 贴入（只贴不执行，不带回车），
+        // Esc 撤条，开始打字也撤。放在模态之后——palette/确认框的 Esc 契约
+        // 不受影响；无条子时三个分支全部穿透，Ctrl+. 照常进终端。
+        if mods.control_key()
+            && !mods.alt_key()
+            && !mods.shift_key()
+            && matches!(&key.logical_key, Key::Character(c) if c.as_str() == ".")
+        {
+            if let Some(command) = self.ctx.nebula_take_ai_fix() {
+                self.ctx.write_to_pty(command.into_bytes());
+                self.ctx.mark_dirty();
+                return;
+            }
+        }
+        if matches!(&key.logical_key, Key::Named(NamedKey::Escape))
+            && self.ctx.nebula_dismiss_ai_fix()
+        {
+            self.ctx.mark_dirty();
+            return;
+        }
+        if matches!(&key.logical_key, Key::Character(_))
+            && !mods.control_key()
+            && !mods.alt_key()
+            && self.ctx.nebula_dismiss_ai_fix()
+        {
+            // 打字撤条：字符本身照常落进终端，不拦截。
+            self.ctx.mark_dirty();
+        }
+
         // Document-viewer tab: bare navigation keys scroll the document. Only
         // unmodified keys are taken — chords (Ctrl+Tab, Ctrl+Shift+W, …) fall
         // through to the normal tab bindings, and any stray text ends in the
@@ -436,158 +513,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
         }
 
-        // Nebula tab shortcuts: Ctrl+Shift+T new, Ctrl+Shift+W close,
-        // Ctrl+Tab next, Ctrl+Shift+Tab previous, Ctrl+1..5 direct select.
-        // Ctrl+Shift+E new window.
-        if mods.control_key() {
-            let shift = mods.shift_key();
-            // Ctrl+Shift+E: open a brand-new Nebula window.
-            if shift && matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("e"))
-            {
-                #[cfg(not(target_os = "macos"))]
-                self.ctx.create_new_window();
-                #[cfg(target_os = "macos")]
-                self.ctx.create_new_window(None);
-                return;
-            }
-            // Ctrl+Shift+P: toggle the command palette.
-            if shift && matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("p"))
-            {
-                let profiles: Vec<String> =
-                    self.ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
-                self.ctx.display().toggle_command_palette(&profiles);
-                self.ctx.mark_dirty();
-                return;
-            }
-            // Ctrl+Shift+O / Ctrl+Shift+G: toggle the right-side drawer's
-            // directory-tree / git view.
-            if shift && matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("o"))
-            {
-                if let Some(destination) = self.ctx.nebula_ssh_destination().map(str::to_owned) {
-                    self.ctx.nebula_open_sftp(destination);
-                } else {
-                    self.ctx
-                        .display()
-                        .toggle_side_panel(crate::display::side_panel::PanelView::Files);
-                }
-                self.ctx.mark_dirty();
-                return;
-            }
-            if shift && matches!(&key.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("g"))
-            {
-                self.ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Git);
-                self.ctx.mark_dirty();
-                return;
-            }
-            // Ctrl+Shift+1..9: launch the quick-launch profile at that index
-            // (Windows Terminal parity). Physical digit codes — Shift turns the
-            // logical key into "!" "@" … so `logical_key` can't be matched.
-            if shift {
-                use winit::keyboard::{KeyCode, PhysicalKey};
-                let profile = match key.physical_key {
-                    PhysicalKey::Code(KeyCode::Digit1) => Some(0),
-                    PhysicalKey::Code(KeyCode::Digit2) => Some(1),
-                    PhysicalKey::Code(KeyCode::Digit3) => Some(2),
-                    PhysicalKey::Code(KeyCode::Digit4) => Some(3),
-                    PhysicalKey::Code(KeyCode::Digit5) => Some(4),
-                    PhysicalKey::Code(KeyCode::Digit6) => Some(5),
-                    PhysicalKey::Code(KeyCode::Digit7) => Some(6),
-                    PhysicalKey::Code(KeyCode::Digit8) => Some(7),
-                    PhysicalKey::Code(KeyCode::Digit9) => Some(8),
-                    _ => None,
-                };
-                if let Some(i) = profile {
-                    if i < self.ctx.config().profiles.len() {
-                        self.ctx.nebula_tab(crate::event::TabRequest::NewProfile(i));
-                        return;
-                    }
-                }
-            }
-            // Ctrl+Shift+Up/Down: jump to the previous/next shell prompt
-            // (OSC 133 semantic marks; needs shell integration or Nushell).
-            if shift && !mods.alt_key() {
-                let jump_up = match &key.logical_key {
-                    Key::Named(NamedKey::ArrowUp) => Some(true),
-                    Key::Named(NamedKey::ArrowDown) => Some(false),
-                    _ => None,
-                };
-                if let Some(up) = jump_up {
-                    if self.ctx.terminal_mut().nebula_prompt_jump(up) {
-                        self.ctx.mark_dirty();
-                    }
-                    return;
-                }
-            }
-            let request = match &key.logical_key {
-                Key::Named(NamedKey::Tab) => Some(if shift {
-                    crate::event::TabRequest::SelectPrev
-                } else {
-                    crate::event::TabRequest::SelectNext
-                }),
-                Key::Character(c) if shift && c.eq_ignore_ascii_case("t") => {
-                    Some(crate::event::TabRequest::New)
-                },
-                Key::Character(c) if shift && c.eq_ignore_ascii_case("w") => {
-                    Some(crate::event::TabRequest::Close)
-                },
-                Key::Character(c) if shift && c.eq_ignore_ascii_case("d") => {
-                    Some(crate::event::TabRequest::SplitToggle(
-                        crate::display::SplitDirection::LeftRight,
-                    ))
-                },
-                Key::Character(c) if shift && c.eq_ignore_ascii_case("s") => {
-                    Some(crate::event::TabRequest::SplitToggle(
-                        crate::display::SplitDirection::TopBottom,
-                    ))
-                },
-                // Ctrl+Shift+Enter: zoom the focused pane to fill the window (toggle).
-                Key::Named(NamedKey::Enter) if shift => Some(crate::event::TabRequest::ToggleZoom),
-                // Ctrl+Alt+Arrow: move focus between split panes.
-                Key::Named(NamedKey::ArrowLeft) if mods.alt_key() => {
-                    Some(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Left))
-                },
-                Key::Named(NamedKey::ArrowRight) if mods.alt_key() => {
-                    Some(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Right))
-                },
-                Key::Named(NamedKey::ArrowUp) if mods.alt_key() => {
-                    Some(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Up))
-                },
-                Key::Named(NamedKey::ArrowDown) if mods.alt_key() => {
-                    Some(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Down))
-                },
-                Key::Character(c) if !shift => match c.as_str() {
-                    // Ctrl+1..9 direct tab select (Windows Terminal parity).
-                    "1" => Some(crate::event::TabRequest::Select(0)),
-                    "2" => Some(crate::event::TabRequest::Select(1)),
-                    "3" => Some(crate::event::TabRequest::Select(2)),
-                    "4" => Some(crate::event::TabRequest::Select(3)),
-                    "5" => Some(crate::event::TabRequest::Select(4)),
-                    "6" => Some(crate::event::TabRequest::Select(5)),
-                    "7" => Some(crate::event::TabRequest::Select(6)),
-                    "8" => Some(crate::event::TabRequest::Select(7)),
-                    "9" => Some(crate::event::TabRequest::Select(8)),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(request) = request {
-                self.ctx.nebula_tab(request);
-                return;
-            }
-        }
-
-        // Alt+1..9: direct tab select (Windows Terminal style). Alt-only —
-        // Ctrl+Alt (AltGr) must stay clear so layouts that type digits/symbols
-        // via AltGr keep working, and plain Alt+letter chords still reach the
-        // shell as ESC-prefixed input below.
-        if mods.alt_key() && !mods.control_key() && !mods.shift_key() && !mods.super_key() {
-            if let Key::Character(c) = &key.logical_key {
-                if let Some(digit @ 1..=9) = c.chars().next().and_then(|ch| ch.to_digit(10)) {
-                    self.ctx.nebula_tab(crate::event::TabRequest::Select(digit as usize - 1));
-                    return;
-                }
-            }
-        }
+        // Nebula chrome shortcuts (tabs, splits, panels, palette, profiles)
+        // live in the binding table now — `default_key_bindings()` +
+        // `nebula_settings.txt` `keybind=` overrides + TOML remaps all funnel
+        // through `process_key_bindings` below (spec 002).
 
         // Accept the Nebula ghost-text suggestion with the configured key
         // (Right/Tab/both): write the remaining text so the shell echoes it,
@@ -760,6 +689,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 .nebula_tab(TabRequest::SplitToggle(crate::display::SplitDirection::TopBottom)),
             ExportWorkspace => self.ctx.nebula_tab(TabRequest::ExportWorkspace),
             ImportWorkspace => self.ctx.nebula_tab(TabRequest::ImportWorkspace),
+            SyncPush => self.ctx.nebula_sync(true),
+            SyncPull => self.ctx.nebula_sync(false),
             OpenSettings => self.ctx.nebula_tab(TabRequest::OpenSettings),
             OpenSettingsFile => self.ctx.display().open_user_config_file(),
             ToggleGhost => self.ctx.display().toggle_ghost(),
@@ -912,6 +843,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 None
             }
         };
+
+        // 用户自定义表（spec 002）优先于 config 默认/TOML 表：命中任意条
+        // （含 `none` 的禁用条目）即短路——config 表与 hint 绑定不再参与，
+        // 「改键遮蔽默认」由这一条实现。表本身是倒序（最新行在前）。
+        for i in 0..self.ctx.display().nebula_keymap.len() {
+            let binding = self.ctx.display().nebula_keymap[i].clone();
+            if let Some(action) = binding_action(&binding) {
+                action.execute(&mut self.ctx);
+                return suppress_chars.unwrap_or(false);
+            }
+        }
 
         // Trigger matching key bindings.
         for i in 0..self.ctx.config().key_bindings().len() {

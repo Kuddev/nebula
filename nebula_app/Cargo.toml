@@ -33,6 +33,13 @@ version = "0.7.0"
 ahash = { version = "0.8.6", features = ["no-rng"] }
 ab_glyph_rasterizer = "=0.1.10"
 base64 = "0.22.0"
+# WebDAV 同步的内容加密（spec 003）。用户裁定（2026-07-28）：同步集含
+# SSH 地址簿与命令历史，属高危隐私必须加密；Argon2 只在同步动作的后台
+# 线程跑（~0.1s/19MiB 瞬时，终端热路径零涉及）——可以上，但克制：参数
+# 取最低推荐档，不做多档配置。版本跟工作区 lock 已有的 0.6.0-rc 线
+# （用户裁定：稍新的版本，特性更全；也避免依赖树里 argon2 双版本并存）。
+argon2 = "0.6.0-rc.8"
+aes-gcm = "0.11"
 bitflags = "2.2.1"
 chrono = "0.4.45"
 clap = { version = "4.2.7", features = ["derive", "env"] }
@@ -67,6 +74,9 @@ toml_edit.workspace = true
 ttf-parser = { version = "=0.25.1", default-features = false, features = ["opentype-layout", "std"] }
 tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
 unicode-width = "0.2.0"
+# Assistant fix requests: blocking HTTP on a background OS thread (spec 001).
+# ureq over reqwest: no tokio coupling for one short JSON POST, small tree.
+ureq = { version = "3", features = ["json"] }
 winit = { version = "0.30.9", default-features = false, features = ["rwh_06", "serde"] }
 global-hotkey = "0.8.0"
 getrandom = "0.3.3"

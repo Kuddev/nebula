@@ -223,6 +223,72 @@ pub enum Action {
     /// Create new window in a tab.
     CreateNewTab,
 
+    /// Close the focused tab (or pane, when the tab is split).
+    CloseTab,
+
+    /// Toggle a left/right split in the focused tab.
+    SplitRight,
+
+    /// Toggle a top/bottom split in the focused tab.
+    SplitDown,
+
+    /// Zoom the focused pane to fill the window (toggle).
+    ToggleZoom,
+
+    /// Move pane focus to the split on the left.
+    FocusPaneLeft,
+
+    /// Move pane focus to the split on the right.
+    FocusPaneRight,
+
+    /// Move pane focus to the split above.
+    FocusPaneUp,
+
+    /// Move pane focus to the split below.
+    FocusPaneDown,
+
+    /// Toggle the command palette.
+    ToggleCommandPalette,
+
+    /// Toggle the right-side drawer's directory tree (SFTP on SSH panes).
+    ToggleFilesPanel,
+
+    /// Toggle the right-side drawer's git view.
+    ToggleGitPanel,
+
+    /// Jump to the previous shell prompt (OSC 133 marks).
+    PromptJumpUp,
+
+    /// Jump to the next shell prompt (OSC 133 marks).
+    PromptJumpDown,
+
+    /// Launch quick-launch profile 1.
+    LaunchProfile1,
+
+    /// Launch quick-launch profile 2.
+    LaunchProfile2,
+
+    /// Launch quick-launch profile 3.
+    LaunchProfile3,
+
+    /// Launch quick-launch profile 4.
+    LaunchProfile4,
+
+    /// Launch quick-launch profile 5.
+    LaunchProfile5,
+
+    /// Launch quick-launch profile 6.
+    LaunchProfile6,
+
+    /// Launch quick-launch profile 7.
+    LaunchProfile7,
+
+    /// Launch quick-launch profile 8.
+    LaunchProfile8,
+
+    /// Launch quick-launch profile 9.
+    LaunchProfile9,
+
     /// Toggle fullscreen.
     ToggleFullscreen,
 

@@ -84,3 +84,4 @@ scripts/drawer_repro.ps1
 scripts/ghost_repro/
 scripts/icon-build/
 scripts/render_shell_icon.html
+docs/future_planning.md

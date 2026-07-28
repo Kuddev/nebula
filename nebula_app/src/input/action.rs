@@ -348,6 +348,77 @@ impl<T: EventListener> Execute<T> for Action {
             Action::SelectTab9 => ctx.window().select_tab_at_index(8),
             #[cfg(target_os = "macos")]
             Action::SelectLastTab => ctx.window().select_last_tab(),
+            // Nebula-owned chrome actions: split management, panels, palette
+            // and profiles all ride the shared tab-request/display plumbing,
+            // which is platform-independent (the tab bar is self-drawn).
+            Action::CloseTab => ctx.nebula_tab(crate::event::TabRequest::Close),
+            Action::SplitRight => ctx.nebula_tab(crate::event::TabRequest::SplitToggle(
+                crate::display::SplitDirection::LeftRight,
+            )),
+            Action::SplitDown => ctx.nebula_tab(crate::event::TabRequest::SplitToggle(
+                crate::display::SplitDirection::TopBottom,
+            )),
+            Action::ToggleZoom => ctx.nebula_tab(crate::event::TabRequest::ToggleZoom),
+            Action::FocusPaneLeft => {
+                ctx.nebula_tab(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Left))
+            },
+            Action::FocusPaneRight => ctx
+                .nebula_tab(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Right)),
+            Action::FocusPaneUp => {
+                ctx.nebula_tab(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Up))
+            },
+            Action::FocusPaneDown => {
+                ctx.nebula_tab(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Down))
+            },
+            Action::ToggleCommandPalette => {
+                let profiles: Vec<String> =
+                    ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
+                ctx.display().toggle_command_palette(&profiles);
+                ctx.mark_dirty();
+            },
+            Action::ToggleFilesPanel => {
+                if let Some(destination) = ctx.nebula_ssh_destination().map(str::to_owned) {
+                    ctx.nebula_open_sftp(destination);
+                } else {
+                    ctx.display()
+                        .toggle_side_panel(crate::display::side_panel::PanelView::Files);
+                }
+                ctx.mark_dirty();
+            },
+            Action::ToggleGitPanel => {
+                ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Git);
+                ctx.mark_dirty();
+            },
+            Action::PromptJumpUp | Action::PromptJumpDown => {
+                let up = *self == Action::PromptJumpUp;
+                if ctx.terminal_mut().nebula_prompt_jump(up) {
+                    ctx.mark_dirty();
+                }
+            },
+            Action::LaunchProfile1
+            | Action::LaunchProfile2
+            | Action::LaunchProfile3
+            | Action::LaunchProfile4
+            | Action::LaunchProfile5
+            | Action::LaunchProfile6
+            | Action::LaunchProfile7
+            | Action::LaunchProfile8
+            | Action::LaunchProfile9 => {
+                let index = match self {
+                    Action::LaunchProfile1 => 0,
+                    Action::LaunchProfile2 => 1,
+                    Action::LaunchProfile3 => 2,
+                    Action::LaunchProfile4 => 3,
+                    Action::LaunchProfile5 => 4,
+                    Action::LaunchProfile6 => 5,
+                    Action::LaunchProfile7 => 6,
+                    Action::LaunchProfile8 => 7,
+                    _ => 8,
+                };
+                if index < ctx.config().profiles.len() {
+                    ctx.nebula_tab(crate::event::TabRequest::NewProfile(index));
+                }
+            },
             _ => (),
         }
     }
