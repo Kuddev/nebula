@@ -1830,13 +1830,24 @@ impl WindowContext {
         path.is_dir().then_some(path)
     }
 
-    /// First busy (non-whitelisted) process running under any of `pane_ids`'
-    /// shells, for the close-confirmation safety net. `None` = safe to close.
+    /// Name of the first busy program under any of `pane_ids`, for the close
+    /// confirm modal — or `None` when every pane is safe to kill.
+    ///
+    /// 2026-07-27 用户反馈"node.exe 仍在运行"：`busy_child` 只认得进程快照里
+    /// 的 exe 名，而 Claude Code / codex 这类 CLI 是被 node 托管的，快照里就
+    /// 只剩宿主解释器。Nebula 另有一份更准的身份——pane 的 `running_program`
+    /// （AI hook 直报 `claude`，或 OSC 133 从命令行解析），侧栏图标画的就是
+    /// 它。所以：由 `busy_child` 判定"忙不忙"，由 `running_program` 决定"叫
+    /// 什么"；后者缺席（无 shell 集成）时退回擦掉 `.exe` 的进程名。
     fn busy_process_in(&self, pane_ids: &[PaneId]) -> Option<String> {
-        pane_ids
-            .iter()
-            .filter_map(|id| self.pane(*id))
-            .find_map(|pane| crate::process_tree::busy_child(pane.shell_pid))
+        pane_ids.iter().filter_map(|id| self.pane(*id)).find_map(|pane| {
+            let exe = crate::process_tree::busy_child(pane.shell_pid)?;
+            let known = pane.nebula_state.running_program.as_deref();
+            Some(known.map_or_else(
+                || crate::process_tree::display_name(&exe),
+                |program| program.to_owned(),
+            ))
+        })
     }
 
     /// Flag the tab containing `pane_id` as having rung its bell, unless it is

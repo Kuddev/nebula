@@ -31,6 +31,20 @@ const STATELESS: &[&str] = &[
     "git.exe",
 ];
 
+/// Turn a raw exe name into something a confirm dialog can show: drop the
+/// `.exe` suffix (`node.exe` → `node`).
+///
+/// 2026-07-27 用户反馈：关闭窗口时确认框写的是 `node.exe 仍在运行`——那其实
+/// 是 Claude Code，只不过快照只看得见宿主解释器。真正的修复在调用方
+/// （`busy_process_in` 优先用 pane 已知的 `running_program`）；这里只负责
+/// 没有那份身份信息时把名字擦干净。
+pub fn display_name(exe: &str) -> String {
+    exe.strip_suffix(".exe")
+        .or_else(|| exe.strip_suffix(".EXE"))
+        .unwrap_or(exe)
+        .to_owned()
+}
+
 /// First non-stateless process under `root_pid` (the pane's shell), or `None`
 /// when the whole tree is safe to kill. The name is used in the confirm modal.
 #[cfg(windows)]
@@ -104,4 +118,18 @@ pub fn busy_child(root_pid: u32) -> Option<String> {
 #[cfg(not(windows))]
 pub fn busy_child(_root_pid: u32) -> Option<String> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_name;
+
+    #[test]
+    fn display_name_drops_exe_suffix() {
+        assert_eq!(display_name("node.exe"), "node");
+        assert_eq!(display_name("CARGO.EXE"), "CARGO");
+        // Unix names and dotted names that are not suffixes stay intact.
+        assert_eq!(display_name("cargo"), "cargo");
+        assert_eq!(display_name("python3.11"), "python3.11");
+    }
 }
