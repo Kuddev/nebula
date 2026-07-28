@@ -545,10 +545,49 @@ pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
 /// Drop a `file://` / `file:///` scheme so a local link reads as a plain
 /// path in the hover tooltip. On Windows `file:///D:/x` → `D:/x` (the slash
 /// before the drive letter goes too); non-`file:` URIs pass through.
+///
+/// 2026-07-26 用户反馈：`ls --hyperlink` 会把非 ASCII 文件名 percent-encode
+/// （一个汉字 → `%E6%98%9F` 九列），48 列预算被编码噪声吃光后再截尾，提示
+/// "显示不全"。file 路径解码后再展示；其他 scheme 保持原样（URL 的编码
+/// 属于其身份，不替它翻译）。
 fn strip_file_scheme(uri: &str) -> String {
-    let rest = uri.strip_prefix("file:///").or_else(|| uri.strip_prefix("file://")).unwrap_or(uri);
-    // `file:///D:/x` yields `D:/x`; a UNC-ish `file://host/x` keeps `host/x`.
-    rest.to_owned()
+    match uri.strip_prefix("file:///").or_else(|| uri.strip_prefix("file://")) {
+        // `file:///D:/x` yields `D:/x`; a UNC-ish `file://host/x` keeps `host/x`.
+        Some(rest) => percent_decode_lossy(rest),
+        None => uri.to_owned(),
+    }
+}
+
+/// Decode `%XX` escapes as UTF-8 bytes for DISPLAY. Malformed escapes pass
+/// through verbatim; if the decoded bytes are not valid UTF-8 the original
+/// string is returned unchanged — a tooltip must never invent mojibake.
+fn percent_decode_lossy(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_owned();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let decoded = (bytes[i] == b'%' && i + 2 < bytes.len())
+            .then(|| {
+                let hi = (bytes[i + 1] as char).to_digit(16)?;
+                let lo = (bytes[i + 2] as char).to_digit(16)?;
+                Some((hi * 16 + lo) as u8)
+            })
+            .flatten();
+        match decoded {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            },
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            },
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_owned())
 }
 
 /// Truncate `s` to at most `budget` display columns (CJK counts as 2), keeping
@@ -4681,12 +4720,21 @@ impl Display {
         let math_coverage =
             terminal_math::CoverageMask::build(&terminal_math_overlays, &prepared_math);
 
-        // Add damage from the terminal.
+        // Add damage from the terminal, keeping a pane-local copy: the shared
+        // tracker gets flooded with a full-window mark every frame further
+        // down, so "did the grid actually change?" (hint invalidation) must
+        // be judged from the terminal's own report captured here.
+        let mut term_damage_full = false;
+        let mut term_damage_lines = Vec::new();
         match terminal.damage() {
-            TermDamage::Full => self.damage_tracker.frame().mark_fully_damaged(),
+            TermDamage::Full => {
+                term_damage_full = true;
+                self.damage_tracker.frame().mark_fully_damaged();
+            },
             TermDamage::Partial(damaged_lines) => {
                 for damage in damaged_lines {
                     self.damage_tracker.frame().damage_line(damage);
+                    term_damage_lines.push(damage);
                 }
             },
         }
@@ -4695,8 +4743,13 @@ impl Display {
         // Drop terminal as early as possible to free lock.
         drop(terminal);
 
-        // Invalidate highlighted hints if grid has changed.
-        self.validate_hint_highlights(display_offset);
+        // Invalidate highlighted hints if grid has changed. Only the pane
+        // that owns the hover may judge that: `highlighted_hint` is hit-tested
+        // against the focused pane, so a background pane's output (build log,
+        // `top`) must not tear down the foreground's highlight.
+        if force_focus != Some(false) {
+            self.validate_hint_highlights(display_offset, term_damage_full, &term_damage_lines);
+        }
 
         // OSC 1337 inline images: prune rows that scrolled out of history for
         // good, then collect the ones visible in this pane's viewport for the
@@ -5479,16 +5532,38 @@ impl Display {
         };
 
         // Buttons: right-aligned row, primary rightmost (Windows order). 文案
-        // 统一"是 / 否"（2026-07-23 用户裁定）；Enter / Esc 快捷键继续生
-        // 效。短文案下用最小宽度保住可点面积。
+        // 统一"是 / 否"（2026-07-23 用户裁定）。
+        //
+        // 2026-07-27 用户反馈：Enter / Esc 一直生效，但按钮上只有"是""否"
+        // 两个字，键位从没画出来——同文件的 SSH 撤销条却老实写着 Ctrl+Z，
+        // 标准不一致。`can_dismiss()` 恒真，故两个键位都名副其实。
+        //
+        // 键位画成键帽（描边小方框）而不是裸文字：v0.5/v0.6 起 welcome 页的
+        // 快捷键就是灰底药丸 + 亮墨的键帽（`welcome.rs` 的 `kbd`），用户记
+        // 的"白色的框"就是它。那边是终端文本（ANSI + powerline 圆头字形），
+        // 这里走 draw_ui + chrome text，没法照搬，所以用本文件既有的惯用法
+        // 手画：外圈描边 quad + 内层填充 quad，只露 1px 圆环。描边取按钮
+        // 自己的墨色，深色主题下自然读作白框，浅色主题下是深框。
         let language = self.ui_language();
         let primary_label = language.pick("是", "Yes");
         let cancel_label = language.pick("否", "No");
+        let primary_key = "Enter";
+        let cancel_key = "Esc";
         let btn_h = s(34.0);
         let btn_pad = s(18.0);
         let btn_min_w = s(88.0);
-        let primary_w = (text_w(primary_label) + 2.0 * btn_pad).max(btn_min_w);
-        let cancel_w = (text_w(cancel_label) + 2.0 * btn_pad).max(btn_min_w);
+        // Keycap: text plus breathing room, and a hair taller than the glyph so
+        // the ring never clips ascenders. Gap sits between label and cap.
+        let cap_pad = s(6.0);
+        let cap_h = cell_h + s(6.0);
+        let cap_r = s(4.0);
+        let key_gap = s(8.0);
+        let cap_w = |key: &str| text_w(key) + 2.0 * cap_pad;
+        let btn_w = |label: &str, key: &str| -> f32 {
+            (text_w(label) + key_gap + cap_w(key) + 2.0 * btn_pad).max(btn_min_w)
+        };
+        let primary_w = btn_w(primary_label, primary_key);
+        let cancel_w = btn_w(cancel_label, cancel_key);
 
         // Card sized to title/buttons, clamped into the window, and capped at
         // 520 logical px: a long body WRAPS instead of stretching the card
@@ -5527,6 +5602,14 @@ impl Display {
         self.nebula_confirm_buttons = Some((primary_rect, cancel_rect));
 
         let primary_fill = if danger { sk.danger } else { accent };
+        // Ink first: the keycap ring is derived from the ink it wraps, so both
+        // buttons' text colors have to exist before the quads are built.
+        let on_primary = if danger { Rgb::new(255, 244, 246) } else { sk.ink_on_accent };
+        // Keycap geometry, shared by the ring quads and the glyph runs below.
+        let cap_y = btn_y + (btn_h - cap_h) / 2.0;
+        let cancel_cap_x = cancel_x + btn_pad + text_w(cancel_label) + key_gap;
+        let primary_cap_x = primary_x + btn_pad + text_w(primary_label) + key_gap;
+
         let mut quads = vec![veil, edge, card];
         // Cancel: quiet ghost button (hairline + faint fill).
         quads.push(UiQuad::solid(
@@ -5541,6 +5624,40 @@ impl Display {
         quads.push(UiQuad::solid(cancel_x, btn_y, cancel_w, btn_h, s(8.0), sk.surface));
         // Primary: the single loud element on the card.
         quads.push(UiQuad::solid(primary_x, btn_y, primary_w, btn_h, s(8.0), primary_fill));
+
+        // Keycaps: a 1px ring in the button's own ink, with the interior
+        // re-stacking that button's own fills so the cap reads as an outline
+        // rather than a second filled control competing with the primary
+        // action. Ring alpha stays low — at full strength it would out-shout
+        // the label it annotates, especially on the accent/danger fill.
+        // Returns its quads instead of pushing: a closure capturing `quads`
+        // mutably would lock it for the rest of the batch.
+        let keycap = |x: f32, ink: Rgb, fills: &[Rgba], key: &str| -> Vec<UiQuad> {
+            let w = cap_w(key);
+            let mut out = vec![UiQuad::solid(
+                x,
+                cap_y,
+                w,
+                cap_h,
+                cap_r,
+                Rgba::new(ink.r, ink.g, ink.b, 120),
+            )];
+            out.extend(fills.iter().map(|fill| {
+                UiQuad::solid(
+                    x + s(1.0),
+                    cap_y + s(1.0),
+                    w - s(2.0),
+                    cap_h - s(2.0),
+                    cap_r - s(1.0),
+                    *fill,
+                )
+            }));
+            out
+        };
+        // The ghost button's visible fill is panel+surface stacked; the cap
+        // interior re-stacks both so it matches the button exactly.
+        quads.extend(keycap(cancel_cap_x, txt, &[sk.panel, sk.surface], cancel_key));
+        quads.extend(keycap(primary_cap_x, on_primary, &[primary_fill], primary_key));
         self.renderer.draw_ui(&size, &quads);
 
         // Text: free-pixel chrome text (no opaque cell backgrounds), left
@@ -5563,15 +5680,34 @@ impl Display {
             cancel_label,
             glyph_cache,
         );
+        // Key text is centered in its cap. The cap shares the button's text
+        // centerline by construction, so `btn_text_y` needs no adjustment.
+        // Ink stays full strength: the ring already marks this run as a key,
+        // dimming it too would push it under the contrast floor.
+        self.renderer.draw_chrome_text(
+            &size,
+            cancel_cap_x + cap_pad,
+            btn_text_y,
+            txt,
+            cancel_key,
+            glyph_cache,
+        );
         // Danger keeps pale ink (red is dark in both modes); the accent
         // button contrast flips with the theme.
-        let on_primary = if danger { Rgb::new(255, 244, 246) } else { sk.ink_on_accent };
         self.renderer.draw_chrome_text(
             &size,
             primary_x + btn_pad,
             btn_text_y,
             on_primary,
             primary_label,
+            glyph_cache,
+        );
+        self.renderer.draw_chrome_text(
+            &size,
+            primary_cap_x + cap_pad,
+            btn_text_y,
+            on_primary,
+            primary_key,
             glyph_cache,
         );
     }
@@ -6575,8 +6711,14 @@ impl Display {
     /// 2026-07-23 用户反馈重构：上一版是整行 opaque `draw_string`，锚在鼠
     /// 标 cell 上——指针沿链接滑动时提示逐格跳动（被感知为"闪烁"），路
     /// 径还能占满整行（"显示太长"）。现在锚定到 hint 自己的起始 cell（指
-    /// 针滑动时纹丝不动）、路径限 48 列（尾部优先）、提示词压缩为
-    /// `Ctrl+点击`，并以 0.85× UI 锚定字号画进圆角小气泡。
+    /// 针滑动时纹丝不动）、提示词压缩为 `Ctrl+点击`，并以 0.85× UI 锚定
+    /// 字号画进圆角小气泡。
+    ///
+    /// 2026-07-26 用户反馈"显示不全"三连修：① file URI percent-decode 后
+    /// 再展示（见 [`strip_file_scheme`]）；② 48 列硬帽退役，预算放开到整
+    /// 个视口宽（fit_tail 仍兜底真溢出）；③ 气泡宽度按渲染器真实步进
+    /// `average_advance × scale` 量取——`cell_w` 是 floor 后的值，48 列累
+    /// 积下来尾部文字会戳出气泡右缘。
     fn draw_hyperlink_preview(
         &mut self,
         config: &UiConfig,
@@ -6611,7 +6753,7 @@ impl Display {
         const HINT: &str = " · Ctrl+点击";
         let width = |s: &str| -> usize { s.chars().map(|c| c.width().unwrap_or(0)).sum() };
         let hint_w = width(HINT);
-        let target_budget = num_cols.saturating_sub(hint_w + 1).min(48);
+        let target_budget = num_cols.saturating_sub(hint_w + 1);
         let target = fit_tail(&target, target_budget);
         let label = format!("{target}{HINT}");
 
@@ -6622,17 +6764,29 @@ impl Display {
             anchor.line.saturating_sub(1)
         };
 
-        // Damage the tooltip row this frame and next (it can appear/vanish).
-        let damage = LineDamageBounds::new(line, 0, num_cols);
-        self.damage_tracker.frame().damage_line(damage);
-        self.damage_tracker.next_frame().damage_line(damage);
+        // Damage every row the bubble touches, this frame and next (it can
+        // appear/vanish). The bubble is taller than one cell row (0.85·cell
+        // plus padding and border, centered on its row), so it bleeds into
+        // both neighbours — an un-damaged neighbour ghosts the bubble's edges
+        // on partial-present paths.
+        let last_line = self.size_info.screen_lines().saturating_sub(1);
+        for touched in line.saturating_sub(1)..=(line + 1).min(last_line) {
+            let damage = LineDamageBounds::new(touched, 0, num_cols);
+            self.damage_tracker.frame().damage_line(damage);
+            self.damage_tracker.next_frame().damage_line(damage);
+        }
 
         let scale_px = self.window.scale_factor as f32;
         let s = |v: f32| v * scale_px;
         let text_scale = 0.85 * self.ui_text_scale();
         let cell_w = self.size_info.cell_width();
         let cell_h = self.size_info.cell_height();
-        let label_px = width(&label) as f32 * cell_w * text_scale;
+        // Measure with the renderer's REAL step for scaled doc text — the
+        // unfloored design advance (`draw_doc_text_tracked` walks
+        // `average_advance × scale`). `cell_w` is that advance floored; the
+        // fraction lost per column made long labels poke out of the bubble.
+        let advance = self.glyph_cache.font_metrics().average_advance as f32 * text_scale;
+        let label_px = width(&label) as f32 * advance;
         let pad_x = s(8.0);
         let bubble_w = label_px + 2.0 * pad_x;
         let bubble_h = cell_h * text_scale + s(8.0);
@@ -6759,8 +6913,19 @@ impl Display {
     }
 
     /// Check whether a hint highlight needs to be cleared.
-    fn validate_hint_highlights(&mut self, display_offset: usize) {
-        let frame = self.damage_tracker.frame();
+    ///
+    /// 2026-07-26 闪烁根因：这里原本拿共享 damage tracker 的 `intersects`
+    /// 判断"hint 底下的网格变没变"，可 Nebula 每帧把 frame/next_frame 都标
+    /// 成全窗 damage（全窗重绘呈现模型），`intersects` 的 `full ||` 短路恒
+    /// 真——悬停高亮活不过两帧就被掐灭，鼠标一动重新点亮又立刻熄灭，ls
+    /// 里扫过文件时下划线和气泡狂闪。改判终端自己上报的本帧 damage
+    /// （`draw_pane` 在污染 tracker 之前捕获），语义回到上游本意。
+    fn validate_hint_highlights(
+        &mut self,
+        display_offset: usize,
+        term_damage_full: bool,
+        term_damage_lines: &[LineDamageBounds],
+    ) {
         let hints = [
             (&mut self.highlighted_hint, &mut self.highlighted_hint_age, true),
             (&mut self.vi_highlighted_hint, &mut self.vi_highlighted_hint_age, false),
@@ -6787,12 +6952,21 @@ impl Display {
                 .filter(|point| point.line < num_lines)
                 .unwrap_or_else(|| Point::new(num_lines - 1, self.size_info.last_column()));
 
-            // Clear invalidated hints.
-            if frame.intersects(start, end) {
+            // Clear hints whose underlying grid content actually changed.
+            let grid_changed = term_damage_full
+                || term_damage_lines.iter().any(|l| {
+                    l.line >= start.line
+                        && l.line <= end.line
+                        // On the hint's first/last line only the hint's own
+                        // column span counts; interior lines count wholly.
+                        && (l.line != start.line || l.right >= start.column.0)
+                        && (l.line != end.line || l.left <= end.column.0)
+                });
+            if grid_changed {
                 if reset_mouse {
                     self.window.set_mouse_cursor(CursorIcon::Default);
                 }
-                frame.mark_fully_damaged();
+                self.damage_tracker.frame().mark_fully_damaged();
                 *hint = None;
             }
         }
@@ -7014,12 +7188,27 @@ mod nebula_ux_tests {
 
     use super::{
         NebulaConfirm, SizeInfo, alt_screen_vertical_padding_bands, nebula_command_hint,
-        remove_ssh_host_from_lists, replays_untrusted_terminal_output, restore_ssh_host_to_lists,
-        system_theme_snapshot,
+        percent_decode_lossy, remove_ssh_host_from_lists, replays_untrusted_terminal_output,
+        restore_ssh_host_to_lists, strip_file_scheme, system_theme_snapshot,
     };
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn file_uri_tooltip_shows_decoded_path() {
+        // `ls --hyperlink` percent-encodes CJK names; the tooltip must not.
+        assert_eq!(
+            strip_file_scheme("file:///D:/%E6%98%9F%E9%9B%B2/read%20me.txt"),
+            "D:/星雲/read me.txt"
+        );
+        // Non-file URIs keep their encoding — it is part of their identity.
+        assert_eq!(strip_file_scheme("https://a.b/c%20d"), "https://a.b/c%20d");
+        // Malformed escapes and non-UTF-8 decodes survive verbatim.
+        assert_eq!(percent_decode_lossy("100%"), "100%");
+        assert_eq!(percent_decode_lossy("%zz"), "%zz");
+        assert_eq!(percent_decode_lossy("%ff%fe"), "%ff%fe");
     }
 
     #[test]

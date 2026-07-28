@@ -1065,20 +1065,45 @@ pub(super) fn draw_text(
         };
         r.draw_chrome_text(size, label_x, ry, fg, &label, gc);
         if !hint.is_empty() {
-            // Truncate long paths: reserve space for the hint, and if it would
-            // collide with the label, clip the hint with "…" suffix.
-            let max_hint_chars = ((iw - label_x - s(28.0)) / cell_w).floor() as usize;
-            let hint_display = if hint.chars().count() > max_hint_chars && max_hint_chars > 2 {
-                let truncated: String = hint.chars().take(max_hint_chars - 1).collect();
-                format!("{}…", truncated)
-            } else {
-                hint.clone()
-            };
-            let hint_w = hint_display.chars().count() as f32 * cell_w;
-            r.draw_chrome_text(size, ix + iw - s(14.0) - hint_w, ry, sk.ink_dim, &hint_display, gc);
+            if let Some((hint_x, shown)) = fit_hint(label_x, &label, ix, iw, cell_w, scale, &hint) {
+                r.draw_chrome_text(size, hint_x, ry, sk.ink_dim, &shown, gc);
+            }
         }
     }
     icon_draws
+}
+
+/// Lay out a row's right-aligned hint next to its left-aligned label: returns
+/// the draw X and the (possibly truncated) text, or `None` when fewer than 3
+/// columns remain. Pure so the no-collision contract is unit-testable.
+///
+/// 2026-07-27 用户反馈"字号放大后 powershell 路径叠进标签"：旧预算
+/// `iw - label_x - s(28)` 把宽度 `iw` 和绝对坐标 `label_x` 混在一起减——
+/// 面板是居中的，窗口一宽 `label_x` 随之变大，差值变负后被 `as usize`
+/// 钳成 0，`> 2` 的守卫反而放行了完整路径，57 列的 powershell.exe 右对
+/// 齐后一头扎回标签里；字号越大 cell_w 越宽，扎得越深。且预算从标签
+/// *左*缘起算，从没给标签本身留过位置。现在从标签右缘 + 呼吸缝起算，
+/// CJK 按双列计宽（目录 picker 的 hint 是可含中文的路径，按 char 数右
+/// 对齐会溢出面板），塞不下保尾截断——路径的辨识度在文件名那端。
+fn fit_hint(
+    label_x: f32,
+    label: &str,
+    ix: f32,
+    iw: f32,
+    cell_w: f32,
+    scale: f32,
+    hint: &str,
+) -> Option<(f32, String)> {
+    let cols = |t: &str| -> usize { t.chars().map(|c| c.width().unwrap_or(0)).sum() };
+    let label_end = label_x + cols(label) as f32 * cell_w;
+    let right = ix + iw - 14.0 * scale;
+    let budget = ((right - label_end - 24.0 * scale) / cell_w).floor();
+    if budget < 3.0 {
+        return None;
+    }
+    let shown = super::fit_tail(hint, budget as usize);
+    let x = right - cols(&shown) as f32 * cell_w;
+    Some((x, shown))
 }
 
 #[cfg(test)]
@@ -1296,6 +1321,42 @@ mod tests {
     fn search_input_and_result_rows_share_compact_height() {
         let layout = palette_layout(1600.0, 900.0, 1.5);
         assert_eq!(layout.input.3, layout.row_h);
+    }
+
+    #[test]
+    fn hint_never_overlaps_label_on_a_wide_window() {
+        // Maximized-wide geometry: the panel is centered, so the label's
+        // absolute x exceeds the panel WIDTH. The old budget subtracted that
+        // absolute x from the width, went negative, was clamped to 0 by
+        // `as usize`, and the `> 2` guard then let the full 57-column path
+        // through — right-aligned straight into the label.
+        let (ix, iw, cell_w, scale) = (960.0, 770.0, 14.0, 1.25);
+        let label = "Windows PowerShell";
+        let label_x = ix + 50.0;
+        let hint = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+        let (hint_x, shown) = fit_hint(label_x, label, ix, iw, cell_w, scale, hint).unwrap();
+        let label_end = label_x + label.chars().count() as f32 * cell_w;
+        assert!(hint_x >= label_end, "hint at {hint_x} starts inside the label (ends {label_end})");
+        // Paths are recognized by their tail, so the cut keeps the filename.
+        assert!(shown.starts_with('…') && shown.ends_with("powershell.exe"), "got {shown}");
+    }
+
+    #[test]
+    fn hint_is_dropped_when_the_label_leaves_no_room() {
+        let label = "启动：一个足够长到吃掉整行宽度的 profile 名字标签";
+        assert_eq!(fit_hint(500.0, label, 100.0, 600.0, 12.0, 1.0, r"C:\x"), None);
+    }
+
+    #[test]
+    fn cjk_hint_right_aligns_by_display_columns_not_chars() {
+        // Directory-picker hints are paths that may contain CJK; counting
+        // chars instead of columns pushed them past the panel's right edge.
+        let (ix, iw, cell_w) = (0.0, 640.0, 10.0);
+        let hint = "D:/项目/子目录";
+        let (hint_x, shown) = fit_hint(ix + 40.0, "口", ix, iw, cell_w, 1.0, hint).unwrap();
+        assert_eq!(shown, hint, "plenty of room: no truncation");
+        let cols: usize = shown.chars().map(|c| c.width().unwrap_or(0)).sum();
+        assert_eq!(hint_x, ix + iw - 14.0 - cols as f32 * cell_w);
     }
 
     #[test]
