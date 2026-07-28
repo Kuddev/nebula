@@ -588,6 +588,132 @@ pub(crate) async fn open_sftp(
     Ok(russh_sftp::client::SftpSession::new(channel.into_stream()).await?)
 }
 
+// ---- 「测试连接」（SSH 编辑器页脚，spec ui-redesign 稿一） ----
+
+/// 编辑器草稿的连通性测试请求。带草稿密码/密钥而不是磁盘 profile——
+/// 测试要回答「保存后能不能连上」，不是「上次保存的配置行不行」。
+#[derive(Debug, Clone)]
+pub struct SshTestRequest {
+    pub destination: String,
+    pub auth: crate::ssh_profiles::SshAuthMode,
+    pub private_keys: Vec<PathBuf>,
+    /// 密码框里的未保存草稿；`None`/空 = 只用密钥与已存凭据。
+    pub password: Option<String>,
+}
+
+const TEST_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// 解析 + 连接 + 无人值守认证一轮，结果连同耗时经事件送回窗口线程。
+/// 绝不弹 AskPass：交互式方法在测试中一律跳过（见 [`test_authenticate`]）。
+pub fn spawn_test(
+    request: SshTestRequest,
+    proxy: winit::event_loop::EventLoopProxy<crate::event::Event>,
+    window_id: winit::window::WindowId,
+) -> io::Result<()> {
+    runtime()?.spawn(async move {
+        let started = std::time::Instant::now();
+        let raw = request.destination.clone();
+        let outcome = tokio::time::timeout(TEST_TIMEOUT, async {
+            let resolved = tokio::task::spawn_blocking({
+                let raw = raw.clone();
+                move || SshDestination::resolve(&raw)
+            })
+            .await
+            .map_err(|err| -> SessionError { format!("SSH 地址解析任务失败: {err}").into() })??;
+            test_connect(&resolved, &request).await
+        })
+        .await;
+        let (ok, message) = match outcome {
+            Ok(Ok(())) => (true, String::new()),
+            Ok(Err(err)) => (false, err.to_string()),
+            Err(_) => (false, format!("连接超时（{} 秒无响应）", TEST_TIMEOUT.as_secs())),
+        };
+        let _ = proxy.send_event(crate::event::Event::new(
+            crate::event::EventType::SshTestDone {
+                destination: raw,
+                ok,
+                message,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            },
+            window_id,
+        ));
+    });
+    Ok(())
+}
+
+/// 一次性连接（不进连接池——池里的旧连接不能代表新草稿），认证完即 drop。
+async fn test_connect(
+    destination: &SshDestination,
+    request: &SshTestRequest,
+) -> Result<(), SessionError> {
+    if let Some(proxy_jump) = destination.proxy_jump.as_deref() {
+        return Err(format!("当前直连模式尚未接入跳板机 {proxy_jump}").into());
+    }
+    let config = Arc::new(client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: None,
+        keepalive_max: 3,
+        ..Default::default()
+    });
+    let handler = ClientHandler { host: destination.host.clone(), port: destination.port };
+    let mut session =
+        client::connect(config, (destination.host.as_str(), destination.port), handler).await?;
+    test_authenticate(&mut session, destination, request).await
+}
+
+/// 无人值守版认证：none → 草稿密码 → 密钥/已存密码计划。keyboard-interactive
+/// 与「连接时询问」在这里跳过——测试不能弹框，也不能把交互失败误报成配置错。
+async fn test_authenticate(
+    session: &mut ClientSession,
+    destination: &SshDestination,
+    request: &SshTestRequest,
+) -> Result<(), SessionError> {
+    if session.authenticate_none(&destination.user).await?.success() {
+        return Ok(());
+    }
+    if let Some(password) = request.password.as_deref().filter(|p| !p.is_empty()) {
+        if authenticate_password(session, &destination.user, password.as_bytes()).await? {
+            return Ok(());
+        }
+    }
+    let plan =
+        authentication_plan(request.auth, &request.private_keys, &destination.identity_files);
+    let mut interactive_skipped = false;
+    let mut stored_password = None;
+    let mut loaded_stored_password = false;
+    for method in plan {
+        match method {
+            AuthMethod::PrivateKey(path) => {
+                if try_private_key(session, destination, &path).await? {
+                    clear_secret(&mut stored_password);
+                    return Ok(());
+                }
+            },
+            AuthMethod::StoredPassword => {
+                if !loaded_stored_password {
+                    stored_password =
+                        crate::ssh_credentials::load_stored_password(&destination.original)?;
+                    loaded_stored_password = true;
+                }
+                if let Some(password) = stored_password.as_deref() {
+                    if authenticate_password(session, &destination.user, password).await? {
+                        clear_secret(&mut stored_password);
+                        return Ok(());
+                    }
+                }
+            },
+            AuthMethod::KeyboardInteractive | AuthMethod::PromptPassword => {
+                interactive_skipped = true;
+            },
+        }
+    }
+    clear_secret(&mut stored_password);
+    if interactive_skipped {
+        return Err("服务器可达，但此配置需要连接时交互输入（密码/MFA），测试无法替你完成".into());
+    }
+    Err("认证未通过：请检查密码、私钥或服务器端授权".into())
+}
+
 fn auth_failure(mode: crate::ssh_profiles::SshAuthMode, key_count: usize) -> String {
     use crate::ssh_profiles::SshAuthMode;
     match mode {

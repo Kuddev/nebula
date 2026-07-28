@@ -198,7 +198,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             } else {
                 None
             };
-            if self.ctx.display().palette_hover(hover_row) {
+            if self.ctx.display().palette_hover((px, py), hover_row) {
                 self.ctx.mark_dirty();
             }
             self.ctx.window().set_mouse_cursor(if hover_row.is_some() {
@@ -291,12 +291,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::CursorShapeOption(_)
             | crate::display::SettingsHit::CursorBlinkToggle
             | crate::display::SettingsHit::CopyOnSelectToggle
+            | crate::display::SettingsHit::CjkBoldToggle
+            | crate::display::SettingsHit::KeymapRow(_)
             | crate::display::SettingsHit::FontSizeUp
             | crate::display::SettingsHit::FontSizeDown
             | crate::display::SettingsHit::BackgroundImageCoverChrome
             | crate::display::SettingsHit::OpenConfigFile
+            | crate::display::SettingsHit::SyncAutoPullToggle
+            | crate::display::SettingsHit::SyncPushButton
+            | crate::display::SettingsHit::SyncPullButton
             | crate::display::SettingsHit::Reset => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
+                return;
+            },
+            crate::display::SettingsHit::SyncInput(_) => {
+                self.ctx.window().set_mouse_cursor(CursorIcon::Text);
                 return;
             },
             crate::display::SettingsHit::OpacitySlider
@@ -1031,6 +1040,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// Modifier state change.
     pub fn modifiers_input(&mut self, modifiers: Modifiers) {
         *self.ctx.modifiers() = modifiers;
+
+        // 键位捕获的实时回显：按下/松开修饰键立即反映到设置页的 keycap。
+        self.ctx.display().keymap_capture_preview(modifiers.state());
 
         // Prompt hint highlight update.
         self.ctx.mouse_mut().hint_highlight_dirty = true;

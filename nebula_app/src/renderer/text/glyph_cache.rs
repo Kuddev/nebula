@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use ahash::RandomState;
 use crossfont::{
-    Error as RasterizerError, FontDesc, FontKey, GlyphKey, Metrics, Rasterize, RasterizedGlyph,
-    Size, Slant, Style, Weight,
+    BitmapBuffer, Error as RasterizerError, FontDesc, FontKey, GlyphKey, Metrics, Rasterize,
+    RasterizedGlyph, Size, Slant, Style, Weight,
 };
 use log::{error, info};
 use unicode_width::UnicodeWidthChar;
@@ -94,6 +94,13 @@ pub struct GlyphCache {
 
     /// Whether to use the built-in font for box drawing characters.
     builtin_box_drawing: bool,
+
+    /// 全宽（2 列）字形在 bold run 里改用 Regular 字形（2026-07-28 裁定，
+    /// 任务 #4）。DirectWrite 会把 CJK 粗体 fallback 到雅黑 Bold 真字形，
+    /// 小字号下与周围 Regular 对比过重、随粗体词分布"时有时无"地发闷。
+    /// 终端圈的成熟处理是宽字形不上粗字重——粗体语义仍由 ANSI 亮色映射
+    /// 承担。默认开，`nebula_settings.txt` 的 `cjk_bold_regular=0` 关闭。
+    pub wide_bold_use_regular: bool,
 }
 
 impl GlyphCache {
@@ -156,6 +163,7 @@ impl GlyphCache {
             ui_metrics: metrics,
             ui_domain: false,
             builtin_box_drawing: font.builtin_box_drawing,
+            wide_bold_use_regular: true,
         })
     }
 
@@ -296,6 +304,18 @@ impl GlyphCache {
     where
         L: LoadGlyph + ?Sized,
     {
+        // 宽字形的 bold 降级发生在缓存键之前：bold run 里的 CJK 与 Regular
+        // 共享同一条缓存/atlas 条目，粗细一致由构造保证。bold_key 本就回落
+        // 到 regular 的配置下这里是无操作。
+        let mut glyph_key = glyph_key;
+        if self.wide_bold_use_regular && glyph_key.character.width() == Some(2) {
+            if glyph_key.font_key == self.bold_key {
+                glyph_key.font_key = self.font_key;
+            } else if glyph_key.font_key == self.bold_italic_key {
+                glyph_key.font_key = self.italic_key;
+            }
+        }
+
         // Try to load glyph from cache.
         if let Some(glyph) = self.cache.get(&glyph_key) {
             return *glyph;
@@ -351,6 +371,31 @@ impl GlyphCache {
     where
         L: LoadGlyph + ?Sized,
     {
+        // 2026-07-28 用户报告：任务列表里的"①"和后面的汉字叠在一起。根因
+        // 是 East Asian Ambiguous（①②★№…）：unicode-width 按窄（1 列）分
+        // 格，可主等宽字体没有这些字形，DirectWrite 落到 CJK 字体的全宽字
+        // 形（≈2 列墨迹），画出来右半截压进邻格。终端侧不能单方面把格子改
+        // 成 2 列——应用程序（Claude Code 等）按 1 列排版，格宽不一致会让
+        // 整行错位。所以在装载时把溢出位图等比缩进一列：CPU、一次、进缓存
+        // （绘制期 GPU 拉伸是被清晰度铁律禁止的）。1.4× 容差放过斜体悬伸
+        // 这类正常越界，只捕获真正的全宽 fallback 字形。
+        {
+            let metrics = if self.ui_domain { &self.ui_metrics } else { &self.metrics };
+            let advance = metrics.average_advance as f32;
+            // Private Use Area（Nerd Font 图标、powerline 分隔符 U+E0B0…）
+            // 刻意画满甚至越出格子拼接徽章，绝不能缩（2026-07-28 用户反馈：
+            // 提示符图标全变小了）。只处理真实的 East Asian Ambiguous 文字。
+            let private_use = matches!(u32::from(glyph.character),
+                0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD);
+            if glyph.character.width() == Some(1)
+                && !private_use
+                && advance > 0.0
+                && glyph.width as f32 > advance * 1.4
+            {
+                shrink_glyph_to_advance(&mut glyph, advance);
+            }
+        }
+
         glyph.left += i32::from(self.glyph_offset.x);
         glyph.top += i32::from(self.glyph_offset.y);
         // The descent baked into the anchor comes from the glyph's domain:
@@ -374,8 +419,7 @@ impl GlyphCache {
     }
 
     /// Reset currently cached data in both GL and the registry to default state.
-    pub fn reset_glyph_cache<L: LoadGlyph>(&mut self, loader: &mut L) {
-        loader.clear();
+    pub fn reset_glyph_cache<L: LoadGlyph>(&mut self, loader: &mut L) {        loader.clear();
         self.cache = Default::default();
 
         self.load_common_glyphs(loader);
@@ -493,6 +537,58 @@ impl GlyphCache {
 #[inline]
 fn is_private_use(character: char) -> bool {
     matches!(character as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+}
+
+/// Shrink an overflowing single-column fallback bitmap so its ink fits one
+/// cell advance: uniform scale (a squashed ① reads worse than a small one),
+/// box-filtered on the CPU once at load time, then horizontally centered in
+/// the cell and re-seated on the baseline.
+fn shrink_glyph_to_advance(glyph: &mut RasterizedGlyph, advance: f32) {
+    let (src_w, src_h) = (glyph.width as usize, glyph.height as usize);
+    if src_w == 0 || src_h == 0 {
+        return;
+    }
+    let scale = advance / src_w as f32;
+    let dst_w = ((src_w as f32 * scale).round() as usize).max(1);
+    let dst_h = ((src_h as f32 * scale).round() as usize).max(1);
+    let (bpp, src) = match &glyph.buffer {
+        BitmapBuffer::Rgb(buffer) => (3usize, buffer),
+        BitmapBuffer::Rgba(buffer) => (4usize, buffer),
+    };
+    if src.len() < src_w * src_h * bpp {
+        // A lying bitmap header must not become an out-of-bounds read.
+        return;
+    }
+    let mut dst = vec![0u8; dst_w * dst_h * bpp];
+    let inv = 1.0 / scale;
+    for dy in 0..dst_h {
+        let sy_lo = (dy as f32 * inv) as usize;
+        let sy_hi = (((dy + 1) as f32 * inv).ceil() as usize).clamp(sy_lo + 1, src_h);
+        for dx in 0..dst_w {
+            let sx_lo = (dx as f32 * inv) as usize;
+            let sx_hi = (((dx + 1) as f32 * inv).ceil() as usize).clamp(sx_lo + 1, src_w);
+            let samples = ((sy_hi - sy_lo) * (sx_hi - sx_lo)) as u32;
+            for channel in 0..bpp {
+                let mut sum = 0u32;
+                for sy in sy_lo..sy_hi {
+                    for sx in sx_lo..sx_hi {
+                        sum += u32::from(src[(sy * src_w + sx) * bpp + channel]);
+                    }
+                }
+                dst[(dy * dst_w + dx) * bpp + channel] = (sum / samples) as u8;
+            }
+        }
+    }
+    glyph.buffer = match &glyph.buffer {
+        BitmapBuffer::Rgb(_) => BitmapBuffer::Rgb(dst),
+        BitmapBuffer::Rgba(_) => BitmapBuffer::Rgba(dst),
+    };
+    glyph.width = dst_w as i32;
+    glyph.height = dst_h as i32;
+    // Center the now-narrower ink in its single cell; the fallback font's
+    // full-width bearing has no meaning in this cell's coordinate space.
+    glyph.left = ((advance - dst_w as f32) * 0.5).round() as i32;
+    glyph.top = (glyph.top as f32 * scale).round() as i32;
 }
 
 #[cfg(all(test, windows))]

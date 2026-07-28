@@ -544,6 +544,44 @@ impl ApplicationHandler<Event> for Processor {
                     }
                 }
             },
+            // Assistant fix results route by pane id the same way.
+            (EventType::AiFixReady { pane, seq, fix }, _) => {
+                for window_context in self.windows.values_mut() {
+                    if window_context.handle_ai_fix(pane, seq, &fix) {
+                        break;
+                    }
+                }
+            },
+            // WebDAV 同步（spec 003）：网络与 Argon2 派生都在后台 OS 线程
+            // 阻塞完成，主循环只发起与收尾——终端渲染不等加密。
+            (EventType::NebulaSync { push }, _) => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let result =
+                        if push { crate::sync::push() } else { crate::sync::pull() };
+                    crate::sync::warn_result(&result);
+                    let (message, error, history_changed) = match result {
+                        Ok(outcome) => (outcome.message, false, outcome.history_changed),
+                        Err(err) => (err, true, false),
+                    };
+                    let _ = proxy.send_event(crate::event::Event::new(
+                        EventType::NebulaSyncDone { message, error, history_changed },
+                        None,
+                    ));
+                });
+            },
+            (EventType::NebulaSyncDone { message, error, history_changed }, _) => {
+                for window_context in self.windows.values_mut() {
+                    window_context.handle_sync_done(&message, error, history_changed);
+                }
+            },
+            (EventType::SshTestDone { destination, ok, message, elapsed_ms }, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.display.ssh_test_done(&destination, ok, &message, elapsed_ms);
+                    window_context.dirty = true;
+                    window_context.display.window.request_redraw();
+                }
+            },
             // Toast click: surface the window (and pane) the toast came from.
             // Must be consumed here — the generic Some(window_id) forwarding
             // below would park it in a window's event queue instead.
@@ -1162,6 +1200,22 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         mem::take(&mut self.nebula_state.suggestion)
     }
 
+    fn nebula_take_ai_fix(&mut self) -> Option<String> {
+        use crate::ai_assistant::AiFixState;
+        match self.nebula_state.ai_fix.take() {
+            Some(AiFixState::Ready { fix, .. }) => Some(fix.command),
+            other => {
+                // Pending 放回去：分析中的请求不因误按 Ctrl+. 而丢。
+                self.nebula_state.ai_fix = other;
+                None
+            },
+        }
+    }
+
+    fn nebula_dismiss_ai_fix(&mut self) -> bool {
+        self.nebula_state.ai_fix.take().is_some()
+    }
+
     #[inline]
     fn nebula_input_char(&mut self, c: char) {
         Display::nebula_input_char(self.nebula_state, c);
@@ -1214,6 +1268,33 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             tab_id: None,
             payload: EventType::NebulaTab(request),
         });
+    }
+
+    fn nebula_sync(&self, push: bool) {
+        let _ = self.event_proxy.send_event(Event {
+            window_id: Some(self.display.window.id()),
+            tab_id: None,
+            payload: EventType::NebulaSync { push },
+        });
+    }
+
+    /// SSH 编辑器「测试连接」：display 侧点击时暂存的请求在这里被取走，
+    /// 交给共享 SSH runtime 执行；结果以 [`EventType::SshTestDone`] 回流。
+    fn nebula_ssh_test(&mut self) {
+        let Some(request) = self.display.take_ssh_test_request() else { return };
+        let destination = request.destination.clone();
+        if let Err(err) = crate::ssh_session::spawn_test(
+            request,
+            self.event_proxy.clone(),
+            self.display.window.id(),
+        ) {
+            self.display.ssh_test_done(
+                &destination,
+                false,
+                &format!("无法启动测试任务：{err}"),
+                0,
+            );
+        }
     }
 
     fn nebula_open_sftp(&mut self, destination: String) {
@@ -1624,6 +1705,21 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         self.spawn_daemon("explorer.exe", &[path.as_os_str()]);
         #[cfg(not(windows))]
         self.spawn_daemon("xdg-open", &[path.as_os_str()]);
+    }
+
+    /// 资源管理器里定位到条目本身（文件树右键「在资源管理器中显示」）。
+    /// `/select,` 与路径必须是同一个参数，逗号后直接拼路径。
+    fn reveal_in_file_manager(&mut self, path: &std::path::Path) {
+        #[cfg(windows)]
+        {
+            let mut arg = std::ffi::OsString::from("/select,");
+            arg.push(path.as_os_str());
+            self.spawn_daemon("explorer.exe", &[arg.as_os_str()]);
+        }
+        #[cfg(not(windows))]
+        if let Some(parent) = path.parent() {
+            self.spawn_daemon("xdg-open", &[parent.as_os_str()]);
+        }
     }
 
     /// Trigger a hint action.
@@ -2160,6 +2256,87 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
 }
 
 impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
+    /// 助手错误恢复（spec 001 阶段一）触发点：便宜的门（冷却、开关、规则
+    /// 表）都过了才抓输出、开线程。任何一门不过都安静返回——这条路径跑在
+    /// 每次命令失败上，不能吵。
+    fn maybe_request_ai_fix(&mut self, exit_code: i32, program: Option<&str>) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(1);
+
+        if let Some(last) = self.ctx.nebula_state.ai_fix_cooldown {
+            if last.elapsed() < crate::ai_assistant::COOLDOWN {
+                return;
+            }
+        }
+        let cfg = crate::ai_assistant::AssistantConfig::load();
+        if !cfg.enabled {
+            return;
+        }
+        let command = self.ctx.nebula_state.last_committed.clone();
+        if !crate::ai_assistant::should_suggest(
+            exit_code,
+            &command,
+            program,
+            &cfg.ignored_exit_codes,
+        ) {
+            return;
+        }
+        self.ctx.nebula_state.ai_fix_cooldown = Some(Instant::now());
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let request = crate::ai_assistant::FixRequest {
+            pane: self.ctx.pane_id,
+            seq,
+            command,
+            exit_code,
+            cwd: self.ctx.nebula_state.cwd.clone(),
+            branch: self.ctx.nebula_state.branch.clone(),
+            output_tail: crate::ai_assistant::redact_secrets(&self.grid_output_tail(24, 2000)),
+        };
+        self.ctx.nebula_state.ai_fix =
+            Some(crate::ai_assistant::AiFixState::Pending { seq });
+        crate::ai_assistant::spawn_fix_request(self.ctx.event_proxy.clone(), cfg, request);
+        self.ctx.mark_dirty();
+    }
+
+    /// The failed command's on-screen output: up to `max_lines` rows ending at
+    /// the cursor (OSC 133;D arrives before the next prompt paints, so the
+    /// cursor still sits at the end of the output), tail-capped at `max_chars`
+    /// — the newest lines carry the actual error. This is the context Kaku's
+    /// shell-side integration can never see; it is Nebula's edge as a terminal.
+    fn grid_output_tail(&self, max_lines: usize, max_chars: usize) -> String {
+        use nebula_terminal::index::{Column, Line};
+        use nebula_terminal::term::cell::Flags as CellFlags;
+
+        let grid = self.ctx.terminal.grid();
+        let cursor_line = grid.cursor.point.line.0;
+        let columns = self.ctx.terminal.columns();
+        let first = (cursor_line + 1 - max_lines as i32).max(0);
+        let mut lines: Vec<String> = Vec::new();
+        for l in first..=cursor_line {
+            let row = &grid[Line(l)];
+            let mut text = String::with_capacity(columns);
+            for c in 0..columns {
+                let cell = &row[Column(c)];
+                // Wide chars own two cells; the spacer half would double every
+                // CJK glyph as a stray space.
+                if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
+            }
+            lines.push(text.trim_end().to_owned());
+        }
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        while lines.first().is_some_and(String::is_empty) {
+            lines.remove(0);
+        }
+        let text = lines.join("\n");
+        let overflow = text.chars().count().saturating_sub(max_chars);
+        if overflow > 0 { text.chars().skip(overflow).collect() } else { text }
+    }
+
     /// Handle events from winit.
     pub fn handle_event(&mut self, event: WinitEvent<Event>) {
         match event {
@@ -2172,10 +2349,16 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 // Resize settling is handled at the window-context level.
                 EventType::NebulaResizeSettled
                 | EventType::SshDeleteUndoExpired
+                | EventType::SshTestDone { .. }
                 | EventType::SftpUpdated => (),
                 // AI hook events are handled at the Processor level (they may
-                // target any window's pane); FocusWindow likewise.
-                EventType::AiHook(_) | EventType::FocusWindow { .. } => (),
+                // target any window's pane); FocusWindow, fix results and
+                // WebDAV sync likewise.
+                EventType::AiHook(_)
+                | EventType::AiFixReady { .. }
+                | EventType::NebulaSync { .. }
+                | EventType::NebulaSyncDone { .. }
+                | EventType::FocusWindow { .. } => (),
                 EventType::Scroll(scroll) => self.ctx.scroll(scroll),
                 EventType::BlinkCursor => {
                     // Only change state when timeout isn't reached, since we could get
@@ -2313,13 +2496,18 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             crate::ssh::ssh_destination(&self.ctx.nebula_state.last_committed);
                         self.ctx.nebula_state.awaiting_input = false;
                     },
-                    TerminalEvent::CommandDone => {
+                    TerminalEvent::CommandDone { exit_code } => {
                         // Take (not just clear) the program: the toast below
                         // names it, and reading the field after the reset used
                         // to hand the toast a permanent `None`.
                         let program = self.ctx.nebula_state.running_program.take();
                         let pending_ssh = self.ctx.nebula_state.pending_ssh_host.take();
                         self.ctx.nebula_state.awaiting_input = false;
+                        // 助手错误恢复（spec 001）：Nebula 集成上报的退出码
+                        // 走触发判定；裸 133;D（第三方集成）码为 None，静默。
+                        if let Some(code) = exit_code {
+                            self.maybe_request_ai_fix(code, program.as_deref());
+                        }
                         // Long commands (npm/cargo builds...) notify when the
                         // window is in the background; quick ones stay silent.
                         if let Some(started) = self.ctx.nebula_state.command_started.take() {
@@ -2347,6 +2535,16 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                                     );
                                 }
                             }
+                        }
+                    },
+                    TerminalEvent::UserVar { name, value } => {
+                        // `nebula_ai_query`（`#` 自然语言转命令）是阶段二的
+                        // 消费者；通道先贯通，其余变量目前无人认领。
+                        if name == "nebula_ai_query" {
+                            info!(
+                                "assistant: query channel received ({} chars)",
+                                value.chars().count()
+                            );
                         }
                     },
                     TerminalEvent::Notify(body) => {

@@ -60,7 +60,7 @@ pub fn askpass_action(has_stored_password: bool, attempt_marker_exists: bool) ->
 }
 
 #[cfg(windows)]
-mod windows_store {
+pub(crate) mod windows_store {
     use super::{AskpassAction, askpass_action, classify_prompt, credential_target};
     use std::ffi::c_void;
     use std::io::{self, Write};

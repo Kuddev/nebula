@@ -64,6 +64,7 @@ pub enum SshEditorField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SshEditorHit {
     None,
+    Close,
     Destination,
     Password,
     PasswordToggle,
@@ -72,8 +73,24 @@ pub enum SshEditorHit {
     RemovePrivateKey(usize),
     SaveToggleBox,
     SaveToggleLabel,
+    Test,
     Primary,
     Cancel,
+}
+
+/// 页脚「测试连接」的四态状态小字（稿一）。结果只对发起时的草稿有效——
+/// 任何字段一改就回 [`Idle`]，绝不让旧结果背书新配置。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SshTestState {
+    #[default]
+    Idle,
+    Running,
+    Ok {
+        elapsed_ms: u64,
+    },
+    Failed {
+        summary: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -89,12 +106,15 @@ pub struct SshHostEditor {
     pub field: SshEditorField,
     pub focus: crate::ux::FocusIndex,
     pub error: Option<String>,
+    /// 「测试连接」当前状态；见 [`SshTestState`]。
+    pub test: SshTestState,
     pub(super) destination_selection: SelectAllState,
     pub(super) password_selection: SelectAllState,
 }
 
 #[derive(Debug, Clone)]
 pub struct SshEditorRects {
+    pub close: (f32, f32, f32, f32),
     pub destination: (f32, f32, f32, f32),
     pub password: (f32, f32, f32, f32),
     pub password_toggle: (f32, f32, f32, f32),
@@ -103,6 +123,7 @@ pub struct SshEditorRects {
     pub private_key_rows: Vec<(usize, (f32, f32, f32, f32))>,
     pub save_checkbox: (f32, f32, f32, f32),
     pub save_toggle: (f32, f32, f32, f32),
+    pub test: (f32, f32, f32, f32),
     pub primary: (f32, f32, f32, f32),
     pub cancel: (f32, f32, f32, f32),
 }

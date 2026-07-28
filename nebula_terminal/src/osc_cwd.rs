@@ -41,8 +41,14 @@ pub enum OscEvent {
     PromptMark,
     /// OSC 133;C — a command started executing.
     CommandStart,
-    /// OSC 133;D — the command finished (exit code, when reported).
-    CommandDone,
+    /// OSC 133;D — the command finished. `exit_code` is the first parameter
+    /// (`133;D;<code>[;aid=…]`), reported by Nebula's own shell integration;
+    /// third-party integrations that send a bare `133;D` yield `None`.
+    CommandDone { exit_code: Option<i32> },
+    /// OSC 1337 `SetUserVar=<name>=<b64>` — a shell-integration variable
+    /// (wezterm/iTerm2 convention). Carries Nebula assistant queries
+    /// (`nebula_ai_query`) from the `#`-line interception, among others.
+    UserVar { name: String, value: String },
     /// OSC 9 — free-text program notification (iTerm style).
     Notify(String),
     /// Nebula 远端 Hook 私有 OSC：随机通道令牌 + 原始 Hook 信封。
@@ -177,6 +183,9 @@ impl CwdSniffer {
             return (!s.is_empty()).then(|| OscEvent::Cwd(s.to_string()));
         }
         if let Some(rest) = self.payload.strip_prefix(b"1337;") {
+            if let Some(var) = rest.strip_prefix(b"SetUserVar=") {
+                return parse_user_var(var);
+            }
             return parse_osc1337_image(rest);
         }
         if let Some(rest) = self.payload.strip_prefix(b"777;nebula-hook;") {
@@ -194,7 +203,14 @@ impl CwdSniffer {
                 return Some(OscEvent::CommandStart);
             }
             if phased(b'D') {
-                return Some(OscEvent::CommandDone);
+                // `D;<code>[;aid=…]` — take the first parameter when it is a
+                // plain integer; a bare `D` or junk parameter reports None.
+                let exit_code = rest
+                    .get(2..)
+                    .map(|params| params.split(|&b| b == b';').next().unwrap_or(params))
+                    .and_then(|first| std::str::from_utf8(first).ok())
+                    .and_then(|first| first.trim().parse::<i32>().ok());
+                return Some(OscEvent::CommandDone { exit_code });
             }
             return None;
         }
@@ -221,6 +237,26 @@ fn prefix_could_match(payload: &[u8]) -> bool {
     const E: &[u8] = b"777;";
     let matches = |target: &[u8]| target.starts_with(payload) || payload.starts_with(target);
     matches(A) || matches(B) || matches(C) || matches(D) || matches(E)
+}
+
+/// Parse a `SetUserVar=<name>=<base64>` body. Names are restricted to the
+/// word-character set every emitter in the wild uses; the value must decode
+/// to UTF-8 (these are shell-integration strings, not blobs). A var larger
+/// than 8 KiB is not a query — reject rather than ferry it around.
+fn parse_user_var(rest: &[u8]) -> Option<OscEvent> {
+    use base64::Engine as _;
+
+    let eq = rest.iter().position(|&b| b == b'=')?;
+    let name = std::str::from_utf8(&rest[..eq]).ok()?;
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD.decode(&rest[eq + 1..]).ok()?;
+    if decoded.len() > 8 * 1024 {
+        return None;
+    }
+    let value = String::from_utf8(decoded).ok()?;
+    Some(OscEvent::UserVar { name: name.to_owned(), value })
 }
 
 fn parse_remote_hook(rest: &[u8]) -> Option<OscEvent> {
@@ -437,7 +473,54 @@ mod tests {
         // B (command line start) has no consumer; C/D became events.
         assert!(events(b"\x1b]133;B\x07").is_empty());
         assert_eq!(events(b"\x1b]133;C\x07"), vec![(8, OscEvent::CommandStart)]);
-        assert_eq!(events(b"\x1b]133;D;0\x07"), vec![(10, OscEvent::CommandDone)]);
+        assert_eq!(
+            events(b"\x1b]133;D;0\x07"),
+            vec![(10, OscEvent::CommandDone { exit_code: Some(0) })]
+        );
+    }
+
+    #[test]
+    fn osc133_done_exit_code_variants() {
+        // Bare D (third-party integrations): finished, code unknown.
+        assert_eq!(
+            events(b"\x1b]133;D\x07"),
+            vec![(8, OscEvent::CommandDone { exit_code: None })]
+        );
+        // Trailing params after the code (kaku/wezterm send `;aid=<pid>`).
+        assert_eq!(
+            events(b"\x1b]133;D;127;aid=4242\x07"),
+            vec![(21, OscEvent::CommandDone { exit_code: Some(127) })]
+        );
+        // Windows STATUS_CONTROL_C_EXIT is negative in i32 — must round-trip.
+        assert_eq!(
+            events(b"\x1b]133;D;-1073741510\x07"),
+            vec![(20, OscEvent::CommandDone { exit_code: Some(-1073741510) })]
+        );
+        // Junk parameter degrades to None, not a dropped event.
+        assert_eq!(
+            events(b"\x1b]133;D;abc\x07"),
+            vec![(12, OscEvent::CommandDone { exit_code: None })]
+        );
+    }
+
+    #[test]
+    fn osc1337_set_user_var() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode("[mode:auto] kill port 3000");
+        let seq = format!("\x1b]1337;SetUserVar=nebula_ai_query={b64}\x07");
+        assert_eq!(
+            events(seq.as_bytes()),
+            vec![(
+                seq.len(),
+                OscEvent::UserVar {
+                    name: "nebula_ai_query".into(),
+                    value: "[mode:auto] kill port 3000".into(),
+                }
+            )]
+        );
+        // Bad base64 and hostile names are dropped, not passed through.
+        assert!(events(b"\x1b]1337;SetUserVar=x=!!!\x07").is_empty());
+        assert!(events(b"\x1b]1337;SetUserVar=bad name=QUJD\x07").is_empty());
     }
 
     #[test]

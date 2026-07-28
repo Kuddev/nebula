@@ -392,11 +392,18 @@ function global:prompt {
     }
 
     $e = $NebE
-    # OSC 133;D — the previous command just finished (this prompt proves it).
-    # Nebula pairs it with the 133;C from the PSConsoleHostReadLine wrapper to
-    # time commands and raise a background notification when a long one
-    # completes.
-    [Console]::Write("$e]133;D$([char]7)")
+    # OSC 133;D;<code> — the previous command just finished (this prompt proves
+    # it), carrying its exit status for the assistant's error recovery. `$?` is
+    # the arbiter (it is False for BOTH failed cmdlets and non-zero native
+    # commands, and unlike $LASTEXITCODE it resets every command — a stale
+    # non-zero $LASTEXITCODE after a successful cmdlet must not read as
+    # failure). The code detail comes from $LASTEXITCODE when it agrees,
+    # otherwise a plain 1. First prompt of a session: $? is True → 0.
+    $nebExit = 0
+    if (-not $originalDollarQuestion) {
+        $nebExit = if ($null -ne $originalLastExitCode -and $originalLastExitCode -ne 0) { $originalLastExitCode } else { 1 }
+    }
+    [Console]::Write("$e]133;D;$nebExit$([char]7)")
     $reset = "$e[0m"
     $loc = (Get-Location).Path
     $hp = $env:USERPROFILE
@@ -810,9 +817,9 @@ __nebula_precmd() {
         unset NEBULA_COMMAND_START_MS
     fi
 
-    # OSC 133;D 要尽早发出：用户的旧 precmd 即使较慢，也不应拖延终端
-    # 对“上一条命令已经结束”的判断。
-    printf '\033]133;D\007'
+    # OSC 133;D;<code> 要尽早发出：用户的旧 precmd 即使较慢，也不应拖延终端
+    # 对“上一条命令已经结束”的判断。退出码供助手的错误恢复判定。
+    printf '\033]133;D;%s\007' "$cmd_status"
 
     # 旧 PROMPT_COMMAND 的非视觉副作用（历史、环境管理器、目录 hook）
     # 仍然执行；Nebula 在它之后设置 PS1，保证最终视觉输出只有一个来源。

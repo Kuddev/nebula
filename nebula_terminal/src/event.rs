@@ -39,8 +39,13 @@ pub enum Event {
     /// OSC 133;C — a command started executing in this pane.
     CommandStart,
 
-    /// OSC 133;D — the command finished.
-    CommandDone,
+    /// OSC 133;D — the command finished. `exit_code` comes from Nebula's own
+    /// shell integration (`133;D;<code>`); bare third-party `133;D` is `None`.
+    CommandDone { exit_code: Option<i32> },
+
+    /// OSC 1337 `SetUserVar` — a shell-integration variable (assistant
+    /// queries and future channels).
+    UserVar { name: String, value: String },
 
     /// OSC 9 — free-text notification from a program (iTerm style).
     Notify(String),
@@ -99,7 +104,10 @@ impl Debug for Event {
                 write!(f, "InlineImage({} bytes @{abs_line}, {width}x{height})", png.len())
             },
             Event::CommandStart => write!(f, "CommandStart"),
-            Event::CommandDone => write!(f, "CommandDone"),
+            Event::CommandDone { exit_code } => write!(f, "CommandDone({exit_code:?})"),
+            Event::UserVar { name, value } => {
+                write!(f, "UserVar({name}, {} chars)", value.chars().count())
+            },
             Event::Notify(text) => write!(f, "Notify({text})"),
             Event::AiHookEnvelope(envelope) => {
                 write!(f, "AiHookEnvelope({} bytes)", envelope.len())

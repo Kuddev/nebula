@@ -72,7 +72,12 @@ impl StreamProcessor {
             match event {
                 OscEvent::Cwd(cwd) => latest_cwd = Some(cwd),
                 OscEvent::CommandStart => event_proxy.send_event(Event::CommandStart),
-                OscEvent::CommandDone => event_proxy.send_event(Event::CommandDone),
+                OscEvent::CommandDone { exit_code } => {
+                    event_proxy.send_event(Event::CommandDone { exit_code })
+                },
+                OscEvent::UserVar { name, value } => {
+                    event_proxy.send_event(Event::UserVar { name, value })
+                },
                 OscEvent::Notify(text) => event_proxy.send_event(Event::Notify(text)),
                 OscEvent::RemoteHook { token, envelope } => {
                     if self.remote_hook_token.as_deref() == Some(token.as_str()) {

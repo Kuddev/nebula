@@ -5,7 +5,7 @@
 //! macros are only used to build these default tables, so they live here too.
 
 use winit::event::MouseButton;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 use nebula_terminal::vi_mode::ViMotion;
 
@@ -181,7 +181,95 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         Enter, ModifiersState::SHIFT,       +BindingMode::SEARCH, ~BindingMode::VI; SearchAction::SearchFocusPrevious;
     );
 
+    bindings.extend(nebula_key_bindings());
     bindings.extend(platform_key_bindings());
+
+    bindings
+}
+
+/// Nebula's own chrome shortcuts (tabs, splits, panels, palette, profiles).
+/// Formerly hardcoded in `input/keyboard.rs`; living in the binding table
+/// means `keybind=` lines in `nebula_settings.txt` and TOML
+/// `[[keyboard.bindings]]` can remap every one of them (spec 002).
+pub fn nebula_key_bindings() -> Vec<KeyBinding> {
+    let ctrl = ModifiersState::CONTROL;
+    let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+    let alt = ModifiersState::ALT;
+
+    let mut bindings = bindings!(
+        KeyBinding;
+        "t",        ctrl_shift; Action::CreateNewTab;
+        "w",        ctrl_shift; Action::CloseTab;
+        Tab,        ctrl;       Action::SelectNextTab;
+        Tab,        ctrl_shift; Action::SelectPreviousTab;
+        "e",        ctrl_shift; Action::CreateNewWindow;
+        "p",        ctrl_shift; Action::ToggleCommandPalette;
+        "d",        ctrl_shift; Action::SplitRight;
+        "s",        ctrl_shift; Action::SplitDown;
+        Enter,      ctrl_shift; Action::ToggleZoom;
+        ArrowLeft,  ctrl_alt;   Action::FocusPaneLeft;
+        ArrowRight, ctrl_alt;   Action::FocusPaneRight;
+        ArrowUp,    ctrl_alt;   Action::FocusPaneUp;
+        ArrowDown,  ctrl_alt;   Action::FocusPaneDown;
+        "o",        ctrl_shift; Action::ToggleFilesPanel;
+        "g",        ctrl_shift; Action::ToggleGitPanel;
+        ArrowUp,    ctrl_shift; Action::PromptJumpUp;
+        ArrowDown,  ctrl_shift; Action::PromptJumpDown;
+    );
+
+    // Direct tab select. The digit is matched on the logical key, which is
+    // stable for unshifted digits across layouts (hardcoded predecessor did
+    // the same).
+    let select = [
+        Action::SelectTab1,
+        Action::SelectTab2,
+        Action::SelectTab3,
+        Action::SelectTab4,
+        Action::SelectTab5,
+        Action::SelectTab6,
+        Action::SelectTab7,
+        Action::SelectTab8,
+        Action::SelectTab9,
+    ];
+    for (i, action) in select.iter().enumerate() {
+        let digit = char::from(b'1' + i as u8).to_string();
+        for mods in [ctrl, alt] {
+            bindings.push(KeyBinding {
+                trigger: BindingKey::Keycode {
+                    key: Key::Character(digit.clone().into()),
+                    location: KeyLocation::Any,
+                },
+                mods,
+                mode: BindingMode::empty(),
+                notmode: BindingMode::empty(),
+                action: action.clone(),
+            });
+        }
+    }
+
+    // Quick-launch profiles need PHYSICAL digit keys: with Shift held the
+    // logical key becomes "!" "@" … and drifts with the keyboard layout.
+    let launch = [
+        (KeyCode::Digit1, Action::LaunchProfile1),
+        (KeyCode::Digit2, Action::LaunchProfile2),
+        (KeyCode::Digit3, Action::LaunchProfile3),
+        (KeyCode::Digit4, Action::LaunchProfile4),
+        (KeyCode::Digit5, Action::LaunchProfile5),
+        (KeyCode::Digit6, Action::LaunchProfile6),
+        (KeyCode::Digit7, Action::LaunchProfile7),
+        (KeyCode::Digit8, Action::LaunchProfile8),
+        (KeyCode::Digit9, Action::LaunchProfile9),
+    ];
+    for (code, action) in launch {
+        bindings.push(KeyBinding {
+            trigger: BindingKey::Scancode(PhysicalKey::Code(code)),
+            mods: ctrl_shift,
+            mode: BindingMode::empty(),
+            notmode: BindingMode::empty(),
+            action,
+        });
+    }
 
     bindings
 }
