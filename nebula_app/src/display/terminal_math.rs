@@ -495,6 +495,8 @@ fn is_ai_cli(program: &str) -> bool {
             | "crush"
             | "opencode"
             | "pi"
+            | "grok"
+            | "grok-cli"
     )
 }
 
