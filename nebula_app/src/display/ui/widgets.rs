@@ -11,7 +11,9 @@
 //! geometry (`*_rect`, [`combobox_text_x`]) and the text pass reuses it.
 
 use super::icons;
+use super::surface;
 use super::theme::Skin;
+use super::tokens::radius;
 use crate::renderer::ui::{Rgba, UiQuad};
 
 pub(crate) type Rect = (f32, f32, f32, f32);
@@ -147,11 +149,12 @@ pub(crate) fn push_combobox(
 ) {
     let s = |v: f32| v * scale;
     let (cx, cy, cw, ch) = rect;
-    quads.push(UiQuad::solid(cx - s(1.0), cy - s(1.0), cw + s(2.0), ch + s(2.0), s(7.0), sk.hairline));
-    quads.push(UiQuad::solid(cx, cy, cw, ch, s(6.0), opaque_panel(sk)));
-    quads.push(UiQuad::solid(cx, cy, cw, ch, s(6.0), sk.surface));
+    let corner = radius::CONTROL * scale;
+    surface::push_stroke(quads, rect, corner, scale, sk.hairline);
+    quads.push(UiQuad::solid(cx, cy, cw, ch, corner, opaque_panel(sk)));
+    quads.push(UiQuad::solid(cx, cy, cw, ch, corner, sk.surface));
     if hot || open {
-        quads.push(UiQuad::solid(cx, cy, cw, ch, s(6.0), sk.hover));
+        quads.push(UiQuad::solid(cx, cy, cw, ch, corner, sk.hover));
     }
     let ink = Rgba::new(sk.ink_dim.r, sk.ink_dim.g, sk.ink_dim.b, 235);
     icons::push_chevron(quads, cx + cw - s(15.0), cy + ch * 0.5, scale, ink, open);
@@ -202,18 +205,35 @@ pub(crate) fn push_combobox_popup(
     sk: &Skin,
 ) {
     let s = |v: f32| v * scale;
-    let (px, py, pw, ph) = popup;
-    quads.push(UiQuad::glow(px - s(14.0), py - s(10.0), pw + s(28.0), ph + s(26.0), Rgba::new(0, 0, 0, 70)));
-    quads.push(UiQuad::solid(px - s(1.0), py - s(1.0), pw + s(2.0), ph + s(2.0), s(9.0), sk.hairline));
-    quads.push(UiQuad::solid(px, py, pw, ph, s(8.0), opaque_panel(sk)));
-    quads.push(UiQuad::solid(px, py, pw, ph, s(8.0), sk.surface));
+    // 层级走 Menu：真外阴影 + 同心描边 + 不透明底。此前这里是
+    // `UiQuad::glow` —— glow 向外扩散亮度，不建立高度关系，在浅色主题上
+    // 只会让下拉四周发灰，看着像脏了一圈而不是浮起来。
+    surface::push_surface(quads, popup, (0.0, 0.0), scale, sk, surface::Elevation::Menu, 1.0);
+    quads.push(UiQuad::solid(
+        popup.0,
+        popup.1,
+        popup.2,
+        popup.3,
+        radius::OVERLAY * scale,
+        sk.surface,
+    ));
     for index in 0..count {
         let (rx, ry, rw, rh) = popup_row_rect(popup, index, scale);
-        if selected == Some(index) {
-            quads.push(UiQuad::solid(rx, ry + s(2.0), rw, rh - s(4.0), s(6.0), sk.accent_soft));
+        let fill = if selected == Some(index) {
+            sk.accent_soft
         } else if hover == Some(index) {
-            quads.push(UiQuad::solid(rx, ry + s(2.0), rw, rh - s(4.0), s(6.0), sk.hover));
-        }
+            sk.hover
+        } else {
+            continue;
+        };
+        quads.push(UiQuad::solid(
+            rx,
+            ry + s(2.0),
+            rw,
+            rh - s(4.0),
+            radius::CONTROL * scale,
+            fill,
+        ));
     }
 }
 
@@ -243,17 +263,17 @@ pub(crate) fn push_spinner(
     hot_up: bool,
     hot_down: bool,
 ) {
-    let s = |v: f32| v * scale;
     let (value, up, down) = spinner_rects(row, scale);
+    let corner = radius::CONTROL * scale;
     for (rect, hot, chevron_up) in
         [(value, false, None), (up, hot_up, Some(true)), (down, hot_down, Some(false))]
     {
         let (cx, cy, cw, ch) = rect;
-        quads.push(UiQuad::solid(cx - s(1.0), cy - s(1.0), cw + s(2.0), ch + s(2.0), s(7.0), sk.hairline));
-        quads.push(UiQuad::solid(cx, cy, cw, ch, s(6.0), opaque_panel(sk)));
-        quads.push(UiQuad::solid(cx, cy, cw, ch, s(6.0), sk.surface));
+        surface::push_stroke(quads, rect, corner, scale, sk.hairline);
+        quads.push(UiQuad::solid(cx, cy, cw, ch, corner, opaque_panel(sk)));
+        quads.push(UiQuad::solid(cx, cy, cw, ch, corner, sk.surface));
         if hot {
-            quads.push(UiQuad::solid(cx, cy, cw, ch, s(6.0), sk.hover));
+            quads.push(UiQuad::solid(cx, cy, cw, ch, corner, sk.hover));
         }
         if let Some(up_arrow) = chevron_up {
             let ink = Rgba::new(sk.ink_dim.r, sk.ink_dim.g, sk.ink_dim.b, 235);

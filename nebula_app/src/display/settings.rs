@@ -3392,7 +3392,7 @@ pub(super) fn draw_text(
                     let (cap_x, ..) = keymap_keycap_rect(rect, &value, cell_w, scale);
                     r.draw_chrome_text(size, cap_x + s(12.0), ty, ink, &value, gc);
                 } else {
-                    // 图8 键帽规范：逐键 chip 内居中键名，弱墨 "+" 分隔。
+                    // 键帽规范：一颗 chip 承载整串键位（Windows 心智）。
                     let combo = super::ui::keycap::layout_combo(
                         &value,
                         rect.0 + rect.2 - s(16.0),
@@ -3411,9 +3411,6 @@ pub(super) fn draw_text(
                             key,
                             gc,
                         );
-                    }
-                    for plus_x in &combo.pluses {
-                        r.draw_chrome_text(size, *plus_x, ty, sk.ink_faint, "+", gc);
                     }
                 }
             }

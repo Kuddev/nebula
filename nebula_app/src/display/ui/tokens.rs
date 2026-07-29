@@ -62,14 +62,17 @@ pub mod elevation {
     pub const MENU_BLUR: f32 = 12.0;
     pub const MENU_OFFSET_Y: f32 = 4.0;
     /// 大浮层：命令面板、shell 选择器。
-    pub const POPOVER_BLUR: f32 = 28.0;
-    pub const POPOVER_OFFSET_Y: f32 = 8.0;
+    pub const POPOVER_BLUR: f32 = 14.0;
+    pub const POPOVER_OFFSET_Y: f32 = 5.0;
     /// 模态：确认框、设置页、SSH 编辑器。
-    pub const MODAL_BLUR: f32 = 40.0;
-    pub const MODAL_OFFSET_Y: f32 = 12.0;
-    /// 阴影浓度。浅色底上的黑阴影必须更淡，否则边缘发脏。
-    pub const SHADOW_ALPHA_LIGHT: u8 = 54;
-    pub const SHADOW_ALPHA_DARK: u8 = 86;
+    pub const MODAL_BLUR: f32 = 20.0;
+    pub const MODAL_OFFSET_Y: f32 = 7.0;
+    /// 阴影浓度。2026-07-29 用户裁定：此前 54/86（21%/34%）太重，浮层像
+    /// 被垫了一块黑布。成熟终端的浮层阴影普遍在 10% 上下——它只需要**暗示**
+    /// 高度，一旦看得清"这是一片阴影"就已经过头了。浅色底上尤其要淡，
+    /// 黑色扩散在浅灰上很容易显脏。
+    pub const SHADOW_ALPHA_LIGHT: u8 = 26;
+    pub const SHADOW_ALPHA_DARK: u8 = 56;
 }
 
 /// Terminal-grid feedback colors are rendered through the cell/rect alpha

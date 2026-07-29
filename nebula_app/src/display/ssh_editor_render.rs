@@ -273,27 +273,36 @@ impl Display {
             None
         };
 
-        let mut quads = vec![
-            UiQuad::solid(
-                0.0,
-                0.0,
-                size.width(),
-                size.height(),
-                0.0,
-                Rgba::new(0, 0, 0, (170.0 * progress).round() as u8),
-            ),
-            UiQuad::solid(
-                bx - s(1.0),
-                by - s(1.0),
-                box_w + s(2.0),
-                box_h + s(2.0),
-                s(11.0),
-                skin.hairline,
-            ),
-            UiQuad::solid(bx, by, box_w, box_h, s(10.0), skin.panel),
-            UiQuad::solid(bx, footer_top, box_w, box_h - (footer_top - by), 0.0, skin.surface),
-            UiQuad::solid(bx, footer_top, box_w, s(1.0), 0.0, skin.hairline),
-        ];
+        // SSH 主机编辑器是 Modal：遮罩、外阴影、同心描边、圆角全部走共享
+        // 配方。此前这里的遮罩是写死的 `Rgba::new(0, 0, 0, 170)`——不读
+        // `skin.veil`，于是浅色主题下也罩一层 67% 的纯黑，比深色主题还重；
+        // 圆角 10/11 也和别处的 8 对不上。
+        let mut quads = Vec::new();
+        super::ui::surface::push_surface(
+            &mut quads,
+            (bx, by, box_w, box_h),
+            (size.width(), size.height()),
+            scale,
+            &skin,
+            super::ui::surface::Elevation::Modal,
+            progress,
+        );
+        quads.push(UiQuad::solid(
+            bx,
+            footer_top,
+            box_w,
+            box_h - (footer_top - by),
+            0.0,
+            super::ui::surface::fade(skin.surface, progress),
+        ));
+        quads.push(UiQuad::solid(
+            bx,
+            footer_top,
+            box_w,
+            s(1.0),
+            0.0,
+            super::ui::surface::fade(skin.hairline, progress),
+        ));
         if self.nebula_ssh_editor_hover == SshEditorHit::Close {
             quads.push(UiQuad::solid(
                 close.0,

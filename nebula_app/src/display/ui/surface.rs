@@ -56,6 +56,17 @@ impl Elevation {
     pub fn dims_background(self) -> bool {
         matches!(self, Self::Modal)
     }
+
+    /// 面板底是否必须完全不透明。
+    ///
+    /// 菜单和下拉紧贴着它们遮住的那一行内容，`Skin::panel` 那 4% 的透明度
+    /// 会让底下的文字隐隐透上来——在选项文字背后叠一层错位的鬼影，正是
+    /// 界面读起来"脏"的那种脏。命令面板和模态离内容远、且四周有阴影过渡，
+    /// 留一点透视反而自然。
+    #[inline]
+    fn needs_opaque_fill(self) -> bool {
+        matches!(self, Self::Menu)
+    }
 }
 
 /// 浮层内容块的状态。
@@ -136,7 +147,12 @@ pub fn push_surface(
     ));
 
     push_stroke(quads, rect, corner, scale, fade(sk.hairline, progress));
-    quads.push(UiQuad::solid(x, y, w, h, corner, fade(sk.panel, progress)));
+    let fill = if level.needs_opaque_fill() {
+        Rgba::new(sk.panel.r, sk.panel.g, sk.panel.b, 255)
+    } else {
+        sk.panel
+    };
+    quads.push(UiQuad::solid(x, y, w, h, corner, fade(fill, progress)));
 }
 
 /// 浮层内部的内容块。

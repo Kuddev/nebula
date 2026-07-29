@@ -31,6 +31,13 @@
 //! - [`widgets`] —— slider / toggle / combobox / spinner
 //! - [`keycap`] —— 键帽 chip
 //! - [`icons`] —— 图标墨迹
+//! - [`guardrails`] —— 把上面这些契约变成会失败的测试
+//!
+//! # 契约怎么被强制
+//!
+//! 第 4 条（不写魔数）曾经只写在这段注释里，然后 `widgets.rs` 自己就违反了
+//! 它——只靠注释表达的约束等于没有约束。现在 [`guardrails`] 用数量上限测试盯着：
+//! 新代码引入违规会让 `cargo test` 变红，且错误信息直接给出正确写法。
 //!
 //! # 未来
 //!
@@ -40,6 +47,8 @@
 //! 需要先把 `Rgb`/`Rgba`/`UiQuad`/`SizeInfo` 这批纯数据类型下沉到共享底座。
 //! 那一步的收益是编译器强制单向依赖 + 独立编译单元（改 UI 不再重编译整个 app）。
 
+pub mod caret;
+pub mod guardrails;
 pub mod icons;
 pub mod keycap;
 pub mod surface;

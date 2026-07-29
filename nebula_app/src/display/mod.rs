@@ -121,15 +121,14 @@ pub use ui::theme::NebulaTheme;
 pub(crate) use ui::theme::write_nebula_prompt_theme;
 
 /// Shared caret blink phase for the chrome text editors (rename / filter /
-/// commit boxes): 500ms on / 500ms off wall-clock, same time source as the
-/// sidebar spinner. The fast tick (armed while an editor is focused) keeps
-/// frames coming so the phase is actually visible instead of looking frozen.
+/// commit boxes). 相位挂在**最后一次编辑活动**上而不是挂钟纪元：聚焦或打完
+/// 字的那一刻光标必定是亮的，连续打字期间不闪。节律取自系统的
+/// `GetCaretBlinkTime`。完整理由见 [`ui::caret`]。
+///
+/// 保留这层薄封装是因为已有十处调用点写作 `caret_blink_on()`；新代码直接用
+/// [`ui::caret::is_on`]。
 pub(crate) fn caret_blink_on() -> bool {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    (millis / 500) % 2 == 0
+    ui::caret::is_on()
 }
 pub use settings::{NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit};
 pub(crate) use settings::SettingsOpacityTarget;
@@ -2528,10 +2527,17 @@ impl Display {
     }
 
     /// A chrome text editor (tab rename / drawer filter / commit message / SSH
-    /// host editor) has keyboard focus — the window context bumps the redraw
-    /// tick to the fast cadence so the insertion caret visibly blinks.
+    /// host editor / command palette) has keyboard focus — the window context
+    /// bumps the redraw tick to the fast cadence so the insertion caret
+    /// visibly blinks.
+    ///
+    /// 命令面板曾经漏在这个列表外：它的入场动画一结束，画面就静止了，
+    /// 光标停在当时那一相里不再翻转。它自带的 `Pulse` 每帧照常累加，
+    /// 但没有帧可累加——**动画状态推进和帧供给是两件事**，只做前者会得到
+    /// 一个看起来"卡住"的光标。
     pub fn chrome_editor_active(&self) -> bool {
         self.nebula_tab_rename.is_some()
+            || self.nebula_palette.is_open()
             || self.nebula_side_panel.search_focus
             || self.nebula_side_panel.commit_focus
             || self.nebula_sftp_panel.as_ref().is_some_and(sftp_panel::SftpPanel::editor_active)
@@ -6215,19 +6221,21 @@ impl Display {
         let bx = ((size.width() - box_w) * 0.5).max(s(16.0));
         let by = ((size.height() - box_h) * 0.5).max(s(16.0));
 
-        // Veil dims the whole window so the modal reads as, well, modal
-        // (white fog on light themes, black dim on dark — sk.veil).
-        let veil = UiQuad::solid(0.0, 0.0, size.width(), size.height(), 0.0, sk.veil);
-        // Hairline edge + flat themed card (no glow, no gradient).
-        let edge = UiQuad::solid(
-            bx - s(1.0),
-            by - s(1.0),
-            box_w + s(2.0),
-            box_h + s(2.0),
-            s(13.0),
-            sk.hairline,
+        // 确认框是 Modal：它要求一个决策、有后果、必须应答，所以画遮罩。
+        // 面板底、遮罩、外阴影、同心描边、圆角全部来自同一个配方，与命令
+        // 面板/右键菜单共用——此前这里是手写的「遮罩 + 描边 + 填充」三件套，
+        // 圆角 12/13 与别处的 8 对不上，而且**根本没有外阴影**：一个要求
+        // 用户停下来应答的东西，却比随手开关的命令面板浮得还低。
+        let mut quads = Vec::new();
+        ui::surface::push_surface(
+            &mut quads,
+            (bx, by, box_w, box_h),
+            (size.width(), size.height()),
+            scale,
+            &sk,
+            ui::surface::Elevation::Modal,
+            1.0,
         );
-        let card = UiQuad::solid(bx, by, box_w, box_h, s(12.0), sk.panel);
 
         // Button geometry (kept for the mouse hit-test).
         let btn_y = by + box_h - pad * 0.75 - btn_h;
@@ -6246,20 +6254,19 @@ impl Display {
         let cancel_cap_x = cancel_x + btn_pad + text_w(cancel_label) + key_gap;
         let primary_cap_x = primary_x + btn_pad + text_w(primary_label) + key_gap;
 
-        let mut quads = vec![veil, edge, card];
         // Cancel: quiet ghost button (hairline + faint fill).
-        quads.push(UiQuad::solid(
-            cancel_x - s(1.0),
-            btn_y - s(1.0),
-            cancel_w + s(2.0),
-            btn_h + s(2.0),
-            s(9.0),
+        let control_r = s(ui::tokens::radius::CONTROL);
+        ui::surface::push_stroke(
+            &mut quads,
+            cancel_rect,
+            control_r,
+            scale,
             sk.hairline,
-        ));
-        quads.push(UiQuad::solid(cancel_x, btn_y, cancel_w, btn_h, s(8.0), sk.panel));
-        quads.push(UiQuad::solid(cancel_x, btn_y, cancel_w, btn_h, s(8.0), sk.surface));
+        );
+        quads.push(UiQuad::solid(cancel_x, btn_y, cancel_w, btn_h, control_r, sk.panel));
+        quads.push(UiQuad::solid(cancel_x, btn_y, cancel_w, btn_h, control_r, sk.surface));
         // Primary: the single loud element on the card.
-        quads.push(UiQuad::solid(primary_x, btn_y, primary_w, btn_h, s(8.0), primary_fill));
+        quads.push(UiQuad::solid(primary_x, btn_y, primary_w, btn_h, control_r, primary_fill));
 
         // Keycaps: 图8 键帽规范（2026-07-29）——与 Ctrl+K/设置页共用
         // `keycap::push_chip` 配方（hairline 圈 + panel/surface 叠底），
@@ -6401,24 +6408,19 @@ impl Display {
         let bar_x = (size.width() - bar_w) * 0.5;
         let bar_y = size.height() - bar_h - s(18.0);
 
-        let quads = vec![
-            UiQuad::glow(
-                bar_x - s(10.0),
-                bar_y - s(8.0),
-                bar_w + s(20.0),
-                bar_h + s(16.0),
-                Rgba::new(0, 0, 0, 72),
-            ),
-            UiQuad::solid(
-                bar_x - s(1.0),
-                bar_y - s(1.0),
-                bar_w + s(2.0),
-                bar_h + s(2.0),
-                s(11.0),
-                sk.hairline,
-            ),
-            UiQuad::solid(bar_x, bar_y, bar_w, bar_h, s(10.0), sk.panel),
-        ];
+        // 通知条是 Menu 层级的浮层：贴着窗口底边、不阻断交互，靠真外阴影
+        // 与内容分层。此前这里是 `UiQuad::glow` 冒充阴影——glow 向外扩散
+        // 亮度而不是压暗，在浅色主题上只会让条子四周发灰。
+        let mut quads = Vec::new();
+        ui::surface::push_surface(
+            &mut quads,
+            (bar_x, bar_y, bar_w, bar_h),
+            (size.width(), size.height()),
+            scale,
+            &sk,
+            ui::surface::Elevation::Menu,
+            1.0,
+        );
         self.renderer.draw_ui(&size, &quads);
 
         let text_y = bar_y + (bar_h - cell_h) * 0.5;
@@ -6498,32 +6500,25 @@ impl Display {
             (bar_x + bar_w - pad - action_w, bar_y + (bar_h - s(34.0)) * 0.5, action_w, s(34.0));
         self.nebula_ssh_delete_undo_rect = Some(action_rect);
 
-        let mut quads = vec![
-            UiQuad::glow(
-                bar_x - s(10.0),
-                bar_y - s(8.0),
-                bar_w + s(20.0),
-                bar_h + s(16.0),
-                Rgba::new(0, 0, 0, 72),
-            ),
-            UiQuad::solid(
-                bar_x - s(1.0),
-                bar_y - s(1.0),
-                bar_w + s(2.0),
-                bar_h + s(2.0),
-                s(11.0),
-                sk.hairline,
-            ),
-            UiQuad::solid(bar_x, bar_y, bar_w, bar_h, s(10.0), sk.panel),
-            UiQuad::solid(
-                action_rect.0,
-                action_rect.1,
-                action_rect.2,
-                action_rect.3,
-                s(7.0),
-                if self.nebula_ssh_delete_undo_hover { sk.hover_strong } else { sk.surface },
-            ),
-        ];
+        // 撤销条同上：Menu 层级的浮层配方，真外阴影而不是 glow。
+        let mut quads = Vec::new();
+        ui::surface::push_surface(
+            &mut quads,
+            (bar_x, bar_y, bar_w, bar_h),
+            (size.width(), size.height()),
+            scale,
+            &sk,
+            ui::surface::Elevation::Menu,
+            1.0,
+        );
+        quads.push(UiQuad::solid(
+            action_rect.0,
+            action_rect.1,
+            action_rect.2,
+            action_rect.3,
+            s(ui::tokens::radius::CONTROL),
+            if self.nebula_ssh_delete_undo_hover { sk.hover_strong } else { sk.surface },
+        ));
         if self.nebula_ssh_delete_undo_hover {
             quads.push(UiQuad::solid(
                 action_rect.0,

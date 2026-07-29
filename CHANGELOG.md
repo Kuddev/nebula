@@ -30,10 +30,17 @@ Every release entry is provided in English and Simplified Chinese.
 #### Improved
 
 - Reworked the SSH host editor into a compact content-sized dialog with consistent 32 px controls, helper text below the destination, a segmented authentication selector, deliberate label/control and section spacing, a lightweight private-key section, visibly blinking text carets, and clearly separated Test / Cancel / Save actions.
-- Reworked the Shell / Profile picker into cards: content-sized height with a maximum ten-row viewport, a "Recommended" section carrying a taller hero card (name above, full program path below, Enter chip on the right) and an "All options" section of uniform cards, neutral initial selection, soft accent selection, a bordered default-shell badge, and a keyboard-hint footer. Paths keep their drive/root context and ellipsize at the tail. Hover and click hit-test against the layout's per-row rectangles, so section captions and the gaps between cards no longer highlight as if they were rows.
-- One keycap recipe everywhere — every place that displays a key combination (the picker's Ctrl+K badge, the command list's shortcut hints, Settings → Key bindings, confirm dialogs, the picker footer) now draws the same per-key chip: hairline ring, panel fill, weak-ink `+` separators. Combos are split per key instead of being one wide pill, and confirm-dialog keycaps no longer restack the button's own fill.
+- Reworked the Shell / Profile picker into cards: content-sized height with a maximum ten-row viewport, a "Recommended" section carrying a taller hero card (name above, full program path below, Enter chip on the right) and an "All options" section, neutral initial selection, soft accent selection, a bordered default-shell badge, and a keyboard-hint footer. Paths keep their drive/root context and ellipsize at the tail. Hover and click hit-test against the layout's per-row rectangles, so section captions and the gaps between rows no longer highlight as if they were rows.
+- Picker rows are no longer drawn as bordered cards. A row is transparent until you hover or select it, because the panel-to-row lightness difference already separates them — five ringed white rectangles in a column read as a form, not as a list. Selection uses a neutral wash rather than the accent: the accent budget is spent once per screen, on the current row.
+- All option paths now start at one shared column, so they line up in a single vertical edge. Right-aligning them made every row's path *start* float with its own length (`cmd.exe` began nearly 300 px right of Nushell's), so scanning the list meant hunting left and right for each line.
+- One keycap recipe everywhere — every place that shows a key combination (the picker's Ctrl+K badge, the command list's shortcut hints, Settings → Key bindings, confirm dialogs) draws the same chip: hairline ring, panel fill, chip radius. A combination is **one** chip carrying the whole string, matching what Windows users already read in VS Code, Windows Terminal and Office; the per-key split it replaces is a macOS form, where `⌘ ⇧ ⌥` are single-character glyphs that tile evenly — `Ctrl` `Shift` `Alt` do not.
+- Chip backgrounds now mean "you can click this". The picker footer's ↑↓ / Enter / Esc hints are keyboard legends, not buttons, so they dropped their chips and separate the key from its description by ink weight instead.
+- Text carets are visibly alive. The blink phase now starts from your last edit instead of running off the wall clock, so a caret is lit the instant a field takes focus (previously it had a 50 % chance of appearing up to half a second late, which read as "this field isn't focused"). The caret holds steady while you type and only breathes once you stop, and the cadence follows the system's `GetCaretBlinkTime`, including the accessibility setting that turns blinking off. The command palette was also missing from the fast-redraw list, so its caret froze once the open animation ended.
+- The command palette's caret is a 1.5 px beam instead of a full-cell glyph, which lets the placeholder and your actual query start at the same x — typing the first character no longer shifts the line sideways.
+- Confirm dialogs and the SSH host editor now cast a real drop shadow and share the app's corner radius. Both previously drew only a hairline and a fill, so a dialog that demands an answer floated lower than the command palette you can dismiss with Esc. The SSH editor's dim was also a hard-coded 67 % black that ignored the theme, veiling light themes more heavily than dark ones.
+- Dropdown lists are fully opaque and cast a shadow instead of a glow. A glow spreads brightness outward without establishing height, which on light themes just grayed the area around the list.
 - Light-theme overlays are white-based: the command palette, the SSH host editor and the settings surfaces no longer inherit a silver/slate fill from the theme family.
-- The palette's right edge now lines up. The Ctrl+K badge, the hero card's Enter chip, the right-aligned path column, the command list's shortcut chips and the footer's Esc hint previously measured from four different insets — the footer even measured from the panel instead of the card column — leaving a ragged right margin that drifted with font size.
+- The palette's right edge now lines up. The Ctrl+K badge, the hero card's Enter chip, the command list's shortcut chips and the footer's Esc hint previously measured from four different insets — the footer even measured from the panel instead of the card column — leaving a ragged right margin that drifted with font size.
 - Aligned Settings with the new navigation-and-row system: equal-height hairline groups, consistent right-aligned controls, restrained section headings, theme previews, and editable keycaps share one layout and interaction model.
 
 ### 简体中文
@@ -60,10 +67,17 @@ Every release entry is provided in English and Simplified Chinese.
 #### 改进
 
 - SSH 主机编辑器重排为紧凑的内容自适应弹窗：控件统一为 32px 高，地址提示移到输入框下方，认证方式改为分段选择，标签/控件与分组间距遵循统一节奏，私钥区降级为轻量小节，文本光标真实闪烁，并清晰分隔“测试连接 / 取消 / 保存”。
-- Shell / Profile 选择器改为卡片式：按条目数量决定高度，最多显示十行；分为“推荐”区（一张更高的大卡片，名称在上、完整程序路径在下、右侧回车键帽）和“所有选项”区（等高卡片）；初次打开保持中性，选中态使用柔和 accent，保留默认 Shell 发丝描边徽标和键盘提示页脚。路径保留盘符/根路径上下文、尾部省略。悬停与点击改为按布局的逐行矩形命中，分区标题和卡片之间的缝隙不再被当成行高亮。
-- 键帽样式全局统一：所有展示键位的地方（选择器的 Ctrl+K 徽标、命令列表的快捷键提示、设置 → 按键映射、确认弹窗、选择器页脚）现在画同一种逐键 chip——发丝圈边、面板填充、弱墨 `+` 分隔。组合键按键拆分，不再是一颗宽药丸；确认弹窗的键帽也不再重叠按钮自身的填充色。
+- Shell / Profile 选择器改为卡片式：按条目数量决定高度，最多显示十行；分为“推荐”区（一张更高的大卡片，名称在上、完整程序路径在下、右侧回车键帽）和“所有选项”区；初次打开保持中性，选中态使用柔和 accent，保留默认 Shell 发丝描边徽标和键盘提示页脚。路径保留盘符/根路径上下文、尾部省略。悬停与点击改为按布局的逐行矩形命中，分区标题和行之间的缝隙不再被当成行高亮。
+- 选择器的行不再画成带框卡片。默认完全透明，只有悬停/选中才上底色——面板与行之间的明度差已经足够把它们分开，而五个带圈的白矩形排成一列读起来是表单，不是列表。选中态改用中性底色而不是 accent：强调色预算一屏只花一次，就花在“当前选中”上。
+- 所有选项的路径改为从同一列起画，左缘对齐成一条竖线。此前是右对齐，每行路径的**起点**随它自身长度浮动（`cmd.exe` 的起点比 Nushell 靠右近 300px），眼睛沿列表往下扫时要不停地左右找落点。
+- 键帽样式全局统一：所有展示键位的地方（选择器的 Ctrl+K 徽标、命令列表的快捷键提示、设置 → 按键映射、确认弹窗）画同一种 chip——发丝圈边、面板填充、统一圆角。一个组合键是**一颗**承载整串的 chip，与 Windows 用户在 VS Code、Windows Terminal、Office 里已经熟悉的写法一致；被它替换掉的逐键拆分是 macOS 的形式，那里 `⌘ ⇧ ⌥` 是单字符图形、排起来宽度整齐，而 `Ctrl` `Shift` `Alt` 不是。
+- chip 底色现在只表示“这里可以点”。选择器页脚的 ↑↓ / Enter / Esc 是键位说明而非按钮，因此去掉 chip 底，改用墨色深浅区分键名与释义。
+- 文本光标有了活动感。闪烁相位改为从**最后一次编辑**起算，而不是跟着系统挂钟走：输入框一获得焦点光标立刻是亮的（此前有一半概率要等最多半秒才出现，读起来像“这个框没聚焦”）。打字期间光标保持常亮，停手后才开始呼吸，节律取自系统的 `GetCaretBlinkTime`，并尊重“关闭闪烁”这项无障碍设置。命令面板此前还漏在快速重绘名单外，入场动画一结束它的光标就不再翻转。
+- 命令面板的光标改为 1.5px 细梁而不是占满一格的字形，于是提示文字与真实输入从同一个 x 起画——打下第一个字符时整行不再横向跳动。
+- 确认弹窗与 SSH 主机编辑器现在有真正的外阴影，圆角也并入统一阶梯。此前两者只画发丝描边加填充，于是一个要求用户作答的弹窗，浮起高度还不如按 Esc 就能关掉的命令面板。SSH 编辑器的遮罩此前是写死的 67% 纯黑、不读主题，浅色主题下比深色主题罩得还重。
+- 下拉列表改为完全不透明，并用阴影而不是辉光。辉光只是向外扩散亮度、不建立高度关系，在浅色主题下只会让列表四周发灰。
 - 浅色主题的浮层统一白色打底：命令面板、SSH 主机编辑器与设置页表面不再从主题族继承银/岩灰底色。
-- 命令面板右缘现在对齐成一条线。此前 Ctrl+K 徽标、大卡片的回车键帽、右对齐路径列、命令列表的快捷键 chip 与页脚的 Esc 提示各用一套内边距——页脚甚至是按面板而非卡片列计算的——右边缘参差，且会随字号漂移。
+- 命令面板右缘现在对齐成一条线。此前 Ctrl+K 徽标、大卡片的回车键帽、命令列表的快捷键 chip 与页脚的 Esc 提示各用一套内边距——页脚甚至是按面板而非卡片列计算的——右边缘参差，且会随字号漂移。
 - 设置页统一到新的导航与等高行体系：hairline 分组、右对齐控件、克制的分节标题、主题预览和可编辑键帽共用一致的布局与交互模型。
 
 ## 0.7.0 - 2026-07-24
