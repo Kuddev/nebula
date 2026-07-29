@@ -115,8 +115,10 @@ pub struct Processor {
     quick_motion_clock: crate::motion::MotionClock,
     /// Global hotkey manager, kept alive so its registration stays active.
     global_hotkey: Option<GlobalHotKeyManager>,
-    /// Id of the registered quick-terminal toggle hotkey.
-    quick_hotkey_id: Option<u32>,
+    /// Registered quick-terminal toggle hotkey and the persisted spelling shown
+    /// in settings. Keeping the full value lets failed replacements restore it.
+    quick_hotkey: Option<HotKey>,
+    quick_hotkey_combo: String,
     /// Tabs of closed windows kept alive for re-attach (multiplexer-style): their
     /// PTYs never stopped, so `claude` and friends survive the window. LIFO —
     /// an attach request adopts the most recently closed window first.
@@ -158,8 +160,10 @@ impl Processor {
 
         let config::LoadedConfig { config, source: config_source, lua_generation } = loaded_config;
 
-        // Register the global quick-terminal toggle hotkey (Ctrl+`).
-        let (global_hotkey, quick_hotkey_id) = Self::init_quick_hotkey();
+        // Register the persisted global quick-terminal toggle hotkey before any
+        // window is shown. Invalid hand-edited values fall back to the default.
+        let quick_hotkey_combo = crate::display::quick_terminal_hotkey_from_settings(&config);
+        let (global_hotkey, quick_hotkey) = Self::init_quick_hotkey(&quick_hotkey_combo);
 
         Processor {
             initial_window_options,
@@ -182,7 +186,8 @@ impl Processor {
             quick_motion: crate::motion::Tween::new(1.0),
             quick_motion_clock: crate::motion::MotionClock::default(),
             global_hotkey,
-            quick_hotkey_id,
+            quick_hotkey,
+            quick_hotkey_combo,
             detached: Vec::new(),
         }
     }
@@ -190,7 +195,7 @@ impl Processor {
     /// Create the global hotkey manager and register the quick-terminal toggle
     /// (Ctrl+`). Returns `(None, None)` if the platform rejects it, so the rest
     /// of the terminal keeps working without a quick terminal.
-    fn init_quick_hotkey() -> (Option<GlobalHotKeyManager>, Option<u32>) {
+    fn init_quick_hotkey(combo: &str) -> (Option<GlobalHotKeyManager>, Option<HotKey>) {
         let manager = match GlobalHotKeyManager::new() {
             Ok(manager) => manager,
             Err(err) => {
@@ -198,10 +203,11 @@ impl Processor {
                 return (None, None);
             },
         };
-        let hotkey = HotKey::new(Some(HotKeyModifiers::CONTROL), Code::Backquote);
-        let id = hotkey.id();
+        let hotkey = combo
+            .parse::<HotKey>()
+            .unwrap_or_else(|_| HotKey::new(Some(HotKeyModifiers::CONTROL), Code::Backquote));
         match manager.register(hotkey) {
-            Ok(()) => (Some(manager), Some(id)),
+            Ok(()) => (Some(manager), Some(hotkey)),
             Err(err) => {
                 // Non-fatal and common in dev: a hard-killed previous instance
                 // never ran Drop to release Ctrl+`, or another app already owns
@@ -335,7 +341,7 @@ impl Processor {
 
     /// Drain global-hotkey events and toggle the quick terminal on a press.
     fn poll_quick_hotkey(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(hotkey_id) = self.quick_hotkey_id else { return };
+        let Some(hotkey_id) = self.quick_hotkey.map(|hotkey| hotkey.id()) else { return };
         let mut toggle = false;
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.id == hotkey_id && event.state == HotKeyState::Pressed {
@@ -344,6 +350,73 @@ impl Processor {
         }
         if toggle {
             self.toggle_quick_terminal(event_loop);
+        }
+    }
+
+    /// Replace the global quick-terminal shortcut transactionally. Registering
+    /// the candidate before releasing the old key keeps the existing shortcut
+    /// alive when the OS rejects a conflicting or malformed candidate.
+    fn apply_quick_terminal_hotkey(&mut self, requested: &str) -> Result<(), String> {
+        let new_hotkey = requested
+            .parse::<HotKey>()
+            .map_err(|err| format!("快捷键格式无效：{err}"))?;
+        if self.quick_hotkey == Some(new_hotkey) {
+            self.quick_hotkey_combo = requested.to_owned();
+            return Ok(())
+        }
+
+        let mut manager = self.global_hotkey.take().or_else(|| GlobalHotKeyManager::new().ok());
+        let Some(manager_ref) = manager.as_mut() else {
+            return Err("系统全局快捷键管理器初始化失败".to_owned());
+        };
+        if let Err(err) = manager_ref.register(new_hotkey) {
+            self.global_hotkey = manager;
+            return Err(format!("快捷键注册失败：{err}"));
+        }
+        if let Some(old_hotkey) = self.quick_hotkey {
+            if let Err(err) = manager_ref.unregister(old_hotkey) {
+                let _ = manager_ref.unregister(new_hotkey);
+                self.global_hotkey = manager;
+                return Err(format!("释放旧快捷键失败：{err}"));
+            }
+        }
+        self.global_hotkey = manager;
+        self.quick_hotkey = Some(new_hotkey);
+        self.quick_hotkey_combo = requested.to_owned();
+        Ok(())
+    }
+
+    /// Settings files are shared by windows. A non-originating window can
+    /// notice a changed hotkey during its mtime reload, so drain one staged
+    /// request during the main wait cycle even when no key event follows.
+    fn flush_quick_hotkey_requests(&mut self) {
+        let mut pending = None;
+        for (window_id, window_context) in &mut self.windows {
+            if let Some(hotkey) = window_context.display.take_quick_hotkey_request() {
+                pending = Some((*window_id, hotkey));
+                break;
+            }
+        }
+        let Some((window_id, hotkey)) = pending else { return };
+        let old = self.quick_hotkey_combo.clone();
+        let result = self.apply_quick_terminal_hotkey(&hotkey);
+        if let Some(window_context) = self.windows.get_mut(&window_id) {
+            match result {
+                Ok(()) => window_context.display.quick_hotkey_registration_done(
+                    &hotkey,
+                    true,
+                    None,
+                    &old,
+                ),
+                Err(err) => window_context.display.quick_hotkey_registration_done(
+                    &hotkey,
+                    false,
+                    Some(&err),
+                    &old,
+                ),
+            }
+            window_context.dirty = true;
+            window_context.display.window.request_redraw();
         }
     }
 
@@ -575,9 +648,46 @@ impl ApplicationHandler<Event> for Processor {
                     window_context.handle_sync_done(&message, error, history_changed);
                 }
             },
-            (EventType::SshTestDone { destination, ok, message, elapsed_ms }, Some(window_id)) => {
+            (EventType::QuickTerminalHotkeyChanged { hotkey }, Some(window_id)) => {
+                let old = self.quick_hotkey_combo.clone();
+                let result = self.apply_quick_terminal_hotkey(&hotkey);
                 if let Some(window_context) = self.windows.get_mut(window_id) {
-                    window_context.display.ssh_test_done(&destination, ok, &message, elapsed_ms);
+                    match result {
+                        Ok(()) => window_context.display.quick_hotkey_registration_done(
+                            &hotkey,
+                            true,
+                            None,
+                            &old,
+                        ),
+                        Err(err) => window_context.display.quick_hotkey_registration_done(
+                            &hotkey,
+                            false,
+                            Some(&err),
+                            &old,
+                        ),
+                    }
+                    window_context.dirty = true;
+                    window_context.display.window.request_redraw();
+                }
+            },
+            (
+                EventType::SshTestDone {
+                    request_id,
+                    destination,
+                    ok,
+                    message,
+                    elapsed_ms,
+                },
+                Some(window_id),
+            ) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.display.ssh_test_done(
+                        request_id,
+                        &destination,
+                        ok,
+                        &message,
+                        elapsed_ms,
+                    );
                     window_context.dirty = true;
                     window_context.display.window.request_redraw();
                 }
@@ -911,6 +1021,7 @@ impl ApplicationHandler<Event> for Processor {
                 WinitEvent::AboutToWait,
             );
         }
+        self.flush_quick_hotkey_requests();
 
         // Update the scheduler after event processing to ensure
         // the event loop deadline is as accurate as possible.
@@ -1278,10 +1389,19 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         });
     }
 
+    fn nebula_quick_hotkey_changed(&mut self) {
+        let Some(hotkey) = self.display.take_quick_hotkey_request() else { return };
+        let _ = self.event_proxy.send_event(Event::new(
+            EventType::QuickTerminalHotkeyChanged { hotkey },
+            self.display.window.id(),
+        ));
+    }
+
     /// SSH 编辑器「测试连接」：display 侧点击时暂存的请求在这里被取走，
     /// 交给共享 SSH runtime 执行；结果以 [`EventType::SshTestDone`] 回流。
     fn nebula_ssh_test(&mut self) {
         let Some(request) = self.display.take_ssh_test_request() else { return };
+        let request_id = request.request_id;
         let destination = request.destination.clone();
         if let Err(err) = crate::ssh_session::spawn_test(
             request,
@@ -1289,6 +1409,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             self.display.window.id(),
         ) {
             self.display.ssh_test_done(
+                request_id,
                 &destination,
                 false,
                 &format!("无法启动测试任务：{err}"),
@@ -2349,6 +2470,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 // Resize settling is handled at the window-context level.
                 EventType::NebulaResizeSettled
                 | EventType::SshDeleteUndoExpired
+                | EventType::QuickTerminalHotkeyChanged { .. }
                 | EventType::SshTestDone { .. }
                 | EventType::SftpUpdated => (),
                 // AI hook events are handled at the Processor level (they may

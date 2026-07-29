@@ -80,9 +80,14 @@ pub enum EventType {
     NebulaAttach,
     NebulaResizeSettled,
     SshDeleteUndoExpired,
+    /// 设置页捕获到新的快速终端全局快捷键。
+    QuickTerminalHotkeyChanged {
+        hotkey: String,
+    },
     /// SSH 编辑器「测试连接」完成（后台 runtime → 窗口线程）。`destination`
     /// 用于丢弃过期结果：草稿已改就当无事发生。
     SshTestDone {
+        request_id: u64,
         destination: String,
         ok: bool,
         message: String,

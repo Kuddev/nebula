@@ -16,6 +16,23 @@ use crate::config::{Action, BindingKey, BindingMode, KeyBinding, KeyLocation};
 
 /// 设置页可编辑的动作（顺序即显示顺序）。数字系动作（SelectTab1..9、
 /// LaunchProfile1..9）与 AI 贴入键属只读展示，不进这张表。
+///
+/// `QUICK_TERMINAL_ROW` 是设置页专用的全局快捷键行，不属于终端
+/// `config::Action`；它放在动作行之前，保证用户在按键页打开时第一眼就能
+/// 找到快速终端入口，同时仍复用同一套捕获/键帽交互。
+pub(super) const QUICK_TERMINAL_ROW: usize = 0;
+pub(super) const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+`";
+
+pub(super) fn editable_row_count() -> usize {
+    EDITABLE_ACTIONS.len() + 1
+}
+
+pub(super) fn display_stored_combo(combo: &str) -> String {
+    parse_combo(combo)
+        .and_then(|(mods, key)| display_combo(mods, &key))
+        .unwrap_or_else(|| combo.to_owned())
+}
+
 pub(super) const EDITABLE_ACTIONS: &[(Action, &str, &str)] = &[
     (Action::CreateNewTab, "新建标签页", "New tab"),
     (Action::CloseTab, "关闭标签页 / 分屏", "Close tab / pane"),
@@ -23,6 +40,7 @@ pub(super) const EDITABLE_ACTIONS: &[(Action, &str, &str)] = &[
     (Action::SelectPreviousTab, "上一个标签页", "Previous tab"),
     (Action::CreateNewWindow, "新建窗口", "New window"),
     (Action::ToggleCommandPalette, "命令面板", "Command palette"),
+    (Action::ToggleShellPicker, "Shell 选择器", "Shell picker"),
     (Action::SplitRight, "左右分屏", "Split right"),
     (Action::SplitDown, "上下分屏", "Split down"),
     (Action::ToggleZoom, "放大当前分屏", "Zoom current pane"),
@@ -422,6 +440,16 @@ mod tests {
     }
 
     #[test]
+    fn quick_terminal_default_matches_global_hotkey_api() {
+        let parsed = DEFAULT_QUICK_TERMINAL_HOTKEY
+            .parse::<global_hotkey::hotkey::HotKey>()
+            .expect("default quick-terminal shortcut must stay registrable");
+        assert_eq!(parsed.key, global_hotkey::hotkey::Code::Backquote);
+        assert!(parsed.mods.contains(global_hotkey::hotkey::Modifiers::CONTROL));
+        assert_eq!(display_stored_combo(DEFAULT_QUICK_TERMINAL_HOTKEY), "Ctrl+`");
+    }
+
+    #[test]
     fn parse_rejects_garbage() {
         assert!(parse_combo("").is_none());
         assert!(parse_combo("ctrl+").is_none());
@@ -484,6 +512,7 @@ mod tests {
             ("ctrl+shift+tab", Action::SelectPreviousTab),
             ("ctrl+shift+e", Action::CreateNewWindow),
             ("ctrl+shift+p", Action::ToggleCommandPalette),
+            ("ctrl+k", Action::ToggleShellPicker),
             ("ctrl+shift+d", Action::SplitRight),
             ("ctrl+shift+s", Action::SplitDown),
             ("ctrl+shift+enter", Action::ToggleZoom),

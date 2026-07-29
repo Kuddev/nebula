@@ -205,6 +205,10 @@ pub fn nebula_key_bindings() -> Vec<KeyBinding> {
         Tab,        ctrl_shift; Action::SelectPreviousTab;
         "e",        ctrl_shift; Action::CreateNewWindow;
         "p",        ctrl_shift; Action::ToggleCommandPalette;
+        // 图4 裁定：Ctrl+K 打开 shell/profile 选择器。占用了 shell 行编辑
+        // 的 kill-line（Ctrl+K → \x0b）；不接受的用户可在 keybindings 里
+        // 改回 ReceiveChar。
+        "k",        ctrl;       Action::ToggleShellPicker;
         "d",        ctrl_shift; Action::SplitRight;
         "s",        ctrl_shift; Action::SplitDown;
         Enter,      ctrl_shift; Action::ToggleZoom;

@@ -84,12 +84,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 | crate::display::SshEditorHit::Password => CursorIcon::Text,
                 crate::display::SshEditorHit::SaveToggleBox
                 | crate::display::SshEditorHit::SaveToggleLabel
+                | crate::display::SshEditorHit::Close
                 | crate::display::SshEditorHit::PasswordToggle
                 | crate::display::SshEditorHit::Auth(_)
                 | crate::display::SshEditorHit::AddPrivateKey
                 | crate::display::SshEditorHit::RemovePrivateKey(_)
+                | crate::display::SshEditorHit::Test
                 | crate::display::SshEditorHit::Primary
                 | crate::display::SshEditorHit::Cancel => CursorIcon::Pointer,
+                crate::display::SshEditorHit::TestStatus => CursorIcon::Help,
                 crate::display::SshEditorHit::None => CursorIcon::Default,
             };
             self.ctx.window().set_mouse_cursor(cursor);
@@ -180,24 +183,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         if self.ctx.display().command_palette_open() {
             let px = x as f32;
             let py = y as f32;
-            let layout = crate::display::command_palette::palette_layout(
-                window_size.width(),
-                window_size.height(),
-                scale,
-            );
-            let (ix, iy, iw, ih) = layout.panel;
-            // Hover detection: the pointer must be inside the panel rectangle,
-            // AND below the input box (list_y), AND the computed row must be a
-            // real item (< visible count). Without the visible-count check, rows
-            // beyond the filtered list — empty space inside the panel — also hover.
-            let hover_row = if px >= ix && px < ix + iw && py >= layout.list_y && py < iy + ih {
-                let row = ((py - layout.list_y) / layout.row_h) as usize;
-                let visible_count =
-                    self.ctx.display().nebula_palette_visible_count().min(layout.max_rows);
-                if row < visible_count { Some(row) } else { None }
-            } else {
-                None
-            };
+            let layout = self.ctx.display().command_palette_layout();
+            // Hover detection rides the layout's per-row rects (`row_at`): the
+            // picker's card geometry is non-uniform (hero card, section gaps),
+            // so dividing by row_h would light up captions and gaps too.
+            let hover_row = layout.row_at(px, py);
             if self.ctx.display().palette_hover((px, py), hover_row) {
                 self.ctx.mark_dirty();
             }

@@ -74,6 +74,7 @@ pub enum SshEditorHit {
     SaveToggleBox,
     SaveToggleLabel,
     Test,
+    TestStatus,
     Primary,
     Cancel,
 }
@@ -84,7 +85,9 @@ pub enum SshEditorHit {
 pub enum SshTestState {
     #[default]
     Idle,
-    Running,
+    Running {
+        request_id: u64,
+    },
     Ok {
         elapsed_ms: u64,
     },
@@ -124,6 +127,7 @@ pub struct SshEditorRects {
     pub save_checkbox: (f32, f32, f32, f32),
     pub save_toggle: (f32, f32, f32, f32),
     pub test: (f32, f32, f32, f32),
+    pub test_status: (f32, f32, f32, f32),
     pub primary: (f32, f32, f32, f32),
     pub cancel: (f32, f32, f32, f32),
 }

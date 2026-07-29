@@ -320,27 +320,22 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     let x = self.ctx.mouse().x as f32;
                     let y = self.ctx.mouse().y as f32;
                     self.ctx.display().ssh_editor_click(x, y);
+                    self.ctx.nebula_ssh_test();
                 }
                 self.ctx.mark_dirty();
                 return;
             }
 
             // Nebula command palette: clicking a row runs it, clicking outside
-            // dismisses — same modal semantics as the keyboard path.
+            // dismisses — same modal semantics as the keyboard path. Row lookup
+            // rides the layout's per-row rects (non-uniform in the picker).
             if button == MouseButton::Left && self.ctx.display().command_palette_open() {
                 let x = self.ctx.mouse().x as f32;
                 let y = self.ctx.mouse().y as f32;
-                let size = self.ctx.display().ui_size_info();
-                let scale = self.ctx.window().scale_factor as f32;
-                let layout = crate::display::command_palette::palette_layout(
-                    size.width(),
-                    size.height(),
-                    scale,
-                );
+                let layout = self.ctx.display().command_palette_layout();
                 let (px, py, pw, ph) = layout.panel;
                 if x >= px && x < px + pw && y >= py && y < py + ph {
-                    if y >= layout.list_y {
-                        let row = ((y - layout.list_y) / layout.row_h) as usize;
+                    if let Some(row) = layout.row_at(x, y) {
                         if let Some(action) = self.ctx.display().palette_click(row, layout.max_rows)
                         {
                             self.run_palette_action(action);

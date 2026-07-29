@@ -75,6 +75,7 @@ mod chrome;
 pub mod command_palette;
 mod context_menu;
 pub mod design_tokens;
+mod keycap;
 mod i18n;
 pub mod markdown_view;
 mod message_queue_entry;
@@ -87,6 +88,12 @@ mod surface_opacity;
 mod terminal_color;
 mod terminal_math;
 mod widgets;
+
+/// Processor uses the same persisted value before the first window exists so
+/// the global quick-terminal shortcut is active from application startup.
+pub(crate) fn quick_terminal_hotkey_from_settings(config: &UiConfig) -> String {
+    settings::nebula_settings_load(config).quick_terminal_hotkey
+}
 
 pub(crate) use chrome::chrome_settings_button_rect;
 pub use chrome::{ChromeHit, TabDropAction, in_chrome_bar, resize_edge};
@@ -1115,6 +1122,9 @@ pub struct Display {
     /// 「测试连接」点击时暂存的请求；input 层随后取走并交给 SSH runtime。
     /// display 不持有事件代理，这一格就是点击→网络之间的交接台。
     nebula_ssh_test_request: Option<crate::ssh_session::SshTestRequest>,
+    /// Monotonic identity for SSH editor test requests. Results must match the
+    /// exact attempt, not merely a destination that a user can edit back to.
+    nebula_ssh_test_seq: u64,
     /// Inline images visible this frame, collected per pane during
     /// `draw_pane` (grid lock + pane viewport at hand) and drawn in one
     /// full-window pass in `present_frame` — mid-pane GL viewport swaps are
@@ -1260,6 +1270,11 @@ pub struct Display {
     /// User keybinding overrides, raw `(combo, action)` from
     /// `nebula_settings.txt` in file order (persisted verbatim).
     pub(crate) nebula_keybinds: Vec<(String, String)>,
+    /// 快速终端全局快捷键的持久值；系统注册由顶层 Processor 负责。
+    pub nebula_quick_terminal_hotkey: String,
+    /// 等待 Processor 确认注册的新值。设置页不会绕过全局管理器自行假设成功。
+    pub(crate) nebula_quick_hotkey_request: Option<String>,
+    pub(crate) nebula_quick_hotkey_error: Option<String>,
     /// Parsed override table (newest-first); consulted by
     /// `process_key_bindings` BEFORE the config table (spec 002).
     pub nebula_keymap: Vec<crate::config::KeyBinding>,
@@ -1734,6 +1749,7 @@ impl Display {
             nebula_ssh_editor_open: false,
             nebula_ssh_editor_hover: SshEditorHit::None,
             nebula_ssh_test_request: None,
+            nebula_ssh_test_seq: 0,
             nebula_frame_images: Vec::new(),
             nebula_theme,
             nebula_theme_preference: settings_init.theme,
@@ -1768,6 +1784,9 @@ impl Display {
             nebula_cjk_bold_regular: settings_init.cjk_bold_regular,
             nebula_keymap: keymap::build_bindings(&settings_init.keybinds),
             nebula_keybinds: settings_init.keybinds,
+            nebula_quick_terminal_hotkey: settings_init.quick_terminal_hotkey,
+            nebula_quick_hotkey_request: None,
+            nebula_quick_hotkey_error: None,
             nebula_keymap_capture: None,
             nebula_keymap_capture_preview: String::new(),
             nebula_font_family: settings_init.font_family,
@@ -2001,6 +2020,8 @@ impl Display {
             SshEditorHit::SaveToggleLabel
         } else if hit(rects.test) {
             SshEditorHit::Test
+        } else if hit(rects.test_status) {
+            SshEditorHit::TestStatus
         } else if hit(rects.cancel) {
             SshEditorHit::Cancel
         } else if hit(rects.primary) {
@@ -2020,7 +2041,6 @@ impl Display {
     pub fn ssh_editor_insert(&mut self, text: &str) {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
             editor.error = None;
-            editor.test = Default::default();
             match editor.field {
                 SshEditorField::Destination => {
                     editor.destination_selection.insert(&mut editor.destination, text)
@@ -2029,12 +2049,15 @@ impl Display {
                     editor.password_selection.insert(&mut editor.password, text)
                 },
             }
+            editor.test = Default::default();
         }
     }
-
     pub fn ssh_editor_backspace(&mut self) {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-            editor.test = Default::default();
+            let before = match editor.field {
+                SshEditorField::Destination => editor.destination.len(),
+                SshEditorField::Password => editor.password.len(),
+            };
             match editor.field {
                 SshEditorField::Destination => {
                     editor.destination_selection.backspace(&mut editor.destination)
@@ -2042,6 +2065,13 @@ impl Display {
                 SshEditorField::Password => {
                     editor.password_selection.backspace(&mut editor.password)
                 },
+            }
+            let after = match editor.field {
+                SshEditorField::Destination => editor.destination.len(),
+                SshEditorField::Password => editor.password.len(),
+            };
+            if before != after {
+                editor.test = Default::default();
             }
         }
     }
@@ -2077,7 +2107,8 @@ impl Display {
             editor.destination_selection.clear();
             editor.password_selection.clear();
             let shows_password = ssh_ui::auth_sections(editor.auth).0;
-            let count = if shows_password { 4 } else { 3 };
+            // Destination, optional password, test, cancel, save.
+            let count = if shows_password { 5 } else { 4 };
             editor.focus.advance(count, reverse);
             editor.field = match (shows_password, editor.focus.current()) {
                 (_, 0) => SshEditorField::Destination,
@@ -2091,8 +2122,9 @@ impl Display {
         let Some(editor) = self.nebula_ssh_editor.as_ref() else { return };
         let shows_password = ssh_ui::auth_sections(editor.auth).0;
         match (shows_password, editor.focus.current()) {
-            (true, 2) | (false, 1) => self.close_ssh_editor(),
-            (true, 3) | (false, 2) => self.save_ssh_editor(),
+            (true, 2) | (false, 1) => self.queue_ssh_test(),
+            (true, 3) | (false, 2) => self.close_ssh_editor(),
+            (true, 4) | (false, 3) => self.save_ssh_editor(),
             _ => {},
         }
     }
@@ -2100,6 +2132,7 @@ impl Display {
     pub fn ssh_editor_toggle_save(&mut self) {
         if let Some(editor) = self.nebula_ssh_editor.as_mut() {
             editor.save_password = !editor.save_password;
+            editor.test = Default::default();
         }
     }
 
@@ -2108,12 +2141,57 @@ impl Display {
         self.nebula_ssh_test_request.take()
     }
 
+    /// Validate the current draft and stage an exact, numbered test request.
+    /// The input layer owns the event proxy and takes this request immediately
+    /// after mouse/keyboard activation.
+    fn queue_ssh_test(&mut self) {
+        let Some(editor) = self.nebula_ssh_editor.as_mut() else { return };
+        let destination = editor.destination.trim().to_owned();
+        let valid = !destination.is_empty()
+            && !destination
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control() || ";&|<>\"'`".contains(c));
+        if !valid {
+            editor.error = Some(if destination.is_empty() {
+                "请输入 SSH 地址，例如 user@example.com".to_owned()
+            } else {
+                "地址不能包含空白、控制字符或 shell 分隔符".to_owned()
+            });
+            editor.test = Default::default();
+            return;
+        }
+        if matches!(editor.test, ssh_ui::SshTestState::Running { .. }) {
+            return;
+        }
+
+        let shows_password = ssh_ui::auth_sections(editor.auth).0;
+        editor.focus.set(if shows_password { 2 } else { 1 }, if shows_password { 5 } else { 4 });
+        self.nebula_ssh_test_seq = self.nebula_ssh_test_seq.wrapping_add(1).max(1);
+        let request_id = self.nebula_ssh_test_seq;
+        editor.error = None;
+        editor.test = ssh_ui::SshTestState::Running { request_id };
+        self.nebula_ssh_test_request = Some(crate::ssh_session::SshTestRequest {
+            request_id,
+            destination,
+            auth: editor.auth,
+            private_keys: editor.private_keys.clone(),
+            password: (!editor.password.is_empty()).then(|| editor.password.clone()),
+        });
+    }
+
     /// 后台测试完成回报。结果只属于发起时的草稿：地址已改或状态已非
     /// Running（用户改过字段被清位）时直接丢弃，不让旧结果背书新配置。
-    pub fn ssh_test_done(&mut self, destination: &str, ok: bool, message: &str, elapsed_ms: u64) {
+    pub fn ssh_test_done(
+        &mut self,
+        request_id: u64,
+        destination: &str,
+        ok: bool,
+        message: &str,
+        elapsed_ms: u64,
+    ) {
         let Some(editor) = self.nebula_ssh_editor.as_mut() else { return };
         if editor.destination.trim() != destination
-            || editor.test != ssh_ui::SshTestState::Running
+            || editor.test != (ssh_ui::SshTestState::Running { request_id })
         {
             return;
         }
@@ -2130,7 +2208,8 @@ impl Display {
         match self.ssh_editor_hit(x, y) {
             SshEditorHit::Destination => {
                 if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    editor.focus.set(0, 4);
+                    let count = if ssh_ui::auth_sections(editor.auth).0 { 5 } else { 4 };
+                    editor.focus.set(0, count);
                     editor.destination_selection.clear();
                     editor.password_selection.clear();
                     editor.field = SshEditorField::Destination;
@@ -2143,7 +2222,7 @@ impl Display {
             },
             SshEditorHit::Password => {
                 if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    editor.focus.set(1, 4);
+                    editor.focus.set(1, 5);
                     editor.destination_selection.clear();
                     editor.password_selection.clear();
                     editor.field = SshEditorField::Password;
@@ -2184,25 +2263,8 @@ impl Display {
             SshEditorHit::SaveToggleBox | SshEditorHit::SaveToggleLabel => {
                 self.ssh_editor_toggle_save();
             },
-            SshEditorHit::Test => {
-                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    let destination = editor.destination.trim().to_owned();
-                    if destination.is_empty() {
-                        editor.error = Some("请输入 SSH 地址，例如 user@example.com".to_owned());
-                    } else if editor.test != ssh_ui::SshTestState::Running {
-                        editor.error = None;
-                        editor.test = ssh_ui::SshTestState::Running;
-                        self.nebula_ssh_test_request =
-                            Some(crate::ssh_session::SshTestRequest {
-                                destination,
-                                auth: editor.auth,
-                                private_keys: editor.private_keys.clone(),
-                                password: (!editor.password.is_empty())
-                                    .then(|| editor.password.clone()),
-                            });
-                    }
-                }
-            },
+            SshEditorHit::Test => self.queue_ssh_test(),
+            SshEditorHit::TestStatus => {},
             SshEditorHit::Close => {
                 self.close_ssh_editor();
             },
@@ -2210,8 +2272,8 @@ impl Display {
                 if let Some(editor) = self.nebula_ssh_editor.as_mut() {
                     let shows_password = ssh_ui::auth_sections(editor.auth).0;
                     editor.focus.set(
-                        if shows_password { 2 } else { 1 },
-                        if shows_password { 4 } else { 3 },
+                        if shows_password { 3 } else { 2 },
+                        if shows_password { 5 } else { 4 },
                     );
                 }
                 self.close_ssh_editor();
@@ -2220,8 +2282,8 @@ impl Display {
                 if let Some(editor) = self.nebula_ssh_editor.as_mut() {
                     let shows_password = ssh_ui::auth_sections(editor.auth).0;
                     editor.focus.set(
-                        if shows_password { 3 } else { 2 },
                         if shows_password { 4 } else { 3 },
+                        if shows_password { 5 } else { 4 },
                     );
                 }
                 self.save_ssh_editor();
@@ -2469,14 +2531,15 @@ impl Display {
         self.nebula_tab_running.iter().any(|running| *running)
     }
 
-    /// A chrome text editor (tab rename / drawer filter / commit message) has
-    /// keyboard focus — the window context bumps the redraw tick to the fast
-    /// cadence so the insertion caret visibly blinks.
+    /// A chrome text editor (tab rename / drawer filter / commit message / SSH
+    /// host editor) has keyboard focus — the window context bumps the redraw
+    /// tick to the fast cadence so the insertion caret visibly blinks.
     pub fn chrome_editor_active(&self) -> bool {
         self.nebula_tab_rename.is_some()
             || self.nebula_side_panel.search_focus
             || self.nebula_side_panel.commit_focus
             || self.nebula_sftp_panel.as_ref().is_some_and(sftp_panel::SftpPanel::editor_active)
+            || self.ssh_editor_active()
     }
 
     /// Decoded (and theme-tinted) pixels for an AI brand logo, plus a stable
@@ -2975,6 +3038,8 @@ impl Display {
                 .iter()
                 .map(|(action, ..)| keymap::effective_combo(action, &self.nebula_keymap))
                 .collect(),
+            quick_terminal_hotkey: self.nebula_quick_terminal_hotkey.clone(),
+            quick_hotkey_error: self.nebula_quick_hotkey_error.clone(),
             keymap_capture: self.nebula_keymap_capture,
             keymap_capture_preview: self.nebula_keymap_capture_preview.clone(),
             sync_inputs: self.nebula_sync_inputs.clone(),
@@ -3819,9 +3884,28 @@ impl Display {
     pub fn open_shell_menu(&mut self, profiles: &[String]) {
         let shells =
             self.nebula_detected_shells.get_or_insert_with(crate::shell_detect::detect_shells);
-        self.nebula_palette.set_shell_menu(shells, profiles);
+        let default_shell = self
+            .nebula_shell_id
+            .as_deref()
+            .unwrap_or_else(|| self.nebula_shell.settings_value());
+        self.nebula_palette.set_shell_menu(shells, profiles, default_shell);
         self.nebula_palette.open_profiles();
         self.pending_update.dirty = true;
+    }
+
+    /// Ctrl+K：开/关 shell picker——与 "+" 旁 chevron 打开的是同一份列表
+    /// （settings 页的 shell 下拉是另一回事，见 `toggle_shell_picker`）。
+    /// 已开着的 shell picker 再按一次收起；其他 palette 模式则切换过来。
+    pub fn toggle_shell_menu(&mut self, profiles: &[String]) {
+        let picker_open = self.nebula_palette.is_picker()
+            && !self.nebula_palette.is_picking_default()
+            && !self.nebula_palette.is_picking_directory();
+        if picker_open {
+            self.nebula_palette.close();
+            self.pending_update.dirty = true;
+        } else {
+            self.open_shell_menu(profiles);
+        }
     }
 
     /// Open a terminal-directory picker backed by the same frecency model as
@@ -3844,6 +3928,19 @@ impl Display {
 
     pub fn command_palette_open(&self) -> bool {
         self.nebula_palette.is_open()
+    }
+
+    /// One geometry contract for palette rendering and pointer input. Picker
+    /// height depends on the live filtered row count, so callers must not
+    /// reconstruct this from window dimensions alone.
+    pub fn command_palette_layout(&self) -> command_palette::PaletteLayout {
+        let size = self.ui_size_info();
+        command_palette::palette_layout(
+            &self.nebula_palette,
+            size.width(),
+            size.height(),
+            self.window.scale_factor as f32,
+        )
     }
 
     pub fn command_palette_picking_default(&self) -> bool {
@@ -3919,11 +4016,6 @@ impl Display {
             return true;
         }
         false
-    }
-
-    /// The number of visible palette results (for hover boundary checking).
-    pub fn nebula_palette_visible_count(&self) -> usize {
-        self.nebula_palette.visible_count()
     }
 
     /// Toggle the right-side drawer (directory tree / git status).
@@ -4507,9 +4599,10 @@ impl Display {
 
     /// 设置页点击某行的 keycap：进入捕获态（下一次按键成为新绑定）。
     pub fn keymap_begin_capture(&mut self, row: usize) {
-        if row < keymap::EDITABLE_ACTIONS.len() {
+        if row < keymap::editable_row_count() {
             self.nebula_keymap_capture = Some(row);
             self.nebula_keymap_capture_preview.clear();
+            self.nebula_quick_hotkey_error = None;
             self.pending_update.dirty = true;
         }
     }
@@ -4538,7 +4631,18 @@ impl Display {
     /// 捕获完成：`combo` 归属该行动作。同 combo 的旧自定义行被移除（键随
     /// 最后写入者），该动作旧的自定义行也移除（一动作一自定义键）。
     pub fn keymap_assign(&mut self, row: usize, combo: String) {
-        let Some((action, ..)) = keymap::EDITABLE_ACTIONS.get(row) else { return };
+        if row == keymap::QUICK_TERMINAL_ROW {
+            self.nebula_keymap_capture = None;
+            self.nebula_keymap_capture_preview.clear();
+            self.nebula_quick_terminal_hotkey = combo;
+            self.nebula_quick_hotkey_error = None;
+            self.nebula_quick_hotkey_request = Some(self.nebula_quick_terminal_hotkey.clone());
+            self.persist_nebula_settings();
+            self.pending_update.dirty = true;
+            return;
+        }
+        let action_row = row.saturating_sub(1);
+        let Some((action, ..)) = keymap::EDITABLE_ACTIONS.get(action_row) else { return };
         let name = keymap::action_storage_name(action);
         self.nebula_keybinds.retain(|(c, a)| c != &combo && !a.eq_ignore_ascii_case(&name));
         self.nebula_keybinds.push((combo, name));
@@ -4547,7 +4651,18 @@ impl Display {
 
     /// 捕获态里按 Backspace：删除该动作的自定义绑定，回落内置默认。
     pub fn keymap_clear_custom(&mut self, row: usize) {
-        let Some((action, ..)) = keymap::EDITABLE_ACTIONS.get(row) else { return };
+        if row == keymap::QUICK_TERMINAL_ROW {
+            self.nebula_keymap_capture = None;
+            self.nebula_keymap_capture_preview.clear();
+            self.nebula_quick_terminal_hotkey = keymap::DEFAULT_QUICK_TERMINAL_HOTKEY.to_owned();
+            self.nebula_quick_hotkey_error = None;
+            self.nebula_quick_hotkey_request = Some(self.nebula_quick_terminal_hotkey.clone());
+            self.persist_nebula_settings();
+            self.pending_update.dirty = true;
+            return;
+        }
+        let action_row = row.saturating_sub(1);
+        let Some((action, ..)) = keymap::EDITABLE_ACTIONS.get(action_row) else { return };
         let name = keymap::action_storage_name(action);
         self.nebula_keybinds.retain(|(_, a)| !a.eq_ignore_ascii_case(&name));
         self.keymap_commit();
@@ -4559,6 +4674,33 @@ impl Display {
         self.nebula_keymap = keymap::build_bindings(&self.nebula_keybinds);
         self.persist_nebula_settings();
         self.pending_update.dirty = true;
+    }
+
+    /// 取走一次性全局快捷键更新请求，由输入层送到 Processor 的全局管理器。
+    pub(crate) fn take_quick_hotkey_request(&mut self) -> Option<String> {
+        self.nebula_quick_hotkey_request.take()
+    }
+
+    /// Processor 完成注册后的确认/回滚。失败时恢复磁盘与界面中的旧值，
+    /// 防止设置页把未注册的组合误显示成当前快捷键。
+    pub(crate) fn quick_hotkey_registration_done(
+        &mut self,
+        requested: &str,
+        accepted: bool,
+        error: Option<&str>,
+        fallback: &str,
+    ) {
+        if accepted {
+            self.nebula_quick_hotkey_error = None;
+            return;
+        }
+        if self.nebula_quick_terminal_hotkey == requested {
+            self.nebula_quick_terminal_hotkey = fallback.to_owned();
+            self.persist_nebula_settings();
+        }
+        self.nebula_quick_hotkey_error = error.map(str::to_owned);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     pub(crate) fn persist_nebula_settings(&mut self) {
@@ -4591,6 +4733,7 @@ impl Display {
             saved_hosts: self.nebula_saved_hosts.clone(),
             hidden_hosts: self.nebula_hidden_hosts.clone(),
             keybinds: self.nebula_keybinds.clone(),
+            quick_terminal_hotkey: self.nebula_quick_terminal_hotkey.clone(),
         });
         self.nebula_settings_mtime = settings::nebula_settings_mtime();
     }
@@ -4683,6 +4826,11 @@ impl Display {
         // in-flight capture is dropped so it can't overwrite the file edit.
         self.nebula_keymap = keymap::build_bindings(&settings.keybinds);
         self.nebula_keybinds = settings.keybinds;
+        if self.nebula_quick_terminal_hotkey != settings.quick_terminal_hotkey {
+            self.nebula_quick_terminal_hotkey = settings.quick_terminal_hotkey.clone();
+            self.nebula_quick_hotkey_request = Some(self.nebula_quick_terminal_hotkey.clone());
+            self.nebula_quick_hotkey_error = None;
+        }
         self.nebula_keymap_capture = None;
         self.nebula_ssh_hosts = merge_ssh_hosts(
             &self.nebula_saved_hosts,
@@ -6049,7 +6197,6 @@ impl Display {
         // the ring never clips ascenders. Gap sits between label and cap.
         let cap_pad = s(6.0);
         let cap_h = cell_h + s(6.0);
-        let cap_r = s(4.0);
         let key_gap = s(8.0);
         let cap_w = |key: &str| text_w(key) + 2.0 * cap_pad;
         let btn_w = |label: &str, key: &str| -> f32 {
@@ -6072,9 +6219,9 @@ impl Display {
         let bx = ((size.width() - box_w) * 0.5).max(s(16.0));
         let by = ((size.height() - box_h) * 0.5).max(s(16.0));
 
-        // Veil dims the whole window so the modal reads as, well, modal.
-        let veil =
-            UiQuad::solid(0.0, 0.0, size.width(), size.height(), 0.0, Rgba::new(0, 0, 0, 118));
+        // Veil dims the whole window so the modal reads as, well, modal
+        // (white fog on light themes, black dim on dark — sk.veil).
+        let veil = UiQuad::solid(0.0, 0.0, size.width(), size.height(), 0.0, sk.veil);
         // Hairline edge + flat themed card (no glow, no gradient).
         let edge = UiQuad::solid(
             bx - s(1.0),
@@ -6118,39 +6265,19 @@ impl Display {
         // Primary: the single loud element on the card.
         quads.push(UiQuad::solid(primary_x, btn_y, primary_w, btn_h, s(8.0), primary_fill));
 
-        // Keycaps: a 1px ring in the button's own ink, with the interior
-        // re-stacking that button's own fills so the cap reads as an outline
-        // rather than a second filled control competing with the primary
-        // action. Ring alpha stays low — at full strength it would out-shout
-        // the label it annotates, especially on the accent/danger fill.
+        // Keycaps: 图8 键帽规范（2026-07-29）——与 Ctrl+K/设置页共用
+        // `keycap::push_chip` 配方（hairline 圈 + panel/surface 叠底），
+        // 不再按按钮墨色自造描边圈。chip 底是中性 panel，所以放在 accent
+        // 主按钮上天然成为浅色小块（图3 mockup 的 Enter 键帽即此形态）。
         // Returns its quads instead of pushing: a closure capturing `quads`
         // mutably would lock it for the rest of the batch.
-        let keycap = |x: f32, ink: Rgb, fills: &[Rgba], key: &str| -> Vec<UiQuad> {
-            let w = cap_w(key);
-            let mut out = vec![UiQuad::solid(
-                x,
-                cap_y,
-                w,
-                cap_h,
-                cap_r,
-                Rgba::new(ink.r, ink.g, ink.b, 120),
-            )];
-            out.extend(fills.iter().map(|fill| {
-                UiQuad::solid(
-                    x + s(1.0),
-                    cap_y + s(1.0),
-                    w - s(2.0),
-                    cap_h - s(2.0),
-                    cap_r - s(1.0),
-                    *fill,
-                )
-            }));
+        let cap = |x: f32, key: &str| -> Vec<UiQuad> {
+            let mut out = Vec::new();
+            keycap::push_chip(&mut out, &sk, x, cap_y, cap_w(key), cap_h, scale);
             out
         };
-        // The ghost button's visible fill is panel+surface stacked; the cap
-        // interior re-stacks both so it matches the button exactly.
-        quads.extend(keycap(cancel_cap_x, txt, &[sk.panel, sk.surface], cancel_key));
-        quads.extend(keycap(primary_cap_x, on_primary, &[primary_fill], primary_key));
+        quads.extend(cap(cancel_cap_x, cancel_key));
+        quads.extend(cap(primary_cap_x, primary_key));
         self.renderer.draw_ui(&size, &quads);
 
         // Text: free-pixel chrome text (no opaque cell backgrounds), left
@@ -6195,11 +6322,13 @@ impl Display {
             primary_label,
             glyph_cache,
         );
+        // 键帽文字统一走 chip 自己的墨（sk.ink）：chip 底是中性 panel，
+        // 不随按钮填充翻转，主按钮上的键名也保持可读。
         self.renderer.draw_chrome_text(
             &size,
             primary_cap_x + cap_pad,
             btn_text_y,
-            on_primary,
+            txt,
             primary_key,
             glyph_cache,
         );

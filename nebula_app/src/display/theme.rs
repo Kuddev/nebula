@@ -430,13 +430,15 @@ impl NebulaTheme {
         let t = p.term_bg;
         if p.is_light {
             Skin {
-                panel: Rgba::new(b.r, b.g, b.b, 252),
+                // 2026-07-29 用户裁定（图6 吸色）：浅色主题的浮层统一"白色
+                // 打底"——面板近白、卡片纯白，SSH 编辑器与 shell 选择器共
+                // 用这一组，不再继承主题族的银/岩灰底。
+                panel: Rgba::new(250, 250, 251, 252),
                 // A white inset on light panels: the hairline carries the
                 // "sunken" read, the fill stays cleaner than a gray wash.
                 input: Rgba::new(255, 255, 255, 240),
-                // Light panels stay flat — the gradient-to-dark trick is a
-                // dark-theme depth cue and would read as dirt here.
-                panel_grad_to: Rgba::new(b.r, b.g, b.b, 252),
+                card: Rgba::new(255, 255, 255, 244),
+                veil: Rgba::new(255, 255, 255, 190),
                 ink: Rgb::new(55, 65, 81),        // #374151 (ui-text-main)
                 ink_dim: Rgb::new(107, 114, 128), // #6b7280 (ui-text-muted)
                 ink_strong: Rgb::new(18, 22, 30),
@@ -465,7 +467,8 @@ impl NebulaTheme {
                 // so it stays in-family on every dark theme (blue-black on
                 // Nebula, pure gray on Coal) instead of one fixed navy.
                 input: Rgba::new(t.r, t.g, t.b, 220),
-                panel_grad_to: Rgba::new(t.r, t.g, t.b, 235),
+                card: Rgba::new(255, 255, 255, 16),
+                veil: Rgba::new(0, 0, 0, 150),
                 ink: Rgb::new(228, 231, 246),
                 ink_dim: Rgb::new(158, 164, 188),
                 ink_strong: Rgb::new(255, 255, 255),
@@ -545,9 +548,12 @@ pub(crate) struct Skin {
     pub(crate) panel: Rgba,
     /// Inset/input surface (command palette query box and friends).
     pub(crate) input: Rgba,
-    /// Far end of the tall-panel gradient (command palette). Same as `panel`
-    /// on light themes — the depth cue is dark-theme only.
-    pub(crate) panel_grad_to: Rgba,
+    /// Elevated card fill for picker rows: a soft lift on the gray panel
+    /// (white cards on light themes, a faint white wash on dark).
+    pub(crate) card: Rgba,
+    /// Full-window wash behind modals. 2026-07-29 用户裁定：浅色主题的弹窗
+    /// 遮罩用白雾压淡而不是黑幕压暗；深色主题保持黑色调暗。
+    pub(crate) veil: Rgba,
     /// Primary label ink.
     pub(crate) ink: Rgb,
     /// Secondary / sub-label ink.

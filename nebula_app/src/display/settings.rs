@@ -35,6 +35,10 @@ use super::{
 // [`Skin`] token from `display::theme` (single source of truth), so the page
 // flips correctly between the light and dark theme families.
 
+/// WebDAV 同步还处于内部迭代阶段。保留状态、持久化与后端实现，但在交互闭环
+/// 完成前不向用户暴露入口；集中守门可避免绘制、命中和滚动高度各自遗漏。
+const SHOW_WEBDAV_SYNC_SETTINGS: bool = false;
+
 /// Sidebar sections of the settings panel. Deliberately small: only sections
 /// with real functionality behind them are listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -294,6 +298,8 @@ pub(super) struct NebulaRuntimeSettings {
     /// (spec 002). Kept verbatim so unknown-but-valid future actions survive a
     /// load/save cycle; `display::keymap::build_bindings` parses them.
     pub(super) keybinds: Vec<(String, String)>,
+    /// 快速终端全局切换键，和普通动作绑定分开持久化。
+    pub(super) quick_terminal_hotkey: String,
 }
 
 /// Load runtime UI settings from `Nebula/nebula_settings.txt`; defaults when
@@ -338,6 +344,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         saved_hosts: Vec::new(),
         hidden_hosts: Vec::new(),
         keybinds: Vec::new(),
+        quick_terminal_hotkey: keymap::DEFAULT_QUICK_TERMINAL_HOTKEY.to_owned(),
     };
     if let Ok(data) = std::fs::read_to_string(path) {
         for line in data.lines() {
@@ -464,6 +471,12 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                         }
                     }
                 },
+                Some(("quick_terminal_hotkey", v)) => {
+                    let value = v.trim();
+                    if value.parse::<global_hotkey::hotkey::HotKey>().is_ok() {
+                        settings.quick_terminal_hotkey = value.to_owned();
+                    }
+                },
                 _ => {},
             }
         }
@@ -574,10 +587,11 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     for (combo, action) in &settings.keybinds {
         keybinds.push_str(&format!("keybind={combo}:{action}\n"));
     }
+    let quick_terminal_hotkey = settings.quick_terminal_hotkey.trim();
     let _ = std::fs::write(
         path,
         format!(
-            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\n{keybinds}",
+            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -671,6 +685,10 @@ struct SettingsGeometry {
 /// Scrollable-content viewport height for the Settings tab.
 fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
     popup_h - 72.0 * scale_factor
+}
+
+fn advanced_content_end(advanced_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
+    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + row_h }
 }
 
 /// Max scroll offset for `section` at the current window size. The input
@@ -819,15 +837,14 @@ fn settings_geometry(
     // Keymap: editable action rows, then a read-only extras group (spec 002).
     let keymap_y0 = 146.0;
     let keymap_readonly_y0 =
-        keymap_y0 + keymap::EDITABLE_ACTIONS.len() as f32 * ROW_H + GROUP_ADVANCE;
+        keymap_y0 + keymap::editable_row_count() as f32 * ROW_H + GROUP_ADVANCE;
     let keymap_h =
         s(keymap_readonly_y0 + keymap::READONLY_ROWS.len() as f32 * ROW_H + 32.0 - 72.0);
     let keymap_row0 = (row_x, at(keymap_y0), row_w, row_h);
     let keymap_readonly_row0 = (row_x, at(keymap_readonly_y0), row_w, row_h);
 
-    // Advanced: session residency, then the WebDAV sync group (spec 003):
-    // url/username/password/passphrase inputs, auto-pull toggle, push/pull
-    // buttons, and one text line for the last outcome.
+    // Advanced: session residency, then the gated WebDAV sync group (spec 003).
+    // 隐藏期间同步几何仍保留，方便后续继续完善，但页面高度只计算可见内容。
     let advanced_y0 = 146.0;
     let keep_session = (row_x, at(advanced_y0), row_w, row_h);
     let sync_y0 = advanced_y0 + ROW_H + GROUP_ADVANCE;
@@ -835,7 +852,8 @@ fn settings_geometry(
     let sync_rows = [sync_row(0.0), sync_row(1.0), sync_row(2.0), sync_row(3.0)];
     let sync_auto_pull = sync_row(4.0);
     let sync_actions = sync_row(5.0);
-    let advanced_h = s(sync_y0 + 7.0 * ROW_H + 32.0 - 72.0);
+    let advanced_end = advanced_content_end(advanced_y0, sync_y0, ROW_H);
+    let advanced_h = s(advanced_end + 32.0 - 72.0);
 
     SettingsGeometry {
         gear,
@@ -1220,7 +1238,7 @@ pub fn settings_hit(
             },
             NebulaSettingsSection::Keymap => {
                 let (row_x, row_y, row_w, row_h) = geometry.keymap_row0;
-                for index in 0..keymap::EDITABLE_ACTIONS.len() {
+                for index in 0..keymap::editable_row_count() {
                     let rect = (row_x, row_y + index as f32 * row_h, row_w, row_h);
                     if contains_rect(rect, x, y) {
                         return SettingsHit::KeymapRow(index);
@@ -1231,22 +1249,24 @@ pub fn settings_hit(
                 if contains_rect(geometry.keep_session, x, y) {
                     return SettingsHit::KeepSessionToggle;
                 }
-                for (index, rect) in geometry.sync_rows.iter().enumerate() {
-                    // 命中整行都算输入框：行左侧是它的 label，点标签聚焦
-                    // 输入是 Windows 设置页的惯例。
-                    if contains_rect(*rect, x, y) {
-                        return SettingsHit::SyncInput(index);
+                if SHOW_WEBDAV_SYNC_SETTINGS {
+                    for (index, rect) in geometry.sync_rows.iter().enumerate() {
+                        // 命中整行都算输入框：行左侧是它的 label，点标签聚焦
+                        // 输入是 Windows 设置页的惯例。
+                        if contains_rect(*rect, x, y) {
+                            return SettingsHit::SyncInput(index);
+                        }
                     }
-                }
-                if contains_rect(geometry.sync_auto_pull, x, y) {
-                    return SettingsHit::SyncAutoPullToggle;
-                }
-                let [push, pull] = sync_button_rects(geometry.sync_actions, scale_factor);
-                if contains_rect(push, x, y) {
-                    return SettingsHit::SyncPushButton;
-                }
-                if contains_rect(pull, x, y) {
-                    return SettingsHit::SyncPullButton;
+                    if contains_rect(geometry.sync_auto_pull, x, y) {
+                        return SettingsHit::SyncAutoPullToggle;
+                    }
+                    let [push, pull] = sync_button_rects(geometry.sync_actions, scale_factor);
+                    if contains_rect(push, x, y) {
+                        return SettingsHit::SyncPushButton;
+                    }
+                    if contains_rect(pull, x, y) {
+                        return SettingsHit::SyncPullButton;
+                    }
                 }
             },
         }
@@ -1319,6 +1339,9 @@ pub(super) struct SettingsView {
     /// 按键映射: per editable row `(display combo, customized)`; `None` =
     /// unbound. Precomputed by `Display` from the override + default tables.
     pub(super) keymap: Vec<Option<(String, bool)>>,
+    /// 快速终端行使用独立的全局快捷键字符串。
+    pub(super) quick_terminal_hotkey: String,
+    pub(super) quick_hotkey_error: Option<String>,
     /// Row currently capturing a new combo, if any.
     pub(super) keymap_capture: Option<usize>,
     /// 捕获态按住的修饰键前缀（"Ctrl+"），实时回显。
@@ -1416,7 +1439,15 @@ fn keymap_row_value(view: &SettingsView, index: usize) -> (String, bool, bool) {
         };
         return (text, false, false);
     }
-    match view.keymap.get(index).and_then(|slot| slot.as_ref()) {
+    if index == keymap::QUICK_TERMINAL_ROW {
+        return (
+            keymap::display_stored_combo(&view.quick_terminal_hotkey),
+            view.quick_terminal_hotkey != keymap::DEFAULT_QUICK_TERMINAL_HOTKEY,
+            true,
+        );
+    }
+    let action_index = index - 1;
+    match view.keymap.get(action_index).and_then(|slot| slot.as_ref()) {
         Some((combo, customized)) => (combo.clone(), *customized, true),
         None => (view.language.pick("未绑定", "Unbound").to_owned(), false, false),
     }
@@ -2016,10 +2047,10 @@ pub(super) fn push_quads(
         },
         NebulaSettingsSection::Keymap => {
             let cell_w = size.cell_width();
-            group_frame(quads, geometry.keymap_row0, keymap::EDITABLE_ACTIONS.len());
+            group_frame(quads, geometry.keymap_row0, keymap::editable_row_count());
             group_frame(quads, geometry.keymap_readonly_row0, keymap::READONLY_ROWS.len());
             let (kx, ky, kw, kh) = geometry.keymap_row0;
-            for index in 0..keymap::EDITABLE_ACTIONS.len() {
+            for index in 0..keymap::editable_row_count() {
                 let rect = (kx, ky + index as f32 * geometry.keymap_row_h, kw, kh);
                 row_hover(quads, rect, view.hover == SettingsHit::KeymapRow(index));
                 // Keycap 底座：有效键围 hairline 徽标；捕获中的行换 accent
@@ -2043,18 +2074,20 @@ pub(super) fn push_quads(
                     clip(quads, UiQuad::solid(cx, cy, cw, ch, s(6.0), sk.panel));
                     clip(quads, UiQuad::solid(cx, cy, cw, ch, s(6.0), sk.accent_soft));
                 } else if bound {
-                    clip(
-                        quads,
-                        UiQuad::solid(
-                            cx - s(1.0),
-                            cy - s(1.0),
-                            cw + s(2.0),
-                            ch + s(2.0),
-                            s(7.0),
-                            sk.hairline,
-                        ),
+                    // 图8 键帽规范：组合键拆逐键 chip（几何与文字 pass 同
+                    // 源自 keycap::layout_combo）。
+                    let combo = super::keycap::layout_combo(
+                        &label,
+                        rect.0 + rect.2 - s(16.0),
+                        rect.1 + rect.3 / 2.0,
+                        cell_w,
+                        scale,
                     );
-                    clip(quads, UiQuad::solid(cx, cy, cw, ch, s(6.0), sk.surface));
+                    let mut chip_quads = Vec::new();
+                    super::keycap::push_combo(&mut chip_quads, &sk, &combo, scale);
+                    for quad in chip_quads {
+                        clip(quads, quad);
+                    }
                 }
             }
         },
@@ -2063,74 +2096,84 @@ pub(super) fn push_quads(
             row_hover(quads, geometry.keep_session, view.hover == SettingsHit::KeepSessionToggle);
             toggle(quads, &mut staged, geometry.keep_session, view.keep_session);
 
-            // ---- 同步（WebDAV，spec 003）：4 输入行 + 自动拉取开关 ----
-            group_frame(quads, geometry.sync_rows[0], 5);
-            let cell_w = size.cell_width();
-            for (index, row) in geometry.sync_rows.iter().enumerate() {
-                row_hover(quads, *row, view.hover == SettingsHit::SyncInput(index));
-                let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
-                let focused = view.sync_focus == Some(index);
-                let border = if focused { sk.accent } else { sk.ink_dim };
-                let border_alpha = if focused { 255 } else { 90 };
-                clip(
-                    quads,
-                    UiQuad::solid(
-                        ix - s(1.0),
-                        iy - s(1.0),
-                        iw + s(2.0),
-                        ih + s(2.0),
-                        s(8.0),
-                        Rgba::new(border.r, border.g, border.b, border_alpha),
-                    ),
-                );
-                clip(quads, UiQuad::solid(ix, iy, iw, ih, s(7.0), sk.surface));
-                if focused && super::caret_blink_on() {
-                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                    let (_, placeholder, cols) = sync_input_display(view, index, max_cols);
-                    let cols = if placeholder { 0 } else { cols };
-                    let caret_h = ih - s(10.0);
+            if SHOW_WEBDAV_SYNC_SETTINGS {
+                // ---- 同步（WebDAV，spec 003）：4 输入行 + 自动拉取开关 ----
+                group_frame(quads, geometry.sync_rows[0], 5);
+                let cell_w = size.cell_width();
+                for (index, row) in geometry.sync_rows.iter().enumerate() {
+                    row_hover(quads, *row, view.hover == SettingsHit::SyncInput(index));
+                    let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
+                    let focused = view.sync_focus == Some(index);
+                    let border = if focused { sk.accent } else { sk.ink_dim };
+                    let border_alpha = if focused { 255 } else { 90 };
                     clip(
                         quads,
                         UiQuad::solid(
-                            (ix + s(12.0) + cols as f32 * cell_w).min(ix + iw - s(6.0)),
-                            iy + (ih - caret_h) / 2.0,
-                            (1.5 * scale).max(1.0),
-                            caret_h,
-                            0.0,
-                            Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
+                            ix - s(1.0),
+                            iy - s(1.0),
+                            iw + s(2.0),
+                            ih + s(2.0),
+                            s(8.0),
+                            Rgba::new(border.r, border.g, border.b, border_alpha),
+                        ),
+                    );
+                    clip(quads, UiQuad::solid(ix, iy, iw, ih, s(7.0), sk.surface));
+                    if focused && super::caret_blink_on() {
+                        let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                        let (_, placeholder, cols) = sync_input_display(view, index, max_cols);
+                        let cols = if placeholder { 0 } else { cols };
+                        let caret_h = ih - s(10.0);
+                        clip(
+                            quads,
+                            UiQuad::solid(
+                                (ix + s(12.0) + cols as f32 * cell_w).min(ix + iw - s(6.0)),
+                                iy + (ih - caret_h) / 2.0,
+                                (1.5 * scale).max(1.0),
+                                caret_h,
+                                0.0,
+                                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
+                            ),
+                        );
+                    }
+                }
+                row_hover(
+                    quads,
+                    geometry.sync_auto_pull,
+                    view.hover == SettingsHit::SyncAutoPullToggle,
+                );
+                toggle(quads, &mut staged, geometry.sync_auto_pull, view.sync_auto_pull);
+
+                // 动作行：两个独立按钮（同步中变灰、不吃 hover）。
+                let [push_rect, pull_rect] = sync_button_rects(geometry.sync_actions, scale);
+                for (rect, hit) in [
+                    (push_rect, SettingsHit::SyncPushButton),
+                    (pull_rect, SettingsHit::SyncPullButton),
+                ] {
+                    let (bx, by, bw, bh) = rect;
+                    let hot = view.hover == hit && !view.sync_busy;
+                    clip(
+                        quads,
+                        UiQuad::solid(
+                            bx - s(1.0),
+                            by - s(1.0),
+                            bw + s(2.0),
+                            bh + s(2.0),
+                            s(9.0),
+                            sk.hairline,
+                        ),
+                    );
+                    clip(
+                        quads,
+                        UiQuad::solid(
+                            bx,
+                            by,
+                            bw,
+                            bh,
+                            s(8.0),
+                            if hot { sk.hover } else { sk.panel },
                         ),
                     );
                 }
-            }
-            row_hover(
-                quads,
-                geometry.sync_auto_pull,
-                view.hover == SettingsHit::SyncAutoPullToggle,
-            );
-            toggle(quads, &mut staged, geometry.sync_auto_pull, view.sync_auto_pull);
-
-            // 动作行：两个独立按钮（同步中变灰、不吃 hover）。
-            let [push_rect, pull_rect] = sync_button_rects(geometry.sync_actions, scale);
-            for (rect, hit) in
-                [(push_rect, SettingsHit::SyncPushButton), (pull_rect, SettingsHit::SyncPullButton)]
-            {
-                let (bx, by, bw, bh) = rect;
-                let hot = view.hover == hit && !view.sync_busy;
-                clip(
-                    quads,
-                    UiQuad::solid(
-                        bx - s(1.0),
-                        by - s(1.0),
-                        bw + s(2.0),
-                        bh + s(2.0),
-                        s(9.0),
-                        sk.hairline,
-                    ),
-                );
-                clip(
-                    quads,
-                    UiQuad::solid(bx, by, bw, bh, s(8.0), if hot { sk.hover } else { sk.panel }),
-                );
             }
         },
     }
@@ -3304,23 +3347,36 @@ pub(super) fn draw_text(
                 let ty = ry + (rh - cell_h) / 2.0;
                 ty >= clip_top && ty + cell_h <= clip_bot
             };
-            for (i, (_, zh_label, en_label)) in keymap::EDITABLE_ACTIONS.iter().enumerate() {
+            for i in 0..keymap::editable_row_count() {
                 let rect = (kx, ky + i as f32 * geometry.keymap_row_h, kw, kh);
                 if !line_visible(rect.1, rect.3) {
                     continue;
                 }
                 let ty = rect.1 + (kh - cell_h) / 2.0;
+                let (zh_label, en_label) = if i == keymap::QUICK_TERMINAL_ROW {
+                    if view.quick_hotkey_error.is_some() {
+                        ("快速终端（注册失败）", "Quick terminal (failed)")
+                    } else {
+                        ("快速终端", "Quick terminal")
+                    }
+                } else {
+                    let (_, zh, en) = keymap::EDITABLE_ACTIONS[i - 1];
+                    (zh, en)
+                };
                 r.draw_chrome_text(
                     size,
                     rect.0 + s(16.0),
                     ty,
-                    sk.ink,
+                    if i == keymap::QUICK_TERMINAL_ROW && view.quick_hotkey_error.is_some() {
+                        if sk.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) }
+                    } else {
+                        sk.ink
+                    },
                     language.pick(zh_label, en_label),
                     gc,
                 );
                 let capturing = view.keymap_capture == Some(i);
                 let (value, customized, bound) = keymap_row_value(view, i);
-                let (cap_x, ..) = keymap_keycap_rect(rect, &value, cell_w, scale);
                 // 墨色分级：捕获中 accent、自定义键 accent、默认键正常墨、
                 // 未绑定弱墨——一眼看出哪些行动过。
                 let ink = if capturing || customized {
@@ -3330,7 +3386,35 @@ pub(super) fn draw_text(
                 } else {
                     sk.ink_dim
                 };
-                r.draw_chrome_text(size, cap_x + s(12.0), ty, ink, &value, gc);
+                if capturing || !bound {
+                    // 捕获提示 / 未绑定占位仍是整段文本（不是键位展示）。
+                    let (cap_x, ..) = keymap_keycap_rect(rect, &value, cell_w, scale);
+                    r.draw_chrome_text(size, cap_x + s(12.0), ty, ink, &value, gc);
+                } else {
+                    // 图8 键帽规范：逐键 chip 内居中键名，弱墨 "+" 分隔。
+                    let combo = super::keycap::layout_combo(
+                        &value,
+                        rect.0 + rect.2 - s(16.0),
+                        rect.1 + rect.3 / 2.0,
+                        cell_w,
+                        scale,
+                    );
+                    for (chip_x, chip_w, key) in &combo.chips {
+                        let key_cols: usize =
+                            key.chars().map(|c| c.width().unwrap_or(0)).sum();
+                        r.draw_chrome_text(
+                            size,
+                            chip_x + (chip_w - key_cols as f32 * cell_w) / 2.0,
+                            ty,
+                            ink,
+                            key,
+                            gc,
+                        );
+                    }
+                    for plus_x in &combo.pluses {
+                        r.draw_chrome_text(size, *plus_x, ty, sk.ink_faint, "+", gc);
+                    }
+                }
             }
             let (rx, ry, rw, rh) = geometry.keymap_readonly_row0;
             if visible(group_y(ry), title_h) {
@@ -3395,80 +3479,89 @@ pub(super) fn draw_text(
                 );
             }
 
-            // ---- 同步（WebDAV）----
-            let (sx, sy, ..) = geometry.sync_rows[0];
-            if visible(group_y(sy), title_h) {
-                section_title(
-                    r,
-                    gc,
-                    size,
-                    scale,
-                    &sk,
-                    sx,
-                    group_y(sy),
-                    language.pick("同步（WebDAV）", "Sync (WebDAV)"),
-                );
-            }
-            let labels = [
-                language.pick("服务器文件 URL", "Server file URL"),
-                language.pick("用户名", "Username"),
-                language.pick("WebDAV 密码", "WebDAV password"),
-                language.pick("端到端口令", "End-to-end passphrase"),
-            ];
-            let cell_w = size.cell_width();
-            let cell_h = size.cell_height();
-            for (index, row) in geometry.sync_rows.iter().enumerate() {
-                if !visible(row.1, row.3) {
-                    continue;
+            if SHOW_WEBDAV_SYNC_SETTINGS {
+                // ---- 同步（WebDAV）----
+                let (sx, sy, ..) = geometry.sync_rows[0];
+                if visible(group_y(sy), title_h) {
+                    section_title(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        sx,
+                        group_y(sy),
+                        language.pick("同步（WebDAV）", "Sync (WebDAV)"),
+                    );
                 }
-                row_label(r, gc, size, scale, &sk, *row, labels[index], "", sk.ink);
-                let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
-                let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                let (text, placeholder, _) = sync_input_display(view, index, max_cols);
-                let ink = if placeholder { sk.ink_dim } else { sk.ink };
-                r.draw_chrome_text(size, ix + s(12.0), iy + (ih - cell_h) / 2.0, ink, &text, gc);
-            }
-            if visible(geometry.sync_auto_pull.1, geometry.sync_auto_pull.3) {
-                row_label(
-                    r,
-                    gc,
-                    size,
-                    scale,
-                    &sk,
-                    geometry.sync_auto_pull,
-                    language.pick("启动时自动拉取", "Pull automatically on startup"),
-                    "",
-                    sk.ink,
-                );
-            }
-            let (_, by, _, bh) = geometry.sync_actions;
-            if visible(by, bh + s(30.0)) {
-                let [push_rect, pull_rect] = sync_button_rects(geometry.sync_actions, scale);
-                let captions = [
-                    (push_rect, language.pick("立即推送", "Push now")),
-                    (pull_rect, language.pick("立即拉取", "Pull now")),
+                let labels = [
+                    language.pick("服务器文件 URL", "Server file URL"),
+                    language.pick("用户名", "Username"),
+                    language.pick("WebDAV 密码", "WebDAV password"),
+                    language.pick("端到端口令", "End-to-end passphrase"),
                 ];
-                for ((bx, byy, bw, bhh), caption) in captions {
-                    let cols: usize =
-                        caption.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
-                    let ink = if view.sync_busy { sk.ink_dim } else { sk.ink };
+                let cell_w = size.cell_width();
+                let cell_h = size.cell_height();
+                for (index, row) in geometry.sync_rows.iter().enumerate() {
+                    if !visible(row.1, row.3) {
+                        continue;
+                    }
+                    row_label(r, gc, size, scale, &sk, *row, labels[index], "", sk.ink);
+                    let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
+                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                    let (text, placeholder, _) = sync_input_display(view, index, max_cols);
+                    let ink = if placeholder { sk.ink_dim } else { sk.ink };
                     r.draw_chrome_text(
                         size,
-                        bx + (bw - cols as f32 * cell_w) / 2.0,
-                        byy + (bhh - cell_h) / 2.0,
+                        ix + s(12.0),
+                        iy + (ih - cell_h) / 2.0,
                         ink,
-                        caption,
+                        &text,
                         gc,
                     );
                 }
-                // 状态行：最近一次动作结果（错误红、成功淡墨）。
-                if let Some((message, error)) = &view.sync_status {
-                    let ink = if *error {
-                        Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b)
-                    } else {
-                        sk.ink_dim
-                    };
-                    r.draw_chrome_text(size, sx, by + bh + s(8.0), ink, message, gc);
+                if visible(geometry.sync_auto_pull.1, geometry.sync_auto_pull.3) {
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        geometry.sync_auto_pull,
+                        language.pick("启动时自动拉取", "Pull automatically on startup"),
+                        "",
+                        sk.ink,
+                    );
+                }
+                let (_, by, _, bh) = geometry.sync_actions;
+                if visible(by, bh + s(30.0)) {
+                    let [push_rect, pull_rect] = sync_button_rects(geometry.sync_actions, scale);
+                    let captions = [
+                        (push_rect, language.pick("立即推送", "Push now")),
+                        (pull_rect, language.pick("立即拉取", "Pull now")),
+                    ];
+                    for ((bx, byy, bw, bhh), caption) in captions {
+                        let cols: usize =
+                            caption.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
+                        let ink = if view.sync_busy { sk.ink_dim } else { sk.ink };
+                        r.draw_chrome_text(
+                            size,
+                            bx + (bw - cols as f32 * cell_w) / 2.0,
+                            byy + (bhh - cell_h) / 2.0,
+                            ink,
+                            caption,
+                            gc,
+                        );
+                    }
+                    // 状态行：最近一次动作结果（错误红、成功淡墨）。
+                    if let Some((message, error)) = &view.sync_status {
+                        let ink = if *error {
+                            Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b)
+                        } else {
+                            sk.ink_dim
+                        };
+                        r.draw_chrome_text(size, sx, by + bh + s(8.0), ink, message, gc);
+                    }
                 }
             }
         },
@@ -3477,8 +3570,8 @@ pub(super) fn draw_text(
 }
 
 #[cfg(test)]
-mod opacity_tests {
-    use super::opacity_from_pointer;
+mod tests {
+    use super::{SHOW_WEBDAV_SYNC_SETTINGS, advanced_content_end, opacity_from_pointer};
 
     #[test]
     fn slider_pointer_maps_to_clamped_fraction() {
@@ -3488,5 +3581,11 @@ mod opacity_tests {
         assert_eq!(opacity_from_pointer(200.0, slider), 0.5);
         assert_eq!(opacity_from_pointer(300.0, slider), 1.0);
         assert_eq!(opacity_from_pointer(350.0, slider), 1.0);
+    }
+
+    #[test]
+    fn hidden_webdav_group_does_not_extend_advanced_content() {
+        assert!(!SHOW_WEBDAV_SYNC_SETTINGS);
+        assert_eq!(advanced_content_end(146.0, 264.0, 44.0), 190.0);
     }
 }

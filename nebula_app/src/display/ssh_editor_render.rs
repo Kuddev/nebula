@@ -1,10 +1,81 @@
 use unicode_width::UnicodeWidthChar;
 
-use super::ssh_ui::auth_sections;
+use super::ssh_ui::{SshTestState, auth_sections};
 use super::*;
 use crate::ssh_profiles::SshAuthMode;
 
 type Rect = (f32, f32, f32, f32);
+
+#[derive(Debug, Clone, Copy)]
+struct SshEditorVerticalLayout {
+    destination_y: f32,
+    auth_y: f32,
+    password_y: f32,
+    save_toggle_y: f32,
+    content_y: f32,
+    key_header_y: f32,
+    key_rows_y: f32,
+    desired_h: f32,
+}
+
+/// 用同一组节奏令牌推导所有纵向位置。这样标签到自身控件保持紧密、不同
+/// 认证组之间保持明确留白，避免此前密码标签贴住分段控件、私钥组却离得过远。
+fn ssh_editor_vertical_layout(
+    show_password: bool,
+    show_keys: bool,
+    key_row_count: usize,
+    cell_h: f32,
+) -> SshEditorVerticalLayout {
+    const DESTINATION_Y: f32 = 84.0;
+    const AUTH_Y: f32 = 176.0;
+    const CONTROL_H: f32 = 32.0;
+    const LABEL_GAP: f32 = 8.0;
+    const GROUP_GAP: f32 = 18.0;
+    const SECTION_GAP: f32 = 24.0;
+    const SAVE_GAP: f32 = 12.0;
+    const SAVE_H: f32 = 28.0;
+    const KEY_LABEL_TO_ROWS: f32 = 30.0;
+    const KEY_EMPTY_H: f32 = 42.0;
+    const KEY_ROW_PITCH: f32 = 36.0;
+    const CONTENT_TO_FOOTER: f32 = 24.0;
+    const FOOTER_H: f32 = 64.0;
+
+    let auth_bottom = AUTH_Y + CONTROL_H;
+    let password_y = if show_password {
+        // auth control -> inter-group gap -> password label -> label/control gap.
+        auth_bottom + GROUP_GAP + cell_h + LABEL_GAP
+    } else {
+        0.0
+    };
+    let save_toggle_y = if show_password { password_y + CONTROL_H + SAVE_GAP } else { 0.0 };
+    let password_bottom = save_toggle_y + SAVE_H;
+    let content_y = auth_bottom + SECTION_GAP;
+    let key_header_y = if show_password { password_bottom + SECTION_GAP } else { content_y };
+    let key_rows_y = key_header_y + KEY_LABEL_TO_ROWS;
+    let content_bottom = if show_keys {
+        key_rows_y
+            + if key_row_count == 0 {
+                KEY_EMPTY_H
+            } else {
+                key_row_count as f32 * KEY_ROW_PITCH
+            }
+    } else if show_password {
+        password_bottom
+    } else {
+        content_y + cell_h
+    };
+
+    SshEditorVerticalLayout {
+        destination_y: DESTINATION_Y,
+        auth_y: AUTH_Y,
+        password_y,
+        save_toggle_y,
+        content_y,
+        key_header_y,
+        key_rows_y,
+        desired_h: content_bottom + CONTENT_TO_FOOTER + FOOTER_H,
+    }
+}
 
 impl Display {
     pub(super) fn draw_ssh_editor_modal(&mut self) {
@@ -33,26 +104,31 @@ impl Display {
         };
         let (show_password, show_keys) = auth_sections(editor.auth);
 
-        let box_w = s(520.0).min(size.width() - s(32.0));
-        let desired_h = if show_password && show_keys {
-            540.0
-        } else if show_keys {
-            460.0
-        } else if show_password {
-            400.0
+        // 稿一的核心不是把旧弹窗换色，而是让高度由真实内容决定。私钥最
+        // 多展示四行，更多条目保留尾部（最近添加项），避免小屏越过页脚。
+        let key_row_count = if show_keys {
+            editor.private_keys.len().max(1).min(4)
         } else {
-            330.0
+            0
         };
-        let box_h = s(desired_h).min(size.height() - s(32.0));
+        let vertical = ssh_editor_vertical_layout(
+            show_password,
+            show_keys,
+            if editor.private_keys.is_empty() { 0 } else { key_row_count },
+            cell_h / scale,
+        );
+        let box_w = s(460.0).min(size.width() - s(32.0));
+        let box_h = s(vertical.desired_h).min(size.height() - s(32.0));
         let bx = (size.width() - box_w) * 0.5;
         let resting_y = (size.height() - box_h) * 0.5;
         let by = resting_y - (1.0 - progress) * s(14.0);
         let pad = s(24.0);
-        let field_h = s(40.0);
+        let field_h = s(32.0);
         let field_w = box_w - pad * 2.0;
-        let destination = (bx + pad, by + s(76.0), field_w, field_h);
-        let auth_y = destination.1 + destination.3 + s(40.0);
-        let auth_track = (destination.0, auth_y, field_w, s(40.0));
+        let close = (bx + box_w - pad - s(28.0), by + s(14.0), s(28.0), s(28.0));
+        let destination = (bx + pad, by + s(vertical.destination_y), field_w, field_h);
+        let auth_y = by + s(vertical.auth_y);
+        let auth_track = (destination.0, auth_y, field_w, s(32.0));
         let auth_pad = s(3.0);
         let auth_w = (field_w - auth_pad * 2.0) / 4.0;
         let auth_modes = [
@@ -72,10 +148,13 @@ impl Display {
                 ),
             )
         });
-        let content_y = auth_y + s(72.0);
+        let content_y = by + s(vertical.content_y);
         let zero = (0.0, 0.0, 0.0, 0.0);
-        let password =
-            if show_password { (destination.0, content_y, field_w, field_h) } else { zero };
+        let password = if show_password {
+            (destination.0, by + s(vertical.password_y), field_w, field_h)
+        } else {
+            zero
+        };
         let password_toggle = if show_password {
             (password.0 + password.2 - s(38.0), password.1 + s(4.0), s(34.0), password.3 - s(8.0))
         } else {
@@ -86,7 +165,7 @@ impl Display {
         let save_toggle = if show_password {
             (
                 destination.0,
-                password.1 + password.3 + s(12.0),
+                by + s(vertical.save_toggle_y),
                 (s(28.0) + text_width(save_label)).min(field_w),
                 s(28.0),
             )
@@ -99,17 +178,18 @@ impl Display {
             zero
         };
 
-        let key_header_y = if show_password { save_toggle.1 + s(54.0) } else { content_y };
+        let key_header_y = by + s(vertical.key_header_y);
         let add_private_key = if show_keys {
-            (destination.0 + field_w - s(126.0), key_header_y - s(8.0), s(126.0), s(32.0))
+            (destination.0 + field_w - s(112.0), key_header_y - s(6.0), s(112.0), s(28.0))
         } else {
             zero
         };
-        let key_rows_y = key_header_y + s(30.0);
-        let footer_y = by + box_h - s(58.0);
-        let footer_top = footer_y - s(16.0);
-        let available_rows =
-            (((footer_top - s(16.0) - key_rows_y) / s(36.0)).floor() as isize).max(1) as usize;
+        let key_rows_y = by + s(vertical.key_rows_y);
+        let footer_top = by + box_h - s(64.0);
+        let footer_y = footer_top + s(16.0);
+        let available_key_height = (footer_top - s(10.0) - key_rows_y).max(0.0);
+        let available_rows = (available_key_height / s(36.0)).floor() as usize;
+        let show_empty_key_state = available_key_height >= s(40.0);
         let visible_start = editor.private_keys.len().saturating_sub(available_rows);
         let visible_keys = if show_keys {
             editor
@@ -134,36 +214,24 @@ impl Display {
         };
 
         let primary_action = language.pick("保存", "Save");
-        let primary_key = "Enter";
         let cancel_action = language.pick("取消", "Cancel");
-        let cancel_key = "Esc";
-        let key_pad = s(6.0);
-        let label_gap = s(8.0);
-        let button_pad = s(14.0);
-        let primary_key_w = text_width(primary_key) + key_pad * 2.0;
-        let cancel_key_w = text_width(cancel_key) + key_pad * 2.0;
-        let primary_w =
-            s(108.0).max(text_width(primary_action) + label_gap + primary_key_w + button_pad * 2.0);
-        let cancel_w =
-            s(100.0).max(text_width(cancel_action) + label_gap + cancel_key_w + button_pad * 2.0);
-        let primary = (bx + box_w - pad - primary_w, footer_y, primary_w, s(36.0));
-        let cancel = (primary.0 - s(12.0) - cancel_w, primary.1, cancel_w, s(36.0));
-        let primary_action_x = primary.0 + button_pad;
-        let primary_key_rect = (
-            primary.0 + primary.2 - button_pad - primary_key_w,
-            primary.1 + s(7.0),
-            primary_key_w,
-            primary.3 - s(14.0),
-        );
-        let cancel_action_x = cancel.0 + button_pad;
-        let cancel_key_rect = (
-            cancel.0 + cancel.2 - button_pad - cancel_key_w,
-            cancel.1 + s(7.0),
-            cancel_key_w,
-            cancel.3 - s(14.0),
+        let test_action = language.pick("测试连接", "Test connection");
+        let primary_w = s(72.0).max(text_width(primary_action) + s(28.0));
+        let cancel_w = s(72.0).max(text_width(cancel_action) + s(28.0));
+        let primary = (bx + box_w - pad - primary_w, footer_y, primary_w, s(32.0));
+        let cancel = (primary.0 - s(8.0) - cancel_w, primary.1, cancel_w, s(32.0));
+        let test_w = s(96.0).max(text_width(test_action) + s(24.0));
+        let test = (bx + pad, footer_y, test_w, s(32.0));
+        let test_status_x = test.0 + test.2 + s(8.0);
+        let test_status = (
+            test_status_x,
+            footer_y,
+            (cancel.0 - s(8.0) - test_status_x).max(0.0),
+            s(32.0),
         );
 
         self.nebula_ssh_editor_rects = Some(SshEditorRects {
+            close,
             destination,
             password,
             password_toggle,
@@ -175,9 +243,34 @@ impl Display {
                 .collect(),
             save_checkbox,
             save_toggle,
+            test,
+            test_status,
             primary,
             cancel,
         });
+
+        let status_tooltip = if self.nebula_ssh_editor_hover == SshEditorHit::TestStatus {
+            match &editor.test {
+                SshTestState::Failed { summary } => {
+                    let max_cols = (((field_w - s(24.0)) / cell_w).floor() as usize).max(12);
+                    let lines = wrap_status_tooltip(summary, max_cols);
+                    let widest = lines
+                        .iter()
+                        .map(|line| line.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>())
+                        .max()
+                        .unwrap_or(0);
+                    let line_h = cell_h + s(3.0);
+                    let width = (widest as f32 * cell_w + s(24.0)).clamp(s(180.0), field_w);
+                    let height = lines.len() as f32 * line_h + s(16.0);
+                    let x = bx + box_w - pad - width;
+                    let y = (footer_top - height - s(8.0)).max(by + s(10.0));
+                    Some(((x, y, width, height), lines, line_h))
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         let mut quads = vec![
             UiQuad::solid(
@@ -193,13 +286,23 @@ impl Display {
                 by - s(1.0),
                 box_w + s(2.0),
                 box_h + s(2.0),
-                s(13.0),
+                s(11.0),
                 skin.hairline,
             ),
-            UiQuad::solid(bx, by, box_w, box_h, s(12.0), skin.panel),
+            UiQuad::solid(bx, by, box_w, box_h, s(10.0), skin.panel),
             UiQuad::solid(bx, footer_top, box_w, box_h - (footer_top - by), 0.0, skin.surface),
             UiQuad::solid(bx, footer_top, box_w, s(1.0), 0.0, skin.hairline),
         ];
+        if self.nebula_ssh_editor_hover == SshEditorHit::Close {
+            quads.push(UiQuad::solid(
+                close.0,
+                close.1,
+                close.2,
+                close.3,
+                s(5.0),
+                skin.hover,
+            ));
+        }
         input_quads(
             &mut quads,
             destination,
@@ -225,7 +328,7 @@ impl Display {
             auth_track.1 - s(1.0),
             auth_track.2 + s(2.0),
             auth_track.3 + s(2.0),
-            s(9.0),
+            s(7.0),
             skin.hairline,
         ));
         quads.push(UiQuad::solid(
@@ -233,7 +336,7 @@ impl Display {
             auth_track.1,
             auth_track.2,
             auth_track.3,
-            s(8.0),
+            s(6.0),
             skin.surface,
         ));
         for (mode, rect) in auth {
@@ -279,28 +382,34 @@ impl Display {
             ));
         }
         if show_keys {
-            quads.push(UiQuad::solid(
-                add_private_key.0 - s(1.0),
-                add_private_key.1 - s(1.0),
-                add_private_key.2 + s(2.0),
-                add_private_key.3 + s(2.0),
-                s(7.0),
-                skin.hairline,
-            ));
-            quads.push(UiQuad::solid(
-                add_private_key.0,
-                add_private_key.1,
-                add_private_key.2,
-                add_private_key.3,
-                s(7.0),
-                if self.nebula_ssh_editor_hover == SshEditorHit::AddPrivateKey {
-                    skin.hover
-                } else {
-                    skin.surface
-                },
-            ));
+            if self.nebula_ssh_editor_hover == SshEditorHit::AddPrivateKey {
+                quads.push(UiQuad::solid(
+                    add_private_key.0,
+                    add_private_key.1,
+                    add_private_key.2,
+                    add_private_key.3,
+                    s(5.0),
+                    skin.hover,
+                ));
+            }
+            if editor.private_keys.is_empty() && show_empty_key_state {
+                let empty = (destination.0, key_rows_y, field_w, s(40.0));
+                quads.push(UiQuad::solid(empty.0, empty.1, empty.2, empty.3, s(6.0), skin.input));
+                dashed_border(&mut quads, empty, skin.hairline, scale);
+            }
             for (index, row, remove) in &visible_keys {
-                quads.push(UiQuad::solid(row.0, row.1, row.2, row.3, s(6.0), skin.input));
+                quads.push(UiQuad::solid(
+                    row.0,
+                    row.1,
+                    row.2,
+                    row.3,
+                    s(6.0),
+                    if self.nebula_ssh_editor_hover == SshEditorHit::RemovePrivateKey(*index) {
+                        skin.hover
+                    } else {
+                        skin.input
+                    },
+                ));
                 if self.nebula_ssh_editor_hover == SshEditorHit::RemovePrivateKey(*index) {
                     quads.push(UiQuad::solid(
                         remove.0,
@@ -315,6 +424,7 @@ impl Display {
         }
         button_quads(
             &mut quads,
+            test,
             cancel,
             primary,
             self.nebula_ssh_editor_hover,
@@ -322,44 +432,78 @@ impl Display {
             scale,
             editor.focus.current(),
             show_password,
+            accent,
         );
-        for rect in [cancel_key_rect, primary_key_rect] {
+        let status_dot = match editor.test {
+            SshTestState::Ok { .. } => Some(Rgba::new(63, 185, 80, 255)),
+            SshTestState::Failed { .. } => Some(Rgba::new(248, 81, 73, 255)),
+            SshTestState::Idle | SshTestState::Running { .. } => None,
+        };
+        if let Some(color) = status_dot {
             quads.push(UiQuad::solid(
-                rect.0 - s(1.0),
-                rect.1 - s(1.0),
-                rect.2 + s(2.0),
-                rect.3 + s(2.0),
-                s(5.0),
-                skin.hairline,
+                test.0 + test.2 + s(12.0),
+                footer_y + (test.3 - s(6.0)) * 0.5,
+                s(6.0),
+                s(6.0),
+                s(3.0),
+                color,
             ));
-            quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, s(4.0), skin.input));
         }
 
-        let caret_field = if editor.field == SshEditorField::Password && show_password {
-            SshEditorField::Password
-        } else {
-            SshEditorField::Destination
-        };
-        let (caret_rect, caret_columns, selected) = match caret_field {
-            SshEditorField::Destination => (
-                destination,
-                editor.destination.chars().count(),
-                editor.destination_selection.is_selected(),
-            ),
-            SshEditorField::Password => {
-                (password, editor.password.chars().count(), editor.password_selection.is_selected())
-            },
-        };
-        draw_caret_quad(
-            &mut quads,
-            caret_rect,
-            caret_columns,
-            selected,
-            caret_field == SshEditorField::Password,
-            cell_w,
-            scale,
-            &skin,
-        );
+        // Footer focus belongs to buttons, so leave the text caret in the two
+        // input fields only; otherwise it appears to edit a field while Enter
+        // is actually activating Test/Cancel/Save.
+        if editor.focus.current() <= usize::from(show_password) {
+            let caret_field = if editor.field == SshEditorField::Password && show_password {
+                SshEditorField::Password
+            } else {
+                SshEditorField::Destination
+            };
+            let (caret_rect, caret_columns, selected) = match caret_field {
+                SshEditorField::Destination => (
+                    destination,
+                    editor.destination.chars().count(),
+                    editor.destination_selection.is_selected(),
+                ),
+                SshEditorField::Password => (
+                    password,
+                    editor.password.chars().count(),
+                    editor.password_selection.is_selected(),
+                ),
+            };
+            // 选区需要持续可见；普通插入光标使用共享 500ms 相位，由
+            // `chrome_editor_active` 的 8fps 时钟持续推进帧。
+            if selected || super::caret_blink_on() {
+                draw_caret_quad(
+                    &mut quads,
+                    caret_rect,
+                    caret_columns,
+                    selected,
+                    caret_field == SshEditorField::Password,
+                    cell_w,
+                    scale,
+                    &skin,
+                );
+            }
+        }
+        if let Some((tooltip, ..)) = &status_tooltip {
+            quads.push(UiQuad::solid(
+                tooltip.0 - s(1.0),
+                tooltip.1 - s(1.0),
+                tooltip.2 + s(2.0),
+                tooltip.3 + s(2.0),
+                s(7.0),
+                skin.hairline,
+            ));
+            quads.push(UiQuad::solid(
+                tooltip.0,
+                tooltip.1,
+                tooltip.2,
+                tooltip.3,
+                s(6.0),
+                skin.panel,
+            ));
+        }
         self.renderer.draw_ui(&size, &quads);
 
         let glyph_cache = &mut self.glyph_cache;
@@ -377,25 +521,37 @@ impl Display {
             },
             glyph_cache,
         );
+        self.renderer.draw_chrome_text(
+            &size,
+            close.0 + (close.2 - text_width("×")) * 0.5,
+            close.1 + (close.3 - cell_h) * 0.5,
+            if self.nebula_ssh_editor_hover == SshEditorHit::Close {
+                skin.icon_hover
+            } else {
+                skin.icon
+            },
+            "×",
+            glyph_cache,
+        );
         let destination_label = language.pick("连接地址", "Destination");
-        let destination_label_y = destination.1 - cell_h - s(5.0);
+        let destination_label_y = destination.1 - cell_h - s(8.0);
         self.renderer.draw_chrome_text(
             &size,
             destination.0,
             destination_label_y,
-            skin.ink,
+            skin.ink_dim,
             destination_label,
             glyph_cache,
         );
-        let destination_hint = editor.error.as_deref().unwrap_or(
-            language
-                .pick("user@host · 非 22 端口用 ssh://", "user@host · use ssh:// for non-22 ports"),
-        );
+        let destination_hint = editor.error.as_deref().unwrap_or(language.pick(
+            "支持 user@host，非 22 端口写 ssh://host:2222",
+            "Supports user@host; use ssh://host:2222 for a non-22 port",
+        ));
         let destination_hint_scale = 0.72;
         self.renderer.draw_ui_text(
             &size,
-            destination.0 + destination.2 - text_width(destination_hint) * destination_hint_scale,
-            destination_label_y + cell_h * (1.0 - destination_hint_scale) * 0.5,
+            destination.0,
+            destination.1 + destination.3 + s(6.0),
             destination_hint_scale,
             if editor.error.is_some() {
                 if skin.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) }
@@ -417,7 +573,7 @@ impl Display {
         self.renderer.draw_chrome_text(
             &size,
             destination.0,
-            auth_y - cell_h - s(5.0),
+            auth_y - cell_h - s(8.0),
             skin.ink_dim,
             language.pick("认证方式", "Authentication"),
             glyph_cache,
@@ -477,11 +633,11 @@ impl Display {
                 language.pick("+ 添加私钥", "+ Add key"),
                 glyph_cache,
             );
-            if editor.private_keys.is_empty() {
+            if editor.private_keys.is_empty() && show_empty_key_state {
                 self.renderer.draw_chrome_text(
                     &size,
-                    destination.0,
-                    key_rows_y + s(7.0),
+                    destination.0 + s(12.0),
+                    key_rows_y + (s(40.0) - cell_h) * 0.5,
                     skin.ink_faint,
                     language.pick(
                         "未指定；将使用 IdentityFile 和默认 id_* 私钥",
@@ -522,23 +678,69 @@ impl Display {
                 glyph_cache,
             );
         }
-        draw_button_text(
-            &mut self.renderer,
-            glyph_cache,
-            &size,
-            cancel,
-            primary,
-            cancel_action_x,
-            primary_action_x,
-            cancel_key_rect,
-            primary_key_rect,
-            cancel_action,
-            primary_action,
-            cancel_key,
-            primary_key,
-            cell_h,
-            &skin,
-        );
+        for (rect, label, ink) in [
+            (test, test_action, skin.ink),
+            (cancel, cancel_action, skin.ink),
+            (primary, primary_action, Rgb::new(8, 12, 20)),
+        ] {
+            self.renderer.draw_chrome_text(
+                &size,
+                rect.0 + (rect.2 - text_width(label)) * 0.5,
+                rect.1 + (rect.3 - cell_h) * 0.5,
+                ink,
+                label,
+                glyph_cache,
+            );
+        }
+
+        let (status, status_ink, has_dot) = match &editor.test {
+            SshTestState::Idle => (None, skin.ink_faint, false),
+            SshTestState::Running { .. } => (
+                Some(language.pick("正在连接…", "Connecting...").to_owned()),
+                skin.ink_faint,
+                false,
+            ),
+            SshTestState::Ok { elapsed_ms } => (
+                Some(format!(
+                    "{} · {elapsed_ms}ms",
+                    language.pick("连接成功", "Connected")
+                )),
+                if skin.is_light { Rgb::new(26, 127, 55) } else { Rgb::new(63, 185, 80) },
+                true,
+            ),
+            SshTestState::Failed { summary } => (
+                Some(summary.replace(['\r', '\n'], " ")),
+                if skin.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) },
+                true,
+            ),
+        };
+        if let Some(status) = status {
+            let status_x = test.0 + test.2 + s(if has_dot { 24.0 } else { 12.0 });
+            let max_cols = (((cancel.0 - s(12.0) - status_x) / cell_w).floor() as isize).max(0);
+            if max_cols > 0 {
+                let shown = truncate_tab_label(&status, max_cols as usize);
+                self.renderer.draw_chrome_text(
+                    &size,
+                    status_x,
+                    footer_y + (test.3 - cell_h) * 0.5,
+                    status_ink,
+                    &shown,
+                    glyph_cache,
+                );
+            }
+        }
+        if let Some((tooltip, lines, line_h)) = status_tooltip {
+            for (line, text) in lines.iter().enumerate() {
+                self.renderer.draw_chrome_text(
+                    &size,
+                    tooltip.0 + s(12.0),
+                    tooltip.1 + s(8.0) + line as f32 * line_h,
+                    skin.ink,
+                    text,
+                    glyph_cache,
+                );
+            }
+        }
 
         if self.nebula_ui_anims.ssh_editor.animating_to(if self.nebula_ssh_editor_open {
             1.0
@@ -548,6 +750,64 @@ impl Display {
             self.pending_update.dirty = true;
             self.window.request_redraw();
         }
+    }
+}
+
+/// Wrap the complete SSH error by terminal display columns. Error chains often
+/// contain long host/key paths, so wrapping by bytes or scalar count would
+/// either split UTF-8 or let CJK text cross the tooltip edge.
+fn wrap_status_tooltip(value: &str, budget: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for source in value.replace('\r', "").split('\n') {
+        if source.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut width = 0usize;
+        for ch in source.chars() {
+            let char_width = ch.width().unwrap_or(0).max(1);
+            if !current.is_empty() && width + char_width > budget {
+                lines.push(std::mem::take(&mut current));
+                width = 0;
+            }
+            current.push(ch);
+            width += char_width;
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+    }
+    if lines.is_empty() { vec![String::new()] } else { lines }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ssh_editor_vertical_layout, wrap_status_tooltip};
+    use unicode_width::UnicodeWidthChar;
+
+    #[test]
+    fn ssh_status_tooltip_keeps_the_complete_utf8_error_within_columns() {
+        let source = "认证失败：私钥路径 C:/用户/密钥/id_ed25519 不可用";
+        let lines = wrap_status_tooltip(source, 12);
+        assert_eq!(lines.concat(), source);
+        assert!(lines.iter().all(|line| {
+            line.chars().map(|ch| ch.width().unwrap_or(0)).sum::<usize>() <= 12
+        }));
+    }
+
+    #[test]
+    fn ssh_editor_groups_keep_crap_proximity_rhythm() {
+        let cell_h = 15.0;
+        let layout = ssh_editor_vertical_layout(true, true, 0, cell_h);
+        let auth_bottom = layout.auth_y + 32.0;
+        let password_label_y = layout.password_y - cell_h - 8.0;
+        let save_bottom = layout.save_toggle_y + 28.0;
+
+        assert!((password_label_y - auth_bottom - 18.0).abs() < f32::EPSILON);
+        assert!((layout.key_header_y - save_bottom - 24.0).abs() < f32::EPSILON);
+        assert!(layout.key_rows_y > layout.key_header_y);
+        assert!(layout.desired_h > layout.key_rows_y + 42.0);
     }
 }
 
@@ -581,6 +841,7 @@ fn input_quads(
 
 fn button_quads(
     quads: &mut Vec<UiQuad>,
+    test: Rect,
     cancel: Rect,
     primary: Rect,
     hover: SshEditorHit,
@@ -588,41 +849,79 @@ fn button_quads(
     scale: f32,
     focus: usize,
     shows_password: bool,
+    accent: Rgba,
 ) {
     let s = |value: f32| value * scale;
-    for rect in [cancel, primary] {
+    for rect in [test, cancel] {
         quads.push(UiQuad::solid(
             rect.0 - s(1.0),
             rect.1 - s(1.0),
             rect.2 + s(2.0),
             rect.3 + s(2.0),
-            s(9.0),
+            s(7.0),
             skin.hairline,
         ));
     }
-    let cancel_focus = if shows_password { 2 } else { 1 };
-    let primary_focus = if shows_password { 3 } else { 2 };
-    for rect in
-        [(focus == cancel_focus).then_some(cancel), (focus == primary_focus).then_some(primary)]
-            .into_iter()
-            .flatten()
+    let test_focus = if shows_password { 2 } else { 1 };
+    let cancel_focus = if shows_password { 3 } else { 2 };
+    let primary_focus = if shows_password { 4 } else { 3 };
+    for rect in [
+        (focus == test_focus).then_some(test),
+        (focus == cancel_focus).then_some(cancel),
+        (focus == primary_focus).then_some(primary),
+    ]
+    .into_iter()
+    .flatten()
     {
         quads.push(UiQuad::solid(
             rect.0 - s(2.0),
             rect.1 - s(2.0),
             rect.2 + s(4.0),
             rect.3 + s(4.0),
-            s(10.0),
-            skin.hover_strong,
+            s(8.0),
+            skin.accent_soft,
         ));
     }
-    // 取消按钮保持透明，只用边框表达边界；保存按钮才承载中性主题底色。
-    quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.surface));
+    quads.push(UiQuad::solid(test.0, test.1, test.2, test.3, s(6.0), skin.surface));
+    quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(6.0), skin.hover));
+    quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(6.0), accent));
+    if hover == SshEditorHit::Test {
+        quads.push(UiQuad::solid(test.0, test.1, test.2, test.3, s(6.0), skin.hover));
+    }
     if hover == SshEditorHit::Cancel {
-        quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(8.0), skin.hover));
+        quads.push(UiQuad::solid(cancel.0, cancel.1, cancel.2, cancel.3, s(6.0), skin.hover_strong));
     }
     if hover == SshEditorHit::Primary {
-        quads.push(UiQuad::solid(primary.0, primary.1, primary.2, primary.3, s(8.0), skin.hover));
+        quads.push(UiQuad::solid(
+            primary.0,
+            primary.1,
+            primary.2,
+            primary.3,
+            s(6.0),
+            Rgba::new(accent.r, accent.g, accent.b, 224),
+        ));
+    }
+}
+
+/// UiQuad 没有虚线描边 primitive；这里用短线段拼一圈，只用于私钥空态。
+fn dashed_border(quads: &mut Vec<UiQuad>, rect: Rect, color: Rgba, scale: f32) {
+    let s = |value: f32| value * scale;
+    let dash = s(5.0).max(2.0);
+    let gap = s(4.0).max(2.0);
+    let stroke = s(1.0).max(1.0);
+    let mut x = rect.0 + s(5.0);
+    while x < rect.0 + rect.2 - s(5.0) {
+        let width = dash.min(rect.0 + rect.2 - s(5.0) - x);
+        quads.push(UiQuad::solid(x, rect.1, width, stroke, 0.0, color));
+        quads.push(UiQuad::solid(x, rect.1 + rect.3 - stroke, width, stroke, 0.0, color));
+        x += dash + gap;
+    }
+    let mut y = rect.1 + s(5.0);
+    while y < rect.1 + rect.3 - s(5.0) {
+        let height = dash.min(rect.1 + rect.3 - s(5.0) - y);
+        quads.push(UiQuad::solid(rect.0, y, stroke, height, 0.0, color));
+        quads.push(UiQuad::solid(rect.0 + rect.2 - stroke, y, stroke, height, 0.0, color));
+        y += dash + gap;
     }
 }
 
@@ -684,7 +983,7 @@ fn draw_password_text(
     renderer.draw_chrome_text(
         size,
         password.0,
-        password.1 - cell_h - s(5.0),
+        password.1 - cell_h - s(8.0),
         skin.ink_dim,
         language.pick("密码", "Password"),
         glyph_cache,
@@ -731,59 +1030,6 @@ fn draw_password_text(
             glyph_cache,
         );
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_button_text(
-    renderer: &mut Renderer,
-    glyph_cache: &mut GlyphCache,
-    size: &SizeInfo,
-    cancel: Rect,
-    primary: Rect,
-    cancel_action_x: f32,
-    primary_action_x: f32,
-    cancel_key_rect: Rect,
-    primary_key_rect: Rect,
-    cancel_action: &str,
-    primary_action: &str,
-    cancel_key: &str,
-    primary_key: &str,
-    cell_h: f32,
-    skin: &theme::Skin,
-) {
-    renderer.draw_chrome_text(
-        size,
-        cancel_action_x,
-        cancel.1 + (cancel.3 - cell_h) / 2.0,
-        skin.ink,
-        cancel_action,
-        glyph_cache,
-    );
-    renderer.draw_chrome_text(
-        size,
-        primary_action_x,
-        primary.1 + (primary.3 - cell_h) / 2.0,
-        skin.ink_strong,
-        primary_action,
-        glyph_cache,
-    );
-    renderer.draw_chrome_text(
-        size,
-        cancel_key_rect.0 + (cancel_key_rect.2 - size.cell_width() * cancel_key.len() as f32) * 0.5,
-        cancel_key_rect.1 + (cancel_key_rect.3 - cell_h) / 2.0,
-        skin.ink_dim,
-        cancel_key,
-        glyph_cache,
-    );
-    renderer.draw_chrome_text(
-        size,
-        primary_key_rect.0
-            + (primary_key_rect.2 - size.cell_width() * primary_key.len() as f32) * 0.5,
-        primary_key_rect.1 + (primary_key_rect.3 - cell_h) / 2.0,
-        skin.ink_dim,
-        primary_key,
-        glyph_cache,
-    );
 }
 
 fn path_tail(path: &std::path::Path, max_chars: usize) -> String {
