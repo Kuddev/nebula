@@ -857,6 +857,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             .iter()
             .map(|tab| crate::motion::Spring::new(tab.1).with_response(0.14))
             .collect();
+        d.nebula_tab_was_visible = tab_layout.tabs.iter().map(|tab| tab.2 > 0.0).collect();
     }
     let mut tab_anim_active = false;
 
@@ -865,6 +866,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         // their eased position so they don't fly in when they reappear.
         if tab_w <= 0.0 {
             d.nebula_tab_anim[index].snap_to(row_y);
+            d.nebula_tab_was_visible[index] = false;
             continue;
         }
         let target_y = d.tab_drag_draw_y(index, row_y, &tab_layout);
@@ -872,16 +874,26 @@ pub(super) fn draw_chrome(d: &mut Display) {
         // laggy); only the rows making way ease toward their slots.
         let dragging_this =
             d.nebula_tab_drag.as_ref().is_some_and(|d| d.active && d.source == index);
-        let tab_y = if dragging_this {
-            d.nebula_tab_anim[index].snap_to(target_y);
-            target_y
-        } else {
-            let spring = &mut d.nebula_tab_anim[index];
-            spring.set_target(target_y, crate::motion::MotionPolicy::Full);
-            spring.step(motion_frame);
-            tab_anim_active |= spring.is_active();
-            spring.value()
+        let action = tab_reveal_motion_action(
+            d.nebula_tab_reveal_motion,
+            d.nebula_tab_was_visible[index],
+            true,
+            dragging_this,
+        );
+        let tab_y = match action {
+            TabRevealMotionAction::Snap => {
+                d.nebula_tab_anim[index].snap_to(target_y);
+                target_y
+            },
+            TabRevealMotionAction::Spring => {
+                let spring = &mut d.nebula_tab_anim[index];
+                spring.set_target(target_y, crate::motion::MotionPolicy::Full);
+                spring.step(motion_frame);
+                tab_anim_active |= spring.is_active();
+                spring.value()
+            },
         };
+        d.nebula_tab_was_visible[index] = true;
         let tab_hovered = matches!(
             d.nebula_chrome_hover,
             ChromeHit::Tab(i) | ChromeHit::TabClose(i) if i == index
@@ -1407,22 +1419,31 @@ pub(super) fn draw_chrome(d: &mut Display) {
             let color =
                 if index == d.nebula_active_tab || tab_hovered { TXT_ON_ACCENT } else { TXT };
             let cy = row_text_cy(draw_row_y, tab_h);
-            // Real AI brand logo (claude/codex): a textured quad in the
-            // icon slot, sized to the glyph ink height so it reads like
+            // Real AI brand logo: a textured quad in the icon slot, sized
+            // to the glyph ink height so it reads like
             // an icon, not a sticker. Staged here, drawn after ALL chrome
             // text (see nebula_chrome_logo_draws). Other programs keep
             // their Nerd Font glyph inside the label text.
             let mut text_x = tab_x + s(14.0) + hover_lift_x;
             let mut reserved = s(60.0);
             if let Some(logo) = d.nebula_tab_logos.get(index).copied().flatten() {
-                let icon_s = (cell_h * 0.72).round();
-                if let Some((id, rgba, px)) = d.ai_logo_pixels(logo, color) {
+                let standard_icon_s = (cell_h * 0.72).round();
+                let icon_s = if logo == super::AiLogo::Grok {
+                    (cell_h * 0.92).round()
+                } else {
+                    standard_icon_s
+                };
+                if let Some((id, rgba, px)) = d.ai_logo_pixels(logo, color, icon_s as u32) {
+                    // Grok is intentionally larger for legibility. Keep the
+                    // standard icon slot's centre instead of growing only to
+                    // the right from its left edge.
+                    let icon_x = text_x - (icon_s - standard_icon_s) / 2.0;
                     let icon_y = (draw_row_y + (tab_h - icon_s) / 2.0).round();
                     d.nebula_chrome_logo_draws.push((
                         id,
                         rgba,
                         px,
-                        (text_x, icon_y, icon_s, icon_s),
+                        (icon_x, icon_y, icon_s, icon_s),
                     ));
                 }
                 text_x += icon_s + s(6.0);
@@ -1881,13 +1902,36 @@ pub(super) fn draw_chrome(d: &mut Display) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabRevealMotionAction {
+    Snap,
+    Spring,
+}
+
+fn tab_reveal_motion_action(
+    preference: super::settings::TabRevealMotion,
+    was_visible: bool,
+    is_visible: bool,
+    dragging: bool,
+) -> TabRevealMotionAction {
+    if dragging
+        || (is_visible && !was_visible && preference == super::settings::TabRevealMotion::Instant)
+    {
+        TabRevealMotionAction::Snap
+    } else {
+        TabRevealMotionAction::Spring
+    }
+}
+
 #[cfg(test)]
 mod resize_edge_tests {
     use super::{
         ChromeHit, advance_spinner_phase, chrome_control_centers, contains_rect, in_chrome_bar,
-        resize_edge, spinner_dot_center, window_control_hit_rect, window_control_visual_rect,
+        resize_edge, spinner_dot_center, tab_reveal_motion_action, window_control_hit_rect,
+        window_control_visual_rect,
     };
     use crate::display::SizeInfo;
+    use crate::display::settings::TabRevealMotion;
 
     #[test]
     fn maximized_or_fullscreen_windows_do_not_expose_drag_resize_edges() {
@@ -1951,5 +1995,25 @@ mod resize_edge_tests {
 
         assert!((half_turn - 0.5).abs() < f32::EPSILON);
         assert!((wrapped - 0.01).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn instant_reveal_snaps_only_when_a_hidden_tab_becomes_visible() {
+        assert_eq!(
+            tab_reveal_motion_action(TabRevealMotion::Instant, false, true, false),
+            super::TabRevealMotionAction::Snap
+        );
+        assert_eq!(
+            tab_reveal_motion_action(TabRevealMotion::Slide, false, true, false),
+            super::TabRevealMotionAction::Spring
+        );
+        assert_eq!(
+            tab_reveal_motion_action(TabRevealMotion::Instant, true, true, false),
+            super::TabRevealMotionAction::Spring
+        );
+        assert_eq!(
+            tab_reveal_motion_action(TabRevealMotion::Instant, true, true, true),
+            super::TabRevealMotionAction::Snap
+        );
     }
 }
