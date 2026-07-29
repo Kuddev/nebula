@@ -4,7 +4,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
-## Unreleased
+## 0.8.0 - 2026-07-29
 
 ### English
 
@@ -15,6 +15,8 @@ Every release entry is provided in English and Simplified Chinese.
 - **Configurable quick-terminal shortcut** — Settings → Key bindings now exposes the global quick-terminal shortcut. Captured changes are applied immediately and remembered; if the operating system rejects a conflicting shortcut, Nebula keeps the previous working binding and shows the registration failure in the row.
 - **Workspace export/import** — the command palette gains "Export workspace…" and "Open workspace…", and a tab's right-click menu gains "Export as workspace…". A workspace file (`.nebula-workspace.json`) records the tab list, each tab's full split layout (axis, ratio, per-pane working directory), tab names and colors, and each tab's launch identity: WSL/custom shells reopen with their shell, SSH tabs reconnect to their saved destination automatically. Files are portable across machines and platforms — a directory that does not exist on the importing machine falls back to the default one, and a shell program the machine lacks (e.g. `wsl.exe` on Linux) falls back to the default shell in the saved directory instead of dropping the tab.
 - **Crash recovery now restores split layouts** — the continuously written session snapshot (1 Hz) uses the same schema as workspace files, so after a crash or force-kill Nebula reopens with every tab's split tree, ratios, per-pane directories and SSH/WSL launch identities — not just one pane per tab as before.
+- **Grok is recognised as a running program** — a tab running `grok` or `grok-cli` shows the official xAI mark in its icon slot, the same way `claude` and `codex` already do. The light or dark mark is picked to match the chrome ink, and it is downsampled to the exact physical pixel size of the slot and optically centred on its ink, so it stays sharp at every DPI. (Thanks to @Sakyvo.)
+- **Tab reveal motion is configurable** — Settings → Interaction gains a "Tab reveal" choice. `Slide` (default, unchanged behaviour) eases a tab into place when it becomes visible; `Instant` puts it there immediately. Drag-to-reorder keeps its spring in both modes. (Thanks to @Sakyvo.)
 
 #### Fixed
 
@@ -52,6 +54,8 @@ Every release entry is provided in English and Simplified Chinese.
 - **快速终端快捷键可配置** — “设置 → 按键映射”新增快速终端全局快捷键行。捕获的新组合立即应用并持久化；若操作系统因冲突拒绝注册，Nebula 会保留原先可用的快捷键，并在该行显示注册失败。
 - **工作区导出/导入** — 命令面板新增"导出工作区…"和"打开工作区…",标签页右键菜单新增"导出为工作区…"。工作区文件(`.nebula-workspace.json`)记录标签页列表、每个标签页的完整分屏布局(方向、比例、每个 pane 的工作目录)、标签名与颜色,以及每个标签页的启动身份:WSL/自定义 shell 按原 shell 重开,SSH 标签页自动重连保存的目标。文件跨机器、跨平台可移植——导入机器上不存在的目录回落默认目录;缺失的 shell 程序(如 Linux 上的 `wsl.exe`)回落为默认 shell 并保留目录,不会丢掉整个标签页。
 - **崩溃恢复现在还原分屏布局** — 持续写入的会话快照(每秒)与工作区文件共用同一格式,崩溃或强杀后重开时,每个标签页的分屏树、比例、各 pane 目录以及 SSH/WSL 启动身份都会还原,不再是以前的"每个标签页只剩一个 pane"。
+- **识别运行中的 Grok** — 跑 `grok` 或 `grok-cli` 的标签页会在图标位显示 xAI 官方标记,和现有的 `claude`、`codex` 一样。浅色/深色两版按 chrome 墨色自动选,并且是按图标槽的**物理像素尺寸**重采样、再按墨迹重心居中的,因此在任何 DPI 下都不发虚。(感谢 @Sakyvo。)
+- **标签展开动效可配置** — 设置 → 交互新增"标签展开"选项。`滑动`(默认,与原行为一致)让标签页在变可见时缓动到位,`立即`则直接落位。两种模式下拖拽换序的弹簧手感都不变。(感谢 @Sakyvo。)
 
 #### 修复
 
