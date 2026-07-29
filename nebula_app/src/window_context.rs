@@ -2443,7 +2443,7 @@ impl WindowContext {
             };
             // Program icon (Nerd Font) in front of the label while a command
             // runs — the sidebar shows WHAT each tab is busy with. AI clients
-            // with a real brand logo (claude/codex) skip the glyph: the
+            // with a real brand logo skip the glyph: the
             // display layer textures the actual mark into the icon slot.
             let logo =
                 state.and_then(|s| s.running_program.as_deref()).and_then(crate::display::ai_logo);

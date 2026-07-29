@@ -93,6 +93,7 @@ pub enum SettingsDropdown {
     Language,
     Accept,
     CursorShape,
+    TabReveal,
     /// 背景色：色板网格 + 16 进制输入的专用浮层（不是通用行列表）。
     BackgroundColor,
 }
@@ -139,9 +140,43 @@ pub(super) const LANGUAGE_OPTIONS: [LanguagePreference; 3] =
 pub(super) const ACCEPT_OPTIONS: [AcceptKey; 3] =
     [AcceptKey::Both, AcceptKey::Tab, AcceptKey::Right];
 
+pub(super) const TAB_REVEAL_OPTIONS: [TabRevealMotion; 2] =
+    [TabRevealMotion::Slide, TabRevealMotion::Instant];
+
 /// Order mirrors the Windows Terminal appearance page the user referenced.
 pub(super) const CURSOR_SHAPE_OPTIONS: [CursorShape; 4] =
     [CursorShape::Beam, CursorShape::Underline, CursorShape::Block, CursorShape::HollowBlock];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum TabRevealMotion {
+    #[default]
+    Slide,
+    Instant,
+}
+
+impl TabRevealMotion {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "slide" => Some(Self::Slide),
+            "instant" => Some(Self::Instant),
+            _ => None,
+        }
+    }
+
+    fn settings_value(self) -> &'static str {
+        match self {
+            Self::Slide => "slide",
+            Self::Instant => "instant",
+        }
+    }
+}
+
+fn tab_reveal_label(motion: TabRevealMotion, language: UiLanguage) -> &'static str {
+    match motion {
+        TabRevealMotion::Slide => language.pick("滑动", "Slide"),
+        TabRevealMotion::Instant => language.pick("立即", "Instant"),
+    }
+}
 
 pub(super) fn cursor_shape_label(shape: CursorShape, language: UiLanguage) -> &'static str {
     match shape {
@@ -200,6 +235,8 @@ pub enum SettingsHit {
     CopyOnSelectToggle,
     /// 交互: 全宽字形 bold run 用 Regular 字形（粗体提亮不加粗）。
     CjkBoldToggle,
+    TabRevealDropdown,
+    TabRevealOption(usize),
     /// Language combobox trigger (options resolve to [`SettingsHit::Language`]).
     LanguageDropdown,
     /// Expanded dropdown option rows for the cycle-style settings.
@@ -266,6 +303,7 @@ pub(super) struct NebulaRuntimeSettings {
     /// 全宽字形（CJK 等）在 bold run 里用 Regular 字形（粗体提亮不加粗）。
     /// 默认开：小字号下雅黑 Bold fallback 与 Regular 混排发闷（任务 #4）。
     pub(super) cjk_bold_regular: bool,
+    pub(super) tab_reveal: TabRevealMotion,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     /// Window close keeps the PTYs alive in the resident process (detach /
@@ -321,6 +359,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         cursor_blink: true,
         copy_on_select: true,
         cjk_bold_regular: true,
+        tab_reveal: TabRevealMotion::Slide,
         // Off by default: the welcome screen pipes a whole script through the
         // fresh shell and repaints on resize — real startup-latency cost on
         // the critical path (user ruling: startup speed outranks the art).
@@ -397,6 +436,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("copy_on_select", v)) => settings.copy_on_select = parse_bool(v, true),
                 Some(("cjk_bold_regular", v)) => {
                     settings.cjk_bold_regular = parse_bool(v, true)
+                },
+                Some(("tab_reveal", v)) => {
+                    settings.tab_reveal = TabRevealMotion::parse(v).unwrap_or_default();
                 },
                 Some(("startup_directory", v)) => {
                     let path = std::path::PathBuf::from(v.trim());
@@ -592,7 +634,8 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let _ = std::fs::write(
         path,
         format!(
-            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
+tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -601,6 +644,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
             settings.cursor_blink as u8,
             settings.copy_on_select as u8,
             settings.cjk_bold_regular as u8,
+            settings.tab_reveal.settings_value(),
             settings.fetch as u8,
             settings.powerline as u8,
             settings.keep_session as u8,
@@ -659,6 +703,7 @@ struct SettingsGeometry {
     copy_on_select: (f32, f32, f32, f32),
     /// 交互: CJK 粗体策略 toggle row.
     cjk_bold: (f32, f32, f32, f32),
+    tab_reveal: (f32, f32, f32, f32),
     reset: (f32, f32, f32, f32),
     /// Top edge of the scrollable content viewport (just below the fixed
     /// header band); everything above it never scrolls.
@@ -828,11 +873,12 @@ fn settings_geometry(
     };
     let profiles_h = s(profiles_end + 32.0 - 72.0);
 
-    // 交互: copy-on-select + 文本渲染（CJK 粗体策略）两组。
+    // 交互: 剪贴板行为与标签展开一组，文本渲染（CJK 粗体策略）另一组。
     let interaction_y0 = 146.0;
-    let cjk_bold_y0 = interaction_y0 + ROW_H + GROUP_ADVANCE;
+    let cjk_bold_y0 = interaction_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
     let interaction_h = s(cjk_bold_y0 + ROW_H + 32.0 - 72.0);
     let copy_on_select = (row_x, at(interaction_y0), row_w, row_h);
+    let tab_reveal = (row_x, at(interaction_y0 + ROW_H), row_w, row_h);
     let cjk_bold = (row_x, at(cjk_bold_y0), row_w, row_h);
 
     // Keymap: editable action rows, then a read-only extras group (spec 002).
@@ -910,6 +956,7 @@ fn settings_geometry(
         hidden_host_count,
         copy_on_select,
         cjk_bold,
+        tab_reveal,
         reset: (popup_x + popup_w - s(170.0), popup_y + s(24.0), s(150.0), s(42.0)),
         content_top,
         appearance_h,
@@ -1027,6 +1074,9 @@ fn dropdown_anchor(
         (Section::Profiles, SettingsDropdown::Accept) => {
             Some((anchor(geometry.accept), ACCEPT_OPTIONS.len()))
         },
+        (Section::Interaction, SettingsDropdown::TabReveal) => {
+            Some((anchor(geometry.tab_reveal), TAB_REVEAL_OPTIONS.len()))
+        },
         (Section::Appearance, SettingsDropdown::BackgroundFit) => {
             Some((anchor(geometry.background_image_fit), BACKGROUND_FIT_OPTIONS.len()))
         },
@@ -1114,6 +1164,7 @@ pub fn settings_hit(
                     SettingsDropdown::BackgroundAlignment => SettingsHit::AlignOption(index),
                     SettingsDropdown::Language => SettingsHit::Language(LANGUAGE_OPTIONS[index]),
                     SettingsDropdown::Accept => SettingsHit::AcceptOption(index),
+                    SettingsDropdown::TabReveal => SettingsHit::TabRevealOption(index),
                     SettingsDropdown::CursorShape => SettingsHit::CursorShapeOption(index),
                     // 背景色浮层在上方特判处理，走不到通用行列表。
                     SettingsDropdown::BackgroundColor => SettingsHit::Panel,
@@ -1233,6 +1284,9 @@ pub fn settings_hit(
                 if contains_rect(geometry.copy_on_select, x, y) {
                     return SettingsHit::CopyOnSelectToggle;
                 }
+                if contains_rect(geometry.tab_reveal, x, y) {
+                    return SettingsHit::TabRevealDropdown;
+                }
                 if contains_rect(geometry.cjk_bold, x, y) {
                     return SettingsHit::CjkBoldToggle;
                 }
@@ -1321,6 +1375,7 @@ pub(super) struct SettingsView {
     pub(super) cursor_blink: bool,
     pub(super) copy_on_select: bool,
     pub(super) cjk_bold_regular: bool,
+    pub(super) tab_reveal: TabRevealMotion,
     /// Live-preview colors: the ACTUAL terminal background/foreground the
     /// grid would use right now (custom background wins over the theme).
     pub(super) preview_bg: Rgb,
@@ -1479,6 +1534,9 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
             LANGUAGE_OPTIONS.iter().position(|preference| *preference == view.language_preference)
         },
         SettingsDropdown::Accept => ACCEPT_OPTIONS.iter().position(|key| *key == view.accept),
+        SettingsDropdown::TabReveal => {
+            TAB_REVEAL_OPTIONS.iter().position(|motion| *motion == view.tab_reveal)
+        },
         SettingsDropdown::CursorShape => {
             CURSOR_SHAPE_OPTIONS.iter().position(|shape| *shape == view.cursor_shape)
         },
@@ -1498,6 +1556,7 @@ fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Optio
             LANGUAGE_OPTIONS.iter().position(|option| *option == preference)
         },
         (SettingsDropdown::Accept, SettingsHit::AcceptOption(index)) => Some(index),
+        (SettingsDropdown::TabReveal, SettingsHit::TabRevealOption(index)) => Some(index),
         (SettingsDropdown::CursorShape, SettingsHit::CursorShapeOption(index)) => Some(index),
         _ => None,
     }
@@ -2035,13 +2094,21 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Interaction => {
-            group_frame(quads, geometry.copy_on_select, 1);
+            group_frame(quads, geometry.copy_on_select, 2);
             row_hover(
                 quads,
                 geometry.copy_on_select,
                 view.hover == SettingsHit::CopyOnSelectToggle,
             );
             toggle(quads, &mut staged, geometry.copy_on_select, view.copy_on_select);
+            row_hover(quads, geometry.tab_reveal, view.hover == SettingsHit::TabRevealDropdown);
+            combobox(
+                quads,
+                &mut staged,
+                geometry.tab_reveal,
+                view.hover == SettingsHit::TabRevealDropdown,
+                view.dropdown == Some(SettingsDropdown::TabReveal),
+            );
             group_frame(quads, geometry.cjk_bold, 1);
             row_hover(quads, geometry.cjk_bold, view.hover == SettingsHit::CjkBoldToggle);
             toggle(quads, &mut staged, geometry.cjk_bold, view.cjk_bold_regular);
@@ -2417,6 +2484,9 @@ pub(super) fn draw_popup_text(
                 language_label(LANGUAGE_OPTIONS[index], language).to_owned()
             },
             SettingsDropdown::Accept => accept_label(ACCEPT_OPTIONS[index], language).to_owned(),
+            SettingsDropdown::TabReveal => {
+                tab_reveal_label(TAB_REVEAL_OPTIONS[index], language).to_owned()
+            },
             SettingsDropdown::CursorShape => {
                 cursor_shape_label(CURSOR_SHAPE_OPTIONS[index], language).to_owned()
             },
@@ -3295,6 +3365,26 @@ pub(super) fn draw_text(
                     sk.ink,
                 );
             }
+            if visible(geometry.tab_reveal.1, geometry.tab_reveal.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.tab_reveal,
+                    language.pick("标签展开", "Tab reveal"),
+                    "",
+                    sk.ink,
+                );
+                combobox_value(
+                    r,
+                    gc,
+                    geometry.tab_reveal,
+                    tab_reveal_label(view.tab_reveal, language),
+                    sk.accent,
+                );
+            }
             let (bx, by, _, bh) = geometry.cjk_bold;
             if visible(group_y(by), title_h) {
                 section_title(
@@ -3569,7 +3659,9 @@ pub(super) fn draw_text(
 
 #[cfg(test)]
 mod tests {
-    use super::{SHOW_WEBDAV_SYNC_SETTINGS, advanced_content_end, opacity_from_pointer};
+    use super::{
+        SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion, advanced_content_end, opacity_from_pointer,
+    };
 
     #[test]
     fn slider_pointer_maps_to_clamped_fraction() {
@@ -3585,5 +3677,16 @@ mod tests {
     fn hidden_webdav_group_does_not_extend_advanced_content() {
         assert!(!SHOW_WEBDAV_SYNC_SETTINGS);
         assert_eq!(advanced_content_end(146.0, 264.0, 44.0), 190.0);
+    }
+
+    #[test]
+    fn tab_reveal_motion_defaults_compatibly_and_round_trips() {
+        assert_eq!(TabRevealMotion::default(), TabRevealMotion::Slide);
+        assert_eq!(TabRevealMotion::parse("slide"), Some(TabRevealMotion::Slide));
+        assert_eq!(TabRevealMotion::parse("INSTANT"), Some(TabRevealMotion::Instant));
+        assert_eq!(TabRevealMotion::parse("unknown").unwrap_or_default(), TabRevealMotion::Slide);
+        for value in [TabRevealMotion::Slide, TabRevealMotion::Instant] {
+            assert_eq!(TabRevealMotion::parse(value.settings_value()), Some(value));
+        }
     }
 }
