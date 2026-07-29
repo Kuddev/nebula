@@ -291,6 +291,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::CursorShapeOption(_)
             | crate::display::SettingsHit::CursorBlinkToggle
             | crate::display::SettingsHit::CopyOnSelectToggle
+            | crate::display::SettingsHit::TabRevealDropdown
+            | crate::display::SettingsHit::TabRevealOption(_)
             | crate::display::SettingsHit::FontSizeUp
             | crate::display::SettingsHit::FontSizeDown
             | crate::display::SettingsHit::BackgroundImageCoverChrome
