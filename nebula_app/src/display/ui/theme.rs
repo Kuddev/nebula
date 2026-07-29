@@ -426,8 +426,11 @@ impl NebulaTheme {
     pub(crate) fn skin(self) -> Skin {
         let p = self.palette();
         let a = self.accent();
-        let b = p.panel;
         let t = p.term_bg;
+        // 浮层相对**内容层**（终端）提亮 14 级。用 term_bg 而不是 p.panel：
+        // p.panel 是窗口外壳色，比终端还暗（Steel 外壳 22,24,30 vs 终端
+        // 26,28,36），拿它当浮层底会让弹窗陷进背景里，方向正好是反的。
+        let lift = |c: u8| c.saturating_add(14);
         if p.is_light {
             Skin {
                 // 明度阶梯（2026-07-29 裁定，见 docs/nebula-visual-design-language.md
@@ -480,13 +483,21 @@ impl NebulaTheme {
             }
         } else {
             Skin {
-                panel: Rgba::new(b.r, b.g, b.b, 250),
+                // 深色下浮层的方向与浅色**相反**：比内容层更亮。
+                // 统一表述是「越靠前，与内容层的对比越强」，方向由主题决定
+                // （otty 深色命令面板比背景亮，浅色命令面板比纯白终端暗）。
+                //
+                // 阶梯：终端 26 → panel 40 → card 54，每层差 14。
+                panel: Rgba::new(lift(t.r), lift(t.g), lift(t.b), 250),
                 // Derive the inset/input surface from the terminal background
                 // so it stays in-family on every dark theme (blue-black on
                 // Nebula, pure gray on Coal) instead of one fixed navy.
                 input: Rgba::new(t.r, t.g, t.b, 220),
                 card: Rgba::new(255, 255, 255, 16),
-                veil: Rgba::new(0, 0, 0, 150),
+                // modal 专用（popover 不画遮罩）。原值 alpha 150（59%）在本就
+                // 很暗的底上接近全黑，把上下文糊没了；36% 足够传达"被阻断"，
+                // 背景仍可读。冷调 slate-950 而不是纯黑，与整套灰同色温。
+                veil: Rgba::new(2, 6, 23, 92),
                 ink: Rgb::new(226, 232, 240),      // slate-200
                 ink_dim: Rgb::new(148, 163, 184),  // slate-400
                 ink_strong: Rgb::new(248, 250, 252), // slate-50

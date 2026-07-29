@@ -374,8 +374,6 @@ pub struct CommandPalette {
     hover_armed: bool,
     /// 武装期间首次上报的指针位置（解除武装的位移基准）。
     pointer_baseline: Option<(f32, f32)>,
-    /// Cursor blink animation state for the search input.
-    cursor_pulse: crate::motion::Pulse,
 }
 
 impl CommandPalette {
@@ -395,7 +393,6 @@ impl CommandPalette {
             hover: None,
             hover_armed: false,
             pointer_baseline: None,
-            cursor_pulse: crate::motion::Pulse::new(std::time::Duration::from_millis(1060)),
         };
         palette.refilter();
         palette
@@ -607,13 +604,15 @@ impl CommandPalette {
         true
     }
 
-    /// Update cursor blink state. Call this each frame while the palette is open.
-    pub fn tick_cursor(&mut self, frame: crate::motion::Frame) {
-        self.cursor_pulse.step(frame);
-    }
-
+    /// 光标该不该画。相位来自 [`ui::caret`](super::ui::caret) 的共享节律，
+    /// 与标签重命名框、SSH 编辑器、侧栏搜索框完全一致——打字时常亮、
+    /// 停手后按系统的 `GetCaretBlinkTime` 呼吸。
+    ///
+    /// 这里曾经自带一个 1060ms、占空比 0.5 的 `Pulse`。它的问题不在参数，
+    /// 而在于**每个输入框各造一套节律**：同一个窗口里两个光标以不同相位
+    /// 闪烁，读起来像界面有两个焦点。
     pub fn cursor_visible(&self) -> bool {
-        self.cursor_pulse.visible(0.5)
+        super::ui::caret::is_on()
     }
 
     pub fn toggle(&mut self) {
@@ -1031,6 +1030,7 @@ pub fn palette_layout(
 // ---- rendering (the parent `display::mod` hands in the model + renderer;
 // this module owns the palette's pixels — same split as `side_panel.rs`) ----
 
+use super::ui::surface;
 use crate::renderer::ui::{Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
 
@@ -1049,6 +1049,18 @@ const HINT_GAP: f32 = 24.0;
 /// 自带视觉边界，不需要靠空白来分隔。
 const CHIP_GAP: f32 = 12.0;
 
+/// 输入框与列表行共用的左内边距。列表文字必须与查询文字**左缘对齐**，
+/// 否则输入框读起来像悬在列表外面的另一个控件。
+const INPUT_PAD_X: f32 = 14.0;
+
+/// 搜索图标占的列数（图标一列 + 一列缝）。按 cell 列而不是固定 px 计量：
+/// 固定 px 的缝隙在字号变化时会与字形脱节——大字号显挤、小字号显空。
+const SEARCH_SLOT_COLS: f32 = 2.0;
+
+/// 文本光标的梁宽（逻辑 px）。细梁不占列宽，placeholder 与真实输入因此
+/// 能落在同一个 x 上。
+const CARET_W: f32 = 1.5;
+
 /// Push the palette's background quads: a dim veil over the window, the glass
 /// panel (glow + gradient border + solid fill, matching the settings modal),
 /// the query input box, and the selected-row
@@ -1066,34 +1078,26 @@ pub(super) fn push_quads(
     let w = size.width();
     let h = size.height();
     let s = |v: f32| v * scale;
-    let palette = theme.palette();
     let sk = theme.skin();
     let layout = palette_layout(model, w, h, scale);
-    let (px, py, pw, ph) = layout.panel;
     let (ix, iy, iw, ih) = layout.input;
 
-    quads.push(UiQuad::solid(0.0, 0.0, w, h, 0.0, sk.veil));
-    quads.push(UiQuad::glow(
-        px - s(24.0),
-        py - s(22.0),
-        pw + s(48.0),
-        ph + s(48.0),
-        palette.edge_glow_l,
-    ));
-    // Hairline ring, not a gradient stroke: the picker reads as one soft gray
-    // sheet (图4/图5), and the chrome shell stays neutral.
-    quads.push(UiQuad::solid(
-        px - s(1.0),
-        py - s(1.0),
-        pw + s(2.0),
-        ph + s(2.0),
-        s(15.0),
-        sk.hairline,
-    ));
-    // 面板填充是纯色柔和灰：chrome 壳保持中性，此前 panel→term_bg 的渐变
-    // 让弹窗在暗色主题下自成一套明暗，与设置模态和侧栏的平面感割裂
-    // （浅色主题还因 alpha 差露出脏渐变）。
-    quads.push(UiQuad::solid(px, py, pw, ph, s(14.0), sk.panel));
+    // 命令面板是 Popover：可 Esc、无后果、随手开关，所以**不画遮罩**。
+    // 遮罩传达的是「我打断了你」这份模态承诺，给随手开关的浮层套上它，既凭空
+    // 抬高心理成本，又遮住这个面板自己经常需要被参考的上下文（"我刚才在哪个
+    // 目录来着"）。浮起改由阴影承担 —— 加法而不是减法，背景信息完整保留。
+    //
+    // 同时移除了此前的品牌辉光（palette.edge_glow_l）：glow 是"发光"，不建立
+    // Z 轴层级；与外阴影叠加只会让边缘浑浊。品牌预算留给 logo 与 tab。
+    surface::push_surface(
+        quads,
+        layout.panel,
+        (w, h),
+        scale,
+        &sk,
+        surface::Elevation::Popover,
+        1.0,
+    );
 
     quads.push(UiQuad::solid(
         ix,
@@ -1106,21 +1110,46 @@ pub(super) fn push_quads(
     if model.query_all_selected() && !model.query.is_empty() {
         let cell_w = size.cell_width();
         let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
-        let selection_x = ix + s(14.0 + 28.0);
-        let selection_w = (columns as f32 * cell_w).min(iw - s(56.0));
+        let selection_x = ix + s(INPUT_PAD_X) + cell_w * SEARCH_SLOT_COLS;
+        let selection_w = (columns as f32 * cell_w).min(iw - s(INPUT_PAD_X * 2.0) - cell_w * SEARCH_SLOT_COLS);
         quads.push(UiQuad::solid(
             selection_x - s(2.0),
             iy + s(7.0),
             selection_w + s(4.0),
             ih - s(14.0),
-            s(4.0),
+            s(super::ui::tokens::radius::CHIP),
             sk.accent_soft,
         ));
     }
 
     let cell_w = size.cell_width();
-    // Ctrl+K 键帽（图4/图8）：仅 shell picker 空查询时展示，指认打开快捷
-    // 键；输入开始后让位给查询文字。
+    // 搜索图标槽与查询文字的起点。槽宽按 **cell 列**算而不是固定 px：
+    // 字号一变，固定 px 的缝隙就会与字形脱节（大字号显挤、小字号显空）。
+    let query_x = ix + s(INPUT_PAD_X) + cell_w * SEARCH_SLOT_COLS;
+
+    // 文本光标画成一条细梁 quad，而不是 `▏` 字形。
+    //
+    // 字形光标占满一个 cell，于是空态的 placeholder 必须整体右让一格给它，
+    // 打下第一个字符时文字又跳回来——一次可见的位移。细梁不占列宽，
+    // placeholder 与真实输入因此能落在**同一个 x** 上，输入过程没有跳动。
+    // 顺带它也更接近原生文本框的观感（1.5px 竖线，不是一个方块）。
+    if !model.query_all_selected() {
+        if super::ui::caret::is_on() {
+            let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
+            let cell_h = size.cell_height();
+            quads.push(UiQuad::solid(
+                query_x + columns as f32 * cell_w,
+                iy + (ih - cell_h) / 2.0,
+                s(CARET_W),
+                cell_h,
+                0.0,
+                Rgba::new(sk.ink_strong.r, sk.ink_strong.g, sk.ink_strong.b, 255),
+            ));
+        }
+    }
+
+    // Ctrl+K 键帽：仅 shell picker 空查询时展示，指认打开快捷键；
+    // 输入开始后让位给查询文字。
     if model.mode == PaletteMode::Profiles && model.query.is_empty() {
         let combo = super::ui::keycap::layout_combo(
             "Ctrl+K",
@@ -1142,27 +1171,24 @@ pub(super) fn push_quads(
     let hero = model.hero_row();
     let accent_ring = Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255);
     if cards {
-        // 卡片行（图4）：柔和灰面板上的浅色卡片，hairline 圈边。选中 =
-        // accent 描边 + 轻染，hover = 中性 wash；推荐大卡片自带 accent
-        // 轻染和右侧回车 chip（glyph 在文字 pass 画）。
+        // 列表行**不画卡片**（2026-07-29 用户裁定）：默认完全透明，露出面板
+        // 底；只有 hover / 选中才上一层底色。
+        //
+        // 此前每行都是「hairline 圈 + 白底卡片」，五行排下来是五个带框的白
+        // 矩形——那读作表单，不读作列表。边框在这里不传递任何信息（明度差
+        // 已经把行分开了），删掉之后噪音立刻降一个量级。
+        //
+        // 选中态用中性的 hover_strong 而不是 accent_soft：强调色预算一屏
+        // 只花一次，而这个面板里真正需要它的是"当前选中"这一处。
+        // 推荐卡也不再染色——它已经被"推荐"分区标题、更大的尺寸、双行布局
+        // 和右侧 ↵ chip 标记了四次身份，第五次是浪费。
+        let corner = s(super::ui::tokens::radius::OVERLAY);
         for (row, &(ry, rh)) in layout.rows.iter().enumerate() {
             let is_hero = hero && row == 0;
-            let selected = selected_row == Some(row);
-            let ring = if selected { accent_ring } else { sk.hairline };
-            quads.push(UiQuad::solid(
-                ix - s(1.0),
-                ry - s(1.0),
-                iw + s(2.0),
-                rh + s(2.0),
-                s(9.0),
-                ring,
-            ));
-            quads.push(UiQuad::solid(ix, ry, iw, rh, s(8.0), sk.card));
-            if is_hero || selected {
-                quads.push(UiQuad::solid(ix, ry, iw, rh, s(8.0), sk.accent_soft));
-            }
-            if model.hover == Some(row) {
-                quads.push(UiQuad::solid(ix, ry, iw, rh, s(8.0), sk.hover));
+            if selected_row == Some(row) {
+                quads.push(UiQuad::solid(ix, ry, iw, rh, corner, sk.hover_strong));
+            } else if model.hover == Some(row) {
+                quads.push(UiQuad::solid(ix, ry, iw, rh, corner, sk.hover));
             }
             if is_hero {
                 let chip = s(28.0);
@@ -1264,27 +1290,16 @@ pub(super) fn push_quads(
         quads.push(UiQuad::solid(bx, by, badge_w, bh, s(4.0), sk.surface));
     }
 
-    if let Some((_, fy, _, fh)) = layout.footer {
-        // 图8 键帽规范：底栏键帽与 Ctrl+K/设置页共用同一 chip 配方。底栏
-        // 背景横贯面板，但里面的文字与卡片列对齐（走 ix/iw，不是 panel）。
-        let key_h = s(super::ui::keycap::KEY_H);
-        let key_y = fy + (fh - key_h) * 0.5;
-        let mut chip = |quads: &mut Vec<UiQuad>, x: f32, cols: usize| {
-            let width = cols as f32 * cell_w + s(8.0);
-            super::ui::keycap::push_chip(quads, &sk, x, key_y, width, key_h, scale);
-        };
-        chip(quads, ix, 3);
-        chip(quads, ix + iw * 0.42, 5);
-        let esc_cols = text_width_cols(model.language.pick("Esc", "Esc"));
-        chip(
-            quads,
-            ix + iw
-                - s(GUTTER)
-                - (esc_cols + text_width_cols(model.language.pick(" 关闭", " Close"))) as f32
-                    * cell_w,
-            esc_cols,
-        );
-    }
+    // 底栏**不画 chip 底**（2026-07-29 用户裁定）。
+    //
+    // chip 底在这套界面里的语义是「可点击」——命令行右侧的快捷键 chip、
+    // Ctrl+K 徽标都对应一个能按下去的东西。底栏的 ↑↓/Enter/Esc 是纯键位
+    // 说明，给它们戴上 chip 会把那个信号稀释成装饰，用户就不再能靠"有没有
+    // chip 底"判断某处能不能点。
+    //
+    // 键位与说明的区分改由**墨色权重**承担（键名 ink_dim、说明 ink_faint，
+    // 见文字 pass）。这也符合层级手段的成本排序：明度差比边框/填充贵，
+    // 但效果更干净——底栏因此从三个灰块变回一行安静的文字。
 }
 
 /// Draw the palette's text: the query line (with a caret) or a placeholder,
@@ -1319,19 +1334,18 @@ pub(super) fn draw_text(
     let sk = theme.skin();
 
     // Left edge for result text and the search icon.
-    let text_x = ix + s(14.0);
+    let text_x = ix + s(INPUT_PAD_X);
 
     const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
     r.draw_chrome_text(size, text_x, iy + (ih - cell_h) / 2.0, sk.ink_faint, ICON_SEARCH, gc);
 
-    let query_x = text_x + s(28.0);
+    // placeholder 与真实查询共用这一个起点。光标是 quad pass 画的细梁，
+    // 不占列宽，所以打下第一个字符时文字不会跳位。
+    let query_x = text_x + cell_w * SEARCH_SLOT_COLS;
     let text_y = iy + (ih - cell_h) / 2.0;
     let query = model.query();
-    let cursor = if model.cursor_visible() { "▏" } else { "" };
 
     if query.is_empty() {
-        // 空态同时给出输入光标和用途提示，避免只有一个空白色块让用户猜测。
-        r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, cursor, gc);
         let placeholder = match model.mode {
             PaletteMode::Commands => model
                 .language
@@ -1343,11 +1357,9 @@ pub(super) fn draw_text(
                 model.language.pick("搜索常用目录…", "Search frequent directories...")
             },
         };
-        r.draw_chrome_text(size, query_x + s(10.0), text_y, sk.ink_dim, placeholder, gc);
+        r.draw_chrome_text(size, query_x, text_y, sk.ink_faint, placeholder, gc);
     } else {
-        let shown =
-            if model.query_all_selected() { query.to_owned() } else { format!("{query}{cursor}") };
-        r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, &shown, gc);
+        r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, query, gc);
     }
 
     if model.is_empty() {
@@ -1366,11 +1378,8 @@ pub(super) fn draw_text(
             },
             gc,
         );
-        if let Some((fx, fy, fw, fh)) = layout.footer {
-            let footer_y = fy + (fh - cell_h) * 0.5;
-            r.draw_chrome_text(size, fx + s(16.0), footer_y, sk.ink_dim, model.language.pick("↑ ↓ 选择", "↑ ↓ Select"), gc);
-            r.draw_chrome_text(size, fx + fw * 0.42, footer_y, sk.ink_dim, model.language.pick("Enter 打开", "Enter Open"), gc);
-            r.draw_chrome_text(size, fx + fw - s(16.0) - text_width_cols(model.language.pick("Esc 关闭", "Esc Close")) as f32 * cell_w, footer_y, sk.ink_dim, model.language.pick("Esc 关闭", "Esc Close"), gc);
+        if let Some((_, fy, _, fh)) = layout.footer {
+            draw_footer_hints(r, gc, size, model, ix, iw, fy, fh, cell_w, cell_h, scale, &sk);
         }
         return icon_draws;
     }
@@ -1411,6 +1420,37 @@ pub(super) fn draw_text(
     let cards = model.is_picker();
     let hero = model.hero_row();
     let (rows, selected_row) = model.visible(layout.max_rows);
+    let badge = model.language.pick("默认", "Default");
+    let badge_w = |present: bool| -> f32 {
+        if present {
+            text_width_cols(badge) as f32 * cell_w + s(12.0) + s(10.0)
+        } else {
+            0.0
+        }
+    };
+
+    // 路径列的左缘。picker 的每一行都从这**同一个 x** 起画路径，于是路径
+    // 排成一条竖线。
+    //
+    // 此前路径是右对齐的：每行路径的起点随它自身的长度浮动（cmd.exe 起点
+    // 在 1030、Nushell 的长路径起点在 730），眼睛沿列表往下扫时要不停地
+    // 左右找落点——这就是"长的长短的短"读着乱的来源。右缘参差反而无所谓，
+    // 因为扫视是沿着起点走的，不是沿着终点。
+    //
+    // 列位置取"最宽的标签 + 呼吸缝"，并钳在面板 62% 处：某一行标签特别长
+    // 时，不能把整列推到没有地方放路径。
+    let path_col_x = cards.then(|| {
+        let widest = rows
+            .iter()
+            .enumerate()
+            .filter(|(row, _)| !(hero && *row == 0))
+            .map(|(_, entry)| {
+                text_width_cols(&entry.label) as f32 * cell_w + badge_w(entry.is_default)
+            })
+            .fold(0.0f32, f32::max);
+        path_column_x(text_x, s(26.0), widest, ix, iw, scale)
+    });
+
     for (row, entry) in rows.into_iter().enumerate() {
         let PaletteRow { icon, color_id, label, hint, is_default } = entry;
         let Some(&(row_y, row_hh)) = layout.rows.get(row) else { break };
@@ -1444,22 +1484,16 @@ pub(super) fn draw_text(
             text_x + indent
         };
         r.draw_chrome_text(size, label_x, ry, fg, &label, gc);
-        let badge = model.language.pick("默认", "Default");
-        let badge_w = if is_default && !is_hero {
-            let width = badge.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
-                * cell_w
-                + s(12.0);
+        let badge_span = if is_default && !is_hero {
             r.draw_chrome_text(
                 size,
-                label_x + label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
-                    * cell_w
-                    + s(10.0),
+                label_x + text_width_cols(&label) as f32 * cell_w + s(10.0),
                 ry,
                 sk.ink_dim,
                 badge,
                 gc,
             );
-            width + s(10.0)
+            badge_w(true)
         } else {
             0.0
         };
@@ -1499,47 +1533,72 @@ pub(super) fn draw_text(
                 if combo.bounds.0 > label_end + s(HINT_GAP) {
                     draw_combo_text(r, gc, size, &combo, cell_w, cell_h, &sk);
                 }
-            } else if let Some((hint_x, shown)) =
-                fit_hint(label_x, &label, badge_w, ix, iw, cell_w, scale, &hint)
-            {
-                r.draw_chrome_text(size, hint_x, ry, sk.ink_dim, &shown, gc);
+            } else if let Some(col_x) = path_col_x {
+                // 路径左对齐到共用的竖线。挤不下（标签太长压到列位）就整条
+                // 让位，绝不叠在标签上——与命令列表的 hint 同一条规矩。
+                let label_end = label_x + text_width_cols(&label) as f32 * cell_w + badge_span;
+                let budget = ((ix + iw - s(GUTTER) - col_x) / cell_w).floor();
+                if col_x >= label_end + s(HINT_GAP) && budget >= 3.0 {
+                    let shown = fit_head(&hint, budget as usize);
+                    r.draw_chrome_text(size, col_x, ry, sk.ink_dim, &shown, gc);
+                }
             }
         }
     }
     if let Some((_, fy, _, fh)) = layout.footer {
-        let footer_y = fy + (fh - cell_h) * 0.5;
-        r.draw_chrome_text(
-            size,
-            ix,
-            footer_y,
-            sk.ink_dim,
-            model.language.pick("↑ ↓ 选择", "↑ ↓ Select"),
-            gc,
-        );
-        r.draw_chrome_text(
-            size,
-            ix + iw * 0.42,
-            footer_y,
-            sk.ink_dim,
-            model.language.pick("Enter 打开", "Enter Open"),
-            gc,
-        );
-        r.draw_chrome_text(
-            size,
-            ix + iw - s(GUTTER) - text_width_cols(model.language.pick("Esc 关闭", "Esc Close"))
-                as f32
-                * cell_w,
-            footer_y,
-            sk.ink_dim,
-            model.language.pick("Esc 关闭", "Esc Close"),
-            gc,
-        );
+        draw_footer_hints(r, gc, size, model, ix, iw, fy, fh, cell_w, cell_h, scale, &sk);
     }
     icon_draws
 }
 
-/// 图8 键帽文字：逐键 chip 内水平居中键名、弱墨 "+" 分隔；几何来自
-/// `keycap::layout_combo`，与 quad pass 同源。
+/// 底栏的三条键位提示。
+///
+/// 键名与释义分成两级墨（`ink_dim` / `ink_faint`）而不是给键名套 chip 底：
+/// chip 底在这套界面里的语义是「可点击」，底栏这三条按不下去。用墨色权重
+/// 区分同样能让键名跳出来，而且不占额外面积、不给画面增加三个灰块。
+///
+/// 三条的锚点分别是左缘、居中、右缘——与列表列同一套 `ix`/`iw`/`GUTTER`，
+/// 所以右缘和上面的快捷键 chip 连成一条竖线。
+#[allow(clippy::too_many_arguments)]
+fn draw_footer_hints(
+    r: &mut Renderer,
+    gc: &mut GlyphCache,
+    size: &SizeInfo,
+    model: &CommandPalette,
+    ix: f32,
+    iw: f32,
+    fy: f32,
+    fh: f32,
+    cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+    sk: &super::ui::theme::Skin,
+) {
+    let y = fy + (fh - cell_h) * 0.5;
+    // (键, 释义)。键名保持 ASCII/箭头，释义随语言切换。
+    let hints = [
+        ("↑ ↓", model.language.pick("选择", "Select")),
+        ("Enter", model.language.pick("打开", "Open")),
+        ("Esc", model.language.pick("关闭", "Close")),
+    ];
+    // 释义与键名之间空一整列：等宽网格上的半格会让两段文字看着没对齐。
+    let span = |key: &str, label: &str| {
+        (text_width_cols(key) + 1 + text_width_cols(label)) as f32 * cell_w
+    };
+    let xs = [
+        ix,
+        ix + (iw - span(hints[1].0, hints[1].1)) * 0.5,
+        ix + iw - scale * GUTTER - span(hints[2].0, hints[2].1),
+    ];
+    for (&x, (key, label)) in xs.iter().zip(hints) {
+        r.draw_chrome_text(size, x, y, sk.ink_dim, key, gc);
+        let label_x = x + (text_width_cols(key) + 1) as f32 * cell_w;
+        r.draw_chrome_text(size, label_x, y, sk.ink_faint, label, gc);
+    }
+}
+
+/// 键帽文字：chip 内水平居中整串键位；几何来自 `keycap::layout_combo`，
+/// 与 quad pass 同源。
 fn draw_combo_text(
     r: &mut Renderer,
     gc: &mut GlyphCache,
@@ -1562,47 +1621,29 @@ fn draw_combo_text(
             gc,
         );
     }
-    for plus_x in &combo.pluses {
-        r.draw_chrome_text(size, *plus_x, ty, sk.ink_faint, "+", gc);
-    }
 }
 
 fn text_width_cols(text: &str) -> usize {
     text.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
-/// Lay out a row's right-aligned hint next to its left-aligned label: returns
-/// the draw X and the (possibly truncated) text, or `None` when fewer than 3
-/// columns remain. Pure so the no-collision contract is unit-testable.
+/// picker 的路径列左缘：所有行共用一个 x，路径因此排成一条竖线。
 ///
-/// 2026-07-27 用户反馈"字号放大后 powershell 路径叠进标签"：旧预算
-/// `iw - label_x - s(28)` 把宽度 `iw` 和绝对坐标 `label_x` 混在一起减——
-/// 面板是居中的，窗口一宽 `label_x` 随之变大，差值变负后被 `as usize`
-/// 钳成 0，`> 2` 的守卫反而放行了完整路径，57 列的 powershell.exe 右对
-/// 齐后一头扎回标签里；字号越大 cell_w 越宽，扎得越深。现在从标签右缘
-/// + 呼吸缝起算，CJK 按双列计宽（目录 picker 的 hint 是可含中文的路径，
-/// 按 char 数右对齐会溢出面板）。2026-07-29 裁定：溢出时尾部省略号、保
-/// 留盘符/根上下文（图2/图4）——叶名辨识交给 label 和推荐卡片的完整路径。
-fn fit_hint(
-    label_x: f32,
-    label: &str,
-    after_label: f32,
-    ix: f32,
-    iw: f32,
-    cell_w: f32,
-    scale: f32,
-    hint: &str,
-) -> Option<(f32, String)> {
-    let cols = |t: &str| -> usize { t.chars().map(|c| c.width().unwrap_or(0)).sum() };
-    let label_end = label_x + cols(label) as f32 * cell_w + after_label;
-    let right = ix + iw - GUTTER * scale;
-    let budget = ((right - label_end - HINT_GAP * scale) / cell_w).floor();
-    if budget < 3.0 {
-        return None;
-    }
-    let shown = fit_head(hint, budget as usize);
-    let x = right - cols(&shown) as f32 * cell_w;
-    Some((x, shown))
+/// `widest_label` 是最宽一行的「标签 + 徽标」像素宽（不含前导图标缩进）。
+///
+/// 2026-07-29 用户反馈"长的长短的短的难看"：路径此前是右对齐的，每行路径的
+/// **起点**随它自身长度浮动（cmd.exe 与 Nushell 的起点差了近 300px），眼睛
+/// 沿列表往下扫时要不停地左右找落点。左对齐让扫视只沿一条竖线走；右缘参差
+/// 无所谓，因为扫视是沿起点走的。
+///
+/// 列位置钳在面板 `COLUMN_MAX_FRACTION` 处：某一行标签特别长时，不能把整列
+/// 推到没有地方放路径。钳住之后那一行的路径会与标签冲突，由调用方让位。
+///
+/// 纯函数，因此"不与标签重叠"这条契约可以被单测覆盖——上一版的
+/// `fit_hint` 就是靠同类测试挡住过一个把宽度和绝对坐标混着减的 bug。
+fn path_column_x(text_x: f32, icon_indent: f32, widest_label: f32, ix: f32, iw: f32, scale: f32) -> f32 {
+    const COLUMN_MAX_FRACTION: f32 = 0.62;
+    (text_x + icon_indent + widest_label + HINT_GAP * scale).min(ix + iw * COLUMN_MAX_FRACTION)
 }
 
 /// Paths keep their root context; overflow is cut at the tail with an
@@ -1922,39 +1963,55 @@ mod tests {
     }
 
     #[test]
-    fn hint_never_overlaps_label_on_a_wide_window() {
-        // Maximized-wide geometry: the panel is centered, so the label's
-        // absolute x exceeds the panel WIDTH. The old budget subtracted that
-        // absolute x from the width, went negative, was clamped to 0 by
-        // `as usize`, and the `> 2` guard then let the full 57-column path
-        // through — right-aligned straight into the label.
+    fn path_column_clears_the_widest_label() {
+        // 列位置由最宽的一行决定，其余行因此不可能与自己的标签冲突。
         let (ix, iw, cell_w, scale) = (960.0, 770.0, 14.0, 1.25);
-        let label = "Windows PowerShell";
-        let label_x = ix + 50.0;
-        let hint = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-        let (hint_x, shown) = fit_hint(label_x, label, 0.0, ix, iw, cell_w, scale, hint).unwrap();
-        let label_end = label_x + label.chars().count() as f32 * cell_w;
-        assert!(hint_x >= label_end, "hint at {hint_x} starts inside the label (ends {label_end})");
-        // 2026-07-29 裁定：溢出保头部（盘符/根上下文），尾部省略号。
+        let text_x = ix + 14.0 * scale;
+        let indent = 26.0 * scale;
+        let widest = text_width_cols("Windows PowerShell") as f32 * cell_w;
+        let col = path_column_x(text_x, indent, widest, ix, iw, scale);
+        assert!(
+            col >= text_x + indent + widest + HINT_GAP * scale - 0.01,
+            "路径列必须落在最宽标签之后至少一个呼吸缝",
+        );
+        assert!(col < ix + iw, "列位置不能跑出面板");
+    }
+
+    #[test]
+    fn path_column_is_capped_so_a_long_label_cannot_squeeze_it_out() {
+        // 单行标签极长时，列被钳住；调用方据此判定冲突并让整条路径让位，
+        // 而不是把路径叠在标签上。
+        let (ix, iw, cell_w, scale) = (0.0, 600.0, 12.0, 1.0);
+        let absurd = text_width_cols("启动：一个足够长到吃掉整行宽度的 profile 名字标签") as f32 * cell_w;
+        let col = path_column_x(ix + 14.0, 26.0, absurd, ix, iw, scale);
+        assert!(col <= ix + iw * 0.62 + 0.01, "列必须被钳在面板 62% 内");
+    }
+
+    #[test]
+    fn path_column_is_identical_for_every_row() {
+        // 「长的长短的短」的回归防线：列位置只依赖最宽标签，与某一行自身
+        // 的路径长度无关，所以每行拿到的起点完全相同。
+        let (ix, iw, scale) = (100.0, 800.0, 1.0);
+        let col = path_column_x(ix + 14.0, 26.0, 200.0, ix, iw, scale);
+        for _ in 0..5 {
+            assert_eq!(path_column_x(ix + 14.0, 26.0, 200.0, ix, iw, scale), col);
+        }
+    }
+
+    #[test]
+    fn long_paths_keep_their_root_and_ellipsize_at_the_tail() {
+        // 2026-07-29 裁定：溢出保头部（盘符/根上下文），尾部省略号——
+        // 叶名辨识交给标签和推荐卡的完整路径。
+        let shown = fit_head(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", 20);
         assert!(shown.starts_with("C:\\Windows") && shown.ends_with('…'), "got {shown}");
     }
 
     #[test]
-    fn hint_is_dropped_when_the_label_leaves_no_room() {
-        let label = "启动：一个足够长到吃掉整行宽度的 profile 名字标签";
-        assert_eq!(fit_hint(500.0, label, 0.0, 100.0, 600.0, 12.0, 1.0, r"C:\x"), None);
-    }
-
-    #[test]
-    fn cjk_hint_right_aligns_by_display_columns_not_chars() {
-        // Directory-picker hints are paths that may contain CJK; counting
-        // chars instead of columns pushed them past the panel's right edge.
-        let (ix, iw, cell_w) = (0.0, 640.0, 10.0);
-        let hint = "D:/项目/子目录";
-        let (hint_x, shown) = fit_hint(ix + 40.0, "口", 0.0, ix, iw, cell_w, 1.0, hint).unwrap();
-        assert_eq!(shown, hint, "plenty of room: no truncation");
+    fn tail_ellipsis_counts_display_columns_not_chars() {
+        // 目录 picker 的路径可含 CJK；按 char 数裁会溢出面板。
+        let shown = fit_head("D:/项目/一个很长的子目录名字", 10);
         let cols: usize = shown.chars().map(|c| c.width().unwrap_or(0)).sum();
-        assert_eq!(hint_x, ix + iw - 14.0 - cols as f32 * cell_w);
+        assert!(cols <= 10, "按显示列宽裁剪，实测 {cols} 列");
     }
 
     #[test]

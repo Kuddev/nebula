@@ -660,10 +660,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
             advance_spinner_phase(d.nebula_ui_anims.spinner_phase, motion_frame.delta);
     }
     let spinner_phase = d.nebula_ui_anims.spinner_phase;
-    // Tick command palette cursor animation (blink cycle).
-    if d.nebula_palette.is_open() {
-        d.nebula_palette.tick_cursor(motion_frame);
-    }
 
     // Chrome colors come from the theme skin (hover washes flip to dark
     // smoke on the light themes); close-hover red stays semantic.
