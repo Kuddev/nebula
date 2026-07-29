@@ -4,7 +4,7 @@ use nebula_terminal::term::color::Colors;
 use nebula_terminal::vte::ansi::Color;
 
 use super::color::Rgb;
-use super::design_tokens::terminal_feedback::FIXED_TEXT_MIN_CONTRAST;
+use super::ui::tokens::terminal_feedback::FIXED_TEXT_MIN_CONTRAST;
 
 const CACHE_ENTRY_LIMIT: usize = 4096;
 const SURFACE_CHANNEL_TOLERANCE: u8 = 32;
@@ -205,7 +205,7 @@ mod tests {
 
     use super::{TerminalColorResolver, is_fixed_color};
     use crate::display::color::Rgb;
-    use crate::display::design_tokens::terminal_feedback::FIXED_TEXT_MIN_CONTRAST;
+    use crate::display::ui::tokens::terminal_feedback::FIXED_TEXT_MIN_CONTRAST;
 
     const LIGHT_FOREGROUND: Rgb = Rgb::new(36, 41, 47);
     const LIGHT_BACKGROUND: Rgb = Rgb::new(255, 255, 255);

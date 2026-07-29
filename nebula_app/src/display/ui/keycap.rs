@@ -11,14 +11,14 @@ use super::theme::Skin;
 use crate::renderer::ui::UiQuad;
 
 /// Chip height in logical px（与 palette 底栏既有键帽一致）。
-pub(super) const KEY_H: f32 = 20.0;
+pub const KEY_H: f32 = 20.0;
 
 fn cols(text: &str) -> usize {
     text.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
 /// One rendered key chip: `(x, w, key)`；`pluses` 是分隔加号的绘制 X。
-pub(super) struct ComboChips {
+pub struct ComboChips {
     pub chips: Vec<(f32, f32, String)>,
     pub pluses: Vec<f32>,
     /// Bounding box `(x, y, w, h)` across every chip.
@@ -27,7 +27,7 @@ pub(super) struct ComboChips {
 
 /// Lay out a "Ctrl+Shift+P" style combo as per-key chips, right-aligned so
 /// the last chip ends at `right_x`, vertically centered on `center_y`.
-pub(super) fn layout_combo(
+pub fn layout_combo(
     combo: &str,
     right_x: f32,
     center_y: f32,
@@ -57,7 +57,7 @@ pub(super) fn layout_combo(
 }
 
 /// The one chip recipe: hairline ring + panel + surface, radius 4.
-pub(super) fn push_chip(
+pub fn push_chip(
     quads: &mut Vec<UiQuad>,
     sk: &Skin,
     x: f32,
@@ -73,7 +73,7 @@ pub(super) fn push_chip(
 }
 
 /// Push every chip of a laid-out combo.
-pub(super) fn push_combo(quads: &mut Vec<UiQuad>, sk: &Skin, combo: &ComboChips, scale: f32) {
+pub fn push_combo(quads: &mut Vec<UiQuad>, sk: &Skin, combo: &ComboChips, scale: f32) {
     let (_, y, _, h) = combo.bounds;
     for &(x, w, _) in &combo.chips {
         push_chip(quads, sk, x, y, w, h, scale);

@@ -36,7 +36,7 @@ use crate::renderer::ui::UiQuad;
 use crate::renderer::{GlyphCache, Renderer};
 
 use super::SizeInfo;
-use super::theme::Skin;
+use super::ui::theme::Skin;
 
 /// Extensions the viewer opens (double-click in the file tree). Everything
 /// else keeps the tree's default activation behaviour.

@@ -11,6 +11,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use super::ui::{icons, tokens};
 
 /// Result of hit-testing a pixel against the Nebula top chrome bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1616,7 +1617,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
             // would bleed across the seam onto the terminal grid.
             if d.nebula_ssh_hosts.is_empty() && d.nebula_hosts_section_open {
                 use unicode_width::UnicodeWidthChar;
-                const HINT_SCALE: f32 = design_tokens::type_scale::SUPPORTING;
+                const HINT_SCALE: f32 = tokens::type_scale::SUPPORTING;
                 let hint_flags = nebula_terminal::term::cell::Flags::empty();
                 let (pnl_x, _, pnl_w, _) = tab_layout.panel;
                 let text_x = hh_x + s(28.0);

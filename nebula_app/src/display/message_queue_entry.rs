@@ -8,7 +8,7 @@
 use nebula_terminal::term::cell::Flags;
 
 use super::color::Rgb;
-use super::theme::Skin;
+use super::ui::theme::Skin;
 use super::{SizeInfo, UiLanguage};
 use crate::renderer::ui::{Gradient, Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};

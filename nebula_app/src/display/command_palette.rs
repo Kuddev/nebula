@@ -961,7 +961,7 @@ pub fn palette_layout(
     let s = |v: f32| v * scale;
     let margin = s(8.0);
     let pad = s(12.0);
-    let row_h = s(super::design_tokens::control::COMPACT_ROW);
+    let row_h = s(super::ui::tokens::control::COMPACT_ROW);
     // 搜索框与结果行等高：输入仍然可发现，但不会压过真正的数据内容。
     let input_h = row_h;
     let cards = model.is_picker();
@@ -1095,7 +1095,14 @@ pub(super) fn push_quads(
     // （浅色主题还因 alpha 差露出脏渐变）。
     quads.push(UiQuad::solid(px, py, pw, ph, s(14.0), sk.panel));
 
-    quads.push(UiQuad::solid(ix, iy, iw, ih, s(super::design_tokens::control::RADIUS), sk.input));
+    quads.push(UiQuad::solid(
+        ix,
+        iy,
+        iw,
+        ih,
+        s(super::ui::tokens::radius::CONTROL),
+        sk.input,
+    ));
     if model.query_all_selected() && !model.query.is_empty() {
         let cell_w = size.cell_width();
         let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
@@ -1115,14 +1122,14 @@ pub(super) fn push_quads(
     // Ctrl+K 键帽（图4/图8）：仅 shell picker 空查询时展示，指认打开快捷
     // 键；输入开始后让位给查询文字。
     if model.mode == PaletteMode::Profiles && model.query.is_empty() {
-        let combo = super::keycap::layout_combo(
+        let combo = super::ui::keycap::layout_combo(
             "Ctrl+K",
             ix + iw - s(GUTTER),
             iy + ih / 2.0,
             cell_w,
             scale,
         );
-        super::keycap::push_combo(quads, &sk, &combo, scale);
+        super::ui::keycap::push_combo(quads, &sk, &combo, scale);
     }
 
     if let Some((fx, fy, fw, fh)) = layout.footer {
@@ -1223,7 +1230,7 @@ pub(super) fn push_quads(
         // 图8 规范：命令列表右侧的快捷键 hint 画成逐键 chip 底（键名在文
         // 字 pass）。挤不下就整组让位，不压进标签。
         if !cards && !entry.hint.is_empty() {
-            let combo = super::keycap::layout_combo(
+            let combo = super::ui::keycap::layout_combo(
                 &entry.hint,
                 ix + iw - s(GUTTER),
                 ry + rh / 2.0,
@@ -1234,7 +1241,7 @@ pub(super) fn push_quads(
                 + entry.label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
                     * cell_w;
             if combo.bounds.0 > label_end + s(HINT_GAP) {
-                super::keycap::push_combo(quads, &sk, &combo, scale);
+                super::ui::keycap::push_combo(quads, &sk, &combo, scale);
             }
         }
         if !entry.is_default || (hero && row == 0) {
@@ -1260,11 +1267,11 @@ pub(super) fn push_quads(
     if let Some((_, fy, _, fh)) = layout.footer {
         // 图8 键帽规范：底栏键帽与 Ctrl+K/设置页共用同一 chip 配方。底栏
         // 背景横贯面板，但里面的文字与卡片列对齐（走 ix/iw，不是 panel）。
-        let key_h = s(super::keycap::KEY_H);
+        let key_h = s(super::ui::keycap::KEY_H);
         let key_y = fy + (fh - key_h) * 0.5;
         let mut chip = |quads: &mut Vec<UiQuad>, x: f32, cols: usize| {
             let width = cols as f32 * cell_w + s(8.0);
-            super::keycap::push_chip(quads, &sk, x, key_y, width, key_h, scale);
+            super::ui::keycap::push_chip(quads, &sk, x, key_y, width, key_h, scale);
         };
         chip(quads, ix, 3);
         chip(quads, ix + iw * 0.42, 5);
@@ -1391,7 +1398,7 @@ pub(super) fn draw_text(
     }
     // Ctrl+K 键帽文字（chip 底在 quad pass，几何同源）。
     if model.mode == PaletteMode::Profiles && model.query.is_empty() {
-        let combo = super::keycap::layout_combo(
+        let combo = super::ui::keycap::layout_combo(
             "Ctrl+K",
             ix + iw - s(GUTTER),
             iy + ih / 2.0,
@@ -1479,7 +1486,7 @@ pub(super) fn draw_text(
             if !cards {
                 // 图8 规范：命令列表快捷键 hint 逐键 chip；与 quad pass 用
                 // 同一 layout_combo 几何与让位守卫。
-                let combo = super::keycap::layout_combo(
+                let combo = super::ui::keycap::layout_combo(
                     &hint,
                     ix + iw - s(GUTTER),
                     row_y + row_hh / 2.0,
@@ -1537,10 +1544,10 @@ fn draw_combo_text(
     r: &mut Renderer,
     gc: &mut GlyphCache,
     size: &SizeInfo,
-    combo: &super::keycap::ComboChips,
+    combo: &super::ui::keycap::ComboChips,
     cell_w: f32,
     cell_h: f32,
-    sk: &super::theme::Skin,
+    sk: &super::ui::theme::Skin,
 ) {
     let (_, key_y, _, key_h) = combo.bounds;
     let ty = key_y + (key_h - cell_h) / 2.0;

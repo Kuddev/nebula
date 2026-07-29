@@ -1,0 +1,247 @@
+//! 浮层配方：面板、卡片、描边、遮罩。本层的核心。
+//!
+//! # 为什么需要它
+//!
+//! 2026-07-29 侦察：`(x-1, y-1, w+2, h+2)` + hairline + 填充这套描边配方在
+//! `display/` 下手写了 **95 处**，八个浮层用了**六种**圆角。结果是任何一条视觉
+//! 规则（明度阶梯、阴影、遮罩、圆角）都无法一次改全——这正是"配色改不干净"的
+//! 结构性原因。
+//!
+//! 这里的函数是那些配方的唯一来源。新的浮层不应该再手写 quad 序列。
+//!
+//! # 遮罩的二分（重要）
+//!
+//! [`Elevation`] 把「是否画遮罩」编码进类型，而不是留给调用方决定。理由是遮罩
+//! 传达的是一份**模态承诺**——「我打断了你，请先处理我」。随手开关的浮层给出这
+//! 份承诺，会凭空抬高用户的心理成本，还会遮住它自己经常需要被参考的上下文。
+//!
+//! otty 的命令面板有像素证据：面板打开时背景终端文字和侧栏亮度完全未变，
+//! 浮起靠的是「明度对比 + 大扩散阴影」，不是压暗背景。
+//! 详见 `docs/nebula-visual-design-language.md` 裁定三。
+
+use super::theme::Skin;
+use super::tokens::{control, elevation, radius};
+use crate::renderer::ui::{Rgba, UiQuad};
+
+/// `(x, y, width, height)`，逻辑像素。
+pub type Rect = (f32, f32, f32, f32);
+
+/// 浮层的高度层级。决定阴影扩散、圆角，以及**是否画遮罩**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Elevation {
+    /// 小浮层：右键菜单、下拉 popup、tooltip。不画遮罩。
+    Menu,
+    /// 大浮层：命令面板、shell 选择器。可 Esc、无后果、随手开关——
+    /// **不画遮罩**，靠明度对比与大扩散阴影浮起。
+    Popover,
+    /// 模态：确认框、设置页、SSH 编辑器。要求决策、有后果，
+    /// 画遮罩（冷调压暗，不是白雾）。
+    Modal,
+}
+
+impl Elevation {
+    /// `(blur, offset_y)`，逻辑像素。阴影扩散必须与被托举的面积成比例：
+    /// 一组适合小菜单的参数放在整块命令面板下面就托不住。
+    #[inline]
+    fn shadow(self) -> (f32, f32) {
+        match self {
+            Self::Menu => (elevation::MENU_BLUR, elevation::MENU_OFFSET_Y),
+            Self::Popover => (elevation::POPOVER_BLUR, elevation::POPOVER_OFFSET_Y),
+            Self::Modal => (elevation::MODAL_BLUR, elevation::MODAL_OFFSET_Y),
+        }
+    }
+
+    /// 只有模态阻断交互，所以只有模态画遮罩。
+    #[inline]
+    pub fn dims_background(self) -> bool {
+        matches!(self, Self::Modal)
+    }
+}
+
+/// 浮层内容块的状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardState {
+    Default,
+    Hover,
+    /// 当前选中项。强调色预算一屏只花一次，就花在这里——
+    /// 不要同时给推荐卡、导航 pill 也染色。
+    Selected,
+}
+
+/// 按入场进度衰减 alpha。`progress` 取 0..1，1 为完全不透明。
+#[inline]
+pub fn fade(color: Rgba, progress: f32) -> Rgba {
+    if progress >= 1.0 {
+        return color;
+    }
+    Rgba::new(color.r, color.g, color.b, (color.a as f32 * progress.clamp(0.0, 1.0)).round() as u8)
+}
+
+/// 发丝描边环。替代散落各处的手写 `(x-1, y-1, w+2, h+2)`。
+///
+/// 外圆角自动取 `radius + hairline`，保证内外弧**同心**——手写处常常内外用同一
+/// 个半径，那样描边在圆角处会变粗，是"边缘发毛"的来源之一。
+///
+/// `radius` 传入的是**内**圆角（已乘过 scale）。
+pub fn push_stroke(quads: &mut Vec<UiQuad>, rect: Rect, radius: f32, scale: f32, color: Rgba) {
+    let hairline = (control::HAIRLINE * scale).max(1.0);
+    let (x, y, w, h) = rect;
+    quads.push(UiQuad::solid(
+        x - hairline,
+        y - hairline,
+        w + hairline * 2.0,
+        h + hairline * 2.0,
+        radius + hairline,
+        color,
+    ));
+}
+
+/// 浮层的底：遮罩（仅 [`Elevation::Modal`]）→ 外阴影 → 发丝环 → 面板填充。
+///
+/// `viewport` 是整窗尺寸 `(width, height)`，只有模态用得上。
+/// `progress` 是入场动画进度，所有颜色按它衰减。
+pub fn push_surface(
+    quads: &mut Vec<UiQuad>,
+    rect: Rect,
+    viewport: (f32, f32),
+    scale: f32,
+    sk: &Skin,
+    level: Elevation,
+    progress: f32,
+) {
+    let (x, y, w, h) = rect;
+    let corner = radius::OVERLAY * scale;
+
+    if level.dims_background() {
+        quads.push(UiQuad::solid(0.0, 0.0, viewport.0, viewport.1, 0.0, fade(sk.veil, progress)));
+    }
+
+    // 外阴影承担 Z 轴层级；发丝环只负责在浅色背景上定义边界。两者分工不同，
+    // 缺了阴影就只剩一条线，浮层会"贴"在背景上而不是浮起来。
+    let (blur, offset_y) = level.shadow();
+    let shadow_alpha = if sk.is_light {
+        elevation::SHADOW_ALPHA_LIGHT
+    } else {
+        elevation::SHADOW_ALPHA_DARK
+    };
+    quads.push(UiQuad::shadow(
+        x,
+        y,
+        w,
+        h,
+        corner,
+        blur * scale,
+        offset_y * scale,
+        fade(Rgba::new(0, 0, 0, shadow_alpha), progress),
+    ));
+
+    push_stroke(quads, rect, corner, scale, fade(sk.hairline, progress));
+    quads.push(UiQuad::solid(x, y, w, h, corner, fade(sk.panel, progress)));
+}
+
+/// 浮层内部的内容块。
+pub fn push_card(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, state: CardState) {
+    let (x, y, w, h) = rect;
+    let corner = radius::OVERLAY * scale;
+    let fill = match state {
+        CardState::Default => sk.card,
+        CardState::Hover => sk.hover,
+        CardState::Selected => sk.accent_soft,
+    };
+    quads.push(UiQuad::solid(x, y, w, h, corner, fill));
+}
+
+/// 下沉表面（文本输入框）。聚焦时描边换成强调色——焦点不能只靠颜色深浅表示。
+pub fn push_input(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, focused: bool) {
+    let (x, y, w, h) = rect;
+    let corner = radius::CONTROL * scale;
+    let stroke = if focused {
+        Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255)
+    } else {
+        sk.hairline
+    };
+    push_stroke(quads, rect, corner, scale, stroke);
+    quads.push(UiQuad::solid(x, y, w, h, corner, sk.input));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::display::ui::theme::NebulaTheme;
+
+    fn light() -> Skin {
+        NebulaTheme::SilverLight.skin()
+    }
+
+    #[test]
+    fn stroke_ring_stays_concentric_with_its_fill() {
+        // 内外弧同心的判据：外半径 - 内半径 == 描边宽度。不满足时描边在圆角
+        // 处会变粗，边缘发毛。
+        let mut quads = Vec::new();
+        let rect = (100.0, 50.0, 200.0, 80.0);
+        push_stroke(&mut quads, rect, 8.0, 1.0, Rgba::new(0, 0, 0, 40));
+
+        let ring = &quads[0];
+        assert_eq!(ring.radius - 8.0, 1.0, "外圆角必须等于内圆角 + 描边宽");
+        assert_eq!((ring.x, ring.y), (99.0, 49.0));
+        assert_eq!((ring.width, ring.height), (202.0, 82.0));
+    }
+
+    #[test]
+    fn stroke_hairline_never_falls_below_one_physical_pixel() {
+        // 缩放小于 1 时 hairline 会算出亚像素宽度，在整数像素栅格上会消失。
+        let mut quads = Vec::new();
+        push_stroke(&mut quads, (0.0, 0.0, 10.0, 10.0), 4.0, 0.5, Rgba::new(0, 0, 0, 40));
+        assert_eq!(quads[0].width, 12.0, "描边宽应被钳到 1px，而不是 0.5px");
+    }
+
+    #[test]
+    fn only_modal_dims_the_background() {
+        // 裁定三的回归防线：popover 加遮罩会凭空给出「我打断了你」的承诺，
+        // 并遮住它自己经常需要被参考的上下文。
+        assert!(!Elevation::Menu.dims_background());
+        assert!(!Elevation::Popover.dims_background());
+        assert!(Elevation::Modal.dims_background());
+
+        let sk = light();
+        for level in [Elevation::Menu, Elevation::Popover] {
+            let mut quads = Vec::new();
+            push_surface(&mut quads, (10.0, 10.0, 100.0, 60.0), (800.0, 600.0), 1.0, &sk, level, 1.0);
+            assert!(
+                !quads.iter().any(|q| q.width >= 800.0 && q.height >= 600.0),
+                "{level:?} 不该产生任何整窗遮罩 quad",
+            );
+            assert_eq!(quads.len(), 3, "{level:?} 应只有阴影 + 发丝环 + 填充");
+        }
+
+        let mut quads = Vec::new();
+        push_surface(
+            &mut quads,
+            (10.0, 10.0, 100.0, 60.0),
+            (800.0, 600.0),
+            1.0,
+            &sk,
+            Elevation::Modal,
+            1.0,
+        );
+        let veil = &quads[0];
+        assert_eq!((veil.x, veil.y, veil.width, veil.height), (0.0, 0.0, 800.0, 600.0));
+    }
+
+    #[test]
+    fn shadow_spread_scales_with_surface_size() {
+        // 小菜单的阴影参数放在整块面板下面托不住，所以按层级分档。
+        let (menu_blur, _) = Elevation::Menu.shadow();
+        let (popover_blur, _) = Elevation::Popover.shadow();
+        let (modal_blur, _) = Elevation::Modal.shadow();
+        assert!(menu_blur < popover_blur && popover_blur < modal_blur);
+    }
+
+    #[test]
+    fn fade_is_identity_at_full_progress() {
+        let c = Rgba::new(10, 20, 30, 200);
+        assert_eq!(fade(c, 1.0).a, 200);
+        assert_eq!(fade(c, 0.5).a, 100);
+        assert_eq!(fade(c, 0.0).a, 0);
+    }
+}
