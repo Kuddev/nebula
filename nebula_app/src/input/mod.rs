@@ -106,6 +106,9 @@ pub trait ActionContext<T: EventListener> {
     fn nebula_sync(&self, _push: bool) {}
 
     fn nebula_ssh_test(&mut self) {}
+    /// Flush a settings-page quick-terminal hotkey change to the global
+    /// processor after the display has accepted a captured combo.
+    fn nebula_quick_hotkey_changed(&mut self) {}
     /// Open the SFTP drawer through this window's event proxy.
     fn nebula_open_sftp(&mut self, _destination: String) {}
     /// Stable SSH identity of the pane receiving this input, when it is a

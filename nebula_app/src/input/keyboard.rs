@@ -57,8 +57,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 // ModifiersChanged 路径清掉。
                 CaptureOutcome::Pending => self.ctx.display().keymap_capture_preview(mods),
                 CaptureOutcome::Cancel => self.ctx.display().keymap_cancel_capture(),
-                CaptureOutcome::ClearCustom => self.ctx.display().keymap_clear_custom(row),
-                CaptureOutcome::Bind(combo) => self.ctx.display().keymap_assign(row, combo),
+                CaptureOutcome::ClearCustom => {
+                    self.ctx.display().keymap_clear_custom(row);
+                    self.ctx.nebula_quick_hotkey_changed();
+                },
+                CaptureOutcome::Bind(combo) => {
+                    self.ctx.display().keymap_assign(row, combo);
+                    self.ctx.nebula_quick_hotkey_changed();
+                },
             }
             self.ctx.mark_dirty();
             return;
@@ -384,6 +390,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     _ => {},
                 }
+                // Enter on the footer's test action stages a request in
+                // Display; ActionContext owns the event proxy that starts it.
+                self.ctx.nebula_ssh_test();
             }
             self.ctx.mark_dirty();
             return;

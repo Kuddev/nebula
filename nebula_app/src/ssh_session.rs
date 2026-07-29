@@ -594,6 +594,10 @@ pub(crate) async fn open_sftp(
 /// 测试要回答「保存后能不能连上」，不是「上次保存的配置行不行」。
 #[derive(Debug, Clone)]
 pub struct SshTestRequest {
+    /// Window-local monotonic id. The editor may be changed and tested again
+    /// while an older network task is still finishing, so address equality is
+    /// not sufficient to associate a result with its request.
+    pub request_id: u64,
     pub destination: String,
     pub auth: crate::ssh_profiles::SshAuthMode,
     pub private_keys: Vec<PathBuf>,
@@ -612,6 +616,7 @@ pub fn spawn_test(
 ) -> io::Result<()> {
     runtime()?.spawn(async move {
         let started = std::time::Instant::now();
+        let request_id = request.request_id;
         let raw = request.destination.clone();
         let outcome = tokio::time::timeout(TEST_TIMEOUT, async {
             let resolved = tokio::task::spawn_blocking({
@@ -630,6 +635,7 @@ pub fn spawn_test(
         };
         let _ = proxy.send_event(crate::event::Event::new(
             crate::event::EventType::SshTestDone {
+                request_id,
                 destination: raw,
                 ok,
                 message,
@@ -671,6 +677,7 @@ async fn test_authenticate(
     if session.authenticate_none(&destination.user).await?.success() {
         return Ok(());
     }
+    let has_draft_password = request.password.as_deref().is_some_and(|password| !password.is_empty());
     if let Some(password) = request.password.as_deref().filter(|p| !p.is_empty()) {
         if authenticate_password(session, &destination.user, password.as_bytes()).await? {
             return Ok(());
@@ -690,6 +697,12 @@ async fn test_authenticate(
                 }
             },
             AuthMethod::StoredPassword => {
+                // A non-empty draft is the user's explicit answer for this
+                // test. Do not let an older credential-manager value turn a
+                // wrong draft into a misleading success.
+                if has_draft_password {
+                    continue;
+                }
                 if !loaded_stored_password {
                     stored_password =
                         crate::ssh_credentials::load_stored_password(&destination.original)?;

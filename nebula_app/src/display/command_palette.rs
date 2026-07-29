@@ -361,6 +361,8 @@ pub struct CommandPalette {
     /// new-tab dropdown) these are detected shells + config profiles; in the
     /// full palette they're the config profiles appended after the actions.
     profiles: Vec<ProfileRow>,
+    /// Stable id of the default shell, used by the shell/profile picker badge.
+    default_shell_id: Option<String>,
     /// Frecency-ranked directory rows supplied by `DirectoryHistory`.
     directories: Vec<DirectoryRow>,
     mode: PaletteMode,
@@ -387,6 +389,7 @@ impl CommandPalette {
             selected: None, // No selection until user navigates
             recent: Vec::new(),
             profiles: Vec::new(),
+            default_shell_id: None,
             directories: Vec::new(),
             mode: PaletteMode::Commands,
             hover: None,
@@ -423,6 +426,21 @@ impl CommandPalette {
         self.open && self.mode == PaletteMode::Directories
     }
 
+    /// 图4 版式：shell picker 空查询时，首行（默认 shell）渲染为"推荐"
+    /// 大卡片，其余行归入"所有选项"。搜索中或无默认时退回平铺卡片列表。
+    pub fn hero_row(&self) -> bool {
+        self.mode == PaletteMode::Profiles
+            && self.query.is_empty()
+            && matches!(
+                self.filtered.first(),
+                Some(&PaletteCandidate::Profile(index)) if matches!(
+                    &self.profiles[index],
+                    ProfileRow::Shell { shell, .. }
+                        if self.default_shell_id.as_deref() == Some(shell.id.as_str())
+                )
+            )
+    }
+
     /// Refresh the dynamic quick-launch rows from the config's profile names.
     /// Called by the full-palette open path so a reloaded config is reflected.
     pub fn set_profiles(&mut self, names: &[String]) {
@@ -443,7 +461,12 @@ impl CommandPalette {
     /// Populate the new-tab dropdown: detected shells first (installed-shell
     /// order), then config profiles. The label carries no verb prefix here —
     /// this menu IS the shell picker, so bare names read cleaner.
-    pub fn set_shell_menu(&mut self, shells: &[DetectedShell], profiles: &[String]) {
+    pub fn set_shell_menu(
+        &mut self,
+        shells: &[DetectedShell],
+        profiles: &[String],
+        default_shell_id: &str,
+    ) {
         let mut rows: Vec<ProfileRow> = shells
             .iter()
             .map(|shell| ProfileRow::Shell {
@@ -458,7 +481,16 @@ impl CommandPalette {
             search: format!("{name} profile launch connect qidong"),
             index,
         }));
+        // 图4 版式：默认 shell 是"推荐"大卡片，必须占首行 —— Enter 直接
+        // 打开推荐项，检测顺序不再决定谁排第一。
+        if let Some(position) = rows.iter().position(|row| {
+            matches!(row, ProfileRow::Shell { shell, .. } if shell.id == default_shell_id)
+        }) {
+            let default_row = rows.remove(position);
+            rows.insert(0, default_row);
+        }
         self.profiles = rows;
+        self.default_shell_id = Some(default_shell_id.to_owned());
     }
 
     /// Populate the settings "默认 Shell" picker: detected shells only (no
@@ -474,6 +506,7 @@ impl CommandPalette {
                 shell: shell.clone(),
             })
             .collect();
+        self.default_shell_id = None;
     }
 
     pub fn set_directories(&mut self, paths: Vec<PathBuf>) {
@@ -530,6 +563,7 @@ impl CommandPalette {
         self.mode = PaletteMode::Commands;
         self.hover = None;
         self.query_selection.clear();
+        self.default_shell_id = None;
     }
 
     /// 指针驱动的 hover 更新（武装门在此）：打开后指针必须从首次上报
@@ -571,11 +605,6 @@ impl CommandPalette {
         }
         self.hover = row;
         true
-    }
-
-    /// The number of filtered results currently shown.
-    pub fn visible_count(&self) -> usize {
-        self.filtered.len()
     }
 
     /// Update cursor blink state. Call this each frame while the palette is open.
@@ -641,9 +670,9 @@ impl CommandPalette {
     /// Confirm the current selection: records it as recent, closes the palette,
     /// and returns the action to run, or `None` when nothing matches.
     pub fn confirm(&mut self) -> Option<PaletteAction> {
-        // The first row is visibly selected on a freshly opened palette. Make
-        // Enter execute that same row even before arrow navigation, otherwise
-        // the UI advertises an action that the keyboard cannot confirm.
+        // Enter executes the first row before arrow navigation. The full
+        // command palette also paints that row selected; lightweight pickers
+        // start visually neutral per稿二 but keep this efficient keyboard path.
         let selected = self.selected.unwrap_or(0);
         let candidate = *self.filtered.get(selected)?;
         // 必须在 close() 清空模式之前计算动作；旧实现先关闭再判断
@@ -763,7 +792,8 @@ impl CommandPalette {
         // still wraps to the last row, matching the existing keyboard model.
         let Some(selected) = self.selected else {
             let rows = self.filtered.iter().take(max_rows).map(|&row| self.row_for(row)).collect();
-            return (rows, Some(0));
+            let selected = (self.mode == PaletteMode::Commands).then_some(0);
+            return (rows, selected);
         };
         // Keep the selection visible: once it passes the last row, scroll so it
         // sits on the bottom line of the window.
@@ -780,18 +810,25 @@ impl CommandPalette {
                 color_id: String::new(),
                 label: localized_item_label(&ITEMS[index], self.language).to_owned(),
                 hint: ITEMS[index].hint.to_string(),
+                is_default: false,
             },
             PaletteCandidate::Profile(index) => PaletteRow {
                 icon: self.profiles[index].icon().to_string(),
                 color_id: self.profiles[index].color_id().to_string(),
                 label: self.profiles[index].label().to_string(),
                 hint: self.profiles[index].hint().to_string(),
+                is_default: matches!(
+                    &self.profiles[index],
+                    ProfileRow::Shell { shell, .. }
+                        if self.default_shell_id.as_deref() == Some(shell.id.as_str())
+                ),
             },
             PaletteCandidate::Directory(index) => PaletteRow {
                 icon: "\u{f07b}".to_owned(),
                 color_id: String::new(),
                 label: self.directories[index].label.clone(),
                 hint: self.directories[index].hint.clone(),
+                is_default: false,
             },
         }
     }
@@ -843,6 +880,7 @@ pub struct PaletteRow {
     pub color_id: String,
     pub label: String,
     pub hint: String,
+    pub is_default: bool,
 }
 
 /// Subsequence fuzzy score, or `None` if the needle isn't a subsequence of the
@@ -880,47 +918,140 @@ pub struct PaletteLayout {
     pub panel: (f32, f32, f32, f32),
     /// Query input box `(x, y, w, h)`.
     pub input: (f32, f32, f32, f32),
-    /// Height of one result row.
+    /// Height of one standard result row.
     pub row_h: f32,
-    /// Top Y of the first result row.
+    /// Top Y of the first result row (or of its section header).
     pub list_y: f32,
     /// Maximum rows drawn before the list scrolls.
     pub max_rows: usize,
+    /// Keyboard-hint footer for picker modes; absent in the full command list.
+    pub footer: Option<(f32, f32, f32, f32)>,
+    /// Per-visible-row rects `(y, h)`; x/w span the panel's inner width. The
+    /// picker's card geometry is non-uniform (hero card, section gaps), so
+    /// rendering AND hit-testing must both read row rects from here instead
+    /// of dividing by `row_h`.
+    pub rows: Vec<(f32, f32)>,
+    /// Section caption baselines for the picker: (推荐, 所有选项).
+    pub headers: (Option<f32>, Option<f32>),
+}
+
+impl PaletteLayout {
+    /// Visible-row index under a point, honoring the non-uniform card
+    /// geometry. Points on section captions or card gaps return `None`.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        let (px, _, pw, _) = self.panel;
+        if x < px || x >= px + pw {
+            return None;
+        }
+        self.rows.iter().position(|&(ry, rh)| y >= ry && y < ry + rh)
+    }
 }
 
 /// Compute the centered popup layout for a window of `win_w` × `win_h`. The
-/// panel height is fixed (sized for `max_rows`) so it doesn't jump as the match
-/// count changes while typing. Every palette mode uses the same search-input
-/// geometry, keeping rendering, hover and click hit-testing on one contract.
-pub fn palette_layout(win_w: f32, win_h: f32, scale: f32) -> PaletteLayout {
+/// command list keeps a fixed panel height (sized for `max_rows`) so it
+/// doesn't jump as the match count changes while typing; pickers shrink to
+/// their content. Every palette mode uses the same search-input geometry,
+/// keeping rendering, hover and click hit-testing on one contract.
+pub fn palette_layout(
+    model: &CommandPalette,
+    win_w: f32,
+    win_h: f32,
+    scale: f32,
+) -> PaletteLayout {
     let s = |v: f32| v * scale;
     let margin = s(8.0);
     let pad = s(12.0);
     let row_h = s(super::design_tokens::control::COMPACT_ROW);
     // 搜索框与结果行等高：输入仍然可发现，但不会压过真正的数据内容。
     let input_h = row_h;
-    let max_rows = 8usize;
+    let cards = model.is_picker();
+    let max_rows = if cards { 10usize } else { 8usize };
+    let visible = model.filtered.len().min(max_rows);
+    let hero = model.hero_row() && visible > 0;
+    let footer_h = if cards { s(36.0) } else { 0.0 };
+    let header_h = s(24.0);
+    let gap = s(6.0);
+    let hero_h = s(58.0);
 
-    let pw = s(640.0).min(win_w - 2.0 * margin);
-    let ph = pad + input_h + s(8.0) + max_rows as f32 * row_h + pad;
+    // List geometry relative to the list's top edge. Pickers lay cards out
+    // with section captions and gaps (图4); the command list stays a dense
+    // uniform grid.
+    let mut rel_rows: Vec<(f32, f32)> = Vec::with_capacity(visible);
+    let mut rel_headers: (Option<f32>, Option<f32>) = (None, None);
+    let mut y = 0.0f32;
+    if cards {
+        let slots = visible.max(1);
+        let mut rest = slots;
+        if hero {
+            rel_headers.0 = Some(y);
+            y += header_h;
+            rel_rows.push((y, hero_h));
+            y += hero_h + s(10.0);
+            rest = slots - 1;
+            if rest > 0 {
+                rel_headers.1 = Some(y);
+                y += header_h;
+            }
+        }
+        for extra in 0..rest {
+            if rel_rows.len() < visible {
+                rel_rows.push((y, row_h));
+            }
+            y += row_h;
+            if extra + 1 < rest {
+                y += gap;
+            }
+        }
+        y += s(4.0);
+    } else {
+        for _ in 0..max_rows {
+            if rel_rows.len() < visible {
+                rel_rows.push((y, row_h));
+            }
+            y += row_h;
+        }
+    }
+
+    let pw = s(if cards { 620.0 } else { 640.0 }).min(win_w - 2.0 * margin);
+    let ph = pad + input_h + s(8.0) + y + if cards { footer_h } else { pad };
     let px = ((win_w - pw) * 0.5).max(margin);
     let py = ((win_h - ph) * 0.5).max(s(48.0));
 
     let input = (px + pad, py + pad, pw - 2.0 * pad, input_h);
     let list_y = py + pad + input_h + s(8.0);
+    let rows = rel_rows.into_iter().map(|(ry, rh)| (list_y + ry, rh)).collect();
+    let headers =
+        (rel_headers.0.map(|v| list_y + v), rel_headers.1.map(|v| list_y + v));
 
-    PaletteLayout { panel: (px, py, pw, ph), input, row_h, list_y, max_rows }
+    let footer = cards.then_some((px, py + ph - footer_h, pw, footer_h));
+
+    PaletteLayout { panel: (px, py, pw, ph), input, row_h, list_y, max_rows, footer, rows, headers }
 }
 
 // ---- rendering (the parent `display::mod` hands in the model + renderer;
 // this module owns the palette's pixels — same split as `side_panel.rs`) ----
 
-use crate::renderer::ui::{Gradient, Rgba, UiQuad};
+use crate::renderer::ui::{Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
 
+/// 卡片列的左右内边距，也是**右侧基准线**：输入框的 Ctrl+K 键帽、推荐卡
+/// 的 ↵ chip、路径列、命令行的快捷键 chip、底栏的 Esc 提示——所有右贴边
+/// 元素都从 `ix + iw - s(GUTTER)` 起算，右缘才连成一条竖线。
+///
+/// 2026-07-29：此前这里散着 10/12/14 三个值，底栏还错用了 panel 坐标
+/// （`px + pw - s(16)`，实际只内缩 4px），右侧看着毛糙且随字号漂移。
+const GUTTER: f32 = 14.0;
+
+/// 标签右缘与右侧信息列之间的最小呼吸缝。挤不下就整列让位，绝不重叠。
+const HINT_GAP: f32 = 24.0;
+
+/// 文字与相邻 chip（推荐卡的 ↵）之间的缝——比 [`HINT_GAP`] 窄，因为 chip
+/// 自带视觉边界，不需要靠空白来分隔。
+const CHIP_GAP: f32 = 12.0;
+
 /// Push the palette's background quads: a dim veil over the window, the glass
-/// panel (glow + gradient border + fill, matching the settings modal), the
-/// query input box, and the selected-row
+/// panel (glow + gradient border + solid fill, matching the settings modal),
+/// the query input box, and the selected-row
 /// highlight. No-op while closed.
 pub(super) fn push_quads(
     model: &CommandPalette,
@@ -937,11 +1068,11 @@ pub(super) fn push_quads(
     let s = |v: f32| v * scale;
     let palette = theme.palette();
     let sk = theme.skin();
-    let layout = palette_layout(w, h, scale);
+    let layout = palette_layout(model, w, h, scale);
     let (px, py, pw, ph) = layout.panel;
     let (ix, iy, iw, ih) = layout.input;
 
-    quads.push(UiQuad::solid(0.0, 0.0, w, h, 0.0, Rgba::new(0, 0, 0, 150)));
+    quads.push(UiQuad::solid(0.0, 0.0, w, h, 0.0, sk.veil));
     quads.push(UiQuad::glow(
         px - s(24.0),
         py - s(22.0),
@@ -949,26 +1080,20 @@ pub(super) fn push_quads(
         ph + s(48.0),
         palette.edge_glow_l,
     ));
-    quads.push(UiQuad::gradient(
+    // Hairline ring, not a gradient stroke: the picker reads as one soft gray
+    // sheet (图4/图5), and the chrome shell stays neutral.
+    quads.push(UiQuad::solid(
         px - s(1.0),
         py - s(1.0),
         pw + s(2.0),
         ph + s(2.0),
         s(15.0),
-        palette.tab_stroke_l,
-        palette.edge_r,
-        Gradient::Axis([0.9, 0.35]),
+        sk.hairline,
     ));
-    quads.push(UiQuad::gradient(
-        px,
-        py,
-        pw,
-        ph,
-        s(14.0),
-        palette.panel,
-        sk.panel_grad_to,
-        Gradient::Axis([0.25, 0.95]),
-    ));
+    // 面板填充是纯色柔和灰：chrome 壳保持中性，此前 panel→term_bg 的渐变
+    // 让弹窗在暗色主题下自成一套明暗，与设置模态和侧栏的平面感割裂
+    // （浅色主题还因 alpha 差露出脏渐变）。
+    quads.push(UiQuad::solid(px, py, pw, ph, s(14.0), sk.panel));
 
     quads.push(UiQuad::solid(ix, iy, iw, ih, s(super::design_tokens::control::RADIUS), sk.input));
     if model.query_all_selected() && !model.query.is_empty() {
@@ -986,35 +1111,172 @@ pub(super) fn push_quads(
         ));
     }
 
-    // Hover background: subtle highlight when the mouse is over a row.
-    if let Some(hover_row) = model.hover {
-        if hover_row < layout.max_rows {
-            let row_y = layout.list_y + hover_row as f32 * layout.row_h;
+    let cell_w = size.cell_width();
+    // Ctrl+K 键帽（图4/图8）：仅 shell picker 空查询时展示，指认打开快捷
+    // 键；输入开始后让位给查询文字。
+    if model.mode == PaletteMode::Profiles && model.query.is_empty() {
+        let combo = super::keycap::layout_combo(
+            "Ctrl+K",
+            ix + iw - s(GUTTER),
+            iy + ih / 2.0,
+            cell_w,
+            scale,
+        );
+        super::keycap::push_combo(quads, &sk, &combo, scale);
+    }
+
+    if let Some((fx, fy, fw, fh)) = layout.footer {
+        quads.push(UiQuad::solid(fx, fy, fw, fh, 0.0, sk.surface));
+        quads.push(UiQuad::solid(fx, fy, fw, s(1.0), 0.0, sk.hairline));
+    }
+
+    let (visible_rows, selected_row) = model.visible(layout.max_rows);
+    let cards = model.is_picker();
+    let hero = model.hero_row();
+    let accent_ring = Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255);
+    if cards {
+        // 卡片行（图4）：柔和灰面板上的浅色卡片，hairline 圈边。选中 =
+        // accent 描边 + 轻染，hover = 中性 wash；推荐大卡片自带 accent
+        // 轻染和右侧回车 chip（glyph 在文字 pass 画）。
+        for (row, &(ry, rh)) in layout.rows.iter().enumerate() {
+            let is_hero = hero && row == 0;
+            let selected = selected_row == Some(row);
+            let ring = if selected { accent_ring } else { sk.hairline };
             quads.push(UiQuad::solid(
-                ix + s(8.0),
-                row_y + s(2.0),
-                iw - s(16.0),
-                layout.row_h - s(4.0),
-                s(6.0),
-                sk.hover,
+                ix - s(1.0),
+                ry - s(1.0),
+                iw + s(2.0),
+                rh + s(2.0),
+                s(9.0),
+                ring,
             ));
+            quads.push(UiQuad::solid(ix, ry, iw, rh, s(8.0), sk.card));
+            if is_hero || selected {
+                quads.push(UiQuad::solid(ix, ry, iw, rh, s(8.0), sk.accent_soft));
+            }
+            if model.hover == Some(row) {
+                quads.push(UiQuad::solid(ix, ry, iw, rh, s(8.0), sk.hover));
+            }
+            if is_hero {
+                let chip = s(28.0);
+                let cx = ix + iw - s(GUTTER) - chip;
+                let cy = ry + (rh - chip) / 2.0;
+                quads.push(UiQuad::solid(
+                    cx - s(1.0),
+                    cy - s(1.0),
+                    chip + s(2.0),
+                    chip + s(2.0),
+                    s(7.0),
+                    sk.hairline,
+                ));
+                quads.push(UiQuad::solid(cx, cy, chip, chip, s(6.0), sk.card));
+            }
+        }
+    } else {
+        // Hover background: subtle highlight when the mouse is over a row.
+        if let Some(hover_row) = model.hover {
+            if let Some(&(ry, rh)) = layout.rows.get(hover_row) {
+                quads.push(UiQuad::solid(
+                    ix + s(8.0),
+                    ry + s(2.0),
+                    iw - s(16.0),
+                    rh - s(4.0),
+                    s(6.0),
+                    sk.hover,
+                ));
+            }
+        }
+        // Highlight pill behind the selected row (list scrolls to keep it
+        // shown).
+        if let Some(row) = selected_row {
+            if let Some(&(ry, rh)) = layout.rows.get(row) {
+                quads.push(UiQuad::solid(
+                    ix + s(8.0),
+                    ry,
+                    iw - s(16.0),
+                    rh - s(4.0),
+                    s(6.0),
+                    sk.accent_soft,
+                ));
+                quads.push(UiQuad::solid(
+                    ix + s(8.0),
+                    ry + s(5.0),
+                    s(2.0),
+                    rh - s(14.0),
+                    s(1.0),
+                    accent_ring,
+                ));
+            }
         }
     }
 
-    // Highlight pill behind the selected row (list scrolls to keep it shown).
-    let (_, selected_row) = model.visible(layout.max_rows);
-    if let Some(row) = selected_row {
-        let ry = layout.list_y + row as f32 * layout.row_h;
-        quads.push(UiQuad::gradient(
-            ix,
-            ry,
-            iw,
-            layout.row_h - s(4.0),
-            s(8.0),
-            palette.tab_bg_l,
-            palette.tab_bg_r,
-            Gradient::Horizontal,
+    // The default badge is deliberately a hairline chip, not another bright
+    // accent pill. It identifies the launch target without competing with the
+    // selected-row affordance. The hero card 已经用"推荐"分区表达默认身份，
+    // 不再叠加徽标。
+    let text_x = ix + s(14.0);
+    let badge = model.language.pick("默认", "Default");
+    let badge_w = badge.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w
+        + s(12.0);
+    for (row, entry) in visible_rows.into_iter().enumerate() {
+        let Some(&(ry, rh)) = layout.rows.get(row) else { continue };
+        // 图8 规范：命令列表右侧的快捷键 hint 画成逐键 chip 底（键名在文
+        // 字 pass）。挤不下就整组让位，不压进标签。
+        if !cards && !entry.hint.is_empty() {
+            let combo = super::keycap::layout_combo(
+                &entry.hint,
+                ix + iw - s(GUTTER),
+                ry + rh / 2.0,
+                cell_w,
+                scale,
+            );
+            let label_end = text_x
+                + entry.label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
+                    * cell_w;
+            if combo.bounds.0 > label_end + s(HINT_GAP) {
+                super::keycap::push_combo(quads, &sk, &combo, scale);
+            }
+        }
+        if !entry.is_default || (hero && row == 0) {
+            continue;
+        }
+        let label_x = if entry.icon.is_empty() { text_x } else { text_x + s(26.0) };
+        let label_w = entry.label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
+            * cell_w;
+        let bx = label_x + label_w + s(8.0);
+        let by = ry + s(7.0);
+        let bh = rh - s(14.0);
+        quads.push(UiQuad::solid(
+            bx - s(1.0),
+            by - s(1.0),
+            badge_w + s(2.0),
+            bh + s(2.0),
+            s(5.0),
+            sk.hairline,
         ));
+        quads.push(UiQuad::solid(bx, by, badge_w, bh, s(4.0), sk.surface));
+    }
+
+    if let Some((_, fy, _, fh)) = layout.footer {
+        // 图8 键帽规范：底栏键帽与 Ctrl+K/设置页共用同一 chip 配方。底栏
+        // 背景横贯面板，但里面的文字与卡片列对齐（走 ix/iw，不是 panel）。
+        let key_h = s(super::keycap::KEY_H);
+        let key_y = fy + (fh - key_h) * 0.5;
+        let mut chip = |quads: &mut Vec<UiQuad>, x: f32, cols: usize| {
+            let width = cols as f32 * cell_w + s(8.0);
+            super::keycap::push_chip(quads, &sk, x, key_y, width, key_h, scale);
+        };
+        chip(quads, ix, 3);
+        chip(quads, ix + iw * 0.42, 5);
+        let esc_cols = text_width_cols(model.language.pick("Esc", "Esc"));
+        chip(
+            quads,
+            ix + iw
+                - s(GUTTER)
+                - (esc_cols + text_width_cols(model.language.pick(" 关闭", " Close"))) as f32
+                    * cell_w,
+            esc_cols,
+        );
     }
 }
 
@@ -1043,7 +1305,7 @@ pub(super) fn draw_text(
     let h = size.height();
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let layout = palette_layout(w, h, scale);
+    let layout = palette_layout(model, w, h, scale);
     let (ix, iy, iw, ih) = layout.input;
 
     // Inks from the theme skin: dark text on light panels, pale on dark.
@@ -1053,7 +1315,7 @@ pub(super) fn draw_text(
     let text_x = ix + s(14.0);
 
     const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
-    r.draw_chrome_text(size, text_x, iy + (ih - cell_h) / 2.0, sk.accent, ICON_SEARCH, gc);
+    r.draw_chrome_text(size, text_x, iy + (ih - cell_h) / 2.0, sk.ink_faint, ICON_SEARCH, gc);
 
     let query_x = text_x + s(28.0);
     let text_y = iy + (ih - cell_h) / 2.0;
@@ -1097,40 +1359,209 @@ pub(super) fn draw_text(
             },
             gc,
         );
+        if let Some((fx, fy, fw, fh)) = layout.footer {
+            let footer_y = fy + (fh - cell_h) * 0.5;
+            r.draw_chrome_text(size, fx + s(16.0), footer_y, sk.ink_dim, model.language.pick("↑ ↓ 选择", "↑ ↓ Select"), gc);
+            r.draw_chrome_text(size, fx + fw * 0.42, footer_y, sk.ink_dim, model.language.pick("Enter 打开", "Enter Open"), gc);
+            r.draw_chrome_text(size, fx + fw - s(16.0) - text_width_cols(model.language.pick("Esc 关闭", "Esc Close")) as f32 * cell_w, footer_y, sk.ink_dim, model.language.pick("Esc 关闭", "Esc Close"), gc);
+        }
         return icon_draws;
     }
 
+    // Section captions (图4): 推荐 / 所有选项。
+    if let Some(hy) = layout.headers.0 {
+        r.draw_chrome_text(
+            size,
+            text_x,
+            hy + s(2.0),
+            sk.ink_dim,
+            model.language.pick("推荐", "Recommended"),
+            gc,
+        );
+    }
+    if let Some(hy) = layout.headers.1 {
+        r.draw_chrome_text(
+            size,
+            text_x,
+            hy + s(2.0),
+            sk.ink_dim,
+            model.language.pick("所有选项", "All options"),
+            gc,
+        );
+    }
+    // Ctrl+K 键帽文字（chip 底在 quad pass，几何同源）。
+    if model.mode == PaletteMode::Profiles && model.query.is_empty() {
+        let combo = super::keycap::layout_combo(
+            "Ctrl+K",
+            ix + iw - s(GUTTER),
+            iy + ih / 2.0,
+            cell_w,
+            scale,
+        );
+        draw_combo_text(r, gc, size, &combo, cell_w, cell_h, &sk);
+    }
+
+    let cards = model.is_picker();
+    let hero = model.hero_row();
     let (rows, selected_row) = model.visible(layout.max_rows);
     for (row, entry) in rows.into_iter().enumerate() {
-        let PaletteRow { icon, color_id, label, hint } = entry;
-        let ry = layout.list_y + row as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0 - s(2.0);
-        let fg = if Some(row) == selected_row { sk.ink_strong } else { sk.ink };
+        let PaletteRow { icon, color_id, label, hint, is_default } = entry;
+        let Some(&(row_y, row_hh)) = layout.rows.get(row) else { break };
+        let is_hero = hero && row == 0;
+        // Hero 卡片双行：名称在上、完整路径在下（图4）；普通行单行居中。
+        let ry = if is_hero {
+            row_y + s(8.0)
+        } else {
+            row_y + (row_hh - cell_h) / 2.0 - s(2.0)
+        };
+        let fg = if Some(row) == selected_row || is_hero { sk.ink_strong } else { sk.ink };
         // Leading icon, then the label indented past it. Detected shells with a
         // brand asset stage a full-color textured quad (drawn later); the rest
         // fall back to the Nerd Font glyph. Built-in action rows carry an empty
         // icon and keep the original left edge.
         let has_color =
             !color_id.is_empty() && crate::shell_detect::color_icon_png(&color_id).is_some();
+        let indent = if is_hero { s(34.0) } else { s(26.0) };
         let label_x = if has_color {
-            // Square icon sized to the glyph ink, vertically centered on the row.
-            let icon_s = (cell_h * 0.92).round();
-            let icon_y = (ry + (cell_h - icon_s) / 2.0).round();
+            // Square icon sized to the glyph ink, vertically centered on the
+            // row (the hero card gets a bigger brand mark).
+            let icon_s = if is_hero { (cell_h * 1.35).round() } else { (cell_h * 0.92).round() };
+            let icon_y = (row_y + (row_hh - icon_s) / 2.0).round();
             icon_draws.push((color_id, (text_x, icon_y, icon_s, icon_s)));
-            text_x + s(26.0)
+            text_x + indent
         } else if icon.is_empty() {
             text_x
         } else {
-            r.draw_chrome_text(size, text_x, ry, sk.accent, &icon, gc);
-            text_x + s(26.0)
+            let icon_y = row_y + (row_hh - cell_h) / 2.0;
+            r.draw_chrome_text(size, text_x, icon_y, sk.accent, &icon, gc);
+            text_x + indent
         };
         r.draw_chrome_text(size, label_x, ry, fg, &label, gc);
-        if !hint.is_empty() {
-            if let Some((hint_x, shown)) = fit_hint(label_x, &label, ix, iw, cell_w, scale, &hint) {
+        let badge = model.language.pick("默认", "Default");
+        let badge_w = if is_default && !is_hero {
+            let width = badge.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
+                * cell_w
+                + s(12.0);
+            r.draw_chrome_text(
+                size,
+                label_x + label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
+                    * cell_w
+                    + s(10.0),
+                ry,
+                sk.ink_dim,
+                badge,
+                gc,
+            );
+            width + s(10.0)
+        } else {
+            0.0
+        };
+        if is_hero {
+            // 第二行完整路径（塞不下时尾部省略号），右侧回车 chip glyph。
+            let chip = s(28.0);
+            let chip_x = ix + iw - s(GUTTER) - chip;
+            let path_y = row_y + row_hh - cell_h - s(8.0);
+            let budget = ((chip_x - s(CHIP_GAP) - label_x) / cell_w).floor();
+            if budget >= 3.0 {
+                let shown = fit_head(&hint, budget as usize);
+                r.draw_chrome_text(size, label_x, path_y, sk.ink_dim, &shown, gc);
+            }
+            let chip_text_y = row_y + (row_hh - cell_h) / 2.0;
+            r.draw_chrome_text(
+                size,
+                chip_x + (chip - cell_w) / 2.0,
+                chip_text_y,
+                sk.accent,
+                "↵",
+                gc,
+            );
+        } else if !hint.is_empty() {
+            if !cards {
+                // 图8 规范：命令列表快捷键 hint 逐键 chip；与 quad pass 用
+                // 同一 layout_combo 几何与让位守卫。
+                let combo = super::keycap::layout_combo(
+                    &hint,
+                    ix + iw - s(GUTTER),
+                    row_y + row_hh / 2.0,
+                    cell_w,
+                    scale,
+                );
+                let label_end = ix + s(GUTTER)
+                    + label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
+                        * cell_w;
+                if combo.bounds.0 > label_end + s(HINT_GAP) {
+                    draw_combo_text(r, gc, size, &combo, cell_w, cell_h, &sk);
+                }
+            } else if let Some((hint_x, shown)) =
+                fit_hint(label_x, &label, badge_w, ix, iw, cell_w, scale, &hint)
+            {
                 r.draw_chrome_text(size, hint_x, ry, sk.ink_dim, &shown, gc);
             }
         }
     }
+    if let Some((_, fy, _, fh)) = layout.footer {
+        let footer_y = fy + (fh - cell_h) * 0.5;
+        r.draw_chrome_text(
+            size,
+            ix,
+            footer_y,
+            sk.ink_dim,
+            model.language.pick("↑ ↓ 选择", "↑ ↓ Select"),
+            gc,
+        );
+        r.draw_chrome_text(
+            size,
+            ix + iw * 0.42,
+            footer_y,
+            sk.ink_dim,
+            model.language.pick("Enter 打开", "Enter Open"),
+            gc,
+        );
+        r.draw_chrome_text(
+            size,
+            ix + iw - s(GUTTER) - text_width_cols(model.language.pick("Esc 关闭", "Esc Close"))
+                as f32
+                * cell_w,
+            footer_y,
+            sk.ink_dim,
+            model.language.pick("Esc 关闭", "Esc Close"),
+            gc,
+        );
+    }
     icon_draws
+}
+
+/// 图8 键帽文字：逐键 chip 内水平居中键名、弱墨 "+" 分隔；几何来自
+/// `keycap::layout_combo`，与 quad pass 同源。
+fn draw_combo_text(
+    r: &mut Renderer,
+    gc: &mut GlyphCache,
+    size: &SizeInfo,
+    combo: &super::keycap::ComboChips,
+    cell_w: f32,
+    cell_h: f32,
+    sk: &super::theme::Skin,
+) {
+    let (_, key_y, _, key_h) = combo.bounds;
+    let ty = key_y + (key_h - cell_h) / 2.0;
+    for (chip_x, chip_w, key) in &combo.chips {
+        let key_cols: usize = key.chars().map(|c| c.width().unwrap_or(0)).sum();
+        r.draw_chrome_text(
+            size,
+            chip_x + (chip_w - key_cols as f32 * cell_w) / 2.0,
+            ty,
+            sk.ink_dim,
+            key,
+            gc,
+        );
+    }
+    for plus_x in &combo.pluses {
+        r.draw_chrome_text(size, *plus_x, ty, sk.ink_faint, "+", gc);
+    }
+}
+
+fn text_width_cols(text: &str) -> usize {
+    text.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
 /// Lay out a row's right-aligned hint next to its left-aligned label: returns
@@ -1141,13 +1572,14 @@ pub(super) fn draw_text(
 /// `iw - label_x - s(28)` 把宽度 `iw` 和绝对坐标 `label_x` 混在一起减——
 /// 面板是居中的，窗口一宽 `label_x` 随之变大，差值变负后被 `as usize`
 /// 钳成 0，`> 2` 的守卫反而放行了完整路径，57 列的 powershell.exe 右对
-/// 齐后一头扎回标签里；字号越大 cell_w 越宽，扎得越深。且预算从标签
-/// *左*缘起算，从没给标签本身留过位置。现在从标签右缘 + 呼吸缝起算，
-/// CJK 按双列计宽（目录 picker 的 hint 是可含中文的路径，按 char 数右
-/// 对齐会溢出面板），塞不下保尾截断——路径的辨识度在文件名那端。
+/// 齐后一头扎回标签里；字号越大 cell_w 越宽，扎得越深。现在从标签右缘
+/// + 呼吸缝起算，CJK 按双列计宽（目录 picker 的 hint 是可含中文的路径，
+/// 按 char 数右对齐会溢出面板）。2026-07-29 裁定：溢出时尾部省略号、保
+/// 留盘符/根上下文（图2/图4）——叶名辨识交给 label 和推荐卡片的完整路径。
 fn fit_hint(
     label_x: f32,
     label: &str,
+    after_label: f32,
     ix: f32,
     iw: f32,
     cell_w: f32,
@@ -1155,15 +1587,40 @@ fn fit_hint(
     hint: &str,
 ) -> Option<(f32, String)> {
     let cols = |t: &str| -> usize { t.chars().map(|c| c.width().unwrap_or(0)).sum() };
-    let label_end = label_x + cols(label) as f32 * cell_w;
-    let right = ix + iw - 14.0 * scale;
-    let budget = ((right - label_end - 24.0 * scale) / cell_w).floor();
+    let label_end = label_x + cols(label) as f32 * cell_w + after_label;
+    let right = ix + iw - GUTTER * scale;
+    let budget = ((right - label_end - HINT_GAP * scale) / cell_w).floor();
     if budget < 3.0 {
         return None;
     }
-    let shown = super::fit_tail(hint, budget as usize);
+    let shown = fit_head(hint, budget as usize);
     let x = right - cols(&shown) as f32 * cell_w;
     Some((x, shown))
+}
+
+/// Paths keep their root context; overflow is cut at the tail with an
+/// ellipsis, matching the mockup's right-aligned path column.
+fn fit_head(value: &str, budget: usize) -> String {
+    let width = |ch: char| ch.width().unwrap_or(0);
+    let total: usize = value.chars().map(width).sum();
+    if total <= budget {
+        return value.to_owned();
+    }
+    if budget <= 1 {
+        return "…".to_owned();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in value.chars() {
+        let w = width(ch);
+        if used + w > budget - 1 {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -1360,7 +1817,7 @@ mod tests {
         palette.open_directories();
         let (rows, selected) = palette.visible(8);
 
-        assert_eq!(selected, Some(0));
+        assert_eq!(selected, None);
         assert_eq!(rows[0].hint, path.display().to_string());
         assert_eq!(palette.confirm(), Some(PaletteAction::NewAtDirectory(path)));
     }
@@ -1368,7 +1825,11 @@ mod tests {
     #[test]
     fn profile_picker_query_filters_rows() {
         let mut palette = CommandPalette::new();
-        palette.set_shell_menu(&[], &["Windows PowerShell".into(), "Git Bash".into()]);
+        palette.set_shell_menu(
+            &[],
+            &["Windows PowerShell".into(), "Git Bash".into()],
+            "powershell",
+        );
         palette.open_profiles();
 
         palette.input_text("git");
@@ -1379,8 +1840,78 @@ mod tests {
 
     #[test]
     fn search_input_and_result_rows_share_compact_height() {
-        let layout = palette_layout(1600.0, 900.0, 1.5);
+        let palette = CommandPalette::new();
+        let layout = palette_layout(&palette, 1600.0, 900.0, 1.5);
         assert_eq!(layout.input.3, layout.row_h);
+    }
+
+    fn shell(name: &str, id: &str, program: &str) -> DetectedShell {
+        DetectedShell {
+            name: name.into(),
+            id: id.into(),
+            program: program.into(),
+            args: vec![],
+        }
+    }
+
+    #[test]
+    fn shell_menu_promotes_default_to_hero_row() {
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(
+            &[
+                shell("CMD", "cmd", r"C:\Windows\System32\cmd.exe"),
+                shell("PowerShell", "powershell", r"C:\Windows\...\powershell.exe"),
+            ],
+            &[],
+            "powershell",
+        );
+        palette.open_profiles();
+        // 检测顺序把 CMD 排前，但推荐位（首行大卡片）必须是默认 shell。
+        assert!(palette.hero_row());
+        let (rows, _) = palette.visible(10);
+        assert_eq!(rows[0].label, "PowerShell");
+        assert!(rows[0].is_default);
+        // 搜索中不分区：hero 退场，回到平铺卡片。
+        palette.input_char('c');
+        assert!(!palette.hero_row());
+    }
+
+    #[test]
+    fn picker_layout_rows_are_non_uniform_and_hit_test_matches() {
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(
+            &[
+                shell("CMD", "cmd", r"C:\Windows\System32\cmd.exe"),
+                shell("PowerShell", "powershell", r"C:\Windows\...\powershell.exe"),
+            ],
+            &[],
+            "powershell",
+        );
+        palette.open_profiles();
+        let layout = palette_layout(&palette, 1600.0, 900.0, 1.0);
+        assert_eq!(layout.rows.len(), 2);
+        let (hero_y, hero_h) = layout.rows[0];
+        let (row_y, row_h) = layout.rows[1];
+        assert!(hero_h > row_h, "推荐大卡片必须比普通卡片高");
+        assert!(layout.headers.0.is_some() && layout.headers.1.is_some());
+        // 命中测试与逐行矩形一致；卡片之间的缝隙与分区标题不可点。
+        let (px, ..) = layout.panel;
+        assert_eq!(layout.row_at(px + 10.0, hero_y + hero_h / 2.0), Some(0));
+        assert_eq!(layout.row_at(px + 10.0, row_y + row_h / 2.0), Some(1));
+        assert_eq!(layout.row_at(px + 10.0, hero_y - 2.0), None, "分区标题不是行");
+        assert_eq!(layout.row_at(px - 20.0, hero_y + 2.0), None, "面板外不命中");
+    }
+
+    #[test]
+    fn command_layout_rows_stay_uniform() {
+        let mut palette = CommandPalette::new();
+        palette.open();
+        let layout = palette_layout(&palette, 1600.0, 900.0, 1.0);
+        assert_eq!(layout.rows.len(), layout.max_rows.min(palette.filtered.len()));
+        for pair in layout.rows.windows(2) {
+            assert_eq!(pair[0].1, pair[1].1, "命令列表保持等高行");
+            assert_eq!(pair[1].0 - pair[0].0, pair[0].1, "无缝隙");
+        }
     }
 
     #[test]
@@ -1394,17 +1925,17 @@ mod tests {
         let label = "Windows PowerShell";
         let label_x = ix + 50.0;
         let hint = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
-        let (hint_x, shown) = fit_hint(label_x, label, ix, iw, cell_w, scale, hint).unwrap();
+        let (hint_x, shown) = fit_hint(label_x, label, 0.0, ix, iw, cell_w, scale, hint).unwrap();
         let label_end = label_x + label.chars().count() as f32 * cell_w;
         assert!(hint_x >= label_end, "hint at {hint_x} starts inside the label (ends {label_end})");
-        // Paths are recognized by their tail, so the cut keeps the filename.
-        assert!(shown.starts_with('…') && shown.ends_with("powershell.exe"), "got {shown}");
+        // 2026-07-29 裁定：溢出保头部（盘符/根上下文），尾部省略号。
+        assert!(shown.starts_with("C:\\Windows") && shown.ends_with('…'), "got {shown}");
     }
 
     #[test]
     fn hint_is_dropped_when_the_label_leaves_no_room() {
         let label = "启动：一个足够长到吃掉整行宽度的 profile 名字标签";
-        assert_eq!(fit_hint(500.0, label, 100.0, 600.0, 12.0, 1.0, r"C:\x"), None);
+        assert_eq!(fit_hint(500.0, label, 0.0, 100.0, 600.0, 12.0, 1.0, r"C:\x"), None);
     }
 
     #[test]
@@ -1413,7 +1944,7 @@ mod tests {
         // chars instead of columns pushed them past the panel's right edge.
         let (ix, iw, cell_w) = (0.0, 640.0, 10.0);
         let hint = "D:/项目/子目录";
-        let (hint_x, shown) = fit_hint(ix + 40.0, "口", ix, iw, cell_w, 1.0, hint).unwrap();
+        let (hint_x, shown) = fit_hint(ix + 40.0, "口", 0.0, ix, iw, cell_w, 1.0, hint).unwrap();
         assert_eq!(shown, hint, "plenty of room: no truncation");
         let cols: usize = shown.chars().map(|c| c.width().unwrap_or(0)).sum();
         assert_eq!(hint_x, ix + iw - 14.0 - cols as f32 * cell_w);

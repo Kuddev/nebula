@@ -250,6 +250,9 @@ pub enum Action {
     /// Toggle the command palette.
     ToggleCommandPalette,
 
+    /// Toggle the shell/profile picker (the new-tab dropdown, Ctrl+K).
+    ToggleShellPicker,
+
     /// Toggle the right-side drawer's directory tree (SFTP on SSH panes).
     ToggleFilesPanel,
 

@@ -10,6 +10,9 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Added
 
+- **Shell picker shortcut (Ctrl+K)** — opens the same shell/profile list the "+" chevron does, and closes it on a second press. The binding appears in Settings → Key bindings and can be rebound; by default it takes over the shell's `kill-line` (Ctrl+K → `\x0b`).
+- **SSH connection testing** — the SSH host editor can now test its unsaved destination, password, authentication mode, and private keys before saving, with a 12-second timeout and inline connecting, success-time, or failure status.
+- **Configurable quick-terminal shortcut** — Settings → Key bindings now exposes the global quick-terminal shortcut. Captured changes are applied immediately and remembered; if the operating system rejects a conflicting shortcut, Nebula keeps the previous working binding and shows the registration failure in the row.
 - **Workspace export/import** — the command palette gains "Export workspace…" and "Open workspace…", and a tab's right-click menu gains "Export as workspace…". A workspace file (`.nebula-workspace.json`) records the tab list, each tab's full split layout (axis, ratio, per-pane working directory), tab names and colors, and each tab's launch identity: WSL/custom shells reopen with their shell, SSH tabs reconnect to their saved destination automatically. Files are portable across machines and platforms — a directory that does not exist on the importing machine falls back to the default one, and a shell program the machine lacks (e.g. `wsl.exe` on Linux) falls back to the default shell in the saved directory instead of dropping the tab.
 - **Crash recovery now restores split layouts** — the continuously written session snapshot (1 Hz) uses the same schema as workspace files, so after a crash or force-kill Nebula reopens with every tab's split tree, ratios, per-pane directories and SSH/WSL launch identities — not just one pane per tab as before.
 
@@ -24,10 +27,22 @@ Every release entry is provided in English and Simplified Chinese.
 - Display blocks now accept physics-style implicit products such as `E = mc^2`; inline `$…$` keeps the stricter shape checks so shell text like `$foo^bar$` stays literal.
 - The first rendered display formula in a pane now unlocks inline `$…$` rendering there, so remote AI sessions get inline math without local process detection.
 
+#### Improved
+
+- Reworked the SSH host editor into a compact content-sized dialog with consistent 32 px controls, helper text below the destination, a segmented authentication selector, deliberate label/control and section spacing, a lightweight private-key section, visibly blinking text carets, and clearly separated Test / Cancel / Save actions.
+- Reworked the Shell / Profile picker into cards: content-sized height with a maximum ten-row viewport, a "Recommended" section carrying a taller hero card (name above, full program path below, Enter chip on the right) and an "All options" section of uniform cards, neutral initial selection, soft accent selection, a bordered default-shell badge, and a keyboard-hint footer. Paths keep their drive/root context and ellipsize at the tail. Hover and click hit-test against the layout's per-row rectangles, so section captions and the gaps between cards no longer highlight as if they were rows.
+- One keycap recipe everywhere — every place that displays a key combination (the picker's Ctrl+K badge, the command list's shortcut hints, Settings → Key bindings, confirm dialogs, the picker footer) now draws the same per-key chip: hairline ring, panel fill, weak-ink `+` separators. Combos are split per key instead of being one wide pill, and confirm-dialog keycaps no longer restack the button's own fill.
+- Light-theme overlays are white-based: the command palette, the SSH host editor and the settings surfaces no longer inherit a silver/slate fill from the theme family.
+- The palette's right edge now lines up. The Ctrl+K badge, the hero card's Enter chip, the right-aligned path column, the command list's shortcut chips and the footer's Esc hint previously measured from four different insets — the footer even measured from the panel instead of the card column — leaving a ragged right margin that drifted with font size.
+- Aligned Settings with the new navigation-and-row system: equal-height hairline groups, consistent right-aligned controls, restrained section headings, theme previews, and editable keycaps share one layout and interaction model.
+
 ### 简体中文
 
 #### 新增
 
+- **Shell 选择器快捷键（Ctrl+K）** — 打开与 "+" 旁 chevron 相同的 shell/profile 列表，再按一次收起。该键位在“设置 → 按键映射”里列出、可改绑；默认占用了 shell 行编辑的 kill-line（Ctrl+K → `\x0b`）。
+- **SSH 连接测试** — SSH 主机编辑器现在可以在保存前测试未保存的地址、密码、认证方式和私钥，带 12 秒超时，并在页脚显示连接中、成功耗时或失败状态。
+- **快速终端快捷键可配置** — “设置 → 按键映射”新增快速终端全局快捷键行。捕获的新组合立即应用并持久化；若操作系统因冲突拒绝注册，Nebula 会保留原先可用的快捷键，并在该行显示注册失败。
 - **工作区导出/导入** — 命令面板新增"导出工作区…"和"打开工作区…",标签页右键菜单新增"导出为工作区…"。工作区文件(`.nebula-workspace.json`)记录标签页列表、每个标签页的完整分屏布局(方向、比例、每个 pane 的工作目录)、标签名与颜色,以及每个标签页的启动身份:WSL/自定义 shell 按原 shell 重开,SSH 标签页自动重连保存的目标。文件跨机器、跨平台可移植——导入机器上不存在的目录回落默认目录;缺失的 shell 程序(如 Linux 上的 `wsl.exe`)回落为默认 shell 并保留目录,不会丢掉整个标签页。
 - **崩溃恢复现在还原分屏布局** — 持续写入的会话快照(每秒)与工作区文件共用同一格式,崩溃或强杀后重开时,每个标签页的分屏树、比例、各 pane 目录以及 SSH/WSL 启动身份都会还原,不再是以前的"每个标签页只剩一个 pane"。
 
@@ -41,6 +56,15 @@ Every release entry is provided in English and Simplified Chinese.
 - 修复 WSL 与远程 SSH 会话中的公式渲染:隔着 `wsl.exe` / `ssh.exe` 运行的 claude、codex、pi 等工具输出的 `$$ … $$`、`\[ … \]` 块级公式现在原生渲染——块级检测不再依赖本机进程树里能否找到 AI CLI(进程探测无法穿透 WSL 和 SSH)。
 - 块级公式接受 `E = mc^2` 这类隐式乘积;行内 `$…$` 保持更严格的形状检查,`$foo^bar$` 之类的 shell 文本仍按字面显示。
 - pane 内首个渲染成功的块级公式会解锁该 pane 的行内 `$…$` 渲染,远程 AI 会话无需本机进程探测即可获得行内公式。
+
+#### 改进
+
+- SSH 主机编辑器重排为紧凑的内容自适应弹窗：控件统一为 32px 高，地址提示移到输入框下方，认证方式改为分段选择，标签/控件与分组间距遵循统一节奏，私钥区降级为轻量小节，文本光标真实闪烁，并清晰分隔“测试连接 / 取消 / 保存”。
+- Shell / Profile 选择器改为卡片式：按条目数量决定高度，最多显示十行；分为“推荐”区（一张更高的大卡片，名称在上、完整程序路径在下、右侧回车键帽）和“所有选项”区（等高卡片）；初次打开保持中性，选中态使用柔和 accent，保留默认 Shell 发丝描边徽标和键盘提示页脚。路径保留盘符/根路径上下文、尾部省略。悬停与点击改为按布局的逐行矩形命中，分区标题和卡片之间的缝隙不再被当成行高亮。
+- 键帽样式全局统一：所有展示键位的地方（选择器的 Ctrl+K 徽标、命令列表的快捷键提示、设置 → 按键映射、确认弹窗、选择器页脚）现在画同一种逐键 chip——发丝圈边、面板填充、弱墨 `+` 分隔。组合键按键拆分，不再是一颗宽药丸；确认弹窗的键帽也不再重叠按钮自身的填充色。
+- 浅色主题的浮层统一白色打底：命令面板、SSH 主机编辑器与设置页表面不再从主题族继承银/岩灰底色。
+- 命令面板右缘现在对齐成一条线。此前 Ctrl+K 徽标、大卡片的回车键帽、右对齐路径列、命令列表的快捷键 chip 与页脚的 Esc 提示各用一套内边距——页脚甚至是按面板而非卡片列计算的——右边缘参差，且会随字号漂移。
+- 设置页统一到新的导航与等高行体系：hairline 分组、右对齐控件、克制的分节标题、主题预览和可编辑键帽共用一致的布局与交互模型。
 
 ## 0.7.0 - 2026-07-24
 
