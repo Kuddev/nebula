@@ -1,5 +1,5 @@
 //! Session restore: reopen with the same tabs (and their directories) you had
-//! when the window closed — Otty-style, no "restore?" dialog.
+//! when the window closed, with no "restore?" dialog.
 //!
 //! A snapshot is written continuously (1 Hz, skipped when nothing changed), so
 //! a crash or force-kill still restores to within a second of where you were.

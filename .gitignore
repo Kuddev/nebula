@@ -85,3 +85,12 @@ scripts/ghost_repro/
 scripts/icon-build/
 scripts/render_shell_icon.html
 docs/future_planning.md
+
+# 探针实例跑的是 debug 产物的副本（见 scripts/launch_probe_instance.ps1）：
+# 直接运行构建产物会让下一次 cargo build 以一个含义不明的 mingw 链接错误告终。
+.probe/
+.run/
+
+# 内部设计推导过程（竞品逐图精读），结论已落进 nebula_app/src/display/ui/
+# 的层契约与代码注释，仓库里不留竞品名。
+docs/nebula-visual-design-language.md
