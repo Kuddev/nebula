@@ -1,5 +1,5 @@
 //! Right-side drawer: directory tree / git status for the focused pane's cwd
-//! (otty-style). This module owns only the *model* — tree flattening, git
+//! This module owns only the *model* — tree flattening, git
 //! parsing, layout maths, and hit-testing. Rendering lives in `display::mod`
 //! (mirroring the command palette split), and input dispatch in `input::mod`.
 //!

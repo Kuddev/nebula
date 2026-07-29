@@ -37,7 +37,7 @@ pub enum ChromeHit {
     /// Fixed entry at the bottom of the sidebar. It owns a separate band and
     /// never competes with Tabs / SSH rows for height.
     MessageQueue,
-    /// Top-bar toggles for the right-side drawer's two views (otty-style).
+    /// Top-bar toggles for the right-side drawer's two views.
     PanelFiles,
     PanelGit,
     Minimize,
