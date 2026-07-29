@@ -69,25 +69,22 @@ pub mod color;
 pub mod content;
 pub mod cursor;
 pub mod hint;
+pub mod ui;
 pub mod window;
 
 mod chrome;
 pub mod command_palette;
 mod context_menu;
-pub mod design_tokens;
-mod keycap;
 mod i18n;
 pub mod markdown_view;
 mod message_queue_entry;
 pub mod sftp_panel;
 pub mod side_panel;
-mod icons;
 mod size_info;
 mod state;
 mod surface_opacity;
 mod terminal_color;
 mod terminal_math;
-mod widgets;
 
 /// Processor uses the same persisted value before the first window exists so
 /// the global quick-terminal shortcut is active from application startup.
@@ -115,14 +112,13 @@ mod settings;
 mod ssh_editor_render;
 mod ssh_ui;
 mod text_input;
-mod theme;
 
 use ssh_ui::SshDeleteUndo;
 pub use ssh_ui::{
     SSH_DELETE_UNDO_DURATION, SshEditorField, SshEditorHit, SshEditorRects, SshHostEditor,
 };
-pub use theme::NebulaTheme;
-pub(crate) use theme::write_nebula_prompt_theme;
+pub use ui::theme::NebulaTheme;
+pub(crate) use ui::theme::write_nebula_prompt_theme;
 
 /// Shared caret blink phase for the chrome text editors (rename / filter /
 /// commit boxes): 500ms on / 500ms off wall-clock, same time source as the
@@ -6273,7 +6269,7 @@ impl Display {
         // mutably would lock it for the rest of the batch.
         let cap = |x: f32, key: &str| -> Vec<UiQuad> {
             let mut out = Vec::new();
-            keycap::push_chip(&mut out, &sk, x, cap_y, cap_w(key), cap_h, scale);
+            ui::keycap::push_chip(&mut out, &sk, x, cap_y, cap_w(key), cap_h, scale);
             out
         };
         quads.extend(cap(cancel_cap_x, cancel_key));

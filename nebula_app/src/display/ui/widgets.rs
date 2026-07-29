@@ -186,7 +186,7 @@ pub(crate) fn popup_row_rect(popup: Rect, index: usize, scale: f32) -> Rect {
 }
 
 pub(crate) fn popup_row_at(popup: Rect, count: usize, scale: f32, x: f32, y: f32) -> Option<usize> {
-    (0..count).find(|&index| super::contains_rect(popup_row_rect(popup, index, scale), x, y))
+    (0..count).find(|&index| crate::display::contains_rect(popup_row_rect(popup, index, scale), x, y))
 }
 
 /// The floating option list: opaque plate + soft shadow so it reads as a

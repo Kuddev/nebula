@@ -1,11 +1,12 @@
-//! Nebula's shared UI contract: spacing, typography, motion and control state.
+//! Nebula 的共享 UI 契约：间距、圆角、字阶、层级、动效、控件状态。
 //!
-//! Values are logical pixels/scales. Callers apply the window DPI exactly once
-//! at layout time; draw, hover, focus and hit-testing must derive from the same
-//! resulting rectangle.
+//! 值是逻辑像素/倍率。调用方在布局时**恰好**应用一次窗口 DPI；绘制、hover、
+//! 焦点和命中检测必须从同一个结果矩形派生。
 
-// Token adoption is intentionally incremental: keeping the complete scale in
-// one catalog prevents new local magic numbers while existing screens migrate.
+// 这个目录是设计系统的完整表达，允许存在暂未采用的条目——补全一个色阶或间距
+// 阶梯不该被 dead_code 拦住。约束的方向是反过来的：**代码里不允许出现本目录
+// 已经覆盖的魔数**。侦察数据（2026-07-29）：仅 3 个文件就有 26 个手写的
+// `s(16.0)`（= space::M）、31 个 `s(8.0)`（= radius::OVERLAY）。
 #![allow(dead_code)]
 
 pub mod space {
@@ -15,6 +16,22 @@ pub mod space {
     pub const M: f32 = 16.0;
     pub const L: f32 = 24.0;
     pub const XL: f32 = 32.0;
+}
+
+/// 圆角阶梯。逐层递减：浮层 → 控件 → chip。
+///
+/// 参照 Windows 11 Fluent 2（`OverlayCornerRadius` = 8，`ControlCornerRadius` = 4），
+/// 不是 macOS 的 10–12。2026-07-29 侦察发现八个浮层用了六种圆角
+/// （命令面板 14、设置模态 12、确认框 12、AI 条 10、右键菜单 9、popup 8），
+/// 这是界面"不成体系"的直接来源。
+pub mod radius {
+    /// 浮层：命令面板、模态、右键菜单、下拉 popup。
+    pub const OVERLAY: f32 = 8.0;
+    /// 控件：combobox、spinner、输入框、按钮。
+    /// Fluent 本身是 4；我们的控件高 32px，6 更耐看，实机再校。
+    pub const CONTROL: f32 = 6.0;
+    /// chip / 键帽 / 徽标。
+    pub const CHIP: f32 = 4.0;
 }
 
 pub mod type_scale {
@@ -33,18 +50,26 @@ pub mod control {
     /// remain visible without making the input visually dominate the content.
     pub const COMPACT_ROW: f32 = 38.0;
     pub const ROW: f32 = 44.0;
-    pub const RADIUS: f32 = 8.0;
     pub const HAIRLINE: f32 = 1.0;
 }
 
-/// Z-axis treatment for transient surfaces rendered above normal content.
+/// 浮层的 Z 轴处理。阴影按浮层面积分档——同一组参数放在小菜单上刚好，
+/// 放在整块命令面板上就托不住（阴影扩散必须与被托举的面积成比例）。
+///
+/// 调用方通常不直接用这些常量，而是走 [`super::surface::Elevation`]。
 pub mod elevation {
-    /// Soft edge around a floating menu/card.
-    pub const FLOATING_BLUR: f32 = 12.0;
-    /// A small downward bias makes the card read as lifted rather than glowing.
-    pub const FLOATING_OFFSET_Y: f32 = 4.0;
-    pub const FLOATING_SHADOW_ALPHA_LIGHT: u8 = 54;
-    pub const FLOATING_SHADOW_ALPHA_DARK: u8 = 86;
+    /// 小浮层：右键菜单、下拉 popup、tooltip。
+    pub const MENU_BLUR: f32 = 12.0;
+    pub const MENU_OFFSET_Y: f32 = 4.0;
+    /// 大浮层：命令面板、shell 选择器。
+    pub const POPOVER_BLUR: f32 = 28.0;
+    pub const POPOVER_OFFSET_Y: f32 = 8.0;
+    /// 模态：确认框、设置页、SSH 编辑器。
+    pub const MODAL_BLUR: f32 = 40.0;
+    pub const MODAL_OFFSET_Y: f32 = 12.0;
+    /// 阴影浓度。浅色底上的黑阴影必须更淡，否则边缘发脏。
+    pub const SHADOW_ALPHA_LIGHT: u8 = 54;
+    pub const SHADOW_ALPHA_DARK: u8 = 86;
 }
 
 /// Terminal-grid feedback colors are rendered through the cell/rect alpha

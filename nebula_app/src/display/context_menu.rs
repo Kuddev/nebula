@@ -4,7 +4,8 @@
 //! hit-testing and animation live together here so pointer targets cannot drift
 //! away from the pixels the user sees at non-integer DPI scales.
 
-use super::design_tokens::{control, elevation, space};
+use super::ui::surface::{self, fade as alpha};
+use super::ui::tokens::{control, space};
 use super::*;
 
 // Maple Mono Normal NF CN ships the stable Codicon block below. Keep menu
@@ -468,10 +469,6 @@ pub(super) fn hit_test(
     if contains(layout.panel, x, y) { ContextMenuHit::Panel } else { ContextMenuHit::Outside }
 }
 
-fn alpha(color: Rgba, opacity: f32) -> Rgba {
-    Rgba::new(color.r, color.g, color.b, (color.a as f32 * opacity).round() as u8)
-}
-
 fn fade_ink(base: Rgba, ink: Rgb, opacity: f32) -> Rgb {
     let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * opacity).round() as u8;
     Rgb::new(mix(base.r, ink.r), mix(base.g, ink.g), mix(base.b, ink.b))
@@ -494,37 +491,19 @@ pub(super) fn draw(display: &mut Display) {
     let s = |v: f32| v * scale;
     let layout = layout(&menu, size, scale, -s(5.0) * (1.0 - progress));
     let sk = display.nebula_theme.skin();
-    let radius = s(9.0);
-    let (px, py, pw, ph) = layout.panel;
 
-    let shadow_alpha = if sk.is_light {
-        elevation::FLOATING_SHADOW_ALPHA_LIGHT
-    } else {
-        elevation::FLOATING_SHADOW_ALPHA_DARK
-    };
-    let hairline = s(control::HAIRLINE).max(1.0);
-    let mut quads = vec![
-        UiQuad::shadow(
-            px,
-            py,
-            pw,
-            ph,
-            radius,
-            s(elevation::FLOATING_BLUR),
-            s(elevation::FLOATING_OFFSET_Y),
-            alpha(Rgba::new(0, 0, 0, shadow_alpha), progress),
-        ),
-        // 全周 hairline 在浅色背景上定义边界；外阴影承担 Z 轴层级。
-        UiQuad::solid(
-            px - hairline,
-            py - hairline,
-            pw + hairline * 2.0,
-            ph + hairline * 2.0,
-            radius + hairline,
-            alpha(sk.hairline, progress),
-        ),
-        UiQuad::solid(px, py, pw, ph, radius, alpha(sk.panel, progress)),
-    ];
+    // 阴影 + 发丝环 + 面板填充的配方现在只有一处定义（`ui::surface`）。
+    // 右键菜单是 Menu 层级：不画遮罩，阴影按小浮层的扩散取值。
+    let mut quads = Vec::new();
+    surface::push_surface(
+        &mut quads,
+        layout.panel,
+        (size.width(), size.height()),
+        scale,
+        &sk,
+        surface::Elevation::Menu,
+        progress,
+    );
     for separator in &layout.separators {
         quads.push(UiQuad::solid(
             separator.0,

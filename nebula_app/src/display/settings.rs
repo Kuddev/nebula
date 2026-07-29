@@ -23,8 +23,9 @@ use crate::renderer::image::{BackgroundImageAlignment, BackgroundImageFit};
 use crate::renderer::ui::{Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
 
-use super::theme::Skin;
-use super::{icons, keymap, widgets};
+use super::keymap;
+use super::ui::theme::Skin;
+use super::ui::{icons, widgets};
 use super::{
     AcceptKey, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
     chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label,
@@ -2076,7 +2077,7 @@ pub(super) fn push_quads(
                 } else if bound {
                     // 图8 键帽规范：组合键拆逐键 chip（几何与文字 pass 同
                     // 源自 keycap::layout_combo）。
-                    let combo = super::keycap::layout_combo(
+                    let combo = super::ui::keycap::layout_combo(
                         &label,
                         rect.0 + rect.2 - s(16.0),
                         rect.1 + rect.3 / 2.0,
@@ -2084,7 +2085,7 @@ pub(super) fn push_quads(
                         scale,
                     );
                     let mut chip_quads = Vec::new();
-                    super::keycap::push_combo(&mut chip_quads, &sk, &combo, scale);
+                    super::ui::keycap::push_combo(&mut chip_quads, &sk, &combo, scale);
                     for quad in chip_quads {
                         clip(quads, quad);
                     }
@@ -3392,7 +3393,7 @@ pub(super) fn draw_text(
                     r.draw_chrome_text(size, cap_x + s(12.0), ty, ink, &value, gc);
                 } else {
                     // 图8 键帽规范：逐键 chip 内居中键名，弱墨 "+" 分隔。
-                    let combo = super::keycap::layout_combo(
+                    let combo = super::ui::keycap::layout_combo(
                         &value,
                         rect.0 + rect.2 - s(16.0),
                         rect.1 + rect.3 / 2.0,

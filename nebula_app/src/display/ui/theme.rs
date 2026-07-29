@@ -430,34 +430,52 @@ impl NebulaTheme {
         let t = p.term_bg;
         if p.is_light {
             Skin {
-                // 2026-07-29 用户裁定（图6 吸色）：浅色主题的浮层统一"白色
-                // 打底"——面板近白、卡片纯白，SSH 编辑器与 shell 选择器共
-                // 用这一组，不再继承主题族的银/岩灰底。
-                panel: Rgba::new(250, 250, 251, 252),
+                // 明度阶梯（2026-07-29 裁定，见 docs/nebula-visual-design-language.md
+                // §3）：相邻层必须差 8–14 级，低于 8 级肉眼分不开，界面就只能靠
+                // 画边框救场——边框一多画面就碎，这才是"脏"的观感来源。
+                //
+                // 浅色下浮层的方向是**比内容更暗**（otty 浅色命令面板底是
+                // #F7F7F7，盖住的终端区是纯白；Fluent 同构：base #F3F3F3 →
+                // layer #FFFFFF）。此前 panel 250 与 card 255 只差 5 级，等于
+                // 没有层级。现在 241 → 254 差 13，且比纯白终端暗 14。
+                //
+                // 这不推翻"白色打底"的裁定：slate-100 依然是近白冷调，不是回到
+                // 主题族的银/岩灰底；变的是它与卡片之间终于有了可见的台阶。
+                panel: Rgba::new(241, 245, 249, 252), // slate-100
                 // A white inset on light panels: the hairline carries the
                 // "sunken" read, the fill stays cleaner than a gray wash.
                 input: Rgba::new(255, 255, 255, 240),
                 card: Rgba::new(255, 255, 255, 244),
-                veil: Rgba::new(255, 255, 255, 190),
-                ink: Rgb::new(55, 65, 81),        // #374151 (ui-text-main)
-                ink_dim: Rgb::new(107, 114, 128), // #6b7280 (ui-text-muted)
-                ink_strong: Rgb::new(18, 22, 30),
-                ink_faint: Rgb::new(148, 153, 163),
+                // modal 专用（popover 不画遮罩，见设计文档裁定三）。冷调压暗
+                // 而不是白雾：白雾 75% 把背景提亮到和白弹窗同明度，弹窗反而
+                // 浮不起来，且糊掉全部上下文。20% 压暗下背景仍然可读。
+                veil: Rgba::new(15, 23, 42, 51), // slate-900 @ 20%
+                ink: Rgb::new(51, 65, 85),          // slate-700
+                ink_dim: Rgb::new(100, 116, 139),   // slate-500
+                ink_strong: Rgb::new(15, 23, 42),   // slate-900
+                ink_faint: Rgb::new(148, 163, 184), // slate-400
                 // Light accents are dark grays — pale ink on top.
                 ink_on_accent: Rgb::new(248, 250, 252),
-                icon: Rgb::new(73, 80, 87),
-                icon_hover: Rgb::new(18, 22, 26),
+                icon: Rgb::new(71, 85, 105),      // slate-600
+                icon_hover: Rgb::new(15, 23, 42), // slate-900
                 accent: a,
                 accent_soft: Rgba::new(a.r, a.g, a.b, 34),
                 danger: Rgba::new(196, 74, 88, 255),
-                hairline: Rgba::new(0, 0, 0, 20), // rgba(0,0,0,.08) — hairline borders
-                surface: Rgba::new(0, 0, 0, 12),
-                hover: Rgba::new(0, 0, 0, 20),
-                hover_strong: Rgba::new(0, 0, 0, 32),
-                track_off: Rgba::new(0, 0, 0, 48),
+                // 2026-07-29 用户裁定：中性灰在屏幕上永远显脏。此前这几个
+                // 叠加色是纯黑 rgba(0,0,0,.05~.19)，而纯黑叠在白底上只能得
+                // 到**零色相**的死灰——这就是"不干净"的物理来源。现在改叠
+                // Slate（掺 3–6% 蓝的冷调灰）：浅色主题叠深 slate，深色主题
+                // 叠浅 slate，两边用不同基色，叠加后色相才不会被纯黑/纯白冲
+                // 淡。alpha 按 (255-底)/(基色-底) 换算过，明度与旧值持平，
+                // 变的只是色温。
+                hairline: Rgba::new(51, 65, 85, 30), // slate-700 @ 12%
+                surface: Rgba::new(100, 116, 139, 20), // slate-500 @ 8%
+                hover: Rgba::new(100, 116, 139, 33),
+                hover_strong: Rgba::new(100, 116, 139, 52),
+                track_off: Rgba::new(100, 116, 139, 78),
                 knob_off: Rgba::new(255, 255, 255, 255),
-                knob_on: Rgba::new(250, 250, 250, 255),
-                scrollbar_thumb: Rgba::new(60, 66, 80, 0),
+                knob_on: Rgba::new(248, 250, 252, 255), // slate-50
+                scrollbar_thumb: Rgba::new(71, 85, 105, 0), // slate-600
                 is_light: true,
             }
         } else {
@@ -469,25 +487,28 @@ impl NebulaTheme {
                 input: Rgba::new(t.r, t.g, t.b, 220),
                 card: Rgba::new(255, 255, 255, 16),
                 veil: Rgba::new(0, 0, 0, 150),
-                ink: Rgb::new(228, 231, 246),
-                ink_dim: Rgb::new(158, 164, 188),
-                ink_strong: Rgb::new(255, 255, 255),
-                ink_faint: Rgb::new(118, 124, 148),
+                ink: Rgb::new(226, 232, 240),      // slate-200
+                ink_dim: Rgb::new(148, 163, 184),  // slate-400
+                ink_strong: Rgb::new(248, 250, 252), // slate-50
+                ink_faint: Rgb::new(100, 116, 139),  // slate-500
                 // Dark accents are light — near-black ink on top.
-                ink_on_accent: Rgb::new(12, 16, 22),
-                icon: Rgb::new(205, 210, 230),
-                icon_hover: Rgb::new(244, 246, 255),
+                ink_on_accent: Rgb::new(15, 23, 42), // slate-900
+                icon: Rgb::new(203, 213, 225),       // slate-300
+                icon_hover: Rgb::new(248, 250, 252), // slate-50
                 accent: a,
                 accent_soft: Rgba::new(a.r, a.g, a.b, 46),
                 danger: Rgba::new(196, 74, 88, 255),
-                hairline: Rgba::new(255, 255, 255, 22),
-                surface: Rgba::new(255, 255, 255, 11),
-                hover: Rgba::new(255, 255, 255, 26),
-                hover_strong: Rgba::new(255, 255, 255, 40),
-                track_off: Rgba::new(255, 255, 255, 34),
-                knob_off: Rgba::new(210, 214, 228, 255),
-                knob_on: Rgba::new(12, 16, 22, 255),
-                scrollbar_thumb: Rgba::new(180, 184, 200, 0),
+                // 深色主题叠 slate-300 而不是纯白：白是中性色，叠上去会把
+                // 底色的色相**冲淡**，一叠就回到死灰。浅色主题叠深 slate、
+                // 深色主题叠浅 slate——这就是"深浅两套灰不一样"的技术原因。
+                hairline: Rgba::new(203, 213, 225, 30),
+                surface: Rgba::new(203, 213, 225, 15),
+                hover: Rgba::new(203, 213, 225, 35),
+                hover_strong: Rgba::new(203, 213, 225, 53),
+                track_off: Rgba::new(203, 213, 225, 45),
+                knob_off: Rgba::new(203, 213, 225, 255), // slate-300
+                knob_on: Rgba::new(15, 23, 42, 255),     // slate-900
+                scrollbar_thumb: Rgba::new(148, 163, 184, 0), // slate-400
                 is_light: false,
             }
         }

@@ -15,7 +15,7 @@ use nebula_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use crate::config::UiConfig;
 use crate::config::color::{InvertedCellColors, NEBULA_DEFAULT_CURSOR};
 use crate::display::color::{CellRgb, DIM_FACTOR, List, Rgb};
-use crate::display::design_tokens::terminal_feedback;
+use crate::display::ui::tokens::terminal_feedback;
 use crate::display::hint::{self, HintState};
 use crate::display::terminal_color::{TerminalColorResolver, is_fixed_color};
 use crate::display::{Display, SizeInfo};
@@ -640,7 +640,7 @@ mod tests {
     };
     use crate::config::color::NEBULA_DEFAULT_CURSOR;
     use crate::display::color::Rgb;
-    use crate::display::design_tokens::terminal_feedback;
+    use crate::display::ui::tokens::terminal_feedback;
     use nebula_terminal::index::{Column, Line, Point};
     use nebula_terminal::term::cell::Flags;
 

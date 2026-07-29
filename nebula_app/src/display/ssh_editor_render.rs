@@ -2,6 +2,7 @@ use unicode_width::UnicodeWidthChar;
 
 use super::ssh_ui::{SshTestState, auth_sections};
 use super::*;
+use super::ui::theme;
 use crate::ssh_profiles::SshAuthMode;
 
 type Rect = (f32, f32, f32, f32);
