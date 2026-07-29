@@ -515,10 +515,14 @@ pub enum AiLogo {
     OpenCode,
     /// Pi's block-built `pi` mark from pi.dev.
     Pi,
+    /// xAI's Grok mark.
+    Grok,
 }
 
-/// Official logo assets (Wikimedia SVG renders, 64 px, alpha-transparent).
+/// Embedded brand logo assets, kept at their source pixel dimensions.
 const AI_LOGO_CLAUDE_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_claude.png");
+const AI_LOGO_GROK_DARK_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_grok_dark.png");
+const AI_LOGO_GROK_LIGHT_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_grok_light.png");
 const AI_LOGO_OPENAI_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_openai.png");
 /// opencode's mark, rasterized from their `favicon.svg`. RGB carries luma
 /// (frame=255, block=90), alpha the shape; tinted `ink × luma/255` at runtime.
@@ -528,6 +532,58 @@ const AI_LOGO_PI_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_pi.png");
 /// Texture ids for chrome logos live far above the inline-image counter
 /// (which starts at 1), so the two id spaces can share the renderer cache.
 const AI_LOGO_ID_BASE: u64 = 1 << 62;
+
+fn prepare_ai_logo_texture(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    target_size: u32,
+) -> (Vec<u8>, u32, u32) {
+    use image::imageops::FilterType;
+
+    let target_size = target_size.max(1);
+    let source = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        .expect("decoded logo dimensions must match its RGBA buffer");
+    let resized = image::imageops::resize(&source, target_size, target_size, FilterType::Lanczos3);
+    let pixels = resized.as_raw();
+    let (mass, weighted_x, weighted_y) = pixels.chunks_exact(4).enumerate().fold(
+        (0.0, 0.0, 0.0),
+        |(mass, weighted_x, weighted_y), (index, pixel)| {
+            let alpha = f64::from(pixel[3]);
+            let x = (index as u32 % target_size) as f64 + 0.5;
+            let y = (index as u32 / target_size) as f64 + 0.5;
+            (mass + alpha, weighted_x + x * alpha, weighted_y + y * alpha)
+        },
+    );
+    if mass == 0.0 {
+        return (resized.into_raw(), target_size, target_size);
+    }
+
+    let center = f64::from(target_size) / 2.0;
+    let shift_x = (center - weighted_x / mass).round() as i32;
+    let shift_y = (center - weighted_y / mass).round() as i32;
+    if shift_x == 0 && shift_y == 0 {
+        return (resized.into_raw(), target_size, target_size);
+    }
+
+    let mut centered = vec![0; pixels.len()];
+    for y in 0..target_size as i32 {
+        for x in 0..target_size as i32 {
+            let dest_x = x + shift_x;
+            let dest_y = y + shift_y;
+            if !(0..target_size as i32).contains(&dest_x)
+                || !(0..target_size as i32).contains(&dest_y)
+            {
+                continue;
+            }
+            let source_index = ((y as u32 * target_size + x as u32) * 4) as usize;
+            let dest_index = ((dest_y as u32 * target_size + dest_x as u32) * 4) as usize;
+            centered[dest_index..dest_index + 4]
+                .copy_from_slice(&pixels[source_index..source_index + 4]);
+        }
+    }
+    (centered, target_size, target_size)
+}
 
 /// Real-logo mapping for AI clients; everything else falls back to the
 /// [`program_icon`] glyph. Gated on PNG support: without it there is no
@@ -541,6 +597,7 @@ pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
         "codex" => Some(AiLogo::OpenAi),
         "opencode" => Some(AiLogo::OpenCode),
         "pi" => Some(AiLogo::Pi),
+        "grok" | "grok-cli" => Some(AiLogo::Grok),
         _ => None,
     }
 }
@@ -1088,6 +1145,7 @@ pub struct Display {
     /// Per-displayed-tab animated draw-x, eased toward the laid-out / drag
     /// target each frame so tab reorder "make way" slides instead of snapping.
     nebula_tab_anim: Vec<crate::motion::Spring>,
+    nebula_tab_was_visible: Vec<bool>,
     /// Active scrollbar drag: the pointer's y-offset inside the thumb captured
     /// at press time, so the thumb tracks the pointer without jumping.
     pub nebula_scrollbar_drag: Option<f32>,
@@ -1179,12 +1237,15 @@ pub struct Display {
     nebula_tab_bells: Vec<bool>,
     /// Per-tab "command is running" flags driving the sidebar spinners.
     nebula_tab_running: Vec<bool>,
-    /// Per-tab real AI brand logo (claude/codex), textured over the icon slot.
+    /// Per-tab real AI brand logo, textured over the icon slot.
     nebula_tab_logos: Vec<Option<AiLogo>>,
-    /// Decoded (+theme-tinted) logo pixels with stable renderer texture ids,
-    /// keyed by (logo, ink). Decode and tint run once per key.
-    nebula_ai_logo_cache:
-        std::collections::HashMap<(AiLogo, [u8; 3]), (u64, std::sync::Arc<Vec<u8>>, (u32, u32))>,
+    /// Decoded (and, where appropriate, theme-tinted) logo pixels with stable renderer texture ids,
+    /// keyed by (logo, ink, target physical size). Decode, tint and high-quality
+    /// downsampling run once per key.
+    nebula_ai_logo_cache: std::collections::HashMap<
+        (AiLogo, [u8; 3], u32),
+        (u64, std::sync::Arc<Vec<u8>>, (u32, u32)),
+    >,
     /// Decoded shell icons (full-color PNGs) with stable texture ids, keyed by
     /// shell id (pwsh/cmd/nu/wsl:Ubuntu). Decode runs once per id.
     nebula_shell_icon_cache:
@@ -1278,6 +1339,7 @@ pub struct Display {
     pub nebula_keymap_capture: Option<usize>,
     /// 捕获态实时回显：当前按住的修饰键前缀（"Ctrl+Shift+"）。松开清空。
     pub nebula_keymap_capture_preview: String,
+    pub nebula_tab_reveal_motion: settings::TabRevealMotion,
     pub nebula_font_family: String,
     nebula_font_families: Vec<String>,
     nebula_font_notice: Option<String>,
@@ -1731,6 +1793,7 @@ impl Display {
             directory_history: crate::directory_history::global(),
             nebula_commands: nebula_commands_handle(),
             nebula_tab_anim: Vec::new(),
+            nebula_tab_was_visible: vec![true],
             nebula_scrollbar_drag: None,
             nebula_split_reveal: None,
             nebula_confirm: required_font_install,
@@ -1784,6 +1847,7 @@ impl Display {
             nebula_quick_hotkey_error: None,
             nebula_keymap_capture: None,
             nebula_keymap_capture_preview: String::new(),
+            nebula_tab_reveal_motion: settings_init.tab_reveal,
             nebula_font_family: settings_init.font_family,
             nebula_font_families,
             nebula_font_notice: None,
@@ -2551,20 +2615,27 @@ impl Display {
         &mut self,
         logo: AiLogo,
         ink: Rgb,
+        target_size: u32,
     ) -> Option<(u64, std::sync::Arc<Vec<u8>>, (u32, u32))> {
-        // Claude's mark ships in Anthropic coral and is used as-is (only its
-        // alpha matters), so its cache key ignores the ink. The OpenAI mark
-        // is black-on-alpha and follows the chrome ink to stay visible on
-        // every theme.
+        // Claude and Grok keep their source colors. Grok ships official dark
+        // and light marks, selected to match the chrome ink without tinting.
+        let grok_uses_light_mark =
+            u32::from(ink.r) * 299 + u32::from(ink.g) * 587 + u32::from(ink.b) * 114 >= 128_000;
         let key = match logo {
-            AiLogo::Claude => (logo, [0, 0, 0]),
-            AiLogo::OpenAi | AiLogo::OpenCode | AiLogo::Pi => (logo, [ink.r, ink.g, ink.b]),
+            AiLogo::Claude => (logo, [0, 0, 0], target_size),
+            AiLogo::Grok if grok_uses_light_mark => (logo, [255, 255, 255], target_size),
+            AiLogo::Grok => (logo, [0, 0, 0], target_size),
+            AiLogo::OpenAi | AiLogo::OpenCode | AiLogo::Pi => {
+                (logo, [ink.r, ink.g, ink.b], target_size)
+            },
         };
         if let Some(cached) = self.nebula_ai_logo_cache.get(&key) {
             return Some(cached.clone());
         }
         let bytes: &[u8] = match logo {
             AiLogo::Claude => AI_LOGO_CLAUDE_PNG,
+            AiLogo::Grok if grok_uses_light_mark => AI_LOGO_GROK_LIGHT_PNG,
+            AiLogo::Grok => AI_LOGO_GROK_DARK_PNG,
             AiLogo::OpenAi => AI_LOGO_OPENAI_PNG,
             AiLogo::OpenCode => AI_LOGO_OPENCODE_PNG,
             AiLogo::Pi => AI_LOGO_PI_PNG,
@@ -2594,8 +2665,13 @@ impl Display {
                     px[2] = (ink.b as u16 * luma / 255) as u8;
                 }
             },
-            AiLogo::Claude => {},
+            AiLogo::Claude | AiLogo::Grok => {},
         }
+        let (rgba, width, height) = if logo == AiLogo::Grok {
+            prepare_ai_logo_texture(&rgba, width, height, target_size)
+        } else {
+            (rgba, width, height)
+        };
         let id = AI_LOGO_ID_BASE + self.nebula_ai_logo_cache.len() as u64;
         let entry = (id, std::sync::Arc::new(rgba), (width, height));
         self.nebula_ai_logo_cache.insert(key, entry.clone());
@@ -3020,6 +3096,7 @@ impl Display {
             cursor_blink: self.nebula_cursor_blink,
             copy_on_select: self.nebula_copy_on_select,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
+            tab_reveal: self.nebula_tab_reveal_motion,
             preview_bg: self.preview_terminal_bg(),
             preview_fg: {
                 let bg = self.preview_terminal_bg();
@@ -3247,6 +3324,15 @@ impl Display {
     pub fn set_accept_option(&mut self, index: usize) {
         if let Some(accept) = settings::ACCEPT_OPTIONS.get(index) {
             self.nebula_accept = *accept;
+            self.persist_nebula_settings();
+        }
+        self.nebula_settings_dropdown = None;
+        self.pending_update.dirty = true;
+    }
+
+    pub fn set_tab_reveal_option(&mut self, index: usize) {
+        if let Some(motion) = settings::TAB_REVEAL_OPTIONS.get(index) {
+            self.nebula_tab_reveal_motion = *motion;
             self.persist_nebula_settings();
         }
         self.nebula_settings_dropdown = None;
@@ -4729,6 +4815,7 @@ impl Display {
             cursor_blink: self.nebula_cursor_blink,
             copy_on_select: self.nebula_copy_on_select,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
+            tab_reveal: self.nebula_tab_reveal_motion,
             theme: self.nebula_theme_preference,
             follow_system_theme: self.nebula_follow_system_theme,
             pinned_hosts: self.nebula_pinned_hosts.clone(),
@@ -4807,6 +4894,7 @@ impl Display {
             self.glyph_cache.wide_bold_use_regular = settings.cjk_bold_regular;
             self.reset_glyph_cache();
         }
+        self.nebula_tab_reveal_motion = settings.tab_reveal;
         self.nebula_window_opacity = settings.opacity;
         self.nebula_background = if settings.follow_system_theme {
             Some(active_theme.palette().term_bg)
@@ -7920,13 +8008,101 @@ mod nebula_ux_tests {
     use winit::window::Theme as WinitTheme;
 
     use super::{
-        NebulaConfirm, SizeInfo, alt_screen_vertical_padding_bands, nebula_command_hint,
-        percent_decode_lossy, remove_ssh_host_from_lists, replays_untrusted_terminal_output,
-        restore_ssh_host_to_lists, strip_file_scheme, system_theme_snapshot,
+        AI_LOGO_GROK_DARK_PNG, AI_LOGO_GROK_LIGHT_PNG, AiLogo, NebulaConfirm, SizeInfo, ai_logo,
+        alt_screen_vertical_padding_bands, extract_program, nebula_command_hint,
+        percent_decode_lossy, prepare_ai_logo_texture, program_icon, remove_ssh_host_from_lists,
+        replays_untrusted_terminal_output, restore_ssh_host_to_lists, strip_file_scheme,
+        system_theme_snapshot,
     };
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn logo_for_command(command: &str) -> Option<AiLogo> {
+        extract_program(command).as_deref().and_then(ai_logo)
+    }
+
+    #[test]
+    fn running_program_identity_normalizes_grok_without_changing_fallbacks() {
+        for command in [
+            "grok",
+            "grok-cli",
+            "GROK.CMD",
+            "C:\\Tools\\GROK-CLI.EXE --help",
+            "/usr/local/bin/grok",
+        ] {
+            assert_eq!(logo_for_command(command), Some(AiLogo::Grok), "{command}");
+        }
+
+        assert_eq!(logo_for_command("codex"), Some(AiLogo::OpenAi));
+        assert_eq!(logo_for_command("C:\\Tools\\CLAUDE.EXE --resume"), Some(AiLogo::Claude));
+        assert_eq!(program_icon("cargo"), "\u{e7a8}");
+        assert_eq!(logo_for_command("unlisted-program"), None);
+        assert_eq!(program_icon("unlisted-program"), "\u{f04b}");
+        assert_eq!(extract_program(""), None);
+    }
+
+    #[cfg(all(feature = "png", not(target_os = "macos")))]
+    #[test]
+    fn official_grok_logos_are_embedded_unchanged_and_decodable() {
+        use sha2::{Digest, Sha256};
+
+        let assets = [
+            (
+                AI_LOGO_GROK_DARK_PNG,
+                [
+                    0x37, 0xdd, 0xbc, 0xb6, 0xe2, 0xa7, 0xf2, 0xe4, 0xb3, 0xbe, 0x78, 0xa7, 0xd4,
+                    0x12, 0x96, 0xa3, 0xbc, 0x7e, 0xdf, 0x69, 0x26, 0x36, 0x24, 0x34, 0xef, 0xc0,
+                    0x0d, 0xf5, 0xa5, 0x6a, 0x35, 0x86,
+                ],
+            ),
+            (
+                AI_LOGO_GROK_LIGHT_PNG,
+                [
+                    0x35, 0x90, 0x56, 0xee, 0x89, 0x83, 0xcf, 0xa0, 0xba, 0x7e, 0x72, 0x79, 0x50,
+                    0x78, 0xc7, 0xc0, 0xdd, 0xf6, 0xc5, 0xd7, 0xa1, 0x87, 0x04, 0x01, 0xab, 0x96,
+                    0x0e, 0xd4, 0xf9, 0xdf, 0x9e, 0x53,
+                ],
+            ),
+        ];
+
+        for (png, expected_sha256) in assets {
+            assert_eq!(Sha256::digest(png).as_slice(), expected_sha256);
+            let (width, height, rgba) = crate::renderer::image::decode_png_bytes(png).unwrap();
+            assert_eq!((width, height), (1024, 1024));
+            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        }
+    }
+
+    #[cfg(all(feature = "png", not(target_os = "macos")))]
+    #[test]
+    fn official_grok_logos_prepare_sharp_optically_centered_physical_textures() {
+        for png in [AI_LOGO_GROK_DARK_PNG, AI_LOGO_GROK_LIGHT_PNG] {
+            let (width, height, rgba) = crate::renderer::image::decode_png_bytes(png).unwrap();
+            let (rgba, width, height) = prepare_ai_logo_texture(&rgba, width, height, 18);
+
+            assert_eq!((width, height, rgba.len()), (18, 18, 18 * 18 * 4));
+            let alpha_levels = rgba
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .filter(|alpha| *alpha > 0)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(alpha_levels.len() >= 8);
+
+            let (mass, weighted_x, weighted_y) = rgba.chunks_exact(4).enumerate().fold(
+                (0.0, 0.0, 0.0),
+                |(mass, weighted_x, weighted_y), (index, pixel)| {
+                    let alpha = f64::from(pixel[3]);
+                    let x = (index as u32 % width) as f64 + 0.5;
+                    let y = (index as u32 / width) as f64 + 0.5;
+                    (mass + alpha, weighted_x + x * alpha, weighted_y + y * alpha)
+                },
+            );
+            let center = f64::from(width) / 2.0;
+            assert!((weighted_x / mass - center).abs() <= 0.5);
+            assert!((weighted_y / mass - center).abs() <= 0.5);
+        }
     }
 
     #[test]

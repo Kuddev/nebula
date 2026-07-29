@@ -283,6 +283,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::CopyOnSelectToggle
             | crate::display::SettingsHit::CjkBoldToggle
             | crate::display::SettingsHit::KeymapRow(_)
+            | crate::display::SettingsHit::TabRevealDropdown
+            | crate::display::SettingsHit::TabRevealOption(_)
             | crate::display::SettingsHit::FontSizeUp
             | crate::display::SettingsHit::FontSizeDown
             | crate::display::SettingsHit::BackgroundImageCoverChrome
