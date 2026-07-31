@@ -453,6 +453,8 @@ impl Window {
 
     pub fn set_blur(&self, blur: bool) {
         self.window.set_blur(blur);
+        #[cfg(windows)]
+        apply_windows_backdrop(&self.window, blur);
     }
 
     pub fn set_maximized(&self, maximized: bool) {
@@ -712,9 +714,57 @@ fn apply_windows_chrome(window: &WinitWindow) {
     }
 }
 
+/// Windows 11 的 Acrylic 背景，挂在 `window.blur` 开关上。
+///
+/// winit 在 Windows 上的 `set_blur` 是**空实现**
+/// （`platform_impl/windows/window.rs`），所以这个配置项此前在本平台什么
+/// 都没做。DWM 从 22621 起提供 `DWMWA_SYSTEMBACKDROP_TYPE`，纯 Win32 就能
+/// 拿到，不像 Windows Terminal 的 Acrylic 那样要整个 XAML 宿主
+/// （`TermControl.cpp` 用的是 `Media::AcrylicBrush`）。
+///
+/// # 为什么是 Acrylic 而不是 Mica
+///
+/// 先选的是 Mica（`DWMSBT_MAINWINDOW`），理由是它便宜：只采样桌面壁纸，
+/// 壁纸不变就不重算。2026-07-31 实测推翻了这个选择——**Mica 给的是壁纸的
+/// 主色调，不是窗口后面的实际内容**，深色主题下那就是一块几乎看不出变化的
+/// 暗调，用户的原话是"感觉是色调改变了而已"。系统资源管理器上 Mica 好看，
+/// 靠的是浅色主题配亮蓝壁纸，换到深色终端上这个前提就没了。
+///
+/// Acrylic 实时模糊窗口后面的真实内容，那个透视感是 Mica 给不出来的。代价
+/// 是 DWM 每帧要重做高斯模糊，后面放视频或滚页面时最明显；但这笔开销落在
+/// DWM 进程的合成上，不进我们的渲染循环，按需重绘的省电模型不受影响。
+///
+/// 低于 22621 的系统上这个调用返回错误、什么都不做，自动回落到现有的纯
+/// alpha 透明，所以不需要版本判断和降级分支。
+#[cfg(windows)]
+fn apply_windows_backdrop(window: &WinitWindow, enabled: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DwmSetWindowAttribute,
+    };
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = handle.hwnd.get() as *mut core::ffi::c_void;
+
+    // 关掉时写 NONE 而不是 AUTO：AUTO 把决定权交还给系统，而系统可能就是
+    // 打开的——那样"关闭"这个动作会没有反应。
+    let backdrop: i32 = if enabled { DWMSBT_TRANSIENTWINDOW } else { DWMSBT_NONE };
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE as u32,
+            &backdrop as *const _ as *const core::ffi::c_void,
+            size_of::<i32>() as u32,
+        );
+    }
+}
+
 #[cfg(all(test, windows))]
-mod windows_startup_tests {
-    use super::startup_state_for_creation;
+mod windows_startup_tests {    use super::startup_state_for_creation;
     use crate::config::window::{StartupMode, WindowConfig};
 
     #[test]

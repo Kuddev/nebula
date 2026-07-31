@@ -2186,7 +2186,9 @@ impl WindowContext {
 
         // Change opacity and blur state.
         self.display.window.set_transparent(!opaque);
-        self.display.window.set_blur(self.config.window.blur);
+        // 模糊开关的权威在 nebula_settings.txt（设置面板写的就是它），
+        // alacritty 那侧的 `window.blur` 只是同名字段，跟它没有同步。
+        self.display.window.set_blur(self.display.nebula_blur);
 
         // Update hint keys.
         self.display.hint_state.update_alphabet(self.config.hints.alphabet());

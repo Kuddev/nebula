@@ -914,6 +914,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::BlurToggle => {
+                        self.ctx.display().toggle_blur();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::KeepSessionToggle => {
                         self.ctx.display().toggle_keep_session();
                         self.ctx.mark_dirty();

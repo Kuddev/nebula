@@ -247,6 +247,7 @@ pub enum SettingsHit {
     RestoreHiddenSsh(usize),
     FetchToggle,
     PowerlineToggle,
+    BlurToggle,
     OpacitySlider,
     BackgroundColor,
     /// 背景色浮层：色板网格里的一格。
@@ -309,6 +310,11 @@ pub(super) struct NebulaRuntimeSettings {
     /// Window close keeps the PTYs alive in the resident process (detach /
     /// re-attach session restore). Off = closing a window kills its shells.
     pub(super) keep_session: bool,
+    /// 窗口背景模糊。Windows 11 上是 Mica（见
+    /// `display::window::apply_windows_backdrop`），macOS / Wayland 上走
+    /// winit 自己的实现。默认开：纯 alpha 会让背景的高频细节直接透上来压在
+    /// 字上，低透明度下文字就读不出来了，而这正是透明度最常被调低的场景。
+    pub(super) blur: bool,
     pub(super) opacity: f32,
     pub(super) background: Option<Rgb>,
     pub(super) background_image: Option<String>,
@@ -369,6 +375,10 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         // clean on close. Residency leaves shells running in the background,
         // which reads as "the app didn't really exit" — opt IN, not out.
         keep_session: false,
+        // 2026-07-31 用户裁定：默认开。纯 alpha 下背景的高频细节压着文字，
+        // 那正是"透明度调低就看不清"的物理来源；模糊把它拍成低频色块。想
+        // 真透出后面窗口内容的人可以关掉。
+        blur: true,
         opacity: config.window_opacity(),
         background: None,
         background_image: None,
@@ -449,6 +459,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("fetch", v)) => settings.fetch = parse_bool(v, true),
                 Some(("powerline", v)) => settings.powerline = parse_bool(v, true),
                 Some(("keep_session", v)) => settings.keep_session = parse_bool(v, false),
+                Some(("blur", v)) => settings.blur = parse_bool(v, true),
                 Some(("opacity", v)) => {
                     if let Ok(opacity) = v.trim().parse::<f32>() {
                         settings.opacity = opacity.clamp(0.0, 1.0);
@@ -635,7 +646,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         path,
         format!(
             "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -648,6 +659,7 @@ tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nopacity={:.2}\nbackgroun
             settings.fetch as u8,
             settings.powerline as u8,
             settings.keep_session as u8,
+            settings.blur as u8,
             settings.opacity,
             settings.background_image_opacity,
             settings.background_image_fit.settings_value(),
@@ -688,6 +700,8 @@ struct SettingsGeometry {
     language_row: (f32, f32, f32, f32),
     opacity_row: (f32, f32, f32, f32),
     opacity_slider: (f32, f32, f32, f32),
+    /// 「窗口背景模糊」开关，紧贴透明度滑块——它只在透明时才看得出效果。
+    blur: (f32, f32, f32, f32),
     /// Cursor group: shape combobox row + blink toggle row.
     cursor_shape_row: (f32, f32, f32, f32),
     cursor_blink_row: (f32, f32, f32, f32),
@@ -829,7 +843,10 @@ fn settings_geometry(
     let cursor_y0 = color_y0 + 6.0 * ROW_H + GROUP_ADVANCE;
     let iface_y0 = cursor_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let opacity_y0 = iface_y0 + ROW_H;
-    let appearance_h = s(opacity_y0 + ROW_H + 32.0 - 72.0);
+    // 模糊开关跟在透明度后面：它修饰的正是透明度透出来的那层东西，隔开就
+    // 读不出这层因果了。
+    let blur_y0 = opacity_y0 + ROW_H;
+    let appearance_h = s(blur_y0 + ROW_H + 32.0 - 72.0);
     // 宽命中区包住细轨道，拖拽时无需精确点中 4px 线条。
     let opacity_row = (row_x, at(opacity_y0), row_w, row_h);
     let slider_x = row_x + row_w - s(212.0);
@@ -937,6 +954,7 @@ fn settings_geometry(
         language_row: (row_x, at(iface_y0), row_w, row_h),
         opacity_row,
         opacity_slider,
+        blur: (row_x, at(blur_y0), row_w, row_h),
         shell: (row_x, at(shell_y0), row_w, row_h),
         startup_directory: (row_x, at(startup_directory_y0), row_w, row_h),
         startup_directory_clear: (
@@ -1230,6 +1248,9 @@ pub fn settings_hit(
                 if contains_rect(geometry.language_row, x, y) {
                     return SettingsHit::LanguageDropdown;
                 }
+                if contains_rect(geometry.blur, x, y) {
+                    return SettingsHit::BlurToggle;
+                }
                 if contains_rect(geometry.opacity_slider, x, y) {
                     return SettingsHit::OpacitySlider;
                 }
@@ -1368,6 +1389,7 @@ pub(super) struct SettingsView {
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     pub(super) keep_session: bool,
+    pub(super) blur: bool,
     pub(super) opacity: f32,
     /// Which opacity slider is mid-drag, for thumb-dot grow feedback.
     pub(super) dragging_opacity: Option<SettingsOpacityTarget>,
@@ -1997,8 +2019,8 @@ pub(super) fn push_quads(
             row_hover(quads, geometry.cursor_blink_row, view.hover == SettingsHit::CursorBlinkToggle);
             toggle(quads, &mut staged, geometry.cursor_blink_row, view.cursor_blink);
 
-            // 界面组：语言（同一通用下拉组件）+ 终端不透明度。
-            group_frame(quads, geometry.language_row, 2);
+            // 界面组：语言（同一通用下拉组件）+ 终端不透明度 + 背景模糊。
+            group_frame(quads, geometry.language_row, 3);
             row_hover(quads, geometry.language_row, view.hover == SettingsHit::LanguageDropdown);
             combobox(
                 quads,
@@ -2015,6 +2037,8 @@ pub(super) fn push_quads(
                 view.hover == SettingsHit::OpacitySlider
                     || view.dragging_opacity == Some(SettingsOpacityTarget::Terminal),
             );
+            row_hover(quads, geometry.blur, view.hover == SettingsHit::BlurToggle);
+            toggle(quads, &mut staged, geometry.blur, view.blur);
         },
         NebulaSettingsSection::Profiles => {
             // 终端组：Shell / 启动目录 / 字体+字号。下拉列表是浮层，行的
@@ -3064,6 +3088,20 @@ pub(super) fn draw_text(
                     or_y + (or_h - cell_h) / 2.0,
                     sk.accent,
                     &opacity_v,
+                    gc,
+                );
+            }
+            let (br_x, br_y, _, br_h) = geometry.blur;
+            if visible(br_y, br_h) {
+                // 文案说的是效果不是实现：用户认的是"背景糊不糊"，不是
+                // Mica 这个 Windows 专有名词——而且这个开关在 macOS 上走的
+                // 是另一套实现。
+                r.draw_chrome_text(
+                    size,
+                    br_x + s(16.0),
+                    br_y + (br_h - cell_h) / 2.0,
+                    sk.ink,
+                    language.pick("背景模糊", "Blur behind window"),
                     gc,
                 );
             }
