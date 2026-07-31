@@ -274,6 +274,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::RestoreHiddenSsh(_)
             | crate::display::SettingsHit::FetchToggle
             | crate::display::SettingsHit::PowerlineToggle
+            | crate::display::SettingsHit::BlurToggle
             | crate::display::SettingsHit::KeepSessionToggle
             | crate::display::SettingsHit::BackgroundColor
             | crate::display::SettingsHit::BackgroundImage

@@ -1318,6 +1318,9 @@ pub struct Display {
     pub nebula_fetch_enabled: bool,
     /// Whether the injected prompt uses Nebula's powerline segments.
     pub nebula_powerline_enabled: bool,
+    /// 窗口背景模糊（Windows 11 上是 Mica）。默认开，见 `settings.rs` 的
+    /// 裁定注释。
+    pub nebula_blur: bool,
     /// Closing a window detaches its panes into the resident process for
     /// re-attach (multiplexer restore). Off = close kills the shells.
     pub nebula_keep_session: bool,
@@ -1708,6 +1711,10 @@ impl Display {
         };
         renderer.clear(background_color, settings_init.opacity);
         window.set_transparent(settings_init.opacity < 1.0);
+        // 背景模糊的开关住在 nebula_settings.txt 里，不是 alacritty 那侧的
+        // `window.blur`——所以要在这里按真正的设置再压一次，否则窗口创建时
+        // 用的是那个字段的默认值。
+        window.set_blur(settings_init.blur);
 
         // Disable shadows for transparent windows on macOS.
         #[cfg(target_os = "macos")]
@@ -1907,6 +1914,7 @@ impl Display {
             nebula_startup_directory: settings_init.startup_directory,
             nebula_fetch_enabled: settings_init.fetch,
             nebula_powerline_enabled: settings_init.powerline,
+            nebula_blur: settings_init.blur,
             nebula_keep_session: settings_init.keep_session,
             nebula_window_opacity: settings_init.opacity,
             nebula_background: if settings_init.follow_system_theme {
@@ -2651,6 +2659,7 @@ impl Display {
             hidden_hosts: self.nebula_hidden_hosts.clone(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
+            blur: self.nebula_blur,
             keep_session: self.nebula_keep_session,
             opacity: self.nebula_window_opacity,
             dragging_opacity: self.nebula_settings_opacity_drag.map(|(target, _, _)| target),
@@ -3135,6 +3144,15 @@ impl Display {
 
     pub fn toggle_powerline(&mut self) {
         self.nebula_powerline_enabled = !self.nebula_powerline_enabled;
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+    }
+
+    /// 界面→背景模糊。直接作用到窗口本身：DWM 的 backdrop 是**窗口属性**，
+    /// 不经过我们的渲染循环，所以标脏重绘是等不到它的。
+    pub fn toggle_blur(&mut self) {
+        self.nebula_blur = !self.nebula_blur;
+        self.window.set_blur(self.nebula_blur);
         self.persist_nebula_settings();
         self.pending_update.dirty = true;
     }
@@ -4364,6 +4382,7 @@ impl Display {
             font_family: self.nebula_font_family.clone(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
+            blur: self.nebula_blur,
             keep_session: self.nebula_keep_session,
             opacity: self.nebula_window_opacity,
             background: self.nebula_background,
@@ -4449,6 +4468,7 @@ impl Display {
         }
         self.nebula_fetch_enabled = settings.fetch;
         self.nebula_powerline_enabled = settings.powerline;
+        self.nebula_blur = settings.blur;
         self.nebula_keep_session = settings.keep_session;
         if self.nebula_cjk_bold_regular != settings.cjk_bold_regular {
             // 字形层策略变了：已缓存的 bold CJK 位图作废，清缓存重栅格。
