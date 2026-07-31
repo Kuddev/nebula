@@ -692,6 +692,17 @@ impl ApplicationHandler<Event> for Processor {
                     window_context.display.window.request_redraw();
                 }
             },
+            // 连接阶段推进：只更新拥有该 pane 的窗口。事件自带 tab_id，
+            // 没有 tab_id 的（不该出现）直接丢弃而不是误绘到别的 pane 上。
+            (EventType::SshConnect(stage), Some(window_id)) => {
+                if let (Some(window_context), Some(pane)) =
+                    (self.windows.get_mut(window_id), tab_id)
+                {
+                    window_context.ssh_connect_stage(pane, stage);
+                    window_context.dirty = true;
+                    window_context.display.window.request_redraw();
+                }
+            },
             // Toast click: surface the window (and pane) the toast came from.
             // Must be consumed here — the generic Some(window_id) forwarding
             // below would park it in a window's event queue instead.
@@ -2472,6 +2483,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 | EventType::SshDeleteUndoExpired
                 | EventType::QuickTerminalHotkeyChanged { .. }
                 | EventType::SshTestDone { .. }
+                | EventType::SshConnect(_)
                 | EventType::SftpUpdated => (),
                 // AI hook events are handled at the Processor level (they may
                 // target any window's pane); FocusWindow, fix results and

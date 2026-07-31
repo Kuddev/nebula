@@ -93,6 +93,9 @@ pub enum EventType {
         message: String,
         elapsed_ms: u64,
     },
+    /// 直连 SSH 会话的连接阶段推进（后台 runtime → 窗口线程）。事件自带
+    /// `tab_id`，接收侧据此定位 pane，无需在负载里重复 pane id。
+    SshConnect(crate::ssh_session::SshStage),
     SftpUpdated,
     AiHook(crate::ai_hook::AiHookEvent),
     /// 助手修复请求完成（后台线程 → 主循环）。`fix: None` = 沉默（失败、

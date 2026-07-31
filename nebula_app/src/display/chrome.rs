@@ -1695,6 +1695,9 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 let cy = row_text_cy(hy, hh);
                 let name = d.nebula_ssh_hosts.get(index).map(String::as_str).unwrap_or("?");
                 let pinned = d.nebula_pinned_hosts.iter().any(|p| p == name);
+                // 起过名字就显示名字。地址仍然是这一行的身份（置顶、删除、连接
+                // 都按地址走），只有给人看的那串文字换掉。
+                let shown = d.nebula_ssh_labels.get(name).map(String::as_str).unwrap_or(name);
                 // Label budget from its real start to the row's right edge
                 // (minus the pin marker's slot when pinned), in columns. The
                 // leading remote icon + space cost 2 columns of the drawn
@@ -1706,7 +1709,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 let row_tracking = s(0.35);
                 let max_cols = (((right - text_x) / (cell_w + row_tracking)).floor() as usize)
                     .saturating_sub(2);
-                let label = truncate_tab_label(name, max_cols.max(1));
+                let label = truncate_tab_label(shown, max_cols.max(1));
                 d.renderer.draw_chrome_text(
                     &size,
                     text_x,

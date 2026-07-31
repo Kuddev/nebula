@@ -363,6 +363,35 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             // Right-side drawer (directory tree / git): header tabs switch views,
             // directory rows expand/collapse. Sits under the modal layers, so
             // only when no modal owns the pointer.
+            // SSH 连接卡片：遮罩盖住整个 pane，所以卡片在场时 pane 内的点击
+            // 全归它——一个字节也不许漏进终端去起拖选（侧栏拖拽残影那个 bug
+            // 就是"未命中的按压漏进选区"）。落在卡片外的空白同样被吞掉。
+            if self.ctx.display().ssh_connect_active()
+                && !self.ctx.display().settings_open()
+                && self.ctx.display().nebula_confirm.is_none()
+            {
+                let x = self.ctx.mouse().x as f32;
+                let y = self.ctx.mouse().y as f32;
+                if self.ctx.display().ssh_connect_covers(x, y) {
+                    if button == MouseButton::Left {
+                        use crate::display::ssh_connect::SshConnectHit;
+                        match self.ctx.display().ssh_connect_hit(x, y) {
+                            SshConnectHit::Logs => {
+                                self.ctx.display().ssh_connect_toggle_logs();
+                                self.ctx.mark_dirty();
+                            },
+                            // 取消与关闭是同一个动作：这个 pane 除了这条连接
+                            // 没有别的内容，留着它没有意义。
+                            SshConnectHit::Cancel | SshConnectHit::Close => {
+                                self.ctx.nebula_tab(crate::event::TabRequest::Close);
+                            },
+                            SshConnectHit::None => {},
+                        }
+                    }
+                    return;
+                }
+            }
+
             if button == MouseButton::Left
                 && self.ctx.display().nebula_sftp_panel.is_some()
                 && !self.ctx.display().settings_open()

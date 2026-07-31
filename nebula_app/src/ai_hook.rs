@@ -1011,7 +1011,15 @@ export default function (pi: ExtensionAPI) {
     /// Write via tmp + rename (MoveFileEx REPLACE_EXISTING under the hood):
     /// readers never observe a torn file, a crash leaves the original intact.
     fn write_atomic(path: &Path, data: &str) -> std::io::Result<()> {
-        let tmp = path.with_extension("nebula-tmp");
+        // 临时文件名带上进程号。多个 Nebula 实例各自守着同一份
+        // `settings.json` 自愈，共用一个固定的 tmp 名就会互相踩：A 写 tmp、
+        // B 覆盖同一个 tmp、A `rename` 把它搬走，B 的 `rename` 于是报
+        // `ERROR_FILE_NOT_FOUND(2)`——一句"系统找不到指定的文件"，指的却是
+        // 那个临时文件，读起来像 settings.json 不见了。
+        //
+        // 内容本身是幂等的（装的是同一套 hook 条目），所以最后谁赢都行，
+        // 要防的只是这个假报错。
+        let tmp = path.with_extension(format!("nebula-tmp-{}", std::process::id()));
         std::fs::write(&tmp, data)?;
         std::fs::rename(&tmp, path)
     }

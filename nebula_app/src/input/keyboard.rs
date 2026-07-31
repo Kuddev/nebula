@@ -365,6 +365,23 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.display().ssh_editor_next_field(mods.shift_key())
                     },
                     Key::Named(NamedKey::Backspace) => self.ctx.display().ssh_editor_backspace(),
+                    Key::Named(NamedKey::Delete) => {
+                        self.ctx.display().ssh_editor_delete_forward()
+                    },
+                    // 光标导航。按住 Shift 是扩选——这套组合键在 Windows 上
+                    // 属于肌肉记忆，缺一个都会被读成"这个输入框是坏的"。
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        self.ctx.display().ssh_editor_move_caret(false, mods.shift_key())
+                    },
+                    Key::Named(NamedKey::ArrowRight) => {
+                        self.ctx.display().ssh_editor_move_caret(true, mods.shift_key())
+                    },
+                    Key::Named(NamedKey::Home) => {
+                        self.ctx.display().ssh_editor_jump_caret(false, mods.shift_key())
+                    },
+                    Key::Named(NamedKey::End) => {
+                        self.ctx.display().ssh_editor_jump_caret(true, mods.shift_key())
+                    },
                     Key::Character(c)
                         if mods.control_key() && !mods.alt_key() && c.eq_ignore_ascii_case("a") =>
                     {

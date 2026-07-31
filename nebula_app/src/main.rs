@@ -57,6 +57,7 @@ mod nebula_history;
 mod notify;
 #[cfg(windows)]
 mod panic;
+mod platform;
 #[cfg(unix)]
 mod polling;
 mod process_tree;
