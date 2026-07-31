@@ -8,7 +8,17 @@ param(
 
     [switch] $SkipBuild,
     [switch] $Force,
-    [string] $OutputDirectory
+    [string] $OutputDirectory,
+
+    # Cargo target directory to build into and package from. Defaults to the
+    # repo's own `target/`.
+    #
+    # Windows refuses to overwrite a running exe, so packaging while a Nebula
+    # instance is live out of `target/release/nebula.exe` dies with a bare
+    # "拒绝访问 (os error 5)" that names the linker, not the real cause. Point
+    # this at a separate directory to build a package without touching — let
+    # alone killing — the instance the user is working in.
+    [string] $TargetDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,8 +30,14 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 } elseif (-not [System.IO.Path]::IsPathRooted($OutputDirectory)) {
     $OutputDirectory = Join-Path $repo $OutputDirectory
 }
+if ([string]::IsNullOrWhiteSpace($TargetDirectory)) {
+    $TargetDirectory = Join-Path $repo 'target'
+} elseif (-not [System.IO.Path]::IsPathRooted($TargetDirectory)) {
+    $TargetDirectory = Join-Path $repo $TargetDirectory
+}
+$cargoTargetRoot = [System.IO.Path]::GetFullPath($TargetDirectory)
 $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
-$targetRoot = Join-Path $repo "target\$Configuration"
+$targetRoot = Join-Path $cargoTargetRoot $Configuration
 $stage = Join-Path $outputRoot ".stage-$Version-$PID"
 $zipPath = Join-Path $outputRoot "NebulaTerminal-v$Version-windows-x64.zip"
 $temporaryZip = Join-Path $outputRoot ".NebulaTerminal-v$Version-windows-x64-$PID.tmp.zip"
@@ -71,7 +87,9 @@ function Remove-StageSafely([string] $Path) {
 
 if (-not $SkipBuild) {
     Push-Location $repo
+    $previousTargetDirectory = $env:CARGO_TARGET_DIR
     try {
+        $env:CARGO_TARGET_DIR = $cargoTargetRoot
         if ($Configuration -eq 'release') {
             & cargo build --workspace --release
         } else {
@@ -81,6 +99,7 @@ if (-not $SkipBuild) {
             throw "Cargo build failed with exit code $LASTEXITCODE"
         }
     } finally {
+        $env:CARGO_TARGET_DIR = $previousTargetDirectory
         Pop-Location
     }
 }

@@ -506,6 +506,7 @@ impl WindowContext {
         match self.tabs[tab_idx].layout.remove_leaf(id) {
             RemoveResult::WasRoot => self.close_tab(tab_idx),
             RemoveResult::Collapsed(focus) => {
+                self.display.forget_ssh_connect(id);
                 if let Some(i) = self.pane_index(id) {
                     let pane = self.panes.remove(i);
                     let _ = pane.notifier.0.send(Msg::Shutdown);

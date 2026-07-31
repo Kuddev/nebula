@@ -322,12 +322,11 @@ mod win {
         ensure_icon_file()
     }
 
-    /// Write the embedded logo to `%APPDATA%\Nebula\toast_icon.png` (idempotent;
-    /// refreshed when the embedded bytes change size, e.g. after a logo swap).
+    /// Write the embedded logo to `toast_icon.png` in the user data dir
+    /// (idempotent; refreshed when the embedded bytes change size, e.g. after a
+    /// logo swap).
     fn ensure_icon_file() -> Option<PathBuf> {
-        let dir = PathBuf::from(std::env::var_os("APPDATA")?).join("Nebula");
-        std::fs::create_dir_all(&dir).ok()?;
-        let path = dir.join("toast_icon.png");
+        let path = crate::platform::dirs::data_dir().join("toast_icon.png");
         let stale = std::fs::metadata(&path)
             .map(|meta| meta.len() != ICON_PNG.len() as u64)
             .unwrap_or(true);

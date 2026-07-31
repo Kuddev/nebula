@@ -48,8 +48,16 @@ use crate::config::window::{Identity, WindowConfig};
 use crate::display::SizeInfo;
 
 /// Window icon for `_NET_WM_ICON` property.
+///
+/// Three levels up, not two: this file sits in `src/display/`, so `../../`
+/// would land on `nebula_app/extra` — which is a stray 8-byte regular file
+/// holding the text `../extra` (a symlink that got committed as content under
+/// `core.symlinks=false`, mode 100644). It is not a real symlink on any
+/// platform, so the two-level path can never resolve. Windows never noticed
+/// because this const is gated out there. Sibling `display/mod.rs` already uses
+/// the correct `../../../`.
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
-const WINDOW_ICON: &[u8] = include_bytes!("../../extra/logo/nebula.png");
+const WINDOW_ICON: &[u8] = include_bytes!("../../../extra/logo/nebula.png");
 
 /// This should match the definition of IDI_ICON from `nebula.rc`.
 #[cfg(windows)]

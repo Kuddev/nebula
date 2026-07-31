@@ -42,6 +42,10 @@ pub struct SshProfileAuth {
     pub auth: SshAuthMode,
     #[serde(default)]
     pub private_keys: Vec<PathBuf>,
+    /// 列表里显示的名字。`None` / 空串都表示回落到地址本身，所以旧配置文件
+    /// 不需要迁移就能读——`serde(default)` 让缺字段等价于"没起名字"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,7 +101,20 @@ impl SshProfiles {
                 destination: destination.to_owned(),
                 auth: SshAuthMode::Auto,
                 private_keys: Vec::new(),
+                label: None,
             })
+    }
+
+    /// 地址 → 显示名。侧栏每帧都要画主机行，不能每帧读一次 JSON，所以调用方
+    /// 把结果缓存起来，只在编辑器保存后刷新。
+    pub fn labels(&self) -> std::collections::HashMap<String, String> {
+        self.profiles
+            .iter()
+            .filter_map(|profile| {
+                let label = profile.label.as_deref()?.trim();
+                (!label.is_empty()).then(|| (profile.destination.clone(), label.to_owned()))
+            })
+            .collect()
     }
 
     pub fn upsert(&mut self, mut profile: SshProfileAuth) {
@@ -184,6 +201,7 @@ mod tests {
             destination: "dev@example.com".to_owned(),
             auth: SshAuthMode::PublicKey,
             private_keys: vec![PathBuf::from(r"C:\Keys\first"), PathBuf::from(r"C:\Keys\second")],
+            label: None,
         });
         profiles.save(&path).unwrap();
 
@@ -207,6 +225,7 @@ mod tests {
                 PathBuf::from(r"c:\keys\ID_ED25519"),
                 PathBuf::from(r"C:\Keys\id_rsa"),
             ],
+            label: None,
         });
 
         assert_eq!(
@@ -222,6 +241,7 @@ mod tests {
             destination: "old@example.com".to_owned(),
             auth: SshAuthMode::PublicKey,
             private_keys: vec![PathBuf::from(r"C:\Keys\id_ed25519")],
+            label: None,
         });
 
         profiles.rename("old@example.com", "new@example.com");

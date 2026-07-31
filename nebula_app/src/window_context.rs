@@ -122,11 +122,11 @@ fn preferred_initial_cwd(
 /// per-frame allocation is introduced.
 #[inline]
 fn chrome_clock_interval(
-    any_tab_running: bool,
+    spinner_running: bool,
     editor_active: bool,
     chrome_animating: bool,
 ) -> Duration {
-    if any_tab_running {
+    if spinner_running {
         Duration::from_micros(16_667)
     } else if editor_active || chrome_animating {
         Duration::from_millis(125)
@@ -1783,6 +1783,16 @@ impl WindowContext {
         self.panes.iter().position(|p| p.id == id)
     }
 
+    /// 把后台 SSH runtime 的阶段上报转给 display，顺带补上这个 pane 的目标
+    /// 地址——事件本身只带 pane 身份，地址在 pane 上。
+    pub fn ssh_connect_stage(&mut self, pane: PaneId, stage: crate::ssh_session::SshStage) {
+        let destination = self
+            .pane_index(pane)
+            .and_then(|index| self.panes[index].ssh_destination.clone())
+            .unwrap_or_default();
+        self.display.ssh_connect_stage(pane, destination, stage);
+    }
+
     /// Working directory of the focused pane (from the shell's `NEBULA|cwd|…`
     /// title report) for a new tab/split to inherit. `None` if unknown.
     fn focused_cwd(&self) -> Option<std::path::PathBuf> {
@@ -2079,6 +2089,9 @@ impl WindowContext {
         let mut ids = Vec::new();
         entry.layout.leaves(&mut ids);
         for id in ids {
+            // 连接中的 tab 被关掉：丢弃它的卡片状态，否则 HashMap 会随
+            // 会话累积，而那个 pane 再也不会回来。
+            self.display.forget_ssh_connect(id);
             if let Some(i) = self.pane_index(id) {
                 let pane = self.panes.remove(i);
                 let _ = pane.notifier.0.send(Msg::Shutdown);
@@ -2233,7 +2246,7 @@ impl WindowContext {
         // the cadence class changes.
         let clock_timer = TimerId::new(Topic::NebulaClock, self.display.window.id());
         let interval = chrome_clock_interval(
-            self.display.any_tab_running(),
+            self.display.any_tab_running() || self.display.ssh_test_running(),
             self.display.chrome_editor_active(),
             self.display.chrome_animating(),
         );
@@ -2302,6 +2315,9 @@ impl WindowContext {
             self.display.draw_doc_frame(doc, view, scheduler);
             return;
         }
+
+        // 连接卡片只画在聚焦 pane 里，display 侧只有几何、没有身份。
+        self.display.set_focused_pane(focused);
 
         if pane_rects.len() <= 1 {
             let id = pane_rects.first().map(|(id, _)| *id).unwrap_or(focused);

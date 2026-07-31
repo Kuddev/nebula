@@ -28,6 +28,7 @@
 //! - [`tokens`] —— 间距、圆角、字阶、动效、层级的常量目录
 //! - [`theme`] —— [`Skin`](theme::Skin)：主题派生的墨色与表面色
 //! - [`surface`] —— 面板/卡片/描边/遮罩的配方（本层的核心）
+//! - [`text_field`] —— 输入框的光标、选区、命中测试（唯一有可变状态的组件）
 //! - [`widgets`] —— slider / toggle / combobox / spinner
 //! - [`keycap`] —— 键帽 chip
 //! - [`icons`] —— 图标墨迹
@@ -52,6 +53,7 @@ pub mod guardrails;
 pub mod icons;
 pub mod keycap;
 pub mod surface;
+pub mod text_field;
 pub mod theme;
 pub mod tokens;
 pub mod widgets;

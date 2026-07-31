@@ -109,7 +109,9 @@ pub use state::{
 mod file_dialog;
 pub(crate) mod keymap;
 mod settings;
+mod ssh_editor_input;
 mod ssh_editor_render;
+pub(crate) mod ssh_connect;
 mod ssh_ui;
 mod text_input;
 
@@ -755,18 +757,14 @@ pub(crate) fn nebula_link_log(message: impl AsRef<str>) {
     }
 }
 
-/// Directory holding Nebula's persistent state (`%APPDATA%\Nebula` or
-/// `~/.config/Nebula`), created on demand. Settings live here next to the
-/// history file managed by [`crate::nebula_history`] and the session
-/// snapshot managed by [`crate::session`].
+/// Directory holding Nebula's persistent state, created on demand. Settings
+/// live here next to the history file managed by [`crate::nebula_history`] and
+/// the session snapshot managed by [`crate::session`].
+///
+/// Per-platform locations and the reasoning behind them live in
+/// [`crate::platform::dirs`] — this is a thin alias kept for its 26 call sites.
 pub(crate) fn nebula_data_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("Nebula");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+    crate::platform::dirs::data_dir().to_path_buf()
 }
 
 /// Read one raw `key=value` from `nebula_settings.txt` (case-insensitive key).
@@ -1130,6 +1128,14 @@ pub struct Display {
     /// Transient "cols × rows" HUD shown briefly after a window resize; it fades
     /// out over ~0.9s. `None` when nothing is showing.
     nebula_resize_hud: Option<ResizeHud>,
+
+    /// 每个 pane 的 SSH 连接进度。成功时立刻移除——卡片让位给真实终端，
+    /// 持续重绘也随之停止；失败保留，让用户读得到原因。
+    nebula_ssh_connect: std::collections::HashMap<u64, ssh_connect::SshConnectState>,
+    /// 聚焦 pane 的 id，由绘制流程每帧同步。连接卡片只画在聚焦 pane 里，
+    /// 而 `nebula_pane_view` 只给几何、不给身份。
+    nebula_focused_pane: u64,
+
     /// Skip the first resize (window creation) so no HUD flashes at startup.
     nebula_resize_hud_armed: bool,
 
@@ -1172,6 +1178,9 @@ pub struct Display {
     pub nebula_ssh_editor_rects: Option<SshEditorRects>,
     nebula_ssh_editor_open: bool,
     nebula_ssh_editor_hover: SshEditorHit,
+    /// 正在拖选的字段。鼠标按在输入框里时置位，松开清掉——拖拽的语义是
+    /// "从按下的那个字符拉到现在这个字符"，所以中途划出框外也要继续跟。
+    nebula_ssh_editor_drag: Option<SshEditorField>,
     /// 「测试连接」点击时暂存的请求；input 层随后取走并交给 SSH runtime。
     /// display 不持有事件代理，这一格就是点击→网络之间的交接台。
     nebula_ssh_test_request: Option<crate::ssh_session::SshTestRequest>,
@@ -1279,6 +1288,9 @@ pub struct Display {
     /// them here makes Delete stable instead of letting the next merge revive
     /// the row immediately.
     nebula_hidden_hosts: Vec<String>,
+    /// 地址 → 用户起的显示名，从 `ssh_profiles.json` 缓存而来。侧栏每帧都要
+    /// 画这些行，读文件必须发生在保存那一刻，而不是绘制路径上。
+    nebula_ssh_labels: std::collections::HashMap<String, String>,
     /// Accordion fold state of the two sidebar sections.
     nebula_tabs_section_open: bool,
     nebula_hosts_section_open: bool,
@@ -1784,6 +1796,8 @@ impl Display {
             cursor_hidden: Default::default(),
             nebula_pane_view: None,
             nebula_resize_hud: None,
+            nebula_ssh_connect: std::collections::HashMap::new(),
+            nebula_focused_pane: 0,
             nebula_resize_hud_armed: false,
             nebula_history: {
                 let history = crate::nebula_history::NebulaHistory::load();
@@ -1806,6 +1820,7 @@ impl Display {
             nebula_ssh_editor_rects: None,
             nebula_ssh_editor_open: false,
             nebula_ssh_editor_hover: SshEditorHit::None,
+            nebula_ssh_editor_drag: None,
             nebula_ssh_test_request: None,
             nebula_ssh_test_seq: 0,
             nebula_frame_images: Vec::new(),
@@ -1871,6 +1886,11 @@ impl Display {
             nebula_pinned_hosts: settings_init.pinned_hosts.clone(),
             nebula_saved_hosts: settings_init.saved_hosts.clone(),
             nebula_hidden_hosts: settings_init.hidden_hosts.clone(),
+            nebula_ssh_labels: crate::ssh_profiles::SshProfiles::load(
+                &nebula_data_dir().join("ssh_profiles.json"),
+            )
+            .map(|profiles| profiles.labels())
+            .unwrap_or_default(),
             nebula_tabs_section_open: true,
             nebula_hosts_section_open: true,
             nebula_tabs_scroll: 0,
@@ -1979,464 +1999,6 @@ impl Display {
 
     pub fn hidden_ssh_host_count(&self) -> usize {
         self.nebula_hidden_hosts.len()
-    }
-
-    pub fn open_ssh_editor(&mut self) {
-        self.nebula_ssh_editor = Some(SshHostEditor {
-            original_destination: None,
-            error: None,
-            destination_selection: Default::default(),
-            password_selection: Default::default(),
-            destination: String::new(),
-            password: String::new(),
-            save_password: true,
-            show_password: false,
-            auth: crate::ssh_profiles::SshAuthMode::Auto,
-            private_keys: Vec::new(),
-            field: SshEditorField::Destination,
-            focus: crate::ux::FocusIndex::default(),
-            test: Default::default(),
-        });
-        self.nebula_ssh_editor_rects = None;
-        self.nebula_ssh_editor_open = true;
-        self.nebula_ssh_editor_hover = SshEditorHit::None;
-        // 每次打开都从零开始，避免上一次退出动画的残余进度造成闪跳。
-        self.nebula_ui_anims.ssh_editor = UiAnim::new(0.0);
-        self.pending_update.dirty = true;
-    }
-
-    pub fn edit_ssh_host(&mut self, index: usize) {
-        let Some(destination) = self.nebula_ssh_hosts.get(index).cloned() else { return };
-        let profile =
-            crate::ssh_profiles::SshProfiles::load(&nebula_data_dir().join("ssh_profiles.json"))
-                .unwrap_or_else(|err| {
-                    warn!("加载 SSH Profile 失败，编辑器使用自动认证: {err}");
-                    crate::ssh_profiles::SshProfiles::default()
-                })
-                .for_destination(&destination);
-        self.nebula_ssh_editor = Some(SshHostEditor {
-            original_destination: Some(destination.clone()),
-            error: None,
-            destination_selection: Default::default(),
-            password_selection: Default::default(),
-            destination,
-            // Never pull a stored secret back into a text field. Leaving this
-            // blank preserves the existing credential when the address stays
-            // unchanged; typing a new value explicitly replaces it.
-            password: String::new(),
-            save_password: true,
-            show_password: false,
-            auth: profile.auth,
-            private_keys: profile.private_keys,
-            field: SshEditorField::Destination,
-            focus: crate::ux::FocusIndex::default(),
-            test: Default::default(),
-        });
-        self.nebula_ssh_editor_rects = None;
-        self.nebula_ssh_editor_open = true;
-        self.nebula_ssh_editor_hover = SshEditorHit::None;
-        self.nebula_ui_anims.ssh_editor = UiAnim::new(0.0);
-        self.pending_update.dirty = true;
-        self.window.request_redraw();
-    }
-
-    pub fn ssh_editor_active(&self) -> bool {
-        self.nebula_ssh_editor_open && self.nebula_ssh_editor.is_some()
-    }
-
-    pub fn close_ssh_editor(&mut self) {
-        if self.nebula_ssh_editor.is_some() {
-            self.nebula_ssh_editor_open = false;
-            self.nebula_ssh_editor_hover = SshEditorHit::None;
-            self.pending_update.dirty = true;
-            self.window.request_redraw();
-        }
-    }
-
-    pub fn ssh_editor_hit(&self, x: f32, y: f32) -> SshEditorHit {
-        let Some(rects) = self.nebula_ssh_editor_rects.as_ref() else {
-            return SshEditorHit::None;
-        };
-        let hit = |r: (f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
-        if hit(rects.close) {
-            SshEditorHit::Close
-        } else if hit(rects.destination) {
-            SshEditorHit::Destination
-        } else if let Some((mode, _)) = rects.auth.iter().find(|(_, rect)| hit(*rect)) {
-            SshEditorHit::Auth(*mode)
-        } else if hit(rects.add_private_key) {
-            SshEditorHit::AddPrivateKey
-        } else if let Some((index, _)) = rects.private_key_rows.iter().find(|(_, rect)| hit(*rect))
-        {
-            SshEditorHit::RemovePrivateKey(*index)
-        } else if hit(rects.password_toggle) {
-            SshEditorHit::PasswordToggle
-        } else if hit(rects.password) {
-            SshEditorHit::Password
-        } else if hit(rects.save_checkbox) {
-            SshEditorHit::SaveToggleBox
-        } else if hit(rects.save_toggle) {
-            SshEditorHit::SaveToggleLabel
-        } else if hit(rects.test) {
-            SshEditorHit::Test
-        } else if hit(rects.test_status) {
-            SshEditorHit::TestStatus
-        } else if hit(rects.cancel) {
-            SshEditorHit::Cancel
-        } else if hit(rects.primary) {
-            SshEditorHit::Primary
-        } else {
-            SshEditorHit::None
-        }
-    }
-
-    pub fn set_ssh_editor_hover(&mut self, hover: SshEditorHit) {
-        if self.nebula_ssh_editor_hover != hover {
-            self.nebula_ssh_editor_hover = hover;
-            self.pending_update.dirty = true;
-        }
-    }
-
-    pub fn ssh_editor_insert(&mut self, text: &str) {
-        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-            editor.error = None;
-            match editor.field {
-                SshEditorField::Destination => {
-                    editor.destination_selection.insert(&mut editor.destination, text)
-                },
-                SshEditorField::Password => {
-                    editor.password_selection.insert(&mut editor.password, text)
-                },
-            }
-            editor.test = Default::default();
-        }
-    }
-    pub fn ssh_editor_backspace(&mut self) {
-        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-            let before = match editor.field {
-                SshEditorField::Destination => editor.destination.len(),
-                SshEditorField::Password => editor.password.len(),
-            };
-            match editor.field {
-                SshEditorField::Destination => {
-                    editor.destination_selection.backspace(&mut editor.destination)
-                },
-                SshEditorField::Password => {
-                    editor.password_selection.backspace(&mut editor.password)
-                },
-            }
-            let after = match editor.field {
-                SshEditorField::Destination => editor.destination.len(),
-                SshEditorField::Password => editor.password.len(),
-            };
-            if before != after {
-                editor.test = Default::default();
-            }
-        }
-    }
-
-    pub fn ssh_editor_select_all(&mut self) {
-        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-            match editor.field {
-                SshEditorField::Destination => {
-                    editor.destination_selection.select(&editor.destination)
-                },
-                SshEditorField::Password => editor.password_selection.select(&editor.password),
-            }
-        }
-    }
-
-    /// Copying an invisible password would persist a secret in the system
-    /// clipboard without visible intent, so it is enabled only after Reveal.
-    pub fn ssh_editor_selected_text(&self) -> Option<String> {
-        let editor = self.nebula_ssh_editor.as_ref()?;
-        match editor.field {
-            SshEditorField::Destination => {
-                editor.destination_selection.selected_text(&editor.destination)
-            },
-            SshEditorField::Password if editor.show_password => {
-                editor.password_selection.selected_text(&editor.password)
-            },
-            SshEditorField::Password => None,
-        }
-    }
-
-    pub fn ssh_editor_next_field(&mut self, reverse: bool) {
-        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-            editor.destination_selection.clear();
-            editor.password_selection.clear();
-            let shows_password = ssh_ui::auth_sections(editor.auth).0;
-            // Destination, optional password, test, cancel, save.
-            let count = if shows_password { 5 } else { 4 };
-            editor.focus.advance(count, reverse);
-            editor.field = match (shows_password, editor.focus.current()) {
-                (_, 0) => SshEditorField::Destination,
-                (true, 1) => SshEditorField::Password,
-                _ => editor.field,
-            };
-        }
-    }
-
-    pub fn ssh_editor_activate_focus(&mut self) {
-        let Some(editor) = self.nebula_ssh_editor.as_ref() else { return };
-        let shows_password = ssh_ui::auth_sections(editor.auth).0;
-        match (shows_password, editor.focus.current()) {
-            (true, 2) | (false, 1) => self.queue_ssh_test(),
-            (true, 3) | (false, 2) => self.close_ssh_editor(),
-            (true, 4) | (false, 3) => self.save_ssh_editor(),
-            _ => {},
-        }
-    }
-
-    pub fn ssh_editor_toggle_save(&mut self) {
-        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-            editor.save_password = !editor.save_password;
-            editor.test = Default::default();
-        }
-    }
-
-    /// input 层在处理完编辑器点击后调用：取走「测试连接」暂存的请求。
-    pub fn take_ssh_test_request(&mut self) -> Option<crate::ssh_session::SshTestRequest> {
-        self.nebula_ssh_test_request.take()
-    }
-
-    /// Validate the current draft and stage an exact, numbered test request.
-    /// The input layer owns the event proxy and takes this request immediately
-    /// after mouse/keyboard activation.
-    fn queue_ssh_test(&mut self) {
-        let Some(editor) = self.nebula_ssh_editor.as_mut() else { return };
-        let destination = editor.destination.trim().to_owned();
-        let valid = !destination.is_empty()
-            && !destination
-                .chars()
-                .any(|c| c.is_whitespace() || c.is_control() || ";&|<>\"'`".contains(c));
-        if !valid {
-            editor.error = Some(if destination.is_empty() {
-                "请输入 SSH 地址，例如 user@example.com".to_owned()
-            } else {
-                "地址不能包含空白、控制字符或 shell 分隔符".to_owned()
-            });
-            editor.test = Default::default();
-            return;
-        }
-        if matches!(editor.test, ssh_ui::SshTestState::Running { .. }) {
-            return;
-        }
-
-        let shows_password = ssh_ui::auth_sections(editor.auth).0;
-        editor.focus.set(if shows_password { 2 } else { 1 }, if shows_password { 5 } else { 4 });
-        self.nebula_ssh_test_seq = self.nebula_ssh_test_seq.wrapping_add(1).max(1);
-        let request_id = self.nebula_ssh_test_seq;
-        editor.error = None;
-        editor.test = ssh_ui::SshTestState::Running { request_id };
-        self.nebula_ssh_test_request = Some(crate::ssh_session::SshTestRequest {
-            request_id,
-            destination,
-            auth: editor.auth,
-            private_keys: editor.private_keys.clone(),
-            password: (!editor.password.is_empty()).then(|| editor.password.clone()),
-        });
-    }
-
-    /// 后台测试完成回报。结果只属于发起时的草稿：地址已改或状态已非
-    /// Running（用户改过字段被清位）时直接丢弃，不让旧结果背书新配置。
-    pub fn ssh_test_done(
-        &mut self,
-        request_id: u64,
-        destination: &str,
-        ok: bool,
-        message: &str,
-        elapsed_ms: u64,
-    ) {
-        let Some(editor) = self.nebula_ssh_editor.as_mut() else { return };
-        if editor.destination.trim() != destination
-            || editor.test != (ssh_ui::SshTestState::Running { request_id })
-        {
-            return;
-        }
-        editor.test = if ok {
-            ssh_ui::SshTestState::Ok { elapsed_ms }
-        } else {
-            ssh_ui::SshTestState::Failed { summary: message.to_owned() }
-        };
-        self.pending_update.dirty = true;
-        self.window.request_redraw();
-    }
-
-    pub fn ssh_editor_click(&mut self, x: f32, y: f32) -> bool {
-        match self.ssh_editor_hit(x, y) {
-            SshEditorHit::Destination => {
-                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    let count = if ssh_ui::auth_sections(editor.auth).0 { 5 } else { 4 };
-                    editor.focus.set(0, count);
-                    editor.destination_selection.clear();
-                    editor.password_selection.clear();
-                    editor.field = SshEditorField::Destination;
-                }
-            },
-            SshEditorHit::PasswordToggle => {
-                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    editor.show_password = !editor.show_password;
-                }
-            },
-            SshEditorHit::Password => {
-                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    editor.focus.set(1, 5);
-                    editor.destination_selection.clear();
-                    editor.password_selection.clear();
-                    editor.field = SshEditorField::Password;
-                }
-            },
-            SshEditorHit::Auth(mode) => {
-                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    editor.auth = mode;
-                    editor.error = None;
-                    editor.test = Default::default();
-                    if !ssh_ui::auth_sections(mode).0 {
-                        editor.field = SshEditorField::Destination;
-                    }
-                }
-            },
-            SshEditorHit::AddPrivateKey => {
-                if let Some(result) = file_dialog::pick_private_key_file(&self.window) {
-                    if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                        match result {
-                            Ok(path) => {
-                                ssh_ui::push_private_key(&mut editor.private_keys, path);
-                                editor.error = None;
-                                editor.test = Default::default();
-                            },
-                            Err(err) => editor.error = Some(err),
-                        }
-                    }
-                }
-            },
-            SshEditorHit::RemovePrivateKey(index) => {
-                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    if index < editor.private_keys.len() {
-                        editor.private_keys.remove(index);
-                        editor.test = Default::default();
-                    }
-                }
-            },
-            SshEditorHit::SaveToggleBox | SshEditorHit::SaveToggleLabel => {
-                self.ssh_editor_toggle_save();
-            },
-            SshEditorHit::Test => self.queue_ssh_test(),
-            SshEditorHit::TestStatus => {},
-            SshEditorHit::Close => {
-                self.close_ssh_editor();
-            },
-            SshEditorHit::Cancel => {
-                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    let shows_password = ssh_ui::auth_sections(editor.auth).0;
-                    editor.focus.set(
-                        if shows_password { 3 } else { 2 },
-                        if shows_password { 5 } else { 4 },
-                    );
-                }
-                self.close_ssh_editor();
-            },
-            SshEditorHit::Primary => {
-                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    let shows_password = ssh_ui::auth_sections(editor.auth).0;
-                    editor.focus.set(
-                        if shows_password { 4 } else { 3 },
-                        if shows_password { 5 } else { 4 },
-                    );
-                }
-                self.save_ssh_editor();
-            },
-            SshEditorHit::None => return false,
-        }
-        self.pending_update.dirty = true;
-        self.window.request_redraw();
-        true
-    }
-
-    pub fn save_ssh_editor(&mut self) {
-        let Some(mut editor) = self.nebula_ssh_editor.take() else { return };
-        let destination = editor.destination.trim().to_owned();
-        let valid = !destination.is_empty()
-            && !destination
-                .chars()
-                .any(|c| c.is_whitespace() || c.is_control() || ";&|<>\"'`".contains(c));
-        if !valid {
-            editor.error = Some(if destination.is_empty() {
-                "请输入 SSH 地址，例如 user@example.com".to_owned()
-            } else {
-                "地址不能包含空白、控制字符或 shell 分隔符".to_owned()
-            });
-            editor.field = SshEditorField::Destination;
-            self.nebula_ssh_editor = Some(editor);
-            self.pending_update.dirty = true;
-            self.window.request_redraw();
-            return;
-        }
-        if let Some(original) = editor.original_destination.as_deref() {
-            if original != destination {
-                self.nebula_saved_hosts.retain(|host| host != original);
-                self.nebula_pinned_hosts.retain(|host| host != original);
-                if !self.nebula_hidden_hosts.iter().any(|host| host == original) {
-                    self.nebula_hidden_hosts.push(original.to_owned());
-                }
-                #[cfg(windows)]
-                {
-                    let _ = crate::ssh_credentials::forget_password(original);
-                }
-            }
-        }
-        // Saving/editing is an explicit request to surface this destination,
-        // so it also undoes a previous Delete of the same address.
-        self.nebula_hidden_hosts.retain(|host| host != &destination);
-        self.nebula_saved_hosts.retain(|host| host != &destination);
-        self.nebula_saved_hosts.insert(0, destination.clone());
-        self.nebula_saved_hosts.truncate(20);
-        self.nebula_ssh_hosts = merge_ssh_hosts(
-            &self.nebula_saved_hosts,
-            &self.nebula_pinned_hosts,
-            &self.nebula_hidden_hosts,
-        );
-        let profile_path = nebula_data_dir().join("ssh_profiles.json");
-        let mut profiles =
-            crate::ssh_profiles::SshProfiles::load(&profile_path).unwrap_or_else(|err| {
-                warn!("加载 SSH Profile 失败，将创建新文件: {err}");
-                crate::ssh_profiles::SshProfiles::default()
-            });
-        if let Some(original) = editor.original_destination.as_deref() {
-            if original != destination {
-                profiles.rename(original, &destination);
-            }
-        }
-        profiles.upsert(crate::ssh_profiles::SshProfileAuth {
-            destination: destination.clone(),
-            auth: editor.auth,
-            private_keys: editor.private_keys.clone(),
-        });
-        if let Err(err) = profiles.save(&profile_path) {
-            editor.error = Some(format!("保存 SSH Profile 失败: {err}"));
-            self.nebula_ssh_editor = Some(editor);
-            self.pending_update.dirty = true;
-            self.window.request_redraw();
-            return;
-        }
-        if ssh_ui::auth_sections(editor.auth).0
-            && editor.save_password
-            && !editor.password.is_empty()
-        {
-            #[cfg(windows)]
-            {
-                let _ = crate::ssh_credentials::store_password(
-                    &destination,
-                    editor.password.as_bytes(),
-                );
-            }
-        }
-        // 凭据落盘后立即清除内存中的明文，但保留其余内容完成短退出动画。
-        editor.password.clear();
-        self.persist_nebula_settings();
-        self.nebula_ssh_editor = Some(editor);
-        self.close_ssh_editor();
     }
 
     /// Ask before removing a saved destination. Config aliases use different
@@ -6655,6 +6217,170 @@ impl Display {
     /// Overlay a transient, fading "cols × rows" HUD centered in the window,
     /// shown briefly after a resize (a resize overlay HUD). Keeps requesting
     /// redraws until it fades out, then clears itself.
+    /// 每帧同步聚焦 pane 的身份。连接卡片据此决定画在哪个 pane 里——
+    /// `nebula_pane_view` 只给几何，不给身份。
+    pub fn set_focused_pane(&mut self, pane: u64) {
+        self.nebula_focused_pane = pane;
+    }
+
+    /// 后台 SSH runtime 上报的连接阶段。
+    ///
+    /// `Ready` 直接移除状态：卡片退场，持续重绘随之停止，不会留下一个连完
+    /// 还在后台跑粒子的 tab。
+    pub fn ssh_connect_stage(
+        &mut self,
+        pane: u64,
+        destination: String,
+        stage: crate::ssh_session::SshStage,
+    ) {
+        if matches!(stage, crate::ssh_session::SshStage::Ready) {
+            self.nebula_ssh_connect.remove(&pane);
+            return;
+        }
+        match self.nebula_ssh_connect.entry(pane) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut().set_stage(stage),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                // 只有 `Resolve` 能开一张新卡片。`Ready` 时状态已被移除，若
+                // 任何后续阶段都能重建，一次会话中途断线就会让连接卡片在一
+                // 个用了半天的终端上凭空复活。
+                if matches!(stage, crate::ssh_session::SshStage::Resolve) {
+                    entry.insert(ssh_connect::SshConnectState::new(destination));
+                }
+            },
+        }
+    }
+
+    /// pane 关闭时丢弃它的连接状态。
+    pub fn forget_ssh_connect(&mut self, pane: u64) {
+        self.nebula_ssh_connect.remove(&pane);
+    }
+
+    /// 卡片当前占据的矩形 = 聚焦 pane 的内容区。绘制与命中共用它，两者不会
+    /// 漂移。
+    fn ssh_connect_rect(&self) -> (f32, f32, f32, f32) {
+        let view = self.pane_view();
+        (
+            view.padding_x(),
+            view.padding_y(),
+            view.width() - view.padding_x() - view.padding_right(),
+            view.height() - view.padding_y() - view.padding_bottom(),
+        )
+    }
+
+    /// 聚焦 pane 是否正被连接卡片接管（遮罩已经在画了）。
+    pub fn ssh_connect_active(&self) -> bool {
+        self.nebula_ssh_connect
+            .get(&self.nebula_focused_pane)
+            .is_some_and(|state| state.visible())
+    }
+
+    /// 遮罩盖住整个 pane，所以卡片在场时 pane 内的一切点击都归卡片，不能
+    /// 漏进终端去起拖选——侧栏拖拽残影那个 bug 的同类。
+    pub fn ssh_connect_covers(&self, x: f32, y: f32) -> bool {
+        self.ssh_connect_active() && ssh_connect::covers(self.ssh_connect_rect(), x, y)
+    }
+
+    pub fn ssh_connect_hit(&self, x: f32, y: f32) -> ssh_connect::SshConnectHit {
+        let Some(state) = self.nebula_ssh_connect.get(&self.nebula_focused_pane) else {
+            return ssh_connect::SshConnectHit::None;
+        };
+        if !state.visible() {
+            return ssh_connect::SshConnectHit::None;
+        }
+        ssh_connect::hit_test(
+            state,
+            &self.ui_size_info(),
+            self.ssh_connect_rect(),
+            self.window.scale_factor as f32,
+            self.nebula_language,
+            x,
+            y,
+        )
+    }
+
+    /// 更新悬停并返回是否需要重绘。
+    pub fn ssh_connect_set_hover(&mut self, hit: ssh_connect::SshConnectHit) -> bool {
+        let pane = self.nebula_focused_pane;
+        self.nebula_ssh_connect.get_mut(&pane).is_some_and(|state| state.set_hover(hit))
+    }
+
+    /// Logs 折叠是纯显示状态，就地处理；其余动作要关 pane 或重连，交给
+    /// `window_context`。
+    pub fn ssh_connect_toggle_logs(&mut self) {
+        let pane = self.nebula_focused_pane;
+        if let Some(state) = self.nebula_ssh_connect.get_mut(&pane) {
+            state.toggle_logs();
+        }
+    }
+
+    /// 聚焦 pane 的连接目标，供"重试"重新发起同一个连接。
+    pub fn ssh_connect_destination(&self) -> Option<String> {
+        self.nebula_ssh_connect
+            .get(&self.nebula_focused_pane)
+            .map(|state| state.destination().to_owned())
+    }
+
+    /// SSH 连接卡片：星云轨道 + 粒子流，画在聚焦 pane 内的浮层。
+    fn draw_ssh_connect(&mut self) {
+        let pane = self.nebula_focused_pane;
+        if !self.nebula_ssh_connect.contains_key(&pane) {
+            return;
+        }
+        let delta = self.nebula_ui_anims.frame().delta;
+        // 借用分离：绘制要同时摸 renderer 与 glyph_cache，先把状态摘出来。
+        let mut states = std::mem::take(&mut self.nebula_ssh_connect);
+        if let Some(state) = states.get_mut(&pane) {
+            state.step(delta);
+            if state.visible() {
+                let size = self.ui_size_info();
+                let scale = self.window.scale_factor as f32;
+                let view = self.pane_view();
+                // pane 的内容矩形：padding 编码了 pane 在窗口里的位置，
+                // 分屏时左右两半的 padding 是非对称的。
+                let rect = (
+                    view.padding_x(),
+                    view.padding_y(),
+                    view.width() - view.padding_x() - view.padding_right(),
+                    view.height() - view.padding_y() - view.padding_bottom(),
+                );
+                let mut quads = Vec::new();
+                // 遮罩用 pane 的真实底色，这样卡片浮在一块与终端同色的板上，
+                // 而不是凭空多出一层灰。
+                let bg = self.nebula_background.unwrap_or(self.colors[NamedColor::Background]);
+                let backdrop = crate::renderer::ui::Rgba::opaque(bg);
+                let language = self.nebula_language;
+                ssh_connect::push_quads(
+                    state,
+                    &self.nebula_theme,
+                    &mut quads,
+                    &size,
+                    rect,
+                    scale,
+                    language,
+                    backdrop,
+                );
+                self.renderer.draw_ui(&size, &quads);
+                let glyph_cache = &mut self.glyph_cache;
+                ssh_connect::draw_text(
+                    state,
+                    &self.nebula_theme,
+                    language,
+                    &mut self.renderer,
+                    glyph_cache,
+                    &size,
+                    rect,
+                    scale,
+                );
+            }
+            // 门槛期内也要保持帧循环，否则永远到不了该显示的那一帧。
+            // 失败态不再有动画，交给事件驱动即可。
+            if !state.failed() {
+                self.window.request_redraw();
+            }
+        }
+        self.nebula_ssh_connect = states;
+    }
+
     fn draw_resize_hud(&mut self) {
         let Some(mut hud) = self.nebula_resize_hud else { return };
         hud.opacity.step(self.nebula_ui_anims.frame());
@@ -6751,6 +6477,9 @@ impl Display {
                 self.renderer.draw_inline_image(&size, *id, rgba, *px, *rect);
             }
         }
+
+        // SSH 连接卡片：在 chrome 之上，resize HUD 之下。
+        self.draw_ssh_connect();
 
         // Transient resize HUD painted on top of the chrome.
         self.draw_resize_hud();

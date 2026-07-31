@@ -73,6 +73,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // retained editor snapshot is released.
         if self.ctx.display().nebula_ssh_editor.is_some() {
             self.ctx.display().set_ssh_delete_undo_hover(false);
+            // 拖选进行中：光标跟着指针走。划出输入框也继续跟——拖拽的语义是
+            // "从按下那个字符拉到现在这个字符"，中途手抖出框不该中断选择。
+            if self.ctx.display().ssh_editor_dragging()
+                && self.ctx.display().ssh_editor_drag_to(x as f32)
+            {
+                self.ctx.mark_dirty();
+            }
             let hit = if self.ctx.display().ssh_editor_active() {
                 self.ctx.display().ssh_editor_hit(x as f32, y as f32)
             } else {
@@ -81,6 +88,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.ctx.display().set_ssh_editor_hover(hit);
             let cursor = match hit {
                 crate::display::SshEditorHit::Destination
+                | crate::display::SshEditorHit::Port
+                | crate::display::SshEditorHit::Label
                 | crate::display::SshEditorHit::Password => CursorIcon::Text,
                 crate::display::SshEditorHit::SaveToggleBox
                 | crate::display::SshEditorHit::SaveToggleLabel
@@ -334,6 +343,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             };
             self.ctx.window().set_mouse_cursor(icon);
             return;
+        }
+
+        // SSH 连接卡片：遮罩盖住整个 pane，指针不能穿到下面的终端去变成
+        // I 形光标——那会读作"这里可以选文字"，而此刻并不能。
+        if self.ctx.display().ssh_connect_active() {
+            let hit = self.ctx.display().ssh_connect_hit(x as f32, y as f32);
+            if self.ctx.display().ssh_connect_set_hover(hit) {
+                self.ctx.mark_dirty();
+            }
+            if self.ctx.display().ssh_connect_covers(x as f32, y as f32) {
+                let cursor =
+                    if hit.is_none() { CursorIcon::Default } else { CursorIcon::Pointer };
+                self.ctx.window().set_mouse_cursor(cursor);
+                return;
+            }
         }
 
         // Drawer hover: rows / header tabs / action buttons light up, and the
@@ -717,6 +741,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // even while a TUI has grabbed the mouse. A plain click (never dragged)
         // returns `None` here and falls through to normal release handling.
         if button == MouseButton::Left {
+            // 松开就结束输入框的拖选。放在最前面：后面任何一条 early return
+            // 都会把这个拖拽状态留下，于是下一次移动鼠标还在选字。
+            self.ctx.display().ssh_editor_end_drag();
             if self.ctx.display().finish_settings_opacity_drag() {
                 self.ctx.mark_dirty();
                 return;

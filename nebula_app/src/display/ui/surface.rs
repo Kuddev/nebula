@@ -89,6 +89,18 @@ pub fn fade(color: Rgba, progress: f32) -> Rgba {
     Rgba::new(color.r, color.g, color.b, (color.a as f32 * progress.clamp(0.0, 1.0)).round() as u8)
 }
 
+/// `top` 压在 `base` 上的合成色，alpha 取 `base` 的。
+///
+/// 用来把"半透明叠加色 + 不透明底"预先算成一个色，画一个 quad 而不是两个。
+/// 这不只是省一次绘制：见 [`push_group`]，中间那层必须不透明，否则底下的
+/// 描边环会从整块面板里渗出来。
+#[inline]
+pub fn over(top: Rgba, base: Rgba) -> Rgba {
+    let a = top.a as f32 / 255.0;
+    let mix = |t: u8, b: u8| (t as f32 * a + b as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
+    Rgba::new(mix(top.r, base.r), mix(top.g, base.g), mix(top.b, base.b), base.a)
+}
+
 /// 发丝描边环。替代散落各处的手写 `(x-1, y-1, w+2, h+2)`。
 ///
 /// 外圆角自动取 `radius + hairline`，保证内外弧**同心**——手写处常常内外用同一
@@ -121,11 +133,50 @@ pub fn push_surface(
     level: Elevation,
     progress: f32,
 ) {
+    push_surface_in(
+        quads,
+        rect,
+        (0.0, 0.0, viewport.0, viewport.1),
+        0.0,
+        scale,
+        sk,
+        level,
+        progress,
+    );
+}
+
+/// 同 [`push_surface`]，但遮罩只铺满 `veil_rect` 而不是整窗，并带 `veil_radius`
+/// 的圆角。
+///
+/// 用于那些语义上属于某块区域的模态：SSH 主机编辑器是"对终端做的事"，遮罩
+/// 盖住终端卡就够了。连侧栏和标题栏一起罩黑会把它读成"整个应用被阻断"，而
+/// 那时侧栏其实仍然是可见的上下文。
+///
+/// 圆角是必须的：终端是一张圆角卡，直角遮罩会在四角各露出一块，读起来像糊
+/// 歪了一层贴纸。
+#[allow(clippy::too_many_arguments)]
+pub fn push_surface_in(
+    quads: &mut Vec<UiQuad>,
+    rect: Rect,
+    veil_rect: Rect,
+    veil_radius: f32,
+    scale: f32,
+    sk: &Skin,
+    level: Elevation,
+    progress: f32,
+) {
     let (x, y, w, h) = rect;
     let corner = radius::OVERLAY * scale;
 
     if level.dims_background() {
-        quads.push(UiQuad::solid(0.0, 0.0, viewport.0, viewport.1, 0.0, fade(sk.veil, progress)));
+        quads.push(UiQuad::solid(
+            veil_rect.0,
+            veil_rect.1,
+            veil_rect.2,
+            veil_rect.3,
+            veil_radius,
+            fade(sk.veil, progress),
+        ));
     }
 
     // 外阴影承担 Z 轴层级；发丝环只负责在浅色背景上定义边界。两者分工不同，
@@ -168,6 +219,24 @@ pub fn push_card(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, sta
     quads.push(UiQuad::solid(x, y, w, h, corner, fill));
 }
 
+/// 带发丝描边的分组卡片：把同组字段收成一块可扫读的区域。
+///
+/// **不要写成 `push_stroke` + `push_card`。** [`push_stroke`] 画的是一个比
+/// 目标大 1px 的**实心**圆角矩形，靠上层填充盖住中心才形成"环"。`panel` 和
+/// `input` 都不透明，盖得住；而 `card` 只有 4.5% 不透明度，盖不住——描边色
+/// 有 95% 透过整张卡片，把它压深整整一档。
+///
+/// 2026-07-31 量到的实迹（Nebula 深色）：panel (29,31,40) 经描边泄漏变成
+/// (50,52,62)，再叠 card 得 (62,65,74)，而原型是 (56,61,73)。所以这里把
+/// `card` 与 `panel` 预先合成成一个**不透明**色，一个 quad 画完，描边环也
+/// 就只剩它该有的那 1px。
+pub fn push_group(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, progress: f32) {
+    let (x, y, w, h) = rect;
+    let corner = radius::OVERLAY * scale;
+    push_stroke(quads, rect, corner, scale, fade(sk.hairline, progress));
+    quads.push(UiQuad::solid(x, y, w, h, corner, fade(over(sk.card, sk.panel), progress)));
+}
+
 /// 下沉表面（文本输入框）。聚焦时描边换成强调色——焦点不能只靠颜色深浅表示。
 pub fn push_input(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, focused: bool) {
     let (x, y, w, h) = rect;
@@ -188,6 +257,33 @@ mod tests {
 
     fn light() -> Skin {
         NebulaTheme::SilverLight.skin()
+    }
+
+    #[test]
+    fn a_group_card_seals_the_stroke_ring_with_an_opaque_fill() {
+        // 这条锁的是 2026-07-31 那个 bug：`push_stroke` 画的是实心矩形，
+        // 靠上层填充盖住中心才成环。card 只有 4.5% 不透明度，直接叠上去
+        // 会让描边色渗满整张卡片，把它压深一整档。所以内芯必须不透明。
+        for skin in [light(), NebulaTheme::Nebula.skin()] {
+            let mut quads = Vec::new();
+            push_group(&mut quads, (40.0, 40.0, 300.0, 120.0), 1.0, &skin, 1.0);
+
+            assert_eq!(quads.len(), 2, "只该有描边环和内芯两个 quad");
+            assert_eq!(quads[1].color0.a, 255, "内芯必须不透明，否则描边渗出来");
+        }
+    }
+
+    #[test]
+    fn a_group_card_reads_one_step_above_its_panel() {
+        // card 是"比底板亮一档"的叠加色。合成之后这个方向必须还在——
+        // 深色主题叠白、浅色主题叠 slate，两边的符号是相反的。
+        let dark = NebulaTheme::Nebula.skin();
+        let fill = over(dark.card, dark.panel);
+        assert!(fill.r > dark.panel.r, "深色下卡片要比面板亮");
+
+        let sun = light();
+        let fill = over(sun.card, sun.panel);
+        assert!(fill.r < sun.panel.r, "浅色下卡片要比面板暗");
     }
 
     #[test]

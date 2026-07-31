@@ -427,32 +427,45 @@ impl NebulaTheme {
         let p = self.palette();
         let a = self.accent();
         let t = p.term_bg;
-        // 浮层相对**内容层**（终端）提亮 14 级。用 term_bg 而不是 p.panel：
-        // p.panel 是窗口外壳色，比终端还暗（Steel 外壳 22,24,30 vs 终端
-        // 26,28,36），拿它当浮层底会让弹窗陷进背景里，方向正好是反的。
+        // 浮层底从**窗口外壳** `shell_bg` 提亮 14 级，不是从终端底色
+        // （2026-07-31 修正）。
+        //
+        // 之前用的是 `term_bg`，理由写的是"浮层要比内容层亮"。方向没错，
+        // 起点错了：Nebula 的外壳 (34,38,48) 比终端 (15,17,26) 亮 20，于是
+        // 从终端起跳的浮层落在 (29,31,40)，比它实际漂浮的那张外壳还暗 5 级
+        // ——弹窗陷进背景里，正是它想避免的那件事。原型的 (48,53,65) 就是
+        // 外壳 +14。
+        //
+        // 当初避开 `p.panel` 是对的（那是 chrome 面板色，Steel 下比终端暗），
+        // 但 `shell_bg` 是另一个字段，四个深色主题下都能让浮层高出终端 9–33
+        // 级，方向对得上。
         let lift = |c: u8| c.saturating_add(14);
+        let shell = p.shell_bg;
         if p.is_light {
             Skin {
-                // 明度阶梯（2026-07-29 裁定）：相邻层必须差 8–14 级，
-                // 低于 8 级肉眼分不开，界面就只能靠
-                // 画边框救场——边框一多画面就碎，这才是"脏"的观感来源。
+                // 浅色的三层不是单调递增的明度阶梯，而是**凹槽**（2026-07-31
+                // 裁定，推翻 07-29 的"浮层比内容更暗"）：浮层底与输入面同为
+                // 纯白，中间的分组卡片压暗一档挖出凹槽，输入框从凹槽里浮回
+                // 表面。
                 //
-                // 浅色下浮层的方向是**比内容更暗**（参照产品的浅色命令面板底
-                // 是 #F7F7F7，盖住的终端区是纯白；Fluent 同构：base #F3F3F3
-                // → layer #FFFFFF）。此前 panel 250 与 card 255 只差 5 级，等于
-                // 没有层级。现在 241 → 254 差 13，且比纯白终端暗 14。
+                // 07-29 那版把方向做反了——panel 241 / card 254 / input 240，
+                // 卡片成了最亮的一层，输入框反而陷进卡片里。视觉上读成"白盒
+                // 子套白盒子"，输入框只能靠一条淡描边撑出来，而描边一多画面
+                // 就碎。阶梯本身没错，错在浅色下**最亮的那层应该是可输入的
+                // 表面**，不是承载它的容器。
                 //
-                // 这不推翻"白色打底"的裁定：slate-100 依然是近白冷调，不是回到
-                // 主题族的银/岩灰底；变的是它与卡片之间终于有了可见的台阶。
-                panel: Rgba::new(241, 245, 249, 252), // slate-100
-                // A white inset on light panels: the hairline carries the
-                // "sunken" read, the fill stays cleaner than a gray wash.
-                input: Rgba::new(255, 255, 255, 240),
-                card: Rgba::new(255, 255, 255, 244),
+                // 压暗用 slate 叠加而不是降低白的明度：纯黑叠白底得到零色相
+                // 的死灰，掺蓝的冷调灰才不显脏（同 hairline/surface 的理由）。
+                // alpha 取 255：原型的 panel 是不透明的，而且 `push_stroke`
+                // 靠上层填充盖住中心才形成描边环——底板只要留一丝透明，那圈
+                // 描边就会从整块面板里渗出来。
+                panel: Rgba::new(255, 255, 255, 255),
+                input: Rgba::new(255, 255, 255, 255),
+                card: Rgba::new(100, 116, 139, 11), // slate-500 @ 4.5%
                 // modal 专用（popover 不画遮罩，见设计文档裁定三）。冷调压暗
                 // 而不是白雾：白雾 75% 把背景提亮到和白弹窗同明度，弹窗反而
                 // 浮不起来，且糊掉全部上下文。20% 压暗下背景仍然可读。
-                veil: Rgba::new(15, 23, 42, 51), // slate-900 @ 20%
+                veil: Rgba::new(15, 23, 42, 56), // slate-900 @ 22%
                 ink: Rgb::new(51, 65, 85),          // slate-700
                 ink_dim: Rgb::new(100, 116, 139),   // slate-500
                 ink_strong: Rgb::new(15, 23, 42),   // slate-900
@@ -461,9 +474,18 @@ impl NebulaTheme {
                 ink_on_accent: Rgb::new(248, 250, 252),
                 icon: Rgb::new(71, 85, 105),      // slate-600
                 icon_hover: Rgb::new(15, 23, 42), // slate-900
-                accent: a,
-                accent_soft: Rgba::new(a.r, a.g, a.b, 34),
-                danger: Rgba::new(196, 74, 88, 255),
+                // 浅色下的强调色是**中性深灰**，不跟主题走（2026-07-31 用户裁定，
+                // 对齐原型）。浅色底本身亮度就高，饱和的主题色压上去会抢过内容
+                // ——焦点框、主按钮、勾选框同时用一个艳色，画面立刻吵起来。原型
+                // 里这三处全是同一个深灰，"柔和"就是从这来的。
+                //
+                // 深色主题不受影响：那边底暗，主题 accent 是唯一的亮点，反而
+                // 是画面的锚。
+                accent: Rgb::new(73, 80, 87),
+                accent_soft: Rgba::new(73, 80, 87, 36), // 14%
+                // 浅色的红要比深色那份更沉：同一个红压在白底上，明度对比大得多，
+                // 照搬深色值会艳到从整张卡片里跳出来。
+                danger: Rgba::new(178, 58, 72, 255),
                 // 2026-07-29 用户裁定：中性灰在屏幕上永远显脏。此前这几个
                 // 叠加色是纯黑 rgba(0,0,0,.05~.19)，而纯黑叠在白底上只能得
                 // 到**零色相**的死灰——这就是"不干净"的物理来源。现在改叠
@@ -488,12 +510,16 @@ impl NebulaTheme {
                 // （深色命令面板比背景亮，浅色命令面板比纯白终端暗）。
                 //
                 // 阶梯：终端 26 → panel 40 → card 54，每层差 14。
-                panel: Rgba::new(lift(t.r), lift(t.g), lift(t.b), 250),
+                //
+                // alpha 取 255 而不是 250：原型的 panel 是不透明的，而且
+                // `push_stroke` 靠上层填充盖住中心才形成描边环——底板只要
+                // 留一丝透明，那圈描边就会从整块面板里渗出来。
+                panel: Rgba::new(lift(shell.r), lift(shell.g), lift(shell.b), 255),
                 // Derive the inset/input surface from the terminal background
                 // so it stays in-family on every dark theme (blue-black on
                 // Nebula, pure gray on Coal) instead of one fixed navy.
-                input: Rgba::new(t.r, t.g, t.b, 220),
-                card: Rgba::new(255, 255, 255, 16),
+                input: Rgba::new(t.r, t.g, t.b, 219), // 86%
+                card: Rgba::new(255, 255, 255, 11),   // 4.5%
                 // modal 专用（popover 不画遮罩）。原值 alpha 150（59%）在本就
                 // 很暗的底上接近全黑，把上下文糊没了；36% 足够传达"被阻断"，
                 // 背景仍可读。冷调 slate-950 而不是纯黑，与整套灰同色温。

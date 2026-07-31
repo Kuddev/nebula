@@ -124,13 +124,7 @@ impl NebulaHistory {
 /// Path to `nebula_history.jsonl` under the user data dir, creating the
 /// directory if needed.
 fn history_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("Nebula");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join("nebula_history.jsonl")
+    crate::platform::dirs::data_dir().join("nebula_history.jsonl")
 }
 
 #[cfg(test)]

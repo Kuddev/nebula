@@ -191,7 +191,7 @@ mod tests {
              这正是「配色/圆角改不干净」的结构性原因。",
             "radius::OVERLAY * scale（浮层）/ radius::CONTROL * scale（控件）\n\
                       / radius::CHIP * scale（chip 键帽），或直接用 surface::push_* 配方",
-            94,
+            69,
             hits,
         );
     }
@@ -215,7 +215,7 @@ mod tests {
             "手写描边普遍内外用同一个半径，圆角处描边会变粗——「边缘发毛」的\n\
              来源之一。push_stroke 让外半径 = 内半径 + 描边宽，内外弧同心。",
             "surface::push_stroke(quads, rect, corner, scale, sk.hairline)",
-            56,
+            47,
             hits,
         );
     }
@@ -225,8 +225,16 @@ mod tests {
         let mut hits = Vec::new();
         for path in source_files() {
             let Ok(src) = std::fs::read_to_string(&path) else { continue };
-            for (index, line) in src.lines().enumerate() {
-                if line.contains("UiQuad::glow(") {
+            let lines: Vec<&str> = src.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if !line.contains("UiQuad::glow(") {
+                    continue;
+                }
+                // 星云品牌位的粒子/脉冲本来就该发光——那是画面主体，不是在给
+                // 浮层垫高度。豁免必须在紧邻的上一行显式写出标记，所以它不会
+                // 悄悄扩散：想用就得先写下理由，reviewer 一眼看得见。
+                let exempt = index > 0 && lines[index - 1].contains("brand-glow:");
+                if !exempt {
                     hits.push((label(&path), index + 1, "用 glow 冒充阴影".to_owned()));
                 }
             }

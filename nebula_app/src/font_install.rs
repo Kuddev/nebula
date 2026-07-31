@@ -15,13 +15,13 @@ pub struct StoredFont {
     pub created: bool,
 }
 
+/// 导入字体的存放目录。**纯拼路径，不创建**——写入侧（`store_font`）自己
+/// `create_dir_all` 并把失败报给用户，读取侧（`imported_font_files`）容忍
+/// 目录不存在。这里若顺手创建，既让读路径每次多一次无谓 IO，也会让写侧
+/// 那条错误提示永不触发。
 #[cfg(windows)]
 pub fn imported_font_directory() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("Nebula").join("fonts")
+    crate::platform::dirs::data_dir().join("fonts")
 }
 
 #[cfg(windows)]

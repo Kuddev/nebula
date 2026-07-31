@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -26,6 +27,39 @@ use crate::event::EventProxy;
 type SessionError = Box<dyn std::error::Error + Send + Sync>;
 type ClientSession = client::Handle<ClientHandler>;
 type SharedSession = Arc<tokio::sync::Mutex<ClientSession>>;
+
+/// 直连 SSH 会话的连接阶段。
+///
+/// 这些取值不是估算的进度百分比——因为我们用 russh 自己实现客户端，而不是
+/// spawn `ssh.exe` 再解析 `-v` 输出，每个阶段都对应一个真实的调用点：
+/// [`SshDestination::resolve`] → [`client::connect`] → [`authenticate`] →
+/// `channel_open_session` + `request_pty` + `request_shell`。
+///
+/// 连接池命中时 [`authenticated_session`] 直接返回既有连接，`Connect` 与
+/// `Authenticate` 都不会上报：复用是瞬时的，连接卡片也就不会浮出来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SshStage {
+    /// 正在解析地址（含 `ssh -G` 读 `~/.ssh/config`）。
+    Resolve,
+    /// 正在建立 TCP 连接并完成协议握手/密钥交换。
+    Connect,
+    /// 正在认证。
+    Authenticate,
+    /// 正在打开 channel、申请 pty 与 shell。
+    OpenShell,
+    /// 会话已就绪：卡片让位给真实终端。
+    Ready,
+    /// 连接失败，附带面向用户的原因。
+    Failed(String),
+}
+
+/// 向拥有该 pane 的窗口上报连接阶段。[`EventProxy`] 自带 `tab_id`，所以
+/// 后台 runtime 不需要知道 pane id 或 window id。
+fn report_stage(progress: Option<&EventProxy>, stage: SshStage) {
+    if let Some(proxy) = progress {
+        proxy.send_event(crate::event::EventType::SshConnect(stage));
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AuthMethod {
@@ -314,6 +348,9 @@ pub fn spawn_session(
     let (sender, receiver) = EventLoopSender::standalone()?;
     let profiles_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
     runtime()?.spawn(async move {
+        // 地址解析是第一个真实阶段：`ssh -G` 要读 ~/.ssh/config，慢链路上
+        // 这一步本身就可能耗时。
+        report_stage(Some(&event_proxy), SshStage::Resolve);
         let raw = destination.clone();
         let resolved = tokio::task::spawn_blocking(move || {
             let resolved = SshDestination::resolve(&raw)?;
@@ -327,6 +364,10 @@ pub fn spawn_session(
             Ok::<_, io::Error>((resolved, profiles.for_destination(&raw)))
         })
         .await;
+        // 会话是否曾经就绪。它把两种 `Err` 分开：连接建立**之前**失败要把
+        // 卡片留在屏幕上让用户读原因；建立**之后**断开则是普通的会话结束，
+        // 必须照常退出 pane，否则会留下一个连不上也关不掉的空壳。
+        let ready = Arc::new(AtomicBool::new(false));
         let result = match resolved {
             Ok(Ok((destination, profile))) => {
                 run_session_async(
@@ -336,17 +377,33 @@ pub fn spawn_session(
                     terminal.clone(),
                     event_proxy.clone(),
                     receiver,
+                    ready.clone(),
                 )
                 .await
             },
             Ok(Err(err)) => Err(err.into()),
             Err(err) => Err(format!("SSH 地址解析任务失败: {err}").into()),
         };
-        if let Err(err) = result {
-            error!("直连 SSH 会话失败 {destination}: {err}");
-            render_error(&terminal, &event_proxy, &format!("SSH 连接失败: {err}"));
+        match result {
+            Err(err) if !ready.load(Ordering::Relaxed) => {
+                // 这里刻意**不用** `error!`：它会额外推一条红色 message bar，
+                // 而连接卡片已经把同一条原因连同阶段和日志一起呈现了。同一个
+                // 错误报两次，其中一次还被卡片的遮罩切成半残的红条。
+                info!("直连 SSH 会话失败 {destination}: {err}");
+                report_stage(Some(&event_proxy), SshStage::Failed(err.to_string()));
+                // 错误也写进 grid：卡片关掉之后它仍然留在回滚里。
+                render_error(&terminal, &event_proxy, &format!("SSH 连接失败: {err}"));
+                // 这里**不** exit：pane 一退出 tab 就关了，卡片和它携带的
+                // 失败原因会一起消失。收尾交给卡片上的「关闭」。
+            },
+            Err(err) => {
+                // 会话中途断开时没有卡片在场，message bar 是唯一的提示渠道。
+                error!("直连 SSH 会话中断 {destination}: {err}");
+                render_error(&terminal, &event_proxy, &format!("SSH 连接失败: {err}"));
+                terminal.lock().exit();
+            },
+            Ok(()) => terminal.lock().exit(),
         }
-        terminal.lock().exit();
         event_proxy.send_event(TerminalEvent::Wakeup.into());
     });
     Ok(sender)
@@ -359,12 +416,14 @@ async fn run_session_async(
     terminal: Arc<FairMutex<Term<EventProxy>>>,
     event_proxy: EventProxy,
     receiver: Receiver<Msg>,
+    ready: Arc<AtomicBool>,
 ) -> Result<(), SessionError> {
     if let Some(proxy_jump) = destination.proxy_jump.as_deref() {
         return Err(format!("当前直连模式尚未接入跳板机 {proxy_jump}").into());
     }
 
-    let session = authenticated_session(&destination, &profile).await?;
+    let session = authenticated_session(&destination, &profile, Some(&event_proxy)).await?;
+    report_stage(Some(&event_proxy), SshStage::OpenShell);
     let mut channel = {
         let session = session.lock().await;
         session.channel_open_session().await?
@@ -383,6 +442,10 @@ async fn run_session_async(
     let hook_token = remote_hook_token()?;
     channel.set_env(false, "NEBULA_REMOTE_HOOK_TOKEN", hook_token.clone()).await?;
     channel.request_shell(true).await?;
+    // Shell 已就绪：连接卡片到此让位给真实终端，持续重绘随之停止。此后再
+    // 出错就是会话中途断开，不该复活卡片。
+    ready.store(true, Ordering::Relaxed);
+    report_stage(Some(&event_proxy), SshStage::Ready);
 
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::task::spawn_blocking(move || {
@@ -441,11 +504,14 @@ async fn wait_for_sync(deadline: Option<std::time::Instant>) {
 async fn authenticated_session(
     destination: &SshDestination,
     profile: &crate::ssh_profiles::SshProfileAuth,
+    progress: Option<&EventProxy>,
 ) -> Result<SharedSession, SessionError> {
     let key = destination.pool_key();
     if let Some(existing) = connection_pool().lock().await.get(&key).cloned() {
         if !existing.lock().await.is_closed() {
             info!("复用已认证 SSH 连接: {key}");
+            // 复用不上报 Connect/Authenticate：这条路径是瞬时的，交给
+            // 350ms 门槛把卡片整个吃掉，用户看到的就是直接出 prompt。
             return Ok(existing);
         }
         connection_pool().lock().await.remove(&key);
@@ -458,8 +524,10 @@ async fn authenticated_session(
         ..Default::default()
     });
     let handler = ClientHandler { host: destination.host.clone(), port: destination.port };
+    report_stage(progress, SshStage::Connect);
     let mut session =
         client::connect(config, (destination.host.as_str(), destination.port), handler).await?;
+    report_stage(progress, SshStage::Authenticate);
     authenticate(&mut session, destination, profile).await?;
 
     let session = Arc::new(tokio::sync::Mutex::new(session));
@@ -579,7 +647,8 @@ pub(crate) async fn open_sftp(
         return Err(format!("当前 SFTP 模式尚未接入跳板机 {proxy_jump}").into());
     }
 
-    let session = authenticated_session(&destination, &profile).await?;
+    // SFTP 面板自己有加载态，不参与终端 pane 的连接卡片。
+    let session = authenticated_session(&destination, &profile, None).await?;
     let channel = {
         let session = session.lock().await;
         session.channel_open_session().await?
