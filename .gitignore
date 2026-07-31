@@ -3,10 +3,17 @@ target
 # Local debug/release build bundles produced by packaging scripts
 dist/
 trellis/
+# `package-release.ps1 -TargetDirectory` builds into its own cargo target dir
+# so packaging never invalidates the incremental cache of the main one.
+target-pack/
 
 # Local/generated visual assets and scratch files.
 docs/ui_mockups/
 tmp/
+# Window/UI probe captures (probe_*.png) and prototype pages (.tmp-*.html):
+# scratch evidence for a single design round, never part of the product.
+probe_*.png
+.tmp-*.html
 
 # Optional local ConPTY runtime bundle; the app falls back when absent.
 assets/windows/conhost/
