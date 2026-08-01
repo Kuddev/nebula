@@ -132,8 +132,8 @@ pub(crate) use ui::theme::write_nebula_prompt_theme;
 pub(crate) fn caret_blink_on() -> bool {
     ui::caret::is_on()
 }
-pub(crate) use settings::SettingsOpacityTarget;
 pub use settings::{NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit};
+pub(crate) use settings::{CellWidthMode, SettingsOpacityTarget};
 
 /// 按显示列宽贪心断行（确认框正文等 UI 段落用）：CJK 逐字可断，行首空
 /// 格吞掉；零宽字符跟随前一个字。不做拉丁连词回退——正文以中文为主，
@@ -1450,6 +1450,9 @@ pub struct Display {
     /// 捕获态实时回显：当前按住的修饰键前缀（"Ctrl+Shift+"）。松开清空。
     pub nebula_keymap_capture_preview: String,
     pub nebula_tab_reveal_motion: settings::TabRevealMotion,
+    /// 单元格宽度模式。只作用于终端内容网格；Nebula 原生界面的字体单元格
+    /// 始终按上游的向下取整计算，不随该偏好变化。
+    pub nebula_cell_width_mode: settings::CellWidthMode,
     pub nebula_font_family: String,
     nebula_font_families: Vec<String>,
     nebula_font_notice: Option<String>,
@@ -1707,7 +1710,8 @@ impl Display {
         crate::boot_trace("glyph cache (font faces loaded)");
 
         let metrics = glyph_cache.font_metrics();
-        let (cell_width, cell_height) = compute_cell_size(config, &metrics);
+        let (cell_width, cell_height) =
+            compute_cell_size(config, &metrics, settings_init.cell_width_mode);
 
         // Resize the window to the user-configured size, or a Windows
         // Terminal-like default when unset. A 116-column by 30-row canvas is
@@ -1725,7 +1729,9 @@ impl Display {
         let base_font_size = config.font.size().scale(scale_factor);
         let (base_cell_width, base_cell_height) = glyph_cache
             .metrics_at(base_font_size)
-            .map(|base_metrics| compute_cell_size(config, &base_metrics))
+            .map(|base_metrics| {
+                compute_cell_size(config, &base_metrics, settings_init.cell_width_mode)
+            })
             .unwrap_or((cell_width, cell_height));
         let size = window_size(
             config,
@@ -1968,6 +1974,7 @@ impl Display {
             nebula_keymap_capture: None,
             nebula_keymap_capture_preview: String::new(),
             nebula_tab_reveal_motion: settings_init.tab_reveal,
+            nebula_cell_width_mode: settings_init.cell_width_mode,
             nebula_font_family: settings_init.font_family,
             nebula_font_families,
             nebula_font_notice: None,
@@ -2992,6 +2999,7 @@ impl Display {
             panel_resize: self.nebula_panel_resize,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
+            cell_width_mode: self.nebula_cell_width_mode,
             preview_bg: self.preview_terminal_bg(),
             preview_fg: {
                 let bg = self.preview_terminal_bg();
@@ -3229,6 +3237,22 @@ impl Display {
         if let Some(motion) = settings::TAB_REVEAL_OPTIONS.get(index) {
             self.nebula_tab_reveal_motion = *motion;
             self.persist_nebula_settings();
+        }
+        self.nebula_settings_dropdown = None;
+        self.pending_update.dirty = true;
+    }
+
+    /// 切换单元格宽度模式。列宽取整方式变了就必须重算单元格——重推当前
+    /// 字体让字体更新路径走一遍，网格、viewport、pane 与 PTY 随之一致更新，
+    /// 无需重启。字号、字体家族与行高都不变。
+    pub fn set_cell_width_mode_option(&mut self, index: usize, base: &Font) {
+        if let Some(mode) = settings::CELL_WIDTH_MODE_OPTIONS.get(index)
+            && *mode != self.nebula_cell_width_mode
+        {
+            self.nebula_cell_width_mode = *mode;
+            self.persist_nebula_settings();
+            let font = self.effective_font(base).with_size(self.font_size);
+            self.pending_update.set_font(font);
         }
         self.nebula_settings_dropdown = None;
         self.pending_update.dirty = true;
@@ -4518,7 +4542,10 @@ impl Display {
     fn refresh_ui_font(&mut self, config: &UiConfig) {
         let ui_size = FontSize::from_px(self.nebula_ui_font.px);
         let metrics = self.glyph_cache.set_ui_font_size(ui_size);
-        self.nebula_ui_font.cell = compute_cell_size(config, &metrics);
+        // 原生界面的字体单元格不受单元格宽度模式影响——该偏好只控制终端
+        // 内容网格的列宽。这里固定用上游的向下取整。
+        self.nebula_ui_font.cell =
+            compute_cell_size(config, &metrics, settings::CellWidthMode::Compact);
         let ratio = self.ui_text_scale();
         // Unconditional breadcrumb (tiny, a handful of lines per session):
         // diagnosing "the sidebar zooms with the terminal" reports needs this
@@ -4812,6 +4839,7 @@ impl Display {
             copy_on_select: self.nebula_copy_on_select,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
+            cell_width_mode: self.nebula_cell_width_mode,
             theme: self.nebula_theme_preference,
             follow_system_theme: self.nebula_follow_system_theme,
             pinned_hosts: self.nebula_pinned_hosts.clone(),
@@ -4909,6 +4937,7 @@ impl Display {
             self.reset_glyph_cache();
         }
         self.nebula_tab_reveal_motion = settings.tab_reveal;
+        self.nebula_cell_width_mode = settings.cell_width_mode;
         self.nebula_window_opacity = settings.opacity;
         self.nebula_background = if settings.follow_system_theme {
             Some(active_theme.palette().term_bg)
@@ -5129,11 +5158,12 @@ impl Display {
         glyph_cache: &mut GlyphCache,
         config: &UiConfig,
         font: &Font,
+        cell_width_mode: settings::CellWidthMode,
     ) -> (f32, f32) {
         let _ = glyph_cache.update_font_size(font);
 
         // Compute new cell sizes.
-        compute_cell_size(config, &glyph_cache.font_metrics())
+        compute_cell_size(config, &glyph_cache.font_metrics(), cell_width_mode)
     }
 
     /// Reset glyph cache.
@@ -5173,7 +5203,9 @@ impl Display {
 
         // Update font size and cell dimensions.
         if let Some(font) = pending_update.font() {
-            let cell_dimensions = Self::update_font_size(&mut self.glyph_cache, config, font);
+            let cell_width_mode = self.nebula_cell_width_mode;
+            let cell_dimensions =
+                Self::update_font_size(&mut self.glyph_cache, config, font, cell_width_mode);
             cell_width = cell_dimensions.0;
             cell_height = cell_dimensions.1;
 
@@ -8132,13 +8164,21 @@ impl FrameTimer {
 ///
 /// This will return a tuple of the cell width and height.
 #[inline]
-fn compute_cell_size(config: &UiConfig, metrics: &crossfont::Metrics) -> (f32, f32) {
+fn compute_cell_size(
+    config: &UiConfig,
+    metrics: &crossfont::Metrics,
+    cell_width_mode: settings::CellWidthMode,
+) -> (f32, f32) {
     let offset_x = f64::from(config.font.offset.x);
     let offset_y = f64::from(config.font.offset.y);
-    (
-        (metrics.average_advance + offset_x).floor().max(1.) as f32,
-        (metrics.line_height + offset_y).floor().max(1.) as f32,
-    )
+    // 宽度取整方式由单元格宽度模式决定；高度始终向下取整，两种模式必须
+    // 得到逐位相同的高度——该偏好只控制列宽。
+    let raw_width = metrics.average_advance + offset_x;
+    let width = match cell_width_mode {
+        settings::CellWidthMode::Compact => raw_width.floor(),
+        settings::CellWidthMode::Relaxed => raw_width.round(),
+    };
+    (width.max(1.) as f32, (metrics.line_height + offset_y).floor().max(1.) as f32)
 }
 
 /// Calculate the size of the window given padding, terminal dimensions and cell size.
@@ -8177,11 +8217,77 @@ mod nebula_ux_tests {
 
     use super::{
         AI_LOGO_GROK_DARK_PNG, AI_LOGO_GROK_LIGHT_PNG, AiLogo, NebulaConfirm, SizeInfo, ai_logo,
-        alt_screen_vertical_padding_bands, extract_program, nebula_command_hint,
+        alt_screen_vertical_padding_bands, compute_cell_size, extract_program, nebula_command_hint,
         percent_decode_lossy, prepare_ai_logo_texture, program_icon, remove_ssh_host_from_lists,
         replays_untrusted_terminal_output, restore_ssh_host_to_lists, strip_file_scheme,
         system_theme_snapshot,
     };
+    use crate::config::UiConfig;
+    use crate::display::settings::CellWidthMode;
+
+    /// 受控字体度量：只有 advance 与 line_height 参与单元格尺寸计算，
+    /// 其余字段取任意合法值。
+    fn metrics(average_advance: f64, line_height: f64) -> crossfont::Metrics {
+        crossfont::Metrics {
+            average_advance,
+            line_height,
+            descent: -4.0,
+            underline_position: -2.0,
+            underline_thickness: 1.0,
+            strikeout_position: 5.0,
+            strikeout_thickness: 1.0,
+        }
+    }
+
+    #[test]
+    fn relaxed_cell_width_rounds_up_the_fraction_compact_floors_it() {
+        let config = UiConfig::default();
+        // Maple Mono NF CN 这类字体的平均 advance 常落在 .5 以上，紧凑向下
+        // 取整因此比 Windows Terminal 少一像素——宽松就是为补这一像素而设。
+        let m = metrics(9.6, 20.0);
+        assert_eq!(compute_cell_size(&config, &m, CellWidthMode::Compact).0, 9.0);
+        assert_eq!(compute_cell_size(&config, &m, CellWidthMode::Relaxed).0, 10.0);
+    }
+
+    #[test]
+    fn a_fraction_below_half_stays_on_the_same_column_width_in_both_modes() {
+        let config = UiConfig::default();
+        let m = metrics(9.4, 20.0);
+        assert_eq!(compute_cell_size(&config, &m, CellWidthMode::Compact).0, 9.0);
+        assert_eq!(compute_cell_size(&config, &m, CellWidthMode::Relaxed).0, 9.0);
+    }
+
+    #[test]
+    fn the_exact_half_boundary_rounds_away_from_zero_in_relaxed_mode() {
+        let config = UiConfig::default();
+        let m = metrics(9.5, 20.0);
+        assert_eq!(compute_cell_size(&config, &m, CellWidthMode::Compact).0, 9.0);
+        assert_eq!(compute_cell_size(&config, &m, CellWidthMode::Relaxed).0, 10.0);
+    }
+
+    #[test]
+    fn both_modes_compute_the_same_cell_height() {
+        let config = UiConfig::default();
+        // 该偏好只控制列宽；高度必须逐位相同，否则行距会随模式漂移。
+        for (advance, line_height) in [(9.6, 20.7), (7.5, 16.5), (12.2, 25.9)] {
+            let m = metrics(advance, line_height);
+            let compact = compute_cell_size(&config, &m, CellWidthMode::Compact);
+            let relaxed = compute_cell_size(&config, &m, CellWidthMode::Relaxed);
+            assert_eq!(compact.1, relaxed.1, "line_height {line_height} 的高度在两模式间漂移");
+        }
+    }
+
+    #[test]
+    fn both_modes_share_the_same_minimum_cell_width() {
+        let config = UiConfig::default();
+        // 退化度量（字体加载异常）不能产出 0 宽单元格——那会让网格除零。
+        let m = metrics(0.3, 0.4);
+        let compact = compute_cell_size(&config, &m, CellWidthMode::Compact);
+        let relaxed = compute_cell_size(&config, &m, CellWidthMode::Relaxed);
+        assert_eq!(compact.0, 1.0);
+        assert_eq!(relaxed.0, 1.0);
+        assert_eq!(compact.1, relaxed.1, "退化度量下高度也不得随模式漂移");
+    }
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()

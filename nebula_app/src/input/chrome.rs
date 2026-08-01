@@ -862,6 +862,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::CellWidthModeDropdown => {
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::CellWidthMode,
+                        );
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::CellWidthModeOption(index) => {
+                        let base_font = self.ctx.config().font.clone();
+                        self.ctx.display().set_cell_width_mode_option(index, &base_font);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::FontSizeUp => {
                         let ui_scale = self.ctx.display().window.scale_factor as f32;
                         self.ctx.change_font_size(ui_scale);
@@ -1292,6 +1305,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::AcceptOption(_)
             | Hit::TabRevealDropdown
             | Hit::TabRevealOption(_)
+            | Hit::CellWidthModeDropdown
+            | Hit::CellWidthModeOption(_)
             | Hit::CursorShapeDropdown
             | Hit::CursorShapeOption(_)
             | Hit::BackgroundColor

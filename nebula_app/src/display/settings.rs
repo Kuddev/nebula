@@ -94,6 +94,7 @@ pub enum SettingsDropdown {
     Accept,
     CursorShape,
     TabReveal,
+    CellWidthMode,
     /// 背景色：色板网格 + 16 进制输入的专用浮层（不是通用行列表）。
     BackgroundColor,
 }
@@ -143,6 +144,9 @@ pub(super) const ACCEPT_OPTIONS: [AcceptKey; 3] =
 pub(super) const TAB_REVEAL_OPTIONS: [TabRevealMotion; 2] =
     [TabRevealMotion::Slide, TabRevealMotion::Instant];
 
+pub(super) const CELL_WIDTH_MODE_OPTIONS: [CellWidthMode; 2] =
+    [CellWidthMode::Compact, CellWidthMode::Relaxed];
+
 /// Order mirrors the appearance page the user referenced.
 pub(super) const CURSOR_SHAPE_OPTIONS: [CursorShape; 4] =
     [CursorShape::Beam, CursorShape::Underline, CursorShape::Block, CursorShape::HollowBlock];
@@ -175,6 +179,41 @@ fn tab_reveal_label(motion: TabRevealMotion, language: UiLanguage) -> &'static s
     match motion {
         TabRevealMotion::Slide => language.pick("滑动", "Slide"),
         TabRevealMotion::Instant => language.pick("立即", "Instant"),
+    }
+}
+
+/// 单元格宽度模式：终端把字体的非整数设计宽度转换为整像素列宽的方式。
+/// 「紧凑」保持上游的向下取整并作为兼容默认；「宽松」采用最接近整数取整，
+/// 补足与 Windows Terminal 相差的那一像素。它只影响列宽，不改变单元格高度、
+/// 字形比例或原生界面排版。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CellWidthMode {
+    #[default]
+    Compact,
+    Relaxed,
+}
+
+impl CellWidthMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "compact" => Some(Self::Compact),
+            "relaxed" => Some(Self::Relaxed),
+            _ => None,
+        }
+    }
+
+    fn settings_value(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Relaxed => "relaxed",
+        }
+    }
+}
+
+fn cell_width_mode_label(mode: CellWidthMode, language: UiLanguage) -> &'static str {
+    match mode {
+        CellWidthMode::Compact => language.pick("紧凑", "Compact"),
+        CellWidthMode::Relaxed => language.pick("宽松", "Relaxed"),
     }
 }
 
@@ -240,6 +279,8 @@ pub enum SettingsHit {
     CjkBoldToggle,
     TabRevealDropdown,
     TabRevealOption(usize),
+    CellWidthModeDropdown,
+    CellWidthModeOption(usize),
     /// Language combobox trigger (options resolve to [`SettingsHit::Language`]).
     LanguageDropdown,
     /// Expanded dropdown option rows for the cycle-style settings.
@@ -309,6 +350,7 @@ pub(super) struct NebulaRuntimeSettings {
     /// 默认开：小字号下雅黑 Bold fallback 与 Regular 混排发闷（任务 #4）。
     pub(super) cjk_bold_regular: bool,
     pub(super) tab_reveal: TabRevealMotion,
+    pub(super) cell_width_mode: CellWidthMode,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     /// Window close keeps the PTYs alive in the resident process (detach /
@@ -381,6 +423,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         copy_on_select: true,
         cjk_bold_regular: true,
         tab_reveal: TabRevealMotion::Slide,
+        cell_width_mode: CellWidthMode::Compact,
         // Off by default: the welcome screen pipes a whole script through the
         // fresh shell and repaints on resize — real startup-latency cost on
         // the critical path (user ruling: startup speed outranks the art).
@@ -467,6 +510,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("cjk_bold_regular", v)) => settings.cjk_bold_regular = parse_bool(v, true),
                 Some(("tab_reveal", v)) => {
                     settings.tab_reveal = TabRevealMotion::parse(v).unwrap_or_default();
+                },
+                Some(("cell_width_mode", v)) => {
+                    settings.cell_width_mode = CellWidthMode::parse(v).unwrap_or_default();
                 },
                 Some(("startup_directory", v)) => {
                     let path = std::path::PathBuf::from(v.trim());
@@ -681,7 +727,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         path,
         format!(
             "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+tab_reveal={}\ncell_width_mode={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -691,6 +737,7 @@ tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur
             settings.copy_on_select as u8,
             settings.cjk_bold_regular as u8,
             settings.tab_reveal.settings_value(),
+            settings.cell_width_mode.settings_value(),
             settings.fetch as u8,
             settings.powerline as u8,
             settings.keep_session as u8,
@@ -729,6 +776,7 @@ struct SettingsGeometry {
     font: (f32, f32, f32, f32),
     /// "字号" spinner row; the value box + steppers derive via `widgets`.
     font_size_row: (f32, f32, f32, f32),
+    cell_width_mode: (f32, f32, f32, f32),
     fetch: (f32, f32, f32, f32),
     powerline: (f32, f32, f32, f32),
     ghost: (f32, f32, f32, f32),
@@ -923,7 +971,8 @@ fn settings_geometry(
     let startup_directory_y0 = shell_y0 + ROW_H;
     let font_y0 = startup_directory_y0 + ROW_H;
     let font_size_y0 = font_y0 + ROW_H;
-    let fetch_y0 = font_size_y0 + ROW_H;
+    let cell_width_mode_y0 = font_size_y0 + ROW_H;
+    let fetch_y0 = cell_width_mode_y0 + ROW_H;
     let ghost_y0 = fetch_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let open_y0 = ghost_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let hidden_y0 = open_y0 + ROW_H + GROUP_ADVANCE;
@@ -1010,6 +1059,7 @@ fn settings_geometry(
         ),
         font: (row_x, at(font_y0), row_w, row_h),
         font_size_row: (row_x, at(font_size_y0), row_w, row_h),
+        cell_width_mode: (row_x, at(cell_width_mode_y0), row_w, row_h),
         fetch: (row_x, at(fetch_y0), row_w, row_h),
         powerline: (row_x, at(fetch_y0 + ROW_H), row_w, row_h),
         ghost: (row_x, at(ghost_y0), row_w, row_h),
@@ -1135,6 +1185,9 @@ fn dropdown_anchor(
         (Section::Profiles, SettingsDropdown::Accept) => {
             Some((anchor(geometry.accept), ACCEPT_OPTIONS.len()))
         },
+        (Section::Profiles, SettingsDropdown::CellWidthMode) => {
+            Some((anchor(geometry.cell_width_mode), CELL_WIDTH_MODE_OPTIONS.len()))
+        },
         (Section::Interaction, SettingsDropdown::TabReveal) => {
             Some((anchor(geometry.tab_reveal), TAB_REVEAL_OPTIONS.len()))
         },
@@ -1226,6 +1279,7 @@ pub fn settings_hit(
                     SettingsDropdown::Language => SettingsHit::Language(LANGUAGE_OPTIONS[index]),
                     SettingsDropdown::Accept => SettingsHit::AcceptOption(index),
                     SettingsDropdown::TabReveal => SettingsHit::TabRevealOption(index),
+                    SettingsDropdown::CellWidthMode => SettingsHit::CellWidthModeOption(index),
                     SettingsDropdown::CursorShape => SettingsHit::CursorShapeOption(index),
                     // 背景色浮层在上方特判处理，走不到通用行列表。
                     SettingsDropdown::BackgroundColor => SettingsHit::Panel,
@@ -1320,6 +1374,9 @@ pub fn settings_hit(
                     if contains_rect(down, x, y) {
                         return SettingsHit::FontSizeDown;
                     }
+                }
+                if contains_rect(geometry.cell_width_mode, x, y) {
+                    return SettingsHit::CellWidthModeDropdown;
                 }
                 if contains_rect(geometry.fetch, x, y) {
                     return SettingsHit::FetchToggle;
@@ -1451,6 +1508,7 @@ pub(super) struct SettingsView {
     pub(super) panel_resize: bool,
     pub(super) cjk_bold_regular: bool,
     pub(super) tab_reveal: TabRevealMotion,
+    pub(super) cell_width_mode: CellWidthMode,
     /// Live-preview colors: the ACTUAL terminal background/foreground the
     /// grid would use right now (custom background wins over the theme).
     pub(super) preview_bg: Rgb,
@@ -1617,6 +1675,9 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         SettingsDropdown::TabReveal => {
             TAB_REVEAL_OPTIONS.iter().position(|motion| *motion == view.tab_reveal)
         },
+        SettingsDropdown::CellWidthMode => {
+            CELL_WIDTH_MODE_OPTIONS.iter().position(|mode| *mode == view.cell_width_mode)
+        },
         SettingsDropdown::CursorShape => {
             CURSOR_SHAPE_OPTIONS.iter().position(|shape| *shape == view.cursor_shape)
         },
@@ -1637,6 +1698,7 @@ fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Optio
         },
         (SettingsDropdown::Accept, SettingsHit::AcceptOption(index)) => Some(index),
         (SettingsDropdown::TabReveal, SettingsHit::TabRevealOption(index)) => Some(index),
+        (SettingsDropdown::CellWidthMode, SettingsHit::CellWidthModeOption(index)) => Some(index),
         (SettingsDropdown::CursorShape, SettingsHit::CursorShapeOption(index)) => Some(index),
         _ => None,
     }
@@ -2172,6 +2234,18 @@ pub(super) fn push_quads(
                 view.hover == SettingsHit::FontSizeUp,
                 view.hover == SettingsHit::FontSizeDown,
             );
+            row_hover(
+                quads,
+                geometry.cell_width_mode,
+                view.hover == SettingsHit::CellWidthModeDropdown,
+            );
+            combobox(
+                quads,
+                &mut staged,
+                geometry.cell_width_mode,
+                view.hover == SettingsHit::CellWidthModeDropdown,
+                view.dropdown == Some(SettingsDropdown::CellWidthMode),
+            );
             for quad in staged.drain(..) {
                 clip(quads, quad);
             }
@@ -2603,6 +2677,9 @@ pub(super) fn draw_popup_text(
             SettingsDropdown::Accept => accept_label(ACCEPT_OPTIONS[index], language).to_owned(),
             SettingsDropdown::TabReveal => {
                 tab_reveal_label(TAB_REVEAL_OPTIONS[index], language).to_owned()
+            },
+            SettingsDropdown::CellWidthMode => {
+                cell_width_mode_label(CELL_WIDTH_MODE_OPTIONS[index], language).to_owned()
             },
             SettingsDropdown::CursorShape => {
                 cursor_shape_label(CURSOR_SHAPE_OPTIONS[index], language).to_owned()
@@ -3329,6 +3406,26 @@ pub(super) fn draw_text(
                     gc,
                 );
             }
+            if visible(geometry.cell_width_mode.1, geometry.cell_width_mode.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.cell_width_mode,
+                    language.pick("字体间距", "Font spacing"),
+                    "",
+                    sk.ink,
+                );
+                combobox_value(
+                    r,
+                    gc,
+                    geometry.cell_width_mode,
+                    cell_width_mode_label(view.cell_width_mode, language),
+                    sk.accent,
+                );
+            }
             // Boolean rows: the switch (drawn in `push_quads`) carries the
             // state; no "On/Off" string next to it.
             if visible(geometry.fetch.1, geometry.fetch.3) {
@@ -3829,7 +3926,8 @@ pub(super) fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion, advanced_content_end, opacity_from_pointer,
+        CELL_WIDTH_MODE_OPTIONS, CellWidthMode, SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion,
+        UiLanguage, advanced_content_end, cell_width_mode_label, opacity_from_pointer,
     };
 
     #[test]
@@ -3858,6 +3956,29 @@ mod tests {
         assert_eq!(TabRevealMotion::parse("unknown").unwrap_or_default(), TabRevealMotion::Slide);
         for value in [TabRevealMotion::Slide, TabRevealMotion::Instant] {
             assert_eq!(TabRevealMotion::parse(value.settings_value()), Some(value));
+        }
+    }
+
+    #[test]
+    fn cell_width_mode_defaults_compatibly_and_round_trips() {
+        assert_eq!(CellWidthMode::default(), CellWidthMode::Compact);
+        assert_eq!(CellWidthMode::parse("compact"), Some(CellWidthMode::Compact));
+        assert_eq!(CellWidthMode::parse("RELAXED"), Some(CellWidthMode::Relaxed));
+        assert_eq!(CellWidthMode::parse("unknown").unwrap_or_default(), CellWidthMode::Compact);
+        for value in [CellWidthMode::Compact, CellWidthMode::Relaxed] {
+            assert_eq!(CellWidthMode::parse(value.settings_value()), Some(value));
+        }
+    }
+
+    #[test]
+    fn cell_width_mode_dropdown_offers_both_choices_with_the_compatible_one_first() {
+        // 列表顺序即下拉顺序，也是持久化索引的来源；兼容默认必须排第一。
+        assert_eq!(CELL_WIDTH_MODE_OPTIONS.len(), 2);
+        assert_eq!(CELL_WIDTH_MODE_OPTIONS[0], CellWidthMode::default());
+        assert_eq!(CELL_WIDTH_MODE_OPTIONS[1], CellWidthMode::Relaxed);
+        for option in CELL_WIDTH_MODE_OPTIONS {
+            assert!(!cell_width_mode_label(option, UiLanguage::ZhCn).is_empty());
+            assert!(!cell_width_mode_label(option, UiLanguage::EnUs).is_empty());
         }
     }
 }
