@@ -132,8 +132,8 @@ pub(crate) use ui::theme::write_nebula_prompt_theme;
 pub(crate) fn caret_blink_on() -> bool {
     ui::caret::is_on()
 }
-pub(crate) use settings::SettingsOpacityTarget;
 pub use settings::{NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit};
+pub(crate) use settings::{NewTabPosition, SettingsOpacityTarget};
 
 /// 按显示列宽贪心断行（确认框正文等 UI 段落用）：CJK 逐字可断，行首空
 /// 格吞掉；零宽字符跟随前一个字。不做拉丁连词回退——正文以中文为主，
@@ -1450,6 +1450,9 @@ pub struct Display {
     /// 捕获态实时回显：当前按住的修饰键前缀（"Ctrl+Shift+"）。松开清空。
     pub nebula_keymap_capture_preview: String,
     pub nebula_tab_reveal_motion: settings::TabRevealMotion,
+    /// 新标签插入策略。只在**真正创建标签**时生效；会话恢复与工作区导入
+    /// 保持各自记录的顺序，不读这个值。
+    pub nebula_new_tab_position: settings::NewTabPosition,
     pub nebula_font_family: String,
     nebula_font_families: Vec<String>,
     nebula_font_notice: Option<String>,
@@ -1968,6 +1971,7 @@ impl Display {
             nebula_keymap_capture: None,
             nebula_keymap_capture_preview: String::new(),
             nebula_tab_reveal_motion: settings_init.tab_reveal,
+            nebula_new_tab_position: settings_init.new_tab_position,
             nebula_font_family: settings_init.font_family,
             nebula_font_families,
             nebula_font_notice: None,
@@ -2992,6 +2996,7 @@ impl Display {
             panel_resize: self.nebula_panel_resize,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
+            new_tab_position: self.nebula_new_tab_position,
             preview_bg: self.preview_terminal_bg(),
             preview_fg: {
                 let bg = self.preview_terminal_bg();
@@ -3228,6 +3233,15 @@ impl Display {
     pub fn set_tab_reveal_option(&mut self, index: usize) {
         if let Some(motion) = settings::TAB_REVEAL_OPTIONS.get(index) {
             self.nebula_tab_reveal_motion = *motion;
+            self.persist_nebula_settings();
+        }
+        self.nebula_settings_dropdown = None;
+        self.pending_update.dirty = true;
+    }
+
+    pub fn set_new_tab_position_option(&mut self, index: usize) {
+        if let Some(position) = settings::NEW_TAB_POSITION_OPTIONS.get(index) {
+            self.nebula_new_tab_position = *position;
             self.persist_nebula_settings();
         }
         self.nebula_settings_dropdown = None;
@@ -4812,6 +4826,7 @@ impl Display {
             copy_on_select: self.nebula_copy_on_select,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
+            new_tab_position: self.nebula_new_tab_position,
             theme: self.nebula_theme_preference,
             follow_system_theme: self.nebula_follow_system_theme,
             pinned_hosts: self.nebula_pinned_hosts.clone(),
@@ -4909,6 +4924,7 @@ impl Display {
             self.reset_glyph_cache();
         }
         self.nebula_tab_reveal_motion = settings.tab_reveal;
+        self.nebula_new_tab_position = settings.new_tab_position;
         self.nebula_window_opacity = settings.opacity;
         self.nebula_background = if settings.follow_system_theme {
             Some(active_theme.palette().term_bg)

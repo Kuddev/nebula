@@ -94,6 +94,7 @@ pub enum SettingsDropdown {
     Accept,
     CursorShape,
     TabReveal,
+    NewTabPosition,
     /// 背景色：色板网格 + 16 进制输入的专用浮层（不是通用行列表）。
     BackgroundColor,
 }
@@ -143,6 +144,9 @@ pub(super) const ACCEPT_OPTIONS: [AcceptKey; 3] =
 pub(super) const TAB_REVEAL_OPTIONS: [TabRevealMotion; 2] =
     [TabRevealMotion::Slide, TabRevealMotion::Instant];
 
+pub(super) const NEW_TAB_POSITION_OPTIONS: [NewTabPosition; 2] =
+    [NewTabPosition::AfterCurrent, NewTabPosition::End];
+
 /// Order mirrors the appearance page the user referenced.
 pub(super) const CURSOR_SHAPE_OPTIONS: [CursorShape; 4] =
     [CursorShape::Beam, CursorShape::Underline, CursorShape::Block, CursorShape::HollowBlock];
@@ -175,6 +179,39 @@ fn tab_reveal_label(motion: TabRevealMotion, language: UiLanguage) -> &'static s
     match motion {
         TabRevealMotion::Slide => language.pick("滑动", "Slide"),
         TabRevealMotion::Instant => language.pick("立即", "Instant"),
+    }
+}
+
+/// 新标签插入策略：真正创建标签时，新标签在标签顺序中的落点。
+/// 上游兼容默认是紧邻当前标签之后。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum NewTabPosition {
+    #[default]
+    AfterCurrent,
+    End,
+}
+
+impl NewTabPosition {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "after_current" => Some(Self::AfterCurrent),
+            "end" => Some(Self::End),
+            _ => None,
+        }
+    }
+
+    fn settings_value(self) -> &'static str {
+        match self {
+            Self::AfterCurrent => "after_current",
+            Self::End => "end",
+        }
+    }
+}
+
+fn new_tab_position_label(position: NewTabPosition, language: UiLanguage) -> &'static str {
+    match position {
+        NewTabPosition::AfterCurrent => language.pick("当前标签之后", "After current"),
+        NewTabPosition::End => language.pick("列表末尾", "End"),
     }
 }
 
@@ -240,6 +277,8 @@ pub enum SettingsHit {
     CjkBoldToggle,
     TabRevealDropdown,
     TabRevealOption(usize),
+    NewTabPositionDropdown,
+    NewTabPositionOption(usize),
     /// Language combobox trigger (options resolve to [`SettingsHit::Language`]).
     LanguageDropdown,
     /// Expanded dropdown option rows for the cycle-style settings.
@@ -309,6 +348,7 @@ pub(super) struct NebulaRuntimeSettings {
     /// 默认开：小字号下雅黑 Bold fallback 与 Regular 混排发闷（任务 #4）。
     pub(super) cjk_bold_regular: bool,
     pub(super) tab_reveal: TabRevealMotion,
+    pub(super) new_tab_position: NewTabPosition,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     /// Window close keeps the PTYs alive in the resident process (detach /
@@ -381,6 +421,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         copy_on_select: true,
         cjk_bold_regular: true,
         tab_reveal: TabRevealMotion::Slide,
+        new_tab_position: NewTabPosition::AfterCurrent,
         // Off by default: the welcome screen pipes a whole script through the
         // fresh shell and repaints on resize — real startup-latency cost on
         // the critical path (user ruling: startup speed outranks the art).
@@ -467,6 +508,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("cjk_bold_regular", v)) => settings.cjk_bold_regular = parse_bool(v, true),
                 Some(("tab_reveal", v)) => {
                     settings.tab_reveal = TabRevealMotion::parse(v).unwrap_or_default();
+                },
+                Some(("new_tab_position", v)) => {
+                    settings.new_tab_position = NewTabPosition::parse(v).unwrap_or_default();
                 },
                 Some(("startup_directory", v)) => {
                     let path = std::path::PathBuf::from(v.trim());
@@ -681,7 +725,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         path,
         format!(
             "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+tab_reveal={}\nnew_tab_position={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -691,6 +735,7 @@ tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur
             settings.copy_on_select as u8,
             settings.cjk_bold_regular as u8,
             settings.tab_reveal.settings_value(),
+            settings.new_tab_position.settings_value(),
             settings.fetch as u8,
             settings.powerline as u8,
             settings.keep_session as u8,
@@ -760,6 +805,7 @@ struct SettingsGeometry {
     /// 交互: CJK 粗体策略 toggle row.
     cjk_bold: (f32, f32, f32, f32),
     tab_reveal: (f32, f32, f32, f32),
+    new_tab_position: (f32, f32, f32, f32),
     reset: (f32, f32, f32, f32),
     /// Top edge of the scrollable content viewport (just below the fixed
     /// header band); everything above it never scrolls.
@@ -934,13 +980,15 @@ fn settings_geometry(
     };
     let profiles_h = s(profiles_end + 32.0 - 72.0);
 
-    // 交互: 剪贴板行为、标签展开与拖拽调节一组，文本渲染（CJK 粗体策略）另一组。
+    // 交互: 剪贴板行为、标签行为（展开、新标签位置）与拖拽调节一组，
+    // 文本渲染（CJK 粗体策略）另一组。
     let interaction_y0 = 146.0;
-    let cjk_bold_y0 = interaction_y0 + ROW_H * 3.0 + GROUP_ADVANCE;
+    let cjk_bold_y0 = interaction_y0 + ROW_H * 4.0 + GROUP_ADVANCE;
     let interaction_h = s(cjk_bold_y0 + ROW_H + 32.0 - 72.0);
     let copy_on_select = (row_x, at(interaction_y0), row_w, row_h);
     let tab_reveal = (row_x, at(interaction_y0 + ROW_H), row_w, row_h);
-    let panel_resize = (row_x, at(interaction_y0 + ROW_H * 2.0), row_w, row_h);
+    let new_tab_position = (row_x, at(interaction_y0 + ROW_H * 2.0), row_w, row_h);
+    let panel_resize = (row_x, at(interaction_y0 + ROW_H * 3.0), row_w, row_h);
     let cjk_bold = (row_x, at(cjk_bold_y0), row_w, row_h);
 
     // Keymap: editable action rows, then a read-only extras group (spec 002).
@@ -1021,6 +1069,7 @@ fn settings_geometry(
         panel_resize,
         cjk_bold,
         tab_reveal,
+        new_tab_position,
         reset: (popup_x + popup_w - s(170.0), popup_y + s(24.0), s(150.0), s(42.0)),
         content_top,
         appearance_h,
@@ -1138,6 +1187,9 @@ fn dropdown_anchor(
         (Section::Interaction, SettingsDropdown::TabReveal) => {
             Some((anchor(geometry.tab_reveal), TAB_REVEAL_OPTIONS.len()))
         },
+        (Section::Interaction, SettingsDropdown::NewTabPosition) => {
+            Some((anchor(geometry.new_tab_position), NEW_TAB_POSITION_OPTIONS.len()))
+        },
         (Section::Appearance, SettingsDropdown::BackgroundFit) => {
             Some((anchor(geometry.background_image_fit), BACKGROUND_FIT_OPTIONS.len()))
         },
@@ -1226,6 +1278,7 @@ pub fn settings_hit(
                     SettingsDropdown::Language => SettingsHit::Language(LANGUAGE_OPTIONS[index]),
                     SettingsDropdown::Accept => SettingsHit::AcceptOption(index),
                     SettingsDropdown::TabReveal => SettingsHit::TabRevealOption(index),
+                    SettingsDropdown::NewTabPosition => SettingsHit::NewTabPositionOption(index),
                     SettingsDropdown::CursorShape => SettingsHit::CursorShapeOption(index),
                     // 背景色浮层在上方特判处理，走不到通用行列表。
                     SettingsDropdown::BackgroundColor => SettingsHit::Panel,
@@ -1351,6 +1404,9 @@ pub fn settings_hit(
                 if contains_rect(geometry.tab_reveal, x, y) {
                     return SettingsHit::TabRevealDropdown;
                 }
+                if contains_rect(geometry.new_tab_position, x, y) {
+                    return SettingsHit::NewTabPositionDropdown;
+                }
                 if contains_rect(geometry.panel_resize, x, y) {
                     return SettingsHit::PanelResizeToggle;
                 }
@@ -1451,6 +1507,7 @@ pub(super) struct SettingsView {
     pub(super) panel_resize: bool,
     pub(super) cjk_bold_regular: bool,
     pub(super) tab_reveal: TabRevealMotion,
+    pub(super) new_tab_position: NewTabPosition,
     /// Live-preview colors: the ACTUAL terminal background/foreground the
     /// grid would use right now (custom background wins over the theme).
     pub(super) preview_bg: Rgb,
@@ -1617,6 +1674,9 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         SettingsDropdown::TabReveal => {
             TAB_REVEAL_OPTIONS.iter().position(|motion| *motion == view.tab_reveal)
         },
+        SettingsDropdown::NewTabPosition => {
+            NEW_TAB_POSITION_OPTIONS.iter().position(|position| *position == view.new_tab_position)
+        },
         SettingsDropdown::CursorShape => {
             CURSOR_SHAPE_OPTIONS.iter().position(|shape| *shape == view.cursor_shape)
         },
@@ -1637,6 +1697,7 @@ fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Optio
         },
         (SettingsDropdown::Accept, SettingsHit::AcceptOption(index)) => Some(index),
         (SettingsDropdown::TabReveal, SettingsHit::TabRevealOption(index)) => Some(index),
+        (SettingsDropdown::NewTabPosition, SettingsHit::NewTabPositionOption(index)) => Some(index),
         (SettingsDropdown::CursorShape, SettingsHit::CursorShapeOption(index)) => Some(index),
         _ => None,
     }
@@ -2209,6 +2270,18 @@ pub(super) fn push_quads(
             );
             row_hover(
                 quads,
+                geometry.new_tab_position,
+                view.hover == SettingsHit::NewTabPositionDropdown,
+            );
+            combobox(
+                quads,
+                &mut staged,
+                geometry.new_tab_position,
+                view.hover == SettingsHit::NewTabPositionDropdown,
+                view.dropdown == Some(SettingsDropdown::NewTabPosition),
+            );
+            row_hover(
+                quads,
                 geometry.panel_resize,
                 view.hover == SettingsHit::PanelResizeToggle,
             );
@@ -2603,6 +2676,9 @@ pub(super) fn draw_popup_text(
             SettingsDropdown::Accept => accept_label(ACCEPT_OPTIONS[index], language).to_owned(),
             SettingsDropdown::TabReveal => {
                 tab_reveal_label(TAB_REVEAL_OPTIONS[index], language).to_owned()
+            },
+            SettingsDropdown::NewTabPosition => {
+                new_tab_position_label(NEW_TAB_POSITION_OPTIONS[index], language).to_owned()
             },
             SettingsDropdown::CursorShape => {
                 cursor_shape_label(CURSOR_SHAPE_OPTIONS[index], language).to_owned()
@@ -3516,6 +3592,26 @@ pub(super) fn draw_text(
                     sk.accent,
                 );
             }
+            if visible(geometry.new_tab_position.1, geometry.new_tab_position.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.new_tab_position,
+                    language.pick("新标签位置", "New tab position"),
+                    "",
+                    sk.ink,
+                );
+                combobox_value(
+                    r,
+                    gc,
+                    geometry.new_tab_position,
+                    new_tab_position_label(view.new_tab_position, language),
+                    sk.accent,
+                );
+            }
             if visible(geometry.panel_resize.1, geometry.panel_resize.3) {
                 // 开关本体在 quads pass；开启前的性能告知走确认框，这里的
                 // label 只说清楚它管哪三条分界线。
@@ -3829,7 +3925,8 @@ pub(super) fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion, advanced_content_end, opacity_from_pointer,
+        NEW_TAB_POSITION_OPTIONS, NewTabPosition, SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion,
+        UiLanguage, advanced_content_end, new_tab_position_label, opacity_from_pointer,
     };
 
     #[test]
@@ -3858,6 +3955,34 @@ mod tests {
         assert_eq!(TabRevealMotion::parse("unknown").unwrap_or_default(), TabRevealMotion::Slide);
         for value in [TabRevealMotion::Slide, TabRevealMotion::Instant] {
             assert_eq!(TabRevealMotion::parse(value.settings_value()), Some(value));
+        }
+    }
+
+    #[test]
+    fn new_tab_position_defaults_compatibly_and_round_trips() {
+        assert_eq!(NewTabPosition::default(), NewTabPosition::AfterCurrent);
+        assert_eq!(NewTabPosition::parse("after_current"), Some(NewTabPosition::AfterCurrent));
+        assert_eq!(NewTabPosition::parse("END"), Some(NewTabPosition::End));
+        assert_eq!(
+            NewTabPosition::parse("unknown").unwrap_or_default(),
+            NewTabPosition::AfterCurrent
+        );
+        for value in [NewTabPosition::AfterCurrent, NewTabPosition::End] {
+            assert_eq!(NewTabPosition::parse(value.settings_value()), Some(value));
+        }
+    }
+
+    #[test]
+    fn new_tab_position_dropdown_offers_both_choices_with_the_compatible_one_first() {
+        // 列表顺序即下拉顺序，也是持久化索引的来源。把兼容默认放在首位是
+        // 合同的一部分——重排这个数组会让升级用户的选择悄悄改变。
+        assert_eq!(NEW_TAB_POSITION_OPTIONS.len(), 2);
+        assert_eq!(NEW_TAB_POSITION_OPTIONS[0], NewTabPosition::default());
+        assert_eq!(NEW_TAB_POSITION_OPTIONS[1], NewTabPosition::End);
+        // 下拉与标签共用同一张表：每个选项都要能渲染出各自的文案。
+        for option in NEW_TAB_POSITION_OPTIONS {
+            assert!(!new_tab_position_label(option, UiLanguage::ZhCn).is_empty());
+            assert!(!new_tab_position_label(option, UiLanguage::EnUs).is_empty());
         }
     }
 }

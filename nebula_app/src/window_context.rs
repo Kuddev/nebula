@@ -95,6 +95,36 @@ fn valid_new_tab_directory(path: &std::path::Path) -> bool {
     path.is_dir()
 }
 
+/// 一次标签插入的落点来源。由调用方声明意图，而不是让插入点自己猜：
+/// 真正创建标签走 [`TabPlacement::Created`]（读新标签插入策略），会话恢复与
+/// 工作区导入走 [`TabPlacement::AfterActive`]（保持各自记录的顺序）。
+///
+/// 这个区别必须由类型承载。恢复路径复用 `spawn_tab_*` 创建函数，光靠注释
+/// 约定「恢复时别读策略」，下一个新增入口就会漏掉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabPlacement {
+    Created,
+    AfterActive,
+}
+
+/// 新标签在标签顺序中的落点。所有插入点共用它，因此
+/// `(active_tab + 1).min(len)` 这条计算只存在一处。
+fn tab_insert_index(
+    placement: TabPlacement,
+    position: crate::display::NewTabPosition,
+    active_tab: usize,
+    tab_count: usize,
+) -> usize {
+    let after_active = active_tab.saturating_add(1).min(tab_count);
+    match placement {
+        TabPlacement::AfterActive => after_active,
+        TabPlacement::Created => match position {
+            crate::display::NewTabPosition::AfterCurrent => after_active,
+            crate::display::NewTabPosition::End => tab_count,
+        },
+    }
+}
+
 /// Resolve a fresh tab's directory without allowing the global setting to
 /// overwrite an explicit profile/command directory.
 fn preferred_tab_cwd(
@@ -617,7 +647,7 @@ impl WindowContext {
             },
             TabRequest::NewAtDirectory(path) => {
                 if valid_new_tab_directory(&path) {
-                    self.spawn_tab_at(Some(path));
+                    self.spawn_tab_at(Some(path), TabPlacement::Created);
                 } else {
                     warn!(
                         "Refusing to open a terminal at a missing or non-directory tree root: \
@@ -631,11 +661,11 @@ impl WindowContext {
                 false
             },
             TabRequest::NewShell { name, shell } => {
-                self.spawn_tab_shell(name, shell);
+                self.spawn_tab_shell(name, shell, TabPlacement::Created);
                 false
             },
             TabRequest::NewSsh(host) => {
-                self.spawn_tab_ssh(host);
+                self.spawn_tab_ssh(host, TabPlacement::Created);
                 false
             },
             TabRequest::OpenDoc(path) => {
@@ -850,15 +880,36 @@ impl WindowContext {
         self.active_tab
     }
 
+    /// 把一个新标签实体加入标签顺序并激活它，返回它的落点。
+    ///
+    /// 这是标签实体进入顺序的唯一入口（拖拽重排的 `move_tab` 除外——那里的
+    /// 落点由用户手势直接给出）。`placement` 由调用方声明意图：真正创建标签
+    /// 传 [`TabPlacement::Created`]，会话恢复与工作区导入传
+    /// [`TabPlacement::AfterActive`]。
+    fn insert_tab(&mut self, entry: TabEntry, placement: TabPlacement) -> usize {
+        let at = tab_insert_index(
+            placement,
+            self.display.nebula_new_tab_position,
+            self.active_tab,
+            self.tabs.len(),
+        );
+        self.tabs.insert(at, entry);
+        self.active_tab = at;
+        at
+    }
+
     /// Spawn and activate a new tab (a single-pane layout) using the default shell.
     fn spawn_tab(&mut self) {
-        self.spawn_tab_at(self.display.startup_directory().or_else(|| self.focused_cwd()));
+        self.spawn_tab_at(
+            self.display.startup_directory().or_else(|| self.focused_cwd()),
+            TabPlacement::Created,
+        );
     }
 
     /// Spawn a default-shell tab at an already validated explicit directory,
     /// or inherit the caller-provided cwd. Keeping this as the only insertion
     /// path guarantees tree-created terminals behave exactly like Ctrl+Shift+T.
-    fn spawn_tab_at(&mut self, cwd: Option<std::path::PathBuf>) {
+    fn spawn_tab_at(&mut self, cwd: Option<std::path::PathBuf>, placement: TabPlacement) {
         // The default-shell setting (`shell=<id>` in nebula_settings.txt) may
         // name a detected shell the PTY layer doesn't bootstrap itself (cmd,
         // pwsh, nushell, a WSL distro). `resolve_id` returns `None` for the two
@@ -870,11 +921,7 @@ impl WindowContext {
             None => self.spawn_pane_detached(cwd, self.display.size_info),
         };
         if let Some(id) = spawned {
-            // Insert right after the current tab (insert right next to the current tab)
-            // rather than at the end of the bar.
-            let at = (self.active_tab + 1).min(self.tabs.len());
-            self.tabs.insert(
-                at,
+            self.insert_tab(
                 TabEntry {
                     layout: Layout::Leaf(id),
                     active_pane: id,
@@ -885,8 +932,8 @@ impl WindowContext {
                     doc: None,
                     settings: false,
                 },
+                placement,
             );
-            self.active_tab = at;
             self.resize_active_layout();
             self.dirty = true;
             self.run_fastfetch_intro(id);
@@ -906,10 +953,10 @@ impl WindowContext {
     /// profile so an `ssh host` entry reads as its destination, not "ssh".
     fn spawn_tab_profile(&mut self, index: usize) {
         let Some(profile) = self.config.profiles.get(index).cloned() else { return };
-        self.spawn_tab_profile_value(profile);
+        self.spawn_tab_profile_value(profile, TabPlacement::Created);
     }
 
-    fn spawn_tab_profile_value(&mut self, profile: Profile) {
+    fn spawn_tab_profile_value(&mut self, profile: Profile, placement: TabPlacement) {
         // Profile cwd wins when it exists; else inherit the focused pane's.
         let cwd = preferred_tab_cwd(
             profile.cwd.as_ref().filter(|p| p.is_dir()).cloned(),
@@ -918,9 +965,7 @@ impl WindowContext {
         );
         let shell = profile.shell();
         if let Some(id) = self.spawn_pane_detached_with(cwd, self.display.size_info, Some(shell)) {
-            let at = (self.active_tab + 1).min(self.tabs.len());
-            self.tabs.insert(
-                at,
+            self.insert_tab(
                 TabEntry {
                     layout: Layout::Leaf(id),
                     active_pane: id,
@@ -931,8 +976,8 @@ impl WindowContext {
                     doc: None,
                     settings: false,
                 },
+                placement,
             );
-            self.active_tab = at;
             self.resize_active_layout();
             self.dirty = true;
         }
@@ -941,15 +986,18 @@ impl WindowContext {
     /// Open a new tab running a detected shell (the new-tab dropdown). Like
     /// `spawn_tab_profile` but the spec is passed in rather than looked up in
     /// the config, and the cwd inherits the focused pane's.
-    fn spawn_tab_shell(&mut self, name: String, shell: nebula_terminal::tty::Shell) {
+    fn spawn_tab_shell(
+        &mut self,
+        name: String,
+        shell: nebula_terminal::tty::Shell,
+        placement: TabPlacement,
+    ) {
         if let Some(id) = self.spawn_pane_detached_with(
             self.display.startup_directory().or_else(|| self.focused_cwd()),
             self.display.size_info,
             Some(shell.clone()),
         ) {
-            let at = (self.active_tab + 1).min(self.tabs.len());
-            self.tabs.insert(
-                at,
+            self.insert_tab(
                 TabEntry {
                     layout: Layout::Leaf(id),
                     active_pane: id,
@@ -960,8 +1008,8 @@ impl WindowContext {
                     doc: None,
                     settings: false,
                 },
+                placement,
             );
-            self.active_tab = at;
             self.resize_active_layout();
             self.dirty = true;
         }
@@ -970,7 +1018,7 @@ impl WindowContext {
     /// Open a saved SSH destination inside the configured default shell.
     /// `nebula ssh` is typed into that shell's PTY so OpenSSH remains inside
     /// Nebula's ConPTY instead of becoming the pane's GUI-subsystem root.
-    fn spawn_tab_ssh(&mut self, host: String) {
+    fn spawn_tab_ssh(&mut self, host: String, placement: TabPlacement) {
         #[cfg(windows)]
         {
             let pane_id = self.next_pane_id;
@@ -985,9 +1033,7 @@ impl WindowContext {
                 Ok(pane) => {
                     self.next_pane_id += 1;
                     self.panes.push(pane);
-                    let at = (self.active_tab + 1).min(self.tabs.len());
-                    self.tabs.insert(
-                        at,
+                    self.insert_tab(
                         TabEntry {
                             layout: Layout::Leaf(pane_id),
                             active_pane: pane_id,
@@ -998,8 +1044,8 @@ impl WindowContext {
                             doc: None,
                             settings: false,
                         },
+                        placement,
                     );
-                    self.active_tab = at;
                     self.resize_active_layout();
                     self.dirty = true;
                     return;
@@ -1046,9 +1092,7 @@ impl WindowContext {
                 self.display.size_info,
                 default_shell,
             ) {
-                let at = (self.active_tab + 1).min(self.tabs.len());
-                self.tabs.insert(
-                    at,
+                self.insert_tab(
                     TabEntry {
                         layout: Layout::Leaf(id),
                         active_pane: id,
@@ -1059,8 +1103,8 @@ impl WindowContext {
                         doc: None,
                         settings: false,
                     },
+                    placement,
                 );
-                self.active_tab = at;
                 self.resize_active_layout();
                 self.dirty = true;
                 if let Some(pane) = self.panes.iter().find(|pane| pane.id == id) {
@@ -1089,9 +1133,7 @@ impl WindowContext {
         // tab identity for doc tabs (no cwd to derive one from). Same codicon
         // as the file tree's markdown icon, so tab and tree read as one system.
         let label = format!("\u{eb1d} {}", doc.title);
-        let at = (self.active_tab + 1).min(self.tabs.len());
-        self.tabs.insert(
-            at,
+        self.insert_tab(
             TabEntry {
                 layout: Layout::Leaf(DOC_PANE_ID),
                 active_pane: DOC_PANE_ID,
@@ -1102,8 +1144,8 @@ impl WindowContext {
                 doc: Some(doc),
                 settings: false,
             },
+            TabPlacement::Created,
         );
-        self.active_tab = at;
         self.display.set_settings_tab_active(false);
         self.dirty = true;
     }
@@ -1118,9 +1160,7 @@ impl WindowContext {
             return;
         }
 
-        let at = (self.active_tab + 1).min(self.tabs.len());
-        self.tabs.insert(
-            at,
+        self.insert_tab(
             TabEntry {
                 layout: Layout::Leaf(DOC_PANE_ID),
                 active_pane: DOC_PANE_ID,
@@ -1131,8 +1171,8 @@ impl WindowContext {
                 doc: None,
                 settings: true,
             },
+            TabPlacement::Created,
         );
-        self.active_tab = at;
         self.display.set_settings_tab_active(true);
         self.sync_chrome_tabs();
         self.dirty = true;
@@ -1151,16 +1191,18 @@ impl WindowContext {
         let before = self.tabs.len();
 
         match launch {
-            TabLaunch::Default => self.spawn_tab_at(self.focused_cwd()),
-            TabLaunch::Profile(profile) => self.spawn_tab_profile_value(profile),
-            TabLaunch::Shell { name, shell } => self.spawn_tab_shell(name, shell),
-            TabLaunch::Ssh(host) => self.spawn_tab_ssh(host),
+            TabLaunch::Default => self.spawn_tab_at(self.focused_cwd(), TabPlacement::Created),
+            TabLaunch::Profile(profile) => {
+                self.spawn_tab_profile_value(profile, TabPlacement::Created)
+            },
+            TabLaunch::Shell { name, shell } => {
+                self.spawn_tab_shell(name, shell, TabPlacement::Created)
+            },
+            TabLaunch::Ssh(host) => self.spawn_tab_ssh(host, TabPlacement::Created),
             TabLaunch::Document(path) => {
                 let doc = crate::display::markdown_view::DocView::open(path.clone());
                 let label = format!("\u{eb1d} {}", doc.title);
-                let at = (self.active_tab + 1).min(self.tabs.len());
-                self.tabs.insert(
-                    at,
+                self.insert_tab(
                     TabEntry {
                         layout: Layout::Leaf(DOC_PANE_ID),
                         active_pane: DOC_PANE_ID,
@@ -1171,8 +1213,8 @@ impl WindowContext {
                         doc: Some(doc),
                         settings: false,
                     },
+                    TabPlacement::Created,
                 );
-                self.active_tab = at;
                 self.dirty = true;
             },
             TabLaunch::Settings => self.open_settings_tab(),
@@ -1336,17 +1378,22 @@ impl WindowContext {
             },
             session::LaunchSession::Shell { name, program, args } => {
                 let shell = nebula_terminal::tty::Shell::new(program.clone(), args.clone());
-                self.spawn_tab_shell(name.clone(), shell);
+                self.spawn_tab_shell(name.clone(), shell, TabPlacement::AfterActive);
             },
             session::LaunchSession::Profile { name, command, args, cwd } => {
-                self.spawn_tab_profile_value(crate::config::ui_config::Profile {
-                    name: name.clone(),
-                    command: command.clone(),
-                    args: args.clone(),
-                    cwd: cwd.as_ref().map(std::path::PathBuf::from),
-                });
+                self.spawn_tab_profile_value(
+                    crate::config::ui_config::Profile {
+                        name: name.clone(),
+                        command: command.clone(),
+                        args: args.clone(),
+                        cwd: cwd.as_ref().map(std::path::PathBuf::from),
+                    },
+                    TabPlacement::AfterActive,
+                );
             },
-            session::LaunchSession::Ssh { host } => self.spawn_tab_ssh(host.clone()),
+            session::LaunchSession::Ssh { host } => {
+                self.spawn_tab_ssh(host.clone(), TabPlacement::AfterActive)
+            },
         }
         if self.tabs.len() == before {
             // Cross-platform degradation: a workspace made on another OS may
@@ -1399,9 +1446,9 @@ impl WindowContext {
         let Some(id) = self.spawn_pane_detached(cwd, self.display.size_info) else {
             return false;
         };
-        let at = (self.active_tab + 1).min(self.tabs.len());
-        self.tabs.insert(
-            at,
+        // 恢复不读新标签插入策略：保存的顺序才是权威，逐个追加在活动标签
+        // 之后即可复现它。
+        self.insert_tab(
             TabEntry {
                 layout: Layout::Leaf(id),
                 active_pane: id,
@@ -1412,8 +1459,8 @@ impl WindowContext {
                 doc: None,
                 settings: false,
             },
+            TabPlacement::AfterActive,
         );
-        self.active_tab = at;
         self.run_fastfetch_intro(id);
         true
     }
@@ -2986,12 +3033,73 @@ mod startup_shell_tests {
     use nebula_terminal::tty::Shell;
 
     use super::{
-        chrome_clock_interval, preferred_initial_cwd, preferred_tab_cwd, routed_input_pane,
-        select_initial_shell, valid_new_tab_directory,
+        TabPlacement, chrome_clock_interval, preferred_initial_cwd, preferred_tab_cwd,
+        routed_input_pane, select_initial_shell, tab_insert_index, valid_new_tab_directory,
     };
+    use crate::display::NewTabPosition;
 
     fn shell(program: &str) -> Shell {
         Shell::new(program.to_owned(), Vec::new())
+    }
+
+    #[test]
+    fn created_tabs_land_after_the_active_tab_by_default() {
+        let at = NewTabPosition::AfterCurrent;
+        assert_eq!(tab_insert_index(TabPlacement::Created, at, 0, 3), 1);
+        assert_eq!(tab_insert_index(TabPlacement::Created, at, 1, 3), 2);
+        assert_eq!(tab_insert_index(TabPlacement::Created, at, 2, 3), 3);
+    }
+
+    #[test]
+    fn created_tabs_land_at_the_end_when_the_user_chose_end() {
+        let end = NewTabPosition::End;
+        assert_eq!(tab_insert_index(TabPlacement::Created, end, 0, 3), 3);
+        assert_eq!(tab_insert_index(TabPlacement::Created, end, 1, 3), 3);
+        assert_eq!(tab_insert_index(TabPlacement::Created, end, 2, 3), 3);
+    }
+
+    #[test]
+    fn restored_tabs_ignore_the_creation_strategy() {
+        // 会话恢复与工作区导入保持既有的「当前标签之后」行为，即使用户把
+        // 新标签插入策略选成了列表末尾——否则恢复会重排保存的顺序。
+        assert_eq!(tab_insert_index(TabPlacement::AfterActive, NewTabPosition::End, 1, 4), 2);
+        assert_eq!(
+            tab_insert_index(TabPlacement::AfterActive, NewTabPosition::AfterCurrent, 1, 4),
+            2
+        );
+    }
+
+    #[test]
+    fn insertion_never_runs_past_the_end_of_the_tab_list() {
+        // 活动下标可能短暂领先于实际长度（关闭标签后的过渡态）；落点必须
+        // 仍是合法的 Vec::insert 位置。
+        assert_eq!(tab_insert_index(TabPlacement::Created, NewTabPosition::AfterCurrent, 9, 2), 2);
+        assert_eq!(tab_insert_index(TabPlacement::AfterActive, NewTabPosition::End, 9, 2), 2);
+        assert_eq!(tab_insert_index(TabPlacement::Created, NewTabPosition::AfterCurrent, 0, 0), 0);
+        assert_eq!(tab_insert_index(TabPlacement::Created, NewTabPosition::End, 0, 0), 0);
+    }
+
+    /// 落点只能有一个来源。九处各自硬编码 `(active_tab + 1).min(len)` 是这个
+    /// 功能存在的原因——只靠约定「新入口记得读策略」，下一个入口就会漏掉。
+    ///
+    /// 允许的两处：`insert_tab`（唯一的创建/恢复插入口）与 `move_tab`
+    /// （拖拽重排，落点由用户手势直接给出，不经策略）。新增第三处会让本测试
+    /// 变红——那说明它应该改走 `insert_tab`。
+    #[test]
+    fn tab_insertion_has_exactly_two_homes() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/window_context.rs"),
+        )
+        .expect("window_context.rs 必须可读，否则本约束静默放水");
+        // 只扫产品代码。规则本身是用字符串字面量表达的，扫描自己会把规则
+        // 连同它的失败信息一起算成违规。
+        let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+        let insertions = production.matches("self.tabs.insert(").count();
+        assert_eq!(
+            insertions, 2,
+            "找到 {insertions} 处 self.tabs.insert(，应为 2 处（insert_tab 与 move_tab）。\n\
+             新的标签插入请调用 insert_tab(entry, placement)，由它决定落点。"
+        );
     }
 
     #[test]

@@ -862,6 +862,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::NewTabPositionDropdown => {
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::NewTabPosition,
+                        );
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::NewTabPositionOption(index) => {
+                        self.ctx.display().set_new_tab_position_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::FontSizeUp => {
                         let ui_scale = self.ctx.display().window.scale_factor as f32;
                         self.ctx.change_font_size(ui_scale);
@@ -1292,6 +1304,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::AcceptOption(_)
             | Hit::TabRevealDropdown
             | Hit::TabRevealOption(_)
+            | Hit::NewTabPositionDropdown
+            | Hit::NewTabPositionOption(_)
             | Hit::CursorShapeDropdown
             | Hit::CursorShapeOption(_)
             | Hit::BackgroundColor
