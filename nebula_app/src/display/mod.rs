@@ -1460,6 +1460,9 @@ pub struct Display {
     /// 字体目录的搜索串。匹配列表上显示的那个名字，不维护跨语言别名。
     /// 只在下拉打开期间存在，关闭即清空，不持久化。
     nebula_font_query: String,
+    /// 目录中被判定为非等宽的族（小写名）。界面据此给比例字体警告——
+    /// 固定网格下它们可能重叠或截断，但用户知情后仍可选择。
+    nebula_font_proportional: std::collections::HashSet<String>,
     nebula_font_notice: Option<String>,
     /// Optional runtime clear/background color controlled from settings.
     pub nebula_background: Option<Rgb>,
@@ -1701,7 +1704,25 @@ impl Display {
         debug!("Loading \"{}\" font", &settings_init.font_family);
         let font =
             config.font.clone().with_family(settings_init.font_family.clone()).with_size(font_size);
-        let mut glyph_cache = GlyphCache::new(rasterizer, &font)?;
+        // 保存的字体偏好可能在两次启动之间消失（系统字体被卸载、导入文件
+        // 被删）。那种情况本次回退到内置字体并告警，但**保留原偏好**——
+        // 字体恢复可用后，下次启动自动回到用户的选择。
+        let (mut glyph_cache, font_notice) = match GlyphCache::new(rasterizer, &font) {
+            Ok(cache) => (cache, None),
+            Err(error) => {
+                let fallback = config
+                    .font
+                    .clone()
+                    .with_family(crate::font_install::REQUIRED_FONT_FAMILY.to_owned())
+                    .with_size(font_size);
+                let notice = format!(
+                    "字体「{}」本次不可用（{error}），暂用内置字体；偏好已保留。",
+                    settings_init.font_family
+                );
+                let rasterizer = Rasterizer::new()?;
+                (GlyphCache::new(rasterizer, &fallback)?, Some(notice))
+            },
+        };
         glyph_cache.wide_bold_use_regular = settings_init.cjk_bold_regular;
         #[cfg(windows)]
         let mut nebula_font_families = glyph_cache.private_font_families();
@@ -1981,7 +2002,8 @@ impl Display {
             nebula_system_fonts: None,
             nebula_font_show_all: false,
             nebula_font_query: String::new(),
-            nebula_font_notice: None,
+            nebula_font_proportional: std::collections::HashSet::new(),
+            nebula_font_notice: font_notice,
             nebula_tab_labels: vec![".".to_owned()],
             nebula_tab_colors: vec![None],
             nebula_tab_bells: vec![false],
@@ -2997,6 +3019,7 @@ impl Display {
             font_notice: self.nebula_font_notice.clone(),
             font_show_all: self.nebula_font_show_all,
             font_query: self.nebula_font_query.clone(),
+            font_proportional: self.nebula_font_proportional.clone(),
             hidden_hosts: self.nebula_hidden_hosts.clone(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
@@ -3385,6 +3408,11 @@ impl Display {
             &self.nebula_font_query,
             &self.nebula_font_family,
         );
+        self.nebula_font_proportional = catalog
+            .iter()
+            .filter(|entry| !entry.monospaced)
+            .map(|entry| entry.name.to_lowercase())
+            .collect();
         let mut families: Vec<String> = catalog.into_iter().map(|entry| entry.name).collect();
         // 内置字体永远排在最前，与上游一致。
         families.retain(|family| family != crate::font_install::REQUIRED_FONT_FAMILY);
