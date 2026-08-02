@@ -63,15 +63,7 @@ pub fn layout_combo(
 }
 
 /// The one chip recipe: hairline ring + panel + surface, chip radius.
-pub fn push_chip(
-    quads: &mut Vec<UiQuad>,
-    sk: &Skin,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    scale: f32,
-) {
+pub fn push_chip(quads: &mut Vec<UiQuad>, sk: &Skin, x: f32, y: f32, w: f32, h: f32, scale: f32) {
     let corner = radius::CHIP * scale;
     super::surface::push_stroke(quads, (x, y, w, h), corner, scale, sk.hairline);
     quads.push(UiQuad::solid(x, y, w, h, corner, sk.panel));

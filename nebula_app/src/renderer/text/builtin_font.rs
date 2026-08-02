@@ -418,9 +418,8 @@ mod tests {
             assert!(builtin_glyph(character, &METRICS, &offset, &glyph_offset).is_some());
         }
 
-        for character in ('\u{e0a0}'..'\u{e0b0}')
-            .chain('\u{e0b5}'..'\u{e0b6}')
-            .chain('\u{e0b7}'..'\u{e0c0}')
+        for character in
+            ('\u{e0a0}'..'\u{e0b0}').chain('\u{e0b5}'..'\u{e0b6}').chain('\u{e0b7}'..'\u{e0c0}')
         {
             assert!(builtin_glyph(character, &METRICS, &offset, &glyph_offset).is_none());
         }

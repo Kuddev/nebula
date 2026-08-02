@@ -109,9 +109,9 @@ pub use state::{
 mod file_dialog;
 pub(crate) mod keymap;
 mod settings;
+pub(crate) mod ssh_connect;
 mod ssh_editor_input;
 mod ssh_editor_render;
-pub(crate) mod ssh_connect;
 mod ssh_ui;
 mod text_input;
 
@@ -132,8 +132,8 @@ pub(crate) use ui::theme::write_nebula_prompt_theme;
 pub(crate) fn caret_blink_on() -> bool {
     ui::caret::is_on()
 }
-pub use settings::{NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit};
 pub(crate) use settings::SettingsOpacityTarget;
+pub use settings::{NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit};
 
 /// 按显示列宽贪心断行（确认框正文等 UI 段落用）：CJK 逐字可断，行首空
 /// 格吞掉；零宽字符跟随前一个字。不做拉丁连词回退——正文以中文为主，
@@ -215,6 +215,12 @@ pub(crate) const NEBULA_UNFOCUSED_SPLIT_DIM: f32 = 0.30;
 /// terminal card, so the first grid row doesn't touch the card's top edge.
 pub const CHROME_BAR_LOGICAL: f32 = 64.0;
 
+/// 「刚完成」对勾在徽章位上停留多久，随后落回未读圆点。
+///
+/// 短到不像一个需要处理的状态、长到能被余光捕捉：低于 ~0.6s 在扫视中会被
+/// 整个错过，高于 ~2s 就开始像"它卡在完成态上了"。
+pub(crate) const BADGE_FLASH: std::time::Duration = std::time::Duration::from_millis(1100);
+
 /// Shared chrome/control corner radius. Used for the small in-shell affordances
 /// (window-control hover pills, tab pills, the "+" square) — kept modest so the
 /// controls stay crisp.
@@ -266,13 +272,63 @@ pub fn content_pad_x(scale_factor: f32) -> f32 {
 /// close affordance, narrow enough to leave the grid roomy.
 pub const SIDEBAR_W_LOGICAL: f32 = 230.0;
 
+/// 拖拽调节（设置·交互开关）允许的范围，逻辑 px。下限保行内容可读，
+/// 上限防把终端挤成一条缝；settings 解析与拖拽 update 用同一组钳制，
+/// 手拖出来的值和手改文件写出来的值才不会各有一套边界。
+pub const SIDEBAR_W_MIN: f32 = 170.0;
+pub const SIDEBAR_W_MAX: f32 = 420.0;
+pub const DRAWER_W_MIN: f32 = 220.0;
+pub const DRAWER_W_MAX: f32 = 560.0;
+/// SSH HOSTS 停靠区高度覆盖的下限 = 只剩标题条（`hosts_header_h` 的逻辑值）。
+pub const HOSTS_BAND_MIN: f32 = 38.0;
+
 /// Sidebar width in physical pixels for `scale_factor`, honouring the collapsed
-/// state. Collapsed folds the panel away entirely (0) so the grid reclaims the
-/// full width; the reveal affordance then lives in the top bar.
+/// state. `logical_w` 是当前（可能被拖拽调过的）逻辑宽，[`SIDEBAR_W_LOGICAL`]
+/// 只是它的默认值。
 #[inline]
-pub fn sidebar_width(scale_factor: f32, collapsed: bool) -> f32 {
-    if collapsed { 0.0 } else { (SIDEBAR_W_LOGICAL * scale_factor).round() }
+pub fn sidebar_width(scale_factor: f32, collapsed: bool, logical_w: f32) -> f32 {
+    if collapsed { 0.0 } else { (logical_w * scale_factor).round() }
 }
+
+/// 三条可拖拽的面板分界线（设置·交互的「拖拽调节」开关管辖）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelDragKind {
+    /// 左侧栏右缘：拖宽度。
+    SidebarWidth,
+    /// SSH HOSTS 停靠区顶缘：拖高度。
+    HostsBand,
+    /// 右抽屉左缘：拖宽度。
+    DrawerWidth,
+}
+
+/// 进行中的面板拖拽。侧栏/抽屉的宽度变化会重排终端（PTY 端另有 settle
+/// 延迟），所以应用端按 [`PANEL_DRAG_REFLOW_MS`] 节流：**视觉**几何每帧
+/// 跟手（chrome/抽屉布局读 `target`），**reflow** 用的已应用字段到点才
+/// 同步，松手必同步——拖动过程平滑，网格重排最多 12 次/秒。
+#[derive(Debug, Clone, Copy)]
+pub struct PanelDrag {
+    pub kind: PanelDragKind,
+    /// 拖动中的目标值（逻辑 px）：宽度或停靠区高度。
+    pub target: f32,
+    /// 上次把 `target` 同步进已应用字段的时刻。
+    pub last_apply: std::time::Instant,
+    /// HOSTS 分界专用：按下时缓存的停靠区内容底缘（物理 px）。它只取决于
+    /// 面板几何、与停靠区自身高度无关，所以整场拖拽都不会变——缓存下来，
+    /// 每次指针移动就不必重跑一遍 `chrome_tab_layout`。
+    pub anchor: f32,
+}
+
+/// 拖动期间两次终端 reflow 的最小间隔（毫秒）。
+pub const PANEL_DRAG_REFLOW_MS: u64 = 80;
+
+/// 侧栏拖到比这更窄（逻辑 px）就直接收起，而不是卡在 [`SIDEBAR_W_MIN`]。
+/// 用户裁定：下限的语义是「关掉」不是「最窄」——把边界一路推到左边缘是
+/// 最自然的收起手势。宽度字段保持折叠前的值，重新展开还是原来那么宽。
+pub const SIDEBAR_COLLAPSE_AT: f32 = 120.0;
+
+/// 右抽屉的同款阈值：拖到比这更窄就关掉抽屉。两侧手势必须对称，否则
+/// 「左边拖到头会关、右边拖到头只是卡住」本身就是个 bug（用户 08-02 报）。
+pub const DRAWER_COLLAPSE_AT: f32 = 150.0;
 
 #[derive(Debug, Clone, Copy)]
 struct UiAnim {
@@ -778,6 +834,17 @@ pub(crate) fn nebula_settings_value(key: &str) -> Option<String> {
     })
 }
 
+/// 启动时是否回放 `session.json`（设置·高级→会话，默认开）。
+///
+/// 事件循环在建窗之前就要问这一句，那时还没有 `Display`，也没有 `UiConfig`
+/// 之外的东西——所以走原始读取而不是 `settings::nebula_settings_load`：
+/// 后者是 `pub(super)`，且会为了一个 bool 解析整份设置。
+pub(crate) fn restore_session_enabled() -> bool {
+    nebula_settings_value("restore_session")
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
+}
+
 #[cfg(windows)]
 fn nebula_pathexts() -> Vec<String> {
     std::env::var("PATHEXT")
@@ -1180,7 +1247,7 @@ pub struct Display {
     nebula_ssh_editor_hover: SshEditorHit,
     /// 正在拖选的字段。鼠标按在输入框里时置位，松开清掉——拖拽的语义是
     /// "从按下的那个字符拉到现在这个字符"，所以中途划出框外也要继续跟。
-    nebula_ssh_editor_drag: Option<SshEditorField>,
+    nebula_ssh_editor_drag: Option<ssh_ui::SshEditorDrag>,
     /// 「测试连接」点击时暂存的请求；input 层随后取走并交给 SSH runtime。
     /// display 不持有事件代理，这一格就是点击→网络之间的交接台。
     nebula_ssh_test_request: Option<crate::ssh_session::SshTestRequest>,
@@ -1246,6 +1313,15 @@ pub struct Display {
     nebula_tab_bells: Vec<bool>,
     /// Per-tab "command is running" flags driving the sidebar spinners.
     nebula_tab_running: Vec<bool>,
+    /// 每个标签是否停在「等你批准」上，画手掌而不是圆点。
+    nebula_tab_attention: Vec<bool>,
+    /// 每个 tab 的 shell 短标（pwsh / cmd / ubuntu / ssh…），空 = 不显示。
+    /// 静默行（无任何徽章）的右侧亮它，回答"这个 tab 是什么环境"。
+    nebula_tab_shells: Vec<String>,
+    /// 上一条命令非零退出且未被看到，画警示三角。
+    nebula_tab_failed: Vec<bool>,
+    /// 刚成功收尾，正在放对勾闪现（[`BADGE_FLASH`] 之内）。
+    nebula_tab_flashing: Vec<bool>,
     /// Per-tab real AI brand logo, textured over the icon slot.
     nebula_tab_logos: Vec<Option<AiLogo>>,
     /// Decoded (and, where appropriate, theme-tinted) logo pixels with stable renderer texture ids,
@@ -1273,6 +1349,20 @@ pub struct Display {
     /// Whether the tab sidebar is folded away. When collapsed the grid
     /// reclaims the full width and only a reveal button remains in the top bar.
     nebula_sidebar_collapsed: bool,
+    /// 左侧栏逻辑宽（拖拽调节的**已应用**值——reflow/持久化读它）。
+    nebula_sidebar_w: f32,
+    /// 右抽屉逻辑宽（同上；布局时仍钳在窗口 42%）。
+    nebula_drawer_w: f32,
+    /// SSH HOSTS 停靠区高度覆盖（逻辑 px），0 = 自动弹性规则。
+    nebula_hosts_band: f32,
+    /// 「拖拽调节侧栏」总开关（设置·交互，默认关，开启需过确认框）。
+    pub nebula_panel_resize: bool,
+    /// 聚焦 pane 的工作目录（shell 通过标题上报），每帧由 `draw` 灌进来。
+    /// 命令面板的「工作目录」组用它：组名右缘挂路径，组里的复制 / 定位 /
+    /// 新建标签页都作用在它身上。`None` = shell 没上报，那一组整组不出现。
+    pub nebula_focused_cwd: Option<std::path::PathBuf>,
+    /// 进行中的面板分界线拖拽（见 [`PanelDrag`]）。
+    pub nebula_panel_drag: Option<PanelDrag>,
     /// SSH host aliases from `~/.ssh/config` for the sidebar's "SSH HOSTS"
     /// section, pinned entries first (see `nebula_pinned_hosts`).
     pub nebula_ssh_hosts: Vec<String>,
@@ -1291,6 +1381,8 @@ pub struct Display {
     /// 地址 → 用户起的显示名，从 `ssh_profiles.json` 缓存而来。侧栏每帧都要
     /// 画这些行，读文件必须发生在保存那一刻，而不是绘制路径上。
     nebula_ssh_labels: std::collections::HashMap<String, String>,
+    /// 地址 → 图标 id（`ui::os_icons`），缓存策略同上。缺项 = 自动。
+    nebula_ssh_icons: std::collections::HashMap<String, String>,
     /// Accordion fold state of the two sidebar sections.
     nebula_tabs_section_open: bool,
     nebula_hosts_section_open: bool,
@@ -1324,6 +1416,9 @@ pub struct Display {
     /// Closing a window detaches its panes into the resident process for
     /// re-attach (multiplexer restore). Off = close kills the shells.
     pub nebula_keep_session: bool,
+    /// 启动时回放 `session.json`（正常关窗与崩溃恢复共用这一条路）。关掉
+    /// 只是不回放——快照照写，导出工作区与崩溃诊断仍然可用。
+    pub nebula_restore_session: bool,
     /// Runtime window opacity controlled from Nebula settings.
     pub nebula_window_opacity: f32,
     /// Which settings combobox (floating option list) is expanded, if any.
@@ -1537,11 +1632,8 @@ fn send_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
 #[cfg(not(windows))]
 fn send_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
     // 非 Windows 暂无回收站集成：递归删除前置确认已由弹窗承担。
-    let result = if path.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    };
+    let result =
+        if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
     result.map_err(|err| err.to_string())
 }
 
@@ -1635,8 +1727,14 @@ impl Display {
             .metrics_at(base_font_size)
             .map(|base_metrics| compute_cell_size(config, &base_metrics))
             .unwrap_or((cell_width, cell_height));
-        let size =
-            window_size(config, dimensions, base_cell_width, base_cell_height, scale_factor);
+        let size = window_size(
+            config,
+            dimensions,
+            base_cell_width,
+            base_cell_height,
+            scale_factor,
+            settings_init.sidebar_w,
+        );
         window.request_inner_size(size);
 
         // Create the GL surface to draw into.
@@ -1676,7 +1774,7 @@ impl Display {
             viewport_size.height as f32,
             cell_width,
             cell_height,
-            padding.0 + content_pad + sidebar_width(scale, false),
+            padding.0 + content_pad + sidebar_width(scale, false, settings_init.sidebar_w),
             padding.0 + content_pad,
             padding.1 + chrome,
             padding.1 + bottom_content_reserve(scale),
@@ -1877,6 +1975,10 @@ impl Display {
             nebula_tab_colors: vec![None],
             nebula_tab_bells: vec![false],
             nebula_tab_running: vec![false],
+            nebula_tab_attention: vec![false],
+            nebula_tab_shells: vec![String::new()],
+            nebula_tab_failed: vec![false],
+            nebula_tab_flashing: vec![false],
             nebula_tab_logos: vec![None],
             nebula_ai_logo_cache: Default::default(),
             nebula_shell_icon_cache: Default::default(),
@@ -1885,6 +1987,12 @@ impl Display {
             nebula_tab_drag: None,
             nebula_tabs_reorderable: true,
             nebula_sidebar_collapsed: false,
+            nebula_sidebar_w: settings_init.sidebar_w,
+            nebula_drawer_w: settings_init.drawer_w,
+            nebula_hosts_band: settings_init.hosts_band,
+            nebula_panel_resize: settings_init.panel_resize,
+            nebula_focused_cwd: None,
+            nebula_panel_drag: None,
             nebula_ssh_hosts: merge_ssh_hosts(
                 &settings_init.saved_hosts,
                 &settings_init.pinned_hosts,
@@ -1897,6 +2005,11 @@ impl Display {
                 &nebula_data_dir().join("ssh_profiles.json"),
             )
             .map(|profiles| profiles.labels())
+            .unwrap_or_default(),
+            nebula_ssh_icons: crate::ssh_profiles::SshProfiles::load(
+                &nebula_data_dir().join("ssh_profiles.json"),
+            )
+            .map(|profiles| profiles.icons())
             .unwrap_or_default(),
             nebula_tabs_section_open: true,
             nebula_hosts_section_open: true,
@@ -1916,6 +2029,7 @@ impl Display {
             nebula_powerline_enabled: settings_init.powerline,
             nebula_blur: settings_init.blur,
             nebula_keep_session: settings_init.keep_session,
+            nebula_restore_session: settings_init.restore_session,
             nebula_window_opacity: settings_init.opacity,
             nebula_background: if settings_init.follow_system_theme {
                 Some(nebula_theme.palette().term_bg)
@@ -2129,7 +2243,11 @@ impl Display {
         mut colors: Vec<Option<Rgb>>,
         mut dots: Vec<bool>,
         mut running: Vec<bool>,
+        mut attention: Vec<bool>,
+        mut failed: Vec<bool>,
+        mut flashing: Vec<bool>,
         mut logos: Vec<Option<AiLogo>>,
+        mut shells: Vec<String>,
         active: usize,
         reorderable: bool,
     ) {
@@ -2143,15 +2261,33 @@ impl Display {
         running.truncate(self.nebula_tab_labels.len());
         running.resize(self.nebula_tab_labels.len(), false);
         self.nebula_tab_running = running;
+        attention.truncate(self.nebula_tab_labels.len());
+        attention.resize(self.nebula_tab_labels.len(), false);
+        self.nebula_tab_attention = attention;
+        failed.truncate(self.nebula_tab_labels.len());
+        failed.resize(self.nebula_tab_labels.len(), false);
+        self.nebula_tab_failed = failed;
+        flashing.truncate(self.nebula_tab_labels.len());
+        flashing.resize(self.nebula_tab_labels.len(), false);
+        self.nebula_tab_flashing = flashing;
         logos.truncate(self.nebula_tab_labels.len());
         logos.resize(self.nebula_tab_labels.len(), None);
         self.nebula_tab_logos = logos;
+        shells.truncate(self.nebula_tab_labels.len());
+        shells.resize(self.nebula_tab_labels.len(), String::new());
+        self.nebula_tab_shells = shells;
         self.nebula_active_tab = active.min(self.nebula_tab_labels.len().saturating_sub(1));
         self.nebula_tabs_reorderable = reorderable;
         // A tab count change (close/open) mid-drag invalidates the grabbed slot.
         if self.nebula_tab_drag.map_or(false, |d| d.source >= self.nebula_tab_labels.len()) {
             self.nebula_tab_drag = None;
         }
+    }
+
+    /// 有标签正在放对勾闪现。闪现靠挂钟判定，没有帧驱动它就会停在对勾上
+    /// 直到下一次因为别的原因重绘——所以这段时间要让 chrome 时钟继续走。
+    pub fn any_tab_flashing(&self) -> bool {
+        self.nebula_tab_flashing.iter().any(|f| *f)
     }
 
     /// Whether any sidebar tab currently shows a running spinner. Only this
@@ -2610,6 +2746,192 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
+    /// 侧栏的**视觉**逻辑宽：拖动中读 target（每帧跟手），否则读已应用值。
+    /// chrome 布局与卡片几何用它；reflow（`handle_update` 的 padding）只认
+    /// `nebula_sidebar_w`——两者的差就是节流窗口内允许的短暂错位。
+    fn sidebar_w_visual(&self) -> f32 {
+        match self.nebula_panel_drag {
+            Some(d) if d.kind == PanelDragKind::SidebarWidth => d.target,
+            _ => self.nebula_sidebar_w,
+        }
+    }
+
+    /// 右抽屉的视觉逻辑宽（同 [`Self::sidebar_w_visual`] 的拖动语义）。
+    fn drawer_w_visual(&self) -> f32 {
+        match self.nebula_panel_drag {
+            Some(d) if d.kind == PanelDragKind::DrawerWidth => d.target,
+            _ => self.nebula_drawer_w,
+        }
+    }
+
+    /// 指针是否落在三条可拖分界线之一。热区 ±4 逻辑 px；动画进行中不给热区
+    /// ——滑动中的边缘抓不准。
+    ///
+    /// 两条**宽度**分界（侧栏右缘、抽屉左缘）要拖动会重排终端，归「拖拽调节」
+    /// 开关管；SSH HOSTS 分界只在侧栏内部分配高度，不碰网格，所以默认就能拖，
+    /// 不受开关约束（用户 08-02 裁定）。
+    pub fn panel_resize_hit(&self, x: f32, y: f32) -> Option<PanelDragKind> {
+        let scale = self.window.scale_factor as f32;
+        let grip = 4.0 * scale;
+        if self.nebula_panel_resize
+            && self.side_panel_visible()
+            && self.nebula_ui_anims.right_drawer.value() > 0.996
+        {
+            let (px, py, _, ph) = self.side_panel_layout().panel;
+            if y >= py && y <= py + ph && (x - px).abs() <= grip {
+                return Some(PanelDragKind::DrawerWidth);
+            }
+        }
+        if self.left_sidebar_visible() && self.left_sidebar_progress() > 0.996 {
+            let layout =
+                chrome::chrome_tab_layout(&self.ui_size_info(), scale, self.sidebar_model(), 1.0);
+            let (px, py, pw, ph) = layout.panel;
+            if pw > 0.0 {
+                if self.nebula_panel_resize
+                    && y >= py
+                    && y <= py + ph
+                    && (x - (px + pw)).abs() <= grip
+                {
+                    return Some(PanelDragKind::SidebarWidth);
+                }
+                // HOSTS 分界 = 停靠区标题条的顶缘。
+                let (hx, hy, hw, _) = layout.hosts_header;
+                if self.nebula_hosts_section_open
+                    && hw > 0.0
+                    && x >= hx
+                    && x <= hx + hw
+                    && (y - hy).abs() <= grip
+                {
+                    return Some(PanelDragKind::HostsBand);
+                }
+            }
+        }
+        None
+    }
+
+    /// input 层在分界线上按下时开启一场拖拽。
+    pub fn begin_panel_drag(&mut self, kind: PanelDragKind) {
+        let target = match kind {
+            PanelDragKind::SidebarWidth => self.nebula_sidebar_w,
+            PanelDragKind::DrawerWidth => self.nebula_drawer_w,
+            PanelDragKind::HostsBand => self.nebula_hosts_band.max(HOSTS_BAND_MIN),
+        };
+        let anchor = if kind == PanelDragKind::HostsBand {
+            let scale = self.window.scale_factor as f32;
+            chrome::chrome_tab_layout(&self.ui_size_info(), scale, self.sidebar_model(), 1.0)
+                .dock_content_bottom
+        } else {
+            0.0
+        };
+        self.nebula_panel_drag =
+            Some(PanelDrag { kind, target, last_apply: std::time::Instant::now(), anchor });
+    }
+
+    /// 拖动中的指针移动：换算目标值。HOSTS 分界纯 chrome 内部、即时生效；
+    /// 两个宽度分界的**视觉**几何每帧跟手，真正的 reflow 要同时满足两道闸
+    /// ——[`PANEL_DRAG_REFLOW_MS`] 的时间节流，以及位移至少跨过一个单元格
+    /// 宽度。后者才是重点：网格列数只在跨过整数列时才会变，同一列内反复
+    /// reflow 是纯浪费。返回 true = 需要重绘。
+    pub fn update_panel_drag(&mut self, x: f32, y: f32) -> bool {
+        let scale = self.window.scale_factor as f32;
+        let Some(drag) = self.nebula_panel_drag else { return false };
+        let target = match drag.kind {
+            // chrome_tab_layout：panel_x = margin(8)、panel_w = sw - 8 - 12，
+            // 右缘 = sw - 12 ⇒ sw = x + 12（都在逻辑座标系里算）。
+            PanelDragKind::SidebarWidth => {
+                let raw = x / scale + 12.0;
+                if raw < SIDEBAR_COLLAPSE_AT {
+                    // 推到左边缘 = 收起。这场拖拽就此结束（侧栏没了，分界线
+                    // 也就没了），宽度字段保持不动。
+                    self.nebula_panel_drag = None;
+                    if !self.nebula_sidebar_collapsed {
+                        self.toggle_sidebar();
+                    }
+                    self.persist_nebula_settings();
+                    return true;
+                }
+                raw.clamp(SIDEBAR_W_MIN, SIDEBAR_W_MAX)
+            },
+            PanelDragKind::DrawerWidth => {
+                let w = (self.size_info.width() - 8.0 * scale - x) / scale;
+                if w < DRAWER_COLLAPSE_AT {
+                    // 推到右边缘 = 关掉抽屉，与侧栏拖到最左同一手势。宽度
+                    // 字段不动，下次打开还是原来那么宽。不走 close_sftp_panel：
+                    // 那条路会取消正在进行的传输，而这里只是把面板收起来。
+                    self.nebula_panel_drag = None;
+                    if self.nebula_side_panel.open {
+                        self.nebula_side_panel.open = false;
+                        let size = PhysicalSize::new(
+                            self.size_info.width() as u32,
+                            self.size_info.height() as u32,
+                        );
+                        self.pending_update.set_dimensions(size);
+                    }
+                    self.persist_nebula_settings();
+                    self.pending_update.dirty = true;
+                    self.window.request_redraw();
+                    return true;
+                }
+                let cap = DRAWER_W_MAX.min(self.size_info.width() * 0.42 / scale);
+                w.clamp(DRAWER_W_MIN.min(cap), cap)
+            },
+            PanelDragKind::HostsBand => ((drag.anchor - y) / scale).max(HOSTS_BAND_MIN),
+        };
+        // 已应用值：宽度类要用它判断这次位移够不够跨一个单元格。
+        let applied = match drag.kind {
+            PanelDragKind::SidebarWidth => self.nebula_sidebar_w,
+            PanelDragKind::DrawerWidth => self.nebula_drawer_w,
+            PanelDragKind::HostsBand => 0.0,
+        };
+        let cell_w = self.size_info.cell_width().max(1.0);
+        let Some(drag) = self.nebula_panel_drag.as_mut() else { return false };
+        if (target - drag.target).abs() < 0.5 {
+            return false;
+        }
+        drag.target = target;
+        let due = drag.last_apply.elapsed() >= std::time::Duration::from_millis(PANEL_DRAG_REFLOW_MS)
+            && (target - applied).abs() * scale >= cell_w;
+        match drag.kind {
+            PanelDragKind::HostsBand => self.nebula_hosts_band = target,
+            PanelDragKind::SidebarWidth | PanelDragKind::DrawerWidth if due => {
+                drag.last_apply = std::time::Instant::now();
+                self.apply_panel_drag_target();
+            },
+            _ => {},
+        }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+        true
+    }
+
+    /// 把 target 同步进已应用字段，宽度类走 toggle_sidebar 同款 reflow 触发。
+    fn apply_panel_drag_target(&mut self) {
+        let Some(drag) = self.nebula_panel_drag else { return };
+        match drag.kind {
+            PanelDragKind::SidebarWidth => self.nebula_sidebar_w = drag.target,
+            PanelDragKind::DrawerWidth => self.nebula_drawer_w = drag.target,
+            PanelDragKind::HostsBand => {
+                self.nebula_hosts_band = drag.target;
+                return;
+            },
+        }
+        let size = PhysicalSize::new(self.size_info.width() as u32, self.size_info.height() as u32);
+        self.pending_update.set_dimensions(size);
+    }
+
+    /// 松开：最终应用 + 持久化。返回 true = 确有一场拖拽在收尾。
+    pub fn end_panel_drag(&mut self) -> bool {
+        if self.nebula_panel_drag.is_none() {
+            return false;
+        }
+        self.apply_panel_drag_target();
+        self.nebula_panel_drag = None;
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+        true
+    }
+
     /// Snapshot of the state the settings render reads, owning the wallpaper
     /// path so `draw_chrome` can still borrow `&mut renderer` afterwards.
     fn settings_view(&self) -> settings::SettingsView {
@@ -2661,11 +2983,13 @@ impl Display {
             powerline: self.nebula_powerline_enabled,
             blur: self.nebula_blur,
             keep_session: self.nebula_keep_session,
+            restore_session: self.nebula_restore_session,
             opacity: self.nebula_window_opacity,
             dragging_opacity: self.nebula_settings_opacity_drag.map(|(target, _, _)| target),
             cursor_shape: self.nebula_cursor_shape,
             cursor_blink: self.nebula_cursor_blink,
             copy_on_select: self.nebula_copy_on_select,
+            panel_resize: self.nebula_panel_resize,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
             preview_bg: self.preview_terminal_bg(),
@@ -3165,6 +3489,14 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
+    /// 高级→会话: 启动时是否回放上次的标签。写进设置文件即可——真正读它的
+    /// 是下次启动的 `create_initial_window`。
+    pub fn toggle_restore_session(&mut self) {
+        self.nebula_restore_session = !self.nebula_restore_session;
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+    }
+
     pub fn begin_settings_opacity_drag(&mut self, target: SettingsOpacityTarget, pointer_x: f32) {
         let slider = settings::opacity_slider_rect(
             &self.ui_size_info(),
@@ -3284,8 +3616,7 @@ impl Display {
         self.nebula_sync_inputs[2].clear();
         self.nebula_sync_inputs[3].clear();
         self.nebula_sync_auto_pull = cfg.auto_pull;
-        self.nebula_sync_secret_set =
-            [crate::sync::has_password(), crate::sync::has_passphrase()];
+        self.nebula_sync_secret_set = [crate::sync::has_password(), crate::sync::has_passphrase()];
         self.nebula_sync_focus = None;
     }
 
@@ -3413,8 +3744,7 @@ impl Display {
         self.nebula_sync_busy = false;
         self.nebula_sync_status = Some((message.to_owned(), error));
         // 拉取可能改写了设置文件的凭据外字段；存在性也可能被首存翻转。
-        self.nebula_sync_secret_set =
-            [crate::sync::has_password(), crate::sync::has_passphrase()];
+        self.nebula_sync_secret_set = [crate::sync::has_password(), crate::sync::has_passphrase()];
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -3468,6 +3798,27 @@ impl Display {
             self.nebula_confirm = Some(NebulaConfirm::EnableBackgroundImageCoverChrome);
         }
         self.pending_update.dirty = true;
+    }
+
+    /// 设置·交互「拖拽调节侧栏」开关。关→开要过一次确认框（宽度拖动会
+    /// 实时重排终端，用户裁定必须明确告知）；开→关直接生效。
+    pub fn request_toggle_panel_resize(&mut self) {
+        if self.nebula_panel_resize {
+            self.nebula_panel_resize = false;
+            self.persist_nebula_settings();
+        } else {
+            self.nebula_confirm = Some(NebulaConfirm::EnablePanelResize);
+        }
+        self.pending_update.dirty = true;
+    }
+
+    /// 确认框「是」：真正开启拖拽调节。
+    pub fn confirm_panel_resize(&mut self) {
+        self.nebula_confirm = None;
+        self.nebula_panel_resize = true;
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     pub fn confirm_background_image_cover_chrome(&mut self) {
@@ -3542,8 +3893,70 @@ impl Display {
     /// reloads are reflected.
     pub fn toggle_command_palette(&mut self, profiles: &[String]) {
         self.nebula_palette.set_profiles(profiles);
+        // 打开这一刻取一次窗口状态：「工作目录」组作用在哪个目录上、两个
+        // 开关命令各自的勾选态。取样而不是每帧回读，见 `PaletteContext`。
+        self.nebula_palette.set_context(command_palette::PaletteContext {
+            cwd: self.nebula_focused_cwd.clone(),
+            sidebar: !self.nebula_sidebar_collapsed,
+            panel_resize: self.nebula_panel_resize,
+            new_tab_inherits_cwd: self.startup_directory().is_none(),
+        });
         self.nebula_palette.toggle();
         self.pending_update.dirty = true;
+    }
+
+    /// 在系统文件管理器里打开聚焦 pane 的工作目录。目录未知时什么也不做
+    /// ——命令面板里那条命令此时根本不出现，这里只是兜底。
+    pub fn reveal_focused_cwd(&mut self) {
+        let Some(path) = self.nebula_focused_cwd.clone() else { return };
+        #[cfg(windows)]
+        let _ = std::process::Command::new("explorer.exe").arg(&path).spawn();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(&path).spawn();
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+        self.pending_update.dirty = true;
+    }
+
+    /// 聚焦 pane 的工作目录，给「复制路径」用（剪贴板在输入层，不在这里）。
+    pub fn focused_cwd_string(&self) -> Option<String> {
+        self.nebula_focused_cwd.as_ref().map(|path| path.display().to_string())
+    }
+
+    /// 默认 shell 的短标（settings 覆盖优先），给 `TabLaunch::Default` 的行用。
+    pub fn default_shell_tag(&self) -> String {
+        let id =
+            self.nebula_shell_id.as_deref().unwrap_or_else(|| self.nebula_shell.settings_value());
+        crate::shell_detect::shell_short_tag(id)
+    }
+
+    /// 「恢复 AI 会话」面板：现扫 claude / codex 的本地会话档（最近 30 条，
+    /// 只读文件头取标题，见 `ai_sessions` 模块），确认后把 resume 命令行敲
+    /// 进当前聚焦的终端。
+    pub fn open_ai_session_palette(&mut self) {
+        let rows = crate::ai_sessions::scan(30)
+            .into_iter()
+            .map(|session| {
+                // 右列 = 「位置 · 相对时间」。来源不再挤进这段文字——行首
+                // 品牌 logo + 右缘 chip 已经把 claude/codex 标满了（纯文字
+                // 的来源在长标题下会被挤没，用户 08-02 截图的现场）。
+                let time = crate::ai_sessions::relative_label(session.modified);
+                let place = session.place_label();
+                let hint = if place.is_empty() { time } else { format!("{place} · {time}") };
+                let search =
+                    format!("{} {} {}", session.title, session.project, session.source.label());
+                command_palette::AiSessionRow {
+                    label: session.title.clone(),
+                    hint,
+                    search,
+                    command: session.resume_command(),
+                    source: session.source,
+                }
+            })
+            .collect();
+        self.nebula_palette.open_ai_sessions(rows);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     /// Open the new-tab dropdown: detected shells (installed-shell order) plus
@@ -3552,10 +3965,8 @@ impl Display {
     pub fn open_shell_menu(&mut self, profiles: &[String]) {
         let shells =
             self.nebula_detected_shells.get_or_insert_with(crate::shell_detect::detect_shells);
-        let default_shell = self
-            .nebula_shell_id
-            .as_deref()
-            .unwrap_or_else(|| self.nebula_shell.settings_value());
+        let default_shell =
+            self.nebula_shell_id.as_deref().unwrap_or_else(|| self.nebula_shell.settings_value());
         self.nebula_palette.set_shell_menu(shells, profiles, default_shell);
         self.nebula_palette.open_profiles();
         self.pending_update.dirty = true;
@@ -3873,6 +4284,7 @@ impl Display {
             reserve,
             scale,
             self.nebula_ui_anims.right_drawer.value(),
+            self.drawer_w_visual(),
         )
     }
 
@@ -4152,7 +4564,7 @@ impl Display {
         // panel's right edge (`sw - 12` logical, see `chrome_tab_layout`);
         // resting collapsed: the chrome margin.
         let t = self.left_sidebar_progress().clamp(0.0, 1.0);
-        let sw = (SIDEBAR_W_LOGICAL * scale).round();
+        let sw = (self.sidebar_w_visual() * scale).round();
         let x = s(8.0) + t * (sw - s(4.0) - s(8.0));
         // Top edge: the top bar's bottom (margin 8 + bar height 40, matching
         // `draw_chrome`), plus a seam so the card visibly floats below it.
@@ -4160,7 +4572,8 @@ impl Display {
         // Right edge follows the file/git drawer the same way: as it slides
         // in, the card cedes its width (drawer width + margin) plus the seam.
         let dt = self.nebula_ui_anims.right_drawer.value().clamp(0.0, 1.0);
-        let drawer = dt * (side_panel::PANEL_W_LOGICAL * scale + s(8.0));
+        let drawer =
+            dt * ((self.drawer_w_visual() * scale).min(self.size_info.width() * 0.42) + s(8.0));
         let w = (self.size_info.width() - drawer - seam - x).max(0.0);
         let h = (self.size_info.height() - seam - y).max(0.0);
         (x, y, w, h)
@@ -4180,6 +4593,8 @@ impl Display {
             hosts_open: self.nebula_hosts_section_open,
             tabs_scroll: self.nebula_tabs_scroll,
             hosts_scroll: self.nebula_hosts_scroll,
+            sidebar_w: self.sidebar_w_visual(),
+            hosts_band: self.nebula_hosts_band,
         }
     }
 
@@ -4384,6 +4799,7 @@ impl Display {
             powerline: self.nebula_powerline_enabled,
             blur: self.nebula_blur,
             keep_session: self.nebula_keep_session,
+            restore_session: self.nebula_restore_session,
             opacity: self.nebula_window_opacity,
             background: self.nebula_background,
             background_image: self.nebula_background_image.clone(),
@@ -4402,6 +4818,10 @@ impl Display {
             pinned_hosts: self.nebula_pinned_hosts.clone(),
             saved_hosts: self.nebula_saved_hosts.clone(),
             hidden_hosts: self.nebula_hidden_hosts.clone(),
+            panel_resize: self.nebula_panel_resize,
+            sidebar_w: self.nebula_sidebar_w,
+            drawer_w: self.nebula_drawer_w,
+            hosts_band: self.nebula_hosts_band,
             keybinds: self.nebula_keybinds.clone(),
             quick_terminal_hotkey: self.nebula_quick_terminal_hotkey.clone(),
         });
@@ -4470,6 +4890,19 @@ impl Display {
         self.nebula_powerline_enabled = settings.powerline;
         self.nebula_blur = settings.blur;
         self.nebula_keep_session = settings.keep_session;
+        self.nebula_restore_session = settings.restore_session;
+        self.nebula_panel_resize = settings.panel_resize;
+        // 手改文件把宽度调了的话，和拖拽一样要触发一次 reflow。
+        let panel_dims_changed = (self.nebula_sidebar_w - settings.sidebar_w).abs() > 0.5
+            || (self.nebula_drawer_w - settings.drawer_w).abs() > 0.5;
+        self.nebula_sidebar_w = settings.sidebar_w;
+        self.nebula_drawer_w = settings.drawer_w;
+        self.nebula_hosts_band = settings.hosts_band;
+        if panel_dims_changed {
+            let size =
+                PhysicalSize::new(self.size_info.width() as u32, self.size_info.height() as u32);
+            self.pending_update.set_dimensions(size);
+        }
         if self.nebula_cjk_bold_regular != settings.cjk_bold_regular {
             // 字形层策略变了：已缓存的 bold CJK 位图作废，清缓存重栅格。
             self.nebula_cjk_bold_regular = settings.cjk_bold_regular;
@@ -4768,12 +5201,12 @@ impl Display {
 
         let scale = self.window.scale_factor as f32;
         let content_pad = content_pad_x(scale);
-        let sidebar = sidebar_width(scale, self.nebula_sidebar_collapsed);
+        let sidebar = sidebar_width(scale, self.nebula_sidebar_collapsed, self.nebula_sidebar_w);
         // The file/git drawer occupies real layout space: the grid cedes its
         // width (plus the window margin) on the right, exactly like the left
         // sidebar reserve — it does not float over the terminal.
         let drawer = if self.nebula_side_panel.open {
-            (side_panel::PANEL_W_LOGICAL * scale + 8.0 * scale).round()
+            ((self.nebula_drawer_w * scale).min(width * 0.42) + 8.0 * scale).round()
         } else {
             0.0
         };
@@ -5771,6 +6204,11 @@ impl Display {
                 "背景图会延伸到标题栏、窗口按钮、Tab 与 SSH 侧栏下方，低对比度图片可能影响操作可见性；界面仍会保留最低不透明度保护。".to_owned(),
                 false,
             ),
+            NebulaConfirm::EnablePanelResize => (
+                "开启侧栏拖拽调节？".to_owned(),
+                "拖动左侧栏或右侧抽屉的宽度时，终端内容会跟随实时重排；在低性能设备或超大回滚缓冲下可能出现掉帧。拖动已按帧率与列宽双重节流，把左侧栏一路拖到最左即可收起。宽度会保存，此功能可随时关闭。".to_owned(),
+                false,
+            ),
             NebulaConfirm::InstallRequiredFont { .. } => (
                 "建议安装终端字体".to_owned(),
                 "未检测到 Maple Mono Nerd Font；缺少图标时可安装后重启 Nebula。".to_owned(),
@@ -5926,13 +6364,7 @@ impl Display {
 
         // Cancel: quiet ghost button (hairline + faint fill).
         let control_r = s(ui::tokens::radius::CONTROL);
-        ui::surface::push_stroke(
-            &mut quads,
-            cancel_rect,
-            control_r,
-            scale,
-            sk.hairline,
-        );
+        ui::surface::push_stroke(&mut quads, cancel_rect, control_r, scale, sk.hairline);
         quads.push(UiQuad::solid(cancel_x, btn_y, cancel_w, btn_h, control_r, sk.panel));
         quads.push(UiQuad::solid(cancel_x, btn_y, cancel_w, btn_h, control_r, sk.surface));
         // Primary: the single loud element on the card.
@@ -6060,11 +6492,8 @@ impl Display {
         let command = truncate_tab_label(&command, cmd_budget.min(96));
         let explain_budget =
             cmd_budget.saturating_sub(text_cols(&command)).saturating_sub(3).min(60);
-        let explain = if text_cols(&explain) + 8 > explain_budget {
-            String::new()
-        } else {
-            explain
-        };
+        let explain =
+            if text_cols(&explain) + 8 > explain_budget { String::new() } else { explain };
 
         let mut content_cols = 2 + text_cols(&command);
         if !explain.is_empty() {
@@ -6289,9 +6718,7 @@ impl Display {
 
     /// 聚焦 pane 是否正被连接卡片接管（遮罩已经在画了）。
     pub fn ssh_connect_active(&self) -> bool {
-        self.nebula_ssh_connect
-            .get(&self.nebula_focused_pane)
-            .is_some_and(|state| state.visible())
+        self.nebula_ssh_connect.get(&self.nebula_focused_pane).is_some_and(|state| state.visible())
     }
 
     /// 遮罩盖住整个 pane，所以卡片在场时 pane 内的一切点击都归卡片，不能
@@ -6448,14 +6875,7 @@ impl Display {
             mix(sk.ink_strong.b, hud_rgb.b),
         );
         let glyph_cache = &mut self.glyph_cache;
-        self.renderer.draw_chrome_text(
-            &size,
-            box_x + pad,
-            box_y + pad,
-            ink,
-            &text,
-            glyph_cache,
-        );
+        self.renderer.draw_chrome_text(&size, box_x + pad, box_y + pad, ink, &text, glyph_cache);
 
         // Keep the frame loop alive so the HUD animates out.
         self.window.request_redraw();
@@ -7299,11 +7719,8 @@ impl Display {
 
         // The destination under the mouse (first highlighted hint with a URI)
         // plus that hint's start cell as the anchor.
-        let Some((uri, hint_start)) = self
-            .highlighted_hint
-            .iter()
-            .chain(&self.vi_highlighted_hint)
-            .find_map(|hint| {
+        let Some((uri, hint_start)) =
+            self.highlighted_hint.iter().chain(&self.vi_highlighted_hint).find_map(|hint| {
                 hint.hyperlink().map(|h| (h.uri().to_owned(), *hint.bounds().start()))
             })
         else {
@@ -7732,6 +8149,7 @@ fn window_size(
     cell_width: f32,
     cell_height: f32,
     scale_factor: f32,
+    sidebar_w: f32,
 ) -> PhysicalSize<u32> {
     let padding = config.window.padding(scale_factor);
     let chrome = chrome_reserve(scale_factor);
@@ -7741,7 +8159,9 @@ fn window_size(
 
     // Left absorbs the sidebar (expanded by default), right is the plain
     // content margin, matching the asymmetric grid the sidebar produces.
-    let pad_left = padding.0 + content_pad_x(scale_factor) + sidebar_width(scale_factor, false);
+    // 侧栏宽被拖宽过的话窗口相应更宽——启动公式仍是「字号 × 116 × 30」，
+    // 列数不因侧栏变化而缩水。
+    let pad_left = padding.0 + content_pad_x(scale_factor) + sidebar_width(scale_factor, false, sidebar_w);
     let pad_right = padding.0 + content_pad_x(scale_factor);
     let width = (grid_width + pad_left + pad_right).floor();
     let pad_top = padding.1 + chrome;

@@ -35,10 +35,17 @@ impl Display {
             destination: String::new(),
             port: String::new(),
             label: String::new(),
+            icon: String::new(),
+            icon_picker: false,
+            icon_filter: String::new(),
+            icon_filter_cursor: Default::default(),
+            icon_scroll: 0,
             password: String::new(),
             save_password: true,
             show_password: false,
-            auth: crate::ssh_profiles::SshAuthMode::Auto,
+            // 默认密码：第一次添加主机的人手里通常只有一串密码；「自动」要
+            // 先有配好的私钥才走得通，拿它当默认等于让新手先撞一次失败。
+            auth: crate::ssh_profiles::SshAuthMode::Password,
             private_keys: Vec::new(),
             field: SshEditorField::Destination,
             focus: crate::ux::FocusIndex::default(),
@@ -73,6 +80,11 @@ impl Display {
             destination: address,
             port,
             label: profile.label.clone().unwrap_or_default(),
+            icon: profile.icon.clone().unwrap_or_default(),
+            icon_picker: false,
+            icon_filter: String::new(),
+            icon_filter_cursor: Default::default(),
+            icon_scroll: 0,
             // Never pull a stored secret back into a text field. Leaving this
             // blank preserves the existing credential when the address stays
             // unchanged; typing a new value explicitly replaces it.
@@ -116,12 +128,136 @@ impl Display {
         }
     }
 
+    /// 图标选择器是否正开着。开着的时候它**独占键盘**：打字进搜索框、Esc
+    /// 只关它、回车挑第一项——一个浮层开着的时候，键盘属于最上面那一层。
+    pub fn ssh_editor_icon_picker_open(&self) -> bool {
+        self.nebula_ssh_editor.as_ref().is_some_and(|editor| editor.icon_picker)
+    }
+
+    pub fn ssh_editor_close_icon_picker(&mut self) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            editor.icon_picker = false;
+            editor.icon_filter.clear();
+            editor.icon_filter_cursor = Default::default();
+            editor.icon_scroll = 0;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    /// 搜索词改一个字，列表就得回到顶：筛完之后的第 5 行和筛之前的第 5 行
+    /// 毫无关系，停在原处等于随机翻了一页。
+    ///
+    /// 编辑走光标模型：插入落在**光标处**、替换选区，Backspace 先删选区。
+    /// 它是一个正经输入框，不是只能尾部追加的过滤串。
+    pub fn ssh_editor_icon_filter_edit(&mut self, insert: Option<&str>) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            match insert {
+                Some(text) => editor.icon_filter_cursor.insert(&mut editor.icon_filter, text),
+                None => editor.icon_filter_cursor.backspace(&mut editor.icon_filter),
+            }
+            editor.icon_scroll = 0;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn ssh_editor_icon_filter_delete_forward(&mut self) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            editor.icon_filter_cursor.delete_forward(&mut editor.icon_filter);
+            editor.icon_scroll = 0;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    /// 搜索框的光标移动 / Home / End / 全选 / 取选中——全部转发组件层。
+    /// 它和表单字段的差别只有"值存在哪"，行为必须是同一套。
+    pub fn ssh_editor_icon_filter_move(&mut self, forward: bool, extend: bool) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            let text = editor.icon_filter.clone();
+            editor.icon_filter_cursor.step(&text, forward, extend);
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn ssh_editor_icon_filter_jump(&mut self, to_end: bool, extend: bool) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            let text = editor.icon_filter.clone();
+            editor.icon_filter_cursor.jump(&text, to_end, extend);
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn ssh_editor_icon_filter_select_all(&mut self) {
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            let text = editor.icon_filter.clone();
+            editor.icon_filter_cursor.select_all(&text);
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn ssh_editor_icon_filter_selected_text(&self) -> Option<String> {
+        let editor = self.nebula_ssh_editor.as_ref()?;
+        editor.icon_filter_cursor.selected_text(&editor.icon_filter)
+    }
+
+    /// 回车挑当前列表的第一项。搜到只剩一个的时候，让人还得再去点一下鼠标
+    /// 是没道理的。
+    pub fn ssh_editor_icon_pick_first(&mut self) {
+        let first = self
+            .nebula_ssh_editor_rects
+            .as_ref()
+            .and_then(|rects| rects.icon_rows.first().map(|(pick, _)| *pick));
+        if let (Some(pick), Some(editor)) = (first, self.nebula_ssh_editor.as_mut()) {
+            editor.icon = match pick {
+                Some(index) => super::ui::os_icons::CATALOG[index].id.to_owned(),
+                None => String::new(),
+            };
+        }
+        self.ssh_editor_close_icon_picker();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn ssh_editor_icon_scroll(&mut self, lines: i32) {
+        let max = self.nebula_ssh_editor_rects.as_ref().map_or(0, |rects| rects.icon_max_scroll);
+        if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+            let next = (editor.icon_scroll as i32 + lines).clamp(0, max as i32) as usize;
+            if next != editor.icon_scroll {
+                editor.icon_scroll = next;
+                self.pending_update.dirty = true;
+                self.window.request_redraw();
+            }
+        }
+    }
+
     pub fn ssh_editor_hit(&self, x: f32, y: f32) -> SshEditorHit {
         let Some(rects) = self.nebula_ssh_editor_rects.as_ref() else {
             return SshEditorHit::None;
         };
         let hit = |r: (f32, f32, f32, f32)| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
-        if hit(rects.close) {
+        // 弹层最先判：它画在最上面，命中顺序就得跟绘制顺序反过来，否则被它
+        // 盖住的字段会"隔着浮层"被点到。落在浮层里但不在任何一行上的点由
+        // `IconPopupChrome` 吞掉——盖住的地方不再属于下面那一层。
+        if hit(rects.icon_popup) {
+            if hit(rects.icon_search) {
+                return SshEditorHit::IconSearch;
+            }
+            return rects
+                .icon_rows
+                .iter()
+                .find(|(_, rect)| hit(*rect))
+                .map_or(SshEditorHit::IconPopupChrome, |(pick, _)| {
+                    SshEditorHit::IconOption(*pick)
+                });
+        }
+        if hit(rects.avatar) {
+            SshEditorHit::Avatar
+        } else if hit(rects.close) {
             SshEditorHit::Close
         } else if hit(rects.destination) {
             SshEditorHit::Destination
@@ -196,7 +332,7 @@ impl Display {
         let Some(rects) = self.nebula_ssh_editor_rects.as_ref() else { return };
         let Some((field, rect)) = rects.field_of(hit) else { return };
         let origin = rects.metrics.origin(field);
-        let cell_w = rects.metrics.cell_w;
+        let cell_w = rects.metrics.cell_w_of(field);
         let slot = match field {
             SshEditorField::Destination => 0,
             SshEditorField::Port => 1,
@@ -210,21 +346,33 @@ impl Display {
         let text = value.clone();
         cursor.place(&text, index);
         let _ = rect;
-        self.nebula_ssh_editor_drag = Some(field);
+        self.nebula_ssh_editor_drag = Some(ssh_ui::SshEditorDrag::Field(field));
     }
 
     /// 拖动中：把选区从按下的锚点拉到当前位置。返回是否真的在拖，让调用方
     /// 决定要不要重绘。
     pub fn ssh_editor_drag_to(&mut self, x: f32) -> bool {
-        let Some(field) = self.nebula_ssh_editor_drag else { return false };
+        let Some(drag) = self.nebula_ssh_editor_drag else { return false };
         let Some(rects) = self.nebula_ssh_editor_rects.as_ref() else { return false };
-        let origin = rects.metrics.origin(field);
-        let cell_w = rects.metrics.cell_w;
-        let Some(editor) = self.nebula_ssh_editor.as_mut() else { return false };
-        let index = editor.index_at(field, x - origin, cell_w);
-        let (value, cursor) = editor.field_mut(field);
-        let text = value.clone();
-        cursor.extend_to(&text, index);
+        match drag {
+            ssh_ui::SshEditorDrag::Field(field) => {
+                let origin = rects.metrics.origin(field);
+                let cell_w = rects.metrics.cell_w_of(field);
+                let Some(editor) = self.nebula_ssh_editor.as_mut() else { return false };
+                let index = editor.index_at(field, x - origin, cell_w);
+                let (value, cursor) = editor.field_mut(field);
+                let text = value.clone();
+                cursor.extend_to(&text, index);
+            },
+            ssh_ui::SshEditorDrag::IconSearch => {
+                let (text_x, cell_w) = (rects.icon_search_text_x, rects.icon_search_cell_w);
+                let Some(editor) = self.nebula_ssh_editor.as_mut() else { return false };
+                let index =
+                    super::ui::text_field::index_at(&editor.icon_filter, x - text_x, cell_w);
+                let text = editor.icon_filter.clone();
+                editor.icon_filter_cursor.extend_to(&text, index);
+            },
+        }
         true
     }
 
@@ -248,10 +396,8 @@ impl Display {
                 }
                 // 位数上限在插入**前**算：先插再 `truncate` 会砍掉尾部，而
                 // 用户刚打的那个字符正在光标处——被砍的看起来是别人的字符。
-                let selected = editor
-                    .port_cursor
-                    .range(&editor.port)
-                    .map_or(0, |(start, end)| end - start);
+                let selected =
+                    editor.port_cursor.range(&editor.port).map_or(0, |(start, end)| end - start);
                 let room = 5usize.saturating_sub(editor.port.chars().count() - selected);
                 if room == 0 {
                     return;
@@ -438,7 +584,25 @@ impl Display {
     }
 
     pub fn ssh_editor_click(&mut self, x: f32, y: f32) -> bool {
-        match self.ssh_editor_hit(x, y) {
+        let hit = self.ssh_editor_hit(x, y);
+        // 列表开着的时候，点在它以外的任何地方都只做一件事：关掉它。这一下
+        // **不**穿透到底下的控件——用户的意图是"收起这个列表"，顺手把光标
+        // 落进某个输入框、甚至切了认证方式，都是他没要的第二个动作。
+        if self.nebula_ssh_editor.as_ref().is_some_and(|editor| editor.icon_picker)
+            && !matches!(
+                hit,
+                SshEditorHit::IconOption(_)
+                    | SshEditorHit::IconSearch
+                    | SshEditorHit::IconPopupChrome
+                    | SshEditorHit::Avatar
+            )
+        {
+            self.ssh_editor_close_icon_picker();
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+            return true;
+        }
+        match hit {
             // 点哪个框就聚焦哪个框，并把光标放到点中的字符缝隙上，同时开一段
             // 拖选。焦点序号必须和 `ssh_editor_next_field` 的顺序一致，否则点
             // 完再按 Tab 会跳到毫不相干的地方。
@@ -449,6 +613,48 @@ impl Display {
             SshEditorHit::PasswordToggle => {
                 if let Some(editor) = self.nebula_ssh_editor.as_mut() {
                     editor.show_password = !editor.show_password;
+                }
+            },
+            SshEditorHit::Avatar => {
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    editor.icon_picker = !editor.icon_picker;
+                    // 每次打开都从干净的状态开始：上次搜过的词留在框里，下次
+                    // 打开只剩一两项可选，人会以为图标丢了。
+                    editor.icon_filter.clear();
+                    editor.icon_filter_cursor = Default::default();
+                    editor.icon_scroll = 0;
+                    if editor.icon_picker {
+                        // 弹层一开搜索框即聚焦：光标此刻必须是亮的。
+                        super::ui::caret::note_activity();
+                    }
+                }
+            },
+            SshEditorHit::IconOption(pick) => {
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    editor.icon = match pick {
+                        Some(index) => super::ui::os_icons::CATALOG[index].id.to_owned(),
+                        // 「自动识别」存空串：配置里只写用户明确挑过的形状。
+                        None => String::new(),
+                    };
+                    // 图标不参与连接，所以**不**清测试结果——刚测通的那条绿字
+                    // 依然对这份草稿有效，换个形状不该把它抹掉。
+                    editor.icon_picker = false;
+                    editor.icon_filter.clear();
+                    editor.icon_scroll = 0;
+                }
+            },
+            // 浮层自己的空白：吞掉，什么都不做。
+            SshEditorHit::IconPopupChrome => {},
+            // 搜索框：点击定位光标并开一段拖选——正经输入框的第一课。
+            SshEditorHit::IconSearch => {
+                let Some(rects) = self.nebula_ssh_editor_rects.as_ref() else { return true };
+                let (text_x, cell_w) = (rects.icon_search_text_x, rects.icon_search_cell_w);
+                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
+                    let index =
+                        super::ui::text_field::index_at(&editor.icon_filter, x - text_x, cell_w);
+                    let text = editor.icon_filter.clone();
+                    editor.icon_filter_cursor.place(&text, index);
+                    self.nebula_ssh_editor_drag = Some(ssh_ui::SshEditorDrag::IconSearch);
                 }
             },
             SshEditorHit::Auth(mode) => {
@@ -584,13 +790,25 @@ impl Display {
                 profiles.rename(original, &destination);
             }
         }
+        // 标签留空就发一个自增的默认名（「主机 6」）而不是存 None。
+        //
+        // 侧栏的主机行是双行的：第一行名字、第二行地址。没有名字那一行就得
+        // 拿地址顶上，于是同一行里出现两遍同样的字符串——比留空更糟。给个
+        // 编号至少让它可读、可改、可搜。
+        //
+        // 编号取现有默认标签的最大值 +1（见 `next_default_label`），所以删掉
+        // 中间几台再新建也不会撞名。
+        let label = match editor.label.trim() {
+            "" => profiles.next_default_label(self.ui_language().pick("主机", "Host")),
+            named => named.to_owned(),
+        };
         profiles.upsert(crate::ssh_profiles::SshProfileAuth {
             destination: destination.clone(),
             auth: editor.auth,
             private_keys: editor.private_keys.clone(),
-            // 空标签存成 None 而不是空串：两者语义相同，但 None 会被跳过序列化，
-            // 于是没起名字的主机在配置文件里干干净净。
-            label: Some(editor.label.trim().to_owned()).filter(|label| !label.is_empty()),
+            label: Some(label),
+            // 空串 = 自动识别，不落盘；配置里只存用户明确选过的形状。
+            icon: (!editor.icon.is_empty()).then(|| editor.icon.clone()),
         });
         if let Err(err) = profiles.save(&profile_path) {
             editor.error = Some(format!("保存 SSH Profile 失败: {err}"));
@@ -602,6 +820,7 @@ impl Display {
         // 只在存盘成功后才刷新缓存：写失败时侧栏应当继续显示旧名字，而不是
         // 显示一个磁盘上并不存在的标签。
         self.nebula_ssh_labels = profiles.labels();
+        self.nebula_ssh_icons = profiles.icons();
         if ssh_ui::auth_sections(editor.auth).0
             && editor.save_password
             && !editor.password.is_empty()

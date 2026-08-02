@@ -514,9 +514,8 @@ mod tests {
 
     #[test]
     fn grid_bottom_uses_independent_bottom_reserve() {
-        let size = SizeInfo::new_fully_asymmetric(
-            1000.0, 1000.0, 10.0, 20.0, 260.0, 20.0, 64.0, 16.0,
-        );
+        let size =
+            SizeInfo::new_fully_asymmetric(1000.0, 1000.0, 10.0, 20.0, 260.0, 20.0, 64.0, 16.0);
         assert_eq!(size.screen_lines(), 46);
         assert_eq!(grid_bottom(&size, 1000.0), 16.0);
     }

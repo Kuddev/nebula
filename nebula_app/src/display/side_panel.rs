@@ -749,13 +749,15 @@ pub fn panel_layout(
     _bottom: f32,
     scale: f32,
     slide: f32,
+    panel_w: f32,
 ) -> PanelLayout {
     let s = |v: f32| v * scale;
     // Same margin / bar height / breathing gap as `chrome_tab_layout`.
     let margin = s(8.0);
     let bar_h = s(40.0);
     let gap = s(12.0);
-    let w = s(PANEL_W_LOGICAL).min(win_w * 0.42);
+    // `panel_w` 是（可能被拖拽调过的）逻辑宽；[`PANEL_W_LOGICAL`] 只是默认值。
+    let w = s(panel_w).min(win_w * 0.42);
     // Motion Runtime already provides the physical response. Applying another
     // curve here would double-ease the drawer and make its ending feel sticky.
     let eased = slide.clamp(0.0, 1.0);
@@ -1863,7 +1865,7 @@ mod tests {
 
     #[test]
     fn hit_test_maps_header_and_rows() {
-        let l = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0);
+        let l = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0, PANEL_W_LOGICAL);
         let (px, py, pw, _) = l.panel;
         assert_eq!(panel_hit(&l, px - 1.0, py + 5.0), PanelHit::None);
         assert_eq!(panel_hit(&l, px + 5.0, py + 5.0), PanelHit::ViewFiles);
@@ -1898,7 +1900,7 @@ mod tests {
 
     #[test]
     fn files_summary_actions_have_distinct_exact_hit_targets() {
-        let layout = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0);
+        let layout = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0, PANEL_W_LOGICAL);
         let actions: Vec<_> = panel_action_rects(&layout, true, true).collect();
         let open = actions
             .iter()

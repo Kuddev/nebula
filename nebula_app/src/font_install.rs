@@ -63,9 +63,9 @@ pub fn store_imported_font(source: &Path) -> Result<StoredFont, String> {
 }
 
 fn supported_font_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc"))
+    path.extension().and_then(|value| value.to_str()).is_some_and(|value| {
+        matches!(value.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")
+    })
 }
 
 fn packaged_font_directory(executable: &Path) -> PathBuf {

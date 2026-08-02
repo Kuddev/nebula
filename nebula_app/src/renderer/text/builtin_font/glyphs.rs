@@ -11,12 +11,16 @@ use crossfont::{BitmapBuffer, Metrics, RasterizedGlyph};
 use crate::config::ui_config::Delta;
 
 use super::{
-    COLOR_FILL, COLOR_FILL_ALPHA_STEP_1, COLOR_FILL_ALPHA_STEP_2, COLOR_FILL_ALPHA_STEP_3,
-    Canvas, Pixel, POWERLINE_ARROW_LTR, POWERLINE_ARROW_RTL, POWERLINE_ROUND_LTR,
-    POWERLINE_TRIANGLE_LTR, POWERLINE_TRIANGLE_RTL, calculate_stroke_size, line_equation,
+    COLOR_FILL, COLOR_FILL_ALPHA_STEP_1, COLOR_FILL_ALPHA_STEP_2, COLOR_FILL_ALPHA_STEP_3, Canvas,
+    POWERLINE_ARROW_LTR, POWERLINE_ARROW_RTL, POWERLINE_ROUND_LTR, POWERLINE_TRIANGLE_LTR,
+    POWERLINE_TRIANGLE_RTL, Pixel, calculate_stroke_size, line_equation,
 };
 
-pub(super) fn box_drawing(character: char, metrics: &Metrics, offset: &Delta<i8>) -> RasterizedGlyph {
+pub(super) fn box_drawing(
+    character: char,
+    metrics: &Metrics,
+    offset: &Delta<i8>,
+) -> RasterizedGlyph {
     // Ensure that width and height is at least one.
     let height = (metrics.line_height as i32 + offset.y as i32).max(1) as usize;
     let width = (metrics.average_advance as i32 + offset.x as i32).max(1) as usize;

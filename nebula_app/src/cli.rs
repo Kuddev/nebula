@@ -4,9 +4,9 @@ use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use nebula_config::SerdeReplace;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum, ValueHint};
 use log::{LevelFilter, error};
+use nebula_config::SerdeReplace;
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
@@ -653,11 +653,9 @@ mod tests {
     fn completions() {
         let mut clap = Options::command();
 
-        for (shell, file) in &[
-            (Shell::Bash, "nebula.bash"),
-            (Shell::Fish, "nebula.fish"),
-            (Shell::Zsh, "_nebula"),
-        ] {
+        for (shell, file) in
+            &[(Shell::Bash, "nebula.bash"), (Shell::Fish, "nebula.fish"), (Shell::Zsh, "_nebula")]
+        {
             let mut generated = Vec::new();
             clap_complete::generate(*shell, &mut clap, "nebula", &mut generated);
             let generated = String::from_utf8_lossy(&generated);

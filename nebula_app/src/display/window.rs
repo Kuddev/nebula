@@ -764,7 +764,8 @@ fn apply_windows_backdrop(window: &WinitWindow, enabled: bool) {
 }
 
 #[cfg(all(test, windows))]
-mod windows_startup_tests {    use super::startup_state_for_creation;
+mod windows_startup_tests {
+    use super::startup_state_for_creation;
     use crate::config::window::{StartupMode, WindowConfig};
 
     #[test]

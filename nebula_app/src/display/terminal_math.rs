@@ -1276,10 +1276,7 @@ pub(super) struct CoverageMask {
 }
 
 impl CoverageMask {
-    pub(super) fn build(
-        overlays: &[FormulaOverlay],
-        prepared: &[Option<PreparedFormula>],
-    ) -> Self {
+    pub(super) fn build(overlays: &[FormulaOverlay], prepared: &[Option<PreparedFormula>]) -> Self {
         let mut rows: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
         for (overlay, prepared) in overlays.iter().zip(prepared) {
             if prepared.is_none() {

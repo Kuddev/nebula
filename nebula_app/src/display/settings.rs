@@ -233,6 +233,9 @@ pub enum SettingsHit {
     CursorBlinkToggle,
     /// 交互: copy-on-select toggle row.
     CopyOnSelectToggle,
+    /// 交互: 拖拽调节左侧栏宽 / 右抽屉宽。开启走确认框（reflow 开销）。
+    /// SSH HOSTS 分界高度不归它管，始终可拖。
+    PanelResizeToggle,
     /// 交互: 全宽字形 bold run 用 Regular 字形（粗体提亮不加粗）。
     CjkBoldToggle,
     TabRevealDropdown,
@@ -266,6 +269,8 @@ pub enum SettingsHit {
     Reset,
     /// 高级: keep the resident server (detach) on window close.
     KeepSessionToggle,
+    /// 高级: 启动时恢复上次会话（也是崩溃恢复的总开关）。
+    RestoreSessionToggle,
     /// 高级→同步: 输入框（0=url 1=用户名 2=WebDAV 密码 3=E2E 口令）。
     SyncInput(usize),
     SyncAutoPullToggle,
@@ -310,6 +315,8 @@ pub(super) struct NebulaRuntimeSettings {
     /// Window close keeps the PTYs alive in the resident process (detach /
     /// re-attach session restore). Off = closing a window kills its shells.
     pub(super) keep_session: bool,
+    /// 高级·会话：启动时恢复上次的标签。
+    pub(super) restore_session: bool,
     /// 窗口背景模糊。Windows 11 上是 Mica（见
     /// `display::window::apply_windows_backdrop`），macOS / Wayland 上走
     /// winit 自己的实现。默认开：纯 alpha 会让背景的高频细节直接透上来压在
@@ -339,6 +346,15 @@ pub(super) struct NebulaRuntimeSettings {
     /// `saved_hosts` because entries discovered in `~/.ssh/config` would
     /// otherwise reappear on the very next merge.
     pub(super) hidden_hosts: Vec<String>,
+    /// 交互：允许拖拽调节左侧栏宽 / SSH HOSTS 分界高 / 右抽屉宽。默认关，
+    /// 开启走一次确认框——宽度拖动会实时重排终端，性能敏感。
+    pub(super) panel_resize: bool,
+    /// 左侧栏逻辑宽；[`super::SIDEBAR_W_LOGICAL`] 是默认值。
+    pub(super) sidebar_w: f32,
+    /// 右抽屉逻辑宽；布局时仍钳在窗口 42%。
+    pub(super) drawer_w: f32,
+    /// SSH HOSTS 停靠区高度覆盖（逻辑 px）；0 = 自动弹性规则。
+    pub(super) hosts_band: f32,
     /// User keybinding overrides, raw `(combo, action)` pairs in file order
     /// (spec 002). Kept verbatim so unknown-but-valid future actions survive a
     /// load/save cycle; `display::keymap::build_bindings` parses them.
@@ -375,6 +391,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         // clean on close. Residency leaves shells running in the background,
         // which reads as "the app didn't really exit" — opt IN, not out.
         keep_session: false,
+        restore_session: true,
         // 2026-07-31 用户裁定：默认开。纯 alpha 下背景的高频细节压着文字，
         // 那正是"透明度调低就看不清"的物理来源；模糊把它拍成低频色块。想
         // 真透出后面窗口内容的人可以关掉。
@@ -393,6 +410,10 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         pinned_hosts: Vec::new(),
         saved_hosts: Vec::new(),
         hidden_hosts: Vec::new(),
+        panel_resize: false,
+        sidebar_w: super::SIDEBAR_W_LOGICAL,
+        drawer_w: super::side_panel::PANEL_W_LOGICAL,
+        hosts_band: 0.0,
         keybinds: Vec::new(),
         quick_terminal_hotkey: keymap::DEFAULT_QUICK_TERMINAL_HOTKEY.to_owned(),
     };
@@ -444,9 +465,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 },
                 Some(("cursor_blink", v)) => settings.cursor_blink = parse_bool(v, true),
                 Some(("copy_on_select", v)) => settings.copy_on_select = parse_bool(v, true),
-                Some(("cjk_bold_regular", v)) => {
-                    settings.cjk_bold_regular = parse_bool(v, true)
-                },
+                Some(("cjk_bold_regular", v)) => settings.cjk_bold_regular = parse_bool(v, true),
                 Some(("tab_reveal", v)) => {
                     settings.tab_reveal = TabRevealMotion::parse(v).unwrap_or_default();
                 },
@@ -459,6 +478,24 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("fetch", v)) => settings.fetch = parse_bool(v, true),
                 Some(("powerline", v)) => settings.powerline = parse_bool(v, true),
                 Some(("keep_session", v)) => settings.keep_session = parse_bool(v, false),
+                Some(("restore_session", v)) => settings.restore_session = parse_bool(v, true),
+                Some(("panel_resize", v)) => settings.panel_resize = parse_bool(v, false),
+                Some(("sidebar_w", v)) => {
+                    if let Ok(w) = v.trim().parse::<f32>() {
+                        settings.sidebar_w = w.clamp(super::SIDEBAR_W_MIN, super::SIDEBAR_W_MAX);
+                    }
+                },
+                Some(("drawer_w", v)) => {
+                    if let Ok(w) = v.trim().parse::<f32>() {
+                        settings.drawer_w = w.clamp(super::DRAWER_W_MIN, super::DRAWER_W_MAX);
+                    }
+                },
+                Some(("hosts_band", v)) => {
+                    if let Ok(h) = v.trim().parse::<f32>() {
+                        settings.hosts_band =
+                            if h > 0.0 { h.max(super::HOSTS_BAND_MIN) } else { 0.0 };
+                    }
+                },
                 Some(("blur", v)) => settings.blur = parse_bool(v, true),
                 Some(("opacity", v)) => {
                     if let Ok(opacity) = v.trim().parse::<f32>() {
@@ -635,8 +672,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let pinned_hosts = settings.pinned_hosts.join(",");
     let saved_hosts = settings.saved_hosts.join(",");
     let hidden_hosts = settings.hidden_hosts.join(",");
-    let font_size =
-        settings.font_size.map(|size| format!("{size:.1}")).unwrap_or_default();
+    let font_size = settings.font_size.map(|size| format!("{size:.1}")).unwrap_or_default();
     let mut keybinds = String::new();
     for (combo, action) in &settings.keybinds {
         keybinds.push_str(&format!("keybind={combo}:{action}\n"));
@@ -646,7 +682,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         path,
         format!(
             "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -659,12 +695,17 @@ tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nblur={}\nopacity={:.2}\n
             settings.fetch as u8,
             settings.powerline as u8,
             settings.keep_session as u8,
+            settings.restore_session as u8,
             settings.blur as u8,
             settings.opacity,
             settings.background_image_opacity,
             settings.background_image_fit.settings_value(),
             settings.background_image_alignment.settings_value(),
             settings.background_image_cover_chrome as u8,
+            settings.panel_resize as u8,
+            settings.sidebar_w,
+            settings.drawer_w,
+            settings.hosts_band,
         ),
     );
 }
@@ -715,6 +756,8 @@ struct SettingsGeometry {
     background_image_opacity_slider: (f32, f32, f32, f32),
     /// 交互: copy-on-select toggle row.
     copy_on_select: (f32, f32, f32, f32),
+    /// 交互·拖拽调节侧栏的开关行。
+    panel_resize: (f32, f32, f32, f32),
     /// 交互: CJK 粗体策略 toggle row.
     cjk_bold: (f32, f32, f32, f32),
     tab_reveal: (f32, f32, f32, f32),
@@ -735,6 +778,8 @@ struct SettingsGeometry {
     keymap_row_h: f32,
     advanced_h: f32,
     keep_session: (f32, f32, f32, f32),
+    /// 高级·会话：启动时恢复上次的标签（崩溃/强杀后同样走这条路）。
+    restore_session: (f32, f32, f32, f32),
     /// 高级→同步（WebDAV）：url/用户名/密码/口令 四行 + 自动拉取开关行
     /// + 动作按钮行。输入框矩形由 [`sync_input_rect`] 从行矩形推导。
     sync_rows: [(f32, f32, f32, f32); 4],
@@ -748,7 +793,7 @@ fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
 }
 
 fn advanced_content_end(advanced_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
-    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + row_h }
+    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + 2.0 * row_h }
 }
 
 /// Max scroll offset for `section` at the current window size. The input
@@ -890,20 +935,20 @@ fn settings_geometry(
     };
     let profiles_h = s(profiles_end + 32.0 - 72.0);
 
-    // 交互: 剪贴板行为与标签展开一组，文本渲染（CJK 粗体策略）另一组。
+    // 交互: 剪贴板行为、标签展开与拖拽调节一组，文本渲染（CJK 粗体策略）另一组。
     let interaction_y0 = 146.0;
-    let cjk_bold_y0 = interaction_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
+    let cjk_bold_y0 = interaction_y0 + ROW_H * 3.0 + GROUP_ADVANCE;
     let interaction_h = s(cjk_bold_y0 + ROW_H + 32.0 - 72.0);
     let copy_on_select = (row_x, at(interaction_y0), row_w, row_h);
     let tab_reveal = (row_x, at(interaction_y0 + ROW_H), row_w, row_h);
+    let panel_resize = (row_x, at(interaction_y0 + ROW_H * 2.0), row_w, row_h);
     let cjk_bold = (row_x, at(cjk_bold_y0), row_w, row_h);
 
     // Keymap: editable action rows, then a read-only extras group (spec 002).
     let keymap_y0 = 146.0;
     let keymap_readonly_y0 =
         keymap_y0 + keymap::editable_row_count() as f32 * ROW_H + GROUP_ADVANCE;
-    let keymap_h =
-        s(keymap_readonly_y0 + keymap::READONLY_ROWS.len() as f32 * ROW_H + 32.0 - 72.0);
+    let keymap_h = s(keymap_readonly_y0 + keymap::READONLY_ROWS.len() as f32 * ROW_H + 32.0 - 72.0);
     let keymap_row0 = (row_x, at(keymap_y0), row_w, row_h);
     let keymap_readonly_row0 = (row_x, at(keymap_readonly_y0), row_w, row_h);
 
@@ -911,7 +956,8 @@ fn settings_geometry(
     // 隐藏期间同步几何仍保留，方便后续继续完善，但页面高度只计算可见内容。
     let advanced_y0 = 146.0;
     let keep_session = (row_x, at(advanced_y0), row_w, row_h);
-    let sync_y0 = advanced_y0 + ROW_H + GROUP_ADVANCE;
+    let restore_session = (row_x, at(advanced_y0 + ROW_H), row_w, row_h);
+    let sync_y0 = advanced_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
     let sync_row = |i: f32| (row_x, at(sync_y0 + i * ROW_H), row_w, row_h);
     let sync_rows = [sync_row(0.0), sync_row(1.0), sync_row(2.0), sync_row(3.0)];
     let sync_auto_pull = sync_row(4.0);
@@ -973,6 +1019,7 @@ fn settings_geometry(
         hidden_host_row0: (row_x, at(hidden_y0), row_w, row_h),
         hidden_host_count,
         copy_on_select,
+        panel_resize,
         cjk_bold,
         tab_reveal,
         reset: (popup_x + popup_w - s(170.0), popup_y + s(24.0), s(150.0), s(42.0)),
@@ -986,6 +1033,7 @@ fn settings_geometry(
         keymap_row_h: row_h,
         advanced_h,
         keep_session,
+        restore_session,
         sync_rows,
         sync_auto_pull,
         sync_actions,
@@ -1065,12 +1113,8 @@ pub(super) fn background_color_popup(
     for (i, rect) in swatch.iter_mut().enumerate() {
         let row = i / COLS;
         let col = i % COLS;
-        *rect = (
-            x + pad + col as f32 * (cell + gap),
-            y + pad + row as f32 * (cell + gap),
-            cell,
-            cell,
-        );
+        *rect =
+            (x + pad + col as f32 * (cell + gap), y + pad + row as f32 * (cell + gap), cell, cell);
     }
     let hex = (x + pad, y + pad + grid_h + gap, w - 2.0 * pad, hex_h);
     BackgroundColorPopup { rect: (x, y, w, h), swatch, hex }
@@ -1308,6 +1352,9 @@ pub fn settings_hit(
                 if contains_rect(geometry.tab_reveal, x, y) {
                     return SettingsHit::TabRevealDropdown;
                 }
+                if contains_rect(geometry.panel_resize, x, y) {
+                    return SettingsHit::PanelResizeToggle;
+                }
                 if contains_rect(geometry.cjk_bold, x, y) {
                     return SettingsHit::CjkBoldToggle;
                 }
@@ -1324,6 +1371,9 @@ pub fn settings_hit(
             NebulaSettingsSection::Advanced => {
                 if contains_rect(geometry.keep_session, x, y) {
                     return SettingsHit::KeepSessionToggle;
+                }
+                if contains_rect(geometry.restore_session, x, y) {
+                    return SettingsHit::RestoreSessionToggle;
                 }
                 if SHOW_WEBDAV_SYNC_SETTINGS {
                     for (index, rect) in geometry.sync_rows.iter().enumerate() {
@@ -1389,6 +1439,8 @@ pub(super) struct SettingsView {
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     pub(super) keep_session: bool,
+    /// 高级·会话：启动时恢复上次的标签。
+    pub(super) restore_session: bool,
     pub(super) blur: bool,
     pub(super) opacity: f32,
     /// Which opacity slider is mid-drag, for thumb-dot grow feedback.
@@ -1396,6 +1448,8 @@ pub(super) struct SettingsView {
     pub(super) cursor_shape: CursorShape,
     pub(super) cursor_blink: bool,
     pub(super) copy_on_select: bool,
+    /// 交互·「拖拽调节侧栏」总开关。
+    pub(super) panel_resize: bool,
     pub(super) cjk_bold_regular: bool,
     pub(super) tab_reveal: TabRevealMotion,
     /// Live-preview colors: the ACTUAL terminal background/foreground the
@@ -1451,7 +1505,8 @@ fn sync_input_display(view: &SettingsView, index: usize, max_cols: usize) -> (St
     let raw = &view.sync_inputs[index];
     if raw.is_empty() {
         let text = match index {
-            0 => language.pick("https://dav.example.com/nebula.sync", "https://dav.example.com/nebula.sync"),
+            0 => language
+                .pick("https://dav.example.com/nebula.sync", "https://dav.example.com/nebula.sync"),
             1 => language.pick("WebDAV 用户名", "WebDAV username"),
             2 if view.sync_secret_set[0] => {
                 language.pick("已保存（输入以更换）", "Saved (type to replace)")
@@ -1483,7 +1538,10 @@ fn sync_input_display(view: &SettingsView, index: usize, max_cols: usize) -> (St
 }
 
 /// 动作行的 [立即推送, 立即拉取] 按钮矩形。
-fn sync_button_rects((rx, ry, _, rh): (f32, f32, f32, f32), scale: f32) -> [(f32, f32, f32, f32); 2] {
+fn sync_button_rects(
+    (rx, ry, _, rh): (f32, f32, f32, f32),
+    scale: f32,
+) -> [(f32, f32, f32, f32); 2] {
     let s = |v: f32| v * scale;
     let w = s(150.0);
     let h = rh - s(12.0);
@@ -1511,7 +1569,9 @@ fn keymap_row_value(view: &SettingsView, index: usize) -> (String, bool, bool) {
     if view.keymap_capture == Some(index) {
         // 按住修饰键时实时回显（"Ctrl+…"），否则给占位 + 取消提示。
         let text = if view.keymap_capture_preview.is_empty() {
-            view.language.pick("按下新按键…（Esc 取消）", "Press new keys… (Esc cancels)").to_owned()
+            view.language
+                .pick("按下新按键…（Esc 取消）", "Press new keys… (Esc cancels)")
+                .to_owned()
         } else {
             format!("{}…", view.keymap_capture_preview)
         };
@@ -1541,10 +1601,9 @@ const PREVIEW_PROMPT_COLS: usize = 2;
 
 fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> Option<usize> {
     match dropdown {
-        SettingsDropdown::Shell => view
-            .shells
-            .iter()
-            .position(|(id, _, _)| view.shell_id.as_deref() == Some(id.as_str())),
+        SettingsDropdown::Shell => {
+            view.shells.iter().position(|(id, _, _)| view.shell_id.as_deref() == Some(id.as_str()))
+        },
         SettingsDropdown::Font => view.fonts.iter().position(|family| family == &view.font_family),
         SettingsDropdown::BackgroundFit => {
             BACKGROUND_FIT_OPTIONS.iter().position(|fit| *fit == view.background_image_fit)
@@ -1718,13 +1777,16 @@ pub(super) fn push_quads(
     // Widget wrappers: stage → viewport-clip → push. Every multi-option row
     // shares ONE combobox component (user ruling 2026-07-23), hover/press
     // feedback included, so no page ever hand-rolls its own control again.
-    let combobox =
-        |quads: &mut Vec<UiQuad>, staged: &mut Vec<UiQuad>, row, hot: bool, open: bool| {
-            widgets::push_combobox(staged, widgets::combobox_rect(row, scale), scale, &sk, hot, open);
-            for quad in staged.drain(..) {
-                clip(quads, quad);
-            }
-        };
+    let combobox = |quads: &mut Vec<UiQuad>,
+                    staged: &mut Vec<UiQuad>,
+                    row,
+                    hot: bool,
+                    open: bool| {
+        widgets::push_combobox(staged, widgets::combobox_rect(row, scale), scale, &sk, hot, open);
+        for quad in staged.drain(..) {
+            clip(quads, quad);
+        }
+    };
     let slider = |quads: &mut Vec<UiQuad>, staged: &mut Vec<UiQuad>, hit, value: f32, hot: bool| {
         widgets::push_slider(staged, hit, value, scale, &sk, hot);
         for quad in staged.drain(..) {
@@ -1782,7 +1844,10 @@ pub(super) fn push_quads(
                     let beam_w = (2.0 * scale).max(1.0);
                     match view.cursor_shape {
                         CursorShape::Beam => {
-                            clip(quads, UiQuad::solid(cursor_x, cursor_y, beam_w, cell_h, 0.0, ink));
+                            clip(
+                                quads,
+                                UiQuad::solid(cursor_x, cursor_y, beam_w, cell_h, 0.0, ink),
+                            );
                         },
                         CursorShape::Underline => {
                             clip(
@@ -1798,7 +1863,10 @@ pub(super) fn push_quads(
                             );
                         },
                         CursorShape::HollowBlock => {
-                            clip(quads, UiQuad::solid(cursor_x, cursor_y, cell_w, cell_h, 0.0, ink));
+                            clip(
+                                quads,
+                                UiQuad::solid(cursor_x, cursor_y, cell_w, cell_h, 0.0, ink),
+                            );
                             clip(
                                 quads,
                                 UiQuad::solid(
@@ -1813,7 +1881,10 @@ pub(super) fn push_quads(
                         },
                         CursorShape::Hidden => {},
                         CursorShape::Block => {
-                            clip(quads, UiQuad::solid(cursor_x, cursor_y, cell_w, cell_h, 0.0, ink));
+                            clip(
+                                quads,
+                                UiQuad::solid(cursor_x, cursor_y, cell_w, cell_h, 0.0, ink),
+                            );
                         },
                     }
                 }
@@ -2016,7 +2087,11 @@ pub(super) fn push_quads(
                 view.hover == SettingsHit::CursorShapeDropdown,
                 view.dropdown == Some(SettingsDropdown::CursorShape),
             );
-            row_hover(quads, geometry.cursor_blink_row, view.hover == SettingsHit::CursorBlinkToggle);
+            row_hover(
+                quads,
+                geometry.cursor_blink_row,
+                view.hover == SettingsHit::CursorBlinkToggle,
+            );
             toggle(quads, &mut staged, geometry.cursor_blink_row, view.cursor_blink);
 
             // 界面组：语言（同一通用下拉组件）+ 终端不透明度 + 背景模糊。
@@ -2118,7 +2193,7 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Interaction => {
-            group_frame(quads, geometry.copy_on_select, 2);
+            group_frame(quads, geometry.copy_on_select, 3);
             row_hover(
                 quads,
                 geometry.copy_on_select,
@@ -2133,6 +2208,12 @@ pub(super) fn push_quads(
                 view.hover == SettingsHit::TabRevealDropdown,
                 view.dropdown == Some(SettingsDropdown::TabReveal),
             );
+            row_hover(
+                quads,
+                geometry.panel_resize,
+                view.hover == SettingsHit::PanelResizeToggle,
+            );
+            toggle(quads, &mut staged, geometry.panel_resize, view.panel_resize);
             group_frame(quads, geometry.cjk_bold, 1);
             row_hover(quads, geometry.cjk_bold, view.hover == SettingsHit::CjkBoldToggle);
             toggle(quads, &mut staged, geometry.cjk_bold, view.cjk_bold_regular);
@@ -2184,9 +2265,15 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Advanced => {
-            group_frame(quads, geometry.keep_session, 1);
+            group_frame(quads, geometry.keep_session, 2);
             row_hover(quads, geometry.keep_session, view.hover == SettingsHit::KeepSessionToggle);
             toggle(quads, &mut staged, geometry.keep_session, view.keep_session);
+            row_hover(
+                quads,
+                geometry.restore_session,
+                view.hover == SettingsHit::RestoreSessionToggle,
+            );
+            toggle(quads, &mut staged, geometry.restore_session, view.restore_session);
 
             if SHOW_WEBDAV_SYNC_SETTINGS {
                 // ---- 同步（WebDAV，spec 003）：4 输入行 + 自动拉取开关 ----
@@ -2366,7 +2453,14 @@ pub(super) fn push_popup_quads(
                 sk.hairline,
             ));
             let color = BACKGROUND_SWATCHES[index];
-            quads.push(UiQuad::solid(sx, sy, sw2, sh2, s(6.0), Rgba::new(color.r, color.g, color.b, 255)));
+            quads.push(UiQuad::solid(
+                sx,
+                sy,
+                sw2,
+                sh2,
+                s(6.0),
+                Rgba::new(color.r, color.g, color.b, 255),
+            ));
         }
 
         // hex 输入框：聚焦态用主题色描边；caret 与 UI 光标共用 500ms 相位。
@@ -3423,6 +3517,24 @@ pub(super) fn draw_text(
                     sk.accent,
                 );
             }
+            if visible(geometry.panel_resize.1, geometry.panel_resize.3) {
+                // 开关本体在 quads pass；开启前的性能告知走确认框，这里的
+                // label 只说清楚它管哪三条分界线。
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.panel_resize,
+                    language.pick(
+                        "拖拽调节侧栏宽度（左侧栏 / 右抽屉；SSH 分界高度无需开关）",
+                        "Drag to resize panel widths (sidebar / drawer)",
+                    ),
+                    "",
+                    sk.ink,
+                );
+            }
             let (bx, by, _, bh) = geometry.cjk_bold;
             if visible(group_y(by), title_h) {
                 section_title(
@@ -3529,8 +3641,7 @@ pub(super) fn draw_text(
                         scale,
                     );
                     for (chip_x, chip_w, key) in &combo.chips {
-                        let key_cols: usize =
-                            key.chars().map(|c| c.width().unwrap_or(0)).sum();
+                        let key_cols: usize = key.chars().map(|c| c.width().unwrap_or(0)).sum();
                         r.draw_chrome_text(
                             size,
                             chip_x + (chip_w - key_cols as f32 * cell_w) / 2.0,
@@ -3603,6 +3714,27 @@ pub(super) fn draw_text(
                     "",
                     sk.ink,
                 );
+            }
+            {
+                let (_, ry, _, rh) = geometry.restore_session;
+                if visible(ry, rh) {
+                    // 关掉它就永远干净启动：session.json 照写不误（导出工作区
+                    // 与崩溃诊断都靠它），只是开机不再回放。
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        geometry.restore_session,
+                        language.pick(
+                            "启动时恢复上次的标签（异常退出后同样恢复）",
+                            "Restore last tabs on launch (also after a crash)",
+                        ),
+                        "",
+                        sk.ink,
+                    );
+                }
             }
 
             if SHOW_WEBDAV_SYNC_SETTINGS {
@@ -3714,7 +3846,9 @@ mod tests {
     #[test]
     fn hidden_webdav_group_does_not_extend_advanced_content() {
         assert!(!SHOW_WEBDAV_SYNC_SETTINGS);
-        assert_eq!(advanced_content_end(146.0, 264.0, 44.0), 190.0);
+        // 会话组现在是两行（驻留 + 启动恢复），页面高度只算这两行——
+        // 隐藏的同步组不许把 Advanced 撑高出一屏空白。
+        assert_eq!(advanced_content_end(146.0, 264.0, 44.0), 234.0);
     }
 
     #[test]

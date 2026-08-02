@@ -185,11 +185,17 @@ pub(crate) fn combobox_popup_rect(
 
 pub(crate) fn popup_row_rect(popup: Rect, index: usize, scale: f32) -> Rect {
     let s = |v: f32| v * scale;
-    (popup.0 + s(4.0), popup.1 + s(4.0) + index as f32 * s(POPUP_ROW_H), popup.2 - s(8.0), s(POPUP_ROW_H))
+    (
+        popup.0 + s(4.0),
+        popup.1 + s(4.0) + index as f32 * s(POPUP_ROW_H),
+        popup.2 - s(8.0),
+        s(POPUP_ROW_H),
+    )
 }
 
 pub(crate) fn popup_row_at(popup: Rect, count: usize, scale: f32, x: f32, y: f32) -> Option<usize> {
-    (0..count).find(|&index| crate::display::contains_rect(popup_row_rect(popup, index, scale), x, y))
+    (0..count)
+        .find(|&index| crate::display::contains_rect(popup_row_rect(popup, index, scale), x, y))
 }
 
 /// The floating option list: opaque plate + soft shadow so it reads as a
@@ -226,14 +232,7 @@ pub(crate) fn push_combobox_popup(
         } else {
             continue;
         };
-        quads.push(UiQuad::solid(
-            rx,
-            ry + s(2.0),
-            rw,
-            rh - s(4.0),
-            radius::CONTROL * scale,
-            fill,
-        ));
+        quads.push(UiQuad::solid(rx, ry + s(2.0), rw, rh - s(4.0), radius::CONTROL * scale, fill));
     }
 }
 

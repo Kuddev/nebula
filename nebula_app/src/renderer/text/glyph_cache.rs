@@ -419,7 +419,8 @@ impl GlyphCache {
     }
 
     /// Reset currently cached data in both GL and the registry to default state.
-    pub fn reset_glyph_cache<L: LoadGlyph>(&mut self, loader: &mut L) {        loader.clear();
+    pub fn reset_glyph_cache<L: LoadGlyph>(&mut self, loader: &mut L) {
+        loader.clear();
         self.cache = Default::default();
 
         self.load_common_glyphs(loader);

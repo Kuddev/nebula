@@ -182,11 +182,8 @@ pub fn push_surface_in(
     // 外阴影承担 Z 轴层级；发丝环只负责在浅色背景上定义边界。两者分工不同，
     // 缺了阴影就只剩一条线，浮层会"贴"在背景上而不是浮起来。
     let (blur, offset_y) = level.shadow();
-    let shadow_alpha = if sk.is_light {
-        elevation::SHADOW_ALPHA_LIGHT
-    } else {
-        elevation::SHADOW_ALPHA_DARK
-    };
+    let shadow_alpha =
+        if sk.is_light { elevation::SHADOW_ALPHA_LIGHT } else { elevation::SHADOW_ALPHA_DARK };
     quads.push(UiQuad::shadow(
         x,
         y,
@@ -241,11 +238,8 @@ pub fn push_group(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, pr
 pub fn push_input(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, focused: bool) {
     let (x, y, w, h) = rect;
     let corner = radius::CONTROL * scale;
-    let stroke = if focused {
-        Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255)
-    } else {
-        sk.hairline
-    };
+    let stroke =
+        if focused { Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255) } else { sk.hairline };
     push_stroke(quads, rect, corner, scale, stroke);
     quads.push(UiQuad::solid(x, y, w, h, corner, sk.input));
 }
@@ -319,7 +313,15 @@ mod tests {
         let sk = light();
         for level in [Elevation::Menu, Elevation::Popover] {
             let mut quads = Vec::new();
-            push_surface(&mut quads, (10.0, 10.0, 100.0, 60.0), (800.0, 600.0), 1.0, &sk, level, 1.0);
+            push_surface(
+                &mut quads,
+                (10.0, 10.0, 100.0, 60.0),
+                (800.0, 600.0),
+                1.0,
+                &sk,
+                level,
+                1.0,
+            );
             assert!(
                 !quads.iter().any(|q| q.width >= 800.0 && q.height >= 600.0),
                 "{level:?} 不该产生任何整窗遮罩 quad",

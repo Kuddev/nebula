@@ -56,7 +56,7 @@ use crate::display::window::{ImeInhibitor, Window};
 use crate::display::{Display, Preedit, SizeInfo};
 use crate::input::{self, ActionContext as _};
 use crate::logging::{LOG_TARGET_CONFIG, LOG_TARGET_WINIT};
-use crate::message_bar::{Message, MessageBuffer};
+use crate::message_bar::{Message, MessageBuffer, MessageType};
 #[cfg(unix)]
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
@@ -233,27 +233,55 @@ impl Processor {
         // start exactly that instead of yesterday's tabs.
         let plain_launch = window_options.terminal_options.working_directory.is_none()
             && window_options.terminal_options.command().is_none();
-        let boot = if plain_launch {
-            crate::session::load()
-                .filter(crate::session::should_restore)
-                .map(|mut session| {
+        // 恢复行为归设置·高级→会话管（默认开）。关掉只是不回放——快照照写，
+        // 工作区导出与崩溃现场诊断都还在。
+        let mut notice = None;
+        let restore = if plain_launch && crate::display::restore_session_enabled() {
+            match crate::session::load() {
+                Some(mut session) if crate::session::should_restore(&session) => {
+                    if crate::session::was_crash(&session) {
+                        notice = Some(format!(
+                            "已从上次异常退出恢复 {} 个标签（进程未正常收尾）。",
+                            session.tabs.len()
+                        ));
+                    }
                     // Count this launch against the crash-loop breaker; the
                     // first successful autosave (1 Hz tick) resets it.
                     crate::session::mark_boot_attempt(&mut session);
-                    session
-                })
-                .map_or(WindowBoot::Fresh, WindowBoot::Restore)
+                    Some(session)
+                },
+                // 断路器跳闸：连续三次启动都没活到第一次自动保存。把这份
+                // 会话隔离出去再干净启动，否则一秒后的自动保存就会盖掉这份
+                // 「一恢复就崩」的唯一现场。
+                Some(session) if !session.tabs.is_empty() => {
+                    notice = Some(match crate::session::quarantine() {
+                        Some(path) => format!(
+                            "连续三次启动失败，已跳过会话恢复；上次的会话保存在 {}。",
+                            path.display()
+                        ),
+                        None => "连续三次启动失败，已跳过会话恢复。".to_owned(),
+                    });
+                    None
+                },
+                _ => None,
+            }
         } else {
-            WindowBoot::Fresh
+            None
         };
+        let boot = restore.map_or(WindowBoot::Fresh, WindowBoot::Restore);
 
-        let window_context = WindowContext::initial(
+        let mut window_context = WindowContext::initial(
             event_loop,
             self.proxy.clone(),
             self.config.clone(),
             window_options,
             boot,
         )?;
+
+        // 恢复提示走消息栏：不打断输入，但下一次按键前一定看得见。
+        if let Some(text) = notice {
+            window_context.message_buffer.push(Message::new(text, MessageType::Warning));
+        }
 
         self.gl_config = Some(window_context.display.gl_context().config());
         self.windows.insert(window_context.id(), window_context);
@@ -357,12 +385,11 @@ impl Processor {
     /// the candidate before releasing the old key keeps the existing shortcut
     /// alive when the OS rejects a conflicting or malformed candidate.
     fn apply_quick_terminal_hotkey(&mut self, requested: &str) -> Result<(), String> {
-        let new_hotkey = requested
-            .parse::<HotKey>()
-            .map_err(|err| format!("快捷键格式无效：{err}"))?;
+        let new_hotkey =
+            requested.parse::<HotKey>().map_err(|err| format!("快捷键格式无效：{err}"))?;
         if self.quick_hotkey == Some(new_hotkey) {
             self.quick_hotkey_combo = requested.to_owned();
-            return Ok(())
+            return Ok(());
         }
 
         let mut manager = self.global_hotkey.take().or_else(|| GlobalHotKeyManager::new().ok());
@@ -402,12 +429,9 @@ impl Processor {
         let result = self.apply_quick_terminal_hotkey(&hotkey);
         if let Some(window_context) = self.windows.get_mut(&window_id) {
             match result {
-                Ok(()) => window_context.display.quick_hotkey_registration_done(
-                    &hotkey,
-                    true,
-                    None,
-                    &old,
-                ),
+                Ok(()) => {
+                    window_context.display.quick_hotkey_registration_done(&hotkey, true, None, &old)
+                },
                 Err(err) => window_context.display.quick_hotkey_registration_done(
                     &hotkey,
                     false,
@@ -630,8 +654,7 @@ impl ApplicationHandler<Event> for Processor {
             (EventType::NebulaSync { push }, _) => {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let result =
-                        if push { crate::sync::push() } else { crate::sync::pull() };
+                    let result = if push { crate::sync::push() } else { crate::sync::pull() };
                     crate::sync::warn_result(&result);
                     let (message, error, history_changed) = match result {
                         Ok(outcome) => (outcome.message, false, outcome.history_changed),
@@ -653,12 +676,9 @@ impl ApplicationHandler<Event> for Processor {
                 let result = self.apply_quick_terminal_hotkey(&hotkey);
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     match result {
-                        Ok(()) => window_context.display.quick_hotkey_registration_done(
-                            &hotkey,
-                            true,
-                            None,
-                            &old,
-                        ),
+                        Ok(()) => window_context
+                            .display
+                            .quick_hotkey_registration_done(&hotkey, true, None, &old),
                         Err(err) => window_context.display.quick_hotkey_registration_done(
                             &hotkey,
                             false,
@@ -671,13 +691,7 @@ impl ApplicationHandler<Event> for Processor {
                 }
             },
             (
-                EventType::SshTestDone {
-                    request_id,
-                    destination,
-                    ok,
-                    message,
-                    elapsed_ms,
-                },
+                EventType::SshTestDone { request_id, destination, ok, message, elapsed_ms },
                 Some(window_id),
             ) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
@@ -2424,8 +2438,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
             branch: self.ctx.nebula_state.branch.clone(),
             output_tail: crate::ai_assistant::redact_secrets(&self.grid_output_tail(24, 2000)),
         };
-        self.ctx.nebula_state.ai_fix =
-            Some(crate::ai_assistant::AiFixState::Pending { seq });
+        self.ctx.nebula_state.ai_fix = Some(crate::ai_assistant::AiFixState::Pending { seq });
         crate::ai_assistant::spawn_fix_request(self.ctx.event_proxy.clone(), cfg, request);
         self.ctx.mark_dirty();
     }
@@ -2658,6 +2671,18 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                                 // Sidebar dot until the tab gets looked at
                                 // (cleared instantly for the visible tab).
                                 self.ctx.nebula_state.finished_unseen = true;
+                                // 成败分流：非零码走警示三角，零码走"刚完成"
+                                // 的对勾闪现。裸 133;D 没带码（第三方集成），
+                                // 那种情况只当作完成，不敢报错。
+                                match exit_code {
+                                    Some(code) if code != 0 => {
+                                        self.ctx.nebula_state.failed_unseen = true;
+                                    },
+                                    _ => {
+                                        self.ctx.nebula_state.finished_at =
+                                            Some(std::time::Instant::now());
+                                    },
+                                }
                                 if !self.ctx.display.window.has_focus() {
                                     crate::notify::deliver(
                                         &self.ctx.display.window,

@@ -115,7 +115,10 @@ pub enum TabRequest {
     New,
     NewAtDirectory(PathBuf),
     NewProfile(usize),
-    NewShell { name: String, shell: nebula_terminal::tty::Shell },
+    NewShell {
+        name: String,
+        shell: nebula_terminal::tty::Shell,
+    },
     NewSsh(String),
     OpenDoc(PathBuf),
     OpenSettings,
@@ -127,15 +130,27 @@ pub enum TabRequest {
     SelectPrev,
     Select(usize),
     SelectLast,
-    Move { from: usize, to: usize },
+    Move {
+        from: usize,
+        to: usize,
+    },
     SplitToggle(crate::display::SplitDirection),
-    SplitIndex { index: usize, direction: crate::display::SplitDirection },
-    DockSplit { source: usize, nav: crate::display::SplitNav },
+    SplitIndex {
+        index: usize,
+        direction: crate::display::SplitDirection,
+    },
+    DockSplit {
+        source: usize,
+        nav: crate::display::SplitNav,
+    },
     FocusSplit(crate::display::SplitNav),
     ToggleZoom,
     BeginRename(usize),
     CommitRename(String),
-    SetColor { index: usize, color: Option<crate::display::color::Rgb> },
+    SetColor {
+        index: usize,
+        color: Option<crate::display::color::Rgb>,
+    },
     CancelRename,
     /// Save every terminal tab as a workspace file.
     ExportWorkspace,

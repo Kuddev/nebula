@@ -90,6 +90,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 crate::display::SshEditorHit::Destination
                 | crate::display::SshEditorHit::Port
                 | crate::display::SshEditorHit::Label
+                | crate::display::SshEditorHit::IconSearch
                 | crate::display::SshEditorHit::Password => CursorIcon::Text,
                 crate::display::SshEditorHit::SaveToggleBox
                 | crate::display::SshEditorHit::SaveToggleLabel
@@ -98,11 +99,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 | crate::display::SshEditorHit::Auth(_)
                 | crate::display::SshEditorHit::AddPrivateKey
                 | crate::display::SshEditorHit::RemovePrivateKey(_)
+                | crate::display::SshEditorHit::Avatar
+                | crate::display::SshEditorHit::IconOption(_)
                 | crate::display::SshEditorHit::Test
                 | crate::display::SshEditorHit::Primary
                 | crate::display::SshEditorHit::Cancel => CursorIcon::Pointer,
                 crate::display::SshEditorHit::TestStatus => CursorIcon::Help,
-                crate::display::SshEditorHit::None => CursorIcon::Default,
+                // 浮层的空白处不是可点的东西，指针就该是普通箭头——给它一个
+                // 手形会让人一直在那儿试着点。
+                crate::display::SshEditorHit::IconPopupChrome
+                | crate::display::SshEditorHit::None => CursorIcon::Default,
             };
             self.ctx.window().set_mouse_cursor(cursor);
             return;
@@ -125,6 +131,24 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.mark_dirty();
             }
             return;
+        }
+
+        // Nebula: an active panel-divider drag maps pointer motion onto the
+        // sidebar / drawer width or the SSH HOSTS band（设置·交互的拖拽调节；
+        // 宽度类在 display 端按节流窗口 reflow）。
+        if let Some(drag) = self.ctx.display().nebula_panel_drag {
+            if lmb_pressed {
+                self.ctx.display().update_panel_drag(x as f32, y as f32);
+                use crate::display::PanelDragKind;
+                self.ctx.window().set_mouse_cursor(match drag.kind {
+                    PanelDragKind::HostsBand => CursorIcon::NsResize,
+                    _ => CursorIcon::EwResize,
+                });
+                self.ctx.mark_dirty();
+                return;
+            }
+            // Button no longer held (release happened elsewhere): finish up.
+            self.ctx.display().end_panel_drag();
         }
 
         // Nebula: while the left button holds the scrollback thumb, pointer
@@ -257,6 +281,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.ctx.window().set_mouse_cursor(icon);
             return;
         }
+        // 面板分界线的悬浮光标（开关开启时）：左右拖=EwResize，HOSTS 分界
+        // =NsResize。放在窗口边缘之后、chrome/设置命中之前——热区最窄的赢。
+        if let Some(kind) = self.ctx.display().panel_resize_hit(x as f32, y as f32) {
+            use crate::display::PanelDragKind;
+            self.ctx.window().set_mouse_cursor(match kind {
+                PanelDragKind::HostsBand => CursorIcon::NsResize,
+                _ => CursorIcon::EwResize,
+            });
+            return;
+        }
         match settings_hover {
             crate::display::SettingsHit::Toggle
             | crate::display::SettingsHit::Nav(_)
@@ -276,6 +310,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::PowerlineToggle
             | crate::display::SettingsHit::BlurToggle
             | crate::display::SettingsHit::KeepSessionToggle
+            | crate::display::SettingsHit::RestoreSessionToggle
             | crate::display::SettingsHit::BackgroundColor
             | crate::display::SettingsHit::BackgroundImage
             | crate::display::SettingsHit::BackgroundImageClear
@@ -291,6 +326,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::CursorShapeOption(_)
             | crate::display::SettingsHit::CursorBlinkToggle
             | crate::display::SettingsHit::CopyOnSelectToggle
+            | crate::display::SettingsHit::PanelResizeToggle
             | crate::display::SettingsHit::CjkBoldToggle
             | crate::display::SettingsHit::KeymapRow(_)
             | crate::display::SettingsHit::TabRevealDropdown
@@ -354,8 +390,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.mark_dirty();
             }
             if self.ctx.display().ssh_connect_covers(x as f32, y as f32) {
-                let cursor =
-                    if hit.is_none() { CursorIcon::Default } else { CursorIcon::Pointer };
+                let cursor = if hit.is_none() { CursorIcon::Default } else { CursorIcon::Pointer };
                 self.ctx.window().set_mouse_cursor(cursor);
                 return;
             }
@@ -772,6 +807,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     return;
                 }
             }
+            // 面板分界线拖拽收尾：最终应用 + 持久化。
+            if self.ctx.display().end_panel_drag() {
+                self.ctx.mark_dirty();
+                return;
+            }
             // Let go of the scrollback thumb.
             if self.ctx.display().nebula_scrollbar_drag.take().is_some() {
                 self.ctx.mark_dirty();
@@ -848,6 +888,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     pub fn mouse_wheel_input(&mut self, delta: MouseScrollDelta, phase: TouchPhase) {
+        // 图标选择器开着时滚轮归它。它是最上面的那一层，而下面是一张模态
+        // 表单——滚轮落到终端回滚里去，是"滚了却什么都没动"的那种坏掉。
+        if self.ctx.display().ssh_editor_icon_picker_open() {
+            let lines = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => -lines.signum() as i32,
+                MouseScrollDelta::PixelDelta(pos) => -(pos.y.signum() as i32),
+            };
+            if lines != 0 {
+                self.ctx.display().ssh_editor_icon_scroll(lines);
+            }
+            return;
+        }
+
         // Ctrl+wheel zooms the terminal font (Windows Terminal / browser
         // convention). Checked before every scroll consumer so zoom wins over
         // page/drawer/grid scrolling while the modifier is held.

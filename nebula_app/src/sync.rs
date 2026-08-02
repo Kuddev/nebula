@@ -45,6 +45,11 @@ const SYNC_KEYS: &[&str] = &[
     "fetch",
     "powerline",
     "keep_session",
+    "restore_session",
+    "panel_resize",
+    "sidebar_w",
+    "drawer_w",
+    "hosts_band",
     "opacity",
     "background",
     "background_image_opacity",
@@ -63,12 +68,52 @@ const LIST_KEYS: &[&str] = &["pinned_hosts", "saved_hosts", "hidden_hosts"];
 /// 客户端弱口令黑名单（硬拒绝，用户裁定 2026-07-28）。E2E 的强度短板
 /// 在口令；123456 这类口令让加密形同虚设，宁可拒绝同步也不给虚假安全感。
 const WEAK_PASSPHRASES: &[&str] = &[
-    "123456", "1234567", "12345678", "123456789", "1234567890", "password", "password1",
-    "qwerty", "qwertyuiop", "abc123", "111111", "000000", "654321", "666666", "888888",
-    "letmein", "iloveyou", "admin", "admin123", "root", "passw0rd", "p@ssw0rd", "dragon",
-    "monkey", "sunshine", "princess", "welcome", "shadow", "master", "qazwsx", "asdfgh",
-    "zxcvbn", "asdfghjkl", "1q2w3e4r", "1qaz2wsx", "qwe123", "a123456", "123123", "121212",
-    "112233", "159357", "147258", "789456", "woaini", "5201314", "nebula",
+    "123456",
+    "1234567",
+    "12345678",
+    "123456789",
+    "1234567890",
+    "password",
+    "password1",
+    "qwerty",
+    "qwertyuiop",
+    "abc123",
+    "111111",
+    "000000",
+    "654321",
+    "666666",
+    "888888",
+    "letmein",
+    "iloveyou",
+    "admin",
+    "admin123",
+    "root",
+    "passw0rd",
+    "p@ssw0rd",
+    "dragon",
+    "monkey",
+    "sunshine",
+    "princess",
+    "welcome",
+    "shadow",
+    "master",
+    "qazwsx",
+    "asdfgh",
+    "zxcvbn",
+    "asdfghjkl",
+    "1q2w3e4r",
+    "1qaz2wsx",
+    "qwe123",
+    "a123456",
+    "123123",
+    "121212",
+    "112233",
+    "159357",
+    "147258",
+    "789456",
+    "woaini",
+    "5201314",
+    "nebula",
 ];
 
 /// Windows 凭据管理器里的条目名（`ssh_credentials` 的通用 DPAPI 存取）。
@@ -198,7 +243,8 @@ fn sync_passphrase() -> Option<String> {
         }
     }
     #[cfg(windows)]
-    if let Ok(Some(secret)) = crate::ssh_credentials::windows_store::load_secret(PASSPHRASE_TARGET) {
+    if let Ok(Some(secret)) = crate::ssh_credentials::windows_store::load_secret(PASSPHRASE_TARGET)
+    {
         return String::from_utf8(secret).ok();
     }
     None
@@ -365,9 +411,7 @@ fn payload_from_json(bytes: &[u8]) -> Result<SyncPayload, String> {
     }
     let history = value["history"]
         .as_array()
-        .map(|list| {
-            list.iter().filter_map(|v| v.as_str()).map(str::to_owned).collect::<Vec<_>>()
-        })
+        .map(|list| list.iter().filter_map(|v| v.as_str()).map(str::to_owned).collect::<Vec<_>>())
         .unwrap_or_default();
     Ok(SyncPayload { modified, device, settings, keybinds, history })
 }
@@ -522,10 +566,8 @@ fn fetch_remote(cfg: &SyncConfig, password: &str, passphrase: &str) -> Result<Re
                 .get("etag")
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned);
-            let body = response
-                .body_mut()
-                .read_to_vec()
-                .map_err(|err| format!("读取远端失败：{err}"))?;
+            let body =
+                response.body_mut().read_to_vec().map_err(|err| format!("读取远端失败：{err}"))?;
             let payload = payload_from_json(&open_packet(&body, passphrase)?)?;
             Ok(Remote { payload: Some(payload), etag })
         },
@@ -635,7 +677,9 @@ pub fn push() -> Result<SyncOutcome, String> {
     }
     let packet = seal(&payload_to_json(&local), &passphrase)?;
     if put_remote(&cfg, &password, &packet, fresh.etag.as_deref())? {
-        Ok(SyncOutcome { message: "同步已推送（已并入远端并发修改）".to_owned(), history_changed })
+        Ok(SyncOutcome {
+            message: "同步已推送（已并入远端并发修改）".to_owned(), history_changed
+        })
     } else {
         Err("远端持续变化，稍后再试".to_owned())
     }
@@ -657,7 +701,9 @@ pub fn pull() -> Result<SyncOutcome, String> {
     let settings_before = apply_to_settings_text(&merged, &text) != text;
     let history_changed = apply_local(&merged, &text)?;
     if !settings_before && !history_changed {
-        return Ok(SyncOutcome { message: "已是最新（与远端一致）".to_owned(), history_changed });
+        return Ok(SyncOutcome {
+            message: "已是最新（与远端一致）".to_owned(), history_changed
+        });
     }
     Ok(SyncOutcome {
         message: format!(

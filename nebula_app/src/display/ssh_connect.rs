@@ -122,9 +122,7 @@ impl SshConnectState {
                 SshStage::Resolve => {},
                 SshStage::Connect => self.push_log("connect   tcp handshake + kex".to_owned()),
                 SshStage::Authenticate => self.push_log("auth      authenticating".to_owned()),
-                SshStage::OpenShell => {
-                    self.push_log("shell     channel + pty + shell".to_owned())
-                },
+                SshStage::OpenShell => self.push_log("shell     channel + pty + shell".to_owned()),
                 SshStage::Ready => self.push_log("ready     session established".to_owned()),
                 SshStage::Failed(message) => self.push_log(format!("error     {message}")),
             }
@@ -226,7 +224,10 @@ struct Layout {
 /// 这里**没有**「重试」——它要在同一个 tab 位上原子地重连，而 `Close` +
 /// `NewSsh` 两个事件按序执行会先把最后一个 tab 连窗口一起关掉。宁可少一个
 /// 按钮，也不放一个按下去会出事的。
-fn button_specs(state: &SshConnectState, language: UiLanguage) -> Vec<(String, SshConnectHit, bool)> {
+fn button_specs(
+    state: &SshConnectState,
+    language: UiLanguage,
+) -> Vec<(String, SshConnectHit, bool)> {
     if state.failed() {
         vec![(language.pick("关闭", "Close").to_owned(), SshConnectHit::Close, true)]
     } else {
@@ -405,8 +406,16 @@ pub(super) fn push_quads(
     let palette = theme.palette();
     let light = sk.is_light;
     // 品牌色对：Nebula 主题自带的星云紫→青。浅色主题下压暗才够对比。
-    let brand_l = if light { lerp_rgb(rgb_of(palette.edge_l), Rgb::new(0, 0, 0), 0.28) } else { rgb_of(palette.edge_l) };
-    let brand_r = if light { lerp_rgb(rgb_of(palette.edge_r), Rgb::new(0, 0, 0), 0.28) } else { rgb_of(palette.edge_r) };
+    let brand_l = if light {
+        lerp_rgb(rgb_of(palette.edge_l), Rgb::new(0, 0, 0), 0.28)
+    } else {
+        rgb_of(palette.edge_l)
+    };
+    let brand_r = if light {
+        lerp_rgb(rgb_of(palette.edge_r), Rgb::new(0, 0, 0), 0.28)
+    } else {
+        rgb_of(palette.edge_r)
+    };
 
     // ── 遮罩 ────────────────────────────────────────────────────
     // 连接期间 pane 里没有任何值得看的东西（grid 是空的，只有一个在 blink
@@ -435,9 +444,7 @@ pub(super) fn push_quads(
     quads.push(UiQuad::solid(cx, cy, cw, chh, s(radius::OVERLAY), sk.panel).pixel_snapped());
     // hairline 描边：与阴影二选一会显薄，浮层这一层两者都要（阴影给高度，
     // 描边给边界），但描边只有 1px 且极淡。
-    quads.push(
-        UiQuad::solid(cx, cy, cw, chh, s(radius::OVERLAY), sk.hairline).pixel_snapped(),
-    );
+    quads.push(UiQuad::solid(cx, cy, cw, chh, s(radius::OVERLAY), sk.hairline).pixel_snapped());
     quads.push(
         UiQuad::solid(
             cx + s(1.0),
@@ -640,7 +647,14 @@ pub(super) fn push_quads(
     // ── Logs 折叠开关 ───────────────────────────────────────────
     // Tabby 那张连接图唯一真正值钱的东西就是它，所以它必须在失败之前就在
     // 场，而不是失败后才冒出来。
-    push_button_frame(quads, l.logs_btn, s(radius::CONTROL), false, state.hover == SshConnectHit::Logs, sk);
+    push_button_frame(
+        quads,
+        l.logs_btn,
+        s(radius::CONTROL),
+        false,
+        state.hover == SshConnectHit::Logs,
+        sk,
+    );
     {
         let (bx, by, bw, bh) = l.logs_btn;
         let cxx = bx + bw - s(space::M) - s(3.0);
@@ -708,15 +722,12 @@ fn push_button_frame(
             return c;
         }
         // 深色底往上提亮，浅色底往下压暗，两边都是"更靠近手指"的方向。
-        let top = if sk.is_light {
-            Rgba::new(0, 0, 0, 20)
-        } else {
-            Rgba::new(255, 255, 255, 26)
-        };
+        let top = if sk.is_light { Rgba::new(0, 0, 0, 20) } else { Rgba::new(255, 255, 255, 26) };
         icons::blend_over(c, top)
     };
     if primary {
-        quads.push(UiQuad::solid(x, y, w, h, radius, lift(Rgba::opaque(sk.accent))).pixel_snapped());
+        quads
+            .push(UiQuad::solid(x, y, w, h, radius, lift(Rgba::opaque(sk.accent))).pixel_snapped());
     } else {
         quads.push(UiQuad::solid(x, y, w, h, radius, sk.hairline).pixel_snapped());
         let inset = (radius * 0.0 + 1.0).max(1.0);
