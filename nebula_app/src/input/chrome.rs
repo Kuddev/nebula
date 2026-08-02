@@ -746,6 +746,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     shell_picker_count,
                     font_picker_count,
                     hidden_host_count,
+                    self.ctx.display().nebula_density,
                 );
                 // 打开的下拉框独占第一击：命中不属于它（选项行或锚行）时，
                 // 这一击只负责关闭浮层，绝不让下层控件借机误触发。

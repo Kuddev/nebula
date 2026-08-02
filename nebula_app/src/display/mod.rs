@@ -2103,6 +2103,7 @@ impl Display {
             area,
             self.nebula_settings_section,
             self.nebula_hidden_hosts.len(),
+            self.nebula_density,
         );
         let next = (self.nebula_settings_scroll + delta).clamp(0.0, max);
         if (next - self.nebula_settings_scroll).abs() > f32::EPSILON {
@@ -3529,6 +3530,7 @@ impl Display {
             self.terminal_card_rect(),
             self.nebula_settings_scroll,
             target,
+            self.nebula_density,
         );
         self.nebula_settings_opacity_drag = Some((target, slider.0, slider.2));
         self.update_settings_opacity_drag(pointer_x);

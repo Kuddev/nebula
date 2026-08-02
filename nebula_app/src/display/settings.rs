@@ -843,8 +843,10 @@ pub(super) fn settings_max_scroll(
     area: (f32, f32, f32, f32),
     section: NebulaSettingsSection,
     hidden_host_count: usize,
+    density: super::ui::tokens::Density,
 ) -> f32 {
-    let geometry = settings_geometry(size_info, scale_factor, area, 0.0, hidden_host_count);
+    let geometry =
+        settings_geometry(size_info, scale_factor, area, 0.0, hidden_host_count, density);
     let (_, _, _, ph) = geometry.popup;
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
@@ -862,6 +864,7 @@ fn settings_geometry(
     area: (f32, f32, f32, f32),
     scroll: f32,
     hidden_host_count: usize,
+    density: super::ui::tokens::Density,
 ) -> SettingsGeometry {
     let s = |v: f32| v * scale_factor;
     let gear = chrome_settings_button_rect(size_info, scale_factor);
@@ -887,8 +890,13 @@ fn settings_geometry(
     // CONTIGUOUS — one hairline frame around the block, hairline separators
     // between rows — and a finished group leaves 32px before the next title,
     // so `74 = 32 (section gap) + 42 (hanging title)`.
-    const ROW_H: f32 = 44.0;
-    const GROUP_ADVANCE: f32 = 74.0;
+    // 行高与组间距按密度降档：紧凑用阶梯上既有的 COMPACT_ROW，组间距
+    // 随行高等量收窄，不引入新数值。
+    let row_advance = super::ui::tokens::control::settings_row(density);
+    #[allow(non_snake_case)]
+    let ROW_H: f32 = row_advance;
+    #[allow(non_snake_case)]
+    let GROUP_ADVANCE: f32 = 74.0 - (44.0 - row_advance);
     // 预览卡设计高度：两行示例文本 + 光标演示的呼吸空间。
     const PREVIEW_H: f32 = 150.0;
 
@@ -1086,8 +1094,9 @@ pub(crate) fn opacity_slider_rect(
     area: (f32, f32, f32, f32),
     scroll: f32,
     target: SettingsOpacityTarget,
+    density: super::ui::tokens::Density,
 ) -> (f32, f32, f32, f32) {
-    let geometry = settings_geometry(size_info, scale_factor, area, scroll, 0);
+    let geometry = settings_geometry(size_info, scale_factor, area, scroll, 0, density);
     match target {
         SettingsOpacityTarget::Terminal => geometry.opacity_slider,
         SettingsOpacityTarget::BackgroundImage => geometry.background_image_opacity_slider,
@@ -1107,8 +1116,9 @@ pub(super) fn appearance_preview_wallpaper_rects(
     area: (f32, f32, f32, f32),
     scroll: f32,
     hidden_hosts: usize,
+    density: super::ui::tokens::Density,
 ) -> Option<((f32, f32, f32, f32), (f32, f32, f32, f32))> {
-    let geometry = settings_geometry(size_info, scale_factor, area, scroll, hidden_hosts);
+    let geometry = settings_geometry(size_info, scale_factor, area, scroll, hidden_hosts, density);
     let (vx, vy, vw, vh) = geometry.preview;
     let (_, content_y, _, _) = geometry.content;
     let (_, py, _, ph) = geometry.popup;
@@ -1215,8 +1225,10 @@ pub fn settings_hit(
     shell_count: usize,
     font_count: usize,
     hidden_host_count: usize,
+    density: super::ui::tokens::Density,
 ) -> SettingsHit {
-    let geometry = settings_geometry(size_info, scale_factor, area, scroll, hidden_host_count);
+    let geometry =
+        settings_geometry(size_info, scale_factor, area, scroll, hidden_host_count, density);
     let s = |v: f32| v * scale_factor;
 
     if contains_rect(geometry.gear, x, y) {
@@ -1703,7 +1715,14 @@ pub(super) fn push_quads(
     let s = |v: f32| v * scale;
     let sk = view.theme.skin();
 
-    let geometry = settings_geometry(size, scale, view.area, view.scroll, view.hidden_hosts.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.area,
+        view.scroll,
+        view.hidden_hosts.len(),
+        view.density,
+    );
     let (px, py, pw, ph) = geometry.popup;
     // Header band height: the title row sits above the content, and the header
     // separator + big title are all measured from here.
@@ -2458,7 +2477,14 @@ pub(super) fn push_popup_quads(
     let Some(dropdown) = view.dropdown else { return };
     let s = |v: f32| v * scale;
     let sk = view.theme.skin();
-    let geometry = settings_geometry(size, scale, view.area, view.scroll, view.hidden_hosts.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.area,
+        view.scroll,
+        view.hidden_hosts.len(),
+        view.density,
+    );
     // 背景色专用浮层：色板网格 + hex 输入框（几何与 hit 同源）。
     if dropdown == SettingsDropdown::BackgroundColor {
         if view.section != NebulaSettingsSection::Appearance {
@@ -2596,7 +2622,14 @@ pub(super) fn draw_popup_text(
     let language = view.language;
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let geometry = settings_geometry(size, scale, view.area, view.scroll, view.hidden_hosts.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.area,
+        view.scroll,
+        view.hidden_hosts.len(),
+        view.density,
+    );
     // 背景色浮层：hex 草稿（或占位提示）画进输入框，色板格无文字。
     if dropdown == SettingsDropdown::BackgroundColor {
         if view.section != NebulaSettingsSection::Appearance {
@@ -2776,7 +2809,14 @@ pub(super) fn draw_text(
     let sk = view.theme.skin();
     let language = view.language;
 
-    let geometry = settings_geometry(size, scale, view.area, view.scroll, view.hidden_hosts.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.area,
+        view.scroll,
+        view.hidden_hosts.len(),
+        view.density,
+    );
     // Kept for parity with [`draw_popup_text`]'s shell icons; the base page
     // currently stages no icon draws of its own.
     let icon_draws = Vec::new();

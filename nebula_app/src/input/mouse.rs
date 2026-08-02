@@ -244,6 +244,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             shell_picker_count,
             font_picker_count,
             hidden_host_count,
+            self.ctx.display().nebula_density,
         );
         let chrome_hover = if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32)
         {
