@@ -2139,6 +2139,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                         view.area,
                         view.scroll,
                         view.hidden_hosts.len(),
+                        view.density,
                     ) {
                         d.renderer.draw_background_image(
                             &size,
