@@ -1500,6 +1500,7 @@ pub(super) fn push_quads(
     quads: &mut Vec<UiQuad>,
     size: &SizeInfo,
     scale: f32,
+    density: super::ui::tokens::Density,
 ) {
     if !model.is_open() {
         return;
@@ -1524,6 +1525,7 @@ pub(super) fn push_quads(
         (w, h),
         scale,
         &sk,
+        density,
         surface::Elevation::Popover,
         1.0,
     );

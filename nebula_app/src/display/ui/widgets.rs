@@ -13,7 +13,7 @@
 use super::icons;
 use super::surface;
 use super::theme::Skin;
-use super::tokens::radius;
+use super::tokens::{Density, radius};
 use crate::renderer::ui::{Rgba, UiQuad};
 
 pub(crate) type Rect = (f32, f32, f32, f32);
@@ -209,12 +209,22 @@ pub(crate) fn push_combobox_popup(
     hover: Option<usize>,
     scale: f32,
     sk: &Skin,
+    density: Density,
 ) {
     let s = |v: f32| v * scale;
     // 层级走 Menu：真外阴影 + 同心描边 + 不透明底。此前这里是
     // `UiQuad::glow` —— glow 向外扩散亮度，不建立高度关系，在浅色主题上
     // 只会让下拉四周发灰，看着像脏了一圈而不是浮起来。
-    surface::push_surface(quads, popup, (0.0, 0.0), scale, sk, surface::Elevation::Menu, 1.0);
+    surface::push_surface(
+        quads,
+        popup,
+        (0.0, 0.0),
+        scale,
+        sk,
+        density,
+        surface::Elevation::Menu,
+        1.0,
+    );
     quads.push(UiQuad::solid(
         popup.0,
         popup.1,

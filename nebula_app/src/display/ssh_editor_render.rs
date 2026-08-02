@@ -556,6 +556,7 @@ impl Display {
             stage_radius,
             scale,
             &skin,
+            self.nebula_density,
             super::ui::surface::Elevation::Modal,
             progress,
         );
@@ -579,7 +580,14 @@ impl Display {
         // 分组卡片：hairline 环 + card 内芯，两者由 `push_group` 合成成一个
         // 不透明填充。分开画会让描边色渗满整张卡（见该函数的注释）。
         for group in [conn_group, auth_group] {
-            super::ui::surface::push_group(&mut quads, group, scale, &skin, progress);
+            super::ui::surface::push_group(
+                &mut quads,
+                group,
+                scale,
+                &skin,
+                self.nebula_density,
+                progress,
+            );
         }
         // 卡片内芯的实色。卡片里再嵌的东西（分段轨道）要拿它当底做合成。
         let group_fill = super::ui::surface::over(skin.card, skin.panel);
@@ -1354,6 +1362,7 @@ impl Display {
                 stage_radius,
                 scale,
                 &skin,
+                self.nebula_density,
                 super::ui::surface::Elevation::Menu,
                 1.0,
             );
