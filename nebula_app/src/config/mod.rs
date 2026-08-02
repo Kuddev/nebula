@@ -262,9 +262,7 @@ pub fn deserialize_config(path: &Path, warn_pruned: bool) -> Result<Value> {
     // Convert YAML to TOML as a transitionary fallback mechanism.
     let extension = path.extension().unwrap_or_default();
     if (extension == "yaml" || extension == "yml") && !contents.trim().is_empty() {
-        warn!(
-            "YAML config {path:?} is deprecated, please migrate to TOML using `nebula migrate`"
-        );
+        warn!("YAML config {path:?} is deprecated, please migrate to TOML using `nebula migrate`");
 
         let mut value: serde_yaml::Value = serde_yaml::from_str(&contents)?;
         prune_yaml_nulls(&mut value, warn_pruned);

@@ -267,8 +267,7 @@ fn find_pwsh() -> Option<String> {
         return Some(path);
     }
     // Store install exposes an execution alias under WindowsApps.
-    env_path("LOCALAPPDATA")
-        .and_then(|root| existing(root.join(r"Microsoft\WindowsApps\pwsh.exe")))
+    env_path("LOCALAPPDATA").and_then(|root| existing(root.join(r"Microsoft\WindowsApps\pwsh.exe")))
 }
 
 #[cfg(windows)]
@@ -290,10 +289,9 @@ fn find_git_bash() -> Option<String> {
     }
 
     // Well-known directories (mirrors the PTY layer's own bash lookup).
-    for candidate in [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files (x86)\Git\bin\bash.exe",
-    ] {
+    for candidate in
+        [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"]
+    {
         if let Some(path) = existing(PathBuf::from(candidate)) {
             return Some(path);
         }
@@ -329,17 +327,74 @@ fn find_nushell() -> Option<String> {
     })
 }
 
+/// 静默 tab 行右侧的 shell 短标：`wsl:Ubuntu` /「WSL · Ubuntu」→ `ubuntu`、
+/// 「PowerShell 7」/ `pwsh` → `pwsh`……口径按人叫得出的短名，不按 exe 名。
+/// 吃 shell 的 settings id 或菜单显示名都行——两条管道喂进来的是哪种取决
+/// 于 tab 的启动方式，短标必须两头一致。
+pub fn shell_short_tag(name_or_id: &str) -> String {
+    let raw = name_or_id.trim();
+    if let Some(distro) = raw.strip_prefix("wsl:") {
+        return distro.to_ascii_lowercase();
+    }
+    // 菜单显示名「WSL · Ubuntu」：发行版名就是短标。
+    if let Some((_, distro)) = raw.split_once('·') {
+        return distro.trim().to_ascii_lowercase();
+    }
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("powershell") {
+        // 用户口头就用 pwsh 区分 7 和老 5.1，只有 Windows PowerShell 保留全名。
+        return if lower.contains("windows") { "powershell".into() } else { "pwsh".into() };
+    }
+    if lower.contains("bash") {
+        return "bash".into();
+    }
+    if lower.contains("nushell") {
+        return "nu".into();
+    }
+    if lower.contains("cmd") || lower.contains("命令提示符") {
+        return "cmd".into();
+    }
+    // 未知的取首词小写、封顶 10 字符——这是注脚，不是第二个标签名。
+    lower.split_whitespace().next().unwrap_or("").chars().take(10).collect()
+}
+
+/// 已注册 WSL 发行版的名字（注册表 `Lxss` 各子键的 `DistributionName`），
+/// 字母序。目录选择器用它把 `\\wsl.localhost\<名>` 钉进侧栏——系统的
+/// 「Linux」导航节点不是每台 Win11 都有（issue #12 的现场就没有），钉进
+/// 去的入口才保证在。跳过 docker-desktop 等管道发行版，口径同 shell 菜单。
+#[cfg(windows)]
+pub fn wsl_distro_names() -> Vec<String> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let Ok(lxss) = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Lxss")
+    else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for guid in lxss.enum_keys().flatten() {
+        let Ok(sub) = lxss.open_subkey(&guid) else { continue };
+        let Ok(name) = sub.get_value::<String, _>("DistributionName") else { continue };
+        if name.starts_with("docker-desktop") {
+            continue;
+        }
+        names.push(name);
+    }
+    names.sort();
+    names
+}
+
 #[cfg(windows)]
 fn find_wsl_distros() -> Vec<DetectedShell> {
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
 
-    let wsl_exe = match env_path("SystemRoot")
-        .and_then(|root| existing(root.join(r"System32\wsl.exe")))
-    {
-        Some(path) => path,
-        None => return Vec::new(),
-    };
+    let wsl_exe =
+        match env_path("SystemRoot").and_then(|root| existing(root.join(r"System32\wsl.exe"))) {
+            Some(path) => path,
+            None => return Vec::new(),
+        };
 
     let lxss = match RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Lxss")
@@ -383,6 +438,20 @@ fn find_wsl_distros() -> Vec<DetectedShell> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_short_tags_read_like_what_people_call_them() {
+        use super::shell_short_tag;
+        // 两条管道各自的形态都要认：settings id 与菜单显示名。
+        assert_eq!(shell_short_tag("wsl:Ubuntu-24.04"), "ubuntu-24.04");
+        assert_eq!(shell_short_tag("WSL · Debian"), "debian");
+        assert_eq!(shell_short_tag("PowerShell 7"), "pwsh");
+        assert_eq!(shell_short_tag("pwsh"), "pwsh");
+        assert_eq!(shell_short_tag("Windows PowerShell"), "powershell");
+        assert_eq!(shell_short_tag("Git Bash"), "bash");
+        assert_eq!(shell_short_tag("Nushell"), "nu");
+        assert_eq!(shell_short_tag("CMD"), "cmd");
+    }
+
     use super::*;
 
     #[test]

@@ -89,11 +89,7 @@ pub fn load_lua_file(path: &Path, reload: ReloadSignal) -> Result<LoadedLuaConfi
     config.config_paths = watched_paths.clone();
     let lua = runtime.into_lua();
 
-    Ok(LoadedLuaConfig {
-        config,
-        generation: LuaGeneration { _lua: lua },
-        diagnostics,
-    })
+    Ok(LoadedLuaConfig { config, generation: LuaGeneration { _lua: lua }, diagnostics })
 }
 
 pub(super) fn validate_config_value(

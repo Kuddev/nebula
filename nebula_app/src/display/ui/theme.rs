@@ -439,8 +439,17 @@ impl NebulaTheme {
         // 当初避开 `p.panel` 是对的（那是 chrome 面板色，Steel 下比终端暗），
         // 但 `shell_bg` 是另一个字段，四个深色主题下都能让浮层高出终端 9–33
         // 级，方向对得上。
-        let lift = |c: u8| c.saturating_add(14);
+        // 提亮按**比例**而不是加常数。旧版 `c + 14` 在 Nebula 外壳
+        // (34,38,48) 上给出 (48,52,62)，而原型 panel 是 (48,53,65)——差的
+        // 全在蓝：外壳的冷调来自蓝比红高 14 级，每个通道同加一个常数后，
+        // 蓝的**相对**占比被摊薄，色温朝中性灰漂，深色底上读出来就是"发
+        // 绿"。乘法把三个通道按同一比例抬，蓝仍然领先同样的比例，冷调
+        // 保得住；对 Coal 那种三通道相等的外壳，两种算法给出同一个数。
+        // 系数取「均值 +14」换算：亮度阶梯跟旧版持平，变的只是色温。
         let shell = p.shell_bg;
+        let shell_avg = ((shell.r as f32 + shell.g as f32 + shell.b as f32) / 3.0).max(1.0);
+        let lift_factor = (shell_avg + 14.0) / shell_avg;
+        let lift = |c: u8| ((c as f32 * lift_factor).round().min(255.0)) as u8;
         if p.is_light {
             Skin {
                 // 浅色的三层不是单调递增的明度阶梯，而是**凹槽**（2026-07-31
@@ -465,7 +474,7 @@ impl NebulaTheme {
                 // modal 专用（popover 不画遮罩，见设计文档裁定三）。冷调压暗
                 // 而不是白雾：白雾 75% 把背景提亮到和白弹窗同明度，弹窗反而
                 // 浮不起来，且糊掉全部上下文。20% 压暗下背景仍然可读。
-                veil: Rgba::new(15, 23, 42, 56), // slate-900 @ 22%
+                veil: Rgba::new(15, 23, 42, 56),    // slate-900 @ 22%
                 ink: Rgb::new(51, 65, 85),          // slate-700
                 ink_dim: Rgb::new(100, 116, 139),   // slate-500
                 ink_strong: Rgb::new(15, 23, 42),   // slate-900
@@ -486,6 +495,15 @@ impl NebulaTheme {
                 // 浅色的红要比深色那份更沉：同一个红压在白底上，明度对比大得多，
                 // 照搬深色值会艳到从整张卡片里跳出来。
                 danger: Rgba::new(178, 58, 72, 255),
+                // 成功 / 等待与 danger 同构：语义色各备深浅两套，浅底上一律
+                // 更沉——同一个饱和色压在高明度背景上明度对比大得多，照搬深色
+                // 那份会艳到从界面里跳出来。
+                //
+                // 它们不跟主题 accent 走：accent 是品牌位（Nebula 蓝、Moss
+                // 绿），而"失败/完成/等你"是**语义**，在绿主题下把警示色也调
+                // 成绿的，等于把警告说成一切正常。
+                ok: Rgba::new(84, 140, 158, 255), // 青，与原型 --ok 同值
+                warn: Rgba::new(217, 119, 6, 255), // amber-600
                 // 2026-07-29 用户裁定：中性灰在屏幕上永远显脏。此前这几个
                 // 叠加色是纯黑 rgba(0,0,0,.05~.19)，而纯黑叠在白底上只能得
                 // 到**零色相**的死灰——这就是"不干净"的物理来源。现在改叠
@@ -524,8 +542,8 @@ impl NebulaTheme {
                 // 很暗的底上接近全黑，把上下文糊没了；36% 足够传达"被阻断"，
                 // 背景仍可读。冷调 slate-950 而不是纯黑，与整套灰同色温。
                 veil: Rgba::new(2, 6, 23, 92),
-                ink: Rgb::new(226, 232, 240),      // slate-200
-                ink_dim: Rgb::new(148, 163, 184),  // slate-400
+                ink: Rgb::new(226, 232, 240),        // slate-200
+                ink_dim: Rgb::new(148, 163, 184),    // slate-400
                 ink_strong: Rgb::new(248, 250, 252), // slate-50
                 ink_faint: Rgb::new(100, 116, 139),  // slate-500
                 // Dark accents are light — near-black ink on top.
@@ -535,6 +553,8 @@ impl NebulaTheme {
                 accent: a,
                 accent_soft: Rgba::new(a.r, a.g, a.b, 46),
                 danger: Rgba::new(196, 74, 88, 255),
+                ok: Rgba::new(125, 178, 194, 255), // 青，与原型 --ok 同值
+                warn: Rgba::new(245, 158, 11, 255), // amber-500
                 // 深色主题叠 slate-300 而不是纯白：白是中性色，叠上去会把
                 // 底色的色相**冲淡**，一叠就回到死灰。浅色主题叠深 slate、
                 // 深色主题叠浅 slate——这就是"深浅两套灰不一样"的技术原因。
@@ -632,6 +652,11 @@ pub(crate) struct Skin {
     /// Destructive primary actions (close-busy-pane confirm). Same on both
     /// light and dark — semantic red doesn't flip.
     pub(crate) danger: Rgba,
+    /// 成功完成。与 [`Skin::danger`] / [`Skin::warn`] 一组，是仅有的三个
+    /// **语义**色——它们表达状态，不表达品牌，所以不随主题 accent 变。
+    pub(crate) ok: Rgba,
+    /// 停下来等用户（授权、确认、密码）。
+    pub(crate) warn: Rgba,
     /// Edges, separators and quiet control borders.
     pub(crate) hairline: Rgba,
     /// Faint lift for interactive rows and cards.

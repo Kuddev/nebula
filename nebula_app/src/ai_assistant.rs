@@ -73,9 +73,7 @@ impl AssistantConfig {
     /// Read the config file. Called per failed command, not per frame — a
     /// sub-millisecond read beats cache-invalidation plumbing here.
     pub fn load() -> Self {
-        Self::parse(
-            &std::fs::read_to_string(config_path()).unwrap_or_default(),
-        )
+        Self::parse(&std::fs::read_to_string(config_path()).unwrap_or_default())
     }
 
     fn parse(text: &str) -> Self {
@@ -212,7 +210,13 @@ pub fn redact_secrets(text: &str) -> String {
         run.clear();
     };
     for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '+' || ch == '/' || ch == '=' || ch == '-' || ch == '_' {
+        if ch.is_ascii_alphanumeric()
+            || ch == '+'
+            || ch == '/'
+            || ch == '='
+            || ch == '-'
+            || ch == '_'
+        {
             run.push(ch);
         } else {
             flush(&mut run, &mut out);
@@ -283,22 +287,18 @@ fn request_fix(cfg: &AssistantConfig, req: &FixRequest) -> Option<AiFix> {
             {"role": "user", "content": user},
         ],
     });
-    let config = ureq::config::Config::builder()
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build();
+    let config =
+        ureq::config::Config::builder().timeout_global(Some(Duration::from_secs(30))).build();
     let agent: ureq::Agent = config.new_agent();
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let mut response = match agent
-        .post(&url)
-        .header("Authorization", &format!("Bearer {key}"))
-        .send_json(&body)
-    {
-        Ok(response) => response,
-        Err(err) => {
-            warn!("assistant: request failed: {err}");
-            return None;
-        },
-    };
+    let mut response =
+        match agent.post(&url).header("Authorization", &format!("Bearer {key}")).send_json(&body) {
+            Ok(response) => response,
+            Err(err) => {
+                warn!("assistant: request failed: {err}");
+                return None;
+            },
+        };
     let value: serde_json::Value = match response.body_mut().read_json() {
         Ok(value) => value,
         Err(err) => {
@@ -370,7 +370,8 @@ mod tests {
         assert_eq!(fix.explain, "拼写");
         assert!(!fix.danger);
         // Local danger regex overrides a lying model.
-        let fix = parse_fix("{\"command\":\"rm -rf /\",\"explain\":\"x\",\"danger\":false}").unwrap();
+        let fix =
+            parse_fix("{\"command\":\"rm -rf /\",\"explain\":\"x\",\"danger\":false}").unwrap();
         assert!(fix.danger);
         // Empty command = deliberate silence.
         assert!(parse_fix("{\"command\":\"\",\"explain\":\"no fix\",\"danger\":false}").is_none());

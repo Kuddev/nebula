@@ -2,9 +2,9 @@ use unicode_width::UnicodeWidthChar;
 
 use super::ssh_connect::{cols_that_fit, rgb_of, truncate_cols};
 use super::ssh_ui::{SshTestState, auth_sections};
-use super::*;
 use super::ui::theme;
 use super::ui::tokens::{control, radius, space, type_scale};
+use super::*;
 use crate::ssh_profiles::SshAuthMode;
 
 type Rect = (f32, f32, f32, f32);
@@ -24,6 +24,26 @@ const PORT_W: f32 = 76.0;
 const KEY_ROW_H: f32 = 30.0;
 /// 私钥最多显示几行，超出保留尾部（最近添加的）。
 const KEY_ROWS_MAX: usize = 4;
+
+/// 测试失败的原因最多铺几行。四行装得下绝大多数错误链；再长的尾巴收进
+/// 悬浮层——但前四行必须直接可见，排障的人不该先去发现"这行字能悬浮"。
+const STATUS_ROWS_MAX: usize = 4;
+
+/// 身份条：头像方块的边长，以及右边名字输入框的高（设计单位，照原型）。
+const AVATAR_H: f32 = 46.0;
+const IDENT_NAME_H: f32 = 30.0;
+/// 名字用比正文大一档的字（原型 15px / 基准 12.5px）。这一行是整张表单里
+/// 唯一一处"标题级"的输入——它答的是"这台机器叫什么"，其余都是参数。
+const IDENT_NAME_SCALE: f32 = 1.2;
+
+/// 图标选择器弹出层的宽度与行高（设计单位）。
+const ICON_POPUP_W: f32 = 232.0;
+const ICON_ROW_H: f32 = 28.0;
+/// 列表最多同时显示几个**可点的行**，再多就滚动。
+///
+/// 二十二个形状一次摊开有 600 多像素，会盖住半张表单——而这是这张表单里
+/// 最不需要改的字段。给它一屏七行的窗口，其余交给滚轮和搜索。
+const ICON_ROWS_MAX: usize = 7;
 
 /// 这套尺寸是按 12.5px 等宽字排的，那个字号下一格的推进宽度就是这个数。
 const DESIGN_CELL_W: f32 = 6.9;
@@ -52,6 +72,9 @@ fn ui_scale(cell_w_logical: f32) -> f32 {
 #[derive(Debug, Clone, Default)]
 struct EditorLayout {
     height: f32,
+    /// 身份条：头像 + 名字 + 地址副行，以及它下面那条分隔线。
+    ident_y: f32,
+    ident_rule_y: f32,
     /// 分组卡片外框 (y, h)：连接、认证。
     conn_group: (f32, f32),
     auth_group: (f32, f32),
@@ -62,7 +85,6 @@ struct EditorLayout {
     dest_y: f32,
     helper_y: f32,
     port_y: f32,
-    label_y: f32,
     /// 「认证」组：方式分段器，以及随方式切换的内容。
     auth_y: f32,
     note_y: f32,
@@ -76,13 +98,14 @@ struct EditorLayout {
     footer_h: f32,
 }
 
-/// 推导整张卡片的纵向布局。`cell_h` 是逻辑像素的 UI 行高。
+/// 推导整张卡片的纵向布局。`cell_h` 是逻辑像素的 UI 行高；`status_lines`
+/// 是测试状态条要占的行数（0 = 没有状态条，失败原因折行后可能多行）。
 fn editor_layout(
     show_password: bool,
     show_keys: bool,
     note_lines: usize,
     key_rows: usize,
-    has_teststate: bool,
+    status_lines: usize,
     cell_h: f32,
 ) -> EditorLayout {
     let caption_h = cell_h * type_scale::SECTION_CAPTION;
@@ -92,6 +115,16 @@ fn editor_layout(
 
     let mut l = EditorLayout::default();
     let mut y = HEAD_H + space::S;
+
+    // ── 身份条 ────────────────────────────────────────────────
+    // 图标 + 名字提到最顶上，合成一张「这台机器是谁」的卡片。它俩是同一件
+    // 事的两半——一个给眼睛认，一个给嘴巴念——分开塞进下面的字段表里，就都
+    // 退化成了可填可不填的杂项。它下面的「连接 / 认证」则纯粹是**怎么连上
+    // 去**，与身份无关，所以中间用一条分隔线断开。
+    l.ident_y = y;
+    y += AVATAR_H;
+    l.ident_rule_y = y + space::S;
+    y = l.ident_rule_y + space::S;
 
     // ── 连接组 ────────────────────────────────────────────────
     l.conn_group.0 = y;
@@ -103,8 +136,6 @@ fn editor_layout(
     l.helper_y = gy;
     gy += support_h + FIELD_GAP;
     l.port_y = gy;
-    gy += CTL_H + FIELD_GAP;
-    l.label_y = gy;
     gy += CTL_H + space::S;
     l.conn_group.1 = gy - y;
     y = gy + space::S;
@@ -143,9 +174,9 @@ fn editor_layout(
     y = gy + space::S;
 
     // ── 底部 ─────────────────────────────────────────────────
-    if has_teststate {
+    if status_lines > 0 {
         l.teststate_y = Some(y);
-        y += space::XS * 2.0 + support_h;
+        y += space::XS * 2.0 + support_h * status_lines as f32;
     }
     l.footer_y = y;
     l.footer_h = space::S * 2.0 + CTL_H;
@@ -162,31 +193,6 @@ fn spinner_phase() -> f32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |since| (since.as_millis() % PERIOD_MS) as f32 / PERIOD_MS as f32)
-}
-
-/// 转圈的忙碌指示器。
-///
-/// 原型那个 `border-top-color` 圆环靠旋转得到，而 quad 是轴对齐的、转不了。
-/// 所以把环离散成一圈点，让亮的那一段随相位绕行——读起来仍是"一段亮弧在
-/// 转"，尾迹衰减还比纯色圆环更能表达方向。
-fn push_spinner(quads: &mut Vec<UiQuad>, cx: f32, cy: f32, radius: f32, phase: f32, accent: Rgba) {
-    const DOTS: usize = 8;
-    let dot = (radius * 0.44).max(1.0);
-    for index in 0..DOTS {
-        let at = index as f32 / DOTS as f32;
-        let angle = std::f32::consts::TAU * at;
-        // 离头部越远越淡。平方衰减让头部足够突出，尾巴不至于糊成一个静止的环。
-        let behind = (at - phase).rem_euclid(1.0);
-        let strength = (1.0 - behind).powi(2);
-        quads.push(UiQuad::solid(
-            cx + radius * angle.cos() - dot * 0.5,
-            cy + radius * angle.sin() - dot * 0.5,
-            dot,
-            dot,
-            dot * 0.5,
-            Rgba::new(accent.r, accent.g, accent.b, (40.0 + strength * 200.0) as u8),
-        ));
-    }
 }
 
 impl Display {
@@ -240,21 +246,43 @@ impl Display {
         // 组内字段的可用宽度：卡片内边距 → 分组卡片内边距 → label 左列。
         let field_w = content_w - s(space::S) * 2.0;
         let ctl_w = field_w - s(LABEL_W) - s(space::S);
-        let note_cols = ((ctl_w + s(LABEL_W) + s(space::S))
-            / (cell_w * type_scale::SUPPORTING))
+        let note_cols = ((ctl_w + s(LABEL_W) + s(space::S)) / (cell_w * type_scale::SUPPORTING))
             .floor()
             .max(8.0) as usize;
         let note_lines = wrap_status_tooltip(note_text, note_cols).len().max(1);
 
         // 私钥最多展示四行，更多条目保留尾部（最近添加项）。
         let key_rows = if show_keys { editor.private_keys.len().clamp(1, KEY_ROWS_MAX) } else { 0 };
-        let has_teststate = editor.test != SshTestState::Idle;
+        // 失败原因在这里先折好行：布局要按行数给状态条留高，绘制按行铺开，
+        // 两边必须拿同一份折行结果，各折各的迟早对不上。
+        let status_cols = (((content_w - s(space::S)) / (cell_w * type_scale::SUPPORTING)).floor())
+            .max(12.0) as usize;
+        let (status_wrapped, status_truncated) = match &editor.test {
+            SshTestState::Failed { summary } => {
+                let mut lines = wrap_status_tooltip(summary, status_cols);
+                let truncated = lines.len() > STATUS_ROWS_MAX;
+                if truncated {
+                    lines.truncate(STATUS_ROWS_MAX);
+                    if let Some(last) = lines.last_mut() {
+                        // 末行钉上"未完"记号；超宽由 truncate 兜住。
+                        *last = truncate_tab_label(&format!("{last} …"), status_cols);
+                    }
+                }
+                (lines, truncated)
+            },
+            _ => (Vec::new(), false),
+        };
+        let status_lines = match &editor.test {
+            SshTestState::Idle => 0,
+            SshTestState::Failed { .. } => status_wrapped.len().max(1),
+            _ => 1,
+        };
         let v = editor_layout(
             show_password,
             show_keys,
             note_lines,
             key_rows,
-            has_teststate,
+            status_lines,
             // layout 全程用设计单位，所以行高也要换算过去。
             cell_h / scale / ui,
         );
@@ -271,19 +299,33 @@ impl Display {
         let conn_group = (group_x, by + s(v.conn_group.0), content_w, s(v.conn_group.1));
         let auth_group = (group_x, by + s(v.auth_group.0), content_w, s(v.auth_group.1));
 
-        let close =
-            (bx + box_w - s(space::S) - s(CTL_H), by + (s(HEAD_H) - s(CTL_H)) * 0.5, s(CTL_H), s(CTL_H));
+        let close = (
+            bx + box_w - s(space::S) - s(CTL_H),
+            by + (s(HEAD_H) - s(CTL_H)) * 0.5,
+            s(CTL_H),
+            s(CTL_H),
+        );
         let destination = (ctl_x, by + s(v.dest_y), ctl_w, field_h);
         let port = (ctl_x, by + s(v.port_y), s(PORT_W), field_h);
-        let host_label = (ctl_x, by + s(v.label_y), ctl_w, field_h);
+        // 身份条：[头像][名字 / 地址]。两者垂直居中对齐，头像跨着名字和它
+        // 下面那行地址——地址是名字的注脚，不是另一个条目。
+        let ident_x = bx + s(space::M);
+        let avatar = (ident_x, by + s(v.ident_y), s(AVATAR_H), s(AVATAR_H));
+        let ident_text_x = avatar.0 + avatar.2 + s(space::S);
+        let ident_text_w = bx + box_w - s(space::M) - ident_text_x;
+        let host_label = (ident_text_x, avatar.1, ident_text_w, s(IDENT_NAME_H));
+        let ident_sub_y = host_label.1 + host_label.3 + s(2.0);
 
         let auth_track = (ctl_x, by + s(v.auth_y), ctl_w, field_h);
         let auth_pad = s(2.0);
         let auth_w = (auth_track.2 - auth_pad * 2.0) / 4.0;
+        // 顺序按「人挑哪个」排，不按枚举定义排（2026-08-01 用户裁定）：密码
+        // 和密钥是明确的意图，放前面；自动是"都试试"的兜底，交互式最少用。
+        // 默认值仍是 Auto——顺序只关排版，不改语义。
         let auth_modes = [
-            SshAuthMode::Auto,
             SshAuthMode::Password,
             SshAuthMode::PublicKey,
+            SshAuthMode::Auto,
             SshAuthMode::KeyboardInteractive,
         ];
         let auth = std::array::from_fn(|index| {
@@ -298,21 +340,25 @@ impl Display {
             )
         });
         let zero = (0.0, 0.0, 0.0, 0.0);
-        let password = if show_password { (ctl_x, by + s(v.password_y), ctl_w, field_h) } else { zero };
+        let password =
+            if show_password { (ctl_x, by + s(v.password_y), ctl_w, field_h) } else { zero };
         let password_toggle = if show_password {
             (password.0 + password.2 - s(30.0), password.1 + s(2.0), s(28.0), password.3 - s(4.0))
         } else {
             zero
         };
-        let save_label = language
-            .pick("保存到 Windows 凭据管理器", "Save in Windows Credential Manager");
+        let save_label =
+            language.pick("保存到 Windows 凭据管理器", "Save in Windows Credential Manager");
         let save_toggle = if show_password {
             (ctl_x, by + s(v.save_y), (s(24.0) + text_width(save_label)).min(ctl_w), s(26.0))
         } else {
             zero
         };
-        let save_checkbox =
-            if show_password { (save_toggle.0, save_toggle.1 + s(5.0), s(16.0), s(16.0)) } else { zero };
+        let save_checkbox = if show_password {
+            (save_toggle.0, save_toggle.1 + s(5.0), s(16.0), s(16.0))
+        } else {
+            zero
+        };
 
         // 私钥行占满 label 右侧的整条控件列。
         let key_rows_y = by + s(v.keys_y);
@@ -359,11 +405,74 @@ impl Display {
         let test_w = s(96.0).max(text_width(test_action) + s(space::L));
         let test = (bx + s(space::M), footer_y, test_w, s(CTL_H));
         // 测试状态自己占一条，不再挤在按钮之间——那里放不下真实的错误原因。
+        // 失败时有几行折行就有几行高，命中区（悬浮）也跟着长。
         let teststate = v.teststate_y.map(|y| {
-            (bx + s(space::M), by + s(y) + s(space::XS), content_w, cell_h * type_scale::SUPPORTING)
+            (
+                bx + s(space::M),
+                by + s(y) + s(space::XS),
+                content_w,
+                cell_h * type_scale::SUPPORTING * status_lines.max(1) as f32,
+            )
         });
         let test_status = teststate.unwrap_or(zero);
         let footer_top = by + s(v.footer_y);
+
+        // ── 图标选择器 ────────────────────────────────────────────
+        // 默认收起。二十二个形状常驻摊开，会把"你正在编一台机器"变成"你正
+        // 在挑一个贴纸"——图标是这张表单里最不需要改的字段，它本来就有值。
+        let zh = language == super::UiLanguage::ZhCn;
+        let picker_rows = if editor.icon_picker {
+            super::ui::os_icons::picker_rows(&editor.icon_filter, zh)
+        } else {
+            Vec::new()
+        };
+        let icon_group_h = s(20.0);
+        let icon_row_h = s(ICON_ROW_H);
+        let list_budget = s(ICON_ROWS_MAX as f32 * ICON_ROW_H);
+        let (icon_max_scroll, visible_icon_rows) = icon_list_window(
+            &picker_rows,
+            editor.icon_scroll,
+            list_budget,
+            icon_group_h,
+            icon_row_h,
+        );
+        let mut list_h = visible_icon_rows.iter().map(|(_, _, h)| h).sum::<f32>();
+        // 一条也不剩时列表不能是零高——那样浮层会塌成一条缝，看起来像坏了。
+        // 留一行的位置写「没有匹配的图标」。
+        let icon_empty = editor.icon_picker && picker_rows.is_empty();
+        if icon_empty {
+            list_h = icon_row_h;
+        }
+        let popup_pad = s(space::XXS);
+        let search_h = s(26.0);
+        let (icon_popup, icon_search, icon_rows) = if editor.icon_picker {
+            let w = s(ICON_POPUP_W).min(box_w - s(space::M) * 2.0);
+            let h = popup_pad * 2.0 + search_h + s(space::XXS) + list_h;
+            let x = avatar.0.min(bx + box_w - s(space::M) - w);
+            // 下面放不下就翻到头像**上方**：浮层宁可换边也不该滑出卡片，
+            // 半截露在终端上的列表既点不全也读不出属于谁。
+            let below = avatar.1 + avatar.3 + s(space::XXS);
+            let y = if below + h > stage.1 + stage.3 - s(space::S) {
+                (avatar.1 - s(space::XXS) - h).max(stage.1 + s(space::S))
+            } else {
+                below
+            };
+            let popup = (x, y, w, h);
+            let search = (x + popup_pad, y + popup_pad, w - popup_pad * 2.0, search_h);
+            let list_top = search.1 + search.3 + s(space::XXS);
+            let rows = visible_icon_rows
+                .iter()
+                .filter_map(|(row, offset, h)| match row {
+                    super::ui::os_icons::PickerRow::Option(pick) => {
+                        Some((*pick, (search.0, list_top + offset, search.2, *h)))
+                    },
+                    super::ui::os_icons::PickerRow::Group(_) => None,
+                })
+                .collect::<Vec<_>>();
+            (popup, search, rows)
+        } else {
+            (zero, zero, Vec::new())
+        };
 
         // 文字起点：绘制和命中共用这一份。端口居中，其余靠左；端口空着时起点
         // 落在框正中，于是光标停在中央而不是贴着左边等着。
@@ -375,6 +484,11 @@ impl Display {
             label_x: host_label.0 + pad,
             password_x: password.0 + pad,
             cell_w,
+            // 名字按 1.2× 真栅格化，绘制的步进是**未取整** UI advance 的
+            // 1.2 倍；cell_w 是 floor 过的，拿它乘列宽每个字差零点几像素，
+            // 点到第十个字光标就漂进邻格了。
+            label_cell_w: self.glyph_cache.ui_font_metrics().average_advance as f32
+                * IDENT_NAME_SCALE,
         };
 
         self.nebula_ssh_editor_rects = Some(SshEditorRects {
@@ -396,31 +510,39 @@ impl Display {
             test_status,
             primary,
             cancel,
+            avatar,
+            icon_popup,
+            icon_search,
+            icon_search_text_x: icon_search.0 + pad,
+            icon_search_cell_w: cell_w * type_scale::SUPPORTING,
+            icon_rows: icon_rows.clone(),
+            icon_max_scroll,
             metrics,
         });
 
-        let status_tooltip = if self.nebula_ssh_editor_hover == SshEditorHit::TestStatus {
-            match &editor.test {
-                SshTestState::Failed { summary } => {
-                    let max_cols = (((field_w - s(24.0)) / cell_w).floor() as usize).max(12);
-                    let lines = wrap_status_tooltip(summary, max_cols);
-                    let widest = lines
-                        .iter()
-                        .map(|line| line.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>())
-                        .max()
-                        .unwrap_or(0);
-                    let line_h = cell_h + s(3.0);
-                    let width = (widest as f32 * cell_w + s(24.0)).clamp(s(180.0), field_w);
-                    let height = lines.len() as f32 * line_h + s(16.0);
-                    let x = bx + box_w - s(space::M) - width;
-                    let y = (footer_top - height - s(8.0)).max(by + s(10.0));
-                    Some(((x, y, width, height), lines, line_h))
-                },
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let status_tooltip =
+            if status_truncated && self.nebula_ssh_editor_hover == SshEditorHit::TestStatus {
+                match &editor.test {
+                    SshTestState::Failed { summary } => {
+                        let max_cols = (((field_w - s(24.0)) / cell_w).floor() as usize).max(12);
+                        let lines = wrap_status_tooltip(summary, max_cols);
+                        let widest = lines
+                            .iter()
+                            .map(|line| line.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>())
+                            .max()
+                            .unwrap_or(0);
+                        let line_h = cell_h + s(3.0);
+                        let width = (widest as f32 * cell_w + s(24.0)).clamp(s(180.0), field_w);
+                        let height = lines.len() as f32 * line_h + s(16.0);
+                        let x = bx + box_w - s(space::M) - width;
+                        let y = (footer_top - height - s(8.0)).max(by + s(10.0));
+                        Some(((x, y, width, height), lines, line_h))
+                    },
+                    _ => None,
+                }
+            } else {
+                None
+            };
 
         // SSH 主机编辑器是 Modal：遮罩、外阴影、同心描边、圆角全部走共享
         // 配方。此前这里的遮罩是写死的 `Rgba::new(0, 0, 0, 170)`——不读
@@ -491,15 +613,96 @@ impl Display {
             &skin,
             scale,
         );
-        input_quads(
-            &mut quads,
-            host_label,
-            editor.field == SshEditorField::Label,
-            self.nebula_ssh_editor_hover == SshEditorHit::Label,
-            accent,
-            &skin,
-            scale,
-        );
+        // 身份条的名字框：默认**没有框**，只有字。它是这张卡片的标题，一上
+        // 来就画一圈边会让整块顶部变成"又一个表单行"；悬浮时给一条发丝提示
+        // 可点，真编辑时才落下输入框的底和强调边。
+        {
+            let focused = editor.field == SshEditorField::Label;
+            if focused {
+                super::ui::surface::push_stroke(
+                    &mut quads,
+                    host_label,
+                    s(radius::CONTROL),
+                    scale,
+                    Rgba::new(accent.r, accent.g, accent.b, if skin.is_light { 118 } else { 136 }),
+                );
+                quads.push(UiQuad::solid(
+                    host_label.0,
+                    host_label.1,
+                    host_label.2,
+                    host_label.3,
+                    s(radius::CONTROL),
+                    skin.input,
+                ));
+            } else if self.nebula_ssh_editor_hover == SshEditorHit::Label {
+                super::ui::surface::push_stroke(
+                    &mut quads,
+                    host_label,
+                    s(radius::CONTROL),
+                    scale,
+                    skin.hairline,
+                );
+                // 描边是**实心矩形**，得有东西盖住中心才成环。这里要的是
+                // 透明底，所以拿它和面板色合成出的那个不透明色去盖。
+                quads.push(UiQuad::solid(
+                    host_label.0,
+                    host_label.1,
+                    host_label.2,
+                    host_label.3,
+                    s(radius::CONTROL),
+                    Rgba::new(skin.panel.r, skin.panel.g, skin.panel.b, 255),
+                ));
+            }
+        }
+        // 头像沿用输入框的皮：它和右边的名字是同一条身份里的两半，长得像
+        // 输入框才读得出"这也是你能改的"。开着列表时按聚焦态描边——弹层是
+        // 从它身上长出来的，得看得出源头。
+        //
+        // 圆角走**浮层**那一档而不是控件档：46px 的方块用 6px 圆角会显得
+        // 生硬，原型这里也是 r-overlay。
+        {
+            let open = editor.icon_picker;
+            let hovered = self.nebula_ssh_editor_hover == SshEditorHit::Avatar;
+            super::ui::surface::push_stroke(
+                &mut quads,
+                avatar,
+                s(radius::OVERLAY),
+                scale,
+                if open || hovered {
+                    Rgba::new(accent.r, accent.g, accent.b, if skin.is_light { 118 } else { 136 })
+                } else {
+                    skin.hairline
+                },
+            );
+            quads.push(UiQuad::solid(
+                avatar.0,
+                avatar.1,
+                avatar.2,
+                avatar.3,
+                s(radius::OVERLAY),
+                skin.input,
+            ));
+            if hovered && !open {
+                quads.push(UiQuad::solid(
+                    avatar.0,
+                    avatar.1,
+                    avatar.2,
+                    avatar.3,
+                    s(radius::OVERLAY),
+                    skin.hover,
+                ));
+            }
+        }
+        // 身份条与下面那两组之间的分隔线：上面答的是"这是谁"，下面答的是
+        // "怎么连上去"，两件事。
+        quads.push(UiQuad::solid(
+            bx + s(space::M),
+            by + s(v.ident_rule_y),
+            content_w,
+            s(control::HAIRLINE),
+            0.0,
+            hairline,
+        ));
         if show_password {
             input_quads(
                 &mut quads,
@@ -648,7 +851,19 @@ impl Display {
             if let Some(color) = status_dot {
                 quads.push(UiQuad::solid(bar.0, cy - s(3.0), s(6.0), s(6.0), s(3.0), color));
             } else if matches!(editor.test, SshTestState::Running { .. }) {
-                push_spinner(&mut quads, bar.0 + s(5.5), cy, s(5.5), spinner_phase(), accent);
+                // 和侧栏标签行同一个组件（`ui::icons::push_spinner`）：这里原来
+                // 有一份 8 点的私货，点少到能数出珠子。轨道用 hairline、亮弧用
+                // accent——"正在连接"是这张表单里唯一在动的东西，值得用品牌色。
+                super::ui::icons::push_spinner(
+                    &mut quads,
+                    bar.0 + s(5.5),
+                    cy,
+                    s(5.5),
+                    spinner_phase(),
+                    skin.hairline,
+                    accent,
+                    Rgba::new(skin.panel.r, skin.panel.g, skin.panel.b, 255),
+                );
             }
         }
 
@@ -667,8 +882,9 @@ impl Display {
                 SshEditorField::Label => host_label,
                 SshEditorField::Password => password,
             };
-            // 光标、选区、命中三者共用 metrics 的起点与组件层的列换算，所以
-            // 点在哪一格，光标就落在哪一格。
+            // 光标、选区、命中三者共用 metrics 的起点与**同一份列宽**，所以
+            // 点在哪一格，光标就落在哪一格——名字那一格比别处宽一档，这里跟
+            // 着字段取，不能图省事全用 `cell_w`。
             super::ui::text_field::push_cursor(
                 &mut quads,
                 caret_rect.1,
@@ -676,28 +892,14 @@ impl Display {
                 metrics.origin(caret_field),
                 &editor.display_text(caret_field),
                 editor.field_view(caret_field).1,
-                cell_w,
+                metrics.cell_w_of(caret_field),
                 scale,
                 &skin,
             );
         }
-        if let Some((tooltip, ..)) = &status_tooltip {
-            super::ui::surface::push_stroke(
-                &mut quads,
-                *tooltip,
-                s(radius::CONTROL),
-                scale,
-                skin.hairline,
-            );
-            quads.push(UiQuad::solid(
-                tooltip.0,
-                tooltip.1,
-                tooltip.2,
-                tooltip.3,
-                s(radius::CONTROL),
-                skin.panel,
-            ));
-        }
+        // tooltip 与图标选择器弹层不在这一批里：主批 quad 整体沉在表单
+        // 文字之下，浮层的底混在这里就压不住字，表单文字会从弹层里透出
+        // 来。它们在表单文字画完后作为 overlay 批另行提交（见下）。
         self.renderer.draw_ui(&size, &quads);
 
         let glyph_cache = &mut self.glyph_cache;
@@ -737,9 +939,16 @@ impl Display {
         );
 
         // ── 分组标题 ───────────────────────────────────────────────
+        //
+        // 两个都换成 codicon 的**空心**字形（原来是 Font Awesome 的实心机架
+        // 和实心钥匙）。实心图标在这个尺寸上是一块墨，形状全靠外轮廓；空心
+        // 的把内部结构留出来，读得出"这是机架的那几层""这是钥匙的那个齿"，
+        // 而且墨量小得多——分组标题本来就该轻，一块实心墨会把它顶到比标题
+        // 文字还重。整个 chrome 的图标语言也统一在 codicon 这一套上（齿轮、
+        // 关闭、图钉早就是它）。
         for (head_y, icon, text) in [
-            (v.conn_head_y, "\u{f233}", language.pick("连接", "Connection")),
-            (v.auth_head_y, "\u{f084}", language.pick("认证", "Authentication")),
+            (v.conn_head_y, "\u{eb50}", language.pick("连接", "Connection")),
+            (v.auth_head_y, "\u{eb11}", language.pick("认证", "Authentication")),
         ] {
             // 图标和标题同色同层：它是标题的一部分，抢眼了反而把"这一组叫
             // 什么"推到第二位。
@@ -811,24 +1020,16 @@ impl Display {
             glyph_cache,
         );
 
-        for (row_y, text, rect, value, placeholder, field) in [
-            (
-                v.port_y,
-                language.pick("端口", "Port"),
-                port,
-                &editor.port,
-                "22",
-                SshEditorField::Port,
-            ),
-            (
-                v.label_y,
-                language.pick("标签", "Label"),
-                host_label,
-                &editor.label,
-                language.pick("可选，列表里显示这个名字", "Optional, shown in the list"),
-                SshEditorField::Label,
-            ),
-        ] {
+        // 端口只剩它自己一行了（名字已经提到身份条），但循环留着：把"画
+        // label + 画内容/占位"这套规则写两遍，正是两个框慢慢长歪的开头。
+        for (row_y, text, rect, value, placeholder, field) in [(
+            v.port_y,
+            language.pick("端口", "Port"),
+            port,
+            &editor.port,
+            "22",
+            SshEditorField::Port,
+        )] {
             self.renderer.draw_ui_text(
                 &size,
                 field_x,
@@ -884,9 +1085,9 @@ impl Display {
             glyph_cache,
         );
         let auth_labels = if language == super::UiLanguage::ZhCn {
-            ["自动", "密码", "密钥", "交互式"]
+            ["密码", "密钥", "自动", "交互式"]
         } else {
-            ["Auto", "Password", "Key", "Interactive"]
+            ["Password", "Key", "Auto", "Interactive"]
         };
         for ((mode, rect), label) in auth.iter().zip(auth_labels) {
             self.renderer.draw_chrome_text(
@@ -1036,47 +1237,162 @@ impl Display {
             );
         }
 
-        let (status, status_ink, has_dot) = match &editor.test {
-            SshTestState::Idle => (None, skin.ink_faint, false),
+        let (status_rows, status_ink, has_dot) = match &editor.test {
+            SshTestState::Idle => (Vec::new(), skin.ink_faint, false),
             SshTestState::Running { .. } => (
-                Some(language.pick("正在连接…", "Connecting...").to_owned()),
+                vec![language.pick("正在连接…", "Connecting...").to_owned()],
                 skin.ink_faint,
                 // 转圈指示器和成功/失败的圆点占同一格，文字的左缩进因此一致
                 // ——不然状态在三态之间切换时，文字会横着跳一下。
                 true,
             ),
             SshTestState::Ok { elapsed_ms } => (
-                Some(format!(
-                    "{} · {elapsed_ms}ms",
-                    language.pick("连接成功", "Connected")
-                )),
+                vec![format!("{} · {elapsed_ms}ms", language.pick("连接成功", "Connected"))],
                 if skin.is_light { Rgb::new(26, 127, 55) } else { Rgb::new(63, 185, 80) },
                 true,
             ),
-            SshTestState::Failed { summary } => (
-                Some(summary.replace(['\r', '\n'], " ")),
+            // 失败原因逐行铺开。此前这里把换行压成空格、截成一行，完整原因
+            // 只活在悬浮层里——排障的人第一眼就该读到全文，而不是先发现
+            // "这行字原来能悬浮"。
+            SshTestState::Failed { .. } => (
+                status_wrapped,
                 if skin.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) },
                 true,
             ),
         };
-        if let (Some(status), Some(bar)) = (status, teststate) {
-            // 状态条独占一行，失败原因终于有地方完整显示，不再被挤在两个
-            // 按钮之间截断成一句读不懂的半句话。
+        if let Some(bar) = teststate {
+            // 状态条有几行，失败原因就铺几行；圆点缩进对齐每一行的左沿。
             let dot_w = if has_dot { s(space::S) } else { 0.0 };
             let max_cols = (((bar.2 - dot_w) / cell_w).floor() as isize).max(0);
             if max_cols > 0 {
-                let shown = truncate_tab_label(&status, max_cols as usize);
-                self.renderer.draw_ui_text(
-                    &size,
-                    bar.0 + dot_w,
-                    bar.1,
-                    support,
-                    status_ink,
-                    Flags::empty(),
-                    &shown,
-                    glyph_cache,
-                );
+                for (row, text) in status_rows.iter().enumerate() {
+                    let shown = truncate_tab_label(text, max_cols as usize);
+                    self.renderer.draw_ui_text(
+                        &size,
+                        bar.0 + dot_w,
+                        bar.1 + row as f32 * cell_h * support,
+                        support,
+                        status_ink,
+                        Flags::empty(),
+                        &shown,
+                        glyph_cache,
+                    );
+                }
             }
+        }
+
+        // ── 身份条 ───────────────────────────────────────────────
+        // 名字：整张表单里唯一一处标题级的输入。空着时给一句招呼而不是
+        // 「可选」——这一行的意思是"给它起个名字"，不是"这里还有个字段"。
+        let name_empty = editor.label.is_empty();
+        // 真栅格化（draw_ui_text 按 1.2× 字号重新出字形），不做位图拉伸——
+        // `draw_chrome_text_scaled` 是把终端字号的图集位图硬放大，名字作为
+        // 整张卡最大的一行字，糊得最扎眼。原型这行就是真 15px。
+        self.renderer.draw_ui_text(
+            &size,
+            metrics.label_x,
+            host_label.1 + (host_label.3 - cell_h * IDENT_NAME_SCALE) * 0.5,
+            IDENT_NAME_SCALE,
+            if name_empty { skin.ink_faint } else { skin.ink },
+            Flags::empty(),
+            if name_empty {
+                language.pick("给这台机器起个名字", "Name this machine")
+            } else {
+                editor.label.as_str()
+            },
+            glyph_cache,
+        );
+        // 地址副行：名字的注脚，跟着上面的地址框实时变。它是等宽的——地址
+        // 是机器读的东西，用等宽排能一眼看出点分十进制的对齐。
+        let ident_sub = if editor.destination.is_empty() {
+            language.pick("未填地址", "No address yet").to_owned()
+        } else {
+            ssh_ui::join_destination_port(&editor.destination, &editor.port)
+        };
+        let sub_cols = ((ident_text_w - s(space::XS)) / (cell_w * support)).floor().max(4.0);
+        self.renderer.draw_ui_text(
+            &size,
+            metrics.label_x,
+            ident_sub_y,
+            support,
+            skin.ink_faint,
+            Flags::empty(),
+            &truncate_tab_label(&ident_sub, sub_cols as usize),
+            glyph_cache,
+        );
+
+        // ── 浮层批：tooltip 与图标选择器弹层 ─────────────────────
+        // quad 与文字分两阶段提交，主批 quad 整体沉在表单文字之下。浮层
+        // 的底必须反过来压住表单文字，所以在文字画完后另起一批提交；浮
+        // 层自己的文字再叠在这批之上。
+        let mut overlay_quads: Vec<UiQuad> = Vec::new();
+        if let Some((tooltip, ..)) = &status_tooltip {
+            super::ui::surface::push_stroke(
+                &mut overlay_quads,
+                *tooltip,
+                s(radius::CONTROL),
+                scale,
+                skin.hairline,
+            );
+            overlay_quads.push(UiQuad::solid(
+                tooltip.0,
+                tooltip.1,
+                tooltip.2,
+                tooltip.3,
+                s(radius::CONTROL),
+                skin.panel,
+            ));
+        }
+        if editor.icon_picker {
+            // 和模态卡同一个 `panel` 底，靠 hairline + 外阴影分层——原型如此。
+            // 换个更亮的底色也能分开，但那样界面里就多出一档只在这里出现的
+            // 颜色；层级本来就该由阴影表达。
+            super::ui::surface::push_surface_in(
+                &mut overlay_quads,
+                icon_popup,
+                stage,
+                stage_radius,
+                scale,
+                &skin,
+                super::ui::surface::Elevation::Menu,
+                1.0,
+            );
+            // 搜索框：正经输入框——弹层开着它就是聚焦的（键盘归它），按
+            // 聚焦态描边；光标与选区走组件层，和表单字段同一套节律。
+            input_quads(&mut overlay_quads, icon_search, true, false, accent, &skin, scale);
+            super::ui::text_field::push_cursor(
+                &mut overlay_quads,
+                icon_search.1,
+                icon_search.3,
+                icon_search.0 + s(space::XS),
+                &editor.icon_filter,
+                &editor.icon_filter_cursor,
+                cell_w * support,
+                scale,
+                &skin,
+            );
+            for (pick, rect) in &icon_rows {
+                let picked = match pick {
+                    Some(index) => super::ui::os_icons::CATALOG[*index].id == editor.icon,
+                    // 「自动识别」= 没存过 id。空串和显式的 "auto" 都算它，
+                    // 这样手改过配置文件的人也能看到自己那一项是选中的。
+                    None => editor.icon.is_empty() || editor.icon == super::ui::os_icons::AUTO_ID,
+                };
+                let hovered = self.nebula_ssh_editor_hover == SshEditorHit::IconOption(*pick);
+                if picked || hovered {
+                    overlay_quads.push(UiQuad::solid(
+                        rect.0,
+                        rect.1,
+                        rect.2,
+                        rect.3,
+                        s(radius::CHIP),
+                        if picked { skin.accent_soft } else { skin.hover },
+                    ));
+                }
+            }
+        }
+        if !overlay_quads.is_empty() {
+            self.renderer.draw_ui(&size, &overlay_quads);
         }
         if let Some((tooltip, lines, line_h)) = status_tooltip {
             for (line, text) in lines.iter().enumerate() {
@@ -1086,6 +1402,153 @@ impl Display {
                     tooltip.1 + s(8.0) + line as f32 * line_h,
                     skin.ink,
                     text,
+                    glyph_cache,
+                );
+            }
+        }
+
+        // ── 头像里的形状 ─────────────────────────────────────────
+        // 「自动识别」在真连上之前先用通用终端的形状顶着：头像不能是空的，
+        // 一个空框会让人以为图标丢了。
+        let picked_icon = super::ui::os_icons::resolve(Some(editor.icon.as_str()));
+        let avatar_px = avatar.3 * 0.46;
+        let avatar_mult = super::ui::os_icons::scale_for(picked_icon, cell_w, avatar_px);
+        // 同名字：真栅格化。图标要放大到两倍上下，拉伸版在 46px 方块里
+        // 糊成一团墨渍（原型 `.nf` 是真 24px）。
+        self.renderer.draw_ui_text(
+            &size,
+            avatar.0 + (avatar.2 - avatar_px) * 0.5,
+            avatar.1 + (avatar.3 - cell_h * avatar_mult) * 0.5,
+            avatar_mult,
+            if editor.icon_picker { skin.ink } else { skin.ink_dim },
+            Flags::empty(),
+            picked_icon.glyph.encode_utf8(&mut [0u8; 4]),
+            glyph_cache,
+        );
+
+        // ── 选择器弹层的文字 ─────────────────────────────────────
+        if editor.icon_picker {
+            let filter_shown = !editor.icon_filter.is_empty();
+            self.renderer.draw_ui_text(
+                &size,
+                icon_search.0 + s(space::XS),
+                icon_search.1 + (icon_search.3 - cell_h * support) * 0.5,
+                support,
+                if filter_shown { skin.ink } else { skin.ink_faint },
+                Flags::empty(),
+                if filter_shown {
+                    editor.icon_filter.as_str()
+                } else {
+                    language.pick("搜索图标…（直接打字）", "Search icons… (just type)")
+                },
+                glyph_cache,
+            );
+            let caption = type_scale::SECTION_CAPTION;
+            let list_top = icon_search.1 + icon_search.3 + s(space::XXS);
+            for (row, offset, h) in &visible_icon_rows {
+                let y = list_top + offset;
+                match row {
+                    super::ui::os_icons::PickerRow::Group(title) => {
+                        self.renderer.draw_ui_text_tracked(
+                            &size,
+                            icon_search.0 + s(space::XS),
+                            y + (h - cell_h * caption) * 0.5,
+                            caption,
+                            s(0.65),
+                            skin.ink_faint,
+                            Flags::empty(),
+                            title,
+                            glyph_cache,
+                        );
+                    },
+                    super::ui::os_icons::PickerRow::Option(pick) => {
+                        let picked = match pick {
+                            Some(index) => super::ui::os_icons::CATALOG[*index].id == editor.icon,
+                            None => {
+                                editor.icon.is_empty()
+                                    || editor.icon == super::ui::os_icons::AUTO_ID
+                            },
+                        };
+                        let ink = if picked { skin.ink_strong } else { skin.ink_dim };
+                        // 图标列和名字列的节奏跟侧栏主机行一致：图标有自己的
+                        // 槽，槽后固定气口再排字。两处对不齐的话，"我在列表里
+                        // 挑的形状"和"侧栏里长出来的形状"就读不成同一个东西。
+                        let slot = h * 0.62;
+                        let glyph_x = icon_search.0 + s(space::XS);
+                        let text_x = glyph_x + slot + s(space::XS);
+                        match pick {
+                            Some(index) => {
+                                let icon = &super::ui::os_icons::CATALOG[*index];
+                                let mult =
+                                    super::ui::os_icons::scale_for(icon, cell_w, slot * 0.86);
+                                // 列表里的图标同样走真栅格化，跟头像出自
+                                // 同一张脸——挑的时候看的和挑完看到的必须
+                                // 是同一个清晰度。
+                                self.renderer.draw_ui_text(
+                                    &size,
+                                    glyph_x + slot * 0.07,
+                                    y + (h - cell_h * mult) * 0.5,
+                                    mult,
+                                    ink,
+                                    Flags::empty(),
+                                    icon.glyph.encode_utf8(&mut [0u8; 4]),
+                                    glyph_cache,
+                                );
+                                self.renderer.draw_ui_text(
+                                    &size,
+                                    text_x,
+                                    y + (h - cell_h * support) * 0.5,
+                                    support,
+                                    ink,
+                                    Flags::empty(),
+                                    if zh { icon.zh } else { icon.en },
+                                    glyph_cache,
+                                );
+                                // 码位贴右缘。这是给"照着配置文件找过来"的
+                                // 人留的锚点，所以用最淡的一档——它是注解，
+                                // 不参与挑选。
+                                let cp = format!("U+{:X}", icon.glyph as u32);
+                                let cp_w = cp.chars().count() as f32
+                                    * self.renderer.ui_text_advance(glyph_cache, caption);
+                                self.renderer.draw_ui_text(
+                                    &size,
+                                    icon_search.0 + icon_search.2 - s(space::XS) - cp_w,
+                                    y + (h - cell_h * caption) * 0.5,
+                                    caption,
+                                    skin.ink_faint,
+                                    Flags::empty(),
+                                    &cp,
+                                    glyph_cache,
+                                );
+                            },
+                            None => {
+                                self.renderer.draw_ui_text(
+                                    &size,
+                                    text_x,
+                                    y + (h - cell_h * support) * 0.5,
+                                    support,
+                                    ink,
+                                    Flags::empty(),
+                                    language.pick(
+                                        "自动识别（连上后按系统认）",
+                                        "Automatic (detect on first connect)",
+                                    ),
+                                    glyph_cache,
+                                );
+                            },
+                        }
+                    },
+                }
+            }
+            if icon_empty {
+                self.renderer.draw_ui_text(
+                    &size,
+                    icon_search.0 + s(space::XS),
+                    list_top + (icon_row_h - cell_h * support) * 0.5,
+                    support,
+                    skin.ink_faint,
+                    Flags::empty(),
+                    language.pick("没有匹配的图标", "No matching icon"),
                     glyph_cache,
                 );
             }
@@ -1132,8 +1595,76 @@ fn wrap_status_tooltip(value: &str, budget: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CTL_H, DESIGN_CELL_W, editor_layout, ui_scale, wrap_status_tooltip};
+    use super::{
+        AVATAR_H, CTL_H, DESIGN_CELL_W, editor_layout, icon_list_window, type_scale, ui_scale,
+        wrap_status_tooltip,
+    };
+    use crate::display::ui::os_icons::{PickerRow, picker_rows};
     use unicode_width::UnicodeWidthChar;
+
+    /// 失败原因折成几行，状态条就长几行高——错误全文必须直接可见，压成
+    /// 单行等于把原因藏回悬浮层。
+    #[test]
+    fn the_test_status_bar_grows_with_the_wrapped_error() {
+        let single = editor_layout(true, false, 1, 0, 1, 15.0);
+        let triple = editor_layout(true, false, 1, 0, 3, 15.0);
+        let support_h = 15.0 * type_scale::SUPPORTING;
+        assert!(
+            (triple.height - single.height - support_h * 2.0).abs() < 0.01,
+            "三行状态该比一行高出恰好两行，实际差 {}",
+            triple.height - single.height
+        );
+        // 状态条从同一处起笔：长的是它自己，顺带把页脚推下去。
+        assert_eq!(single.teststate_y, triple.teststate_y);
+        assert!(triple.footer_y > single.footer_y);
+        // 没有状态时整条不存在，不占一行空白。
+        assert!(editor_layout(true, false, 1, 0, 0, 15.0).teststate_y.is_none());
+    }
+
+    /// 列表的窗口按**高度**开，不按行数——标题矮一档，按行数除会算错。
+    #[test]
+    fn the_icon_list_window_never_overruns_its_height_budget() {
+        let rows = picker_rows("", true);
+        let (_, visible) = icon_list_window(&rows, 0, 196.0, 20.0, 28.0);
+        let used: f32 = visible.iter().map(|(_, _, h)| h).sum();
+        assert!(used <= 196.0, "窗口用了 {used}px，预算只有 196px");
+        assert!(visible.len() >= 7, "196px 至少能放下七行，实际只有 {}", visible.len());
+        // 偏移必须首尾相接：中间空一档会被读成"这里有一行没画出来"。
+        let mut expected = 0.0;
+        for (_, offset, h) in &visible {
+            assert!((offset - expected).abs() < 0.01);
+            expected += h;
+        }
+    }
+
+    /// 滚到底时最后一行正好贴着下沿。按 `len - 可见行数` 算会多滚出一段空
+    /// 白，看起来像下面还有东西却怎么也滚不出来。
+    #[test]
+    fn scrolling_to_the_bottom_lands_flush_on_the_last_row() {
+        let rows = picker_rows("", true);
+        let (max_scroll, _) = icon_list_window(&rows, 0, 196.0, 20.0, 28.0);
+        assert!(max_scroll > 0, "二十多个图标塞不进 196px，理应可滚");
+
+        let (_, bottom) = icon_list_window(&rows, max_scroll, 196.0, 20.0, 28.0);
+        assert_eq!(
+            bottom.last().map(|(row, ..)| *row),
+            rows.last().copied(),
+            "滚到底该看见最后一行"
+        );
+        // 再往下滚也是同一屏——夹取在窗口里做掉，输入侧不必自己算上限。
+        let (_, past_end) = icon_list_window(&rows, max_scroll + 5, 196.0, 20.0, 28.0);
+        assert_eq!(past_end.len(), bottom.len());
+    }
+
+    /// 全放得下时不该报出可滚——一个滚不动的滚动条比没有更让人困惑。
+    #[test]
+    fn a_short_list_reports_no_scroll() {
+        let rows = picker_rows("ubuntu", true);
+        let (max_scroll, visible) = icon_list_window(&rows, 0, 196.0, 20.0, 28.0);
+        assert_eq!(max_scroll, 0);
+        assert_eq!(visible.len(), rows.len());
+        assert!(matches!(visible[0].0, PickerRow::Group(_)));
+    }
 
     #[test]
     fn panel_grows_with_the_font_so_padding_survives() {
@@ -1154,18 +1685,24 @@ mod tests {
         let source = "认证失败：私钥路径 C:/用户/密钥/id_ed25519 不可用";
         let lines = wrap_status_tooltip(source, 12);
         assert_eq!(lines.concat(), source);
-        assert!(lines.iter().all(|line| {
-            line.chars().map(|ch| ch.width().unwrap_or(0)).sum::<usize>() <= 12
-        }));
+        assert!(
+            lines.iter().all(|line| {
+                line.chars().map(|ch| ch.width().unwrap_or(0)).sum::<usize>() <= 12
+            })
+        );
     }
 
     #[test]
     fn editor_layout_stacks_fields_without_overlap() {
-        let l = editor_layout(true, true, 1, 2, true, 15.0);
+        let l = editor_layout(true, true, 1, 2, 1, 15.0);
+        // 身份条在最上面，它下面那条分隔线把"这是谁"和"怎么连"隔开，连接
+        // 组从线以下开始。
+        assert!(l.ident_y + AVATAR_H <= l.ident_rule_y);
+        assert!(l.ident_rule_y < l.conn_group.0);
         // 连接组的三行按视觉顺序推进，helper 夹在地址和端口之间。
         assert!(l.dest_y + CTL_H <= l.helper_y);
         assert!(l.helper_y < l.port_y);
-        assert!(l.port_y + CTL_H <= l.label_y);
+        assert!(l.port_y + CTL_H <= l.conn_group.0 + l.conn_group.1);
         // 两个分组不重叠，且认证组在连接组下面。
         assert!(l.conn_group.0 + l.conn_group.1 <= l.auth_group.0);
         // 认证组内部的字段都落在组框里。
@@ -1181,23 +1718,70 @@ mod tests {
 
     #[test]
     fn editor_layout_shrinks_when_the_auth_mode_needs_no_fields() {
-        let full = editor_layout(true, true, 1, 4, false, 15.0);
+        let full = editor_layout(true, true, 1, 4, 0, 15.0);
         // keyboard-interactive：没有密码框也没有私钥列表，只剩一句说明。
-        let bare = editor_layout(false, false, 1, 0, false, 15.0);
+        let bare = editor_layout(false, false, 1, 0, 0, 15.0);
         assert!(bare.height < full.height);
         // 说明文案折成两行时，认证组要跟着长高——否则文字会顶穿组框下缘。
-        let two_lines = editor_layout(false, false, 2, 0, false, 15.0);
+        let two_lines = editor_layout(false, false, 2, 0, 0, 15.0);
         assert!(two_lines.auth_group.1 > bare.auth_group.1);
-        assert!(two_lines.note_y + 15.0 * 2.0 * 0.8 <= two_lines.auth_group.0 + two_lines.auth_group.1);
+        assert!(
+            two_lines.note_y + 15.0 * 2.0 * 0.8 <= two_lines.auth_group.0 + two_lines.auth_group.1
+        );
     }
 
     #[test]
     fn editor_layout_grows_with_the_private_key_list() {
-        let one = editor_layout(false, true, 1, 1, false, 15.0);
-        let four = editor_layout(false, true, 1, 4, false, 15.0);
+        let one = editor_layout(false, true, 1, 1, 0, 15.0);
+        let four = editor_layout(false, true, 1, 4, 0, 15.0);
         assert!(four.height > one.height);
         assert!(four.add_key_y > one.add_key_y);
     }
+}
+
+/// 选择器列表的可视窗口：`(最大滚动量, [(行, 行内偏移, 行高)])`。
+///
+/// 分组标题比选项矮一档，所以窗口只能按**高度**算，不能按行数除。
+///
+/// 最大滚动量从**末尾**倒推：滚到底时最后一行正好贴着列表下沿。按
+/// `len - 可见行数` 算是不对的——那是拿"从顶上看能显示几行"去推"从底下
+/// 数该留几行"，两头行高不一样时会多滚出一段空白，看起来像列表下面还有
+/// 东西却怎么也滚不出来。
+fn icon_list_window(
+    rows: &[super::ui::os_icons::PickerRow],
+    scroll: usize,
+    budget: f32,
+    group_h: f32,
+    option_h: f32,
+) -> (usize, Vec<(super::ui::os_icons::PickerRow, f32, f32)>) {
+    use super::ui::os_icons::PickerRow;
+    let height = |row: &PickerRow| match row {
+        // 分组标题比选项矮：它是路牌不是选项，占同样的高度会让人去点它。
+        PickerRow::Group(_) => group_h,
+        PickerRow::Option(_) => option_h,
+    };
+
+    let mut max_scroll = rows.len();
+    let mut tail = 0.0;
+    for (index, row) in rows.iter().enumerate().rev() {
+        tail += height(row);
+        if tail > budget {
+            break;
+        }
+        max_scroll = index;
+    }
+
+    let mut visible = Vec::new();
+    let mut used = 0.0;
+    for row in rows.iter().skip(scroll.min(max_scroll)) {
+        let h = height(row);
+        if used + h > budget {
+            break;
+        }
+        visible.push((*row, used, h));
+        used += h;
+    }
+    (max_scroll, visible)
 }
 
 fn input_quads(

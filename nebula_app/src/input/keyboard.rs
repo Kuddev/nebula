@@ -358,6 +358,81 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         if self.ctx.display().nebula_ssh_editor.is_some() {
             if self.ctx.display().ssh_editor_active() {
+                // 图标列表开着时它独占键盘：打字进搜索、Esc 只收列表、回车挑
+                // 第一项。不这样的话，敲 "deb" 会落进正在编辑的名字里，而 Esc
+                // 会连整张表单一起关掉——用户只是想收起一个列表。
+                if self.ctx.display().ssh_editor_icon_picker_open() {
+                    match &key.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            self.ctx.display().ssh_editor_close_icon_picker();
+                        },
+                        Key::Named(NamedKey::Enter) => {
+                            self.ctx.display().ssh_editor_icon_pick_first()
+                        },
+                        Key::Named(NamedKey::Backspace) => {
+                            self.ctx.display().ssh_editor_icon_filter_edit(None)
+                        },
+                        Key::Named(NamedKey::Delete) => {
+                            self.ctx.display().ssh_editor_icon_filter_delete_forward()
+                        },
+                        Key::Named(NamedKey::ArrowDown) => {
+                            self.ctx.display().ssh_editor_icon_scroll(1)
+                        },
+                        Key::Named(NamedKey::ArrowUp) => {
+                            self.ctx.display().ssh_editor_icon_scroll(-1)
+                        },
+                        // 搜索框是正经输入框：移动光标、Shift 扩选、Home/End、
+                        // Ctrl+A/C/V 一样不缺——这套组合键属于肌肉记忆，缺一个
+                        // 都会被读成"这个框是坏的"。
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            self.ctx.display().ssh_editor_icon_filter_move(false, mods.shift_key())
+                        },
+                        Key::Named(NamedKey::ArrowRight) => {
+                            self.ctx.display().ssh_editor_icon_filter_move(true, mods.shift_key())
+                        },
+                        Key::Named(NamedKey::Home) => {
+                            self.ctx.display().ssh_editor_icon_filter_jump(false, mods.shift_key())
+                        },
+                        Key::Named(NamedKey::End) => {
+                            self.ctx.display().ssh_editor_icon_filter_jump(true, mods.shift_key())
+                        },
+                        Key::Character(c)
+                            if mods.control_key()
+                                && !mods.alt_key()
+                                && c.eq_ignore_ascii_case("a") =>
+                        {
+                            self.ctx.display().ssh_editor_icon_filter_select_all();
+                        },
+                        Key::Character(c)
+                            if mods.control_key()
+                                && !mods.alt_key()
+                                && c.eq_ignore_ascii_case("c") =>
+                        {
+                            if let Some(text) =
+                                self.ctx.display().ssh_editor_icon_filter_selected_text()
+                            {
+                                self.ctx.clipboard_mut().store(ClipboardType::Clipboard, text);
+                            }
+                        },
+                        Key::Character(c)
+                            if mods.control_key()
+                                && !mods.alt_key()
+                                && c.eq_ignore_ascii_case("v") =>
+                        {
+                            let text = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                            self.ctx.display().ssh_editor_icon_filter_edit(Some(&text));
+                        },
+                        Key::Character(c) if !mods.control_key() && !mods.alt_key() => {
+                            self.ctx.display().ssh_editor_icon_filter_edit(Some(c))
+                        },
+                        Key::Named(NamedKey::Space) => {
+                            self.ctx.display().ssh_editor_icon_filter_edit(Some(" "))
+                        },
+                        _ => {},
+                    }
+                    self.ctx.mark_dirty();
+                    return;
+                }
                 match &key.logical_key {
                     Key::Named(NamedKey::Escape) => self.ctx.display().close_ssh_editor(),
                     Key::Named(NamedKey::Enter) => self.ctx.display().ssh_editor_activate_focus(),
@@ -365,9 +440,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.display().ssh_editor_next_field(mods.shift_key())
                     },
                     Key::Named(NamedKey::Backspace) => self.ctx.display().ssh_editor_backspace(),
-                    Key::Named(NamedKey::Delete) => {
-                        self.ctx.display().ssh_editor_delete_forward()
-                    },
+                    Key::Named(NamedKey::Delete) => self.ctx.display().ssh_editor_delete_forward(),
                     // 光标导航。按住 Shift 是扩选——这套组合键在 Windows 上
                     // 属于肌肉记忆，缺一个都会被读成"这个输入框是坏的"。
                     Key::Named(NamedKey::ArrowLeft) => {
@@ -697,7 +770,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         use crate::event::TabRequest;
         match action {
             NewTab => self.ctx.nebula_tab(TabRequest::New),
+            CopyCwd => {
+                if let Some(path) = self.ctx.display().focused_cwd_string() {
+                    self.ctx.clipboard_mut().store(ClipboardType::Clipboard, path);
+                }
+            },
+            RevealCwd => self.ctx.display().reveal_focused_cwd(),
+            ToggleSidebar => self.ctx.display().toggle_sidebar(),
+            TogglePanelResize => self.ctx.display().request_toggle_panel_resize(),
             OpenDirectoryPicker => self.ctx.display().open_directory_picker(),
+            OpenAiSessionPicker => self.ctx.display().open_ai_session_palette(),
+            ResumeAiSession(command) => {
+                // 非 bracketed：resume 是要**执行**的命令行，bracketed 包裹
+                // 会让部分 shell 把它按纯文本粘着不跑。
+                self.ctx.paste(&format!("{command}\r"), false);
+            },
             CloseTab => self.ctx.nebula_tab(TabRequest::Close),
             NextTab => self.ctx.nebula_tab(TabRequest::SelectNext),
             PrevTab => self.ctx.nebula_tab(TabRequest::SelectPrev),

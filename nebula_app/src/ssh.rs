@@ -156,8 +156,7 @@ pub fn ssh_destination(line: &str) -> Option<String> {
                 if VALUE_OPTS.contains(&b) {
                     // Attached value (`-p2222`) or the next token (`-p 2222`).
                     let attached = &tok[idx + 1..];
-                    let value =
-                        if attached.is_empty() { tokens.next() } else { Some(attached) };
+                    let value = if attached.is_empty() { tokens.next() } else { Some(attached) };
                     match b {
                         b'l' => login_user = value,
                         b'p' => port = value,
@@ -426,9 +425,9 @@ fn askpass_destination_from_args(args: &[String]) -> Option<String> {
     while i < args.len() {
         let arg = &args[i];
         if arg == "--" {
-            return args.get(i + 1).map(|dest| {
-                format_destination(dest, login_user.as_deref(), port.as_deref())
-            });
+            return args
+                .get(i + 1)
+                .map(|dest| format_destination(dest, login_user.as_deref(), port.as_deref()));
         }
         let bytes = arg.as_bytes();
         if bytes.first() == Some(&b'-') && bytes.len() >= 2 {
@@ -487,11 +486,7 @@ pub fn build_pane_launch(
     } else if shell == "cmd" {
         format!("\"{exe_text}\" ssh -- {destination}\r")
     } else if matches!(shell.as_str(), "bash" | "git-bash" | "gitbash") {
-        format!(
-            "'{}' ssh -- '{}'\r",
-            git_bash_path(exe),
-            destination.replace('\'', "'\\''")
-        )
+        format!("'{}' ssh -- '{}'\r", git_bash_path(exe), destination.replace('\'', "'\\''"))
     } else if shell == "nu" {
         format!(
             "^'{}' ssh -- '{}'\r",
@@ -499,11 +494,7 @@ pub fn build_pane_launch(
             destination.replace('\'', "''")
         )
     } else if shell.starts_with("wsl:") || shell == "wsl" {
-        format!(
-            "'{}' ssh -- '{}'\r",
-            wsl_path(exe),
-            destination.replace('\'', "'\\''")
-        )
+        format!("'{}' ssh -- '{}'\r", wsl_path(exe), destination.replace('\'', "'\\''"))
     } else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -524,10 +515,8 @@ pub fn build_askpass_env(
     destination: &str,
     session_id: u64,
 ) -> SshAskpassEnv {
-    let attempt_path = std::env::temp_dir().join(format!(
-        "nebula-ssh-askpass-{}-{session_id}.flag",
-        std::process::id()
-    ));
+    let attempt_path = std::env::temp_dir()
+        .join(format!("nebula-ssh-askpass-{}-{session_id}.flag", std::process::id()));
     let _ = std::fs::remove_file(&attempt_path);
     let mut values = std::collections::HashMap::new();
     values.insert("SSH_ASKPASS".into(), exe.to_string_lossy().into_owned());
@@ -535,10 +524,7 @@ pub fn build_askpass_env(
     values.insert("DISPLAY".into(), "nebula".into());
     values.insert("NEBULA_SSH_ASKPASS".into(), "1".into());
     values.insert("NEBULA_SSH_DESTINATION".into(), destination.into());
-    values.insert(
-        "NEBULA_SSH_ASKPASS_ATTEMPT".into(),
-        attempt_path.display().to_string(),
-    );
+    values.insert("NEBULA_SSH_ASKPASS_ATTEMPT".into(), attempt_path.display().to_string());
     SshAskpassEnv { values, attempt_path }
 }
 
@@ -579,9 +565,9 @@ pub fn run(args: Vec<String>) -> i32 {
     let ssh = find_ssh();
     let mut cmd = Command::new(&ssh);
     let askpass = askpass_destination_from_args(&args).and_then(|destination| {
-        std::env::current_exe().ok().map(|exe| {
-            build_askpass_env(&exe, &destination, std::process::id() as u64)
-        })
+        std::env::current_exe()
+            .ok()
+            .map(|exe| build_askpass_env(&exe, &destination, std::process::id() as u64))
     });
     if let Some(context) = &askpass {
         cmd.envs(&context.values);
@@ -741,24 +727,34 @@ mod tests {
     fn ssh_pane_launch_uses_shell_specific_quoting() {
         let exe = std::path::Path::new(r"C:\Program Files\Nebula\nebula.exe");
         let ps = build_pane_launch("pwsh", exe, "root@example.com").unwrap();
-        assert_eq!(String::from_utf8(ps.command).unwrap(),
-            "& 'C:\\Program Files\\Nebula\\nebula.exe' ssh -- 'root@example.com'\r");
+        assert_eq!(
+            String::from_utf8(ps.command).unwrap(),
+            "& 'C:\\Program Files\\Nebula\\nebula.exe' ssh -- 'root@example.com'\r"
+        );
 
         let cmd = build_pane_launch("cmd", exe, "root@example.com").unwrap();
-        assert_eq!(String::from_utf8(cmd.command).unwrap(),
-            "\"C:\\Program Files\\Nebula\\nebula.exe\" ssh -- root@example.com\r");
+        assert_eq!(
+            String::from_utf8(cmd.command).unwrap(),
+            "\"C:\\Program Files\\Nebula\\nebula.exe\" ssh -- root@example.com\r"
+        );
 
         let bash = build_pane_launch("git-bash", exe, "root@example.com").unwrap();
-        assert_eq!(String::from_utf8(bash.command).unwrap(),
-            "'/c/Program Files/Nebula/nebula.exe' ssh -- 'root@example.com'\r");
+        assert_eq!(
+            String::from_utf8(bash.command).unwrap(),
+            "'/c/Program Files/Nebula/nebula.exe' ssh -- 'root@example.com'\r"
+        );
 
         let nu = build_pane_launch("nu", exe, "root@example.com").unwrap();
-        assert_eq!(String::from_utf8(nu.command).unwrap(),
-            "^'C:\\Program Files\\Nebula\\nebula.exe' ssh -- 'root@example.com'\r");
+        assert_eq!(
+            String::from_utf8(nu.command).unwrap(),
+            "^'C:\\Program Files\\Nebula\\nebula.exe' ssh -- 'root@example.com'\r"
+        );
 
         let wsl = build_pane_launch("wsl:Ubuntu", exe, "root@example.com").unwrap();
-        assert_eq!(String::from_utf8(wsl.command).unwrap(),
-            "'/mnt/c/Program Files/Nebula/nebula.exe' ssh -- 'root@example.com'\r");
+        assert_eq!(
+            String::from_utf8(wsl.command).unwrap(),
+            "'/mnt/c/Program Files/Nebula/nebula.exe' ssh -- 'root@example.com'\r"
+        );
     }
 
     #[test]
@@ -768,10 +764,16 @@ mod tests {
             "alice@example.com",
             42,
         );
-        assert_eq!(launch.values.get("SSH_ASKPASS").map(String::as_str), Some(r"C:\Nebula\nebula.exe"));
+        assert_eq!(
+            launch.values.get("SSH_ASKPASS").map(String::as_str),
+            Some(r"C:\Nebula\nebula.exe")
+        );
         assert_eq!(launch.values.get("SSH_ASKPASS_REQUIRE").map(String::as_str), Some("force"));
         assert_eq!(launch.values.get("NEBULA_SSH_ASKPASS").map(String::as_str), Some("1"));
-        assert_eq!(launch.values.get("NEBULA_SSH_DESTINATION").map(String::as_str), Some("alice@example.com"));
+        assert_eq!(
+            launch.values.get("NEBULA_SSH_DESTINATION").map(String::as_str),
+            Some("alice@example.com")
+        );
         assert!(launch.values["NEBULA_SSH_ASKPASS_ATTEMPT"].contains("42"));
     }
 

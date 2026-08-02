@@ -29,6 +29,7 @@ use nebula_terminal::tty;
 
 mod ai_assistant;
 mod ai_hook;
+mod ai_sessions;
 mod atomic_file;
 mod cli;
 mod clipboard;
@@ -66,7 +67,8 @@ mod scheduler;
 mod session;
 mod shell_detect;
 #[cfg(windows)]
-mod ssh;#[cfg(windows)]
+mod ssh;
+#[cfg(windows)]
 mod ssh_credentials;
 #[cfg(windows)]
 mod ssh_profiles;

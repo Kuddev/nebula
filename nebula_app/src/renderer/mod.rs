@@ -477,8 +477,7 @@ impl Renderer {
         // descent (see `load_glyph`), and Δ = (ui_cell_h + ui_descent) ·
         // (scale − 1) matches the doc formula at the base zoom.
         let ui_metrics = glyph_cache.ui_font_metrics();
-        let anchor_y =
-            (y + (size_info.cell_height() + ui_metrics.descent) * (scale - 1.0)).round();
+        let anchor_y = (y + (size_info.cell_height() + ui_metrics.descent) * (scale - 1.0)).round();
         let advance = ui_metrics.average_advance as f32 * scale;
 
         let mut pen_x = x;
@@ -515,32 +514,32 @@ impl Renderer {
         glyph_cache.ui_font_metrics().average_advance as f32 * scale
     }
 
-/// Sampled breadcrumb for chrome-text rasterization (1/512 calls): records
-/// the terminal font px, the UI role px actually drawn and the cell the text
-/// steps by, into `ui_anchor.log`. Field diagnosis of "the sidebar zooms with
-/// the terminal" needs the ACTUAL rasterized size from user machines.
-fn chrome_text_probe(terminal: crossfont::Size, ui_role: crossfont::Size, cell_w: f32) {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNT: AtomicU32 = AtomicU32::new(0);
-    if COUNT.fetch_add(1, Ordering::Relaxed) % 512 != 0 {
-        return;
+    /// Sampled breadcrumb for chrome-text rasterization (1/512 calls): records
+    /// the terminal font px, the UI role px actually drawn and the cell the text
+    /// steps by, into `ui_anchor.log`. Field diagnosis of "the sidebar zooms with
+    /// the terminal" needs the ACTUAL rasterized size from user machines.
+    fn chrome_text_probe(terminal: crossfont::Size, ui_role: crossfont::Size, cell_w: f32) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNT: AtomicU32 = AtomicU32::new(0);
+        if COUNT.fetch_add(1, Ordering::Relaxed) % 512 != 0 {
+            return;
+        }
+        let line = format!(
+            "[chrome_text] term_px={:.1} drawn_px={:.1} step_cell_w={cell_w:.1}\n",
+            terminal.as_px(),
+            ui_role.as_px(),
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(crate::display::nebula_data_dir().join("ui_anchor.log"))
+        {
+            use std::io::Write as _;
+            let _ = file.write_all(line.as_bytes());
+        }
     }
-    let line = format!(
-        "[chrome_text] term_px={:.1} drawn_px={:.1} step_cell_w={cell_w:.1}\n",
-        terminal.as_px(),
-        ui_role.as_px(),
-    );
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(crate::display::nebula_data_dir().join("ui_anchor.log"))
-    {
-        use std::io::Write as _;
-        let _ = file.write_all(line.as_bytes());
-    }
-}
 
-/// Chrome text at the glyph cache's CURRENT font size, stepped by the
+    /// Chrome text at the glyph cache's CURRENT font size, stepped by the
     /// passed `SizeInfo` cells. Internal: [`Self::draw_chrome_text_styled`]
     /// wraps this with the UI compensation ratio; [`Self::draw_doc_text_tracked`]
     /// calls it directly so document text keeps following the terminal zoom.
@@ -875,7 +874,16 @@ fn chrome_text_probe(terminal: crossfont::Size, ui_role: crossfont::Size, cell_w
             );
         }
 
-        self.image_renderer.draw(size_info, path, opacity, fit, alignment, target, clip, clip_radius);
+        self.image_renderer.draw(
+            size_info,
+            path,
+            opacity,
+            fit,
+            alignment,
+            target,
+            clip,
+            clip_radius,
+        );
         // The image pass rebinds TEXTURE_2D behind the text renderer's back;
         // drop its cached atlas binding or every later glyph goes invisible.
         self.invalidate_text_texture_cache();

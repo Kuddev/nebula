@@ -35,10 +35,7 @@ pub fn file_uri_to_local_path(uri: &str) -> Option<PathBuf> {
 
 /// Test seam for [`file_uri_to_local_path`]; `drive_exists` is injected so unit
 /// tests don't depend on which drive letters the host machine happens to have.
-fn file_uri_to_local_path_with(
-    uri: &str,
-    drive_exists: impl Fn(char) -> bool,
-) -> Option<PathBuf> {
+fn file_uri_to_local_path_with(uri: &str, drive_exists: impl Fn(char) -> bool) -> Option<PathBuf> {
     // Case-insensitive `file:` scheme check without allocating.
     let rest = strip_scheme(uri)?;
 
@@ -79,9 +76,7 @@ fn host_is_local(host: &str) -> bool {
         return true;
     }
     // `ls --hyperlink` uses the machine's hostname; treat our own name as local.
-    std::env::var("COMPUTERNAME")
-        .ok()
-        .is_some_and(|name| name.eq_ignore_ascii_case(host))
+    std::env::var("COMPUTERNAME").ok().is_some_and(|name| name.eq_ignore_ascii_case(host))
 }
 
 /// Convert a decoded, local, posix-looking URI path into a Windows path.
@@ -222,10 +217,7 @@ mod tests {
     #[test]
     fn utf8_filename_roundtrips() {
         // "文档" percent-encoded as UTF-8.
-        assert_eq!(
-            t("file:///D:/%E6%96%87%E6%A1%A3/x.md"),
-            Some("D:\\文档\\x.md".into())
-        );
+        assert_eq!(t("file:///D:/%E6%96%87%E6%A1%A3/x.md"), Some("D:\\文档\\x.md".into()));
     }
 
     #[test]
@@ -267,7 +259,10 @@ mod tests {
 
     #[test]
     fn remote_host_becomes_unc() {
-        assert_eq!(t("file://fileserver/share/doc.txt"), Some(r"\\fileserver\share\doc.txt".into()));
+        assert_eq!(
+            t("file://fileserver/share/doc.txt"),
+            Some(r"\\fileserver\share\doc.txt".into())
+        );
     }
 
     #[test]

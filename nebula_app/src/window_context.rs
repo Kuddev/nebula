@@ -26,7 +26,7 @@ use winit::window::WindowId;
 use nebula_terminal::event::{Event as TerminalEvent, Notify};
 use nebula_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
 use nebula_terminal::grid::{Dimensions, Scroll};
-use nebula_terminal::index::Direction;
+use nebula_terminal::index::{Column, Direction, Line, Point};
 use nebula_terminal::sync::FairMutex;
 use nebula_terminal::term::test::TermSize;
 use nebula_terminal::term::{Term, TermMode};
@@ -237,13 +237,7 @@ impl WindowContext {
             renderer::platform::create_gl_context(&gl_display, &gl_config, raw_window_handle)?;
         crate::boot_trace("gl context created");
 
-        let display = Display::new(
-            window,
-            gl_context,
-            &config,
-            event_loop.system_theme(),
-            false,
-        )?;
+        let display = Display::new(window, gl_context, &config, event_loop.system_theme(), false)?;
         crate::boot_trace("display ready (fonts rasterized)");
 
         Self::new(display, config, options, proxy, boot)
@@ -285,13 +279,7 @@ impl WindowContext {
         let gl_context =
             renderer::platform::create_gl_context(&gl_display, gl_config, Some(raw_window_handle))?;
 
-        let display = Display::new(
-            window,
-            gl_context,
-            &config,
-            event_loop.system_theme(),
-            tabbed,
-        )?;
+        let display = Display::new(window, gl_context, &config, event_loop.system_theme(), tabbed)?;
 
         let mut window_context = Self::new(display, config, options, proxy, boot)?;
 
@@ -323,8 +311,7 @@ impl WindowContext {
         // Startup no longer replays the saved window size (the session file's
         // window record is write-only), so the live inner size IS the last
         // normal size at this point.
-        let windowed_size =
-            display.window.inner_size().to_logical(display.window.scale_factor);
+        let windowed_size = display.window.inner_size().to_logical(display.window.scale_factor);
 
         // Bootstrap the tab set: fresh/restored windows spawn their first
         // pane here; an attach adopts the detached panes wholesale.
@@ -1207,9 +1194,13 @@ impl WindowContext {
     fn export_workspace(&mut self, tab_index: Option<usize>) {
         let exportable = |tab: &&TabEntry| tab.doc.is_none() && !tab.settings;
         let tabs: Vec<_> = match tab_index {
-            Some(index) => {
-                self.tabs.get(index).filter(exportable).map(|tab| self.tab_session(tab)).into_iter().collect()
-            },
+            Some(index) => self
+                .tabs
+                .get(index)
+                .filter(exportable)
+                .map(|tab| self.tab_session(tab))
+                .into_iter()
+                .collect(),
             None => self.tabs.iter().filter(exportable).map(|tab| self.tab_session(tab)).collect(),
         };
         let Some(first) = tabs.first() else { return };
@@ -1229,7 +1220,13 @@ impl WindowContext {
         };
         let stem: String = stem
             .chars()
-            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c })
+            .map(|c| {
+                if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                    '-'
+                } else {
+                    c
+                }
+            })
             .collect();
 
         let Some(path) =
@@ -1437,8 +1434,7 @@ impl WindowContext {
                 if let Some(id) = seed.take() {
                     return Some(Layout::Leaf(id));
                 }
-                let cwd =
-                    session::valid_dir(cwd).or_else(|| self.display.startup_directory());
+                let cwd = session::valid_dir(cwd).or_else(|| self.display.startup_directory());
                 self.spawn_pane_detached(cwd, self.display.size_info).map(Layout::Leaf)
             },
             session::LayoutSession::Split { axis, ratio_permille, first, second } => {
@@ -1476,7 +1472,7 @@ impl WindowContext {
     /// session snapshot is written here and the Drop one is suppressed —
     /// after the take below, Drop would see zero tabs and wipe the file.
     pub fn detach_panes(&mut self) -> DetachedWindow {
-        session::save(&self.session_snapshot());
+        session::save_final(&mut self.session_snapshot());
         self.session_exempt = true;
         DetachedWindow {
             panes: mem::take(&mut self.panes),
@@ -1926,10 +1922,31 @@ impl WindowContext {
                 state.command_started.get_or_insert_with(std::time::Instant::now);
             },
             crate::ai_hook::AiHookKind::TurnDone | crate::ai_hook::AiHookKind::NeedsAttention => {
+                // codex 的 notify 只有"回合完成"一种事件：弹出交互式提问时
+                // 它发的也是 turn-complete，事件流分不出"说完了"和"在等你
+                // 回答"。回合结束的瞬间看一眼屏幕尾部——还挂着选择框或确认
+                // 提示，就按「等你批准」处理（蓝点升级成手掌）。
+                let screen_asks = ev.kind == crate::ai_hook::AiHookKind::TurnDone && {
+                    let term = self.panes[idx].terminal.lock();
+                    let lines = term.screen_lines();
+                    let take = lines.min(15);
+                    let start = Point::new(Line((lines - take) as i32), Column(0));
+                    let end = Point::new(
+                        Line(lines as i32 - 1),
+                        Column(term.columns().saturating_sub(1)),
+                    );
+                    crate::ai_hook::tail_looks_like_question(&term.bounds_to_string(start, end))
+                };
                 {
                     let state = &mut self.panes[idx].nebula_state;
                     state.awaiting_input = true;
                     state.finished_unseen = true;
+                    // 「等你批准」是比「回合完成」更强的状态：它不是通知你
+                    // 结果，是挡在半路要你点头。徽章上分成手掌与圆点两种
+                    // 墨迹，此前两者共用一个点，界面上根本分不出来。
+                    if ev.kind == crate::ai_hook::AiHookKind::NeedsAttention || screen_asks {
+                        state.needs_attention = true;
+                    }
                 }
                 // Tab dot when the pane sits in a background tab (same rule
                 // as mark_pane_bell; the visible tab shows the pane itself).
@@ -1982,9 +1999,8 @@ impl WindowContext {
         let Some(idx) = self.pane_index(pane_id) else { return false };
         let state = &mut self.panes[idx].nebula_state;
         if state.ai_fix.as_ref().is_some_and(|current| current.seq() == seq) {
-            state.ai_fix = fix
-                .clone()
-                .map(|fix| crate::ai_assistant::AiFixState::Ready { seq, fix });
+            state.ai_fix =
+                fix.clone().map(|fix| crate::ai_assistant::AiFixState::Ready { seq, fix });
             self.dirty = true;
             self.display.window.request_redraw();
         }
@@ -2241,6 +2257,10 @@ impl WindowContext {
             self.pane(self.focused_pane_id()).and_then(|pane| pane.ssh_destination.clone());
         self.display.route_side_panel(focused_ssh.as_deref());
         let panel_cwd = self.focused_cwd().or_else(|| self.focused_wsl_cwd());
+        // 命令面板的「工作目录」组也认这个值（WSL 路径已映射成 `\\wsl$\…`，
+        // 复制出去和丢给资源管理器都能用）。抽屉是节流的，这里不能顺手复用
+        // 它的内部状态——面板要的是**当前**目录，不是抽屉上次同步到的那个。
+        self.display.nebula_focused_cwd = panel_cwd.clone();
         self.display.side_panel_sync(panel_cwd);
 
         // Chrome clock: 1 Hz idle, 8 fps for finite UI transitions, and
@@ -2248,7 +2268,9 @@ impl WindowContext {
         // the cadence class changes.
         let clock_timer = TimerId::new(Topic::NebulaClock, self.display.window.id());
         let interval = chrome_clock_interval(
-            self.display.any_tab_running() || self.display.ssh_test_running(),
+            self.display.any_tab_running()
+                || self.display.ssh_test_running()
+                || self.display.any_tab_flashing(),
             self.display.chrome_editor_active(),
             self.display.chrome_animating(),
         );
@@ -2439,6 +2461,8 @@ impl WindowContext {
         if let Some(id) = self.tabs.get(self.active_tab).map(|t| t.active_pane) {
             if let Some(i) = self.pane_index(id) {
                 self.panes[i].nebula_state.finished_unseen = false;
+                self.panes[i].nebula_state.needs_attention = false;
+                self.panes[i].nebula_state.failed_unseen = false;
             }
         }
 
@@ -2446,7 +2470,13 @@ impl WindowContext {
         let mut colors = Vec::with_capacity(self.tabs.len());
         let mut dots = Vec::with_capacity(self.tabs.len());
         let mut running = Vec::with_capacity(self.tabs.len());
+        let mut attention = Vec::with_capacity(self.tabs.len());
+        let mut failed = Vec::with_capacity(self.tabs.len());
+        let mut flashing = Vec::with_capacity(self.tabs.len());
         let mut logos = Vec::with_capacity(self.tabs.len());
+        let mut shells = Vec::with_capacity(self.tabs.len());
+        // 静默行右侧的 shell 短标；Default 启动的 tab 用当前默认 shell 的。
+        let default_tag = self.display.default_shell_tag();
         let ui_language = self.display.ui_language();
         for tab in &self.tabs {
             let pane = self.pane(tab.active_pane);
@@ -2473,6 +2503,15 @@ impl WindowContext {
             logos.push(logo);
             labels.push(label);
             colors.push(tab.custom_color);
+            shells.push(match &tab.launch {
+                TabLaunch::Default => default_tag.clone(),
+                TabLaunch::Shell { name, .. } => crate::shell_detect::shell_short_tag(name),
+                // SSH 行的身份是目标主机（标签本身就写着），短标只说环境。
+                TabLaunch::Ssh(_) => "ssh".to_owned(),
+                TabLaunch::Profile(_) | TabLaunch::Document(_) | TabLaunch::Settings => {
+                    String::new()
+                },
+            });
             // Unseen-result dot: bell in a background tab, a tracked command
             // that finished unseen, or a tracked program parked at "waiting
             // for input" (claude between turns). The ring collapsing into a
@@ -2487,10 +2526,18 @@ impl WindowContext {
             // Spinner only while the command actually works; once it rang BEL
             // and waits for input the dot above takes over.
             running.push(state.is_some_and(|s| s.command_started.is_some() && !s.awaiting_input));
+            attention.push(state.is_some_and(|s| s.needs_attention));
+            failed.push(state.is_some_and(|s| s.failed_unseen));
+            // 对勾只在成功收尾后的一小段里亮着，随后落回圆点。
+            flashing.push(state.is_some_and(|s| {
+                s.finished_at.is_some_and(|at| at.elapsed() < crate::display::BADGE_FLASH)
+            }));
         }
         let active = self.active_tab.min(labels.len().saturating_sub(1));
         // displayed == storage index always holds now, so the bar is reorderable.
-        self.display.set_chrome_tabs(labels, colors, dots, running, logos, active, true);
+        self.display.set_chrome_tabs(
+            labels, colors, dots, running, attention, failed, flashing, logos, shells, active, true,
+        );
     }
 
     fn chrome_tab_label(pane: &Pane) -> String {
@@ -2580,6 +2627,8 @@ impl WindowContext {
             let focused = self.focused_pane_id();
             if let Some(i) = self.pane_index(focused) {
                 self.panes[i].nebula_state.awaiting_input = false;
+                // 打字即表态：人已经在这个 pane 上动手了，徽章再催就是噪声。
+                self.panes[i].nebula_state.needs_attention = false;
             }
         }
 
@@ -2918,9 +2967,11 @@ impl Drop for WindowContext {
         // empty list is exactly what makes the next launch start clean.
         // Closing the whole window (X / Alt+F4 / shortcut) keeps the tabs, so
         // they restore. Crash/kill paths never get here and are covered by
-        // the 1 Hz autosave instead.
+        // the 1 Hz autosave instead — which is also why this one (and only
+        // this one) stamps `clean_exit`: reaching Drop IS the definition of
+        // a clean exit.
         if !self.session_exempt {
-            session::save(&self.session_snapshot());
+            session::save_final(&mut self.session_snapshot());
         }
 
         // Shutdown every pane's PTY.

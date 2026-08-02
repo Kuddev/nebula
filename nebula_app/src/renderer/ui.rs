@@ -228,12 +228,7 @@ impl UiQuad {
     /// Flat-filled gradient polygon from explicit pixel corners
     /// `[top-left, bottom-left, top-right, bottom-right]` (for powerline slants).
     #[inline]
-    pub fn poly(
-        corners: [[f32; 2]; 4],
-        color0: Rgba,
-        color1: Rgba,
-        gradient: Gradient,
-    ) -> Self {
+    pub fn poly(corners: [[f32; 2]; 4], color0: Rgba, color1: Rgba, gradient: Gradient) -> Self {
         Self {
             x: 0.0,
             y: 0.0,
@@ -527,7 +522,8 @@ mod tests {
 
     #[test]
     fn shadow_geometry_includes_blur_and_vertical_offset() {
-        let shadow = UiQuad::shadow(10.0, 20.0, 100.0, 80.0, 8.0, 12.0, 4.0, Rgba::new(0, 0, 0, 54));
+        let shadow =
+            UiQuad::shadow(10.0, 20.0, 100.0, 80.0, 8.0, 12.0, 4.0, Rgba::new(0, 0, 0, 54));
         assert_eq!((shadow.x, shadow.y), (-2.0, 12.0));
         assert_eq!((shadow.width, shadow.height), (124.0, 104.0));
         assert_eq!(shadow.corner_radii, [8.0; 4]);

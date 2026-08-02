@@ -39,10 +39,7 @@ const STATELESS: &[&str] = &[
 /// （`busy_process_in` 优先用 pane 已知的 `running_program`）；这里只负责
 /// 没有那份身份信息时把名字擦干净。
 pub fn display_name(exe: &str) -> String {
-    exe.strip_suffix(".exe")
-        .or_else(|| exe.strip_suffix(".EXE"))
-        .unwrap_or(exe)
-        .to_owned()
+    exe.strip_suffix(".exe").or_else(|| exe.strip_suffix(".EXE")).unwrap_or(exe).to_owned()
 }
 
 /// First non-stateless process under `root_pid` (the pane's shell), or `None`

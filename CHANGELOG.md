@@ -4,6 +4,76 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
+## 0.9.0 - 2026-08-02
+
+### English
+
+#### Added
+
+- **Idle tabs show their shell** — a quiet tab row (no badge, not hovered) shows its shell as a small dim tag at the right edge: `pwsh`, `cmd`, `bash`, `ubuntu` (WSL distributions by name), and `ssh` for SSH tabs. Any badge (spinner, dot, attention…) outranks it, and the tag steps aside when a long name reaches the right edge.
+- **WSL distributions in the folder picker** — "Browse folder" dialogs now pin every registered WSL distribution (`\\wsl.localhost\<distro>`) to the top of their sidebar, so picking a Linux directory no longer depends on the system's "Linux" navigation node being present. (#12)
+- **Drag to resize the panels** — Settings → Interaction gains "Drag to resize panel widths". With it on, the sidebar's right edge and the file/git drawer's left edge become drag handles (the pointer turns into a resize cursor over the ±4 px grip), and dragging either panel all the way to its window edge closes it rather than stopping at a minimum width. Off by default, and turning it on asks for confirmation first, because a width drag reflows the terminal live. The drag itself is double-throttled — the panel edge tracks the pointer every frame, but the grid is only re-laid when the width has crossed a whole cell and at most once every 80 ms, so a fast drag cannot turn into a reflow storm. The SSH HOSTS divider is always draggable regardless of the switch — it only redistributes height inside the sidebar and never touches the grid, and the height you drag it to is honoured even when you have fewer hosts than fit. All three sizes persist.
+- **Restore last tabs on launch is now a setting** — Settings → Advanced → Sessions gains "Restore last tabs on launch (also after a crash)", on by default. Turning it off always starts clean; the snapshot keeps being written either way, so workspace export and crash diagnostics still work.
+- **Window background blur (Windows 11)** — Settings → Appearance gains "Background blur". With it on, whatever is behind the window is blurred through the terminal background (Acrylic), and the window-opacity slider becomes the strength of the tint laid over that blur, so one control still governs "how much shows through". Mica was tried and dropped: it samples the desktop wallpaper rather than the actual window behind, which reads as a flat colour wash instead of a blur. Note that a translucent background forces text anti-aliasing from subpixel to grayscale — that is a system-level constraint of transparent windows, not a rendering regression.
+- **The command palette is grouped** — rows now sit under quiet section headers with a hairline rule running to the panel edge: Working directory, Tabs, Jump, View, Workspace, Appearance, Settings, and the shell/profile list. The **Working directory** group carries the focused pane's path on the header itself — written once instead of repeated on every row — and holds "Copy path" and "Reveal in file manager"; "New tab" joins it only when a new tab would actually open there (a configured startup directory takes precedence, and then the row stays under Tabs rather than sitting under a heading that lies). Toggle commands ("Show tab sidebar", "Drag to resize panels") carry a check mark for their current state, so a switch that is already on reads differently from an action that would turn it on. Grouping is applied after ranking, so a group's internal order is still most-recently-used first (or best fuzzy match while typing), and the headers track the scrolled window rather than the top of the list.
+- **SSH connection progress** — connecting to a saved host now shows the four real stages (resolve, TCP, authenticate, open session) instead of a blank pane. The stages are call sites in Nebula's own SSH implementation rather than guesses parsed from a client's output, so the progress is truthful. The page waits 350 ms before appearing: connections that finish faster than that never flash a progress screen, and hovering a host in the sidebar shows the state inline instead of taking over the pane.
+
+#### Fixed
+
+- **A crash is now told apart from a clean exit** — the session snapshot records whether the process reached its teardown. After an unclean exit (crash, force-kill, power loss) the restored window says so in the message bar instead of restoring silently; and when the crash-loop breaker trips after three failed launches, the offending session is moved to `session.crashed.json` instead of being overwritten by the next autosave a second later — previously the only evidence of a restore-crash loop destroyed itself.
+- **Sharp text and icons in the SSH host editor** — the identity strip's name, the avatar shape and the icon list previously scaled up bitmaps rasterized at the terminal font size, visibly blurry next to the design; they now re-rasterize at their true size. Caret placement in the enlarged name field follows the true glyph advance, so clicking the tenth character no longer lands the caret a column off.
+- **The icon picker no longer shows form text through its panel** — overlay backgrounds were submitted in the same batch as the form's fills, which all paint beneath text; overlays (the icon list, the test-status tooltip) now paint after the form's text, so nothing bleeds through.
+- **Test-connection failures show the whole reason** — the status line used to flatten the error into one truncated line with the full text hidden behind a hover tooltip. Failures now wrap up to four lines right in the dialog; the tooltip remains only for over-long tails.
+- **Spinner rings render as smooth rings** — the beaded look came from translucent dots doubling their alpha wherever they overlap, and the active tab's ring composited against the sidebar background instead of the light pill it actually sits on, which read as a dark circle. Ring colors now pre-compose against the row's real background.
+- **The "needs your answer" badge shows up for codex** — codex's notify pipe only reports "turn complete", so interactive question prompts could only ever show the unread dot. On turn completion Nebula now checks the visible tail of the screen for prompt markers ("enter to submit", "(y/N)"…) and upgrades the badge to the attention marker.
+- **Inline math renders for grok too** — the rule that a rendered display formula unlocks inline `$…$` in that pane was keyed to a list of AI CLIs that had not been updated when grok was recognised elsewhere. grok sessions now get inline formulas like claude and codex do.
+
+#### Improved
+
+- **The icon picker's search box is a real input field** — click to place the caret, drag to select, Shift+arrows / Home / End, Ctrl+A/C/V, with the same caret-blink rhythm as every other field; the hint still shows while it is empty.
+- **New SSH hosts default to password authentication** — "Auto" needs a configured key to succeed, which made the old default a guaranteed first failure for most people. Existing hosts keep whatever they saved.
+- **The raised-hand badge is withdrawn for now** — even with wider fingers and tighter gaps the shape did not read as a hand at badge size. "Needs your answer" is an amber dot until the icon is redrawn; it still outranks the blue unread dot, and the two are told apart by colour rather than by shape.
+- **Sidebar rows breathe wider** — the row inset narrowed from 8 px to 4 px, giving the width to names, badges and shell tags; the sidebar's own width is unchanged.
+- **Every text field shares one caret** — caret position, selection, click-to-place and the blink rhythm moved out of the individual dialogs and into the input component itself. Previously each field carried its own copy, which is why the SSH editor's enlarged name field and the icon search box each drifted from the others in small ways; they now behave identically, and new fields inherit the behaviour instead of re-implementing it.
+
+#### Queued beyond 0.9
+
+- **Resume AI session palette** — the command palette gains "Resume AI session…": the 30 most recent local claude / codex sessions, searchable, with Enter typing the matching `claude --resume` / `codex resume` command into the focused terminal. Each row carries the agent's own brand mark at its head and a `claude` / `codex` chip at its right edge, so the source reads at a glance instead of competing for the text column; the right column shows where the session lived plus its age. Titles come from the first thing the human actually said — CLI-injected blocks (`AGENTS.md` / `CLAUDE.md` instruction dumps, `/clear` echoes, anything the CLI marks `isMeta`) are skipped rather than becoming the session's name, and a long title is truncated instead of running through the column beside it. Ships in a later release, not 0.9.
+
+### 简体中文
+
+#### 新增
+
+- **静默标签页显示 shell 类型** — 没有任何徽章、未悬浮的标签行，右侧以最淡的小字显示该标签的 shell 短标：`pwsh`、`cmd`、`bash`、`ubuntu`（WSL 按发行版名），SSH 标签显示 `ssh`。任何徽章（转圈、圆点、「等你批准」…）都比它优先；名字长到顶着右缘时短标自动让位。
+- **文件夹选择器可直达 WSL** — 「浏览文件夹」对话框把每个已注册的 WSL 发行版（`\\wsl.localhost\<发行版>`）钉进侧栏顶部，不再依赖系统资源管理器是否显示「Linux」节点。（#12）
+- **侧栏可拖拽调节** — 设置→交互新增「拖拽调节侧栏宽度」。开启后左侧栏右缘与文件/Git 抽屉左缘成为拖拽把手（±4px 热区上光标变为调整宽度形态）；把左侧栏一路拖到最左、或把抽屉一路拖到最右，就直接收起该面板，而不是卡在最小宽度上。默认关闭，且开启前会先确认——宽度拖动会实时重排终端内容。拖动本身走双重节流：面板边缘每帧跟手，但网格只在宽度跨过一整个单元格时才重排，且最快 80ms 一次，快速拖动不会演变成 resize 风暴。SSH HOSTS 分界线不受该开关约束、始终可拖：它只在侧栏内部重新分配高度，碰不到终端网格；主机数量撑不满时，拖出来的高度也照样生效。三处尺寸都会保存。
+- **启动恢复会话可开关** — 设置→高级→会话新增「启动时恢复上次的标签（异常退出后同样恢复）」，默认开启。关掉就永远干净启动；快照照写不误，工作区导出与崩溃诊断仍然可用。
+- **窗口背景模糊（Windows 11）** — 设置→外观新增「背景模糊」。开启后窗口背后的内容透过终端底色被模糊（Acrylic），窗口不透明度滑杆随之变成盖在模糊层上的着色强度——「透出多少」仍然只由一个控件管。Mica 试过后放弃：它取的是桌面壁纸而不是窗口背后的真实内容，看起来是一层平涂色调而非模糊。另外，半透明背景会把文字抗锯齿从次像素降为灰度，这是透明窗口的系统级约束，不是渲染退化。
+- **命令面板分组了** — 行归到安静的分组标题下，标题右侧一条发丝线拉到面板右缘：工作目录、标签页、跳转、视图、工作区、外观、设置，以及 shell / profile 列表。**工作目录**组把聚焦终端的路径挂在标题上——写一次，而不是每行重复一遍——组里是「复制路径」和「在资源管理器中显示」；「新建标签页」只在它确实会开在那个目录时才并入（配了启动目录时启动目录优先，那时这行留在标签页组，而不是挂在一个说谎的标题下）。开关类命令（「显示标签侧栏」「拖拽调节侧栏宽度」）带勾选态，已经开着的开关与「点了会开」的动作因此读起来不一样。分组是在排序**之后**做的稳定划分，组内仍然是最近用过的优先（打字时是模糊得分优先）；表头跟着滚动窗口走，而不是钉在列表开头。
+- **SSH 连接进度** — 连接已保存的主机时不再是一片空白，而是显示四个真实阶段（解析、TCP、认证、建立会话）。这四个阶段是 Nebula 自己的 SSH 实现里的调用点，不是从某个客户端的输出里猜出来的，所以进度是可信的。连接页有 350ms 门槛：比这更快连上的连接不会闪一下进度屏；在侧栏悬浮某台主机时状态就地显示，不接管整个终端面板。
+
+#### 修复
+
+- **崩溃与正常退出现在分得清了** — 会话快照记录进程有没有走完收尾。上次是异常退出（崩溃、强杀、断电）时，恢复后会在消息栏明说，而不是悄悄恢复；连续三次启动失败触发断路器时，那份会话被挪到 `session.crashed.json` 而不是被一秒后的自动保存盖掉——此前「一恢复就崩」的唯一现场会自己销毁。
+- **SSH 主机编辑器的大字与图标不再发糊** — 身份条的名字、头像形状与图标列表此前是把按终端字号栅格化的位图硬放大，对着原型一眼可见的糊；现在按真实字号重新栅格化。放大后名字框的光标换算按真实字形步进，点第十个字不再偏一格。
+- **图标选择器不再透出表单文字** — 浮层的底与表单同批提交时全部沉在文字之下；现在浮层（图标列表、测试状态提示）在表单文字之后单独提交，什么都透不上来。
+- **「测试连接」失败显示完整原因** — 此前被压成单行截断，全文藏在悬浮层里；现在失败原因直接折行铺开（最多四行），只有超长的尾巴才收进悬浮层。
+- **转圈指示器是平滑的圆环** — 珠链感来自半透明圆点在重叠处 alpha 翻倍；活动标签上的环还拿侧栏深底做合成，画在浅色药丸上就成了一圈黑。环的颜色现在按所在行的真实底色预合成。
+- **codex 的「等你回答」徽章能亮了** — codex 的 notify 只报「回合完成」，交互式提问也只能落成未读圆点。现在回合结束时检查屏幕尾部的提问特征（"enter to submit"、"(y/N)"…），命中即把徽章升级为「等你批准」。
+- **grok 也能渲染行内公式** — 「本窗格出现过一次整块公式就解锁行内 `$…$`」这条规则挂在一份 AI CLI 名单上，而别处认出 grok 时这份名单没跟着更新。grok 会话现在和 claude / codex 一样能渲染行内公式。
+
+#### 改进
+
+- **图标搜索框是一个正经输入框** — 点击定位光标、拖选、Shift+方向键 / Home / End、Ctrl+A/C/V，光标闪烁节律与其它输入框一致；空着时仍显示提示语。
+- **新建 SSH 主机默认密码认证** — 「自动」要先配好私钥才走得通，拿它当默认等于让多数新手先撞一次失败。已保存的主机保持原样。
+- **手掌徽章暂时下线** — 指再粗、缝再窄，徽章尺寸下还是读不成一只手。「等你批准」改用琥珀色圆点，等图标重画后再回来；它依然压过蓝色未读点，两者靠颜色而不是形状区分。
+- **侧栏行更宽** — 行的左右内缩从 8px 收到 4px，宽度让给名字、徽章和 shell 短标；侧栏总宽不变。
+- **所有输入框共用同一套光标** — 光标位置、选区、点击定位与闪烁节律从各个对话框里下沉到输入组件本身。此前每个输入框各存一份，SSH 编辑器放大后的名字框、图标搜索框于是各自在细节上跑偏；现在行为完全一致，新加的输入框直接继承，不必再实现一遍。
+
+#### 排期在 0.9 之后
+
+- **恢复 AI 会话面板** — 命令面板新增「恢复 AI 会话…」：列出本机最近 30 条 claude / codex 会话，可搜索，回车把对应的 `claude --resume` / `codex resume` 命令敲进当前终端。每行行首是该 agent 的品牌标、右缘是 `claude` / `codex` 小药丸，来源一眼可辨而不必去挤文字列；右列显示会话所在位置与相对时间。标题取自用户真正说的第一句话——CLI 自动注入的内容（`AGENTS.md` / `CLAUDE.md` 指令块、`/clear` 回显、以及一切被 CLI 打上 `isMeta` 的行）会被跳过，不再拿来当会话名；标题过长时截断，不再横穿到旁边的列上。随后续版本发布，不进 0.9。
+
 ## 0.8.0 - 2026-07-29
 
 ### English

@@ -87,11 +87,23 @@ impl DirectoryRow {
     }
 }
 
+/// 「恢复 AI 会话」模式的一行：标题 + 右侧「位置 · 相对时间」+ 确认时敲进
+/// 终端的 resume 命令行。由 `Display` 用 `ai_sessions::scan` 的结果构造。
+pub struct AiSessionRow {
+    pub label: String,
+    pub hint: String,
+    pub search: String,
+    pub command: String,
+    /// claude / codex——决定行首的品牌 logo 与右缘的来源 chip。
+    pub source: crate::ai_sessions::AiSessionSource,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PaletteCandidate {
     Item(usize),
     Profile(usize),
     Directory(usize),
+    AiSession(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +112,7 @@ enum PaletteMode {
     Profiles,
     DefaultShell,
     Directories,
+    AiSessions,
 }
 
 /// A single executable action reachable from the command palette.
@@ -111,9 +124,21 @@ enum PaletteMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteAction {
     NewTab,
+    /// 复制聚焦 pane 的工作目录到剪贴板。
+    CopyCwd,
+    /// 在系统文件管理器里打开工作目录。
+    RevealCwd,
+    /// 折叠 / 展开左侧标签侧栏。
+    ToggleSidebar,
+    /// 设置·交互「拖拽调节侧栏宽度」开关（关→开要过确认框）。
+    TogglePanelResize,
     /// Open the frecency-ranked directory picker; this is a UI workflow, not a
     /// shell-specific command or alias.
     OpenDirectoryPicker,
+    /// 打开「恢复 AI 会话」列表（claude / codex 的本地历史会话）。
+    OpenAiSessionPicker,
+    /// 把这条 resume 命令行敲进当前聚焦的终端执行。
+    ResumeAiSession(String),
     CloseTab,
     NextTab,
     PrevTab,
@@ -174,10 +199,32 @@ const ITEMS: &[PaletteItem] = &[
         action: PaletteAction::NewTab,
     },
     PaletteItem {
+        label: "复制路径",
+        hint: "",
+        search: "复制路径 copy path cwd working directory fuzhi lujing gongzuo mulu",
+        action: PaletteAction::CopyCwd,
+    },
+    PaletteItem {
+        label: "在资源管理器中显示",
+        hint: "",
+        search: "在资源管理器中显示 reveal open explorer file manager folder ziyuan guanliqi \
+                 wenjianjia",
+        action: PaletteAction::RevealCwd,
+    },
+    PaletteItem {
         label: "在常用目录中新建终端…",
         hint: "",
         search: "在常用目录中新建终端 new terminal in frequent directory changyong mulu",
         action: PaletteAction::OpenDirectoryPicker,
+    },
+    PaletteItem {
+        // 母命令：一个入口通向所有「名词」（AI 会话 / 目录 / SSH / 标签页），
+        // 而不是每加一个品类就往命令表里塞一条子命令——那样这张表迟早会被
+        // 名词淹掉。目前只列 AI 会话，其余品类随面板打磨一起接进来。
+        label: "快速跳转…",
+        hint: "",
+        search: "快速跳转 恢复 AI 会话 open quickly jump resume ai session claude codex kuaisu tiaozhuan huifu",
+        action: PaletteAction::OpenAiSessionPicker,
     },
     PaletteItem {
         label: "关闭标签页",
@@ -232,6 +279,18 @@ const ITEMS: &[PaletteItem] = &[
         hint: "Ctrl+Shift+O",
         search: "目录树面板 files tree explorer panel mulushu wenjian",
         action: PaletteAction::ToggleFilesPanel,
+    },
+    PaletteItem {
+        label: "显示标签侧栏",
+        hint: "",
+        search: "显示标签侧栏 toggle show hide tab sidebar xianshi biaoqian celan",
+        action: PaletteAction::ToggleSidebar,
+    },
+    PaletteItem {
+        label: "拖拽调节侧栏宽度",
+        hint: "",
+        search: "拖拽调节侧栏宽度 drag resize sidebar drawer panel width tuozhuai tiaojie kuandu",
+        action: PaletteAction::TogglePanelResize,
     },
     PaletteItem {
         label: "Git 面板",
@@ -340,6 +399,14 @@ const ITEMS: &[PaletteItem] = &[
 /// How many recently-run actions are remembered for the empty-query ordering.
 const RECENT_MAX: usize = 6;
 
+/// 「工作目录」表头右缘那段路径的列宽上限。超出从头部省略——超过这个宽度
+/// 后路径就开始跟表头横线抢地方，横线一短，分组的视觉边界就散了。
+const CWD_CONTEXT_COLS: usize = 40;
+
+/// 命令列表左侧勾选态列的宽度。与带图标行的缩进（`s(26.0)`）取同一个值：
+/// shell 行画品牌标、命令行画 ✓ 或留空，三种行的标签因此落在同一个 x 上。
+const CHECK_COL_W: f32 = 26.0;
+
 /// Command palette UI + filtering state, embedded in `Display`.
 pub struct CommandPalette {
     language: super::UiLanguage,
@@ -365,6 +432,9 @@ pub struct CommandPalette {
     default_shell_id: Option<String>,
     /// Frecency-ranked directory rows supplied by `DirectoryHistory`.
     directories: Vec<DirectoryRow>,
+    /// 「恢复 AI 会话」的行，打开时由 `ai_sessions::scan` 现扫——历史会话
+    /// 随时在长，缓存一份很快就是旧账。
+    ai_sessions: Vec<AiSessionRow>,
     mode: PaletteMode,
     /// Mouse-hovered row within the visible window (`None` when not hovering).
     hover: Option<usize>,
@@ -374,6 +444,29 @@ pub struct CommandPalette {
     hover_armed: bool,
     /// 武装期间首次上报的指针位置（解除武装的位移基准）。
     pointer_baseline: Option<(f32, f32)>,
+    /// 打开这一刻对窗口状态的取样（见 [`PaletteContext`]）。
+    context: PaletteContext,
+}
+
+/// 命令面板打开时对窗口状态的一次取样。
+///
+/// 面板是**模态**的：打开期间用户碰不到侧栏、也换不了目录，所以这些值取样
+/// 一次就够。让面板每帧回读 `Display` 会把面板的渲染路径和窗口状态绑在
+/// 一起——命令行为随后台事件（cwd 上报）在面板打开期间跳变，是比省一次
+/// 拷贝更贵的问题。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaletteContext {
+    /// 聚焦 pane 的工作目录。`None` = shell 没上报：此时整个「工作目录」
+    /// 组不出现，而不是留一组作用在空路径上的死命令。
+    pub cwd: Option<PathBuf>,
+    /// 左侧标签侧栏是否展开（勾选态 ✓）。
+    pub sidebar: bool,
+    /// 「拖拽调节侧栏宽度」是否已开（勾选态 ✓）。
+    pub panel_resize: bool,
+    /// 新建标签页会不会真的落在 `cwd` 里。配了启动目录时不会——`spawn_tab`
+    /// 那边启动目录优先，此时这条命令必须留在「标签页」组，否则组标题就在
+    /// 说谎（用户读到「工作目录 · D:\…」，敲下去却开在别处）。
+    pub new_tab_inherits_cwd: bool,
 }
 
 impl CommandPalette {
@@ -389,10 +482,12 @@ impl CommandPalette {
             profiles: Vec::new(),
             default_shell_id: None,
             directories: Vec::new(),
+            ai_sessions: Vec::new(),
             mode: PaletteMode::Commands,
             hover: None,
             hover_armed: false,
             pointer_baseline: None,
+            context: PaletteContext::default(),
         };
         palette.refilter();
         palette
@@ -407,6 +502,16 @@ impl CommandPalette {
         self.refilter();
     }
 
+    /// 灌入打开这一刻的窗口状态。cwd 决定「工作目录」组在不在，所以变了
+    /// 就得重新过滤——不然 shell 刚上报 cwd 时列表还是旧的那几行。
+    pub fn set_context(&mut self, context: PaletteContext) {
+        if self.context == context {
+            return;
+        }
+        self.context = context;
+        self.refilter();
+    }
+
     /// Whether the palette is in default-shell picking mode.
     pub fn is_picking_default(&self) -> bool {
         self.mode == PaletteMode::DefaultShell
@@ -417,6 +522,12 @@ impl CommandPalette {
     /// a long shell/profile list otherwise becomes needlessly hard to scan.
     pub fn is_picker(&self) -> bool {
         self.open && self.mode != PaletteMode::Commands
+    }
+
+    /// 命令列表左侧那条**勾选态列**在不在。只有命令面板有开关类命令；
+    /// picker 的左列是类型图标 / 品牌标，两者不能共用同一列。
+    pub fn has_check_column(&self) -> bool {
+        self.open && self.mode == PaletteMode::Commands
     }
 
     pub fn is_picking_directory(&self) -> bool {
@@ -436,6 +547,19 @@ impl CommandPalette {
                         if self.default_shell_id.as_deref() == Some(shell.id.as_str())
                 )
             )
+    }
+
+    /// 打开「恢复 AI 会话」列表。行已按最近活动排好序，这里不再重排。
+    pub fn open_ai_sessions(&mut self, rows: Vec<AiSessionRow>) {
+        self.ai_sessions = rows;
+        self.open = true;
+        self.mode = PaletteMode::AiSessions;
+        self.query.clear();
+        self.query_selection = Default::default();
+        self.hover = None;
+        self.hover_armed = false;
+        self.pointer_baseline = None;
+        self.refilter();
     }
 
     /// Refresh the dynamic quick-launch rows from the config's profile names.
@@ -480,9 +604,9 @@ impl CommandPalette {
         }));
         // 图4 版式：默认 shell 是"推荐"大卡片，必须占首行 —— Enter 直接
         // 打开推荐项，检测顺序不再决定谁排第一。
-        if let Some(position) = rows.iter().position(|row| {
-            matches!(row, ProfileRow::Shell { shell, .. } if shell.id == default_shell_id)
-        }) {
+        if let Some(position) = rows.iter().position(
+            |row| matches!(row, ProfileRow::Shell { shell, .. } if shell.id == default_shell_id),
+        ) {
             let default_row = rows.remove(position);
             rows.insert(0, default_row);
         }
@@ -572,9 +696,7 @@ impl CommandPalette {
                     self.pointer_baseline = Some(pos);
                     return self.set_hover(None);
                 },
-                Some(base)
-                    if (base.0 - pos.0).abs() < 2.0 && (base.1 - pos.1).abs() < 2.0 =>
-                {
+                Some(base) if (base.0 - pos.0).abs() < 2.0 && (base.1 - pos.1).abs() < 2.0 => {
                     return self.set_hover(None);
                 },
                 Some(_) => {
@@ -688,6 +810,9 @@ impl CommandPalette {
             PaletteCandidate::Directory(directory) => {
                 PaletteAction::NewAtDirectory(self.directories[directory].path.clone())
             },
+            PaletteCandidate::AiSession(session) => {
+                PaletteAction::ResumeAiSession(self.ai_sessions[session].command.clone())
+            },
         };
         self.close();
         if let PaletteCandidate::Item(index) = candidate {
@@ -698,12 +823,23 @@ impl CommandPalette {
 
     /// Confirm the visible row at `row` (0 = topmost visible line, mirroring
     /// [`Self::visible`]'s scroll window) — the mouse-click path.
+    /// 滚动窗口的首行下标。选中行越过最后一行时窗口整体下移，让它停在底行。
+    ///
+    /// 行、表头、点击换算**必须**共用这一个算式。此前它被抄了两份（`visible`
+    /// 与 `click` 各一份）而表头那份压根没算，于是列表一滚动，行走了、表头
+    /// 还停在开头那套分组上——分组标题指着一批已经滚走的行。
+    fn scroll_start(&self, max_rows: usize) -> usize {
+        match self.selected {
+            Some(selected) if max_rows > 0 => selected.saturating_sub(max_rows - 1),
+            _ => 0,
+        }
+    }
+
     pub fn click(&mut self, row: usize, max_rows: usize) -> Option<PaletteAction> {
         if self.filtered.is_empty() || max_rows == 0 {
             return None;
         }
-        let start = self.selected.unwrap_or(0).saturating_sub(max_rows - 1);
-        let filtered_index = start + row;
+        let filtered_index = self.scroll_start(max_rows) + row;
         if filtered_index >= self.filtered.len() {
             return None;
         }
@@ -724,9 +860,130 @@ impl CommandPalette {
     /// recently-run first, then declaration order (a stable sort keeps the
     /// declared order for the un-recent tail), then profiles. Resets the
     /// selection to the top.
+    /// 每个可见行前面要不要起一条分组表头：`Some((标签, 右缘上下文))` = 这
+    /// 一行是新一组的第一行。上下文为空串表示这一组不挂东西；「工作目录」
+    /// 组挂当前 cwd——那一组的动作全作用在它身上，路径写在标题上一次，好过
+    /// 每行重复一遍。返回 `None` 表示这个模式不分组（shell 选择器…）。
+    ///
+    /// 参数是 `max_rows` 而不是可见行数：表头必须落在**滚动之后**的那个窗口
+    /// 上（见 [`Self::scroll_start`]），拿行数算不出窗口从哪儿开始。窗口首行
+    /// 永远起一条表头（`previous` 从 `None` 开始）——组标题滚走之后，列表顶
+    /// 上仍然写着「你在哪一组」。
+    ///
+    /// 分组的前提是同组的行**连续**，那件事由 [`Self::refilter`] 末尾的稳定
+    /// 排序保证。
+    fn group_labels(&self, max_rows: usize) -> Option<Vec<Option<(String, String)>>> {
+        let start = self.scroll_start(max_rows);
+        let window: Vec<PaletteCandidate> =
+            self.filtered.iter().skip(start).take(max_rows).copied().collect();
+        if window.is_empty() {
+            return None;
+        }
+        match self.mode {
+            PaletteMode::AiSessions => {
+                let mut labels = Vec::with_capacity(window.len());
+                let mut previous = None;
+                for candidate in &window {
+                    let PaletteCandidate::AiSession(index) = candidate else {
+                        labels.push(None);
+                        continue;
+                    };
+                    let source = self.ai_sessions[*index].source;
+                    labels.push(
+                        (previous != Some(source))
+                            .then(|| (source_group_label(source), String::new())),
+                    );
+                    previous = Some(source);
+                }
+                Some(labels)
+            },
+            PaletteMode::Commands => {
+                let mut labels = Vec::with_capacity(window.len());
+                let mut previous = None;
+                for candidate in &window {
+                    let group = self.command_group(*candidate);
+                    labels.push((previous != Some(group)).then(|| {
+                        let context = if group == CommandGroup::Cwd {
+                            self.cwd_context()
+                        } else {
+                            String::new()
+                        };
+                        (group.label(self.language), context)
+                    }));
+                    previous = Some(group);
+                }
+                Some(labels)
+            },
+            _ => None,
+        }
+    }
+
+    /// 「工作目录」表头右缘的路径。原样显示（技术值不美化），过长时砍掉
+    /// **头部**——路径的辨识信息在尾部（项目名 / 子目录），砍尾等于把整行
+    /// 变成一串没用的盘符。
+    fn cwd_context(&self) -> String {
+        let Some(cwd) = self.context.cwd.as_ref() else { return String::new() };
+        fit_tail(&cwd.display().to_string(), CWD_CONTEXT_COLS)
+    }
+
+    /// 一条候选属于哪个分组。动态的 shell / profile 行自成一组。
+    fn command_group(&self, candidate: PaletteCandidate) -> CommandGroup {
+        let PaletteCandidate::Item(index) = candidate else { return CommandGroup::Shells };
+        let group = CommandGroup::of(&ITEMS[index].action);
+        // 工作目录组的成立条件逐条命令判定：cwd 未知时整组不存在；「新建
+        // 标签页」还要额外满足**它确实会开在那里**（见 `new_tab_inherits_cwd`）。
+        // 不满足就退回标签页组——留一条孤儿表头，或者让组标题指着一个命令
+        // 并不会去的目录，都比少一行糟。
+        if group == CommandGroup::Cwd {
+            let inherits =
+                ITEMS[index].action != PaletteAction::NewTab || self.context.new_tab_inherits_cwd;
+            if self.context.cwd.is_none() || !inherits {
+                return CommandGroup::Tabs;
+            }
+        }
+        group
+    }
+
+    /// 让同一来源的会话连续排列。排在前面的是**拥有最新一条会话的那个来源**
+    /// ——既满足了分组表头「同组成块」的前提，又不至于把「我刚才在做的那件
+    /// 事」压到第二组去。组内顺序原样保留（空查询=最近优先，有查询=模糊得分
+    /// 优先），所以这里只做一次稳定划分，不重新排序。
+    fn group_ai_sessions_by_source(&mut self) {
+        let lead = match self.filtered.first() {
+            Some(PaletteCandidate::AiSession(index)) => self.ai_sessions[*index].source,
+            _ => return,
+        };
+        let rows = std::mem::take(&mut self.filtered);
+        let (mut head, tail): (Vec<_>, Vec<_>) = rows.into_iter().partition(|candidate| {
+            match candidate {
+                PaletteCandidate::AiSession(index) => self.ai_sessions[*index].source == lead,
+                _ => true,
+            }
+        });
+        head.extend(tail);
+        self.filtered = head;
+    }
+
+    /// 一条命令这一轮出不出现在列表里。
+    ///
+    /// 两类：形态没打磨完的（`OpenAiSessionPicker` —— 筛选芯片、类型标、按
+    /// 对象推导的页脚动词都还没做，先不让用户撞见半成品），和依赖的状态压根
+    /// 不存在的（cwd 未知时的工作目录组）。
+    ///
+    /// 放行只需删掉对应分支；不要改 `ITEMS`，那样会连带丢掉搜索词和本地化
+    /// 文案。
+    fn parked(&self, action: &PaletteAction) -> bool {
+        match action {
+            PaletteAction::OpenAiSessionPicker => true,
+            PaletteAction::CopyCwd | PaletteAction::RevealCwd => self.context.cwd.is_none(),
+            _ => false,
+        }
+    }
+
     fn refilter(&mut self) {
         let candidates: Vec<PaletteCandidate> = match self.mode {
             PaletteMode::Commands => (0..ITEMS.len())
+                .filter(|index| !self.parked(&ITEMS[*index].action))
                 .map(PaletteCandidate::Item)
                 .chain((0..self.profiles.len()).map(PaletteCandidate::Profile))
                 .collect(),
@@ -736,6 +993,9 @@ impl CommandPalette {
             PaletteMode::Directories => {
                 (0..self.directories.len()).map(PaletteCandidate::Directory).collect()
             },
+            PaletteMode::AiSessions => {
+                (0..self.ai_sessions.len()).map(PaletteCandidate::AiSession).collect()
+            },
         };
         let combined_search = |candidate: PaletteCandidate| -> &str {
             match candidate {
@@ -744,6 +1004,7 @@ impl CommandPalette {
                 // 目录模式已经由 DirectoryHistory 完成匹配和排序；这里
                 // 不再二次模糊排序，以免破坏 frecency 的确定性。
                 PaletteCandidate::Directory(_) => "",
+                PaletteCandidate::AiSession(index) => &self.ai_sessions[index].search,
             }
         };
         let query = self.query.trim();
@@ -755,7 +1016,9 @@ impl CommandPalette {
                 PaletteCandidate::Item(index) => {
                     self.recent.iter().position(|recent| recent == index).unwrap_or(usize::MAX)
                 },
-                PaletteCandidate::Profile(_) | PaletteCandidate::Directory(_) => usize::MAX,
+                PaletteCandidate::Profile(_)
+                | PaletteCandidate::Directory(_)
+                | PaletteCandidate::AiSession(_) => usize::MAX,
             });
             self.filtered = order;
         } else {
@@ -767,6 +1030,21 @@ impl CommandPalette {
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
             self.filtered = scored.into_iter().map(|(_, candidate)| candidate).collect();
+        }
+        // 分组表头要求同组的行连续；上面两种排序（最近优先 / 模糊得分）都会把
+        // 分类打散，所以这一步必须在**所有**排序之后。`sort_by_key` 是稳定
+        // 排序，组内既有的先后原样保留。
+        match self.mode {
+            PaletteMode::AiSessions => self.group_ai_sessions_by_source(),
+            PaletteMode::Commands => {
+                let groups: Vec<_> =
+                    self.filtered.iter().map(|c| self.command_group(*c)).collect();
+                let mut paired: Vec<_> =
+                    groups.into_iter().zip(self.filtered.drain(..)).collect();
+                paired.sort_by_key(|(group, _)| *group);
+                self.filtered = paired.into_iter().map(|(_, candidate)| candidate).collect();
+            },
+            _ => {},
         }
         self.selected = None; // Reset selection on refilter
     }
@@ -796,7 +1074,7 @@ impl CommandPalette {
         };
         // Keep the selection visible: once it passes the last row, scroll so it
         // sits on the bottom line of the window.
-        let start = selected.saturating_sub(max_rows - 1);
+        let start = self.scroll_start(max_rows);
         let rows =
             self.filtered.iter().skip(start).take(max_rows).map(|&row| self.row_for(row)).collect();
         (rows, Some(selected - start))
@@ -810,6 +1088,15 @@ impl CommandPalette {
                 label: localized_item_label(&ITEMS[index], self.language).to_owned(),
                 hint: ITEMS[index].hint.to_string(),
                 is_default: false,
+                chip: String::new(),
+                // 开关类命令带当前状态：勾上的是「已经开着」，不是「点了会
+                // 开」。列表里同时有开关和一次性动作时，这是唯一能把两者分开
+                // 的信号。
+                checked: match ITEMS[index].action {
+                    PaletteAction::ToggleSidebar => Some(self.context.sidebar),
+                    PaletteAction::TogglePanelResize => Some(self.context.panel_resize),
+                    _ => None,
+                },
             },
             PaletteCandidate::Profile(index) => PaletteRow {
                 icon: self.profiles[index].icon().to_string(),
@@ -821,6 +1108,8 @@ impl CommandPalette {
                     ProfileRow::Shell { shell, .. }
                         if self.default_shell_id.as_deref() == Some(shell.id.as_str())
                 ),
+                chip: String::new(),
+                checked: None,
             },
             PaletteCandidate::Directory(index) => PaletteRow {
                 icon: "\u{f07b}".to_owned(),
@@ -828,6 +1117,30 @@ impl CommandPalette {
                 label: self.directories[index].label.clone(),
                 hint: self.directories[index].hint.clone(),
                 is_default: false,
+                chip: String::new(),
+                checked: None,
+            },
+            PaletteCandidate::AiSession(index) => {
+                PaletteRow {
+                    // 双星（mdi-creation）：AI 会话的**通用**标，不按 claude /
+                    // codex 分。来源交给分组承担，行首再放品牌标是同一条信息
+                    // 说两遍；而且品牌标每行长得都不一样，混合列表里就没有一个
+                    // 稳定的「这是会话」的记号可扫。
+                    //
+                    // 必须是双星不能是单颗四角星——单星是 Gemini 的标识，拿它
+                    // 当通用 AI 标会被读成某一家的品牌入口（用户 08-02 裁定）。
+                    //
+                    // 走字形而不是纹理，顺带解决主题自适应：字形用 skin 的墨色
+                    // 画，深浅主题自动跟随；纹理要为每个主题各备一版并重采样。
+                    icon: AI_SESSION_GLYPH.to_owned(),
+                    color_id: String::new(),
+                    label: self.ai_sessions[index].label.clone(),
+                    hint: self.ai_sessions[index].hint.clone(),
+                    is_default: false,
+                    // 右缘是**类型**标，不是来源标。
+                    chip: self.language.pick("会话", "Session").to_owned(),
+                    checked: None,
+                }
             },
         }
     }
@@ -840,7 +1153,12 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
     }
     match item.action {
         NewTab => "New tab",
+        CopyCwd => "Copy path",
+        RevealCwd => "Reveal in file manager",
+        ToggleSidebar => "Show tab sidebar",
+        TogglePanelResize => "Drag to resize panels",
         OpenDirectoryPicker => "New terminal in a frequent directory...",
+        OpenAiSessionPicker => "Open quickly...",
         CloseTab => "Close tab",
         NextTab => "Next tab",
         PrevTab => "Previous tab",
@@ -867,19 +1185,92 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
         ImportWorkspace => "Open workspace...",
         SyncPush => "Sync: push settings",
         SyncPull => "Sync: pull settings",
-        LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) | NewAtDirectory(_) => item.label,
+        LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) | NewAtDirectory(_)
+        | ResumeAiSession(_) => item.label,
     }
 }
 
+/// 命令的分类。分组表头按它分，组的先后也按它排（`ordinal`）。
+///
+/// 分组的前提是同组的行**连续**，而空查询要把最近用过的命令顶上来、有查询
+/// 要按模糊得分排——两种排序都会把分类打散。所以 refilter 末尾再按 ordinal
+/// 做一次**稳定**排序：组的顺序固定下来，组内仍然是「最近优先 / 得分优先」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CommandGroup {
+    /// 作用在聚焦 pane 工作目录上的动作。排在最前：面板打开时用户十有八九
+    /// 是要对「手头这个目录」做点什么。
+    Cwd,
+    Tabs,
+    Jump,
+    View,
+    Workspace,
+    Appearance,
+    Settings,
+    /// 动态的 shell / profile 行，永远排在静态命令之后。
+    Shells,
+}
+
+impl CommandGroup {
+    fn of(action: &PaletteAction) -> Self {
+        use PaletteAction::*;
+        match action {
+            NewTab | CopyCwd | RevealCwd => Self::Cwd,
+            OpenDirectoryPicker | CloseTab | NextTab | PrevTab | NewWindow | SplitRight
+            | SplitDown => Self::Tabs,
+            OpenAiSessionPicker => Self::Jump,
+            ToggleFilesPanel | ToggleGitPanel | ToggleSidebar | TogglePanelResize => Self::View,
+            ExportWorkspace | ImportWorkspace | SyncPush | SyncPull => Self::Workspace,
+            PickBackgroundImage | CycleBackground | ResetAppearance | SelectTheme(_) => {
+                Self::Appearance
+            },
+            _ => Self::Settings,
+        }
+    }
+
+    fn label(self, language: super::UiLanguage) -> String {
+        match self {
+            Self::Cwd => language.pick("工作目录", "WORKING DIRECTORY"),
+            Self::Tabs => language.pick("标签页", "TABS"),
+            Self::Jump => language.pick("跳转", "JUMP"),
+            Self::View => language.pick("视图", "VIEW"),
+            Self::Workspace => language.pick("工作区", "WORKSPACE"),
+            Self::Appearance => language.pick("外观", "APPEARANCE"),
+            Self::Settings => language.pick("设置", "SETTINGS"),
+            Self::Shells => language.pick("SHELL 与 PROFILE", "SHELLS & PROFILES"),
+        }
+        .to_owned()
+    }
+}
+
+/// AI 会话分组表头的文案。用产品名而不是 `AiSessionSource::label()` 的小写
+/// 短标（`claude` / `codex`）：表头是给人读的标题，不是数据里的枚举值。
+fn source_group_label(source: crate::ai_sessions::AiSessionSource) -> String {
+    match source {
+        crate::ai_sessions::AiSessionSource::Claude => "CLAUDE CODE 会话".to_owned(),
+        crate::ai_sessions::AiSessionSource::Codex => "CODEX 会话".to_owned(),
+    }
+}
+
+/// AI 会话行的行首字形：mdi-creation，一大一小两颗四角星。见 `row_for`
+/// 的 `AiSession` 分支说明为什么是「双星 + 通用 + 字形」这三条。
+const AI_SESSION_GLYPH: &str = "\u{f0674}";
+
 /// One rendered palette row. `icon` is the Nerd Font fallback glyph (empty for
 /// built-in action rows); `color_id` names a full-color brand PNG when the row
-/// is a detected shell (empty otherwise, so the glyph shows instead).
+/// is a detected shell, or an `ai:*` id for AI-session brand logos (empty
+/// otherwise, so the glyph shows instead).
 pub struct PaletteRow {
     pub icon: String,
     pub color_id: String,
     pub label: String,
     pub hint: String,
     pub is_default: bool,
+    /// 右缘小药丸的文字（AI 会话行 = 来源 `claude` / `codex`）；空 = 无。
+    pub chip: String,
+    /// 开关类命令的当前状态：`Some(true)` 画 ✓。`None` = 这行不是开关（一次
+    /// 性动作），左列留空但**仍然占位**——同一组里一行缩进一行不缩进，标签
+    /// 就成了锯齿。
+    pub checked: Option<bool>,
 }
 
 /// Subsequence fuzzy score, or `None` if the needle isn't a subsequence of the
@@ -930,8 +1321,13 @@ pub struct PaletteLayout {
     /// rendering AND hit-testing must both read row rects from here instead
     /// of dividing by `row_h`.
     pub rows: Vec<(f32, f32)>,
-    /// Section caption baselines for the picker: (推荐, 所有选项).
-    pub headers: (Option<f32>, Option<f32>),
+    /// 分组表头：`(y, 标签, 右缘上下文)`。标签左对齐、右边拉一条淡色发丝线
+    /// 到面板右缘；上下文非空时贴在线的右端（如「工作目录」那组挂当前 cwd
+    /// ——这组动作作用在谁身上，写在标题上而不是每行重复）。
+    ///
+    /// 通用化之前这里是一对 `Option<f32>`，只够 hero 版式的「推荐 / 所有
+    /// 选项」两条用；现在 hero 也走这个 vec，不再有第二套机制。
+    pub groups: Vec<(f32, String, String)>,
 }
 
 impl PaletteLayout {
@@ -951,12 +1347,7 @@ impl PaletteLayout {
 /// doesn't jump as the match count changes while typing; pickers shrink to
 /// their content. Every palette mode uses the same search-input geometry,
 /// keeping rendering, hover and click hit-testing on one contract.
-pub fn palette_layout(
-    model: &CommandPalette,
-    win_w: f32,
-    win_h: f32,
-    scale: f32,
-) -> PaletteLayout {
+pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32) -> PaletteLayout {
     let s = |v: f32| v * scale;
     let margin = s(8.0);
     let pad = s(12.0);
@@ -976,21 +1367,41 @@ pub fn palette_layout(
     // with section captions and gaps (图4); the command list stays a dense
     // uniform grid.
     let mut rel_rows: Vec<(f32, f32)> = Vec::with_capacity(visible);
-    let mut rel_headers: (Option<f32>, Option<f32>) = (None, None);
+    let mut rel_groups: Vec<(f32, String, String)> = Vec::new();
     let mut y = 0.0f32;
     if cards {
         let slots = visible.max(1);
         let mut rest = slots;
         if hero {
-            rel_headers.0 = Some(y);
+            rel_groups.push((y, model.language.pick("推荐", "Recommended").to_owned(), String::new()));
             y += header_h;
             rel_rows.push((y, hero_h));
             y += hero_h + s(10.0);
             rest = slots - 1;
             if rest > 0 {
-                rel_headers.1 = Some(y);
+                rel_groups.push((
+                    y,
+                    model.language.pick("所有选项", "All options").to_owned(),
+                    String::new(),
+                ));
                 y += header_h;
             }
+        } else if let Some(labels) = model.group_labels(max_rows) {
+            // 分组版式：每遇到新的一组就插一条表头，然后铺该组的行。
+            let count = labels.len();
+            for (index, group) in labels.iter().enumerate() {
+                if let Some((label, context)) = group {
+                    rel_groups.push((y, label.clone(), context.clone()));
+                    y += header_h;
+                }
+                rel_rows.push((y, row_h));
+                y += row_h;
+                if index + 1 < count {
+                    y += gap;
+                }
+            }
+            y += s(4.0);
+            rest = 0;
         }
         for extra in 0..rest {
             if rel_rows.len() < visible {
@@ -1001,7 +1412,25 @@ pub fn palette_layout(
                 y += gap;
             }
         }
-        y += s(4.0);
+        if rest > 0 {
+            y += s(4.0);
+        }
+    } else if let Some(labels) = model.group_labels(max_rows) {
+        // 命令列表：均匀行距，但每组前面插一条表头。组与组之间再留半行呼吸，
+        // 首组紧贴列表顶——顶上那条线不该和输入框贴出一道双边。
+        for (index, group) in labels.iter().enumerate() {
+            if let Some((label, context)) = group {
+                if index > 0 {
+                    y += s(6.0);
+                }
+                rel_groups.push((y, label.clone(), context.clone()));
+                y += header_h;
+            }
+            rel_rows.push((y, row_h));
+            y += row_h;
+        }
+        // 行少时也把面板撑到固定高度：否则每敲一个字面板都在长高缩矮。
+        y = y.max(max_rows as f32 * row_h);
     } else {
         for _ in 0..max_rows {
             if rel_rows.len() < visible {
@@ -1019,12 +1448,12 @@ pub fn palette_layout(
     let input = (px + pad, py + pad, pw - 2.0 * pad, input_h);
     let list_y = py + pad + input_h + s(8.0);
     let rows = rel_rows.into_iter().map(|(ry, rh)| (list_y + ry, rh)).collect();
-    let headers =
-        (rel_headers.0.map(|v| list_y + v), rel_headers.1.map(|v| list_y + v));
+    let groups =
+        rel_groups.into_iter().map(|(gy, label, ctx)| (list_y + gy, label, ctx)).collect();
 
     let footer = cards.then_some((px, py + ph - footer_h, pw, footer_h));
 
-    PaletteLayout { panel: (px, py, pw, ph), input, row_h, list_y, max_rows, footer, rows, headers }
+    PaletteLayout { panel: (px, py, pw, ph), input, row_h, list_y, max_rows, footer, rows, groups }
 }
 
 // ---- rendering (the parent `display::mod` hands in the model + renderer;
@@ -1099,19 +1528,13 @@ pub(super) fn push_quads(
         1.0,
     );
 
-    quads.push(UiQuad::solid(
-        ix,
-        iy,
-        iw,
-        ih,
-        s(super::ui::tokens::radius::CONTROL),
-        sk.input,
-    ));
+    quads.push(UiQuad::solid(ix, iy, iw, ih, s(super::ui::tokens::radius::CONTROL), sk.input));
     if model.query_all_selected() && !model.query.is_empty() {
         let cell_w = size.cell_width();
         let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
         let selection_x = ix + s(INPUT_PAD_X) + cell_w * SEARCH_SLOT_COLS;
-        let selection_w = (columns as f32 * cell_w).min(iw - s(INPUT_PAD_X * 2.0) - cell_w * SEARCH_SLOT_COLS);
+        let selection_w =
+            (columns as f32 * cell_w).min(iw - s(INPUT_PAD_X * 2.0) - cell_w * SEARCH_SLOT_COLS);
         quads.push(UiQuad::solid(
             selection_x - s(2.0),
             iy + s(7.0),
@@ -1123,6 +1546,23 @@ pub(super) fn push_quads(
     }
 
     let cell_w = size.cell_width();
+    // 分组表头的淡色横线：从标签右侧一直拉到面板右缘（有右缘上下文时让位
+    // 给它）。线是 quad、标签是文字，两边共用 `layout.groups` 的同一份 y
+    // 与同一套 GUTTER 基准，所以永远不会错位。
+    for (gy, label, ctx) in &layout.groups {
+        let label_w = text_width_cols(label) as f32 * cell_w;
+        let x0 = ix + s(INPUT_PAD_X) + label_w + s(10.0);
+        let ctx_w =
+            if ctx.is_empty() { 0.0 } else { text_width_cols(ctx) as f32 * cell_w + s(10.0) };
+        let x1 = ix + iw - s(GUTTER) - ctx_w;
+        if x1 > x0 {
+            // 一整像素高，吸附到像素网格：半像素的发丝线会被摊成两行半透明
+            // 灰，比没有还糟（与 render-crispness 的整像素锚点同一条铁律）。
+            quads.push(
+                UiQuad::solid(x0, gy + s(11.0), x1 - x0, 1.0, 0.0, sk.hairline).pixel_snapped(),
+            );
+        }
+    }
     // 搜索图标槽与查询文字的起点。槽宽按 **cell 列**算而不是固定 px：
     // 字号一变，固定 px 的缝隙就会与字形脱节（大字号显挤、小字号显空）。
     let query_x = ix + s(INPUT_PAD_X) + cell_w * SEARCH_SLOT_COLS;
@@ -1248,9 +1688,10 @@ pub(super) fn push_quads(
     // selected-row affordance. The hero card 已经用"推荐"分区表达默认身份，
     // 不再叠加徽标。
     let text_x = ix + s(14.0);
+    let check_col = model.has_check_column();
     let badge = model.language.pick("默认", "Default");
-    let badge_w = badge.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w
-        + s(12.0);
+    let badge_w =
+        badge.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w + s(12.0);
     for (row, entry) in visible_rows.into_iter().enumerate() {
         let Some(&(ry, rh)) = layout.rows.get(row) else { continue };
         // 图8 规范：命令列表右侧的快捷键 hint 画成逐键 chip 底（键名在文
@@ -1270,12 +1711,46 @@ pub(super) fn push_quads(
                 super::ui::keycap::push_combo(quads, &sk, &combo, scale);
             }
         }
+        // AI 会话行右缘的来源 chip（"claude"/"codex"）底：push_stroke 发丝
+        // 环 + 面板底，与「默认」徽标同宗——身份标注，不与选中态抢强调色。
+        // 文字在 text pass 按同一几何画。
+        if !entry.chip.is_empty() {
+            let chip_w =
+                entry.chip.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w
+                    + s(12.0);
+            let cx = ix + iw - s(GUTTER) - chip_w;
+            let cy = ry + s(7.0);
+            let ch = rh - s(14.0);
+            let corner = s(super::ui::tokens::radius::CHIP);
+            surface::push_stroke(quads, (cx, cy, chip_w, ch), corner, scale, sk.hairline);
+            quads.push(UiQuad::solid(cx, cy, chip_w, ch, corner, sk.surface));
+        }
+        // 开关类命令的勾选态。画成线段 quad 而不是字体里的 `✓` 字形：那个
+        // 码位在不同 fallback 字体里宽窄不一，行与行之间会左右晃半格，而这
+        // 一列的全部价值就在于**竖直对齐**。青色（`ok`）是「已经是这样」的
+        // 语义色，与强调色分开——列表里同时有开关和一次性动作时，这是唯一
+        // 能把两者分开的信号。
+        if entry.checked == Some(true) {
+            super::ui::icons::push_check(
+                quads,
+                text_x + s(CHECK_COL_W) / 2.0,
+                ry + rh / 2.0,
+                scale,
+                sk.ok,
+            );
+        }
         if !entry.is_default || (hero && row == 0) {
             continue;
         }
-        let label_x = if entry.icon.is_empty() { text_x } else { text_x + s(26.0) };
-        let label_w = entry.label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
-            * cell_w;
+        let label_x = if !entry.icon.is_empty() {
+            text_x + s(26.0)
+        } else if check_col {
+            text_x + s(CHECK_COL_W)
+        } else {
+            text_x
+        };
+        let label_w =
+            entry.label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w;
         let bx = label_x + label_w + s(8.0);
         let by = ry + s(7.0);
         let bh = rh - s(14.0);
@@ -1356,6 +1831,9 @@ pub(super) fn draw_text(
             PaletteMode::Directories => {
                 model.language.pick("搜索常用目录…", "Search frequent directories...")
             },
+            PaletteMode::AiSessions => {
+                model.language.pick("搜索 AI 会话…", "Search AI sessions...")
+            },
         };
         r.draw_chrome_text(size, query_x, text_y, sk.ink_faint, placeholder, gc);
     } else {
@@ -1372,6 +1850,9 @@ pub(super) fn draw_text(
                 PaletteMode::Directories => {
                     model.language.pick("没有匹配的已访问目录", "No matching visited directories")
                 },
+                PaletteMode::AiSessions => model
+                    .language
+                    .pick("没有找到 AI 会话（claude / codex）", "No AI sessions found"),
                 PaletteMode::Commands | PaletteMode::Profiles | PaletteMode::DefaultShell => {
                     model.language.pick("无匹配命令", "No matching commands")
                 },
@@ -1384,26 +1865,22 @@ pub(super) fn draw_text(
         return icon_draws;
     }
 
-    // Section captions (图4): 推荐 / 所有选项。
-    if let Some(hy) = layout.headers.0 {
-        r.draw_chrome_text(
-            size,
-            text_x,
-            hy + s(2.0),
-            sk.ink_dim,
-            model.language.pick("推荐", "Recommended"),
-            gc,
-        );
-    }
-    if let Some(hy) = layout.headers.1 {
-        r.draw_chrome_text(
-            size,
-            text_x,
-            hy + s(2.0),
-            sk.ink_dim,
-            model.language.pick("所有选项", "All options"),
-            gc,
-        );
+    // 分组表头（图4 的推荐/所有选项，以及 AI 会话按来源分的组）。
+    for (gy, label, ctx) in &layout.groups {
+        r.draw_chrome_text(size, text_x, gy + s(2.0), sk.ink_dim, label, gc);
+        // 右缘上下文（如「工作目录」组挂当前 cwd）：右对齐贴到面板右缘，
+        // 与横线让出的位置同一套基准（见 quad pass 的 `ctx_w`）。
+        if !ctx.is_empty() {
+            let ctx_w = text_width_cols(ctx) as f32 * cell_w;
+            r.draw_chrome_text(
+                size,
+                ix + iw - s(GUTTER) - ctx_w,
+                gy + s(2.0),
+                sk.ink_faint,
+                ctx,
+                gc,
+            );
+        }
     }
     // Ctrl+K 键帽文字（chip 底在 quad pass，几何同源）。
     if model.mode == PaletteMode::Profiles && model.query.is_empty() {
@@ -1419,14 +1896,11 @@ pub(super) fn draw_text(
 
     let cards = model.is_picker();
     let hero = model.hero_row();
+    let check_col = model.has_check_column();
     let (rows, selected_row) = model.visible(layout.max_rows);
     let badge = model.language.pick("默认", "Default");
     let badge_w = |present: bool| -> f32 {
-        if present {
-            text_width_cols(badge) as f32 * cell_w + s(12.0) + s(10.0)
-        } else {
-            0.0
-        }
+        if present { text_width_cols(badge) as f32 * cell_w + s(12.0) + s(10.0) } else { 0.0 }
     };
 
     // 路径列的左缘。picker 的每一行都从这**同一个 x** 起画路径，于是路径
@@ -1452,22 +1926,18 @@ pub(super) fn draw_text(
     });
 
     for (row, entry) in rows.into_iter().enumerate() {
-        let PaletteRow { icon, color_id, label, hint, is_default } = entry;
+        let PaletteRow { icon, color_id, label, hint, is_default, chip, checked: _ } = entry;
         let Some(&(row_y, row_hh)) = layout.rows.get(row) else { break };
         let is_hero = hero && row == 0;
         // Hero 卡片双行：名称在上、完整路径在下（图4）；普通行单行居中。
-        let ry = if is_hero {
-            row_y + s(8.0)
-        } else {
-            row_y + (row_hh - cell_h) / 2.0 - s(2.0)
-        };
+        let ry = if is_hero { row_y + s(8.0) } else { row_y + (row_hh - cell_h) / 2.0 - s(2.0) };
         let fg = if Some(row) == selected_row || is_hero { sk.ink_strong } else { sk.ink };
         // Leading icon, then the label indented past it. Detected shells with a
         // brand asset stage a full-color textured quad (drawn later); the rest
         // fall back to the Nerd Font glyph. Built-in action rows carry an empty
         // icon and keep the original left edge.
-        let has_color =
-            !color_id.is_empty() && crate::shell_detect::color_icon_png(&color_id).is_some();
+        let has_color = !color_id.is_empty()
+            && crate::shell_detect::color_icon_png(&color_id).is_some();
         let indent = if is_hero { s(34.0) } else { s(26.0) };
         let label_x = if has_color {
             // Square icon sized to the glyph ink, vertically centered on the
@@ -1476,6 +1946,12 @@ pub(super) fn draw_text(
             let icon_y = (row_y + (row_hh - icon_s) / 2.0).round();
             icon_draws.push((color_id, (text_x, icon_y, icon_s, icon_s)));
             text_x + indent
+        } else if check_col {
+            // 命令面板的左列**永远占位**（勾选态列，✓ 在 quad pass 画）：
+            // 开关命令勾上，一次性动作留空。留空而不是收窄——同一组里一行
+            // 缩进一行不缩进，标签就排成锯齿，而分组表头刚把这些行归到了
+            // 一起。
+            text_x + s(CHECK_COL_W)
         } else if icon.is_empty() {
             text_x
         } else {
@@ -1483,6 +1959,25 @@ pub(super) fn draw_text(
             r.draw_chrome_text(size, text_x, icon_y, sk.accent, &icon, gc);
             text_x + indent
         };
+        // 右缘边界：来源 chip 占掉的宽度从这一行所有右侧内容里扣除；chip
+        // 文字与 quad pass 的药丸底同一几何。
+        let right_limit = if chip.is_empty() {
+            ix + iw - s(GUTTER)
+        } else {
+            let chip_w = text_width_cols(&chip) as f32 * cell_w + s(12.0);
+            let cx = ix + iw - s(GUTTER) - chip_w;
+            r.draw_chrome_text(size, cx + s(6.0), ry, sk.ink_dim, &chip, gc);
+            cx - s(CHIP_GAP)
+        };
+        // 标签按可用宽截断（尾部省略号）。60 字符的会话标题此前不截断，
+        // 直接横穿路径列画出面板（用户 08-02 截图）；任何一行的标签都不许
+        // 画进右侧信息区。
+        let label_limit = match path_col_x {
+            Some(col) if !is_hero => right_limit.min(col - s(HINT_GAP)),
+            _ => right_limit,
+        };
+        let label_budget = ((label_limit - label_x) / cell_w).floor().max(0.0) as usize;
+        let label = fit_head(&label, label_budget);
         r.draw_chrome_text(size, label_x, ry, fg, &label, gc);
         let badge_span = if is_default && !is_hero {
             r.draw_chrome_text(
@@ -1527,9 +2022,9 @@ pub(super) fn draw_text(
                     cell_w,
                     scale,
                 );
-                let label_end = ix + s(GUTTER)
-                    + label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
-                        * cell_w;
+                let label_end = ix
+                    + s(GUTTER)
+                    + label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w;
                 if combo.bounds.0 > label_end + s(HINT_GAP) {
                     draw_combo_text(r, gc, size, &combo, cell_w, cell_h, &sk);
                 }
@@ -1537,7 +2032,7 @@ pub(super) fn draw_text(
                 // 路径左对齐到共用的竖线。挤不下（标签太长压到列位）就整条
                 // 让位，绝不叠在标签上——与命令列表的 hint 同一条规矩。
                 let label_end = label_x + text_width_cols(&label) as f32 * cell_w + badge_span;
-                let budget = ((ix + iw - s(GUTTER) - col_x) / cell_w).floor();
+                let budget = ((right_limit - col_x) / cell_w).floor();
                 if col_x >= label_end + s(HINT_GAP) && budget >= 3.0 {
                     let shown = fit_head(&hint, budget as usize);
                     r.draw_chrome_text(size, col_x, ry, sk.ink_dim, &shown, gc);
@@ -1641,7 +2136,14 @@ fn text_width_cols(text: &str) -> usize {
 ///
 /// 纯函数，因此"不与标签重叠"这条契约可以被单测覆盖——上一版的
 /// `fit_hint` 就是靠同类测试挡住过一个把宽度和绝对坐标混着减的 bug。
-fn path_column_x(text_x: f32, icon_indent: f32, widest_label: f32, ix: f32, iw: f32, scale: f32) -> f32 {
+fn path_column_x(
+    text_x: f32,
+    icon_indent: f32,
+    widest_label: f32,
+    ix: f32,
+    iw: f32,
+    scale: f32,
+) -> f32 {
     const COLUMN_MAX_FRACTION: f32 = 0.62;
     (text_x + icon_indent + widest_label + HINT_GAP * scale).min(ix + iw * COLUMN_MAX_FRACTION)
 }
@@ -1671,6 +2173,37 @@ fn fit_head(value: &str, budget: usize) -> String {
     out
 }
 
+/// 路径的**头部**省略：`D:\a\b\…\nebula`。与 [`fit_head`] 相反，因为这两处
+/// 要保住的信息在两头——picker 的路径列扫的是共同前缀（哪个盘、哪个用户），
+/// 分组表头挂的那个 cwd 扫的是尾巴（在哪个项目里）。
+fn fit_tail(value: &str, budget: usize) -> String {
+    let width = |ch: char| ch.width().unwrap_or(0);
+    let total: usize = value.chars().map(width).sum();
+    if total <= budget {
+        return value.to_owned();
+    }
+    if budget <= 1 {
+        return "…".to_owned();
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut used = 0usize;
+    for ch in value.chars().rev() {
+        let w = width(ch);
+        if used + w > budget - 1 {
+            break;
+        }
+        tail.push(ch);
+        used += w;
+    }
+    let mut out = String::from("…");
+    out.extend(tail.into_iter().rev());
+    out
+}
+
+/// `PaletteRow::color_id` 的 `ai:` 命名空间曾在这里解析成 claude / codex 的
+/// 品牌纹理。2026-08-02 撤掉：AI 会话统一走 [`AI_SESSION_GLYPH`] 双星字形，
+/// 来源由分组承担。Shell / Profile 行的彩色真标不受影响——那是识别不同的
+/// **程序**，与「同一类事物的不同来源」不是一回事。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1678,7 +2211,11 @@ mod tests {
     #[test]
     fn empty_query_lists_all_in_declaration_order() {
         let palette = CommandPalette::new();
-        assert_eq!(palette.filtered.len(), ITEMS.len());
+        // 暂缓露出的命令（`CommandPalette::parked`）不进列表，但仍留在
+        // `ITEMS` 里——它的动作、搜索词和本地化文案都还在，放行时只需删掉
+        // 那条判定。工作目录组的两条也在此列：新面板没有 cwd。
+        let parked = ITEMS.iter().filter(|item| palette.parked(&item.action)).count();
+        assert_eq!(palette.filtered.len(), ITEMS.len() - parked);
         assert_eq!(
             palette.filtered[0],
             PaletteCandidate::Item(0),
@@ -1894,12 +2431,7 @@ mod tests {
     }
 
     fn shell(name: &str, id: &str, program: &str) -> DetectedShell {
-        DetectedShell {
-            name: name.into(),
-            id: id.into(),
-            program: program.into(),
-            args: vec![],
-        }
+        DetectedShell { name: name.into(), id: id.into(), program: program.into(), args: vec![] }
     }
 
     #[test]
@@ -1924,6 +2456,192 @@ mod tests {
         assert!(!palette.hero_row());
     }
 
+    /// 命令列表按分类分组：组的顺序固定（工作目录→标签页→跳转→视图→
+    /// 工作区→外观→设置→shell），组内保持「最近优先」。表头只在每组第一
+    /// 行起一次。
+    #[test]
+    fn commands_group_by_category_and_headers_start_each_group() {
+        let palette = CommandPalette::new();
+        let visible = palette.filtered.len().min(24);
+        let groups: Vec<_> =
+            palette.filtered.iter().take(visible).map(|c| palette.command_group(*c)).collect();
+        let mut sorted = groups.clone();
+        sorted.sort();
+        assert_eq!(groups, sorted, "同一分类的命令必须连续，否则表头会切进组中间");
+
+        let labels = palette.group_labels(visible).unwrap();
+        assert_eq!(labels[0].as_ref().map(|(l, _)| l.as_str()), Some("标签页"));
+        assert_eq!(labels[1], None, "组内第二行不再起表头");
+        // 起表头的次数 == 分类数
+        let distinct = {
+            let mut seen = groups.clone();
+            seen.dedup();
+            seen.len()
+        };
+        assert_eq!(labels.iter().flatten().count(), distinct);
+    }
+
+    /// cwd 未知时整个「工作目录」组不出现——留一组作用在空路径上的死命令
+    /// 比少一组糟得多。cwd 一到，这组排在最前，路径挂在表头右缘（写一次，
+    /// 而不是每行重复），「新建标签页」也从标签页组挪进来：它确实继承那个
+    /// 目录，组名已经把「在此」说清楚了。
+    #[test]
+    fn cwd_group_appears_only_with_a_working_directory() {
+        let mut palette = CommandPalette::new();
+        let without: Vec<_> = palette
+            .group_labels(palette.filtered.len())
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .map(|(label, _)| label)
+            .collect();
+        assert!(!without.iter().any(|l| l == "工作目录"), "没有 cwd 就没有这一组");
+        assert!(!palette.filtered.iter().any(|&c| matches!(
+            c,
+            PaletteCandidate::Item(i) if ITEMS[i].action == PaletteAction::CopyCwd
+        )));
+
+        palette.set_context(PaletteContext {
+            cwd: Some(PathBuf::from("D:\\temp_build\\nebula")),
+            sidebar: true,
+            panel_resize: false,
+            new_tab_inherits_cwd: true,
+        });
+        let labels = palette.group_labels(palette.filtered.len()).unwrap();
+        let (label, context) = labels[0].as_ref().expect("第一行起一条表头");
+        assert_eq!(label, "工作目录", "有 cwd 时它排最前");
+        assert_eq!(context, "D:\\temp_build\\nebula", "路径挂在表头右缘");
+        assert_eq!(
+            palette.command_group(palette.filtered[0]),
+            CommandGroup::Cwd,
+            "「新建标签页」跟着进工作目录组"
+        );
+
+        // 配了启动目录：新标签页开在别处，于是它退回标签页组，而复制 / 定位
+        // 两条仍然作用在 cwd 上——组还在，只是少一行。
+        palette.set_context(PaletteContext {
+            cwd: Some(PathBuf::from("D:\\temp_build\\nebula")),
+            sidebar: true,
+            panel_resize: false,
+            new_tab_inherits_cwd: false,
+        });
+        let new_tab = ITEMS.iter().position(|item| item.action == PaletteAction::NewTab).unwrap();
+        assert_eq!(
+            palette.command_group(PaletteCandidate::Item(new_tab)),
+            CommandGroup::Tabs,
+            "开不在那里就不能挂在工作目录标题下"
+        );
+        assert!(palette
+            .group_labels(palette.filtered.len())
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .any(|(label, _)| label == "工作目录"));
+    }
+
+    /// 开关类命令带勾选态，一次性动作不带。列表里同时有两类时，✓ 是唯一
+    /// 能把它们分开的信号；`None` 与 `Some(false)` 的区别不能丢——后者是
+    /// 「开关，当前关着」，前者是「这行根本不是开关」。
+    #[test]
+    fn toggle_rows_carry_their_current_state() {
+        let mut palette = CommandPalette::new();
+        palette.set_context(PaletteContext {
+            cwd: None,
+            sidebar: true,
+            panel_resize: false,
+            new_tab_inherits_cwd: true,
+        });
+        let row_of = |palette: &CommandPalette, action: PaletteAction| {
+            let index = ITEMS.iter().position(|item| item.action == action).unwrap();
+            palette.row_for(PaletteCandidate::Item(index)).checked
+        };
+        assert_eq!(row_of(&palette, PaletteAction::ToggleSidebar), Some(true));
+        assert_eq!(row_of(&palette, PaletteAction::TogglePanelResize), Some(false));
+        assert_eq!(row_of(&palette, PaletteAction::NewTab), None, "一次性动作不是开关");
+    }
+
+    /// 表头跟着滚动窗口走。此前 `group_labels` 取的是 `filtered` 的**前 N
+    /// 条**、行取的是滚动后的窗口，两边基准不同：往下翻一页，行换了、表头
+    /// 还写着列表开头那几组，标题于是指着一批已经滚走的行。
+    #[test]
+    fn headers_follow_the_scrolled_window() {
+        const MAX_ROWS: usize = 4;
+        let mut palette = CommandPalette::new();
+        palette.open();
+        palette.set_context(PaletteContext {
+            cwd: Some(PathBuf::from("D:\\temp_build\\nebula")),
+            sidebar: false,
+            panel_resize: false,
+            new_tab_inherits_cwd: true,
+        });
+        assert!(palette.filtered.len() > MAX_ROWS * 2, "要够长才能翻页");
+
+        let group_at = |palette: &CommandPalette, index: usize| {
+            palette.command_group(palette.filtered[index])
+        };
+        let top_label = |palette: &CommandPalette| {
+            palette.group_labels(MAX_ROWS).unwrap()[0].as_ref().map(|(l, _)| l.clone())
+        };
+        assert_eq!(top_label(&palette), Some(group_at(&palette, 0).label(palette.language)));
+
+        // 一路下翻到第 9 行：窗口变成 6..10，表头必须跟着换成第 6 行那一组。
+        palette.move_selection(9);
+        let start = palette.scroll_start(MAX_ROWS);
+        assert_eq!(start, 6, "选中行停在底行");
+        let labels = palette.group_labels(MAX_ROWS).unwrap();
+        let (rows, selected) = palette.visible(MAX_ROWS);
+        assert_eq!(labels.len(), rows.len(), "表头与行必须逐条对齐");
+        assert_eq!(selected, Some(MAX_ROWS - 1));
+        assert_eq!(
+            top_label(&palette),
+            Some(group_at(&palette, start).label(palette.language)),
+            "窗口首行永远起一条表头，写的是**它自己**那一组"
+        );
+        // 窗口内其余各行只在换组时起表头。
+        for (offset, label) in labels.iter().enumerate().skip(1) {
+            let changed = group_at(&palette, start + offset) != group_at(&palette, start + offset - 1);
+            assert_eq!(label.is_some(), changed, "第 {offset} 行的表头判定与实际换组不符");
+        }
+    }
+
+    /// 分组表头的前提是同来源的行**连续**。模糊搜索按得分排序会把两家的
+    /// 会话打散，所以 refilter 末尾必须再做一次稳定划分；打头的那一组是
+    /// 拥有最新一条会话的来源，「我刚才在做的那件事」不会被压到第二组。
+    #[test]
+    fn ai_sessions_stay_grouped_by_source_even_while_searching() {
+        use crate::ai_sessions::AiSessionSource::{Claude, Codex};
+        let row = |source, label: &str| AiSessionRow {
+            label: label.to_owned(),
+            hint: String::new(),
+            search: label.to_owned(),
+            command: String::new(),
+            source,
+        };
+        let mut palette = CommandPalette::new();
+        // 交错到达，最新的一条（首行）是 claude。
+        palette.open_ai_sessions(vec![
+            row(Claude, "aa 修复"),
+            row(Codex, "ab 修复"),
+            row(Claude, "ac 修复"),
+            row(Codex, "ad 修复"),
+        ]);
+        let sources = |p: &CommandPalette| -> Vec<_> {
+            p.filtered
+                .iter()
+                .map(|c| match c {
+                    PaletteCandidate::AiSession(i) => p.ai_sessions[*i].source,
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        assert_eq!(sources(&palette), vec![Claude, Claude, Codex, Codex], "空查询就该分好组");
+        let labels = palette.group_labels(4).unwrap();
+        assert_eq!(labels[0].as_ref().map(|(l, _)| l.as_str()), Some("CLAUDE CODE 会话"));
+        assert_eq!(labels[1], None, "组内第二行不再起表头");
+        assert_eq!(labels[2].as_ref().map(|(l, _)| l.as_str()), Some("CODEX 会话"));
+        assert_eq!(labels[3], None);
+    }
+
     #[test]
     fn picker_layout_rows_are_non_uniform_and_hit_test_matches() {
         let mut palette = CommandPalette::new();
@@ -1941,8 +2659,7 @@ mod tests {
         let (hero_y, hero_h) = layout.rows[0];
         let (row_y, row_h) = layout.rows[1];
         assert!(hero_h > row_h, "推荐大卡片必须比普通卡片高");
-        assert!(layout.headers.0.is_some() && layout.headers.1.is_some());
-        // 命中测试与逐行矩形一致；卡片之间的缝隙与分区标题不可点。
+        assert_eq!(layout.groups.len(), 2, "hero 版式仍是「推荐 / 所有选项」两条表头");        // 命中测试与逐行矩形一致；卡片之间的缝隙与分区标题不可点。
         let (px, ..) = layout.panel;
         assert_eq!(layout.row_at(px + 10.0, hero_y + hero_h / 2.0), Some(0));
         assert_eq!(layout.row_at(px + 10.0, row_y + row_h / 2.0), Some(1));
@@ -1982,7 +2699,8 @@ mod tests {
         // 单行标签极长时，列被钳住；调用方据此判定冲突并让整条路径让位，
         // 而不是把路径叠在标签上。
         let (ix, iw, cell_w, scale) = (0.0, 600.0, 12.0, 1.0);
-        let absurd = text_width_cols("启动：一个足够长到吃掉整行宽度的 profile 名字标签") as f32 * cell_w;
+        let absurd =
+            text_width_cols("启动：一个足够长到吃掉整行宽度的 profile 名字标签") as f32 * cell_w;
         let col = path_column_x(ix + 14.0, 26.0, absurd, ix, iw, scale);
         assert!(col <= ix + iw * 0.62 + 0.01, "列必须被钳在面板 62% 内");
     }

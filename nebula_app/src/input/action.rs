@@ -386,8 +386,7 @@ impl<T: EventListener> Execute<T> for Action {
                 if let Some(destination) = ctx.nebula_ssh_destination().map(str::to_owned) {
                     ctx.nebula_open_sftp(destination);
                 } else {
-                    ctx.display()
-                        .toggle_side_panel(crate::display::side_panel::PanelView::Files);
+                    ctx.display().toggle_side_panel(crate::display::side_panel::PanelView::Files);
                 }
                 ctx.mark_dirty();
             },

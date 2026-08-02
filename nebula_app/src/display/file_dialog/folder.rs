@@ -8,13 +8,14 @@ use windows_sys::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows_sys::Win32::UI::Shell::{
-    FILEOPENDIALOGOPTIONS, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST,
-    FOS_PICKFOLDERS, FileOpenDialog, SIGDN, SIGDN_FILESYSPATH,
+    FDAP_TOP, FILEOPENDIALOGOPTIONS, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST,
+    FOS_PICKFOLDERS, FileOpenDialog, SHCreateItemFromParsingName, SIGDN, SIGDN_FILESYSPATH,
 };
 use windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
 use winit::raw_window_handle::RawWindowHandle;
 
 const FILE_OPEN_DIALOG_IID: GUID = GUID::from_u128(0xd57c7288_d4ad_4768_be02_9d969532d960);
+const SHELL_ITEM_IID: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
 const HRESULT_CANCELLED: HRESULT = 0x800704c7_u32 as HRESULT;
 
 #[repr(C)]
@@ -60,7 +61,8 @@ struct IFileDialogVTable {
     _set_ok_button_label: usize,
     _set_file_name_label: usize,
     get_result: unsafe extern "system" fn(this: *mut c_void, item: *mut *mut c_void) -> HRESULT,
-    _add_place: usize,
+    add_place:
+        unsafe extern "system" fn(this: *mut c_void, item: *mut c_void, placement: i32) -> HRESULT,
     _set_default_extension: usize,
     _close: usize,
     _set_client_guid: usize,
@@ -189,6 +191,32 @@ pub(super) fn pick(owner: RawWindowHandle, title: &str) -> Option<PathBuf> {
     let result = unsafe { (dialog_vtable.base.set_title)(dialog.0, title.as_ptr()) };
     if !succeeded("设置目录选择器标题", result) {
         return None;
+    }
+
+    // WSL 发行版钉进侧栏（issue #12：系统的「Linux」导航节点不是每台
+    // Win11 都有，钉进去的入口才保证在）。逐个失败静默跳过——发行版
+    // 停着时解析可能失败，这不该拦住对话框本身。
+    //
+    // FDAP_TOP 是"插到最顶"，逐个插会倒序——倒着喂，最终按字母序落位。
+    for name in crate::shell_detect::wsl_distro_names().iter().rev() {
+        let unc = format!(r"\\wsl.localhost\{name}")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut item_pointer = std::ptr::null_mut();
+        let result = unsafe {
+            SHCreateItemFromParsingName(
+                unc.as_ptr(),
+                std::ptr::null_mut(),
+                &SHELL_ITEM_IID,
+                &mut item_pointer,
+            )
+        };
+        if result < 0 {
+            continue;
+        }
+        let Some(item) = ComPtr::from_raw(item_pointer) else { continue };
+        unsafe { (dialog_vtable.base.add_place)(dialog.0, item.0, FDAP_TOP) };
     }
 
     let result = unsafe { (dialog_vtable.base.base.show)(dialog.0, owner) };

@@ -128,10 +128,7 @@ mod tests {
     /// 放行的形式：token 常量、以及从别处派生的表达式（`th * 0.5` 的胶囊、
     /// `knob / 2.0` 的圆形、上游传下来的 `corner`）。只揪 `s(常数)` 和裸常数。
     fn is_hardcoded_radius(arg: &str) -> bool {
-        let inner = arg
-            .strip_prefix("s(")
-            .and_then(|rest| rest.strip_suffix(')'))
-            .unwrap_or(arg);
+        let inner = arg.strip_prefix("s(").and_then(|rest| rest.strip_suffix(')')).unwrap_or(arg);
         if !inner.bytes().all(|b| b.is_ascii_digit() || b == b'.') || inner.is_empty() {
             return false;
         }
@@ -139,7 +136,13 @@ mod tests {
     }
 
     /// 一条数量上限规则的检查。`budget` 是当前实际违规数。
-    fn check_budget(rule: &str, why: &str, fix: &str, budget: usize, hits: Vec<(String, usize, String)>) {
+    fn check_budget(
+        rule: &str,
+        why: &str,
+        fix: &str,
+        budget: usize,
+        hits: Vec<(String, usize, String)>,
+    ) {
         let found = hits.len();
         if found == budget {
             return;
@@ -206,7 +209,11 @@ mod tests {
             }
             for (index, line) in src.lines().enumerate() {
                 if line.contains("- s(1.0)") {
-                    hits.push((label(&path), index + 1, "手写的 (x-1, y-1, w+2, h+2) 描边".to_owned()));
+                    hits.push((
+                        label(&path),
+                        index + 1,
+                        "手写的 (x-1, y-1, w+2, h+2) 描边".to_owned(),
+                    ));
                 }
             }
         }
@@ -215,7 +222,7 @@ mod tests {
             "手写描边普遍内外用同一个半径，圆角处描边会变粗——「边缘发毛」的\n\
              来源之一。push_stroke 让外半径 = 内半径 + 描边宽，内外弧同心。",
             "surface::push_stroke(quads, rect, corner, scale, sk.hairline)",
-            47,
+            45,
             hits,
         );
     }
@@ -264,7 +271,8 @@ mod tests {
 
     #[test]
     fn multi_line_calls_are_counted_at_their_opening_line() {
-        let src = "line one\nUiQuad::solid(\n    x,\n    y,\n    w,\n    h,\n    s(9.0),\n    color,\n)";
+        let src =
+            "line one\nUiQuad::solid(\n    x,\n    y,\n    w,\n    h,\n    s(9.0),\n    color,\n)";
         let args = radius_arguments(src);
         assert_eq!(args, vec![(2, "s(9.0)".to_owned())]);
     }

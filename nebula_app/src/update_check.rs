@@ -80,8 +80,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
         version
             .split('.')
             .map(|segment| {
-                let digits: String =
-                    segment.chars().take_while(char::is_ascii_digit).collect();
+                let digits: String = segment.chars().take_while(char::is_ascii_digit).collect();
                 digits.parse().unwrap_or(0)
             })
             .collect()

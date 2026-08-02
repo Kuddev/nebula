@@ -37,7 +37,10 @@ pub enum ContextMenuTarget {
     SftpPanel,
     /// 本地文件树（侧栏 Files 视图）的一行。`is_dir` 决定首行是「打开」
     /// 还是「在此处打开终端」。row 是可见行索引，执行时再验证路径。
-    FileTree { row: usize, is_dir: bool },
+    FileTree {
+        row: usize,
+        is_dir: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

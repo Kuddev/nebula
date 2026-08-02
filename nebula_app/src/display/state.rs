@@ -71,6 +71,9 @@ pub enum NebulaConfirm {
     /// under persistent controls is opt-in because low-contrast images can
     /// make caption buttons, tabs and SSH navigation harder to read.
     EnableBackgroundImageCoverChrome,
+    /// 「拖拽调节侧栏」开启前的一次性告知：宽度拖动会实时重排终端，低配
+    /// 机器或超大回滚缓冲下可能掉帧（用户裁定：开启必须先明确警告）。
+    EnablePanelResize,
     InstallRequiredFont {
         directory: PathBuf,
     },
@@ -149,6 +152,17 @@ pub struct NebulaPaneState {
     pub last_committed: String,
     pub awaiting_input: bool,
     pub finished_unseen: bool,
+    /// AI CLI 停下来等用户批准（claude 的 `Notification` hook）。和
+    /// `finished_unseen` 分开：那个是"回合做完了，轮到你"，这个是"它卡在
+    /// 半路上，不点头就不动"——后者才需要手掌徽章催人。
+    pub needs_attention: bool,
+    /// 上一条命令以非零码收尾且还没被看到。此前失败和成功共用一颗圆点，
+    /// 标签上根本读不出"那条跑挂了"。
+    pub failed_unseen: bool,
+    /// 命令成功收尾的时刻，用来放那一下对勾闪现（见 `BADGE_FLASH`）。
+    /// 闪完落回圆点——对勾说"刚成的"，圆点说"有结果没看"，是同一件事的
+    /// 两个阶段。
+    pub finished_at: Option<std::time::Instant>,
     pub pending_ssh_host: Option<String>,
     /// 助手错误恢复的建议条状态（spec 001）；`None` = 无条。
     pub ai_fix: Option<crate::ai_assistant::AiFixState>,

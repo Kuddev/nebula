@@ -36,11 +36,22 @@ const MAX_BOOT_ATTEMPTS: u32 = 3;
 pub enum LaunchSession {
     Default,
     /// A detected shell from the new-tab dropdown (e.g. a WSL distro).
-    Shell { name: String, program: String, args: Vec<String> },
+    Shell {
+        name: String,
+        program: String,
+        args: Vec<String>,
+    },
     /// A quick-launch profile, embedded rather than referenced by name.
-    Profile { name: String, command: String, args: Vec<String>, cwd: Option<String> },
+    Profile {
+        name: String,
+        command: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+    },
     /// A saved SSH destination; restoring reconnects automatically.
-    Ssh { host: String },
+    Ssh {
+        host: String,
+    },
 }
 
 /// Split axis, mirrored from `display::SplitDirection` so the display layer
@@ -141,11 +152,27 @@ pub struct Session {
     pub tabs: Vec<TabSession>,
     #[serde(default)]
     pub window: Option<WindowState>,
+    /// 上一次退出有没有走完收尾。1 Hz 自动保存一律写 `false`，只有真正的
+    /// 收尾路径（关窗、退出、detach 驻留）在最后一笔写 `true`——所以启动时
+    /// 读到 `false` 就说明上次是崩溃、强杀或断电。
+    ///
+    /// 老版本文件没有这个字段，`serde(default)` 会给 `false`：一次性地把
+    /// 升级前的最后一次会话判成异常退出。恢复行为完全不变（两种情况都恢复），
+    /// 代价只是多一条提示，所以不值得为它单开一个版本号。
+    #[serde(default)]
+    pub clean_exit: bool,
 }
 
 impl Session {
     pub fn new(active_tab: usize, tabs: Vec<TabSession>) -> Self {
-        Self { version: VERSION, boot_attempts: 0, active_tab, tabs, window: None }
+        Self {
+            version: VERSION,
+            boot_attempts: 0,
+            active_tab,
+            tabs,
+            window: None,
+            clean_exit: false,
+        }
     }
 }
 
@@ -199,6 +226,33 @@ pub fn should_restore(session: &Session) -> bool {
     session.boot_attempts < MAX_BOOT_ATTEMPTS && !session.tabs.is_empty()
 }
 
+/// 收尾时的最后一笔快照：先打上 [`Session::clean_exit`] 再落盘。所有正常
+/// 退出路径都必须走这里，否则下次启动会把这次退出误判成崩溃。
+pub fn save_final(session: &mut Session) {
+    session.clean_exit = true;
+    save(session);
+}
+
+/// 上次是异常退出（崩溃 / 强杀 / 断电），而不是正常收尾。空会话不算——
+/// 那是一路关标签关干净的正常退出。
+pub fn was_crash(session: &Session) -> bool {
+    !session.clean_exit && !session.tabs.is_empty()
+}
+
+/// 断路器跳闸（连续 [`MAX_BOOT_ATTEMPTS`] 次启动都没活到第一次自动保存）时，
+/// 把这份会话挪到 `session.crashed.json` 再让本次启动走干净路径。
+///
+/// 必须**挪走**而不是留在原地：启动一成功，一秒后的自动保存就会把
+/// `session.json` 盖掉，那份「一恢复就崩」的现场是唯一的诊断材料。顺带
+/// 也让 `boot_attempts` 自然归零，用户不必手工删文件才能恢复正常。
+pub fn quarantine() -> Option<PathBuf> {
+    let from = session_path();
+    let to = crate::display::nebula_data_dir().join("session.crashed.json");
+    std::fs::copy(&from, &to).ok()?;
+    let _ = std::fs::remove_file(&from);
+    Some(to)
+}
+
 /// A saved cwd as a `PathBuf`, if it still exists on disk. A vanished
 /// directory must not sink the pane spawn — ConPTY fails outright on an
 /// invalid startup directory — so callers fall back to the default cwd.
@@ -221,6 +275,28 @@ pub fn mark_boot_attempt(session: &mut Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 崩溃判定的三种现场：自动保存写的半路快照、正常收尾、以及一路关标签
+    /// 关到空——只有第一种算异常退出。
+    #[test]
+    fn only_an_unfinished_teardown_counts_as_a_crash() {
+        let mut running = Session::new(0, vec![TabSession::single("D:/work".into(), None, None)]);
+        assert!(was_crash(&running), "1 Hz 自动保存写的快照 = 还没走到收尾");
+        running.clean_exit = true;
+        assert!(!was_crash(&running));
+        let quit_clean = Session::new(0, vec![]);
+        assert!(!was_crash(&quit_clean), "空会话是正常退出，不是崩溃");
+    }
+
+    /// 升级前的会话文件没有 `clean_exit`，读出来必须是 false（当作异常退出）
+    /// 而不是解析失败——恢复行为不变，只多一条提示。
+    #[test]
+    fn a_file_written_before_clean_exit_existed_still_parses() {
+        let json = r#"{"version":4,"boot_attempts":0,"active_tab":0,"tabs":[{"cwd":"D:/work"}]}"#;
+        let session: Session = serde_json::from_str(json).unwrap();
+        assert!(!session.clean_exit);
+        assert!(should_restore(&session));
+    }
 
     #[test]
     fn v1_tabs_deserialize_with_default_metadata() {

@@ -164,10 +164,7 @@ fn parse_key_name(lower: &str) -> Option<BindingKey> {
         return Some(BindingKey::Scancode(PhysicalKey::Code(*code)));
     }
     if let Some((_, named)) = NAMED_ALIASES.iter().find(|(name, _)| *name == lower) {
-        return Some(BindingKey::Keycode {
-            key: Key::Named(*named),
-            location: KeyLocation::Any,
-        });
+        return Some(BindingKey::Keycode { key: Key::Named(*named), location: KeyLocation::Any });
     }
     let key = match lower {
         "esc" => Key::Named(NamedKey::Escape),
@@ -323,9 +320,8 @@ pub(super) fn effective_combo(action: &Action, custom: &[KeyBinding]) -> Option<
         if binding.action != *action {
             continue;
         }
-        let shadowed_by_newer = custom[..index]
-            .iter()
-            .any(|b| b.trigger == binding.trigger && b.mods == binding.mods);
+        let shadowed_by_newer =
+            custom[..index].iter().any(|b| b.trigger == binding.trigger && b.mods == binding.mods);
         if !shadowed_by_newer {
             return display_combo(binding.mods, &binding.trigger).map(|text| (text, true));
         }
@@ -343,10 +339,7 @@ pub(super) fn effective_combo(action: &Action, custom: &[KeyBinding]) -> Option<
             !matches!(
                 &b.trigger,
                 BindingKey::Keycode { key: Key::Named(NamedKey::Copy | NamedKey::Paste), .. }
-                    | BindingKey::Keycode {
-                        location: KeyLocation::Numpad,
-                        ..
-                    }
+                    | BindingKey::Keycode { location: KeyLocation::Numpad, .. }
             )
         })
         .find(|b| !shadowed(b))
@@ -390,9 +383,8 @@ pub(crate) fn capture_combo(key: &KeyEvent, mods: ModifiersState) -> CaptureOutc
     }
 
     let binding_key = match key.key_without_modifiers() {
-        Key::Named(named) => BindingKey::Keycode {
-            key: Key::Named(named),
-            location: KeyLocation::Any,
+        Key::Named(named) => {
+            BindingKey::Keycode { key: Key::Named(named), location: KeyLocation::Any }
         },
         Key::Character(c) => {
             let lower = c.to_lowercase();
@@ -472,8 +464,7 @@ mod tests {
     fn custom_binding_shadows_default_in_display() {
         // 自定义 Ctrl+Shift+T → SplitRight 后：SplitRight 显示新键（自定义），
         // CreateNewTab 的默认 Ctrl+Shift+T 被遮蔽 → 显示未绑定。
-        let raw =
-            vec![("ctrl+shift+t".to_owned(), "SplitRight".to_owned())];
+        let raw = vec![("ctrl+shift+t".to_owned(), "SplitRight".to_owned())];
         let custom = build_bindings(&raw);
         assert_eq!(
             effective_combo(&Action::SplitRight, &custom),
@@ -533,9 +524,7 @@ mod tests {
         for (combo, action) in expect {
             let (mods, key) = parse_combo(combo).unwrap();
             assert!(
-                defaults
-                    .iter()
-                    .any(|b| b.action == action && b.mods == mods && b.trigger == key),
+                defaults.iter().any(|b| b.action == action && b.mods == mods && b.trigger == key),
                 "default table is missing {combo} → {action:?}"
             );
         }

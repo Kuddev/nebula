@@ -693,7 +693,9 @@ pub fn spawn_test(
                 move || SshDestination::resolve(&raw)
             })
             .await
-            .map_err(|err| -> SessionError { format!("SSH 地址解析任务失败: {err}").into() })??;
+            .map_err(|err| -> SessionError {
+                format!("SSH 地址解析任务失败: {err}").into()
+            })??;
             test_connect(&resolved, &request).await
         })
         .await;
@@ -746,7 +748,8 @@ async fn test_authenticate(
     if session.authenticate_none(&destination.user).await?.success() {
         return Ok(());
     }
-    let has_draft_password = request.password.as_deref().is_some_and(|password| !password.is_empty());
+    let has_draft_password =
+        request.password.as_deref().is_some_and(|password| !password.is_empty());
     if let Some(password) = request.password.as_deref().filter(|p| !p.is_empty()) {
         if authenticate_password(session, &destination.user, password.as_bytes()).await? {
             return Ok(());

@@ -10,8 +10,8 @@
 
 #![allow(clippy::wildcard_imports)]
 
-use super::*;
 use super::ui::{icons, tokens};
+use super::*;
 
 /// Result of hit-testing a pixel against the Nebula top chrome bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +119,9 @@ pub(super) struct ChromeTabLayout {
     /// Scroll clamps: the largest valid row offset for each section.
     pub(super) tabs_max_scroll: usize,
     pub(super) hosts_max_scroll: usize,
+    /// 停靠区可用内容的底缘 y（物理 px）——HOSTS 分界拖拽用它把指针 y 换算
+    /// 成停靠区高度；与布局同源，两头不会漂。折叠时为 0。
+    pub(super) dock_content_bottom: f32,
 }
 
 /// Sidebar content model handed to the layout: everything that changes the
@@ -132,6 +135,10 @@ pub(crate) struct SidebarModel {
     pub(super) hosts_open: bool,
     pub(super) tabs_scroll: usize,
     pub(super) hosts_scroll: usize,
+    /// 侧栏逻辑宽（拖拽调节的实时值；默认 [`super::SIDEBAR_W_LOGICAL`]）。
+    pub(super) sidebar_w: f32,
+    /// SSH HOSTS 停靠区高度覆盖（逻辑 px），0 = 自动（46% 弹性规则）。
+    pub(super) hosts_band: f32,
 }
 
 pub(super) fn contains_rect((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f32) -> bool {
@@ -164,6 +171,66 @@ pub(super) fn truncate_tab_label(label: &str, max_cols: usize) -> String {
     }
     text.push('…');
     text
+}
+
+/// 分组标题文本的 y——chip、数字、标题共用的**唯一事实源**。
+///
+/// TABS 和 SSH HOSTS 的标题各有自己的落点（TABS 为躲开与顶栏的接缝特意往下
+/// 压了几像素，HOSTS 在自己的带里居中）。之前 chip/数字用"header 居中"另算
+/// 一份，TABS 那组就差出 6px——第三次栽在"两边各算一次"上了。现在谁要跟标题
+/// 对齐，谁就从这里拿 y。
+pub(super) fn section_title_y(
+    header: (f32, f32, f32, f32),
+    is_tabs: bool,
+    text_h: f32,
+    scale: f32,
+) -> f32 {
+    if is_tabs {
+        // 与 draw_chrome 里 TABS 标题的 `pnl_y + s(22)` 同源（tabs_header.1
+        // 就是 panel_top）。
+        header.1 + 22.0 * scale
+    } else {
+        header.1 + (header.3 - text_h) / 2.0
+    }
+}
+
+/// 分组标题里那颗数量 chip 的矩形（背景 + 数字共用）。
+///
+/// 背景在 quads 那一趟画、数字在 text 那一趟画，中间隔着 `draw_ui`。两边各
+/// 算一次必然漂移——这正是本模块存在的理由，所以位置只在这里算一次。
+///
+/// UI 字体不是等宽，标题宽度只能按平均步进估。chip 是块独立的色片、不需要
+/// 贴着标题的最后一个字形，估算的几像素误差落在那 6px 间距里看不出来。
+pub(super) fn section_count_chip(
+    header: (f32, f32, f32, f32),
+    is_tabs: bool,
+    title_chars: usize,
+    digits: usize,
+    advance: f32,
+    tracking: f32,
+    text_h: f32,
+    scale: f32,
+) -> (f32, f32, f32, f32) {
+    let s = |v: f32| v * scale;
+    let (hx, _, _, _) = header;
+    // 标题的实际推进 = 字形步进 + **字距**，再乘一点粗体的富余。第一版漏了
+    // tracking（0.65px/字），"SSH HOSTS" 十二个字符就差出近 8px——chip 于是
+    // 正好压在标题最后一个字母上。BOLD 比常规再宽一档，用 1.06 兜住。
+    let advance_per_char = (advance + tracking) * 1.06;
+    let x = hx + s(16.0) + advance_per_char * title_chars as f32 + s(7.0);
+    // 高度跟着**文本**走而不是写死 16px：字号或 DPI 一变，固定高度的 chip 要么
+    // 箍不住数字、要么在小字号下胖成一坨。
+    //
+    // 1.45 那版把 chip 撑成了一颗比标题还抢眼的圆球——数量是**附注**，它只在
+    // 折叠时替你数一下里面有几条，不该盖过它所标注的那个标题。原型里这颗片是
+    // `padding: 0 5px` 的窄胶囊（高度就是行盒），所以这里也只留一线余量；下限
+    // 同时把它压成横向的胶囊而不是正圆——正圆在这个尺寸上读起来就是个徽章。
+    let h = (text_h * 1.18).max(s(11.0));
+    let w = (advance * digits as f32 + s(8.0)).max(h * 1.25);
+    // y 锚在标题文本上（chip 比文本高出的部分上下平分），不再自己在 header
+    // 里居中——标题不是居中画的，居中的 chip 必然漂。
+    let title_y = section_title_y(header, is_tabs, text_h, scale);
+    (x, title_y - (h - text_h) / 2.0, w, h)
 }
 
 /// Shared geometry for the custom Windows-style titlebar controls.
@@ -242,7 +309,9 @@ pub(crate) fn chrome_settings_button_rect(
     let margin = s(8.0);
     let top = margin;
     let bar_h = s(40.0);
-    let inner_pad = s(6.0);
+    // 顶栏按钮的命中/背景边长 = bar_h - 2*inner_pad。6 那版给出 28px，比
+    // tokens 的 `hit`(32) 小一圈——按钮看着紧贴图标，按下去也不跟手。
+    let inner_pad = s(4.0);
     let pill_h = bar_h - 2.0 * inner_pad;
     let toggle_x = margin + inner_pad;
     let x = toggle_x + pill_h + s(8.0);
@@ -264,7 +333,9 @@ pub(super) fn chrome_tab_layout(
     let h = size_info.height();
     let margin = s(8.0);
     let bar_h = s(40.0);
-    let inner_pad = s(6.0);
+    // 顶栏按钮的命中/背景边长 = bar_h - 2*inner_pad。6 那版给出 28px，比
+    // tokens 的 `hit`(32) 小一圈——按钮看着紧贴图标，按下去也不跟手。
+    let inner_pad = s(4.0);
     let pill_h = bar_h - 2.0 * inner_pad;
     let top = margin;
     let count = model.tab_count.max(1);
@@ -304,6 +375,7 @@ pub(super) fn chrome_tab_layout(
             hosts_band: (0.0, 0.0),
             tabs_max_scroll: 0,
             hosts_max_scroll: 0,
+            dock_content_bottom: 0.0,
         };
     }
 
@@ -313,7 +385,7 @@ pub(super) fn chrome_tab_layout(
     // are squared off in `draw_chrome`. It runs down to the window's bottom
     // margin (symmetric with the top bar's top at `margin`), leaving only a
     // breathing gap before the terminal grid on its right.
-    let sw = SIDEBAR_W_LOGICAL * scale_factor;
+    let sw = model.sidebar_w * scale_factor;
     let slide = (1.0 - expand.clamp(0.0, 1.0)) * sw;
     let panel_x = margin - slide;
     let panel_w = (sw - margin - s(12.0)).max(s(120.0));
@@ -325,7 +397,11 @@ pub(super) fn chrome_tab_layout(
     // Vertical tab rows: full panel width minus inner padding, stacked below
     // the "TABS" header. The new-tab affordance is a small square at the right
     // end of that header row (revealed on sidebar hover), not a trailing row.
-    let tab_pad = s(14.0);
+    // 行的左右内缩。窄内缩 = 更宽的行 = 名称与徽章之间拉得开——侧栏总宽
+    // 一点没变，变的只是行在里面占多少。14 → 8 → 4 一路收：14 那版把 28px
+    // 让给了两侧空白；otty 的行几乎贴满侧栏，呼吸感来自行**内部**的留白，
+    // 不是行外的边框。
+    let tab_pad = s(4.0);
     let tab_x = panel_x + tab_pad;
     let tab_w = panel_w - 2.0 * tab_pad;
     let row_h = s(34.0);
@@ -358,28 +434,66 @@ pub(super) fn chrome_tab_layout(
 
     let tabs_header = (panel_x, panel_top, panel_w, header);
 
-    // ---- Elastic accordion split ----
-    // Each open section wants `count` rows. If both fit, both get what they
-    // want; if not, the panel's row budget is split so neither section can
-    // starve the other below half of the budget, and every overflowing
-    // section scrolls behind its own scrollbar.
-    let avail_rows =
-        (((panel_h - queue_reserved - header - hosts_header_h - empty_hosts_hint_h - bottom_pad
-            + gap)
-            / pitch)
-            .floor()
-            .max(0.0)) as usize;
+    // ---- 两个分区：标签吃满弹性高度，主机沉到底 ----
+    //
+    // 原来两段排在同一条流里、互相削减。问题是它们不是同一类东西：标签是
+    // **活的状态**（哪个在跑、谁在等你批准），那套徽章的全部价值就在于它一
+    // 直在余光里；主机是**目录**，只在开新会话那一刻用一次。排在一条流里，
+    // 主机一多就会把标签顶出视口——用得少的那类挤掉了必须常驻的那类。
+    //
+    // 所以主机整块沉到面板底部：自己的地盘、自己的滚动、封顶。标签拿走上面
+    // 剩下的全部，永远不会被挤没。
+    //
+    // 主机行是**双行**的（名字在上、地址在下），比标签行高一档；两段行高不
+    // 同，所以到处都按**高度**算，不能再除同一个 pitch。
+    let host_row_h = row_h + s(13.0);
+    let host_pitch = host_row_h + gap;
+    // n 行占的高度：行间距只在行**之间**，末行后面不留。
+    let rows_h = |n: usize, pitch: f32| if n == 0 { 0.0 } else { n as f32 * pitch - gap };
+
+    let content_top = panel_top + header;
+    let content_bottom = (panel_bottom - queue_reserved - bottom_pad).max(content_top);
+    let content_h = content_bottom - content_top;
+
     let tabs_want = if model.tabs_open { count } else { 0 };
     let hosts_want = if model.hosts_open { host_count } else { 0 };
-    let (tabs_show, hosts_show) = if tabs_want + hosts_want <= avail_rows {
-        (tabs_want, hosts_want)
+
+    // 停靠区的地盘：**至少** 46%，但标签用不完的话它可以更多。只写死 46%
+    // 的话，两个标签配四十台主机会在中间空出一大片——封顶是为了保护标签，
+    // 标签不需要保护的时候就不该继续封着。
+    const DOCK_MIN_SHARE: f32 = 0.46;
+    // 标题（和空态提示）是停靠区的固定开销，先扣掉再让行去分剩下的。
+    let dock_fixed = hosts_header_h + empty_hosts_hint_h;
+    // 用户拖过 HOSTS 分界（设置开启拖拽调节）后，停靠区高度以覆盖值为准，
+    // 钳在「只剩标题」与「至少给标签区留一行」之间；没拖过走弹性规则。
+    let dock_cap = if model.hosts_band > 0.0 {
+        (model.hosts_band * scale_factor).clamp(dock_fixed, (content_h - pitch - gap).max(dock_fixed))
     } else {
-        let half = avail_rows / 2;
-        let tabs_show = tabs_want.min(avail_rows.saturating_sub(hosts_want).max(half));
-        let hosts_show = hosts_want.min(avail_rows - tabs_show);
-        // Hand any slack back to the tabs section (hosts already capped).
-        (tabs_want.min(avail_rows - hosts_show), hosts_show)
+        (content_h - rows_h(tabs_want, pitch) - gap).max(content_h * DOCK_MIN_SHARE).min(content_h)
     };
+    let mut hosts_show = hosts_want;
+    while hosts_show > 0 && dock_fixed + gap + rows_h(hosts_show, host_pitch) > dock_cap {
+        hosts_show -= 1;
+    }
+    // 内容需要的高度。没拖过分界时它**就是**停靠区的高度——贴着内容走。
+    let content_dock_h =
+        dock_fixed + if hosts_show > 0 { gap + rows_h(hosts_show, host_pitch) } else { 0.0 };
+    // 拖过分界之后改以拖出来的高度为准：手动分界的语义是「手动覆盖弹性」。
+    // 只拿它当上限是不够的——主机数撑不满上限时（一台主机配一屏高度就是
+    // 这样），上限抬得再高内容也长不出来，分界线纹丝不动，手感上就是
+    // 「往上拖不动、被限制死了」（用户 08-02 报的正是这个）。多出来的空白
+    // 是用户自己要的：他把地盘划给了 HOSTS。
+    let dock_h = if model.hosts_band > 0.0 { dock_cap } else { content_dock_h };
+    // 贴底：停靠区的**下**沿固定，上沿随内容升降。折起来（hosts_open=false）
+    // 就只剩一条标题贴在最下面。
+    let dock_top = (content_bottom - dock_h).max(content_top);
+
+    // 标签区 = 停靠区上方剩下的全部。
+    let tabs_avail = (dock_top - gap - content_top).max(0.0);
+    let mut tabs_show = tabs_want;
+    while tabs_show > 0 && rows_h(tabs_show, pitch) > tabs_avail {
+        tabs_show -= 1;
+    }
     let tabs_max_scroll = tabs_want.saturating_sub(tabs_show);
     let hosts_max_scroll = hosts_want.saturating_sub(hosts_show);
     let tabs_scroll = model.tabs_scroll.min(tabs_max_scroll);
@@ -411,8 +525,8 @@ pub(super) fn chrome_tab_layout(
     let tabs_band_h = if tabs_show > 0 { tabs_show as f32 * pitch - gap } else { 0.0 };
     let tabs_band = (tabs_top, tabs_top + tabs_band_h);
 
-    // Hosts section stacks right below the tabs band.
-    let hosts_header_y = tabs_band.1 + if tabs_show > 0 { gap } else { 0.0 };
+    // 停靠区：位置由 `dock_top` 定死（贴着面板底），不再跟着标签区的末尾走。
+    let hosts_header_y = dock_top;
     let hosts_header = (panel_x, hosts_header_y, panel_w, hosts_header_h);
     let hosts_top = hosts_header_y + hosts_header_h;
     let mut hosts = Vec::with_capacity(host_count);
@@ -421,10 +535,10 @@ pub(super) fn chrome_tab_layout(
             hosts.push(zero);
             continue;
         }
-        let y = hosts_top + (i - hosts_scroll) as f32 * pitch;
-        hosts.push((tab_x, y, tab_w, row_h));
+        let y = hosts_top + (i - hosts_scroll) as f32 * host_pitch;
+        hosts.push((tab_x, y, tab_w, host_row_h));
     }
-    let hosts_band_h = if hosts_show > 0 { hosts_show as f32 * pitch - gap } else { 0.0 };
+    let hosts_band_h = if hosts_show > 0 { hosts_show as f32 * host_pitch - gap } else { 0.0 };
     let hosts_band = (hosts_top, hosts_top + hosts_band_h);
 
     // Overlay scrollbar thumbs, one per overflowing section: pinned to the
@@ -463,6 +577,7 @@ pub(super) fn chrome_tab_layout(
         hosts_band,
         tabs_max_scroll,
         hosts_max_scroll,
+        dock_content_bottom: content_bottom,
     }
 }
 
@@ -685,7 +800,9 @@ pub(super) fn draw_chrome(d: &mut Display) {
 
     let margin = s(8.0);
     let bar_h = s(40.0);
-    let inner_pad = s(6.0);
+    // 顶栏按钮的命中/背景边长 = bar_h - 2*inner_pad。6 那版给出 28px，比
+    // tokens 的 `hit`(32) 小一圈——按钮看着紧贴图标，按下去也不跟手。
+    let inner_pad = s(4.0);
     let radius = s(UI_CORNER_RADIUS_LOGICAL);
     let pill_h = bar_h - 2.0 * inner_pad;
     let pill_r = s(UI_CORNER_RADIUS_LOGICAL);
@@ -797,8 +914,12 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // away and back; it's the one tab affordance that survives collapse.
     let (tog_x, tog_y, tog_w, tog_h) = tab_layout.toggle;
     let toggle_hovered = d.nebula_chrome_hover == ChromeHit::SidebarToggle;
-    if toggle_hovered {
-        quads.push(UiQuad::solid(tog_x, tog_y, tog_w, tog_h, pill_r, HOVER_FILL_STRONG));
+    // 展开时常驻一层底：这个按钮是**开关**不是动作，而开关必须能看出自己
+    // 处在哪一档。此前只有 hover 才有背景，展开和收起长得一模一样，点下去
+    // 除了侧栏动一下没有任何确认。
+    if toggle_hovered || d.left_sidebar_visible() {
+        let fill = if toggle_hovered { HOVER_FILL_STRONG } else { sk.surface };
+        quads.push(UiQuad::solid(tog_x, tog_y, tog_w, tog_h, pill_r, fill));
     }
     let icon_c = if toggle_hovered { sk.icon_hover } else { sk.icon };
     icons::push_sidebar_toggle(
@@ -902,40 +1023,17 @@ pub(super) fn draw_chrome(d: &mut Display) {
         let tab_draw_x = tab_x;
         let tab_draw_y = tab_y;
         if index == d.nebula_active_tab {
-            // Floating-pill active tab: a soft accent wash over the pill plus
-            // a hairline border. The narrow identity light below carries the
-            // optional user-picked color.
-            let accent = palette.edge_r;
-            quads.push(UiQuad::solid(
-                tab_draw_x - s(1.0),
-                tab_draw_y - s(1.0),
-                tab_w + s(2.0),
-                tab_h + s(2.0),
-                pill_r + s(1.0),
-                Rgba::new(accent.r, accent.g, accent.b, 40),
-            ));
-            quads.push(UiQuad::solid(
-                tab_draw_x,
-                tab_draw_y,
-                tab_w,
-                tab_h,
-                pill_r,
-                palette.tab_bg_l,
-            ));
-            // The accent wash on top is a DARK-theme depth cue: the white pill
-            // (`tab_bg_l`) is the state on the light themes, so tinting it just
-            // grays the white the user asked to keep pure. Only the dark themes
-            // layer the wash over their (dark) active pill.
-            if !palette.is_light {
-                quads.push(UiQuad::solid(
-                    tab_draw_x,
-                    tab_draw_y,
-                    tab_w,
-                    tab_h,
-                    pill_r,
-                    Rgba::new(accent.r, accent.g, accent.b, 26),
-                ));
-            }
+            // 选中态是**中性**的一档提亮，不带品牌色。
+            //
+            // 此前这里叠了三层：accent 外环 + 主题 tab_bg_l + 深色再补一层
+            // accent。而标签左边本来就有程序 logo，claude / codex / grok 全是
+            // 彩标——背景再染色就是两个彩色在同一行里抢。中性底反而让那颗
+            // logo 的颜色立得住，这也是原型看起来"融合"的原因。
+            //
+            // 浅色用纯白 panel（从灰底上浮起来），深色用 hover_strong（白叠加
+            // 提亮一档）。方向相反，都是"比周围亮"。
+            let fill = if palette.is_light { sk.panel } else { sk.hover_strong };
+            quads.push(UiQuad::solid(tab_draw_x, tab_draw_y, tab_w, tab_h, pill_r, fill));
         }
         // Inactive tabs carry no standalone fill — they sit flush on the
         // sidebar surface and only light up on hover (below). State is the
@@ -992,20 +1090,65 @@ pub(super) fn draw_chrome(d: &mut Display) {
         if !tab_hovered {
             let has_dot = d.nebula_tab_bells.get(index).copied().unwrap_or(false);
             let running = d.nebula_tab_running.get(index).copied().unwrap_or(false);
-            if has_dot {
+            let attention = d.nebula_tab_attention.get(index).copied().unwrap_or(false);
+            let failed = d.nebula_tab_failed.get(index).copied().unwrap_or(false);
+            let flashing = d.nebula_tab_flashing.get(index).copied().unwrap_or(false);
+            let cx = close_x + close_w / 2.0;
+            let cy = close_y + close_h / 2.0;
+            // 挖空/合成色取**这一行当时的真实底**：非活动行是侧栏底，活动行
+            // 是那块提亮的药丸——拿侧栏深底去合成画在浅药丸上的环，出来就是
+            // 一个黑圈（活动 tab 的 spinner 曾因此显黑）。三角与对勾的挖空
+            // 同理：填错底，挖空处就是一块颜色不对的补丁。
+            let panel_under = {
+                let shell =
+                    Rgba::new(palette.shell_bg.r, palette.shell_bg.g, palette.shell_bg.b, 255);
+                if index == d.nebula_active_tab {
+                    let fill = if palette.is_light { sk.panel } else { sk.hover_strong };
+                    super::ui::surface::over(fill, shell)
+                } else {
+                    shell
+                }
+            };
+            // 徽章按「不处理就没有进展」排序：等你批准 > 跑挂了 > 刚完成 >
+            // 有未读结果 > 还在跑。一个标签同一时刻只说一件事，而且说最要紧
+            // 的那件。
+            //
+            // 全部走 skin 的语义色：warn / danger / ok / accent。此前这里写死
+            // 了 rgb(82,168,255)——那是 Nebula 一个主题的 accent，换到 Moss 或
+            // Coal 上就是一颗与整屏无关的蓝点。
+            if attention {
+                // 手掌图形暂时下线（用户 08-02：现在这版不满意——五指靠挖空
+                // 撑形，小尺寸下指缝糊成一团，读不出"手"）。在重画之前，
+                // 「等你批准」退回一颗 warn 色圆点：与 accent 的"有未读结果"
+                // 靠颜色区分，不靠形状。恢复时把下面这行换回 push_hand。
+                // super::ui::icons::push_hand(&mut quads, cx, cy, scale, sk.warn);
+                let dot_d = s(7.0);
+                quads.push(UiQuad::solid(
+                    cx - dot_d / 2.0,
+                    cy - dot_d / 2.0,
+                    dot_d,
+                    dot_d,
+                    dot_d / 2.0,
+                    sk.warn,
+                ));
+            } else if failed {
+                super::ui::icons::push_alert(&mut quads, cx, cy, scale, sk.danger, panel_under);
+            } else if flashing {
+                super::ui::icons::push_check_badge(&mut quads, cx, cy, scale, sk.ok, panel_under);
+            } else if has_dot {
                 // The one state that earns a dot: an unseen result (bell
                 // in a background tab / long command finished unseen).
-                // Design-spec blue with a soft glow halo.
                 let dot_d = s(6.0);
                 let dot_x = close_x + (close_w - dot_d) / 2.0;
                 let dot_y = close_y + (close_h - dot_d) / 2.0;
                 let halo = dot_d * 3.0;
+                let accent = sk.accent;
                 quads.push(UiQuad::glow(
                     dot_x + dot_d / 2.0 - halo / 2.0,
                     dot_y + dot_d / 2.0 - halo / 2.0,
                     halo,
                     halo,
-                    Rgba::new(82, 168, 255, 80),
+                    Rgba::new(accent.r, accent.g, accent.b, 80),
                 ));
                 quads.push(UiQuad::solid(
                     dot_x,
@@ -1013,29 +1156,23 @@ pub(super) fn draw_chrome(d: &mut Display) {
                     dot_d,
                     dot_d,
                     dot_d / 2.0,
-                    Rgba::new(82, 168, 255, 230),
+                    Rgba::new(accent.r, accent.g, accent.b, 230),
                 ));
             } else if running {
-                // Spinner: three orbiting dots, head bright / tail dim —
-                // phase advances continuously from the shared monotonic frame
-                // clock, so the cycle boundary has no duplicated or skipped
-                // angular step.
-                let cx = close_x + close_w / 2.0;
-                let cy = close_y + close_h / 2.0;
-                let radius = s(4.5);
-                for k in 0..3u32 {
-                    let (dot_x, dot_y) = spinner_dot_center(spinner_phase, k, cx, cy, radius);
-                    let alpha = [225u8, 140, 70][k as usize];
-                    let d = s(2.4);
-                    quads.push(UiQuad::solid(
-                        dot_x - d / 2.0,
-                        dot_y - d / 2.0,
-                        d,
-                        d,
-                        d / 2.0,
-                        Rgba::new(palette.edge_r.r, palette.edge_r.g, palette.edge_r.b, alpha),
-                    ));
-                }
+                // 一圈暗轨道 + 一段绕行的亮弧（组件层配方）。亮弧用中性灰而
+                // 不是品牌色：spinner 表达的是"还在跑"，是这些状态里最不需
+                // 要人动手的一个，不该最艳；活动/非活动行如今合成底不同、观
+                // 感一致（见 panel_under）。
+                icons::push_spinner(
+                    &mut quads,
+                    cx,
+                    cy,
+                    s(5.5),
+                    spinner_phase,
+                    sk.hairline,
+                    Rgba::new(sk.ink_dim.r, sk.ink_dim.g, sk.ink_dim.b, 255),
+                    panel_under,
+                );
             }
             // Idle tab → nothing: the row stays clean by default.
         }
@@ -1168,8 +1305,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         let _ = cy;
         let hovered = d.nebula_chrome_hover == hit;
         let visual = window_control_visual_rect(cx, top_y, bar_h, scale);
-        let hover_fill =
-            if hit == ChromeHit::Close { CLOSE_HOVER_FILL } else { HOVER_FILL_STRONG };
+        let hover_fill = if hit == ChromeHit::Close { CLOSE_HOVER_FILL } else { HOVER_FILL_STRONG };
         if hovered {
             quads.push(UiQuad::solid(visual.0, visual.1, visual.2, visual.3, 0.0, hover_fill));
         }
@@ -1192,9 +1328,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         let cutout = if hovered { icons::blend_over(base, hover_fill) } else { base };
         let kind = match hit {
             ChromeHit::Minimize => icons::WindowControlIcon::Minimize,
-            ChromeHit::Maximize => {
-                icons::WindowControlIcon::Maximize { restore: restore_window }
-            },
+            ChromeHit::Maximize => icons::WindowControlIcon::Maximize { restore: restore_window },
             _ => icons::WindowControlIcon::Close,
         };
         icons::push_window_control(
@@ -1270,6 +1404,77 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // The Settings special tab paints its page inside the normal content card.
     if d.nebula_settings_open {
         settings::push_quads(&d.settings_view(), &mut quads, &size, scale);
+    }
+
+    // 分组标题的数量 chip（背景片）。文字在下面那趟画，位置同源于
+    // `section_count_chip`。
+    {
+        const TITLE_SCALE: f32 = 0.82;
+        let adv = d.renderer.ui_text_advance(&d.glyph_cache, TITLE_SCALE);
+        let trk = s(0.65);
+        let title_h = size.cell_height() * TITLE_SCALE;
+        // 底色回到 `surface`（原型里的 `var(--surface)`）。上一版提到 `hover` 是
+        // 为了"看得见"，但那是行悬浮的亮度——一个静态附注顶着交互态的底色，会
+        // 让人以为鼠标正停在标题上。附注就该只比背景高一线。
+        let chip_fill = sk.surface;
+        if tab_layout.tabs_header.2 > 0.0 {
+            let n = d.nebula_tab_labels.len();
+            // 标题串是「箭头 + 两个空格 + TABS」，chip 跟在它后面。
+            let chip = section_count_chip(
+                tab_layout.tabs_header,
+                true,
+                7,
+                n.to_string().len(),
+                adv,
+                trk,
+                title_h,
+                scale,
+            );
+            quads.push(UiQuad::solid(chip.0, chip.1, chip.2, chip.3, chip.3 * 0.5, chip_fill));
+        }
+        if tab_layout.hosts_header.2 > 0.0 {
+            let n = d.nebula_ssh_hosts.len();
+            let chip = section_count_chip(
+                tab_layout.hosts_header,
+                false,
+                12,
+                n.to_string().len(),
+                adv,
+                trk,
+                title_h,
+                scale,
+            );
+            quads.push(UiQuad::solid(chip.0, chip.1, chip.2, chip.3, chip.3 * 0.5, chip_fill));
+        }
+    }
+
+    // 停靠区的分界线。
+    //
+    // 只有一条 hairline，没有另一层底色：独立滚动、贴底、封顶这三条行为已经
+    // 让主机区是另一块地盘了。再刷一层底，侧栏就从"一块面板"变成"两块拼起来
+    // 的面板"——可它们本来属于同一个外壳，一体感就是这么丢的。
+    //
+    // 上面那列真滚起来（也就是边界这时才开始有意义），才在分界线上方叠一道
+    // 极浅的落影，让被滚走的行读作"从这条线下面穿过去了"。没滚动时它完全不
+    // 存在——静止的界面不该带着一条解释不了的阴影。
+    if tab_layout.hosts_header.2 > 0.0 && tab_layout.tabs_band.1 > tab_layout.tabs_band.0 {
+        let (hx, hy, hw, _) = tab_layout.hosts_header;
+        let line_y = (hy - s(5.0)).round();
+        if d.nebula_tabs_scroll > 0 {
+            // 三层递减的薄片就是一道渐变落影：越靠近线越实。
+            for step in 1..=3 {
+                let alpha = (26 / step) as u8;
+                quads.push(UiQuad::solid(
+                    hx,
+                    line_y - s(3.0) * step as f32,
+                    hw,
+                    s(3.0),
+                    0.0,
+                    Rgba::new(0, 0, 0, alpha),
+                ));
+            }
+        }
+        quads.push(UiQuad::solid(hx + s(8.0), line_y, hw - s(16.0), s(1.0), 0.0, sk.hairline));
     }
 
     // Paint the panels and pills first.
@@ -1382,7 +1587,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         // "TABS" caption at the panel head, with an accordion chevron. The
         // panel abuts the top bar with no gap, so the caption is pushed down
         // inside the header band to keep clearance from the join.
-        let (pnl_x, pnl_y, _, _) = tab_layout.panel;
+        let (pnl_x, _, _, _) = tab_layout.panel;
         let tabs_chevron = if d.nebula_tabs_section_open { "\u{eab4}" } else { "\u{eab6}" };
         const SECTION_TITLE_SCALE: f32 = 0.82;
         let section_title_tracking = s(0.65);
@@ -1390,14 +1595,49 @@ pub(super) fn draw_chrome(d: &mut Display) {
         d.renderer.draw_ui_text_tracked(
             &size,
             pnl_x + s(16.0),
-            pnl_y + s(22.0),
+            section_title_y(tab_layout.tabs_header, true, cell_h * SECTION_TITLE_SCALE, scale),
             SECTION_TITLE_SCALE,
             section_title_tracking,
             TXT_DIM,
             section_title_flags,
-            &format!("TABS  {tabs_chevron}"),
+            // 箭头前置、数量后置。
+            //
+            // 前置不是排版偏好，是**符号语义**：后置的 chevron 在 UI 语言里
+            // 属于下拉菜单（combobox），前置的三角才是折叠（Finder / VS Code /
+            // 所有 IDE 的 disclosure triangle）。用后置箭头表达折叠等于借错了
+            // 符号。前置还让多个分组的箭头对齐成一条竖线，层级一眼可扫；后置
+            // 的位置得跟着标题长度飘。
+            //
+            // 数量常驻：折叠之后它是这一段仅剩的信息量，而 SSH 那边"42 台"
+            // 与"3 台"直接决定人是滚动找还是直接搜。
+            &format!("{tabs_chevron}  TABS"),
             &mut d.glyph_cache,
         );
+        {
+            let n = d.nebula_tab_labels.len().to_string();
+            let adv = d.renderer.ui_text_advance(&d.glyph_cache, SECTION_TITLE_SCALE);
+            let chip = section_count_chip(
+                tab_layout.tabs_header,
+                true,
+                7,
+                n.len(),
+                adv,
+                section_title_tracking,
+                cell_h * SECTION_TITLE_SCALE,
+                scale,
+            );
+            d.renderer.draw_ui_text_tracked(
+                &size,
+                chip.0 + (chip.2 - adv * n.len() as f32) * 0.5,
+                section_title_y(tab_layout.tabs_header, true, cell_h * SECTION_TITLE_SCALE, scale),
+                SECTION_TITLE_SCALE,
+                0.0,
+                sk.ink_faint,
+                nebula_terminal::term::cell::Flags::empty(),
+                &n,
+                &mut d.glyph_cache,
+            );
+        }
         for (index, (tab_x, row_y, tab_w, tab_h)) in tab_layout.tabs.iter().copied().enumerate() {
             // Scrolled-out / folded rows: zero rect, nothing to draw.
             if tab_w <= 0.0 {
@@ -1581,6 +1821,39 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 &label,
                 &mut d.glyph_cache,
             );
+            // 静默行的右侧亮出 shell 短标（otty 的 "zsh" 位）：徽章位空着时
+            // 它回答"这个 tab 是什么环境"。任何徽章都比它要紧，来了就让；
+            // 文字压 SUPPORTING 档、用最淡的墨——它是环境注脚，不是第二个
+            // 标签名，和名字抢眼就输了。
+            let badge_busy = d.nebula_tab_bells.get(index).copied().unwrap_or(false)
+                || d.nebula_tab_running.get(index).copied().unwrap_or(false)
+                || d.nebula_tab_attention.get(index).copied().unwrap_or(false)
+                || d.nebula_tab_failed.get(index).copied().unwrap_or(false)
+                || d.nebula_tab_flashing.get(index).copied().unwrap_or(false);
+            if !tab_hovered && !renaming_this && !badge_busy {
+                if let Some(tag) = d.nebula_tab_shells.get(index).filter(|tag| !tag.is_empty()) {
+                    const TAG_SCALE: f32 = tokens::type_scale::SUPPORTING;
+                    let tag_cols: usize = tag.chars().map(|c| c.width().unwrap_or(0).max(1)).sum();
+                    let tag_w = tag_cols as f32 * cell_w * TAG_SCALE;
+                    let tag_x = tab_x + tab_w - s(10.0) - tag_w;
+                    let label_cols: usize =
+                        label.chars().map(|c| c.width().unwrap_or(0).max(1)).sum();
+                    let label_end = text_x + label_cols as f32 * (cell_w + row_tracking);
+                    // 名字长到贴着右缘时不画：一半压在字上的注脚比没有更糟。
+                    if tag_x > label_end + s(12.0) {
+                        d.renderer.draw_ui_text(
+                            &size,
+                            tag_x,
+                            draw_row_y + (tab_h - cell_h * TAG_SCALE) / 2.0,
+                            TAG_SCALE,
+                            sk.ink_faint,
+                            nebula_terminal::term::cell::Flags::empty(),
+                            tag,
+                            &mut d.glyph_cache,
+                        );
+                    }
+                }
+            }
             if tab_hovered {
                 let (close_x, _, close_w, close_h) = tab_layout.closes[index];
                 let close_y = draw_row_y + (tab_h - close_h) / 2.0;
@@ -1615,14 +1888,49 @@ pub(super) fn draw_chrome(d: &mut Display) {
             d.renderer.draw_ui_text_tracked(
                 &size,
                 hh_x + s(16.0),
-                hh_y + (hh_h - cell_h * SECTION_TITLE_SCALE) / 2.0,
+                section_title_y(
+                    tab_layout.hosts_header,
+                    false,
+                    cell_h * SECTION_TITLE_SCALE,
+                    scale,
+                ),
                 SECTION_TITLE_SCALE,
                 section_title_tracking,
                 TXT_DIM,
                 section_title_flags,
-                &format!("SSH HOSTS  {hosts_chevron}"),
+                &format!("{hosts_chevron}  SSH HOSTS"),
                 &mut d.glyph_cache,
             );
+            {
+                let n = d.nebula_ssh_hosts.len().to_string();
+                let adv = d.renderer.ui_text_advance(&d.glyph_cache, SECTION_TITLE_SCALE);
+                let chip = section_count_chip(
+                    tab_layout.hosts_header,
+                    false,
+                    12,
+                    n.len(),
+                    adv,
+                    section_title_tracking,
+                    cell_h * SECTION_TITLE_SCALE,
+                    scale,
+                );
+                d.renderer.draw_ui_text_tracked(
+                    &size,
+                    chip.0 + (chip.2 - adv * n.len() as f32) * 0.5,
+                    section_title_y(
+                        tab_layout.hosts_header,
+                        false,
+                        cell_h * SECTION_TITLE_SCALE,
+                        scale,
+                    ),
+                    SECTION_TITLE_SCALE,
+                    0.0,
+                    sk.ink_faint,
+                    nebula_terminal::term::cell::Flags::empty(),
+                    &n,
+                    &mut d.glyph_cache,
+                );
+            }
             // Empty state: the section stays visible with a hint teaching the
             // zero-config path — typing `ssh host` in any pane auto-saves the
             // destination here once the connection confirms (`~/.ssh/config`
@@ -1705,23 +2013,61 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 // reserve under-counted at larger font sizes and let long
                 // aliases run past the hover pill.
                 let text_x = hx + s(14.0);
-                let right = hx + hw - s(42.0);
+                // 右缘预算：置顶行给 pin 记号留槽，普通行只留呼吸气口。此前
+                // 无条件扣 42px——未置顶的行右边一片空白，地址却被截成
+                // 「192.168.…」。
+                let right = hx + hw - if pinned { s(42.0) } else { s(10.0) };
                 let row_tracking = s(0.35);
                 let max_cols = (((right - text_x) / (cell_w + row_tracking)).floor() as usize)
                     .saturating_sub(2);
                 let label = truncate_tab_label(shown, max_cols.max(1));
-                d.renderer.draw_chrome_text(
+                // 双行：名字在上、地址在下。地址是这一行的**身份**（置顶、删除、
+                // 连接都按它走），但人认的是名字——所以名字占主行，地址退成一行
+                // 更小更淡的副文本。两者都完整可见，不必再把名字截成「生…」。
+                //
+                // 没起过名字的旧条目退回单行：那时 `shown` 就是地址本身，画成
+                // 两行等于把同一串字重复一遍，比留白更糟。
+                const SUB_SCALE: f32 = tokens::type_scale::SUPPORTING;
+                let two_line = shown != name;
+                let sub_h = cell_h * SUB_SCALE;
+                let title_y = if two_line {
+                    hy + (hh - (cell_h + sub_h)) * 0.5
+                } else {
+                    hy + (hh - cell_h) * 0.5
+                };
+                // 图标跨着两行居中，而不是贴着名字那一行：它标注的是**整条**
+                // 主机（名字和地址是同一台机器的两种写法），跟第一行对齐会让
+                // 副行看起来像悬在图标外面的另一条目。
+                //
+                // 图标有**自己的槽**，宽度就是标签行品牌 logo 的那一格
+                // （`cell_h * 0.72`），后面留 6px 气口再排文字——和标签行完全
+                // 同一套节奏，两种行的图标因此同宽同列、文字也在同一竖线上。
+                //
+                // 之前是借用等宽网格（图标第 0 列、文字第 2 列，"\u{eb51} 设置"
+                // 那类标签就是这么拼的）。但 Nerd Font 的图标墨迹比步进宽得多
+                // 且各不相同（1.27～2.00 格，见 ui::os_icons），宽的那些右缘直
+                // 接顶到文字上——这就是"贴得太紧"的来源。槽里再按墨迹缩到 0.82
+                // 档，比品牌 logo 略收一点：logo 是彩色实心的，单色线条图标画到
+                // 同样大就显得重。
+                let icon =
+                    super::ui::os_icons::resolve(d.nebula_ssh_icons.get(name).map(String::as_str));
+                let icon_slot = (cell_h * 0.72).round();
+                let icon_px = icon_slot * 0.82;
+                let icon_mult = super::ui::os_icons::scale_for(icon, cell_w, icon_px);
+                d.renderer.draw_chrome_text_scaled(
                     &size,
-                    text_x,
-                    cy,
+                    text_x + (icon_slot - icon_px) * 0.5,
+                    hy + hh / 2.0 - cell_h * icon_mult / 2.0,
+                    icon_mult,
                     color,
-                    "\u{f489}",
+                    icon.glyph.encode_utf8(&mut [0u8; 4]),
                     &mut d.glyph_cache,
                 );
+                let label_x = text_x + icon_slot + s(6.0);
                 d.renderer.draw_ui_text_tracked(
                     &size,
-                    text_x + cell_w * 2.0,
-                    cy,
+                    label_x,
+                    title_y,
                     1.0,
                     row_tracking,
                     color,
@@ -1729,6 +2075,25 @@ pub(super) fn draw_chrome(d: &mut Display) {
                     &label,
                     &mut d.glyph_cache,
                 );
+                if two_line {
+                    // 地址保持等宽：它是技术值，要被逐字符比对（哪台机器、哪个
+                    // 端口），等宽下数字对齐读起来才快。名字是自然语言，走上面
+                    // 那条路径。
+                    let sub_cols =
+                        (((hx + hw - s(42.0)) - (label_x)) / (cell_w * SUB_SCALE)).floor() as usize;
+                    let sub = truncate_tab_label(name, sub_cols.max(1));
+                    d.renderer.draw_ui_text_tracked(
+                        &size,
+                        label_x,
+                        title_y + cell_h,
+                        SUB_SCALE,
+                        row_tracking,
+                        sk.ink_faint,
+                        nebula_terminal::term::cell::Flags::empty(),
+                        &sub,
+                        &mut d.glyph_cache,
+                    );
+                }
                 if pinned {
                     // Pin marker pinned to the row's right edge (mirrors the
                     // × slot on tab rows).
@@ -1803,13 +2168,8 @@ pub(super) fn draw_chrome(d: &mut Display) {
         settings::push_popup_quads(&view, &mut popup_quads, &size, scale);
         if !popup_quads.is_empty() {
             d.renderer.draw_ui(&size, &popup_quads);
-            let popup_icons = settings::draw_popup_text(
-                &view,
-                &mut d.renderer,
-                &mut d.glyph_cache,
-                &size,
-                scale,
-            );
+            let popup_icons =
+                settings::draw_popup_text(&view, &mut d.renderer, &mut d.glyph_cache, &size, scale);
             for (shell_id, rect) in popup_icons {
                 if let Some((id, rgba, px)) = d.shell_icon_pixels(&shell_id) {
                     d.nebula_chrome_logo_draws.push((id, rgba, px, rect));
@@ -1894,9 +2254,10 @@ pub(super) fn draw_chrome(d: &mut Display) {
     );
 
     // Palette's full-color shell icons (textured quads) staged after all chrome
-    // text, like AI brand logos. Decode + cache each PNG once per id.
-    for (shell_id, rect) in shell_icon_draws {
-        if let Some((id, rgba, px)) = d.shell_icon_pixels(&shell_id) {
+    // text. AI-session rows no longer come through here — they draw the
+    // shared double-star glyph in skin ink, which follows the theme for free.
+    for (icon_id, rect) in shell_icon_draws {
+        if let Some((id, rgba, px)) = d.shell_icon_pixels(&icon_id) {
             d.nebula_chrome_logo_draws.push((id, rgba, px, rect));
         }
     }
@@ -1920,6 +2281,185 @@ fn tab_reveal_motion_action(
         TabRevealMotionAction::Snap
     } else {
         TabRevealMotionAction::Spring
+    }
+}
+
+#[cfg(test)]
+mod sidebar_dock_tests {
+    use super::{SidebarModel, chrome_tab_layout};
+    use crate::display::SizeInfo;
+
+    fn layout(tabs: usize, hosts: usize, hosts_open: bool) -> super::ChromeTabLayout {
+        let size = SizeInfo::new(1400.0, 900.0, 10.0, 20.0, 0.0, 0.0, false);
+        chrome_tab_layout(
+            &size,
+            1.0,
+            SidebarModel {
+                tab_count: tabs,
+                host_count: hosts,
+                tabs_open: true,
+                hosts_open,
+                tabs_scroll: 0,
+                hosts_scroll: 0,
+                sidebar_w: crate::display::SIDEBAR_W_LOGICAL,
+                hosts_band: 0.0,
+            },
+            1.0,
+        )
+    }
+
+    /// 停靠区的**下**沿贴着面板底，上沿随内容升降——这就是"沉底"。折起来时
+    /// 只剩那条标题，它照样贴在最下面而不是跟着标签跑。
+    #[test]
+    fn hosts_dock_to_the_panel_bottom_whatever_they_contain() {
+        for (hosts, open) in [(0, true), (4, true), (40, true), (12, false)] {
+            let l = layout(3, hosts, open);
+            let panel_bottom = l.panel.1 + l.panel.3;
+            let dock_bottom = if open && hosts > 0 {
+                l.hosts_band.1
+            } else {
+                l.hosts_header.1 + l.hosts_header.3
+            };
+            assert!(
+                dock_bottom <= panel_bottom && panel_bottom - dock_bottom < 40.0,
+                "hosts={hosts} open={open}：停靠区底 {dock_bottom} 离面板底 {panel_bottom} 太远",
+            );
+        }
+    }
+
+    /// 沉底之所以值得做：主机再多也吃不掉标签的地盘。这是旧的同流布局做不到
+    /// 的——那时四十台主机会把标签一路顶出视口。
+    #[test]
+    fn a_long_host_list_never_starves_the_tab_list() {
+        let few = layout(6, 2, true);
+        let many = layout(6, 60, true);
+        let visible = |l: &super::ChromeTabLayout| l.tabs.iter().filter(|r| r.2 > 0.0).count();
+
+        assert_eq!(visible(&few), 6, "六个标签本来就该全放得下");
+        assert_eq!(visible(&many), 6, "主机涨到 60 台，标签一行都不该少");
+        assert!(many.hosts_max_scroll > 0, "放不下的主机应该退给滚动，而不是去挤标签");
+    }
+
+    /// 拖拽调节：HOSTS 分界的覆盖值取代弹性规则，且两端有钳制——往下拖到
+    /// 只剩标题、往上拖也抢不走标签的最后一行。
+    #[test]
+    fn a_dragged_hosts_band_overrides_the_elastic_cap_within_clamps() {
+        let with_band = |band: f32| {
+            let size = SizeInfo::new(1400.0, 900.0, 10.0, 20.0, 0.0, 0.0, false);
+            chrome_tab_layout(
+                &size,
+                1.0,
+                SidebarModel {
+                    tab_count: 3,
+                    host_count: 20,
+                    tabs_open: true,
+                    hosts_open: true,
+                    tabs_scroll: 0,
+                    hosts_scroll: 0,
+                    sidebar_w: crate::display::SIDEBAR_W_LOGICAL,
+                    hosts_band: band,
+                },
+                1.0,
+            )
+        };
+        let rows = |l: &super::ChromeTabLayout| l.hosts.iter().filter(|r| r.2 > 0.0).count();
+        let auto = with_band(0.0);
+        let small = with_band(140.0);
+        assert!(rows(&small) < rows(&auto), "把停靠区拖矮后可见主机行必须变少");
+        let huge = with_band(5000.0);
+        assert!(huge.tabs[0].3 > 0.0, "覆盖值再大，标签区也要保住至少一行");
+        assert!(rows(&huge) >= rows(&auto), "拖高后主机行不应少于弹性规则");
+    }
+
+    /// 停靠区高度必须真的跟着分界走，哪怕主机根本撑不满：只有一台主机时，
+    /// 把分界往上拖，标题条要真的上移。此前 `hosts_band` 只当上限用，内容
+    /// 长不到那么高，分界线就纹丝不动——手感上就是「拖不动」（用户 08-02）。
+    #[test]
+    fn dragging_the_divider_up_moves_it_even_with_a_single_host() {
+        let layout = |band: f32| {
+            let size = SizeInfo::new(1400.0, 900.0, 10.0, 20.0, 0.0, 0.0, false);
+            chrome_tab_layout(
+                &size,
+                1.0,
+                SidebarModel {
+                    tab_count: 3,
+                    host_count: 1,
+                    tabs_open: true,
+                    hosts_open: true,
+                    tabs_scroll: 0,
+                    hosts_scroll: 0,
+                    sidebar_w: crate::display::SIDEBAR_W_LOGICAL,
+                    hosts_band: band,
+                },
+                1.0,
+            )
+        };
+        let hugging = layout(0.0);
+        let dragged = layout(360.0);
+        assert!(
+            dragged.hosts_header.1 < hugging.hosts_header.1 - 100.0,
+            "拖高 360px 后 HOSTS 标题条必须明显上移，而不是贴着那一台主机不动"
+        );
+        // 那一台主机仍然画在标题条下面（多出来的地盘是空白，不是把行推走）。
+        assert!(dragged.hosts[0].3 > 0.0);
+        assert!(dragged.hosts[0].1 > dragged.hosts_header.1);
+    }
+
+
+    #[test]
+    fn a_dragged_sidebar_width_widens_the_panel_one_to_one() {
+        let with_width = |w: f32| {
+            let size = SizeInfo::new(1400.0, 900.0, 10.0, 20.0, 0.0, 0.0, false);
+            chrome_tab_layout(
+                &size,
+                1.0,
+                SidebarModel {
+                    tab_count: 3,
+                    host_count: 2,
+                    tabs_open: true,
+                    hosts_open: true,
+                    tabs_scroll: 0,
+                    hosts_scroll: 0,
+                    sidebar_w: w,
+                    hosts_band: 0.0,
+                },
+                1.0,
+            )
+        };
+        let narrow = with_width(230.0);
+        let wide = with_width(360.0);
+        assert_eq!(wide.panel.2 - narrow.panel.2, 130.0);
+        assert!(wide.tabs[0].2 > narrow.tabs[0].2, "行宽要跟着面板一起变宽");
+    }
+
+    /// 封顶是为了保护标签；标签不需要保护的时候就不该继续封着，否则两个标签
+    /// 配四十台主机会在中间空出一大片。
+    #[test]
+    fn the_dock_grows_past_its_cap_when_tabs_leave_room() {
+        let crowded = layout(20, 40, true);
+        let roomy = layout(2, 40, true);
+        let rows = |l: &super::ChromeTabLayout| l.hosts.iter().filter(|r| r.2 > 0.0).count();
+
+        assert!(
+            rows(&roomy) > rows(&crowded),
+            "标签只有两个时主机该多显示几行（{} vs {}）",
+            rows(&roomy),
+            rows(&crowded),
+        );
+    }
+
+    /// 两个区不能重叠：标签的最后一行必须停在停靠区标题上面。
+    #[test]
+    fn the_two_zones_never_overlap() {
+        for tabs in [1, 5, 12, 30] {
+            let l = layout(tabs, 8, true);
+            assert!(
+                l.tabs_band.1 <= l.hosts_header.1,
+                "tabs={tabs}：标签带底 {} 压到了停靠区标题 {}",
+                l.tabs_band.1,
+                l.hosts_header.1,
+            );
+        }
     }
 }
 

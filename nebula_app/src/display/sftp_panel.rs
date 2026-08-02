@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn filter_hit_uses_the_drawn_geometry_without_a_toolbar_band() {
-        let base = side_panel::panel_layout(1000.0, 800.0, 0.0, 0.0, 1.0, 1.0);
+        let base = side_panel::panel_layout(1000.0, 800.0, 0.0, 0.0, 1.0, 1.0, 300.0);
         let layout = layout(&base, 1.0);
         let rect = layout.filter;
         assert_eq!(

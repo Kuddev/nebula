@@ -129,6 +129,16 @@ pub enum SshEditorField {
 pub enum SshEditorHit {
     None,
     Close,
+    /// 身份条头像：点击开合图标选择列表。
+    Avatar,
+    /// 弹出列表里的一项：`None` = 「自动识别」，`Some(i)` = `CATALOG[i]`。
+    IconOption(Option<usize>),
+    /// 弹层顶部的搜索框。它是一个正经输入框：点击定位光标、拖选、复制
+    /// 粘贴，一样不缺。
+    IconSearch,
+    /// 弹出列表里**不可点**的地方（标题、内边距）。它存在只为了
+    /// 吞掉点击：浮层盖住的位置不该穿透到下面的字段上。
+    IconPopupChrome,
     Destination,
     Port,
     Label,
@@ -143,6 +153,14 @@ pub enum SshEditorHit {
     TestStatus,
     Primary,
     Cancel,
+}
+
+/// 一段进行中的拖选属于谁——表单字段，或弹层里的搜索框。两者的选区模型
+/// 是同一个组件（`TextCursor`），只是值存的地方不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshEditorDrag {
+    Field(SshEditorField),
+    IconSearch,
 }
 
 /// 页脚「测试连接」的四态状态小字（稿一）。结果只对发起时的草稿有效——
@@ -175,6 +193,17 @@ pub struct SshHostEditor {
     pub save_password: bool,
     pub show_password: bool,
     pub auth: SshAuthMode,
+    /// 图标 id（`ui::os_icons`）。空串 = 自动识别。
+    pub icon: String,
+    /// 头像的弹出选择列表是否展开。
+    pub icon_picker: bool,
+    /// 选择器的搜索词。列表开着的时候键盘归它，敲进来的字落在这里。
+    pub icon_filter: String,
+    /// 搜索词的光标。搜索框是正经输入框：插入落在光标处、有选区、能复制
+    /// 粘贴——节律与表单字段共用组件层的同一套（`TextCursor`）。
+    pub(super) icon_filter_cursor: TextCursor,
+    /// 选择器列表滚过去的行数。
+    pub icon_scroll: usize,
     pub private_keys: Vec<PathBuf>,
     pub field: SshEditorField,
     pub focus: crate::ux::FocusIndex,
@@ -261,6 +290,9 @@ pub struct SshFieldMetrics {
     pub password_x: f32,
     /// 一列的推进宽度（物理像素）。
     pub cell_w: f32,
+    /// 名字那一格的列宽。身份条上的名字比其余字段大一档，光标定位、拖选、
+    /// 光标绘制全都按列算——这里少给一份，点在第 8 个字上会落到第 6 个。
+    pub label_cell_w: f32,
 }
 
 impl SshFieldMetrics {
@@ -270,6 +302,14 @@ impl SshFieldMetrics {
             SshEditorField::Port => self.port_x,
             SshEditorField::Label => self.label_x,
             SshEditorField::Password => self.password_x,
+        }
+    }
+
+    /// 该字段一列有多宽。
+    pub fn cell_w_of(&self, field: SshEditorField) -> f32 {
+        match field {
+            SshEditorField::Label => self.label_cell_w,
+            _ => self.cell_w,
         }
     }
 }
@@ -291,6 +331,24 @@ pub struct SshEditorRects {
     pub test_status: (f32, f32, f32, f32),
     pub primary: (f32, f32, f32, f32),
     pub cancel: (f32, f32, f32, f32),
+    /// 身份头像（点它开合图标选择器）。
+    pub avatar: (f32, f32, f32, f32),
+    /// 弹出选择器的整块外框。列表收起时是零矩形。
+    ///
+    /// 它同时是**吞点击的挡板**：落在这块里但没命中任何一行的点（标题、
+    /// 搜索框、边距）不能穿透过去点到下面的字段——浮层盖住的地方就不再属于
+    /// 下面那一层了。
+    pub icon_popup: (f32, f32, f32, f32),
+    /// 弹层顶部的搜索框，以及它的文字起点与列宽——点击换算光标位置时，
+    /// 输入侧必须拿绘制侧同一份换算，否则点在哪一格光标落不到哪一格。
+    pub icon_search: (f32, f32, f32, f32),
+    pub icon_search_text_x: f32,
+    pub icon_search_cell_w: f32,
+    /// 可点的选项行：`None` = 「自动识别」，`Some(i)` = `CATALOG[i]`。
+    pub icon_rows: Vec<(Option<usize>, (f32, f32, f32, f32))>,
+    /// 列表最多能滚到第几行。滚动量由输入侧改、由布局侧算——上限只有排完版
+    /// 才知道（行高不等，还随搜索词变），所以从这里回传给输入侧夹取。
+    pub icon_max_scroll: usize,
     pub metrics: SshFieldMetrics,
 }
 

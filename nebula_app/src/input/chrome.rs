@@ -53,6 +53,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             NebulaConfirm::EnableBackgroundImageCoverChrome => {
                 self.ctx.display().confirm_background_image_cover_chrome();
             },
+            NebulaConfirm::EnablePanelResize => {
+                self.ctx.display().confirm_panel_resize();
+            },
             NebulaConfirm::ClosePane { .. } => {
                 self.ctx.nebula_tab(crate::event::TabRequest::Close);
             },
@@ -716,6 +719,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.mark_dirty();
                     return;
                 }
+                // 面板分界线拖拽（设置·交互开关启用时）先于其余 chrome 命中：
+                // 分界线热区骑在侧栏行 / 抽屉内容的边上，先到先得。
+                if let Some(kind) = self.ctx.display().panel_resize_hit(x, y) {
+                    self.ctx.display().begin_panel_drag(kind);
+                    return;
+                }
                 let settings_open = self.ctx.display().settings_open();
                 let settings_section = self.ctx.display().settings_section();
                 let settings_scroll = self.ctx.display().settings_scroll();
@@ -807,9 +816,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::SettingsHit::CursorShapeDropdown => {
-                        self.ctx
-                            .display()
-                            .toggle_settings_dropdown(crate::display::SettingsDropdown::CursorShape);
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::CursorShape,
+                        );
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -828,6 +837,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::CopyOnSelectToggle => {
                         self.ctx.display().toggle_copy_on_select();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::PanelResizeToggle => {
+                        self.ctx.display().request_toggle_panel_resize();
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -924,6 +938,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::RestoreSessionToggle => {
+                        self.ctx.display().toggle_restore_session();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::SyncInput(index) => {
                         self.ctx.display().focus_sync_field(index);
                         self.ctx.mark_dirty();
@@ -987,11 +1006,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::SettingsHit::BackgroundImageFit => {
-                        self.ctx
-                            .display()
-                            .toggle_settings_dropdown(
-                                crate::display::SettingsDropdown::BackgroundFit,
-                            );
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::BackgroundFit,
+                        );
                         self.ctx.mark_dirty();
                         return;
                     },
