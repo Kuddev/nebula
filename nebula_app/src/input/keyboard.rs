@@ -129,6 +129,32 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        // 字体目录展开时键盘归搜索：系统字体动辄几百个，没有过滤就只能
+        // 靠滚。Esc 关闭，退格删字符，其余可打印字符追加。
+        if self.ctx.display().nebula_settings_dropdown
+            == Some(crate::display::SettingsDropdown::Font)
+        {
+            match &key.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.display().close_settings_dropdown();
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().font_query_backspace();
+                },
+                Key::Named(NamedKey::Space) => {
+                    self.ctx.display().font_query_push(' ');
+                },
+                Key::Character(text) if !mods.control_key() => {
+                    for ch in text.chars() {
+                        self.ctx.display().font_query_push(ch);
+                    }
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // An expanded settings dropdown is a transient picker. Esc only
         // dismisses; any other key dismisses and then follows its normal path.
         if self.ctx.display().nebula_settings_dropdown.is_some() {
