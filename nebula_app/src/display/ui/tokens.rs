@@ -9,13 +9,39 @@
 // `s(16.0)`（= space::M）、31 个 `s(8.0)`（= radius::OVERLAY）。
 #![allow(dead_code)]
 
+/// 界面密度。紧凑档不引入任何新的视觉数值，只在既有的间距与圆角阶梯上
+/// 取更小一档——紧凑不是另一套审美，是同一套审美的更密档位。
+///
+/// 决策与理由见 ADR-0002。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Density {
+    #[default]
+    Standard,
+    Compact,
+}
+
+impl Density {
+    #[inline]
+    const fn compact(self) -> bool {
+        matches!(self, Self::Compact)
+    }
+}
+
 pub mod space {
+    use super::Density;
+
     pub const XXS: f32 = 4.0;
     pub const XS: f32 = 8.0;
     pub const S: f32 = 12.0;
     pub const M: f32 = 16.0;
     pub const L: f32 = 24.0;
     pub const XL: f32 = 32.0;
+
+    /// 主留白。紧凑降一档：`M` → `S`。
+    #[inline]
+    pub fn major(density: Density) -> f32 {
+        if density.compact() { S } else { M }
+    }
 }
 
 /// 圆角阶梯。逐层递减：浮层 → 控件 → chip。
@@ -25,6 +51,8 @@ pub mod space {
 /// （命令面板 14、设置模态 12、确认框 12、AI 条 10、右键菜单 9、popup 8），
 /// 这是界面"不成体系"的直接来源。
 pub mod radius {
+    use super::Density;
+
     /// 浮层：命令面板、模态、右键菜单、下拉 popup。
     pub const OVERLAY: f32 = 8.0;
     /// 控件：combobox、spinner、输入框、按钮。
@@ -32,6 +60,18 @@ pub mod radius {
     pub const CONTROL: f32 = 6.0;
     /// chip / 键帽 / 徽标。
     pub const CHIP: f32 = 4.0;
+
+    /// 浮层圆角。紧凑整档下移：`OVERLAY` → `CONTROL`。
+    #[inline]
+    pub fn overlay(density: Density) -> f32 {
+        if density.compact() { CONTROL } else { OVERLAY }
+    }
+
+    /// 控件圆角。紧凑整档下移：`CONTROL` → `CHIP`。
+    #[inline]
+    pub fn control(density: Density) -> f32 {
+        if density.compact() { CHIP } else { CONTROL }
+    }
 }
 
 pub mod type_scale {
@@ -44,6 +84,8 @@ pub mod type_scale {
 }
 
 pub mod control {
+    use super::Density;
+
     pub const ICON_BUTTON: f32 = 20.0;
     pub const MIN_HIT_TARGET: f32 = 32.0;
     /// Dense rows used by command/search pickers where several choices must
@@ -51,6 +93,20 @@ pub mod control {
     pub const COMPACT_ROW: f32 = 38.0;
     pub const ROW: f32 = 44.0;
     pub const HAIRLINE: f32 = 1.0;
+
+    /// 普通行高。紧凑降到最小点击目标——那既是阶梯上的既有值，也是密度
+    /// 收紧的硬下界。
+    #[inline]
+    pub fn row(density: Density) -> f32 {
+        if density.compact() { MIN_HIT_TARGET } else { ROW }
+    }
+
+    /// 设置页行高。紧凑用既有的 [`COMPACT_ROW`]，它本就是为「多选项同时
+    /// 可见而输入框不喧宾夺主」定的密行高。
+    #[inline]
+    pub fn settings_row(density: Density) -> f32 {
+        if density.compact() { COMPACT_ROW } else { ROW }
+    }
 }
 
 /// 浮层的 Z 轴处理。阴影按浮层面积分档——同一组参数放在小菜单上刚好，
@@ -135,7 +191,41 @@ impl ControlState {
 
 #[cfg(test)]
 mod tests {
-    use super::ControlState;
+    use super::{ControlState, Density, control, radius, space};
+
+    /// 紧凑档的每一个值都必须是阶梯上**已经存在**的常量。
+    ///
+    /// 这条断言就是「不引入新的视觉数值」合同的可执行形式：一旦有人给紧凑
+    /// 档写了个新数字，它就不再等于任何一档，测试立刻变红。
+    #[test]
+    fn compact_steps_down_the_existing_ladder_without_inventing_values() {
+        assert_eq!(radius::overlay(Density::Standard), radius::OVERLAY);
+        assert_eq!(radius::overlay(Density::Compact), radius::CONTROL);
+        assert_eq!(radius::control(Density::Standard), radius::CONTROL);
+        assert_eq!(radius::control(Density::Compact), radius::CHIP);
+
+        assert_eq!(space::major(Density::Standard), space::M);
+        assert_eq!(space::major(Density::Compact), space::S);
+
+        assert_eq!(control::row(Density::Standard), control::ROW);
+        assert_eq!(control::row(Density::Compact), control::MIN_HIT_TARGET);
+        assert_eq!(control::settings_row(Density::Standard), control::ROW);
+        assert_eq!(control::settings_row(Density::Compact), control::COMPACT_ROW);
+    }
+
+    #[test]
+    fn compact_never_drops_below_the_minimum_hit_target() {
+        // 密度可以收紧留白，但不能把可交互目标压到手指够不着。
+        for density in [Density::Standard, Density::Compact] {
+            assert!(control::row(density) >= control::MIN_HIT_TARGET);
+            assert!(control::settings_row(density) >= control::MIN_HIT_TARGET);
+        }
+    }
+
+    #[test]
+    fn standard_is_the_upstream_compatible_default() {
+        assert_eq!(Density::default(), Density::Standard);
+    }
 
     #[test]
     fn persistent_control_states_outrank_hover() {

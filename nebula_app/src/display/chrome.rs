@@ -2241,6 +2241,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         &mut palette_quads,
         &size,
         d.window.scale_factor as f32,
+        d.nebula_density,
     );
     d.renderer.draw_ui(&size, &palette_quads);
 

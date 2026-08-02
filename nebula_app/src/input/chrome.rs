@@ -862,6 +862,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::DensityDropdown => {
+                        self.ctx
+                            .display()
+                            .toggle_settings_dropdown(crate::display::SettingsDropdown::Density);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::DensityOption(index) => {
+                        self.ctx.display().set_density_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::FontSizeUp => {
                         let ui_scale = self.ctx.display().window.scale_factor as f32;
                         self.ctx.change_font_size(ui_scale);
@@ -1292,6 +1304,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::AcceptOption(_)
             | Hit::TabRevealDropdown
             | Hit::TabRevealOption(_)
+            | Hit::DensityDropdown
+            | Hit::DensityOption(_)
             | Hit::CursorShapeDropdown
             | Hit::CursorShapeOption(_)
             | Hit::BackgroundColor

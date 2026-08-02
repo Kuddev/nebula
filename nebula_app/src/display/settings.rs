@@ -94,6 +94,7 @@ pub enum SettingsDropdown {
     Accept,
     CursorShape,
     TabReveal,
+    Density,
     /// 背景色：色板网格 + 16 进制输入的专用浮层（不是通用行列表）。
     BackgroundColor,
 }
@@ -143,6 +144,9 @@ pub(super) const ACCEPT_OPTIONS: [AcceptKey; 3] =
 pub(super) const TAB_REVEAL_OPTIONS: [TabRevealMotion; 2] =
     [TabRevealMotion::Slide, TabRevealMotion::Instant];
 
+pub(super) const DENSITY_OPTIONS: [super::ui::tokens::Density; 2] =
+    [super::ui::tokens::Density::Standard, super::ui::tokens::Density::Compact];
+
 /// Order mirrors the appearance page the user referenced.
 pub(super) const CURSOR_SHAPE_OPTIONS: [CursorShape; 4] =
     [CursorShape::Beam, CursorShape::Underline, CursorShape::Block, CursorShape::HollowBlock];
@@ -175,6 +179,31 @@ fn tab_reveal_label(motion: TabRevealMotion, language: UiLanguage) -> &'static s
     match motion {
         TabRevealMotion::Slide => language.pick("滑动", "Slide"),
         TabRevealMotion::Instant => language.pick("立即", "Instant"),
+    }
+}
+
+pub(super) fn density_label(
+    density: super::ui::tokens::Density,
+    language: UiLanguage,
+) -> &'static str {
+    match density {
+        super::ui::tokens::Density::Standard => language.pick("标准", "Standard"),
+        super::ui::tokens::Density::Compact => language.pick("紧凑", "Compact"),
+    }
+}
+
+pub(super) fn density_parse(value: &str) -> Option<super::ui::tokens::Density> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "standard" => Some(super::ui::tokens::Density::Standard),
+        "compact" => Some(super::ui::tokens::Density::Compact),
+        _ => None,
+    }
+}
+
+pub(super) fn density_settings_value(density: super::ui::tokens::Density) -> &'static str {
+    match density {
+        super::ui::tokens::Density::Standard => "standard",
+        super::ui::tokens::Density::Compact => "compact",
     }
 }
 
@@ -240,6 +269,8 @@ pub enum SettingsHit {
     CjkBoldToggle,
     TabRevealDropdown,
     TabRevealOption(usize),
+    DensityDropdown,
+    DensityOption(usize),
     /// Language combobox trigger (options resolve to [`SettingsHit::Language`]).
     LanguageDropdown,
     /// Expanded dropdown option rows for the cycle-style settings.
@@ -309,6 +340,8 @@ pub(super) struct NebulaRuntimeSettings {
     /// 默认开：小字号下雅黑 Bold fallback 与 Regular 混排发闷（任务 #4）。
     pub(super) cjk_bold_regular: bool,
     pub(super) tab_reveal: TabRevealMotion,
+    /// 界面外观预设：标准 / 紧凑。
+    pub(super) density: super::ui::tokens::Density,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     /// Window close keeps the PTYs alive in the resident process (detach /
@@ -381,6 +414,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         copy_on_select: true,
         cjk_bold_regular: true,
         tab_reveal: TabRevealMotion::Slide,
+        density: super::ui::tokens::Density::Standard,
         // Off by default: the welcome screen pipes a whole script through the
         // fresh shell and repaints on resize — real startup-latency cost on
         // the critical path (user ruling: startup speed outranks the art).
@@ -467,6 +501,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("cjk_bold_regular", v)) => settings.cjk_bold_regular = parse_bool(v, true),
                 Some(("tab_reveal", v)) => {
                     settings.tab_reveal = TabRevealMotion::parse(v).unwrap_or_default();
+                },
+                Some(("density", v)) => {
+                    settings.density = density_parse(v).unwrap_or_default();
                 },
                 Some(("startup_directory", v)) => {
                     let path = std::path::PathBuf::from(v.trim());
@@ -681,7 +718,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         path,
         format!(
             "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+tab_reveal={}\ndensity={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -691,6 +728,7 @@ tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur
             settings.copy_on_select as u8,
             settings.cjk_bold_regular as u8,
             settings.tab_reveal.settings_value(),
+            density_settings_value(settings.density),
             settings.fetch as u8,
             settings.powerline as u8,
             settings.keep_session as u8,
@@ -738,6 +776,7 @@ struct SettingsGeometry {
     hidden_host_count: usize,
     /// Full-width "窗口透明度" row and its draggable track.
     language_row: (f32, f32, f32, f32),
+    density_row: (f32, f32, f32, f32),
     opacity_row: (f32, f32, f32, f32),
     opacity_slider: (f32, f32, f32, f32),
     /// 「窗口背景模糊」开关，紧贴透明度滑块——它只在透明时才看得出效果。
@@ -886,7 +925,8 @@ fn settings_geometry(
     // 光标组：形状下拉 + 闪烁开关。
     let cursor_y0 = color_y0 + 6.0 * ROW_H + GROUP_ADVANCE;
     let iface_y0 = cursor_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
-    let opacity_y0 = iface_y0 + ROW_H;
+    let density_y0 = iface_y0 + ROW_H;
+    let opacity_y0 = density_y0 + ROW_H;
     // 模糊开关跟在透明度后面：它修饰的正是透明度透出来的那层东西，隔开就
     // 读不出这层因果了。
     let blur_y0 = opacity_y0 + ROW_H;
@@ -997,6 +1037,7 @@ fn settings_geometry(
         cursor_shape_row: (row_x, at(cursor_y0), row_w, row_h),
         cursor_blink_row: (row_x, at(cursor_y0 + ROW_H), row_w, row_h),
         language_row: (row_x, at(iface_y0), row_w, row_h),
+        density_row: (row_x, at(density_y0), row_w, row_h),
         opacity_row,
         opacity_slider,
         blur: (row_x, at(blur_y0), row_w, row_h),
@@ -1147,6 +1188,9 @@ fn dropdown_anchor(
         (Section::Appearance, SettingsDropdown::Language) => {
             Some((anchor(geometry.language_row), LANGUAGE_OPTIONS.len()))
         },
+        (Section::Appearance, SettingsDropdown::Density) => {
+            Some((anchor(geometry.density_row), DENSITY_OPTIONS.len()))
+        },
         (Section::Appearance, SettingsDropdown::CursorShape) => {
             Some((anchor(geometry.cursor_shape_row), CURSOR_SHAPE_OPTIONS.len()))
         },
@@ -1226,6 +1270,7 @@ pub fn settings_hit(
                     SettingsDropdown::Language => SettingsHit::Language(LANGUAGE_OPTIONS[index]),
                     SettingsDropdown::Accept => SettingsHit::AcceptOption(index),
                     SettingsDropdown::TabReveal => SettingsHit::TabRevealOption(index),
+                    SettingsDropdown::Density => SettingsHit::DensityOption(index),
                     SettingsDropdown::CursorShape => SettingsHit::CursorShapeOption(index),
                     // 背景色浮层在上方特判处理，走不到通用行列表。
                     SettingsDropdown::BackgroundColor => SettingsHit::Panel,
@@ -1290,6 +1335,9 @@ pub fn settings_hit(
                 }
                 if contains_rect(geometry.language_row, x, y) {
                     return SettingsHit::LanguageDropdown;
+                }
+                if contains_rect(geometry.density_row, x, y) {
+                    return SettingsHit::DensityDropdown;
                 }
                 if contains_rect(geometry.blur, x, y) {
                     return SettingsHit::BlurToggle;
@@ -1451,6 +1499,7 @@ pub(super) struct SettingsView {
     pub(super) panel_resize: bool,
     pub(super) cjk_bold_regular: bool,
     pub(super) tab_reveal: TabRevealMotion,
+    pub(super) density: super::ui::tokens::Density,
     /// Live-preview colors: the ACTUAL terminal background/foreground the
     /// grid would use right now (custom background wins over the theme).
     pub(super) preview_bg: Rgb,
@@ -1617,6 +1666,7 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         SettingsDropdown::TabReveal => {
             TAB_REVEAL_OPTIONS.iter().position(|motion| *motion == view.tab_reveal)
         },
+        SettingsDropdown::Density => DENSITY_OPTIONS.iter().position(|d| *d == view.density),
         SettingsDropdown::CursorShape => {
             CURSOR_SHAPE_OPTIONS.iter().position(|shape| *shape == view.cursor_shape)
         },
@@ -1637,6 +1687,7 @@ fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Optio
         },
         (SettingsDropdown::Accept, SettingsHit::AcceptOption(index)) => Some(index),
         (SettingsDropdown::TabReveal, SettingsHit::TabRevealOption(index)) => Some(index),
+        (SettingsDropdown::Density, SettingsHit::DensityOption(index)) => Some(index),
         (SettingsDropdown::CursorShape, SettingsHit::CursorShapeOption(index)) => Some(index),
         _ => None,
     }
@@ -2093,7 +2144,8 @@ pub(super) fn push_quads(
             );
             toggle(quads, &mut staged, geometry.cursor_blink_row, view.cursor_blink);
 
-            // 界面组：语言（同一通用下拉组件）+ 终端不透明度 + 背景模糊。
+            // 界面组：语言（同一通用下拉组件）+ 界面外观预设 + 终端不透明度
+            // + 背景模糊。
             group_frame(quads, geometry.language_row, 3);
             row_hover(quads, geometry.language_row, view.hover == SettingsHit::LanguageDropdown);
             combobox(
@@ -2102,6 +2154,14 @@ pub(super) fn push_quads(
                 geometry.language_row,
                 view.hover == SettingsHit::LanguageDropdown,
                 view.dropdown == Some(SettingsDropdown::Language),
+            );
+            row_hover(quads, geometry.density_row, view.hover == SettingsHit::DensityDropdown);
+            combobox(
+                quads,
+                &mut staged,
+                geometry.density_row,
+                view.hover == SettingsHit::DensityDropdown,
+                view.dropdown == Some(SettingsDropdown::Density),
             );
             slider(
                 quads,
@@ -2506,7 +2566,7 @@ pub(super) fn push_popup_quads(
         widgets::combobox_popup_rect(anchor, count, scale, geometry.content_top, py + ph - s(6.0));
     let selected = dropdown_selected_index(view, dropdown);
     let hover = dropdown_hover_index(view.hover, dropdown);
-    widgets::push_combobox_popup(quads, popup, count, selected, hover, scale, &sk);
+    widgets::push_combobox_popup(quads, popup, count, selected, hover, scale, &sk, view.density);
     if let Some(index) = selected {
         let (rx, ry, rw, rh) = widgets::popup_row_rect(popup, index, scale);
         icons::push_check(
@@ -2604,6 +2664,7 @@ pub(super) fn draw_popup_text(
             SettingsDropdown::TabReveal => {
                 tab_reveal_label(TAB_REVEAL_OPTIONS[index], language).to_owned()
             },
+            SettingsDropdown::Density => density_label(DENSITY_OPTIONS[index], language).to_owned(),
             SettingsDropdown::CursorShape => {
                 cursor_shape_label(CURSOR_SHAPE_OPTIONS[index], language).to_owned()
             },
@@ -3161,6 +3222,24 @@ pub(super) fn draw_text(
                     gc,
                     geometry.language_row,
                     language_label(view.language_preference, language),
+                    sk.accent,
+                );
+            }
+            if visible(geometry.density_row.1, geometry.density_row.3) {
+                let (dr_x, dr_y, _, dr_h) = geometry.density_row;
+                r.draw_chrome_text(
+                    size,
+                    dr_x + s(16.0),
+                    dr_y + (dr_h - cell_h) / 2.0,
+                    sk.ink,
+                    language.pick("界面外观", "Appearance"),
+                    gc,
+                );
+                combobox_value(
+                    r,
+                    gc,
+                    geometry.density_row,
+                    density_label(view.density, language),
                     sk.accent,
                 );
             }

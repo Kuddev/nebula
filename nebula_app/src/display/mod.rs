@@ -134,6 +134,7 @@ pub(crate) fn caret_blink_on() -> bool {
 }
 pub(crate) use settings::SettingsOpacityTarget;
 pub use settings::{NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit};
+pub(crate) use ui::tokens::Density;
 
 /// 按显示列宽贪心断行（确认框正文等 UI 段落用）：CJK 逐字可断，行首空
 /// 格吞掉；零宽字符跟随前一个字。不做拉丁连词回退——正文以中文为主，
@@ -1450,6 +1451,9 @@ pub struct Display {
     /// 捕获态实时回显：当前按住的修饰键前缀（"Ctrl+Shift+"）。松开清空。
     pub nebula_keymap_capture_preview: String,
     pub nebula_tab_reveal_motion: settings::TabRevealMotion,
+    /// 界面外观预设。紧凑只在既有阶梯上降一档，不引入新的视觉数值
+    /// （ADR-0002）；它不改变终端字体、单元格几何或 shell 输出。
+    pub nebula_density: ui::tokens::Density,
     pub nebula_font_family: String,
     nebula_font_families: Vec<String>,
     nebula_font_notice: Option<String>,
@@ -1968,6 +1972,7 @@ impl Display {
             nebula_keymap_capture: None,
             nebula_keymap_capture_preview: String::new(),
             nebula_tab_reveal_motion: settings_init.tab_reveal,
+            nebula_density: settings_init.density,
             nebula_font_family: settings_init.font_family,
             nebula_font_families,
             nebula_font_notice: None,
@@ -2992,6 +2997,7 @@ impl Display {
             panel_resize: self.nebula_panel_resize,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
+            density: self.nebula_density,
             preview_bg: self.preview_terminal_bg(),
             preview_fg: {
                 let bg = self.preview_terminal_bg();
@@ -3232,6 +3238,25 @@ impl Display {
         }
         self.nebula_settings_dropdown = None;
         self.pending_update.dirty = true;
+    }
+
+    /// 切换界面外观预设。密度只影响 Nebula 原生界面的留白、行高与圆角；
+    /// 终端字体、单元格几何与 shell 输出一概不受影响，但界面让出的空间会
+    /// 让终端行列数增加——那正是紧凑档的收益。
+    pub fn set_density_option(&mut self, index: usize) {
+        if let Some(density) = settings::DENSITY_OPTIONS.get(index).copied()
+            && density != self.nebula_density
+        {
+            self.nebula_density = density;
+            self.persist_nebula_settings();
+            // 与折叠侧栏同样的重排路径：界面尺寸变了，网格与 PTY 要跟上。
+            let size =
+                PhysicalSize::new(self.size_info.width() as u32, self.size_info.height() as u32);
+            self.pending_update.set_dimensions(size);
+        }
+        self.nebula_settings_dropdown = None;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     /// Returns true when the default cursor style changed (the caller then
@@ -4812,6 +4837,7 @@ impl Display {
             copy_on_select: self.nebula_copy_on_select,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
+            density: self.nebula_density,
             theme: self.nebula_theme_preference,
             follow_system_theme: self.nebula_follow_system_theme,
             pinned_hosts: self.nebula_pinned_hosts.clone(),
@@ -4909,6 +4935,7 @@ impl Display {
             self.reset_glyph_cache();
         }
         self.nebula_tab_reveal_motion = settings.tab_reveal;
+        self.nebula_density = settings.density;
         self.nebula_window_opacity = settings.opacity;
         self.nebula_background = if settings.follow_system_theme {
             Some(active_theme.palette().term_bg)
@@ -6340,6 +6367,7 @@ impl Display {
             (size.width(), size.height()),
             scale,
             &sk,
+            self.nebula_density,
             ui::surface::Elevation::Modal,
             1.0,
         );
@@ -6516,6 +6544,7 @@ impl Display {
             (size.width(), size.height()),
             scale,
             &sk,
+            self.nebula_density,
             ui::surface::Elevation::Menu,
             1.0,
         );
@@ -6606,6 +6635,7 @@ impl Display {
             (size.width(), size.height()),
             scale,
             &sk,
+            self.nebula_density,
             ui::surface::Elevation::Menu,
             1.0,
         );
