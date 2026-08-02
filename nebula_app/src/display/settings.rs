@@ -1432,6 +1432,10 @@ pub(super) struct SettingsView {
     /// Private families plus Maple; the import action is rendered separately.
     pub(super) fonts: Vec<String>,
     pub(super) font_notice: Option<String>,
+    /// 字体目录的「显示全部」临时过滤是否开启。
+    pub(super) font_show_all: bool,
+    /// 字体目录搜索串；下拉展开且非空时顶替触发器上显示的字体名。
+    pub(super) font_query: String,
     /// Persistent soft-deleted destinations. Rows provide a discoverable
     /// recovery path after the short Undo bar has expired.
     pub(super) hidden_hosts: Vec<String>,
@@ -2588,6 +2592,14 @@ pub(super) fn draw_popup_text(
             },
             SettingsDropdown::Font => match view.fonts.get(index) {
                 Some(family) => family.clone(),
+                // 倒数第二行是过滤切换，最后一行是导入。
+                None if index == view.fonts.len() => {
+                    if view.font_show_all {
+                        language.pick("◉  显示全部字体", "(*) Showing all fonts").to_owned()
+                    } else {
+                        language.pick("○  仅等宽字体", "( ) Monospaced only").to_owned()
+                    }
+                },
                 None => language.pick("＋  导入字体…", "+  Import font...").to_owned(),
             },
             SettingsDropdown::BackgroundFit => {
@@ -3285,7 +3297,14 @@ pub(super) fn draw_text(
                 }
             }
             if visible(geometry.font.1, geometry.font.3) {
-                let font_value = view.font_notice.as_deref().unwrap_or(&view.font_family);
+                // 搜索期间触发器顶替显示查询串——否则用户看不见自己在搜
+                // 什么。加载失败的告警优先于两者。
+                let searching = format!("\u{1f50d} {}", view.font_query);
+                let font_value = match view.font_notice.as_deref() {
+                    Some(notice) => notice,
+                    None if !view.font_query.is_empty() => &searching,
+                    None => &view.font_family,
+                };
                 row_label(
                     r,
                     gc,
