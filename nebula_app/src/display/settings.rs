@@ -1436,6 +1436,8 @@ pub(super) struct SettingsView {
     pub(super) font_show_all: bool,
     /// 字体目录搜索串；下拉展开且非空时顶替触发器上显示的字体名。
     pub(super) font_query: String,
+    /// 非等宽族的小写名集合；下拉行据此追加比例字体警告。
+    pub(super) font_proportional: std::collections::HashSet<String>,
     /// Persistent soft-deleted destinations. Rows provide a discoverable
     /// recovery path after the short Undo bar has expired.
     pub(super) hidden_hosts: Vec<String>,
@@ -2591,6 +2593,11 @@ pub(super) fn draw_popup_text(
                 if program.is_empty() { name.clone() } else { format!("{name}  ·  {program}") }
             },
             SettingsDropdown::Font => match view.fonts.get(index) {
+                // 比例字体在固定终端网格下可能重叠或截断：标出来，但不拦着
+                // 用户选——这是知情选择，不是错误。
+                Some(family) if view.font_proportional.contains(&family.to_lowercase()) => {
+                    format!("{family}   {}", language.pick("· 非等宽", "· not monospaced"))
+                },
                 Some(family) => family.clone(),
                 // 倒数第二行是过滤切换，最后一行是导入。
                 None if index == view.fonts.len() => {
