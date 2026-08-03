@@ -53,7 +53,7 @@ use crate::display::NebulaPaneState;
 use crate::display::color::Rgb;
 use crate::display::hint::HintMatch;
 use crate::display::window::{ImeInhibitor, Window};
-use crate::display::{Display, Preedit, SizeInfo};
+use crate::display::{Display, Preedit, SizeInfo, ToastKind};
 use crate::input::{self, ActionContext as _};
 use crate::logging::{LOG_TARGET_CONFIG, LOG_TARGET_WINIT};
 use crate::message_bar::{Message, MessageBuffer, MessageType};
@@ -235,12 +235,17 @@ impl Processor {
             && window_options.terminal_options.command().is_none();
         // 恢复行为归设置·高级→会话管（默认开）。关掉只是不回放——快照照写，
         // 工作区导出与崩溃现场诊断都还在。
-        let mut notice = None;
+        //
+        // 两类提示分流：恢复成功是**已经结束、没有待办**的事实，走自动消失的
+        // toast；断路器那条带着隔离文件路径，用户可能要去把它捞出来，必须留在
+        // 消息栏等他自己关掉。
+        let mut restored_notice = None;
+        let mut blocked_notice = None;
         let restore = if plain_launch && crate::display::restore_session_enabled() {
             match crate::session::load() {
                 Some(mut session) if crate::session::should_restore(&session) => {
                     if crate::session::was_crash(&session) {
-                        notice = Some(format!(
+                        restored_notice = Some(format!(
                             "已从上次异常退出恢复 {} 个标签（进程未正常收尾）。",
                             session.tabs.len()
                         ));
@@ -254,7 +259,7 @@ impl Processor {
                 // 会话隔离出去再干净启动，否则一秒后的自动保存就会盖掉这份
                 // 「一恢复就崩」的唯一现场。
                 Some(session) if !session.tabs.is_empty() => {
-                    notice = Some(match crate::session::quarantine() {
+                    blocked_notice = Some(match crate::session::quarantine() {
                         Some(path) => format!(
                             "连续三次启动失败，已跳过会话恢复；上次的会话保存在 {}。",
                             path.display()
@@ -278,8 +283,11 @@ impl Processor {
             boot,
         )?;
 
-        // 恢复提示走消息栏：不打断输入，但下一次按键前一定看得见。
-        if let Some(text) = notice {
+        // 恢复成功：说完就走。断路器：留在消息栏，路径要能被读到。
+        if let Some(text) = restored_notice {
+            window_context.display.push_toast(text, ToastKind::Success);
+        }
+        if let Some(text) = blocked_notice {
             window_context.message_buffer.push(Message::new(text, MessageType::Warning));
         }
 

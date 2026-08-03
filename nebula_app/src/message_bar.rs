@@ -6,7 +6,14 @@ use nebula_terminal::grid::Dimensions;
 
 use crate::display::SizeInfo;
 
-pub const CLOSE_BUTTON_TEXT: &str = "[X]";
+/// 关闭按钮占的列数。按钮本身是自绘图标（见 `ui::widgets::push_close_button`），
+/// 这里只负责在首行右端**留出**这块地，让文字不会跑到它底下。
+///
+/// 早先的做法是把 `[X]` 三个字符拼进首行文本里。那条路在中文消息上必然失败：
+/// 渲染器 `draw_string` 按显示宽度排版且不消费 spacer，而下面的换行逻辑又给
+/// 每个宽字符补了一个空格，于是一个汉字吃掉三列，首行溢出，行尾的 `[X]` 被
+/// 静默裁掉——按钮点得到却看不见，用户当然会报告"无法关闭"。
+pub const CLOSE_BUTTON_COLUMNS: usize = 3;
 const CLOSE_BUTTON_PADDING: usize = 1;
 const MIN_FREE_LINES: usize = 3;
 const TRUNCATED_MESSAGE: &str = "[MESSAGE TRUNCATED]";
@@ -49,13 +56,15 @@ pub fn message_bar_rect(size_info: &SizeInfo, search_active: bool) -> MessageBar
     MessageBarRect::new(x, y, right - x, size_info.height() - y)
 }
 
-/// Pixel hit target occupied by the visible `[X]` on the first message row.
+/// Pixel hit target occupied by the visible close button on the first message
+/// row. Drawing and hit-testing both come from here, so the icon can never
+/// drift from what is clickable.
 #[inline]
 pub fn message_close_button_rect(
     size_info: &SizeInfo,
     search_active: bool,
 ) -> Option<MessageBarRect> {
-    let button_columns = CLOSE_BUTTON_TEXT.chars().count();
+    let button_columns = CLOSE_BUTTON_COLUMNS;
     if size_info.columns() < button_columns {
         return None;
     }
@@ -100,12 +109,15 @@ impl Message {
     }
 
     /// Formatted message text lines.
+    ///
+    /// 一切按**显示宽度**记账（一个汉字两列），因为渲染器就是这么排的。首行
+    /// 右端留出 [`CLOSE_BUTTON_COLUMNS`] 列给自绘的关闭按钮。
     pub fn text(&self, size_info: &SizeInfo) -> Vec<String> {
         let num_cols = size_info.columns();
         let total_lines = (size_info.height() - size_info.padding_y() - size_info.padding_bottom())
             / size_info.cell_height();
         let max_lines = (total_lines as usize).saturating_sub(MIN_FREE_LINES);
-        let button_len = CLOSE_BUTTON_TEXT.chars().count();
+        let button_len = CLOSE_BUTTON_COLUMNS;
 
         // Split line to fit the screen.
         let mut lines = Vec::new();
@@ -133,7 +145,7 @@ impl Message {
 
                 lines.push(Self::pad_text(line, num_cols));
                 line = new_line;
-                line_len = line.chars().count();
+                line_len = Self::width_of(&line);
 
                 // Do not append whitespace at EOL.
                 if is_whitespace {
@@ -142,12 +154,6 @@ impl Message {
             }
 
             line.push(c);
-
-            // Reserve extra column for fullwidth characters.
-            if width == 2 {
-                line.push(' ');
-            }
-
             line_len += width
         }
         lines.push(Self::pad_text(line, num_cols));
@@ -159,15 +165,6 @@ impl Message {
                 if let Some(line) = lines.iter_mut().last() {
                     *line = Self::pad_text(TRUNCATED_MESSAGE.into(), num_cols);
                 }
-            }
-        }
-
-        // Append close button to first line.
-        if button_len <= num_cols {
-            if let Some(line) = lines.get_mut(0) {
-                // `num_cols` 是字符/单元格数量，不能直接作为 UTF-8 字节下标。
-                Self::truncate_chars(line, num_cols - button_len);
-                line.push_str(CLOSE_BUTTON_TEXT);
             }
         }
 
@@ -192,18 +189,18 @@ impl Message {
         self.target = Some(target);
     }
 
-    /// Right-pad text to fit a specific number of columns.
+    /// Right-pad text to fill a specific number of **columns**.
     #[inline]
     fn pad_text(mut text: String, num_cols: usize) -> String {
-        let padding_len = num_cols.saturating_sub(text.chars().count());
+        let padding_len = num_cols.saturating_sub(Self::width_of(&text));
         text.extend(vec![' '; padding_len]);
         text
     }
 
-    fn truncate_chars(text: &mut String, max_chars: usize) {
-        if let Some((byte_index, _)) = text.char_indices().nth(max_chars) {
-            text.truncate(byte_index);
-        }
+    /// Display width in terminal columns.
+    #[inline]
+    fn width_of(text: &str) -> usize {
+        text.chars().map(|c| c.width().unwrap_or(0)).sum()
     }
 }
 
@@ -301,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn appends_close_button() {
+    fn reserves_columns_for_the_close_button() {
         let input = "a";
         let mut message_buffer = MessageBuffer::default();
         message_buffer.push(Message::new(input.into(), MessageType::Error));
@@ -309,11 +306,12 @@ mod tests {
 
         let lines = message_buffer.message().unwrap().text(&size);
 
-        assert_eq!(lines, vec![String::from("a   [X]")]);
+        // 按钮是自绘图标，不再占用文本流——首行只是把右端那几列空出来。
+        assert_eq!(lines, vec![String::from("a      ")]);
     }
 
     #[test]
-    fn multiline_close_button_first_line() {
+    fn multiline_reserves_on_first_line_only() {
         let input = "fo\nbar";
         let mut message_buffer = MessageBuffer::default();
         message_buffer.push(Message::new(input.into(), MessageType::Error));
@@ -321,7 +319,7 @@ mod tests {
 
         let lines = message_buffer.message().unwrap().text(&size);
 
-        assert_eq!(lines, vec![String::from("fo [X]"), String::from("bar   ")]);
+        assert_eq!(lines, vec![String::from("fo    "), String::from("bar   ")]);
     }
 
     #[test]
@@ -371,7 +369,10 @@ mod tests {
 
         assert_eq!(
             lines,
-            vec![String::from("hahahahahahahahaha [X]"), String::from("[MESSAGE TRUNCATED]   ")]
+            vec![
+                String::from("hahahahahahahahaha    "),
+                String::from("[MESSAGE TRUNCATED]   ")
+            ]
         );
     }
 
@@ -408,7 +409,7 @@ mod tests {
 
         let lines = message_buffer.message().unwrap().text(&size);
 
-        assert_eq!(lines, vec![String::from("t [X]"), String::from("est  ")]);
+        assert_eq!(lines, vec![String::from("t    "), String::from("est  ")]);
     }
 
     #[test]
@@ -460,7 +461,7 @@ mod tests {
 
         assert_eq!(
             lines,
-            vec![String::from("a [X]"), String::from("bc   "), String::from("defg ")]
+            vec![String::from("a    "), String::from("bc   "), String::from("defg ")]
         );
     }
 
@@ -475,21 +476,24 @@ mod tests {
 
         assert_eq!(
             lines,
-            vec![String::from("ab  [X]"), String::from("c 👩 d  "), String::from("fgh    ")]
+            vec![String::from("ab     "), String::from("c 👩d  "), String::from("fgh    ")]
         );
     }
 
     #[test]
-    fn wraps_cjk_before_appending_close_button() {
+    fn cjk_wraps_by_display_width() {
         let mut message_buffer = MessageBuffer::default();
         message_buffer.push(Message::new("配置加载失败".into(), MessageType::Error));
         let size = SizeInfo::new(7., 10., 1., 1., 0., 0., false);
 
         let lines = message_buffer.message().unwrap().text(&size);
 
+        // 一个汉字两列。此前每个宽字符还会被补一个空格，而渲染器又按宽度
+        // 排版，于是一个字吃掉三列、整行溢出——行尾的关闭按钮就是这样被
+        // 裁掉的。
         assert_eq!(
             lines,
-            vec![String::from("配   [X]"), String::from("置 加 载  "), String::from("失 败    ")]
+            vec![String::from("配     "), String::from("置加载 "), String::from("失败   ")]
         );
     }
 
@@ -502,7 +506,7 @@ mod tests {
 
         let lines = message_buffer.message().unwrap().text(&size);
 
-        assert_eq!(lines, vec![String::from("[X]"), String::from("0 1"), String::from("2 3"),]);
+        assert_eq!(lines, vec![String::from("   "), String::from("0 1"), String::from("2 3"),]);
     }
 
     #[test]

@@ -30,6 +30,7 @@
 //! - [`surface`] —— 面板/卡片/描边/遮罩的配方（本层的核心）
 //! - [`text_field`] —— 输入框的光标、选区、命中测试（唯一有可变状态的组件）
 //! - [`widgets`] —— slider / toggle / combobox / spinner
+//! - [`toast`] —— 自动消失的轻提示浮层
 //! - [`keycap`] —— 键帽 chip
 //! - [`icons`] —— 图标墨迹
 //! - [`guardrails`] —— 把上面这些契约变成会失败的测试
@@ -56,5 +57,6 @@ pub mod os_icons;
 pub mod surface;
 pub mod text_field;
 pub mod theme;
+pub mod toast;
 pub mod tokens;
 pub mod widgets;

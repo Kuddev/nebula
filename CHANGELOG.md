@@ -21,7 +21,9 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Fixed
 
-- **A crash is now told apart from a clean exit** — the session snapshot records whether the process reached its teardown. After an unclean exit (crash, force-kill, power loss) the restored window says so in the message bar instead of restoring silently; and when the crash-loop breaker trips after three failed launches, the offending session is moved to `session.crashed.json` instead of being overwritten by the next autosave a second later — previously the only evidence of a restore-crash loop destroyed itself.
+- **A crash is now told apart from a clean exit** — the session snapshot records whether the process reached its teardown. After an unclean exit (crash, force-kill, power loss) the restored window says so in a transient success toast instead of restoring silently; and when the crash-loop breaker trips after three failed launches, the offending session is moved to `session.crashed.json` instead of being overwritten by the next autosave a second later — previously the only evidence of a restore-crash loop destroyed itself.
+- **Recovery notices use the right layer** — a completed recovery is a short success toast, while a crash-loop breaker notice remains in the message bar with the quarantined session path available for follow-up.
+- **The message-bar close button stays visible with CJK text** — wide characters are measured in terminal columns and the close control is drawn as a reusable UI widget, so long multilingual notices no longer push the button off-screen; its plate and hover state make the control visibly clickable.
 - **Sharp text and icons in the SSH host editor** — the identity strip's name, the avatar shape and the icon list previously scaled up bitmaps rasterized at the terminal font size, visibly blurry next to the design; they now re-rasterize at their true size. Caret placement in the enlarged name field follows the true glyph advance, so clicking the tenth character no longer lands the caret a column off.
 - **The icon picker no longer shows form text through its panel** — overlay backgrounds were submitted in the same batch as the form's fills, which all paint beneath text; overlays (the icon list, the test-status tooltip) now paint after the form's text, so nothing bleeds through.
 - **Test-connection failures show the whole reason** — the status line used to flatten the error into one truncated line with the full text hidden behind a hover tooltip. Failures now wrap up to four lines right in the dialog; the tooltip remains only for over-long tails.
@@ -51,7 +53,9 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### 修复
 
-- **崩溃与正常退出现在分得清了** — 会话快照记录进程有没有走完收尾。上次是异常退出（崩溃、强杀、断电）时，恢复后会在消息栏明说，而不是悄悄恢复；连续三次启动失败触发断路器时，那份会话被挪到 `session.crashed.json` 而不是被一秒后的自动保存盖掉——此前「一恢复就崩」的唯一现场会自己销毁。
+- **崩溃与正常退出现在分得清了** — 会话快照记录进程有没有走完收尾。上次是异常退出（崩溃、强杀、断电）时，恢复后会用自动消失的 success toast 明说，而不是悄悄恢复；连续三次启动失败触发断路器时，那份会话被挪到 `session.crashed.json` 而不是被一秒后的自动保存盖掉——此前「一恢复就崩」的唯一现场会自己销毁。
+- **恢复提示分到正确的层** — 已完成的恢复成功提示走短暂的 success toast；断路器提示仍留在消息栏，并保留隔离会话路径供后续处理。
+- **中文消息栏的关闭按钮始终可见** — 按终端显示列宽处理宽字符，关闭控件改为可复用 UI 组件自绘，中文长消息不会再把按钮挤出屏幕；常态底板与悬停反馈让它明显可点击。
 - **SSH 主机编辑器的大字与图标不再发糊** — 身份条的名字、头像形状与图标列表此前是把按终端字号栅格化的位图硬放大，对着原型一眼可见的糊；现在按真实字号重新栅格化。放大后名字框的光标换算按真实字形步进，点第十个字不再偏一格。
 - **图标选择器不再透出表单文字** — 浮层的底与表单同批提交时全部沉在文字之下；现在浮层（图标列表、测试状态提示）在表单文字之后单独提交，什么都透不上来。
 - **「测试连接」失败显示完整原因** — 此前被压成单行截断，全文藏在悬浮层里；现在失败原因直接折行铺开（最多四行），只有超长的尾巴才收进悬浮层。
