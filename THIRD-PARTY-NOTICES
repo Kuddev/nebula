@@ -17,6 +17,14 @@ The embedded Latin Modern Math font is distributed under the GUST Font
 License 1.0. Its complete license text is included as
 licenses/LICENSE-LATIN-MODERN-MATH.
 
+The Windows installed-shell detection (registry lookup order and the
+shell brand icon artwork) derives from Tabby (github.com/Eugeny/tabby),
+distributed under the MIT License, whose text is reproduced below.
+
+The bundled conpty.dll and OpenConsole.exe come from the Windows
+Terminal project (github.com/microsoft/terminal), distributed under the
+MIT License.
+
 ---------------------------------------------------------------------
 
                               Apache License

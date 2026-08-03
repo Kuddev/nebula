@@ -11,6 +11,7 @@ Every release entry is provided in English and Simplified Chinese.
 #### Added
 
 - **Idle tabs show their shell** — a quiet tab row (no badge, not hovered) shows its shell as a small dim tag at the right edge: `pwsh`, `cmd`, `bash`, `ubuntu` (WSL distributions by name), and `ssh` for SSH tabs. Any badge (spinner, dot, attention…) outranks it, and the tag steps aside when a long name reaches the right edge.
+- **Section headers count what is in them** — the sidebar's TABS and SSH HOSTS headers carry a small count chip, and the disclosure chevron moved to the front of the title so several sections line their chevrons into one column. The count stays visible while a section is collapsed: it is the only information left there, and "42 hosts" versus "3 hosts" is what decides whether you scroll or search.
 - **WSL distributions in the folder picker** — "Browse folder" dialogs now pin every registered WSL distribution (`\\wsl.localhost\<distro>`) to the top of their sidebar, so picking a Linux directory no longer depends on the system's "Linux" navigation node being present. (#12)
 - **Drag to resize the panels** — Settings → Interaction gains "Drag to resize panel widths". With it on, the sidebar's right edge and the file/git drawer's left edge become drag handles (the pointer turns into a resize cursor over the ±4 px grip), and dragging either panel all the way to its window edge closes it rather than stopping at a minimum width. Off by default, and turning it on asks for confirmation first, because a width drag reflows the terminal live. The drag itself is double-throttled — the panel edge tracks the pointer every frame, but the grid is only re-laid when the width has crossed a whole cell and at most once every 80 ms, so a fast drag cannot turn into a reflow storm. The SSH HOSTS divider is always draggable regardless of the switch — it only redistributes height inside the sidebar and never touches the grid, and the height you drag it to is honoured even when you have fewer hosts than fit. All three sizes persist.
 - **Restore last tabs on launch is now a setting** — Settings → Advanced → Sessions gains "Restore last tabs on launch (also after a crash)", on by default. Turning it off always starts clean; the snapshot keeps being written either way, so workspace export and crash diagnostics still work.
@@ -26,7 +27,6 @@ Every release entry is provided in English and Simplified Chinese.
 - **Test-connection failures show the whole reason** — the status line used to flatten the error into one truncated line with the full text hidden behind a hover tooltip. Failures now wrap up to four lines right in the dialog; the tooltip remains only for over-long tails.
 - **Spinner rings render as smooth rings** — the beaded look came from translucent dots doubling their alpha wherever they overlap, and the active tab's ring composited against the sidebar background instead of the light pill it actually sits on, which read as a dark circle. Ring colors now pre-compose against the row's real background.
 - **The "needs your answer" badge shows up for codex** — codex's notify pipe only reports "turn complete", so interactive question prompts could only ever show the unread dot. On turn completion Nebula now checks the visible tail of the screen for prompt markers ("enter to submit", "(y/N)"…) and upgrades the badge to the attention marker.
-- **Inline math renders for grok too** — the rule that a rendered display formula unlocks inline `$…$` in that pane was keyed to a list of AI CLIs that had not been updated when grok was recognised elsewhere. grok sessions now get inline formulas like claude and codex do.
 
 #### Improved
 
@@ -41,6 +41,7 @@ Every release entry is provided in English and Simplified Chinese.
 #### 新增
 
 - **静默标签页显示 shell 类型** — 没有任何徽章、未悬浮的标签行，右侧以最淡的小字显示该标签的 shell 短标：`pwsh`、`cmd`、`bash`、`ubuntu`（WSL 按发行版名），SSH 标签显示 `ssh`。任何徽章（转圈、圆点、「等你批准」…）都比它优先；名字长到顶着右缘时短标自动让位。
+- **分组标题显示数量** — 侧栏的 TABS 与 SSH HOSTS 标题带一颗数量 chip，折叠箭头移到标题前面，多个分组的箭头因此对齐成一条竖线。折叠之后数量仍然常驻：那时它是这一段仅剩的信息量，而「42 台」和「3 台」直接决定人是滚动找还是直接搜。
 - **文件夹选择器可直达 WSL** — 「浏览文件夹」对话框把每个已注册的 WSL 发行版（`\\wsl.localhost\<发行版>`）钉进侧栏顶部，不再依赖系统资源管理器是否显示「Linux」节点。（#12）
 - **侧栏可拖拽调节** — 设置→交互新增「拖拽调节侧栏宽度」。开启后左侧栏右缘与文件/Git 抽屉左缘成为拖拽把手（±4px 热区上光标变为调整宽度形态）；把左侧栏一路拖到最左、或把抽屉一路拖到最右，就直接收起该面板，而不是卡在最小宽度上。默认关闭，且开启前会先确认——宽度拖动会实时重排终端内容。拖动本身走双重节流：面板边缘每帧跟手，但网格只在宽度跨过一整个单元格时才重排，且最快 80ms 一次，快速拖动不会演变成 resize 风暴。SSH HOSTS 分界线不受该开关约束、始终可拖：它只在侧栏内部重新分配高度，碰不到终端网格；主机数量撑不满时，拖出来的高度也照样生效。三处尺寸都会保存。
 - **启动恢复会话可开关** — 设置→高级→会话新增「启动时恢复上次的标签（异常退出后同样恢复）」，默认开启。关掉就永远干净启动；快照照写不误，工作区导出与崩溃诊断仍然可用。
@@ -56,7 +57,6 @@ Every release entry is provided in English and Simplified Chinese.
 - **「测试连接」失败显示完整原因** — 此前被压成单行截断，全文藏在悬浮层里；现在失败原因直接折行铺开（最多四行），只有超长的尾巴才收进悬浮层。
 - **转圈指示器是平滑的圆环** — 珠链感来自半透明圆点在重叠处 alpha 翻倍；活动标签上的环还拿侧栏深底做合成，画在浅色药丸上就成了一圈黑。环的颜色现在按所在行的真实底色预合成。
 - **codex 的「等你回答」徽章能亮了** — codex 的 notify 只报「回合完成」，交互式提问也只能落成未读圆点。现在回合结束时检查屏幕尾部的提问特征（"enter to submit"、"(y/N)"…），命中即把徽章升级为「等你批准」。
-- **grok 也能渲染行内公式** — 「本窗格出现过一次整块公式就解锁行内 `$…$`」这条规则挂在一份 AI CLI 名单上，而别处认出 grok 时这份名单没跟着更新。grok 会话现在和 claude / codex 一样能渲染行内公式。
 
 #### 改进
 

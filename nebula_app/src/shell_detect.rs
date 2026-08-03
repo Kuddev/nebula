@@ -1,7 +1,7 @@
 //! Installed-shell detection for the new-tab dropdown's profile menu.
 //!
-//! Ported from Tabby's detector set (tabby-electron/src/shells, MIT) — kept
-//! as an attribution of where this code came from. The menu lists what's
+//! Third-party provenance for this module and its icon assets is recorded
+//! in THIRD-PARTY-NOTICES at the repository root. The menu lists what's
 //! actually installed, in a stable, familiar order:
 //! PowerShell 7 → Windows PowerShell → CMD → Git Bash → Nushell → WSL distros.
 //!
@@ -61,8 +61,8 @@ pub fn icon_for_id(id: &str) -> &'static str {
     }
 }
 
-/// Full-color brand icon (embedded PNG, rasterized from Tabby's SVGs with a
-/// 12% safe margin) for a shell id — the terminal picker draws this textured
+/// Full-color brand icon (embedded PNG, rasterized from vector artwork with
+/// a 12% safe margin; see THIRD-PARTY-NOTICES) for a shell id — the terminal picker draws this textured
 /// quad instead of the flat Nerd Font glyph. WSL distro ids map by distro
 /// name (`wsl:Ubuntu` → the Ubuntu roundel), falling back to the generic
 /// Tux for unknown distros. `None` = no brand asset; caller keeps the glyph.
