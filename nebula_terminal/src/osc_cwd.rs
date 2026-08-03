@@ -46,7 +46,7 @@ pub enum OscEvent {
     /// third-party integrations that send a bare `133;D` yield `None`.
     CommandDone { exit_code: Option<i32> },
     /// OSC 1337 `SetUserVar=<name>=<b64>` — a shell-integration variable
-    /// (wezterm/iTerm2 convention). Carries Nebula assistant queries
+    /// (the OSC 1337 shell-integration convention). Carries Nebula queries
     /// (`nebula_ai_query`) from the `#`-line interception, among others.
     UserVar { name: String, value: String },
     /// OSC 9 — free-text program notification (iTerm style).
@@ -486,7 +486,7 @@ mod tests {
             events(b"\x1b]133;D\x07"),
             vec![(8, OscEvent::CommandDone { exit_code: None })]
         );
-        // Trailing params after the code (kaku/wezterm send `;aid=<pid>`).
+        // Trailing params after the code (some terminals send `;aid=<pid>`).
         assert_eq!(
             events(b"\x1b]133;D;127;aid=4242\x07"),
             vec![(21, OscEvent::CommandDone { exit_code: Some(127) })]

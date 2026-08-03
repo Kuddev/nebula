@@ -37,7 +37,7 @@ fn opaque_panel(sk: &Skin) -> Rgba {
 
 // ---- slider ----
 
-/// Windows Terminal-style slider inside the row's wide hit rect: a thin
+/// Slider inside the row's wide hit rect: a thin
 /// track + accent fill + a ringed round thumb whose inner dot grows while
 /// the pointer is on the control (`hot`). No plate behind the track — the
 /// hit rect stays invisible.

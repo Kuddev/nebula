@@ -403,8 +403,8 @@ impl Renderer {
         text: &str,
         glyph_cache: &mut GlyphCache,
     ) {
-        // Chrome text rasterizes at the UI font role's size (wezterm's
-        // Entity::Title pattern) — never at the terminal zoom.
+        // Chrome text rasterizes at the UI font role's size — never at the
+        // terminal zoom.
         let ui_size = glyph_cache.ui_font_size();
         Self::chrome_text_probe(glyph_cache.font_size, ui_size, size_info.cell_width());
         if glyph_cache.font_size == ui_size {
@@ -838,7 +838,7 @@ impl Renderer {
         result
     }
 
-    /// Draw a background image with Windows Terminal-compatible sizing and
+    /// Draw a background image with the configured sizing and
     /// alignment semantics. `target` is the rect the image is fitted into;
     /// `clip` is the rect it may actually touch (usually the same, a sub-band
     /// for scrolled previews). `clip_radius > 0` additionally rounds the

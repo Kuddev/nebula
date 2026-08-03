@@ -121,8 +121,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     /// Advance the multi-click state machine for this press — exactly ONCE
-    /// per press, at the top of `on_mouse_press` (WT's `_numberOfClicks`
-    /// model). A press upgrades Click→Double→Triple only when it is the same
+    /// per press, at the top of `on_mouse_press` (the platform's
+    /// click-count model). A press upgrades Click→Double→Triple only when it is the same
     /// button, within the system double-click time AND within half a cell of
     /// the previous press; anything else resets to a plain Click. The
     /// distance gate keeps "click somewhere, then immediately click-drag
@@ -582,7 +582,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
 
             // Right-clicking the sidebar "+" opens the quick-launch profile menu
-            // (Windows Terminal's profile dropdown); left-click keeps opening the
+            // (the familiar profile dropdown); left-click keeps opening the
             // default shell. Tab and SSH context menus will replace the old
             // reorder/pin shortcuts; until that menu lands, SSH right-click is
             // consumed without changing the saved-host order.
@@ -1074,7 +1074,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::ChromeHit::NewTabMenu => {
                         // The chevron opens the shell dropdown (detected shells +
-                        // config profiles), like Windows Terminal's profile menu.
+                        // config profiles) — the familiar profile menu.
                         let profiles: Vec<String> =
                             self.ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
                         self.ctx.display().open_shell_menu(&profiles);
@@ -1109,7 +1109,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                             self.ctx.mark_dirty();
                             return;
                         }
-                        // Double-click a tab to start renaming (Windows Terminal style).
+                        // Double-click a tab to start renaming (platform convention).
                         if state == ClickState::DoubleClick {
                             self.ctx.nebula_tab(crate::event::TabRequest::BeginRename(index));
                             return;
@@ -1229,7 +1229,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         // Nebula: right-click copies the selection, or pastes when there is
-        // none (Windows Terminal-style), unless the app is in mouse mode.
+        // none (platform convention), unless the app is in mouse mode.
         if button == MouseButton::Right
             && !self.ctx.modifiers().state().shift_key()
             && !self.ctx.mouse_mode()

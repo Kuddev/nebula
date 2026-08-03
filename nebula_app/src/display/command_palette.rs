@@ -22,7 +22,7 @@ enum ProfileRow {
     /// Config profile at this index — routed through `TabRequest::NewProfile`.
     Config { label: String, search: String, index: usize },
     /// Detected shell — routed through `TabRequest::NewShell`. `hint` is the
-    /// program path, shown dimmed (Windows Terminal's profile menu layout).
+    /// program path, shown dimmed — the familiar profile-menu layout.
     Shell { label: String, hint: String, search: String, shell: DetectedShell },
 }
 

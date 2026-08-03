@@ -597,7 +597,7 @@ pub fn run(args: Vec<String>) -> i32 {
             // base64 the whole script (alphabet is `A-Za-z0-9+/=`, zero shell
             // metacharacters) and send a trivially-portable one-liner every
             // remote shell (bash/zsh/sh/fish/csh) parses identically — just
-            // echo, a pipe, and base64. The kitty/wezterm `ssh kitten` approach.
+            // echo, a pipe, and base64 — the usual remote-bootstrap approach.
             let launcher = format!("echo {} | base64 -d | sh", b64.encode(&bootstrap));
             // -t forces a remote PTY so the shell is interactive (idempotent:
             // skipped if the user already asked for one). Order: `-t`, then the

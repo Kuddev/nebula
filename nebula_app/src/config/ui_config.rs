@@ -85,7 +85,7 @@ pub struct UiConfig {
     /// Config for the nebula_terminal itself.
     pub terminal: Terminal,
 
-    /// Quick-launch profiles (Windows Terminal style): named commands, each
+    /// Quick-launch profiles: named commands, each
     /// opening a new tab running that command instead of the default shell
     /// (e.g. an `ssh host` jump entry). Reachable from the command palette,
     /// right-clicking the sidebar "+" button, and Ctrl+Shift+1..9.

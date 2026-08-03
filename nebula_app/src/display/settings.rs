@@ -49,7 +49,7 @@ pub enum NebulaSettingsSection {
     Appearance,
     /// Completion behaviour plus the raw `nebula_settings.txt` config file.
     Profiles,
-    /// Selection/clipboard behaviour (Windows Terminal's "交互" page).
+    /// Selection/clipboard behaviour (the 「交互」 page).
     Interaction,
     /// Read-only shortcut sheet + pointer to `[[keyboard.bindings]]` remapping.
     Keymap,
@@ -82,7 +82,7 @@ pub(crate) enum SettingsOpacityTarget {
 
 /// Which inline dropdown (combobox) is currently expanded. At most one at a
 /// time; the option list floats over later rows instead of pushing them down.
-/// 用户范式（2026-07-23）：凡是多选项的设置一律做成 WT 风格内嵌下拉框，
+/// 用户范式（2026-07-23）：凡是多选项的设置一律做成内嵌下拉框，
 /// 不再用"点击循环切换"——所有选项必须先可见再选择。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsDropdown {
@@ -143,7 +143,7 @@ pub(super) const ACCEPT_OPTIONS: [AcceptKey; 3] =
 pub(super) const TAB_REVEAL_OPTIONS: [TabRevealMotion; 2] =
     [TabRevealMotion::Slide, TabRevealMotion::Instant];
 
-/// Order mirrors the Windows Terminal appearance page the user referenced.
+/// Order mirrors the appearance page the user referenced.
 pub(super) const CURSOR_SHAPE_OPTIONS: [CursorShape; 4] =
     [CursorShape::Beam, CursorShape::Underline, CursorShape::Block, CursorShape::HollowBlock];
 
@@ -303,8 +303,7 @@ pub(super) struct NebulaRuntimeSettings {
     pub(super) cursor_shape: CursorShape,
     /// Default-on: a static cursor reads as a hang ("没有活动感").
     pub(super) cursor_blink: bool,
-    /// 交互: selecting text copies it to the clipboard immediately (WT's
-    /// copyOnSelect). Off = right-click copies instead.
+    /// 交互: 选中即复制（copyOnSelect）。关 = 右键复制。
     pub(super) copy_on_select: bool,
     /// 全宽字形（CJK 等）在 bold run 里用 Regular 字形（粗体提亮不加粗）。
     /// 默认开：小字号下雅黑 Bold fallback 与 Regular 混排发闷（任务 #4）。
@@ -877,7 +876,7 @@ fn settings_geometry(
     // Appearance: preview, cards, colors, cursor and interface groups.
     let system_theme_y0 = card_y0 + 2.0 * (64.0 + 48.0) + GROUP_ADVANCE;
     let color_y0 = system_theme_y0 + ROW_H + GROUP_ADVANCE;
-    // Match Windows Terminal's background-image controls: path, stretch,
+    // Background-image controls: path, stretch,
     // alignment and an independent image-opacity slider.
     let background_image_y0 = color_y0 + ROW_H;
     let background_image_fit_y0 = background_image_y0 + ROW_H;

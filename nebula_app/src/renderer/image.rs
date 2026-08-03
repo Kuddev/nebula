@@ -24,7 +24,7 @@ use crate::renderer::shader::{ShaderProgram, ShaderVersion};
 const IMAGE_SHADER_F: &str = include_str!("../../res/image.f.glsl");
 const IMAGE_SHADER_V: &str = include_str!("../../res/image.v.glsl");
 
-/// Windows Terminal-compatible wallpaper sizing modes.
+/// Wallpaper sizing modes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundImageFit {
     /// Distort the image to exactly match the window.

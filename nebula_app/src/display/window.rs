@@ -719,8 +719,7 @@ fn apply_windows_chrome(window: &WinitWindow) {
 /// winit 在 Windows 上的 `set_blur` 是**空实现**
 /// （`platform_impl/windows/window.rs`），所以这个配置项此前在本平台什么
 /// 都没做。DWM 从 22621 起提供 `DWMWA_SYSTEMBACKDROP_TYPE`，纯 Win32 就能
-/// 拿到，不像 Windows Terminal 的 Acrylic 那样要整个 XAML 宿主
-/// （`TermControl.cpp` 用的是 `Media::AcrylicBrush`）。
+/// 拿到，不必像 XAML 那条路子那样，为了一个 `AcrylicBrush` 背上整个宿主。
 ///
 /// # 为什么是 Acrylic 而不是 Mica
 ///
