@@ -236,6 +236,43 @@ pub(crate) fn push_combobox_popup(
     }
 }
 
+// ---- close button ----
+
+/// 按钮的可视方块：在命中区里居中的正方形。绘制与 hover 反馈都用它，命中区
+/// 本身可以比它宽（消息栏那种按网格列切出来的 3 列区域），指针容差因此不会
+/// 被图标的视觉尺寸绑死。
+pub(crate) fn close_button_plate_rect(hit: Rect) -> Rect {
+    let (hx, hy, hw, hh) = hit;
+    let side = hw.min(hh);
+    ((hx + (hw - side) * 0.5).round(), (hy + (hh - side) * 0.5).round(), side, side)
+}
+
+/// 关闭按钮：一块底 + 一个 ✕ 墨迹。
+///
+/// `fill` 由调用方按状态给（常态一层淡底、hover 加深）——本层不做 hover 决策。
+/// 常态就画底是刻意的：裸 ✕ 在横幅上读不出"这是个可点的东西"，用户反馈过
+/// 「看不到关闭按钮 = 无法关闭」。
+///
+/// `ink` 同样由调用方给：消息栏是终端色系（黄/红底 + 背景色的字），不走 Skin。
+pub(crate) fn push_close_button(
+    quads: &mut Vec<UiQuad>,
+    hit: Rect,
+    scale: f32,
+    ink: Rgba,
+    fill: Rgba,
+) {
+    let plate = close_button_plate_rect(hit);
+    let (px, py, side, _) = plate;
+    quads.push(UiQuad::solid(px, py, side, side, radius::CHIP * scale, fill));
+
+    let cx = px + side * 0.5;
+    let cy = py + side * 0.5;
+    let half = (side * 0.22).max(3.0 * scale);
+    let stroke = (1.4 * scale).max(1.0);
+    icons::push_segment(quads, (cx - half, cy - half), (cx + half, cy + half), stroke, ink);
+    icons::push_segment(quads, (cx + half, cy - half), (cx - half, cy + half), stroke, ink);
+}
+
 // ---- spinner ----
 
 /// Numeric stepper docked at the right edge of its row:

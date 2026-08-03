@@ -1267,8 +1267,22 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             .then_some(CursorIcon::Default)
     }
 
+    /// 把关闭按钮的悬停态同步给绘制层。指针形状那条路是只读的，而按钮要给
+    /// 视觉反馈，所以单独走一次——命中仍旧来自同一个 rect helper。
+    fn update_message_close_hover(&mut self) {
+        let size = self.ctx.size_info();
+        let mouse = self.ctx.mouse();
+        let (x, y) = (mouse.x as f32, mouse.y as f32);
+        let search_active = self.ctx.search_active();
+        let hovered = self.ctx.message().is_some()
+            && message_bar::message_close_button_rect(&size, search_active)
+                .is_some_and(|rect| rect.contains(x, y));
+        self.ctx.display().set_message_close_hover(hovered);
+    }
+
     /// Icon state of the cursor.
     fn cursor_state(&mut self) -> CursorIcon {
+        self.update_message_close_hover();
         let display_offset = self.ctx.terminal().grid().display_offset();
         let mut point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
         // `point` is clamped to `size_info`, but we're about to index the grid,

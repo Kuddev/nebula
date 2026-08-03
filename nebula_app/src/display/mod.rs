@@ -85,6 +85,7 @@ mod state;
 mod surface_opacity;
 mod terminal_color;
 mod terminal_math;
+mod toast;
 
 /// Processor uses the same persisted value before the first window exists so
 /// the global quick-terminal shortcut is active from application startup.
@@ -105,6 +106,7 @@ pub use state::{
     AcceptKey, NebulaConfirm, NebulaInlineImage, NebulaPaneState, NebulaShell, SplitDirection,
     SplitNav,
 };
+pub use toast::ToastKind;
 
 mod file_dialog;
 pub(crate) mod keymap;
@@ -1241,6 +1243,13 @@ pub struct Display {
     /// Undo button geometry published by the draw pass for exact hit-testing.
     nebula_ssh_delete_undo_rect: Option<(f32, f32, f32, f32)>,
     nebula_ssh_delete_undo_hover: bool,
+    /// 在场的轻提示（右下角，自动消失）。见 [`toast`]。
+    nebula_toasts: Vec<toast::Toast>,
+    /// 消息栏关闭按钮：绘制矩形 + 墨色，由终端 pass 发布给 chrome pass。
+    /// 几何来自 `message_bar::message_close_button_rect`，与输入层的命中共用
+    /// 同一个 helper，所以画出来的和点得到的永远是同一块。
+    nebula_message_close: Option<((f32, f32, f32, f32), Rgb)>,
+    nebula_message_close_hover: bool,
     pub nebula_ssh_editor: Option<SshHostEditor>,
     pub nebula_ssh_editor_rects: Option<SshEditorRects>,
     nebula_ssh_editor_open: bool,
@@ -1921,6 +1930,9 @@ impl Display {
             nebula_ai_fix_bar: None,
             nebula_ssh_delete_undo_rect: None,
             nebula_ssh_delete_undo_hover: false,
+            nebula_toasts: Vec::new(),
+            nebula_message_close: None,
+            nebula_message_close_hover: false,
             nebula_ssh_editor: None,
             nebula_ssh_editor_rects: None,
             nebula_ssh_editor_open: false,
@@ -2235,6 +2247,33 @@ impl Display {
             self.pending_update.dirty = true;
             self.window.request_redraw();
         }
+    }
+
+    pub fn set_message_close_hover(&mut self, hovered: bool) {
+        if self.nebula_message_close_hover != hovered {
+            self.nebula_message_close_hover = hovered;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    /// 消息栏的关闭按钮。画在 chrome pass 里而不是随消息文本走：横幅是终端
+    /// 文字管线画的，那条路只能放字符，而拼进文本的 `[X]` 会被 CJK 消息挤出
+    /// 屏幕——按钮点得到却看不见，用户因此报告「无法关闭」。
+    ///
+    /// 配色走终端色系（横幅是 yellow/red 底 + 背景色的字），所以墨色由终端
+    /// pass 一并发布，不取 Skin。
+    fn draw_message_close(&mut self) {
+        let Some((rect, ink)) = self.nebula_message_close else { return };
+        let size = self.size_info;
+        let scale = self.window.scale_factor as f32;
+        let ink = Rgba::new(ink.r, ink.g, ink.b, 255);
+        // 常态就有一层淡底，按钮才读得出"可点"；hover 加深作为反馈。
+        let fill = Rgba::new(ink.r, ink.g, ink.b, if self.nebula_message_close_hover { 64 } else { 28 });
+
+        let mut quads = Vec::new();
+        ui::widgets::push_close_button(&mut quads, rect, scale, ink, fill);
+        self.renderer.draw_ui(&size, &quads);
     }
 
     pub fn set_chrome_tabs(
@@ -5819,7 +5858,16 @@ impl Display {
                     glyph_cache,
                 );
             }
+
+            // 关闭按钮交给 chrome pass 自绘：这里是终端文字管线，画不了圆角
+            // 底和图标墨迹。发布几何 + 墨色，`draw_message_close` 随后照着画，
+            // 与 `message_close_button_rect` 共用同一份矩形。
+            self.nebula_message_close =
+                message_bar::message_close_button_rect(&size_info, search_offset != 0)
+                    .map(|rect| ((rect.x, rect.y, rect.width, rect.height), fg));
         } else {
+            self.nebula_message_close = None;
+            self.nebula_message_close_hover = false;
             // Draw rectangles.
             self.renderer.draw_rects(&size_info, &metrics, rects);
         }
@@ -6924,6 +6972,10 @@ impl Display {
         self.draw_resize_hud();
         context_menu::draw(self);
         self.draw_ssh_delete_undo();
+        // 消息栏的关闭按钮：横幅由终端 pass 画，按钮必须在它之上。
+        self.draw_message_close();
+        // 轻提示：右下角，在浮条之上、模态之下（模态要求决策，不该被提示压住）。
+        toast::draw(self);
         self.draw_ai_fix_bar();
         self.draw_ssh_editor_modal();
         self.draw_confirm_modal();
