@@ -32,7 +32,7 @@ const PIPE_CAPACITY: usize = crate::event_loop::READ_BUFFER_SIZE;
 /// Load the pseudoconsole API from conpty.dll if possible, otherwise use the
 /// standard Windows API.
 ///
-/// The conpty.dll from the Windows Terminal project
+/// The bundled conpty.dll (provenance: THIRD-PARTY-NOTICES)
 /// supports loading OpenConsole.exe, which offers many improvements and
 /// bugfixes compared to the standard conpty that ships with Windows.
 ///
