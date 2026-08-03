@@ -1,6 +1,8 @@
-//! Installed-shell detection for the new-tab dropdown (Windows Terminal's
-//! profile menu). Ported from Tabby's detector set (tabby-electron/src/shells)
-//! so the menu lists what's actually installed, in a stable, familiar order:
+//! Installed-shell detection for the new-tab dropdown's profile menu.
+//!
+//! Ported from Tabby's detector set (tabby-electron/src/shells, MIT) — kept
+//! as an attribution of where this code came from. The menu lists what's
+//! actually installed, in a stable, familiar order:
 //! PowerShell 7 → Windows PowerShell → CMD → Git Bash → Nushell → WSL distros.
 //!
 //! Detection touches the filesystem and the registry, so callers run it ONCE
@@ -181,8 +183,8 @@ pub fn is_pty_integrated_id(id: &str) -> bool {
 fn detect_windows() -> Vec<DetectedShell> {
     let mut shells = Vec::new();
 
-    // PowerShell 7+ (pwsh). App Paths registration first (Tabby's source of
-    // truth), then the well-known installs. `-NoLogo` mirrors Tabby/WT.
+    // PowerShell 7+ (pwsh). App Paths registration first (the authoritative
+    // source), then the well-known installs. `-NoLogo` is the usual default.
     if let Some(program) = find_pwsh() {
         shells.push(DetectedShell {
             name: "PowerShell 7".into(),
@@ -217,7 +219,7 @@ fn detect_windows() -> Vec<DetectedShell> {
         });
     }
 
-    // Git Bash — registry install path first (Tabby), then well-known dirs.
+    // Git Bash — registry install path first, then well-known dirs.
     // Kept under the historic `bash` id: the PTY layer injects the Nebula
     // rcfile (OSC 7 cwd / prompt contract) on this id.
     if let Some(program) = find_git_bash() {
@@ -229,7 +231,7 @@ fn detect_windows() -> Vec<DetectedShell> {
         });
     }
 
-    // Nushell — the user's WT shows it; WT itself only lists it via fragments.
+    // Nushell — installed per-user; only ever listed via fragment files.
     if let Some(program) = find_nushell() {
         shells.push(DetectedShell {
             name: "Nushell".into(),
@@ -239,8 +241,8 @@ fn detect_windows() -> Vec<DetectedShell> {
         });
     }
 
-    // WSL distributions, one entry each (Tabby enumerates Lxss). Hidden
-    // plumbing distros (docker-desktop*) are skipped like Windows Terminal.
+    // WSL distributions, one entry each (enumerated from Lxss). Hidden
+    // plumbing distros (docker-desktop*) are skipped — they aren't shells.
     shells.extend(find_wsl_distros());
 
     shells
@@ -275,7 +277,7 @@ fn find_git_bash() -> Option<String> {
     use winreg::RegKey;
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
-    // HKLM then HKCU InstallPath, exactly Tabby's lookup order.
+    // HKLM then HKCU InstallPath, in that order.
     for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
         if let Some(path) = RegKey::predef(hive)
             .open_subkey(r"Software\GitForWindows")
@@ -401,7 +403,7 @@ fn find_wsl_distros() -> Vec<DetectedShell> {
     {
         Ok(key) => key,
         // WSL installed but no registered distro: offer the default entry
-        // only when the legacy bash.exe shim exists (Tabby's fallback).
+        // only when the legacy bash.exe shim exists.
         Err(_) => {
             return env_path("SystemRoot")
                 .and_then(|root| existing(root.join(r"System32\bash.exe")))
@@ -421,7 +423,7 @@ fn find_wsl_distros() -> Vec<DetectedShell> {
     for guid in lxss.enum_keys().flatten() {
         let Ok(sub) = lxss.open_subkey(&guid) else { continue };
         let Ok(name) = sub.get_value::<String, _>("DistributionName") else { continue };
-        // Plumbing distros are not user shells (same skip list as WT).
+        // Plumbing distros are not user shells.
         if name.starts_with("docker-desktop") {
             continue;
         }

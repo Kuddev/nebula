@@ -530,7 +530,7 @@ async fn upload_local_paths(
 
     for directory in plan.directories {
         context.check_cancelled()?;
-        // 与 Tabby 一致：递归上传允许目标目录已存在。
+        // 递归上传允许目标目录已存在。
         let _ = sftp.create_dir(directory).await;
     }
     for (local, remote, _) in plan.files {
@@ -568,7 +568,7 @@ async fn upload_file_atomic(
         }
         target.shutdown().await?;
 
-        // SFTP v3 rename通常不覆盖；与 Tabby 一样先删除旧目标，再替换临时文件。
+        // SFTP v3 rename 通常不覆盖：先删除旧目标，再替换临时文件。
         let _ = sftp.remove_file(destination.to_owned()).await;
         sftp.rename(temporary.clone(), destination.to_owned()).await?;
         Ok::<_, SftpError>(())

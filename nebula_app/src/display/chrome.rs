@@ -399,7 +399,7 @@ pub(super) fn chrome_tab_layout(
     // end of that header row (revealed on sidebar hover), not a trailing row.
     // 行的左右内缩。窄内缩 = 更宽的行 = 名称与徽章之间拉得开——侧栏总宽
     // 一点没变，变的只是行在里面占多少。14 → 8 → 4 一路收：14 那版把 28px
-    // 让给了两侧空白；otty 的行几乎贴满侧栏，呼吸感来自行**内部**的留白，
+    // 让给了两侧空白；参照原型的行几乎贴满侧栏，呼吸感来自行**内部**的留白，
     // 不是行外的边框。
     let tab_pad = s(4.0);
     let tab_x = panel_x + tab_pad;
@@ -1821,7 +1821,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 &label,
                 &mut d.glyph_cache,
             );
-            // 静默行的右侧亮出 shell 短标（otty 的 "zsh" 位）：徽章位空着时
+            // 静默行的右侧亮出 shell 短标（原型里的 "zsh" 位）：徽章位空着时
             // 它回答"这个 tab 是什么环境"。任何徽章都比它要紧，来了就让；
             // 文字压 SUPPORTING 档、用最淡的墨——它是环境注脚，不是第二个
             // 标签名，和名字抢眼就输了。

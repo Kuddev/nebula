@@ -36,10 +36,6 @@ Every release entry is provided in English and Simplified Chinese.
 - **Sidebar rows breathe wider** — the row inset narrowed from 8 px to 4 px, giving the width to names, badges and shell tags; the sidebar's own width is unchanged.
 - **Every text field shares one caret** — caret position, selection, click-to-place and the blink rhythm moved out of the individual dialogs and into the input component itself. Previously each field carried its own copy, which is why the SSH editor's enlarged name field and the icon search box each drifted from the others in small ways; they now behave identically, and new fields inherit the behaviour instead of re-implementing it.
 
-#### Queued beyond 0.9
-
-- **Resume AI session palette** — the command palette gains "Resume AI session…": the 30 most recent local claude / codex sessions, searchable, with Enter typing the matching `claude --resume` / `codex resume` command into the focused terminal. Each row carries the agent's own brand mark at its head and a `claude` / `codex` chip at its right edge, so the source reads at a glance instead of competing for the text column; the right column shows where the session lived plus its age. Titles come from the first thing the human actually said — CLI-injected blocks (`AGENTS.md` / `CLAUDE.md` instruction dumps, `/clear` echoes, anything the CLI marks `isMeta`) are skipped rather than becoming the session's name, and a long title is truncated instead of running through the column beside it. Ships in a later release, not 0.9.
-
 ### 简体中文
 
 #### 新增
@@ -69,10 +65,6 @@ Every release entry is provided in English and Simplified Chinese.
 - **手掌徽章暂时下线** — 指再粗、缝再窄，徽章尺寸下还是读不成一只手。「等你批准」改用琥珀色圆点，等图标重画后再回来；它依然压过蓝色未读点，两者靠颜色而不是形状区分。
 - **侧栏行更宽** — 行的左右内缩从 8px 收到 4px，宽度让给名字、徽章和 shell 短标；侧栏总宽不变。
 - **所有输入框共用同一套光标** — 光标位置、选区、点击定位与闪烁节律从各个对话框里下沉到输入组件本身。此前每个输入框各存一份，SSH 编辑器放大后的名字框、图标搜索框于是各自在细节上跑偏；现在行为完全一致，新加的输入框直接继承，不必再实现一遍。
-
-#### 排期在 0.9 之后
-
-- **恢复 AI 会话面板** — 命令面板新增「恢复 AI 会话…」：列出本机最近 30 条 claude / codex 会话，可搜索，回车把对应的 `claude --resume` / `codex resume` 命令敲进当前终端。每行行首是该 agent 的品牌标、右缘是 `claude` / `codex` 小药丸，来源一眼可辨而不必去挤文字列；右列显示会话所在位置与相对时间。标题取自用户真正说的第一句话——CLI 自动注入的内容（`AGENTS.md` / `CLAUDE.md` 指令块、`/clear` 回显、以及一切被 CLI 打上 `isMeta` 的行）会被跳过，不再拿来当会话名；标题过长时截断，不再横穿到旁边的列上。随后续版本发布，不进 0.9。
 
 ## 0.8.0 - 2026-07-29
 

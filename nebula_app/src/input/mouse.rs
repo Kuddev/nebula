@@ -348,7 +348,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             },
             crate::display::SettingsHit::OpacitySlider
             | crate::display::SettingsHit::BackgroundImageOpacitySlider => {
-                // WT 风格滑块用普通指针：双向箭头(EwResize)让拖动读起来像
+                // 滑块用普通指针：双向箭头(EwResize)让拖动读起来像
                 // 在改窗口大小，是用户报告的"手势不对"。
                 self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
                 return;
@@ -516,8 +516,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             // Engage drag-selection only past a real drag distance: at least
             // half a cell (and never under 8px). The old 4px threshold was
             // inside ordinary click jitter, so a plain click kept leaving a
-            // one-cell selection behind — Windows Terminal only selects once
-            // the pointer actually travels, a click never does.
+            // one-cell selection behind. A selection starts only once the
+            // pointer actually travels; a click never does.
             let dragging = self.ctx.mouse().drag_active
                 || self.ctx.mouse().drag_origin.is_some_and(|(ox, oy)| {
                     let scale = self.ctx.window().scale_factor as f32;
@@ -530,8 +530,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.mouse_mut().drag_active = true;
                 // A real drag is in progress — don't launch hints on release.
                 self.ctx.mouse_mut().block_hint_launcher = true;
-                // Crossing the threshold is what STARTS the selection (WT
-                // model): anchor at the original press cell, not wherever the
+                // Crossing the threshold is what STARTS the selection: anchor at the original press cell, not wherever the
                 // pointer is by now. Double/triple clicks selected at press
                 // and carry no pending entry — they just extend below.
                 if first {
@@ -682,7 +681,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             ClickState::Click => {
                 let had_selection = !self.ctx.selection_is_empty();
                 // Shift+click extends the existing selection to the clicked
-                // cell (Windows Terminal / native text field behaviour)
+                // cell (native text-field behaviour)
                 // instead of clearing it.
                 if self.ctx.modifiers().state().shift_key() && had_selection {
                     self.ctx.update_selection(point, side);
@@ -721,7 +720,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.mouse().y,
                 ));
 
-                // Windows Terminal model: a single click never CREATES a
+                // Platform model: a single click never CREATES a
                 // selection — it only clears an existing one. The would-be
                 // selection is merely armed here; `mouse_moved` starts it for
                 // real once the pointer travels past the drag threshold.
@@ -734,7 +733,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
                 // Ctrl+click on a highlighted link is a link-open gesture, not
                 // the start of a block selection: hint hit-testing outranks
-                // selection arming (WT parity). A plain click over a link
+                // selection arming (platform parity). A plain click over a link
                 // still arms — dragging across a URL must select its text.
                 if !(control && hint_hit) {
                     let ty = if control { SelectionType::Block } else { SelectionType::Simple };
@@ -751,7 +750,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 // Double-click selects the word under the pointer — but on an
                 // EMPTY cell there is no word, and semantically selecting the
                 // blank used to paint a stray one-cell block that read as "a
-                // click leaves a cursor behind" (WT selects nothing there).
+                // click leaves a cursor behind" (nothing gets selected there).
                 let cell_char = self.ctx.terminal().grid()[point].c;
                 if cell_char != ' ' && cell_char != '\t' && cell_char != '\0' {
                     self.ctx.mouse_mut().block_hint_launcher = true;
@@ -901,7 +900,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
-        // Ctrl+wheel zooms the terminal font (Windows Terminal / browser
+        // Ctrl+wheel zooms the terminal font (browser
         // convention). Checked before every scroll consumer so zoom wins over
         // page/drawer/grid scrolling while the modifier is held.
         if self.ctx.modifiers().state().control_key() {

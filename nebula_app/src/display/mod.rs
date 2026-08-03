@@ -760,7 +760,7 @@ pub(crate) fn program_icon(program: &str) -> &'static str {
     }
 }
 
-/// The UI font role (wezterm's `window_frame` pattern): the size chrome
+/// The UI font role: the size chrome
 /// typography rasterizes at and the cell chrome layout steps by. Anchored to
 /// the config font at the window's DPI — never to the terminal zoom. Stage 3
 /// exposes family/size as user config.
@@ -1429,7 +1429,7 @@ pub struct Display {
     /// the shape with DECSCUSR escapes (vim's mode cursor keeps working).
     pub nebula_cursor_shape: CursorShape,
     pub nebula_cursor_blink: bool,
-    /// 交互: WT-style copyOnSelect. Off = right-click copies / pastes instead.
+    /// 交互: 选中即复制（copyOnSelect）。关 = 右键复制 / 粘贴。
     pub nebula_copy_on_select: bool,
     /// 全宽字形（CJK 等）bold run 用 Regular 字形（粗体提亮不加粗，#4）。
     pub nebula_cjk_bold_regular: bool,
@@ -1459,7 +1459,7 @@ pub struct Display {
     pub nebula_background_image: Option<String>,
     /// Wallpaper alpha, separate from the window opacity to preserve text contrast.
     pub nebula_background_image_opacity: f32,
-    /// Windows Terminal-compatible wallpaper sizing and anchor settings.
+    /// Wallpaper sizing and anchor settings (fill / fit / stretch / tile).
     pub nebula_background_image_fit: BackgroundImageFit,
     pub nebula_background_image_alignment: BackgroundImageAlignment,
     /// Off by default: wallpapers stay inside terminal content. Enabling this
@@ -1485,7 +1485,7 @@ pub struct Display {
 
     /// Tab rename state: when `Some(index, text)`, a text input is shown over
     /// tab `index` with the current edit buffer `text`. The user types to edit,
-    /// Enter commits, Esc cancels (Windows Terminal double-click rename).
+    /// Enter commits, Esc cancels (double-click to rename).
     pub nebula_tab_rename: Option<(usize, String)>,
     /// True for the instant after a rename begins: the whole existing name
     /// reads as "selected" (nushell-style blue fill) and the first typed
@@ -1533,7 +1533,7 @@ pub struct Display {
     /// Font size used by the window.
     pub font_size: FontSize,
 
-    /// UI 字体角色（wezterm `window_frame` 范式）：chrome 排版锚定在这个
+    /// UI 字体角色：chrome 排版锚定在这个
     /// 状态上，永不跟随终端缩放。Ctrl+滚轮 / 设置 spinner 只改
     /// `font_size`（终端网格与跟随它的文档查看器）。阶段 3 将把
     /// family/size 暴露为独立配置。
@@ -3401,7 +3401,7 @@ impl Display {
         self.open_user_config_file();
     }
 
-    /// WT-style default-shell picker (command palette mode). Kept for compatibility.
+    /// Default-shell picker (command palette mode). Kept for compatibility.
     /// detected-shell dropdown as the "+" chevron, but confirming SETS the
     /// default instead of launching a tab. Replaces the old 2-value cycle.
     pub fn open_default_shell_picker(&mut self) {
@@ -3961,7 +3961,7 @@ impl Display {
 
     /// Open the new-tab dropdown: detected shells (installed-shell order) plus
     /// any config profiles. Detection runs once and is cached — the chevron
-    /// beside the "+" opens this, mirroring Windows Terminal's profile menu.
+    /// beside the "+" opens this — the familiar profile menu.
     pub fn open_shell_menu(&mut self, profiles: &[String]) {
         let shells =
             self.nebula_detected_shells.get_or_insert_with(crate::shell_detect::detect_shells);
@@ -4652,8 +4652,7 @@ impl Display {
 
     /// Auto-save an SSH destination the user typed and successfully connected
     /// to — armed at OSC 133;C, confirmed by a remote `NEBULA|` title or a
-    /// session that outlived [`crate::ssh::SAVE_MIN_SESSION`]. Tabby-style
-    /// recents: most recent first, deduped, capped. An already-listed host
+    /// session that outlived [`crate::ssh::SAVE_MIN_SESSION`]. Recents: most recent first, deduped, capped. An already-listed host
     /// only refreshes its recency (for the next launch) — the visible list
     /// never jumps while the user is looking at it.
     pub fn nebula_save_ssh_host(&mut self, host: &str) {

@@ -304,7 +304,7 @@ fn common_keybindings() -> Vec<KeyBinding> {
         "v",    ModifiersState::CONTROL | ModifiersState::SHIFT, ~BindingMode::VI;                       Action::Paste;
         "v",    ModifiersState::CONTROL | ModifiersState::SHIFT, +BindingMode::VI, +BindingMode::SEARCH; Action::Paste;
         // Windows/Linux convention: plain Ctrl+V pastes too (matches PowerShell
-        // PSReadLine and Windows Terminal). Suppressed in Nebula's vi scroll
+        // PSReadLine, and every mainstream Windows terminal). Suppressed in
         // mode so Ctrl+V there keeps its navigation meaning.
         "v",    ModifiersState::CONTROL,                          ~BindingMode::VI;                       Action::Paste;
         "v",    ModifiersState::CONTROL,                          +BindingMode::VI, +BindingMode::SEARCH; Action::Paste;

@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_auth_plan_matches_tabby_order_and_deduplicates_keys() {
+    fn auto_auth_plan_keeps_key_order_and_deduplicates_keys() {
         let explicit = vec![PathBuf::from(r"C:\Keys\chosen"), PathBuf::from(r"c:\keys\CHOSEN")];
         let resolved = vec![PathBuf::from(r"C:\Keys\config")];
 

@@ -69,7 +69,7 @@ pub struct GlyphCache {
     /// Font size.
     pub font_size: crossfont::Size,
 
-    /// The UI font role's size (wezterm's `Entity::Title` pattern): chrome
+    /// The UI font role's size: chrome
     /// typography rasterizes at this size and never follows the terminal
     /// zoom. Kept alongside the terminal size — `GlyphKey` carries the size,
     /// so both roles share one atlas.
@@ -483,7 +483,7 @@ impl GlyphCache {
         self.rasterizer.metrics(self.font_key, size).ok()
     }
 
-    /// Pin the UI font role to `size` (wezterm's `Entity::Title` pattern):
+    /// Pin the UI font role to `size`:
     /// chrome typography rasterizes at this size regardless of the terminal
     /// zoom. Returns the role's metrics; on rasterizer failure the role
     /// degrades to the terminal font so chrome never goes blank.
