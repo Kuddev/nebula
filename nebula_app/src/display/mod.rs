@@ -1460,6 +1460,9 @@ pub struct Display {
     /// 字体目录的搜索串。匹配列表上显示的那个名字，不维护跨语言别名。
     /// 只在下拉打开期间存在，关闭即清空，不持久化。
     nebula_font_query: String,
+    /// 搜索框的光标与选区。与图标搜索框、SSH 表单字段共用同一套模型：
+    /// 新加的输入框继承行为，不必再实现一遍。
+    nebula_font_query_cursor: ui::text_field::TextCursor,
     /// 目录中被判定为非等宽的族（小写名）。界面据此给比例字体警告——
     /// 固定网格下它们可能重叠或截断，但用户知情后仍可选择。
     nebula_font_proportional: std::collections::HashSet<String>,
@@ -2002,6 +2005,7 @@ impl Display {
             nebula_system_fonts: None,
             nebula_font_show_all: false,
             nebula_font_query: String::new(),
+            nebula_font_query_cursor: Default::default(),
             nebula_font_proportional: std::collections::HashSet::new(),
             nebula_font_notice: font_notice,
             nebula_tab_labels: vec![".".to_owned()],
@@ -3019,6 +3023,7 @@ impl Display {
             font_notice: self.nebula_font_notice.clone(),
             font_show_all: self.nebula_font_show_all,
             font_query: self.nebula_font_query.clone(),
+            font_query_cursor: self.nebula_font_query_cursor.clone(),
             font_proportional: self.nebula_font_proportional.clone(),
             hidden_hosts: self.nebula_hidden_hosts.clone(),
             fetch: self.nebula_fetch_enabled,
@@ -3238,6 +3243,7 @@ impl Display {
         // 搜索是这次展开的临时状态：关掉就清空，下次打开从完整目录开始。
         if !self.nebula_font_query.is_empty() {
             self.nebula_font_query.clear();
+            self.nebula_font_query_cursor = Default::default();
             self.rebuild_font_catalog();
         }
         self.pending_update.dirty = true;
@@ -3423,25 +3429,87 @@ impl Display {
         self.nebula_font_families = families;
     }
 
+    /// 搜索框里文本的起点 x 与单元格宽——鼠标定位光标要用它换算落点。
+    /// 与渲染同源（[`settings::font_search_field_rect`]），两边不会漂。
+    pub fn font_search_text_origin(&self) -> (f32, f32) {
+        let scale = self.window.scale_factor as f32;
+        let cell_w = self.size_info.cell_width();
+        let field = settings::font_search_field_rect(
+            &self.size_info,
+            scale,
+            self.terminal_card_rect(),
+            self.nebula_settings_section,
+            self.nebula_settings_scroll,
+            self.nebula_settings_dropdown,
+            self.font_picker_count(),
+            self.nebula_hidden_hosts.len(),
+        );
+        (field.map_or(0.0, |rect| rect.0 + 12.0 * scale), cell_w)
+    }
+
     pub fn font_query(&self) -> &str {
         &self.nebula_font_query
     }
 
-    pub fn font_query_push(&mut self, ch: char) {
-        if ch.is_control() {
-            return;
+    /// 插入文本，或 `None` 表示退格。查询串一变就重建目录——列表跟着打字走，
+    /// 才是「所见即所搜」。
+    pub fn font_query_edit(&mut self, insert: Option<&str>) {
+        match insert {
+            Some(text) => {
+                let clean: String = text.chars().filter(|ch| !ch.is_control()).collect();
+                if clean.is_empty() {
+                    return;
+                }
+                self.nebula_font_query_cursor.insert(&mut self.nebula_font_query, &clean);
+            },
+            None => self.nebula_font_query_cursor.backspace(&mut self.nebula_font_query),
         }
-        self.nebula_font_query.push(ch);
         self.rebuild_font_catalog();
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
 
-    pub fn font_query_backspace(&mut self) {
-        if self.nebula_font_query.pop().is_none() {
-            return;
-        }
+    pub fn font_query_delete_forward(&mut self) {
+        self.nebula_font_query_cursor.delete_forward(&mut self.nebula_font_query);
         self.rebuild_font_catalog();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn font_query_move(&mut self, forward: bool, extend: bool) {
+        let text = self.nebula_font_query.clone();
+        self.nebula_font_query_cursor.step(&text, forward, extend);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn font_query_jump(&mut self, to_end: bool, extend: bool) {
+        let text = self.nebula_font_query.clone();
+        self.nebula_font_query_cursor.jump(&text, to_end, extend);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn font_query_select_all(&mut self) {
+        let text = self.nebula_font_query.clone();
+        self.nebula_font_query_cursor.select_all(&text);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn font_query_selected_text(&self) -> Option<String> {
+        self.nebula_font_query_cursor.selected_text(&self.nebula_font_query)
+    }
+
+    /// 按点击落点定位光标。`offset_x` 是相对文本起点的距离。
+    pub fn font_query_place(&mut self, offset_x: f32, cell_w: f32, extend: bool) {
+        let text = self.nebula_font_query.clone();
+        let index = ui::text_field::index_at(&text, offset_x, cell_w);
+        if extend {
+            self.nebula_font_query_cursor.extend_to(&text, index);
+        } else {
+            self.nebula_font_query_cursor.place(&text, index);
+        }
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }

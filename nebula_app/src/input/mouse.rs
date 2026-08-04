@@ -342,7 +342,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
                 return;
             },
-            crate::display::SettingsHit::SyncInput(_) => {
+            crate::display::SettingsHit::SyncInput(_)
+            // 搜索框是文本字段，光标要变 I 形——和其它输入框一致。
+            | crate::display::SettingsHit::FontSearchField => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Text);
                 return;
             },

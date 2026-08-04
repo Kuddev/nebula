@@ -902,6 +902,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::FontSearchField => {
+                        // 点搜索框是定位光标，不是关掉弹层——它是这次展开里
+                        // 唯一还接受输入的东西。
+                        let (text_x, cell_w) = self.ctx.display().font_search_text_origin();
+                        let extend = self.ctx.modifiers().state().shift_key();
+                        self.ctx.display().font_query_place(x - text_x, cell_w, extend);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::FontPickerRow(index) => {
                         let base_font = self.ctx.config().font.clone();
                         self.ctx.display().set_terminal_font_by_index(index, &base_font);
@@ -1282,6 +1291,7 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::ShellPickerRow(_)
             | Hit::FontCycle
             | Hit::FontPickerRow(_)
+            | Hit::FontSearchField
             | Hit::BackgroundImageFit
             | Hit::FitOption(_)
             | Hit::BackgroundImageAlignment
