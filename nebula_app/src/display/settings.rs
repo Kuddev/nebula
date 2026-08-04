@@ -25,7 +25,7 @@ use crate::renderer::{GlyphCache, Renderer};
 
 use super::keymap;
 use super::ui::theme::Skin;
-use super::ui::{icons, widgets};
+use super::ui::{icons, surface, text_field, widgets};
 use super::{
     AcceptKey, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
     chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label,
@@ -224,6 +224,8 @@ pub enum SettingsHit {
     FontCycle,
     /// Imported-font picker rows; the final row is always "导入字体…".
     FontPickerRow(usize),
+    /// 字体弹层顶部的搜索框。点它是定位光标，不是关掉弹层。
+    FontSearchField,
     /// Font-size spinner steppers on the "字号" row.
     FontSizeUp,
     FontSizeDown,
@@ -1119,6 +1121,19 @@ pub(super) fn background_color_popup(
     BackgroundColorPopup { rect: (x, y, w, h), swatch, hex }
 }
 
+/// 字体弹层的总行数：候选行 + 顶部那个搜索框。
+///
+/// 一个字体都筛不出来时仍然是 1 行——那时搜索框是弹层里唯一的东西，也正是
+/// 用户要用来改查询串的那一个。
+pub(super) fn font_popup_row_count(font_rows: usize) -> usize {
+    font_rows + 1
+}
+
+/// 弹层第 `row` 行对应第几个候选。`None` = 那是搜索框。
+pub(super) fn font_popup_slot(row: usize) -> Option<usize> {
+    row.checked_sub(1)
+}
+
 fn dropdown_anchor(
     geometry: &SettingsGeometry,
     section: NebulaSettingsSection,
@@ -1131,7 +1146,9 @@ fn dropdown_anchor(
     let anchor = |row| widgets::combobox_rect(row, scale);
     match (section, dropdown) {
         (Section::Profiles, SettingsDropdown::Shell) => Some((anchor(geometry.shell), shell_count)),
-        (Section::Profiles, SettingsDropdown::Font) => Some((anchor(geometry.font), font_count)),
+        (Section::Profiles, SettingsDropdown::Font) => {
+            Some((anchor(geometry.font), font_popup_row_count(font_count)))
+        },
         (Section::Profiles, SettingsDropdown::Accept) => {
             Some((anchor(geometry.accept), ACCEPT_OPTIONS.len()))
         },
@@ -1158,6 +1175,37 @@ fn dropdown_anchor(
 /// same offset the renderer used, so hits land on what the user actually sees;
 /// rows scrolled out of the content viewport don't respond.
 #[allow(clippy::too_many_arguments)]
+/// 字体弹层里搜索框的矩形。命中与渲染各算一遍会漂，所以两边都问这里。
+///
+/// 返回 `None` 表示当前没有展开字体弹层。
+pub fn font_search_field_rect(
+    size_info: &SizeInfo,
+    scale_factor: f32,
+    area: (f32, f32, f32, f32),
+    section: NebulaSettingsSection,
+    scroll: f32,
+    dropdown: Option<SettingsDropdown>,
+    font_count: usize,
+    hidden_host_count: usize,
+) -> Option<(f32, f32, f32, f32)> {
+    if dropdown != Some(SettingsDropdown::Font) {
+        return None;
+    }
+    let geometry = settings_geometry(size_info, scale_factor, area, scroll, hidden_host_count);
+    let s = |v: f32| v * scale_factor;
+    let (_, py, _, ph) = geometry.popup;
+    let (anchor, count) =
+        dropdown_anchor(&geometry, section, SettingsDropdown::Font, 0, font_count, scale_factor)?;
+    let popup = widgets::combobox_popup_rect(
+        anchor,
+        count,
+        scale_factor,
+        geometry.content_top,
+        py + ph - s(6.0),
+    );
+    Some(widgets::popup_row_rect(popup, 0, scale_factor))
+}
+
 pub fn settings_hit(
     size_info: &SizeInfo,
     scale_factor: f32,
@@ -1220,7 +1268,10 @@ pub fn settings_hit(
             if let Some(index) = widgets::popup_row_at(popup, count, scale_factor, x, y) {
                 return match dropdown {
                     SettingsDropdown::Shell => SettingsHit::ShellPickerRow(index),
-                    SettingsDropdown::Font => SettingsHit::FontPickerRow(index),
+                    SettingsDropdown::Font => match font_popup_slot(index) {
+                        Some(slot) => SettingsHit::FontPickerRow(slot),
+                        None => SettingsHit::FontSearchField,
+                    },
                     SettingsDropdown::BackgroundFit => SettingsHit::FitOption(index),
                     SettingsDropdown::BackgroundAlignment => SettingsHit::AlignOption(index),
                     SettingsDropdown::Language => SettingsHit::Language(LANGUAGE_OPTIONS[index]),
@@ -1434,8 +1485,11 @@ pub(super) struct SettingsView {
     pub(super) font_notice: Option<String>,
     /// 字体目录的「显示全部」临时过滤是否开启。
     pub(super) font_show_all: bool,
-    /// 字体目录搜索串；下拉展开且非空时顶替触发器上显示的字体名。
+    /// 字体目录搜索串；长在弹层顶部那个搜索框里。
     pub(super) font_query: String,
+    /// 搜索框的光标与选区。下沉到 [`super::ui::text_field`] 的同一套模型，
+    /// 新加的输入框直接继承，不必再实现一遍。
+    pub(super) font_query_cursor: text_field::TextCursor,
     /// 非等宽族的小写名集合；下拉行据此追加比例字体警告。
     pub(super) font_proportional: std::collections::HashSet<String>,
     /// Persistent soft-deleted destinations. Rows provide a discoverable
@@ -1609,7 +1663,10 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         SettingsDropdown::Shell => {
             view.shells.iter().position(|(id, _, _)| view.shell_id.as_deref() == Some(id.as_str()))
         },
-        SettingsDropdown::Font => view.fonts.iter().position(|family| family == &view.font_family),
+        // 加一：弹层第 0 行是搜索框，候选整体下移一行。
+        SettingsDropdown::Font => {
+            view.fonts.iter().position(|family| family == &view.font_family).map(|slot| slot + 1)
+        },
         SettingsDropdown::BackgroundFit => {
             BACKGROUND_FIT_OPTIONS.iter().position(|fit| *fit == view.background_image_fit)
         },
@@ -1635,7 +1692,7 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
 fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Option<usize> {
     match (dropdown, hover) {
         (SettingsDropdown::Shell, SettingsHit::ShellPickerRow(index)) => Some(index),
-        (SettingsDropdown::Font, SettingsHit::FontPickerRow(index)) => Some(index),
+        (SettingsDropdown::Font, SettingsHit::FontPickerRow(index)) => Some(index + 1),
         (SettingsDropdown::BackgroundFit, SettingsHit::FitOption(index)) => Some(index),
         (SettingsDropdown::BackgroundAlignment, SettingsHit::AlignOption(index)) => Some(index),
         (SettingsDropdown::Language, SettingsHit::Language(preference)) => {
@@ -2213,11 +2270,7 @@ pub(super) fn push_quads(
                 view.hover == SettingsHit::TabRevealDropdown,
                 view.dropdown == Some(SettingsDropdown::TabReveal),
             );
-            row_hover(
-                quads,
-                geometry.panel_resize,
-                view.hover == SettingsHit::PanelResizeToggle,
-            );
+            row_hover(quads, geometry.panel_resize, view.hover == SettingsHit::PanelResizeToggle);
             toggle(quads, &mut staged, geometry.panel_resize, view.panel_resize);
             group_frame(quads, geometry.cjk_bold, 1);
             row_hover(quads, geometry.cjk_bold, view.hover == SettingsHit::CjkBoldToggle);
@@ -2513,6 +2566,23 @@ pub(super) fn push_popup_quads(
     let selected = dropdown_selected_index(view, dropdown);
     let hover = dropdown_hover_index(view.hover, dropdown);
     widgets::push_combobox_popup(quads, popup, count, selected, hover, scale, &sk);
+    // 字体弹层第 0 行是一个正经输入框：下沉底 + 光标/选区。它不是选项，所以
+    // 不吃 hover 高亮，走 `push_input` 而不是 popup 行的配方。
+    if matches!(dropdown, SettingsDropdown::Font) {
+        let field = widgets::popup_row_rect(popup, 0, scale);
+        surface::push_input(quads, field, scale, &sk, true);
+        text_field::push_cursor(
+            quads,
+            field.1,
+            field.3,
+            field.0 + s(12.0),
+            &view.font_query,
+            &view.font_query_cursor,
+            size.cell_width(),
+            scale,
+            &sk,
+        );
+    }
     if let Some(index) = selected {
         let (rx, ry, rw, rh) = widgets::popup_row_rect(popup, index, scale);
         icons::push_check(
@@ -2592,22 +2662,39 @@ pub(super) fn draw_popup_text(
                 text_x = rx + s(40.0);
                 if program.is_empty() { name.clone() } else { format!("{name}  ·  {program}") }
             },
-            SettingsDropdown::Font => match view.fonts.get(index) {
-                // 比例字体在固定终端网格下可能重叠或截断：标出来，但不拦着
-                // 用户选——这是知情选择，不是错误。
-                Some(family) if view.font_proportional.contains(&family.to_lowercase()) => {
-                    format!("{family}   {}", language.pick("· 非等宽", "· not monospaced"))
-                },
-                Some(family) => family.clone(),
-                // 倒数第二行是过滤切换，最后一行是导入。
-                None if index == view.fonts.len() => {
-                    if view.font_show_all {
-                        language.pick("◉  显示全部字体", "(*) Showing all fonts").to_owned()
+            SettingsDropdown::Font => {
+                // 第 0 行是搜索框：它的底与光标在 quads pass 里画，这里只
+                // 落查询串本身（空着时落提示语）。
+                let Some(slot) = font_popup_slot(index) else {
+                    let showing = !view.font_query.is_empty();
+                    let text = if showing {
+                        view.font_query.clone()
                     } else {
-                        language.pick("○  仅等宽字体", "( ) Monospaced only").to_owned()
-                    }
-                },
-                None => language.pick("＋  导入字体…", "+  Import font...").to_owned(),
+                        language
+                            .pick("搜索字体…（直接打字）", "Search fonts… (just type)")
+                            .to_owned()
+                    };
+                    let ink = if showing { sk.ink } else { sk.ink_faint };
+                    r.draw_chrome_text(size, text_x, ty, ink, &text, gc);
+                    continue;
+                };
+                match view.fonts.get(slot) {
+                    // 比例字体在固定终端网格下可能重叠或截断：标出来，但不拦着
+                    // 用户选——这是知情选择，不是错误。
+                    Some(family) if view.font_proportional.contains(&family.to_lowercase()) => {
+                        format!("{family}   {}", language.pick("· 非等宽", "· not monospaced"))
+                    },
+                    Some(family) => family.clone(),
+                    // 倒数第二行是过滤切换，最后一行是导入。
+                    None if slot == view.fonts.len() => {
+                        if view.font_show_all {
+                            language.pick("◉  显示全部字体", "(*) Showing all fonts").to_owned()
+                        } else {
+                            language.pick("○  仅等宽字体", "( ) Monospaced only").to_owned()
+                        }
+                    },
+                    None => language.pick("＋  导入字体…", "+  Import font...").to_owned(),
+                }
             },
             SettingsDropdown::BackgroundFit => {
                 background_image_fit_label(BACKGROUND_FIT_OPTIONS[index], language).to_owned()
@@ -2629,8 +2716,8 @@ pub(super) fn draw_popup_text(
             // 上方特判提前返回；此臂只为 match 完备。
             SettingsDropdown::BackgroundColor => continue,
         };
-        let import_row =
-            matches!(dropdown, SettingsDropdown::Font) && view.fonts.get(index).is_none();
+        let import_row = matches!(dropdown, SettingsDropdown::Font)
+            && font_popup_slot(index).is_some_and(|slot| view.fonts.get(slot).is_none());
         let color = if selected == Some(index) || import_row { sk.accent } else { sk.ink };
         let max_chars =
             (((rx + rw - s(28.0)) - text_x).max(cell_w) / cell_w).floor().max(1.0) as usize;
@@ -3304,12 +3391,10 @@ pub(super) fn draw_text(
                 }
             }
             if visible(geometry.font.1, geometry.font.3) {
-                // 搜索期间触发器顶替显示查询串——否则用户看不见自己在搜
-                // 什么。加载失败的告警优先于两者。
-                let searching = format!("\u{1f50d} {}", view.font_query);
+                // 查询串现在长在弹层顶部的搜索框里，触发器只管报当前字体。
+                // 加载失败的告警优先。
                 let font_value = match view.font_notice.as_deref() {
                     Some(notice) => notice,
-                    None if !view.font_query.is_empty() => &searching,
                     None => &view.font_family,
                 };
                 row_label(
@@ -3855,8 +3940,21 @@ pub(super) fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion, advanced_content_end, opacity_from_pointer,
+        SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion, advanced_content_end, font_popup_row_count,
+        font_popup_slot, opacity_from_pointer,
     };
+
+    #[test]
+    fn the_font_popup_reserves_its_first_row_for_the_search_field() {
+        // 搜索框占掉第 0 行，选项整体下移一行。用「多算一行」而不是另开一套
+        // 几何：弹层的定位、上下翻转与裁剪都还归 combobox_popup_rect 管。
+        assert_eq!(font_popup_row_count(0), 1, "一个字体都没有时也要有搜索框");
+        assert_eq!(font_popup_row_count(7), 8);
+
+        assert_eq!(font_popup_slot(0), None, "第 0 行是搜索框，不是选项");
+        assert_eq!(font_popup_slot(1), Some(0));
+        assert_eq!(font_popup_slot(4), Some(3));
+    }
 
     #[test]
     fn slider_pointer_maps_to_clamped_fraction() {
