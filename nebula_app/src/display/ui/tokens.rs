@@ -107,6 +107,14 @@ pub mod control {
     pub fn settings_row(density: Density) -> f32 {
         if density.compact() { COMPACT_ROW } else { ROW }
     }
+
+    /// 本来就密的列表行（命令面板、弹层列表）。标准档已经站在
+    /// [`COMPACT_ROW`] 上，所以紧凑再降一格落到 [`MIN_HIT_TARGET`]——阶梯
+    /// 的最后一档，也是不该再往下走的硬下界。
+    #[inline]
+    pub fn dense_row(density: Density) -> f32 {
+        if density.compact() { MIN_HIT_TARGET } else { COMPACT_ROW }
+    }
 }
 
 /// 浮层的 Z 轴处理。阴影按浮层面积分档——同一组参数放在小菜单上刚好，
@@ -211,6 +219,9 @@ mod tests {
         assert_eq!(control::row(Density::Compact), control::MIN_HIT_TARGET);
         assert_eq!(control::settings_row(Density::Standard), control::ROW);
         assert_eq!(control::settings_row(Density::Compact), control::COMPACT_ROW);
+        // 本来就密的列表比设置行低一档起步，紧凑之后落到阶梯末端。
+        assert_eq!(control::dense_row(Density::Standard), control::COMPACT_ROW);
+        assert_eq!(control::dense_row(Density::Compact), control::MIN_HIT_TARGET);
     }
 
     #[test]
@@ -219,6 +230,7 @@ mod tests {
         for density in [Density::Standard, Density::Compact] {
             assert!(control::row(density) >= control::MIN_HIT_TARGET);
             assert!(control::settings_row(density) >= control::MIN_HIT_TARGET);
+            assert!(control::dense_row(density) >= control::MIN_HIT_TARGET);
         }
     }
 

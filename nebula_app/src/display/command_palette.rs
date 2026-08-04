@@ -954,12 +954,11 @@ impl CommandPalette {
             _ => return,
         };
         let rows = std::mem::take(&mut self.filtered);
-        let (mut head, tail): (Vec<_>, Vec<_>) = rows.into_iter().partition(|candidate| {
-            match candidate {
+        let (mut head, tail): (Vec<_>, Vec<_>) =
+            rows.into_iter().partition(|candidate| match candidate {
                 PaletteCandidate::AiSession(index) => self.ai_sessions[*index].source == lead,
                 _ => true,
-            }
-        });
+            });
         head.extend(tail);
         self.filtered = head;
     }
@@ -1037,10 +1036,8 @@ impl CommandPalette {
         match self.mode {
             PaletteMode::AiSessions => self.group_ai_sessions_by_source(),
             PaletteMode::Commands => {
-                let groups: Vec<_> =
-                    self.filtered.iter().map(|c| self.command_group(*c)).collect();
-                let mut paired: Vec<_> =
-                    groups.into_iter().zip(self.filtered.drain(..)).collect();
+                let groups: Vec<_> = self.filtered.iter().map(|c| self.command_group(*c)).collect();
+                let mut paired: Vec<_> = groups.into_iter().zip(self.filtered.drain(..)).collect();
                 paired.sort_by_key(|(group, _)| *group);
                 self.filtered = paired.into_iter().map(|(_, candidate)| candidate).collect();
             },
@@ -1347,11 +1344,17 @@ impl PaletteLayout {
 /// doesn't jump as the match count changes while typing; pickers shrink to
 /// their content. Every palette mode uses the same search-input geometry,
 /// keeping rendering, hover and click hit-testing on one contract.
-pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32) -> PaletteLayout {
+pub fn palette_layout(
+    model: &CommandPalette,
+    win_w: f32,
+    win_h: f32,
+    scale: f32,
+    density: super::ui::tokens::Density,
+) -> PaletteLayout {
     let s = |v: f32| v * scale;
     let margin = s(8.0);
     let pad = s(12.0);
-    let row_h = s(super::ui::tokens::control::COMPACT_ROW);
+    let row_h = s(super::ui::tokens::control::dense_row(density));
     // 搜索框与结果行等高：输入仍然可发现，但不会压过真正的数据内容。
     let input_h = row_h;
     let cards = model.is_picker();
@@ -1373,7 +1376,11 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
         let slots = visible.max(1);
         let mut rest = slots;
         if hero {
-            rel_groups.push((y, model.language.pick("推荐", "Recommended").to_owned(), String::new()));
+            rel_groups.push((
+                y,
+                model.language.pick("推荐", "Recommended").to_owned(),
+                String::new(),
+            ));
             y += header_h;
             rel_rows.push((y, hero_h));
             y += hero_h + s(10.0);
@@ -1448,8 +1455,7 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
     let input = (px + pad, py + pad, pw - 2.0 * pad, input_h);
     let list_y = py + pad + input_h + s(8.0);
     let rows = rel_rows.into_iter().map(|(ry, rh)| (list_y + ry, rh)).collect();
-    let groups =
-        rel_groups.into_iter().map(|(gy, label, ctx)| (list_y + gy, label, ctx)).collect();
+    let groups = rel_groups.into_iter().map(|(gy, label, ctx)| (list_y + gy, label, ctx)).collect();
 
     let footer = cards.then_some((px, py + ph - footer_h, pw, footer_h));
 
@@ -1509,7 +1515,7 @@ pub(super) fn push_quads(
     let h = size.height();
     let s = |v: f32| v * scale;
     let sk = theme.skin();
-    let layout = palette_layout(model, w, h, scale);
+    let layout = palette_layout(model, w, h, scale, density);
     let (ix, iy, iw, ih) = layout.input;
 
     // 命令面板是 Popover：可 Esc、无后果、随手开关，所以**不画遮罩**。
@@ -1530,7 +1536,14 @@ pub(super) fn push_quads(
         1.0,
     );
 
-    quads.push(UiQuad::solid(ix, iy, iw, ih, s(super::ui::tokens::radius::CONTROL), sk.input));
+    quads.push(UiQuad::solid(
+        ix,
+        iy,
+        iw,
+        ih,
+        s(super::ui::tokens::radius::control(density)),
+        sk.input,
+    ));
     if model.query_all_selected() && !model.query.is_empty() {
         let cell_w = size.cell_width();
         let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
@@ -1624,7 +1637,7 @@ pub(super) fn push_quads(
         // 只花一次，而这个面板里真正需要它的是"当前选中"这一处。
         // 推荐卡也不再染色——它已经被"推荐"分区标题、更大的尺寸、双行布局
         // 和右侧 ↵ chip 标记了四次身份，第五次是浪费。
-        let corner = s(super::ui::tokens::radius::OVERLAY);
+        let corner = s(super::ui::tokens::radius::overlay(density));
         for (row, &(ry, rh)) in layout.rows.iter().enumerate() {
             let is_hero = hero && row == 0;
             if selected_row == Some(row) {
@@ -1717,9 +1730,9 @@ pub(super) fn push_quads(
         // 环 + 面板底，与「默认」徽标同宗——身份标注，不与选中态抢强调色。
         // 文字在 text pass 按同一几何画。
         if !entry.chip.is_empty() {
-            let chip_w =
-                entry.chip.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w
-                    + s(12.0);
+            let chip_w = entry.chip.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
+                * cell_w
+                + s(12.0);
             let cx = ix + iw - s(GUTTER) - chip_w;
             let cy = ry + s(7.0);
             let ch = rh - s(14.0);
@@ -1787,6 +1800,7 @@ pub(super) fn push_quads(
 /// it for the post-text image pass (a textured quad can't be interleaved with
 /// glyph batches). Rows whose id has no brand asset draw the Nerd Font glyph
 /// here and contribute nothing to the returned list.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_text(
     model: &CommandPalette,
     theme: &NebulaTheme,
@@ -1794,6 +1808,7 @@ pub(super) fn draw_text(
     gc: &mut GlyphCache,
     size: &SizeInfo,
     scale: f32,
+    density: super::ui::tokens::Density,
 ) -> Vec<(String, (f32, f32, f32, f32))> {
     let mut icon_draws = Vec::new();
     if !model.is_open() {
@@ -1804,7 +1819,7 @@ pub(super) fn draw_text(
     let h = size.height();
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let layout = palette_layout(model, w, h, scale);
+    let layout = palette_layout(model, w, h, scale, density);
     let (ix, iy, iw, ih) = layout.input;
 
     // Inks from the theme skin: dark text on light panels, pale on dark.
@@ -1938,8 +1953,8 @@ pub(super) fn draw_text(
         // brand asset stage a full-color textured quad (drawn later); the rest
         // fall back to the Nerd Font glyph. Built-in action rows carry an empty
         // icon and keep the original left edge.
-        let has_color = !color_id.is_empty()
-            && crate::shell_detect::color_icon_png(&color_id).is_some();
+        let has_color =
+            !color_id.is_empty() && crate::shell_detect::color_icon_png(&color_id).is_some();
         let indent = if is_hero { s(34.0) } else { s(26.0) };
         let label_x = if has_color {
             // Square icon sized to the glyph ink, vertically centered on the
@@ -2428,7 +2443,13 @@ mod tests {
     #[test]
     fn search_input_and_result_rows_share_compact_height() {
         let palette = CommandPalette::new();
-        let layout = palette_layout(&palette, 1600.0, 900.0, 1.5);
+        let layout = palette_layout(
+            &palette,
+            1600.0,
+            900.0,
+            1.5,
+            crate::display::ui::tokens::Density::Standard,
+        );
         assert_eq!(layout.input.3, layout.row_h);
     }
 
@@ -2533,12 +2554,14 @@ mod tests {
             CommandGroup::Tabs,
             "开不在那里就不能挂在工作目录标题下"
         );
-        assert!(palette
-            .group_labels(palette.filtered.len())
-            .unwrap()
-            .into_iter()
-            .flatten()
-            .any(|(label, _)| label == "工作目录"));
+        assert!(
+            palette
+                .group_labels(palette.filtered.len())
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .any(|(label, _)| label == "工作目录")
+        );
     }
 
     /// 开关类命令带勾选态，一次性动作不带。列表里同时有两类时，✓ 是唯一
@@ -2578,9 +2601,8 @@ mod tests {
         });
         assert!(palette.filtered.len() > MAX_ROWS * 2, "要够长才能翻页");
 
-        let group_at = |palette: &CommandPalette, index: usize| {
-            palette.command_group(palette.filtered[index])
-        };
+        let group_at =
+            |palette: &CommandPalette, index: usize| palette.command_group(palette.filtered[index]);
         let top_label = |palette: &CommandPalette| {
             palette.group_labels(MAX_ROWS).unwrap()[0].as_ref().map(|(l, _)| l.clone())
         };
@@ -2601,7 +2623,8 @@ mod tests {
         );
         // 窗口内其余各行只在换组时起表头。
         for (offset, label) in labels.iter().enumerate().skip(1) {
-            let changed = group_at(&palette, start + offset) != group_at(&palette, start + offset - 1);
+            let changed =
+                group_at(&palette, start + offset) != group_at(&palette, start + offset - 1);
             assert_eq!(label.is_some(), changed, "第 {offset} 行的表头判定与实际换组不符");
         }
     }
@@ -2656,12 +2679,18 @@ mod tests {
             "powershell",
         );
         palette.open_profiles();
-        let layout = palette_layout(&palette, 1600.0, 900.0, 1.0);
+        let layout = palette_layout(
+            &palette,
+            1600.0,
+            900.0,
+            1.0,
+            crate::display::ui::tokens::Density::Standard,
+        );
         assert_eq!(layout.rows.len(), 2);
         let (hero_y, hero_h) = layout.rows[0];
         let (row_y, row_h) = layout.rows[1];
         assert!(hero_h > row_h, "推荐大卡片必须比普通卡片高");
-        assert_eq!(layout.groups.len(), 2, "hero 版式仍是「推荐 / 所有选项」两条表头");        // 命中测试与逐行矩形一致；卡片之间的缝隙与分区标题不可点。
+        assert_eq!(layout.groups.len(), 2, "hero 版式仍是「推荐 / 所有选项」两条表头"); // 命中测试与逐行矩形一致；卡片之间的缝隙与分区标题不可点。
         let (px, ..) = layout.panel;
         assert_eq!(layout.row_at(px + 10.0, hero_y + hero_h / 2.0), Some(0));
         assert_eq!(layout.row_at(px + 10.0, row_y + row_h / 2.0), Some(1));
@@ -2673,7 +2702,13 @@ mod tests {
     fn command_layout_rows_stay_uniform() {
         let mut palette = CommandPalette::new();
         palette.open();
-        let layout = palette_layout(&palette, 1600.0, 900.0, 1.0);
+        let layout = palette_layout(
+            &palette,
+            1600.0,
+            900.0,
+            1.0,
+            crate::display::ui::tokens::Density::Standard,
+        );
         assert_eq!(layout.rows.len(), layout.max_rows.min(palette.filtered.len()));
         for pair in layout.rows.windows(2) {
             assert_eq!(pair[0].1, pair[1].1, "命令列表保持等高行");

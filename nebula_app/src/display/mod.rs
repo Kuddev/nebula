@@ -4046,6 +4046,7 @@ impl Display {
             size.width(),
             size.height(),
             self.window.scale_factor as f32,
+            self.nebula_density,
         )
     }
 
@@ -6771,6 +6772,7 @@ impl Display {
             self.ssh_connect_rect(),
             self.window.scale_factor as f32,
             self.nebula_language,
+            self.nebula_density,
             x,
             y,
         )
@@ -6835,6 +6837,7 @@ impl Display {
                     rect,
                     scale,
                     language,
+                    self.nebula_density,
                     backdrop,
                 );
                 self.renderer.draw_ui(&size, &quads);
@@ -6848,6 +6851,7 @@ impl Display {
                     &size,
                     rect,
                     scale,
+                    self.nebula_density,
                 );
             }
             // 门槛期内也要保持帧循环，否则永远到不了该显示的那一帧。
