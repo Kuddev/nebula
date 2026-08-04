@@ -467,7 +467,8 @@ pub(super) fn chrome_tab_layout(
     // 用户拖过 HOSTS 分界（设置开启拖拽调节）后，停靠区高度以覆盖值为准，
     // 钳在「只剩标题」与「至少给标签区留一行」之间；没拖过走弹性规则。
     let dock_cap = if model.hosts_band > 0.0 {
-        (model.hosts_band * scale_factor).clamp(dock_fixed, (content_h - pitch - gap).max(dock_fixed))
+        (model.hosts_band * scale_factor)
+            .clamp(dock_fixed, (content_h - pitch - gap).max(dock_fixed))
     } else {
         (content_h - rows_h(tabs_want, pitch) - gap).max(content_h * DOCK_MIN_SHARE).min(content_h)
     };
@@ -2253,6 +2254,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         &mut d.glyph_cache,
         &size,
         d.window.scale_factor as f32,
+        d.nebula_density,
     );
 
     // Palette's full-color shell icons (textured quads) staged after all chrome
@@ -2406,7 +2408,6 @@ mod sidebar_dock_tests {
         assert!(dragged.hosts[0].3 > 0.0);
         assert!(dragged.hosts[0].1 > dragged.hosts_header.1);
     }
-
 
     #[test]
     fn a_dragged_sidebar_width_widens_the_panel_one_to_one() {
