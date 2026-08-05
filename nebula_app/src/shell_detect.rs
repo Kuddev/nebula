@@ -31,9 +31,48 @@ pub struct DetectedShell {
     pub args: Vec<String>,
 }
 
+/// 检测到的 shell 如何提供 tab 图标、转圈和命令完成状态所依赖的语义生命周期。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellIntegration {
+    PowerShell,
+    Bash,
+    /// Nushell 原生发 OSC 133；不能替换 config，否则会连带覆盖内置/外部
+    /// completer、menus 与 keybindings。
+    NativeOsc133,
+    Unsupported,
+}
+
 impl DetectedShell {
     pub fn shell(&self) -> nebula_terminal::tty::Shell {
+        #[cfg(windows)]
+        match self.integration() {
+            ShellIntegration::PowerShell => {
+                return nebula_terminal::tty::powershell_with_nebula_integration(
+                    self.program.clone(),
+                    self.args.clone(),
+                );
+            },
+            ShellIntegration::Bash => {
+                return nebula_terminal::tty::bash_with_nebula_integration(
+                    self.program.clone(),
+                    self.args.clone(),
+                );
+            },
+            ShellIntegration::NativeOsc133 | ShellIntegration::Unsupported => {},
+        }
+
         nebula_terminal::tty::Shell::new(self.program.clone(), self.args.clone())
+    }
+
+    fn integration(&self) -> ShellIntegration {
+        match self.id.trim().to_ascii_lowercase().as_str() {
+            "powershell" | "pwsh" => ShellIntegration::PowerShell,
+            "bash" | "git-bash" | "gitbash" => ShellIntegration::Bash,
+            "nu" => ShellIntegration::NativeOsc133,
+            // CMD 没有可靠的原生 pre-exec hook；WSL 只是宿主，未识别来宾
+            // shell 前注入任何一家的参数都会破坏启动。
+            _ => ShellIntegration::Unsupported,
+        }
     }
 
     /// A Nerd Font glyph for the menu/tab row, keyed off the stable id. All
@@ -440,6 +479,15 @@ fn find_wsl_distros() -> Vec<DetectedShell> {
 
 #[cfg(test)]
 mod tests {
+    fn detected(id: &str, program: &str, args: &[&str]) -> super::DetectedShell {
+        super::DetectedShell {
+            name: id.to_owned(),
+            id: id.to_owned(),
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        }
+    }
+
     #[test]
     fn shell_short_tags_read_like_what_people_call_them() {
         use super::shell_short_tag;
@@ -455,6 +503,55 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn shell_integration_is_selected_by_stable_shell_id() {
+        assert_eq!(
+            detected("powershell", "powershell.exe", &[]).integration(),
+            ShellIntegration::PowerShell
+        );
+        assert_eq!(
+            detected("pwsh", "pwsh.exe", &[]).integration(),
+            ShellIntegration::PowerShell
+        );
+        assert_eq!(detected("bash", "bash.exe", &[]).integration(), ShellIntegration::Bash);
+        assert_eq!(
+            detected("nu", "nu.exe", &[]).integration(),
+            ShellIntegration::NativeOsc133
+        );
+        assert_eq!(
+            detected("cmd", "cmd.exe", &[]).integration(),
+            ShellIntegration::Unsupported
+        );
+        assert_eq!(
+            detected("wsl:Ubuntu", "wsl.exe", &[]).integration(),
+            ShellIntegration::Unsupported
+        );
+    }
+
+    #[test]
+    fn native_and_unsupported_shells_keep_their_program_and_completion_args() {
+        for source in [
+            detected("nu", "nu.exe", &["--config", "custom.nu"]),
+            detected("cmd", "cmd.exe", &["/Q"]),
+            detected("other", "other.exe", &["--interactive"]),
+        ] {
+            let launched = source.shell();
+            assert_eq!(launched.program(), source.program);
+            assert_eq!(launched.args(), source.args);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn menu_powershell_loads_nebula_without_disabling_the_user_profile() {
+        let launched = detected("pwsh", "pwsh.exe", &["-NoLogo"]).shell();
+
+        assert_eq!(launched.program(), "pwsh.exe");
+        assert_eq!(launched.args().first().map(String::as_str), Some("-NoLogo"));
+        assert!(launched.args().iter().any(|arg| arg == "-Command"));
+        assert!(!launched.args().iter().any(|arg| arg.eq_ignore_ascii_case("-NoProfile")));
+    }
 
     #[test]
     fn resolve_rejects_pty_integrated_ids() {
