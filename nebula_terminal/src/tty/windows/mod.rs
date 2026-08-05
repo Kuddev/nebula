@@ -884,8 +884,32 @@ fn nebula_bash_rc_path() -> Option<std::path::PathBuf> {
     write_if_changed(&path, NEBULA_BASH_RC.as_bytes()).then_some(path)
 }
 
+fn explicit_bash_integration_args(rc: &std::path::Path) -> Vec<String> {
+    // 显式 shell 的 Options::escape_args=false；路径必须在参数自身带引号，
+    // 否则用户名含空格时 Bash 会把 rcfile 路径截成两段。
+    vec![
+        "--rcfile".to_owned(),
+        format!("\"{}\"", rc.display()),
+        "-i".to_owned(),
+    ]
+}
+
+/// 给三点菜单显式选择的 Bash 装上 Nebula 的 OSC/提示符契约。
+///
+/// `--rcfile` 只可靠接管交互式非 login shell，因此这里不能保留检测结果里的
+/// `--login`。生成的 rcfile 会先 source `~/.bashrc`，bash-completion、alias
+/// 与用户函数仍在，随后才安装 OSC 133;A/C/D hook。
+pub fn bash_with_nebula_integration(program: String, fallback_args: Vec<String>) -> Shell {
+    match nebula_bash_rc_path() {
+        Some(rc) => Shell::new(program, explicit_bash_integration_args(&rc)),
+        None => Shell::new(program, fallback_args),
+    }
+}
+
 fn nebula_bash_shell() -> Shell {
     if let Some(program) = nebula_find_bash() {
+        // 默认 shell 的参数会由 cmdline 统一转义，不能复用上面显式 shell
+        // 已自带引号的参数，否则路径会被二次转义。
         let mut args = Vec::new();
         if let Some(rc) = nebula_bash_rc_path() {
             args.push("--rcfile".to_owned());
@@ -901,6 +925,30 @@ fn nebula_bash_shell() -> Shell {
     }
 }
 
+fn powershell_integration_args(
+    mut args: Vec<String>,
+    script: &std::path::Path,
+) -> Vec<String> {
+    args.extend([
+        "-NoExit".to_owned(),
+        "-ExecutionPolicy".to_owned(),
+        "Bypass".to_owned(),
+        "-Command".to_owned(),
+        format!(". '{}'", script.display()),
+    ]);
+    args
+}
+
+/// 给三点菜单显式选择的 Windows PowerShell / PowerShell 7 装上同一份
+/// OSC/提示符契约。原参数排在前面且不追加 `-NoProfile`，因此用户 Profile、
+/// PSReadLine 与原生 Tab completer 都会先正常加载。
+pub fn powershell_with_nebula_integration(program: String, args: Vec<String>) -> Shell {
+    match nebula_prompt_script_path() {
+        Some(path) => Shell::new(program, powershell_integration_args(args, &path)),
+        None => Shell::new(program, args),
+    }
+}
+
 /// Build the default shell, injecting the Nebula prompt when possible.
 fn nebula_default_shell(settings: NebulaRuntimeSettings) -> Shell {
     if settings.shell == NebulaShellExecutor::Bash {
@@ -910,20 +958,18 @@ fn nebula_default_shell(settings: NebulaRuntimeSettings) -> Shell {
     match nebula_prompt_script_path() {
         Some(path) => Shell::new(
             "powershell".to_owned(),
-            vec![
-                "-NoLogo".to_owned(),
-                // Skip $PROFILE: Nebula's integration script owns the prompt,
-                // aliases and PSReadLine setup, so the user profile would be
-                // mostly overridden anyway — and it is the single biggest
-                // uncontrollable startup cost (conda/nvm/oh-my-posh routinely
-                // add seconds).
-                "-NoProfile".to_owned(),
-                "-NoExit".to_owned(),
-                "-ExecutionPolicy".to_owned(),
-                "Bypass".to_owned(),
-                "-Command".to_owned(),
-                format!(". '{}'", path.display()),
-            ],
+            powershell_integration_args(
+                vec![
+                    "-NoLogo".to_owned(),
+                    // Skip $PROFILE: Nebula's integration script owns the prompt,
+                    // aliases and PSReadLine setup, so the user profile would be
+                    // mostly overridden anyway — and it is the single biggest
+                    // uncontrollable startup cost (conda/nvm/oh-my-posh routinely
+                    // add seconds).
+                    "-NoProfile".to_owned(),
+                ],
+                &path,
+            ),
         ),
         None => Shell::new("powershell".to_owned(), Vec::new()),
     }
@@ -960,7 +1006,8 @@ mod test {
     use std::process::{Command, Stdio};
 
     use crate::tty::windows::{
-        NEBULA_BASH_RC, NEBULA_PROMPT_PS1, cmdline, nebula_find_bash, push_escaped_arg,
+        NEBULA_BASH_RC, NEBULA_PROMPT_PS1, cmdline, explicit_bash_integration_args,
+        nebula_find_bash, powershell_integration_args, push_escaped_arg,
     };
     use crate::tty::{Options, Shell};
 
@@ -980,6 +1027,43 @@ mod test {
             !NEBULA_PROMPT_PS1.contains("return $output"),
             "an early return would skip common $? restoration"
         );
+    }
+
+    #[test]
+    fn disabling_powerline_keeps_the_complete_osc_lifecycle() {
+        let toggle = NEBULA_PROMPT_PS1
+            .find("Get-NebulaBoolSetting 'powerline'")
+            .expect("powerline visual branch");
+        let done = NEBULA_PROMPT_PS1.find("]133;D;").expect("OSC command done");
+        let prompt = NEBULA_PROMPT_PS1[toggle..].find("]133;A").expect("plain prompt mark");
+        let start = NEBULA_PROMPT_PS1[toggle..].find("]133;C").expect("OSC command start");
+
+        assert!(done < toggle, "command completion must not depend on the visual branch");
+        assert!(prompt < start, "the powerline-off prompt and ReadLine wrapper must both stay");
+    }
+
+    #[test]
+    fn explicit_powershell_keeps_existing_args_and_adds_only_integration() {
+        let script = std::path::Path::new(r"C:\Temp Folder\nebula_prompt.ps1");
+        let args = powershell_integration_args(vec!["-NoLogo".to_owned()], script);
+
+        assert_eq!(args.first().map(String::as_str), Some("-NoLogo"));
+        assert!(!args.iter().any(|arg| arg.eq_ignore_ascii_case("-NoProfile")));
+        assert_eq!(args[args.len() - 2], "-Command");
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(". 'C:\\Temp Folder\\nebula_prompt.ps1'")
+        );
+    }
+
+    #[test]
+    fn explicit_bash_quotes_the_generated_rcfile_without_touching_user_config() {
+        let rc = std::path::Path::new(r"C:\Temp Folder\nebula_bashrc");
+        assert_eq!(
+            explicit_bash_integration_args(rc),
+            vec!["--rcfile", r#""C:\Temp Folder\nebula_bashrc""#, "-i"]
+        );
+        assert!(NEBULA_BASH_RC.contains(r#"[ -f "$HOME/.bashrc" ]"#));
     }
 
     #[test]
