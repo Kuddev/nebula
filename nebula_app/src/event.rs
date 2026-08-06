@@ -53,7 +53,7 @@ use crate::display::NebulaPaneState;
 use crate::display::color::Rgb;
 use crate::display::hint::HintMatch;
 use crate::display::window::{ImeInhibitor, Window};
-use crate::display::{Display, Preedit, SizeInfo, ToastKind};
+use crate::display::{Display, Preedit, SizeInfo, ToastKind, UiLanguage};
 use crate::input::{self, ActionContext as _};
 use crate::logging::{LOG_TARGET_CONFIG, LOG_TARGET_WINIT};
 use crate::message_bar::{Message, MessageBuffer, MessageType};
@@ -61,6 +61,7 @@ use crate::message_bar::{Message, MessageBuffer, MessageType};
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::window_context::{DetachedWindow, WindowBoot, WindowContext};
+use crate::window_transition::{NativeWindowStage, NativeWindowStageTracker};
 
 mod input_state;
 mod proxy;
@@ -96,6 +97,7 @@ pub struct Processor {
     initial_window_options: Option<WindowOptions>,
     initial_window_error: Option<Box<dyn Error>>,
     windows: HashMap<WindowId, WindowContext, RandomState>,
+    native_window_stages: NativeWindowStageTracker,
     proxy: EventLoopProxy<Event>,
     gl_config: Option<GlutinConfig>,
     #[cfg(unix)]
@@ -131,6 +133,7 @@ impl Processor {
         loaded_config: config::LoadedConfig,
         cli_options: CliOptions,
         event_loop: &EventLoop<Event>,
+        native_window_stages: NativeWindowStageTracker,
     ) -> Processor {
         let proxy = event_loop.create_proxy();
         let reload_proxy = proxy.clone();
@@ -178,6 +181,7 @@ impl Processor {
             config_reload_worker,
             clipboard,
             windows: Default::default(),
+            native_window_stages,
             #[cfg(unix)]
             global_ipc_options: Default::default(),
             config_monitor,
@@ -190,6 +194,30 @@ impl Processor {
             quick_hotkey_combo,
             detached: Vec::new(),
         }
+    }
+
+    /// Apply native move/resize stages before handling the next winit event.
+    /// The native hook only records these two low-frequency markers; all
+    /// window scans and state changes stay on the normal application path.
+    fn drain_native_window_stages(&mut self) {
+        self.native_window_stages.drain(|event| {
+            for window_context in self.windows.values_mut() {
+                if window_context.display.window.native_window_handle_id() != Some(event.hwnd) {
+                    continue;
+                }
+
+                match event.stage {
+                    NativeWindowStage::EnterSizeMove => {
+                        window_context.display.window.set_native_live_move(true);
+                    },
+                    NativeWindowStage::ExitSizeMove => {
+                        window_context.display.window.set_native_live_move(false);
+                        window_context.apply_pending_native_transition();
+                    },
+                }
+                break;
+            }
+        });
     }
 
     /// Create the global hotkey manager and register the quick-terminal toggle
@@ -603,6 +631,10 @@ impl ApplicationHandler<Event> for Processor {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        // A native stage can precede the winit event it affects (notably DPI
+        // changes), so consume it before filtering or routing this event.
+        self.drain_native_window_stages();
+
         if self.config.debug.print_events {
             info!(target: LOG_TARGET_WINIT, "{event:?}");
         }
@@ -1034,6 +1066,10 @@ impl ApplicationHandler<Event> for Processor {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // WM_EXITSIZEMOVE may not have a corresponding WindowEvent. Drain it
+        // here so the final pending DPI is committed before the loop sleeps.
+        self.drain_native_window_stages();
+
         if self.config.debug.print_events {
             info!(target: LOG_TARGET_WINIT, "About to wait");
         }
@@ -1205,7 +1241,26 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         if ty == ClipboardType::Selection && self.display.nebula_copy_on_select {
             self.clipboard.store(ClipboardType::Clipboard, text.clone());
         }
-        self.clipboard.store(ty, text);
+        self.clipboard.store(ty, text.clone());
+        // Explicit clipboard copies are user actions worth acknowledging.
+        // Selection storage is intentionally silent: with copy-on-select it
+        // can fire for every mouse-motion update and would spam the toast rail.
+        if ty == ClipboardType::Clipboard {
+            self.notify_copy(&text);
+        }
+    }
+
+    /// Show the copy confirmation in the current UI language. Keeping this in
+    /// the event layer lets keyboard, context-menu and right-click copies share
+    /// exactly one notification path while paste remains silent.
+    fn notify_copy(&mut self, text: &str) {
+        let lines = text.lines().count().max(1);
+        let language = self.display.ui_language();
+        let message = match language {
+            UiLanguage::ZhCn => format!("已复制 {lines} 行到剪贴板"),
+            UiLanguage::EnUs => format!("Copied {lines} lines to clipboard"),
+        };
+        self.display.push_toast(message, ToastKind::Info);
     }
 
     fn selection_is_empty(&self) -> bool {
@@ -1919,7 +1974,8 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             },
             // Copy the text to the clipboard.
             HintAction::Action(HintInternalAction::Copy) => {
-                self.clipboard.store(ClipboardType::Clipboard, text);
+                self.clipboard.store(ClipboardType::Clipboard, text.clone());
+                self.notify_copy(&text);
             },
             // Write the text to the PTY/search.
             HintAction::Action(HintInternalAction::Paste) => self.paste(&text, true),
@@ -2824,17 +2880,16 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         self.ctx.nebula_tab(TabRequest::CloseWindow);
                     },
                     WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                        let old_scale_factor =
-                            mem::replace(&mut self.ctx.window().scale_factor, scale_factor);
-
-                        // Rescale font size for the new factor.
-                        let font_scale = scale_factor as f32 / old_scale_factor as f32;
-                        self.ctx.display.font_size = self.ctx.display.font_size.scale(font_scale);
-                        self.ctx.display.rescale_ui_font(font_scale);
-
-                        let font = self.ctx.display.effective_font(&self.ctx.config.font);
-                        let font_size = self.ctx.display.font_size;
-                        self.ctx.display.pending_update.set_font(font.with_size(font_size));
+                        if self.ctx.window().native_live_move() {
+                            // During a mixed-DPI drag, Windows can emit several
+                            // transient factors before the window settles. Keep
+                            // only the newest one and defer glyph/UI work.
+                            self.ctx.window().defer_scale_factor(scale_factor);
+                        } else {
+                            self.ctx
+                                .display
+                                .apply_scale_factor_change(scale_factor, self.ctx.config);
+                        }
                     },
                     WindowEvent::Resized(size) => {
                         // Ignore unreasonably small resizes. A borderless window on
@@ -2842,6 +2897,19 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // of 0x0; honoring it would collapse the terminal grid to a
                         // single row and lose the visible content on restore.
                         if size.width < 100 || size.height < 100 {
+                            return;
+                        }
+
+                        let defer_native_resize = {
+                            let window = self.ctx.window();
+                            window.native_live_move() && window.has_pending_scale_factor()
+                        };
+                        if defer_native_resize {
+                            // A DPI transition is followed by a synthetic
+                            // resize on Windows. Keep its physical size until
+                            // the native move exits, while ordinary edge
+                            // resizing remains fully live.
+                            self.ctx.window().defer_inner_size(size);
                             return;
                         }
 

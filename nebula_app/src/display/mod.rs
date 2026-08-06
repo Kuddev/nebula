@@ -1447,6 +1447,11 @@ pub struct Display {
     pub(crate) nebula_keybinds: Vec<(String, String)>,
     /// 快速终端全局快捷键的持久值；系统注册由顶层 Processor 负责。
     pub nebula_quick_terminal_hotkey: String,
+    /// SSH 出站代理（全局三态）的持久镜像；连接时的真正决策在
+    /// `crate::ssh_proxy`（它直接读设置文件，不经过这里）。
+    pub nebula_ssh_proxy_mode: crate::ssh_proxy::ProxyMode,
+    pub nebula_ssh_proxy_url: String,
+    pub nebula_ssh_proxy_no_proxy: String,
     /// 等待 Processor 确认注册的新值。设置页不会绕过全局管理器自行假设成功。
     pub(crate) nebula_quick_hotkey_request: Option<String>,
     pub(crate) nebula_quick_hotkey_error: Option<String>,
@@ -1491,6 +1496,11 @@ pub struct Display {
     /// 最近一次同步动作的结果 `(message, is_error)`，画在按钮行下方。
     pub(crate) nebula_sync_status: Option<(String, bool)>,
     nebula_sync_busy: bool,
+    /// 聚焦的 SSH 代理输入框（0=代理地址 1=绕过列表；正文直接编辑
+    /// `nebula_ssh_proxy_url` / `nebula_ssh_proxy_no_proxy`，失焦提交落盘）。
+    pub(crate) nebula_ssh_proxy_focus: Option<usize>,
+    /// 聚焦那一刻的原值快照，Esc 取消编辑时还原。
+    nebula_ssh_proxy_backup: [String; 2],
 
     /// Tab rename state: when `Some(index, text)`, a text input is shown over
     /// tab `index` with the current edit buffer `text`. The user types to edit,
@@ -1975,6 +1985,9 @@ impl Display {
             nebula_keymap: keymap::build_bindings(&settings_init.keybinds),
             nebula_keybinds: settings_init.keybinds,
             nebula_quick_terminal_hotkey: settings_init.quick_terminal_hotkey,
+            nebula_ssh_proxy_mode: settings_init.ssh_proxy_mode,
+            nebula_ssh_proxy_url: settings_init.ssh_proxy_url,
+            nebula_ssh_proxy_no_proxy: settings_init.ssh_proxy_no_proxy,
             nebula_quick_hotkey_request: None,
             nebula_quick_hotkey_error: None,
             nebula_keymap_capture: None,
@@ -2063,6 +2076,8 @@ impl Display {
             nebula_sync_secret_set: [false; 2],
             nebula_sync_status: None,
             nebula_sync_busy: false,
+            nebula_ssh_proxy_focus: None,
+            nebula_ssh_proxy_backup: Default::default(),
             meter: Default::default(),
             ime: Default::default(),
         };
@@ -2553,15 +2568,20 @@ impl Display {
         let sidebar_expand = self.left_sidebar_progress();
         let layout =
             chrome_tab_layout(&self.ui_size_info(), scale, self.sidebar_model(), sidebar_expand);
-        // Tabs stack vertically now: count rows whose vertical centre the
-        // pointer has passed to get the remove-then-insert target slot.
-        let passed = layout
+        // `chrome_tab_layout` keeps the storage index stable by representing
+        // scrolled-out rows as zero rectangles. Those placeholders are not
+        // coordinates: counting them here used to move every drop target by
+        // the number of hidden tabs and could even create a reversed clamp
+        // interval in `tab_drag_draw_y`. Build the target in the visible row
+        // coordinate space, then add the scroll window's real start index.
+        let visible: Vec<_> = layout
             .tabs
             .iter()
+            .copied()
             .enumerate()
-            .filter(|(i, rect)| *i != source && y > rect.1 + rect.3 * 0.5)
-            .count();
-        passed.min(self.nebula_tab_labels.len().saturating_sub(1))
+            .filter(|(_, (_, _, width, height))| *width > 0.0 && *height > 0.0)
+            .collect();
+        tab_drop_index_from_visible_rows(source, y, &visible, self.nebula_tab_labels.len())
     }
 
     /// Draw-X for a tab's pill/label during a reorder drag. The grabbed pill
@@ -2571,17 +2591,28 @@ impl Display {
     fn tab_drag_draw_y(&self, index: usize, tab_y: f32, layout: &ChromeTabLayout) -> f32 {
         let Some(d) = self.nebula_tab_drag.filter(|d| d.active) else { return tab_y };
 
+        // Only visible rows have meaningful screen coordinates. Hidden rows
+        // are zero placeholders used by hit-testing/index bookkeeping.
+        let visible: Vec<_> = layout
+            .tabs
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, (_, _, width, height))| *width > 0.0 && *height > 0.0)
+            .collect();
+        let Some((_, first)) = visible.first() else { return tab_y };
+
         // The grabbed pill tracks the pointer, clamped to the tab column.
         if d.source == index {
-            let lo = layout.tabs.first().map_or(tab_y, |t| t.1);
-            let hi = layout.tabs.last().map_or(tab_y, |t| t.1);
+            let lo = first.1;
+            let hi = visible.last().map_or(lo, |(_, rect)| rect.1);
             return (tab_y + d.current - d.origin).clamp(lo, hi);
         }
 
         // Other tabs make way. Slot pitch = distance between adjacent rows
         // (uniform height + gap); needs at least two tabs, which a drag implies.
-        let Some(second) = layout.tabs.get(1) else { return tab_y };
-        let slot = second.1 - layout.tabs[0].1;
+        let Some((_, second)) = visible.get(1) else { return tab_y };
+        let slot = second.1 - first.1;
         let target = self.tab_drop_index(d.source, d.current);
         if d.source < target && index > d.source && index <= target {
             tab_y - slot // dragging down: rows in (source, target] slide up
@@ -3061,6 +3092,12 @@ impl Display {
             sync_secret_set: self.nebula_sync_secret_set,
             sync_status: self.nebula_sync_status.clone(),
             sync_busy: self.nebula_sync_busy,
+            ssh_proxy_mode: self.nebula_ssh_proxy_mode,
+            ssh_proxy_inputs: [
+                self.nebula_ssh_proxy_url.clone(),
+                self.nebula_ssh_proxy_no_proxy.clone(),
+            ],
+            ssh_proxy_focus: self.nebula_ssh_proxy_focus,
         }
     }
 
@@ -3754,6 +3791,95 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
+    /// 设置→高级→SSH 代理：选择全局模式（下拉行序 =
+    /// [`settings::SSH_PROXY_MODE_OPTIONS`]），落盘即生效——连接侧每次
+    /// 建连都重读设置文件。
+    pub fn set_ssh_proxy_mode(&mut self, index: usize) {
+        if let Some(mode) = settings::SSH_PROXY_MODE_OPTIONS.get(index) {
+            if self.nebula_ssh_proxy_mode != *mode {
+                self.nebula_ssh_proxy_mode = *mode;
+                self.persist_nebula_settings();
+            }
+        }
+        self.nebula_settings_dropdown = None;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// 聚焦某个代理输入框；先提交上一个（点击切换即失焦保存）。编辑直接
+    /// 发生在持久镜像字段上，快照留给 Esc 还原。
+    pub fn focus_ssh_proxy_field(&mut self, index: usize) {
+        let index = index.min(1);
+        if self.nebula_ssh_proxy_focus == Some(index) {
+            return;
+        }
+        self.commit_ssh_proxy_field();
+        self.nebula_ssh_proxy_backup =
+            [self.nebula_ssh_proxy_url.clone(), self.nebula_ssh_proxy_no_proxy.clone()];
+        self.nebula_ssh_proxy_focus = Some(index);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn ssh_proxy_field_push(&mut self, ch: char) {
+        let Some(index) = self.nebula_ssh_proxy_focus else { return };
+        if ch.is_control() {
+            return;
+        }
+        // URL 无空白；绕过列表允许逗号后的空格（保存侧不 trim 条目内部）。
+        if index == 0 && ch.is_whitespace() {
+            return;
+        }
+        let field = if index == 0 {
+            &mut self.nebula_ssh_proxy_url
+        } else {
+            &mut self.nebula_ssh_proxy_no_proxy
+        };
+        if field.chars().count() < 256 {
+            field.push(ch);
+            self.pending_update.dirty = true;
+        }
+    }
+
+    pub fn ssh_proxy_field_paste(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.ssh_proxy_field_push(ch);
+        }
+    }
+
+    pub fn ssh_proxy_field_backspace(&mut self) {
+        let Some(index) = self.nebula_ssh_proxy_focus else { return };
+        let field = if index == 0 {
+            &mut self.nebula_ssh_proxy_url
+        } else {
+            &mut self.nebula_ssh_proxy_no_proxy
+        };
+        if field.pop().is_some() {
+            self.pending_update.dirty = true;
+        }
+    }
+
+    /// 失焦提交：trim 后写 `nebula_settings.txt`。
+    pub fn commit_ssh_proxy_field(&mut self) {
+        if self.nebula_ssh_proxy_focus.take().is_none() {
+            return;
+        }
+        self.nebula_ssh_proxy_url = self.nebula_ssh_proxy_url.trim().to_owned();
+        self.nebula_ssh_proxy_no_proxy = self.nebula_ssh_proxy_no_proxy.trim().to_owned();
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+    }
+
+    /// Esc：还原为聚焦时的快照并失焦，不落盘。
+    pub fn cancel_ssh_proxy_field(&mut self) {
+        if self.nebula_ssh_proxy_focus.take().is_none() {
+            return;
+        }
+        let [url, no_proxy] = std::mem::take(&mut self.nebula_ssh_proxy_backup);
+        self.nebula_ssh_proxy_url = url;
+        self.nebula_ssh_proxy_no_proxy = no_proxy;
+        self.pending_update.dirty = true;
+    }
+
     pub fn toggle_sync_auto_pull(&mut self) {
         self.nebula_sync_auto_pull = !self.nebula_sync_auto_pull;
         let mut cfg = crate::sync::SyncConfig::load();
@@ -4102,8 +4228,49 @@ impl Display {
     }
 
     pub fn palette_move(&mut self, delta: i32) {
-        self.nebula_palette.move_selection(delta);
+        let max_rows = self.command_palette_layout().max_rows;
+        self.nebula_palette.move_selection(delta, max_rows);
         self.pending_update.dirty = true;
+    }
+
+    pub fn palette_scroll_by(&mut self, rows: i32, max_rows: usize) -> bool {
+        if self.nebula_palette.scroll_by(rows, max_rows) {
+            self.pending_update.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    pub fn palette_scrollbar_press(
+        &mut self,
+        x: f32,
+        y: f32,
+        layout: &command_palette::PaletteLayout,
+    ) -> bool {
+        let Some(scrollbar) = layout.scrollbar else { return false };
+        if self.nebula_palette.scrollbar_press(x, y, layout.max_rows, scrollbar) {
+            self.pending_update.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    pub fn palette_scrollbar_dragging(&self) -> bool {
+        self.nebula_palette.scrollbar_dragging()
+    }
+
+    pub fn palette_scrollbar_drag_to(&mut self, y: f32) -> bool {
+        let layout = self.command_palette_layout();
+        let Some(scrollbar) = layout.scrollbar else { return false };
+        if self.nebula_palette.scrollbar_drag_to(y, layout.max_rows, scrollbar) {
+            self.pending_update.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    pub fn end_palette_scrollbar_drag(&mut self) -> bool {
+        self.nebula_palette.end_scrollbar_drag()
     }
 
     /// Confirm the palette selection; returns the action for the input layer to
@@ -4520,6 +4687,24 @@ impl Display {
     }
 
     /// DPI 变化时按同一比例重标 UI 角色字号（等价于配置字号 × 新缩放）。
+    /// Apply a monitor scale change after any native move transaction has
+    /// settled. Keeping this in Display makes the immediate and deferred paths
+    /// use exactly the same font/UI invalidation sequence.
+    pub(crate) fn apply_scale_factor_change(&mut self, scale_factor: f64, config: &UiConfig) {
+        let old_scale_factor = mem::replace(&mut self.window.scale_factor, scale_factor);
+        if (old_scale_factor - scale_factor).abs() <= f64::EPSILON {
+            return;
+        }
+
+        let font_scale = scale_factor as f32 / old_scale_factor as f32;
+        self.font_size = self.font_size.scale(font_scale);
+        self.rescale_ui_font(font_scale);
+
+        let font = self.effective_font(&config.font);
+        let font_size = self.font_size;
+        self.pending_update.set_font(font.with_size(font_size));
+    }
+
     pub(crate) fn rescale_ui_font(&mut self, factor: f32) {
         if factor.is_finite() && factor > 0.0 {
             self.nebula_ui_font.px *= factor;
@@ -4862,6 +5047,9 @@ impl Display {
             hosts_band: self.nebula_hosts_band,
             keybinds: self.nebula_keybinds.clone(),
             quick_terminal_hotkey: self.nebula_quick_terminal_hotkey.clone(),
+            ssh_proxy_mode: self.nebula_ssh_proxy_mode,
+            ssh_proxy_url: self.nebula_ssh_proxy_url.clone(),
+            ssh_proxy_no_proxy: self.nebula_ssh_proxy_no_proxy.clone(),
         });
         self.nebula_settings_mtime = settings::nebula_settings_mtime();
     }
@@ -4975,6 +5163,11 @@ impl Display {
             self.nebula_quick_hotkey_error = None;
         }
         self.nebula_keymap_capture = None;
+        // 代理键也参与「手改文件即生效」：下一次连接读到的就是新值，这里
+        // 只需让设置页与下一次 persist 不吐回旧值。
+        self.nebula_ssh_proxy_mode = settings.ssh_proxy_mode;
+        self.nebula_ssh_proxy_url = settings.ssh_proxy_url;
+        self.nebula_ssh_proxy_no_proxy = settings.ssh_proxy_no_proxy;
         self.nebula_ssh_hosts = merge_ssh_hosts(
             &self.nebula_saved_hosts,
             &self.nebula_pinned_hosts,
@@ -8037,6 +8230,27 @@ impl Display {
     }
 }
 
+/// Map a pointer position in the currently visible tab rows back to the
+/// storage index used by the pane list. The layout intentionally keeps hidden
+/// rows as zero rectangles, so this function's input must already be filtered
+/// to positive-size rows; keeping that invariant explicit prevents the two
+/// coordinate spaces from being mixed again.
+fn tab_drop_index_from_visible_rows(
+    source: usize,
+    y: f32,
+    visible: &[(usize, (f32, f32, f32, f32))],
+    tab_count: usize,
+) -> usize {
+    let Some((visible_start, _)) = visible.first() else { return source };
+    let passed = visible
+        .iter()
+        .filter(|(index, rect)| *index != source && y > rect.1 + rect.3 * 0.5)
+        .count();
+    visible_start
+        .saturating_add(passed)
+        .min(tab_count.saturating_sub(1))
+}
+
 impl Drop for Display {
     fn drop(&mut self) {
         // Switch OpenGL context before dropping, otherwise objects (like programs) from other
@@ -8462,5 +8676,20 @@ mod nebula_ux_tests {
             NebulaConfirm::InstallRequiredFont { directory: std::path::PathBuf::from("fonts") };
 
         assert!(confirm.can_dismiss());
+    }
+
+    #[test]
+    fn tab_drop_ignores_scrolled_out_zero_rows() {
+        // Storage indices 0..=2 and 13.. are hidden; only 3..=12 have screen
+        // coordinates. A pointer within that window must never be shifted by
+        // the hidden rows that the layout keeps for index stability.
+        let visible: Vec<_> = (3..=12)
+            .map(|index| (index, (0.0, 100.0 + (index - 3) as f32 * 30.0, 200.0, 24.0)))
+            .collect();
+
+        assert_eq!(super::tab_drop_index_from_visible_rows(5, 90.0, &visible, 16), 3);
+        assert_eq!(super::tab_drop_index_from_visible_rows(5, 130.0, &visible, 16), 4);
+        assert_eq!(super::tab_drop_index_from_visible_rows(5, 500.0, &visible, 16), 12);
+        assert_eq!(super::tab_drop_index_from_visible_rows(5, 130.0, &[], 16), 5);
     }
 }

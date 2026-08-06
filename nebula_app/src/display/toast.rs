@@ -30,6 +30,11 @@ pub use recipe::ToastKind;
 const HOLD: Duration = Duration::from_millis(4200);
 const FADE_IN: Duration = Duration::from_millis(140);
 const FADE_OUT: Duration = Duration::from_millis(240);
+/// Repeating the same explicit action in a short burst should refresh the
+/// user's context, not create a stack of identical cards. This is deliberately
+/// a duplicate-only gate: distinct copy results and unrelated notifications
+/// remain visible independently.
+const DUPLICATE_COOLDOWN: Duration = Duration::from_millis(600);
 /// 同屏最多叠三条，再多就挤掉最旧的。toast 是提示不是日志。
 const MAX_VISIBLE: usize = 3;
 
@@ -62,6 +67,11 @@ impl Display {
     pub fn push_toast(&mut self, text: impl Into<String>, kind: ToastKind) {
         let text = text.into();
         if text.trim().is_empty() {
+            return;
+        }
+        if self.nebula_toasts.last().is_some_and(|last| {
+            last.text == text && last.born.elapsed() < DUPLICATE_COOLDOWN
+        }) {
             return;
         }
         log::info!("toast [{kind:?}]: {text}");

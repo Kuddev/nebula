@@ -22,6 +22,13 @@ $requiredPatterns = [ordered]@{
     'font payload' = 'MapleMonoNormal-NF-CN-Regular\.ttf'
     'optional font installation task' = 'Tasks: installfont'
     'pinned Chinese language file' = 'target\\installer-tools\\ChineseSimplified\.isl'
+    'localized context menu label' = 'english\.OpenInNebula=Open in Nebula'
+    'localized Chinese context menu label' = 'chinesesimplified\.OpenInNebula=\S.+'
+    'directory background context menu' = 'Software\\Classes\\Directory\\Background\\shell\\NebulaTerminal'
+    'selected directory context menu' = 'Software\\Classes\\Directory\\shell\\NebulaTerminal'
+    'context menu executable icon' = 'ValueName: "Icon"; ValueData: "\{app\}\\nebula\.exe,0"'
+    'background working-directory command' = '--working-directory ""%V""'
+    'selected directory working-directory command' = '--working-directory ""%1""'
 }
 
 foreach ($entry in $requiredPatterns.GetEnumerator()) {
@@ -34,6 +41,17 @@ $uninstallRun = $installer.IndexOf('[UninstallRun]', [System.StringComparison]::
 $cleanup = $installer.IndexOf('setup-ai --remove', [System.StringComparison]::Ordinal)
 if ($uninstallRun -lt 0 -or $cleanup -lt $uninstallRun) {
     throw 'Hook cleanup must be an [UninstallRun] action so it executes before installed files are deleted.'
+}
+
+$contextMenuRoots = @(
+    'Software\Classes\Directory\Background\shell\NebulaTerminal'
+    'Software\Classes\Directory\shell\NebulaTerminal'
+)
+foreach ($root in $contextMenuRoots) {
+    $escapedRoot = [regex]::Escape($root)
+    if ($installer -notmatch "Subkey: `"$escapedRoot`";.*Flags: uninsdeletekey") {
+        throw "Context-menu key must be removed during uninstall: $root"
+    }
 }
 
 & $builderPath -SkipBuild -ValidateOnly

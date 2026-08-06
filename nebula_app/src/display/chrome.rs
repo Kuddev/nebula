@@ -402,8 +402,15 @@ pub(super) fn chrome_tab_layout(
     // 让给了两侧空白；参照原型的行几乎贴满侧栏，呼吸感来自行**内部**的留白，
     // 不是行外的边框。
     let tab_pad = s(4.0);
+    // 右内缩比左边深：那条缝是留给覆盖式滚动条的**专用沟槽**。左右都用 4 的
+    // 话，行右缘和滑块左缘会正好贴在一起（滑块占 [panel_w-4, panel_w-1]），
+    // 读起来像是从行上长出来的一根刺，而不是一条独立的轨。
+    //
+    // 沟槽宽度**恒定**，不随滚动条出没变化：只在溢出时才收窄行，会让整列标签
+    // 在滚动条出现的那一帧横向抖一下——省下的 5px 远不值这一下跳。
+    let tab_right_pad = s(9.0);
     let tab_x = panel_x + tab_pad;
-    let tab_w = panel_w - 2.0 * tab_pad;
+    let tab_w = panel_w - tab_pad - tab_right_pad;
     let row_h = s(34.0);
     let gap = s(8.0);
     let pitch = row_h + gap;
@@ -429,7 +436,7 @@ pub(super) fn chrome_tab_layout(
     let plus_sz = s(20.0);
     let menu_w = s(15.0);
     let plus_y = panel_top + (header - plus_sz) * 0.5;
-    let menu = (panel_x + panel_w - tab_pad - menu_w, plus_y, menu_w, plus_sz);
+    let menu = (panel_x + panel_w - tab_right_pad - menu_w, plus_y, menu_w, plus_sz);
     let plus = (menu.0 - s(2.0) - plus_sz, plus_y, plus_sz, plus_sz);
 
     let tabs_header = (panel_x, panel_top, panel_w, header);
@@ -543,6 +550,11 @@ pub(super) fn chrome_tab_layout(
 
     // Overlay scrollbar thumbs, one per overflowing section: pinned to the
     // panel's right inner edge, sized to the visible fraction of the list.
+    //
+    // 条贴到最右的那道缝里（行右缘 `tab_pad`=4 之外只剩这点空隙），而不是压在
+    // 行上：标签行右端挂着**状态徽章**（跑批的转圈、待批准的点），滚动条一旦
+    // 侵进行宽就会盖住它们——那套徽章的全部价值就在于一直在余光里。留 1px
+    // 贴边间隙，条与面板边缘之间还能透出一线底色，不至于糊在边框上。
     let thumb = |band: (f32, f32), show: usize, want: usize, scroll: usize| {
         if show == 0 || want <= show {
             return None;
@@ -550,7 +562,7 @@ pub(super) fn chrome_tab_layout(
         let track_h = band.1 - band.0;
         let th = (track_h * show as f32 / want as f32).max(s(24.0));
         let ty = band.0 + (track_h - th) * scroll as f32 / (want - show) as f32;
-        Some((panel_x + panel_w - s(6.0), ty, s(3.0), th))
+        Some((panel_x + panel_w - s(4.0), ty, s(3.0), th))
     };
     let tabs_scrollbar = thumb(tabs_band, tabs_show, tabs_want, tabs_scroll);
     let hosts_scrollbar = thumb(hosts_band, hosts_show, hosts_want, hosts_scroll);
@@ -1259,9 +1271,26 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 Rgba::new(add_ink.r, add_ink.g, add_ink.b, 235),
             );
         }
-        let thumb_c = sk.scrollbar_thumb;
-        for bar in [tab_layout.tabs_scrollbar, tab_layout.hosts_scrollbar].into_iter().flatten() {
-            let (bx, by, bw, bh) = bar;
+        // A scrollbar is an explicit affordance, not a one-pixel accidental
+        // mark — but它也不是**品牌位**。之前用 accent 画，深色主题下侧栏右缘
+        // 挂出一条饱和色带，比它旁边的标签名还抢眼；滚动位置是背景信息，不该
+        // 用整窗唯一的那个饱和音去说。改用 chrome 图标墨色（随明暗主题翻面）
+        // 压低透明度：静止时是一道能看见、但不会先于内容被看见的灰痕。
+        //
+        // 两套主题的 alpha 不对称：同样一条 3px 细痕，浅色下是深墨压在亮底上，
+        // 深色下是亮墨浮在暗底上——后者在细笔画上更容易被周围的暗面吃掉，同
+        // alpha 会明显比浅色那版弱。所以深色单独抬一档，让两边**看起来**一样重。
+        let (thumb_a, track_a) = if palette.is_light { (0.42, 0.08) } else { (0.58, 0.10) };
+        let thumb_c = Rgba::opaque(sk.icon).with_alpha(thumb_a);
+        let track_c = Rgba::opaque(sk.icon).with_alpha(track_a);
+        for (bar, band) in [
+            (tab_layout.tabs_scrollbar, tab_layout.tabs_band),
+            (tab_layout.hosts_scrollbar, tab_layout.hosts_band),
+        ] {
+            let Some((bx, by, bw, bh)) = bar else { continue };
+            let track_y = band.0;
+            let track_h = (band.1 - band.0).max(bh);
+            quads.push(UiQuad::solid(bx, track_y, bw, track_h, bw * 0.5, track_c));
             quads.push(UiQuad::solid(bx, by, bw, bh, bw * 0.5, thumb_c));
         }
     }

@@ -338,7 +338,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let layout = self.ctx.display().command_palette_layout();
                 let (px, py, pw, ph) = layout.panel;
                 if x >= px && x < px + pw && y >= py && y < py + ph {
-                    if let Some(row) = layout.row_at(x, y) {
+                    if self.ctx.display().palette_scrollbar_press(x, y, &layout) {
+                        self.ctx.window().set_mouse_cursor(winit::window::CursorIcon::Grabbing);
+                    } else if let Some(row) = layout.row_at(x, y) {
                         if let Some(action) = self.ctx.display().palette_click(row, layout.max_rows)
                         {
                             self.run_palette_action(action);
@@ -763,6 +765,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 if !matches!(settings_hit, crate::display::SettingsHit::SyncInput(_)) {
                     self.ctx.display().commit_sync_field();
                 }
+                // SSH 代理输入框同规矩：点到别处即失焦落盘。
+                if !matches!(settings_hit, crate::display::SettingsHit::SshProxyInput(_)) {
+                    self.ctx.display().commit_ssh_proxy_field();
+                }
                 match settings_hit {
                     crate::display::SettingsHit::KeymapRow(row) => {
                         if capturing != Some(row) {
@@ -945,6 +951,23 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::SyncInput(index) => {
                         self.ctx.display().focus_sync_field(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshProxyModeDropdown => {
+                        self.ctx
+                            .display()
+                            .toggle_settings_dropdown(crate::display::SettingsDropdown::SshProxyMode);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshProxyModeOption(index) => {
+                        self.ctx.display().set_ssh_proxy_mode(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshProxyInput(index) => {
+                        self.ctx.display().focus_ssh_proxy_field(index);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1294,6 +1317,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::TabRevealOption(_)
             | Hit::CursorShapeDropdown
             | Hit::CursorShapeOption(_)
+            | Hit::SshProxyModeDropdown
+            | Hit::SshProxyModeOption(_)
             | Hit::BackgroundColor
             | Hit::BackgroundSwatch(_)
             | Hit::BackgroundHexInput

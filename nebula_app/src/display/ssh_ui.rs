@@ -123,6 +123,45 @@ pub enum SshEditorField {
     /// 列表里显示的名字。空则回落到地址本身。
     Label,
     Password,
+    /// 每主机代理覆盖的自定义 URL（仅 [`SshProxyChoice::Custom`] 时可见）。
+    ProxyUrl,
+}
+
+/// 每主机代理覆盖的三态。持久化编码见 [`SshProxyChoice::to_saved`]。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SshProxyChoice {
+    /// 跟随全局设置（设置→高级→SSH 代理）。
+    #[default]
+    Follow,
+    /// 强制直连：全局开着代理也不走。
+    Direct,
+    /// 用本主机专属的代理 URL。
+    Custom,
+}
+
+impl SshProxyChoice {
+    /// 从 `ssh_profiles.json` 的 `proxy` 字段还原：缺失 = 跟随全局，
+    /// `"direct"` = 强制直连，其余 = 自定义 URL。
+    pub fn from_saved(saved: Option<&str>) -> (Self, String) {
+        match saved.map(str::trim) {
+            None | Some("") => (Self::Follow, String::new()),
+            Some(value) if value.eq_ignore_ascii_case("direct") => (Self::Direct, String::new()),
+            Some(url) => (Self::Custom, url.to_owned()),
+        }
+    }
+
+    /// 保存编码（`for_destination` 的 `proxy` 字段）。自定义但 URL 为空视同
+    /// 跟随全局——存空串会让连接侧报「配置无效」，而用户只是没填。
+    pub fn to_saved(self, url: &str) -> Option<String> {
+        match self {
+            Self::Follow => None,
+            Self::Direct => Some("direct".to_owned()),
+            Self::Custom => {
+                let url = url.trim();
+                (!url.is_empty()).then(|| url.to_owned())
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +184,10 @@ pub enum SshEditorHit {
     Password,
     PasswordToggle,
     Auth(SshAuthMode),
+    /// 代理覆盖分段器的一段。
+    ProxyChoice(SshProxyChoice),
+    /// 自定义代理 URL 输入框。
+    ProxyUrl,
     AddPrivateKey,
     RemovePrivateKey(usize),
     SaveToggleBox,
@@ -161,6 +204,15 @@ pub enum SshEditorHit {
 pub enum SshEditorDrag {
     Field(SshEditorField),
     IconSearch,
+}
+
+/// Tab 环上的一个停靠点。顺序只在 [`SshHostEditor::slots`] 一处生成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshEditorSlot {
+    Field(SshEditorField),
+    Test,
+    Cancel,
+    Save,
 }
 
 /// 页脚「测试连接」的四态状态小字（稿一）。结果只对发起时的草稿有效——
@@ -205,6 +257,9 @@ pub struct SshHostEditor {
     /// 选择器列表滚过去的行数。
     pub icon_scroll: usize,
     pub private_keys: Vec<PathBuf>,
+    /// 每主机代理覆盖三态 + 自定义 URL（仅 Custom 生效，其余态保留草稿）。
+    pub proxy_choice: SshProxyChoice,
+    pub proxy_url: String,
     pub field: SshEditorField,
     pub focus: crate::ux::FocusIndex,
     pub error: Option<String>,
@@ -214,9 +269,36 @@ pub struct SshHostEditor {
     pub(super) port_cursor: TextCursor,
     pub(super) label_cursor: TextCursor,
     pub(super) password_cursor: TextCursor,
+    pub(super) proxy_cursor: TextCursor,
 }
 
 impl SshHostEditor {
+    /// 当前草稿的 Tab 顺序。字段显隐随认证方式与代理三态变化，序号只在这里
+    /// 生成一次——聚焦、Tab 前进、Enter 激活、按钮高亮、caret 判定全部按表
+    /// 查。此前是七处各自硬编码 `if shows_password { n } else { n-1 }`，加
+    /// 一个字段就要同步改七处数字，漏一处就是"焦点跳到毫不相干的地方"。
+    pub fn slots(&self) -> Vec<SshEditorSlot> {
+        let mut slots = vec![
+            SshEditorSlot::Field(SshEditorField::Destination),
+            SshEditorSlot::Field(SshEditorField::Port),
+            SshEditorSlot::Field(SshEditorField::Label),
+        ];
+        if auth_sections(self.auth).0 {
+            slots.push(SshEditorSlot::Field(SshEditorField::Password));
+        }
+        if self.proxy_choice == SshProxyChoice::Custom {
+            slots.push(SshEditorSlot::Field(SshEditorField::ProxyUrl));
+        }
+        slots.extend([SshEditorSlot::Test, SshEditorSlot::Cancel, SshEditorSlot::Save]);
+        slots
+    }
+
+    /// 某停靠点在 Tab 环上的序号。表里必然有它；`unwrap_or(0)` 只是不让
+    /// 渲染路径 panic。
+    pub fn slot_of(&self, target: SshEditorSlot) -> usize {
+        self.slots().iter().position(|slot| *slot == target).unwrap_or(0)
+    }
+
     /// 某个字段的文本与光标。插入、退格、全选、点击定位对四个字段的处理完全
     /// 一样，集中到这里之后，再加字段只需要补这一个 match，而不是把同样的分支
     /// 在五个方法里各抄一遍——那种写法漏一处就是"某个框打不出字"。
@@ -226,6 +308,7 @@ impl SshHostEditor {
             SshEditorField::Port => (&mut self.port, &mut self.port_cursor),
             SshEditorField::Label => (&mut self.label, &mut self.label_cursor),
             SshEditorField::Password => (&mut self.password, &mut self.password_cursor),
+            SshEditorField::ProxyUrl => (&mut self.proxy_url, &mut self.proxy_cursor),
         }
     }
 
@@ -236,6 +319,7 @@ impl SshHostEditor {
             SshEditorField::Port => (&self.port, &self.port_cursor),
             SshEditorField::Label => (&self.label, &self.label_cursor),
             SshEditorField::Password => (&self.password, &self.password_cursor),
+            SshEditorField::ProxyUrl => (&self.proxy_url, &self.proxy_cursor),
         }
     }
 
@@ -254,6 +338,7 @@ impl SshHostEditor {
         self.port_cursor.clear_selection();
         self.label_cursor.clear_selection();
         self.password_cursor.clear_selection();
+        self.proxy_cursor.clear_selection();
     }
 
     /// 距文字起点 `offset_x` 像素处落在第几个字符的缝隙上。
@@ -288,6 +373,7 @@ pub struct SshFieldMetrics {
     pub port_x: f32,
     pub label_x: f32,
     pub password_x: f32,
+    pub proxy_url_x: f32,
     /// 一列的推进宽度（物理像素）。
     pub cell_w: f32,
     /// 名字那一格的列宽。身份条上的名字比其余字段大一档，光标定位、拖选、
@@ -302,6 +388,7 @@ impl SshFieldMetrics {
             SshEditorField::Port => self.port_x,
             SshEditorField::Label => self.label_x,
             SshEditorField::Password => self.password_x,
+            SshEditorField::ProxyUrl => self.proxy_url_x,
         }
     }
 
@@ -323,6 +410,10 @@ pub struct SshEditorRects {
     pub password: (f32, f32, f32, f32),
     pub password_toggle: (f32, f32, f32, f32),
     pub auth: [(SshAuthMode, (f32, f32, f32, f32)); 4],
+    /// 代理覆盖分段器（跟随全局 / 直连 / 自定义）。
+    pub proxy: [(SshProxyChoice, (f32, f32, f32, f32)); 3],
+    /// 自定义代理 URL 输入框；非 Custom 态是零矩形。
+    pub proxy_url: (f32, f32, f32, f32),
     pub add_private_key: (f32, f32, f32, f32),
     pub private_key_rows: Vec<(usize, (f32, f32, f32, f32))>,
     pub save_checkbox: (f32, f32, f32, f32),
@@ -361,6 +452,7 @@ impl SshEditorRects {
             SshEditorHit::Port => Some((SshEditorField::Port, self.port)),
             SshEditorHit::Label => Some((SshEditorField::Label, self.label)),
             SshEditorHit::Password => Some((SshEditorField::Password, self.password)),
+            SshEditorHit::ProxyUrl => Some((SshEditorField::ProxyUrl, self.proxy_url)),
             _ => None,
         }
     }
@@ -368,9 +460,34 @@ impl SshEditorRects {
 
 #[cfg(test)]
 mod tests {
-    use super::{auth_sections, join_destination_port, push_private_key, split_destination_port};
+    use super::{
+        SshProxyChoice, auth_sections, join_destination_port, push_private_key,
+        split_destination_port,
+    };
     use crate::ssh_profiles::SshAuthMode;
     use std::path::PathBuf;
+
+    /// 三态与 `ssh_profiles.json` 的 `proxy` 字段编码互逆；自定义但没填 URL
+    /// 视同跟随全局——存空串会让连接侧报「配置无效」，而用户只是没填完。
+    #[test]
+    fn proxy_choice_round_trips_the_profile_encoding() {
+        assert_eq!(SshProxyChoice::from_saved(None), (SshProxyChoice::Follow, String::new()));
+        assert_eq!(
+            SshProxyChoice::from_saved(Some("DIRECT")),
+            (SshProxyChoice::Direct, String::new()),
+        );
+        assert_eq!(
+            SshProxyChoice::from_saved(Some("socks5://proxy.lan:1080")),
+            (SshProxyChoice::Custom, "socks5://proxy.lan:1080".to_owned()),
+        );
+        assert_eq!(SshProxyChoice::Follow.to_saved("socks5://ignored"), None);
+        assert_eq!(SshProxyChoice::Direct.to_saved(""), Some("direct".to_owned()));
+        assert_eq!(SshProxyChoice::Custom.to_saved("   "), None);
+        assert_eq!(
+            SshProxyChoice::Custom.to_saved(" socks5://proxy.lan "),
+            Some("socks5://proxy.lan".to_owned()),
+        );
+    }
 
     #[test]
     fn auth_modes_show_the_expected_editor_sections() {

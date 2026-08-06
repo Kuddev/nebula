@@ -28,3 +28,7 @@ toml_edit = "0.24.0"
 # TODO: Drop this pin and return to the crates.io release once the fix ships there.
 [patch.crates-io]
 x11-clipboard = { git = "https://github.com/quininer/x11-clipboard.git", rev = "19ab2163cf0bd0db607e827a5214571990307866" }
+# Keep the 0.30.13 API/rwh_06 surface while backporting winit upstream
+# 488c036a's Windows 11 mixed-DPI positioning fix. The upstream revision has
+# since moved to a different EventLoop API and cannot be used directly here.
+winit = { path = "third_party/winit-0.30.13" }

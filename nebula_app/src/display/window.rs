@@ -116,6 +116,13 @@ pub struct Window {
     /// Cached scale factor for quickly scaling pixel sizes.
     pub scale_factor: f64,
 
+    /// True while Windows owns the interactive move/resize modal loop. DPI
+    /// changes are held until that loop exits so a mixed-DPI drag cannot
+    /// rebuild fonts and surfaces against an intermediate monitor.
+    native_live_move: bool,
+    pending_scale_factor: Option<f64>,
+    pending_inner_size: Option<PhysicalSize<u32>>,
+
     /// Flag indicating whether redraw was requested.
     pub requested_redraw: bool,
 
@@ -225,6 +232,9 @@ impl Window {
             mouse_visible: true,
             has_frame: true,
             scale_factor,
+            native_live_move: false,
+            pending_scale_factor: None,
+            pending_inner_size: None,
             window,
             is_x11,
             ime_inhibitor: Default::default(),
@@ -234,6 +244,59 @@ impl Window {
     #[inline]
     pub fn raw_window_handle(&self) -> RawWindowHandle {
         self.window.window_handle().unwrap().as_raw()
+    }
+
+    /// Return a stable native handle key for the Windows message hook.
+    #[cfg(windows)]
+    #[inline]
+    pub fn native_window_handle_id(&self) -> Option<usize> {
+        match self.raw_window_handle() {
+            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as usize),
+            _ => None,
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[inline]
+    pub fn native_window_handle_id(&self) -> Option<usize> {
+        None
+    }
+
+    #[inline]
+    pub fn native_live_move(&self) -> bool {
+        self.native_live_move
+    }
+
+    #[inline]
+    pub fn set_native_live_move(&mut self, live: bool) {
+        self.native_live_move = live;
+    }
+
+    /// Keep only the newest factor while the native move loop is active. This
+    /// avoids repeated font/glyph work for every crossing-related DPI event.
+    #[inline]
+    pub fn defer_scale_factor(&mut self, scale_factor: f64) {
+        self.pending_scale_factor = Some(scale_factor);
+    }
+
+    #[inline]
+    pub fn has_pending_scale_factor(&self) -> bool {
+        self.pending_scale_factor.is_some()
+    }
+
+    #[inline]
+    pub fn defer_inner_size(&mut self, size: PhysicalSize<u32>) {
+        self.pending_inner_size = Some(size);
+    }
+
+    #[inline]
+    pub fn take_pending_inner_size(&mut self) -> Option<PhysicalSize<u32>> {
+        self.pending_inner_size.take()
+    }
+
+    #[inline]
+    pub fn take_pending_scale_factor(&mut self) -> Option<f64> {
+        self.pending_scale_factor.take()
     }
 
     #[inline]

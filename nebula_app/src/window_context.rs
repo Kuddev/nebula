@@ -2566,6 +2566,28 @@ impl WindowContext {
             .unwrap_or_else(|| ".".to_owned())
     }
 
+    /// Commit the final DPI and physical size held by the native move tracker.
+    /// Applying the factor first keeps the logical windowed bounds correct and
+    /// collapses the cross-monitor work into one display update.
+    pub fn apply_pending_native_transition(&mut self) {
+        if self.display.window.native_live_move() {
+            return;
+        }
+
+        if let Some(scale_factor) = self.display.window.take_pending_scale_factor() {
+            self.display.apply_scale_factor_change(scale_factor, &self.config);
+            self.dirty = true;
+        }
+
+        if let Some(size) = self.display.window.take_pending_inner_size() {
+            if self.display.window.allows_drag_resize() {
+                self.windowed_size = size.to_logical(self.display.window.scale_factor);
+            }
+            self.display.pending_update.set_dimensions(size);
+            self.dirty = true;
+        }
+    }
+
     /// Process events for this terminal window.
     pub fn handle_event(
         &mut self,
@@ -2583,7 +2605,10 @@ impl WindowContext {
             WinitEvent::AboutToWait
             | WinitEvent::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 // Skip further event handling with no staged updates.
-                if self.event_queue.is_empty() {
+                // A native DPI transition can stage a Display update without
+                // adding a synthetic winit event, so the pending flag is part
+                // of this fast-path decision.
+                if self.event_queue.is_empty() && !self.display.pending_update.dirty {
                     return;
                 }
 

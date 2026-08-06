@@ -25,7 +25,7 @@ use crate::renderer::{GlyphCache, Renderer};
 
 use super::keymap;
 use super::ui::theme::Skin;
-use super::ui::{icons, widgets};
+use super::ui::{icons, surface, widgets};
 use super::{
     AcceptKey, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
     chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label,
@@ -94,6 +94,8 @@ pub enum SettingsDropdown {
     Accept,
     CursorShape,
     TabReveal,
+    /// 高级：SSH 代理模式（关闭/系统/自定义）。
+    SshProxyMode,
     /// 背景色：色板网格 + 16 进制输入的专用浮层（不是通用行列表）。
     BackgroundColor,
 }
@@ -142,6 +144,21 @@ pub(super) const ACCEPT_OPTIONS: [AcceptKey; 3] =
 
 pub(super) const TAB_REVEAL_OPTIONS: [TabRevealMotion; 2] =
     [TabRevealMotion::Slide, TabRevealMotion::Instant];
+
+/// 下拉行序即为这里的顺序；连接时的真正决策在 `crate::ssh_proxy`。
+pub(super) const SSH_PROXY_MODE_OPTIONS: [crate::ssh_proxy::ProxyMode; 3] = [
+    crate::ssh_proxy::ProxyMode::Off,
+    crate::ssh_proxy::ProxyMode::System,
+    crate::ssh_proxy::ProxyMode::Custom,
+];
+
+fn ssh_proxy_mode_label(mode: crate::ssh_proxy::ProxyMode, language: UiLanguage) -> &'static str {
+    match mode {
+        crate::ssh_proxy::ProxyMode::Off => language.pick("关闭", "Off"),
+        crate::ssh_proxy::ProxyMode::System => language.pick("系统代理", "System proxy"),
+        crate::ssh_proxy::ProxyMode::Custom => language.pick("自定义", "Custom"),
+    }
+}
 
 /// Order mirrors the appearance page the user referenced.
 pub(super) const CURSOR_SHAPE_OPTIONS: [CursorShape; 4] =
@@ -276,6 +293,11 @@ pub enum SettingsHit {
     SyncAutoPullToggle,
     SyncPushButton,
     SyncPullButton,
+    /// 高级→SSH 代理: 模式下拉触发行。
+    SshProxyModeDropdown,
+    SshProxyModeOption(usize),
+    /// 高级→SSH 代理: 输入框（0=代理地址 1=绕过列表）。
+    SshProxyInput(usize),
     /// 按键映射: one editable action row (click → capture a new combo).
     KeymapRow(usize),
 }
@@ -360,6 +382,13 @@ pub(super) struct NebulaRuntimeSettings {
     pub(super) keybinds: Vec<(String, String)>,
     /// 快速终端全局切换键，和普通动作绑定分开持久化。
     pub(super) quick_terminal_hotkey: String,
+    /// SSH 出站代理（全局三态）。解析与连接决策都在 `crate::ssh_proxy`，
+    /// 这里只负责三个键在 `nebula_settings.txt` 里的持久化往返——写文件是
+    /// 整体重写，键不进这个结构体就会在下一次保存时被抹掉。
+    pub(super) ssh_proxy_mode: crate::ssh_proxy::ProxyMode,
+    pub(super) ssh_proxy_url: String,
+    /// 绕过列表原文（逗号分隔），按用户输入原样保存；拆分归 `ssh_proxy`。
+    pub(super) ssh_proxy_no_proxy: String,
 }
 
 /// Load runtime UI settings from `Nebula/nebula_settings.txt`; defaults when
@@ -415,6 +444,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         hosts_band: 0.0,
         keybinds: Vec::new(),
         quick_terminal_hotkey: keymap::DEFAULT_QUICK_TERMINAL_HOTKEY.to_owned(),
+        ssh_proxy_mode: crate::ssh_proxy::ProxyMode::Off,
+        ssh_proxy_url: String::new(),
+        ssh_proxy_no_proxy: String::new(),
     };
     if let Ok(data) = std::fs::read_to_string(path) {
         for line in data.lines() {
@@ -567,6 +599,13 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                         settings.quick_terminal_hotkey = value.to_owned();
                     }
                 },
+                Some(("ssh_proxy_mode", v)) => {
+                    settings.ssh_proxy_mode = crate::ssh_proxy::ProxyMode::parse(v);
+                },
+                Some(("ssh_proxy_url", v)) => settings.ssh_proxy_url = v.trim().to_owned(),
+                Some(("ssh_proxy_no_proxy", v)) => {
+                    settings.ssh_proxy_no_proxy = v.trim().to_owned();
+                },
                 _ => {},
             }
         }
@@ -677,11 +716,14 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         keybinds.push_str(&format!("keybind={combo}:{action}\n"));
     }
     let quick_terminal_hotkey = settings.quick_terminal_hotkey.trim();
+    let ssh_proxy_mode = settings.ssh_proxy_mode.as_str();
+    let ssh_proxy_url = settings.ssh_proxy_url.trim();
+    let ssh_proxy_no_proxy = settings.ssh_proxy_no_proxy.trim();
     let _ = std::fs::write(
         path,
         format!(
             "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+tab_reveal={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nssh_proxy_mode={ssh_proxy_mode}\nssh_proxy_url={ssh_proxy_url}\nssh_proxy_no_proxy={ssh_proxy_no_proxy}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -780,6 +822,10 @@ struct SettingsGeometry {
     /// 高级·会话：启动时恢复上次的标签（崩溃/强杀后同样走这条路）。
     restore_session: (f32, f32, f32, f32),
     /// 高级→同步（WebDAV）：url/用户名/密码/口令 四行 + 自动拉取开关行
+    /// 高级→SSH 代理：模式下拉行 + [地址, 绕过列表] 两输入行（输入框矩形
+    /// 与同步行共用 [`sync_input_rect`] 推导）。
+    ssh_proxy_mode: (f32, f32, f32, f32),
+    ssh_proxy_rows: [(f32, f32, f32, f32); 2],
     /// + 动作按钮行。输入框矩形由 [`sync_input_rect`] 从行矩形推导。
     sync_rows: [(f32, f32, f32, f32); 4],
     sync_auto_pull: (f32, f32, f32, f32),
@@ -791,8 +837,8 @@ fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
     popup_h - 72.0 * scale_factor
 }
 
-fn advanced_content_end(advanced_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
-    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + 2.0 * row_h }
+fn advanced_content_end(proxy_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
+    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { proxy_y0 + 3.0 * row_h }
 }
 
 /// Max scroll offset for `section` at the current window size. The input
@@ -956,12 +1002,17 @@ fn settings_geometry(
     let advanced_y0 = 146.0;
     let keep_session = (row_x, at(advanced_y0), row_w, row_h);
     let restore_session = (row_x, at(advanced_y0 + ROW_H), row_w, row_h);
-    let sync_y0 = advanced_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
+    // SSH 代理组：模式下拉 + 地址/绕过两输入行。
+    let proxy_y0 = advanced_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
+    let proxy_row = |i: f32| (row_x, at(proxy_y0 + i * ROW_H), row_w, row_h);
+    let ssh_proxy_mode = proxy_row(0.0);
+    let ssh_proxy_rows = [proxy_row(1.0), proxy_row(2.0)];
+    let sync_y0 = proxy_y0 + ROW_H * 3.0 + GROUP_ADVANCE;
     let sync_row = |i: f32| (row_x, at(sync_y0 + i * ROW_H), row_w, row_h);
     let sync_rows = [sync_row(0.0), sync_row(1.0), sync_row(2.0), sync_row(3.0)];
     let sync_auto_pull = sync_row(4.0);
     let sync_actions = sync_row(5.0);
-    let advanced_end = advanced_content_end(advanced_y0, sync_y0, ROW_H);
+    let advanced_end = advanced_content_end(proxy_y0, sync_y0, ROW_H);
     let advanced_h = s(advanced_end + 32.0 - 72.0);
 
     SettingsGeometry {
@@ -1033,6 +1084,8 @@ fn settings_geometry(
         advanced_h,
         keep_session,
         restore_session,
+        ssh_proxy_mode,
+        ssh_proxy_rows,
         sync_rows,
         sync_auto_pull,
         sync_actions,
@@ -1138,6 +1191,9 @@ fn dropdown_anchor(
         (Section::Interaction, SettingsDropdown::TabReveal) => {
             Some((anchor(geometry.tab_reveal), TAB_REVEAL_OPTIONS.len()))
         },
+        (Section::Advanced, SettingsDropdown::SshProxyMode) => {
+            Some((anchor(geometry.ssh_proxy_mode), SSH_PROXY_MODE_OPTIONS.len()))
+        },
         (Section::Appearance, SettingsDropdown::BackgroundFit) => {
             Some((anchor(geometry.background_image_fit), BACKGROUND_FIT_OPTIONS.len()))
         },
@@ -1227,6 +1283,7 @@ pub fn settings_hit(
                     SettingsDropdown::Accept => SettingsHit::AcceptOption(index),
                     SettingsDropdown::TabReveal => SettingsHit::TabRevealOption(index),
                     SettingsDropdown::CursorShape => SettingsHit::CursorShapeOption(index),
+                    SettingsDropdown::SshProxyMode => SettingsHit::SshProxyModeOption(index),
                     // 背景色浮层在上方特判处理，走不到通用行列表。
                     SettingsDropdown::BackgroundColor => SettingsHit::Panel,
                 };
@@ -1374,6 +1431,15 @@ pub fn settings_hit(
                 if contains_rect(geometry.restore_session, x, y) {
                     return SettingsHit::RestoreSessionToggle;
                 }
+                if contains_rect(geometry.ssh_proxy_mode, x, y) {
+                    return SettingsHit::SshProxyModeDropdown;
+                }
+                for (index, rect) in geometry.ssh_proxy_rows.iter().enumerate() {
+                    // 与同步行同规矩：整行都算输入框，点标签即聚焦。
+                    if contains_rect(*rect, x, y) {
+                        return SettingsHit::SshProxyInput(index);
+                    }
+                }
                 if SHOW_WEBDAV_SYNC_SETTINGS {
                     for (index, rect) in geometry.sync_rows.iter().enumerate() {
                         // 命中整行都算输入框：行左侧是它的 label，点标签聚焦
@@ -1487,6 +1553,10 @@ pub(super) struct SettingsView {
     /// 最近一次同步动作的结果 `(message, is_error)`。
     pub(super) sync_status: Option<(String, bool)>,
     pub(super) sync_busy: bool,
+    /// 高级→SSH 代理：全局模式 + [代理地址, 绕过列表] 输入原文 + 聚焦下标。
+    pub(super) ssh_proxy_mode: crate::ssh_proxy::ProxyMode,
+    pub(super) ssh_proxy_inputs: [String; 2],
+    pub(super) ssh_proxy_focus: Option<usize>,
 }
 
 /// 同步行右侧的输入框矩形（quad/text/hit 三处共用）。行左侧留给标签。
@@ -1522,6 +1592,13 @@ fn sync_input_display(view: &SettingsView, index: usize, max_cols: usize) -> (St
         return ("●".repeat(dots), false, dots);
     }
     // 从尾部收集不超过 max_cols 列的字符（中文占 2 列）。
+    let (text, cols) = text_tail(raw, max_cols);
+    (text, false, cols)
+}
+
+/// 从尾部收集不超过 `max_cols` 列的字符（中文占 2 列）；编辑总发生在
+/// 末尾，超宽时截头部。返回 `(展示文本, 实际列数)`，列数供 caret 定位。
+fn text_tail(raw: &str, max_cols: usize) -> (String, usize) {
     let mut cols = 0usize;
     let mut chars: Vec<char> = Vec::new();
     for ch in raw.chars().rev() {
@@ -1533,7 +1610,26 @@ fn sync_input_display(view: &SettingsView, index: usize, max_cols: usize) -> (St
         chars.push(ch);
     }
     chars.reverse();
-    (chars.into_iter().collect(), false, cols)
+    (chars.into_iter().collect(), cols)
+}
+
+/// SSH 代理输入框的展示内容：`(文本, 是否占位, 列数)`。与
+/// [`sync_input_display`] 同一契约，行矩形也共用 [`sync_input_rect`]。
+fn ssh_proxy_input_display(
+    view: &SettingsView,
+    index: usize,
+    max_cols: usize,
+) -> (String, bool, usize) {
+    let raw = &view.ssh_proxy_inputs[index];
+    if raw.is_empty() {
+        let text = match index {
+            0 => "socks5://127.0.0.1:7890",
+            _ => view.language.pick("例：10.0.0.0, .internal", "e.g. 10.0.0.0, .internal"),
+        };
+        return (text.to_owned(), true, 0);
+    }
+    let (text, cols) = text_tail(raw, max_cols);
+    (text, false, cols)
 }
 
 /// 动作行的 [立即推送, 立即拉取] 按钮矩形。
@@ -1620,6 +1716,9 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         SettingsDropdown::CursorShape => {
             CURSOR_SHAPE_OPTIONS.iter().position(|shape| *shape == view.cursor_shape)
         },
+        SettingsDropdown::SshProxyMode => {
+            SSH_PROXY_MODE_OPTIONS.iter().position(|mode| *mode == view.ssh_proxy_mode)
+        },
         SettingsDropdown::BackgroundColor => view
             .background
             .and_then(|current| BACKGROUND_SWATCHES.iter().position(|color| *color == current)),
@@ -1638,6 +1737,7 @@ fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Optio
         (SettingsDropdown::Accept, SettingsHit::AcceptOption(index)) => Some(index),
         (SettingsDropdown::TabReveal, SettingsHit::TabRevealOption(index)) => Some(index),
         (SettingsDropdown::CursorShape, SettingsHit::CursorShapeOption(index)) => Some(index),
+        (SettingsDropdown::SshProxyMode, SettingsHit::SshProxyModeOption(index)) => Some(index),
         _ => None,
     }
 }
@@ -2274,6 +2374,53 @@ pub(super) fn push_quads(
             );
             toggle(quads, &mut staged, geometry.restore_session, view.restore_session);
 
+            // ---- SSH 代理：模式下拉 + 地址/绕过两输入行 ----
+            group_frame(quads, geometry.ssh_proxy_mode, 3);
+            row_hover(
+                quads,
+                geometry.ssh_proxy_mode,
+                view.hover == SettingsHit::SshProxyModeDropdown,
+            );
+            combobox(
+                quads,
+                &mut staged,
+                geometry.ssh_proxy_mode,
+                view.hover == SettingsHit::SshProxyModeDropdown,
+                view.dropdown == Some(SettingsDropdown::SshProxyMode),
+            );
+            {
+                let cell_w = size.cell_width();
+                for (index, row) in geometry.ssh_proxy_rows.iter().enumerate() {
+                    row_hover(quads, *row, view.hover == SettingsHit::SshProxyInput(index));
+                    let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
+                    let focused = view.ssh_proxy_focus == Some(index);
+                    // 输入框走 surface 配方（描边环 + 圆角 token）；配方不感知
+                    // 视口裁剪，落到临时 Vec 再逐个过 clip，保住与 caret 的叠序。
+                    let mut input = Vec::new();
+                    surface::push_input(&mut input, (ix, iy, iw, ih), scale, &sk, focused);
+                    for quad in input {
+                        clip(quads, quad);
+                    }
+                    if focused && super::caret_blink_on() {
+                        let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                        let (_, placeholder, cols) = ssh_proxy_input_display(view, index, max_cols);
+                        let cols = if placeholder { 0 } else { cols };
+                        let caret_h = ih - s(10.0);
+                        clip(
+                            quads,
+                            UiQuad::solid(
+                                (ix + s(12.0) + cols as f32 * cell_w).min(ix + iw - s(6.0)),
+                                iy + (ih - caret_h) / 2.0,
+                                (1.5 * scale).max(1.0),
+                                caret_h,
+                                0.0,
+                                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
+                            ),
+                        );
+                    }
+                }
+            }
+
             if SHOW_WEBDAV_SYNC_SETTINGS {
                 // ---- 同步（WebDAV，spec 003）：4 输入行 + 自动拉取开关 ----
                 group_frame(quads, geometry.sync_rows[0], 5);
@@ -2606,6 +2753,9 @@ pub(super) fn draw_popup_text(
             },
             SettingsDropdown::CursorShape => {
                 cursor_shape_label(CURSOR_SHAPE_OPTIONS[index], language).to_owned()
+            },
+            SettingsDropdown::SshProxyMode => {
+                ssh_proxy_mode_label(SSH_PROXY_MODE_OPTIONS[index], language).to_owned()
             },
             // 上方特判提前返回；此臂只为 match 完备。
             SettingsDropdown::BackgroundColor => continue,
@@ -3736,6 +3886,76 @@ pub(super) fn draw_text(
                 }
             }
 
+            // ---- SSH 代理 ----
+            {
+                let (gx, gy, ..) = geometry.ssh_proxy_mode;
+                if visible(group_y(gy), title_h) {
+                    section_title(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        gx,
+                        group_y(gy),
+                        language.pick("SSH 代理", "SSH proxy"),
+                    );
+                }
+                if visible(geometry.ssh_proxy_mode.1, geometry.ssh_proxy_mode.3) {
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        geometry.ssh_proxy_mode,
+                        language.pick("SSH 连接代理", "SSH connection proxy"),
+                        "",
+                        sk.ink,
+                    );
+                    combobox_value(
+                        r,
+                        gc,
+                        geometry.ssh_proxy_mode,
+                        ssh_proxy_mode_label(view.ssh_proxy_mode, language),
+                        sk.accent,
+                    );
+                }
+                let labels = [
+                    language.pick("代理地址（socks5:// 或 http://）", "Proxy URL (socks5:// or http://)"),
+                    language.pick("不走代理的主机（逗号分隔）", "Bypass hosts (comma separated)"),
+                ];
+                // 地址只在「自定义」下参与决策，绕过列表在「系统代理」下同样
+                // 生效——各自按此判灰，但始终可点可改（改完切模式即生效）。
+                let active = [
+                    view.ssh_proxy_mode == crate::ssh_proxy::ProxyMode::Custom,
+                    view.ssh_proxy_mode != crate::ssh_proxy::ProxyMode::Off,
+                ];
+                let cell_w = size.cell_width();
+                let cell_h = size.cell_height();
+                for (index, row) in geometry.ssh_proxy_rows.iter().enumerate() {
+                    if !visible(row.1, row.3) {
+                        continue;
+                    }
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        *row,
+                        labels[index],
+                        "",
+                        if active[index] { sk.ink } else { sk.ink_dim },
+                    );
+                    let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
+                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                    let (text, placeholder, _) = ssh_proxy_input_display(view, index, max_cols);
+                    let ink = if placeholder || !active[index] { sk.ink_dim } else { sk.ink };
+                    r.draw_chrome_text(size, ix + s(12.0), iy + (ih - cell_h) / 2.0, ink, &text, gc);
+                }
+            }
+
             if SHOW_WEBDAV_SYNC_SETTINGS {
                 // ---- 同步（WebDAV）----
                 let (sx, sy, ..) = geometry.sync_rows[0];
@@ -3845,9 +4065,10 @@ mod tests {
     #[test]
     fn hidden_webdav_group_does_not_extend_advanced_content() {
         assert!(!SHOW_WEBDAV_SYNC_SETTINGS);
-        // 会话组现在是两行（驻留 + 启动恢复），页面高度只算这两行——
-        // 隐藏的同步组不许把 Advanced 撑高出一屏空白。
-        assert_eq!(advanced_content_end(146.0, 264.0, 44.0), 234.0);
+        // 会话组两行 + SSH 代理组三行（模式下拉 + 地址 + 绕过列表），页面高度
+        // 到代理组末行为止——隐藏的同步组不许把 Advanced 撑高出一屏空白。
+        // 146 + 2*44 + 74 = 308（proxy_y0），期望 308 + 3*44 = 440。
+        assert_eq!(advanced_content_end(308.0, 514.0, 44.0), 440.0);
     }
 
     #[test]

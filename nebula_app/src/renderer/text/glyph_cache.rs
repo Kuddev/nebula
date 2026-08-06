@@ -84,6 +84,12 @@ pub struct GlyphCache {
     /// Font metrics.
     metrics: Metrics,
 
+    /// Size [`Self::metrics`] was measured at. `draw_doc_text` raises
+    /// [`Self::font_size`] for a heading run without touching the metrics —
+    /// baseline anchoring is built on the base ones — so anything comparing a
+    /// glyph against `metrics` must rescale by `font_size / metrics_size`.
+    metrics_size: crossfont::Size,
+
     /// The UI font role's metrics, truly rasterized at [`Self::ui_font_size`].
     ui_metrics: Metrics,
 
@@ -160,6 +166,7 @@ impl GlyphCache {
             font_offset: font.offset,
             glyph_offset: font.glyph_offset,
             metrics,
+            metrics_size: font.size(),
             ui_metrics: metrics,
             ui_domain: false,
             builtin_box_drawing: font.builtin_box_drawing,
@@ -381,7 +388,20 @@ impl GlyphCache {
         // 这类正常越界，只捕获真正的全宽 fallback 字形。
         {
             let metrics = if self.ui_domain { &self.ui_metrics } else { &self.metrics };
-            let advance = metrics.average_advance as f32;
+            // 2026-08-05 用户报告：换成自带的导入字体后，Markdown 标题里
+            // "Native" 的 N 正常、ative 明显小一圈，设置页标题的 l 也坍缩。
+            // 根因就在这条判据：`draw_doc_text` 为标题把 font_size 抬到
+            // 1.7 倍却不动 metrics（基线锚定按基准算），于是放大后的字形
+            // 一律超过基准 advance×1.4，被当成全宽 fallback 压回一列——
+            // 墨迹宽的字母压得多、窄的（i l t）几乎不压，同一行大小失衡。
+            // 阈值必须跟着真正栅格化的字号走。字形墨迹本来就宽的字体（比如
+            // 用户导入的 JetBrains Maple Mono）触发得更早，所以换字体才显形。
+            let size_ratio = if self.ui_domain {
+                1.0
+            } else {
+                self.font_size.as_px() / self.metrics_size.as_px().max(1.0)
+            };
+            let advance = metrics.average_advance as f32 * size_ratio;
             // Private Use Area（Nerd Font 图标、powerline 分隔符 U+E0B0…）
             // 刻意画满甚至越出格子拼接徽章，绝不能缩（2026-07-28 用户反馈：
             // 提示符图标全变小了）。只处理真实的 East Asian Ambiguous 文字。
@@ -459,6 +479,7 @@ impl GlyphCache {
         self.bold_italic_key = bold_italic;
         self.symbol_key = symbol_key;
         self.metrics = metrics;
+        self.metrics_size = font.size();
         self.builtin_box_drawing = font.builtin_box_drawing;
 
         Ok(())

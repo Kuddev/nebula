@@ -19,8 +19,8 @@ use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::content::RenderableCell;
 use crate::math::cache::{FormulaCacheKey, MathLayoutCache};
-use crate::math::layout::MathLayout;
-use crate::math::{DEFAULT_LIMITS, compile_formula};
+use crate::math::layout::{MathLayout, MathMetrics};
+use crate::math::{DEFAULT_LIMITS, MIN_READABLE_MATH_PX, compile_formula};
 use crate::renderer::math::MathClip;
 use crate::renderer::{GlyphCache, Renderer};
 
@@ -28,8 +28,31 @@ const MAX_VISIBLE_FORMULAS: usize = 64;
 const MAX_PERSISTED_FORMULAS: usize = 2_048;
 const PERSISTED_FORMULA_BUDGET: usize = 1024 * 1024;
 const MAX_HISTORY_FORMULA_ROWS: usize = 512;
-const MIN_MATH_PIXEL_SIZE: f32 = 6.0;
 const FORMULA_INSET: f32 = 2.0;
+/// How many consecutive blank rows one side of a formula may lend it. Two is
+/// what an AI answer's `$$` block is normally surrounded by; taking more would
+/// start moving the formula visibly away from the text it belongs to.
+const MAX_ABSORBED_BLANK_ROWS: usize = 2;
+/// Sliver of a lent blank row kept free, in rows, so the ink never reaches the
+/// row past it.
+const BLANK_ROW_MARGIN: f32 = 0.1;
+/// Neighbour state before [`apply_layout_hints`] has looked at the grid: the
+/// whole row counts as occupied, so an overlay that somehow skipped the scan
+/// gets the line gap and nothing more.
+const NEIGHBOUR_UNKNOWN: Option<(usize, usize)> = Some((0, usize::MAX));
+/// Bleed budget when the neighbouring row holds text right under the formula:
+/// the natural line gap plus the sliver a monospace glyph leaves inside its
+/// cell. Sized so an inline fraction at [`crate::math::MIN_SCRIPT_SCALE`] —
+/// the tallest thing that routinely shares a row with prose — still renders
+/// whole. Anything larger starts landing on the neighbour's glyphs; an
+/// unconditional allowance here is what once produced formulas painted over
+/// adjacent text.
+const BLEED_INTO_PROSE: f32 = 0.2;
+/// Height a formula may overrun its budget by, as a fraction of that budget,
+/// before it is scaled down. Sized so an inline fraction — the tallest thing
+/// that routinely appears inside one prose row — keeps the terminal font size:
+/// its overrun lands in the line gap and the clip trims what is left.
+const HEIGHT_OVERRUN_TOLERANCE: f32 = 0.12;
 
 /// Per-pane state. Layout data is intentionally discarded when a pane state is
 /// cloned: cloned UI metadata can outlive a renderer/font scale, while layouts
@@ -467,8 +490,9 @@ impl PersistedFormula {
             spans,
             foreground: Rgb::default(),
             fallback: Vec::new(),
-            expand_top: false,
-            expand_bottom: false,
+            neighbours_above: [NEIGHBOUR_UNKNOWN; MAX_ABSORBED_BLANK_ROWS],
+            neighbours_below: [NEIGHBOUR_UNKNOWN; MAX_ABSORBED_BLANK_ROWS],
+            widen_right: false,
         }
     }
 }
@@ -529,12 +553,19 @@ pub(super) struct FormulaOverlay {
     spans: Vec<RowSpan>,
     foreground: Rgb,
     fallback: Vec<RenderableCell>,
-    /// Half-row breathing room above/below granted when the neighbouring grid
-    /// row is entirely blank. Display sources that fit on one terminal row
-    /// would otherwise squeeze tall layouts (`\sum` limits, fractions) into a
-    /// single cell height, making formula sizes wildly inconsistent.
-    expand_top: bool,
-    expand_bottom: bool,
+    /// Occupied column range of each neighbouring row, nearest first, capped
+    /// at [`MAX_ABSORBED_BLANK_ROWS`] per side. `None` marks a row that can
+    /// never get in the way (blank, or outside the viewport where the clip
+    /// already stops the ink). Whether an occupied row actually blocks depends
+    /// on which columns the formula's ink lands in — prose above a centred
+    /// formula usually ends long before it — so the decision belongs to
+    /// [`prepare_overlays`], which knows the rendered width.
+    neighbours_above: [Option<(usize, usize)>; MAX_ABSORBED_BLANK_ROWS],
+    neighbours_below: [Option<(usize, usize)>; MAX_ABSORBED_BLANK_ROWS],
+    /// Display formula whose rows hold nothing right of the source span, so
+    /// its layout may use the rest of the line. Keeps a formula's size
+    /// independent of how many columns its source happened to occupy.
+    widen_right: bool,
 }
 
 impl FormulaOverlay {
@@ -559,15 +590,42 @@ impl FormulaOverlay {
         let right_col = self.spans.iter().map(|span| span.end).max()?;
         let left = size.padding_x() + left_col as f32 * size.cell_width();
         let right = size.padding_x() + right_col as f32 * size.cell_width();
-        let mut top = size.padding_y() + first.row as f32 * size.cell_height();
-        let mut bottom = size.padding_y() + (last.row + 1) as f32 * size.cell_height();
-        if self.expand_top {
-            top -= size.cell_height() * 0.5;
-        }
-        if self.expand_bottom {
-            bottom += size.cell_height() * 0.5;
-        }
+        let top = size.padding_y() + first.row as f32 * size.cell_height();
+        let bottom = size.padding_y() + (last.row + 1) as f32 * size.cell_height();
         (right > left && bottom > top).then_some(FormulaBounds { left, top, right, bottom })
+    }
+
+    /// Per-side vertical room past `bounds()`, in pixels, given how many
+    /// neighbouring rows the formula's ink is allowed to reach into. A lent
+    /// row keeps a sliver free so antialiasing never touches the row past it;
+    /// a row that stays occupied lends only the natural line gap — terminal
+    /// glyph ink does not fill the whole cell — because anything larger lands
+    /// on that neighbour's glyphs. The fitted size and the clip consume these
+    /// same numbers, which is the invariant that keeps formula ink off
+    /// adjacent text: whatever the fit could not absorb, the clip crops.
+    fn vertical_bleed(&self, size: &SizeInfo, absorbed: (usize, usize)) -> (f32, f32) {
+        let budget = |rows: usize| {
+            size.cell_height()
+                * if rows == 0 { BLEED_INTO_PROSE } else { rows as f32 - BLANK_ROW_MARGIN }
+        };
+        (budget(absorbed.0), budget(absorbed.1))
+    }
+
+
+    /// How many neighbouring rows per side the ink may reach into: the run of
+    /// nearest rows whose own ink does not overlap `columns`. Inline math
+    /// expands symmetrically — it shares its row with prose, and a one-sided
+    /// expansion would visibly lift it off that text's baseline.
+    fn absorbable_rows(&self, columns: (usize, usize)) -> (usize, usize) {
+        let free = |rows: &[Option<(usize, usize)>; MAX_ABSORBED_BLANK_ROWS]| {
+            rows.iter()
+                .take_while(|row| {
+                    row.is_none_or(|(start, end)| end <= columns.0 || start >= columns.1)
+                })
+                .count()
+        };
+        let (above, below) = (free(&self.neighbours_above), free(&self.neighbours_below));
+        if self.display { (above, below) } else { (above.min(below), above.min(below)) }
     }
 }
 
@@ -787,6 +845,18 @@ impl TextGrid {
             .is_some_and(|cells| cells.iter().all(|cell| cell.is_none_or(|c| c == ' ')))
     }
 
+    /// Columns between the first and last non-blank cell of `row`, or `None`
+    /// for a blank row. Interior gaps are counted as occupied: a formula that
+    /// squeezes its ink between two words of the row above would read as an
+    /// overlap even where the cells are technically empty.
+    fn row_ink_columns(&self, row: usize) -> Option<(usize, usize)> {
+        let cells = self.rows.get(row)?;
+        let occupied = |cell: &Option<char>| cell.is_some_and(|character| character != ' ');
+        let start = cells.iter().position(occupied)?;
+        let end = cells.iter().rposition(occupied)? + 1;
+        Some((start, end))
+    }
+
     fn spans(&self, start: GridPosition, end: GridPosition) -> Vec<RowSpan> {
         if start.row == end.row {
             return vec![RowSpan { row: start.row as i32, start: start.column, end: end.column }];
@@ -880,42 +950,73 @@ pub(super) fn scan_visible<T>(
                 .find(|cell| !cell.character.is_whitespace())
                 .map_or(default_foreground, |cell| cell.fg);
 
-            // Grant tall layouts half a row of blank neighbour space so their
-            // rendered size stays consistent regardless of how many terminal
-            // rows the source happened to occupy. Display formulas may expand
-            // one-sided; inline formulas share a row with prose, so only a
-            // symmetric expansion keeps them optically on the text baseline.
-            if let (Some(first), Some(last)) = (overlay.spans.first(), overlay.spans.last()) {
-                let above_blank = match first.row.checked_sub(1) {
-                    Some(above) if above >= 0 => match usize::try_from(above) {
-                        Ok(row) => grid.row_is_blank(row),
-                        Err(_) => false,
-                    },
-                    // 上一行已滚入历史：clip 会截到视口，扩展无害。
-                    _ => overlay.display,
-                };
-                let below = last.row + 1;
-                let below_blank = match usize::try_from(below) {
-                    Ok(row) if row < grid.rows.len() => grid.row_is_blank(row),
-                    Ok(_) => overlay.display,
-                    Err(_) => false,
-                };
-                if overlay.display {
-                    overlay.expand_top = above_blank;
-                    overlay.expand_bottom = below_blank;
-                } else {
-                    overlay.expand_top = above_blank && below_blank;
-                    overlay.expand_bottom = above_blank && below_blank;
-                }
-            }
+            apply_layout_hints(&mut overlay, &grid);
             Some(overlay)
         })
         .collect()
 }
 
+/// Room the surrounding grid can lend an overlay, decided purely by what its
+/// neighbours hold. A formula's rendered size must not depend on how many rows
+/// and columns its source happened to occupy, so `$$x$$` on one line and the
+/// same source spread over three lines end up with the same budget whenever
+/// the blank space around them allows it. `scan_visible` and the tests share
+/// this one decision so the numbers behind fit and clip always agree.
+fn apply_layout_hints(overlay: &mut FormulaOverlay, grid: &TextGrid) {
+    // Record what the neighbouring rows hold; `prepare_overlays` decides how
+    // much of it is actually in the way once it knows the rendered width.
+    let (Some(first), Some(last)) = (overlay.spans.first(), overlay.spans.last()) else {
+        return;
+    };
+    overlay.neighbours_above = neighbour_rows(grid, first.row, -1, overlay.display);
+    overlay.neighbours_below = neighbour_rows(grid, last.row, 1, overlay.display);
+
+    // Rows that hold nothing right of the source span let a display formula
+    // lay out across the rest of the line, so its rendered size no longer
+    // depends on how many columns the source happened to span. Rows scrolled
+    // out of the viewport cannot be inspected; treating them as blank is safe
+    // because only visible rows can show a horizontal collision.
+    overlay.widen_right = overlay.display
+        && overlay.spans.iter().all(|span| match usize::try_from(span.row) {
+            Ok(row) if row < grid.rows.len() => grid.span_is_blank(row, span.end, grid.columns),
+            _ => true,
+        });
+}
+
+/// Ink columns of the [`MAX_ABSORBED_BLANK_ROWS`] rows starting one step from
+/// `from`, nearest first. Rows outside the viewport read as free for display
+/// math — the clip stops at the viewport edge, so the extra budget cannot
+/// reach anything — and as occupied for inline math, which would otherwise
+/// lift itself off the prose baseline it shares a row with.
+fn neighbour_rows(
+    grid: &TextGrid,
+    from: i32,
+    step: i32,
+    display: bool,
+) -> [Option<(usize, usize)>; MAX_ABSORBED_BLANK_ROWS] {
+    std::array::from_fn(|index| {
+        let row = from + step * (index as i32 + 1);
+        match usize::try_from(row) {
+            Ok(row) if row < grid.rows.len() => grid.row_ink_columns(row),
+            _ => (!display).then_some((0, grid.columns)),
+        }
+    })
+}
+
 #[cfg(test)]
 fn scan_grid(grid: &TextGrid, allow_inline_dollar: bool) -> Vec<FormulaOverlay> {
     scan_grid_result(grid, allow_inline_dollar).overlays
+}
+
+/// Test-only mirror of the `scan_visible` tail: scan, then let the neighbours
+/// hand out the same layout budget the real pipeline would.
+#[cfg(test)]
+fn scan_grid_with_hints(grid: &TextGrid, allow_inline_dollar: bool) -> Vec<FormulaOverlay> {
+    let mut overlays = scan_grid(grid, allow_inline_dollar);
+    for overlay in &mut overlays {
+        apply_layout_hints(overlay, grid);
+    }
+    overlays
 }
 
 struct GridScanResult {
@@ -1206,16 +1307,67 @@ fn make_overlay(
         spans: grid.spans(open, after),
         foreground: Rgb::default(),
         fallback: Vec::new(),
-        expand_top: false,
-        expand_bottom: false,
+        neighbours_above: [NEIGHBOUR_UNKNOWN; MAX_ABSORBED_BLANK_ROWS],
+        neighbours_below: [NEIGHBOUR_UNKNOWN; MAX_ABSORBED_BLANK_ROWS],
+        widen_right: false,
     }
 }
 
 /// A formula that passed layout pre-flight: the grid pass omits its source
 /// cells and [`draw_overlays`] paints the compiled layout in their place.
+/// Every geometric decision is taken here, so the fit and the clip can never
+/// disagree about how much room the formula was given.
 #[derive(Clone, Copy)]
 pub(super) struct PreparedFormula {
     fitted_pixel_size: f32,
+    /// Typesetting style actually used. A block formula that does not fit its
+    /// row falls back to text style before it gives up any size: readers judge
+    /// a formula by how big its letters are next to the prose, not by whether
+    /// `\sum` carries its limits above or beside it.
+    display_style: bool,
+    /// Room past `bounds()` on each side, and the right edge of the layout
+    /// box: [`draw_overlays`] consumes these instead of recomputing them.
+    bleed_top: f32,
+    bleed_bottom: f32,
+    box_right: f32,
+    centered: bool,
+}
+
+/// Largest uniform scale at which `metrics` fits the given room, capped at 1.
+///
+/// Height is allowed to overrun by [`HEIGHT_OVERRUN_TOLERANCE`] before the
+/// size gives way. Formulas of the same kind reading at the same size is what
+/// users actually notice; a few percent of height costs the outermost row of
+/// antialiasing, which the clip trims at the budget anyway. Width gets no such
+/// tolerance — what overruns there is a real symbol at the right edge, and
+/// cropping it loses content.
+fn fit_ratio(metrics: &MathMetrics, available_width: f32, available_height: f32) -> f32 {
+    let total_height = (metrics.height + metrics.depth).max(1.0);
+    let height_fit = available_height / total_height;
+    let height_fit = if height_fit >= 1.0 - HEIGHT_OVERRUN_TOLERANCE { 1.0 } else { height_fit };
+    (available_width / metrics.width.max(1.0)).min(height_fit).min(1.0)
+}
+
+/// Grid columns the ink of a `width`-wide layout would occupy, following the
+/// same placement rule [`draw_overlays`] uses. Measured at the terminal font
+/// size, which is the widest the formula can end up: shrinking only pulls the
+/// ink further inside this range, so neighbours judged clear stay clear.
+fn ink_columns(
+    overlay: &FormulaOverlay,
+    size: &SizeInfo,
+    bounds: FormulaBounds,
+    box_right: f32,
+    width: f32,
+) -> (usize, usize) {
+    let box_width = box_right - bounds.left;
+    let left = if overlay.display || width >= box_width * 0.75 {
+        bounds.left + (box_width - width) / 2.0
+    } else {
+        bounds.left + FORMULA_INSET
+    }
+    .max(bounds.left);
+    let column = |x: f32| ((x - size.padding_x()) / size.cell_width().max(1.0)).max(0.0);
+    (column(left).floor() as usize, column(left + width).ceil() as usize)
 }
 
 /// Pre-compile every overlay before the cell pass so the renderer knows which
@@ -1232,37 +1384,119 @@ pub(super) fn prepare_overlays(
         .iter()
         .map(|overlay| {
             let bounds = overlay.bounds(size)?;
-            let available_width = (bounds.width() - FORMULA_INSET * 2.0).max(1.0);
-            let available_height = (bounds.height() - FORMULA_INSET * 2.0).max(1.0);
+            let viewport_right = size.padding_x() + size.columns() as f32 * size.cell_width();
+            let box_right = if overlay.widen_right {
+                viewport_right.max(bounds.right)
+            } else {
+                bounds.right
+            };
+            let available_width = (box_right - bounds.left - FORMULA_INSET * 2.0).max(1.0);
 
-            let base_metrics = state
-                .layout(
-                    overlay.formula_id,
-                    &overlay.source,
-                    font_pixel_size,
-                    pixels_per_point,
-                    overlay.display,
-                )
-                .ok()?
-                .metrics;
-            let total_height = (base_metrics.height + base_metrics.depth).max(1.0);
-            let fit = (available_width / base_metrics.width.max(1.0))
-                .min(available_height / total_height)
-                .min(1.0);
-            let fitted_pixel_size = font_pixel_size * fit * 0.96;
-            if !fitted_pixel_size.is_finite() || fitted_pixel_size < MIN_MATH_PIXEL_SIZE {
+            // Both candidate styles are measured at the terminal font size
+            // first: the widest of them decides which columns the ink can
+            // possibly land in, and only rows holding text in those columns
+            // are in the way. Prose above a centred formula usually stops long
+            // before it, which is what lets a `$$` block wedged between two
+            // list items still use their vertical space.
+            let styles: &[bool] = if overlay.display { &[true, false] } else { &[false] };
+            let mut widest = 0.0f32;
+            for &display_style in styles {
+                let metrics = state
+                    .layout(
+                        overlay.formula_id,
+                        &overlay.source,
+                        font_pixel_size,
+                        pixels_per_point,
+                        display_style,
+                    )
+                    .ok()?
+                    .metrics;
+                widest = widest.max(metrics.width);
+            }
+            let absorbed = overlay.absorbable_rows(ink_columns(
+                overlay,
+                size,
+                bounds,
+                box_right,
+                widest,
+            ));
+            // Vertical room is the bounds plus each side's budget. Rows the
+            // ink may reach into effectively hand a formula their whole
+            // height, so `$$` blocks render at the terminal font size like the
+            // prose around them; a formula truly hemmed in by text only gets
+            // the line gap.
+            let (bleed_top, bleed_bottom) = overlay.vertical_bleed(size, absorbed);
+            // 2026-08-05 裁定（用户两次实测后）：字号一致优先于呼吸感。这里
+            // 曾经先扣一条"留白边距"再去 fit，结果被长正文夹住的 `$$` 掉到
+            // 74–76%，而前后有空行的同款仍是 100%——同组两个尺寸，正是要消
+            // 除的现象。固定行高里造不出高度，留白只能靠 emitter 在 `$$` 前
+            // 后留空行。别再加回来。
+            let available_height = (bounds.height() + bleed_top + bleed_bottom).max(1.0);
+
+            // Style ladder before size ladder. A `$$` block wedged between two
+            // prose rows has barely one row of height, and display style wants
+            // two: `\sum` stacks its limits, fractions stay full size. Laying
+            // that same source out in text style keeps the letters at the
+            // terminal font size and moves the limits beside the operator —
+            // exactly what TeX does for math inside a paragraph. Shrinking
+            // uniformly is the last resort, because that is what makes a
+            // formula read as "too small next to the text".
+            let mut best: Option<(bool, f32)> = None;
+            for &display_style in styles {
+                let metrics = state
+                    .layout(
+                        overlay.formula_id,
+                        &overlay.source,
+                        font_pixel_size,
+                        pixels_per_point,
+                        display_style,
+                    )
+                    .ok()?
+                    .metrics;
+                let fit = fit_ratio(&metrics, available_width, available_height);
+                if fit >= 1.0 {
+                    best = Some((display_style, font_pixel_size));
+                    break;
+                }
+                // Math layout is linear in pixel size only approximately; the
+                // same rounding margin the markdown reader uses keeps the
+                // re-laid-out ink inside the budget the clip will enforce.
+                let fitted = font_pixel_size * fit * 0.98;
+                if best.is_none_or(|(_, previous)| fitted > previous) {
+                    best = Some((display_style, fitted));
+                }
+            }
+
+            let (display_style, fitted_pixel_size) = best?;
+            if !fitted_pixel_size.is_finite() || fitted_pixel_size < MIN_READABLE_MATH_PX {
                 return None;
             }
-            state
+            let metrics = state
                 .layout(
                     overlay.formula_id,
                     &overlay.source,
                     fitted_pixel_size,
                     pixels_per_point,
-                    overlay.display,
+                    display_style,
                 )
-                .ok()?;
-            Some(PreparedFormula { fitted_pixel_size })
+                .ok()?
+                .metrics;
+            // Display math centers like block typography. Inline math whose
+            // rendered width is far below its source span (`$\xi$` is five
+            // cells of source, one glyph of output) hugs the preceding prose
+            // instead: centering would strand it in the middle of a large gap,
+            // detached from both sides. Near-full-width results still center
+            // so the leftover cell splits evenly.
+            let centered =
+                overlay.display || metrics.width >= (box_right - bounds.left) * 0.75;
+            Some(PreparedFormula {
+                fitted_pixel_size,
+                display_style,
+                bleed_top,
+                bleed_bottom,
+                box_right,
+                centered,
+            })
         })
         .collect()
 }
@@ -1327,7 +1561,7 @@ pub(super) fn draw_overlays(
             &overlay.source,
             prepared.fitted_pixel_size,
             pixels_per_point,
-            overlay.display,
+            prepared.display_style,
         ) {
             Ok(layout) => layout,
             Err(_) => {
@@ -1338,28 +1572,42 @@ pub(super) fn draw_overlays(
             },
         };
         let total_height = layout.metrics.height + layout.metrics.depth;
-        // Display math centers like block typography. Inline math whose
-        // rendered width is far below its source span (`$\xi$` is five cells
-        // of source, one glyph of output) hugs the preceding prose instead:
-        // centering would strand it in the middle of a large gap, detached
-        // from both sides. Near-full-width results still center so the
-        // leftover cell splits evenly.
-        let centered = overlay.display || layout.metrics.width >= bounds.width() * 0.75;
-        let origin_x = if centered {
-            bounds.left + (bounds.width() - layout.metrics.width) / 2.0
+        let viewport_right = size.padding_x() + size.columns() as f32 * size.cell_width();
+        let viewport_bottom = size.padding_y() + size.screen_lines() as f32 * size.cell_height();
+        let box_right = prepared.box_right;
+        let box_width = box_right - bounds.left;
+        let origin_x = if prepared.centered {
+            bounds.left + (box_width - layout.metrics.width) / 2.0
         } else {
             bounds.left + FORMULA_INSET
         };
-        let baseline_y =
-            bounds.top + (bounds.height() - total_height) / 2.0 + layout.metrics.height;
+        // Centre inside the source rows while the ink fits them. What does not
+        // fit is split between the sides in proportion to what each side can
+        // actually lend: with a blank row above and prose below, the overflow
+        // goes up, and the formula keeps the full line gap between itself and
+        // the text underneath instead of splitting the crowding evenly.
+        let slack = bounds.height() - total_height;
+        let room = prepared.bleed_top + prepared.bleed_bottom;
+        let top = if slack >= 0.0 {
+            bounds.top + slack / 2.0
+        } else if room > 0.0 {
+            bounds.top + slack * (prepared.bleed_top / room)
+        } else {
+            bounds.top + slack / 2.0
+        };
+        let baseline_y = (top + layout.metrics.height)
+            .max(bounds.top - prepared.bleed_top + layout.metrics.height)
+            .min(bounds.bottom + prepared.bleed_bottom - layout.metrics.depth);
 
-        let viewport_right = size.padding_x() + size.columns() as f32 * size.cell_width();
-        let viewport_bottom = size.padding_y() + size.screen_lines() as f32 * size.cell_height();
+        // The clip follows the bleed budget, never the ink: whatever the fit
+        // could not absorb gets cropped instead of landing on neighbouring
+        // prose. (Following the ink is what painted formulas over adjacent
+        // rows.)
         let clip = MathClip {
             left: bounds.left.max(size.padding_x()),
-            top: bounds.top.max(size.padding_y()),
-            right: bounds.right.min(viewport_right),
-            bottom: bounds.bottom.min(viewport_bottom),
+            top: (bounds.top - prepared.bleed_top).max(size.padding_y()),
+            right: box_right.min(viewport_right),
+            bottom: (bounds.bottom + prepared.bleed_bottom).min(viewport_bottom),
         };
         if clip.right <= clip.left || clip.bottom <= clip.top {
             renderer.draw_cells(size, glyph_cache, overlay.fallback.iter().cloned());
@@ -1763,5 +2011,354 @@ d & -b \\
         let pruned = grid_at(&["text"], 93, 93);
         state.synchronize_grid(&pruned);
         assert!(state.formulas.is_empty());
+    }
+
+    /// Cell geometry proportional to a real terminal font: monospace advance
+    /// is ~0.6 em and line height ~1.3 em, so budgets in these tests mean the
+    /// same thing they mean on screen.
+    fn test_size(columns: f32, lines: f32) -> SizeInfo {
+        SizeInfo::new(columns * 12.0, lines * 26.0, 12.0, 26.0, 0.0, 0.0, false)
+    }
+
+    /// Nominal terminal font size behind [`test_size`].
+    const TEST_FONT_PX: f32 = 20.0;
+
+    fn fitted_size(rows: &[&str], allow_inline: bool) -> f32 {
+        let grid = TextGrid::from_rows(rows);
+        let overlays = scan_grid_with_hints(&grid, allow_inline);
+        assert_eq!(overlays.len(), 1, "expected exactly one formula in {rows:?}");
+        let size = test_size(grid.columns as f32, grid.rows.len() as f32);
+        let mut state = TerminalMathState::default();
+        let prepared = prepare_overlays(&mut state, &overlays, &size, TEST_FONT_PX, 1.0);
+        prepared[0].expect("formula must render").fitted_pixel_size
+    }
+
+    #[test]
+    fn display_formula_with_blank_neighbours_keeps_the_terminal_font_size() {
+        let fitted = fitted_size(
+            &[
+                "                    ",
+                "$$                  ",
+                r"\sum_{i=1}^{n} i^2  ",
+                "$$                  ",
+                "                    ",
+            ],
+            false,
+        );
+        assert_eq!(fitted, TEST_FONT_PX, "blank-neighbour display math must not shrink");
+    }
+
+    /// The whole point of the blank-row budget: the same source keeps one size
+    /// whether the emitter put it on one line or spread it over three.
+    #[test]
+    fn display_math_size_does_not_depend_on_how_many_rows_the_source_used() {
+        let one_line = fitted_size(
+            &[
+                "                              ",
+                r"$$\sum_{i=1}^{n} i^2$$        ",
+                "                              ",
+            ],
+            false,
+        );
+        let three_lines = fitted_size(
+            &[
+                "                              ",
+                "$$                            ",
+                r"\sum_{i=1}^{n} i^2            ",
+                "$$                            ",
+                "                              ",
+            ],
+            false,
+        );
+        assert_eq!(one_line, three_lines);
+        assert_eq!(one_line, TEST_FONT_PX);
+    }
+
+    /// A row hemmed in on both sides by prose that reaches under the formula
+    /// is the one case where the budget really is a single line gap. The
+    /// formula must then trade layout style — and only as a last resort a few
+    /// percent of size — for staying inside it, because the clip crops exactly
+    /// what the fit could not absorb.
+    #[test]
+    fn tall_formula_hemmed_in_by_prose_stays_inside_the_line_gap_budget() {
+        let rows = &[
+            "prose above that runs under the formula",
+            r"$$\frac{x^2+1}{y-1}$$                  ",
+            "prose below that runs under the formula",
+        ];
+        let grid = TextGrid::from_rows(rows);
+        let overlays = scan_grid_with_hints(&grid, false);
+        assert_eq!(overlays.len(), 1);
+        let size = test_size(grid.columns as f32, 8.0);
+
+        let mut state = TerminalMathState::default();
+        let prepared = prepare_overlays(&mut state, &overlays, &size, TEST_FONT_PX, 1.0);
+        let prepared = prepared[0].expect("formula must render");
+        assert!(
+            !prepared.display_style,
+            "the compact style must be tried before any size is given up",
+        );
+        assert!(
+            prepared.fitted_pixel_size >= TEST_FONT_PX * 0.9,
+            "compact style should cost at most a few percent, got {}",
+            prepared.fitted_pixel_size,
+        );
+
+        // The invariant behind the whole scheme: re-laid-out ink stays inside
+        // bounds plus the prose-side budgets and the deliberate overrun
+        // tolerance, so the clip only ever trims an antialiasing edge.
+        let layout = state
+            .layout(
+                overlays[0].formula_id,
+                &overlays[0].source,
+                prepared.fitted_pixel_size,
+                1.0,
+                prepared.display_style,
+            )
+            .expect("fitted layout");
+        let budget = size.cell_height()
+            * (1.0 + BLEED_INTO_PROSE * 2.0)
+            * (1.0 + HEIGHT_OVERRUN_TOLERANCE);
+        assert!(
+            layout.metrics.height + layout.metrics.depth <= budget + 0.5,
+            "fitted ink {} must fit the prose budget {}",
+            layout.metrics.height + layout.metrics.depth,
+            budget,
+        );
+    }
+
+    /// Prose that stops well before the formula's columns is not in the way:
+    /// the ink of a centred block lands where those rows are empty, so it may
+    /// use their height and keep both the display style and the font size.
+    #[test]
+    fn short_prose_neighbours_do_not_shrink_a_centred_block() {
+        let rows = &[
+            "其中：                                  ",
+            r"$$\sum_{i=1}^{n} i = \frac{n(n+1)}{2}$$",
+            "下面继续说明。                            ",
+        ];
+        let grid = TextGrid::from_rows(rows);
+        let overlays = scan_grid_with_hints(&grid, false);
+        assert_eq!(overlays.len(), 1);
+
+        let mut state = TerminalMathState::default();
+        let size = test_size(grid.columns as f32, 8.0);
+        let prepared = prepare_overlays(&mut state, &overlays, &size, TEST_FONT_PX, 1.0);
+        let prepared = prepared[0].expect("formula must render");
+        assert_eq!(prepared.fitted_pixel_size, TEST_FONT_PX);
+        assert!(prepared.display_style, "there is room for the block style here");
+    }
+
+    #[test]
+    fn inline_formula_between_prose_keeps_the_terminal_font_size() {
+        let fitted = fitted_size(&["value $x^2$ grows   "], true);
+        assert_eq!(
+            fitted, TEST_FONT_PX,
+            "a superscript must fit the line-gap budget without shrinking",
+        );
+    }
+
+    /// The acceptance rule: formulas written with the same delimiter must read
+    /// at one size. Groups may differ from each other — an inline fraction is
+    /// meant to be more compact than a block one — but within a group a reader
+    /// scanning an answer must not see one formula shrunk against the others.
+    #[test]
+    fn formulas_of_the_same_kind_render_at_one_size() {
+        let rows = &[
+            "核心想法：与其硬选一个 prompt，不如软组合一堆 prompt 组件。      ",
+            "                                                              ",
+            "- 用 query 对所有组件算注意力权重，然后加权求和出一组 prompt：   ",
+            r"$$P_i = \sum_j a_{i,j} \cdot c_j$$                            ",
+            "- 这样每个任务的 prompt 是所有组件的连续加权组合。              ",
+            "                                                              ",
+            "单行块紧贴正文：                                                ",
+            r"$$\sum_{i=1}^{n} i = \frac{n(n+1)}{2}$$                       ",
+            "下面继续说明。                                                  ",
+            "                                                              ",
+            r"高斯积分：$$\int_{-\infty}^{\infty} e^{-x^2}dx = \sqrt{\pi}$$   ",
+            "                                                              ",
+            "$$                                                            ",
+            r"A = \begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix}                ",
+            "$$                                                            ",
+            "                                                              ",
+            r"内联的分式 $\frac{a+b}{c-d}$ 与根号 $\sqrt{x^2+y^2}$ 混排收尾。 ",
+            r"行内的求和 $\sum_{i=1}^{n} i$ 和上标 $x^2$ 也在同一段里。       ",
+        ];
+        let grid = TextGrid::from_rows(rows);
+        let overlays = scan_grid_with_hints(&grid, true);
+        let size = test_size(grid.columns as f32, grid.rows.len() as f32);
+        let mut state = TerminalMathState::default();
+        let prepared = prepare_overlays(&mut state, &overlays, &size, TEST_FONT_PX, 1.0);
+
+        let mut sizes: BTreeMap<bool, Vec<(String, f32)>> = BTreeMap::new();
+        for (overlay, prepared) in overlays.iter().zip(&prepared) {
+            let prepared = prepared.expect("every formula in the sample must render");
+            sizes
+                .entry(overlay.display)
+                .or_default()
+                .push((overlay.source.to_string(), prepared.fitted_pixel_size));
+        }
+        assert_eq!(sizes.len(), 2, "sample must exercise both kinds");
+        for (display, group) in sizes {
+            assert!(group.len() >= 4, "each kind needs several samples, got {group:?}");
+            assert!(
+                group.iter().all(|(_, size)| *size == TEST_FONT_PX),
+                "{} formulas must share the terminal font size: {group:?}",
+                if display { "block" } else { "inline" },
+            );
+        }
+    }
+
+    /// The ceiling behind the raised script sizes: a formula sharing its row
+    /// with prose may grow past one row, but never past two — beyond that it
+    /// stops being ink in a line gap and starts being ink on the neighbours.
+    #[test]
+    fn inline_math_never_grows_past_two_rows() {
+        let sources = [
+            r"$\frac{a+b}{c-d}$",
+            r"$\int_0^\infty e^{-x^2}dx$",
+            r"$\sqrt{\frac{a+b}{c+d}}$",
+            r"$x_{i+1}^2+y_{j-1}^2$",
+            r"$\sum_{i=1}^{n} i$",
+        ];
+        let size = test_size(60.0, 4.0);
+        for source in sources {
+            let row = format!("值 {source} 收敛                        ");
+            let grid = TextGrid::from_rows(&[&row]);
+            let overlays = scan_grid_with_hints(&grid, true);
+            assert_eq!(overlays.len(), 1, "{source}");
+
+            let mut state = TerminalMathState::default();
+            let prepared = prepare_overlays(&mut state, &overlays, &size, TEST_FONT_PX, 1.0);
+            let prepared = prepared[0].expect("formula must render");
+            let layout = state
+                .layout(
+                    overlays[0].formula_id,
+                    &overlays[0].source,
+                    prepared.fitted_pixel_size,
+                    1.0,
+                    prepared.display_style,
+                )
+                .expect("fitted layout");
+            let rows = (layout.metrics.height + layout.metrics.depth) / size.cell_height();
+            assert!(rows <= 2.0, "{source} rendered {rows} rows tall");
+        }
+    }
+
+    /// 诊断用：打印各场景的缩放比例，`cargo test diagnose -- --nocapture`。
+    #[test]
+    fn diagnose_sizes() {
+        let blank = " ".repeat(80);
+        let blank = blank.as_str();
+        let long = r"\pm\quad \mp\quad \times\quad \div\quad \cdot\quad \ast\quad \circ\quad \bullet\quad \oplus\quad \otimes";
+        let cases: Vec<(&str, Vec<&str>, bool)> = vec![
+            ("display 3行 sum", vec![blank, "$$", r"\sum_{i=1}^{n} i^2", "$$", blank], false),
+            ("display 1行 sum", vec![blank, r"$$\sum_{i=1}^{n} i^2$$", blank], false),
+            ("display 1行 frac", vec![blank, r"$$\frac{x^2+1}{y-1}$$", blank], false),
+            (
+                "display 1行 矩阵",
+                vec![blank, r"$$A=\begin{pmatrix}1&2\\3&4\end{pmatrix}$$", blank],
+                false,
+            ),
+            (
+                "display 3行 矩阵",
+                vec![blank, "$$", r"A=\begin{pmatrix}1&2\\3&4\end{pmatrix}", "$$", blank],
+                false,
+            ),
+            (
+                "display 3行 大矩阵",
+                vec![
+                    blank,
+                    "$$",
+                    r"A=\begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix}",
+                    "$$",
+                    blank,
+                ],
+                false,
+            ),
+            ("display 3行 长串", vec![blank, "$$", long, "$$", blank], false),
+            ("display 3行 紧贴正文", vec!["前文", "$$", r"\frac{x^2+1}{y-1}", "$$", "后文"], false),
+            (
+                "display 1行 紧贴正文",
+                vec![
+                    "- 来一张图片，用 query 对所有组件算注意力权重，然后加权求和出一组 prompt：",
+                    r"$$P_i = \sum_j attention_{i,j} \cdot component_j$$",
+                    "- 这样每个任务的 prompt 不是从池子里挑一个，而是所有组件的连续加权组合。",
+                ],
+                false,
+            ),
+            (
+                "display 1行 sum 夹住",
+                vec!["前面的说明文字：", r"$$\sum_{i=1}^{n} i = \frac{n(n+1)}{2}$$", "下面继续说明。"],
+                false,
+            ),
+            // 用户 08-05 截图的真实排版：上下都是跑满整行的长正文，公式的
+            // 墨迹列被两侧的字覆盖，一行的高度就是全部预算。
+            (
+                "display 长正文夹住 sum",
+                vec![
+                    "单行块紧贴正文：- 来一张图片，用 query 对所有组件算注意力权重，然后加权求和出一组 prompt：",
+                    r"$$\sum_{i=1}^{n} i = \frac{n(n+1)}{2}$$",
+                    "下面继续说明。- 来一张图片，用 query 对所有组件算注意力权重，然后加权求和出一组 prompt：",
+                ],
+                false,
+            ),
+            (
+                "display 长正文夹住 int",
+                vec![
+                    "- 来一张图片，用 query 对所有组件算注意力权重，然后加权求和出一组 prompt：",
+                    r"高斯积分：$$\int_{-\infty}^{\infty} e^{-x^2}dx = \sqrt{\pi}$$",
+                    "- 来一张图片，用 query 对所有组件算注意力权重，然后加权求和出一组 prompt：",
+                ],
+                false,
+            ),
+            (
+                "display 1行 矩阵夹住",
+                vec!["前面的说明：", r"$$A=\begin{pmatrix}1&2\\3&4\end{pmatrix}$$", "下面继续。"],
+                false,
+            ),
+            ("inline x^2", vec!["value $x^2$ grows"], true),
+            ("inline frac", vec![r"value $\frac{a}{b}$ grows"], true),
+            ("inline 大 frac", vec![r"value $\frac{x^2+1}{y-1}$ grows"], true),
+            ("inline sqrt", vec![r"value $\sqrt{x^2+y^2}$ grows"], true),
+            ("inline sum", vec![r"value $\sum_{i=1}^{n} i$ grows"], true),
+            ("inline int", vec![r"value $\int_0^\infty e^{-x^2}dx$ ok"], true),
+            ("inline 短源码", vec![r"值 $x_{i+1}^2+y_{j-1}^2$ 收敛"], true),
+        ];
+        println!("\n{:<22} {:>6} {:>6} {:>16} {:>16}", "场景", "比例", "样式", "墨迹 宽×高", "预算 宽×高");
+        for (name, rows, inline) in cases {
+            let grid = TextGrid::from_rows(&rows);
+            let overlays = scan_grid_with_hints(&grid, inline);
+            assert_eq!(overlays.len(), 1, "{name}: expected one formula");
+            let overlay = &overlays[0];
+            let size = test_size(grid.columns as f32, grid.rows.len() as f32);
+            let mut state = TerminalMathState::default();
+
+            let bounds = overlay.bounds(&size).expect("bounds");
+            let viewport_right = size.padding_x() + size.columns() as f32 * size.cell_width();
+            let right =
+                if overlay.widen_right { viewport_right.max(bounds.right) } else { bounds.right };
+            let base = state
+                .layout(overlay.formula_id, &overlay.source, TEST_FONT_PX, 1.0, overlay.display)
+                .expect("layout")
+                .metrics;
+            let absorbed =
+                overlay.absorbable_rows(ink_columns(overlay, &size, bounds, right, base.width));
+            let (bleed_top, bleed_bottom) = overlay.vertical_bleed(&size, absorbed);
+            let budget_width = right - bounds.left - FORMULA_INSET * 2.0;
+            let budget_height = bounds.height() + bleed_top + bleed_bottom;
+
+            let prepared = prepare_overlays(&mut state, &overlays, &size, TEST_FONT_PX, 1.0);
+            let prepared = prepared[0].expect("formula must render");
+            println!(
+                "{name:<22} {:>5.0}% {:>6} {:>7.0}×{:<8.0} {:>7.0}×{:<8.0}",
+                prepared.fitted_pixel_size / TEST_FONT_PX * 100.0,
+                if prepared.display_style { "块级" } else { "行内" },
+                base.width,
+                base.height + base.depth,
+                budget_width,
+                budget_height,
+            );
+        }
     }
 }

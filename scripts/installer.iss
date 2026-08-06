@@ -60,11 +60,13 @@ Name: "chinesesimplified"; MessagesFile: "{#RepoRoot}\target\installer-tools\Chi
 english.DesktopIcon=Create a desktop shortcut
 english.AutoStart=Start Nebula Terminal when I sign in to Windows
 english.InstallFont=Install Maple Mono font for the current user
+english.OpenInNebula=Open in Nebula
 english.LaunchProgram=Launch Nebula Terminal
 english.UninstallProgram=Uninstall Nebula Terminal
 chinesesimplified.DesktopIcon=创建桌面快捷方式
 chinesesimplified.AutoStart=登录 Windows 后启动 Nebula Terminal
 chinesesimplified.InstallFont=为当前用户安装 Maple Mono 字体
+chinesesimplified.OpenInNebula=在 Nebula 中打开
 chinesesimplified.LaunchProgram=启动 Nebula Terminal
 chinesesimplified.UninstallProgram=卸载 Nebula Terminal
 
@@ -94,6 +96,16 @@ Name: "{group}\Nebula Terminal"; Filename: "{app}\nebula.exe"; WorkingDir: "{%US
 Name: "{group}\{cm:UninstallProgram}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Nebula Terminal"; Filename: "{app}\nebula.exe"; WorkingDir: "{%USERPROFILE}"; Tasks: desktopicon
 Name: "{userstartup}\Nebula Terminal"; Filename: "{app}\nebula.exe"; WorkingDir: "{%USERPROFILE}"; Tasks: autostart
+
+[Registry]
+; 目录背景使用 %V，选中的目录对象使用 %1；两者必须由 Explorer 展开后再交给 CLI。
+; 每个动词使用独立的应用子键，卸载时只删除 Nebula 自己注册的菜单。
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\NebulaTerminal"; ValueType: string; ValueName: "MUIVerb"; ValueData: "{cm:OpenInNebula}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\NebulaTerminal"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\nebula.exe,0"
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\NebulaTerminal\command"; ValueType: string; ValueName: ""; ValueData: """{app}\nebula.exe"" --working-directory ""%V"""
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\NebulaTerminal"; ValueType: string; ValueName: "MUIVerb"; ValueData: "{cm:OpenInNebula}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\NebulaTerminal"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\nebula.exe,0"
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\NebulaTerminal\command"; ValueType: string; ValueName: ""; ValueData: """{app}\nebula.exe"" --working-directory ""%1"""
 
 [Run]
 Filename: "{app}\nebula.exe"; Description: "{cm:LaunchProgram}"; WorkingDir: "{%USERPROFILE}"; Flags: nowait postinstall skipifsilent
