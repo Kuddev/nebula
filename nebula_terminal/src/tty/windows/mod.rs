@@ -189,11 +189,17 @@ struct NebulaRuntimeSettings {
 }
 
 fn nebula_data_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
+    // The GUI and the injected shell prompt must read the same settings file.
+    // Portable runs set this override on the parent process; falling back to
+    // APPDATA preserves the normal installed-layout behavior.
+    if let Some(path) = std::env::var_os("NEBULA_CONFIG_DIR").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+    std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("Nebula")
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Nebula")
 }
 
 fn nebula_settings_value(key: &str) -> Option<String> {
@@ -302,7 +308,9 @@ $global:NebFolderIcon = [char]0xE70F
 $global:NebGitBranchIcon = [char]0xF418
 $global:NebClockIcon = [char]0xF017
 $global:NebulaPromptCount = 0
-$global:NebulaSettingsFile = if ($env:APPDATA) {
+$global:NebulaSettingsFile = if ($env:NEBULA_CONFIG_DIR) {
+    Join-Path $env:NEBULA_CONFIG_DIR 'nebula_settings.txt'
+} elseif ($env:APPDATA) {
     Join-Path $env:APPDATA 'Nebula\nebula_settings.txt'
 } elseif ($env:HOME) {
     Join-Path (Join-Path $env:HOME '.config') 'Nebula\nebula_settings.txt'
@@ -721,7 +729,9 @@ if [ -f "$HOME/.bashrc" ] && [ -z "${NEBULA_BASHRC_SOURCED:-}" ]; then
 fi
 
 __nebula_settings_file() {
-    if command -v cygpath >/dev/null 2>&1 && [ -n "${APPDATA:-}" ]; then
+    if [ -n "${NEBULA_CONFIG_DIR:-}" ]; then
+        printf '%s/nebula_settings.txt' "$NEBULA_CONFIG_DIR"
+    elif command -v cygpath >/dev/null 2>&1 && [ -n "${APPDATA:-}" ]; then
         printf '%s/Nebula/nebula_settings.txt' "$(cygpath -u "$APPDATA")"
     elif [ -n "${APPDATA:-}" ]; then
         printf '%s/Nebula/nebula_settings.txt' "$APPDATA"
@@ -1040,6 +1050,18 @@ mod test {
 
         assert!(done < toggle, "command completion must not depend on the visual branch");
         assert!(prompt < start, "the powerline-off prompt and ReadLine wrapper must both stay");
+    }
+
+    #[test]
+    fn shell_integrations_share_the_portable_settings_override() {
+        assert!(
+            NEBULA_PROMPT_PS1.contains("NEBULA_CONFIG_DIR"),
+            "PowerShell must read the same override as the GUI"
+        );
+        assert!(
+            NEBULA_BASH_RC.contains("NEBULA_CONFIG_DIR"),
+            "Bash must read the same override as the GUI"
+        );
     }
 
     #[test]

@@ -1,0 +1,743 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nebula 数学公式间隙与防重叠演示</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #111417;
+      --surface: #181d20;
+      --surface-2: #20272b;
+      --surface-3: #252e33;
+      --line: #354047;
+      --line-soft: #293238;
+      --text: #eef3f2;
+      --muted: #9aa8ad;
+      --green: #5fd6a0;
+      --green-dim: #173c2e;
+      --amber: #f0bc62;
+      --amber-dim: #493719;
+      --blue: #83b6ff;
+      --red: #ef827b;
+      --mono: "Cascadia Mono", "Maple Mono", Consolas, monospace;
+      --cell: 0.66em;
+      --guard-cells: 1;
+    }
+
+    * { box-sizing: border-box; letter-spacing: 0; }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--page);
+      color: var(--text);
+      font-family: Inter, "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    }
+
+    body { min-width: 320px; }
+
+    button, input { font: inherit; }
+
+    button:focus-visible, input:focus-visible {
+      outline: 2px solid var(--blue);
+      outline-offset: 2px;
+    }
+
+    .app-header {
+      min-height: 64px;
+      border-bottom: 1px solid var(--line);
+      background: #151a1d;
+    }
+
+    .header-inner, .workspace {
+      width: min(1240px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .header-inner {
+      min-height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #3f5358;
+      border-radius: 6px;
+      background: #202a2d;
+      color: var(--green);
+      font: 700 14px var(--mono);
+    }
+
+    .brand-title { margin: 0; font-size: 15px; font-weight: 700; }
+    .brand-subtitle { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 3px rgba(95, 214, 160, 0.12);
+    }
+
+    .workspace { padding: 26px 0 34px; }
+
+    .title-row {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 20px;
+    }
+
+    h1 { margin: 0; font-size: 25px; line-height: 1.2; }
+
+    .lead {
+      max-width: 720px;
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #171c1f;
+    }
+
+    .swatch { width: 10px; height: 10px; border-radius: 2px; }
+    .swatch.ink { background: var(--green); }
+    .swatch.guard { background: var(--amber); }
+    .swatch.source { background: var(--blue); }
+
+    .tool-surface {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) minmax(220px, 0.8fr) auto;
+      gap: 28px;
+      align-items: center;
+      padding: 17px 18px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-2);
+    }
+
+    .control-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 9px;
+      color: #c9d2d4;
+      font-size: 12px;
+    }
+
+    .control-value { color: var(--text); font: 700 12px var(--mono); }
+
+    input[type="range"] {
+      width: 100%;
+      height: 4px;
+      margin: 0;
+      accent-color: var(--green);
+      cursor: pointer;
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: #c9d2d4;
+      font-size: 13px;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    .toggle input { width: 16px; height: 16px; margin: 0; accent-color: var(--green); }
+
+    .board {
+      display: grid;
+      grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+      gap: 1px;
+      background: var(--line);
+    }
+
+    .panel { min-width: 0; background: #151a1d; }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 47px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .panel-title { font-size: 13px; font-weight: 700; }
+    .panel-meta { color: var(--muted); font: 11px var(--mono); }
+
+    .rows { display: grid; gap: 0; }
+
+    .row {
+      min-height: 124px;
+      padding: 18px 16px 16px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .row:last-child { border-bottom: 0; }
+
+    .row-label {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 13px;
+    }
+
+    .row-title { color: #dce5e5; font-size: 13px; font-weight: 650; }
+    .row-id { color: #718087; font: 11px var(--mono); }
+
+    .source-line, .projected-line {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      overflow-x: auto;
+      padding: 8px 10px;
+      border: 1px solid var(--line-soft);
+      background: #101517;
+      white-space: nowrap;
+    }
+
+    .source-line {
+      gap: 0;
+      color: #c9d7dc;
+      font: 15px/1.3 var(--mono);
+    }
+
+    .source-line .source-text { color: #c9d7dc; }
+    .source-line .source-formula {
+      color: var(--blue);
+      background: rgba(131, 182, 255, 0.1);
+      border-top: 1px solid rgba(131, 182, 255, 0.5);
+      border-bottom: 1px solid rgba(131, 182, 255, 0.5);
+    }
+
+    .projected-line {
+      gap: 0;
+      color: #dce8e6;
+      font: 16px/1.35 var(--mono);
+    }
+
+    .stack-lines {
+      display: grid;
+      gap: 1px;
+      width: 100%;
+    }
+
+    .stack-lines .source-line,
+    .stack-lines .projected-line {
+      min-height: max(58px, calc(var(--math-size, 28px) * 1.9));
+      overflow: visible;
+    }
+
+    .stack-lines .projected-line {
+      padding-block: 8px;
+      border-color: rgba(95, 214, 160, 0.2);
+    }
+
+    .projected-line .text { flex: 0 0 auto; }
+
+    .formula-atom {
+      --guard-width: calc(var(--guard-cells) * var(--cell));
+      position: relative;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      min-height: 42px;
+      padding-inline: var(--guard-width);
+      border-block: 1px solid transparent;
+      isolation: isolate;
+    }
+
+    .formula-atom::before,
+    .formula-atom::after {
+      content: "";
+      position: absolute;
+      top: 4px;
+      bottom: 4px;
+      width: var(--guard-width);
+      background: rgba(240, 188, 98, 0.11);
+      border-block: 1px solid rgba(240, 188, 98, 0.38);
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    .formula-atom::before { left: 0; border-left: 1px solid rgba(240, 188, 98, 0.38); }
+    .formula-atom::after { right: 0; border-right: 1px solid rgba(240, 188, 98, 0.38); }
+
+    .formula-atom math {
+      display: inline-block;
+      min-width: 0;
+      color: var(--green);
+      font-family: "STIX Two Math", "Cambria Math", "Latin Modern Math", serif;
+      line-height: 1;
+    }
+
+    .show-geometry .formula-atom {
+      border-color: rgba(95, 214, 160, 0.64);
+      background: rgba(95, 214, 160, 0.045);
+    }
+
+    .show-geometry .formula-atom math {
+      outline: 1px solid rgba(95, 214, 160, 0.75);
+      outline-offset: 3px;
+    }
+
+    .atom-tag {
+      position: absolute;
+      top: -18px;
+      left: 50%;
+      translate: -50% 0;
+      padding: 2px 5px;
+      border: 1px solid rgba(95, 214, 160, 0.45);
+      border-radius: 3px;
+      background: #14221d;
+      color: var(--green);
+      font: 10px var(--mono);
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .show-geometry .atom-tag { opacity: 1; }
+
+    .source-code {
+      margin-top: 9px;
+      color: #728188;
+      font: 11px/1.4 var(--mono);
+      white-space: normal;
+    }
+
+    .source-code code { color: #b9c9cf; }
+
+    .row-note {
+      margin-top: 9px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border-top: 1px solid var(--line);
+      background: #13181a;
+    }
+
+    .metric { min-width: 0; padding: 15px 17px; border-right: 1px solid var(--line-soft); }
+    .metric:last-child { border-right: 0; }
+    .metric-label { color: var(--muted); font-size: 11px; }
+    .metric-value { margin-top: 6px; color: var(--text); font: 700 18px var(--mono); }
+    .metric-value.good { color: var(--green); }
+    .metric-value.warn { color: var(--amber); }
+
+    .method-note {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 14px;
+      margin-top: 20px;
+    }
+
+    .method {
+      min-width: 0;
+      padding: 14px 15px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--surface);
+    }
+
+    .method h2 { margin: 0 0 7px; font-size: 13px; }
+    .method p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+
+    @media (max-width: 900px) {
+      .title-row { align-items: flex-start; flex-direction: column; }
+      .legend { justify-content: flex-start; }
+      .controls { grid-template-columns: 1fr; gap: 15px; }
+      .board { grid-template-columns: 1fr; }
+      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metric:nth-child(2) { border-right: 0; }
+      .metric:nth-child(-n + 2) { border-bottom: 1px solid var(--line-soft); }
+      .method-note { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 500px) {
+      .header-inner, .workspace { width: min(100% - 20px, 1240px); }
+      .status { display: none; }
+      h1 { font-size: 22px; }
+      .row { padding-inline: 11px; }
+      .source-line, .projected-line { padding-inline: 7px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand">
+        <div class="brand-mark">∑</div>
+        <div>
+          <p class="brand-title">Nebula / Math Gap Lab</p>
+          <p class="brand-subtitle">公式原子化投影与相邻文本安全区</p>
+        </div>
+      </div>
+      <div class="status"><span class="status-dot"></span>原生 MathML · 离线演示</div>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <div class="title-row">
+      <div>
+        <h1>防止上标、下标与邻文重叠</h1>
+        <p class="lead">公式不再按 TeX 源码字符数占位，而是作为一个不可拆分的视觉原子。保护单元只放在原子左右，控制“防重叠”与“不要产生大间隙”的平衡。</p>
+      </div>
+      <div class="legend" aria-label="图例">
+        <span class="legend-item"><i class="swatch source"></i>源码跨度</span>
+        <span class="legend-item"><i class="swatch ink"></i>公式墨迹</span>
+        <span class="legend-item"><i class="swatch guard"></i>保护单元</span>
+      </div>
+    </div>
+
+    <section class="tool-surface" aria-label="数学公式投影实验台">
+      <div class="controls">
+        <div>
+          <div class="control-label"><span>左右保护单元</span><span class="control-value" id="guardValue">1 cell</span></div>
+          <input id="guardRange" type="range" min="0" max="2" step="1" value="1" aria-label="左右保护单元">
+        </div>
+        <div>
+          <div class="control-label"><span>公式字号</span><span class="control-value" id="sizeValue">28 px</span></div>
+          <input id="sizeRange" type="range" min="22" max="38" step="1" value="28" aria-label="公式字号">
+        </div>
+        <label class="toggle"><input id="geometryToggle" type="checkbox" checked>显示边界与保护区</label>
+      </div>
+
+      <div class="board">
+        <section class="panel">
+          <div class="panel-head"><span class="panel-title">源码网格</span><span class="panel-meta">source span</span></div>
+          <div class="rows" id="sourceRows"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><span class="panel-title">紧凑投影</span><span class="panel-meta">ink + guard cells</span></div>
+          <div class="rows" id="projectedRows"></div>
+        </section>
+      </div>
+
+      <div class="summary">
+        <div class="metric"><div class="metric-label">当前保护</div><div class="metric-value" id="summaryGuard">1 cell</div></div>
+        <div class="metric"><div class="metric-label">公式原子</div><div class="metric-value" id="summaryAtoms">4</div></div>
+        <div class="metric"><div class="metric-label">上下标策略</div><div class="metric-value good">整体测量</div></div>
+        <div class="metric"><div class="metric-label">重叠风险</div><div class="metric-value good" id="summaryRisk">none</div></div>
+      </div>
+    </section>
+
+    <section class="method-note" aria-label="布局决策">
+      <article class="method">
+        <h2>1 · 先测墨迹</h2>
+        <p>上标和下标的高度、深度由 MathML 布局实际决定；不根据 `$...$` 字符数量猜宽度。</p>
+      </article>
+      <article class="method">
+        <h2>2 · 原子化</h2>
+        <p>公式内部的 TeX 结构不参与邻文排版。整个公式只产生一个投影跨度，邻文从原子右边继续。</p>
+      </article>
+      <article class="method">
+        <h2>3 · 保护而不膨胀</h2>
+        <p>默认只给左右各一个 cell；保护区不参与公式居中，避免把安全空间变成公式内部的可见大空白。</p>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const samples = [
+      {
+        title: "上标 / 下标紧邻文本",
+        source: "前文 x_{i+1}^2+y_{j-1}^2 后文",
+        before: "前文 ",
+        after: " 后文",
+        tex: "x_{i+1}^2+y_{j-1}^2",
+        math: '<mrow><msup><msub><mi>x</mi><mrow><mi>i</mi><mo>+</mo><mn>1</mn></mrow></msub><mn>2</mn></msup><mo>+</mo><msup><msub><mi>y</mi><mrow><mi>j</mi><mo>−</mo><mn>1</mn></mrow></msub><mn>2</mn></msup></mrow>',
+        note: "保护区只在公式两侧；上下方向由公式自己的墨迹边界负责。"
+      },
+      {
+        title: "分式与根号",
+        source: "分式 (a+b)/(c-d) 后接根号 sqrt(x²+y²)",
+        before: "分式 ",
+        after: " 后接根号 ",
+        tex: "\\frac{a+b}{c-d}  \\sqrt{x^2+y^2}",
+        math: '<mrow><mfrac><mrow><mi>a</mi><mo>+</mo><mi>b</mi></mrow><mrow><mi>c</mi><mo>−</mo><mi>d</mi></mrow></mfrac><mo> </mo><msqrt><msup><mi>x</mi><mn>2</mn></msup><mo>+</mo><msup><mi>y</mi><mn>2</mn></msup></msqrt></mrow>',
+        note: "分式的上下高度不应该挤占相邻文本的水平 cell；原子宽度只由横向 ink 决定。"
+      },
+      {
+        title: "两个公式连续出现",
+        source: "左 x² 右 y₀ + zⁿ 收尾",
+        before: "左 ",
+        after: " 收尾",
+        tex: "x^2   y_0 + z^n   收尾",
+        parts: [
+          { tex: "x^2", math: '<msup><mi>x</mi><mn>2</mn></msup>' },
+          { text: " 右 " },
+          { tex: "y_0+z^n", math: '<mrow><msub><mi>y</mi><mn>0</mn></msub><mo>+</mo><msup><mi>z</mi><mi>n</mi></msup></mrow>' }
+        ],
+        note: "每个公式各自计算保护区，前一个原子的缩短不会把后一个原子推回源码位置。"
+      },
+      {
+        title: "矩阵的横向安全边界",
+        source: "矩阵 A=(1 2; 3 4) 后继续正文",
+        before: "矩阵 ",
+        after: " 后继续正文",
+        tex: "A=\\begin{pmatrix}1&2\\\\3&4\\end{pmatrix}",
+        math: '<mrow><mi>A</mi><mo>=</mo><mfenced open="(" close=")"><mtable><mtr><mtd><mn>1</mn></mtd><mtd><mn>2</mn></mtd></mtr><mtr><mtd><mn>3</mn></mtd><mtd><mn>4</mn></mtd></mtr></mtable></mfenced></mrow>',
+        note: "矩阵属于更宽的原子；保护区仍然只在左右边缘，不把空白塞进矩阵内部。"
+      },
+      {
+        title: "三行密集公式：分式、上下标、长积分",
+        stack: true,
+        lines: [
+          {
+            before: "第 1 行  ",
+            after: "  +  后文",
+            tex: "\\frac{a_1+b^2}{c_i-d^3}+x_i^2",
+            math: '<mrow><mfrac><mrow><msub><mi>a</mi><mn>1</mn></msub><mo>+</mo><msup><mi>b</mi><mn>2</mn></msup></mrow><mrow><msub><mi>c</mi><mi>i</mi></msub><mo>−</mo><msup><mi>d</mi><mn>3</mn></msup></mrow></mfrac><mo>+</mo><msup><msub><mi>x</mi><mi>i</mi></msub><mn>2</mn></msup></mrow>'
+          },
+          {
+            before: "第 2 行  ",
+            after: "  +  后文",
+            tex: "\\int_0^\\infty e^{-x^2}dx+\\sum_{k=1}^{n}k^2",
+            math: '<mrow><msubsup><mo>∫</mo><mn>0</mn><mi>∞</mi></msubsup><msup><mi>e</mi><mrow><mo>−</mo><msup><mi>x</mi><mn>2</mn></msup></mrow></msup><mi>d</mi><mi>x</mi><mo>+</mo><munderover><mo>∑</mo><mrow><mi>k</mi><mo>=</mo><mn>1</mn></mrow><mi>n</mi></munderover><msup><mi>k</mi><mn>2</mn></msup></mrow>'
+          },
+          {
+            before: "第 3 行  ",
+            after: "  +  后文",
+            tex: "\\frac{\\sum_{i=1}^{n}x_i}{\\sqrt{1+x_{j-1}^2}}+y_{m+1}",
+            math: '<mrow><mfrac><mrow><munderover><mo>∑</mo><mrow><mi>i</mi><mo>=</mo><mn>1</mn></mrow><mi>n</mi></munderover><msub><mi>x</mi><mi>i</mi></msub></mrow><msqrt><mn>1</mn><mo>+</mo><msup><msub><mi>x</mi><mrow><mi>j</mi><mo>−</mo><mn>1</mn></mrow></msub><mn>2</mn></msup></msqrt></mfrac><mo>+</mo><msub><mi>y</mi><mrow><mi>m</mi><mo>+</mo><mn>1</mn></mrow></msub></mrow>'
+          }
+        ],
+        note: "三行只留 1px 行间距；每行按实际 ink 高度分配行盒，公式上下伸展不会侵入邻行。"
+      }
+    ];
+
+    const root = document.documentElement;
+    const sourceRows = document.getElementById("sourceRows");
+    const projectedRows = document.getElementById("projectedRows");
+    const guardRange = document.getElementById("guardRange");
+    const sizeRange = document.getElementById("sizeRange");
+    const geometryToggle = document.getElementById("geometryToggle");
+    const guardValue = document.getElementById("guardValue");
+    const sizeValue = document.getElementById("sizeValue");
+    const summaryGuard = document.getElementById("summaryGuard");
+    const summaryAtoms = document.getElementById("summaryAtoms");
+    const summaryRisk = document.getElementById("summaryRisk");
+
+    function makeSourceRow(sample, index) {
+      const row = document.createElement("article");
+      row.className = "row";
+      row.innerHTML = `<div class="row-label"><span class="row-title">${sample.title}</span><span class="row-id">0${index + 1}</span></div>`;
+      if (sample.lines) {
+        const stack = document.createElement("div");
+        stack.className = "stack-lines";
+        sample.lines.forEach(lineData => {
+          const line = document.createElement("div");
+          line.className = "source-line";
+          const before = document.createElement("span");
+          before.className = "source-text";
+          before.textContent = lineData.before;
+          const formula = document.createElement("span");
+          formula.className = "source-formula";
+          formula.textContent = `$${lineData.tex}$`;
+          const after = document.createElement("span");
+          after.className = "source-text";
+          after.textContent = lineData.after;
+          line.append(before, formula, after);
+          stack.append(line);
+        });
+        row.append(stack);
+        return row;
+      }
+      const line = document.createElement("div");
+      line.className = "source-line";
+      if (sample.parts) {
+        const lead = document.createElement("span");
+        lead.className = "source-text";
+        lead.textContent = sample.before;
+        line.append(lead);
+        sample.parts.forEach(part => {
+          const node = document.createElement("span");
+          if (part.math) {
+            node.className = "source-formula";
+            node.textContent = `$${part.tex}$`;
+          } else {
+            node.className = "source-text";
+            node.textContent = part.text;
+          }
+          line.append(node);
+        });
+        const tail = document.createElement("span");
+        tail.className = "source-text";
+        tail.textContent = sample.after;
+        line.append(tail);
+      } else {
+        const before = document.createElement("span");
+        before.className = "source-text";
+        before.textContent = sample.before;
+        const formula = document.createElement("span");
+        formula.className = "source-formula";
+        formula.textContent = `$${sample.tex}$`;
+        const after = document.createElement("span");
+        after.className = "source-text";
+        after.textContent = sample.after;
+        line.append(before, formula, after);
+      }
+      row.append(line);
+      return row;
+    }
+
+    function makeMathAtom(item, index) {
+      const atom = document.createElement("span");
+      atom.className = "formula-atom";
+      atom.dataset.tex = item.tex;
+      const math = document.createElement("math");
+      math.setAttribute("display", "inline");
+      math.setAttribute("aria-label", item.tex);
+      math.innerHTML = item.math;
+      const tag = document.createElement("span");
+      tag.className = "atom-tag";
+      tag.textContent = `atom ${index + 1}`;
+      atom.append(math, tag);
+      return atom;
+    }
+
+    function makeProjectedRow(sample, index) {
+      const row = document.createElement("article");
+      row.className = "row";
+      row.innerHTML = `<div class="row-label"><span class="row-title">${sample.title}</span><span class="row-id">${sample.lines ? "3 rows" : sample.parts ? "2 atoms" : "1 atom"}</span></div>`;
+      if (sample.lines) {
+        const stack = document.createElement("div");
+        stack.className = "stack-lines";
+        sample.lines.forEach((lineData, lineIndex) => {
+          const line = document.createElement("div");
+          line.className = "projected-line";
+          const before = document.createElement("span");
+          before.className = "text";
+          before.textContent = lineData.before;
+          line.append(before, makeMathAtom(lineData, lineIndex));
+          const after = document.createElement("span");
+          after.className = "text";
+          after.textContent = lineData.after;
+          line.append(after);
+          stack.append(line);
+        });
+        row.append(stack);
+        const code = document.createElement("div");
+        code.className = "source-code";
+        code.innerHTML = `源码：<code>三行独立 atom · 每行实际 ink 高度参与行盒</code>`;
+        row.append(code);
+        const note = document.createElement("div");
+        note.className = "row-note";
+        note.textContent = sample.note;
+        row.append(note);
+        return row;
+      }
+      const line = document.createElement("div");
+      line.className = "projected-line";
+      const before = document.createElement("span");
+      before.className = "text";
+      before.textContent = sample.before;
+      line.append(before);
+      if (sample.parts) {
+        sample.parts.forEach((part, partIndex) => {
+          if (part.math) line.append(makeMathAtom(part, partIndex));
+          else {
+            const text = document.createElement("span");
+            text.className = "text";
+            text.textContent = part.text;
+            line.append(text);
+          }
+        });
+      } else {
+        line.append(makeMathAtom(sample, 0));
+      }
+      const after = document.createElement("span");
+      after.className = "text";
+      after.textContent = sample.after;
+      line.append(after);
+      row.append(line);
+      const code = document.createElement("div");
+      code.className = "source-code";
+      code.innerHTML = `源码：<code>${sample.tex}</code>`;
+      row.append(code);
+      const note = document.createElement("div");
+      note.className = "row-note";
+      note.textContent = sample.note;
+      row.append(note);
+      return row;
+    }
+
+    function render() {
+      sourceRows.replaceChildren();
+      projectedRows.replaceChildren();
+      samples.forEach((sample, index) => {
+        sourceRows.append(makeSourceRow(sample, index));
+        projectedRows.append(makeProjectedRow(sample, index));
+      });
+      root.style.setProperty("--guard-cells", guardRange.value);
+      root.style.setProperty("--math-size", `${sizeRange.value}px`);
+      projectedRows.querySelectorAll("math").forEach(math => math.style.fontSize = `${sizeRange.value}px`);
+      document.body.classList.toggle("show-geometry", geometryToggle.checked);
+      const guard = Number(guardRange.value);
+      guardValue.textContent = `${guard} ${guard === 1 ? "cell" : "cells"}`;
+      sizeValue.textContent = `${sizeRange.value} px`;
+      summaryGuard.textContent = `${guard} ${guard === 1 ? "cell" : "cells"}`;
+      summaryAtoms.textContent = String(projectedRows.querySelectorAll(".formula-atom").length);
+      summaryRisk.textContent = guard === 0 ? "edge risk" : "none";
+      summaryRisk.className = `metric-value ${guard === 0 ? "warn" : "good"}`;
+    }
+
+    [guardRange, sizeRange, geometryToggle].forEach(control => control.addEventListener("input", render));
+    geometryToggle.addEventListener("change", render);
+    render();
+  </script>
+</body>
+</html>
