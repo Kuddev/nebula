@@ -2883,10 +2883,26 @@ impl WindowContext {
         }
 
         if self.dirty || self.mouse.hint_highlight_dirty {
+            let visual_point = self
+                .mouse
+                .point(&self.display.pane_view(), terminal.grid().display_offset());
+            let pane = match focused {
+                Some(index) => &self.panes[index],
+                None => &self.doc_pane,
+            };
+            let hint_point = pane
+                .nebula_state
+                .terminal_math_source_point(
+                    visual_point,
+                    self.mouse.cell_side,
+                    terminal.grid().display_offset(),
+                )
+                .0;
             self.dirty |= self.display.update_highlighted_hints(
                 &terminal,
                 &self.config,
                 &self.mouse,
+                hint_point,
                 self.modifiers.state(),
             );
             self.mouse.hint_highlight_dirty = false;

@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use nebula_terminal::index::{Point, Side};
+
 use super::terminal_math::TerminalMathState;
 
 /// Which key accepts an inline suggestion.
@@ -170,6 +172,17 @@ pub struct NebulaPaneState {
     pub ai_fix_cooldown: Option<std::time::Instant>,
     /// 可重建的公式布局缓存跟随 Pane，避免分屏之间复用错误的位置或字体尺寸。
     pub(super) terminal_math: TerminalMathState,
+}
+
+impl NebulaPaneState {
+    pub(crate) fn terminal_math_source_point(
+        &self,
+        point: Point,
+        side: Side,
+        display_offset: usize,
+    ) -> (Point, Side) {
+        self.terminal_math.source_point(point, side, display_offset)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

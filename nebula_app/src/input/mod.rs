@@ -52,6 +52,11 @@ pub trait ActionContext<T: EventListener> {
     fn write_to_pty<B: Into<Cow<'static, [u8]>>>(&self, _data: B) {}
     fn mark_dirty(&mut self) {}
     fn size_info(&self) -> SizeInfo;
+    /// Map a visual terminal cell back to the immutable source grid. The
+    /// default keeps non-Nebula test contexts and callers projection-free.
+    fn terminal_math_source_point(&self, point: Point, side: Side) -> (Point, Side) {
+        (point, side)
+    }
     fn copy_selection(&mut self, _ty: ClipboardType) {}
     /// A successful explicit copy may acknowledge itself in the owning UI;
     /// selection-only storage keeps the default silent to avoid toast spam.

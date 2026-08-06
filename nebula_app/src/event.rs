@@ -1193,6 +1193,14 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         self.display.pane_view()
     }
 
+    fn terminal_math_source_point(&self, point: Point, side: Side) -> (Point, Side) {
+        self.nebula_state.terminal_math_source_point(
+            point,
+            side,
+            self.terminal.grid().display_offset(),
+        )
+    }
+
     fn scroll(&mut self, scroll: Scroll) {
         let old_offset = self.terminal.grid().display_offset() as i32;
 
@@ -1216,7 +1224,8 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         {
             let display_offset = self.terminal.grid().display_offset();
             let point = self.mouse.point(&self.size_info(), display_offset);
-            self.update_selection(point, self.mouse.cell_side);
+            let (point, side) = self.terminal_math_source_point(point, self.mouse.cell_side);
+            self.update_selection(point, side);
         }
 
         // Scrolling inside Vi mode moves the cursor, so start typing.
@@ -2013,8 +2022,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         // Load mouse point, treating message bar and padding as the closest cell.
         let display_offset = self.terminal().grid().display_offset();
         let point = self.mouse().point(&self.size_info(), display_offset);
-
-        let cell_side = self.mouse().cell_side;
+        let (point, cell_side) = self.terminal_math_source_point(point, self.mouse().cell_side);
 
         let selection = match &mut self.terminal_mut().selection {
             Some(selection) => selection,

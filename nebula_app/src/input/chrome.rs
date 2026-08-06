@@ -1285,6 +1285,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             // Load mouse point, treating message bar and padding as the closest cell.
             let display_offset = self.ctx.terminal().grid().display_offset();
             let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+            let (point, side) =
+                self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side);
+            self.ctx.mouse_mut().cell_side = side;
 
             if let MouseButton::Left = button {
                 self.on_left_click(point)
