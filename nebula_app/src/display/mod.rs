@@ -5681,6 +5681,9 @@ impl Display {
         );
         let math_coverage =
             terminal_math::CoverageMask::build(&terminal_math_overlays, &prepared_math);
+        pane_state
+            .terminal_math
+            .update_projection(&terminal_math_overlays, &prepared_math);
 
         // Add damage from the terminal, keeping a pane-local copy: the shared
         // tracker gets flooded with a full-window mark every frame further
@@ -5843,11 +5846,17 @@ impl Display {
             let mut clickable_index = 0usize;
 
             let cells = grid_cells.into_iter().filter_map(|mut cell| {
+                let source_point = cell.point;
                 // 会被公式覆盖的源码字形直接不画：公式落在真实窗口背景上，
                 // 不再需要事后用不透明色块把源文本盖掉。
-                if !math_coverage.is_empty() && math_coverage.covers(cell.point) {
+                if !math_coverage.is_empty() && math_coverage.covers(source_point) {
                     return None;
                 }
+                // 这里只改 RenderableCell 副本的屏幕列，terminal grid 中的
+                // 源列始终不动；宽字符、背景和装饰随后都会读取同一个 point。
+                cell.point = pane_state
+                    .terminal_math
+                    .project_cell(source_point, size_info.columns())?;
                 match cell.character {
                     NEBULA_FOLDER_ICON_MARKER => {
                         powerline_icons.push(NebulaPowerlineIcon {
@@ -5866,7 +5875,7 @@ impl Display {
                     _ => (),
                 }
 
-                let point = term::viewport_to_point(display_offset, cell.point);
+                let point = term::viewport_to_point(display_offset, source_point);
                 while clickable_matches
                     .get(clickable_index)
                     .is_some_and(|bounds| bounds.end() < &point)
@@ -5894,7 +5903,7 @@ impl Display {
                         hint.as_ref().is_some_and(|hint| hint.should_highlight(point, hyperlink))
                     };
                     if should_highlight(highlighted_hint) || should_highlight(vi_highlighted_hint) {
-                        damage_tracker.frame().damage_point(cell.point);
+                        damage_tracker.frame().damage_point(source_point);
                         if !is_clickable {
                             cell.flags.insert(Flags::UNDERLINE);
                         }
@@ -7230,6 +7239,7 @@ impl Display {
         term: &Term<T>,
         config: &UiConfig,
         mouse: &Mouse,
+        point: Point,
         modifiers: ModifiersState,
     ) -> bool {
         // Update vi mode cursor hint.
@@ -7261,8 +7271,8 @@ impl Display {
             return dirty;
         }
 
-        // Find highlighted hint at mouse position.
-        let point = mouse.point(&self.pane_view(), term.grid().display_offset());
+        // `point` has already passed through the focused pane's math projection,
+        // so hover and click resolve the same immutable source cell.
         let highlighted_hint = hint::highlighted_at(term, config, point, modifiers);
 
         // Update cursor shape.

@@ -49,6 +49,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         let display_offset = self.ctx.terminal().grid().display_offset();
         let old_point = self.ctx.mouse().point(&size_info, display_offset);
+        let (old_point, _) =
+            self.ctx.terminal_math_source_point(old_point, self.ctx.mouse().cell_side);
 
         // Clamp to the window, not the pane: chrome to the right/bottom of a
         // split pane must stay hoverable and clickable.
@@ -493,7 +495,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // the palette of hover updates.
 
         let inside_text_area = size_info.contains_point(x, y);
-        let cell_side = self.cell_side(x);
+        let visual_cell_side = self.cell_side(x);
 
         // Activate a pending tree-entry drag once the pointer travels; while
         // active, the ghost chip follows the pointer and the copy cursor
@@ -509,6 +511,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         let point = self.ctx.mouse().point(&size_info, display_offset);
+        let (point, cell_side) =
+            self.ctx.terminal_math_source_point(point, visual_cell_side);
         let cell_changed = old_point != point;
 
         // If the mouse hasn't changed cells, do nothing.
@@ -615,6 +619,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     pub(super) fn mouse_report(&mut self, button: u8, state: ElementState) {
         let display_offset = self.ctx.terminal().grid().display_offset();
         let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        let (point, _) =
+            self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side);
 
         // Assure the mouse point is not in the scrollback.
         if point.line < 0 {
@@ -718,7 +724,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     let hint_point = {
                         let view = self.ctx.display().pane_view();
                         let display_offset = self.ctx.terminal().grid().display_offset();
-                        self.ctx.mouse().point(&view, display_offset)
+                        let point = self.ctx.mouse().point(&view, display_offset);
+                        self.ctx
+                            .terminal_math_source_point(point, self.ctx.mouse().cell_side)
+                            .0
                     };
                     if let Some(hint) = crate::display::hint::highlighted_at(
                         self.ctx.terminal(),
@@ -1322,6 +1331,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         self.update_message_close_hover();
         let display_offset = self.ctx.terminal().grid().display_offset();
         let mut point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        point = self
+            .ctx
+            .terminal_math_source_point(point, self.ctx.mouse().cell_side)
+            .0;
         // `point` is clamped to `size_info`, but we're about to index the grid,
         // whose column/line count can trail `size_info` by one during a resize
         // or sidebar toggle (asymmetric-padding reflow lands a frame later).
