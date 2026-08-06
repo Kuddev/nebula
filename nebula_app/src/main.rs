@@ -72,6 +72,7 @@ mod ssh;
 mod ssh_credentials;
 #[cfg(windows)]
 mod ssh_profiles;
+mod ssh_proxy;
 #[cfg(windows)]
 mod ssh_session;
 #[cfg(windows)]
@@ -80,6 +81,7 @@ mod string;
 mod sync;
 mod update_check;
 mod ux;
+mod window_transition;
 mod window_context;
 
 mod gl {
@@ -225,8 +227,12 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     }
     boot_trace("mux probe done");
 
-    // Setup winit event loop.
-    let window_event_loop = EventLoop::<Event>::with_user_event().build()?;
+    // Setup winit event loop. Windows observes native size/move stages via a
+    // WinEvent hook installed on this thread (see window_transition); winit's
+    // own message dispatch is untouched.
+    let native_window_stages = window_transition::NativeWindowStageTracker::new();
+    let mut event_loop_builder = EventLoop::<Event>::with_user_event();
+    let window_event_loop = event_loop_builder.build()?;
     boot_trace("event loop built");
 
     // Initialize the logger as soon as possible as to capture output from other subsystems.
@@ -311,7 +317,7 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     };
 
     // Event processor.
-    let mut processor = Processor::new(config, options, &window_event_loop);
+    let mut processor = Processor::new(config, options, &window_event_loop, native_window_stages);
 
     // Serve mux attach requests (window re-attach / single instance) for the
     // lifetime of the event loop; dropping it removes the port file.

@@ -250,6 +250,9 @@ pub enum Action {
     /// Toggle the command palette.
     ToggleCommandPalette,
 
+    /// Open the quick-jump panel.
+    OpenQuickJump,
+
     /// Toggle the shell/profile picker (the new-tab dropdown, Ctrl+K).
     ToggleShellPicker,
 

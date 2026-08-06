@@ -21,7 +21,9 @@ pub(crate) fn compile_formula(
     limits: MathLimits,
 ) -> Result<MathLayout, MathError> {
     let formula = parse_formula(source, display, limits)?;
-    layout_formula(&formula, pixel_size, pixels_per_point, limits)
+    // 光学补偿在这一个入口做：调用方传名义字号（终端/正文字号），缓存键也用
+    // 名义字号，返回的 metrics 已是补偿后的真实几何，fit 逻辑自然吸收。
+    layout_formula(&formula, pixel_size * super::OPTICAL_SCALE, pixels_per_point, limits)
 }
 
 /// Normalize transport-level text without inferring mathematical structure.
@@ -237,5 +239,19 @@ mod tests {
 
         let layout = compile_formula(damaged, true, 18.0, 1.0, DEFAULT_LIMITS).unwrap();
         assert!(layout.text.iter().all(|operation| operation.character != '&'));
+    }
+
+    /// 光学补偿必须真正到达 metrics：Latin Modern 的 x-height 是 0.431 em，
+    /// 名义 20px 下补偿后应为 0.431 × 20 × [`super::super::OPTICAL_SCALE`]。
+    /// 补偿只在 compile_formula 单点生效；缓存键、fit、draw 都持名义字号。
+    #[test]
+    fn optical_scale_reaches_layout_metrics() {
+        let layout = compile_formula("x", false, 20.0, 1.0, DEFAULT_LIMITS).expect("compile");
+        let expected = 0.431 * 20.0 * crate::math::OPTICAL_SCALE;
+        assert!(
+            (layout.metrics.height - expected).abs() < 0.5,
+            "x-height {} should be ≈ {expected}",
+            layout.metrics.height,
+        );
     }
 }

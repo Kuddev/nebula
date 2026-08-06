@@ -222,7 +222,7 @@ const ITEMS: &[PaletteItem] = &[
         // 而不是每加一个品类就往命令表里塞一条子命令——那样这张表迟早会被
         // 名词淹掉。目前只列 AI 会话，其余品类随面板打磨一起接进来。
         label: "快速跳转…",
-        hint: "",
+        hint: "Ctrl+Shift+O",
         search: "快速跳转 恢复 AI 会话 open quickly jump resume ai session claude codex kuaisu tiaozhuan huifu",
         action: PaletteAction::OpenAiSessionPicker,
     },
@@ -276,7 +276,7 @@ const ITEMS: &[PaletteItem] = &[
     },
     PaletteItem {
         label: "目录树面板",
-        hint: "Ctrl+Shift+O",
+        hint: "Ctrl+Shift+F",
         search: "目录树面板 files tree explorer panel mulushu wenjian",
         action: PaletteAction::ToggleFilesPanel,
     },
@@ -419,6 +419,11 @@ pub struct CommandPalette {
     /// Selected row *within `filtered`*. `None` when nothing is selected yet
     /// (initial state — keyboard nav or hover will activate selection).
     selected: Option<usize>,
+    /// 可见窗口的首项，必须与 `selected` 分开：滚轮/滑块只移动视口，不能让
+    /// Enter 悄悄执行已经滚出屏幕的旧选中项。
+    scroll_offset: usize,
+    /// 拖动滑块时，指针相对滑块顶部的偏移；保留它才能避免按下瞬间跳位。
+    scrollbar_drag: Option<f32>,
     /// Recently-run `ITEMS` indices, most-recent first (deduped, capped at
     /// `RECENT_MAX`). Lifts frequent actions to the top of an empty query.
     /// Static items only: profile indices shift whenever the config changes.
@@ -478,6 +483,8 @@ impl CommandPalette {
             query_selection: Default::default(),
             filtered: Vec::new(),
             selected: None, // No selection until user navigates
+            scroll_offset: 0,
+            scrollbar_drag: None,
             recent: Vec::new(),
             profiles: Vec::new(),
             default_shell_id: None,
@@ -538,6 +545,7 @@ impl CommandPalette {
     /// 大卡片，其余行归入"所有选项"。搜索中或无默认时退回平铺卡片列表。
     pub fn hero_row(&self) -> bool {
         self.mode == PaletteMode::Profiles
+            && self.scroll_offset == 0
             && self.query.is_empty()
             && matches!(
                 self.filtered.first(),
@@ -683,6 +691,7 @@ impl CommandPalette {
         self.open = false;
         self.mode = PaletteMode::Commands;
         self.hover = None;
+        self.scrollbar_drag = None;
         self.query_selection.clear();
         self.default_shell_id = None;
     }
@@ -777,15 +786,26 @@ impl CommandPalette {
         self.query_selection.is_selected()
     }
 
-    /// Move the selection by `delta` rows, wrapping at both ends.
-    pub fn move_selection(&mut self, delta: i32) {
+    /// Move the selection by `delta` rows, wrapping at both ends and keeping it
+    /// inside the independently scrollable visible window.
+    pub fn move_selection(&mut self, delta: i32, max_rows: usize) {
         if self.filtered.is_empty() {
             return;
         }
         let len = self.filtered.len() as i32;
-        // Initialize selection on first navigation
-        let current = self.selected.unwrap_or(0) as i32;
-        self.selected = Some(((current + delta).rem_euclid(len)) as usize);
+        let current = self.selected.unwrap_or(self.scroll_offset.min(self.filtered.len() - 1));
+        let selected = ((current as i32 + delta).rem_euclid(len)) as usize;
+        self.selected = Some(selected);
+        self.hover = None;
+
+        if max_rows == 0 {
+            return;
+        }
+        if selected < self.scroll_offset {
+            self.scroll_offset = selected;
+        } else if selected >= self.scroll_offset + max_rows {
+            self.scroll_offset = selected + 1 - max_rows;
+        }
     }
 
     /// Confirm the current selection: records it as recent, closes the palette,
@@ -794,7 +814,7 @@ impl CommandPalette {
         // Enter executes the first row before arrow navigation. The full
         // command palette also paints that row selected; lightweight pickers
         // start visually neutral per稿二 but keep this efficient keyboard path.
-        let selected = self.selected.unwrap_or(0);
+        let selected = self.selected.unwrap_or(self.scroll_offset.min(self.filtered.len() - 1));
         let candidate = *self.filtered.get(selected)?;
         // 必须在 close() 清空模式之前计算动作；旧实现先关闭再判断
         // picking_default，导致“设置默认 Shell”被错误执行成“启动 Shell”。
@@ -829,10 +849,84 @@ impl CommandPalette {
     /// 与 `click` 各一份）而表头那份压根没算，于是列表一滚动，行走了、表头
     /// 还停在开头那套分组上——分组标题指着一批已经滚走的行。
     fn scroll_start(&self, max_rows: usize) -> usize {
-        match self.selected {
-            Some(selected) if max_rows > 0 => selected.saturating_sub(max_rows - 1),
-            _ => 0,
+        self.scroll_offset.min(self.filtered.len().saturating_sub(max_rows))
+    }
+
+    fn max_scroll(&self, max_rows: usize) -> usize {
+        self.filtered.len().saturating_sub(max_rows)
+    }
+
+    /// 独立滚动视口。已有选中项一旦离开视口，就钳到最近边缘，确保 Enter
+    /// 永远只会执行用户当前看得见的行。
+    pub fn scroll_by(&mut self, delta: i32, max_rows: usize) -> bool {
+        if max_rows == 0 {
+            return false;
         }
+        let target = (self.scroll_offset as i64 + delta as i64)
+            .clamp(0, self.max_scroll(max_rows) as i64) as usize;
+        self.set_scroll_offset(target, max_rows)
+    }
+
+    fn set_scroll_offset(&mut self, target: usize, max_rows: usize) -> bool {
+        let target = target.min(self.max_scroll(max_rows));
+        if target == self.scroll_offset {
+            return false;
+        }
+        self.scroll_offset = target;
+        self.hover = None;
+        if let Some(selected) = self.selected {
+            let last = (target + max_rows.saturating_sub(1)).min(self.filtered.len() - 1);
+            self.selected = Some(selected.clamp(target, last));
+        }
+        true
+    }
+
+    pub fn scrollbar_press(
+        &mut self,
+        x: f32,
+        y: f32,
+        max_rows: usize,
+        scrollbar: PaletteScrollbar,
+    ) -> bool {
+        if !scrollbar.hit_test(x, y) {
+            return false;
+        }
+        let (_, thumb_y, _, thumb_h) = scrollbar.thumb;
+        let grab = if y >= thumb_y && y < thumb_y + thumb_h {
+            y - thumb_y
+        } else {
+            thumb_h * 0.5
+        };
+        self.scrollbar_drag = Some(grab);
+        self.scrollbar_drag_to(y, max_rows, scrollbar);
+        true
+    }
+
+    pub fn scrollbar_drag_to(
+        &mut self,
+        y: f32,
+        max_rows: usize,
+        scrollbar: PaletteScrollbar,
+    ) -> bool {
+        let Some(grab) = self.scrollbar_drag else { return false };
+        let (_, track_y, _, track_h) = scrollbar.track;
+        let (_, _, _, thumb_h) = scrollbar.thumb;
+        let travel = (track_h - thumb_h).max(0.0);
+        let max_scroll = self.max_scroll(max_rows);
+        if travel <= f32::EPSILON || max_scroll == 0 {
+            return false;
+        }
+        let fraction = ((y - grab - track_y) / travel).clamp(0.0, 1.0);
+        let target = (fraction * max_scroll as f32).round() as usize;
+        self.set_scroll_offset(target, max_rows)
+    }
+
+    pub fn scrollbar_dragging(&self) -> bool {
+        self.scrollbar_drag.is_some()
+    }
+
+    pub fn end_scrollbar_drag(&mut self) -> bool {
+        self.scrollbar_drag.take().is_some()
     }
 
     pub fn click(&mut self, row: usize, max_rows: usize) -> Option<PaletteAction> {
@@ -1047,6 +1141,8 @@ impl CommandPalette {
             _ => {},
         }
         self.selected = None; // Reset selection on refilter
+        self.scroll_offset = 0;
+        self.scrollbar_drag = None;
     }
 
     pub fn query(&self) -> &str {
@@ -1064,20 +1160,26 @@ impl CommandPalette {
         if self.filtered.is_empty() || max_rows == 0 {
             return (Vec::new(), None);
         }
-        // No stored selection yet: the first row is the visual/default target.
+        let start = self.scroll_start(max_rows);
+        // No stored selection yet: the first visible row is the default target.
         // `selected` stays None until navigation so Up from a fresh palette
         // still wraps to the last row, matching the existing keyboard model.
         let Some(selected) = self.selected else {
-            let rows = self.filtered.iter().take(max_rows).map(|&row| self.row_for(row)).collect();
+            let rows = self
+                .filtered
+                .iter()
+                .skip(start)
+                .take(max_rows)
+                .map(|&row| self.row_for(row))
+                .collect();
             let selected = (self.mode == PaletteMode::Commands).then_some(0);
             return (rows, selected);
         };
-        // Keep the selection visible: once it passes the last row, scroll so it
-        // sits on the bottom line of the window.
-        let start = self.scroll_start(max_rows);
         let rows =
             self.filtered.iter().skip(start).take(max_rows).map(|&row| self.row_for(row)).collect();
-        (rows, Some(selected - start))
+        let selected_row = (selected >= start && selected < start + rows.len())
+            .then_some(selected - start);
+        (rows, selected_row)
     }
 
     fn row_for(&self, candidate: PaletteCandidate) -> PaletteRow {
@@ -1302,6 +1404,24 @@ fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
     (next == needle.len()).then_some(score)
 }
 
+/// Scrollbar geometry shared by rendering and pointer input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PaletteScrollbar {
+    /// Visual track `(x, y, w, h)`.
+    pub track: (f32, f32, f32, f32),
+    /// Visual thumb `(x, y, w, h)`.
+    pub thumb: (f32, f32, f32, f32),
+    /// Widened pointer target around the thin visual track.
+    hit: (f32, f32, f32, f32),
+}
+
+impl PaletteScrollbar {
+    pub fn hit_test(&self, x: f32, y: f32) -> bool {
+        let (hx, hy, hw, hh) = self.hit;
+        x >= hx && x < hx + hw && y >= hy && y < hy + hh
+    }
+}
+
 /// Popup layout rectangles, all in physical pixels for the given `scale`.
 pub struct PaletteLayout {
     /// Outer panel `(x, y, w, h)`.
@@ -1328,6 +1448,8 @@ pub struct PaletteLayout {
     /// 通用化之前这里是一对 `Option<f32>`，只够 hero 版式的「推荐 / 所有
     /// 选项」两条用；现在 hero 也走这个 vec，不再有第二套机制。
     pub groups: Vec<(f32, String, String)>,
+    /// Present only when the filtered result set exceeds `max_rows`.
+    pub scrollbar: Option<PaletteScrollbar>,
 }
 
 impl PaletteLayout {
@@ -1452,8 +1574,38 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
         rel_groups.into_iter().map(|(gy, label, ctx)| (list_y + gy, label, ctx)).collect();
 
     let footer = cards.then_some((px, py + ph - footer_h, pw, footer_h));
+    let scrollbar = (model.filtered.len() > max_rows && max_rows > 0).then(|| {
+        let track_w = s(3.0);
+        let track_x = px + pw - s(8.0);
+        let track_h = y.max(row_h);
+        let visible_fraction = max_rows as f32 / model.filtered.len() as f32;
+        let thumb_h = (track_h * visible_fraction).max(s(28.0)).min(track_h);
+        let max_scroll = model.max_scroll(max_rows);
+        let fraction = if max_scroll == 0 {
+            0.0
+        } else {
+            model.scroll_start(max_rows) as f32 / max_scroll as f32
+        };
+        let thumb_y = list_y + (track_h - thumb_h) * fraction;
+        PaletteScrollbar {
+            track: (track_x, list_y, track_w, track_h),
+            thumb: (track_x, thumb_y, track_w, thumb_h),
+            // 细滚动条保持克制，但命中区必须足够宽，避免高 DPI 下难以抓取。
+            hit: (track_x - s(6.0), list_y, track_w + s(12.0), track_h),
+        }
+    });
 
-    PaletteLayout { panel: (px, py, pw, ph), input, row_h, list_y, max_rows, footer, rows, groups }
+    PaletteLayout {
+        panel: (px, py, pw, ph),
+        input,
+        row_h,
+        list_y,
+        max_rows,
+        footer,
+        rows,
+        groups,
+        scrollbar,
+    }
 }
 
 // ---- rendering (the parent `display::mod` hands in the model + renderer;
@@ -1604,6 +1756,19 @@ pub(super) fn push_quads(
     if let Some((fx, fy, fw, fh)) = layout.footer {
         quads.push(UiQuad::solid(fx, fy, fw, fh, 0.0, sk.surface));
         quads.push(UiQuad::solid(fx, fy, fw, s(1.0), 0.0, sk.hairline));
+    }
+
+    if let Some(scrollbar) = layout.scrollbar {
+        let (tx, ty, tw, th) = scrollbar.thumb;
+        let alpha = if model.scrollbar_dragging() { 0.72 } else { 0.48 };
+        quads.push(UiQuad::solid(
+            tx,
+            ty,
+            tw,
+            th,
+            tw * 0.5,
+            sk.scrollbar_thumb.with_alpha(alpha),
+        ));
     }
 
     let (visible_rows, selected_row) = model.visible(layout.max_rows);
@@ -2323,13 +2488,13 @@ mod tests {
         let mut palette = CommandPalette::new();
         palette.open();
         assert_eq!(palette.selected, None);
-        palette.move_selection(-1);
+        palette.move_selection(-1, 5);
         assert_eq!(
             palette.selected,
             Some(palette.filtered.len() - 1),
             "up from top wraps to bottom"
         );
-        palette.move_selection(1);
+        palette.move_selection(1, 5);
         assert_eq!(palette.selected, Some(0), "down from bottom wraps to top");
     }
 
@@ -2344,7 +2509,7 @@ mod tests {
         assert_eq!(sel, Some(0));
         // Move past the window; the selection pins to the bottom visible row.
         for _ in 0..7 {
-            palette.move_selection(1);
+            palette.move_selection(1, max);
         }
         assert_eq!(palette.selected, Some(7));
         let (rows, sel) = palette.visible(max);
@@ -2585,7 +2750,7 @@ mod tests {
         assert_eq!(top_label(&palette), Some(group_at(&palette, 0).label(palette.language)));
 
         // 一路下翻到第 9 行：窗口变成 6..10，表头必须跟着换成第 6 行那一组。
-        palette.move_selection(9);
+        palette.move_selection(9, MAX_ROWS);
         let start = palette.scroll_start(MAX_ROWS);
         assert_eq!(start, 6, "选中行停在底行");
         let labels = palette.group_labels(MAX_ROWS).unwrap();
@@ -2602,6 +2767,47 @@ mod tests {
             let changed = group_at(&palette, start + offset) != group_at(&palette, start + offset - 1);
             assert_eq!(label.is_some(), changed, "第 {offset} 行的表头判定与实际换组不符");
         }
+    }
+
+    #[test]
+    fn wheel_scroll_uses_an_independent_clamped_window() {
+        const MAX_ROWS: usize = 5;
+        let mut palette = CommandPalette::new();
+        palette.open();
+        assert!(palette.filtered.len() > MAX_ROWS);
+
+        assert!(palette.scroll_by(3, MAX_ROWS));
+        assert_eq!(palette.scroll_start(MAX_ROWS), 3);
+        let expected = palette.row_for(palette.filtered[3]).label;
+        let (rows, selected) = palette.visible(MAX_ROWS);
+        assert_eq!(rows[0].label, expected);
+        assert_eq!(selected, Some(0), "命令面板默认执行当前窗口首行");
+
+        assert!(palette.scroll_by(i32::MAX, MAX_ROWS));
+        assert_eq!(palette.scroll_start(MAX_ROWS), palette.filtered.len() - MAX_ROWS);
+        assert!(!palette.scroll_by(1, MAX_ROWS), "列表底部继续下滚应保持不变");
+    }
+
+    #[test]
+    fn overflowing_palette_exposes_a_draggable_scrollbar() {
+        const MAX_ROWS: usize = 8;
+        let mut palette = CommandPalette::new();
+        palette.open();
+        let layout = palette_layout(&palette, 1200.0, 900.0, 1.0);
+        assert_eq!(layout.max_rows, MAX_ROWS);
+        let scrollbar = layout.scrollbar.expect("长命令列表必须显示滚动条");
+
+        let (tx, ty, tw, th) = scrollbar.track;
+        assert!(scrollbar.hit_test(tx + tw * 0.5, ty + th - 1.0));
+        assert!(palette.scrollbar_press(
+            tx + tw * 0.5,
+            ty + th - 1.0,
+            layout.max_rows,
+            scrollbar,
+        ));
+        assert_eq!(palette.scroll_start(MAX_ROWS), palette.filtered.len() - MAX_ROWS);
+        assert!(palette.scrollbar_dragging());
+        assert!(palette.end_scrollbar_drag());
     }
 
     /// 分组表头的前提是同来源的行**连续**。模糊搜索按得分排序会把两家的

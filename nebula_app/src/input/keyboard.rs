@@ -129,6 +129,39 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        // 设置→高级→SSH 代理的输入框：规则与同步输入框一致（Enter/Tab
+        // 提交、Esc 还原、Ctrl+V 粘贴、其余字符追加）。
+        if self.ctx.display().settings_open() && self.ctx.display().nebula_ssh_proxy_focus.is_some()
+        {
+            match &key.logical_key {
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => {
+                    self.ctx.display().commit_ssh_proxy_field();
+                },
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.display().cancel_ssh_proxy_field();
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().ssh_proxy_field_backspace();
+                },
+                Key::Named(NamedKey::Space) => {
+                    self.ctx.display().ssh_proxy_field_push(' ');
+                },
+                Key::Character(text) => {
+                    if mods.control_key() && text.eq_ignore_ascii_case("v") {
+                        let paste = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                        self.ctx.display().ssh_proxy_field_paste(&paste);
+                    } else if !mods.control_key() {
+                        for ch in text.chars() {
+                            self.ctx.display().ssh_proxy_field_push(ch);
+                        }
+                    }
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // An expanded settings dropdown is a transient picker. Esc only
         // dismisses; any other key dismisses and then follows its normal path.
         if self.ctx.display().nebula_settings_dropdown.is_some() {

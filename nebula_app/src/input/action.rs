@@ -376,6 +376,10 @@ impl<T: EventListener> Execute<T> for Action {
                 ctx.display().toggle_command_palette(&profiles);
                 ctx.mark_dirty();
             },
+            Action::OpenQuickJump => {
+                ctx.display().open_ai_session_palette();
+                ctx.mark_dirty();
+            },
             Action::ToggleShellPicker => {
                 let profiles: Vec<String> =
                     ctx.config().profiles.iter().map(|p| p.name.clone()).collect();

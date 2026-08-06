@@ -91,12 +91,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 | crate::display::SshEditorHit::Port
                 | crate::display::SshEditorHit::Label
                 | crate::display::SshEditorHit::IconSearch
+                | crate::display::SshEditorHit::ProxyUrl
                 | crate::display::SshEditorHit::Password => CursorIcon::Text,
                 crate::display::SshEditorHit::SaveToggleBox
                 | crate::display::SshEditorHit::SaveToggleLabel
                 | crate::display::SshEditorHit::Close
                 | crate::display::SshEditorHit::PasswordToggle
                 | crate::display::SshEditorHit::Auth(_)
+                | crate::display::SshEditorHit::ProxyChoice(_)
                 | crate::display::SshEditorHit::AddPrivateKey
                 | crate::display::SshEditorHit::RemovePrivateKey(_)
                 | crate::display::SshEditorHit::Avatar
@@ -217,14 +219,28 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             let px = x as f32;
             let py = y as f32;
             let layout = self.ctx.display().command_palette_layout();
+            if self.ctx.display().palette_scrollbar_dragging() {
+                if lmb_pressed {
+                    self.ctx.display().palette_scrollbar_drag_to(py);
+                    self.ctx.window().set_mouse_cursor(CursorIcon::Grabbing);
+                    self.ctx.mark_dirty();
+                    return;
+                }
+                self.ctx.display().end_palette_scrollbar_drag();
+            }
+            let over_scrollbar =
+                layout.scrollbar.is_some_and(|scrollbar| scrollbar.hit_test(px, py));
             // Hover detection rides the layout's per-row rects (`row_at`): the
             // picker's card geometry is non-uniform (hero card, section gaps),
-            // so dividing by row_h would light up captions and gaps too.
-            let hover_row = layout.row_at(px, py);
+            // so dividing by row_h would light up captions and gaps too. The
+            // scrollbar's widened hit target owns its pixels and suppresses row hover.
+            let hover_row = if over_scrollbar { None } else { layout.row_at(px, py) };
             if self.ctx.display().palette_hover((px, py), hover_row) {
                 self.ctx.mark_dirty();
             }
-            self.ctx.window().set_mouse_cursor(if hover_row.is_some() {
+            self.ctx.window().set_mouse_cursor(if over_scrollbar {
+                CursorIcon::Grab
+            } else if hover_row.is_some() {
                 CursorIcon::Pointer
             } else {
                 CursorIcon::Default
@@ -338,11 +354,14 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::SyncAutoPullToggle
             | crate::display::SettingsHit::SyncPushButton
             | crate::display::SettingsHit::SyncPullButton
+            | crate::display::SettingsHit::SshProxyModeDropdown
+            | crate::display::SettingsHit::SshProxyModeOption(_)
             | crate::display::SettingsHit::Reset => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
                 return;
             },
-            crate::display::SettingsHit::SyncInput(_) => {
+            crate::display::SettingsHit::SyncInput(_)
+            | crate::display::SettingsHit::SshProxyInput(_) => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Text);
                 return;
             },
@@ -811,6 +830,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.mark_dirty();
                 return;
             }
+            if self.ctx.display().end_palette_scrollbar_drag() {
+                self.ctx.mark_dirty();
+                return;
+            }
             // Let go of the scrollback thumb.
             if self.ctx.display().nebula_scrollbar_drag.take().is_some() {
                 self.ctx.mark_dirty();
@@ -911,6 +934,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             if steps != 0.0 {
                 let scale = self.ctx.window().scale_factor as f32;
                 self.ctx.change_font_size(steps.signum() * scale);
+            }
+            return;
+        }
+
+        // Palette modes own the wheel while visible. Use whole-row movement so
+        // the thumb, row hit-testing and keyboard selection share one offset.
+        if self.ctx.display().command_palette_open() {
+            let layout = self.ctx.display().command_palette_layout();
+            let rows = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => -lines.signum() as i32 * 3,
+                MouseScrollDelta::PixelDelta(pos) => -(pos.y.signum() as i32),
+            };
+            if rows != 0 && self.ctx.display().palette_scroll_by(rows, layout.max_rows) {
+                self.ctx.mark_dirty();
             }
             return;
         }

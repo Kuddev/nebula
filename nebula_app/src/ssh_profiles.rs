@@ -51,6 +51,11 @@ pub struct SshProfileAuth {
     /// 码位——码位属于某一个字体文件，换字体就作废；id 是我们自己的稳定键。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// 每主机代理覆盖：`"direct"` = 强制直连；其余值 = 代理 URL
+    /// （`socks5://`、`http://`，解析归 `ssh_proxy::ProxyServer`）。
+    /// `None` = 跟随全局设置（`nebula_settings.txt` 的 `ssh_proxy_*` 键）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +113,7 @@ impl SshProfiles {
                 private_keys: Vec::new(),
                 label: None,
                 icon: None,
+                proxy: None,
             })
     }
 
@@ -258,6 +264,7 @@ mod tests {
                 private_keys: Vec::new(),
                 label: None,
                 icon,
+                proxy: None,
             });
         }
         let json = serde_json::to_string(&profiles).expect("serialize");
@@ -267,6 +274,35 @@ mod tests {
         let icons = profiles.icons();
         assert_eq!(icons.get("root@10.0.0.1").map(String::as_str), Some("debian"));
         assert!(!icons.contains_key("root@10.0.0.2"));
+    }
+
+    /// 代理覆盖同样是后加字段：老文件照读（缺字段 = 跟随全局），写盘只写
+    /// 明确设置过的主机——空 `"proxy"` 字段会让"没配过"和"配了跟随"无法区分。
+    #[test]
+    fn proxy_override_round_trips_and_stays_optional() {
+        let mut profiles = SshProfiles::default();
+        for (destination, proxy) in [
+            ("root@vps.example.com", Some("socks5://127.0.0.1:7890".to_owned())),
+            ("root@10.0.0.9", None),
+        ] {
+            profiles.upsert(SshProfileAuth {
+                destination: destination.to_owned(),
+                auth: SshAuthMode::Auto,
+                private_keys: Vec::new(),
+                label: None,
+                icon: None,
+                proxy,
+            });
+        }
+        let json = serde_json::to_string(&profiles).expect("serialize");
+        assert_eq!(json.matches("\"proxy\"").count(), 1, "没设置过的主机不该写出空字段");
+
+        let loaded: SshProfiles = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(
+            loaded.for_destination("root@vps.example.com").proxy.as_deref(),
+            Some("socks5://127.0.0.1:7890")
+        );
+        assert_eq!(loaded.for_destination("root@10.0.0.9").proxy, None);
     }
 
     #[test]
@@ -283,6 +319,7 @@ mod tests {
                 private_keys: Vec::new(),
                 label: Some(label),
                 icon: None,
+                proxy: None,
             });
         }
         profiles.remove("root@10.0.0.1");
@@ -301,6 +338,7 @@ mod tests {
             private_keys: Vec::new(),
             label: Some("生产数据库".to_owned()),
             icon: None,
+            proxy: None,
         });
 
         assert_eq!(profiles.next_default_label("主机"), "主机 1");
@@ -317,6 +355,7 @@ mod tests {
             private_keys: vec![PathBuf::from(r"C:\Keys\first"), PathBuf::from(r"C:\Keys\second")],
             label: None,
             icon: None,
+            proxy: None,
         });
         profiles.save(&path).unwrap();
 
@@ -342,6 +381,7 @@ mod tests {
             ],
             label: None,
             icon: None,
+            proxy: None,
         });
 
         assert_eq!(
@@ -359,6 +399,7 @@ mod tests {
             private_keys: vec![PathBuf::from(r"C:\Keys\id_ed25519")],
             label: None,
             icon: None,
+            proxy: None,
         });
 
         profiles.rename("old@example.com", "new@example.com");

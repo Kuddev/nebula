@@ -72,7 +72,7 @@ tempfile = "3.12.0"
 toml.workspace = true
 toml_edit.workspace = true
 ttf-parser = { version = "=0.25.1", default-features = false, features = ["opentype-layout", "std"] }
-tokio = { version = "1", features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "net", "rt-multi-thread", "sync", "time"] }
 unicode-width = "0.2.0"
 # Assistant fix requests: blocking HTTP on a background OS thread (spec 001).
 # ureq over reqwest: no tokio coupling for one short JSON POST, small tree.
@@ -132,6 +132,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Controls_Dialogs",
     # System double-click time for the terminal's multi-click detection.
     "Win32_UI_Input_KeyboardAndMouse",
+    # WinEvent hook (SetWinEventHook) for native move/size stage tracking:
+    # WM_ENTER/EXITSIZEMOVE are sent messages that never reach a msg hook.
+    "Win32_UI_Accessibility",
     # COM + Shell: build the Start-menu shortcut that carries our AUMID so the
     # toast is attributed to Nebula (IShellLink + IPersistFile + IPropertyStore).
     "Win32_System_Com",

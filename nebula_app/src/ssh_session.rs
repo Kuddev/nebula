@@ -506,7 +506,19 @@ async fn authenticated_session(
     profile: &crate::ssh_profiles::SshProfileAuth,
     progress: Option<&EventProxy>,
 ) -> Result<SharedSession, SessionError> {
-    let key = destination.pool_key();
+    // 代理决策先于连接池查找：pool key 必须带上代理身份，否则改完代理设置
+    // 还在复用旧代理建立的连接，表现为「改了设置没生效」。配置写错在这里
+    // 直接报错——静默直连会把配置问题伪装成网络问题。
+    let global = tokio::task::spawn_blocking(crate::ssh_proxy::SshProxyConfig::load_global)
+        .await
+        .map_err(|err| format!("读取代理配置任务失败: {err}"))?;
+    let proxy = global
+        .resolve(profile.proxy.as_deref(), &destination.host)
+        .map_err(|err| format!("SSH 代理配置无效: {err}"))?;
+    let key = match &proxy {
+        Some(server) => format!("{}|{}", destination.pool_key(), server.identity()),
+        None => destination.pool_key(),
+    };
     if let Some(existing) = connection_pool().lock().await.get(&key).cloned() {
         if !existing.lock().await.is_closed() {
             info!("复用已认证 SSH 连接: {key}");
@@ -525,8 +537,7 @@ async fn authenticated_session(
     });
     let handler = ClientHandler { host: destination.host.clone(), port: destination.port };
     report_stage(progress, SshStage::Connect);
-    let mut session =
-        client::connect(config, (destination.host.as_str(), destination.port), handler).await?;
+    let mut session = open_transport(proxy.as_ref(), config, destination, handler).await?;
     report_stage(progress, SshStage::Authenticate);
     authenticate(&mut session, destination, profile).await?;
 
@@ -539,6 +550,27 @@ async fn authenticated_session(
     }
     pool.insert(key, session.clone());
     Ok(session)
+}
+
+/// 建立 SSH 传输层：直连交给 russh 自己开 TCP；走代理时先完成隧道握手，
+/// 再把裸流交给 `connect_stream`——两条路返回同一种会话句柄。
+async fn open_transport(
+    proxy: Option<&crate::ssh_proxy::ProxyServer>,
+    config: Arc<client::Config>,
+    destination: &SshDestination,
+    handler: ClientHandler,
+) -> Result<ClientSession, SessionError> {
+    match proxy {
+        Some(server) => {
+            info!("经代理 {} 连接 {}:{}", server.display(), destination.host, destination.port);
+            let stream = crate::ssh_proxy::connect(server, &destination.host, destination.port)
+                .await
+                .map_err(|err| format!("经代理 {} 连接失败: {err}", server.display()))?;
+            Ok(client::connect_stream(config, stream, handler).await?)
+        },
+        None => Ok(client::connect(config, (destination.host.as_str(), destination.port), handler)
+            .await?),
+    }
 }
 
 async fn authenticate(
@@ -672,6 +704,10 @@ pub struct SshTestRequest {
     pub private_keys: Vec<PathBuf>,
     /// 密码框里的未保存草稿；`None`/空 = 只用密钥与已存凭据。
     pub password: Option<String>,
+    /// 每主机代理覆盖的草稿编码（同 `SshProfileAuth::proxy`）：`None` =
+    /// 跟随全局，`"direct"` = 直连，其余 = 代理 URL。测试必须用草稿而不是
+    /// 磁盘值——它回答的是「保存后能不能连上」。
+    pub proxy: Option<String>,
 }
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -688,15 +724,24 @@ pub fn spawn_test(
         let request_id = request.request_id;
         let raw = request.destination.clone();
         let outcome = tokio::time::timeout(TEST_TIMEOUT, async {
-            let resolved = tokio::task::spawn_blocking({
+            let (resolved, global) = tokio::task::spawn_blocking({
                 let raw = raw.clone();
-                move || SshDestination::resolve(&raw)
+                move || {
+                    let resolved = SshDestination::resolve(&raw)?;
+                    let global = crate::ssh_proxy::SshProxyConfig::load_global();
+                    Ok::<_, io::Error>((resolved, global))
+                }
             })
             .await
             .map_err(|err| -> SessionError {
                 format!("SSH 地址解析任务失败: {err}").into()
             })??;
-            test_connect(&resolved, &request).await
+            // 代理决策与真连同一套规则，但覆盖值取编辑器草稿：测试回答的是
+            // 「保存后能不能连上」，磁盘上的旧覆盖不能替草稿作答。
+            let proxy = global
+                .resolve(request.proxy.as_deref(), &resolved.host)
+                .map_err(|err| -> SessionError { format!("SSH 代理配置无效: {err}").into() })?;
+            test_connect(&resolved, &request, proxy.as_ref()).await
         })
         .await;
         let (ok, message) = match outcome {
@@ -722,6 +767,7 @@ pub fn spawn_test(
 async fn test_connect(
     destination: &SshDestination,
     request: &SshTestRequest,
+    proxy: Option<&crate::ssh_proxy::ProxyServer>,
 ) -> Result<(), SessionError> {
     if let Some(proxy_jump) = destination.proxy_jump.as_deref() {
         return Err(format!("当前直连模式尚未接入跳板机 {proxy_jump}").into());
@@ -733,8 +779,7 @@ async fn test_connect(
         ..Default::default()
     });
     let handler = ClientHandler { host: destination.host.clone(), port: destination.port };
-    let mut session =
-        client::connect(config, (destination.host.as_str(), destination.port), handler).await?;
+    let mut session = open_transport(proxy, config, destination, handler).await?;
     test_authenticate(&mut session, destination, request).await
 }
 

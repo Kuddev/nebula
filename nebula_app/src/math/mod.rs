@@ -16,6 +16,38 @@ pub(crate) use compile::compile_formula;
 pub(crate) use parser::parse_formula;
 pub(crate) use validate::validate;
 
+/// 低于该字号的公式已不可读：调用方应放弃覆盖渲染，回退到原始源码文本。
+/// 终端覆盖层与 markdown 阅读器共用同一条底线，保证两条管线判定一致。
+pub(crate) const MIN_READABLE_MATH_PX: f32 = 6.0;
+
+/// Latin Modern Math 在等宽字体旁边天生显小：它的 x-height 是 0.431 em，
+/// 而主流编程字体在 0.53–0.56 em。同样的名义字号下，公式里的 `x` 比正文的
+/// `x` 矮一圈。KaTeX 对同族字体给出的补偿是 1.21 em，这里沿用同一数值，
+/// 在 [`compile_formula`] 单点生效，两条渲染管线（终端覆盖层 / markdown
+/// 阅读器）自动一致。
+pub(crate) const OPTICAL_SCALE: f32 = 1.21;
+
+/// 上下标 / 分子分母的最小相对字号。Latin Modern 的 MATH 表给 70%，是为
+/// 纸面阅读字号调的；终端正文本来就小，0.7 em 的分子在 20px 字号下只有
+/// 14px，用户看到的就是"公式比正文小一圈"。这里抬到 0.8，代价是公式变高
+/// 约一成——仍在一行加行距的预算内（见 `terminal_math` 的溢出容差），所以
+/// 同类公式的字号不会因此分裂。
+///
+/// 这是刻意偏离 LaTeX/KaTeX 的一处：那两者排的是版面充裕的文档，我们排的
+/// 是终端里 AI 输出的一行文字。
+/// 上下标 / 分子分母的最小相对字号。Latin Modern 的 MATH 表给 70%，是为
+/// 纸面阅读字号调的；终端正文本来就小，0.7 em 的分子在 20px 字号下只有
+/// 14px，用户看到的就是"公式比正文小一圈"。
+///
+/// 这是刻意偏离 LaTeX/KaTeX 的一处：那两者排的是版面充裕的文档，我们排的
+/// 是终端里 AI 输出的一行文字。上限卡在 0.8：再往上（实测 0.85）根号里的
+/// 上标会把 `\sqrt` 顶过字形变体的阈值，高度从 30px 跳到 45px，那条公式
+/// 就得缩——同类公式一样大比多两个百分点重要。
+pub(crate) const MIN_SCRIPT_SCALE: f32 = 0.8;
+/// 二级下标（`x^{a^b}` 的 b、分式套分式的内层）的下限。仍比一级小一档，
+/// 层级关系保住，但不再掉到 0.5 em 那种糊成一团的尺寸。
+pub(crate) const MIN_SCRIPT_SCRIPT_SCALE: f32 = 0.65;
+
 pub(crate) const DEFAULT_LIMITS: MathLimits = MathLimits {
     max_source_bytes: 16 * 1024,
     max_depth: 64,

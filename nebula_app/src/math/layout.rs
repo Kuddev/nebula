@@ -1111,14 +1111,25 @@ impl LayoutBuilder<'_> {
     fn pixel_size(&self, index: usize) -> Result<f32, MathError> {
         let scale = match self.styles[index] {
             MathStyle::Display | MathStyle::Text => 1.0,
-            MathStyle::Script => {
-                self.font.script_scale(false).map_err(|_| MathError::new(MathErrorKind::Font, 0))?
-            },
-            MathStyle::ScriptScript => {
-                self.font.script_scale(true).map_err(|_| MathError::new(MathErrorKind::Font, 0))?
-            },
+            MathStyle::Script => self.script_scale(false)?,
+            MathStyle::ScriptScript => self.script_scale(true)?,
         };
         Ok(self.base_pixel_size * scale)
+    }
+
+    /// Script sizes, raised off the font's own percentages by
+    /// [`MIN_SCRIPT_SCALE`] / [`MIN_SCRIPT_SCRIPT_SCALE`]. Latin Modern asks
+    /// for 70%/50%, tuned for print at reading sizes; beside a terminal's
+    /// monospace body text those land at 14px and 10px, where a fraction's
+    /// numerator stops reading as the same document as the prose around it.
+    fn script_scale(&self, script_script: bool) -> Result<f32, MathError> {
+        let scale = self
+            .font
+            .script_scale(script_script)
+            .map_err(|_| MathError::new(MathErrorKind::Font, 0))?;
+        let floor =
+            if script_script { super::MIN_SCRIPT_SCRIPT_SCALE } else { super::MIN_SCRIPT_SCALE };
+        Ok(scale.max(floor))
     }
 
     fn axis(&self, index: usize) -> Result<f32, MathError> {

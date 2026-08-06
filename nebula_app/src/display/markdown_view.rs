@@ -30,7 +30,7 @@ use crate::markdown::{
 };
 use crate::math::cache::{FormulaCacheKey, MathLayoutCache};
 use crate::math::layout::MathMetrics;
-use crate::math::{DEFAULT_LIMITS, compile_formula};
+use crate::math::{DEFAULT_LIMITS, MIN_READABLE_MATH_PX, compile_formula};
 use crate::renderer::math::MathClip;
 use crate::renderer::ui::UiQuad;
 use crate::renderer::{GlyphCache, Renderer};
@@ -59,9 +59,6 @@ const OVERSCAN_LINES: usize = 8;
 /// Body line height, in cell heights.
 const BODY_LINE: f32 = 1.55;
 const CODE_LINE: f32 = 1.4;
-/// Below this size a fitted formula stops being readable; the existing
-/// source-text fallback then wraps it normally instead of clipping tiny ink.
-const MIN_FITTED_MATH_PX: f32 = 6.0;
 /// Per-level indent of lists and quotes, in px.
 const LIST_INDENT: f32 = 26.0;
 const QUOTE_INDENT: f32 = 20.0;
@@ -534,7 +531,7 @@ fn fit_math_run(
     // Math layout is linear in pixel size. Leave a small rounding margin so
     // the rightmost antialiasing pixel stays inside the reading column.
     let fitted_size = pixel_size * (max_width / run.advance_width) * 0.98;
-    if fitted_size < MIN_FITTED_MATH_PX {
+    if fitted_size < MIN_READABLE_MATH_PX {
         return None;
     }
     measure_math(source, formula_id, fitted_size, pixels_per_point, display, cache)

@@ -53,6 +53,9 @@ pub trait ActionContext<T: EventListener> {
     fn mark_dirty(&mut self) {}
     fn size_info(&self) -> SizeInfo;
     fn copy_selection(&mut self, _ty: ClipboardType) {}
+    /// A successful explicit copy may acknowledge itself in the owning UI;
+    /// selection-only storage keeps the default silent to avoid toast spam.
+    fn notify_copy(&mut self, _text: &str) {}
     fn start_selection(&mut self, _ty: SelectionType, _point: Point, _side: Side) {}
     fn toggle_selection(&mut self, _ty: SelectionType, _point: Point, _side: Side) {}
     fn update_selection(&mut self, _point: Point, _side: Side) {}
