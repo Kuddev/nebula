@@ -22,25 +22,34 @@ const POWERLINE_ROUND_RTL: char = '\u{e0b4}';
 const POWERLINE_ROUND_LTR: char = '\u{e0b6}';
 
 /// Returns the rasterized glyph if the character is part of the built-in font.
+///
+/// `cell_width` is the **effective** cell width for the calling domain — the
+/// same integer value the grid lays columns out at (`compute_cell_size`'s
+/// product, already floored/rounded per the active cell-width mode and already
+/// carrying `font.offset.x`). Box-drawing strokes, block elements and Powerline
+/// separators must fill exactly this width; recomputing it from
+/// `metrics.average_advance` would floor the advance again, leaving a 1px seam
+/// between adjacent cells under the relaxed (round) mode.
 pub fn builtin_glyph(
     character: char,
     metrics: &Metrics,
+    cell_width: usize,
     offset: &Delta<i8>,
     glyph_offset: &Delta<i8>,
 ) -> Option<RasterizedGlyph> {
     let mut glyph = match character {
         // Box drawing characters and block elements.
         '\u{2500}'..='\u{259f}' | '\u{1fb00}'..='\u{1fb3b}' | '\u{1fb82}'..='\u{1fb8b}' => {
-            box_drawing(character, metrics, offset)
+            box_drawing(character, metrics, cell_width, offset)
         },
         // Powerline symbols: '','','',''
         POWERLINE_TRIANGLE_LTR..=POWERLINE_ARROW_RTL => {
-            powerline_drawing(character, metrics, offset)?
+            powerline_drawing(character, metrics, cell_width, offset)?
         },
         // Powerline extra rounded caps: '',''. 这些字符经常由 Nerd Font 提供，
         // 但不同字体的垂直 metrics 不一致；内建绘制能保证它们和三角分隔符同高。
         POWERLINE_ROUND_RTL | POWERLINE_ROUND_LTR => {
-            powerline_round_drawing(character, metrics, offset)?
+            powerline_round_drawing(character, metrics, cell_width, offset)?
         },
         _ => return None,
     };
@@ -394,11 +403,11 @@ mod tests {
 
         // Test coverage of box drawing characters.
         for character in ('\u{2500}'..='\u{259f}').chain('\u{1fb00}'..='\u{1fb3b}') {
-            assert!(builtin_glyph(character, &METRICS, &offset, &glyph_offset).is_some());
+            assert!(builtin_glyph(character, &METRICS, 6, &offset, &glyph_offset).is_some());
         }
 
         for character in ('\u{2450}'..'\u{2500}').chain('\u{25a0}'..'\u{2600}') {
-            assert!(builtin_glyph(character, &METRICS, &offset, &glyph_offset).is_none());
+            assert!(builtin_glyph(character, &METRICS, 6, &offset, &glyph_offset).is_none());
         }
     }
 
@@ -409,19 +418,111 @@ mod tests {
 
         // Test coverage of box drawing characters.
         for character in '\u{e0b0}'..='\u{e0b3}' {
-            assert!(builtin_glyph(character, &METRICS, &offset, &glyph_offset).is_some());
+            assert!(builtin_glyph(character, &METRICS, 6, &offset, &glyph_offset).is_some());
         }
 
         // Rounded caps were intentionally added after the original four
         // triangle/arrow glyphs, so they are coverage too rather than holes.
         for character in ['\u{e0b4}', '\u{e0b6}'] {
-            assert!(builtin_glyph(character, &METRICS, &offset, &glyph_offset).is_some());
+            assert!(builtin_glyph(character, &METRICS, 6, &offset, &glyph_offset).is_some());
         }
 
         for character in
             ('\u{e0a0}'..'\u{e0b0}').chain('\u{e0b5}'..'\u{e0b6}').chain('\u{e0b7}'..'\u{e0c0}')
         {
-            assert!(builtin_glyph(character, &METRICS, &offset, &glyph_offset).is_none());
+            assert!(builtin_glyph(character, &METRICS, 6, &offset, &glyph_offset).is_none());
+        }
+    }
+
+    // Fractional advance where compact (floor) and relaxed (round) differ by
+    // one pixel — the case that produced 1px seams in contiguous box-drawing
+    // lines and Powerline separators before the effective width was threaded
+    // through. Both metrics share the same line height; only the width
+    // resolves differently per mode.
+    const FRACTIONAL_METRICS: Metrics = Metrics {
+        average_advance: 9.6,
+        line_height: 20.,
+        descent: 5.,
+        underline_position: 2.,
+        underline_thickness: 2.,
+        strikeout_position: 2.,
+        strikeout_thickness: 2.,
+    };
+
+    // compact cell width = floor(9.6 + 0) = 9, relaxed = round(9.6 + 0) = 10.
+    const COMPACT_WIDTH: usize = 9;
+    const RELAXED_WIDTH: usize = 10;
+
+    /// A box-drawing horizontal stroke, a full block, and a Powerline
+    /// triangle all must fill exactly the effective cell width — anything
+    /// narrower splits a run of them into dashes.
+    #[test]
+    fn builtin_glyph_fills_effective_cell_width_both_modes() {
+        let offset = Default::default();
+        let glyph_offset = Default::default();
+
+        for character in ['\u{2500}', '\u{2588}', '\u{e0b0}'] {
+            let compact = builtin_glyph(
+                character,
+                &FRACTIONAL_METRICS,
+                COMPACT_WIDTH,
+                &offset,
+                &glyph_offset,
+            )
+            .expect("glyph should be built-in");
+            let relaxed = builtin_glyph(
+                character,
+                &FRACTIONAL_METRICS,
+                RELAXED_WIDTH,
+                &offset,
+                &glyph_offset,
+            )
+            .expect("glyph should be built-in");
+
+            // The rasterized width and the horizontal advance both track the
+            // effective cell width passed in — no re-flooring of the advance.
+            assert_eq!(compact.width, COMPACT_WIDTH as i32, "compact width for {character:?}");
+            assert_eq!(
+                compact.advance.0, COMPACT_WIDTH as i32,
+                "compact advance for {character:?}"
+            );
+            assert_eq!(relaxed.width, RELAXED_WIDTH as i32, "relaxed width for {character:?}");
+            assert_eq!(
+                relaxed.advance.0, RELAXED_WIDTH as i32,
+                "relaxed advance for {character:?}"
+            );
+
+            // Relaxed is exactly one pixel wider than compact for this
+            // advance — the seam that used to appear under the relaxed mode.
+            assert_eq!(relaxed.width - compact.width, 1, "relaxed width for {character:?}");
+        }
+    }
+
+    /// Height is independent of the cell-width mode: both modes must produce
+    /// byte-identical glyph heights (the preference only controls width).
+    #[test]
+    fn builtin_glyph_height_is_mode_independent() {
+        let offset = Default::default();
+        let glyph_offset = Default::default();
+
+        for character in ['\u{2500}', '\u{2588}', '\u{e0b0}'] {
+            let compact = builtin_glyph(
+                character,
+                &FRACTIONAL_METRICS,
+                COMPACT_WIDTH,
+                &offset,
+                &glyph_offset,
+            )
+            .expect("glyph should be built-in");
+            let relaxed = builtin_glyph(
+                character,
+                &FRACTIONAL_METRICS,
+                RELAXED_WIDTH,
+                &offset,
+                &glyph_offset,
+            )
+            .expect("glyph should be built-in");
+            assert_eq!(compact.height, relaxed.height, "height for {character:?}");
         }
     }
 }
