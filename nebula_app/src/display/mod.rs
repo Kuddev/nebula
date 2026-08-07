@@ -4546,6 +4546,9 @@ impl Display {
         // 内容网格的列宽。这里固定用上游的向下取整。
         self.nebula_ui_font.cell =
             compute_cell_size(config, &metrics, settings::CellWidthMode::Compact);
+        // 同步把 UI 域的生效列宽交给 glyph_cache，使 UI 文本里的内建
+        // 字形（光标形状预览的 │ █ ▁）与 chrome 网格列宽对齐。
+        self.glyph_cache.set_ui_cell_width(self.nebula_ui_font.cell.0 as usize);
         let ratio = self.ui_text_scale();
         // Unconditional breadcrumb (tiny, a handful of lines per session):
         // diagnosing "the sidebar zooms with the terminal" reports needs this
@@ -5163,7 +5166,15 @@ impl Display {
         let _ = glyph_cache.update_font_size(font);
 
         // Compute new cell sizes.
-        compute_cell_size(config, &glyph_cache.font_metrics(), cell_width_mode)
+        let cell_dimensions =
+            compute_cell_size(config, &glyph_cache.font_metrics(), cell_width_mode);
+
+        // The built-in box-drawing / Powerline glyphs fill exactly the
+        // effective cell width; pin it so they stop re-flooring the advance
+        // (a 1px drift under the relaxed mode that splits lines into dashes).
+        glyph_cache.set_cell_width(cell_dimensions.0 as usize);
+
+        cell_dimensions
     }
 
     /// Reset glyph cache.
