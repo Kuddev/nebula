@@ -18,8 +18,8 @@ use unicode_width::UnicodeWidthChar;
 use nebula_terminal::vte::ansi::CursorShape;
 
 use crate::config::UiConfig;
-use crate::encrypted_backup::BackupSelection;
 use crate::display::color::Rgb;
+use crate::encrypted_backup::BackupSelection;
 use crate::renderer::image::{BackgroundImageAlignment, BackgroundImageFit};
 use crate::renderer::ui::{Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
@@ -40,6 +40,11 @@ use super::{
 /// WebDAV 同步还处于内部迭代阶段。保留状态、持久化与后端实现，但在交互闭环
 /// 完成前不向用户暴露入口；集中守门可避免绘制、命中和滚动高度各自遗漏。
 const SHOW_WEBDAV_SYNC_SETTINGS: bool = false;
+
+/// 备份页的后端已经可用，但页面先不放进侧栏，等恢复流程的可视化预览和
+/// 冲突策略交互接入后再重新开放。枚举、命中和导出逻辑继续保留，避免隐藏
+/// 入口演变成删除功能。
+const SHOW_BACKUP_SETTINGS: bool = false;
 
 /// Sidebar sections of the settings panel. Deliberately small: only sections
 /// with real functionality behind them are listed.
@@ -73,6 +78,18 @@ impl NebulaSettingsSection {
             Self::Advanced => language.pick("高级", "Advanced"),
             Self::Backup => language.pick("备份", "Backup"),
         }
+    }
+}
+
+fn nav_icon(section: NebulaSettingsSection) -> icons::SettingsNavIcon {
+    match section {
+        NebulaSettingsSection::Appearance => icons::SettingsNavIcon::Appearance,
+        NebulaSettingsSection::Profiles => icons::SettingsNavIcon::Profiles,
+        NebulaSettingsSection::Ssh => icons::SettingsNavIcon::Ssh,
+        NebulaSettingsSection::Interaction => icons::SettingsNavIcon::Interaction,
+        NebulaSettingsSection::Keymap => icons::SettingsNavIcon::Keymap,
+        NebulaSettingsSection::Advanced => icons::SettingsNavIcon::Advanced,
+        NebulaSettingsSection::Backup => icons::SettingsNavIcon::Backup,
     }
 }
 
@@ -843,6 +860,11 @@ struct SettingsGeometry {
     sync_rows: [(f32, f32, f32, f32); 4],
     sync_auto_pull: (f32, f32, f32, f32),
     sync_actions: (f32, f32, f32, f32),
+    /// Backups follow the HTML prototype: an always-visible auto-backup card,
+    /// a compact export/restore segmented control, then grouped rows.
+    backup_auto: (f32, f32, f32, f32),
+    backup_segment: (f32, f32, f32, f32),
+    backup_groups: [(f32, f32, f32, f32); 4],
     backup_rows: [(f32, f32, f32, f32); 9],
     backup_actions: (f32, f32, f32, f32),
     backup_h: f32,
@@ -895,7 +917,9 @@ fn settings_geometry(
     // geometry rooted in that card makes sidebar/drawer animations and DPI
     // changes follow the exact same bounds as terminal and document tabs.
     let (popup_x, popup_y, popup_w, popup_h) = area;
-    let sidebar_w = s(220.0).min(popup_w * 0.30);
+    // Match the reference settings shell: a quiet 196px navigation rail and a
+    // 2px rhythm between compact 32px rows leave the content area breathing.
+    let sidebar_w = s(196.0).min(popup_w * 0.30);
     let sidebar = (popup_x, popup_y, sidebar_w, popup_h);
     let content_x = popup_x + sidebar_w + s(16.0);
     let content_w = (popup_w - sidebar_w - s(16.0)).max(s(240.0));
@@ -969,12 +993,12 @@ fn settings_geometry(
         (slider_x, at(background_image_opacity_y0) + s(4.0), slider_w, s(36.0));
 
     // Sidebar navigation rows. The rects line up with the active-row
-    // highlight drawn while rendering. 4px between items — same breathing as
-    // the design sheet's nav menu.
-    let nav_x = popup_x + s(24.0);
-    let nav_w = sidebar_w - s(48.0);
-    let nav_h = s(44.0);
-    let nav_gap = s(4.0);
+    // highlight drawn while rendering. The reference uses 32px rows with a
+    // 2px gap; the icon and label carry the internal breathing instead.
+    let nav_x = popup_x + s(10.0);
+    let nav_w = sidebar_w - s(20.0);
+    let nav_h = s(32.0);
+    let nav_gap = s(2.0);
     let nav_y0 = popup_y + s(88.0);
     let nav_slot = |i: f32| nav_y0 + i * (nav_h + nav_gap);
     let nav = [
@@ -1041,15 +1065,30 @@ fn settings_geometry(
     };
     let ssh_h = s(ssh_end + 32.0 - 72.0);
 
-    let backup_y0 = 146.0;
-    let backup_row = |i: f32| (row_x, at(backup_y0 + i * ROW_H), row_w, row_h);
+    // Backup prototype: automatic-backup summary, export/restore segmented
+    // action, then one grouped manifest card. Backup rows are taller because
+    // every category carries a description and size, unlike the generic
+    // single-line setting rows above.
+    const BACKUP_ROW_H: f32 = 52.0;
+    let backup_auto = (row_x, at(126.0), row_w, s(68.0));
+    let backup_segment = (row_x, at(212.0), s(300.0).min(row_w), s(38.0));
+    let backup_group = |y: f32| (row_x, at(y), row_w, s(24.0));
+    let backup_groups =
+        [backup_group(300.0), backup_group(480.0), backup_group(556.0), backup_group(632.0)];
+    let backup_row = |y: f32| (row_x, at(y), row_w, s(BACKUP_ROW_H));
     let backup_rows = [
-        backup_row(0.0), backup_row(1.0), backup_row(2.0), backup_row(3.0),
-        backup_row(4.0), backup_row(5.0), backup_row(6.0), backup_row(7.0),
-        backup_row(8.0),
+        backup_row(324.0), // appearance
+        backup_row(376.0), // config
+        backup_row(504.0), // SSH
+        backup_row(428.0), // sync
+        backup_row(580.0), // assistant
+        backup_row(656.0), // session
+        backup_row(708.0), // directory history
+        backup_row(760.0), // command history
+        backup_row(812.0), // fonts
     ];
-    let backup_actions = backup_row(9.0);
-    let backup_h = s(backup_y0 + 10.0 * ROW_H + 32.0 - 72.0);
+    let backup_actions = backup_segment;
+    let backup_h = s(864.0 + 40.0 - 72.0);
 
     SettingsGeometry {
         gear,
@@ -1127,6 +1166,9 @@ fn settings_geometry(
         sync_rows,
         sync_auto_pull,
         sync_actions,
+        backup_auto,
+        backup_segment,
+        backup_groups,
         backup_rows,
         backup_actions,
         backup_h,
@@ -1340,6 +1382,9 @@ pub fn settings_hit(
     // Sidebar navigation and the header reset button are available from every
     // section.
     for (nav_section, nx, ny, nw, nh) in geometry.nav {
+        if nav_section == NebulaSettingsSection::Backup && !SHOW_BACKUP_SETTINGS {
+            continue;
+        }
         if contains_rect((nx, ny, nw, nh), x, y) {
             return SettingsHit::Nav(nav_section);
         }
@@ -1514,7 +1559,7 @@ pub fn settings_hit(
                         return SettingsHit::BackupSelection(index);
                     }
                 }
-                let [export, restore] = sync_button_rects(geometry.backup_actions, scale_factor);
+                let [export, restore] = backup_segment_rects(geometry.backup_segment, scale_factor);
                 if contains_rect(export, x, y) {
                     return SettingsHit::BackupExport;
                 }
@@ -1708,6 +1753,35 @@ fn sync_button_rects(
     [(rx, y, w, h), (rx + w + s(12.0), y, w, h)]
 }
 
+/// Export/restore segmented control from the backup prototype. The hit boxes
+/// are the same inner slots that are painted, including the 3px outer inset.
+fn backup_segment_rects(
+    (rx, ry, rw, rh): (f32, f32, f32, f32),
+    scale: f32,
+) -> [(f32, f32, f32, f32); 2] {
+    let inset = 3.0 * scale;
+    let inner_w = (rw - inset * 2.0).max(0.0);
+    let slot_w = inner_w * 0.5;
+    [
+        (rx + inset, ry + inset, slot_w, rh - inset * 2.0),
+        (rx + inset + slot_w, ry + inset, slot_w, rh - inset * 2.0),
+    ]
+}
+
+fn backup_item_selected(selection: BackupSelection, index: usize) -> bool {
+    match index {
+        0 => selection.appearance,
+        1 => selection.config,
+        2 => selection.ssh,
+        3 => selection.sync,
+        4 => selection.assistant,
+        5 => selection.session,
+        6 => selection.directory_history,
+        7 => selection.command_history,
+        _ => selection.fonts,
+    }
+}
+
 /// 键位行的 keycap 矩形（quad 与 text 两个 pass 共用同一几何）。
 fn keymap_keycap_rect(
     (rx, ry, rw, rh): (f32, f32, f32, f32),
@@ -1868,6 +1942,9 @@ pub(super) fn push_quads(
     // no vertical line); hover stays a quiet wash.
     let section = view.section;
     for (nav_section, nx, ny, nw, nh) in geometry.nav {
+        if nav_section == NebulaSettingsSection::Backup && !SHOW_BACKUP_SETTINGS {
+            continue;
+        }
         if nav_section == section {
             quads.push(UiQuad::solid(
                 nx - s(1.0),
@@ -1875,13 +1952,28 @@ pub(super) fn push_quads(
                 nw + s(2.0),
                 nh + s(2.0),
                 s(9.0),
-                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 40),
+                // HTML 原型的选中态是白色卡片 + 发丝边框；这里用中性
+                // surface wash，避免整条导航被 accent 色块压满。
+                Rgba::new(sk.ink_strong.r, sk.ink_strong.g, sk.ink_strong.b, 18),
             ));
-            quads.push(UiQuad::solid(nx, ny, nw, nh, s(8.0), sk.panel));
-            quads.push(UiQuad::solid(nx, ny, nw, nh, s(8.0), sk.accent_soft));
+            quads.push(UiQuad::solid(nx, ny, nw, nh, s(8.0), sk.surface));
         } else if view.hover == SettingsHit::Nav(nav_section) {
             quads.push(UiQuad::solid(nx, ny, nw, nh, s(8.0), sk.hover));
         }
+        let icon_ink = if nav_section == section {
+            Rgba::new(sk.ink_strong.r, sk.ink_strong.g, sk.ink_strong.b, 235)
+        } else if view.hover == SettingsHit::Nav(nav_section) {
+            Rgba::new(sk.icon_hover.r, sk.icon_hover.g, sk.icon_hover.b, 230)
+        } else {
+            Rgba::new(sk.icon.r, sk.icon.g, sk.icon.b, 190)
+        };
+        icons::push_settings_nav_icon(
+            quads,
+            nav_icon(nav_section),
+            (nx + s(10.0), ny + s(7.0), s(18.0), s(18.0)),
+            scale,
+            icon_ink,
+        );
     }
 
     // Reset: a quiet ghost button in the header (hairline, no fill until hover).
@@ -2559,40 +2651,154 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Backup => {
-            group_frame(quads, geometry.backup_rows[0], geometry.backup_rows.len());
-            for (index, row) in geometry.backup_rows.iter().enumerate() {
-                row_hover(quads, *row, view.hover == SettingsHit::BackupSelection(index));
-                let on = match index {
-                    0 => view.backup_selection.appearance,
-                    1 => view.backup_selection.config,
-                    2 => view.backup_selection.ssh,
-                    3 => view.backup_selection.sync,
-                    4 => view.backup_selection.assistant,
-                    5 => view.backup_selection.session,
-                    6 => view.backup_selection.directory_history,
-                    7 => view.backup_selection.command_history,
-                    _ => view.backup_selection.fonts,
-                };
-                toggle(quads, &mut staged, *row, on);
-            }
-            let [export, restore] = sync_button_rects(geometry.backup_actions, scale);
-            for (rect, hit) in [(export, SettingsHit::BackupExport), (restore, SettingsHit::BackupRestore)] {
-                let (bx, by, bw, bh) = rect;
-                let radius = super::ui::tokens::radius::CONTROL * scale;
+            let overlay_radius = super::ui::tokens::radius::OVERLAY * scale;
+            let control_radius = super::ui::tokens::radius::CONTROL * scale;
+            let chip_radius = super::ui::tokens::radius::CHIP * scale;
+            // Automatic-backup summary card. Its switch is deliberately shown
+            // disabled while the page is gated: the current backend supports
+            // explicit encrypted exports, but has no scheduled-retention
+            // service yet, so presenting an active control would be dishonest.
+            {
+                let (ax, ay, aw, ah) = geometry.backup_auto;
                 let mut stroke = Vec::new();
-                surface::push_stroke(&mut stroke, rect, radius, scale, sk.hairline);
+                surface::push_stroke(
+                    &mut stroke,
+                    geometry.backup_auto,
+                    overlay_radius,
+                    scale,
+                    sk.hairline,
+                );
                 for quad in stroke {
                     clip(quads, quad);
                 }
+                clip(quads, UiQuad::solid(ax, ay, aw, ah, overlay_radius, sk.panel));
+                let icon_rect = (ax + s(16.0), ay + (ah - s(34.0)) * 0.5, s(34.0), s(34.0));
+                let (ix, iy, iw, ih) = icon_rect;
+                clip(quads, UiQuad::solid(ix, iy, iw, ih, control_radius, sk.surface));
+                let mut icon = Vec::new();
+                icons::push_settings_nav_icon(
+                    &mut icon,
+                    icons::SettingsNavIcon::Backup,
+                    icon_rect,
+                    scale,
+                    Rgba::new(sk.icon.r, sk.icon.g, sk.icon.b, 220),
+                );
+                for quad in icon {
+                    clip(quads, quad);
+                }
+                let track = (ax + aw - s(50.0), ay + (ah - s(20.0)) * 0.5, s(34.0), s(20.0));
+                clip(
+                    quads,
+                    UiQuad::solid(track.0, track.1, track.2, track.3, track.3 * 0.5, sk.track_off),
+                );
                 clip(
                     quads,
                     UiQuad::solid(
-                        bx,
-                        by,
-                        bw,
-                        bh,
-                        radius,
-                        if view.hover == hit { sk.hover } else { sk.panel },
+                        track.0 + s(2.0),
+                        track.1 + s(2.0),
+                        s(16.0),
+                        s(16.0),
+                        s(16.0) * 0.5,
+                        sk.knob_off,
+                    ),
+                );
+            }
+
+            // Export / restore actions share the prototype's segmented plate.
+            {
+                let (sx, sy, sw, sh) = geometry.backup_segment;
+                let mut stroke = Vec::new();
+                surface::push_stroke(
+                    &mut stroke,
+                    geometry.backup_segment,
+                    overlay_radius,
+                    scale,
+                    sk.hairline,
+                );
+                for quad in stroke {
+                    clip(quads, quad);
+                }
+                clip(quads, UiQuad::solid(sx, sy, sw, sh, overlay_radius, sk.card));
+                let [export, restore] = backup_segment_rects(geometry.backup_segment, scale);
+                for (rect, hit, active) in [
+                    (export, SettingsHit::BackupExport, true),
+                    (restore, SettingsHit::BackupRestore, false),
+                ] {
+                    let (bx, by, bw, bh) = rect;
+                    let fill = if active {
+                        sk.panel
+                    } else if view.hover == hit {
+                        sk.hover
+                    } else {
+                        Rgba::new(0, 0, 0, 0)
+                    };
+                    clip(quads, UiQuad::solid(bx, by, bw, bh, control_radius, fill));
+                }
+            }
+
+            // One manifest card with quiet group headers. Row geometry is not
+            // contiguous in category-index order, so paint by the explicit
+            // visual order used by the HTML prototype.
+            {
+                let (gx, gy, gw, _) = geometry.backup_groups[0];
+                let last = geometry.backup_rows[8];
+                let gh = last.1 + last.3 - gy;
+                let card = (gx, gy, gw, gh);
+                let mut stroke = Vec::new();
+                surface::push_stroke(&mut stroke, card, overlay_radius, scale, sk.hairline);
+                for quad in stroke {
+                    clip(quads, quad);
+                }
+                clip(quads, UiQuad::solid(gx, gy, gw, gh, overlay_radius, sk.panel));
+            }
+            for (index, row) in geometry.backup_rows.iter().enumerate() {
+                row_hover(quads, *row, view.hover == SettingsHit::BackupSelection(index));
+                let on = backup_item_selected(view.backup_selection, index);
+                let cb = (row.0 + s(16.0), row.1 + (row.3 - s(16.0)) * 0.5, s(16.0), s(16.0));
+                if on {
+                    clip(
+                        quads,
+                        UiQuad::solid(
+                            cb.0,
+                            cb.1,
+                            cb.2,
+                            cb.3,
+                            chip_radius,
+                            Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
+                        ),
+                    );
+                    let mut check = Vec::new();
+                    icons::push_check(
+                        &mut check,
+                        cb.0 + cb.2 * 0.5,
+                        cb.1 + cb.3 * 0.5,
+                        scale * 0.82,
+                        Rgba::new(sk.ink_on_accent.r, sk.ink_on_accent.g, sk.ink_on_accent.b, 255),
+                    );
+                    for quad in check {
+                        clip(quads, quad);
+                    }
+                } else {
+                    let mut stroke = Vec::new();
+                    surface::push_stroke(&mut stroke, cb, chip_radius, scale, sk.hairline);
+                    for quad in stroke {
+                        clip(quads, quad);
+                    }
+                    clip(quads, UiQuad::solid(cb.0, cb.1, cb.2, cb.3, chip_radius, sk.panel));
+                }
+            }
+
+            for index in [1usize, 3, 6, 7, 8] {
+                let row = geometry.backup_rows[index];
+                clip(
+                    quads,
+                    UiQuad::solid(
+                        row.0 + s(16.0),
+                        row.1,
+                        row.2 - s(32.0),
+                        s(1.0),
+                        0.0,
+                        sk.hairline,
                     ),
                 );
             }
@@ -3015,16 +3221,20 @@ pub(super) fn draw_text(
         r.draw_chrome_text(size, tx, ry + (rh - cell_h) / 2.0, sk.ink_dim, label, gc);
     }
     let section = view.section;
-    // Sidebar navigation labels — only the two wired-up sections.
+    // Sidebar navigation labels share the icon geometry and visibility gate
+    // from the quad/hit passes, so hidden entries cannot leave ghost text.
     for (nav_section, nx, ny, _nw, nh) in geometry.nav {
+        if nav_section == NebulaSettingsSection::Backup && !SHOW_BACKUP_SETTINGS {
+            continue;
+        }
         let active = nav_section == section;
         let hovered = view.hover == SettingsHit::Nav(nav_section);
         r.draw_chrome_text(
             size,
-            nx + s(18.0),
+            nx + s(38.0),
             ny + (nh - cell_h) / 2.0,
             if active {
-                sk.accent
+                sk.ink_strong
             } else if hovered {
                 sk.ink
             } else {
@@ -4167,39 +4377,205 @@ pub(super) fn draw_text(
             }
         },
         NebulaSettingsSection::Backup => {
-            let labels = [
-                ("外观", "Appearance"), ("配置文件", "Configuration"),
-                ("SSH 地址簿", "SSH address book"), ("同步配置", "Sync config"),
-                ("AI 助手", "AI assistant"), ("会话布局", "Session layout"),
-                ("目录历史", "Directory history"), ("命令历史", "Command history"),
-                ("导入字体", "Imported fonts"),
-            ];
-            if visible(group_y(geometry.backup_rows[0].1), title_h) {
-                section_title(r, gc, size, scale, &sk, geometry.backup_rows[0].0,
-                    group_y(geometry.backup_rows[0].1), language.pick("导出内容", "Backup contents"));
+            r.draw_chrome_text(
+                size,
+                content_x + s(24.0),
+                content_y + s(49.0),
+                sk.ink_faint,
+                language.pick(
+                    "导出、恢复与自动备份 · 加密文件可跨设备迁移",
+                    "Export, restore, and automatic backups · encrypted and portable",
+                ),
+                gc,
+            );
+
+            let (ax, ay, _, ah) = geometry.backup_auto;
+            if visible(ay, ah) {
+                r.draw_chrome_text(
+                    size,
+                    ax + s(64.0),
+                    ay + s(11.0),
+                    sk.ink_strong,
+                    language.pick("自动备份", "Automatic backup"),
+                    gc,
+                );
+                r.draw_chrome_text(
+                    size,
+                    ax + s(64.0),
+                    ay + s(11.0) + cell_h,
+                    sk.ink_faint,
+                    language.pick(
+                        "恢复预览与回滚流程完成后开放，当前请使用手动导出",
+                        "Available after restore preview and rollback are complete; use manual export for now",
+                    ),
+                    gc,
+                );
             }
-            for (index, row) in geometry.backup_rows.iter().enumerate() {
-                if visible(row.1, row.3) {
-                    row_label(r, gc, size, scale, &sk, *row,
-                        language.pick(labels[index].0, labels[index].1), "", sk.ink);
-                }
-            }
-            let [export, restore] = sync_button_rects(geometry.backup_actions, scale);
-            for ((bx, by, bw, bh), caption) in [
-                (export, language.pick("导出备份", "Export backup")),
-                (restore, language.pick("恢复备份", "Restore backup")),
+
+            let [export, restore] = backup_segment_rects(geometry.backup_segment, scale);
+            for ((bx, by, bw, bh), caption, active) in [
+                (export, language.pick("导出备份", "Export backup"), true),
+                (restore, language.pick("恢复备份", "Restore backup"), false),
             ] {
                 if visible(by, bh) {
-                    let cols = caption.chars().map(|c| c.width().unwrap_or(1).max(1)).sum::<usize>();
-                    r.draw_chrome_text(size, bx + (bw - cols as f32 * cell_w) / 2.0,
-                        by + (bh - cell_h) / 2.0, sk.ink, caption, gc);
+                    let cols =
+                        caption.chars().map(|c| c.width().unwrap_or(1).max(1)).sum::<usize>();
+                    r.draw_chrome_text(
+                        size,
+                        bx + (bw - cols as f32 * cell_w) / 2.0,
+                        by + (bh - cell_h) / 2.0,
+                        if active { sk.ink_strong } else { sk.ink_dim },
+                        caption,
+                        gc,
+                    );
+                }
+            }
+
+            let title_y = geometry.backup_groups[0].1 - s(30.0);
+            if visible(title_y, title_h) {
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.backup_groups[0].0,
+                    title_y,
+                    language.pick("导出内容", "Backup contents"),
+                );
+            }
+
+            let group_labels = [
+                language.pick("设置  ·  3 项", "SETTINGS  ·  3 ITEMS"),
+                language.pick("SSH  ·  1 项", "SSH  ·  1 ITEM"),
+                language.pick("AI  ·  1 项", "AI  ·  1 ITEM"),
+                language.pick("数据与历史  ·  4 项", "DATA & HISTORY  ·  4 ITEMS"),
+            ];
+            for (group, label) in geometry.backup_groups.iter().zip(group_labels) {
+                if visible(group.1, group.3) {
+                    r.draw_chrome_text(
+                        size,
+                        group.0 + s(16.0),
+                        group.1 + (group.3 - cell_h) / 2.0,
+                        sk.ink_faint,
+                        label,
+                        gc,
+                    );
+                }
+            }
+
+            let items = [
+                (
+                    ("外观", "Appearance"),
+                    ("主题、字号、透明度与背景", "Theme, font size, opacity, and background"),
+                    "12 KB",
+                ),
+                (
+                    ("配置文件", "Profiles"),
+                    ("Shell 配置与启动参数", "Shell profiles and launch arguments"),
+                    "4 KB",
+                ),
+                (
+                    ("SSH 地址簿", "SSH address book"),
+                    (
+                        "主机、端口、代理与认证方式，不含凭据",
+                        "Hosts, ports, proxies, and auth methods; no credentials",
+                    ),
+                    "2 KB",
+                ),
+                (
+                    ("同步配置", "Sync configuration"),
+                    ("WebDAV 地址与同步策略，不含密码", "WebDAV endpoint and policy; no passwords"),
+                    "1 KB",
+                ),
+                (
+                    ("AI 助手", "AI assistant"),
+                    (
+                        "模型、MCP 与 Skills 开关，不含 API Key",
+                        "Models, MCP, and Skills switches; no API keys",
+                    ),
+                    "6 KB",
+                ),
+                (
+                    ("会话布局", "Session layout"),
+                    ("标签页、分屏与工作区", "Tabs, splits, and workspaces"),
+                    "3 KB",
+                ),
+                (
+                    ("目录历史", "Directory history"),
+                    ("最近目录，用于启动器推荐", "Recent folders used by launcher suggestions"),
+                    "18 KB",
+                ),
+                (
+                    ("命令历史", "Command history"),
+                    ("各会话保存的本地命令记录", "Locally stored command history by session"),
+                    "64 KB",
+                ),
+                (
+                    ("导入字体", "Imported fonts"),
+                    ("Nebula 管理的私有字体文件", "Private font files managed by Nebula"),
+                    "2.4 MB",
+                ),
+            ];
+            for (index, row) in geometry.backup_rows.iter().enumerate() {
+                if visible(row.1, row.3) {
+                    let (label, description, meta) = items[index];
+                    let text_x = row.0 + s(44.0);
+                    let meta_cols = meta.chars().count();
+                    let meta_x = row.0 + row.2 - s(16.0) - meta_cols as f32 * cell_w;
+                    let max_desc_cols =
+                        (((meta_x - s(12.0) - text_x) / cell_w).floor() as usize).max(1);
+                    let description = truncate_tab_label(
+                        language.pick(description.0, description.1),
+                        max_desc_cols,
+                    );
+                    r.draw_chrome_text(
+                        size,
+                        text_x,
+                        row.1 + s(7.0),
+                        if backup_item_selected(view.backup_selection, index) {
+                            sk.ink
+                        } else {
+                            sk.ink_dim
+                        },
+                        language.pick(label.0, label.1),
+                        gc,
+                    );
+                    r.draw_chrome_text(
+                        size,
+                        text_x,
+                        row.1 + s(7.0) + cell_h,
+                        sk.ink_faint,
+                        &description,
+                        gc,
+                    );
+                    r.draw_chrome_text(
+                        size,
+                        meta_x,
+                        row.1 + (row.3 - cell_h) / 2.0,
+                        sk.ink_faint,
+                        meta,
+                        gc,
+                    );
                 }
             }
             if let Some((status, error)) = &view.backup_status {
-                r.draw_chrome_text(size, geometry.backup_actions.0,
-                    geometry.backup_actions.1 + geometry.backup_actions.3 + s(8.0),
-                    if *error { Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b) } else { sk.ink_dim },
-                    status, gc);
+                let last = geometry.backup_rows[8];
+                let status_y = last.1 + last.3 + s(8.0);
+                if visible(status_y, cell_h) {
+                    r.draw_chrome_text(
+                        size,
+                        geometry.backup_actions.0,
+                        status_y,
+                        if *error {
+                            Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b)
+                        } else {
+                            sk.ink_dim
+                        },
+                        status,
+                        gc,
+                    );
+                }
             }
         },
     }
@@ -4209,7 +4585,8 @@ pub(super) fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion, advanced_content_end, opacity_from_pointer,
+        SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion, advanced_content_end,
+        opacity_from_pointer,
     };
 
     #[test]
@@ -4227,6 +4604,11 @@ mod tests {
         assert!(!SHOW_WEBDAV_SYNC_SETTINGS);
         // SSH 已迁到独立页面；隐藏同步组不能继续把 Advanced 撑高。
         assert_eq!(advanced_content_end(146.0, 308.0, 44.0), 234.0);
+    }
+
+    #[test]
+    fn backup_settings_entry_stays_gated_until_restore_workflow_is_complete() {
+        assert!(!SHOW_BACKUP_SETTINGS);
     }
 
     #[test]

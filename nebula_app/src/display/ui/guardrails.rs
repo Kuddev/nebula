@@ -194,7 +194,7 @@ mod tests {
              这正是「配色/圆角改不干净」的结构性原因。",
             "radius::OVERLAY * scale（浮层）/ radius::CONTROL * scale（控件）\n\
                       / radius::CHIP * scale（chip 键帽），或直接用 surface::push_* 配方",
-            68,
+            67,
             hits,
         );
     }

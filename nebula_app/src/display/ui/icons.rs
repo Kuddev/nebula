@@ -303,6 +303,192 @@ pub(crate) fn push_check(
     );
 }
 
+/// Settings sidebar marks. These are intentionally small, font-independent
+/// vector shapes so the navigation keeps the same silhouette at every DPI
+/// and does not depend on a private-use glyph in the user's UI font.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsNavIcon {
+    Appearance,
+    Profiles,
+    Ssh,
+    Interaction,
+    Keymap,
+    Advanced,
+    Backup,
+}
+
+fn push_rect_outline(
+    quads: &mut Vec<UiQuad>,
+    (x, y, width, height): (f32, f32, f32, f32),
+    stroke: f32,
+    ink: Rgba,
+) {
+    push_segment(quads, (x, y), (x + width, y), stroke, ink);
+    push_segment(quads, (x + width, y), (x + width, y + height), stroke, ink);
+    push_segment(quads, (x + width, y + height), (x, y + height), stroke, ink);
+    push_segment(quads, (x, y + height), (x, y), stroke, ink);
+}
+
+pub(crate) fn push_settings_nav_icon(
+    quads: &mut Vec<UiQuad>,
+    icon: SettingsNavIcon,
+    rect: (f32, f32, f32, f32),
+    scale: f32,
+    ink: Rgba,
+) {
+    let (x, y, width, height) = rect;
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let cx = x + width * 0.5;
+    let cy = y + height * 0.5;
+    let stroke = (1.25 * scale).max(1.0);
+    let arm = |v: f32| v * scale;
+    match icon {
+        SettingsNavIcon::Appearance => {
+            // A small sun/spark reads as appearance without competing with the
+            // section label at the compact 13px icon size.
+            quads.push(UiQuad::solid(
+                cx - arm(3.0),
+                cy - arm(3.0),
+                arm(6.0),
+                arm(6.0),
+                arm(3.0),
+                ink,
+            ));
+            for (from, to) in [
+                ((cx, cy - arm(7.0)), (cx, cy - arm(5.0))),
+                ((cx, cy + arm(5.0)), (cx, cy + arm(7.0))),
+                ((cx - arm(7.0), cy), (cx - arm(5.0), cy)),
+                ((cx + arm(5.0), cy), (cx + arm(7.0), cy)),
+            ] {
+                push_segment(quads, from, to, stroke, ink);
+            }
+        },
+        SettingsNavIcon::Profiles => {
+            push_rect_outline(
+                quads,
+                (cx - arm(6.0), cy - arm(5.0), arm(11.0), arm(10.0)),
+                stroke,
+                ink,
+            );
+            push_segment(
+                quads,
+                (cx - arm(3.0), cy - arm(1.0)),
+                (cx + arm(3.0), cy - arm(1.0)),
+                stroke,
+                ink,
+            );
+            push_segment(
+                quads,
+                (cx - arm(3.0), cy + arm(2.0)),
+                (cx + arm(2.0), cy + arm(2.0)),
+                stroke,
+                ink,
+            );
+        },
+        SettingsNavIcon::Ssh => {
+            push_rect_outline(
+                quads,
+                (cx - arm(7.0), cy - arm(5.0), arm(14.0), arm(10.0)),
+                stroke,
+                ink,
+            );
+            push_segment(
+                quads,
+                (cx - arm(4.5), cy - arm(1.0)),
+                (cx - arm(1.5), cy + arm(1.5)),
+                stroke,
+                ink,
+            );
+            push_segment(
+                quads,
+                (cx - arm(1.5), cy + arm(1.5)),
+                (cx - arm(4.5), cy + arm(4.0)),
+                stroke,
+                ink,
+            );
+            push_segment(
+                quads,
+                (cx + arm(1.5), cy + arm(3.5)),
+                (cx + arm(4.5), cy + arm(3.5)),
+                stroke,
+                ink,
+            );
+        },
+        SettingsNavIcon::Interaction => {
+            push_segment(
+                quads,
+                (cx - arm(5.0), cy - arm(6.0)),
+                (cx - arm(2.0), cy + arm(6.0)),
+                stroke,
+                ink,
+            );
+            push_segment(
+                quads,
+                (cx - arm(5.0), cy - arm(6.0)),
+                (cx + arm(5.5), cy - arm(1.5)),
+                stroke,
+                ink,
+            );
+            push_segment(quads, (cx + arm(5.5), cy - arm(1.5)), (cx + arm(1.0), cy), stroke, ink);
+            push_segment(quads, (cx + arm(1.0), cy), (cx + arm(5.0), cy + arm(5.5)), stroke, ink);
+        },
+        SettingsNavIcon::Keymap => {
+            push_rect_outline(
+                quads,
+                (cx - arm(7.0), cy - arm(5.0), arm(14.0), arm(10.0)),
+                stroke,
+                ink,
+            );
+            for dx in [-4.0, 0.0, 4.0] {
+                quads.push(UiQuad::solid(
+                    cx + arm(dx) - stroke * 0.5,
+                    cy - arm(2.5),
+                    stroke,
+                    stroke,
+                    stroke * 0.5,
+                    ink,
+                ));
+            }
+            push_segment(
+                quads,
+                (cx - arm(4.5), cy + arm(3.0)),
+                (cx + arm(4.5), cy + arm(3.0)),
+                stroke,
+                ink,
+            );
+        },
+        SettingsNavIcon::Advanced => {
+            push_rect_outline(
+                quads,
+                (cx - arm(4.0), cy - arm(4.0), arm(8.0), arm(8.0)),
+                stroke,
+                ink,
+            );
+            for (from, to) in [
+                ((cx, cy - arm(7.0)), (cx, cy - arm(4.0))),
+                ((cx, cy + arm(4.0)), (cx, cy + arm(7.0))),
+                ((cx - arm(7.0), cy), (cx - arm(4.0), cy)),
+                ((cx + arm(4.0), cy), (cx + arm(7.0), cy)),
+            ] {
+                push_segment(quads, from, to, stroke, ink);
+            }
+        },
+        SettingsNavIcon::Backup => {
+            push_segment(quads, (cx, cy - arm(7.0)), (cx, cy + arm(2.0)), stroke, ink);
+            push_segment(quads, (cx - arm(3.0), cy - arm(1.0)), (cx, cy + arm(2.0)), stroke, ink);
+            push_segment(quads, (cx + arm(3.0), cy - arm(1.0)), (cx, cy + arm(2.0)), stroke, ink);
+            push_rect_outline(
+                quads,
+                (cx - arm(6.0), cy + arm(2.5), arm(12.0), arm(4.0)),
+                stroke,
+                ink,
+            );
+        },
+    }
+}
+
 /// 举起的手掌：「停下来等你」。标签徽章用它区别于「回合完成」的圆点。
 ///
 /// # 为什么是实心而不是描边
