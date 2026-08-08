@@ -367,7 +367,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let layout = self.ctx.display().command_palette_layout();
                 let (px, py, pw, ph) = layout.panel;
                 if x >= px && x < px + pw && y >= py && y < py + ph {
-                    if self.ctx.display().palette_scrollbar_press(x, y, &layout) {
+                    if let Some(filter) = layout.chip_at(x, y) {
+                        self.ctx.display().palette_select_launcher_filter(filter);
+                    } else if self.ctx.display().palette_scrollbar_press(x, y, &layout) {
                         self.ctx.window().set_mouse_cursor(winit::window::CursorIcon::Grabbing);
                     } else if let Some(row) = layout.row_at(x, y) {
                         if let Some(action) = self.ctx.display().palette_click(row, layout.max_rows)

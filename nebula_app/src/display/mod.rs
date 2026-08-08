@@ -4446,11 +4446,21 @@ impl Display {
     /// any config profiles. Detection runs once and is cached — the chevron
     /// beside the "+" opens this — the familiar profile menu.
     pub fn open_shell_menu(&mut self, profiles: &[crate::config::ui_config::Profile]) {
+        let ssh_rows: Vec<(String, String)> = self
+            .nebula_ssh_hosts
+            .iter()
+            .map(|host| {
+                let label =
+                    self.nebula_ssh_labels.get(host).cloned().unwrap_or_else(|| host.clone());
+                (label, host.clone())
+            })
+            .collect();
         let shells =
             self.nebula_detected_shells.get_or_insert_with(crate::shell_detect::detect_shells);
         let default_shell =
             self.nebula_shell_id.as_deref().unwrap_or_else(|| self.nebula_shell.settings_value());
         self.nebula_palette.set_shell_menu(shells, profiles, default_shell);
+        self.nebula_palette.set_ssh_hosts(&ssh_rows);
         self.nebula_palette.open_profiles();
         self.pending_update.dirty = true;
     }
@@ -4551,6 +4561,25 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
+    pub fn palette_tab(&mut self, delta: i32) {
+        if !self.nebula_palette.cycle_launcher_filter(delta) {
+            self.palette_move(delta);
+            return;
+        }
+        self.pending_update.dirty = true;
+    }
+
+    pub fn palette_select_launcher_filter(
+        &mut self,
+        filter: command_palette::LauncherFilter,
+    ) -> bool {
+        if self.nebula_palette.set_launcher_filter(filter) {
+            self.pending_update.dirty = true;
+            return true;
+        }
+        false
+    }
+
     pub fn palette_scroll_by(&mut self, rows: i32, max_rows: usize) -> bool {
         if self.nebula_palette.scroll_by(rows, max_rows) {
             self.pending_update.dirty = true;
@@ -4613,8 +4642,13 @@ impl Display {
 
     /// Update palette hover state. `row` is the visual row index, or `None` when
     /// the mouse left the palette area.
-    pub fn palette_hover(&mut self, pos: (f32, f32), row: Option<usize>) -> bool {
-        if self.nebula_palette.pointer_hover(pos, row) {
+    pub fn palette_hover(
+        &mut self,
+        pos: (f32, f32),
+        row: Option<usize>,
+        chip: Option<command_palette::LauncherFilter>,
+    ) -> bool {
+        if self.nebula_palette.pointer_hover(pos, row, chip) {
             self.pending_update.dirty = true;
             return true;
         }

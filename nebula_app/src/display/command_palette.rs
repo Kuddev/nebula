@@ -68,6 +68,61 @@ impl ProfileRow {
             Self::Config { profile, .. } => profile.shell_id.as_deref().unwrap_or(""),
         }
     }
+
+    fn is_shell(&self) -> bool {
+        matches!(self, Self::Shell { .. } | Self::Config { .. })
+    }
+}
+
+/// An SSH destination shown by the launcher. The display label may be a saved
+/// alias while `host` remains the exact launch payload.
+#[derive(Debug, Clone)]
+struct SshRow {
+    label: String,
+    hint: String,
+    search: String,
+    host: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherFilter {
+    All,
+    Ssh,
+    Shell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LauncherGroup {
+    Recommended,
+    Shell,
+    Ssh,
+}
+
+impl LauncherGroup {
+    fn label(self, language: super::UiLanguage) -> &'static str {
+        match self {
+            Self::Recommended => language.pick("推荐", "Recommended"),
+            Self::Shell => language.pick("所有 Shell", "All shells"),
+            Self::Ssh => language.pick("SSH 主机", "SSH hosts"),
+        }
+    }
+}
+
+impl LauncherFilter {
+    fn label(self, language: super::UiLanguage) -> &'static str {
+        match self {
+            Self::All => language.pick("全部", "All"),
+            Self::Ssh => "SSH",
+            Self::Shell => "Shell",
+        }
+    }
+
+    fn next(self, delta: i32) -> Self {
+        const FILTERS: [LauncherFilter; 3] =
+            [LauncherFilter::All, LauncherFilter::Ssh, LauncherFilter::Shell];
+        let index = FILTERS.iter().position(|filter| *filter == self).unwrap_or(0) as i32;
+        FILTERS[(index + delta).rem_euclid(FILTERS.len() as i32) as usize]
+    }
 }
 
 /// 命令面板只负责展示目录；候选的匹配与 frecency 排序由共享目录服务完成，
@@ -107,6 +162,7 @@ pub struct AiSessionRow {
 enum PaletteCandidate {
     Item(usize),
     Profile(usize),
+    Ssh(usize),
     Directory(usize),
     AiSession(usize),
 }
@@ -162,6 +218,8 @@ pub enum PaletteAction {
     LaunchProfile(Profile),
     /// Launch a detected shell (the new-tab dropdown) in a new tab.
     LaunchShell(DetectedShell),
+    /// Launch a saved SSH destination in a new tab.
+    LaunchSsh(String),
     /// Set a detected shell as the default (the settings "默认 Shell" picker).
     SetDefaultShell(DetectedShell),
     SetDefaultProfile(Profile),
@@ -439,8 +497,11 @@ pub struct CommandPalette {
     /// new-tab dropdown) these are detected shells + config profiles; in the
     /// full palette they're the config profiles appended after the actions.
     profiles: Vec<ProfileRow>,
+    /// Saved/configured SSH destinations used only by the launcher picker.
+    ssh_hosts: Vec<SshRow>,
     /// Stable id of the default shell, used by the shell/profile picker badge.
     default_shell_id: Option<String>,
+    launcher_filter: LauncherFilter,
     /// Frecency-ranked directory rows supplied by `DirectoryHistory`.
     directories: Vec<DirectoryRow>,
     /// 「恢复 AI 会话」的行，打开时由 `ai_sessions::scan` 现扫——历史会话
@@ -449,6 +510,7 @@ pub struct CommandPalette {
     mode: PaletteMode,
     /// Mouse-hovered row within the visible window (`None` when not hovering).
     hover: Option<usize>,
+    launcher_chip_hover: Option<LauncherFilter>,
     /// 打开时武装：指针从首次上报位置真正移动（>2px）前不点亮 hover。
     /// 「+」的下拉紧贴按钮弹出，首行往往恰在指针正下方——立即点亮会被
     /// 读成「PowerShell 被默认选中」（2026-07-28 用户反馈：全部待选）。
@@ -493,11 +555,14 @@ impl CommandPalette {
             scrollbar_drag: None,
             recent: Vec::new(),
             profiles: Vec::new(),
+            ssh_hosts: Vec::new(),
             default_shell_id: None,
+            launcher_filter: LauncherFilter::All,
             directories: Vec::new(),
             ai_sessions: Vec::new(),
             mode: PaletteMode::Commands,
             hover: None,
+            launcher_chip_hover: None,
             hover_armed: false,
             pointer_baseline: None,
             context: PaletteContext::default(),
@@ -547,20 +612,10 @@ impl CommandPalette {
         self.open && self.mode == PaletteMode::Directories
     }
 
-    /// 图4 版式：shell picker 空查询时，首行（默认 shell）渲染为"推荐"
-    /// 大卡片，其余行归入"所有选项"。搜索中或无默认时退回平铺卡片列表。
+    /// Launcher rows are intentionally uniform. The default target may sort
+    /// first and carry a badge, but it must never grow into a taller hero row.
     pub fn hero_row(&self) -> bool {
-        self.mode == PaletteMode::Profiles
-            && self.scroll_offset == 0
-            && self.query.is_empty()
-            && matches!(
-                self.filtered.first(),
-                Some(&PaletteCandidate::Profile(index)) if matches!(
-                    &self.profiles[index],
-                    ProfileRow::Shell { shell, .. }
-                        if self.default_shell_id.as_deref() == Some(shell.id.as_str())
-                )
-            )
+        false
     }
 
     /// 打开「恢复 AI 会话」列表。行已按最近活动排好序，这里不再重排。
@@ -571,6 +626,7 @@ impl CommandPalette {
         self.query.clear();
         self.query_selection = Default::default();
         self.hover = None;
+        self.launcher_chip_hover = None;
         self.hover_armed = false;
         self.pointer_baseline = None;
         self.refilter();
@@ -584,7 +640,10 @@ impl CommandPalette {
             .map(|profile| ProfileRow::Config {
                 label: profile.name.clone(),
                 hint: profile.command.clone(),
-                search: format!("{} {} profile launch connect qidong", profile.name, profile.command),
+                search: format!(
+                    "{} {} profile launch connect qidong",
+                    profile.name, profile.command
+                ),
                 profile: profile.clone(),
             })
             .collect();
@@ -616,19 +675,35 @@ impl CommandPalette {
         }));
         // 图4 版式：默认 shell 是"推荐"大卡片，必须占首行 —— Enter 直接
         // 打开推荐项，检测顺序不再决定谁排第一。
-        if let Some(position) = rows.iter().position(
-            |row| match row {
-                ProfileRow::Shell { shell, .. } => shell.id == default_shell_id,
-                ProfileRow::Config { profile, .. } => {
-                    profile.settings_id().as_deref() == Some(default_shell_id)
-                },
+        if let Some(position) = rows.iter().position(|row| match row {
+            ProfileRow::Shell { shell, .. } => shell.id == default_shell_id,
+            ProfileRow::Config { profile, .. } => {
+                profile.settings_id().as_deref() == Some(default_shell_id)
             },
-        ) {
+        }) {
             let default_row = rows.remove(position);
             rows.insert(0, default_row);
         }
         self.profiles = rows;
         self.default_shell_id = Some(default_shell_id.to_owned());
+    }
+
+    /// Refresh SSH rows independently from shell/profile rows. This keeps
+    /// saved destinations out of the settings default-shell picker while
+    /// still making imported or auto-saved hosts available immediately.
+    pub fn set_ssh_hosts(&mut self, hosts: &[(String, String)]) {
+        self.ssh_hosts = hosts
+            .iter()
+            .map(|(label, host)| SshRow {
+                label: label.clone(),
+                hint: host.clone(),
+                search: format!("{label} {host} ssh host remote").to_lowercase(),
+                host: host.clone(),
+            })
+            .collect();
+        if self.mode == PaletteMode::Profiles {
+            self.refilter();
+        }
     }
 
     /// Populate the settings "默认 Shell" picker: detected shells only (no
@@ -683,6 +758,7 @@ impl CommandPalette {
         self.arm_pointer_hover();
         self.open = true;
         self.mode = PaletteMode::Profiles;
+        self.launcher_filter = LauncherFilter::All;
         self.query.clear();
         self.query_selection.clear();
         self.refilter();
@@ -717,19 +793,55 @@ impl CommandPalette {
         self.scrollbar_drag = None;
         self.query_selection.clear();
         self.default_shell_id = None;
+        self.launcher_filter = LauncherFilter::All;
+    }
+
+    pub fn is_launcher(&self) -> bool {
+        self.open && self.mode == PaletteMode::Profiles
+    }
+
+    pub fn launcher_filter(&self) -> LauncherFilter {
+        self.launcher_filter
+    }
+
+    pub fn launcher_chip_counts(&self) -> [(LauncherFilter, usize); 3] {
+        let shell_count = self.profiles.iter().filter(|row| row.is_shell()).count();
+        [
+            (LauncherFilter::All, shell_count + self.ssh_hosts.len()),
+            (LauncherFilter::Ssh, self.ssh_hosts.len()),
+            (LauncherFilter::Shell, shell_count),
+        ]
+    }
+
+    pub fn set_launcher_filter(&mut self, filter: LauncherFilter) -> bool {
+        if !self.is_launcher() || self.launcher_filter == filter {
+            return false;
+        }
+        self.launcher_filter = filter;
+        self.refilter();
+        true
+    }
+
+    pub fn cycle_launcher_filter(&mut self, delta: i32) -> bool {
+        self.set_launcher_filter(self.launcher_filter.next(delta))
     }
 
     /// 指针驱动的 hover 更新（武装门在此）：打开后指针必须从首次上报
     /// 位置移动超过 2px 才开始点亮；解除一次后恢复普通 hover 跟随。
-    pub fn pointer_hover(&mut self, pos: (f32, f32), row: Option<usize>) -> bool {
+    pub fn pointer_hover(
+        &mut self,
+        pos: (f32, f32),
+        row: Option<usize>,
+        chip: Option<LauncherFilter>,
+    ) -> bool {
         if self.hover_armed {
             match self.pointer_baseline {
                 None => {
                     self.pointer_baseline = Some(pos);
-                    return self.set_hover(None);
+                    return self.set_hover(None, None);
                 },
                 Some(base) if (base.0 - pos.0).abs() < 2.0 && (base.1 - pos.1).abs() < 2.0 => {
-                    return self.set_hover(None);
+                    return self.set_hover(None, None);
                 },
                 Some(_) => {
                     self.hover_armed = false;
@@ -737,7 +849,7 @@ impl CommandPalette {
                 },
             }
         }
-        self.set_hover(row)
+        self.set_hover(row, chip)
     }
 
     /// 每次打开（任何模式）都重新武装 hover。
@@ -745,16 +857,18 @@ impl CommandPalette {
         self.hover_armed = true;
         self.pointer_baseline = None;
         self.hover = None;
+        self.launcher_chip_hover = None;
     }
 
     /// Update hover based on mouse position. `row` is the index within the
     /// visible window (`0..max_rows`), or `None` when the mouse left. Returns
     /// whether the hover changed, so the caller only redraws on transitions.
-    pub fn set_hover(&mut self, row: Option<usize>) -> bool {
-        if self.hover == row {
+    pub fn set_hover(&mut self, row: Option<usize>, chip: Option<LauncherFilter>) -> bool {
+        if self.hover == row && self.launcher_chip_hover == chip {
             return false;
         }
         self.hover = row;
+        self.launcher_chip_hover = chip;
         true
     }
 
@@ -852,6 +966,9 @@ impl CommandPalette {
                     PaletteAction::SetDefaultShell(shell.clone())
                 },
                 ProfileRow::Shell { shell, .. } => PaletteAction::LaunchShell(shell.clone()),
+            },
+            PaletteCandidate::Ssh(index) => {
+                PaletteAction::LaunchSsh(self.ssh_hosts[index].host.clone())
             },
             PaletteCandidate::Directory(directory) => {
                 PaletteAction::NewAtDirectory(self.directories[directory].path.clone())
@@ -1030,6 +1147,48 @@ impl CommandPalette {
                 }
                 Some(labels)
             },
+            PaletteMode::Profiles => {
+                let mut labels = Vec::with_capacity(window.len());
+                let mut previous = None;
+                for candidate in &window {
+                    let Some(group) = self.launcher_group(*candidate) else {
+                        labels.push(None);
+                        continue;
+                    };
+                    labels.push(
+                        (previous != Some(group))
+                            .then(|| (group.label(self.language).to_owned(), String::new())),
+                    );
+                    previous = Some(group);
+                }
+                Some(labels)
+            },
+            _ => None,
+        }
+    }
+
+    fn profile_is_default(&self, index: usize) -> bool {
+        match &self.profiles[index] {
+            ProfileRow::Shell { shell, .. } => {
+                self.default_shell_id.as_deref() == Some(shell.id.as_str())
+            },
+            ProfileRow::Config { profile, .. } => profile
+                .settings_id()
+                .is_some_and(|id| self.default_shell_id.as_deref() == Some(id.as_str())),
+        }
+    }
+
+    /// Launcher 的推荐身份只来自真实默认 Shell；SSH 没有可靠的使用频率数据，
+    /// 不能为了复刻原型而伪造推荐项。开始搜索后隐藏推荐分组，结果只按类别分段。
+    fn launcher_group(&self, candidate: PaletteCandidate) -> Option<LauncherGroup> {
+        match candidate {
+            PaletteCandidate::Profile(index)
+                if self.query.trim().is_empty() && self.profile_is_default(index) =>
+            {
+                Some(LauncherGroup::Recommended)
+            },
+            PaletteCandidate::Profile(_) => Some(LauncherGroup::Shell),
+            PaletteCandidate::Ssh(_) => Some(LauncherGroup::Ssh),
             _ => None,
         }
     }
@@ -1102,7 +1261,16 @@ impl CommandPalette {
                 .map(PaletteCandidate::Item)
                 .chain((0..self.profiles.len()).map(PaletteCandidate::Profile))
                 .collect(),
-            PaletteMode::Profiles | PaletteMode::DefaultShell => {
+            PaletteMode::Profiles => {
+                let profiles = (0..self.profiles.len())
+                    .filter(|_| self.launcher_filter != LauncherFilter::Ssh)
+                    .map(PaletteCandidate::Profile);
+                let ssh = (0..self.ssh_hosts.len())
+                    .filter(|_| self.launcher_filter != LauncherFilter::Shell)
+                    .map(PaletteCandidate::Ssh);
+                profiles.chain(ssh).collect()
+            },
+            PaletteMode::DefaultShell => {
                 (0..self.profiles.len()).map(PaletteCandidate::Profile).collect()
             },
             PaletteMode::Directories => {
@@ -1116,6 +1284,7 @@ impl CommandPalette {
             match candidate {
                 PaletteCandidate::Item(index) => ITEMS[index].search,
                 PaletteCandidate::Profile(index) => self.profiles[index].search(),
+                PaletteCandidate::Ssh(index) => &self.ssh_hosts[index].search,
                 // 目录模式已经由 DirectoryHistory 完成匹配和排序；这里
                 // 不再二次模糊排序，以免破坏 frecency 的确定性。
                 PaletteCandidate::Directory(_) => "",
@@ -1132,6 +1301,7 @@ impl CommandPalette {
                     self.recent.iter().position(|recent| recent == index).unwrap_or(usize::MAX)
                 },
                 PaletteCandidate::Profile(_)
+                | PaletteCandidate::Ssh(_)
                 | PaletteCandidate::Directory(_)
                 | PaletteCandidate::AiSession(_) => usize::MAX,
             });
@@ -1224,14 +1394,19 @@ impl CommandPalette {
                 color_id: self.profiles[index].color_id().to_string(),
                 label: self.profiles[index].label().to_string(),
                 hint: self.profiles[index].hint().to_string(),
-                is_default: match &self.profiles[index] {
-                    ProfileRow::Shell { shell, .. } => {
-                        self.default_shell_id.as_deref() == Some(shell.id.as_str())
-                    },
-                    ProfileRow::Config { profile, .. } => profile
-                        .settings_id()
-                        .is_some_and(|id| self.default_shell_id.as_deref() == Some(id.as_str())),
-                },
+                is_default: self.profile_is_default(index),
+                chip: String::new(),
+                checked: None,
+            },
+            PaletteCandidate::Ssh(index) => PaletteRow {
+                // Same outline terminal mark for every SSH destination; the
+                // host identity belongs in the label/address, not in a random
+                // per-row glyph color.
+                icon: "\u{f489}".to_owned(),
+                color_id: String::new(),
+                label: self.ssh_hosts[index].label.clone(),
+                hint: self.ssh_hosts[index].hint.clone(),
+                is_default: false,
                 chip: String::new(),
                 checked: None,
             },
@@ -1309,9 +1484,8 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
         ImportWorkspace => "Open workspace...",
         SyncPush => "Sync: push settings",
         SyncPull => "Sync: pull settings",
-        LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) | SetDefaultProfile(_)
-        | NewAtDirectory(_)
-        | ResumeAiSession(_) => item.label,
+        LaunchProfile(_) | LaunchShell(_) | LaunchSsh(_) | SetDefaultShell(_)
+        | SetDefaultProfile(_) | NewAtDirectory(_) | ResumeAiSession(_) => item.label,
     }
 }
 
@@ -1438,6 +1612,22 @@ pub struct PaletteScrollbar {
     hit: (f32, f32, f32, f32),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LauncherChip {
+    pub filter: LauncherFilter,
+    pub label: &'static str,
+    pub count: usize,
+    pub rect: (f32, f32, f32, f32),
+    pub selected: bool,
+}
+
+impl LauncherChip {
+    pub fn hit_test(&self, x: f32, y: f32) -> bool {
+        let (cx, cy, cw, ch) = self.rect;
+        x >= cx && x < cx + cw && y >= cy && y < cy + ch
+    }
+}
+
 impl PaletteScrollbar {
     pub fn hit_test(&self, x: f32, y: f32) -> bool {
         let (hx, hy, hw, hh) = self.hit;
@@ -1451,10 +1641,17 @@ pub struct PaletteLayout {
     pub panel: (f32, f32, f32, f32),
     /// Query input box `(x, y, w, h)`.
     pub input: (f32, f32, f32, f32),
+    /// Launcher-only group controls and their containing strip.
+    pub chips: Vec<LauncherChip>,
+    pub chip_band: Option<(f32, f32, f32, f32)>,
     /// Height of one standard result row.
     pub row_h: f32,
     /// Top Y of the first result row (or of its section header).
     pub list_y: f32,
+    /// Scrollable list bounds `(x, y, w, h)`. Launcher rows use the HTML
+    /// prototype's outer 6px list inset; other modes retain their current
+    /// alignment with the query field.
+    pub list: (f32, f32, f32, f32),
     /// Maximum rows drawn before the list scrolls.
     pub max_rows: usize,
     /// Keyboard-hint footer for picker modes; absent in the full command list.
@@ -1479,11 +1676,15 @@ impl PaletteLayout {
     /// Visible-row index under a point, honoring the non-uniform card
     /// geometry. Points on section captions or card gaps return `None`.
     pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
-        let (px, _, pw, _) = self.panel;
-        if x < px || x >= px + pw {
+        let (lx, _, lw, _) = self.list;
+        if x < lx || x >= lx + lw {
             return None;
         }
         self.rows.iter().position(|&(ry, rh)| y >= ry && y < ry + rh)
+    }
+
+    pub fn chip_at(&self, x: f32, y: f32) -> Option<LauncherFilter> {
+        self.chips.iter().find(|chip| chip.hit_test(x, y)).map(|chip| chip.filter)
     }
 }
 
@@ -1497,17 +1698,39 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
     let s = |v: f32| v * scale;
     let margin = s(8.0);
     let pad = s(12.0);
-    let row_h = s(super::ui::tokens::control::COMPACT_ROW);
-    // 搜索框与结果行等高：输入仍然可发现，但不会压过真正的数据内容。
-    let input_h = row_h;
     let cards = model.is_picker();
-    let max_rows = if cards { 10usize } else { 8usize };
-    let visible = model.filtered.len().min(max_rows);
-    let hero = model.hero_row() && visible > 0;
+    let launcher = model.is_launcher();
+    let row_h = s(if launcher { 42.0 } else { super::ui::tokens::control::COMPACT_ROW });
+    // HTML launcher 的搜索行比结果行矮，空间来自 pal-in 的上下留白；其他模式
+    // 继续保持输入框与结果行等高，避免改变既有命令面板。
+    let input_h = if launcher { s(34.0) } else { row_h };
     let footer_h = if cards { s(36.0) } else { 0.0 };
     let header_h = s(24.0);
     let gap = s(6.0);
     let hero_h = s(58.0);
+    let chip_h = s(24.0);
+    let chip_band_h = if launcher { chip_h + s(10.0) } else { 0.0 };
+    let launcher_top_pad = s(8.0);
+    let launcher_input_gap = s(2.0);
+    let launcher_list_pad = s(6.0);
+    // 固定预留推荐 / Shell / SSH 三条标题，筛选或搜索不会改变面板高度。
+    let launcher_group_reserve = header_h * 3.0;
+    let max_rows = if launcher {
+        let fixed = launcher_top_pad
+            + input_h
+            + launcher_input_gap
+            + chip_band_h
+            + launcher_list_pad * 2.0
+            + launcher_group_reserve
+            + footer_h;
+        (((win_h - margin * 2.0 - fixed).max(row_h) / row_h).floor() as usize).clamp(1, 8)
+    } else if cards {
+        10usize
+    } else {
+        8usize
+    };
+    let visible = model.filtered.len().min(max_rows);
+    let hero = model.hero_row() && visible > 0;
 
     // List geometry relative to the list's top edge. Pickers lay cards out
     // with section captions and gaps (图4); the command list stays a dense
@@ -1515,7 +1738,20 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
     let mut rel_rows: Vec<(f32, f32)> = Vec::with_capacity(visible);
     let mut rel_groups: Vec<(f32, String, String)> = Vec::new();
     let mut y = 0.0f32;
-    if cards {
+    if launcher {
+        // Launcher 与 HTML 一样同时保留 chips 和类别标题。标题本身承担分隔，
+        // 行之间不再额外插缝，因此推荐项与普通项始终等高。
+        let labels = model.group_labels(max_rows).unwrap_or_default();
+        for group in &labels {
+            if let Some((label, context)) = group {
+                rel_groups.push((y, label.clone(), context.clone()));
+                y += header_h;
+            }
+            rel_rows.push((y, row_h));
+            y += row_h;
+        }
+        y = y.max(launcher_group_reserve + max_rows as f32 * row_h);
+    } else if cards {
         let slots = visible.max(1);
         let mut rest = slots;
         if hero {
@@ -1598,13 +1834,68 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
         y = y.max(group_reserve + max_rows as f32 * row_h + row_gaps + s(4.0));
     }
 
-    let pw = s(if cards { 620.0 } else { 640.0 }).min(win_w - 2.0 * margin);
-    let ph = pad + input_h + s(8.0) + y + if cards { footer_h } else { pad };
+    let pw = s(if launcher {
+        660.0
+    } else if cards {
+        620.0
+    } else {
+        640.0
+    })
+    .min(win_w - 2.0 * margin);
+    let ph = if launcher {
+        launcher_top_pad
+            + input_h
+            + launcher_input_gap
+            + chip_band_h
+            + launcher_list_pad
+            + y
+            + launcher_list_pad
+            + footer_h
+    } else {
+        pad + input_h + s(8.0) + chip_band_h + y + if cards { footer_h } else { pad }
+    };
     let px = ((win_w - pw) * 0.5).max(margin);
-    let py = ((win_h - ph) * 0.5).max(s(48.0));
+    let centered_y = ((win_h - ph) * 0.5).max(s(48.0));
+    let py = if launcher { s(96.0).min((win_h - ph - margin).max(margin)) } else { centered_y };
 
-    let input = (px + pad, py + pad, pw - 2.0 * pad, input_h);
-    let list_y = py + pad + input_h + s(8.0);
+    let input = if launcher {
+        (px + s(16.0), py + launcher_top_pad, pw - s(32.0), input_h)
+    } else {
+        (px + pad, py + pad, pw - 2.0 * pad, input_h)
+    };
+    let chip_band = launcher.then_some((
+        px + s(16.0),
+        input.1 + input_h + launcher_input_gap,
+        pw - s(32.0),
+        chip_band_h,
+    ));
+    let mut chips = Vec::new();
+    if let Some((band_x, band_y, _, _)) = chip_band {
+        let mut chip_x = band_x;
+        for (filter, count) in model.launcher_chip_counts() {
+            let label = filter.label(model.language);
+            let columns = text_width_cols(label) + count.to_string().len();
+            let chip_w = s(20.0 + columns as f32 * 7.0).max(s(58.0));
+            chips.push(LauncherChip {
+                filter,
+                label,
+                count,
+                rect: (chip_x, band_y, chip_w, chip_h),
+                selected: model.launcher_filter() == filter,
+            });
+            chip_x += chip_w + s(6.0);
+        }
+    }
+    let list_y = if launcher {
+        chip_band.map_or(input.1 + input_h, |(_, by, _, bh)| by + bh) + launcher_list_pad
+    } else {
+        py + pad + input_h + s(8.0) + chip_band_h
+    };
+    let (list_x, list_w) = if launcher {
+        (px + launcher_list_pad, pw - launcher_list_pad * 2.0)
+    } else {
+        (input.0, input.2)
+    };
     let rows = rel_rows.into_iter().map(|(ry, rh)| (list_y + ry, rh)).collect();
     let groups = rel_groups.into_iter().map(|(gy, label, ctx)| (list_y + gy, label, ctx)).collect();
 
@@ -1633,8 +1924,11 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
     PaletteLayout {
         panel: (px, py, pw, ph),
         input,
+        chips,
+        chip_band,
         row_h,
         list_y,
+        list: (list_x, list_y, list_w, y),
         max_rows,
         footer,
         rows,
@@ -1669,6 +1963,10 @@ const CHIP_GAP: f32 = 12.0;
 /// 否则输入框读起来像悬在列表外面的另一个控件。
 const INPUT_PAD_X: f32 = 14.0;
 
+const PICKER_ICON_BOX: f32 = 26.0;
+const PICKER_ICON_GAP: f32 = 11.0;
+const PICKER_ICON_INDENT: f32 = PICKER_ICON_BOX + PICKER_ICON_GAP;
+
 /// 搜索图标占的列数（图标一列 + 一列缝）。按 cell 列而不是固定 px 计量：
 /// 固定 px 的缝隙在字号变化时会与字形脱节——大字号显挤、小字号显空。
 const SEARCH_SLOT_COLS: f32 = 2.0;
@@ -1697,14 +1995,17 @@ pub(super) fn push_quads(
     let sk = theme.skin();
     let layout = palette_layout(model, w, h, scale);
     let (ix, iy, iw, ih) = layout.input;
+    let (list_x, _, list_w, _) = layout.list;
+    let launcher = model.is_launcher();
 
-    // 命令面板是 Popover：可 Esc、无后果、随手开关，所以**不画遮罩**。
-    // 遮罩传达的是「我打断了你」这份模态承诺，给随手开关的浮层套上它，既凭空
-    // 抬高心理成本，又遮住这个面板自己经常需要被参考的上下文（"我刚才在哪个
-    // 目录来着"）。浮起改由阴影承担 —— 加法而不是减法，背景信息完整保留。
-    //
-    // 同时移除了此前的品牌辉光（palette.edge_glow_l）：glow 是"发光"，不建立
-    // Z 轴层级；与外阴影叠加只会让边缘浑浊。品牌预算留给 logo 与 tab。
+    // The three-dot launcher owns the entire pointer/keyboard scope while it
+    // is open. Its veil is therefore painted in this final overlay pass so
+    // settings/chrome text cannot leak above it. Other command-palette modes
+    // retain their lighter popover behavior.
+    if launcher {
+        quads.push(UiQuad::solid(0.0, 0.0, w, h, 0.0, sk.veil));
+    }
+
     surface::push_surface(
         quads,
         layout.panel,
@@ -1715,13 +2016,41 @@ pub(super) fn push_quads(
         1.0,
     );
 
-    quads.push(UiQuad::solid(ix, iy, iw, ih, s(super::ui::tokens::radius::CONTROL), sk.input));
+    // 原型的搜索行直接落在面板底上；其他 palette 模式仍保留内凹输入框。
+    if !launcher {
+        quads.push(UiQuad::solid(
+            ix,
+            iy,
+            iw,
+            ih,
+            s(super::ui::tokens::radius::CONTROL),
+            sk.input,
+        ));
+    }
+
+    if let Some((bx, by, bw, bh)) = layout.chip_band {
+        quads.push(UiQuad::solid(bx, by + bh - 1.0, bw, 1.0, 0.0, sk.hairline).pixel_snapped());
+        for chip in &layout.chips {
+            let (cx, cy, cw, ch) = chip.rect;
+            let hovered = model.launcher_chip_hover == Some(chip.filter);
+            if chip.selected || hovered {
+                quads.push(UiQuad::solid(
+                    cx,
+                    cy,
+                    cw,
+                    ch,
+                    ch * 0.5,
+                    if chip.selected { sk.hover_strong } else { sk.hover },
+                ));
+            }
+        }
+    }
     if model.query_all_selected() && !model.query.is_empty() {
         let cell_w = size.cell_width();
         let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
-        let selection_x = ix + s(INPUT_PAD_X) + cell_w * SEARCH_SLOT_COLS;
-        let selection_w =
-            (columns as f32 * cell_w).min(iw - s(INPUT_PAD_X * 2.0) - cell_w * SEARCH_SLOT_COLS);
+        let search_left = if launcher { ix } else { ix + s(INPUT_PAD_X) };
+        let selection_x = search_left + cell_w * SEARCH_SLOT_COLS;
+        let selection_w = (columns as f32 * cell_w).min((ix + iw - selection_x).max(0.0));
         quads.push(UiQuad::solid(
             selection_x - s(2.0),
             iy + s(7.0),
@@ -1733,26 +2062,32 @@ pub(super) fn push_quads(
     }
 
     let cell_w = size.cell_width();
+    let row_content_x = if launcher { list_x + s(10.0) } else { ix + s(INPUT_PAD_X) };
+    let row_content_right =
+        if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
     // 分组表头的淡色横线：从标签右侧一直拉到面板右缘（有右缘上下文时让位
     // 给它）。线是 quad、标签是文字，两边共用 `layout.groups` 的同一份 y
     // 与同一套 GUTTER 基准，所以永远不会错位。
-    for (gy, label, ctx) in &layout.groups {
-        let label_w = text_width_cols(label) as f32 * cell_w;
-        let x0 = ix + s(INPUT_PAD_X) + label_w + s(10.0);
-        let ctx_w =
-            if ctx.is_empty() { 0.0 } else { text_width_cols(ctx) as f32 * cell_w + s(10.0) };
-        let x1 = ix + iw - s(GUTTER) - ctx_w;
-        if x1 > x0 {
-            // 一整像素高，吸附到像素网格：半像素的发丝线会被摊成两行半透明
-            // 灰，比没有还糟（与 render-crispness 的整像素锚点同一条铁律）。
-            quads.push(
-                UiQuad::solid(x0, gy + s(11.0), x1 - x0, 1.0, 0.0, sk.hairline).pixel_snapped(),
-            );
+    if !launcher {
+        for (gy, label, ctx) in &layout.groups {
+            let label_w = text_width_cols(label) as f32 * cell_w;
+            let x0 = row_content_x + label_w + s(10.0);
+            let ctx_w =
+                if ctx.is_empty() { 0.0 } else { text_width_cols(ctx) as f32 * cell_w + s(10.0) };
+            let x1 = row_content_right - ctx_w;
+            if x1 > x0 {
+                // 一整像素高，吸附到像素网格：半像素的发丝线会被摊成两行半透明
+                // 灰，比没有还糟（与 render-crispness 的整像素锚点同一条铁律）。
+                quads.push(
+                    UiQuad::solid(x0, gy + s(11.0), x1 - x0, 1.0, 0.0, sk.hairline)
+                        .pixel_snapped(),
+                );
+            }
         }
     }
     // 搜索图标槽与查询文字的起点。槽宽按 **cell 列**算而不是固定 px：
     // 字号一变，固定 px 的缝隙就会与字形脱节（大字号显挤、小字号显空）。
-    let query_x = ix + s(INPUT_PAD_X) + cell_w * SEARCH_SLOT_COLS;
+    let query_x = if launcher { ix } else { ix + s(INPUT_PAD_X) } + cell_w * SEARCH_SLOT_COLS;
 
     // 文本光标画成一条细梁 quad，而不是 `▏` 字形。
     //
@@ -1780,7 +2115,7 @@ pub(super) fn push_quads(
     if model.mode == PaletteMode::Profiles && model.query.is_empty() {
         let combo = super::ui::keycap::layout_combo(
             "Ctrl+K",
-            ix + iw - s(GUTTER),
+            if launcher { ix + iw } else { ix + iw - s(GUTTER) },
             iy + ih / 2.0,
             cell_w,
             scale,
@@ -1819,13 +2154,31 @@ pub(super) fn push_quads(
         for (row, &(ry, rh)) in layout.rows.iter().enumerate() {
             let is_hero = hero && row == 0;
             if selected_row == Some(row) {
-                quads.push(UiQuad::solid(ix, ry, iw, rh, corner, sk.hover_strong));
+                quads.push(UiQuad::solid(list_x, ry, list_w, rh, corner, sk.hover_strong));
             } else if model.hover == Some(row) {
-                quads.push(UiQuad::solid(ix, ry, iw, rh, corner, sk.hover));
+                quads.push(UiQuad::solid(list_x, ry, list_w, rh, corner, sk.hover));
             }
+            // Every launcher/picker row gets the same icon container. Brand
+            // artwork and fallback glyphs may differ, but their visual weight
+            // no longer depends on whether an asset happens to have its own
+            // colored background.
+            let icon_s = s(PICKER_ICON_BOX);
+            let icon_fill = if launcher && selected_row != Some(row) && model.hover != Some(row) {
+                sk.hover
+            } else {
+                sk.surface
+            };
+            quads.push(UiQuad::solid(
+                row_content_x,
+                ry + (rh - icon_s) * 0.5,
+                icon_s,
+                icon_s,
+                s(super::ui::tokens::radius::CONTROL),
+                icon_fill,
+            ));
             if is_hero {
                 let chip = s(28.0);
-                let cx = ix + iw - s(GUTTER) - chip;
+                let cx = row_content_right - chip;
                 let cy = ry + (rh - chip) / 2.0;
                 quads.push(UiQuad::solid(
                     cx - s(1.0),
@@ -1880,7 +2233,7 @@ pub(super) fn push_quads(
     // accent pill. It identifies the launch target without competing with the
     // selected-row affordance. The hero card 已经用"推荐"分区表达默认身份，
     // 不再叠加徽标。
-    let text_x = ix + s(14.0);
+    let text_x = row_content_x;
     let check_col = model.has_check_column();
     let badge = model.language.pick("默认", "Default");
     let badge_w =
@@ -1936,7 +2289,7 @@ pub(super) fn push_quads(
             continue;
         }
         let label_x = if !entry.icon.is_empty() {
-            text_x + s(26.0)
+            text_x + s(PICKER_ICON_INDENT)
         } else if check_col {
             text_x + s(CHECK_COL_W)
         } else {
@@ -1997,19 +2350,32 @@ pub(super) fn draw_text(
     let cell_h = size.cell_height();
     let layout = palette_layout(model, w, h, scale);
     let (ix, iy, iw, ih) = layout.input;
+    let (list_x, _, list_w, _) = layout.list;
+    let launcher = model.is_launcher();
 
     // Inks from the theme skin: dark text on light panels, pale on dark.
     let sk = theme.skin();
 
-    // Left edge for result text and the search icon.
-    let text_x = ix + s(INPUT_PAD_X);
+    // 搜索区和列表各自遵循 HTML 的 16px 内容线；非 launcher 模式继续沿用
+    // 输入框内 14px 的既有基准。
+    let search_x = if launcher { ix } else { ix + s(INPUT_PAD_X) };
+    let text_x = if launcher { list_x + s(10.0) } else { search_x };
+    let text_right =
+        if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
 
     const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
-    r.draw_chrome_text(size, text_x, iy + (ih - cell_h) / 2.0, sk.ink_faint, ICON_SEARCH, gc);
+    r.draw_chrome_text(
+        size,
+        search_x,
+        iy + (ih - cell_h) / 2.0,
+        sk.ink_faint,
+        ICON_SEARCH,
+        gc,
+    );
 
     // placeholder 与真实查询共用这一个起点。光标是 quad pass 画的细梁，
     // 不占列宽，所以打下第一个字符时文字不会跳位。
-    let query_x = text_x + cell_w * SEARCH_SLOT_COLS;
+    let query_x = search_x + cell_w * SEARCH_SLOT_COLS;
     let text_y = iy + (ih - cell_h) / 2.0;
     let query = model.query();
 
@@ -2019,7 +2385,11 @@ pub(super) fn draw_text(
                 .language
                 .pick("搜索命令、Shell 或 Profile…", "Search commands, shells or profiles..."),
             PaletteMode::Profiles | PaletteMode::DefaultShell => {
-                model.language.pick("搜索 Shell 或 Profile…", "Search shells or profiles...")
+                if model.mode == PaletteMode::Profiles {
+                    model.language.pick("搜索 Shell 或 SSH 主机…", "Search shells or SSH hosts...")
+                } else {
+                    model.language.pick("搜索 Shell 或 Profile…", "Search shells or profiles...")
+                }
             },
             PaletteMode::Directories => {
                 model.language.pick("搜索常用目录…", "Search frequent directories...")
@@ -2031,6 +2401,24 @@ pub(super) fn draw_text(
         r.draw_chrome_text(size, query_x, text_y, sk.ink_faint, placeholder, gc);
     } else {
         r.draw_chrome_text(size, query_x, text_y, sk.ink_strong, query, gc);
+    }
+
+    for chip in &layout.chips {
+        let (cx, cy, _, ch) = chip.rect;
+        let ty = cy + (ch - cell_h) * 0.5;
+        let active = chip.selected || model.launcher_chip_hover == Some(chip.filter);
+        let label_ink = if active { sk.ink_strong } else { sk.ink_faint };
+        r.draw_chrome_text(size, cx + s(10.0), ty, label_ink, chip.label, gc);
+        let count = chip.count.to_string();
+        let count_x = cx + s(10.0) + text_width_cols(chip.label) as f32 * cell_w + s(6.0);
+        r.draw_chrome_text(
+            size,
+            count_x,
+            ty,
+            if chip.selected { sk.accent } else { sk.ink_faint },
+            &count,
+            gc,
+        );
     }
 
     if model.is_empty() {
@@ -2046,7 +2434,10 @@ pub(super) fn draw_text(
                 PaletteMode::AiSessions => model
                     .language
                     .pick("没有找到 AI 会话（claude / codex）", "No AI sessions found"),
-                PaletteMode::Commands | PaletteMode::Profiles | PaletteMode::DefaultShell => {
+                PaletteMode::Profiles => {
+                    model.language.pick("当前分组没有匹配项", "No matches in this group")
+                },
+                PaletteMode::Commands | PaletteMode::DefaultShell => {
                     model.language.pick("无匹配命令", "No matching commands")
                 },
             },
@@ -2060,14 +2451,21 @@ pub(super) fn draw_text(
 
     // 分组表头（图4 的推荐/所有选项，以及 AI 会话按来源分的组）。
     for (gy, label, ctx) in &layout.groups {
-        r.draw_chrome_text(size, text_x, gy + s(2.0), sk.ink_dim, label, gc);
+        r.draw_chrome_text(
+            size,
+            text_x,
+            gy + s(2.0),
+            if launcher { sk.ink_faint } else { sk.ink_dim },
+            label,
+            gc,
+        );
         // 右缘上下文（如「工作目录」组挂当前 cwd）：右对齐贴到面板右缘，
         // 与横线让出的位置同一套基准（见 quad pass 的 `ctx_w`）。
         if !ctx.is_empty() {
             let ctx_w = text_width_cols(ctx) as f32 * cell_w;
             r.draw_chrome_text(
                 size,
-                ix + iw - s(GUTTER) - ctx_w,
+                text_right - ctx_w,
                 gy + s(2.0),
                 sk.ink_faint,
                 ctx,
@@ -2079,7 +2477,7 @@ pub(super) fn draw_text(
     if model.mode == PaletteMode::Profiles && model.query.is_empty() {
         let combo = super::ui::keycap::layout_combo(
             "Ctrl+K",
-            ix + iw - s(GUTTER),
+            if launcher { ix + iw } else { ix + iw - s(GUTTER) },
             iy + ih / 2.0,
             cell_w,
             scale,
@@ -2096,46 +2494,28 @@ pub(super) fn draw_text(
         if present { text_width_cols(badge) as f32 * cell_w + s(12.0) + s(10.0) } else { 0.0 }
     };
 
-    // 路径列的左缘。picker 的每一行都从这**同一个 x** 起画路径，于是路径
-    // 排成一条竖线。
-    //
-    // 此前路径是右对齐的：每行路径的起点随它自身的长度浮动（cmd.exe 起点
-    // 在 1030、Nushell 的长路径起点在 730），眼睛沿列表往下扫时要不停地
-    // 左右找落点——这就是"长的长短的短"读着乱的来源。右缘参差反而无所谓，
-    // 因为扫视是沿着起点走的，不是沿着终点。
-    //
-    // 列位置取"最宽的标签 + 呼吸缝"，并钳在面板 62% 处：某一行标签特别长
-    // 时，不能把整列推到没有地方放路径。
-    let path_col_x = cards.then(|| {
-        let widest = rows
-            .iter()
-            .enumerate()
-            .filter(|(row, _)| !(hero && *row == 0))
-            .map(|(_, entry)| {
-                text_width_cols(&entry.label) as f32 * cell_w + badge_w(entry.is_default)
-            })
-            .fold(0.0f32, f32::max);
-        path_column_x(text_x, s(26.0), widest, ix, iw, scale)
-    });
-
     for (row, entry) in rows.into_iter().enumerate() {
         let PaletteRow { icon, color_id, label, hint, is_default, chip, checked: _ } = entry;
         let Some(&(row_y, row_hh)) = layout.rows.get(row) else { break };
         let is_hero = hero && row == 0;
         // Hero 卡片双行：名称在上、完整路径在下（图4）；普通行单行居中。
         let ry = if is_hero { row_y + s(8.0) } else { row_y + (row_hh - cell_h) / 2.0 - s(2.0) };
-        let fg = if Some(row) == selected_row || is_hero { sk.ink_strong } else { sk.ink };
+        let fg = if Some(row) == selected_row || is_hero {
+            sk.ink_strong
+        } else if launcher {
+            sk.ink_dim
+        } else {
+            sk.ink
+        };
         // Leading icon, then the label indented past it. Detected shells with a
         // brand asset stage a full-color textured quad (drawn later); the rest
         // fall back to the Nerd Font glyph. Built-in action rows carry an empty
         // icon and keep the original left edge.
         let has_color =
             !color_id.is_empty() && crate::shell_detect::color_icon_png(&color_id).is_some();
-        let indent = if is_hero { s(34.0) } else { s(26.0) };
+        let indent = if cards { s(PICKER_ICON_INDENT) } else { s(26.0) };
         let label_x = if has_color {
-            // Square icon sized to the glyph ink, vertically centered on the
-            // row (the hero card gets a bigger brand mark).
-            let icon_s = if is_hero { (cell_h * 1.35).round() } else { (cell_h * 0.92).round() };
+            let icon_s = if cards { s(PICKER_ICON_BOX) } else { (cell_h * 0.92).round() };
             let icon_y = (row_y + (row_hh - icon_s) / 2.0).round();
             icon_draws.push((color_id, (text_x, icon_y, icon_s, icon_s)));
             text_x + indent
@@ -2149,25 +2529,32 @@ pub(super) fn draw_text(
             text_x
         } else {
             let icon_y = row_y + (row_hh - cell_h) / 2.0;
-            r.draw_chrome_text(size, text_x, icon_y, sk.accent, &icon, gc);
+            let icon_x = if cards { text_x + (s(PICKER_ICON_BOX) - cell_w) * 0.5 } else { text_x };
+            r.draw_chrome_text(size, icon_x, icon_y, sk.icon, &icon, gc);
             text_x + indent
         };
         // 右缘边界：来源 chip 占掉的宽度从这一行所有右侧内容里扣除；chip
         // 文字与 quad pass 的药丸底同一几何。
         let right_limit = if chip.is_empty() {
-            ix + iw - s(GUTTER)
+            text_right
         } else {
             let chip_w = text_width_cols(&chip) as f32 * cell_w + s(12.0);
-            let cx = ix + iw - s(GUTTER) - chip_w;
+            let cx = text_right - chip_w;
             r.draw_chrome_text(size, cx + s(6.0), ry, sk.ink_dim, &chip, gc);
             cx - s(CHIP_GAP)
         };
         // 标签按可用宽截断（尾部省略号）。60 字符的会话标题此前不截断，
         // 直接横穿路径列画出面板（用户 08-02 截图）；任何一行的标签都不许
         // 画进右侧信息区。
-        let label_limit = match path_col_x {
-            Some(col) if !is_hero => right_limit.min(col - s(HINT_GAP)),
-            _ => right_limit,
+        // HTML reference contract: details consume the remaining flex space
+        // and align to the shared right edge. Reserve a quiet right-hand zone
+        // before fitting the label so the two columns can never overlap.
+        let path_floor = list_x + list_w * 0.54;
+        let badge_reserve = badge_w(is_default && !is_hero);
+        let label_limit = if cards && !hint.is_empty() && !is_hero {
+            right_limit.min(path_floor - s(HINT_GAP) - badge_reserve)
+        } else {
+            right_limit
         };
         let label_budget = ((label_limit - label_x) / cell_w).floor().max(0.0) as usize;
         let label = fit_head(&label, label_budget);
@@ -2221,14 +2608,19 @@ pub(super) fn draw_text(
                 if combo.bounds.0 > label_end + s(HINT_GAP) {
                     draw_combo_text(r, gc, size, &combo, cell_w, cell_h, &sk);
                 }
-            } else if let Some(col_x) = path_col_x {
-                // 路径左对齐到共用的竖线。挤不下（标签太长压到列位）就整条
-                // 让位，绝不叠在标签上——与命令列表的 hint 同一条规矩。
+            } else if cards {
+                // Details end on one shared right edge. Overflow keeps the
+                // root/program prefix and ellipsizes at the tail, matching the
+                // launcher HTML rather than drifting into the label column.
                 let label_end = label_x + text_width_cols(&label) as f32 * cell_w + badge_span;
-                let budget = ((right_limit - col_x) / cell_w).floor();
-                if col_x >= label_end + s(HINT_GAP) && budget >= 3.0 {
-                    let shown = fit_head(&hint, budget as usize);
-                    r.draw_chrome_text(size, col_x, ry, sk.ink_dim, &shown, gc);
+                let detail_left = path_floor.max(label_end + s(HINT_GAP));
+                let budget = ((right_limit - detail_left) / cell_w).floor();
+                if budget >= 3.0 {
+                    let (shown, hint_x) =
+                        fit_right_detail(&hint, budget as usize, right_limit, cell_w);
+                    let hint_ink =
+                        if Some(row) == selected_row { sk.ink_dim } else { sk.ink_faint };
+                    r.draw_chrome_text(size, hint_x, ry, hint_ink, &shown, gc);
                 }
             }
         }
@@ -2263,6 +2655,29 @@ fn draw_footer_hints(
     sk: &super::ui::theme::Skin,
 ) {
     let y = fy + (fh - cell_h) * 0.5;
+    if model.is_launcher() {
+        let hints = [
+            ("↑ ↓", model.language.pick("选择", "Select")),
+            ("Enter", model.language.pick("打开", "Open")),
+            ("Tab", model.language.pick("切换分组", "Switch group")),
+            ("Esc", model.language.pick("关闭", "Close")),
+        ];
+        // Launcher 的 `ix/iw` 已经是面板 16px 内容线，不再重复内缩。
+        let mut x = ix;
+        for (key, label) in hints {
+            r.draw_chrome_text(size, x, y, sk.ink_dim, key, gc);
+            let label_x = x + (text_width_cols(key) + 1) as f32 * cell_w;
+            r.draw_chrome_text(size, label_x, y, sk.ink_faint, label, gc);
+            x = label_x + text_width_cols(label) as f32 * cell_w + scale * 16.0;
+        }
+        let count = model.language.pick("项", "items");
+        let count = format!("{} {count}", model.filtered.len());
+        let count_x = ix + iw - text_width_cols(&count) as f32 * cell_w;
+        if count_x > x {
+            r.draw_chrome_text(size, count_x, y, sk.ink_faint, &count, gc);
+        }
+        return;
+    }
     // (键, 释义)。键名保持 ASCII/箭头，释义随语言切换。
     let hints = [
         ("↑ ↓", model.language.pick("选择", "Select")),
@@ -2315,32 +2730,6 @@ fn text_width_cols(text: &str) -> usize {
     text.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
-/// picker 的路径列左缘：所有行共用一个 x，路径因此排成一条竖线。
-///
-/// `widest_label` 是最宽一行的「标签 + 徽标」像素宽（不含前导图标缩进）。
-///
-/// 2026-07-29 用户反馈"长的长短的短的难看"：路径此前是右对齐的，每行路径的
-/// **起点**随它自身长度浮动（cmd.exe 与 Nushell 的起点差了近 300px），眼睛
-/// 沿列表往下扫时要不停地左右找落点。左对齐让扫视只沿一条竖线走；右缘参差
-/// 无所谓，因为扫视是沿起点走的。
-///
-/// 列位置钳在面板 `COLUMN_MAX_FRACTION` 处：某一行标签特别长时，不能把整列
-/// 推到没有地方放路径。钳住之后那一行的路径会与标签冲突，由调用方让位。
-///
-/// 纯函数，因此"不与标签重叠"这条契约可以被单测覆盖——上一版的
-/// `fit_hint` 就是靠同类测试挡住过一个把宽度和绝对坐标混着减的 bug。
-fn path_column_x(
-    text_x: f32,
-    icon_indent: f32,
-    widest_label: f32,
-    ix: f32,
-    iw: f32,
-    scale: f32,
-) -> f32 {
-    const COLUMN_MAX_FRACTION: f32 = 0.62;
-    (text_x + icon_indent + widest_label + HINT_GAP * scale).min(ix + iw * COLUMN_MAX_FRACTION)
-}
-
 /// Paths keep their root context; overflow is cut at the tail with an
 /// ellipsis, matching the mockup's right-aligned path column.
 fn fit_head(value: &str, budget: usize) -> String {
@@ -2364,6 +2753,12 @@ fn fit_head(value: &str, budget: usize) -> String {
     }
     out.push('…');
     out
+}
+
+fn fit_right_detail(value: &str, budget: usize, right: f32, cell_w: f32) -> (String, f32) {
+    let shown = fit_head(value, budget);
+    let x = right - text_width_cols(&shown) as f32 * cell_w;
+    (shown, x)
 }
 
 /// 路径的**头部**省略：`D:\a\b\…\nebula`。与 [`fit_head`] 相反，因为这两处
@@ -2606,8 +3001,22 @@ mod tests {
         palette.set_shell_menu(
             &[],
             &[
-                Profile { name: "Windows PowerShell".into(), command: "powershell.exe".into(), args: vec![], cwd: None, shell_id: None, terminal_profile_id: None },
-                Profile { name: "Git Bash".into(), command: "bash.exe".into(), args: vec![], cwd: None, shell_id: None, terminal_profile_id: None },
+                Profile {
+                    name: "Windows PowerShell".into(),
+                    command: "powershell.exe".into(),
+                    args: vec![],
+                    cwd: None,
+                    shell_id: None,
+                    terminal_profile_id: None,
+                },
+                Profile {
+                    name: "Git Bash".into(),
+                    command: "bash.exe".into(),
+                    args: vec![],
+                    cwd: None,
+                    shell_id: None,
+                    terminal_profile_id: None,
+                },
             ],
             "powershell",
         );
@@ -2617,6 +3026,69 @@ mod tests {
         let (rows, _) = palette.visible(8);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "Git Bash");
+    }
+
+    #[test]
+    fn launcher_filters_cycle_all_ssh_shell_and_reset_selection() {
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(
+            &[shell("PowerShell", "powershell", "powershell.exe")],
+            &[],
+            "powershell",
+        );
+        palette.set_ssh_hosts(&[("生产机".into(), "root@example.com".into())]);
+        palette.open_profiles();
+
+        assert_eq!(palette.launcher_filter(), LauncherFilter::All);
+        assert_eq!(palette.visible(10).0.len(), 2);
+        palette.move_selection(1, 10);
+        assert!(palette.cycle_launcher_filter(1));
+        assert_eq!(palette.launcher_filter(), LauncherFilter::Ssh);
+        assert_eq!(palette.visible(10).0[0].label, "生产机");
+        assert_eq!(palette.selected, None, "切组后不能保留旧分组的行索引");
+        assert!(palette.cycle_launcher_filter(1));
+        assert_eq!(palette.launcher_filter(), LauncherFilter::Shell);
+        assert_eq!(palette.visible(10).0[0].label, "PowerShell");
+        assert!(palette.cycle_launcher_filter(1));
+        assert_eq!(palette.launcher_filter(), LauncherFilter::All);
+        assert!(palette.cycle_launcher_filter(-1));
+        assert_eq!(palette.launcher_filter(), LauncherFilter::Shell);
+    }
+
+    #[test]
+    fn launcher_ssh_confirmation_keeps_the_exact_destination() {
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(&[], &[], "powershell");
+        palette.set_ssh_hosts(&[("生产机".into(), "ssh://root@example.com:2222".into())]);
+        palette.open_profiles();
+        assert!(palette.set_launcher_filter(LauncherFilter::Ssh));
+
+        let (rows, _) = palette.visible(10);
+        assert_eq!(rows[0].label, "生产机");
+        assert_eq!(rows[0].hint, "ssh://root@example.com:2222");
+        assert_eq!(
+            palette.confirm(),
+            Some(PaletteAction::LaunchSsh("ssh://root@example.com:2222".into()))
+        );
+    }
+
+    #[test]
+    fn launcher_panel_height_stays_fixed_across_filtering() {
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(
+            &[shell("CMD", "cmd", "cmd.exe"), shell("PowerShell", "powershell", "powershell.exe")],
+            &[],
+            "powershell",
+        );
+        palette.set_ssh_hosts(&[("生产机".into(), "root@example.com".into())]);
+        palette.open_profiles();
+        let full = palette_layout(&palette, 1600.0, 900.0, 1.0).panel.3;
+        palette.input_text("cmd");
+        let filtered = palette_layout(&palette, 1600.0, 900.0, 1.0).panel.3;
+        assert_eq!(full, filtered, "搜索结果变化不能让 launcher 上下跳动");
+        palette.set_launcher_filter(LauncherFilter::Ssh);
+        let ssh = palette_layout(&palette, 1600.0, 900.0, 1.0).panel.3;
+        assert_eq!(full, ssh, "切换分组不能改变 launcher 高度");
     }
 
     #[test]
@@ -2671,7 +3143,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_menu_promotes_default_to_hero_row() {
+    fn shell_menu_keeps_default_first_without_a_hero_row() {
         let mut palette = CommandPalette::new();
         palette.set_shell_menu(
             &[
@@ -2682,12 +3154,12 @@ mod tests {
             "powershell",
         );
         palette.open_profiles();
-        // 检测顺序把 CMD 排前，但推荐位（首行大卡片）必须是默认 shell。
-        assert!(palette.hero_row());
+        // 检测顺序把 CMD 排前，但默认 shell 仍排在第一；身份只靠 badge，
+        // 不再用额外高度破坏列表节奏。
+        assert!(!palette.hero_row());
         let (rows, _) = palette.visible(10);
         assert_eq!(rows[0].label, "PowerShell");
         assert!(rows[0].is_default);
-        // 搜索中不分区：hero 退场，回到平铺卡片。
         palette.input_char('c');
         assert!(!palette.hero_row());
     }
@@ -2944,7 +3416,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_layout_rows_are_non_uniform_and_hit_test_matches() {
+    fn launcher_rows_are_equal_and_chip_hit_test_matches() {
         let mut palette = CommandPalette::new();
         palette.set_shell_menu(
             &[
@@ -2954,18 +3426,29 @@ mod tests {
             &[],
             "powershell",
         );
+        palette.set_ssh_hosts(&[("生产机".into(), "root@192.0.2.10".into())]);
         palette.open_profiles();
         let layout = palette_layout(&palette, 1600.0, 900.0, 1.0);
-        assert_eq!(layout.rows.len(), 2);
-        let (hero_y, hero_h) = layout.rows[0];
+        assert_eq!(layout.rows.len(), 3);
+        assert_eq!(layout.chips.len(), 3);
+        assert_eq!(
+            layout.chips.iter().map(|chip| chip.label).collect::<Vec<_>>(),
+            ["全部", "SSH", "Shell"]
+        );
+        assert_eq!(layout.chips.iter().map(|chip| chip.count).collect::<Vec<_>>(), [3, 1, 2]);
+        let (first_y, first_h) = layout.rows[0];
         let (row_y, row_h) = layout.rows[1];
-        assert!(hero_h > row_h, "推荐大卡片必须比普通卡片高");
-        assert_eq!(layout.groups.len(), 2, "hero 版式仍是「推荐 / 所有选项」两条表头"); // 命中测试与逐行矩形一致；卡片之间的缝隙与分区标题不可点。
+        assert_eq!(first_h, row_h, "默认项与普通项必须等高");
+        assert!(row_y - first_y > first_h, "类别切换必须留出标题的分隔空间");
+        assert_eq!(layout.groups.iter().map(|(_, label, _)| label.as_str()).collect::<Vec<_>>(),
+            ["推荐", "所有 Shell", "SSH 主机"]);
         let (px, ..) = layout.panel;
-        assert_eq!(layout.row_at(px + 10.0, hero_y + hero_h / 2.0), Some(0));
+        assert_eq!(layout.row_at(px + 10.0, first_y + first_h / 2.0), Some(0));
         assert_eq!(layout.row_at(px + 10.0, row_y + row_h / 2.0), Some(1));
-        assert_eq!(layout.row_at(px + 10.0, hero_y - 2.0), None, "分区标题不是行");
-        assert_eq!(layout.row_at(px - 20.0, hero_y + 2.0), None, "面板外不命中");
+        assert_eq!(layout.row_at(px + 10.0, first_y - 2.0), None, "chip 分组区不是行");
+        assert_eq!(layout.row_at(px - 20.0, first_y + 2.0), None, "面板外不命中");
+        let ssh = &layout.chips[1];
+        assert_eq!(layout.chip_at(ssh.rect.0 + 2.0, ssh.rect.1 + 2.0), Some(LauncherFilter::Ssh));
     }
 
     #[test]
@@ -2981,39 +3464,13 @@ mod tests {
     }
 
     #[test]
-    fn path_column_clears_the_widest_label() {
-        // 列位置由最宽的一行决定，其余行因此不可能与自己的标签冲突。
-        let (ix, iw, cell_w, scale) = (960.0, 770.0, 14.0, 1.25);
-        let text_x = ix + 14.0 * scale;
-        let indent = 26.0 * scale;
-        let widest = text_width_cols("Windows PowerShell") as f32 * cell_w;
-        let col = path_column_x(text_x, indent, widest, ix, iw, scale);
-        assert!(
-            col >= text_x + indent + widest + HINT_GAP * scale - 0.01,
-            "路径列必须落在最宽标签之后至少一个呼吸缝",
-        );
-        assert!(col < ix + iw, "列位置不能跑出面板");
-    }
-
-    #[test]
-    fn path_column_is_capped_so_a_long_label_cannot_squeeze_it_out() {
-        // 单行标签极长时，列被钳住；调用方据此判定冲突并让整条路径让位，
-        // 而不是把路径叠在标签上。
-        let (ix, iw, cell_w, scale) = (0.0, 600.0, 12.0, 1.0);
-        let absurd =
-            text_width_cols("启动：一个足够长到吃掉整行宽度的 profile 名字标签") as f32 * cell_w;
-        let col = path_column_x(ix + 14.0, 26.0, absurd, ix, iw, scale);
-        assert!(col <= ix + iw * 0.62 + 0.01, "列必须被钳在面板 62% 内");
-    }
-
-    #[test]
-    fn path_column_is_identical_for_every_row() {
-        // 「长的长短的短」的回归防线：列位置只依赖最宽标签，与某一行自身
-        // 的路径长度无关，所以每行拿到的起点完全相同。
-        let (ix, iw, scale) = (100.0, 800.0, 1.0);
-        let col = path_column_x(ix + 14.0, 26.0, 200.0, ix, iw, scale);
-        for _ in 0..5 {
-            assert_eq!(path_column_x(ix + 14.0, 26.0, 200.0, ix, iw, scale), col);
+    fn detail_paths_share_a_right_edge_after_ellipsis() {
+        let right = 900.0;
+        let cell_w = 10.0;
+        for value in ["cmd.exe", r"C:\Program Files\PowerShell\7\pwsh.exe"] {
+            let (shown, x) = fit_right_detail(value, 18, right, cell_w);
+            assert_eq!(x + text_width_cols(&shown) as f32 * cell_w, right);
+            assert!(text_width_cols(&shown) <= 18);
         }
     }
 

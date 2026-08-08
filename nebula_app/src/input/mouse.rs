@@ -280,17 +280,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
             let over_scrollbar =
                 layout.scrollbar.is_some_and(|scrollbar| scrollbar.hit_test(px, py));
+            let hover_chip = if over_scrollbar { None } else { layout.chip_at(px, py) };
             // Hover detection rides the layout's per-row rects (`row_at`): the
             // picker's card geometry is non-uniform (hero card, section gaps),
             // so dividing by row_h would light up captions and gaps too. The
             // scrollbar's widened hit target owns its pixels and suppresses row hover.
-            let hover_row = if over_scrollbar { None } else { layout.row_at(px, py) };
-            if self.ctx.display().palette_hover((px, py), hover_row) {
+            let hover_row =
+                if over_scrollbar || hover_chip.is_some() { None } else { layout.row_at(px, py) };
+            if self.ctx.display().palette_hover((px, py), hover_row, hover_chip) {
                 self.ctx.mark_dirty();
             }
             self.ctx.window().set_mouse_cursor(if over_scrollbar {
                 CursorIcon::Grab
-            } else if hover_row.is_some() {
+            } else if hover_row.is_some() || hover_chip.is_some() {
                 CursorIcon::Pointer
             } else {
                 CursorIcon::Default
@@ -474,9 +476,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.ctx.window().set_mouse_cursor(CursorIcon::Grab);
             return;
         }
-        if self.ctx.image_view().is_some()
-            && rect_contains(image_area, x as f32, y as f32)
-        {
+        if self.ctx.image_view().is_some() && rect_contains(image_area, x as f32, y as f32) {
             self.ctx.window().set_mouse_cursor(CursorIcon::Grab);
             return;
         }

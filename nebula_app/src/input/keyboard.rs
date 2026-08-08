@@ -533,7 +533,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     }
                 },
                 Key::Named(NamedKey::Tab) => {
-                    self.ctx.display().palette_move(if mods.shift_key() { -1 } else { 1 });
+                    self.ctx.display().palette_tab(if mods.shift_key() { -1 } else { 1 });
                 },
                 Key::Named(NamedKey::ArrowDown) => self.ctx.display().palette_move(1),
                 Key::Named(NamedKey::ArrowUp) => self.ctx.display().palette_move(-1),
@@ -923,6 +923,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 name: shell.name.clone(),
                 shell: shell.shell(),
             }),
+            LaunchSsh(host) => self.ctx.nebula_tab(TabRequest::NewSsh(host)),
             SetDefaultShell(shell) => self.ctx.display().set_default_shell(&shell),
             SetDefaultProfile(profile) => self.ctx.display().set_default_profile(&profile),
             NewAtDirectory(path) => self.ctx.nebula_tab(TabRequest::NewAtDirectory(path)),
