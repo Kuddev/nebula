@@ -128,6 +128,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Load command line options.
     let options = Options::new();
 
+    #[cfg(windows)]
+    if options.subcommands.is_none() && env::var_os("NEBULA_DETACHED_LAUNCH").is_some() {
+        // 独立验证实例必须在创建窗口和 ConPTY 前脱离短生命周期的启动控制台，
+        // 否则启动器退出会连带关闭窗口，只留下后台会话进程。
+        unsafe {
+            FreeConsole();
+        }
+    }
+
     match options.subcommands {
         #[cfg(unix)]
         Some(Subcommands::Msg(options)) => msg(options)?,

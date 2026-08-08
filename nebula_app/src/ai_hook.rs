@@ -1036,15 +1036,35 @@ export default function (pi: ExtensionAPI) {
     }
 
     /// Absolute path of the bridge exe.
+    ///
+    /// The helper is an optional runtime asset, so a development checkout or
+    /// an incomplete standalone directory is a valid state. `helper_path()`
+    /// is called from several self-healing paths and from the pipe bootstrap;
+    /// logging on every probe turns that state into an apparent infinite
+    /// warning loop when a config watcher is busy. Keep the state transition
+    /// noisy once, but make repeated probes silent until the helper is found
+    /// again (or removed later).
+    static HELPER_MISSING_ANNOUNCED: AtomicBool = AtomicBool::new(false);
+
     fn helper_path() -> Option<PathBuf> {
         let exe = std::env::current_exe().ok()?;
         let helper = helper_path_from_exe(&exe);
-        if helper.is_none() {
-            log::warn!(
-                "ai_hook: nebula-hook.exe missing from runtime/ and executable directory; AI integrations not installed"
-            );
+        match helper {
+            Some(path) => {
+                // Permit a later installation/removal to be reported once on
+                // the next state transition rather than caching a stale path.
+                HELPER_MISSING_ANNOUNCED.store(false, Ordering::Relaxed);
+                Some(path)
+            },
+            None => {
+                if !HELPER_MISSING_ANNOUNCED.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "ai_hook: nebula-hook.exe missing from runtime/ and executable directory; AI integrations not installed"
+                    );
+                }
+                None
+            },
         }
-        helper
     }
 
     fn helper_path_from_exe(exe: &Path) -> Option<PathBuf> {
