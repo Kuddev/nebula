@@ -2150,6 +2150,7 @@ impl Display {
             area,
             self.nebula_settings_section,
             self.nebula_hidden_hosts.len(),
+            self.nebula_ssh_hosts.len(),
         );
         let next = (self.nebula_settings_scroll + delta).clamp(0.0, max);
         if (next - self.nebula_settings_scroll).abs() > f32::EPSILON {
@@ -2186,6 +2187,39 @@ impl Display {
 
     pub fn hidden_ssh_host_count(&self) -> usize {
         self.nebula_hidden_hosts.len()
+    }
+
+    pub fn ssh_host_count(&self) -> usize {
+        self.nebula_ssh_hosts.len()
+    }
+
+    /// Re-read the user's SSH config without restarting Nebula. The merge
+    /// function is deliberately shared with startup and delete/restore flows,
+    /// so importing cannot create a second ordering or hidden-host policy.
+    pub fn import_ssh_config(&mut self) {
+        self.nebula_ssh_hosts = merge_ssh_hosts(
+            &self.nebula_saved_hosts,
+            &self.nebula_pinned_hosts,
+            &self.nebula_hidden_hosts,
+        );
+        let count = crate::ssh::ssh_config_hosts()
+            .into_iter()
+            .filter(|host| self.nebula_ssh_hosts.iter().any(|entry| entry == host))
+            .count();
+        self.push_toast(
+            format!("已导入 {count} 个 SSH 主机，立即可用"),
+            ToastKind::Success,
+        );
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// The button is intentionally present before update detection exists. It
+    /// gives the page a stable affordance now; networking, verification and
+    /// replacement are tracked in the future plan instead of running here.
+    pub fn request_ssh_upgrade(&mut self) {
+        self.push_toast("升级检测将在后续版本提供", ToastKind::Info);
+        self.pending_update.dirty = true;
     }
 
     /// Ask before removing a saved destination. Config aliases use different
@@ -3122,6 +3156,24 @@ impl Display {
             fonts: self.nebula_font_families.clone(),
             font_notice: self.nebula_font_notice.clone(),
             hidden_hosts: self.nebula_hidden_hosts.clone(),
+            ssh_hosts: self
+                .nebula_ssh_hosts
+                .iter()
+                .map(|destination| settings::SshSettingsHost {
+                    destination: destination.clone(),
+                    label: self
+                        .nebula_ssh_labels
+                        .get(destination)
+                        .cloned()
+                        .unwrap_or_else(|| destination.clone()),
+                    icon: self
+                        .nebula_ssh_icons
+                        .get(destination)
+                        .cloned()
+                        .unwrap_or_else(|| crate::display::ui::os_icons::DEFAULT_ID.to_owned()),
+                    pinned: self.nebula_pinned_hosts.iter().any(|host| host == destination),
+                })
+                .collect(),
             fetch: self.nebula_fetch_enabled,
             powerline: self.nebula_powerline_enabled,
             blur: self.nebula_blur,

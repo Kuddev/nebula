@@ -26,7 +26,7 @@ use crate::renderer::{GlyphCache, Renderer};
 
 use super::keymap;
 use super::ui::theme::Skin;
-use super::ui::{icons, surface, widgets};
+use super::ui::{icons, surface, tokens, widgets};
 use super::{
     AcceptKey, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
     chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label,
@@ -289,6 +289,18 @@ pub enum SettingsHit {
     AlignOption(usize),
     /// Restore one address from the persistent hidden-host list.
     RestoreHiddenSsh(usize),
+    /// SSH settings page: connect to a saved destination.
+    SshHostConnect(usize),
+    /// SSH settings page: edit a saved destination.
+    SshHostEdit(usize),
+    /// SSH settings page: hide a destination without editing ~/.ssh/config.
+    SshHostHide(usize),
+    /// SSH settings page: re-read ~/.ssh/config immediately.
+    SshImportConfig,
+    /// SSH settings page: open the existing SSH editor for a new host.
+    SshAddHost,
+    /// SSH settings page: update flow placeholder until background detection exists.
+    SshUpgrade,
     FetchToggle,
     PowerlineToggle,
     BlurToggle,
@@ -805,6 +817,12 @@ struct SettingsGeometry {
     accept: (f32, f32, f32, f32),
     open_config_file: (f32, f32, f32, f32),
     terminal_import: (f32, f32, f32, f32),
+    ssh_host_row0: (f32, f32, f32, f32),
+    ssh_host_count: usize,
+    ssh_host_row_h: f32,
+    ssh_add_host: (f32, f32, f32, f32),
+    ssh_import_config: (f32, f32, f32, f32),
+    ssh_upgrade: (f32, f32, f32, f32),
     hidden_host_row0: (f32, f32, f32, f32),
     hidden_host_count: usize,
     /// Full-width "窗口透明度" row and its draggable track.
@@ -888,8 +906,10 @@ pub(super) fn settings_max_scroll(
     area: (f32, f32, f32, f32),
     section: NebulaSettingsSection,
     hidden_host_count: usize,
+    ssh_host_count: usize,
 ) -> f32 {
-    let geometry = settings_geometry(size_info, scale_factor, area, 0.0, hidden_host_count);
+    let geometry =
+        settings_geometry(size_info, scale_factor, area, 0.0, hidden_host_count, ssh_host_count);
     let (_, _, _, ph) = geometry.popup;
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
@@ -909,6 +929,7 @@ fn settings_geometry(
     area: (f32, f32, f32, f32),
     scroll: f32,
     hidden_host_count: usize,
+    ssh_host_count: usize,
 ) -> SettingsGeometry {
     let s = |v: f32| v * scale_factor;
     let gear = chrome_settings_button_rect(size_info, scale_factor);
@@ -1052,17 +1073,28 @@ fn settings_geometry(
     let sync_actions = sync_row(5.0);
     let advanced_h = s(advanced_content_end(advanced_y0, sync_y0, ROW_H) + 32.0 - 72.0);
 
-    // SSH 独立页：代理组之后才是可选的隐藏主机恢复列表。
-    let proxy_y0 = 146.0;
+    // SSH 独立页：先展示侧栏同源的主机卡片，再放添加/导入动作，最后
+    // 是隐藏主机恢复和代理设置。主机卡片使用独立高度，保证双行信息和
+    // 三个操作按钮不会因为字体或窗口宽度变化而改动行高。
+    const SSH_HOST_ROW_H: f32 = 78.0;
+    let ssh_host_y0 = 146.0;
+    let ssh_host_row = |i: f32| {
+        (row_x, at(ssh_host_y0 + i * SSH_HOST_ROW_H), row_w, s(SSH_HOST_ROW_H))
+    };
+    let ssh_host_row0 = ssh_host_row(0.0);
+    let ssh_actions_y0 = ssh_host_y0 + ssh_host_count as f32 * SSH_HOST_ROW_H + 16.0;
+    let ssh_add_host = (row_x, at(ssh_actions_y0), row_w, row_h);
+    let ssh_import_config = (row_x, at(ssh_actions_y0 + ROW_H), row_w, row_h);
+    let hidden_y0 = ssh_actions_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
+    let proxy_y0 = if hidden_host_count == 0 {
+        hidden_y0
+    } else {
+        hidden_y0 + hidden_host_count as f32 * ROW_H + GROUP_ADVANCE
+    };
     let proxy_row = |i: f32| (row_x, at(proxy_y0 + i * ROW_H), row_w, row_h);
     let ssh_proxy_mode = proxy_row(0.0);
     let ssh_proxy_rows = [proxy_row(1.0), proxy_row(2.0)];
-    let hidden_y0 = proxy_y0 + ROW_H * 3.0 + GROUP_ADVANCE;
-    let ssh_end = if hidden_host_count == 0 {
-        proxy_y0 + ROW_H * 3.0
-    } else {
-        hidden_y0 + hidden_host_count as f32 * ROW_H
-    };
+    let ssh_end = proxy_y0 + ROW_H * 3.0;
     let ssh_h = s(ssh_end + 32.0 - 72.0);
 
     // Backup prototype: automatic-backup summary, export/restore segmented
@@ -1142,6 +1174,12 @@ fn settings_geometry(
         accept: (row_x, at(ghost_y0 + ROW_H), row_w, row_h),
         open_config_file: (row_x, at(open_y0), row_w, row_h),
         terminal_import: (row_x, at(terminal_import_y0), row_w, row_h),
+        ssh_host_row0,
+        ssh_host_count,
+        ssh_host_row_h: s(SSH_HOST_ROW_H),
+        ssh_add_host,
+        ssh_import_config,
+        ssh_upgrade: (popup_x + popup_w - s(170.0), popup_y + s(24.0), s(150.0), s(42.0)),
         hidden_host_row0: (row_x, at(hidden_y0), row_w, row_h),
         hidden_host_count,
         copy_on_select,
@@ -1182,7 +1220,7 @@ pub(crate) fn opacity_slider_rect(
     scroll: f32,
     target: SettingsOpacityTarget,
 ) -> (f32, f32, f32, f32) {
-    let geometry = settings_geometry(size_info, scale_factor, area, scroll, 0);
+    let geometry = settings_geometry(size_info, scale_factor, area, scroll, 0, 0);
     match target {
         SettingsOpacityTarget::Terminal => geometry.opacity_slider,
         SettingsOpacityTarget::BackgroundImage => geometry.background_image_opacity_slider,
@@ -1191,6 +1229,24 @@ pub(crate) fn opacity_slider_rect(
 
 pub(crate) fn opacity_from_pointer(pointer_x: f32, slider: (f32, f32, f32, f32)) -> f32 {
     ((pointer_x - slider.0) / slider.2.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// Three fixed-width actions live in the right side of every SSH card. Keeping
+/// this derivation shared by draw and hit-test is what prevents a translated
+/// label or DPI change from making the visible button miss its click target.
+fn ssh_host_action_rect(
+    row: (f32, f32, f32, f32),
+    scale: f32,
+    action: usize,
+) -> (f32, f32, f32, f32) {
+    let s = |v: f32| v * scale;
+    let (x, y, w, h) = row;
+    let button_w = s(54.0);
+    let gap = s(6.0);
+    let right = x + w - s(14.0);
+    let buttons_after = 2usize.saturating_sub(action) as f32;
+    let bx = right - button_w * (3usize.saturating_sub(action) as f32) - gap * buttons_after;
+    (bx, y + s(22.0), button_w, h - s(44.0))
 }
 
 /// Appearance 预览卡的壁纸绘制矩形：`(fit 目标, 实际允许触碰的裁剪带)`。
@@ -1203,7 +1259,7 @@ pub(super) fn appearance_preview_wallpaper_rects(
     scroll: f32,
     hidden_hosts: usize,
 ) -> Option<((f32, f32, f32, f32), (f32, f32, f32, f32))> {
-    let geometry = settings_geometry(size_info, scale_factor, area, scroll, hidden_hosts);
+    let geometry = settings_geometry(size_info, scale_factor, area, scroll, hidden_hosts, 0);
     let (vx, vy, vw, vh) = geometry.preview;
     let (_, content_y, _, _) = geometry.content;
     let (_, py, _, ph) = geometry.popup;
@@ -1310,8 +1366,10 @@ pub fn settings_hit(
     shell_count: usize,
     font_count: usize,
     hidden_host_count: usize,
+    ssh_host_count: usize,
 ) -> SettingsHit {
-    let geometry = settings_geometry(size_info, scale_factor, area, scroll, hidden_host_count);
+    let geometry =
+        settings_geometry(size_info, scale_factor, area, scroll, hidden_host_count, ssh_host_count);
     let s = |v: f32| v * scale_factor;
 
     if contains_rect(geometry.gear, x, y) {
@@ -1388,6 +1446,9 @@ pub fn settings_hit(
         if contains_rect((nx, ny, nw, nh), x, y) {
             return SettingsHit::Nav(nav_section);
         }
+    }
+    if section == NebulaSettingsSection::Ssh && contains_rect(geometry.ssh_upgrade, x, y) {
+        return SettingsHit::SshUpgrade;
     }
     if contains_rect(geometry.reset, x, y) {
         return SettingsHit::Reset;
@@ -1487,6 +1548,29 @@ pub fn settings_hit(
                 }
             },
             NebulaSettingsSection::Ssh => {
+                for index in 0..geometry.ssh_host_count {
+                    let row = (
+                        geometry.ssh_host_row0.0,
+                        geometry.ssh_host_row0.1 + index as f32 * geometry.ssh_host_row_h,
+                        geometry.ssh_host_row0.2,
+                        geometry.ssh_host_row_h,
+                    );
+                    if contains_rect(ssh_host_action_rect(row, scale_factor, 0), x, y) {
+                        return SettingsHit::SshHostConnect(index);
+                    }
+                    if contains_rect(ssh_host_action_rect(row, scale_factor, 1), x, y) {
+                        return SettingsHit::SshHostEdit(index);
+                    }
+                    if contains_rect(ssh_host_action_rect(row, scale_factor, 2), x, y) {
+                        return SettingsHit::SshHostHide(index);
+                    }
+                }
+                if contains_rect(geometry.ssh_add_host, x, y) {
+                    return SettingsHit::SshAddHost;
+                }
+                if contains_rect(geometry.ssh_import_config, x, y) {
+                    return SettingsHit::SshImportConfig;
+                }
                 if contains_rect(geometry.ssh_proxy_mode, x, y) {
                     return SettingsHit::SshProxyModeDropdown;
                 }
@@ -1575,6 +1659,17 @@ pub fn settings_hit(
 
 // ---- rendering ----
 
+/// Renderer-owned snapshot for one SSH destination. Keeping this small model
+/// separate from `Display` means the settings page never reaches into runtime
+/// collections while drawing, and the same host ordering can be reused by
+/// the sidebar and command palette without UI-specific branching.
+pub(super) struct SshSettingsHost {
+    pub(super) destination: String,
+    pub(super) label: String,
+    pub(super) icon: String,
+    pub(super) pinned: bool,
+}
+
 /// A per-frame snapshot of the display state the settings render reads. Owns its
 /// data (notably the wallpaper path) so the caller can hand it in by reference
 /// while still borrowing `&mut renderer` for [`draw_text`].
@@ -1608,6 +1703,8 @@ pub(super) struct SettingsView {
     /// Persistent soft-deleted destinations. Rows provide a discoverable
     /// recovery path after the short Undo bar has expired.
     pub(super) hidden_hosts: Vec<String>,
+    /// SSH destinations copied from the sidebar's merged, ordered snapshot.
+    pub(super) ssh_hosts: Vec<SshSettingsHost>,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     pub(super) keep_session: bool,
@@ -1890,7 +1987,14 @@ pub(super) fn push_quads(
     let s = |v: f32| v * scale;
     let sk = view.theme.skin();
 
-    let geometry = settings_geometry(size, scale, view.area, view.scroll, view.hidden_hosts.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.area,
+        view.scroll,
+        view.hidden_hosts.len(),
+        view.ssh_hosts.len(),
+    );
     let (px, py, pw, ph) = geometry.popup;
     // Header band height: the title row sits above the content, and the header
     // separator + big title are all measured from here.
@@ -1988,7 +2092,12 @@ pub(super) fn push_quads(
             sk.hairline,
         ));
         quads.push(UiQuad::solid(rx, ry, rw, rh, s(8.0), sk.surface));
-        if view.hover == SettingsHit::Reset {
+        let hovered = if section == NebulaSettingsSection::Ssh {
+            view.hover == SettingsHit::SshUpgrade
+        } else {
+            view.hover == SettingsHit::Reset
+        };
+        if hovered {
             quads.push(UiQuad::solid(rx, ry, rw, rh, s(8.0), sk.hover));
         }
     }
@@ -2441,7 +2550,99 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Ssh => {
-            group_frame(quads, geometry.ssh_proxy_mode, 3);
+            // Saved hosts are the primary SSH surface. Cards intentionally use
+            // a stable two-line height so a long alias or an icon never shifts
+            // the action buttons below it.
+            for index in 0..geometry.ssh_host_count {
+                let row = (
+                    geometry.ssh_host_row0.0,
+                    geometry.ssh_host_row0.1 + index as f32 * geometry.ssh_host_row_h,
+                    geometry.ssh_host_row0.2,
+                    geometry.ssh_host_row_h,
+                );
+                let (rx, ry, rw, rh) = row;
+                let mut stroke = Vec::new();
+                surface::push_stroke(
+                    &mut stroke,
+                    row,
+                    s(tokens::radius::OVERLAY),
+                    scale,
+                    sk.hairline,
+                );
+                for quad in stroke {
+                    clip(quads, quad);
+                }
+                clip(
+                    quads,
+                    UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.surface),
+                );
+                if matches!(
+                    view.hover,
+                    SettingsHit::SshHostConnect(i)
+                        | SettingsHit::SshHostEdit(i)
+                        | SettingsHit::SshHostHide(i)
+                        if i == index
+                ) {
+                    clip(
+                        quads,
+                        UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.hover),
+                    );
+                }
+                let tile = (rx + s(14.0), ry + s(20.0), s(38.0), s(38.0));
+                let mut tile_stroke = Vec::new();
+                surface::push_stroke(
+                    &mut tile_stroke,
+                    tile,
+                    s(tokens::radius::ICON_TILE),
+                    scale,
+                    sk.hairline,
+                );
+                for quad in tile_stroke {
+                    clip(quads, quad);
+                }
+                clip(
+                    quads,
+                    UiQuad::solid(tile.0, tile.1, tile.2, tile.3, s(tokens::radius::ICON_TILE), sk.panel),
+                );
+                for action in 0..3 {
+                    let rect = ssh_host_action_rect(row, scale, action);
+                    let hovered = match (action, view.hover) {
+                        (0, SettingsHit::SshHostConnect(i)) => i == index,
+                        (1, SettingsHit::SshHostEdit(i)) => i == index,
+                        (2, SettingsHit::SshHostHide(i)) => i == index,
+                        _ => false,
+                    };
+                    let mut action_stroke = Vec::new();
+                    surface::push_stroke(
+                        &mut action_stroke,
+                        rect,
+                        s(tokens::radius::CONTROL),
+                        scale,
+                        sk.hairline,
+                    );
+                    for quad in action_stroke {
+                        clip(quads, quad);
+                    }
+                    clip(
+                        quads,
+                        UiQuad::solid(
+                            rect.0,
+                            rect.1,
+                            rect.2,
+                            rect.3,
+                            s(tokens::radius::CONTROL),
+                            if hovered { sk.hover } else { sk.panel },
+                        ),
+                    );
+                }
+            }
+            group_frame(quads, geometry.ssh_add_host, 2);
+            row_hover(quads, geometry.ssh_add_host, view.hover == SettingsHit::SshAddHost);
+            row_hover(
+                quads,
+                geometry.ssh_import_config,
+                view.hover == SettingsHit::SshImportConfig,
+            );
             row_hover(
                 quads,
                 geometry.ssh_proxy_mode,
@@ -2849,7 +3050,14 @@ pub(super) fn push_popup_quads(
     let Some(dropdown) = view.dropdown else { return };
     let s = |v: f32| v * scale;
     let sk = view.theme.skin();
-    let geometry = settings_geometry(size, scale, view.area, view.scroll, view.hidden_hosts.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.area,
+        view.scroll,
+        view.hidden_hosts.len(),
+        view.ssh_hosts.len(),
+    );
     // 背景色专用浮层：色板网格 + hex 输入框（几何与 hit 同源）。
     if dropdown == SettingsDropdown::BackgroundColor {
         if view.section != NebulaSettingsSection::Appearance {
@@ -2987,7 +3195,14 @@ pub(super) fn draw_popup_text(
     let language = view.language;
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let geometry = settings_geometry(size, scale, view.area, view.scroll, view.hidden_hosts.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.area,
+        view.scroll,
+        view.hidden_hosts.len(),
+        view.ssh_hosts.len(),
+    );
     // 背景色浮层：hex 草稿（或占位提示）画进输入框，色板格无文字。
     if dropdown == SettingsDropdown::BackgroundColor {
         if view.section != NebulaSettingsSection::Appearance {
@@ -3169,7 +3384,14 @@ pub(super) fn draw_text(
     let sk = view.theme.skin();
     let language = view.language;
 
-    let geometry = settings_geometry(size, scale, view.area, view.scroll, view.hidden_hosts.len());
+    let geometry = settings_geometry(
+        size,
+        scale,
+        view.area,
+        view.scroll,
+        view.hidden_hosts.len(),
+        view.ssh_hosts.len(),
+    );
     // Kept for parity with [`draw_popup_text`]'s shell icons; the base page
     // currently stages no icon draws of its own.
     let icon_draws = Vec::new();
@@ -3199,6 +3421,7 @@ pub(super) fn draw_text(
     let group_y = |row_y: f32| row_y - s(42.0);
     let title_h = s(26.0);
 
+    let section = view.section;
     // Brand title in the sidebar header. Drawn large via the scaled-glyph path
     // so it anchors the panel instead of reading as just another row label.
     draw_big_text(
@@ -3215,12 +3438,22 @@ pub(super) fn draw_text(
     {
         // Center the reset label inside its ghost button.
         let (rx, ry, rw, rh) = geometry.reset;
-        let label = language.pick("恢复默认设置", "Restore defaults");
+        let label = if section == NebulaSettingsSection::Ssh {
+            language.pick("升级", "Upgrade")
+        } else {
+            language.pick("恢复默认设置", "Restore defaults")
+        };
         let cols: usize = label.chars().map(|c| c.width().unwrap_or(0)).sum();
         let tx = rx + (rw - cols as f32 * cell_w) / 2.0;
-        r.draw_chrome_text(size, tx, ry + (rh - cell_h) / 2.0, sk.ink_dim, label, gc);
+        r.draw_chrome_text(
+            size,
+            tx,
+            ry + (rh - cell_h) / 2.0,
+            if section == NebulaSettingsSection::Ssh { sk.accent } else { sk.ink_dim },
+            label,
+            gc,
+        );
     }
-    let section = view.section;
     // Sidebar navigation labels share the icon geometry and visibility gate
     // from the quad/hit passes, so hidden entries cannot leave ghost text.
     for (nav_section, nx, ny, _nw, nh) in geometry.nav {
@@ -3909,6 +4142,148 @@ pub(super) fn draw_text(
             }
         },
         NebulaSettingsSection::Ssh => {
+            let (host_x, host_y, host_w, _host_h) = geometry.ssh_host_row0;
+            if visible(group_y(host_y), title_h) {
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    host_x,
+                    group_y(host_y),
+                    language.pick("已保存主机", "Saved hosts"),
+                );
+            }
+            let draw_centered_action = |r: &mut Renderer,
+                                         gc: &mut GlyphCache,
+                                         rect: (f32, f32, f32, f32),
+                                         label: &str,
+                                         ink: Rgb| {
+                let cols = label.chars().map(|ch| ch.width().unwrap_or(1)).sum::<usize>();
+                let tx = rect.0 + (rect.2 - cols as f32 * cell_w) * 0.5;
+                r.draw_chrome_text(
+                    size,
+                    tx,
+                    rect.1 + (rect.3 - cell_h) / 2.0,
+                    ink,
+                    label,
+                    gc,
+                );
+            };
+            for (index, host) in view.ssh_hosts.iter().enumerate() {
+                let row = (
+                    host_x,
+                    host_y + index as f32 * geometry.ssh_host_row_h,
+                    host_w,
+                    geometry.ssh_host_row_h,
+                );
+                if !visible(row.1, row.3) {
+                    continue;
+                }
+                let icon = super::ui::os_icons::resolve(Some(host.icon.as_str()));
+                let icon_px = s(20.0);
+                let icon_mult = super::ui::os_icons::scale_for(icon, cell_w, icon_px);
+                r.draw_chrome_text_scaled(
+                    size,
+                    row.0 + s(14.0) + (s(38.0) - icon_px) * 0.5,
+                    row.1 + row.3 / 2.0 - cell_h * icon_mult / 2.0,
+                    icon_mult,
+                    sk.accent,
+                    icon.glyph.encode_utf8(&mut [0u8; 4]),
+                    gc,
+                );
+                let title_y = row.1 + s(17.0);
+                r.draw_chrome_text(size, row.0 + s(66.0), title_y, sk.ink, &host.label, gc);
+                r.draw_ui_text(
+                    size,
+                    row.0 + s(66.0),
+                    title_y + cell_h * 0.95,
+                    0.78,
+                    sk.ink_dim,
+                    nebula_terminal::term::cell::Flags::empty(),
+                    &host.destination,
+                    gc,
+                );
+                if host.pinned {
+                    r.draw_chrome_text(
+                        size,
+                        row.0 + s(52.0),
+                        title_y,
+                        sk.accent,
+                        "\u{eab4}",
+                        gc,
+                    );
+                }
+                for (action, label) in [
+                    (0usize, language.pick("连接", "Connect")),
+                    (1usize, language.pick("编辑", "Edit")),
+                    (2usize, language.pick("隐藏", "Hide")),
+                ] {
+                    let ink = match (action, view.hover) {
+                        (0, SettingsHit::SshHostConnect(i)) if i == index => sk.accent,
+                        (1, SettingsHit::SshHostEdit(i)) if i == index => sk.accent,
+                        (2, SettingsHit::SshHostHide(i)) if i == index => sk.accent,
+                        _ => sk.ink_dim,
+                    };
+                    draw_centered_action(r, gc, ssh_host_action_rect(row, scale, action), label, ink);
+                }
+            }
+            if visible(geometry.ssh_add_host.1, geometry.ssh_add_host.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.ssh_add_host,
+                    language.pick("添加主机", "Add host"),
+                    "＋",
+                    sk.accent,
+                );
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.ssh_import_config,
+                    language.pick("导入 ~/.ssh/config", "Import ~/.ssh/config"),
+                    language.pick("立即刷新", "Refresh now"),
+                    sk.accent,
+                );
+            }
+            if geometry.hidden_host_count > 0 {
+                let (hx, hy, hw, hh) = geometry.hidden_host_row0;
+                if visible(group_y(hy), title_h) {
+                    section_title(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        hx,
+                        group_y(hy),
+                        language.pick("已隐藏主机", "Hidden hosts"),
+                    );
+                }
+                for (index, host) in view.hidden_hosts.iter().enumerate() {
+                    let rect = (hx, hy + index as f32 * hh, hw, hh);
+                    if visible(rect.1, rect.3) {
+                        row_label(
+                            r,
+                            gc,
+                            size,
+                            scale,
+                            &sk,
+                            rect,
+                            host,
+                            language.pick("恢复", "Restore"),
+                            sk.accent,
+                        );
+                    }
+                }
+            }
             let (gx, gy, ..) = geometry.ssh_proxy_mode;
             if visible(group_y(gy), title_h) {
                 section_title(
@@ -3982,40 +4357,6 @@ pub(super) fn draw_text(
                     &text,
                     gc,
                 );
-            }
-            if geometry.hidden_host_count > 0 {
-                let (hx, hy, hw, hh) = geometry.hidden_host_row0;
-                if visible(group_y(hy), title_h) {
-                    section_title(
-                        r,
-                        gc,
-                        size,
-                        scale,
-                        &sk,
-                        hx,
-                        group_y(hy),
-                        language.pick(
-                            "已隐藏 SSH 主机 · 密码不会恢复",
-                            "Hidden SSH hosts · passwords are not restored",
-                        ),
-                    );
-                }
-                for (index, host) in view.hidden_hosts.iter().enumerate() {
-                    let rect = (hx, hy + index as f32 * hh, hw, hh);
-                    if visible(rect.1, rect.3) {
-                        row_label(
-                            r,
-                            gc,
-                            size,
-                            scale,
-                            &sk,
-                            rect,
-                            host,
-                            language.pick("恢复", "Restore"),
-                            sk.accent,
-                        );
-                    }
-                }
             }
         },
         NebulaSettingsSection::Interaction => {
