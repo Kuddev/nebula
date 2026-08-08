@@ -1731,14 +1731,19 @@ pub fn palette_layout(
     // 继续保持输入框与结果行等高，避免改变既有命令面板。
     let input_h = if launcher { s(34.0) } else { row_h };
     let footer_h = if cards { s(36.0) } else { 0.0 };
-    let header_h = s(24.0);
+    let header_h = if launcher { s(LAUNCHER_GROUP_HEADER_H) } else { s(24.0) };
     let gap = s(6.0);
     let hero_h = s(58.0);
     let chip_h = s(24.0);
     let chip_band_h = if launcher { chip_h + s(10.0) } else { 0.0 };
-    let launcher_top_pad = s(8.0);
-    let launcher_input_gap = s(2.0);
-    let launcher_list_pad = s(6.0);
+    let launcher_top_pad = s(14.0);
+    let launcher_input_gap = s(6.0);
+    // HTML launcher geometry: the list has 8px horizontal inset, 6px top
+    // breathing room, and 8px bottom breathing room. Keeping these axes
+    // separate prevents the icon tile from reading as glued to the panel.
+    let launcher_list_pad_x = s(8.0);
+    let launcher_list_pad_top = s(6.0);
+    let launcher_list_pad_bottom = s(8.0);
     // 固定预留推荐 / Shell / SSH 三条标题，筛选或搜索不会改变面板高度。
     let launcher_group_reserve = header_h * 3.0;
     let max_rows = if launcher {
@@ -1746,10 +1751,11 @@ pub fn palette_layout(
             + input_h
             + launcher_input_gap
             + chip_band_h
-            + launcher_list_pad * 2.0
+            + launcher_list_pad_top
+            + launcher_list_pad_bottom
             + launcher_group_reserve
             + footer_h;
-        (((win_h - margin * 2.0 - fixed).max(row_h) / row_h).floor() as usize).clamp(1, 8)
+        (((win_h - margin * 2.0 - fixed).max(row_h) / row_h).floor() as usize).clamp(1, 7)
     } else if cards {
         10usize
     } else {
@@ -1861,7 +1867,7 @@ pub fn palette_layout(
     }
 
     let pw = s(if launcher {
-        660.0
+        640.0
     } else if cards {
         620.0
     } else {
@@ -1873,9 +1879,9 @@ pub fn palette_layout(
             + input_h
             + launcher_input_gap
             + chip_band_h
-            + launcher_list_pad
+            + launcher_list_pad_top
             + y
-            + launcher_list_pad
+            + launcher_list_pad_bottom
             + footer_h
     } else {
         pad + input_h + s(8.0) + chip_band_h + y + if cards { footer_h } else { pad }
@@ -1912,12 +1918,12 @@ pub fn palette_layout(
         }
     }
     let list_y = if launcher {
-        chip_band.map_or(input.1 + input_h, |(_, by, _, bh)| by + bh) + launcher_list_pad
+        chip_band.map_or(input.1 + input_h, |(_, by, _, bh)| by + bh) + launcher_list_pad_top
     } else {
         py + pad + input_h + s(8.0) + chip_band_h
     };
     let (list_x, list_w) = if launcher {
-        (px + launcher_list_pad, pw - launcher_list_pad * 2.0)
+        (px + launcher_list_pad_x, pw - launcher_list_pad_x * 2.0)
     } else {
         (input.0, input.2)
     };
@@ -1966,6 +1972,7 @@ pub fn palette_layout(
 // this module owns the palette's pixels — same split as `side_panel.rs`) ----
 
 use super::ui::surface;
+use super::ui::widgets::{self, ChipState};
 use crate::renderer::ui::{Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
 
@@ -1988,9 +1995,14 @@ const CHIP_GAP: f32 = 12.0;
 /// 否则输入框读起来像悬在列表外面的另一个控件。
 const INPUT_PAD_X: f32 = 14.0;
 
-const PICKER_ICON_BOX: f32 = 26.0;
+const PICKER_ICON_BOX: f32 = 28.0;
 const PICKER_ICON_GAP: f32 = 11.0;
 const PICKER_ICON_INDENT: f32 = PICKER_ICON_BOX + PICKER_ICON_GAP;
+
+/// Group captions are structure, not content. Keeping them below body size
+/// preserves the HTML reference's quiet scan path through the rows.
+const LAUNCHER_GROUP_TEXT_SCALE: f32 = 0.8;
+const LAUNCHER_GROUP_HEADER_H: f32 = 28.0;
 
 /// 搜索图标占的列数（图标一列 + 一列缝）。按 cell 列而不是固定 px 计量：
 /// 固定 px 的缝隙在字号变化时会与字形脱节——大字号显挤、小字号显空。
@@ -2031,48 +2043,39 @@ pub(super) fn push_quads(
         quads.push(UiQuad::solid(0.0, 0.0, w, h, 0.0, sk.veil));
     }
 
-    surface::push_surface(
+    let panel_radius = if launcher {
+        super::ui::tokens::radius::LAUNCHER
+    } else {
+        super::ui::tokens::radius::OVERLAY
+    };
+    surface::push_surface_with_radius(
         quads,
         layout.panel,
-        (w, h),
+        (0.0, 0.0, w, h),
+        0.0,
         scale,
         &sk,
         surface::Elevation::Popover,
         1.0,
+        panel_radius,
     );
 
     // 原型的搜索行直接落在面板底上；其他 palette 模式仍保留内凹输入框。
     if !launcher {
-        quads.push(UiQuad::solid(
-            ix,
-            iy,
-            iw,
-            ih,
-            s(super::ui::tokens::radius::CONTROL),
-            sk.input,
-        ));
+        quads.push(UiQuad::solid(ix, iy, iw, ih, s(super::ui::tokens::radius::CONTROL), sk.input));
     }
 
     if let Some((bx, by, bw, bh)) = layout.chip_band {
         quads.push(UiQuad::solid(bx, by + bh - 1.0, bw, 1.0, 0.0, sk.hairline).pixel_snapped());
         for chip in &layout.chips {
-            let (cx, cy, cw, ch) = chip.rect;
-            let hovered = model.launcher_chip_hover == Some(chip.filter);
-            let fill = if chip.selected {
-                surface::over(sk.accent_soft, sk.panel)
-            } else if hovered {
-                surface::over(sk.hover, sk.panel)
+            let state = if chip.selected {
+                ChipState::Selected
+            } else if model.launcher_chip_hover == Some(chip.filter) {
+                ChipState::Hover
             } else {
-                sk.panel
+                ChipState::Quiet
             };
-            let stroke = if chip.selected {
-                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 112)
-            } else {
-                sk.hairline
-            };
-            let corner = ch * 0.5;
-            surface::push_stroke(quads, chip.rect, corner, scale, stroke);
-            quads.push(UiQuad::solid(cx, cy, cw, ch, corner, fill));
+            widgets::push_chip(quads, chip.rect, scale, &sk, state);
         }
     }
     if model.query_all_selected() && !model.query.is_empty() {
@@ -2093,12 +2096,28 @@ pub(super) fn push_quads(
 
     let cell_w = size.cell_width();
     let row_content_x = if launcher { list_x + s(10.0) } else { ix + s(INPUT_PAD_X) };
-    let row_content_right =
-        if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
+    let row_content_right = if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
     // 分组表头的淡色横线：从标签右侧一直拉到面板右缘（有右缘上下文时让位
     // 给它）。线是 quad、标签是文字，两边共用 `layout.groups` 的同一份 y
     // 与同一套 GUTTER 基准，所以永远不会错位。
-    if !launcher {
+    if launcher {
+        let (px, _, pw, _) = layout.panel;
+        let x = px + s(8.0);
+        let width = (pw - s(16.0)).max(0.0);
+        for (gy, _, _) in &layout.groups {
+            quads.push(
+                UiQuad::solid(
+                    x,
+                    gy + s(LAUNCHER_GROUP_HEADER_H - 1.0),
+                    width,
+                    1.0,
+                    0.0,
+                    sk.hairline,
+                )
+                .pixel_snapped(),
+            );
+        }
+    } else {
         for (gy, label, ctx) in &layout.groups {
             let label_w = text_width_cols(label) as f32 * cell_w;
             let x0 = row_content_x + label_w + s(10.0);
@@ -2109,8 +2128,7 @@ pub(super) fn push_quads(
                 // 一整像素高，吸附到像素网格：半像素的发丝线会被摊成两行半透明
                 // 灰，比没有还糟（与 render-crispness 的整像素锚点同一条铁律）。
                 quads.push(
-                    UiQuad::solid(x0, gy + s(11.0), x1 - x0, 1.0, 0.0, sk.hairline)
-                        .pixel_snapped(),
+                    UiQuad::solid(x0, gy + s(11.0), x1 - x0, 1.0, 0.0, sk.hairline).pixel_snapped(),
                 );
             }
         }
@@ -2193,18 +2211,23 @@ pub(super) fn push_quads(
             // no longer depends on whether an asset happens to have its own
             // colored background.
             let icon_s = s(PICKER_ICON_BOX);
-            let icon_fill = if launcher && selected_row != Some(row) && model.hover != Some(row) {
-                sk.hover
-            } else {
-                sk.surface
-            };
+            let icon_rect = (row_content_x, ry + (rh - icon_s) * 0.5, icon_s, icon_s);
+            // The tile owns its own quiet boundary and surface. It remains
+            // legible on a selected row without becoming another selection.
+            surface::push_stroke(
+                quads,
+                icon_rect,
+                s(super::ui::tokens::radius::ICON_TILE),
+                scale,
+                sk.hairline,
+            );
             quads.push(UiQuad::solid(
-                row_content_x,
-                ry + (rh - icon_s) * 0.5,
-                icon_s,
-                icon_s,
-                s(super::ui::tokens::radius::CONTROL),
-                icon_fill,
+                icon_rect.0,
+                icon_rect.1,
+                icon_rect.2,
+                icon_rect.3,
+                s(super::ui::tokens::radius::ICON_TILE),
+                sk.card,
             ));
             if is_hero {
                 let chip = s(28.0);
@@ -2390,18 +2413,10 @@ pub(super) fn draw_text(
     // 输入框内 14px 的既有基准。
     let search_x = if launcher { ix } else { ix + s(INPUT_PAD_X) };
     let text_x = if launcher { list_x + s(10.0) } else { search_x };
-    let text_right =
-        if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
+    let text_right = if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
 
     const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
-    r.draw_chrome_text(
-        size,
-        search_x,
-        iy + (ih - cell_h) / 2.0,
-        sk.ink_faint,
-        ICON_SEARCH,
-        gc,
-    );
+    r.draw_chrome_text(size, search_x, iy + (ih - cell_h) / 2.0, sk.ink_faint, ICON_SEARCH, gc);
 
     // placeholder 与真实查询共用这一个起点。光标是 quad pass 画的细梁，
     // 不占列宽，所以打下第一个字符时文字不会跳位。
@@ -2487,26 +2502,25 @@ pub(super) fn draw_text(
 
     // 分组表头（图4 的推荐/所有选项，以及 AI 会话按来源分的组）。
     for (gy, label, ctx) in &layout.groups {
-        r.draw_chrome_text(
-            size,
-            text_x,
-            gy + s(2.0),
-            if launcher { sk.ink_faint } else { sk.ink_dim },
-            label,
-            gc,
-        );
+        if launcher {
+            r.draw_ui_text(
+                size,
+                text_x,
+                gy + s(3.0),
+                LAUNCHER_GROUP_TEXT_SCALE,
+                sk.ink_faint,
+                nebula_terminal::term::cell::Flags::empty(),
+                label,
+                gc,
+            );
+        } else {
+            r.draw_chrome_text(size, text_x, gy + s(2.0), sk.ink_dim, label, gc);
+        }
         // 右缘上下文（如「工作目录」组挂当前 cwd）：右对齐贴到面板右缘，
         // 与横线让出的位置同一套基准（见 quad pass 的 `ctx_w`）。
         if !ctx.is_empty() {
             let ctx_w = text_width_cols(ctx) as f32 * cell_w;
-            r.draw_chrome_text(
-                size,
-                text_right - ctx_w,
-                gy + s(2.0),
-                sk.ink_faint,
-                ctx,
-                gc,
-            );
+            r.draw_chrome_text(size, text_right - ctx_w, gy + s(2.0), sk.ink_faint, ctx, gc);
         }
     }
     // Ctrl+K 键帽文字（chip 底在 quad pass，几何同源）。
@@ -2566,7 +2580,8 @@ pub(super) fn draw_text(
         } else {
             let icon_y = row_y + (row_hh - cell_h) / 2.0;
             let icon_x = if cards { text_x + (s(PICKER_ICON_BOX) - cell_w) * 0.5 } else { text_x };
-            r.draw_chrome_text(size, icon_x, icon_y, sk.icon, &icon, gc);
+            let icon_ink = if launcher { sk.ink_dim } else { sk.icon };
+            r.draw_chrome_text(size, icon_x, icon_y, icon_ink, &icon, gc);
             text_x + indent
         };
         // 右缘边界：来源 chip 占掉的宽度从这一行所有右侧内容里扣除；chip

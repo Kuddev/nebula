@@ -24,7 +24,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Improved
 
-- **The launcher palette now follows the grouped Shell/SSH design** — the three filters are reduced to All, SSH, and Shell; their outlined chips use real UI-font metrics so multi-column labels and double-digit counts stay inside the pill, with distinct default, hover, and selected states. Recommended shells, all shells, and SSH hosts use explicit section headings, equal-height rows, consistent icon plates, stable panel height, and shared search/filter/list geometry. Opening it also dims the surrounding workspace so the active surface is unambiguous.
+- **The launcher palette now follows the grouped Shell/SSH design** — the three filters are reduced to All, SSH, and Shell; quiet chips remain text-only until hover or selection, while the selected state gets a restrained pill and hairline ring. Chip geometry uses real UI-font metrics so multi-column labels and double-digit counts stay inside the pill. Recommended shells, all shells, and SSH hosts use smaller section captions, full-width hairlines, equal-height rows, 28 px neutral icon tiles, stable panel height, a softer outer radius, and shared search/filter/list geometry. Opening it also dims the surrounding workspace so the active surface is unambiguous.
 - **Settings navigation is compact, icon-led, and quieter** — the rail now matches the 196 px reference shell with 32 px rows, 2 px gaps, dedicated vector icons, wider internal label spacing, and a neutral low-contrast selected state. The backup surface has also been reorganized around an automatic-backup summary, an export/restore segmented action, and a grouped manifest with descriptions and sizes; its sidebar entry remains hidden until restore preview, conflict handling, and rollback are ready.
 - **The Windows installer can register Nebula as a command** — "Add Nebula Terminal to the user PATH" is selected by default, `nebula.exe` is also registered through Windows App Paths for Win+R, and uninstall removes only the PATH entry that the installer added. Existing Explorer directory and directory-background context-menu registrations remain included in the installer.
 - **File-tree status is quieter and stable** — directories use neutral theme colors, ignored paths detected through batched `git check-ignore` are dimmed without changing sorting or filtering, and hovering a row no longer shifts its contents.
@@ -47,7 +47,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### 改进
 
-- **启动器面板改为 Shell / SSH 分组设计** — 筛选项收敛为“全部、SSH、Shell”；描边 chip 按 UI 字体真实度量计算宽度，双列文字和两位数计数都不会越出圆角底，并区分默认、悬停与选中状态。推荐 Shell、所有 Shell 与 SSH 主机使用明确分组标题；所有条目等高，图标底块、搜索/筛选/列表几何与面板固定高度保持一致。打开面板时同时压暗周围工作区，当前操作层级更明确。
+- **启动器面板改为 Shell / SSH 分组设计** — 筛选项收敛为“全部、SSH、Shell”；未选中 chip 保持纯文字，悬停或选中才出现克制的胶囊底，选中态带很弱的发丝描边。chip 宽度按 UI 字体真实度量计算，双列文字和两位数计数都不会越出圆角底。推荐 Shell、所有 Shell 与 SSH 主机使用更小的分组标题、贯穿内容宽度的细分隔线、等高条目、28px 中性图标底块、更柔和的面板圆角和固定高度；搜索、筛选、列表继续共用同一套几何。打开面板时同时压暗周围工作区，当前操作层级更明确。
 - **设置导航更紧凑、图标化且更安静** — 左侧栏对齐 196px 原型，使用 32px 条目、2px 间隔、独立矢量图标、更宽松的内部文字间距，以及低对比度的中性选中态。备份页也重排为自动备份摘要、导出/恢复分段操作和带描述/大小的分组清单；在恢复预览、冲突策略与回滚流程完成前，左侧入口暂时隐藏。
 - **Windows 安装器可以把 Nebula 注册为命令** — “将 Nebula Terminal 添加到当前用户 PATH”默认勾选，同时通过 Windows App Paths 注册 `nebula.exe`，因此 Win+R 可以直接启动；卸载时只移除安装器自己加入的 PATH 条目。资源管理器目录及目录背景的右键菜单注册仍随安装包提供。
 - **文件树状态更安静且不抖动** — 目录使用主题中性灰，批量 `git check-ignore` 识别出的忽略项只降低显示强度、不参与排序或过滤，鼠标悬浮也不再移动行内容。
