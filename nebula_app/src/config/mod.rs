@@ -181,6 +181,35 @@ pub fn load(options: &mut Options) -> LoadedConfig {
 fn after_loading(config: &mut UiConfig, options: &mut Options) {
     // Override config with CLI options.
     options.override_config(config);
+    merge_terminal_profiles(config);
+}
+
+/// Append profiles imported through Settings after every config load. Imported
+/// profiles live outside Lua/TOML/YAML so the user's source file is untouched.
+pub fn merge_terminal_profiles(config: &mut UiConfig) {
+    if let Ok(imported) = crate::terminal_profiles::TerminalProfiles::load() {
+        merge_profile_values(config, imported.as_config_profiles());
+    }
+}
+
+fn merge_profile_values(config: &mut UiConfig, imported: Vec<crate::config::ui_config::Profile>) {
+    let mut existing: std::collections::HashSet<String> =
+        config.profiles.iter().map(|profile| profile_command_key(&profile.command)).collect();
+    for profile in imported {
+        if existing.insert(profile_command_key(&profile.command)) {
+            config.profiles.push(profile);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn profile_command_key(command: &str) -> String {
+    command.to_ascii_lowercase()
+}
+
+#[cfg(not(windows))]
+fn profile_command_key(command: &str) -> String {
+    command.to_owned()
 }
 
 /// Load configuration file and log errors.
@@ -451,6 +480,42 @@ mod tests {
     #[test]
     fn empty_config() {
         toml::from_str::<UiConfig>("").unwrap();
+    }
+
+    #[test]
+    fn imported_terminal_profiles_survive_a_config_reload() {
+        let mut config = UiConfig::default();
+        config.profiles.push(crate::config::ui_config::Profile {
+            name: "configured".to_owned(),
+            command: "pwsh.exe".to_owned(),
+            args: Vec::new(),
+            cwd: None,
+            shell_id: None,
+            terminal_profile_id: None,
+        });
+        let imported = vec![
+            crate::config::ui_config::Profile {
+                name: "same command".to_owned(),
+                command: "pwsh.exe".to_owned(),
+                args: vec!["-NoLogo".to_owned()],
+                cwd: None,
+                shell_id: Some("pwsh".to_owned()),
+                terminal_profile_id: None,
+            },
+            crate::config::ui_config::Profile {
+                name: "imported".to_owned(),
+                command: "D:/tools/nu.exe".to_owned(),
+                args: Vec::new(),
+                cwd: None,
+                shell_id: Some("nu".to_owned()),
+                terminal_profile_id: None,
+            },
+        ];
+
+        merge_profile_values(&mut config, imported);
+
+        assert_eq!(config.profiles.len(), 2);
+        assert_eq!(config.profiles[1].name, "imported");
     }
 
     fn yaml_to_toml(contents: &str) -> String {

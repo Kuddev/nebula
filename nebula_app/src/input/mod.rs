@@ -83,6 +83,12 @@ pub trait ActionContext<T: EventListener> {
     fn nebula_chrome_active(&self) -> bool {
         true
     }
+    /// Whether the active tab is a non-terminal page such as settings, a
+    /// document, or an image. These pages must not inherit terminal-only
+    /// overlays or pointer hit regions.
+    fn nebula_special_tab_active(&self) -> bool {
+        false
+    }
     fn terminal(&self) -> &Term<T>;
     fn terminal_mut(&mut self) -> &mut Term<T>;
     fn nebula_accept(&self) -> crate::display::AcceptKey {
@@ -110,6 +116,8 @@ pub trait ActionContext<T: EventListener> {
     fn spawn_new_instance(&mut self) {}
     /// Send a Nebula tab management request for this window.
     fn nebula_tab(&self, _request: crate::event::TabRequest) {}
+    /// Re-merge imported terminal profiles into every live window immediately.
+    fn refresh_terminal_profiles(&mut self) {}
     /// Kick a WebDAV sync (spec 003). true = push, false = pull.
     fn nebula_sync(&self, _push: bool) {}
 
@@ -132,6 +140,11 @@ pub trait ActionContext<T: EventListener> {
     /// The active tab's document view, when it is a viewer tab (no pane):
     /// wheel and navigation keys scroll this instead of the grid.
     fn doc_view(&mut self) -> Option<&mut crate::display::markdown_view::DocView> {
+        None
+    }
+    /// The active tab's standalone image view, when present. It owns wheel
+    /// zoom and pointer dragging instead of forwarding those events to a PTY.
+    fn image_view(&mut self) -> Option<&mut crate::display::image_viewer::ImageView> {
         None
     }
     #[cfg(target_os = "macos")]

@@ -123,9 +123,8 @@ impl ProxyServer {
 
 fn split_host_port(host_port: &str, default_port: u16) -> Result<(String, u16), String> {
     if let Some(rest) = host_port.strip_prefix('[') {
-        let (host, suffix) = rest
-            .split_once(']')
-            .ok_or_else(|| format!("无效的 IPv6 代理地址: {host_port}"))?;
+        let (host, suffix) =
+            rest.split_once(']').ok_or_else(|| format!("无效的 IPv6 代理地址: {host_port}"))?;
         let port = match suffix.strip_prefix(':') {
             Some(port) => port.parse().map_err(|_| format!("无效的代理端口: {port}"))?,
             None => default_port,
@@ -277,7 +276,9 @@ pub async fn connect(
         // 时这份职责归我们，漏掉就是整条 SSH 会话按键延迟。
         stream.set_nodelay(true)?;
         match proxy.scheme {
-            ProxyScheme::Socks5 => socks5_handshake(&mut stream, proxy, target_host, target_port).await?,
+            ProxyScheme::Socks5 => {
+                socks5_handshake(&mut stream, proxy, target_host, target_port).await?
+            },
             ProxyScheme::HttpConnect => {
                 http_connect_handshake(&mut stream, proxy, target_host, target_port).await?
             },
@@ -505,10 +506,7 @@ mod tests {
         assert!(global.resolve(Some("direct"), "vps.example.com").unwrap().is_none());
         // 跟随全局：绕过列表命中 = 直连，其余走代理。
         assert!(global.resolve(None, "10.0.0.1").unwrap().is_none());
-        assert_eq!(
-            global.resolve(None, "vps.example.com").unwrap().unwrap().host,
-            "global.lan"
-        );
+        assert_eq!(global.resolve(None, "vps.example.com").unwrap().unwrap().host, "global.lan");
         // 关闭态永远直连；自定义但没填地址必须报错而不是静默直连。
         let off = SshProxyConfig::default();
         assert!(off.resolve(None, "vps.example.com").unwrap().is_none());
@@ -591,10 +589,7 @@ mod tests {
                 stream.write_all(&[0x05, 0x00]).await.unwrap();
                 let mut request = vec![0u8; 22];
                 stream.read_exact(&mut request).await.unwrap();
-                stream
-                    .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                    .await
-                    .unwrap();
+                stream.write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await.unwrap();
             });
             let proxy = ProxyServer {
                 scheme: ProxyScheme::Socks5,
@@ -626,7 +621,9 @@ mod tests {
                 // user:pass 的标准 base64。
                 assert!(text.contains("Proxy-Authorization: Basic dXNlcjpwYXNz"), "{text}");
                 stream
-                    .write_all(b"HTTP/1.1 200 Connection established\r\nX-Filler: 1\r\n\r\nSSH-2.0-server")
+                    .write_all(
+                        b"HTTP/1.1 200 Connection established\r\nX-Filler: 1\r\n\r\nSSH-2.0-server",
+                    )
                     .await
                     .unwrap();
             });

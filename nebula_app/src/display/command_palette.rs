@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use super::{NebulaTheme, SizeInfo};
+use crate::config::ui_config::Profile;
 use crate::shell_detect::DetectedShell;
 use unicode_width::UnicodeWidthChar;
 
@@ -20,7 +21,7 @@ use unicode_width::UnicodeWidthChar;
 #[derive(Debug, Clone)]
 enum ProfileRow {
     /// Config profile at this index — routed through `TabRequest::NewProfile`.
-    Config { label: String, search: String, index: usize },
+    Config { label: String, hint: String, search: String, profile: Profile },
     /// Detected shell — routed through `TabRequest::NewShell`. `hint` is the
     /// program path, shown dimmed — the familiar profile-menu layout.
     Shell { label: String, hint: String, search: String, shell: DetectedShell },
@@ -35,7 +36,7 @@ impl ProfileRow {
 
     fn hint(&self) -> &str {
         match self {
-            Self::Config { .. } => "",
+            Self::Config { hint, .. } => hint,
             Self::Shell { hint, .. } => hint,
         }
     }
@@ -51,7 +52,11 @@ impl ProfileRow {
     fn icon(&self) -> &'static str {
         match self {
             Self::Shell { shell, .. } => shell.icon(),
-            Self::Config { .. } => "\u{ea60}",
+            Self::Config { profile, .. } => profile
+                .shell_id
+                .as_deref()
+                .map(crate::shell_detect::icon_for_id)
+                .unwrap_or("\u{ea60}"),
         }
     }
 
@@ -60,7 +65,7 @@ impl ProfileRow {
     fn color_id(&self) -> &str {
         match self {
             Self::Shell { shell, .. } => &shell.id,
-            Self::Config { .. } => "",
+            Self::Config { profile, .. } => profile.shell_id.as_deref().unwrap_or(""),
         }
     }
 }
@@ -154,11 +159,12 @@ pub enum PaletteAction {
     ResetAppearance,
     SelectTheme(NebulaTheme),
     /// Launch the quick-launch profile at this config index in a new tab.
-    LaunchProfile(usize),
+    LaunchProfile(Profile),
     /// Launch a detected shell (the new-tab dropdown) in a new tab.
     LaunchShell(DetectedShell),
     /// Set a detected shell as the default (the settings "默认 Shell" picker).
     SetDefaultShell(DetectedShell),
+    SetDefaultProfile(Profile),
     /// Open a local terminal whose PTY starts directly in this directory.
     NewAtDirectory(PathBuf),
     ToggleFilesPanel,
@@ -572,17 +578,14 @@ impl CommandPalette {
 
     /// Refresh the dynamic quick-launch rows from the config's profile names.
     /// Called by the full-palette open path so a reloaded config is reflected.
-    pub fn set_profiles(&mut self, names: &[String]) {
-        self.profiles = names
+    pub fn set_profiles(&mut self, profiles: &[Profile]) {
+        self.profiles = profiles
             .iter()
-            .enumerate()
-            .map(|(index, name)| ProfileRow::Config {
-                // The label carries a glyph-free prefix so profile rows read
-                // distinctly from built-in actions; the haystack adds latin
-                // aliases (matching the static items' convention).
-                label: format!("{}：{name}", self.language.pick("启动", "Launch")),
-                search: format!("启动 {name} profile launch connect qidong"),
-                index,
+            .map(|profile| ProfileRow::Config {
+                label: profile.name.clone(),
+                hint: profile.command.clone(),
+                search: format!("{} {} profile launch connect qidong", profile.name, profile.command),
+                profile: profile.clone(),
             })
             .collect();
     }
@@ -593,7 +596,7 @@ impl CommandPalette {
     pub fn set_shell_menu(
         &mut self,
         shells: &[DetectedShell],
-        profiles: &[String],
+        profiles: &[Profile],
         default_shell_id: &str,
     ) {
         let mut rows: Vec<ProfileRow> = shells
@@ -605,15 +608,21 @@ impl CommandPalette {
                 shell: shell.clone(),
             })
             .collect();
-        rows.extend(profiles.iter().enumerate().map(|(index, name)| ProfileRow::Config {
-            label: name.clone(),
-            search: format!("{name} profile launch connect qidong"),
-            index,
+        rows.extend(profiles.iter().map(|profile| ProfileRow::Config {
+            label: profile.name.clone(),
+            hint: profile.command.clone(),
+            search: format!("{} {} profile launch connect qidong", profile.name, profile.command),
+            profile: profile.clone(),
         }));
         // 图4 版式：默认 shell 是"推荐"大卡片，必须占首行 —— Enter 直接
         // 打开推荐项，检测顺序不再决定谁排第一。
         if let Some(position) = rows.iter().position(
-            |row| matches!(row, ProfileRow::Shell { shell, .. } if shell.id == default_shell_id),
+            |row| match row {
+                ProfileRow::Shell { shell, .. } => shell.id == default_shell_id,
+                ProfileRow::Config { profile, .. } => {
+                    profile.settings_id().as_deref() == Some(default_shell_id)
+                },
+            },
         ) {
             let default_row = rows.remove(position);
             rows.insert(0, default_row);
@@ -625,8 +634,13 @@ impl CommandPalette {
     /// Populate the settings "默认 Shell" picker: detected shells only (no
     /// config profiles — you can't default to an ssh jump), and confirming
     /// sets the default instead of launching.
-    pub fn set_default_shell_menu(&mut self, shells: &[DetectedShell]) {
-        self.profiles = shells
+    pub fn set_default_shell_menu(
+        &mut self,
+        shells: &[DetectedShell],
+        profiles: &[Profile],
+        default_shell_id: &str,
+    ) {
+        let mut rows: Vec<ProfileRow> = shells
             .iter()
             .map(|shell| ProfileRow::Shell {
                 label: shell.name.clone(),
@@ -635,7 +649,16 @@ impl CommandPalette {
                 shell: shell.clone(),
             })
             .collect();
-        self.default_shell_id = None;
+        rows.extend(profiles.iter().filter(|profile| profile.settings_id().is_some()).map(
+            |profile| ProfileRow::Config {
+                label: profile.name.clone(),
+                hint: profile.command.clone(),
+                search: format!("{} {} shell profile", profile.name, profile.command),
+                profile: profile.clone(),
+            },
+        ));
+        self.profiles = rows;
+        self.default_shell_id = Some(default_shell_id.to_owned());
     }
 
     pub fn set_directories(&mut self, paths: Vec<PathBuf>) {
@@ -821,7 +844,10 @@ impl CommandPalette {
         let action = match candidate {
             PaletteCandidate::Item(index) => ITEMS[index].action.clone(),
             PaletteCandidate::Profile(profile) => match &self.profiles[profile] {
-                ProfileRow::Config { index, .. } => PaletteAction::LaunchProfile(*index),
+                ProfileRow::Config { profile, .. } if self.mode == PaletteMode::DefaultShell => {
+                    PaletteAction::SetDefaultProfile(profile.clone())
+                },
+                ProfileRow::Config { profile, .. } => PaletteAction::LaunchProfile(profile.clone()),
                 ProfileRow::Shell { shell, .. } if self.mode == PaletteMode::DefaultShell => {
                     PaletteAction::SetDefaultShell(shell.clone())
                 },
@@ -892,11 +918,7 @@ impl CommandPalette {
             return false;
         }
         let (_, thumb_y, _, thumb_h) = scrollbar.thumb;
-        let grab = if y >= thumb_y && y < thumb_y + thumb_h {
-            y - thumb_y
-        } else {
-            thumb_h * 0.5
-        };
+        let grab = if y >= thumb_y && y < thumb_y + thumb_h { y - thumb_y } else { thumb_h * 0.5 };
         self.scrollbar_drag = Some(grab);
         self.scrollbar_drag_to(y, max_rows, scrollbar);
         true
@@ -1048,12 +1070,11 @@ impl CommandPalette {
             _ => return,
         };
         let rows = std::mem::take(&mut self.filtered);
-        let (mut head, tail): (Vec<_>, Vec<_>) = rows.into_iter().partition(|candidate| {
-            match candidate {
+        let (mut head, tail): (Vec<_>, Vec<_>) =
+            rows.into_iter().partition(|candidate| match candidate {
                 PaletteCandidate::AiSession(index) => self.ai_sessions[*index].source == lead,
                 _ => true,
-            }
-        });
+            });
         head.extend(tail);
         self.filtered = head;
     }
@@ -1131,10 +1152,8 @@ impl CommandPalette {
         match self.mode {
             PaletteMode::AiSessions => self.group_ai_sessions_by_source(),
             PaletteMode::Commands => {
-                let groups: Vec<_> =
-                    self.filtered.iter().map(|c| self.command_group(*c)).collect();
-                let mut paired: Vec<_> =
-                    groups.into_iter().zip(self.filtered.drain(..)).collect();
+                let groups: Vec<_> = self.filtered.iter().map(|c| self.command_group(*c)).collect();
+                let mut paired: Vec<_> = groups.into_iter().zip(self.filtered.drain(..)).collect();
                 paired.sort_by_key(|(group, _)| *group);
                 self.filtered = paired.into_iter().map(|(_, candidate)| candidate).collect();
             },
@@ -1175,10 +1194,10 @@ impl CommandPalette {
             let selected = (self.mode == PaletteMode::Commands).then_some(0);
             return (rows, selected);
         };
-        let rows =
+        let rows: Vec<_> =
             self.filtered.iter().skip(start).take(max_rows).map(|&row| self.row_for(row)).collect();
-        let selected_row = (selected >= start && selected < start + rows.len())
-            .then_some(selected - start);
+        let selected_row =
+            (selected >= start && selected < start + rows.len()).then_some(selected - start);
         (rows, selected_row)
     }
 
@@ -1205,11 +1224,14 @@ impl CommandPalette {
                 color_id: self.profiles[index].color_id().to_string(),
                 label: self.profiles[index].label().to_string(),
                 hint: self.profiles[index].hint().to_string(),
-                is_default: matches!(
-                    &self.profiles[index],
-                    ProfileRow::Shell { shell, .. }
-                        if self.default_shell_id.as_deref() == Some(shell.id.as_str())
-                ),
+                is_default: match &self.profiles[index] {
+                    ProfileRow::Shell { shell, .. } => {
+                        self.default_shell_id.as_deref() == Some(shell.id.as_str())
+                    },
+                    ProfileRow::Config { profile, .. } => profile
+                        .settings_id()
+                        .is_some_and(|id| self.default_shell_id.as_deref() == Some(id.as_str())),
+                },
                 chip: String::new(),
                 checked: None,
             },
@@ -1287,7 +1309,8 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
         ImportWorkspace => "Open workspace...",
         SyncPush => "Sync: push settings",
         SyncPull => "Sync: pull settings",
-        LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) | NewAtDirectory(_)
+        LaunchProfile(_) | LaunchShell(_) | SetDefaultShell(_) | SetDefaultProfile(_)
+        | NewAtDirectory(_)
         | ResumeAiSession(_) => item.label,
     }
 }
@@ -1465,10 +1488,11 @@ impl PaletteLayout {
 }
 
 /// Compute the centered popup layout for a window of `win_w` × `win_h`. The
-/// command list keeps a fixed panel height (sized for `max_rows`) so it
-/// doesn't jump as the match count changes while typing; pickers shrink to
-/// their content. Every palette mode uses the same search-input geometry,
-/// keeping rendering, hover and click hit-testing on one contract.
+/// command list and AI-session picker keep a fixed panel height (sized for
+/// `max_rows`) so they don't jump as the match count changes while typing;
+/// smaller one-shot pickers shrink to their content. Every palette mode uses
+/// the same search-input geometry, keeping rendering, hover and click
+/// hit-testing on one contract.
 pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32) -> PaletteLayout {
     let s = |v: f32| v * scale;
     let margin = s(8.0);
@@ -1495,7 +1519,11 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
         let slots = visible.max(1);
         let mut rest = slots;
         if hero {
-            rel_groups.push((y, model.language.pick("推荐", "Recommended").to_owned(), String::new()));
+            rel_groups.push((
+                y,
+                model.language.pick("推荐", "Recommended").to_owned(),
+                String::new(),
+            ));
             y += header_h;
             rel_rows.push((y, hero_h));
             y += hero_h + s(10.0);
@@ -1562,6 +1590,14 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
         }
     }
 
+    if model.mode == PaletteMode::AiSessions {
+        // AI 会话只有 Claude/Codex 两组。为两条组标题和完整十行预留稳定高度，
+        // 搜索过滤时只减少行，不移动面板边界和底栏，避免输入过程中整块 UI 跳动。
+        let group_reserve = header_h * 2.0;
+        let row_gaps = max_rows.saturating_sub(1) as f32 * gap;
+        y = y.max(group_reserve + max_rows as f32 * row_h + row_gaps + s(4.0));
+    }
+
     let pw = s(if cards { 620.0 } else { 640.0 }).min(win_w - 2.0 * margin);
     let ph = pad + input_h + s(8.0) + y + if cards { footer_h } else { pad };
     let px = ((win_w - pw) * 0.5).max(margin);
@@ -1570,8 +1606,7 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
     let input = (px + pad, py + pad, pw - 2.0 * pad, input_h);
     let list_y = py + pad + input_h + s(8.0);
     let rows = rel_rows.into_iter().map(|(ry, rh)| (list_y + ry, rh)).collect();
-    let groups =
-        rel_groups.into_iter().map(|(gy, label, ctx)| (list_y + gy, label, ctx)).collect();
+    let groups = rel_groups.into_iter().map(|(gy, label, ctx)| (list_y + gy, label, ctx)).collect();
 
     let footer = cards.then_some((px, py + ph - footer_h, pw, footer_h));
     let scrollbar = (model.filtered.len() > max_rows && max_rows > 0).then(|| {
@@ -1761,14 +1796,7 @@ pub(super) fn push_quads(
     if let Some(scrollbar) = layout.scrollbar {
         let (tx, ty, tw, th) = scrollbar.thumb;
         let alpha = if model.scrollbar_dragging() { 0.72 } else { 0.48 };
-        quads.push(UiQuad::solid(
-            tx,
-            ty,
-            tw,
-            th,
-            tw * 0.5,
-            sk.scrollbar_thumb.with_alpha(alpha),
-        ));
+        quads.push(UiQuad::solid(tx, ty, tw, th, tw * 0.5, sk.scrollbar_thumb.with_alpha(alpha)));
     }
 
     let (visible_rows, selected_row) = model.visible(layout.max_rows);
@@ -1880,9 +1908,9 @@ pub(super) fn push_quads(
         // 环 + 面板底，与「默认」徽标同宗——身份标注，不与选中态抢强调色。
         // 文字在 text pass 按同一几何画。
         if !entry.chip.is_empty() {
-            let chip_w =
-                entry.chip.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w
-                    + s(12.0);
+            let chip_w = entry.chip.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
+                * cell_w
+                + s(12.0);
             let cx = ix + iw - s(GUTTER) - chip_w;
             let cy = ry + s(7.0);
             let ch = rh - s(14.0);
@@ -2101,8 +2129,8 @@ pub(super) fn draw_text(
         // brand asset stage a full-color textured quad (drawn later); the rest
         // fall back to the Nerd Font glyph. Built-in action rows carry an empty
         // icon and keep the original left edge.
-        let has_color = !color_id.is_empty()
-            && crate::shell_detect::color_icon_png(&color_id).is_some();
+        let has_color =
+            !color_id.is_empty() && crate::shell_detect::color_icon_png(&color_id).is_some();
         let indent = if is_hero { s(34.0) } else { s(26.0) };
         let label_x = if has_color {
             // Square icon sized to the glyph ink, vertically centered on the
@@ -2553,7 +2581,7 @@ mod tests {
             args: vec![],
         };
         let mut palette = CommandPalette::new();
-        palette.set_default_shell_menu(std::slice::from_ref(&shell));
+        palette.set_default_shell_menu(std::slice::from_ref(&shell), &[], "pwsh");
         palette.open_default_picker();
 
         assert_eq!(palette.confirm(), Some(PaletteAction::SetDefaultShell(shell)));
@@ -2577,7 +2605,10 @@ mod tests {
         let mut palette = CommandPalette::new();
         palette.set_shell_menu(
             &[],
-            &["Windows PowerShell".into(), "Git Bash".into()],
+            &[
+                Profile { name: "Windows PowerShell".into(), command: "powershell.exe".into(), args: vec![], cwd: None, shell_id: None, terminal_profile_id: None },
+                Profile { name: "Git Bash".into(), command: "bash.exe".into(), args: vec![], cwd: None, shell_id: None, terminal_profile_id: None },
+            ],
             "powershell",
         );
         palette.open_profiles();
@@ -2586,6 +2617,46 @@ mod tests {
         let (rows, _) = palette.visible(8);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "Git Bash");
+    }
+
+    #[test]
+    fn imported_profile_keeps_shell_icon_and_click_snapshot() {
+        let profile = Profile {
+            name: "PowerShell 7".into(),
+            command: r"D:\\tools\\pwsh.exe".into(),
+            args: vec!["-NoLogo".into()],
+            cwd: None,
+            shell_id: Some("pwsh".into()),
+            terminal_profile_id: Some("pwsh-test".into()),
+        };
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(&[], std::slice::from_ref(&profile), "powershell");
+        palette.open_profiles();
+
+        let (rows, _) = palette.visible(8);
+        assert_eq!(rows[0].label, "PowerShell 7");
+        assert_eq!(rows[0].icon, crate::shell_detect::icon_for_id("pwsh"));
+        assert_eq!(palette.click(0, 8), Some(PaletteAction::LaunchProfile(profile)));
+    }
+
+    #[test]
+    fn imported_profile_can_be_selected_as_default_shell() {
+        let shell = shell("CMD", "cmd", r"C:\\Windows\\System32\\cmd.exe");
+        let profile = Profile {
+            name: "PowerShell 7".into(),
+            command: r"D:\\tools\\pwsh.exe".into(),
+            args: vec![],
+            cwd: None,
+            shell_id: Some("pwsh".into()),
+            terminal_profile_id: Some("pwsh-test".into()),
+        };
+        let default_id = profile.settings_id().unwrap();
+        let mut palette = CommandPalette::new();
+        palette.set_default_shell_menu(&[shell], std::slice::from_ref(&profile), &default_id);
+        palette.open_default_picker();
+        palette.move_selection(1, 8);
+
+        assert_eq!(palette.confirm(), Some(PaletteAction::SetDefaultProfile(profile)));
     }
 
     #[test]
@@ -2696,12 +2767,14 @@ mod tests {
             CommandGroup::Tabs,
             "开不在那里就不能挂在工作目录标题下"
         );
-        assert!(palette
-            .group_labels(palette.filtered.len())
-            .unwrap()
-            .into_iter()
-            .flatten()
-            .any(|(label, _)| label == "工作目录"));
+        assert!(
+            palette
+                .group_labels(palette.filtered.len())
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .any(|(label, _)| label == "工作目录")
+        );
     }
 
     /// 开关类命令带勾选态，一次性动作不带。列表里同时有两类时，✓ 是唯一
@@ -2741,9 +2814,8 @@ mod tests {
         });
         assert!(palette.filtered.len() > MAX_ROWS * 2, "要够长才能翻页");
 
-        let group_at = |palette: &CommandPalette, index: usize| {
-            palette.command_group(palette.filtered[index])
-        };
+        let group_at =
+            |palette: &CommandPalette, index: usize| palette.command_group(palette.filtered[index]);
         let top_label = |palette: &CommandPalette| {
             palette.group_labels(MAX_ROWS).unwrap()[0].as_ref().map(|(l, _)| l.clone())
         };
@@ -2764,7 +2836,8 @@ mod tests {
         );
         // 窗口内其余各行只在换组时起表头。
         for (offset, label) in labels.iter().enumerate().skip(1) {
-            let changed = group_at(&palette, start + offset) != group_at(&palette, start + offset - 1);
+            let changed =
+                group_at(&palette, start + offset) != group_at(&palette, start + offset - 1);
             assert_eq!(label.is_some(), changed, "第 {offset} 行的表头判定与实际换组不符");
         }
     }
@@ -2799,12 +2872,7 @@ mod tests {
 
         let (tx, ty, tw, th) = scrollbar.track;
         assert!(scrollbar.hit_test(tx + tw * 0.5, ty + th - 1.0));
-        assert!(palette.scrollbar_press(
-            tx + tw * 0.5,
-            ty + th - 1.0,
-            layout.max_rows,
-            scrollbar,
-        ));
+        assert!(palette.scrollbar_press(tx + tw * 0.5, ty + th - 1.0, layout.max_rows, scrollbar,));
         assert_eq!(palette.scroll_start(MAX_ROWS), palette.filtered.len() - MAX_ROWS);
         assert!(palette.scrollbar_dragging());
         assert!(palette.end_scrollbar_drag());
@@ -2849,6 +2917,33 @@ mod tests {
     }
 
     #[test]
+    fn ai_session_panel_height_stays_fixed_while_filtering() {
+        use crate::ai_sessions::AiSessionSource::{Claude, Codex};
+        let rows = (0..12)
+            .map(|index| AiSessionRow {
+                label: format!("session {index}"),
+                hint: String::new(),
+                search: if index == 0 {
+                    "unique needle".to_owned()
+                } else {
+                    format!("session {index}")
+                },
+                command: String::new(),
+                source: if index % 2 == 0 { Claude } else { Codex },
+            })
+            .collect();
+        let mut palette = CommandPalette::new();
+        palette.open_ai_sessions(rows);
+        let full = palette_layout(&palette, 1600.0, 1000.0, 1.0).panel.3;
+
+        palette.input_text("unique needle");
+        assert_eq!(palette.filtered.len(), 1);
+        let filtered = palette_layout(&palette, 1600.0, 1000.0, 1.0).panel.3;
+
+        assert_eq!(filtered, full, "过滤结果不能改变 AI 会话面板高度");
+    }
+
+    #[test]
     fn picker_layout_rows_are_non_uniform_and_hit_test_matches() {
         let mut palette = CommandPalette::new();
         palette.set_shell_menu(
@@ -2865,7 +2960,7 @@ mod tests {
         let (hero_y, hero_h) = layout.rows[0];
         let (row_y, row_h) = layout.rows[1];
         assert!(hero_h > row_h, "推荐大卡片必须比普通卡片高");
-        assert_eq!(layout.groups.len(), 2, "hero 版式仍是「推荐 / 所有选项」两条表头");        // 命中测试与逐行矩形一致；卡片之间的缝隙与分区标题不可点。
+        assert_eq!(layout.groups.len(), 2, "hero 版式仍是「推荐 / 所有选项」两条表头"); // 命中测试与逐行矩形一致；卡片之间的缝隙与分区标题不可点。
         let (px, ..) = layout.panel;
         assert_eq!(layout.row_at(px + 10.0, hero_y + hero_h / 2.0), Some(0));
         assert_eq!(layout.row_at(px + 10.0, row_y + row_h / 2.0), Some(1));

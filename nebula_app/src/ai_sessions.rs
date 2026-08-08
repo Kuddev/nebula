@@ -63,9 +63,7 @@ impl AiSession {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            AiSessionSource::Claude => {
-                self.project.rsplit('-').next().unwrap_or("").to_owned()
-            },
+            AiSessionSource::Claude => self.project.rsplit('-').next().unwrap_or("").to_owned(),
         }
     }
 

@@ -71,6 +71,7 @@ pub(super) struct TabEntry {
     pub(super) custom_color: Option<Rgb>,
     pub(super) launch: TabLaunch,
     pub(super) doc: Option<crate::display::markdown_view::DocView>,
+    pub(super) image: Option<crate::display::image_viewer::ImageView>,
     pub(super) settings: bool,
 }
 
@@ -81,6 +82,7 @@ pub(super) enum TabLaunch {
     Shell { name: String, shell: tty::Shell },
     Ssh(String),
     Document(PathBuf),
+    Image(PathBuf),
     Settings,
 }
 

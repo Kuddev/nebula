@@ -69,9 +69,11 @@ impl Display {
         if text.trim().is_empty() {
             return;
         }
-        if self.nebula_toasts.last().is_some_and(|last| {
-            last.text == text && last.born.elapsed() < DUPLICATE_COOLDOWN
-        }) {
+        if self
+            .nebula_toasts
+            .last()
+            .is_some_and(|last| last.text == text && last.born.elapsed() < DUPLICATE_COOLDOWN)
+        {
             return;
         }
         log::info!("toast [{kind:?}]: {text}");

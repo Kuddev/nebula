@@ -704,11 +704,47 @@ pub struct Profile {
     /// Optional startup directory; falls back to the focused pane's cwd.
     #[serde(default)]
     pub cwd: Option<PathBuf>,
+    /// Optional shell family used by imported terminal profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_id: Option<String>,
+    /// Stable id from `terminal_profiles.json`; absent for ordinary config
+    /// profiles. Keeping it with the merged value lets the default-shell
+    /// setting refer to an imported executable without storing its path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_profile_id: Option<String>,
 }
 
 impl Profile {
+    /// Stable settings key for an imported profile. The shell family is part
+    /// of the key so icon lookup can still work without loading the profile
+    /// store during rendering; `|` is deliberately used because WSL ids can
+    /// themselves contain `:`.
+    pub fn settings_id(&self) -> Option<String> {
+        Some(format!(
+            "profile:{}|{}",
+            self.shell_id.as_deref()?,
+            self.terminal_profile_id.as_deref()?
+        ))
+    }
+
     /// The PTY shell override this profile launches.
     pub fn shell(&self) -> Shell {
+        #[cfg(windows)]
+        match self.shell_id.as_deref() {
+            Some("pwsh") | Some("powershell") => {
+                return nebula_terminal::tty::windows::powershell_with_nebula_integration(
+                    self.command.clone(),
+                    self.args.clone(),
+                );
+            },
+            Some("bash") | Some("git-bash") => {
+                return nebula_terminal::tty::windows::bash_with_nebula_integration(
+                    self.command.clone(),
+                    self.args.clone(),
+                );
+            },
+            _ => {},
+        }
         Shell::new(self.command.clone(), self.args.clone())
     }
 }

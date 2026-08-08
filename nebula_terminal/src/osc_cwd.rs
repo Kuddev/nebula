@@ -267,9 +267,7 @@ fn parse_remote_hook(rest: &[u8]) -> Option<OscEvent> {
     if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
-    let envelope = base64::engine::general_purpose::STANDARD
-        .decode(&rest[separator + 1..])
-        .ok()?;
+    let envelope = base64::engine::general_purpose::STANDARD.decode(&rest[separator + 1..]).ok()?;
     if envelope.is_empty() || envelope.len() > 64 * 1024 {
         return None;
     }
@@ -389,26 +387,17 @@ mod tests {
 
     #[test]
     fn osc7_windows_drive() {
-        assert_eq!(
-            one(b"\x1b]7;file:///C:/Users/foo\x07").as_deref(),
-            Some("C:/Users/foo")
-        );
+        assert_eq!(one(b"\x1b]7;file:///C:/Users/foo\x07").as_deref(), Some("C:/Users/foo"));
     }
 
     #[test]
     fn osc7_unix_with_host_and_st() {
-        assert_eq!(
-            one(b"\x1b]7;file://host/home/user\x1b\\").as_deref(),
-            Some("/home/user")
-        );
+        assert_eq!(one(b"\x1b]7;file://host/home/user\x1b\\").as_deref(), Some("/home/user"));
     }
 
     #[test]
     fn osc7_percent_encoded_space() {
-        assert_eq!(
-            one(b"\x1b]7;file:///C:/My%20Docs\x07").as_deref(),
-            Some("C:/My Docs")
-        );
+        assert_eq!(one(b"\x1b]7;file:///C:/My%20Docs\x07").as_deref(), Some("C:/My Docs"));
     }
 
     #[test]
@@ -482,10 +471,7 @@ mod tests {
     #[test]
     fn osc133_done_exit_code_variants() {
         // Bare D (third-party integrations): finished, code unknown.
-        assert_eq!(
-            events(b"\x1b]133;D\x07"),
-            vec![(8, OscEvent::CommandDone { exit_code: None })]
-        );
+        assert_eq!(events(b"\x1b]133;D\x07"), vec![(8, OscEvent::CommandDone { exit_code: None })]);
         // Trailing params after the code (some terminals send `;aid=<pid>`).
         assert_eq!(
             events(b"\x1b]133;D;127;aid=4242\x07"),
@@ -531,10 +517,7 @@ mod tests {
         );
         // ConEmu progress (9;4) is reserved; cwd (9;9) must keep precedence.
         assert!(events(b"\x1b]9;4;1;50\x07").is_empty());
-        assert_eq!(
-            one(b"\x1b]9;9;C:\\w\x07").as_deref(),
-            Some("C:\\w")
-        );
+        assert_eq!(one(b"\x1b]9;9;C:\\w\x07").as_deref(), Some("C:\\w"));
     }
 
     #[test]
@@ -542,9 +525,7 @@ mod tests {
         use base64::Engine as _;
         let envelope = b"nebula-hook/1 source=codex pane=999\n{\"type\":\"agent-turn-complete\"}";
         let encoded = base64::engine::general_purpose::STANDARD.encode(envelope);
-        let seq = format!(
-            "\x1b]777;nebula-hook;0123456789abcdef0123456789abcdef;{encoded}\x07"
-        );
+        let seq = format!("\x1b]777;nebula-hook;0123456789abcdef0123456789abcdef;{encoded}\x07");
         assert_eq!(
             events(seq.as_bytes()),
             vec![(
@@ -577,11 +558,11 @@ mod tests {
 
     /// A minimal valid 1x1 transparent PNG.
     const TINY_PNG: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-        0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
-        0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
-        0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
     fn tiny_png_osc() -> Vec<u8> {

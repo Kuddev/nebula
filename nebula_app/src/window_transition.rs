@@ -24,10 +24,9 @@ mod platform {
     use std::sync::{Arc, OnceLock};
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
-    use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
+    use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, OBJID_WINDOW,
-        WINEVENT_OUTOFCONTEXT,
+        EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, OBJID_WINDOW, WINEVENT_OUTOFCONTEXT,
     };
 
     struct Shared {

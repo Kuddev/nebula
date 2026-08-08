@@ -18,6 +18,7 @@ use unicode_width::UnicodeWidthChar;
 use nebula_terminal::vte::ansi::CursorShape;
 
 use crate::config::UiConfig;
+use crate::encrypted_backup::BackupSelection;
 use crate::display::color::Rgb;
 use crate::renderer::image::{BackgroundImageAlignment, BackgroundImageFit};
 use crate::renderer::ui::{Rgba, UiQuad};
@@ -49,12 +50,16 @@ pub enum NebulaSettingsSection {
     Appearance,
     /// Completion behaviour plus the raw `nebula_settings.txt` config file.
     Profiles,
+    /// SSH proxy settings and hidden-host recovery.
+    Ssh,
     /// Selection/clipboard behaviour (the 「交互」 page).
     Interaction,
     /// Read-only shortcut sheet + pointer to `[[keyboard.bindings]]` remapping.
     Keymap,
     /// Power-user switches (session residency on close, …).
     Advanced,
+    /// Password-protected export and restore of Nebula-owned data.
+    Backup,
 }
 
 impl NebulaSettingsSection {
@@ -62,9 +67,11 @@ impl NebulaSettingsSection {
         match self {
             Self::Appearance => language.pick("外观", "Appearance"),
             Self::Profiles => language.pick("配置文件", "Profiles"),
+            Self::Ssh => "SSH",
             Self::Interaction => language.pick("交互", "Interaction"),
             Self::Keymap => language.pick("按键映射", "Key bindings"),
             Self::Advanced => language.pick("高级", "Advanced"),
+            Self::Backup => language.pick("备份", "Backup"),
         }
     }
 }
@@ -283,6 +290,7 @@ pub enum SettingsHit {
     BackgroundImageCoverChrome,
     BackgroundImageOpacitySlider,
     OpenConfigFile,
+    ImportTerminal,
     Reset,
     /// 高级: keep the resident server (detach) on window close.
     KeepSessionToggle,
@@ -300,6 +308,9 @@ pub enum SettingsHit {
     SshProxyInput(usize),
     /// 按键映射: one editable action row (click → capture a new combo).
     KeymapRow(usize),
+    BackupSelection(usize),
+    BackupExport,
+    BackupRestore,
 }
 
 // ---- runtime settings store (`Nebula/nebula_settings.txt`) ----
@@ -759,7 +770,7 @@ struct SettingsGeometry {
     popup: (f32, f32, f32, f32),
     sidebar: (f32, f32, f32, f32),
     content: (f32, f32, f32, f32),
-    nav: [(NebulaSettingsSection, f32, f32, f32, f32); 5],
+    nav: [(NebulaSettingsSection, f32, f32, f32, f32); 7],
     options: [(NebulaTheme, f32, f32, f32, f32); 7],
     /// Live terminal preview card at the top of Appearance: configure →
     /// immediately see (font, size, colors, wallpaper opacity, cursor).
@@ -776,6 +787,7 @@ struct SettingsGeometry {
     ghost: (f32, f32, f32, f32),
     accept: (f32, f32, f32, f32),
     open_config_file: (f32, f32, f32, f32),
+    terminal_import: (f32, f32, f32, f32),
     hidden_host_row0: (f32, f32, f32, f32),
     hidden_host_count: usize,
     /// Full-width "窗口透明度" row and its draggable track.
@@ -818,6 +830,7 @@ struct SettingsGeometry {
     keymap_readonly_row0: (f32, f32, f32, f32),
     keymap_row_h: f32,
     advanced_h: f32,
+    ssh_h: f32,
     keep_session: (f32, f32, f32, f32),
     /// 高级·会话：启动时恢复上次的标签（崩溃/强杀后同样走这条路）。
     restore_session: (f32, f32, f32, f32),
@@ -830,6 +843,9 @@ struct SettingsGeometry {
     sync_rows: [(f32, f32, f32, f32); 4],
     sync_auto_pull: (f32, f32, f32, f32),
     sync_actions: (f32, f32, f32, f32),
+    backup_rows: [(f32, f32, f32, f32); 9],
+    backup_actions: (f32, f32, f32, f32),
+    backup_h: f32,
 }
 
 /// Scrollable-content viewport height for the Settings tab.
@@ -837,8 +853,8 @@ fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
     popup_h - 72.0 * scale_factor
 }
 
-fn advanced_content_end(proxy_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
-    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { proxy_y0 + 3.0 * row_h }
+fn advanced_content_end(advanced_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
+    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + 2.0 * row_h }
 }
 
 /// Max scroll offset for `section` at the current window size. The input
@@ -856,9 +872,11 @@ pub(super) fn settings_max_scroll(
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
         NebulaSettingsSection::Profiles => geometry.profiles_h,
+        NebulaSettingsSection::Ssh => geometry.ssh_h,
         NebulaSettingsSection::Interaction => geometry.interaction_h,
         NebulaSettingsSection::Keymap => geometry.keymap_h,
         NebulaSettingsSection::Advanced => geometry.advanced_h,
+        NebulaSettingsSection::Backup => geometry.backup_h,
     };
     (content_h - settings_viewport_h(ph, scale_factor)).max(0.0)
 }
@@ -936,7 +954,11 @@ fn settings_geometry(
     // 模糊开关跟在透明度后面：它修饰的正是透明度透出来的那层东西，隔开就
     // 读不出这层因果了。
     let blur_y0 = opacity_y0 + ROW_H;
-    let appearance_h = s(blur_y0 + ROW_H + 32.0 - 72.0);
+    // Terminal presentation belongs to Appearance: font sizing, the startup
+    // welcome and the prompt decoration all change what a new terminal looks
+    // like, while Profiles remains focused on what executable is launched.
+    let terminal_appearance_y0 = blur_y0 + ROW_H + GROUP_ADVANCE;
+    let appearance_h = s(terminal_appearance_y0 + 3.0 * ROW_H + 32.0 - 72.0);
     // 宽命中区包住细轨道，拖拽时无需精确点中 4px 线条。
     let opacity_row = (row_x, at(opacity_y0), row_w, row_h);
     let slider_x = row_x + row_w - s(212.0);
@@ -958,27 +980,24 @@ fn settings_geometry(
     let nav = [
         (NebulaSettingsSection::Appearance, nav_x, nav_slot(0.0), nav_w, nav_h),
         (NebulaSettingsSection::Profiles, nav_x, nav_slot(1.0), nav_w, nav_h),
-        (NebulaSettingsSection::Interaction, nav_x, nav_slot(2.0), nav_w, nav_h),
-        (NebulaSettingsSection::Keymap, nav_x, nav_slot(3.0), nav_w, nav_h),
-        (NebulaSettingsSection::Advanced, nav_x, nav_slot(4.0), nav_w, nav_h),
+        (NebulaSettingsSection::Ssh, nav_x, nav_slot(2.0), nav_w, nav_h),
+        (NebulaSettingsSection::Interaction, nav_x, nav_slot(3.0), nav_w, nav_h),
+        (NebulaSettingsSection::Keymap, nav_x, nav_slot(4.0), nav_w, nav_h),
+        (NebulaSettingsSection::Advanced, nav_x, nav_slot(5.0), nav_w, nav_h),
+        (NebulaSettingsSection::Backup, nav_x, nav_slot(6.0), nav_w, nav_h),
     ];
 
     // Profiles: dropdown popups FLOAT over later rows (Windows 11 combobox),
     // so every row keeps a fixed offset — no picker shove, no scroll jumps.
     let shell_y0 = 146.0;
-    let startup_directory_y0 = shell_y0 + ROW_H;
+    // Import belongs to the Terminal group, immediately below the default
+    // Shell row, instead of being buried in the configuration section.
+    let terminal_import_y0 = shell_y0 + ROW_H;
+    let startup_directory_y0 = terminal_import_y0 + ROW_H;
     let font_y0 = startup_directory_y0 + ROW_H;
-    let font_size_y0 = font_y0 + ROW_H;
-    let fetch_y0 = font_size_y0 + ROW_H;
-    let ghost_y0 = fetch_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
+    let ghost_y0 = font_y0 + ROW_H + GROUP_ADVANCE;
     let open_y0 = ghost_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
-    let hidden_y0 = open_y0 + ROW_H + GROUP_ADVANCE;
-    let profiles_end = if hidden_host_count == 0 {
-        open_y0 + ROW_H
-    } else {
-        hidden_y0 + hidden_host_count as f32 * ROW_H
-    };
-    let profiles_h = s(profiles_end + 32.0 - 72.0);
+    let profiles_h = s(open_y0 + ROW_H + 32.0 - 72.0);
 
     // 交互: 剪贴板行为、标签展开与拖拽调节一组，文本渲染（CJK 粗体策略）另一组。
     let interaction_y0 = 146.0;
@@ -1002,18 +1021,35 @@ fn settings_geometry(
     let advanced_y0 = 146.0;
     let keep_session = (row_x, at(advanced_y0), row_w, row_h);
     let restore_session = (row_x, at(advanced_y0 + ROW_H), row_w, row_h);
-    // SSH 代理组：模式下拉 + 地址/绕过两输入行。
-    let proxy_y0 = advanced_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
-    let proxy_row = |i: f32| (row_x, at(proxy_y0 + i * ROW_H), row_w, row_h);
-    let ssh_proxy_mode = proxy_row(0.0);
-    let ssh_proxy_rows = [proxy_row(1.0), proxy_row(2.0)];
-    let sync_y0 = proxy_y0 + ROW_H * 3.0 + GROUP_ADVANCE;
+    let sync_y0 = advanced_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
     let sync_row = |i: f32| (row_x, at(sync_y0 + i * ROW_H), row_w, row_h);
     let sync_rows = [sync_row(0.0), sync_row(1.0), sync_row(2.0), sync_row(3.0)];
     let sync_auto_pull = sync_row(4.0);
     let sync_actions = sync_row(5.0);
-    let advanced_end = advanced_content_end(proxy_y0, sync_y0, ROW_H);
-    let advanced_h = s(advanced_end + 32.0 - 72.0);
+    let advanced_h = s(advanced_content_end(advanced_y0, sync_y0, ROW_H) + 32.0 - 72.0);
+
+    // SSH 独立页：代理组之后才是可选的隐藏主机恢复列表。
+    let proxy_y0 = 146.0;
+    let proxy_row = |i: f32| (row_x, at(proxy_y0 + i * ROW_H), row_w, row_h);
+    let ssh_proxy_mode = proxy_row(0.0);
+    let ssh_proxy_rows = [proxy_row(1.0), proxy_row(2.0)];
+    let hidden_y0 = proxy_y0 + ROW_H * 3.0 + GROUP_ADVANCE;
+    let ssh_end = if hidden_host_count == 0 {
+        proxy_y0 + ROW_H * 3.0
+    } else {
+        hidden_y0 + hidden_host_count as f32 * ROW_H
+    };
+    let ssh_h = s(ssh_end + 32.0 - 72.0);
+
+    let backup_y0 = 146.0;
+    let backup_row = |i: f32| (row_x, at(backup_y0 + i * ROW_H), row_w, row_h);
+    let backup_rows = [
+        backup_row(0.0), backup_row(1.0), backup_row(2.0), backup_row(3.0),
+        backup_row(4.0), backup_row(5.0), backup_row(6.0), backup_row(7.0),
+        backup_row(8.0),
+    ];
+    let backup_actions = backup_row(9.0);
+    let backup_h = s(backup_y0 + 10.0 * ROW_H + 32.0 - 72.0);
 
     SettingsGeometry {
         gear,
@@ -1060,12 +1096,13 @@ fn settings_geometry(
             s(34.0),
         ),
         font: (row_x, at(font_y0), row_w, row_h),
-        font_size_row: (row_x, at(font_size_y0), row_w, row_h),
-        fetch: (row_x, at(fetch_y0), row_w, row_h),
-        powerline: (row_x, at(fetch_y0 + ROW_H), row_w, row_h),
+        font_size_row: (row_x, at(terminal_appearance_y0), row_w, row_h),
+        fetch: (row_x, at(terminal_appearance_y0 + ROW_H), row_w, row_h),
+        powerline: (row_x, at(terminal_appearance_y0 + 2.0 * ROW_H), row_w, row_h),
         ghost: (row_x, at(ghost_y0), row_w, row_h),
         accept: (row_x, at(ghost_y0 + ROW_H), row_w, row_h),
         open_config_file: (row_x, at(open_y0), row_w, row_h),
+        terminal_import: (row_x, at(terminal_import_y0), row_w, row_h),
         hidden_host_row0: (row_x, at(hidden_y0), row_w, row_h),
         hidden_host_count,
         copy_on_select,
@@ -1076,6 +1113,7 @@ fn settings_geometry(
         content_top,
         appearance_h,
         profiles_h,
+        ssh_h,
         interaction_h,
         keymap_h,
         keymap_row0,
@@ -1089,6 +1127,9 @@ fn settings_geometry(
         sync_rows,
         sync_auto_pull,
         sync_actions,
+        backup_rows,
+        backup_actions,
+        backup_h,
     }
 }
 
@@ -1191,7 +1232,7 @@ fn dropdown_anchor(
         (Section::Interaction, SettingsDropdown::TabReveal) => {
             Some((anchor(geometry.tab_reveal), TAB_REVEAL_OPTIONS.len()))
         },
-        (Section::Advanced, SettingsDropdown::SshProxyMode) => {
+        (Section::Ssh, SettingsDropdown::SshProxyMode) => {
             Some((anchor(geometry.ssh_proxy_mode), SSH_PROXY_MODE_OPTIONS.len()))
         },
         (Section::Appearance, SettingsDropdown::BackgroundFit) => {
@@ -1354,20 +1395,6 @@ pub fn settings_hit(
                 if contains_rect(geometry.opacity_slider, x, y) {
                     return SettingsHit::OpacitySlider;
                 }
-            },
-            NebulaSettingsSection::Profiles => {
-                if contains_rect(geometry.shell, x, y) {
-                    return SettingsHit::ShellCycle;
-                }
-                if contains_rect(geometry.startup_directory_clear, x, y) {
-                    return SettingsHit::StartupDirectoryClear;
-                }
-                if contains_rect(geometry.startup_directory, x, y) {
-                    return SettingsHit::StartupDirectory;
-                }
-                if contains_rect(geometry.font, x, y) {
-                    return SettingsHit::FontCycle;
-                }
                 {
                     let (_, up, down) =
                         widgets::spinner_rects(geometry.font_size_row, scale_factor);
@@ -1384,6 +1411,26 @@ pub fn settings_hit(
                 if contains_rect(geometry.powerline, x, y) {
                     return SettingsHit::PowerlineToggle;
                 }
+            },
+            NebulaSettingsSection::Profiles => {
+                // The import row touches the Shell row at one inclusive
+                // boundary in the shared hit helper; give it priority there
+                // so a click on its top edge cannot open the dropdown.
+                if contains_rect(geometry.terminal_import, x, y) {
+                    return SettingsHit::ImportTerminal;
+                }
+                if contains_rect(geometry.shell, x, y) {
+                    return SettingsHit::ShellCycle;
+                }
+                if contains_rect(geometry.startup_directory_clear, x, y) {
+                    return SettingsHit::StartupDirectoryClear;
+                }
+                if contains_rect(geometry.startup_directory, x, y) {
+                    return SettingsHit::StartupDirectory;
+                }
+                if contains_rect(geometry.font, x, y) {
+                    return SettingsHit::FontCycle;
+                }
                 if contains_rect(geometry.ghost, x, y) {
                     return SettingsHit::GhostToggle;
                 }
@@ -1392,6 +1439,16 @@ pub fn settings_hit(
                 }
                 if contains_rect(geometry.open_config_file, x, y) {
                     return SettingsHit::OpenConfigFile;
+                }
+            },
+            NebulaSettingsSection::Ssh => {
+                if contains_rect(geometry.ssh_proxy_mode, x, y) {
+                    return SettingsHit::SshProxyModeDropdown;
+                }
+                for (index, rect) in geometry.ssh_proxy_rows.iter().enumerate() {
+                    if contains_rect(*rect, x, y) {
+                        return SettingsHit::SshProxyInput(index);
+                    }
                 }
                 let (row_x, row_y, row_w, row_h) = geometry.hidden_host_row0;
                 for index in 0..geometry.hidden_host_count {
@@ -1431,15 +1488,6 @@ pub fn settings_hit(
                 if contains_rect(geometry.restore_session, x, y) {
                     return SettingsHit::RestoreSessionToggle;
                 }
-                if contains_rect(geometry.ssh_proxy_mode, x, y) {
-                    return SettingsHit::SshProxyModeDropdown;
-                }
-                for (index, rect) in geometry.ssh_proxy_rows.iter().enumerate() {
-                    // 与同步行同规矩：整行都算输入框，点标签即聚焦。
-                    if contains_rect(*rect, x, y) {
-                        return SettingsHit::SshProxyInput(index);
-                    }
-                }
                 if SHOW_WEBDAV_SYNC_SETTINGS {
                     for (index, rect) in geometry.sync_rows.iter().enumerate() {
                         // 命中整行都算输入框：行左侧是它的 label，点标签聚焦
@@ -1458,6 +1506,20 @@ pub fn settings_hit(
                     if contains_rect(pull, x, y) {
                         return SettingsHit::SyncPullButton;
                     }
+                }
+            },
+            NebulaSettingsSection::Backup => {
+                for (index, rect) in geometry.backup_rows.iter().enumerate() {
+                    if contains_rect(*rect, x, y) {
+                        return SettingsHit::BackupSelection(index);
+                    }
+                }
+                let [export, restore] = sync_button_rects(geometry.backup_actions, scale_factor);
+                if contains_rect(export, x, y) {
+                    return SettingsHit::BackupExport;
+                }
+                if contains_rect(restore, x, y) {
+                    return SettingsHit::BackupRestore;
                 }
             },
         }
@@ -1557,6 +1619,8 @@ pub(super) struct SettingsView {
     pub(super) ssh_proxy_mode: crate::ssh_proxy::ProxyMode,
     pub(super) ssh_proxy_inputs: [String; 2],
     pub(super) ssh_proxy_focus: Option<usize>,
+    pub(super) backup_selection: BackupSelection,
+    pub(super) backup_status: Option<(String, bool)>,
 }
 
 /// 同步行右侧的输入框矩形（quad/text/hit 三处共用）。行左侧留给标签。
@@ -2213,33 +2277,41 @@ pub(super) fn push_quads(
             );
             row_hover(quads, geometry.blur, view.hover == SettingsHit::BlurToggle);
             toggle(quads, &mut staged, geometry.blur, view.blur);
+
+            group_frame(quads, geometry.font_size_row, 3);
+            widgets::push_spinner(
+                &mut staged,
+                geometry.font_size_row,
+                scale,
+                &sk,
+                view.hover == SettingsHit::FontSizeUp,
+                view.hover == SettingsHit::FontSizeDown,
+            );
+            for quad in staged.drain(..) {
+                clip(quads, quad);
+            }
+            row_hover(quads, geometry.fetch, view.hover == SettingsHit::FetchToggle);
+            row_hover(quads, geometry.powerline, view.hover == SettingsHit::PowerlineToggle);
+            toggle(quads, &mut staged, geometry.fetch, view.fetch);
+            toggle(quads, &mut staged, geometry.powerline, view.powerline);
         },
         NebulaSettingsSection::Profiles => {
-            // 终端组：Shell / 启动目录 / 字体+字号。下拉列表是浮层，行的
+            // 终端组：Shell / 启动目录 / 字体。下拉列表是浮层，行的
             // hairline 分组保持固定，不再被展开的列表推开。
-            group_frame(quads, geometry.shell, 1);
+            group_frame(quads, geometry.shell, 2);
             group_frame(quads, geometry.startup_directory, 1);
-            group_frame(quads, geometry.font, 2);
-            group_frame(quads, geometry.fetch, 2);
+            group_frame(quads, geometry.font, 1);
             group_frame(quads, geometry.ghost, 2);
             group_frame(quads, geometry.open_config_file, 1);
-            if geometry.hidden_host_count > 0 {
-                group_frame(quads, geometry.hidden_host_row0, geometry.hidden_host_count);
-                for index in 0..geometry.hidden_host_count {
-                    let mut rect = geometry.hidden_host_row0;
-                    rect.1 += index as f32 * rect.3;
-                    row_hover(quads, rect, view.hover == SettingsHit::RestoreHiddenSsh(index));
-                }
-            }
             for (hit, rect) in [
                 (SettingsHit::ShellCycle, geometry.shell),
+                (SettingsHit::ImportTerminal, geometry.terminal_import),
                 (SettingsHit::StartupDirectory, geometry.startup_directory),
                 (SettingsHit::FontCycle, geometry.font),
-                (SettingsHit::FetchToggle, geometry.fetch),
-                (SettingsHit::PowerlineToggle, geometry.powerline),
                 (SettingsHit::GhostToggle, geometry.ghost),
                 (SettingsHit::AcceptCycle, geometry.accept),
                 (SettingsHit::OpenConfigFile, geometry.open_config_file),
+                (SettingsHit::ImportTerminal, geometry.terminal_import),
             ] {
                 row_hover(quads, rect, view.hover == hit);
             }
@@ -2264,17 +2336,6 @@ pub(super) fn push_quads(
                 view.hover == SettingsHit::FontCycle,
                 view.dropdown == Some(SettingsDropdown::Font),
             );
-            widgets::push_spinner(
-                &mut staged,
-                geometry.font_size_row,
-                scale,
-                &sk,
-                view.hover == SettingsHit::FontSizeUp,
-                view.hover == SettingsHit::FontSizeDown,
-            );
-            for quad in staged.drain(..) {
-                clip(quads, quad);
-            }
             combobox(
                 quads,
                 &mut staged,
@@ -2283,12 +2344,59 @@ pub(super) fn push_quads(
                 view.dropdown == Some(SettingsDropdown::Accept),
             );
             // Boolean rows render a real switch instead of an "On/Off" string.
-            for (rect, on) in [
-                (geometry.fetch, view.fetch),
-                (geometry.powerline, view.powerline),
-                (geometry.ghost, view.ghost),
-            ] {
+            for (rect, on) in [(geometry.ghost, view.ghost)] {
                 toggle(quads, &mut staged, rect, on);
+            }
+        },
+        NebulaSettingsSection::Ssh => {
+            group_frame(quads, geometry.ssh_proxy_mode, 3);
+            row_hover(
+                quads,
+                geometry.ssh_proxy_mode,
+                view.hover == SettingsHit::SshProxyModeDropdown,
+            );
+            combobox(
+                quads,
+                &mut staged,
+                geometry.ssh_proxy_mode,
+                view.hover == SettingsHit::SshProxyModeDropdown,
+                view.dropdown == Some(SettingsDropdown::SshProxyMode),
+            );
+            let cell_w = size.cell_width();
+            for (index, row) in geometry.ssh_proxy_rows.iter().enumerate() {
+                row_hover(quads, *row, view.hover == SettingsHit::SshProxyInput(index));
+                let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
+                let focused = view.ssh_proxy_focus == Some(index);
+                let mut input = Vec::new();
+                surface::push_input(&mut input, (ix, iy, iw, ih), scale, &sk, focused);
+                for quad in input {
+                    clip(quads, quad);
+                }
+                if focused && super::caret_blink_on() {
+                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                    let (_, placeholder, cols) = ssh_proxy_input_display(view, index, max_cols);
+                    let cols = if placeholder { 0 } else { cols };
+                    let caret_h = ih - s(10.0);
+                    clip(
+                        quads,
+                        UiQuad::solid(
+                            (ix + s(12.0) + cols as f32 * cell_w).min(ix + iw - s(6.0)),
+                            iy + (ih - caret_h) / 2.0,
+                            (1.5 * scale).max(1.0),
+                            caret_h,
+                            0.0,
+                            Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
+                        ),
+                    );
+                }
+            }
+            if geometry.hidden_host_count > 0 {
+                group_frame(quads, geometry.hidden_host_row0, geometry.hidden_host_count);
+                for index in 0..geometry.hidden_host_count {
+                    let mut rect = geometry.hidden_host_row0;
+                    rect.1 += index as f32 * rect.3;
+                    row_hover(quads, rect, view.hover == SettingsHit::RestoreHiddenSsh(index));
+                }
             }
         },
         NebulaSettingsSection::Interaction => {
@@ -2307,11 +2415,7 @@ pub(super) fn push_quads(
                 view.hover == SettingsHit::TabRevealDropdown,
                 view.dropdown == Some(SettingsDropdown::TabReveal),
             );
-            row_hover(
-                quads,
-                geometry.panel_resize,
-                view.hover == SettingsHit::PanelResizeToggle,
-            );
+            row_hover(quads, geometry.panel_resize, view.hover == SettingsHit::PanelResizeToggle);
             toggle(quads, &mut staged, geometry.panel_resize, view.panel_resize);
             group_frame(quads, geometry.cjk_bold, 1);
             row_hover(quads, geometry.cjk_bold, view.hover == SettingsHit::CjkBoldToggle);
@@ -2373,53 +2477,6 @@ pub(super) fn push_quads(
                 view.hover == SettingsHit::RestoreSessionToggle,
             );
             toggle(quads, &mut staged, geometry.restore_session, view.restore_session);
-
-            // ---- SSH 代理：模式下拉 + 地址/绕过两输入行 ----
-            group_frame(quads, geometry.ssh_proxy_mode, 3);
-            row_hover(
-                quads,
-                geometry.ssh_proxy_mode,
-                view.hover == SettingsHit::SshProxyModeDropdown,
-            );
-            combobox(
-                quads,
-                &mut staged,
-                geometry.ssh_proxy_mode,
-                view.hover == SettingsHit::SshProxyModeDropdown,
-                view.dropdown == Some(SettingsDropdown::SshProxyMode),
-            );
-            {
-                let cell_w = size.cell_width();
-                for (index, row) in geometry.ssh_proxy_rows.iter().enumerate() {
-                    row_hover(quads, *row, view.hover == SettingsHit::SshProxyInput(index));
-                    let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
-                    let focused = view.ssh_proxy_focus == Some(index);
-                    // 输入框走 surface 配方（描边环 + 圆角 token）；配方不感知
-                    // 视口裁剪，落到临时 Vec 再逐个过 clip，保住与 caret 的叠序。
-                    let mut input = Vec::new();
-                    surface::push_input(&mut input, (ix, iy, iw, ih), scale, &sk, focused);
-                    for quad in input {
-                        clip(quads, quad);
-                    }
-                    if focused && super::caret_blink_on() {
-                        let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                        let (_, placeholder, cols) = ssh_proxy_input_display(view, index, max_cols);
-                        let cols = if placeholder { 0 } else { cols };
-                        let caret_h = ih - s(10.0);
-                        clip(
-                            quads,
-                            UiQuad::solid(
-                                (ix + s(12.0) + cols as f32 * cell_w).min(ix + iw - s(6.0)),
-                                iy + (ih - caret_h) / 2.0,
-                                (1.5 * scale).max(1.0),
-                                caret_h,
-                                0.0,
-                                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
-                            ),
-                        );
-                    }
-                }
-            }
 
             if SHOW_WEBDAV_SYNC_SETTINGS {
                 // ---- 同步（WebDAV，spec 003）：4 输入行 + 自动拉取开关 ----
@@ -2501,6 +2558,45 @@ pub(super) fn push_quads(
                 }
             }
         },
+        NebulaSettingsSection::Backup => {
+            group_frame(quads, geometry.backup_rows[0], geometry.backup_rows.len());
+            for (index, row) in geometry.backup_rows.iter().enumerate() {
+                row_hover(quads, *row, view.hover == SettingsHit::BackupSelection(index));
+                let on = match index {
+                    0 => view.backup_selection.appearance,
+                    1 => view.backup_selection.config,
+                    2 => view.backup_selection.ssh,
+                    3 => view.backup_selection.sync,
+                    4 => view.backup_selection.assistant,
+                    5 => view.backup_selection.session,
+                    6 => view.backup_selection.directory_history,
+                    7 => view.backup_selection.command_history,
+                    _ => view.backup_selection.fonts,
+                };
+                toggle(quads, &mut staged, *row, on);
+            }
+            let [export, restore] = sync_button_rects(geometry.backup_actions, scale);
+            for (rect, hit) in [(export, SettingsHit::BackupExport), (restore, SettingsHit::BackupRestore)] {
+                let (bx, by, bw, bh) = rect;
+                let radius = super::ui::tokens::radius::CONTROL * scale;
+                let mut stroke = Vec::new();
+                surface::push_stroke(&mut stroke, rect, radius, scale, sk.hairline);
+                for quad in stroke {
+                    clip(quads, quad);
+                }
+                clip(
+                    quads,
+                    UiQuad::solid(
+                        bx,
+                        by,
+                        bw,
+                        bh,
+                        radius,
+                        if view.hover == hit { sk.hover } else { sk.panel },
+                    ),
+                );
+            }
+        },
     }
 
     // Overlay scrollbar on the content viewport's right edge, only when the
@@ -2509,9 +2605,11 @@ pub(super) fn push_quads(
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
         NebulaSettingsSection::Profiles => geometry.profiles_h,
+        NebulaSettingsSection::Ssh => geometry.ssh_h,
         NebulaSettingsSection::Interaction => geometry.interaction_h,
         NebulaSettingsSection::Keymap => geometry.keymap_h,
         NebulaSettingsSection::Advanced => geometry.advanced_h,
+        NebulaSettingsSection::Backup => geometry.backup_h,
     };
     let viewport_h = settings_viewport_h(ph, scale);
     if content_h > viewport_h {
@@ -3348,6 +3446,69 @@ pub(super) fn draw_text(
                     gc,
                 );
             }
+            let (fa_x, fa_y, _, fa_h) = geometry.font_size_row;
+            if visible(group_y(fa_y), title_h) {
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    fa_x,
+                    group_y(fa_y),
+                    language.pick("终端外观", "Terminal appearance"),
+                );
+            }
+            if visible(fa_y, fa_h) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.font_size_row,
+                    language.pick("终端字号（Ctrl+滚轮缩放）", "Font size (Ctrl+wheel zooms)"),
+                    "",
+                    sk.ink,
+                );
+                let (value_box, _, _) = widgets::spinner_rects(geometry.font_size_row, scale);
+                let value = format!("{:.0}", view.font_size_px);
+                let cols: usize = value.chars().map(|c| c.width().unwrap_or(0)).sum();
+                r.draw_chrome_text(
+                    size,
+                    value_box.0 + (value_box.2 - cols as f32 * cell_w) / 2.0,
+                    value_box.1 + (value_box.3 - cell_h) / 2.0,
+                    sk.ink,
+                    &value,
+                    gc,
+                );
+            }
+            if visible(geometry.fetch.1, geometry.fetch.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.fetch,
+                    language.pick("启动欢迎信息", "Startup welcome"),
+                    "",
+                    sk.ink,
+                );
+            }
+            if visible(geometry.powerline.1, geometry.powerline.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.powerline,
+                    language.pick("Powerline 提示符", "Powerline prompt"),
+                    "",
+                    sk.ink,
+                );
+            }
         },
         NebulaSettingsSection::Profiles => {
             // Rows carry single, self-explanatory Chinese labels — the old
@@ -3379,6 +3540,17 @@ pub(super) fn draw_text(
                     sk.ink,
                 );
                 combobox_value(r, gc, geometry.shell, &view.shell_label, sk.accent);
+            }
+            let (ix, iy, _, ih) = geometry.terminal_import;
+            if visible(iy, ih) {
+                r.draw_chrome_text(
+                    size,
+                    ix + s(16.0),
+                    iy + (ih - cell_h) / 2.0,
+                    sk.accent,
+                    language.pick("导入终端目录…", "Import terminal directory..."),
+                    gc,
+                );
             }
             if visible(geometry.startup_directory.1, geometry.startup_directory.3) {
                 row_label(
@@ -3455,59 +3627,6 @@ pub(super) fn draw_text(
                     if view.font_notice.is_some() { sk.ink_dim } else { sk.accent },
                 );
             }
-            if visible(geometry.font_size_row.1, geometry.font_size_row.3) {
-                row_label(
-                    r,
-                    gc,
-                    size,
-                    scale,
-                    &sk,
-                    geometry.font_size_row,
-                    language.pick("终端字号（Ctrl+滚轮缩放）", "Font size (Ctrl+wheel zooms)"),
-                    "",
-                    sk.ink,
-                );
-                let (value_box, _, _) = widgets::spinner_rects(geometry.font_size_row, scale);
-                let value = format!("{:.0}", view.font_size_px);
-                let cols: usize = value.chars().map(|c| c.width().unwrap_or(0)).sum();
-                r.draw_chrome_text(
-                    size,
-                    value_box.0 + (value_box.2 - cols as f32 * cell_w) / 2.0,
-                    value_box.1 + (value_box.3 - cell_h) / 2.0,
-                    sk.ink,
-                    &value,
-                    gc,
-                );
-            }
-            // Boolean rows: the switch (drawn in `push_quads`) carries the
-            // state; no "On/Off" string next to it.
-            if visible(geometry.fetch.1, geometry.fetch.3) {
-                row_label(
-                    r,
-                    gc,
-                    size,
-                    scale,
-                    &sk,
-                    geometry.fetch,
-                    language.pick("启动欢迎信息", "Startup welcome"),
-                    "",
-                    sk.ink,
-                );
-            }
-            if visible(geometry.powerline.1, geometry.powerline.3) {
-                row_label(
-                    r,
-                    gc,
-                    size,
-                    scale,
-                    &sk,
-                    geometry.powerline,
-                    language.pick("Powerline 提示符", "Powerline prompt"),
-                    "",
-                    sk.ink,
-                );
-            }
-
             let (gh_x, gh_y, _, gh_h) = geometry.ghost;
             if visible(group_y(gh_y), title_h) {
                 section_title(
@@ -3578,7 +3697,82 @@ pub(super) fn draw_text(
                     gc,
                 );
             }
-
+        },
+        NebulaSettingsSection::Ssh => {
+            let (gx, gy, ..) = geometry.ssh_proxy_mode;
+            if visible(group_y(gy), title_h) {
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    gx,
+                    group_y(gy),
+                    language.pick("SSH 代理", "SSH proxy"),
+                );
+            }
+            if visible(geometry.ssh_proxy_mode.1, geometry.ssh_proxy_mode.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.ssh_proxy_mode,
+                    language.pick("SSH 连接代理", "SSH connection proxy"),
+                    "",
+                    sk.ink,
+                );
+                combobox_value(
+                    r,
+                    gc,
+                    geometry.ssh_proxy_mode,
+                    ssh_proxy_mode_label(view.ssh_proxy_mode, language),
+                    sk.accent,
+                );
+            }
+            let labels = [
+                language.pick(
+                    "代理地址（socks5:// 或 http://）",
+                    "Proxy URL (socks5:// or http://)",
+                ),
+                language.pick("不走代理的主机（逗号分隔）", "Bypass hosts (comma separated)"),
+            ];
+            let active = [
+                view.ssh_proxy_mode == crate::ssh_proxy::ProxyMode::Custom,
+                view.ssh_proxy_mode != crate::ssh_proxy::ProxyMode::Off,
+            ];
+            let cell_w = size.cell_width();
+            let cell_h = size.cell_height();
+            for (index, row) in geometry.ssh_proxy_rows.iter().enumerate() {
+                if !visible(row.1, row.3) {
+                    continue;
+                }
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    *row,
+                    labels[index],
+                    "",
+                    if active[index] { sk.ink } else { sk.ink_dim },
+                );
+                let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
+                let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                let (text, placeholder, _) = ssh_proxy_input_display(view, index, max_cols);
+                let ink = if placeholder || !active[index] { sk.ink_dim } else { sk.ink };
+                r.draw_chrome_text(
+                    size,
+                    ix + s(12.0),
+                    iy + (ih - cell_h) / 2.0,
+                    ink,
+                    &text,
+                    gc,
+                );
+            }
             if geometry.hidden_host_count > 0 {
                 let (hx, hy, hw, hh) = geometry.hidden_host_row0;
                 if visible(group_y(hy), title_h) {
@@ -3886,76 +4080,6 @@ pub(super) fn draw_text(
                 }
             }
 
-            // ---- SSH 代理 ----
-            {
-                let (gx, gy, ..) = geometry.ssh_proxy_mode;
-                if visible(group_y(gy), title_h) {
-                    section_title(
-                        r,
-                        gc,
-                        size,
-                        scale,
-                        &sk,
-                        gx,
-                        group_y(gy),
-                        language.pick("SSH 代理", "SSH proxy"),
-                    );
-                }
-                if visible(geometry.ssh_proxy_mode.1, geometry.ssh_proxy_mode.3) {
-                    row_label(
-                        r,
-                        gc,
-                        size,
-                        scale,
-                        &sk,
-                        geometry.ssh_proxy_mode,
-                        language.pick("SSH 连接代理", "SSH connection proxy"),
-                        "",
-                        sk.ink,
-                    );
-                    combobox_value(
-                        r,
-                        gc,
-                        geometry.ssh_proxy_mode,
-                        ssh_proxy_mode_label(view.ssh_proxy_mode, language),
-                        sk.accent,
-                    );
-                }
-                let labels = [
-                    language.pick("代理地址（socks5:// 或 http://）", "Proxy URL (socks5:// or http://)"),
-                    language.pick("不走代理的主机（逗号分隔）", "Bypass hosts (comma separated)"),
-                ];
-                // 地址只在「自定义」下参与决策，绕过列表在「系统代理」下同样
-                // 生效——各自按此判灰，但始终可点可改（改完切模式即生效）。
-                let active = [
-                    view.ssh_proxy_mode == crate::ssh_proxy::ProxyMode::Custom,
-                    view.ssh_proxy_mode != crate::ssh_proxy::ProxyMode::Off,
-                ];
-                let cell_w = size.cell_width();
-                let cell_h = size.cell_height();
-                for (index, row) in geometry.ssh_proxy_rows.iter().enumerate() {
-                    if !visible(row.1, row.3) {
-                        continue;
-                    }
-                    row_label(
-                        r,
-                        gc,
-                        size,
-                        scale,
-                        &sk,
-                        *row,
-                        labels[index],
-                        "",
-                        if active[index] { sk.ink } else { sk.ink_dim },
-                    );
-                    let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
-                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                    let (text, placeholder, _) = ssh_proxy_input_display(view, index, max_cols);
-                    let ink = if placeholder || !active[index] { sk.ink_dim } else { sk.ink };
-                    r.draw_chrome_text(size, ix + s(12.0), iy + (ih - cell_h) / 2.0, ink, &text, gc);
-                }
-            }
-
             if SHOW_WEBDAV_SYNC_SETTINGS {
                 // ---- 同步（WebDAV）----
                 let (sx, sy, ..) = geometry.sync_rows[0];
@@ -4042,6 +4166,42 @@ pub(super) fn draw_text(
                 }
             }
         },
+        NebulaSettingsSection::Backup => {
+            let labels = [
+                ("外观", "Appearance"), ("配置文件", "Configuration"),
+                ("SSH 地址簿", "SSH address book"), ("同步配置", "Sync config"),
+                ("AI 助手", "AI assistant"), ("会话布局", "Session layout"),
+                ("目录历史", "Directory history"), ("命令历史", "Command history"),
+                ("导入字体", "Imported fonts"),
+            ];
+            if visible(group_y(geometry.backup_rows[0].1), title_h) {
+                section_title(r, gc, size, scale, &sk, geometry.backup_rows[0].0,
+                    group_y(geometry.backup_rows[0].1), language.pick("导出内容", "Backup contents"));
+            }
+            for (index, row) in geometry.backup_rows.iter().enumerate() {
+                if visible(row.1, row.3) {
+                    row_label(r, gc, size, scale, &sk, *row,
+                        language.pick(labels[index].0, labels[index].1), "", sk.ink);
+                }
+            }
+            let [export, restore] = sync_button_rects(geometry.backup_actions, scale);
+            for ((bx, by, bw, bh), caption) in [
+                (export, language.pick("导出备份", "Export backup")),
+                (restore, language.pick("恢复备份", "Restore backup")),
+            ] {
+                if visible(by, bh) {
+                    let cols = caption.chars().map(|c| c.width().unwrap_or(1).max(1)).sum::<usize>();
+                    r.draw_chrome_text(size, bx + (bw - cols as f32 * cell_w) / 2.0,
+                        by + (bh - cell_h) / 2.0, sk.ink, caption, gc);
+                }
+            }
+            if let Some((status, error)) = &view.backup_status {
+                r.draw_chrome_text(size, geometry.backup_actions.0,
+                    geometry.backup_actions.1 + geometry.backup_actions.3 + s(8.0),
+                    if *error { Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b) } else { sk.ink_dim },
+                    status, gc);
+            }
+        },
     }
     icon_draws
 }
@@ -4065,10 +4225,8 @@ mod tests {
     #[test]
     fn hidden_webdav_group_does_not_extend_advanced_content() {
         assert!(!SHOW_WEBDAV_SYNC_SETTINGS);
-        // 会话组两行 + SSH 代理组三行（模式下拉 + 地址 + 绕过列表），页面高度
-        // 到代理组末行为止——隐藏的同步组不许把 Advanced 撑高出一屏空白。
-        // 146 + 2*44 + 74 = 308（proxy_y0），期望 308 + 3*44 = 440。
-        assert_eq!(advanced_content_end(308.0, 514.0, 44.0), 440.0);
+        // SSH 已迁到独立页面；隐藏同步组不能继续把 Advanced 撑高。
+        assert_eq!(advanced_content_end(146.0, 308.0, 44.0), 234.0);
     }
 
     #[test]

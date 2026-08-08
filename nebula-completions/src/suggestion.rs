@@ -68,34 +68,22 @@ pub struct SemanticSuggestion {
 
 impl SemanticSuggestion {
     pub fn new(suggestion: Suggestion) -> Self {
-        Self {
-            suggestion,
-            kind: None,
-        }
+        Self { suggestion, kind: None }
     }
 
     pub fn with_kind(suggestion: Suggestion, kind: SuggestionKind) -> Self {
-        Self {
-            suggestion,
-            kind: Some(kind),
-        }
+        Self { suggestion, kind: Some(kind) }
     }
 }
 
 impl From<Suggestion> for SemanticSuggestion {
     fn from(suggestion: Suggestion) -> Self {
-        Self {
-            suggestion,
-            ..Default::default()
-        }
+        Self { suggestion, ..Default::default() }
     }
 }
 
 impl Default for SemanticSuggestion {
     fn default() -> Self {
-        Self {
-            suggestion: Suggestion::default(),
-            kind: None,
-        }
+        Self { suggestion: Suggestion::default(), kind: None }
     }
 }

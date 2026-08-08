@@ -1,9 +1,9 @@
 #ifndef AppVersion
-  #define AppVersion "0.6.0"
+  #define AppVersion "0.9.0"
 #endif
 
 #ifndef NumericVersion
-  #define NumericVersion "0.6.0.0"
+  #define NumericVersion "0.9.0.0"
 #endif
 
 #ifndef Configuration
@@ -50,6 +50,7 @@ CloseApplications=yes
 RestartApplications=no
 RestartIfNeededByRun=no
 SetupLogging=yes
+ChangesEnvironment=yes
 ShowLanguageDialog=auto
 
 [Languages]
@@ -60,18 +61,21 @@ Name: "chinesesimplified"; MessagesFile: "{#RepoRoot}\target\installer-tools\Chi
 english.DesktopIcon=Create a desktop shortcut
 english.AutoStart=Start Nebula Terminal when I sign in to Windows
 english.InstallFont=Install Maple Mono font for the current user
+english.AddToPath=Add Nebula Terminal to the user PATH
 english.OpenInNebula=Open in Nebula
 english.LaunchProgram=Launch Nebula Terminal
 english.UninstallProgram=Uninstall Nebula Terminal
 chinesesimplified.DesktopIcon=创建桌面快捷方式
 chinesesimplified.AutoStart=登录 Windows 后启动 Nebula Terminal
 chinesesimplified.InstallFont=为当前用户安装 Maple Mono 字体
+chinesesimplified.AddToPath=将 Nebula Terminal 添加到当前用户 PATH
 chinesesimplified.OpenInNebula=在 Nebula 中打开
 chinesesimplified.LaunchProgram=启动 Nebula Terminal
 chinesesimplified.UninstallProgram=卸载 Nebula Terminal
 
 [Tasks]
 Name: "installfont"; Description: "{cm:InstallFont}"
+Name: "addtopath"; Description: "{cm:AddToPath}"
 Name: "desktopicon"; Description: "{cm:DesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "autostart"; Description: "{cm:AutoStart}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
@@ -98,6 +102,10 @@ Name: "{autodesktop}\Nebula Terminal"; Filename: "{app}\nebula.exe"; WorkingDir:
 Name: "{userstartup}\Nebula Terminal"; Filename: "{app}\nebula.exe"; WorkingDir: "{%USERPROFILE}"; Tasks: autostart
 
 [Registry]
+Root: HKCU; Subkey: "Software\Nebula Terminal"; ValueType: dword; ValueName: "InstallerAddedToPath"; ValueData: "1"; Tasks: addtopath; Check: NeedsAddToPath; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Tasks: addtopath; Check: NeedsAddToPath; Flags: preservestringtype
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\nebula.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\nebula.exe"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\nebula.exe"; ValueType: string; ValueName: "Path"; ValueData: "{app}"
 ; 目录背景使用 %V，选中的目录对象使用 %1；两者必须由 Explorer 展开后再交给 CLI。
 ; 每个动词使用独立的应用子键，卸载时只删除 Nebula 自己注册的菜单。
 Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\NebulaTerminal"; ValueType: string; ValueName: "MUIVerb"; ValueData: "{cm:OpenInNebula}"; Flags: uninsdeletekey
@@ -113,3 +121,38 @@ Filename: "{app}\nebula.exe"; Description: "{cm:LaunchProgram}"; WorkingDir: "{%
 [UninstallRun]
 ; 必须在 Inno 删除 nebula.exe 前调用应用自己的结构化清理逻辑，避免直接改写用户配置。
 Filename: "{app}\nebula.exe"; Parameters: "setup-ai --remove"; WorkingDir: "{app}"; RunOnceId: "RemoveNebulaAiHooks"; Flags: runhidden skipifdoesntexist
+
+[Code]
+function NeedsAddToPath: Boolean;
+var
+  ExistingPath: string;
+begin
+  ExistingPath := '';
+  Result := True;
+  if RegQueryStringValue(HKCU, 'Environment', 'Path', ExistingPath) then
+    Result := Pos(';' + ExpandConstant('{app}') + ';', ';' + ExistingPath + ';') = 0;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ExistingPath: string;
+  WrappedPath: string;
+  Target: string;
+begin
+  if CurUninstallStep <> usUninstall then
+    Exit;
+
+  if not RegValueExists(HKCU, 'Software\Nebula Terminal', 'InstallerAddedToPath') then
+    Exit;
+
+  ExistingPath := '';
+  if not RegQueryStringValue(HKCU, 'Environment', 'Path', ExistingPath) then
+    Exit;
+
+  WrappedPath := ';' + ExistingPath + ';';
+  Target := ';' + ExpandConstant('{app}') + ';';
+  if StringChangeEx(WrappedPath, Target, ';', True) > 0 then begin
+    ExistingPath := Copy(WrappedPath, 2, Length(WrappedPath) - 2);
+    RegWriteExpandStringValue(HKCU, 'Environment', 'Path', ExistingPath);
+  end;
+end;

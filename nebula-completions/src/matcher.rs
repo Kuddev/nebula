@@ -53,11 +53,7 @@ struct FuzzyMatch<T> {
 
 enum State<T> {
     Unscored(Vec<UnscoredMatch<T>>),
-    Fuzzy {
-        matcher: Matcher,
-        atom: Atom,
-        matches: Vec<FuzzyMatch<T>>,
-    },
+    Fuzzy { matcher: Matcher, atom: Atom, matches: Vec<FuzzyMatch<T>> },
 }
 
 /// Filters and sorts candidate completions against a needle using the
@@ -99,7 +95,7 @@ impl<T> CandidateMatcher<'_, T> {
                     needle: lowercase_needle,
                     state: State::Unscored(Vec::new()),
                 }
-            }
+            },
             MatchAlgorithm::Fuzzy => {
                 let atom = Atom::new(
                     needle,
@@ -126,7 +122,7 @@ impl<T> CandidateMatcher<'_, T> {
                         matches: Vec::new(),
                     },
                 }
-            }
+            },
         }
     }
 
@@ -149,7 +145,7 @@ impl<T> CandidateMatcher<'_, T> {
                         } else {
                             None
                         }
-                    }
+                    },
                     MatchAlgorithm::Substring => haystack_folded.find(self.needle.as_str()),
                     _ => unreachable!("Only prefix and substring algorithms don't use score"),
                 };
@@ -167,12 +163,8 @@ impl<T> CandidateMatcher<'_, T> {
                     }
                     match_indices
                 })
-            }
-            State::Fuzzy {
-                matcher,
-                atom,
-                matches,
-            } => {
+            },
+            State::Fuzzy { matcher, atom, matches } => {
                 let mut haystack_buf = Vec::new();
                 let haystack_utf32 = Utf32Str::new(haystack, &mut haystack_buf);
                 let mut indices = Vec::new();
@@ -194,7 +186,7 @@ impl<T> CandidateMatcher<'_, T> {
                     });
                 }
                 Some(indices)
-            }
+            },
         }
     }
 
@@ -226,18 +218,14 @@ impl<T> CandidateMatcher<'_, T> {
                             .then(cmp_sensitive)
                     }
                 });
-            }
+            },
             State::Fuzzy { matches, .. } => match self.options.sort {
                 crate::options::CompletionSort::Alphabetical => {
                     matches.sort_by(|a, b| a.haystack.cmp(&b.haystack));
-                }
+                },
                 crate::options::CompletionSort::Smart => {
-                    matches.sort_by(|a, b| {
-                        b.score
-                            .cmp(&a.score)
-                            .then(a.haystack.cmp(&b.haystack))
-                    });
-                }
+                    matches.sort_by(|a, b| b.score.cmp(&a.score).then(a.haystack.cmp(&b.haystack)));
+                },
             },
         }
     }
@@ -249,14 +237,12 @@ impl<T> CandidateMatcher<'_, T> {
             self.sort();
         }
         match self.state {
-            State::Unscored(matches) => matches
-                .into_iter()
-                .map(|m| (m.item, m.match_indices))
-                .collect(),
-            State::Fuzzy { matches, .. } => matches
-                .into_iter()
-                .map(|m| (m.item, m.match_indices))
-                .collect(),
+            State::Unscored(matches) => {
+                matches.into_iter().map(|m| (m.item, m.match_indices)).collect()
+            },
+            State::Fuzzy { matches, .. } => {
+                matches.into_iter().map(|m| (m.item, m.match_indices)).collect()
+            },
         }
     }
 }
@@ -292,10 +278,8 @@ mod tests {
 
     #[test]
     fn prefix_match() {
-        let opts = CompletionOptions {
-            match_algorithm: MatchAlgorithm::Prefix,
-            ..Default::default()
-        };
+        let opts =
+            CompletionOptions { match_algorithm: MatchAlgorithm::Prefix, ..Default::default() };
         let mut m = CandidateMatcher::new("examp", &opts, true);
         assert!(m.add("example text", "example text"));
         assert!(!m.add("text", "text"));
@@ -305,10 +289,8 @@ mod tests {
 
     #[test]
     fn prefix_no_match() {
-        let opts = CompletionOptions {
-            match_algorithm: MatchAlgorithm::Prefix,
-            ..Default::default()
-        };
+        let opts =
+            CompletionOptions { match_algorithm: MatchAlgorithm::Prefix, ..Default::default() };
         let mut m = CandidateMatcher::new("text", &opts, true);
         assert!(!m.add("example text", "example text"));
         let results: Vec<_> = m.results().iter().map(|r| r.0).collect();
@@ -318,10 +300,8 @@ mod tests {
 
     #[test]
     fn substring_match() {
-        let opts = CompletionOptions {
-            match_algorithm: MatchAlgorithm::Substring,
-            ..Default::default()
-        };
+        let opts =
+            CompletionOptions { match_algorithm: MatchAlgorithm::Substring, ..Default::default() };
         let mut m = CandidateMatcher::new("text", &opts, true);
         assert!(m.add("example text", "example text"));
         let results: Vec<_> = m.results().iter().map(|r| r.0).collect();
@@ -330,20 +310,16 @@ mod tests {
 
     #[test]
     fn substring_no_match() {
-        let opts = CompletionOptions {
-            match_algorithm: MatchAlgorithm::Substring,
-            ..Default::default()
-        };
+        let opts =
+            CompletionOptions { match_algorithm: MatchAlgorithm::Substring, ..Default::default() };
         let mut m = CandidateMatcher::new("mplxt", &opts, true);
         assert!(!m.add("example text", "example text"));
     }
 
     #[test]
     fn fuzzy_match() {
-        let opts = CompletionOptions {
-            match_algorithm: MatchAlgorithm::Fuzzy,
-            ..Default::default()
-        };
+        let opts =
+            CompletionOptions { match_algorithm: MatchAlgorithm::Fuzzy, ..Default::default() };
         let mut m = CandidateMatcher::new("ext", &opts, true);
         assert!(m.add("example text", "example text"));
         let results: Vec<_> = m.results().iter().map(|r| r.0).collect();
@@ -352,10 +328,8 @@ mod tests {
 
     #[test]
     fn fuzzy_no_match() {
-        let opts = CompletionOptions {
-            match_algorithm: MatchAlgorithm::Fuzzy,
-            ..Default::default()
-        };
+        let opts =
+            CompletionOptions { match_algorithm: MatchAlgorithm::Fuzzy, ..Default::default() };
         let mut m = CandidateMatcher::new("mpp", &opts, true);
         assert!(!m.add("example text", "example text"));
     }
@@ -381,16 +355,10 @@ mod tests {
 
     #[test]
     fn fuzzy_strip_quotes() {
-        let opts = CompletionOptions {
-            match_algorithm: MatchAlgorithm::Fuzzy,
-            ..Default::default()
-        };
+        let opts =
+            CompletionOptions { match_algorithm: MatchAlgorithm::Fuzzy, ..Default::default() };
         let mut m = CandidateMatcher::new("'love spaces' ", &opts, true);
-        for item in [
-            "'i love spaces'",
-            "'i love spaces' so much",
-            "'lovespaces' ",
-        ] {
+        for item in ["'i love spaces'", "'i love spaces' so much", "'lovespaces' "] {
             m.add(item, item);
         }
         let results = m.results();

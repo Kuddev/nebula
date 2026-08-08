@@ -142,6 +142,11 @@ impl Drop for Conpty {
 unsafe impl Send for Conpty {}
 
 pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
+    // ConPTY decodes CSI ... _ records into native INPUT_RECORDs. This is
+    // required for functional chords such as Codex's Shift+Enter, while
+    // ordinary character input still remains on the normal UTF-8 path.
+    const PSEUDOCONSOLE_WIN32_INPUT_MODE: u32 = 0x4;
+
     let api = ConptyApi::new();
     crate::pty_trace(if api.sideloaded {
         "conpty api ready (sideloaded OpenConsole)"
@@ -177,7 +182,7 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
             window_size.into(),
             conin_pty_handle.into_raw_handle() as HANDLE,
             conout_pty_handle.into_raw_handle() as HANDLE,
-            0,
+            PSEUDOCONSOLE_WIN32_INPUT_MODE,
             &mut pty_handle as *mut _,
         )
     };

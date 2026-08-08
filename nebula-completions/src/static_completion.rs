@@ -20,9 +20,7 @@ impl StaticCompletion {
     /// Create a completer from a `&'static [&'static str]` slice.
     pub fn from_static(options: &'static [&'static str]) -> Self {
         let v: Vec<String> = options.iter().map(|s| s.to_string()).collect();
-        Self {
-            options: Cow::Owned(v),
-        }
+        Self { options: Cow::Owned(v) }
     }
 }
 
@@ -36,10 +34,8 @@ impl Completer for StaticCompletion {
         options: &CompletionOptions,
     ) -> Vec<SemanticSuggestion> {
         let mut matcher = CandidateMatcher::new(prefix, options, true);
-        let current_span = Span::new(
-            span.start.saturating_sub(offset),
-            span.end.saturating_sub(offset),
-        );
+        let current_span =
+            Span::new(span.start.saturating_sub(offset), span.end.saturating_sub(offset));
 
         for option in self.options.iter() {
             matcher.add_suggestion(SemanticSuggestion {

@@ -55,6 +55,14 @@ const WORKSPACE_FILTERS: &[FileFilter] = &[
     },
     ALL_FILES_FILTER,
 ];
+const BACKUP_FILTERS: &[FileFilter] = &[
+    FileFilter {
+        name: "Nebula encrypted backups",
+        extensions: &["nebula-backup"],
+        patterns: &["*.nebula-backup"],
+    },
+    ALL_FILES_FILTER,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PrivateKeyFileKind {
@@ -137,12 +145,24 @@ pub(super) fn pick_startup_directory(owner: &Window) -> Option<PathBuf> {
     platform::pick_folder(owner, "选择终端启动目录")
 }
 
+pub(super) fn pick_terminal_directory(owner: &Window) -> Option<PathBuf> {
+    platform::pick_folder(owner, "导入终端目录")
+}
+
 pub(super) fn save_workspace_file(owner: &Window, default_name: &str) -> Option<PathBuf> {
     platform::save_file(owner, "导出工作区", WORKSPACE_FILTERS, default_name)
 }
 
 pub(super) fn pick_workspace_file(owner: &Window) -> Option<PathBuf> {
     platform::pick_file(owner, "打开工作区", WORKSPACE_FILTERS)
+}
+
+pub(super) fn save_backup_file(owner: &Window) -> Option<PathBuf> {
+    platform::save_file(owner, "导出 Nebula 备份", BACKUP_FILTERS, "nebula-backup.nebula-backup")
+}
+
+pub(super) fn pick_backup_file(owner: &Window) -> Option<PathBuf> {
+    platform::pick_file(owner, "恢复 Nebula 备份", BACKUP_FILTERS)
 }
 
 #[cfg(test)]

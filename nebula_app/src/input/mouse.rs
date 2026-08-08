@@ -70,6 +70,54 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        if self.ctx.display().sidebar_scrollbar_dragging() {
+            if lmb_pressed {
+                if self.ctx.display().sidebar_scrollbar_drag_to(y as f32) {
+                    self.ctx.mark_dirty();
+                }
+                self.ctx.window().set_mouse_cursor(CursorIcon::Grabbing);
+                return;
+            }
+            self.ctx.display().end_sidebar_scrollbar_drag();
+        }
+
+        if self.ctx.doc_view().is_some_and(|doc| doc.scrollbar_dragging()) {
+            if lmb_pressed {
+                let area = self.ctx.display().doc_view_area();
+                let scale = self.ctx.window().scale_factor as f32;
+                if self
+                    .ctx
+                    .doc_view()
+                    .is_some_and(|doc| doc.scrollbar_drag_to(area, scale, y as f32))
+                {
+                    self.ctx.mark_dirty();
+                }
+                self.ctx.window().set_mouse_cursor(CursorIcon::Grabbing);
+                return;
+            }
+            if let Some(doc) = self.ctx.doc_view() {
+                doc.end_scrollbar_drag();
+            }
+        }
+
+        if self.ctx.image_view().is_some_and(|image| image.dragging()) {
+            if lmb_pressed {
+                let area = self.ctx.display().image_view_area();
+                if self
+                    .ctx
+                    .image_view()
+                    .is_some_and(|image| image.drag_to((x as f32, y as f32), area))
+                {
+                    self.ctx.mark_dirty();
+                }
+                self.ctx.window().set_mouse_cursor(CursorIcon::Grabbing);
+                return;
+            }
+            if let Some(image) = self.ctx.image_view() {
+                image.end_drag();
+            }
+        }
+
         // The SSH editor is modal. Its controls own hover/cursor feedback while
         // open, and the closing animation swallows pointer motion until the
         // retained editor snapshot is released.
@@ -279,6 +327,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             chrome_hover
         };
         self.ctx.display().set_chrome_hover(chrome_hover, settings_hover);
+        let doc_area = self.ctx.display().doc_view_area();
+        let image_area = self.ctx.display().image_view_area();
+        let doc_hot = (x as f32) >= doc_area.0
+            && (x as f32) < doc_area.0 + doc_area.2
+            && (y as f32) >= doc_area.1
+            && (y as f32) < doc_area.1 + doc_area.3;
+        if self.ctx.doc_view().is_some_and(|doc| doc.set_scrollbar_hover(doc_hot)) {
+            self.ctx.mark_dirty();
+        }
 
         // Resize cursor on the window border, arrow over the title bar/sidebar,
         // pointer over clickable chrome controls. Chrome/resize geometry is
@@ -353,12 +410,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::FontSizeDown
             | crate::display::SettingsHit::BackgroundImageCoverChrome
             | crate::display::SettingsHit::OpenConfigFile
+            | crate::display::SettingsHit::ImportTerminal
             | crate::display::SettingsHit::SyncAutoPullToggle
             | crate::display::SettingsHit::SyncPushButton
             | crate::display::SettingsHit::SyncPullButton
             | crate::display::SettingsHit::SshProxyModeDropdown
             | crate::display::SettingsHit::SshProxyModeOption(_)
             | crate::display::SettingsHit::Reset => {
+                self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
+                return;
+            },
+            crate::display::SettingsHit::BackupSelection(_)
+            | crate::display::SettingsHit::BackupExport
+            | crate::display::SettingsHit::BackupRestore => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
                 return;
             },
@@ -397,9 +461,23 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 | crate::display::ChromeHit::HostsSection
                 | crate::display::ChromeHit::MessageQueue
                 | crate::display::ChromeHit::SidebarToggle => CursorIcon::Pointer,
+                crate::display::ChromeHit::TabsScrollbar
+                | crate::display::ChromeHit::HostsScrollbar => CursorIcon::Grab,
                 _ => CursorIcon::Default,
             };
             self.ctx.window().set_mouse_cursor(icon);
+            return;
+        }
+        if self.ctx.doc_view().is_some_and(|doc| {
+            doc.scrollbar(doc_area, scale).is_some_and(|bar| bar.hit_test(x as f32, y as f32))
+        }) {
+            self.ctx.window().set_mouse_cursor(CursorIcon::Grab);
+            return;
+        }
+        if self.ctx.image_view().is_some()
+            && rect_contains(image_area, x as f32, y as f32)
+        {
+            self.ctx.window().set_mouse_cursor(CursorIcon::Grab);
             return;
         }
 
@@ -511,8 +589,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         }
 
         let point = self.ctx.mouse().point(&size_info, display_offset);
-        let (point, cell_side) =
-            self.ctx.terminal_math_source_point(point, visual_cell_side);
+        let (point, cell_side) = self.ctx.terminal_math_source_point(point, visual_cell_side);
         let cell_changed = old_point != point;
 
         // If the mouse hasn't changed cells, do nothing.
@@ -619,8 +696,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     pub(super) fn mouse_report(&mut self, button: u8, state: ElementState) {
         let display_offset = self.ctx.terminal().grid().display_offset();
         let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
-        let (point, _) =
-            self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side);
+        let (point, _) = self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side);
 
         // Assure the mouse point is not in the scrollback.
         if point.line < 0 {
@@ -725,9 +801,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         let view = self.ctx.display().pane_view();
                         let display_offset = self.ctx.terminal().grid().display_offset();
                         let point = self.ctx.mouse().point(&view, display_offset);
-                        self.ctx
-                            .terminal_math_source_point(point, self.ctx.mouse().cell_side)
-                            .0
+                        self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side).0
                     };
                     if let Some(hint) = crate::display::hint::highlighted_at(
                         self.ctx.terminal(),
@@ -808,6 +882,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             // 都会把这个拖拽状态留下，于是下一次移动鼠标还在选字。
             self.ctx.display().ssh_editor_end_drag();
             if self.ctx.display().finish_settings_opacity_drag() {
+                self.ctx.mark_dirty();
+                return;
+            }
+            if self.ctx.display().end_sidebar_scrollbar_drag() {
+                self.ctx.mark_dirty();
+                return;
+            }
+            if self.ctx.image_view().is_some_and(|image| image.end_drag()) {
+                self.ctx.window().set_mouse_cursor(CursorIcon::Grab);
+                self.ctx.mark_dirty();
+                return;
+            }
+            if self.ctx.doc_view().is_some_and(|doc| doc.end_scrollbar_drag()) {
                 self.ctx.mark_dirty();
                 return;
             }
@@ -1021,6 +1108,24 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.mark_dirty();
                 return;
             }
+        }
+
+        // A standalone image owns the remaining wheel. Zoom is anchored at
+        // the pointer, matching image editors instead of jumping around the
+        // viewport center on every wheel tick.
+        if self.ctx.image_view().is_some() {
+            let area = self.ctx.display().image_view_area();
+            let anchor = (self.ctx.mouse().x as f32, self.ctx.mouse().y as f32);
+            if rect_contains(area, anchor.0, anchor.1) {
+                let steps = match delta {
+                    MouseScrollDelta::LineDelta(_, lines) => lines * multiplier as f32,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 * 0.01 * multiplier as f32,
+                };
+                if self.ctx.image_view().is_some_and(|image| image.zoom_by(steps, anchor, area)) {
+                    self.ctx.mark_dirty();
+                }
+            }
+            return;
         }
 
         // A document-viewer tab owns the remaining wheel: pixel-scroll the
@@ -1297,6 +1402,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Check mouse icon state in relation to the message bar.
     fn message_bar_cursor_state(&self) -> Option<CursorIcon> {
+        // Special tabs have no terminal message bar. Do not let a queued
+        // terminal error steal clicks or cursor feedback from settings/docs.
+        if self.ctx.nebula_special_tab_active() {
+            return None;
+        }
         let size = self.ctx.size_info();
         let mouse = self.ctx.mouse();
         let search_active = self.ctx.search_active();
@@ -1316,6 +1426,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// 把关闭按钮的悬停态同步给绘制层。指针形状那条路是只读的，而按钮要给
     /// 视觉反馈，所以单独走一次——命中仍旧来自同一个 rect helper。
     fn update_message_close_hover(&mut self) {
+        if self.ctx.nebula_special_tab_active() {
+            self.ctx.display().set_message_close_hover(false);
+            return;
+        }
         let size = self.ctx.size_info();
         let mouse = self.ctx.mouse();
         let (x, y) = (mouse.x as f32, mouse.y as f32);
@@ -1331,10 +1445,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         self.update_message_close_hover();
         let display_offset = self.ctx.terminal().grid().display_offset();
         let mut point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
-        point = self
-            .ctx
-            .terminal_math_source_point(point, self.ctx.mouse().cell_side)
-            .0;
+        point = self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side).0;
         // `point` is clamped to `size_info`, but we're about to index the grid,
         // whose column/line count can trail `size_info` by one during a resize
         // or sidebar toggle (asymmetric-padding reflow lands a frame later).
@@ -1401,4 +1512,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         scheduler.unschedule(timer_id);
         scheduler.schedule(event, SELECTION_SCROLLING_INTERVAL, true, timer_id);
     }
+}
+
+fn rect_contains((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+    x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }

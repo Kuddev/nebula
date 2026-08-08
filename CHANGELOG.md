@@ -4,6 +4,48 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
+## Unreleased
+
+### English
+
+#### Added
+
+- **Encrypted backup and restore** — Settings can export selected Nebula-owned data into an AES-256-GCM archive protected by an Argon2id-derived passphrase, then authenticate and restore it with path-traversal and symlink-parent checks. Appearance, configuration, sanitized SSH profiles, sync, assistant data, sessions, directory and command history, and imported fonts can be selected independently.
+- **A dedicated image viewer tab** — double-clicking PNG, JPEG, WebP, or BMP files in the file tree opens an independent image tab that scales the decoded image to the content area. Markdown images reuse the same decoder and renderer instead of maintaining a second image path.
+- **A dedicated SSH settings page** — SSH proxy mode, proxy address, bypass hosts, and recovery of hidden SSH hosts now live together under Settings → SSH; the existing host editor remains available from the sidebar.
+- **Shared overlay scrollbars** — Markdown, tab lists, and SSH hosts now use the same unobtrusive scrollbar: a 3 px thumb appears only for overflowing hovered content, with a forgiving 12 px pointer target plus drag and track-click navigation.
+- **A unified Files/Git drawer header** — Files and Git are two centered slots in one segmented control. The file tools row keeps the current root on one line and provides follow-current-terminal (`Alt+R`), new-terminal-here (`Alt+T`), and reveal-in-file-manager (`Alt+O`) actions with matching hover tips.
+
+#### Fixed
+
+- **Codex can distinguish Shift+Enter from Enter on Windows** — Nebula now enables ConPTY's Win32 input mode when creating a pseudo console, tracks the application's DECSET 9001 request, and emits the Win32 key records expected by console applications. Codex can therefore insert a newline with Shift+Enter instead of receiving an ordinary Enter submission.
+- **Installer version metadata matches the application** — the Inno Setup fallback version and numeric file version now match Nebula 0.9.0; release builds continue to inject the package version automatically.
+
+#### Improved
+
+- **The Windows installer can register Nebula as a command** — "Add Nebula Terminal to the user PATH" is selected by default, `nebula.exe` is also registered through Windows App Paths for Win+R, and uninstall removes only the PATH entry that the installer added. Existing Explorer directory and directory-background context-menu registrations remain included in the installer.
+- **File-tree status is quieter and stable** — directories use neutral theme colors, ignored paths detected through batched `git check-ignore` are dimmed without changing sorting or filtering, and hovering a row no longer shifts its contents.
+
+### 简体中文
+
+#### 新增
+
+- **加密备份与恢复** — 设置页可将选中的 Nebula 数据导出为 AES-256-GCM 加密归档，密钥由 Argon2id 从口令派生；恢复前会完整认证，并防止路径穿越和符号链接父目录写入。外观、配置、已脱敏的 SSH 配置、同步、助手数据、会话、目录与命令历史以及导入字体均可独立选择。
+- **独立图片查看器标签页** — 在文件树中双击 PNG、JPEG、WebP 或 BMP 会打开独立图片标签页，并按内容区域等比适配。Markdown 图片复用同一套解码与渲染路径，不再维护重复实现。
+- **独立 SSH 设置页** — SSH 代理模式、代理地址、绕过主机和已隐藏 SSH 主机恢复统一归入“设置 → SSH”；完整主机编辑器仍从侧栏进入。
+- **共享 OverlayScrollbar** — Markdown、标签列表和 SSH 主机列表统一使用克制的浮层滚动条：内容溢出且鼠标进入时才显示 3px thumb，实际命中区为 12px，并支持拖动和点击轨道跳转。
+- **文件/Git 一体化抽屉头部** — 文件与 Git 成为同一分段控件内居中的两个槽位；文件工具行单行显示当前根目录，并提供跟随当前终端（`Alt+R`）、在此新建终端（`Alt+T`）和在资源管理器中打开（`Alt+O`），hover 提示与快捷键保持一致。
+
+#### 修复
+
+- **Windows 下 Codex 现在能区分 Shift+Enter 与 Enter** — Nebula 创建伪控制台时启用 ConPTY Win32 输入模式，跟踪应用发出的 DECSET 9001 请求，并发送 Windows 控制台程序所需的 Win32 按键记录。因此 Codex 中 Shift+Enter 会插入换行，不再被当作普通 Enter 提交。
+- **安装器版本信息与应用一致** — Inno Setup 的兜底版本和数字文件版本改为 Nebula 0.9.0；正式构建仍会自动注入包版本。
+
+#### 改进
+
+- **Windows 安装器可以把 Nebula 注册为命令** — “将 Nebula Terminal 添加到当前用户 PATH”默认勾选，同时通过 Windows App Paths 注册 `nebula.exe`，因此 Win+R 可以直接启动；卸载时只移除安装器自己加入的 PATH 条目。资源管理器目录及目录背景的右键菜单注册仍随安装包提供。
+- **文件树状态更安静且不抖动** — 目录使用主题中性灰，批量 `git check-ignore` 识别出的忽略项只降低显示强度、不参与排序或过滤，鼠标悬浮也不再移动行内容。
+
 ## 0.9.0 - 2026-08-02
 
 ### English

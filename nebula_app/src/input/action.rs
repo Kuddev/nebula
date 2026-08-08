@@ -371,8 +371,7 @@ impl<T: EventListener> Execute<T> for Action {
                 ctx.nebula_tab(crate::event::TabRequest::FocusSplit(crate::display::SplitNav::Down))
             },
             Action::ToggleCommandPalette => {
-                let profiles: Vec<String> =
-                    ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
+                let profiles = ctx.config().profiles.clone();
                 ctx.display().toggle_command_palette(&profiles);
                 ctx.mark_dirty();
             },
@@ -381,8 +380,7 @@ impl<T: EventListener> Execute<T> for Action {
                 ctx.mark_dirty();
             },
             Action::ToggleShellPicker => {
-                let profiles: Vec<String> =
-                    ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
+                let profiles = ctx.config().profiles.clone();
                 ctx.display().toggle_shell_menu(&profiles);
                 ctx.mark_dirty();
             },
@@ -424,8 +422,8 @@ impl<T: EventListener> Execute<T> for Action {
                     Action::LaunchProfile8 => 7,
                     _ => 8,
                 };
-                if index < ctx.config().profiles.len() {
-                    ctx.nebula_tab(crate::event::TabRequest::NewProfile(index));
+                if let Some(profile) = ctx.config().profiles.get(index).cloned() {
+                    ctx.nebula_tab(crate::event::TabRequest::NewProfile(profile));
                 }
             },
             _ => (),
