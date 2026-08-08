@@ -312,6 +312,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             shell_picker_count,
             font_picker_count,
             hidden_host_count,
+            self.ctx.display().ssh_host_count(),
         );
         let chrome_hover = if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32)
         {
@@ -383,6 +384,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::FontCycle
             | crate::display::SettingsHit::FontPickerRow(_)
             | crate::display::SettingsHit::RestoreHiddenSsh(_)
+            | crate::display::SettingsHit::SshHostConnect(_)
+            | crate::display::SettingsHit::SshHostEdit(_)
+            | crate::display::SettingsHit::SshHostHide(_)
+            | crate::display::SettingsHit::SshImportConfig
+            | crate::display::SettingsHit::SshAddHost
+            | crate::display::SettingsHit::SshUpgrade
             | crate::display::SettingsHit::FetchToggle
             | crate::display::SettingsHit::PowerlineToggle
             | crate::display::SettingsHit::BlurToggle

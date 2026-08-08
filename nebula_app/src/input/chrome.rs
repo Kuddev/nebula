@@ -779,6 +779,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 let shell_picker_count = self.ctx.display().shell_picker_count();
                 let font_picker_count = self.ctx.display().font_picker_count();
                 let hidden_host_count = self.ctx.display().hidden_ssh_host_count();
+                let ssh_host_count = self.ctx.display().ssh_host_count();
                 let settings_area = self.ctx.display().terminal_card_rect();
                 let settings_hit = crate::display::settings_hit(
                     &size,
@@ -793,6 +794,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     shell_picker_count,
                     font_picker_count,
                     hidden_host_count,
+                    ssh_host_count,
                 );
                 // 打开的下拉框独占第一击：命中不属于它（选项行或锚行）时，
                 // 这一击只负责关闭浮层，绝不让下层控件借机误触发。
@@ -981,6 +983,39 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::RestoreHiddenSsh(index) => {
                         self.ctx.display().restore_hidden_ssh_host(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshHostConnect(index) => {
+                        let host = self.ctx.display().nebula_ssh_hosts.get(index).cloned();
+                        if let Some(host) = host {
+                            self.ctx.nebula_tab(crate::event::TabRequest::NewSsh(host));
+                        }
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshHostEdit(index) => {
+                        self.ctx.display().edit_ssh_host(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshHostHide(index) => {
+                        self.ctx.display().request_delete_ssh_host(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshImportConfig => {
+                        self.ctx.display().import_ssh_config();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshAddHost => {
+                        self.ctx.display().open_ssh_editor();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshUpgrade => {
+                        self.ctx.display().request_ssh_upgrade();
                         self.ctx.mark_dirty();
                         return;
                     },

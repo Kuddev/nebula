@@ -12,7 +12,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 - **Encrypted backup and restore** — Settings can export selected Nebula-owned data into an AES-256-GCM archive protected by an Argon2id-derived passphrase, then authenticate and restore it with path-traversal and symlink-parent checks. Appearance, configuration, sanitized SSH profiles, sync, assistant data, sessions, directory and command history, and imported fonts can be selected independently.
 - **A dedicated image viewer tab** — double-clicking PNG, JPEG, WebP, or BMP files in the file tree opens an independent image tab that scales the decoded image to the content area. Markdown images reuse the same decoder and renderer instead of maintaining a second image path.
-- **A dedicated SSH settings page** — SSH proxy mode, proxy address, bypass hosts, and recovery of hidden SSH hosts now live together under Settings → SSH; the existing host editor remains available from the sidebar.
+- **A dedicated SSH settings page** — the sidebar's ordered SSH hosts now have a two-line card view with connect, edit, hide, add-host, and immediate `~/.ssh/config` import actions under Settings → SSH. Proxy mode, proxy address, bypass hosts, hidden-host recovery, and the stable upgrade affordance live on the same page; the existing sidebar remains a fast connection entry point.
 - **Shared overlay scrollbars** — Markdown, tab lists, and SSH hosts now use the same unobtrusive scrollbar: a 3 px thumb appears only for overflowing hovered content, with a forgiving 12 px pointer target plus drag and track-click navigation.
 - **A unified Files/Git drawer header** — Files and Git are two centered slots in one segmented control. The file tools row keeps the current root on one line and provides follow-current-terminal (`Alt+R`), new-terminal-here (`Alt+T`), and reveal-in-file-manager (`Alt+O`) actions with matching hover tips.
 
@@ -35,7 +35,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 - **加密备份与恢复** — 设置页可将选中的 Nebula 数据导出为 AES-256-GCM 加密归档，密钥由 Argon2id 从口令派生；恢复前会完整认证，并防止路径穿越和符号链接父目录写入。外观、配置、已脱敏的 SSH 配置、同步、助手数据、会话、目录与命令历史以及导入字体均可独立选择。
 - **独立图片查看器标签页** — 在文件树中双击 PNG、JPEG、WebP 或 BMP 会打开独立图片标签页，并按内容区域等比适配。Markdown 图片复用同一套解码与渲染路径，不再维护重复实现。
-- **独立 SSH 设置页** — SSH 代理模式、代理地址、绕过主机和已隐藏 SSH 主机恢复统一归入“设置 → SSH”；完整主机编辑器仍从侧栏进入。
+- **独立 SSH 设置页** — 侧栏同源、保持原顺序的 SSH 主机现在以双行卡片呈现，并提供连接、编辑、隐藏、添加主机和立即导入 `~/.ssh/config`；代理模式、代理地址、绕过主机、已隐藏主机恢复和稳定的升级入口也统一归入“设置 → SSH”。侧栏仍保留为快速连接入口。
 - **共享 OverlayScrollbar** — Markdown、标签列表和 SSH 主机列表统一使用克制的浮层滚动条：内容溢出且鼠标进入时才显示 3px thumb，实际命中区为 12px，并支持拖动和点击轨道跳转。
 - **文件/Git 一体化抽屉头部** — 文件与 Git 成为同一分段控件内居中的两个槽位；文件工具行单行显示当前根目录，并提供跟随当前终端（`Alt+R`）、在此新建终端（`Alt+T`）和在资源管理器中打开（`Alt+O`），hover 提示与快捷键保持一致。
 
