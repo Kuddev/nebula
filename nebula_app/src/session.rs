@@ -47,6 +47,8 @@ pub enum LaunchSession {
         command: String,
         args: Vec<String>,
         cwd: Option<String>,
+        #[serde(default)]
+        shell_id: Option<String>,
     },
     /// A saved SSH destination; restoring reconnects automatically.
     Ssh {

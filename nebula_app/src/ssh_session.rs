@@ -568,8 +568,10 @@ async fn open_transport(
                 .map_err(|err| format!("经代理 {} 连接失败: {err}", server.display()))?;
             Ok(client::connect_stream(config, stream, handler).await?)
         },
-        None => Ok(client::connect(config, (destination.host.as_str(), destination.port), handler)
-            .await?),
+        None => {
+            Ok(client::connect(config, (destination.host.as_str(), destination.port), handler)
+                .await?)
+        },
     }
 }
 
@@ -738,9 +740,9 @@ pub fn spawn_test(
             })??;
             // 代理决策与真连同一套规则，但覆盖值取编辑器草稿：测试回答的是
             // 「保存后能不能连上」，磁盘上的旧覆盖不能替草稿作答。
-            let proxy = global
-                .resolve(request.proxy.as_deref(), &resolved.host)
-                .map_err(|err| -> SessionError { format!("SSH 代理配置无效: {err}").into() })?;
+            let proxy = global.resolve(request.proxy.as_deref(), &resolved.host).map_err(
+                |err| -> SessionError { format!("SSH 代理配置无效: {err}").into() },
+            )?;
             test_connect(&resolved, &request, proxy.as_ref()).await
         })
         .await;

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use nebula_terminal::grid::Dimensions;
 use nebula_terminal::index::{Column, Line, Point, Side};
-use nebula_terminal::term::{self, Term};
 use nebula_terminal::term::cell::Flags;
+use nebula_terminal::term::{self, Term};
 
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
@@ -126,11 +126,7 @@ impl TerminalMathState {
         self.projection.rebuild(overlays, prepared);
     }
 
-    pub(super) fn project_cell(
-        &self,
-        point: Point<usize>,
-        columns: usize,
-    ) -> Option<Point<usize>> {
+    pub(super) fn project_cell(&self, point: Point<usize>, columns: usize) -> Option<Point<usize>> {
         self.projection.project_cell(point, columns)
     }
 
@@ -670,7 +666,6 @@ impl FormulaOverlay {
         )
     }
 
-
     /// How many neighbouring rows per side the ink may reach into: the run of
     /// nearest rows whose own ink does not overlap `columns`. Inline math
     /// expands symmetrically — it shares its row with prose, and a one-sided
@@ -1050,13 +1045,7 @@ fn apply_layout_hints(overlay: &mut FormulaOverlay, grid: &TextGrid) {
 fn mark_formula_neighbours(overlays: &mut [FormulaOverlay]) {
     let spans: Vec<Vec<(i32, usize, usize)>> = overlays
         .iter()
-        .map(|overlay| {
-            overlay
-                .spans
-                .iter()
-                .map(|span| (span.row, span.start, span.end))
-                .collect()
-        })
+        .map(|overlay| overlay.spans.iter().map(|span| (span.row, span.start, span.end)).collect())
         .collect();
     for (index, overlay) in overlays.iter_mut().enumerate() {
         let Some(first) = overlay.spans.first() else { continue };
@@ -1068,19 +1057,15 @@ fn mark_formula_neighbours(overlays: &mut [FormulaOverlay]) {
             let distance = (distance + 1) as i32;
             let above = first.row - distance;
             let below = last.row + distance;
-            overlay.formula_neighbours_above[distance as usize - 1] = spans
-                .iter()
-                .enumerate()
-                .any(|(other_index, other_spans)| {
+            overlay.formula_neighbours_above[distance as usize - 1] =
+                spans.iter().enumerate().any(|(other_index, other_spans)| {
                     other_index != index
                         && other_spans.iter().any(|&(row, start, end)| {
                             row == above && start < source_end && end > source_start
                         })
                 });
-            overlay.formula_neighbours_below[distance as usize - 1] = spans
-                .iter()
-                .enumerate()
-                .any(|(other_index, other_spans)| {
+            overlay.formula_neighbours_below[distance as usize - 1] =
+                spans.iter().enumerate().any(|(other_index, other_spans)| {
                     other_index != index
                         && other_spans.iter().any(|&(row, start, end)| {
                             row == below && start < source_end && end > source_start
@@ -1464,11 +1449,7 @@ struct LineProjection {
 }
 
 impl LineProjection {
-    fn rebuild(
-        &mut self,
-        overlays: &[FormulaOverlay],
-        prepared: &[Option<PreparedFormula>],
-    ) {
+    fn rebuild(&mut self, overlays: &[FormulaOverlay], prepared: &[Option<PreparedFormula>]) {
         self.spans.clear();
         // `reserve` after `clear` reuses the existing allocation on stable
         // frames and grows at most with the visible formula count.
@@ -1565,10 +1546,7 @@ impl LineProjection {
                 return if relative_twice < span.visual_cells {
                     (Point::new(point.line, Column(span.source_start)), Side::Left)
                 } else {
-                    (
-                        Point::new(point.line, Column(span.source_end.saturating_sub(1))),
-                        Side::Right,
-                    )
+                    (Point::new(point.line, Column(span.source_end.saturating_sub(1))), Side::Right)
                 };
             }
             shift = span.shift_after;
@@ -1610,8 +1588,7 @@ fn fit_ratio(
 ) -> f32 {
     let total_height = (metrics.height + metrics.depth).max(1.0);
     let height_fit = available_height / total_height;
-    let height_fit =
-        if height_fit >= 1.0 - height_overrun_tolerance { 1.0 } else { height_fit };
+    let height_fit = if height_fit >= 1.0 - height_overrun_tolerance { 1.0 } else { height_fit };
     (available_width / metrics.width.max(1.0)).min(height_fit).min(1.0)
 }
 
@@ -1686,13 +1663,8 @@ pub(super) fn prepare_overlays(
                 bounds.right
             };
             let available_width = (box_right - bounds.left - FORMULA_INSET * 2.0).max(1.0);
-            let absorbed = overlay.absorbable_rows(ink_columns(
-                overlay,
-                size,
-                bounds,
-                box_right,
-                widest,
-            ));
+            let absorbed =
+                overlay.absorbable_rows(ink_columns(overlay, size, bounds, box_right, widest));
             // Vertical room is the bounds plus each side's budget. Rows the
             // ink may reach into effectively hand a formula their whole
             // height, so `$$` blocks render at the terminal font size like the
@@ -1996,10 +1968,8 @@ mod tests {
         let prepared = [compact_prepared(2), compact_prepared(2)];
         let projection = LineProjection::build(&overlays, &prepared);
         let last = overlays[1].spans[0];
-        let source_reduction: usize = overlays
-            .iter()
-            .map(|overlay| overlay.spans[0].end - overlay.spans[0].start - 2)
-            .sum();
+        let source_reduction: usize =
+            overlays.iter().map(|overlay| overlay.spans[0].end - overlay.spans[0].start - 2).sum();
 
         let suffix = projection
             .project_cell(Point::new(0, Column(last.end)), 80)
@@ -2734,7 +2704,11 @@ d & -b \\
             ),
             (
                 "display 1行 sum 夹住",
-                vec!["前面的说明文字：", r"$$\sum_{i=1}^{n} i = \frac{n(n+1)}{2}$$", "下面继续说明。"],
+                vec![
+                    "前面的说明文字：",
+                    r"$$\sum_{i=1}^{n} i = \frac{n(n+1)}{2}$$",
+                    "下面继续说明。",
+                ],
                 false,
             ),
             // 用户 08-05 截图的真实排版：上下都是跑满整行的长正文，公式的
@@ -2770,7 +2744,10 @@ d & -b \\
             ("inline int", vec![r"value $\int_0^\infty e^{-x^2}dx$ ok"], true),
             ("inline 短源码", vec![r"值 $x_{i+1}^2+y_{j-1}^2$ 收敛"], true),
         ];
-        println!("\n{:<22} {:>6} {:>6} {:>16} {:>16}", "场景", "比例", "样式", "墨迹 宽×高", "预算 宽×高");
+        println!(
+            "\n{:<22} {:>6} {:>6} {:>16} {:>16}",
+            "场景", "比例", "样式", "墨迹 宽×高", "预算 宽×高"
+        );
         for (name, rows, inline) in cases {
             let grid = TextGrid::from_rows(&rows);
             let overlays = scan_grid_with_hints(&grid, inline);

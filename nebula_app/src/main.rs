@@ -38,6 +38,7 @@ mod config_cli;
 mod daemon;
 mod directory_history;
 mod display;
+mod encrypted_backup;
 mod event;
 #[cfg(windows)]
 mod file_uri;
@@ -79,6 +80,7 @@ mod ssh_session;
 mod ssh_sftp;
 mod string;
 mod sync;
+mod terminal_profiles;
 mod update_check;
 mod ux;
 mod window_transition;

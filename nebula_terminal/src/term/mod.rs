@@ -84,6 +84,8 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
+        /// Microsoft ConPTY Win32 input mode (DECSET 9001).
+        const WIN32_INPUT_MODE        = 1 << 23;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -1951,6 +1953,10 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn set_private_mode(&mut self, mode: PrivateMode) {
+        if matches!(mode, PrivateMode::Unknown(9001)) {
+            self.mode.insert(TermMode::WIN32_INPUT_MODE);
+            return;
+        }
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
             PrivateMode::Unknown(mode) => {
@@ -2013,6 +2019,10 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn unset_private_mode(&mut self, mode: PrivateMode) {
+        if matches!(mode, PrivateMode::Unknown(9001)) {
+            self.mode.remove(TermMode::WIN32_INPUT_MODE);
+            return;
+        }
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
             PrivateMode::Unknown(mode) => {
@@ -2062,6 +2072,11 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn report_private_mode(&mut self, mode: PrivateMode) {
         trace!("Reporting private mode {mode:?}");
+        if matches!(mode, PrivateMode::Unknown(9001)) {
+            let state = if self.mode.contains(TermMode::WIN32_INPUT_MODE) { 1 } else { 2 };
+            self.event_proxy.send_event(Event::PtyWrite(format!("\x1b[?9001;{state}$y")));
+            return;
+        }
         let state = match mode {
             PrivateMode::Named(mode) => match mode {
                 NamedPrivateMode::CursorKeys => self.mode.contains(TermMode::APP_CURSOR).into(),
@@ -2484,6 +2499,18 @@ mod tests {
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
     use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
+
+    #[test]
+    fn win32_input_mode_tracks_decset_9001() {
+        let size = TermSize::new(5, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        term.set_private_mode(PrivateMode::Unknown(9001));
+        assert!(term.mode().contains(TermMode::WIN32_INPUT_MODE));
+
+        term.unset_private_mode(PrivateMode::Unknown(9001));
+        assert!(!term.mode().contains(TermMode::WIN32_INPUT_MODE));
+    }
 
     #[test]
     fn scroll_display_page_up() {

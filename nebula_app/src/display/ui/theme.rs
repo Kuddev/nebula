@@ -479,6 +479,7 @@ impl NebulaTheme {
                 ink_dim: Rgb::new(100, 116, 139),   // slate-500
                 ink_strong: Rgb::new(15, 23, 42),   // slate-900
                 ink_faint: Rgb::new(148, 163, 184), // slate-400
+                ink_ignored: Rgb::new(180, 180, 187),
                 // Light accents are dark grays — pale ink on top.
                 ink_on_accent: Rgb::new(248, 250, 252),
                 icon: Rgb::new(71, 85, 105),      // slate-600
@@ -546,6 +547,7 @@ impl NebulaTheme {
                 ink_dim: Rgb::new(148, 163, 184),    // slate-400
                 ink_strong: Rgb::new(248, 250, 252), // slate-50
                 ink_faint: Rgb::new(100, 116, 139),  // slate-500
+                ink_ignored: Rgb::new(92, 92, 92),
                 // Dark accents are light — near-black ink on top.
                 ink_on_accent: Rgb::new(15, 23, 42), // slate-900
                 icon: Rgb::new(203, 213, 225),       // slate-300
@@ -640,6 +642,9 @@ pub(crate) struct Skin {
     pub(crate) ink_strong: Rgb,
     /// Placeholder / hint text (weakest voice).
     pub(crate) ink_faint: Rgb,
+    /// File-tree entries matched by git ignore rules. This is a visibility
+    /// tier, not a filter or sort key.
+    pub(crate) ink_ignored: Rgb,
     /// Ink on top of an `accent`-filled control (primary buttons).
     pub(crate) ink_on_accent: Rgb,
     /// Chrome glyph icons (sidebar toggle, settings gear, tab ×, …).

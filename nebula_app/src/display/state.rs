@@ -111,6 +111,12 @@ pub enum NebulaConfirm {
         path: PathBuf,
         is_dir: bool,
     },
+    /// Password entry for an encrypted backup export or restore. The
+    /// passphrase itself deliberately lives only in `Display` and is never
+    /// copied into the modal enum or persisted to settings.
+    BackupPassphrase {
+        restoring: bool,
+    },
 }
 
 impl NebulaConfirm {

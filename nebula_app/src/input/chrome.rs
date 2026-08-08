@@ -90,11 +90,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.display().nebula_confirm = None;
                 self.ctx.open_path(&directory);
             },
+            NebulaConfirm::BackupPassphrase { .. } => {
+                self.ctx.display().complete_backup_operation();
+            },
         }
     }
 
     /// Dismiss a confirmation without taking its primary action.
     pub fn nebula_confirm_cancel(&mut self, confirm: crate::display::NebulaConfirm) {
+        if matches!(confirm, crate::display::NebulaConfirm::BackupPassphrase { .. }) {
+            self.ctx.display().cancel_backup_operation();
+            return;
+        }
         if confirm.can_dismiss() {
             self.ctx.display().nebula_confirm = None;
         }
@@ -305,6 +312,28 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 return;
             }
 
+            if button == MouseButton::Left && self.ctx.doc_view().is_some() {
+                let x = self.ctx.mouse().x as f32;
+                let y = self.ctx.mouse().y as f32;
+                let area = self.ctx.display().doc_view_area();
+                let scale = self.ctx.window().scale_factor as f32;
+                if self.ctx.doc_view().is_some_and(|doc| doc.scrollbar_press(area, scale, x, y)) {
+                    self.ctx.window().set_mouse_cursor(winit::window::CursorIcon::Grabbing);
+                    self.ctx.mark_dirty();
+                    return;
+                }
+            }
+
+            if button == MouseButton::Left && self.ctx.image_view().is_some() {
+                let point = (self.ctx.mouse().x as f32, self.ctx.mouse().y as f32);
+                let area = self.ctx.display().image_view_area();
+                if self.ctx.image_view().is_some_and(|image| image.begin_drag(point, area)) {
+                    self.ctx.window().set_mouse_cursor(winit::window::CursorIcon::Grabbing);
+                    self.ctx.mark_dirty();
+                    return;
+                }
+            }
+
             // A left press anywhere OUTSIDE the rename box ends the edit
             // (canceling, like Esc) — the click itself still lands wherever it
             // was aimed. Clicking inside the box is caret placement (below).
@@ -446,6 +475,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                             PanelHit::OpenDirectory => {
                                 self.ctx.display().choose_side_panel_directory();
                             },
+                            PanelHit::RevealDirectory => {
+                                let root = self
+                                    .ctx
+                                    .display()
+                                    .nebula_side_panel
+                                    .root()
+                                    .map(std::path::Path::to_path_buf);
+                                if let Some(root) = root {
+                                    self.ctx.open_path(&root);
+                                }
+                            },
                             PanelHit::NewTerminalHere => {
                                 let root = self
                                     .ctx
@@ -562,7 +602,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                                             // Readable text files open in an
                                             // in-app viewer tab; everything else
                                             // goes to the system handler.
-                                            if crate::display::markdown_view::viewable_file(&path) {
+                                            if crate::display::markdown_view::viewable_file(&path)
+                                                || crate::display::image_viewer::viewable_file(
+                                                    &path,
+                                                )
+                                            {
                                                 self.ctx.nebula_tab(
                                                     crate::event::TabRequest::OpenDoc(path),
                                                 );
@@ -657,10 +701,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 }
                 match self.ctx.display().chrome_hit(x, y) {
                     crate::display::ChromeHit::NewTab => {
-                        let profiles: Vec<String> =
-                            self.ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
                         // Detected shells fill the menu even with no config
                         // profiles, so always open it.
+                        let profiles = self.ctx.config().profiles.clone();
                         self.ctx.display().open_shell_menu(&profiles);
                         self.ctx.mark_dirty();
                         return;
@@ -774,6 +817,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         if capturing != Some(row) {
                             self.ctx.display().keymap_begin_capture(row);
                         }
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackupSelection(index) => {
+                        self.ctx.display().toggle_backup_selection(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackupExport => {
+                        self.ctx.display().start_backup_export();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackupRestore => {
+                        self.ctx.display().start_backup_restore();
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -955,9 +1013,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::SettingsHit::SshProxyModeDropdown => {
-                        self.ctx
-                            .display()
-                            .toggle_settings_dropdown(crate::display::SettingsDropdown::SshProxyMode);
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::SshProxyMode,
+                        );
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1070,6 +1128,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::ImportTerminal => {
+                        if self.ctx.display().import_terminal_directory() {
+                            self.ctx.refresh_terminal_profiles();
+                        }
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::Reset => {
                         self.ctx.display().reset_appearance_settings();
                         self.ctx.mark_dirty();
@@ -1098,8 +1163,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     crate::display::ChromeHit::NewTabMenu => {
                         // The chevron opens the shell dropdown (detected shells +
                         // config profiles) — the familiar profile menu.
-                        let profiles: Vec<String> =
-                            self.ctx.config().profiles.iter().map(|p| p.name.clone()).collect();
+                        let profiles = self.ctx.config().profiles.clone();
                         self.ctx.display().open_shell_menu(&profiles);
                         self.ctx.mark_dirty();
                         return;
@@ -1165,6 +1229,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     crate::display::ChromeHit::HostsSection => {
                         self.ctx.display().toggle_sidebar_section(true);
                         self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::ChromeHit::TabsScrollbar
+                    | crate::display::ChromeHit::HostsScrollbar => {
+                        if self.ctx.display().sidebar_scrollbar_press(x, y) {
+                            self.ctx.window().set_mouse_cursor(winit::window::CursorIcon::Grabbing);
+                            self.ctx.mark_dirty();
+                        }
+                        return;
+                    },
+                    crate::display::ChromeHit::TabsArea | crate::display::ChromeHit::HostsArea => {
                         return;
                     },
                     crate::display::ChromeHit::PanelFiles => {

@@ -20,10 +20,8 @@ impl Completer for DirectoryCompletion {
 
         let items = complete_item(true, span, prefix, &[cwd], options, true, None);
 
-        let current_span = Span::new(
-            span.start.saturating_sub(offset),
-            span.end.saturating_sub(offset),
-        );
+        let current_span =
+            Span::new(span.start.saturating_sub(offset), span.end.saturating_sub(offset));
 
         let mut hidden = Vec::new();
         let mut non_hidden = Vec::new();

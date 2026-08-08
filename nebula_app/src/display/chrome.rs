@@ -10,7 +10,7 @@
 
 #![allow(clippy::wildcard_imports)]
 
-use super::ui::{icons, tokens};
+use super::ui::{icons, tokens, widgets};
 use super::*;
 
 /// Result of hit-testing a pixel against the Nebula top chrome bar.
@@ -34,6 +34,10 @@ pub enum ChromeHit {
     TabsSection,
     /// The "SSH HOSTS" section header — click toggles the accordion fold.
     HostsSection,
+    TabsScrollbar,
+    HostsScrollbar,
+    TabsArea,
+    HostsArea,
     /// Fixed entry at the bottom of the sidebar. It owns a separate band and
     /// never competes with Tabs / SSH rows for height.
     MessageQueue,
@@ -43,6 +47,18 @@ pub enum ChromeHit {
     Minimize,
     Maximize,
     Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SidebarScrollKind {
+    Tabs,
+    Hosts,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SidebarScrollDrag {
+    pub(super) kind: SidebarScrollKind,
+    pub(super) grab: f32,
 }
 
 /// An in-progress tab-bar reorder drag.
@@ -111,8 +127,8 @@ pub(super) struct ChromeTabLayout {
     pub(super) hosts_header: (f32, f32, f32, f32),
     /// Per-section overlay scrollbars (track omitted, thumb only), present
     /// only when that section overflows its elastic share of the panel.
-    pub(super) tabs_scrollbar: Option<(f32, f32, f32, f32)>,
-    pub(super) hosts_scrollbar: Option<(f32, f32, f32, f32)>,
+    pub(super) tabs_scrollbar: Option<widgets::OverlayScrollbar>,
+    pub(super) hosts_scrollbar: Option<widgets::OverlayScrollbar>,
     /// Vertical band `(y0, y1)` of each section's row area, for wheel routing.
     pub(super) tabs_band: (f32, f32),
     pub(super) hosts_band: (f32, f32),
@@ -397,14 +413,13 @@ pub(super) fn chrome_tab_layout(
     // Vertical tab rows: full panel width minus inner padding, stacked below
     // the "TABS" header. The new-tab affordance is a small square at the right
     // end of that header row (revealed on sidebar hover), not a trailing row.
-    // 行的左右内缩。窄内缩 = 更宽的行 = 名称与徽章之间拉得开——侧栏总宽
-    // 一点没变，变的只是行在里面占多少。14 → 8 → 4 一路收：14 那版把 28px
-    // 让给了两侧空白；参照原型的行几乎贴满侧栏，呼吸感来自行**内部**的留白，
-    // 不是行外的边框。
-    let tab_pad = s(4.0);
-    // 右内缩比左边深：那条缝是留给覆盖式滚动条的**专用沟槽**。左右都用 4 的
-    // 话，行右缘和滑块左缘会正好贴在一起（滑块占 [panel_w-4, panel_w-1]），
-    // 读起来像是从行上长出来的一根刺，而不是一条独立的轨。
+    // 行的左右内缩。参照原型，行外保留 8px，行内再给左右标识留出稳定的
+    // 呼吸位；Tab 之间的纵向间距单独由 `gap` 控制，不靠扩大外沿来制造空间。
+    // Match the reference rail's 8px side inset. The scrollbar keeps its own
+    // slightly wider gutter on the right, so rows never shift when it appears.
+    let tab_pad = s(8.0);
+    // 右内缩比左边深：那条缝是留给覆盖式滚动条的**专用沟槽**，同时避免
+    // 右侧状态/关闭标识贴住滚动条。滚动条出现与否不会改变行宽，避免整列抖动。
     //
     // 沟槽宽度**恒定**，不随滚动条出没变化：只在溢出时才收窄行，会让整列标签
     // 在滚动条出现的那一帧横向抖一下——省下的 5px 远不值这一下跳。
@@ -474,7 +489,8 @@ pub(super) fn chrome_tab_layout(
     // 用户拖过 HOSTS 分界（设置开启拖拽调节）后，停靠区高度以覆盖值为准，
     // 钳在「只剩标题」与「至少给标签区留一行」之间；没拖过走弹性规则。
     let dock_cap = if model.hosts_band > 0.0 {
-        (model.hosts_band * scale_factor).clamp(dock_fixed, (content_h - pitch - gap).max(dock_fixed))
+        (model.hosts_band * scale_factor)
+            .clamp(dock_fixed, (content_h - pitch - gap).max(dock_fixed))
     } else {
         (content_h - rows_h(tabs_want, pitch) - gap).max(content_h * DOCK_MIN_SHARE).min(content_h)
     };
@@ -551,21 +567,25 @@ pub(super) fn chrome_tab_layout(
     // Overlay scrollbar thumbs, one per overflowing section: pinned to the
     // panel's right inner edge, sized to the visible fraction of the list.
     //
-    // 条贴到最右的那道缝里（行右缘 `tab_pad`=4 之外只剩这点空隙），而不是压在
+    // 条贴到最右的那道缝里（行右缘 `tab_right_pad` 之外只剩这点空隙），而不是压在
     // 行上：标签行右端挂着**状态徽章**（跑批的转圈、待批准的点），滚动条一旦
     // 侵进行宽就会盖住它们——那套徽章的全部价值就在于一直在余光里。留 1px
     // 贴边间隙，条与面板边缘之间还能透出一线底色，不至于糊在边框上。
-    let thumb = |band: (f32, f32), show: usize, want: usize, scroll: usize| {
+    let thumb = |band: (f32, f32), pitch: f32, show: usize, want: usize, scroll: usize| {
         if show == 0 || want <= show {
             return None;
         }
-        let track_h = band.1 - band.0;
-        let th = (track_h * show as f32 / want as f32).max(s(24.0));
-        let ty = band.0 + (track_h - th) * scroll as f32 / (want - show) as f32;
-        Some((panel_x + panel_w - s(4.0), ty, s(3.0), th))
+        let viewport = band.1 - band.0;
+        widgets::overlay_scrollbar(
+            (panel_x, band.0, panel_w, viewport),
+            viewport,
+            want as f32 * pitch,
+            scroll as f32 * pitch,
+            scale_factor,
+        )
     };
-    let tabs_scrollbar = thumb(tabs_band, tabs_show, tabs_want, tabs_scroll);
-    let hosts_scrollbar = thumb(hosts_band, hosts_show, hosts_want, hosts_scroll);
+    let tabs_scrollbar = thumb(tabs_band, pitch, tabs_show, tabs_want, tabs_scroll);
+    let hosts_scrollbar = thumb(hosts_band, host_pitch, hosts_show, hosts_want, hosts_scroll);
 
     ChromeTabLayout {
         tabs,
@@ -632,6 +652,12 @@ pub(super) fn chrome_hit_with_tabs(
     if contains_rect(layout.hosts_add, x, y) {
         return ChromeHit::AddSshHost;
     }
+    if layout.tabs_scrollbar.is_some_and(|bar| bar.hit_test(x, y)) {
+        return ChromeHit::TabsScrollbar;
+    }
+    if layout.hosts_scrollbar.is_some_and(|bar| bar.hit_test(x, y)) {
+        return ChromeHit::HostsScrollbar;
+    }
     for (index, rect) in layout.closes.iter().copied().enumerate() {
         if contains_rect(rect, x, y) {
             return ChromeHit::TabClose(index);
@@ -646,6 +672,14 @@ pub(super) fn chrome_hit_with_tabs(
         if contains_rect(rect, x, y) {
             return ChromeHit::Host(index);
         }
+    }
+    let (panel_x, _, panel_w, _) = layout.panel;
+    if x >= panel_x && x < panel_x + panel_w && y >= layout.tabs_band.0 && y < layout.tabs_band.1 {
+        return ChromeHit::TabsArea;
+    }
+    if x >= panel_x && x < panel_x + panel_w && y >= layout.hosts_band.0 && y < layout.hosts_band.1
+    {
+        return ChromeHit::HostsArea;
     }
     // Section captions toggle the accordion. Checked after the "+" (which
     // lives inside the TABS header band) and the rows.
@@ -1271,27 +1305,31 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 Rgba::new(add_ink.r, add_ink.g, add_ink.b, 235),
             );
         }
-        // A scrollbar is an explicit affordance, not a one-pixel accidental
-        // mark — but它也不是**品牌位**。之前用 accent 画，深色主题下侧栏右缘
-        // 挂出一条饱和色带，比它旁边的标签名还抢眼；滚动位置是背景信息，不该
-        // 用整窗唯一的那个饱和音去说。改用 chrome 图标墨色（随明暗主题翻面）
-        // 压低透明度：静止时是一道能看见、但不会先于内容被看见的灰痕。
-        //
-        // 两套主题的 alpha 不对称：同样一条 3px 细痕，浅色下是深墨压在亮底上，
-        // 深色下是亮墨浮在暗底上——后者在细笔画上更容易被周围的暗面吃掉，同
-        // alpha 会明显比浅色那版弱。所以深色单独抬一档，让两边**看起来**一样重。
-        let (thumb_a, track_a) = if palette.is_light { (0.42, 0.08) } else { (0.58, 0.10) };
-        let thumb_c = Rgba::opaque(sk.icon).with_alpha(thumb_a);
-        let track_c = Rgba::opaque(sk.icon).with_alpha(track_a);
-        for (bar, band) in [
-            (tab_layout.tabs_scrollbar, tab_layout.tabs_band),
-            (tab_layout.hosts_scrollbar, tab_layout.hosts_band),
+        let tabs_hot = matches!(
+            d.nebula_chrome_hover,
+            ChromeHit::TabsSection
+                | ChromeHit::TabsScrollbar
+                | ChromeHit::TabsArea
+                | ChromeHit::Tab(_)
+                | ChromeHit::TabClose(_)
+        );
+        let hosts_hot = matches!(
+            d.nebula_chrome_hover,
+            ChromeHit::HostsSection
+                | ChromeHit::HostsScrollbar
+                | ChromeHit::HostsArea
+                | ChromeHit::Host(_)
+                | ChromeHit::AddSshHost
+        );
+        for (bar, hot, kind) in [
+            (tab_layout.tabs_scrollbar, tabs_hot, SidebarScrollKind::Tabs),
+            (tab_layout.hosts_scrollbar, hosts_hot, SidebarScrollKind::Hosts),
         ] {
-            let Some((bx, by, bw, bh)) = bar else { continue };
-            let track_y = band.0;
-            let track_h = (band.1 - band.0).max(bh);
-            quads.push(UiQuad::solid(bx, track_y, bw, track_h, bw * 0.5, track_c));
-            quads.push(UiQuad::solid(bx, by, bw, bh, bw * 0.5, thumb_c));
+            let Some(bar) = bar else { continue };
+            let dragging = d.nebula_sidebar_scroll_drag.is_some_and(|drag| drag.kind == kind);
+            if hot || dragging {
+                widgets::push_overlay_scrollbar(&mut quads, bar, scale, &sk, hot, dragging);
+            }
         }
     }
 
@@ -1712,8 +1750,8 @@ pub(super) fn draw_chrome(d: &mut Display) {
                         (icon_x, icon_y, icon_s, icon_s),
                     ));
                 }
-                text_x += icon_s + s(6.0);
-                reserved += icon_s + s(6.0);
+                text_x += icon_s + s(9.0);
+                reserved += icon_s + s(9.0);
             }
             // When renaming this tab, show the edit buffer instead of the label
             let label = if d.nebula_tab_rename.as_ref().is_some_and(|(i, _)| *i == index) {
@@ -2433,7 +2471,6 @@ mod sidebar_dock_tests {
         assert!(dragged.hosts[0].3 > 0.0);
         assert!(dragged.hosts[0].1 > dragged.hosts_header.1);
     }
-
 
     #[test]
     fn a_dragged_sidebar_width_widens_the_panel_one_to_one() {

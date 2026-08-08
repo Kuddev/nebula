@@ -843,6 +843,7 @@ impl ApplicationHandler<Event> for Processor {
                     && let Ok(mut loaded) = result.loaded
                 {
                     self.cli_options.override_config(&mut loaded.config);
+                    config::merge_terminal_profiles(&mut loaded.config);
                     self.lua_generation = loaded.lua_generation;
                     self.config_source = loaded.source;
                     self.config = Rc::new(loaded.config);
@@ -861,6 +862,18 @@ impl ApplicationHandler<Event> for Processor {
                     for window_context in self.windows.values_mut() {
                         window_context.update_config(self.config.clone());
                     }
+                }
+            },
+            (EventType::TerminalProfilesChanged, _) => {
+                // The imported profile store is deliberately separate from
+                // the user's config file. Rebuild the shared config snapshot
+                // in-place so every existing window and future tab sees the
+                // new profile without a restart.
+                let mut config = (*self.config).clone();
+                config::merge_terminal_profiles(&mut config);
+                self.config = Rc::new(config);
+                for window_context in self.windows.values_mut() {
+                    window_context.update_config(self.config.clone());
                 }
             },
             // Create a new terminal window.
@@ -1145,6 +1158,9 @@ pub struct ActionContext<'a, N, T> {
     /// Document shown by the active tab, when it is a viewer tab — wheel and
     /// navigation keys scroll this instead of a grid. `None` on pane tabs.
     pub doc: Option<&'a mut crate::display::markdown_view::DocView>,
+    /// Standalone image shown by the active tab. Pointer wheel/drag events
+    /// update this state instead of reaching the document stub terminal.
+    pub image: Option<&'a mut crate::display::image_viewer::ImageView>,
     pub message_buffer: &'a mut MessageBuffer,
     pub config: &'a UiConfig,
     pub cursor_blink_timed_out: &'a mut bool,
@@ -1171,6 +1187,11 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     }
 
     #[inline]
+    fn nebula_special_tab_active(&self) -> bool {
+        self.display.nebula_special_tab_active
+    }
+
+    #[inline]
     fn write_to_pty<B: Into<Cow<'static, [u8]>>>(&self, val: B) {
         self.notifier.notify(val);
     }
@@ -1178,6 +1199,11 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     #[inline]
     fn doc_view(&mut self) -> Option<&mut crate::display::markdown_view::DocView> {
         self.doc.as_deref_mut()
+    }
+
+    #[inline]
+    fn image_view(&mut self) -> Option<&mut crate::display::image_viewer::ImageView> {
+        self.image.as_deref_mut()
     }
 
     /// Request a redraw.
@@ -1475,6 +1501,14 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             window_id: Some(self.display.window.id()),
             tab_id: None,
             payload: EventType::NebulaTab(request),
+        });
+    }
+
+    fn refresh_terminal_profiles(&mut self) {
+        let _ = self.event_proxy.send_event(Event {
+            window_id: None,
+            tab_id: None,
+            payload: EventType::TerminalProfilesChanged,
         });
     }
 
@@ -2875,6 +2909,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 EventType::Message(_)
                 | EventType::ConfigReload(_)
                 | EventType::ConfigReloadReady
+                | EventType::TerminalProfilesChanged
                 | EventType::CreateWindow(_)
                 | EventType::Frame => (),
             },

@@ -36,6 +36,9 @@ pub struct FileRow {
     /// 用于切换到上级根目录的合成 `..` 行。必须显式区分，避免普通目录的
     /// 展开、拖拽和双击逻辑把导航项误认为真实文件系统条目。
     pub is_parent: bool,
+    /// Git-ignored entries remain in the normal tree order, but render with
+    /// subdued ink so generated/build output recedes from source files.
+    pub ignored: bool,
 }
 
 /// Parsed `git status` snapshot.
@@ -67,6 +70,8 @@ pub enum PanelHit {
     Search,
     /// Choose a window-local tree root with the native folder picker.
     OpenDirectory,
+    /// Reveal the current tree root in the platform file manager.
+    RevealDirectory,
     /// Open a fresh terminal tab whose PTY starts at the current tree root.
     NewTerminalHere,
     /// Clear the window-local root and resume following the focused pane cwd.
@@ -415,9 +420,11 @@ impl SidePanel {
                     is_dir: true,
                     expanded: false,
                     is_parent: true,
+                    ignored: false,
                 });
             }
             self.flatten_dir(&root, 0);
+            Self::mark_ignored(&root, &mut self.rows);
             return;
         }
         // Filter mode: string-match against the cached flat index. The index
@@ -428,6 +435,7 @@ impl SidePanel {
             let mut index = Vec::new();
             let mut budget = SEARCH_VISIT_BUDGET;
             build_search_index(&root, 0, &mut index, &mut budget);
+            Self::mark_ignored(&root, &mut index);
             self.search_index = Some(index);
         }
         let index = self.search_index.as_ref().unwrap();
@@ -636,10 +644,64 @@ impl SidePanel {
                 is_dir,
                 expanded,
                 is_parent: false,
+                ignored: false,
             });
             if expanded {
                 self.flatten_dir(&path, depth + 1);
             }
+        }
+    }
+
+    /// Annotate the already-sorted snapshot in one `git check-ignore` call. This
+    /// runs after flattening, so ignore state can never change row order.
+    fn mark_ignored(root: &Path, rows: &mut [FileRow]) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let candidates: Vec<_> = rows
+        .iter()
+        .filter(|row| !row.is_parent)
+        .filter_map(|row| row.path.strip_prefix(root).ok())
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect();
+        if candidates.is_empty() {
+            return;
+        }
+
+        let mut command = Command::new("git");
+        command
+            .args(["--no-optional-locks", "check-ignore", "-z", "--stdin"])
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let Ok(mut child) = command.spawn() else { return };
+        let Some(mut stdin) = child.stdin.take() else { return };
+        for path in candidates {
+            if stdin.write_all(path.as_bytes()).is_err() || stdin.write_all(&[0]).is_err() {
+                return;
+            }
+        }
+        drop(stdin);
+        let Ok(output) = child.wait_with_output() else { return };
+        if !output.status.success() && output.status.code() != Some(1) {
+            return;
+        }
+        let ignored: HashSet<String> = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).replace('\\', "/"))
+            .collect();
+        for row in rows {
+            row.ignored = row.path.strip_prefix(root).ok().is_some_and(|relative| {
+                ignored.contains(&relative.to_string_lossy().replace('\\', "/"))
+            });
         }
     }
 
@@ -733,6 +795,14 @@ pub struct PanelLayout {
     pub max_rows: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PanelToolsLayout {
+    pub directory: (f32, f32, f32, f32),
+    pub follow: (f32, f32, f32, f32),
+    pub terminal: (f32, f32, f32, f32),
+    pub reveal: (f32, f32, f32, f32),
+}
+
 /// Drawer layout: a floating panel pinned to the SAME vertical band as the
 /// left tab sidebar (`chrome_tab_layout`) — top at `margin + bar_h + 12`,
 /// bottom at `win_h - margin - 12` — and inset from the right window edge by
@@ -768,10 +838,12 @@ pub fn panel_layout(
     let x = rest_x + (1.0 - eased) * (w + margin);
     let y = margin + bar_h + gap;
     let h = (win_h - margin - gap - y).max(0.0);
-    let header_h = s(40.0);
+    // 12px top margin + 32px segmented control + 10px breathing room.
+    let header_h = s(50.0);
     let row_h = s(34.0);
-    let search = (x + s(14.0), y + header_h + s(34.0), w - s(28.0), s(34.0));
-    let list_y = search.1 + search.3 + s(16.0); // header + summary + filter box
+    let tools = panel_tools_layout_raw(x, y, w, header_h, scale);
+    let search = (x + s(12.0), tools.directory.1 + tools.directory.3 + s(10.0), w - s(24.0), s(30.0));
+    let list_y = search.1 + search.3 + s(8.0);
     let max_rows = (((y + h) - list_y) / row_h).max(0.0) as usize;
     PanelLayout { panel: (x, y, w, h), header_h, row_h, search, list_y, max_rows }
 }
@@ -783,8 +855,15 @@ pub fn panel_hit(layout: &PanelLayout, x: f32, y: f32) -> PanelHit {
         return PanelHit::None;
     }
     if y < py + layout.header_h {
-        // Header: two half-width view tabs.
-        return if x < px + pw * 0.5 { PanelHit::ViewFiles } else { PanelHit::ViewGit };
+        // Header: one segmented control with two equal slots. Its 12px outer
+        // margin is intentionally inert instead of creating oversized hits.
+        let scale = layout.header_h / 50.0;
+        let inset = 12.0 * scale;
+        let top = py + inset;
+        let height = 32.0 * scale;
+        if x >= px + inset && x < px + pw - inset && y >= top && y < top + height {
+            return if x < px + pw * 0.5 { PanelHit::ViewFiles } else { PanelHit::ViewGit };
+        }
     }
     let (sx, sy, sw, sh) = layout.search;
     if x >= sx && x < sx + sw && y >= sy && y < sy + sh {
@@ -801,33 +880,42 @@ pub fn panel_hit(layout: &PanelLayout, x: f32, y: f32) -> PanelHit {
 
 pub fn panel_action_rects(
     layout: &PanelLayout,
-    custom_root: bool,
-    has_root: bool,
+    _custom_root: bool,
+    _has_root: bool,
 ) -> impl Iterator<Item = (PanelHit, (f32, f32, f32, f32))> {
-    let scale = layout.header_h / 40.0;
-    let s = |value: f32| value * scale;
-    let (px, py, pw, _) = layout.panel;
-    let height = s(26.0);
-    let y = py + layout.header_h + s(4.0);
-    let right = px + pw - s(10.0);
-    let icon_width = s(30.0);
-    let gap = s(4.0);
-    let open_x = right - icon_width;
-    let terminal_x = open_x - gap - icon_width;
-    let leftmost_icon_x = if has_root { terminal_x } else { open_x };
-    let follow_width = s(62.0);
-    let follow_x = leftmost_icon_x - gap - follow_width;
-
-    // Fixed-size options keep per-frame draw and pointer hit-testing free of
-    // tiny heap allocations while still allowing root-dependent actions.
+    let tools = panel_tools_layout(layout);
     [
-        Some((PanelHit::OpenDirectory, (open_x, y, icon_width, height))),
-        has_root.then_some((PanelHit::NewTerminalHere, (terminal_x, y, icon_width, height))),
-        (custom_root && has_root)
-            .then_some((PanelHit::FollowCurrentDirectory, (follow_x, y, follow_width, height))),
+        (PanelHit::FollowCurrentDirectory, tools.follow),
+        (PanelHit::NewTerminalHere, tools.terminal),
+        (PanelHit::RevealDirectory, tools.reveal),
     ]
     .into_iter()
-    .flatten()
+}
+
+pub fn panel_tools_layout(layout: &PanelLayout) -> PanelToolsLayout {
+    let scale = layout.header_h / 50.0;
+    let (px, py, pw, _) = layout.panel;
+    panel_tools_layout_raw(px, py, pw, layout.header_h, scale)
+}
+
+fn panel_tools_layout_raw(
+    px: f32,
+    py: f32,
+    pw: f32,
+    header_h: f32,
+    scale: f32,
+) -> PanelToolsLayout {
+    let s = |value: f32| value * scale;
+    let y = py + header_h + s(4.0);
+    let button = s(26.0);
+    let gap = s(6.0);
+    let right = px + pw - s(12.0);
+    let reveal = (right - button, y, button, button);
+    let terminal = (reveal.0 - gap - button, y, button, button);
+    let follow = (terminal.0 - gap - button, y, button, button);
+    let directory_x = px + s(12.0);
+    let directory = (directory_x, y, (follow.0 - gap - directory_x).max(s(48.0)), button);
+    PanelToolsLayout { directory, follow, terminal, reveal }
 }
 
 pub fn panel_interactive_hit(
@@ -839,9 +927,21 @@ pub fn panel_interactive_hit(
     y: f32,
 ) -> PanelHit {
     if view == PanelView::Files {
+        let directory = panel_tools_layout(layout).directory;
+        if x >= directory.0
+            && x < directory.0 + directory.2
+            && y >= directory.1
+            && y < directory.1 + directory.3
+        {
+            return PanelHit::OpenDirectory;
+        }
         for (hit, (rx, ry, rw, rh)) in panel_action_rects(layout, custom_root, has_root) {
             if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
-                return hit;
+                return if has_root || hit == PanelHit::FollowCurrentDirectory {
+                    hit
+                } else {
+                    PanelHit::Inside
+                };
             }
         }
     }
@@ -879,6 +979,7 @@ fn build_search_index(dir: &Path, depth: usize, index: &mut Vec<FileRow>, budget
             is_dir,
             expanded: false,
             is_parent: false,
+            ignored: false,
         });
         if is_dir {
             build_search_index(&path, depth + 1, index, budget);
@@ -960,22 +1061,25 @@ use crate::renderer::{GlyphCache, Renderer};
 
 use super::{NebulaTheme, SizeInfo, UI_CORNER_RADIUS_LOGICAL};
 
-// Codicon glyphs (same family as the chrome's sidebar/settings icons).
-pub(super) const ICON_FOLDER: &str = "\u{ea83}";
-pub(super) const ICON_FOLDER_OPEN: &str = "\u{eaf7}";
+// Nerd Font glyphs verified in the bundled Maple Mono font. The folder pair
+// intentionally uses the lighter outline family from the approved prototype.
+pub(super) const ICON_FOLDER: &str = "\u{f114}";
+pub(super) const ICON_FOLDER_OPEN: &str = "\u{f115}";
 const ICON_TERMINAL: &str = "\u{ea85}";
 const ICON_FILE: &str = "\u{ea7b}";
 pub(super) const ICON_CHEVRON_RIGHT: &str = "\u{eab6}";
 const ICON_CHEVRON_DOWN: &str = "\u{eab4}";
 const ICON_BRANCH: &str = "\u{ea68}";
-const ICON_SEARCH: &str = "\u{ea6d}";
+const ICON_SEARCH: &str = "\u{f002}";
+const ICON_HOME: &str = "\u{f015}";
+const ICON_FOLLOW: &str = "\u{f140}";
 
 /// File-type icon for a tree row, keyed by extension (dotfile names like
 /// `.gitignore` count as their own family). The glyph carries the type; the
 /// ink stays the tree's neutral scheme — no per-type colors in the chrome.
 /// Every codepoint here is verified present in the bundled Maple Mono NF CN
 /// (codicon/seti/devicon/octicon blocks), so nothing can render as tofu.
-pub(super) fn file_type_icon(name: &str) -> &'static str {
+pub(crate) fn file_type_icon(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     if lower.starts_with(".git") {
         return "\u{e65d}"; // seti-git: .gitignore/.gitattributes/.gitmodules
@@ -1054,6 +1158,33 @@ fn drag_chip_cols(name: &str) -> usize {
     name.chars().map(|c| c.width().unwrap_or(0).max(1)).sum()
 }
 
+fn panel_action_tooltip(
+    panel: &SidePanel,
+    layout: &PanelLayout,
+    scale: f32,
+    cell_w: f32,
+) -> Option<((f32, f32, f32, f32), &'static str)> {
+    if panel.view != PanelView::Files {
+        return None;
+    }
+    let (action, label) = match panel.hover {
+        PanelHit::FollowCurrentDirectory => {
+            (PanelHit::FollowCurrentDirectory, "跟随当前终端  Alt+R")
+        },
+        PanelHit::NewTerminalHere => (PanelHit::NewTerminalHere, "在此新建终端  Alt+T"),
+        PanelHit::RevealDirectory => (PanelHit::RevealDirectory, "在资源管理器中打开  Alt+O"),
+        _ => return None,
+    };
+    let action_rect = panel_action_rects(layout, panel.custom_root_active(), panel.root().is_some())
+        .find_map(|(hit, rect)| (hit == action).then_some(rect))?;
+    let s = |value: f32| value * scale;
+    let (px, _, pw, _) = layout.panel;
+    let width = (drag_chip_cols(label) as f32 * cell_w + s(16.0)).min(pw - s(16.0));
+    let x = (action_rect.0 + action_rect.2 * 0.5 - width * 0.5)
+        .clamp(px + s(8.0), px + pw - s(8.0) - width);
+    Some(((x, action_rect.1 + action_rect.3 + s(6.0), width, s(26.0)), label))
+}
+
 pub(super) fn push_quads(
     panel: &SidePanel,
     layout: &PanelLayout,
@@ -1076,35 +1207,20 @@ pub(super) fn push_quads(
     // stays flat).
     quads.push(UiQuad::solid(px, py, pw, ph, radius, palette.panel));
 
-    // Header: two half-width view tabs. The active one wears the left
-    // sidebar's floating-pill language — an accent halo, the tab 底色, and a
-    // soft accent wash — no accent bar (state is brightness, per the sheet).
-    // A hovered inactive tab gets the quiet hover wash.
-    let tab_w = pw * 0.5 - s(8.0);
-    let tab_h = layout.header_h - s(8.0);
-    let (fx, gx) = (px + s(6.0), px + pw * 0.5 + s(2.0));
+    // One segmented shell owns both Files and Git. This is deliberately a
+    // single dark control, not two unrelated pills floating in the header.
+    let segment = (px + s(12.0), py + s(12.0), pw - s(24.0), s(32.0));
+    let tab_w = (segment.2 - s(4.0)) * 0.5;
+    let tab_h = segment.3 - s(4.0);
+    let (fx, gx) = (segment.0 + s(2.0), segment.0 + s(2.0) + tab_w);
     let active_x = match panel.view {
         PanelView::Files => fx,
         PanelView::Git => gx,
     };
-    let ty = py + s(4.0);
-    quads.push(UiQuad::solid(
-        active_x - s(1.0),
-        ty - s(1.0),
-        tab_w + s(2.0),
-        tab_h + s(2.0),
-        radius + s(1.0),
-        Rgba::new(accent.r, accent.g, accent.b, 40),
-    ));
-    quads.push(UiQuad::solid(active_x, ty, tab_w, tab_h, radius, palette.tab_bg_l));
-    quads.push(UiQuad::solid(
-        active_x,
-        ty,
-        tab_w,
-        tab_h,
-        radius,
-        Rgba::new(accent.r, accent.g, accent.b, 26),
-    ));
+    let ty = segment.1 + s(2.0);
+    quads.push(UiQuad::solid(segment.0, segment.1, segment.2, segment.3, radius, sk.input));
+    quads.push(UiQuad::solid(active_x, ty, tab_w, tab_h, radius, sk.card));
+    quads.push(UiQuad::solid(active_x, ty, tab_w, tab_h, radius, sk.surface));
     let hovered_tab_x = match panel.hover {
         PanelHit::ViewFiles if panel.view != PanelView::Files => Some(fx),
         PanelHit::ViewGit if panel.view != PanelView::Git => Some(gx),
@@ -1113,13 +1229,66 @@ pub(super) fn push_quads(
     if let Some(hx) = hovered_tab_x {
         quads.push(UiQuad::solid(hx, ty, tab_w, tab_h, radius, sk.hover));
     }
+    if let Some(git) = panel.git() {
+        let count = git.unstaged.len() + git.staged.len();
+        if count > 0 {
+            let digits = count.to_string();
+            let badge_w = digits.len() as f32 * cell_w + s(12.0);
+            let content_w = cell_w + s(6.0) + cell_w * 3.0 + s(6.0) + badge_w;
+            let start = gx + (tab_w - content_w) * 0.5;
+            let badge_x = start + cell_w + s(6.0) + cell_w * 3.0 + s(6.0);
+            quads.push(UiQuad::solid(
+                badge_x,
+                ty + (tab_h - s(16.0)) * 0.5,
+                badge_w,
+                s(16.0),
+                s(16.0) * 0.5,
+                sk.accent_soft,
+            ));
+        }
+    }
 
     if panel.view == PanelView::Files {
+        let tools = panel_tools_layout(layout);
+        super::ui::surface::push_stroke(
+            quads,
+            tools.directory,
+            radius,
+            scale,
+            sk.hairline,
+        );
+        quads.push(UiQuad::solid(
+            tools.directory.0,
+            tools.directory.1,
+            tools.directory.2,
+            tools.directory.3,
+            radius,
+            sk.input,
+        ));
         for (hit, (x, y, w, h)) in
             panel_action_rects(layout, panel.custom_root_active(), panel.root().is_some())
         {
-            let fill = if panel.hover == hit { sk.hover_strong } else { sk.input };
-            quads.push(UiQuad::solid(x, y, w, h, radius, fill));
+            let fill = if panel.hover == hit {
+                Some(sk.hover_strong)
+            } else if hit == PanelHit::FollowCurrentDirectory && !panel.custom_root_active() {
+                Some(sk.accent_soft)
+            } else {
+                None
+            };
+            if let Some(fill) = fill {
+                quads.push(UiQuad::solid(x, y, w, h, radius, fill));
+            }
+        }
+        if !panel.custom_root_active() {
+            let (_, y, w, _) = tools.follow;
+            quads.push(UiQuad::solid(
+                tools.follow.0 + w - s(7.0),
+                y + s(4.0),
+                s(5.0),
+                s(5.0),
+                s(5.0) * 0.5,
+                sk.ok,
+            ));
         }
     }
 
@@ -1281,6 +1450,21 @@ pub(super) fn push_quads(
             }
         }
     }
+
+    // Tooltip is appended last so it floats above the search field below the
+    // tools row. The text pass uses the same helper and therefore cannot drift.
+    if let Some((tooltip, _)) = panel_action_tooltip(panel, layout, scale, cell_w) {
+        let tooltip_radius = super::ui::tokens::radius::CONTROL * scale;
+        super::ui::surface::push_stroke(quads, tooltip, tooltip_radius, scale, sk.hairline);
+        quads.push(UiQuad::solid(
+            tooltip.0,
+            tooltip.1,
+            tooltip.2,
+            tooltip.3,
+            tooltip_radius,
+            sk.card,
+        ));
+    }
 }
 
 /// The four git action buttons' `(x, w)` spans inside `sx..sx+sw`.
@@ -1295,7 +1479,7 @@ pub(super) fn draw_text(
     panel: &SidePanel,
     layout: &PanelLayout,
     theme: &NebulaTheme,
-    ls: LsColors,
+    _ls: LsColors,
     r: &mut Renderer,
     gc: &mut GlyphCache,
     size: &SizeInfo,
@@ -1337,8 +1521,11 @@ pub(super) fn draw_text(
     // `px + pw - s(10)`, keep a small inset inside it.
     let row_text_right = px + pw - s(18.0);
 
-    // Header tabs: icon + label.
-    let header_ty = py + (layout.header_h - cell_h) / 2.0;
+    // Center each icon/label group inside its segmented-control slot.
+    let segment_x = px + s(12.0);
+    let segment_w = pw - s(24.0);
+    let slot_w = (segment_w - s(4.0)) * 0.5;
+    let header_ty = py + s(12.0) + (s(32.0) - cell_h) / 2.0;
     let files_hover = panel.hover == PanelHit::ViewFiles;
     let git_hover = panel.hover == PanelHit::ViewGit;
     let files_lift = if files_hover && panel.view != PanelView::Files { -s(1.0) } else { 0.0 };
@@ -1347,34 +1534,53 @@ pub(super) fn draw_text(
         PanelView::Files => (sk.ink_strong, sk.ink_dim),
         PanelView::Git => (sk.ink_dim, sk.ink_strong),
     };
-    let fx = px + s(6.0) + s(12.0);
+    let files_content_w = cell_w + s(6.0) + cell_w * 4.0;
+    let fx = segment_x + s(2.0) + (slot_w - files_content_w) * 0.5;
     r.draw_chrome_text(size, fx, header_ty + files_lift, files_ink, ICON_FOLDER, gc);
-    r.draw_chrome_text(size, fx + cell_w * 1.8, header_ty + files_lift, files_ink, "文件", gc);
-    let gx = px + pw * 0.5 + s(2.0) + s(12.0);
+    r.draw_chrome_text(
+        size,
+        fx + cell_w + s(6.0),
+        header_ty + files_lift,
+        files_ink,
+        "文件",
+        gc,
+    );
+    let git_count = panel.git().map(|git| git.unstaged.len() + git.staged.len()).unwrap_or(0);
+    let badge = (git_count > 0).then(|| git_count.to_string());
+    let badge_w = badge.as_ref().map_or(0.0, |text| text.len() as f32 * cell_w + s(12.0));
+    let git_content_w = cell_w
+        + s(6.0)
+        + cell_w * 3.0
+        + if badge.is_some() { s(6.0) + badge_w } else { 0.0 };
+    let gx = segment_x + s(2.0) + slot_w + (slot_w - git_content_w) * 0.5;
     r.draw_chrome_text(size, gx, header_ty + git_lift, git_ink, ICON_BRANCH, gc);
-    r.draw_chrome_text(size, gx + cell_w * 1.8, header_ty + git_lift, git_ink, "Git", gc);
+    let git_label_x = gx + cell_w + s(6.0);
+    r.draw_chrome_text(size, git_label_x, header_ty + git_lift, git_ink, "Git", gc);
+    if let Some(badge) = badge {
+        r.draw_chrome_text(
+            size,
+            git_label_x + cell_w * 3.0 + s(12.0),
+            header_ty + git_lift,
+            sk.accent,
+            &badge,
+            gc,
+        );
+    }
 
-    let summary_y = py + layout.header_h + (s(30.0) - cell_h) / 2.0;
+    let summary_y = panel_tools_layout(layout).directory.1 + (s(26.0) - cell_h) / 2.0;
     let scroll = panel.scroll;
     let row_ty = |i: usize| layout.list_y + i as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0;
 
     match panel.view {
         PanelView::Files => {
-            let action_x =
-                panel_action_rects(layout, panel.custom_root_active(), panel.root().is_some())
-                    .map(|(_, rect)| rect.0)
-                    .fold(px + pw - text_pad, f32::min);
+            let tools = panel_tools_layout(layout);
+            let path_x = tools.directory.0 + s(9.0) + cell_w + s(6.0);
             let summary_cols =
-                (((action_x - px - 2.0 * text_pad) / cell_w).floor() as usize).max(4);
+                (((tools.directory.0 + tools.directory.2 - s(9.0) - path_x) / cell_w).floor()
+                    as usize)
+                    .max(4);
             let (summary, summary_ink) = if let Some(notice) = panel.root_notice() {
                 (clip_tail(notice, summary_cols), Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b))
-            } else if let Some(hint) = match panel.hover {
-                PanelHit::NewTerminalHere => Some("在此新建终端"),
-                PanelHit::OpenDirectory => Some("选择文件树目录"),
-                PanelHit::FollowCurrentDirectory => Some("跟随当前终端"),
-                _ => None,
-            } {
-                (clip_tail(hint, summary_cols), sk.ink_strong)
             } else {
                 (
                     panel
@@ -1384,19 +1590,43 @@ pub(super) fn draw_text(
                     sk.ink_dim,
                 )
             };
-            r.draw_chrome_text(size, px + text_pad, summary_y, summary_ink, &summary, gc);
+            let path_ink = if panel.hover == PanelHit::OpenDirectory {
+                sk.ink_strong
+            } else {
+                summary_ink
+            };
+            r.draw_chrome_text(
+                size,
+                tools.directory.0 + s(9.0),
+                summary_y,
+                sk.ink_faint,
+                ICON_HOME,
+                gc,
+            );
+            r.draw_chrome_text(size, path_x, summary_y, path_ink, &summary, gc);
 
             for (hit, (x, y, w, h)) in
                 panel_action_rects(layout, panel.custom_root_active(), panel.root().is_some())
             {
-                let ink = if panel.hover == hit { sk.ink_strong } else { sk.ink_dim };
-                let (label, columns) = match hit {
-                    PanelHit::OpenDirectory => (ICON_FOLDER_OPEN, 1.0),
-                    PanelHit::NewTerminalHere => (ICON_TERMINAL, 1.0),
-                    PanelHit::FollowCurrentDirectory => ("跟随", 4.0),
+                let enabled = panel.root().is_some() || hit == PanelHit::FollowCurrentDirectory;
+                let ink = if panel.hover == hit {
+                    sk.ink_strong
+                } else if !enabled {
+                    sk.ink_faint
+                } else if hit == PanelHit::FollowCurrentDirectory
+                    && !panel.custom_root_active()
+                {
+                    sk.accent
+                } else {
+                    sk.ink_dim
+                };
+                let label = match hit {
+                    PanelHit::RevealDirectory => ICON_FOLDER_OPEN,
+                    PanelHit::NewTerminalHere => ICON_TERMINAL,
+                    PanelHit::FollowCurrentDirectory => ICON_FOLLOW,
                     _ => continue,
                 };
-                let tx = x + ((w - cell_w * columns) / 2.0).max(0.0);
+                let tx = x + ((w - cell_w) / 2.0).max(0.0);
                 let ty = y + (h - cell_h) / 2.0;
                 r.draw_chrome_text(size, tx, ty, ink, label, gc);
             }
@@ -1424,13 +1654,8 @@ pub(super) fn draw_text(
             let filtering = !panel.search.trim().is_empty();
             for (i, row) in panel.file_rows().iter().skip(scroll).take(layout.max_rows).enumerate()
             {
-                let hovered = matches!(panel.hover, PanelHit::Row(h) if h == i);
-                let selected = panel.selected.as_ref() == Some(&row.path)
-                    || panel.drag_file.as_ref().is_some_and(|d| d.path == row.path);
-                let lift_x = if hovered || selected { s(1.0) } else { 0.0 };
-                let lift_y = if hovered { -s(1.0) } else { 0.0 };
-                let ry = row_ty(i) + lift_y;
-                let mut x = px + text_pad + row.depth as f32 * cell_w * 2.4 + lift_x;
+                let ry = row_ty(i);
+                let mut x = px + text_pad + row.depth as f32 * cell_w * 2.4;
                 if !filtering {
                     if row.is_dir && !row.is_parent {
                         let chev =
@@ -1439,12 +1664,24 @@ pub(super) fn draw_text(
                     }
                     x += cell_w * 1.9;
                 }
-                let (icon, icon_ink, name_ink) = if row.is_dir {
-                    // `ls` parity: directories in the terminal's ANSI blue.
-                    (if row.expanded { ICON_FOLDER_OPEN } else { ICON_FOLDER }, ls.dir, ls.dir)
-                } else if is_executable(&row.name) {
-                    // Executables in ANSI green, same as Nebula-List.
-                    (file_type_icon(&row.name), ls.exec, ls.exec)
+                let (icon, icon_ink, name_ink) = if row.ignored {
+                    (
+                        if row.is_dir && row.expanded {
+                            ICON_FOLDER_OPEN
+                        } else if row.is_dir {
+                            ICON_FOLDER
+                        } else {
+                            file_type_icon(&row.name)
+                        },
+                        sk.ink_ignored,
+                        sk.ink_ignored,
+                    )
+                } else if row.is_dir {
+                    (
+                        if row.expanded { ICON_FOLDER_OPEN } else { ICON_FOLDER },
+                        sk.icon,
+                        sk.ink_strong,
+                    )
                 } else {
                     (file_type_icon(&row.name), sk.ink_dim, sk.ink)
                 };
@@ -1669,6 +1906,17 @@ pub(super) fn draw_text(
             },
         },
     }
+
+    if let Some((tooltip, label)) = panel_action_tooltip(panel, layout, scale, cell_w) {
+        r.draw_chrome_text(
+            size,
+            tooltip.0 + s(8.0),
+            tooltip.1 + (tooltip.3 - cell_h) / 2.0,
+            sk.ink_strong,
+            label,
+            gc,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1789,6 +2037,34 @@ mod tests {
     }
 
     #[test]
+    fn ignored_state_does_not_change_existing_tree_order() {
+        let mut rows = vec![
+            FileRow {
+                path: PathBuf::from("src"),
+                name: "src".into(),
+                depth: 0,
+                is_dir: true,
+                expanded: false,
+                is_parent: false,
+                ignored: false,
+            },
+            FileRow {
+                path: PathBuf::from("target"),
+                name: "target".into(),
+                depth: 0,
+                is_dir: true,
+                expanded: false,
+                is_parent: false,
+                ignored: false,
+            },
+        ];
+        let before: Vec<_> = rows.iter().map(|row| row.name.clone()).collect();
+        rows[1].ignored = true;
+        let after: Vec<_> = rows.iter().map(|row| row.name.clone()).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
     fn parent_row_navigates_the_tree_root_without_becoming_draggable() {
         let base = std::env::temp_dir()
             .join(format!("nebula-panel-parent-row-test-{}", std::process::id()));
@@ -1868,8 +2144,9 @@ mod tests {
         let l = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0, PANEL_W_LOGICAL);
         let (px, py, pw, _) = l.panel;
         assert_eq!(panel_hit(&l, px - 1.0, py + 5.0), PanelHit::None);
-        assert_eq!(panel_hit(&l, px + 5.0, py + 5.0), PanelHit::ViewFiles);
-        assert_eq!(panel_hit(&l, px + pw - 5.0, py + 5.0), PanelHit::ViewGit);
+        assert_eq!(panel_hit(&l, px + 5.0, py + 5.0), PanelHit::Inside);
+        assert_eq!(panel_hit(&l, px + 20.0, py + 20.0), PanelHit::ViewFiles);
+        assert_eq!(panel_hit(&l, px + pw - 20.0, py + 20.0), PanelHit::ViewGit);
         assert_eq!(panel_hit(&l, px + 5.0, l.list_y + l.row_h * 1.5), PanelHit::Row(1));
     }
 
@@ -1902,10 +2179,10 @@ mod tests {
     fn files_summary_actions_have_distinct_exact_hit_targets() {
         let layout = panel_layout(1000.0, 800.0, 40.0, 30.0, 1.0, 1.0, PANEL_W_LOGICAL);
         let actions: Vec<_> = panel_action_rects(&layout, true, true).collect();
-        let open = actions
+        let reveal = actions
             .iter()
-            .find(|(hit, _)| *hit == PanelHit::OpenDirectory)
-            .expect("open-directory action");
+            .find(|(hit, _)| *hit == PanelHit::RevealDirectory)
+            .expect("reveal-directory action");
         let follow = actions
             .iter()
             .find(|(hit, _)| *hit == PanelHit::FollowCurrentDirectory)
@@ -1915,13 +2192,18 @@ mod tests {
             .find(|(hit, _)| *hit == PanelHit::NewTerminalHere)
             .expect("new-terminal-here action");
         let center = |rect: (f32, f32, f32, f32)| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
-        let (open_x, open_y) = center(open.1);
+        let (reveal_x, reveal_y) = center(reveal.1);
         let (follow_x, follow_y) = center(follow.1);
         let (terminal_x, terminal_y) = center(terminal.1);
+        let (directory_x, directory_y) = center(panel_tools_layout(&layout).directory);
 
         assert_eq!(
-            panel_interactive_hit(&layout, PanelView::Files, true, true, open_x, open_y),
+            panel_interactive_hit(&layout, PanelView::Files, true, true, directory_x, directory_y),
             PanelHit::OpenDirectory
+        );
+        assert_eq!(
+            panel_interactive_hit(&layout, PanelView::Files, true, true, reveal_x, reveal_y),
+            PanelHit::RevealDirectory
         );
         assert_eq!(
             panel_interactive_hit(&layout, PanelView::Files, true, true, terminal_x, terminal_y),
@@ -1933,8 +2215,8 @@ mod tests {
         );
         assert_eq!(
             panel_interactive_hit(&layout, PanelView::Files, false, true, follow_x, follow_y),
-            PanelHit::Inside,
-            "the reset action must not exist while following the terminal cwd"
+            PanelHit::FollowCurrentDirectory,
+            "the active follow control keeps its stable hit target"
         );
         assert_eq!(
             panel_interactive_hit(&layout, PanelView::Files, false, false, terminal_x, terminal_y),
@@ -1942,7 +2224,7 @@ mod tests {
             "the terminal action must not exist without a tree root"
         );
         assert_eq!(
-            panel_interactive_hit(&layout, PanelView::Git, true, true, open_x, open_y),
+            panel_interactive_hit(&layout, PanelView::Git, true, true, reveal_x, reveal_y),
             PanelHit::Inside,
             "Files-only actions must not create invisible Git hit targets"
         );

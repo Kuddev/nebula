@@ -139,11 +139,7 @@ pub(crate) fn ink(sk: &Skin, progress: f32) -> Rgb {
     let mix = |top: u8, bottom: u8| {
         (top as f32 * progress + bottom as f32 * (1.0 - progress)).round().clamp(0.0, 255.0) as u8
     };
-    Rgb::new(
-        mix(sk.ink.r, sk.panel.r),
-        mix(sk.ink.g, sk.panel.g),
-        mix(sk.ink.b, sk.panel.b),
-    )
+    Rgb::new(mix(sk.ink.r, sk.panel.r), mix(sk.ink.g, sk.panel.g), mix(sk.ink.b, sk.panel.b))
 }
 
 /// 圆角查询：调用方需要在卡片上再叠东西时用，避免又写死一个数。

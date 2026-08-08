@@ -369,10 +369,7 @@ mod tests {
 
         assert_eq!(
             lines,
-            vec![
-                String::from("hahahahahahahahaha    "),
-                String::from("[MESSAGE TRUNCATED]   ")
-            ]
+            vec![String::from("hahahahahahahahaha    "), String::from("[MESSAGE TRUNCATED]   ")]
         );
     }
 

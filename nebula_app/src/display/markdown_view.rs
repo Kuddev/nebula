@@ -37,6 +37,7 @@ use crate::renderer::{GlyphCache, Renderer};
 
 use super::SizeInfo;
 use super::ui::theme::Skin;
+use super::ui::widgets::{self, OverlayScrollbar};
 
 /// Extensions the viewer opens (double-click in the file tree). Everything
 /// else keeps the tree's default activation behaviour.
@@ -150,6 +151,8 @@ pub struct DocView {
     pub scroll: f32,
     content_h: f32,
     math_cache: MathLayoutCache,
+    scrollbar_drag: Option<f32>,
+    scrollbar_hover: bool,
 }
 
 impl DocView {
@@ -175,6 +178,8 @@ impl DocView {
             scroll: 0.0,
             content_h: 0.0,
             math_cache: MathLayoutCache::default(),
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         }
     }
 
@@ -193,6 +198,58 @@ impl DocView {
 
     pub fn scroll_by(&mut self, dy: f32, viewport_h: f32) {
         self.scroll = (self.scroll + dy).clamp(0.0, self.max_scroll(viewport_h));
+    }
+
+    pub fn scrollbar(&self, area: (f32, f32, f32, f32), scale: f32) -> Option<OverlayScrollbar> {
+        widgets::overlay_scrollbar(area, area.3, self.content_h, self.scroll, scale)
+    }
+
+    pub fn scrollbar_press(
+        &mut self,
+        area: (f32, f32, f32, f32),
+        scale: f32,
+        x: f32,
+        y: f32,
+    ) -> bool {
+        let Some(bar) = self.scrollbar(area, scale).filter(|bar| bar.hit_test(x, y)) else {
+            return false;
+        };
+        let grab =
+            if super::contains_rect(bar.thumb, x, y) { y - bar.thumb.1 } else { bar.thumb.3 * 0.5 };
+        self.scrollbar_drag = Some(grab);
+        self.scroll = bar.target_scroll(y, grab);
+        true
+    }
+
+    pub fn scrollbar_drag_to(&mut self, area: (f32, f32, f32, f32), scale: f32, y: f32) -> bool {
+        let Some(grab) = self.scrollbar_drag else { return false };
+        let Some(bar) = self.scrollbar(area, scale) else { return false };
+        let target = bar.target_scroll(y, grab);
+        if (target - self.scroll).abs() < f32::EPSILON {
+            return false;
+        }
+        self.scroll = target;
+        true
+    }
+
+    pub fn scrollbar_dragging(&self) -> bool {
+        self.scrollbar_drag.is_some()
+    }
+
+    pub fn end_scrollbar_drag(&mut self) -> bool {
+        self.scrollbar_drag.take().is_some()
+    }
+
+    pub fn set_scrollbar_hover(&mut self, hover: bool) -> bool {
+        if self.scrollbar_hover == hover {
+            return false;
+        }
+        self.scrollbar_hover = hover;
+        true
+    }
+
+    pub fn scrollbar_hover(&self) -> bool {
+        self.scrollbar_hover
     }
 
     /// Word-wrap the blocks for `content_w` at the current font metrics.
@@ -1212,8 +1269,8 @@ fn line_start_x(line: &VisualLine, cx: f32, cw: f32, cell_w: f32, adv_base: f32)
 }
 
 /// Draw the whole document view for this frame: background decor quads, then
-/// the visible lines' text, then the overlay scrollbar. `area` is the pane
-/// content region (chrome-exclusive), screen-space.
+/// the visible lines' text, then the hover-only overlay scrollbar. `area` is
+/// the pane content region (chrome-exclusive), screen-space.
 pub fn draw(
     doc: &mut DocView,
     renderer: &mut Renderer,
@@ -1222,6 +1279,7 @@ pub fn draw(
     skin: &Skin,
     area: (f32, f32, f32, f32),
     scale: f32,
+    scrollbar_hot: bool,
 ) {
     let s = |v: f32| v * scale;
     let cell_w = size.cell_width();
@@ -1368,24 +1426,41 @@ pub fn draw(
                     ),
                 );
             }
+            if let Some(source) = span.link.as_deref() {
+                let image_path = doc
+                    .path
+                    .parent()
+                    .map(|parent| parent.join(source))
+                    .filter(|path| crate::display::image_viewer::viewable_file(path));
+                if let Some(image_path) = image_path {
+                    crate::display::image_viewer::draw_path(
+                        renderer,
+                        size,
+                        &image_path,
+                        (px, y, w.max(s(80.0)), line.h.max(cell_h)),
+                        scale,
+                    );
+                }
+            }
             pen_x += w;
         }
     }
 
-    // Overlay scrollbar (thin thumb, no track — same language as the panes).
-    if doc.content_h > chh {
-        let track_h = chh - s(12.0);
-        let thumb_h = (track_h * chh / doc.content_h).max(s(28.0));
-        let frac = doc.scroll / doc.max_scroll(chh);
-        let ty = cy + s(6.0) + (track_h - thumb_h) * frac;
-        quads.push(UiQuad::solid(
-            area.0 + area.2 - s(7.0),
-            ty,
-            s(4.0),
-            thumb_h,
-            s(2.0),
-            skin.scrollbar_thumb.with_alpha(0.45),
-        ));
+    // Keep the document surface visually clean when the pointer is elsewhere,
+    // but preserve the thumb for an active drag so it cannot disappear under
+    // the pointer while the user is moving it.
+    let dragging = doc.scrollbar_dragging();
+    if scrollbar_hot || dragging {
+        if let Some(scrollbar) = doc.scrollbar(area, scale) {
+            widgets::push_overlay_scrollbar(
+                &mut quads,
+                scrollbar,
+                scale,
+                skin,
+                scrollbar_hot,
+                dragging,
+            );
+        }
     }
     renderer.draw_ui(size, &quads);
 
@@ -1647,6 +1722,8 @@ mod tests {
             scroll: 0.0,
             content_h: 0.0,
             math_cache: MathLayoutCache::default(),
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         };
         doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
         assert_eq!(doc.visual.len(), 1);
@@ -1668,6 +1745,8 @@ mod tests {
             scroll: 0.0,
             content_h: 0.0,
             math_cache: MathLayoutCache::default(),
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         };
         doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
         let span = &doc.visual[0].spans[0];
@@ -1711,6 +1790,8 @@ mod tests {
             scroll: 0.0,
             content_h: 0.0,
             math_cache: MathLayoutCache::default(),
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         };
         doc.relayout(80.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
         assert!(doc.visual.len() > 1);
@@ -1732,6 +1813,8 @@ mod tests {
             scroll: 0.0,
             content_h: 0.0,
             math_cache: MathLayoutCache::default(),
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         };
         let content_width = 120.0;
         doc.relayout(content_width, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
@@ -1765,6 +1848,8 @@ mod tests {
             scroll: 0.0,
             content_h: 0.0,
             math_cache: MathLayoutCache::default(),
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         };
         doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
         let run = doc
@@ -1819,6 +1904,8 @@ mod tests {
             scroll: 0.0,
             content_h: 0.0,
             math_cache: MathLayoutCache::default(),
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         };
         doc.relayout(860.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
 
@@ -1926,6 +2013,8 @@ mod tests {
             scroll: 0.0,
             content_h: 0.0,
             math_cache: MathLayoutCache::default(),
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         };
         doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
         let math_runs = doc
@@ -1950,6 +2039,8 @@ mod tests {
             scroll: 0.0,
             content_h: 0.0,
             math_cache: MathLayoutCache::default(),
+            scrollbar_drag: None,
+            scrollbar_hover: false,
         };
         doc.relayout(600.0, 8.0, 16.0, 8.0, 16.0, 1.0, 12.0, 1.0);
         assert_eq!(doc.visual.len(), 500);

@@ -87,7 +87,7 @@ impl DetectedShell {
 /// row so a saved `shell=<id>` always draws the same mark. WSL distro ids carry
 /// a `wsl:` prefix; everything else matches whole.
 pub fn icon_for_id(id: &str) -> &'static str {
-    let id = id.to_ascii_lowercase();
+    let id = profile_shell_id(id).unwrap_or(id).to_ascii_lowercase();
     if id.starts_with("wsl") {
         return "\u{f17c}"; // Linux/Tux (WSL distros)
     }
@@ -106,7 +106,7 @@ pub fn icon_for_id(id: &str) -> &'static str {
 /// name (`wsl:Ubuntu` → the Ubuntu roundel), falling back to the generic
 /// Tux for unknown distros. `None` = no brand asset; caller keeps the glyph.
 pub fn color_icon_png(id: &str) -> Option<&'static [u8]> {
-    let lower = id.to_ascii_lowercase();
+    let lower = profile_shell_id(id).unwrap_or(id).to_ascii_lowercase();
     if let Some(distro) = lower.strip_prefix("wsl:") {
         // Match the distro family in its name (registry names vary:
         // "Ubuntu-22.04", "kali-linux", "openSUSE-Tumbleweed").
@@ -140,6 +140,15 @@ pub fn color_icon_png(id: &str) -> Option<&'static [u8]> {
         "wsl" => ICON_LINUX, // legacy id (no distro name)
         _ => return None,
     })
+}
+
+/// Imported profiles persist their shell family and store id together as
+/// `profile:<shell-id>|<profile-id>`. Rendering only needs the family; keeping
+/// this parser here makes every icon consumer agree on that representation.
+fn profile_shell_id(id: &str) -> Option<&str> {
+    id.strip_prefix("profile:")
+        .or_else(|| id.strip_prefix("PROFILE:"))
+        .and_then(|value| value.split_once('|').map(|(shell, _)| shell))
 }
 
 const ICON_PWSH: &[u8] = include_bytes!("../../extra/shell-icons/powershell-core.png");
@@ -510,19 +519,10 @@ mod tests {
             detected("powershell", "powershell.exe", &[]).integration(),
             ShellIntegration::PowerShell
         );
-        assert_eq!(
-            detected("pwsh", "pwsh.exe", &[]).integration(),
-            ShellIntegration::PowerShell
-        );
+        assert_eq!(detected("pwsh", "pwsh.exe", &[]).integration(), ShellIntegration::PowerShell);
         assert_eq!(detected("bash", "bash.exe", &[]).integration(), ShellIntegration::Bash);
-        assert_eq!(
-            detected("nu", "nu.exe", &[]).integration(),
-            ShellIntegration::NativeOsc133
-        );
-        assert_eq!(
-            detected("cmd", "cmd.exe", &[]).integration(),
-            ShellIntegration::Unsupported
-        );
+        assert_eq!(detected("nu", "nu.exe", &[]).integration(), ShellIntegration::NativeOsc133);
+        assert_eq!(detected("cmd", "cmd.exe", &[]).integration(), ShellIntegration::Unsupported);
         assert_eq!(
             detected("wsl:Ubuntu", "wsl.exe", &[]).integration(),
             ShellIntegration::Unsupported
@@ -570,6 +570,13 @@ mod tests {
         assert!(!is_pty_integrated_id("cmd"));
         assert!(!is_pty_integrated_id("nu"));
         assert!(!is_pty_integrated_id("wsl:Ubuntu"));
+    }
+
+    #[test]
+    fn imported_profile_shell_keys_reuse_brand_assets() {
+        let profile_key = "profile:pwsh|pwsh-1234";
+        assert_eq!(icon_for_id(profile_key), icon_for_id("pwsh"));
+        assert!(color_icon_png(profile_key).is_some());
     }
 
     #[cfg(windows)]

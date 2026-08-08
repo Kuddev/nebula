@@ -51,6 +51,9 @@ pub enum EventType {
     Terminal(TerminalEvent),
     ConfigReload(PathBuf),
     ConfigReloadReady,
+    /// A Settings import changed `terminal_profiles.json`; refresh all live
+    /// window configs without waiting for a process restart.
+    TerminalProfilesChanged,
     Message(Message),
     Scroll(Scroll),
     CreateWindow(WindowOptions),
@@ -114,7 +117,9 @@ pub enum EventType {
 pub enum TabRequest {
     New,
     NewAtDirectory(PathBuf),
-    NewProfile(usize),
+    /// Launch the supplied profile snapshot. Carrying the value avoids a
+    /// stale index when imported profiles are refreshed while a menu is open.
+    NewProfile(crate::config::ui_config::Profile),
     NewShell {
         name: String,
         shell: nebula_terminal::tty::Shell,

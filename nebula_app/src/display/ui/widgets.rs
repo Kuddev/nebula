@@ -25,6 +25,99 @@ const CONTROL_H: f32 = 32.0;
 /// Right inset shared by every row-trailing control.
 const ROW_INSET: f32 = 16.0;
 
+// ---- overlay scrollbar ----
+
+/// Geometry for a trackless overlay scrollbar. `hit` is intentionally wider
+/// than `thumb`: the control stays easy to grab without painting a dark rail.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct OverlayScrollbar {
+    pub(crate) thumb: Rect,
+    pub(crate) hit: Rect,
+    track_y: f32,
+    track_h: f32,
+    max_scroll: f32,
+}
+
+impl OverlayScrollbar {
+    pub(crate) fn hit_test(self, x: f32, y: f32) -> bool {
+        crate::display::contains_rect(self.hit, x, y)
+    }
+
+    /// Map a pointer y coordinate to content scroll, preserving the point at
+    /// which the thumb was grabbed. Track presses pass half the thumb height.
+    pub(crate) fn target_scroll(self, y: f32, grab: f32) -> f32 {
+        let travel = (self.track_h - self.thumb.3).max(1.0);
+        let thumb_y = (y - grab - self.track_y).clamp(0.0, travel);
+        self.max_scroll * thumb_y / travel
+    }
+
+    pub(crate) fn target_offset(self, y: f32, grab: f32, max_offset: usize) -> usize {
+        if self.max_scroll <= 0.0 {
+            return 0;
+        }
+        (self.target_scroll(y, grab) / self.max_scroll * max_offset as f32)
+            .round()
+            .clamp(0.0, max_offset as f32) as usize
+    }
+}
+
+pub(crate) fn overlay_scrollbar(
+    area: Rect,
+    viewport: f32,
+    content: f32,
+    scroll: f32,
+    scale: f32,
+) -> Option<OverlayScrollbar> {
+    let max_scroll = content - viewport;
+    if viewport <= 0.0 || max_scroll <= 0.0 {
+        return None;
+    }
+    let s = |v: f32| v * scale;
+    let track_y = area.1 + s(6.0);
+    let track_h = (area.3 - s(12.0)).max(s(26.0));
+    let thumb_h = (track_h * viewport / content).max(s(26.0)).min(track_h);
+    let thumb_y = track_y + (track_h - thumb_h) * (scroll / max_scroll).clamp(0.0, 1.0);
+    let visual_w = s(5.0);
+    let hit_w = s(14.0);
+    let right = area.0 + area.2 - s(4.0);
+    Some(OverlayScrollbar {
+        thumb: (right - visual_w, thumb_y, visual_w, thumb_h),
+        hit: (right - hit_w, track_y, hit_w, track_h),
+        track_y,
+        track_h,
+        max_scroll,
+    })
+}
+
+/// Paint only the thumb. The transparent hit region is geometry, never a rail.
+pub(crate) fn push_overlay_scrollbar(
+    quads: &mut Vec<UiQuad>,
+    scrollbar: OverlayScrollbar,
+    _scale: f32,
+    sk: &Skin,
+    hot: bool,
+    dragging: bool,
+) {
+    let alpha = if dragging {
+        0.78
+    } else if hot {
+        0.64
+    } else if sk.is_light {
+        0.50
+    } else {
+        0.46
+    };
+    let color = sk.scrollbar_thumb.with_alpha(alpha);
+    quads.push(UiQuad::solid(
+        scrollbar.thumb.0,
+        scrollbar.thumb.1,
+        scrollbar.thumb.2,
+        scrollbar.thumb.3,
+        scrollbar.thumb.2 * 0.5,
+        color,
+    ));
+}
+
 #[inline]
 fn accent(sk: &Skin) -> Rgba {
     Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255)
@@ -315,5 +408,33 @@ pub(crate) fn push_spinner(
             let ink = Rgba::new(sk.ink_dim.r, sk.ink_dim.g, sk.ink_dim.b, 235);
             icons::push_chevron(quads, cx + cw * 0.5, cy + ch * 0.5, scale, ink, up_arrow);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overlay_scrollbar;
+
+    #[test]
+    fn overlay_scrollbar_has_a_wide_invisible_hit_area() {
+        let bar = overlay_scrollbar((0.0, 0.0, 400.0, 300.0), 300.0, 900.0, 300.0, 1.0)
+            .expect("overflowing content needs a scrollbar");
+        assert_eq!(bar.thumb.2, 5.0);
+        assert_eq!(bar.hit.2, 14.0);
+        assert!(bar.hit.0 < bar.thumb.0);
+    }
+
+    #[test]
+    fn overlay_scrollbar_drag_maps_to_the_full_scroll_range() {
+        let bar = overlay_scrollbar((0.0, 0.0, 400.0, 300.0), 300.0, 900.0, 0.0, 1.0)
+            .expect("overflowing content needs a scrollbar");
+        let grab = bar.thumb.3 * 0.5;
+        assert_eq!(bar.target_offset(bar.hit.1 + grab, grab, 20), 0);
+        assert_eq!(bar.target_offset(bar.hit.1 + bar.hit.3, grab, 20), 20);
+    }
+
+    #[test]
+    fn overlay_scrollbar_is_absent_without_overflow() {
+        assert!(overlay_scrollbar((0.0, 0.0, 400.0, 300.0), 300.0, 300.0, 0.0, 1.0).is_none());
     }
 }

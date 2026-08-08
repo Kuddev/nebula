@@ -29,6 +29,12 @@ $requiredPatterns = [ordered]@{
     'context menu executable icon' = 'ValueName: "Icon"; ValueData: "\{app\}\\nebula\.exe,0"'
     'background working-directory command' = '--working-directory ""%V""'
     'selected directory working-directory command' = '--working-directory ""%1""'
+    'PATH task' = 'Name: "addtopath"; Description: "\{cm:AddToPath\}"'
+    'PATH registry entry' = 'Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"'
+    'PATH ownership marker' = 'ValueName: "InstallerAddedToPath"'
+    'Win+R App Paths registration' = 'App Paths\\nebula\.exe'
+    'environment change notification' = 'ChangesEnvironment=yes'
+    'PATH uninstall cleanup' = 'CurUninstallStepChanged\(CurUninstallStep: TUninstallStep\)'
 }
 
 foreach ($entry in $requiredPatterns.GetEnumerator()) {

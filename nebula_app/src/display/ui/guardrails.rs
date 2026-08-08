@@ -194,7 +194,7 @@ mod tests {
              这正是「配色/圆角改不干净」的结构性原因。",
             "radius::OVERLAY * scale（浮层）/ radius::CONTROL * scale（控件）\n\
                       / radius::CHIP * scale（chip 键帽），或直接用 surface::push_* 配方",
-            69,
+            68,
             hits,
         );
     }
@@ -222,7 +222,7 @@ mod tests {
             "手写描边普遍内外用同一个半径，圆角处描边会变粗——「边缘发毛」的\n\
              来源之一。push_stroke 让外半径 = 内半径 + 描边宽，内外弧同心。",
             "surface::push_stroke(quads, rect, corner, scale, sk.hairline)",
-            45,
+            43,
             hits,
         );
     }

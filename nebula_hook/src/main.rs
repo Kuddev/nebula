@@ -68,7 +68,6 @@ fn run() {
 
     // 本地 Pane 使用命名管道；远端 Pane 没有本地管道时，把同一信封写入控制终端的私有 OSC。
     if let Some(pipe) = std::env::var_os("NEBULA_NOTIFY_PIPE") {
-
         // The server accepts one connection at a time and re-creates the pipe
         // instance in between, so a raced connect fails for microseconds.
         // Retry briefly, then give up silently: notifications are best-effort.
@@ -86,11 +85,7 @@ fn run() {
             && token.bytes().all(|byte| byte.is_ascii_hexdigit())
             && message.len() <= 64 * 1024
         {
-            let osc = format!(
-                "\x1b]777;nebula-hook;{};{}\x07",
-                token,
-                base64_encode(&message)
-            );
+            let osc = format!("\x1b]777;nebula-hook;{};{}\x07", token, base64_encode(&message));
             if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
                 let _ = tty.write_all(osc.as_bytes());
                 let _ = tty.flush();
@@ -110,8 +105,7 @@ fn run() {
 }
 
 fn base64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let a = chunk[0];
@@ -124,11 +118,7 @@ fn base64_encode(input: &[u8]) -> String {
         } else {
             '='
         });
-        output.push(if chunk.len() > 2 {
-            TABLE[(c & 0x3f) as usize] as char
-        } else {
-            '='
-        });
+        output.push(if chunk.len() > 2 { TABLE[(c & 0x3f) as usize] as char } else { '=' });
     }
     output
 }

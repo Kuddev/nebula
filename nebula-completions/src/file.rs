@@ -1,10 +1,10 @@
-use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR as SEP, is_separator};
 use std::fmt::Write;
+use std::path::{Component, MAIN_SEPARATOR as SEP, Path, PathBuf, is_separator};
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::options::{CompletionOptions, MatchAlgorithm};
 use crate::matcher::{CandidateMatcher, IgnoreCaseExt};
+use crate::options::{CompletionOptions, MatchAlgorithm};
 use crate::span::Span;
 
 // ---------------------------------------------------------------------------
@@ -104,10 +104,9 @@ fn collapse_ndots(path: PathBuiltFromString) -> PathBuiltFromString {
         }
     }
     if dot_count > 0 {
-        result.parts.push(MatchedPart {
-            text: ".".repeat(dot_count + 1),
-            match_indices: Vec::new(),
-        });
+        result
+            .parts
+            .push(MatchedPart { text: ".".repeat(dot_count + 1), match_indices: Vec::new() });
     }
     result
 }
@@ -131,10 +130,7 @@ fn complete_rec(
             .iter()
             .map(|built| {
                 let mut built = built.clone();
-                built.parts.push(MatchedPart {
-                    text: base.to_string(),
-                    match_indices: Vec::new(),
-                });
+                built.parts.push(MatchedPart { text: base.to_string(), match_indices: Vec::new() });
                 built.isdir = true;
                 built
             })
@@ -183,10 +179,9 @@ fn complete_rec(
                             let mut built_exact = built.clone();
                             let match_indices: Vec<usize> =
                                 (0..entry_name.graphemes(true).count()).collect();
-                            built_exact.parts.push(MatchedPart {
-                                text: entry_name.clone(),
-                                match_indices,
-                            });
+                            built_exact
+                                .parts
+                                .push(MatchedPart { text: entry_name.clone(), match_indices });
                             exact_match = Some(built_exact);
                         } else {
                             multiple_exact_matches = true;
@@ -201,37 +196,21 @@ fn complete_rec(
 
     // Single exact match → drill into it directly (hides sibling entries)
     if !multiple_exact_matches && let Some(built) = exact_match {
-        return complete_rec(
-            &partial[1..],
-            &[built],
-            options,
-            want_directory,
-            isdir,
-            true,
-        );
+        return complete_rec(&partial[1..], &[built], options, want_directory, isdir, true);
     }
 
-    let completion_iter = matcher.results().into_iter().map(
-        |((mut built, last_entry_name), last_match_indices)| {
-            built.parts.push(MatchedPart {
-                text: last_entry_name,
-                match_indices: last_match_indices,
-            });
+    let completion_iter =
+        matcher.results().into_iter().map(|((mut built, last_entry_name), last_match_indices)| {
             built
-        },
-    );
+                .parts
+                .push(MatchedPart { text: last_entry_name, match_indices: last_match_indices });
+            built
+        });
 
     if has_more {
         completion_iter
             .flat_map(|completion| {
-                complete_rec(
-                    &partial[1..],
-                    &[completion],
-                    options,
-                    want_directory,
-                    isdir,
-                    false,
-                )
+                complete_rec(&partial[1..], &[completion], options, want_directory, isdir, false)
             })
             .collect()
     } else {
@@ -288,16 +267,17 @@ pub fn escape_path(path: &str) -> Option<String> {
 /// if we can use `std`).
 fn dirs_next_home() -> Option<PathBuf> {
     // Try standard env vars first, then fall back to home_dir (deprecated but works)
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOMEDRIVE").and_then(|drive| {
-            std::env::var_os("HOMEPATH").map(|path| {
-                let mut p = PathBuf::from(drive);
-                p.push(path);
-                p
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).or_else(
+        || {
+            std::env::var_os("HOMEDRIVE").and_then(|drive| {
+                std::env::var_os("HOMEPATH").map(|path| {
+                    let mut p = PathBuf::from(drive);
+                    p.push(path);
+                    p
+                })
             })
-        }))
+        },
+    )
 }
 
 /// Remove surrounding quotes from a partial path.
@@ -309,7 +289,7 @@ pub fn surround_remove(partial: &str) -> String {
                 [inside] => inside.to_string(),
                 [inside, outside] if inside.ends_with(is_separator) => {
                     format!("{inside}{outside}")
-                }
+                },
                 _ => ret.to_string(),
             };
         }
@@ -345,29 +325,20 @@ pub fn complete_item(
     #[cfg(unix)]
     let path_separator = SEP;
     #[cfg(windows)]
-    let path_separator = cleaned_partial
-        .chars()
-        .rfind(|c: &char| is_separator(*c))
-        .unwrap_or(SEP);
+    let path_separator = cleaned_partial.chars().rfind(|c: &char| is_separator(*c)).unwrap_or(SEP);
 
     // Handle trailing dot case
     if cleaned_partial.ends_with(&format!("{path_separator}.")) {
         write!(partial, "{path_separator}.").expect("write to String is infallible");
     }
 
-    let cwd_pathbufs: Vec<_> = cwds
-        .iter()
-        .map(|cwd| Path::new(cwd.as_ref()).to_path_buf())
-        .collect();
+    let cwd_pathbufs: Vec<_> =
+        cwds.iter().map(|cwd| Path::new(cwd.as_ref()).to_path_buf()).collect();
 
     #[cfg(feature = "color")]
-    let ls_colors = if use_ls_colors {
-        crate::color::get_ls_colors(ls_colors_env)
-    } else {
-        None
-    };
+    let ls_colors = if use_ls_colors { crate::color::get_ls_colors(ls_colors_env) } else { None };
 
-let mut cwds = cwd_pathbufs.clone();
+    let mut cwds = cwd_pathbufs.clone();
     let mut prefix_len = 0;
     let mut original_cwd = OriginalCwd::None;
 
@@ -378,20 +349,18 @@ let mut cwds = cwd_pathbufs.clone();
             cwds = vec![[c, Component::RootDir].iter().collect()];
             prefix_len = c.as_os_str().len();
             original_cwd = OriginalCwd::Prefix(c.as_os_str().to_string_lossy().into_owned());
-        }
+        },
         Some(c @ Component::RootDir) => {
             cwds = vec![PathBuf::from(c.as_os_str())];
             prefix_len = 1;
             original_cwd = OriginalCwd::Prefix(String::new());
-        }
+        },
         Some(Component::Normal(home)) if home.to_string_lossy() == "~" => {
-            cwds = dirs_next_home()
-                .map(|dir| vec![dir])
-                .unwrap_or(cwd_pathbufs);
+            cwds = dirs_next_home().map(|dir| vec![dir]).unwrap_or(cwd_pathbufs);
             prefix_len = 1;
             original_cwd = OriginalCwd::Home;
-        }
-        _ => {}
+        },
+        _ => {},
     };
 
     let after_prefix = &partial[prefix_len..];
@@ -406,11 +375,7 @@ let mut cwds = cwd_pathbufs.clone();
         partial.as_slice(),
         &cwds
             .into_iter()
-            .map(|cwd| PathBuiltFromString {
-                cwd,
-                parts: Vec::new(),
-                isdir: false,
-            })
+            .map(|cwd| PathBuiltFromString { cwd, parts: Vec::new(), isdir: false })
             .collect::<Vec<_>>(),
         options,
         want_directory,
@@ -449,8 +414,7 @@ let mut cwds = cwd_pathbufs.clone();
         #[cfg(feature = "color")]
         let style = ls_colors.as_ref().and_then(|lsc| {
             let real_path = std::path::absolute(&path).ok().unwrap_or_else(|| PathBuf::from(&path));
-            lsc.style_for_path_with_metadata(&real_path, None)
-                .map(|s| s.to_nu_ansi_term_style())
+            lsc.style_for_path_with_metadata(&real_path, None).map(|s| s.to_nu_ansi_term_style())
         });
 
         let (value, display_override) = if let Some(escaped) = escape_path(&path) {

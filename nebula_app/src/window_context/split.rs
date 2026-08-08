@@ -440,7 +440,11 @@ impl WindowContext {
         // Doc/settings tabs own no real pane: splitting one would graft the
         // DOC sentinel leaf into a split tree, whose draw pass then skips it
         // and leaves that half of the frame stale.
-        if self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some() || tab.settings) {
+        if self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.doc.is_some() || tab.image.is_some() || tab.settings)
+        {
             return;
         }
         self.zoom = None;

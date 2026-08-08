@@ -897,11 +897,7 @@ fn nebula_bash_rc_path() -> Option<std::path::PathBuf> {
 fn explicit_bash_integration_args(rc: &std::path::Path) -> Vec<String> {
     // 显式 shell 的 Options::escape_args=false；路径必须在参数自身带引号，
     // 否则用户名含空格时 Bash 会把 rcfile 路径截成两段。
-    vec![
-        "--rcfile".to_owned(),
-        format!("\"{}\"", rc.display()),
-        "-i".to_owned(),
-    ]
+    vec!["--rcfile".to_owned(), format!("\"{}\"", rc.display()), "-i".to_owned()]
 }
 
 /// 给三点菜单显式选择的 Bash 装上 Nebula 的 OSC/提示符契约。
@@ -935,10 +931,7 @@ fn nebula_bash_shell() -> Shell {
     }
 }
 
-fn powershell_integration_args(
-    mut args: Vec<String>,
-    script: &std::path::Path,
-) -> Vec<String> {
+fn powershell_integration_args(mut args: Vec<String>, script: &std::path::Path) -> Vec<String> {
     args.extend([
         "-NoExit".to_owned(),
         "-ExecutionPolicy".to_owned(),
@@ -1072,10 +1065,7 @@ mod test {
         assert_eq!(args.first().map(String::as_str), Some("-NoLogo"));
         assert!(!args.iter().any(|arg| arg.eq_ignore_ascii_case("-NoProfile")));
         assert_eq!(args[args.len() - 2], "-Command");
-        assert_eq!(
-            args.last().map(String::as_str),
-            Some(". 'C:\\Temp Folder\\nebula_prompt.ps1'")
-        );
+        assert_eq!(args.last().map(String::as_str), Some(". 'C:\\Temp Folder\\nebula_prompt.ps1'"));
     }
 
     #[test]

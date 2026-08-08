@@ -351,7 +351,7 @@ impl WindowContext {
                 let cli_shell = options.terminal_options.command().map(Into::into);
                 pty_config.shell = select_initial_shell(
                     pty_config.shell.take(),
-                    Self::default_shell_override(),
+                    Self::default_shell_override(&config),
                     cli_shell,
                 );
                 options.terminal_options.override_pty_config(&mut pty_config);
@@ -383,6 +383,7 @@ impl WindowContext {
                         custom_color: None,
                         launch: TabLaunch::Default,
                         doc: None,
+                        image: None,
                         settings: false,
                     }],
                     0,
@@ -626,8 +627,8 @@ impl WindowContext {
                 }
                 false
             },
-            TabRequest::NewProfile(index) => {
-                self.spawn_tab_profile(index);
+            TabRequest::NewProfile(profile) => {
+                self.spawn_tab_profile_value(profile);
                 false
             },
             TabRequest::NewShell { name, shell } => {
@@ -639,7 +640,11 @@ impl WindowContext {
                 false
             },
             TabRequest::OpenDoc(path) => {
-                self.open_doc_tab(path);
+                if crate::display::image_viewer::viewable_file(&path) {
+                    self.open_image_tab(path);
+                } else {
+                    self.open_doc_tab(path);
+                }
                 false
             },
             TabRequest::OpenSettings => {
@@ -650,7 +655,7 @@ impl WindowContext {
                 if self
                     .tabs
                     .get(self.active_tab)
-                    .is_some_and(|tab| tab.doc.is_some() || tab.settings)
+                    .is_some_and(|tab| tab.doc.is_some() || tab.image.is_some() || tab.settings)
                 {
                     return self.close_tab(self.active_tab);
                 }
@@ -768,7 +773,11 @@ impl WindowContext {
                 false
             },
             TabRequest::SplitIndex { index, direction } => {
-                if self.tabs.get(index).is_some_and(|tab| tab.doc.is_none() && !tab.settings) {
+                if self
+                    .tabs
+                    .get(index)
+                    .is_some_and(|tab| tab.doc.is_none() && tab.image.is_none() && !tab.settings)
+                {
                     self.select_tab(index);
                     self.split_focused(direction);
                 }
@@ -864,7 +873,7 @@ impl WindowContext {
         // pwsh, nushell, a WSL distro). `resolve_id` returns `None` for the two
         // PTY-integrated executors (powershell/bash) so those keep their prompt
         // injection; anything else spawns as an explicit override here.
-        let override_shell = Self::default_shell_override();
+        let override_shell = Self::default_shell_override(&self.config);
         let spawned = match override_shell {
             Some(shell) => self.spawn_pane_detached_with(cwd, self.display.size_info, Some(shell)),
             None => self.spawn_pane_detached(cwd, self.display.size_info),
@@ -883,6 +892,7 @@ impl WindowContext {
                     custom_color: None,
                     launch: TabLaunch::Default,
                     doc: None,
+                    image: None,
                     settings: false,
                 },
             );
@@ -895,9 +905,18 @@ impl WindowContext {
 
     /// The default-shell override for a plain new tab, or `None` to use the PTY
     /// layer's own default (which owns the powershell/bash prompt bootstrap).
-    fn default_shell_override() -> Option<nebula_terminal::tty::Shell> {
+    fn default_shell_override(
+        config: &crate::config::ui_config::UiConfig,
+    ) -> Option<nebula_terminal::tty::Shell> {
         let id = crate::display::nebula_settings_value("shell")
             .or_else(|| crate::display::nebula_settings_value("executor"))?;
+        if let Some(profile) = config
+            .profiles
+            .iter()
+            .find(|profile| profile.settings_id().as_deref() == Some(id.as_str()))
+        {
+            return Some(profile.shell());
+        }
         crate::shell_detect::resolve_id(&id).map(|shell| shell.shell())
     }
 
@@ -929,6 +948,7 @@ impl WindowContext {
                     custom_color: None,
                     launch: TabLaunch::Profile(profile),
                     doc: None,
+                    image: None,
                     settings: false,
                 },
             );
@@ -958,6 +978,7 @@ impl WindowContext {
                     custom_color: None,
                     launch: TabLaunch::Shell { name, shell },
                     doc: None,
+                    image: None,
                     settings: false,
                 },
             );
@@ -996,6 +1017,7 @@ impl WindowContext {
                             custom_color: None,
                             launch: TabLaunch::Ssh(host),
                             doc: None,
+                            image: None,
                             settings: false,
                         },
                     );
@@ -1040,7 +1062,7 @@ impl WindowContext {
                     return;
                 },
             };
-            let default_shell = Self::default_shell_override();
+            let default_shell = Self::default_shell_override(&self.config);
             if let Some(id) = self.spawn_pane_detached_with(
                 self.focused_cwd(),
                 self.display.size_info,
@@ -1057,6 +1079,7 @@ impl WindowContext {
                         custom_color: None,
                         launch: TabLaunch::Ssh(host),
                         doc: None,
+                        image: None,
                         settings: false,
                     },
                 );
@@ -1100,6 +1123,45 @@ impl WindowContext {
                 custom_color: None,
                 launch: TabLaunch::Document(doc.path.clone()),
                 doc: Some(doc),
+                image: None,
+                settings: false,
+            },
+        );
+        self.active_tab = at;
+        self.display.set_settings_tab_active(false);
+        self.dirty = true;
+    }
+
+    fn open_image_tab(&mut self, path: std::path::PathBuf) {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.image.as_ref().is_some_and(|image| image.path == path))
+        {
+            if let Some(image) = self.tabs[index].image.as_mut() {
+                image.reload();
+            }
+            self.select_tab(index);
+            self.dirty = true;
+            return;
+        }
+        let image = crate::display::image_viewer::ImageView::open(path.clone());
+        let at = (self.active_tab + 1).min(self.tabs.len());
+        self.tabs.insert(
+            at,
+            TabEntry {
+                layout: Layout::Leaf(DOC_PANE_ID),
+                active_pane: DOC_PANE_ID,
+                has_bell: false,
+                custom_name: Some(format!(
+                    "{} {}",
+                    crate::display::side_panel::file_type_icon(&image.title),
+                    image.title
+                )),
+                custom_color: None,
+                launch: TabLaunch::Image(path),
+                doc: None,
+                image: Some(image),
                 settings: false,
             },
         );
@@ -1129,6 +1191,7 @@ impl WindowContext {
                 custom_color: None,
                 launch: TabLaunch::Settings,
                 doc: None,
+                image: None,
                 settings: true,
             },
         );
@@ -1169,12 +1232,14 @@ impl WindowContext {
                         custom_color: None,
                         launch: TabLaunch::Document(path),
                         doc: Some(doc),
+                        image: None,
                         settings: false,
                     },
                 );
                 self.active_tab = at;
                 self.dirty = true;
             },
+            TabLaunch::Image(path) => self.open_image_tab(path),
             TabLaunch::Settings => self.open_settings_tab(),
         }
 
@@ -1192,7 +1257,8 @@ impl WindowContext {
     /// workspace file — the same schema the crash-restore session uses, so
     /// "打开工作区" and session restore share one rebuild path.
     fn export_workspace(&mut self, tab_index: Option<usize>) {
-        let exportable = |tab: &&TabEntry| tab.doc.is_none() && !tab.settings;
+        let exportable =
+            |tab: &&TabEntry| tab.doc.is_none() && tab.image.is_none() && !tab.settings;
         let tabs: Vec<_> = match tab_index {
             Some(index) => self
                 .tabs
@@ -1338,12 +1404,14 @@ impl WindowContext {
                 let shell = nebula_terminal::tty::Shell::new(program.clone(), args.clone());
                 self.spawn_tab_shell(name.clone(), shell);
             },
-            session::LaunchSession::Profile { name, command, args, cwd } => {
+            session::LaunchSession::Profile { name, command, args, cwd, shell_id } => {
                 self.spawn_tab_profile_value(crate::config::ui_config::Profile {
                     name: name.clone(),
                     command: command.clone(),
                     args: args.clone(),
                     cwd: cwd.as_ref().map(std::path::PathBuf::from),
+                    shell_id: shell_id.clone(),
+                    terminal_profile_id: None,
                 });
             },
             session::LaunchSession::Ssh { host } => self.spawn_tab_ssh(host.clone()),
@@ -1410,6 +1478,7 @@ impl WindowContext {
                 custom_color: None,
                 launch: TabLaunch::Default,
                 doc: None,
+                image: None,
                 settings: false,
             },
         );
@@ -1526,12 +1595,12 @@ impl WindowContext {
             .tabs
             .iter()
             .take(self.active_tab)
-            .filter(|tab| tab.doc.is_none() && !tab.settings)
+            .filter(|tab| tab.doc.is_none() && tab.image.is_none() && !tab.settings)
             .count();
         let tabs: Vec<_> = self
             .tabs
             .iter()
-            .filter(|tab| tab.doc.is_none() && !tab.settings)
+            .filter(|tab| tab.doc.is_none() && tab.image.is_none() && !tab.settings)
             .map(|tab| self.tab_session(tab))
             .collect();
         let mut session = session::Session::new(active_tab.min(tabs.len().saturating_sub(1)), tabs);
@@ -1580,7 +1649,7 @@ impl WindowContext {
     /// keeps the function total without giving them a session meaning.
     fn launch_session(launch: &TabLaunch) -> session::LaunchSession {
         match launch {
-            TabLaunch::Default | TabLaunch::Document(_) | TabLaunch::Settings => {
+            TabLaunch::Default | TabLaunch::Document(_) | TabLaunch::Image(_) | TabLaunch::Settings => {
                 session::LaunchSession::Default
             },
             TabLaunch::Shell { name, shell } => session::LaunchSession::Shell {
@@ -1593,6 +1662,7 @@ impl WindowContext {
                 command: profile.command.clone(),
                 args: profile.args.clone(),
                 cwd: profile.cwd.as_ref().map(|path| path.to_string_lossy().into_owned()),
+                shell_id: profile.shell_id.clone(),
             },
             TabLaunch::Ssh(host) => session::LaunchSession::Ssh { host: host.clone() },
         }
@@ -2058,8 +2128,11 @@ impl WindowContext {
         }
         self.active_tab = index;
         self.tabs[index].has_bell = false;
-        self.display
-            .set_special_tab_active(self.tabs[index].doc.is_some() || self.tabs[index].settings);
+        self.display.set_special_tab_active(
+            self.tabs[index].doc.is_some()
+                || self.tabs[index].image.is_some()
+                || self.tabs[index].settings,
+        );
         self.display.set_settings_tab_active(self.tabs[index].settings);
         self.zoom = None;
         self.resize_active_layout();
@@ -2123,8 +2196,10 @@ impl WindowContext {
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
-        let special =
-            self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some() || tab.settings);
+        let special = self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.doc.is_some() || tab.image.is_some() || tab.settings);
         self.display.set_special_tab_active(special);
         self.display.set_settings_tab_active(
             self.tabs.get(self.active_tab).is_some_and(|tab| tab.settings),
@@ -2333,6 +2408,13 @@ impl WindowContext {
 
         // Document-viewer tab: no pane, no grid. Draw the doc into the tab's
         // content rect; `present_frame` inside lays the normal chrome on top.
+        if let Some(image) = self.tabs.get(self.active_tab).and_then(|tab| tab.image.clone()) {
+            let view = pane_rects.first().map(|(_, view)| *view).unwrap_or(self.display.size_info);
+            self.display.begin_pane_frame(&self.config);
+            self.display.draw_image_frame(&image, view, scheduler);
+            return;
+        }
+
         if let Some(doc) = self.tabs.get_mut(self.active_tab).and_then(|tab| tab.doc.as_mut()) {
             let view = pane_rects.first().map(|(_, view)| *view).unwrap_or(self.display.size_info);
             self.display.begin_pane_frame(&self.config);
@@ -2450,8 +2532,10 @@ impl WindowContext {
     }
 
     fn sync_chrome_tabs(&mut self) {
-        let special =
-            self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some() || tab.settings);
+        let special = self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.doc.is_some() || tab.image.is_some() || tab.settings);
         self.display.set_special_tab_active(special);
         self.display.set_settings_tab_active(
             self.tabs.get(self.active_tab).is_some_and(|tab| tab.settings),
@@ -2508,7 +2592,7 @@ impl WindowContext {
                 TabLaunch::Shell { name, .. } => crate::shell_detect::shell_short_tag(name),
                 // SSH 行的身份是目标主机（标签本身就写着），短标只说环境。
                 TabLaunch::Ssh(_) => "ssh".to_owned(),
-                TabLaunch::Profile(_) | TabLaunch::Document(_) | TabLaunch::Settings => {
+                TabLaunch::Profile(_) | TabLaunch::Document(_) | TabLaunch::Image(_) | TabLaunch::Settings => {
                     String::new()
                 },
             });
@@ -2726,8 +2810,10 @@ impl WindowContext {
         // A doc tab has no pane: its events run against `doc_pane` below so
         // chrome interaction (tab switching, closing, the sidebar) keeps
         // working; anything typed lands in the sink notifier.
-        let special_tab =
-            self.tabs.get(self.active_tab).is_some_and(|tab| tab.doc.is_some() || tab.settings);
+        let special_tab = self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.doc.is_some() || tab.image.is_some() || tab.settings);
         let focused = match self.pane_index(focused_id) {
             Some(index) => Some(index),
             None if special_tab => None,
@@ -2756,12 +2842,12 @@ impl WindowContext {
         let mut events = mem::take(&mut self.event_queue).into_iter().peekable();
         while let Some(event) = events.next() {
             let target_id = target_of(&event);
-            let (pane, doc) = match self.pane_index(target_id) {
-                Some(pane_idx) => (&mut self.panes[pane_idx], None),
-                None if target_id == DOC_PANE_ID && special_tab => (
-                    &mut self.doc_pane,
-                    self.tabs.get_mut(self.active_tab).and_then(|tab| tab.doc.as_mut()),
-                ),
+            let (pane, doc, image) = match self.pane_index(target_id) {
+                Some(pane_idx) => (&mut self.panes[pane_idx], None, None),
+                None if target_id == DOC_PANE_ID && special_tab => {
+                    let tab = &mut self.tabs[self.active_tab];
+                    (&mut self.doc_pane, tab.doc.as_mut(), tab.image.as_mut())
+                },
                 None => {
                     // Source pane is gone (closed with output still in flight):
                     // drop its events, keep the rest of the batch.
@@ -2782,6 +2868,7 @@ impl WindowContext {
                 nebula_state: &mut pane.nebula_state,
                 ssh_destination: pane.ssh_destination.as_deref(),
                 doc,
+                image,
                 modifiers: &mut self.modifiers,
                 notifier: &mut pane.notifier,
                 display: &mut self.display,
@@ -2883,9 +2970,8 @@ impl WindowContext {
         }
 
         if self.dirty || self.mouse.hint_highlight_dirty {
-            let visual_point = self
-                .mouse
-                .point(&self.display.pane_view(), terminal.grid().display_offset());
+            let visual_point =
+                self.mouse.point(&self.display.pane_view(), terminal.grid().display_offset());
             let pane = match focused {
                 Some(index) => &self.panes[index],
                 None => &self.doc_pane,
