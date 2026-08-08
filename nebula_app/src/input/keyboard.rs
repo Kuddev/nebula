@@ -4,8 +4,6 @@ use winit::event::{ElementState, KeyEvent};
 #[cfg(target_os = "macos")]
 use winit::keyboard::ModifiersKeyState;
 use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
-#[cfg(target_os = "windows")]
-use winit::platform::scancode::PhysicalKeyExtScancode;
 #[cfg(target_os = "macos")]
 use winit::platform::macos::OptionAsAlt;
 
@@ -16,13 +14,8 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use crate::config::{Action, BindingKey, BindingMode, KeyBinding};
 use crate::display::window::ImeInhibitor;
 use crate::event::TYPING_SEARCH_DELAY;
-use crate::input::{ActionContext, Execute, Processor};
+use crate::input::{ActionContext, Execute, Processor, terminal_input};
 use crate::scheduler::{TimerId, Topic};
-
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    MapVirtualKeyW, MAPVK_VSC_TO_VK_EX,
-};
 
 impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// Process key input.
@@ -995,7 +988,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         mods: ModifiersState,
     ) -> bool {
         if mode.contains(TermMode::WIN32_INPUT_MODE)
-            && build_win32_input_sequence(key, mods).is_some()
+            && terminal_input::build_win32_input_sequence(key).is_some()
         {
             return true;
         }
@@ -1159,7 +1152,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 #[inline(never)]
 fn build_sequence(key: KeyEvent, mods: ModifiersState, mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::WIN32_INPUT_MODE) {
-        if let Some(sequence) = build_win32_input_sequence(&key, mods) {
+        if let Some(sequence) = terminal_input::build_win32_input_sequence(&key) {
             return sequence;
         }
     }
@@ -1229,74 +1222,6 @@ fn build_sequence(key: KeyEvent, mods: ModifiersState, mode: TermMode) -> Vec<u8
     payload.push(terminator.encode_esc_sequence());
 
     payload.into_bytes()
-}
-
-/// Build a ConPTY Win32 input record for functional keys and modified chords.
-/// Printable text deliberately returns `None`, so IME and layout-generated
-/// characters continue through the normal UTF-8 path used by every shell.
-#[cfg(target_os = "windows")]
-fn build_win32_input_sequence(key: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
-    if win32_input_uses_text_path(&key.logical_key) {
-        return None;
-    }
-
-    let (virtual_key, scan_code, enhanced) = win32_key_codes(key.physical_key)?;
-
-    const SHIFT_PRESSED: u32 = 0x10;
-    const RIGHT_ALT_PRESSED: u32 = 0x01;
-    const LEFT_ALT_PRESSED: u32 = 0x02;
-    const RIGHT_CTRL_PRESSED: u32 = 0x04;
-    const LEFT_CTRL_PRESSED: u32 = 0x08;
-    const ENHANCED_KEY: u32 = 0x100;
-
-    let current_is_shift = matches!(key.logical_key, Key::Named(NamedKey::Shift));
-    let current_is_alt = matches!(key.logical_key, Key::Named(NamedKey::Alt));
-    let current_is_ctrl = matches!(key.logical_key, Key::Named(NamedKey::Control));
-    let pressed = key.state == ElementState::Pressed;
-    let mut control_key_state = 0;
-    if (mods.shift_key() || (current_is_shift && pressed)) && !(current_is_shift && !pressed) {
-        control_key_state |= SHIFT_PRESSED;
-    }
-    if (mods.alt_key() || (current_is_alt && pressed)) && !(current_is_alt && !pressed) {
-        control_key_state |=
-            if current_is_alt && enhanced { RIGHT_ALT_PRESSED } else { LEFT_ALT_PRESSED };
-    }
-    if (mods.control_key() || (current_is_ctrl && pressed)) && !(current_is_ctrl && !pressed) {
-        control_key_state |=
-            if current_is_ctrl && enhanced { RIGHT_CTRL_PRESSED } else { LEFT_CTRL_PRESSED };
-    }
-    if enhanced {
-        control_key_state |= ENHANCED_KEY;
-    }
-
-    let down = u8::from(pressed);
-    Some(
-        format!(
-            "\x1b[{virtual_key};{scan_code};0;{down};{control_key_state};1_"
-        )
-        .into_bytes(),
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn win32_input_uses_text_path(key: &Key) -> bool {
-    matches!(key, Key::Character(_) | Key::Named(NamedKey::Space))
-}
-
-#[cfg(target_os = "windows")]
-fn win32_key_codes(key: winit::keyboard::PhysicalKey) -> Option<(u32, u32, bool)> {
-    let extended_scan_code = key.to_scancode()?;
-    let virtual_key = unsafe { MapVirtualKeyW(extended_scan_code, MAPVK_VSC_TO_VK_EX) };
-    (virtual_key != 0).then_some((
-        virtual_key,
-        extended_scan_code & 0xff,
-        extended_scan_code > 0xff,
-    ))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn build_win32_input_sequence(_: &KeyEvent, _: ModifiersState) -> Option<Vec<u8>> {
-    None
 }
 
 /// Helper to build escape sequence payloads from [`KeyEvent`].
@@ -1653,27 +1578,4 @@ fn is_control_character(text: &str) -> bool {
     // does not match the reported text (`^H`), despite not technically being part of C0 or C1.
     let codepoint = text.bytes().next().unwrap();
     text.len() == 1 && (codepoint < 0x20 || (0x7f..=0x9f).contains(&codepoint))
-}
-
-#[cfg(all(test, target_os = "windows"))]
-mod win32_input_tests {
-    use super::*;
-    use winit::keyboard::{KeyCode, PhysicalKey};
-
-    #[test]
-    fn printable_symbols_remain_on_the_utf8_text_path() {
-        for text in ["，", "。", "/", "【", "】"] {
-            assert!(win32_input_uses_text_path(&Key::Character(text.into())));
-        }
-    }
-
-    #[test]
-    fn enter_uses_the_native_windows_key_identity() {
-        let (virtual_key, scan_code, enhanced) =
-            win32_key_codes(PhysicalKey::Code(KeyCode::Enter)).unwrap();
-
-        assert_eq!(virtual_key, 0x0d);
-        assert_eq!(scan_code, 0x1c);
-        assert!(!enhanced);
-    }
 }

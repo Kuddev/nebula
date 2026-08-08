@@ -7,10 +7,12 @@ use std::ffi::c_void;
 use std::path::Path;
 
 use crate::dpi::PhysicalSize;
-use crate::event::DeviceId;
+use crate::event::{DeviceId, KeyEvent};
 use crate::event_loop::EventLoopBuilder;
 use crate::monitor::MonitorHandle;
 use crate::window::{BadIcon, Icon, Window, WindowAttributes};
+
+pub use crate::platform_impl::RawKeyEventInfo;
 
 /// Window Handle type used by Win32 API
 pub type HWND = isize;
@@ -18,6 +20,22 @@ pub type HWND = isize;
 pub type HMENU = isize;
 /// Monitor Handle type used by Win32 API
 pub type HMONITOR = isize;
+
+/// Provides the unmodified Win32 fields needed by ConPTY's Win32 input mode.
+///
+/// Winit already receives these values from WM_KEYDOWN/WM_KEYUP. Exposing the
+/// captured snapshot avoids reconstructing a virtual key from a Unicode value,
+/// which is incorrect for layout-dependent keys, AltGr, dead keys, and IMEs.
+pub trait KeyEventExtWindows {
+    fn raw_key_event(&self) -> RawKeyEventInfo;
+}
+
+impl KeyEventExtWindows for KeyEvent {
+    #[inline]
+    fn raw_key_event(&self) -> RawKeyEventInfo {
+        self.platform_specific.raw
+    }
+}
 
 /// Describes a system-drawn backdrop material of a window.
 ///
