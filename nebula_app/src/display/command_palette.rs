@@ -1628,6 +1628,25 @@ impl LauncherChip {
     }
 }
 
+/// 与 `launcher-unified.html` 的 `.chip` 保持同一套水平节奏：左右 11px，
+/// 标签与计数之间 6px。宽度必须基于 UI 字体的真实 cell，而不是经验常数；
+/// 否则 CJK 双列标签或两位数计数会先于圆角底溢出。
+const LAUNCHER_CHIP_PAD_X: f32 = 11.0;
+const LAUNCHER_CHIP_TEXT_GAP: f32 = 6.0;
+
+fn launcher_chip_width(label: &str, count: usize, cell_w: f32, scale: f32) -> f32 {
+    let count = count.to_string();
+    let text_w = (text_width_cols(label) + text_width_cols(&count)) as f32 * cell_w;
+    text_w + (LAUNCHER_CHIP_PAD_X * 2.0 + LAUNCHER_CHIP_TEXT_GAP) * scale
+}
+
+fn launcher_chip_text_x(chip: &LauncherChip, count: &str, cell_w: f32, scale: f32) -> (f32, f32) {
+    let label_x = chip.rect.0 + LAUNCHER_CHIP_PAD_X * scale;
+    let count_w = text_width_cols(count) as f32 * cell_w;
+    let count_x = chip.rect.0 + chip.rect.2 - LAUNCHER_CHIP_PAD_X * scale - count_w;
+    (label_x, count_x)
+}
+
 impl PaletteScrollbar {
     pub fn hit_test(&self, x: f32, y: f32) -> bool {
         let (hx, hy, hw, hh) = self.hit;
@@ -1694,8 +1713,15 @@ impl PaletteLayout {
 /// smaller one-shot pickers shrink to their content. Every palette mode uses
 /// the same search-input geometry, keeping rendering, hover and click
 /// hit-testing on one contract.
-pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32) -> PaletteLayout {
+pub fn palette_layout(
+    model: &CommandPalette,
+    win_w: f32,
+    win_h: f32,
+    scale: f32,
+    cell_w: f32,
+) -> PaletteLayout {
     let s = |v: f32| v * scale;
+    let cell_w = cell_w.max(s(1.0));
     let margin = s(8.0);
     let pad = s(12.0);
     let cards = model.is_picker();
@@ -1874,8 +1900,7 @@ pub fn palette_layout(model: &CommandPalette, win_w: f32, win_h: f32, scale: f32
         let mut chip_x = band_x;
         for (filter, count) in model.launcher_chip_counts() {
             let label = filter.label(model.language);
-            let columns = text_width_cols(label) + count.to_string().len();
-            let chip_w = s(20.0 + columns as f32 * 7.0).max(s(58.0));
+            let chip_w = launcher_chip_width(label, count, cell_w, scale);
             chips.push(LauncherChip {
                 filter,
                 label,
@@ -1993,7 +2018,7 @@ pub(super) fn push_quads(
     let h = size.height();
     let s = |v: f32| v * scale;
     let sk = theme.skin();
-    let layout = palette_layout(model, w, h, scale);
+    let layout = palette_layout(model, w, h, scale, size.cell_width());
     let (ix, iy, iw, ih) = layout.input;
     let (list_x, _, list_w, _) = layout.list;
     let launcher = model.is_launcher();
@@ -2033,16 +2058,21 @@ pub(super) fn push_quads(
         for chip in &layout.chips {
             let (cx, cy, cw, ch) = chip.rect;
             let hovered = model.launcher_chip_hover == Some(chip.filter);
-            if chip.selected || hovered {
-                quads.push(UiQuad::solid(
-                    cx,
-                    cy,
-                    cw,
-                    ch,
-                    ch * 0.5,
-                    if chip.selected { sk.hover_strong } else { sk.hover },
-                ));
-            }
+            let fill = if chip.selected {
+                surface::over(sk.accent_soft, sk.panel)
+            } else if hovered {
+                surface::over(sk.hover, sk.panel)
+            } else {
+                sk.panel
+            };
+            let stroke = if chip.selected {
+                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 112)
+            } else {
+                sk.hairline
+            };
+            let corner = ch * 0.5;
+            surface::push_stroke(quads, chip.rect, corner, scale, stroke);
+            quads.push(UiQuad::solid(cx, cy, cw, ch, corner, fill));
         }
     }
     if model.query_all_selected() && !model.query.is_empty() {
@@ -2348,7 +2378,7 @@ pub(super) fn draw_text(
     let h = size.height();
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let layout = palette_layout(model, w, h, scale);
+    let layout = palette_layout(model, w, h, scale, size.cell_width());
     let (ix, iy, iw, ih) = layout.input;
     let (list_x, _, list_w, _) = layout.list;
     let launcher = model.is_launcher();
@@ -2404,13 +2434,19 @@ pub(super) fn draw_text(
     }
 
     for chip in &layout.chips {
-        let (cx, cy, _, ch) = chip.rect;
+        let (_, cy, _, ch) = chip.rect;
         let ty = cy + (ch - cell_h) * 0.5;
-        let active = chip.selected || model.launcher_chip_hover == Some(chip.filter);
-        let label_ink = if active { sk.ink_strong } else { sk.ink_faint };
-        r.draw_chrome_text(size, cx + s(10.0), ty, label_ink, chip.label, gc);
+        let hovered = model.launcher_chip_hover == Some(chip.filter);
         let count = chip.count.to_string();
-        let count_x = cx + s(10.0) + text_width_cols(chip.label) as f32 * cell_w + s(6.0);
+        let (label_x, count_x) = launcher_chip_text_x(chip, &count, cell_w, scale);
+        let label_ink = if chip.selected {
+            sk.accent
+        } else if hovered {
+            sk.ink_strong
+        } else {
+            sk.ink_dim
+        };
+        r.draw_chrome_text(size, label_x, ty, label_ink, chip.label, gc);
         r.draw_chrome_text(
             size,
             count_x,
@@ -3082,12 +3118,12 @@ mod tests {
         );
         palette.set_ssh_hosts(&[("生产机".into(), "root@example.com".into())]);
         palette.open_profiles();
-        let full = palette_layout(&palette, 1600.0, 900.0, 1.0).panel.3;
+        let full = palette_layout(&palette, 1600.0, 900.0, 1.0, 8.0).panel.3;
         palette.input_text("cmd");
-        let filtered = palette_layout(&palette, 1600.0, 900.0, 1.0).panel.3;
+        let filtered = palette_layout(&palette, 1600.0, 900.0, 1.0, 8.0).panel.3;
         assert_eq!(full, filtered, "搜索结果变化不能让 launcher 上下跳动");
         palette.set_launcher_filter(LauncherFilter::Ssh);
-        let ssh = palette_layout(&palette, 1600.0, 900.0, 1.0).panel.3;
+        let ssh = palette_layout(&palette, 1600.0, 900.0, 1.0, 8.0).panel.3;
         assert_eq!(full, ssh, "切换分组不能改变 launcher 高度");
     }
 
@@ -3134,7 +3170,7 @@ mod tests {
     #[test]
     fn search_input_and_result_rows_share_compact_height() {
         let palette = CommandPalette::new();
-        let layout = palette_layout(&palette, 1600.0, 900.0, 1.5);
+        let layout = palette_layout(&palette, 1600.0, 900.0, 1.5, 12.0);
         assert_eq!(layout.input.3, layout.row_h);
     }
 
@@ -3338,7 +3374,7 @@ mod tests {
         const MAX_ROWS: usize = 8;
         let mut palette = CommandPalette::new();
         palette.open();
-        let layout = palette_layout(&palette, 1200.0, 900.0, 1.0);
+        let layout = palette_layout(&palette, 1200.0, 900.0, 1.0, 8.0);
         assert_eq!(layout.max_rows, MAX_ROWS);
         let scrollbar = layout.scrollbar.expect("长命令列表必须显示滚动条");
 
@@ -3406,11 +3442,11 @@ mod tests {
             .collect();
         let mut palette = CommandPalette::new();
         palette.open_ai_sessions(rows);
-        let full = palette_layout(&palette, 1600.0, 1000.0, 1.0).panel.3;
+        let full = palette_layout(&palette, 1600.0, 1000.0, 1.0, 8.0).panel.3;
 
         palette.input_text("unique needle");
         assert_eq!(palette.filtered.len(), 1);
-        let filtered = palette_layout(&palette, 1600.0, 1000.0, 1.0).panel.3;
+        let filtered = palette_layout(&palette, 1600.0, 1000.0, 1.0, 8.0).panel.3;
 
         assert_eq!(filtered, full, "过滤结果不能改变 AI 会话面板高度");
     }
@@ -3428,7 +3464,7 @@ mod tests {
         );
         palette.set_ssh_hosts(&[("生产机".into(), "root@192.0.2.10".into())]);
         palette.open_profiles();
-        let layout = palette_layout(&palette, 1600.0, 900.0, 1.0);
+        let layout = palette_layout(&palette, 1600.0, 900.0, 1.0, 8.0);
         assert_eq!(layout.rows.len(), 3);
         assert_eq!(layout.chips.len(), 3);
         assert_eq!(
@@ -3440,8 +3476,10 @@ mod tests {
         let (row_y, row_h) = layout.rows[1];
         assert_eq!(first_h, row_h, "默认项与普通项必须等高");
         assert!(row_y - first_y > first_h, "类别切换必须留出标题的分隔空间");
-        assert_eq!(layout.groups.iter().map(|(_, label, _)| label.as_str()).collect::<Vec<_>>(),
-            ["推荐", "所有 Shell", "SSH 主机"]);
+        assert_eq!(
+            layout.groups.iter().map(|(_, label, _)| label.as_str()).collect::<Vec<_>>(),
+            ["推荐", "所有 Shell", "SSH 主机"]
+        );
         let (px, ..) = layout.panel;
         assert_eq!(layout.row_at(px + 10.0, first_y + first_h / 2.0), Some(0));
         assert_eq!(layout.row_at(px + 10.0, row_y + row_h / 2.0), Some(1));
@@ -3452,10 +3490,43 @@ mod tests {
     }
 
     #[test]
+    fn launcher_chip_count_stays_inside_pill_at_double_digits() {
+        let shells: Vec<_> = (0..10)
+            .map(|index| DetectedShell {
+                name: format!("Shell {index}"),
+                id: format!("shell-{index}"),
+                program: format!(r"C:\Shells\{index}\shell.exe"),
+                args: Vec::new(),
+            })
+            .collect();
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(&shells, &[], "shell-0");
+        palette.set_ssh_hosts(&[("生产机".into(), "root@192.0.2.10".into())]);
+        palette.open_profiles();
+
+        let scale = 1.25;
+        let cell_w = 10.5;
+        let layout = palette_layout(&palette, 1600.0, 900.0, scale, cell_w);
+        assert_eq!(layout.chips.iter().map(|chip| chip.count).collect::<Vec<_>>(), [11, 1, 10]);
+
+        for chip in &layout.chips {
+            let count = chip.count.to_string();
+            let (label_x, count_x) = launcher_chip_text_x(chip, &count, cell_w, scale);
+            let label_right = label_x + text_width_cols(chip.label) as f32 * cell_w;
+            let count_right = count_x + text_width_cols(&count) as f32 * cell_w;
+            assert!((count_x - label_right - LAUNCHER_CHIP_TEXT_GAP * scale).abs() < 0.01);
+            assert!(
+                count_right <= chip.rect.0 + chip.rect.2 - LAUNCHER_CHIP_PAD_X * scale + 0.01,
+                "计数必须完整落在 chip 右内边距之前"
+            );
+        }
+    }
+
+    #[test]
     fn command_layout_rows_stay_uniform() {
         let mut palette = CommandPalette::new();
         palette.open();
-        let layout = palette_layout(&palette, 1600.0, 900.0, 1.0);
+        let layout = palette_layout(&palette, 1600.0, 900.0, 1.0, 8.0);
         assert_eq!(layout.rows.len(), layout.max_rows.min(palette.filtered.len()));
         for pair in layout.rows.windows(2) {
             assert_eq!(pair[0].1, pair[1].1, "命令列表保持等高行");

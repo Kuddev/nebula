@@ -4512,6 +4512,7 @@ impl Display {
             size.width(),
             size.height(),
             self.window.scale_factor as f32,
+            size.cell_width(),
         )
     }
 
