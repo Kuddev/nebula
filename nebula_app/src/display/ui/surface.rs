@@ -133,7 +133,7 @@ pub fn push_surface(
     level: Elevation,
     progress: f32,
 ) {
-    push_surface_in(
+    push_surface_with_radius(
         quads,
         rect,
         (0.0, 0.0, viewport.0, viewport.1),
@@ -142,6 +142,35 @@ pub fn push_surface(
         sk,
         level,
         progress,
+        radius::OVERLAY,
+    );
+}
+
+/// Same elevated surface recipe as [`push_surface`], with a caller-selected
+/// logical corner radius for references whose outer silhouette is intentionally
+/// softer than the shared Fluent overlay token.
+#[allow(clippy::too_many_arguments)]
+pub fn push_surface_with_radius(
+    quads: &mut Vec<UiQuad>,
+    rect: Rect,
+    veil_rect: Rect,
+    veil_radius: f32,
+    scale: f32,
+    sk: &Skin,
+    level: Elevation,
+    progress: f32,
+    radius_logical: f32,
+) {
+    push_surface_in_with_radius(
+        quads,
+        rect,
+        veil_rect,
+        veil_radius,
+        scale,
+        sk,
+        level,
+        progress,
+        radius_logical * scale,
     );
 }
 
@@ -165,8 +194,32 @@ pub fn push_surface_in(
     level: Elevation,
     progress: f32,
 ) {
+    push_surface_in_with_radius(
+        quads,
+        rect,
+        veil_rect,
+        veil_radius,
+        scale,
+        sk,
+        level,
+        progress,
+        radius::OVERLAY * scale,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_surface_in_with_radius(
+    quads: &mut Vec<UiQuad>,
+    rect: Rect,
+    veil_rect: Rect,
+    veil_radius: f32,
+    scale: f32,
+    sk: &Skin,
+    level: Elevation,
+    progress: f32,
+    corner: f32,
+) {
     let (x, y, w, h) = rect;
-    let corner = radius::OVERLAY * scale;
 
     if level.dims_background() {
         quads.push(UiQuad::solid(

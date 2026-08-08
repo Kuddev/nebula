@@ -27,9 +27,13 @@ pub mod space {
 pub mod radius {
     /// 浮层：命令面板、模态、右键菜单、下拉 popup。
     pub const OVERLAY: f32 = 8.0;
+    /// 统一启动器：参考稿用更宽的外轮廓，面板宽度变化时仍保持柔和的弧线。
+    pub const LAUNCHER: f32 = 14.0;
     /// 控件：combobox、spinner、输入框、按钮。
     /// Fluent 本身是 4；我们的控件高 32px，6 更耐看，实机再校。
     pub const CONTROL: f32 = 6.0;
+    /// 品牌/终端图标的中性 tile。
+    pub const ICON_TILE: f32 = 7.0;
     /// chip / 键帽 / 徽标。
     pub const CHIP: f32 = 4.0;
 }

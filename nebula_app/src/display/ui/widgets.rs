@@ -25,6 +25,15 @@ const CONTROL_H: f32 = 32.0;
 /// Right inset shared by every row-trailing control.
 const ROW_INSET: f32 = 16.0;
 
+/// Visual state for a text chip. Quiet chips intentionally have no plate: the
+/// selected state is the only decoration, which keeps a row of filters calm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChipState {
+    Quiet,
+    Hover,
+    Selected,
+}
+
 // ---- overlay scrollbar ----
 
 /// Geometry for a trackless overlay scrollbar. `hit` is intentionally wider
@@ -126,6 +135,31 @@ fn accent(sk: &Skin) -> Rgba {
 #[inline]
 fn opaque_panel(sk: &Skin) -> Rgba {
     Rgba::new(sk.panel.r, sk.panel.g, sk.panel.b, 255)
+}
+
+/// Paint the reusable pill background shared by launcher filters and future
+/// compact segmented controls. Text stays in the caller's text pass so the
+/// same geometry can be used for layout, hit testing, and drawing.
+pub(crate) fn push_chip(
+    quads: &mut Vec<UiQuad>,
+    rect: Rect,
+    scale: f32,
+    sk: &Skin,
+    state: ChipState,
+) {
+    let (x, y, w, h) = rect;
+    let corner = h * 0.5;
+    match state {
+        ChipState::Quiet => {},
+        ChipState::Hover => {
+            quads.push(UiQuad::solid(x, y, w, h, corner, surface::over(sk.hover, sk.panel)));
+        },
+        ChipState::Selected => {
+            let stroke = Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 112);
+            surface::push_stroke(quads, rect, corner, scale, stroke);
+            quads.push(UiQuad::solid(x, y, w, h, corner, surface::over(sk.accent_soft, sk.panel)));
+        }
+    }
 }
 
 // ---- slider ----
