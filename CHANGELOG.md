@@ -19,10 +19,13 @@ Every release entry is provided in English and Simplified Chinese.
 #### Fixed
 
 - **Codex can distinguish Shift+Enter from Enter on Windows** — Nebula now enables ConPTY's Win32 input mode when creating a pseudo console, tracks the application's DECSET 9001 request, and emits the Win32 key records expected by console applications. Codex can therefore insert a newline with Shift+Enter instead of receiving an ordinary Enter submission.
+- **Missing AI hook warnings no longer repeat every frame** — the notice is emitted only when hook availability changes into the missing state, preventing an unavailable optional hook from producing an unbounded warning loop.
 - **Installer version metadata matches the application** — the Inno Setup fallback version and numeric file version now match Nebula 0.9.0; release builds continue to inject the package version automatically.
 
 #### Improved
 
+- **The launcher palette now follows the grouped Shell/SSH design** — the three filters are reduced to All, SSH, and Shell; recommended shells, all shells, and SSH hosts use explicit section headings, equal-height rows, consistent icon plates, stable panel height, and shared search/filter/list geometry. Opening it also dims the surrounding workspace so the active surface is unambiguous.
+- **Settings navigation is compact, icon-led, and quieter** — the rail now matches the 196 px reference shell with 32 px rows, 2 px gaps, dedicated vector icons, wider internal label spacing, and a neutral low-contrast selected state. The backup surface has also been reorganized around an automatic-backup summary, an export/restore segmented action, and a grouped manifest with descriptions and sizes; its sidebar entry remains hidden until restore preview, conflict handling, and rollback are ready.
 - **The Windows installer can register Nebula as a command** — "Add Nebula Terminal to the user PATH" is selected by default, `nebula.exe` is also registered through Windows App Paths for Win+R, and uninstall removes only the PATH entry that the installer added. Existing Explorer directory and directory-background context-menu registrations remain included in the installer.
 - **File-tree status is quieter and stable** — directories use neutral theme colors, ignored paths detected through batched `git check-ignore` are dimmed without changing sorting or filtering, and hovering a row no longer shifts its contents.
 
@@ -39,10 +42,13 @@ Every release entry is provided in English and Simplified Chinese.
 #### 修复
 
 - **Windows 下 Codex 现在能区分 Shift+Enter 与 Enter** — Nebula 创建伪控制台时启用 ConPTY Win32 输入模式，跟踪应用发出的 DECSET 9001 请求，并发送 Windows 控制台程序所需的 Win32 按键记录。因此 Codex 中 Shift+Enter 会插入换行，不再被当作普通 Enter 提交。
+- **AI hook 缺失警告不再逐帧重复** — 只有 hook 可用性切换到“缺失”状态时才提示一次，避免可选 hook 不存在时产生无上限的警告循环。
 - **安装器版本信息与应用一致** — Inno Setup 的兜底版本和数字文件版本改为 Nebula 0.9.0；正式构建仍会自动注入包版本。
 
 #### 改进
 
+- **启动器面板改为 Shell / SSH 分组设计** — 筛选项收敛为“全部、SSH、Shell”，推荐 Shell、所有 Shell 与 SSH 主机使用明确分组标题；所有条目等高，图标底块、搜索/筛选/列表几何与面板固定高度保持一致。打开面板时同时压暗周围工作区，当前操作层级更明确。
+- **设置导航更紧凑、图标化且更安静** — 左侧栏对齐 196px 原型，使用 32px 条目、2px 间隔、独立矢量图标、更宽松的内部文字间距，以及低对比度的中性选中态。备份页也重排为自动备份摘要、导出/恢复分段操作和带描述/大小的分组清单；在恢复预览、冲突策略与回滚流程完成前，左侧入口暂时隐藏。
 - **Windows 安装器可以把 Nebula 注册为命令** — “将 Nebula Terminal 添加到当前用户 PATH”默认勾选，同时通过 Windows App Paths 注册 `nebula.exe`，因此 Win+R 可以直接启动；卸载时只移除安装器自己加入的 PATH 条目。资源管理器目录及目录背景的右键菜单注册仍随安装包提供。
 - **文件树状态更安静且不抖动** — 目录使用主题中性灰，批量 `git check-ignore` 识别出的忽略项只降低显示强度、不参与排序或过滤，鼠标悬浮也不再移动行内容。
 
