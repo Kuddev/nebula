@@ -33,7 +33,7 @@ use crate::platform_impl::platform::event_loop::ProcResult;
 use crate::platform_impl::platform::keyboard_layout::{
     Layout, LayoutCache, WindowsModifiers, LAYOUT_CACHE,
 };
-use crate::platform_impl::platform::{loword, primarylangid, KeyEventExtra};
+use crate::platform_impl::platform::{loword, primarylangid, KeyEventExtra, RawKeyEventInfo};
 
 pub type ExScancode = u16;
 
@@ -444,6 +444,20 @@ impl KeyEventBuilder {
             key_without_modifiers,
             key_state,
             is_repeat: false,
+            raw: RawKeyEventInfo {
+                virtual_key: vk as u16,
+                scan_code: (scancode & 0xff) as u8,
+                repeat_count: 1,
+                is_extended: (scancode & 0xff00) == 0xe000,
+                unicode_char: win32_unicode_char(&logical_key),
+                control_key_state: synthetic_control_key_state(
+                    vk,
+                    caps_lock_on,
+                    num_lock_on,
+                    (scancode & 0xff00) == 0xe000,
+                    key_state,
+                ),
+            },
             physical_key,
             location: get_location(scancode, locale_id),
             utf16parts: Vec::with_capacity(8),
@@ -483,6 +497,8 @@ struct PartialKeyEventInfo {
     logical_key: PartialLogicalKey,
 
     key_without_modifiers: Key,
+
+    raw: RawKeyEventInfo,
 
     /// The UTF-16 code units of the text that was produced by the keypress event.
     /// This take all modifiers into account. Including CTRL
@@ -536,6 +552,8 @@ impl PartialKeyEventInfo {
 
         let preliminary_logical_key =
             layout.get_key(mods_without_ctrl, num_lock_on, vkey, &physical_key);
+        let unicode_char =
+            win32_unicode_char(&layout.get_key(mods, num_lock_on, vkey, &physical_key));
         let key_is_char = matches!(preliminary_logical_key, Key::Character(_));
         let is_pressed = state == ElementState::Pressed;
 
@@ -577,6 +595,19 @@ impl PartialKeyEventInfo {
             logical_key,
             key_without_modifiers,
             is_repeat: lparam_struct.is_repeat,
+            raw: RawKeyEventInfo {
+                virtual_key: vkey as u16,
+                scan_code: lparam_struct.scancode,
+                repeat_count: lparam_struct.repeat_count,
+                is_extended: lparam_struct.extended,
+                unicode_char,
+                control_key_state: control_key_state(
+                    &kbd_state,
+                    vkey as u16,
+                    lparam_struct.extended,
+                    state,
+                ),
+            },
             physical_key,
             location,
             utf16parts: Vec::with_capacity(8),
@@ -623,6 +654,17 @@ impl PartialKeyEventInfo {
             PartialLogicalKey::This(v) => v,
         };
 
+        let mut raw = self.raw;
+        if matches!(logical_key, Key::Character(_) | Key::Named(NamedKey::Space)) {
+            if let Some(text) = char_with_all_modifiers.as_deref() {
+                if let Some(unicode_char) = single_utf16_code_unit(text) {
+                    // WM_CHAR is the authoritative layout/dead-key result. The cached
+                    // layout value above is primarily needed for key-up events.
+                    raw.unicode_char = unicode_char;
+                }
+            }
+        }
+
         KeyEvent {
             physical_key: self.physical_key,
             logical_key,
@@ -633,6 +675,7 @@ impl PartialKeyEventInfo {
             platform_specific: KeyEventExtra {
                 text_with_all_modifiers: char_with_all_modifiers,
                 key_without_modifiers: self.key_without_modifiers,
+                raw,
             },
         }
     }
@@ -642,6 +685,10 @@ impl PartialKeyEventInfo {
 struct KeyLParam {
     pub scancode: u8,
     pub extended: bool,
+
+    /// The low word of lParam is the repeat count. Preserve it instead of
+    /// converting every repeated key into a synthetic single press.
+    pub repeat_count: u16,
 
     /// This is `previous_state XOR transition_state`. See the lParam for WM_KEYDOWN and WM_KEYUP
     /// for further details.
@@ -654,8 +701,146 @@ fn destructure_key_lparam(lparam: LPARAM) -> KeyLParam {
     KeyLParam {
         scancode: ((lparam >> 16) & 0xff) as u8,
         extended: ((lparam >> 24) & 0x01) != 0,
+        repeat_count: (lparam & 0xffff) as u16,
         is_repeat: (previous_state ^ transition_state) != 0,
     }
+}
+
+#[inline]
+fn single_utf16_code_unit(text: &str) -> Option<u16> {
+    let mut units = text.encode_utf16();
+    let first = units.next()?;
+    units.next().is_none().then_some(first)
+}
+
+#[inline]
+fn win32_unicode_char(key: &Key) -> u16 {
+    match key {
+        Key::Character(text) => single_utf16_code_unit(text).unwrap_or(0),
+        Key::Named(NamedKey::Space) => b' ' as u16,
+        _ => 0,
+    }
+}
+
+/// 将布局解析已经读取的键盘状态转换为 Win32 KEY_EVENT_RECORD 字段。
+/// 状态在 Winit 内只读取一次，避免应用热路径再次调用 GetKeyboardState。
+fn control_key_state(
+    kbd_state: &[u8; 256],
+    virtual_key: u16,
+    extended: bool,
+    key_state: ElementState,
+) -> u32 {
+    const RIGHT_ALT_PRESSED: u32 = 0x01;
+    const LEFT_ALT_PRESSED: u32 = 0x02;
+    const RIGHT_CTRL_PRESSED: u32 = 0x04;
+    const LEFT_CTRL_PRESSED: u32 = 0x08;
+    const SHIFT_PRESSED: u32 = 0x10;
+    const NUMLOCK_ON: u32 = 0x20;
+    const SCROLLLOCK_ON: u32 = 0x40;
+    const CAPSLOCK_ON: u32 = 0x80;
+    const ENHANCED_KEY: u32 = 0x100;
+
+    let is_down = |vk: VIRTUAL_KEY| kbd_state[vk as usize] & 0x80 != 0;
+    let mut state = 0;
+    if is_down(VK_SHIFT) || is_down(VK_LSHIFT) || is_down(VK_RSHIFT) {
+        state |= SHIFT_PRESSED;
+    }
+    if is_down(VK_LMENU) {
+        state |= LEFT_ALT_PRESSED;
+    }
+    if is_down(VK_RMENU) {
+        state |= RIGHT_ALT_PRESSED;
+    }
+    if state & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED) == 0 && is_down(VK_MENU) {
+        state |= if virtual_key as VIRTUAL_KEY == VK_MENU && extended {
+            RIGHT_ALT_PRESSED
+        } else {
+            LEFT_ALT_PRESSED
+        };
+    }
+    if is_down(VK_LCONTROL) {
+        state |= LEFT_CTRL_PRESSED;
+    }
+    if is_down(VK_RCONTROL) {
+        state |= RIGHT_CTRL_PRESSED;
+    }
+    if state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED) == 0 && is_down(VK_CONTROL) {
+        state |= if virtual_key as VIRTUAL_KEY == VK_CONTROL && extended {
+            RIGHT_CTRL_PRESSED
+        } else {
+            LEFT_CTRL_PRESSED
+        };
+    }
+    if kbd_state[VK_NUMLOCK as usize] & 1 != 0 {
+        state |= NUMLOCK_ON;
+    }
+    if kbd_state[VK_SCROLL as usize] & 1 != 0 {
+        state |= SCROLLLOCK_ON;
+    }
+    if kbd_state[VK_CAPITAL as usize] & 1 != 0 {
+        state |= CAPSLOCK_ON;
+    }
+    if extended {
+        state |= ENHANCED_KEY;
+    }
+
+    // 某些布局在 GetKeyboardState 中只报告通用修饰键，但 WM_KEY 消息仍带有
+    // 左右位置；仅对 keydown 补入当前消息的身份，避免 keyup 把按下位卡住。
+    if key_state == ElementState::Pressed {
+        match virtual_key as VIRTUAL_KEY {
+            VK_LMENU => state |= LEFT_ALT_PRESSED,
+            VK_RMENU => state |= RIGHT_ALT_PRESSED,
+            VK_LCONTROL => state |= LEFT_CTRL_PRESSED,
+            VK_RCONTROL => state |= RIGHT_CTRL_PRESSED,
+            VK_LSHIFT | VK_RSHIFT => state |= SHIFT_PRESSED,
+            VK_MENU if extended => state |= RIGHT_ALT_PRESSED,
+            VK_MENU => state |= LEFT_ALT_PRESSED,
+            VK_CONTROL if extended => state |= RIGHT_CTRL_PRESSED,
+            VK_CONTROL => state |= LEFT_CTRL_PRESSED,
+            VK_SHIFT => state |= SHIFT_PRESSED,
+            _ => {},
+        }
+    }
+    state
+}
+
+fn synthetic_control_key_state(
+    virtual_key: VIRTUAL_KEY,
+    caps_lock_on: bool,
+    num_lock_on: bool,
+    extended: bool,
+    key_state: ElementState,
+) -> u32 {
+    const RIGHT_ALT_PRESSED: u32 = 0x01;
+    const LEFT_ALT_PRESSED: u32 = 0x02;
+    const RIGHT_CTRL_PRESSED: u32 = 0x04;
+    const LEFT_CTRL_PRESSED: u32 = 0x08;
+    const SHIFT_PRESSED: u32 = 0x10;
+    const NUMLOCK_ON: u32 = 0x20;
+    const CAPSLOCK_ON: u32 = 0x80;
+    const ENHANCED_KEY: u32 = 0x100;
+
+    let mut state = 0;
+    if caps_lock_on {
+        state |= CAPSLOCK_ON;
+    }
+    if num_lock_on {
+        state |= NUMLOCK_ON;
+    }
+    if extended {
+        state |= ENHANCED_KEY;
+    }
+    if key_state == ElementState::Pressed {
+        match virtual_key {
+            VK_LSHIFT | VK_RSHIFT => state |= SHIFT_PRESSED,
+            VK_LMENU => state |= LEFT_ALT_PRESSED,
+            VK_RMENU => state |= RIGHT_ALT_PRESSED,
+            VK_LCONTROL => state |= LEFT_CTRL_PRESSED,
+            VK_RCONTROL => state |= RIGHT_CTRL_PRESSED,
+            _ => {},
+        }
+    }
+    state
 }
 
 #[inline]
@@ -1240,4 +1425,45 @@ pub(crate) fn scancode_to_physicalkey(scancode: u32) -> PhysicalKey {
         0xe030 => KeyCode::AudioVolumeUp,
         _ => return PhysicalKey::Unidentified(NativeKeyCode::Windows(scancode as u16)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_lparam_keeps_repeat_and_extended_bits() {
+        let lparam = (3 | (0x1c << 16) | (1 << 24)) as LPARAM;
+        let parsed = destructure_key_lparam(lparam);
+
+        assert_eq!(parsed.repeat_count, 3);
+        assert_eq!(parsed.scancode, 0x1c);
+        assert!(parsed.extended);
+        assert!(!parsed.is_repeat);
+    }
+
+    #[test]
+    fn modifier_release_does_not_retain_the_pressed_bit() {
+        let mut keyboard = [0; 256];
+        keyboard[VK_LSHIFT as usize] = 0x80;
+
+        assert_ne!(
+            control_key_state(&keyboard, VK_LSHIFT as u16, false, ElementState::Pressed) & 0x10,
+            0
+        );
+
+        keyboard[VK_LSHIFT as usize] = 0;
+        assert_eq!(
+            control_key_state(&keyboard, VK_LSHIFT as u16, false, ElementState::Released) & 0x10,
+            0
+        );
+    }
+
+    #[test]
+    fn unicode_char_requires_exactly_one_utf16_code_unit() {
+        assert_eq!(single_utf16_code_unit("/"), Some(47));
+        assert_eq!(single_utf16_code_unit("，"), Some(0xff0c));
+        assert_eq!(single_utf16_code_unit("【】"), None);
+        assert_eq!(single_utf16_code_unit("😀"), None);
+    }
 }

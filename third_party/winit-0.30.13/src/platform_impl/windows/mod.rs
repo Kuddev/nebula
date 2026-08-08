@@ -91,10 +91,28 @@ fn wrap_device_id(id: u32) -> RootDeviceId {
 
 pub type OsError = std::io::Error;
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct RawKeyEventInfo {
+    /// The virtual-key code copied directly from the WM_KEY* message.
+    pub virtual_key: u16,
+    /// The low byte of the scan-code field in the WM_KEY* lParam.
+    pub scan_code: u8,
+    /// The repeat count copied from the low word of WM_KEY* lParam.
+    pub repeat_count: u16,
+    /// Whether the WM_KEY* lParam carried the extended-key flag.
+    pub is_extended: bool,
+    /// The UTF-16 code unit produced by the active Windows keyboard layout.
+    /// A value of zero means that the key has no single-code-unit text value.
+    pub unicode_char: u16,
+    /// The KEY_EVENT_RECORD-compatible control-key state captured by Winit.
+    pub control_key_state: u32,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct KeyEventExtra {
     pub text_with_all_modifiers: Option<SmolStr>,
     pub key_without_modifiers: Key,
+    pub raw: RawKeyEventInfo,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

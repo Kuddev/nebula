@@ -33,6 +33,7 @@ mod action;
 mod chrome;
 pub mod keyboard;
 mod mouse;
+mod terminal_input;
 mod touch;
 
 #[cfg(test)]
