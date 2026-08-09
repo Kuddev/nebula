@@ -26,7 +26,7 @@ use crate::renderer::{GlyphCache, Renderer};
 
 use super::keymap;
 use super::ui::theme::Skin;
-use super::ui::{icons, surface, tokens, widgets};
+use super::ui::{icons, os_icons, surface, tokens, widgets};
 use super::{
     AcceptKey, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
     chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label,
@@ -55,8 +55,10 @@ pub enum NebulaSettingsSection {
     Appearance,
     /// Completion behaviour plus the raw `nebula_settings.txt` config file.
     Profiles,
-    /// SSH proxy settings and hidden-host recovery.
+    /// Saved SSH destinations and hidden-host recovery.
     Ssh,
+    /// Outbound proxy policy for SSH connections.
+    Proxy,
     /// Selection/clipboard behaviour (the 「交互」 page).
     Interaction,
     /// Read-only shortcut sheet + pointer to `[[keyboard.bindings]]` remapping.
@@ -73,6 +75,7 @@ impl NebulaSettingsSection {
             Self::Appearance => language.pick("外观", "Appearance"),
             Self::Profiles => language.pick("配置文件", "Profiles"),
             Self::Ssh => "SSH",
+            Self::Proxy => language.pick("网络", "Network"),
             Self::Interaction => language.pick("交互", "Interaction"),
             Self::Keymap => language.pick("按键映射", "Key bindings"),
             Self::Advanced => language.pick("高级", "Advanced"),
@@ -86,6 +89,7 @@ fn nav_icon(section: NebulaSettingsSection) -> icons::SettingsNavIcon {
         NebulaSettingsSection::Appearance => icons::SettingsNavIcon::Appearance,
         NebulaSettingsSection::Profiles => icons::SettingsNavIcon::Profiles,
         NebulaSettingsSection::Ssh => icons::SettingsNavIcon::Ssh,
+        NebulaSettingsSection::Proxy => icons::SettingsNavIcon::Proxy,
         NebulaSettingsSection::Interaction => icons::SettingsNavIcon::Interaction,
         NebulaSettingsSection::Keymap => icons::SettingsNavIcon::Keymap,
         NebulaSettingsSection::Advanced => icons::SettingsNavIcon::Advanced,
@@ -118,7 +122,7 @@ pub enum SettingsDropdown {
     Accept,
     CursorShape,
     TabReveal,
-    /// 高级：SSH 代理模式（关闭/系统/自定义）。
+    /// 代理：SSH 连接代理模式（关闭/系统/自定义）。
     SshProxyMode,
     /// 背景色：色板网格 + 16 进制输入的专用浮层（不是通用行列表）。
     BackgroundColor,
@@ -299,8 +303,6 @@ pub enum SettingsHit {
     SshImportConfig,
     /// SSH settings page: open the existing SSH editor for a new host.
     SshAddHost,
-    /// SSH settings page: update flow placeholder until background detection exists.
-    SshUpgrade,
     FetchToggle,
     PowerlineToggle,
     BlurToggle,
@@ -330,16 +332,43 @@ pub enum SettingsHit {
     SyncAutoPullToggle,
     SyncPushButton,
     SyncPullButton,
-    /// 高级→SSH 代理: 模式下拉触发行。
+    /// 代理→SSH 连接代理: 模式下拉触发行。
     SshProxyModeDropdown,
     SshProxyModeOption(usize),
-    /// 高级→SSH 代理: 输入框（0=代理地址 1=绕过列表）。
+    /// 代理→SSH 连接代理: 输入框（0=代理地址 1=绕过列表）。
     SshProxyInput(usize),
     /// 按键映射: one editable action row (click → capture a new combo).
     KeymapRow(usize),
+    /// 按键映射: one read-only extras row. 不可点击，但 hover 得有着落——
+    /// 2026-08-09 裁定：列表每一项都要轻量色变反馈，无位移。
+    KeymapReadonlyRow(usize),
     BackupSelection(usize),
     BackupExport,
     BackupRestore,
+}
+
+/// Stable animation slots for the settings switches. Rendering and the shared
+/// motion clock both use this mapping, so one switch can never borrow another
+/// switch's thumb position while the pointer moves between rows.
+pub(super) const SETTINGS_TOGGLE_COUNT: usize = 13;
+
+pub(super) fn settings_toggle_slot(hit: SettingsHit) -> Option<usize> {
+    Some(match hit {
+        SettingsHit::SystemThemeToggle => 0,
+        SettingsHit::GhostToggle => 1,
+        SettingsHit::CursorBlinkToggle => 2,
+        SettingsHit::CopyOnSelectToggle => 3,
+        SettingsHit::PanelResizeToggle => 4,
+        SettingsHit::CjkBoldToggle => 5,
+        SettingsHit::FetchToggle => 6,
+        SettingsHit::PowerlineToggle => 7,
+        SettingsHit::BlurToggle => 8,
+        SettingsHit::KeepSessionToggle => 9,
+        SettingsHit::RestoreSessionToggle => 10,
+        SettingsHit::SyncAutoPullToggle => 11,
+        SettingsHit::BackgroundImageCoverChrome => 12,
+        _ => return None,
+    })
 }
 
 // ---- runtime settings store (`Nebula/nebula_settings.txt`) ----
@@ -799,7 +828,10 @@ struct SettingsGeometry {
     popup: (f32, f32, f32, f32),
     sidebar: (f32, f32, f32, f32),
     content: (f32, f32, f32, f32),
-    nav: [(NebulaSettingsSection, f32, f32, f32, f32); 7],
+    nav: [(NebulaSettingsSection, f32, f32, f32, f32); 8],
+    /// Navigation group labels occupy the intentional gaps before connection
+    /// and system settings, so the rail never contains unexplained whitespace.
+    nav_groups: [(f32, f32, f32, f32); 2],
     options: [(NebulaTheme, f32, f32, f32, f32); 7],
     /// Live terminal preview card at the top of Appearance: configure →
     /// immediately see (font, size, colors, wallpaper opacity, cursor).
@@ -820,9 +852,9 @@ struct SettingsGeometry {
     ssh_host_row0: (f32, f32, f32, f32),
     ssh_host_count: usize,
     ssh_host_row_h: f32,
+    ssh_host_gap: f32,
     ssh_add_host: (f32, f32, f32, f32),
     ssh_import_config: (f32, f32, f32, f32),
-    ssh_upgrade: (f32, f32, f32, f32),
     hidden_host_row0: (f32, f32, f32, f32),
     hidden_host_count: usize,
     /// Full-width "窗口透明度" row and its draggable track.
@@ -866,11 +898,12 @@ struct SettingsGeometry {
     keymap_row_h: f32,
     advanced_h: f32,
     ssh_h: f32,
+    proxy_h: f32,
     keep_session: (f32, f32, f32, f32),
     /// 高级·会话：启动时恢复上次的标签（崩溃/强杀后同样走这条路）。
     restore_session: (f32, f32, f32, f32),
     /// 高级→同步（WebDAV）：url/用户名/密码/口令 四行 + 自动拉取开关行
-    /// 高级→SSH 代理：模式下拉行 + [地址, 绕过列表] 两输入行（输入框矩形
+    /// 代理→SSH 连接代理：模式下拉行 + [地址, 绕过列表] 两输入行（输入框矩形
     /// 与同步行共用 [`sync_input_rect`] 推导）。
     ssh_proxy_mode: (f32, f32, f32, f32),
     ssh_proxy_rows: [(f32, f32, f32, f32); 2],
@@ -915,6 +948,7 @@ pub(super) fn settings_max_scroll(
         NebulaSettingsSection::Appearance => geometry.appearance_h,
         NebulaSettingsSection::Profiles => geometry.profiles_h,
         NebulaSettingsSection::Ssh => geometry.ssh_h,
+        NebulaSettingsSection::Proxy => geometry.proxy_h,
         NebulaSettingsSection::Interaction => geometry.interaction_h,
         NebulaSettingsSection::Keymap => geometry.keymap_h,
         NebulaSettingsSection::Advanced => geometry.advanced_h,
@@ -1022,15 +1056,24 @@ fn settings_geometry(
     let nav_gap = s(2.0);
     let nav_y0 = popup_y + s(88.0);
     let nav_slot = |i: f32| nav_y0 + i * (nav_h + nav_gap);
+    let connections_group_y = nav_slot(4.0);
+    let ssh_nav_y = connections_group_y + s(24.0);
+    let proxy_nav_y = ssh_nav_y + nav_h + nav_gap;
+    let system_group_y = proxy_nav_y + nav_h + nav_gap;
+    let advanced_nav_y = system_group_y + s(24.0);
+    let backup_nav_y = advanced_nav_y + nav_h + nav_gap;
     let nav = [
         (NebulaSettingsSection::Appearance, nav_x, nav_slot(0.0), nav_w, nav_h),
         (NebulaSettingsSection::Profiles, nav_x, nav_slot(1.0), nav_w, nav_h),
-        (NebulaSettingsSection::Ssh, nav_x, nav_slot(2.0), nav_w, nav_h),
-        (NebulaSettingsSection::Interaction, nav_x, nav_slot(3.0), nav_w, nav_h),
-        (NebulaSettingsSection::Keymap, nav_x, nav_slot(4.0), nav_w, nav_h),
-        (NebulaSettingsSection::Advanced, nav_x, nav_slot(5.0), nav_w, nav_h),
-        (NebulaSettingsSection::Backup, nav_x, nav_slot(6.0), nav_w, nav_h),
+        (NebulaSettingsSection::Interaction, nav_x, nav_slot(2.0), nav_w, nav_h),
+        (NebulaSettingsSection::Keymap, nav_x, nav_slot(3.0), nav_w, nav_h),
+        (NebulaSettingsSection::Ssh, nav_x, ssh_nav_y, nav_w, nav_h),
+        (NebulaSettingsSection::Proxy, nav_x, proxy_nav_y, nav_w, nav_h),
+        (NebulaSettingsSection::Advanced, nav_x, advanced_nav_y, nav_w, nav_h),
+        (NebulaSettingsSection::Backup, nav_x, backup_nav_y, nav_w, nav_h),
     ];
+    let nav_groups =
+        [(nav_x, connections_group_y, nav_w, s(24.0)), (nav_x, system_group_y, nav_w, s(24.0))];
 
     // Profiles: dropdown popups FLOAT over later rows (Windows 11 combobox),
     // so every row keeps a fixed offset — no picker shove, no scroll jumps.
@@ -1073,29 +1116,43 @@ fn settings_geometry(
     let sync_actions = sync_row(5.0);
     let advanced_h = s(advanced_content_end(advanced_y0, sync_y0, ROW_H) + 32.0 - 72.0);
 
-    // SSH 独立页：先展示侧栏同源的主机卡片，再放添加/导入动作，最后
-    // 是隐藏主机恢复和代理设置。主机卡片使用独立高度，保证双行信息和
-    // 三个操作按钮不会因为字体或窗口宽度变化而改动行高。
-    const SSH_HOST_ROW_H: f32 = 78.0;
+    // SSH 独立页：标题栏直接提供添加动作，正文只保留紧凑主机卡片、导入与
+    // 隐藏主机恢复。代理拥有独立页面，不能再参与 SSH 页的高度或滚动计算。
+    const SSH_HOST_ROW_H: f32 = 58.0;
+    const SSH_HOST_GAP: f32 = 8.0;
     let ssh_host_y0 = 146.0;
     let ssh_host_row = |i: f32| {
-        (row_x, at(ssh_host_y0 + i * SSH_HOST_ROW_H), row_w, s(SSH_HOST_ROW_H))
+        (row_x, at(ssh_host_y0 + i * (SSH_HOST_ROW_H + SSH_HOST_GAP)), row_w, s(SSH_HOST_ROW_H))
     };
     let ssh_host_row0 = ssh_host_row(0.0);
-    let ssh_actions_y0 = ssh_host_y0 + ssh_host_count as f32 * SSH_HOST_ROW_H + 16.0;
-    let ssh_add_host = (row_x, at(ssh_actions_y0), row_w, row_h);
-    let ssh_import_config = (row_x, at(ssh_actions_y0 + ROW_H), row_w, row_h);
-    let hidden_y0 = ssh_actions_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
-    let proxy_y0 = if hidden_host_count == 0 {
-        hidden_y0
+    let ssh_import_y0 = ssh_host_y0 + ssh_host_count as f32 * (SSH_HOST_ROW_H + SSH_HOST_GAP)
+        - if ssh_host_count > 0 { SSH_HOST_GAP } else { 0.0 }
+        + 16.0;
+    let title_bar_y = at(ssh_host_y0 - 48.0);
+    let title_bar_h = s(32.0);
+    let add_button_w = s(112.0).min(row_w * 0.42).max(s(34.0));
+    let add_button_h = s(30.0);
+    let ssh_add_host = (
+        row_x + row_w - add_button_w,
+        widgets::centered_y(title_bar_y, title_bar_h, add_button_h),
+        add_button_w,
+        add_button_h,
+    );
+    let ssh_import_config = (row_x, at(ssh_import_y0), row_w, row_h);
+    let hidden_y0 = ssh_import_y0 + ROW_H + GROUP_ADVANCE;
+    let ssh_end = if hidden_host_count == 0 {
+        ssh_import_y0 + ROW_H
     } else {
-        hidden_y0 + hidden_host_count as f32 * ROW_H + GROUP_ADVANCE
+        hidden_y0 + hidden_host_count as f32 * ROW_H
     };
+    let ssh_h = s(ssh_end + 32.0 - 72.0);
+
+    // Proxy page: the mode and both dependent inputs form one compact group.
+    let proxy_y0 = 146.0;
     let proxy_row = |i: f32| (row_x, at(proxy_y0 + i * ROW_H), row_w, row_h);
     let ssh_proxy_mode = proxy_row(0.0);
     let ssh_proxy_rows = [proxy_row(1.0), proxy_row(2.0)];
-    let ssh_end = proxy_y0 + ROW_H * 3.0;
-    let ssh_h = s(ssh_end + 32.0 - 72.0);
+    let proxy_h = s(proxy_y0 + ROW_H * 3.0 + 32.0 - 72.0);
 
     // Backup prototype: automatic-backup summary, export/restore segmented
     // action, then one grouped manifest card. Backup rows are taller because
@@ -1128,6 +1185,7 @@ fn settings_geometry(
         sidebar,
         content,
         nav,
+        nav_groups,
         options: [
             (NebulaTheme::Nebula, card(0.0), card_slot_y(0.0), card_w, card_h),
             (NebulaTheme::SilverLight, card(1.0), card_slot_y(1.0), card_w, card_h),
@@ -1177,9 +1235,9 @@ fn settings_geometry(
         ssh_host_row0,
         ssh_host_count,
         ssh_host_row_h: s(SSH_HOST_ROW_H),
+        ssh_host_gap: s(SSH_HOST_GAP),
         ssh_add_host,
         ssh_import_config,
-        ssh_upgrade: (popup_x + popup_w - s(170.0), popup_y + s(24.0), s(150.0), s(42.0)),
         hidden_host_row0: (row_x, at(hidden_y0), row_w, row_h),
         hidden_host_count,
         copy_on_select,
@@ -1191,6 +1249,7 @@ fn settings_geometry(
         appearance_h,
         profiles_h,
         ssh_h,
+        proxy_h,
         interaction_h,
         keymap_h,
         keymap_row0,
@@ -1242,11 +1301,21 @@ fn ssh_host_action_rect(
     let s = |v: f32| v * scale;
     let (x, y, w, h) = row;
     let button_w = s(54.0);
+    let button_h = s(30.0);
     let gap = s(6.0);
     let right = x + w - s(14.0);
     let buttons_after = 2usize.saturating_sub(action) as f32;
     let bx = right - button_w * (3usize.saturating_sub(action) as f32) - gap * buttons_after;
-    (bx, y + s(22.0), button_w, h - s(44.0))
+    (bx, widgets::centered_y(y, h, button_h), button_w, button_h)
+}
+
+/// Compact trailing command button inside an otherwise non-clickable settings row.
+fn row_action_rect(row: (f32, f32, f32, f32), scale: f32, logical_w: f32) -> (f32, f32, f32, f32) {
+    let s = |v: f32| v * scale;
+    let (x, y, w, h) = row;
+    let button_w = s(logical_w).min(w * 0.42);
+    let button_h = s(30.0).min(h);
+    (x + w - s(16.0) - button_w, widgets::centered_y(y, h, button_h), button_w, button_h)
 }
 
 /// Appearance 预览卡的壁纸绘制矩形：`(fit 目标, 实际允许触碰的裁剪带)`。
@@ -1330,7 +1399,7 @@ fn dropdown_anchor(
         (Section::Interaction, SettingsDropdown::TabReveal) => {
             Some((anchor(geometry.tab_reveal), TAB_REVEAL_OPTIONS.len()))
         },
-        (Section::Ssh, SettingsDropdown::SshProxyMode) => {
+        (Section::Proxy, SettingsDropdown::SshProxyMode) => {
             Some((anchor(geometry.ssh_proxy_mode), SSH_PROXY_MODE_OPTIONS.len()))
         },
         (Section::Appearance, SettingsDropdown::BackgroundFit) => {
@@ -1447,10 +1516,7 @@ pub fn settings_hit(
             return SettingsHit::Nav(nav_section);
         }
     }
-    if section == NebulaSettingsSection::Ssh && contains_rect(geometry.ssh_upgrade, x, y) {
-        return SettingsHit::SshUpgrade;
-    }
-    if contains_rect(geometry.reset, x, y) {
+    if section != NebulaSettingsSection::Ssh && contains_rect(geometry.reset, x, y) {
         return SettingsHit::Reset;
     }
 
@@ -1462,10 +1528,10 @@ pub fn settings_hit(
                         return SettingsHit::Theme(theme);
                     }
                 }
-                if contains_rect(geometry.system_theme, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.system_theme, scale_factor), x, y) {
                     return SettingsHit::SystemThemeToggle;
                 }
-                if contains_rect(geometry.background, x, y) {
+                if contains_rect(widgets::combobox_rect(geometry.background, scale_factor), x, y) {
                     return SettingsHit::BackgroundColor;
                 }
                 if contains_rect(geometry.background_image_clear, x, y) {
@@ -1474,28 +1540,49 @@ pub fn settings_hit(
                 if contains_rect(geometry.background_image, x, y) {
                     return SettingsHit::BackgroundImage;
                 }
-                if contains_rect(geometry.background_image_fit, x, y) {
+                if contains_rect(
+                    widgets::combobox_rect(geometry.background_image_fit, scale_factor),
+                    x,
+                    y,
+                ) {
                     return SettingsHit::BackgroundImageFit;
                 }
-                if contains_rect(geometry.background_image_alignment, x, y) {
+                if contains_rect(
+                    widgets::combobox_rect(geometry.background_image_alignment, scale_factor),
+                    x,
+                    y,
+                ) {
                     return SettingsHit::BackgroundImageAlignment;
                 }
                 if contains_rect(geometry.background_image_opacity_slider, x, y) {
                     return SettingsHit::BackgroundImageOpacitySlider;
                 }
-                if contains_rect(geometry.background_image_cover_chrome, x, y) {
+                if contains_rect(
+                    widgets::toggle_rect(geometry.background_image_cover_chrome, scale_factor),
+                    x,
+                    y,
+                ) {
                     return SettingsHit::BackgroundImageCoverChrome;
                 }
-                if contains_rect(geometry.cursor_shape_row, x, y) {
+                if contains_rect(
+                    widgets::combobox_rect(geometry.cursor_shape_row, scale_factor),
+                    x,
+                    y,
+                ) {
                     return SettingsHit::CursorShapeDropdown;
                 }
-                if contains_rect(geometry.cursor_blink_row, x, y) {
+                if contains_rect(
+                    widgets::toggle_rect(geometry.cursor_blink_row, scale_factor),
+                    x,
+                    y,
+                ) {
                     return SettingsHit::CursorBlinkToggle;
                 }
-                if contains_rect(geometry.language_row, x, y) {
+                if contains_rect(widgets::combobox_rect(geometry.language_row, scale_factor), x, y)
+                {
                     return SettingsHit::LanguageDropdown;
                 }
-                if contains_rect(geometry.blur, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.blur, scale_factor), x, y) {
                     return SettingsHit::BlurToggle;
                 }
                 if contains_rect(geometry.opacity_slider, x, y) {
@@ -1511,10 +1598,10 @@ pub fn settings_hit(
                         return SettingsHit::FontSizeDown;
                     }
                 }
-                if contains_rect(geometry.fetch, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.fetch, scale_factor), x, y) {
                     return SettingsHit::FetchToggle;
                 }
-                if contains_rect(geometry.powerline, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.powerline, scale_factor), x, y) {
                     return SettingsHit::PowerlineToggle;
                 }
             },
@@ -1522,10 +1609,14 @@ pub fn settings_hit(
                 // The import row touches the Shell row at one inclusive
                 // boundary in the shared hit helper; give it priority there
                 // so a click on its top edge cannot open the dropdown.
-                if contains_rect(geometry.terminal_import, x, y) {
+                if contains_rect(
+                    row_action_rect(geometry.terminal_import, scale_factor, 112.0),
+                    x,
+                    y,
+                ) {
                     return SettingsHit::ImportTerminal;
                 }
-                if contains_rect(geometry.shell, x, y) {
+                if contains_rect(widgets::combobox_rect(geometry.shell, scale_factor), x, y) {
                     return SettingsHit::ShellCycle;
                 }
                 if contains_rect(geometry.startup_directory_clear, x, y) {
@@ -1534,16 +1625,20 @@ pub fn settings_hit(
                 if contains_rect(geometry.startup_directory, x, y) {
                     return SettingsHit::StartupDirectory;
                 }
-                if contains_rect(geometry.font, x, y) {
+                if contains_rect(widgets::combobox_rect(geometry.font, scale_factor), x, y) {
                     return SettingsHit::FontCycle;
                 }
-                if contains_rect(geometry.ghost, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.ghost, scale_factor), x, y) {
                     return SettingsHit::GhostToggle;
                 }
-                if contains_rect(geometry.accept, x, y) {
+                if contains_rect(widgets::combobox_rect(geometry.accept, scale_factor), x, y) {
                     return SettingsHit::AcceptCycle;
                 }
-                if contains_rect(geometry.open_config_file, x, y) {
+                if contains_rect(
+                    row_action_rect(geometry.open_config_file, scale_factor, 140.0),
+                    x,
+                    y,
+                ) {
                     return SettingsHit::OpenConfigFile;
                 }
             },
@@ -1551,7 +1646,8 @@ pub fn settings_hit(
                 for index in 0..geometry.ssh_host_count {
                     let row = (
                         geometry.ssh_host_row0.0,
-                        geometry.ssh_host_row0.1 + index as f32 * geometry.ssh_host_row_h,
+                        geometry.ssh_host_row0.1
+                            + index as f32 * (geometry.ssh_host_row_h + geometry.ssh_host_gap),
                         geometry.ssh_host_row0.2,
                         geometry.ssh_host_row_h,
                     );
@@ -1568,10 +1664,27 @@ pub fn settings_hit(
                 if contains_rect(geometry.ssh_add_host, x, y) {
                     return SettingsHit::SshAddHost;
                 }
-                if contains_rect(geometry.ssh_import_config, x, y) {
+                if contains_rect(
+                    row_action_rect(geometry.ssh_import_config, scale_factor, 112.0),
+                    x,
+                    y,
+                ) {
                     return SettingsHit::SshImportConfig;
                 }
-                if contains_rect(geometry.ssh_proxy_mode, x, y) {
+                let (row_x, row_y, row_w, row_h) = geometry.hidden_host_row0;
+                for index in 0..geometry.hidden_host_count {
+                    let rect = (row_x, row_y + index as f32 * row_h, row_w, row_h);
+                    if contains_rect(row_action_rect(rect, scale_factor, 80.0), x, y) {
+                        return SettingsHit::RestoreHiddenSsh(index);
+                    }
+                }
+            },
+            NebulaSettingsSection::Proxy => {
+                if contains_rect(
+                    widgets::combobox_rect(geometry.ssh_proxy_mode, scale_factor),
+                    x,
+                    y,
+                ) {
                     return SettingsHit::SshProxyModeDropdown;
                 }
                 for (index, rect) in geometry.ssh_proxy_rows.iter().enumerate() {
@@ -1579,25 +1692,19 @@ pub fn settings_hit(
                         return SettingsHit::SshProxyInput(index);
                     }
                 }
-                let (row_x, row_y, row_w, row_h) = geometry.hidden_host_row0;
-                for index in 0..geometry.hidden_host_count {
-                    let rect = (row_x, row_y + index as f32 * row_h, row_w, row_h);
-                    if contains_rect(rect, x, y) {
-                        return SettingsHit::RestoreHiddenSsh(index);
-                    }
-                }
             },
             NebulaSettingsSection::Interaction => {
-                if contains_rect(geometry.copy_on_select, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.copy_on_select, scale_factor), x, y)
+                {
                     return SettingsHit::CopyOnSelectToggle;
                 }
-                if contains_rect(geometry.tab_reveal, x, y) {
+                if contains_rect(widgets::combobox_rect(geometry.tab_reveal, scale_factor), x, y) {
                     return SettingsHit::TabRevealDropdown;
                 }
-                if contains_rect(geometry.panel_resize, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.panel_resize, scale_factor), x, y) {
                     return SettingsHit::PanelResizeToggle;
                 }
-                if contains_rect(geometry.cjk_bold, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.cjk_bold, scale_factor), x, y) {
                     return SettingsHit::CjkBoldToggle;
                 }
             },
@@ -1609,12 +1716,20 @@ pub fn settings_hit(
                         return SettingsHit::KeymapRow(index);
                     }
                 }
+                let (row_x, row_y, row_w, row_h) = geometry.keymap_readonly_row0;
+                for index in 0..keymap::READONLY_ROWS.len() {
+                    let rect = (row_x, row_y + index as f32 * row_h, row_w, row_h);
+                    if contains_rect(rect, x, y) {
+                        return SettingsHit::KeymapReadonlyRow(index);
+                    }
+                }
             },
             NebulaSettingsSection::Advanced => {
-                if contains_rect(geometry.keep_session, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.keep_session, scale_factor), x, y) {
                     return SettingsHit::KeepSessionToggle;
                 }
-                if contains_rect(geometry.restore_session, x, y) {
+                if contains_rect(widgets::toggle_rect(geometry.restore_session, scale_factor), x, y)
+                {
                     return SettingsHit::RestoreSessionToggle;
                 }
                 if SHOW_WEBDAV_SYNC_SETTINGS {
@@ -1625,7 +1740,11 @@ pub fn settings_hit(
                             return SettingsHit::SyncInput(index);
                         }
                     }
-                    if contains_rect(geometry.sync_auto_pull, x, y) {
+                    if contains_rect(
+                        widgets::toggle_rect(geometry.sync_auto_pull, scale_factor),
+                        x,
+                        y,
+                    ) {
                         return SettingsHit::SyncAutoPullToggle;
                     }
                     let [push, pull] = sync_button_rects(geometry.sync_actions, scale_factor);
@@ -1681,6 +1800,12 @@ pub(super) struct SettingsView {
     pub(super) language: UiLanguage,
     pub(super) section: NebulaSettingsSection,
     pub(super) hover: SettingsHit,
+    /// Settings control currently held by the primary mouse button. This is
+    /// separate from hover so toggles can reproduce the HTML reference's
+    /// pressed stretch without making every row a click target.
+    pub(super) pressed: SettingsHit,
+    /// Independent travel/stretch/color/hover channels for every switch.
+    pub(super) toggle_motion: [widgets::ToggleMotion; SETTINGS_TOGGLE_COUNT],
     pub(super) theme: NebulaTheme,
     pub(super) follow_system_theme: bool,
     pub(super) ghost: bool,
@@ -1829,7 +1954,13 @@ fn ssh_proxy_input_display(
     let raw = &view.ssh_proxy_inputs[index];
     if raw.is_empty() {
         let text = match index {
-            0 => "socks5://127.0.0.1:7890",
+            // 无前缀地址就能用（自动按 socks5），placeholder 直接示范最短
+            // 形态；System 模式下这一行不生效，改写代理从哪里读。
+            0 if view.ssh_proxy_mode == crate::ssh_proxy::ProxyMode::System => view.language.pick(
+                "跟随系统（注册表 Internet Settings / 环境变量）",
+                "System (registry Internet Settings / env vars)",
+            ),
+            0 => "127.0.0.1:7890",
             _ => view.language.pick("例：10.0.0.0, .internal", "e.g. 10.0.0.0, .internal"),
         };
         return (text.to_owned(), true, 0);
@@ -1996,9 +2127,6 @@ pub(super) fn push_quads(
         view.ssh_hosts.len(),
     );
     let (px, py, pw, ph) = geometry.popup;
-    // Header band height: the title row sits above the content, and the header
-    // separator + big title are all measured from here.
-    let header_h = s(72.0);
     // Scrolled content is clipped EXACTLY at the viewport edges: quads that
     // cross the fixed header separator or the popup's bottom edge are cut at
     // the line via [`UiQuad::clip_y`] (uv-remapped, so rounded corners and
@@ -2016,50 +2144,13 @@ pub(super) fn push_quads(
     // The page is flush with the active tab card. No veil, drop shadow or
     // second window outline: depth belongs to the app shell, not this page.
     quads.push(UiQuad::solid(px, py, pw, ph, s(12.0), sk.panel));
-    let (side_x, side_y, side_w, side_h) = geometry.sidebar;
-
-    // Sidebar: no fill of its own — just a hairline separator on its right
-    // edge. Hierarchy comes from the nav rows, not a competing surface.
-    quads.push(UiQuad::solid(
-        side_x + side_w - s(1.0),
-        side_y + s(16.0),
-        s(1.0),
-        side_h - s(32.0),
-        0.0,
-        sk.hairline,
-    ));
-
-    // Header separator under the panel title row, only in the content area
-    // (right of the sidebar). The sidebar's own separator runs full height.
-    let content_x = side_x + side_w;
-    quads.push(UiQuad::solid(
-        content_x,
-        py + header_h,
-        px + pw - content_x - s(1.0),
-        s(1.0),
-        0.0,
-        sk.hairline,
-    ));
-
-    // Sidebar navigation: the active row is a floating pill — a soft accent
-    // wash inside a hairline accent border (design language: no accent bar,
-    // no vertical line); hover stays a quiet wash.
+    // Sidebar and content use spacing alone; no structural divider lines.
     let section = view.section;
     for (nav_section, nx, ny, nw, nh) in geometry.nav {
         if nav_section == NebulaSettingsSection::Backup && !SHOW_BACKUP_SETTINGS {
             continue;
         }
         if nav_section == section {
-            quads.push(UiQuad::solid(
-                nx - s(1.0),
-                ny - s(1.0),
-                nw + s(2.0),
-                nh + s(2.0),
-                s(9.0),
-                // HTML 原型的选中态是白色卡片 + 发丝边框；这里用中性
-                // surface wash，避免整条导航被 accent 色块压满。
-                Rgba::new(sk.ink_strong.r, sk.ink_strong.g, sk.ink_strong.b, 18),
-            ));
             quads.push(UiQuad::solid(nx, ny, nw, nh, s(8.0), sk.surface));
         } else if view.hover == SettingsHit::Nav(nav_section) {
             quads.push(UiQuad::solid(nx, ny, nw, nh, s(8.0), sk.hover));
@@ -2071,72 +2162,53 @@ pub(super) fn push_quads(
         } else {
             Rgba::new(sk.icon.r, sk.icon.g, sk.icon.b, 190)
         };
+        // 空心图标（代理的中继环）挖空用的必须是行的**有效底色**：面板色
+        // 与选中/悬浮药丸（半透明）合成后的结果，猜错环心就是一块色斑。
+        let icon_cutout = if nav_section == section {
+            icons::blend_over(sk.panel, sk.surface)
+        } else if view.hover == SettingsHit::Nav(nav_section) {
+            icons::blend_over(sk.panel, sk.hover)
+        } else {
+            sk.panel
+        };
         icons::push_settings_nav_icon(
             quads,
             nav_icon(nav_section),
             (nx + s(10.0), ny + s(7.0), s(18.0), s(18.0)),
             scale,
             icon_ink,
+            icon_cutout,
         );
     }
 
-    // Reset: a quiet ghost button in the header (hairline, no fill until hover).
-    {
+    // Reset: a quiet ghost button in the header. SSH intentionally has no
+    // page-level "Upgrade" action; host management is the complete surface.
+    if section != NebulaSettingsSection::Ssh {
         let (rx, ry, rw, rh) = geometry.reset;
-        quads.push(UiQuad::solid(
-            rx - s(1.0),
-            ry - s(1.0),
-            rw + s(2.0),
-            rh + s(2.0),
-            s(9.0),
-            sk.hairline,
-        ));
         quads.push(UiQuad::solid(rx, ry, rw, rh, s(8.0), sk.surface));
-        let hovered = if section == NebulaSettingsSection::Ssh {
-            view.hover == SettingsHit::SshUpgrade
-        } else {
-            view.hover == SettingsHit::Reset
-        };
+        let hovered = view.hover == SettingsHit::Reset;
         if hovered {
             quads.push(UiQuad::solid(rx, ry, rw, rh, s(8.0), sk.hover));
         }
     }
 
-    // One framed group of rows: a hairline border around the whole block and
-    // hairline separators between rows — the block reads as ONE plate (the
-    // design sheet's `.settings-list`), not a stack of separate pills. Rows
-    // stay transparent; hover marks the row with an inset rounded wash.
-    let row_h = geometry.background.3;
-    let group_frame = |quads: &mut Vec<UiQuad>, first_row: (f32, f32, f32, f32), rows: usize| {
-        let (gx, gy, gw, _) = first_row;
-        let gh = rows as f32 * row_h;
+    // Settings groups are unframed. Natural row spacing carries hierarchy;
+    // controls provide their own local hover feedback and click targets.
+    let group_frame = |_quads: &mut Vec<UiQuad>, _first_row, _rows: usize| {};
+    let row_hover = |_quads: &mut Vec<UiQuad>, _rect, _hovered: bool| {};
+    let action_button = |quads: &mut Vec<UiQuad>, row, logical_w: f32, hovered: bool| {
+        let rect = row_action_rect(row, scale, logical_w);
         clip(
             quads,
-            UiQuad::solid(gx - s(1.0), gy - s(1.0), gw + s(2.0), gh + s(2.0), s(9.0), sk.hairline),
+            UiQuad::solid(
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                rect.3 * 0.5,
+                if hovered { sk.hover } else { sk.surface },
+            ),
         );
-        clip(quads, UiQuad::solid(gx, gy, gw, gh, s(8.0), sk.panel));
-        for i in 1..rows {
-            clip(
-                quads,
-                UiQuad::solid(
-                    gx + s(1.0),
-                    gy + i as f32 * row_h,
-                    gw - s(2.0),
-                    s(1.0),
-                    0.0,
-                    sk.hairline,
-                ),
-            );
-        }
-    };
-    let row_hover = |quads: &mut Vec<UiQuad>, rect: (f32, f32, f32, f32), hovered: bool| {
-        if hovered {
-            let (rx, ry, rw, rh) = rect;
-            clip(
-                quads,
-                UiQuad::solid(rx + s(2.0), ry + s(2.0), rw - s(4.0), rh - s(4.0), s(6.0), sk.hover),
-            );
-        }
     };
     // Widget wrappers: stage → viewport-clip → push. Every multi-option row
     // shares ONE combobox component (user ruling 2026-07-23), hover/press
@@ -2157,8 +2229,16 @@ pub(super) fn push_quads(
             clip(quads, quad);
         }
     };
-    let toggle = |quads: &mut Vec<UiQuad>, staged: &mut Vec<UiQuad>, row, on: bool| {
-        widgets::push_toggle(staged, row, on, scale, &sk);
+    let toggle = |quads: &mut Vec<UiQuad>,
+                  staged: &mut Vec<UiQuad>,
+                  row,
+                  hit: SettingsHit,
+                  on: bool,
+                  _hot: bool,
+                  _pressed: bool| {
+        let motion = settings_toggle_slot(hit)
+            .map_or_else(|| widgets::ToggleMotion::settled(on), |index| view.toggle_motion[index]);
+        widgets::push_toggle(staged, row, scale, &sk, motion);
         for quad in staged.drain(..) {
             clip(quads, quad);
         }
@@ -2381,7 +2461,15 @@ pub(super) fn push_quads(
 
             group_frame(quads, geometry.system_theme, 1);
             row_hover(quads, geometry.system_theme, view.hover == SettingsHit::SystemThemeToggle);
-            toggle(quads, &mut staged, geometry.system_theme, view.follow_system_theme);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.system_theme,
+                SettingsHit::SystemThemeToggle,
+                view.follow_system_theme,
+                view.hover == SettingsHit::SystemThemeToggle,
+                view.pressed == SettingsHit::SystemThemeToggle,
+            );
 
             // 自定义背景和界面都使用连续分组，避免设置 Tab 内再次出现
             // 漂浮卡片语言。
@@ -2434,7 +2522,10 @@ pub(super) fn push_quads(
                 quads,
                 &mut staged,
                 geometry.background_image_cover_chrome,
+                SettingsHit::BackgroundImageCoverChrome,
                 view.background_image_cover_chrome,
+                view.hover == SettingsHit::BackgroundImageCoverChrome,
+                view.pressed == SettingsHit::BackgroundImageCoverChrome,
             );
 
             // 光标组：形状下拉 + 闪烁开关。
@@ -2456,7 +2547,15 @@ pub(super) fn push_quads(
                 geometry.cursor_blink_row,
                 view.hover == SettingsHit::CursorBlinkToggle,
             );
-            toggle(quads, &mut staged, geometry.cursor_blink_row, view.cursor_blink);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.cursor_blink_row,
+                SettingsHit::CursorBlinkToggle,
+                view.cursor_blink,
+                view.hover == SettingsHit::CursorBlinkToggle,
+                view.pressed == SettingsHit::CursorBlinkToggle,
+            );
 
             // 界面组：语言（同一通用下拉组件）+ 终端不透明度 + 背景模糊。
             group_frame(quads, geometry.language_row, 3);
@@ -2477,7 +2576,15 @@ pub(super) fn push_quads(
                     || view.dragging_opacity == Some(SettingsOpacityTarget::Terminal),
             );
             row_hover(quads, geometry.blur, view.hover == SettingsHit::BlurToggle);
-            toggle(quads, &mut staged, geometry.blur, view.blur);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.blur,
+                SettingsHit::BlurToggle,
+                view.blur,
+                view.hover == SettingsHit::BlurToggle,
+                view.pressed == SettingsHit::BlurToggle,
+            );
 
             group_frame(quads, geometry.font_size_row, 3);
             widgets::push_spinner(
@@ -2493,8 +2600,24 @@ pub(super) fn push_quads(
             }
             row_hover(quads, geometry.fetch, view.hover == SettingsHit::FetchToggle);
             row_hover(quads, geometry.powerline, view.hover == SettingsHit::PowerlineToggle);
-            toggle(quads, &mut staged, geometry.fetch, view.fetch);
-            toggle(quads, &mut staged, geometry.powerline, view.powerline);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.fetch,
+                SettingsHit::FetchToggle,
+                view.fetch,
+                view.hover == SettingsHit::FetchToggle,
+                view.pressed == SettingsHit::FetchToggle,
+            );
+            toggle(
+                quads,
+                &mut staged,
+                geometry.powerline,
+                SettingsHit::PowerlineToggle,
+                view.powerline,
+                view.hover == SettingsHit::PowerlineToggle,
+                view.pressed == SettingsHit::PowerlineToggle,
+            );
         },
         NebulaSettingsSection::Profiles => {
             // 终端组：Shell / 启动目录 / 字体。下拉列表是浮层，行的
@@ -2512,7 +2635,6 @@ pub(super) fn push_quads(
                 (SettingsHit::GhostToggle, geometry.ghost),
                 (SettingsHit::AcceptCycle, geometry.accept),
                 (SettingsHit::OpenConfigFile, geometry.open_config_file),
-                (SettingsHit::ImportTerminal, geometry.terminal_import),
             ] {
                 row_hover(quads, rect, view.hover == hit);
             }
@@ -2523,6 +2645,18 @@ pub(super) fn push_quads(
                     view.hover == SettingsHit::StartupDirectoryClear,
                 );
             }
+            action_button(
+                quads,
+                geometry.terminal_import,
+                112.0,
+                view.hover == SettingsHit::ImportTerminal,
+            );
+            action_button(
+                quads,
+                geometry.open_config_file,
+                140.0,
+                view.hover == SettingsHit::OpenConfigFile,
+            );
             combobox(
                 quads,
                 &mut staged,
@@ -2546,64 +2680,36 @@ pub(super) fn push_quads(
             );
             // Boolean rows render a real switch instead of an "On/Off" string.
             for (rect, on) in [(geometry.ghost, view.ghost)] {
-                toggle(quads, &mut staged, rect, on);
+                toggle(
+                    quads,
+                    &mut staged,
+                    rect,
+                    SettingsHit::GhostToggle,
+                    on,
+                    view.hover == SettingsHit::GhostToggle,
+                    view.pressed == SettingsHit::GhostToggle,
+                );
             }
         },
         NebulaSettingsSection::Ssh => {
-            // Saved hosts are the primary SSH surface. Cards intentionally use
-            // a stable two-line height so a long alias or an icon never shifts
-            // the action buttons below it.
+            // Saved hosts are the primary SSH surface. The compact fixed pitch
+            // keeps every two-line card separate without turning it into a tall tile.
             for index in 0..geometry.ssh_host_count {
                 let row = (
                     geometry.ssh_host_row0.0,
-                    geometry.ssh_host_row0.1 + index as f32 * geometry.ssh_host_row_h,
+                    geometry.ssh_host_row0.1
+                        + index as f32 * (geometry.ssh_host_row_h + geometry.ssh_host_gap),
                     geometry.ssh_host_row0.2,
                     geometry.ssh_host_row_h,
                 );
                 let (rx, ry, rw, rh) = row;
-                let mut stroke = Vec::new();
-                surface::push_stroke(
-                    &mut stroke,
-                    row,
-                    s(tokens::radius::OVERLAY),
-                    scale,
-                    sk.hairline,
-                );
-                for quad in stroke {
-                    clip(quads, quad);
-                }
-                clip(
-                    quads,
-                    UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.surface),
-                );
-                if matches!(
-                    view.hover,
-                    SettingsHit::SshHostConnect(i)
-                        | SettingsHit::SshHostEdit(i)
-                        | SettingsHit::SshHostHide(i)
-                        if i == index
-                ) {
-                    clip(
-                        quads,
-                        UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.hover),
-                    );
-                }
-                let tile = (rx + s(14.0), ry + s(20.0), s(38.0), s(38.0));
-                let mut tile_stroke = Vec::new();
-                surface::push_stroke(
-                    &mut tile_stroke,
-                    tile,
-                    s(tokens::radius::ICON_TILE),
-                    scale,
-                    sk.hairline,
-                );
-                for quad in tile_stroke {
-                    clip(quads, quad);
-                }
-                clip(
-                    quads,
-                    UiQuad::solid(tile.0, tile.1, tile.2, tile.3, s(tokens::radius::ICON_TILE), sk.panel),
-                );
+                // The host row is an unframed setting surface. Spacing and the
+                // compact trailing actions provide hierarchy without a card outline.
+                clip(quads, UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.surface));
+                // 行左缘画主机的 OS 图标（文字 pass，os_icons 字形），不再是
+                // 状态环——2026-08-09 用户裁定：已保存主机要把图标显示出来。
+                // 主机模型依旧没有可靠的在线态，图标标注的是「这是哪台机器」，
+                // 不发明绿点。
                 for action in 0..3 {
                     let rect = ssh_host_action_rect(row, scale, action);
                     let hovered = match (action, view.hover) {
@@ -2612,37 +2718,58 @@ pub(super) fn push_quads(
                         (2, SettingsHit::SshHostHide(i)) => i == index,
                         _ => false,
                     };
-                    let mut action_stroke = Vec::new();
-                    surface::push_stroke(
-                        &mut action_stroke,
-                        rect,
-                        s(tokens::radius::CONTROL),
-                        scale,
-                        sk.hairline,
-                    );
-                    for quad in action_stroke {
+                    let mut button = Vec::new();
+                    widgets::push_outline_button(&mut button, rect, scale, &sk, hovered);
+                    for quad in button {
                         clip(quads, quad);
                     }
-                    clip(
+                }
+            }
+            // "Add host" belongs to the Saved hosts heading, not a second
+            // full-width settings row below the list.
+            let add = geometry.ssh_add_host;
+            let add_hovered = view.hover == SettingsHit::SshAddHost;
+            let mut add_button = Vec::new();
+            widgets::push_outline_button(&mut add_button, add, scale, &sk, add_hovered);
+            for quad in add_button {
+                clip(quads, quad);
+            }
+            let add_icon_rect =
+                if add.2 < s(96.0) { add } else { (add.0 + s(4.0), add.1, add.3, add.3) };
+            let mut add_icon = Vec::new();
+            let add_icon_rgb = if add_hovered { sk.icon_hover } else { sk.icon };
+            icons::push_add(
+                &mut add_icon,
+                add_icon_rect,
+                scale,
+                Rgba::new(add_icon_rgb.r, add_icon_rgb.g, add_icon_rgb.b, 230),
+            );
+            for quad in add_icon {
+                clip(quads, quad);
+            }
+            group_frame(quads, geometry.ssh_import_config, 1);
+            action_button(
+                quads,
+                geometry.ssh_import_config,
+                112.0,
+                view.hover == SettingsHit::SshImportConfig,
+            );
+            if geometry.hidden_host_count > 0 {
+                group_frame(quads, geometry.hidden_host_row0, geometry.hidden_host_count);
+                for index in 0..geometry.hidden_host_count {
+                    let mut rect = geometry.hidden_host_row0;
+                    rect.1 += index as f32 * rect.3;
+                    action_button(
                         quads,
-                        UiQuad::solid(
-                            rect.0,
-                            rect.1,
-                            rect.2,
-                            rect.3,
-                            s(tokens::radius::CONTROL),
-                            if hovered { sk.hover } else { sk.panel },
-                        ),
+                        rect,
+                        80.0,
+                        view.hover == SettingsHit::RestoreHiddenSsh(index),
                     );
                 }
             }
-            group_frame(quads, geometry.ssh_add_host, 2);
-            row_hover(quads, geometry.ssh_add_host, view.hover == SettingsHit::SshAddHost);
-            row_hover(
-                quads,
-                geometry.ssh_import_config,
-                view.hover == SettingsHit::SshImportConfig,
-            );
+        },
+        NebulaSettingsSection::Proxy => {
+            group_frame(quads, geometry.ssh_proxy_mode, 3);
             row_hover(
                 quads,
                 geometry.ssh_proxy_mode,
@@ -2683,14 +2810,6 @@ pub(super) fn push_quads(
                     );
                 }
             }
-            if geometry.hidden_host_count > 0 {
-                group_frame(quads, geometry.hidden_host_row0, geometry.hidden_host_count);
-                for index in 0..geometry.hidden_host_count {
-                    let mut rect = geometry.hidden_host_row0;
-                    rect.1 += index as f32 * rect.3;
-                    row_hover(quads, rect, view.hover == SettingsHit::RestoreHiddenSsh(index));
-                }
-            }
         },
         NebulaSettingsSection::Interaction => {
             group_frame(quads, geometry.copy_on_select, 3);
@@ -2699,7 +2818,15 @@ pub(super) fn push_quads(
                 geometry.copy_on_select,
                 view.hover == SettingsHit::CopyOnSelectToggle,
             );
-            toggle(quads, &mut staged, geometry.copy_on_select, view.copy_on_select);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.copy_on_select,
+                SettingsHit::CopyOnSelectToggle,
+                view.copy_on_select,
+                view.hover == SettingsHit::CopyOnSelectToggle,
+                view.pressed == SettingsHit::CopyOnSelectToggle,
+            );
             row_hover(quads, geometry.tab_reveal, view.hover == SettingsHit::TabRevealDropdown);
             combobox(
                 quads,
@@ -2709,15 +2836,38 @@ pub(super) fn push_quads(
                 view.dropdown == Some(SettingsDropdown::TabReveal),
             );
             row_hover(quads, geometry.panel_resize, view.hover == SettingsHit::PanelResizeToggle);
-            toggle(quads, &mut staged, geometry.panel_resize, view.panel_resize);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.panel_resize,
+                SettingsHit::PanelResizeToggle,
+                view.panel_resize,
+                view.hover == SettingsHit::PanelResizeToggle,
+                view.pressed == SettingsHit::PanelResizeToggle,
+            );
             group_frame(quads, geometry.cjk_bold, 1);
             row_hover(quads, geometry.cjk_bold, view.hover == SettingsHit::CjkBoldToggle);
-            toggle(quads, &mut staged, geometry.cjk_bold, view.cjk_bold_regular);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.cjk_bold,
+                SettingsHit::CjkBoldToggle,
+                view.cjk_bold_regular,
+                view.hover == SettingsHit::CjkBoldToggle,
+                view.pressed == SettingsHit::CjkBoldToggle,
+            );
         },
         NebulaSettingsSection::Keymap => {
             let cell_w = size.cell_width();
             group_frame(quads, geometry.keymap_row0, keymap::editable_row_count());
             group_frame(quads, geometry.keymap_readonly_row0, keymap::READONLY_ROWS.len());
+            // 只读行同样给轻量 hover（无位移的色变）：一列可交互行里没有
+            // 反馈的行读作「死区」，像是渲染坏了。
+            let (rx, ry, rw, rh) = geometry.keymap_readonly_row0;
+            for index in 0..keymap::READONLY_ROWS.len() {
+                let rect = (rx, ry + index as f32 * geometry.keymap_row_h, rw, rh);
+                row_hover(quads, rect, view.hover == SettingsHit::KeymapReadonlyRow(index));
+            }
             let (kx, ky, kw, kh) = geometry.keymap_row0;
             for index in 0..keymap::editable_row_count() {
                 let rect = (kx, ky + index as f32 * geometry.keymap_row_h, kw, kh);
@@ -2753,7 +2903,13 @@ pub(super) fn push_quads(
                         scale,
                     );
                     let mut chip_quads = Vec::new();
-                    super::ui::keycap::push_combo(&mut chip_quads, &sk, &combo, scale);
+                    super::ui::keycap::push_combo_with_hover(
+                        &mut chip_quads,
+                        &sk,
+                        &combo,
+                        scale,
+                        view.hover == SettingsHit::KeymapRow(index),
+                    );
                     for quad in chip_quads {
                         clip(quads, quad);
                     }
@@ -2763,13 +2919,29 @@ pub(super) fn push_quads(
         NebulaSettingsSection::Advanced => {
             group_frame(quads, geometry.keep_session, 2);
             row_hover(quads, geometry.keep_session, view.hover == SettingsHit::KeepSessionToggle);
-            toggle(quads, &mut staged, geometry.keep_session, view.keep_session);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.keep_session,
+                SettingsHit::KeepSessionToggle,
+                view.keep_session,
+                view.hover == SettingsHit::KeepSessionToggle,
+                view.pressed == SettingsHit::KeepSessionToggle,
+            );
             row_hover(
                 quads,
                 geometry.restore_session,
                 view.hover == SettingsHit::RestoreSessionToggle,
             );
-            toggle(quads, &mut staged, geometry.restore_session, view.restore_session);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.restore_session,
+                SettingsHit::RestoreSessionToggle,
+                view.restore_session,
+                view.hover == SettingsHit::RestoreSessionToggle,
+                view.pressed == SettingsHit::RestoreSessionToggle,
+            );
 
             if SHOW_WEBDAV_SYNC_SETTINGS {
                 // ---- 同步（WebDAV，spec 003）：4 输入行 + 自动拉取开关 ----
@@ -2816,7 +2988,15 @@ pub(super) fn push_quads(
                     geometry.sync_auto_pull,
                     view.hover == SettingsHit::SyncAutoPullToggle,
                 );
-                toggle(quads, &mut staged, geometry.sync_auto_pull, view.sync_auto_pull);
+                toggle(
+                    quads,
+                    &mut staged,
+                    geometry.sync_auto_pull,
+                    SettingsHit::SyncAutoPullToggle,
+                    view.sync_auto_pull,
+                    view.hover == SettingsHit::SyncAutoPullToggle,
+                    view.pressed == SettingsHit::SyncAutoPullToggle,
+                );
 
                 // 动作行：两个独立按钮（同步中变灰、不吃 hover）。
                 let [push_rect, pull_rect] = sync_button_rects(geometry.sync_actions, scale);
@@ -2883,6 +3063,7 @@ pub(super) fn push_quads(
                     icon_rect,
                     scale,
                     Rgba::new(sk.icon.r, sk.icon.g, sk.icon.b, 220),
+                    icons::blend_over(sk.panel, sk.surface),
                 );
                 for quad in icon {
                     clip(quads, quad);
@@ -2908,17 +3089,6 @@ pub(super) fn push_quads(
             // Export / restore actions share the prototype's segmented plate.
             {
                 let (sx, sy, sw, sh) = geometry.backup_segment;
-                let mut stroke = Vec::new();
-                surface::push_stroke(
-                    &mut stroke,
-                    geometry.backup_segment,
-                    overlay_radius,
-                    scale,
-                    sk.hairline,
-                );
-                for quad in stroke {
-                    clip(quads, quad);
-                }
                 clip(quads, UiQuad::solid(sx, sy, sw, sh, overlay_radius, sk.card));
                 let [export, restore] = backup_segment_rects(geometry.backup_segment, scale);
                 for (rect, hit, active) in [
@@ -2944,12 +3114,6 @@ pub(super) fn push_quads(
                 let (gx, gy, gw, _) = geometry.backup_groups[0];
                 let last = geometry.backup_rows[8];
                 let gh = last.1 + last.3 - gy;
-                let card = (gx, gy, gw, gh);
-                let mut stroke = Vec::new();
-                surface::push_stroke(&mut stroke, card, overlay_radius, scale, sk.hairline);
-                for quad in stroke {
-                    clip(quads, quad);
-                }
                 clip(quads, UiQuad::solid(gx, gy, gw, gh, overlay_radius, sk.panel));
             }
             for (index, row) in geometry.backup_rows.iter().enumerate() {
@@ -2988,21 +3152,6 @@ pub(super) fn push_quads(
                     clip(quads, UiQuad::solid(cb.0, cb.1, cb.2, cb.3, chip_radius, sk.panel));
                 }
             }
-
-            for index in [1usize, 3, 6, 7, 8] {
-                let row = geometry.backup_rows[index];
-                clip(
-                    quads,
-                    UiQuad::solid(
-                        row.0 + s(16.0),
-                        row.1,
-                        row.2 - s(32.0),
-                        s(1.0),
-                        0.0,
-                        sk.hairline,
-                    ),
-                );
-            }
         },
     }
 
@@ -3013,6 +3162,7 @@ pub(super) fn push_quads(
         NebulaSettingsSection::Appearance => geometry.appearance_h,
         NebulaSettingsSection::Profiles => geometry.profiles_h,
         NebulaSettingsSection::Ssh => geometry.ssh_h,
+        NebulaSettingsSection::Proxy => geometry.proxy_h,
         NebulaSettingsSection::Interaction => geometry.interaction_h,
         NebulaSettingsSection::Keymap => geometry.keymap_h,
         NebulaSettingsSection::Advanced => geometry.advanced_h,
@@ -3343,6 +3493,27 @@ fn row_label(
     row_label_with_right_inset(r, gc, size, scale, sk, (rx, ry, rw, rh), k, v, value_ink, 0.0);
 }
 
+fn draw_button_label(
+    r: &mut Renderer,
+    gc: &mut GlyphCache,
+    size: &SizeInfo,
+    rect: (f32, f32, f32, f32),
+    label: &str,
+    ink: Rgb,
+) {
+    let cell_w = size.cell_width();
+    let cell_h = size.cell_height();
+    let cols = label.chars().map(|ch| ch.width().unwrap_or(1)).sum::<usize>();
+    r.draw_chrome_text(
+        size,
+        rect.0 + (rect.2 - cols as f32 * cell_w) * 0.5,
+        widgets::centered_y(rect.1, rect.3, cell_h),
+        ink,
+        label,
+        gc,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn row_label_with_right_inset(
     r: &mut Renderer,
@@ -3435,24 +3606,13 @@ pub(super) fn draw_text(
         sk.ink_strong,
         language.pick("Nebula 设置", "Nebula Settings"),
     );
-    {
+    if section != NebulaSettingsSection::Ssh {
         // Center the reset label inside its ghost button.
         let (rx, ry, rw, rh) = geometry.reset;
-        let label = if section == NebulaSettingsSection::Ssh {
-            language.pick("升级", "Upgrade")
-        } else {
-            language.pick("恢复默认设置", "Restore defaults")
-        };
+        let label = language.pick("恢复默认设置", "Restore defaults");
         let cols: usize = label.chars().map(|c| c.width().unwrap_or(0)).sum();
         let tx = rx + (rw - cols as f32 * cell_w) / 2.0;
-        r.draw_chrome_text(
-            size,
-            tx,
-            ry + (rh - cell_h) / 2.0,
-            if section == NebulaSettingsSection::Ssh { sk.accent } else { sk.ink_dim },
-            label,
-            gc,
-        );
+        r.draw_chrome_text(size, tx, ry + (rh - cell_h) / 2.0, sk.ink_dim, label, gc);
     }
     // Sidebar navigation labels share the icon geometry and visibility gate
     // from the quad/hit passes, so hidden entries cannot leave ghost text.
@@ -3474,6 +3634,23 @@ pub(super) fn draw_text(
                 sk.ink_dim
             },
             nav_section.label(view.language),
+            gc,
+        );
+    }
+    let group_text_h = cell_h * 0.78;
+    for (rect, label) in geometry
+        .nav_groups
+        .into_iter()
+        .zip([language.pick("连接", "Connections"), language.pick("系统", "System")])
+    {
+        r.draw_ui_text(
+            size,
+            rect.0 + s(10.0),
+            widgets::centered_y(rect.1, rect.3, group_text_h),
+            0.78,
+            sk.ink_dim,
+            nebula_terminal::term::cell::Flags::empty(),
+            label,
             gc,
         );
     }
@@ -3984,15 +4161,26 @@ pub(super) fn draw_text(
                 );
                 combobox_value(r, gc, geometry.shell, &view.shell_label, sk.accent);
             }
-            let (ix, iy, _, ih) = geometry.terminal_import;
+            let (_ix, iy, _, ih) = geometry.terminal_import;
             if visible(iy, ih) {
-                r.draw_chrome_text(
-                    size,
-                    ix + s(16.0),
-                    iy + (ih - cell_h) / 2.0,
-                    sk.accent,
-                    language.pick("导入终端目录…", "Import terminal directory..."),
+                row_label(
+                    r,
                     gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.terminal_import,
+                    language.pick("导入终端目录", "Import terminal directory"),
+                    "",
+                    sk.ink,
+                );
+                draw_button_label(
+                    r,
+                    gc,
+                    size,
+                    row_action_rect(geometry.terminal_import, scale, 112.0),
+                    language.pick("导入", "Import"),
+                    if view.hover == SettingsHit::ImportTerminal { sk.accent } else { sk.ink },
                 );
             }
             if visible(geometry.startup_directory.1, geometry.startup_directory.3) {
@@ -4131,73 +4319,89 @@ pub(super) fn draw_text(
                 );
             }
             if visible(ocy, och) {
-                r.draw_chrome_text(
-                    size,
-                    ocx + s(16.0),
-                    ocy + (och - cell_h) / 2.0,
-                    sk.accent,
-                    language.pick("打开配置文件", "Open configuration file"),
+                row_label(
+                    r,
                     gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.open_config_file,
+                    language.pick("打开配置文件", "Open configuration file"),
+                    "",
+                    sk.ink,
+                );
+                draw_button_label(
+                    r,
+                    gc,
+                    size,
+                    row_action_rect(geometry.open_config_file, scale, 140.0),
+                    language.pick("打开", "Open"),
+                    if view.hover == SettingsHit::OpenConfigFile { sk.accent } else { sk.ink },
                 );
             }
         },
         NebulaSettingsSection::Ssh => {
             let (host_x, host_y, host_w, _host_h) = geometry.ssh_host_row0;
             if visible(group_y(host_y), title_h) {
-                section_title(
-                    r,
-                    gc,
+                let available = (geometry.ssh_add_host.0 - host_x - s(8.0)).max(cell_w);
+                let max_chars = (available / (cell_w * 1.2)).floor().max(1.0) as usize;
+                let saved_hosts =
+                    truncate_tab_label(language.pick("已保存主机", "Saved hosts"), max_chars);
+                section_title(r, gc, size, scale, &sk, host_x, group_y(host_y), &saved_hosts);
+            }
+            let add = geometry.ssh_add_host;
+            if add.2 >= s(96.0) && visible(add.1, add.3) {
+                r.draw_chrome_text(
                     size,
-                    scale,
-                    &sk,
-                    host_x,
-                    group_y(host_y),
-                    language.pick("已保存主机", "Saved hosts"),
+                    add.0 + s(36.0),
+                    widgets::centered_y(add.1, add.3, cell_h),
+                    if view.hover == SettingsHit::SshAddHost { sk.accent } else { sk.ink },
+                    language.pick("添加主机", "Add host"),
+                    gc,
                 );
             }
             let draw_centered_action = |r: &mut Renderer,
-                                         gc: &mut GlyphCache,
-                                         rect: (f32, f32, f32, f32),
-                                         label: &str,
-                                         ink: Rgb| {
+                                        gc: &mut GlyphCache,
+                                        rect: (f32, f32, f32, f32),
+                                        label: &str,
+                                        ink: Rgb| {
                 let cols = label.chars().map(|ch| ch.width().unwrap_or(1)).sum::<usize>();
                 let tx = rect.0 + (rect.2 - cols as f32 * cell_w) * 0.5;
-                r.draw_chrome_text(
-                    size,
-                    tx,
-                    rect.1 + (rect.3 - cell_h) / 2.0,
-                    ink,
-                    label,
-                    gc,
-                );
+                r.draw_chrome_text(size, tx, rect.1 + (rect.3 - cell_h) / 2.0, ink, label, gc);
             };
             for (index, host) in view.ssh_hosts.iter().enumerate() {
                 let row = (
                     host_x,
-                    host_y + index as f32 * geometry.ssh_host_row_h,
+                    host_y + index as f32 * (geometry.ssh_host_row_h + geometry.ssh_host_gap),
                     host_w,
                     geometry.ssh_host_row_h,
                 );
                 if !visible(row.1, row.3) {
                     continue;
                 }
-                let icon = super::ui::os_icons::resolve(Some(host.icon.as_str()));
-                let icon_px = s(20.0);
-                let icon_mult = super::ui::os_icons::scale_for(icon, cell_w, icon_px);
+                let detail_h = cell_h * 0.78;
+                let title_y = widgets::centered_y(row.1, row.3, cell_h + detail_h);
+                // 左缘 OS 图标：与侧栏主机行同一套 os_icons 配方——真墨迹按
+                // `ink_em` 反解缩放到统一目标宽（Nerd Font 图标墨迹 0.76~1.20 em
+                // 各不相同，不缩就有的顶文字有的悬空），跨双行垂直居中。id 来自
+                // 主机存储，auto / 未认出回落通用终端形状。
+                let icon = os_icons::resolve(Some(host.icon.as_str()));
+                let icon_slot = (cell_h * 0.72).round();
+                let icon_px = icon_slot * 0.82;
+                let icon_mult = os_icons::scale_for(icon, size.cell_width(), icon_px);
                 r.draw_chrome_text_scaled(
                     size,
-                    row.0 + s(14.0) + (s(38.0) - icon_px) * 0.5,
-                    row.1 + row.3 / 2.0 - cell_h * icon_mult / 2.0,
+                    row.0 + s(20.0) - icon_slot * 0.5 + (icon_slot - icon_px) * 0.5,
+                    widgets::centered_y(row.1, row.3, cell_h * icon_mult),
                     icon_mult,
-                    sk.accent,
+                    sk.icon,
                     icon.glyph.encode_utf8(&mut [0u8; 4]),
                     gc,
                 );
-                let title_y = row.1 + s(17.0);
-                r.draw_chrome_text(size, row.0 + s(66.0), title_y, sk.ink, &host.label, gc);
+                r.draw_chrome_text(size, row.0 + s(38.0), title_y, sk.ink, &host.label, gc);
                 r.draw_ui_text(
                     size,
-                    row.0 + s(66.0),
+                    row.0 + s(38.0),
                     title_y + cell_h * 0.95,
                     0.78,
                     sk.ink_dim,
@@ -4206,14 +4410,7 @@ pub(super) fn draw_text(
                     gc,
                 );
                 if host.pinned {
-                    r.draw_chrome_text(
-                        size,
-                        row.0 + s(52.0),
-                        title_y,
-                        sk.accent,
-                        "\u{eab4}",
-                        gc,
-                    );
+                    r.draw_chrome_text(size, row.0 + s(27.0), title_y, sk.accent, "\u{eab4}", gc);
                 }
                 for (action, label) in [
                     (0usize, language.pick("连接", "Connect")),
@@ -4226,21 +4423,16 @@ pub(super) fn draw_text(
                         (2, SettingsHit::SshHostHide(i)) if i == index => sk.accent,
                         _ => sk.ink_dim,
                     };
-                    draw_centered_action(r, gc, ssh_host_action_rect(row, scale, action), label, ink);
+                    draw_centered_action(
+                        r,
+                        gc,
+                        ssh_host_action_rect(row, scale, action),
+                        label,
+                        ink,
+                    );
                 }
             }
-            if visible(geometry.ssh_add_host.1, geometry.ssh_add_host.3) {
-                row_label(
-                    r,
-                    gc,
-                    size,
-                    scale,
-                    &sk,
-                    geometry.ssh_add_host,
-                    language.pick("添加主机", "Add host"),
-                    "＋",
-                    sk.accent,
-                );
+            if visible(geometry.ssh_import_config.1, geometry.ssh_import_config.3) {
                 row_label(
                     r,
                     gc,
@@ -4284,6 +4476,8 @@ pub(super) fn draw_text(
                     }
                 }
             }
+        },
+        NebulaSettingsSection::Proxy => {
             let (gx, gy, ..) = geometry.ssh_proxy_mode;
             if visible(group_y(gy), title_h) {
                 section_title(
@@ -4319,8 +4513,8 @@ pub(super) fn draw_text(
             }
             let labels = [
                 language.pick(
-                    "代理地址（socks5:// 或 http://）",
-                    "Proxy URL (socks5:// or http://)",
+                    "代理地址（socks5:// / http:// / jump:主机）",
+                    "Proxy address (socks5:// / http:// / jump:host)",
                 ),
                 language.pick("不走代理的主机（逗号分隔）", "Bypass hosts (comma separated)"),
             ];
@@ -4349,14 +4543,7 @@ pub(super) fn draw_text(
                 let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
                 let (text, placeholder, _) = ssh_proxy_input_display(view, index, max_cols);
                 let ink = if placeholder || !active[index] { sk.ink_dim } else { sk.ink };
-                r.draw_chrome_text(
-                    size,
-                    ix + s(12.0),
-                    iy + (ih - cell_h) / 2.0,
-                    ink,
-                    &text,
-                    gc,
-                );
+                r.draw_chrome_text(size, ix + s(12.0), iy + (ih - cell_h) / 2.0, ink, &text, gc);
             }
         },
         NebulaSettingsSection::Interaction => {
@@ -4514,7 +4701,13 @@ pub(super) fn draw_text(
                 let (value, customized, bound) = keymap_row_value(view, i);
                 // 墨色分级：捕获中 accent、自定义键 accent、默认键正常墨、
                 // 未绑定弱墨——一眼看出哪些行动过。
-                let ink = if capturing || customized {
+                let ink = if capturing {
+                    sk.accent
+                } else if view.hover == SettingsHit::KeymapRow(i) && bound {
+                    // Hover only lifts the key text one tier; the chip itself
+                    // gets the matching quiet fill in the quad pass.
+                    sk.ink_strong
+                } else if customized {
                     sk.accent
                 } else if bound {
                     sk.ink
@@ -4927,8 +5120,9 @@ pub(super) fn draw_text(
 mod tests {
     use super::{
         SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion, advanced_content_end,
-        opacity_from_pointer,
+        opacity_from_pointer, row_action_rect,
     };
+    use crate::display::ui::widgets;
 
     #[test]
     fn slider_pointer_maps_to_clamped_fraction() {
@@ -4961,5 +5155,23 @@ mod tests {
         for value in [TabRevealMotion::Slide, TabRevealMotion::Instant] {
             assert_eq!(TabRevealMotion::parse(value.settings_value()), Some(value));
         }
+    }
+
+    #[test]
+    fn settings_actions_keep_their_hit_area_on_the_button() {
+        let row = (100.0, 200.0, 500.0, 44.0);
+        let button = row_action_rect(row, 1.0, 112.0);
+        assert!(button.0 > row.0);
+        assert!(button.0 + button.2 <= row.0 + row.2);
+        assert!(!super::contains_rect(button, row.0 + 8.0, row.1 + row.3 * 0.5));
+        assert!(
+            super::contains_rect(button, button.0 + button.2 * 0.5, button.1 + button.3 * 0.5,)
+        );
+
+        let toggle = widgets::toggle_rect(row, 1.0);
+        assert!(!super::contains_rect(toggle, row.0 + 8.0, row.1 + row.3 * 0.5));
+        assert!(
+            super::contains_rect(toggle, toggle.0 + toggle.2 * 0.5, toggle.1 + toggle.3 * 0.5,)
+        );
     }
 }

@@ -659,11 +659,11 @@ impl SidePanel {
         use std::process::{Command, Stdio};
 
         let candidates: Vec<_> = rows
-        .iter()
-        .filter(|row| !row.is_parent)
-        .filter_map(|row| row.path.strip_prefix(root).ok())
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .collect();
+            .iter()
+            .filter(|row| !row.is_parent)
+            .filter_map(|row| row.path.strip_prefix(root).ok())
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect();
         if candidates.is_empty() {
             return;
         }
@@ -842,7 +842,8 @@ pub fn panel_layout(
     let header_h = s(50.0);
     let row_h = s(34.0);
     let tools = panel_tools_layout_raw(x, y, w, header_h, scale);
-    let search = (x + s(12.0), tools.directory.1 + tools.directory.3 + s(10.0), w - s(24.0), s(30.0));
+    let search =
+        (x + s(12.0), tools.directory.1 + tools.directory.3 + s(10.0), w - s(24.0), s(30.0));
     let list_y = search.1 + search.3 + s(8.0);
     let max_rows = (((y + h) - list_y) / row_h).max(0.0) as usize;
     PanelLayout { panel: (x, y, w, h), header_h, row_h, search, list_y, max_rows }
@@ -1059,6 +1060,7 @@ use crate::display::color::Rgb;
 use crate::renderer::ui::{Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
 
+use super::ui::widgets;
 use super::{NebulaTheme, SizeInfo, UI_CORNER_RADIUS_LOGICAL};
 
 // Nerd Font glyphs verified in the bundled Maple Mono font. The folder pair
@@ -1175,8 +1177,9 @@ fn panel_action_tooltip(
         PanelHit::RevealDirectory => (PanelHit::RevealDirectory, "在资源管理器中打开  Alt+O"),
         _ => return None,
     };
-    let action_rect = panel_action_rects(layout, panel.custom_root_active(), panel.root().is_some())
-        .find_map(|(hit, rect)| (hit == action).then_some(rect))?;
+    let action_rect =
+        panel_action_rects(layout, panel.custom_root_active(), panel.root().is_some())
+            .find_map(|(hit, rect)| (hit == action).then_some(rect))?;
     let s = |value: f32| value * scale;
     let (px, _, pw, _) = layout.panel;
     let width = (drag_chip_cols(label) as f32 * cell_w + s(16.0)).min(pw - s(16.0));
@@ -1221,14 +1224,8 @@ pub(super) fn push_quads(
     quads.push(UiQuad::solid(segment.0, segment.1, segment.2, segment.3, radius, sk.input));
     quads.push(UiQuad::solid(active_x, ty, tab_w, tab_h, radius, sk.card));
     quads.push(UiQuad::solid(active_x, ty, tab_w, tab_h, radius, sk.surface));
-    let hovered_tab_x = match panel.hover {
-        PanelHit::ViewFiles if panel.view != PanelView::Files => Some(fx),
-        PanelHit::ViewGit if panel.view != PanelView::Git => Some(gx),
-        _ => None,
-    };
-    if let Some(hx) = hovered_tab_x {
-        quads.push(UiQuad::solid(hx, ty, tab_w, tab_h, radius, sk.hover));
-    }
+    // Hover never changes segmented-control geometry or fill. The text pass
+    // alone raises the inactive label's ink, so switching stays visually still.
     if let Some(git) = panel.git() {
         let count = git.unstaged.len() + git.staged.len();
         if count > 0 {
@@ -1250,13 +1247,7 @@ pub(super) fn push_quads(
 
     if panel.view == PanelView::Files {
         let tools = panel_tools_layout(layout);
-        super::ui::surface::push_stroke(
-            quads,
-            tools.directory,
-            radius,
-            scale,
-            sk.hairline,
-        );
+        super::ui::surface::push_stroke(quads, tools.directory, radius, scale, sk.hairline);
         quads.push(UiQuad::solid(
             tools.directory.0,
             tools.directory.1,
@@ -1525,56 +1516,58 @@ pub(super) fn draw_text(
     let segment_x = px + s(12.0);
     let segment_w = pw - s(24.0);
     let slot_w = (segment_w - s(4.0)) * 0.5;
-    let header_ty = py + s(12.0) + (s(32.0) - cell_h) / 2.0;
+    let header_ty = widgets::centered_y(py + s(12.0), s(32.0), cell_h);
     let files_hover = panel.hover == PanelHit::ViewFiles;
     let git_hover = panel.hover == PanelHit::ViewGit;
-    let files_lift = if files_hover && panel.view != PanelView::Files { -s(1.0) } else { 0.0 };
-    let git_lift = if git_hover && panel.view != PanelView::Git { -s(1.0) } else { 0.0 };
-    let (files_ink, git_ink) = match panel.view {
-        PanelView::Files => (sk.ink_strong, sk.ink_dim),
-        PanelView::Git => (sk.ink_dim, sk.ink_strong),
+    let files_ink = if panel.view == PanelView::Files {
+        sk.ink_strong
+    } else if files_hover {
+        sk.ink
+    } else {
+        sk.ink_dim
+    };
+    let git_ink = if panel.view == PanelView::Git {
+        sk.ink_strong
+    } else if git_hover {
+        sk.ink
+    } else {
+        sk.ink_dim
     };
     let files_content_w = cell_w + s(6.0) + cell_w * 4.0;
     let fx = segment_x + s(2.0) + (slot_w - files_content_w) * 0.5;
-    r.draw_chrome_text(size, fx, header_ty + files_lift, files_ink, ICON_FOLDER, gc);
-    r.draw_chrome_text(
-        size,
-        fx + cell_w + s(6.0),
-        header_ty + files_lift,
-        files_ink,
-        "文件",
-        gc,
-    );
+    r.draw_chrome_text(size, fx, header_ty, files_ink, ICON_FOLDER, gc);
+    r.draw_chrome_text(size, fx + cell_w + s(6.0), header_ty, files_ink, "文件", gc);
     let git_count = panel.git().map(|git| git.unstaged.len() + git.staged.len()).unwrap_or(0);
     let badge = (git_count > 0).then(|| git_count.to_string());
     let badge_w = badge.as_ref().map_or(0.0, |text| text.len() as f32 * cell_w + s(12.0));
-    let git_content_w = cell_w
-        + s(6.0)
-        + cell_w * 3.0
-        + if badge.is_some() { s(6.0) + badge_w } else { 0.0 };
+    let git_content_w =
+        cell_w + s(6.0) + cell_w * 3.0 + if badge.is_some() { s(6.0) + badge_w } else { 0.0 };
     let gx = segment_x + s(2.0) + slot_w + (slot_w - git_content_w) * 0.5;
-    r.draw_chrome_text(size, gx, header_ty + git_lift, git_ink, ICON_BRANCH, gc);
+    r.draw_chrome_text(size, gx, header_ty, git_ink, ICON_BRANCH, gc);
     let git_label_x = gx + cell_w + s(6.0);
-    r.draw_chrome_text(size, git_label_x, header_ty + git_lift, git_ink, "Git", gc);
+    r.draw_chrome_text(size, git_label_x, header_ty, git_ink, "Git", gc);
     if let Some(badge) = badge {
         r.draw_chrome_text(
             size,
             git_label_x + cell_w * 3.0 + s(12.0),
-            header_ty + git_lift,
+            header_ty,
             sk.accent,
             &badge,
             gc,
         );
     }
 
-    let summary_y = panel_tools_layout(layout).directory.1 + (s(26.0) - cell_h) / 2.0;
+    let directory = panel_tools_layout(layout).directory;
+    let summary_y = widgets::centered_y(directory.1, directory.3, cell_h);
     let scroll = panel.scroll;
-    let row_ty = |i: usize| layout.list_y + i as f32 * layout.row_h + (layout.row_h - cell_h) / 2.0;
+    let row_ty = |i: usize| {
+        widgets::centered_y(layout.list_y + i as f32 * layout.row_h, layout.row_h, cell_h)
+    };
 
     match panel.view {
         PanelView::Files => {
             let tools = panel_tools_layout(layout);
-            let path_x = tools.directory.0 + s(9.0) + cell_w + s(6.0);
+            let path_x = tools.directory.0 + s(9.0) + cell_w + s(10.0);
             let summary_cols =
                 (((tools.directory.0 + tools.directory.2 - s(9.0) - path_x) / cell_w).floor()
                     as usize)
@@ -1590,11 +1583,8 @@ pub(super) fn draw_text(
                     sk.ink_dim,
                 )
             };
-            let path_ink = if panel.hover == PanelHit::OpenDirectory {
-                sk.ink_strong
-            } else {
-                summary_ink
-            };
+            let path_ink =
+                if panel.hover == PanelHit::OpenDirectory { sk.ink_strong } else { summary_ink };
             r.draw_chrome_text(
                 size,
                 tools.directory.0 + s(9.0),
@@ -1613,9 +1603,7 @@ pub(super) fn draw_text(
                     sk.ink_strong
                 } else if !enabled {
                     sk.ink_faint
-                } else if hit == PanelHit::FollowCurrentDirectory
-                    && !panel.custom_root_active()
-                {
+                } else if hit == PanelHit::FollowCurrentDirectory && !panel.custom_root_active() {
                     sk.accent
                 } else {
                     sk.ink_dim
@@ -1627,13 +1615,13 @@ pub(super) fn draw_text(
                     _ => continue,
                 };
                 let tx = x + ((w - cell_w) / 2.0).max(0.0);
-                let ty = y + (h - cell_h) / 2.0;
+                let ty = widgets::centered_y(y, h, cell_h);
                 r.draw_chrome_text(size, tx, ty, ink, label, gc);
             }
 
             // Filter box: magnifier + query (caret while focused) or hint.
             let (sx, sy, _, sh) = layout.search;
-            let search_ty = sy + (sh - cell_h) / 2.0;
+            let search_ty = widgets::centered_y(sy, sh, cell_h);
             r.draw_chrome_text(size, sx + s(8.0), search_ty, sk.ink_faint, ICON_SEARCH, gc);
             let qx = sx + s(8.0) + cell_w * 1.8;
             if panel.search.is_empty() && !panel.search_focus {
@@ -1747,7 +1735,7 @@ pub(super) fn draw_text(
             // ends inside the chip.
             if let Some(drag) = panel.drag_file.as_ref().filter(|d| d.active) {
                 let (mx, my) = drag.pos;
-                let ty = my + s(12.0) + (s(26.0) - cell_h) / 2.0;
+                let ty = widgets::centered_y(my + s(14.0), s(26.0), cell_h);
                 let chip_w = (drag_chip_cols(&drag.name) as f32 * s(8.0) + s(32.0)).min(s(220.0));
                 let max_cols = (((chip_w - s(26.0)) / cell_w).floor() as usize).max(2);
                 r.draw_chrome_text(
@@ -1794,7 +1782,7 @@ pub(super) fn draw_text(
                 // Action strip: commit-message input while composing, else the
                 // 暂存 / 提交 / 推送 buttons (disabled = dim ink).
                 let (sx, sy, sw, sh) = layout.search;
-                let strip_ty = sy + (sh - cell_h) / 2.0;
+                let strip_ty = widgets::centered_y(sy, sh, cell_h);
                 if panel.commit_focus {
                     let caret = if !panel.commit_all_selected() && super::caret_blink_on() {
                         "▏"
@@ -1911,7 +1899,7 @@ pub(super) fn draw_text(
         r.draw_chrome_text(
             size,
             tooltip.0 + s(8.0),
-            tooltip.1 + (tooltip.3 - cell_h) / 2.0,
+            widgets::centered_y(tooltip.1, tooltip.3, cell_h),
             sk.ink_strong,
             label,
             gc,

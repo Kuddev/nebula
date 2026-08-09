@@ -138,6 +138,10 @@ pub struct Window {
     current_mouse_cursor: CursorIcon,
     mouse_visible: bool,
     ime_inhibitor: ImeInhibitor,
+
+    /// 上次推给系统的 IME 光标区域（物理像素，整数圆整）。见
+    /// [`Self::push_ime_cursor_area`] ——值没变就不再打扰输入法进程。
+    ime_cursor_area: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
 }
 
 impl Window {
@@ -238,6 +242,7 @@ impl Window {
             window,
             is_x11,
             ime_inhibitor: Default::default(),
+            ime_cursor_area: std::cell::Cell::new(None),
         })
     }
 
@@ -626,7 +631,34 @@ impl Window {
         if self.ime_inhibitor.contains(inhibitor) != inhibit {
             self.ime_inhibitor.set(inhibitor, inhibit);
             self.window.set_ime_allowed(self.ime_inhibitor.is_empty());
+            // 重新关联 IME 上下文后，输入法侧的窗口位置状态从零开始。
+            self.reset_ime_cursor_area_cache();
         }
+    }
+
+    /// 把 IME 光标区域推给系统前先做值去重。
+    ///
+    /// Windows 上这最终落到 IMM32 的 `ImmSetCompositionWindow` +
+    /// `ImmSetCandidateWindow`。微软拼音这类 TSF 输入法经 imm32→msctf 桥
+    /// 接到输入法宿主进程（ctfmon / TextInputHost），是**同步跨进程**调用；
+    /// 而渲染路径每帧都在推位置——光标闪烁、输出滚动、无 preedit 的兜底
+    /// 分支全算帧。输入法宿主一忙，这串调用就把渲染线程挂住：PowerShell
+    /// 中文输入"有时卡顿"而系统 conhost 不卡（它只在光标真移动时设置一次）
+    /// 的根因（2026-08-09 诊断）。矩形没变就直接返回，真正换格才推。
+    fn push_ime_cursor_area(&self, x: f64, y: f64, w: f64, h: f64) {
+        let key = (x.round() as i32, y.round() as i32, w.round() as i32, h.round() as i32);
+        if self.ime_cursor_area.get() == Some(key) {
+            return;
+        }
+        self.ime_cursor_area.set(Some(key));
+        self.window
+            .set_ime_cursor_area(PhysicalPosition::new(x, y), PhysicalSize::new(w, h));
+    }
+
+    /// 缓存失效：焦点或 IME 关联变化后，输入法侧的窗口状态可能已被重置，
+    /// 下一次位置必须重推（即使矩形与失效前相同）。
+    pub fn reset_ime_cursor_area_cache(&self) {
+        self.ime_cursor_area.set(None);
     }
 
     /// Adjust the IME editor position according to the new location of the cursor.
@@ -644,20 +676,14 @@ impl Window {
         let width = size.cell_width() as f64 * 2.;
         let height = size.cell_height as f64;
 
-        self.window.set_ime_cursor_area(
-            PhysicalPosition::new(nspot_x, nspot_y),
-            PhysicalSize::new(width, height),
-        );
+        self.push_ime_cursor_area(nspot_x, nspot_y, width, height);
     }
 
     /// Anchor the IME candidate window to an arbitrary physical-pixel rect,
     /// used for chrome-level editors (tab rename) that live outside the grid.
     /// The caret X/Y and cell size are already in physical pixels.
     pub fn set_ime_cursor_area_px(&self, x: f32, y: f32, w: f32, h: f32) {
-        self.window.set_ime_cursor_area(
-            PhysicalPosition::new(x as f64, y as f64),
-            PhysicalSize::new(w as f64, h as f64),
-        );
+        self.push_ime_cursor_area(x as f64, y as f64, w as f64, h as f64);
     }
 
     /// Disable macOS window shadows.

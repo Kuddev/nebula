@@ -54,6 +54,7 @@ pub mod guardrails;
 pub mod icons;
 pub mod keycap;
 pub mod os_icons;
+pub mod overlay_list;
 pub mod surface;
 pub mod text_field;
 pub mod theme;

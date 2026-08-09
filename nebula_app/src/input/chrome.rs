@@ -796,6 +796,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     hidden_host_count,
                     ssh_host_count,
                 );
+                // Keep the primary-button target for the settings renderer's
+                // HTML-like toggle active state until the matching release.
+                self.ctx.display().set_settings_pressed(settings_hit);
                 // 打开的下拉框独占第一击：命中不属于它（选项行或锚行）时，
                 // 这一击只负责关闭浮层，绝不让下层控件借机误触发。
                 if settings_dropdown.is_some() && !settings_dropdown_keeps_open(settings_hit) {
@@ -824,6 +827,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    // 只读行：hover 有色变反馈，点击与点空白同义（无动作）。
+                    crate::display::SettingsHit::KeymapReadonlyRow(_) => {},
                     crate::display::SettingsHit::BackupSelection(index) => {
                         self.ctx.display().toggle_backup_selection(index);
                         self.ctx.mark_dirty();
@@ -1014,11 +1019,6 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
-                    crate::display::SettingsHit::SshUpgrade => {
-                        self.ctx.display().request_ssh_upgrade();
-                        self.ctx.mark_dirty();
-                        return;
-                    },
                     crate::display::SettingsHit::FetchToggle => {
                         self.ctx.display().toggle_fetch();
                         self.ctx.mark_dirty();
@@ -1181,6 +1181,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     crate::display::SettingsHit::None => {},
                 }
                 let chrome_hit = self.ctx.display().chrome_hit(x, y);
+                crate::display::nebula_debug_log(format!(
+                    "chrome_press hit={chrome_hit:?} xy=({x:.0},{y:.0})"
+                ));
                 if self.ctx.display().nebula_special_tab_active
                     && matches!(
                         chrome_hit,

@@ -517,8 +517,12 @@ impl NebulaTheme {
                 hover: Rgba::new(100, 116, 139, 33),
                 hover_strong: Rgba::new(100, 116, 139, 52),
                 track_off: Rgba::new(100, 116, 139, 78),
-                knob_off: Rgba::new(255, 255, 255, 255),
-                knob_on: Rgba::new(248, 250, 252, 255), // slate-50
+                toggle_track_off: Rgba::new(226, 232, 240, 255),
+                toggle_track_on: Rgba::new(100, 116, 139, 255),
+                toggle_border_off: Rgba::new(203, 213, 225, 255),
+                toggle_border_on: Rgba::new(71, 85, 105, 255),
+                knob_off: Rgba::new(148, 163, 184, 255),
+                knob_on: Rgba::new(245, 247, 250, 255), // neutral near-white
                 scrollbar_thumb: Rgba::new(71, 85, 105, 0), // slate-600
                 is_light: true,
             }
@@ -565,8 +569,15 @@ impl NebulaTheme {
                 hover: Rgba::new(203, 213, 225, 35),
                 hover_strong: Rgba::new(203, 213, 225, 53),
                 track_off: Rgba::new(203, 213, 225, 45),
-                knob_off: Rgba::new(203, 213, 225, 255), // slate-300
-                knob_on: Rgba::new(15, 23, 42, 255),     // slate-900
+                // Dark switches intentionally follow the supplied HTML colors
+                // instead of inheriting the theme accent. A boolean state must
+                // not turn into another saturated blue control.
+                toggle_track_off: Rgba::new(40, 44, 52, 255), // #282c34
+                toggle_track_on: Rgba::new(30, 34, 43, 255),  // #1e222b
+                toggle_border_off: Rgba::new(63, 68, 79, 255), // #3f444f
+                toggle_border_on: Rgba::new(92, 99, 112, 255), // #5c6370
+                knob_off: Rgba::new(171, 178, 191, 255),      // #abb2bf
+                knob_on: Rgba::new(245, 247, 250, 255),       // low-saturation white
                 scrollbar_thumb: Rgba::new(148, 163, 184, 0), // slate-400
                 is_light: false,
             }
@@ -672,6 +683,12 @@ pub(crate) struct Skin {
     pub(crate) hover_strong: Rgba,
     /// Toggle-off track / slider rail.
     pub(crate) track_off: Rgba,
+    /// Complete toggle palette. These are separate from the generic slider
+    /// rail because the selected capsule owns an opaque background state.
+    pub(crate) toggle_track_off: Rgba,
+    pub(crate) toggle_track_on: Rgba,
+    pub(crate) toggle_border_off: Rgba,
+    pub(crate) toggle_border_on: Rgba,
     /// Toggle knob when off / on (chosen to contrast the track).
     pub(crate) knob_off: Rgba,
     pub(crate) knob_on: Rgba,

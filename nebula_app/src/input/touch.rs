@@ -11,7 +11,7 @@ use nebula_terminal::term::TermMode;
 use crate::display::window::ImeInhibitor;
 use crate::event::{TouchPurpose, TouchZoom};
 
-use super::{ActionContext, Processor};
+use super::{ActionContext, Processor, terminal_input};
 
 /// Distance before a touch input is considered a drag.
 const MAX_TAP_DISTANCE: f64 = 20.;
@@ -28,7 +28,28 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
             self.ctx.mark_dirty();
         }
-        if self.ctx.terminal().mode().contains(TermMode::FOCUS_IN_OUT) {
+        let mode = *self.ctx.terminal().mode();
+        if !is_focused {
+            // Held modifiers' real key-ups go to whichever window is focused
+            // next; release them on the wire first so the application's
+            // modifier state cannot dangle across an Alt+Tab round-trip.
+            // The held set comes from our own key-event tracking — winit has
+            // already cleared `ctx.modifiers()` by the time focus loss is
+            // delivered (ModifiersChanged(empty) precedes Focused(false)).
+            let mods = super::keyboard::take_held_modifiers();
+            let key_ups = terminal_input::build_focus_loss_key_ups(mods, mode);
+            if !key_ups.is_empty() {
+                self.ctx.write_to_pty(key_ups);
+            }
+        }
+        // Focus reports go out when the app subscribed (DECSET 1004) — and
+        // also, per ConPTY spec #4999, whenever Win32 input mode (9001) is
+        // active: ConPTY consumes `CSI I`/`CSI O` itself to synthesize the
+        // FOCUS_EVENT_RECORDs Win32 console programs read, and only forwards
+        // the VT form to clients that asked via 1004. A host that activated
+        // 9001 always parses these, so nothing can leak into the shell as
+        // typed input; plain VT sessions keep the 1004-only behavior.
+        if mode.intersects(TermMode::FOCUS_IN_OUT | TermMode::WIN32_INPUT_MODE) {
             let chr = if is_focused { "I" } else { "O" };
 
             let msg = format!("\x1b[{chr}");

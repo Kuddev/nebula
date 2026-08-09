@@ -64,8 +64,8 @@ pub(crate) fn push_add(quads: &mut Vec<UiQuad>, rect: (f32, f32, f32, f32), scal
     }
     let center_x = x + width * 0.5;
     let center_y = y + height * 0.5;
-    let stroke = (1.5 * scale).max(1.0);
-    let arm = 7.0 * scale;
+    let stroke = (1.1 * scale).max(1.0);
+    let arm = 6.0 * scale;
     quads.push(UiQuad::solid(
         center_x - arm,
         center_y - stroke * 0.5,
@@ -129,6 +129,38 @@ fn push_rounded_outline(
         y + stroke,
         size - 2.0 * stroke,
         size - 2.0 * stroke,
+        (radius - stroke).max(0.0),
+        cutout,
+    ));
+}
+
+/// [`push_rounded_outline`] 的任意宽高版本，设置导航图标的统一骨架。
+/// 外沿先吸附整像素（清晰度铁律），radius 允许到半高/半宽——胶囊与正圆
+/// 都从这一个原语出（鼠标、地球、滑块环）。
+fn push_rounded_frame(
+    quads: &mut Vec<UiQuad>,
+    (x0, y0, x1, y1): (f32, f32, f32, f32),
+    radius: f32,
+    stroke: f32,
+    ink: Rgba,
+    cutout: Rgba,
+) {
+    let x0 = x0.round();
+    let y0 = y0.round();
+    let x1 = x1.round();
+    let y1 = y1.round();
+    let width = x1 - x0;
+    let height = y1 - y0;
+    if width < stroke * 2.0 || height < stroke * 2.0 {
+        return;
+    }
+    let radius = radius.min(width * 0.5).min(height * 0.5);
+    quads.push(UiQuad::solid(x0, y0, width, height, radius, ink));
+    quads.push(UiQuad::solid(
+        x0 + stroke,
+        y0 + stroke,
+        width - 2.0 * stroke,
+        height - 2.0 * stroke,
         (radius - stroke).max(0.0),
         cutout,
     ));
@@ -311,180 +343,225 @@ pub(crate) enum SettingsNavIcon {
     Appearance,
     Profiles,
     Ssh,
+    Proxy,
     Interaction,
     Keymap,
     Advanced,
     Backup,
 }
 
-fn push_rect_outline(
-    quads: &mut Vec<UiQuad>,
-    (x, y, width, height): (f32, f32, f32, f32),
-    stroke: f32,
-    ink: Rgba,
-) {
-    push_segment(quads, (x, y), (x + width, y), stroke, ink);
-    push_segment(quads, (x + width, y), (x + width, y + height), stroke, ink);
-    push_segment(quads, (x + width, y + height), (x, y + height), stroke, ink);
-    push_segment(quads, (x, y + height), (x, y), stroke, ink);
+/// Whole-pixel horizontal bar (radius 0, snapped).
+fn push_hbar(quads: &mut Vec<UiQuad>, x0: f32, x1: f32, y_center: f32, stroke: f32, ink: Rgba) {
+    let y = (y_center - stroke * 0.5).round();
+    let x0 = x0.round();
+    quads.push(UiQuad::solid(x0, y, (x1.round() - x0).max(1.0), stroke, 0.0, ink));
 }
 
+/// Whole-pixel vertical bar (radius 0, snapped).
+fn push_vbar(quads: &mut Vec<UiQuad>, x_center: f32, y0: f32, y1: f32, stroke: f32, ink: Rgba) {
+    let x = (x_center - stroke * 0.5).round();
+    let y0 = y0.round();
+    quads.push(UiQuad::solid(x, y0, stroke, (y1.round() - y0).max(1.0), 0.0, ink));
+}
+
+/// Round dot with a whole-pixel bounding box.
+fn push_dot(quads: &mut Vec<UiQuad>, center: (f32, f32), diameter: f32, ink: Rgba) {
+    let d = diameter.round().max(2.0);
+    let x = (center.0 - d * 0.5).round();
+    let y = (center.1 - d * 0.5).round();
+    quads.push(UiQuad::solid(x, y, d, d, d * 0.5, ink));
+}
+
+/// 设置导航图标。`cutout` 是图标落点的**有效底色**（面板色与选中/悬浮
+/// 药丸合成后的结果）——整套图标全靠挖空手法做空心轮廓，传错底色环心
+/// 就会变成一块色斑，见 [`blend_over`]。
+///
+/// 设计语言（2026-08-09 用户裁定：线性、干净、圆润，不要方方正正）：
+/// - 一律细线轮廓，骨架统一走 [`push_rounded_frame`]——盒形图标全带圆角，
+///   胶囊 / 正圆 / 跑道也是同一原语（radius 顶到半宽即是）；
+/// - 不用大面积实心块，空心靠 cutout 挖，环内是真的透出底色；
+/// - 清晰度铁律不动摇（与 `draw_ui_text` 的整像素锚点同源）：中心点先
+///   吸附整数物理像素，横竖笔画从整数派生、宽取整数（`round().max(1)`），
+///   斜线仍走 [`push_segment`] 的 poly 抗锯齿——斜边柔边是形状的一部分。
 pub(crate) fn push_settings_nav_icon(
     quads: &mut Vec<UiQuad>,
     icon: SettingsNavIcon,
     rect: (f32, f32, f32, f32),
     scale: f32,
     ink: Rgba,
+    cutout: Rgba,
 ) {
     let (x, y, width, height) = rect;
     if width <= 0.0 || height <= 0.0 {
         return;
     }
-    let cx = x + width * 0.5;
-    let cy = y + height * 0.5;
-    let stroke = (1.25 * scale).max(1.0);
-    let arm = |v: f32| v * scale;
+    let cx = (x + width * 0.5).round();
+    let cy = (y + height * 0.5).round();
+    let stroke = (1.3 * scale).round().max(1.0);
+    let u = |v: f32| v * scale;
     match icon {
         SettingsNavIcon::Appearance => {
-            // A small sun/spark reads as appearance without competing with the
-            // section label at the compact 13px icon size.
-            quads.push(UiQuad::solid(
-                cx - arm(3.0),
-                cy - arm(3.0),
-                arm(6.0),
-                arm(6.0),
-                arm(3.0),
+            // Sun with a hollow core + 8 rays. The solid core read as a blob
+            // next to the new outline family; a ring keeps the page linear.
+            let core = u(6.2).round().max(4.0);
+            push_rounded_frame(
+                quads,
+                (cx - core * 0.5, cy - core * 0.5, cx + core * 0.5, cy + core * 0.5),
+                core * 0.5,
+                stroke,
                 ink,
-            ));
-            for (from, to) in [
-                ((cx, cy - arm(7.0)), (cx, cy - arm(5.0))),
-                ((cx, cy + arm(5.0)), (cx, cy + arm(7.0))),
-                ((cx - arm(7.0), cy), (cx - arm(5.0), cy)),
-                ((cx + arm(5.0), cy), (cx + arm(7.0), cy)),
-            ] {
-                push_segment(quads, from, to, stroke, ink);
+                cutout,
+            );
+            let inner = u(5.0);
+            let outer = u(7.4);
+            push_vbar(quads, cx, cy - outer, cy - inner, stroke, ink);
+            push_vbar(quads, cx, cy + inner, cy + outer, stroke, ink);
+            push_hbar(quads, cx - outer, cx - inner, cy, stroke, ink);
+            push_hbar(quads, cx + inner, cx + outer, cy, stroke, ink);
+            let diag_inner = inner * std::f32::consts::FRAC_1_SQRT_2;
+            let diag_outer = outer * std::f32::consts::FRAC_1_SQRT_2;
+            for (sx, sy) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                push_segment(
+                    quads,
+                    (cx + sx * diag_inner, cy + sy * diag_inner),
+                    (cx + sx * diag_outer, cy + sy * diag_outer),
+                    stroke,
+                    ink,
+                );
             }
         },
         SettingsNavIcon::Profiles => {
-            push_rect_outline(
+            // Rounded terminal window with a prompt: the shell-profile mark.
+            push_rounded_frame(
                 quads,
-                (cx - arm(6.0), cy - arm(5.0), arm(11.0), arm(10.0)),
+                (cx - u(7.2), cy - u(5.6), cx + u(7.2), cy + u(5.6)),
+                u(2.6),
+                stroke,
+                ink,
+                cutout,
+            );
+            push_segment(
+                quads,
+                (cx - u(4.4), cy - u(2.2)),
+                (cx - u(2.0), cy + u(0.2)),
                 stroke,
                 ink,
             );
             push_segment(
                 quads,
-                (cx - arm(3.0), cy - arm(1.0)),
-                (cx + arm(3.0), cy - arm(1.0)),
+                (cx - u(2.0), cy + u(0.2)),
+                (cx - u(4.4), cy + u(2.6)),
                 stroke,
                 ink,
             );
-            push_segment(
-                quads,
-                (cx - arm(3.0), cy + arm(2.0)),
-                (cx + arm(2.0), cy + arm(2.0)),
-                stroke,
-                ink,
-            );
+            push_hbar(quads, cx + u(0.8), cx + u(4.6), cy + u(2.3), stroke, ink);
         },
         SettingsNavIcon::Ssh => {
-            push_rect_outline(
+            // Server stack: two rounded chassis, each with a status LED and a
+            // vent slot. Same silhouette as before, corners softened.
+            push_rounded_frame(
                 quads,
-                (cx - arm(7.0), cy - arm(5.0), arm(14.0), arm(10.0)),
+                (cx - u(7.0), cy - u(6.4), cx + u(7.0), cy - u(1.0)),
+                u(1.9),
                 stroke,
                 ink,
+                cutout,
             );
-            push_segment(
+            push_rounded_frame(
                 quads,
-                (cx - arm(4.5), cy - arm(1.0)),
-                (cx - arm(1.5), cy + arm(1.5)),
+                (cx - u(7.0), cy + u(1.0), cx + u(7.0), cy + u(6.4)),
+                u(1.9),
                 stroke,
                 ink,
+                cutout,
             );
-            push_segment(
+            for mid in [cy - u(3.7), cy + u(3.7)] {
+                push_dot(quads, (cx - u(4.3), mid), u(1.9), ink);
+                push_hbar(quads, cx + u(0.8), cx + u(4.6), mid, stroke, ink);
+            }
+        },
+        SettingsNavIcon::Proxy => {
+            // Globe（用户 2026-08-09 点名：网络图标要地球）：外环 + 中央
+            // 经线 + 赤道。经线是 radius=半宽的竖跑道，13px 下与椭圆无从
+            // 分辨；顶底端正好落在外环内壁（同为整数坐标，零缝隙）。绘制
+            // 顺序即层义：外环 → 经线 → 赤道最后横贯，网格交叉才成立。
+            let d = u(15.0).round().max(9.0);
+            let gx = (cx - d * 0.5).round();
+            let gy = (cy - d * 0.5).round();
+            push_rounded_frame(quads, (gx, gy, gx + d, gy + d), d * 0.5, stroke, ink, cutout);
+            let mw = u(7.0).round().max(3.0);
+            push_rounded_frame(
                 quads,
-                (cx - arm(1.5), cy + arm(1.5)),
-                (cx - arm(4.5), cy + arm(4.0)),
+                (cx - mw * 0.5, gy + stroke, cx + mw * 0.5, gy + d - stroke),
+                mw * 0.5,
                 stroke,
                 ink,
+                cutout,
             );
-            push_segment(
-                quads,
-                (cx + arm(1.5), cy + arm(3.5)),
-                (cx + arm(4.5), cy + arm(3.5)),
-                stroke,
-                ink,
-            );
+            push_hbar(quads, gx + stroke, gx + d - stroke, cy, stroke, ink);
         },
         SettingsNavIcon::Interaction => {
-            push_segment(
-                quads,
-                (cx - arm(5.0), cy - arm(6.0)),
-                (cx - arm(2.0), cy + arm(6.0)),
-                stroke,
-                ink,
-            );
-            push_segment(
-                quads,
-                (cx - arm(5.0), cy - arm(6.0)),
-                (cx + arm(5.5), cy - arm(1.5)),
-                stroke,
-                ink,
-            );
-            push_segment(quads, (cx + arm(5.5), cy - arm(1.5)), (cx + arm(1.0), cy), stroke, ink);
-            push_segment(quads, (cx + arm(1.0), cy), (cx + arm(5.0), cy + arm(5.5)), stroke, ink);
+            // Mouse: a capsule outline with a scroll-wheel tick. The old
+            // solid pointer-with-ripples was the loudest mark on the rail;
+            // the page is about mouse behavior, so draw the mouse itself.
+            let mw = u(9.2).round().max(6.0);
+            let mh = u(15.0).round();
+            let mx = (cx - mw * 0.5).round();
+            let my = (cy - mh * 0.5).round();
+            push_rounded_frame(quads, (mx, my, mx + mw, my + mh), mw * 0.5, stroke, ink, cutout);
+            push_vbar(quads, cx, my + u(3.4), my + u(6.2), stroke, ink);
         },
         SettingsNavIcon::Keymap => {
-            push_rect_outline(
-                quads,
-                (cx - arm(7.0), cy - arm(5.0), arm(14.0), arm(10.0)),
-                stroke,
+            // Single keycap with a thick bottom lip——原型 `.kbd` 键帽的
+            // border-bottom 立体语言。键盘缩到 13px 只剩「框 + 几个点」，
+            // 一颗真键帽反而读得出「按键」。
+            let k = u(12.8).round();
+            let kx = (cx - k * 0.5).round();
+            let ky = (cy - k * 0.5).round();
+            push_rounded_frame(quads, (kx, ky, kx + k, ky + k), u(3.2), stroke, ink, cutout);
+            let lip = u(1.6).round().max(1.0);
+            quads.push(UiQuad::solid(
+                kx + stroke,
+                ky + k - stroke - lip,
+                k - 2.0 * stroke,
+                lip,
+                lip * 0.4,
                 ink,
-            );
-            for dx in [-4.0, 0.0, 4.0] {
-                quads.push(UiQuad::solid(
-                    cx + arm(dx) - stroke * 0.5,
-                    cy - arm(2.5),
-                    stroke,
-                    stroke,
-                    stroke * 0.5,
-                    ink,
-                ));
-            }
-            push_segment(
-                quads,
-                (cx - arm(4.5), cy + arm(3.0)),
-                (cx + arm(4.5), cy + arm(3.0)),
-                stroke,
-                ink,
-            );
+            ));
         },
         SettingsNavIcon::Advanced => {
-            push_rect_outline(
-                quads,
-                (cx - arm(4.0), cy - arm(4.0), arm(8.0), arm(8.0)),
-                stroke,
-                ink,
-            );
-            for (from, to) in [
-                ((cx, cy - arm(7.0)), (cx, cy - arm(4.0))),
-                ((cx, cy + arm(4.0)), (cx, cy + arm(7.0))),
-                ((cx - arm(7.0), cy), (cx - arm(4.0), cy)),
-                ((cx + arm(4.0), cy), (cx + arm(7.0), cy)),
-            ] {
-                push_segment(quads, from, to, stroke, ink);
+            // Three slider tracks with hollow knobs. The ring's cutout eats
+            // the track inside it, so the knob visibly sits *on* the rail.
+            for (offset, knob) in [(-4.4, -2.6), (0.0, 2.4), (4.4, -0.8)] {
+                let track_y = cy + u(offset);
+                push_hbar(quads, cx - u(7.0), cx + u(7.0), track_y, stroke, ink);
+                let kd = u(4.8).round().max(3.0);
+                let knob_x = (cx + u(knob) - kd * 0.5).round();
+                let knob_y = ((track_y - stroke * 0.5).round() + stroke * 0.5 - kd * 0.5).round();
+                push_rounded_frame(
+                    quads,
+                    (knob_x, knob_y, knob_x + kd, knob_y + kd),
+                    kd * 0.5,
+                    stroke,
+                    ink,
+                    cutout,
+                );
             }
         },
         SettingsNavIcon::Backup => {
-            push_segment(quads, (cx, cy - arm(7.0)), (cx, cy + arm(2.0)), stroke, ink);
-            push_segment(quads, (cx - arm(3.0), cy - arm(1.0)), (cx, cy + arm(2.0)), stroke, ink);
-            push_segment(quads, (cx + arm(3.0), cy - arm(1.0)), (cx, cy + arm(2.0)), stroke, ink);
-            push_rect_outline(
-                quads,
-                (cx - arm(6.0), cy + arm(2.5), arm(12.0), arm(4.0)),
-                stroke,
-                ink,
-            );
+            // Down-arrow into a rounded tray. The tray is a full rounded
+            // frame whose top edge is erased between the corner arcs——the
+            // leftover arc stubs become the tray's rounded lips.
+            push_vbar(quads, cx, cy - u(6.8), cy + u(0.8), stroke, ink);
+            push_segment(quads, (cx - u(2.9), cy - u(1.2)), (cx, cy + u(1.8)), stroke, ink);
+            push_segment(quads, (cx + u(2.9), cy - u(1.2)), (cx, cy + u(1.8)), stroke, ink);
+            let tw = u(13.6).round();
+            let th = u(5.0).round();
+            let tx = (cx - tw * 0.5).round();
+            let ty = (cy + u(2.2)).round();
+            let radius = u(2.0).round();
+            push_rounded_frame(quads, (tx, ty, tx + tw, ty + th), radius, stroke, ink, cutout);
+            quads.push(UiQuad::solid(tx + radius, ty, tw - 2.0 * radius, stroke, 0.0, cutout));
         },
     }
 }

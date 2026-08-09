@@ -1720,6 +1720,17 @@ pub fn palette_layout(
     scale: f32,
     cell_w: f32,
 ) -> PaletteLayout {
+    palette_layout_with_launcher_bounds(model, win_w, win_h, scale, cell_w, None)
+}
+
+pub(crate) fn palette_layout_with_launcher_bounds(
+    model: &CommandPalette,
+    win_w: f32,
+    win_h: f32,
+    scale: f32,
+    cell_w: f32,
+    launcher_bounds: Option<(f32, f32)>,
+) -> PaletteLayout {
     let s = |v: f32| v * scale;
     let cell_w = cell_w.max(s(1.0));
     let margin = s(8.0);
@@ -1755,7 +1766,12 @@ pub fn palette_layout(
             + launcher_list_pad_bottom
             + launcher_group_reserve
             + footer_h;
-        (((win_h - margin * 2.0 - fixed).max(row_h) / row_h).floor() as usize).clamp(1, 7)
+        (((win_h - margin * 2.0 - fixed).max(row_h) / row_h).floor() as usize).clamp(1, 5)
+    } else if model.mode == PaletteMode::AiSessions {
+        // Session recovery is a quick chooser, not a history browser. Six
+        // rows keep the pane scan-friendly while the existing scrollbar still
+        // exposes older sessions.
+        6usize
     } else if cards {
         10usize
     } else {
@@ -1866,13 +1882,11 @@ pub fn palette_layout(
         y = y.max(group_reserve + max_rows as f32 * row_h + row_gaps + s(4.0));
     }
 
-    let pw = s(if launcher {
-        640.0
-    } else if cards {
-        620.0
+    let desired_pw = if launcher {
+        launcher_bounds.map_or(s(960.0), |(left, right)| (right - left).max(0.0))
     } else {
-        640.0
-    })
+        s(960.0)
+    }
     .min(win_w - 2.0 * margin);
     let ph = if launcher {
         launcher_top_pad
@@ -1886,9 +1900,27 @@ pub fn palette_layout(
     } else {
         pad + input_h + s(8.0) + chip_band_h + y + if cards { footer_h } else { pad }
     };
-    let px = ((win_w - pw) * 0.5).max(margin);
-    let centered_y = ((win_h - ph) * 0.5).max(s(48.0));
-    let py = if launcher { s(96.0).min((win_h - ph - margin).max(margin)) } else { centered_y };
+    let pane = if launcher {
+        launcher_bounds.map_or_else(
+            || widgets::pane_geometry(win_w, win_h, scale, desired_pw, ph, 8.0, 12.0, Some(96.0)),
+            |bounds| {
+                widgets::pane_geometry_in_horizontal_bounds(
+                    win_w,
+                    win_h,
+                    scale,
+                    desired_pw,
+                    ph,
+                    8.0,
+                    12.0,
+                    Some(96.0),
+                    bounds,
+                )
+            },
+        )
+    } else {
+        widgets::pane_geometry(win_w, win_h, scale, desired_pw, ph, 8.0, 12.0, None)
+    };
+    let (px, py, pw, ph) = pane.panel;
 
     let input = if launcher {
         (px + s(16.0), py + launcher_top_pad, pw - s(32.0), input_h)
@@ -1971,9 +2003,10 @@ pub fn palette_layout(
 // ---- rendering (the parent `display::mod` hands in the model + renderer;
 // this module owns the palette's pixels — same split as `side_panel.rs`) ----
 
+use super::ui::overlay_list::{self, RowState};
 use super::ui::surface;
 use super::ui::widgets::{self, ChipState};
-use crate::renderer::ui::{Rgba, UiQuad};
+use crate::renderer::ui::UiQuad;
 use crate::renderer::{GlyphCache, Renderer};
 
 /// 卡片列的左右内边距，也是**右侧基准线**：输入框的 Ctrl+K 键帽、推荐卡
@@ -2008,10 +2041,6 @@ const LAUNCHER_GROUP_HEADER_H: f32 = 28.0;
 /// 固定 px 的缝隙在字号变化时会与字形脱节——大字号显挤、小字号显空。
 const SEARCH_SLOT_COLS: f32 = 2.0;
 
-/// 文本光标的梁宽（逻辑 px）。细梁不占列宽，placeholder 与真实输入因此
-/// 能落在同一个 x 上。
-const CARET_W: f32 = 1.5;
-
 /// Push the palette's background quads: a dim veil over the window, the glass
 /// panel (glow + gradient border + solid fill, matching the settings modal),
 /// the query input box, and the selected-row
@@ -2022,6 +2051,7 @@ pub(super) fn push_quads(
     quads: &mut Vec<UiQuad>,
     size: &SizeInfo,
     scale: f32,
+    launcher_bounds: Option<(f32, f32)>,
 ) {
     if !model.is_open() {
         return;
@@ -2030,7 +2060,8 @@ pub(super) fn push_quads(
     let h = size.height();
     let s = |v: f32| v * scale;
     let sk = theme.skin();
-    let layout = palette_layout(model, w, h, scale, size.cell_width());
+    let layout =
+        palette_layout_with_launcher_bounds(model, w, h, scale, size.cell_width(), launcher_bounds);
     let (ix, iy, iw, ih) = layout.input;
     let (list_x, _, list_w, _) = layout.list;
     let launcher = model.is_launcher();
@@ -2065,8 +2096,12 @@ pub(super) fn push_quads(
         quads.push(UiQuad::solid(ix, iy, iw, ih, s(super::ui::tokens::radius::CONTROL), sk.input));
     }
 
-    if let Some((bx, by, bw, bh)) = layout.chip_band {
-        quads.push(UiQuad::solid(bx, by + bh - 1.0, bw, 1.0, 0.0, sk.hairline).pixel_snapped());
+    if let Some((_bx, by, _bw, bh)) = layout.chip_band {
+        let (panel_x, _, panel_w, _) = layout.panel;
+        // One quiet rule under the tag band, spanning the complete pane.
+        quads.push(
+            UiQuad::solid(panel_x, by + bh - 1.0, panel_w, 1.0, 0.0, sk.hairline).pixel_snapped(),
+        );
         for chip in &layout.chips {
             let state = if chip.selected {
                 ChipState::Selected
@@ -2082,80 +2117,39 @@ pub(super) fn push_quads(
         let cell_w = size.cell_width();
         let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
         let search_left = if launcher { ix } else { ix + s(INPUT_PAD_X) };
-        let selection_x = search_left + cell_w * SEARCH_SLOT_COLS;
-        let selection_w = (columns as f32 * cell_w).min((ix + iw - selection_x).max(0.0));
-        quads.push(UiQuad::solid(
-            selection_x - s(2.0),
-            iy + s(7.0),
-            selection_w + s(4.0),
-            ih - s(14.0),
-            s(super::ui::tokens::radius::CHIP),
-            sk.accent_soft,
-        ));
+        overlay_list::push_selection_band(
+            quads,
+            search_left + cell_w * SEARCH_SLOT_COLS,
+            layout.input,
+            columns as f32,
+            cell_w,
+            scale,
+            &sk,
+        );
     }
 
     let cell_w = size.cell_width();
     let row_content_x = if launcher { list_x + s(10.0) } else { ix + s(INPUT_PAD_X) };
     let row_content_right = if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
-    // 分组表头的淡色横线：从标签右侧一直拉到面板右缘（有右缘上下文时让位
-    // 给它）。线是 quad、标签是文字，两边共用 `layout.groups` 的同一份 y
-    // 与同一套 GUTTER 基准，所以永远不会错位。
-    if launcher {
-        let (px, _, pw, _) = layout.panel;
-        let x = px + s(8.0);
-        let width = (pw - s(16.0)).max(0.0);
-        for (gy, _, _) in &layout.groups {
-            quads.push(
-                UiQuad::solid(
-                    x,
-                    gy + s(LAUNCHER_GROUP_HEADER_H - 1.0),
-                    width,
-                    1.0,
-                    0.0,
-                    sk.hairline,
-                )
-                .pixel_snapped(),
-            );
-        }
-    } else {
-        for (gy, label, ctx) in &layout.groups {
-            let label_w = text_width_cols(label) as f32 * cell_w;
-            let x0 = row_content_x + label_w + s(10.0);
-            let ctx_w =
-                if ctx.is_empty() { 0.0 } else { text_width_cols(ctx) as f32 * cell_w + s(10.0) };
-            let x1 = row_content_right - ctx_w;
-            if x1 > x0 {
-                // 一整像素高，吸附到像素网格：半像素的发丝线会被摊成两行半透明
-                // 灰，比没有还糟（与 render-crispness 的整像素锚点同一条铁律）。
-                quads.push(
-                    UiQuad::solid(x0, gy + s(11.0), x1 - x0, 1.0, 0.0, sk.hairline).pixel_snapped(),
-                );
-            }
-        }
-    }
+    // Group captions provide hierarchy through type and spacing. Do not add
+    // separator rules below them; the single full-width tag rule above is the
+    // only divider in the pane body.
     // 搜索图标槽与查询文字的起点。槽宽按 **cell 列**算而不是固定 px：
     // 字号一变，固定 px 的缝隙就会与字形脱节（大字号显挤、小字号显空）。
     let query_x = if launcher { ix } else { ix + s(INPUT_PAD_X) } + cell_w * SEARCH_SLOT_COLS;
 
-    // 文本光标画成一条细梁 quad，而不是 `▏` 字形。
-    //
-    // 字形光标占满一个 cell，于是空态的 placeholder 必须整体右让一格给它，
-    // 打下第一个字符时文字又跳回来——一次可见的位移。细梁不占列宽，
-    // placeholder 与真实输入因此能落在**同一个 x** 上，输入过程没有跳动。
-    // 顺带它也更接近原生文本框的观感（1.5px 竖线，不是一个方块）。
+    // 文本光标是细梁 quad 而不是 `▏` 字形（不占列宽，placeholder 与真实
+    // 输入同 x）——理由与几何都在 `overlay_list::push_query_caret`。
     if !model.query_all_selected() {
-        if super::ui::caret::is_on() {
-            let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
-            let cell_h = size.cell_height();
-            quads.push(UiQuad::solid(
-                query_x + columns as f32 * cell_w,
-                iy + (ih - cell_h) / 2.0,
-                s(CARET_W),
-                cell_h,
-                0.0,
-                Rgba::new(sk.ink_strong.r, sk.ink_strong.g, sk.ink_strong.b, 255),
-            ));
-        }
+        let columns: usize = model.query.chars().map(|c| c.width().unwrap_or(0)).sum();
+        overlay_list::push_query_caret(
+            quads,
+            query_x + columns as f32 * cell_w,
+            layout.input,
+            size.cell_height(),
+            scale,
+            &sk,
+        );
     }
 
     // Ctrl+K 键帽：仅 shell picker 空查询时展示，指认打开快捷键；
@@ -2171,9 +2165,8 @@ pub(super) fn push_quads(
         super::ui::keycap::push_combo(quads, &sk, &combo, scale);
     }
 
-    if let Some((fx, fy, fw, fh)) = layout.footer {
-        quads.push(UiQuad::solid(fx, fy, fw, fh, 0.0, sk.surface));
-        quads.push(UiQuad::solid(fx, fy, fw, s(1.0), 0.0, sk.hairline));
+    if let Some(footer) = layout.footer {
+        overlay_list::push_footer_band(quads, footer, &sk);
     }
 
     if let Some(scrollbar) = layout.scrollbar {
@@ -2185,7 +2178,6 @@ pub(super) fn push_quads(
     let (visible_rows, selected_row) = model.visible(layout.max_rows);
     let cards = model.is_picker();
     let hero = model.hero_row();
-    let accent_ring = Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255);
     if cards {
         // 列表行**不画卡片**（2026-07-29 用户裁定）：默认完全透明，露出面板
         // 底；只有 hover / 选中才上一层底色。
@@ -2201,83 +2193,47 @@ pub(super) fn push_quads(
         let corner = s(super::ui::tokens::radius::OVERLAY);
         for (row, &(ry, rh)) in layout.rows.iter().enumerate() {
             let is_hero = hero && row == 0;
-            if selected_row == Some(row) {
-                quads.push(UiQuad::solid(list_x, ry, list_w, rh, corner, sk.hover_strong));
+            let row_rect = (list_x, ry, list_w, rh);
+            let state = if selected_row == Some(row) {
+                RowState::Selected
             } else if model.hover == Some(row) {
-                quads.push(UiQuad::solid(list_x, ry, list_w, rh, corner, sk.hover));
-            }
+                RowState::Hover
+            } else {
+                RowState::Idle
+            };
+            overlay_list::push_row_state(quads, row_rect, corner, &sk, state);
             // Every launcher/picker row gets the same icon container. Brand
             // artwork and fallback glyphs may differ, but their visual weight
             // no longer depends on whether an asset happens to have its own
             // colored background.
-            let icon_s = s(PICKER_ICON_BOX);
-            let icon_rect = (row_content_x, ry + (rh - icon_s) * 0.5, icon_s, icon_s);
-            // The tile owns its own quiet boundary and surface. It remains
-            // legible on a selected row without becoming another selection.
-            surface::push_stroke(
-                quads,
-                icon_rect,
-                s(super::ui::tokens::radius::ICON_TILE),
-                scale,
-                sk.hairline,
-            );
-            quads.push(UiQuad::solid(
-                icon_rect.0,
-                icon_rect.1,
-                icon_rect.2,
-                icon_rect.3,
-                s(super::ui::tokens::radius::ICON_TILE),
-                sk.card,
-            ));
+            let icon_rect =
+                overlay_list::icon_tile_rect(row_content_x, row_rect, s(PICKER_ICON_BOX));
+            overlay_list::push_icon_tile(quads, icon_rect, scale, &sk);
             if is_hero {
+                // 推荐卡右缘的 ↵ chip 与图标瓦片同一容器语言（迁移前圆角
+                // 手写成 6，比瓦片的 ICON_TILE=7 少 1px——无信息的偏差，
+                // 组件化时归一）。
                 let chip = s(28.0);
-                let cx = row_content_right - chip;
-                let cy = ry + (rh - chip) / 2.0;
-                quads.push(UiQuad::solid(
-                    cx - s(1.0),
-                    cy - s(1.0),
-                    chip + s(2.0),
-                    chip + s(2.0),
-                    s(7.0),
-                    sk.hairline,
-                ));
-                quads.push(UiQuad::solid(cx, cy, chip, chip, s(6.0), sk.card));
+                let chip_rect =
+                    overlay_list::icon_tile_rect(row_content_right - chip, row_rect, chip);
+                overlay_list::push_icon_tile(quads, chip_rect, scale, &sk);
             }
         }
     } else {
-        // Hover background: subtle highlight when the mouse is over a row.
+        // Hover / selected pills: the option-row recipe (2px breathing gaps,
+        // CONTROL corner, accent beam on the keyboard selection) lives in
+        // `overlay_list::push_option_row`. A row that is hovered AND selected
+        // keeps painting both layers, same as before the extraction.
         if let Some(hover_row) = model.hover {
             if let Some(&(ry, rh)) = layout.rows.get(hover_row) {
-                quads.push(UiQuad::solid(
-                    ix + s(8.0),
-                    ry + s(2.0),
-                    iw - s(16.0),
-                    rh - s(4.0),
-                    s(6.0),
-                    sk.hover,
-                ));
+                let rect = (ix + s(8.0), ry, iw - s(16.0), rh);
+                overlay_list::push_option_row(quads, rect, scale, &sk, RowState::Hover, false);
             }
         }
-        // Highlight pill behind the selected row (list scrolls to keep it
-        // shown).
         if let Some(row) = selected_row {
             if let Some(&(ry, rh)) = layout.rows.get(row) {
-                quads.push(UiQuad::solid(
-                    ix + s(8.0),
-                    ry,
-                    iw - s(16.0),
-                    rh - s(4.0),
-                    s(6.0),
-                    sk.accent_soft,
-                ));
-                quads.push(UiQuad::solid(
-                    ix + s(8.0),
-                    ry + s(5.0),
-                    s(2.0),
-                    rh - s(14.0),
-                    s(1.0),
-                    accent_ring,
-                ));
+                let rect = (ix + s(8.0), ry, iw - s(16.0), rh);
+                overlay_list::push_option_row(quads, rect, scale, &sk, RowState::Selected, true);
             }
         }
     }
@@ -2310,19 +2266,18 @@ pub(super) fn push_quads(
                 super::ui::keycap::push_combo(quads, &sk, &combo, scale);
             }
         }
-        // AI 会话行右缘的来源 chip（"claude"/"codex"）底：push_stroke 发丝
-        // 环 + 面板底，与「默认」徽标同宗——身份标注，不与选中态抢强调色。
-        // 文字在 text pass 按同一几何画。
+        // AI 会话行右缘的来源 chip（"claude"/"codex"）与「默认」徽标同宗
+        // ——身份标注，不与选中态抢强调色，皮肤统一在
+        // `overlay_list::push_identity_chip`。文字在 text pass 按同一几何画。
         if !entry.chip.is_empty() {
-            let chip_w = entry.chip.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32
-                * cell_w
-                + s(12.0);
-            let cx = ix + iw - s(GUTTER) - chip_w;
-            let cy = ry + s(7.0);
-            let ch = rh - s(14.0);
-            let corner = s(super::ui::tokens::radius::CHIP);
-            surface::push_stroke(quads, (cx, cy, chip_w, ch), corner, scale, sk.hairline);
-            quads.push(UiQuad::solid(cx, cy, chip_w, ch, corner, sk.surface));
+            let rect = overlay_list::identity_chip_rect(
+                ix + iw - s(GUTTER),
+                (ix, ry, iw, rh),
+                text_width_cols(&entry.chip) as f32,
+                cell_w,
+                scale,
+            );
+            overlay_list::push_identity_chip(quads, rect, scale, &sk);
         }
         // 开关类命令的勾选态。画成线段 quad 而不是字体里的 `✓` 字形：那个
         // 码位在不同 fallback 字体里宽窄不一，行与行之间会左右晃半格，而这
@@ -2350,18 +2305,12 @@ pub(super) fn push_quads(
         };
         let label_w =
             entry.label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w;
-        let bx = label_x + label_w + s(8.0);
-        let by = ry + s(7.0);
-        let bh = rh - s(14.0);
-        quads.push(UiQuad::solid(
-            bx - s(1.0),
-            by - s(1.0),
-            badge_w + s(2.0),
-            bh + s(2.0),
-            s(5.0),
-            sk.hairline,
-        ));
-        quads.push(UiQuad::solid(bx, by, badge_w, bh, s(4.0), sk.surface));
+        overlay_list::push_identity_chip(
+            quads,
+            (label_x + label_w + s(8.0), ry + s(7.0), badge_w, rh - s(14.0)),
+            scale,
+            &sk,
+        );
     }
 
     // 底栏**不画 chip 底**（2026-07-29 用户裁定）。
@@ -2391,6 +2340,7 @@ pub(super) fn draw_text(
     gc: &mut GlyphCache,
     size: &SizeInfo,
     scale: f32,
+    launcher_bounds: Option<(f32, f32)>,
 ) -> Vec<(String, (f32, f32, f32, f32))> {
     let mut icon_draws = Vec::new();
     if !model.is_open() {
@@ -2401,7 +2351,8 @@ pub(super) fn draw_text(
     let h = size.height();
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let layout = palette_layout(model, w, h, scale, size.cell_width());
+    let layout =
+        palette_layout_with_launcher_bounds(model, w, h, scale, size.cell_width(), launcher_bounds);
     let (ix, iy, iw, ih) = layout.input;
     let (list_x, _, list_w, _) = layout.list;
     let launcher = model.is_launcher();
@@ -2416,12 +2367,12 @@ pub(super) fn draw_text(
     let text_right = if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
 
     const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
-    r.draw_chrome_text(size, search_x, iy + (ih - cell_h) / 2.0, sk.ink_faint, ICON_SEARCH, gc);
+    let text_y = widgets::centered_y(iy, ih, cell_h);
+    r.draw_chrome_text(size, search_x, text_y, sk.ink_faint, ICON_SEARCH, gc);
 
     // placeholder 与真实查询共用这一个起点。光标是 quad pass 画的细梁，
     // 不占列宽，所以打下第一个字符时文字不会跳位。
     let query_x = search_x + cell_w * SEARCH_SLOT_COLS;
-    let text_y = iy + (ih - cell_h) / 2.0;
     let query = model.query();
 
     if query.is_empty() {
@@ -2549,7 +2500,7 @@ pub(super) fn draw_text(
         let Some(&(row_y, row_hh)) = layout.rows.get(row) else { break };
         let is_hero = hero && row == 0;
         // Hero 卡片双行：名称在上、完整路径在下（图4）；普通行单行居中。
-        let ry = if is_hero { row_y + s(8.0) } else { row_y + (row_hh - cell_h) / 2.0 - s(2.0) };
+        let ry = if is_hero { row_y + s(8.0) } else { widgets::centered_y(row_y, row_hh, cell_h) };
         let fg = if Some(row) == selected_row || is_hero {
             sk.ink_strong
         } else if launcher {
@@ -2566,7 +2517,7 @@ pub(super) fn draw_text(
         let indent = if cards { s(PICKER_ICON_INDENT) } else { s(26.0) };
         let label_x = if has_color {
             let icon_s = if cards { s(PICKER_ICON_BOX) } else { (cell_h * 0.92).round() };
-            let icon_y = (row_y + (row_hh - icon_s) / 2.0).round();
+            let icon_y = widgets::centered_y(row_y, row_hh, icon_s).round();
             icon_draws.push((color_id, (text_x, icon_y, icon_s, icon_s)));
             text_x + indent
         } else if check_col {
@@ -2578,7 +2529,7 @@ pub(super) fn draw_text(
         } else if icon.is_empty() {
             text_x
         } else {
-            let icon_y = row_y + (row_hh - cell_h) / 2.0;
+            let icon_y = widgets::centered_y(row_y, row_hh, cell_h);
             let icon_x = if cards { text_x + (s(PICKER_ICON_BOX) - cell_w) * 0.5 } else { text_x };
             let icon_ink = if launcher { sk.ink_dim } else { sk.icon };
             r.draw_chrome_text(size, icon_x, icon_y, icon_ink, &icon, gc);
@@ -2633,7 +2584,7 @@ pub(super) fn draw_text(
                 let shown = fit_head(&hint, budget as usize);
                 r.draw_chrome_text(size, label_x, path_y, sk.ink_dim, &shown, gc);
             }
-            let chip_text_y = row_y + (row_hh - cell_h) / 2.0;
+            let chip_text_y = widgets::centered_y(row_y, row_hh, cell_h);
             r.draw_chrome_text(
                 size,
                 chip_x + (chip - cell_w) / 2.0,
@@ -2763,7 +2714,7 @@ fn draw_combo_text(
     sk: &super::ui::theme::Skin,
 ) {
     let (_, key_y, _, key_h) = combo.bounds;
-    let ty = key_y + (key_h - cell_h) / 2.0;
+    let ty = widgets::centered_y(key_y, key_h, cell_h);
     for (chip_x, chip_w, key) in &combo.chips {
         let key_cols: usize = key.chars().map(|c| c.width().unwrap_or(0)).sum();
         r.draw_chrome_text(
@@ -3143,6 +3094,25 @@ mod tests {
     }
 
     #[test]
+    fn launcher_content_stays_inside_the_panel_at_high_dpi() {
+        let shells: Vec<_> = (0..7)
+            .map(|index| shell(&format!("Shell {index}"), &format!("shell-{index}"), "shell.exe"))
+            .collect();
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(&shells, &[], "shell-0");
+        palette.set_ssh_hosts(&[("production".into(), "root@example.com".into())]);
+        palette.open_profiles();
+
+        let layout = palette_layout(&palette, 1913.0, 1110.0, 1.5, 12.0);
+        let panel_bottom = layout.panel.1 + layout.panel.3;
+        let content_bottom = layout.footer.map_or(panel_bottom, |(_, footer_y, _, _)| footer_y);
+        assert_eq!(layout.max_rows, 5, "启动器保持紧凑的五行视口");
+        assert!(layout.rows.iter().all(|(y, h)| y + h <= content_bottom));
+        assert!(layout.groups.iter().all(|(y, _, _)| *y < content_bottom));
+        assert!(layout.footer.is_none_or(|(_, y, _, h)| y + h <= panel_bottom));
+    }
+
+    #[test]
     fn imported_profile_keeps_shell_icon_and_click_snapshot() {
         let profile = Profile {
             name: "PowerShell 7".into(),
@@ -3502,6 +3472,29 @@ mod tests {
         assert_eq!(layout.row_at(px - 20.0, first_y + 2.0), None, "面板外不命中");
         let ssh = &layout.chips[1];
         assert_eq!(layout.chip_at(ssh.rect.0 + 2.0, ssh.rect.1 + 2.0), Some(LauncherFilter::Ssh));
+    }
+
+    #[test]
+    fn launcher_pane_respects_reserved_workspace_bounds() {
+        let mut palette = CommandPalette::new();
+        palette.set_shell_menu(&[shell("PowerShell", "powershell", "pwsh.exe")], &[], "powershell");
+        palette.open_profiles();
+
+        let left = 230.0;
+        let right = 1300.0;
+        let layout = palette_layout_with_launcher_bounds(
+            &palette,
+            1600.0,
+            900.0,
+            1.0,
+            8.0,
+            Some((left, right)),
+        );
+        let (panel_x, _, panel_w, _) = layout.panel;
+        assert!(panel_x >= left);
+        assert!(panel_x + panel_w <= right);
+        assert!(layout.input.0 >= left);
+        assert!(layout.input.0 + layout.input.2 <= right);
     }
 
     #[test]

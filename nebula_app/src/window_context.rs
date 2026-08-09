@@ -2659,11 +2659,20 @@ impl WindowContext {
         }
 
         if let Some(scale_factor) = self.display.window.take_pending_scale_factor() {
+            let start = Instant::now();
             self.display.apply_scale_factor_change(scale_factor, &self.config);
+            crate::display::nebula_debug_log(format!(
+                "winmove pending_scale {scale_factor} applied in {:?}",
+                start.elapsed()
+            ));
             self.dirty = true;
         }
 
         if let Some(size) = self.display.window.take_pending_inner_size() {
+            crate::display::nebula_debug_log(format!(
+                "winmove pending_size {}x{} applied",
+                size.width, size.height
+            ));
             if self.display.window.allows_drag_resize() {
                 self.windowed_size = size.to_logical(self.display.window.scale_factor);
             }
@@ -2917,6 +2926,7 @@ impl WindowContext {
 
         // Process DisplayUpdate events.
         if self.display.pending_update.dirty {
+            let update_start = Instant::now();
             let pane = match focused {
                 Some(index) => &mut self.panes[index],
                 None => &mut self.doc_pane,
@@ -2930,6 +2940,10 @@ impl WindowContext {
                 old_is_searching,
                 &self.config,
             );
+            crate::display::nebula_debug_log(format!(
+                "winmove display_update in {:?}",
+                update_start.elapsed()
+            ));
             self.dirty = true;
 
             // Deferred PTY resize: a lone resize (startup, maximize, sidebar

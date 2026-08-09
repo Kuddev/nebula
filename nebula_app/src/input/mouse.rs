@@ -389,7 +389,6 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::SshHostHide(_)
             | crate::display::SettingsHit::SshImportConfig
             | crate::display::SettingsHit::SshAddHost
-            | crate::display::SettingsHit::SshUpgrade
             | crate::display::SettingsHit::FetchToggle
             | crate::display::SettingsHit::PowerlineToggle
             | crate::display::SettingsHit::BlurToggle
@@ -448,7 +447,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 return;
             },
             crate::display::SettingsHit::Panel
-            | crate::display::SettingsHit::BackgroundPopupPanel => {
+            | crate::display::SettingsHit::BackgroundPopupPanel
+            // 只读行有 hover 反馈但不可点，普通箭头——Pointer 会许诺一次
+            // 不存在的点击。
+            | crate::display::SettingsHit::KeymapReadonlyRow(_) => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Default);
                 return;
             },
@@ -885,6 +887,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // even while a TUI has grabbed the mouse. A plain click (never dragged)
         // returns `None` here and falls through to normal release handling.
         if button == MouseButton::Left {
+            self.ctx.display().set_settings_pressed(crate::display::SettingsHit::None);
             // 松开就结束输入框的拖选。放在最前面：后面任何一条 early return
             // 都会把这个拖拽状态留下，于是下一次移动鼠标还在选字。
             self.ctx.display().ssh_editor_end_drag();

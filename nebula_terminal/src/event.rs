@@ -88,6 +88,11 @@ pub enum Event {
 
     /// Child process exited.
     ChildExit(ExitStatus),
+
+    /// The PTY transport died without the child exiting first (console host
+    /// crash, pipe failure, poller error). Carries a human-readable reason;
+    /// the session is unrecoverable and `Exit` follows.
+    PtyFailure(String),
 }
 
 impl Debug for Event {
@@ -119,6 +124,7 @@ impl Debug for Event {
             Event::Bell => write!(f, "Bell"),
             Event::Exit => write!(f, "Exit"),
             Event::ChildExit(status) => write!(f, "ChildExit({status:?})"),
+            Event::PtyFailure(reason) => write!(f, "PtyFailure({reason})"),
         }
     }
 }
