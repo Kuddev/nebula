@@ -58,7 +58,9 @@ polling = "3.11.0"
 # event parser; `display::markdown_view` renders the folded block AST.
 pulldown-cmark = { version = "0.13", default-features = false }
 pulldown-latex = "=0.7.1"
-russh = { version = "0.62.2", default-features = false, features = ["ring"] }
+# rsa 不能省：云厂商控制台下载的 .pem（PKCS#1）与 OpenSSH 容器里的 RSA
+# 私钥都靠它解析；缺失时 load_secret_key 直接 UnsupportedKeyType。
+russh = { version = "0.62.2", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "2.3.0"
 # preserve_order: we rewrite the user's claude settings.json (ai_hook
 # self-heal) and must not alphabetize their keys in the process.

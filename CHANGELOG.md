@@ -32,6 +32,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **Occasional stalls while typing Chinese in PowerShell** — the renderer pushed the IME caret rectangle to the input method every frame, cursor blink and output scrolling included, and on Windows each push is a chain of synchronous cross-process IMM32 calls into the input-method host; whenever that host was busy, the render thread waited on it. The rectangle is now deduplicated and only pushed when it actually changes, and the cache is invalidated on focus changes, IME enabling, and IME re-association so the first composition after returning never lands at a stale position.
 - **Missing AI hook warnings no longer repeat every frame** — the notice is emitted only when hook availability changes into the missing state, preventing an unavailable optional hook from producing an unbounded warning loop.
 - **Installer version metadata matches the application** — the Inno Setup fallback version and numeric file version now match Nebula 0.9.0; release builds continue to inject the package version automatically.
+- **A specified private key no longer triggers the system passphrase dialog** — the russh dependency had dropped its default `rsa` feature while switching to the ring backend, so every RSA private key — including the classic PKCS#1 `.pem` downloaded from cloud consoles — failed to parse locally; the failure was misclassified as "the key has a passphrase", popped the Windows credential dialog, and finally reported "the server rejected the key" although the server never saw it. The `rsa` feature is restored, a parse failure is reported as the local problem it is (only genuinely encrypted keys enter the passphrase flow), and the footer connection test never prompts — it reports "key is passphrase-protected" instead, honouring its no-interaction contract.
 - **The terminal card's corners no longer show a pale fringe** — the rounded card and the shell's concave corner patches were two independently anti-aliased arcs blended in sequence, which mathematically leaks a sliver of the clear color along the arc (and the desktop behind the window once transparency is on). The corner patches now render underneath the card inside the backdrop pass, making the card's own arc the only visible seam, and the clear fallback uses the composited shell tone shared with the chrome strips.
 
 #### Improved
@@ -73,6 +74,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **AI hook 缺失警告不再逐帧重复** — 只有 hook 可用性切换到“缺失”状态时才提示一次，避免可选 hook 不存在时产生无上限的警告循环。
 - **安装器版本信息与应用一致** — Inno Setup 的兜底版本和数字文件版本改为 Nebula 0.9.0；正式构建仍会自动注入包版本。
 - **终端卡四角不再泛白边** — 圆角卡片与壳层凹角补片是两条各自抗锯齿的弧按先后顺序混合，弧线上必然漏出一丝清屏色（开启透明度后直接漏出窗口后面的桌面）。凹角补片改为在 backdrop 里画在卡片**之下**，卡片自己的圆弧成为唯一可见接缝；清屏兜底色也换成与 chrome 条带同源的壳层合成色。
+- **指定私钥不再触发系统口令弹窗** — russh 依赖在切换 ring 后端时把默认的 `rsa` feature 一并关掉了，导致所有 RSA 私钥（包括云厂商控制台下载的经典 PKCS#1 `.pem`）本地解析失败；这个失败被误判成「密钥有口令」，弹出 Windows 凭据对话框，最终还报成「服务器拒绝了指定的私钥」——其实服务器根本没见过这把钥匙。现在补回 `rsa` feature，解析失败按本地问题如实报错（只有真正加密的密钥才进入口令流程），页脚的「测试连接」也绝不弹框——改为报告「私钥受口令保护」，兑现无人值守承诺。
 
 #### 改进
 
