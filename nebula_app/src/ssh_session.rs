@@ -676,10 +676,13 @@ async fn authenticate(
     let mut reusable_password = None;
     let mut loaded_stored_password = false;
     let mut stored_password_was_present = false;
+    let mut local_key_errors = Vec::new();
     for method in plan {
         match method {
             AuthMethod::PrivateKey(path) => {
-                if try_private_key(session, destination, &path).await? {
+                if try_private_key(session, destination, &path, true, &mut local_key_errors)
+                    .await?
+                {
                     clear_secret(&mut reusable_password);
                     return Ok(());
                 }
@@ -733,7 +736,7 @@ async fn authenticate(
         crate::ssh_credentials::forget_password(&destination.original)?;
     }
     clear_secret(&mut reusable_password);
-    Err(auth_failure(profile.auth, key_count).into())
+    Err(auth_failure(profile.auth, key_count, &local_key_errors).into())
 }
 
 /// 在现有认证连接上打开独立 SFTP 子系统；连接池和认证策略仍只有一份。
@@ -884,10 +887,15 @@ async fn test_authenticate(
     let mut interactive_skipped = false;
     let mut stored_password = None;
     let mut loaded_stored_password = false;
+    let mut local_key_errors = Vec::new();
     for method in plan {
         match method {
             AuthMethod::PrivateKey(path) => {
-                if try_private_key(session, destination, &path).await? {
+                // allow_prompt=false：spawn_test 承诺绝不弹框，密钥口令也
+                // 不例外——受口令保护且无已存口令的密钥记为本地问题。
+                if try_private_key(session, destination, &path, false, &mut local_key_errors)
+                    .await?
+                {
                     clear_secret(&mut stored_password);
                     return Ok(());
                 }
@@ -917,15 +925,30 @@ async fn test_authenticate(
         }
     }
     clear_secret(&mut stored_password);
+    if !local_key_errors.is_empty() {
+        return Err(format!("私钥无法使用：{}", local_key_errors.join("；")).into());
+    }
     if interactive_skipped {
         return Err("服务器可达，但此配置需要连接时交互输入（密码/MFA），测试无法替你完成".into());
     }
     Err("认证未通过：请检查密码、私钥或服务器端授权".into())
 }
 
-fn auth_failure(mode: crate::ssh_profiles::SshAuthMode, key_count: usize) -> String {
+fn auth_failure(
+    mode: crate::ssh_profiles::SshAuthMode,
+    key_count: usize,
+    local_key_errors: &[String],
+) -> String {
     use crate::ssh_profiles::SshAuthMode;
-    match mode {
+    // 纯密钥模式下所有私钥都倒在本地时，服务器根本没见过密钥——报
+    // 「服务器拒绝」是误导，直接报本地原因。
+    if mode == SshAuthMode::PublicKey
+        && !local_key_errors.is_empty()
+        && local_key_errors.len() >= key_count
+    {
+        return format!("私钥无法使用：{}", local_key_errors.join("；"));
+    }
+    let message = match mode {
         SshAuthMode::Auto if key_count >= 3 => format!(
             "服务器拒绝了自动认证；已尝试 {key_count} 把私钥，可能触发 MaxAuthTries，请明确选择一把密钥"
         ),
@@ -938,32 +961,74 @@ fn auth_failure(mode: crate::ssh_profiles::SshAuthMode, key_count: usize) -> Str
         SshAuthMode::KeyboardInteractive => {
             "服务器拒绝了 keyboard-interactive 认证，未回退到密码认证".to_owned()
         },
+    };
+    if local_key_errors.is_empty() {
+        message
+    } else {
+        format!("{message}（本地密钥问题：{}）", local_key_errors.join("；"))
     }
 }
 
+/// 判定私钥解析失败是否因为「密钥受口令保护」。russh 对 OpenSSH 加密容器和
+/// PKCS#1 传统加密（DEK-Info）报 `KeyIsEncrypted`；PKCS#8 加密无口令时报的
+/// 是 ASN.1 解码错误，只能靠 PEM 头识别。其余失败（格式不支持/文件损坏）
+/// 绝不能当成「缺口令」——那会弹一个永远解不开的口令框。
+fn key_needs_passphrase(err: &russh::keys::Error, pem: &[u8]) -> bool {
+    const PKCS8_ENCRYPTED: &[u8] = b"-----BEGIN ENCRYPTED PRIVATE KEY-----";
+    matches!(err, russh::keys::Error::KeyIsEncrypted)
+        || pem.windows(PKCS8_ENCRYPTED.len()).any(|window| window == PKCS8_ENCRYPTED)
+}
+
+/// 用 `path` 的私钥认证一轮。密钥本地不可用（读取/解析/口令问题）返回
+/// `Ok(false)` 让认证计划继续，同时把原因记入 `local_errors`——最终报错
+/// 必须能区分「服务器拒绝了密钥」和「密钥根本没送出去」。
+/// `allow_prompt=false`（测试连接）时绝不弹口令框。
 async fn try_private_key(
     session: &mut ClientSession,
     destination: &SshDestination,
     path: &Path,
+    allow_prompt: bool,
+    local_errors: &mut Vec<String>,
 ) -> Result<bool, SessionError> {
     let private_key = match std::fs::read(path) {
         Ok(private_key) => private_key,
         Err(err) => {
             warn!("无法读取 SSH 私钥 {}: {err}", path.display());
+            local_errors.push(format!("{}: 无法读取（{err}）", path.display()));
             return Ok(false);
         },
     };
-    let prompt = format!("密钥口令: {}", path.display());
-    let mut stored = crate::ssh_credentials::load_private_key_passphrase(&private_key)?;
-    let mut key = stored
-        .as_deref()
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(|passphrase| russh::keys::load_secret_key(path, Some(passphrase)).ok())
-        .or_else(|| russh::keys::load_secret_key(path, None).ok());
+    // 无口令解析优先：绝大多数密钥（含云厂商 .pem）在这里直接成功，全程
+    // 零交互。只有确认密钥受口令保护才进入口令流程。
+    let mut key = match russh::keys::load_secret_key(path, None) {
+        Ok(key) => Some(key),
+        Err(err) if key_needs_passphrase(&err, &private_key) => None,
+        Err(err) => {
+            warn!("SSH 私钥 {} 无法解析: {err}", path.display());
+            local_errors.push(format!("{}: 无法解析（{err}）", path.display()));
+            return Ok(false);
+        },
+    };
 
     if key.is_none() {
+        let mut stored = crate::ssh_credentials::load_private_key_passphrase(&private_key)?;
+        key = stored
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|passphrase| russh::keys::load_secret_key(path, Some(passphrase)).ok());
+        if key.is_none() {
+            crate::ssh_credentials::forget_private_key_passphrase(&private_key)?;
+        }
         clear_secret(&mut stored);
-        crate::ssh_credentials::forget_private_key_passphrase(&private_key)?;
+    }
+
+    if key.is_none() {
+        if !allow_prompt {
+            local_errors
+                .push(format!("{}: 私钥受口令保护，测试无法替你输入口令", path.display()));
+            return Ok(false);
+        }
+        let prompt = format!("密钥口令: {}", path.display());
         if let Some((mut passphrase, save)) = prompt_secret(prompt, None, true).await? {
             let text = String::from_utf8_lossy(&passphrase).into_owned();
             key = russh::keys::load_secret_key(path, Some(&text)).ok();
@@ -972,8 +1037,10 @@ async fn try_private_key(
             }
             passphrase.fill(0);
         }
+        if key.is_none() {
+            local_errors.push(format!("{}: 密钥口令不正确或已取消", path.display()));
+        }
     }
-    clear_secret(&mut stored);
     let Some(key) = key else { return Ok(false) };
 
     let key = Arc::new(key);
@@ -1226,5 +1293,104 @@ mod tests {
             authentication_plan(SshAuthMode::KeyboardInteractive, &[], &[]),
             vec![AuthMethod::KeyboardInteractive]
         );
+    }
+
+    /// 测试专用密钥（ssh-keygen 现场生成，从未用于任何真实主机）。
+    /// PKCS#1 格式（`BEGIN RSA PRIVATE KEY`）就是云厂商控制台下载的经典
+    /// .pem——它必须在无口令、零交互下直接解析成功。
+    const TEST_RSA_PKCS1_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIIEoQIBAAKCAQEAt9Kvur74e4WQha50+U5XjU/eksBFrf3K6Q0r6sQ0nxUz3nJW
+EVKGnxpcBu0tjMBCH/4+PmoKefrs9XweUlbQeLCJD/RXWaR7ETafuFif6n2ZdeHh
+sqbFoPKOAJNOt3+p7x+XEp8pKjJ+YTJNQ7qGSjqywUsEU/kXVn2ntQDaaaMnF7kt
+AYTFAQDtzntbcmy/N1LloOYio/Wi70ZCsB/MBuKe+mCYr5dq9VImrOuUEGDIER9y
+48ZE+PpF9TkU+5NNYaVzObuw3M1GN0Tu5FoaKaIjLcAqEfyCRf5hfA3Z+i0S9HIc
+XmgN7RLumqJb5sHREIAoJfgHtc8N3BVvzhoiWwIDAQABAoIBAETiLBzYPEgZXHdj
+0QytSUy4fcjTSSkyngtn9qmSXb+xU88LXGpAWRcc6xhjX3rLftv7S3rbBNMB7zLs
+kHY9dwCK8smqP+NlKgLgy8hqWX6nE08j1o46RXuS+RiJGunTaqwjU9rUDrpz0nz8
+uwxixLjjNyIMyPHouVCdZK+EwtPrf3aEshezbqs7qoN/7ULwYvAKxa44fn3sEQPY
+MY9QhdpkaybT7pib3tYWmRjEJNvIbnT01IOcUfrcWcY1tOekLW/Y3TPd3bTJXp6O
+GLQCXIgcnPNK4xOSPx8N0kNPjgpAeB3TewVqfllzoeCdEw7ycdKDFHqaAwbIpsqb
+EpsJ3Y0CgYEA3ex1L6i+sHdU/0Qn4kBjTNa3Uw+Mk2SDZJO2Uykgj2Kbh6O8mJaP
++ZGTm4IRv/AcfpkZ6hxrk5Ndv/nk9LwwYpHKb0TgkFzD2UD9C7vQPLXesf3whr3i
+KQvGxLtGR8qzOnwdl7YjY2hCVgzpulF81pq059kcPBxpPVuYGklEjx8CgYEA1AyJ
+9yPrC5+bCXggUIGk5bXSi/7WYsTlFMrjrGFm1GmA/HEUmNNtgs8Hm/5Hun50rvwo
+20vjS2Pd/Y5MTS6mUDjxXpDCB7sdU4HXa00TBQML141jzAT3D51Uf9coItpc+OQe
+kzszaVUT8Uk9nAgzQS13qRYkgy4TG+Q2ireRkUUCgYArZsAwVu8cMepUle66597D
+u0ZVHzhd5w1vURgaQXPVtvI138bVjLSRmW/lvNVd1UatV6Hi0DYVwX9XOTcWyeso
+i9ysUCse8JV42qXicpOyG9t2sfQlVeNyJZR1Cy8egTz2FinvbraTDWPT0mivgJpK
+mi0BHsvP0bqfPleL5IJc/wJ/M1rWDwSj6Cy/X4u4R8ceKIPgegc95K3KzT5V5Wmx
+fcAPfRPl6R1LaGK7dQwgUwpNOBPZ0UKPybJmEQJleEvT+5nO2xgz5atrbs4DXflM
+oeoa9BlKEh8htqZj0JJLJiW8Xorg3Md5rAjuy4DxatiRkTdxw4GZVivSdO7QRsgu
+eQKBgQCxrxYM7PmWMc8Kd1bs5oi3DoJSphWe5BVGaa83BKgNDossq3cJWi+IAz4B
+3YQjwa20xeLJ9E/Gg8dmzUANSqu9h1npnq2oGL/q7HNAkzzol4n7wLltbALuQk8f
+dl+RK/+C/B4FvPhU0VmBustY8wIK7Ag0/hZzGsXvuefRU26d/Q==
+-----END RSA PRIVATE KEY-----
+";
+
+    /// 测试专用：口令为 `test-passphrase` 的 OpenSSH 加密 ed25519。
+    const TEST_ENCRYPTED_OPENSSH_PEM: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABBtaqDtAS
+iEydl7ufOxfloWAAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAINGK341X7zN9RTlt
+hvn9NiZD8t69+cieB7ZTqiWV+p+VAAAAoCwhYq9GyCpiJ+ZtgOdAMi0w7EM9CS7p3ClSWs
+yWhRmWiblcWRIDB7EUi4Pl1Rkjf8LAr1PcVqFB5RR9SLtgByaZmWeOx29h3mcqDtjkD27M
+X1l3VqjJ/4jpeFutSPjJNztG+wNGlALsGkFxLBZ8hk4u86lVdoBjLEOivCvo1Qmd1XT74t
+AAhYTvsZWAkp6JTIprUWd7YdQJ7HfVl+fRqto=
+-----END OPENSSH PRIVATE KEY-----
+";
+
+    #[test]
+    fn rsa_pkcs1_pem_parses_without_passphrase() {
+        let key = russh::keys::decode_secret_key(TEST_RSA_PKCS1_PEM, None)
+            .expect("PKCS#1 RSA .pem 必须无口令直接解析（russh 需要 rsa feature）");
+        assert!(key.algorithm().is_rsa());
+    }
+
+    #[test]
+    fn rsa_pkcs1_pem_with_passphrase_also_parses() {
+        // 用户把无口令密钥误存了口令时不该解析失败：无加密的 PEM 忽略口令。
+        let key = russh::keys::decode_secret_key(TEST_RSA_PKCS1_PEM, Some("whatever"))
+            .expect("无加密 PEM 携带多余口令也应解析");
+        assert!(key.algorithm().is_rsa());
+    }
+
+    #[test]
+    fn encrypted_openssh_key_is_classified_as_needing_passphrase() {
+        let err = russh::keys::decode_secret_key(TEST_ENCRYPTED_OPENSSH_PEM, None)
+            .expect_err("加密密钥无口令解析必须失败");
+        assert!(super::key_needs_passphrase(&err, TEST_ENCRYPTED_OPENSSH_PEM.as_bytes()));
+        // 口令正确则解开——证明失败确实只是缺口令。
+        russh::keys::decode_secret_key(TEST_ENCRYPTED_OPENSSH_PEM, Some("test-passphrase"))
+            .expect("口令正确必须解开");
+    }
+
+    #[test]
+    fn pkcs8_encrypted_banner_is_classified_as_needing_passphrase() {
+        let pem = "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n";
+        let err = russh::keys::decode_secret_key(pem, None)
+            .expect_err("占位密文必须解析失败");
+        assert!(super::key_needs_passphrase(&err, pem.as_bytes()));
+    }
+
+    #[test]
+    fn unparseable_key_is_not_classified_as_needing_passphrase() {
+        // 格式不支持/损坏绝不能进口令流程——那正是「无口令 .pem 弹出系统
+        // 口令框」事故的形态。
+        let garbage = "this is not a private key";
+        let err = russh::keys::decode_secret_key(garbage, None)
+            .expect_err("垃圾输入必须解析失败");
+        assert!(!super::key_needs_passphrase(&err, garbage.as_bytes()));
+    }
+
+    #[test]
+    fn all_keys_failing_locally_is_not_reported_as_server_rejection() {
+        let errors = vec!["C:\\keys\\a.pem: 无法解析（unsupported）".to_owned()];
+        let message = super::auth_failure(SshAuthMode::PublicKey, 1, &errors);
+        assert!(message.starts_with("私钥无法使用"), "实际文案: {message}");
+        assert!(!message.contains("服务器拒绝"), "实际文案: {message}");
+
+        // 有密钥真的送到了服务器（本地失败数 < 密钥数）时保留原判词。
+        let partial = super::auth_failure(SshAuthMode::PublicKey, 2, &errors);
+        assert!(partial.contains("服务器拒绝"), "实际文案: {partial}");
+        assert!(partial.contains("本地密钥问题"), "实际文案: {partial}");
     }
 }

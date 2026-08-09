@@ -352,6 +352,24 @@ resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记�
 - 提示条：`[X]` 文本按钮其实已存在且可点（`message_bar.rs` CLOSE_BUTTON_TEXT、
   `mouse.rs` pop_message），但用户认不出——应改成 quad 绘制的真 × 按钮带 hover。
 
+## SSH 密钥口令输入进应用内模态（替换 CredUI）
+
+来源：2026-08-09 用户反馈「不应该弹出系统弹窗」（截图：CredUI 密钥口令框）。
+当日已修根因：russh 丢了 `rsa` feature 导致所有 RSA .pem 解析失败，被误判成
+「密钥有口令」而弹 CredUI；现在解析失败直接报错，只有真正加密的密钥才进
+口令流程。剩余工程：
+
+- 真正受口令保护的密钥，口令输入仍走 `ssh_credentials.rs`
+  `CredUIPromptForCredentialsW`（用户名+密码双框的系统对话框，语义错位——
+  只需要一个口令框）。密码认证的 `PromptPassword` 与 keyboard-interactive
+  的 MFA 输入同样走 CredUI，一并替换。
+- 方向：复用 `NebulaConfirm::BackupPassphrase` 的应用内单行掩码输入模式。
+  难点是请求-响应通道：SSH 认证在 tokio 后台任务里，UI 在窗口线程——需要
+  `EventType::SshSecretRequest`（EventProxy 带 pane id）+ oneshot 回传，
+  连接卡片期间模态置于卡片之上。
+- 「记住口令」勾选沿用现有凭据管理器存储
+  （`Nebula/SSH/KeyPassphrase/<sha512>` 命名空间不变）。
+
 ## Markdown 选中 → 评论 → 发送到指定 tab
 
 来源：2026-07-29 用户提供的 otty 截图（composer.md L3 弹窗）。形态：
