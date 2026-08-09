@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthChar;
 use super::color::Rgb;
 use super::i18n::UiLanguage;
 use super::ui::icons;
-use super::ui::tokens::{radius, space, type_scale};
+use super::ui::tokens::{Density, radius, space, type_scale};
 use super::{NebulaTheme, SizeInfo};
 use crate::renderer::ui::{Gradient, Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
@@ -235,12 +235,14 @@ fn button_specs(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout(
     state: &SshConnectState,
     size: &SizeInfo,
     view: (f32, f32, f32, f32),
     scale: f32,
     language: UiLanguage,
+    density: Density,
 ) -> Layout {
     let s = |v: f32| v * scale;
     let pad = s(space::L);
@@ -271,7 +273,7 @@ fn layout(
         // 留下一大块空框，读起来像"还有内容没加载出来"。
         let rows = state.log.len().clamp(1, LOG_ROWS);
         let inner = ch * type_scale::SUPPORTING * rows as f32 + s(space::S) * 2.0;
-        h += s(space::M) + inner;
+        h += s(space::major(density)) + inner;
         Some(inner)
     } else {
         None
@@ -285,7 +287,7 @@ fn layout(
     let card_y = (view.1 + (view.3 - h) * 0.5).round();
 
     let icon_x = card_x + pad;
-    let text_x = icon_x + icon_h + s(space::M);
+    let text_x = icon_x + icon_h + s(space::major(density));
     // 两行身份文字在图标高度内垂直居中。
     let name_line = ch * type_scale::BODY;
     let meta_line = ch * type_scale::SUPPORTING;
@@ -294,7 +296,9 @@ fn layout(
 
     // Logs 按钮贴卡片右内缘，与图标同一条水平中线。
     let logs_label = language.pick("Logs", "Logs");
-    let logs_w = text_w(logs_label, cell_w, type_scale::SUPPORTING) + s(space::M) * 2.0 + s(10.0);
+    let logs_w = text_w(logs_label, cell_w, type_scale::SUPPORTING)
+        + s(space::major(density)) * 2.0
+        + s(10.0);
     let logs_btn = (
         (card_x + card_w - pad - logs_w).round(),
         (card_y + icon_top + (icon_h - s(BTN_H)) * 0.5).round(),
@@ -306,7 +310,8 @@ fn layout(
     let mut buttons = Vec::new();
     let mut right = card_x + card_w - pad;
     for (label, hit, primary) in button_specs(state, language).into_iter().rev() {
-        let w = (text_w(&label, cell_w, type_scale::BODY) + s(space::M) * 2.0).max(s(76.0));
+        let w = (text_w(&label, cell_w, type_scale::BODY) + s(space::major(density)) * 2.0)
+            .max(s(76.0));
         right -= w;
         buttons.push((
             ((right).round(), (card_y + btn_top).round(), w.round(), s(BTN_H)),
@@ -350,10 +355,11 @@ pub(super) fn hit_test(
     view: (f32, f32, f32, f32),
     scale: f32,
     language: UiLanguage,
+    density: Density,
     x: f32,
     y: f32,
 ) -> SshConnectHit {
-    let l = layout(state, size, view, scale, language);
+    let l = layout(state, size, view, scale, language, density);
     if contains(l.logs_btn, x, y) {
         return SshConnectHit::Logs;
     }
@@ -398,9 +404,10 @@ pub(super) fn push_quads(
     view: (f32, f32, f32, f32),
     scale: f32,
     language: UiLanguage,
+    density: Density,
     backdrop: Rgba,
 ) {
-    let l = layout(state, size, view, scale, language);
+    let l = layout(state, size, view, scale, language, density);
     let s = |v: f32| v * scale;
     let sk = theme.skin();
     let palette = theme.palette();
@@ -434,24 +441,28 @@ pub(super) fn push_quads(
             cy,
             cw,
             chh,
-            s(radius::OVERLAY),
+            s(radius::overlay(density)),
             s(20.0),
             s(7.0),
             Rgba::new(0, 0, 0, shadow_alpha),
         )
         .pixel_snapped(),
     );
-    quads.push(UiQuad::solid(cx, cy, cw, chh, s(radius::OVERLAY), sk.panel).pixel_snapped());
+    quads.push(
+        UiQuad::solid(cx, cy, cw, chh, s(radius::overlay(density)), sk.panel).pixel_snapped(),
+    );
     // hairline 描边：与阴影二选一会显薄，浮层这一层两者都要（阴影给高度，
     // 描边给边界），但描边只有 1px 且极淡。
-    quads.push(UiQuad::solid(cx, cy, cw, chh, s(radius::OVERLAY), sk.hairline).pixel_snapped());
+    quads.push(
+        UiQuad::solid(cx, cy, cw, chh, s(radius::overlay(density)), sk.hairline).pixel_snapped(),
+    );
     quads.push(
         UiQuad::solid(
             cx + s(1.0),
             cy + s(1.0),
             cw - s(2.0),
             chh - s(2.0),
-            s(radius::OVERLAY) - s(1.0),
+            s(radius::overlay(density)) - s(1.0),
             sk.panel,
         )
         .pixel_snapped(),
@@ -464,7 +475,9 @@ pub(super) fn push_quads(
     // 这正是 icons.rs 里 blend_over 存在的理由。先算出真实的不透明底色。
     let solid_panel = icons::blend_over(backdrop, sk.panel);
     let solid_card = icons::blend_over(solid_panel, sk.card);
-    quads.push(UiQuad::solid(ix, iy, iw, ih, s(radius::CONTROL), solid_card).pixel_snapped());
+    quads.push(
+        UiQuad::solid(ix, iy, iw, ih, s(radius::control(density)), solid_card).pixel_snapped(),
+    );
     // 服务器机架墨迹：两层机箱 + 各一颗指示灯。字体私用区字形在分数 DPI 下
     // 会漂，所以和 icons.rs 一样走矢量，不借字形。
     {
@@ -650,14 +663,14 @@ pub(super) fn push_quads(
     push_button_frame(
         quads,
         l.logs_btn,
-        s(radius::CONTROL),
+        s(radius::control(density)),
         false,
         state.hover == SshConnectHit::Logs,
         sk,
     );
     {
         let (bx, by, bw, bh) = l.logs_btn;
-        let cxx = bx + bw - s(space::M) - s(3.0);
+        let cxx = bx + bw - s(space::major(density)) - s(3.0);
         let cyy = by + bh * 0.5;
         let arm = s(3.2);
         let stroke = (s(1.3)).max(1.0);
@@ -683,7 +696,7 @@ pub(super) fn push_quads(
     // ── 日志区 ─────────────────────────────────────────────────
     if let Some(area) = l.logs_area {
         quads.push(
-            UiQuad::solid(area.0, area.1, area.2, area.3, s(radius::CONTROL), sk.hairline)
+            UiQuad::solid(area.0, area.1, area.2, area.3, s(radius::control(density)), sk.hairline)
                 .pixel_snapped(),
         );
         let inset = s(1.0);
@@ -693,7 +706,7 @@ pub(super) fn push_quads(
                 area.1 + inset,
                 area.2 - inset * 2.0,
                 area.3 - inset * 2.0,
-                s(radius::CONTROL) - inset,
+                s(radius::control(density)) - inset,
                 sk.card,
             )
             .pixel_snapped(),
@@ -702,7 +715,14 @@ pub(super) fn push_quads(
 
     // ── 底部按钮 ───────────────────────────────────────────────
     for (rect, hit, primary) in &l.buttons {
-        push_button_frame(quads, *rect, s(radius::CONTROL), *primary, state.hover == *hit, sk);
+        push_button_frame(
+            quads,
+            *rect,
+            s(radius::control(density)),
+            *primary,
+            state.hover == *hit,
+            sk,
+        );
     }
 }
 
@@ -798,8 +818,9 @@ pub(super) fn draw_text(
     size: &SizeInfo,
     view: (f32, f32, f32, f32),
     scale: f32,
+    density: Density,
 ) {
-    let l = layout(state, size, view, scale, language);
+    let l = layout(state, size, view, scale, language, density);
     let sk = theme.skin();
     let cell_w = size.cell_width();
 
@@ -913,7 +934,7 @@ pub(super) fn draw_text(
     // Logs 开关的标签（箭头是矢量，在 push_quads 里）。
     r.draw_ui_text(
         size,
-        (l.logs_btn.0 + space::M * scale).round(),
+        (l.logs_btn.0 + space::major(density) * scale).round(),
         (l.logs_btn.1 + (l.logs_btn.3 - size.cell_height() * type_scale::SUPPORTING) * 0.5).round(),
         type_scale::SUPPORTING,
         sk.ink_dim,
@@ -1162,18 +1183,36 @@ mod tests {
         let size = probe_size();
         let lang = UiLanguage::EnUs;
         let state = SshConnectState::new("root@h".into());
-        let l = layout(&state, &size, VIEW, 1.0, lang);
+        let l = layout(&state, &size, VIEW, 1.0, lang, Density::Standard);
 
         let (bx, by, bw, bh) = l.logs_btn;
         assert_eq!(
-            hit_test(&state, &size, VIEW, 1.0, lang, bx + bw * 0.5, by + bh * 0.5),
+            hit_test(
+                &state,
+                &size,
+                VIEW,
+                1.0,
+                lang,
+                Density::Standard,
+                bx + bw * 0.5,
+                by + bh * 0.5
+            ),
             SshConnectHit::Logs
         );
 
         let (rect, hit, _) = l.buttons[0];
         assert_eq!(hit, SshConnectHit::Cancel, "连接中只该有取消");
         assert_eq!(
-            hit_test(&state, &size, VIEW, 1.0, lang, rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5),
+            hit_test(
+                &state,
+                &size,
+                VIEW,
+                1.0,
+                lang,
+                Density::Standard,
+                rect.0 + rect.2 * 0.5,
+                rect.1 + rect.3 * 0.5
+            ),
             SshConnectHit::Cancel
         );
     }
@@ -1184,12 +1223,21 @@ mod tests {
         let lang = UiLanguage::EnUs;
         let mut state = SshConnectState::new("root@h".into());
         state.set_stage(SshStage::Failed("boom".into()));
-        let l = layout(&state, &size, VIEW, 1.0, lang);
+        let l = layout(&state, &size, VIEW, 1.0, lang, Density::Standard);
         let (rect, hit, primary) = l.buttons[0];
         assert_eq!(hit, SshConnectHit::Close);
         assert!(primary, "唯一动作应当是主按钮");
         assert_eq!(
-            hit_test(&state, &size, VIEW, 1.0, lang, rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5),
+            hit_test(
+                &state,
+                &size,
+                VIEW,
+                1.0,
+                lang,
+                Density::Standard,
+                rect.0 + rect.2 * 0.5,
+                rect.1 + rect.3 * 0.5
+            ),
             SshConnectHit::Close
         );
     }
@@ -1207,11 +1255,11 @@ mod tests {
         let size = probe_size();
         let lang = UiLanguage::EnUs;
         let mut state = SshConnectState::new("root@h".into());
-        let before = layout(&state, &size, VIEW, 1.0, lang).card;
+        let before = layout(&state, &size, VIEW, 1.0, lang, Density::Standard).card;
         state.toggle_logs();
-        let after = layout(&state, &size, VIEW, 1.0, lang).card;
+        let after = layout(&state, &size, VIEW, 1.0, lang, Density::Standard).card;
         assert!(after.3 > before.3, "展开日志应当长高");
         assert_eq!(after.2, before.2, "宽度不该跟着变，否则读起来像在抖");
-        assert!(layout(&state, &size, VIEW, 1.0, lang).logs_area.is_some());
+        assert!(layout(&state, &size, VIEW, 1.0, lang, Density::Standard).logs_area.is_some());
     }
 }

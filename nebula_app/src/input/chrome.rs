@@ -795,6 +795,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     font_picker_count,
                     hidden_host_count,
                     ssh_host_count,
+                    self.ctx.display().nebula_density,
                 );
                 // Keep the primary-button target for the settings renderer's
                 // HTML-like toggle active state until the matching release.
@@ -932,6 +933,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::TabRevealOption(index) => {
                         self.ctx.display().set_tab_reveal_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::DensityDropdown => {
+                        self.ctx
+                            .display()
+                            .toggle_settings_dropdown(crate::display::SettingsDropdown::Density);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::DensityOption(index) => {
+                        self.ctx.display().set_density_option(index);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1443,6 +1456,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::AcceptOption(_)
             | Hit::TabRevealDropdown
             | Hit::TabRevealOption(_)
+            | Hit::DensityDropdown
+            | Hit::DensityOption(_)
             | Hit::CursorShapeDropdown
             | Hit::CursorShapeOption(_)
             | Hit::SshProxyModeDropdown

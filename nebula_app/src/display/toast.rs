@@ -133,7 +133,7 @@ pub(super) fn draw(d: &mut Display) {
             recipe::toast_rect(viewport, index, text_cols(text), cell_w, cell_h, scale, *progress);
 
         let mut quads = Vec::new();
-        recipe::push_toast(&mut quads, rect, viewport, *kind, scale, &sk, *progress);
+        recipe::push_toast(&mut quads, rect, viewport, *kind, scale, &sk, d.nebula_density, *progress);
         d.renderer.draw_ui(&size, &quads);
 
         let (text_x, text_y) = recipe::text_origin(rect, cell_h, scale);

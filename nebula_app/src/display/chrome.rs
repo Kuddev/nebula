@@ -2186,6 +2186,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
                         view.area,
                         view.scroll,
                         view.hidden_hosts.len(),
+                        view.density,
                     ) {
                         d.renderer.draw_background_image(
                             &size,
@@ -2290,6 +2291,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         &size,
         d.window.scale_factor as f32,
         palette_bounds,
+        d.nebula_density,
     );
     d.renderer.draw_ui(&size, &palette_quads);
 
@@ -2301,6 +2303,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
         &size,
         d.window.scale_factor as f32,
         palette_bounds,
+        d.nebula_density,
     );
 
     // Palette's full-color shell icons (textured quads) staged after all chrome

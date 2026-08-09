@@ -504,6 +504,7 @@ pub(super) fn draw(display: &mut Display) {
         (size.width(), size.height()),
         scale,
         &sk,
+        display.nebula_density,
         surface::Elevation::Menu,
         progress,
     );

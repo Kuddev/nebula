@@ -18,6 +18,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **Input latency probes** — launching with `NEBULA_INPUT_LATENCY=1` logs per-segment timings (key event → PTY write, PTY wakeup → frame, key → frame) through the debug log, turning "typing feels slow" into a number that names the slow segment. Disabled probes cost one initialized-`OnceLock` read.
 - **SSH connections can go through a jump host or the system proxy** — a host's proxy now resolves with clear precedence: the profile's own `proxy` field, then `ProxyJump` from `~/.ssh/config`, then the global setting. `jump:user@bastion` tunnels the session through one SSH bastion, and multi-hop chains are rejected with an explanatory error instead of silently using the first hop. The global "system" mode reads the Windows registry proxy and honours its bypass list.
 - **The font picker lists installed system fonts** — the font selector merges Windows system font families with imported ones: monospaced families (as reported by DirectWrite, not guessed from glyph widths) are shown by default, the full list is one click away, and a real search box — caret, selection, and clipboard shortcuts included — filters by display name. Enumeration is lazy and stays off the startup path. Applying a font is transactional: validated first, rolled back on failure; proportional families are marked, and a startup fallback shows a notice. (Thanks to @Sakyvo.)
+- **A compact appearance preset** — Settings → Appearance gains an interface density choice: Standard keeps the current look, while Compact trims padding, steps every corner radius one rung down the existing ladder, and forgoes decorative glows across the title bar, sidebar, settings, command palette, file drawer, and dialogs. No new visual values are introduced — compact takes the next smaller step of the existing spacing and radius ladders, expressed as relations (`radius::overlay(density)`, `control::row(density)`) rather than a parallel constant table. (Thanks to @Sakyvo.)
 
 #### Fixed
 
@@ -53,6 +54,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **输入延迟打点** — 以 `NEBULA_INPUT_LATENCY=1` 启动后，调试日志会记录分段耗时（按键事件→PTY 写入、PTY 唤醒→帧、按键→帧），把“打字感觉慢”变成能指出慢在哪一段的数字。探针关闭时的开销仅为一次已初始化 `OnceLock` 读取。
 - **SSH 可经跳板机或系统代理连接** — 主机的代理按清晰的优先级解析：profile 自己的 `proxy` 字段 > `~/.ssh/config` 的 `ProxyJump` > 全局设置。`jump:user@bastion` 让会话经一台 SSH 跳板建立；多级跳板链会得到明确报错，而不是悄悄只取第一跳。全局“系统”模式读取 Windows 注册表代理并遵守其绕过列表。
 - **字体选择器列出系统已安装字体** — 字体选择器把 Windows 系统字体族与导入字体合并去重：默认只显示等宽家族（由 DirectWrite 权威判定，不用字形宽度启发式），一键展开全部；弹层顶部是正经搜索框（光标、选区、剪贴板快捷键俱全），按显示名过滤。枚举惰性执行，不进启动路径。应用字体是事务性的：先验证再持久化，失败回滚到当前字体；非等宽家族有标记，启动回退时也会给出提示。（感谢 @Sakyvo。）
+- **紧凑外观预设** — 设置 → 外观新增界面密度选项：标准保持现状；紧凑减少留白、把所有圆角在既有阶梯上整体下移一档，并去除顶栏、侧栏、设置、命令面板、文件抽屉与对话框的装饰性光晕。不引入任何新的视觉数值——紧凑取的是既有间距与圆角阶梯的更小一档，以关系函数（`radius::overlay(density)`、`control::row(density)` 等）表达，而非平行常量表。（感谢 @Sakyvo。）
 
 #### 修复
 
