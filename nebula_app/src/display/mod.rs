@@ -1618,6 +1618,20 @@ pub struct Display {
     pub nebula_tab_reveal_motion: settings::TabRevealMotion,
     pub nebula_font_family: String,
     nebula_font_families: Vec<String>,
+    /// 系统字体族的惰性缓存：首次展开字体目录时枚举一次，之后复用。
+    /// 放在启动路径上会让每次冷启都付几百个族的等宽查询开销。
+    nebula_system_fonts: Option<Vec<crate::font_install::SystemFontFamily>>,
+    /// 字体目录的「显示全部」临时过滤开关，不持久化。
+    nebula_font_show_all: bool,
+    /// 字体目录的搜索串。匹配列表上显示的那个名字，不维护跨语言别名。
+    /// 只在下拉打开期间存在，关闭即清空，不持久化。
+    nebula_font_query: String,
+    /// 搜索框的光标与选区。与图标搜索框、SSH 表单字段共用同一套模型：
+    /// 新加的输入框继承行为，不必再实现一遍。
+    nebula_font_query_cursor: ui::text_field::TextCursor,
+    /// 目录中被判定为非等宽的族（小写名）。界面据此给比例字体警告——
+    /// 固定网格下它们可能重叠或截断，但用户知情后仍可选择。
+    nebula_font_proportional: std::collections::HashSet<String>,
     nebula_font_notice: Option<String>,
     /// Optional runtime clear/background color controlled from settings.
     pub nebula_background: Option<Rgb>,
@@ -1866,7 +1880,25 @@ impl Display {
         debug!("Loading \"{}\" font", &settings_init.font_family);
         let font =
             config.font.clone().with_family(settings_init.font_family.clone()).with_size(font_size);
-        let mut glyph_cache = GlyphCache::new(rasterizer, &font)?;
+        // 保存的字体偏好可能在两次启动之间消失（系统字体被卸载、导入文件
+        // 被删）。那种情况本次回退到内置字体并告警，但**保留原偏好**——
+        // 字体恢复可用后，下次启动自动回到用户的选择。
+        let (mut glyph_cache, font_notice) = match GlyphCache::new(rasterizer, &font) {
+            Ok(cache) => (cache, None),
+            Err(error) => {
+                let fallback = config
+                    .font
+                    .clone()
+                    .with_family(crate::font_install::REQUIRED_FONT_FAMILY.to_owned())
+                    .with_size(font_size);
+                let notice = format!(
+                    "字体「{}」本次不可用（{error}），暂用内置字体；偏好已保留。",
+                    settings_init.font_family
+                );
+                let rasterizer = Rasterizer::new()?;
+                (GlyphCache::new(rasterizer, &fallback)?, Some(notice))
+            },
+        };
         glyph_cache.wide_bold_use_regular = settings_init.cjk_bold_regular;
         #[cfg(windows)]
         let mut nebula_font_families = glyph_cache.private_font_families();
@@ -2156,7 +2188,12 @@ impl Display {
             nebula_tab_reveal_motion: settings_init.tab_reveal,
             nebula_font_family: settings_init.font_family,
             nebula_font_families,
-            nebula_font_notice: None,
+            nebula_system_fonts: None,
+            nebula_font_show_all: false,
+            nebula_font_query: String::new(),
+            nebula_font_query_cursor: Default::default(),
+            nebula_font_proportional: std::collections::HashSet::new(),
+            nebula_font_notice: font_notice,
             nebula_tab_labels: vec![".".to_owned()],
             nebula_tab_colors: vec![None],
             nebula_tab_bells: vec![false],
@@ -2319,8 +2356,14 @@ impl Display {
         self.nebula_detected_shells.as_ref().map_or(0, Vec::len)
     }
 
+    /// 字体族行 + 两个固定尾行：「显示全部 / 仅等宽」过滤切换，以及「导入字体…」。
     pub fn font_picker_count(&self) -> usize {
-        self.nebula_font_families.len() + 1
+        self.nebula_font_families.len() + 2
+    }
+
+    /// 「显示全部」当前是否开启（供设置页渲染该行的文案）。
+    pub fn font_show_all(&self) -> bool {
+        self.nebula_font_show_all
     }
 
     pub fn hidden_ssh_host_count(&self) -> usize {
@@ -3291,6 +3334,10 @@ impl Display {
             font_size_px: self.font_size.as_px() / self.window.scale_factor as f32,
             fonts: self.nebula_font_families.clone(),
             font_notice: self.nebula_font_notice.clone(),
+            font_show_all: self.nebula_font_show_all,
+            font_query: self.nebula_font_query.clone(),
+            font_query_cursor: self.nebula_font_query_cursor.clone(),
+            font_proportional: self.nebula_font_proportional.clone(),
             hidden_hosts: self.nebula_hidden_hosts.clone(),
             ssh_hosts: self
                 .nebula_ssh_hosts
@@ -3701,6 +3748,12 @@ impl Display {
             return false;
         }
         self.nebula_bg_hex_active = false;
+        // 搜索是这次展开的临时状态：关掉就清空，下次打开从完整目录开始。
+        if !self.nebula_font_query.is_empty() {
+            self.nebula_font_query.clear();
+            self.nebula_font_query_cursor = Default::default();
+            self.rebuild_font_catalog();
+        }
         self.pending_update.dirty = true;
         self.window.request_redraw();
         true
@@ -3880,7 +3933,144 @@ impl Display {
     }
 
     pub fn toggle_font_picker(&mut self) {
+        // 首次展开才枚举系统字体——这是整个功能里唯一昂贵的一步，放在
+        // 用户已经预期有一次加载的时刻。
+        if self.nebula_settings_dropdown != Some(settings::SettingsDropdown::Font) {
+            self.ensure_font_catalog();
+        }
         self.toggle_settings_dropdown(settings::SettingsDropdown::Font);
+    }
+
+    /// 惰性装配**字体目录**：系统族与导入族合并去重、按当前过滤条件筛选，
+    /// 当前生效字体始终保留。
+    fn ensure_font_catalog(&mut self) {
+        #[cfg(windows)]
+        if self.nebula_system_fonts.is_none() {
+            self.nebula_system_fonts = Some(self.glyph_cache.system_font_families());
+        }
+        self.rebuild_font_catalog();
+    }
+
+    fn rebuild_font_catalog(&mut self) {
+        let system = self.nebula_system_fonts.clone().unwrap_or_default();
+        #[cfg(windows)]
+        let imported = self.glyph_cache.private_font_families();
+        #[cfg(not(windows))]
+        let imported: Vec<String> = Vec::new();
+        let catalog = crate::font_install::font_catalog(
+            &system,
+            &imported,
+            self.nebula_font_show_all,
+            &self.nebula_font_query,
+            &self.nebula_font_family,
+        );
+        self.nebula_font_proportional = catalog
+            .iter()
+            .filter(|entry| !entry.monospaced)
+            .map(|entry| entry.name.to_lowercase())
+            .collect();
+        let mut families: Vec<String> = catalog.into_iter().map(|entry| entry.name).collect();
+        // 内置字体永远排在最前，与上游一致。
+        families.retain(|family| family != crate::font_install::REQUIRED_FONT_FAMILY);
+        families.insert(0, crate::font_install::REQUIRED_FONT_FAMILY.to_owned());
+        if !families.iter().any(|family| family == &self.nebula_font_family) {
+            families.push(self.nebula_font_family.clone());
+        }
+        self.nebula_font_families = families;
+    }
+
+    /// 搜索框里文本的起点 x 与单元格宽——鼠标定位光标要用它换算落点。
+    /// 与渲染同源（[`settings::font_search_field_rect`]），两边不会漂。
+    pub fn font_search_text_origin(&self) -> (f32, f32) {
+        let scale = self.window.scale_factor as f32;
+        let cell_w = self.size_info.cell_width();
+        let field = settings::font_search_field_rect(
+            &self.size_info,
+            scale,
+            self.terminal_card_rect(),
+            self.nebula_settings_section,
+            self.nebula_settings_scroll,
+            self.nebula_settings_dropdown,
+            self.font_picker_count(),
+            self.nebula_hidden_hosts.len(),
+            self.ssh_host_count(),
+        );
+        (field.map_or(0.0, |rect| rect.0 + 12.0 * scale), cell_w)
+    }
+
+    pub fn font_query(&self) -> &str {
+        &self.nebula_font_query
+    }
+
+    /// 插入文本，或 `None` 表示退格。查询串一变就重建目录——列表跟着打字走，
+    /// 才是「所见即所搜」。
+    pub fn font_query_edit(&mut self, insert: Option<&str>) {
+        match insert {
+            Some(text) => {
+                let clean: String = text.chars().filter(|ch| !ch.is_control()).collect();
+                if clean.is_empty() {
+                    return;
+                }
+                self.nebula_font_query_cursor.insert(&mut self.nebula_font_query, &clean);
+            },
+            None => self.nebula_font_query_cursor.backspace(&mut self.nebula_font_query),
+        }
+        self.rebuild_font_catalog();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn font_query_delete_forward(&mut self) {
+        self.nebula_font_query_cursor.delete_forward(&mut self.nebula_font_query);
+        self.rebuild_font_catalog();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn font_query_move(&mut self, forward: bool, extend: bool) {
+        let text = self.nebula_font_query.clone();
+        self.nebula_font_query_cursor.step(&text, forward, extend);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn font_query_jump(&mut self, to_end: bool, extend: bool) {
+        let text = self.nebula_font_query.clone();
+        self.nebula_font_query_cursor.jump(&text, to_end, extend);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn font_query_select_all(&mut self) {
+        let text = self.nebula_font_query.clone();
+        self.nebula_font_query_cursor.select_all(&text);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn font_query_selected_text(&self) -> Option<String> {
+        self.nebula_font_query_cursor.selected_text(&self.nebula_font_query)
+    }
+
+    /// 按点击落点定位光标。`offset_x` 是相对文本起点的距离。
+    pub fn font_query_place(&mut self, offset_x: f32, cell_w: f32, extend: bool) {
+        let text = self.nebula_font_query.clone();
+        let index = ui::text_field::index_at(&text, offset_x, cell_w);
+        if extend {
+            self.nebula_font_query_cursor.extend_to(&text, index);
+        } else {
+            self.nebula_font_query_cursor.place(&text, index);
+        }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// 切换「显示全部」并重建目录。这是临时过滤，不写入设置。
+    pub fn toggle_font_show_all(&mut self) {
+        self.nebula_font_show_all = !self.nebula_font_show_all;
+        self.ensure_font_catalog();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     pub fn close_font_picker(&mut self) {
@@ -3893,7 +4083,19 @@ impl Display {
         base.clone().with_family(self.nebula_font_family.clone())
     }
 
+    /// 事务性地切换字体族：先确认它真能加载，成功才更新生效字体与持久化
+    /// 偏好；失败保留原字体与原偏好，并给出可理解的错误。
+    ///
+    /// 上游此前「先持久化再加载」是安全的——那时目录里只有内置字体与已经
+    /// 成功导入过的族，个个都预先验证过。系统字体枚举打破了这个不变量，
+    /// 所以这道预检是本功能自带的安全网，不是顺手修的既有缺陷。
     fn apply_font_family(&mut self, family: String, base: &Font) {
+        if !self.glyph_cache.family_loads(&family, self.font_size) {
+            self.nebula_font_notice = Some(format!("字体无法加载：{family}"));
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+            return;
+        }
         self.nebula_font_family = family;
         self.nebula_font_notice = None;
         let font = self.effective_font(base).with_size(self.font_size);
@@ -3908,7 +4110,12 @@ impl Display {
             self.nebula_settings_dropdown = None;
             return;
         }
-        if index != self.nebula_font_families.len() {
+        // 倒数第二行：临时过滤切换，不关闭下拉——用户通常要接着挑字体。
+        if index == self.nebula_font_families.len() {
+            self.toggle_font_show_all();
+            return;
+        }
+        if index != self.nebula_font_families.len() + 1 {
             return;
         }
 
@@ -4691,14 +4898,14 @@ impl Display {
     /// One geometry contract for palette rendering and pointer input. Picker
     /// height depends on the live filtered row count, so callers must not
     /// reconstruct this from window dimensions alone.
-    pub(super) fn command_palette_launcher_bounds(&self) -> Option<(f32, f32)> {
-        if !self.nebula_palette.is_launcher() {
+    pub(super) fn command_palette_workspace_bounds(&self) -> Option<(f32, f32)> {
+        if !self.nebula_palette.is_open() {
             return None;
         }
         let scale = self.window.scale_factor as f32;
         let width = self.ui_size_info().width();
-        // Launcher panes occupy only the default terminal work area: Tabs on
-        // the left and the file drawer on the right remain visually reserved.
+        // 快捷面板族只占默认终端工作区：左侧 Tabs 与右侧文件抽屉都保留。
+        // 三个面板共用这条边界，切换快捷键时宽度与水平基准才不会跳变。
         let sidebar = (self.sidebar_w_visual() * scale).round();
         let left = (sidebar - 4.0 * scale).round().clamp(0.0, width);
         let drawer = (self.drawer_w_visual() * scale).min(width * 0.42);
@@ -4708,13 +4915,13 @@ impl Display {
 
     pub fn command_palette_layout(&self) -> command_palette::PaletteLayout {
         let size = self.ui_size_info();
-        command_palette::palette_layout_with_launcher_bounds(
+        command_palette::palette_layout_with_workspace_bounds(
             &self.nebula_palette,
             size.width(),
             size.height(),
             self.window.scale_factor as f32,
             size.cell_width(),
-            self.command_palette_launcher_bounds(),
+            self.command_palette_workspace_bounds(),
         )
     }
 

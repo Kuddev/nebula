@@ -17,6 +17,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **A unified Files/Git drawer header** — Files and Git are two centered slots in one segmented control. The file tools row keeps the current root on one line and provides follow-current-terminal (`Alt+R`), new-terminal-here (`Alt+T`), and reveal-in-file-manager (`Alt+O`) actions with matching hover tips.
 - **Input latency probes** — launching with `NEBULA_INPUT_LATENCY=1` logs per-segment timings (key event → PTY write, PTY wakeup → frame, key → frame) through the debug log, turning "typing feels slow" into a number that names the slow segment. Disabled probes cost one initialized-`OnceLock` read.
 - **SSH connections can go through a jump host or the system proxy** — a host's proxy now resolves with clear precedence: the profile's own `proxy` field, then `ProxyJump` from `~/.ssh/config`, then the global setting. `jump:user@bastion` tunnels the session through one SSH bastion, and multi-hop chains are rejected with an explanatory error instead of silently using the first hop. The global "system" mode reads the Windows registry proxy and honours its bypass list.
+- **The font picker lists installed system fonts** — the font selector merges Windows system font families with imported ones: monospaced families (as reported by DirectWrite, not guessed from glyph widths) are shown by default, the full list is one click away, and a real search box — caret, selection, and clipboard shortcuts included — filters by display name. Enumeration is lazy and stays off the startup path. Applying a font is transactional: validated first, rolled back on failure; proportional families are marked, and a startup fallback shows a notice. (Thanks to @Sakyvo.)
 
 #### Fixed
 
@@ -51,6 +52,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **文件/Git 一体化抽屉头部** — 文件与 Git 成为同一分段控件内居中的两个槽位；文件工具行单行显示当前根目录，并提供跟随当前终端（`Alt+R`）、在此新建终端（`Alt+T`）和在资源管理器中打开（`Alt+O`），hover 提示与快捷键保持一致。
 - **输入延迟打点** — 以 `NEBULA_INPUT_LATENCY=1` 启动后，调试日志会记录分段耗时（按键事件→PTY 写入、PTY 唤醒→帧、按键→帧），把“打字感觉慢”变成能指出慢在哪一段的数字。探针关闭时的开销仅为一次已初始化 `OnceLock` 读取。
 - **SSH 可经跳板机或系统代理连接** — 主机的代理按清晰的优先级解析：profile 自己的 `proxy` 字段 > `~/.ssh/config` 的 `ProxyJump` > 全局设置。`jump:user@bastion` 让会话经一台 SSH 跳板建立；多级跳板链会得到明确报错，而不是悄悄只取第一跳。全局“系统”模式读取 Windows 注册表代理并遵守其绕过列表。
+- **字体选择器列出系统已安装字体** — 字体选择器把 Windows 系统字体族与导入字体合并去重：默认只显示等宽家族（由 DirectWrite 权威判定，不用字形宽度启发式），一键展开全部；弹层顶部是正经搜索框（光标、选区、剪贴板快捷键俱全），按显示名过滤。枚举惰性执行，不进启动路径。应用字体是事务性的：先验证再持久化，失败回滚到当前字体；非等宽家族有标记，启动回退时也会给出提示。（感谢 @Sakyvo。）
 
 #### 修复
 
