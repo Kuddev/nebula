@@ -2282,7 +2282,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // palette panel in the first quad batch allowed Settings text to overwrite
     // it and produced the reported two-layer ghosting.
     let mut palette_quads = Vec::new();
-    let palette_bounds = d.command_palette_launcher_bounds();
+    let palette_bounds = d.command_palette_workspace_bounds();
     command_palette::push_quads(
         &d.nebula_palette,
         &d.nebula_theme,
