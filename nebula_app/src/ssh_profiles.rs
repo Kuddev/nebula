@@ -51,9 +51,10 @@ pub struct SshProfileAuth {
     /// 码位——码位属于某一个字体文件，换字体就作废；id 是我们自己的稳定键。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
-    /// 每主机代理覆盖：`"direct"` = 强制直连；其余值 = 代理 URL
-    /// （`socks5://`、`http://`，解析归 `ssh_proxy::ProxyServer`）。
-    /// `None` = 跟随全局设置（`nebula_settings.txt` 的 `ssh_proxy_*` 键）。
+    /// 每主机代理覆盖：`"direct"` = 强制直连；其余值 = 链路描述
+    /// （`socks5://`、`http://`、裸 `host:port`、`jump:<主机>`，解析归
+    /// `ssh_proxy::ProxyLink`）。`None` = 跟随全局设置
+    /// （`nebula_settings.txt` 的 `ssh_proxy_*` 键）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
 }

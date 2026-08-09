@@ -2,6 +2,110 @@
 
 > 登记尚未排期的功能任务。做完一项就把它移到 changelog 并从这里删除。
 
+## 2026-08-09 产品优先级总览
+
+详细产品范围、Netcatty 对照、验收指标与分期背景见
+[PRD：AI 会话指挥中心与远程开发工作流](prd-ai-session-and-remote-workflow.md)。
+2026-08-09 进一步复核上级目录的 Kaku 与 Herdr 后，产品定位和前三项优先级按本节更新；
+PRD 中与本节冲突的旧优先级不再作为排期依据。
+
+本节是当前功能排期的统一口径；下方各章节继续保存需求细节、调研证据和实现备忘。
+若下方条目未在标题中写明优先级，以本节为准。
+
+### 产品定位裁定
+
+Nebula 的目标是成为**最出色的传统 AI 终端**：终端始终是主工作表面，AI 是原生执行层，
+SSH 是附带连接能力而不是产品身份。前三项投入必须直接增强本地与远端共用的终端、AI 和
+长期任务体验，不以追平通用 SSH 客户端的功能全集为目标。
+
+Kaku 已经具备自然语言转命令、失败修复、原生 AI Chat、工具循环、审批和长期记忆，说明
+“命令生成 + 自动修错”只是入场能力，不能再用较浅的 Command Center 代表整个 AI 产品。
+Herdr 已经验证 server-owned Pane/进程状态、单一 Agent 状态权威、状态向上汇总、
+detach/reattach、冷恢复和 Agent 原生 resume 必须构成同一个运行时，不能拆成互不相干的面板功能。
+
+因此作出三项调整：
+
+1. “AI Command Center”升级为完整的 **Native AI Workbench / Agent Engine**；
+   Command Center 只保留为搜索、跳转和动作发现入口。
+2. 把高频、低延迟的 **Intelligent Command Loop / Failure Intelligence** 单列为第二产品支柱，
+   避免日常命令被深度 Chat 的重量和延迟淹没。
+3. 把 Task Runtime、Flight Control、Attention Router、常驻会话与 Semantic Resume 合并为
+   **Agent Runtime & Session Continuity**，共用任务身份、事件日志和状态权威。
+
+### 优先级定义
+
+| 优先级 | 含义 | 排期规则 |
+| --- | --- | --- |
+| `P0` | 核心定位、正确性和可靠性门槛 | 当前主线优先；未达到验收线前，不以同类新功能分散投入 |
+| `P0-Q` | P0 并行质量门 | 不增加产品支柱；持续守住传统终端输入、渲染和平台兼容基线 |
+| `P1` | 扩展核心 AI 工作流 | 在相关 P0 地基稳定后进入；不得绕过 P0 的权限和任务合同 |
+| `P2` | SSH 附带能力、跨设备、阅读体验和高级协作 | 不作为当前定位成立的前提，按依赖与用户价值排期 |
+| `P3` | 机会项或当前非目标 | 需要单独 PRD、安全评审和明确维护预算后才进入正式排期 |
+
+优先级表示产品顺序，不等同于固定发布日期。
+
+### 三个最优先产品任务
+
+| 顺序 | 产品任务 | 核心范围 | 为什么现在做 | 退出/验收门槛 |
+| --- | --- | --- | --- | --- |
+| `P0-1` | **Native AI Workbench / Agent Engine** | 原生流式对话；Pane、选区、命令失败、cwd、Git 上下文；文件/搜索/Shell/项目工具；多轮 Agent loop；审批、取消、失败恢复；会话与受控记忆；Provider 和系统凭据 | Kaku 已把简单命令生成变成基线；Nebula 必须先拥有能完成真实任务的原生 AI 执行面 | AI 可在一个可取消、可审批的流程中读取项目、运行命令、处理失败并修改文件；变更必须经过策略或用户授权；终端输出不能升级为系统指令；密钥不明文落盘 |
+| `P0-2` | **Intelligent Command Loop / Failure Intelligence** | `#` 自然语言转命令；失败解释与修复；命令预览和风险；历史、补全与 AI 建议统一排序；选中输出后解释/修复；当前 Pane、新 Tab、Split 执行目标 | 这是传统 AI 终端最高频、最低摩擦的使用路径，不能要求用户每次进入 Chat | 生成命令只进入可编辑输入区且绝不默认执行；失败上下文能准确携带命令、退出码、cwd、Git 和环境；高风险动作必须确认；可无复制地升级到 Workbench |
+| `P0-3` | **Agent Runtime & Session Continuity** | server-owned `TaskIdentity/TaskRuntime`；单一状态权威；Pane/Tab/Workspace 汇总；Attention Inbox；实时 detach/reattach；冷恢复；Agent 原生 resume；`live/lost/rebuildable` 边界 | 这是 Nebula 超过普通 AI Chat 终端的长期差异化，也是真实后台 Agent、注意力和恢复能力的共同地基 | 侧栏、Tab、通知、Workbench、Command Center 和恢复快照消费同一状态；24 小时驻留和 100 次 detach/attach 基准达标；重启后不把重建伪装成仍存活 |
+
+产品编号表示用户价值和交付顺序，不代表先画 `P0-1` 的聊天界面。三个产品任务共用的底层合同必须先落地，否则后续 UI 会形成第二套任务状态、第二套命令事实和不可审计的工具执行路径。
+
+### 最先攻克且最难的三个底层点
+
+| 工程顺序 | 底层难点 | 为什么必须先做 | 难点实质 | 第一阶段完成定义 |
+| --- | --- | --- | --- | --- |
+| `T0-1` | **统一 TaskIdentity、Runtime Authority 与事件日志** | 三个产品任务都需要稳定地回答“谁在什么环境做什么、现在是什么状态”；身份或事实源后补会导致 Pane、Chat、通知和恢复全面迁移 | Pane 会关闭或重建，PTY/CLI hook/进程/SSH 会给出互相冲突且乱序的事实，还要处理重连、重复事件和崩溃恢复 | 定义不可复用的 task/session/run id；每类状态只有一个权威 reducer；事件可去重、重放并形成确定快照；覆盖 working/blocked/done/idle/unknown/lost、超时、打断和异常退出 |
+| `T0-2` | **AI Tool/Action Contract 与审批事务内核** | Workbench 和 Command Loop 都会产生真实副作用；先做 Chat 再补权限、取消和审计会把高风险逻辑散落到 UI 与各工具 | 流式模型、并行或后台工具、用户审批、超时、取消、部分成功和重试共同构成分布式事务；Shell 不能承诺普遍回滚 | 所有工具使用版本化 schema 和稳定 action id；读/写/执行/网络分级；审批绑定参数摘要与作用域；取消、超时、重复回调和进程遗留有测试；审计记录脱敏且不保存密钥 |
+| `T0-3` | **结构化命令生命周期与可信上下文边界** | 没有准确的命令、退出码、cwd、Git、选区和输出边界，命令修复只是猜测，Agent 也无法安全使用终端上下文 | 终端字节流本身不提供可靠语义，Shell、ConPTY、远端 SSH 和全屏 TUI 行为不同；屏幕输出还可能携带 prompt injection 和秘密 | 通过 shell integration/hook 与 PTY 事实建立 command id、开始/结束、退出码和 cwd 事件；保留原始来源与截断标记；终端输出按不可信数据注入；敏感内容可脱敏；本地、SSH、失败、取消和 TUI 夹具通过 |
+
+技术依赖主链为 `T0-1 -> T0-2/T0-3 -> P0-1/P0-2 -> P0-3 完整可视化与恢复闭环`。
+`T0-2` 与 `T0-3` 的 schema 可以并行设计，但都必须引用 `T0-1` 的 task/session/run id。
+
+### 其余功能包排期
+
+| 优先级 | 功能包 | 排期裁定 | 前置依赖 | 退出/验收门槛 |
+| --- | --- | --- | --- | --- |
+| `P0-Q` | Windows 原生输入、ConPTY 与窗口兼容路线 | 作为传统终端可信度的长期质量门，与三大产品任务并行维护，不占用第四个产品支柱 | 原始事件事实、9001 协议、平台适配层 | 协议/布局/IME/多屏矩阵通过；不支持 9001 时正确降级 |
+| `P1` | Git worktree Agent Fork、Cross-Pane Context Bus、Markdown 评论发送 | 在 Runtime 与 Action Contract 上扩展深度 Agent 协作 | 任务 ID、Git 检查、内容脱敏、目标权限 | 创建和发送前可预览目标与范围；失败不覆盖或删除用户数据；接收内容不会未经确认执行 |
+| `P1` | MCP / Skill 与受控 Recipe | 扩展 Agent 能力，但必须复用宿主权限和凭据代理 | Tool/Action Contract、Provider、secret store | 安装、启停和升级可回滚；权限可解释；第三方能力不能直接读取系统密钥 |
+| `P2` | Host Chain / ProxyJump、端口转发、可靠 SFTP、轻量主机组织 | SSH 是附带能力；保留可靠连接闭环，但不与三个 P0 支柱争抢主线资源 | 统一 host id、逐跳凭据、SSH runtime、独立传输事务 | 多跳可定位失败 hop；转发状态与真实 listener 一致；1 GiB 传输可恢复且失败不留下半个最终文件 |
+| `P2` | WebDAV、图片/代码阅读、Markdown 增强、外观 | 提升跨设备与阅读体验，不作为 AI 终端定位成立的前提 | 同步冲突模型、查看器状态、统一焦点 | 功能完整、键盘可达、错误可恢复；同步冲突可处理；大文件不阻塞 UI |
+| `P2` | 大文件模块按职责拆分 | 只由实际 P0/P1 修改牵引，降低核心功能变更风险 | 明确模块所有权和行为基线 | 行为与性能无回归，边界有测试；不做无业务收益的纯搬运 |
+| `P3` | 定时任务、完整 Vault、多协议、公开插件市场、多云 Provider、自治多主机运维 | 当前偏离传统 AI 终端主线，或安全与维护成本过高 | 单独产品论证 | 必须另立 PRD、安全评审和维护成本评估 |
+
+### 下方既有条目映射
+
+| 优先级 | 既有 planning 条目 |
+| --- | --- |
+| `P0` | AI 供应商与 API Key 管理；CLI 输入预测；AI Assist 完善；CLI 消息通知开关进设置面板；子代理等待状态与主任务进度不同步 |
+| `P0-Q` | Windows Terminal 原生输入与窗口兼容路线 |
+| `P1` | MCP / Skill 内置化；自动化脚本执行；Markdown 选中/评论/发送到指定 tab |
+| `P2` | SSH 常用命令保存器；SSH 错误标记到 tab + 提示条真关闭按钮；SSH 代理（HTTP CONNECT / SOCKS5）；强杀 Nebula 时连带清理子进程（Job Object）；背景色真调色板与自定义 HEX；图片与代码阅读器；Explorer 右键集成；Markdown 选择复制/目录；图片预览器；超大源码文件拆分；WebDAV 同步完善 |
+| `P3` | 定时任务；Markdown 内嵌 HTML 解析；未来可能加入的完整 Vault、多协议、公开插件市场和自治多主机运维 |
+
+### 执行约束
+
+- 下方条目是详细需求来源，本节只决定产品顺序，不替代原始验收细节。
+- 已经部分或全部落地、但仍留在本文件中的条目，实施前必须按当前代码、测试和 changelog 重新核实，避免重复开发。特别是 SSH 代理、图片预览、加密备份等近期代码路径。
+- 已明确标记“已落地”的“数学公式渲染管线统一”不进入当前排期；完成真实性核实后应移入 changelog 并从 planning 删除。
+- P0 新功能必须先定义可重复的可靠性、权限或状态机验收；没有证据时不得宣称“彻底解决”。
+- P0 的 UI 不得自行维护工具、命令或任务的第二份事实；所有表面必须消费 T0 合同。
+- SSH、SFTP 和端口转发是附带能力；若需求扩展到通用运维产品，应另立 PRD，不在原任务内顺带膨胀。
+
+## [P2] 背景色真调色板与自定义 HEX
+
+来源：2026-08-08 用户需求（设置 → 外观 → 背景色）。
+
+- 背景色选择器改为真实调色板：预置色块直接展示最终颜色，不再用文字列表模拟颜色选项。
+- 支持输入自定义十六进制颜色；至少接受 `#RRGGBB`，校验失败时保留原值并给出明确的内联错误。
+- 预置色与自定义色共用同一份选中、预览、应用和持久化状态，避免弹层色块、输入框与实际终端背景不同步。
+- 打开选择器时必须回显当前有效颜色；应用前规范化为统一格式，自定义色不能因不在预置调色板中而丢失。
+- 优先级：`P2`。
+
 ## 图片与代码阅读器
 
 - 右侧文件树双击 PNG、JPG、JPEG、WebP 图片时，在 Nebula 内创建新的图片预览 tab。
@@ -16,6 +120,72 @@
 `TermControl`/`TerminalCore`/`TerminalInput` 实现，以及 WezTerm 的 `RawKeyEvent` 设计。
 目标不是复制 WT 的 WinUI 窗口代码，而是吸收它“原始事实保留在原生后端、协议编码在终端层”
 的数据流，确保 Windows 兼容性、跨平台扩展性和长期可维护性同时成立。
+
+### 长期方案裁定(2026-08-09)
+
+问题:wezterm 为多端各自维护 3 套原生键位后端;Nebula 要 WT 级 Windows 兼容性 + 多端,
+winit 是否是性能/兼容性/可维护性的最优解?
+
+**裁定:保留 vendored winit fork,不换库、不自建 window 层。键位走三层结构,把
+wezterm 的「3 套完整后端」压缩成「3 个只搬事实的薄适配器」:**
+
+1. **采集层**(per-platform,薄):winit fork 扩展只做「原生事实搬运」——Windows 已有
+   `RawKeyEventInfo`(VK/扫描码/repeat/extended/control_key_state/布局字符,一次捕获);
+   Linux 未来搬 xkb keysym+utf8+evdev code,macOS 搬 NSEvent keyCode/characters。
+   **fork 治理红线:只允许加只读字段/扩展 trait,禁止在 fork 里做策略(编码、过滤、映射)。**
+2. **契约层**(跨平台,一处):`keyboard.rs` 只认 winit KeyEvent + 平台补充字段,做分发
+   与快捷键判断,零平台分支堆积。
+3. **编码层**(跨平台,一处):`terminal_input.rs` 按终端能力(legacy/kitty/win32-input)
+   从契约模型编码,纯函数、可单测。kitty/legacy 编码天然平台无关;win32-input 仅在
+   Windows 有数据源。
+
+三维度论证:
+
+- **性能**:键盘不是热路径(人类输入 <100 事件/秒;热路径在 PTY 吞吐/渲染/reflow,与窗口
+  库无关)。winit 的 Windows 事件循环就是标准 Win32 消息泵,无附加层。换库零收益。
+- **兼容性**:兼容缺口全部在「信息保真」而非库本身。winit 上游确实丢原生事实(不暴露
+  repeat_count/control_key_state/WM_CHAR 原始流,上游服务通用 GUI 永远不会收这些终端专用
+  API),但 fork+扩展已两役实证可达 WT 级保真:Codex Shift+Enter(9001 记录)与 Claude Code
+  Esc(uChar=0→27,见 docs/hard_lessons.md)。备选项全部更差:tao 键盘抽象更旧(为 webview
+  服务);GLFW/SDL 是 C 依赖、文本/IME 保真差;自建三套原生后端=wezterm 路线,其 window
+  层数万行且 issue 半数是平台窗口 bug,单人不可承受;ghostty 的「核心库+原生壳」对既有
+  Rust/winit 代码库等于推倒重来 UI 层。
+- **可维护性**:多端键位的维护面 = 每平台 100–300 行事实搬运;编码器永远一份。fork 成本
+  已被 vendor 策略锁定(保持 0.30.13 API 面、backport 上游),扩展是加法不改上游行为,
+  rebase 冲突面小。WT 兼容性的本质是「原始 KEY_EVENT 事实不丢」,不是它的窗口代码——
+  这一性质已通过采集层达成。
+
+已知可接受偏差(记录在案,不视为缺口):key-up 无 WM_CHAR,修饰组合的 up 记录 uChar 回落
+到无修饰基础值(WT 发与 down 相同值);ConPTY 侧对 up 记录的 uChar 不敏感。
+
+落地进度(2026-08-09):契约层第一步完成——`terminal_input.rs` 定义 `KeyInput`
+键盘事实结构,采集只发生在 `From<&winit KeyEvent>` 一处,win32 编码器成为契约结构上的
+纯函数。修饰组合(Shift+Enter、Ctrl+Enter、Ctrl+Space、Ctrl+Backspace、AltGr、裸修饰键、
+UTF-16 代理对、Esc 双向)首次获得字节级单测;测试值全部取自真实捕获的事实表,禁止猜测。
+配合 `scripts/win32_input_matrix.ps1`(PostMessage 无打扰回放,断言 node 通道基线)形成
+「纯函数单测 + 端到端回放」双层防线。后续:kitty/legacy 编码器迁到同一契约;焦点报告已按
+spec #4999 在 9001 会话无条件发送(宿主自消费,仅向 1004 订阅者透传,双向验证零泄漏)。
+
+落地进度(2026-08-09 第二步):kitty/legacy VT 编码器整体迁入 `terminal_input.rs`,
+`keyboard.rs` 中约 470 行旧编码器(`build_sequence`/`SequenceBuilder` 一族)删除,编码层
+对 winit 类型的最后依赖消除——三平台自此共用同一份纯函数编码器。`KeyInput` 契约补上
+`key_without_modifiers`(kitty 备用键上报需要无修饰基键)。新增 11 个跨平台 vt 单测
+(Esc 消歧 CSI 27u、Shift+Enter 修饰位、Ctrl+A 码点、legacy 方向/功能键、事件类型标记
+释放、左 Shift 专属 keysym、关联文本码点、numpad 门控、win32/kitty 优先级),在任意 OS
+上都可编译运行——「编码层跨平台一处」的可见形态。迁移后矩阵回放 PASS,字节与基线逐位一致。
+
+落地进度(2026-08-09 第三步):可靠性三件套落地。(1) 失焦合成 key-up:
+`terminal_input::build_focus_loss_key_ups` 纯函数,失焦瞬间对按住的修饰键按当前协议
+(win32 记录 / kitty ALL_KEYS+EVENT_TYPES)合成 release,门控与真实 `key_release` 一致,
+挂钩在 `touch.rs on_focus_change`(先合成 up 再发 CSI O);左侧变体近似为已知偏差。
+(2) 输入延迟打点:`input/latency.rs`,`NEBULA_INPUT_LATENCY=1` 启用,分段
+key→pty / wake→frame / key→frame 走 `nebula_debug_log`;全局单槽、无回显字节归因为
+已知偏差。(3) ConPTY 生命周期:`drain_recv_channel` 每轮排空只应用最新 resize
+(keep-last,零定时器不吞终值);`CreatePseudoConsole` 带 0x4 失败去 flag 重试
+(端到端自门控降级,assert panic 消灭);传输死亡(读/写/poll 错误)统一发
+`Event::PtyFailure(reason)` + `terminal.exit()` 收尾,app 侧消息栏+日志,僵尸 tab 消灭。
+未竟:降级分支(in-box 拒 0x4)在 Win11 开发机无法自然触发,靠代码审查覆盖;
+resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记为后续)。
 
 ### 长期边界
 

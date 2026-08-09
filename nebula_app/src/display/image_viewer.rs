@@ -46,12 +46,7 @@ impl ImageView {
     }
 
     /// Zoom around the pointer so the inspected pixel stays under the cursor.
-    pub fn zoom_by(
-        &mut self,
-        steps: f32,
-        anchor: (f32, f32),
-        area: (f32, f32, f32, f32),
-    ) -> bool {
+    pub fn zoom_by(&mut self, steps: f32, anchor: (f32, f32), area: (f32, f32, f32, f32)) -> bool {
         if steps.abs() < f32::EPSILON || self.dimensions.is_none() {
             return false;
         }
@@ -167,10 +162,7 @@ fn image_dimensions(_path: &Path) -> Result<(u32, u32), String> {
 }
 
 fn contains(area: (f32, f32, f32, f32), point: (f32, f32)) -> bool {
-    point.0 >= area.0
-        && point.0 < area.0 + area.2
-        && point.1 >= area.1
-        && point.1 < area.1 + area.3
+    point.0 >= area.0 && point.0 < area.0 + area.2 && point.1 >= area.1 && point.1 < area.1 + area.3
 }
 
 /// Draw an image path for standalone image tabs and Markdown image blocks.

@@ -3,7 +3,13 @@
 //! 不引入代理 crate：握手完成后把裸 `TcpStream` 交给 russh 的
 //! `client::connect_stream`。全局配置存 `nebula_settings.txt`
 //! （`ssh_proxy_mode` / `ssh_proxy_url` / `ssh_proxy_no_proxy`），每主机覆盖
-//! 存 `ssh_profiles.json` 的 `proxy` 字段（`"direct"` 或代理 URL）。
+//! 存 `ssh_profiles.json` 的 `proxy` 字段（`"direct"`、代理地址或
+//! `jump:<主机>`）。跳板链路的建立在 `ssh_session::open_transport`——它需要
+//! 完整的认证栈，本模块只负责把配置解析成 [`ProxyLink`]。
+//!
+//! 「跟随系统」在 Windows 上先读注册表 Internet Settings（WinINET，Clash /
+//! v2rayN 等代理软件写的就是它），读不到再回落环境变量——只读环境变量的话
+//! 这个模式在 Windows 上基本等于摆设。
 //!
 //! SOCKS5 一律把主机名交给代理端解析（ATYP=0x03，字面 IP 除外）：访问境外
 //! 主机时本地 DNS 往往被污染或解析不到，本地解析等于代理白配。
@@ -45,6 +51,57 @@ impl ProxyMode {
             Self::Custom => "custom",
         }
     }
+}
+
+/// 一条已解析的出站链路：普通代理服务器，或经另一台 SSH 主机转发（跳板）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyLink {
+    Server(ProxyServer),
+    /// SSH 跳板。值是 `user@host[:port]`、`~/.ssh/config` 别名或已存主机，
+    /// 解析与认证沿用跳板自己的配置（profile / 密钥 / 它自己的代理设置）。
+    Jump(String),
+}
+
+impl ProxyLink {
+    /// 配置值统一入口：`jump:<主机>`、带协议前缀的 URL、或裸 `host[:port]`。
+    /// 裸地址按 socks5 处理——从 Clash / v2rayN 复制出来的就是 `127.0.0.1:7890`
+    /// 这种形态，逼用户手补前缀是纯摩擦（混合端口对 SOCKS5 一律来者不拒）。
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let value = value.trim();
+        if let Some(rest) = strip_prefix_ignore_case(value, "jump:") {
+            let target = rest.trim();
+            if target.is_empty() {
+                return Err("jump: 后面需要写跳板主机，例如 jump:user@bastion".to_owned());
+            }
+            if target.contains(',') {
+                return Err("暂不支持多级跳板链（jump: 只能写一台主机）".to_owned());
+            }
+            return Ok(Self::Jump(target.to_owned()));
+        }
+        if value.contains("://") {
+            return ProxyServer::parse_url(value).map(Self::Server);
+        }
+        ProxyServer::parse_url(&format!("socks5://{value}"))
+            .map(Self::Server)
+            .map_err(|_| format!("无法识别的代理地址: {value}（支持 socks5:// / http:// / host:port / jump:主机）"))
+    }
+
+    /// 连接池 key 里的链路身份（不含凭据）。
+    pub fn identity(&self) -> String {
+        match self {
+            Self::Server(server) => server.identity(),
+            Self::Jump(target) => format!("jump:{target}"),
+        }
+    }
+}
+
+fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .len()
+        .checked_sub(prefix.len())
+        .and_then(|_| value.get(..prefix.len()))
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,19 +245,27 @@ impl SshProxyConfig {
         config
     }
 
-    /// 汇总「这次连接走不走代理、走哪台」。`override_value` 来自主机 profile
-    /// 的 `proxy` 字段；配置写错要立刻报错——静默直连会把「代理没生效」伪装
-    /// 成网络问题。
+    /// 汇总「这次连接走不走代理、走哪条链路」。优先级：每主机覆盖
+    /// （profile 的 `proxy` 字段）> `~/.ssh/config` 的 ProxyJump > 全局设置。
+    /// 前两者是对这台主机的明确指令，不受全局绕过列表影响；配置写错要立刻
+    /// 报错——静默直连会把「代理没生效」伪装成网络问题。
     pub fn resolve(
         &self,
         override_value: Option<&str>,
+        config_proxy_jump: Option<&str>,
         target_host: &str,
-    ) -> Result<Option<ProxyServer>, String> {
+    ) -> Result<Option<ProxyLink>, String> {
         if let Some(value) = override_value.map(str::trim).filter(|value| !value.is_empty()) {
             if value.eq_ignore_ascii_case("direct") {
                 return Ok(None);
             }
-            return ProxyServer::parse_url(value).map(Some);
+            return ProxyLink::parse(value).map(Some);
+        }
+        if let Some(jump) = config_proxy_jump.map(str::trim).filter(|value| !value.is_empty()) {
+            if jump.contains(',') {
+                return Err(format!("暂不支持多级跳板链（ProxyJump {jump}）"));
+            }
+            return Ok(Some(ProxyLink::Jump(jump.to_owned())));
         }
         match self.mode {
             ProxyMode::Off => Ok(None),
@@ -211,18 +276,18 @@ impl SshProxyConfig {
                 if bypassed(target_host, &self.no_proxy) {
                     return Ok(None);
                 }
-                ProxyServer::parse_url(&self.url).map(Some)
+                ProxyLink::parse(&self.url).map(Some)
             },
             ProxyMode::System => {
-                let Some(url) = system_proxy_url() else { return Ok(None) };
-                let mut no_proxy = self.no_proxy.clone();
+                let Some((url, mut no_proxy)) = system_proxy() else { return Ok(None) };
+                no_proxy.extend_from_slice(&self.no_proxy);
                 if let Some(env) = env_var("NO_PROXY") {
                     no_proxy.extend(parse_no_proxy(&env));
                 }
                 if bypassed(target_host, &no_proxy) {
                     return Ok(None);
                 }
-                ProxyServer::parse_url(&url).map(Some)
+                ProxyServer::parse_url(&url).map(|server| Some(ProxyLink::Server(server)))
             },
         }
     }
@@ -239,24 +304,91 @@ pub fn parse_no_proxy(value: &str) -> Vec<String> {
 
 /// 目标主机是否命中绕过列表。规则与 curl 的 `NO_PROXY` 对齐：`*` 全绕过；
 /// 条目做完整匹配或点边界后缀匹配（`example.com` 命中 `a.example.com`，
-/// 不命中 `notexample.com`）。
+/// 不命中 `notexample.com`）。另收 WinINET ProxyOverride 的两种惯用形态：
+/// `<local>`（无点主机名）与尾通配（`192.168.*` / `*.example.com`）——
+/// Windows 代理软件写进注册表的就是这些，不认等于系统绕过列表白读。
 fn bypassed(target_host: &str, no_proxy: &[String]) -> bool {
     let host = target_host.to_ascii_lowercase();
     no_proxy.iter().any(|entry| {
         if entry == "*" {
             return true;
         }
-        let suffix = entry.strip_prefix('.').unwrap_or(entry);
+        if entry == "<local>" {
+            return !host.contains('.') && !host.contains(':');
+        }
+        if let Some(prefix) = entry.strip_suffix('*') {
+            if !prefix.is_empty() {
+                return host.starts_with(prefix);
+            }
+        }
+        let suffix = entry.strip_prefix("*.").or_else(|| entry.strip_prefix('.')).unwrap_or(entry);
         host == *suffix || host.ends_with(&format!(".{suffix}"))
     })
 }
 
-/// 环境变量代理，优先级与 zap 的 `resolve_proxy` 对齐。
-fn system_proxy_url() -> Option<String> {
+/// 「跟随系统」的代理来源：`(代理 URL, 系统侧绕过列表)`。Windows 上注册表
+/// Internet Settings 优先（Clash / v2rayN「系统代理」写的就是它），没启用
+/// 再回落环境变量（`ALL_PROXY` → `HTTPS_PROXY` → `HTTP_PROXY`，含小写）。
+fn system_proxy() -> Option<(String, Vec<String>)> {
+    #[cfg(windows)]
+    if let Some(found) = registry_proxy() {
+        return Some(found);
+    }
     ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"]
         .iter()
         .find_map(|name| env_var(name))
         .filter(|value| !value.trim().is_empty())
+        .map(|url| (url, Vec::new()))
+}
+
+/// HKCU\...\Internet Settings：`ProxyEnable` 非零时读 `ProxyServer` 与
+/// `ProxyOverride`。值的解析拆成纯函数，跨平台可测。
+#[cfg(windows)]
+fn registry_proxy() -> Option<(String, Vec<String>)> {
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+        .ok()?;
+    if key.get_value::<u32, _>("ProxyEnable").unwrap_or(0) == 0 {
+        return None;
+    }
+    let server: String = key.get_value("ProxyServer").ok()?;
+    let url = wininet_proxy_url(&server)?;
+    let bypass: String = key.get_value("ProxyOverride").unwrap_or_default();
+    Some((url, parse_wininet_override(&bypass)))
+}
+
+/// WinINET `ProxyServer` 的两种形态：单值 `host:port`（所有协议共用一个
+/// HTTP 代理），或 `http=...;https=...;socks=...` 的分协议表。分协议时优先
+/// 取 `socks=`（域名交给代理解析，见模块注释），其余按 HTTP CONNECT。
+fn wininet_proxy_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if !value.contains('=') {
+        return Some(format!("http://{value}"));
+    }
+    let pick = |wanted: &str| {
+        value.split(';').find_map(|part| {
+            let (key, addr) = part.split_once('=')?;
+            let addr = addr.trim();
+            (key.trim().eq_ignore_ascii_case(wanted) && !addr.is_empty()).then(|| addr.to_owned())
+        })
+    };
+    if let Some(addr) = pick("socks") {
+        return Some(format!("socks5://{addr}"));
+    }
+    pick("https").or_else(|| pick("http")).map(|addr| format!("http://{addr}"))
+}
+
+/// WinINET `ProxyOverride`：分号分隔，`<local>` 原样保留给 [`bypassed`] 特判。
+fn parse_wininet_override(value: &str) -> Vec<String> {
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.to_ascii_lowercase())
+        .collect()
 }
 
 fn env_var(name: &str) -> Option<String> {
@@ -491,29 +623,97 @@ mod tests {
         assert!(!bypassed("notexample.com", &list), "无点边界不得误伤");
         assert!(!bypassed("10.0.0.10", &list), "IP 是完整匹配不是前缀匹配");
         assert!(bypassed("anything", &[String::from("*")]));
+
+        // WinINET ProxyOverride 的惯用形态。
+        let wininet = parse_wininet_override("localhost;127.*;*.corp.example;<local>");
+        assert!(bypassed("127.0.0.1", &wininet), "尾通配 = 前缀匹配");
+        assert!(bypassed("db.corp.example", &wininet), "*.suffix 同点边界后缀");
+        assert!(bypassed("bastion", &wininet), "<local> 命中无点主机名");
+        assert!(!bypassed("bastion.lan", &wininet), "<local> 不得命中带点主机");
     }
 
     #[test]
-    fn resolve_precedence_override_then_global() {
+    fn wininet_proxy_server_forms() {
+        assert_eq!(wininet_proxy_url("127.0.0.1:7890").as_deref(), Some("http://127.0.0.1:7890"));
+        assert_eq!(
+            wininet_proxy_url("http=127.0.0.1:7890;https=127.0.0.1:7891").as_deref(),
+            Some("http://127.0.0.1:7891"),
+            "分协议表优先 https"
+        );
+        assert_eq!(
+            wininet_proxy_url("http=1.2.3.4:80;socks=127.0.0.1:1080").as_deref(),
+            Some("socks5://127.0.0.1:1080"),
+            "有 socks= 用 socks（域名交代理解析）"
+        );
+        assert_eq!(wininet_proxy_url("  "), None);
+    }
+
+    #[test]
+    fn proxy_link_parse_forms() {
+        assert!(matches!(
+            ProxyLink::parse("socks5://127.0.0.1:7890"),
+            Ok(ProxyLink::Server(server)) if server.scheme == ProxyScheme::Socks5
+        ));
+        // 裸 host:port（从 Clash 复制的形态）默认按 socks5。
+        assert!(matches!(
+            ProxyLink::parse("127.0.0.1:7890"),
+            Ok(ProxyLink::Server(server)) if server.scheme == ProxyScheme::Socks5 && server.port == 7890
+        ));
+        assert_eq!(
+            ProxyLink::parse("JUMP:ops@bastion.corp:2222"),
+            Ok(ProxyLink::Jump("ops@bastion.corp:2222".to_owned())),
+            "jump: 前缀大小写不敏感，值原样保留"
+        );
+        assert_eq!(ProxyLink::parse("jump:a,b").is_ok(), false, "多跳链明确报错");
+        assert!(ProxyLink::parse("jump: ").is_err());
+        assert!(ProxyLink::parse("ftp://x").is_err());
+        assert_eq!(ProxyLink::Jump("bastion".into()).identity(), "jump:bastion");
+    }
+
+    #[test]
+    fn resolve_precedence_override_then_config_jump_then_global() {
         let global = SshProxyConfig {
             mode: ProxyMode::Custom,
             url: "socks5://global.lan:1080".to_owned(),
             no_proxy: parse_no_proxy("10.0.0.1"),
         };
-        // 每主机覆盖优先于全局，且不受绕过列表影响（覆盖是明确指令）。
-        let forced = global.resolve(Some("http://special.lan:3128"), "10.0.0.1").unwrap().unwrap();
-        assert_eq!(forced.scheme, ProxyScheme::HttpConnect);
-        assert!(global.resolve(Some("direct"), "vps.example.com").unwrap().is_none());
+        // 每主机覆盖优先于一切，且不受绕过列表影响（覆盖是明确指令）。
+        let forced =
+            global.resolve(Some("http://special.lan:3128"), None, "10.0.0.1").unwrap().unwrap();
+        assert!(
+            matches!(forced, ProxyLink::Server(ref server) if server.scheme == ProxyScheme::HttpConnect)
+        );
+        assert!(global.resolve(Some("direct"), Some("bastion"), "vps.example.com").unwrap().is_none(),
+            "direct 覆盖连 ProxyJump 一起否掉");
+        // ssh_config 的 ProxyJump 次之，同样不受全局绕过影响。
+        assert_eq!(
+            global.resolve(None, Some("ops@bastion"), "10.0.0.1").unwrap(),
+            Some(ProxyLink::Jump("ops@bastion".to_owned()))
+        );
+        assert!(global.resolve(None, Some("j1,j2"), "vps.example.com").is_err(), "多跳报错");
         // 跟随全局：绕过列表命中 = 直连，其余走代理。
-        assert!(global.resolve(None, "10.0.0.1").unwrap().is_none());
-        assert_eq!(global.resolve(None, "vps.example.com").unwrap().unwrap().host, "global.lan");
+        assert!(global.resolve(None, None, "10.0.0.1").unwrap().is_none());
+        assert!(matches!(
+            global.resolve(None, None, "vps.example.com").unwrap().unwrap(),
+            ProxyLink::Server(server) if server.host == "global.lan"
+        ));
+        // 全局 url 也可以写 jump: 或裸地址。
+        let jump_global = SshProxyConfig {
+            mode: ProxyMode::Custom,
+            url: "jump:bastion".to_owned(),
+            no_proxy: Vec::new(),
+        };
+        assert_eq!(
+            jump_global.resolve(None, None, "vps.example.com").unwrap(),
+            Some(ProxyLink::Jump("bastion".to_owned()))
+        );
         // 关闭态永远直连；自定义但没填地址必须报错而不是静默直连。
         let off = SshProxyConfig::default();
-        assert!(off.resolve(None, "vps.example.com").unwrap().is_none());
+        assert!(off.resolve(None, None, "vps.example.com").unwrap().is_none());
         let empty = SshProxyConfig { mode: ProxyMode::Custom, ..Default::default() };
-        assert!(empty.resolve(None, "vps.example.com").is_err());
+        assert!(empty.resolve(None, None, "vps.example.com").is_err());
         // 覆盖字段写了非法 URL 也要报错。
-        assert!(global.resolve(Some("not-a-url"), "vps.example.com").is_err());
+        assert!(global.resolve(Some("ftp://nope"), None, "vps.example.com").is_err());
     }
 
     /// 进程内 SOCKS5 服务器：校验客户端字节流的每一段，再回放数据验证

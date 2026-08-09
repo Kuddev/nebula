@@ -32,6 +32,7 @@ use crate::scheduler::Scheduler;
 mod action;
 mod chrome;
 pub mod keyboard;
+pub mod latency;
 mod mouse;
 mod terminal_input;
 mod touch;

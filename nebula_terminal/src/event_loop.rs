@@ -183,15 +183,25 @@ where
     ///
     /// Returns `false` when a shutdown message was received.
     fn drain_recv_channel(&mut self, state: &mut State) -> bool {
+        // Resize storms (live window drags) queue faster than
+        // ResizePseudoConsole drains them — the console host performs a full
+        // viewport reflow per call. Within one drain only the newest size
+        // matters: intermediate sizes carry no information (the next message
+        // supersedes them), and the final size is never dropped because it is
+        // always the last one seen. The slower the host reflows, the more
+        // sizes pile up per drain and the harder the coalescing works.
+        let mut resize = None;
         while let Some(msg) = self.rx.recv() {
             match msg {
                 Msg::Input(input) => state.write_list.push_back(input),
-                Msg::Resize(window_size) => {
-                    state.stream.resize(window_size);
-                    self.pty.on_resize(window_size);
-                },
+                Msg::Resize(window_size) => resize = Some(window_size),
                 Msg::Shutdown => return false,
             }
+        }
+
+        if let Some(window_size) = resize {
+            state.stream.resize(window_size);
+            self.pty.on_resize(window_size);
         }
 
         true
@@ -332,6 +342,11 @@ where
                 None
             };
 
+            // Reason the transport died without a child exit, reported after
+            // the loop: without it the app never learns the session is gone
+            // and the tab turns into a zombie (unresponsive input, no notice).
+            let mut failure: Option<String> = None;
+
             'event_loop: loop {
                 // Wakeup the event loop when a synchronized update timeout was reached.
                 let timeout = state
@@ -345,6 +360,7 @@ where
                         ErrorKind::Interrupted => continue,
                         _ => {
                             error!("Event loop polling error: {err}");
+                            failure = Some(format!("event loop polling error: {err}"));
                             break 'event_loop;
                         },
                     }
@@ -400,6 +416,7 @@ where
                                     }
 
                                     error!("Error reading from PTY in event loop: {err}");
+                                    failure = Some(format!("PTY read failed: {err}"));
                                     break 'event_loop;
                                 }
                             }
@@ -407,6 +424,7 @@ where
                             if event.writable {
                                 if let Err(err) = self.pty_write(&mut state) {
                                     error!("Error writing to PTY in event loop: {err}");
+                                    failure = Some(format!("PTY write failed: {err}"));
                                     break 'event_loop;
                                 }
                             }
@@ -423,6 +441,15 @@ where
                     // Re-register with new interest.
                     self.pty.reregister(&self.poll, interest, poll_opts).unwrap();
                 }
+            }
+
+            // Announce a transport death exactly like a child exit so the
+            // app's existing teardown runs (`exit()` triggers `Event::Exit`).
+            // The child-exit and shutdown paths leave `failure` unset.
+            if let Some(reason) = failure {
+                self.event_proxy.send_event(Event::PtyFailure(reason));
+                self.terminal.lock().exit();
+                self.event_proxy.send_event(Event::Wakeup);
             }
 
             // The evented instances are not dropped here so deregister them explicitly.

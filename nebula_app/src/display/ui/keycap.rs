@@ -64,17 +64,44 @@ pub fn layout_combo(
 
 /// The one chip recipe: hairline ring + panel + surface, chip radius.
 pub fn push_chip(quads: &mut Vec<UiQuad>, sk: &Skin, x: f32, y: f32, w: f32, h: f32, scale: f32) {
+    push_chip_with_hover(quads, sk, x, y, w, h, scale, false);
+}
+
+/// Same chip recipe with a quiet hover wash. The geometry is intentionally
+/// identical in both states so a shortcut chip never shifts under the pointer.
+pub fn push_chip_with_hover(
+    quads: &mut Vec<UiQuad>,
+    sk: &Skin,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+    hovered: bool,
+) {
     let corner = radius::CHIP * scale;
     super::surface::push_stroke(quads, (x, y, w, h), corner, scale, sk.hairline);
     quads.push(UiQuad::solid(x, y, w, h, corner, sk.panel));
-    quads.push(UiQuad::solid(x, y, w, h, corner, sk.surface));
+    let fill = if hovered { super::surface::over(sk.hover, sk.surface) } else { sk.surface };
+    quads.push(UiQuad::solid(x, y, w, h, corner, fill));
 }
 
 /// Push every chip of a laid-out combo.
 pub fn push_combo(quads: &mut Vec<UiQuad>, sk: &Skin, combo: &ComboChips, scale: f32) {
+    push_combo_with_hover(quads, sk, combo, scale, false);
+}
+
+/// Push every chip of a laid-out combo, with a subtle hover color only.
+pub fn push_combo_with_hover(
+    quads: &mut Vec<UiQuad>,
+    sk: &Skin,
+    combo: &ComboChips,
+    scale: f32,
+    hovered: bool,
+) {
     let (_, y, _, h) = combo.bounds;
     for &(x, w, _) in &combo.chips {
-        push_chip(quads, sk, x, y, w, h, scale);
+        push_chip_with_hover(quads, sk, x, y, w, h, scale, hovered);
     }
 }
 

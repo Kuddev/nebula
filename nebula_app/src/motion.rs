@@ -79,6 +79,13 @@ pub enum Easing {
     EaseInQuad,
     EaseOutQuad,
     EaseInOutCubic,
+    /// CSS `ease`: `cubic-bezier(0.25, 0.1, 0.25, 1)`.
+    CssEase,
+    /// Material/CSS standard curve: `cubic-bezier(0.4, 0, 0.2, 1)`.
+    CssStandard,
+    /// The local toggle reference's elastic travel curve:
+    /// `cubic-bezier(0.68, -0.6, 0.32, 1.6)`.
+    LiquidToggle,
     #[default]
     SwiftOut,
 }
@@ -130,9 +137,72 @@ impl Easing {
             Self::EaseOutQuad => 1.0 - (1.0 - t) * (1.0 - t),
             Self::EaseInOutCubic if t < 0.5 => 4.0 * t * t * t,
             Self::EaseInOutCubic => 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0,
+            Self::CssEase => cubic_bezier(0.25, 0.1, 0.25, 1.0, t),
+            Self::CssStandard => cubic_bezier(0.4, 0.0, 0.2, 1.0, t),
+            Self::LiquidToggle => cubic_bezier(0.68, -0.6, 0.32, 1.6, t),
             Self::SwiftOut => 1.0 - (1.0 - t).powi(3),
         }
     }
+}
+
+/// Sample a CSS cubic-bezier timing function at a normalized time.
+///
+/// CSS constrains the two X control points to `0..=1`, so X is monotonic but
+/// is not itself the curve parameter. Newton iteration handles the common
+/// case; bisection keeps unusual but valid curves deterministic near a flat
+/// derivative. Y is intentionally not clamped because elastic curves use
+/// values below zero and above one to create their overshoot.
+fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
+    #[inline]
+    fn sample(a1: f32, a2: f32, t: f32) -> f32 {
+        let inverse = 1.0 - t;
+        3.0 * inverse * inverse * t * a1 + 3.0 * inverse * t * t * a2 + t * t * t
+    }
+
+    #[inline]
+    fn slope(a1: f32, a2: f32, t: f32) -> f32 {
+        3.0 * (1.0 - t).powi(2) * a1
+            + 6.0 * (1.0 - t) * t * (a2 - a1)
+            + 3.0 * t * t * (1.0 - a2)
+    }
+
+    let x = x.clamp(0.0, 1.0);
+    if x <= f32::EPSILON || (1.0 - x) <= f32::EPSILON {
+        return x;
+    }
+
+    let mut parameter = x;
+    for _ in 0..8 {
+        let error = sample(x1, x2, parameter) - x;
+        if error.abs() <= 1.0e-6 {
+            return sample(y1, y2, parameter);
+        }
+        let derivative = slope(x1, x2, parameter);
+        if derivative.abs() < 1.0e-6 {
+            break;
+        }
+        let next = parameter - error / derivative;
+        if !(0.0..=1.0).contains(&next) {
+            break;
+        }
+        parameter = next;
+    }
+
+    let (mut low, mut high) = (0.0, 1.0);
+    parameter = x;
+    for _ in 0..16 {
+        let sampled_x = sample(x1, x2, parameter);
+        if (sampled_x - x).abs() <= 1.0e-6 {
+            break;
+        }
+        if sampled_x < x {
+            low = parameter;
+        } else {
+            high = parameter;
+        }
+        parameter = (low + high) * 0.5;
+    }
+    sample(y1, y2, parameter)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -400,6 +470,13 @@ mod tests {
         tween.animate_to(1.0, Duration::from_secs(1), Easing::SwiftOut, MotionPolicy::Off);
         assert_eq!(tween.value(), 1.0);
         assert!(!tween.is_active());
+    }
+
+    #[test]
+    fn liquid_toggle_curve_keeps_css_overshoot() {
+        assert!(Easing::LiquidToggle.sample(0.08) < 0.0);
+        assert!(Easing::LiquidToggle.sample(0.92) > 1.0);
+        assert!((Easing::LiquidToggle.sample(0.5) - 0.5).abs() < 0.0001);
     }
 
     #[test]

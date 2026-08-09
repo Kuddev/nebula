@@ -506,6 +506,18 @@ async fn authenticated_session(
     profile: &crate::ssh_profiles::SshProfileAuth,
     progress: Option<&EventProxy>,
 ) -> Result<SharedSession, SessionError> {
+    authenticated_session_at(destination, profile, progress, 0).await
+}
+
+/// [`authenticated_session`] 的带深度版本。`depth` 是当前跳板层级：目标连接
+/// 为 0，它的跳板为 1……跳板递归（[`open_transport`] 的 `Jump` 分支）经
+/// [`authenticated_session_boxed`] 回到这里，深度上限在那边把关。
+async fn authenticated_session_at(
+    destination: &SshDestination,
+    profile: &crate::ssh_profiles::SshProfileAuth,
+    progress: Option<&EventProxy>,
+    depth: u8,
+) -> Result<SharedSession, SessionError> {
     // 代理决策先于连接池查找：pool key 必须带上代理身份，否则改完代理设置
     // 还在复用旧代理建立的连接，表现为「改了设置没生效」。配置写错在这里
     // 直接报错——静默直连会把配置问题伪装成网络问题。
@@ -513,10 +525,10 @@ async fn authenticated_session(
         .await
         .map_err(|err| format!("读取代理配置任务失败: {err}"))?;
     let proxy = global
-        .resolve(profile.proxy.as_deref(), &destination.host)
+        .resolve(profile.proxy.as_deref(), destination.proxy_jump.as_deref(), &destination.host)
         .map_err(|err| format!("SSH 代理配置无效: {err}"))?;
     let key = match &proxy {
-        Some(server) => format!("{}|{}", destination.pool_key(), server.identity()),
+        Some(link) => format!("{}|{}", destination.pool_key(), link.identity()),
         None => destination.pool_key(),
     };
     if let Some(existing) = connection_pool().lock().await.get(&key).cloned() {
@@ -537,7 +549,7 @@ async fn authenticated_session(
     });
     let handler = ClientHandler { host: destination.host.clone(), port: destination.port };
     report_stage(progress, SshStage::Connect);
-    let mut session = open_transport(proxy.as_ref(), config, destination, handler).await?;
+    let mut session = open_transport(proxy.as_ref(), config, destination, handler, depth).await?;
     report_stage(progress, SshStage::Authenticate);
     authenticate(&mut session, destination, profile).await?;
 
@@ -552,21 +564,88 @@ async fn authenticated_session(
     Ok(session)
 }
 
-/// 建立 SSH 传输层：直连交给 russh 自己开 TCP；走代理时先完成隧道握手，
-/// 再把裸流交给 `connect_stream`——两条路返回同一种会话句柄。
+/// 跳板递归需要的类型擦除：async fn 相互递归时 future 类型无限展开，
+/// `Box<dyn Future>` 在这里切断它。
+fn authenticated_session_boxed<'a>(
+    destination: &'a SshDestination,
+    profile: &'a crate::ssh_profiles::SshProfileAuth,
+    progress: Option<&'a EventProxy>,
+    depth: u8,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<SharedSession, SessionError>> + Send + 'a>,
+> {
+    Box::pin(authenticated_session_at(destination, profile, progress, depth))
+}
+
+/// 建立 SSH 传输层。直连交给 russh 自己开 TCP；代理服务器先完成隧道握手，
+/// 再把裸流交给 `connect_stream`；跳板则先对跳板主机走一遍完整的
+/// 连接 + 认证（沿用它自己的 profile / 密钥 / 代理配置，会话进连接池可
+/// 复用），再在其上开 direct-tcpip 通道当传输层——三条路返回同一种句柄。
 async fn open_transport(
-    proxy: Option<&crate::ssh_proxy::ProxyServer>,
+    proxy: Option<&crate::ssh_proxy::ProxyLink>,
     config: Arc<client::Config>,
     destination: &SshDestination,
     handler: ClientHandler,
+    depth: u8,
 ) -> Result<ClientSession, SessionError> {
+    use crate::ssh_proxy::ProxyLink;
     match proxy {
-        Some(server) => {
+        Some(ProxyLink::Server(server)) => {
             info!("经代理 {} 连接 {}:{}", server.display(), destination.host, destination.port);
             let stream = crate::ssh_proxy::connect(server, &destination.host, destination.port)
                 .await
                 .map_err(|err| format!("经代理 {} 连接失败: {err}", server.display()))?;
             Ok(client::connect_stream(config, stream, handler).await?)
+        },
+        Some(ProxyLink::Jump(spec)) => {
+            // 上限 2 级：target → 跳板 → 跳板的跳板。成环配置（a jump b、
+            // b jump a）也在这里截断，报错而不是栈溢出。
+            if depth >= 2 {
+                return Err(format!("跳板链过深或存在循环（经 {spec}，最多 2 级跳板）").into());
+            }
+            info!("经跳板 {spec} 连接 {}:{}", destination.host, destination.port);
+            let (jump_destination, jump_profile) = tokio::task::spawn_blocking({
+                let spec = spec.clone();
+                move || {
+                    let jump_destination = SshDestination::resolve(&spec)?;
+                    let path = crate::display::nebula_data_dir().join("ssh_profiles.json");
+                    let profile = match crate::ssh_profiles::SshProfiles::load(&path) {
+                        Ok(profiles) => profiles.for_destination(&spec),
+                        Err(err) => {
+                            warn!("加载跳板 SSH Profile 失败，使用自动认证: {err}");
+                            crate::ssh_profiles::SshProfiles::default().for_destination(&spec)
+                        },
+                    };
+                    Ok::<_, io::Error>((jump_destination, profile))
+                }
+            })
+            .await
+            .map_err(|err| format!("解析跳板地址任务失败: {err}"))?
+            .map_err(|err| format!("解析跳板 {spec} 失败: {err}"))?;
+            // 跳板阶段不上报进度：连接卡片的阶段属于目标主机，来回横跳
+            // 只会让用户以为连接在抽风。
+            let jump_session =
+                authenticated_session_boxed(&jump_destination, &jump_profile, None, depth + 1)
+                    .await
+                    .map_err(|err| format!("连接跳板 {spec} 失败: {err}"))?;
+            let channel = {
+                let session = jump_session.lock().await;
+                session
+                    .channel_open_direct_tcpip(
+                        destination.host.clone(),
+                        u32::from(destination.port),
+                        "127.0.0.1",
+                        0,
+                    )
+                    .await
+                    .map_err(|err| {
+                        format!(
+                            "经跳板 {spec} 转发到 {}:{} 失败: {err}",
+                            destination.host, destination.port
+                        )
+                    })?
+            };
+            Ok(client::connect_stream(config, channel.into_stream(), handler).await?)
         },
         None => {
             Ok(client::connect(config, (destination.host.as_str(), destination.port), handler)
@@ -678,7 +757,7 @@ pub(crate) async fn open_sftp(
     .map_err(|err| format!("SSH 地址解析任务失败: {err}"))??;
 
     if let Some(proxy_jump) = destination.proxy_jump.as_deref() {
-        return Err(format!("当前 SFTP 模式尚未接入跳板机 {proxy_jump}").into());
+        info!("SFTP 将经跳板 {proxy_jump} 建立");
     }
 
     // SFTP 面板自己有加载态，不参与终端 pane 的连接卡片。
@@ -740,9 +819,9 @@ pub fn spawn_test(
             })??;
             // 代理决策与真连同一套规则，但覆盖值取编辑器草稿：测试回答的是
             // 「保存后能不能连上」，磁盘上的旧覆盖不能替草稿作答。
-            let proxy = global.resolve(request.proxy.as_deref(), &resolved.host).map_err(
-                |err| -> SessionError { format!("SSH 代理配置无效: {err}").into() },
-            )?;
+            let proxy = global
+                .resolve(request.proxy.as_deref(), resolved.proxy_jump.as_deref(), &resolved.host)
+                .map_err(|err| -> SessionError { format!("SSH 代理配置无效: {err}").into() })?;
             test_connect(&resolved, &request, proxy.as_ref()).await
         })
         .await;
@@ -766,14 +845,12 @@ pub fn spawn_test(
 }
 
 /// 一次性连接（不进连接池——池里的旧连接不能代表新草稿），认证完即 drop。
+/// 跳板路径例外：跳板本身的会话仍走池（它不承载草稿，复用是安全的）。
 async fn test_connect(
     destination: &SshDestination,
     request: &SshTestRequest,
-    proxy: Option<&crate::ssh_proxy::ProxyServer>,
+    proxy: Option<&crate::ssh_proxy::ProxyLink>,
 ) -> Result<(), SessionError> {
-    if let Some(proxy_jump) = destination.proxy_jump.as_deref() {
-        return Err(format!("当前直连模式尚未接入跳板机 {proxy_jump}").into());
-    }
     let config = Arc::new(client::Config {
         inactivity_timeout: None,
         keepalive_interval: None,
@@ -781,7 +858,7 @@ async fn test_connect(
         ..Default::default()
     });
     let handler = ClientHandler { host: destination.host.clone(), port: destination.port };
-    let mut session = open_transport(proxy, config, destination, handler).await?;
+    let mut session = open_transport(proxy, config, destination, handler, 0).await?;
     test_authenticate(&mut session, destination, request).await
 }
 

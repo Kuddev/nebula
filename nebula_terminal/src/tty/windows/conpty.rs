@@ -176,19 +176,40 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         crate::pty_trace("DA1 response primed");
     }
 
-    // Create the Pseudo Console, using the pipes.
-    let result = unsafe {
+    // Create the Pseudo Console, using the pipes. Win32 input mode (0x4) is
+    // an OpenConsole-era flag: the bundled host always understands it, while
+    // the in-box ConPTY only does on newer Windows builds and fails
+    // CreatePseudoConsole with E_INVALIDARG on older ones. Retry without the
+    // flag instead of dying — a host created flagless never issues DECSET
+    // 9001, the terminal never sets WIN32_INPUT_MODE, and the encoder stays
+    // on the legacy VT path, so the degradation is self-gating end to end.
+    let conin_handle = conin_pty_handle.into_raw_handle() as HANDLE;
+    let conout_handle = conout_pty_handle.into_raw_handle() as HANDLE;
+    let mut result = unsafe {
         (api.create)(
             window_size.into(),
-            conin_pty_handle.into_raw_handle() as HANDLE,
-            conout_pty_handle.into_raw_handle() as HANDLE,
+            conin_handle,
+            conout_handle,
             PSEUDOCONSOLE_WIN32_INPUT_MODE,
             &mut pty_handle as *mut _,
         )
     };
+    if result != S_OK {
+        warn!(
+            "CreatePseudoConsole rejected win32 input mode (HRESULT {result:#x}); \
+             retrying in legacy VT input mode"
+        );
+        crate::pty_trace("CreatePseudoConsole win32-input rejected; legacy retry");
+        result = unsafe {
+            (api.create)(window_size.into(), conin_handle, conout_handle, 0, &mut pty_handle
+                as *mut _)
+        };
+    }
     crate::pty_trace("CreatePseudoConsole done");
 
-    assert_eq!(result, S_OK);
+    if result != S_OK {
+        return Err(Error::other(format!("CreatePseudoConsole failed: HRESULT {result:#x}")));
+    }
 
     let mut success;
 

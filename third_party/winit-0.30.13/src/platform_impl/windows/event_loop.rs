@@ -543,6 +543,30 @@ impl OwnedDisplayHandle {
     }
 }
 
+/// Nebula overlay diagnostic: gated by the same `NEBULA_DEBUG_LOG` switch the
+/// application uses, appended to `%TEMP%\nebula_winit.log`. Traces the native
+/// move-loop and mixed-DPI transitions that cannot be observed from the app.
+fn nebula_diag(message: impl AsRef<str>) {
+    use std::io::Write as _;
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| {
+        std::env::var("NEBULA_DEBUG_LOG").is_ok_and(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+    }) {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()))
+        .unwrap_or_else(|_| "0.000".to_owned());
+    let path = std::env::temp_dir().join("nebula_winit.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "[{ts}] {}", message.as_ref());
+    }
+}
+
 /// Returns the id of the main thread.
 ///
 /// Windows has no real API to check if the current executing thread is the "main thread", unlike
@@ -1199,6 +1223,7 @@ unsafe fn public_window_callback_inner(
         },
 
         WM_ENTERSIZEMOVE => {
+            nebula_diag("enter_size_move");
             userdata
                 .window_state_lock()
                 .set_window_flags_in_place(|f| f.insert(WindowFlags::MARKER_IN_SIZE_MOVE));
@@ -1207,6 +1232,7 @@ unsafe fn public_window_callback_inner(
 
         WM_EXITSIZEMOVE => {
             let mut state = userdata.window_state_lock();
+            nebula_diag(format!("exit_size_move dragging={}", state.dragging));
             if state.dragging {
                 state.dragging = false;
                 unsafe { PostMessageW(window, WM_LBUTTONUP, 0, lparam) };
@@ -1218,6 +1244,22 @@ unsafe fn public_window_callback_inner(
 
         WM_NCLBUTTONDOWN => {
             if wparam == HTCAPTION as _ {
+                // Nebula overlay: never post the pause-canceling dummy for a
+                // maximized window. The modal move loop's drag-to-unsnap
+                // tracker reads the dummy's empty button state (wparam 0, no
+                // MK_LBUTTON) as "button released" and aborts the loop ~30ms
+                // in: the window neither restores nor follows the cursor, so
+                // dragging a maximized window silently does nothing (and a
+                // cross-monitor drag strands it wherever it was). Measured
+                // 2026-08-09 with the NEBULA_DEBUG_LOG move-loop trace; the
+                // dummy is harmless for restored windows, so those keep the
+                // upstream 500ms-pause workaround below.
+                let maximized = userdata
+                    .window_state_lock()
+                    .window_flags()
+                    .contains(WindowFlags::MAXIMIZED);
+                nebula_diag(format!("nclbuttondown htcaption maximized={maximized}"));
+                if !maximized {
                 // Prevent the user event loop from pausing when left clicking the title bar.
                 //
                 // When the user interacts with the title bar, Windows enters the modal event
@@ -1244,6 +1286,7 @@ unsafe fn public_window_callback_inner(
                 // in the main event loop caused by that popup menu.
                 let lparam = 0;
                 unsafe { PostMessageW(window, WM_MOUSEMOVE, 0, lparam) };
+                }
             }
             result = ProcResult::DefWindowProc(wparam);
         },
@@ -2323,6 +2366,19 @@ unsafe fn public_window_callback_inner(
                 // back onto the monitor seam.
                 suggested_rect
             };
+
+            nebula_diag(format!(
+                "dpichanged {old_scale_factor}->{new_scale_factor} dragging={dragging_window} \
+                 allow_resize={allow_resize} suggested=({},{},{},{}) applied=({},{},{},{})",
+                suggested_rect.left,
+                suggested_rect.top,
+                suggested_rect.right,
+                suggested_rect.bottom,
+                new_outer_rect.left,
+                new_outer_rect.top,
+                new_outer_rect.right,
+                new_outer_rect.bottom,
+            ));
 
             unsafe {
                 SetWindowPos(

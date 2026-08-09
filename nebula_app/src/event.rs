@@ -208,9 +208,11 @@ impl Processor {
 
                 match event.stage {
                     NativeWindowStage::EnterSizeMove => {
+                        crate::display::nebula_debug_log("winmove enter_size_move");
                         window_context.display.window.set_native_live_move(true);
                     },
                     NativeWindowStage::ExitSizeMove => {
+                        crate::display::nebula_debug_log("winmove exit_size_move");
                         window_context.display.window.set_native_live_move(false);
                         window_context.apply_pending_native_transition();
                     },
@@ -660,7 +662,13 @@ impl ApplicationHandler<Event> for Processor {
         );
 
         if is_redraw {
+            let start = std::time::Instant::now();
             window_context.draw(&mut self.scheduler);
+            crate::input::latency::frame_drawn();
+            let elapsed = start.elapsed();
+            if elapsed.as_millis() >= 8 {
+                crate::display::nebula_debug_log(format!("winmove slow_draw {elapsed:?}"));
+            }
         }
     }
 
@@ -915,6 +923,7 @@ impl ApplicationHandler<Event> for Processor {
                 }
             },
             (EventType::Terminal(TerminalEvent::Wakeup), Some(window_id)) => {
+                crate::input::latency::pty_wakeup();
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.dirty = true;
                     // A typed `ssh` login is confirmed by remote output still
@@ -2902,6 +2911,17 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     TerminalEvent::PtyWrite(text) => self.ctx.write_to_pty(text.into_bytes()),
                     TerminalEvent::MouseCursorDirty => self.reset_mouse_cursor(),
                     TerminalEvent::CursorBlinkingChange => self.ctx.update_cursor_blinking(),
+                    TerminalEvent::PtyFailure(reason) => {
+                        // 宿主/管道异常死(shell 未退出)。三层裁定:用户有待办
+                        // 动作(重开会话)→ 消息栏;toast 不承载唯一副本,必落 log。
+                        // 随后到来的 `Exit` 走既有的 tab 关闭路径。
+                        crate::display::nebula_debug_log(format!("pty failure: {reason}"));
+                        self.ctx.message_buffer.push(Message::new(
+                            format!("终端会话异常终止(宿主或管道故障):{reason}"),
+                            MessageType::Error,
+                        ));
+                        self.ctx.display.pending_update.dirty = true;
+                    },
                     TerminalEvent::Exit | TerminalEvent::ChildExit(_) | TerminalEvent::Wakeup => (),
                 },
                 #[cfg(unix)]
@@ -2927,11 +2947,19 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             // During a mixed-DPI drag, Windows can emit several
                             // transient factors before the window settles. Keep
                             // only the newest one and defer glyph/UI work.
+                            crate::display::nebula_debug_log(format!(
+                                "winmove scale_factor_changed {scale_factor} deferred"
+                            ));
                             self.ctx.window().defer_scale_factor(scale_factor);
                         } else {
+                            let start = std::time::Instant::now();
                             self.ctx
                                 .display
                                 .apply_scale_factor_change(scale_factor, self.ctx.config);
+                            crate::display::nebula_debug_log(format!(
+                                "winmove scale_factor_changed {scale_factor} applied in {:?}",
+                                start.elapsed()
+                            ));
                         }
                     },
                     WindowEvent::Resized(size) => {
@@ -2947,6 +2975,10 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             let window = self.ctx.window();
                             window.native_live_move() && window.has_pending_scale_factor()
                         };
+                        crate::display::nebula_debug_log(format!(
+                            "winmove resized {}x{} defer={defer_native_resize}",
+                            size.width, size.height
+                        ));
                         if defer_native_resize {
                             // A DPI transition is followed by a synthetic
                             // resize on Windows. Keep its physical size until
@@ -2991,6 +3023,10 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     WindowEvent::Focused(is_focused) => {
                         log::info!("WindowEvent::Focused({})", is_focused);
                         self.ctx.terminal.is_focused = is_focused;
+                        // 焦点切换会让输入法宿主重置窗口状态；IME 位置缓存
+                        // 必须跟着作废，否则回焦后第一次组合可能拿到陈旧的
+                        // 候选窗位置（见 window.rs push_ime_cursor_area）。
+                        self.ctx.display.window.reset_ime_cursor_area_cache();
 
                         // Losing window focus ends any chrome text editing —
                         // a rename box left open under another window reads
@@ -3115,6 +3151,9 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             },
                             Ime::Enabled => {
                                 self.ctx.display.ime.set_enabled(true);
+                                // 输入法启用/切换：位置状态从零开始，下一帧
+                                // 必须重推（值相同也要推）。
+                                self.ctx.display.window.reset_ime_cursor_area_cache();
                                 *self.ctx.dirty = true;
                             },
                             Ime::Disabled => {

@@ -130,7 +130,6 @@ enum BackupOperation {
     Restore(std::path::PathBuf),
 }
 
-
 /// Shared caret blink phase for the chrome text editors (rename / filter /
 /// commit boxes). 相位挂在**最后一次编辑活动**上而不是挂钟纪元：聚焦或打完
 /// 字的那一刻光标必定是亮的，连续打字期间不闪。节律取自系统的
@@ -367,6 +366,105 @@ impl UiAnim {
     }
 }
 
+/// Independent motion channels for one settings toggle. The reference HTML
+/// animates travel, active stretch, color and hover through different CSS
+/// transitions; keeping four Tweens per switch preserves that separation.
+#[derive(Debug, Clone, Copy)]
+struct SettingsToggleAnim {
+    position: crate::motion::Tween,
+    stretch: crate::motion::Tween,
+    color: crate::motion::Tween,
+    hover: crate::motion::Tween,
+}
+
+impl SettingsToggleAnim {
+    fn new(on: bool) -> Self {
+        let value = if on { 1.0 } else { 0.0 };
+        Self {
+            position: crate::motion::Tween::new(value),
+            stretch: crate::motion::Tween::new(0.0),
+            color: crate::motion::Tween::new(value),
+            hover: crate::motion::Tween::new(0.0),
+        }
+    }
+
+    fn step(&mut self, frame: crate::motion::Frame, on: bool, pressed: bool, hovered: bool) {
+        // The settings input commits the new boolean on mouse-down. The
+        // active selector therefore only changes the thumb geometry; it never
+        // hides the newly selected track or reverses an already-on switch.
+        let position = if on { if pressed { 16.0 / 24.0 } else { 1.0 } } else { 0.0 };
+        let color = if on { 1.0 } else { 0.0 };
+        let stretch = if pressed { 1.0 } else { 0.0 };
+        let hover = if hovered { 1.0 } else { 0.0 };
+        const POSITION: Duration = Duration::from_millis(400);
+        const STRETCH: Duration = Duration::from_millis(250);
+        const COLOR: Duration = Duration::from_millis(300);
+
+        if (self.position.target() - position).abs() > f32::EPSILON {
+            self.position.animate_to(
+                position,
+                POSITION,
+                crate::motion::Easing::LiquidToggle,
+                crate::motion::MotionPolicy::Full,
+            );
+        }
+        if (self.stretch.target() - stretch).abs() > f32::EPSILON {
+            self.stretch.animate_to(
+                stretch,
+                STRETCH,
+                crate::motion::Easing::CssStandard,
+                crate::motion::MotionPolicy::Full,
+            );
+        }
+        if (self.color.target() - color).abs() > f32::EPSILON {
+            self.color.animate_to(
+                color,
+                COLOR,
+                crate::motion::Easing::CssEase,
+                crate::motion::MotionPolicy::Full,
+            );
+        }
+        if (self.hover.target() - hover).abs() > f32::EPSILON {
+            self.hover.animate_to(
+                hover,
+                COLOR,
+                crate::motion::Easing::CssEase,
+                crate::motion::MotionPolicy::Full,
+            );
+        }
+        self.position.step(frame);
+        self.stretch.step(frame);
+        self.color.step(frame);
+        self.hover.step(frame);
+    }
+
+    fn value(self) -> ui::widgets::ToggleMotion {
+        ui::widgets::ToggleMotion {
+            // Do not clamp position: the supplied cubic-bezier deliberately
+            // crosses 0/1 to create the same brief elastic overshoot as CSS.
+            position: self.position.value(),
+            stretch: self.stretch.value().clamp(0.0, 1.0),
+            color: self.color.value().clamp(0.0, 1.0),
+            hover: self.hover.value().clamp(0.0, 1.0),
+        }
+    }
+
+    fn animating_to(self, on: bool, pressed: bool, hovered: bool) -> bool {
+        let position = if on { if pressed { 16.0 / 24.0 } else { 1.0 } } else { 0.0 };
+        let color = if on { 1.0 } else { 0.0 };
+        let stretch = if pressed { 1.0 } else { 0.0 };
+        let hover = if hovered { 1.0 } else { 0.0 };
+        [
+            (self.position, position),
+            (self.stretch, stretch),
+            (self.color, color),
+            (self.hover, hover),
+        ]
+        .into_iter()
+        .any(|(tween, target)| tween.is_active() || (tween.value() - target).abs() > 0.004)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct NebulaUiAnims {
     clock: crate::motion::MotionClock,
@@ -378,6 +476,7 @@ struct NebulaUiAnims {
     left_sidebar: UiAnim,
     right_drawer: UiAnim,
     ssh_editor: UiAnim,
+    settings_toggles: [SettingsToggleAnim; settings::SETTINGS_TOGGLE_COUNT],
 }
 
 impl NebulaUiAnims {
@@ -389,15 +488,31 @@ impl NebulaUiAnims {
             left_sidebar: UiAnim::new(1.0),
             right_drawer: UiAnim::new(0.0),
             ssh_editor: UiAnim::new(0.0),
+            settings_toggles: std::array::from_fn(|_| SettingsToggleAnim::new(false)),
         }
     }
 
-    fn step(&mut self, left_open: bool, right_open: bool, ssh_open: bool) {
+    fn step(
+        &mut self,
+        left_open: bool,
+        right_open: bool,
+        ssh_open: bool,
+        toggle_targets: [bool; settings::SETTINGS_TOGGLE_COUNT],
+        toggle_pressed: SettingsHit,
+        toggle_hover: SettingsHit,
+    ) {
         let frame = self.clock.tick();
         self.frame = Some(frame);
         self.left_sidebar.step(frame, if left_open { 1.0 } else { 0.0 });
         self.right_drawer.step(frame, if right_open { 1.0 } else { 0.0 });
         self.ssh_editor.step(frame, if ssh_open { 1.0 } else { 0.0 });
+        for (index, (anim, target)) in
+            self.settings_toggles.iter_mut().zip(toggle_targets).enumerate()
+        {
+            let pressed = settings::settings_toggle_slot(toggle_pressed) == Some(index);
+            let hovered = settings::settings_toggle_slot(toggle_hover) == Some(index);
+            anim.step(frame, target, pressed, hovered);
+        }
     }
 
     fn frame(&mut self) -> crate::motion::Frame {
@@ -410,9 +525,28 @@ impl NebulaUiAnims {
         }
     }
 
-    fn animating(&self, left_open: bool, right_open: bool) -> bool {
+    fn animating(
+        &self,
+        left_open: bool,
+        right_open: bool,
+        toggle_targets: [bool; settings::SETTINGS_TOGGLE_COUNT],
+        toggle_pressed: SettingsHit,
+        toggle_hover: SettingsHit,
+    ) -> bool {
         self.left_sidebar.animating_to(if left_open { 1.0 } else { 0.0 })
             || self.right_drawer.animating_to(if right_open { 1.0 } else { 0.0 })
+            || self
+                .settings_toggles
+                .iter()
+                .zip(toggle_targets)
+                .enumerate()
+                .any(|(index, (anim, target))| {
+                    anim.animating_to(
+                        target,
+                        settings::settings_toggle_slot(toggle_pressed) == Some(index),
+                        settings::settings_toggle_slot(toggle_hover) == Some(index),
+                    )
+                })
     }
 }
 
@@ -1325,6 +1459,9 @@ pub struct Display {
     /// geometry or input contracts again.
     nebula_message_queue_entry: message_queue_entry::MessageQueueEntry,
     nebula_settings_hover: SettingsHit,
+    /// Primary-button settings control currently held down for HTML-like
+    /// toggle active feedback. Cleared on release or when the settings view closes.
+    nebula_settings_pressed: SettingsHit,
     /// Active settings opacity drag: target plus the screen-space track used
     /// for pointer-to-value mapping. Values persist only when the drag ends.
     pub nebula_settings_opacity_drag: Option<(settings::SettingsOpacityTarget, f32, f32)>,
@@ -1998,6 +2135,7 @@ impl Display {
             nebula_sidebar_scroll_drag: None,
             nebula_message_queue_entry: message_queue_entry::MessageQueueEntry::default(),
             nebula_settings_hover: SettingsHit::None,
+            nebula_settings_pressed: SettingsHit::None,
             nebula_settings_opacity_drag: None,
             nebula_context_menu: None,
             nebula_settings_dropdown: None,
@@ -2206,20 +2344,9 @@ impl Display {
             .into_iter()
             .filter(|host| self.nebula_ssh_hosts.iter().any(|entry| entry == host))
             .count();
-        self.push_toast(
-            format!("已导入 {count} 个 SSH 主机，立即可用"),
-            ToastKind::Success,
-        );
+        self.push_toast(format!("已导入 {count} 个 SSH 主机，立即可用"), ToastKind::Success);
         self.pending_update.dirty = true;
         self.window.request_redraw();
-    }
-
-    /// The button is intentionally present before update detection exists. It
-    /// gives the page a stable affordance now; networking, verification and
-    /// replacement are tracked in the future plan instead of running here.
-    pub fn request_ssh_upgrade(&mut self) {
-        self.push_toast("升级检测将在后续版本提供", ToastKind::Info);
-        self.pending_update.dirty = true;
     }
 
     /// Ask before removing a saved destination. Config aliases use different
@@ -2711,6 +2838,17 @@ impl Display {
         }
     }
 
+    /// Remember the settings control under the primary button while the
+    /// pointer is held. The renderer uses this only for the toggle's active
+    /// stretch; hit testing remains owned by [`settings_hit`].
+    pub fn set_settings_pressed(&mut self, hit: SettingsHit) {
+        if self.nebula_settings_pressed != hit {
+            self.nebula_settings_pressed = hit;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
     pub fn context_menu_interactive(&self) -> bool {
         self.nebula_context_menu.as_ref().is_some_and(context_menu::ContextMenu::interactive)
     }
@@ -3092,6 +3230,10 @@ impl Display {
             language: self.nebula_language,
             section: self.nebula_settings_section,
             hover: self.nebula_settings_hover,
+            pressed: self.nebula_settings_pressed,
+            toggle_motion: std::array::from_fn(|index| {
+                self.nebula_ui_anims.settings_toggles[index].value()
+            }),
             theme: self.nebula_theme,
             follow_system_theme: self.nebula_follow_system_theme,
             ghost: self.nebula_ghost_enabled,
@@ -3129,21 +3271,15 @@ impl Display {
                     .map(|detected| {
                         detected
                             .iter()
-                            .map(|shell| (shell.id.clone(), shell.name.clone(), shell.program.clone()))
+                            .map(|shell| {
+                                (shell.id.clone(), shell.name.clone(), shell.program.clone())
+                            })
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                shells.extend(
-                    self.nebula_profiles
-                        .iter()
-                        .filter_map(|profile| {
-                            Some((
-                                profile.settings_id()?,
-                                profile.name.clone(),
-                                profile.command.clone(),
-                            ))
-                        }),
-                );
+                shells.extend(self.nebula_profiles.iter().filter_map(|profile| {
+                    Some((profile.settings_id()?, profile.name.clone(), profile.command.clone()))
+                }));
                 shells
             },
             shell_id: self.nebula_shell_id.clone(),
@@ -3236,8 +3372,14 @@ impl Display {
             3 => self.nebula_backup_selection.sync = !self.nebula_backup_selection.sync,
             4 => self.nebula_backup_selection.assistant = !self.nebula_backup_selection.assistant,
             5 => self.nebula_backup_selection.session = !self.nebula_backup_selection.session,
-            6 => self.nebula_backup_selection.directory_history = !self.nebula_backup_selection.directory_history,
-            7 => self.nebula_backup_selection.command_history = !self.nebula_backup_selection.command_history,
+            6 => {
+                self.nebula_backup_selection.directory_history =
+                    !self.nebula_backup_selection.directory_history
+            },
+            7 => {
+                self.nebula_backup_selection.command_history =
+                    !self.nebula_backup_selection.command_history
+            },
             8 => self.nebula_backup_selection.fonts = !self.nebula_backup_selection.fonts,
             _ => return,
         }
@@ -3288,11 +3430,8 @@ impl Display {
 
     pub fn backup_passphrase_paste(&mut self, text: &str) {
         let replacing_selection = self.nebula_backup_passphrase_select_all.is_selected();
-        let used = if replacing_selection {
-            0
-        } else {
-            self.nebula_backup_passphrase.chars().count()
-        };
+        let used =
+            if replacing_selection { 0 } else { self.nebula_backup_passphrase.chars().count() };
         let incoming: String = text
             .chars()
             .filter(|character| !character.is_control())
@@ -3305,8 +3444,7 @@ impl Display {
     }
 
     pub fn backup_passphrase_backspace(&mut self) {
-        self.nebula_backup_passphrase_select_all
-            .backspace(&mut self.nebula_backup_passphrase);
+        self.nebula_backup_passphrase_select_all.backspace(&mut self.nebula_backup_passphrase);
         self.nebula_backup_status = None;
         self.window.request_redraw();
     }
@@ -3324,8 +3462,7 @@ impl Display {
                 crate::encrypted_backup::collect(self.nebula_backup_selection)
                     .and_then(|archive| crate::encrypted_backup::seal(&archive, &passphrase))
                     .and_then(|packet| {
-                        crate::atomic_file::write(&path, &packet)
-                            .map_err(|error| error.to_string())
+                        crate::atomic_file::write(&path, &packet).map_err(|error| error.to_string())
                     })
             },
             BackupOperation::Restore(path) => std::fs::read(&path)
@@ -3383,7 +3520,6 @@ impl Display {
         self.window.request_redraw();
     }
 
-
     pub fn set_settings_tab_active(&mut self, active: bool) {
         if self.nebula_settings_open == active {
             return;
@@ -3397,6 +3533,7 @@ impl Display {
             self.commit_sync_field();
             self.nebula_settings_dropdown = None;
             self.nebula_settings_hover = SettingsHit::None;
+            self.nebula_settings_pressed = SettingsHit::None;
             self.nebula_keymap_capture = None;
         } else {
             self.load_sync_state();
@@ -3860,11 +3997,8 @@ impl Display {
 
     pub fn set_default_shell_by_index(&mut self, index: usize) {
         let detected_count = self.nebula_detected_shells.as_ref().map_or(0, Vec::len);
-        let shell = self
-            .nebula_detected_shells
-            .as_ref()
-            .and_then(|shells| shells.get(index))
-            .cloned();
+        let shell =
+            self.nebula_detected_shells.as_ref().and_then(|shells| shells.get(index)).cloned();
         if let Some(shell) = shell {
             self.set_default_shell(&shell);
         } else if let Some(profile) = self
@@ -4557,14 +4691,30 @@ impl Display {
     /// One geometry contract for palette rendering and pointer input. Picker
     /// height depends on the live filtered row count, so callers must not
     /// reconstruct this from window dimensions alone.
+    pub(super) fn command_palette_launcher_bounds(&self) -> Option<(f32, f32)> {
+        if !self.nebula_palette.is_launcher() {
+            return None;
+        }
+        let scale = self.window.scale_factor as f32;
+        let width = self.ui_size_info().width();
+        // Launcher panes occupy only the default terminal work area: Tabs on
+        // the left and the file drawer on the right remain visually reserved.
+        let sidebar = (self.sidebar_w_visual() * scale).round();
+        let left = (sidebar - 4.0 * scale).round().clamp(0.0, width);
+        let drawer = (self.drawer_w_visual() * scale).min(width * 0.42);
+        let right = (width - drawer - 8.0 * scale).round().clamp(left, width);
+        (right > left).then_some((left, right))
+    }
+
     pub fn command_palette_layout(&self) -> command_palette::PaletteLayout {
         let size = self.ui_size_info();
-        command_palette::palette_layout(
+        command_palette::palette_layout_with_launcher_bounds(
             &self.nebula_palette,
             size.width(),
             size.height(),
             self.window.scale_factor as f32,
             size.cell_width(),
+            self.command_palette_launcher_bounds(),
         )
     }
 
@@ -5071,16 +5221,44 @@ impl Display {
         }
     }
 
+    fn settings_toggle_targets(&self) -> [bool; settings::SETTINGS_TOGGLE_COUNT] {
+        [
+            self.nebula_follow_system_theme,
+            self.nebula_ghost_enabled,
+            self.nebula_cursor_blink,
+            self.nebula_copy_on_select,
+            self.nebula_panel_resize,
+            self.nebula_cjk_bold_regular,
+            self.nebula_fetch_enabled,
+            self.nebula_powerline_enabled,
+            self.nebula_blur,
+            self.nebula_keep_session,
+            self.nebula_restore_session,
+            self.nebula_sync_auto_pull,
+            self.nebula_background_image_cover_chrome,
+        ]
+    }
+
     pub fn step_chrome_anims(&mut self) {
+        let toggle_targets = self.settings_toggle_targets();
         self.nebula_ui_anims.step(
             !self.nebula_sidebar_collapsed,
             self.nebula_side_panel.open,
             self.nebula_ssh_editor_open,
+            toggle_targets,
+            self.nebula_settings_pressed,
+            self.nebula_settings_hover,
         );
     }
 
     pub fn chrome_animating(&self) -> bool {
-        self.nebula_ui_anims.animating(!self.nebula_sidebar_collapsed, self.nebula_side_panel.open)
+        self.nebula_ui_anims.animating(
+            !self.nebula_sidebar_collapsed,
+            self.nebula_side_panel.open,
+            self.settings_toggle_targets(),
+            self.nebula_settings_pressed,
+            self.nebula_settings_hover,
+        )
     }
 
     pub fn left_sidebar_progress(&self) -> f32 {
@@ -5217,9 +5395,12 @@ impl Display {
     pub(super) fn sidebar_model(&self) -> chrome::SidebarModel {
         chrome::SidebarModel {
             tab_count: self.nebula_tab_labels.len().max(1),
-            host_count: self.nebula_ssh_hosts.len(),
+            // Saved SSH destinations belong in the launcher/settings. The
+            // home tab rail is reserved for actual sessions, so no second
+            // SSH HOSTS section is laid out underneath TABS.
+            host_count: 0,
             tabs_open: self.nebula_tabs_section_open,
-            hosts_open: self.nebula_hosts_section_open,
+            hosts_open: false,
             tabs_scroll: self.nebula_tabs_scroll,
             hosts_scroll: self.nebula_hosts_scroll,
             sidebar_w: self.sidebar_w_visual(),
@@ -7075,8 +7256,7 @@ impl Display {
         let body_h = body_lines.len() as f32 * line_h - s(6.0);
         let input_h = if is_backup_passphrase { s(38.0) } else { 0.0 };
         let input_space = if is_backup_passphrase { input_h + s(14.0) } else { 0.0 };
-        let box_h =
-            pad + cell_h + s(10.0) + body_h + input_space + s(24.0) + btn_h + pad * 0.75;
+        let box_h = pad + cell_h + s(10.0) + body_h + input_space + s(24.0) + btn_h + pad * 0.75;
         let bx = ((size.width() - box_w) * 0.5).max(s(16.0));
         let by = ((size.height() - box_h) * 0.5).max(s(16.0));
 
@@ -7097,12 +7277,7 @@ impl Display {
         );
 
         let backup_input_rect = is_backup_passphrase.then(|| {
-            (
-                bx + pad,
-                by + pad + cell_h + s(10.0) + body_h + s(14.0),
-                box_w - 2.0 * pad,
-                input_h,
-            )
+            (bx + pad, by + pad + cell_h + s(10.0) + body_h + s(14.0), box_w - 2.0 * pad, input_h)
         });
         if let Some(input_rect) = backup_input_rect {
             ui::surface::push_stroke(
@@ -7134,7 +7309,6 @@ impl Display {
                 ));
             }
         }
-
 
         // Button geometry (kept for the mouse hit-test).
         let btn_y = by + box_h - pad * 0.75 - btn_h;
@@ -7215,7 +7389,6 @@ impl Display {
                 glyph_cache,
             );
         }
-
 
         // Key text is centered in its cap. The cap shares the button's text
         // centerline by construction, so `btn_text_y` needs no adjustment.

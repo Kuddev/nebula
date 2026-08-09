@@ -776,7 +776,7 @@ impl Display {
         if editor.proxy_choice == ssh_ui::SshProxyChoice::Custom {
             let url = editor.proxy_url.trim();
             if !url.is_empty() {
-                if let Err(err) = crate::ssh_proxy::ProxyServer::parse_url(url) {
+                if let Err(err) = crate::ssh_proxy::ProxyLink::parse(url) {
                     editor.error = Some(err);
                     editor.field = SshEditorField::ProxyUrl;
                     self.nebula_ssh_editor = Some(editor);
