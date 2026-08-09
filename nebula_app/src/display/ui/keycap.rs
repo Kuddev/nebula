@@ -79,11 +79,37 @@ pub fn push_chip_with_hover(
     scale: f32,
     hovered: bool,
 ) {
+    push_chip_toned(quads, sk, x, y, w, h, scale, hovered, false);
+}
+
+/// 完整键帽配方（2026-08-09 对齐原型 .kbd）：surface 底 + **底边 1.5px
+/// 实体感**替代四边描边——四边环在 20px 高度上糊成灰块，只留底边才读得出
+/// 「可按」。`danger` 是冲突键帽：danger 13% 底 + 文字侧配 danger 墨。
+/// 回滚（四边 hairline 环旧配方）：
+/// super::surface::push_stroke(quads, (x, y, w, h), corner, scale, sk.hairline);
+#[allow(clippy::too_many_arguments)]
+pub fn push_chip_toned(
+    quads: &mut Vec<UiQuad>,
+    sk: &Skin,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+    hovered: bool,
+    danger: bool,
+) {
     let corner = radius::CHIP * scale;
-    super::surface::push_stroke(quads, (x, y, w, h), corner, scale, sk.hairline);
     quads.push(UiQuad::solid(x, y, w, h, corner, sk.panel));
     let fill = if hovered { super::surface::over(sk.hover, sk.surface) } else { sk.surface };
     quads.push(UiQuad::solid(x, y, w, h, corner, fill));
+    if danger {
+        // 原型 .kbd.clash：color-mix(danger 13%)。
+        let tint = crate::renderer::ui::Rgba::new(sk.danger.r, sk.danger.g, sk.danger.b, 33);
+        quads.push(UiQuad::solid(x, y, w, h, corner, tint));
+    }
+    let lip = (1.5 * scale).max(1.0);
+    quads.push(UiQuad::solid(x, y + h - lip, w, lip, lip * 0.4, sk.hairline));
 }
 
 /// Push every chip of a laid-out combo.

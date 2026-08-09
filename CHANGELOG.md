@@ -32,6 +32,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **Occasional stalls while typing Chinese in PowerShell** — the renderer pushed the IME caret rectangle to the input method every frame, cursor blink and output scrolling included, and on Windows each push is a chain of synchronous cross-process IMM32 calls into the input-method host; whenever that host was busy, the render thread waited on it. The rectangle is now deduplicated and only pushed when it actually changes, and the cache is invalidated on focus changes, IME enabling, and IME re-association so the first composition after returning never lands at a stale position.
 - **Missing AI hook warnings no longer repeat every frame** — the notice is emitted only when hook availability changes into the missing state, preventing an unavailable optional hook from producing an unbounded warning loop.
 - **Installer version metadata matches the application** — the Inno Setup fallback version and numeric file version now match Nebula 0.9.0; release builds continue to inject the package version automatically.
+- **The terminal card's corners no longer show a pale fringe** — the rounded card and the shell's concave corner patches were two independently anti-aliased arcs blended in sequence, which mathematically leaks a sliver of the clear color along the arc (and the desktop behind the window once transparency is on). The corner patches now render underneath the card inside the backdrop pass, making the card's own arc the only visible seam, and the clear fallback uses the composited shell tone shared with the chrome strips.
 
 #### Improved
 
@@ -41,6 +42,9 @@ Every release entry is provided in English and Simplified Chinese.
 - **File-tree status is quieter and stable** — directories use neutral theme colors, ignored paths detected through batched `git check-ignore` are dimmed without changing sorting or filtering, and hovering a row no longer shifts its contents.
 - **Saved hosts in Settings → SSH show their OS icon** — each row now draws the same per-host icon as the sidebar (real ink width measured, then optically scaled to one target size), replacing the earlier neutral status ring; `auto` and unrecognized ids fall back to the generic terminal shape. The icon says which machine this is — it does not invent an online state.
 - **Overlay panels draw from one component set** — the command palette, the Ctrl+K launcher, the Ctrl+Shift+O session picker, and combobox dropdowns now share one `overlay_list` module for option rows, icon tiles, identity chips, footer hints, and the query caret, and the SSH settings row actions share one outline-button widget. Selection and hover treatments are now identical everywhere; the migration also removed a hidden asymmetry where selected pills were 2 px taller than hover pills.
+- **The Network page shows only what the selected mode needs** — Off is a single explanatory note instead of leftover input boxes; Follow system reports the proxy it is actually reading right now (registry Internet Settings or environment variables, probed on entry rather than per frame); Custom proxy offers a manual-address / SSH-jump-host choice, with the jump host picked from saved hosts instead of typed syntax. Hosts carrying their own link override are listed on the same page with an inline summary (direct / proxy / via jump host) and open their editor on click, ending with "the other N hosts follow the global default".
+- **One selection tint everywhere** — the settings navigation, the sidebar's active tab, and the Network page's choice rows now share the design prototype's accent-soft selection wash (≈ rgb(52,71,99) composited on the dark theme); light themes stay neutral automatically because the token derives from each theme's accent.
+- **The key-bindings page gains groups, search, and clash warnings** — actions are grouped under Global / Tabs / Panes / Side panels / Terminal with quiet section headers only (no frames), a search box filters actions and keys as you type and folds empty groups away, duplicate bindings paint both keycaps in the danger tint plus a warning naming which action stops firing, keycaps follow the prototype's tiering (surface base, thick bottom lip, dim ink lifted on hover), and hovering a row reveals the Rebind affordance.
 
 ### 简体中文
 
@@ -68,6 +72,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **PowerShell 中文输入偶发卡顿** — 渲染层此前每帧都把 IME 光标矩形推给输入法（光标闪烁、输出滚动都算帧），而 Windows 上每次推送是一串同步跨进程的 IMM32 调用，直达输入法宿主进程；宿主一忙，渲染线程就跟着等。现在推送前做值去重，矩形没变就不再打扰输入法；焦点切换、输入法启用与重新关联时作废缓存强制重推，回焦后的第一次组词不会落在陈旧位置。
 - **AI hook 缺失警告不再逐帧重复** — 只有 hook 可用性切换到“缺失”状态时才提示一次，避免可选 hook 不存在时产生无上限的警告循环。
 - **安装器版本信息与应用一致** — Inno Setup 的兜底版本和数字文件版本改为 Nebula 0.9.0；正式构建仍会自动注入包版本。
+- **终端卡四角不再泛白边** — 圆角卡片与壳层凹角补片是两条各自抗锯齿的弧按先后顺序混合，弧线上必然漏出一丝清屏色（开启透明度后直接漏出窗口后面的桌面）。凹角补片改为在 backdrop 里画在卡片**之下**，卡片自己的圆弧成为唯一可见接缝；清屏兜底色也换成与 chrome 条带同源的壳层合成色。
 
 #### 改进
 
@@ -77,6 +82,9 @@ Every release entry is provided in English and Simplified Chinese.
 - **文件树状态更安静且不抖动** — 目录使用主题中性灰，批量 `git check-ignore` 识别出的忽略项只降低显示强度、不参与排序或过滤，鼠标悬浮也不再移动行内容。
 - **设置 → SSH 的已保存主机显示各自的系统图标** — 每行左缘画与侧栏同源的 per-host 图标（按真实墨迹宽度光学缩放到统一尺寸），替代此前的中性状态环；`auto` 与未识别的 id 回落通用终端形状。图标只回答“这是哪台机器”，不发明在线状态。
 - **浮层面板共用一套组件** — 命令面板、Ctrl+K 启动器、Ctrl+Shift+O 会话快跳与下拉框的选项行、图标底块、身份 chip、页脚提示和查询光标统一收进 `overlay_list` 组件，SSH 设置页的行内动作也共用一个 outline 按钮组件。各处的选中/悬停形态从此完全一致——迁移顺带消除了一个隐藏不对称（选中药丸此前比悬停药丸高 2px）。
+- **网络页按所选模式显示内容** — 「不使用」只剩一句直连说明，不再残留输入框；「跟随系统」实时写明当前读到的代理（注册表 Internet Settings 或环境变量，进页时探测而非逐帧读）；「指定代理」提供手动填写 / SSH 跳板两种方式，跳板直接从已保存主机中选择而不用手写语法。单独设置链路的主机在同页列出摘要（直连 / 指定代理 / 经跳板转发），点击直达其编辑器，结尾一行写明「其余 N 台主机跟随全局默认」。
+- **选中色全局统一为一个 token** — 设置导航、侧栏活动标签与网络页单选行共用原型的 accent-soft 选中底（深色主题合成后 ≈ rgb(52,71,99)）；浅色主题的这个 token 本身就是中性灰，无需另设分支。
+- **按键映射页新增分组、搜索与冲突提示** — 动作按 全局 / 标签页 / 窗格 / 侧栏面板 / 终端 分组，只用段标题与间距分隔（无框保持干净）；搜索框即输入即过滤动作名与按键，被滤空的组连标题一起收起；重复绑定会把两行键帽标成 danger 色，并配一条写明「谁不生效」的警告；键帽按原型分级（surface 底、厚底边、弱墨 hover 提亮）；悬停行浮现「改键」入口。
 
 ## 0.9.0 - 2026-08-02
 

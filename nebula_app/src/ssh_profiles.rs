@@ -142,6 +142,18 @@ impl SshProfiles {
             .collect()
     }
 
+    /// 地址 → 每主机链路覆盖（`proxy` 字段）。设置页「每主机覆盖」列表的
+    /// 数据源，缓存策略同 [`Self::labels`]：空值视同未设置。
+    pub fn proxies(&self) -> std::collections::HashMap<String, String> {
+        self.profiles
+            .iter()
+            .filter_map(|profile| {
+                let proxy = profile.proxy.as_deref()?.trim();
+                (!proxy.is_empty()).then(|| (profile.destination.clone(), proxy.to_owned()))
+            })
+            .collect()
+    }
+
     /// 下一个可用的默认标签，形如「主机 6」。
     ///
     /// 取现有默认标签里**编号的最大值 +1**，而不是条目总数：删掉中间几台之后

@@ -34,14 +34,20 @@ pub(super) fn display_stored_combo(combo: &str) -> String {
 }
 
 pub(super) const EDITABLE_ACTIONS: &[(Action, &str, &str)] = &[
+    // 顺序 = 设置页展示顺序：按 GROUPS 的连续区间分组（2026-08-09 学原型
+    // 分组裁定）。持久化按 Action 名存储，重排只影响展示，不动用户数据。
+    // -- 全局（快速终端行占本组第 0 行，见 QUICK_TERMINAL_ROW）--
+    (Action::ToggleCommandPalette, "命令面板", "Command palette"),
+    (Action::OpenQuickJump, "快速跳转", "Quick jump"),
+    (Action::ToggleShellPicker, "Shell 选择器", "Shell picker"),
+    (Action::CreateNewWindow, "新建窗口", "New window"),
+    (Action::ToggleFullscreen, "全屏", "Fullscreen"),
+    // -- 标签页 --
     (Action::CreateNewTab, "新建标签页", "New tab"),
     (Action::CloseTab, "关闭标签页 / 分屏", "Close tab / pane"),
     (Action::SelectNextTab, "下一个标签页", "Next tab"),
     (Action::SelectPreviousTab, "上一个标签页", "Previous tab"),
-    (Action::CreateNewWindow, "新建窗口", "New window"),
-    (Action::ToggleCommandPalette, "命令面板", "Command palette"),
-    (Action::OpenQuickJump, "快速跳转", "Quick jump"),
-    (Action::ToggleShellPicker, "Shell 选择器", "Shell picker"),
+    // -- 窗格 --
     (Action::SplitRight, "左右分屏", "Split right"),
     (Action::SplitDown, "上下分屏", "Split down"),
     (Action::ToggleZoom, "放大当前分屏", "Zoom current pane"),
@@ -49,8 +55,10 @@ pub(super) const EDITABLE_ACTIONS: &[(Action, &str, &str)] = &[
     (Action::FocusPaneRight, "焦点：右侧分屏", "Focus pane right"),
     (Action::FocusPaneUp, "焦点：上方分屏", "Focus pane up"),
     (Action::FocusPaneDown, "焦点：下方分屏", "Focus pane down"),
+    // -- 侧栏面板 --
     (Action::ToggleFilesPanel, "目录树面板", "Files panel"),
     (Action::ToggleGitPanel, "Git 面板", "Git panel"),
+    // -- 终端 --
     (Action::PromptJumpUp, "跳到上一个提示符", "Previous prompt"),
     (Action::PromptJumpDown, "跳到下一个提示符", "Next prompt"),
     (Action::SearchForward, "搜索（向前）", "Search forward"),
@@ -60,7 +68,16 @@ pub(super) const EDITABLE_ACTIONS: &[(Action, &str, &str)] = &[
     (Action::IncreaseFontSize, "增大字号", "Font size up"),
     (Action::DecreaseFontSize, "减小字号", "Font size down"),
     (Action::ResetFontSize, "重置字号", "Reset font size"),
-    (Action::ToggleFullscreen, "全屏", "Fullscreen"),
+];
+
+/// 设置页分组（无框裁定 2026-08-09：只用段标题+间距分组，不画容器）。
+/// `usize` 是本组行数；区间连续覆盖全部可编辑行（含第 0 行快速终端）。
+pub(super) const GROUPS: &[(&str, &str, usize)] = &[
+    ("全局", "Global", 6),
+    ("标签页", "Tabs", 4),
+    ("窗格", "Panes", 7),
+    ("侧栏面板", "Side panels", 2),
+    ("终端", "Terminal", 9),
 ];
 
 /// 只读展示行（无法在图形页编辑，TOML/settings 行仍可覆盖其中的表驱动键）。
@@ -69,6 +86,18 @@ pub(super) const READONLY_ROWS: &[(&str, &str, &str)] = &[
     ("启动 Profile N", "Launch Profile N", "Ctrl+Shift+1..9"),
     ("贴入 AI 修复建议", "Paste AI fix suggestion", "Ctrl+."),
 ];
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    #[test]
+    fn groups_cover_every_editable_row_exactly_once() {
+        let total: usize = GROUPS.iter().map(|(.., count)| count).sum();
+        assert_eq!(total, editable_row_count(), "分组区间必须连续铺满全部可编辑行");
+        assert_eq!(GROUPS.len(), 5, "settings::KeymapPaneState 的数组长度写死为 5");
+    }
+}
 
 /// 内置默认表的进程级缓存：设置页每帧反查 25+ 个动作，重建整表太贵。
 fn cached_defaults() -> &'static [KeyBinding] {

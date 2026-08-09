@@ -796,6 +796,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     hidden_host_count,
                     ssh_host_count,
                     self.ctx.display().nebula_density,
+                    self.ctx.display().ssh_proxy_pane_state(),
+                    self.ctx.display().keymap_pane_state(),
                 );
                 // Keep the primary-button target for the settings renderer's
                 // HTML-like toggle active state until the matching release.
@@ -820,10 +822,22 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 if !matches!(settings_hit, crate::display::SettingsHit::SshProxyInput(_)) {
                     self.ctx.display().commit_ssh_proxy_field();
                 }
+                if !matches!(settings_hit, crate::display::SettingsHit::KeymapSearchField) {
+                    self.ctx.display().blur_keymap_search();
+                }
                 match settings_hit {
-                    crate::display::SettingsHit::KeymapRow(row) => {
-                        if capturing != Some(row) {
-                            self.ctx.display().keymap_begin_capture(row);
+                    crate::display::SettingsHit::KeymapSearchField => {
+                        self.ctx.display().focus_keymap_search();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::KeymapRow(slot) => {
+                        // 槽位是过滤后的顺序，display 映射回 flat 行。点中
+                        // 正在捕获的那一行 = 取消（上面已统一撤销，不重启）。
+                        if capturing.is_none()
+                            || capturing != self.ctx.display().keymap_slot_to_flat(slot)
+                        {
+                            self.ctx.display().keymap_begin_capture_slot(slot);
                         }
                         self.ctx.mark_dirty();
                         return;
@@ -1085,6 +1099,28 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::SshProxyInput(index) => {
                         self.ctx.display().focus_ssh_proxy_field(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshProxyLinkPick(index) => {
+                        self.ctx.display().set_ssh_proxy_link_pick(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshJumpHostDropdown => {
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::SshJumpHost,
+                        );
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshJumpHostOption(index) => {
+                        self.ctx.display().set_ssh_proxy_jump_host(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshProxyOverrideEdit(index) => {
+                        self.ctx.display().edit_ssh_proxy_override(index);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1462,6 +1498,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::CursorShapeOption(_)
             | Hit::SshProxyModeDropdown
             | Hit::SshProxyModeOption(_)
+            | Hit::SshJumpHostDropdown
+            | Hit::SshJumpHostOption(_)
             | Hit::BackgroundColor
             | Hit::BackgroundSwatch(_)
             | Hit::BackgroundHexInput

@@ -1672,6 +1672,19 @@ pub struct Display {
     pub(crate) nebula_ssh_proxy_focus: Option<usize>,
     /// 聚焦那一刻的原值快照，Esc 取消编辑时还原。
     nebula_ssh_proxy_backup: [String; 2],
+    /// 指定代理子模式：true = SSH 跳板。从 `nebula_ssh_proxy_url` 的
+    /// `jump:` 前缀派生（不单独落盘），切换时清空共享的 url 字段。
+    nebula_ssh_proxy_jump: bool,
+    /// 「跟随系统」探测缓存：`(URL, 来自注册表)`。进网络页 / 切模式时
+    /// 刷新；渲染只读——注册表是跨进程调用，不进逐帧路径。
+    nebula_system_proxy_probe: Option<(String, bool)>,
+    /// destination → 每主机代理覆盖（profiles.json `proxy` 字段的镜像，
+    /// 与 labels/icons 同缓存策略：编辑器保存后刷新）。
+    nebula_ssh_proxies: std::collections::HashMap<String, String>,
+    /// 按键映射页搜索框：查询串 + 聚焦态。过滤在读取时按需计算——28 行的
+    /// 字符串匹配量级，不值得为它维护缓存失效。
+    nebula_keymap_query: String,
+    nebula_keymap_search_focus: bool,
 
     /// Tab rename state: when `Some(index, text)`, a text input is shown over
     /// tab `index` with the current edit buffer `text`. The user types to edit,
@@ -2282,6 +2295,15 @@ impl Display {
             nebula_backup_status: None,
             nebula_ssh_proxy_focus: None,
             nebula_ssh_proxy_backup: Default::default(),
+            nebula_ssh_proxy_jump: false,
+            nebula_system_proxy_probe: None,
+            nebula_ssh_proxies: crate::ssh_profiles::SshProfiles::load(
+                &nebula_data_dir().join("ssh_profiles.json"),
+            )
+            .map(|profiles| profiles.proxies())
+            .unwrap_or_default(),
+            nebula_keymap_query: String::new(),
+            nebula_keymap_search_focus: false,
             meter: Default::default(),
             ime: Default::default(),
         };
@@ -2289,6 +2311,11 @@ impl Display {
         // base size — the font role must be pinned NOW, not after the first
         // font change funnels through handle_update.
         display.refresh_ui_font(config);
+        // jump 子模式从 url 前缀派生（不单独落盘）；顺手做一次系统代理
+        // 探测，启动直达网络页时「当前读到」不至于空白。
+        display.nebula_ssh_proxy_jump =
+            crate::ssh_proxy::jump_target(&display.nebula_ssh_proxy_url).is_some();
+        display.refresh_system_proxy_probe();
         Ok(display)
     }
 
@@ -2313,6 +2340,10 @@ impl Display {
             self.nebula_settings_scroll = 0.0;
             self.pending_update.dirty = true;
         }
+        if section == NebulaSettingsSection::Proxy {
+            // 进网络页刷新「跟随系统」探测——跨进程读注册表只发生在点击。
+            self.refresh_system_proxy_probe();
+        }
     }
 
     /// Scroll the settings content by `delta` px (positive = content moves
@@ -2331,6 +2362,8 @@ impl Display {
             self.nebula_hidden_hosts.len(),
             self.nebula_ssh_hosts.len(),
             self.nebula_density,
+            self.ssh_proxy_pane_state(),
+            self.keymap_pane_state(),
         );
         let next = (self.nebula_settings_scroll + delta).clamp(0.0, max);
         if (next - self.nebula_settings_scroll).abs() > f32::EPSILON {
@@ -3400,6 +3433,12 @@ impl Display {
             quick_hotkey_error: self.nebula_quick_hotkey_error.clone(),
             keymap_capture: self.nebula_keymap_capture,
             keymap_capture_preview: self.nebula_keymap_capture_preview.clone(),
+            keymap_query: self.nebula_keymap_query.clone(),
+            keymap_search_focus: self.nebula_keymap_search_focus,
+            keymap_visible: self.keymap_visible_editable(),
+            keymap_readonly_visible: self.keymap_visible_readonly(),
+            keymap_clash_rows: self.keymap_clash_info().0,
+            keymap_clash_note: self.keymap_clash_info().1,
             sync_inputs: self.nebula_sync_inputs.clone(),
             sync_focus: self.nebula_sync_focus,
             sync_auto_pull: self.nebula_sync_auto_pull,
@@ -3412,6 +3451,25 @@ impl Display {
                 self.nebula_ssh_proxy_no_proxy.clone(),
             ],
             ssh_proxy_focus: self.nebula_ssh_proxy_focus,
+            ssh_proxy_jump: self.nebula_ssh_proxy_jump,
+            system_proxy_probe: self.nebula_system_proxy_probe.clone(),
+            ssh_proxy_overrides: self
+                .nebula_ssh_hosts
+                .iter()
+                .enumerate()
+                .filter_map(|(host_index, destination)| {
+                    self.nebula_ssh_proxies.get(destination).map(|value| {
+                        (
+                            self.nebula_ssh_labels
+                                .get(destination)
+                                .cloned()
+                                .unwrap_or_else(|| destination.clone()),
+                            settings::ssh_proxy_override_summary(value, self.nebula_language),
+                            host_index,
+                        )
+                    })
+                })
+                .collect(),
             backup_selection: self.nebula_backup_selection,
             backup_status: self.nebula_backup_status.clone(),
         }
@@ -3592,6 +3650,9 @@ impl Display {
             self.load_sync_state();
             // Each explicit visit starts at a predictable page origin.
             self.nebula_settings_scroll = 0.0;
+            if self.nebula_settings_section == NebulaSettingsSection::Proxy {
+                self.refresh_system_proxy_probe();
+            }
         }
         self.pending_update.dirty = true;
     }
@@ -4537,11 +4598,253 @@ impl Display {
             if self.nebula_ssh_proxy_mode != *mode {
                 self.nebula_ssh_proxy_mode = *mode;
                 self.persist_nebula_settings();
+                if *mode == crate::ssh_proxy::ProxyMode::System {
+                    // 切到跟随系统时刷新「当前读到」——只在点击时读注册表。
+                    self.refresh_system_proxy_probe();
+                }
             }
         }
         self.nebula_settings_dropdown = None;
         self.pending_update.dirty = true;
         self.window.request_redraw();
+    }
+
+    /// 网络页几何的动态输入（滚动上限与命中测试的调用方取用）。
+    pub fn ssh_proxy_pane_state(&self) -> settings::ProxyPaneState {
+        settings::ProxyPaneState {
+            mode: self.nebula_ssh_proxy_mode,
+            jump: self.nebula_ssh_proxy_jump,
+            override_count: self
+                .nebula_ssh_hosts
+                .iter()
+                .filter(|destination| self.nebula_ssh_proxies.contains_key(*destination))
+                .count(),
+        }
+    }
+
+    /// 刷新「跟随系统」探测缓存。注册表读取是跨进程调用，只允许由
+    /// 进网络页 / 切模式 / 启动这几个离散事件触发，绝不逐帧。
+    pub fn refresh_system_proxy_probe(&mut self) {
+        self.nebula_system_proxy_probe = crate::ssh_proxy::probe_system_proxy()
+            .map(|(url, source)| (url, source == crate::ssh_proxy::SystemProxySource::Registry));
+    }
+
+    /// 指定代理的子模式切换（0=手动填写 1=SSH 跳板）。切走时清空共享的
+    /// url 字段：残值会被解析层捡起，界面与实际链路就对不上了（学 Tabby
+    /// component.ts:111 的纪律，原型注释同款）。
+    pub fn set_ssh_proxy_link_pick(&mut self, index: usize) {
+        let jump = index == 1;
+        if self.nebula_ssh_proxy_jump != jump {
+            self.nebula_ssh_proxy_jump = jump;
+            self.nebula_ssh_proxy_focus = None;
+            if !self.nebula_ssh_proxy_url.trim().is_empty() {
+                self.nebula_ssh_proxy_url.clear();
+                self.persist_nebula_settings();
+            }
+        }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// 跳板下拉选择：写 `jump:<destination>` 并立即落盘（连接侧每次建连
+    /// 重读设置文件，无需再通知）。
+    pub fn set_ssh_proxy_jump_host(&mut self, index: usize) {
+        if let Some(destination) = self.nebula_ssh_hosts.get(index) {
+            let value = format!("jump:{destination}");
+            if self.nebula_ssh_proxy_url != value {
+                self.nebula_ssh_proxy_url = value;
+                self.persist_nebula_settings();
+            }
+        }
+        self.nebula_settings_dropdown = None;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// 每主机覆盖行 → 打开该主机的编辑器。`index` 是覆盖列表下标，过滤
+    /// 顺序与视图构建完全一致（同一迭代 + 同一谓词）。
+    pub fn edit_ssh_proxy_override(&mut self, index: usize) {
+        let host_index = self
+            .nebula_ssh_hosts
+            .iter()
+            .enumerate()
+            .filter(|(_, destination)| self.nebula_ssh_proxies.contains_key(*destination))
+            .nth(index)
+            .map(|(host_index, _)| host_index);
+        if let Some(host_index) = host_index {
+            self.edit_ssh_host(host_index);
+        }
+    }
+
+    // ---- 按键映射页：搜索与冲突 ----
+
+    /// 搜索框是否接管键盘（捕获态优先于搜索）。
+    pub fn keymap_search_active(&self) -> bool {
+        self.nebula_settings_open
+            && self.nebula_keymap_search_focus
+            && self.nebula_keymap_capture.is_none()
+    }
+
+    pub fn focus_keymap_search(&mut self) {
+        self.nebula_keymap_search_focus = true;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn blur_keymap_search(&mut self) {
+        if self.nebula_keymap_search_focus {
+            self.nebula_keymap_search_focus = false;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn keymap_search_push(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        self.nebula_keymap_query.push(ch);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn keymap_search_backspace(&mut self) {
+        if self.nebula_keymap_query.pop().is_some() {
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+    }
+
+    /// Esc 两段式：先清词，词已空则退出聚焦——与字体弹层搜索一致。
+    pub fn keymap_search_escape(&mut self) {
+        if self.nebula_keymap_query.is_empty() {
+            self.nebula_keymap_search_focus = false;
+        } else {
+            self.nebula_keymap_query.clear();
+        }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// flat 行的可搜索文本：动作名（中英）+ 当前键位展示串。
+    fn keymap_row_haystack(&self, flat: usize) -> String {
+        let combo = if flat == keymap::QUICK_TERMINAL_ROW {
+            keymap::display_stored_combo(&self.nebula_quick_terminal_hotkey)
+        } else {
+            keymap::EDITABLE_ACTIONS
+                .get(flat - 1)
+                .and_then(|(action, ..)| keymap::effective_combo(action, &self.nebula_keymap))
+                .map(|(combo, _)| combo)
+                .unwrap_or_default()
+        };
+        let (zh, en) = if flat == keymap::QUICK_TERMINAL_ROW {
+            ("快速终端", "Quick terminal")
+        } else {
+            keymap::EDITABLE_ACTIONS.get(flat - 1).map(|(_, zh, en)| (*zh, *en)).unwrap_or(("", ""))
+        };
+        format!("{zh} {en} {combo}").to_lowercase()
+    }
+
+    /// 过滤后的可见行（flat 下标，升序）。空查询 = 全部。
+    pub fn keymap_visible_editable(&self) -> Vec<usize> {
+        let query = self.nebula_keymap_query.trim().to_lowercase();
+        (0..keymap::editable_row_count())
+            .filter(|flat| query.is_empty() || self.keymap_row_haystack(*flat).contains(&query))
+            .collect()
+    }
+
+    fn keymap_visible_readonly(&self) -> Vec<usize> {
+        let query = self.nebula_keymap_query.trim().to_lowercase();
+        keymap::READONLY_ROWS
+            .iter()
+            .enumerate()
+            .filter(|(_, (zh, en, combo))| {
+                query.is_empty() || format!("{zh} {en} {combo}").to_lowercase().contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// 冲突检测：同一 combo 绑了多个动作 → 每行标记 + 一句提示。只报第一组
+    /// ——修完一组再报下一组，提示条不该自己变成列表。
+    fn keymap_clash_info(&self) -> (Vec<bool>, Option<String>) {
+        let total = keymap::editable_row_count();
+        let mut combos: Vec<Option<String>> = Vec::with_capacity(total);
+        for flat in 0..total {
+            let combo = if flat == keymap::QUICK_TERMINAL_ROW {
+                Some(keymap::display_stored_combo(&self.nebula_quick_terminal_hotkey))
+            } else {
+                keymap::EDITABLE_ACTIONS
+                    .get(flat - 1)
+                    .and_then(|(action, ..)| keymap::effective_combo(action, &self.nebula_keymap))
+                    .map(|(combo, _)| combo)
+            };
+            combos.push(combo.filter(|combo| !combo.is_empty()));
+        }
+        let mut rows = vec![false; total];
+        let mut note = None;
+        let name = |flat: usize| -> String {
+            if flat == keymap::QUICK_TERMINAL_ROW {
+                self.nebula_language.pick("快速终端", "Quick terminal").to_owned()
+            } else {
+                keymap::EDITABLE_ACTIONS
+                    .get(flat - 1)
+                    .map(|(_, zh, en)| self.nebula_language.pick(zh, en).to_owned())
+                    .unwrap_or_default()
+            }
+        };
+        for a in 0..total {
+            let Some(combo_a) = combos[a].clone() else { continue };
+            for b in (a + 1)..total {
+                let Some(combo_b) = &combos[b] else { continue };
+                if !combo_a.eq_ignore_ascii_case(combo_b) {
+                    continue;
+                }
+                rows[a] = true;
+                rows[b] = true;
+                if note.is_none() {
+                    let (a_name, b_name) = (name(a), name(b));
+                    let zh = format!(
+                        "{combo_a} 同时绑定了「{a_name}」与「{b_name}」——只有排前面的「{a_name}」会触发"
+                    );
+                    let en = format!(
+                        "{combo_a} is bound to both {a_name} and {b_name} — only {a_name}, listed first, fires"
+                    );
+                    note = Some(self.nebula_language.pick(&zh, &en).to_owned());
+                }
+            }
+        }
+        (rows, note)
+    }
+
+    /// 按键映射页几何输入（滚动上限与命中测试的调用方取用）。
+    pub fn keymap_pane_state(&self) -> settings::KeymapPaneState {
+        let visible = self.keymap_visible_editable();
+        let mut pane = settings::KeymapPaneState {
+            readonly_visible: self.keymap_visible_readonly().len() as u8,
+            clash: self.keymap_clash_info().1.is_some(),
+            ..Default::default()
+        };
+        let mut start = 0usize;
+        for (group, (.., count)) in keymap::GROUPS.iter().enumerate() {
+            let end = start + count;
+            pane.visible[group] =
+                visible.iter().filter(|flat| (start..end).contains(*flat)).count() as u8;
+            start = end;
+        }
+        pane
+    }
+
+    /// 可见槽位 → flat 行（点击命中带的是过滤后的槽位）。
+    pub fn keymap_slot_to_flat(&self, slot: usize) -> Option<usize> {
+        self.keymap_visible_editable().get(slot).copied()
+    }
+
+    pub fn keymap_begin_capture_slot(&mut self, slot: usize) {
+        if let Some(flat) = self.keymap_slot_to_flat(slot) {
+            self.nebula_keymap_search_focus = false;
+            self.keymap_begin_capture(flat);
+        }
     }
 
     /// 聚焦某个代理输入框；先提交上一个（点击切换即失焦保存）。编辑直接
@@ -6057,6 +6360,11 @@ impl Display {
         self.nebula_ssh_proxy_mode = settings.ssh_proxy_mode;
         self.nebula_ssh_proxy_url = settings.ssh_proxy_url;
         self.nebula_ssh_proxy_no_proxy = settings.ssh_proxy_no_proxy;
+        self.nebula_ssh_proxy_jump =
+            crate::ssh_proxy::jump_target(&self.nebula_ssh_proxy_url).is_some();
+        if self.nebula_ssh_proxy_mode == crate::ssh_proxy::ProxyMode::System {
+            self.refresh_system_proxy_probe();
+        }
         self.nebula_ssh_hosts = merge_ssh_hosts(
             &self.nebula_saved_hosts,
             &self.nebula_pinned_hosts,
@@ -6113,30 +6421,82 @@ impl Display {
     /// 窗口后面的桌面（旧模型有壁纸时不画卡底，深色主题下低不透明度会
     /// 透出刺眼的白）。卡以外的壳由 chrome pass 的一体化壳层负责（同一
     /// 用户透明度）。
+    /// 壳层合成色：panel 预合成在 shell_bg 上（保住面板 token 的调子），
+    /// alpha 直接取用户不透明度。chrome 的条带与 backdrop 的凹角/清屏兜底
+    /// **必须同源**取这一个值——各算各的迟早漂出色差接缝。
+    pub(crate) fn shell_frame_color(&self) -> Rgba {
+        let palette = self.nebula_theme.palette();
+        let shell_alpha =
+            surface_opacity::SurfaceOpacityPolicy::new(self.nebula_window_opacity).chrome;
+        let pa = palette.panel.a as f32 / 255.0;
+        let comp = |p: u8, b: u8| (p as f32 * pa + b as f32 * (1.0 - pa)).round() as u8;
+        Rgba::new(
+            comp(palette.panel.r, palette.shell_bg.r),
+            comp(palette.panel.g, palette.shell_bg.g),
+            comp(palette.panel.b, palette.shell_bg.b),
+            (shell_alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+        )
+    }
+
     fn draw_window_backdrop(&mut self, terminal_background: Rgb) {
-        // rgb 保留壳色：不透明窗口下 DWM 忽略 alpha，尚未被壳/卡覆盖的
-        // 像素以壳色兜底而不是黑底。
-        self.renderer.clear(self.nebula_theme.palette().shell_bg, 0.0);
+        // rgb 兜底取壳合成色（panel-over-shell_bg）：不透明窗口下 DWM 忽略
+        // alpha，尚未被壳/卡覆盖的像素本来就在壳区，取纯 shell_bg 会比
+        // 条带暗一档，正是四角亮线里混进的那个杂色。
+        let shell = self.shell_frame_color();
+        self.renderer.clear(Rgb::new(shell.r, shell.g, shell.b), 0.0);
         {
             let (card_x, card_y, card_w, card_h) = self.terminal_card_rect();
             let scale = self.window.scale_factor as f32;
             let alpha = (self.nebula_window_opacity * 255.0).round().clamp(0.0, 255.0) as u8;
-            // 与 chrome 壳层的凹角同径同 round：半径差出小数像素会让两侧
-            // 的圆弧 AA 错位成一圈细缝。
-            let card = UiQuad::solid(
+            // 与 chrome 壳层同径同 round：半径差出小数像素就是一圈错位细缝。
+            let radius = (UI_SHELL_RADIUS_LOGICAL * scale)
+                .round()
+                .min(card_w * 0.5)
+                .min(card_h * 0.5);
+            // 2026-08-09 白角根因修复：凹角补片从 chrome 壳层挪到这里、画在
+            // 卡片**之前**。原先卡与补片是两条独立 AA 弧按顺序 over，弧上
+            // 必然残留 i(1-i)·清屏色 的交叉项——四角浮出一圈亮线，透明窗
+            // 直接漏桌面。补片先把角块铺满壳色，卡的凸圆角向「已铺满的壳」
+            // 过渡，成为唯一可见 AA 边，交叉项从结构上消失。
+            let mut quads = Vec::with_capacity(5);
+            if radius > 0.0 && card_w > 0.0 && card_h > 0.0 {
+                quads.push(UiQuad::concave_corner(card_x, card_y, radius, 0, shell));
+                quads.push(UiQuad::concave_corner(
+                    card_x + card_w - radius,
+                    card_y,
+                    radius,
+                    1,
+                    shell,
+                ));
+                quads.push(UiQuad::concave_corner(
+                    card_x + card_w - radius,
+                    card_y + card_h - radius,
+                    radius,
+                    2,
+                    shell,
+                ));
+                quads.push(UiQuad::concave_corner(
+                    card_x,
+                    card_y + card_h - radius,
+                    radius,
+                    3,
+                    shell,
+                ));
+            }
+            quads.push(UiQuad::solid(
                 card_x,
                 card_y,
                 card_w,
                 card_h,
-                (UI_SHELL_RADIUS_LOGICAL * scale).round(),
+                radius,
                 Rgba::new(
                     terminal_background.r,
                     terminal_background.g,
                     terminal_background.b,
                     alpha,
                 ),
-            );
-            self.renderer.draw_ui(&self.size_info, &[card]);
+            ));
+            self.renderer.draw_ui(&self.size_info, &quads);
         }
 
         // The image is intentionally independent of the terminal tint: its own

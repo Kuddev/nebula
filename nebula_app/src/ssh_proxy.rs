@@ -104,6 +104,12 @@ fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str>
         .map(|_| &value[prefix.len()..])
 }
 
+/// `jump:<目标>` 的目标部分（trim 后），大小写不敏感。设置页用它判断
+/// 「指定代理」的子模式并回显当前跳板；真值解析仍走 [`ProxyLink::parse`]。
+pub fn jump_target(value: &str) -> Option<&str> {
+    strip_prefix_ignore_case(value.trim(), "jump:").map(str::trim)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyScheme {
     Socks5,
@@ -334,11 +340,36 @@ fn system_proxy() -> Option<(String, Vec<String>)> {
     if let Some(found) = registry_proxy() {
         return Some(found);
     }
+    env_proxy_url().map(|url| (url, Vec::new()))
+}
+
+/// 环境变量链里的第一个非空代理 URL。[`system_proxy`]（连接决策）与
+/// [`probe_system_proxy`]（设置页展示）共用，探测顺序不会漂移。
+fn env_proxy_url() -> Option<String> {
     ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"]
         .iter()
         .find_map(|name| env_var(name))
         .filter(|value| !value.trim().is_empty())
-        .map(|url| (url, Vec::new()))
+}
+
+/// 设置页「跟随系统」面板展示的探测结果来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemProxySource {
+    /// `HKCU\..\Internet Settings`（`ProxyEnable` + `ProxyServer`）。
+    Registry,
+    /// 环境变量（`ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`）。
+    Environment,
+}
+
+/// 当前系统代理读到了什么：`(URL, 来源)`。只做展示，不含绕过列表——连接
+/// 决策走 [`SshProxyConfig::resolve`]。注册表是跨进程调用，调用方必须缓存
+/// （进设置网络页 / 切模式时刷新），禁止进逐帧路径。
+pub fn probe_system_proxy() -> Option<(String, SystemProxySource)> {
+    #[cfg(windows)]
+    if let Some((url, _)) = registry_proxy() {
+        return Some((url, SystemProxySource::Registry));
+    }
+    env_proxy_url().map(|url| (url, SystemProxySource::Environment))
 }
 
 /// HKCU\...\Internet Settings：`ProxyEnable` 非零时读 `ProxyServer` 与
