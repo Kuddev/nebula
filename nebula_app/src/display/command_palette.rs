@@ -1720,16 +1720,16 @@ pub fn palette_layout(
     scale: f32,
     cell_w: f32,
 ) -> PaletteLayout {
-    palette_layout_with_launcher_bounds(model, win_w, win_h, scale, cell_w, None)
+    palette_layout_with_workspace_bounds(model, win_w, win_h, scale, cell_w, None)
 }
 
-pub(crate) fn palette_layout_with_launcher_bounds(
+pub(crate) fn palette_layout_with_workspace_bounds(
     model: &CommandPalette,
     win_w: f32,
     win_h: f32,
     scale: f32,
     cell_w: f32,
-    launcher_bounds: Option<(f32, f32)>,
+    workspace_bounds: Option<(f32, f32)>,
 ) -> PaletteLayout {
     let s = |v: f32| v * scale;
     let cell_w = cell_w.max(s(1.0));
@@ -1882,12 +1882,12 @@ pub(crate) fn palette_layout_with_launcher_bounds(
         y = y.max(group_reserve + max_rows as f32 * row_h + row_gaps + s(4.0));
     }
 
-    let desired_pw = if launcher {
-        launcher_bounds.map_or(s(960.0), |(left, right)| (right - left).max(0.0))
-    } else {
-        s(960.0)
-    }
-    .min(win_w - 2.0 * margin);
+    // 三个快捷面板属于同一个 UI 族：Shell launcher、命令面板和 AI 会话
+    // 跳转都以终端工作区为水平基准。此前只有 launcher 使用工作区边界，另外
+    // 两个仍固定请求 960 logical px，在 150% DPI 下会比 launcher 宽 216px。
+    let desired_pw = workspace_bounds
+        .map_or(s(960.0), |(left, right)| (right - left).max(0.0))
+        .min(win_w - 2.0 * margin);
     let ph = if launcher {
         launcher_top_pad
             + input_h
@@ -1900,26 +1900,15 @@ pub(crate) fn palette_layout_with_launcher_bounds(
     } else {
         pad + input_h + s(8.0) + chip_band_h + y + if cards { footer_h } else { pad }
     };
-    let pane = if launcher {
-        launcher_bounds.map_or_else(
-            || widgets::pane_geometry(win_w, win_h, scale, desired_pw, ph, 8.0, 12.0, Some(96.0)),
-            |bounds| {
-                widgets::pane_geometry_in_horizontal_bounds(
-                    win_w,
-                    win_h,
-                    scale,
-                    desired_pw,
-                    ph,
-                    8.0,
-                    12.0,
-                    Some(96.0),
-                    bounds,
-                )
-            },
-        )
-    } else {
-        widgets::pane_geometry(win_w, win_h, scale, desired_pw, ph, 8.0, 12.0, None)
-    };
+    let top = launcher.then_some(96.0);
+    let pane = workspace_bounds.map_or_else(
+        || widgets::pane_geometry(win_w, win_h, scale, desired_pw, ph, 8.0, 12.0, top),
+        |bounds| {
+            widgets::pane_geometry_in_horizontal_bounds(
+                win_w, win_h, scale, desired_pw, ph, 8.0, 12.0, top, bounds,
+            )
+        },
+    );
     let (px, py, pw, ph) = pane.panel;
 
     let input = if launcher {
@@ -1934,7 +1923,10 @@ pub(crate) fn palette_layout_with_launcher_bounds(
         chip_band_h,
     ));
     let mut chips = Vec::new();
-    if let Some((band_x, band_y, _, _)) = chip_band {
+    if let Some((band_x, band_y, _, band_h)) = chip_band {
+        // 胶囊属于整条分组背景带，必须在带内居中；直接拿 band_y 会把全部
+        // 10px 留白压到底部，文字虽在胶囊内居中，整组仍会显得向上漂。
+        let chip_y = widgets::centered_y(band_y, band_h, chip_h);
         let mut chip_x = band_x;
         for (filter, count) in model.launcher_chip_counts() {
             let label = filter.label(model.language);
@@ -1943,7 +1935,7 @@ pub(crate) fn palette_layout_with_launcher_bounds(
                 filter,
                 label,
                 count,
-                rect: (chip_x, band_y, chip_w, chip_h),
+                rect: (chip_x, chip_y, chip_w, chip_h),
                 selected: model.launcher_filter() == filter,
             });
             chip_x += chip_w + s(6.0);
@@ -2051,7 +2043,7 @@ pub(super) fn push_quads(
     quads: &mut Vec<UiQuad>,
     size: &SizeInfo,
     scale: f32,
-    launcher_bounds: Option<(f32, f32)>,
+    workspace_bounds: Option<(f32, f32)>,
 ) {
     if !model.is_open() {
         return;
@@ -2060,8 +2052,14 @@ pub(super) fn push_quads(
     let h = size.height();
     let s = |v: f32| v * scale;
     let sk = theme.skin();
-    let layout =
-        palette_layout_with_launcher_bounds(model, w, h, scale, size.cell_width(), launcher_bounds);
+    let layout = palette_layout_with_workspace_bounds(
+        model,
+        w,
+        h,
+        scale,
+        size.cell_width(),
+        workspace_bounds,
+    );
     let (ix, iy, iw, ih) = layout.input;
     let (list_x, _, list_w, _) = layout.list;
     let launcher = model.is_launcher();
@@ -2340,7 +2338,7 @@ pub(super) fn draw_text(
     gc: &mut GlyphCache,
     size: &SizeInfo,
     scale: f32,
-    launcher_bounds: Option<(f32, f32)>,
+    workspace_bounds: Option<(f32, f32)>,
 ) -> Vec<(String, (f32, f32, f32, f32))> {
     let mut icon_draws = Vec::new();
     if !model.is_open() {
@@ -2351,8 +2349,14 @@ pub(super) fn draw_text(
     let h = size.height();
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let layout =
-        palette_layout_with_launcher_bounds(model, w, h, scale, size.cell_width(), launcher_bounds);
+    let layout = palette_layout_with_workspace_bounds(
+        model,
+        w,
+        h,
+        scale,
+        size.cell_width(),
+        workspace_bounds,
+    );
     let (ix, iy, iw, ih) = layout.input;
     let (list_x, _, list_w, _) = layout.list;
     let launcher = model.is_launcher();
@@ -3472,6 +3476,12 @@ mod tests {
         assert_eq!(layout.row_at(px - 20.0, first_y + 2.0), None, "面板外不命中");
         let ssh = &layout.chips[1];
         assert_eq!(layout.chip_at(ssh.rect.0 + 2.0, ssh.rect.1 + 2.0), Some(LauncherFilter::Ssh));
+        let (_, band_y, _, band_h) = layout.chip_band.expect("launcher 必须有 chip 背景带");
+        for chip in &layout.chips {
+            let chip_center = chip.rect.1 + chip.rect.3 * 0.5;
+            let band_center = band_y + band_h * 0.5;
+            assert!((chip_center - band_center).abs() < 0.01, "chip 必须与背景带垂直居中");
+        }
     }
 
     #[test]
@@ -3482,7 +3492,7 @@ mod tests {
 
         let left = 230.0;
         let right = 1300.0;
-        let layout = palette_layout_with_launcher_bounds(
+        let layout = palette_layout_with_workspace_bounds(
             &palette,
             1600.0,
             900.0,
@@ -3495,6 +3505,42 @@ mod tests {
         assert!(panel_x + panel_w <= right);
         assert!(layout.input.0 >= left);
         assert!(layout.input.0 + layout.input.2 <= right);
+    }
+
+    #[test]
+    fn command_and_jump_panels_match_launcher_workspace_width() {
+        use crate::ai_sessions::AiSessionSource;
+
+        let bounds = (230.0, 1300.0);
+        let layout = |palette: &CommandPalette| {
+            palette_layout_with_workspace_bounds(palette, 1600.0, 1000.0, 1.0, 8.0, Some(bounds))
+        };
+
+        let mut launcher = CommandPalette::new();
+        launcher.set_shell_menu(
+            &[shell("PowerShell", "powershell", "powershell.exe")],
+            &[],
+            "powershell",
+        );
+        launcher.open_profiles();
+
+        let mut commands = CommandPalette::new();
+        commands.open();
+
+        let mut jump = CommandPalette::new();
+        jump.open_ai_sessions(vec![AiSessionRow {
+            label: "继续修复".into(),
+            hint: "nebula · 刚刚".into(),
+            search: "继续修复 nebula".into(),
+            command: "codex resume test".into(),
+            source: AiSessionSource::Codex,
+        }]);
+
+        let launcher_panel = layout(&launcher).panel;
+        for panel in [layout(&commands).panel, layout(&jump).panel] {
+            assert_eq!(panel.0, launcher_panel.0, "快捷面板必须共享工作区左缘");
+            assert_eq!(panel.2, launcher_panel.2, "快捷面板必须与 Shell 选择器同宽");
+        }
     }
 
     #[test]
