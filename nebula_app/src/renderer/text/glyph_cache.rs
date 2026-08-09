@@ -116,6 +116,11 @@ impl GlyphCache {
     }
 
     #[cfg(windows)]
+    pub fn system_font_families(&self) -> Vec<crate::font_install::SystemFontFamily> {
+        self.rasterizer.system_font_families()
+    }
+
+    #[cfg(windows)]
     pub fn add_private_font(
         &mut self,
         path: &std::path::Path,
@@ -126,6 +131,14 @@ impl GlyphCache {
     #[cfg(windows)]
     pub fn refresh_private_fonts(&mut self) -> Vec<String> {
         self.rasterizer.refresh_private_fonts()
+    }
+
+    /// 在不改变已配置终端字体的前提下，试着加载一个字体族。
+    ///
+    /// 字体目录纳入系统字体后，目录里的条目不再个个都是「已经成功加载过」
+    /// 的——任意系统族都可能加载失败。选择因此必须先过这一关再提交。
+    pub fn family_loads(&mut self, family: &str, size: Size) -> bool {
+        Self::font_family_available(&mut self.rasterizer, family, size)
     }
 
     /// Check a system font family without changing the configured terminal font.

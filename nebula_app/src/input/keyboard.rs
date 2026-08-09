@@ -193,6 +193,63 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        // 字体目录展开时键盘归弹层顶部的搜索框：系统字体动辄几百个，没有
+        // 过滤就只能靠滚。搜索框是正经输入框，光标与选区走组件层，和其它
+        // 字段同一套行为。
+        if self.ctx.display().nebula_settings_dropdown
+            == Some(crate::display::SettingsDropdown::Font)
+        {
+            let ctrl = mods.control_key();
+            let shift = mods.shift_key();
+            match &key.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.display().close_settings_dropdown();
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().font_query_edit(None);
+                },
+                Key::Named(NamedKey::Delete) => {
+                    self.ctx.display().font_query_delete_forward();
+                },
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.ctx.display().font_query_move(false, shift);
+                },
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.ctx.display().font_query_move(true, shift);
+                },
+                Key::Named(NamedKey::Home) => {
+                    self.ctx.display().font_query_jump(false, shift);
+                },
+                Key::Named(NamedKey::End) => {
+                    self.ctx.display().font_query_jump(true, shift);
+                },
+                Key::Named(NamedKey::Space) if !ctrl => {
+                    self.ctx.display().font_query_edit(Some(" "));
+                },
+                Key::Character(text) if ctrl => match text.as_str() {
+                    "a" | "A" => self.ctx.display().font_query_select_all(),
+                    "c" | "C" => {
+                        if let Some(selected) = self.ctx.display().font_query_selected_text() {
+                            self.ctx.clipboard_mut().store(ClipboardType::Clipboard, selected);
+                        }
+                    },
+                    "v" | "V" => {
+                        let pasted = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                        if !pasted.is_empty() {
+                            self.ctx.display().font_query_edit(Some(&pasted));
+                        }
+                    },
+                    _ => {},
+                },
+                Key::Character(text) => {
+                    self.ctx.display().font_query_edit(Some(text.as_str()));
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // An expanded settings dropdown is a transient picker. Esc only
         // dismisses; any other key dismisses and then follows its normal path.
         if self.ctx.display().nebula_settings_dropdown.is_some() {
