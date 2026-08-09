@@ -12,7 +12,7 @@
 
 use super::surface;
 use super::theme::Skin;
-use super::tokens::{radius, space};
+use super::tokens::{Density, radius, space};
 use crate::display::color::Rgb;
 use crate::renderer::ui::{Rgba, UiQuad};
 
@@ -109,11 +109,12 @@ pub(crate) fn push_toast(
     kind: ToastKind,
     scale: f32,
     sk: &Skin,
+    density: Density,
     progress: f32,
 ) {
     let s = |value: f32| value * scale;
     let (x, y, _, h) = rect;
-    surface::push_surface(quads, rect, viewport, scale, sk, surface::Elevation::Menu, progress);
+    surface::push_surface(quads, rect, viewport, scale, sk, density, surface::Elevation::Menu, progress);
 
     let rail_w = s(RAIL_W);
     let rail_h = (h - s(space::M)).max(s(space::S));

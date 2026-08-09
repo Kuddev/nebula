@@ -21,7 +21,7 @@
 //! popover，要求决策、有后果的是 modal。
 
 use super::theme::Skin;
-use super::tokens::{control, elevation, radius};
+use super::tokens::{Density, control, elevation, radius};
 use crate::renderer::ui::{Rgba, UiQuad};
 
 /// `(x, y, width, height)`，逻辑像素。
@@ -101,6 +101,7 @@ pub fn over(top: Rgba, base: Rgba) -> Rgba {
     Rgba::new(mix(top.r, base.r), mix(top.g, base.g), mix(top.b, base.b), base.a)
 }
 
+
 /// 发丝描边环。替代散落各处的手写 `(x-1, y-1, w+2, h+2)`。
 ///
 /// 外圆角自动取 `radius + hairline`，保证内外弧**同心**——手写处常常内外用同一
@@ -124,12 +125,14 @@ pub fn push_stroke(quads: &mut Vec<UiQuad>, rect: Rect, radius: f32, scale: f32,
 ///
 /// `viewport` 是整窗尺寸 `(width, height)`，只有模态用得上。
 /// `progress` 是入场动画进度，所有颜色按它衰减。
+#[allow(clippy::too_many_arguments)]
 pub fn push_surface(
     quads: &mut Vec<UiQuad>,
     rect: Rect,
     viewport: (f32, f32),
     scale: f32,
     sk: &Skin,
+    density: Density,
     level: Elevation,
     progress: f32,
 ) {
@@ -142,7 +145,7 @@ pub fn push_surface(
         sk,
         level,
         progress,
-        radius::OVERLAY,
+        radius::overlay(density),
     );
 }
 
@@ -191,6 +194,7 @@ pub fn push_surface_in(
     veil_radius: f32,
     scale: f32,
     sk: &Skin,
+    density: Density,
     level: Elevation,
     progress: f32,
 ) {
@@ -203,7 +207,9 @@ pub fn push_surface_in(
         sk,
         level,
         progress,
-        radius::OVERLAY * scale,
+        // 密度作为显式参数进来，而不是塞进 `Skin`——主题与密度是正交轴，皮肤
+        // 的每个字段都是颜色。层契约「输入是矩形和 Skin，不读配置」仍然成立。
+        radius::overlay(density) * scale,
     );
 }
 
@@ -258,9 +264,16 @@ fn push_surface_in_with_radius(
 }
 
 /// 浮层内部的内容块。
-pub fn push_card(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, state: CardState) {
+pub fn push_card(
+    quads: &mut Vec<UiQuad>,
+    rect: Rect,
+    scale: f32,
+    sk: &Skin,
+    density: Density,
+    state: CardState,
+) {
     let (x, y, w, h) = rect;
-    let corner = radius::OVERLAY * scale;
+    let corner = radius::overlay(density) * scale;
     let fill = match state {
         CardState::Default => sk.card,
         CardState::Hover => sk.hover,
@@ -280,17 +293,31 @@ pub fn push_card(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, sta
 /// (50,52,62)，再叠 card 得 (62,65,74)，而原型是 (56,61,73)。所以这里把
 /// `card` 与 `panel` 预先合成成一个**不透明**色，一个 quad 画完，描边环也
 /// 就只剩它该有的那 1px。
-pub fn push_group(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, progress: f32) {
+pub fn push_group(
+    quads: &mut Vec<UiQuad>,
+    rect: Rect,
+    scale: f32,
+    sk: &Skin,
+    density: Density,
+    progress: f32,
+) {
     let (x, y, w, h) = rect;
-    let corner = radius::OVERLAY * scale;
+    let corner = radius::overlay(density) * scale;
     push_stroke(quads, rect, corner, scale, fade(sk.hairline, progress));
     quads.push(UiQuad::solid(x, y, w, h, corner, fade(over(sk.card, sk.panel), progress)));
 }
 
 /// 下沉表面（文本输入框）。聚焦时描边换成强调色——焦点不能只靠颜色深浅表示。
-pub fn push_input(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin, focused: bool) {
+pub fn push_input(
+    quads: &mut Vec<UiQuad>,
+    rect: Rect,
+    scale: f32,
+    sk: &Skin,
+    density: Density,
+    focused: bool,
+) {
     let (x, y, w, h) = rect;
-    let corner = radius::CONTROL * scale;
+    let corner = radius::control(density) * scale;
     let stroke =
         if focused { Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255) } else { sk.hairline };
     push_stroke(quads, rect, corner, scale, stroke);
@@ -313,7 +340,7 @@ mod tests {
         // 会让描边色渗满整张卡片，把它压深一整档。所以内芯必须不透明。
         for skin in [light(), NebulaTheme::Nebula.skin()] {
             let mut quads = Vec::new();
-            push_group(&mut quads, (40.0, 40.0, 300.0, 120.0), 1.0, &skin, 1.0);
+            push_group(&mut quads, (40.0, 40.0, 300.0, 120.0), 1.0, &skin, Density::Standard, 1.0);
 
             assert_eq!(quads.len(), 2, "只该有描边环和内芯两个 quad");
             assert_eq!(quads[1].color0.a, 255, "内芯必须不透明，否则描边渗出来");
@@ -372,6 +399,7 @@ mod tests {
                 (800.0, 600.0),
                 1.0,
                 &sk,
+                Density::Standard,
                 level,
                 1.0,
             );
@@ -389,11 +417,35 @@ mod tests {
             (800.0, 600.0),
             1.0,
             &sk,
+            Density::Standard,
             Elevation::Modal,
             1.0,
         );
         let veil = &quads[0];
         assert_eq!((veil.x, veil.y, veil.width, veil.height), (0.0, 0.0, 800.0, 600.0));
+    }
+
+    #[test]
+    fn compact_surfaces_reuse_the_control_radius_instead_of_a_new_value() {
+        // 紧凑不是「另一套圆角」，而是同一阶梯降一档。这里从配方产出的
+        // quad 上验证：紧凑浮层的圆角恰好等于标准档控件圆角。
+        let sk = light();
+        let corner_of = |density| {
+            let mut quads = Vec::new();
+            push_surface(
+                &mut quads,
+                (10.0, 10.0, 100.0, 60.0),
+                (800.0, 600.0),
+                1.0,
+                &sk,
+                density,
+                Elevation::Menu,
+                1.0,
+            );
+            quads.last().expect("面板填充是最后一个 quad").radius
+        };
+        assert_eq!(corner_of(Density::Standard), radius::OVERLAY);
+        assert_eq!(corner_of(Density::Compact), radius::CONTROL);
     }
 
     #[test]

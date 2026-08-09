@@ -313,6 +313,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             font_picker_count,
             hidden_host_count,
             self.ctx.display().ssh_host_count(),
+            self.ctx.display().nebula_density,
         );
         let chrome_hover = if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32)
         {
@@ -414,6 +415,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::KeymapRow(_)
             | crate::display::SettingsHit::TabRevealDropdown
             | crate::display::SettingsHit::TabRevealOption(_)
+            | crate::display::SettingsHit::DensityDropdown
+            | crate::display::SettingsHit::DensityOption(_)
             | crate::display::SettingsHit::FontSizeUp
             | crate::display::SettingsHit::FontSizeDown
             | crate::display::SettingsHit::BackgroundImageCoverChrome

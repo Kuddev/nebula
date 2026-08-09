@@ -1616,6 +1616,9 @@ pub struct Display {
     /// 捕获态实时回显：当前按住的修饰键前缀（"Ctrl+Shift+"）。松开清空。
     pub nebula_keymap_capture_preview: String,
     pub nebula_tab_reveal_motion: settings::TabRevealMotion,
+    /// 界面外观预设。紧凑只在既有阶梯上降一档，不引入新的视觉数值
+    /// （ADR-0002）；它不改变终端字体、单元格几何或 shell 输出。
+    pub nebula_density: ui::tokens::Density,
     pub nebula_font_family: String,
     nebula_font_families: Vec<String>,
     /// 系统字体族的惰性缓存：首次展开字体目录时枚举一次，之后复用。
@@ -2186,6 +2189,7 @@ impl Display {
             nebula_keymap_capture: None,
             nebula_keymap_capture_preview: String::new(),
             nebula_tab_reveal_motion: settings_init.tab_reveal,
+            nebula_density: settings_init.density,
             nebula_font_family: settings_init.font_family,
             nebula_font_families,
             nebula_system_fonts: None,
@@ -2326,6 +2330,7 @@ impl Display {
             self.nebula_settings_section,
             self.nebula_hidden_hosts.len(),
             self.nebula_ssh_hosts.len(),
+            self.nebula_density,
         );
         let next = (self.nebula_settings_scroll + delta).clamp(0.0, max);
         if (next - self.nebula_settings_scroll).abs() > f32::EPSILON {
@@ -3370,6 +3375,7 @@ impl Display {
             panel_resize: self.nebula_panel_resize,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
+            density: self.nebula_density,
             preview_bg: self.preview_terminal_bg(),
             preview_fg: {
                 let bg = self.preview_terminal_bg();
@@ -3795,6 +3801,25 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
+    /// 切换界面外观预设。密度只影响 Nebula 原生界面的留白、行高与圆角；
+    /// 终端字体、单元格几何与 shell 输出一概不受影响，但界面让出的空间会
+    /// 让终端行列数增加——那正是紧凑档的收益。
+    pub fn set_density_option(&mut self, index: usize) {
+        if let Some(density) = settings::DENSITY_OPTIONS.get(index).copied()
+            && density != self.nebula_density
+        {
+            self.nebula_density = density;
+            self.persist_nebula_settings();
+            // 与折叠侧栏同样的重排路径：界面尺寸变了，网格与 PTY 要跟上。
+            let size =
+                PhysicalSize::new(self.size_info.width() as u32, self.size_info.height() as u32);
+            self.pending_update.set_dimensions(size);
+        }
+        self.nebula_settings_dropdown = None;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
     /// Returns true when the default cursor style changed (the caller then
     /// pushes the new default into every live terminal).
     pub fn set_cursor_shape_option(&mut self, index: usize) -> bool {
@@ -3994,6 +4019,7 @@ impl Display {
             self.font_picker_count(),
             self.nebula_hidden_hosts.len(),
             self.ssh_host_count(),
+            self.nebula_density,
         );
         (field.map_or(0.0, |rect| rect.0 + 12.0 * scale), cell_w)
     }
@@ -4291,6 +4317,7 @@ impl Display {
             self.terminal_card_rect(),
             self.nebula_settings_scroll,
             target,
+            self.nebula_density,
         );
         self.nebula_settings_opacity_drag = Some((target, slider.0, slider.2));
         self.update_settings_opacity_drag(pointer_x);
@@ -4921,6 +4948,7 @@ impl Display {
             size.height(),
             self.window.scale_factor as f32,
             size.cell_width(),
+            self.nebula_density,
             self.command_palette_workspace_bounds(),
         )
     }
@@ -5895,6 +5923,7 @@ impl Display {
             copy_on_select: self.nebula_copy_on_select,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
+            density: self.nebula_density,
             theme: self.nebula_theme_preference,
             follow_system_theme: self.nebula_follow_system_theme,
             pinned_hosts: self.nebula_pinned_hosts.clone(),
@@ -5995,6 +6024,7 @@ impl Display {
             self.reset_glyph_cache();
         }
         self.nebula_tab_reveal_motion = settings.tab_reveal;
+        self.nebula_density = settings.density;
         self.nebula_window_opacity = settings.opacity;
         self.nebula_background = if settings.follow_system_theme {
             Some(active_theme.palette().term_bg)
@@ -7479,6 +7509,7 @@ impl Display {
             (size.width(), size.height()),
             scale,
             &sk,
+            self.nebula_density,
             ui::surface::Elevation::Modal,
             1.0,
         );
@@ -7709,6 +7740,7 @@ impl Display {
             (size.width(), size.height()),
             scale,
             &sk,
+            self.nebula_density,
             ui::surface::Elevation::Menu,
             1.0,
         );
@@ -7799,6 +7831,7 @@ impl Display {
             (size.width(), size.height()),
             scale,
             &sk,
+            self.nebula_density,
             ui::surface::Elevation::Menu,
             1.0,
         );
@@ -7932,6 +7965,7 @@ impl Display {
             self.ssh_connect_rect(),
             self.window.scale_factor as f32,
             self.nebula_language,
+            self.nebula_density,
             x,
             y,
         )
@@ -7996,6 +8030,7 @@ impl Display {
                     rect,
                     scale,
                     language,
+                    self.nebula_density,
                     backdrop,
                 );
                 self.renderer.draw_ui(&size, &quads);
@@ -8009,6 +8044,7 @@ impl Display {
                     &size,
                     rect,
                     scale,
+                    self.nebula_density,
                 );
             }
             // 门槛期内也要保持帧循环，否则永远到不了该显示的那一帧。
