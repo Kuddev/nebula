@@ -186,6 +186,9 @@ key→pty / wake→frame / key→frame 走 `nebula_debug_log`;全局单槽、无
 `Event::PtyFailure(reason)` + `terminal.exit()` 收尾,app 侧消息栏+日志,僵尸 tab 消灭。
 未竟:降级分支(in-box 拒 0x4)在 Win11 开发机无法自然触发,靠代码审查覆盖;
 resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记为后续)。
+矩阵回放已知偏差:被测 exe 首次启动若被实时扫描/磁盘抖动卡住,会丢头部键(窗口就绪
+慢于 ready+1s 预算)或整树在脚本 7s 收尾时被杀(尾部键全失,探针连 90s timeout 行都
+来不及写);同一 exe 重跑即恢复逐位一致。判 FAIL 前先重跑一次,脚本加自动重试记为后续。
 
 ### 长期边界
 
