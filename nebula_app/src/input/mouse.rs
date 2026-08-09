@@ -314,6 +314,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             hidden_host_count,
             self.ctx.display().ssh_host_count(),
             self.ctx.display().nebula_density,
+            self.ctx.display().ssh_proxy_pane_state(),
+            self.ctx.display().keymap_pane_state(),
         );
         let chrome_hover = if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32)
         {
@@ -427,6 +429,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::SyncPullButton
             | crate::display::SettingsHit::SshProxyModeDropdown
             | crate::display::SettingsHit::SshProxyModeOption(_)
+            | crate::display::SettingsHit::SshProxyLinkPick(_)
+            | crate::display::SettingsHit::SshJumpHostDropdown
+            | crate::display::SettingsHit::SshJumpHostOption(_)
+            | crate::display::SettingsHit::SshProxyOverrideEdit(_)
             | crate::display::SettingsHit::Reset => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
                 return;
@@ -440,6 +446,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             crate::display::SettingsHit::SyncInput(_)
             | crate::display::SettingsHit::SshProxyInput(_)
             // 搜索框是文本字段，光标要变 I 形——和其它输入框一致。
+            | crate::display::SettingsHit::KeymapSearchField
             | crate::display::SettingsHit::FontSearchField => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Text);
                 return;

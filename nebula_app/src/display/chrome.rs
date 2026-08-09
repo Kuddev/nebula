@@ -859,24 +859,13 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // 壳色 = panel 在 shell_bg 上的预合成（保住面板 token 的调子），
     // alpha 直接取用户透明度：滑块驱动整个外壳作为一体变化；cover 壁纸
     // 时壳浮在壁纸上，半透明壳整体透出壁纸。文字与图标保持不透明。
-    let shell_r = s(UI_SHELL_RADIUS_LOGICAL);
     let sidebar_expand = d.left_sidebar_progress();
     let top_y = margin;
-    let shell_alpha = surface_opacity::SurfaceOpacityPolicy::new(d.nebula_window_opacity).chrome;
-    let shell_bg = palette.shell_bg;
-    let pa = palette.panel.a as f32 / 255.0;
-    let comp = |p: u8, b: u8| (p as f32 * pa + b as f32 * (1.0 - pa)).round() as u8;
-    let shell_color = Rgba::new(
-        comp(palette.panel.r, shell_bg.r),
-        comp(palette.panel.g, shell_bg.g),
-        comp(palette.panel.b, shell_bg.b),
-        (shell_alpha * 255.0).round().clamp(0.0, 255.0) as u8,
-    );
+    let shell_color = d.shell_frame_color();
     let (card_x, card_y, card_w, card_h) = d.terminal_card_rect();
-    let card_r = shell_r.round().min(card_w * 0.5).min(card_h * 0.5);
-    // 条带贴卡的直边；凹角块叠在卡矩形四角的 r×r 区域上，只涂圆弧以外
-    // 的部分。凹角的圆与卡片自身圆角同心同径，弧线两侧 coverage 互补相
-    // 加为 1，半透明壳下也不会出现更实或漏底的接缝。
+    // 条带贴卡的直边。四个凹角补片已挪进 `draw_window_backdrop`（画在卡
+    // **之前**，2026-08-09 白角修复）：补片与卡两条弧在这里顺序 over 会在
+    // 弧上漏出 i(1-i)·清屏色 的交叉项——四角那圈亮线的根因。
     quads.push(UiQuad::solid(0.0, 0.0, w, card_y, 0.0, shell_color));
     quads.push(UiQuad::solid(0.0, card_y, card_x, card_h, 0.0, shell_color));
     quads.push(UiQuad::solid(
@@ -895,30 +884,6 @@ pub(super) fn draw_chrome(d: &mut Display) {
         0.0,
         shell_color,
     ));
-    if card_r > 0.0 && card_w > 0.0 && card_h > 0.0 {
-        quads.push(UiQuad::concave_corner(card_x, card_y, card_r, 0, shell_color));
-        quads.push(UiQuad::concave_corner(
-            card_x + card_w - card_r,
-            card_y,
-            card_r,
-            1,
-            shell_color,
-        ));
-        quads.push(UiQuad::concave_corner(
-            card_x + card_w - card_r,
-            card_y + card_h - card_r,
-            card_r,
-            2,
-            shell_color,
-        ));
-        quads.push(UiQuad::concave_corner(
-            card_x,
-            card_y + card_h - card_r,
-            card_r,
-            3,
-            shell_color,
-        ));
-    }
 
     // ---- Background ambient light ----
     // Purple bloom in the lower-left, cool blue in the upper-right, giving
@@ -1063,16 +1028,20 @@ pub(super) fn draw_chrome(d: &mut Display) {
         let tab_draw_x = tab_x;
         let tab_draw_y = tab_y;
         if index == d.nebula_active_tab {
-            // 选中态是**中性**的一档提亮，不带品牌色。
+            // 2026-08-09 对齐原型：选中 = accent_soft（HTML .nav-item.on 同款，
+            // nebula 深底合成后 ≈ rgb(52,71,99)）；设置导航与网络页单选行共用
+            // 同一 token，浅色主题的 accent_soft 本身就是中性灰，两头成立。
+            // 回滚（中性提亮方案，理由见下面保留的注释）：
+            // let fill = if palette.is_light { sk.panel } else { sk.hover_strong };
             //
+            // 旧案：选中态是**中性**的一档提亮，不带品牌色。
             // 此前这里叠了三层：accent 外环 + 主题 tab_bg_l + 深色再补一层
             // accent。而标签左边本来就有程序 logo，claude / codex / grok 全是
             // 彩标——背景再染色就是两个彩色在同一行里抢。中性底反而让那颗
             // logo 的颜色立得住，这也是原型看起来"融合"的原因。
-            //
             // 浅色用纯白 panel（从灰底上浮起来），深色用 hover_strong（白叠加
             // 提亮一档）。方向相反，都是"比周围亮"。
-            let fill = if palette.is_light { sk.panel } else { sk.hover_strong };
+            let fill = sk.accent_soft;
             quads.push(UiQuad::solid(tab_draw_x, tab_draw_y, tab_w, tab_h, pill_r, fill));
         }
         // Inactive tabs carry no standalone fill — they sit flush on the
@@ -1143,7 +1112,9 @@ pub(super) fn draw_chrome(d: &mut Display) {
                 let shell =
                     Rgba::new(palette.shell_bg.r, palette.shell_bg.g, palette.shell_bg.b, 255);
                 if index == d.nebula_active_tab {
-                    let fill = if palette.is_light { sk.panel } else { sk.hover_strong };
+                    // 与上面的活动药丸同源；换色两处必须一起动。
+                    // 回滚: let fill = if palette.is_light { sk.panel } else { sk.hover_strong };
+                    let fill = sk.accent_soft;
                     super::ui::surface::over(fill, shell)
                 } else {
                     shell

@@ -124,6 +124,8 @@ pub enum SettingsDropdown {
     TabReveal,
     /// 代理：SSH 连接代理模式（关闭/系统/自定义）。
     SshProxyMode,
+    /// 网络→指定代理→SSH 跳板：已保存主机的选择下拉。
+    SshJumpHost,
     /// 外观密度（标准/紧凑）。
     Density,
     /// 背景色：色板网格 + 16 进制输入的专用浮层（不是通用行列表）。
@@ -183,10 +185,51 @@ pub(super) const SSH_PROXY_MODE_OPTIONS: [crate::ssh_proxy::ProxyMode; 3] = [
 ];
 
 fn ssh_proxy_mode_label(mode: crate::ssh_proxy::ProxyMode, language: UiLanguage) -> &'static str {
+    // 2026-08-09 对齐原型分段文案：不使用 / 跟随系统 / 指定代理。
     match mode {
-        crate::ssh_proxy::ProxyMode::Off => language.pick("关闭", "Off"),
-        crate::ssh_proxy::ProxyMode::System => language.pick("系统代理", "System proxy"),
-        crate::ssh_proxy::ProxyMode::Custom => language.pick("自定义", "Custom"),
+        crate::ssh_proxy::ProxyMode::Off => language.pick("不使用", "Off"),
+        crate::ssh_proxy::ProxyMode::System => language.pick("跟随系统", "Follow system"),
+        crate::ssh_proxy::ProxyMode::Custom => language.pick("指定代理", "Custom proxy"),
+    }
+}
+
+/// 网络页几何的动态输入：模式与子模式决定下方内容的种类与高度，覆盖行数
+/// 决定「每主机覆盖」列表的高度。命中 / 绘制 / 滚动上限三方共用同一份，
+/// 保证控件与点击区不漂移（组件化范式：几何同源）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProxyPaneState {
+    pub mode: crate::ssh_proxy::ProxyMode,
+    /// 指定代理的子模式：true = SSH 跳板，false = 手动填写。
+    pub jump: bool,
+    /// 设置了每主机链路覆盖的主机数（profiles.json 的 `proxy` 字段）。
+    pub override_count: usize,
+}
+
+/// 按键映射页几何的动态输入：搜索过滤后的每组可见行数 + 冲突提示占位。
+/// 数组与 [`keymap::GROUPS`] 对齐（长度由 keymap 侧测试锁定为 5）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeymapPaneState {
+    pub visible: [u8; 5],
+    pub readonly_visible: u8,
+    /// 是否显示冲突提示条（占一段版面，无冲突不留空洞）。
+    pub clash: bool,
+}
+
+/// 每主机覆盖行的摘要：`direct` / `jump:` / 代理 URL → 人话。解析失败时
+/// 原样展示——错值也该被看见，而不是被摘要藏起来。
+pub(super) fn ssh_proxy_override_summary(value: &str, language: UiLanguage) -> String {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("direct") {
+        return language.pick("不走代理", "Direct (no proxy)").to_owned();
+    }
+    match crate::ssh_proxy::ProxyLink::parse(value) {
+        Ok(crate::ssh_proxy::ProxyLink::Jump(target)) => {
+            format!("{}{}{}", language.pick("SSH 跳板 · 经 ", "Jump host · via "), target, language.pick(" 转发", ""))
+        },
+        Ok(crate::ssh_proxy::ProxyLink::Server(server)) => {
+            format!("{} · {}", language.pick("指定代理", "Custom proxy"), server.display())
+        },
+        Err(_) => value.to_owned(),
     }
 }
 
@@ -369,9 +412,19 @@ pub enum SettingsHit {
     /// 代理→SSH 连接代理: 模式下拉触发行。
     SshProxyModeDropdown,
     SshProxyModeOption(usize),
-    /// 代理→SSH 连接代理: 输入框（0=代理地址 1=绕过列表）。
+    /// 网络: 输入框（0=代理地址（手动填写展开行） 1=绕过列表）。
     SshProxyInput(usize),
+    /// 网络→指定代理: 子模式单选行（0=手动填写 1=SSH 跳板）。
+    SshProxyLinkPick(usize),
+    /// 网络→指定代理→SSH 跳板: 主机下拉触发行。
+    SshJumpHostDropdown,
+    SshJumpHostOption(usize),
+    /// 网络: 每主机覆盖行（值=覆盖列表下标），点击开该主机的编辑器。
+    SshProxyOverrideEdit(usize),
+    /// 按键映射: 页顶搜索框（过滤动作名与按键）。
+    KeymapSearchField,
     /// 按键映射: one editable action row (click → capture a new combo).
+    /// 值 = **可见槽位**（过滤后的顺序），chrome 经 display 映射回 flat 行。
     KeymapRow(usize),
     /// 按键映射: one read-only extras row. 不可点击，但 hover 得有着落——
     /// 2026-08-09 裁定：列表每一项都要轻量色变反馈，无位移。
@@ -933,7 +986,16 @@ struct SettingsGeometry {
     profiles_h: f32,
     interaction_h: f32,
     keymap_h: f32,
-    /// First keymap row rect; row `i` sits `i * row_h` below it.
+    /// 按键映射页动态几何：搜索框 / 冲突提示条 / 分组行。`keymap_slot_ys`
+    /// 是过滤后各可见行的 y（前「可见总数」个有效）；`keymap_title_ys` 是
+    /// 各组标题的 y（NaN = 该组被滤空；下标 5 = 固定快捷键组）。
+    keymap_search: (f32, f32, f32, f32),
+    keymap_note: (f32, f32, f32, f32),
+    keymap_pane: KeymapPaneState,
+    keymap_slot_ys: [f32; 32],
+    keymap_title_ys: [f32; 6],
+    keymap_hint_y: f32,
+    /// 行矩形模板：x/w/h 通用，可见槽 `i` 的 y 在 `keymap_slot_ys[i]`。
     keymap_row0: (f32, f32, f32, f32),
     /// First row of the read-only shortcut group below the editable block.
     keymap_readonly_row0: (f32, f32, f32, f32),
@@ -944,12 +1006,19 @@ struct SettingsGeometry {
     keep_session: (f32, f32, f32, f32),
     /// 高级·会话：启动时恢复上次的标签（崩溃/强杀后同样走这条路）。
     restore_session: (f32, f32, f32, f32),
-    /// 高级→同步（WebDAV）：url/用户名/密码/口令 四行 + 自动拉取开关行
-    /// 代理→SSH 连接代理：模式下拉行 + [地址, 绕过列表] 两输入行（输入框矩形
-    /// 与同步行共用 [`sync_input_rect`] 推导）。
+    /// 网络页（原型三态）：模式下拉行；说明卡（不使用/跟随系统）；指定
+    /// 代理的两个子模式单选行 + 展开行（手动=地址输入，跳板=主机下拉）；
+    /// 绕过列表行；每主机覆盖列表。输入框矩形与同步行共用
+    /// [`sync_input_rect`] 推导；矩形按 `proxy_pane` 摆放，渲染与命中都
+    /// 按模式分支，不看当前模式用不到的矩形。
     ssh_proxy_mode: (f32, f32, f32, f32),
-    ssh_proxy_rows: [(f32, f32, f32, f32); 2],
-    /// + 动作按钮行。输入框矩形由 [`sync_input_rect`] 从行矩形推导。
+    ssh_proxy_note: (f32, f32, f32, f32),
+    ssh_proxy_link_rows: [(f32, f32, f32, f32); 2],
+    ssh_proxy_expand: (f32, f32, f32, f32),
+    ssh_proxy_bypass: (f32, f32, f32, f32),
+    ssh_proxy_override_row0: (f32, f32, f32, f32),
+    ssh_proxy_inherit: (f32, f32, f32, f32),
+    proxy_pane: ProxyPaneState,
     sync_rows: [(f32, f32, f32, f32); 4],
     sync_auto_pull: (f32, f32, f32, f32),
     sync_actions: (f32, f32, f32, f32),
@@ -983,6 +1052,8 @@ pub(super) fn settings_max_scroll(
     hidden_host_count: usize,
     ssh_host_count: usize,
     density: super::ui::tokens::Density,
+    proxy: ProxyPaneState,
+    keymap_pane: KeymapPaneState,
 ) -> f32 {
     let geometry = settings_geometry(
         size_info,
@@ -992,6 +1063,8 @@ pub(super) fn settings_max_scroll(
         hidden_host_count,
         ssh_host_count,
         density,
+        proxy,
+        keymap_pane,
     );
     let (_, _, _, ph) = geometry.popup;
     let content_h = match section {
@@ -1015,6 +1088,8 @@ fn settings_geometry(
     hidden_host_count: usize,
     ssh_host_count: usize,
     density: super::ui::tokens::Density,
+    proxy: ProxyPaneState,
+    keymap_pane: KeymapPaneState,
 ) -> SettingsGeometry {
     let s = |v: f32| v * scale_factor;
     let gear = chrome_settings_button_rect(size_info, scale_factor);
@@ -1153,13 +1228,51 @@ fn settings_geometry(
     let panel_resize = (row_x, at(interaction_y0 + ROW_H * 2.0), row_w, row_h);
     let cjk_bold = (row_x, at(cjk_bold_y0), row_w, row_h);
 
-    // Keymap: editable action rows, then a read-only extras group (spec 002).
+    // 按键映射页（学原型）：搜索框 → 冲突提示（有冲突才占位）→ 分组行
+    // （无框裁定：段标题+间距分组）→ 固定快捷键组 → 页尾改键提示。行数
+    // 与组显隐随 `keymap_pane`（搜索过滤 + 冲突检测）变化。
     let keymap_y0 = 146.0;
-    let keymap_readonly_y0 =
-        keymap_y0 + keymap::editable_row_count() as f32 * ROW_H + GROUP_ADVANCE;
-    let keymap_h = s(keymap_readonly_y0 + keymap::READONLY_ROWS.len() as f32 * ROW_H + 32.0 - 72.0);
-    let keymap_row0 = (row_x, at(keymap_y0), row_w, row_h);
-    let keymap_readonly_row0 = (row_x, at(keymap_readonly_y0), row_w, row_h);
+    let keymap_search = (row_x, at(keymap_y0), row_w, s(34.0));
+    let mut keymap_cursor = keymap_y0 + 34.0 + 12.0;
+    let keymap_note = (row_x, at(keymap_cursor), row_w, s(50.0));
+    if keymap_pane.clash {
+        keymap_cursor += 50.0 + 12.0;
+    }
+    let mut keymap_slot_ys = [0.0f32; 32];
+    let mut keymap_title_ys = [f32::NAN; 6];
+    let mut keymap_slot = 0usize;
+    let mut keymap_first_group = true;
+    let keymap_rows_top = keymap_cursor + 42.0;
+    for group in 0..keymap::GROUPS.len() {
+        let rows = keymap_pane.visible[group] as usize;
+        if rows == 0 {
+            continue;
+        }
+        keymap_cursor += if keymap_first_group { 42.0 } else { GROUP_ADVANCE };
+        keymap_first_group = false;
+        keymap_title_ys[group] = at(keymap_cursor - 42.0);
+        for _ in 0..rows {
+            if keymap_slot < keymap_slot_ys.len() {
+                keymap_slot_ys[keymap_slot] = at(keymap_cursor);
+            }
+            keymap_slot += 1;
+            keymap_cursor += ROW_H;
+        }
+    }
+    let keymap_row0 = (
+        row_x,
+        if keymap_slot > 0 { keymap_slot_ys[0] } else { at(keymap_rows_top) },
+        row_w,
+        row_h,
+    );
+    if keymap_pane.readonly_visible > 0 {
+        keymap_cursor += if keymap_first_group { 42.0 } else { GROUP_ADVANCE };
+        keymap_title_ys[5] = at(keymap_cursor - 42.0);
+    }
+    let keymap_readonly_row0 = (row_x, at(keymap_cursor), row_w, row_h);
+    keymap_cursor += keymap_pane.readonly_visible as f32 * ROW_H;
+    let keymap_hint_y = at(keymap_cursor + 10.0);
+    let keymap_h = s(keymap_cursor + 10.0 + 26.0 + 32.0 - 72.0);
 
     // Advanced: session residency, then the gated WebDAV sync group (spec 003).
     // 隐藏期间同步几何仍保留，方便后续继续完善，但页面高度只计算可见内容。
@@ -1204,12 +1317,46 @@ fn settings_geometry(
     };
     let ssh_h = s(ssh_end + 32.0 - 72.0);
 
-    // Proxy page: the mode and both dependent inputs form one compact group.
+    // 网络页（学原型 ssh-proxy-panel-prototype.html 的三态结构）：模式
+    // 下拉决定下方内容——不使用=说明卡；跟随系统=说明卡+绕过行；指定
+    // 代理=手动/跳板单选行+展开行+绕过行。展开行插在选中的单选行正下方
+    // （原型形态），另一行顺延让位。
     let proxy_y0 = 146.0;
-    let proxy_row = |i: f32| (row_x, at(proxy_y0 + i * ROW_H), row_w, row_h);
-    let ssh_proxy_mode = proxy_row(0.0);
-    let ssh_proxy_rows = [proxy_row(1.0), proxy_row(2.0)];
-    let proxy_h = s(proxy_y0 + ROW_H * 3.0 + 32.0 - 72.0);
+    let ssh_proxy_mode = (row_x, at(proxy_y0), row_w, row_h);
+    let pane_y0 = proxy_y0 + ROW_H + 10.0;
+    // 说明卡高度：不使用两行文案；跟随系统多一行「当前读到」。
+    let note_h = match proxy.mode {
+        crate::ssh_proxy::ProxyMode::System => 84.0,
+        _ => 62.0,
+    };
+    let ssh_proxy_note = (row_x, at(pane_y0), row_w, s(note_h));
+    const LINK_ROW_H: f32 = 52.0;
+    const EXPAND_H: f32 = 66.0; // 输入/下拉行 44 + 提示行 22
+    let link0_y = pane_y0;
+    let link1_y = link0_y + LINK_ROW_H + if proxy.jump { 0.0 } else { EXPAND_H };
+    let expand_y = if proxy.jump { link1_y + LINK_ROW_H } else { link0_y + LINK_ROW_H };
+    let ssh_proxy_link_rows = [
+        (row_x, at(link0_y), row_w, s(LINK_ROW_H)),
+        (row_x, at(link1_y), row_w, s(LINK_ROW_H)),
+    ];
+    // 展开行整体右缩进：读作「属于上面那个单选项」，与原型的 36px 一致。
+    let ssh_proxy_expand = (row_x + s(34.0), at(expand_y), row_w - s(34.0), row_h);
+    let custom_end = link0_y + 2.0 * LINK_ROW_H + EXPAND_H;
+    let bypass_y = match proxy.mode {
+        crate::ssh_proxy::ProxyMode::System => pane_y0 + note_h + 10.0,
+        _ => custom_end + 10.0,
+    };
+    let ssh_proxy_bypass = (row_x, at(bypass_y), row_w, row_h);
+    let pane_end = match proxy.mode {
+        crate::ssh_proxy::ProxyMode::Off => pane_y0 + note_h,
+        _ => bypass_y + ROW_H,
+    };
+    // 每主机覆盖：普通行高，结尾一行「其余 N 台跟随全局默认」。
+    let override_y0 = pane_end + GROUP_ADVANCE;
+    let ssh_proxy_override_row0 = (row_x, at(override_y0), row_w, row_h);
+    let override_end = override_y0 + proxy.override_count as f32 * ROW_H;
+    let ssh_proxy_inherit = (row_x, at(override_end), row_w, s(34.0));
+    let proxy_h = s(override_end + 34.0 + 32.0 - 72.0);
 
     // Backup prototype: automatic-backup summary, export/restore segmented
     // action, then one grouped manifest card. Backup rows are taller because
@@ -1310,6 +1457,12 @@ fn settings_geometry(
         proxy_h,
         interaction_h,
         keymap_h,
+        keymap_search,
+        keymap_note,
+        keymap_pane,
+        keymap_slot_ys,
+        keymap_title_ys,
+        keymap_hint_y,
         keymap_row0,
         keymap_readonly_row0,
         keymap_row_h: row_h,
@@ -1317,7 +1470,13 @@ fn settings_geometry(
         keep_session,
         restore_session,
         ssh_proxy_mode,
-        ssh_proxy_rows,
+        ssh_proxy_note,
+        ssh_proxy_link_rows,
+        ssh_proxy_expand,
+        ssh_proxy_bypass,
+        ssh_proxy_override_row0,
+        ssh_proxy_inherit,
+        proxy_pane: proxy,
         sync_rows,
         sync_auto_pull,
         sync_actions,
@@ -1338,7 +1497,17 @@ pub(crate) fn opacity_slider_rect(
     target: SettingsOpacityTarget,
     density: super::ui::tokens::Density,
 ) -> (f32, f32, f32, f32) {
-    let geometry = settings_geometry(size_info, scale_factor, area, scroll, 0, 0, density);
+    let geometry = settings_geometry(
+        size_info,
+        scale_factor,
+        area,
+        scroll,
+        0,
+        0,
+        density,
+        ProxyPaneState::default(),
+        KeymapPaneState::default(),
+    );
     match target {
         SettingsOpacityTarget::Terminal => geometry.opacity_slider,
         SettingsOpacityTarget::BackgroundImage => geometry.background_image_opacity_slider,
@@ -1369,6 +1538,8 @@ fn ssh_host_action_rect(
 }
 
 /// Compact trailing command button inside an otherwise non-clickable settings row.
+const STANDARD_ROW_ACTION_W: f32 = 112.0;
+
 fn row_action_rect(row: (f32, f32, f32, f32), scale: f32, logical_w: f32) -> (f32, f32, f32, f32) {
     let s = |v: f32| v * scale;
     let (x, y, w, h) = row;
@@ -1388,8 +1559,17 @@ pub(super) fn appearance_preview_wallpaper_rects(
     hidden_hosts: usize,
     density: super::ui::tokens::Density,
 ) -> Option<((f32, f32, f32, f32), (f32, f32, f32, f32))> {
-    let geometry =
-        settings_geometry(size_info, scale_factor, area, scroll, hidden_hosts, 0, density);
+    let geometry = settings_geometry(
+        size_info,
+        scale_factor,
+        area,
+        scroll,
+        hidden_hosts,
+        0,
+        density,
+        ProxyPaneState::default(),
+        KeymapPaneState::default(),
+    );
     let (vx, vy, vw, vh) = geometry.preview;
     let (_, content_y, _, _) = geometry.content;
     let (_, py, _, ph) = geometry.popup;
@@ -1478,6 +1658,10 @@ fn dropdown_anchor(
         (Section::Proxy, SettingsDropdown::SshProxyMode) => {
             Some((anchor(geometry.ssh_proxy_mode), SSH_PROXY_MODE_OPTIONS.len()))
         },
+        // 跳板主机下拉挂在展开行上；空列表也给一行（占位提示，点了无动作）。
+        (Section::Proxy, SettingsDropdown::SshJumpHost) => {
+            Some((anchor(geometry.ssh_proxy_expand), geometry.ssh_host_count.max(1)))
+        },
         (Section::Appearance, SettingsDropdown::BackgroundFit) => {
             Some((anchor(geometry.background_image_fit), BACKGROUND_FIT_OPTIONS.len()))
         },
@@ -1527,6 +1711,8 @@ pub fn font_search_field_rect(
         hidden_host_count,
         ssh_host_count,
         density,
+        ProxyPaneState::default(),
+        KeymapPaneState::default(),
     );
     let s = |v: f32| v * scale_factor;
     let (_, py, _, ph) = geometry.popup;
@@ -1557,6 +1743,8 @@ pub fn settings_hit(
     hidden_host_count: usize,
     ssh_host_count: usize,
     density: super::ui::tokens::Density,
+    proxy: ProxyPaneState,
+    keymap_pane: KeymapPaneState,
 ) -> SettingsHit {
     let geometry = settings_geometry(
         size_info,
@@ -1566,6 +1754,8 @@ pub fn settings_hit(
         hidden_host_count,
         ssh_host_count,
         density,
+        proxy,
+        keymap_pane,
     );
     let s = |v: f32| v * scale_factor;
 
@@ -1626,6 +1816,7 @@ pub fn settings_hit(
                     SettingsDropdown::Density => SettingsHit::DensityOption(index),
                     SettingsDropdown::CursorShape => SettingsHit::CursorShapeOption(index),
                     SettingsDropdown::SshProxyMode => SettingsHit::SshProxyModeOption(index),
+                    SettingsDropdown::SshJumpHost => SettingsHit::SshJumpHostOption(index),
                     // 背景色浮层在上方特判处理，走不到通用行列表。
                     SettingsDropdown::BackgroundColor => SettingsHit::Panel,
                 };
@@ -1745,7 +1936,7 @@ pub fn settings_hit(
                 // boundary in the shared hit helper; give it priority there
                 // so a click on its top edge cannot open the dropdown.
                 if contains_rect(
-                    row_action_rect(geometry.terminal_import, scale_factor, 112.0),
+                    row_action_rect(geometry.terminal_import, scale_factor, STANDARD_ROW_ACTION_W),
                     x,
                     y,
                 ) {
@@ -1770,7 +1961,7 @@ pub fn settings_hit(
                     return SettingsHit::AcceptCycle;
                 }
                 if contains_rect(
-                    row_action_rect(geometry.open_config_file, scale_factor, 140.0),
+                    row_action_rect(geometry.open_config_file, scale_factor, STANDARD_ROW_ACTION_W),
                     x,
                     y,
                 ) {
@@ -1800,7 +1991,11 @@ pub fn settings_hit(
                     return SettingsHit::SshAddHost;
                 }
                 if contains_rect(
-                    row_action_rect(geometry.ssh_import_config, scale_factor, 112.0),
+                    row_action_rect(
+                        geometry.ssh_import_config,
+                        scale_factor,
+                        STANDARD_ROW_ACTION_W,
+                    ),
                     x,
                     y,
                 ) {
@@ -1822,9 +2017,39 @@ pub fn settings_hit(
                 ) {
                     return SettingsHit::SshProxyModeDropdown;
                 }
-                for (index, rect) in geometry.ssh_proxy_rows.iter().enumerate() {
-                    if contains_rect(*rect, x, y) {
-                        return SettingsHit::SshProxyInput(index);
+                match geometry.proxy_pane.mode {
+                    crate::ssh_proxy::ProxyMode::Off => {},
+                    crate::ssh_proxy::ProxyMode::System => {
+                        if contains_rect(geometry.ssh_proxy_bypass, x, y) {
+                            return SettingsHit::SshProxyInput(1);
+                        }
+                    },
+                    crate::ssh_proxy::ProxyMode::Custom => {
+                        for (index, rect) in geometry.ssh_proxy_link_rows.iter().enumerate() {
+                            if contains_rect(*rect, x, y) {
+                                return SettingsHit::SshProxyLinkPick(index);
+                            }
+                        }
+                        if geometry.proxy_pane.jump {
+                            if contains_rect(
+                                widgets::combobox_rect(geometry.ssh_proxy_expand, scale_factor),
+                                x,
+                                y,
+                            ) {
+                                return SettingsHit::SshJumpHostDropdown;
+                            }
+                        } else if contains_rect(geometry.ssh_proxy_expand, x, y) {
+                            return SettingsHit::SshProxyInput(0);
+                        }
+                        if contains_rect(geometry.ssh_proxy_bypass, x, y) {
+                            return SettingsHit::SshProxyInput(1);
+                        }
+                    },
+                }
+                let (ox, oy, ow, oh) = geometry.ssh_proxy_override_row0;
+                for index in 0..geometry.proxy_pane.override_count {
+                    if contains_rect((ox, oy + index as f32 * oh, ow, oh), x, y) {
+                        return SettingsHit::SshProxyOverrideEdit(index);
                     }
                 }
             },
@@ -1844,15 +2069,20 @@ pub fn settings_hit(
                 }
             },
             NebulaSettingsSection::Keymap => {
-                let (row_x, row_y, row_w, row_h) = geometry.keymap_row0;
-                for index in 0..keymap::editable_row_count() {
-                    let rect = (row_x, row_y + index as f32 * row_h, row_w, row_h);
+                if contains_rect(geometry.keymap_search, x, y) {
+                    return SettingsHit::KeymapSearchField;
+                }
+                let (row_x, _, row_w, row_h) = geometry.keymap_row0;
+                let total: usize =
+                    geometry.keymap_pane.visible.iter().map(|count| *count as usize).sum();
+                for slot in 0..total.min(geometry.keymap_slot_ys.len()) {
+                    let rect = (row_x, geometry.keymap_slot_ys[slot], row_w, row_h);
                     if contains_rect(rect, x, y) {
-                        return SettingsHit::KeymapRow(index);
+                        return SettingsHit::KeymapRow(slot);
                     }
                 }
                 let (row_x, row_y, row_w, row_h) = geometry.keymap_readonly_row0;
-                for index in 0..keymap::READONLY_ROWS.len() {
+                for index in 0..geometry.keymap_pane.readonly_visible as usize {
                     let rect = (row_x, row_y + index as f32 * row_h, row_w, row_h);
                     if contains_rect(rect, x, y) {
                         return SettingsHit::KeymapReadonlyRow(index);
@@ -2017,6 +2247,15 @@ pub(super) struct SettingsView {
     pub(super) keymap_capture: Option<usize>,
     /// 捕获态按住的修饰键前缀（"Ctrl+"），实时回显。
     pub(super) keymap_capture_preview: String,
+    /// 按键映射页搜索：查询串 + 聚焦态；过滤后可见行的 flat 下标
+    /// （编辑组 / 只读组分开），由 Display 用同一过滤谓词预计算。
+    pub(super) keymap_query: String,
+    pub(super) keymap_search_focus: bool,
+    pub(super) keymap_visible: Vec<usize>,
+    pub(super) keymap_readonly_visible: Vec<usize>,
+    /// 与 flat 行对齐的冲突标记 + 预排好的冲突提示句（None = 无冲突）。
+    pub(super) keymap_clash_rows: Vec<bool>,
+    pub(super) keymap_clash_note: Option<String>,
     /// 高级→同步：四个输入草稿（url、用户名、WebDAV 密码、E2E 口令）。
     pub(super) sync_inputs: [String; 4],
     /// 聚焦的同步输入框下标（0..4）。
@@ -2031,6 +2270,13 @@ pub(super) struct SettingsView {
     pub(super) ssh_proxy_mode: crate::ssh_proxy::ProxyMode,
     pub(super) ssh_proxy_inputs: [String; 2],
     pub(super) ssh_proxy_focus: Option<usize>,
+    /// 指定代理的子模式：true = SSH 跳板（Display 从 url 前缀派生并持有）。
+    pub(super) ssh_proxy_jump: bool,
+    /// 「跟随系统」当前读到的代理：`(URL, 来自注册表)`。None = 系统未启用。
+    /// Display 在进网络页 / 切模式时刷新缓存；渲染只读，不做系统调用。
+    pub(super) system_proxy_probe: Option<(String, bool)>,
+    /// 每主机覆盖行：`(显示名, 摘要, ssh_hosts 下标)`，随视图快照重建。
+    pub(super) ssh_proxy_overrides: Vec<(String, String, usize)>,
     pub(super) backup_selection: BackupSelection,
     pub(super) backup_status: Option<(String, bool)>,
 }
@@ -2100,11 +2346,7 @@ fn ssh_proxy_input_display(
     if raw.is_empty() {
         let text = match index {
             // 无前缀地址就能用（自动按 socks5），placeholder 直接示范最短
-            // 形态；System 模式下这一行不生效，改写代理从哪里读。
-            0 if view.ssh_proxy_mode == crate::ssh_proxy::ProxyMode::System => view.language.pick(
-                "跟随系统（注册表 Internet Settings / 环境变量）",
-                "System (registry Internet Settings / env vars)",
-            ),
+            // 形态；System 模式下地址行整个不渲染，无需在此分支。
             0 => "127.0.0.1:7890",
             _ => view.language.pick("例：10.0.0.0, .internal", "e.g. 10.0.0.0, .internal"),
         };
@@ -2112,6 +2354,33 @@ fn ssh_proxy_input_display(
     }
     let (text, cols) = text_tail(raw, max_cols);
     (text, false, cols)
+}
+
+/// 视图 → 网络页几何输入。所有 settings_geometry 调用点共用同一份推导，
+/// 防止命中与绘制对模式的理解不一致。
+fn proxy_pane_state(view: &SettingsView) -> ProxyPaneState {
+    ProxyPaneState {
+        mode: view.ssh_proxy_mode,
+        jump: view.ssh_proxy_jump,
+        override_count: view.ssh_proxy_overrides.len(),
+    }
+}
+
+/// 视图 → 按键映射页几何输入（每组可见行数从 flat 下标反推）。
+fn keymap_pane_state_view(view: &SettingsView) -> KeymapPaneState {
+    let mut pane = KeymapPaneState {
+        readonly_visible: view.keymap_readonly_visible.len() as u8,
+        clash: view.keymap_clash_note.is_some(),
+        ..Default::default()
+    };
+    let mut start = 0usize;
+    for (group, (.., count)) in keymap::GROUPS.iter().enumerate() {
+        let end = start + count;
+        pane.visible[group] =
+            view.keymap_visible.iter().filter(|flat| (start..end).contains(*flat)).count() as u8;
+        start = end;
+    }
+    pane
 }
 
 /// 动作行的 [立即推送, 立即拉取] 按钮矩形。
@@ -2234,6 +2503,8 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         SettingsDropdown::SshProxyMode => {
             SSH_PROXY_MODE_OPTIONS.iter().position(|mode| *mode == view.ssh_proxy_mode)
         },
+        SettingsDropdown::SshJumpHost => crate::ssh_proxy::jump_target(&view.ssh_proxy_inputs[0])
+            .and_then(|target| view.ssh_hosts.iter().position(|host| host.destination == target)),
         SettingsDropdown::BackgroundColor => view
             .background
             .and_then(|current| BACKGROUND_SWATCHES.iter().position(|color| *color == current)),
@@ -2254,6 +2525,7 @@ fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Optio
         (SettingsDropdown::Density, SettingsHit::DensityOption(index)) => Some(index),
         (SettingsDropdown::CursorShape, SettingsHit::CursorShapeOption(index)) => Some(index),
         (SettingsDropdown::SshProxyMode, SettingsHit::SshProxyModeOption(index)) => Some(index),
+        (SettingsDropdown::SshJumpHost, SettingsHit::SshJumpHostOption(index)) => Some(index),
         _ => None,
     }
 }
@@ -2276,6 +2548,8 @@ pub(super) fn push_quads(
         view.hidden_hosts.len(),
         view.ssh_hosts.len(),
         view.density,
+        proxy_pane_state(view),
+        keymap_pane_state_view(view),
     );
     let (px, py, pw, ph) = geometry.popup;
     // Scrolled content is clipped EXACTLY at the viewport edges: quads that
@@ -2302,7 +2576,9 @@ pub(super) fn push_quads(
             continue;
         }
         if nav_section == section {
-            quads.push(UiQuad::solid(nx, ny, nw, nh, s(8.0), sk.surface));
+            // 2026-08-09 对齐原型 .nav-item.on：选中 = accent_soft，与侧栏
+            // tab、网络页单选行同 token。回滚: sk.surface（中性档）。
+            quads.push(UiQuad::solid(nx, ny, nw, nh, s(8.0), sk.accent_soft));
         } else if view.hover == SettingsHit::Nav(nav_section) {
             quads.push(UiQuad::solid(nx, ny, nw, nh, s(8.0), sk.hover));
         }
@@ -2316,7 +2592,9 @@ pub(super) fn push_quads(
         // 空心图标（代理的中继环）挖空用的必须是行的**有效底色**：面板色
         // 与选中/悬浮药丸（半透明）合成后的结果，猜错环心就是一块色斑。
         let icon_cutout = if nav_section == section {
-            icons::blend_over(sk.panel, sk.surface)
+            // 选中底换 accent_soft 后挖空必须跟着换，否则环心是旧色斑。
+            // 回滚: icons::blend_over(sk.panel, sk.surface)
+            icons::blend_over(sk.panel, sk.accent_soft)
         } else if view.hover == SettingsHit::Nav(nav_section) {
             icons::blend_over(sk.panel, sk.hover)
         } else {
@@ -2808,13 +3086,13 @@ pub(super) fn push_quads(
             action_button(
                 quads,
                 geometry.terminal_import,
-                112.0,
+                STANDARD_ROW_ACTION_W,
                 view.hover == SettingsHit::ImportTerminal,
             );
             action_button(
                 quads,
                 geometry.open_config_file,
-                140.0,
+                STANDARD_ROW_ACTION_W,
                 view.hover == SettingsHit::OpenConfigFile,
             );
             combobox(
@@ -2911,7 +3189,7 @@ pub(super) fn push_quads(
             action_button(
                 quads,
                 geometry.ssh_import_config,
-                112.0,
+                STANDARD_ROW_ACTION_W,
                 view.hover == SettingsHit::SshImportConfig,
             );
             if geometry.hidden_host_count > 0 {
@@ -2929,7 +3207,6 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Proxy => {
-            group_frame(quads, geometry.ssh_proxy_mode, 3);
             row_hover(
                 quads,
                 geometry.ssh_proxy_mode,
@@ -2943,9 +3220,9 @@ pub(super) fn push_quads(
                 view.dropdown == Some(SettingsDropdown::SshProxyMode),
             );
             let cell_w = size.cell_width();
-            for (index, row) in geometry.ssh_proxy_rows.iter().enumerate() {
-                row_hover(quads, *row, view.hover == SettingsHit::SshProxyInput(index));
-                let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
+            // 输入行（地址 / 绕过共用）：右侧输入框 + 聚焦 caret。
+            let mut input_row = |quads: &mut Vec<UiQuad>, row: (f32, f32, f32, f32), index: usize| {
+                let (ix, iy, iw, ih) = sync_input_rect(row, scale);
                 let focused = view.ssh_proxy_focus == Some(index);
                 let mut input = Vec::new();
                 surface::push_input(&mut input, (ix, iy, iw, ih), scale, &sk, view.density, focused);
@@ -2969,6 +3246,125 @@ pub(super) fn push_quads(
                         ),
                     );
                 }
+            };
+            // 说明卡：hairline 环 + card 内芯（原型 .note 的中性形态）。
+            let note_card = |quads: &mut Vec<UiQuad>, rect: (f32, f32, f32, f32)| {
+                let corner = s(tokens::radius::OVERLAY);
+                let mut card = Vec::new();
+                surface::push_stroke(&mut card, rect, corner, scale, sk.hairline);
+                card.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, corner, sk.card));
+                for quad in card {
+                    clip(quads, quad);
+                }
+            };
+            match view.ssh_proxy_mode {
+                crate::ssh_proxy::ProxyMode::Off => {
+                    note_card(quads, geometry.ssh_proxy_note);
+                },
+                crate::ssh_proxy::ProxyMode::System => {
+                    note_card(quads, geometry.ssh_proxy_note);
+                    row_hover(
+                        quads,
+                        geometry.ssh_proxy_bypass,
+                        view.hover == SettingsHit::SshProxyInput(1),
+                    );
+                    input_row(quads, geometry.ssh_proxy_bypass, 1);
+                },
+                crate::ssh_proxy::ProxyMode::Custom => {
+                    // 子模式单选行：选中 = accent_soft 药丸（原型 .row.on），
+                    // 未选中 hover 给轻量色变；前缘 radio 圆环，选中加内点。
+                    for (index, rect) in geometry.ssh_proxy_link_rows.iter().enumerate() {
+                        let selected = (index == 1) == view.ssh_proxy_jump;
+                        let hovered = view.hover == SettingsHit::SshProxyLinkPick(index);
+                        let corner = s(tokens::radius::OVERLAY);
+                        let (rx, ry, rw, rh) = *rect;
+                        if selected {
+                            clip(quads, UiQuad::solid(rx, ry, rw, rh, corner, sk.accent_soft));
+                        } else if hovered {
+                            clip(quads, UiQuad::solid(rx, ry, rw, rh, corner, sk.hover));
+                        }
+                        // radio 环：push_stroke 是实心底环，中心必须用行的
+                        // **有效底色**盖回去（同导航图标挖空的教训）。
+                        let d = s(14.0).round();
+                        let dot = ((rx + s(14.0)).round(), (ry + (rh - d) / 2.0).round(), d, d);
+                        let ring = if selected {
+                            Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255)
+                        } else {
+                            sk.track_off
+                        };
+                        let cutout = if selected {
+                            icons::blend_over(sk.panel, sk.accent_soft)
+                        } else if hovered {
+                            icons::blend_over(sk.panel, sk.hover)
+                        } else {
+                            Rgba::new(sk.panel.r, sk.panel.g, sk.panel.b, 255)
+                        };
+                        let mut radio = Vec::new();
+                        surface::push_stroke(&mut radio, dot, d * 0.5, scale, ring);
+                        radio.push(UiQuad::solid(dot.0, dot.1, dot.2, dot.3, d * 0.5, cutout));
+                        if selected {
+                            let inner = (d * 0.5 - s(1.4)).round().max(2.0);
+                            radio.push(UiQuad::solid(
+                                (dot.0 + (d - inner) / 2.0).round(),
+                                (dot.1 + (d - inner) / 2.0).round(),
+                                inner,
+                                inner,
+                                inner * 0.5,
+                                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
+                            ));
+                        }
+                        for quad in radio {
+                            clip(quads, quad);
+                        }
+                    }
+                    if view.ssh_proxy_jump {
+                        row_hover(
+                            quads,
+                            geometry.ssh_proxy_expand,
+                            view.hover == SettingsHit::SshJumpHostDropdown,
+                        );
+                        combobox(
+                            quads,
+                            &mut staged,
+                            geometry.ssh_proxy_expand,
+                            view.hover == SettingsHit::SshJumpHostDropdown,
+                            view.dropdown == Some(SettingsDropdown::SshJumpHost),
+                        );
+                    } else {
+                        row_hover(
+                            quads,
+                            geometry.ssh_proxy_expand,
+                            view.hover == SettingsHit::SshProxyInput(0),
+                        );
+                        input_row(quads, geometry.ssh_proxy_expand, 0);
+                    }
+                    row_hover(
+                        quads,
+                        geometry.ssh_proxy_bypass,
+                        view.hover == SettingsHit::SshProxyInput(1),
+                    );
+                    input_row(quads, geometry.ssh_proxy_bypass, 1);
+                },
+            }
+            // 每主机覆盖：行 hover 色变 + 右缘「编辑」quiet 按钮底。
+            let (ox, oy, ow, oh) = geometry.ssh_proxy_override_row0;
+            for index in 0..view.ssh_proxy_overrides.len() {
+                let rect = (ox, oy + index as f32 * oh, ow, oh);
+                let hovered = view.hover == SettingsHit::SshProxyOverrideEdit(index);
+                if hovered {
+                    clip(
+                        quads,
+                        UiQuad::solid(
+                            rect.0,
+                            rect.1,
+                            rect.2,
+                            rect.3,
+                            s(tokens::radius::OVERLAY),
+                            sk.hover,
+                        ),
+                    );
+                }
+                action_button(quads, rect, 54.0, hovered);
             }
         },
         NebulaSettingsSection::Interaction => {
@@ -3019,23 +3415,69 @@ pub(super) fn push_quads(
         },
         NebulaSettingsSection::Keymap => {
             let cell_w = size.cell_width();
-            group_frame(quads, geometry.keymap_row0, keymap::editable_row_count());
-            group_frame(quads, geometry.keymap_readonly_row0, keymap::READONLY_ROWS.len());
-            // 只读行同样给轻量 hover（无位移的色变）：一列可交互行里没有
-            // 反馈的行读作「死区」，像是渲染坏了。
-            let (rx, ry, rw, rh) = geometry.keymap_readonly_row0;
-            for index in 0..keymap::READONLY_ROWS.len() {
-                let rect = (rx, ry + index as f32 * geometry.keymap_row_h, rw, rh);
-                row_hover(quads, rect, view.hover == SettingsHit::KeymapReadonlyRow(index));
+            // 搜索框（原型 .search：input 底、聚焦 accent 边——push_input
+            // 配方已含这两态）。捕获进行时搜索不聚焦，caret 不闪。
+            {
+                let (sx, sy, sw, sh) = geometry.keymap_search;
+                let focused = view.keymap_search_focus && view.keymap_capture.is_none();
+                let mut input = Vec::new();
+                surface::push_input(&mut input, (sx, sy, sw, sh), scale, &sk, view.density, focused);
+                for quad in input {
+                    clip(quads, quad);
+                }
+                if focused && super::caret_blink_on() {
+                    let cols: usize =
+                        view.keymap_query.chars().map(|c| c.width().unwrap_or(1)).sum();
+                    let caret_h = sh - s(10.0);
+                    clip(
+                        quads,
+                        UiQuad::solid(
+                            (sx + s(12.0) + cols as f32 * cell_w).min(sx + sw - s(6.0)),
+                            sy + (sh - caret_h) / 2.0,
+                            (1.5 * scale).max(1.0),
+                            caret_h,
+                            0.0,
+                            Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
+                        ),
+                    );
+                }
             }
-            let (kx, ky, kw, kh) = geometry.keymap_row0;
-            for index in 0..keymap::editable_row_count() {
-                let rect = (kx, ky + index as f32 * geometry.keymap_row_h, kw, kh);
-                row_hover(quads, rect, view.hover == SettingsHit::KeymapRow(index));
-                // Keycap 底座：有效键围 hairline 徽标；捕获中的行换 accent
-                // 描边 + 软填充提示「正在等待按键」；未绑定行不画底座。
-                let capturing = view.keymap_capture == Some(index);
-                let (label, _, bound) = keymap_row_value(view, index);
+            // 冲突提示条：warn 变体（有待办动作才配警示色，纪律见原型 451）。
+            if geometry.keymap_pane.clash {
+                let (nx, ny, nw, nh) = geometry.keymap_note;
+                let corner = s(tokens::radius::OVERLAY);
+                let mut card = Vec::new();
+                surface::push_stroke(
+                    &mut card,
+                    (nx, ny, nw, nh),
+                    corner,
+                    scale,
+                    Rgba::new(sk.warn.r, sk.warn.g, sk.warn.b, 71),
+                );
+                card.push(UiQuad::solid(
+                    nx,
+                    ny,
+                    nw,
+                    nh,
+                    corner,
+                    Rgba::new(sk.warn.r, sk.warn.g, sk.warn.b, 23),
+                ));
+                for quad in card {
+                    clip(quads, quad);
+                }
+            }
+            let (row_x, _, row_w, row_h) = geometry.keymap_row0;
+            for (slot, flat) in view.keymap_visible.iter().copied().enumerate() {
+                if slot >= geometry.keymap_slot_ys.len() {
+                    break;
+                }
+                let rect = (row_x, geometry.keymap_slot_ys[slot], row_w, row_h);
+                let hovered = view.hover == SettingsHit::KeymapRow(slot);
+                row_hover(quads, rect, hovered);
+                // Keycap 底座：捕获中的行换 accent 描边 + 软填充提示「正在
+                // 等待按键」；未绑定行不画底座；冲突行 danger 底（.kbd.clash）。
+                let capturing = view.keymap_capture == Some(flat);
+                let (label, _, bound) = keymap_row_value(view, flat);
                 let cap = keymap_keycap_rect(rect, &label, cell_w, scale);
                 let (cx, cy, cw, ch) = cap;
                 if capturing {
@@ -3053,8 +3495,6 @@ pub(super) fn push_quads(
                     clip(quads, UiQuad::solid(cx, cy, cw, ch, s(6.0), sk.panel));
                     clip(quads, UiQuad::solid(cx, cy, cw, ch, s(6.0), sk.accent_soft));
                 } else if bound {
-                    // 图8 键帽规范：组合键拆逐键 chip（几何与文字 pass 同
-                    // 源自 keycap::layout_combo）。
                     let combo = super::ui::keycap::layout_combo(
                         &label,
                         rect.0 + rect.2 - s(16.0),
@@ -3062,18 +3502,33 @@ pub(super) fn push_quads(
                         cell_w,
                         scale,
                     );
+                    let danger = view.keymap_clash_rows.get(flat).copied().unwrap_or(false);
+                    let (_, chip_y, _, chip_h) = combo.bounds;
                     let mut chip_quads = Vec::new();
-                    super::ui::keycap::push_combo_with_hover(
-                        &mut chip_quads,
-                        &sk,
-                        &combo,
-                        scale,
-                        view.hover == SettingsHit::KeymapRow(index),
-                    );
+                    for &(chip_x, chip_w, _) in &combo.chips {
+                        super::ui::keycap::push_chip_toned(
+                            &mut chip_quads,
+                            &sk,
+                            chip_x,
+                            chip_y,
+                            chip_w,
+                            chip_h,
+                            scale,
+                            hovered,
+                            danger,
+                        );
+                    }
                     for quad in chip_quads {
                         clip(quads, quad);
                     }
                 }
+            }
+            // 只读行同样给轻量 hover（无位移的色变）：一列可交互行里没有
+            // 反馈的行读作「死区」，像是渲染坏了。
+            let (rx, ry, rw, rh) = geometry.keymap_readonly_row0;
+            for index in 0..view.keymap_readonly_visible.len() {
+                let rect = (rx, ry + index as f32 * rh, rw, rh);
+                row_hover(quads, rect, view.hover == SettingsHit::KeymapReadonlyRow(index));
             }
         },
         NebulaSettingsSection::Advanced => {
@@ -3368,6 +3823,8 @@ pub(super) fn push_popup_quads(
         view.hidden_hosts.len(),
         view.ssh_hosts.len(),
         view.density,
+        proxy_pane_state(view),
+        keymap_pane_state_view(view),
     );
     // 背景色专用浮层：色板网格 + hex 输入框（几何与 hit 同源）。
     if dropdown == SettingsDropdown::BackgroundColor {
@@ -3531,6 +3988,8 @@ pub(super) fn draw_popup_text(
         view.hidden_hosts.len(),
         view.ssh_hosts.len(),
         view.density,
+        proxy_pane_state(view),
+        keymap_pane_state_view(view),
     );
     // 背景色浮层：hex 草稿（或占位提示）画进输入框，色板格无文字。
     if dropdown == SettingsDropdown::BackgroundColor {
@@ -3635,6 +4094,16 @@ pub(super) fn draw_popup_text(
             },
             SettingsDropdown::SshProxyMode => {
                 ssh_proxy_mode_label(SSH_PROXY_MODE_OPTIONS[index], language).to_owned()
+            },
+            SettingsDropdown::SshJumpHost => match view.ssh_hosts.get(index) {
+                Some(host) if host.label != host.destination => {
+                    format!("{}  ·  {}", host.label, host.destination)
+                },
+                Some(host) => host.destination.clone(),
+                // 空列表的占位行：告诉用户去哪里补数据，点击无动作。
+                None => language
+                    .pick("没有已保存的主机——先在 SSH 页添加", "No saved hosts — add one in SSH")
+                    .to_owned(),
             },
             // 上方特判提前返回；此臂只为 match 完备。
             SettingsDropdown::BackgroundColor => continue,
@@ -3773,6 +4242,8 @@ pub(super) fn draw_text(
         view.hidden_hosts.len(),
         view.ssh_hosts.len(),
         view.density,
+        proxy_pane_state(view),
+        keymap_pane_state_view(view),
     );
     // Kept for parity with [`draw_popup_text`]'s shell icons; the base page
     // currently stages no icon draws of its own.
@@ -4407,7 +4878,7 @@ pub(super) fn draw_text(
                     r,
                     gc,
                     size,
-                    row_action_rect(geometry.terminal_import, scale, 112.0),
+                    row_action_rect(geometry.terminal_import, scale, STANDARD_ROW_ACTION_W),
                     language.pick("导入", "Import"),
                     if view.hover == SettingsHit::ImportTerminal { sk.accent } else { sk.ink },
                 );
@@ -4568,7 +5039,7 @@ pub(super) fn draw_text(
                     r,
                     gc,
                     size,
-                    row_action_rect(geometry.open_config_file, scale, 140.0),
+                    row_action_rect(geometry.open_config_file, scale, STANDARD_ROW_ACTION_W),
                     language.pick("打开", "Open"),
                     if view.hover == SettingsHit::OpenConfigFile { sk.accent } else { sk.ink },
                 );
@@ -4722,7 +5193,7 @@ pub(super) fn draw_text(
                     &sk,
                     gx,
                     group_y(gy),
-                    language.pick("SSH 代理", "SSH proxy"),
+                    language.pick("全局默认", "Global default"),
                 );
             }
             if visible(geometry.ssh_proxy_mode.1, geometry.ssh_proxy_mode.3) {
@@ -4733,7 +5204,10 @@ pub(super) fn draw_text(
                     scale,
                     &sk,
                     geometry.ssh_proxy_mode,
-                    language.pick("SSH 连接代理", "SSH connection proxy"),
+                    language.pick(
+                        "连接链路（改动只影响新建连接）",
+                        "Connection link (new connections only)",
+                    ),
                     "",
                     sk.ink,
                 );
@@ -4745,22 +5219,22 @@ pub(super) fn draw_text(
                     sk.accent,
                 );
             }
-            let labels = [
-                language.pick(
-                    "代理地址（socks5:// / http:// / jump:主机）",
-                    "Proxy address (socks5:// / http:// / jump:host)",
-                ),
-                language.pick("不走代理的主机（逗号分隔）", "Bypass hosts (comma separated)"),
-            ];
-            let active = [
-                view.ssh_proxy_mode == crate::ssh_proxy::ProxyMode::Custom,
-                view.ssh_proxy_mode != crate::ssh_proxy::ProxyMode::Off,
-            ];
             let cell_w = size.cell_width();
             let cell_h = size.cell_height();
-            for (index, row) in geometry.ssh_proxy_rows.iter().enumerate() {
+            // 说明卡文案：卡内 14px 边距，行距 = cell_h + 6。
+            let mut note_lines = |r: &mut Renderer, gc: &mut GlyphCache, lines: [(String, Rgb); 2]| {
+                let (nx, ny, ..) = geometry.ssh_proxy_note;
+                for (i, (text, ink)) in lines.iter().enumerate() {
+                    let y = ny + s(12.0) + i as f32 * (cell_h + s(6.0));
+                    if visible(y, cell_h) {
+                        r.draw_chrome_text(size, nx + s(14.0), y, *ink, text, gc);
+                    }
+                }
+            };
+            let mut bypass_row = |r: &mut Renderer, gc: &mut GlyphCache| {
+                let row = geometry.ssh_proxy_bypass;
                 if !visible(row.1, row.3) {
-                    continue;
+                    return;
                 }
                 row_label(
                     r,
@@ -4768,16 +5242,247 @@ pub(super) fn draw_text(
                     size,
                     scale,
                     &sk,
-                    *row,
-                    labels[index],
+                    row,
+                    language.pick("不走代理的主机（逗号分隔）", "Bypass hosts (comma separated)"),
                     "",
-                    if active[index] { sk.ink } else { sk.ink_dim },
+                    sk.ink,
                 );
-                let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
+                let (ix, iy, iw, ih) = sync_input_rect(row, scale);
                 let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                let (text, placeholder, _) = ssh_proxy_input_display(view, index, max_cols);
-                let ink = if placeholder || !active[index] { sk.ink_dim } else { sk.ink };
+                let (text, placeholder, _) = ssh_proxy_input_display(view, 1, max_cols);
+                let ink = if placeholder { sk.ink_dim } else { sk.ink };
                 r.draw_chrome_text(size, ix + s(12.0), iy + (ih - cell_h) / 2.0, ink, &text, gc);
+            };
+            match view.ssh_proxy_mode {
+                crate::ssh_proxy::ProxyMode::Off => {
+                    note_lines(r, gc, [
+                        (
+                            language
+                                .pick(
+                                    "直连目标主机，并忽略 ALL_PROXY 等环境变量。",
+                                    "Connect directly, ignoring ALL_PROXY and similar variables.",
+                                )
+                                .to_owned(),
+                            sk.ink,
+                        ),
+                        (
+                            language
+                                .pick(
+                                    "下方单独设置了链路的主机不受影响。",
+                                    "Hosts with their own link below are unaffected.",
+                                )
+                                .to_owned(),
+                            sk.ink_dim,
+                        ),
+                    ]);
+                },
+                crate::ssh_proxy::ProxyMode::System => {
+                    // 「当前读到」来自 Display 缓存的探测（进页/切模式时刷新），
+                    // 渲染路径绝不直接碰注册表。
+                    let probe = match &view.system_proxy_probe {
+                        Some((url, from_registry)) => format!(
+                            "{}{url} · {}",
+                            language.pick("当前读到：", "Currently reading: "),
+                            if *from_registry {
+                                language.pick("注册表 Internet Settings", "registry Internet Settings")
+                            } else {
+                                language.pick("环境变量", "environment variables")
+                            },
+                        ),
+                        None => language
+                            .pick(
+                                "当前系统未启用代理：连接将直连（等同「不使用」）。",
+                                "No system proxy is active: connections go direct (same as Off).",
+                            )
+                            .to_owned(),
+                    };
+                    note_lines(r, gc, [
+                        (
+                            language
+                                .pick(
+                                    "跟随 Windows 系统代理，代理软件切换节点后无需在此改动。",
+                                    "Follows the Windows system proxy; switching nodes needs no change here.",
+                                )
+                                .to_owned(),
+                            sk.ink,
+                        ),
+                        (probe, sk.ink_dim),
+                    ]);
+                    bypass_row(r, gc);
+                },
+                crate::ssh_proxy::ProxyMode::Custom => {
+                    let names = [
+                        (
+                            language.pick("手动填写", "Manual address"),
+                            language.pick(
+                                "直接填地址，协议可交给自动识别",
+                                "Type an address; the scheme is auto-detected",
+                            ),
+                        ),
+                        (
+                            language.pick("SSH 跳板", "SSH jump host"),
+                            language.pick(
+                                "先连另一台已保存的主机，用它转发",
+                                "Connect through another saved host",
+                            ),
+                        ),
+                    ];
+                    for (index, rect) in geometry.ssh_proxy_link_rows.iter().enumerate() {
+                        if !visible(rect.1, rect.3) {
+                            continue;
+                        }
+                        let selected = (index == 1) == view.ssh_proxy_jump;
+                        let name_ink = if selected { sk.ink_strong } else { sk.ink };
+                        let text_x = rect.0 + s(38.0);
+                        r.draw_chrome_text(size, text_x, rect.1 + s(7.0), name_ink, names[index].0, gc);
+                        r.draw_chrome_text(
+                            size,
+                            text_x,
+                            rect.1 + s(7.0) + cell_h + s(2.0),
+                            sk.ink_faint,
+                            names[index].1,
+                            gc,
+                        );
+                    }
+                    let expand = geometry.ssh_proxy_expand;
+                    if visible(expand.1, expand.3 + s(22.0)) {
+                        if view.ssh_proxy_jump {
+                            row_label(
+                                r,
+                                gc,
+                                size,
+                                scale,
+                                &sk,
+                                expand,
+                                language.pick("跳板主机", "Jump host"),
+                                "",
+                                sk.ink,
+                            );
+                            let target = crate::ssh_proxy::jump_target(&view.ssh_proxy_inputs[0])
+                                .unwrap_or("");
+                            let (value, value_ink) = if target.is_empty() {
+                                (
+                                    language.pick("选择一台已保存的主机…", "Pick a saved host…").to_owned(),
+                                    sk.ink_dim,
+                                )
+                            } else {
+                                (
+                                    view.ssh_hosts
+                                        .iter()
+                                        .find(|host| host.destination == target)
+                                        .map(|host| host.label.clone())
+                                        .unwrap_or_else(|| target.to_owned()),
+                                    sk.accent,
+                                )
+                            };
+                            combobox_value(r, gc, expand, &value, value_ink);
+                            r.draw_chrome_text(
+                                size,
+                                expand.0 + s(2.0),
+                                expand.1 + expand.3 + s(4.0),
+                                sk.ink_faint,
+                                language.pick(
+                                    "跳板沿用它自己的密钥、端口与代理；被删除时明确报错，不会静默直连。",
+                                    "The jump host keeps its own key, port and proxy; deleting it fails loudly.",
+                                ),
+                                gc,
+                            );
+                        } else {
+                            row_label(
+                                r,
+                                gc,
+                                size,
+                                scale,
+                                &sk,
+                                expand,
+                                language.pick("代理地址", "Proxy address"),
+                                "",
+                                sk.ink,
+                            );
+                            let (ix, iy, iw, ih) = sync_input_rect(expand, scale);
+                            let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                            let (text, placeholder, _) = ssh_proxy_input_display(view, 0, max_cols);
+                            let ink = if placeholder { sk.ink_dim } else { sk.ink };
+                            r.draw_chrome_text(
+                                size,
+                                ix + s(12.0),
+                                iy + (ih - cell_h) / 2.0,
+                                ink,
+                                &text,
+                                gc,
+                            );
+                            r.draw_chrome_text(
+                                size,
+                                expand.0 + s(2.0),
+                                expand.1 + expand.3 + s(4.0),
+                                sk.ink_faint,
+                                language.pick(
+                                    "可直接粘贴 host:port，无需补协议前缀。",
+                                    "Paste host:port directly; no scheme prefix needed.",
+                                ),
+                                gc,
+                            );
+                        }
+                    }
+                    bypass_row(r, gc);
+                },
+            }
+            // 每主机覆盖：名字 + 摘要 + 行尾「编辑」；结尾一行继承说明。
+            let (ox, oy, ow, oh) = geometry.ssh_proxy_override_row0;
+            if visible(group_y(oy), title_h) {
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    ox,
+                    group_y(oy),
+                    language.pick("每主机覆盖", "Per-host overrides"),
+                );
+            }
+            for (index, (label, summary, _)) in view.ssh_proxy_overrides.iter().enumerate() {
+                let rect = (ox, oy + index as f32 * oh, ow, oh);
+                if !visible(rect.1, rect.3) {
+                    continue;
+                }
+                let hovered = view.hover == SettingsHit::SshProxyOverrideEdit(index);
+                let text_y = rect.1 + (rect.3 - cell_h) / 2.0;
+                r.draw_chrome_text(size, rect.0 + s(16.0), text_y, sk.ink, label, gc);
+                let label_cols: usize = label.chars().map(|c| c.width().unwrap_or(1)).sum();
+                r.draw_chrome_text(
+                    size,
+                    rect.0 + s(16.0) + (label_cols as f32 + 2.0) * cell_w,
+                    text_y,
+                    sk.ink_faint,
+                    summary,
+                    gc,
+                );
+                let action = row_action_rect(rect, scale, 54.0);
+                let action_text = language.pick("编辑", "Edit");
+                let action_cols: usize = action_text.chars().map(|c| c.width().unwrap_or(1)).sum();
+                r.draw_chrome_text(
+                    size,
+                    action.0 + (action.2 - action_cols as f32 * cell_w) / 2.0,
+                    action.1 + (action.3 - cell_h) / 2.0,
+                    if hovered { sk.accent } else { sk.ink_dim },
+                    action_text,
+                    gc,
+                );
+            }
+            let inherit = geometry.ssh_proxy_inherit;
+            if visible(inherit.1, inherit.3) {
+                let rest = view.ssh_hosts.len().saturating_sub(view.ssh_proxy_overrides.len());
+                let text = format!(
+                    "{}{rest}{}",
+                    if view.ssh_proxy_overrides.is_empty() {
+                        language.pick("全部 ", "All ")
+                    } else {
+                        language.pick("其余 ", "The other ")
+                    },
+                    language.pick(" 台主机跟随全局默认。", " hosts follow the global default."),
+                );
+                r.draw_chrome_text(size, inherit.0 + s(16.0), inherit.1 + s(8.0), sk.ink_faint, &text, gc);
             }
         },
         NebulaSettingsSection::Interaction => {
@@ -4881,33 +5586,76 @@ pub(super) fn draw_text(
             }
         },
         NebulaSettingsSection::Keymap => {
-            let (kx, ky, kw, kh) = geometry.keymap_row0;
-            if visible(group_y(ky), title_h) {
+            // 搜索框文字：查询串或占位；聚焦态的 caret 在 quad pass。
+            {
+                let (sx, sy, _, sh) = geometry.keymap_search;
+                if visible(sy, sh) {
+                    let showing = !view.keymap_query.is_empty();
+                    let text = if showing {
+                        view.keymap_query.clone()
+                    } else {
+                        language.pick("搜索动作或按键…", "Search actions or keys…").to_owned()
+                    };
+                    let ink = if showing { sk.ink } else { sk.ink_faint };
+                    r.draw_chrome_text(size, sx + s(12.0), sy + (sh - cell_h) / 2.0, ink, &text, gc);
+                }
+            }
+            // 冲突提示句（写清谁不生效——Tabby 的静默失效就是反例）。
+            if let Some(note) = &view.keymap_clash_note {
+                let (nx, ny, _, nh) = geometry.keymap_note;
+                if geometry.keymap_pane.clash && visible(ny, nh) {
+                    r.draw_chrome_text(size, nx + s(14.0), ny + (nh - cell_h) / 2.0, sk.ink, note, gc);
+                }
+            }
+            // 分组标题（无框分组：标题 + 间距承担层级）；下标 5 = 固定组。
+            for (group, title_y) in geometry.keymap_title_ys.iter().enumerate() {
+                if !title_y.is_finite() || !visible(*title_y, title_h) {
+                    continue;
+                }
+                let (zh, en) = match keymap::GROUPS.get(group) {
+                    Some((zh, en, _)) => (*zh, *en),
+                    None => ("固定快捷键", "Fixed shortcuts"),
+                };
                 section_title(
                     r,
                     gc,
                     size,
                     scale,
                     &sk,
-                    kx,
-                    group_y(ky),
-                    language.pick(
-                        "快捷键（点击右侧按键重新绑定，Backspace 恢复默认）",
-                        "Shortcuts (click a key to rebind, Backspace restores default)",
-                    ),
+                    geometry.keymap_row0.0,
+                    *title_y,
+                    language.pick(zh, en),
                 );
             }
+            let (kx, _, kw, kh) = geometry.keymap_row0;
             // 行矩形按文字行剔除：quad 走 scissor 能画半行，文字只要居中
             // 的字盒仍完整落在视口内就照画——否则底部半行只剩空 keycap。
             let line_visible = |ry: f32, rh: f32| {
                 let ty = ry + (rh - cell_h) / 2.0;
                 ty >= clip_top && ty + cell_h <= clip_bot
             };
-            for i in 0..keymap::editable_row_count() {
-                let rect = (kx, ky + i as f32 * geometry.keymap_row_h, kw, kh);
+            if view.keymap_visible.is_empty() {
+                let (_, ey, ..) = geometry.keymap_row0;
+                if visible(ey, kh) {
+                    r.draw_chrome_text(
+                        size,
+                        kx + s(4.0),
+                        ey + s(6.0),
+                        sk.ink_faint,
+                        language.pick("没有匹配的动作或按键。", "No actions or keys match."),
+                        gc,
+                    );
+                }
+            }
+            for (slot, flat) in view.keymap_visible.iter().copied().enumerate() {
+                if slot >= geometry.keymap_slot_ys.len() {
+                    break;
+                }
+                let rect = (kx, geometry.keymap_slot_ys[slot], kw, kh);
                 if !line_visible(rect.1, rect.3) {
                     continue;
                 }
+                let i = flat;
                 let ty = rect.1 + (kh - cell_h) / 2.0;
                 let (zh_label, en_label) = if i == keymap::QUICK_TERMINAL_ROW {
                     if view.quick_hotkey_error.is_some() {
@@ -4931,22 +5679,25 @@ pub(super) fn draw_text(
                     language.pick(zh_label, en_label),
                     gc,
                 );
+                let hovered = view.hover == SettingsHit::KeymapRow(slot);
                 let capturing = view.keymap_capture == Some(i);
                 let (value, customized, bound) = keymap_row_value(view, i);
-                // 墨色分级：捕获中 accent、自定义键 accent、默认键正常墨、
-                // 未绑定弱墨——一眼看出哪些行动过。
+                let clash = view.keymap_clash_rows.get(i).copied().unwrap_or(false);
+                // 墨色分级（2026-08-09 对齐原型 .kbd）：冲突 danger、捕获/
+                // 自定义 accent、hover 提一档、默认键 ink_dim（回滚: sk.ink）、
+                // 未绑定 ink_faint（回滚: sk.ink_dim）。
                 let ink = if capturing {
                     sk.accent
-                } else if view.hover == SettingsHit::KeymapRow(i) && bound {
-                    // Hover only lifts the key text one tier; the chip itself
-                    // gets the matching quiet fill in the quad pass.
+                } else if clash {
+                    Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b)
+                } else if hovered && bound {
                     sk.ink_strong
                 } else if customized {
                     sk.accent
                 } else if bound {
-                    sk.ink
-                } else {
                     sk.ink_dim
+                } else {
+                    sk.ink_faint
                 };
                 if capturing || !bound {
                     // 捕获提示 / 未绑定占位仍是整段文本（不是键位展示）。
@@ -4972,23 +5723,29 @@ pub(super) fn draw_text(
                             gc,
                         );
                     }
+                    // hover 才浮现「改键」提示（原型 .rebind 语义）：整行
+                    // 本就可点，这里只补可见性，不加新命中。
+                    if hovered && !capturing {
+                        let rebind = language.pick("改键", "Rebind");
+                        let rebind_cols: usize =
+                            rebind.chars().map(|c| c.width().unwrap_or(1)).sum();
+                        r.draw_chrome_text(
+                            size,
+                            combo.bounds.0 - s(12.0) - rebind_cols as f32 * cell_w,
+                            ty,
+                            sk.accent,
+                            rebind,
+                            gc,
+                        );
+                    }
                 }
             }
             let (rx, ry, rw, rh) = geometry.keymap_readonly_row0;
-            if visible(group_y(ry), title_h) {
-                section_title(
-                    r,
-                    gc,
-                    size,
-                    scale,
-                    &sk,
-                    rx,
-                    group_y(ry),
-                    language.pick("固定快捷键", "Fixed shortcuts"),
-                );
-            }
-            for (i, (zh_label, en_label, combo)) in keymap::READONLY_ROWS.iter().enumerate() {
-                let rect = (rx, ry + i as f32 * geometry.keymap_row_h, rw, rh);
+            for (row, flat) in view.keymap_readonly_visible.iter().copied().enumerate() {
+                let Some((zh_label, en_label, combo)) = keymap::READONLY_ROWS.get(flat) else {
+                    continue;
+                };
+                let rect = (rx, ry + row as f32 * rh, rw, rh);
                 if line_visible(rect.1, rect.3) {
                     row_label(
                         r,
@@ -5002,6 +5759,20 @@ pub(super) fn draw_text(
                         sk.ink_dim,
                     );
                 }
+            }
+            // 页尾提示：改键入口与恢复默认的操作说明（原页首长标题的归宿）。
+            if visible(geometry.keymap_hint_y, cell_h) {
+                r.draw_chrome_text(
+                    size,
+                    kx + s(4.0),
+                    geometry.keymap_hint_y,
+                    sk.ink_faint,
+                    language.pick(
+                        "点击行改键 · 捕获时按 Backspace 恢复默认绑定",
+                        "Click a row to rebind · Backspace during capture restores the default",
+                    ),
+                    gc,
+                );
             }
         },
         NebulaSettingsSection::Advanced => {
@@ -5353,8 +6124,9 @@ pub(super) fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS, TabRevealMotion, advanced_content_end,
-        font_popup_row_count, font_popup_slot, opacity_from_pointer, row_action_rect,
+        SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS, STANDARD_ROW_ACTION_W, TabRevealMotion,
+        advanced_content_end, font_popup_row_count, font_popup_slot, opacity_from_pointer,
+        row_action_rect,
     };
     use crate::display::ui::widgets;
 
@@ -5406,7 +6178,7 @@ mod tests {
     #[test]
     fn settings_actions_keep_their_hit_area_on_the_button() {
         let row = (100.0, 200.0, 500.0, 44.0);
-        let button = row_action_rect(row, 1.0, 112.0);
+        let button = row_action_rect(row, 1.0, STANDARD_ROW_ACTION_W);
         assert!(button.0 > row.0);
         assert!(button.0 + button.2 <= row.0 + row.2);
         assert!(!super::contains_rect(button, row.0 + 8.0, row.1 + row.3 * 0.5));
@@ -5419,5 +6191,13 @@ mod tests {
         assert!(
             super::contains_rect(toggle, toggle.0 + toggle.2 * 0.5, toggle.1 + toggle.3 * 0.5,)
         );
+    }
+
+    #[test]
+    fn profile_import_and_open_actions_share_one_width() {
+        let import = row_action_rect((100.0, 200.0, 500.0, 44.0), 1.5, STANDARD_ROW_ACTION_W);
+        let open = row_action_rect((100.0, 400.0, 500.0, 44.0), 1.5, STANDARD_ROW_ACTION_W);
+        assert_eq!(import.2, open.2);
+        assert_eq!(import.2, STANDARD_ROW_ACTION_W * 1.5);
     }
 }

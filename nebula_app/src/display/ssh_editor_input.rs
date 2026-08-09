@@ -855,6 +855,7 @@ impl Display {
         // 显示一个磁盘上并不存在的标签。
         self.nebula_ssh_labels = profiles.labels();
         self.nebula_ssh_icons = profiles.icons();
+        self.nebula_ssh_proxies = profiles.proxies();
         if ssh_ui::auth_sections(editor.auth).0
             && editor.save_password
             && !editor.password.is_empty()

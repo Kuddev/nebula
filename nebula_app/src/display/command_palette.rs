@@ -1949,8 +1949,13 @@ pub(crate) fn palette_layout_with_workspace_bounds(
     } else {
         py + pad + input_h + s(8.0) + chip_band_h
     };
+    let needs_scrollbar = model.filtered.len() > max_rows && max_rows > 0;
     let (list_x, list_w) = if launcher {
-        (px + launcher_list_pad_x, pw - launcher_list_pad_x * 2.0)
+        // 滚动条占据右侧原本的 8px inset。再预留同样一份间距后，选中行
+        // 到滚动条的可见空隙才与选中行到面板左缘一致，不会右边贴住。
+        let right_pad =
+            if needs_scrollbar { launcher_list_pad_x * 2.0 } else { launcher_list_pad_x };
+        (px + launcher_list_pad_x, pw - launcher_list_pad_x - right_pad)
     } else {
         (input.0, input.2)
     };
@@ -1958,7 +1963,7 @@ pub(crate) fn palette_layout_with_workspace_bounds(
     let groups = rel_groups.into_iter().map(|(gy, label, ctx)| (list_y + gy, label, ctx)).collect();
 
     let footer = cards.then_some((px, py + ph - footer_h, pw, footer_h));
-    let scrollbar = (model.filtered.len() > max_rows && max_rows > 0).then(|| {
+    let scrollbar = needs_scrollbar.then(|| {
         let track_w = s(3.0);
         let track_x = px + pw - s(8.0);
         let track_h = y.max(row_h);
@@ -3129,6 +3134,14 @@ mod tests {
         assert!(layout.rows.iter().all(|(y, h)| y + h <= content_bottom));
         assert!(layout.groups.iter().all(|(y, _, _)| *y < content_bottom));
         assert!(layout.footer.is_none_or(|(_, y, _, h)| y + h <= panel_bottom));
+        let scrollbar = layout.scrollbar.expect("超出五行时必须出现滚动条");
+        let left_gap = layout.list.0 - layout.panel.0;
+        let row_right = layout.list.0 + layout.list.2;
+        let scrollbar_gap = scrollbar.track.0 - row_right;
+        assert!(
+            (scrollbar_gap - left_gap).abs() < 0.01,
+            "选中行到滚动条的间距必须与左侧面板留白一致"
+        );
     }
 
     #[test]

@@ -193,6 +193,40 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        // 按键映射页搜索框：捕获态优先（keymap_search_active 自带该判断）。
+        // Enter/Tab 退出聚焦、Esc 两段式（清词→退出）、Ctrl+V 粘贴。
+        if self.ctx.display().keymap_search_active() {
+            match &key.logical_key {
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => {
+                    self.ctx.display().blur_keymap_search();
+                },
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.display().keymap_search_escape();
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().keymap_search_backspace();
+                },
+                Key::Named(NamedKey::Space) => {
+                    self.ctx.display().keymap_search_push(' ');
+                },
+                Key::Character(text) => {
+                    if mods.control_key() && text.eq_ignore_ascii_case("v") {
+                        let paste = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                        for ch in paste.chars() {
+                            self.ctx.display().keymap_search_push(ch);
+                        }
+                    } else if !mods.control_key() {
+                        for ch in text.chars() {
+                            self.ctx.display().keymap_search_push(ch);
+                        }
+                    }
+                },
+                _ => {},
+            }
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // 字体目录展开时键盘归弹层顶部的搜索框：系统字体动辄几百个，没有
         // 过滤就只能靠滚。搜索框是正经输入框，光标与选区走组件层，和其它
         // 字段同一套行为。
