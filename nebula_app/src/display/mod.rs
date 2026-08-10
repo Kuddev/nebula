@@ -1689,8 +1689,13 @@ pub struct Display {
     /// 「跟随系统」探测缓存：`(URL, 来自注册表)`。进网络页 / 切模式时
     /// 刷新；渲染只读——注册表是跨进程调用，不进逐帧路径。
     nebula_system_proxy_probe: Option<(String, bool)>,
-    /// destination → 每主机代理覆盖（profiles.json `proxy` 字段的镜像，
-    /// 与 labels/icons 同缓存策略：编辑器保存后刷新）。
+    /// 网络页真实出网测试的状态、待发送请求和单调序号。序号用于丢弃用户
+    /// 修改设置后才返回的旧结果。
+    nebula_proxy_test_status: settings::ProxyTestStatus,
+    nebula_proxy_test_request: Option<u64>,
+    nebula_proxy_test_seq: u64,
+    /// destination → 旧版每主机代理值（profiles.json `proxy` 字段的镜像）。
+    /// 仅用于兼容旧配置，不再覆盖网络页设置或出现在 SSH 编辑器中。
     nebula_ssh_proxies: std::collections::HashMap<String, String>,
     /// 按键映射页搜索框：查询串 + 聚焦态。过滤在读取时按需计算——28 行的
     /// 字符串匹配量级，不值得为它维护缓存失效。
@@ -2317,6 +2322,9 @@ impl Display {
             nebula_proxy_scanning: false,
             nebula_proxy_scan_request: false,
             nebula_system_proxy_probe: None,
+            nebula_proxy_test_status: settings::ProxyTestStatus::Idle,
+            nebula_proxy_test_request: None,
+            nebula_proxy_test_seq: 0,
             nebula_ssh_proxies: crate::ssh_profiles::SshProfiles::load(
                 &nebula_data_dir().join("ssh_profiles.json"),
             )
@@ -2334,17 +2342,14 @@ impl Display {
         display.refresh_ui_font(config);
         display.nebula_ssh_proxy_protocol =
             settings::manual_proxy_parts(&display.nebula_ssh_proxy_url).0;
-        display.nebula_ssh_proxy_choice = if crate::ssh_proxy::jump_target(
-            &display.nebula_ssh_proxy_url,
-        )
-        .is_some()
-        {
-            settings::ProxyChoice::Jump
-        } else if crate::ssh_proxy::command_target(&display.nebula_ssh_proxy_url).is_some() {
-            settings::ProxyChoice::Command
-        } else {
-            settings::ProxyChoice::Manual
-        };
+        display.nebula_ssh_proxy_choice =
+            if crate::ssh_proxy::jump_target(&display.nebula_ssh_proxy_url).is_some() {
+                settings::ProxyChoice::Jump
+            } else if crate::ssh_proxy::command_target(&display.nebula_ssh_proxy_url).is_some() {
+                settings::ProxyChoice::Command
+            } else {
+                settings::ProxyChoice::Manual
+            };
         display.refresh_system_proxy_probe();
         Ok(display)
     }
@@ -3487,7 +3492,9 @@ impl Display {
                 if self.nebula_ssh_proxy_choice == settings::ProxyChoice::Manual {
                     settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).1.to_owned()
                 } else {
-                    self.nebula_ssh_proxy_url.clone()
+                    // 旧版全局 jump:/command: 继续在后端生效，但精简页不把
+                    // 这些高级编码伪装成普通 host:port。
+                    String::new()
                 },
                 self.nebula_ssh_proxy_no_proxy.clone(),
                 crate::ssh_proxy::command_target(&self.nebula_ssh_proxy_url)
@@ -3501,6 +3508,7 @@ impl Display {
             local_proxies: self.nebula_local_proxies.clone(),
             proxy_scanning: self.nebula_proxy_scanning,
             system_proxy_probe: self.nebula_system_proxy_probe.clone(),
+            proxy_test_status: self.nebula_proxy_test_status.clone(),
             ssh_proxy_overrides: self
                 .nebula_ssh_hosts
                 .iter()
@@ -4840,22 +4848,18 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
-    /// 设置→高级→SSH 代理：选择全局模式（下拉行序 =
+    /// 设置→网络代理：选择全局模式（下拉行序 =
     /// [`settings::SSH_PROXY_MODE_OPTIONS`]），落盘即生效——连接侧每次
     /// 建连都重读设置文件。
     pub fn set_ssh_proxy_mode(&mut self, index: usize) {
         if let Some(mode) = settings::SSH_PROXY_MODE_OPTIONS.get(index) {
             if self.nebula_ssh_proxy_mode != *mode {
                 self.nebula_ssh_proxy_mode = *mode;
+                self.invalidate_proxy_test();
                 self.persist_nebula_settings();
                 if *mode == crate::ssh_proxy::ProxyMode::System {
                     // 切到跟随系统时刷新「当前读到」——只在点击时读注册表。
                     self.refresh_system_proxy_probe();
-                }
-                if *mode == crate::ssh_proxy::ProxyMode::Custom
-                    && self.nebula_local_proxies.is_empty()
-                {
-                    self.request_local_proxy_scan();
                 }
             }
         }
@@ -4886,6 +4890,52 @@ impl Display {
             .map(|(url, source)| (url, source == crate::ssh_proxy::SystemProxySource::Registry));
     }
 
+    fn invalidate_proxy_test(&mut self) {
+        self.nebula_proxy_test_seq = self.nebula_proxy_test_seq.wrapping_add(1);
+        self.nebula_proxy_test_request = None;
+        self.nebula_proxy_test_status = settings::ProxyTestStatus::Idle;
+    }
+
+    /// 先提交当前输入，再把测试请求交给事件层的共享 SSH runtime。测试线程
+    /// 会重新读取落盘配置，因此验证的就是下一条真实连接会使用的值。
+    pub fn request_proxy_test(&mut self) {
+        self.commit_ssh_proxy_field();
+        if matches!(self.nebula_proxy_test_status, settings::ProxyTestStatus::Running) {
+            return;
+        }
+        self.nebula_proxy_test_seq = self.nebula_proxy_test_seq.wrapping_add(1);
+        let request_id = self.nebula_proxy_test_seq;
+        self.nebula_proxy_test_request = Some(request_id);
+        self.nebula_proxy_test_status = settings::ProxyTestStatus::Running;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub(crate) fn take_proxy_test_request(&mut self) -> Option<u64> {
+        self.nebula_proxy_test_request.take()
+    }
+
+    pub(crate) fn proxy_test_done(
+        &mut self,
+        request_id: u64,
+        ok: bool,
+        message: &str,
+        elapsed_ms: u64,
+    ) {
+        if request_id != self.nebula_proxy_test_seq
+            || !matches!(self.nebula_proxy_test_status, settings::ProxyTestStatus::Running)
+        {
+            return;
+        }
+        self.nebula_proxy_test_status = if ok {
+            settings::ProxyTestStatus::Success { elapsed_ms, route: message.to_owned() }
+        } else {
+            settings::ProxyTestStatus::Failed { message: message.to_owned() }
+        };
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
     /// 指定代理列表选择：发现项在前，随后依次为手动、SSH 跳板、自定义
     /// 命令。切换方式时清空共享 URL，避免解析层拾取已不可见的残值。
     pub fn set_ssh_proxy_link_pick(&mut self, index: usize) {
@@ -4904,9 +4954,11 @@ impl Display {
             self.nebula_ssh_proxy_choice = choice;
             self.nebula_ssh_proxy_focus = None;
             self.nebula_ssh_proxy_url = match choice {
-                settings::ProxyChoice::Detected(found) => {
-                    self.nebula_local_proxies.get(found).map(|proxy| proxy.url()).unwrap_or_default()
-                },
+                settings::ProxyChoice::Detected(found) => self
+                    .nebula_local_proxies
+                    .get(found)
+                    .map(|proxy| proxy.url())
+                    .unwrap_or_default(),
                 _ => String::new(),
             };
             if choice == settings::ProxyChoice::Manual {
@@ -4932,10 +4984,7 @@ impl Display {
         std::mem::take(&mut self.nebula_proxy_scan_request)
     }
 
-    pub fn local_proxy_scan_done(
-        &mut self,
-        proxies: Vec<crate::ssh_proxy::LocalProxyEndpoint>,
-    ) {
+    pub fn local_proxy_scan_done(&mut self, proxies: Vec<crate::ssh_proxy::LocalProxyEndpoint>) {
         self.nebula_proxy_scanning = false;
         self.nebula_local_proxies = proxies;
         if self.nebula_ssh_proxy_mode == crate::ssh_proxy::ProxyMode::Custom
@@ -4985,10 +5034,15 @@ impl Display {
             return;
         };
         self.commit_ssh_proxy_field();
-        let address = settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).1.to_owned();
+        let address = if self.nebula_ssh_proxy_choice == settings::ProxyChoice::Manual {
+            settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).1.to_owned()
+        } else {
+            String::new()
+        };
         self.nebula_ssh_proxy_protocol = protocol;
         self.nebula_ssh_proxy_url = settings::manual_proxy_value(protocol, &address);
         self.nebula_ssh_proxy_choice = settings::ProxyChoice::Manual;
+        self.invalidate_proxy_test();
         self.nebula_settings_dropdown = None;
         self.persist_nebula_settings();
         self.pending_update.dirty = true;
@@ -5277,7 +5331,10 @@ impl Display {
 
     fn ssh_proxy_field_text(&self, index: usize) -> &str {
         match index {
-            0 => settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).1,
+            0 if self.nebula_ssh_proxy_choice == settings::ProxyChoice::Manual => {
+                settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).1
+            },
+            0 => "",
             1 => &self.nebula_ssh_proxy_no_proxy,
             _ => crate::ssh_proxy::command_target(&self.nebula_ssh_proxy_url).unwrap_or(""),
         }
@@ -5286,6 +5343,7 @@ impl Display {
     fn set_ssh_proxy_field_text(&mut self, index: usize, field: String) {
         match index {
             0 => {
+                self.nebula_ssh_proxy_choice = settings::ProxyChoice::Manual;
                 self.nebula_ssh_proxy_url =
                     settings::manual_proxy_value(self.nebula_ssh_proxy_protocol, &field);
             },
@@ -5318,6 +5376,10 @@ impl Display {
             return;
         }
         self.set_ssh_proxy_field_text(index, field);
+        self.invalidate_proxy_test();
+        // 代理是连接前读取的运行时设置；每次编辑立即落盘，确保用户不必
+        // 关闭设置页或重启应用，随后发起的新连接就能读到最新值。
+        self.persist_nebula_settings();
         self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
@@ -5328,6 +5390,8 @@ impl Display {
         let mut field = self.ssh_proxy_field_text(index).to_owned();
         self.nebula_ssh_proxy_cursor[index].backspace(&mut field);
         self.set_ssh_proxy_field_text(index, field);
+        self.invalidate_proxy_test();
+        self.persist_nebula_settings();
         self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
@@ -5338,6 +5402,8 @@ impl Display {
         let mut field = self.ssh_proxy_field_text(index).to_owned();
         self.nebula_ssh_proxy_cursor[index].delete_forward(&mut field);
         self.set_ssh_proxy_field_text(index, field);
+        self.invalidate_proxy_test();
+        self.persist_nebula_settings();
         self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
@@ -5432,14 +5498,10 @@ impl Display {
         self.nebula_ssh_proxy_url = self.nebula_ssh_proxy_url.trim().to_owned();
         self.nebula_ssh_proxy_no_proxy = self.nebula_ssh_proxy_no_proxy.trim().to_owned();
         if self.nebula_ssh_proxy_choice == settings::ProxyChoice::Command {
-            let command = crate::ssh_proxy::command_target(&self.nebula_ssh_proxy_url)
-                .unwrap_or("")
-                .trim();
-            self.nebula_ssh_proxy_url = if command.is_empty() {
-                String::new()
-            } else {
-                format!("command:{command}")
-            };
+            let command =
+                crate::ssh_proxy::command_target(&self.nebula_ssh_proxy_url).unwrap_or("").trim();
+            self.nebula_ssh_proxy_url =
+                if command.is_empty() { String::new() } else { format!("command:{command}") };
         }
         self.persist_nebula_settings();
         self.pending_update.dirty = true;
@@ -5452,8 +5514,7 @@ impl Display {
         }
         let [url, no_proxy] = std::mem::take(&mut self.nebula_ssh_proxy_backup);
         self.nebula_ssh_proxy_url = url;
-        self.nebula_ssh_proxy_protocol =
-            settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).0;
+        self.nebula_ssh_proxy_protocol = settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).0;
         self.nebula_ssh_proxy_no_proxy = no_proxy;
         self.pending_update.dirty = true;
     }
@@ -6899,11 +6960,16 @@ impl Display {
         self.nebula_keymap_capture = None;
         // 代理键也参与「手改文件即生效」：下一次连接读到的就是新值，这里
         // 只需让设置页与下一次 persist 不吐回旧值。
+        let proxy_changed = self.nebula_ssh_proxy_mode != settings.ssh_proxy_mode
+            || self.nebula_ssh_proxy_url != settings.ssh_proxy_url
+            || self.nebula_ssh_proxy_no_proxy != settings.ssh_proxy_no_proxy;
         self.nebula_ssh_proxy_mode = settings.ssh_proxy_mode;
         self.nebula_ssh_proxy_url = settings.ssh_proxy_url;
         self.nebula_ssh_proxy_no_proxy = settings.ssh_proxy_no_proxy;
-        self.nebula_ssh_proxy_protocol =
-            settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).0;
+        if proxy_changed {
+            self.invalidate_proxy_test();
+        }
+        self.nebula_ssh_proxy_protocol = settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).0;
         self.nebula_ssh_proxy_choice = self
             .nebula_local_proxies
             .iter()

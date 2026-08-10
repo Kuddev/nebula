@@ -737,6 +737,13 @@ impl ApplicationHandler<Event> for Processor {
                     window_context.display.window.request_redraw();
                 }
             },
+            (EventType::ProxyTestDone { request_id, ok, message, elapsed_ms }, Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.display.proxy_test_done(request_id, ok, &message, elapsed_ms);
+                    window_context.dirty = true;
+                    window_context.display.window.request_redraw();
+                }
+            },
             (EventType::QuickTerminalHotkeyChanged { hotkey }, Some(window_id)) => {
                 let old = self.quick_hotkey_combo.clone();
                 let result = self.apply_quick_terminal_hotkey(&hotkey);
@@ -1551,10 +1558,20 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         if !self.display.take_local_proxy_scan_request() {
             return;
         }
-        let _ = self.event_proxy.send_event(Event::new(
-            EventType::LocalProxyScan,
+        let _ = self
+            .event_proxy
+            .send_event(Event::new(EventType::LocalProxyScan, self.display.window.id()));
+    }
+
+    fn nebula_proxy_test(&mut self) {
+        let Some(request_id) = self.display.take_proxy_test_request() else { return };
+        if let Err(err) = crate::ssh_session::spawn_proxy_test(
+            request_id,
+            self.event_proxy.clone(),
             self.display.window.id(),
-        ));
+        ) {
+            self.display.proxy_test_done(request_id, false, &format!("无法启动网络测试：{err}"), 0);
+        }
     }
 
     fn nebula_quick_hotkey_changed(&mut self) {
@@ -2638,6 +2655,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 EventType::NebulaResizeSettled
                 | EventType::SshDeleteUndoExpired
                 | EventType::QuickTerminalHotkeyChanged { .. }
+                | EventType::ProxyTestDone { .. }
                 | EventType::SshTestDone { .. }
                 | EventType::SshConnect(_)
                 | EventType::SftpUpdated => (),

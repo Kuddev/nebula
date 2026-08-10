@@ -82,6 +82,13 @@ pub enum EventType {
     /// 设置→网络的本机代理握手扫描。请求在后台线程运行，结果回到目标窗口。
     LocalProxyScan,
     LocalProxyScanDone(Vec<crate::ssh_proxy::LocalProxyEndpoint>),
+    /// 设置→网络的真实出网测试完成。`request_id` 用于丢弃设置变化前的旧结果。
+    ProxyTestDone {
+        request_id: u64,
+        ok: bool,
+        message: String,
+        elapsed_ms: u64,
+    },
     NebulaTick,
     NebulaAttach,
     NebulaResizeSettled,

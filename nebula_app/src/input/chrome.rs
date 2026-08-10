@@ -1106,7 +1106,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::SshProxyModeOption(index) => {
                         self.ctx.display().set_ssh_proxy_mode(index);
-                        self.ctx.nebula_local_proxy_scan();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshProxyTest => {
+                        self.ctx.display().request_proxy_test();
+                        self.ctx.nebula_proxy_test();
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1532,6 +1537,7 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::CursorShapeOption(_)
             | Hit::SshProxyModeDropdown
             | Hit::SshProxyModeOption(_)
+            | Hit::SshProxyTest
             | Hit::SshProxyProtocolDropdown
             | Hit::SshProxyProtocolOption(_)
             | Hit::SshJumpHostDropdown

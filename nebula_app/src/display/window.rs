@@ -651,8 +651,7 @@ impl Window {
             return;
         }
         self.ime_cursor_area.set(Some(key));
-        self.window
-            .set_ime_cursor_area(PhysicalPosition::new(x, y), PhysicalSize::new(w, h));
+        self.window.set_ime_cursor_area(PhysicalPosition::new(x, y), PhysicalSize::new(w, h));
     }
 
     /// 缓存失效：焦点或 IME 关联变化后，输入法侧的窗口状态可能已被重置，

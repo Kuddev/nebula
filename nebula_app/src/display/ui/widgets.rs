@@ -232,20 +232,18 @@ pub(crate) fn push_chip(
 ) {
     let (x, y, w, h) = rect;
     let corner = h * 0.5;
-    match state {
-        ChipState::Quiet => {
-            surface::push_stroke(quads, rect, corner, scale, sk.hairline);
-        },
-        ChipState::Hover => {
-            surface::push_stroke(quads, rect, corner, scale, sk.hairline);
-            quads.push(UiQuad::solid(x, y, w, h, corner, surface::over(sk.hover, sk.panel)));
-        },
-        ChipState::Selected => {
-            let stroke = Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 112);
-            surface::push_stroke(quads, rect, corner, scale, stroke);
-            quads.push(UiQuad::solid(x, y, w, h, corner, surface::over(sk.accent_soft, sk.panel)));
-        },
-    }
+    let (stroke, fill) = match state {
+        // push_stroke 本身是实心外层，必须用面板本色盖住中心；只画 stroke
+        // 会把“未选中”误画成一整颗灰色胶囊。
+        ChipState::Quiet => (sk.hairline, opaque_panel(sk)),
+        ChipState::Hover => (sk.hairline, surface::over(sk.hover, sk.panel)),
+        ChipState::Selected => (
+            Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 112),
+            surface::over(sk.accent_soft, sk.panel),
+        ),
+    };
+    surface::push_stroke(quads, rect, corner, scale, stroke);
+    quads.push(UiQuad::solid(x, y, w, h, corner, fill));
 }
 
 // ---- radio ----
@@ -279,15 +277,8 @@ pub(crate) fn push_radio(
     let ring_w = s(2.0).round().max(1.0).min(d * 0.25);
     let hole_d = (d - ring_w * 2.0).max(2.0);
     quads.push(
-        UiQuad::solid(
-            x + ring_w,
-            y + ring_w,
-            hole_d,
-            hole_d,
-            hole_d * 0.5,
-            background,
-        )
-        .pixel_snapped(),
+        UiQuad::solid(x + ring_w, y + ring_w, hole_d, hole_d, hole_d * 0.5, background)
+            .pixel_snapped(),
     );
 
     if selected {
@@ -698,8 +689,8 @@ pub(crate) fn push_spinner(
 #[cfg(test)]
 mod tests {
     use super::{
-        ToggleMotion, centered_y, overlay_scrollbar, push_radio, push_toggle, radio_rect,
-        toggle_rect,
+        ChipState, ToggleMotion, centered_y, opaque_panel, overlay_scrollbar, push_chip,
+        push_radio, push_toggle, radio_rect, toggle_rect,
     };
     use crate::display::ui::theme::NebulaTheme;
     use crate::renderer::ui::{Rgba, UiQuad};
@@ -728,9 +719,23 @@ mod tests {
         assert_eq!(selected[0].color0, Rgba::opaque(skin.accent));
         assert_eq!(selected[1].color0, background);
         assert_eq!(selected[2].color0, Rgba::opaque(skin.accent));
-        assert!(quiet.iter().chain(&selected).all(|quad| {
-            quad.color0 == quad.color1 && quad.color0.a == 255
-        }));
+        assert!(
+            quiet
+                .iter()
+                .chain(&selected)
+                .all(|quad| { quad.color0 == quad.color1 && quad.color0.a == 255 })
+        );
+    }
+
+    #[test]
+    fn quiet_chip_is_an_outline_instead_of_a_solid_capsule() {
+        let skin = NebulaTheme::Nebula.skin();
+        let mut quads = Vec::<UiQuad>::new();
+        push_chip(&mut quads, (20.0, 30.0, 88.0, 28.0), 1.0, &skin, ChipState::Quiet);
+
+        assert_eq!(quads.len(), 2, "未选中胶囊应只有外框层和面板色内芯");
+        assert_eq!(quads[1].color0, opaque_panel(&skin));
+        assert_ne!(quads[0].color0, quads[1].color0, "内芯不能继续沿用描边色");
     }
 
     #[test]

@@ -460,11 +460,8 @@ mod tests {
         let directory = tempdir().unwrap();
         fs::write(directory.path().join("nebula.lua"), "return {}").unwrap();
         fs::write(directory.path().join("terminal_profiles.json"), "{\"profiles\":[]}").unwrap();
-        let selection = BackupSelection {
-            appearance: false,
-            config: true,
-            ..BackupSelection::default()
-        };
+        let selection =
+            BackupSelection { appearance: false, config: true, ..BackupSelection::default() };
 
         let collected = collect_from(directory.path(), selection).unwrap();
         assert_eq!(

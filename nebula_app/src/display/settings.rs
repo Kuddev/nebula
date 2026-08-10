@@ -201,10 +201,24 @@ pub(super) enum ManualProxyProtocol {
     Http,
 }
 
-pub(super) const MANUAL_PROXY_PROTOCOL_OPTIONS: [ManualProxyProtocol; 2] = [
-    ManualProxyProtocol::Socks5,
-    ManualProxyProtocol::Http,
-];
+pub(super) const MANUAL_PROXY_PROTOCOL_OPTIONS: [ManualProxyProtocol; 2] =
+    [ManualProxyProtocol::Socks5, ManualProxyProtocol::Http];
+
+/// 网络页“测试网络”的窗口态。结果只代表发起测试时已经落盘的那份设置；
+/// 用户随后改动模式或地址时会回到 `Idle`，避免旧成功状态冒充新配置有效。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) enum ProxyTestStatus {
+    #[default]
+    Idle,
+    Running,
+    Success {
+        elapsed_ms: u64,
+        route: String,
+    },
+    Failed {
+        message: String,
+    },
+}
 
 fn manual_proxy_protocol_label(
     protocol: ManualProxyProtocol,
@@ -298,9 +312,9 @@ pub(super) fn ssh_proxy_override_summary(value: &str, language: UiLanguage) -> S
         Ok(crate::ssh_proxy::ProxyLink::Server(server)) => {
             format!("{} · {}", language.pick("指定代理", "Custom proxy"), server.display())
         },
-        Ok(crate::ssh_proxy::ProxyLink::Command(_)) => {
-            language.pick("自定义命令 · stdin/stdout 转发", "Custom command · stdin/stdout").to_owned()
-        },
+        Ok(crate::ssh_proxy::ProxyLink::Command(_)) => language
+            .pick("自定义命令 · stdin/stdout 转发", "Custom command · stdin/stdout")
+            .to_owned(),
         Err(_) => value.to_owned(),
     }
 }
@@ -484,6 +498,8 @@ pub enum SettingsHit {
     /// 代理→SSH 连接代理: 模式下拉触发行。
     SshProxyModeDropdown,
     SshProxyModeOption(usize),
+    /// 网络页：按当前已提交设置执行一次真实出网测试。
+    SshProxyTest,
     /// 网络→指定代理→手动填写：协议下拉。
     SshProxyProtocolDropdown,
     SshProxyProtocolOption(usize),
@@ -1093,6 +1109,7 @@ struct SettingsGeometry {
     ssh_proxy_other_rows: [(f32, f32, f32, f32); 3],
     ssh_proxy_expand: (f32, f32, f32, f32),
     ssh_proxy_bypass: (f32, f32, f32, f32),
+    ssh_proxy_test: (f32, f32, f32, f32),
     ssh_proxy_override_row0: (f32, f32, f32, f32),
     ssh_proxy_inherit: (f32, f32, f32, f32),
     proxy_pane: ProxyPaneState,
@@ -1305,10 +1322,9 @@ fn settings_geometry(
     let panel_resize = (row_x, at(interaction_y0 + ROW_H * 2.0), row_w, row_h);
     let cjk_bold = (row_x, at(cjk_bold_y0), row_w, row_h);
 
-    // 按键映射页（学原型）：搜索框 → 冲突提示（有冲突才占位）→ 分组行
-    // （无框裁定：段标题+间距分组）→ 固定快捷键组 → 页尾改键提示。行数
-    // 与组显隐随 `keymap_pane`（搜索过滤 + 冲突检测）变化。
-    let keymap_y0 = 146.0;
+    // 按键映射没有普通设置页的首个“悬挂分组标题”，搜索框直接占用那块
+    // 空间；继续沿用 146px 起点会无端多出 42px 空白。
+    let keymap_y0 = 104.0;
     let keymap_search = (row_x, at(keymap_y0), row_w, s(34.0));
     let mut keymap_cursor = keymap_y0 + 34.0 + 12.0;
     let keymap_note = (row_x, at(keymap_cursor), row_w, s(50.0));
@@ -1395,20 +1411,21 @@ fn settings_geometry(
     let ssh_h = s(ssh_end + 32.0 - 72.0);
 
     // 网络代理只保留一张紧凑设置卡：所有模式都有方式行；自定义代理再
-    // 展开地址与直连地址两行。SSH 跳板/命令属于主机高级设置，不混在这里。
+    // 展开地址与直连地址两行。旧跳板/命令只保留兼容解析，不再暴露第二套入口。
     let proxy_y0 = 146.0;
     let ssh_proxy_mode = (row_x, at(proxy_y0), row_w, row_h);
     let pane_y0 = proxy_y0 + ROW_H;
     let ssh_proxy_expand = (row_x, at(pane_y0), row_w, row_h);
     let bypass_y = pane_y0 + ROW_H;
     let ssh_proxy_bypass = (row_x, at(bypass_y), row_w, row_h);
-    let pane_end = if proxy.mode == crate::ssh_proxy::ProxyMode::Custom {
-        bypass_y + ROW_H
-    } else {
-        pane_y0
-    };
-    // 旧扫描/跳板/覆盖能力保留在后端与 SSH 主机编辑器；这些零尺寸几何
-    // 只维持结构兼容，网络页不再绘制或命中它们。
+    let pane_end =
+        if proxy.mode == crate::ssh_proxy::ProxyMode::Custom { bypass_y + ROW_H } else { pane_y0 };
+    // 出网测试是功能入口，不是旧版说明卡：三种模式始终显示，并紧跟当前
+    // 模式真正会使用的字段，测试结果才不会在视觉上归错组。
+    let proxy_test_y = pane_end + 18.0;
+    let ssh_proxy_test = (row_x, at(proxy_test_y), row_w, s(54.0));
+    // 旧扫描/跳板/覆盖能力只保留在兼容后端；这些零尺寸几何用于渐进收口
+    // 内部结构，任何绘制与命中都不再消费它们。
     let hidden_proxy_rect = (row_x, at(pane_y0), 0.0, 0.0);
     let ssh_proxy_scan_head = hidden_proxy_rect;
     let ssh_proxy_scan_button = hidden_proxy_rect;
@@ -1417,7 +1434,7 @@ fn settings_geometry(
     let ssh_proxy_other_rows = [hidden_proxy_rect; 3];
     let ssh_proxy_override_row0 = hidden_proxy_rect;
     let ssh_proxy_inherit = hidden_proxy_rect;
-    let proxy_h = s(pane_end + 32.0 - 72.0);
+    let proxy_h = s(proxy_test_y + 54.0 + 32.0 - 72.0);
 
     // Backup prototype: automatic-backup summary, export/restore segmented
     // action, then one grouped manifest card. Backup rows are taller because
@@ -1538,6 +1555,7 @@ fn settings_geometry(
         ssh_proxy_other_rows,
         ssh_proxy_expand,
         ssh_proxy_bypass,
+        ssh_proxy_test,
         ssh_proxy_override_row0,
         ssh_proxy_inherit,
         proxy_pane: proxy,
@@ -1752,17 +1770,19 @@ fn dropdown_anchor(
         (Section::Interaction, SettingsDropdown::TabReveal) => {
             Some((anchor(geometry.tab_reveal), TAB_REVEAL_OPTIONS.len()))
         },
-        (Section::Proxy, SettingsDropdown::SshProxyMode) => {
-            Some((anchor(geometry.ssh_proxy_mode), SSH_PROXY_MODE_OPTIONS.len()))
-        },
+        (Section::Proxy, SettingsDropdown::SshProxyMode) => Some((
+            ssh_proxy_mode_control(geometry.ssh_proxy_mode, scale),
+            SSH_PROXY_MODE_OPTIONS.len(),
+        )),
         (Section::Proxy, SettingsDropdown::SshProxyProtocol) => Some((
             ssh_proxy_manual_controls(geometry.ssh_proxy_expand, scale).0,
             MANUAL_PROXY_PROTOCOL_OPTIONS.len(),
         )),
         // 跳板主机下拉挂在展开行上；空列表也给一行（占位提示，点了无动作）。
-        (Section::Proxy, SettingsDropdown::SshJumpHost) => {
-            Some((ssh_proxy_expand_control(geometry.ssh_proxy_expand, scale), geometry.ssh_host_count.max(1)))
-        },
+        (Section::Proxy, SettingsDropdown::SshJumpHost) => Some((
+            ssh_proxy_expand_control(geometry.ssh_proxy_expand, scale),
+            geometry.ssh_host_count.max(1),
+        )),
         (Section::Appearance, SettingsDropdown::BackgroundFit) => {
             Some((anchor(geometry.background_image_fit), BACKGROUND_FIT_OPTIONS.len()))
         },
@@ -2239,85 +2259,29 @@ pub fn settings_hit(
             },
             NebulaSettingsSection::Proxy => {
                 if contains_rect(
-                    widgets::combobox_rect(geometry.ssh_proxy_mode, scale_factor),
+                    ssh_proxy_mode_control(geometry.ssh_proxy_mode, scale_factor),
                     x,
                     y,
                 ) {
                     return SettingsHit::SshProxyModeDropdown;
                 }
-                match geometry.proxy_pane.mode {
-                    crate::ssh_proxy::ProxyMode::Off => {},
-                    crate::ssh_proxy::ProxyMode::System => {
-                        if contains_rect(geometry.ssh_proxy_bypass, x, y) {
-                            return SettingsHit::SshProxyInput(1);
-                        }
-                    },
-                    crate::ssh_proxy::ProxyMode::Custom => {
-                        if contains_rect(geometry.ssh_proxy_scan_button, x, y) {
-                            return SettingsHit::SshProxyRescan;
-                        }
-                        let (fx, fy, fw, fh) = geometry.ssh_proxy_found_row0;
-                        for index in 0..geometry.proxy_pane.found_count {
-                            if contains_rect((fx, fy + index as f32 * fh, fw, fh), x, y) {
-                                return SettingsHit::SshProxyLinkPick(index);
-                            }
-                        }
-                        for (index, rect) in geometry.ssh_proxy_other_rows.iter().enumerate() {
-                            if contains_rect(*rect, x, y) {
-                                return SettingsHit::SshProxyLinkPick(
-                                    geometry.proxy_pane.found_count + index,
-                                );
-                            }
-                        }
-                        match geometry.proxy_pane.choice {
-                            ProxyChoice::Manual => {
-                                let (protocol, address) = ssh_proxy_manual_controls(
-                                    geometry.ssh_proxy_expand,
-                                    scale_factor,
-                                );
-                                if contains_rect(protocol, x, y) {
-                                    return SettingsHit::SshProxyProtocolDropdown;
-                                }
-                                if contains_rect(address, x, y) {
-                                    return SettingsHit::SshProxyInput(0);
-                                }
-                            },
-                            ProxyChoice::Jump
-                                if contains_rect(
-                                    ssh_proxy_expand_control(
-                                        geometry.ssh_proxy_expand,
-                                        scale_factor,
-                                    ),
-                                    x,
-                                    y,
-                                ) =>
-                            {
-                                return SettingsHit::SshJumpHostDropdown;
-                            },
-                            ProxyChoice::Command
-                                if contains_rect(
-                                    ssh_proxy_expand_control(
-                                        geometry.ssh_proxy_expand,
-                                        scale_factor,
-                                    ),
-                                    x,
-                                    y,
-                                ) =>
-                            {
-                                return SettingsHit::SshProxyInput(2);
-                            },
-                            _ => {},
-                        }
-                        if contains_rect(geometry.ssh_proxy_bypass, x, y) {
-                            return SettingsHit::SshProxyInput(1);
-                        }
-                    },
-                }
-                let (ox, oy, ow, oh) = geometry.ssh_proxy_override_row0;
-                for index in 0..geometry.proxy_pane.override_count {
-                    if contains_rect((ox, oy + index as f32 * oh, ow, oh), x, y) {
-                        return SettingsHit::SshProxyOverrideEdit(index);
+                if geometry.proxy_pane.mode == crate::ssh_proxy::ProxyMode::Custom {
+                    let (protocol, address) =
+                        ssh_proxy_manual_controls(geometry.ssh_proxy_expand, scale_factor);
+                    if contains_rect(protocol, x, y) {
+                        return SettingsHit::SshProxyProtocolDropdown;
                     }
+                    if contains_rect(address, x, y) {
+                        return SettingsHit::SshProxyInput(0);
+                    }
+                    if contains_rect(sync_input_rect(geometry.ssh_proxy_bypass, scale_factor), x, y)
+                    {
+                        return SettingsHit::SshProxyInput(1);
+                    }
+                }
+                if contains_rect(ssh_proxy_test_button(geometry.ssh_proxy_test, scale_factor), x, y)
+                {
+                    return SettingsHit::SshProxyTest;
                 }
             },
             NebulaSettingsSection::Interaction => {
@@ -2550,6 +2514,8 @@ pub(super) struct SettingsView {
     /// 「跟随系统」当前读到的代理：`(URL, 来自注册表)`。None = 系统未启用。
     /// Display 在进网络页 / 切模式时刷新缓存；渲染只读，不做系统调用。
     pub(super) system_proxy_probe: Option<(String, bool)>,
+    /// 当前网络设置的最近一次真实出网测试结果。
+    pub(super) proxy_test_status: ProxyTestStatus,
     /// 每主机覆盖行：`(显示名, 摘要, ssh_hosts 下标)`，随视图快照重建。
     pub(super) ssh_proxy_overrides: Vec<(String, String, usize)>,
     pub(super) backup_selection: BackupSelection,
@@ -2585,6 +2551,18 @@ fn ssh_proxy_mode_control(
     let w = s(156.0).min(rw * 0.38).max(s(132.0));
     let h = s(32.0);
     (rx + rw - s(16.0) - w, ry + (rh - h) * 0.5, w, h)
+}
+
+/// 测试横幅右侧动作。横幅整块承载状态，只有这个按钮触发联网，避免用户
+/// 点击错误文案时无意重复发起请求。
+fn ssh_proxy_test_button(
+    (rx, ry, rw, rh): (f32, f32, f32, f32),
+    scale: f32,
+) -> (f32, f32, f32, f32) {
+    let s = |v: f32| v * scale;
+    let w = s(108.0).min(rw * 0.34).max(s(88.0));
+    let h = s(30.0);
+    (rx + rw - s(12.0) - w, ry + (rh - h) * 0.5, w, h)
 }
 
 fn ssh_proxy_manual_controls(
@@ -3551,236 +3529,104 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Proxy => {
-            row_hover(
-                quads,
-                geometry.ssh_proxy_mode,
-                view.hover == SettingsHit::SshProxyModeDropdown,
-            );
-            combobox(
-                quads,
+            widgets::push_combobox(
                 &mut staged,
-                geometry.ssh_proxy_mode,
+                ssh_proxy_mode_control(geometry.ssh_proxy_mode, scale),
+                scale,
+                &sk,
                 view.hover == SettingsHit::SshProxyModeDropdown,
                 view.dropdown == Some(SettingsDropdown::SshProxyMode),
             );
+            for quad in staged.drain(..) {
+                clip(quads, quad);
+            }
             let cell_w = size.cell_width();
-            // 输入控件与其 caret 共用同一矩形；普通设置行仍从行几何派生右侧
-            // 输入框，代理方式的展开组件则可以传入原型规定的整行矩形。
-            let input_control =
-                |quads: &mut Vec<UiQuad>, (ix, iy, iw, ih), index: usize| {
-                    let focused = view.ssh_proxy_focus == Some(index);
-                    let mut input = Vec::new();
-                    surface::push_input(
-                        &mut input,
-                        (ix, iy, iw, ih),
-                        scale,
-                        &sk,
-                        view.density,
-                        focused,
-                    );
-                    if focused {
-                        let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                        let (display, placeholder, _, hidden) =
-                            ssh_proxy_input_display(view, index, max_cols);
-                        if !placeholder {
-                            // 展示串是跟随光标的窗口：光标按窗口起点平移，
-                            // 与文字落在同一套列换算上。
-                            text_field::push_cursor(
-                                &mut input,
-                                iy,
-                                ih,
-                                ix + s(12.0),
-                                &display,
-                                &view.ssh_proxy_cursors[index].shifted(hidden),
-                                cell_w,
-                                scale,
-                                &sk,
-                            );
-                        } else {
-                            text_field::push_cursor(
-                                &mut input,
-                                iy,
-                                ih,
-                                ix + s(12.0),
-                                "",
-                                &view.ssh_proxy_cursors[index],
-                                cell_w,
-                                scale,
-                                &sk,
-                            );
-                        }
-                    }
-                    for quad in input {
-                        clip(quads, quad);
-                    }
-                };
-            let input_row =
-                |quads: &mut Vec<UiQuad>, row: (f32, f32, f32, f32), index: usize| {
-                    input_control(quads, sync_input_rect(row, scale), index);
-                };
-            match view.ssh_proxy_mode {
-                crate::ssh_proxy::ProxyMode::Off => {},
-                crate::ssh_proxy::ProxyMode::System => {
-                    row_hover(
-                        quads,
-                        geometry.ssh_proxy_bypass,
-                        view.hover == SettingsHit::SshProxyInput(1),
-                    );
-                    input_row(quads, geometry.ssh_proxy_bypass, 1);
-                },
-                crate::ssh_proxy::ProxyMode::Custom => {
-                    let scan_hot = view.hover == SettingsHit::SshProxyRescan;
-                    let mut scan_button = Vec::new();
-                    surface::push_stroke(
-                        &mut scan_button,
-                        geometry.ssh_proxy_scan_button,
-                        s(6.0),
-                        scale,
-                        sk.hairline,
-                    );
-                    if scan_hot && !view.proxy_scanning {
-                        let (bx, by, bw, bh) = geometry.ssh_proxy_scan_button;
-                        scan_button.push(UiQuad::solid(bx, by, bw, bh, s(6.0), sk.hover));
-                    }
-                    for quad in scan_button {
-                        clip(quads, quad);
-                    }
-
-                    let paint_row = |quads: &mut Vec<UiQuad>,
-                                         rect: (f32, f32, f32, f32),
-                                         hit_index: usize,
-                                         selected: bool| {
-                        let hovered = view.hover == SettingsHit::SshProxyLinkPick(hit_index);
-                        let corner = s(tokens::radius::OVERLAY);
-                        let (rx, ry, rw, rh) = rect;
-                        let row_background = if selected {
-                            surface::over(sk.accent_soft, sk.panel)
-                        } else if hovered {
-                            surface::over(sk.hover, sk.panel)
-                        } else {
-                            sk.panel
-                        };
-                        if selected || hovered {
-                            clip(
-                                quads,
-                                UiQuad::solid(rx, ry, rw, rh, corner, row_background),
-                            );
-                        }
-                        // 单选按钮统一走 widgets：外环和圆点只使用纯色，内芯
-                        // 复用行的最终底色，避免多层透明色在圆弧边缘混成脏色。
-                        let mut radio = Vec::new();
-                        widgets::push_radio(
-                            &mut radio,
-                            rect,
+            // 输入控件与 caret 共用同一矩形；协议与地址的几何也同时供命中和
+            // 文字使用，避免精简页面后又出现“看得到但点不到”的漂移。
+            let input_control = |quads: &mut Vec<UiQuad>, (ix, iy, iw, ih), index: usize| {
+                let focused = view.ssh_proxy_focus == Some(index);
+                let mut input = Vec::new();
+                surface::push_input(
+                    &mut input,
+                    (ix, iy, iw, ih),
+                    scale,
+                    &sk,
+                    view.density,
+                    focused,
+                );
+                if focused {
+                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                    let (display, placeholder, _, hidden) =
+                        ssh_proxy_input_display(view, index, max_cols);
+                    if !placeholder {
+                        // 展示串是跟随光标的窗口：光标按窗口起点平移，
+                        // 与文字落在同一套列换算上。
+                        text_field::push_cursor(
+                            &mut input,
+                            iy,
+                            ih,
+                            ix + s(12.0),
+                            &display,
+                            &view.ssh_proxy_cursors[index].shifted(hidden),
+                            cell_w,
                             scale,
                             &sk,
-                            selected,
-                            row_background,
                         );
-                        for quad in radio {
-                            clip(quads, quad);
-                        }
-                    };
-
-                    let (fx, fy, fw, fh) = geometry.ssh_proxy_found_row0;
-                    for (index, proxy) in view.local_proxies.iter().enumerate() {
-                        let rect = (fx, fy + index as f32 * fh, fw, fh);
-                        paint_row(
-                            quads,
-                            rect,
-                            index,
-                            view.ssh_proxy_choice == ProxyChoice::Detected(index),
+                    } else {
+                        text_field::push_cursor(
+                            &mut input,
+                            iy,
+                            ih,
+                            ix + s(12.0),
+                            "",
+                            &view.ssh_proxy_cursors[index],
+                            cell_w,
+                            scale,
+                            &sk,
                         );
-                        let label = proxy.protocol.label();
-                        let tag_w = label.chars().count() as f32 * cell_w + s(16.0);
-                        let tag = (
-                            rect.0 + rect.2 - tag_w - s(11.0),
-                            rect.1 + (rect.3 - s(20.0)) * 0.5,
-                            tag_w,
-                            s(20.0),
-                        );
-                        let color = if proxy.protocol == crate::ssh_proxy::LocalProxyProtocol::Mixed {
-                            Rgba::new(sk.ok.r, sk.ok.g, sk.ok.b, 34)
-                        } else {
-                            sk.surface
-                        };
-                        clip(quads, UiQuad::solid(tag.0, tag.1, tag.2, tag.3, s(5.0), color));
                     }
-                    let found_count = view.local_proxies.len();
-                    for (index, rect) in geometry.ssh_proxy_other_rows.iter().copied().enumerate() {
-                        let choice = match index {
-                            0 => ProxyChoice::Manual,
-                            1 => ProxyChoice::Jump,
-                            _ => ProxyChoice::Command,
-                        };
-                        paint_row(quads, rect, found_count + index, view.ssh_proxy_choice == choice);
-                    }
-                    match view.ssh_proxy_choice {
-                        ProxyChoice::Manual => {
-                            let (protocol, address) =
-                                ssh_proxy_manual_controls(geometry.ssh_proxy_expand, scale);
-                            widgets::push_combobox(
-                                &mut staged,
-                                protocol,
-                                scale,
-                                &sk,
-                                view.hover == SettingsHit::SshProxyProtocolDropdown,
-                                view.dropdown == Some(SettingsDropdown::SshProxyProtocol),
-                            );
-                            for quad in staged.drain(..) {
-                                clip(quads, quad);
-                            }
-                            input_control(quads, address, 0);
-                        },
-                        ProxyChoice::Jump => {
-                            widgets::push_combobox(
-                                &mut staged,
-                                ssh_proxy_expand_control(geometry.ssh_proxy_expand, scale),
-                                scale,
-                                &sk,
-                                view.hover == SettingsHit::SshJumpHostDropdown,
-                                view.dropdown == Some(SettingsDropdown::SshJumpHost),
-                            );
-                            for quad in staged.drain(..) {
-                                clip(quads, quad);
-                            }
-                        },
-                        ProxyChoice::Command => {
-                            input_control(
-                                quads,
-                                ssh_proxy_expand_control(geometry.ssh_proxy_expand, scale),
-                                2,
-                            );
-                        },
-                        ProxyChoice::Detected(_) => {},
-                    }
-                    row_hover(
-                        quads,
-                        geometry.ssh_proxy_bypass,
-                        view.hover == SettingsHit::SshProxyInput(1),
-                    );
-                    input_row(quads, geometry.ssh_proxy_bypass, 1);
-                },
-            }
-            // 每主机覆盖：行 hover 色变 + 右缘「编辑」quiet 按钮底。
-            let (ox, oy, ow, oh) = geometry.ssh_proxy_override_row0;
-            for index in 0..view.ssh_proxy_overrides.len() {
-                let rect = (ox, oy + index as f32 * oh, ow, oh);
-                let hovered = view.hover == SettingsHit::SshProxyOverrideEdit(index);
-                if hovered {
-                    clip(
-                        quads,
-                        UiQuad::solid(
-                            rect.0,
-                            rect.1,
-                            rect.2,
-                            rect.3,
-                            s(tokens::radius::OVERLAY),
-                            sk.hover,
-                        ),
-                    );
                 }
-                action_button(quads, rect, 54.0, hovered);
+                for quad in input {
+                    clip(quads, quad);
+                }
+            };
+            if view.ssh_proxy_mode == crate::ssh_proxy::ProxyMode::Custom {
+                let (protocol, address) =
+                    ssh_proxy_manual_controls(geometry.ssh_proxy_expand, scale);
+                widgets::push_combobox(
+                    &mut staged,
+                    protocol,
+                    scale,
+                    &sk,
+                    view.hover == SettingsHit::SshProxyProtocolDropdown,
+                    view.dropdown == Some(SettingsDropdown::SshProxyProtocol),
+                );
+                for quad in staged.drain(..) {
+                    clip(quads, quad);
+                }
+                input_control(quads, address, 0);
+                input_control(quads, sync_input_rect(geometry.ssh_proxy_bypass, scale), 1);
+            }
+
+            // 功能横幅保持中性底；成功/失败只由状态文字表达，不用整块绿/红
+            // 背景污染页面。按钮走通用 outline widget。
+            let banner = geometry.ssh_proxy_test;
+            let corner = s(tokens::radius::OVERLAY);
+            let mut banner_quads = Vec::new();
+            surface::push_stroke(&mut banner_quads, banner, corner, scale, sk.hairline);
+            banner_quads
+                .push(UiQuad::solid(banner.0, banner.1, banner.2, banner.3, corner, sk.surface));
+            let button = ssh_proxy_test_button(banner, scale);
+            widgets::push_outline_button(
+                &mut banner_quads,
+                button,
+                scale,
+                &sk,
+                view.hover == SettingsHit::SshProxyTest
+                    && !matches!(view.proxy_test_status, ProxyTestStatus::Running),
+            );
+            for quad in banner_quads {
+                clip(quads, quad);
             }
         },
         NebulaSettingsSection::Interaction => {
@@ -3891,6 +3737,46 @@ pub(super) fn push_quads(
                 );
             }
             let (row_x, _, row_w, row_h) = geometry.keymap_row0;
+            // 每个动作分组各自一圈 hairline；中心回填页面本色而不是 card 色，
+            // 所以只得到独立线框，没有用户不需要的分组背景块。
+            let outline_group = |quads: &mut Vec<UiQuad>, first_y: f32, rows: usize| {
+                if rows == 0 {
+                    return;
+                }
+                let rect = (row_x, first_y, row_w, row_h * rows as f32);
+                let corner = s(tokens::radius::OVERLAY);
+                let mut outline = Vec::new();
+                surface::push_stroke(&mut outline, rect, corner, scale, sk.hairline);
+                outline.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, corner, sk.panel));
+                for row in 1..rows {
+                    outline.push(UiQuad::solid(
+                        rect.0,
+                        rect.1 + row as f32 * row_h,
+                        rect.2,
+                        s(1.0).max(1.0),
+                        0.0,
+                        sk.hairline,
+                    ));
+                }
+                for quad in outline {
+                    clip(quads, quad);
+                }
+            };
+            let mut first_slot = 0usize;
+            for rows in geometry.keymap_pane.visible {
+                let rows = rows as usize;
+                if rows > 0 && first_slot < geometry.keymap_slot_ys.len() {
+                    outline_group(quads, geometry.keymap_slot_ys[first_slot], rows);
+                    first_slot += rows;
+                }
+            }
+            if !view.keymap_readonly_visible.is_empty() {
+                outline_group(
+                    quads,
+                    geometry.keymap_readonly_row0.1,
+                    view.keymap_readonly_visible.len(),
+                );
+            }
             for (slot, flat) in view.keymap_visible.iter().copied().enumerate() {
                 if slot >= geometry.keymap_slot_ys.len() {
                     break;
@@ -4554,11 +4440,10 @@ pub(super) fn draw_popup_text(
             SettingsDropdown::SshProxyMode => {
                 ssh_proxy_mode_label(SSH_PROXY_MODE_OPTIONS[index], language).to_owned()
             },
-            SettingsDropdown::SshProxyProtocol => manual_proxy_protocol_label(
-                MANUAL_PROXY_PROTOCOL_OPTIONS[index],
-                language,
-            )
-            .to_owned(),
+            SettingsDropdown::SshProxyProtocol => {
+                manual_proxy_protocol_label(MANUAL_PROXY_PROTOCOL_OPTIONS[index], language)
+                    .to_owned()
+            },
             SettingsDropdown::SshJumpHost => match view.ssh_hosts.get(absolute_index) {
                 Some(host) if host.label != host.destination => {
                     format!("{}  ·  {}", host.label, host.destination)
@@ -5734,442 +5619,141 @@ pub(super) fn draw_text(
                     "",
                     sk.ink,
                 );
-                combobox_value(
+                combobox_value_rect(
                     r,
                     gc,
-                    geometry.ssh_proxy_mode,
+                    ssh_proxy_mode_control(geometry.ssh_proxy_mode, scale),
                     ssh_proxy_mode_label(view.ssh_proxy_mode, language),
                     sk.accent,
                 );
             }
             let cell_w = size.cell_width();
             let cell_h = size.cell_height();
-            // 说明卡文案：卡内 14px 边距，行距 = cell_h + 6。
-            let note_lines =
-                |r: &mut Renderer, gc: &mut GlyphCache, lines: [(String, Rgb); 2]| {
-                    let (nx, ny, ..) = geometry.ssh_proxy_note;
-                    for (i, (text, ink)) in lines.iter().enumerate() {
-                        let y = ny + s(12.0) + i as f32 * (cell_h + s(6.0));
-                        if visible(y, cell_h) {
-                            r.draw_chrome_text(size, nx + s(14.0), y, *ink, text, gc);
-                        }
-                    }
-                };
-            let bypass_row = |r: &mut Renderer, gc: &mut GlyphCache| {
-                let row = geometry.ssh_proxy_bypass;
-                if !visible(row.1, row.3) {
-                    return;
+
+            if view.ssh_proxy_mode == crate::ssh_proxy::ProxyMode::Custom {
+                let row = geometry.ssh_proxy_expand;
+                if visible(row.1, row.3) {
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        row,
+                        language.pick("代理地址", "Proxy address"),
+                        "",
+                        sk.ink,
+                    );
+                    let (protocol, address) = ssh_proxy_manual_controls(row, scale);
+                    combobox_value_rect(
+                        r,
+                        gc,
+                        protocol,
+                        manual_proxy_protocol_label(view.ssh_proxy_protocol, language),
+                        sk.accent,
+                    );
+                    let (ix, iy, iw, ih) = address;
+                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                    let (text, placeholder, _, _) = ssh_proxy_input_display(view, 0, max_cols);
+                    r.draw_chrome_text(
+                        size,
+                        ix + s(12.0),
+                        iy + (ih - cell_h) / 2.0,
+                        if placeholder { sk.ink_dim } else { sk.ink },
+                        &text,
+                        gc,
+                    );
                 }
-                row_label(
-                    r,
-                    gc,
-                    size,
-                    scale,
-                    &sk,
-                    row,
-                    language.pick("不走代理的主机（逗号分隔）", "Bypass hosts (comma separated)"),
-                    "",
-                    sk.ink,
-                );
-                let (ix, iy, iw, ih) = sync_input_rect(row, scale);
-                let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                let (text, placeholder, _, _) = ssh_proxy_input_display(view, 1, max_cols);
-                let ink = if placeholder { sk.ink_dim } else { sk.ink };
-                r.draw_chrome_text(size, ix + s(12.0), iy + (ih - cell_h) / 2.0, ink, &text, gc);
-            };
-            match view.ssh_proxy_mode {
-                crate::ssh_proxy::ProxyMode::Off => {
-                    note_lines(r, gc, [
-                        (
-                            language
-                                .pick(
-                                    "直连目标主机，并忽略 ALL_PROXY 等环境变量。",
-                                    "Connect directly, ignoring ALL_PROXY and similar variables.",
-                                )
-                                .to_owned(),
-                            sk.ink,
-                        ),
-                        (
-                            language
-                                .pick(
-                                    "下方单独设置了链路的主机不受影响。",
-                                    "Hosts with their own link below are unaffected.",
-                                )
-                                .to_owned(),
-                            sk.ink_dim,
-                        ),
-                    ]);
-                },
-                crate::ssh_proxy::ProxyMode::System => {
-                    // 「当前读到」来自 Display 缓存的探测（进页/切模式时刷新），
-                    // 渲染路径绝不直接碰注册表。
-                    let probe = match &view.system_proxy_probe {
-                        Some((url, from_registry)) => format!(
-                            "{}{url} · {}",
-                            language.pick("当前读到：", "Currently reading: "),
-                            if *from_registry {
-                                language
-                                    .pick("注册表 Internet Settings", "registry Internet Settings")
-                            } else {
-                                language.pick("环境变量", "environment variables")
-                            },
-                        ),
-                        None => language
+
+                let row = geometry.ssh_proxy_bypass;
+                if visible(row.1, row.3) {
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        row,
+                        language.pick("直连地址", "Direct addresses"),
+                        "",
+                        sk.ink,
+                    );
+                    let (ix, iy, iw, ih) = sync_input_rect(row, scale);
+                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                    let (text, placeholder, _, _) = ssh_proxy_input_display(view, 1, max_cols);
+                    r.draw_chrome_text(
+                        size,
+                        ix + s(12.0),
+                        iy + (ih - cell_h) / 2.0,
+                        if placeholder { sk.ink_dim } else { sk.ink },
+                        &text,
+                        gc,
+                    );
+                }
+            }
+
+            let banner = geometry.ssh_proxy_test;
+            if visible(banner.1, banner.3) {
+                let button = ssh_proxy_test_button(banner, scale);
+                let (status, status_ink) = match &view.proxy_test_status {
+                    ProxyTestStatus::Idle => (
+                        language
                             .pick(
-                                "当前系统未启用代理：连接将直连（等同「不使用」）。",
-                                "No system proxy is active: connections go direct (same as Off).",
+                                "测试当前设置是否可以访问网络",
+                                "Test whether the current setting can access the network",
                             )
                             .to_owned(),
-                    };
-                    note_lines(r, gc, [
-                        (
-                            language
-                                .pick(
-                                    "跟随 Windows 系统代理，代理软件切换节点后无需在此改动。",
-                                    "Follows the Windows system proxy; switching nodes needs no change here.",
-                                )
-                                .to_owned(),
-                            sk.ink,
-                        ),
-                        (probe, sk.ink_dim),
-                    ]);
-                    bypass_row(r, gc);
-                },
-                crate::ssh_proxy::ProxyMode::Custom => {
-                    let scan = geometry.ssh_proxy_scan_head;
-                    if visible(scan.1, scan.3) {
-                        let scan_text = if view.proxy_scanning {
-                            language.pick("正在扫描本机代理…", "Scanning local proxies…").to_owned()
-                        } else {
-                            format!(
-                                "{}{}{}",
-                                language.pick("在本机发现 ", "Found "),
-                                view.local_proxies.len(),
-                                language.pick(" 个代理", " local proxies")
+                        sk.ink_dim,
+                    ),
+                    ProxyTestStatus::Running => (
+                        language
+                            .pick(
+                                "正在通过当前设置测试网络…",
+                                "Testing through the current setting…",
                             )
-                        };
-                        r.draw_chrome_text(
-                            size,
-                            scan.0,
-                            scan.1 + (scan.3 - cell_h) / 2.0,
-                            sk.ink_dim,
-                            &scan_text,
-                            gc,
-                        );
-                        let button = geometry.ssh_proxy_scan_button;
-                        let caption = if view.proxy_scanning {
-                            language.pick("扫描中…", "Scanning…")
-                        } else {
-                            language.pick("重新扫描", "Rescan")
-                        };
-                        let cols = caption.chars().map(|ch| ch.width().unwrap_or(1).max(1)).sum::<usize>();
-                        r.draw_chrome_text(
-                            size,
-                            button.0 + (button.2 - cols as f32 * cell_w) / 2.0,
-                            button.1 + (button.3 - cell_h) / 2.0,
-                            if view.proxy_scanning { sk.ink_faint } else { sk.ink_dim },
-                            caption,
-                            gc,
-                        );
-                    }
-
-                    let list = geometry.ssh_proxy_list;
-                    let group_ink = sk.ink_faint;
-                    let group_x = list.0 + s(11.0);
-                    let found_group_y = list.1 + s(7.0);
-                    if visible(found_group_y, cell_h) {
-                        r.draw_chrome_text(
-                            size,
-                            group_x,
-                            found_group_y,
-                            group_ink,
-                            language.pick("本机发现", "DISCOVERED LOCALLY"),
-                            gc,
-                        );
-                    }
-                    let (fx, fy, fw, fh) = geometry.ssh_proxy_found_row0;
-                    if view.local_proxies.is_empty() {
-                        let empty_y = fy + s(10.0);
-                        if visible(empty_y, cell_h) {
-                            r.draw_chrome_text(
-                                size,
-                                fx + s(38.0),
-                                empty_y,
-                                sk.ink_faint,
-                                language.pick(
-                                    "未发现可握手的本机代理",
-                                    "No local proxy completed a handshake",
-                                ),
-                                gc,
-                            );
-                        }
-                    }
-                    for (index, proxy) in view.local_proxies.iter().enumerate() {
-                        let rect = (fx, fy + index as f32 * fh, fw, fh);
-                        if !visible(rect.1, rect.3) {
-                            continue;
-                        }
-                        let selected = view.ssh_proxy_choice == ProxyChoice::Detected(index);
-                        let text_x = rect.0 + s(38.0);
-                        r.draw_chrome_text(
-                            size,
-                            text_x,
-                            rect.1 + s(7.0),
-                            if selected { sk.ink_strong } else { sk.ink },
-                            proxy.name(),
-                            gc,
-                        );
-                        r.draw_chrome_text(
-                            size,
-                            text_x,
-                            rect.1 + s(7.0) + cell_h + s(2.0),
-                            sk.ink_faint,
-                            &proxy.address(),
-                            gc,
-                        );
-                        let label = proxy.protocol.label();
-                        let tag_w = label.chars().count() as f32 * cell_w + s(16.0);
-                        r.draw_chrome_text(
-                            size,
-                            rect.0 + rect.2 - tag_w - s(3.0),
-                            rect.1 + (rect.3 - cell_h) / 2.0,
-                            if proxy.protocol == crate::ssh_proxy::LocalProxyProtocol::Mixed {
-                                Rgb::new(sk.ok.r, sk.ok.g, sk.ok.b)
-                            } else {
-                                sk.ink_dim
-                            },
-                            label,
-                            gc,
-                        );
-                    }
-
-                    let names = [
-                        (
-                            language.pick("手动填写", "Manual address"),
-                            language.pick(
-                                "直接填地址，协议可交给自动识别",
-                                "Type an address; the scheme is auto-detected",
-                            ),
+                            .to_owned(),
+                        sk.accent,
+                    ),
+                    ProxyTestStatus::Success { elapsed_ms, route } => (
+                        format!(
+                            "{} · {route} · {elapsed_ms} ms",
+                            language.pick("网络连接正常", "Network connection succeeded"),
                         ),
-                        (
-                            language.pick("SSH 跳板", "SSH jump host"),
-                            language.pick(
-                                "先连另一台已保存的主机，用它转发",
-                                "Connect through another saved host",
-                            ),
-                        ),
-                        (
-                            language.pick("自定义命令", "Custom command"),
-                            language.pick(
-                                "用命令的 stdin/stdout 代替网络连接",
-                                "Use a command's stdin/stdout as the network stream",
-                            ),
-                        ),
-                    ];
-                    let other_group_y = geometry.ssh_proxy_other_rows[0].1 - s(23.0);
-                    if visible(other_group_y, cell_h) {
-                        r.draw_chrome_text(
-                            size,
-                            group_x,
-                            other_group_y,
-                            group_ink,
-                            language.pick("其他方式", "OTHER METHODS"),
-                            gc,
-                        );
-                    }
-                    for (index, rect) in geometry.ssh_proxy_other_rows.iter().enumerate() {
-                        if !visible(rect.1, rect.3) {
-                            continue;
-                        }
-                        let selected = matches!(
-                            (view.ssh_proxy_choice, index),
-                            (ProxyChoice::Manual, 0)
-                                | (ProxyChoice::Jump, 1)
-                                | (ProxyChoice::Command, 2)
-                        );
-                        let name_ink = if selected { sk.ink_strong } else { sk.ink };
-                        let text_x = rect.0 + s(38.0);
-                        r.draw_chrome_text(
-                            size,
-                            text_x,
-                            rect.1 + s(7.0),
-                            name_ink,
-                            names[index].0,
-                            gc,
-                        );
-                        r.draw_chrome_text(
-                            size,
-                            text_x,
-                            rect.1 + s(7.0) + cell_h + s(2.0),
-                            sk.ink_faint,
-                            names[index].1,
-                            gc,
-                        );
-                    }
-                    let expand = geometry.ssh_proxy_expand;
-                    if visible(expand.1, expand.3 + s(22.0)) {
-                        if view.ssh_proxy_choice == ProxyChoice::Jump {
-                            let target = crate::ssh_proxy::jump_target(&view.ssh_proxy_inputs[0])
-                                .unwrap_or("");
-                            let (value, value_ink) = if target.is_empty() {
-                                (
-                                    language
-                                        .pick("选择一台已保存的主机…", "Pick a saved host…")
-                                        .to_owned(),
-                                    sk.ink_dim,
-                                )
-                            } else {
-                                (
-                                    view.ssh_hosts
-                                        .iter()
-                                        .find(|host| host.destination == target)
-                                        .map(|host| host.label.clone())
-                                        .unwrap_or_else(|| target.to_owned()),
-                                    sk.accent,
-                                )
-                            };
-                            combobox_value_rect(
-                                r,
-                                gc,
-                                ssh_proxy_expand_control(expand, scale),
-                                &value,
-                                value_ink,
-                            );
-                            r.draw_chrome_text(
-                                size,
-                                expand.0 + s(2.0),
-                                expand.1 + expand.3 + s(4.0),
-                                sk.ink_faint,
-                                language.pick(
-                                    "跳板沿用它自己的密钥、端口与代理；被删除时明确报错，不会静默直连。",
-                                    "The jump host keeps its own key, port and proxy; deleting it fails loudly.",
-                                ),
-                                gc,
-                            );
-                        } else if view.ssh_proxy_choice == ProxyChoice::Manual {
-                            let (protocol, address) = ssh_proxy_manual_controls(expand, scale);
-                            combobox_value_rect(
-                                r,
-                                gc,
-                                protocol,
-                                manual_proxy_protocol_label(view.ssh_proxy_protocol, language),
-                                sk.accent,
-                            );
-                            let (ix, iy, iw, ih) = address;
-                            let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                            let (text, placeholder, _, _) =
-                                ssh_proxy_input_display(view, 0, max_cols);
-                            let ink = if placeholder { sk.ink_dim } else { sk.ink };
-                            r.draw_chrome_text(
-                                size,
-                                ix + s(12.0),
-                                iy + (ih - cell_h) / 2.0,
-                                ink,
-                                &text,
-                                gc,
-                            );
-                            r.draw_chrome_text(
-                                size,
-                                expand.0 + s(2.0),
-                                expand.1 + expand.3 + s(4.0),
-                                sk.ink_faint,
-                                language.pick(
-                                    "可直接粘贴 host:port，无需补协议前缀。",
-                                    "Paste host:port directly; no scheme prefix needed.",
-                                ),
-                                gc,
-                            );
-                        } else if view.ssh_proxy_choice == ProxyChoice::Command {
-                            let (ix, iy, iw, ih) = ssh_proxy_expand_control(expand, scale);
-                            let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                            let (text, placeholder, _, _) =
-                                ssh_proxy_input_display(view, 2, max_cols);
-                            let ink = if placeholder { sk.ink_dim } else { sk.ink };
-                            r.draw_chrome_text(
-                                size,
-                                ix + s(12.0),
-                                iy + (ih - cell_h) / 2.0,
-                                ink,
-                                &text,
-                                gc,
-                            );
-                            r.draw_chrome_text(
-                                size,
-                                expand.0 + s(2.0),
-                                expand.1 + expand.3 + s(4.0),
-                                sk.ink_faint,
-                                language.pick(
-                                    "%h 目标主机 · %p 目标端口",
-                                    "%h target host · %p target port",
-                                ),
-                                gc,
-                            );
-                        }
-                    }
-                    bypass_row(r, gc);
-                },
-            }
-            // 每主机覆盖：名字 + 摘要 + 行尾「编辑」；结尾一行继承说明。
-            let (ox, oy, ow, oh) = geometry.ssh_proxy_override_row0;
-            if visible(group_y(oy), title_h) {
-                section_title(
-                    r,
-                    gc,
-                    size,
-                    scale,
-                    &sk,
-                    ox,
-                    group_y(oy),
-                    language.pick("每主机覆盖", "Per-host overrides"),
-                );
-            }
-            for (index, (label, summary, _)) in view.ssh_proxy_overrides.iter().enumerate() {
-                let rect = (ox, oy + index as f32 * oh, ow, oh);
-                if !visible(rect.1, rect.3) {
-                    continue;
-                }
-                let hovered = view.hover == SettingsHit::SshProxyOverrideEdit(index);
-                let text_y = rect.1 + (rect.3 - cell_h) / 2.0;
-                r.draw_chrome_text(size, rect.0 + s(16.0), text_y, sk.ink, label, gc);
-                let label_cols: usize = label.chars().map(|c| c.width().unwrap_or(1)).sum();
+                        Rgb::new(sk.ok.r, sk.ok.g, sk.ok.b),
+                    ),
+                    ProxyTestStatus::Failed { message } => (
+                        format!("{}：{message}", language.pick("测试失败", "Test failed")),
+                        Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b),
+                    ),
+                };
+                let available = (button.0 - banner.0 - s(28.0)).max(cell_w);
+                let max_chars = (available / cell_w).floor().max(1.0) as usize;
+                let status = truncate_tab_label(&status, max_chars);
                 r.draw_chrome_text(
                     size,
-                    rect.0 + s(16.0) + (label_cols as f32 + 2.0) * cell_w,
-                    text_y,
-                    sk.ink_faint,
-                    summary,
+                    banner.0 + s(14.0),
+                    banner.1 + (banner.3 - cell_h) / 2.0,
+                    status_ink,
+                    &status,
                     gc,
                 );
-                let action = row_action_rect(rect, scale, 54.0);
-                let action_text = language.pick("编辑", "Edit");
-                let action_cols: usize = action_text.chars().map(|c| c.width().unwrap_or(1)).sum();
+                let caption = if matches!(view.proxy_test_status, ProxyTestStatus::Running) {
+                    language.pick("测试中…", "Testing…")
+                } else {
+                    language.pick("测试网络", "Test network")
+                };
+                let caption_cols: usize =
+                    caption.chars().map(|ch| ch.width().unwrap_or(1).max(1)).sum();
                 r.draw_chrome_text(
                     size,
-                    action.0 + (action.2 - action_cols as f32 * cell_w) / 2.0,
-                    action.1 + (action.3 - cell_h) / 2.0,
-                    if hovered { sk.accent } else { sk.ink_dim },
-                    action_text,
-                    gc,
-                );
-            }
-            let inherit = geometry.ssh_proxy_inherit;
-            if visible(inherit.1, inherit.3) {
-                let rest = view.ssh_hosts.len().saturating_sub(view.ssh_proxy_overrides.len());
-                let text = format!(
-                    "{}{rest}{}",
-                    if view.ssh_proxy_overrides.is_empty() {
-                        language.pick("全部 ", "All ")
+                    button.0 + (button.2 - caption_cols as f32 * cell_w) / 2.0,
+                    button.1 + (button.3 - cell_h) / 2.0,
+                    if matches!(view.proxy_test_status, ProxyTestStatus::Running) {
+                        sk.ink_faint
                     } else {
-                        language.pick("其余 ", "The other ")
+                        sk.ink_dim
                     },
-                    language.pick(" 台主机跟随全局默认。", " hosts follow the global default."),
-                );
-                r.draw_chrome_text(
-                    size,
-                    inherit.0 + s(16.0),
-                    inherit.1 + s(8.0),
-                    sk.ink_faint,
-                    &text,
+                    caption,
                     gc,
                 );
             }
@@ -7005,10 +6589,7 @@ mod tests {
         };
         assert_eq!(hit(geometry.ssh_proxy_scan_button), SettingsHit::SshProxyRescan);
         assert_eq!(hit(geometry.ssh_proxy_found_row0), SettingsHit::SshProxyLinkPick(0));
-        assert_eq!(
-            hit(geometry.ssh_proxy_other_rows[2]),
-            SettingsHit::SshProxyLinkPick(4)
-        );
+        assert_eq!(hit(geometry.ssh_proxy_other_rows[2]), SettingsHit::SshProxyLinkPick(4));
         assert_eq!(hit(geometry.ssh_proxy_expand), SettingsHit::SshProxyInput(2));
     }
 

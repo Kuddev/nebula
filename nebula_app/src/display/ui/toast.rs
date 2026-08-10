@@ -114,7 +114,16 @@ pub(crate) fn push_toast(
 ) {
     let s = |value: f32| value * scale;
     let (x, y, _, h) = rect;
-    surface::push_surface(quads, rect, viewport, scale, sk, density, surface::Elevation::Menu, progress);
+    surface::push_surface(
+        quads,
+        rect,
+        viewport,
+        scale,
+        sk,
+        density,
+        surface::Elevation::Menu,
+        progress,
+    );
 
     let rail_w = s(RAIL_W);
     let rail_h = (h - s(space::M)).max(s(space::S));

@@ -697,7 +697,9 @@ impl CommandPalette {
     pub fn set_ssh_hosts(&mut self, hosts: &[(String, String)]) {
         let rows: Vec<_> = hosts
             .iter()
-            .map(|(label, host)| (label.clone(), host.clone(), super::ui::os_icons::DEFAULT_ID.to_owned()))
+            .map(|(label, host)| {
+                (label.clone(), host.clone(), super::ui::os_icons::DEFAULT_ID.to_owned())
+            })
             .collect();
         self.set_ssh_hosts_with_icons(&rows);
     }
@@ -1376,8 +1378,8 @@ impl CommandPalette {
             // Commands and the Shell/SSH launcher both execute the first row
             // on Enter before explicit navigation, so both must paint that
             // target. Keeping `self.selected` as None preserves Up-to-wrap.
-            let selected = matches!(self.mode, PaletteMode::Commands | PaletteMode::Profiles)
-                .then_some(0);
+            let selected =
+                matches!(self.mode, PaletteMode::Commands | PaletteMode::Profiles).then_some(0);
             return (rows, selected);
         };
         let rows: Vec<_> =
@@ -1765,8 +1767,7 @@ pub(crate) fn palette_layout_with_workspace_bounds(
     let pad = s(12.0);
     let cards = model.is_picker();
     let launcher = model.is_launcher();
-    let row_h =
-        s(if launcher { 42.0 } else { super::ui::tokens::control::dense_row(density) });
+    let row_h = s(if launcher { 42.0 } else { super::ui::tokens::control::dense_row(density) });
     // HTML launcher 的搜索行比结果行矮，空间来自 pal-in 的上下留白；其他模式
     // 继续保持输入框与结果行等高，避免改变既有命令面板。
     let input_h = if launcher { s(34.0) } else { row_h };
@@ -2448,11 +2449,7 @@ pub(super) fn draw_text(
     // 搜索区和列表各自遵循 HTML 的 16px 内容线；非 launcher 模式继续沿用
     // 输入框内 14px 的既有基准。
     let search_x = if launcher { ix } else { ix + s(INPUT_PAD_X) };
-    let text_x = if launcher {
-        list_x + s(LAUNCHER_CONTENT_INSET - 8.0)
-    } else {
-        search_x
-    };
+    let text_x = if launcher { list_x + s(LAUNCHER_CONTENT_INSET - 8.0) } else { search_x };
     let text_right = if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
 
     const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
@@ -3210,12 +3207,39 @@ mod tests {
         );
         palette.set_ssh_hosts(&[("生产机".into(), "root@example.com".into())]);
         palette.open_profiles();
-        let full = palette_layout(&palette, 1600.0, 900.0, 1.0, 8.0, crate::display::ui::tokens::Density::Standard).panel.3;
+        let full = palette_layout(
+            &palette,
+            1600.0,
+            900.0,
+            1.0,
+            8.0,
+            crate::display::ui::tokens::Density::Standard,
+        )
+        .panel
+        .3;
         palette.input_text("cmd");
-        let filtered = palette_layout(&palette, 1600.0, 900.0, 1.0, 8.0, crate::display::ui::tokens::Density::Standard).panel.3;
+        let filtered = palette_layout(
+            &palette,
+            1600.0,
+            900.0,
+            1.0,
+            8.0,
+            crate::display::ui::tokens::Density::Standard,
+        )
+        .panel
+        .3;
         assert_eq!(full, filtered, "搜索结果变化不能让 launcher 上下跳动");
         palette.set_launcher_filter(LauncherFilter::Ssh);
-        let ssh = palette_layout(&palette, 1600.0, 900.0, 1.0, 8.0, crate::display::ui::tokens::Density::Standard).panel.3;
+        let ssh = palette_layout(
+            &palette,
+            1600.0,
+            900.0,
+            1.0,
+            8.0,
+            crate::display::ui::tokens::Density::Standard,
+        )
+        .panel
+        .3;
         assert_eq!(full, ssh, "切换分组不能改变 launcher 高度");
     }
 
@@ -3229,7 +3253,14 @@ mod tests {
         palette.set_ssh_hosts(&[("production".into(), "root@example.com".into())]);
         palette.open_profiles();
 
-        let layout = palette_layout(&palette, 1913.0, 1110.0, 1.5, 12.0, crate::display::ui::tokens::Density::Standard);
+        let layout = palette_layout(
+            &palette,
+            1913.0,
+            1110.0,
+            1.5,
+            12.0,
+            crate::display::ui::tokens::Density::Standard,
+        );
         let panel_bottom = layout.panel.1 + layout.panel.3;
         let content_bottom = layout.footer.map_or(panel_bottom, |(_, footer_y, _, _)| footer_y);
         assert_eq!(layout.max_rows, 5, "启动器保持紧凑的五行视口");
@@ -3500,7 +3531,14 @@ mod tests {
         const MAX_ROWS: usize = 8;
         let mut palette = CommandPalette::new();
         palette.open();
-        let layout = palette_layout(&palette, 1200.0, 900.0, 1.0, 8.0, crate::display::ui::tokens::Density::Standard);
+        let layout = palette_layout(
+            &palette,
+            1200.0,
+            900.0,
+            1.0,
+            8.0,
+            crate::display::ui::tokens::Density::Standard,
+        );
         assert_eq!(layout.max_rows, MAX_ROWS);
         let scrollbar = layout.scrollbar.expect("长命令列表必须显示滚动条");
 
@@ -3568,11 +3606,29 @@ mod tests {
             .collect();
         let mut palette = CommandPalette::new();
         palette.open_ai_sessions(rows);
-        let full = palette_layout(&palette, 1600.0, 1000.0, 1.0, 8.0, crate::display::ui::tokens::Density::Standard).panel.3;
+        let full = palette_layout(
+            &palette,
+            1600.0,
+            1000.0,
+            1.0,
+            8.0,
+            crate::display::ui::tokens::Density::Standard,
+        )
+        .panel
+        .3;
 
         palette.input_text("unique needle");
         assert_eq!(palette.filtered.len(), 1);
-        let filtered = palette_layout(&palette, 1600.0, 1000.0, 1.0, 8.0, crate::display::ui::tokens::Density::Standard).panel.3;
+        let filtered = palette_layout(
+            &palette,
+            1600.0,
+            1000.0,
+            1.0,
+            8.0,
+            crate::display::ui::tokens::Density::Standard,
+        )
+        .panel
+        .3;
 
         assert_eq!(filtered, full, "过滤结果不能改变 AI 会话面板高度");
     }
@@ -3678,7 +3734,15 @@ mod tests {
 
         let bounds = (230.0, 1300.0);
         let layout = |palette: &CommandPalette| {
-            palette_layout_with_workspace_bounds(palette, 1600.0, 1000.0, 1.0, 8.0, crate::display::ui::tokens::Density::Standard, Some(bounds))
+            palette_layout_with_workspace_bounds(
+                palette,
+                1600.0,
+                1000.0,
+                1.0,
+                8.0,
+                crate::display::ui::tokens::Density::Standard,
+                Some(bounds),
+            )
         };
 
         let mut launcher = CommandPalette::new();
@@ -3725,7 +3789,14 @@ mod tests {
 
         let scale = 1.25;
         let cell_w = 10.5;
-        let layout = palette_layout(&palette, 1600.0, 900.0, scale, cell_w, crate::display::ui::tokens::Density::Standard);
+        let layout = palette_layout(
+            &palette,
+            1600.0,
+            900.0,
+            scale,
+            cell_w,
+            crate::display::ui::tokens::Density::Standard,
+        );
         assert_eq!(layout.chips.iter().map(|chip| chip.count).collect::<Vec<_>>(), [11, 1, 10]);
 
         for chip in &layout.chips {
