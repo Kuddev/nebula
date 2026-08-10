@@ -719,6 +719,24 @@ impl ApplicationHandler<Event> for Processor {
                     window_context.handle_sync_done(&message, error, history_changed);
                 }
             },
+            (EventType::LocalProxyScan, Some(window_id)) => {
+                let proxy = self.proxy.clone();
+                let window_id = *window_id;
+                std::thread::spawn(move || {
+                    let found = crate::ssh_proxy::scan_local_proxies(&[]);
+                    let _ = proxy.send_event(crate::event::Event::new(
+                        EventType::LocalProxyScanDone(found),
+                        window_id,
+                    ));
+                });
+            },
+            (EventType::LocalProxyScanDone(found), Some(window_id)) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.display.local_proxy_scan_done(found);
+                    window_context.dirty = true;
+                    window_context.display.window.request_redraw();
+                }
+            },
             (EventType::QuickTerminalHotkeyChanged { hotkey }, Some(window_id)) => {
                 let old = self.quick_hotkey_combo.clone();
                 let result = self.apply_quick_terminal_hotkey(&hotkey);
@@ -1527,6 +1545,16 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             tab_id: None,
             payload: EventType::NebulaSync { push },
         });
+    }
+
+    fn nebula_local_proxy_scan(&mut self) {
+        if !self.display.take_local_proxy_scan_request() {
+            return;
+        }
+        let _ = self.event_proxy.send_event(Event::new(
+            EventType::LocalProxyScan,
+            self.display.window.id(),
+        ));
     }
 
     fn nebula_quick_hotkey_changed(&mut self) {
@@ -2620,6 +2648,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 | EventType::AiFixReady { .. }
                 | EventType::NebulaSync { .. }
                 | EventType::NebulaSyncDone { .. }
+                | EventType::LocalProxyScan
+                | EventType::LocalProxyScanDone(_)
                 | EventType::FocusWindow { .. } => (),
                 EventType::Scroll(scroll) => self.ctx.scroll(scroll),
                 EventType::BlinkCursor => {
@@ -3105,12 +3135,32 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         match ime {
                             Ime::Commit(text) => {
                                 *self.ctx.dirty = true;
-                                // Tab rename owns committed text while editing: on
-                                // Windows (and any IME), printable characters are
-                                // delivered here, NOT through key_input — so the
-                                // rename buffer must consume them here or typing
-                                // silently pastes into the shell behind the box.
-                                if self.ctx.display.nebula_tab_rename.is_some() {
+                                // 设置页的自绘输入框也必须在 IME 提交阶段消费文字。
+                                // Windows 中文输入法不会经过 `KeyboardInput` 的字符分支；
+                                // 若这里漏掉某个字段，拼音确认后就会穿透到终端。
+                                if self.ctx.display().settings_open()
+                                    && self.ctx.display().nebula_settings_dropdown
+                                        == Some(crate::display::SettingsDropdown::Font)
+                                {
+                                    self.ctx.display().font_query_edit(Some(&text));
+                                } else if self.ctx.display().settings_open()
+                                    && self.ctx.display().keymap_search_active()
+                                {
+                                    self.ctx.display().keymap_search_edit(&text);
+                                } else if self.ctx.display().settings_open()
+                                    && self.ctx.display().nebula_ssh_proxy_focus.is_some()
+                                {
+                                    self.ctx.display().ssh_proxy_field_paste(&text);
+                                } else if self.ctx.display().settings_open()
+                                    && self.ctx.display().nebula_sync_focus.is_some()
+                                {
+                                    self.ctx.display().sync_field_paste(&text);
+                                } else if self.ctx.display().nebula_tab_rename.is_some() {
+                                    // Tab rename owns committed text while editing: on
+                                    // Windows (and any IME), printable characters are
+                                    // delivered here, NOT through key_input — so the
+                                    // rename buffer must consume them here or typing
+                                    // silently pastes into the shell behind the box.
                                     // Caret-aware insert (type-to-overwrite on a
                                     // pending select-all) — same code path as the
                                     // non-IME keyboard fallback.
@@ -3137,6 +3187,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                                     // Don't use bracketed paste for single char input.
                                     self.ctx.paste(&text, text.chars().count() > 1);
                                 }
+                                self.ctx.display().update_settings_ime_cursor();
                                 self.ctx.update_cursor_blinking();
                             },
                             Ime::Preedit(text, cursor_offset) => {
@@ -3145,6 +3196,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
 
                                 if self.ctx.display.ime.preedit() != preedit.as_ref() {
                                     self.ctx.display.ime.set_preedit(preedit);
+                                    self.ctx.display.update_settings_ime_cursor();
                                     self.ctx.update_cursor_blinking();
                                     *self.ctx.dirty = true;
                                 }
@@ -3154,6 +3206,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                                 // 输入法启用/切换：位置状态从零开始，下一帧
                                 // 必须重推（值相同也要推）。
                                 self.ctx.display.window.reset_ime_cursor_area_cache();
+                                self.ctx.display.update_settings_ime_cursor();
                                 *self.ctx.dirty = true;
                             },
                             Ime::Disabled => {

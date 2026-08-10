@@ -793,6 +793,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     settings_dropdown,
                     shell_picker_count,
                     font_picker_count,
+                    self.ctx.display().font_popup_scroll(),
                     hidden_host_count,
                     ssh_host_count,
                     self.ctx.display().nebula_density,
@@ -802,6 +803,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 // Keep the primary-button target for the settings renderer's
                 // HTML-like toggle active state until the matching release.
                 self.ctx.display().set_settings_pressed(settings_hit);
+                // 字体弹层滚动条先于「点击关闭下拉」接管：按 track/thumb
+                // 是滚动手势，不是关闭浮层。
+                if self.ctx.display().font_popup_scrollbar_press(x, y) {
+                    self.ctx.mark_dirty();
+                    return;
+                }
                 // 打开的下拉框独占第一击：命中不属于它（选项行或锚行）时，
                 // 这一击只负责关闭浮层，绝不让下层控件借机误触发。
                 if settings_dropdown.is_some() && !settings_dropdown_keeps_open(settings_hit) {
@@ -828,6 +835,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 match settings_hit {
                     crate::display::SettingsHit::KeymapSearchField => {
                         self.ctx.display().focus_keymap_search();
+                        // 点击即按落点放置 caret，与字体搜索一致；Shift 扩展选区。
+                        let (text_x, cell_w) = self.ctx.display().keymap_search_text_origin();
+                        let extend = self.ctx.modifiers().state().shift_key();
+                        self.ctx.display().begin_keymap_search_drag(x - text_x, cell_w, extend);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -865,6 +876,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::Nav(section) => {
                         self.ctx.display().select_settings_section(section);
+                        self.ctx.nebula_local_proxy_scan();
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1007,7 +1019,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         // 唯一还接受输入的东西。
                         let (text_x, cell_w) = self.ctx.display().font_search_text_origin();
                         let extend = self.ctx.modifiers().state().shift_key();
-                        self.ctx.display().font_query_place(x - text_x, cell_w, extend);
+                        self.ctx.display().begin_font_query_drag(x - text_x, cell_w, extend);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1094,16 +1106,38 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::SshProxyModeOption(index) => {
                         self.ctx.display().set_ssh_proxy_mode(index);
+                        self.ctx.nebula_local_proxy_scan();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshProxyProtocolDropdown => {
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::SshProxyProtocol,
+                        );
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshProxyProtocolOption(index) => {
+                        self.ctx.display().set_ssh_proxy_protocol(index);
                         self.ctx.mark_dirty();
                         return;
                     },
                     crate::display::SettingsHit::SshProxyInput(index) => {
                         self.ctx.display().focus_ssh_proxy_field(index);
+                        // 点击即按落点放置 caret；Shift 扩展选区。
+                        let extend = self.ctx.modifiers().state().shift_key();
+                        self.ctx.display().begin_ssh_proxy_drag(index, x, extend);
                         self.ctx.mark_dirty();
                         return;
                     },
                     crate::display::SettingsHit::SshProxyLinkPick(index) => {
                         self.ctx.display().set_ssh_proxy_link_pick(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::SshProxyRescan => {
+                        self.ctx.display().request_local_proxy_scan();
+                        self.ctx.nebula_local_proxy_scan();
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1498,6 +1532,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::CursorShapeOption(_)
             | Hit::SshProxyModeDropdown
             | Hit::SshProxyModeOption(_)
+            | Hit::SshProxyProtocolDropdown
+            | Hit::SshProxyProtocolOption(_)
             | Hit::SshJumpHostDropdown
             | Hit::SshJumpHostOption(_)
             | Hit::BackgroundColor

@@ -79,6 +79,9 @@ pub enum EventType {
         error: bool,
         history_changed: bool,
     },
+    /// 设置→网络的本机代理握手扫描。请求在后台线程运行，结果回到目标窗口。
+    LocalProxyScan,
+    LocalProxyScanDone(Vec<crate::ssh_proxy::LocalProxyEndpoint>),
     NebulaTick,
     NebulaAttach,
     NebulaResizeSettled,

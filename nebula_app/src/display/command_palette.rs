@@ -82,6 +82,9 @@ struct SshRow {
     hint: String,
     search: String,
     host: String,
+    /// Same persisted id used by Settings -> SSH and the sidebar. Keeping the
+    /// id on the row avoids a second host-name heuristic in the launcher.
+    icon_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -692,13 +695,22 @@ impl CommandPalette {
     /// saved destinations out of the settings default-shell picker while
     /// still making imported or auto-saved hosts available immediately.
     pub fn set_ssh_hosts(&mut self, hosts: &[(String, String)]) {
+        let rows: Vec<_> = hosts
+            .iter()
+            .map(|(label, host)| (label.clone(), host.clone(), super::ui::os_icons::DEFAULT_ID.to_owned()))
+            .collect();
+        self.set_ssh_hosts_with_icons(&rows);
+    }
+
+    pub fn set_ssh_hosts_with_icons(&mut self, hosts: &[(String, String, String)]) {
         self.ssh_hosts = hosts
             .iter()
-            .map(|(label, host)| SshRow {
+            .map(|(label, host, icon_id)| SshRow {
                 label: label.clone(),
                 hint: host.clone(),
                 search: format!("{label} {host} ssh host remote").to_lowercase(),
                 host: host.clone(),
+                icon_id: icon_id.clone(),
             })
             .collect();
         if self.mode == PaletteMode::Profiles {
@@ -1361,7 +1373,11 @@ impl CommandPalette {
                 .take(max_rows)
                 .map(|&row| self.row_for(row))
                 .collect();
-            let selected = (self.mode == PaletteMode::Commands).then_some(0);
+            // Commands and the Shell/SSH launcher both execute the first row
+            // on Enter before explicit navigation, so both must paint that
+            // target. Keeping `self.selected` as None preserves Up-to-wrap.
+            let selected = matches!(self.mode, PaletteMode::Commands | PaletteMode::Profiles)
+                .then_some(0);
             return (rows, selected);
         };
         let rows: Vec<_> =
@@ -1374,6 +1390,7 @@ impl CommandPalette {
     fn row_for(&self, candidate: PaletteCandidate) -> PaletteRow {
         match candidate {
             PaletteCandidate::Item(index) => PaletteRow {
+                os_icon_id: String::new(),
                 icon: String::new(),
                 color_id: String::new(),
                 label: localized_item_label(&ITEMS[index], self.language).to_owned(),
@@ -1390,6 +1407,7 @@ impl CommandPalette {
                 },
             },
             PaletteCandidate::Profile(index) => PaletteRow {
+                os_icon_id: String::new(),
                 icon: self.profiles[index].icon().to_string(),
                 color_id: self.profiles[index].color_id().to_string(),
                 label: self.profiles[index].label().to_string(),
@@ -1399,10 +1417,13 @@ impl CommandPalette {
                 checked: None,
             },
             PaletteCandidate::Ssh(index) => PaletteRow {
-                // Same outline terminal mark for every SSH destination; the
-                // host identity belongs in the label/address, not in a random
-                // per-row glyph color.
-                icon: "\u{f489}".to_owned(),
+                // Settings, the sidebar and the launcher all resolve the same
+                // persisted id. Unknown/auto ids intentionally fall back to
+                // the shared terminal outline in `os_icons::resolve`.
+                icon: super::ui::os_icons::resolve(Some(&self.ssh_hosts[index].icon_id))
+                    .glyph
+                    .to_string(),
+                os_icon_id: self.ssh_hosts[index].icon_id.clone(),
                 color_id: String::new(),
                 label: self.ssh_hosts[index].label.clone(),
                 hint: self.ssh_hosts[index].hint.clone(),
@@ -1411,6 +1432,7 @@ impl CommandPalette {
                 checked: None,
             },
             PaletteCandidate::Directory(index) => PaletteRow {
+                os_icon_id: String::new(),
                 icon: "\u{f07b}".to_owned(),
                 color_id: String::new(),
                 label: self.directories[index].label.clone(),
@@ -1421,6 +1443,7 @@ impl CommandPalette {
             },
             PaletteCandidate::AiSession(index) => {
                 PaletteRow {
+                    os_icon_id: String::new(),
                     // 双星（mdi-creation）：AI 会话的**通用**标，不按 claude /
                     // codex 分。来源交给分组承担，行首再放品牌标是同一条信息
                     // 说两遍；而且品牌标每行长得都不一样，混合列表里就没有一个
@@ -1560,6 +1583,9 @@ const AI_SESSION_GLYPH: &str = "\u{f0674}";
 /// otherwise, so the glyph shows instead).
 pub struct PaletteRow {
     pub icon: String,
+    /// SSH 行的持久化 OS 图标 id（空 = 非 SSH 行）。绘制端据此走
+    /// renderer 的真实栅格墨迹对齐，而不是拿字形当普通文字画。
+    pub os_icon_id: String,
     pub color_id: String,
     pub label: String,
     pub hint: String,
@@ -1915,14 +1941,21 @@ pub(crate) fn palette_layout_with_workspace_bounds(
     let (px, py, pw, ph) = pane.panel;
 
     let input = if launcher {
-        (px + s(16.0), py + launcher_top_pad, pw - s(32.0), input_h)
+        (
+            px + s(LAUNCHER_CONTENT_INSET),
+            py + launcher_top_pad,
+            pw - s(LAUNCHER_CONTENT_INSET * 2.0),
+            input_h,
+        )
     } else {
         (px + pad, py + pad, pw - 2.0 * pad, input_h)
     };
     let chip_band = launcher.then_some((
-        px + s(16.0),
+        // chip 与 SSH glyph 共用 `launcher_icon_ink_span` 的左线；绘制端会用
+        // 实际 raster bounds 把墨迹精确放到这里，而不是假定 glyph 从 cell x 起墨。
+        launcher_icon_ink_span(px + s(LAUNCHER_CONTENT_INSET), scale).0,
         input.1 + input_h + launcher_input_gap,
-        pw - s(32.0),
+        pw - s(LAUNCHER_CONTENT_INSET * 2.0),
         chip_band_h,
     ));
     let mut chips = Vec::new();
@@ -2006,7 +2039,7 @@ pub(crate) fn palette_layout_with_workspace_bounds(
 use super::ui::overlay_list::{self, RowState};
 use super::ui::surface;
 use super::ui::widgets::{self, ChipState};
-use crate::renderer::ui::UiQuad;
+use crate::renderer::ui::{Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
 
 /// 卡片列的左右内边距，也是**右侧基准线**：输入框的 Ctrl+K 键帽、推荐卡
@@ -2031,6 +2064,42 @@ const INPUT_PAD_X: f32 = 14.0;
 const PICKER_ICON_BOX: f32 = 28.0;
 const PICKER_ICON_GAP: f32 = 11.0;
 const PICKER_ICON_INDENT: f32 = PICKER_ICON_BOX + PICKER_ICON_GAP;
+
+/// Launcher 搜索区与 icon tile 外框共用的基础内容线。
+const LAUNCHER_CONTENT_INSET: f32 = 16.0;
+/// SSH glyph 的真实墨迹在 28px tile 内左右各留出的安全边距。过滤 chip 与
+/// glyph 墨迹共用这条线，不能再分别用 tile、cell 或经验槽宽推算。
+const LAUNCHER_ICON_OPTICAL_INSET: f32 = 6.0;
+const LAUNCHER_ICON_INK_W: f32 = PICKER_ICON_BOX - LAUNCHER_ICON_OPTICAL_INSET * 2.0;
+
+fn launcher_icon_ink_span(tile_left: f32, scale: f32) -> (f32, f32) {
+    (tile_left + LAUNCHER_ICON_OPTICAL_INSET * scale, LAUNCHER_ICON_INK_W * scale)
+}
+
+/// 把实际栅格墨迹 `(left, top, width, height)` 映射到目标左线和行中心。
+/// 返回 glyph cell 的绘制锚点与缩放，而不是墨迹框本身。
+fn fit_glyph_ink(
+    ink: (f32, f32, f32, f32),
+    target_left: f32,
+    target_center_y: f32,
+    target_width: f32,
+) -> Option<(f32, f32, f32)> {
+    let (left, top, width, height) = ink;
+    if !left.is_finite()
+        || !top.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= f32::EPSILON
+        || height <= f32::EPSILON
+        || !target_width.is_finite()
+        || target_width <= f32::EPSILON
+    {
+        return None;
+    }
+
+    let mult = (target_width / width).clamp(0.35, 2.0);
+    Some((target_left - left * mult, target_center_y - (top + height * 0.5) * mult, mult))
+}
 
 /// Group captions are structure, not content. Keeping them below body size
 /// preserves the HTML reference's quiet scan path through the rows.
@@ -2144,7 +2213,13 @@ pub(super) fn push_quads(
     }
 
     let cell_w = size.cell_width();
-    let row_content_x = if launcher { list_x + s(10.0) } else { ix + s(INPUT_PAD_X) };
+    let row_content_x = if launcher {
+        // `list_x` 有 8px 的滚动/命中内缩；补齐剩余 8px 后必须落在
+        // chip 的 16px 内容线上，不能再另加一套 10px 行内边距。
+        list_x + s(LAUNCHER_CONTENT_INSET - 8.0)
+    } else {
+        ix + s(INPUT_PAD_X)
+    };
     let row_content_right = if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
     // Group captions provide hierarchy through type and spacing. Do not add
     // separator rules below them; the single full-width tag rule above is the
@@ -2206,6 +2281,16 @@ pub(super) fn push_quads(
         // 推荐卡也不再染色——它已经被"推荐"分区标题、更大的尺寸、双行布局
         // 和右侧 ↵ chip 标记了四次身份，第五次是浪费。
         let corner = s(super::ui::tokens::radius::overlay(density));
+        let selected_fill = if launcher {
+            let shell = theme.palette().shell_bg;
+            let sidebar_active =
+                surface::over(sk.accent_soft, Rgba::new(shell.r, shell.g, shell.b, 255));
+            // launcher 的 veil 覆盖在侧栏之上；预先应用同一层 veil，
+            // 才能让选中行与屏幕上看到的活动 tab 使用完全相同的最终色。
+            surface::over(sk.veil, sidebar_active)
+        } else {
+            sk.accent_soft
+        };
         for (row, &(ry, rh)) in layout.rows.iter().enumerate() {
             let is_hero = hero && row == 0;
             let row_rect = (list_x, ry, list_w, rh);
@@ -2216,7 +2301,7 @@ pub(super) fn push_quads(
             } else {
                 RowState::Idle
             };
-            overlay_list::push_row_state(quads, row_rect, corner, &sk, state);
+            overlay_list::push_row_state(quads, row_rect, corner, &sk, state, selected_fill);
             // Every launcher/picker row gets the same icon container. Brand
             // artwork and fallback glyphs may differ, but their visual weight
             // no longer depends on whether an asset happens to have its own
@@ -2253,15 +2338,9 @@ pub(super) fn push_quads(
         }
     }
 
-    // The default badge is deliberately a hairline chip, not another bright
-    // accent pill. It identifies the launch target without competing with the
-    // selected-row affordance. The hero card 已经用"推荐"分区表达默认身份，
-    // 不再叠加徽标。
+    // 「默认」只保留低对比文字，不再画 chip 底。它是状态说明，不可点击；
+    // 继续套药丸会在选中行上形成第二块背景，与真正的筛选 chip 争夺层级。
     let text_x = row_content_x;
-    let check_col = model.has_check_column();
-    let badge = model.language.pick("默认", "Default");
-    let badge_w =
-        badge.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w + s(12.0);
     for (row, entry) in visible_rows.into_iter().enumerate() {
         let Some(&(ry, rh)) = layout.rows.get(row) else { continue };
         // 图8 规范：命令列表右侧的快捷键 hint 画成逐键 chip 底（键名在文
@@ -2308,24 +2387,6 @@ pub(super) fn push_quads(
                 sk.ok,
             );
         }
-        if !entry.is_default || (hero && row == 0) {
-            continue;
-        }
-        let label_x = if !entry.icon.is_empty() {
-            text_x + s(PICKER_ICON_INDENT)
-        } else if check_col {
-            text_x + s(CHECK_COL_W)
-        } else {
-            text_x
-        };
-        let label_w =
-            entry.label.chars().map(|c| c.width().unwrap_or(1)).sum::<usize>() as f32 * cell_w;
-        overlay_list::push_identity_chip(
-            quads,
-            (label_x + label_w + s(8.0), ry + s(7.0), badge_w, rh - s(14.0)),
-            scale,
-            &sk,
-        );
     }
 
     // 底栏**不画 chip 底**（2026-07-29 用户裁定）。
@@ -2387,7 +2448,11 @@ pub(super) fn draw_text(
     // 搜索区和列表各自遵循 HTML 的 16px 内容线；非 launcher 模式继续沿用
     // 输入框内 14px 的既有基准。
     let search_x = if launcher { ix } else { ix + s(INPUT_PAD_X) };
-    let text_x = if launcher { list_x + s(10.0) } else { search_x };
+    let text_x = if launcher {
+        list_x + s(LAUNCHER_CONTENT_INSET - 8.0)
+    } else {
+        search_x
+    };
     let text_right = if launcher { list_x + list_w - s(10.0) } else { ix + iw - s(GUTTER) };
 
     const ICON_SEARCH: &str = "\u{f0349}"; // mdi-magnify
@@ -2516,11 +2581,12 @@ pub(super) fn draw_text(
     let (rows, selected_row) = model.visible(layout.max_rows);
     let badge = model.language.pick("默认", "Default");
     let badge_w = |present: bool| -> f32 {
-        if present { text_width_cols(badge) as f32 * cell_w + s(12.0) + s(10.0) } else { 0.0 }
+        if present { text_width_cols(badge) as f32 * cell_w + s(10.0) + s(10.0) } else { 0.0 }
     };
 
     for (row, entry) in rows.into_iter().enumerate() {
-        let PaletteRow { icon, color_id, label, hint, is_default, chip, checked: _ } = entry;
+        let PaletteRow { icon, os_icon_id, color_id, label, hint, is_default, chip, checked: _ } =
+            entry;
         let Some(&(row_y, row_hh)) = layout.rows.get(row) else { break };
         let is_hero = hero && row == 0;
         // Hero 卡片双行：名称在上、完整路径在下（图4）；普通行单行居中。
@@ -2552,6 +2618,42 @@ pub(super) fn draw_text(
             text_x + s(CHECK_COL_W)
         } else if icon.is_empty() {
             text_x
+        } else if !os_icon_id.is_empty() {
+            // SSH 行必须按 renderer 的真实 raster bounds 对齐。`ink_em` 只能
+            // 统一轮廓宽度，不能消除 glyph bearing 与 hinting 带来的起墨偏移；
+            // 这里把真实墨迹左缘放到与顶部 chip 完全相同的共享基准线上。
+            let os_icon = super::ui::os_icons::resolve(Some(&os_icon_id));
+            let icon_ink = if launcher { sk.ink_dim } else { sk.icon };
+            let (target_left, target_width) = launcher_icon_ink_span(text_x, scale);
+            let target_center_y = row_y + row_hh * 0.5;
+            if let Some(anchor) = r
+                .chrome_glyph_ink(gc, size, os_icon.glyph)
+                .and_then(|ink| fit_glyph_ink(ink, target_left, target_center_y, target_width))
+            {
+                r.draw_ui_glyph_scaled(
+                    size,
+                    anchor.0,
+                    anchor.1,
+                    anchor.2,
+                    icon_ink,
+                    os_icon.glyph,
+                    gc,
+                );
+            } else {
+                // 缓存或字体暂不可用时仍保持图标可见；下一帧正常命中真实
+                // bounds 后会自动回到精确路径。
+                let icon_mult = super::ui::os_icons::scale_for(os_icon, cell_w, target_width);
+                r.draw_chrome_text_scaled(
+                    size,
+                    target_left,
+                    widgets::centered_y(row_y, row_hh, cell_h * icon_mult),
+                    icon_mult,
+                    icon_ink,
+                    os_icon.glyph.encode_utf8(&mut [0u8; 4]),
+                    gc,
+                );
+            }
+            text_x + indent
         } else {
             let icon_y = widgets::centered_y(row_y, row_hh, cell_h);
             let icon_x = if cards { text_x + (s(PICKER_ICON_BOX) - cell_w) * 0.5 } else { text_x };
@@ -2588,7 +2690,7 @@ pub(super) fn draw_text(
         let badge_span = if is_default && !is_hero {
             r.draw_chrome_text(
                 size,
-                label_x + text_width_cols(&label) as f32 * cell_w + s(10.0),
+                label_x + text_width_cols(&label) as f32 * cell_w + s(13.0),
                 ry,
                 sk.ink_dim,
                 badge,
@@ -3512,6 +3614,12 @@ mod tests {
             ["推荐", "所有 Shell", "SSH 主机"]
         );
         let (px, ..) = layout.panel;
+        let icon_tile_x = layout.list.0 + (LAUNCHER_CONTENT_INSET - 8.0);
+        let icon_ink_x = launcher_icon_ink_span(icon_tile_x, 1.0).0;
+        assert_eq!(
+            layout.chips[0].rect.0, icon_ink_x,
+            "chip 左缘必须与 SSH glyph 的目标墨迹线对齐"
+        );
         assert_eq!(layout.row_at(px + 10.0, first_y + first_h / 2.0), Some(0));
         assert_eq!(layout.row_at(px + 10.0, row_y + row_h / 2.0), Some(1));
         assert_eq!(layout.row_at(px + 10.0, first_y - 2.0), None, "chip 分组区不是行");
@@ -3524,6 +3632,20 @@ mod tests {
             let band_center = band_y + band_h * 0.5;
             assert!((chip_center - band_center).abs() < 0.01, "chip 必须与背景带垂直居中");
         }
+    }
+
+    #[test]
+    fn fitted_launcher_glyph_maps_real_ink_to_shared_chip_line() {
+        let ink = (2.0, 5.0, 20.0, 12.0);
+        let target_left = 100.0;
+        let target_center_y = 80.0;
+        let target_width = 16.0;
+        let (x, y, mult) =
+            fit_glyph_ink(ink, target_left, target_center_y, target_width).expect("valid ink");
+
+        assert!((x + ink.0 * mult - target_left).abs() < 0.01);
+        assert!((ink.2 * mult - target_width).abs() < 0.01);
+        assert!((y + (ink.1 + ink.3 * 0.5) * mult - target_center_y).abs() < 0.01);
     }
 
     #[test]

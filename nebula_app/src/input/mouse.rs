@@ -81,6 +81,26 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.ctx.display().end_sidebar_scrollbar_drag();
         }
 
+        if self.ctx.display().font_popup_scrollbar_dragging() {
+            if lmb_pressed {
+                if self.ctx.display().font_popup_scrollbar_drag_to(y as f32) {
+                    self.ctx.mark_dirty();
+                }
+                self.ctx.window().set_mouse_cursor(CursorIcon::Grabbing);
+                return;
+            }
+            self.ctx.display().end_font_popup_scrollbar_drag();
+        }
+
+        if self.ctx.display().settings_text_drag_to(x as f32) {
+            if lmb_pressed {
+                self.ctx.window().set_mouse_cursor(CursorIcon::Text);
+                self.ctx.mark_dirty();
+                return;
+            }
+            self.ctx.display().end_settings_text_drag();
+        }
+
         if self.ctx.doc_view().is_some_and(|doc| doc.scrollbar_dragging()) {
             if lmb_pressed {
                 let area = self.ctx.display().doc_view_area();
@@ -311,6 +331,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             settings_dropdown,
             shell_picker_count,
             font_picker_count,
+            self.ctx.display().font_popup_scroll(),
             hidden_host_count,
             self.ctx.display().ssh_host_count(),
             self.ctx.display().nebula_density,
@@ -429,7 +450,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::SyncPullButton
             | crate::display::SettingsHit::SshProxyModeDropdown
             | crate::display::SettingsHit::SshProxyModeOption(_)
+            | crate::display::SettingsHit::SshProxyProtocolDropdown
+            | crate::display::SettingsHit::SshProxyProtocolOption(_)
             | crate::display::SettingsHit::SshProxyLinkPick(_)
+            | crate::display::SettingsHit::SshProxyRescan
             | crate::display::SettingsHit::SshJumpHostDropdown
             | crate::display::SettingsHit::SshJumpHostOption(_)
             | crate::display::SettingsHit::SshProxyOverrideEdit(_)
@@ -900,6 +924,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // returns `None` here and falls through to normal release handling.
         if button == MouseButton::Left {
             self.ctx.display().set_settings_pressed(crate::display::SettingsHit::None);
+            self.ctx.display().end_settings_text_drag();
             // 松开就结束输入框的拖选。放在最前面：后面任何一条 early return
             // 都会把这个拖拽状态留下，于是下一次移动鼠标还在选字。
             self.ctx.display().ssh_editor_end_drag();
@@ -908,6 +933,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 return;
             }
             if self.ctx.display().end_sidebar_scrollbar_drag() {
+                self.ctx.mark_dirty();
+                return;
+            }
+            if self.ctx.display().end_font_popup_scrollbar_drag() {
                 self.ctx.mark_dirty();
                 return;
             }
@@ -1073,6 +1102,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // The Settings tab captures the wheel: scroll its page instead of the
         // sink terminal used for special-tab input routing.
         if self.ctx.display().settings_open() {
+            // 字体下拉开着时滚轮归弹层：候选按行滚动，底下的设置页不能
+            // 跟着串滚（弹层锚定在行上，页面一动锚点就跑）。
+            if self.ctx.display().nebula_settings_dropdown
+                == Some(crate::display::SettingsDropdown::Font)
+            {
+                let rows = match delta {
+                    MouseScrollDelta::LineDelta(_, lines) => -lines.signum() as i32 * 3,
+                    MouseScrollDelta::PixelDelta(pos) => -(pos.y.signum() as i32),
+                };
+                if rows != 0 {
+                    self.ctx.display().font_popup_scroll_by(rows);
+                }
+                return;
+            }
             let px = match delta {
                 MouseScrollDelta::LineDelta(_, lines) => {
                     lines * 3.0 * self.ctx.size_info().cell_height()

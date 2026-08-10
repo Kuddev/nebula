@@ -309,7 +309,9 @@ fn common_keybindings() -> Vec<KeyBinding> {
         // mode so Ctrl+V there keeps its navigation meaning.
         "v",    ModifiersState::CONTROL,                          ~BindingMode::VI;                       Action::Paste;
         "v",    ModifiersState::CONTROL,                          +BindingMode::VI, +BindingMode::SEARCH; Action::Paste;
-        "f",    ModifiersState::CONTROL | ModifiersState::SHIFT, ~BindingMode::SEARCH;                   Action::SearchForward;
+        // Ctrl+Shift+F belongs to the Nebula files panel. Keep terminal search
+        // on the conventional Ctrl+F so the keymap page has no silent clash.
+        "f",    ModifiersState::CONTROL,                          ~BindingMode::SEARCH;                   Action::SearchForward;
         "b",    ModifiersState::CONTROL | ModifiersState::SHIFT, ~BindingMode::SEARCH;                   Action::SearchBackward;
         Insert, ModifiersState::SHIFT,                           ~BindingMode::VI;                       Action::PasteSelection;
         "c",    ModifiersState::CONTROL | ModifiersState::SHIFT;                                         Action::Copy;

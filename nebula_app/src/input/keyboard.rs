@@ -156,14 +156,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 },
                 _ => {},
             }
+            self.ctx.display().update_settings_ime_cursor();
             self.ctx.mark_dirty();
             return;
         }
 
-        // 设置→SSH→代理的输入框：规则与同步输入框一致（Enter/Tab
-        // 提交、Esc 还原、Ctrl+V 粘贴、其余字符追加）。
+        // 设置→SSH→代理的输入框：完整文本字段行为（Enter/Tab 提交、
+        // Esc 还原、选区/导航/剪贴板与其他输入框一致）。
         if self.ctx.display().settings_open() && self.ctx.display().nebula_ssh_proxy_focus.is_some()
         {
+            let ctrl = mods.control_key();
+            let shift = mods.shift_key();
             match &key.logical_key {
                 Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => {
                     self.ctx.display().commit_ssh_proxy_field();
@@ -174,28 +177,51 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 Key::Named(NamedKey::Backspace) => {
                     self.ctx.display().ssh_proxy_field_backspace();
                 },
-                Key::Named(NamedKey::Space) => {
+                Key::Named(NamedKey::Delete) => {
+                    self.ctx.display().ssh_proxy_field_delete_forward();
+                },
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.ctx.display().ssh_proxy_field_move(false, shift);
+                },
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.ctx.display().ssh_proxy_field_move(true, shift);
+                },
+                Key::Named(NamedKey::Home) => {
+                    self.ctx.display().ssh_proxy_field_jump(false, shift);
+                },
+                Key::Named(NamedKey::End) => {
+                    self.ctx.display().ssh_proxy_field_jump(true, shift);
+                },
+                Key::Named(NamedKey::Space) if !ctrl => {
                     self.ctx.display().ssh_proxy_field_push(' ');
                 },
-                Key::Character(text) => {
-                    if mods.control_key() && text.eq_ignore_ascii_case("v") {
+                Key::Character(text) if ctrl => match text.as_str() {
+                    "a" | "A" => self.ctx.display().ssh_proxy_field_select_all(),
+                    "c" | "C" => {
+                        if let Some(selected) = self.ctx.display().ssh_proxy_field_selected_text() {
+                            self.ctx.clipboard_mut().store(ClipboardType::Clipboard, selected);
+                        }
+                    },
+                    "v" | "V" => {
                         let paste = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
                         self.ctx.display().ssh_proxy_field_paste(&paste);
-                    } else if !mods.control_key() {
-                        for ch in text.chars() {
-                            self.ctx.display().ssh_proxy_field_push(ch);
-                        }
-                    }
+                    },
+                    _ => {},
+                },
+                Key::Character(text) => {
+                    self.ctx.display().ssh_proxy_field_paste(text.as_str());
                 },
                 _ => {},
             }
+            self.ctx.display().update_settings_ime_cursor();
             self.ctx.mark_dirty();
             return;
         }
 
-        // 按键映射页搜索框：捕获态优先（keymap_search_active 自带该判断）。
-        // Enter/Tab 退出聚焦、Esc 两段式（清词→退出）、Ctrl+V 粘贴。
+        // 按键映射页搜索框：复用字体搜索的完整文本字段行为。
         if self.ctx.display().keymap_search_active() {
+            let ctrl = mods.control_key();
+            let shift = mods.shift_key();
             match &key.logical_key {
                 Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => {
                     self.ctx.display().blur_keymap_search();
@@ -206,23 +232,41 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 Key::Named(NamedKey::Backspace) => {
                     self.ctx.display().keymap_search_backspace();
                 },
-                Key::Named(NamedKey::Space) => {
+                Key::Named(NamedKey::Delete) => {
+                    self.ctx.display().keymap_search_delete_forward();
+                },
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.ctx.display().keymap_search_move(false, shift);
+                },
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.ctx.display().keymap_search_move(true, shift);
+                },
+                Key::Named(NamedKey::Home) => {
+                    self.ctx.display().keymap_search_jump(false, shift);
+                },
+                Key::Named(NamedKey::End) => {
+                    self.ctx.display().keymap_search_jump(true, shift);
+                },
+                Key::Named(NamedKey::Space) if !ctrl => {
                     self.ctx.display().keymap_search_push(' ');
                 },
-                Key::Character(text) => {
-                    if mods.control_key() && text.eq_ignore_ascii_case("v") {
-                        let paste = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
-                        for ch in paste.chars() {
-                            self.ctx.display().keymap_search_push(ch);
+                Key::Character(text) if ctrl => match text.as_str() {
+                    "a" | "A" => self.ctx.display().keymap_search_select_all(),
+                    "c" | "C" => {
+                        if let Some(selected) = self.ctx.display().keymap_search_selected_text() {
+                            self.ctx.clipboard_mut().store(ClipboardType::Clipboard, selected);
                         }
-                    } else if !mods.control_key() {
-                        for ch in text.chars() {
-                            self.ctx.display().keymap_search_push(ch);
-                        }
-                    }
+                    },
+                    "v" | "V" => {
+                        let pasted = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                        self.ctx.display().keymap_search_edit(&pasted);
+                    },
+                    _ => {},
                 },
+                Key::Character(text) => self.ctx.display().keymap_search_edit(text.as_str()),
                 _ => {},
             }
+            self.ctx.display().update_settings_ime_cursor();
             self.ctx.mark_dirty();
             return;
         }
@@ -280,6 +324,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 },
                 _ => {},
             }
+            self.ctx.display().update_settings_ime_cursor();
             self.ctx.mark_dirty();
             return;
         }
@@ -1232,7 +1277,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Handle key release.
     fn key_release(&mut self, key: KeyEvent, mode: TermMode, mods: ModifiersState) {
-        if !mode.contains(TermMode::REPORT_EVENT_TYPES) && !terminal_input::use_win32_input_mode(mode)
+        if !mode.contains(TermMode::REPORT_EVENT_TYPES)
+            && !terminal_input::use_win32_input_mode(mode)
             || mode.contains(TermMode::VI)
             || self.ctx.search_active()
             || self.ctx.display().hint_state.active()

@@ -418,10 +418,6 @@ async fn run_session_async(
     receiver: Receiver<Msg>,
     ready: Arc<AtomicBool>,
 ) -> Result<(), SessionError> {
-    if let Some(proxy_jump) = destination.proxy_jump.as_deref() {
-        return Err(format!("当前直连模式尚未接入跳板机 {proxy_jump}").into());
-    }
-
     let session = authenticated_session(&destination, &profile, Some(&event_proxy)).await?;
     report_stage(Some(&event_proxy), SshStage::OpenShell);
     let mut channel = {
@@ -646,6 +642,14 @@ async fn open_transport(
                     })?
             };
             Ok(client::connect_stream(config, channel.into_stream(), handler).await?)
+        },
+        Some(ProxyLink::Command(command)) => {
+            info!("经自定义命令连接 {}:{}", destination.host, destination.port);
+            let stream =
+                crate::ssh_proxy::connect_command(command, &destination.host, destination.port)
+                    .await
+                    .map_err(|err| format!("自定义代理命令启动失败: {err}"))?;
+            Ok(client::connect_stream(config, stream, handler).await?)
         },
         None => {
             Ok(client::connect(config, (destination.host.as_str(), destination.port), handler)
