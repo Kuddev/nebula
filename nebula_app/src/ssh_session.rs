@@ -560,14 +560,13 @@ async fn authenticated_session_at(
     Ok(session)
 }
 
-/// SSH/SFTP 的唯一 Nebula 代理决策入口。旧 profile 的 `proxy` 字段只保留
-/// 数据兼容，不再参与运行时；OpenSSH `ProxyJump` 是目标解析的一部分，仍需
-/// 先于全局网络设置生效。
+/// SSH/SFTP 的唯一 Nebula 代理决策入口。主机编辑器不再维护第二套代理；
+/// OpenSSH `ProxyJump` 是目标解析的一部分，仍需先于全局网络设置生效。
 fn resolve_network_proxy(
     global: &crate::ssh_proxy::SshProxyConfig,
     destination: &SshDestination,
 ) -> Result<Option<crate::ssh_proxy::ProxyLink>, String> {
-    global.resolve(None, destination.proxy_jump.as_deref(), &destination.host)
+    global.resolve(destination.proxy_jump.as_deref(), &destination.host)
 }
 
 /// 跳板递归需要的类型擦除：async fn 相互递归时 future 类型无限展开，
@@ -898,9 +897,8 @@ async fn proxy_test_once() -> Result<String, SessionError> {
     let global = tokio::task::spawn_blocking(crate::ssh_proxy::SshProxyConfig::load_global)
         .await
         .map_err(|err| format!("读取代理设置失败: {err}"))?;
-    let link = global
-        .resolve(None, None, NETWORK_TEST_HOST)
-        .map_err(|err| format!("代理设置无效: {err}"))?;
+    let link =
+        global.resolve(None, NETWORK_TEST_HOST).map_err(|err| format!("代理设置无效: {err}"))?;
     let route = match &link {
         Some(crate::ssh_proxy::ProxyLink::Server(server)) => server.display(),
         Some(crate::ssh_proxy::ProxyLink::Jump(target)) => format!("SSH {target}"),

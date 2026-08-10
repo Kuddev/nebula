@@ -2,15 +2,13 @@
 //!
 //! 不引入代理 crate：握手完成后把裸 `TcpStream` 交给 russh 的
 //! `client::connect_stream`。全局配置存 `nebula_settings.txt`
-//! （`ssh_proxy_mode` / `ssh_proxy_url` / `ssh_proxy_no_proxy`）。旧版写入
-//! `ssh_profiles.json` 的每主机 `proxy` 字段仍能被解析以保证数据兼容，但主
-//! 界面和连接入口不再使用它覆盖全局网络设置。跳板链路的建立在
-//! `ssh_session::open_transport`——它需要完整的认证栈，本模块只负责把配置
-//! 解析成 [`ProxyLink`]。
+//! （`ssh_proxy_mode` / `ssh_proxy_url` / `ssh_proxy_no_proxy`）。跳板链路的建
+//! 立在 `ssh_session::open_transport`——它需要完整的认证栈，本模块只负责把
+//! 配置解析成 [`ProxyLink`]。
 //!
-//! 「跟随系统」在 Windows 上先读注册表 Internet Settings（WinINET，Clash /
-//! v2rayN 等代理软件写的就是它），读不到再回落环境变量——只读环境变量的话
-//! 这个模式在 Windows 上基本等于摆设。
+//! 「跟随系统」在 Windows 上读取 Internet Settings 注册表（WinINET，Clash /
+//! v2rayN 等代理软件写的就是它），不读取终端环境变量，避免不同启动方式
+//! 让同一份软件设置产生不同的连接路线。
 //!
 //! SOCKS5 一律把主机名交给代理端解析（ATYP=0x03，字面 IP 除外）：访问境外
 //! 主机时本地 DNS 往往被污染或解析不到，本地解析等于代理白配。
@@ -34,8 +32,7 @@ const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum ProxyMode {
     #[default]
     Off,
-    /// 读环境变量 `ALL_PROXY` → `HTTPS_PROXY` → `HTTP_PROXY`（含小写变体），
-    /// `NO_PROXY` 并入绕过列表。
+    /// 读取操作系统的代理设置；不会读取终端环境变量。
     System,
     Custom,
 }
@@ -481,22 +478,14 @@ impl SshProxyConfig {
         config
     }
 
-    /// 汇总「这次连接走不走代理、走哪条链路」。优先级：每主机覆盖
-    /// （profile 的 `proxy` 字段）> `~/.ssh/config` 的 ProxyJump > 全局设置。
-    /// 前两者是对这台主机的明确指令，不受全局绕过列表影响；配置写错要立刻
-    /// 报错——静默直连会把「代理没生效」伪装成网络问题。
+    /// 汇总「这次连接走不走代理、走哪条链路」。`~/.ssh/config` 的
+    /// `ProxyJump` 是目标自身的连接要求，优先于全局网络设置；主机编辑器
+    /// 不再维护第二套代理覆盖字段。
     pub fn resolve(
         &self,
-        override_value: Option<&str>,
         config_proxy_jump: Option<&str>,
         target_host: &str,
     ) -> Result<Option<ProxyLink>, String> {
-        if let Some(value) = override_value.map(str::trim).filter(|value| !value.is_empty()) {
-            if value.eq_ignore_ascii_case("direct") {
-                return Ok(None);
-            }
-            return ProxyLink::parse(value).map(Some);
-        }
         if let Some(jump) = config_proxy_jump.map(str::trim).filter(|value| !value.is_empty()) {
             if jump.contains(',') {
                 return Err(format!("暂不支持多级跳板链（ProxyJump {jump}）"));
@@ -509,19 +498,10 @@ impl SshProxyConfig {
                 if self.url.trim().is_empty() {
                     return Err("代理模式为自定义，但未填写代理地址".to_owned());
                 }
-                if bypassed(target_host, &self.no_proxy) {
-                    return Ok(None);
-                }
                 ProxyLink::parse(&self.url).map(Some)
             },
             ProxyMode::System => {
-                let Some((url, mut no_proxy)) = system_proxy() else { return Ok(None) };
-                // 网络页在系统模式下不显示 Nebula 自定义“直连地址”；这里也
-                // 不能暗中继续套用旧值。只尊重系统 ProxyOverride 和环境侧
-                // NO_PROXY，界面与真实连接语义保持一致。
-                if let Some(env) = env_var("NO_PROXY") {
-                    no_proxy.extend(parse_no_proxy(&env));
-                }
+                let Some((url, no_proxy)) = system_proxy() else { return Ok(None) };
                 if bypassed(target_host, &no_proxy) {
                     return Ok(None);
                 }
@@ -564,24 +544,18 @@ fn bypassed(target_host: &str, no_proxy: &[String]) -> bool {
     })
 }
 
-/// 「跟随系统」的代理来源：`(代理 URL, 系统侧绕过列表)`。Windows 上注册表
-/// Internet Settings 优先（Clash / v2rayN「系统代理」写的就是它），没启用
-/// 再回落环境变量（`ALL_PROXY` → `HTTPS_PROXY` → `HTTP_PROXY`，含小写）。
+/// 「跟随系统」只读取操作系统的代理设置。Windows 上使用 WinINET 注册表；
+/// 不读取 `ALL_PROXY`、`HTTP_PROXY` 等环境变量，避免终端启动环境悄悄改变
+/// 软件内的连接路线。
 fn system_proxy() -> Option<(String, Vec<String>)> {
     #[cfg(windows)]
-    if let Some(found) = registry_proxy() {
-        return Some(found);
+    {
+        return registry_proxy();
     }
-    env_proxy_url().map(|url| (url, Vec::new()))
-}
-
-/// 环境变量链里的第一个非空代理 URL。[`system_proxy`]（连接决策）与
-/// [`probe_system_proxy`]（设置页展示）共用，探测顺序不会漂移。
-fn env_proxy_url() -> Option<String> {
-    ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"]
-        .iter()
-        .find_map(|name| env_var(name))
-        .filter(|value| !value.trim().is_empty())
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 /// 设置页「跟随系统」面板展示的探测结果来源。
@@ -589,8 +563,6 @@ fn env_proxy_url() -> Option<String> {
 pub enum SystemProxySource {
     /// `HKCU\..\Internet Settings`（`ProxyEnable` + `ProxyServer`）。
     Registry,
-    /// 环境变量（`ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`）。
-    Environment,
 }
 
 /// 当前系统代理读到了什么：`(URL, 来源)`。只做展示，不含绕过列表——连接
@@ -598,10 +570,13 @@ pub enum SystemProxySource {
 /// （进设置网络页 / 切模式时刷新），禁止进逐帧路径。
 pub fn probe_system_proxy() -> Option<(String, SystemProxySource)> {
     #[cfg(windows)]
-    if let Some((url, _)) = registry_proxy() {
-        return Some((url, SystemProxySource::Registry));
+    {
+        return registry_proxy().map(|(url, _)| (url, SystemProxySource::Registry));
     }
-    env_proxy_url().map(|url| (url, SystemProxySource::Environment))
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 /// HKCU\...\Internet Settings：`ProxyEnable` 非零时读 `ProxyServer` 与
@@ -652,10 +627,6 @@ fn parse_wininet_override(value: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(|entry| entry.to_ascii_lowercase())
         .collect()
-}
-
-fn env_var(name: &str) -> Option<String> {
-    std::env::var(name).ok().or_else(|| std::env::var(name.to_ascii_lowercase()).ok())
 }
 
 /// 经代理建立到 `target_host:target_port` 的隧道，返回可直接交给
@@ -948,32 +919,26 @@ mod tests {
     }
 
     #[test]
-    fn resolve_precedence_override_then_config_jump_then_global() {
+    fn resolve_proxy_jump_then_global() {
         let global = SshProxyConfig {
             mode: ProxyMode::Custom,
             url: "socks5://global.lan:1080".to_owned(),
             no_proxy: parse_no_proxy("10.0.0.1"),
         };
-        // 每主机覆盖优先于一切，且不受绕过列表影响（覆盖是明确指令）。
-        let forced =
-            global.resolve(Some("http://special.lan:3128"), None, "10.0.0.1").unwrap().unwrap();
-        assert!(
-            matches!(forced, ProxyLink::Server(ref server) if server.scheme == ProxyScheme::HttpConnect)
-        );
-        assert!(
-            global.resolve(Some("direct"), Some("bastion"), "vps.example.com").unwrap().is_none(),
-            "direct 覆盖连 ProxyJump 一起否掉"
-        );
-        // ssh_config 的 ProxyJump 次之，同样不受全局绕过影响。
+        // ssh_config 的 ProxyJump 优先于全局绕过列表。
         assert_eq!(
-            global.resolve(None, Some("ops@bastion"), "10.0.0.1").unwrap(),
+            global.resolve(Some("ops@bastion"), "10.0.0.1").unwrap(),
             Some(ProxyLink::Jump("ops@bastion".to_owned()))
         );
-        assert!(global.resolve(None, Some("j1,j2"), "vps.example.com").is_err(), "多跳报错");
-        // 跟随全局：绕过列表命中 = 直连，其余走代理。
-        assert!(global.resolve(None, None, "10.0.0.1").unwrap().is_none());
+        assert!(global.resolve(Some("j1,j2"), "vps.example.com").is_err(), "多跳报错");
+        // 自定义模式不再提供“直连目标主机”条目；旧配置里的绕过列表
+        // 不会让新的全局代理设置悄悄失效。
         assert!(matches!(
-            global.resolve(None, None, "vps.example.com").unwrap().unwrap(),
+            global.resolve(None, "10.0.0.1").unwrap().unwrap(),
+            ProxyLink::Server(server) if server.host == "global.lan"
+        ));
+        assert!(matches!(
+            global.resolve(None, "vps.example.com").unwrap().unwrap(),
             ProxyLink::Server(server) if server.host == "global.lan"
         ));
         // 全局 url 也可以写 jump: 或裸地址。
@@ -983,16 +948,14 @@ mod tests {
             no_proxy: Vec::new(),
         };
         assert_eq!(
-            jump_global.resolve(None, None, "vps.example.com").unwrap(),
+            jump_global.resolve(None, "vps.example.com").unwrap(),
             Some(ProxyLink::Jump("bastion".to_owned()))
         );
         // 关闭态永远直连；自定义但没填地址必须报错而不是静默直连。
         let off = SshProxyConfig::default();
-        assert!(off.resolve(None, None, "vps.example.com").unwrap().is_none());
+        assert!(off.resolve(None, "vps.example.com").unwrap().is_none());
         let empty = SshProxyConfig { mode: ProxyMode::Custom, ..Default::default() };
-        assert!(empty.resolve(None, None, "vps.example.com").is_err());
-        // 覆盖字段写了非法 URL 也要报错。
-        assert!(global.resolve(Some("ftp://nope"), None, "vps.example.com").is_err());
+        assert!(empty.resolve(None, "vps.example.com").is_err());
     }
 
     /// 进程内 SOCKS5 服务器：校验客户端字节流的每一段，再回放数据验证

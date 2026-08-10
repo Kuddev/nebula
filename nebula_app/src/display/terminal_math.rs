@@ -827,6 +827,39 @@ impl TextGrid {
         }
     }
 
+    fn previous(&self, position: GridPosition) -> Option<GridPosition> {
+        if position.column > 0 {
+            Some(GridPosition { row: position.row, column: position.column - 1 })
+        } else if position.row > 0 {
+            Some(GridPosition { row: position.row - 1, column: self.columns.saturating_sub(1) })
+        } else {
+            None
+        }
+    }
+
+    /// Inline TeX may cross a terminal's physical row only when that row was
+    /// produced by a soft wrap. A real newline still ends the inline span, so
+    /// separate Markdown lines cannot accidentally become one formula.
+    fn find_closing_soft_wrap(
+        &self,
+        mut position: GridPosition,
+        delimiter: &[char],
+    ) -> Option<GridPosition> {
+        loop {
+            if position.row >= self.rows.len() {
+                return None;
+            }
+            if self.starts_with(position, delimiter) && !self.is_escaped(position) {
+                return Some(position);
+            }
+            let previous_row = position.row;
+            position = self.next(position)?;
+            if position.row != previous_row && !self.wrapped[previous_row] {
+                return None;
+            }
+        }
+    }
+
     fn find_closing(
         &self,
         mut position: GridPosition,
@@ -1216,12 +1249,10 @@ fn find_dollar_formula(
     }
 
     let mut search = source_start;
-    while let Some(close) = grid.find_closing(search, &['$'], true) {
-        let previous = (close.column > 0)
-            .then(|| grid.character(GridPosition { row: close.row, column: close.column - 1 }))
-            .flatten();
+    while let Some(close) = grid.find_closing_soft_wrap(search, &['$']) {
+        let previous = grid.previous(close).and_then(|position| grid.character(position));
         let after = grid.after(close, 1);
-        let next = grid.character(after);
+        let next = grid.next(close).and_then(|position| grid.character(position));
         if previous.is_some_and(char::is_whitespace)
             || next.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
         {
@@ -2005,6 +2036,19 @@ mod tests {
             sources(&[r"中文 \(x^2+y^2=z^2\) and $\alpha+1$"], true),
             vec![("x^2+y^2=z^2".into(), false), (r"\alpha+1".into(), false)]
         );
+    }
+
+    #[test]
+    fn inline_formula_survives_soft_wrap_but_not_hard_newline() {
+        let mut wrapped = TextGrid::from_rows(&["$e^    ", r"{i\pi}+1=0$"]);
+        wrapped.wrapped[0] = true;
+        let overlays = scan_grid(&wrapped, true);
+        assert_eq!(overlays.len(), 1);
+        assert!(overlays[0].source.contains("e^"));
+        assert!(overlays[0].source.contains(r"{i\pi}+1=0"));
+
+        let hard = TextGrid::from_rows(&["$e^    ", r"{i\pi}+1=0$"]);
+        assert!(scan_grid(&hard, true).is_empty());
     }
 
     #[test]

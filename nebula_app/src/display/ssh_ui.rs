@@ -214,9 +214,6 @@ pub struct SshHostEditor {
     /// 选择器列表滚过去的行数。
     pub icon_scroll: usize,
     pub private_keys: Vec<PathBuf>,
-    /// 旧版本写入的每主机代理值只做无损持久化。编辑器不再暴露或使用它，
-    /// 新连接统一读取“设置 → 网络”，但保存其他字段也不应顺手破坏历史数据。
-    pub legacy_proxy: Option<String>,
     pub field: SshEditorField,
     pub focus: crate::ux::FocusIndex,
     pub error: Option<String>,

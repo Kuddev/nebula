@@ -260,6 +260,16 @@ pub(super) fn manual_proxy_value(protocol: ManualProxyProtocol, address: &str) -
     }
 }
 
+/// 设置页的悬停层使用当前主题的 accent，而不是固定的灰色或另一套绿色。
+/// 透明度在浅色/深色主题分别取值，保证两种底色上都只是轻微提示。
+fn settings_skin(theme: NebulaTheme) -> Skin {
+    let mut skin = theme.skin();
+    let (hover_alpha, strong_alpha) = if skin.is_light { (22, 34) } else { (30, 46) };
+    skin.hover = Rgba::new(skin.accent.r, skin.accent.g, skin.accent.b, hover_alpha);
+    skin.hover_strong = Rgba::new(skin.accent.r, skin.accent.g, skin.accent.b, strong_alpha);
+    skin
+}
+
 /// 网络页几何的动态输入：模式与子模式决定下方内容的种类与高度，覆盖行数
 /// 决定「每主机覆盖」列表的高度。命中 / 绘制 / 滚动上限三方共用同一份，
 /// 保证控件与点击区不漂移（组件化范式：几何同源）。
@@ -1410,20 +1420,20 @@ fn settings_geometry(
     };
     let ssh_h = s(ssh_end + 32.0 - 72.0);
 
+    // 出网测试是网络页的第一项，用户打开页面即可验证当前设置；三种模式
+    // 的选择与地址控件排在测试横幅之后，避免把功能入口埋在页面最底部。
+    let proxy_test_y = 146.0;
+    let ssh_proxy_test = (row_x, at(proxy_test_y), row_w, s(54.0));
     // 网络代理只保留一张紧凑设置卡：所有模式都有方式行；自定义代理再
     // 展开地址与直连地址两行。旧跳板/命令只保留兼容解析，不再暴露第二套入口。
-    let proxy_y0 = 146.0;
+    let proxy_y0 = proxy_test_y + 54.0 + 18.0;
     let ssh_proxy_mode = (row_x, at(proxy_y0), row_w, row_h);
     let pane_y0 = proxy_y0 + ROW_H;
     let ssh_proxy_expand = (row_x, at(pane_y0), row_w, row_h);
     let bypass_y = pane_y0 + ROW_H;
     let ssh_proxy_bypass = (row_x, at(bypass_y), row_w, row_h);
     let pane_end =
-        if proxy.mode == crate::ssh_proxy::ProxyMode::Custom { bypass_y + ROW_H } else { pane_y0 };
-    // 出网测试是功能入口，不是旧版说明卡：三种模式始终显示，并紧跟当前
-    // 模式真正会使用的字段，测试结果才不会在视觉上归错组。
-    let proxy_test_y = pane_end + 18.0;
-    let ssh_proxy_test = (row_x, at(proxy_test_y), row_w, s(54.0));
+        if proxy.mode == crate::ssh_proxy::ProxyMode::Custom { pane_y0 + ROW_H } else { pane_y0 };
     // 旧扫描/跳板/覆盖能力只保留在兼容后端；这些零尺寸几何用于渐进收口
     // 内部结构，任何绘制与命中都不再消费它们。
     let hidden_proxy_rect = (row_x, at(pane_y0), 0.0, 0.0);
@@ -1434,7 +1444,7 @@ fn settings_geometry(
     let ssh_proxy_other_rows = [hidden_proxy_rect; 3];
     let ssh_proxy_override_row0 = hidden_proxy_rect;
     let ssh_proxy_inherit = hidden_proxy_rect;
-    let proxy_h = s(proxy_test_y + 54.0 + 32.0 - 72.0);
+    let proxy_h = s(pane_end + 32.0 - 72.0);
 
     // Backup prototype: automatic-backup summary, export/restore segmented
     // action, then one grouped manifest card. Backup rows are taller because
@@ -2274,10 +2284,6 @@ pub fn settings_hit(
                     if contains_rect(address, x, y) {
                         return SettingsHit::SshProxyInput(0);
                     }
-                    if contains_rect(sync_input_rect(geometry.ssh_proxy_bypass, scale_factor), x, y)
-                    {
-                        return SettingsHit::SshProxyInput(1);
-                    }
                 }
                 if contains_rect(ssh_proxy_test_button(geometry.ssh_proxy_test, scale_factor), x, y)
                 {
@@ -2860,7 +2866,7 @@ pub(super) fn push_quads(
     scale: f32,
 ) {
     let s = |v: f32| v * scale;
-    let sk = view.theme.skin();
+    let sk = settings_skin(view.theme);
 
     let geometry = settings_geometry(
         size,
@@ -3465,7 +3471,10 @@ pub(super) fn push_quads(
                 let (rx, ry, rw, rh) = row;
                 // The host row is an unframed setting surface. Spacing and the
                 // compact trailing actions provide hierarchy without a card outline.
-                clip(quads, UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.surface));
+                clip(
+                    quads,
+                    UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.accent_soft),
+                );
                 // 行左缘画主机的 OS 图标（文字 pass，os_icons 字形），不再是
                 // 状态环——2026-08-09 用户裁定：已保存主机要把图标显示出来。
                 // 主机模型依旧没有可靠的在线态，图标标注的是「这是哪台机器」，
@@ -3605,7 +3614,6 @@ pub(super) fn push_quads(
                     clip(quads, quad);
                 }
                 input_control(quads, address, 0);
-                input_control(quads, sync_input_rect(geometry.ssh_proxy_bypass, scale), 1);
             }
 
             // 功能横幅保持中性底；成功/失败只由状态文字表达，不用整块绿/红
@@ -4124,7 +4132,7 @@ pub(super) fn push_popup_quads(
 ) {
     let Some(dropdown) = view.dropdown else { return };
     let s = |v: f32| v * scale;
-    let sk = view.theme.skin();
+    let sk = settings_skin(view.theme);
     let geometry = settings_geometry(
         size,
         scale,
@@ -4313,7 +4321,7 @@ pub(super) fn draw_popup_text(
     let mut icon_draws = Vec::new();
     let Some(dropdown) = view.dropdown else { return icon_draws };
     let s = |v: f32| v * scale;
-    let sk = view.theme.skin();
+    let sk = settings_skin(view.theme);
     let language = view.language;
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
@@ -4621,7 +4629,7 @@ pub(super) fn draw_text(
     let s = |v: f32| v * scale;
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
-    let sk = view.theme.skin();
+    let sk = settings_skin(view.theme);
     let language = view.language;
 
     let geometry = settings_geometry(
@@ -5655,32 +5663,6 @@ pub(super) fn draw_text(
                     let (ix, iy, iw, ih) = address;
                     let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
                     let (text, placeholder, _, _) = ssh_proxy_input_display(view, 0, max_cols);
-                    r.draw_chrome_text(
-                        size,
-                        ix + s(12.0),
-                        iy + (ih - cell_h) / 2.0,
-                        if placeholder { sk.ink_dim } else { sk.ink },
-                        &text,
-                        gc,
-                    );
-                }
-
-                let row = geometry.ssh_proxy_bypass;
-                if visible(row.1, row.3) {
-                    row_label(
-                        r,
-                        gc,
-                        size,
-                        scale,
-                        &sk,
-                        row,
-                        language.pick("直连地址", "Direct addresses"),
-                        "",
-                        sk.ink,
-                    );
-                    let (ix, iy, iw, ih) = sync_input_rect(row, scale);
-                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
-                    let (text, placeholder, _, _) = ssh_proxy_input_display(view, 1, max_cols);
                     r.draw_chrome_text(
                         size,
                         ix + s(12.0),

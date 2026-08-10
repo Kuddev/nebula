@@ -8,15 +8,30 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### English
 
+#### Updated
+
+- **Updated network settings** — the page now has three clear choices: No proxy, Follow system, and Use proxy. The network test is at the top of the page, and changing the choice or address takes effect immediately without restarting Nebula.
+- **Updated proxy routing** — Follow system reads the operating system proxy only; terminal variables such as `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY` no longer change SSH or SFTP routes. The old per-host proxy field is removed from `ssh_profiles.json`, while OpenSSH `ProxyJump` remains supported.
+
+#### Fixed
+
+- **Fixed inline formulas split by terminal wrapping** — a formula such as `$e^{i\\pi}+1=0$` still renders when the terminal wraps it onto the next screen row, while a real line break still ends the inline formula.
+- **Fixed the network page showing an obsolete direct-host row** — all three modes now avoid displaying the unused bypass-host input.
+
+#### Improved
+
+- **Improved settings color feedback** — selected and hovered controls now use one softly tinted version of the active theme color in both light and dark themes, avoiding abrupt green-to-blue transitions.
+- **Improved saved-host rows** — host cards use the same pale theme-tinted surface as the selected navigation item, so settings sections read as one consistent interface.
+
 #### Added
 
 - **Encrypted backup and restore** — Settings can export selected Nebula-owned data into an AES-256-GCM archive protected by an Argon2id-derived passphrase, then authenticate and restore it with path-traversal and symlink-parent checks. Appearance, configuration, sanitized SSH profiles, sync, assistant data, sessions, directory and command history, and imported fonts can be selected independently.
 - **A dedicated image viewer tab** — double-clicking PNG, JPEG, WebP, or BMP files in the file tree opens an independent image tab that scales the decoded image to the content area. Markdown images reuse the same decoder and renderer instead of maintaining a second image path.
-- **A dedicated SSH settings page** — the sidebar's ordered SSH hosts now have a two-line card view with connect, edit, hide, add-host, and immediate `~/.ssh/config` import actions under Settings → SSH. Proxy mode, proxy address, bypass hosts, hidden-host recovery, and the stable upgrade affordance live on the same page; the existing sidebar remains a fast connection entry point.
+- **A dedicated SSH settings page** — the sidebar's ordered SSH hosts now have a two-line card view with connect, edit, hide, add-host, and immediate `~/.ssh/config` import actions under Settings → SSH. The global network mode and proxy address live on their own Network page; the existing sidebar remains a fast connection entry point.
 - **Shared overlay scrollbars** — Markdown, tab lists, and SSH hosts now use the same unobtrusive scrollbar: a 3 px thumb appears only for overflowing hovered content, with a forgiving 12 px pointer target plus drag and track-click navigation.
 - **A unified Files/Git drawer header** — Files and Git are two centered slots in one segmented control. The file tools row keeps the current root on one line and provides follow-current-terminal (`Alt+R`), new-terminal-here (`Alt+T`), and reveal-in-file-manager (`Alt+O`) actions with matching hover tips.
 - **Input latency probes** — launching with `NEBULA_INPUT_LATENCY=1` logs per-segment timings (key event → PTY write, PTY wakeup → frame, key → frame) through the debug log, turning "typing feels slow" into a number that names the slow segment. Disabled probes cost one initialized-`OnceLock` read.
-- **SSH connections can go through a jump host or the system proxy** — a host's proxy now resolves with clear precedence: the profile's own `proxy` field, then `ProxyJump` from `~/.ssh/config`, then the global setting. `jump:user@bastion` tunnels the session through one SSH bastion, and multi-hop chains are rejected with an explanatory error instead of silently using the first hop. The global "system" mode reads the Windows registry proxy and honours its bypass list.
+- **SSH connections can go through a jump host or the system proxy** — `ProxyJump` from `~/.ssh/config` remains supported, and SSH/SFTP connections use the shared global network setting. The system mode reads the Windows system proxy instead of terminal environment variables; multi-hop chains are rejected with an explanatory error.
 - **The font picker lists installed system fonts** — the font selector merges Windows system font families with imported ones: monospaced families (as reported by DirectWrite, not guessed from glyph widths) are shown by default, the full list is one click away, and a real search box — caret, selection, and clipboard shortcuts included — filters by display name. Enumeration is lazy and stays off the startup path. Applying a font is transactional: validated first, rolled back on failure; proportional families are marked, and a startup fallback shows a notice. (Thanks to @Sakyvo.)
 - **A compact appearance preset** — Settings → Appearance gains an interface density choice: Standard keeps the current look, while Compact trims padding, steps every corner radius one rung down the existing ladder, and forgoes decorative glows across the title bar, sidebar, settings, command palette, file drawer, and dialogs. No new visual values are introduced — compact takes the next smaller step of the existing spacing and radius ladders, expressed as relations (`radius::overlay(density)`, `control::row(density)`) rather than a parallel constant table. (Thanks to @Sakyvo.)
 
@@ -43,21 +58,36 @@ Every release entry is provided in English and Simplified Chinese.
 - **File-tree status is quieter and stable** — directories use neutral theme colors, ignored paths detected through batched `git check-ignore` are dimmed without changing sorting or filtering, and hovering a row no longer shifts its contents.
 - **Saved hosts in Settings → SSH show their OS icon** — each row now draws the same per-host icon as the sidebar (real ink width measured, then optically scaled to one target size), replacing the earlier neutral status ring; `auto` and unrecognized ids fall back to the generic terminal shape. The icon says which machine this is — it does not invent an online state.
 - **Overlay panels draw from one component set** — the command palette, the Ctrl+K launcher, the Ctrl+Shift+O session picker, and combobox dropdowns now share one `overlay_list` module for option rows, icon tiles, identity chips, footer hints, and the query caret, and the SSH settings row actions share one outline-button widget. Selection and hover treatments are now identical everywhere; the migration also removed a hidden asymmetry where selected pills were 2 px taller than hover pills.
-- **The Network page shows only what the selected mode needs** — Off is a single explanatory note instead of leftover input boxes; Follow system reports the proxy it is actually reading right now (registry Internet Settings or environment variables, probed on entry rather than per frame); Custom proxy offers a manual-address / SSH-jump-host choice, with the jump host picked from saved hosts instead of typed syntax. Hosts carrying their own link override are listed on the same page with an inline summary (direct / proxy / via jump host) and open their editor on click, ending with "the other N hosts follow the global default".
+- **The Network page shows only what the selected mode needs** — the page keeps the mode selector, a manual proxy address when needed, and the network test. Obsolete local proxy scans, per-host overrides, and direct-host input are no longer presented; saved SSH hosts use the global network setting while OpenSSH `ProxyJump` remains a backend capability.
 - **One selection tint everywhere** — the settings navigation, the sidebar's active tab, and the Network page's choice rows now share the design prototype's accent-soft selection wash (≈ rgb(52,71,99) composited on the dark theme); light themes stay neutral automatically because the token derives from each theme's accent.
 - **The key-bindings page gains groups, search, and clash warnings** — actions are grouped under Global / Tabs / Panes / Side panels / Terminal with quiet section headers only (no frames), a search box filters actions and keys as you type and folds empty groups away, duplicate bindings paint both keycaps in the danger tint plus a warning naming which action stops firing, keycaps follow the prototype's tiering (surface base, thick bottom lip, dim ink lifted on hover), and hovering a row reveals the Rebind affordance.
 
 ### 简体中文
 
+#### 更新
+
+- **更新网络设置** — 网络页现在只保留三个直观选项：“不使用代理”“跟随系统”“使用代理”。“测试网络”放在页面最上方，切换选项或修改地址会立即生效，不需要重启 Nebula。
+- **更新代理读取方式** — “跟随系统”只读取操作系统代理，不再受 `ALL_PROXY`、`HTTP_PROXY`、`HTTPS_PROXY` 等终端环境变量影响。`ssh_profiles.json` 中旧的主机代理字段已移除，但 OpenSSH 的 `ProxyJump` 仍然支持。
+
+#### 修复
+
+- **修复行内公式被终端换行拆开后不显示** — `$e^{i\\pi}+1=0$` 即使跨到下一屏幕行也会正常渲染；真正的换行仍会结束行内公式。
+- **修复网络页残留“直连目标主机”输入行** — 三种模式都不再显示这条已经不用的设置。
+
+#### 改进
+
+- **改进设置页的颜色反馈** — 选中和悬停使用当前主题的同一套主题色，浅色与深色模式都保持柔和、干净的过渡，不再出现绿色跳成蓝色的突兀变化。
+- **改进设置页主机行** — 已保存主机使用淡色主题底，和导航选中状态保持一致，减少不同区域之间的颜色跳变。
+
 #### 新增
 
 - **加密备份与恢复** — 设置页可将选中的 Nebula 数据导出为 AES-256-GCM 加密归档，密钥由 Argon2id 从口令派生；恢复前会完整认证，并防止路径穿越和符号链接父目录写入。外观、配置、已脱敏的 SSH 配置、同步、助手数据、会话、目录与命令历史以及导入字体均可独立选择。
 - **独立图片查看器标签页** — 在文件树中双击 PNG、JPEG、WebP 或 BMP 会打开独立图片标签页，并按内容区域等比适配。Markdown 图片复用同一套解码与渲染路径，不再维护重复实现。
-- **独立 SSH 设置页** — 侧栏同源、保持原顺序的 SSH 主机现在以双行卡片呈现，并提供连接、编辑、隐藏、添加主机和立即导入 `~/.ssh/config`；代理模式、代理地址、绕过主机、已隐藏主机恢复和稳定的升级入口也统一归入“设置 → SSH”。侧栏仍保留为快速连接入口。
+- **独立 SSH 设置页** — 侧栏同源、保持原顺序的 SSH 主机现在以双行卡片呈现，并提供连接、编辑、隐藏、添加主机和立即导入 `~/.ssh/config`；全局网络模式和代理地址集中在“设置 → 网络”。侧栏仍保留为快速连接入口。
 - **共享 OverlayScrollbar** — Markdown、标签列表和 SSH 主机列表统一使用克制的浮层滚动条：内容溢出且鼠标进入时才显示 3px thumb，实际命中区为 12px，并支持拖动和点击轨道跳转。
 - **文件/Git 一体化抽屉头部** — 文件与 Git 成为同一分段控件内居中的两个槽位；文件工具行单行显示当前根目录，并提供跟随当前终端（`Alt+R`）、在此新建终端（`Alt+T`）和在资源管理器中打开（`Alt+O`），hover 提示与快捷键保持一致。
 - **输入延迟打点** — 以 `NEBULA_INPUT_LATENCY=1` 启动后，调试日志会记录分段耗时（按键事件→PTY 写入、PTY 唤醒→帧、按键→帧），把“打字感觉慢”变成能指出慢在哪一段的数字。探针关闭时的开销仅为一次已初始化 `OnceLock` 读取。
-- **SSH 可经跳板机或系统代理连接** — 主机的代理按清晰的优先级解析：profile 自己的 `proxy` 字段 > `~/.ssh/config` 的 `ProxyJump` > 全局设置。`jump:user@bastion` 让会话经一台 SSH 跳板建立；多级跳板链会得到明确报错，而不是悄悄只取第一跳。全局“系统”模式读取 Windows 注册表代理并遵守其绕过列表。
+- **SSH 可经跳板机或系统代理连接** — `~/.ssh/config` 的 `ProxyJump` 仍然支持，SSH/SFTP 连接统一使用网络页的全局设置；“跟随系统”读取 Windows 系统代理，不读取终端环境变量。多级跳板链会得到明确报错。
 - **字体选择器列出系统已安装字体** — 字体选择器把 Windows 系统字体族与导入字体合并去重：默认只显示等宽家族（由 DirectWrite 权威判定，不用字形宽度启发式），一键展开全部；弹层顶部是正经搜索框（光标、选区、剪贴板快捷键俱全），按显示名过滤。枚举惰性执行，不进启动路径。应用字体是事务性的：先验证再持久化，失败回滚到当前字体；非等宽家族有标记，启动回退时也会给出提示。（感谢 @Sakyvo。）
 - **紧凑外观预设** — 设置 → 外观新增界面密度选项：标准保持现状；紧凑减少留白、把所有圆角在既有阶梯上整体下移一档，并去除顶栏、侧栏、设置、命令面板、文件抽屉与对话框的装饰性光晕。不引入任何新的视觉数值——紧凑取的是既有间距与圆角阶梯的更小一档，以关系函数（`radius::overlay(density)`、`control::row(density)` 等）表达，而非平行常量表。（感谢 @Sakyvo。）
 
@@ -84,7 +114,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **文件树状态更安静且不抖动** — 目录使用主题中性灰，批量 `git check-ignore` 识别出的忽略项只降低显示强度、不参与排序或过滤，鼠标悬浮也不再移动行内容。
 - **设置 → SSH 的已保存主机显示各自的系统图标** — 每行左缘画与侧栏同源的 per-host 图标（按真实墨迹宽度光学缩放到统一尺寸），替代此前的中性状态环；`auto` 与未识别的 id 回落通用终端形状。图标只回答“这是哪台机器”，不发明在线状态。
 - **浮层面板共用一套组件** — 命令面板、Ctrl+K 启动器、Ctrl+Shift+O 会话快跳与下拉框的选项行、图标底块、身份 chip、页脚提示和查询光标统一收进 `overlay_list` 组件，SSH 设置页的行内动作也共用一个 outline 按钮组件。各处的选中/悬停形态从此完全一致——迁移顺带消除了一个隐藏不对称（选中药丸此前比悬停药丸高 2px）。
-- **网络页按所选模式显示内容** — 「不使用」只剩一句直连说明，不再残留输入框；「跟随系统」实时写明当前读到的代理（注册表 Internet Settings 或环境变量，进页时探测而非逐帧读）；「指定代理」提供手动填写 / SSH 跳板两种方式，跳板直接从已保存主机中选择而不用手写语法。单独设置链路的主机在同页列出摘要（直连 / 指定代理 / 经跳板转发），点击直达其编辑器，结尾一行写明「其余 N 台主机跟随全局默认」。
+- **网络页按所选模式显示内容** — 页面保留模式选择、需要时的代理地址和网络测试；旧的本机代理扫描、每主机覆盖和“直连目标主机”输入不再显示。已保存主机统一使用网络页的全局设置，OpenSSH `ProxyJump` 仍由后端支持。
 - **选中色全局统一为一个 token** — 设置导航、侧栏活动标签与网络页单选行共用原型的 accent-soft 选中底（深色主题合成后 ≈ rgb(52,71,99)）；浅色主题的这个 token 本身就是中性灰，无需另设分支。
 - **按键映射页新增分组、搜索与冲突提示** — 动作按 全局 / 标签页 / 窗格 / 侧栏面板 / 终端 分组，只用段标题与间距分隔（无框保持干净）；搜索框即输入即过滤动作名与按键，被滤空的组连标题一起收起；重复绑定会把两行键帽标成 danger 色，并配一条写明「谁不生效」的警告；键帽按原型分级（surface 底、厚底边、弱墨 hover 提亮）；悬停行浮现「改键」入口。
 
