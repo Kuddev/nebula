@@ -4,7 +4,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
-## Unreleased
+## 1.0.0 - 2026-08-10
 
 ### English
 
