@@ -4,8 +4,8 @@
 //! # Why hooks, not the notification channel
 //!
 //! Claude Code's terminal notifications (`preferredNotifChannel`) are a dead
-//! end on Windows: `auto` only recognizes Apple Terminal / iTerm2 / kitty /
-//! ghostty and silently resolves to "no method available" everywhere else
+//! end on Windows: `auto` only recognizes a fixed set of terminal identifiers
+//! and silently resolves to "no method available" everywhere else
 //! (verified by decompiling claude 2.1.158; there is no env-var override
 //! either). Rewriting `~/.claude.json` from outside is worse: claude rewrites
 //! that file wholesale with no lock (anthropics/claude-code#28922), so

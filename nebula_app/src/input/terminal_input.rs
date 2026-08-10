@@ -242,7 +242,7 @@ pub(crate) fn build_sequence(input: &KeyInput, mods: ModifiersState, mode: TermM
     payload.into_bytes()
 }
 
-/// Select the same protocol precedence as Windows Terminal: ConPTY's native
+/// Select protocol precedence for ConPTY's native input mode. Child-requested
 /// Win32 records are the fallback, not a competing encoder. Once the child has
 /// requested Kitty keyboard flags, those flags describe the wire contract and
 /// must take precedence over DECSET 9001.

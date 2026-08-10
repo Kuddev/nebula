@@ -84,7 +84,7 @@ pub(super) struct TabDrag {
     pub(super) active: bool,
     /// Dock target while the pointer hovers the terminal area: dropping here
     /// splits the ACTIVE tab's layout on that side and moves the dragged tab's
-    /// whole pane tree into it (VS Code-style edge docking).
+    /// whole pane tree into it (edge docking).
     pub(super) dock: Option<SplitNav>,
 }
 
@@ -948,7 +948,7 @@ pub(super) fn draw_chrome(d: &mut Display) {
     // re-create the "solid panel on translucent border" split it replaced.
 
     // Dock preview: while a dragged tab hovers the terminal area, glow the
-    // half where dropping would split the active tab (VS Code edge dock).
+    // half where dropping would split the active tab.
     if let Some(nav) = d.nebula_tab_drag.as_ref().filter(|d| d.active).and_then(|d| d.dock) {
         let gx = size.padding_x();
         let gy = size.padding_y();
@@ -1633,8 +1633,8 @@ pub(super) fn draw_chrome(d: &mut Display) {
             // 箭头前置、数量后置。
             //
             // 前置不是排版偏好，是**符号语义**：后置的 chevron 在 UI 语言里
-            // 属于下拉菜单（combobox），前置的三角才是折叠（Finder / VS Code /
-            // 所有 IDE 的 disclosure triangle）。用后置箭头表达折叠等于借错了
+            // 属于下拉菜单（combobox），前置的三角才是折叠控件通用的
+            // disclosure triangle。用后置箭头表达折叠等于借错了
             // 符号。前置还让多个分组的箭头对齐成一条竖线，层级一眼可扫；后置
             // 的位置得跟着标题长度飘。
             //

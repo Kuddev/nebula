@@ -2044,7 +2044,7 @@ impl Display {
         };
         renderer.clear(background_color, settings_init.opacity);
         window.set_transparent(settings_init.opacity < 1.0);
-        // 背景模糊的开关住在 nebula_settings.txt 里，不是 alacritty 那侧的
+        // 背景模糊的开关住在 nebula_settings.txt 里，不是基础配置侧的
         // `window.blur`——所以要在这里按真正的设置再压一次，否则窗口创建时
         // 用的是那个字段的默认值。
         window.set_blur(settings_init.blur);
@@ -8401,7 +8401,7 @@ impl Display {
         // 键位画成键帽（描边小方框）而不是裸文字：v0.5/v0.6 起 welcome 页的
         // 快捷键就是灰底药丸 + 亮墨的键帽（`welcome.rs` 的 `kbd`），用户记
         // 的"白色的框"就是它。那边是终端文本（ANSI + powerline 圆头字形），
-        // 这里走 draw_ui + chrome text，没法照搬，所以用本文件既有的惯用法
+        // 这里走 draw_ui + chrome text，因此使用本文件既有的惯用法
         // 手画：外圈描边 quad + 内层填充 quad，只露 1px 圆环。描边取按钮
         // 自己的墨色，深色主题下自然读作白框，浅色主题下是深框。
         let language = self.ui_language();

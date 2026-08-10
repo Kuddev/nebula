@@ -98,8 +98,8 @@ docs/future_planning.md
 .probe/
 .run/
 
-# 内部设计推导过程（竞品逐图精读），结论已落进 nebula_app/src/display/ui/
-# 的层契约与代码注释，仓库里不留竞品名。
+# 内部设计推导过程不入库；稳定结论已经落进 nebula_app/src/display/ui/
+# 的层契约与代码注释。
 docs/nebula-visual-design-language.md
 
 # 设计规格文档：内含后续版本的路线图，不进公开仓库。

@@ -187,7 +187,7 @@ pub struct SidePanel {
     /// Scroll offset in rows.
     pub scroll: usize,
     /// Files-view filter query; non-empty switches the tree to a flat list of
-    /// deep matches (VS Code's explorer filter).
+    /// deep matches, matching the tree filter's flat-result behavior.
     pub search: String,
     /// Whether the filter box owns the keyboard.
     pub search_focus: bool,
@@ -263,7 +263,7 @@ impl SidePanel {
     }
 
     /// Toggle the drawer. Re-invoking with the *other* view while open only
-    /// switches views (VS Code sidebar behaviour) instead of closing.
+    /// switches views instead of closing the drawer.
     pub fn toggle(&mut self, view: PanelView) {
         if self.open && self.view == view {
             self.open = false;
@@ -629,8 +629,7 @@ impl SidePanel {
                 Some((is_dir, name, e.path()))
             })
             .collect();
-        // Directories first, then case-insensitive alphabetical (Explorer/
-        // VS Code convention).
+        // Directories first, then case-insensitive alphabetical order.
         entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
         for (is_dir, name, path) in entries {
             if self.rows.len() >= MAX_ROWS {

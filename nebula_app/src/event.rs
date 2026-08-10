@@ -2606,8 +2606,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
     /// The failed command's on-screen output: up to `max_lines` rows ending at
     /// the cursor (OSC 133;D arrives before the next prompt paints, so the
     /// cursor still sits at the end of the output), tail-capped at `max_chars`
-    /// — the newest lines carry the actual error. This is the context Kaku's
-    /// shell-side integration can never see; it is Nebula's edge as a terminal.
+    /// — the newest lines carry the actual error. Shell-side integrations cannot
+    /// see this rendered context, so the terminal grid remains the authoritative source.
     fn grid_output_tail(&self, max_lines: usize, max_chars: usize) -> String {
         use nebula_terminal::index::{Column, Line};
         use nebula_terminal::term::cell::Flags as CellFlags;

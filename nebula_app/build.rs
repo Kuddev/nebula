@@ -42,7 +42,7 @@ fn main() {
 }
 
 /// Copy the side-by-side new-ConPTY (`conpty.dll` + `OpenConsole.exe`) next to
-/// the built exe, mirroring Windows Terminal's OpenConsole strategy.
+/// the built exe so the matching OpenConsole host is selected at runtime.
 ///
 /// `conpty.rs` first tries to load a `conpty.dll` found through the normal DLL
 /// search path, which includes the executable directory. That DLL then launches
