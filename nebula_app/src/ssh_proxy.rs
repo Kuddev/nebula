@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
-/// 与 zap 一致的握手预算：慢代理 10 秒建不起隧道就该报错，而不是让
+/// 代理握手预算为 10 秒：超时后应明确报错，而不是让
 /// 连接卡片永远转圈。
 const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 

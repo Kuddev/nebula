@@ -2,7 +2,7 @@
 #
 # Everything mutable is redirected into one throwaway root: APPDATA carries
 # both nebula_settings.txt (our own key/value store, owns `opacity`) and
-# nebula.toml (the alacritty-side config, owns `window.blur`). Isolating it
+# nebula.toml (the base config, owns `window.blur`). Isolating it
 # keeps the real user settings untouched -- and, just as important, gives the
 # probe its own mux.port so the launch does not just ping the resident
 # instance and exit without ever opening a window.

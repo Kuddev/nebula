@@ -5869,7 +5869,7 @@ pub(super) fn draw_text(
                     );
                 }
             }
-            // 冲突提示句（写清谁不生效——Tabby 的静默失效就是反例）。
+            // 冲突提示句必须写清哪个绑定不生效，不能让配置静默失效。
             if let Some(note) = &view.keymap_clash_note {
                 let (nx, ny, nw, nh) = geometry.keymap_note;
                 if geometry.keymap_pane.clash && visible(ny, nh) {

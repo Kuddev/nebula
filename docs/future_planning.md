@@ -4,9 +4,9 @@
 
 ## 2026-08-09 产品优先级总览
 
-详细产品范围、Netcatty 对照、验收指标与分期背景见
+详细产品范围、验收指标与分期背景见
 [PRD：AI 会话指挥中心与远程开发工作流](prd-ai-session-and-remote-workflow.md)。
-2026-08-09 进一步复核上级目录的 Kaku 与 Herdr 后，产品定位和前三项优先级按本节更新；
+2026-08-09 进一步复核现有产品能力与运行时需求后，产品定位和前三项优先级按本节更新；
 PRD 中与本节冲突的旧优先级不再作为排期依据。
 
 本节是当前功能排期的统一口径；下方各章节继续保存需求细节、调研证据和实现备忘。
@@ -18,10 +18,10 @@ Nebula 的目标是成为**最出色的传统 AI 终端**：终端始终是主�
 SSH 是附带连接能力而不是产品身份。前三项投入必须直接增强本地与远端共用的终端、AI 和
 长期任务体验，不以追平通用 SSH 客户端的功能全集为目标。
 
-Kaku 已经具备自然语言转命令、失败修复、原生 AI Chat、工具循环、审批和长期记忆，说明
-“命令生成 + 自动修错”只是入场能力，不能再用较浅的 Command Center 代表整个 AI 产品。
-Herdr 已经验证 server-owned Pane/进程状态、单一 Agent 状态权威、状态向上汇总、
-detach/reattach、冷恢复和 Agent 原生 resume 必须构成同一个运行时，不能拆成互不相干的面板功能。
+行业实践已经证明，自然语言转命令、失败修复、原生 AI Chat、工具循环、审批和长期记忆
+只是基础能力，不能再用较浅的 Command Center 代表整个 AI 产品。长期任务还要求
+server-owned Pane/进程状态、单一 Agent 状态权威、状态向上汇总、detach/reattach、冷恢复和
+Agent 原生 resume 构成同一个运行时，不能拆成互不相干的面板功能。
 
 因此作出三项调整：
 
@@ -48,7 +48,7 @@ detach/reattach、冷恢复和 Agent 原生 resume 必须构成同一个运行�
 
 | 顺序 | 产品任务 | 核心范围 | 为什么现在做 | 退出/验收门槛 |
 | --- | --- | --- | --- | --- |
-| `P0-1` | **Native AI Workbench / Agent Engine** | 原生流式对话；Pane、选区、命令失败、cwd、Git 上下文；文件/搜索/Shell/项目工具；多轮 Agent loop；审批、取消、失败恢复；会话与受控记忆；Provider 和系统凭据 | Kaku 已把简单命令生成变成基线；Nebula 必须先拥有能完成真实任务的原生 AI 执行面 | AI 可在一个可取消、可审批的流程中读取项目、运行命令、处理失败并修改文件；变更必须经过策略或用户授权；终端输出不能升级为系统指令；密钥不明文落盘 |
+| `P0-1` | **Native AI Workbench / Agent Engine** | 原生流式对话；Pane、选区、命令失败、cwd、Git 上下文；文件/搜索/Shell/项目工具；多轮 Agent loop；审批、取消、失败恢复；会话与受控记忆；Provider 和系统凭据 | 简单命令生成已是基础能力；Nebula 必须先拥有能完成真实任务的原生 AI 执行面 | AI 可在一个可取消、可审批的流程中读取项目、运行命令、处理失败并修改文件；变更必须经过策略或用户授权；终端输出不能升级为系统指令；密钥不明文落盘 |
 | `P0-2` | **Intelligent Command Loop / Failure Intelligence** | `#` 自然语言转命令；失败解释与修复；命令预览和风险；历史、补全与 AI 建议统一排序；选中输出后解释/修复；当前 Pane、新 Tab、Split 执行目标 | 这是传统 AI 终端最高频、最低摩擦的使用路径，不能要求用户每次进入 Chat | 生成命令只进入可编辑输入区且绝不默认执行；失败上下文能准确携带命令、退出码、cwd、Git 和环境；高风险动作必须确认；可无复制地升级到 Workbench |
 | `P0-3` | **Agent Runtime & Session Continuity** | server-owned `TaskIdentity/TaskRuntime`；单一状态权威；Pane/Tab/Workspace 汇总；Attention Inbox；实时 detach/reattach；冷恢复；Agent 原生 resume；`live/lost/rebuildable` 边界 | 这是 Nebula 超过普通 AI Chat 终端的长期差异化，也是真实后台 Agent、注意力和恢复能力的共同地基 | 侧栏、Tab、通知、Workbench、Command Center 和恢复快照消费同一状态；24 小时驻留和 100 次 detach/attach 基准达标；重启后不把重建伪装成仍存活 |
 
@@ -72,7 +72,7 @@ detach/reattach、冷恢复和 Agent 原生 resume 必须构成同一个运行�
 | `P0-Q` | Windows 原生输入、ConPTY 与窗口兼容路线 | 作为传统终端可信度的长期质量门，与三大产品任务并行维护，不占用第四个产品支柱 | 原始事件事实、9001 协议、平台适配层 | 协议/布局/IME/多屏矩阵通过；不支持 9001 时正确降级 |
 | `P1` | Git worktree Agent Fork、Cross-Pane Context Bus、Markdown 评论发送 | 在 Runtime 与 Action Contract 上扩展深度 Agent 协作 | 任务 ID、Git 检查、内容脱敏、目标权限 | 创建和发送前可预览目标与范围；失败不覆盖或删除用户数据；接收内容不会未经确认执行 |
 | `P1` | MCP / Skill 与受控 Recipe | 扩展 Agent 能力，但必须复用宿主权限和凭据代理 | Tool/Action Contract、Provider、secret store | 安装、启停和升级可回滚；权限可解释；第三方能力不能直接读取系统密钥 |
-| `P2` | Host Chain / ProxyJump、端口转发、可靠 SFTP、轻量主机组织 | SSH 是附带能力；保留可靠连接闭环，但不与三个 P0 支柱争抢主线资源 | 统一 host id、逐跳凭据、SSH runtime、独立传输事务 | 多跳可定位失败 hop；转发状态与真实 listener 一致；1 GiB 传输可恢复且失败不留下半个最终文件 |
+| `P2` | Host Chain / ProxyJump、端口转发、可靠 SFTP、SSH 图片粘贴、轻量主机组织 | SSH 是附带能力；保留可靠连接闭环，但不与三个 P0 支柱争抢主线资源 | 统一 host id、逐跳凭据、SSH runtime、独立传输事务 | 多跳可定位失败 hop；转发状态与真实 listener 一致；1 GiB 传输可恢复且失败不留下半个最终文件；本机图片可安全上传并引用 |
 | `P2` | WebDAV、图片/代码阅读、Markdown 增强、外观 | 提升跨设备与阅读体验，不作为 AI 终端定位成立的前提 | 同步冲突模型、查看器状态、统一焦点 | 功能完整、键盘可达、错误可恢复；同步冲突可处理；大文件不阻塞 UI |
 | `P2` | 大文件模块按职责拆分 | 只由实际 P0/P1 修改牵引，降低核心功能变更风险 | 明确模块所有权和行为基线 | 行为与性能无回归，边界有测试；不做无业务收益的纯搬运 |
 | `P3` | 定时任务、完整 Vault、多协议、公开插件市场、多云 Provider、自治多主机运维 | 当前偏离传统 AI 终端主线，或安全与维护成本过高 | 单独产品论证 | 必须另立 PRD、安全评审和维护成本评估 |
@@ -82,9 +82,9 @@ detach/reattach、冷恢复和 Agent 原生 resume 必须构成同一个运行�
 | 优先级 | 既有 planning 条目 |
 | --- | --- |
 | `P0` | AI 供应商与 API Key 管理；CLI 输入预测；AI Assist 完善；CLI 消息通知开关进设置面板；子代理等待状态与主任务进度不同步 |
-| `P0-Q` | Windows Terminal 原生输入与窗口兼容路线 |
+| `P0-Q` | Windows 原生输入与窗口兼容路线 |
 | `P1` | MCP / Skill 内置化；自动化脚本执行；Markdown 选中/评论/发送到指定 tab |
-| `P2` | SSH 常用命令保存器；SSH 错误标记到 tab + 提示条真关闭按钮；SSH 代理（HTTP CONNECT / SOCKS5）；强杀 Nebula 时连带清理子进程（Job Object）；背景色真调色板与自定义 HEX；图片与代码阅读器；Explorer 右键集成；Markdown 选择复制/目录；图片预览器；超大源码文件拆分；WebDAV 同步完善 |
+| `P2` | SSH 常用命令保存器；SSH 错误标记到 tab + 提示条真关闭按钮；SSH 代理（HTTP CONNECT / SOCKS5）；SSH 会话粘贴本机剪贴板图片；强杀 Nebula 时连带清理子进程（Job Object）；背景色真调色板与自定义 HEX；图片与代码阅读器；Explorer 右键集成；Markdown 选择复制/目录；图片预览器；超大源码文件拆分；WebDAV 同步完善 |
 | `P3` | 定时任务；Markdown 内嵌 HTML 解析；未来可能加入的完整 Vault、多协议、公开插件市场和自治多主机运维 |
 
 ## 新增待排期事项（2026-08-10）
@@ -113,6 +113,15 @@ detach/reattach、冷恢复和 Agent 原生 resume 必须构成同一个运行�
 - 保持同一套墨迹宽度测量、光学缩放和垂直居中规则，避免连接页的服务器图标与实际主机类型不一致。
 - 覆盖自动识别、用户手动指定图标、未知图标回落三种情况，并加入截图验收。
 
+### P2 SSH 会话粘贴本机剪贴板图片
+
+- 在 SSH 会话中触发粘贴时，若本机剪贴板只有图片数据，先显示文件名、格式、尺寸、大小和远端目标目录，用户确认后再上传；文本粘贴保持现有行为。
+- 图片经当前 SSH 会话的 SFTP 通道上传到受控远端临时目录，采用随机文件名和原子落盘，禁止覆盖现有文件、路径穿越及跟随不可信符号链接。
+- 上传成功后，根据当前前台 CLI 的能力注入远端文件路径或安全引用；无法确认 CLI 支持方式时只粘贴带 Shell 转义的远端路径，不自动执行命令。
+- 明确处理剪贴板格式转换、同名冲突、大小上限、连接中断、部分文件回滚、远端权限不足和重连；失败时不得把本机路径误发给远端。
+- 临时文件必须有可解释的生命周期：会话关闭时提示清理，异常退出后可在下次连接中识别并清理；用户选择保留的文件不得被自动删除。
+- 验收至少覆盖 PNG/JPEG/WebP、包含空格和非 ASCII 字符的路径、只读远端目录、上传取消、断线恢复、多 Pane 并发和不支持 SFTP 的服务器。
+
 ### 执行约束
 
 - 下方条目是详细需求来源，本节只决定产品顺序，不替代原始验收细节。
@@ -140,20 +149,19 @@ detach/reattach、冷恢复和 Agent 原生 resume 必须构成同一个运行�
 - 后续增加缩放、平移、原始尺寸、图片信息、动画图片和更多格式支持。
 - 后续增加代码阅读器，再扩展为可编辑代码：语法高亮、行号、搜索、保存、未保存状态和原子写入。
 
-## Windows Terminal 原生输入与窗口兼容路线
+## Windows 原生输入与窗口兼容路线
 
-来源：2026-08-08 对照 Windows Terminal `#4999 Improved keyboard handling in Conpty`、
-`TermControl`/`TerminalCore`/`TerminalInput` 实现，以及 WezTerm 的 `RawKeyEvent` 设计。
-目标不是复制 WT 的 WinUI 窗口代码，而是吸收它“原始事实保留在原生后端、协议编码在终端层”
-的数据流，确保 Windows 兼容性、跨平台扩展性和长期可维护性同时成立。
+来源：2026-08-08 对 ConPTY 9001 输入规格、Win32 `KEY_EVENT_RECORD` 和现有
+`RawKeyEvent` 数据流的核验。目标是把原始事实保留在原生后端、把协议编码放在终端层，
+确保 Windows 兼容性、跨平台扩展性和长期可维护性同时成立。
 
 ### 长期方案裁定(2026-08-09)
 
-问题:wezterm 为多端各自维护 3 套原生键位后端;Nebula 要 WT 级 Windows 兼容性 + 多端,
-winit 是否是性能/兼容性/可维护性的最优解?
+问题：Nebula 既要保持 Windows 原生输入保真，也要为多平台保留一致的事件契约；
+winit 是否仍满足性能、兼容性和可维护性要求？
 
-**裁定:保留 vendored winit fork,不换库、不自建 window 层。键位走三层结构,把
-wezterm 的「3 套完整后端」压缩成「3 个只搬事实的薄适配器」:**
+**裁定：保留 vendored winit fork，不换库、不自建 window 层。键位走三层结构，
+每个平台只维护搬运原生事实的薄适配器：**
 
 1. **采集层**(per-platform,薄):winit fork 扩展只做「原生事实搬运」——Windows 已有
    `RawKeyEventInfo`(VK/扫描码/repeat/extended/control_key_state/布局字符,一次捕获);
@@ -161,36 +169,35 @@ wezterm 的「3 套完整后端」压缩成「3 个只搬事实的薄适配器�
    **fork 治理红线:只允许加只读字段/扩展 trait,禁止在 fork 里做策略(编码、过滤、映射)。**
 2. **契约层**(跨平台,一处):`keyboard.rs` 只认 winit KeyEvent + 平台补充字段,做分发
    与快捷键判断,零平台分支堆积。
-3. **编码层**(跨平台,一处):`terminal_input.rs` 按终端能力(legacy/kitty/win32-input)
-   从契约模型编码,纯函数、可单测。kitty/legacy 编码天然平台无关;win32-input 仅在
+3. **编码层**（跨平台，一处）：`terminal_input.rs` 按终端能力
+   （legacy/扩展键盘协议/win32-input）从契约模型编码，纯函数、可单测。VT 编码天然
+   平台无关；win32-input 仅在
    Windows 有数据源。
 
 三维度论证:
 
 - **性能**:键盘不是热路径(人类输入 <100 事件/秒;热路径在 PTY 吞吐/渲染/reflow,与窗口
   库无关)。winit 的 Windows 事件循环就是标准 Win32 消息泵,无附加层。换库零收益。
-- **兼容性**:兼容缺口全部在「信息保真」而非库本身。winit 上游确实丢原生事实(不暴露
+- **兼容性**：兼容缺口全部在「信息保真」而非库本身。winit 上游确实丢原生事实（不暴露
   repeat_count/control_key_state/WM_CHAR 原始流,上游服务通用 GUI 永远不会收这些终端专用
-  API),但 fork+扩展已两役实证可达 WT 级保真:Codex Shift+Enter(9001 记录)与 Claude Code
-  Esc(uChar=0→27,见 docs/hard_lessons.md)。备选项全部更差:tao 键盘抽象更旧(为 webview
-  服务);GLFW/SDL 是 C 依赖、文本/IME 保真差;自建三套原生后端=wezterm 路线,其 window
-  层数万行且 issue 半数是平台窗口 bug,单人不可承受;ghostty 的「核心库+原生壳」对既有
-  Rust/winit 代码库等于推倒重来 UI 层。
+  API），但 fork 扩展已经在 Shift+Enter（9001 记录）与 Esc
+  （uChar=0→27，见 docs/hard_lessons.md）两条路径验证了 Win32 输入保真。替换窗口库、
+  引入 C 窗口依赖或自建三套原生后端都会扩大平台维护面，并要求重写既有 UI 层。
 - **可维护性**:多端键位的维护面 = 每平台 100–300 行事实搬运;编码器永远一份。fork 成本
   已被 vendor 策略锁定(保持 0.30.13 API 面、backport 上游),扩展是加法不改上游行为,
-  rebase 冲突面小。WT 兼容性的本质是「原始 KEY_EVENT 事实不丢」,不是它的窗口代码——
+  rebase 冲突面小。Win32 输入兼容性的本质是「原始 KEY_EVENT 事实不丢」，而不是窗口代码——
   这一性质已通过采集层达成。
 
 已知可接受偏差(记录在案,不视为缺口):key-up 无 WM_CHAR,修饰组合的 up 记录 uChar 回落
-到无修饰基础值(WT 发与 down 相同值);ConPTY 侧对 up 记录的 uChar 不敏感。
+到无修饰基础值（原生记录与 down 使用相同值）；ConPTY 侧对 up 记录的 uChar 不敏感。
 
 落地进度(2026-08-09):契约层第一步完成——`terminal_input.rs` 定义 `KeyInput`
 键盘事实结构,采集只发生在 `From<&winit KeyEvent>` 一处,win32 编码器成为契约结构上的
 纯函数。修饰组合(Shift+Enter、Ctrl+Enter、Ctrl+Space、Ctrl+Backspace、AltGr、裸修饰键、
 UTF-16 代理对、Esc 双向)首次获得字节级单测;测试值全部取自真实捕获的事实表,禁止猜测。
 配合 `scripts/win32_input_matrix.ps1`(PostMessage 无打扰回放,断言 node 通道基线)形成
-「纯函数单测 + 端到端回放」双层防线。后续:kitty/legacy 编码器迁到同一契约;焦点报告已按
-spec #4999 在 9001 会话无条件发送(宿主自消费,仅向 1004 订阅者透传,双向验证零泄漏)。
+「纯函数单测 + 端到端回放」双层防线。后续：扩展/legacy VT 编码器迁到同一契约；焦点报告
+已按 9001 契约在对应会话无条件发送（宿主自消费，仅向 1004 订阅者透传，双向验证零泄漏）。
 
 落地进度(2026-08-09 第二步):kitty/legacy VT 编码器整体迁入 `terminal_input.rs`,
 `keyboard.rs` 中约 470 行旧编码器(`build_sequence`/`SequenceBuilder` 一族)删除,编码层
@@ -247,7 +254,7 @@ resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记�
 - [ ] **ConPTY 生命周期契约**：把 `CreatePseudoConsole`、Win32 input mode 请求、焦点变化、
   resize、关闭和重连整理成单一状态机；对不支持或异常响应的 ConPTY 明确降级，不让协议状态
   污染普通 VT 输入。
-- [ ] **Windows 原生窗口服务层**：保持 Winit 的窗口抽象，在 Windows 后端补齐 WT 风格的
+- [ ] **Windows 原生窗口服务层**：保持 Winit 的窗口抽象，在 Windows 后端补齐 Win32
   原生事实适配：`WM_DPICHANGED` 建议矩形、多显示器 DPI 缩放、工作区边界、窗口跨屏迁移、
   最大化/全屏状态和系统标题栏交互。适配层只向上提供稳定事实，不让渲染层直接依赖 HWND 消息。
 - [ ] **Linux/macOS 同级后端**：沿用相同的 `RawKeyEvent`/文本提交契约，分别接入 Linux
@@ -261,7 +268,7 @@ resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记�
 - [ ] **替换 Winit 的独立评估**：只有在 Winit 无法满足窗口、多屏、DPI 或 IME 契约时，才另立
   架构项目比较 Win32/Wayland/AppKit 原生窗口方案；不得把窗口库替换混入键盘修复或普通功能迭代。
 
-### WT 参考落点
+### ConPTY 9001 参考落点
 
 - `terminal/doc/specs/#4999 - Improved keyboard handling in Conpty.md`：9001 请求、
   `KEY_EVENT_RECORD` 字段和完整示例。
@@ -271,12 +278,12 @@ resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记�
   修饰键走原生 key event，并在字符事件到达时恢复 VKEY/扫描码关联。
 - `terminal/src/terminal/input/terminalInput.cpp`：只格式化已经存在的
   `KEY_EVENT_RECORD` 字段，不从 Unicode 文本反推 VKEY。
-- WezTerm 对应的 `RawKeyEvent` 和 `encode_win32_input_mode()` 作为跨平台事件模型与回放测试
-  的补充参考，不作为 Nebula 的平台依赖。
+- `RawKeyEvent` 和 `encode_win32_input_mode()` 作为跨平台事件模型与回放测试的边界，
+  不向通用层泄漏具体窗口后端类型。
 
 ## Explorer「在此处打开终端」右键集成（安装版）
 
-来源：2026-07-28 用户需求（含截图，参照 Windows Terminal 的右键菜单项）。
+来源：2026-07-28 用户需求（含右键菜单截图）。
 
 - 目录背景与目录节点右键菜单加「在 Nebula 中打开终端」，带 Nebula 图标。
 - 实现路径：安装器写注册表 `HKCU\Software\Classes\Directory\shell\Nebula`（含
@@ -288,9 +295,9 @@ resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记�
 
 ## MCP / Skill 内置化
 
-来源：2026-07-28 用户需求（CLI-Manager 调研方向：provider/SSH key/skill/MCP 内置化）。
+来源：2026-07-28 用户需求（provider/SSH key/skill/MCP 内置化）。
 
-- 在 Nebula 内管理 MCP 服务器与 skill（安装/启停/配置），类似 CLI-Manager 的生态位。
+- 在 Nebula 内管理 MCP 服务器与 skill（安装/启停/配置），形成统一的扩展管理入口。
 
 ## AI 供应商与 API Key 管理
 
@@ -398,7 +405,7 @@ resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记�
 
 ## Markdown 选中 → 评论 → 发送到指定 tab
 
-来源：2026-07-29 用户提供的 otty 截图（composer.md L3 弹窗）。形态：
+来源：2026-07-29 用户提供的交互截图（composer.md L3 弹窗）。形态：
 
 - 在 markdown 阅读器里选中一段文本，弹出小模态，标题是「文件名 + 行号」
   （`composer.md L3`），下面用只读引用块回显选中的原文（两行截断）。
@@ -412,35 +419,17 @@ resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记�
 
 ## SSH 代理（HTTP CONNECT / SOCKS5）
 
-来源：2026-08-04 用户需求「访问境外小鸡有个代理方便得多，http 或 socks5，放到设置里面」。
-已调研上层目录的 zap / tabby / wezterm / kitty，结论如下。
-
-### 三家的做法各不相同
-
-| 项目 | 实现方式 | 粒度 | UI 位置 |
-| --- | --- | --- | --- |
-| zap | 自实现 HTTP CONNECT（hyper）+ SOCKS5 | 全局 `ProxyMode: Off/System/Custom` + URL + 用户名密码 + `no_proxy` 绕过列表 | 独立「网络」设置页 |
-| tabby | 调 russh 的 `newSocksProxy`/`newHttpProxy` | 每主机 `socksProxyHost/Port`、`httpProxyHost/Port` | SSH 主机编辑器 |
-| wezterm / kitty | 不自己实现，走 OpenSSH `ProxyCommand`，spawn 外部进程 | 跟随 `~/.ssh/config` | 无 UI |
-
-证据：
-- `zap/app/src/settings_view/network_page.rs:33` 引入 `ProxyMode`，`:146`–`:154` 是
-  Off/System/Custom 三态；密码不进 settings，单独走 `settings::network_secrets::ProxyCredentials`。
-- `zap/crates/websocket/src/proxy.rs:97` `resolve_proxy()` 定义环境变量优先级
-  （`HTTPS_PROXY`→`ALL_PROXY`），`:188`–`:256` 是 HTTP CONNECT 实现。
-- `tabby/tabby-ssh/src/session/ssh.ts:392`–`:410` 按 profile 字段三选一建 transport；
-  字段定义在 `tabby-ssh/src/api/interfaces.ts:34`–`:37`。
-- `wezterm/wezterm-ssh/src/sessioninner.rs:329`–`:355`：Windows 上 `cmd /c <proxy_command>`
-  + socketpair 接管 stdio。
-
-**注意 zap 的代理只服务 HTTP/WebSocket（AI 请求），它的 SSH 并不走这套。** 三家里
-只有 tabby 真把 SSH 接到了自建代理上。
+来源：2026-08-04 用户需求：为境外主机配置 HTTP 或 SOCKS5 代理。
+工程上存在三种常见粒度：应用全局代理、每主机覆盖，以及直接服从
+`~/.ssh/config` 的 `ProxyCommand`。Nebula 的设置页负责前两者，OpenSSH 配置继续作为
+高级用户的兼容入口。凭据不得写入普通 settings；环境变量优先级与 HTTP CONNECT / SOCKS5
+握手必须由连接层统一处理。
 
 ### 建议给 Nebula 的形态：全局默认 + 每主机覆盖
 
-单取任一家都有缺口——只做全局则「这台特殊」无解，只做每主机则十几台境外机要填十几遍。
-取 zap 的全局三态模型（含 `no_proxy` 绕过列表，正好覆盖「国内机器不该绕代理」），
-叠加 tabby 的每主机覆盖（跟随全局 / 强制直连 / 自定义）。
+只做全局配置无法处理特殊主机，只做每主机配置又会制造大量重复输入。因此采用全局三态
+（关闭 / 跟随系统 / 自定义，含 `no_proxy` 绕过列表）并叠加每主机覆盖
+（跟随全局 / 强制直连 / 自定义）。
 
 ### 实现路线（零新依赖）
 
@@ -471,62 +460,21 @@ resize 合并与 create 重试无独立单测(需 mock EventedPty/ConptyApi,记�
 来源：2026-08-04 用户反馈「nebula 卡死强行关闭后，关联的 claude code / codex
 必须一起关掉，否则内存泄漏」。
 
-### 调研结论：Windows Terminal 也没做，我们遇到的是同一个病
+### 实现裁定
 
-- **Windows Terminal 正式代码不用 Job Object**，`AssignProcessToJobObject` 只出现在
-  测试代码里（`terminal/src/host/ft_host/`、`WindowsTerminal_UIATests/`、
-  `src/tools/closetest/`）。生产路径靠 `ConptyClosePseudoConsole`
-  （`terminal/src/winconpty/winconpty.cpp:586`）+ `_piClient.reset()`
-  （`ConptyConnection.cpp:543`、`:696`）。这正是 wt 被任务管理器强杀后 pwsh 常常还活着的原因。
-- kitty、Kaku 同样没做。
-- 真正做了的是下面两个 Rust 项目，**写法可以直接抄**。
+仅关闭 ConPTY 不能保证宿主进程被强制终止时整棵子进程树退出。Windows Job Object 可以用
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 建立明确的生命周期边界，但把已经属于其他 job 的进程
+重新分配进去可能失败，因此不能用一个进程级大 job 粗暴接管所有 shell。
 
-### 抄法一：zap（用 `win32job` crate，最省事）
-
-`zap/crates/command/src/windows.rs:81`–`:119`：
-
-```rust
-fn create_internal(self) -> Result<(), win32job::JobError> {
-    let job = win32job::Job::create()?;
-    let mut info = job.query_extended_limit_info()?;
-    info.limit_kill_on_job_close();
-    info.limit_breakaway_ok();
-    if !self.kill_children_on_close {
-        info.limit_silent_breakaway_ok();
-    }
-    job.set_extended_limit_info(&info)?;
-    if self.assign_current_process { job.assign_current_process()?; }
-    if let Some(process) = self.assign_process { job.assign_process(process)?; }
-    Box::leak(Box::new(job)); // 句柄活到进程结束
-    Ok(())
-}
-```
-
-启动时一句 `JobObject::new().kill_children_on_close().assign_current_process().create()`
-就把整棵子进程树纳管（`windows.rs:111`–`:119`）。
-
-**它踩过的坑写在 `windows.rs:41`–`:43`**：
-> assigning some processes to jobs that already contain other processes (i.e. `pwsh.exe`)
-> 会失败，所以一个 job 只放一个进程。
-
-配合 `limit_breakaway_ok()` 理解——这两条是同一个问题的两面，实现时别漏。
-
-### 抄法二：CLI-Manager（纯 `windows-sys` 手写，无新依赖）
-
-`CLI-Manager/src-tauri/src/process_job.rs` 全文约 60 行：`CreateJobObjectW` →
-`JOBOBJECT_EXTENDED_LIMIT_INFORMATION.BasicLimitInformation.LimitFlags =
-JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` → `SetInformationJobObject` →
-`AssignProcessToJobObject(job, child.as_raw_handle())`，`Drop` 里 `CloseHandle`，
-另给一个 `terminate()` 走 `TerminateJobObject` 主动收割。每个 child 一个 job。
-
-**Nebula 该选这条**：`windows-sys 0.59` 已经在依赖里（`nebula_app/Cargo.toml:129`），
-只需给 features 列表补 `"Win32_System_JobObjects"`，不引入新 crate。
+Nebula 直接使用现有的 `windows-sys`：`CreateJobObjectW` 创建对象，
+`SetInformationJobObject` 写入 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，
+`AssignProcessToJobObject` 绑定 child，并由 RAII 在 `Drop` 中 `CloseHandle`。主动终止走
+`TerminateJobObject`。这条路线无需新增 crate，且便于为每个 pane 单独管理生命周期。
 
 ### 落点
 
 ConPTY 的 `CreateProcessW` 在 `nebula_terminal/src/tty/windows/conpty.rs:274`。
-需要决定是「每个 pane 一个 job」（对齐 zap/CLI-Manager 的单进程单 job，避开 pwsh 冲突）
-还是「进程级一个大 job」（最省事但撞 pwsh 问题）。倾向前者。
+采用「每个 pane 一个 job」，避免进程级大 job 与已有 shell job 发生归属冲突。
 
 另需确认 mux 驻留进程是否要排除——若保留「关掉窗口、会话还在后台」的用法，
 那条链不能进 job。

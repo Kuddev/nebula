@@ -36,7 +36,7 @@ Enter、Ctrl+Enter、字母、方向键全部正常。诡异点:**Codex CLI 的 
 1. Nebula 的 win32-input-mode 编码器(`nebula_app/src/input/terminal_input.rs`)对所有
    非字符键硬编码 `Uc=0`,发出 `CSI 27;1;0;1;0;1 _`;winit fork 的 `win32_unicode_char`
    同样 `_ => 0`。而真实 Windows 键盘的 KEY_EVENT:Esc=27、Enter=13、Tab=9、Backspace=8
-   (Windows Terminal 的编码器也发真值;wezterm 因内部把 Esc 表示为 `Char('\x1b')` 天然带 27)。
+   （原生输入编码应保留真值；字符路径把 Esc 表示为 `Char('\x1b')` 时天然带 27）。
 2. sideload 的 OpenConsole 1.22 在「INPUT_RECORD → VT 字节流」翻译层,对 VK_RETURN/
    VK_TAB/VK_BACK 有不依赖 uChar 的显式映射,**唯独 VK_ESCAPE 依赖 uChar**——uChar=0 的
    Esc 翻译产出为空。这精确解释了「只有 Esc 坏」。
@@ -45,7 +45,7 @@ Enter、Ctrl+Enter、字母、方向键全部正常。诡异点:**Codex CLI 的 
 
 ### 修复原理
 
-让 win32-input 记录忠实模拟真实 KEY_EVENT——协议(WT `#4999` spec)的本意就是「把原生
+让 win32-input 记录忠实模拟真实 KEY_EVENT——ConPTY 9001 协议的本意就是「把原生
 事实原样搬运」。`terminal_input.rs` 的非字符键分支改为:
 
 - 优先 `text_with_all_modifiers()`(WM_CHAR 真值,自然覆盖 Ctrl+Enter→0x0A、
@@ -88,17 +88,17 @@ Enter、Ctrl+Enter、字母、方向键全部正常。诡异点:**Codex CLI 的 
 ### 症状
 
 Codex CLI 在 Nebula 里 Shift+Enter 无法换行(经典 VT 编码下 Shift+Enter 与 Enter 都是
-`\r`,信息在编码时就丢了),Windows Terminal 里正常。
+`\r`，信息在编码时就丢了），而原生输入路径正常。
 
 ### 根因与修复原理
 
-WT 的能力来自 ConPTY 的 Win32 input mode(DECSET 9001,`#4999` spec):终端把完整的
+这项能力来自 ConPTY 的 Win32 input mode（DECSET 9001）：终端把完整的
 `KEY_EVENT_RECORD` 六元组(Vk/Sc/Uc/Kd/Cs/Rc)编码为 `CSI ..._` 发给 ConPTY,修饰状态
 (Cs)随记录携带,ConPTY 重建 INPUT_RECORD 给子程序——Shift 信息得以幸存。修复 =
 `CreatePseudoConsole` 传 `PSEUDOCONSOLE_WIN32_INPUT_MODE (0x4)` + 终端侧跟踪 9001 模式位
 + `build_win32_input_sequence` 编码器 + winit fork 暴露 `RawKeyEventInfo`(VK/扫描码/
-repeat/extended/control_key_state 一次捕获)。Kitty 协议激活时 win32 记录让位(两套编码
-互斥,kitty 是子程序显式请求的更高层契约)。
+repeat/extended/control_key_state 一次捕获）。扩展键盘协议激活时 win32 记录让位（两套编码
+互斥，扩展协议是子程序显式请求的更高层契约）。
 
 ### 教训
 

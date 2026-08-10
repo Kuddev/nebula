@@ -644,7 +644,7 @@ if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue) {
         Set-PSReadLineKeyHandler -Key Ctrl+k -Function ForwardDeleteLine -ErrorAction SilentlyContinue
     } catch {}
 
-    # OSC 133;C — wrap PSConsoleHostReadLine (VS Code shell integration's
+    # OSC 133;C — wrap PSConsoleHostReadLine (the shell integration protocol's
     # approach, same signal nushell emits natively before executing): the host
     # only returns from ReadLine once it has a *complete* command, so C fires
     # exactly once, right before execution. The previous Enter-key-handler

@@ -4,7 +4,7 @@
 //! 把失败命令、退出码、cwd、git 分支和 **grid 里的真实输出尾部**发给一个
 //! OpenAI 兼容端点，拿回一条修复建议，画进 pane 底部的建议条；Ctrl+. 只贴
 //! 入不执行。触发判定全部在本模块的纯函数里（可单测），网络在后台 OS 线程
-//! 阻塞完成（Kaku 验证过的模型），结果经 `EventType::AiFixReady` 回主循环。
+//! 阻塞完成，结果经 `EventType::AiFixReady` 回主循环。
 //!
 //! 隐私边界（spec「安全与隐私」）：默认关闭；开启后发送的内容 = 命令文本、
 //! 退出码、目录尾部、分支名、≤2000 字符输出尾部（先经 [`redact_secrets`]
@@ -262,8 +262,8 @@ pub fn spawn_fix_request(proxy: EventLoopProxy<Event>, cfg: AssistantConfig, req
     }
 }
 
-/// 失败即沉默（Kaku 的哲学：拿不到建议和「刻意不建议」同款处理），但要
-/// 把原因写进日志——静默功能坏起来只有日志能救。
+/// 请求失败时不打断终端工作流，但必须把原因写进日志，否则静默功能失效后
+/// 没有可供诊断的证据。
 fn request_fix(cfg: &AssistantConfig, req: &FixRequest) -> Option<AiFix> {
     let Some(key) = api_key() else {
         info!("assistant: no API key (NEBULA_AI_KEY / OPENAI_API_KEY / credential store)");

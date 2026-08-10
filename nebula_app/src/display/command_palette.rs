@@ -1002,7 +1002,7 @@ impl CommandPalette {
     /// [`Self::visible`]'s scroll window) — the mouse-click path.
     /// 滚动窗口的首行下标。选中行越过最后一行时窗口整体下移，让它停在底行。
     ///
-    /// 行、表头、点击换算**必须**共用这一个算式。此前它被抄了两份（`visible`
+    /// 行、表头、点击换算**必须**共用这一个算式。此前它被重复实现两次（`visible`
     /// 与 `click` 各一份）而表头那份压根没算，于是列表一滚动，行走了、表头
     /// 还停在开头那套分组上——分组标题指着一批已经滚走的行。
     fn scroll_start(&self, max_rows: usize) -> usize {
@@ -1193,7 +1193,7 @@ impl CommandPalette {
     }
 
     /// Launcher 的推荐身份只来自真实默认 Shell；SSH 没有可靠的使用频率数据，
-    /// 不能为了复刻原型而伪造推荐项。开始搜索后隐藏推荐分组，结果只按类别分段。
+    /// 不能为了匹配静态原型而伪造推荐项。开始搜索后隐藏推荐分组，结果只按类别分段。
     fn launcher_group(&self, candidate: PaletteCandidate) -> Option<LauncherGroup> {
         match candidate {
             PaletteCandidate::Profile(index)

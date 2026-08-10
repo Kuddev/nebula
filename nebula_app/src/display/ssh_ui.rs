@@ -242,7 +242,7 @@ impl SshHostEditor {
 
     /// 某个字段的文本与光标。插入、退格、全选、点击定位对四个字段的处理完全
     /// 一样，集中到这里之后，再加字段只需要补这一个 match，而不是把同样的分支
-    /// 在五个方法里各抄一遍——那种写法漏一处就是"某个框打不出字"。
+    /// 在五个方法里重复维护——那种写法漏一处就是"某个框打不出字"。
     pub(super) fn field_mut(&mut self, field: SshEditorField) -> (&mut String, &mut TextCursor) {
         match field {
             SshEditorField::Destination => (&mut self.destination, &mut self.destination_cursor),

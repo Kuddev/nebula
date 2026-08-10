@@ -13,7 +13,7 @@
 //! font-size change. Every line wraps to the content column: nothing ever
 //! overflows horizontally.
 //!
-//! Rendering is windowed (the VSCode model): `visible_range` binary-searches
+//! Rendering is windowed: `visible_range` binary-searches
 //! the y-prefix array for the slice covering the viewport plus a few buffer
 //! lines, and ONLY that slice generates quads/glyphs. A 100k-line document
 //! costs a binary search plus ~60 lines of draw work per frame.
