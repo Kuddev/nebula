@@ -1,4 +1,4 @@
-//! Reusable settings-control primitives: slider, toggle, combobox, spinner.
+//! Reusable settings-control primitives: radio, slider, toggle, combobox, spinner.
 //!
 //! Same layering contract as [`super::icons`]: pure geometry + quad output,
 //! no `Display` state and no hover decisions. Layout, drawing and hit-testing
@@ -245,6 +245,64 @@ pub(crate) fn push_chip(
             surface::push_stroke(quads, rect, corner, scale, stroke);
             quads.push(UiQuad::solid(x, y, w, h, corner, surface::over(sk.accent_soft, sk.panel)));
         },
+    }
+}
+
+// ---- radio ----
+
+/// 单选按钮在整行命中区中的可视矩形。命中仍由调用方使用整行处理，按钮本身
+/// 只负责稳定的左侧对齐和垂直居中，避免各页面重复手算后出现一两像素漂移。
+pub(crate) fn radio_rect(row: Rect, scale: f32) -> Rect {
+    let s = |v: f32| v * scale;
+    let d = s(14.0).round().max(2.0);
+    (row.0 + s(14.0).round(), centered_y(row.1, row.3, d).round(), d, d)
+}
+
+/// 纯色单选按钮：不透明外环、与所在行一致的内芯、选中时的不透明圆点。
+///
+/// `background` 由调用方传入行的最终合成色。这里刻意不用半透明描边或渐变，
+/// 因为拿多层 alpha 反复“挖空”会在圆弧抗锯齿处混出一圈脏色；先确定最终
+/// 行底色再覆盖内芯，才能让不同主题和选中背景上的圆环都保持干净。
+pub(crate) fn push_radio(
+    quads: &mut Vec<UiQuad>,
+    row: Rect,
+    scale: f32,
+    sk: &Skin,
+    selected: bool,
+    background: Rgba,
+) {
+    let s = |v: f32| v * scale;
+    let (x, y, d, _) = radio_rect(row, scale);
+    let ring = if selected { accent(sk) } else { Rgba::opaque(sk.ink_dim) };
+    quads.push(UiQuad::solid(x, y, d, d, d * 0.5, ring).pixel_snapped());
+
+    let ring_w = s(2.0).round().max(1.0).min(d * 0.25);
+    let hole_d = (d - ring_w * 2.0).max(2.0);
+    quads.push(
+        UiQuad::solid(
+            x + ring_w,
+            y + ring_w,
+            hole_d,
+            hole_d,
+            hole_d * 0.5,
+            background,
+        )
+        .pixel_snapped(),
+    );
+
+    if selected {
+        let dot_d = s(5.0).round().max(2.0).min(hole_d);
+        quads.push(
+            UiQuad::solid(
+                (x + (d - dot_d) * 0.5).round(),
+                (y + (d - dot_d) * 0.5).round(),
+                dot_d,
+                dot_d,
+                dot_d * 0.5,
+                accent(sk),
+            )
+            .pixel_snapped(),
+        );
     }
 }
 
@@ -639,14 +697,40 @@ pub(crate) fn push_spinner(
 
 #[cfg(test)]
 mod tests {
-    use super::{ToggleMotion, centered_y, overlay_scrollbar, push_toggle, toggle_rect};
+    use super::{
+        ToggleMotion, centered_y, overlay_scrollbar, push_radio, push_toggle, radio_rect,
+        toggle_rect,
+    };
     use crate::display::ui::theme::NebulaTheme;
-    use crate::renderer::ui::UiQuad;
+    use crate::renderer::ui::{Rgba, UiQuad};
 
     #[test]
     fn centered_y_uses_the_container_center_line() {
         assert_eq!(centered_y(10.0, 40.0, 16.0), 22.0);
         assert_eq!(centered_y(10.0, 40.0, 40.0), 10.0);
+    }
+
+    #[test]
+    fn radio_uses_only_opaque_flat_state_colors() {
+        let row = (10.0, 20.0, 240.0, 44.0);
+        let skin = NebulaTheme::Nebula.skin();
+        let background = Rgba::new(38, 55, 78, 255);
+        let mut quiet = Vec::<UiQuad>::new();
+        let mut selected = Vec::<UiQuad>::new();
+        push_radio(&mut quiet, row, 1.0, &skin, false, background);
+        push_radio(&mut selected, row, 1.0, &skin, true, background);
+
+        assert_eq!(radio_rect(row, 1.0), (24.0, 35.0, 14.0, 14.0));
+        assert_eq!(quiet.len(), 2);
+        assert_eq!(selected.len(), 3);
+        assert_eq!(quiet[0].color0, Rgba::opaque(skin.ink_dim));
+        assert_eq!(quiet[1].color0, background);
+        assert_eq!(selected[0].color0, Rgba::opaque(skin.accent));
+        assert_eq!(selected[1].color0, background);
+        assert_eq!(selected[2].color0, Rgba::opaque(skin.accent));
+        assert!(quiet.iter().chain(&selected).all(|quad| {
+            quad.color0 == quad.color1 && quad.color0.a == 255
+        }));
     }
 
     #[test]

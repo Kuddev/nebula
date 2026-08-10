@@ -28,19 +28,20 @@ pub(crate) enum RowState {
 }
 
 /// 满宽行态（launcher / picker 卡片列表）：默认全透明露出面板底，hover 一层
-/// 静底，选中用中性 `hover_strong`——强调色预算留给真正需要它的地方
-/// （2026-07-29 用户裁定：列表行不画卡片、不上强调色）。
+/// 静底。选中填充由调用方传入，因为 launcher 需要使用左侧活动 tab 在 veil
+/// 下的最终合成色，而普通 picker 仍直接使用 `accent_soft`。
 pub(crate) fn push_row_state(
     quads: &mut Vec<UiQuad>,
     rect: Rect,
     radius_px: f32,
     sk: &Skin,
     state: RowState,
+    selected_fill: Rgba,
 ) {
     let fill = match state {
         RowState::Idle => return,
         RowState::Hover => sk.hover,
-        RowState::Selected => sk.hover_strong,
+        RowState::Selected => selected_fill,
     };
     quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, radius_px, fill));
 }
@@ -80,14 +81,7 @@ pub(crate) fn icon_tile_rect(left_x: f32, row: Rect, size_px: f32) -> Rect {
 
 pub(crate) fn push_icon_tile(quads: &mut Vec<UiQuad>, rect: Rect, scale: f32, sk: &Skin) {
     surface::push_stroke(quads, rect, radius::ICON_TILE * scale, scale, sk.hairline);
-    quads.push(UiQuad::solid(
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        radius::ICON_TILE * scale,
-        sk.card,
-    ));
+    quads.push(UiQuad::solid(rect.0, rect.1, rect.2, rect.3, radius::ICON_TILE * scale, sk.card));
 }
 
 /// 身份 chip 的几何：右缘对齐、行内垂直居中。`text_cols` 是 chip 文字的

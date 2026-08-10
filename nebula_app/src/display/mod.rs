@@ -535,18 +535,15 @@ impl NebulaUiAnims {
     ) -> bool {
         self.left_sidebar.animating_to(if left_open { 1.0 } else { 0.0 })
             || self.right_drawer.animating_to(if right_open { 1.0 } else { 0.0 })
-            || self
-                .settings_toggles
-                .iter()
-                .zip(toggle_targets)
-                .enumerate()
-                .any(|(index, (anim, target))| {
+            || self.settings_toggles.iter().zip(toggle_targets).enumerate().any(
+                |(index, (anim, target))| {
                     anim.animating_to(
                         target,
                         settings::settings_toggle_slot(toggle_pressed) == Some(index),
                         settings::settings_toggle_slot(toggle_hover) == Some(index),
                     )
-                })
+                },
+            )
     }
 }
 
@@ -1632,6 +1629,12 @@ pub struct Display {
     /// 搜索框的光标与选区。与图标搜索框、SSH 表单字段共用同一套模型：
     /// 新加的输入框继承行为，不必再实现一遍。
     nebula_font_query_cursor: ui::text_field::TextCursor,
+    nebula_font_popup_scroll: usize,
+    /// 字体弹层滚动条拖拽中的抓取偏移（thumb 内的 y 距离）。
+    nebula_font_popup_drag: Option<f32>,
+    /// 当前正在拖选的设置文本框：0=字体搜索，1=按键搜索，2=SSH 代理。
+    /// 统一在 Display 保存拖选状态，避免鼠标离开输入框后选区停止更新。
+    nebula_settings_text_drag: Option<(u8, usize)>,
     /// 目录中被判定为非等宽的族（小写名）。界面据此给比例字体警告——
     /// 固定网格下它们可能重叠或截断，但用户知情后仍可选择。
     nebula_font_proportional: std::collections::HashSet<String>,
@@ -1670,11 +1673,19 @@ pub struct Display {
     /// 聚焦的 SSH 代理输入框（0=代理地址 1=绕过列表；正文直接编辑
     /// `nebula_ssh_proxy_url` / `nebula_ssh_proxy_no_proxy`，失焦提交落盘）。
     pub(crate) nebula_ssh_proxy_focus: Option<usize>,
+    /// 手动地址、绕过列表、自定义命令三个输入框的光标/选区。
+    nebula_ssh_proxy_cursor: [ui::text_field::TextCursor; 3],
     /// 聚焦那一刻的原值快照，Esc 取消编辑时还原。
     nebula_ssh_proxy_backup: [String; 2],
-    /// 指定代理子模式：true = SSH 跳板。从 `nebula_ssh_proxy_url` 的
-    /// `jump:` 前缀派生（不单独落盘），切换时清空共享的 url 字段。
-    nebula_ssh_proxy_jump: bool,
+    /// 指定代理列表的选中项。非发现项可由持久化 URL 前缀恢复；发现项在
+    /// 后台扫描完成后按 URL 精确匹配，绝不根据端口猜。
+    nebula_ssh_proxy_choice: settings::ProxyChoice,
+    /// 手动地址的协议选择独立保留；地址被清空时不能因为 URL 暂时为空就
+    /// 把用户刚选的 HTTP 悄悄重置成默认 SOCKS5。
+    nebula_ssh_proxy_protocol: settings::ManualProxyProtocol,
+    nebula_local_proxies: Vec<crate::ssh_proxy::LocalProxyEndpoint>,
+    nebula_proxy_scanning: bool,
+    nebula_proxy_scan_request: bool,
     /// 「跟随系统」探测缓存：`(URL, 来自注册表)`。进网络页 / 切模式时
     /// 刷新；渲染只读——注册表是跨进程调用，不进逐帧路径。
     nebula_system_proxy_probe: Option<(String, bool)>,
@@ -1684,6 +1695,7 @@ pub struct Display {
     /// 按键映射页搜索框：查询串 + 聚焦态。过滤在读取时按需计算——28 行的
     /// 字符串匹配量级，不值得为它维护缓存失效。
     nebula_keymap_query: String,
+    nebula_keymap_query_cursor: ui::text_field::TextCursor,
     nebula_keymap_search_focus: bool,
 
     /// Tab rename state: when `Some(index, text)`, a text input is shown over
@@ -2209,6 +2221,9 @@ impl Display {
             nebula_font_show_all: false,
             nebula_font_query: String::new(),
             nebula_font_query_cursor: Default::default(),
+            nebula_font_popup_scroll: 0,
+            nebula_font_popup_drag: None,
+            nebula_settings_text_drag: None,
             nebula_font_proportional: std::collections::HashSet::new(),
             nebula_font_notice: font_notice,
             nebula_tab_labels: vec![".".to_owned()],
@@ -2294,8 +2309,13 @@ impl Display {
             nebula_backup_selection: crate::encrypted_backup::BackupSelection::default(),
             nebula_backup_status: None,
             nebula_ssh_proxy_focus: None,
+            nebula_ssh_proxy_cursor: Default::default(),
             nebula_ssh_proxy_backup: Default::default(),
-            nebula_ssh_proxy_jump: false,
+            nebula_ssh_proxy_choice: settings::ProxyChoice::Manual,
+            nebula_ssh_proxy_protocol: settings::ManualProxyProtocol::Socks5,
+            nebula_local_proxies: Vec::new(),
+            nebula_proxy_scanning: false,
+            nebula_proxy_scan_request: false,
             nebula_system_proxy_probe: None,
             nebula_ssh_proxies: crate::ssh_profiles::SshProfiles::load(
                 &nebula_data_dir().join("ssh_profiles.json"),
@@ -2303,6 +2323,7 @@ impl Display {
             .map(|profiles| profiles.proxies())
             .unwrap_or_default(),
             nebula_keymap_query: String::new(),
+            nebula_keymap_query_cursor: Default::default(),
             nebula_keymap_search_focus: false,
             meter: Default::default(),
             ime: Default::default(),
@@ -2311,10 +2332,19 @@ impl Display {
         // base size — the font role must be pinned NOW, not after the first
         // font change funnels through handle_update.
         display.refresh_ui_font(config);
-        // jump 子模式从 url 前缀派生（不单独落盘）；顺手做一次系统代理
-        // 探测，启动直达网络页时「当前读到」不至于空白。
-        display.nebula_ssh_proxy_jump =
-            crate::ssh_proxy::jump_target(&display.nebula_ssh_proxy_url).is_some();
+        display.nebula_ssh_proxy_protocol =
+            settings::manual_proxy_parts(&display.nebula_ssh_proxy_url).0;
+        display.nebula_ssh_proxy_choice = if crate::ssh_proxy::jump_target(
+            &display.nebula_ssh_proxy_url,
+        )
+        .is_some()
+        {
+            settings::ProxyChoice::Jump
+        } else if crate::ssh_proxy::command_target(&display.nebula_ssh_proxy_url).is_some() {
+            settings::ProxyChoice::Command
+        } else {
+            settings::ProxyChoice::Manual
+        };
         display.refresh_system_proxy_probe();
         Ok(display)
     }
@@ -2343,7 +2373,11 @@ impl Display {
         if section == NebulaSettingsSection::Proxy {
             // 进网络页刷新「跟随系统」探测——跨进程读注册表只发生在点击。
             self.refresh_system_proxy_probe();
+            if self.nebula_local_proxies.is_empty() {
+                self.request_local_proxy_scan();
+            }
         }
+        self.update_settings_ime_cursor();
     }
 
     /// Scroll the settings content by `delta` px (positive = content moves
@@ -3375,6 +3409,8 @@ impl Display {
             font_show_all: self.nebula_font_show_all,
             font_query: self.nebula_font_query.clone(),
             font_query_cursor: self.nebula_font_query_cursor.clone(),
+            font_popup_scroll: self.nebula_font_popup_scroll,
+            font_popup_dragging: self.nebula_font_popup_drag.is_some(),
             font_proportional: self.nebula_font_proportional.clone(),
             hidden_hosts: self.nebula_hidden_hosts.clone(),
             ssh_hosts: self
@@ -3434,6 +3470,7 @@ impl Display {
             keymap_capture: self.nebula_keymap_capture,
             keymap_capture_preview: self.nebula_keymap_capture_preview.clone(),
             keymap_query: self.nebula_keymap_query.clone(),
+            keymap_query_cursor: self.nebula_keymap_query_cursor.clone(),
             keymap_search_focus: self.nebula_keymap_search_focus,
             keymap_visible: self.keymap_visible_editable(),
             keymap_readonly_visible: self.keymap_visible_readonly(),
@@ -3447,11 +3484,22 @@ impl Display {
             sync_busy: self.nebula_sync_busy,
             ssh_proxy_mode: self.nebula_ssh_proxy_mode,
             ssh_proxy_inputs: [
-                self.nebula_ssh_proxy_url.clone(),
+                if self.nebula_ssh_proxy_choice == settings::ProxyChoice::Manual {
+                    settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).1.to_owned()
+                } else {
+                    self.nebula_ssh_proxy_url.clone()
+                },
                 self.nebula_ssh_proxy_no_proxy.clone(),
+                crate::ssh_proxy::command_target(&self.nebula_ssh_proxy_url)
+                    .unwrap_or("")
+                    .to_owned(),
             ],
+            ssh_proxy_cursors: self.nebula_ssh_proxy_cursor.clone(),
             ssh_proxy_focus: self.nebula_ssh_proxy_focus,
-            ssh_proxy_jump: self.nebula_ssh_proxy_jump,
+            ssh_proxy_protocol: self.nebula_ssh_proxy_protocol,
+            ssh_proxy_choice: self.nebula_ssh_proxy_choice,
+            local_proxies: self.nebula_local_proxies.clone(),
+            proxy_scanning: self.nebula_proxy_scanning,
             system_proxy_probe: self.nebula_system_proxy_probe.clone(),
             ssh_proxy_overrides: self
                 .nebula_ssh_hosts
@@ -3646,14 +3694,17 @@ impl Display {
             self.nebula_settings_hover = SettingsHit::None;
             self.nebula_settings_pressed = SettingsHit::None;
             self.nebula_keymap_capture = None;
+            self.nebula_settings_text_drag = None;
         } else {
             self.load_sync_state();
             // Each explicit visit starts at a predictable page origin.
             self.nebula_settings_scroll = 0.0;
+            self.nebula_settings_text_drag = None;
             if self.nebula_settings_section == NebulaSettingsSection::Proxy {
                 self.refresh_system_proxy_probe();
             }
         }
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
     }
 
@@ -3804,6 +3855,7 @@ impl Display {
             }
             if dropdown == settings::SettingsDropdown::Font {
                 self.nebula_font_notice = None;
+                self.nebula_font_popup_scroll = 0;
             }
             self.nebula_settings_dropdown = Some(dropdown);
         }
@@ -3821,6 +3873,8 @@ impl Display {
             self.nebula_font_query_cursor = Default::default();
             self.rebuild_font_catalog();
         }
+        self.nebula_font_popup_scroll = 0;
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
         true
@@ -4063,6 +4117,8 @@ impl Display {
             families.push(self.nebula_font_family.clone());
         }
         self.nebula_font_families = families;
+        // 候选集合变了，旧滚动位置无意义；回到顶部避免窗口悬在越界偏移上。
+        self.nebula_font_popup_scroll = 0;
     }
 
     /// 搜索框里文本的起点 x 与单元格宽——鼠标定位光标要用它换算落点。
@@ -4078,6 +4134,7 @@ impl Display {
             self.nebula_settings_scroll,
             self.nebula_settings_dropdown,
             self.font_picker_count(),
+            self.nebula_font_popup_scroll,
             self.nebula_hidden_hosts.len(),
             self.ssh_host_count(),
             self.nebula_density,
@@ -4103,6 +4160,7 @@ impl Display {
             None => self.nebula_font_query_cursor.backspace(&mut self.nebula_font_query),
         }
         self.rebuild_font_catalog();
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -4110,6 +4168,7 @@ impl Display {
     pub fn font_query_delete_forward(&mut self) {
         self.nebula_font_query_cursor.delete_forward(&mut self.nebula_font_query);
         self.rebuild_font_catalog();
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -4117,6 +4176,7 @@ impl Display {
     pub fn font_query_move(&mut self, forward: bool, extend: bool) {
         let text = self.nebula_font_query.clone();
         self.nebula_font_query_cursor.step(&text, forward, extend);
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -4124,6 +4184,7 @@ impl Display {
     pub fn font_query_jump(&mut self, to_end: bool, extend: bool) {
         let text = self.nebula_font_query.clone();
         self.nebula_font_query_cursor.jump(&text, to_end, extend);
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -4131,6 +4192,7 @@ impl Display {
     pub fn font_query_select_all(&mut self) {
         let text = self.nebula_font_query.clone();
         self.nebula_font_query_cursor.select_all(&text);
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -4152,10 +4214,198 @@ impl Display {
         self.window.request_redraw();
     }
 
+    pub fn begin_font_query_drag(&mut self, offset_x: f32, cell_w: f32, extend: bool) {
+        self.font_query_place(offset_x, cell_w, extend);
+        self.nebula_settings_text_drag = Some((0, 0));
+        self.update_settings_ime_cursor();
+    }
+
+    pub fn begin_keymap_search_drag(&mut self, offset_x: f32, cell_w: f32, extend: bool) {
+        self.keymap_search_place(offset_x, cell_w, extend);
+        self.nebula_settings_text_drag = Some((1, 0));
+        self.update_settings_ime_cursor();
+    }
+
+    pub fn begin_ssh_proxy_drag(&mut self, index: usize, x: f32, extend: bool) {
+        self.ssh_proxy_field_place(index, x, extend);
+        self.nebula_settings_text_drag = Some((2, index.min(1)));
+        self.update_settings_ime_cursor();
+    }
+
+    pub fn settings_text_drag_to(&mut self, x: f32) -> bool {
+        let Some((kind, index)) = self.nebula_settings_text_drag else { return false };
+        match kind {
+            0 => {
+                let (text_x, cell_w) = self.font_search_text_origin();
+                self.font_query_place(x - text_x, cell_w, true);
+            },
+            1 => {
+                let (text_x, cell_w) = self.keymap_search_text_origin();
+                self.keymap_search_place(x - text_x, cell_w, true);
+            },
+            2 => self.ssh_proxy_field_place(index, x, true),
+            _ => return false,
+        }
+        self.update_settings_ime_cursor();
+        true
+    }
+
+    pub fn end_settings_text_drag(&mut self) -> bool {
+        self.nebula_settings_text_drag.take().is_some()
+    }
+
+    /// 将输入法候选窗锚到当前自绘字段的 caret。终端网格的 caret 仍由主渲染
+    /// 路径维护；设置页是另一套坐标系，若不在这里重推，中文候选窗会飘到
+    /// 终端左上角，看起来就像输入框没有获得焦点。
+    pub(crate) fn update_settings_ime_cursor(&self) {
+        if !self.nebula_settings_open {
+            self.window.reset_ime_cursor_area_cache();
+            return;
+        }
+        let scale = self.window.scale_factor as f32;
+        let cell_w = self.size_info.cell_width();
+        let cell_h = self.size_info.cell_height();
+        let caret = |text: &str, cursor: &ui::text_field::TextCursor| {
+            ui::text_field::columns_before(text, cursor.caret(text)) as f32 * cell_w
+        };
+        if self.nebula_settings_dropdown == Some(settings::SettingsDropdown::Font) {
+            if let Some(field) = settings::font_search_field_rect(
+                &self.size_info,
+                scale,
+                self.terminal_card_rect(),
+                self.nebula_settings_section,
+                self.nebula_settings_scroll,
+                self.nebula_settings_dropdown,
+                self.font_picker_count(),
+                self.nebula_font_popup_scroll,
+                self.nebula_hidden_hosts.len(),
+                self.ssh_host_count(),
+                self.nebula_density,
+            ) {
+                self.window.set_ime_cursor_area_px(
+                    field.0
+                        + 12.0 * scale
+                        + caret(&self.nebula_font_query, &self.nebula_font_query_cursor),
+                    field.1,
+                    cell_w,
+                    field.3.max(cell_h),
+                );
+            }
+        } else if self.keymap_search_active() {
+            let field = settings::keymap_search_rect(
+                &self.size_info,
+                scale,
+                self.terminal_card_rect(),
+                self.nebula_settings_scroll,
+                self.nebula_hidden_hosts.len(),
+                self.ssh_host_count(),
+                self.nebula_density,
+                self.keymap_pane_state(),
+            );
+            self.window.set_ime_cursor_area_px(
+                field.0
+                    + 12.0 * scale
+                    + caret(&self.nebula_keymap_query, &self.nebula_keymap_query_cursor),
+                field.1,
+                cell_w,
+                field.3.max(cell_h),
+            );
+        } else if let Some(index) = self.nebula_ssh_proxy_focus {
+            let field = settings::ssh_proxy_input_rect(
+                &self.size_info,
+                scale,
+                self.terminal_card_rect(),
+                self.nebula_settings_scroll,
+                self.nebula_hidden_hosts.len(),
+                self.ssh_host_count(),
+                self.nebula_density,
+                self.ssh_proxy_pane_state(),
+                index,
+            );
+            let text = self.ssh_proxy_field_text(index);
+            self.window.set_ime_cursor_area_px(
+                field.0 + 12.0 * scale + caret(text, &self.nebula_ssh_proxy_cursor[index.min(1)]),
+                field.1,
+                cell_w,
+                field.3.max(cell_h),
+            );
+        }
+    }
+
+    pub fn font_popup_scroll(&self) -> usize {
+        self.nebula_font_popup_scroll
+    }
+
+    pub fn font_popup_scroll_by(&mut self, delta: i32) -> bool {
+        let total = settings::font_popup_row_count(self.nebula_font_families.len());
+        let max_scroll = total.saturating_sub(8);
+        let next =
+            (self.nebula_font_popup_scroll as i32 + delta).clamp(0, max_scroll as i32) as usize;
+        if next == self.nebula_font_popup_scroll {
+            return false;
+        }
+        self.nebula_font_popup_scroll = next;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+        true
+    }
+
+    /// 字体弹层滚动条几何（绘制/命中同源）与最大候选偏移。
+    fn font_popup_scrollbar(&self) -> Option<(ui::widgets::OverlayScrollbar, usize)> {
+        settings::font_popup_scrollbar(
+            &self.size_info,
+            self.window.scale_factor as f32,
+            self.terminal_card_rect(),
+            self.nebula_settings_section,
+            self.nebula_settings_scroll,
+            self.nebula_settings_dropdown,
+            self.font_picker_count(),
+            self.nebula_font_popup_scroll,
+            self.nebula_hidden_hosts.len(),
+            self.ssh_host_count(),
+            self.nebula_density,
+        )
+    }
+
+    /// 按下：命中 track/thumb 即接管拖拽并立即滚到目标。返回是否消费。
+    pub fn font_popup_scrollbar_press(&mut self, x: f32, y: f32) -> bool {
+        let Some((bar, max)) = self.font_popup_scrollbar() else { return false };
+        if !bar.hit_test(x, y) {
+            return false;
+        }
+        let grab = if contains_rect(bar.thumb, x, y) { y - bar.thumb.1 } else { bar.thumb.3 * 0.5 };
+        self.nebula_font_popup_drag = Some(grab);
+        self.nebula_font_popup_scroll = bar.target_offset(y, grab, max);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+        true
+    }
+
+    pub fn font_popup_scrollbar_drag_to(&mut self, y: f32) -> bool {
+        let Some(grab) = self.nebula_font_popup_drag else { return false };
+        let Some((bar, max)) = self.font_popup_scrollbar() else { return false };
+        let target = bar.target_offset(y, grab, max);
+        if target != self.nebula_font_popup_scroll {
+            self.nebula_font_popup_scroll = target;
+            self.pending_update.dirty = true;
+            self.window.request_redraw();
+        }
+        true
+    }
+
+    pub fn font_popup_scrollbar_dragging(&self) -> bool {
+        self.nebula_font_popup_drag.is_some()
+    }
+
+    pub fn end_font_popup_scrollbar_drag(&mut self) -> bool {
+        self.nebula_font_popup_drag.take().is_some()
+    }
+
     /// 切换「显示全部」并重建目录。这是临时过滤，不写入设置。
     pub fn toggle_font_show_all(&mut self) {
         self.nebula_font_show_all = !self.nebula_font_show_all;
         self.ensure_font_catalog();
+        self.nebula_font_popup_scroll = 0;
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -4602,6 +4852,11 @@ impl Display {
                     // 切到跟随系统时刷新「当前读到」——只在点击时读注册表。
                     self.refresh_system_proxy_probe();
                 }
+                if *mode == crate::ssh_proxy::ProxyMode::Custom
+                    && self.nebula_local_proxies.is_empty()
+                {
+                    self.request_local_proxy_scan();
+                }
             }
         }
         self.nebula_settings_dropdown = None;
@@ -4613,7 +4868,9 @@ impl Display {
     pub fn ssh_proxy_pane_state(&self) -> settings::ProxyPaneState {
         settings::ProxyPaneState {
             mode: self.nebula_ssh_proxy_mode,
-            jump: self.nebula_ssh_proxy_jump,
+            choice: self.nebula_ssh_proxy_choice,
+            found_count: self.nebula_local_proxies.len(),
+            scanning: self.nebula_proxy_scanning,
             override_count: self
                 .nebula_ssh_hosts
                 .iter()
@@ -4629,19 +4886,80 @@ impl Display {
             .map(|(url, source)| (url, source == crate::ssh_proxy::SystemProxySource::Registry));
     }
 
-    /// 指定代理的子模式切换（0=手动填写 1=SSH 跳板）。切走时清空共享的
-    /// url 字段：残值会被解析层捡起，界面与实际链路就对不上了（学 Tabby
-    /// component.ts:111 的纪律，原型注释同款）。
+    /// 指定代理列表选择：发现项在前，随后依次为手动、SSH 跳板、自定义
+    /// 命令。切换方式时清空共享 URL，避免解析层拾取已不可见的残值。
     pub fn set_ssh_proxy_link_pick(&mut self, index: usize) {
-        let jump = index == 1;
-        if self.nebula_ssh_proxy_jump != jump {
-            self.nebula_ssh_proxy_jump = jump;
-            self.nebula_ssh_proxy_focus = None;
-            if !self.nebula_ssh_proxy_url.trim().is_empty() {
-                self.nebula_ssh_proxy_url.clear();
-                self.persist_nebula_settings();
+        let found_count = self.nebula_local_proxies.len();
+        let choice = if index < found_count {
+            settings::ProxyChoice::Detected(index)
+        } else {
+            match index - found_count {
+                0 => settings::ProxyChoice::Manual,
+                1 => settings::ProxyChoice::Jump,
+                2 => settings::ProxyChoice::Command,
+                _ => return,
             }
+        };
+        if self.nebula_ssh_proxy_choice != choice {
+            self.nebula_ssh_proxy_choice = choice;
+            self.nebula_ssh_proxy_focus = None;
+            self.nebula_ssh_proxy_url = match choice {
+                settings::ProxyChoice::Detected(found) => {
+                    self.nebula_local_proxies.get(found).map(|proxy| proxy.url()).unwrap_or_default()
+                },
+                _ => String::new(),
+            };
+            if choice == settings::ProxyChoice::Manual {
+                self.nebula_ssh_proxy_protocol = settings::ManualProxyProtocol::Socks5;
+            }
+            self.persist_nebula_settings();
         }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn request_local_proxy_scan(&mut self) {
+        if self.nebula_proxy_scanning {
+            return;
+        }
+        self.nebula_proxy_scanning = true;
+        self.nebula_proxy_scan_request = true;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub(crate) fn take_local_proxy_scan_request(&mut self) -> bool {
+        std::mem::take(&mut self.nebula_proxy_scan_request)
+    }
+
+    pub fn local_proxy_scan_done(
+        &mut self,
+        proxies: Vec<crate::ssh_proxy::LocalProxyEndpoint>,
+    ) {
+        self.nebula_proxy_scanning = false;
+        self.nebula_local_proxies = proxies;
+        if self.nebula_ssh_proxy_mode == crate::ssh_proxy::ProxyMode::Custom
+            && self.nebula_ssh_proxy_url.trim().is_empty()
+            && !self.nebula_local_proxies.is_empty()
+        {
+            self.nebula_ssh_proxy_choice = settings::ProxyChoice::Detected(0);
+            self.nebula_ssh_proxy_url = self.nebula_local_proxies[0].url();
+            self.persist_nebula_settings();
+        }
+        self.nebula_ssh_proxy_choice = self
+            .nebula_local_proxies
+            .iter()
+            .position(|proxy| proxy.url() == self.nebula_ssh_proxy_url)
+            .map(settings::ProxyChoice::Detected)
+            .unwrap_or_else(|| {
+                if crate::ssh_proxy::jump_target(&self.nebula_ssh_proxy_url).is_some() {
+                    settings::ProxyChoice::Jump
+                } else if crate::ssh_proxy::command_target(&self.nebula_ssh_proxy_url).is_some() {
+                    settings::ProxyChoice::Command
+                } else {
+                    settings::ProxyChoice::Manual
+                }
+            });
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -4657,6 +4975,22 @@ impl Display {
             }
         }
         self.nebula_settings_dropdown = None;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// 手动代理协议下拉只改持久化前缀，地址正文保持不变。
+    pub fn set_ssh_proxy_protocol(&mut self, index: usize) {
+        let Some(protocol) = settings::MANUAL_PROXY_PROTOCOL_OPTIONS.get(index).copied() else {
+            return;
+        };
+        self.commit_ssh_proxy_field();
+        let address = settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).1.to_owned();
+        self.nebula_ssh_proxy_protocol = protocol;
+        self.nebula_ssh_proxy_url = settings::manual_proxy_value(protocol, &address);
+        self.nebula_ssh_proxy_choice = settings::ProxyChoice::Manual;
+        self.nebula_settings_dropdown = None;
+        self.persist_nebula_settings();
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -4687,6 +5021,7 @@ impl Display {
 
     pub fn focus_keymap_search(&mut self) {
         self.nebula_keymap_search_focus = true;
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
@@ -4694,6 +5029,7 @@ impl Display {
     pub fn blur_keymap_search(&mut self) {
         if self.nebula_keymap_search_focus {
             self.nebula_keymap_search_focus = false;
+            self.update_settings_ime_cursor();
             self.pending_update.dirty = true;
             self.window.request_redraw();
         }
@@ -4703,16 +5039,90 @@ impl Display {
         if ch.is_control() {
             return;
         }
-        self.nebula_keymap_query.push(ch);
+        self.nebula_keymap_query_cursor.insert(&mut self.nebula_keymap_query, &ch.to_string());
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn keymap_search_edit(&mut self, text: &str) {
+        let clean: String = text.chars().filter(|ch| !ch.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        self.nebula_keymap_query_cursor.insert(&mut self.nebula_keymap_query, &clean);
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }
 
     pub fn keymap_search_backspace(&mut self) {
-        if self.nebula_keymap_query.pop().is_some() {
-            self.pending_update.dirty = true;
-            self.window.request_redraw();
+        self.nebula_keymap_query_cursor.backspace(&mut self.nebula_keymap_query);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn keymap_search_delete_forward(&mut self) {
+        self.nebula_keymap_query_cursor.delete_forward(&mut self.nebula_keymap_query);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn keymap_search_move(&mut self, forward: bool, extend: bool) {
+        let text = self.nebula_keymap_query.clone();
+        self.nebula_keymap_query_cursor.step(&text, forward, extend);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn keymap_search_jump(&mut self, to_end: bool, extend: bool) {
+        let text = self.nebula_keymap_query.clone();
+        self.nebula_keymap_query_cursor.jump(&text, to_end, extend);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn keymap_search_select_all(&mut self) {
+        let text = self.nebula_keymap_query.clone();
+        self.nebula_keymap_query_cursor.select_all(&text);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    /// 搜索框文本起点 x 与单元格宽；与渲染同源，点击定位不会漂。
+    pub fn keymap_search_text_origin(&self) -> (f32, f32) {
+        let scale = self.window.scale_factor as f32;
+        let rect = settings::keymap_search_rect(
+            &self.size_info,
+            scale,
+            self.terminal_card_rect(),
+            self.nebula_settings_scroll,
+            self.nebula_hidden_hosts.len(),
+            self.ssh_host_count(),
+            self.nebula_density,
+            self.keymap_pane_state(),
+        );
+        (rect.0 + 12.0 * scale, self.size_info.cell_width())
+    }
+
+    pub fn keymap_search_place(&mut self, offset_x: f32, cell_w: f32, extend: bool) {
+        let text = self.nebula_keymap_query.clone();
+        let index = ui::text_field::index_at(&text, offset_x, cell_w);
+        if extend {
+            self.nebula_keymap_query_cursor.extend_to(&text, index);
+        } else {
+            self.nebula_keymap_query_cursor.place(&text, index);
         }
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn keymap_search_selected_text(&self) -> Option<String> {
+        self.nebula_keymap_query_cursor.selected_text(&self.nebula_keymap_query)
     }
 
     /// Esc 两段式：先清词，词已空则退出聚焦——与字体弹层搜索一致。
@@ -4721,6 +5131,7 @@ impl Display {
             self.nebula_keymap_search_focus = false;
         } else {
             self.nebula_keymap_query.clear();
+            self.nebula_keymap_query_cursor = Default::default();
         }
         self.pending_update.dirty = true;
         self.window.request_redraw();
@@ -4850,7 +5261,7 @@ impl Display {
     /// 聚焦某个代理输入框；先提交上一个（点击切换即失焦保存）。编辑直接
     /// 发生在持久镜像字段上，快照留给 Esc 还原。
     pub fn focus_ssh_proxy_field(&mut self, index: usize) {
-        let index = index.min(1);
+        let index = index.min(2);
         if self.nebula_ssh_proxy_focus == Some(index) {
             return;
         }
@@ -4858,45 +5269,159 @@ impl Display {
         self.nebula_ssh_proxy_backup =
             [self.nebula_ssh_proxy_url.clone(), self.nebula_ssh_proxy_no_proxy.clone()];
         self.nebula_ssh_proxy_focus = Some(index);
+        let text = self.ssh_proxy_field_text(index).to_owned();
+        self.nebula_ssh_proxy_cursor[index].collapse_to_end(&text);
+        self.update_settings_ime_cursor();
         self.pending_update.dirty = true;
     }
 
-    pub fn ssh_proxy_field_push(&mut self, ch: char) {
-        let Some(index) = self.nebula_ssh_proxy_focus else { return };
-        if ch.is_control() {
-            return;
-        }
-        // URL 无空白；绕过列表允许逗号后的空格（保存侧不 trim 条目内部）。
-        if index == 0 && ch.is_whitespace() {
-            return;
-        }
-        let field = if index == 0 {
-            &mut self.nebula_ssh_proxy_url
-        } else {
-            &mut self.nebula_ssh_proxy_no_proxy
-        };
-        if field.chars().count() < 256 {
-            field.push(ch);
-            self.pending_update.dirty = true;
+    fn ssh_proxy_field_text(&self, index: usize) -> &str {
+        match index {
+            0 => settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).1,
+            1 => &self.nebula_ssh_proxy_no_proxy,
+            _ => crate::ssh_proxy::command_target(&self.nebula_ssh_proxy_url).unwrap_or(""),
         }
     }
 
-    pub fn ssh_proxy_field_paste(&mut self, text: &str) {
-        for ch in text.chars() {
-            self.ssh_proxy_field_push(ch);
+    fn set_ssh_proxy_field_text(&mut self, index: usize, field: String) {
+        match index {
+            0 => {
+                self.nebula_ssh_proxy_url =
+                    settings::manual_proxy_value(self.nebula_ssh_proxy_protocol, &field);
+            },
+            1 => self.nebula_ssh_proxy_no_proxy = field,
+            _ => self.nebula_ssh_proxy_url = format!("command:{field}"),
         }
+    }
+
+    pub fn ssh_proxy_cursor(&self, index: usize) -> &ui::text_field::TextCursor {
+        &self.nebula_ssh_proxy_cursor[index.min(2)]
+    }
+
+    pub fn ssh_proxy_field_push(&mut self, ch: char) {
+        self.ssh_proxy_field_paste(&ch.to_string());
+    }
+
+    pub fn ssh_proxy_field_paste(&mut self, text: &str) {
+        let Some(index) = self.nebula_ssh_proxy_focus else { return };
+        // 手动 URL 无空白；绕过列表与命令允许空格。控制字符统一丢弃。
+        let clean: String = text
+            .chars()
+            .filter(|ch| !ch.is_control() && !(index == 0 && ch.is_whitespace()))
+            .collect();
+        if clean.is_empty() {
+            return;
+        }
+        let mut field = self.ssh_proxy_field_text(index).to_owned();
+        self.nebula_ssh_proxy_cursor[index].insert(&mut field, &clean);
+        if field.chars().count() > 256 {
+            return;
+        }
+        self.set_ssh_proxy_field_text(index, field);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     pub fn ssh_proxy_field_backspace(&mut self) {
         let Some(index) = self.nebula_ssh_proxy_focus else { return };
-        let field = if index == 0 {
-            &mut self.nebula_ssh_proxy_url
-        } else {
-            &mut self.nebula_ssh_proxy_no_proxy
-        };
-        if field.pop().is_some() {
-            self.pending_update.dirty = true;
+        let mut field = self.ssh_proxy_field_text(index).to_owned();
+        self.nebula_ssh_proxy_cursor[index].backspace(&mut field);
+        self.set_ssh_proxy_field_text(index, field);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn ssh_proxy_field_delete_forward(&mut self) {
+        let Some(index) = self.nebula_ssh_proxy_focus else { return };
+        let mut field = self.ssh_proxy_field_text(index).to_owned();
+        self.nebula_ssh_proxy_cursor[index].delete_forward(&mut field);
+        self.set_ssh_proxy_field_text(index, field);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn ssh_proxy_field_move(&mut self, forward: bool, extend: bool) {
+        let Some(index) = self.nebula_ssh_proxy_focus else { return };
+        let text = self.ssh_proxy_field_text(index).to_owned();
+        self.nebula_ssh_proxy_cursor[index].step(&text, forward, extend);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn ssh_proxy_field_jump(&mut self, to_end: bool, extend: bool) {
+        let Some(index) = self.nebula_ssh_proxy_focus else { return };
+        let text = self.ssh_proxy_field_text(index).to_owned();
+        self.nebula_ssh_proxy_cursor[index].jump(&text, to_end, extend);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn ssh_proxy_field_select_all(&mut self) {
+        let Some(index) = self.nebula_ssh_proxy_focus else { return };
+        let text = self.ssh_proxy_field_text(index).to_owned();
+        self.nebula_ssh_proxy_cursor[index].select_all(&text);
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
+    pub fn ssh_proxy_field_selected_text(&self) -> Option<String> {
+        let index = self.nebula_ssh_proxy_focus?;
+        self.nebula_ssh_proxy_cursor[index].selected_text(self.ssh_proxy_field_text(index))
+    }
+
+    /// 点击定位：把窗口内的落点换算回全文字符索引。窗口逻辑与
+    /// [`settings::ssh_proxy_input_rect`] / 渲染侧的尾窗口一致。
+    pub fn ssh_proxy_field_place(&mut self, index: usize, x: f32, extend: bool) {
+        let index = index.min(2);
+        if self.nebula_ssh_proxy_focus != Some(index) {
+            return;
         }
+        let scale = self.window.scale_factor as f32;
+        let cell_w = self.size_info.cell_width();
+        let (ix, _, iw, _) = settings::ssh_proxy_input_rect(
+            &self.size_info,
+            scale,
+            self.terminal_card_rect(),
+            self.nebula_settings_scroll,
+            self.nebula_hidden_hosts.len(),
+            self.ssh_host_count(),
+            self.nebula_density,
+            self.ssh_proxy_pane_state(),
+            index,
+        );
+        let raw = self.ssh_proxy_field_text(index).to_owned();
+        let max_cols = (((iw - 24.0 * scale) / cell_w) as usize).max(1);
+        // 与渲染同一套窗口：尾窗口能盖住光标就用尾窗口，否则从光标开窗。
+        let total = raw.chars().count();
+        let mut cols = 0usize;
+        let mut tail_len = 0usize;
+        for ch in raw.chars().rev() {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            if cols + w > max_cols {
+                break;
+            }
+            cols += w;
+            tail_len += 1;
+        }
+        let caret = self.nebula_ssh_proxy_cursor[index].caret(&raw);
+        let tail_hidden = total - tail_len;
+        let hidden = if caret >= tail_hidden { tail_hidden } else { caret };
+        let visible: String = raw.chars().skip(hidden).collect();
+        let at = ui::text_field::index_at(&visible, x - (ix + 12.0 * scale), cell_w) + hidden;
+        if extend {
+            self.nebula_ssh_proxy_cursor[index].extend_to(&raw, at);
+        } else {
+            self.nebula_ssh_proxy_cursor[index].place(&raw, at);
+        }
+        self.update_settings_ime_cursor();
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     /// 失焦提交：trim 后写 `nebula_settings.txt`。
@@ -4906,6 +5431,16 @@ impl Display {
         }
         self.nebula_ssh_proxy_url = self.nebula_ssh_proxy_url.trim().to_owned();
         self.nebula_ssh_proxy_no_proxy = self.nebula_ssh_proxy_no_proxy.trim().to_owned();
+        if self.nebula_ssh_proxy_choice == settings::ProxyChoice::Command {
+            let command = crate::ssh_proxy::command_target(&self.nebula_ssh_proxy_url)
+                .unwrap_or("")
+                .trim();
+            self.nebula_ssh_proxy_url = if command.is_empty() {
+                String::new()
+            } else {
+                format!("command:{command}")
+            };
+        }
         self.persist_nebula_settings();
         self.pending_update.dirty = true;
     }
@@ -4917,6 +5452,8 @@ impl Display {
         }
         let [url, no_proxy] = std::mem::take(&mut self.nebula_ssh_proxy_backup);
         self.nebula_ssh_proxy_url = url;
+        self.nebula_ssh_proxy_protocol =
+            settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).0;
         self.nebula_ssh_proxy_no_proxy = no_proxy;
         self.pending_update.dirty = true;
     }
@@ -5169,13 +5706,18 @@ impl Display {
     /// any config profiles. Detection runs once and is cached — the chevron
     /// beside the "+" opens this — the familiar profile menu.
     pub fn open_shell_menu(&mut self, profiles: &[crate::config::ui_config::Profile]) {
-        let ssh_rows: Vec<(String, String)> = self
+        let ssh_rows: Vec<(String, String, String)> = self
             .nebula_ssh_hosts
             .iter()
             .map(|host| {
                 let label =
                     self.nebula_ssh_labels.get(host).cloned().unwrap_or_else(|| host.clone());
-                (label, host.clone())
+                let icon = self
+                    .nebula_ssh_icons
+                    .get(host)
+                    .cloned()
+                    .unwrap_or_else(|| crate::display::ui::os_icons::DEFAULT_ID.to_owned());
+                (label, host.clone(), icon)
             })
             .collect();
         let shells =
@@ -5183,7 +5725,7 @@ impl Display {
         let default_shell =
             self.nebula_shell_id.as_deref().unwrap_or_else(|| self.nebula_shell.settings_value());
         self.nebula_palette.set_shell_menu(shells, profiles, default_shell);
-        self.nebula_palette.set_ssh_hosts(&ssh_rows);
+        self.nebula_palette.set_ssh_hosts_with_icons(&ssh_rows);
         self.nebula_palette.open_profiles();
         self.pending_update.dirty = true;
     }
@@ -6360,8 +6902,22 @@ impl Display {
         self.nebula_ssh_proxy_mode = settings.ssh_proxy_mode;
         self.nebula_ssh_proxy_url = settings.ssh_proxy_url;
         self.nebula_ssh_proxy_no_proxy = settings.ssh_proxy_no_proxy;
-        self.nebula_ssh_proxy_jump =
-            crate::ssh_proxy::jump_target(&self.nebula_ssh_proxy_url).is_some();
+        self.nebula_ssh_proxy_protocol =
+            settings::manual_proxy_parts(&self.nebula_ssh_proxy_url).0;
+        self.nebula_ssh_proxy_choice = self
+            .nebula_local_proxies
+            .iter()
+            .position(|proxy| proxy.url() == self.nebula_ssh_proxy_url)
+            .map(settings::ProxyChoice::Detected)
+            .unwrap_or_else(|| {
+                if crate::ssh_proxy::jump_target(&self.nebula_ssh_proxy_url).is_some() {
+                    settings::ProxyChoice::Jump
+                } else if crate::ssh_proxy::command_target(&self.nebula_ssh_proxy_url).is_some() {
+                    settings::ProxyChoice::Command
+                } else {
+                    settings::ProxyChoice::Manual
+                }
+            });
         if self.nebula_ssh_proxy_mode == crate::ssh_proxy::ProxyMode::System {
             self.refresh_system_proxy_probe();
         }
@@ -6449,10 +7005,8 @@ impl Display {
             let scale = self.window.scale_factor as f32;
             let alpha = (self.nebula_window_opacity * 255.0).round().clamp(0.0, 255.0) as u8;
             // 与 chrome 壳层同径同 round：半径差出小数像素就是一圈错位细缝。
-            let radius = (UI_SHELL_RADIUS_LOGICAL * scale)
-                .round()
-                .min(card_w * 0.5)
-                .min(card_h * 0.5);
+            let radius =
+                (UI_SHELL_RADIUS_LOGICAL * scale).round().min(card_w * 0.5).min(card_h * 0.5);
             // 2026-08-09 白角根因修复：凹角补片从 chrome 壳层挪到这里、画在
             // 卡片**之前**。原先卡与补片是两条独立 AA 弧按顺序 over，弧上
             // 必然残留 i(1-i)·清屏色 的交叉项——四角浮出一圈亮线，透明窗

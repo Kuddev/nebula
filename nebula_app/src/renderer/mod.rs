@@ -372,6 +372,46 @@ impl Renderer {
         Some((glyph.left as f32, top, glyph.width as f32, glyph.height as f32))
     }
 
+    /// 以 `(x, y)` 为锚点缩放并绘制一个 UI 字体角色的字形。
+    ///
+    /// 它与 [`Self::chrome_glyph_ink`] 使用完全相同的 UI 字号和 metrics，调用方
+    /// 因此能把量出的墨迹框精确映射进视觉槽。旧的
+    /// [`Self::draw_chrome_text_scaled`] 从终端字号 atlas 起步再补偿；普通文字足够，
+    /// 但图标需要和控件共享硬基准线时，bearing 相差一个像素也会直接露出来。
+    pub fn draw_ui_glyph_scaled(
+        &mut self,
+        size_info: &SizeInfo,
+        x: f32,
+        y: f32,
+        mult: f32,
+        fg: Rgb,
+        character: char,
+        glyph_cache: &mut GlyphCache,
+    ) {
+        if !mult.is_finite() || mult <= 0.0 {
+            return;
+        }
+
+        let base_size = glyph_cache.font_size;
+        glyph_cache.font_size = glyph_cache.ui_font_size();
+        glyph_cache.begin_ui_domain();
+        self.begin_chrome_text_scaled(size_info, x, y, mult);
+        let cell = RenderableCell {
+            point: Point::new(0, Column(0)),
+            character,
+            extra: None,
+            flags: Flags::empty(),
+            bg_alpha: 0.0,
+            fg,
+            bg: Rgb::new(0, 0, 0),
+            underline: fg,
+        };
+        self.draw_cells(size_info, glyph_cache, std::iter::once(cell));
+        self.end_chrome_text(size_info);
+        glyph_cache.end_ui_domain();
+        glyph_cache.font_size = base_size;
+    }
+
     pub fn draw_chrome_text(
         &mut self,
         size_info: &SizeInfo,

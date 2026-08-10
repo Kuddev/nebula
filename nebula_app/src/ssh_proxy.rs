@@ -14,10 +14,14 @@
 //! SOCKS5 一律把主机名交给代理端解析（ATYP=0x03，字面 IP 除外）：访问境外
 //! 主机时本地 DNS 往往被污染或解析不到，本地解析等于代理白配。
 
-use std::io;
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream as StdTcpStream};
+use std::pin::Pin;
+use std::process::Stdio;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
 /// 与 zap 一致的握手预算：慢代理 10 秒建不起隧道就该报错，而不是让
@@ -60,12 +64,15 @@ pub enum ProxyLink {
     /// SSH 跳板。值是 `user@host[:port]`、`~/.ssh/config` 别名或已存主机，
     /// 解析与认证沿用跳板自己的配置（profile / 密钥 / 它自己的代理设置）。
     Jump(String),
+    /// 用子进程 stdin/stdout 承载目标字节流，语义与 OpenSSH ProxyCommand
+    /// 一致。命令来自用户设置；`%h` / `%p` 在启动前替换为目标主机和端口。
+    Command(String),
 }
 
 impl ProxyLink {
     /// 配置值统一入口：`jump:<主机>`、带协议前缀的 URL、或裸 `host[:port]`。
-    /// 裸地址按 socks5 处理——从 Clash / v2rayN 复制出来的就是 `127.0.0.1:7890`
-    /// 这种形态，逼用户手补前缀是纯摩擦（混合端口对 SOCKS5 一律来者不拒）。
+    /// 裸地址按 SOCKS5 处理，兼容已有设置；新界面要求用户在 SOCKS5 与
+    /// HTTP 之间明确选择，不再提供语义含糊的自动识别。
     pub fn parse(value: &str) -> Result<Self, String> {
         let value = value.trim();
         if let Some(rest) = strip_prefix_ignore_case(value, "jump:") {
@@ -77,6 +84,16 @@ impl ProxyLink {
                 return Err("暂不支持多级跳板链（jump: 只能写一台主机）".to_owned());
             }
             return Ok(Self::Jump(target.to_owned()));
+        }
+        if let Some(rest) = strip_prefix_ignore_case(value, "command:") {
+            let command = rest.trim();
+            if command.is_empty() {
+                return Err("command: 后面需要填写代理命令".to_owned());
+            }
+            if !command.contains("%h") || !command.contains("%p") {
+                return Err("自定义代理命令必须同时包含 %h（目标主机）和 %p（目标端口）".to_owned());
+            }
+            return Ok(Self::Command(command.to_owned()));
         }
         if value.contains("://") {
             return ProxyServer::parse_url(value).map(Self::Server);
@@ -91,6 +108,7 @@ impl ProxyLink {
         match self {
             Self::Server(server) => server.identity(),
             Self::Jump(target) => format!("jump:{target}"),
+            Self::Command(command) => format!("command:{command}"),
         }
     }
 }
@@ -108,6 +126,215 @@ fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str>
 /// 「指定代理」的子模式并回显当前跳板；真值解析仍走 [`ProxyLink::parse`]。
 pub fn jump_target(value: &str) -> Option<&str> {
     strip_prefix_ignore_case(value.trim(), "jump:").map(str::trim)
+}
+
+/// 返回 `command:` 后的命令正文；设置页用它派生子模式并隐藏持久化前缀。
+pub fn command_target(value: &str) -> Option<&str> {
+    strip_prefix_ignore_case(value.trim(), "command:").map(str::trim)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalProxyProtocol {
+    Socks5,
+    Http,
+    Mixed,
+}
+
+impl LocalProxyProtocol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Socks5 => "SOCKS5",
+            Self::Http => "HTTP",
+            Self::Mixed => "HTTP + SOCKS5",
+        }
+    }
+
+    fn url_scheme(self) -> &'static str {
+        match self {
+            // 混合端口优先 SOCKS5，让目标域名继续由代理端解析。
+            Self::Socks5 | Self::Mixed => "socks5",
+            Self::Http => "http",
+        }
+    }
+}
+
+/// 一次真实本机握手探测得到的代理端点。名称只描述协议，不根据常用端口
+/// 猜测进程名，避免把任意监听 7890 的程序误标成 Clash。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalProxyEndpoint {
+    pub host: String,
+    pub port: u16,
+    pub protocol: LocalProxyProtocol,
+}
+
+impl LocalProxyEndpoint {
+    pub fn name(&self) -> &'static str {
+        match self.protocol {
+            LocalProxyProtocol::Socks5 => "本机 SOCKS5 代理",
+            LocalProxyProtocol::Http => "本机 HTTP 代理",
+            LocalProxyProtocol::Mixed => "本机混合代理",
+        }
+    }
+
+    pub fn address(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    pub fn url(&self) -> String {
+        format!("{}://{}:{}", self.protocol.url_scheme(), self.host, self.port)
+    }
+}
+
+const LOCAL_PROXY_PORTS: [u16; 9] = [7890, 7891, 7897, 1080, 10808, 10809, 20170, 20171, 2080];
+const LOCAL_PROXY_PROBE_TIMEOUT: Duration = Duration::from_millis(140);
+
+/// 扫描常用本机端口并分别执行 SOCKS5 与 HTTP CONNECT 握手。这个函数会
+/// 阻塞，调用方必须放到后台线程；只把握手成功的端点交给 UI。
+pub fn scan_local_proxies(extra_ports: &[u16]) -> Vec<LocalProxyEndpoint> {
+    let mut ports = LOCAL_PROXY_PORTS.to_vec();
+    for port in extra_ports.iter().copied().filter(|port| *port != 0) {
+        if !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+
+    ports
+        .into_iter()
+        .filter_map(|port| {
+            let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+            let socks5 = probe_local_socks5(address);
+            let http = probe_local_http(address);
+            let protocol = match (socks5, http) {
+                (true, true) => LocalProxyProtocol::Mixed,
+                (true, false) => LocalProxyProtocol::Socks5,
+                (false, true) => LocalProxyProtocol::Http,
+                (false, false) => return None,
+            };
+            Some(LocalProxyEndpoint { host: "127.0.0.1".to_owned(), port, protocol })
+        })
+        .collect()
+}
+
+fn local_probe_stream(address: SocketAddr) -> io::Result<StdTcpStream> {
+    let stream = StdTcpStream::connect_timeout(&address, LOCAL_PROXY_PROBE_TIMEOUT)?;
+    stream.set_read_timeout(Some(LOCAL_PROXY_PROBE_TIMEOUT))?;
+    stream.set_write_timeout(Some(LOCAL_PROXY_PROBE_TIMEOUT))?;
+    Ok(stream)
+}
+
+fn probe_local_socks5(address: SocketAddr) -> bool {
+    let Ok(mut stream) = local_probe_stream(address) else { return false };
+    if stream.write_all(&[0x05, 0x01, 0x00]).is_err() {
+        return false;
+    }
+    let mut response = [0u8; 2];
+    stream.read_exact(&mut response).is_ok() && response == [0x05, 0x00]
+}
+
+fn probe_local_http(address: SocketAddr) -> bool {
+    let Ok(mut stream) = local_probe_stream(address) else { return false };
+    let request = b"CONNECT 127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n";
+    if stream.write_all(request).is_err() {
+        return false;
+    }
+    let mut response = [0u8; 160];
+    let Ok(read) = stream.read(&mut response) else { return false };
+    let head = String::from_utf8_lossy(&response[..read]);
+    let Some(status) = head.lines().next().and_then(|line| line.split_whitespace().nth(1)) else {
+        return false;
+    };
+    // 普通 Web 服务常以 400/404/405 回应 CONNECT；这里只接收代理对隧道
+    // 请求的典型结果，避免把本机网站误报成 HTTP 代理。
+    matches!(status.parse::<u16>(), Ok(200 | 407 | 500 | 502 | 503 | 504))
+}
+
+/// 自定义代理命令的双向字节流。持有 Child 以保证 russh 使用期间进程存活；
+/// 流被丢弃时主动终止，避免失败连接遗留后台进程。
+pub struct CommandStream {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+}
+
+impl AsyncRead for CommandStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stdout).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for CommandStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.get_mut().stdin).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().stdin).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().stdin).poll_shutdown(cx)
+    }
+}
+
+impl Drop for CommandStream {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
+fn render_proxy_command(template: &str, target_host: &str, target_port: u16) -> io::Result<String> {
+    // 用户命令本身是受信设置，但 `%h` 来自 SSH 配置。限制替换值字符集，
+    // 防止恶意 Host 借 shell 元字符改变用户原本配置的命令。
+    if target_host.is_empty()
+        || !target_host
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':'))
+    {
+        return Err(proxy_err("自定义代理命令的目标主机包含不安全字符"));
+    }
+    if !template.contains("%h") || !template.contains("%p") {
+        return Err(proxy_err("自定义代理命令必须同时包含 %h 和 %p"));
+    }
+    Ok(template.replace("%h", target_host).replace("%p", &target_port.to_string()))
+}
+
+pub async fn connect_command(
+    template: &str,
+    target_host: &str,
+    target_port: u16,
+) -> io::Result<CommandStream> {
+    let rendered = render_proxy_command(template, target_host, target_port)?;
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = tokio::process::Command::new("cmd.exe");
+        command.args(["/D", "/S", "/C", &rendered]);
+        command.creation_flags(0x08000000);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", &rendered]);
+        command
+    };
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|err| proxy_err(&format!("无法启动自定义代理命令: {err}")))?;
+    let stdin = child.stdin.take().ok_or_else(|| proxy_err("自定义代理命令没有 stdin"))?;
+    let stdout = child.stdout.take().ok_or_else(|| proxy_err("自定义代理命令没有 stdout"))?;
+    Ok(CommandStream { child, stdin, stdout })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -699,6 +926,20 @@ mod tests {
         assert!(ProxyLink::parse("jump: ").is_err());
         assert!(ProxyLink::parse("ftp://x").is_err());
         assert_eq!(ProxyLink::Jump("bastion".into()).identity(), "jump:bastion");
+        assert_eq!(
+            ProxyLink::parse("command:corkscrew proxy 8080 %h %p"),
+            Ok(ProxyLink::Command("corkscrew proxy 8080 %h %p".to_owned()))
+        );
+        assert!(ProxyLink::parse("command:nc proxy 8080").is_err(), "缺占位符必须报错");
+    }
+
+    #[test]
+    fn proxy_command_replaces_only_valid_target_placeholders() {
+        assert_eq!(
+            render_proxy_command("tool --host %h --port %p", "vps.example.com", 2222).unwrap(),
+            "tool --host vps.example.com --port 2222"
+        );
+        assert!(render_proxy_command("tool %h %p", "bad host&whoami", 22).is_err());
     }
 
     #[test]

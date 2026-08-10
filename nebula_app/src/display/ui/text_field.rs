@@ -95,6 +95,15 @@ impl TextCursor {
         caret::note_activity();
     }
 
+    /// 展示窗口截掉前 `hidden` 个字符时的等效光标：配合截断后的展示串传给
+    /// [`push_cursor`]。只做只读换算，不触发 caret 活跃节律。
+    pub fn shifted(&self, hidden: usize) -> TextCursor {
+        TextCursor {
+            caret: self.caret.saturating_sub(hidden),
+            anchor: self.anchor.map(|anchor| anchor.saturating_sub(hidden)),
+        }
+    }
+
     /// 左右移动一格。
     ///
     /// 有选区且不按 Shift 时，方向键是**塌陷到选区的那一端**而不是移动一格

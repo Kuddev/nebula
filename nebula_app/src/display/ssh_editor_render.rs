@@ -1181,9 +1181,9 @@ impl Display {
             glyph_cache,
         );
         let proxy_labels = if language == super::UiLanguage::ZhCn {
-            ["跟随全局", "直连", "自定义"]
+            ["跟随系统", "直接连接", "单独设置"]
         } else {
-            ["Global", "Direct", "Custom"]
+            ["System", "Direct", "Custom"]
         };
         for ((choice, rect), label) in proxy.iter().zip(proxy_labels) {
             self.renderer.draw_chrome_text(
