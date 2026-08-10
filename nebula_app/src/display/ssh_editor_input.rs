@@ -47,9 +47,7 @@ impl Display {
             // 先有配好的私钥才走得通，拿它当默认等于让新手先撞一次失败。
             auth: crate::ssh_profiles::SshAuthMode::Password,
             private_keys: Vec::new(),
-            proxy_choice: Default::default(),
-            proxy_url: String::new(),
-            proxy_cursor: Default::default(),
+            legacy_proxy: None,
             field: SshEditorField::Destination,
             focus: crate::ux::FocusIndex::default(),
             test: Default::default(),
@@ -73,8 +71,6 @@ impl Display {
                 .for_destination(&destination);
         // 存盘的地址串里端口是内嵌的；编辑器分两个框显示，所以这里拆开。
         let (address, port) = ssh_ui::split_destination_port(&destination);
-        let (proxy_choice, proxy_url) =
-            ssh_ui::SshProxyChoice::from_saved(profile.proxy.as_deref());
         self.nebula_ssh_editor = Some(SshHostEditor {
             original_destination: Some(destination.clone()),
             error: None,
@@ -98,9 +94,7 @@ impl Display {
             show_password: false,
             auth: profile.auth,
             private_keys: profile.private_keys,
-            proxy_choice,
-            proxy_url,
-            proxy_cursor: Default::default(),
+            legacy_proxy: profile.proxy.clone(),
             field: SshEditorField::Destination,
             focus: crate::ux::FocusIndex::default(),
             test: Default::default(),
@@ -275,10 +269,6 @@ impl Display {
             SshEditorHit::Label
         } else if let Some((mode, _)) = rects.auth.iter().find(|(_, rect)| hit(*rect)) {
             SshEditorHit::Auth(*mode)
-        } else if let Some((choice, _)) = rects.proxy.iter().find(|(_, rect)| hit(*rect)) {
-            SshEditorHit::ProxyChoice(*choice)
-        } else if hit(rects.proxy_url) {
-            SshEditorHit::ProxyUrl
         } else if hit(rects.add_private_key) {
             SshEditorHit::AddPrivateKey
         } else if let Some((index, _)) = rects.private_key_rows.iter().find(|(_, rect)| hit(*rect))
@@ -554,7 +544,6 @@ impl Display {
             auth: editor.auth,
             private_keys: editor.private_keys.clone(),
             password: (!editor.password.is_empty()).then(|| editor.password.clone()),
-            proxy: editor.proxy_choice.to_saved(&editor.proxy_url),
         });
     }
 
@@ -609,8 +598,7 @@ impl Display {
             hit @ (SshEditorHit::Destination
             | SshEditorHit::Port
             | SshEditorHit::Label
-            | SshEditorHit::Password
-            | SshEditorHit::ProxyUrl) => self.ssh_editor_press_field(hit, x),
+            | SshEditorHit::Password) => self.ssh_editor_press_field(hit, x),
             SshEditorHit::PasswordToggle => {
                 if let Some(editor) = self.nebula_ssh_editor.as_mut() {
                     editor.show_password = !editor.show_password;
@@ -690,27 +678,6 @@ impl Display {
                     }
                 }
             },
-            SshEditorHit::ProxyChoice(choice) => {
-                if let Some(editor) = self.nebula_ssh_editor.as_mut() {
-                    if editor.proxy_choice != choice {
-                        editor.proxy_choice = choice;
-                        // 代理参与连接：切换后旧的测试结果不再为这份草稿背书。
-                        editor.error = None;
-                        editor.test = Default::default();
-                        if choice == ssh_ui::SshProxyChoice::Custom {
-                            // 选「自定义」的下一步必然是填地址：直接聚焦 URL 框。
-                            let slot = editor
-                                .slot_of(ssh_ui::SshEditorSlot::Field(SshEditorField::ProxyUrl));
-                            editor.focus.set(slot, editor.slots().len());
-                            editor.field = SshEditorField::ProxyUrl;
-                            super::ui::caret::note_activity();
-                        } else if editor.field == SshEditorField::ProxyUrl {
-                            // URL 框随 Custom 显隐；藏起来的框不能继续持有键盘。
-                            editor.field = SshEditorField::Destination;
-                        }
-                    }
-                }
-            },
             SshEditorHit::SaveToggleBox | SshEditorHit::SaveToggleLabel => {
                 self.ssh_editor_toggle_save();
             },
@@ -771,21 +738,6 @@ impl Display {
             self.window.request_redraw();
             return;
         }
-        // 自定义代理的 URL 在保存时就校验：写错的地址留到连接时才报，
-        // 用户看到的会是「连不上主机」而不是「代理没写对」。
-        if editor.proxy_choice == ssh_ui::SshProxyChoice::Custom {
-            let url = editor.proxy_url.trim();
-            if !url.is_empty() {
-                if let Err(err) = crate::ssh_proxy::ProxyLink::parse(url) {
-                    editor.error = Some(err);
-                    editor.field = SshEditorField::ProxyUrl;
-                    self.nebula_ssh_editor = Some(editor);
-                    self.pending_update.dirty = true;
-                    self.window.request_redraw();
-                    return;
-                }
-            }
-        }
         if let Some(original) = editor.original_destination.as_deref() {
             if original != destination {
                 self.nebula_saved_hosts.retain(|host| host != original);
@@ -840,9 +792,9 @@ impl Display {
             label: Some(label),
             // 空串 = 自动识别，不落盘；配置里只存用户明确选过的形状。
             icon: (!editor.icon.is_empty()).then(|| editor.icon.clone()),
-            // 三态编码：跟随全局不落盘、直连存 "direct"、自定义存 URL
-            // （空 URL 视同跟随，见 `SshProxyChoice::to_saved`）。
-            proxy: editor.proxy_choice.to_saved(&editor.proxy_url),
+            // 旧版每主机代理不再参与连接，但不能因为用户改了名字或认证方式
+            // 就破坏历史配置；因此只做原样透传，不在当前编辑器中解释或改写。
+            proxy: editor.legacy_proxy.clone(),
         });
         if let Err(err) = profiles.save(&profile_path) {
             editor.error = Some(format!("保存 SSH Profile 失败: {err}"));

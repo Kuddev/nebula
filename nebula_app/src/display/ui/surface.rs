@@ -101,7 +101,6 @@ pub fn over(top: Rgba, base: Rgba) -> Rgba {
     Rgba::new(mix(top.r, base.r), mix(top.g, base.g), mix(top.b, base.b), base.a)
 }
 
-
 /// 发丝描边环。替代散落各处的手写 `(x-1, y-1, w+2, h+2)`。
 ///
 /// 外圆角自动取 `radius + hairline`，保证内外弧**同心**——手写处常常内外用同一
@@ -307,7 +306,8 @@ pub fn push_group(
     quads.push(UiQuad::solid(x, y, w, h, corner, fade(over(sk.card, sk.panel), progress)));
 }
 
-/// 下沉表面（文本输入框）。聚焦时描边换成强调色——焦点不能只靠颜色深浅表示。
+/// 下沉表面（文本输入框）。聚焦描边先与面板预合成为单一不透明颜色：这样
+/// 不会因 hairline、面板和输入底三层 alpha 在圆角边缘叠出一圈杂色。
 pub fn push_input(
     quads: &mut Vec<UiQuad>,
     rect: Rect,
@@ -318,8 +318,11 @@ pub fn push_input(
 ) {
     let (x, y, w, h) = rect;
     let corner = radius::control(density) * scale;
-    let stroke =
-        if focused { Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255) } else { sk.hairline };
+    let stroke = if focused {
+        over(Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 118), sk.panel)
+    } else {
+        over(sk.hairline, sk.panel)
+    };
     push_stroke(quads, rect, corner, scale, stroke);
     quads.push(UiQuad::solid(x, y, w, h, corner, sk.input));
 }
@@ -380,6 +383,17 @@ mod tests {
         let mut quads = Vec::new();
         push_stroke(&mut quads, (0.0, 0.0, 10.0, 10.0), 4.0, 0.5, Rgba::new(0, 0, 0, 40));
         assert_eq!(quads[0].width, 12.0, "描边宽应被钳到 1px，而不是 0.5px");
+    }
+
+    #[test]
+    fn focused_input_uses_one_precomposed_soft_stroke_color() {
+        let skin = NebulaTheme::Nebula.skin();
+        let mut quads = Vec::new();
+        push_input(&mut quads, (20.0, 20.0, 240.0, 34.0), 1.0, &skin, Density::Standard, true);
+
+        assert_eq!(quads.len(), 2);
+        assert_eq!(quads[0].color0.a, skin.panel.a, "焦点线必须先合成为单色");
+        assert_ne!(quads[0].color0, Rgba::opaque(skin.accent), "焦点线不应是刺眼的纯强调色");
     }
 
     #[test]

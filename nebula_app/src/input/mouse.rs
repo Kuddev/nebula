@@ -161,14 +161,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 | crate::display::SshEditorHit::Port
                 | crate::display::SshEditorHit::Label
                 | crate::display::SshEditorHit::IconSearch
-                | crate::display::SshEditorHit::ProxyUrl
                 | crate::display::SshEditorHit::Password => CursorIcon::Text,
                 crate::display::SshEditorHit::SaveToggleBox
                 | crate::display::SshEditorHit::SaveToggleLabel
                 | crate::display::SshEditorHit::Close
                 | crate::display::SshEditorHit::PasswordToggle
                 | crate::display::SshEditorHit::Auth(_)
-                | crate::display::SshEditorHit::ProxyChoice(_)
                 | crate::display::SshEditorHit::AddPrivateKey
                 | crate::display::SshEditorHit::RemovePrivateKey(_)
                 | crate::display::SshEditorHit::Avatar
@@ -450,6 +448,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::SyncPullButton
             | crate::display::SettingsHit::SshProxyModeDropdown
             | crate::display::SettingsHit::SshProxyModeOption(_)
+            | crate::display::SettingsHit::SshProxyTest
             | crate::display::SettingsHit::SshProxyProtocolDropdown
             | crate::display::SettingsHit::SshProxyProtocolOption(_)
             | crate::display::SettingsHit::SshProxyLinkPick(_)

@@ -41,9 +41,7 @@ fn enabled() -> bool {
     *ENABLED.get_or_init(|| {
         let on = std::env::var("NEBULA_INPUT_LATENCY").is_ok_and(|v| v != "0" && !v.is_empty());
         if on {
-            crate::display::nebula_debug_log(
-                "inlat enabled (key→pty / wake→frame / key→frame)",
-            );
+            crate::display::nebula_debug_log("inlat enabled (key→pty / wake→frame / key→frame)");
         }
         on
     })

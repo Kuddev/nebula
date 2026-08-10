@@ -2,10 +2,11 @@
 //!
 //! 不引入代理 crate：握手完成后把裸 `TcpStream` 交给 russh 的
 //! `client::connect_stream`。全局配置存 `nebula_settings.txt`
-//! （`ssh_proxy_mode` / `ssh_proxy_url` / `ssh_proxy_no_proxy`），每主机覆盖
-//! 存 `ssh_profiles.json` 的 `proxy` 字段（`"direct"`、代理地址或
-//! `jump:<主机>`）。跳板链路的建立在 `ssh_session::open_transport`——它需要
-//! 完整的认证栈，本模块只负责把配置解析成 [`ProxyLink`]。
+//! （`ssh_proxy_mode` / `ssh_proxy_url` / `ssh_proxy_no_proxy`）。旧版写入
+//! `ssh_profiles.json` 的每主机 `proxy` 字段仍能被解析以保证数据兼容，但主
+//! 界面和连接入口不再使用它覆盖全局网络设置。跳板链路的建立在
+//! `ssh_session::open_transport`——它需要完整的认证栈，本模块只负责把配置
+//! 解析成 [`ProxyLink`]。
 //!
 //! 「跟随系统」在 Windows 上先读注册表 Internet Settings（WinINET，Clash /
 //! v2rayN 等代理软件写的就是它），读不到再回落环境变量——只读环境变量的话
@@ -98,9 +99,11 @@ impl ProxyLink {
         if value.contains("://") {
             return ProxyServer::parse_url(value).map(Self::Server);
         }
-        ProxyServer::parse_url(&format!("socks5://{value}"))
-            .map(Self::Server)
-            .map_err(|_| format!("无法识别的代理地址: {value}（支持 socks5:// / http:// / host:port / jump:主机）"))
+        ProxyServer::parse_url(&format!("socks5://{value}")).map(Self::Server).map_err(|_| {
+            format!(
+                "无法识别的代理地址: {value}（支持 socks5:// / http:// / host:port / jump:主机）"
+            )
+        })
     }
 
     /// 连接池 key 里的链路身份（不含凭据）。
@@ -513,7 +516,9 @@ impl SshProxyConfig {
             },
             ProxyMode::System => {
                 let Some((url, mut no_proxy)) = system_proxy() else { return Ok(None) };
-                no_proxy.extend_from_slice(&self.no_proxy);
+                // 网络页在系统模式下不显示 Nebula 自定义“直连地址”；这里也
+                // 不能暗中继续套用旧值。只尊重系统 ProxyOverride 和环境侧
+                // NO_PROXY，界面与真实连接语义保持一致。
                 if let Some(env) = env_var("NO_PROXY") {
                     no_proxy.extend(parse_no_proxy(&env));
                 }
@@ -955,8 +960,10 @@ mod tests {
         assert!(
             matches!(forced, ProxyLink::Server(ref server) if server.scheme == ProxyScheme::HttpConnect)
         );
-        assert!(global.resolve(Some("direct"), Some("bastion"), "vps.example.com").unwrap().is_none(),
-            "direct 覆盖连 ProxyJump 一起否掉");
+        assert!(
+            global.resolve(Some("direct"), Some("bastion"), "vps.example.com").unwrap().is_none(),
+            "direct 覆盖连 ProxyJump 一起否掉"
+        );
         // ssh_config 的 ProxyJump 次之，同样不受全局绕过影响。
         assert_eq!(
             global.resolve(None, Some("ops@bastion"), "10.0.0.1").unwrap(),

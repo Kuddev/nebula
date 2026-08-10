@@ -83,8 +83,8 @@ mod sync;
 mod terminal_profiles;
 mod update_check;
 mod ux;
-mod window_transition;
 mod window_context;
+mod window_transition;
 
 mod gl {
     #![allow(clippy::all, unsafe_op_in_unsafe_fn)]

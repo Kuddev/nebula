@@ -168,11 +168,7 @@ fn append_raw_key_event(
 ///
 /// The key sequences for `APP_KEYPAD` and alike are handled inside the bindings.
 #[inline(never)]
-pub(crate) fn build_sequence(
-    input: &KeyInput,
-    mods: ModifiersState,
-    mode: TermMode,
-) -> Vec<u8> {
+pub(crate) fn build_sequence(input: &KeyInput, mods: ModifiersState, mode: TermMode) -> Vec<u8> {
     if use_win32_input_mode(mode) {
         if let Some(sequence) = build_win32_input_sequence(input) {
             return sequence;
@@ -252,8 +248,7 @@ pub(crate) fn build_sequence(
 /// must take precedence over DECSET 9001.
 #[inline]
 pub(crate) fn use_win32_input_mode(mode: TermMode) -> bool {
-    mode.contains(TermMode::WIN32_INPUT_MODE)
-        && !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL)
+    mode.contains(TermMode::WIN32_INPUT_MODE) && !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL)
 }
 
 /// Synthesize key-up sequences for modifiers still held when the window loses
@@ -274,8 +269,8 @@ pub(crate) fn build_focus_loss_key_ups(mods: ModifiersState, mode: TermMode) -> 
     // ALL_KEYS, and releases additionally require REPORT_EVENT_TYPES (the
     // same gate `key_release` applies to real events). Anywhere else the
     // down was never sent, so there is nothing to release.
-    let kitty_release = mode
-        .contains(TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_EVENT_TYPES);
+    let kitty_release =
+        mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_EVENT_TYPES);
     if !use_win32_input_mode(mode) && !kitty_release {
         return Vec::new();
     }
@@ -290,11 +285,8 @@ pub(crate) fn build_focus_loss_key_ups(mods: ModifiersState, mode: TermMode) -> 
     ];
 
     #[cfg(target_os = "windows")]
-    let mut control_key_state: u32 = HELD_ORDER
-        .iter()
-        .filter(|(flag, ..)| mods.contains(*flag))
-        .map(|(.., bit)| bit)
-        .sum();
+    let mut control_key_state: u32 =
+        HELD_ORDER.iter().filter(|(flag, ..)| mods.contains(*flag)).map(|(.., bit)| bit).sum();
 
     let mut bytes = Vec::new();
     let mut remaining = mods;
@@ -738,24 +730,21 @@ mod vt_tests {
     #[test]
     fn kitty_disambiguate_escape_is_csi_27_u() {
         let esc = input(Key::Named(NamedKey::Escape), ElementState::Pressed, Some("\x1b"));
-        let bytes =
-            build_sequence(&esc, ModifiersState::empty(), TermMode::DISAMBIGUATE_ESC_CODES);
+        let bytes = build_sequence(&esc, ModifiersState::empty(), TermMode::DISAMBIGUATE_ESC_CODES);
         assert_eq!(bytes, b"\x1b[27u");
     }
 
     #[test]
     fn kitty_shift_enter_reports_the_shift_modifier() {
         let enter = input(Key::Named(NamedKey::Enter), ElementState::Pressed, Some("\r"));
-        let bytes =
-            build_sequence(&enter, ModifiersState::SHIFT, TermMode::DISAMBIGUATE_ESC_CODES);
+        let bytes = build_sequence(&enter, ModifiersState::SHIFT, TermMode::DISAMBIGUATE_ESC_CODES);
         assert_eq!(bytes, b"\x1b[13;2u");
     }
 
     #[test]
     fn kitty_ctrl_character_encodes_codepoint_and_modifier() {
         let key = input(Key::Character("a".into()), ElementState::Pressed, Some("\x01"));
-        let bytes =
-            build_sequence(&key, ModifiersState::CONTROL, TermMode::DISAMBIGUATE_ESC_CODES);
+        let bytes = build_sequence(&key, ModifiersState::CONTROL, TermMode::DISAMBIGUATE_ESC_CODES);
         assert_eq!(bytes, b"\x1b[97;5u");
     }
 
@@ -765,10 +754,7 @@ mod vt_tests {
         assert_eq!(build_sequence(&up, ModifiersState::empty(), TermMode::empty()), b"\x1b[A");
 
         let f5 = input(Key::Named(NamedKey::F5), ElementState::Pressed, None);
-        assert_eq!(
-            build_sequence(&f5, ModifiersState::SHIFT, TermMode::empty()),
-            b"\x1b[15;2~"
-        );
+        assert_eq!(build_sequence(&f5, ModifiersState::SHIFT, TermMode::empty()), b"\x1b[15;2~");
     }
 
     #[test]
@@ -782,11 +768,8 @@ mod vt_tests {
     fn kitty_left_shift_uses_its_dedicated_keysym() {
         let mut shift = input(Key::Named(NamedKey::Shift), ElementState::Pressed, None);
         shift.location = KeyLocation::Left;
-        let bytes = build_sequence(
-            &shift,
-            ModifiersState::empty(),
-            TermMode::REPORT_ALL_KEYS_AS_ESC,
-        );
+        let bytes =
+            build_sequence(&shift, ModifiersState::empty(), TermMode::REPORT_ALL_KEYS_AS_ESC);
         // The modifier applies to itself on press, per the kitty spec.
         assert_eq!(bytes, b"\x1b[57441;2u");
     }
@@ -824,10 +807,7 @@ mod vt_tests {
         let mode = TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_EVENT_TYPES;
         // Ctrl alone: left-control keysym, empty remaining modifiers, release
         // event type.
-        assert_eq!(
-            build_focus_loss_key_ups(ModifiersState::CONTROL, mode),
-            b"\x1b[57442;1:3u"
-        );
+        assert_eq!(build_focus_loss_key_ups(ModifiersState::CONTROL, mode), b"\x1b[57442;1:3u");
         // Shift+Ctrl: shift releases first while control is still held (;5),
         // then control releases with nothing remaining (;1).
         assert_eq!(
@@ -905,16 +885,11 @@ mod tests {
     #[test]
     fn escape_carries_its_control_character_both_directions() {
         // Down has WM_CHAR text; up has none and falls back to the table.
-        let down = input(
-            Key::Named(NamedKey::Escape),
-            ElementState::Pressed,
-            Some("\x1b"),
-            (27, 1, 0, 0),
-        );
+        let down =
+            input(Key::Named(NamedKey::Escape), ElementState::Pressed, Some("\x1b"), (27, 1, 0, 0));
         assert_eq!(encoded(&down), b"\x1b[27;1;27;1;0;1_");
 
-        let up =
-            input(Key::Named(NamedKey::Escape), ElementState::Released, None, (27, 1, 0, 0));
+        let up = input(Key::Named(NamedKey::Escape), ElementState::Released, None, (27, 1, 0, 0));
         assert_eq!(encoded(&up), b"\x1b[27;1;27;0;0;1_");
     }
 
@@ -976,12 +951,8 @@ mod tests {
 
     #[test]
     fn bare_modifiers_and_function_keys_stay_char_less() {
-        let shift_down = input(
-            Key::Named(NamedKey::Shift),
-            ElementState::Pressed,
-            None,
-            (16, 42, 0, SHIFT),
-        );
+        let shift_down =
+            input(Key::Named(NamedKey::Shift), ElementState::Pressed, None, (16, 42, 0, SHIFT));
         assert_eq!(encoded(&shift_down), b"\x1b[16;42;0;1;16;1_");
 
         let f5 = input(Key::Named(NamedKey::F5), ElementState::Pressed, None, (116, 63, 0, 0));
@@ -990,12 +961,8 @@ mod tests {
 
     #[test]
     fn surrogate_pair_text_emits_one_record_per_utf16_unit() {
-        let emoji = input(
-            Key::Character("😀".into()),
-            ElementState::Pressed,
-            Some("😀"),
-            (0, 0, 0, 0),
-        );
+        let emoji =
+            input(Key::Character("😀".into()), ElementState::Pressed, Some("😀"), (0, 0, 0, 0));
         assert_eq!(encoded(&emoji), b"\x1b[0;0;55357;1;0;1_\x1b[0;0;56832;1;0;1_");
     }
 

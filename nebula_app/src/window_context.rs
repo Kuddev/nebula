@@ -1649,9 +1649,10 @@ impl WindowContext {
     /// keeps the function total without giving them a session meaning.
     fn launch_session(launch: &TabLaunch) -> session::LaunchSession {
         match launch {
-            TabLaunch::Default | TabLaunch::Document(_) | TabLaunch::Image(_) | TabLaunch::Settings => {
-                session::LaunchSession::Default
-            },
+            TabLaunch::Default
+            | TabLaunch::Document(_)
+            | TabLaunch::Image(_)
+            | TabLaunch::Settings => session::LaunchSession::Default,
             TabLaunch::Shell { name, shell } => session::LaunchSession::Shell {
                 name: name.clone(),
                 program: shell.program().to_owned(),
@@ -2592,9 +2593,10 @@ impl WindowContext {
                 TabLaunch::Shell { name, .. } => crate::shell_detect::shell_short_tag(name),
                 // SSH 行的身份是目标主机（标签本身就写着），短标只说环境。
                 TabLaunch::Ssh(_) => "ssh".to_owned(),
-                TabLaunch::Profile(_) | TabLaunch::Document(_) | TabLaunch::Image(_) | TabLaunch::Settings => {
-                    String::new()
-                },
+                TabLaunch::Profile(_)
+                | TabLaunch::Document(_)
+                | TabLaunch::Image(_)
+                | TabLaunch::Settings => String::new(),
             });
             // Unseen-result dot: bell in a background tab, a tracked command
             // that finished unseen, or a tracked program parked at "waiting

@@ -85,9 +85,6 @@ struct EditorLayout {
     dest_y: f32,
     helper_y: f32,
     port_y: f32,
-    /// 代理覆盖三态分段器；自定义时下面跟一行 URL 输入框。
-    proxy_y: f32,
-    proxy_url_y: Option<f32>,
     /// 「认证」组：方式分段器，以及随方式切换的内容。
     auth_y: f32,
     note_y: f32,
@@ -106,7 +103,6 @@ struct EditorLayout {
 fn editor_layout(
     show_password: bool,
     show_keys: bool,
-    show_proxy_url: bool,
     note_lines: usize,
     key_rows: usize,
     status_lines: usize,
@@ -140,16 +136,7 @@ fn editor_layout(
     l.helper_y = gy;
     gy += support_h + FIELD_GAP;
     l.port_y = gy;
-    gy += CTL_H + FIELD_GAP;
-    // 代理覆盖属于「怎么连上去」，跟地址端口同组；URL 行只在自定义时存在。
-    l.proxy_y = gy;
-    gy += CTL_H;
-    if show_proxy_url {
-        gy += FIELD_GAP;
-        l.proxy_url_y = Some(gy);
-        gy += CTL_H;
-    }
-    gy += space::S;
+    gy += CTL_H + space::S;
     l.conn_group.1 = gy - y;
     y = gy + space::S;
 
@@ -290,11 +277,9 @@ impl Display {
             SshTestState::Failed { .. } => status_wrapped.len().max(1),
             _ => 1,
         };
-        let show_proxy_url = editor.proxy_choice == ssh_ui::SshProxyChoice::Custom;
         let v = editor_layout(
             show_password,
             show_keys,
-            show_proxy_url,
             note_lines,
             key_rows,
             status_lines,
@@ -355,31 +340,6 @@ impl Display {
             )
         });
         let zero = (0.0, 0.0, 0.0, 0.0);
-        // 代理覆盖分段器：三段（跟随全局 / 直连 / 自定义），轨道与认证方式
-        // 的分段器同款；URL 输入行只在「自定义」时存在。
-        let proxy_track = (ctl_x, by + s(v.proxy_y), ctl_w, field_h);
-        let proxy_pad = s(2.0);
-        let proxy_w = (proxy_track.2 - proxy_pad * 2.0) / 3.0;
-        let proxy_choices = [
-            ssh_ui::SshProxyChoice::Follow,
-            ssh_ui::SshProxyChoice::Direct,
-            ssh_ui::SshProxyChoice::Custom,
-        ];
-        let proxy = std::array::from_fn(|index| {
-            (
-                proxy_choices[index],
-                (
-                    proxy_track.0 + proxy_pad + index as f32 * proxy_w,
-                    proxy_track.1 + proxy_pad,
-                    proxy_w,
-                    proxy_track.3 - proxy_pad * 2.0,
-                ),
-            )
-        });
-        let proxy_url = match v.proxy_url_y {
-            Some(y) => (ctl_x, by + s(y), ctl_w, field_h),
-            None => zero,
-        };
         let password =
             if show_password { (ctl_x, by + s(v.password_y), ctl_w, field_h) } else { zero };
         let password_toggle = if show_password {
@@ -523,7 +483,6 @@ impl Display {
             port_x: port.0 + (port.2 - text_width(&port_shown)).max(0.0) * 0.5,
             label_x: host_label.0 + pad,
             password_x: password.0 + pad,
-            proxy_url_x: proxy_url.0 + pad,
             cell_w,
             // 名字按 1.2× 真栅格化，绘制的步进是**未取整** UI advance 的
             // 1.2 倍；cell_w 是 floor 过的，拿它乘列宽每个字差零点几像素，
@@ -540,8 +499,6 @@ impl Display {
             password,
             password_toggle,
             auth,
-            proxy,
-            proxy_url,
             add_private_key,
             private_key_rows: visible_keys
                 .iter()
@@ -803,47 +760,6 @@ impl Display {
                 ));
             }
         }
-        // 代理覆盖：分段轨道与选中片和认证方式是同一套组件语言。
-        super::ui::surface::push_stroke(
-            &mut quads,
-            proxy_track,
-            s(radius::CONTROL),
-            scale,
-            skin.hairline,
-        );
-        quads.push(UiQuad::solid(
-            proxy_track.0,
-            proxy_track.1,
-            proxy_track.2,
-            proxy_track.3,
-            s(radius::CONTROL),
-            super::ui::surface::over(skin.surface, group_fill),
-        ));
-        for (choice, rect) in proxy {
-            let active = editor.proxy_choice == choice;
-            let hovered = self.nebula_ssh_editor_hover == SshEditorHit::ProxyChoice(choice);
-            if active || hovered {
-                quads.push(UiQuad::solid(
-                    rect.0,
-                    rect.1,
-                    rect.2,
-                    rect.3,
-                    s(radius::CHIP),
-                    if active { skin.panel } else { skin.hover },
-                ));
-            }
-        }
-        if show_proxy_url {
-            input_quads(
-                &mut quads,
-                proxy_url,
-                editor.field == SshEditorField::ProxyUrl,
-                self.nebula_ssh_editor_hover == SshEditorHit::ProxyUrl,
-                accent,
-                &skin,
-                scale,
-            );
-        }
         if show_password {
             if self.nebula_ssh_editor_hover == SshEditorHit::PasswordToggle {
                 quads.push(UiQuad::solid(
@@ -967,7 +883,6 @@ impl Display {
         ) {
             let caret_field = match editor.field {
                 SshEditorField::Password if !show_password => SshEditorField::Destination,
-                SshEditorField::ProxyUrl if !show_proxy_url => SshEditorField::Destination,
                 field => field,
             };
             let caret_rect = match caret_field {
@@ -975,7 +890,6 @@ impl Display {
                 SshEditorField::Port => port,
                 SshEditorField::Label => host_label,
                 SshEditorField::Password => password,
-                SshEditorField::ProxyUrl => proxy_url,
             };
             // 光标、选区、命中三者共用 metrics 的起点与**同一份列宽**，所以
             // 点在哪一格，光标就落在哪一格——名字那一格比别处宽一档，这里跟
@@ -1168,49 +1082,6 @@ impl Display {
             language.pick("默认 22", "default 22"),
             glyph_cache,
         );
-
-        // ── 代理覆盖 ───────────────────────────────────────────────
-        self.renderer.draw_ui_text(
-            &size,
-            field_x,
-            label_y(by + s(v.proxy_y)),
-            support,
-            skin.ink_dim,
-            Flags::empty(),
-            language.pick("代理", "Proxy"),
-            glyph_cache,
-        );
-        let proxy_labels = if language == super::UiLanguage::ZhCn {
-            ["跟随系统", "直接连接", "单独设置"]
-        } else {
-            ["System", "Direct", "Custom"]
-        };
-        for ((choice, rect), label) in proxy.iter().zip(proxy_labels) {
-            self.renderer.draw_chrome_text(
-                &size,
-                rect.0 + (rect.2 - text_width(label)) * 0.5,
-                rect.1 + (rect.3 - cell_h) / 2.0,
-                if editor.proxy_choice == *choice { skin.ink_strong } else { skin.ink_dim },
-                label,
-                glyph_cache,
-            );
-        }
-        if show_proxy_url {
-            let value = &editor.proxy_url;
-            let (shown, x) = if value.is_empty() {
-                ("socks5://127.0.0.1:7890", inner_x(proxy_url))
-            } else {
-                (value.as_str(), metrics.origin(SshEditorField::ProxyUrl))
-            };
-            self.renderer.draw_chrome_text(
-                &size,
-                x,
-                inner_y(by + s(v.proxy_url_y.unwrap_or_default())),
-                if value.is_empty() { skin.ink_faint } else { skin.ink },
-                shown,
-                glyph_cache,
-            );
-        }
 
         self.renderer.draw_ui_text(
             &size,
@@ -1745,8 +1616,8 @@ mod tests {
     /// 单行等于把原因藏回悬浮层。
     #[test]
     fn the_test_status_bar_grows_with_the_wrapped_error() {
-        let single = editor_layout(true, false, false, 1, 0, 1, 15.0);
-        let triple = editor_layout(true, false, false, 1, 0, 3, 15.0);
+        let single = editor_layout(true, false, 1, 0, 1, 15.0);
+        let triple = editor_layout(true, false, 1, 0, 3, 15.0);
         let support_h = 15.0 * type_scale::SUPPORTING;
         assert!(
             (triple.height - single.height - support_h * 2.0).abs() < 0.01,
@@ -1757,7 +1628,7 @@ mod tests {
         assert_eq!(single.teststate_y, triple.teststate_y);
         assert!(triple.footer_y > single.footer_y);
         // 没有状态时整条不存在，不占一行空白。
-        assert!(editor_layout(true, false, false, 1, 0, 0, 15.0).teststate_y.is_none());
+        assert!(editor_layout(true, false, 1, 0, 0, 15.0).teststate_y.is_none());
     }
 
     /// 列表的窗口按**高度**开，不按行数——标题矮一档，按行数除会算错。
@@ -1833,7 +1704,7 @@ mod tests {
 
     #[test]
     fn editor_layout_stacks_fields_without_overlap() {
-        let l = editor_layout(true, true, false, 1, 2, 1, 15.0);
+        let l = editor_layout(true, true, 1, 2, 1, 15.0);
         // 身份条在最上面，它下面那条分隔线把"这是谁"和"怎么连"隔开，连接
         // 组从线以下开始。
         assert!(l.ident_y + AVATAR_H <= l.ident_rule_y);
@@ -1857,12 +1728,12 @@ mod tests {
 
     #[test]
     fn editor_layout_shrinks_when_the_auth_mode_needs_no_fields() {
-        let full = editor_layout(true, true, false, 1, 4, 0, 15.0);
+        let full = editor_layout(true, true, 1, 4, 0, 15.0);
         // keyboard-interactive：没有密码框也没有私钥列表，只剩一句说明。
-        let bare = editor_layout(false, false, false, 1, 0, 0, 15.0);
+        let bare = editor_layout(false, false, 1, 0, 0, 15.0);
         assert!(bare.height < full.height);
         // 说明文案折成两行时，认证组要跟着长高——否则文字会顶穿组框下缘。
-        let two_lines = editor_layout(false, false, false, 2, 0, 0, 15.0);
+        let two_lines = editor_layout(false, false, 2, 0, 0, 15.0);
         assert!(two_lines.auth_group.1 > bare.auth_group.1);
         assert!(
             two_lines.note_y + 15.0 * 2.0 * 0.8 <= two_lines.auth_group.0 + two_lines.auth_group.1
@@ -1871,8 +1742,8 @@ mod tests {
 
     #[test]
     fn editor_layout_grows_with_the_private_key_list() {
-        let one = editor_layout(false, true, false, 1, 1, 0, 15.0);
-        let four = editor_layout(false, true, false, 1, 4, 0, 15.0);
+        let one = editor_layout(false, true, 1, 1, 0, 15.0);
+        let four = editor_layout(false, true, 1, 4, 0, 15.0);
         assert!(four.height > one.height);
         assert!(four.add_key_y > one.add_key_y);
     }

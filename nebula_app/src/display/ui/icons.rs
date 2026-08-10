@@ -512,22 +512,27 @@ pub(crate) fn push_settings_nav_icon(
             push_vbar(quads, cx, my + u(3.4), my + u(6.2), stroke, ink);
         },
         SettingsNavIcon::Keymap => {
-            // Single keycap with a thick bottom lip——原型 `.kbd` 键帽的
-            // border-bottom 立体语言。键盘缩到 13px 只剩「框 + 几个点」，
-            // 一颗真键帽反而读得出「按键」。
-            let k = u(12.8).round();
-            let kx = (cx - k * 0.5).round();
-            let ky = (cy - k * 0.5).round();
-            push_rounded_frame(quads, (kx, ky, kx + k, ky + k), u(3.2), stroke, ink, cutout);
-            let lip = u(1.6).round().max(1.0);
-            quads.push(UiQuad::solid(
-                kx + stroke,
-                ky + k - stroke - lip,
-                k - 2.0 * stroke,
-                lip,
-                lip * 0.4,
-                ink,
-            ));
+            // 用户给定的键盘轮廓：横向圆角外框 + 两排小键 + 底部空格键。
+            // 小尺寸不画字母，点阵比缩成噪声的字符更稳定，也与截图一致。
+            let kw = u(16.0).round().max(10.0);
+            let kh = u(12.0).round().max(8.0);
+            let kx = (cx - kw * 0.5).round();
+            let ky = (cy - kh * 0.5).round();
+            push_rounded_frame(quads, (kx, ky, kx + kw, ky + kh), u(2.4), stroke, ink, cutout);
+            let key = u(1.35).round().max(1.0);
+            for row_y in [cy - u(2.2), cy + u(0.3)] {
+                for offset in [-4.5, -1.5, 1.5, 4.5] {
+                    quads.push(UiQuad::solid(
+                        (cx + u(offset) - key * 0.5).round(),
+                        (row_y - key * 0.5).round(),
+                        key,
+                        key,
+                        key * 0.3,
+                        ink,
+                    ));
+                }
+            }
+            push_hbar(quads, cx - u(3.2), cx + u(3.2), cy + u(3.3), key, ink);
         },
         SettingsNavIcon::Advanced => {
             // Three slider tracks with hollow knobs. The ring's cutout eats

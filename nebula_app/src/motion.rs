@@ -161,9 +161,7 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, x: f32) -> f32 {
 
     #[inline]
     fn slope(a1: f32, a2: f32, t: f32) -> f32 {
-        3.0 * (1.0 - t).powi(2) * a1
-            + 6.0 * (1.0 - t) * t * (a2 - a1)
-            + 3.0 * t * t * (1.0 - a2)
+        3.0 * (1.0 - t).powi(2) * a1 + 6.0 * (1.0 - t) * t * (a2 - a1) + 3.0 * t * t * (1.0 - a2)
     }
 
     let x = x.clamp(0.0, 1.0);

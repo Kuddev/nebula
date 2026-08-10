@@ -21,6 +21,7 @@ use russh::ChannelMsg;
 use russh::client::{self, KeyboardInteractiveAuthResponse};
 use russh::keys::ssh_key;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::event::EventProxy;
 
@@ -520,8 +521,7 @@ async fn authenticated_session_at(
     let global = tokio::task::spawn_blocking(crate::ssh_proxy::SshProxyConfig::load_global)
         .await
         .map_err(|err| format!("读取代理配置任务失败: {err}"))?;
-    let proxy = global
-        .resolve(profile.proxy.as_deref(), destination.proxy_jump.as_deref(), &destination.host)
+    let proxy = resolve_network_proxy(&global, destination)
         .map_err(|err| format!("SSH 代理配置无效: {err}"))?;
     let key = match &proxy {
         Some(link) => format!("{}|{}", destination.pool_key(), link.identity()),
@@ -558,6 +558,16 @@ async fn authenticated_session_at(
     }
     pool.insert(key, session.clone());
     Ok(session)
+}
+
+/// SSH/SFTP 的唯一 Nebula 代理决策入口。旧 profile 的 `proxy` 字段只保留
+/// 数据兼容，不再参与运行时；OpenSSH `ProxyJump` 是目标解析的一部分，仍需
+/// 先于全局网络设置生效。
+fn resolve_network_proxy(
+    global: &crate::ssh_proxy::SshProxyConfig,
+    destination: &SshDestination,
+) -> Result<Option<crate::ssh_proxy::ProxyLink>, String> {
+    global.resolve(None, destination.proxy_jump.as_deref(), &destination.host)
 }
 
 /// 跳板递归需要的类型擦除：async fn 相互递归时 future 类型无限展开，
@@ -684,8 +694,7 @@ async fn authenticate(
     for method in plan {
         match method {
             AuthMethod::PrivateKey(path) => {
-                if try_private_key(session, destination, &path, true, &mut local_key_errors)
-                    .await?
+                if try_private_key(session, destination, &path, true, &mut local_key_errors).await?
                 {
                     clear_secret(&mut reusable_password);
                     return Ok(());
@@ -792,10 +801,6 @@ pub struct SshTestRequest {
     pub private_keys: Vec<PathBuf>,
     /// 密码框里的未保存草稿；`None`/空 = 只用密钥与已存凭据。
     pub password: Option<String>,
-    /// 每主机代理覆盖的草稿编码（同 `SshProfileAuth::proxy`）：`None` =
-    /// 跟随全局，`"direct"` = 直连，其余 = 代理 URL。测试必须用草稿而不是
-    /// 磁盘值——它回答的是「保存后能不能连上」。
-    pub proxy: Option<String>,
 }
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -824,11 +829,12 @@ pub fn spawn_test(
             .map_err(|err| -> SessionError {
                 format!("SSH 地址解析任务失败: {err}").into()
             })??;
-            // 代理决策与真连同一套规则，但覆盖值取编辑器草稿：测试回答的是
-            // 「保存后能不能连上」，磁盘上的旧覆盖不能替草稿作答。
-            let proxy = global
-                .resolve(request.proxy.as_deref(), resolved.proxy_jump.as_deref(), &resolved.host)
-                .map_err(|err| -> SessionError { format!("SSH 代理配置无效: {err}").into() })?;
+            // SSH 编辑器不再维护重复的每主机代理；测试与真连都只读取网络页
+            // 的当前配置。`ProxyJump` 属于 OpenSSH 目标解析，仍按其原语义保留。
+            let proxy =
+                resolve_network_proxy(&global, &resolved).map_err(|err| -> SessionError {
+                    format!("SSH 代理配置无效: {err}").into()
+                })?;
             test_connect(&resolved, &request, proxy.as_ref()).await
         })
         .await;
@@ -849,6 +855,142 @@ pub fn spawn_test(
         ));
     });
     Ok(())
+}
+
+// ---- 设置→网络：真实出网测试 ----
+
+const NETWORK_TEST_HOST: &str = "example.com";
+const NETWORK_TEST_PORT: u16 = 80;
+
+trait NetworkTestStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> NetworkTestStream for T {}
+
+/// 使用与 SSH 新连接相同的全局配置解析和代理握手建立字节流，再请求一个
+/// 真实 HTTP 页面。只探测代理端口并不能证明代理有出网能力，所以这里必须
+/// 收到目标站点的 HTTP 状态行才算成功。
+pub fn spawn_proxy_test(
+    request_id: u64,
+    proxy: winit::event_loop::EventLoopProxy<crate::event::Event>,
+    window_id: winit::window::WindowId,
+) -> io::Result<()> {
+    runtime()?.spawn(async move {
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(TEST_TIMEOUT, proxy_test_once()).await;
+        let (ok, message) = match outcome {
+            Ok(Ok(route)) => (true, route),
+            Ok(Err(err)) => (false, err.to_string()),
+            Err(_) => (false, format!("网络测试超时（{} 秒无响应）", TEST_TIMEOUT.as_secs())),
+        };
+        let _ = proxy.send_event(crate::event::Event::new(
+            crate::event::EventType::ProxyTestDone {
+                request_id,
+                ok,
+                message,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            },
+            window_id,
+        ));
+    });
+    Ok(())
+}
+
+async fn proxy_test_once() -> Result<String, SessionError> {
+    let global = tokio::task::spawn_blocking(crate::ssh_proxy::SshProxyConfig::load_global)
+        .await
+        .map_err(|err| format!("读取代理设置失败: {err}"))?;
+    let link = global
+        .resolve(None, None, NETWORK_TEST_HOST)
+        .map_err(|err| format!("代理设置无效: {err}"))?;
+    let route = match &link {
+        Some(crate::ssh_proxy::ProxyLink::Server(server)) => server.display(),
+        Some(crate::ssh_proxy::ProxyLink::Jump(target)) => format!("SSH {target}"),
+        Some(crate::ssh_proxy::ProxyLink::Command(_)) => "自定义命令".to_owned(),
+        None if global.mode == crate::ssh_proxy::ProxyMode::Custom => "直连地址".to_owned(),
+        None => "直接连接".to_owned(),
+    };
+    let mut stream = proxy_test_stream(link.as_ref()).await?;
+    stream
+        .write_all(
+            b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nUser-Agent: Nebula-Network-Test\r\n\r\n",
+        )
+        .await
+        .map_err(|err| format!("发送网页测试请求失败: {err}"))?;
+    stream.flush().await.map_err(|err| format!("发送网页测试请求失败: {err}"))?;
+
+    let mut response = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 512];
+    while response.len() < 2048 && !response.windows(2).any(|part| part == b"\r\n") {
+        let read =
+            stream.read(&mut chunk).await.map_err(|err| format!("读取网页测试响应失败: {err}"))?;
+        if read == 0 {
+            break;
+        }
+        response.extend_from_slice(&chunk[..read]);
+    }
+    let head = String::from_utf8_lossy(&response);
+    let status_line = head.lines().next().unwrap_or_default();
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| format!("目标站点没有返回有效 HTTP 状态行: {status_line}"))?;
+    if !(200..500).contains(&status) {
+        return Err(format!("目标站点返回 HTTP {status}").into());
+    }
+    Ok(route)
+}
+
+async fn proxy_test_stream(
+    link: Option<&crate::ssh_proxy::ProxyLink>,
+) -> Result<Box<dyn NetworkTestStream>, SessionError> {
+    use crate::ssh_proxy::ProxyLink;
+    match link {
+        Some(ProxyLink::Server(server)) => {
+            crate::ssh_proxy::connect(server, NETWORK_TEST_HOST, NETWORK_TEST_PORT)
+                .await
+                .map(|stream| Box::new(stream) as Box<dyn NetworkTestStream>)
+                .map_err(|err| format!("经代理 {} 出网失败: {err}", server.display()).into())
+        },
+        Some(ProxyLink::Command(command)) => {
+            crate::ssh_proxy::connect_command(command, NETWORK_TEST_HOST, NETWORK_TEST_PORT)
+                .await
+                .map(|stream| Box::new(stream) as Box<dyn NetworkTestStream>)
+                .map_err(|err| format!("自定义代理命令出网失败: {err}").into())
+        },
+        Some(ProxyLink::Jump(spec)) => {
+            let (jump_destination, jump_profile) = tokio::task::spawn_blocking({
+                let spec = spec.clone();
+                move || {
+                    let destination = SshDestination::resolve(&spec)?;
+                    let path = crate::display::nebula_data_dir().join("ssh_profiles.json");
+                    let profile = crate::ssh_profiles::SshProfiles::load(&path)
+                        .unwrap_or_default()
+                        .for_destination(&spec);
+                    Ok::<_, io::Error>((destination, profile))
+                }
+            })
+            .await
+            .map_err(|err| format!("解析跳板任务失败: {err}"))??;
+            let jump = authenticated_session_at(&jump_destination, &jump_profile, None, 1).await?;
+            let channel = {
+                let session = jump.lock().await;
+                session
+                    .channel_open_direct_tcpip(
+                        NETWORK_TEST_HOST,
+                        u32::from(NETWORK_TEST_PORT),
+                        "127.0.0.1",
+                        0,
+                    )
+                    .await
+                    .map_err(|err| format!("经跳板 {spec} 打开出网通道失败: {err}"))?
+            };
+            Ok(Box::new(channel.into_stream()))
+        },
+        None => tokio::net::TcpStream::connect((NETWORK_TEST_HOST, NETWORK_TEST_PORT))
+            .await
+            .map(|stream| Box::new(stream) as Box<dyn NetworkTestStream>)
+            .map_err(|err| format!("直接连接测试站点失败: {err}").into()),
+    }
 }
 
 /// 一次性连接（不进连接池——池里的旧连接不能代表新草稿），认证完即 drop。
@@ -1028,8 +1170,7 @@ async fn try_private_key(
 
     if key.is_none() {
         if !allow_prompt {
-            local_errors
-                .push(format!("{}: 私钥受口令保护，测试无法替你输入口令", path.display()));
+            local_errors.push(format!("{}: 私钥受口令保护，测试无法替你输入口令", path.display()));
             return Ok(false);
         }
         let prompt = format!("密钥口令: {}", path.display());
@@ -1214,8 +1355,12 @@ fn wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthMethod, SshDestination, authentication_plan, parse_resolved_config};
+    use super::{
+        AuthMethod, SshDestination, authentication_plan, parse_resolved_config,
+        resolve_network_proxy,
+    };
     use crate::ssh_profiles::SshAuthMode;
+    use crate::ssh_proxy::{ProxyLink, ProxyMode, SshProxyConfig};
     use std::path::PathBuf;
 
     #[test]
@@ -1245,6 +1390,27 @@ mod tests {
         assert_eq!(destination.host, "server.internal");
         assert_eq!(destination.port, 2200);
         assert_eq!(destination.identity_files.len(), 1);
+    }
+
+    #[test]
+    fn ssh_runtime_uses_global_network_proxy_and_keeps_openssh_proxy_jump() {
+        let global = SshProxyConfig {
+            mode: ProxyMode::Custom,
+            url: "socks5://127.0.0.1:7890".to_owned(),
+            no_proxy: Vec::new(),
+        };
+        let direct_target = SshDestination::parse("root@example.com").unwrap();
+        assert!(matches!(
+            resolve_network_proxy(&global, &direct_target).unwrap(),
+            Some(ProxyLink::Server(_))
+        ));
+
+        let mut jump_target = direct_target;
+        jump_target.proxy_jump = Some("bastion.internal".to_owned());
+        assert_eq!(
+            resolve_network_proxy(&global, &jump_target).unwrap(),
+            Some(ProxyLink::Jump("bastion.internal".to_owned()))
+        );
     }
 
     #[test]
@@ -1369,9 +1535,9 @@ AAhYTvsZWAkp6JTIprUWd7YdQJ7HfVl+fRqto=
 
     #[test]
     fn pkcs8_encrypted_banner_is_classified_as_needing_passphrase() {
-        let pem = "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n";
-        let err = russh::keys::decode_secret_key(pem, None)
-            .expect_err("占位密文必须解析失败");
+        let pem =
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n";
+        let err = russh::keys::decode_secret_key(pem, None).expect_err("占位密文必须解析失败");
         assert!(super::key_needs_passphrase(&err, pem.as_bytes()));
     }
 
@@ -1380,8 +1546,7 @@ AAhYTvsZWAkp6JTIprUWd7YdQJ7HfVl+fRqto=
         // 格式不支持/损坏绝不能进口令流程——那正是「无口令 .pem 弹出系统
         // 口令框」事故的形态。
         let garbage = "this is not a private key";
-        let err = russh::keys::decode_secret_key(garbage, None)
-            .expect_err("垃圾输入必须解析失败");
+        let err = russh::keys::decode_secret_key(garbage, None).expect_err("垃圾输入必须解析失败");
         assert!(!super::key_needs_passphrase(&err, garbage.as_bytes()));
     }
 
