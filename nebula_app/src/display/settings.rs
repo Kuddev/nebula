@@ -4510,6 +4510,12 @@ fn section_title(
     draw_big_text(r, gc, size, scale, x, y, 1.2, sk.ink_strong, text);
 }
 
+/// 网络页的分组标题属于测试横幅这一组；标题必须挂在横幅上方，不能再
+/// 以代理方式行作为锚点，否则横幅提前后标题会被绘制到横幅内部。
+fn proxy_section_title_y(test_row_y: f32, scale: f32) -> f32 {
+    test_row_y - 42.0 * scale
+}
+
 /// Keymap groups follow the prototype's quiet hierarchy: small, tracked-ish
 /// captions and generous whitespace do the grouping work; no frame or filled
 /// block is needed around a category.
@@ -5602,8 +5608,9 @@ pub(super) fn draw_text(
             }
         },
         NebulaSettingsSection::Proxy => {
-            let (gx, gy, ..) = geometry.ssh_proxy_mode;
-            if visible(group_y(gy), title_h) {
+            let (gx, test_y, ..) = geometry.ssh_proxy_test;
+            let title_y = proxy_section_title_y(test_y, scale);
+            if visible(title_y, title_h) {
                 section_title(
                     r,
                     gc,
@@ -5611,7 +5618,7 @@ pub(super) fn draw_text(
                     scale,
                     &sk,
                     gx,
-                    group_y(gy),
+                    title_y,
                     language.pick("网络代理", "Network proxy"),
                 );
             }
@@ -6405,8 +6412,8 @@ mod tests {
         KeymapPaneState, ManualProxyProtocol, NebulaSettingsSection, ProxyChoice, ProxyPaneState,
         SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS, STANDARD_ROW_ACTION_W, SettingsHit,
         TabRevealMotion, advanced_content_end, font_popup_row_count, font_popup_slot,
-        manual_proxy_parts, manual_proxy_value, opacity_from_pointer, row_action_rect,
-        settings_geometry, settings_hit, ssh_proxy_manual_controls,
+        manual_proxy_parts, manual_proxy_value, opacity_from_pointer, proxy_section_title_y,
+        row_action_rect, settings_geometry, settings_hit, ssh_proxy_manual_controls,
     };
     use crate::display::SizeInfo;
     use crate::display::ui::tokens::Density;
@@ -6525,6 +6532,25 @@ mod tests {
         assert!(manual_geometry.proxy_h > detected_geometry.proxy_h);
         assert!(manual_geometry.ssh_proxy_expand.1 > manual_geometry.ssh_proxy_other_rows[0].1);
         assert!(manual_geometry.ssh_proxy_expand.1 < manual_geometry.ssh_proxy_other_rows[1].1);
+    }
+
+    #[test]
+    fn proxy_section_title_stays_above_the_test_banner() {
+        let size = proxy_test_size();
+        let geometry = settings_geometry(
+            &size,
+            1.0,
+            (0.0, 0.0, 1200.0, 900.0),
+            0.0,
+            0,
+            0,
+            Density::Standard,
+            ProxyPaneState::default(),
+            KeymapPaneState::default(),
+        );
+        let title_y = proxy_section_title_y(geometry.ssh_proxy_test.1, 1.0);
+        assert!(title_y >= geometry.content_top);
+        assert!(title_y + 26.0 <= geometry.ssh_proxy_test.1);
     }
 
     #[test]
