@@ -47,7 +47,6 @@ impl Display {
             // 先有配好的私钥才走得通，拿它当默认等于让新手先撞一次失败。
             auth: crate::ssh_profiles::SshAuthMode::Password,
             private_keys: Vec::new(),
-            legacy_proxy: None,
             field: SshEditorField::Destination,
             focus: crate::ux::FocusIndex::default(),
             test: Default::default(),
@@ -94,7 +93,6 @@ impl Display {
             show_password: false,
             auth: profile.auth,
             private_keys: profile.private_keys,
-            legacy_proxy: profile.proxy.clone(),
             field: SshEditorField::Destination,
             focus: crate::ux::FocusIndex::default(),
             test: Default::default(),
@@ -792,9 +790,6 @@ impl Display {
             label: Some(label),
             // 空串 = 自动识别，不落盘；配置里只存用户明确选过的形状。
             icon: (!editor.icon.is_empty()).then(|| editor.icon.clone()),
-            // 旧版每主机代理不再参与连接，但不能因为用户改了名字或认证方式
-            // 就破坏历史配置；因此只做原样透传，不在当前编辑器中解释或改写。
-            proxy: editor.legacy_proxy.clone(),
         });
         if let Err(err) = profiles.save(&profile_path) {
             editor.error = Some(format!("保存 SSH Profile 失败: {err}"));
@@ -807,7 +802,6 @@ impl Display {
         // 显示一个磁盘上并不存在的标签。
         self.nebula_ssh_labels = profiles.labels();
         self.nebula_ssh_icons = profiles.icons();
-        self.nebula_ssh_proxies = profiles.proxies();
         if ssh_ui::auth_sections(editor.auth).0
             && editor.save_password
             && !editor.password.is_empty()

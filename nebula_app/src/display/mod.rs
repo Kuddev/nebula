@@ -1694,9 +1694,6 @@ pub struct Display {
     nebula_proxy_test_status: settings::ProxyTestStatus,
     nebula_proxy_test_request: Option<u64>,
     nebula_proxy_test_seq: u64,
-    /// destination → 旧版每主机代理值（profiles.json `proxy` 字段的镜像）。
-    /// 仅用于兼容旧配置，不再覆盖网络页设置或出现在 SSH 编辑器中。
-    nebula_ssh_proxies: std::collections::HashMap<String, String>,
     /// 按键映射页搜索框：查询串 + 聚焦态。过滤在读取时按需计算——28 行的
     /// 字符串匹配量级，不值得为它维护缓存失效。
     nebula_keymap_query: String,
@@ -2325,11 +2322,6 @@ impl Display {
             nebula_proxy_test_status: settings::ProxyTestStatus::Idle,
             nebula_proxy_test_request: None,
             nebula_proxy_test_seq: 0,
-            nebula_ssh_proxies: crate::ssh_profiles::SshProfiles::load(
-                &nebula_data_dir().join("ssh_profiles.json"),
-            )
-            .map(|profiles| profiles.proxies())
-            .unwrap_or_default(),
             nebula_keymap_query: String::new(),
             nebula_keymap_query_cursor: Default::default(),
             nebula_keymap_search_focus: false,
@@ -3509,23 +3501,7 @@ impl Display {
             proxy_scanning: self.nebula_proxy_scanning,
             system_proxy_probe: self.nebula_system_proxy_probe.clone(),
             proxy_test_status: self.nebula_proxy_test_status.clone(),
-            ssh_proxy_overrides: self
-                .nebula_ssh_hosts
-                .iter()
-                .enumerate()
-                .filter_map(|(host_index, destination)| {
-                    self.nebula_ssh_proxies.get(destination).map(|value| {
-                        (
-                            self.nebula_ssh_labels
-                                .get(destination)
-                                .cloned()
-                                .unwrap_or_else(|| destination.clone()),
-                            settings::ssh_proxy_override_summary(value, self.nebula_language),
-                            host_index,
-                        )
-                    })
-                })
-                .collect(),
+            ssh_proxy_overrides: Vec::new(),
             backup_selection: self.nebula_backup_selection,
             backup_status: self.nebula_backup_status.clone(),
         }
@@ -4875,11 +4851,7 @@ impl Display {
             choice: self.nebula_ssh_proxy_choice,
             found_count: self.nebula_local_proxies.len(),
             scanning: self.nebula_proxy_scanning,
-            override_count: self
-                .nebula_ssh_hosts
-                .iter()
-                .filter(|destination| self.nebula_ssh_proxies.contains_key(*destination))
-                .count(),
+            override_count: 0,
         }
     }
 
@@ -5052,16 +5024,7 @@ impl Display {
     /// 每主机覆盖行 → 打开该主机的编辑器。`index` 是覆盖列表下标，过滤
     /// 顺序与视图构建完全一致（同一迭代 + 同一谓词）。
     pub fn edit_ssh_proxy_override(&mut self, index: usize) {
-        let host_index = self
-            .nebula_ssh_hosts
-            .iter()
-            .enumerate()
-            .filter(|(_, destination)| self.nebula_ssh_proxies.contains_key(*destination))
-            .nth(index)
-            .map(|(host_index, _)| host_index);
-        if let Some(host_index) = host_index {
-            self.edit_ssh_host(host_index);
-        }
+        let _ = index;
     }
 
     // ---- 按键映射页：搜索与冲突 ----
