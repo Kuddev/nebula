@@ -6,6 +6,8 @@
 
 详细产品范围、验收指标与分期背景见
 [PRD：AI 会话指挥中心与远程开发工作流](prd-ai-session-and-remote-workflow.md)。
+相对 Herdr 的本地源码证据、能力缺口和不应照搬的边界见
+[Nebula 相对 Herdr 的能力缺口审计](herdr-gap-analysis.md)。
 2026-08-09 进一步复核现有产品能力与运行时需求后，产品定位和前三项优先级按本节更新；
 PRD 中与本节冲突的旧优先级不再作为排期依据。
 
@@ -50,7 +52,7 @@ Agent 原生 resume 构成同一个运行时，不能拆成互不相干的面板
 | --- | --- | --- | --- | --- |
 | `P0-1` | **Native AI Workbench / Agent Engine** | 原生流式对话；Pane、选区、命令失败、cwd、Git 上下文；文件/搜索/Shell/项目工具；多轮 Agent loop；审批、取消、失败恢复；会话与受控记忆；Provider 和系统凭据 | 简单命令生成已是基础能力；Nebula 必须先拥有能完成真实任务的原生 AI 执行面 | AI 可在一个可取消、可审批的流程中读取项目、运行命令、处理失败并修改文件；变更必须经过策略或用户授权；终端输出不能升级为系统指令；密钥不明文落盘 |
 | `P0-2` | **Intelligent Command Loop / Failure Intelligence** | `#` 自然语言转命令；失败解释与修复；命令预览和风险；历史、补全与 AI 建议统一排序；选中输出后解释/修复；当前 Pane、新 Tab、Split 执行目标 | 这是传统 AI 终端最高频、最低摩擦的使用路径，不能要求用户每次进入 Chat | 生成命令只进入可编辑输入区且绝不默认执行；失败上下文能准确携带命令、退出码、cwd、Git 和环境；高风险动作必须确认；可无复制地升级到 Workbench |
-| `P0-3` | **Agent Runtime & Session Continuity** | server-owned `TaskIdentity/TaskRuntime`；单一状态权威；Pane/Tab/Workspace 汇总；Attention Inbox；实时 detach/reattach；冷恢复；Agent 原生 resume；`live/lost/rebuildable` 边界 | 这是 Nebula 超过普通 AI Chat 终端的长期差异化，也是真实后台 Agent、注意力和恢复能力的共同地基 | 侧栏、Tab、通知、Workbench、Command Center 和恢复快照消费同一状态；24 小时驻留和 100 次 detach/attach 基准达标；重启后不把重建伪装成仍存活 |
+| `P0-3` | **Agent Runtime & Session Continuity** | server-owned `TaskIdentity/TaskRuntime`；单一状态权威；版本化 CLI/socket API、事件订阅与 JSON Schema；Pane/Tab/Workspace 汇总；Attention Inbox；实时 detach/reattach；冷恢复；Agent 原生 resume；`live/lost/rebuildable` 边界 | 这是 Nebula 超过普通 AI Chat 终端的长期差异化，也是真实后台 Agent、注意力、自动化和恢复能力的共同地基 | 侧栏、Tab、通知、Workbench、Command Center、脚本/Agent 客户端和恢复快照消费同一状态；外部客户端可 `read/prompt/wait/focus/split/subscribe`；24 小时驻留和 100 次 detach/attach 基准达标；重启后不把重建伪装成仍存活；协议不匹配返回可恢复的机器可读错误 |
 
 产品编号表示用户价值和交付顺序，不代表先画 `P0-1` 的聊天界面。三个产品任务共用的底层合同必须先落地，否则后续 UI 会形成第二套任务状态、第二套命令事实和不可审计的工具执行路径。
 
@@ -58,20 +60,38 @@ Agent 原生 resume 构成同一个运行时，不能拆成互不相干的面板
 
 | 工程顺序 | 底层难点 | 为什么必须先做 | 难点实质 | 第一阶段完成定义 |
 | --- | --- | --- | --- | --- |
-| `T0-1` | **统一 TaskIdentity、Runtime Authority 与事件日志** | 三个产品任务都需要稳定地回答“谁在什么环境做什么、现在是什么状态”；身份或事实源后补会导致 Pane、Chat、通知和恢复全面迁移 | Pane 会关闭或重建，PTY/CLI hook/进程/SSH 会给出互相冲突且乱序的事实，还要处理重连、重复事件和崩溃恢复 | 定义不可复用的 task/session/run id；每类状态只有一个权威 reducer；事件可去重、重放并形成确定快照；覆盖 working/blocked/done/idle/unknown/lost、超时、打断和异常退出 |
+| `T0-1` | **统一 TaskIdentity、Runtime Authority、事件日志与公共投影** | 三个产品任务以及未来脚本/Agent 客户端都需要稳定地回答“谁在什么环境做什么、现在是什么状态”；身份、事实源或 API 后补会导致 Pane、Chat、通知、恢复和插件全面迁移 | Pane 会关闭或重建，PTY/CLI hook/进程/SSH 会给出互相冲突且乱序的事实；还要让 GUI、CLI、socket 和订阅者在重连、重复事件与崩溃恢复后看到同一状态 | 定义不可复用的 task/session/run id；每类状态只有一个权威 reducer；事件可去重、重放并形成确定快照；通过同一类型源生成版本化请求/响应/事件 Schema；覆盖 working/blocked/done/idle/unknown/lost、超时、打断、异常退出、重复 request id、客户端断开和协议不匹配 |
 | `T0-2` | **AI Tool/Action Contract 与审批事务内核** | Workbench 和 Command Loop 都会产生真实副作用；先做 Chat 再补权限、取消和审计会把高风险逻辑散落到 UI 与各工具 | 流式模型、并行或后台工具、用户审批、超时、取消、部分成功和重试共同构成分布式事务；Shell 不能承诺普遍回滚 | 所有工具使用版本化 schema 和稳定 action id；读/写/执行/网络分级；审批绑定参数摘要与作用域；取消、超时、重复回调和进程遗留有测试；审计记录脱敏且不保存密钥 |
 | `T0-3` | **结构化命令生命周期与可信上下文边界** | 没有准确的命令、退出码、cwd、Git、选区和输出边界，命令修复只是猜测，Agent 也无法安全使用终端上下文 | 终端字节流本身不提供可靠语义，Shell、ConPTY、远端 SSH 和全屏 TUI 行为不同；屏幕输出还可能携带 prompt injection 和秘密 | 通过 shell integration/hook 与 PTY 事实建立 command id、开始/结束、退出码和 cwd 事件；保留原始来源与截断标记；终端输出按不可信数据注入；敏感内容可脱敏；本地、SSH、失败、取消和 TUI 夹具通过 |
 
 技术依赖主链为 `T0-1 -> T0-2/T0-3 -> P0-1/P0-2 -> P0-3 完整可视化与恢复闭环`。
 `T0-2` 与 `T0-3` 的 schema 可以并行设计，但都必须引用 `T0-1` 的 task/session/run id。
 
+### 2026-08-11 Herdr 对照后的学习裁定
+
+Herdr 最值得学习的是 runtime 合同，不是终端内 TUI 形态。完整证据与差距见
+[Herdr 能力缺口审计](herdr-gap-analysis.md)。以下五项进入当前路线图：
+
+| 顺序 | 学习项 | Nebula 的落地方式 | 验收门槛 |
+| --- | --- | --- | --- |
+| `L1 / P0` | **CLI、socket、事件订阅共享一个版本化控制面** | 在 `T0-1` 的 server-owned 状态上建立中性 runtime API；GUI 只是客户端之一，脚本、Agent、插件复用同一方法和 Schema | 无 GUI 客户端可创建/读取/聚焦/拆分 Pane，向 Agent 提示并等待语义状态；两客户端观察到一致身份与事件顺序；断线不杀 PTY；协议不匹配可诊断、可升级 |
+| `L2 / P0` | **一个 Task 只有一个生命周期权威，并可 explain** | 分离进程识别、session identity、显示 metadata 与 lifecycle authority；hook、OSC、屏幕 manifest 和超时事实进入同一 reducer | explain 输出最终状态、权威来源、命中证据、fallback 原因、manifest 来源/版本；滚屏不改变 live 检测；延迟/乱序 hook 与返回 Shell 有状态机测试 |
+| `L3 / P1` | **Git worktree 是 Workspace 一等实体** | GUI、Command Center、CLI/API 共用事务化 `create/open/remove`；Workspace 保存 repo/worktree/branch provenance | 创建前检查分支/路径/脏状态；失败只回滚本次拥有的产物；关闭 Workspace 不删除 checkout；删除 checkout 不删除分支；返回稳定 workspace/tab/pane/task id |
+| `L4 / P1` | **进程外 manifest 扩展复用完整 Action Contract** | Lua、Recipe、MCP、Skill 与本地插件统一到版本化 action、权限、凭据代理和 TaskState；先支持可信本地 link/install，不以前置公开市场为目标 | manifest 校验最低版本、平台、入口、事件和权限；安装预览真实命令；取消/超时/审批/审计不能被插件绕过；插件失败不阻塞 Nebula 启动 |
+| `L5 / P0-Q` | **发布、协议和文档是同一个版本合同** | Cargo、二进制 metadata、安装器、资产名、README、CHANGELOG、API Schema 和版本文档由单一发布输入生成或校验 | CI 拒绝旧版本号、缺失资产、Schema/示例漂移与无效链接；协议文档按版本冻结；当前/预览文档分流；运行时报告应用/协议/状态版本 |
+
+明确不学习的部分：不把 Nebula 改成依赖外层终端的 TUI；不以 Herdr 的 CLI completion 脚本
+替换现有行内 ghost 补全；不以 remote runtime attach 替换原生 SSH/SFTP；不在权限、凭据代理和
+协议版本稳定前先建设公开插件市场。
+
 ### 其余功能包排期
 
 | 优先级 | 功能包 | 排期裁定 | 前置依赖 | 退出/验收门槛 |
 | --- | --- | --- | --- | --- |
 | `P0-Q` | Windows 原生输入、ConPTY 与窗口兼容路线 | 作为传统终端可信度的长期质量门，与三大产品任务并行维护，不占用第四个产品支柱 | 原始事件事实、9001 协议、平台适配层 | 协议/布局/IME/多屏矩阵通过；不支持 9001 时正确降级 |
-| `P1` | Git worktree Agent Fork、Cross-Pane Context Bus、Markdown 评论发送 | 在 Runtime 与 Action Contract 上扩展深度 Agent 协作 | 任务 ID、Git 检查、内容脱敏、目标权限 | 创建和发送前可预览目标与范围；失败不覆盖或删除用户数据；接收内容不会未经确认执行 |
-| `P1` | MCP / Skill 与受控 Recipe | 扩展 Agent 能力，但必须复用宿主权限和凭据代理 | Tool/Action Contract、Provider、secret store | 安装、启停和升级可回滚；权限可解释；第三方能力不能直接读取系统密钥 |
+| `P0-Q` | 发布、协议与版本文档一致性 | 先修当前 `1.0.0` / `0.9.0` / README `0.6.0` 漂移，再把一致性固化进 release CI；不能靠每次发布人工搜字符串 | 单一版本源、协议版本、Schema 生成、版本化文档 | Cargo/二进制/安装器/资产/README/CHANGELOG 一致；CI 检查旧版本引用、资产存在性、Schema fixture、链接和协议兼容错误 |
+| `P1` | Git worktree Agent Fork、Cross-Pane Context Bus、Markdown 评论发送 | 在 Runtime 与 Action Contract 上扩展深度 Agent 协作；worktree 先成为带 Git provenance 的 Workspace 一等实体 | 任务 ID、Git 检查、内容脱敏、目标权限、runtime API | worktree `create/open/remove` 事务覆盖脏状态、路径/分支冲突和失败回滚；关闭不删除 checkout、删除不删除分支；上下文创建和发送前可预览目标与范围；接收内容不会未经确认执行 |
+| `P1` | MCP / Skill、受控 Recipe 与本地插件合同 | 扩展 Agent 能力，但必须复用宿主权限、凭据代理、版本化 Action Contract 和公共 runtime API；公开市场仍为 P3 | Tool/Action Contract、Provider、secret store、runtime API | 本地 link/install、manifest 版本/平台/权限校验、信任预览和进程外执行可用；安装/启停/升级可回滚；插件不能绕过审批或直接读取系统密钥；失败不阻塞宿主启动 |
 | `P2` | Host Chain / ProxyJump、端口转发、可靠 SFTP、SSH 图片粘贴、轻量主机组织 | SSH 是附带能力；保留可靠连接闭环，但不与三个 P0 支柱争抢主线资源 | 统一 host id、逐跳凭据、SSH runtime、独立传输事务 | 多跳可定位失败 hop；转发状态与真实 listener 一致；1 GiB 传输可恢复且失败不留下半个最终文件；本机图片可安全上传并引用 |
 | `P2` | WebDAV、图片/代码阅读、Markdown 增强、外观 | 提升跨设备与阅读体验，不作为 AI 终端定位成立的前提 | 同步冲突模型、查看器状态、统一焦点 | 功能完整、键盘可达、错误可恢复；同步冲突可处理；大文件不阻塞 UI |
 | `P2` | 大文件模块按职责拆分 | 只由实际 P0/P1 修改牵引，降低核心功能变更风险 | 明确模块所有权和行为基线 | 行为与性能无回归，边界有测试；不做无业务收益的纯搬运 |
@@ -81,19 +101,22 @@ Agent 原生 resume 构成同一个运行时，不能拆成互不相干的面板
 
 | 优先级 | 既有 planning 条目 |
 | --- | --- |
-| `P0` | AI 供应商与 API Key 管理；CLI 输入预测；AI Assist 完善；CLI 消息通知开关进设置面板；子代理等待状态与主任务进度不同步 |
-| `P0-Q` | Windows 原生输入与窗口兼容路线 |
-| `P1` | MCP / Skill 内置化；自动化脚本执行；Markdown 选中/评论/发送到指定 tab |
+| `P0` | 版本化 Agent 控制面；状态 authority/explain；AI 供应商与 API Key 管理；CLI 输入预测；AI Assist 完善；CLI 消息通知开关进设置面板；子代理等待状态与主任务进度不同步 |
+| `P0-Q` | Windows 原生输入与窗口兼容路线；发布、协议与版本文档一致性 |
+| `P1` | Git worktree Agent Fork；MCP / Skill 与本地插件合同；自动化脚本执行；Markdown 选中/评论/发送到指定 tab |
 | `P2` | SSH 常用命令保存器；SSH 错误标记到 tab + 提示条真关闭按钮；SSH 代理（HTTP CONNECT / SOCKS5）；SSH 会话粘贴本机剪贴板图片；强杀 Nebula 时连带清理子进程（Job Object）；背景色真调色板与自定义 HEX；图片与代码阅读器；Explorer 右键集成；Markdown 选择复制/目录；图片预览器；超大源码文件拆分；WebDAV 同步完善 |
 | `P3` | 定时任务；Markdown 内嵌 HTML 解析；未来可能加入的完整 Vault、多协议、公开插件市场和自治多主机运维 |
 
 ## 新增待排期事项（2026-08-10）
 
-### P0-2 CLI 自动补全建议
+### P0-2 CLI 补全统一排序与语义增强
 
-- 在当前终端输入区提供基于命令历史、当前目录和可用命令的轻量建议。
-- 建议只进入可编辑输入区，用户确认后才发送到 Shell；不能自动执行。
-- 建议计算不能阻塞 PTY 输出和输入，网络模型建议必须显式显示来源并可关闭。
+- 当前已经有基于命令历史、常用目录、`PATH` 可执行文件和文件路径的 ghost 行内补全；
+  后续工作是在现有能力上合并语义/AI 候选，不得重复实现第二套基础补全。
+- 历史、目录、命令、路径和语义候选共用来源标识、排序合同与接受行为；`Tab` 无 ghost 候选时
+  继续交给 Shell 原生补全，不能破坏 PowerShell、Nushell、Fish 等自身行为。
+- 建议只进入可编辑输入区，用户确认后才发送到 Shell；不能自动执行。建议计算不能阻塞 PTY
+  输出和输入，网络模型建议必须显式显示来源并可关闭。
 
 ### P2 代码编辑器
 
