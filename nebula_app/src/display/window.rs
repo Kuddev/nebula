@@ -29,7 +29,7 @@ use {
 };
 
 use bitflags::bitflags;
-use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event_loop::ActiveEventLoop;
 use winit::monitor::MonitorHandle;
 #[cfg(windows)]
@@ -287,6 +287,14 @@ impl Window {
     #[inline]
     pub fn has_pending_scale_factor(&self) -> bool {
         self.pending_scale_factor.is_some()
+    }
+
+    /// Floor for interactive resizes, in logical units. The OS enforces this
+    /// during the drag, so the grid never sees a width that only `MIN_COLUMNS`
+    /// can absorb. `None` lifts the floor.
+    #[inline]
+    pub fn set_min_inner_size(&self, size: Option<LogicalSize<f64>>) {
+        self.window.set_min_inner_size(size);
     }
 
     #[inline]

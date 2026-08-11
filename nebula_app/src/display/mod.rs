@@ -19,7 +19,7 @@ use glutin::surface::{Surface, SwapInterval, WindowSurface};
 
 use log::{debug, info, warn};
 use parking_lot::MutexGuard;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::keyboard::ModifiersState;
 use winit::raw_window_handle::RawWindowHandle;
 use winit::window::{CursorIcon, Theme as WinitTheme};
@@ -296,6 +296,42 @@ pub const HOSTS_BAND_MIN: f32 = 38.0;
 #[inline]
 pub fn sidebar_width(scale_factor: f32, collapsed: bool, logical_w: f32) -> f32 {
     if collapsed { 0.0 } else { (logical_w * scale_factor).round() }
+}
+
+/// Re-derive the OS-enforced window floor from the current cell size and
+/// chrome, so the grid can never be dragged below
+/// [`SizeInfo::MIN_USABLE_COLUMNS`].
+///
+/// Must be re-applied whenever the cell size or sidebar width changes: a floor
+/// computed for a 7px cell stops protecting anything once the user zooms to a
+/// 21px one. `set_min_inner_size` is logical DIPs, so the physical paddings are
+/// divided back out by the scale factor.
+#[cfg(windows)]
+fn apply_min_window_size(
+    window: &crate::display::window::Window,
+    config: &UiConfig,
+    cell_width: f32,
+    cell_height: f32,
+    sidebar_logical_w: f32,
+) {
+    let scale = window.scale_factor as f32;
+    let pad = config.window.padding(scale);
+    let content_pad = content_pad_x(scale);
+    let min_w = SizeInfo::min_usable_width(
+        cell_width,
+        pad.0 + content_pad + sidebar_width(scale, false, sidebar_logical_w),
+        pad.0 + content_pad,
+    );
+    let min_h = SizeInfo::min_usable_height(
+        cell_height,
+        pad.1 + chrome_reserve(scale),
+        pad.1,
+        nebula_terminal::term::MIN_SCREEN_LINES,
+    );
+    window.set_min_inner_size(Some(LogicalSize::new(
+        (min_w / scale) as f64,
+        (min_h / scale) as f64,
+    )));
 }
 
 /// 三条可拖拽的面板分界线（设置·交互的「拖拽调节」开关管辖）。
@@ -1993,6 +2029,19 @@ impl Display {
         // Make the context current.
         let context = gl_context.make_current(&surface)?;
         crate::boot_trace("surface + context current");
+
+        // Let the OS refuse resizes that would collapse the grid below a usable
+        // column count — without this, dragging narrow turns 2 columns of real
+        // content into hundreds of soft-wrapped rows that overflow the
+        // scrollback (data loss no reflow can undo).
+        #[cfg(windows)]
+        apply_min_window_size(
+            &window,
+            config,
+            cell_width,
+            cell_height,
+            settings_init.sidebar_w,
+        );
 
         // Create renderer.
         let mut renderer = Renderer::new(&context, config.debug.renderer)?;
@@ -6402,7 +6451,15 @@ impl Display {
     }
 
     /// Toggle the right-side drawer (directory tree / git status).
+    ///
+    /// Special tabs (settings / document / image) own the whole content area,
+    /// so the drawer stays shut there. Guarding here rather than at each of the
+    /// callers — sidebar button, panel header, keybinding, command palette —
+    /// is what keeps a newly added entry point from reintroducing the squeeze.
     pub fn toggle_side_panel(&mut self, view: side_panel::PanelView) {
+        if self.nebula_special_tab_active {
+            return;
+        }
         let was_open = self.nebula_side_panel.open;
         if self.nebula_sftp_panel.take().is_some() {
             self.nebula_side_panel.open = true;
@@ -6597,6 +6654,12 @@ impl Display {
         destination: String,
         proxy: winit::event_loop::EventLoopProxy<crate::event::Event>,
     ) -> Result<(), String> {
+        // Same content-area contract as `toggle_side_panel`: a special tab is
+        // never the right place to raise the remote browser, and opening it
+        // here would also strand the controller behind a hidden drawer.
+        if self.nebula_special_tab_active {
+            return Ok(());
+        }
         let was_open = self.nebula_side_panel.open;
         let controller = crate::ssh_sftp::SftpController::new(destination, proxy, self.window.id())
             .map_err(|err| format!("无法打开 SFTP: {err}"))?;
@@ -7643,6 +7706,24 @@ impl Display {
         compute_cell_size(config, &glyph_cache.font_metrics())
     }
 
+    /// Re-derive the OS-enforced window floor from the current cell size and
+    /// chrome, so the grid can never be dragged below
+    /// [`SizeInfo::MIN_USABLE_COLUMNS`].
+    ///
+    /// Must be re-applied whenever the cell size or sidebar width changes: a
+    /// floor computed for a 7px cell stops protecting anything once the user
+    /// zooms to a 21px one.
+    #[cfg(windows)]
+    fn apply_min_window_size(&self, config: &UiConfig, cell_width: f32, cell_height: f32) {
+        apply_min_window_size(
+            &self.window,
+            config,
+            cell_width,
+            cell_height,
+            self.nebula_sidebar_w,
+        );
+    }
+
     /// Reset glyph cache.
     fn reset_glyph_cache(&mut self) {
         let cache = &mut self.glyph_cache;
@@ -7685,6 +7766,12 @@ impl Display {
             cell_height = cell_dimensions.1;
 
             info!("Cell size: {cell_width} x {cell_height}");
+
+            // The window floor is derived from the cell size, so it has to be
+            // re-derived here or zooming in would leave the old (smaller) floor
+            // in place and reopen the narrow-collapse hole.
+            #[cfg(windows)]
+            self.apply_min_window_size(config, cell_width, cell_height);
 
             // Every zoom / font / DPI change funnels through a font update,
             // so this is the single point where the UI font role can go

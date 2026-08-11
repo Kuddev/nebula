@@ -10,19 +10,6 @@ use crate::grid::row::Row;
 use crate::grid::{Dimensions, Grid, GridCell};
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
-    /// Reflow (re-merge) soft-wrapped lines when the grid grows *wider*.
-    ///
-    /// Kept OFF by default. The perfect fix — sideloading the 1.22+ passthrough
-    /// ConPTY so this grid is the only reflow engine — is real but opt-in
-    /// (`NEBULA_SIDELOAD_CONPTY=1`), because that host spawns an `OpenConsole.exe`
-    /// per pane and slows tab startup, which by user ruling outranks reflow
-    /// fidelity. With the in-box ConPTY (default) two reflow engines still fight
-    /// on grow, so we disable ours: shrink-time wrapping is kept (it doesn't
-    /// mangle), grow-time re-merge is skipped. Trade-off: lines wrapped on a
-    /// shrink don't re-join on a later grow — cosmetic, the "微末 TUI 错位" the
-    /// user chose to accept. Flip to `true` only alongside the sideloaded host.
-    const REFLOW_ON_GROW: bool = false;
-
     /// Resize the grid's width and/or height.
     pub fn resize<D>(&mut self, reflow: bool, lines: usize, columns: usize)
     where
@@ -39,7 +26,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         }
 
         match self.columns.cmp(&columns) {
-            Ordering::Less => self.grow_columns(reflow && Self::REFLOW_ON_GROW, columns),
+            Ordering::Less => self.grow_columns(reflow && self.reflow_on_grow, columns),
             Ordering::Greater => self.shrink_columns(reflow, columns),
             Ordering::Equal => (),
         }

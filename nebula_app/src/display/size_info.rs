@@ -170,6 +170,35 @@ impl SizeInfo<f32> {
         )
     }
 
+    /// Smallest column count worth handing to a shell.
+    ///
+    /// [`MIN_COLUMNS`] is 2, which is a grid-invariant floor, not a usable
+    /// terminal: at 2 columns every line of `ls` output soft-wraps into dozens
+    /// of rows, and once those rows overflow the scrollback the oldest ones are
+    /// dropped for good — widening back cannot resurrect what is no longer in
+    /// the buffer. The window floor derived from this keeps the user out of that
+    /// region entirely (Windows Terminal does the same with a fixed 460 DIP
+    /// minimum; deriving it from `chrome` keeps it honest when the sidebar is
+    /// open or the font changes).
+    pub const MIN_USABLE_COLUMNS: usize = 20;
+
+    /// Physical window width below which the grid would collapse past
+    /// [`Self::MIN_USABLE_COLUMNS`]. Feed this to `set_min_inner_size` so the OS
+    /// refuses the drag instead of letting the grid silently clamp.
+    pub fn min_usable_width(cell_width: f32, padding_x: f32, padding_right: f32) -> f32 {
+        padding_x + padding_right + cell_width * Self::MIN_USABLE_COLUMNS as f32
+    }
+
+    /// Physical window height below which the grid drops under `min_lines`.
+    pub fn min_usable_height(
+        cell_height: f32,
+        padding_y: f32,
+        padding_bottom: f32,
+        min_lines: usize,
+    ) -> f32 {
+        padding_y + padding_bottom + cell_height * min_lines as f32
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn assemble(
         width: f32,
@@ -183,7 +212,19 @@ impl SizeInfo<f32> {
     ) -> SizeInfo {
         let lines = (height - padding_y - padding_bottom) / cell_height;
         let screen_lines = cmp::max(lines as usize, MIN_SCREEN_LINES);
-        let columns = (width - padding_x - padding_right) / cell_width;
+        // `as usize` saturates, so a negative numerator (chrome wider than the
+        // window) becomes 0 and then clamps to `MIN_COLUMNS` — silently, which is
+        // how a too-narrow window used to reach the shell as 2 columns. The floor
+        // still stands as a last resort; `min_usable_width` is what keeps us from
+        // getting here.
+        let usable_width = width - padding_x - padding_right;
+        debug_assert!(
+            usable_width >= cell_width * MIN_COLUMNS as f32,
+            "window too narrow for chrome: {width}px total, {}px of padding leaves {usable_width}px \
+             for a {cell_width}px cell — set_min_inner_size should have blocked this",
+            padding_x + padding_right,
+        );
+        let columns = usable_width / cell_width;
         let columns = cmp::max(columns as usize, MIN_COLUMNS);
 
         SizeInfo {

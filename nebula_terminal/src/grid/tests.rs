@@ -252,10 +252,11 @@ fn shrink_reflow_empty_cell_inside_line() {
     assert_eq!(grid[Line(0)][Column(0)], cell('4'));
 }
 
-// Nebula: growing wider does NOT re-merge soft-wrapped rows even when reflow
-// is requested — see `REFLOW_ON_GROW` in grid/resize.rs (deliberate trade-off,
-// double-reflow fight with the legacy ConPTY host). These two tests encode
-// that contract; `grow_reflow_disabled` covers the explicit reflow=false path.
+// Growing wider re-merges what a shrink soft-wrapped: `shrink_columns` records
+// `Flags::WRAPLINE` on every row it splits and `grow_columns` reads those marks
+// back, which is what makes narrowing then widening restore the layout. Hosts
+// running a second reflow engine opt out via `Grid::set_reflow_on_grow`;
+// `grow_reflow_disabled` covers the explicit `reflow=false` path.
 #[test]
 fn grow_reflow() {
     let mut grid = Grid::<Cell>::new(2, 2, 0);
@@ -268,16 +269,56 @@ fn grow_reflow() {
 
     assert_eq!(grid.total_lines(), 2);
 
+    // '3' rejoins the row it was wrapped off of, and the wrap mark is consumed.
+    assert_eq!(grid[Line(1)].len(), 3);
+    assert_eq!(grid[Line(1)][Column(0)], cell('1'));
+    assert_eq!(grid[Line(1)][Column(1)], cell('2'));
+    assert_eq!(grid[Line(1)][Column(2)], cell('3'));
+
+    // The vacated row is blank, not a leftover copy.
+    assert_eq!(grid[Line(0)].len(), 3);
+    assert_eq!(grid[Line(0)][Column(0)], Cell::default());
+    assert_eq!(grid[Line(0)][Column(1)], Cell::default());
+    assert_eq!(grid[Line(0)][Column(2)], Cell::default());
+}
+
+/// The property that actually matters to the user: narrowing then widening back
+/// is a no-op as long as nothing overflowed the scrollback in between.
+#[test]
+fn shrink_then_grow_restores_the_original_layout() {
+    let mut grid = Grid::<Cell>::new(1, 6, 4);
+    for (i, c) in "123456".chars().enumerate() {
+        grid[Line(0)][Column(i)] = cell(c);
+    }
+
+    grid.resize(true, 1, 2);
+    grid.resize(true, 1, 6);
+
+    assert_eq!(grid[Line(0)].len(), 6);
+    for (i, c) in "123456".chars().enumerate() {
+        assert_eq!(grid[Line(0)][Column(i)], cell(c), "column {i} after round-trip");
+    }
+}
+
+/// Opting out keeps shrink-time wrapping but never re-merges, so rows stay
+/// split — the legacy in-box ConPTY contract.
+#[test]
+fn grow_does_not_reflow_when_disabled_on_the_grid() {
+    let mut grid = Grid::<Cell>::new(2, 2, 0);
+    grid.set_reflow_on_grow(false);
+    grid[Line(0)][Column(0)] = cell('1');
+    grid[Line(0)][Column(1)] = wrap_cell('2');
+    grid[Line(1)][Column(0)] = cell('3');
+    grid[Line(1)][Column(1)] = Cell::default();
+
+    grid.resize(true, 2, 3);
+
+    assert_eq!(grid.total_lines(), 2);
+
     assert_eq!(grid[Line(0)].len(), 3);
     assert_eq!(grid[Line(0)][Column(0)], cell('1'));
     assert_eq!(grid[Line(0)][Column(1)], wrap_cell('2'));
-    assert_eq!(grid[Line(0)][Column(2)], Cell::default());
-
-    // The wrapped row stays put instead of merging up.
-    assert_eq!(grid[Line(1)].len(), 3);
     assert_eq!(grid[Line(1)][Column(0)], cell('3'));
-    assert_eq!(grid[Line(1)][Column(1)], Cell::default());
-    assert_eq!(grid[Line(1)][Column(2)], Cell::default());
 }
 
 #[test]
@@ -294,19 +335,16 @@ fn grow_reflow_multiline() {
 
     assert_eq!(grid.total_lines(), 3);
 
-    // Every soft-wrapped row keeps its cells; only the width grew.
-    assert_eq!(grid[Line(0)].len(), 6);
-    assert_eq!(grid[Line(0)][Column(0)], cell('1'));
-    assert_eq!(grid[Line(0)][Column(1)], wrap_cell('2'));
-    assert_eq!(grid[Line(1)][Column(0)], cell('3'));
-    assert_eq!(grid[Line(1)][Column(1)], wrap_cell('4'));
-    assert_eq!(grid[Line(2)][Column(0)], cell('5'));
-    assert_eq!(grid[Line(2)][Column(1)], cell('6'));
+    // All three rows were one logical line: it collapses back into one row.
+    assert_eq!(grid[Line(2)].len(), 6);
+    for (i, c) in "123456".chars().enumerate() {
+        assert_eq!(grid[Line(2)][Column(i)], cell(c), "column {i}");
+    }
 
-    // Make sure the rest of the grid is empty.
-    for r in (0..3).map(Line::from) {
+    // The two rows it was spread across are left blank.
+    for r in (0..2).map(Line::from) {
         assert_eq!(grid[r].len(), 6);
-        for c in 2..6 {
+        for c in 0..6 {
             assert_eq!(grid[r][Column(c)], Cell::default());
         }
     }

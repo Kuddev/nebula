@@ -287,6 +287,25 @@ pub enum Osc52 {
     CopyPaste,
 }
 
+/// Whether the grid may re-merge soft-wrapped rows when it grows wider.
+///
+/// The sideloaded passthrough ConPTY (the default host) leaves reflow entirely
+/// to us, so re-merging is what makes a shrink→grow round-trip lossless. The
+/// legacy in-box host reflows its own buffer on resize, and two engines
+/// rewriting one stream mangle it — hence the capability check rather than a
+/// blanket `true`.
+#[cfg(windows)]
+fn reflow_on_grow_supported() -> bool {
+    crate::tty::windows::conpty_sideload_enabled()
+}
+
+/// Unix ptys carry no reflow engine of their own; the grid is always the sole
+/// owner.
+#[cfg(not(windows))]
+fn reflow_on_grow_supported() -> bool {
+    true
+}
+
 impl<T> Term<T> {
     #[inline]
     pub fn scroll_display(&mut self, scroll: Scroll)
@@ -384,8 +403,16 @@ impl<T> Term<T> {
         let num_lines = dimensions.screen_lines();
 
         let history_size = config.scrolling_history;
-        let grid = Grid::new(num_lines, num_cols, history_size);
-        let inactive_grid = Grid::new(num_lines, num_cols, 0);
+        let mut grid = Grid::new(num_lines, num_cols, history_size);
+        let mut inactive_grid = Grid::new(num_lines, num_cols, 0);
+
+        // Only re-merge soft-wrapped rows on grow when we own the sole reflow
+        // engine. The sideloaded passthrough ConPTY leaves reflow entirely to us
+        // (the default); the legacy in-box host reflows its own buffer, and two
+        // engines rewriting one stream mangle it.
+        let reflow_on_grow = reflow_on_grow_supported();
+        grid.set_reflow_on_grow(reflow_on_grow);
+        inactive_grid.set_reflow_on_grow(reflow_on_grow);
 
         let tabs = TabStops::new(grid.columns());
 

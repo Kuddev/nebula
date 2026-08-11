@@ -142,6 +142,19 @@ pub struct Grid<T> {
     /// number for rows still in the buffer — used by prompt marks.
     #[cfg_attr(feature = "serde", serde(default))]
     scrolled_out: usize,
+
+    /// Whether growing wider re-merges soft-wrapped rows; see
+    /// [`Self::set_reflow_on_grow`]. Shrink-time wrapping is unconditional, so
+    /// this only gates the *inverse* operation.
+    #[cfg_attr(feature = "serde", serde(skip, default = "reflow_on_grow_default"))]
+    reflow_on_grow: bool,
+}
+
+/// Re-merging on grow is what makes a shrink→grow round-trip lossless, so it is
+/// the default; hosts that run a second reflow engine opt out explicitly.
+#[cfg(feature = "serde")]
+fn reflow_on_grow_default() -> bool {
+    true
 }
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -153,9 +166,29 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             saved_cursor: Cursor::default(),
             cursor: Cursor::default(),
             scrolled_out: 0,
+            reflow_on_grow: true,
             lines,
             columns,
         }
+    }
+
+    /// Control whether growing wider re-merges rows that a previous shrink
+    /// soft-wrapped.
+    ///
+    /// On means narrowing then widening restores the original layout: `shrink`
+    /// records `Flags::WRAPLINE` on every row it splits, and `grow` reads those
+    /// marks to pull the cells back. The two are inverses, so this is the only
+    /// thing standing between us and "拖窄再拖回能恢复".
+    ///
+    /// Off exists for one reason: a second reflow engine downstream. The legacy
+    /// in-box ConPTY reflows its own buffer on resize, and two engines rewriting
+    /// the same stream mangle it. With the sideloaded 1.22+ passthrough host we
+    /// are the only engine, so this stays on.
+    ///
+    /// Turning it off is not lossless-minus-a-feature: rows stay split forever
+    /// and the wrap marks accumulate unread.
+    pub fn set_reflow_on_grow(&mut self, enabled: bool) {
+        self.reflow_on_grow = enabled;
     }
 
     /// Update the size of the scrollback history.

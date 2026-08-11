@@ -151,6 +151,11 @@ impl<T> Row<T> {
     }
 
     /// Check if all cells in the row are empty.
+    ///
+    /// Must scan the full width, not just `..occ`: `reset` leaves the cells past
+    /// `occ` holding the *template*, which is not necessarily empty (a template
+    /// carrying a background color makes the row non-clear even with `occ == 0`).
+    /// `occ` bounds what was written, not what is blank.
     #[inline]
     pub fn is_clear(&self) -> bool
     where
