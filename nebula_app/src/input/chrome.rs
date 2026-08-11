@@ -985,8 +985,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::CellWidthModeDropdown => {
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::CellWidthMode,
+                        );
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::NewTabPositionOption(index) => {
                         self.ctx.display().set_new_tab_position_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::CellWidthModeOption(index) => {
+                        let base_font = self.ctx.config().font.clone();
+                        self.ctx.display().set_cell_width_mode_option(index, &base_font);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1605,6 +1618,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::DensityOption(_)
             | Hit::NewTabPositionDropdown
             | Hit::NewTabPositionOption(_)
+            | Hit::CellWidthModeDropdown
+            | Hit::CellWidthModeOption(_)
             | Hit::CursorShapeDropdown
             | Hit::CursorShapeOption(_)
             | Hit::SshProxyModeDropdown

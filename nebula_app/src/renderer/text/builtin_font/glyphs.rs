@@ -19,11 +19,16 @@ use super::{
 pub(super) fn box_drawing(
     character: char,
     metrics: &Metrics,
+    cell_width: usize,
     offset: &Delta<i8>,
 ) -> RasterizedGlyph {
-    // Ensure that width and height is at least one.
+    // Ensure that width and height is at least one. The width is the effective
+    // cell width the caller already resolved (floored/rounded per the active
+    // cell-width mode, `font.offset.x` already folded in) — re-flooring
+    // `metrics.average_advance` here would drift one pixel under the relaxed
+    // (round) mode and split contiguous box-drawing lines into dashes.
     let height = (metrics.line_height as i32 + offset.y as i32).max(1) as usize;
-    let width = (metrics.average_advance as i32 + offset.x as i32).max(1) as usize;
+    let width = cell_width.max(1);
     let stroke_size = calculate_stroke_size(width);
     let heavy_stroke_size = stroke_size * 2;
 
@@ -573,10 +578,11 @@ pub(super) fn box_drawing(
 pub(super) fn powerline_drawing(
     character: char,
     metrics: &Metrics,
+    cell_width: usize,
     offset: &Delta<i8>,
 ) -> Option<RasterizedGlyph> {
     let height = (metrics.line_height as i32 + offset.y as i32) as usize;
-    let width = (metrics.average_advance as i32 + offset.x as i32) as usize;
+    let width = cell_width;
     let extra_thickness = calculate_stroke_size(width) as i32 - 1;
 
     let mut canvas = Canvas::new(width, height);
@@ -646,10 +652,11 @@ pub(super) fn powerline_drawing(
 pub(super) fn powerline_round_drawing(
     character: char,
     metrics: &Metrics,
+    cell_width: usize,
     offset: &Delta<i8>,
 ) -> Option<RasterizedGlyph> {
     let height = (metrics.line_height as i32 + offset.y as i32).max(1) as usize;
-    let width = (metrics.average_advance as i32 + offset.x as i32).max(1) as usize;
+    let width = cell_width.max(1);
 
     if width == 0 || height == 0 {
         return None;

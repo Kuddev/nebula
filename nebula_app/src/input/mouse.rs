@@ -450,6 +450,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::DensityOption(_)
             | crate::display::SettingsHit::NewTabPositionDropdown
             | crate::display::SettingsHit::NewTabPositionOption(_)
+            | crate::display::SettingsHit::CellWidthModeDropdown
+            | crate::display::SettingsHit::CellWidthModeOption(_)
             | crate::display::SettingsHit::FontSizeUp
             | crate::display::SettingsHit::FontSizeDown
             | crate::display::SettingsHit::BackgroundImageCoverChrome

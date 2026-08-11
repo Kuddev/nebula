@@ -135,6 +135,7 @@ pub enum SettingsDropdown {
     /// 外观密度（标准/紧凑）。
     Density,
     NewTabPosition,
+    CellWidthMode,
     /// 背景色：色板网格 + 16 进制输入的专用浮层（不是通用行列表）。
     BackgroundColor,
 }
@@ -338,6 +339,8 @@ pub(super) const DENSITY_OPTIONS: [super::ui::tokens::Density; 2] =
     [super::ui::tokens::Density::Standard, super::ui::tokens::Density::Compact];
 pub(super) const NEW_TAB_POSITION_OPTIONS: [NewTabPosition; 2] =
     [NewTabPosition::AfterCurrent, NewTabPosition::End];
+pub(super) const CELL_WIDTH_MODE_OPTIONS: [CellWidthMode; 2] =
+    [CellWidthMode::Compact, CellWidthMode::Relaxed];
 
 /// Order mirrors the appearance page the user referenced.
 pub(super) const CURSOR_SHAPE_OPTIONS: [CursorShape; 4] =
@@ -432,6 +435,41 @@ fn new_tab_position_label(position: NewTabPosition, language: UiLanguage) -> &'s
     }
 }
 
+/// 单元格宽度模式：终端把字体的非整数设计宽度转换为整像素列宽的方式。
+/// 「紧凑」保持上游的向下取整并作为兼容默认；「宽松」采用最接近整数取整，
+/// 补足与 Windows Terminal 相差的那一像素。它只影响列宽，不改变单元格高度、
+/// 字形比例或原生界面排版。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CellWidthMode {
+    #[default]
+    Compact,
+    Relaxed,
+}
+
+impl CellWidthMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "compact" => Some(Self::Compact),
+            "relaxed" => Some(Self::Relaxed),
+            _ => None,
+        }
+    }
+
+    fn settings_value(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Relaxed => "relaxed",
+        }
+    }
+}
+
+fn cell_width_mode_label(mode: CellWidthMode, language: UiLanguage) -> &'static str {
+    match mode {
+        CellWidthMode::Compact => language.pick("紧凑", "Compact"),
+        CellWidthMode::Relaxed => language.pick("宽松", "Relaxed"),
+    }
+}
+
 pub(super) fn cursor_shape_label(shape: CursorShape, language: UiLanguage) -> &'static str {
     match shape {
         CursorShape::Beam => language.pick("条形（│）", "Bar (│)"),
@@ -500,6 +538,8 @@ pub enum SettingsHit {
     DensityOption(usize),
     NewTabPositionDropdown,
     NewTabPositionOption(usize),
+    CellWidthModeDropdown,
+    CellWidthModeOption(usize),
     /// Language combobox trigger (options resolve to [`SettingsHit::Language`]).
     LanguageDropdown,
     /// Expanded dropdown option rows for the cycle-style settings.
@@ -651,6 +691,7 @@ pub(super) struct NebulaRuntimeSettings {
     /// 界面外观预设：标准 / 紧凑。
     pub(super) density: super::ui::tokens::Density,
     pub(super) new_tab_position: NewTabPosition,
+    pub(super) cell_width_mode: CellWidthMode,
     pub(super) fetch: bool,
     pub(super) powerline: bool,
     /// Window close keeps the PTYs alive in the resident process (detach /
@@ -732,6 +773,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         tab_reveal: TabRevealMotion::Slide,
         density: super::ui::tokens::Density::Standard,
         new_tab_position: NewTabPosition::AfterCurrent,
+        cell_width_mode: CellWidthMode::Compact,
         // Off by default: the welcome screen pipes a whole script through the
         // fresh shell and repaints on resize — real startup-latency cost on
         // the critical path (user ruling: startup speed outranks the art).
@@ -827,6 +869,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 },
                 Some(("new_tab_position", v)) => {
                     settings.new_tab_position = NewTabPosition::parse(v).unwrap_or_default();
+                },
+                Some(("cell_width_mode", v)) => {
+                    settings.cell_width_mode = CellWidthMode::parse(v).unwrap_or_default();
                 },
                 Some(("startup_directory", v)) => {
                     let path = std::path::PathBuf::from(v.trim());
@@ -1051,7 +1096,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         path,
         format!(
             "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\ndensity={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nssh_proxy_mode={ssh_proxy_mode}\nssh_proxy_url={ssh_proxy_url}\nssh_proxy_no_proxy={ssh_proxy_no_proxy}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+tab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nssh_proxy_mode={ssh_proxy_mode}\nssh_proxy_url={ssh_proxy_url}\nssh_proxy_no_proxy={ssh_proxy_no_proxy}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -1063,6 +1108,7 @@ tab_reveal={}\ndensity={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_sess
             settings.tab_reveal.settings_value(),
             density_settings_value(settings.density),
             settings.new_tab_position.settings_value(),
+            settings.cell_width_mode.settings_value(),
             settings.fetch as u8,
             settings.powerline as u8,
             settings.keep_session as u8,
@@ -1107,6 +1153,7 @@ struct SettingsGeometry {
     font: (f32, f32, f32, f32),
     /// "字号" spinner row; the value box + steppers derive via `widgets`.
     font_size_row: (f32, f32, f32, f32),
+    cell_width_mode: (f32, f32, f32, f32),
     fetch: (f32, f32, f32, f32),
     powerline: (f32, f32, f32, f32),
     ghost: (f32, f32, f32, f32),
@@ -1379,7 +1426,7 @@ fn settings_geometry(
     // welcome and the prompt decoration all change what a new terminal looks
     // like, while Profiles remains focused on what executable is launched.
     let terminal_appearance_y0 = blur_y0 + ROW_H + GROUP_ADVANCE;
-    let appearance_h = s(terminal_appearance_y0 + 3.0 * ROW_H + 32.0 - 72.0);
+    let appearance_h = s(terminal_appearance_y0 + 4.0 * ROW_H + 32.0 - 72.0);
     // 宽命中区包住细轨道，拖拽时无需精确点中 4px 线条。
     let opacity_row = (row_x, at(opacity_y0), row_w, row_h);
     let slider_x = if stacked_rows { row_x + s(16.0) } else { row_x + row_w - s(212.0) };
@@ -1676,8 +1723,9 @@ fn settings_geometry(
         ),
         font: (row_x, at(font_y0), row_w, row_h),
         font_size_row: (row_x, at(terminal_appearance_y0), row_w, row_h),
-        fetch: (row_x, at(terminal_appearance_y0 + ROW_H), row_w, row_h),
-        powerline: (row_x, at(terminal_appearance_y0 + 2.0 * ROW_H), row_w, row_h),
+        cell_width_mode: (row_x, at(terminal_appearance_y0 + ROW_H), row_w, row_h),
+        fetch: (row_x, at(terminal_appearance_y0 + 2.0 * ROW_H), row_w, row_h),
+        powerline: (row_x, at(terminal_appearance_y0 + 3.0 * ROW_H), row_w, row_h),
         ghost: (row_x, at(ghost_y0), row_w, row_h),
         accept: (row_x, at(ghost_y0 + ROW_H), row_w, row_h),
         open_config_file: (row_x, at(open_y0), row_w, row_h),
@@ -1970,6 +2018,9 @@ fn dropdown_anchor(
         },
         (Section::Profiles, SettingsDropdown::Accept) => {
             Some((anchor(geometry.accept), ACCEPT_OPTIONS.len()))
+        },
+        (Section::Appearance, SettingsDropdown::CellWidthMode) => {
+            Some((anchor(geometry.cell_width_mode), CELL_WIDTH_MODE_OPTIONS.len()))
         },
         (Section::Interaction, SettingsDropdown::TabReveal) => {
             Some((anchor(geometry.tab_reveal), TAB_REVEAL_OPTIONS.len()))
@@ -2297,6 +2348,7 @@ pub fn settings_hit(
                     SettingsDropdown::TabReveal => SettingsHit::TabRevealOption(index),
                     SettingsDropdown::Density => SettingsHit::DensityOption(index),
                     SettingsDropdown::NewTabPosition => SettingsHit::NewTabPositionOption(index),
+                    SettingsDropdown::CellWidthMode => SettingsHit::CellWidthModeOption(index),
                     SettingsDropdown::CursorShape => SettingsHit::CursorShapeOption(index),
                     SettingsDropdown::SshProxyMode => SettingsHit::SshProxyModeOption(index),
                     SettingsDropdown::SshProxyProtocol => {
@@ -2411,6 +2463,13 @@ pub fn settings_hit(
                     if contains_rect(down, x, y) {
                         return SettingsHit::FontSizeDown;
                     }
+                }
+                if contains_rect(
+                    widgets::combobox_rect(geometry.cell_width_mode, scale_factor),
+                    x,
+                    y,
+                ) {
+                    return SettingsHit::CellWidthModeDropdown;
                 }
                 if contains_rect(widgets::toggle_rect(geometry.fetch, scale_factor), x, y) {
                     return SettingsHit::FetchToggle;
@@ -2764,6 +2823,7 @@ pub(super) struct SettingsView {
     pub(super) tab_reveal: TabRevealMotion,
     pub(super) density: super::ui::tokens::Density,
     pub(super) new_tab_position: NewTabPosition,
+    pub(super) cell_width_mode: CellWidthMode,
     /// Live-preview colors: the ACTUAL terminal background/foreground the
     /// grid would use right now (custom background wins over the theme).
     pub(super) preview_bg: Rgb,
@@ -3176,6 +3236,9 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         SettingsDropdown::NewTabPosition => {
             NEW_TAB_POSITION_OPTIONS.iter().position(|position| *position == view.new_tab_position)
         },
+        SettingsDropdown::CellWidthMode => {
+            CELL_WIDTH_MODE_OPTIONS.iter().position(|mode| *mode == view.cell_width_mode)
+        },
         SettingsDropdown::CursorShape => {
             CURSOR_SHAPE_OPTIONS.iter().position(|shape| *shape == view.cursor_shape)
         },
@@ -3206,6 +3269,7 @@ fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Optio
         (SettingsDropdown::TabReveal, SettingsHit::TabRevealOption(index)) => Some(index),
         (SettingsDropdown::Density, SettingsHit::DensityOption(index)) => Some(index),
         (SettingsDropdown::NewTabPosition, SettingsHit::NewTabPositionOption(index)) => Some(index),
+        (SettingsDropdown::CellWidthMode, SettingsHit::CellWidthModeOption(index)) => Some(index),
         (SettingsDropdown::CursorShape, SettingsHit::CursorShapeOption(index)) => Some(index),
         (SettingsDropdown::SshProxyMode, SettingsHit::SshProxyModeOption(index)) => Some(index),
         (SettingsDropdown::SshProxyProtocol, SettingsHit::SshProxyProtocolOption(index)) => {
@@ -3712,7 +3776,7 @@ pub(super) fn push_quads(
                 view.pressed == SettingsHit::BlurToggle,
             );
 
-            group_frame(quads, geometry.font_size_row, 3);
+            group_frame(quads, geometry.font_size_row, 4);
             widgets::push_spinner(
                 &mut staged,
                 geometry.font_size_row,
@@ -3720,6 +3784,18 @@ pub(super) fn push_quads(
                 &sk,
                 view.hover == SettingsHit::FontSizeUp,
                 view.hover == SettingsHit::FontSizeDown,
+            );
+            row_hover(
+                quads,
+                geometry.cell_width_mode,
+                view.hover == SettingsHit::CellWidthModeDropdown,
+            );
+            combobox(
+                quads,
+                &mut staged,
+                geometry.cell_width_mode,
+                view.hover == SettingsHit::CellWidthModeDropdown,
+                view.dropdown == Some(SettingsDropdown::CellWidthMode),
             );
             for quad in staged.drain(..) {
                 clip(quads, quad);
@@ -4990,6 +5066,9 @@ pub(super) fn draw_popup_text(
             SettingsDropdown::NewTabPosition => {
                 new_tab_position_label(NEW_TAB_POSITION_OPTIONS[index], language).to_owned()
             },
+            SettingsDropdown::CellWidthMode => {
+                cell_width_mode_label(CELL_WIDTH_MODE_OPTIONS[index], language).to_owned()
+            },
             SettingsDropdown::CursorShape => {
                 cursor_shape_label(CURSOR_SHAPE_OPTIONS[index], language).to_owned()
             },
@@ -5811,6 +5890,26 @@ pub(super) fn draw_text(
                     sk.ink,
                     &value,
                     gc,
+                );
+            }
+            if visible(geometry.cell_width_mode.1, geometry.cell_width_mode.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.cell_width_mode,
+                    language.pick("字体间距", "Font spacing"),
+                    "",
+                    sk.ink,
+                );
+                combobox_value(
+                    r,
+                    gc,
+                    geometry.cell_width_mode,
+                    cell_width_mode_label(view.cell_width_mode, language),
+                    sk.accent,
                 );
             }
             if visible(geometry.fetch.1, geometry.fetch.3) {
@@ -7188,13 +7287,13 @@ pub(super) fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        KeymapPaneState, ManualProxyProtocol, NEW_TAB_POSITION_OPTIONS, NebulaSettingsSection,
-        NewTabPosition, ProxyChoice, ProxyPaneState, SHOW_BACKUP_SETTINGS,
-        SHOW_WEBDAV_SYNC_SETTINGS, STANDARD_ROW_ACTION_W, SettingsHit, TabRevealMotion,
-        UiLanguage, advanced_content_end, font_popup_row_count, font_popup_slot,
-        manual_proxy_parts, manual_proxy_value, new_tab_position_label, opacity_from_pointer,
-        proxy_section_title_y, row_action_rect, settings_geometry, settings_hit,
-        ssh_proxy_manual_controls,
+        CELL_WIDTH_MODE_OPTIONS, CellWidthMode, KeymapPaneState, ManualProxyProtocol,
+        NEW_TAB_POSITION_OPTIONS, NebulaSettingsSection, NewTabPosition, ProxyChoice,
+        ProxyPaneState, SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS, STANDARD_ROW_ACTION_W,
+        SettingsHit, TabRevealMotion, UiLanguage, advanced_content_end, cell_width_mode_label,
+        font_popup_row_count, font_popup_slot, manual_proxy_parts, manual_proxy_value,
+        new_tab_position_label, opacity_from_pointer, proxy_section_title_y, row_action_rect,
+        settings_geometry, settings_hit, ssh_proxy_manual_controls,
     };
     use crate::display::SizeInfo;
     use crate::display::ui::tokens::Density;
@@ -7556,6 +7655,17 @@ mod tests {
     }
 
     #[test]
+    fn cell_width_mode_defaults_compatibly_and_round_trips() {
+        assert_eq!(CellWidthMode::default(), CellWidthMode::Compact);
+        assert_eq!(CellWidthMode::parse("compact"), Some(CellWidthMode::Compact));
+        assert_eq!(CellWidthMode::parse("RELAXED"), Some(CellWidthMode::Relaxed));
+        assert_eq!(CellWidthMode::parse("unknown").unwrap_or_default(), CellWidthMode::Compact);
+        for value in [CellWidthMode::Compact, CellWidthMode::Relaxed] {
+            assert_eq!(CellWidthMode::parse(value.settings_value()), Some(value));
+        }
+    }
+
+    #[test]
     fn new_tab_position_dropdown_offers_both_choices_with_the_compatible_one_first() {
         // 列表顺序即下拉顺序，也是持久化索引的来源。把兼容默认放在首位是
         // 合同的一部分——重排这个数组会让升级用户的选择悄悄改变。
@@ -7566,6 +7676,18 @@ mod tests {
         for option in NEW_TAB_POSITION_OPTIONS {
             assert!(!new_tab_position_label(option, UiLanguage::ZhCn).is_empty());
             assert!(!new_tab_position_label(option, UiLanguage::EnUs).is_empty());
+        }
+    }
+
+    #[test]
+    fn cell_width_mode_dropdown_offers_both_choices_with_the_compatible_one_first() {
+        // 列表顺序即下拉顺序，也是持久化索引的来源；兼容默认必须排第一。
+        assert_eq!(CELL_WIDTH_MODE_OPTIONS.len(), 2);
+        assert_eq!(CELL_WIDTH_MODE_OPTIONS[0], CellWidthMode::default());
+        assert_eq!(CELL_WIDTH_MODE_OPTIONS[1], CellWidthMode::Relaxed);
+        for option in CELL_WIDTH_MODE_OPTIONS {
+            assert!(!cell_width_mode_label(option, UiLanguage::ZhCn).is_empty());
+            assert!(!cell_width_mode_label(option, UiLanguage::EnUs).is_empty());
         }
     }
 }

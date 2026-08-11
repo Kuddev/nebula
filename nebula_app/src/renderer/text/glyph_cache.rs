@@ -93,6 +93,19 @@ pub struct GlyphCache {
     /// The UI font role's metrics, truly rasterized at [`Self::ui_font_size`].
     ui_metrics: Metrics,
 
+    /// Effective terminal cell width — `compute_cell_size`'s product for the
+    /// active cell-width mode (already floored/rounded, `font.offset.x`
+    /// folded in). Built-in glyphs fill exactly this width so box-drawing
+    /// strokes and Powerline separators never drift a pixel under the
+    /// relaxed (round) mode. Refreshed by the display whenever the font or
+    /// cell-width mode changes.
+    cell_width: usize,
+
+    /// Effective cell width for the UI domain. The UI role is pinned to the
+    /// compact (floor) mode, so this is `floor(ui_metrics.average_advance +
+    /// font.offset.x)` — the same value the chrome grid lays UI columns at.
+    ui_cell_width: usize,
+
     /// While set, [`Self::load_glyph`] bakes the UI role's descent into glyph
     /// anchors instead of the terminal's. The UI text paths flip this around
     /// their draws; see [`Self::begin_ui_domain`].
@@ -228,6 +241,11 @@ impl GlyphCache {
             metrics,
             metrics_size: font.size(),
             ui_metrics: metrics,
+            // Seed the effective widths from the loaded metrics (compact mode
+            // = floor, matching the display's initial `compute_cell_size`).
+            // The display overwrites both on every font / mode change.
+            cell_width: (metrics.average_advance as i32 + font.offset.x as i32).max(1) as usize,
+            ui_cell_width: (metrics.average_advance as i32 + font.offset.x as i32).max(1) as usize,
             ui_domain: false,
             preview_restore: None,
             builtin_box_drawing: font.builtin_box_drawing,
@@ -399,9 +417,11 @@ impl GlyphCache {
                 // domain like every other glyph — the cursor-shape previews
                 // (│ █ ▁) in the settings dropdown are UI text.
                 let metrics = if self.ui_domain { &self.ui_metrics } else { &self.metrics };
+                let cell_width = if self.ui_domain { self.ui_cell_width } else { self.cell_width };
                 builtin_font::builtin_glyph(
                     glyph_key.character,
                     metrics,
+                    cell_width,
                     &self.font_offset,
                     &self.glyph_offset,
                 )
@@ -548,6 +568,20 @@ impl GlyphCache {
 
     pub fn font_metrics(&self) -> crossfont::Metrics {
         self.metrics
+    }
+
+    /// Pin the effective terminal cell width. Call this after every font or
+    /// cell-width-mode change, with the width the grid will lay columns at
+    /// (`compute_cell_size`'s product). Built-in glyphs then fill exactly
+    /// this width instead of re-flooring `average_advance` from the metrics.
+    pub fn set_cell_width(&mut self, cell_width: usize) {
+        self.cell_width = cell_width.max(1);
+    }
+
+    /// Pin the effective UI-domain cell width. The UI role is always compact
+    /// (floor), so callers pass `compute_cell_size(.., Compact).0 as usize`.
+    pub fn set_ui_cell_width(&mut self, cell_width: usize) {
+        self.ui_cell_width = cell_width.max(1);
     }
 
     /// Metrics the regular face produces when truly rasterized at `size`.
