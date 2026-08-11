@@ -4226,12 +4226,17 @@ impl Display {
         let imported = self.glyph_cache.private_font_families();
         #[cfg(not(windows))]
         let imported: Vec<String> = Vec::new();
+        // 多级 fallback 列表（issue #33）在目录里以主族身份参与匹配与高亮；
+        // 链本身仍原样保存在设置值里。
+        let primary_family =
+            crate::renderer::text::glyph_cache::primary_font_family(&self.nebula_font_family)
+                .to_owned();
         let catalog = crate::font_install::font_catalog(
             &system,
             &imported,
             self.nebula_font_show_all,
             &self.nebula_font_query,
-            &self.nebula_font_family,
+            &primary_family,
         );
         self.nebula_font_proportional = catalog
             .iter()
@@ -4242,8 +4247,8 @@ impl Display {
         // 内置字体永远排在最前，与上游一致。
         families.retain(|family| family != crate::font_install::REQUIRED_FONT_FAMILY);
         families.insert(0, crate::font_install::REQUIRED_FONT_FAMILY.to_owned());
-        if !families.iter().any(|family| family == &self.nebula_font_family) {
-            families.push(self.nebula_font_family.clone());
+        if !families.iter().any(|family| family == &primary_family) {
+            families.push(primary_family);
         }
         self.nebula_font_families = families;
         // 候选集合变了，旧滚动位置无意义；回到顶部避免窗口悬在越界偏移上。
@@ -4583,6 +4588,17 @@ impl Display {
             self.window.request_redraw();
             return;
         }
+        // 字体选择器只换主族；用户手写的多级 fallback 链（逗号分隔，
+        // issue #33）原样保留在新值后面。
+        let family = {
+            let rest: Vec<&str> =
+                crate::renderer::text::glyph_cache::split_font_families(&self.nebula_font_family)
+                    .into_iter()
+                    .skip(1)
+                    .filter(|fallback| *fallback != family)
+                    .collect();
+            if rest.is_empty() { family } else { format!("{family}, {}", rest.join(", ")) }
+        };
         self.nebula_font_family = family;
         self.nebula_font_notice = None;
         let font = self.effective_font(base).with_size(self.font_size);
@@ -8560,7 +8576,10 @@ impl Display {
         let view = self.size_info;
         self.make_current();
         self.reload_nebula_settings_if_changed(config);
-        // `None` focus → keep the terminal's real window-focus state.
+        // 光标聚焦态以 winit 的窗口焦点为唯一权威：`Term::is_focused` 是由
+        // Focused 事件维护的缓存，只写"当时聚焦"的那一个 Term——切 tab /
+        // 分屏又并回后残留旧值，表现为聚焦窗口里光标随机空心、不闪。每帧
+        // 用真实焦点覆盖，残留状态无处藏身。
         self.draw_pane(
             terminal,
             message_buffer,
@@ -8568,7 +8587,7 @@ impl Display {
             search_state,
             pane_state,
             view,
-            None,
+            Some(self.window.has_focus()),
             true,
         );
         self.present_frame(scheduler);

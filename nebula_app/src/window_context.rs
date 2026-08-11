@@ -187,6 +187,10 @@ pub struct WindowContext {
     split_drag: Option<split::SplitDragState>,
     proxy: EventLoopProxy<Event>,
     cursor_blink_timed_out: bool,
+    /// 上一帧的聚焦 pane。变化时给新聚焦终端补发 CursorBlinkingChange，
+    /// blink 定时器按它的样式重新起表——否则从"不闪"的 pane 切到"该闪"
+    /// 的 pane 后表根本没开，光标永远常亮。
+    blink_focus_pane: Option<usize>,
     prev_bell_cmd: Option<Instant>,
     /// When the PTYs last learned their size. Drives the leading-edge check of
     /// the resize debounce: a lone resize (startup, maximize, sidebar toggle)
@@ -443,6 +447,7 @@ impl WindowContext {
             config,
             doc_pane,
             cursor_blink_timed_out: Default::default(),
+            blink_focus_pane: None,
             prev_bell_cmd: Default::default(),
             last_pty_resize: None,
             clock_interval: Duration::from_secs(1),
@@ -640,6 +645,22 @@ impl WindowContext {
 
     /// Handle a Nebula tab request. Returns `true` if the window should close
     /// (i.e. the last tab was closed).
+    /// 渲染门控看门狗（1 Hz 心跳调用）：Windows 的 `Occluded(false)` 与帧
+    /// 回调都可能失约，卡住的 `occluded` / `has_frame` 会让整条 draw 路径
+    /// 熄火——窗口"点什么都没反应"，最小化再复原才活过来（issue #21）。
+    /// 窗口明明没最小化时强制解锁两道门；正常情况下它们本来就是开的，
+    /// 这里是幂等空操作。
+    pub fn unstick_render_gates_if_visible(&mut self) {
+        if self.display.window.is_minimized().unwrap_or(false) {
+            return;
+        }
+        if self.occluded || !self.display.window.has_frame {
+            self.occluded = false;
+            self.display.window.has_frame = true;
+            self.dirty = true;
+        }
+    }
+
     pub fn handle_tab_request(&mut self, request: TabRequest) -> bool {
         use crate::display::NebulaConfirm;
         match request {
@@ -2410,7 +2431,6 @@ impl WindowContext {
         if self.occluded {
             return;
         }
-
         self.dirty = false;
 
         // Force the display to process any pending display update.
@@ -2474,6 +2494,17 @@ impl WindowContext {
         // 连接卡片只画在聚焦 pane 里，display 侧只有几何、没有身份。
         self.display.set_focused_pane(focused);
 
+        // 焦点 pane 变了：blink 定时器还按旧终端的样式在跑（或没跑）。给
+        // 新聚焦终端补发一次 CursorBlinkingChange，让它按自己的样式起表。
+        if self.blink_focus_pane != Some(focused) {
+            self.blink_focus_pane = Some(focused);
+            if let Some(idx) = self.pane_index(focused) {
+                let pane = &self.panes[idx];
+                EventProxy::new_tab(self.proxy.clone(), pane.window_route.clone(), pane.id)
+                    .send_event(TerminalEvent::CursorBlinkingChange.into());
+            }
+        }
+
         if pane_rects.len() <= 1 {
             let id = pane_rects.first().map(|(id, _)| *id).unwrap_or(focused);
             if let Some(idx) = self.pane_index(id) {
@@ -2497,6 +2528,10 @@ impl WindowContext {
             // below, and skipping the clearing pane would leave every later
             // frame compositing over stale buffer contents (ghost frames).
             let mut cleared = false;
+            // Pane focus AND window focus together decide the cursor's
+            // focused look — a focused pane in an unfocused window must show
+            // the hollow unfocused cursor, exactly like the single-pane path.
+            let window_focused = self.display.window.has_focus();
             for (id, view) in pane_rects.iter() {
                 let Some(idx) = self.pane_index(*id) else { continue };
                 let is_focused = *id == focused;
@@ -2523,7 +2558,7 @@ impl WindowContext {
                     &mut pane.search_state,
                     &mut pane.nebula_state,
                     *view,
-                    is_focused,
+                    is_focused && window_focused,
                     !cleared,
                 );
                 cleared = true;

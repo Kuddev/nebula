@@ -1219,6 +1219,9 @@ impl ApplicationHandler<Event> for Processor {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     // Piggyback session persistence on the 1 Hz chrome clock.
                     window_context.autosave_session();
+                    // 渲染门控看门狗:被误报的遮挡/丢失的帧回调在这里解锁
+                    // (issue #21"启动后点什么都没反应")。
+                    window_context.unstick_render_gates_if_visible();
                     window_context.dirty = true;
                     window_context.display.window.request_redraw();
                 }
@@ -2676,7 +2679,9 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
     }
 
     /// Update the cursor blinking state.
-    fn update_cursor_blinking(&mut self) {
+    /// 当前聚焦终端此刻是否应该闪烁光标——blink 定时与每个 tick 的自检共
+    /// 用这一个判定,两处口径不可能分叉。
+    fn cursor_should_blink(&mut self) -> bool {
         // Push the settings default (shape + blink) into the terminal first:
         // `Term::cursor_style()` falls back to it whenever no DECSCUSR escape
         // has overridden the style, so vim's mode cursor keeps working while
@@ -2694,6 +2699,14 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
         let mut blinking = cursor_style.blinking_override().unwrap_or(terminal_blinking);
         blinking &= (vi_mode || self.terminal().mode().contains(TermMode::SHOW_CURSOR))
             && self.display().ime.preedit().is_none();
+        // 用 winit 的实时焦点而不是 `terminal.is_focused` 缓存:切 pane / 切
+        // tab 后新 Term 的缓存可能从未见过 Focused 事件,残留 false 会让
+        // 闪烁"有时不闪";残留 true 则让失焦窗口继续闪。
+        blinking && self.display.window.has_focus()
+    }
+
+    fn update_cursor_blinking(&mut self) {
+        let blinking = self.cursor_should_blink();
 
         // Update cursor blinking state.
         let window_id = self.display.window.id();
@@ -2703,7 +2716,7 @@ impl<'a, N: Notify + 'a, T: EventListener> ActionContext<'a, N, T> {
         // Reset blinking timeout.
         *self.cursor_blink_timed_out = false;
 
-        if blinking && self.terminal.is_focused {
+        if blinking {
             self.schedule_blinking();
             self.schedule_blinking_timeout();
         } else {
@@ -2882,9 +2895,14 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 | EventType::FocusWindow { .. } => (),
                 EventType::Scroll(scroll) => self.ctx.scroll(scroll),
                 EventType::BlinkCursor => {
-                    // Only change state when timeout isn't reached, since we could get
-                    // BlinkCursor and BlinkCursorTimeout events at the same time.
-                    if !*self.ctx.cursor_blink_timed_out {
+                    // 切 tab / 切 pane 后 timer 可能还按旧终端的口味在跑；
+                    // 每个 tick 都对照当前聚焦终端自检，不该闪就地停表并把
+                    // 光标恢复常亮——"残留闪烁"没有活过一个周期的机会。
+                    if !self.ctx.cursor_should_blink() {
+                        self.ctx.update_cursor_blinking();
+                    } else if !*self.ctx.cursor_blink_timed_out {
+                        // Only change state when timeout isn't reached, since we could get
+                        // BlinkCursor and BlinkCursorTimeout events at the same time.
                         self.ctx.display.cursor_hidden ^= true;
                         *self.ctx.dirty = true;
                     }
@@ -3325,7 +3343,17 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         self.ctx.window().set_ime_inhibitor(ImeInhibitor::FOCUS, !is_focused);
                     },
                     WindowEvent::Occluded(occluded) => {
-                        *self.ctx.occluded = occluded;
+                        // Windows 的遮挡事件不可靠：启动早期 / DWM 合成切换
+                        // 会误发 `Occluded(true)`，而配对的 `false` 可能永远
+                        // 不来。标志被误置后整条 draw 路径熄火——窗口"点什
+                        // 么都没反应"，直到最小化再复原靠 Focused(true) 的
+                        // 补丁解锁（issue #21）。窗口明明没最小化就发来的
+                        // true 一律不信；false 永远接受。
+                        let minimized =
+                            self.ctx.display.window.is_minimized().unwrap_or(false);
+                        if !occluded || minimized {
+                            *self.ctx.occluded = occluded;
+                        }
 
                         // Force a full redraw when the window becomes visible again.
                         if !occluded {

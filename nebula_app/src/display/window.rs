@@ -523,6 +523,13 @@ impl Window {
         self.window.has_focus()
     }
 
+    /// Whether the window is currently minimized (`None` = platform can't
+    /// tell). 渲染门控的看门狗用它区分"真的最小化"与"被误报遮挡"。
+    #[inline]
+    pub fn is_minimized(&self) -> Option<bool> {
+        self.window.is_minimized()
+    }
+
     pub fn set_transparent(&self, transparent: bool) {
         self.window.set_transparent(transparent);
     }
