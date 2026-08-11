@@ -19,6 +19,7 @@ use crossfont::Size as FontSize;
 use glutin::config::Config as GlutinConfig;
 use glutin::display::GetGlDisplay;
 use log::{debug, error, info, warn};
+use serde_json::Value;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event as WinitEvent, Ime, Modifiers, StartCause, WindowEvent};
@@ -59,6 +60,7 @@ use crate::logging::{LOG_TARGET_CONFIG, LOG_TARGET_WINIT};
 use crate::message_bar::{Message, MessageBuffer, MessageType};
 #[cfg(unix)]
 use crate::polling::ipc::{self, SocketReply};
+use crate::runtime_api::{ApiError, RuntimeCommand, RuntimeDispatch, RuntimeHub, RuntimeSnapshot};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::window_context::{DetachedWindow, WindowBoot, WindowContext};
 use crate::window_transition::{NativeWindowStage, NativeWindowStageTracker};
@@ -125,6 +127,8 @@ pub struct Processor {
     /// PTYs never stopped, so `claude` and friends survive the window. LIFO —
     /// an attach request adopts the most recently closed window first.
     detached: Vec<DetachedWindow>,
+    /// Canonical state projection observed by CLI clients and subscribers.
+    runtime_hub: RuntimeHub,
 }
 
 impl Processor {
@@ -134,6 +138,7 @@ impl Processor {
         cli_options: CliOptions,
         event_loop: &EventLoop<Event>,
         native_window_stages: NativeWindowStageTracker,
+        runtime_hub: RuntimeHub,
     ) -> Processor {
         let proxy = event_loop.create_proxy();
         let reload_proxy = proxy.clone();
@@ -193,6 +198,7 @@ impl Processor {
             quick_hotkey,
             quick_hotkey_combo,
             detached: Vec::new(),
+            runtime_hub,
         }
     }
 
@@ -393,6 +399,167 @@ impl Processor {
                 error!("Could not open window on attach request: {err:?}");
             }
         }
+    }
+
+    fn runtime_snapshot(&self) -> RuntimeSnapshot {
+        let mut windows: Vec<_> =
+            self.windows.values().map(WindowContext::runtime_snapshot).collect();
+        windows.sort_by_key(|window| window.id);
+        RuntimeSnapshot::new(self.detached.len(), windows)
+    }
+
+    fn publish_runtime_snapshot(&self) -> RuntimeSnapshot {
+        self.runtime_hub.publish(self.runtime_snapshot())
+    }
+
+    /// Resolve a control target without relying on HashMap iteration order.
+    /// Pane ids are window-local, so an omitted window is accepted only when
+    /// the pane is unique across all live windows.
+    fn runtime_target_window(
+        &self,
+        window_id: Option<u64>,
+        pane_id: Option<u64>,
+    ) -> Result<WindowId, ApiError> {
+        if let Some(window_id) = window_id {
+            let id = WindowId::from(window_id);
+            let Some(window) = self.windows.get(&id) else {
+                return Err(ApiError::new(
+                    "target_not_found",
+                    format!("window {window_id} does not exist"),
+                ));
+            };
+            if let Some(pane_id) = pane_id
+                && !window.runtime_contains_pane(pane_id)
+            {
+                return Err(ApiError::new(
+                    "target_not_found",
+                    format!("pane {pane_id} does not belong to window {window_id}"),
+                ));
+            }
+            return Ok(id);
+        }
+
+        if let Some(pane_id) = pane_id {
+            let mut matches: Vec<_> = self
+                .windows
+                .iter()
+                .filter_map(|(id, window)| window.runtime_contains_pane(pane_id).then_some(*id))
+                .collect();
+            matches.sort_by_key(|id| u64::from(*id));
+            return match matches.as_slice() {
+                [id] => Ok(*id),
+                [] => {
+                    Err(ApiError::new("target_not_found", format!("pane {pane_id} does not exist")))
+                },
+                _ => Err(ApiError::new(
+                    "ambiguous_target",
+                    format!("pane id {pane_id} exists in multiple windows; provide window_id"),
+                )),
+            };
+        }
+
+        self.windows
+            .iter()
+            .filter(|(_, window)| window.display.window.has_focus())
+            .map(|(id, _)| *id)
+            .next()
+            .or_else(|| {
+                self.windows
+                    .iter()
+                    .filter(|(_, window)| !window.session_exempt)
+                    .map(|(id, _)| *id)
+                    .min_by_key(|id| u64::from(*id))
+            })
+            .or_else(|| self.windows.keys().copied().min_by_key(|id| u64::from(*id)))
+            .ok_or_else(|| ApiError::new("target_not_found", "no live Nebula window exists"))
+    }
+
+    fn runtime_result(&self, action: Value) -> Result<Value, ApiError> {
+        let snapshot = self.publish_runtime_snapshot();
+        Ok(serde_json::json!({ "action": action, "snapshot": snapshot }))
+    }
+
+    fn execute_runtime_command(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        command: &RuntimeCommand,
+    ) -> Result<Value, ApiError> {
+        match command {
+            RuntimeCommand::Snapshot => serde_json::to_value(self.publish_runtime_snapshot())
+                .map_err(|error| ApiError::new("serialization_failed", error.to_string())),
+            RuntimeCommand::NewWindow => {
+                // GL backends require every current context to be released
+                // before another window surface is created.
+                for window in self.windows.values_mut() {
+                    window.display.make_not_current();
+                }
+                let id = if self.gl_config.is_none() {
+                    let before: Vec<_> = self.windows.keys().copied().collect();
+                    self.create_initial_window(event_loop, WindowOptions::default())
+                        .map_err(|error| ApiError::new("action_failed", error.to_string()))?;
+                    self.windows.keys().copied().find(|id| !before.contains(id)).ok_or_else(
+                        || ApiError::new("action_failed", "new window was not registered"),
+                    )?
+                } else {
+                    self.create_window(event_loop, WindowOptions::default())
+                        .map_err(|error| ApiError::new("action_failed", error.to_string()))?
+                };
+                self.runtime_result(serde_json::json!({ "window_id": u64::from(id) }))
+            },
+            RuntimeCommand::Focus { window_id, pane_id } => {
+                let id = self.runtime_target_window(*window_id, *pane_id)?;
+                self.windows
+                    .get_mut(&id)
+                    .expect("resolved runtime window exists")
+                    .runtime_focus(*pane_id)?;
+                self.runtime_result(serde_json::json!({
+                    "window_id": u64::from(id),
+                    "pane_id": pane_id
+                }))
+            },
+            RuntimeCommand::NewTab { window_id } => {
+                let id = self.runtime_target_window(*window_id, None)?;
+                let pane_id = self
+                    .windows
+                    .get_mut(&id)
+                    .expect("resolved runtime window exists")
+                    .runtime_new_tab()?;
+                self.runtime_result(serde_json::json!({
+                    "window_id": u64::from(id),
+                    "pane_id": pane_id
+                }))
+            },
+            RuntimeCommand::Split { window_id, direction } => {
+                let id = self.runtime_target_window(*window_id, None)?;
+                let pane_id = self
+                    .windows
+                    .get_mut(&id)
+                    .expect("resolved runtime window exists")
+                    .runtime_split(*direction)?;
+                self.runtime_result(serde_json::json!({
+                    "window_id": u64::from(id),
+                    "pane_id": pane_id
+                }))
+            },
+            RuntimeCommand::Prompt { window_id, pane_id, text, submit } => {
+                let id = self.runtime_target_window(*window_id, Some(*pane_id))?;
+                self.windows.get_mut(&id).expect("resolved runtime window exists").runtime_prompt(
+                    *pane_id,
+                    text.clone(),
+                    *submit,
+                )?;
+                self.runtime_result(serde_json::json!({
+                    "window_id": u64::from(id),
+                    "pane_id": pane_id,
+                    "submitted": submit
+                }))
+            },
+        }
+    }
+
+    fn handle_runtime_control(&mut self, event_loop: &ActiveEventLoop, dispatch: &RuntimeDispatch) {
+        let response = self.execute_runtime_command(event_loop, &dispatch.command);
+        dispatch.respond(response);
     }
 
     /// Drop a detached pane whose shell exited while its window was closed,
@@ -680,6 +847,9 @@ impl ApplicationHandler<Event> for Processor {
         // Handle events which don't mandate the WindowId.
         let tab_id = event.tab_id;
         match (event.payload, event.window_id.as_ref()) {
+            (EventType::RuntimeControl(dispatch), _) => {
+                self.handle_runtime_control(event_loop, &dispatch)
+            },
             // AI-CLI lifecycle events (nebula-hook pipe) route by pane id, so
             // the windows resolve them themselves; the owner claims it.
             (EventType::AiHook(hook), _) => {
@@ -740,6 +910,22 @@ impl ApplicationHandler<Event> for Processor {
             (EventType::ProxyTestDone { request_id, ok, message, elapsed_ms }, Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.display.proxy_test_done(request_id, ok, &message, elapsed_ms);
+                    window_context.dirty = true;
+                    window_context.display.window.request_redraw();
+                }
+            },
+            (
+                EventType::ProviderTestDone { request_id, provider_id, ok, message, elapsed_ms },
+                Some(window_id),
+            ) => {
+                if let Some(window_context) = self.windows.get_mut(window_id) {
+                    window_context.display.provider_test_done(
+                        request_id,
+                        &provider_id,
+                        ok,
+                        &message,
+                        elapsed_ms,
+                    );
                     window_context.dirty = true;
                     window_context.display.window.request_redraw();
                 }
@@ -1138,6 +1324,9 @@ impl ApplicationHandler<Event> for Processor {
             );
         }
         self.flush_quick_hotkey_requests();
+        // This is the single projection boundary for GUI, PTY, hook, and CLI
+        // changes. RuntimeHub deduplicates identical semantic snapshots.
+        self.publish_runtime_snapshot();
 
         // Update the scheduler after event processing to ensure
         // the event loop deadline is as accurate as possible.
@@ -1571,6 +1760,25 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             self.display.window.id(),
         ) {
             self.display.proxy_test_done(request_id, false, &format!("无法启动网络测试：{err}"), 0);
+        }
+    }
+
+    fn nebula_provider_test(&mut self) {
+        let Some(request) = self.display.take_provider_test_request() else { return };
+        let request_id = request.request_id;
+        let provider_id = request.provider.id.clone();
+        if let Err(err) = crate::ai_providers::spawn_test(
+            request,
+            self.event_proxy.clone(),
+            self.display.window.id(),
+        ) {
+            self.display.provider_test_done(
+                request_id,
+                &provider_id,
+                false,
+                &format!("无法启动供应商测试：{err}"),
+                0,
+            );
         }
     }
 
@@ -2650,12 +2858,15 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 // Tab requests are handled at the window-context level.
                 EventType::NebulaTab(_) => (),
                 // Clock ticks are handled at the window-context level.
-                EventType::NebulaTick | EventType::NebulaAttach => (),
+                EventType::NebulaTick | EventType::NebulaAttach | EventType::RuntimeControl(_) => {
+                    ()
+                },
                 // Resize settling is handled at the window-context level.
                 EventType::NebulaResizeSettled
                 | EventType::SshDeleteUndoExpired
                 | EventType::QuickTerminalHotkeyChanged { .. }
                 | EventType::ProxyTestDone { .. }
+                | EventType::ProviderTestDone { .. }
                 | EventType::SshTestDone { .. }
                 | EventType::SshConnect(_)
                 | EventType::SftpUpdated => (),

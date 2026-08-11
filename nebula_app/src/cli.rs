@@ -233,6 +233,8 @@ impl WindowIdentity {
 /// Available CLI subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Subcommands {
+    /// Control the resident Nebula runtime through the versioned local API.
+    Ctl(ControlOptions),
     #[cfg(unix)]
     Msg(MessageOptions),
     Migrate(MigrateOptions),
@@ -327,6 +329,106 @@ pub struct SshOptions {
     /// All arguments forwarded verbatim to `ssh` (destination and flags).
     #[clap(trailing_var_arg = true, allow_hyphen_values = true)]
     pub args: Vec<String>,
+}
+
+/// Options for the cross-platform runtime control API.
+#[derive(Args, Debug)]
+pub struct ControlOptions {
+    /// Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines.
+    #[clap(long, global = true)]
+    pub pretty: bool,
+
+    /// Maximum time to wait for a command response.
+    #[clap(long, global = true, default_value_t = 30_000)]
+    pub timeout_ms: u64,
+
+    #[clap(subcommand)]
+    pub command: ControlCommand,
+}
+
+/// Commands exposed by the versioned runtime control plane.
+#[derive(Subcommand, Debug)]
+pub enum ControlCommand {
+    /// Describe the protocol version, runtime version, and available capabilities.
+    Describe,
+    /// Read the authoritative window, tab, pane, and task-state projection.
+    Snapshot,
+    /// Stream state snapshots whenever their semantic content changes.
+    Subscribe {
+        /// Resume after this revision; the current snapshot is sent when newer.
+        #[clap(long)]
+        since: Option<u64>,
+    },
+    /// Create and focus a new terminal window.
+    NewWindow,
+    /// Focus a window or one of its panes.
+    Focus {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: Option<u64>,
+    },
+    /// Create a default-shell tab in the target window.
+    NewTab {
+        #[clap(long)]
+        window: Option<u64>,
+    },
+    /// Split the focused pane in the target window.
+    Split {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long, value_enum, default_value = "right")]
+        direction: ControlSplitDirection,
+    },
+    /// Send one plain-text prompt to a pane, optionally submitting it with Enter.
+    Prompt {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+        #[clap(long)]
+        text: String,
+        /// Write the text without appending Enter.
+        #[clap(long)]
+        no_submit: bool,
+        /// After sending, wait until the pane reaches this task state.
+        #[clap(long, value_enum)]
+        wait: Option<ControlWaitState>,
+    },
+    /// Wait until a pane reaches a semantic task state.
+    Wait {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+        #[clap(long, value_enum, default_value = "settled")]
+        state: ControlWaitState,
+        /// Require the pane's state_change_seq to advance past this value.
+        /// Pass the value observed before sending work so an already-settled
+        /// pane does not satisfy the wait immediately.
+        #[clap(long)]
+        after_seq: Option<u64>,
+    },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlSplitDirection {
+    /// Create the new pane to the right of the focused pane.
+    Right,
+    /// Create the new pane below the focused pane.
+    Down,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlWaitState {
+    Idle,
+    Running,
+    WaitingInput,
+    Attention,
+    Finished,
+    Failed,
+    /// Any non-running terminal state.
+    Settled,
 }
 
 /// Send a message to the Nebula socket.

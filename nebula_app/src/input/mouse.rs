@@ -335,6 +335,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.ctx.display().nebula_density,
             self.ctx.display().ssh_proxy_pane_state(),
             self.ctx.display().keymap_pane_state(),
+            self.ctx.display().provider_count(),
         );
         let chrome_hover = if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32)
         {
@@ -411,6 +412,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::SshHostHide(_)
             | crate::display::SettingsHit::SshImportConfig
             | crate::display::SettingsHit::SshAddHost
+            | crate::display::SettingsHit::ProviderAdd
+            | crate::display::SettingsHit::ProviderRow(_)
+            | crate::display::SettingsHit::ProviderSave
+            | crate::display::SettingsHit::ProviderTest
+            | crate::display::SettingsHit::ProviderDelete
+            | crate::display::SettingsHit::ProviderEnableToggle(_)
+            | crate::display::SettingsHit::ProviderCodexGoalsToggle
+            | crate::display::SettingsHit::ProviderCodexRemoteToggle
+            | crate::display::SettingsHit::ProviderApplyCodex
             | crate::display::SettingsHit::FetchToggle
             | crate::display::SettingsHit::PowerlineToggle
             | crate::display::SettingsHit::BlurToggle
@@ -467,6 +477,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 return;
             },
             crate::display::SettingsHit::SyncInput(_)
+            | crate::display::SettingsHit::ProviderField(_)
             | crate::display::SettingsHit::SshProxyInput(_)
             // 搜索框是文本字段，光标要变 I 形——和其它输入框一致。
             | crate::display::SettingsHit::KeymapSearchField

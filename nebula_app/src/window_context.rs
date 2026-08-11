@@ -49,6 +49,7 @@ use crate::{input, renderer, session};
 
 mod model;
 mod nebula_fetch_art;
+mod runtime;
 /// New-tab welcome page (Windows logo + fastfetch intro). Stateless helpers.
 mod welcome;
 use welcome::nebula_fastfetch_intro_command_for;
@@ -1128,6 +1129,7 @@ impl WindowContext {
             },
         );
         self.active_tab = at;
+        self.display.set_special_tab_active(true);
         self.display.set_settings_tab_active(false);
         self.dirty = true;
     }
@@ -1166,6 +1168,7 @@ impl WindowContext {
             },
         );
         self.active_tab = at;
+        self.display.set_special_tab_active(true);
         self.display.set_settings_tab_active(false);
         self.dirty = true;
     }

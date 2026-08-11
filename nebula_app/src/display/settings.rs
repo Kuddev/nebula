@@ -55,6 +55,8 @@ pub enum NebulaSettingsSection {
     Appearance,
     /// Completion behaviour plus the raw `nebula_settings.txt` config file.
     Profiles,
+    /// OpenAI-compatible AI providers and their OS-backed API keys.
+    Providers,
     /// Saved SSH destinations and hidden-host recovery.
     Ssh,
     /// Outbound proxy policy for SSH connections.
@@ -74,6 +76,7 @@ impl NebulaSettingsSection {
         match self {
             Self::Appearance => language.pick("外观", "Appearance"),
             Self::Profiles => language.pick("配置文件", "Profiles"),
+            Self::Providers => language.pick("供应商", "Providers"),
             Self::Ssh => "SSH",
             Self::Proxy => language.pick("网络", "Network"),
             Self::Interaction => language.pick("交互", "Interaction"),
@@ -88,6 +91,7 @@ fn nav_icon(section: NebulaSettingsSection) -> icons::SettingsNavIcon {
     match section {
         NebulaSettingsSection::Appearance => icons::SettingsNavIcon::Appearance,
         NebulaSettingsSection::Profiles => icons::SettingsNavIcon::Profiles,
+        NebulaSettingsSection::Providers => icons::SettingsNavIcon::Providers,
         NebulaSettingsSection::Ssh => icons::SettingsNavIcon::Ssh,
         NebulaSettingsSection::Proxy => icons::SettingsNavIcon::Proxy,
         NebulaSettingsSection::Interaction => icons::SettingsNavIcon::Interaction,
@@ -466,6 +470,9 @@ pub enum SettingsHit {
     AlignOption(usize),
     /// Restore one address from the persistent hidden-host list.
     RestoreHiddenSsh(usize),
+    /// SSH 主机行本体：不是可点动作，只承载 hover 底色并让右缘三枚图标显形。
+    /// 2026-08-11 用户裁定：静态那一行只留身份信息，动作藏进 hover。
+    SshHostRow(usize),
     /// SSH settings page: connect to a saved destination.
     SshHostConnect(usize),
     /// SSH settings page: edit a saved destination.
@@ -476,6 +483,17 @@ pub enum SettingsHit {
     SshImportConfig,
     /// SSH settings page: open the existing SSH editor for a new host.
     SshAddHost,
+    /// AI provider management: preset/add, select, edit and persist actions.
+    ProviderAdd,
+    ProviderRow(usize),
+    ProviderField(usize),
+    ProviderSave,
+    ProviderTest,
+    ProviderDelete,
+    ProviderEnableToggle(usize),
+    ProviderCodexGoalsToggle,
+    ProviderCodexRemoteToggle,
+    ProviderApplyCodex,
     FetchToggle,
     PowerlineToggle,
     BlurToggle,
@@ -540,7 +558,7 @@ pub enum SettingsHit {
 /// Stable animation slots for the settings switches. Rendering and the shared
 /// motion clock both use this mapping, so one switch can never borrow another
 /// switch's thumb position while the pointer moves between rows.
-pub(super) const SETTINGS_TOGGLE_COUNT: usize = 13;
+pub(super) const SETTINGS_TOGGLE_COUNT: usize = 15;
 
 pub(super) fn settings_toggle_slot(hit: SettingsHit) -> Option<usize> {
     Some(match hit {
@@ -557,6 +575,8 @@ pub(super) fn settings_toggle_slot(hit: SettingsHit) -> Option<usize> {
         SettingsHit::RestoreSessionToggle => 10,
         SettingsHit::SyncAutoPullToggle => 11,
         SettingsHit::BackgroundImageCoverChrome => 12,
+        SettingsHit::ProviderCodexGoalsToggle => 13,
+        SettingsHit::ProviderCodexRemoteToggle => 14,
         _ => return None,
     })
 }
@@ -1025,7 +1045,10 @@ struct SettingsGeometry {
     popup: (f32, f32, f32, f32),
     sidebar: (f32, f32, f32, f32),
     content: (f32, f32, f32, f32),
-    nav: [(NebulaSettingsSection, f32, f32, f32, f32); 8],
+    /// 中等宽度只保留导航图标，把空间还给正文；窄宽度进一步把设置行改为两层。
+    compact_nav: bool,
+    stacked_rows: bool,
+    nav: [(NebulaSettingsSection, f32, f32, f32, f32); 9],
     /// Navigation group labels occupy the intentional gaps before connection
     /// and system settings, so the rail never contains unexplained whitespace.
     nav_groups: [(f32, f32, f32, f32); 2],
@@ -1087,6 +1110,7 @@ struct SettingsGeometry {
     /// `content_top`). `max_scroll = (height - viewport).max(0)`.
     appearance_h: f32,
     profiles_h: f32,
+    providers_h: f32,
     interaction_h: f32,
     keymap_h: f32,
     /// 按键映射页动态几何：搜索框 / 冲突提示条 / 分组行。`keymap_slot_ys`
@@ -1105,6 +1129,17 @@ struct SettingsGeometry {
     keymap_row_h: f32,
     advanced_h: f32,
     ssh_h: f32,
+    provider_add: (f32, f32, f32, f32),
+    provider_row0: (f32, f32, f32, f32),
+    provider_row_h: f32,
+    provider_row_count: usize,
+    provider_fields: [(f32, f32, f32, f32); 6],
+    provider_codex_goals: (f32, f32, f32, f32),
+    provider_codex_remote: (f32, f32, f32, f32),
+    provider_codex_apply: (f32, f32, f32, f32),
+    provider_save: (f32, f32, f32, f32),
+    provider_test: (f32, f32, f32, f32),
+    provider_delete: (f32, f32, f32, f32),
     proxy_h: f32,
     keep_session: (f32, f32, f32, f32),
     /// 高级·会话：启动时恢复上次的标签（崩溃/强杀后同样走这条路）。
@@ -1158,8 +1193,9 @@ pub(super) fn settings_max_scroll(
     density: super::ui::tokens::Density,
     proxy: ProxyPaneState,
     keymap_pane: KeymapPaneState,
+    provider_count: usize,
 ) -> f32 {
-    let geometry = settings_geometry(
+    let mut geometry = settings_geometry(
         size_info,
         scale_factor,
         area,
@@ -1170,10 +1206,12 @@ pub(super) fn settings_max_scroll(
         proxy,
         keymap_pane,
     );
+    fit_provider_rows(&mut geometry, provider_count);
     let (_, _, _, ph) = geometry.popup;
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
         NebulaSettingsSection::Profiles => geometry.profiles_h,
+        NebulaSettingsSection::Providers => geometry.providers_h,
         NebulaSettingsSection::Ssh => geometry.ssh_h,
         NebulaSettingsSection::Proxy => geometry.proxy_h,
         NebulaSettingsSection::Interaction => geometry.interaction_h,
@@ -1202,12 +1240,19 @@ fn settings_geometry(
     // geometry rooted in that card makes sidebar/drawer animations and DPI
     // changes follow the exact same bounds as terminal and document tabs.
     let (popup_x, popup_y, popup_w, popup_h) = area;
-    // Match the reference settings shell: a quiet 196px navigation rail and a
-    // 2px rhythm between compact 32px rows leave the content area breathing.
-    let sidebar_w = s(196.0).min(popup_w * 0.30);
+    // 断点依据设置卡片的逻辑宽度，不依据物理像素或字体大小，避免 DPI 缩放
+    // 意外改变交互布局。
+    let logical_popup_w = popup_w / scale_factor.max(f32::EPSILON);
+    let compact_nav = logical_popup_w < 900.0;
+    let stacked_rows = logical_popup_w < 650.0;
+    // Match the reference settings shell when wide; an icon-only rail gives
+    // the content a usable minimum width at medium and narrow sizes.
+    let sidebar_w =
+        if compact_nav { s(64.0).min(popup_w * 0.30) } else { s(196.0).min(popup_w * 0.30) };
     let sidebar = (popup_x, popup_y, sidebar_w, popup_h);
-    let content_x = popup_x + sidebar_w + s(16.0);
-    let content_w = (popup_w - sidebar_w - s(16.0)).max(s(240.0));
+    let content_gap = if compact_nav { s(8.0) } else { s(16.0) };
+    let content_x = popup_x + sidebar_w + content_gap;
+    let content_w = (popup_w - sidebar_w - content_gap).max(s(1.0));
     let content = (content_x, popup_y, content_w, popup_h);
 
     // The header band (big section title) is fixed; everything below it
@@ -1224,35 +1269,51 @@ fn settings_geometry(
     // 行高与组间距按密度降档：紧凑用阶梯上既有的 COMPACT_ROW，组间距
     // 随行高等量收窄，不引入新数值。
     let row_advance = super::ui::tokens::control::settings_row(density);
+    let row_advance = if stacked_rows {
+        // 两层设置行必须同时容纳标签和通栏控件；密度 token 仍作为下限，
+        // 让紧凑外观与既有主题保持一致。
+        row_advance.max(72.0)
+    } else {
+        row_advance
+    };
     #[allow(non_snake_case)]
     let ROW_H: f32 = row_advance;
     #[allow(non_snake_case)]
     let GROUP_ADVANCE: f32 = 74.0 - (44.0 - row_advance);
     // 预览卡设计高度：两行示例文本 + 光标演示的呼吸空间。
     const PREVIEW_H: f32 = 150.0;
+    let content_inset = s(if compact_nav { 16.0 } else { 24.0 });
 
     // Live preview leads the page: configure → see it immediately.
     let preview_y0 = 146.0;
-    let preview = (content_x + s(24.0), at(preview_y0), content_w - s(48.0), s(PREVIEW_H));
+    let preview = (
+        content_x + content_inset,
+        at(preview_y0),
+        (content_w - 2.0 * content_inset).max(s(1.0)),
+        s(PREVIEW_H),
+    );
 
-    // Theme cards flow as a 4 + 3 grid with the design sheet's 20px gaps:
-    // slot i sits at column i%4 on row i/4. The row pitch reserves a strip
-    // under each card for its label (12px gap + text + 20px grid row gap).
+    // 主题卡宽屏四列、窄屏两列；实际行数继续参与后续区块的 Y 坐标计算，
+    // 确保绘制、滚动与命中测试同步移动。
     let card_gap = s(20.0);
-    let card_w = ((content_w - s(48.0) - 3.0 * card_gap) / 4.0).clamp(s(88.0), s(170.0));
+    let card_columns = if stacked_rows { 2.0 } else { 4.0 };
+    let card_inner_w = (content_w - 2.0 * content_inset).max(s(1.0));
+    let card_w =
+        ((card_inner_w - (card_columns - 1.0) * card_gap) / card_columns).max(s(1.0)).min(s(170.0));
     let card_h = s(64.0);
     let card_y0 = preview_y0 + PREVIEW_H + GROUP_ADVANCE;
-    let card_x = content_x + s(24.0);
+    let card_x = content_x + content_inset;
     let card_row_pitch = card_h + s(48.0);
-    let card = |i: f32| card_x + (i % 4.0) * (card_w + card_gap);
-    let card_slot_y = |i: f32| at(card_y0) + (i / 4.0).floor() * card_row_pitch;
+    let card = |i: f32| card_x + (i % card_columns) * (card_w + card_gap);
+    let card_slot_y = |i: f32| at(card_y0) + (i / card_columns).floor() * card_row_pitch;
 
-    let row_x = content_x + s(24.0);
-    let row_w = content_w - s(48.0);
+    let row_x = content_x + content_inset;
+    let row_w = (content_w - 2.0 * content_inset).max(s(1.0));
     let row_h = s(ROW_H);
 
     // Appearance: preview, cards, colors, cursor and interface groups.
-    let system_theme_y0 = card_y0 + 2.0 * (64.0 + 48.0) + GROUP_ADVANCE;
+    let card_rows = (7.0f32 / card_columns).ceil();
+    let system_theme_y0 = card_y0 + card_rows * (64.0 + 48.0) + GROUP_ADVANCE;
     let color_y0 = system_theme_y0 + ROW_H + GROUP_ADVANCE;
     // Background-image controls: path, stretch,
     // alignment and an independent image-opacity slider.
@@ -1276,12 +1337,17 @@ fn settings_geometry(
     let appearance_h = s(terminal_appearance_y0 + 3.0 * ROW_H + 32.0 - 72.0);
     // 宽命中区包住细轨道，拖拽时无需精确点中 4px 线条。
     let opacity_row = (row_x, at(opacity_y0), row_w, row_h);
-    let slider_x = row_x + row_w - s(212.0);
-    let slider_w = s(188.0).min(row_w * 0.42).max(s(96.0));
-    let opacity_slider = (slider_x, at(opacity_y0) + s(4.0), slider_w, s(36.0));
+    let slider_x = if stacked_rows { row_x + s(16.0) } else { row_x + row_w - s(212.0) };
+    let slider_w = if stacked_rows {
+        (row_w - s(32.0)).max(s(24.0))
+    } else {
+        s(188.0).min(row_w * 0.42).max(s(96.0).min(row_w.max(s(1.0))))
+    };
+    let slider_y = if stacked_rows { s(34.0) } else { s(4.0) };
+    let opacity_slider = (slider_x, at(opacity_y0) + slider_y, slider_w, s(36.0));
     let background_image_opacity_row = (row_x, at(background_image_opacity_y0), row_w, row_h);
     let background_image_opacity_slider =
-        (slider_x, at(background_image_opacity_y0) + s(4.0), slider_w, s(36.0));
+        (slider_x, at(background_image_opacity_y0) + slider_y, slider_w, s(36.0));
 
     // Sidebar navigation rows. The rects line up with the active-row
     // highlight drawn while rendering. The reference uses 32px rows with a
@@ -1292,17 +1358,18 @@ fn settings_geometry(
     let nav_gap = s(2.0);
     let nav_y0 = popup_y + s(88.0);
     let nav_slot = |i: f32| nav_y0 + i * (nav_h + nav_gap);
-    let connections_group_y = nav_slot(4.0);
-    let ssh_nav_y = connections_group_y + s(24.0);
+    let connections_group_y = nav_slot(5.0);
+    let ssh_nav_y = if compact_nav { nav_slot(5.0) } else { connections_group_y + s(24.0) };
     let proxy_nav_y = ssh_nav_y + nav_h + nav_gap;
     let system_group_y = proxy_nav_y + nav_h + nav_gap;
-    let advanced_nav_y = system_group_y + s(24.0);
+    let advanced_nav_y = if compact_nav { nav_slot(7.0) } else { system_group_y + s(24.0) };
     let backup_nav_y = advanced_nav_y + nav_h + nav_gap;
     let nav = [
         (NebulaSettingsSection::Appearance, nav_x, nav_slot(0.0), nav_w, nav_h),
         (NebulaSettingsSection::Profiles, nav_x, nav_slot(1.0), nav_w, nav_h),
-        (NebulaSettingsSection::Interaction, nav_x, nav_slot(2.0), nav_w, nav_h),
-        (NebulaSettingsSection::Keymap, nav_x, nav_slot(3.0), nav_w, nav_h),
+        (NebulaSettingsSection::Providers, nav_x, nav_slot(2.0), nav_w, nav_h),
+        (NebulaSettingsSection::Interaction, nav_x, nav_slot(3.0), nav_w, nav_h),
+        (NebulaSettingsSection::Keymap, nav_x, nav_slot(4.0), nav_w, nav_h),
         (NebulaSettingsSection::Ssh, nav_x, ssh_nav_y, nav_w, nav_h),
         (NebulaSettingsSection::Proxy, nav_x, proxy_nav_y, nav_w, nav_h),
         (NebulaSettingsSection::Advanced, nav_x, advanced_nav_y, nav_w, nav_h),
@@ -1322,6 +1389,47 @@ fn settings_geometry(
     let ghost_y0 = font_y0 + ROW_H + GROUP_ADVANCE;
     let open_y0 = ghost_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
     let profiles_h = s(open_y0 + ROW_H + 32.0 - 72.0);
+
+    // AI providers intentionally use a denser list + editor flow inspired by
+    // CC Switch: the left-side list keeps switching cheap, while the active
+    // provider exposes base URL/model/key fields without a second window.
+    const PROVIDER_ROW_H: f32 = 58.0;
+    let providers_y0 = 146.0;
+    let provider_title_y = at(providers_y0 - 48.0);
+    let provider_add_w = s(112.0).min(row_w * 0.42).max(s(34.0));
+    let provider_add = (
+        row_x + row_w - provider_add_w,
+        widgets::centered_y(provider_title_y, s(32.0), s(30.0)),
+        provider_add_w,
+        s(30.0),
+    );
+    let provider_row0_y = providers_y0;
+    let provider_row0 = (row_x, at(provider_row0_y), row_w, s(PROVIDER_ROW_H));
+    let provider_form_y0 = provider_row0_y + PROVIDER_ROW_H * 6.0 + GROUP_ADVANCE;
+    let provider_field = |i: f32| (row_x, at(provider_form_y0 + i * ROW_H), row_w, row_h);
+    let provider_fields = [
+        provider_field(0.0),
+        provider_field(1.0),
+        provider_field(2.0),
+        provider_field(3.0),
+        provider_field(4.0),
+        provider_field(5.0),
+    ];
+    let provider_codex_goals = provider_field(6.0);
+    let provider_codex_remote = provider_field(7.0);
+    let provider_codex_apply = provider_field(8.0);
+    let provider_actions_y = provider_form_y0 + 9.0 * ROW_H + GROUP_ADVANCE;
+    let provider_action_w = s(112.0).min(row_w * 0.30).max(s(34.0));
+    let provider_save =
+        (row_x + row_w - provider_action_w, at(provider_actions_y), provider_action_w, row_h);
+    let provider_test = (
+        provider_save.0 - provider_action_w - s(10.0),
+        at(provider_actions_y),
+        provider_action_w,
+        row_h,
+    );
+    let provider_delete = (row_x, at(provider_actions_y), provider_action_w, row_h);
+    let providers_h = s(provider_actions_y + ROW_H + 32.0 - 72.0);
 
     // 交互: 剪贴板行为、标签展开与拖拽调节一组，文本渲染（CJK 粗体策略）另一组。
     let interaction_y0 = 146.0;
@@ -1476,6 +1584,8 @@ fn settings_geometry(
         popup: (popup_x, popup_y, popup_w, popup_h),
         sidebar,
         content,
+        compact_nav,
+        stacked_rows,
         nav,
         nav_groups,
         options: [
@@ -1493,7 +1603,7 @@ fn settings_geometry(
         background_image: (row_x, at(background_image_y0), row_w, row_h),
         background_image_clear: (
             row_x + row_w - s(48.0),
-            at(background_image_y0) + s(5.0),
+            at(background_image_y0) + if stacked_rows { s(33.0) } else { s(5.0) },
             s(36.0),
             s(34.0),
         ),
@@ -1513,7 +1623,7 @@ fn settings_geometry(
         startup_directory: (row_x, at(startup_directory_y0), row_w, row_h),
         startup_directory_clear: (
             row_x + row_w - s(82.0),
-            at(startup_directory_y0) + s(5.0),
+            at(startup_directory_y0) + if stacked_rows { s(33.0) } else { s(5.0) },
             s(72.0),
             s(34.0),
         ),
@@ -1537,11 +1647,27 @@ fn settings_geometry(
         panel_resize,
         cjk_bold,
         tab_reveal,
-        reset: (popup_x + popup_w - s(170.0), popup_y + s(24.0), s(150.0), s(42.0)),
+        reset: if stacked_rows {
+            (popup_x + popup_w - s(58.0), popup_y + s(24.0), s(38.0), s(38.0))
+        } else {
+            (popup_x + popup_w - s(170.0), popup_y + s(24.0), s(150.0), s(42.0))
+        },
         content_top,
         appearance_h,
         profiles_h,
+        providers_h,
         ssh_h,
+        provider_add,
+        provider_row0,
+        provider_row_h: s(PROVIDER_ROW_H),
+        provider_row_count: 6,
+        provider_fields,
+        provider_codex_goals,
+        provider_codex_remote,
+        provider_codex_apply,
+        provider_save,
+        provider_test,
+        provider_delete,
         proxy_h,
         interaction_h,
         keymap_h,
@@ -1581,6 +1707,27 @@ fn settings_geometry(
     }
 }
 
+/// Provider rows are backed by the persisted collection, while the rest of
+/// Settings geometry is static. Moving the editor block here keeps hit tests,
+/// rendering and scroll bounds on the same calculation without threading a
+/// provider count through every unrelated geometry helper.
+fn fit_provider_rows(geometry: &mut SettingsGeometry, provider_count: usize) {
+    let old_count = geometry.provider_row_count;
+    let delta = provider_count as f32 - old_count as f32;
+    let offset = delta * geometry.provider_row_h;
+    geometry.provider_row_count = provider_count;
+    for field in &mut geometry.provider_fields {
+        field.1 += offset;
+    }
+    geometry.provider_codex_goals.1 += offset;
+    geometry.provider_codex_remote.1 += offset;
+    geometry.provider_codex_apply.1 += offset;
+    geometry.provider_save.1 += offset;
+    geometry.provider_test.1 += offset;
+    geometry.provider_delete.1 += offset;
+    geometry.providers_h = (geometry.providers_h + offset).max(0.0);
+}
+
 pub(crate) fn opacity_slider_rect(
     size_info: &SizeInfo,
     scale_factor: f32,
@@ -1610,9 +1757,12 @@ pub(crate) fn opacity_from_pointer(pointer_x: f32, slider: (f32, f32, f32, f32))
     ((pointer_x - slider.0) / slider.2.max(1.0)).clamp(0.0, 1.0)
 }
 
-/// Three fixed-width actions live in the right side of every SSH card. Keeping
-/// this derivation shared by draw and hit-test is what prevents a translated
-/// label or DPI change from making the visible button miss its click target.
+/// 主机行右缘的三枚方形图标槽（连接 / 编辑 / 隐藏）。绘制与命中共用这一处
+/// 推导，是"看得见的按钮点不中"的唯一防线。
+///
+/// 2026-08-11：从 54px 宽的描边文字按钮改成方形图标槽。文字按钮常态占掉右侧
+/// 约 180px，把主机名挤到一半宽；图标槽只在 hover 时显形，静态那一行只剩身份
+/// 信息。命中区保持正方且比墨迹宽，指针容差不被视觉尺寸绑死。
 fn ssh_host_action_rect(
     row: (f32, f32, f32, f32),
     scale: f32,
@@ -1620,18 +1770,13 @@ fn ssh_host_action_rect(
 ) -> (f32, f32, f32, f32) {
     let s = |v: f32| v * scale;
     let (x, y, w, h) = row;
-    // Keep actions inside the row even when the settings card is narrower than
-    // the desktop reference width. The previous fixed 54px buttons overlapped
-    // the host identity and made the last button fall outside the hit area.
-    let gap = s(6.0);
-    let right = x + w - s(14.0);
-    let max_button_w = ((w - s(28.0) - gap * 2.0) / 3.0).max(s(34.0));
-    let button_w = s(54.0).min(max_button_w);
-    let button_h = s(30.0).min(h - s(12.0)).max(s(22.0));
+    let gap = s(2.0);
+    let right = x + w - s(12.0);
+    let slot = s(28.0).min((h - s(10.0)).max(s(20.0)));
     let bx = right
-        - button_w * (3usize.saturating_sub(action) as f32)
+        - slot * (3usize.saturating_sub(action) as f32)
         - gap * (2usize.saturating_sub(action) as f32);
-    (bx, widgets::centered_y(y, h, button_h), button_w, button_h)
+    (bx, widgets::centered_y(y, h, slot), slot, slot)
 }
 
 /// Compact trailing command button inside an otherwise non-clickable settings row.
@@ -1642,7 +1787,8 @@ fn row_action_rect(row: (f32, f32, f32, f32), scale: f32, logical_w: f32) -> (f3
     let (x, y, w, h) = row;
     let button_w = s(logical_w).min(w * 0.42);
     let button_h = s(30.0).min(h);
-    (x + w - s(16.0) - button_w, widgets::centered_y(y, h, button_h), button_w, button_h)
+    let button_y = if h >= s(56.0) { y + h - s(38.0) } else { widgets::centered_y(y, h, button_h) };
+    (x + w - s(16.0) - button_w, button_y, button_w, button_h)
 }
 
 /// Appearance 预览卡的壁纸绘制矩形：`(fit 目标, 实际允许触碰的裁剪带)`。
@@ -1972,6 +2118,34 @@ pub fn keymap_search_rect(
     .keymap_search
 }
 
+/// Active provider field rectangle, shared by pointer placement and IME
+/// anchoring with the render pass.
+pub fn provider_input_rect(
+    size_info: &SizeInfo,
+    scale_factor: f32,
+    area: (f32, f32, f32, f32),
+    scroll: f32,
+    hidden_host_count: usize,
+    ssh_host_count: usize,
+    density: super::ui::tokens::Density,
+    provider_count: usize,
+    index: usize,
+) -> Option<(f32, f32, f32, f32)> {
+    let mut geometry = settings_geometry(
+        size_info,
+        scale_factor,
+        area,
+        scroll,
+        hidden_host_count,
+        ssh_host_count,
+        density,
+        ProxyPaneState::default(),
+        KeymapPaneState::default(),
+    );
+    fit_provider_rows(&mut geometry, provider_count);
+    geometry.provider_fields.get(index).copied().map(|row| sync_input_rect(row, scale_factor))
+}
+
 pub fn settings_hit(
     size_info: &SizeInfo,
     scale_factor: f32,
@@ -1990,8 +2164,9 @@ pub fn settings_hit(
     density: super::ui::tokens::Density,
     proxy: ProxyPaneState,
     keymap_pane: KeymapPaneState,
+    provider_count: usize,
 ) -> SettingsHit {
-    let geometry = settings_geometry(
+    let mut geometry = settings_geometry(
         size_info,
         scale_factor,
         area,
@@ -2002,6 +2177,7 @@ pub fn settings_hit(
         proxy,
         keymap_pane,
     );
+    fit_provider_rows(&mut geometry, provider_count);
     let s = |v: f32| v * scale_factor;
 
     if contains_rect(geometry.gear, x, y) {
@@ -2097,7 +2273,9 @@ pub fn settings_hit(
             return SettingsHit::Nav(nav_section);
         }
     }
-    if section != NebulaSettingsSection::Ssh && contains_rect(geometry.reset, x, y) {
+    if !matches!(section, NebulaSettingsSection::Ssh | NebulaSettingsSection::Providers)
+        && contains_rect(geometry.reset, x, y)
+    {
         return SettingsHit::Reset;
     }
 
@@ -2226,6 +2404,60 @@ pub fn settings_hit(
                     return SettingsHit::OpenConfigFile;
                 }
             },
+            NebulaSettingsSection::Providers => {
+                if contains_rect(geometry.provider_add, x, y) {
+                    return SettingsHit::ProviderAdd;
+                }
+                for index in 0..geometry.provider_row_count {
+                    let row = (
+                        geometry.provider_row0.0,
+                        geometry.provider_row0.1 + index as f32 * geometry.provider_row_h,
+                        geometry.provider_row0.2,
+                        geometry.provider_row_h,
+                    );
+                    if contains_rect(row, x, y) {
+                        if x >= row.0 + row.2 - scale_factor * 76.0 {
+                            return SettingsHit::ProviderEnableToggle(index);
+                        }
+                        return SettingsHit::ProviderRow(index);
+                    }
+                }
+                for (index, field) in geometry.provider_fields.iter().enumerate() {
+                    if contains_rect(*field, x, y) {
+                        return SettingsHit::ProviderField(index);
+                    }
+                }
+                if contains_rect(
+                    widgets::toggle_rect(geometry.provider_codex_goals, scale_factor),
+                    x,
+                    y,
+                ) {
+                    return SettingsHit::ProviderCodexGoalsToggle;
+                }
+                if contains_rect(
+                    widgets::toggle_rect(geometry.provider_codex_remote, scale_factor),
+                    x,
+                    y,
+                ) {
+                    return SettingsHit::ProviderCodexRemoteToggle;
+                }
+                if contains_rect(
+                    row_action_rect(geometry.provider_codex_apply, scale_factor, 148.0),
+                    x,
+                    y,
+                ) {
+                    return SettingsHit::ProviderApplyCodex;
+                }
+                if contains_rect(geometry.provider_save, x, y) {
+                    return SettingsHit::ProviderSave;
+                }
+                if contains_rect(geometry.provider_test, x, y) {
+                    return SettingsHit::ProviderTest;
+                }
+                if contains_rect(geometry.provider_delete, x, y) {
+                    return SettingsHit::ProviderDelete;
+                }
+            },
             NebulaSettingsSection::Ssh => {
                 for index in 0..geometry.ssh_host_count {
                     let row = (
@@ -2243,6 +2475,10 @@ pub fn settings_hit(
                     }
                     if contains_rect(ssh_host_action_rect(row, scale_factor, 2), x, y) {
                         return SettingsHit::SshHostHide(index);
+                    }
+                    // 三枚图标之后才轮到行本体，顺序反了图标就永远拿不到命中。
+                    if contains_rect(row, x, y) {
+                        return SettingsHit::SshHostRow(index);
                     }
                 }
                 if contains_rect(geometry.ssh_add_host, x, y) {
@@ -2421,6 +2657,12 @@ pub(super) struct SettingsView {
     pub(super) shells: Vec<(String, String, String)>, // (id, name, program)
     pub(super) shell_id: Option<String>,
     pub(super) startup_directory: Option<String>,
+    pub(super) providers: Vec<crate::ai_providers::AiProvider>,
+    pub(super) active_provider_id: String,
+    pub(super) provider_inputs: [String; 6],
+    pub(super) provider_cursors: [text_field::TextCursor; 6],
+    pub(super) provider_focus: Option<usize>,
+    pub(super) provider_status: Option<(String, bool)>,
     pub(super) font_family: String,
     /// Current terminal font size in LOGICAL px, for the spinner value box.
     pub(super) font_size_px: f32,
@@ -2531,6 +2773,9 @@ pub(super) struct SettingsView {
 /// 同步行右侧的输入框矩形（quad/text/hit 三处共用）。行左侧留给标签。
 fn sync_input_rect((rx, ry, rw, rh): (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
     let s = |v: f32| v * scale;
+    if rh >= s(56.0) {
+        return (rx + s(16.0), ry + rh - s(38.0), (rw - s(32.0)).max(s(1.0)), s(32.0));
+    }
     let w = rw * 0.56;
     let h = rh - s(12.0);
     (rx + rw - s(16.0) - w, ry + (rh - h) / 2.0, w, h)
@@ -2554,6 +2799,9 @@ fn ssh_proxy_mode_control(
     scale: f32,
 ) -> (f32, f32, f32, f32) {
     let s = |v: f32| v * scale;
+    if rh >= s(56.0) {
+        return (rx + s(16.0), ry + rh - s(38.0), (rw - s(32.0)).max(s(1.0)), s(32.0));
+    }
     let w = s(156.0).min(rw * 0.38).max(s(132.0));
     let h = s(32.0);
     (rx + rw - s(16.0) - w, ry + (rh - h) * 0.5, w, h)
@@ -2674,6 +2922,52 @@ fn ssh_proxy_input_display(
     let (text, cols) = text_tail(raw, max_cols);
     let hidden = raw.chars().count() - text.chars().count();
     (text, false, cols, hidden)
+}
+
+fn provider_input_display(
+    view: &SettingsView,
+    index: usize,
+    max_cols: usize,
+) -> (String, bool, usize) {
+    let raw = &view.provider_inputs[index];
+    if raw.is_empty() {
+        let placeholder = if index == 5 {
+            match view.providers.iter().find(|provider| provider.id == view.active_provider_id) {
+                Some(provider) if !provider.kind.requires_api_key() => {
+                    view.language.pick("本地服务无需 API Key", "No API key required").to_owned()
+                },
+                Some(provider) if provider.api_key_set => format!(
+                    "{}  {}",
+                    provider.api_key_hint,
+                    view.language.pick("（输入以更换）", "(type to replace)")
+                ),
+                _ => view.language.pick("输入 API Key", "Enter API key").to_owned(),
+            }
+        } else {
+            view.language.pick("未设置", "Not set").to_owned()
+        };
+        return (placeholder, true, 0);
+    }
+
+    let source = if index == 5 { "●".repeat(raw.chars().count()) } else { raw.clone() };
+    let caret = view.provider_cursors[index].caret(raw);
+    let total = source.chars().count();
+    let (tail, _) = text_tail(&source, max_cols);
+    let hidden = total - tail.chars().count();
+    if view.provider_focus != Some(index) || caret >= hidden {
+        return (tail, false, hidden);
+    }
+    let mut cols = 0usize;
+    let mut display = String::new();
+    for ch in source.chars().skip(caret) {
+        let width = ch.width().unwrap_or(1).max(1);
+        if cols + width > max_cols {
+            break;
+        }
+        cols += width;
+        display.push(ch);
+    }
+    (display, false, caret)
 }
 
 /// 视图 → 网络页几何输入。所有 settings_geometry 调用点共用同一份推导，
@@ -2868,7 +3162,7 @@ pub(super) fn push_quads(
     let s = |v: f32| v * scale;
     let sk = settings_skin(view.theme);
 
-    let geometry = settings_geometry(
+    let mut geometry = settings_geometry(
         size,
         scale,
         view.area,
@@ -2879,6 +3173,7 @@ pub(super) fn push_quads(
         proxy_pane_state(view),
         keymap_pane_state_view(view),
     );
+    fit_provider_rows(&mut geometry, view.providers.len());
     let (px, py, pw, ph) = geometry.popup;
     // Scrolled content is clipped EXACTLY at the viewport edges: quads that
     // cross the fixed header separator or the popup's bottom edge are cut at
@@ -2928,10 +3223,11 @@ pub(super) fn push_quads(
         } else {
             sk.panel
         };
+        let icon_x = if geometry.compact_nav { nx + (nw - s(18.0)) * 0.5 } else { nx + s(10.0) };
         icons::push_settings_nav_icon(
             quads,
             nav_icon(nav_section),
-            (nx + s(10.0), ny + s(7.0), s(18.0), s(18.0)),
+            (icon_x, ny + s(7.0), s(18.0), s(18.0)),
             scale,
             icon_ink,
             icon_cutout,
@@ -2940,7 +3236,7 @@ pub(super) fn push_quads(
 
     // Reset: a quiet ghost button in the header. SSH intentionally has no
     // page-level "Upgrade" action; host management is the complete surface.
-    if section != NebulaSettingsSection::Ssh {
+    if !matches!(section, NebulaSettingsSection::Ssh | NebulaSettingsSection::Providers) {
         let (rx, ry, rw, rh) = geometry.reset;
         quads.push(UiQuad::solid(rx, ry, rw, rh, s(8.0), sk.surface));
         let hovered = view.hover == SettingsHit::Reset;
@@ -3457,6 +3753,104 @@ pub(super) fn push_quads(
                 );
             }
         },
+        NebulaSettingsSection::Providers => {
+            for index in 0..geometry.provider_row_count {
+                let row = (
+                    geometry.provider_row0.0,
+                    geometry.provider_row0.1 + index as f32 * geometry.provider_row_h,
+                    geometry.provider_row0.2,
+                    geometry.provider_row_h,
+                );
+                let active = view
+                    .providers
+                    .get(index)
+                    .is_some_and(|provider| provider.id == view.active_provider_id);
+                let hovered = view.hover == SettingsHit::ProviderRow(index)
+                    || view.hover == SettingsHit::ProviderEnableToggle(index);
+                clip(
+                    quads,
+                    UiQuad::solid(
+                        row.0,
+                        row.1,
+                        row.2,
+                        row.3,
+                        tokens::radius::CONTROL * scale,
+                        if active {
+                            sk.accent_soft
+                        } else if hovered {
+                            sk.hover
+                        } else {
+                            sk.surface
+                        },
+                    ),
+                );
+            }
+            for (index, field) in geometry.provider_fields.iter().enumerate() {
+                let input_rect = sync_input_rect(*field, scale);
+                let mut input = Vec::new();
+                surface::push_input(
+                    &mut input,
+                    input_rect,
+                    scale,
+                    &sk,
+                    view.density,
+                    view.provider_focus == Some(index),
+                );
+                if view.provider_focus == Some(index) {
+                    let max_cols = (((input_rect.2 - s(24.0)) / size.cell_width()) as usize).max(1);
+                    let (display, placeholder, hidden) =
+                        provider_input_display(view, index, max_cols);
+                    text_field::push_cursor(
+                        &mut input,
+                        input_rect.1,
+                        input_rect.3,
+                        input_rect.0 + s(12.0),
+                        if placeholder { "" } else { &display },
+                        &view.provider_cursors[index].shifted(hidden),
+                        size.cell_width(),
+                        scale,
+                        &sk,
+                    );
+                }
+                for quad in input {
+                    clip(quads, quad);
+                }
+            }
+            let current =
+                view.providers.iter().find(|provider| provider.id == view.active_provider_id);
+            for (row, hit, on) in [
+                (
+                    geometry.provider_codex_goals,
+                    SettingsHit::ProviderCodexGoalsToggle,
+                    current.is_some_and(|provider| provider.codex_goals),
+                ),
+                (
+                    geometry.provider_codex_remote,
+                    SettingsHit::ProviderCodexRemoteToggle,
+                    current.is_some_and(|provider| provider.codex_remote_compaction),
+                ),
+            ] {
+                toggle(quads, &mut staged, row, hit, on, view.hover == hit, view.pressed == hit);
+            }
+            action_button(
+                quads,
+                geometry.provider_codex_apply,
+                148.0,
+                view.hover == SettingsHit::ProviderApplyCodex,
+            );
+            for (hit, rect) in [
+                (SettingsHit::ProviderAdd, geometry.provider_add),
+                (SettingsHit::ProviderSave, geometry.provider_save),
+                (SettingsHit::ProviderTest, geometry.provider_test),
+                (SettingsHit::ProviderDelete, geometry.provider_delete),
+            ] {
+                let mut button = Vec::new();
+                widgets::push_outline_button(&mut button, rect, scale, &sk, view.hover == hit);
+                for quad in button {
+                    clip(quads, quad);
+                }
+            }
+        },
         NebulaSettingsSection::Ssh => {
             // Saved hosts are the primary SSH surface. The compact fixed pitch
             // keeps every two-line card separate without turning it into a tall tile.
@@ -3469,28 +3863,75 @@ pub(super) fn push_quads(
                     geometry.ssh_host_row_h,
                 );
                 let (rx, ry, rw, rh) = row;
-                // The host row is an unframed setting surface. Spacing and the
-                // compact trailing actions provide hierarchy without a card outline.
-                clip(
-                    quads,
-                    UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.accent_soft),
+                // 2026-08-11 用户裁定：常态不画卡片底。原来每行都铺 accent_soft，
+                // 五行灰块叠起来就是「灰蒙蒙」的来源。底色只在 hover 时出现，
+                // 静态列表回到纯净的白底 + 文字层级。
+                let row_hovered = matches!(
+                    view.hover,
+                    SettingsHit::SshHostRow(i)
+                        | SettingsHit::SshHostConnect(i)
+                        | SettingsHit::SshHostEdit(i)
+                        | SettingsHit::SshHostHide(i)
+                        if i == index
                 );
+                if row_hovered {
+                    clip(
+                        quads,
+                        UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.hover),
+                    );
+                }
                 // 行左缘画主机的 OS 图标（文字 pass，os_icons 字形），不再是
                 // 状态环——2026-08-09 用户裁定：已保存主机要把图标显示出来。
                 // 主机模型依旧没有可靠的在线态，图标标注的是「这是哪台机器」，
                 // 不发明绿点。
-                for action in 0..3 {
-                    let rect = ssh_host_action_rect(row, scale, action);
-                    let hovered = match (action, view.hover) {
-                        (0, SettingsHit::SshHostConnect(i)) => i == index,
-                        (1, SettingsHit::SshHostEdit(i)) => i == index,
-                        (2, SettingsHit::SshHostHide(i)) => i == index,
-                        _ => false,
-                    };
-                    let mut button = Vec::new();
-                    widgets::push_outline_button(&mut button, rect, scale, &sk, hovered);
-                    for quad in button {
-                        clip(quads, quad);
+                //
+                // 三枚动作图标同样只在 hover 时显形，且不再套描边方框——方框
+                // 加文字常态吃掉右侧 180px，把主机名挤到一半宽。命中区始终存在
+                // （见 ssh_host_action_rect），只是墨迹不画。
+                if row_hovered {
+                    // 眼睛图标要挖空，挖空色必须是这一枚图标脚下的实际底色，
+                    // 否则半透明的 hover washes 叠起来会在瞳孔周围留一圈脏边。
+                    let row_bg = surface::over(sk.hover, sk.panel);
+                    for (action, icon) in [
+                        (0usize, icons::RowActionIcon::Connect),
+                        (1usize, icons::RowActionIcon::Edit),
+                        (2usize, icons::RowActionIcon::Hide),
+                    ] {
+                        let rect = ssh_host_action_rect(row, scale, action);
+                        let icon_hovered = match (action, view.hover) {
+                            (0, SettingsHit::SshHostConnect(i)) => i == index,
+                            (1, SettingsHit::SshHostEdit(i)) => i == index,
+                            (2, SettingsHit::SshHostHide(i)) => i == index,
+                            _ => false,
+                        };
+                        let (ink, cutout) = if icon_hovered {
+                            clip(
+                                quads,
+                                UiQuad::solid(
+                                    rect.0,
+                                    rect.1,
+                                    rect.2,
+                                    rect.3,
+                                    s(tokens::radius::CONTROL),
+                                    sk.hover_strong,
+                                ),
+                            );
+                            (sk.ink.into(), surface::over(sk.hover_strong, row_bg))
+                        } else {
+                            (sk.ink_dim.into(), row_bg)
+                        };
+                        let mut ink_quads = Vec::new();
+                        icons::push_row_action_icon(
+                            &mut ink_quads,
+                            icon,
+                            rect,
+                            scale,
+                            ink,
+                            cutout,
+                        );
+                        for quad in ink_quads {
+                            clip(quads, quad);
+                        }
                     }
                 }
             }
@@ -4094,6 +4535,7 @@ pub(super) fn push_quads(
     let content_h = match section {
         NebulaSettingsSection::Appearance => geometry.appearance_h,
         NebulaSettingsSection::Profiles => geometry.profiles_h,
+        NebulaSettingsSection::Providers => geometry.providers_h,
         NebulaSettingsSection::Ssh => geometry.ssh_h,
         NebulaSettingsSection::Proxy => geometry.proxy_h,
         NebulaSettingsSection::Interaction => geometry.interaction_h,
@@ -4133,7 +4575,7 @@ pub(super) fn push_popup_quads(
     let Some(dropdown) = view.dropdown else { return };
     let s = |v: f32| v * scale;
     let sk = settings_skin(view.theme);
-    let geometry = settings_geometry(
+    let mut geometry = settings_geometry(
         size,
         scale,
         view.area,
@@ -4144,6 +4586,7 @@ pub(super) fn push_popup_quads(
         proxy_pane_state(view),
         keymap_pane_state_view(view),
     );
+    fit_provider_rows(&mut geometry, view.providers.len());
     // 背景色专用浮层：色板网格 + hex 输入框（几何与 hit 同源）。
     if dropdown == SettingsDropdown::BackgroundColor {
         if view.section != NebulaSettingsSection::Appearance {
@@ -4410,12 +4853,38 @@ pub(super) fn draw_popup_text(
                     continue;
                 };
                 match view.fonts.get(slot) {
-                    // 比例字体在固定终端网格下可能重叠或截断：标出来，但不拦着
-                    // 用户选——这是知情选择，不是错误。
-                    Some(family) if view.font_proportional.contains(&family.to_lowercase()) => {
-                        format!("{family}   {}", language.pick("· 非等宽", "· not monospaced"))
+                    // 候选行用**这个字体自己的字形**画自己的名字：选之前就看见
+                    // 选之后的样子（WYSIWYG）。chrome 文本按单元格步进排版，
+                    // 所以比例字体在这里的挤压与它进终端网格后完全一致——预览
+                    // 不美化，正因如此才有判断价值。
+                    //
+                    // 元信息（「· 非等宽」）留在界面字体里：那是我们的批注，
+                    // 不是字体样本，跟着候选字体变形只会让人误读。
+                    Some(family) => {
+                        let max_chars = (((rx + rw - s(28.0)) - text_x).max(cell_w) / cell_w)
+                            .floor()
+                            .max(1.0) as usize;
+                        let color = if selected == Some(index) { sk.accent } else { sk.ink };
+                        let name = truncate_tab_label(family, max_chars);
+                        let previewing = gc.begin_preview_face(family);
+                        r.draw_chrome_text(size, text_x, ty, color, &name, gc);
+                        if previewing {
+                            gc.end_preview_face();
+                        }
+                        // 非等宽批注接在名字之后，按已画列数让位。
+                        if view.font_proportional.contains(&family.to_lowercase()) {
+                            let cols: usize =
+                                name.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() + 3;
+                            let note_x = text_x + cols as f32 * cell_w;
+                            let note = language.pick("· 非等宽", "· not monospaced");
+                            let note_cols: usize =
+                                note.chars().map(|c| c.width().unwrap_or(0)).sum();
+                            if note_x + note_cols as f32 * cell_w < rx + rw - s(28.0) {
+                                r.draw_chrome_text(size, note_x, ty, sk.ink_dim, note, gc);
+                            }
+                        }
+                        continue;
                     },
-                    Some(family) => family.clone(),
                     // 倒数第二行是过滤切换，最后一行是导入。
                     None if slot == view.fonts.len() => {
                         if view.font_show_all {
@@ -4613,6 +5082,19 @@ fn row_label_with_right_inset(
     let s = |val: f32| val * scale;
     let cell_w = size.cell_width();
     let cell_h = size.cell_height();
+    if rh >= s(56.0) {
+        // 窄屏行明确分为两层：标签占稳定的上基线，值或控件独占下一层。
+        let label_y = ry + s(9.0);
+        r.draw_chrome_text(size, rx + s(16.0), label_y, sk.ink, k, gc);
+        let value_left = rx + s(16.0);
+        let value_right = rx + rw - s(16.0) - right_inset;
+        let max_chars = ((value_right - value_left).max(cell_w) / cell_w).floor().max(1.0) as usize;
+        let value = truncate_tab_label(v, max_chars);
+        if !value.is_empty() {
+            r.draw_chrome_text(size, value_left, ry + s(9.0) + cell_h, value_ink, &value, gc);
+        }
+        return;
+    }
     let ty = ry + (rh - cell_h) / 2.0;
     r.draw_chrome_text(size, rx + s(16.0), ty, sk.ink, k, gc);
     let value_left = rx + rw * 0.42;
@@ -4638,7 +5120,7 @@ pub(super) fn draw_text(
     let sk = settings_skin(view.theme);
     let language = view.language;
 
-    let geometry = settings_geometry(
+    let mut geometry = settings_geometry(
         size,
         scale,
         view.area,
@@ -4649,6 +5131,7 @@ pub(super) fn draw_text(
         proxy_pane_state(view),
         keymap_pane_state_view(view),
     );
+    fit_provider_rows(&mut geometry, view.providers.len());
     // Kept for parity with [`draw_popup_text`]'s shell icons; the base page
     // currently stages no icon draws of its own.
     let icon_draws = Vec::new();
@@ -4660,6 +5143,9 @@ pub(super) fn draw_text(
     let clip_top = geometry.content_top;
     let clip_bot = py + ph - s(6.0);
     let visible = |ry: f32, rh: f32| ry >= clip_top && ry + rh <= clip_bot;
+    let row_text_y = |ry: f32, rh: f32| {
+        if geometry.stacked_rows { ry + s(9.0) } else { ry + (rh - cell_h) / 2.0 }
+    };
     // 通用 combobox 的当前值：控件框内左对齐，截断在 chevron 井之前。
     let combobox_value = |r: &mut Renderer,
                           gc: &mut GlyphCache,
@@ -4690,23 +5176,29 @@ pub(super) fn draw_text(
     let title_h = s(26.0);
 
     let section = view.section;
-    // Brand title in the sidebar header. Drawn large via the scaled-glyph path
-    // so it anchors the panel instead of reading as just another row label.
-    draw_big_text(
-        r,
-        gc,
-        size,
-        scale,
-        px + s(24.0),
-        py + s(22.0),
-        1.5,
-        sk.ink_strong,
-        language.pick("Nebula 设置", "Nebula Settings"),
-    );
-    if section != NebulaSettingsSection::Ssh {
+    // Brand title in the sidebar header. The compact rail is intentionally
+    // icon-only, so a long brand label must not compete with the content.
+    if !geometry.compact_nav {
+        draw_big_text(
+            r,
+            gc,
+            size,
+            scale,
+            px + s(24.0),
+            py + s(22.0),
+            1.5,
+            sk.ink_strong,
+            language.pick("Nebula 设置", "Nebula Settings"),
+        );
+    }
+    if !matches!(section, NebulaSettingsSection::Ssh | NebulaSettingsSection::Providers) {
         // Center the reset label inside its ghost button.
         let (rx, ry, rw, rh) = geometry.reset;
-        let label = language.pick("恢复默认设置", "Restore defaults");
+        let label = if geometry.stacked_rows {
+            "↶"
+        } else {
+            language.pick("恢复默认设置", "Restore defaults")
+        };
         let cols: usize = label.chars().map(|c| c.width().unwrap_or(0)).sum();
         let tx = rx + (rw - cols as f32 * cell_w) / 2.0;
         r.draw_chrome_text(size, tx, ry + (rh - cell_h) / 2.0, sk.ink_dim, label, gc);
@@ -4715,6 +5207,9 @@ pub(super) fn draw_text(
     // from the quad/hit passes, so hidden entries cannot leave ghost text.
     for (nav_section, nx, ny, _nw, nh) in geometry.nav {
         if nav_section == NebulaSettingsSection::Backup && !SHOW_BACKUP_SETTINGS {
+            continue;
+        }
+        if geometry.compact_nav {
             continue;
         }
         let active = nav_section == section;
@@ -4735,21 +5230,23 @@ pub(super) fn draw_text(
         );
     }
     let group_text_h = cell_h * 0.78;
-    for (rect, label) in geometry
-        .nav_groups
-        .into_iter()
-        .zip([language.pick("连接", "Connections"), language.pick("系统", "System")])
-    {
-        r.draw_ui_text(
-            size,
-            rect.0 + s(10.0),
-            widgets::centered_y(rect.1, rect.3, group_text_h),
-            0.78,
-            sk.ink_dim,
-            nebula_terminal::term::cell::Flags::empty(),
-            label,
-            gc,
-        );
+    if !geometry.compact_nav {
+        for (rect, label) in geometry
+            .nav_groups
+            .into_iter()
+            .zip([language.pick("连接", "Connections"), language.pick("系统", "System")])
+        {
+            r.draw_ui_text(
+                size,
+                rect.0 + s(10.0),
+                widgets::centered_y(rect.1, rect.3, group_text_h),
+                0.78,
+                sk.ink_dim,
+                nebula_terminal::term::cell::Flags::empty(),
+                label,
+                gc,
+            );
+        }
     }
     // Content header: the big section title alone. (No subtitle — the nav
     // label + title already say everything; the old dim sentence only added
@@ -4892,7 +5389,7 @@ pub(super) fn draw_text(
                 r.draw_chrome_text(
                     size,
                     st_x + s(16.0),
-                    st_y + (st_h - cell_h) / 2.0,
+                    row_text_y(st_y, st_h),
                     sk.ink,
                     language.pick("跟随系统明暗模式", "Follow system appearance"),
                     gc,
@@ -5011,10 +5508,16 @@ pub(super) fn draw_text(
             }
             let (_, image_opacity_y, _, image_opacity_h) = geometry.background_image_opacity_row;
             if visible(image_opacity_y, image_opacity_h) {
+                let stacked = image_opacity_h >= s(56.0);
+                let text_y = if stacked {
+                    image_opacity_y + s(9.0)
+                } else {
+                    image_opacity_y + (image_opacity_h - cell_h) / 2.0
+                };
                 r.draw_chrome_text(
                     size,
                     geometry.background_image_opacity_row.0 + s(16.0),
-                    image_opacity_y + (image_opacity_h - cell_h) / 2.0,
+                    text_y,
                     sk.ink,
                     language.pick("背景图像不透明度", "Background image opacity"),
                     gc,
@@ -5024,10 +5527,17 @@ pub(super) fn draw_text(
                     image_opacity_v.chars().map(|c| c.width().unwrap_or(0)).sum();
                 r.draw_chrome_text(
                     size,
-                    geometry.background_image_opacity_slider.0
-                        - s(10.0)
-                        - image_opacity_cols as f32 * cell_w,
-                    image_opacity_y + (image_opacity_h - cell_h) / 2.0,
+                    if stacked {
+                        geometry.background_image_opacity_row.0
+                            + geometry.background_image_opacity_row.2
+                            - s(16.0)
+                            - image_opacity_cols as f32 * cell_w
+                    } else {
+                        geometry.background_image_opacity_slider.0
+                            - s(10.0)
+                            - image_opacity_cols as f32 * cell_w
+                    },
+                    text_y,
                     sk.accent,
                     &image_opacity_v,
                     gc,
@@ -5116,7 +5626,7 @@ pub(super) fn draw_text(
                 r.draw_chrome_text(
                     size,
                     lr_x + s(16.0),
-                    lr_y + (lr_h - cell_h) / 2.0,
+                    row_text_y(lr_y, lr_h),
                     sk.ink,
                     language.pick("语言", "Language"),
                     gc,
@@ -5134,7 +5644,7 @@ pub(super) fn draw_text(
                 r.draw_chrome_text(
                     size,
                     dr_x + s(16.0),
-                    dr_y + (dr_h - cell_h) / 2.0,
+                    row_text_y(dr_y, dr_h),
                     sk.ink,
                     language.pick("界面外观", "Appearance"),
                     gc,
@@ -5148,10 +5658,12 @@ pub(super) fn draw_text(
                 );
             }
             if visible(or_y, or_h) {
+                let stacked = or_h >= s(56.0);
+                let text_y = if stacked { or_y + s(9.0) } else { or_y + (or_h - cell_h) / 2.0 };
                 r.draw_chrome_text(
                     size,
                     or_x + s(16.0),
-                    or_y + (or_h - cell_h) / 2.0,
+                    text_y,
                     sk.ink,
                     language.pick("终端正文不透明度", "Terminal content opacity"),
                     gc,
@@ -5160,8 +5672,12 @@ pub(super) fn draw_text(
                 let opacity_cols: usize = opacity_v.chars().map(|c| c.width().unwrap_or(0)).sum();
                 r.draw_chrome_text(
                     size,
-                    geometry.opacity_slider.0 - s(10.0) - opacity_cols as f32 * cell_w,
-                    or_y + (or_h - cell_h) / 2.0,
+                    if stacked {
+                        or_x + geometry.opacity_row.2 - s(16.0) - opacity_cols as f32 * cell_w
+                    } else {
+                        geometry.opacity_slider.0 - s(10.0) - opacity_cols as f32 * cell_w
+                    },
+                    text_y,
                     sk.accent,
                     &opacity_v,
                     gc,
@@ -5175,7 +5691,7 @@ pub(super) fn draw_text(
                 r.draw_chrome_text(
                     size,
                     br_x + s(16.0),
-                    br_y + (br_h - cell_h) / 2.0,
+                    row_text_y(br_y, br_h),
                     sk.ink,
                     language.pick("背景模糊", "Blur behind window"),
                     gc,
@@ -5313,7 +5829,8 @@ pub(super) fn draw_text(
 
                 let (dx, dy, dw, dh) = geometry.startup_directory;
                 // 与"默认 Shell / 终端字体"同一右对齐基线；有清除按钮时向左避让。
-                let value_left = dx + dw * 0.42;
+                let stacked = dh >= s(56.0);
+                let value_left = if stacked { dx + s(16.0) } else { dx + dw * 0.42 };
                 let value_right = if view.startup_directory.is_some() {
                     geometry.startup_directory_clear.0 - s(12.0)
                 } else {
@@ -5328,10 +5845,11 @@ pub(super) fn draw_text(
                 let value_cols: usize = value.chars().map(|c| c.width().unwrap_or(0)).sum();
                 let value_x = (value_right - value_cols as f32 * cell_w).max(value_left);
 
+                let value_y = if stacked { dy + s(9.0) + cell_h } else { dy + (dh - cell_h) / 2.0 };
                 r.draw_chrome_text(
                     size,
-                    value_x,
-                    dy + (dh - cell_h) / 2.0,
+                    if stacked { value_left } else { value_x },
+                    value_y,
                     if view.startup_directory.is_some() { sk.accent } else { sk.ink_dim },
                     &value,
                     gc,
@@ -5460,6 +5978,185 @@ pub(super) fn draw_text(
                 );
             }
         },
+        NebulaSettingsSection::Providers => {
+            let (list_x, list_y, _, _) = geometry.provider_row0;
+            if visible(group_y(list_y), title_h) {
+                section_title(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    list_x,
+                    group_y(list_y),
+                    language.pick("AI 供应商", "AI providers"),
+                );
+            }
+            if visible(geometry.provider_add.1, geometry.provider_add.3) {
+                draw_button_label(
+                    r,
+                    gc,
+                    size,
+                    geometry.provider_add,
+                    language.pick("＋ 添加", "+ Add"),
+                    if view.hover == SettingsHit::ProviderAdd { sk.accent } else { sk.ink },
+                );
+            }
+            for (index, provider) in view.providers.iter().enumerate() {
+                let row = (
+                    geometry.provider_row0.0,
+                    geometry.provider_row0.1 + index as f32 * geometry.provider_row_h,
+                    geometry.provider_row0.2,
+                    geometry.provider_row_h,
+                );
+                if !visible(row.1, row.3) {
+                    continue;
+                }
+                let active = provider.id == view.active_provider_id;
+                let value = if provider.model.is_empty() {
+                    provider.kind.label()
+                } else {
+                    provider.model.as_str()
+                };
+                row_label_with_right_inset(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    row,
+                    &provider.name,
+                    value,
+                    if active { sk.accent } else { sk.ink_dim },
+                    s(76.0),
+                );
+                let enabled = provider.enabled;
+                let state = if enabled {
+                    language.pick("启用", "On")
+                } else {
+                    language.pick("关闭", "Off")
+                };
+                let cols = state.chars().map(|ch| ch.width().unwrap_or(1)).sum::<usize>();
+                r.draw_chrome_text(
+                    size,
+                    row.0 + row.2 - s(16.0) - cols as f32 * cell_w,
+                    widgets::centered_y(row.1, row.3, cell_h),
+                    if enabled { sk.accent } else { sk.ink_dim },
+                    state,
+                    gc,
+                );
+            }
+
+            for (index, row) in geometry.provider_fields.iter().enumerate() {
+                if !visible(row.1, row.3) {
+                    continue;
+                }
+                let label = match index {
+                    0 => language.pick("供应商名称", "Provider name"),
+                    1 => language.pick("备注", "Note"),
+                    2 => language.pick("官网链接", "Website"),
+                    3 => language.pick("API 请求地址", "API endpoint"),
+                    4 => language.pick("默认模型", "Default model"),
+                    _ => "API Key",
+                };
+                row_label(r, gc, size, scale, &sk, *row, label, "", sk.ink);
+                let input = sync_input_rect(*row, scale);
+                let max_cols = ((input.2 - s(24.0)).max(cell_w) / cell_w).floor() as usize;
+                let (value, placeholder, _) = provider_input_display(view, index, max_cols.max(1));
+                r.draw_chrome_text(
+                    size,
+                    input.0 + s(12.0),
+                    widgets::centered_y(input.1, input.3, cell_h),
+                    if placeholder { sk.ink_dim } else { sk.ink },
+                    &value,
+                    gc,
+                );
+            }
+            for (row, label, detail) in [
+                (
+                    geometry.provider_codex_goals,
+                    "Codex Goal mode",
+                    language.pick("写入 features.goals", "Writes features.goals"),
+                ),
+                (
+                    geometry.provider_codex_remote,
+                    language.pick("Codex 远程压缩", "Codex remote compaction"),
+                    language.pick(
+                        "写入 features.remote_compaction_v2",
+                        "Writes features.remote_compaction_v2",
+                    ),
+                ),
+            ] {
+                if visible(row.1, row.3) {
+                    row_label(r, gc, size, scale, &sk, row, label, detail, sk.ink_dim);
+                }
+            }
+            if visible(geometry.provider_codex_apply.1, geometry.provider_codex_apply.3) {
+                row_label_with_right_inset(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.provider_codex_apply,
+                    language.pick("Codex 配置", "Codex configuration"),
+                    language.pick("写入 auth.json / config.toml", "Write auth.json / config.toml"),
+                    sk.ink_dim,
+                    s(164.0),
+                );
+                draw_button_label(
+                    r,
+                    gc,
+                    size,
+                    row_action_rect(geometry.provider_codex_apply, scale, 148.0),
+                    language.pick("应用到 Codex", "Apply to Codex"),
+                    if view.hover == SettingsHit::ProviderApplyCodex { sk.accent } else { sk.ink },
+                );
+            }
+            for (hit, rect, label) in [
+                (
+                    SettingsHit::ProviderDelete,
+                    geometry.provider_delete,
+                    language.pick("删除", "Delete"),
+                ),
+                (
+                    SettingsHit::ProviderTest,
+                    geometry.provider_test,
+                    language.pick("测试连接", "Test"),
+                ),
+                (SettingsHit::ProviderSave, geometry.provider_save, language.pick("保存", "Save")),
+            ] {
+                if visible(rect.1, rect.3) {
+                    draw_button_label(
+                        r,
+                        gc,
+                        size,
+                        rect,
+                        label,
+                        if view.hover == hit { sk.accent } else { sk.ink },
+                    );
+                }
+            }
+            if let Some((message, is_error)) = &view.provider_status {
+                let y = geometry.provider_save.1 + geometry.provider_save.3 + s(8.0);
+                if visible(y, cell_h) {
+                    let max_cols = (geometry.provider_row0.2 / cell_w).floor().max(1.0) as usize;
+                    let message = truncate_tab_label(message, max_cols);
+                    r.draw_chrome_text(
+                        size,
+                        geometry.provider_delete.0,
+                        y,
+                        if *is_error {
+                            Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b)
+                        } else {
+                            sk.accent
+                        },
+                        &message,
+                        gc,
+                    );
+                }
+            }
+        },
         NebulaSettingsSection::Ssh => {
             let (host_x, host_y, host_w, _host_h) = geometry.ssh_host_row0;
             if visible(group_y(host_y), title_h) {
@@ -5532,25 +6229,8 @@ pub(super) fn draw_text(
                 if host.pinned {
                     r.draw_chrome_text(size, row.0 + s(27.0), title_y, sk.accent, "\u{eab4}", gc);
                 }
-                for (action, label) in [
-                    (0usize, language.pick("连接", "Connect")),
-                    (1usize, language.pick("编辑", "Edit")),
-                    (2usize, language.pick("隐藏", "Hide")),
-                ] {
-                    let ink = match (action, view.hover) {
-                        (0, SettingsHit::SshHostConnect(i)) if i == index => sk.accent,
-                        (1, SettingsHit::SshHostEdit(i)) if i == index => sk.accent,
-                        (2, SettingsHit::SshHostHide(i)) if i == index => sk.accent,
-                        _ => sk.ink_dim,
-                    };
-                    draw_centered_action(
-                        r,
-                        gc,
-                        ssh_host_action_rect(row, scale, action),
-                        label,
-                        ink,
-                    );
-                }
+                // 三枚动作图标改由 quad pass 绘制（icons::push_row_action_icon），
+                // 文字 pass 这里不再画「连接 / 编辑 / 隐藏」三个词。
             }
             if visible(geometry.ssh_import_config.1, geometry.ssh_import_config.3) {
                 row_label(
@@ -6490,8 +7170,96 @@ mod tests {
         assert_eq!(import.2, STANDARD_ROW_ACTION_W * 1.5);
     }
 
+    #[test]
+    fn settings_geometry_releases_navigation_width_before_stacking_rows() {
+        let size = proxy_test_size();
+        let geometry = |width| {
+            settings_geometry(
+                &size,
+                1.0,
+                (0.0, 0.0, width, 900.0),
+                0.0,
+                0,
+                0,
+                Density::Standard,
+                ProxyPaneState::default(),
+                KeymapPaneState::default(),
+            )
+        };
+
+        let wide = geometry(1200.0);
+        assert!(!wide.compact_nav);
+        assert!(!wide.stacked_rows);
+        assert_eq!(wide.sidebar.2, 196.0);
+
+        let medium = geometry(800.0);
+        assert!(medium.compact_nav);
+        assert!(!medium.stacked_rows);
+        assert_eq!(medium.sidebar.2, 64.0);
+        assert!(medium.content.0 + medium.content.2 <= medium.popup.0 + medium.popup.2);
+
+        let narrow = geometry(600.0);
+        assert!(narrow.compact_nav);
+        assert!(narrow.stacked_rows);
+        assert!(narrow.shell.3 >= 72.0);
+        let shell_control = widgets::combobox_rect(narrow.shell, 1.0);
+        assert!(shell_control.0 >= narrow.shell.0);
+        assert!(shell_control.0 + shell_control.2 <= narrow.shell.0 + narrow.shell.2);
+        assert!(shell_control.1 > narrow.shell.1 + 24.0);
+    }
+
     fn proxy_test_size() -> SizeInfo {
         SizeInfo::new(1400.0, 1000.0, 10.0, 20.0, 0.0, 0.0, false)
+    }
+
+    #[test]
+    fn provider_geometry_tracks_every_persisted_custom_entry() {
+        let size = proxy_test_size();
+        let area = (0.0, 0.0, 1200.0, 1800.0);
+        let provider_count = 14;
+        let mut geometry = settings_geometry(
+            &size,
+            1.0,
+            area,
+            0.0,
+            0,
+            0,
+            Density::Standard,
+            ProxyPaneState::default(),
+            KeymapPaneState::default(),
+        );
+        let old_field_y = geometry.provider_fields[0].1;
+        super::fit_provider_rows(&mut geometry, provider_count);
+        assert_eq!(geometry.provider_row_count, provider_count);
+        assert_eq!(geometry.provider_fields[0].1, old_field_y + geometry.provider_row_h * 8.0);
+
+        let last_row = (
+            geometry.provider_row0.0,
+            geometry.provider_row0.1 + 13.0 * geometry.provider_row_h,
+            geometry.provider_row0.2,
+            geometry.provider_row_h,
+        );
+        let hit = settings_hit(
+            &size,
+            1.0,
+            area,
+            last_row.0 + 20.0,
+            last_row.1 + last_row.3 * 0.5,
+            true,
+            NebulaSettingsSection::Providers,
+            0.0,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Density::Standard,
+            ProxyPaneState::default(),
+            KeymapPaneState::default(),
+            provider_count,
+        );
+        assert_eq!(hit, SettingsHit::ProviderRow(13));
     }
 
     #[test]
@@ -6593,6 +7361,7 @@ mod tests {
                 Density::Standard,
                 proxy,
                 KeymapPaneState::default(),
+                6,
             )
         };
         assert_eq!(hit(geometry.ssh_proxy_scan_button), SettingsHit::SshProxyRescan);
@@ -6662,6 +7431,7 @@ mod tests {
                 Density::Standard,
                 proxy,
                 KeymapPaneState::default(),
+                6,
             )
         };
         let (protocol, address) = ssh_proxy_manual_controls(geometry.ssh_proxy_expand, 1.0);

@@ -370,7 +370,13 @@ pub(crate) fn toggle_rect(row: Rect, scale: f32) -> Rect {
     let tw = s(48.0);
     let th = s(26.0);
     let tx = rx + rw - s(ROW_INSET) - tw;
-    (tx, centered_y(ry, rh, th), tw, th)
+    if rh >= s(56.0) {
+        // 窄屏设置行把标签放在控件上方；开关仍靠右下，既保留熟悉的点击位置，
+        // 又把上层完整宽度留给标签。
+        (tx, ry + rh - s(34.0), tw, th)
+    } else {
+        (tx, centered_y(ry, rh, th), tw, th)
+    }
 }
 
 /// Per-frame visual state for the liquid toggle. The four values stay
@@ -450,7 +456,11 @@ pub(crate) fn push_toggle(
 pub(crate) fn combobox_rect(row: Rect, scale: f32) -> Rect {
     let s = |v: f32| v * scale;
     let (rx, ry, rw, rh) = row;
-    let cw = s(220.0).min(rw * 0.46).max(s(132.0));
+    if rh >= s(56.0) {
+        let cw = (rw - s(32.0)).max(s(1.0));
+        return (rx + s(16.0), ry + rh - s(38.0), cw, s(32.0).min(rh));
+    }
+    let cw = s(220.0).min(rw * 0.46).max(s(132.0).min(rw.max(s(1.0))));
     let ch = s(CONTROL_H);
     (rx + rw - s(ROW_INSET) - cw, ry + (rh - ch) / 2.0, cw, ch)
 }
@@ -649,7 +659,7 @@ pub(crate) fn spinner_rects(row: Rect, scale: f32) -> (Rect, Rect, Rect) {
     let s = |v: f32| v * scale;
     let (rx, ry, rw, rh) = row;
     let ch = s(CONTROL_H);
-    let cy = ry + (rh - ch) / 2.0;
+    let cy = if rh >= s(56.0) { ry + rh - s(38.0) } else { ry + (rh - ch) / 2.0 };
     let button_w = s(32.0);
     let value_w = s(56.0);
     let gap = s(4.0);

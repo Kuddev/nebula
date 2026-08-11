@@ -1,7 +1,6 @@
 //! Application event protocol shared by the event loop, PTY proxies, and UI actions.
 
 use std::path::PathBuf;
-#[cfg(unix)]
 use std::sync::Arc;
 
 #[cfg(unix)]
@@ -89,8 +88,20 @@ pub enum EventType {
         message: String,
         elapsed_ms: u64,
     },
+    /// 设置→供应商的后台连通性测试结果。provider_id 与 request_id
+    /// 共同防止切换供应商后旧请求覆盖当前状态。
+    ProviderTestDone {
+        request_id: u64,
+        provider_id: String,
+        ok: bool,
+        message: String,
+        elapsed_ms: u64,
+    },
     NebulaTick,
     NebulaAttach,
+    /// Authenticated runtime API request. The transport waits on the embedded
+    /// one-shot response while all state mutation stays on this event thread.
+    RuntimeControl(Arc<crate::runtime_api::RuntimeDispatch>),
     NebulaResizeSettled,
     SshDeleteUndoExpired,
     /// 设置页捕获到新的快速终端全局快捷键。

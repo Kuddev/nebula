@@ -161,6 +161,67 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        // 设置→供应商输入框：普通元数据可编辑，API Key 只在提交瞬间
+        // 写入系统凭据管理器，随后立即清空草稿，避免明文残留在 UI 状态。
+        if self.ctx.display().settings_open() && self.ctx.display().nebula_provider_focus.is_some()
+        {
+            let ctrl = mods.control_key();
+            let shift = mods.shift_key();
+            match &key.logical_key {
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => {
+                    self.ctx.display().commit_provider_field();
+                },
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.display().provider_sync_inputs();
+                    self.ctx.display().nebula_provider_focus = None;
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().provider_field_backspace();
+                },
+                Key::Named(NamedKey::Delete) => {
+                    self.ctx.display().provider_field_delete_forward();
+                },
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.ctx.display().provider_field_move(false, shift);
+                },
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.ctx.display().provider_field_move(true, shift);
+                },
+                Key::Named(NamedKey::Home) => {
+                    self.ctx.display().provider_field_jump(false, shift);
+                },
+                Key::Named(NamedKey::End) => {
+                    self.ctx.display().provider_field_jump(true, shift);
+                },
+                Key::Named(NamedKey::Space) if !ctrl => {
+                    self.ctx.display().provider_field_push(' ');
+                },
+                Key::Character(text) if ctrl => match text.as_str() {
+                    "a" | "A" => self.ctx.display().provider_field_select_all(),
+                    "c" | "C" => {
+                        if let Some(selected) = self.ctx.display().provider_field_selected_text() {
+                            self.ctx.clipboard_mut().store(ClipboardType::Clipboard, selected);
+                        }
+                    },
+                    "x" | "X" => {
+                        if let Some(selected) = self.ctx.display().provider_field_cut() {
+                            self.ctx.clipboard_mut().store(ClipboardType::Clipboard, selected);
+                        }
+                    },
+                    "v" | "V" => {
+                        let paste = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                        self.ctx.display().provider_field_paste(&paste);
+                    },
+                    _ => {},
+                },
+                Key::Character(text) => self.ctx.display().provider_field_paste(text.as_str()),
+                _ => {},
+            }
+            self.ctx.display().update_settings_ime_cursor();
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // 设置→SSH→代理的输入框：完整文本字段行为（Enter/Tab 提交、
         // Esc 还原、选区/导航/剪贴板与其他输入框一致）。
         if self.ctx.display().settings_open() && self.ctx.display().nebula_ssh_proxy_focus.is_some()

@@ -126,6 +126,8 @@ pub trait ActionContext<T: EventListener> {
 
     fn nebula_proxy_test(&mut self) {}
 
+    fn nebula_provider_test(&mut self) {}
+
     fn nebula_ssh_test(&mut self) {}
     /// Flush a settings-page quick-terminal hotkey change to the global
     /// processor after the display has accepted a captured combo.

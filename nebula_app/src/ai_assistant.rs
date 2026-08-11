@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use log::{info, warn};
 use winit::event_loop::EventLoopProxy;
+use zeroize::Zeroizing;
 
+use crate::ai_providers::ProviderKind;
 use crate::event::{Event, EventType};
 
 /// 配置文件名（位于 `nebula_data_dir()`）。独立于 `nebula_settings.txt`：
@@ -100,18 +102,68 @@ pub fn config_path() -> PathBuf {
     crate::display::nebula_data_dir().join(CONFIG_FILE)
 }
 
-/// API key 的来源：`NEBULA_AI_KEY` → `OPENAI_API_KEY`。凭据管理器存储随
-/// 阶段三的配置中心一起来——没有录入 UI 的加密存储是空中楼阁。
-fn api_key() -> Option<String> {
+/// Legacy compatibility when no enabled provider is selected in Settings.
+fn fallback_api_key() -> Option<Zeroizing<String>> {
     for var in ["NEBULA_AI_KEY", "OPENAI_API_KEY"] {
         if let Ok(key) = std::env::var(var) {
             let key = key.trim().to_owned();
             if !key.is_empty() {
-                return Some(key);
+                return Some(Zeroizing::new(key));
             }
         }
     }
     None
+}
+
+struct RequestTarget {
+    kind: ProviderKind,
+    base_url: String,
+    model: String,
+    full_url: bool,
+    key: Zeroizing<String>,
+}
+
+fn request_target(cfg: &AssistantConfig) -> Option<RequestTarget> {
+    let store = crate::ai_providers::load();
+    if let Some(provider) = crate::ai_providers::active_enabled(&store) {
+        let key = if provider.kind.requires_api_key() {
+            let secret = match crate::ai_providers::load_api_key(&provider.id) {
+                Ok(Some(secret)) => secret,
+                Ok(None) => {
+                    info!("assistant: active provider has no credential");
+                    return None;
+                },
+                Err(err) => {
+                    warn!("assistant: credential lookup failed: {err}");
+                    return None;
+                },
+            };
+            match String::from_utf8(secret) {
+                Ok(key) => Zeroizing::new(key),
+                Err(_) => {
+                    warn!("assistant: provider credential is not valid UTF-8");
+                    return None;
+                },
+            }
+        } else {
+            Zeroizing::new(String::new())
+        };
+        return Some(RequestTarget {
+            kind: provider.kind,
+            base_url: provider.base_url.clone(),
+            model: provider.model.clone(),
+            full_url: provider.full_url,
+            key,
+        });
+    }
+
+    Some(RequestTarget {
+        kind: ProviderKind::OpenAi,
+        base_url: cfg.base_url.clone(),
+        model: cfg.model.clone(),
+        full_url: false,
+        key: fallback_api_key()?,
+    })
 }
 
 /// Exit codes that mean "the user stopped it", not "it failed":
@@ -265,8 +317,8 @@ pub fn spawn_fix_request(proxy: EventLoopProxy<Event>, cfg: AssistantConfig, req
 /// 请求失败时不打断终端工作流，但必须把原因写进日志，否则静默功能失效后
 /// 没有可供诊断的证据。
 fn request_fix(cfg: &AssistantConfig, req: &FixRequest) -> Option<AiFix> {
-    let Some(key) = api_key() else {
-        info!("assistant: no API key (NEBULA_AI_KEY / OPENAI_API_KEY / credential store)");
+    let Some(target) = request_target(cfg) else {
+        info!("assistant: no usable enabled provider or fallback API key");
         return None;
     };
     let user = format!(
@@ -278,27 +330,72 @@ fn request_fix(cfg: &AssistantConfig, req: &FixRequest) -> Option<AiFix> {
         if req.branch.is_empty() { "-" } else { &req.branch },
         req.output_tail,
     );
-    let body = serde_json::json!({
-        "model": cfg.model,
-        "temperature": 0.2,
-        "max_tokens": 300,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ],
-    });
+    let content = send_model_request(&target, &user)?;
+    parse_fix(&content)
+}
+
+fn send_model_request(target: &RequestTarget, user: &str) -> Option<String> {
     let config =
         ureq::config::Config::builder().timeout_global(Some(Duration::from_secs(30))).build();
     let agent: ureq::Agent = config.new_agent();
-    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let mut response =
-        match agent.post(&url).header("Authorization", &format!("Bearer {key}")).send_json(&body) {
-            Ok(response) => response,
-            Err(err) => {
-                warn!("assistant: request failed: {err}");
-                return None;
+    let base = target.base_url.trim_end_matches('/');
+    let (url, body) = match target.kind {
+        ProviderKind::Anthropic => (
+            if target.full_url { base.to_owned() } else { format!("{base}/messages") },
+            serde_json::json!({
+                "model": target.model,
+                "system": SYSTEM_PROMPT,
+                "temperature": 0.2,
+                "max_tokens": 300,
+                "messages": [{"role": "user", "content": user}],
+            }),
+        ),
+        ProviderKind::Google => {
+            let model = target.model.trim().trim_start_matches("models/");
+            (
+                if target.full_url {
+                    base.to_owned()
+                } else {
+                    format!("{base}/models/{model}:generateContent")
+                },
+                serde_json::json!({
+                    "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                    "contents": [{"role": "user", "parts": [{"text": user}]}],
+                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 300},
+                }),
+            )
+        },
+        ProviderKind::AzureOpenAi => (
+            if target.full_url {
+                base.to_owned()
+            } else {
+                format!("{base}/{}/chat/completions?api-version=2024-10-21", target.model)
             },
-        };
+            openai_body(&target.model, user),
+        ),
+        _ => (
+            if target.full_url { base.to_owned() } else { format!("{base}/chat/completions") },
+            openai_body(&target.model, user),
+        ),
+    };
+    let mut request = agent.post(&url);
+    let bearer = Zeroizing::new(format!("Bearer {}", target.key.as_str()));
+    request = match target.kind {
+        ProviderKind::Anthropic => request
+            .header("x-api-key", target.key.as_str())
+            .header("anthropic-version", "2023-06-01"),
+        ProviderKind::Google => request.header("x-goog-api-key", target.key.as_str()),
+        ProviderKind::AzureOpenAi => request.header("api-key", target.key.as_str()),
+        _ if target.key.is_empty() => request,
+        _ => request.header("Authorization", bearer.as_str()),
+    };
+    let mut response = match request.send_json(&body) {
+        Ok(response) => response,
+        Err(err) => {
+            warn!("assistant: request failed: {err}");
+            return None;
+        },
+    };
     let value: serde_json::Value = match response.body_mut().read_json() {
         Ok(value) => value,
         Err(err) => {
@@ -306,8 +403,25 @@ fn request_fix(cfg: &AssistantConfig, req: &FixRequest) -> Option<AiFix> {
             return None;
         },
     };
-    let content = value["choices"][0]["message"]["content"].as_str()?;
-    parse_fix(content)
+    match target.kind {
+        ProviderKind::Anthropic => value["content"][0]["text"].as_str().map(str::to_owned),
+        ProviderKind::Google => {
+            value["candidates"][0]["content"]["parts"][0]["text"].as_str().map(str::to_owned)
+        },
+        _ => value["choices"][0]["message"]["content"].as_str().map(str::to_owned),
+    }
+}
+
+fn openai_body(model: &str, user: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "temperature": 0.2,
+        "max_tokens": 300,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ],
+    })
 }
 
 /// Extract the `{...}` object from the model's reply (models love to wrap

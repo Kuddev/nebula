@@ -79,6 +79,7 @@ unicode-width = "0.2.0"
 # Assistant fix requests: blocking HTTP on a background OS thread (spec 001).
 # ureq over reqwest: no tokio coupling for one short JSON POST, small tree.
 ureq = { version = "3", features = ["json"] }
+zeroize = "1"
 winit = { version = "0.30.9", default-features = false, features = ["rwh_06", "serde"] }
 global-hotkey = "0.8.0"
 getrandom = "0.3.3"

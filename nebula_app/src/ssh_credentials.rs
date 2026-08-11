@@ -375,6 +375,24 @@ pub fn forget_password(destination: &str) -> std::io::Result<()> {
     windows_store::delete_password(destination)
 }
 
+/// Generic credential-manager primitives used by non-SSH features. Keeping
+/// the target namespace at the caller makes the secret store reusable without
+/// duplicating Windows API code or ever exposing the value to UI state.
+#[cfg(windows)]
+pub fn store_generic_secret(target: &str, secret: &[u8]) -> std::io::Result<()> {
+    windows_store::save_secret(target, "Nebula", secret)
+}
+
+#[cfg(windows)]
+pub fn load_generic_secret(target: &str) -> std::io::Result<Option<Vec<u8>>> {
+    windows_store::load_secret(target)
+}
+
+#[cfg(windows)]
+pub fn delete_generic_secret(target: &str) -> std::io::Result<()> {
+    windows_store::delete_secret(target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

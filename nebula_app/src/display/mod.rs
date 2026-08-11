@@ -1632,7 +1632,8 @@ pub struct Display {
     nebula_font_popup_scroll: usize,
     /// 字体弹层滚动条拖拽中的抓取偏移（thumb 内的 y 距离）。
     nebula_font_popup_drag: Option<f32>,
-    /// 当前正在拖选的设置文本框：0=字体搜索，1=按键搜索，2=SSH 代理。
+    /// 当前正在拖选的设置文本框：0=字体搜索，1=按键搜索，2=SSH 代理，
+    /// 3=AI 供应商。
     /// 统一在 Display 保存拖选状态，避免鼠标离开输入框后选区停止更新。
     nebula_settings_text_drag: Option<(u8, usize)>,
     /// 目录中被判定为非等宽的族（小写名）。界面据此给比例字体警告——
@@ -1668,6 +1669,16 @@ pub struct Display {
     /// 最近一次同步动作的结果 `(message, is_error)`，画在按钮行下方。
     pub(crate) nebula_sync_status: Option<(String, bool)>,
     nebula_sync_busy: bool,
+    /// Provider metadata is safe to keep in the settings model; API keys stay
+    /// behind the OS credential manager and only their masked hint is copied.
+    nebula_providers: crate::ai_providers::ProviderStore,
+    pub(crate) nebula_provider_inputs: [String; 6],
+    nebula_provider_cursors: [ui::text_field::TextCursor; 6],
+    pub(crate) nebula_provider_focus: Option<usize>,
+    pub(crate) nebula_provider_status: Option<(String, bool)>,
+    nebula_provider_test_request: Option<crate::ai_providers::ProviderTestRequest>,
+    nebula_provider_test_seq: u64,
+    nebula_provider_codex_confirm: Option<String>,
     nebula_backup_selection: crate::encrypted_backup::BackupSelection,
     pub(crate) nebula_backup_status: Option<(String, bool)>,
     /// 聚焦的 SSH 代理输入框（0=代理地址 1=绕过列表；正文直接编辑
@@ -2308,6 +2319,14 @@ impl Display {
             nebula_sync_secret_set: [false; 2],
             nebula_sync_status: None,
             nebula_sync_busy: false,
+            nebula_providers: crate::ai_providers::load(),
+            nebula_provider_inputs: Default::default(),
+            nebula_provider_cursors: Default::default(),
+            nebula_provider_focus: None,
+            nebula_provider_status: None,
+            nebula_provider_test_request: None,
+            nebula_provider_test_seq: 0,
+            nebula_provider_codex_confirm: None,
             nebula_backup_selection: crate::encrypted_backup::BackupSelection::default(),
             nebula_backup_status: None,
             nebula_ssh_proxy_focus: None,
@@ -2374,6 +2393,14 @@ impl Display {
                 self.request_local_proxy_scan();
             }
         }
+        if section == NebulaSettingsSection::Providers {
+            if self.nebula_providers.active_id.is_empty() {
+                if let Some(provider) = self.nebula_providers.providers.first() {
+                    self.nebula_providers.active_id = provider.id.clone();
+                }
+            }
+            self.provider_sync_inputs();
+        }
         self.update_settings_ime_cursor();
     }
 
@@ -2395,6 +2422,7 @@ impl Display {
             self.nebula_density,
             self.ssh_proxy_pane_state(),
             self.keymap_pane_state(),
+            self.nebula_providers.providers.len(),
         );
         let next = (self.nebula_settings_scroll + delta).clamp(0.0, max);
         if (next - self.nebula_settings_scroll).abs() > f32::EPSILON {
@@ -3399,6 +3427,12 @@ impl Display {
                 .nebula_startup_directory
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned()),
+            providers: self.nebula_providers.providers.clone(),
+            active_provider_id: self.nebula_providers.active_id.clone(),
+            provider_inputs: self.nebula_provider_inputs.clone(),
+            provider_cursors: self.nebula_provider_cursors.clone(),
+            provider_focus: self.nebula_provider_focus,
+            provider_status: self.nebula_provider_status.clone(),
             font_family: self.nebula_font_family.clone(),
             font_size_px: self.font_size.as_px() / self.window.scale_factor as f32,
             fonts: self.nebula_font_families.clone(),
@@ -3665,10 +3699,18 @@ impl Display {
 
     pub fn set_settings_tab_active(&mut self, active: bool) {
         if self.nebula_settings_open == active {
+            if active {
+                // 再次聚焦设置页时布尔状态不会变化，但仍要维持非 Shell
+                // 页面不占用文件抽屉宽度的布局约束。
+                self.close_side_panel_for_special_tab();
+            }
             return;
         }
         self.nebula_settings_open = active;
-        self.nebula_special_tab_active = active;
+        if active {
+            self.nebula_special_tab_active = true;
+            self.close_side_panel_for_special_tab();
+        }
         if !active {
             if self.nebula_backup_operation.is_some() {
                 self.cancel_backup_operation();
@@ -3695,6 +3737,7 @@ impl Display {
     pub fn set_special_tab_active(&mut self, active: bool) {
         self.nebula_special_tab_active = active;
         if active {
+            self.close_side_panel_for_special_tab();
             // Keep queued messages for the next terminal tab, but invalidate
             // terminal-only close geometry while a special tab is visible.
             self.nebula_message_close = None;
@@ -3706,6 +3749,21 @@ impl Display {
             }
             self.nebula_settings_open = false;
         }
+    }
+
+    /// 文档/设置页接管内容区时关闭右侧抽屉。这里只隐藏抽屉而不销毁 SFTP
+    /// 控制器，切回 SSH 标签仍可复用连接，同时非终端页面不再被抽屉挤压。
+    fn close_side_panel_for_special_tab(&mut self) {
+        if !self.nebula_side_panel.open {
+            return;
+        }
+        self.nebula_side_panel.search_unfocus(false);
+        self.nebula_side_panel.commit_unfocus();
+        self.nebula_side_panel.open = false;
+        let size = PhysicalSize::new(self.size_info.width() as u32, self.size_info.height() as u32);
+        self.pending_update.set_dimensions(size);
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
     }
 
     pub fn set_ui_language(&mut self, preference: LanguagePreference) {
@@ -4228,6 +4286,7 @@ impl Display {
                 self.keymap_search_place(x - text_x, cell_w, true);
             },
             2 => self.ssh_proxy_field_place(index, x, true),
+            3 => self.provider_field_place(index, x, true),
             _ => return false,
         }
         self.update_settings_ime_cursor();
@@ -4313,6 +4372,26 @@ impl Display {
                 cell_w,
                 field.3.max(cell_h),
             );
+        } else if let Some(index) = self.nebula_provider_focus {
+            if let Some(field) = settings::provider_input_rect(
+                &self.size_info,
+                scale,
+                self.terminal_card_rect(),
+                self.nebula_settings_scroll,
+                self.nebula_hidden_hosts.len(),
+                self.ssh_host_count(),
+                self.nebula_density,
+                self.nebula_providers.providers.len(),
+                index,
+            ) {
+                let text = &self.nebula_provider_inputs[index];
+                self.window.set_ime_cursor_area_px(
+                    field.0 + 12.0 * scale + caret(text, &self.nebula_provider_cursors[index]),
+                    field.1,
+                    cell_w,
+                    field.3.max(cell_h),
+                );
+            }
         }
     }
 
@@ -4810,6 +4889,366 @@ impl Display {
             },
             _ => {},
         }
+    }
+
+    // ---- 设置→供应商 ----
+
+    fn provider_edit_index(&self) -> Option<usize> {
+        self.nebula_providers
+            .providers
+            .iter()
+            .position(|provider| provider.id == self.nebula_providers.active_id)
+    }
+
+    pub(crate) fn provider_sync_inputs(&mut self) {
+        let Some(index) = self.provider_edit_index() else {
+            self.nebula_provider_inputs = Default::default();
+            self.nebula_provider_cursors = Default::default();
+            self.nebula_provider_focus = None;
+            return;
+        };
+        let provider = &self.nebula_providers.providers[index];
+        self.nebula_provider_inputs[0] = provider.name.clone();
+        self.nebula_provider_inputs[1] = provider.note.clone();
+        self.nebula_provider_inputs[2] = provider.website_url.clone();
+        self.nebula_provider_inputs[3] = provider.base_url.clone();
+        self.nebula_provider_inputs[4] = provider.model.clone();
+        self.nebula_provider_inputs[5].clear();
+        for (text, cursor) in
+            self.nebula_provider_inputs.iter().zip(self.nebula_provider_cursors.iter_mut())
+        {
+            cursor.collapse_to_end(text);
+        }
+        self.nebula_provider_focus = None;
+    }
+
+    pub fn provider_select(&mut self, index: usize) {
+        let Some(id) =
+            self.nebula_providers.providers.get(index).map(|provider| provider.id.clone())
+        else {
+            return;
+        };
+        self.commit_provider_field();
+        self.nebula_providers.active_id = id;
+        self.nebula_provider_test_seq = self.nebula_provider_test_seq.wrapping_add(1);
+        self.nebula_provider_test_request = None;
+        self.nebula_provider_codex_confirm = None;
+        self.nebula_provider_status = None;
+        let _ = crate::ai_providers::save(&self.nebula_providers);
+        self.provider_sync_inputs();
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_add(&mut self) {
+        self.commit_provider_field();
+        let id = crate::ai_providers::next_custom_id(&self.nebula_providers);
+        let provider =
+            crate::ai_providers::AiProvider::preset(crate::ai_providers::ProviderKind::Custom, &id);
+        self.nebula_providers.active_id = id;
+        self.nebula_providers.providers.push(provider);
+        self.nebula_provider_codex_confirm = None;
+        self.nebula_provider_status = None;
+        self.provider_sync_inputs();
+        let _ = crate::ai_providers::save(&self.nebula_providers);
+        self.nebula_provider_codex_confirm = None;
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_toggle_codex_goals(&mut self) {
+        let Some(index) = self.provider_edit_index() else { return };
+        let provider = &mut self.nebula_providers.providers[index];
+        provider.codex_goals = !provider.codex_goals;
+        self.nebula_provider_codex_confirm = None;
+        let _ = crate::ai_providers::save(&self.nebula_providers);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_toggle_codex_remote(&mut self) {
+        let Some(index) = self.provider_edit_index() else { return };
+        let provider = &mut self.nebula_providers.providers[index];
+        provider.codex_remote_compaction = !provider.codex_remote_compaction;
+        self.nebula_provider_codex_confirm = None;
+        let _ = crate::ai_providers::save(&self.nebula_providers);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_apply_codex(&mut self) {
+        self.commit_provider_field();
+        let Some(index) = self.provider_edit_index() else { return };
+        let provider = self.nebula_providers.providers[index].clone();
+        if self.nebula_provider_codex_confirm.as_deref() != Some(provider.id.as_str()) {
+            self.nebula_provider_codex_confirm = Some(provider.id);
+            self.nebula_provider_status = Some((
+                self.ui_language()
+                    .pick(
+                        "再次点击确认：API Key 将明文写入 Codex auth.json（原文件会备份）",
+                        "Click again: the API key will be written to Codex auth.json in plaintext (with backup)",
+                    )
+                    .to_owned(),
+                false,
+            ));
+            self.pending_update.dirty = true;
+            return;
+        }
+        self.nebula_provider_codex_confirm = None;
+        self.nebula_provider_status = Some(match crate::codex_config::apply_provider(&provider) {
+            Ok(path) => (
+                self.ui_language().pick("已应用到 Codex：", "Applied to Codex: ").to_owned()
+                    + &path.display().to_string(),
+                false,
+            ),
+            Err(error) => (error, true),
+        });
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_toggle_enabled(&mut self) {
+        let Some(index) = self.provider_edit_index() else { return };
+        self.nebula_providers.providers[index].enabled =
+            !self.nebula_providers.providers[index].enabled;
+        let _ = crate::ai_providers::save(&self.nebula_providers);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn focus_provider_field(&mut self, index: usize) {
+        if index >= self.nebula_provider_inputs.len() {
+            return;
+        }
+        if self.nebula_provider_focus != Some(index) {
+            self.commit_provider_field();
+            self.nebula_provider_focus = Some(index);
+            self.nebula_provider_cursors[index]
+                .collapse_to_end(&self.nebula_provider_inputs[index]);
+            self.pending_update.dirty = true;
+        }
+    }
+
+    pub fn provider_field_push(&mut self, ch: char) {
+        let mut buffer = [0; 4];
+        self.provider_field_paste(ch.encode_utf8(&mut buffer));
+    }
+
+    pub fn provider_field_backspace(&mut self) {
+        let Some(index) = self.nebula_provider_focus else { return };
+        self.nebula_provider_cursors[index].backspace(&mut self.nebula_provider_inputs[index]);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_field_paste(&mut self, text: &str) {
+        let Some(index) = self.nebula_provider_focus else { return };
+        let available = 512usize.saturating_sub(self.nebula_provider_inputs[index].chars().count());
+        let clean: String = text
+            .chars()
+            .filter(|ch| !ch.is_control() && (index == 1 || !ch.is_whitespace()))
+            .take(available)
+            .collect();
+        self.nebula_provider_cursors[index].insert(&mut self.nebula_provider_inputs[index], &clean);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_field_delete_forward(&mut self) {
+        let Some(index) = self.nebula_provider_focus else { return };
+        self.nebula_provider_cursors[index].delete_forward(&mut self.nebula_provider_inputs[index]);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_field_move(&mut self, forward: bool, extend: bool) {
+        let Some(index) = self.nebula_provider_focus else { return };
+        let text = self.nebula_provider_inputs[index].clone();
+        self.nebula_provider_cursors[index].step(&text, forward, extend);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_field_jump(&mut self, to_end: bool, extend: bool) {
+        let Some(index) = self.nebula_provider_focus else { return };
+        let text = self.nebula_provider_inputs[index].clone();
+        self.nebula_provider_cursors[index].jump(&text, to_end, extend);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_field_select_all(&mut self) {
+        let Some(index) = self.nebula_provider_focus else { return };
+        let text = self.nebula_provider_inputs[index].clone();
+        self.nebula_provider_cursors[index].select_all(&text);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_field_selected_text(&self) -> Option<String> {
+        let index = self.nebula_provider_focus?;
+        // Secret fields accept paste but never expose cleartext to Clipboard.
+        (index != 5).then(|| {
+            self.nebula_provider_cursors[index].selected_text(&self.nebula_provider_inputs[index])
+        })?
+    }
+
+    pub fn provider_field_cut(&mut self) -> Option<String> {
+        let selected = self.provider_field_selected_text()?;
+        self.provider_field_backspace();
+        Some(selected)
+    }
+
+    pub fn provider_field_place(&mut self, index: usize, pointer_x: f32, extend: bool) {
+        if self.nebula_provider_focus != Some(index) {
+            return;
+        }
+        let scale = self.window.scale_factor as f32;
+        let Some(field) = settings::provider_input_rect(
+            &self.size_info,
+            scale,
+            self.terminal_card_rect(),
+            self.nebula_settings_scroll,
+            self.nebula_hidden_hosts.len(),
+            self.ssh_host_count(),
+            self.nebula_density,
+            self.nebula_providers.providers.len(),
+            index,
+        ) else {
+            return;
+        };
+        let text = self.nebula_provider_inputs[index].clone();
+        let at = ui::text_field::index_at(
+            &text,
+            pointer_x - field.0 - 12.0 * scale,
+            self.size_info.cell_width(),
+        );
+        if extend {
+            self.nebula_provider_cursors[index].extend_to(&text, at);
+        } else {
+            self.nebula_provider_cursors[index].place(&text, at);
+        }
+        self.pending_update.dirty = true;
+    }
+
+    pub fn begin_provider_field_drag(&mut self, index: usize, pointer_x: f32, extend: bool) {
+        self.provider_field_place(index, pointer_x, extend);
+        self.nebula_settings_text_drag = Some((3, index));
+        self.update_settings_ime_cursor();
+    }
+
+    pub fn commit_provider_field(&mut self) {
+        let Some(field) = self.nebula_provider_focus.take() else { return };
+        let Some(index) = self.provider_edit_index() else { return };
+        let provider = &mut self.nebula_providers.providers[index];
+        let value = self.nebula_provider_inputs[field].trim().to_owned();
+        match field {
+            0 => provider.name = value,
+            1 => provider.note = value,
+            2 => provider.website_url = value,
+            3 => provider.base_url = value,
+            4 => provider.model = value,
+            5 => {
+                if !value.is_empty() {
+                    match crate::ai_providers::save_api_key(&provider.id, &value) {
+                        Ok(hint) => {
+                            provider.api_key_set = true;
+                            provider.api_key_hint = hint;
+                            self.nebula_provider_status = Some((
+                                self.ui_language()
+                                    .pick(
+                                        "API Key 已保存到凭据管理器",
+                                        "API key saved to the credential manager",
+                                    )
+                                    .to_owned(),
+                                false,
+                            ));
+                        },
+                        Err(err) => self.nebula_provider_status = Some((err.to_string(), true)),
+                    }
+                }
+                self.nebula_provider_inputs[5].clear();
+            },
+            _ => {},
+        }
+        let _ = crate::ai_providers::save(&self.nebula_providers);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_save(&mut self) {
+        self.commit_provider_field();
+        if let Err(err) = crate::ai_providers::save(&self.nebula_providers) {
+            self.nebula_provider_status = Some((err.to_string(), true));
+        } else {
+            self.nebula_provider_status = Some((
+                self.ui_language().pick("供应商配置已保存", "Provider saved").to_owned(),
+                false,
+            ));
+        }
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_test(&mut self) {
+        self.commit_provider_field();
+        let Some(index) = self.provider_edit_index() else { return };
+        let provider = self.nebula_providers.providers[index].clone();
+        let valid_url =
+            provider.base_url.starts_with("http://") || provider.base_url.starts_with("https://");
+        if !valid_url
+            || provider.model.trim().is_empty()
+            || (provider.kind.requires_api_key() && !provider.api_key_set)
+        {
+            self.nebula_provider_status = Some((
+                self.ui_language()
+                    .pick(
+                        "请填写有效的请求地址、模型并保存 API Key",
+                        "Enter an endpoint and model, then save an API key",
+                    )
+                    .to_owned(),
+                true,
+            ));
+            self.pending_update.dirty = true;
+            return;
+        }
+        self.nebula_provider_test_seq = self.nebula_provider_test_seq.wrapping_add(1);
+        let request_id = self.nebula_provider_test_seq;
+        self.nebula_provider_test_request =
+            Some(crate::ai_providers::ProviderTestRequest { request_id, provider });
+        self.nebula_provider_status = Some((
+            self.ui_language().pick("正在测试连接…", "Testing connection...").to_owned(),
+            false,
+        ));
+        self.pending_update.dirty = true;
+    }
+
+    pub(crate) fn take_provider_test_request(
+        &mut self,
+    ) -> Option<crate::ai_providers::ProviderTestRequest> {
+        self.nebula_provider_test_request.take()
+    }
+
+    pub(crate) fn provider_test_done(
+        &mut self,
+        request_id: u64,
+        provider_id: &str,
+        ok: bool,
+        message: &str,
+        elapsed_ms: u64,
+    ) {
+        if request_id != self.nebula_provider_test_seq
+            || provider_id != self.nebula_providers.active_id
+        {
+            return;
+        }
+        self.nebula_provider_status = Some((format!("{message} · {elapsed_ms} ms"), !ok));
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_delete(&mut self) {
+        let Some(index) = self.provider_edit_index() else { return };
+        let id = self.nebula_providers.providers[index].id.clone();
+        self.nebula_provider_test_seq = self.nebula_provider_test_seq.wrapping_add(1);
+        self.nebula_provider_test_request = None;
+        self.nebula_provider_codex_confirm = None;
+        let _ = crate::ai_providers::delete_api_key(&id);
+        self.nebula_providers.providers.remove(index);
+        self.nebula_providers.active_id =
+            self.nebula_providers.providers.first().map(|p| p.id.clone()).unwrap_or_default();
+        self.provider_sync_inputs();
+        let _ = crate::ai_providers::save(&self.nebula_providers);
+        self.pending_update.dirty = true;
+    }
+
+    pub fn provider_count(&self) -> usize {
+        self.nebula_providers.providers.len()
     }
 
     /// Esc：丢弃当前草稿并失焦（url/username 还原为文件值）。
@@ -6326,6 +6765,8 @@ impl Display {
     }
 
     fn settings_toggle_targets(&self) -> [bool; settings::SETTINGS_TOGGLE_COUNT] {
+        let provider =
+            self.provider_edit_index().and_then(|index| self.nebula_providers.providers.get(index));
         [
             self.nebula_follow_system_theme,
             self.nebula_ghost_enabled,
@@ -6340,6 +6781,8 @@ impl Display {
             self.nebula_restore_session,
             self.nebula_sync_auto_pull,
             self.nebula_background_image_cover_chrome,
+            provider.is_some_and(|provider| provider.codex_goals),
+            provider.is_some_and(|provider| provider.codex_remote_compaction),
         ]
     }
 

@@ -799,6 +799,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.display().nebula_density,
                     self.ctx.display().ssh_proxy_pane_state(),
                     self.ctx.display().keymap_pane_state(),
+                    self.ctx.display().provider_count(),
                 );
                 // Keep the primary-button target for the settings renderer's
                 // HTML-like toggle active state until the matching release.
@@ -824,6 +825,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 // 视为编辑结束（点另一个框由 focus_sync_field 内部提交）。
                 if !matches!(settings_hit, crate::display::SettingsHit::SyncInput(_)) {
                     self.ctx.display().commit_sync_field();
+                }
+                if !matches!(settings_hit, crate::display::SettingsHit::ProviderField(_)) {
+                    self.ctx.display().commit_provider_field();
                 }
                 // SSH 代理输入框同规矩：点到别处即失焦落盘。
                 if !matches!(settings_hit, crate::display::SettingsHit::SshProxyInput(_)) {
@@ -1064,6 +1068,60 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::SshAddHost => {
                         self.ctx.display().open_ssh_editor();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderAdd => {
+                        self.ctx.display().provider_add();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderRow(index) => {
+                        self.ctx.display().provider_select(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderField(index) => {
+                        self.ctx.display().focus_provider_field(index);
+                        let extend = self.ctx.modifiers().state().shift_key();
+                        self.ctx.display().begin_provider_field_drag(index, x, extend);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderCodexGoalsToggle => {
+                        self.ctx.display().provider_toggle_codex_goals();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderCodexRemoteToggle => {
+                        self.ctx.display().provider_toggle_codex_remote();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderApplyCodex => {
+                        self.ctx.display().provider_apply_codex();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderSave => {
+                        self.ctx.display().provider_save();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderTest => {
+                        self.ctx.display().provider_test();
+                        self.ctx.nebula_provider_test();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderDelete => {
+                        self.ctx.display().provider_delete();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::ProviderEnableToggle(index) => {
+                        self.ctx.display().provider_select(index);
+                        self.ctx.display().provider_toggle_enabled();
                         self.ctx.mark_dirty();
                         return;
                     },

@@ -29,10 +29,12 @@ use nebula_terminal::tty;
 
 mod ai_assistant;
 mod ai_hook;
+mod ai_providers;
 mod ai_sessions;
 mod atomic_file;
 mod cli;
 mod clipboard;
+mod codex_config;
 mod config;
 mod config_cli;
 mod daemon;
@@ -53,8 +55,6 @@ mod math;
 mod message_bar;
 mod migrate;
 mod motion;
-#[cfg(windows)]
-mod mux;
 mod nebula_history;
 mod notify;
 #[cfg(windows)]
@@ -64,6 +64,7 @@ mod platform;
 mod polling;
 mod process_tree;
 mod renderer;
+mod runtime_api;
 mod scheduler;
 mod session;
 mod shell_detect;
@@ -138,6 +139,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     match options.subcommands {
+        Some(Subcommands::Ctl(options)) => runtime_api::run_cli(options)?,
         #[cfg(unix)]
         Some(Subcommands::Msg(options)) => msg(options)?,
         Some(Subcommands::Migrate(options)) => migrate::migrate(options),
@@ -232,7 +234,7 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
         let plain_launch = !options.daemon
             && options.window_options.terminal_options.working_directory.is_none()
             && options.window_options.terminal_options.command().is_none();
-        if plain_launch && mux::try_attach_existing() {
+        if plain_launch && runtime_api::try_attach_existing() {
             return Ok(());
         }
     }
@@ -327,13 +329,21 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
         log_file: log_cleanup,
     };
 
-    // Event processor.
-    let mut processor = Processor::new(config, options, &window_event_loop, native_window_stages);
+    // The server and event processor share only an immutable snapshot hub;
+    // every runtime mutation still crosses the typed winit event protocol.
+    let runtime_hub = runtime_api::RuntimeHub::new();
+    let mut processor = Processor::new(
+        config,
+        options,
+        &window_event_loop,
+        native_window_stages,
+        runtime_hub.clone(),
+    );
 
-    // Serve mux attach requests (window re-attach / single instance) for the
-    // lifetime of the event loop; dropping it removes the port file.
-    #[cfg(windows)]
-    let _mux_server = mux::MuxServer::spawn(window_event_loop.create_proxy());
+    // Serve both the legacy attach verb and the versioned runtime API for the
+    // lifetime of the event loop; dropping it removes the discovery file.
+    let _runtime_server =
+        runtime_api::RuntimeServer::spawn(window_event_loop.create_proxy(), runtime_hub);
 
     // Start event loop and block until shutdown.
     let result = processor.run(window_event_loop);
