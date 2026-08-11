@@ -98,6 +98,10 @@ pub struct GlyphCache {
     /// their draws; see [`Self::begin_ui_domain`].
     ui_domain: bool,
 
+    /// The terminal face displaced by an active [`Self::begin_preview_face`],
+    /// restored on `end_preview_face`. `None` outside a preview draw.
+    preview_restore: Option<FontKey>,
+
     /// Whether to use the built-in font for box drawing characters.
     builtin_box_drawing: bool,
 
@@ -150,6 +154,49 @@ impl GlyphCache {
         rasterizer.load_font(&description, size).is_ok()
     }
 
+    /// Load a system font for WYSIWYG preview rendering without changing the
+    /// configured terminal font. Returns the `FontKey` on success so the caller
+    /// can temporarily swap `Self::font_key` for drawing.
+    ///
+    /// 字体目录混了系统族与导入的私有族（`font_catalog`），所以两条集合都
+    /// 要试：`load_font` 只查系统集合，导入的字体活在私有 DirectWrite
+    /// 集合里，只有 `load_embedded_font` 找得到。
+    fn preview_font_key(&mut self, family: &str) -> Option<FontKey> {
+        let description = FontDesc::new(
+            family,
+            Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+        );
+        let key = self.rasterizer.load_font(&description, self.ui_font_size).ok();
+        #[cfg(windows)]
+        let key = key.or_else(|| {
+            self.rasterizer
+                .load_embedded_font(family, Slant::Normal, Weight::Normal, self.ui_font_size)
+                .ok()
+        });
+        key
+    }
+
+    /// 接下来的 chrome 文本改用 `family` 的真实字形绘制——字体选择器的行内
+    /// 预览（WYSIWYG）。返回 `false` 表示这个族当前加载不了，调用方照常用
+    /// 界面字体画：预览缺一行好过整行空白。
+    ///
+    /// 缓存键 [`GlyphKey`] 带 `font_key`，各族字形互不覆盖；`load_glyph` 的
+    /// 溢出压缩照旧生效，于是预览呈现的正是**选中之后**的真实效果（比例
+    /// 字体在固定网格里的挤压也如实展示）。必须与 [`Self::end_preview_face`]
+    /// 配对。
+    pub fn begin_preview_face(&mut self, family: &str) -> bool {
+        let Some(key) = self.preview_font_key(family) else { return false };
+        self.preview_restore = Some(self.font_key);
+        self.font_key = key;
+        true
+    }
+
+    pub fn end_preview_face(&mut self) {
+        if let Some(key) = self.preview_restore.take() {
+            self.font_key = key;
+        }
+    }
+
     pub fn new(mut rasterizer: Rasterizer, font: &Font) -> Result<GlyphCache, crossfont::Error> {
         let (regular, bold, italic, bold_italic) = Self::compute_font_keys(font, &mut rasterizer)?;
         #[cfg(windows)]
@@ -182,6 +229,7 @@ impl GlyphCache {
             metrics_size: font.size(),
             ui_metrics: metrics,
             ui_domain: false,
+            preview_restore: None,
             builtin_box_drawing: font.builtin_box_drawing,
             wide_bold_use_regular: true,
         })

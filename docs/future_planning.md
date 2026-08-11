@@ -581,6 +581,115 @@ inline 公式尤其明显：`$x^2$` 的上标让 `metrics.height` 约 1.2 cell�
 - 显示活跃 agent 数、已等待时长和最近一次状态变化，并提供可立即停止等待的操作。
 - 增加状态机测试，覆盖零 agent、部分完成、全部完成、超时、用户打断及 agent 异常退出。
 
+## 字体集合统一：系统族与导入族合并为一个 DirectWrite 集合
+
+来源：2026-08-11 用户提问「系统族和导入的私有族难道不能统一吗」。做字体选择器
+行内预览（WYSIWYG）时暴露的架构裂缝。
+
+### 现状：两个互不相通的集合
+
+`renderer/text/font_rasterizer.rs` 的 `Rasterizer` 同时持有两套字体来源：
+
+- `system: crossfont::Rasterizer` — crossfont 0.8.1 的 `DirectWriteRasterizer::new`
+  里硬初始化 `FontCollection::system()`，**没有暴露注入点**，改不了它查哪个集合。
+- `private_collection: FontCollection` — 内置 Maple 加用户导入的字体文件，
+  经 `CustomFontCollectionLoaderImpl` 组装。
+
+两者从不合并，因为 DirectWrite 的 `IDWriteFontCollection` 是**不可变对象**：没有
+`AddFontFile` 之类的接口，不能往系统集合里追加。
+
+于是每个「按族名拿字体」的操作都得写两遍查找：
+
+- `load_preferred_font`：先 `system.load_font`，失败落 `load_embedded_font`
+- `preview_font_key`（`glyph_cache.rs`，本次 WYSIWYG 新增）：同样的双路径
+- `family_loads` / `font_family_available`（`glyph_cache.rs`）：**只查系统集合**
+  —— 已知不一致，导入字体是走 `add_private_font` 那条独立分支验证的
+
+### 目标形态
+
+把系统字体文件与私有文件一起灌进一个 `CustomFontCollectionLoaderImpl`，得到单一
+合并集合，所有按族名的查找走一条路径。
+
+```
+合并 FontCollection
+├─ 系统字体文件（枚举出 FilePath）
+└─ 私有文件
+   ├─ 内置 Maple（include_bytes!）
+   └─ 用户导入的 .ttf / .otf
+```
+
+### 实现路线
+
+1. 枚举系统字体的**文件路径**。dwrote 0.11.5 没有包 `IDWriteFontSet`（`lib.rs`
+   导出里只有 `FontCollection` / `FontFile` / `FontFallback`），所以要么自己写
+   winapi 绑定拿 `GetSystemFontSet`，要么退用 `FontCollection::system()` 逐族
+   `create_font_face().get_files()`。后者不需要新绑定，但在装了几百个字体的机器上
+   是实打实的开销，必须懒加载 + 缓存（`system_font_families` 上已有同类告诫）。
+2. 用合并集合替换 `private_collection`，`load_embedded_font` 成为唯一族查找入口。
+3. 上面三处双路径塌缩成单路径。
+4. crossfont 的 `system` 字段仍要保留：它承载 OS 级 fallback（`MapCharacters`）
+   与 metrics，那部分不受集合合并影响。
+
+### 收益与风险
+
+**收益**：查找路径唯一；`family_loads` 的导入字体盲区自动消失；将来做可配置
+fallback 链（issue #33）时有一个统一的族命名空间可映射。
+
+**风险**：合并集合要持有全部系统字体文件的 `FontFile` 句柄，内存与首次构建耗时
+都会涨。必须实测装了 500+ 字体的机器上的冷启动数字，超过 ~50ms 就改后台线程
+预热 + 首帧回退双路径。
+
+### 关联
+
+issue #33 的三个洞里，「导入字体拿不到 OS fallback」（`rasterize_once` 走
+embedded 分支就绕开了 crossfont 的系统路径）在集合统一后**仍然存在**——那是
+fallback 链的问题，不是集合的问题，两件事分开做。
+
+## PowerShell 集成脚本末尾的 Clear-Host 会吞掉用户 $PROFILE 的输出
+
+来源：2026-08-11 修复「新增 $PROFILE 函数不生效」时发现的连带问题。已确认存在，
+但用户裁定先不动，等真有人反馈再定位。
+
+### 背景
+
+`nebula_terminal/src/tty/windows/mod.rs:956` 的默认 shell 曾硬编码 `-NoProfile`，
+导致用户 `$PROFILE` 里新增的函数在新建 tab 后不存在，而 Windows Terminal 正常。
+该参数已移除，并在 `mod.rs:1078` 加了回归测试
+`default_powershell_loads_the_user_profile_and_ends_with_the_integration` 守住。
+
+### 遗留问题
+
+`$PROFILE` 恢复加载之后，注入脚本 `NEBULA_PROMPT_PS1` 末尾的 `Clear-Host`
+（`mod.rs:693`）会在 profile 执行完之后清屏。因此用户 profile 里的欢迎语、
+fastfetch、oh-my-posh 横幅等**任何启动输出都会被抹掉**。
+
+WT 不清屏——它的 `defaults.json:41` 只写裸 `powershell.exe`，一个参数都不加，
+shell integration 靠用户自己往 `$PROFILE` 里写 OSC 133。我们选的是自动注入路线，
+那么注入就必须是「追加」而不是「替换」用户环境；`Clear-Host` 违背了这条。
+
+现象会是：用户报告「函数生效了，但我的 profile 输出没了」——这是第二个 issue，
+不是第一个的复发。
+
+### 待定的处理方向
+
+`Clear-Host` 当初的用途是盖掉 PowerShell 版本横幅，但默认参数里已经有 `-NoLogo`，
+两者职责重叠。可能的做法（未裁定）：
+
+- 直接删掉 `Clear-Host`，靠 `-NoLogo` 抑制横幅。风险是若 profile 本身有噪声输出，
+  首屏不再干净——但那本来就是用户自己的选择。
+- 只在检测到用户无 `$PROFILE` 时清屏。引入分支，且要判断三个 profile 路径
+  （AllUsers/CurrentUser × AllHosts/CurrentHost），复杂度不低。
+- 保留现状，在设置里给一个「启动时清屏」开关。
+
+倾向第一个：删掉最简单，且与 WT 语义一致。但要先确认 `-NoLogo` 在
+Windows PowerShell 5.1 和 pwsh 7 上都真的抑制了横幅（5.1 的 `-NoLogo` 历史上
+有过不生效的版本）。
+
+### 复现方式
+
+在 `$PROFILE` 里写一行 `Write-Host "hello from profile"`，新建 tab。函数可用，
+但这行输出看不到。
+
 ## 备忘
 
 - （空）
