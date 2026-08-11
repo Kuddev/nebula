@@ -300,6 +300,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 }
             }
 
+            // 中键点标签 = 关闭该标签（浏览器与主流终端的惯例）。命中关闭
+            // 按钮的中键同样生效——目标一致，没必要苛求落点。
+            if button == MouseButton::Middle {
+                let x = self.ctx.mouse().x as f32;
+                let y = self.ctx.mouse().y as f32;
+                match self.ctx.display().chrome_hit(x, y) {
+                    crate::display::ChromeHit::Tab(index)
+                    | crate::display::ChromeHit::TabClose(index) => {
+                        self.ctx.nebula_tab(crate::event::TabRequest::CloseIndex(index));
+                        return;
+                    },
+                    _ => {},
+                }
+            }
+
             if button == MouseButton::Left && self.ctx.display().context_menu_interactive() {
                 let x = self.ctx.mouse().x as f32;
                 let y = self.ctx.mouse().y as f32;
