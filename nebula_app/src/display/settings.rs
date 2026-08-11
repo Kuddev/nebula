@@ -3217,7 +3217,10 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         },
         // 加一：弹层第 0 行是搜索框，候选整体下移一行。
         SettingsDropdown::Font => {
-            view.fonts.iter().position(|family| family == &view.font_family).map(|slot| slot + 1)
+            // 多级 fallback 列表按主族高亮（issue #33）。
+            let primary =
+                crate::renderer::text::glyph_cache::primary_font_family(&view.font_family);
+            view.fonts.iter().position(|family| family == primary).map(|slot| slot + 1)
         },
         SettingsDropdown::BackgroundFit => {
             BACKGROUND_FIT_OPTIONS.iter().position(|fit| *fit == view.background_image_fit)

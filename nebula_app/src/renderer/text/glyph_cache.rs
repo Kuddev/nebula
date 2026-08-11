@@ -126,6 +126,18 @@ pub struct GlyphCache {
     pub wide_bold_use_regular: bool,
 }
 
+/// `font_family` 允许逗号分隔的多级列表（issue #33）：第一个是主族，其余
+/// 按序作为缺字形时的 fallback 层级，内置 Maple 永远垫底。空段丢弃。
+pub(crate) fn split_font_families(family: &str) -> Vec<&str> {
+    family.split(',').map(str::trim).filter(|family| !family.is_empty()).collect()
+}
+
+/// The face actually loaded as the primary terminal font — the first entry
+/// of the comma-separated list, or the raw string when there is no list.
+pub(crate) fn primary_font_family(family: &str) -> &str {
+    split_font_families(family).first().copied().unwrap_or(family)
+}
+
 impl GlyphCache {
     #[cfg(windows)]
     pub fn private_font_families(&self) -> Vec<String> {
@@ -158,35 +170,44 @@ impl GlyphCache {
         Self::font_family_available(&mut self.rasterizer, family, size)
     }
 
-    /// Check a system font family without changing the configured terminal font.
+    /// Check a font family without changing the configured terminal font.
+    /// 系统族与导入的私有族走同一条查找路径（`load_family_font`）。
     pub fn font_family_available(rasterizer: &mut Rasterizer, family: &str, size: Size) -> bool {
-        let description = FontDesc::new(
-            family,
-            Style::Description { slant: Slant::Normal, weight: Weight::Normal },
-        );
-        rasterizer.load_font(&description, size).is_ok()
+        #[cfg(windows)]
+        {
+            rasterizer.load_family_font(family, Slant::Normal, Weight::Normal, size).is_ok()
+        }
+        #[cfg(not(windows))]
+        {
+            let description = FontDesc::new(
+                family,
+                Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+            );
+            rasterizer.load_font(&description, size).is_ok()
+        }
     }
 
     /// Load a system font for WYSIWYG preview rendering without changing the
     /// configured terminal font. Returns the `FontKey` on success so the caller
     /// can temporarily swap `Self::font_key` for drawing.
     ///
-    /// 字体目录混了系统族与导入的私有族（`font_catalog`），所以两条集合都
-    /// 要试：`load_font` 只查系统集合，导入的字体活在私有 DirectWrite
-    /// 集合里，只有 `load_embedded_font` 找得到。
+    /// 字体目录混了系统族与导入的私有族（`font_catalog`），查找统一走
+    /// `load_family_font`（系统在前、私有兜底），与生效字体同一条路径。
     fn preview_font_key(&mut self, family: &str) -> Option<FontKey> {
-        let description = FontDesc::new(
-            family,
-            Style::Description { slant: Slant::Normal, weight: Weight::Normal },
-        );
-        let key = self.rasterizer.load_font(&description, self.ui_font_size).ok();
         #[cfg(windows)]
-        let key = key.or_else(|| {
+        {
             self.rasterizer
-                .load_embedded_font(family, Slant::Normal, Weight::Normal, self.ui_font_size)
+                .load_family_font(family, Slant::Normal, Weight::Normal, self.ui_font_size)
                 .ok()
-        });
-        key
+        }
+        #[cfg(not(windows))]
+        {
+            let description = FontDesc::new(
+                family,
+                Style::Description { slant: Slant::Normal, weight: Weight::Normal },
+            );
+            self.rasterizer.load_font(&description, self.ui_font_size).ok()
+        }
     }
 
     /// 接下来的 chrome 文本改用 `family` 的真实字形绘制——字体选择器的行内
@@ -285,41 +306,72 @@ impl GlyphCache {
     ) -> Result<(FontKey, FontKey, FontKey, FontKey), crossfont::Error> {
         let size = font.size();
 
+        // `family` 可以是逗号分隔的多级列表：主族承载四个样式 key 的加载，
+        // 其余族按序组成缺字形 fallback 链（issue #33）。
+        let normal_font = Self::primary_description(font.normal());
+        #[cfg(windows)]
+        let fallback_families: Vec<String> = split_font_families(&font.normal().family)
+            .into_iter()
+            .skip(1)
+            .map(str::to_owned)
+            .collect();
+
         // Load regular font.
-        let regular_desc = Self::make_desc(font.normal(), Slant::Normal, Weight::Normal);
+        let regular_desc = Self::make_desc(&normal_font, Slant::Normal, Weight::Normal);
 
         let regular = Self::load_regular_font(
             rasterizer,
             &regular_desc,
-            &font.normal().family,
+            &normal_font.family,
             Slant::Normal,
             Weight::Normal,
             size,
         )?;
+        #[cfg(windows)]
+        Self::register_fallback_chain(
+            rasterizer,
+            regular,
+            &fallback_families,
+            Slant::Normal,
+            Weight::Normal,
+            size,
+        );
 
         // Helper to load a description if it is not the `regular_desc`.
         let mut load_or_regular = |desc: FontDesc, family: &str, slant: Slant, weight: Weight| {
             if desc == regular_desc {
                 regular
             } else {
-                Self::load_regular_font(rasterizer, &desc, family, slant, weight, size)
-                    .unwrap_or(regular)
+                let key = Self::load_regular_font(rasterizer, &desc, family, slant, weight, size)
+                    .unwrap_or(regular);
+                #[cfg(windows)]
+                if key != regular {
+                    Self::register_fallback_chain(
+                        rasterizer,
+                        key,
+                        &fallback_families,
+                        slant,
+                        weight,
+                        size,
+                    );
+                }
+                key
             }
         };
 
         // Load bold font.
-        let bold_font = font.bold();
+        let bold_font = Self::primary_description(&font.bold());
         let bold_desc = Self::make_desc(&bold_font, Slant::Normal, Weight::Bold);
         let bold = load_or_regular(bold_desc, &bold_font.family, Slant::Normal, Weight::Bold);
 
         // Load italic font.
-        let italic_font = font.italic();
+        let italic_font = Self::primary_description(&font.italic());
         let italic_desc = Self::make_desc(&italic_font, Slant::Italic, Weight::Normal);
         let italic =
             load_or_regular(italic_desc, &italic_font.family, Slant::Italic, Weight::Normal);
 
         // Load bold italic font.
-        let bold_italic_font = font.bold_italic();
+        let bold_italic_font = Self::primary_description(&font.bold_italic());
         let bold_italic_desc = Self::make_desc(&bold_italic_font, Slant::Italic, Weight::Bold);
         let bold_italic = load_or_regular(
             bold_italic_desc,
@@ -329,6 +381,51 @@ impl GlyphCache {
         );
 
         Ok((regular, bold, italic, bold_italic))
+    }
+
+    /// The description with `family` reduced to the primary entry of a
+    /// comma-separated fallback list.
+    fn primary_description(desc: &FontDescription) -> FontDescription {
+        FontDescription {
+            family: primary_font_family(&desc.family).to_owned(),
+            style: desc.style.clone(),
+        }
+    }
+
+    /// 为 `primary` 注册用户配置的多级 fallback 链（issue #33）：每个族先查
+    /// 系统集合，再查私有/导入集合；链尾始终补上内置 Maple 兜底，中文与
+    /// Nerd Font 图标的覆盖面不因换字体而回退。
+    #[cfg(windows)]
+    fn register_fallback_chain(
+        rasterizer: &mut Rasterizer,
+        primary: FontKey,
+        families: &[String],
+        slant: Slant,
+        weight: Weight,
+        size: Size,
+    ) {
+        let mut chain = Vec::new();
+        for family in families {
+            match rasterizer.load_family_font(family, slant, weight, size) {
+                Ok(key) => {
+                    if key != primary && !chain.contains(&key) {
+                        chain.push(key);
+                    }
+                },
+                Err(error) => error!("fallback font {family} unavailable: {error}"),
+            }
+        }
+        if let Ok(maple) = rasterizer.load_embedded_font(
+            crate::font_install::REQUIRED_FONT_FAMILY,
+            slant,
+            weight,
+            size,
+        ) && maple != primary
+            && !chain.contains(&maple)
+        {
+            chain.push(maple);
+        }
+        rasterizer.set_fallback_chain(primary, chain);
     }
 
     fn load_regular_font(

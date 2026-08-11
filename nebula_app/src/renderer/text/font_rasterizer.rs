@@ -67,8 +67,10 @@ pub(crate) struct Rasterizer {
     embedded_fonts: HashMap<FontKey, EmbeddedFont>,
     embedded_keys: HashMap<FontDesc, FontKey>,
     /// Missing glyphs are resolved only after the primary face rejects them.
-    /// The glyph cache stores the result, so this map is not touched per frame.
-    fallback_keys: HashMap<FontKey, FontKey>,
+    /// Ordered fallback chain per primary face — the user's extra families
+    /// first (issue #33), the embedded Maple always last. The glyph cache
+    /// stores the result, so this map is not touched per frame.
+    fallback_chains: HashMap<FontKey, Vec<FontKey>>,
 }
 
 #[cfg(windows)]
@@ -99,15 +101,44 @@ impl Rasterizer {
 
         // 自定义字体只负责它实际包含的字形；中文和 Nerd Font 私用区由随程序
         // 内置的 Maple 托底，避免为了换字体而牺牲终端内容或原生界面图标。
+        // 用户配置的多级 fallback（若有）由 glyph cache 随后整链覆盖。
         if let Ok(fallback) =
             self.load_embedded_font(crate::font_install::REQUIRED_FONT_FAMILY, slant, weight, size)
         {
             if fallback != primary {
-                self.fallback_keys.insert(primary, fallback);
+                self.fallback_chains.insert(primary, vec![fallback]);
             }
         }
 
         Ok(primary)
+    }
+
+    /// Replace `primary`'s ordered fallback chain. Faces are tried in order
+    /// after the primary reports a missing glyph; the caller terminates the
+    /// chain with the embedded Maple so CJK and icon coverage never regresses.
+    pub(super) fn set_fallback_chain(&mut self, primary: FontKey, chain: Vec<FontKey>) {
+        if chain.is_empty() {
+            self.fallback_chains.remove(&primary);
+        } else {
+            self.fallback_chains.insert(primary, chain);
+        }
+    }
+
+    /// 用族名换 `FontKey` 的唯一入口：先查系统集合，再查私有集合（导入
+    /// 字体与内置 Maple 都活在那里）。所有按族名找字体的路径——预览、
+    /// 可用性校验、fallback 链——统一走这里，不再各自拼两条查找路径。
+    pub(crate) fn load_family_font(
+        &mut self,
+        family: &str,
+        slant: Slant,
+        weight: Weight,
+        size: Size,
+    ) -> Result<FontKey, Error> {
+        let description = FontDesc::new(family, Style::Description { slant, weight });
+        match self.system.load_font(&description, size) {
+            Ok(key) => Ok(key),
+            Err(_) => self.load_embedded_font(family, slant, weight, size),
+        }
     }
 
     pub(super) fn load_embedded_font(
@@ -334,7 +365,7 @@ impl Rasterize for Rasterizer {
             private_paths,
             embedded_fonts: HashMap::new(),
             embedded_keys: HashMap::new(),
-            fallback_keys: HashMap::new(),
+            fallback_chains: HashMap::new(),
         })
     }
 
@@ -351,10 +382,17 @@ impl Rasterize for Rasterizer {
 
     fn get_glyph(&mut self, glyph: GlyphKey) -> Result<RasterizedGlyph, Error> {
         let rasterized = self.rasterize_once(glyph);
-        if matches!(rasterized, Err(Error::MissingGlyph(_)))
-            && let Some(font_key) = self.fallback_keys.get(&glyph.font_key).copied()
-        {
-            return self.rasterize_once(GlyphKey { font_key, ..glyph });
+        if !matches!(rasterized, Err(Error::MissingGlyph(_))) {
+            return rasterized;
+        }
+        // 依序走 fallback 链，第一张有此字形的脸胜出;整链都缺就带着主字体
+        // 的 MissingGlyph 占位返回,让缓存层照旧处理缺字形。
+        let chain = self.fallback_chains.get(&glyph.font_key).cloned().unwrap_or_default();
+        for font_key in chain {
+            match self.rasterize_once(GlyphKey { font_key, ..glyph }) {
+                Err(Error::MissingGlyph(_)) => continue,
+                resolved => return resolved,
+            }
         }
         rasterized
     }
