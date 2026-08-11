@@ -964,12 +964,9 @@ fn nebula_default_shell(settings: NebulaRuntimeSettings) -> Shell {
             powershell_integration_args(
                 vec![
                     "-NoLogo".to_owned(),
-                    // Skip $PROFILE: Nebula's integration script owns the prompt,
-                    // aliases and PSReadLine setup, so the user profile would be
-                    // mostly overridden anyway — and it is the single biggest
-                    // uncontrollable startup cost (conda/nvm/oh-my-posh routinely
-                    // add seconds).
-                    "-NoProfile".to_owned(),
+                    // Match the native Windows terminal path: do not silently
+                    // skip the user's $PROFILE. Nebula's integration script is
+                    // appended after PowerShell finishes its normal startup.
                 ],
                 &path,
             ),
@@ -1009,8 +1006,9 @@ mod test {
     use std::process::{Command, Stdio};
 
     use crate::tty::windows::{
-        NEBULA_BASH_RC, NEBULA_PROMPT_PS1, cmdline, explicit_bash_integration_args,
-        nebula_find_bash, powershell_integration_args, push_escaped_arg,
+        NEBULA_BASH_RC, NEBULA_PROMPT_PS1, NebulaRuntimeSettings, NebulaShellExecutor, cmdline,
+        explicit_bash_integration_args, nebula_default_shell, nebula_find_bash,
+        powershell_integration_args, push_escaped_arg,
     };
     use crate::tty::{Options, Shell};
 
@@ -1066,6 +1064,35 @@ mod test {
         assert!(!args.iter().any(|arg| arg.eq_ignore_ascii_case("-NoProfile")));
         assert_eq!(args[args.len() - 2], "-Command");
         assert_eq!(args.last().map(String::as_str), Some(". 'C:\\Temp Folder\\nebula_prompt.ps1'"));
+    }
+
+    /// `-NoProfile` on the default-shell path silently skipped the user's
+    /// `$PROFILE`, so functions added there never loaded in a new tab while
+    /// Windows Terminal loaded them fine. The explicit-shell path had its own
+    /// guard already; this covers the path that actually regressed.
+    #[test]
+    fn default_powershell_loads_the_user_profile_and_ends_with_the_integration() {
+        let shell = nebula_default_shell(NebulaRuntimeSettings {
+            shell: NebulaShellExecutor::PowerShell,
+        });
+        let args = shell.args();
+
+        assert_eq!(shell.program(), "powershell");
+        assert!(
+            !args.iter().any(|arg| arg.eq_ignore_ascii_case("-NoProfile")),
+            "the default shell must not skip the user's $PROFILE: {args:?}"
+        );
+        // The remaining shape only exists when the prompt script was written;
+        // the no-`-NoProfile` contract above holds on both branches.
+        let Some(command) = args.iter().position(|arg| arg == "-Command") else {
+            return;
+        };
+        assert_eq!(args.first().map(String::as_str), Some("-NoLogo"));
+        assert_eq!(command, args.len() - 2, "the dot-source must be the trailing argument");
+        assert!(
+            args.last().is_some_and(|arg| arg.starts_with(". '")),
+            "the trailing argument must dot-source the prompt script: {args:?}"
+        );
     }
 
     #[test]
