@@ -140,8 +140,8 @@ enum BackupOperation {
 pub(crate) fn caret_blink_on() -> bool {
     ui::caret::is_on()
 }
-pub(crate) use settings::SettingsOpacityTarget;
 pub use settings::{NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit};
+pub(crate) use settings::{NewTabPosition, SettingsOpacityTarget};
 
 /// 按显示列宽贪心断行（确认框正文等 UI 段落用）：CJK 逐字可断，行首空
 /// 格吞掉；零宽字符跟随前一个字。不做拉丁连词回退——正文以中文为主，
@@ -1652,6 +1652,9 @@ pub struct Display {
     /// 界面外观预设。紧凑只在既有阶梯上降一档，不引入新的视觉数值
     /// （ADR-0002）；它不改变终端字体、单元格几何或 shell 输出。
     pub nebula_density: ui::tokens::Density,
+    /// 新标签插入策略。只在**真正创建标签**时生效；会话恢复与工作区导入
+    /// 保持各自记录的顺序，不读这个值。
+    pub nebula_new_tab_position: settings::NewTabPosition,
     pub nebula_font_family: String,
     nebula_font_families: Vec<String>,
     /// 系统字体族的惰性缓存：首次展开字体目录时枚举一次，之后复用。
@@ -2277,6 +2280,7 @@ impl Display {
             nebula_keymap_capture_preview: String::new(),
             nebula_tab_reveal_motion: settings_init.tab_reveal,
             nebula_density: settings_init.density,
+            nebula_new_tab_position: settings_init.new_tab_position,
             nebula_font_family: settings_init.font_family,
             nebula_font_families,
             nebula_system_fonts: None,
@@ -3525,6 +3529,7 @@ impl Display {
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
             density: self.nebula_density,
+            new_tab_position: self.nebula_new_tab_position,
             preview_bg: self.preview_terminal_bg(),
             preview_fg: {
                 let bg = self.preview_terminal_bg();
@@ -4024,6 +4029,15 @@ impl Display {
         self.nebula_settings_dropdown = None;
         self.pending_update.dirty = true;
         self.window.request_redraw();
+    }
+
+    pub fn set_new_tab_position_option(&mut self, index: usize) {
+        if let Some(position) = settings::NEW_TAB_POSITION_OPTIONS.get(index) {
+            self.nebula_new_tab_position = *position;
+            self.persist_nebula_settings();
+        }
+        self.nebula_settings_dropdown = None;
+        self.pending_update.dirty = true;
     }
 
     /// Returns true when the default cursor style changed (the caller then
@@ -7299,6 +7313,7 @@ impl Display {
             cjk_bold_regular: self.nebula_cjk_bold_regular,
             tab_reveal: self.nebula_tab_reveal_motion,
             density: self.nebula_density,
+            new_tab_position: self.nebula_new_tab_position,
             theme: self.nebula_theme_preference,
             follow_system_theme: self.nebula_follow_system_theme,
             pinned_hosts: self.nebula_pinned_hosts.clone(),
@@ -7400,6 +7415,7 @@ impl Display {
         }
         self.nebula_tab_reveal_motion = settings.tab_reveal;
         self.nebula_density = settings.density;
+        self.nebula_new_tab_position = settings.new_tab_position;
         self.nebula_window_opacity = settings.opacity;
         self.nebula_background = if settings.follow_system_theme {
             Some(active_theme.palette().term_bg)
