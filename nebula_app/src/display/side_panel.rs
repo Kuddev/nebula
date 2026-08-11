@@ -221,8 +221,26 @@ pub struct SidePanel {
     op_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Last operation's error (empty = success), shown on the summary line.
     op_error: std::sync::Arc<std::sync::Mutex<String>>,
+    /// A snapshot worker (fs walk + git subprocesses) is in flight. Guards
+    /// against stacking workers; a refresh requested meanwhile re-arms
+    /// `needs_refresh` and runs after this one lands.
+    snapshot_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The worker's finished snapshot, harvested by `sync` on the next frame.
+    /// 切换视图/根不再同步跑 git——旧内容原样留在屏上，新快照落地后整体
+    /// 替换（VSCode 的树刷新模式）。
+    snapshot_slot: std::sync::Arc<std::sync::Mutex<Option<PanelSnapshot>>>,
     last_refresh: Option<Instant>,
     needs_refresh: bool,
+}
+
+/// What the background snapshot worker produces: everything `refresh` used to
+/// compute synchronously on the render thread.
+struct PanelSnapshot {
+    /// Root the snapshot was built from — stale snapshots (root changed while
+    /// the worker ran) are dropped on harvest.
+    root: PathBuf,
+    rows: Vec<FileRow>,
+    git: Option<GitInfo>,
 }
 
 fn git_pull_args() -> Vec<String> {
@@ -257,6 +275,8 @@ impl SidePanel {
             op_running: Default::default(),
             op_done: Default::default(),
             op_error: Default::default(),
+            snapshot_running: Default::default(),
+            snapshot_slot: Default::default(),
             last_refresh: None,
             needs_refresh: false,
         }
@@ -285,6 +305,9 @@ impl SidePanel {
         if !self.open {
             return false;
         }
+        // 先收割落地的后台快照——旧内容在工人跑动期间一直显示，这里一次
+        // 性换成新内容（先显示旧的、再更新，VSCode 的树刷新模式）。
+        let mut changed = self.harvest_snapshot();
         // 聚焦 pane 报不出本地有效目录时（SSH 远端路径、未映射的 WSL 路
         // 径、shell 还没发 OSC）保持现状：跟随的语义是"最后一个已知有效
         // 目录"，清空只会让切到远程 tab 的瞬间目录树闪成空白。
@@ -308,7 +331,7 @@ impl SidePanel {
             self.needs_refresh = true;
         }
         if !(root_changed || custom_invalidated || stale || self.needs_refresh) {
-            return false;
+            return changed;
         }
         if root_changed {
             self.root = next_root;
@@ -317,6 +340,42 @@ impl SidePanel {
             self.selected = None;
         }
         self.refresh();
+        changed || root_changed || custom_invalidated
+    }
+
+    /// 测试辅助：等后台快照工人落地并收割。生产路径永不阻塞。
+    #[cfg(test)]
+    fn wait_snapshot(&mut self) {
+        for _ in 0..1000 {
+            if !self.snapshot_running.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.harvest_snapshot();
+    }
+
+    /// Fold a finished background snapshot into the visible state. Returns
+    /// whether anything on screen changed.
+    fn harvest_snapshot(&mut self) -> bool {
+        // 过滤查询激活时不收割：树快照会覆盖过滤视图。快照留在槽里，查询
+        // 清空后的下一帧照常落地。
+        if !self.search.trim().is_empty() {
+            return false;
+        }
+        let snapshot = match self.snapshot_slot.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(_) => None,
+        };
+        let Some(snapshot) = snapshot else { return false };
+        // 工人跑动期间根又变了：这份快照已经过期，丢弃。新刷新在路上。
+        if self.root.as_ref() != Some(&snapshot.root) {
+            return false;
+        }
+        self.rows = snapshot.rows;
+        self.git = snapshot.git;
+        // New snapshot → the filter index is stale; rebuild lazily on demand.
+        self.search_index = None;
         true
     }
 
@@ -396,13 +455,31 @@ impl SidePanel {
     fn refresh(&mut self) {
         self.needs_refresh = false;
         self.last_refresh = Some(Instant::now());
-        // New snapshot → the filter index is stale; rebuild lazily on demand.
-        self.search_index = None;
-        self.rebuild_rows();
-        self.git = None;
-        if let Some(root) = self.root.clone() {
-            self.git = read_git(&root);
+        let Some(root) = self.root.clone() else {
+            // 没有根：清空是即时且无成本的，不需要工人。
+            self.rows.clear();
+            self.git = None;
+            self.search_index = None;
+            return;
+        };
+        // 快照工人一次只跑一个：fs 遍历 + 三个 git 子进程在渲染线程上曾是
+        // 切换视图卡顿的直接根因。工人在飞时再次请求就重挂 `needs_refresh`，
+        // 落地后 `sync` 的下一帧自然补跑，不排队叠罗汉。
+        if self.snapshot_running.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            self.needs_refresh = true;
+            return;
         }
+        let expanded = self.expanded.clone();
+        let running = std::sync::Arc::clone(&self.snapshot_running);
+        let slot = std::sync::Arc::clone(&self.snapshot_slot);
+        std::thread::spawn(move || {
+            let rows = SidePanel::tree_rows(&root, &expanded);
+            let git = read_git(&root);
+            if let Ok(mut slot) = slot.lock() {
+                *slot = Some(PanelSnapshot { root, rows, git });
+            }
+            running.store(false, std::sync::atomic::Ordering::Release);
+        });
     }
 
     /// Rebuild only the flattened rows (tree shape / filter changes; the git
@@ -412,19 +489,7 @@ impl SidePanel {
         let Some(root) = self.root.clone() else { return };
         let needle = self.search.trim().to_lowercase();
         if needle.is_empty() {
-            if let Some(parent) = root.parent() {
-                self.rows.push(FileRow {
-                    path: parent.to_path_buf(),
-                    name: "..".to_owned(),
-                    depth: 0,
-                    is_dir: true,
-                    expanded: false,
-                    is_parent: true,
-                    ignored: false,
-                });
-            }
-            self.flatten_dir(&root, 0);
-            Self::mark_ignored(&root, &mut self.rows);
+            self.rows = Self::tree_rows(&root, &self.expanded);
             return;
         }
         // Filter mode: string-match against the cached flat index. The index
@@ -611,8 +676,33 @@ impl SidePanel {
     }
 
     /// Depth-first flatten of `dir` into `rows`, following `expanded`.
-    fn flatten_dir(&mut self, dir: &Path, depth: usize) {
-        if self.rows.len() >= MAX_ROWS {
+    /// Build the Files view's flattened tree snapshot. Free of `&self` so the
+    /// background snapshot worker can run it off the render thread.
+    fn tree_rows(root: &Path, expanded: &HashSet<PathBuf>) -> Vec<FileRow> {
+        let mut rows = Vec::new();
+        if let Some(parent) = root.parent() {
+            rows.push(FileRow {
+                path: parent.to_path_buf(),
+                name: "..".to_owned(),
+                depth: 0,
+                is_dir: true,
+                expanded: false,
+                is_parent: true,
+                ignored: false,
+            });
+        }
+        Self::flatten_dir_into(&mut rows, expanded, root, 0);
+        Self::mark_ignored(root, &mut rows);
+        rows
+    }
+
+    fn flatten_dir_into(
+        rows: &mut Vec<FileRow>,
+        expanded: &HashSet<PathBuf>,
+        dir: &Path,
+        depth: usize,
+    ) {
+        if rows.len() >= MAX_ROWS {
             return;
         }
         let Ok(read) = std::fs::read_dir(dir) else { return };
@@ -632,21 +722,21 @@ impl SidePanel {
         // Directories first, then case-insensitive alphabetical order.
         entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
         for (is_dir, name, path) in entries {
-            if self.rows.len() >= MAX_ROWS {
+            if rows.len() >= MAX_ROWS {
                 return;
             }
-            let expanded = is_dir && self.expanded.contains(&path);
-            self.rows.push(FileRow {
+            let is_expanded = is_dir && expanded.contains(&path);
+            rows.push(FileRow {
                 path: path.clone(),
                 name,
                 depth,
                 is_dir,
-                expanded,
+                expanded: is_expanded,
                 is_parent: false,
                 ignored: false,
             });
-            if expanded {
-                self.flatten_dir(&path, depth + 1);
+            if is_expanded {
+                Self::flatten_dir_into(rows, expanded, &path, depth + 1);
             }
         }
     }
@@ -2007,6 +2097,7 @@ mod tests {
         let mut p = SidePanel::new();
         p.toggle(PanelView::Files);
         assert!(p.sync(Some(base.clone())));
+        p.wait_snapshot();
         let rows = p.file_rows();
         assert_eq!(rows[0].name, "..", "parent navigation stays at the top");
         assert!(rows[0].is_parent);
@@ -2061,6 +2152,7 @@ mod tests {
         let mut panel = SidePanel::new();
         panel.toggle(PanelView::Files);
         assert!(panel.sync(Some(child.clone())));
+        panel.wait_snapshot();
         let parent = panel.file_rows().first().expect("parent row").clone();
         assert_eq!(parent.name, "..");
         assert!(parent.is_parent);
@@ -2086,6 +2178,7 @@ mod tests {
         let mut panel = SidePanel::new();
         panel.toggle(PanelView::Files);
         assert!(panel.sync(Some(base.clone())));
+        panel.wait_snapshot();
         let drag = FileDrag::new(sub, "sub".into(), true, 1, (10.0, 10.0));
 
         assert!(panel.click_drag_source(&drag), "a non-drag release keeps directory click");
