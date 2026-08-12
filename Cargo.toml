@@ -7,6 +7,7 @@ members = [
     "nebula-completions",
     "nebula_hook",
 ]
+exclude = ["nebula_gpui"]
 resolver = "2"
 
 [workspace.package]

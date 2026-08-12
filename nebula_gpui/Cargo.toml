@@ -1,0 +1,24 @@
+[package]
+name = "nebula-gpui"
+version = "0.1.0"
+license = "GPL-3.0-or-later"
+description = "Nebula's GPUI application foundation and component acceptance surface"
+publish = false
+edition = "2024"
+rust-version = "1.85.0"
+
+[[bin]]
+name = "nebula-gpui"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "=0.2.2"
+gpui-component = "=0.5.1"
+gpui-component-assets = "=0.5.1"
+
+[workspace]
+resolver = "2"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
