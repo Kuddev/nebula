@@ -1,4 +1,5 @@
 mod app;
+mod terminal;
 mod ui;
 mod views;
 

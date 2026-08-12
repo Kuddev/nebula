@@ -69,3 +69,27 @@ build path unchanged.
 This boundary does not prevent future reuse of pure Rust core crates, for
 example `nebula_terminal`; it prevents GUI native dependencies from being
 resolved together before their ownership and rendering boundaries are ready.
+
+## Terminal Vertical Slice
+
+`src/terminal/` hosts the terminal integration and proves the hardest
+migration claim: `nebula_terminal` (PTY, VT parser, grid, selection) renders
+inside GPUI as a custom `Element` without forking either side.
+
+- `session.rs` — owns the ConPTY + `EventLoop` wiring. Terminal events cross
+  into GPUI through one futures channel; the PTY I/O thread never touches
+  GPUI types.
+- `element.rs` — the paint hot path. One `FairMutex` lock per frame builds a
+  plain-data snapshot (background runs, styled text segments, cursor,
+  selection), then paints with `paint_quad` + `shape_line(force_width)` so
+  CJK wide cells stay grid-aligned.
+- `view.rs` — focus, keyboard, mouse selection, wheel scrolling, clipboard,
+  and IME via `EntityInputHandler` (marked text drawn at the cursor cell,
+  candidate window anchored through `bounds_for_range`).
+- `keymap.rs` — encodes only control/modified keys; printable text (including
+  IME commits) flows through the text-input path so nothing is sent twice.
+- `colors.rs` — resolves vte colors against `Term::colors()` overrides, then
+  a default palette.
+
+The boundary rule stays symmetric: no `nebula_terminal` type escapes
+`src/terminal/`, and no GPUI type enters `nebula_terminal`.

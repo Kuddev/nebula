@@ -1,0 +1,493 @@
+//! 终端视图：持有会话、处理输入与 IME、驱动重绘。
+
+use gpui::{
+    App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
+    FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent,
+    Styled as _, UTF16Selection, Window, div, point, px,
+};
+use gpui_component::PixelsExt as _;
+use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
+use nebula_terminal::grid::Scroll;
+use nebula_terminal::index::{Column, Point as TermPoint, Side};
+use nebula_terminal::selection::{Selection, SelectionType};
+use nebula_terminal::term::TermMode;
+use nebula_terminal::term::viewport_to_point;
+
+use super::colors;
+use super::element::TerminalElement;
+use super::keymap;
+use super::session::{self, GridSize, TerminalSession};
+
+use futures::StreamExt as _;
+
+pub struct TerminalView {
+    pub session: Option<TerminalSession>,
+    pub focus_handle: FocusHandle,
+    pub font: Font,
+    pub font_bold: Font,
+    pub font_italic: Font,
+    pub font_bold_italic: Font,
+    pub font_size: Pixels,
+    pub line_height_mul: f32,
+    pub marked_text: Option<String>,
+    pub ime_bounds: Bounds<Pixels>,
+    pub title: String,
+    error: Option<String>,
+    exited: Option<String>,
+    origin: Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
+    cols: usize,
+    rows: usize,
+    window_size: WindowSize,
+    scroll_px: f32,
+    selecting: bool,
+}
+
+impl TerminalView {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let mono = |weight: FontWeight, style: FontStyle| Font {
+            weight,
+            style,
+            ..gpui::font("Cascadia Mono")
+        };
+
+        let initial = WindowSize { num_lines: 30, num_cols: 100, cell_width: 9, cell_height: 18 };
+        let (session, error) = match session::spawn(initial) {
+            Ok((session, mut rx)) => {
+                cx.spawn(async move |this, cx| {
+                    while let Some(event) = rx.next().await {
+                        // 合并同一批到达的事件，避免每个 Wakeup 都独立触发一帧。
+                        let mut batch = vec![event];
+                        while batch.len() < 128 {
+                            match rx.try_recv() {
+                                Ok(event) => batch.push(event),
+                                _ => break,
+                            }
+                        }
+                        let done = batch.iter().any(|e| matches!(e, TermEvent::Exit));
+                        if this
+                            .update(cx, |view: &mut Self, cx| {
+                                for event in batch {
+                                    view.process_event(event, cx);
+                                }
+                            })
+                            .is_err()
+                            || done
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+                (Some(session), None)
+            },
+            Err(err) => (None, Some(format!("PTY 启动失败: {err}"))),
+        };
+
+        Self {
+            session,
+            focus_handle: cx.focus_handle(),
+            font: mono(FontWeight::NORMAL, FontStyle::Normal),
+            font_bold: mono(FontWeight::BOLD, FontStyle::Normal),
+            font_italic: mono(FontWeight::NORMAL, FontStyle::Italic),
+            font_bold_italic: mono(FontWeight::BOLD, FontStyle::Italic),
+            font_size: px(14.0),
+            line_height_mul: 1.25,
+            marked_text: None,
+            ime_bounds: Bounds::default(),
+            title: String::from("shell"),
+            error,
+            exited: None,
+            origin: point(px(0.0), px(0.0)),
+            cell_width: px(8.0),
+            line_height: px(18.0),
+            cols: initial.num_cols as usize,
+            rows: initial.num_lines as usize,
+            window_size: initial,
+            scroll_px: 0.0,
+            selecting: false,
+        }
+    }
+
+    fn process_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
+        match event {
+            TermEvent::Wakeup | TermEvent::MouseCursorDirty | TermEvent::CursorBlinkingChange => {
+                cx.notify();
+            },
+            TermEvent::Title(title) => {
+                self.title = title;
+                cx.notify();
+            },
+            TermEvent::ResetTitle => {
+                self.title = String::from("shell");
+                cx.notify();
+            },
+            TermEvent::PtyWrite(text) => self.write_bytes(text.into_bytes()),
+            TermEvent::ClipboardStore(_, text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            },
+            TermEvent::ClipboardLoad(_, formatter) => {
+                let text =
+                    cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+                self.write_bytes(formatter(&text).into_bytes());
+            },
+            TermEvent::ColorRequest(index, formatter) => {
+                let reply = self.session.as_ref().map(|session| {
+                    let term = session.term.lock();
+                    colors::query_reply(index, term.colors())
+                });
+                if let Some(rgb) = reply {
+                    self.write_bytes(formatter(rgb).into_bytes());
+                }
+            },
+            TermEvent::TextAreaSizeRequest(formatter) => {
+                self.write_bytes(formatter(self.window_size).into_bytes());
+            },
+            TermEvent::ChildExit(code) => {
+                self.exited = Some(format!("进程已退出（{code:?}）"));
+                cx.notify();
+            },
+            TermEvent::PtyFailure(reason) => {
+                self.exited = Some(format!("PTY 故障：{reason}"));
+                cx.notify();
+            },
+            TermEvent::Exit => {
+                self.exited.get_or_insert_with(|| String::from("会话已结束"));
+                cx.notify();
+            },
+            // 垂直切片不处理：铃声、cwd 上报、内联图片、OSC133、AI hook 等。
+            _ => {},
+        }
+    }
+
+    fn write_bytes(&self, bytes: Vec<u8>) {
+        if let Some(session) = &self.session {
+            session.notifier.notify(bytes);
+        }
+    }
+
+    /// 输入后回到底部并请求重绘。
+    fn write_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        if let Some(session) = &self.session {
+            {
+                let mut term = session.term.lock();
+                term.scroll_display(Scroll::Bottom);
+                term.selection = None;
+            }
+            session.notifier.notify(bytes);
+        }
+        cx.notify();
+    }
+
+    /// 元素 prepaint 回写布局；行列变化时同步 Term 和 ConPTY。
+    pub fn set_layout(
+        &mut self,
+        origin: Point<Pixels>,
+        cell_width: Pixels,
+        line_height: Pixels,
+        cols: usize,
+        rows: usize,
+        scale: f32,
+    ) {
+        self.origin = origin;
+        self.cell_width = cell_width;
+        self.line_height = line_height;
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        self.cols = cols;
+        self.rows = rows;
+        let window_size = WindowSize {
+            num_lines: rows as u16,
+            num_cols: cols as u16,
+            cell_width: (cell_width.as_f32() * scale) as u16,
+            cell_height: (line_height.as_f32() * scale) as u16,
+        };
+        self.window_size = window_size;
+        if let Some(session) = &self.session {
+            session.term.lock().resize(GridSize { columns: cols, screen_lines: rows });
+            let mut notifier = nebula_terminal::event_loop::Notifier(session.notifier.0.clone());
+            notifier.on_resize(window_size);
+        }
+    }
+
+    fn term_mode(&self) -> TermMode {
+        self.session.as_ref().map(|s| *s.term.lock().mode()).unwrap_or_default()
+    }
+
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = &self.session {
+            let text = session.term.lock().selection_to_string();
+            if let Some(text) = text.filter(|t| !t.is_empty()) {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+        }
+    }
+
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+        let bytes = if self.term_mode().contains(TermMode::BRACKETED_PASTE) {
+            let mut b = b"\x1b[200~".to_vec();
+            // 过滤粘贴内容里的收尾哨兵，防止注入截断。
+            b.extend_from_slice(normalized.replace("\x1b[201~", "").as_bytes());
+            b.extend_from_slice(b"\x1b[201~");
+            b
+        } else {
+            normalized.into_bytes()
+        };
+        self.write_input(bytes, cx);
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.exited.is_some() {
+            return;
+        }
+        let ks = &event.keystroke;
+        let mods = &ks.modifiers;
+
+        // 终端惯例快捷键优先于编码器。
+        if mods.control && mods.shift {
+            match ks.key.as_str() {
+                "c" => {
+                    self.copy_selection(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                "v" => {
+                    self.paste(cx);
+                    cx.stop_propagation();
+                    return;
+                },
+                _ => {},
+            }
+        }
+
+        let mode = self.term_mode();
+        if let Some(bytes) = keymap::encode(ks, &mode) {
+            self.write_input(bytes, cx);
+            cx.stop_propagation();
+        }
+    }
+
+    /// 像素坐标 → 网格坐标（含滚动偏移）与半格判定。
+    fn grid_point(&self, position: Point<Pixels>) -> (TermPoint, Side) {
+        let rel_x = (position.x - self.origin.x).as_f32() / self.cell_width.as_f32().max(1.0);
+        let rel_y = (position.y - self.origin.y).as_f32() / self.line_height.as_f32().max(1.0);
+        let col = (rel_x.floor().max(0.0) as usize).min(self.cols.saturating_sub(1));
+        let row = (rel_y.floor().max(0.0) as usize).min(self.rows.saturating_sub(1));
+        let side = if rel_x.fract() > 0.5 { Side::Right } else { Side::Left };
+        let display_offset =
+            self.session.as_ref().map(|s| s.term.lock().grid().display_offset()).unwrap_or(0);
+        (viewport_to_point(display_offset, TermPoint::new(row, Column(col))), side)
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle);
+        let Some(session) = &self.session else { return };
+        let (point, side) = self.grid_point(event.position);
+        let ty = match event.click_count {
+            1 => SelectionType::Simple,
+            2 => SelectionType::Semantic,
+            _ => SelectionType::Lines,
+        };
+        session.term.lock().selection = Some(Selection::new(ty, point, side));
+        self.selecting = true;
+        cx.notify();
+    }
+
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let (point, side) = self.grid_point(event.position);
+        if let Some(session) = &self.session {
+            if let Some(selection) = session.term.lock().selection.as_mut() {
+                selection.update(point, side);
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.selecting = false;
+        cx.notify();
+    }
+
+    fn on_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let delta_y = event.delta.pixel_delta(self.line_height).y.as_f32();
+        self.scroll_px += delta_y;
+        let lines = (self.scroll_px / self.line_height.as_f32().max(1.0)).trunc() as i32;
+        if lines == 0 {
+            return;
+        }
+        self.scroll_px -= lines as f32 * self.line_height.as_f32();
+        let Some(session) = &self.session else { return };
+        let mode = *session.term.lock().mode();
+        if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+            // 备用屏（less/vim）：滚轮翻译成方向键。
+            let seq: &[u8] = if mode.contains(TermMode::APP_CURSOR) {
+                if lines > 0 { b"\x1bOA" } else { b"\x1bOB" }
+            } else if lines > 0 {
+                b"\x1b[A"
+            } else {
+                b"\x1b[B"
+            };
+            let mut bytes = Vec::new();
+            for _ in 0..lines.unsigned_abs() {
+                bytes.extend_from_slice(seq);
+            }
+            session.notifier.notify(bytes);
+        } else {
+            session.term.lock().scroll_display(Scroll::Delta(lines));
+        }
+        cx.notify();
+    }
+
+    fn marked_utf16_len(&self) -> usize {
+        self.marked_text.as_deref().map(|t| t.encode_utf16().count()).unwrap_or(0)
+    }
+}
+
+impl EventEmitter<()> for TerminalView {}
+
+impl Focusable for TerminalView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl gpui::EntityInputHandler for TerminalView {
+    fn text_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _adjusted_range: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        // 终端没有文本框语义的选区；返回折叠选区让 IME 把组合文本插在光标处。
+        let len = self.marked_utf16_len();
+        Some(UTF16Selection { range: len..len, reversed: false })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        self.marked_text.as_ref().map(|_| 0..self.marked_utf16_len())
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.marked_text = None;
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked_text = None;
+        if !text.is_empty() && self.exited.is_none() {
+            self.write_input(text.as_bytes().to_vec(), cx);
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _range: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked_text = if new_text.is_empty() { None } else { Some(new_text.to_string()) };
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: std::ops::Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        Some(self.ime_bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
+impl Render for TerminalView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut root = div()
+            .id("nebula-terminal")
+            .size_full()
+            .overflow_hidden()
+            .bg(colors::BACKGROUND)
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::on_key_down))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_scroll_wheel(cx.listener(Self::on_scroll));
+
+        if let Some(error) = &self.error {
+            root = root.child(div().p_4().text_color(gpui::red()).child(error.clone()));
+        } else {
+            root = root.child(TerminalElement::new(cx.entity()));
+            if let Some(exited) = &self.exited {
+                root = root.child(
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .left_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(gpui::opaque_grey(0.2, 0.9))
+                        .text_sm()
+                        .child(exited.clone()),
+                );
+            }
+        }
+        root
+    }
+}

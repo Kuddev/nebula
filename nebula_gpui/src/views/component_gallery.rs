@@ -4,6 +4,7 @@ use gpui::{
     Window, div, px,
 };
 
+use crate::terminal::view::TerminalView;
 use crate::ui::prelude::*;
 
 gpui::actions!(component_gallery, [Increment]);
@@ -13,6 +14,7 @@ pub struct ComponentGallery {
     editor: Entity<InputState>,
     select: Entity<SelectState<Vec<&'static str>>>,
     dock_area: Entity<DockArea>,
+    terminal: Entity<TerminalView>,
     enabled: bool,
     clicks: usize,
     active_tab: usize,
@@ -93,7 +95,9 @@ impl ComponentGallery {
             dock.set_center(DockItem::tab(panel, &weak_dock_area, window, cx), window, cx);
         });
 
-        Self { input, editor, select, dock_area, enabled: true, clicks: 0, active_tab: 0 }
+        let terminal = cx.new(TerminalView::new);
+
+        Self { input, editor, select, dock_area, terminal, enabled: true, clicks: 0, active_tab: 0 }
     }
 }
 
@@ -233,6 +237,21 @@ impl Render for ComponentGallery {
                                             .overflow_hidden()
                                             .child(self.dock_area.clone()),
                                     ),
+                            )
+                            .child(
+                                div().text_sm().child(
+                                    "终端垂直切片（ConPTY + nebula_terminal + 自定义 Element）",
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(360.0))
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .rounded_md()
+                                    .overflow_hidden()
+                                    .child(self.terminal.clone()),
                             )
                             .child(div().text_sm().child("Code Editor / Tree-sitter 基础"))
                             .child(Input::new(&self.editor).h(px(220.0)))
