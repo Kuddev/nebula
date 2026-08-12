@@ -93,3 +93,33 @@ inside GPUI as a custom `Element` without forking either side.
 
 The boundary rule stays symmetric: no `nebula_terminal` type escapes
 `src/terminal/`, and no GPUI type enters `nebula_terminal`.
+
+## Multi-Tab Terminal Workspace
+
+`views/workspace.rs` is the product shell: a custom `TitleBar` plus a center
+`TabPanel` of terminal tabs. `terminal/panel.rs` adapts `TerminalView` to the
+upstream `Panel` contract; the tab layer owns tab semantics only (title,
+close, focus forwarding, lifecycle) and terminal behavior stays in
+`TerminalView`.
+
+Lifecycle rules proven by manual acceptance:
+
+- New tab: title-bar button or `ctrl-shift-t`; the new tab activates and
+  focuses its terminal.
+- Close: per-tab close button (`title_suffix`, because a root-level
+  `TabPanel` is treated as locked layout by the component library and never
+  renders its own close button), `ctrl-shift-w`, or shell `exit`. All three
+  paths converge on `TabPanel::remove_panel`.
+- Session teardown: `Panel::on_removed` sends `Msg::Shutdown` immediately;
+  `TerminalView::drop` is the backstop. `DockArea` keeps the initial
+  `DockItem` snapshot alive, so Drop alone is not sufficient — do not remove
+  the `on_removed` cleanup.
+- Last tab closed quits the app (`quit_if_empty`, also subscribed to
+  `PanelEvent::LayoutChanged` to cover the per-tab close button path).
+- The center layout is intentionally a root-level `TabPanel` (no
+  `StackPanel` parent): tabs cannot be dragged out into splits, which keeps
+  `on_removed` equal to "really closing". Revisit teardown ownership before
+  introducing split layouts.
+
+App-level hotkeys must be let through by the terminal key handler
+(`view.rs` passes `ctrl-shift-t/w` up instead of encoding them as C0 bytes).

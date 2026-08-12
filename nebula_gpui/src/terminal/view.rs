@@ -8,6 +8,7 @@ use gpui::{
 };
 use gpui_component::PixelsExt as _;
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
+use nebula_terminal::event_loop::Msg;
 use nebula_terminal::grid::Scroll;
 use nebula_terminal::index::{Column, Point as TermPoint, Side};
 use nebula_terminal::selection::{Selection, SelectionType};
@@ -20,6 +21,14 @@ use super::keymap;
 use super::session::{self, GridSize, TerminalSession};
 
 use futures::StreamExt as _;
+
+/// 终端视图对宿主（Panel/Workspace）暴露的状态变化。
+pub enum TerminalViewEvent {
+    /// OSC 标题变化，宿主应刷新 Tab 标题。
+    TitleChanged,
+    /// 会话结束（子进程退出或 PTY 故障），只发一次。
+    Exited,
+}
 
 pub struct TerminalView {
     pub session: Option<TerminalSession>,
@@ -118,10 +127,12 @@ impl TerminalView {
             },
             TermEvent::Title(title) => {
                 self.title = title;
+                cx.emit(TerminalViewEvent::TitleChanged);
                 cx.notify();
             },
             TermEvent::ResetTitle => {
                 self.title = String::from("shell");
+                cx.emit(TerminalViewEvent::TitleChanged);
                 cx.notify();
             },
             TermEvent::PtyWrite(text) => self.write_bytes(text.into_bytes()),
@@ -146,19 +157,32 @@ impl TerminalView {
                 self.write_bytes(formatter(self.window_size).into_bytes());
             },
             TermEvent::ChildExit(code) => {
-                self.exited = Some(format!("进程已退出（{code:?}）"));
-                cx.notify();
+                self.mark_exited(format!("进程已退出（{code:?}）"), cx);
             },
             TermEvent::PtyFailure(reason) => {
-                self.exited = Some(format!("PTY 故障：{reason}"));
-                cx.notify();
+                self.mark_exited(format!("PTY 故障：{reason}"), cx);
             },
             TermEvent::Exit => {
-                self.exited.get_or_insert_with(|| String::from("会话已结束"));
-                cx.notify();
+                self.mark_exited(String::from("会话已结束"), cx);
             },
             // 垂直切片不处理：铃声、cwd 上报、内联图片、OSC133、AI hook 等。
             _ => {},
+        }
+    }
+
+    /// `Exited` 只对宿主发一次；重复的退出信号（ChildExit 之后必然跟 Exit）只更新文案。
+    fn mark_exited(&mut self, message: String, cx: &mut Context<Self>) {
+        if self.exited.is_none() {
+            self.exited = Some(message);
+            cx.emit(TerminalViewEvent::Exited);
+        }
+        cx.notify();
+    }
+
+    /// 让 EventLoop 退出并回收 ConPTY/子进程。幂等：重复调用只会得到发送失败。
+    pub fn shutdown(&self) {
+        if let Some(session) = &self.session {
+            let _ = session.notifier.0.send(Msg::Shutdown);
         }
     }
 
@@ -261,6 +285,9 @@ impl TerminalView {
                     cx.stop_propagation();
                     return;
                 },
+                // 应用级快捷键（新建/关闭 Tab）：不编码、不拦截，
+                // 让按键冒泡到 workspace 的 action 绑定。
+                "t" | "w" => return,
                 _ => {},
             }
         }
@@ -366,7 +393,15 @@ impl TerminalView {
     }
 }
 
-impl EventEmitter<()> for TerminalView {}
+impl EventEmitter<TerminalViewEvent> for TerminalView {}
+
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        // 兜底清理：无论视图以何种路径销毁（关 Tab、关窗口、退出应用），
+        // 都保证 PTY 线程和子进程被回收。
+        self.shutdown();
+    }
+}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {

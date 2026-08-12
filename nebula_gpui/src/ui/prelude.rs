@@ -6,11 +6,11 @@
 // 重新从上游散落导入而绕过升级边界。
 #[allow(unused_imports)]
 pub use gpui_component::{
-    ActiveTheme as _, Icon, IconName,
+    ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     dialog::{Dialog, DialogButtonProps},
-    dock::{DockArea, DockAreaState, DockItem, Panel, PanelControl, PanelEvent, PanelState},
+    dock::{DockArea, DockAreaState, DockItem, Panel, PanelControl, PanelEvent, PanelState, TabPanel},
     h_flex,
     input::{Input, InputState},
     menu::{ContextMenuExt as _, PopupMenu},
