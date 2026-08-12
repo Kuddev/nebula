@@ -6,6 +6,5 @@
 pub mod colors;
 pub mod element;
 pub mod keymap;
-pub mod panel;
 pub mod session;
 pub mod view;

@@ -1,120 +1,225 @@
-//! Nebula 主工作区：自绘 TitleBar + 多 Tab 终端。
+//! Nebula 主工作区：左侧垂直 Tab 侧边栏 + 主终端卡片区。
 //!
-//! 布局约束：中心是单个根级 TabPanel（`stack_panel` 为空 → Tab 不可拖出分屏），
-//! 因此 `TerminalPanel::on_removed` 只会由真实关闭触发。引入分屏布局时，
-//! 会话清理需要改为由 workspace 的显式关闭路径驱动。
+//! 布局对齐 nebula_app 的产品形态（TABS 侧边栏、每项图标 + 标题 + 关闭、
+//! 激活高亮、主区圆角终端卡片），不再使用水平 TabPanel。终端实例由本视图
+//! 直接持有；会话清理走显式 `shutdown` + `TerminalView::drop` 兜底。
 
-use std::sync::Arc;
-
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, Focusable as _, FontWeight, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    App, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    KeyBinding, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px,
 };
 
-use crate::terminal::panel::{TerminalPanel, TerminalPanelEvent};
+use crate::terminal::view::{TerminalView, TerminalViewEvent};
 use crate::ui::prelude::*;
 
-gpui::actions!(nebula_workspace, [NewTerminal, CloseActiveTerminal]);
+gpui::actions!(nebula_workspace, [NewTerminal, CloseActiveTerminal, ToggleSidebar]);
 
 /// 注册工作区快捷键；在 `gpui_component::init` 之后调用一次。
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-shift-t", NewTerminal, None),
         KeyBinding::new("ctrl-shift-w", CloseActiveTerminal, None),
+        KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
     ]);
 }
 
+struct TerminalTab {
+    view: Entity<TerminalView>,
+    _subscription: Subscription,
+}
+
 pub struct NebulaWorkspace {
-    dock_area: Entity<DockArea>,
-    tab_panel: Entity<TabPanel>,
-    _subscriptions: Vec<Subscription>,
+    tabs: Vec<TerminalTab>,
+    active: usize,
+    sidebar_collapsed: bool,
 }
 
 impl NebulaWorkspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let dock_area = cx.new(|cx| DockArea::new("nebula-workspace", Some(1), window, cx));
-        let weak_dock = dock_area.downgrade();
-
-        let panel = cx.new(|cx| TerminalPanel::new(window, cx));
-        let tabs = DockItem::tabs(vec![Arc::new(panel.clone())], &weak_dock, window, cx);
-        let tab_panel = match &tabs {
-            DockItem::Tabs { view, .. } => view.clone(),
-            _ => unreachable!("DockItem::tabs 恒定返回 Tabs 变体"),
-        };
-        dock_area.update(cx, |dock, cx| dock.set_center(tabs, window, cx));
-
-        let subscriptions = vec![
-            cx.subscribe_in(&panel, window, Self::on_terminal_event),
-            cx.subscribe_in(&tab_panel, window, Self::on_tab_layout_event),
-        ];
-
-        // 首个 Tab 的 active_ix 保持 0 不变，TabPanel 不会触发激活回调，
-        // 手动把初始输入焦点交给终端。
-        let focus = panel.read(cx).focus_handle(cx);
-        window.defer(cx, move |window, _| window.focus(&focus));
-
-        Self { dock_area, tab_panel, _subscriptions: subscriptions }
+        let mut this = Self { tabs: Vec::new(), active: 0, sidebar_collapsed: false };
+        this.add_terminal(window, cx);
+        this
     }
 
     fn add_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let panel = cx.new(|cx| TerminalPanel::new(window, cx));
-        self._subscriptions.push(cx.subscribe_in(&panel, window, Self::on_terminal_event));
-        // add_panel 会激活新 Tab 并把焦点交给面板（即终端）。
-        self.tab_panel.update(cx, |tabs, cx| tabs.add_panel(Arc::new(panel), window, cx));
-    }
-
-    fn close_active_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(panel) = self.tab_panel.read(cx).active_panel(cx) else { return };
-        self.tab_panel.update(cx, |tabs, cx| tabs.remove_panel(panel, window, cx));
-        self.quit_if_empty(cx);
-    }
-
-    /// 终端应用惯例：最后一个 Tab 关闭即退出应用。
-    fn quit_if_empty(&self, cx: &mut Context<Self>) {
-        if self.tab_panel.read(cx).active_panel(cx).is_none() {
-            cx.quit();
-        }
+        let view = cx.new(TerminalView::new);
+        let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);
+        self.tabs.push(TerminalTab { view: view.clone(), _subscription: subscription });
+        self.active = self.tabs.len() - 1;
+        self.focus_active(window, cx);
+        cx.notify();
     }
 
     fn on_terminal_event(
         &mut self,
-        panel: &Entity<TerminalPanel>,
-        event: &TerminalPanelEvent,
+        view: &Entity<TerminalView>,
+        event: &TerminalViewEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
-            TerminalPanelEvent::TitleChanged => {
-                // Tab 标题渲染在 TabPanel 的渲染树里，面板自身的 notify
-                // 不会让 TabPanel 重绘，需要在这里转发。
-                self.tab_panel.update(cx, |_, cx| cx.notify());
-            },
-            TerminalPanelEvent::Exited | TerminalPanelEvent::CloseRequested => {
-                let panel = panel.clone();
-                self.tab_panel.update(cx, |tabs, cx| {
-                    tabs.remove_panel(Arc::new(panel), window, cx);
-                });
-                self.quit_if_empty(cx);
+            // 侧边栏标题渲染在本视图里，直接重绘。
+            TerminalViewEvent::TitleChanged => cx.notify(),
+            TerminalViewEvent::Exited => {
+                let id = view.entity_id();
+                if let Some(ix) = self.tabs.iter().position(|t| t.view.entity_id() == id) {
+                    self.close_tab(ix, window, cx);
+                }
             },
         }
     }
 
-    fn on_tab_layout_event(
-        &mut self,
-        _: &Entity<TabPanel>,
-        event: &PanelEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // 覆盖用户直接点 Tab 关闭按钮的路径（不经过 workspace）。
-        if matches!(event, PanelEvent::LayoutChanged) {
-            self.quit_if_empty(cx);
+    /// 终端应用惯例：最后一个 Tab 关闭即退出应用。
+    fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
         }
+        let tab = self.tabs.remove(ix);
+        // 立即回收会话；实体引用清零后 TerminalView::drop 再兜底。
+        tab.view.read(cx).shutdown();
+
+        if self.tabs.is_empty() {
+            cx.quit();
+            return;
+        }
+        if ix < self.active {
+            self.active -= 1;
+        }
+        if self.active >= self.tabs.len() {
+            self.active = self.tabs.len() - 1;
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix < self.tabs.len() && ix != self.active {
+            self.active = ix;
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab(self.active, window, cx);
+    }
+
+    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(self.active) {
+            let focus = tab.view.read(cx).focus_handle.clone();
+            window.defer(cx, move |window, _| window.focus(&focus));
+        }
+    }
+
+    fn tab_title(&self, ix: usize, cx: &App) -> SharedString {
+        const MAX_CHARS: usize = 20;
+        let title = &self.tabs[ix].view.read(cx).title;
+        let mut chars = title.chars();
+        let head: String = chars.by_ref().take(MAX_CHARS).collect();
+        if chars.next().is_some() { format!("{head}…").into() } else { head.into() }
+    }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let sidebar_bg = theme.sidebar;
+        let sidebar_border = theme.sidebar_border;
+        let muted = theme.muted_foreground;
+        let active_bg = theme.sidebar_accent;
+        let active_fg = theme.sidebar_accent_foreground;
+        let hover_bg = theme.list_hover;
+
+        let items = (0..self.tabs.len()).map(|ix| {
+            let active = ix == self.active;
+            let title = self.tab_title(ix, cx);
+            h_flex()
+                .id(("sidebar-tab", ix))
+                .gap_2()
+                .px_2()
+                .h(px(30.0))
+                .items_center()
+                .rounded_md()
+                .cursor_pointer()
+                .when(active, |item| item.bg(active_bg).text_color(active_fg))
+                .when(!active, |item| {
+                    item.text_color(muted).hover(|style| style.bg(hover_bg))
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.activate_tab(ix, window, cx);
+                }))
+                .child(
+                    Icon::new(IconName::SquareTerminal)
+                        .small()
+                        .text_color(if active { active_fg } else { muted }),
+                )
+                .child(div().flex_1().min_w_0().text_sm().truncate().child(title))
+                .child(
+                    Button::new(("close-tab", ix))
+                        .icon(IconName::Close)
+                        .ghost()
+                        .xsmall()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(ix, window, cx);
+                        })),
+                )
+        });
+
+        v_flex()
+            .w(px(210.0))
+            .h_full()
+            .flex_shrink_0()
+            .bg(sidebar_bg)
+            .border_r_1()
+            .border_color(sidebar_border)
+            .p_2()
+            .gap_1()
+            .child(
+                h_flex()
+                    .px_2()
+                    .pb_1()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("TABS {}", self.tabs.len())),
+                    )
+                    .child(
+                        Button::new("sidebar-new-tab")
+                            .icon(IconName::Plus)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("新建终端 (Ctrl+Shift+T)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_terminal(window, cx);
+                            })),
+                    ),
+            )
+            .child(v_flex().flex_1().gap_1().children(items))
+            .child(
+                h_flex().px_1().child(
+                    Button::new("open-gallery")
+                        .icon(IconName::Settings)
+                        .ghost()
+                        .small()
+                        .tooltip("组件验收页")
+                        .on_click(|_, _, cx| {
+                            crate::app::open_gallery_window(cx);
+                        }),
+                ),
+            )
     }
 }
 
 impl Render for NebulaWorkspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme_border = cx.theme().border;
+        let collapsed = self.sidebar_collapsed;
+        let active_terminal = self.tabs.get(self.active).map(|tab| tab.view.clone());
+
         div()
             .size_full()
             .flex()
@@ -125,58 +230,62 @@ impl Render for NebulaWorkspace {
                 this.add_terminal(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseActiveTerminal, window, cx| {
-                this.close_active_terminal(window, cx);
+                this.close_active(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.sidebar_collapsed = !this.sidebar_collapsed;
+                cx.notify();
             }))
             .child(
                 TitleBar::new()
                     .child(
-                        div()
-                            .flex()
+                        h_flex()
+                            .gap_1()
                             .items_center()
-                            .gap_2()
+                            .occlude()
+                            .child(
+                                Button::new("toggle-sidebar")
+                                    .icon(if collapsed {
+                                        IconName::PanelLeftOpen
+                                    } else {
+                                        IconName::PanelLeftClose
+                                    })
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("折叠/展开侧边栏 (Ctrl+Shift+B)")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sidebar_collapsed = !this.sidebar_collapsed;
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 div()
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("Nebula"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("GPUI"),
                             ),
                     )
+                    .child(div()),
+            )
+            .child(
+                // 不用 h_flex：它默认 items_center，会把子项高度压成内容高度。
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h_0()
+                    .when(!collapsed, |root| root.child(self.render_sidebar(cx)))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .pr_2()
-                            // 阻止标题栏拖拽区吃掉按钮点击。
-                            .occlude()
-                            .child(
-                                Button::new("new-terminal")
-                                    .icon(IconName::Plus)
-                                    .ghost()
-                                    .small()
-                                    .tooltip("新建终端 (Ctrl+Shift+T)")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_terminal(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("open-gallery")
-                                    .icon(IconName::LayoutDashboard)
-                                    .ghost()
-                                    .small()
-                                    .tooltip("组件验收页")
-                                    .on_click(|_, _, cx| {
-                                        crate::app::open_gallery_window(cx);
-                                    }),
-                            ),
+                        div().flex_1().min_w_0().p_2().child(
+                            div()
+                                .size_full()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme_border)
+                                .overflow_hidden()
+                                .children(active_terminal),
+                        ),
                     ),
             )
-            .child(div().flex_1().min_h_0().child(self.dock_area.clone()))
     }
 }
