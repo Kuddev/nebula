@@ -393,6 +393,121 @@ fn a_cursor_parked_after_the_text_survives_a_narrow_drag() {
     assert_eq!(grid.cursor.point, Point::new(Line(0), Column(text.len())), "cursor after the drag");
 }
 
+#[test]
+fn display_iterator_can_crop_to_the_bottom_of_the_live_viewport() {
+    let mut grid = Grid::<usize>::new(4, 3, 0);
+    for line in 0..4 {
+        for column in 0..3 {
+            grid[Line(line)][Column(column)] = line as usize * 10 + column;
+        }
+    }
+
+    let points: Vec<_> = grid
+        .display_iter_from(Line(2), 2, 2)
+        .map(|cell| (cell.point, *cell.cell))
+        .collect();
+
+    assert_eq!(
+        points,
+        vec![
+            (Point::new(Line(2), Column(0)), 20),
+            (Point::new(Line(2), Column(1)), 21),
+            (Point::new(Line(3), Column(0)), 30),
+            (Point::new(Line(3), Column(1)), 31),
+        ]
+    );
+}
+
+/// A crop that does not reach the grid's bottom row must not leak the row
+/// below it: the renderer trusts every yielded point to be inside the
+/// requested viewport.
+#[test]
+fn display_iterator_crop_stops_above_uncovered_bottom_rows() {
+    let mut grid = Grid::<usize>::new(4, 3, 0);
+    for line in 0..4 {
+        for column in 0..3 {
+            grid[Line(line)][Column(column)] = line as usize * 10 + column;
+        }
+    }
+
+    let points: Vec<_> = grid.display_iter_from(Line(0), 2, 3).map(|cell| cell.point).collect();
+
+    assert_eq!(
+        points,
+        vec![
+            Point::new(Line(0), Column(0)),
+            Point::new(Line(0), Column(1)),
+            Point::new(Line(0), Column(2)),
+            Point::new(Line(1), Column(0)),
+            Point::new(Line(1), Column(1)),
+            Point::new(Line(1), Column(2)),
+        ]
+    );
+}
+
+#[test]
+fn conpty_grow_lines_pins_rows_cursor_and_scrollback() {
+    let mut grid = Grid::<usize>::new(2, 1, 10);
+    grid[Line(0)][Column(0)] = 1;
+    grid[Line(1)][Column(0)] = 2;
+    grid.scroll_up::<usize>(&(Line(0)..Line(2)), 1);
+    grid[Line(1)][Column(0)] = 3;
+    grid.cursor.point = Point::new(Line(1), Column(0));
+
+    grid.resize_conpty::<usize>(true, 4, 1);
+
+    assert_eq!(grid.cursor.point.line, Line(1));
+    assert_eq!(grid[Line(0)][Column(0)], 2);
+    assert_eq!(grid[Line(1)][Column(0)], 3);
+    assert_eq!(grid[Line(2)][Column(0)], 0);
+    assert_eq!(grid[Line(3)][Column(0)], 0);
+    assert_eq!(grid.history_size(), 1);
+    assert_eq!(grid[Line(-1)][Column(0)], 1);
+}
+
+#[test]
+fn conpty_shrink_lines_keeps_the_last_written_row_visible() {
+    let mut grid = Grid::<usize>::new(4, 1, 10);
+    for line in 0..4 {
+        grid[Line(line)][Column(0)] = line as usize + 1;
+    }
+    grid.cursor.point = Point::new(Line(2), Column(0));
+
+    grid.resize_conpty::<usize>(true, 2, 1);
+
+    assert_eq!(grid[Line(0)][Column(0)], 3);
+    assert_eq!(grid[Line(1)][Column(0)], 4);
+    assert_eq!(grid.cursor.point.line, Line(0));
+    assert_eq!(grid.history_size(), 2);
+    assert_eq!(grid[Line(-1)][Column(0)], 2);
+    assert_eq!(grid[Line(-2)][Column(0)], 1);
+}
+
+/// ConPTY and Windows Terminal reflow the blank cell immediately before the
+/// cursor even when it has the default attributes.  Without it, a cursor that
+/// lands exactly on the new right edge is stored as pending-wrap on the old
+/// row, while conhost has already moved it to the next row; the next absolute
+/// CUP emitted by PSReadLine then targets different rows in the two buffers.
+#[test]
+fn shrinking_at_the_cursor_column_reflows_implicit_cursor_whitespace() {
+    let mut grid = Grid::<Cell>::new(3, 10, 8);
+    for (i, c) in "abc".chars().enumerate() {
+        grid[Line(2)][Column(i)] = cell(c);
+    }
+    grid.cursor.point = Point::new(Line(2), Column(5));
+
+    grid.resize(true, 3, 5);
+
+    assert!(grid[Line(1)][Column(4)].flags.contains(Flags::WRAPLINE));
+    assert_eq!(grid.cursor.point, Point::new(Line(2), Column(0)));
+    assert!(!grid.cursor.input_needs_wrap);
+
+    grid.resize(true, 3, 10);
+
+    assert_eq!(grid.cursor.point, Point::new(Line(2), Column(5)));
+    assert!(!grid.cursor.input_needs_wrap);
+}
+
 /// Opting out keeps shrink-time wrapping but never re-merges, so rows stay
 /// split — the legacy in-box ConPTY contract.
 #[test]

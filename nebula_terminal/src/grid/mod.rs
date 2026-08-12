@@ -459,8 +459,9 @@ impl<T> Grid<T> {
     /// Iterate over all cells in the grid starting at a specific point.
     #[inline]
     pub fn iter_from(&self, point: Point) -> GridIterator<'_, T> {
-        let end = Point::new(self.bottommost_line(), self.last_column());
-        GridIterator { grid: self, point, end }
+        let last_column = self.last_column();
+        let end = Point::new(self.bottommost_line(), last_column);
+        GridIterator { grid: self, point, end, last_column }
     }
 
     /// Iterate over all visible cells.
@@ -474,7 +475,29 @@ impl<T> Grid<T> {
         let end_line = min(start.line + self.screen_lines(), self.bottommost_line());
         let end = Point::new(end_line, last_column);
 
-        GridIterator { grid: self, point: start, end }
+        GridIterator { grid: self, point: start, end, last_column }
+    }
+
+    /// Iterate over a viewport inside the currently displayed grid area.
+    ///
+    /// The requested dimensions may temporarily differ from the grid while a
+    /// host throttles terminal reflow during an interactive resize.  Keeping
+    /// the iterator bounded here avoids allocating a projected grid just to
+    /// render the clipped viewport.
+    #[inline]
+    pub fn display_iter_from(&self, top: Line, lines: usize, columns: usize) -> GridIterator<'_, T> {
+        debug_assert!(lines > 0);
+        debug_assert!(columns > 0);
+
+        let columns = min(columns, self.columns);
+        let lines = min(lines, (self.bottommost_line() - top).0.max(0) as usize + 1);
+        let last_column = Column(columns - 1);
+        // `start` sits one cell before the first yielded cell; advancing by
+        // `lines` rows therefore lands exactly on the crop's last row.
+        let start = Point::new(top - 1, last_column);
+        let end = Point::new(start.line + lines, last_column);
+
+        GridIterator { grid: self, point: start, end, last_column }
     }
 
     #[inline]
@@ -633,6 +656,13 @@ pub struct GridIterator<'a, T> {
 
     /// Last cell included in the iterator.
     end: Point,
+
+    /// Column at which a row ends and the iterator wraps to the next line.
+    ///
+    /// This matches the grid's last column except for viewport crops created
+    /// by [`Grid::display_iter_from`], which never yield cells past the
+    /// cropped width.
+    last_column: Column,
 }
 
 impl<'a, T> GridIterator<'a, T> {
@@ -657,7 +687,7 @@ impl<'a, T> Iterator for GridIterator<'a, T> {
         }
 
         match self.point {
-            Point { column, .. } if column >= self.grid.last_column() => {
+            Point { column, .. } if column >= self.last_column => {
                 self.point.column = Column(0);
                 self.point.line += 1;
             },
@@ -672,14 +702,15 @@ impl<'a, T> Iterator for GridIterator<'a, T> {
             return (0, Some(0));
         }
 
+        let row_width = self.last_column.0 + 1;
         let size = if self.point.line == self.end.line {
             (self.end.column - self.point.column).0
         } else {
-            let cols_on_first_line = self.grid.columns.saturating_sub(self.point.column.0 + 1);
+            let cols_on_first_line = row_width.saturating_sub(self.point.column.0 + 1);
             let middle_lines = (self.end.line - self.point.line).0 as usize - 1;
             let cols_on_last_line = self.end.column + 1;
 
-            cols_on_first_line + middle_lines * self.grid.columns + cols_on_last_line.0
+            cols_on_first_line + middle_lines * row_width + cols_on_last_line.0
         };
 
         (size, Some(size))
@@ -694,7 +725,6 @@ pub trait BidirectionalIterator: Iterator {
 impl<T> BidirectionalIterator for GridIterator<'_, T> {
     fn prev(&mut self) -> Option<Self::Item> {
         let topmost_line = self.grid.topmost_line();
-        let last_column = self.grid.last_column();
 
         // Stop once we've reached the end of the grid.
         if self.point <= Point::new(topmost_line, Column(0)) {
@@ -703,7 +733,7 @@ impl<T> BidirectionalIterator for GridIterator<'_, T> {
 
         match self.point {
             Point { column: Column(0), .. } => {
-                self.point.column = last_column;
+                self.point.column = self.last_column;
                 self.point.line -= 1;
             },
             _ => self.point.column -= Column(1),

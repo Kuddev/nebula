@@ -16,12 +16,34 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         T: ResetDiscriminant<D>,
         D: PartialEq,
     {
+        self.resize_impl(reflow, false, lines, columns);
+    }
+
+    /// Resize the grid with the row anchoring used by Windows ConPTY.
+    ///
+    /// ConPTY silently re-anchors its private screen buffer when its geometry
+    /// changes, then keeps emitting absolute CUP coordinates against that new
+    /// layout. The primary grid must make the same row decisions or PSReadLine
+    /// redraws target a different line after a window resize.
+    pub fn resize_conpty<D>(&mut self, reflow: bool, lines: usize, columns: usize)
+    where
+        T: ResetDiscriminant<D>,
+        D: PartialEq,
+    {
+        self.resize_impl(reflow, true, lines, columns);
+    }
+
+    fn resize_impl<D>(&mut self, reflow: bool, conpty: bool, lines: usize, columns: usize)
+    where
+        T: ResetDiscriminant<D>,
+        D: PartialEq,
+    {
         // Use empty template cell for resetting cells due to resize.
         let template = mem::take(&mut self.cursor.template);
 
         match self.lines.cmp(&lines) {
-            Ordering::Less => self.grow_lines(lines),
-            Ordering::Greater => self.shrink_lines(lines),
+            Ordering::Less => self.grow_lines(conpty, lines),
+            Ordering::Greater => self.shrink_lines(conpty, lines),
             Ordering::Equal => (),
         }
 
@@ -76,7 +98,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     /// Nebula keeps the cursor at the bottom of the terminal as long as there
     /// is scrollback available. Once scrollback is exhausted, new lines are
     /// simply added to the bottom of the screen.
-    fn grow_lines<D>(&mut self, target: usize)
+    ///
+    /// ConPTY does not restore scrollback when growing. It leaves visible rows
+    /// and the cursor pinned, opening blank rows below them instead.
+    fn grow_lines<D>(&mut self, conpty: bool, target: usize)
     where
         T: ResetDiscriminant<D>,
         D: PartialEq,
@@ -88,7 +113,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         self.lines = target;
 
         let history_size = self.history_size();
-        let from_history = min(history_size, lines_added);
+        let from_history = if conpty { 0 } else { min(history_size, lines_added) };
 
         // Move existing lines up for every line that couldn't be pulled from history.
         if from_history != lines_added {
@@ -111,18 +136,28 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     /// of the terminal window.
     ///
     /// Nebula takes the same approach.
-    fn shrink_lines<D>(&mut self, target: usize)
+    ///
+    /// ConPTY anchors the shrink to the last written row rather than only the
+    /// parser cursor: PSReadLine can leave a continuation hint below its cursor
+    /// and will repaint it with absolute CUP coordinates after the resize.
+    fn shrink_lines<D>(&mut self, conpty: bool, target: usize)
     where
         T: ResetDiscriminant<D>,
         D: PartialEq,
     {
+        let cursor_line = self.cursor.point.line.0 as usize;
+
         // Scroll up to keep content inside the window.
-        let required_scrolling = (self.cursor.point.line.0 as usize + 1).saturating_sub(target);
+        let required_scrolling = self.shrink_scroll_amount(conpty, target);
         if required_scrolling > 0 {
             self.scroll_up(&(Line(0)..Line(self.lines as i32)), required_scrolling);
 
-            // Clamp cursors to the new viewport size.
-            self.cursor.point.line = min(self.cursor.point.line, Line(target as i32 - 1));
+            // The primary cursor follows its content, but never scrolls above
+            // the viewport when the content anchor was below it.
+            self.cursor.point.line = min(
+                Line((cursor_line - min(required_scrolling, cursor_line)) as i32),
+                Line(target as i32 - 1),
+            );
         }
 
         // Clamp saved cursor, since only primary cursor is scrolled into viewport.
@@ -131,6 +166,36 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         self.raw.rotate((self.lines - target) as isize);
         self.raw.shrink_visible_lines(target);
         self.lines = target;
+    }
+
+    /// Viewport rows a shrink to `target` visible lines will scroll out.
+    ///
+    /// This is exposed to the renderer so a host that defers the actual
+    /// resize to a commit point can crop exactly the rows the upcoming
+    /// shrink will keep visible, making the settled reflow land without a
+    /// visual jump.
+    pub(crate) fn shrink_scroll_amount(&self, conpty: bool, target: usize) -> usize {
+        let cursor_line = self.cursor.point.line.0 as usize;
+
+        let mut required_scrolling = (cursor_line + 1).saturating_sub(target);
+        if conpty {
+            let last_written = max(cursor_line, self.bottommost_occupied_line());
+            let by_content = (last_written + 1).saturating_sub(target);
+            // Never scroll farther than the cursor can follow; ConPTY keeps a
+            // cursor near the top visible even if stale content extends below.
+            required_scrolling = max(required_scrolling, min(by_content, cursor_line));
+        }
+
+        required_scrolling
+    }
+
+    /// Bottommost viewport row containing a non-empty cell.
+    #[inline]
+    fn bottommost_occupied_line(&self) -> usize {
+        (0..self.lines)
+            .rev()
+            .find(|&line| !self.raw[Line(line as i32)].is_clear())
+            .unwrap_or(0)
     }
 
     /// Grow number of columns in each row, reflowing if necessary.
@@ -323,12 +388,21 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             }
 
             loop {
+                let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
+                let minimum = if reflow && i == cursor_buffer_line {
+                    // WT's `oldCursorPos.x + 1`: default cells before a cursor
+                    // are part of the logical row even though `Row::shrink`
+                    // would normally trim them as invisible trailing space.
+                    self.cursor.point.column.0 + 1
+                } else {
+                    0
+                };
+
                 // Remove all cells which require reflowing.
-                let mut wrapped = match row.shrink(columns) {
+                let mut wrapped = match row.shrink_with_minimum(columns, minimum) {
                     Some(wrapped) if reflow => wrapped,
                     _ => {
-                        let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
-                        if reflow && i == cursor_buffer_line && self.cursor.point.column > columns {
+                        if reflow && i == cursor_buffer_line && self.cursor.point.column >= columns {
                             // If there are empty cells before the cursor, we assume it is explicit
                             // whitespace and need to wrap it like normal content.
                             Vec::new()

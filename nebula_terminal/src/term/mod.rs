@@ -131,15 +131,30 @@ impl Default for TermMode {
 /// Convert a terminal point to a viewport relative point.
 #[inline]
 pub fn point_to_viewport(display_offset: usize, point: Point) -> Option<Point<usize>> {
-    let viewport_line = point.line.0 + display_offset as i32;
+    point_to_viewport_from(Line(-(display_offset as i32)), point)
+}
+
+/// Convert a terminal point to a viewport-relative point with an explicit top row.
+///
+/// This is used when the renderer temporarily crops an already committed grid
+/// during an interactive host resize.  `display_offset` alone cannot represent
+/// a crop below the live viewport because that crop has a positive origin.
+#[inline]
+pub fn point_to_viewport_from(origin: Line, point: Point) -> Option<Point<usize>> {
+    let viewport_line = point.line.0 - origin.0;
     usize::try_from(viewport_line).ok().map(|line| Point::new(line, point.column))
 }
 
 /// Convert a viewport relative point to a terminal point.
 #[inline]
 pub fn viewport_to_point(display_offset: usize, point: Point<usize>) -> Point {
-    let line = Line(point.line as i32) - display_offset;
-    Point::new(line, point.column)
+    viewport_to_point_from(Line(-(display_offset as i32)), point)
+}
+
+/// Convert a point relative to an explicit viewport top row back to grid space.
+#[inline]
+pub fn viewport_to_point_from(origin: Line, point: Point<usize>) -> Point {
+    Point::new(origin + point.line as i32, point.column)
 }
 
 pub struct Term<T> {
@@ -253,6 +268,14 @@ pub struct Config {
     /// side-loaded ConPTY sessions whose bring-up handshake was pre-primed
     /// (the host already got its answer before it spawned).
     pub suppress_bringup_da1: bool,
+
+    /// Use ConPTY's primary-screen row anchoring during resize.
+    ///
+    /// ConPTY keeps painting absolute cursor coordinates after silently
+    /// re-anchoring its private buffer, so the visible grid must preserve the
+    /// same row layout. The alternate screen intentionally keeps normal
+    /// behavior because applications repaint it themselves.
+    pub conpty_resize: bool,
 }
 
 impl Default for Config {
@@ -265,6 +288,7 @@ impl Default for Config {
             kitty_keyboard: Default::default(),
             osc52: Default::default(),
             suppress_bringup_da1: false,
+            conpty_resize: false,
         }
     }
 }
@@ -661,6 +685,58 @@ impl<T> Term<T> {
         RenderableContent::new(self)
     }
 
+    /// Create renderable content clipped to a visual viewport.
+    ///
+    /// Hosts which debounce ConPTY resizes must not reflow the terminal grid on
+    /// every drag tick: doing so gives the renderer a width history that the
+    /// child never received.  The host can render a crop of the last committed
+    /// grid until it atomically commits the next grid/PTY size pair.
+    #[inline]
+    pub fn renderable_content_with_viewport(
+        &self,
+        lines: usize,
+        columns: usize,
+    ) -> RenderableContent<'_>
+    where
+        T: EventListener,
+    {
+        RenderableContent::with_viewport(self, lines, columns)
+    }
+
+    /// First grid row shown at line zero of a `lines`-tall visual viewport.
+    ///
+    /// While an interactive resize is between commit points the visual
+    /// viewport can be smaller than the grid. The crop previews exactly the
+    /// rows the deferred shrink will keep visible — the same anchor
+    /// [`Grid::resize`]/[`Grid::resize_conpty`] will use — so the settled
+    /// reflow lands without a visual jump. A user scrolled into history stays
+    /// anchored to the row they are reading instead.
+    #[inline]
+    pub fn viewport_origin_for(&self, lines: usize) -> Line {
+        let display_offset = self.grid.display_offset();
+        if display_offset != 0 || lines >= self.grid.screen_lines() {
+            return Line(-(display_offset as i32));
+        }
+
+        // The alternate screen is repainted by its application after the
+        // commit, and its shrink only ever follows the cursor.
+        let conpty = self.config.conpty_resize && !self.mode.contains(TermMode::ALT_SCREEN);
+        Line(self.grid.shrink_scroll_amount(conpty, lines) as i32)
+    }
+
+    /// Convert a point in a `lines`-tall visual viewport to grid space.
+    ///
+    /// The result is clamped to cells that exist in the grid: during a
+    /// deferred resize the visual viewport can extend past the committed
+    /// grid, and input must not index rows or columns that are not there yet.
+    #[inline]
+    pub fn visual_viewport_to_point(&self, lines: usize, point: Point<usize>) -> Point {
+        let mut point = viewport_to_point_from(self.viewport_origin_for(lines), point);
+        point.line = cmp::min(point.line, self.bottommost_line());
+        point.column = cmp::min(point.column, self.grid.last_column());
+        point
+    }
+
     /// Access to the raw grid data structure.
     pub fn grid(&self) -> &Grid<Cell> {
         &self.grid
@@ -694,8 +770,21 @@ impl<T> Term<T> {
         self.vi_mode_cursor.point.line += delta;
 
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
-        self.grid.resize(!is_alt, num_lines, num_cols);
-        self.inactive_grid.resize(is_alt, num_lines, num_cols);
+        if self.config.conpty_resize {
+            // The primary screen might currently be inactive. Preserve ConPTY
+            // row semantics there only; full-screen applications own and repaint
+            // the alternate screen after a resize.
+            if is_alt {
+                self.grid.resize(!is_alt, num_lines, num_cols);
+                self.inactive_grid.resize_conpty(is_alt, num_lines, num_cols);
+            } else {
+                self.grid.resize_conpty(!is_alt, num_lines, num_cols);
+                self.inactive_grid.resize(is_alt, num_lines, num_cols);
+            }
+        } else {
+            self.grid.resize(!is_alt, num_lines, num_cols);
+            self.inactive_grid.resize(is_alt, num_lines, num_cols);
+        }
 
         // Reflow rewraps history rows, so absolute prompt-mark lines no longer
         // match; drop them rather than jump to shifted positions.
@@ -2535,6 +2624,43 @@ mod tests {
 
         term.unset_private_mode(PrivateMode::Unknown(9001));
         assert!(!term.mode().contains(TermMode::WIN32_INPUT_MODE));
+    }
+
+    /// The visual-viewport crop previews the anchor of the deferred resize,
+    /// so the settled reflow shows exactly the rows the drag was showing.
+    #[test]
+    fn viewport_origin_previews_the_deferred_resize_crop() {
+        let size = TermSize::new(10, 4);
+        let config = Config { conpty_resize: true, ..Config::default() };
+        let mut term = Term::new(config, &size, VoidListener);
+
+        // Cursor on row 1 with output left behind on row 3.
+        term.grid.cursor.point = Point::new(Line(1), Column(0));
+        term.grid[Line(3)][Column(0)].c = 'x';
+
+        // Nothing to crop while the viewport matches or exceeds the grid.
+        assert_eq!(term.viewport_origin_for(4), Line(0));
+        assert_eq!(term.viewport_origin_for(6), Line(0));
+
+        // ConPTY's shrink keeps the last written row visible; the crop
+        // previews that same anchor.
+        assert_eq!(term.viewport_origin_for(3), Line(1));
+
+        // The alternate screen is repainted by its application after the
+        // commit and only ever follows the cursor.
+        term.swap_alt();
+        term.grid.cursor.point = Point::new(Line(1), Column(0));
+        term.grid[Line(3)][Column(0)].c = 'x';
+        assert_eq!(term.viewport_origin_for(3), Line(0));
+
+        // A user scrolled into history stays anchored to the row they are
+        // reading instead of the crop.
+        term.swap_alt();
+        for _ in 0..8 {
+            term.newline();
+        }
+        term.scroll_display(Scroll::Delta(2));
+        assert_eq!(term.viewport_origin_for(3), Line(-2));
     }
 
     #[test]

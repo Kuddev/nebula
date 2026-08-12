@@ -72,13 +72,29 @@ impl<T: Default> Row<T> {
     where
         T: GridCell,
     {
+        self.shrink_with_minimum(columns, 0)
+    }
+
+    /// Split cells past `columns`, retaining default cells through `minimum`.
+    ///
+    /// A cursor can be positioned after default-attribute whitespace which is
+    /// intentionally absent from the row's visible content. Reflow still has
+    /// to move those cells: ConPTY measures the cursor's column as content for
+    /// this purpose, otherwise its following absolute cursor movement lands on
+    /// a different row from the renderer.
+    pub fn shrink_with_minimum(&mut self, columns: usize, minimum: usize) -> Option<Vec<T>>
+    where
+        T: GridCell,
+    {
         if self.inner.len() <= columns {
             return None;
         }
 
         // Split off cells for a new row.
         let mut new_row = self.inner.split_off(columns);
-        let index = new_row.iter().rposition(|c| !c.is_empty()).map_or(0, |i| i + 1);
+        let content = new_row.iter().rposition(|c| !c.is_empty()).map_or(0, |i| i + 1);
+        let cursor = minimum.saturating_sub(columns).min(new_row.len());
+        let index = max(content, cursor);
         new_row.truncate(index);
 
         self.occ = min(self.occ, columns);

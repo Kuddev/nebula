@@ -1,7 +1,7 @@
 //! Read-only terminal viewport assembled for the renderer.
 
-use crate::grid::GridIterator;
-use crate::index::Point;
+use crate::grid::{Dimensions, GridIterator};
+use crate::index::{Line, Point};
 use crate::selection::SelectionRange;
 use crate::term::cell::{Cell, Flags};
 use crate::term::color::Colors;
@@ -39,15 +39,28 @@ pub struct RenderableContent<'a> {
     pub selection: Option<SelectionRange>,
     pub cursor: RenderableCursor,
     pub display_offset: usize,
+    /// First grid row rendered at viewport line zero.
+    pub viewport_origin: Line,
     pub colors: &'a Colors,
     pub mode: TermMode,
 }
 
 impl<'a> RenderableContent<'a> {
     pub(super) fn new<T>(term: &'a Term<T>) -> Self {
+        Self::with_viewport(term, term.grid().screen_lines(), term.grid().columns())
+    }
+
+    pub(super) fn with_viewport<T>(term: &'a Term<T>, lines: usize, columns: usize) -> Self {
+        let grid = term.grid();
+        let display_offset = grid.display_offset();
+        // Crop the committed grid to the rows the deferred resize will keep,
+        // so rendering during the drag and the settled reflow agree.
+        let viewport_origin = term.viewport_origin_for(lines);
+
         Self {
-            display_iter: term.grid().display_iter(),
-            display_offset: term.grid().display_offset(),
+            display_iter: grid.display_iter_from(viewport_origin, lines, columns),
+            display_offset,
+            viewport_origin,
             cursor: RenderableCursor::new(term),
             selection: term.selection.as_ref().and_then(|selection| selection.to_range(term)),
             colors: &term.colors,
