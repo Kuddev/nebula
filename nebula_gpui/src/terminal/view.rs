@@ -4,21 +4,25 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
     FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent,
-    Styled as _, UTF16Selection, Window, div, point, px,
+    Size, Styled as _, UTF16Selection, Window, div, point, px,
 };
 use gpui_component::PixelsExt as _;
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
 use nebula_terminal::event_loop::Msg;
 use nebula_terminal::grid::Scroll;
 use nebula_terminal::index::{Column, Point as TermPoint, Side};
+use nebula_terminal::render::{CellMetrics, ViewportTracker};
 use nebula_terminal::selection::{Selection, SelectionType};
 use nebula_terminal::term::TermMode;
 use nebula_terminal::term::viewport_to_point;
 
-use super::colors;
+use std::sync::Arc;
+
+use super::colors::Palette;
 use super::element::TerminalElement;
 use super::keymap;
 use super::session::{self, GridSize, TerminalSession};
+use crate::config::Settings;
 
 use futures::StreamExt as _;
 
@@ -39,6 +43,7 @@ pub struct TerminalView {
     pub font_bold_italic: Font,
     pub font_size: Pixels,
     pub line_height_mul: f32,
+    pub palette: Arc<Palette>,
     pub marked_text: Option<String>,
     pub ime_bounds: Bounds<Pixels>,
     pub title: String,
@@ -50,16 +55,36 @@ pub struct TerminalView {
     cols: usize,
     rows: usize,
     window_size: WindowSize,
+    viewports: ViewportTracker,
     scroll_px: f32,
     selecting: bool,
 }
 
 impl TerminalView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let mono = |weight: FontWeight, style: FontStyle| Font {
+        // 字体与调色板来自用户 nebula.toml（bootstrap 时装载为全局 Settings）。
+        let (families, font_size, palette) = match cx.try_global::<Settings>() {
+            Some(settings) => (
+                [
+                    settings.font_family.clone(),
+                    settings.font_bold_family.clone(),
+                    settings.font_italic_family.clone(),
+                    settings.font_bold_italic_family.clone(),
+                ],
+                px(settings.font_size_px),
+                Arc::new(settings.palette.clone()),
+            ),
+            None => (
+                std::array::from_fn(|_| String::from("Cascadia Mono")),
+                px(15.0),
+                Arc::new(Palette::default()),
+            ),
+        };
+        // to_string：SharedString 的 &str 转换要求 'static，字体名是运行时值。
+        let mono = |family: &str, weight: FontWeight, style: FontStyle| Font {
             weight,
             style,
-            ..gpui::font("Cascadia Mono")
+            ..gpui::font(family.to_string())
         };
 
         let initial = WindowSize { num_lines: 30, num_cols: 100, cell_width: 9, cell_height: 18 };
@@ -98,12 +123,13 @@ impl TerminalView {
         Self {
             session,
             focus_handle: cx.focus_handle(),
-            font: mono(FontWeight::NORMAL, FontStyle::Normal),
-            font_bold: mono(FontWeight::BOLD, FontStyle::Normal),
-            font_italic: mono(FontWeight::NORMAL, FontStyle::Italic),
-            font_bold_italic: mono(FontWeight::BOLD, FontStyle::Italic),
-            font_size: px(14.0),
+            font: mono(&families[0], FontWeight::NORMAL, FontStyle::Normal),
+            font_bold: mono(&families[1], FontWeight::BOLD, FontStyle::Normal),
+            font_italic: mono(&families[2], FontWeight::NORMAL, FontStyle::Italic),
+            font_bold_italic: mono(&families[3], FontWeight::BOLD, FontStyle::Italic),
+            font_size,
             line_height_mul: 1.25,
+            palette,
             marked_text: None,
             ime_bounds: Bounds::default(),
             title: String::from("shell"),
@@ -115,6 +141,7 @@ impl TerminalView {
             cols: initial.num_cols as usize,
             rows: initial.num_lines as usize,
             window_size: initial,
+            viewports: ViewportTracker::default(),
             scroll_px: 0.0,
             selecting: false,
         }
@@ -147,7 +174,7 @@ impl TerminalView {
             TermEvent::ColorRequest(index, formatter) => {
                 let reply = self.session.as_ref().map(|session| {
                     let term = session.term.lock();
-                    colors::query_reply(index, term.colors())
+                    self.palette.query_reply(index, term.colors())
                 });
                 if let Some(rgb) = reply {
                     self.write_bytes(formatter(rgb).into_bytes());
@@ -205,36 +232,52 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 元素 prepaint 回写布局；行列变化时同步 Term 和 ConPTY。
+    /// 元素 prepaint 回写布局：内容矩形与度量交给渲染合同裁定网格。
+    /// 网格变化时同步 Term 与 ConPTY；行列不变但像素口径变化也上报 PTY
+    /// （Ghostty 规则）；稳态帧 observe 返回 None，零额外开销。
     pub fn set_layout(
         &mut self,
         origin: Point<Pixels>,
         cell_width: Pixels,
         line_height: Pixels,
-        cols: usize,
-        rows: usize,
+        content: Size<Pixels>,
         scale: f32,
     ) {
         self.origin = origin;
         self.cell_width = cell_width;
         self.line_height = line_height;
-        if cols == self.cols && rows == self.rows {
-            return;
-        }
-        self.cols = cols;
-        self.rows = rows;
-        let window_size = WindowSize {
-            num_lines: rows as u16,
-            num_cols: cols as u16,
-            cell_width: (cell_width.as_f32() * scale) as u16,
-            cell_height: (line_height.as_f32() * scale) as u16,
+        let metrics = CellMetrics {
+            cell_width: cell_width.as_f32(),
+            cell_height: line_height.as_f32(),
+            scale,
         };
-        self.window_size = window_size;
+        let Some(change) =
+            self.viewports.observe(content.width.as_f32(), content.height.as_f32(), &metrics)
+        else {
+            return;
+        };
+        let viewport = change.viewport;
+        self.cols = viewport.cols as usize;
+        self.rows = viewport.rows as usize;
+        self.window_size = viewport.window_size();
         if let Some(session) = &self.session {
-            session.term.lock().resize(GridSize { columns: cols, screen_lines: rows });
+            if change.grid_changed {
+                session
+                    .term
+                    .lock()
+                    .resize(GridSize { columns: self.cols, screen_lines: self.rows });
+            }
             let mut notifier = nebula_terminal::event_loop::Notifier(session.notifier.0.clone());
-            notifier.on_resize(window_size);
+            notifier.on_resize(viewport.window_size());
         }
+    }
+
+    pub fn grid_rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn grid_cols(&self) -> usize {
+        self.cols
     }
 
     fn term_mode(&self) -> TermMode {
@@ -496,7 +539,7 @@ impl Render for TerminalView {
             .id("nebula-terminal")
             .size_full()
             .overflow_hidden()
-            .bg(colors::BACKGROUND)
+            .bg(self.palette.background)
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
