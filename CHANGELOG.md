@@ -4,6 +4,44 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
+## Unreleased
+
+### English
+
+#### Added
+
+- **Configurable new-tab placement** — Settings → Interaction can place newly created tabs immediately after the active tab or at the end of the tab list. The choice persists, while restored tabs keep their original ordering semantics.
+- **Configurable terminal cell width** — Settings → Appearance offers Compact and Relaxed cell-width modes. Changing the mode immediately rebuilds font metrics, the terminal grid, pane layout, and PTY dimensions, and the choice persists across launches.
+- **Ordered font fallback chains** — `font_family` accepts comma-separated families such as `JetBrains Mono, LXGW WenKai, Cascadia Code`. The first family remains the primary face, later families fill missing glyphs in order for regular, bold, italic, and bold-italic text, and the embedded Maple font remains the final fallback. System and imported/private fonts now use the same family lookup path for validation, preview, and rendering. (#33)
+- **Middle-click to close tabs** — middle-clicking a tab or its close control follows the existing close flow, including confirmation when required.
+
+#### Fixed
+
+- **Cursor focus and blinking stay in sync across tabs and panes** — cursor rendering now combines the live window focus with the active pane, and switching tabs or panes re-evaluates blinking for the newly focused terminal. Unfocused cursors remain hollow and do not retain a stale blink timer.
+- **Visible Windows windows recover from stuck render gates** — startup-time occlusion misreports and missing frame callbacks can no longer leave an already visible window accepting input without repainting. Occlusion is ignored unless the window is actually minimized, and the existing 1 Hz window heartbeat idempotently releases stale `occluded` and `has_frame` gates. (#21)
+
+#### Improved
+
+- **File/Git side-panel refreshes no longer block rendering** — directory traversal and Git status subprocesses now build a snapshot on a worker thread while the existing view stays usable. Completed snapshots are swapped in atomically; stale-root results are discarded and active search results are not overwritten.
+
+### 简体中文
+
+#### 新增
+
+- **可配置新标签页插入位置** — “设置 → 交互”可选择把新建标签页插在当前标签页之后，或放到标签列表末尾。选择会持久化；恢复会话中的标签页仍保持原有顺序语义。
+- **可配置终端单元格宽度** — “设置 → 外观”新增“紧凑”和“宽松”两种单元格宽度模式。切换后会立即重算字体度量、终端网格、分屏布局和 PTY 尺寸，并在下次启动时保留选择。
+- **有序字体 fallback 链** — `font_family` 支持逗号分隔的字体族，例如 `JetBrains Mono, 霞鹜文楷, Cascadia Code`。第一个字体族仍是主字体，后续字体族按顺序为常规、粗体、斜体和粗斜体补齐缺失字形，内置 Maple 字体始终作为最后兜底。系统字体与导入/私有字体现在统一通过同一族名查找路径完成校验、预览和渲染。（#33）
+- **中键关闭标签页** — 在标签页或其关闭控件上单击鼠标中键，会进入既有的关闭流程；需要确认时仍会正常弹出确认。
+
+#### 修复
+
+- **切换标签页和分屏后光标焦点与闪烁保持同步** — 光标渲染现在同时依据实时窗口焦点与活动分屏，切换标签页或分屏时会重新评估新终端的闪烁状态。失焦光标保持空心，也不会残留旧终端的闪烁计时器。
+- **Windows 可见窗口可从卡死的渲染门控中恢复** — 启动期的遮挡误报或帧回调丢失不再让可见窗口陷入“能接收输入但不重绘”。窗口没有真正最小化时会忽略遮挡误报，既有的 1 Hz 窗口心跳也会以幂等方式释放卡住的 `occluded` 与 `has_frame` 门控。（#21）
+
+#### 改进
+
+- **文件/Git 侧栏刷新不再阻塞渲染** — 目录遍历与 Git 状态子进程改为在工作线程中生成快照，旧内容在刷新期间仍可正常使用。完成后的快照会整体替换；根目录已变化的过期结果会被丢弃，正在显示的搜索结果也不会被覆盖。
+
 ## 1.0.0 - 2026-08-10
 
 ### English
