@@ -44,7 +44,7 @@ bitflags = "2.2.1"
 chrono = "0.4.45"
 clap = { version = "4.2.7", features = ["derive", "env"] }
 copypasta = { version = "0.10.1", default-features = false }
-crossfont = "0.8.1"
+crossfont = "0.9.0"
 glutin = { version = "0.32.2", default-features = false, features = ["egl", "wgl"] }
 html-escape = "0.2.14"
 home = "0.5.5"
@@ -182,7 +182,10 @@ wayland = [
     "glutin/wayland",
     "winit/wayland",
     "winit/wayland-dlopen",
-    "winit/wayland-csd-adwaita-crossfont",
+    # ab_glyph 口味而非 crossfont 口味：摘掉 sctk-adwaita 对 crossfont ^0.8
+    # 的依赖（0.11+ 才升 ^0.9），避免图谱里出现双版本 crossfont → 双版本
+    # yeslogic-fontconfig-sys（links 冲突随之回归）。仅影响 Linux Wayland 窗饰文字。
+    "winit/wayland-csd-adwaita",
 ]
 nightly = []
 wgpu-foundation = ["dep:pollster", "dep:wgpu"]

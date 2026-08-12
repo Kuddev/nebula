@@ -60,22 +60,22 @@ removal condition, and the maintenance owner is explicit.
 
 ## Workspace Boundary
 
-`nebula_gpui` is excluded from the root Cargo workspace because of a proven,
-unresolvable native-link conflict (verified 2026-08-12 by attempting the
-merge and letting Cargo resolve):
+`nebula_gpui` is a member of the root Cargo workspace (merged 2026-08-12).
+The former blocker — two packages holding `links = "fontconfig"` — was
+resolved by aligning both sides on `yeslogic-fontconfig-sys ^6.0`:
 
 - `gpui 0.2.2` → `zed-font-kit 0.14.1-zed` → `yeslogic-fontconfig-sys ^6.0`
-- `nebula` (main app) → `crossfont 0.8.1` → `yeslogic-fontconfig-sys ^5.0`
+- `nebula` → `crossfont 0.9.0` (upstream bumped to `^6.0` in 0.9.0)
+- The winit Wayland decoration feature switched from the crossfont flavor to
+  `wayland-csd-adwaita` (ab_glyph), so `sctk-adwaita 0.10` no longer drags
+  `crossfont ^0.8` (and with it `yeslogic ^5`) back into the graph. This is
+  Linux-only decoration text; Windows/macOS builds are unaffected.
 
-Both packages set `links = "fontconfig"`, Cargo allows exactly one version of
-a `links` key per dependency graph, and `^5`/`^6` have no intersection, so a
-merged workspace fails at resolve time on every platform (the lockfile is
-platform-independent). No patch can fix this without forking a font stack.
-
-The merge becomes possible exactly when `crossfont` leaves the dependency
-graph — that is, when the legacy OpenGL renderer is retired. Until then the
-two workspaces stay separate, and pure Rust core crates such as
-`nebula_terminal` are shared across the boundary via `path` dependencies.
+One lockfile now holds `gpui 0.2.2`, `crossfont 0.9.0`, and a single
+`yeslogic-fontconfig-sys 6.0.1`, and both binaries compile from the merged
+workspace. `crossfont` still leaves the graph entirely when the legacy
+OpenGL renderer is retired; the decoration switch was the first consumer
+removed on that path.
 
 ## Terminal Vertical Slice
 

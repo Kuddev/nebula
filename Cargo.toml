@@ -6,8 +6,8 @@ members = [
     "nebula_config_derive",
     "nebula-completions",
     "nebula_hook",
+    "nebula_gpui",
 ]
-exclude = ["nebula_gpui"]
 resolver = "2"
 
 [workspace.package]
