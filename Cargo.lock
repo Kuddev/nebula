@@ -4666,6 +4666,7 @@ dependencies = [
  "log",
  "mlua",
  "nebula-completions",
+ "nebula-gpui",
  "nebula_config",
  "nebula_config_derive",
  "nebula_terminal",

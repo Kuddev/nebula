@@ -25,6 +25,11 @@ version = "1.0.0"
 path = "../nebula_config"
 version = "1.0.0"
 
+# 可选：进程内 GPUI UI 层（feature = "gpui-shell"）。
+[dependencies.nebula-gpui]
+path = "../nebula_gpui"
+optional = true
+
 [dependencies.nebula-completions]
 path = "../nebula-completions"
 version = "1.0.0"
@@ -189,3 +194,6 @@ wayland = [
 ]
 nightly = []
 wgpu-foundation = ["dep:pollster", "dep:wgpu"]
+# C 路线：在 nebula.exe 进程内的专用线程上拉起 GPUI UI 层。
+# 默认关闭，不影响常规构建；开启后由 NEBULA_GPUI_SHELL=1 触发。
+gpui-shell = ["dep:nebula-gpui"]

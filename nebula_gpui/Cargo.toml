@@ -7,6 +7,12 @@ publish = false
 edition = "2024"
 rust-version = "1.85.0"
 
+# lib + bin 双形态：bin 是开发/验证入口；lib 供 nebula.exe（C 路线）
+# 在专用线程上以 run_shell() 拉起进程内 GPUI UI 层。
+[lib]
+name = "nebula_gpui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nebula-gpui"
 path = "src/main.rs"

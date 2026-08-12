@@ -129,6 +129,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Load command line options.
     let options = Options::new();
 
+    // C 路线 spike：GPUI UI 层跑在专用线程，拥有自己的消息循环与窗口；
+    // 与主线程的 winit 循环互不接管。仅在显式设置环境变量时启动，
+    // 用于验证双 UI 运行时共存（焦点/IME/DPI）。
+    #[cfg(feature = "gpui-shell")]
+    if std::env::var_os("NEBULA_GPUI_SHELL").is_some() {
+        std::thread::Builder::new()
+            .name("gpui-shell".into())
+            .spawn(nebula_gpui::run_shell)
+            .expect("spawn gpui-shell thread");
+    }
+
     #[cfg(windows)]
     if options.subcommands.is_none() && env::var_os("NEBULA_DETACHED_LAUNCH").is_some() {
         // 独立验证实例必须在创建窗口和 ConPTY 前脱离短生命周期的启动控制台，
