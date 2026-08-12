@@ -8,8 +8,8 @@ use std::{cmp, mem, ptr, str};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as Base64;
+use base64::Engine;
 use bitflags::bitflags;
 use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
@@ -289,20 +289,15 @@ pub enum Osc52 {
 
 /// Whether the grid may re-merge soft-wrapped rows when it grows wider.
 ///
-/// The sideloaded passthrough ConPTY (the default host) leaves reflow entirely
-/// to us, so re-merging is what makes a shrink→grow round-trip lossless. The
-/// legacy in-box host reflows its own buffer on resize, and two engines
-/// rewriting one stream mangle it — hence the capability check rather than a
-/// blanket `true`.
-#[cfg(windows)]
+/// Nebula's grid is the terminal-side source of truth for cursor/content
+/// coordinates on every backend. ConPTY also reflows its private buffer, but
+/// Windows Terminal's `TextBuffer::Reflow` shows that this is intentionally
+/// allowed: ConPTY asks the terminal for the current cursor position instead
+/// of replacing the terminal's reflow state. Disabling grow reflow for one
+/// ConPTY variant therefore leaves the grid permanently split after a narrow
+/// resize and makes the next input use a stale logical row.
 fn reflow_on_grow_supported() -> bool {
-    crate::tty::windows::conpty_sideload_enabled()
-}
-
-/// Unix ptys carry no reflow engine of their own; the grid is always the sole
-/// owner.
-#[cfg(not(windows))]
-fn reflow_on_grow_supported() -> bool {
+    // 关键：ConPTY 的私有缓冲会自行重排，但终端网格仍是 shell 查询到的光标权威，不能关闭回合并。
     true
 }
 
@@ -406,10 +401,9 @@ impl<T> Term<T> {
         let mut grid = Grid::new(num_lines, num_cols, history_size);
         let mut inactive_grid = Grid::new(num_lines, num_cols, 0);
 
-        // Only re-merge soft-wrapped rows on grow when we own the sole reflow
-        // engine. The sideloaded passthrough ConPTY leaves reflow entirely to us
-        // (the default); the legacy in-box host reflows its own buffer, and two
-        // engines rewriting one stream mangle it.
+        // Keep the grid's logical rows reversible on both in-box and side-loaded
+        // ConPTY. The host has a private buffer, while the terminal grid remains
+        // the cursor/content authority queried by the shell after a resize.
         let reflow_on_grow = reflow_on_grow_supported();
         grid.set_reflow_on_grow(reflow_on_grow);
         inactive_grid.set_reflow_on_grow(reflow_on_grow);
@@ -2346,7 +2340,11 @@ enum ModeState {
 
 impl From<bool> for ModeState {
     fn from(value: bool) -> Self {
-        if value { Self::Set } else { Self::Reset }
+        if value {
+            Self::Set
+        } else {
+            Self::Reset
+        }
     }
 }
 
@@ -3004,6 +3002,56 @@ mod tests {
 
         assert_eq!(term.history_size(), 15);
         assert_eq!(term.grid.cursor.point, Point::new(Line(4), Column(0)));
+    }
+
+    #[test]
+    fn reflow_keeps_prompt_input_at_the_logical_cursor() {
+        let size = TermSize::new(6, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        for c in "promp".chars() {
+            term.input(c);
+        }
+
+        for columns in (3..6).rev() {
+            term.resize(TermSize::new(columns, 3));
+        }
+        for columns in 4..=6 {
+            term.resize(TermSize::new(columns, 3));
+        }
+
+        term.input('!');
+
+        assert_eq!(term.grid()[Line(0)][Column(5)].c, '!');
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(5)));
+        assert!(term.grid.cursor.input_needs_wrap);
+    }
+
+    #[test]
+    fn reflow_preserves_pending_wrap_before_the_next_input() {
+        let size = TermSize::new(6, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        for c in "123456".chars() {
+            term.input(c);
+        }
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(5)));
+        assert!(term.grid.cursor.input_needs_wrap);
+
+        for columns in (3..6).rev() {
+            term.resize(TermSize::new(columns, 3));
+        }
+        for columns in 4..=6 {
+            term.resize(TermSize::new(columns, 3));
+        }
+
+        // The cursor is visually on the last cell, but the next byte must wrap
+        // before writing instead of overwriting that cell.
+        assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(5)));
+        assert!(term.grid.cursor.input_needs_wrap);
+        term.input('X');
+
+        assert_eq!(term.grid[Line(1)][Column(0)].c, 'X');
+        assert_eq!(term.grid.cursor.point, Point::new(Line(1), Column(1)));
+        assert!(!term.grid.cursor.input_needs_wrap);
     }
 
     #[test]

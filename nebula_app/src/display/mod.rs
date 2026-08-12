@@ -4229,8 +4229,7 @@ impl Display {
         // 多级 fallback 列表（issue #33）在目录里以主族身份参与匹配与高亮；
         // 链本身仍原样保存在设置值里。
         let primary_family =
-            crate::renderer::text::glyph_cache::primary_font_family(&self.nebula_font_family)
-                .to_owned();
+            crate::renderer::primary_font_family(&self.nebula_font_family).to_owned();
         let catalog = crate::font_install::font_catalog(
             &system,
             &imported,
@@ -4591,12 +4590,11 @@ impl Display {
         // 字体选择器只换主族；用户手写的多级 fallback 链（逗号分隔，
         // issue #33）原样保留在新值后面。
         let family = {
-            let rest: Vec<&str> =
-                crate::renderer::text::glyph_cache::split_font_families(&self.nebula_font_family)
-                    .into_iter()
-                    .skip(1)
-                    .filter(|fallback| *fallback != family)
-                    .collect();
+            let rest: Vec<&str> = crate::renderer::split_font_families(&self.nebula_font_family)
+                .into_iter()
+                .skip(1)
+                .filter(|fallback| *fallback != family)
+                .collect();
             if rest.is_empty() { family } else { format!("{family}, {}", rest.join(", ")) }
         };
         self.nebula_font_family = family;

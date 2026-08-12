@@ -270,16 +270,16 @@ fn grow_reflow() {
     assert_eq!(grid.total_lines(), 2);
 
     // '3' rejoins the row it was wrapped off of, and the wrap mark is consumed.
-    assert_eq!(grid[Line(1)].len(), 3);
-    assert_eq!(grid[Line(1)][Column(0)], cell('1'));
-    assert_eq!(grid[Line(1)][Column(1)], cell('2'));
-    assert_eq!(grid[Line(1)][Column(2)], cell('3'));
+    assert_eq!(grid[Line(0)].len(), 3);
+    assert_eq!(grid[Line(0)][Column(0)], cell('1'));
+    assert_eq!(grid[Line(0)][Column(1)], cell('2'));
+    assert_eq!(grid[Line(0)][Column(2)], cell('3'));
 
     // The vacated row is blank, not a leftover copy.
-    assert_eq!(grid[Line(0)].len(), 3);
-    assert_eq!(grid[Line(0)][Column(0)], Cell::default());
-    assert_eq!(grid[Line(0)][Column(1)], Cell::default());
-    assert_eq!(grid[Line(0)][Column(2)], Cell::default());
+    assert_eq!(grid[Line(1)].len(), 3);
+    assert_eq!(grid[Line(1)][Column(0)], Cell::default());
+    assert_eq!(grid[Line(1)][Column(1)], Cell::default());
+    assert_eq!(grid[Line(1)][Column(2)], Cell::default());
 }
 
 /// The property that actually matters to the user: narrowing then widening back
@@ -298,6 +298,99 @@ fn shrink_then_grow_restores_the_original_layout() {
     for (i, c) in "123456".chars().enumerate() {
         assert_eq!(grid[Line(0)][Column(i)], cell(c), "column {i} after round-trip");
     }
+}
+
+/// Restoring the *text* is only half the round-trip: the cursor has to land back
+/// where it started too, or the next keystroke overwrites the wrong cell.
+///
+/// The cursor sits right after the text, which is where a shell prompt leaves
+/// it. Alacritty tracks the cursor through reflow by incremental bookkeeping
+/// (`cursor_line_delta` and friends in `grow_columns`) rather than deriving it
+/// from where the content landed, and its grid tests never assert on the cursor
+/// at all — so this is the property most likely to be wrong.
+#[test]
+fn shrink_then_grow_restores_the_cursor() {
+    let mut grid = Grid::<Cell>::new(3, 6, 4);
+    for (i, c) in "123456".chars().enumerate() {
+        grid[Line(0)][Column(i)] = cell(c);
+    }
+    grid.cursor.point = Point::new(Line(1), Column(0));
+
+    grid.resize(true, 3, 2);
+    grid.resize(true, 3, 6);
+
+    assert_eq!(grid.cursor.point, Point::new(Line(1), Column(0)), "cursor after round-trip");
+}
+
+/// Same round-trip with the cursor parked *inside* the text that gets wrapped
+/// and re-merged, rather than on the empty line below it.
+#[test]
+fn shrink_then_grow_restores_a_cursor_inside_wrapped_text() {
+    let mut grid = Grid::<Cell>::new(3, 6, 4);
+    for (i, c) in "123456".chars().enumerate() {
+        grid[Line(0)][Column(i)] = cell(c);
+    }
+    // On '5' — column 4 of the logical line, which a shrink to 2 columns pushes
+    // onto the third wrapped row.
+    grid.cursor.point = Point::new(Line(0), Column(4));
+
+    grid.resize(true, 3, 2);
+    grid.resize(true, 3, 6);
+
+    assert_eq!(grid[Line(0)][Column(4)], cell('5'), "cursor's cell after round-trip");
+    assert_eq!(grid.cursor.point, Point::new(Line(0), Column(4)), "cursor after round-trip");
+}
+
+/// The round-trips above resize in one jump. An interactive drag does not: with
+/// cell-sized resize increments the window emits one resize *per column*, so a
+/// 20→4 drag calls `resize` 16 times and 16 more on the way back.
+///
+/// This is the case that actually broke. Each individual step looked right, but
+/// the cursor used to be carried along by incremental bookkeeping inside
+/// `grow_columns` / `shrink_columns`, and the per-step error compounded until the
+/// cursor sat somewhere in the middle of old output.
+#[test]
+fn dragging_one_column_at_a_time_keeps_the_cursor_on_its_cell() {
+    let text = "0123456789abcdefghij";
+    let mut grid = Grid::<Cell>::new(3, 20, 8);
+    for (i, c) in text.chars().enumerate() {
+        grid[Line(0)][Column(i)] = cell(c);
+    }
+    grid.cursor.point = Point::new(Line(1), Column(0));
+
+    for columns in (4..20).rev() {
+        grid.resize(true, 3, columns);
+    }
+    for columns in 5..=20 {
+        grid.resize(true, 3, columns);
+    }
+
+    for (i, c) in text.chars().enumerate() {
+        assert_eq!(grid[Line(0)][Column(i)], cell(c), "column {i} after the drag");
+    }
+    assert_eq!(grid.cursor.point, Point::new(Line(1), Column(0)), "cursor after the drag");
+}
+
+/// The shape from the bug report: a shell prompt leaves the cursor just past the
+/// text it printed, on the same row. Nothing is written below it, so the only
+/// thing pinning the cursor is the content to its left.
+#[test]
+fn a_cursor_parked_after_the_text_survives_a_narrow_drag() {
+    let text = "0123456789";
+    let mut grid = Grid::<Cell>::new(3, 20, 8);
+    for (i, c) in text.chars().enumerate() {
+        grid[Line(0)][Column(i)] = cell(c);
+    }
+    grid.cursor.point = Point::new(Line(0), Column(text.len()));
+
+    for columns in (4..20).rev() {
+        grid.resize(true, 3, columns);
+    }
+    for columns in 5..=20 {
+        grid.resize(true, 3, columns);
+    }
+
+    assert_eq!(grid.cursor.point, Point::new(Line(0), Column(text.len())), "cursor after the drag");
 }
 
 /// Opting out keeps shrink-time wrapping but never re-merges, so rows stay
@@ -335,14 +428,15 @@ fn grow_reflow_multiline() {
 
     assert_eq!(grid.total_lines(), 3);
 
-    // All three rows were one logical line: it collapses back into one row.
-    assert_eq!(grid[Line(2)].len(), 6);
+    // All three rows were one logical line: it collapses back into one row, and
+    // stays on the row the logical line started on.
+    assert_eq!(grid[Line(0)].len(), 6);
     for (i, c) in "123456".chars().enumerate() {
-        assert_eq!(grid[Line(2)][Column(i)], cell(c), "column {i}");
+        assert_eq!(grid[Line(0)][Column(i)], cell(c), "column {i}");
     }
 
     // The two rows it was spread across are left blank.
-    for r in (0..2).map(Line::from) {
+    for r in (1..3).map(Line::from) {
         assert_eq!(grid[r].len(), 6);
         for c in 0..6 {
             assert_eq!(grid[r][Column(c)], Cell::default());

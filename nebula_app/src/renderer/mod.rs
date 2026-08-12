@@ -38,6 +38,7 @@ pub mod ui;
 #[cfg(feature = "wgpu-foundation")]
 pub mod wgpu_foundation;
 pub(crate) use text::Rasterizer;
+pub(crate) use text::glyph_cache::{primary_font_family, split_font_families};
 
 pub use text::{GlyphCache, LoaderApi};
 

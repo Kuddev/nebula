@@ -470,6 +470,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::SshJumpHostDropdown
             | crate::display::SettingsHit::SshJumpHostOption(_)
             | crate::display::SettingsHit::SshProxyOverrideEdit(_)
+            | crate::display::SettingsHit::SshHostRow(_)
             | crate::display::SettingsHit::Reset => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
                 return;

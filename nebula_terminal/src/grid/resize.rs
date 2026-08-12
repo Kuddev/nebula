@@ -1,6 +1,6 @@
 //! Grid resize and reflow.
 
-use std::cmp::{Ordering, max, min};
+use std::cmp::{max, min, Ordering};
 use std::mem;
 
 use crate::index::{Boundary, Column, Line};
@@ -25,10 +25,46 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             Ordering::Equal => (),
         }
 
-        match self.columns.cmp(&columns) {
+        // Anchor the cursor to the content *before* reflowing, and put it back
+        // afterwards, instead of trusting the running total that `grow_columns` /
+        // `shrink_columns` keep as they splice rows.
+        //
+        // Those two maintain the cursor by incremental bookkeeping
+        // (`cursor_line_delta`, `point.column -= columns`, and a couple of
+        // branches that `continue` before recording anything). A single step is
+        // right, but an interactive drag calls this once per column — around 80
+        // times for a 120→40 column drag, and 80 more on the way back — and the
+        // error compounds until the cursor sits in the middle of old output.
+        //
+        // Windows Terminal avoids the problem by not keeping a separate tally at
+        // all: `TextBuffer::Reflow` rewrites the content cell by cell and reads
+        // the cursor back off wherever its cell landed
+        // (`newCursorPos = { AdjustToGlyphStart(oldCursorPos.x - oldX + newX), newY }`,
+        // textBuffer.cpp:2879). The cursor rides the content. This does the same
+        // thing without touching the splice logic: remember which logical line
+        // the cursor is on and how far into it, then re-derive the position from
+        // the reflowed buffer.
+        //
+        // Only when the rows actually get spliced, though. Widening with reflow
+        // disabled just makes every row wider without moving a single cell, and
+        // anchoring through that would *introduce* a jump: the offset was
+        // measured in old columns and each row now spans more of them.
+        let column_order = self.columns.cmp(&columns);
+        let splices_rows = match column_order {
+            Ordering::Less => reflow && self.reflow_on_grow,
+            Ordering::Greater => reflow,
+            Ordering::Equal => false,
+        };
+        let anchor = if splices_rows { self.cursor_anchor() } else { None };
+
+        match column_order {
             Ordering::Less => self.grow_columns(reflow && self.reflow_on_grow, columns),
             Ordering::Greater => self.shrink_columns(reflow, columns),
             Ordering::Equal => (),
+        }
+
+        if let Some(anchor) = anchor {
+            self.restore_cursor_anchor(anchor);
         }
 
         // Restore template cell.
@@ -181,7 +217,25 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 // this will always be either `0` or `1`.
                 let line_delta = self.cursor.point.line - target.line;
 
-                if line_delta != 0 && row.is_clear() {
+                if row.is_clear() {
+                    // The row was merged away in full, so it must go, exactly
+                    // like any other emptied continuation row.
+                    //
+                    // Upstream only drops it when `line_delta != 0`, which never
+                    // holds for a cursor on the top visible row: `Point::sub`
+                    // clamps at `Line(0)` under `Boundary::Cursor` (index.rs:103),
+                    // so the delta comes out `0` and the blank row survives. It
+                    // then stands exactly where the content used to be and pushes
+                    // that content up a row into the scrollback — which reads as
+                    // the whole viewport having scrolled by itself.
+                    //
+                    // Dropping it unconditionally is safe now that the cursor is
+                    // re-derived from `CursorAnchor` after the reflow rather than
+                    // from these running deltas.
+                    if i < self.display_offset {
+                        self.display_offset = self.display_offset.saturating_sub(1);
+                    }
+
                     continue;
                 }
 
@@ -386,4 +440,148 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // Clamp the saved cursor to the grid.
         self.saved_cursor.point.column = min(self.saved_cursor.point.column, Column(columns - 1));
     }
+
+    /// Whether this row soft-wraps into the one below it.
+    ///
+    /// The flag lives on the row's *physical* last cell, which is where both
+    /// `shrink_columns` writes it and `grow_columns` reads it.
+    fn has_wrapline(&self, line: Line) -> bool {
+        if line < self.topmost_line() || line > self.bottommost_line() {
+            return false;
+        }
+
+        let row = &self[line];
+        let len = row.len();
+        len > 0 && row[Column(len - 1)].flags().contains(Flags::WRAPLINE)
+    }
+
+    /// Columns this row contributes to its logical line.
+    ///
+    /// A trailing [`Flags::LEADING_WIDE_CHAR_SPACER`] is padding inserted because
+    /// a wide char would not fit — the char itself lives on the continuation row,
+    /// so the spacer holds no content and must not shift the offset.
+    fn logical_width(&self, line: Line) -> usize {
+        let row = &self[line];
+        let len = row.len();
+        if len > 0 && row[Column(len - 1)].flags().contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+            len - 1
+        } else {
+            len
+        }
+    }
+
+    /// Record where the cursor sits relative to the *content*, so it can be found
+    /// again after the rows underneath it have been split or merged.
+    ///
+    /// Returns `None` when the cursor is outside the viewport, which leaves the
+    /// existing bookkeeping in charge rather than guessing.
+    fn cursor_anchor(&self) -> Option<CursorAnchor> {
+        let cursor = self.cursor.point;
+        if cursor.line < Line(0) || cursor.line > self.bottommost_line() {
+            return None;
+        }
+
+        // Walk up to the first row of the cursor's logical line, accumulating the
+        // columns every row above the cursor contributes. `input_needs_wrap`
+        // means "one past the last column", so it counts as one more column.
+        let topmost = self.topmost_line();
+        let mut start = cursor.line;
+        let mut offset = cursor.column.0 + usize::from(self.cursor.input_needs_wrap);
+        while start > topmost && self.has_wrapline(start - 1) {
+            start -= 1;
+            offset += self.logical_width(start);
+        }
+
+        // Find the logical line's last row, then count the logical lines below
+        // it. Reflow splits and merges rows *within* a logical line and never
+        // moves a hard line break, so this count is what survives it — physical
+        // row indices do not. Counting from the bottom also makes it immune to
+        // scrollback truncation, which only ever drops the oldest rows.
+        let bottommost = self.bottommost_line();
+        let mut end = cursor.line;
+        while end < bottommost && self.has_wrapline(end) {
+            end += 1;
+        }
+
+        let mut logical_lines_below = 0;
+        let mut line = end + 1;
+        while line <= bottommost {
+            // Every logical line ends in exactly one row without a wrap flag.
+            if !self.has_wrapline(line) {
+                logical_lines_below += 1;
+            }
+            line += 1;
+        }
+
+        Some(CursorAnchor { logical_lines_below, offset })
+    }
+
+    /// Put the cursor back on the cell it was anchored to, overriding whatever
+    /// the reflow's own bookkeeping arrived at.
+    fn restore_cursor_anchor(&mut self, anchor: CursorAnchor) {
+        let topmost = self.topmost_line();
+        let bottommost = self.bottommost_line();
+
+        // Walk up from the bottom of the buffer until `logical_lines_below`
+        // logical lines have been passed; the next row up ends the anchored one.
+        let mut end = bottommost;
+        let mut seen = 0;
+        while seen < anchor.logical_lines_below {
+            if !self.has_wrapline(end) {
+                seen += 1;
+            }
+
+            if end == topmost {
+                // The anchored line is no longer in the buffer; leave the
+                // cursor where the reflow put it rather than inventing a spot.
+                return;
+            }
+            end -= 1;
+        }
+
+        // Then back up to that logical line's first row and walk down through it,
+        // spending the recorded offset one row at a time.
+        let mut line = end;
+        while line > topmost && self.has_wrapline(line - 1) {
+            line -= 1;
+        }
+
+        let mut remaining = anchor.offset;
+        while line < end {
+            let width = self.logical_width(line);
+            if remaining < width {
+                break;
+            }
+            remaining -= width;
+            line += 1;
+        }
+
+        let last_column = Column(self.columns - 1);
+        if remaining > last_column.0 {
+            // Offset landed one past the end: the pending-wrap state, which is
+            // how a full row keeps the cursor addressable.
+            self.cursor.point.column = last_column;
+            self.cursor.input_needs_wrap = true;
+        } else {
+            self.cursor.point.column = Column(remaining);
+            self.cursor.input_needs_wrap = false;
+        }
+
+        // A logical line long enough to push its own start above the viewport
+        // leaves the cursor clamped to the top row, matching what the reflow
+        // paths already do in that case.
+        self.cursor.point.line = max(line, Line(0));
+    }
+}
+
+/// Where the cursor sits in the content, in terms that survive a reflow.
+///
+/// Both fields are measured against the *logical* line — the run of rows joined
+/// by [`Flags::WRAPLINE`] — because that is the unit reflow preserves.
+struct CursorAnchor {
+    /// Logical lines between the cursor's own and the bottom of the buffer.
+    logical_lines_below: usize,
+
+    /// Cursor's column offset from the start of its logical line.
+    offset: usize,
 }

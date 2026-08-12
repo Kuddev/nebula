@@ -5,14 +5,14 @@ use std::os::windows::process::ExitStatusExt;
 use std::process::ExitStatus;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 
 use polling::os::iocp::{CompletionPacket, PollerIocpExt};
 use polling::{Event, Poller};
 
 use windows_sys::Win32::Foundation::{BOOLEAN, FALSE, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    GetExitCodeProcess, GetProcessId, INFINITE, RegisterWaitForSingleObject, UnregisterWait,
+    GetExitCodeProcess, GetProcessId, RegisterWaitForSingleObject, UnregisterWait, INFINITE,
     WT_EXECUTEINWAITTHREAD, WT_EXECUTEONLYONCE,
 };
 

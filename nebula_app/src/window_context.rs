@@ -190,7 +190,7 @@ pub struct WindowContext {
     /// 上一帧的聚焦 pane。变化时给新聚焦终端补发 CursorBlinkingChange，
     /// blink 定时器按它的样式重新起表——否则从"不闪"的 pane 切到"该闪"
     /// 的 pane 后表根本没开，光标永远常亮。
-    blink_focus_pane: Option<usize>,
+    blink_focus_pane: Option<PaneId>,
     prev_bell_cmd: Option<Instant>,
     /// When the PTYs last learned their size. Drives the leading-edge check of
     /// the resize debounce: a lone resize (startup, maximize, sidebar toggle)
@@ -680,7 +680,7 @@ impl WindowContext {
                 false
             },
             TabRequest::NewProfile(profile) => {
-                self.spawn_tab_profile_value(profile);
+                self.spawn_tab_profile_value(profile, TabPlacement::Created);
                 false
             },
             TabRequest::NewShell { name, shell } => {

@@ -1083,6 +1083,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    // 主机行本体只承载 hover（底色 + 右缘三枚图标显形），本身
+                    // 不是动作：点空白处不该悄悄连上一台机器。
+                    crate::display::SettingsHit::SshHostRow(_) => return,
                     crate::display::SettingsHit::SshHostConnect(index) => {
                         let host = self.ctx.display().nebula_ssh_hosts.get(index).cloned();
                         if let Some(host) = host {

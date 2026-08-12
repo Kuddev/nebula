@@ -3,8 +3,8 @@ use std::io::{self, Result};
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
+use std::sync::Arc;
 
 use windows_sys::Win32::System::Threading::TerminateProcess;
 
@@ -269,9 +269,7 @@ fn nebula_find_bash() -> Option<String> {
         }
     }
 
-    for root in
-        ["LOCALAPPDATA", "USERPROFILE"].into_iter().filter_map(|name| std::env::var_os(name))
-    {
+    for root in ["LOCALAPPDATA", "USERPROFILE"].into_iter().filter_map(std::env::var_os) {
         let root = PathBuf::from(root);
         for candidate in [
             root.join("Programs").join("Git").join("bin").join("bash.exe"),
@@ -1006,9 +1004,9 @@ mod test {
     use std::process::{Command, Stdio};
 
     use crate::tty::windows::{
-        NEBULA_BASH_RC, NEBULA_PROMPT_PS1, NebulaRuntimeSettings, NebulaShellExecutor, cmdline,
-        explicit_bash_integration_args, nebula_default_shell, nebula_find_bash,
-        powershell_integration_args, push_escaped_arg,
+        cmdline, explicit_bash_integration_args, nebula_default_shell, nebula_find_bash,
+        powershell_integration_args, push_escaped_arg, NebulaRuntimeSettings, NebulaShellExecutor,
+        NEBULA_BASH_RC, NEBULA_PROMPT_PS1,
     };
     use crate::tty::{Options, Shell};
 
@@ -1072,9 +1070,8 @@ mod test {
     /// guard already; this covers the path that actually regressed.
     #[test]
     fn default_powershell_loads_the_user_profile_and_ends_with_the_integration() {
-        let shell = nebula_default_shell(NebulaRuntimeSettings {
-            shell: NebulaShellExecutor::PowerShell,
-        });
+        let shell =
+            nebula_default_shell(NebulaRuntimeSettings { shell: NebulaShellExecutor::PowerShell });
         let args = shell.args();
 
         assert_eq!(shell.program(), "powershell");

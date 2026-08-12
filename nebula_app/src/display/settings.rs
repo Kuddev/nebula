@@ -1853,12 +1853,13 @@ pub(crate) fn opacity_from_pointer(pointer_x: f32, slider: (f32, f32, f32, f32))
     ((pointer_x - slider.0) / slider.2.max(1.0)).clamp(0.0, 1.0)
 }
 
-/// 主机行右缘的三枚方形图标槽（连接 / 编辑 / 隐藏）。绘制与命中共用这一处
-/// 推导，是"看得见的按钮点不中"的唯一防线。
+/// 主机行右缘的动作槽。绘制与命中共用这一处推导，是"看得见的按钮点不中"的
+/// 唯一防线。
 ///
-/// 2026-08-11：从 54px 宽的描边文字按钮改成方形图标槽。文字按钮常态占掉右侧
-/// 约 180px，把主机名挤到一半宽；图标槽只在 hover 时显形，静态那一行只剩身份
-/// 信息。命中区保持正方且比墨迹宽，指针容差不被视觉尺寸绑死。
+/// 2026-08-11 对齐原型：**主动作「连接」是文字按钮**（白底+描边+"连接"二字），
+/// 编辑/隐藏是方形图标槽。原型里唯一带底的就是主动作——一行五个等价图标会让
+/// 人逐个悬停去猜哪个是"进去"，文字消掉这次猜测。三个槽都只在 hover 时显形，
+/// 静态那一行只剩身份信息。命中区比墨迹宽，指针容差不被视觉尺寸绑死。
 fn ssh_host_action_rect(
     row: (f32, f32, f32, f32),
     scale: f32,
@@ -1866,13 +1867,26 @@ fn ssh_host_action_rect(
 ) -> (f32, f32, f32, f32) {
     let s = |v: f32| v * scale;
     let (x, y, w, h) = row;
-    let gap = s(2.0);
-    let right = x + w - s(12.0);
-    let slot = s(28.0).min((h - s(10.0)).max(s(20.0)));
-    let bx = right
-        - slot * (3usize.saturating_sub(action) as f32)
-        - gap * (2usize.saturating_sub(action) as f32);
-    (bx, widgets::centered_y(y, h, slot), slot, slot)
+    let gap = s(4.0);
+    let right = x + w - s(14.0);
+    let slot = s(26.0).min((h - s(10.0)).max(s(18.0)));
+    let connect_w = s(52.0);
+    // 从右往左排：隐藏、编辑、连接。连接最宽，所以单独算。
+    match action {
+        2 => {
+            let bx = right - slot;
+            (bx, widgets::centered_y(y, h, slot), slot, slot)
+        },
+        1 => {
+            let bx = right - slot * 2.0 - gap;
+            (bx, widgets::centered_y(y, h, slot), slot, slot)
+        },
+        _ => {
+            let bh = s(26.0).min((h - s(10.0)).max(s(18.0)));
+            let bx = right - slot * 2.0 - gap * 2.0 - connect_w;
+            (bx, widgets::centered_y(y, h, bh), connect_w, bh)
+        },
+    }
 }
 
 /// Compact trailing command button inside an otherwise non-clickable settings row.
@@ -3218,8 +3232,7 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         // 加一：弹层第 0 行是搜索框，候选整体下移一行。
         SettingsDropdown::Font => {
             // 多级 fallback 列表按主族高亮（issue #33）。
-            let primary =
-                crate::renderer::text::glyph_cache::primary_font_family(&view.font_family);
+            let primary = crate::renderer::primary_font_family(&view.font_family);
             view.fonts.iter().position(|family| family == primary).map(|slot| slot + 1)
         },
         SettingsDropdown::BackgroundFit => {
@@ -4009,6 +4022,10 @@ pub(super) fn push_quads(
                 // 2026-08-11 用户裁定：常态不画卡片底。原来每行都铺 accent_soft，
                 // 五行灰块叠起来就是「灰蒙蒙」的来源。底色只在 hover 时出现，
                 // 静态列表回到纯净的白底 + 文字层级。
+                //
+                // hover 底用 `surface`（8%）而不是 `hover`（13%）：整行是个很大
+                // 的面，同一个 alpha 铺在 26px 的图标槽上是"轻轻一提"，铺满一
+                // 整行就成了灰条。大面积要更淡，小面积才允许更重。
                 let row_hovered = matches!(
                     view.hover,
                     SettingsHit::SshHostRow(i)
@@ -4020,7 +4037,7 @@ pub(super) fn push_quads(
                 if row_hovered {
                     clip(
                         quads,
-                        UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.hover),
+                        UiQuad::solid(rx, ry, rw, rh, s(tokens::radius::OVERLAY), sk.surface),
                     );
                 }
                 // 行左缘画主机的 OS 图标（文字 pass，os_icons 字形），不再是
@@ -4028,21 +4045,26 @@ pub(super) fn push_quads(
                 // 主机模型依旧没有可靠的在线态，图标标注的是「这是哪台机器」，
                 // 不发明绿点。
                 //
-                // 三枚动作图标同样只在 hover 时显形，且不再套描边方框——方框
-                // 加文字常态吃掉右侧 180px，把主机名挤到一半宽。命中区始终存在
-                // （见 ssh_host_action_rect），只是墨迹不画。
+                // 右缘动作整组只在 hover 时显形。命中区始终存在（见
+                // ssh_host_action_rect），只是墨迹不画。
                 if row_hovered {
-                    // 眼睛图标要挖空，挖空色必须是这一枚图标脚下的实际底色，
-                    // 否则半透明的 hover washes 叠起来会在瞳孔周围留一圈脏边。
-                    let row_bg = surface::over(sk.hover, sk.panel);
-                    for (action, icon) in [
-                        (0usize, icons::RowActionIcon::Connect),
-                        (1usize, icons::RowActionIcon::Edit),
-                        (2usize, icons::RowActionIcon::Hide),
-                    ] {
+                    let row_bg = surface::over(sk.surface, sk.panel);
+                    // 主动作「连接」：白底 + 描边的真按钮，是这一行唯一带底的
+                    // 东西，也是原型里唯一带底的那个。
+                    let connect = ssh_host_action_rect(row, scale, 0);
+                    let connect_hot = view.hover == SettingsHit::SshHostConnect(index);
+                    let mut button = Vec::new();
+                    widgets::push_outline_button(&mut button, connect, scale, &sk, connect_hot);
+                    for quad in button {
+                        clip(quads, quad);
+                    }
+                    // 次级动作用图标，挖空色取图标脚下的实际底色——半透明的
+                    // hover wash 叠起来若用错基色，眼睛的瞳孔周围会留一圈脏边。
+                    for (action, icon) in
+                        [(1usize, icons::RowActionIcon::Edit), (2usize, icons::RowActionIcon::Hide)]
+                    {
                         let rect = ssh_host_action_rect(row, scale, action);
                         let icon_hovered = match (action, view.hover) {
-                            (0, SettingsHit::SshHostConnect(i)) => i == index,
                             (1, SettingsHit::SshHostEdit(i)) => i == index,
                             (2, SettingsHit::SshHostHide(i)) => i == index,
                             _ => false,
@@ -4056,22 +4078,15 @@ pub(super) fn push_quads(
                                     rect.2,
                                     rect.3,
                                     s(tokens::radius::CONTROL),
-                                    sk.hover_strong,
+                                    sk.hover,
                                 ),
                             );
-                            (sk.ink.into(), surface::over(sk.hover_strong, row_bg))
+                            (Rgba::opaque(sk.ink), surface::over(sk.hover, row_bg))
                         } else {
-                            (sk.ink_dim.into(), row_bg)
+                            (Rgba::opaque(sk.ink_faint), row_bg)
                         };
                         let mut ink_quads = Vec::new();
-                        icons::push_row_action_icon(
-                            &mut ink_quads,
-                            icon,
-                            rect,
-                            scale,
-                            ink,
-                            cutout,
-                        );
+                        icons::push_row_action_icon(&mut ink_quads, icon, rect, scale, ink, cutout);
                         for quad in ink_quads {
                             clip(quads, quad);
                         }
@@ -6358,15 +6373,6 @@ pub(super) fn draw_text(
                     gc,
                 );
             }
-            let draw_centered_action = |r: &mut Renderer,
-                                        gc: &mut GlyphCache,
-                                        rect: (f32, f32, f32, f32),
-                                        label: &str,
-                                        ink: Rgb| {
-                let cols = label.chars().map(|ch| ch.width().unwrap_or(1)).sum::<usize>();
-                let tx = rect.0 + (rect.2 - cols as f32 * cell_w) * 0.5;
-                r.draw_chrome_text(size, tx, rect.1 + (rect.3 - cell_h) / 2.0, ink, label, gc);
-            };
             for (index, host) in view.ssh_hosts.iter().enumerate() {
                 let row = (
                     host_x,
@@ -6410,8 +6416,34 @@ pub(super) fn draw_text(
                 if host.pinned {
                     r.draw_chrome_text(size, row.0 + s(27.0), title_y, sk.accent, "\u{eab4}", gc);
                 }
-                // 三枚动作图标改由 quad pass 绘制（icons::push_row_action_icon），
-                // 文字 pass 这里不再画「连接 / 编辑 / 隐藏」三个词。
+                // 编辑 / 隐藏是纯图标（quad pass 画），主动作「连接」保留文字：
+                // 一行全是等价图标会逼人逐个悬停去猜哪个是"进去"。整组同样只在
+                // hover 时显形。
+                let row_hovered = matches!(
+                    view.hover,
+                    SettingsHit::SshHostRow(i)
+                        | SettingsHit::SshHostConnect(i)
+                        | SettingsHit::SshHostEdit(i)
+                        | SettingsHit::SshHostHide(i)
+                        if i == index
+                );
+                if row_hovered {
+                    let connect = ssh_host_action_rect(row, scale, 0);
+                    let label = language.pick("连接", "Connect");
+                    let cols = label.chars().map(|ch| ch.width().unwrap_or(1)).sum::<usize>();
+                    r.draw_chrome_text(
+                        size,
+                        connect.0 + (connect.2 - cols as f32 * cell_w) * 0.5,
+                        widgets::centered_y(connect.1, connect.3, cell_h),
+                        if view.hover == SettingsHit::SshHostConnect(index) {
+                            sk.accent
+                        } else {
+                            sk.ink
+                        },
+                        label,
+                        gc,
+                    );
+                }
             }
             if visible(geometry.ssh_import_config.1, geometry.ssh_import_config.3) {
                 row_label(

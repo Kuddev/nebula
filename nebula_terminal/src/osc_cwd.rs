@@ -111,7 +111,7 @@ impl CwdSniffer {
                         if let Some(event) = self.parse() {
                             events.push((i + 1, event));
                         }
-                        self.to_ground();
+                        self.reset_to_ground();
                     } else {
                         // The ESC belonged to the payload after all; keep it and
                         // reprocess this byte in the normal OSC state.
@@ -134,14 +134,14 @@ impl CwdSniffer {
                 if let Some(event) = self.parse() {
                     events.push((i + 1, event));
                 }
-                self.to_ground();
+                self.reset_to_ground();
             },
             0x1b => self.phase = Phase::OscEsc,
             _ => self.push(b),
         }
     }
 
-    fn to_ground(&mut self) {
+    fn reset_to_ground(&mut self) {
         self.phase = Phase::Ground;
         self.payload.clear();
         self.interested = false;

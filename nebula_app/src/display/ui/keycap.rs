@@ -1,17 +1,8 @@
 //! 键帽规范：所有展示键位的地方共用一颗 chip——hairline 圈边 +
 //! panel/surface 叠底、小圆角；不再各处自造键帽样式，也不叠加额外装饰。
 //!
-//! # 为什么是**一整串**而不是逐键拆分
-//!
-//! 2026-07-29 用户裁定，推翻了本文件的上一版。逐键 chip 是 macOS 的形式：
-//! 那里修饰键是 `⌘ ⇧ ⌥` 单字符图形，一符号一方块天然成立、宽度还整齐。
-//! Windows 上修饰键是 `Ctrl` `Shift` `Alt` 这种**单词**，拆开会得到一排
-//! 宽度参差的方块，画面反而更碎。
-//!
-//! 更重要的是心智迁移：Windows 用户熟悉把组合键显示成
-//! `Ctrl+Shift+P` 一整串。沿用这套系统惯例，用户能直接复用既有识别习惯；
-//! 自造形式则要他们先解析
-//! 一遍"这几个方块是一个组合还是三个选项"。
+//! 组合键按物理按键拆成相邻的小键帽。每颗键帽都有独立的表面、底边和
+//! 呼吸缝，长组合键因此仍然可扫读，不会变成一块写满文字的灰色胶囊。
 //!
 //! `layout_combo` 是几何唯一来源：quad pass 与 text pass 各调一次拿到
 //! 相同矩形（同 settings 键位行 quad/text 共用几何的既有约定）。
@@ -25,7 +16,7 @@ use crate::renderer::ui::UiQuad;
 /// Chip height in logical px（与 palette 底栏既有键帽一致）。
 pub const KEY_H: f32 = 20.0;
 
-/// chip 内的左右呼吸缝。整串比单键长，边距太小会显得字挤在框上。
+/// 每颗键帽内的左右呼吸缝。单键也要留出足够边距，避免文字贴住轮廓。
 const PAD_X: f32 = 7.0;
 
 fn cols(text: &str) -> usize {
@@ -42,8 +33,8 @@ pub struct ComboChips {
     pub bounds: (f32, f32, f32, f32),
 }
 
-/// Lay out a `Ctrl+Shift+P` style combo as one chip, right-aligned so it ends
-/// at `right_x`, vertically centered on `center_y`.
+/// Lay out a `Ctrl+Shift+P` style combo as separate keycaps, right-aligned so
+/// the final cap ends at `right_x`, vertically centered on `center_y`.
 pub fn layout_combo(
     combo: &str,
     right_x: f32,
@@ -54,12 +45,24 @@ pub fn layout_combo(
     let s = |v: f32| v * scale;
     let key_h = s(KEY_H);
     let key_y = center_y - key_h / 2.0;
-    // 规范化：丢掉空段后用 "+" 重新连接。畸形输入（末尾多一个 "+"、
-    // 连续 "++"）因此得到稳定结果，与上一版逐键实现的取舍保持一致。
-    let label = combo.split('+').filter(|k| !k.is_empty()).collect::<Vec<_>>().join("+");
-    let width = cols(&label) as f32 * cell_w + s(PAD_X) * 2.0;
-    let x = right_x - width;
-    ComboChips { chips: vec![(x, width, label)], bounds: (x, key_y, width, key_h) }
+    // 丢掉空段，避免配置里的末尾/连续 `+` 生成空键帽；加号是键帽之间的
+    // 视觉连接，不占任何一颗键帽的文字宽度。
+    let labels: Vec<&str> = combo.split('+').filter(|key| !key.is_empty()).collect();
+    let gap = s(4.0);
+    let widths: Vec<f32> =
+        labels.iter().map(|label| cols(label) as f32 * cell_w + s(PAD_X) * 2.0).collect();
+    let total = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
+    let mut x = right_x - total;
+    let chips = labels
+        .into_iter()
+        .zip(widths)
+        .map(|(label, width)| {
+            let chip = (x, width, label.to_owned());
+            x += width + gap;
+            chip
+        })
+        .collect();
+    ComboChips { chips, bounds: (right_x - total, key_y, total, key_h) }
 }
 
 /// The one chip recipe: hairline ring + panel + surface, chip radius.
@@ -117,6 +120,23 @@ pub fn push_combo(quads: &mut Vec<UiQuad>, sk: &Skin, combo: &ComboChips, scale:
     push_combo_with_hover(quads, sk, combo, scale, false);
 }
 
+/// Push a combo whose surface follows a transient overlay's alpha. Context
+/// menus animate their panel and labels together; fading the three keycap
+/// layers here prevents the shortcut caps from popping in a frame early.
+pub fn push_combo_with_progress(
+    quads: &mut Vec<UiQuad>,
+    sk: &Skin,
+    combo: &ComboChips,
+    scale: f32,
+    progress: f32,
+) {
+    let mut faded = *sk;
+    faded.panel = super::surface::fade(faded.panel, progress);
+    faded.surface = super::surface::fade(faded.surface, progress);
+    faded.hairline = super::surface::fade(faded.hairline, progress);
+    push_combo(quads, &faded, combo, scale);
+}
+
 /// Push every chip of a laid-out combo, with a subtle hover color only.
 pub fn push_combo_with_hover(
     quads: &mut Vec<UiQuad>,
@@ -136,24 +156,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn combo_is_one_chip_carrying_the_whole_string() {
-        // Windows 心智：`Ctrl+K` 是一颗键帽，不是两颗方块加一个加号。
+    fn combo_is_split_into_keycaps_and_right_aligned() {
         let combo = layout_combo("Ctrl+K", 500.0, 100.0, 10.0, 1.0);
-        assert_eq!(combo.chips.len(), 1);
+        assert_eq!(combo.chips.len(), 2);
         let (x, w, ref label) = combo.chips[0];
-        assert_eq!(label, "Ctrl+K");
-        assert!((x + w - 500.0).abs() < 0.01, "chip 右缘落在 right_x");
-        assert_eq!(w, 6.0 * 10.0 + PAD_X * 2.0, "宽 = 整串列宽 + 左右呼吸缝");
+        assert_eq!(label, "Ctrl");
+        assert!((combo.chips[1].0 + combo.chips[1].1 - 500.0).abs() < 0.01);
+        assert!(combo.chips[1].0 > x + w, "键帽之间要有稳定呼吸缝");
         let (bx, _, bw, bh) = combo.bounds;
         assert!((bx + bw - 500.0).abs() < 0.01);
         assert_eq!(bh, KEY_H);
     }
 
     #[test]
-    fn three_key_combo_stays_a_single_chip() {
+    fn three_key_combo_has_three_caps() {
         let combo = layout_combo("Ctrl+Shift+P", 400.0, 50.0, 8.0, 1.0);
-        assert_eq!(combo.chips.len(), 1);
-        assert_eq!(combo.chips[0].2, "Ctrl+Shift+P");
+        assert_eq!(combo.chips.len(), 3);
+        assert_eq!(
+            combo.chips.iter().map(|chip| chip.2.as_str()).collect::<Vec<_>>(),
+            ["Ctrl", "Shift", "P"]
+        );
     }
 
     #[test]
@@ -161,7 +183,7 @@ mod tests {
         // 末尾多一个 "+"、连续 "++" 都不该画出空键帽。
         for raw in ["Ctrl+", "+Ctrl", "Ctrl++K"] {
             let combo = layout_combo(raw, 300.0, 50.0, 8.0, 1.0);
-            assert_eq!(combo.chips.len(), 1);
+            assert!(!combo.chips.is_empty());
             assert!(!combo.chips[0].2.is_empty());
             assert!(!combo.chips[0].2.ends_with('+'));
         }

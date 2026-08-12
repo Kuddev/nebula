@@ -307,23 +307,18 @@ impl NebulaTheme {
                 shell_bg: Rgb::new(34, 38, 48),
             },
             // Cool silver — the light half of the steel pair. Chrome layers
-            // follow the premium-light sheet: sidebar over app-bg, terminal
-            // pure white for maximum contrast.
+            // follow the premium-light sheet: sidebar #f3f4f6 over app-bg
+            // #f9fafb, terminal pure white for maximum contrast.
             Self::SilverLight => NebulaPalette {
                 // Neutral silver, blue removed: the panel/tab surfaces sit on a
                 // true-neutral gray ramp (was Tailwind's blue-leaning gray-100),
                 // and the active-tab halo is a soft neutral shadow instead of a
                 // blue wash — a pure-white pill lifting off a flat gray gutter.
-                //
-                // 2026-08-11：整条灰阶上移约 7 级。原来外壳落在 gray-100
-                // (243)，与纯白终端差 12 级——这么大面积上的 12 级读出来
-                // 不是"另一层表面"，是蒙了一层灰。外壳提到 250 后卡片与
-                // 沟槽的分离仍然看得出，但整窗回到"浅"而不是"灰"。
-                panel: Rgba::new(252, 252, 253, 236),
-                pill: Rgba::new(241, 241, 243, 230),
-                tab_stroke_l: Rgba::new(208, 208, 211, 140),
+                panel: Rgba::new(245, 245, 246, 236),
+                pill: Rgba::new(233, 233, 234, 230),
+                tab_stroke_l: Rgba::new(198, 198, 200, 150),
                 tab_bg_l: Rgba::new(255, 255, 255, 242),
-                tab_bg_r: Rgba::new(253, 253, 254, 236),
+                tab_bg_r: Rgba::new(250, 250, 251, 236),
                 edge_l: Rgba::new(110, 112, 116, 170),
                 edge_r: Rgba::new(118, 121, 126, 180),
                 edge_glow_l: Rgba::new(118, 121, 126, 18),
@@ -337,8 +332,9 @@ impl NebulaTheme {
                 // Pure white terminal on every light theme (premium-light
                 // sheet): highest contrast for the Primer ANSI ink set.
                 term_bg: Rgb::new(255, 255, 255),
-                // 近白的银灰：白色终端卡片浮在它上面。
-                shell_bg: Rgb::new(250, 250, 251),
+                // Premium-light app-bg layer (#f3f4f6-ish): the white terminal
+                // card floats on this neutral silver.
+                shell_bg: Rgb::new(243, 244, 246),
             },
             // Warm limestone — the light half of the coal pair.
             Self::LimestoneLight => NebulaPalette {

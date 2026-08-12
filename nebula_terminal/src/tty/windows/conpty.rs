@@ -7,25 +7,25 @@ use std::os::windows::io::IntoRawHandle;
 use std::path::{Path, PathBuf};
 use std::{mem, ptr};
 
-use windows_sys::Win32::Foundation::{HANDLE, S_OK};
-use windows_sys::Win32::System::Console::{
-    COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
-};
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::core::{HRESULT, PWSTR};
 use windows_sys::s;
+use windows_sys::Win32::Foundation::{HANDLE, S_OK};
+use windows_sys::Win32::System::Console::{
+    ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
+};
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 use windows_sys::Win32::System::Threading::{
-    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
-    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
+    CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
 use crate::event::{OnResize, WindowSize};
-use crate::tty::Options;
 use crate::tty::windows::blocking::{UnblockedReader, UnblockedWriter};
 use crate::tty::windows::child::ChildExitWatcher;
-use crate::tty::windows::{Pty, cmdline, win32_string};
+use crate::tty::windows::{cmdline, win32_string, Pty};
+use crate::tty::Options;
 
 const PIPE_CAPACITY: usize = crate::event_loop::READ_BUFFER_SIZE;
 
@@ -201,8 +201,13 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         );
         crate::pty_trace("CreatePseudoConsole win32-input rejected; legacy retry");
         result = unsafe {
-            (api.create)(window_size.into(), conin_handle, conout_handle, 0, &mut pty_handle
-                as *mut _)
+            (api.create)(
+                window_size.into(),
+                conin_handle,
+                conout_handle,
+                0,
+                &mut pty_handle as *mut _,
+            )
         };
     }
     crate::pty_trace("CreatePseudoConsole done");

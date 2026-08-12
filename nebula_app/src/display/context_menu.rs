@@ -4,6 +4,7 @@
 //! hit-testing and animation live together here so pointer targets cannot drift
 //! away from the pixels the user sees at non-integer DPI scales.
 
+use super::ui::keycap;
 use super::ui::surface::{self, fade as alpha};
 use super::ui::tokens::{control, space};
 use super::*;
@@ -469,7 +470,11 @@ pub(super) fn hit_test(
             return ContextMenuHit::Action(*action);
         }
     }
-    if contains(layout.panel, x, y) { ContextMenuHit::Panel } else { ContextMenuHit::Outside }
+    if contains(layout.panel, x, y) {
+        ContextMenuHit::Panel
+    } else {
+        ContextMenuHit::Outside
+    }
 }
 
 fn fade_ink(base: Rgba, ink: Rgb, opacity: f32) -> Rgb {
@@ -554,6 +559,20 @@ pub(super) fn draw(display: &mut Display) {
             alpha(Rgba::new(swatch.r, swatch.g, swatch.b, 255), progress),
         ));
     }
+    // 右键菜单和命令面板共用同一颗键帽组件；快捷键不再是贴在右缘的一串
+    // 灰字，独立小键帽给出清晰的可按暗示，也让两类浮层形成同一套视觉语法。
+    for row in &layout.rows {
+        if !row.hint.is_empty() {
+            let combo = keycap::layout_combo(
+                row.hint,
+                row.rect.0 + row.rect.2 - s(10.0),
+                row.rect.1 + row.rect.3 * 0.5,
+                size.cell_width(),
+                scale,
+            );
+            keycap::push_combo_with_progress(&mut quads, &sk, &combo, scale, progress);
+        }
+    }
     display.renderer.draw_ui(&size, &quads);
 
     // Text has no alpha channel in the glyph pipeline, so fade it toward the
@@ -581,15 +600,27 @@ pub(super) fn draw(display: &mut Display) {
             &mut display.glyph_cache,
         );
         if !row.hint.is_empty() {
-            let hint_w = row.hint.chars().count() as f32 * size.cell_width();
-            display.renderer.draw_chrome_text(
-                &size,
-                row.rect.0 + row.rect.2 - hint_w - s(10.0),
-                y,
-                dim,
+            let combo = keycap::layout_combo(
                 row.hint,
-                &mut display.glyph_cache,
+                row.rect.0 + row.rect.2 - s(10.0),
+                row.rect.1 + row.rect.3 * 0.5,
+                size.cell_width(),
+                scale,
             );
+            let (_, key_y, _, key_h) = combo.bounds;
+            let key_text_y = key_y + (key_h - cell_h) * 0.5;
+            for (chip_x, chip_w, key) in &combo.chips {
+                let key_w = key.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() as f32
+                    * size.cell_width();
+                display.renderer.draw_chrome_text(
+                    &size,
+                    chip_x + (chip_w - key_w) * 0.5,
+                    key_text_y,
+                    dim,
+                    key,
+                    &mut display.glyph_cache,
+                );
+            }
         }
     }
     if let Some((x, y)) = layout.color_label {

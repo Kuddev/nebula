@@ -335,13 +335,14 @@ pub(crate) fn push_check(
     );
 }
 
-/// 主机行右缘的动作图标：hover 才显形，替代原来三个描边文字按钮。
-/// 与设置导航图标同一套配方（线性圆润、真墨迹居中、整像素吸附），
-/// 尺寸统一按 `rect` 短边推导，因此三枚在任何 DPI 下都等重。
+/// 主机行右缘的动作图标：hover 才显形。主动作「连接」是文字按钮（原型里
+/// 唯一带底的那个），这里只画次级动作——一行全是等价图标会逼人逐个悬停去
+/// 猜哪个是"进去"。
+///
+/// 与设置导航图标同一套配方：线性圆润、真墨迹居中、外沿整像素吸附，尺寸统
+/// 一按 `rect` 推导，因此几枚在任何 DPI 下都等重。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RowActionIcon {
-    /// 连接：右向三角，播放/前往的通用语义。
-    Connect,
     /// 编辑：斜置笔杆 + 笔尖。
     Edit,
     /// 隐藏：眼睛加一道斜杠。
@@ -362,44 +363,26 @@ pub(crate) fn push_row_action_icon(
     }
     let cx = (x + width * 0.5).round();
     let cy = (y + height * 0.5).round();
-    let stroke = (1.3 * scale).max(1.0);
+    let stroke = (1.25 * scale).max(1.0);
     match icon {
-        // 实心三角比描边箭头更稳：这一枚尺寸最小，描边到 13px 见方时
-        // 两条斜边会各自吃掉半像素，糊成灰块。
-        RowActionIcon::Connect => {
-            let half_h = 4.4 * scale;
-            let reach = 4.0 * scale;
-            let left = cx - 2.6 * scale;
-            let steps = (half_h * 2.0).round().max(2.0) as i32;
-            for i in 0..steps {
-                let t = i as f32 / steps as f32;
-                let row_y = cy - half_h + t * half_h * 2.0;
-                // 三角在垂直中线处最宽，向上下两端线性收窄。
-                let w = reach * (1.0 - (t - 0.5).abs() * 2.0);
-                if w <= 0.0 {
-                    continue;
-                }
-                quads.push(UiQuad::solid(left, row_y.round(), w.max(1.0), 1.0, 0.0, ink));
-            }
-        },
         RowActionIcon::Edit => {
-            // 笔杆：从左下到右上的一道斜线，末端补一小段更粗的笔尖。
-            let tip = (cx - 4.6 * scale, cy + 4.6 * scale);
-            let tail = (cx + 4.2 * scale, cy - 4.2 * scale);
+            // 笔杆：左下到右上一道斜线；笔尖再补一小段加粗，让它读成"笔"
+            // 而不是"斜杠"（斜杠已经被 Hide 占用，两枚不能撞形）。
+            let tip = (cx - 4.4 * scale, cy + 4.4 * scale);
+            let tail = (cx + 4.4 * scale, cy - 4.4 * scale);
             push_segment(quads, tip, tail, stroke, ink);
-            // 笔尖的小三角：一个贴着 tip 的短粗段，让斜线读成"笔"而非"斜杠"。
             push_segment(
                 quads,
-                (tip.0, tip.1),
-                (tip.0 + 1.9 * scale, tip.1 - 1.9 * scale),
-                stroke * 2.0,
+                tip,
+                (tip.0 + 1.8 * scale, tip.1 - 1.8 * scale),
+                stroke * 2.1,
                 ink,
             );
         },
         RowActionIcon::Hide => {
-            // 眼睛：外圈椭圆（用圆角矩形逼近）挖空 + 中心瞳孔，再压一道斜杠。
-            let w = 11.0 * scale;
-            let h = 6.6 * scale;
+            // 眼睛：圆角胶囊挖空当外圈轮廓 + 中心瞳孔，再压一道斜杠。
+            let w = 11.5 * scale;
+            let h = 7.0 * scale;
             let ex = (cx - w * 0.5).round();
             let ey = (cy - h * 0.5).round();
             quads.push(UiQuad::solid(ex, ey, w, h, h * 0.5, ink));
@@ -411,7 +394,7 @@ pub(crate) fn push_row_action_icon(
                 (h * 0.5 - stroke).max(0.0),
                 cutout,
             ));
-            let pupil = 3.0 * scale;
+            let pupil = 2.8 * scale;
             quads.push(UiQuad::solid(
                 cx - pupil * 0.5,
                 cy - pupil * 0.5,
@@ -420,10 +403,10 @@ pub(crate) fn push_row_action_icon(
                 pupil * 0.5,
                 ink,
             ));
-            // 斜杠先用底色垫一条更宽的，避免与眼睛的墨迹糊在一起。
-            let a = (cx - 5.4 * scale, cy + 5.4 * scale);
-            let b = (cx + 5.4 * scale, cy - 5.4 * scale);
-            push_segment(quads, a, b, stroke * 2.6, cutout);
+            // 斜杠先垫一条底色的更宽段，避免与眼睛墨迹糊成一团黑。
+            let a = (cx - 5.6 * scale, cy + 5.6 * scale);
+            let b = (cx + 5.6 * scale, cy - 5.6 * scale);
+            push_segment(quads, a, b, stroke * 2.8, cutout);
             push_segment(quads, a, b, stroke, ink);
         },
     }
