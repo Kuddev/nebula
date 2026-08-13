@@ -46,6 +46,8 @@ mod event;
 mod file_uri;
 #[cfg(windows)]
 mod font_install;
+#[cfg(feature = "gpui-shell")]
+mod gpui_shell;
 mod input;
 mod logging;
 #[cfg(target_os = "macos")]
@@ -129,14 +131,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Load command line options.
     let options = Options::new();
 
+    // P3 主窗形态：GPUI 作为 nebula.exe 的 UI 层，从主线程直接进 GPUI
+    // 消息循环，winit 旧壳完全不启动。三闸门在此形态复测。
+    #[cfg(feature = "gpui-shell")]
+    if options.gpui {
+        gpui_shell::run_shell();
+        return Ok(());
+    }
+
     // C 路线 spike：GPUI UI 层跑在专用线程，拥有自己的消息循环与窗口；
     // 与主线程的 winit 循环互不接管。仅在显式设置环境变量时启动，
-    // 用于验证双 UI 运行时共存（焦点/IME/DPI）。
+    // 用于验证双 UI 运行时共存（焦点/IME/DPI）；P3 主窗接管完成后移除。
     #[cfg(feature = "gpui-shell")]
     if std::env::var_os("NEBULA_GPUI_SHELL").is_some() {
         std::thread::Builder::new()
             .name("gpui-shell".into())
-            .spawn(nebula_gpui::run_shell)
+            .spawn(gpui_shell::run_shell)
             .expect("spawn gpui-shell thread");
     }
 

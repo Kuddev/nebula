@@ -33,6 +33,11 @@ pub struct Options {
     #[clap(long)]
     pub embed: Option<String>,
 
+    /// Launch the GPUI UI shell as the main window (P3 acceptance form).
+    #[cfg(feature = "gpui-shell")]
+    #[clap(long)]
+    pub gpui: bool,
+
     /// Specify alternative configuration file [default:
     /// $XDG_CONFIG_HOME/nebula/nebula.toml].
     #[cfg(not(any(target_os = "macos", windows)))]

@@ -25,9 +25,28 @@ version = "1.0.0"
 path = "../nebula_config"
 version = "1.0.0"
 
-# 可选：进程内 GPUI UI 层（feature = "gpui-shell"）。
-[dependencies.nebula-gpui]
-path = "../nebula_gpui"
+# 可选：GPUI UI 层（feature = "gpui-shell"，模块 src/gpui_shell/）。
+# gpui 与 gpui-component 成对锁定：0.5.1 编译在 gpui 0.2.2 上；两者由根
+# Cargo.toml 的 [patch.crates-io] 重定向到我们的 fork。
+[dependencies.gpui]
+version = "=0.2.2"
+optional = true
+
+[dependencies.gpui-component]
+version = "=0.5.1"
+optional = true
+
+[dependencies.gpui-component-assets]
+version = "=0.5.1"
+optional = true
+
+# 运行时用户设置（nebula_settings.txt + 主题终端色表）的共享权威实现。
+[dependencies.nebula-settings]
+path = "../nebula_settings"
+optional = true
+
+[dependencies.futures]
+version = "0.3"
 optional = true
 
 [dependencies.nebula-completions]
@@ -198,6 +217,12 @@ wayland = [
 ]
 nightly = []
 wgpu-foundation = ["dep:pollster", "dep:wgpu"]
-# C 路线：在 nebula.exe 进程内的专用线程上拉起 GPUI UI 层。
-# 默认关闭，不影响常规构建；开启后由 NEBULA_GPUI_SHELL=1 触发。
-gpui-shell = ["dep:nebula-gpui"]
+# GPUI UI 层（产品代码在 src/gpui_shell/）。默认关闭，不影响常规构建。
+# 拉起：`nebula --gpui`（主窗形态）或 NEBULA_GPUI_SHELL=1（spike 并存形态）。
+gpui-shell = [
+    "dep:gpui",
+    "dep:gpui-component",
+    "dep:gpui-component-assets",
+    "dep:nebula-settings",
+    "dep:futures",
+]

@@ -11,8 +11,8 @@ use gpui::{
     Styled as _, Subscription, Window, div, px,
 };
 
-use crate::terminal::view::{TerminalView, TerminalViewEvent};
-use crate::ui::prelude::*;
+use crate::gpui_shell::prelude::*;
+use crate::gpui_shell::terminal::view::{TerminalView, TerminalViewEvent};
 
 gpui::actions!(nebula_workspace, [NewTerminal, CloseActiveTerminal, ToggleSidebar]);
 
@@ -199,18 +199,6 @@ impl NebulaWorkspace {
                     ),
             )
             .child(v_flex().flex_1().gap_1().children(items))
-            .child(
-                h_flex().px_1().child(
-                    Button::new("open-gallery")
-                        .icon(IconName::Settings)
-                        .ghost()
-                        .small()
-                        .tooltip("组件验收页")
-                        .on_click(|_, _, cx| {
-                            crate::app::open_gallery_window(cx);
-                        }),
-                ),
-            )
     }
 }
 

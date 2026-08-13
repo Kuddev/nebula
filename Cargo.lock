@@ -4570,10 +4570,14 @@ dependencies = [
  "dirs 6.0.0",
  "dwrote",
  "embed-resource",
+ "futures",
  "getrandom 0.3.3",
  "gl_generator",
  "global-hotkey",
  "glutin",
+ "gpui",
+ "gpui-component",
+ "gpui-component-assets",
  "home",
  "html-escape",
  "image",
@@ -4581,7 +4585,7 @@ dependencies = [
  "log",
  "mlua",
  "nebula-completions",
- "nebula-gpui",
+ "nebula-settings",
  "nebula_config",
  "nebula_config_derive",
  "nebula_terminal",
@@ -4635,15 +4639,9 @@ dependencies = [
 name = "nebula-gpui"
 version = "0.1.0"
 dependencies = [
- "dirs 6.0.0",
- "futures",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
- "nebula-settings",
- "nebula_terminal",
- "serde",
- "toml 0.9.11+spec-1.1.0",
 ]
 
 [[package]]

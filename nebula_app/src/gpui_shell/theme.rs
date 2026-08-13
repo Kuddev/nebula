@@ -1,6 +1,3 @@
-//! 实验场副本：产品权威在 `nebula_app/src/gpui_shell/theme.rs`。
-//! gallery 用产品同款视觉 token 验收组件；改 token 时两处同步。
-
 use gpui::{App, hsla, px};
 use gpui_component::{Theme, ThemeMode};
 

@@ -1,4 +1,4 @@
-//! 读取用户配置：`nebula.toml` + `nebula_settings.txt`，与 `nebula_app`
+﻿//! 读取用户配置：`nebula.toml` + `nebula_settings.txt`，与 `nebula_app`
 //! 共享同一套文件与语义。
 //!
 //! 两个来源、一个优先级：`nebula_settings.txt`（设置界面持久化的运行时
@@ -23,7 +23,7 @@ use nebula_settings::{CursorShapeName, RuntimeSettings};
 use nebula_terminal::vte::ansi::CursorShape;
 use serde::Deserialize;
 
-use crate::terminal::colors::Palette;
+use crate::gpui_shell::terminal::colors::Palette;
 
 /// 应用启动时装载一次的全局设置。
 pub struct Settings {
@@ -206,7 +206,7 @@ fn load_merged_toml(path: &Path) -> toml::Value {
         if import_path.exists() {
             merged = merge_values(merged, read_toml(&import_path));
         } else {
-            eprintln!("[nebula-gpui] config import not found: {}", import_path.display());
+            eprintln!("[nebula:gpui] config import not found: {}", import_path.display());
         }
     }
     merge_values(merged, main)
@@ -216,7 +216,7 @@ fn read_toml(path: &Path) -> toml::Value {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
-            eprintln!("[nebula-gpui] failed to read config {}: {err}", path.display());
+            eprintln!("[nebula:gpui] failed to read config {}: {err}", path.display());
             return toml::Value::Table(Default::default());
         },
     };
@@ -224,7 +224,7 @@ fn read_toml(path: &Path) -> toml::Value {
     match text.parse::<toml::Table>() {
         Ok(table) => toml::Value::Table(table),
         Err(err) => {
-            eprintln!("[nebula-gpui] failed to parse config {}: {err}", path.display());
+            eprintln!("[nebula:gpui] failed to parse config {}: {err}", path.display());
             toml::Value::Table(Default::default())
         },
     }
@@ -234,7 +234,7 @@ fn read_toml(path: &Path) -> toml::Value {
 fn resolve_import_path(import: &str, base_config: &Path) -> PathBuf {
     let mut path = PathBuf::from(import);
     if let Ok(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home::home_dir() {
             path = home.join(stripped);
         }
     }

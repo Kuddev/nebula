@@ -23,7 +23,7 @@ use super::element::TerminalElement;
 use super::keymap;
 use super::mouse_protocol;
 use super::session::{self, GridSize, TerminalSession};
-use crate::config::Settings;
+use crate::gpui_shell::config::Settings;
 
 use futures::StreamExt as _;
 
