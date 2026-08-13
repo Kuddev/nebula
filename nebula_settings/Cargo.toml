@@ -1,0 +1,12 @@
+[package]
+name = "nebula-settings"
+version = "1.0.0"
+license = "GPL-3.0-or-later"
+description = "Shared reader for Nebula runtime user settings (nebula_settings.txt) and theme terminal-color tables"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+# 刻意零依赖：任何壳（winit 旧壳 / GPUI）与任何渲染后端都能免费引用，
+# 不给依赖图带来任何新节点。
+[dependencies]

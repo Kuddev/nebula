@@ -62,8 +62,9 @@ pub struct TerminalView {
 
 impl TerminalView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        // 字体与调色板来自用户 nebula.toml（bootstrap 时装载为全局 Settings）。
-        let (families, font_size, palette) = match cx.try_global::<Settings>() {
+        // 字体、调色板与终端启动配置来自用户配置（nebula.toml +
+        // nebula_settings.txt，bootstrap 时装载为全局 Settings）。
+        let (families, font_size, palette, term_config) = match cx.try_global::<Settings>() {
             Some(settings) => (
                 [
                     settings.font_family.clone(),
@@ -73,11 +74,13 @@ impl TerminalView {
                 ],
                 px(settings.font_size_px),
                 Arc::new(settings.palette.clone()),
+                settings.term_config(),
             ),
             None => (
                 std::array::from_fn(|_| String::from("Cascadia Mono")),
                 px(15.0),
                 Arc::new(Palette::default()),
+                nebula_terminal::term::Config::default(),
             ),
         };
         // to_string：SharedString 的 &str 转换要求 'static，字体名是运行时值。
@@ -88,7 +91,7 @@ impl TerminalView {
         };
 
         let initial = WindowSize { num_lines: 30, num_cols: 100, cell_width: 9, cell_height: 18 };
-        let (session, error) = match session::spawn(initial) {
+        let (session, error) = match session::spawn(initial, term_config) {
             Ok((session, mut rx)) => {
                 cx.spawn(async move |this, cx| {
                     while let Some(event) = rx.next().await {

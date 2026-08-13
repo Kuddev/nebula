@@ -24,6 +24,8 @@ gpui-component-assets = "=0.5.1"
 # 终端核心是纯 Rust（vte/grid/ConPTY），没有 GUI 原生依赖，因此可以跨 workspace
 # 边界直接 path 引用而不会重新引入 fontconfig links 冲突。
 nebula_terminal = { path = "../nebula_terminal" }
+# 运行时用户设置（nebula_settings.txt + 主题终端色表）的共享权威实现。
+nebula-settings = { path = "../nebula_settings" }
 futures = "0.3"
 # 读取用户 nebula.toml 的字体/配色子集；版本与主仓保持一致。
 serde = { version = "1", features = ["derive"] }

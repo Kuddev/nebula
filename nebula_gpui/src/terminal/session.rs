@@ -50,9 +50,11 @@ pub struct TerminalSession {
     pub notifier: Notifier,
 }
 
-/// 启动一个本地 shell 会话。尺寸随后由首帧 prepaint 按真实布局重设。
+/// 启动一个本地 shell 会话。尺寸随后由首帧 prepaint 按真实布局重设；
+/// `term_config` 携带运行时设置（默认光标形状/闪烁等）。
 pub fn spawn(
     window_size: WindowSize,
+    term_config: Config,
 ) -> std::io::Result<(TerminalSession, UnboundedReceiver<Event>)> {
     let (tx, rx) = unbounded();
     let proxy = EventProxy(tx);
@@ -61,7 +63,7 @@ pub fn spawn(
         columns: window_size.num_cols as usize,
         screen_lines: window_size.num_lines as usize,
     };
-    let term = Arc::new(FairMutex::new(Term::new(Config::default(), &grid, proxy.clone())));
+    let term = Arc::new(FairMutex::new(Term::new(term_config, &grid, proxy.clone())));
 
     let options = tty::Options::default();
     tty::setup_env();

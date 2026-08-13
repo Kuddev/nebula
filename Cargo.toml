@@ -7,6 +7,7 @@ members = [
     "nebula-completions",
     "nebula_hook",
     "nebula_gpui",
+    "nebula_settings",
 ]
 resolver = "2"
 

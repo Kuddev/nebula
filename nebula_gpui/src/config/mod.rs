@@ -1,18 +1,26 @@
-//! 读取用户的 `nebula.toml`，与 `nebula_app` 共享同一份配置文件。
+//! 读取用户配置：`nebula.toml` + `nebula_settings.txt`，与 `nebula_app`
+//! 共享同一套文件与语义。
 //!
-//! 只解析 GPUI 壳当前消费的子集（字体、终端配色），解析全程宽容：未知字段
-//! 忽略、非法值回退默认，保证任何用户配置都不会阻止启动。查找路径与主应用
-//! `config::installed_config` 完全一致；`general.import`（及顶层 `import`）
-//! 按主应用语义做值级合并：imports 先加载，主文件最后覆盖。
+//! 两个来源、一个优先级：`nebula_settings.txt`（设置界面持久化的运行时
+//! 意图，经共享 crate `nebula-settings` 读取）覆盖 `nebula.toml` 的对应
+//! 字段；主题对终端色表的影响永远在最后叠加（镜像旧壳 `apply_term_colors`
+//! 的次序：用户配色是 defaults，主题裁定背景/浅色替换/Powerline 槽位）。
+//!
+//! 解析全程宽容：未知字段忽略、非法值回退默认，任何用户配置都不会阻止
+//! 启动。toml 查找路径与主应用 `config::installed_config` 一致；
+//! `general.import`（及顶层 `import`）按主应用语义值级合并。
 //!
 //! 尚未对齐的字段（记录在案，后续步骤处理）：
 //! - `font.offset` / `font.glyph_offset`（cell 度量微调）
 //! - `colors.cursor` 的 `CellForeground`/`CellBackground` 反色语义
+//! - `follow_system_theme`（系统外观联动切主题）
 //! - 配置热重载（主应用用 notify 监视；本壳目前启动读一次）
 
 use std::path::{Path, PathBuf};
 
 use gpui::Global;
+use nebula_settings::{CursorShapeName, RuntimeSettings};
+use nebula_terminal::vte::ansi::CursorShape;
 use serde::Deserialize;
 
 use crate::terminal::colors::Palette;
@@ -26,7 +34,11 @@ pub struct Settings {
     /// GPUI 逻辑像素（配置里是 pt，1pt = 4/3 px @96dpi）。
     pub font_size_px: f32,
     pub palette: Palette,
-    /// 实际加载的配置文件（诊断用；None 表示全默认）。
+    pub cursor_shape: Option<CursorShape>,
+    pub cursor_blink: Option<bool>,
+    /// 选区完成即复制（旧壳 `copy_on_select` 设置）。
+    pub copy_on_select: bool,
+    /// 实际加载的 toml 配置文件（诊断用；None 表示无 toml）。
     pub source_path: Option<PathBuf>,
 }
 
@@ -34,6 +46,7 @@ impl Global for Settings {}
 
 impl Settings {
     pub fn load() -> Self {
+        let runtime = RuntimeSettings::load();
         let path = find_config_file();
         let raw = path
             .as_deref()
@@ -41,25 +54,81 @@ impl Settings {
             .unwrap_or_else(|| toml::Value::Table(Default::default()));
         let raw: RawConfig = raw.try_into().unwrap_or_default();
 
-        let normal_family = raw
-            .font
-            .normal
-            .family
+        // 字体：settings.txt（设置界面）覆盖 toml，最后落内置默认。
+        let normal_family = runtime
+            .font_family
             .clone()
+            .or_else(|| raw.font.normal.family.clone())
             .unwrap_or_else(|| default_font_family().to_string());
         let secondary = |desc: &RawFontDesc| -> String {
             desc.family.clone().unwrap_or_else(|| normal_family.clone())
         };
+        let font_size_pt =
+            runtime.font_size_pt.or(raw.font.size).unwrap_or(11.25).clamp(4.0, 96.0);
+
+        // 配色：toml 覆盖内置默认，主题最后裁定（与旧壳同序）。
+        let mut palette = build_palette(&raw.colors);
+        apply_theme(&mut palette, runtime.theme);
 
         Settings {
             font_bold_family: secondary(&raw.font.bold),
             font_italic_family: secondary(&raw.font.italic),
             font_bold_italic_family: secondary(&raw.font.bold_italic),
-            font_size_px: raw.font.size.unwrap_or(11.25).clamp(4.0, 96.0) * 4.0 / 3.0,
-            palette: build_palette(&raw.colors),
+            font_size_px: font_size_pt * 4.0 / 3.0,
+            palette,
+            cursor_shape: runtime.cursor_shape.map(|shape| match shape {
+                CursorShapeName::Block => CursorShape::Block,
+                CursorShapeName::Beam => CursorShape::Beam,
+                CursorShapeName::Underline => CursorShape::Underline,
+            }),
+            cursor_blink: runtime.cursor_blink,
+            copy_on_select: runtime.copy_on_select,
             font_family: normal_family,
             source_path: path,
         }
+    }
+
+    /// 引擎 Term 的启动配置（默认光标形状/闪烁来自运行时设置）。
+    pub fn term_config(&self) -> nebula_terminal::term::Config {
+        let mut config = nebula_terminal::term::Config::default();
+        if let Some(shape) = self.cursor_shape {
+            config.default_cursor_style.shape = shape;
+        }
+        if let Some(blinking) = self.cursor_blink {
+            config.default_cursor_style.blinking = blinking;
+        }
+        config
+    }
+}
+
+/// 主题叠加在 toml 配色之上（镜像旧壳 `apply_term_colors` 的范围与次序）：
+/// 背景永远替换；Powerline 槽位 16..=23 替换；浅色主题另替换前景与
+/// ANSI-16。dim 表与 bright_foreground 有意不动——与旧壳逐字段一致。
+fn apply_theme(palette: &mut Palette, theme: nebula_settings::ThemeName) {
+    let term = theme.term_theme();
+    palette.background = rgba8(term.background);
+    for (i, color) in term.powerline.into_iter().enumerate() {
+        set_indexed(palette, nebula_settings::POWERLINE_SLOT0 + i as u8, rgba8(color));
+    }
+    if term.is_light {
+        palette.foreground = rgba8(nebula_settings::LIGHT_FOREGROUND);
+        for (i, color) in nebula_settings::LIGHT_ANSI.into_iter().enumerate() {
+            palette.ansi[i] = rgba8(color);
+        }
+    }
+}
+
+fn set_indexed(palette: &mut Palette, index: u8, color: gpui::Rgba) {
+    palette.indexed.retain(|(existing, _)| *existing != index);
+    palette.indexed.push((index, color));
+}
+
+fn rgba8(color: nebula_settings::Rgb8) -> gpui::Rgba {
+    gpui::Rgba {
+        r: color[0] as f32 / 255.0,
+        g: color[1] as f32 / 255.0,
+        b: color[2] as f32 / 255.0,
+        a: 1.0,
     }
 }
 
