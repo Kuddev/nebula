@@ -15,6 +15,8 @@
 //! - A pixel-size change is reported even when rows/cols are unchanged
 //!   (Ghostty rule): applications may care about pixel metrics.
 
+pub mod boxdraw;
+
 use crate::event::{EventListener, WindowSize};
 use crate::term::cell::Flags;
 use crate::term::color::Colors;
@@ -204,6 +206,20 @@ pub struct CursorSnapshot {
     pub wide: bool,
 }
 
+/// A cell rendered by built-in geometry ([`boxdraw`]) instead of a font:
+/// box-drawing, block elements and Powerline separators must cover the cell
+/// exactly and join seamlessly across cells — no font (CJK fonts above all)
+/// guarantees that, so these never enter a text segment.
+pub struct BoxGlyph {
+    pub row: u16,
+    pub col: u16,
+    /// The terminal marked this cell wide: geometry spans two columns.
+    pub wide: bool,
+    pub ch: char,
+    pub fg: Color,
+    pub bold: bool,
+}
+
 /// Everything a frontend needs to paint one frame, as plain data. Built in a
 /// single pass under the `Term` lock; owning no references, it lets the lock
 /// drop before any painting or color resolution happens.
@@ -216,6 +232,8 @@ pub struct RenderSnapshot {
     pub bg_runs: Vec<BgRun>,
     pub selection_runs: Vec<CellRun>,
     pub segments: Vec<TextSegment>,
+    /// Cells routed to built-in geometry; disjoint from `segments`.
+    pub box_glyphs: Vec<BoxGlyph>,
     pub cursor: Option<CursorSnapshot>,
 }
 
@@ -245,6 +263,7 @@ impl RenderSnapshot {
             bg_runs: Vec::new(),
             selection_runs: Vec::new(),
             segments: Vec::new(),
+            box_glyphs: Vec::new(),
             cursor: None,
         };
 
@@ -310,6 +329,20 @@ impl RenderSnapshot {
                 && cursor_vp.is_some_and(|c| c.line == row as usize && c.column.0 == col as usize);
 
             let c = indexed.cell.c;
+            if boxdraw::is_builtin(c) {
+                // Built-in geometry cells never enter a text segment — the
+                // typography engine has no authority over them. Combining
+                // characters on box glyphs are meaningless and dropped.
+                snap.box_glyphs.push(BoxGlyph {
+                    row,
+                    col,
+                    wide: flags.contains(Flags::WIDE_CHAR),
+                    ch: c,
+                    fg,
+                    bold,
+                });
+                continue;
+            }
             if c == ' '
                 && indexed.cell.extra.is_none()
                 && !flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
@@ -501,5 +534,19 @@ mod tests {
         term.grid_mut().cursor.point = crate::index::Point::new(Line(0), Column(0));
         let snap = RenderSnapshot::capture(&term, &cfg(4, 8));
         assert!(snap.cursor.expect("cursor").wide);
+    }
+
+    #[test]
+    fn capture_routes_builtin_glyphs_to_geometry() {
+        let term = term_with(&["a─█b"]);
+        let snap = RenderSnapshot::capture(&term, &cfg(4, 8));
+
+        let boxes: Vec<_> = snap.box_glyphs.iter().map(|b| (b.row, b.col, b.ch, b.wide)).collect();
+        assert_eq!(boxes, vec![(0, 1, '─', false), (0, 2, '█', false)]);
+
+        // Text segments keep only 'a' and 'b', split at the geometry cells.
+        let segments: Vec<_> =
+            snap.segments.iter().map(|s| (s.start_col, s.cells.len())).collect();
+        assert_eq!(segments, vec![(0, 1), (3, 1)]);
     }
 }

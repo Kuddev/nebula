@@ -8,11 +8,11 @@
 
 use gpui::{
     App, Bounds, Element, ElementId, GlobalElementId, HitboxBehavior, Hsla, InspectorElementId,
-    LayoutId, Pixels, SharedString, Style, TextRun, UnderlineStyle, Window, fill, outline, point,
-    px, relative, size,
+    LayoutId, Pixels, Rgba, SharedString, Style, TextRun, UnderlineStyle, Window, fill, outline,
+    point, px, relative, size,
 };
 use gpui_component::PixelsExt as _;
-use nebula_terminal::render::{RenderSnapshot, SnapshotConfig};
+use nebula_terminal::render::{RenderSnapshot, SnapshotConfig, boxdraw};
 use nebula_terminal::vte::ansi::CursorShape;
 
 use super::view::TerminalView;
@@ -212,6 +212,54 @@ impl Element for TerminalElement {
                     matches!(c.shape, CursorShape::Block) && c.row == row && c.col == col
                 })
         };
+
+        // 内建几何字形（框线/块元素/Powerline）：不走字体，直接以图元填充。
+        // 几何由渲染合同裁定（含设备像素吸附），保证盖满单元格、相邻无缝
+        // —— CJK 字体下的框线错位就此根治。
+        let scale = window.scale_factor();
+        for glyph in &snap.box_glyphs {
+            let fg = if cursor_inverts(glyph.row, glyph.col) {
+                theme.background
+            } else {
+                theme.resolve(glyph.fg, &overrides, glyph.bold)
+            };
+            let span = if glyph.wide { 2.0 } else { 1.0 };
+            let Some(prims) = boxdraw::primitives(
+                glyph.ch,
+                layout.cell_width.as_f32() * span,
+                layout.line_height.as_f32(),
+                scale,
+            ) else {
+                continue;
+            };
+            let origin = point(
+                bounds.origin.x + layout.cell_width * glyph.col as f32,
+                bounds.origin.y + layout.line_height * glyph.row as f32,
+            );
+            let at = |p: &[f32; 2]| point(origin.x + px(p[0]), origin.y + px(p[1]));
+            for prim in prims {
+                match prim {
+                    boxdraw::Primitive::Rect { rect, alpha } => {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(origin.x + px(rect.x), origin.y + px(rect.y)),
+                                size(px(rect.w), px(rect.h)),
+                            ),
+                            Rgba { a: fg.a * alpha, ..fg },
+                        ));
+                    },
+                    boxdraw::Primitive::Poly { points } => {
+                        // 合同保证顶点为凸序，首点三角扇填充正确。
+                        let Some((first, rest)) = points.split_first() else { continue };
+                        let mut path = gpui::Path::new(at(first));
+                        for p in rest {
+                            path.line_to(at(p));
+                        }
+                        window.paint_path(path, fg);
+                    },
+                }
+            }
+        }
 
         for seg in &snap.segments {
             let step = seg.step() as usize;
