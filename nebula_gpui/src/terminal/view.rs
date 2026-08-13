@@ -21,6 +21,7 @@ use std::sync::Arc;
 use super::colors::Palette;
 use super::element::TerminalElement;
 use super::keymap;
+use super::mouse_protocol;
 use super::session::{self, GridSize, TerminalSession};
 use crate::config::Settings;
 
@@ -58,31 +59,39 @@ pub struct TerminalView {
     viewports: ViewportTracker,
     scroll_px: f32,
     selecting: bool,
+    /// 选中即复制（旧壳 `copy_on_select`）；关闭时复制交给右键路径。
+    copy_on_select: bool,
+    /// 鼠标模式下最后上报的单元格：move 事件按"进入新单元格"去重。
+    last_report_point: Option<TermPoint>,
 }
 
 impl TerminalView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         // 字体、调色板与终端启动配置来自用户配置（nebula.toml +
         // nebula_settings.txt，bootstrap 时装载为全局 Settings）。
-        let (families, font_size, palette, term_config) = match cx.try_global::<Settings>() {
-            Some(settings) => (
-                [
-                    settings.font_family.clone(),
-                    settings.font_bold_family.clone(),
-                    settings.font_italic_family.clone(),
-                    settings.font_bold_italic_family.clone(),
-                ],
-                px(settings.font_size_px),
-                Arc::new(settings.palette.clone()),
-                settings.term_config(),
-            ),
-            None => (
-                std::array::from_fn(|_| String::from("Cascadia Mono")),
-                px(15.0),
-                Arc::new(Palette::default()),
-                nebula_terminal::term::Config::default(),
-            ),
-        };
+        let (families, font_size, palette, term_config, copy_on_select) =
+            match cx.try_global::<Settings>() {
+                Some(settings) => (
+                    [
+                        settings.font_family.clone(),
+                        settings.font_bold_family.clone(),
+                        settings.font_italic_family.clone(),
+                        settings.font_bold_italic_family.clone(),
+                    ],
+                    px(settings.font_size_px),
+                    Arc::new(settings.palette.clone()),
+                    settings.term_config(),
+                    settings.copy_on_select,
+                ),
+                None => (
+                    std::array::from_fn(|_| String::from("Cascadia Mono")),
+                    px(15.0),
+                    Arc::new(Palette::default()),
+                    nebula_terminal::term::Config::default(),
+                    // 旧壳的出厂默认即开。
+                    true,
+                ),
+            };
         // to_string：SharedString 的 &str 转换要求 'static，字体名是运行时值。
         let mono = |family: &str, weight: FontWeight, style: FontStyle| Font {
             weight,
@@ -147,6 +156,8 @@ impl TerminalView {
             viewports: ViewportTracker::default(),
             scroll_px: 0.0,
             selecting: false,
+            copy_on_select,
+            last_report_point: None,
         }
     }
 
@@ -339,6 +350,28 @@ impl TerminalView {
         }
 
         let mode = self.term_mode();
+
+        // 回滚快捷键（对齐旧壳默认绑定，仅主屏）：Shift+PageUp/PageDown
+        // 翻页、Shift+Home/End 到顶/到底；备用屏下不拦截，交给编码器
+        // 把带修饰的键序发给应用（less 自己处理 Shift+PageUp）。
+        if mods.shift && !mods.control && !mods.alt && !mode.contains(TermMode::ALT_SCREEN) {
+            let scroll = match ks.key.as_str() {
+                "pageup" => Some(Scroll::PageUp),
+                "pagedown" => Some(Scroll::PageDown),
+                "home" => Some(Scroll::Top),
+                "end" => Some(Scroll::Bottom),
+                _ => None,
+            };
+            if let Some(scroll) = scroll {
+                if let Some(session) = &self.session {
+                    session.term.lock().scroll_display(scroll);
+                }
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+        }
+
         if let Some(bytes) = keymap::encode(ks, &mode) {
             self.write_input(bytes, cx);
             cx.stop_propagation();
@@ -357,6 +390,30 @@ impl TerminalView {
         (viewport_to_point(display_offset, TermPoint::new(row, Column(col))), side)
     }
 
+    /// 应用是否接管了鼠标（vim/htop 等）。Shift 按住时强制旁路——这是
+    /// 终端的通用逃生门：应用吃鼠标时用户仍能选择/复制。
+    fn mouse_mode_active(&self, mods: &gpui::Modifiers) -> bool {
+        !mods.shift && self.term_mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// 把一次鼠标事件按当前协议（SGR/normal/UTF-8）编码上报给应用。
+    fn send_mouse_report(
+        &mut self,
+        position: Point<Pixels>,
+        button: u8,
+        pressed: bool,
+        mods: &gpui::Modifiers,
+    ) {
+        let (point, _) = self.grid_point(position);
+        self.last_report_point = Some(point);
+        let mode = self.term_mode();
+        let mods =
+            mouse_protocol::ReportMods { shift: mods.shift, alt: mods.alt, control: mods.control };
+        if let Some(bytes) = mouse_protocol::report(&mode, point, button, pressed, mods) {
+            self.write_bytes(bytes);
+        }
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -364,14 +421,36 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
-        let Some(session) = &self.session else { return };
+        if self.session.is_none() {
+            return;
+        }
+        if self.mouse_mode_active(&event.modifiers) {
+            self.send_mouse_report(
+                event.position,
+                mouse_protocol::BUTTON_LEFT,
+                true,
+                &event.modifiers,
+            );
+            return;
+        }
         let (point, side) = self.grid_point(event.position);
         let ty = match event.click_count {
             1 => SelectionType::Simple,
             2 => SelectionType::Semantic,
             _ => SelectionType::Lines,
         };
-        session.term.lock().selection = Some(Selection::new(ty, point, side));
+        if let Some(session) = &self.session {
+            let mut term = session.term.lock();
+            // Shift+单击扩展既有选区到点击处（原生文本框行为，对齐旧壳）；
+            // 其余情况都开新选区。
+            let extend = event.modifiers.shift
+                && event.click_count == 1
+                && term.selection.as_ref().is_some_and(|s| !s.is_empty());
+            match term.selection.as_mut() {
+                Some(selection) if extend => selection.update(point, side),
+                _ => term.selection = Some(Selection::new(ty, point, side)),
+            }
+        }
         self.selecting = true;
         cx.notify();
     }
@@ -382,20 +461,144 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+        if self.selecting {
+            if event.pressed_button != Some(MouseButton::Left) {
+                return;
+            }
+            let (point, side) = self.grid_point(event.position);
+            if let Some(session) = &self.session {
+                if let Some(selection) = session.term.lock().selection.as_mut() {
+                    selection.update(point, side);
+                }
+            }
+            cx.notify();
             return;
         }
-        let (point, side) = self.grid_point(event.position);
-        if let Some(session) = &self.session {
-            if let Some(selection) = session.term.lock().selection.as_mut() {
-                selection.update(point, side);
-            }
+        if !self.mouse_mode_active(&event.modifiers) {
+            return;
+        }
+        // 鼠标模式的移动上报：拖动 = 按钮码+32（需 DRAG 或 MOTION 任一），
+        // 无按键纯移动 = 35（仅 MOTION）；同一单元格内的移动不重报。
+        let mode = self.term_mode();
+        if !mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
+            return;
+        }
+        let button = match event.pressed_button {
+            Some(MouseButton::Left) => mouse_protocol::BUTTON_LEFT + mouse_protocol::DRAG_OFFSET,
+            Some(MouseButton::Middle) => {
+                mouse_protocol::BUTTON_MIDDLE + mouse_protocol::DRAG_OFFSET
+            },
+            Some(MouseButton::Right) => mouse_protocol::BUTTON_RIGHT + mouse_protocol::DRAG_OFFSET,
+            _ => {
+                if !mode.contains(TermMode::MOUSE_MOTION) {
+                    return;
+                }
+                mouse_protocol::MOTION_ONLY
+            },
+        };
+        let (point, _) = self.grid_point(event.position);
+        if self.last_report_point == Some(point) {
+            return;
+        }
+        self.send_mouse_report(event.position, button, true, &event.modifiers);
+    }
+
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selecting && self.mouse_mode_active(&event.modifiers) {
+            self.send_mouse_report(
+                event.position,
+                mouse_protocol::BUTTON_LEFT,
+                false,
+                &event.modifiers,
+            );
+            return;
+        }
+        self.selecting = false;
+        // 选中即复制：在抬手时一次性入剪贴板（旧壳同样在 release 复制，
+        // 避免拖动过程刷爆剪贴板）。空选区在 copy_selection 内自然短路。
+        if self.copy_on_select {
+            self.copy_selection(cx);
         }
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        self.selecting = false;
+    /// 右键（旧壳 Windows 惯例）：有选区 → 复制并清除；无选区 → 粘贴。
+    /// 应用接管鼠标时上报给应用。
+    fn on_right_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle);
+        if self.session.is_none() {
+            return;
+        }
+        if self.mouse_mode_active(&event.modifiers) {
+            self.send_mouse_report(
+                event.position,
+                mouse_protocol::BUTTON_RIGHT,
+                true,
+                &event.modifiers,
+            );
+            return;
+        }
+        let has_selection = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.term.lock().selection.as_ref().is_some_and(|sel| !sel.is_empty()));
+        if has_selection {
+            self.copy_selection(cx);
+            if let Some(session) = &self.session {
+                session.term.lock().selection = None;
+            }
+            cx.notify();
+        } else {
+            self.paste(cx);
+        }
+    }
+
+    fn on_right_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.mouse_mode_active(&event.modifiers) {
+            self.send_mouse_report(
+                event.position,
+                mouse_protocol::BUTTON_RIGHT,
+                false,
+                &event.modifiers,
+            );
+        }
+        cx.notify();
+    }
+
+    /// 中键只在鼠标模式下有意义（上报给应用）；旧壳在 Windows 上没有
+    /// 中键粘贴路径，这里保持一致。
+    fn on_middle_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle);
+        if self.mouse_mode_active(&event.modifiers) {
+            self.send_mouse_report(
+                event.position,
+                mouse_protocol::BUTTON_MIDDLE,
+                true,
+                &event.modifiers,
+            );
+        }
+        cx.notify();
+    }
+
+    fn on_middle_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.mouse_mode_active(&event.modifiers) {
+            self.send_mouse_report(
+                event.position,
+                mouse_protocol::BUTTON_MIDDLE,
+                false,
+                &event.modifiers,
+            );
+        }
         cx.notify();
     }
 
@@ -412,8 +615,18 @@ impl TerminalView {
             return;
         }
         self.scroll_px -= lines as f32 * self.line_height.as_f32();
+        let mode = self.term_mode();
+        // 应用接管鼠标时滚轮也归应用（htop 列表滚动）；Shift 旁路回本地回滚。
+        if !event.modifiers.shift && mode.intersects(TermMode::MOUSE_MODE) {
+            let code =
+                if lines > 0 { mouse_protocol::WHEEL_UP } else { mouse_protocol::WHEEL_DOWN };
+            for _ in 0..lines.unsigned_abs() {
+                self.send_mouse_report(event.position, code, true, &event.modifiers);
+            }
+            cx.notify();
+            return;
+        }
         let Some(session) = &self.session else { return };
-        let mode = *session.term.lock().mode();
         if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
             // 备用屏（less/vim）：滚轮翻译成方向键。
             let seq: &[u8] = if mode.contains(TermMode::APP_CURSOR) {
@@ -546,8 +759,12 @@ impl Render for TerminalView {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_right_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_middle_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll));
 
         if let Some(error) = &self.error {
