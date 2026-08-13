@@ -52,10 +52,11 @@
   **G1 阈值定为：等网格下吞吐不低于旧壳的 90%——当前通过**。后续在等
   网格条件下复测一次收严。
 
-  测量中抓到的真 bug（引擎级）：无侧载 OpenConsole/conpty.dll 对时走
-  系统 conhost 回退，大流量下会话**完全停摆**（PTY 缓冲写满、相关进程
-  全部 0% CPU）。旧壳发行版始终带侧载对所以从未暴露。修复列入 P2；
-  运维规则：任何 nebula 系 exe 旁必须部署侧载对。
+  附带判明（判别实验 2026-08-13，两壳分别以 `openconsole=off`/缺侧载对
+  复测）：无侧载 OpenConsole/conpty.dll 时走 in-box ConPTY（conhost），
+  两壳同样慢 3~8 倍且抖动巨大（0.5~1.3 MB/s、单轮 38~94s、尾部可达
+  分钟级，观感近似停摆）。这是 in-box host 自身行为，**不是引擎死锁**，
+  引擎侧无从修复。运维硬规则：任何 nebula 系 exe 旁必须部署侧载对。
 - **1b IME 清单**：输出一页人工验收清单，等用户有空亲手敲。
 - **1c 视觉对账集**：`scripts/visual_parity.ps1`——固定样张（boxdraw 全家
   桶、块/浓度/象限、Powerline 分隔符、CJK 对齐标尺、256 色/真彩）注入
@@ -76,7 +77,6 @@
 - config 共享化：还掉实验场里复制 config 解析的债——共享 crate，一份
   nebula.toml 两壳同读。
 - 会话/SSH 逻辑共享化评估（能抽则抽，抽不动的记录原因）。
-- conhost 回退路径的大流量停摆修复（P1-1a 抓到，见上）。
 
 ### P3 接入 `nebula_app`（GPUI 成为产品 UI 层）
 
