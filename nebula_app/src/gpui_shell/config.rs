@@ -63,23 +63,32 @@ impl Settings {
         let secondary = |desc: &RawFontDesc| -> String {
             desc.family.clone().unwrap_or_else(|| normal_family.clone())
         };
-        let font_size_pt =
-            runtime.font_size_pt.or(raw.font.size).unwrap_or(11.25).clamp(4.0, 96.0);
+        // 字号语义（对齐旧壳写盘）：settings.txt 的 font_size 是**逻辑像素**
+        // （设置 spinner/Ctrl+滚轮持久化时已除 scale）；toml 的 font.size
+        // 才是 pt（1pt = 4/3 px @96dpi）。
+        let font_size_px = runtime
+            .font_size_px
+            .unwrap_or_else(|| raw.font.size.unwrap_or(11.25).clamp(4.0, 96.0) * 4.0 / 3.0);
 
-        // 配色：toml 覆盖内置默认，主题最后裁定（与旧壳同序）。
+        // 配色：toml 覆盖内置默认，主题裁定背景/浅色替换/Powerline 槽位，
+        // 用户的背景覆盖色（设置页取色器）最后压轴——与旧壳同序。
         let mut palette = build_palette(&raw.colors);
         apply_theme(&mut palette, runtime.theme);
+        if let Some(background) = runtime.background {
+            palette.background = rgba8(background);
+        }
 
         Settings {
             font_bold_family: secondary(&raw.font.bold),
             font_italic_family: secondary(&raw.font.italic),
             font_bold_italic_family: secondary(&raw.font.bold_italic),
-            font_size_px: font_size_pt * 4.0 / 3.0,
+            font_size_px,
             palette,
             cursor_shape: runtime.cursor_shape.map(|shape| match shape {
                 CursorShapeName::Block => CursorShape::Block,
                 CursorShapeName::Beam => CursorShape::Beam,
                 CursorShapeName::Underline => CursorShape::Underline,
+                CursorShapeName::Hollow => CursorShape::HollowBlock,
             }),
             cursor_blink: runtime.cursor_blink,
             copy_on_select: runtime.copy_on_select,

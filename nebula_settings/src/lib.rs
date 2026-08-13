@@ -313,20 +313,284 @@ pub enum CursorShapeName {
     Block,
     Beam,
     Underline,
+    Hollow,
 }
 
-/// 新 UI 消费的运行时设置子集。字段随消费方增长；未设置的键保持 `None`
-/// 让调用方自选回退。
+impl CursorShapeName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "block" => Some(Self::Block),
+            "beam" | "bar" => Some(Self::Beam),
+            "underline" => Some(Self::Underline),
+            "hollow" => Some(Self::Hollow),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Beam => "beam",
+            Self::Underline => "underline",
+            Self::Hollow => "hollow",
+        }
+    }
+}
+
+/// 下面的小枚举都是 `nebula_settings.txt` 的键值域，取值与旧壳设置页
+/// 逐字一致（parse 宽容：未知值回退默认）。
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum LanguagePref {
+    #[default]
+    System,
+    ZhCn,
+    EnUs,
+}
+
+impl LanguagePref {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim() {
+            "system" => Some(Self::System),
+            "zh-CN" => Some(Self::ZhCn),
+            "en-US" => Some(Self::EnUs),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::ZhCn => "zh-CN",
+            Self::EnUs => "en-US",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum AcceptKeyName {
+    Right,
+    Tab,
+    #[default]
+    Both,
+}
+
+impl AcceptKeyName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "right" => Some(Self::Right),
+            "tab" => Some(Self::Tab),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::Right => "right",
+            Self::Tab => "tab",
+            Self::Both => "both",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum CompletionStyleName {
+    #[default]
+    Inline,
+    Popup,
+}
+
+impl CompletionStyleName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "inline" | "ghost" => Some(Self::Inline),
+            "popup" | "menu" | "list" => Some(Self::Popup),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Popup => "popup",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum TabRevealName {
+    #[default]
+    Slide,
+    Instant,
+}
+
+impl TabRevealName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "slide" => Some(Self::Slide),
+            "instant" => Some(Self::Instant),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::Slide => "slide",
+            Self::Instant => "instant",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum DensityName {
+    #[default]
+    Standard,
+    Compact,
+}
+
+impl DensityName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "standard" => Some(Self::Standard),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Compact => "compact",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum NewTabPositionName {
+    #[default]
+    AfterCurrent,
+    End,
+}
+
+impl NewTabPositionName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "after_current" => Some(Self::AfterCurrent),
+            "end" => Some(Self::End),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::AfterCurrent => "after_current",
+            Self::End => "end",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum CellWidthModeName {
+    #[default]
+    Compact,
+    Relaxed,
+}
+
+impl CellWidthModeName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "compact" => Some(Self::Compact),
+            "relaxed" => Some(Self::Relaxed),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Relaxed => "relaxed",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum ProxyModeName {
+    #[default]
+    Off,
+    System,
+    Custom,
+}
+
+impl ProxyModeName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "system" => Some(Self::System),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::System => "system",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+/// 新 UI 消费的运行时设置。字段与出厂默认逐项对照旧壳
+/// `nebula_settings_load`；`Option` 字段的 `None` = 键未设置，调用方自选
+/// 回退（如 font_family 回落 nebula.toml）。
 pub struct RuntimeSettings {
+    pub language: LanguagePref,
     pub theme: ThemeName,
+    /// 系统外观变化时自动在主题家族的深浅成员间切换（默认关，尊重显式选择）。
+    pub follow_system_theme: bool,
     pub font_family: Option<String>,
-    /// pt（与设置界面一致）。
-    pub font_size_pt: Option<f32>,
+    /// **逻辑像素**（旧壳写盘语义：设置页 spinner 与 Ctrl+滚轮缩放持久化时
+    /// 已除以 scale factor）。`None` = 跟随 nebula.toml 的 `font.size`（pt）。
+    pub font_size_px: Option<f32>,
     pub cursor_shape: Option<CursorShapeName>,
     pub cursor_blink: Option<bool>,
     pub copy_on_select: bool,
     pub powerline: bool,
+    /// 默认 shell 的原始 id（`shell=` 原文：powershell/bash/cmd/pwsh/WSL
+    /// 发行版等）。解析归 shell 检测层，这里只做持久化往返。
+    pub shell: Option<String>,
+    pub startup_directory: Option<String>,
+    /// AI 内联补全（ghost text）。
+    pub ghost: bool,
+    pub accept: AcceptKeyName,
+    pub completion_style: CompletionStyleName,
+    /// 全宽字形（CJK 等）bold run 用 Regular 字形（粗体提亮不加粗）。
+    pub cjk_bold_regular: bool,
+    pub tab_reveal: TabRevealName,
+    pub density: DensityName,
+    pub new_tab_position: NewTabPositionName,
+    pub cell_width_mode: CellWidthModeName,
+    /// 新会话欢迎屏 fastfetch（默认关：启动速度优先于观感，旧壳裁定）。
+    pub fetch: bool,
+    pub keep_session: bool,
+    pub restore_session: bool,
+    pub resume_ai: bool,
+    /// 常驻系统托盘图标。
+    pub tray: bool,
+    pub blur: bool,
+    pub opacity: f32,
+    /// 终端背景覆盖色（设置页取色器写入，优先于主题背景）。
+    pub background: Option<Rgb8>,
+    pub panel_resize: bool,
+    pub ssh_proxy_mode: ProxyModeName,
+    pub ssh_proxy_url: String,
+    pub ssh_proxy_no_proxy: String,
+    pub quick_terminal_hotkey: String,
 }
+
+/// 旧壳默认快速终端热键。
+pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+`";
 
 impl RuntimeSettings {
     pub fn load() -> Self {
@@ -335,22 +599,79 @@ impl RuntimeSettings {
 
     pub fn from_raw(raw: &RawSettings) -> Self {
         Self {
+            language: raw
+                .value("language")
+                .and_then(LanguagePref::from_settings)
+                .unwrap_or_default(),
             theme: raw.value("theme").and_then(ThemeName::from_prompt_name).unwrap_or_default(),
+            follow_system_theme: raw.bool_on("follow_system_theme").unwrap_or(false),
             font_family: raw.value("font_family").map(str::to_owned),
-            font_size_pt: raw.f32("font_size").map(|size| size.clamp(4.0, 96.0)),
-            cursor_shape: raw.value("cursor_shape").and_then(|value| {
-                match value.to_ascii_lowercase().as_str() {
-                    "block" => Some(CursorShapeName::Block),
-                    "beam" | "bar" => Some(CursorShapeName::Beam),
-                    "underline" => Some(CursorShapeName::Underline),
-                    _ => None,
-                }
-            }),
+            font_size_px: raw.f32("font_size").map(|size| size.clamp(4.0, 96.0)),
+            cursor_shape: raw.value("cursor_shape").and_then(CursorShapeName::from_settings),
             cursor_blink: raw.bool_on("cursor_blink"),
             copy_on_select: raw.bool_on("copy_on_select").unwrap_or(false),
             powerline: raw.bool_on("powerline").unwrap_or(true),
+            shell: raw.value("shell").or_else(|| raw.value("executor")).map(str::to_owned),
+            startup_directory: raw.value("startup_directory").map(str::to_owned),
+            ghost: raw.value("ghost").map(|v| v != "0").unwrap_or(true),
+            accept: raw.value("accept").and_then(AcceptKeyName::from_settings).unwrap_or_default(),
+            completion_style: raw
+                .value("completion_style")
+                .and_then(CompletionStyleName::from_settings)
+                .unwrap_or_default(),
+            cjk_bold_regular: raw.bool_on("cjk_bold_regular").unwrap_or(true),
+            tab_reveal: raw
+                .value("tab_reveal")
+                .and_then(TabRevealName::from_settings)
+                .unwrap_or_default(),
+            density: raw.value("density").and_then(DensityName::from_settings).unwrap_or_default(),
+            new_tab_position: raw
+                .value("new_tab_position")
+                .and_then(NewTabPositionName::from_settings)
+                .unwrap_or_default(),
+            cell_width_mode: raw
+                .value("cell_width_mode")
+                .and_then(CellWidthModeName::from_settings)
+                .unwrap_or_default(),
+            fetch: raw.bool_on("fetch").unwrap_or(false),
+            keep_session: raw.bool_on("keep_session").unwrap_or(false),
+            restore_session: raw.bool_on("restore_session").unwrap_or(true),
+            resume_ai: raw.bool_on("resume_ai").unwrap_or(true),
+            tray: raw.bool_on("tray").unwrap_or(true),
+            blur: raw.bool_on("blur").unwrap_or(true),
+            opacity: raw.f32("opacity").map(|o| o.clamp(0.0, 1.0)).unwrap_or(1.0),
+            background: raw.value("background").and_then(parse_hex_rgb),
+            panel_resize: raw.bool_on("panel_resize").unwrap_or(false),
+            ssh_proxy_mode: raw
+                .value("ssh_proxy_mode")
+                .and_then(ProxyModeName::from_settings)
+                .unwrap_or_default(),
+            ssh_proxy_url: raw.value("ssh_proxy_url").unwrap_or_default().to_owned(),
+            ssh_proxy_no_proxy: raw.value("ssh_proxy_no_proxy").unwrap_or_default().to_owned(),
+            quick_terminal_hotkey: raw
+                .value("quick_terminal_hotkey")
+                .unwrap_or(DEFAULT_QUICK_TERMINAL_HOTKEY)
+                .to_owned(),
         }
     }
+}
+
+/// 解析 `#rrggbb`（旧壳 `parse_hex_rgb` 同款：# 前缀可省）。
+pub fn parse_hex_rgb(value: &str) -> Option<Rgb8> {
+    let hex = value.trim();
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some([r, g, b])
+}
+
+/// 格式化为 `#rrggbb`（写盘格式，与旧壳一致）。
+pub fn format_hex_rgb(rgb: Rgb8) -> String {
+    format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
 }
 
 #[cfg(test)]
@@ -360,26 +681,67 @@ mod tests {
     #[test]
     fn parses_real_settings_shape() {
         let raw = RawSettings::from_text(
-            "language=system\n\
+            "language=zh-CN\n\
              theme=SilverLight\n\
              follow_system_theme=0\n\
-             shell=powershell\n\
+             ghost=1\n\
+             accept=tab\n\
+             completion_style=popup\n\
+             shell=pwsh\n\
              font_family=Maple Mono Normal NF CN\n\
              font_size=16.3\n\
              cursor_shape=beam\n\
              cursor_blink=1\n\
              copy_on_select=1\n\
+             cjk_bold_regular=1\n\
+             tab_reveal=instant\n\
+             density=compact\n\
+             new_tab_position=end\n\
+             cell_width_mode=relaxed\n\
+             fetch=1\n\
              powerline=0\n\
+             keep_session=1\n\
+             restore_session=0\n\
+             resume_ai=0\n\
+             tray=0\n\
+             blur=0\n\
+             opacity=0.87\n\
+             background=#101216\n\
+             panel_resize=1\n\
+             ssh_proxy_mode=custom\n\
+             ssh_proxy_url=socks5://127.0.0.1:7890\n\
+             quick_terminal_hotkey=alt+`\n\
              startup_directory=\n",
         );
         let settings = RuntimeSettings::from_raw(&raw);
+        assert_eq!(settings.language, LanguagePref::ZhCn);
         assert_eq!(settings.theme, ThemeName::SilverLight);
         assert_eq!(settings.font_family.as_deref(), Some("Maple Mono Normal NF CN"));
-        assert_eq!(settings.font_size_pt, Some(16.3));
+        // font_size 键存的是逻辑像素（旧壳写盘语义），不做 pt 换算。
+        assert_eq!(settings.font_size_px, Some(16.3));
         assert_eq!(settings.cursor_shape, Some(CursorShapeName::Beam));
         assert_eq!(settings.cursor_blink, Some(true));
         assert!(settings.copy_on_select);
         assert!(!settings.powerline);
+        assert_eq!(settings.shell.as_deref(), Some("pwsh"));
+        assert_eq!(settings.accept, AcceptKeyName::Tab);
+        assert_eq!(settings.completion_style, CompletionStyleName::Popup);
+        assert_eq!(settings.tab_reveal, TabRevealName::Instant);
+        assert_eq!(settings.density, DensityName::Compact);
+        assert_eq!(settings.new_tab_position, NewTabPositionName::End);
+        assert_eq!(settings.cell_width_mode, CellWidthModeName::Relaxed);
+        assert!(settings.fetch);
+        assert!(settings.keep_session);
+        assert!(!settings.restore_session);
+        assert!(!settings.resume_ai);
+        assert!(!settings.tray);
+        assert!(!settings.blur);
+        assert!((settings.opacity - 0.87).abs() < 1e-6);
+        assert_eq!(settings.background, Some([0x10, 0x12, 0x16]));
+        assert!(settings.panel_resize);
+        assert_eq!(settings.ssh_proxy_mode, ProxyModeName::Custom);
+        assert_eq!(settings.ssh_proxy_url, "socks5://127.0.0.1:7890");
+        assert_eq!(settings.quick_terminal_hotkey, "alt+`");
         // 空值 = 未设置。
         assert_eq!(raw.value("startup_directory"), None);
     }
@@ -387,10 +749,39 @@ mod tests {
     #[test]
     fn defaults_when_file_content_is_absent_or_junk() {
         let settings = RuntimeSettings::from_raw(&RawSettings::from_text("theme=NoSuchTheme\n"));
+        // 出厂默认逐项对照旧壳 nebula_settings_load。
+        assert_eq!(settings.language, LanguagePref::System);
         assert_eq!(settings.theme, ThemeName::Nebula);
         assert_eq!(settings.font_family, None);
         assert!(!settings.copy_on_select);
         assert!(settings.powerline);
+        assert!(settings.ghost);
+        assert_eq!(settings.accept, AcceptKeyName::Both);
+        assert_eq!(settings.completion_style, CompletionStyleName::Inline);
+        assert!(settings.cjk_bold_regular);
+        assert_eq!(settings.tab_reveal, TabRevealName::Slide);
+        assert_eq!(settings.density, DensityName::Standard);
+        assert_eq!(settings.new_tab_position, NewTabPositionName::AfterCurrent);
+        assert_eq!(settings.cell_width_mode, CellWidthModeName::Compact);
+        assert!(!settings.fetch);
+        assert!(!settings.keep_session);
+        assert!(settings.restore_session);
+        assert!(settings.resume_ai);
+        assert!(settings.tray);
+        assert!(settings.blur);
+        assert!((settings.opacity - 1.0).abs() < 1e-6);
+        assert_eq!(settings.background, None);
+        assert!(!settings.panel_resize);
+        assert_eq!(settings.ssh_proxy_mode, ProxyModeName::Off);
+        assert_eq!(settings.quick_terminal_hotkey, DEFAULT_QUICK_TERMINAL_HOTKEY);
+    }
+
+    #[test]
+    fn hex_rgb_roundtrip() {
+        assert_eq!(parse_hex_rgb("#8bd5ca"), Some([0x8b, 0xd5, 0xca]));
+        assert_eq!(parse_hex_rgb("8bd5ca"), Some([0x8b, 0xd5, 0xca]));
+        assert_eq!(parse_hex_rgb("#nothex"), None);
+        assert_eq!(format_hex_rgb([0x8b, 0xd5, 0xca]), "#8bd5ca");
     }
 
     #[test]
