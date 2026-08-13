@@ -1,0 +1,11 @@
+[package]
+name = "nebula-split"
+version = "1.0.0"
+license = "GPL-3.0-or-later"
+description = "Shared split-pane rules: layout tree, geometry, divider drag and directional focus"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+# 刻意零依赖：任何壳与任何渲染后端都能免费引用（与 nebula-settings 同则）。
+[dependencies]
