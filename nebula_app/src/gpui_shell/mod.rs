@@ -12,6 +12,7 @@
 
 pub mod config;
 pub mod prelude;
+pub mod settings_pane;
 pub mod terminal;
 pub mod theme;
 pub mod workspace;
@@ -38,7 +39,7 @@ pub fn run_shell() {
 fn init(cx: &mut App) {
     // 组件库必须只初始化一次，否则全局 action、菜单和主题状态会重复注册。
     gpui_component::init(cx);
-    theme::apply_nebula_theme(cx);
+    theme::apply_chrome_theme(cx);
     workspace::init(cx);
 
     // 用户 nebula.toml + nebula_settings.txt，启动读一次；失败静默回退默认。

@@ -79,6 +79,50 @@ impl RawSettings {
     }
 }
 
+/// 把若干键值写回 `nebula_settings.txt`：已有键**原地替换**（保留行序、
+/// 未知键与原样格式），缺失键追加到尾部。全量读-改-写；与旧壳的全量覆盖
+/// 写并存时后写者胜——与旧壳多窗口的既有语义一致。
+pub fn persist_keys(updates: &[(&str, String)]) -> std::io::Result<()> {
+    let path = settings_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = apply_updates(&text, updates);
+    std::fs::create_dir_all(settings_dir())?;
+    std::fs::write(&path, updated)
+}
+
+/// [`persist_keys`] 的纯文本变换，单测锁定行为。
+pub fn apply_updates(text: &str, updates: &[(&str, String)]) -> String {
+    let mut pending: Vec<(usize, &(&str, String))> = updates.iter().enumerate().collect();
+    let mut out = String::with_capacity(text.len() + 64);
+
+    for line in text.lines() {
+        let key = line.split_once('=').map(|(key, _)| key.trim().to_ascii_lowercase());
+        let hit = key.as_deref().and_then(|key| {
+            pending.iter().position(|(_, (k, _))| k.eq_ignore_ascii_case(key))
+        });
+        match hit {
+            Some(ix) => {
+                let (_, (key, value)) = pending.remove(ix);
+                out.push_str(key);
+                out.push('=');
+                out.push_str(value);
+            },
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+
+    // 追加缺失键，保持调用方给出的次序。
+    pending.sort_by_key(|(order, _)| *order);
+    for (_, (key, value)) in pending {
+        out.push_str(key);
+        out.push('=');
+        out.push_str(value);
+        out.push('\n');
+    }
+    out
+}
+
 pub type Rgb8 = [u8; 3];
 
 /// 主题标识；`nebula_settings.txt` 里 `theme=` 持久化 [`Self::prompt_name`]。
@@ -381,5 +425,33 @@ mod tests {
         let raw = RawSettings::from_text("  Theme = SilverLight \nFONT_SIZE=12\n");
         assert_eq!(raw.value("theme"), Some("SilverLight"));
         assert_eq!(raw.f32("font_size"), Some(12.0));
+    }
+
+    #[test]
+    fn apply_updates_replaces_in_place_and_appends_missing() {
+        let text = "language=system\ntheme=Nebula\nshell=powershell\n";
+        let updated = apply_updates(
+            text,
+            &[("theme", "SilverLight".into()), ("cursor_blink", "1".into())],
+        );
+        assert_eq!(
+            updated,
+            "language=system\ntheme=SilverLight\nshell=powershell\ncursor_blink=1\n"
+        );
+    }
+
+    #[test]
+    fn apply_updates_preserves_unknown_lines_and_matches_case_insensitively() {
+        let text = "# comment survives\nTHEME=CoalDark\nkeybind=ctrl+x=Copy\n";
+        let updated = apply_updates(text, &[("theme", "MossDark".into())]);
+        // 键名按调用方写法输出，注释与奇形行原样保留。
+        assert_eq!(updated, "# comment survives\ntheme=MossDark\nkeybind=ctrl+x=Copy\n");
+    }
+
+    #[test]
+    fn apply_updates_on_empty_file_appends_all() {
+        let updated =
+            apply_updates("", &[("theme", "Nebula".into()), ("font_size", "12.5".into())]);
+        assert_eq!(updated, "theme=Nebula\nfont_size=12.5\n");
     }
 }

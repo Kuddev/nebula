@@ -14,6 +14,7 @@ pub use gpui_component::{
     h_flex,
     input::{Input, InputState},
     menu::{ContextMenuExt as _, PopupMenu},
+    resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     scroll::ScrollableElement as _,
     select::{Select, SelectState},
     sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem},

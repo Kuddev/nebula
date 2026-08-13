@@ -27,6 +27,12 @@ use crate::gpui_shell::config::Settings;
 
 use futures::StreamExt as _;
 
+/// 等宽字体描述。SharedString 的 &str 转换要求 'static，字体名是运行时值，
+/// 因此走 to_string。
+fn mono_font(family: &str, weight: FontWeight, style: FontStyle) -> Font {
+    Font { weight, style, ..gpui::font(family.to_string()) }
+}
+
 /// 终端视图对宿主（Panel/Workspace）暴露的状态变化。
 pub enum TerminalViewEvent {
     /// OSC 标题变化，宿主应刷新 Tab 标题。
@@ -92,13 +98,6 @@ impl TerminalView {
                     true,
                 ),
             };
-        // to_string：SharedString 的 &str 转换要求 'static，字体名是运行时值。
-        let mono = |family: &str, weight: FontWeight, style: FontStyle| Font {
-            weight,
-            style,
-            ..gpui::font(family.to_string())
-        };
-
         let initial = WindowSize { num_lines: 30, num_cols: 100, cell_width: 9, cell_height: 18 };
         let (session, error) = match session::spawn(initial, term_config) {
             Ok((session, mut rx)) => {
@@ -135,10 +134,10 @@ impl TerminalView {
         Self {
             session,
             focus_handle: cx.focus_handle(),
-            font: mono(&families[0], FontWeight::NORMAL, FontStyle::Normal),
-            font_bold: mono(&families[1], FontWeight::BOLD, FontStyle::Normal),
-            font_italic: mono(&families[2], FontWeight::NORMAL, FontStyle::Italic),
-            font_bold_italic: mono(&families[3], FontWeight::BOLD, FontStyle::Italic),
+            font: mono_font(&families[0], FontWeight::NORMAL, FontStyle::Normal),
+            font_bold: mono_font(&families[1], FontWeight::BOLD, FontStyle::Normal),
+            font_italic: mono_font(&families[2], FontWeight::NORMAL, FontStyle::Italic),
+            font_bold_italic: mono_font(&families[3], FontWeight::BOLD, FontStyle::Italic),
             font_size,
             line_height_mul: 1.25,
             palette,
@@ -284,6 +283,31 @@ impl TerminalView {
             let mut notifier = nebula_terminal::event_loop::Notifier(session.notifier.0.clone());
             notifier.on_resize(viewport.window_size());
         }
+    }
+
+    /// 热应用运行时设置（设置页改动后由宿主调用）：配色/字号/字体/
+    /// copy_on_select 即时生效；已开会话的默认光标形状不动——DECSCUSR
+    /// 属程序权威（vim 模式光标），默认值只对新标签页生效，对齐旧壳语义。
+    pub fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(settings) = cx.try_global::<Settings>() else { return };
+        let families = [
+            settings.font_family.clone(),
+            settings.font_bold_family.clone(),
+            settings.font_italic_family.clone(),
+            settings.font_bold_italic_family.clone(),
+        ];
+        let font_size = px(settings.font_size_px);
+        let palette = Arc::new(settings.palette.clone());
+        let copy_on_select = settings.copy_on_select;
+
+        self.font = mono_font(&families[0], FontWeight::NORMAL, FontStyle::Normal);
+        self.font_bold = mono_font(&families[1], FontWeight::BOLD, FontStyle::Normal);
+        self.font_italic = mono_font(&families[2], FontWeight::NORMAL, FontStyle::Italic);
+        self.font_bold_italic = mono_font(&families[3], FontWeight::BOLD, FontStyle::Italic);
+        self.font_size = font_size;
+        self.palette = palette;
+        self.copy_on_select = copy_on_select;
+        cx.notify();
     }
 
     pub fn grid_rows(&self) -> usize {

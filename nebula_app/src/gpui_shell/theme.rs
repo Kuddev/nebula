@@ -1,6 +1,17 @@
 use gpui::{App, hsla, px};
 use gpui_component::{Theme, ThemeMode};
 
+/// 按运行时主题联动窗口 chrome 深浅：浅色终端主题切组件库 Light 模式，
+/// 深色主题回 Nebula 定制 token。启动与设置变更都走这里。
+pub fn apply_chrome_theme(cx: &mut App) {
+    let is_light = nebula_settings::RuntimeSettings::load().theme.term_theme().is_light;
+    if is_light {
+        Theme::change(ThemeMode::Light, None, cx);
+    } else {
+        apply_nebula_theme(cx);
+    }
+}
+
 pub fn apply_nebula_theme(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
 
