@@ -74,8 +74,12 @@
 - 选择/复制细节对齐旧壳（双击选词、行选、复制行为）。
 - 滚动细节：翻页快捷键、回滚缓冲行为、滚动条（如旧壳有）。
 - 分屏：先把分屏规则抽成共享 `SplitTree`（纯数据 + 单测），再接 GPUI 面板。
-- config 共享化：还掉实验场里复制 config 解析的债——共享 crate，一份
-  nebula.toml 两壳同读。
+- config 共享化 **✔ 第一刀完成（2026-08-13，9e29331）**：新共享 crate
+  `nebula-settings`（零依赖）承接 `nebula_settings.txt` 路径/键值语义与
+  主题终端色表；实验场按旧壳同序叠加（toml → 主题），字体/光标/
+  copy_on_select 均读运行时设置。同主题对账样张已验（SilverLight 白底 +
+  Primer Light ANSI + 16.3pt + beam 光标）。剩余：toml 侧 font offset、
+  cursor 反色语义、follow_system_theme、热重载。
 - 会话/SSH 逻辑共享化评估（能抽则抽，抽不动的记录原因）。
 
 ### P3 接入 `nebula_app`（GPUI 成为产品 UI 层）
