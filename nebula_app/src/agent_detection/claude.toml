@@ -1,0 +1,50 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "claude"
+aliases = ["claude-code"]
+
+[[rules]]
+id = "live_form_blocked"
+state = "blocked"
+priority = 900
+region = "after_last_horizontal_rule"
+contains = ["esc to cancel"]
+any = [
+  { contains = ["enter to select"] },
+  { contains = ["enter to confirm"] },
+  { contains = ["do you want to proceed?"] },
+  { contains = ["tab to amend"] },
+]
+
+[[rules]]
+id = "yes_no_blocked"
+state = "blocked"
+priority = 700
+region = "bottom_non_empty_lines(12)"
+any = [
+  { contains = ["do you want to proceed?"] },
+  { contains = ["waiting for permission"] },
+  { contains = ["(y/n)"] },
+  { contains = ["[y/n]"] },
+]
+
+[[rules]]
+id = "spinner_working"
+state = "working"
+priority = 400
+region = "bottom_non_empty_lines(6)"
+line_regex = ['^[\s]*[\x{2801}-\x{28FF}]\s+\S']
+any = [
+  { contains = ["esc to interrupt"] },
+  { contains = ["esc to cancel"] },
+]
+
+[[rules]]
+id = "prompt_idle"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(4)"
+line_regex = ['^\s*❯(?:\s|$)']
+not = [
+  { contains = ["esc to cancel"] },
+  { contains = ["enter to select"] },
+]

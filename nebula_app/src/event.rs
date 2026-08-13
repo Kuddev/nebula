@@ -1272,6 +1272,9 @@ impl ApplicationHandler<Event> for Processor {
             },
             (EventType::NebulaTick, Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
+                    // Agent screen semantics (blocked/working/idle) are a
+                    // cheap 1 Hz fallback under exact lifecycle hooks.
+                    window_context.refresh_agent_screen_states();
                     // Piggyback session persistence on the 1 Hz chrome clock.
                     window_context.autosave_session();
                     // 渲染门控看门狗:被误报的遮挡/丢失的帧回调在这里解锁
@@ -3180,8 +3183,31 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         self.ctx.nebula_state.command_started = Some(Instant::now());
                         // Program identity for the sidebar tab icon, from the
                         // line captured at Enter (buffers are cleared by now).
-                        self.ctx.nebula_state.running_program =
-                            crate::display::extract_program(&self.ctx.nebula_state.last_committed);
+                        self.ctx.nebula_state.running_program = crate::display::extract_program(
+                            &self.ctx.nebula_state.last_committed,
+                        )
+                        .map(|program| {
+                            crate::ai_agents::AgentKind::parse(&program)
+                                .map(|agent| agent.slug().to_owned())
+                                .unwrap_or(program)
+                        });
+                        self.ctx.nebula_state.agent_hook_seen = false;
+                        self.ctx.nebula_state.agent_status_rule = None;
+                        self.ctx.nebula_state.agent_status_source =
+                            crate::ai_agents::AgentStatusSource::Process;
+                        self.ctx.nebula_state.agent_status =
+                            if self
+                                .ctx
+                                .nebula_state
+                                .running_program
+                                .as_deref()
+                                .and_then(crate::ai_agents::AgentKind::parse)
+                                .is_some()
+                            {
+                                crate::ai_agents::AgentStatus::Working
+                            } else {
+                                crate::ai_agents::AgentStatus::Unknown
+                            };
                         // Arm the ssh host auto-save: when this command is an
                         // interactive ssh login, hold its destination until a
                         // remote NEBULA| title or a long-enough session
@@ -3198,6 +3224,12 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // CLI 退回提示符，对话不再是这个 pane 的前台事实；
                         // 留着它，快照会把一个已经退出的会话当活的接续。
                         self.ctx.nebula_state.ai_session = None;
+                        self.ctx.nebula_state.agent_hook_seen = false;
+                        self.ctx.nebula_state.agent_status =
+                            crate::ai_agents::AgentStatus::Unknown;
+                        self.ctx.nebula_state.agent_status_source =
+                            crate::ai_agents::AgentStatusSource::Unknown;
+                        self.ctx.nebula_state.agent_status_rule = None;
                         let pending_ssh = self.ctx.nebula_state.pending_ssh_host.take();
                         self.ctx.nebula_state.awaiting_input = false;
                         // 助手错误恢复（spec 001）：Nebula 集成上报的退出码

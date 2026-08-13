@@ -1,0 +1,29 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "copilot"
+aliases = ["github-copilot", "ghcs"]
+
+[[rules]]
+id = "selection_blocked"
+state = "blocked"
+priority = 800
+region = "bottom_non_empty_lines(12)"
+all = [
+  { any = [{ contains = ["esc to cancel"] }, { contains = ["esc cancel"] }] },
+  { any = [
+      { contains = ["enter to select"] },
+      { contains = ["enter to confirm"] },
+      { contains = ["enter to submit"] },
+      { contains = ["enter accept"] },
+  ] },
+]
+
+[[rules]]
+id = "cancel_hint_working"
+state = "working"
+priority = 300
+region = "bottom_non_empty_lines(8)"
+any = [
+  { contains = ["esc to cancel"] },
+  { contains = ["esc cancel"] },
+  { contains = ["esc interrupt"] },
+]

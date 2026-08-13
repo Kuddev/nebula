@@ -83,30 +83,19 @@ impl AgentSession {
     /// 缺 id）时返回 `None`，宁可只恢复布局也不上屏可疑字节。命令形状与
     /// `ai_sessions::AiSession::resume_command`（手动恢复面板）保持一致。
     pub fn resume_command(&self) -> Option<String> {
-        let id = match self.session_id.as_deref() {
-            Some(id) if valid_session_id(id) => Some(id),
-            // 有 id 但形状可疑：绝不把它敲进终端。
-            Some(_) => return None,
-            None => None,
-        };
-        match (self.source.as_str(), id) {
-            ("claude", Some(id)) => Some(format!("claude --resume {id}")),
+        let agent = crate::ai_agents::AgentKind::parse(&self.source)?;
+        match self.session_id.as_deref() {
+            Some(id) => agent.resume_command(id),
             // claude 无 id（hook 未装、OSC 认出的启动）：`--continue` 恢复
             // 当前目录最近一次对话——pane 的 cwd 已经先被恢复，语义正好。
-            ("claude", None) => Some("claude --continue".to_owned()),
-            ("codex", Some(id)) => Some(format!("codex resume {id}")),
+            None if agent == crate::ai_agents::AgentKind::Claude => {
+                Some("claude --continue".to_owned())
+            },
             // codex 没有按目录 continue 的形式，缺 id 只能放弃接续。
             _ => None,
         }
     }
-}
 
-/// 会话 id 只可能是 uuid 一族的字符集；其余一律拒绝，这行字符串会被敲进
-/// 用户的 shell，必须按不可信输入对待。
-fn valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// A tab's pane tree. Leaves carry each pane's working directory; splits carry
@@ -486,7 +475,11 @@ mod tests {
             Some("codex resume b5f6c1c2-1111-2222-3333-444455556666")
         );
         assert_eq!(agent("codex", None).resume_command(), None);
-        assert_eq!(agent("gemini", Some("abc")).resume_command(), None, "无 resume 语法的来源");
+        assert_eq!(
+            agent("gemini", Some("abc")).resume_command().as_deref(),
+            Some("gemini --resume abc")
+        );
+        assert_eq!(agent("aider", Some("abc")).resume_command(), None, "无 resume 语法的来源");
         // shell 元字符、空串、超长——全都不许上屏。
         assert_eq!(agent("claude", Some("abc; rm -rf /")).resume_command(), None);
         assert_eq!(agent("claude", Some("")).resume_command(), None);

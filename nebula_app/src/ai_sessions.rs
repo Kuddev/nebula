@@ -29,6 +29,13 @@ impl AiSessionSource {
             Self::Codex => "codex",
         }
     }
+
+    fn agent(self) -> crate::ai_agents::AgentKind {
+        match self {
+            Self::Claude => crate::ai_agents::AgentKind::Claude,
+            Self::Codex => crate::ai_agents::AgentKind::Codex,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,10 +55,15 @@ pub struct AiSession {
 impl AiSession {
     /// 在终端里敲下去就能恢复这个会话的命令行。
     pub fn resume_command(&self) -> String {
-        match self.source {
-            AiSessionSource::Claude => format!("claude --resume {}", self.id),
-            AiSessionSource::Codex => format!("codex resume {}", self.id),
-        }
+        self.source
+            .agent()
+            .resume_command(&self.id)
+            .expect("filesystem-derived Claude/Codex ids are valid session tokens")
+    }
+
+    /// 从这条历史会话创建独立分叉，不改变原会话。
+    pub fn fork_command(&self) -> Option<String> {
+        self.source.agent().fork_command(&self.id)
     }
 
     /// hint 里的位置词。codex 有真实 cwd，取末段目录名；claude 只有编码过的
@@ -431,8 +443,13 @@ mod tests {
             path: PathBuf::new(),
         };
         assert_eq!(claude.resume_command(), "claude --resume abc-123");
+        assert_eq!(
+            claude.fork_command().as_deref(),
+            Some("claude --resume abc-123 --fork-session")
+        );
         let codex = AiSession { source: AiSessionSource::Codex, ..claude };
         assert_eq!(codex.resume_command(), "codex resume abc-123");
+        assert_eq!(codex.fork_command().as_deref(), Some("codex fork abc-123"));
     }
 
     #[test]

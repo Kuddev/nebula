@@ -221,6 +221,15 @@ pub struct NebulaPaneState {
     /// 与 `running_program` 同生命周期：133;D 命令收尾时一起清除，快照据此
     /// 判断「关窗那一刻这个 pane 里还开着哪个对话」，冷恢复接续它。
     pub ai_session: Option<AiSessionIdentity>,
+    /// 统一 agent 语义状态。Hook 是权威边界；声明式屏幕规则补足无 hook
+    /// 客户端及“回合完成 vs 正在问人”这类事件流无法分辨的现场。
+    pub agent_status: crate::ai_agents::AgentStatus,
+    pub agent_status_source: crate::ai_agents::AgentStatusSource,
+    /// 最后命中的声明式规则 id，供诊断日志/问题截图对账。
+    pub agent_status_rule: Option<String>,
+    /// 本次前台 agent 命令是否收到过 hook。屏幕规则的 idle 不得覆盖精确的
+    /// hook done；可见 blocker/working 仍可纠正漏报或过时事件。
+    pub agent_hook_seen: bool,
     pub last_committed: String,
     pub awaiting_input: bool,
     pub finished_unseen: bool,

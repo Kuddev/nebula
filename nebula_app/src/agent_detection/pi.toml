@@ -1,0 +1,9 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "pi"
+
+[[rules]]
+id = "working_literal"
+state = "working"
+priority = 300
+region = "bottom_non_empty_lines(8)"
+contains = ["Working..."]

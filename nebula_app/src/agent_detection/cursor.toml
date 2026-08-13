@@ -1,0 +1,29 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "cursor"
+aliases = ["cursor-agent"]
+
+[[rules]]
+id = "write_approval_blocked"
+state = "blocked"
+priority = 850
+region = "bottom_non_empty_lines(10)"
+any = [
+  { contains = ["write to this file?", "proceed (y)"] },
+  { contains = ["waiting for approval", "run this command?"] },
+  { contains = ["skip (esc or n)"] },
+  { line_regex = ['(?i)^\s*allow .*\(y\)'] },
+]
+
+[[rules]]
+id = "stop_hint_working"
+state = "working"
+priority = 300
+region = "bottom_non_empty_lines(8)"
+contains = ["ctrl+c to stop"]
+
+[[rules]]
+id = "background_tasks_working"
+state = "working"
+priority = 250
+region = "bottom_non_empty_lines(6)"
+line_regex = ['(?i)\b[1-9][0-9]*\s+background\s+tasks?\b']

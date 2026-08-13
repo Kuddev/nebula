@@ -1,0 +1,22 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "gemini"
+aliases = ["gemini-cli"]
+
+[[rules]]
+id = "approval_blocked"
+state = "blocked"
+priority = 800
+region = "bottom_non_empty_lines(12)"
+any = [
+  { contains = ["apply this change"] },
+  { contains = ["allow execution"] },
+  { contains = ["waiting for user confirmation"] },
+  { contains = ["do you want to proceed?"] },
+]
+
+[[rules]]
+id = "cancel_hint_working"
+state = "working"
+priority = 300
+region = "bottom_non_empty_lines(6)"
+contains = ["esc to cancel"]

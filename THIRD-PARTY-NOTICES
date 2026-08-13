@@ -13,6 +13,10 @@ Native mathematical formula support uses pulldown-latex 0.7.1 under the
 MIT License, ttf-parser 0.25.1 under the MIT OR Apache-2.0 License, and
 ab_glyph_rasterizer 0.1.10 under the Apache-2.0 License.
 
+The bundled AI-CLI screen-state evidence in
+nebula_app/src/agent_detection derives from Herdr
+(github.com/AmrDeveloper/herdr), distributed under the Apache License 2.0.
+
 The embedded Latin Modern Math font is distributed under the GUST Font
 License 1.0. Its complete license text is included as
 licenses/LICENSE-LATIN-MODERN-MATH.

@@ -28,6 +28,7 @@ use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use nebula_terminal::tty;
 
 mod ai_assistant;
+mod ai_agents;
 mod ai_hook;
 mod ai_providers;
 mod ai_sessions;

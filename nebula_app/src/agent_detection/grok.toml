@@ -1,0 +1,40 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "grok"
+aliases = ["grok-cli", "grok-build"]
+
+[[rules]]
+id = "option_dialog_blocked"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(14)"
+any = [
+  { line_regex = ['^\s*┃\s+[0-9a-z]+\s+\([●○]\)\s'] },
+  { contains = [":select", "ctrl+o:yolo", "ctrl+c:cancel"] },
+  { contains = ["tab:scrollback", "shift+x:dismiss"] },
+  { contains = ["yes, proceed", "no, reject"] },
+]
+
+[[rules]]
+id = "spinner_working"
+state = "working"
+priority = 400
+region = "bottom_non_empty_lines(8)"
+line_regex = ['^\s*[\x{2801}-\x{28FF}]\s.*\[stop\]\s*$']
+
+[[rules]]
+id = "cancel_hint_working"
+state = "working"
+priority = 300
+region = "bottom_non_empty_lines(4)"
+contains = ["esc:cancel"]
+
+[[rules]]
+id = "prompt_idle"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(3)"
+contains = ["ctrl+.:shortcuts"]
+not = [
+  { contains = ["esc:cancel"] },
+  { contains = ["ctrl+c:cancel"] },
+]

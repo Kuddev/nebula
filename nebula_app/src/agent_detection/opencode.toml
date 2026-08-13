@@ -1,0 +1,32 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "opencode"
+aliases = ["open-code"]
+
+[[rules]]
+id = "permission_blocked"
+state = "blocked"
+priority = 800
+region = "bottom_non_empty_lines(12)"
+any = [
+  { contains = ["permission required"] },
+  { contains = ["esc dismiss", "enter confirm"] },
+  { contains = ["esc dismiss", "enter submit"] },
+]
+
+[[rules]]
+id = "interrupt_hint_working"
+state = "working"
+priority = 300
+region = "bottom_non_empty_lines(8)"
+any = [
+  { contains = ["esc to interrupt"] },
+  { contains = ["ctrl+c to interrupt"] },
+  { contains = ["press esc to interrupt"] },
+]
+
+[[rules]]
+id = "progress_working"
+state = "working"
+priority = 200
+region = "bottom_non_empty_lines(8)"
+regex = ['(■|⬝){4,}']

@@ -1,0 +1,41 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "codex"
+
+[[rules]]
+id = "strong_blocker"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(12)"
+any = [
+  { contains = ["press enter to confirm or esc to cancel"] },
+  { contains = ["enter to submit answer"] },
+  { contains = ["enter to submit all"] },
+  { contains = ["allow command?"] },
+  { contains = ["tab to add notes", "enter to submit"] },
+]
+
+[[rules]]
+id = "yes_no_blocker"
+state = "blocked"
+priority = 700
+region = "bottom_non_empty_lines(12)"
+any = [
+  { contains = ["[y/n]"] },
+  { contains = ["(y/n)"] },
+  { contains = ["yes (y)"] },
+]
+
+[[rules]]
+id = "working_status"
+state = "working"
+priority = 400
+region = "bottom_non_empty_lines(4)"
+line_regex = ['^[•◦]\s+Working \([^)]*esc to interrupt\)(?: · .*)?$']
+
+[[rules]]
+id = "prompt_idle"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(4)"
+line_regex = ['^\s*›(?:\s|$)']
+not = [{ contains = ["esc to interrupt"] }]

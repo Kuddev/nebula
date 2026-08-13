@@ -72,18 +72,33 @@ pub const HOOK_EXE_ENV: &str = "NEBULA_HOOK_EXE";
 /// helper's name so entries survive Nebula moving to a new absolute path.
 const HELPER_MARK: &str = "nebula-hook";
 
-/// Claude hook events we subscribe to.
-const CLAUDE_EVENTS: [&str; 3] = ["UserPromptSubmit", "Stop", "Notification"];
+/// Claude hook events we subscribe to. Session boundaries carry the id needed
+/// for resume/fork; PostToolUse lets a stale permission state return to working
+/// before the whole turn completes.
+const CLAUDE_EVENTS: [&str; 6] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "Notification",
+    "PostToolUse",
+    "Stop",
+    "SessionEnd",
+];
 
 /// What a lifecycle event means for the pane's turn state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiHookKind {
+    /// Agent process/session became live; usually the earliest session-id edge.
+    SessionStart,
     /// The user submitted a prompt: a turn is running.
     PromptSubmit,
+    /// A tool completed; clears a stale permission/question wait.
+    ToolComplete,
     /// The turn finished; the CLI waits for the next instruction.
     TurnDone,
     /// The CLI needs the user NOW (permission prompt, idle reminder).
     NeedsAttention,
+    /// Agent session shut down and no longer owns the pane.
+    SessionEnd,
 }
 
 /// A typed AI-CLI lifecycle event, parsed from one pipe connection.
@@ -133,12 +148,17 @@ fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
     let session_id = payload
         .get("session_id")
         .or_else(|| payload.get("thread-id"))
+        .or_else(|| payload.get("sessionID"))
+        .or_else(|| payload.get("sessionId"))
         .and_then(Value::as_str)
         .map(str::to_owned);
     let (kind, message) = match source.as_str() {
         "claude" => match payload.get("hook_event_name").and_then(Value::as_str) {
+            Some("SessionStart") => (AiHookKind::SessionStart, None),
             Some("UserPromptSubmit") => (AiHookKind::PromptSubmit, None),
+            Some("PostToolUse") => (AiHookKind::ToolComplete, None),
             Some("Stop") => (AiHookKind::TurnDone, None),
+            Some("SessionEnd") => (AiHookKind::SessionEnd, None),
             Some("Notification") => (
                 AiHookKind::NeedsAttention,
                 payload.get("message").and_then(Value::as_str).map(str::to_owned),
@@ -161,8 +181,11 @@ fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         // embedded plugin in `ensure_opencode_plugin`), so this side stays
         // decoupled from opencode's evolving SDK event schema.
         "opencode" | "pi" => match payload.get("kind").and_then(Value::as_str) {
+            Some("session-start") => (AiHookKind::SessionStart, None),
             Some("prompt") => (AiHookKind::PromptSubmit, None),
+            Some("tool-complete") => (AiHookKind::ToolComplete, None),
             Some("done") => (AiHookKind::TurnDone, None),
+            Some("session-end") => (AiHookKind::SessionEnd, None),
             Some("attention") => (
                 AiHookKind::NeedsAttention,
                 payload.get("message").and_then(Value::as_str).map(|m| truncate(m, 300)),
@@ -268,6 +291,14 @@ mod remote_tests {
 
     #[test]
     fn pi_extension_events_use_the_normalized_lifecycle_shape() {
+        let start = parse_remote_envelope(
+            b"nebula-hook/1 source=pi pane=3\n{\"kind\":\"session-start\",\"sessionId\":\"pi-42\"}",
+            Some(3),
+        )
+        .unwrap();
+        assert_eq!(start.kind, AiHookKind::SessionStart);
+        assert_eq!(start.session_id.as_deref(), Some("pi-42"));
+
         let prompt = parse_remote_envelope(
             b"nebula-hook/1 source=pi pane=3\n{\"kind\":\"prompt\"}",
             Some(3),
@@ -279,6 +310,14 @@ mod remote_tests {
             parse_remote_envelope(b"nebula-hook/1 source=pi pane=3\n{\"kind\":\"done\"}", Some(3))
                 .unwrap();
         assert_eq!(done.kind, AiHookKind::TurnDone);
+
+        for (kind, expected) in [
+            ("tool-complete", AiHookKind::ToolComplete),
+            ("session-end", AiHookKind::SessionEnd),
+        ] {
+            let raw = format!("nebula-hook/1 source=pi pane=3\n{{\"kind\":\"{kind}\"}}");
+            assert_eq!(parse_remote_envelope(raw.as_bytes(), Some(3)).unwrap().kind, expected);
+        }
     }
 }
 
@@ -657,16 +696,29 @@ export const NebulaNotify = async ({ $ }) => {
   if (!hook) return {}
   let active = false
   let lastUser = ""
+  let sessionId = ""
   const send = (obj) => {
     // Fire-and-forget; never throw into opencode's event loop.
-    try { $`${hook} opencode ${JSON.stringify(obj)}`.quiet().nothrow().catch(() => {}) }
+    try {
+      if (sessionId) obj.session_id = sessionId
+      $`${hook} opencode ${JSON.stringify(obj)}`.quiet().nothrow().catch(() => {})
+    }
     catch (_) {}
   }
   return {
     event: async ({ event }) => {
       const t = event && event.type
+      const props = (event && event.properties) || {}
+      const info = props.info || {}
+      // Root session only: subagents carry parentID and must not steal the
+      // pane's resume identity.
+      const candidate = props.sessionID || info.sessionID || (!info.parentID && info.id)
+      if (candidate) {
+        const first = !sessionId
+        sessionId = candidate
+        if (first) send({ kind: "session-start" })
+      }
       if (t === "message.updated") {
-        const info = event.properties && event.properties.info
         if (info && info.role === "user" && info.id !== lastUser) {
           lastUser = info.id
           active = true
@@ -678,7 +730,11 @@ export const NebulaNotify = async ({ $ }) => {
         if (active) { active = false; send({ kind: "done" }) }
       } else if (t === "permission.updated") {
         active = false
-        send({ kind: "attention", message: (event.properties && event.properties.title) || "" })
+        send({ kind: "attention", message: props.title || "" })
+      } else if (t === "tool.execute.after") {
+        send({ kind: "tool-complete" })
+      } else if (t === "session.deleted") {
+        send({ kind: "session-end" })
       }
     },
   }
@@ -694,11 +750,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {
   let active = false;
-  const send = (kind: "prompt" | "done") => {
+  const send = (kind: "session-start" | "prompt" | "tool-complete" | "done" | "session-end", ctx?: any) => {
     const hook = process.env.NEBULA_HOOK_EXE;
     if (!hook) return;
     try {
-      spawn(hook, ["pi", JSON.stringify({ kind })], {
+      let session_id = "";
+      try { session_id = ctx?.sessionManager?.getSessionId?.() || ""; } catch (_) {}
+      spawn(hook, ["pi", JSON.stringify({ kind, session_id })], {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
@@ -706,15 +764,18 @@ export default function (pi: ExtensionAPI) {
     } catch (_) {}
   };
 
-  pi.on("agent_start", async () => {
+  pi.on("agent_start", async (_event, ctx) => {
     active = true;
-    send("prompt");
+    send("prompt", ctx);
   });
-  pi.on("agent_end", async () => {
+  pi.on("agent_end", async (_event, ctx) => {
     if (!active) return;
     active = false;
-    send("done");
+    send("done", ctx);
   });
+  try { pi.on("session_start", async (_event, ctx) => send("session-start", ctx)); } catch (_) {}
+  try { pi.on("tool_result", async (_event, ctx) => send("tool-complete", ctx)); } catch (_) {}
+  try { pi.on("session_shutdown", async (_event, ctx) => send("session-end", ctx)); } catch (_) {}
 }
 "#;
 

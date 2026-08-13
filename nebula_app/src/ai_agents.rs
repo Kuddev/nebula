@@ -1,0 +1,537 @@
+//! Shared AI-CLI identity, resumability and screen-state detection.
+//!
+//! Hooks remain the highest-confidence lifecycle source. This module fills the
+//! gaps hooks cannot cover: wrapped process identity, agents without a hook
+//! API, and interactive permission/question screens that a coarse "turn done"
+//! callback cannot distinguish.
+//!
+//! Detection rules are declarative TOML. Bundled rules cover the popular
+//! clients; `%APPDATA%\Nebula\agent-detection\<slug>.toml` (or the equivalent
+//! [`nebula_settings::settings_dir`]) overrides one manifest. Overrides are
+//! mtime-checked at most once every two seconds, so rules can be tuned while a
+//! client is running without putting filesystem work on every frame.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant, SystemTime};
+
+use regex::Regex;
+use serde::Deserialize;
+
+/// AI clients Nebula can identify as a first-class terminal workload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    Gemini,
+    Aider,
+    Amp,
+    OpenCode,
+    Copilot,
+    Cursor,
+    Goose,
+    Droid,
+    Pi,
+    Auggie,
+    Hermes,
+    Vibe,
+    Antigravity,
+    Grok,
+    Qwen,
+    OhMyPi,
+}
+
+impl AgentKind {
+    pub const ALL: [Self; 18] = [
+        Self::Claude,
+        Self::Codex,
+        Self::Gemini,
+        Self::Aider,
+        Self::Amp,
+        Self::OpenCode,
+        Self::Copilot,
+        Self::Cursor,
+        Self::Goose,
+        Self::Droid,
+        Self::Pi,
+        Self::Auggie,
+        Self::Hermes,
+        Self::Vibe,
+        Self::Antigravity,
+        Self::Grok,
+        Self::Qwen,
+        Self::OhMyPi,
+    ];
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::Aider => "aider",
+            Self::Amp => "amp",
+            Self::OpenCode => "opencode",
+            Self::Copilot => "copilot",
+            Self::Cursor => "cursor",
+            Self::Goose => "goose",
+            Self::Droid => "droid",
+            Self::Pi => "pi",
+            Self::Auggie => "auggie",
+            Self::Hermes => "hermes",
+            Self::Vibe => "vibe",
+            Self::Antigravity => "antigravity",
+            Self::Grok => "grok",
+            Self::Qwen => "qwen",
+            Self::OhMyPi => "omp",
+        }
+    }
+
+    fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::Claude => &["claude", "claude-code"],
+            Self::Codex => &["codex", "codex-cli"],
+            Self::Gemini => &["gemini", "gemini-cli"],
+            Self::Aider => &["aider", "aider-chat"],
+            Self::Amp => &["amp", "amp-local"],
+            Self::OpenCode => &["opencode", "open-code"],
+            Self::Copilot => &["copilot", "github-copilot", "ghcs"],
+            Self::Cursor => &["cursor", "cursor-agent"],
+            Self::Goose => &["goose"],
+            Self::Droid => &["droid"],
+            Self::Pi => &["pi"],
+            Self::Auggie => &["auggie"],
+            Self::Hermes => &["hermes", "hermes-agent"],
+            Self::Vibe => &["vibe", "vibe-acp"],
+            Self::Antigravity => &["agy", "antigravity", "antigravity-cli"],
+            Self::Grok => &["grok", "grok-cli", "grok-build"],
+            Self::Qwen => &["qwen", "qwen-code"],
+            Self::OhMyPi => &["omp", "oh-my-pi"],
+        }
+    }
+
+    /// Resolve an executable/program label to a canonical client identity.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let raw = raw
+            .trim()
+            .trim_matches(['"', '\''])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(raw)
+            .to_ascii_lowercase();
+        let raw = [".exe", ".cmd", ".bat", ".ps1", ".com", ".js"]
+            .into_iter()
+            .find_map(|suffix| raw.strip_suffix(suffix))
+            .unwrap_or(&raw);
+        Self::ALL.into_iter().find(|agent| agent.aliases().contains(&raw))
+    }
+
+    /// Shell-safe resume command. Session ids are untrusted hook/file input,
+    /// so an unsupported shape returns `None` instead of being quoted.
+    pub fn resume_command(self, session_id: &str) -> Option<String> {
+        valid_session_id(session_id)?;
+        Some(match self {
+            Self::Claude => format!("claude --resume {session_id}"),
+            Self::Codex => format!("codex resume {session_id}"),
+            Self::Gemini => format!("gemini --resume {session_id}"),
+            Self::OpenCode => format!("opencode --session {session_id}"),
+            Self::Amp => format!("amp threads continue {session_id}"),
+            Self::Cursor => format!("cursor-agent --resume {session_id}"),
+            Self::Copilot => format!("copilot --resume {session_id}"),
+            Self::Grok => format!("grok --resume {session_id}"),
+            Self::Pi => format!("pi --session {session_id}"),
+            Self::OhMyPi => format!("omp --resume {session_id}"),
+            Self::Aider
+            | Self::Goose
+            | Self::Droid
+            | Self::Auggie
+            | Self::Hermes
+            | Self::Vibe
+            | Self::Antigravity
+            | Self::Qwen => return None,
+        })
+    }
+
+    /// Shell-safe fork command for clients with a verified fork syntax.
+    pub fn fork_command(self, session_id: &str) -> Option<String> {
+        valid_session_id(session_id)?;
+        Some(match self {
+            Self::Claude => format!("claude --resume {session_id} --fork-session"),
+            Self::Codex => format!("codex fork {session_id}"),
+            Self::OpenCode => format!("opencode --session {session_id} --fork"),
+            Self::Grok => format!("grok --resume {session_id} --fork-session"),
+            Self::OhMyPi => format!("omp --fork {session_id}"),
+            _ => return None,
+        })
+    }
+}
+
+fn valid_session_id(id: &str) -> Option<()> {
+    (!id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
+    .then_some(())
+}
+
+/// Semantic state inferred from live application chrome.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentStatus {
+    Idle,
+    Working,
+    Blocked,
+    Done,
+    #[default]
+    Unknown,
+}
+
+/// Why the current pane status has its value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentStatusSource {
+    Hook,
+    Screen,
+    Process,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Detection {
+    pub agent: AgentKind,
+    pub status: AgentStatus,
+    pub rule_id: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Manifest {
+    id: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    rules: Vec<Rule>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Rule {
+    id: String,
+    state: RuleState,
+    #[serde(default)]
+    priority: i32,
+    #[serde(default = "whole_recent")]
+    region: String,
+    #[serde(flatten)]
+    gate: Gate,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+struct Gate {
+    #[serde(default)]
+    contains: Vec<String>,
+    #[serde(default)]
+    regex: Vec<String>,
+    #[serde(default)]
+    line_regex: Vec<String>,
+    #[serde(default)]
+    all: Vec<Gate>,
+    #[serde(default)]
+    any: Vec<Gate>,
+    #[serde(default, rename = "not")]
+    not_gate: Vec<Gate>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RuleState {
+    Idle,
+    Working,
+    Blocked,
+}
+
+impl From<RuleState> for AgentStatus {
+    fn from(state: RuleState) -> Self {
+        match state {
+            RuleState::Idle => Self::Idle,
+            RuleState::Working => Self::Working,
+            RuleState::Blocked => Self::Blocked,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CompiledManifest {
+    manifest: Manifest,
+    rules: Vec<CompiledGate>,
+    override_mtime: Option<SystemTime>,
+}
+
+#[derive(Debug)]
+struct CompiledGate {
+    contains: Vec<String>,
+    regex: Vec<Regex>,
+    line_regex: Vec<Regex>,
+    all: Vec<CompiledGate>,
+    any: Vec<CompiledGate>,
+    not_gate: Vec<CompiledGate>,
+}
+
+#[derive(Debug)]
+struct Cache {
+    manifests: HashMap<AgentKind, CompiledManifest>,
+    last_override_scan: Instant,
+}
+
+const BUNDLED: &[(AgentKind, &str)] = &[
+    (AgentKind::Claude, include_str!("agent_detection/claude.toml")),
+    (AgentKind::Codex, include_str!("agent_detection/codex.toml")),
+    (AgentKind::Gemini, include_str!("agent_detection/gemini.toml")),
+    (AgentKind::Cursor, include_str!("agent_detection/cursor.toml")),
+    (AgentKind::OpenCode, include_str!("agent_detection/opencode.toml")),
+    (AgentKind::Copilot, include_str!("agent_detection/copilot.toml")),
+    (AgentKind::Grok, include_str!("agent_detection/grok.toml")),
+    (AgentKind::Pi, include_str!("agent_detection/pi.toml")),
+];
+
+static CACHE: OnceLock<RwLock<Cache>> = OnceLock::new();
+
+fn cache() -> &'static RwLock<Cache> {
+    CACHE.get_or_init(|| {
+        RwLock::new(Cache { manifests: build_cache(), last_override_scan: Instant::now() })
+    })
+}
+
+fn build_cache() -> HashMap<AgentKind, CompiledManifest> {
+    BUNDLED
+        .iter()
+        .map(|(agent, source)| {
+            let path = override_path(*agent);
+            let disk_mtime = modified(&path);
+            let bundled = compile_manifest(source, disk_mtime).unwrap_or_else(|error| {
+                panic!("bundled {} agent rules are invalid: {error}", agent.slug())
+            });
+            let loaded = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| {
+                    compile_manifest(&text, disk_mtime)
+                        .map_err(|error| {
+                            log::warn!("agent detection: ignored {}: {error}", path.display());
+                        })
+                        .ok()
+                })
+                .filter(|loaded| {
+                    let matches = manifest_matches(&loaded.manifest, *agent);
+                    if !matches {
+                        log::warn!(
+                            "agent detection: ignored {} because id {} does not match {}",
+                            path.display(),
+                            loaded.manifest.id,
+                            agent.slug()
+                        );
+                    }
+                    matches
+                })
+                .unwrap_or(bundled);
+            (*agent, loaded)
+        })
+        .collect()
+}
+
+fn override_path(agent: AgentKind) -> PathBuf {
+    settings_dir().join("agent-detection").join(format!("{}.toml", agent.slug()))
+}
+
+/// Same path contract as nebula-settings, repeated here because that crate is
+/// optional in non-GPUI builds while agent semantics serve both shells.
+fn settings_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("NEBULA_CONFIG_DIR").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Nebula")
+}
+
+fn modified(path: &std::path::Path) -> Option<SystemTime> {
+    path.metadata().and_then(|meta| meta.modified()).ok()
+}
+
+fn refresh_overrides_if_needed() {
+    let should_scan = cache()
+        .read()
+        .map(|guard| guard.last_override_scan.elapsed() >= Duration::from_secs(2))
+        .unwrap_or(true);
+    if !should_scan {
+        return;
+    }
+    let Ok(mut guard) = cache().write() else { return };
+    if guard.last_override_scan.elapsed() < Duration::from_secs(2) {
+        return;
+    }
+    guard.last_override_scan = Instant::now();
+    let changed = BUNDLED.iter().any(|(agent, _)| {
+        let path = override_path(*agent);
+        let disk_mtime = modified(&path);
+        guard.manifests.get(agent).is_none_or(|loaded| loaded.override_mtime != disk_mtime)
+    });
+    if changed {
+        guard.manifests = build_cache();
+    }
+}
+
+/// Match one live screen snapshot. No match is `None`: callers retain their
+/// higher-confidence hook/process state rather than fabricating idle.
+pub fn detect(program: &str, screen: &str) -> Option<Detection> {
+    let agent = AgentKind::parse(program)?;
+    refresh_overrides_if_needed();
+    let guard = cache().read().ok()?;
+    let loaded = guard.manifests.get(&agent)?;
+    let mut best: Option<(&Rule, &CompiledGate)> = None;
+    for (rule, gate) in loaded.manifest.rules.iter().zip(&loaded.rules) {
+        let text = region(screen, &rule.region);
+        if !gate.matches(text) {
+            continue;
+        }
+        if best.is_none_or(|(previous, _)| rule.priority > previous.priority) {
+            best = Some((rule, gate));
+        }
+    }
+    best.map(|(rule, _)| Detection { agent, status: rule.state.into(), rule_id: rule.id.clone() })
+}
+
+fn compile_manifest(
+    source: &str,
+    override_mtime: Option<SystemTime>,
+) -> Result<CompiledManifest, String> {
+    let manifest: Manifest = toml::from_str(source).map_err(|error| error.to_string())?;
+    if manifest.rules.is_empty() || manifest.rules.len() > 64 {
+        return Err("manifest must contain 1..=64 rules".to_owned());
+    }
+    let rules = manifest
+        .rules
+        .iter()
+        .map(|rule| compile_gate(&rule.gate))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CompiledManifest { manifest, rules, override_mtime })
+}
+
+fn compile_gate(gate: &Gate) -> Result<CompiledGate, String> {
+    let compile = |patterns: &[String]| {
+        patterns
+            .iter()
+            .map(|pattern| Regex::new(pattern).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    Ok(CompiledGate {
+        contains: gate.contains.iter().map(|value| value.to_lowercase()).collect(),
+        regex: compile(&gate.regex)?,
+        line_regex: compile(&gate.line_regex)?,
+        all: gate.all.iter().map(compile_gate).collect::<Result<_, _>>()?,
+        any: gate.any.iter().map(compile_gate).collect::<Result<_, _>>()?,
+        not_gate: gate.not_gate.iter().map(compile_gate).collect::<Result<_, _>>()?,
+    })
+}
+
+impl CompiledGate {
+    fn matches(&self, text: &str) -> bool {
+        let lower = text.to_lowercase();
+        self.contains.iter().all(|needle| lower.contains(needle))
+            && self.regex.iter().all(|regex| regex.is_match(text))
+            && self.line_regex.iter().all(|regex| text.lines().any(|line| regex.is_match(line)))
+            && self.all.iter().all(|gate| gate.matches(text))
+            && (self.any.is_empty() || self.any.iter().any(|gate| gate.matches(text)))
+            && !self.not_gate.iter().any(|gate| gate.matches(text))
+    }
+}
+
+fn manifest_matches(manifest: &Manifest, agent: AgentKind) -> bool {
+    manifest.id == agent.slug()
+        || manifest.aliases.iter().any(|alias| agent.aliases().contains(&alias.as_str()))
+}
+
+fn whole_recent() -> String {
+    "whole_recent".to_owned()
+}
+
+fn region<'a>(screen: &'a str, spec: &str) -> &'a str {
+    if spec == "whole_recent" {
+        return screen;
+    }
+    if let Some(count) = region_count(spec, "bottom_non_empty_lines") {
+        let lines: Vec<&str> = screen.lines().collect();
+        let Some(start) = lines
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .take(count)
+            .last()
+            .map(|(index, _)| index)
+        else {
+            return "";
+        };
+        return slice_from_line(screen, &lines, start);
+    }
+    if spec == "after_last_horizontal_rule" {
+        let mut offset = 0;
+        let mut last = 0;
+        for line in screen.lines() {
+            offset = (offset + line.len() + 1).min(screen.len());
+            let trimmed = line.trim();
+            if trimmed.chars().filter(|character| *character == '─').count() >= 3 {
+                last = offset;
+            }
+        }
+        return &screen[last..];
+    }
+    ""
+}
+
+fn region_count(spec: &str, name: &str) -> Option<usize> {
+    spec.strip_prefix(name)?.strip_prefix('(')?.strip_suffix(')')?.parse().ok()
+}
+
+fn slice_from_line<'a>(screen: &'a str, lines: &[&str], index: usize) -> &'a str {
+    let offset = lines[..index.min(lines.len())]
+        .iter()
+        .map(|line| line.len() + 1)
+        .sum::<usize>()
+        .min(screen.len());
+    &screen[offset..]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aliases_resolve_to_canonical_agents() {
+        assert_eq!(AgentKind::parse(r"C:\tools\CLAUDE.EXE"), Some(AgentKind::Claude));
+        assert_eq!(AgentKind::parse("cursor-agent"), Some(AgentKind::Cursor));
+        assert_eq!(AgentKind::parse("grok-cli.cmd"), Some(AgentKind::Grok));
+        assert_eq!(AgentKind::parse("cargo"), None);
+    }
+
+    #[test]
+    fn commands_are_exact_and_injection_safe() {
+        assert_eq!(
+            AgentKind::Claude.resume_command("abc-123").as_deref(),
+            Some("claude --resume abc-123")
+        );
+        assert_eq!(AgentKind::Codex.fork_command("abc-123").as_deref(), Some("codex fork abc-123"));
+        assert_eq!(AgentKind::Claude.resume_command("x; calc"), None);
+        assert_eq!(AgentKind::Aider.resume_command("abc"), None);
+    }
+
+    #[test]
+    fn screen_rules_distinguish_working_blocked_and_idle() {
+        let blocked =
+            detect("claude", "Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel").unwrap();
+        assert_eq!(blocked.status, AgentStatus::Blocked);
+        let working = detect("codex", "• Working (12s • esc to interrupt)").unwrap();
+        assert_eq!(working.status, AgentStatus::Working);
+        let idle = detect("claude", "────────────────\n❯ ").unwrap();
+        assert_eq!(idle.status, AgentStatus::Idle);
+    }
+}

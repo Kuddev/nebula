@@ -51,7 +51,7 @@ mod model;
 mod nebula_fetch_art;
 mod runtime;
 /// New-tab welcome page (Windows logo + fastfetch intro). Stateless helpers.
-mod welcome;
+pub(crate) mod welcome;
 use welcome::nebula_fastfetch_intro_command_for;
 
 use model::{DOC_PANE_ID, Layout, PaneId, TabEntry, TabLaunch};
@@ -2113,6 +2113,9 @@ impl WindowContext {
         {
             let state = &mut self.panes[idx].nebula_state;
             state.running_program = Some(ev.source.clone());
+            state.agent_hook_seen = true;
+            state.agent_status_source = crate::ai_agents::AgentStatusSource::Hook;
+            state.agent_status_rule = None;
             // 会话身份跟着事件走：同一个 pane 里 /clear、重开会话都会带来
             // 新 id，最后一次上报永远是权威。133;D（CLI 退回提示符）清除。
             if let Some(id) = ev.session_id.as_deref() {
@@ -2124,14 +2127,33 @@ impl WindowContext {
         }
 
         match ev.kind {
+            crate::ai_hook::AiHookKind::SessionStart => {
+                let state = &mut self.panes[idx].nebula_state;
+                state.agent_status = crate::ai_agents::AgentStatus::Idle;
+                state.awaiting_input = true;
+                state.needs_attention = false;
+                state.command_started.get_or_insert_with(Instant::now);
+            },
             crate::ai_hook::AiHookKind::PromptSubmit => {
                 // A turn started: spinner resumes, stale dot is consumed.
                 let state = &mut self.panes[idx].nebula_state;
+                state.agent_status = crate::ai_agents::AgentStatus::Working;
                 state.awaiting_input = false;
+                state.needs_attention = false;
                 state.finished_unseen = false;
                 // No shell integration = no OSC 133;C ever ran: give the
                 // spinner a start mark so the turn still animates.
                 state.command_started.get_or_insert_with(std::time::Instant::now);
+            },
+            crate::ai_hook::AiHookKind::ToolComplete => {
+                let state = &mut self.panes[idx].nebula_state;
+                // Tool completion is meaningful chiefly after a permission
+                // wait: the user answered and work resumed.
+                if state.agent_status == crate::ai_agents::AgentStatus::Blocked {
+                    state.agent_status = crate::ai_agents::AgentStatus::Working;
+                    state.awaiting_input = false;
+                    state.needs_attention = false;
+                }
             },
             crate::ai_hook::AiHookKind::TurnDone | crate::ai_hook::AiHookKind::NeedsAttention => {
                 // codex 的 notify 只有"回合完成"一种事件：弹出交互式提问时
@@ -2151,6 +2173,12 @@ impl WindowContext {
                 };
                 {
                     let state = &mut self.panes[idx].nebula_state;
+                    state.agent_status =
+                        if ev.kind == crate::ai_hook::AiHookKind::NeedsAttention || screen_asks {
+                            crate::ai_agents::AgentStatus::Blocked
+                        } else {
+                            crate::ai_agents::AgentStatus::Done
+                        };
                     state.awaiting_input = true;
                     state.finished_unseen = true;
                     // 「等你批准」是比「回合完成」更强的状态：它不是通知你
@@ -2192,6 +2220,17 @@ impl WindowContext {
                     );
                 }
             },
+            crate::ai_hook::AiHookKind::SessionEnd => {
+                let state = &mut self.panes[idx].nebula_state;
+                state.agent_status = crate::ai_agents::AgentStatus::Unknown;
+                state.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
+                state.agent_status_rule = None;
+                state.agent_hook_seen = false;
+                state.ai_session = None;
+                state.running_program = None;
+                state.awaiting_input = false;
+                state.needs_attention = false;
+            },
         }
 
         self.dirty = true;
@@ -2199,34 +2238,101 @@ impl WindowContext {
         true
     }
 
+    /// 1 Hz 声明式屏幕检测。Hook 仍是精确边界；屏幕承担两类补位：
+    ///
+    /// 1. Gemini/Cursor/Copilot 等尚无 hook 桥接的客户端；
+    /// 2. 可见的权限/问题框（比“turn complete”事件更能证明正在等人）。
+    ///
+    /// 只读底部 24 行，规则已预编译；普通 shell 或未知程序立即跳过。
+    pub fn refresh_agent_screen_states(&mut self) {
+        for pane in &mut self.panes {
+            let Some(program) = pane.nebula_state.running_program.clone() else {
+                continue;
+            };
+            if crate::ai_agents::AgentKind::parse(&program).is_none() {
+                continue;
+            }
+            let screen = {
+                let term = pane.terminal.lock();
+                let lines = term.screen_lines();
+                if lines == 0 || term.columns() == 0 {
+                    continue;
+                }
+                let take = lines.min(24);
+                let start = Point::new(Line((lines - take) as i32), Column(0));
+                let end =
+                    Point::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
+                term.bounds_to_string(start, end)
+            };
+            let Some(detection) = crate::ai_agents::detect(&program, &screen) else {
+                continue;
+            };
+
+            let state = &mut pane.nebula_state;
+            // An exact hook-done must not be downgraded merely because an idle
+            // prompt is visible. Strong live blocker/working chrome may still
+            // correct a missed/new event.
+            if detection.status == crate::ai_agents::AgentStatus::Idle && state.agent_hook_seen {
+                continue;
+            }
+            let previous = state.agent_status;
+            if previous != detection.status
+                || state.agent_status_rule.as_deref() != Some(&detection.rule_id)
+            {
+                log::debug!(
+                    "agent screen state: pane={} program={} {:?}->{:?} rule={}",
+                    pane.id,
+                    program,
+                    previous,
+                    detection.status,
+                    detection.rule_id
+                );
+            }
+            state.agent_status = detection.status;
+            state.agent_status_source = crate::ai_agents::AgentStatusSource::Screen;
+            state.agent_status_rule = Some(detection.rule_id);
+
+            match detection.status {
+                crate::ai_agents::AgentStatus::Blocked => {
+                    state.awaiting_input = true;
+                    state.needs_attention = true;
+                    state.finished_unseen = true;
+                },
+                crate::ai_agents::AgentStatus::Working => {
+                    state.awaiting_input = false;
+                    state.needs_attention = false;
+                    state.finished_unseen = false;
+                    state.command_started.get_or_insert_with(Instant::now);
+                },
+                crate::ai_agents::AgentStatus::Idle => {
+                    state.awaiting_input = true;
+                    state.needs_attention = false;
+                    if previous == crate::ai_agents::AgentStatus::Working {
+                        state.finished_unseen = true;
+                        state.finished_at = Some(Instant::now());
+                    }
+                },
+                crate::ai_agents::AgentStatus::Done
+                | crate::ai_agents::AgentStatus::Unknown => {},
+            }
+        }
+        // Chrome/tray read the established fields; rebuilding their compact
+        // arrays here makes the detector visible in the same tick.
+        self.sync_chrome_tabs();
+    }
+
     /// 托盘菜单的数据面（T1-3）：本窗口所有正在跑 AI CLI 的 pane。与侧栏
     /// 徽章同一事实源（`running_program` + `needs_attention`），托盘因此
     /// 永远和 pane 徽章一致，不另立第二份 agent 状态。
     pub fn tray_agents(&self) -> Vec<crate::tray::TrayAgent> {
-        /// 托盘只列 agent 类 CLI（hook 直报的四家 + 图标表认识的其他家）。
-        /// vim/cargo 这类长命令不进托盘——它们不会「停下来等你回答」。
-        fn is_agent(program: &str) -> bool {
-            matches!(
-                program,
-                "claude"
-                    | "codex"
-                    | "opencode"
-                    | "pi"
-                    | "gemini"
-                    | "copilot"
-                    | "cursor-agent"
-                    | "grok"
-                    | "grok-cli"
-                    | "aider"
-                    | "goose"
-                    | "crush"
-            )
-        }
         self.panes
             .iter()
             .filter_map(|pane| {
                 let state = &pane.nebula_state;
-                let program = state.running_program.as_deref().filter(|p| is_agent(p))?;
+                let program = state
+                    .running_program
+                    .as_deref()
+                    .filter(|program| crate::ai_agents::AgentKind::parse(program).is_some())?;
                 // 「哪个项目」比「哪个 pane id」有意义：取 cwd 尾段。
                 let place = std::path::Path::new(state.cwd.trim())
                     .file_name()
