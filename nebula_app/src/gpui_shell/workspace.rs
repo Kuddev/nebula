@@ -260,6 +260,18 @@ impl NebulaWorkspace {
                     ),
             )
             .child(v_flex().flex_1().gap_1().children(items))
+            .child(
+                h_flex().px_1().child(
+                    Button::new("sidebar-settings")
+                        .icon(IconName::Settings)
+                        .ghost()
+                        .small()
+                        .tooltip("设置 (Ctrl+,)")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_settings(window, cx);
+                        })),
+                ),
+            )
     }
 }
 

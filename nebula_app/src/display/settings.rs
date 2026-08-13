@@ -41,10 +41,10 @@ use super::{
 /// 完成前不向用户暴露入口；集中守门可避免绘制、命中和滚动高度各自遗漏。
 const SHOW_WEBDAV_SYNC_SETTINGS: bool = false;
 
-/// 备份页的后端已经可用，但页面先不放进侧栏，等恢复流程的可视化预览和
-/// 冲突策略交互接入后再重新开放。枚举、命中和导出逻辑继续保留，避免隐藏
-/// 入口演变成删除功能。
-const SHOW_BACKUP_SETTINGS: bool = false;
+/// 备份页对用户开放（2026-08-13）：本地加密导出/恢复此前已完整，本次加上
+/// 多协议远程备份（目录/WebDAV/S3/SFTP，见 `crate::backup_remote`）后闭环
+/// 成立。恢复的可视化预览仍是后续增强，不再作为门禁。
+const SHOW_BACKUP_SETTINGS: bool = true;
 
 /// Sidebar sections of the settings panel. Deliberately small: only sections
 /// with real functionality behind them are listed.
@@ -127,6 +127,8 @@ pub enum SettingsDropdown {
     CompletionStyle,
     CursorShape,
     TabReveal,
+    /// 备份：远程备份协议（关闭/目录/WebDAV/S3/SFTP）。
+    BackupProtocol,
     /// 代理：SSH 连接代理模式（关闭/系统/自定义）。
     SshProxyMode,
     /// 网络→指定代理→手动填写：地址协议（SOCKS5/HTTP）。
@@ -188,6 +190,16 @@ pub(super) const COMPLETION_STYLE_OPTIONS: [CompletionStyle; 2] =
 
 pub(super) const TAB_REVEAL_OPTIONS: [TabRevealMotion; 2] =
     [TabRevealMotion::Slide, TabRevealMotion::Instant];
+
+/// 远程备份协议下拉的行序。`display` 的 `set_backup_protocol_option`
+/// 按同一数组下标持久化，两侧永不错位。
+pub(crate) const BACKUP_PROTOCOL_OPTIONS: [crate::backup_remote::BackupProtocol; 5] = [
+    crate::backup_remote::BackupProtocol::Off,
+    crate::backup_remote::BackupProtocol::Folder,
+    crate::backup_remote::BackupProtocol::WebDav,
+    crate::backup_remote::BackupProtocol::S3,
+    crate::backup_remote::BackupProtocol::Sftp,
+];
 
 /// 下拉行序即为这里的顺序；连接时的真正决策在 `crate::ssh_proxy`。
 pub(super) const SSH_PROXY_MODE_OPTIONS: [crate::ssh_proxy::ProxyMode; 3] = [
@@ -499,6 +511,91 @@ fn completion_style_label(style: CompletionStyle, language: UiLanguage) -> &'sta
     }
 }
 
+fn backup_protocol_label(
+    protocol: crate::backup_remote::BackupProtocol,
+    language: UiLanguage,
+) -> &'static str {
+    use crate::backup_remote::BackupProtocol;
+    match protocol {
+        BackupProtocol::Off => language.pick("关闭", "Off"),
+        BackupProtocol::Folder => language.pick("本地 / 网络目录", "Local / network folder"),
+        BackupProtocol::WebDav => "WebDAV",
+        BackupProtocol::S3 => language.pick("S3 兼容存储", "S3-compatible storage"),
+        BackupProtocol::Sftp => language.pick("SFTP（SSH 主机）", "SFTP (SSH host)"),
+    }
+}
+
+/// 远程备份输入行的标签（槽位语义随协议变化）。
+fn backup_remote_field_label(
+    protocol: crate::backup_remote::BackupProtocol,
+    index: usize,
+    language: UiLanguage,
+) -> &'static str {
+    use crate::backup_remote::BackupProtocol;
+    match (protocol, index) {
+        (BackupProtocol::Folder, 0) => language.pick("备份目录", "Backup folder"),
+        (BackupProtocol::WebDav, 0) => language.pick("目录 URL", "Directory URL"),
+        (BackupProtocol::WebDav, 1) => language.pick("用户名", "Username"),
+        (BackupProtocol::WebDav, 2) => language.pick("WebDAV 密码", "WebDAV password"),
+        (BackupProtocol::S3, 0) => "Endpoint",
+        (BackupProtocol::S3, 1) => language.pick("区域", "Region"),
+        (BackupProtocol::S3, 2) => language.pick("存储桶 / 前缀", "Bucket / prefix"),
+        (BackupProtocol::S3, 3) => "Access Key",
+        (BackupProtocol::S3, 4) => "Secret Key",
+        (BackupProtocol::Sftp, 0) => language.pick("SSH 目标", "SSH destination"),
+        (BackupProtocol::Sftp, 1) => language.pick("远端目录", "Remote directory"),
+        _ => "",
+    }
+}
+
+/// 远程备份输入框的空值占位示例。
+fn backup_remote_field_placeholder(
+    protocol: crate::backup_remote::BackupProtocol,
+    index: usize,
+    language: UiLanguage,
+) -> &'static str {
+    use crate::backup_remote::BackupProtocol;
+    match (protocol, index) {
+        (BackupProtocol::Folder, 0) => r"D:\Backups\Nebula 或 \\nas\share\nebula",
+        (BackupProtocol::WebDav, 0) => "https://dav.example.com/nebula/",
+        (BackupProtocol::WebDav, 1) => language.pick("WebDAV 用户名", "WebDAV username"),
+        (BackupProtocol::S3, 0) => "https://s3.us-east-1.amazonaws.com",
+        (BackupProtocol::S3, 1) => "us-east-1",
+        (BackupProtocol::S3, 2) => "my-bucket/nebula",
+        (BackupProtocol::S3, 3) => "AKIA…",
+        (BackupProtocol::Sftp, 0) => "user@host[:port]",
+        (BackupProtocol::Sftp, 1) => "/home/user/backups",
+        _ => language.pick("未设置", "Not set"),
+    }
+}
+
+/// 远程备份输入框的展示内容：`(文本, 是否占位, 列数)`。密文槽显示为掩码
+/// 点；超宽截尾部（编辑总发生在末尾）。列数供 caret 定位。
+fn backup_remote_input_display(
+    view: &SettingsView,
+    index: usize,
+    max_cols: usize,
+) -> (String, bool, usize) {
+    let language = view.language;
+    let protocol = view.backup_protocol;
+    let secret = crate::backup_remote::secret_field(protocol) == Some(index);
+    let raw = &view.backup_remote_inputs[index];
+    if raw.is_empty() {
+        let text = if secret && view.backup_remote_secret_set {
+            language.pick("已保存（输入以更换）", "Saved (type to replace)").to_owned()
+        } else {
+            backup_remote_field_placeholder(protocol, index, language).to_owned()
+        };
+        return (text, true, 0);
+    }
+    if secret {
+        let dots = raw.chars().count().min(24);
+        return ("●".repeat(dots), false, dots);
+    }
+    let (text, cols) = text_tail(raw, max_cols);
+    (text, false, cols)
+}
+
 fn language_label(preference: LanguagePreference, language: UiLanguage) -> &'static str {
     match preference {
         LanguagePreference::System => language.pick("跟随系统", "Follow system"),
@@ -617,6 +714,8 @@ pub enum SettingsHit {
     RestoreSessionToggle,
     /// 高级: 冷恢复时自动接续各 pane 里的 AI 对话（claude/codex resume）。
     ResumeAiToggle,
+    /// 高级: 常驻系统托盘图标（agent 等待输入时变 attention 态）。
+    TrayToggle,
     /// 高级→同步: 输入框（0=url 1=用户名 2=WebDAV 密码 3=E2E 口令）。
     SyncInput(usize),
     SyncAutoPullToggle,
@@ -652,12 +751,19 @@ pub enum SettingsHit {
     BackupSelection(usize),
     BackupExport,
     BackupRestore,
+    /// 备份→远程备份: 协议下拉触发行 + 展开的选项行。
+    BackupProtocolCycle,
+    BackupProtocolOption(usize),
+    /// 备份→远程备份: 输入框（槽位语义随协议变化）。
+    BackupRemoteField(usize),
+    BackupRemotePush,
+    BackupRemotePull,
 }
 
 /// Stable animation slots for the settings switches. Rendering and the shared
 /// motion clock both use this mapping, so one switch can never borrow another
 /// switch's thumb position while the pointer moves between rows.
-pub(super) const SETTINGS_TOGGLE_COUNT: usize = 16;
+pub(super) const SETTINGS_TOGGLE_COUNT: usize = 17;
 
 pub(super) fn settings_toggle_slot(hit: SettingsHit) -> Option<usize> {
     Some(match hit {
@@ -678,6 +784,7 @@ pub(super) fn settings_toggle_slot(hit: SettingsHit) -> Option<usize> {
         SettingsHit::ProviderCodexRemoteToggle => 14,
         // 追加在尾部：槽位是稳定映射，重排会让开关借走彼此的动画状态。
         SettingsHit::ResumeAiToggle => 15,
+        SettingsHit::TrayToggle => 16,
         _ => return None,
     })
 }
@@ -726,6 +833,8 @@ pub(super) struct NebulaRuntimeSettings {
     pub(super) restore_session: bool,
     /// 高级·会话：冷恢复时自动接续各 pane 的 AI 对话（claude/codex resume）。
     pub(super) resume_ai: bool,
+    /// 高级：常驻系统托盘图标。
+    pub(super) tray: bool,
     /// 窗口背景模糊。Windows 11 上是 Mica（见
     /// `display::window::apply_windows_backdrop`），macOS / Wayland 上走
     /// winit 自己的实现。默认开：纯 alpha 会让背景的高频细节直接透上来压在
@@ -815,6 +924,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         // 默认开：恢复布局却丢下正聊到一半的对话，等于只恢复了一半现场。
         // 关掉它仍恢复标签/分屏/目录，只是不再敲 resume。
         resume_ai: true,
+        // 默认开：托盘是 agent 等待提醒的常驻出口（任务栏闪烁会被忽略、
+        // toast 会过期）；不想要常驻图标的人在设置里关。
+        tray: true,
         // 2026-07-31 用户裁定：默认开。纯 alpha 下背景的高频细节压着文字，
         // 那正是"透明度调低就看不清"的物理来源；模糊把它拍成低频色块。想
         // 真透出后面窗口内容的人可以关掉。
@@ -920,6 +1032,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("keep_session", v)) => settings.keep_session = parse_bool(v, false),
                 Some(("restore_session", v)) => settings.restore_session = parse_bool(v, true),
                 Some(("resume_ai", v)) => settings.resume_ai = parse_bool(v, true),
+                Some(("tray", v)) => settings.tray = parse_bool(v, true),
                 Some(("panel_resize", v)) => settings.panel_resize = parse_bool(v, false),
                 Some(("sidebar_w", v)) => {
                     if let Ok(w) = v.trim().parse::<f32>() {
@@ -1134,7 +1247,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         path,
         format!(
             "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\ncompletion_style={completion_style}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nresume_ai={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nssh_proxy_mode={ssh_proxy_mode}\nssh_proxy_url={ssh_proxy_url}\nssh_proxy_no_proxy={ssh_proxy_no_proxy}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+tab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nresume_ai={}\ntray={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nssh_proxy_mode={ssh_proxy_mode}\nssh_proxy_url={ssh_proxy_url}\nssh_proxy_no_proxy={ssh_proxy_no_proxy}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -1152,6 +1265,7 @@ tab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npo
             settings.keep_session as u8,
             settings.restore_session as u8,
             settings.resume_ai as u8,
+            settings.tray as u8,
             settings.blur as u8,
             settings.opacity,
             settings.background_image_opacity,
@@ -1278,6 +1392,8 @@ struct SettingsGeometry {
     restore_session: (f32, f32, f32, f32),
     /// 高级·会话：冷恢复自动接续 AI 对话。
     resume_ai: (f32, f32, f32, f32),
+    /// 高级：常驻系统托盘图标。
+    tray: (f32, f32, f32, f32),
     /// 网络页：主模式仍是下拉框；指定代理分支按 HTML 原型排成扫描标题、
     /// 一张连续列表卡、选中项展开、绕过列表与每主机覆盖。
     ssh_proxy_mode: (f32, f32, f32, f32),
@@ -1302,6 +1418,10 @@ struct SettingsGeometry {
     backup_groups: [(f32, f32, f32, f32); 4],
     backup_rows: [(f32, f32, f32, f32); 9],
     backup_actions: (f32, f32, f32, f32),
+    /// 远程备份组：协议下拉行、5 个输入槽行（按协议裁剪可见数）、动作行。
+    backup_remote_protocol: (f32, f32, f32, f32),
+    backup_remote_fields: [(f32, f32, f32, f32); 5],
+    backup_remote_actions: (f32, f32, f32, f32),
     backup_h: f32,
 }
 
@@ -1311,7 +1431,7 @@ fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
 }
 
 fn advanced_content_end(advanced_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
-    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + 3.0 * row_h }
+    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + 4.0 * row_h }
 }
 
 /// Max scroll offset for `section` at the current window size. The input
@@ -1627,7 +1747,8 @@ fn settings_geometry(
     let keep_session = (row_x, at(advanced_y0), row_w, row_h);
     let restore_session = (row_x, at(advanced_y0 + ROW_H), row_w, row_h);
     let resume_ai = (row_x, at(advanced_y0 + ROW_H * 2.0), row_w, row_h);
-    let sync_y0 = advanced_y0 + ROW_H * 3.0 + GROUP_ADVANCE;
+    let tray = (row_x, at(advanced_y0 + ROW_H * 3.0), row_w, row_h);
+    let sync_y0 = advanced_y0 + ROW_H * 4.0 + GROUP_ADVANCE;
     let sync_row = |i: f32| (row_x, at(sync_y0 + i * ROW_H), row_w, row_h);
     let sync_rows = [sync_row(0.0), sync_row(1.0), sync_row(2.0), sync_row(3.0)];
     let sync_auto_pull = sync_row(4.0);
@@ -1714,7 +1835,25 @@ fn settings_geometry(
         backup_row(812.0), // fonts
     ];
     let backup_actions = backup_segment;
-    let backup_h = s(864.0 + 40.0 - 72.0);
+    // 远程备份组接在清单卡之后（清单行位一个不动）：协议下拉 + 至多 5 个
+    // 输入行 + 动作行。行位按字段最多的协议（S3=5）预留；字段更少的协议
+    // 隐藏尾部行，动作行经 `backup_remote_actions_rect` 上移贴住可见行。
+    let backup_remote_y0 = 944.0;
+    let backup_remote_protocol = (row_x, at(backup_remote_y0), row_w, row_h);
+    let backup_remote_field = |index: usize| {
+        (row_x, at(backup_remote_y0 + (1.0 + index as f32) * ROW_H), row_w, row_h)
+    };
+    let backup_remote_fields = [
+        backup_remote_field(0),
+        backup_remote_field(1),
+        backup_remote_field(2),
+        backup_remote_field(3),
+        backup_remote_field(4),
+    ];
+    let backup_remote_actions_y = backup_remote_y0 + 6.0 * ROW_H + 12.0;
+    let backup_remote_actions =
+        (row_x, at(backup_remote_actions_y), s(300.0).min(row_w), s(38.0));
+    let backup_h = s(backup_remote_actions_y + 38.0 + 64.0 - 72.0);
 
     SettingsGeometry {
         gear,
@@ -1824,6 +1963,7 @@ fn settings_geometry(
         keep_session,
         restore_session,
         resume_ai,
+        tray,
         ssh_proxy_mode,
         ssh_proxy_scan_head,
         ssh_proxy_scan_button,
@@ -1844,6 +1984,9 @@ fn settings_geometry(
         backup_groups,
         backup_rows,
         backup_actions,
+        backup_remote_protocol,
+        backup_remote_fields,
+        backup_remote_actions,
         backup_h,
     }
 }
@@ -2165,6 +2308,9 @@ fn dropdown_anchor(
         (Section::Profiles, SettingsDropdown::CompletionStyle) => {
             Some((anchor(geometry.completion_style), COMPLETION_STYLE_OPTIONS.len()))
         },
+        (Section::Backup, SettingsDropdown::BackupProtocol) => {
+            Some((anchor(geometry.backup_remote_protocol), BACKUP_PROTOCOL_OPTIONS.len()))
+        },
         (Section::Appearance, SettingsDropdown::CellWidthMode) => {
             Some((anchor(geometry.cell_width_mode), CELL_WIDTH_MODE_OPTIONS.len()))
         },
@@ -2413,6 +2559,7 @@ pub fn settings_hit(
     proxy: ProxyPaneState,
     keymap_pane: KeymapPaneState,
     provider_count: usize,
+    backup_protocol: crate::backup_remote::BackupProtocol,
 ) -> SettingsHit {
     let mut geometry = settings_geometry(
         size_info,
@@ -2498,6 +2645,7 @@ pub fn settings_hit(
                     SettingsDropdown::Language => SettingsHit::Language(LANGUAGE_OPTIONS[index]),
                     SettingsDropdown::Accept => SettingsHit::AcceptOption(index),
                     SettingsDropdown::CompletionStyle => SettingsHit::CompletionStyleOption(index),
+                    SettingsDropdown::BackupProtocol => SettingsHit::BackupProtocolOption(index),
                     SettingsDropdown::TabReveal => SettingsHit::TabRevealOption(index),
                     SettingsDropdown::Density => SettingsHit::DensityOption(index),
                     SettingsDropdown::NewTabPosition => SettingsHit::NewTabPositionOption(index),
@@ -2851,6 +2999,9 @@ pub fn settings_hit(
                 if contains_rect(widgets::toggle_rect(geometry.resume_ai, scale_factor), x, y) {
                     return SettingsHit::ResumeAiToggle;
                 }
+                if contains_rect(widgets::toggle_rect(geometry.tray, scale_factor), x, y) {
+                    return SettingsHit::TrayToggle;
+                }
                 if SHOW_WEBDAV_SYNC_SETTINGS {
                     for (index, rect) in geometry.sync_rows.iter().enumerate() {
                         // 命中整行都算输入框：行左侧是它的 label，点标签聚焦
@@ -2887,6 +3038,34 @@ pub fn settings_hit(
                 }
                 if contains_rect(restore, x, y) {
                     return SettingsHit::BackupRestore;
+                }
+                if contains_rect(
+                    widgets::combobox_rect(geometry.backup_remote_protocol, scale_factor),
+                    x,
+                    y,
+                ) {
+                    return SettingsHit::BackupProtocolCycle;
+                }
+                let field_count = crate::backup_remote::field_count(backup_protocol);
+                for (index, rect) in
+                    geometry.backup_remote_fields.iter().take(field_count).enumerate()
+                {
+                    // 命中整行都算输入框：行左侧是它的 label，点标签聚焦
+                    // 输入是 Windows 设置页的惯例（与同步行一致）。
+                    if contains_rect(*rect, x, y) {
+                        return SettingsHit::BackupRemoteField(index);
+                    }
+                }
+                if backup_protocol != crate::backup_remote::BackupProtocol::Off {
+                    let actions =
+                        backup_remote_actions_rect(&geometry, scale_factor, field_count);
+                    let [push, pull] = sync_button_rects(actions, scale_factor);
+                    if contains_rect(push, x, y) {
+                        return SettingsHit::BackupRemotePush;
+                    }
+                    if contains_rect(pull, x, y) {
+                        return SettingsHit::BackupRemotePull;
+                    }
                 }
             },
         }
@@ -2976,6 +3155,8 @@ pub(super) struct SettingsView {
     pub(super) restore_session: bool,
     /// 高级·会话：冷恢复自动接续 AI 对话。
     pub(super) resume_ai: bool,
+    /// 高级：常驻系统托盘图标。
+    pub(super) tray: bool,
     pub(super) blur: bool,
     pub(super) opacity: f32,
     /// Which opacity slider is mid-drag, for thumb-dot grow feedback.
@@ -3057,6 +3238,14 @@ pub(super) struct SettingsView {
     pub(super) ssh_proxy_overrides: Vec<(String, String, usize)>,
     pub(super) backup_selection: BackupSelection,
     pub(super) backup_status: Option<(String, bool)>,
+    /// 状态行画在触发动作的控件旁：true = 远程组下方，false = 清单下方。
+    pub(super) backup_status_remote: bool,
+    /// 远程备份：协议、5 个输入槽草稿、聚焦槽位、密文凭据存在性、动作忙。
+    pub(super) backup_protocol: crate::backup_remote::BackupProtocol,
+    pub(super) backup_remote_inputs: [String; 5],
+    pub(super) backup_remote_focus: Option<usize>,
+    pub(super) backup_remote_secret_set: bool,
+    pub(super) backup_busy: bool,
 }
 
 /// 同步行右侧的输入框矩形（quad/text/hit 三处共用）。行左侧留给标签。
@@ -3315,6 +3504,20 @@ fn backup_segment_rects(
     ]
 }
 
+/// 远程备份动作行紧跟当前协议的最后一个可见输入行（字段数随协议变化，
+/// 行位跟着上移）。hit / quad / text 三个 pass 共用，按钮与点击区不漂移。
+/// 行距从几何自身推导（ROW_H 随密度变化，是 `settings_geometry` 的局部）。
+fn backup_remote_actions_rect(
+    geometry: &SettingsGeometry,
+    scale: f32,
+    field_count: usize,
+) -> (f32, f32, f32, f32) {
+    let (bx, _, bw, bh) = geometry.backup_remote_actions;
+    let pitch = geometry.backup_remote_fields[1].1 - geometry.backup_remote_fields[0].1;
+    let y = geometry.backup_remote_fields[0].1 + field_count as f32 * pitch + 12.0 * scale;
+    (bx, y, bw, bh)
+}
+
 fn backup_item_selected(selection: BackupSelection, index: usize) -> bool {
     match index {
         0 => selection.appearance,
@@ -3403,6 +3606,9 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
         SettingsDropdown::CompletionStyle => {
             COMPLETION_STYLE_OPTIONS.iter().position(|style| *style == view.completion_style)
         },
+        SettingsDropdown::BackupProtocol => {
+            BACKUP_PROTOCOL_OPTIONS.iter().position(|protocol| *protocol == view.backup_protocol)
+        },
         SettingsDropdown::TabReveal => {
             TAB_REVEAL_OPTIONS.iter().position(|motion| *motion == view.tab_reveal)
         },
@@ -3443,6 +3649,7 @@ fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Optio
         (SettingsDropdown::CompletionStyle, SettingsHit::CompletionStyleOption(index)) => {
             Some(index)
         },
+        (SettingsDropdown::BackupProtocol, SettingsHit::BackupProtocolOption(index)) => Some(index),
         (SettingsDropdown::TabReveal, SettingsHit::TabRevealOption(index)) => Some(index),
         (SettingsDropdown::Density, SettingsHit::DensityOption(index)) => Some(index),
         (SettingsDropdown::NewTabPosition, SettingsHit::NewTabPositionOption(index)) => Some(index),
@@ -4633,7 +4840,7 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Advanced => {
-            group_frame(quads, geometry.keep_session, 3);
+            group_frame(quads, geometry.keep_session, 4);
             row_hover(quads, geometry.keep_session, view.hover == SettingsHit::KeepSessionToggle);
             toggle(
                 quads,
@@ -4667,6 +4874,16 @@ pub(super) fn push_quads(
                 view.resume_ai,
                 view.hover == SettingsHit::ResumeAiToggle,
                 view.pressed == SettingsHit::ResumeAiToggle,
+            );
+            row_hover(quads, geometry.tray, view.hover == SettingsHit::TrayToggle);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.tray,
+                SettingsHit::TrayToggle,
+                view.tray,
+                view.hover == SettingsHit::TrayToggle,
+                view.pressed == SettingsHit::TrayToggle,
             );
 
             if SHOW_WEBDAV_SYNC_SETTINGS {
@@ -4876,6 +5093,91 @@ pub(super) fn push_quads(
                         clip(quads, quad);
                     }
                     clip(quads, UiQuad::solid(cb.0, cb.1, cb.2, cb.3, chip_radius, sk.panel));
+                }
+            }
+
+            // ---- 远程备份：协议下拉 + 按协议裁剪的输入行 + 动作行 ----
+            {
+                let field_count = crate::backup_remote::field_count(view.backup_protocol);
+                let group_rows = 1 + field_count;
+                group_frame(quads, geometry.backup_remote_protocol, group_rows);
+                row_hover(
+                    quads,
+                    geometry.backup_remote_protocol,
+                    view.hover == SettingsHit::BackupProtocolCycle,
+                );
+                combobox(
+                    quads,
+                    &mut staged,
+                    geometry.backup_remote_protocol,
+                    view.hover == SettingsHit::BackupProtocolCycle,
+                    view.dropdown == Some(SettingsDropdown::BackupProtocol),
+                );
+                let cell_w = size.cell_width();
+                for (index, row) in
+                    geometry.backup_remote_fields.iter().take(field_count).enumerate()
+                {
+                    row_hover(quads, *row, view.hover == SettingsHit::BackupRemoteField(index));
+                    let rect = sync_input_rect(*row, scale);
+                    let (ix, iy, iw, ih) = rect;
+                    let focused = view.backup_remote_focus == Some(index);
+                    let border = if focused {
+                        Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255)
+                    } else {
+                        Rgba::new(sk.ink_dim.r, sk.ink_dim.g, sk.ink_dim.b, 90)
+                    };
+                    let mut stroke = Vec::new();
+                    surface::push_stroke(&mut stroke, rect, control_radius, scale, border);
+                    for quad in stroke {
+                        clip(quads, quad);
+                    }
+                    clip(quads, UiQuad::solid(ix, iy, iw, ih, control_radius, sk.surface));
+                    if focused && super::caret_blink_on() {
+                        let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                        let (_, placeholder, cols) =
+                            backup_remote_input_display(view, index, max_cols);
+                        let cols = if placeholder { 0 } else { cols };
+                        let caret_h = ih - s(10.0);
+                        clip(
+                            quads,
+                            UiQuad::solid(
+                                (ix + s(12.0) + cols as f32 * cell_w).min(ix + iw - s(6.0)),
+                                iy + (ih - caret_h) / 2.0,
+                                (1.5 * scale).max(1.0),
+                                caret_h,
+                                0.0,
+                                Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 255),
+                            ),
+                        );
+                    }
+                }
+                // 动作行：两个独立按钮（协议关闭时不画，忙时变灰不吃 hover）。
+                if view.backup_protocol != crate::backup_remote::BackupProtocol::Off {
+                    let actions = backup_remote_actions_rect(&geometry, scale, field_count);
+                    let [push_rect, pull_rect] = sync_button_rects(actions, scale);
+                    for (rect, hit) in [
+                        (push_rect, SettingsHit::BackupRemotePush),
+                        (pull_rect, SettingsHit::BackupRemotePull),
+                    ] {
+                        let (bx, by, bw, bh) = rect;
+                        let hot = view.hover == hit && !view.backup_busy;
+                        let mut stroke = Vec::new();
+                        surface::push_stroke(&mut stroke, rect, control_radius, scale, sk.hairline);
+                        for quad in stroke {
+                            clip(quads, quad);
+                        }
+                        clip(
+                            quads,
+                            UiQuad::solid(
+                                bx,
+                                by,
+                                bw,
+                                bh,
+                                control_radius,
+                                if hot { sk.hover } else { sk.panel },
+                            ),
+                        );
+                    }
                 }
             }
         },
@@ -5357,6 +5659,9 @@ pub(super) fn draw_popup_text(
             SettingsDropdown::Accept => accept_label(ACCEPT_OPTIONS[index], language).to_owned(),
             SettingsDropdown::CompletionStyle => {
                 completion_style_label(COMPLETION_STYLE_OPTIONS[index], language).to_owned()
+            },
+            SettingsDropdown::BackupProtocol => {
+                backup_protocol_label(BACKUP_PROTOCOL_OPTIONS[index], language).to_owned()
             },
             SettingsDropdown::TabReveal => {
                 tab_reveal_label(TAB_REVEAL_OPTIONS[index], language).to_owned()
@@ -7347,6 +7652,26 @@ pub(super) fn draw_text(
                     );
                 }
             }
+            {
+                let (_, ry, _, rh) = geometry.tray;
+                if visible(ry, rh) {
+                    // 关掉立即摘图标；agent 提醒仍有 toast 和任务栏闪烁兜底。
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        geometry.tray,
+                        language.pick(
+                            "常驻系统托盘图标（agent 等待输入时变色提醒）",
+                            "System tray icon (turns amber when an agent needs you)",
+                        ),
+                        "",
+                        sk.ink,
+                    );
+                }
+            }
 
             if SHOW_WEBDAV_SYNC_SETTINGS {
                 // ---- 同步（WebDAV）----
@@ -7617,9 +7942,100 @@ pub(super) fn draw_text(
                     );
                 }
             }
+            // ---- 远程备份 ----
+            let field_count = crate::backup_remote::field_count(view.backup_protocol);
+            {
+                let (rx, ry, _, rh) = geometry.backup_remote_protocol;
+                let remote_title_y = ry - s(30.0);
+                if visible(remote_title_y, title_h) {
+                    section_title(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        rx,
+                        remote_title_y,
+                        language.pick("远程备份", "Remote backup"),
+                    );
+                }
+                if visible(ry, rh) {
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        geometry.backup_remote_protocol,
+                        language.pick("协议", "Protocol"),
+                        "",
+                        sk.ink,
+                    );
+                    combobox_value(
+                        r,
+                        gc,
+                        geometry.backup_remote_protocol,
+                        backup_protocol_label(view.backup_protocol, language),
+                        sk.ink,
+                    );
+                }
+                for (index, row) in
+                    geometry.backup_remote_fields.iter().take(field_count).enumerate()
+                {
+                    if !visible(row.1, row.3) {
+                        continue;
+                    }
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        *row,
+                        backup_remote_field_label(view.backup_protocol, index, language),
+                        "",
+                        sk.ink,
+                    );
+                    let (ix, iy, iw, ih) = sync_input_rect(*row, scale);
+                    let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
+                    let (text, placeholder, _) = backup_remote_input_display(view, index, max_cols);
+                    let ink = if placeholder { sk.ink_dim } else { sk.ink };
+                    r.draw_chrome_text(size, ix + s(12.0), iy + (ih - cell_h) / 2.0, ink, &text, gc);
+                }
+                if view.backup_protocol != crate::backup_remote::BackupProtocol::Off {
+                    let actions = backup_remote_actions_rect(&geometry, scale, field_count);
+                    if visible(actions.1, actions.3) {
+                        let [push_rect, pull_rect] = sync_button_rects(actions, scale);
+                        let captions = [
+                            (push_rect, language.pick("备份到远程", "Back up now")),
+                            (pull_rect, language.pick("恢复最新备份", "Restore latest")),
+                        ];
+                        for ((bx, by, bw, bh), caption) in captions {
+                            let cols: usize =
+                                caption.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
+                            let ink = if view.backup_busy { sk.ink_dim } else { sk.ink };
+                            r.draw_chrome_text(
+                                size,
+                                bx + (bw - cols as f32 * cell_w) / 2.0,
+                                by + (bh - cell_h) / 2.0,
+                                ink,
+                                caption,
+                                gc,
+                            );
+                        }
+                    }
+                }
+            }
+            // 状态行画在触发动作的那组控件下方（本地导出/恢复 → 清单卡尾；
+            // 远程动作 → 远程按钮行下）。
             if let Some((status, error)) = &view.backup_status {
-                let last = geometry.backup_rows[8];
-                let status_y = last.1 + last.3 + s(8.0);
+                let status_y = if view.backup_status_remote {
+                    let actions = backup_remote_actions_rect(&geometry, scale, field_count);
+                    actions.1 + actions.3 + s(8.0)
+                } else {
+                    let last = geometry.backup_rows[8];
+                    last.1 + last.3 + s(8.0)
+                };
                 if visible(status_y, cell_h) {
                     r.draw_chrome_text(
                         size,
@@ -7734,13 +8150,40 @@ mod tests {
     fn hidden_webdav_group_does_not_extend_advanced_content() {
         assert!(!SHOW_WEBDAV_SYNC_SETTINGS);
         // SSH 已迁到独立页面；隐藏同步组不能继续把 Advanced 撑高。会话组
-        // 现为 3 行：保留会话 / 恢复会话 / 恢复时接续 AI 对话（resume_ai）。
-        assert_eq!(advanced_content_end(146.0, 308.0, 44.0), 278.0);
+        // 现为 4 行：保留会话 / 恢复会话 / 恢复时接续 AI 对话（resume_ai）
+        // / 常驻托盘图标（tray）。
+        assert_eq!(advanced_content_end(146.0, 308.0, 44.0), 322.0);
     }
 
     #[test]
-    fn backup_settings_entry_stays_gated_until_restore_workflow_is_complete() {
-        assert!(!SHOW_BACKUP_SETTINGS);
+    fn backup_settings_entry_is_exposed_with_remote_destinations() {
+        // 2026-08-13：远程备份（目录/WebDAV/S3/SFTP）接入后备份页开放。
+        assert!(SHOW_BACKUP_SETTINGS);
+    }
+
+    #[test]
+    fn backup_remote_actions_track_visible_field_count() {
+        let size = SizeInfo::new(1600.0, 1000.0, 8.0, 16.0, 0.0, 0.0, false);
+        let area = (0.0, 40.0, 1600.0, 960.0);
+        let geometry = settings_geometry(
+            &size,
+            1.0,
+            area,
+            0.0,
+            0,
+            0,
+            Density::Standard,
+            ProxyPaneState::default(),
+            KeymapPaneState::default(),
+        );
+        // 满配（S3 = 5 字段）时动作行与几何里的静态槽位重合。
+        let full = super::backup_remote_actions_rect(&geometry, 1.0, 5);
+        assert!((full.1 - geometry.backup_remote_actions.1).abs() < 0.5);
+        // 字段更少的协议动作行上移，且始终排在最后一个可见行之后。
+        let folder = super::backup_remote_actions_rect(&geometry, 1.0, 1);
+        assert!(folder.1 < full.1);
+        let first_field = geometry.backup_remote_fields[0];
+        assert!(folder.1 >= first_field.1 + first_field.3);
     }
 
     #[test]
@@ -7868,6 +8311,7 @@ mod tests {
             ProxyPaneState::default(),
             KeymapPaneState::default(),
             provider_count,
+            Default::default(),
         );
         assert_eq!(hit, SettingsHit::ProviderRow(13));
     }
@@ -7989,6 +8433,7 @@ mod tests {
                 proxy,
                 KeymapPaneState::default(),
                 6,
+                Default::default(),
             )
         };
         // 命中矩形与绘制矩形同源：用 hit-test 内部同款控件几何函数取靶。
@@ -8067,6 +8512,7 @@ mod tests {
                 proxy,
                 KeymapPaneState::default(),
                 6,
+                Default::default(),
             )
         };
         let (protocol, address) = ssh_proxy_manual_controls(geometry.ssh_proxy_expand, 1.0);

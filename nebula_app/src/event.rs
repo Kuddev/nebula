@@ -911,6 +911,39 @@ impl ApplicationHandler<Event> for Processor {
                     window_context.handle_sync_done(&message, error, history_changed);
                 }
             },
+            // 远程备份（设置→备份）：打包、Argon2 派生与网络都在后台 OS
+            // 线程阻塞完成，主循环只发起与收尾——与 WebDAV 同步同一模型。
+            (EventType::NebulaBackupRemote { upload, passphrase, selection }, _) => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let result = if upload {
+                        crate::encrypted_backup::collect(selection)
+                            .and_then(|archive| {
+                                crate::encrypted_backup::seal(&archive, &passphrase)
+                            })
+                            .and_then(|packet| crate::backup_remote::push(&packet))
+                    } else {
+                        crate::backup_remote::pull_latest().and_then(|(name, packet)| {
+                            crate::encrypted_backup::restore(&packet, &passphrase)
+                                .map(|()| format!("已从远端恢复 {name}，重启后应用全部设置"))
+                        })
+                    };
+                    crate::backup_remote::warn_result(&result);
+                    let (message, error) = match result {
+                        Ok(message) => (message, false),
+                        Err(err) => (err, true),
+                    };
+                    let _ = proxy.send_event(crate::event::Event::new(
+                        EventType::NebulaBackupRemoteDone { message, error },
+                        None,
+                    ));
+                });
+            },
+            (EventType::NebulaBackupRemoteDone { message, error }, _) => {
+                for window_context in self.windows.values_mut() {
+                    window_context.handle_backup_remote_done(&message, error);
+                }
+            },
             (EventType::LocalProxyScan, Some(window_id)) => {
                 let proxy = self.proxy.clone();
                 let window_id = *window_id;
@@ -1247,6 +1280,15 @@ impl ApplicationHandler<Event> for Processor {
                     window_context.dirty = true;
                     window_context.display.window.request_redraw();
                 }
+                // 托盘 agent 清单同样搭 1 Hz 时钟：跨窗口聚合，tray::update
+                // 内容不变时自去抖。多窗口各自的 tick 都会走到这里，最先到
+                // 的那个完成本秒的发布，其余是廉价 no-op。
+                let agents = self
+                    .windows
+                    .values()
+                    .flat_map(|window_context| window_context.tray_agents())
+                    .collect();
+                crate::tray::update(agents);
             },
             (EventType::NebulaResizeSettled, Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
@@ -1806,6 +1848,18 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             window_id: Some(self.display.window.id()),
             tab_id: None,
             payload: EventType::NebulaSync { push },
+        });
+    }
+
+    fn nebula_backup_remote(&self, request: crate::display::RemoteBackupRequest) {
+        let _ = self.event_proxy.send_event(Event {
+            window_id: Some(self.display.window.id()),
+            tab_id: None,
+            payload: EventType::NebulaBackupRemote {
+                upload: request.upload,
+                passphrase: request.passphrase,
+                selection: request.selection,
+            },
         });
     }
 
@@ -2989,6 +3043,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 | EventType::AiFixReady { .. }
                 | EventType::NebulaSync { .. }
                 | EventType::NebulaSyncDone { .. }
+                | EventType::NebulaBackupRemote { .. }
+                | EventType::NebulaBackupRemoteDone { .. }
                 | EventType::LocalProxyScan
                 | EventType::LocalProxyScanDone(_)
                 | EventType::FocusWindow { .. } => (),

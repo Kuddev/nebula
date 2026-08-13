@@ -136,6 +136,8 @@ pub trait ActionContext<T: EventListener> {
     fn refresh_terminal_profiles(&mut self) {}
     /// Kick a WebDAV sync (spec 003). true = push, false = pull.
     fn nebula_sync(&self, _push: bool) {}
+    /// 口令确认后的远程备份/恢复：发事件到后台线程执行。
+    fn nebula_backup_remote(&self, _request: crate::display::RemoteBackupRequest) {}
     fn nebula_local_proxy_scan(&mut self) {}
 
     fn nebula_proxy_test(&mut self) {}

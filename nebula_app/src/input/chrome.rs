@@ -91,7 +91,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.open_path(&directory);
             },
             NebulaConfirm::BackupPassphrase { .. } => {
-                self.ctx.display().complete_backup_operation();
+                // 本地导出/恢复同步完成；远程动作返回请求，转成事件在后台
+                // 线程执行（打包、Argon2 与网络都不进 UI 线程）。
+                if let Some(request) = self.ctx.display().complete_backup_operation() {
+                    self.ctx.nebula_backup_remote(request);
+                }
             },
         }
     }
@@ -815,6 +819,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.display().ssh_proxy_pane_state(),
                     self.ctx.display().keymap_pane_state(),
                     self.ctx.display().provider_count(),
+                    self.ctx.display().backup_protocol(),
                 );
                 // Keep the primary-button target for the settings renderer's
                 // HTML-like toggle active state until the matching release.
@@ -840,6 +845,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 // 视为编辑结束（点另一个框由 focus_sync_field 内部提交）。
                 if !matches!(settings_hit, crate::display::SettingsHit::SyncInput(_)) {
                     self.ctx.display().commit_sync_field();
+                }
+                if !matches!(settings_hit, crate::display::SettingsHit::BackupRemoteField(_)) {
+                    self.ctx.display().commit_backup_remote_field();
                 }
                 if !matches!(settings_hit, crate::display::SettingsHit::ProviderField(_)) {
                     self.ctx.display().commit_provider_field();
@@ -884,6 +892,33 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::BackupProtocolCycle => {
+                        self.ctx
+                            .display()
+                            .toggle_settings_dropdown(crate::display::SettingsDropdown::BackupProtocol);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackupProtocolOption(index) => {
+                        self.ctx.display().set_backup_protocol_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackupRemoteField(index) => {
+                        self.ctx.display().focus_backup_remote_field(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackupRemotePush => {
+                        self.ctx.display().start_backup_remote(true);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackupRemotePull => {
+                        self.ctx.display().start_backup_remote(false);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::BackupRestore => {
                         self.ctx.display().start_backup_restore();
                         self.ctx.mark_dirty();
@@ -924,6 +959,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::ResumeAiToggle => {
                         self.ctx.display().toggle_resume_ai();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::TrayToggle => {
+                        self.ctx.display().toggle_tray();
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1662,6 +1702,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::AcceptOption(_)
             | Hit::CompletionStyleCycle
             | Hit::CompletionStyleOption(_)
+            | Hit::BackupProtocolCycle
+            | Hit::BackupProtocolOption(_)
             | Hit::TabRevealDropdown
             | Hit::TabRevealOption(_)
             | Hit::DensityDropdown

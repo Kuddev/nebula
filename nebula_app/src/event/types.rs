@@ -78,6 +78,19 @@ pub enum EventType {
         error: bool,
         history_changed: bool,
     },
+    /// 远程备份请求（设置→备份，口令确认后）。打包/加密/网络都在后台
+    /// 线程；口令只在事件载荷里过一手，线程用完即弃。
+    NebulaBackupRemote {
+        upload: bool,
+        passphrase: String,
+        selection: crate::encrypted_backup::BackupSelection,
+    },
+    /// 后台远程备份线程完成（消息文本已含成功/失败语义，恢复成功的
+    /// 提示里带「重启后应用」）。
+    NebulaBackupRemoteDone {
+        message: String,
+        error: bool,
+    },
     /// 设置→网络的本机代理握手扫描。请求在后台线程运行，结果回到目标窗口。
     LocalProxyScan,
     LocalProxyScanDone(Vec<crate::ssh_proxy::LocalProxyEndpoint>),

@@ -70,6 +70,9 @@ clap = { version = "4.2.7", features = ["derive", "env"] }
 copypasta = { version = "0.10.1", default-features = false }
 crossfont = "0.9.0"
 glutin = { version = "0.32.2", default-features = false, features = ["egl", "wgl"] }
+# 远程备份的 S3 SigV4 签名（backup_remote）。0.13 配 sha2 0.11 的 digest
+# 世代；lock 里已有该版本，零新增下载。
+hmac = "0.13"
 html-escape = "0.2.14"
 home = "0.5.5"
 libc = "0.2"
@@ -172,6 +175,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_Variant",
     "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_Registry",
     "Win32_System_Console",

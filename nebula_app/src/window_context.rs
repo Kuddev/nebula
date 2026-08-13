@@ -2199,6 +2199,54 @@ impl WindowContext {
         true
     }
 
+    /// 托盘菜单的数据面（T1-3）：本窗口所有正在跑 AI CLI 的 pane。与侧栏
+    /// 徽章同一事实源（`running_program` + `needs_attention`），托盘因此
+    /// 永远和 pane 徽章一致，不另立第二份 agent 状态。
+    pub fn tray_agents(&self) -> Vec<crate::tray::TrayAgent> {
+        /// 托盘只列 agent 类 CLI（hook 直报的四家 + 图标表认识的其他家）。
+        /// vim/cargo 这类长命令不进托盘——它们不会「停下来等你回答」。
+        fn is_agent(program: &str) -> bool {
+            matches!(
+                program,
+                "claude"
+                    | "codex"
+                    | "opencode"
+                    | "pi"
+                    | "gemini"
+                    | "copilot"
+                    | "cursor-agent"
+                    | "grok"
+                    | "grok-cli"
+                    | "aider"
+                    | "goose"
+                    | "crush"
+            )
+        }
+        self.panes
+            .iter()
+            .filter_map(|pane| {
+                let state = &pane.nebula_state;
+                let program = state.running_program.as_deref().filter(|p| is_agent(p))?;
+                // 「哪个项目」比「哪个 pane id」有意义：取 cwd 尾段。
+                let place = std::path::Path::new(state.cwd.trim())
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let label = if place.is_empty() {
+                    program.to_owned()
+                } else {
+                    format!("{program} · {place}")
+                };
+                Some(crate::tray::TrayAgent {
+                    window: self.display.window.id(),
+                    pane: pane.id,
+                    label,
+                    needs_attention: state.needs_attention,
+                })
+            })
+            .collect()
+    }
+
     /// 后台修复请求（spec 001）的结果落地：pane 归属本窗口即认领（返回
     /// true，AiHook 同款路由契约）。写入前校验 seq——条子已被用户撤掉、或
     /// 新失败已顶掉旧请求时，迟到的响应直接丢弃。
@@ -2217,6 +2265,20 @@ impl WindowContext {
             self.display.window.request_redraw();
         }
         true
+    }
+
+    /// 远程备份线程收尾：设置页状态行是第一现场，message bar 兜底通知
+    /// 没开设置页的窗口。
+    pub fn handle_backup_remote_done(&mut self, message: &str, error: bool) {
+        self.display.backup_remote_done(message, error);
+        let ty = if error {
+            crate::message_bar::MessageType::Error
+        } else {
+            crate::message_bar::MessageType::Warning
+        };
+        self.message_buffer.push(crate::message_bar::Message::new(format!("备份：{message}"), ty));
+        self.dirty = true;
+        self.display.window.request_redraw();
     }
 
     /// 同步线程收尾（spec 003）：消息进 message bar；拉到新历史时热加载

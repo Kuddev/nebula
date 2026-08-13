@@ -128,6 +128,19 @@ pub(crate) use ui::theme::write_nebula_prompt_theme;
 enum BackupOperation {
     Export(std::path::PathBuf),
     Restore(std::path::PathBuf),
+    /// 远程备份/恢复（协议与目的地在 `nebula_backup.txt`）。口令确认后由
+    /// 事件层在后台线程执行——网络绝不进 UI 线程。
+    RemotePush,
+    RemotePull,
+}
+
+/// 口令确认后待执行的远程备份动作，`complete_backup_operation` 返回给
+/// 输入层去分发事件（display 自己够不到 event proxy）。
+#[derive(Debug, Clone)]
+pub(crate) struct RemoteBackupRequest {
+    pub upload: bool,
+    pub passphrase: String,
+    pub selection: crate::encrypted_backup::BackupSelection,
 }
 
 /// Shared caret blink phase for the chrome text editors (rename / filter /
@@ -1029,6 +1042,14 @@ pub(crate) fn restore_session_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// 托盘图标开关（设置·高级，默认开）。与 [`restore_session_enabled`] 同一
+/// 处境：托盘在建窗之前初始化，只能走原始设置读取。
+pub(crate) fn tray_enabled() -> bool {
+    nebula_settings_value("tray")
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
+}
+
 #[cfg(windows)]
 fn nebula_pathexts() -> Vec<String> {
     std::env::var("PATHEXT")
@@ -1681,6 +1702,9 @@ pub struct Display {
     /// 冷恢复时自动接续各 pane 的 AI 对话（claude/codex resume，T1-2）。
     /// 消费方在 `window_context::resume_agent_sessions`。
     pub nebula_resume_ai: bool,
+    /// 系统托盘常驻图标 + agent attention 状态（T1-3）。消费方在
+    /// `crate::tray`；这里只是设置页的开关状态。
+    pub nebula_tray: bool,
     /// Runtime window opacity controlled from Nebula settings.
     pub nebula_window_opacity: f32,
     /// Which settings combobox (floating option list) is expanded, if any.
@@ -1791,6 +1815,19 @@ pub struct Display {
     nebula_provider_codex_confirm: Option<String>,
     nebula_backup_selection: crate::encrypted_backup::BackupSelection,
     pub(crate) nebula_backup_status: Option<(String, bool)>,
+    /// 最近一次备份状态来自远程动作（true）还是本地导出/恢复（false）——
+    /// 状态行画在触发它的那组控件旁边。
+    nebula_backup_status_remote: bool,
+    /// 远程备份协议（`nebula_backup.txt` 的缓存，设置页打开时装载）。
+    nebula_backup_protocol: crate::backup_remote::BackupProtocol,
+    /// 远程备份的 5 个输入槽草稿（语义随协议变化；密文槽只是「待保存」
+    /// 缓冲——提交即入凭据管理器并清空，明文从不驻留）。
+    nebula_backup_remote_inputs: [String; 5],
+    pub(crate) nebula_backup_remote_focus: Option<usize>,
+    /// 当前协议的密文凭据是否已在凭据管理器（占位文案用，不回读明文）。
+    nebula_backup_remote_secret_set: bool,
+    /// 远程备份/恢复动作进行中（后台线程），按钮变灰防重复分发。
+    nebula_backup_busy: bool,
     /// 聚焦的 SSH 代理输入框（0=代理地址 1=绕过列表；正文直接编辑
     /// `nebula_ssh_proxy_url` / `nebula_ssh_proxy_no_proxy`，失焦提交落盘）。
     pub(crate) nebula_ssh_proxy_focus: Option<usize>,
@@ -2430,6 +2467,7 @@ impl Display {
             nebula_keep_session: settings_init.keep_session,
             nebula_restore_session: settings_init.restore_session,
             nebula_resume_ai: settings_init.resume_ai,
+            nebula_tray: settings_init.tray,
             nebula_window_opacity: settings_init.opacity,
             nebula_background: if settings_init.follow_system_theme {
                 Some(nebula_theme.palette().term_bg)
@@ -2461,6 +2499,12 @@ impl Display {
             nebula_provider_codex_confirm: None,
             nebula_backup_selection: crate::encrypted_backup::BackupSelection::default(),
             nebula_backup_status: None,
+            nebula_backup_status_remote: false,
+            nebula_backup_protocol: Default::default(),
+            nebula_backup_remote_inputs: Default::default(),
+            nebula_backup_remote_focus: None,
+            nebula_backup_remote_secret_set: false,
+            nebula_backup_busy: false,
             nebula_ssh_proxy_focus: None,
             nebula_ssh_proxy_cursor: Default::default(),
             nebula_ssh_proxy_backup: Default::default(),
@@ -3608,6 +3652,7 @@ impl Display {
             keep_session: self.nebula_keep_session,
             restore_session: self.nebula_restore_session,
             resume_ai: self.nebula_resume_ai,
+            tray: self.nebula_tray,
             opacity: self.nebula_window_opacity,
             dragging_opacity: self.nebula_settings_opacity_drag.map(|(target, _, _)| target),
             cursor_shape: self.nebula_cursor_shape,
@@ -3682,6 +3727,12 @@ impl Display {
             ssh_proxy_overrides: Vec::new(),
             backup_selection: self.nebula_backup_selection,
             backup_status: self.nebula_backup_status.clone(),
+            backup_status_remote: self.nebula_backup_status_remote,
+            backup_protocol: self.nebula_backup_protocol,
+            backup_remote_inputs: self.nebula_backup_remote_inputs.clone(),
+            backup_remote_focus: self.nebula_backup_remote_focus,
+            backup_remote_secret_set: self.nebula_backup_remote_secret_set,
+            backup_busy: self.nebula_backup_busy,
         }
     }
 
@@ -3707,6 +3758,189 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
+    // ---- 设置→备份→远程备份 ----
+
+    /// 当前远程备份协议（命中测试要按它裁剪可见输入行）。
+    pub fn backup_protocol(&self) -> crate::backup_remote::BackupProtocol {
+        self.nebula_backup_protocol
+    }
+
+    /// 打开设置时装载远程备份状态：协议与非密文字段来自
+    /// `nebula_backup.txt`，密文只查存在性（明文不进 UI 状态）。
+    pub fn load_backup_remote_state(&mut self) {
+        let cfg = crate::backup_remote::BackupRemoteConfig::load();
+        self.nebula_backup_protocol = cfg.protocol;
+        self.nebula_backup_remote_inputs = Default::default();
+        for (index, input) in self.nebula_backup_remote_inputs.iter_mut().enumerate() {
+            if let Some(value) = cfg.slot(index) {
+                *input = value.to_owned();
+            }
+        }
+        self.nebula_backup_remote_secret_set =
+            crate::backup_remote::protocol_secret_set(cfg.protocol);
+        self.nebula_backup_remote_focus = None;
+    }
+
+    /// 设置页下拉选择远程备份协议：持久化并按新协议重装输入槽。
+    pub fn set_backup_protocol_option(&mut self, index: usize) {
+        let Some(protocol) = settings::BACKUP_PROTOCOL_OPTIONS.get(index).copied() else { return };
+        self.commit_backup_remote_field();
+        let mut cfg = crate::backup_remote::BackupRemoteConfig::load();
+        cfg.protocol = protocol;
+        if let Err(err) = cfg.save() {
+            self.nebula_backup_status = Some((err, true));
+            self.nebula_backup_status_remote = true;
+        }
+        self.load_backup_remote_state();
+        self.close_settings_dropdown();
+        self.pending_update.dirty = true;
+    }
+
+    /// 聚焦某个远程备份输入框；先提交上一个（点击切换即失焦保存）。
+    pub fn focus_backup_remote_field(&mut self, index: usize) {
+        if self.nebula_backup_remote_focus == Some(index) {
+            return;
+        }
+        self.commit_backup_remote_field();
+        let count = crate::backup_remote::field_count(self.nebula_backup_protocol);
+        if count == 0 {
+            return;
+        }
+        self.nebula_backup_remote_focus = Some(index.min(count - 1));
+        self.pending_update.dirty = true;
+    }
+
+    pub fn backup_remote_field_push(&mut self, ch: char) {
+        let Some(index) = self.nebula_backup_remote_focus else { return };
+        if ch.is_control() {
+            return;
+        }
+        // 密文槽允许内部空格（trim 在保存侧）；其余槽拒绝空白——URL、
+        // 路径、区域名里出现空格只会是误粘贴。
+        let secret =
+            crate::backup_remote::secret_field(self.nebula_backup_protocol) == Some(index);
+        if ch.is_whitespace() && !secret {
+            return;
+        }
+        if self.nebula_backup_remote_inputs[index].chars().count() < 512 {
+            self.nebula_backup_remote_inputs[index].push(ch);
+            self.pending_update.dirty = true;
+        }
+    }
+
+    pub fn backup_remote_field_paste(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.backup_remote_field_push(ch);
+        }
+    }
+
+    pub fn backup_remote_field_backspace(&mut self) {
+        let Some(index) = self.nebula_backup_remote_focus else { return };
+        if self.nebula_backup_remote_inputs[index].pop().is_some() {
+            self.pending_update.dirty = true;
+        }
+    }
+
+    /// 失焦提交：普通槽写 `nebula_backup.txt`；密文槽若有输入则存入凭据
+    /// 管理器并清空缓冲。
+    pub fn commit_backup_remote_field(&mut self) {
+        let Some(index) = self.nebula_backup_remote_focus.take() else { return };
+        self.pending_update.dirty = true;
+        let protocol = self.nebula_backup_protocol;
+        if crate::backup_remote::secret_field(protocol) == Some(index) {
+            let secret = std::mem::take(&mut self.nebula_backup_remote_inputs[index]);
+            if secret.trim().is_empty() {
+                return;
+            }
+            let result = match protocol {
+                crate::backup_remote::BackupProtocol::WebDav => {
+                    crate::backup_remote::store_webdav_password(
+                        self.nebula_backup_remote_inputs[1].trim(),
+                        &secret,
+                    )
+                },
+                crate::backup_remote::BackupProtocol::S3 => {
+                    crate::backup_remote::store_s3_secret(
+                        self.nebula_backup_remote_inputs[3].trim(),
+                        &secret,
+                    )
+                },
+                _ => return,
+            };
+            match result {
+                Ok(()) => {
+                    self.nebula_backup_remote_secret_set = true;
+                },
+                Err(err) => {
+                    self.nebula_backup_status = Some((err, true));
+                    self.nebula_backup_status_remote = true;
+                },
+            }
+            return;
+        }
+        let mut cfg = crate::backup_remote::BackupRemoteConfig::load();
+        cfg.protocol = protocol;
+        if cfg.set_slot(index, self.nebula_backup_remote_inputs[index].trim().to_owned()) {
+            if let Err(err) = cfg.save() {
+                self.nebula_backup_status = Some((err, true));
+                self.nebula_backup_status_remote = true;
+            }
+        }
+    }
+
+    /// Esc：丢弃当前草稿并失焦（还原为文件值；密文槽清空）。
+    pub fn cancel_backup_remote_field(&mut self) {
+        let Some(index) = self.nebula_backup_remote_focus.take() else { return };
+        let cfg = crate::backup_remote::BackupRemoteConfig::load();
+        self.nebula_backup_remote_inputs[index] =
+            cfg.slot(index).map(str::to_owned).unwrap_or_default();
+        self.pending_update.dirty = true;
+    }
+
+    /// 「备份到远程 / 从远程恢复」按钮：先行校验配置，通过则弹口令确认。
+    /// 真正的网络动作等口令提交后由事件层在后台线程执行。
+    pub fn start_backup_remote(&mut self, upload: bool) {
+        if self.nebula_backup_busy {
+            return;
+        }
+        self.commit_backup_remote_field();
+        self.nebula_backup_status_remote = true;
+        if upload && self.nebula_backup_selection.is_empty() {
+            self.nebula_backup_status = Some((
+                self.ui_language()
+                    .pick("至少选择一项备份内容", "Select at least one backup item")
+                    .to_owned(),
+                true,
+            ));
+            self.window.request_redraw();
+            return;
+        }
+        if let Err(err) = crate::backup_remote::validate() {
+            self.nebula_backup_status = Some((err, true));
+            self.window.request_redraw();
+            return;
+        }
+        self.nebula_backup_operation = Some(if upload {
+            BackupOperation::RemotePush
+        } else {
+            BackupOperation::RemotePull
+        });
+        self.nebula_backup_passphrase.clear();
+        self.nebula_backup_passphrase_select_all.clear();
+        self.nebula_backup_status = None;
+        self.nebula_confirm = Some(NebulaConfirm::BackupPassphrase { restoring: !upload });
+        self.window.request_redraw();
+    }
+
+    /// 后台远程备份线程收尾（`NebulaBackupRemoteDone`）。
+    pub fn backup_remote_done(&mut self, message: &str, error: bool) {
+        self.nebula_backup_busy = false;
+        self.nebula_backup_status = Some((message.to_owned(), error));
+        self.nebula_backup_status_remote = true;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+    }
+
     pub fn start_backup_export(&mut self) {
         if self.nebula_backup_selection.is_empty() {
             self.nebula_backup_status = Some((
@@ -3715,6 +3949,7 @@ impl Display {
                     .to_owned(),
                 true,
             ));
+            self.nebula_backup_status_remote = false;
             self.window.request_redraw();
             return;
         }
@@ -3775,8 +4010,10 @@ impl Display {
         self.window.request_redraw();
     }
 
-    pub fn complete_backup_operation(&mut self) {
-        let Some(operation) = self.nebula_backup_operation.clone() else { return };
+    /// 口令确认。本地导出/恢复同步完成（小文件 + Argon2 一次派生）；远程
+    /// 动作返回请求，由调用方发事件到后台线程——网络不进 UI 线程。
+    pub fn complete_backup_operation(&mut self) -> Option<RemoteBackupRequest> {
+        let Some(operation) = self.nebula_backup_operation.clone() else { return None };
         let passphrase = self.nebula_backup_passphrase.clone();
         let result = match operation {
             BackupOperation::Export(path) => {
@@ -3789,7 +4026,47 @@ impl Display {
             BackupOperation::Restore(path) => std::fs::read(&path)
                 .map_err(|error| error.to_string())
                 .and_then(|packet| crate::encrypted_backup::restore(&packet, &passphrase)),
+            BackupOperation::RemotePush | BackupOperation::RemotePull => {
+                self.nebula_backup_status_remote = true;
+                if passphrase.chars().count() < 8 {
+                    self.nebula_backup_status = Some((
+                        self.ui_language()
+                            .pick(
+                                "备份操作失败: 口令至少 8 个字符",
+                                "Backup operation failed: passphrase must be at least 8 characters",
+                            )
+                            .to_owned(),
+                        true,
+                    ));
+                    self.nebula_backup_passphrase.clear();
+                    self.nebula_backup_passphrase_select_all.clear();
+                    self.window.request_redraw();
+                    return None;
+                }
+                let upload = matches!(operation, BackupOperation::RemotePush);
+                self.nebula_backup_busy = true;
+                self.nebula_backup_status = Some((
+                    self.ui_language()
+                        .pick(
+                            if upload { "备份上传中…" } else { "正在取回远端备份…" },
+                            if upload { "Uploading backup…" } else { "Fetching remote backup…" },
+                        )
+                        .to_owned(),
+                    false,
+                ));
+                self.nebula_confirm = None;
+                self.nebula_backup_operation = None;
+                self.nebula_backup_passphrase.clear();
+                self.nebula_backup_passphrase_select_all.clear();
+                self.window.request_redraw();
+                return Some(RemoteBackupRequest {
+                    upload,
+                    passphrase,
+                    selection: self.nebula_backup_selection,
+                });
+            },
         };
+        self.nebula_backup_status_remote = false;
         match result {
             Ok(()) => {
                 let restoring = matches!(
@@ -3831,6 +4108,7 @@ impl Display {
             },
         }
         self.window.request_redraw();
+        None
     }
 
     pub fn cancel_backup_operation(&mut self) {
@@ -3860,6 +4138,7 @@ impl Display {
                 self.cancel_backup_operation();
             }
             self.commit_sync_field();
+            self.commit_backup_remote_field();
             self.nebula_settings_dropdown = None;
             self.nebula_settings_hover = SettingsHit::None;
             self.nebula_settings_pressed = SettingsHit::None;
@@ -3867,6 +4146,7 @@ impl Display {
             self.nebula_settings_text_drag = None;
         } else {
             self.load_sync_state();
+            self.load_backup_remote_state();
             // Each explicit visit starts at a predictable page origin.
             self.nebula_settings_scroll = 0.0;
             self.nebula_settings_text_drag = None;
@@ -7057,7 +7337,17 @@ impl Display {
             provider.is_some_and(|provider| provider.codex_goals),
             provider.is_some_and(|provider| provider.codex_remote_compaction),
             self.nebula_resume_ai,
+            self.nebula_tray,
         ]
+    }
+
+    /// 高级：「常驻托盘图标」开关。翻转即生效：托盘线程收到 enable/disable
+    /// 后立刻挂上或摘掉通知区图标。
+    pub fn toggle_tray(&mut self) {
+        self.nebula_tray = !self.nebula_tray;
+        crate::tray::set_enabled(self.nebula_tray);
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
     }
 
     /// 高级·会话：「恢复时接续 AI 对话」开关。
@@ -7511,6 +7801,7 @@ impl Display {
             keep_session: self.nebula_keep_session,
             restore_session: self.nebula_restore_session,
             resume_ai: self.nebula_resume_ai,
+            tray: self.nebula_tray,
             opacity: self.nebula_window_opacity,
             background: self.nebula_background,
             background_image: self.nebula_background_image.clone(),
@@ -7610,6 +7901,10 @@ impl Display {
         self.nebula_keep_session = settings.keep_session;
         self.nebula_restore_session = settings.restore_session;
         self.nebula_resume_ai = settings.resume_ai;
+        if self.nebula_tray != settings.tray {
+            self.nebula_tray = settings.tray;
+            crate::tray::set_enabled(settings.tray);
+        }
         self.nebula_panel_resize = settings.panel_resize;
         // 手改文件把宽度调了的话，和拖拽一样要触发一次 reflow。
         let panel_dims_changed = (self.nebula_sidebar_w - settings.sidebar_w).abs() > 0.5

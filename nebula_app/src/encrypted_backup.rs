@@ -33,8 +33,10 @@ pub(crate) enum BackupCategory {
     Fonts,
 }
 
+// `pub`（而非 pub(crate)）：作为 `EventType::NebulaBackupRemote` 的字段随
+// 公有枚举可达；bin crate 里只为消除 private-interfaces 告警。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BackupSelection {
+pub struct BackupSelection {
     pub appearance: bool,
     pub config: bool,
     pub ssh: bool,

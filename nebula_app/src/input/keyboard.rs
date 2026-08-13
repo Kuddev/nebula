@@ -161,6 +161,41 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             return;
         }
 
+        // 设置→备份→远程备份的输入框独占键盘：语义与同步输入框一致
+        // （Enter/Tab 提交、Esc 还原、Ctrl+V 粘贴、其余字符追加）。
+        if self.ctx.display().settings_open()
+            && self.ctx.display().nebula_backup_remote_focus.is_some()
+        {
+            match &key.logical_key {
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Tab) => {
+                    self.ctx.display().commit_backup_remote_field();
+                },
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.display().cancel_backup_remote_field();
+                },
+                Key::Named(NamedKey::Backspace) => {
+                    self.ctx.display().backup_remote_field_backspace();
+                },
+                Key::Named(NamedKey::Space) => {
+                    self.ctx.display().backup_remote_field_push(' ');
+                },
+                Key::Character(text) => {
+                    if mods.control_key() && text.eq_ignore_ascii_case("v") {
+                        let paste = self.ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                        self.ctx.display().backup_remote_field_paste(&paste);
+                    } else if !mods.control_key() {
+                        for ch in text.chars() {
+                            self.ctx.display().backup_remote_field_push(ch);
+                        }
+                    }
+                },
+                _ => {},
+            }
+            self.ctx.display().update_settings_ime_cursor();
+            self.ctx.mark_dirty();
+            return;
+        }
+
         // 设置→供应商输入框：普通元数据可编辑，API Key 只在提交瞬间
         // 写入系统凭据管理器，随后立即清空草稿，避免明文残留在 UI 状态。
         if self.ctx.display().settings_open() && self.ctx.display().nebula_provider_focus.is_some()

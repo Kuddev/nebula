@@ -46,6 +46,8 @@ const SYNC_KEYS: &[&str] = &[
     "powerline",
     "keep_session",
     "restore_session",
+    "resume_ai",
+    "tray",
     "panel_resize",
     "sidebar_w",
     "drawer_w",

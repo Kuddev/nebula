@@ -355,6 +355,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             self.ctx.display().ssh_proxy_pane_state(),
             self.ctx.display().keymap_pane_state(),
             self.ctx.display().provider_count(),
+            self.ctx.display().backup_protocol(),
         );
         let chrome_hover = if crate::display::in_chrome_bar(&window_size, scale, x as f32, y as f32)
         {
@@ -448,6 +449,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::KeepSessionToggle
             | crate::display::SettingsHit::RestoreSessionToggle
             | crate::display::SettingsHit::ResumeAiToggle
+            | crate::display::SettingsHit::TrayToggle
             | crate::display::SettingsHit::BackgroundColor
             | crate::display::SettingsHit::BackgroundSvPlane
             | crate::display::SettingsHit::BackgroundHueBar
@@ -501,11 +503,16 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             },
             crate::display::SettingsHit::BackupSelection(_)
             | crate::display::SettingsHit::BackupExport
-            | crate::display::SettingsHit::BackupRestore => {
+            | crate::display::SettingsHit::BackupRestore
+            | crate::display::SettingsHit::BackupProtocolCycle
+            | crate::display::SettingsHit::BackupProtocolOption(_)
+            | crate::display::SettingsHit::BackupRemotePush
+            | crate::display::SettingsHit::BackupRemotePull => {
                 self.ctx.window().set_mouse_cursor(CursorIcon::Pointer);
                 return;
             },
             crate::display::SettingsHit::SyncInput(_)
+            | crate::display::SettingsHit::BackupRemoteField(_)
             | crate::display::SettingsHit::ProviderField(_)
             | crate::display::SettingsHit::SshProxyInput(_)
             // 搜索框是文本字段，光标要变 I 形——和其它输入框一致。

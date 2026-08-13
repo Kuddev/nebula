@@ -10,6 +10,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Added
 
+- **Remote backups over multiple protocols** — the Settings → Backup page is now available and gains a "Remote backup" group that pushes the existing password-protected archive (Argon2id + AES-256-GCM; servers only ever see ciphertext) to a destination of choice: a local/network folder (NAS UNC paths), WebDAV, S3-compatible storage (AWS/MinIO/R2/B2 via SigV4, path-style), or SFTP reusing saved SSH hosts and their authentication. Archives are timestamped (`nebula-backup-YYYYMMDD-HHMMSS.nbk`), the newest 10 are retained per destination, and "Restore latest" fetches and applies the most recent one after passphrase entry. WebDAV/S3 secrets live in the Windows Credential Manager (env-var fallback elsewhere), non-secret settings persist in `nebula_backup.txt`, and all packing, key derivation, and network I/O run on a background thread. Provider surface modeled on Netcatty's cloud-sync adapters (its OAuth providers — GitHub/Google Drive/OneDrive — are out of scope for now).
 - **Two completion styles with a switch** — Settings → Terminal → Completion adds a "Completion style" choice between the existing inline ghost text and a new popup candidate list. The popup gathers history, frecency directories, PATH commands, and filesystem matches (up to 8, with source tags), navigates with Up/Down, accepts with the configured accept key (Tab/Right), and dismisses with Esc without re-opening until the line changes. A command-palette action toggles the style, and the choice persists as `completion_style`.
 - **A real color picker for the custom background** — the background-color popup now leads with a saturation/value plane and a hue bar; dragging picks continuously with live terminal preview and persists on release. The preset swatches and the hex field remain, and all three inputs stay in sync (including hue retention across gray/black/white picks).
 - **Clipboard screenshot paste, locally and over SSH** — pasting with an image-only clipboard (e.g. right after Win+Shift+S) now converts the bitmap to PNG and pastes a file path instead of nothing. Local panes write a temp file; SSH panes upload via the existing SFTP stack to `/tmp/nebula-paste-<ts>.png` in the background and then type the remote path into the pane — so image-accepting CLIs like codex and claude receive a usable path on both sides (interaction modeled on Netcatty).
@@ -17,13 +18,18 @@ Every release entry is provided in English and Simplified Chinese.
 - **Configurable terminal cell width** — Settings → Appearance offers Compact and Relaxed cell-width modes. Changing the mode immediately rebuilds font metrics, the terminal grid, pane layout, and PTY dimensions, and the choice persists across launches.
 - **Ordered font fallback chains** — `font_family` accepts comma-separated families such as `JetBrains Mono, LXGW WenKai, Cascadia Code`. The first family remains the primary face, later families fill missing glyphs in order for regular, bold, italic, and bold-italic text, and the embedded Maple font remains the final fallback. System and imported/private fonts now use the same family lookup path for validation, preview, and rendering. (#33)
 - **Middle-click to close tabs** — middle-clicking a tab or its close control follows the existing close flow, including confirmation when required.
+- **Audible terminal bell** — BEL (`\a`) now plays the system notification sound in addition to the visual bell, so an AI CLI finishing a turn is audible even from another tab. Throttled so a bell-happy program cannot machine-gun it; disable with `bell.audible = false`. (#37)
+- **AI conversations resume across restarts** — panes that had a claude/codex conversation open when Nebula closed (or crashed) now type the exact resume command (`claude --resume <id>` / `codex resume <id>`) into the restored shell automatically. Session identity comes from the CLIs' own hook payloads; a claude detected without an id falls back to `claude --continue` in the restored directory. Injection only targets plain restored shells (never SSH/profile seeds), ids are validated before anything reaches the terminal, and Settings → Advanced offers the "resume AI conversations on restore" switch (`resume_ai`, on by default).
+- **System tray icon with agent attention** — a resident tray icon flips to an amber-dot state whenever any AI CLI stops and waits for input, even with every window buried or minimized. Right-click lists all agent panes with their state (running / waiting) and jumps straight to the source pane through the same focus path as toast clicks; left-click goes to the most urgent pane. The tray mirrors the sidebar badges (one source of truth) and can be turned off in Settings → Advanced (`tray`, on by default).
 
 #### Fixed
 
 - **Explorer context-menu launches join the resident instance** — "Open in Nebula" used to be treated as explicit intent and always started an independent window, so tabs detached in the resident process looked lost. A directory launch without `-e` now attaches the existing instance first (restoring its tabs) and opens the directory as a new tab in that window, brought to the foreground; without a resident instance it still starts standalone. The runtime API's `tab.new` gained an optional `cwd` parameter to carry this.
 - **Imported terminals become selectable in the default-shell dropdown** — the dropdown's hit test counted only detected shells while the list also renders imported quick-launch profiles, leaving the trailing rows visible but unclickable. Both sides now share one count.
 - **Git panel no longer blanks on repositories owned by another user** — `git status`/`diff` in the drawer run with a per-invocation `safe.directory` exemption, fixing the silently empty Git view on `\\wsl$\…` roots and elevated-owner checkouts where the same commands work in the user's own shell. Failures now leave a debug-log trace instead of a silent blank.
-- **Visible Windows windows recover from stuck render gates** — startup-time occlusion misreports and missing frame callbacks can no longer leave an already visible window accepting input without repainting. Occlusion is ignored unless the window is actually minimized, and the existing 1 Hz window heartbeat idempotently releases stale `occluded` and `has_frame` gates. (#21)
+- **Visible Windows windows recover from stuck render gates** — startup-time occlusion misreports and missing frame callbacks can no longer leave an already visible window accepting input without repainting. Occlusion is ignored unless the window is actually minimized, the existing 1 Hz window heartbeat idempotently releases stale `occluded` and `has_frame` gates, and the watchdog is now armed at window creation so even a freeze before the first frame self-heals within a second. (#21, #32)
+- **Drive-root context menu launches work** — right-clicking the background of `D:\` (any drive root) and choosing "Open in Nebula" failed with "invalid working directory": Explorer expands `%V` to `D:\`, whose trailing backslash escapes the closing quote on the command line. The mangled path is now repaired, and the error's log hint uses PowerShell syntax (`$env:NEBULA_LOG`) so copy-paste resolves. (#36)
+- **Multi-line paste stops interrupting codex** — the multi-line paste confirmation now only fires when newlines are actually headed to a shell that would execute them line by line. Applications in bracketed-paste mode (codex, vim, modern PSReadLine) receive the paste as one atomic chunk, so the warning no longer blocks them. The dark-theme "Enter" keycap on the confirm dialog's accent button also derives from the button's own ink instead of the near-black panel color. (#35)
 
 #### Improved
 
@@ -33,6 +39,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### 新增
 
+- **多协议远程备份** — “设置 → 备份”页面正式开放，并新增「远程备份」组：把既有的口令保护归档（Argon2id + AES-256-GCM，服务器只见密文）推送到所选目的地——本地/网络目录（含 NAS 的 UNC 路径）、WebDAV、S3 兼容存储（SigV4 签名、路径式 URL，AWS/MinIO/R2/B2 通吃）、或复用已保存 SSH 主机及其认证的 SFTP。归档按时间戳命名（`nebula-backup-YYYYMMDD-HHMMSS.nbk`），每个远端保留最近 10 份；「恢复最新备份」取回最新一份、输口令后落盘。WebDAV/S3 的密钥存 Windows 凭据管理器（其他平台走环境变量），非密文配置持久化在 `nebula_backup.txt`；打包、密钥派生与网络全部在后台线程完成。协议面参考 Netcatty 的云同步适配器（其 GitHub/Google Drive/OneDrive 三个 OAuth 后端暂不纳入）。
 - **两种补全样式可切换** — “设置 → 终端 → 补全”新增「补全样式」：在既有的行内灰字与新的弹窗候选列表之间选择。弹窗汇总历史命令、常用目录、PATH 命令与文件系统匹配（至多 8 项，带来源标签），↑/↓ 选行、按补全接受键（Tab/→）接受、Esc 关闭且同一行不再重弹；命令面板提供切换动作，选择以 `completion_style` 持久化。
 - **自定义背景色改用真调色盘** — 背景色浮层顶部新增饱和度/明度取色面与色相条，按住拖动即连续取色、终端实时预览、松手落盘。预设色板与 16 进制输入保留，三种输入互相同步（灰/黑/白取色时保留既有色相）。
 - **剪贴板截图粘贴（本地与 SSH）** — 剪贴板只有位图没有文本时（如 Win+Shift+S 之后），粘贴会把位图转成 PNG 并粘出文件路径：本地 pane 写入临时文件；SSH pane 经既有 SFTP 栈后台上传到远端 `/tmp/nebula-paste-<时间戳>.png` 再把远端路径敲进会话——codex/claude 这类接受图片路径的 CLI 在两侧都能直接用（交互参考 Netcatty）。
@@ -40,13 +47,18 @@ Every release entry is provided in English and Simplified Chinese.
 - **可配置终端单元格宽度** — “设置 → 外观”新增“紧凑”和“宽松”两种单元格宽度模式。切换后会立即重算字体度量、终端网格、分屏布局和 PTY 尺寸，并在下次启动时保留选择。
 - **有序字体 fallback 链** — `font_family` 支持逗号分隔的字体族，例如 `JetBrains Mono, 霞鹜文楷, Cascadia Code`。第一个字体族仍是主字体，后续字体族按顺序为常规、粗体、斜体和粗斜体补齐缺失字形，内置 Maple 字体始终作为最后兜底。系统字体与导入/私有字体现在统一通过同一族名查找路径完成校验、预览和渲染。（#33）
 - **中键关闭标签页** — 在标签页或其关闭控件上单击鼠标中键，会进入既有的关闭流程；需要确认时仍会正常弹出确认。
+- **终端铃声** — BEL（`\a`）现在在视觉铃声之外播放系统提示音：AI CLI 在别的标签页里完成回合也听得见。内置节流，刷铃声的程序不会连成机关枪；`bell.audible = false` 可关闭。（#37）
+- **AI 对话跨重启接续** — 关闭（或崩溃）时某个 pane 里还开着 claude/codex 对话的，冷恢复后会自动把 resume 命令（`claude --resume <id>` / `codex resume <id>`）敲进恢复出来的 shell。会话身份来自 CLI 自己的 hook 载荷；识别到 claude 但没有 id 时退化为在恢复目录里 `claude --continue`。注入只针对恢复出的裸 shell（绝不注入 SSH/Profile 首格），id 上屏前先做字符集校验；“设置 → 高级”提供「恢复时自动接续 AI 对话」开关（`resume_ai`，默认开）。
+- **托盘图标 agent 提醒** — 常驻系统托盘图标：任一 AI CLI 停下来等输入时翻转为橙点 attention 态，窗口全被压住或最小化也看得见。右键列出所有 agent pane 及状态（运行中/等待输入），点击经 toast 同一条聚焦路径直达来源 pane；左键直达最需要人的那个。托盘与侧栏徽章同一事实源；“设置 → 高级”可关（`tray`，默认开）。
 
 #### 修复
 
 - **资源管理器右键打开并入驻留实例** — 「在 Nebula 中打开」此前被当作显式意图而总是启动独立窗口，驻留进程里 detached 的标签看起来就“丢了”。带目录、无 `-e` 命令的启动现在会先 ATTACH 既有实例（找回原有标签），再在该窗口新开定目录标签并置前；没有驻留实例时仍独立启动。runtime API 的 `tab.new` 为此新增可选 `cwd` 参数。
 - **导入的终端在默认 Shell 下拉中可以选中** — 下拉的命中测试此前只统计检测到的 shell，而列表还渲染了导入的快速启动配置，末尾几行看得见点不中。绘制与命中现在共用同一计数。
 - **Git 面板在他人所有的仓库上不再空白** — 抽屉里的 `git status`/`diff` 以单次调用范围的 `safe.directory` 豁免运行，修复 `\\wsl$\…` 根目录与提升权限检出下“自己 shell 里 git status 正常、面板却空白”的问题；失败现在会留下调试日志而不是无声空白。
-- **Windows 可见窗口可从卡死的渲染门控中恢复** — 启动期的遮挡误报或帧回调丢失不再让可见窗口陷入“能接收输入但不重绘”。窗口没有真正最小化时会忽略遮挡误报，既有的 1 Hz 窗口心跳也会以幂等方式释放卡住的 `occluded` 与 `has_frame` 门控。（#21）
+- **Windows 可见窗口可从卡死的渲染门控中恢复** — 启动期的遮挡误报或帧回调丢失不再让可见窗口陷入“能接收输入但不重绘”。窗口没有真正最小化时会忽略遮挡误报，既有的 1 Hz 窗口心跳也会以幂等方式释放卡住的 `occluded` 与 `has_frame` 门控；看门狗现在在建窗时即刻武装，首帧之前的冻结也能在一秒内自愈。（#21、#32）
+- **盘符根目录右键启动可用** — 在 `D:\` 这类盘符根目录背景右键「在 Nebula 中打开」此前报「无效的工作目录」：资源管理器把 `%V` 展开成 `D:\`，末尾反斜杠在命令行上转义了收尾引号。被吃掉的路径现在会被修复；错误提示里的日志变量改用 PowerShell 语法（`$env:NEBULA_LOG`），复制即可用。（#36）
+- **多行粘贴不再打断 codex** — 多行粘贴确认现在只在换行真的会被 shell 逐行执行时弹出。处于 bracketed paste 模式的应用（codex、vim、新版 PSReadLine）会把粘贴当作一个整体接收，警告不再拦路。确认框里深色主题下 accent 主按钮上的「Enter」键帽也改从按钮自身墨色派生，不再是一块近黑色。（#35）
 
 #### 改进
 

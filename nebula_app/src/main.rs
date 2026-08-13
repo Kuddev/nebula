@@ -32,6 +32,7 @@ mod ai_hook;
 mod ai_providers;
 mod ai_sessions;
 mod atomic_file;
+mod backup_remote;
 mod cli;
 mod clipboard;
 mod codex_config;
@@ -84,6 +85,7 @@ mod ssh_sftp;
 mod string;
 mod sync;
 mod terminal_profiles;
+mod tray;
 mod update_check;
 mod ux;
 mod window_context;
@@ -303,6 +305,10 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     {
         ai_hook::spawn_server(window_event_loop.create_proxy());
         ai_hook::spawn_config_guard();
+        // 托盘 attention（T1-3）：常驻图标 + agent 状态菜单。开关读原始
+        // 设置存储——事件循环还没有任何窗口/Display 可问。
+        tray::init(window_event_loop.create_proxy());
+        tray::set_enabled(display::tray_enabled());
     }
 
     #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
@@ -384,6 +390,10 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
 
     // Start event loop and block until shutdown.
     let result = processor.run(window_event_loop);
+
+    // 摘掉托盘图标：进程退出后残影会留在通知区直到用户悬停。
+    #[cfg(windows)]
+    tray::shutdown();
 
     // `Processor` must be dropped before calling `FreeConsole`.
     //

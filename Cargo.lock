@@ -4578,6 +4578,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "hmac 0.13.0",
  "home",
  "html-escape",
  "image",
