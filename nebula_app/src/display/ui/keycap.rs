@@ -11,7 +11,8 @@ use unicode_width::UnicodeWidthChar;
 
 use super::theme::Skin;
 use super::tokens::radius;
-use crate::renderer::ui::UiQuad;
+use crate::display::color::Rgb;
+use crate::renderer::ui::{Rgba, UiQuad};
 
 /// Chip height in logical px（与 palette 底栏既有键帽一致）。
 pub const KEY_H: f32 = 20.0;
@@ -113,6 +114,33 @@ pub fn push_chip_toned(
     }
     let lip = (1.5 * scale).max(1.0);
     quads.push(UiQuad::solid(x, y + h - lip, w, lip, lip * 0.4, sk.hairline));
+}
+
+/// 实心按钮（accent/danger 填充）上的键帽。中性 `panel` 底在深色主题里
+/// 近黑，叠在亮色主按钮上会读成一块突兀的深色（issue #35 的 Enter 键帽）。
+/// 这里改从按钮自身的文字墨派生：低透明度墨作底、同墨加重作底边，文字侧
+/// 配满强度的同一支墨——该墨在这块填充上本就保证可读，因此深浅主题 ×
+/// accent/danger 四种组合全部成立。几何与 [`push_chip`] 完全一致。
+pub fn push_chip_on_fill(
+    quads: &mut Vec<UiQuad>,
+    ink: Rgb,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+) {
+    let corner = radius::CHIP * scale;
+    quads.push(UiQuad::solid(x, y, w, h, corner, Rgba::new(ink.r, ink.g, ink.b, 38)));
+    let lip = (1.5 * scale).max(1.0);
+    quads.push(UiQuad::solid(
+        x,
+        y + h - lip,
+        w,
+        lip,
+        lip * 0.4,
+        Rgba::new(ink.r, ink.g, ink.b, 110),
+    ));
 }
 
 /// Push every chip of a laid-out combo.

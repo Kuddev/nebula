@@ -15,6 +15,17 @@ pub struct BellConfig {
     /// Command to run on bell.
     pub command: Option<Program>,
 
+    /// Play an audible system sound when the bell rings (BEL / `\a`).
+    ///
+    /// AI CLIs ring BEL when a turn finishes or they need input, so this is
+    /// the "claude/codex needs you" cue even while Nebula is focused on a
+    /// different tab — the visual bell and background-tab toast never cover
+    /// that case. Plays regardless of focus and is throttled in
+    /// [`crate::platform::beep`] so a bell-happy program cannot machine-gun
+    /// it. On by default, matching a conventional terminal; set
+    /// `bell.audible = false` to silence it.
+    pub audible: bool,
+
     /// Visual bell flash color.
     pub color: Rgb,
 
@@ -28,6 +39,7 @@ impl Default for BellConfig {
             color: Rgb::new(255, 255, 255),
             animation: Default::default(),
             command: Default::default(),
+            audible: true,
             duration: Default::default(),
         }
     }

@@ -31,7 +31,7 @@ pub struct RenderableContent<'a> {
     terminal_content: TerminalContent<'a>,
     cursor: RenderableCursor,
     cursor_shape: CursorShape,
-    cursor_point: Point<usize>,
+    cursor_point: Option<Point<usize>>,
     search: Option<HintMatches<'a>>,
     hint: Option<Hint<'a>>,
     config: &'a UiConfig,
@@ -56,7 +56,8 @@ impl<'a> RenderableContent<'a> {
     ) -> Self {
         let search = search_state.dfas().map(|dfas| HintMatches::visible_regex_matches(term, dfas));
         let focused_match = search_state.focused_match();
-        let terminal_content = term.renderable_content();
+        let terminal_content =
+            term.renderable_content_with_viewport(size.screen_lines(), size.columns());
         let theme_is_light = display.nebula_theme.palette().is_light;
         let theme_foreground = display.colors[NamedColor::Foreground];
         let theme_background = display.colors[NamedColor::Background];
@@ -87,8 +88,8 @@ impl<'a> RenderableContent<'a> {
 
         // Convert terminal cursor point to viewport position.
         let cursor_point = terminal_content.cursor.point;
-        let display_offset = terminal_content.display_offset;
-        let cursor_point = term::point_to_viewport(display_offset, cursor_point).unwrap();
+        let cursor_point = term::point_to_viewport_from(terminal_content.viewport_origin, cursor_point)
+            .filter(|point| point.line < size.screen_lines() && point.column.0 < size.columns());
 
         let hint = if display.hint_state.active() {
             display.hint_state.update_matches(term);
@@ -120,6 +121,20 @@ impl<'a> RenderableContent<'a> {
     /// Viewport offset.
     pub fn display_offset(&self) -> usize {
         self.terminal_content.display_offset
+    }
+
+    /// First grid row rendered at viewport line zero.
+    #[inline]
+    pub fn viewport_origin(&self) -> Line {
+        self.terminal_content.viewport_origin
+    }
+
+    /// Convert a grid point to this content's clipped viewport coordinates.
+    #[inline]
+    pub fn point_to_viewport(&self, point: Point) -> Option<Point<usize>> {
+        term::point_to_viewport_from(self.viewport_origin(), point).filter(|point| {
+            point.line < self.size.screen_lines() && point.column.0 < self.size.columns()
+        })
     }
 
     /// Get the terminal cursor.
@@ -176,7 +191,9 @@ impl<'a> RenderableContent<'a> {
         RenderableCursor {
             width,
             shape: self.cursor_shape,
-            point: self.cursor_point,
+            // Only reached from `next()` when this cell IS the cursor cell,
+            // so the cell's own viewport point is the cursor point.
+            point: cell.point,
             cursor_color,
             text_color,
             opacity,
@@ -222,7 +239,7 @@ impl Iterator for RenderableContent<'_> {
             let cell = self.terminal_content.display_iter.next()?;
             let mut cell = RenderableCell::new(self, cell);
 
-            if self.cursor_point == cell.point {
+            if self.cursor_point == Some(cell.point) {
                 // Store the cursor which should be rendered.
                 self.cursor = self.renderable_cursor(&cell);
                 if self.cursor.shape == CursorShape::Block {
@@ -330,8 +347,7 @@ impl RenderableCell {
             )
         });
 
-        let display_offset = content.terminal_content.display_offset;
-        let viewport_start = Point::new(Line(-(display_offset as i32)), Column(0));
+        let viewport_start = Point::new(content.viewport_origin(), Column(0));
         let colors = &content.config.colors;
         let mut character = cell.c;
         let mut flags = cell.flags;
@@ -395,7 +411,9 @@ impl RenderableCell {
 
         // Convert cell point to viewport position.
         let cell_point = cell.point;
-        let point = term::point_to_viewport(display_offset, cell_point).unwrap();
+        let point = content
+            .point_to_viewport(cell_point)
+            .expect("render iterator only yields points inside its viewport");
 
         let underline = cell.underline_color().map_or(fg, |underline| {
             let (underline_rgb, fixed_underline) = Self::compute_fg_rgb(content, underline, flags);

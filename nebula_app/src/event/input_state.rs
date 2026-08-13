@@ -9,7 +9,7 @@ use winit::event::{ElementState, MouseButton, Touch as TouchEvent};
 
 use nebula_terminal::grid::Dimensions;
 use nebula_terminal::index::{Column, Point, Side};
-use nebula_terminal::term;
+use nebula_terminal::term::Term;
 
 use crate::display::SizeInfo;
 use crate::input::FONT_SIZE_STEP;
@@ -115,13 +115,19 @@ impl Default for Mouse {
 }
 
 impl Mouse {
+    /// Terminal grid cell under the pointer.
+    ///
+    /// The pixel position maps into the *visual* viewport (`size`), which the
+    /// renderer may crop out of a larger committed grid while a resize is
+    /// pending; `term` supplies that viewport origin and clamps the result to
+    /// cells the grid actually has.
     #[inline]
-    pub fn point(&self, size: &SizeInfo, display_offset: usize) -> Point {
+    pub fn point<T>(&self, size: &SizeInfo, term: &Term<T>) -> Point {
         let col = self.x.saturating_sub(size.padding_x() as usize) / size.cell_width() as usize;
         let col = min(Column(col), size.last_column());
         let line = self.y.saturating_sub(size.padding_y() as usize) / size.cell_height() as usize;
         let line = min(line, size.bottommost_line().0 as usize);
-        term::viewport_to_point(display_offset, Point::new(line, col))
+        term.visual_viewport_to_point(size.screen_lines(), Point::new(line, col))
     }
 }
 

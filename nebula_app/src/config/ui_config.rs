@@ -131,6 +131,15 @@ impl UiConfig {
         #[cfg(not(windows))]
         let suppress_bringup_da1 = false;
 
+        // Windows child sessions are presented through ConPTY. It silently
+        // re-anchors its primary buffer on resize and keeps repainting with
+        // absolute CUP coordinates, so the renderer grid must use the matching
+        // row semantics. Alternate-screen applications retain normal behavior.
+        #[cfg(windows)]
+        let conpty_resize = true;
+        #[cfg(not(windows))]
+        let conpty_resize = false;
+
         TermConfig {
             semantic_escape_chars: self.selection.semantic_escape_chars.clone(),
             scrolling_history: self.scrolling.history() as usize,
@@ -139,6 +148,7 @@ impl UiConfig {
             osc52: self.terminal.osc52.0,
             kitty_keyboard: true,
             suppress_bringup_da1,
+            conpty_resize,
         }
     }
 

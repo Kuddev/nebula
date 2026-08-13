@@ -104,10 +104,13 @@ impl Logger {
             Err(_) => return,
         };
 
+        // Show the variable in the reader's own shell syntax. On Windows the
+        // default shell is PowerShell, where cmd-style `%NEBULA_LOG%` does not
+        // expand (issue #36); use `$env:NEBULA_LOG` so a copy-paste resolves.
         #[cfg(not(windows))]
         let env_var = format!("${NEBULA_LOG_ENV}");
         #[cfg(windows)]
-        let env_var = format!("%{}%", NEBULA_LOG_ENV);
+        let env_var = format!("$env:{NEBULA_LOG_ENV}");
 
         let message = format!(
             "[{}] {}\nSee log at {} ({})",

@@ -104,8 +104,8 @@ pub use context_menu::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
 pub use i18n::{LanguagePreference, UiLanguage};
 pub use size_info::SizeInfo;
 pub use state::{
-    AcceptKey, NebulaConfirm, NebulaInlineImage, NebulaPaneState, NebulaShell, SplitDirection,
-    SplitNav,
+    AcceptKey, AiSessionIdentity, CompletionStyle, NebulaCompletionItem, NebulaCompletionKind,
+    NebulaConfirm, NebulaInlineImage, NebulaPaneState, NebulaShell, SplitDirection, SplitNav,
 };
 pub use toast::ToastKind;
 
@@ -140,7 +140,9 @@ enum BackupOperation {
 pub(crate) fn caret_blink_on() -> bool {
     ui::caret::is_on()
 }
-pub use settings::{NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit};
+pub use settings::{
+    BgPickerPart, NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit,
+};
 pub(crate) use settings::{CellWidthMode, NewTabPosition, SettingsOpacityTarget};
 
 /// 按显示列宽贪心断行（确认框正文等 UI 段落用）：CJK 逐字可断，行首空
@@ -653,8 +655,14 @@ fn merge_ssh_hosts(saved: &[String], pinned: &[String], hidden: &[String]) -> Ve
 /// Remove one destination while recording exactly enough list state for Undo.
 /// Kept independent from rendering and Credential Manager so the destructive
 /// state transition can be regression-tested without touching real secrets.
+///
+/// Only config-sourced aliases go to the hidden list: Nebula never edits
+/// `~/.ssh/config`, so hiding is the strongest "delete" available for them.
+/// Nebula-managed hosts are removed outright — parking them in the hidden
+/// section made deletion read as a rename to "hidden".
 fn remove_ssh_host_from_lists(
     host: &str,
+    from_config: bool,
     saved: &mut Vec<String>,
     pinned: &mut Vec<String>,
     hidden: &mut Vec<String>,
@@ -664,7 +672,7 @@ fn remove_ssh_host_from_lists(
     let was_hidden = hidden.iter().any(|entry| entry == host);
     saved.retain(|entry| entry != host);
     pinned.retain(|entry| entry != host);
-    if !was_hidden {
+    if from_config && !was_hidden {
         hidden.push(host.to_owned());
     }
     (saved_index, pinned_index, was_hidden)
@@ -1218,6 +1226,56 @@ fn nebula_command_hint<'a>(commands: &'a [String], prefix: &str) -> Option<&'a s
     })
 }
 
+/// Multi-candidate variant of [`nebula_command_hint`] for the popup list: up
+/// to `limit` full command names extending `prefix`. Unlike the ghost variant
+/// an exact match does NOT suppress the longer neighbors — listing `claude`
+/// alongside `claude-agent-acp` is exactly what a chooser is for.
+fn nebula_command_hints<'a>(commands: &'a [String], prefix: &str, limit: usize) -> Vec<&'a str> {
+    if prefix.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<&'a str> = Vec::new();
+    for command in commands {
+        if command.len() <= prefix.len() || !command.is_char_boundary(prefix.len()) {
+            continue;
+        }
+        let head = &command[..prefix.len()];
+        #[cfg(windows)]
+        let matches = head.eq_ignore_ascii_case(prefix);
+        #[cfg(not(windows))]
+        let matches = head == prefix;
+        if matches && !out.iter().any(|seen| *seen == command.as_str()) {
+            out.push(command);
+            if out.len() == limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Truncate/pad `text` to exactly `width` display cells (wide chars count 2;
+/// a wide char that would straddle the boundary is dropped and padded over).
+fn nebula_pad_to_cells(text: &str, width: usize) -> String {
+    let mut out = String::with_capacity(width);
+    let mut used = 0usize;
+    for c in text.chars() {
+        let w = c.width().unwrap_or(0);
+        if w == 0 {
+            continue;
+        }
+        if used + w > width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    for _ in used..width {
+        out.push(' ');
+    }
+    out
+}
+
 fn nebula_is_command_position(line: &str) -> bool {
     !line.contains([' ', '\t'])
         && !line.contains(['/', '\\'])
@@ -1498,6 +1556,11 @@ pub struct Display {
     /// Active settings opacity drag: target plus the screen-space track used
     /// for pointer-to-value mapping. Values persist only when the drag ends.
     pub nebula_settings_opacity_drag: Option<(settings::SettingsOpacityTarget, f32, f32)>,
+    /// 背景色调色盘的草稿 HSV。打开浮层时从生效色初始化；拖动期间它是唯一
+    /// 权威——灰/黑/白点的色相经 RGB 往返会坍缩成 0，这里保住用户拨到的值。
+    nebula_bg_picker_hsv: (f32, f32, f32),
+    /// 进行中的调色盘拖拽（SV 面或色相条），值实时应用、松手落盘。
+    pub nebula_bg_picker_drag: Option<settings::BgPickerPart>,
     /// Unified native right-click menu shared by tab and SSH rows. The menu
     /// owns its short open/close animation so no input path needs timers.
     nebula_context_menu: Option<context_menu::ContextMenu>,
@@ -1592,6 +1655,8 @@ pub struct Display {
     pub nebula_ghost_enabled: bool,
     /// Which key accepts a ghost suggestion.
     pub nebula_accept: AcceptKey,
+    /// How completions surface: inline ghost remainder or a popup list.
+    pub nebula_completion_style: CompletionStyle,
     /// Default executor used by new sessions when no explicit shell is configured.
     pub nebula_shell: NebulaShell,
     /// Raw default-shell id when the user picked a detected shell the 2-value
@@ -1613,6 +1678,9 @@ pub struct Display {
     /// 启动时回放 `session.json`（正常关窗与崩溃恢复共用这一条路）。关掉
     /// 只是不回放——快照照写，导出工作区与崩溃诊断仍然可用。
     pub nebula_restore_session: bool,
+    /// 冷恢复时自动接续各 pane 的 AI 对话（claude/codex resume，T1-2）。
+    /// 消费方在 `window_context::resume_agent_sessions`。
+    pub nebula_resume_ai: bool,
     /// Runtime window opacity controlled from Nebula settings.
     pub nebula_window_opacity: f32,
     /// Which settings combobox (floating option list) is expanded, if any.
@@ -2268,6 +2336,8 @@ impl Display {
             nebula_settings_hover: SettingsHit::None,
             nebula_settings_pressed: SettingsHit::None,
             nebula_settings_opacity_drag: None,
+            nebula_bg_picker_hsv: (220.0, 0.0, 0.0),
+            nebula_bg_picker_drag: None,
             nebula_context_menu: None,
             nebula_settings_dropdown: None,
             nebula_cursor_shape: settings_init.cursor_shape,
@@ -2350,6 +2420,7 @@ impl Display {
             nebula_pty_resize_pending: false,
             nebula_ghost_enabled: settings_init.ghost,
             nebula_accept: settings_init.accept,
+            nebula_completion_style: settings_init.completion_style,
             nebula_shell: settings_init.shell,
             nebula_shell_id: settings_init.shell_id.clone(),
             nebula_startup_directory: settings_init.startup_directory,
@@ -2358,6 +2429,7 @@ impl Display {
             nebula_blur: settings_init.blur,
             nebula_keep_session: settings_init.keep_session,
             nebula_restore_session: settings_init.restore_session,
+            nebula_resume_ai: settings_init.resume_ai,
             nebula_window_opacity: settings_init.opacity,
             nebula_background: if settings_init.follow_system_theme {
                 Some(nebula_theme.palette().term_bg)
@@ -2509,8 +2581,14 @@ impl Display {
         self.terminal_card_rect()
     }
 
+    /// Rows in the default-shell dropdown. MUST agree with the list the
+    /// settings view renders (`SettingsView::shells` = detected shells +
+    /// imported quick-launch profiles): the hit test sizes the popup from this
+    /// count, and undercounting made every imported profile's row — drawn and
+    /// hovered — unclickable (导入终端后选不中最后一项).
     pub fn shell_picker_count(&self) -> usize {
         self.nebula_detected_shells.as_ref().map_or(0, Vec::len)
+            + self.nebula_profiles.iter().filter(|profile| profile.settings_id().is_some()).count()
     }
 
     /// 字体族行 + 两个固定尾行：「显示全部 / 仅等宽」过滤切换，以及「导入字体…」。
@@ -2576,6 +2654,7 @@ impl Display {
 
         let (saved_index, pinned_index, was_hidden) = remove_ssh_host_from_lists(
             host,
+            from_config,
             &mut self.nebula_saved_hosts,
             &mut self.nebula_pinned_hosts,
             &mut self.nebula_hidden_hosts,
@@ -3438,6 +3517,7 @@ impl Display {
             follow_system_theme: self.nebula_follow_system_theme,
             ghost: self.nebula_ghost_enabled,
             accept: self.nebula_accept,
+            completion_style: self.nebula_completion_style,
             shell_label: {
                 // Rich picked id (cmd/pwsh/nu/wsl:X) wins; else the 2-value
                 // enum label. Icon comes from the same table the dropdown
@@ -3527,6 +3607,7 @@ impl Display {
             blur: self.nebula_blur,
             keep_session: self.nebula_keep_session,
             restore_session: self.nebula_restore_session,
+            resume_ai: self.nebula_resume_ai,
             opacity: self.nebula_window_opacity,
             dragging_opacity: self.nebula_settings_opacity_drag.map(|(target, _, _)| target),
             cursor_shape: self.nebula_cursor_shape,
@@ -3548,6 +3629,7 @@ impl Display {
             background: self.nebula_background,
             bg_hex_input: self.nebula_bg_hex_input.clone(),
             bg_hex_active: self.nebula_bg_hex_active,
+            bg_picker_hsv: self.nebula_bg_picker_hsv,
             background_image: self.nebula_background_image.clone(),
             background_image_opacity: self.nebula_background_image_opacity,
             background_image_fit: self.nebula_background_image_fit,
@@ -3940,6 +4022,24 @@ impl Display {
     pub fn cycle_accept(&mut self) {
         self.nebula_accept = self.nebula_accept.cycle();
         self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+    }
+
+    /// Flip between inline ghost and popup-list completion (palette /
+    /// keybinding path; the settings page goes through
+    /// [`Self::set_completion_style_option`]).
+    pub fn cycle_completion_style(&mut self) {
+        self.nebula_completion_style = self.nebula_completion_style.cycle();
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+    }
+
+    pub fn set_completion_style_option(&mut self, index: usize) {
+        if let Some(style) = settings::COMPLETION_STYLE_OPTIONS.get(index) {
+            self.nebula_completion_style = *style;
+            self.persist_nebula_settings();
+        }
+        self.nebula_settings_dropdown = None;
         self.pending_update.dirty = true;
     }
 
@@ -4843,11 +4943,19 @@ impl Display {
         self.pending_update.dirty = true;
     }
 
-    /// 打开/关闭背景色浮层（色板 + 16 进制输入），草稿预填当前生效色。
+    /// 打开/关闭背景色浮层（调色盘 + 色板 + 16 进制输入），草稿预填当前
+    /// 生效色。灰/黑/白的色相在 RGB 里是缺失的：那时保留上一次的色相，
+    /// 用户把明度拨回来时不会发现色相被重置到红色。
     pub fn open_background_color_picker(&mut self) {
         let current = self.nebula_background.unwrap_or(self.colors[NamedColor::Background]);
         self.nebula_bg_hex_input = format!("#{:02X}{:02X}{:02X}", current.r, current.g, current.b);
         self.nebula_bg_hex_active = false;
+        let (h, s, v) = settings::rgb_to_hsv(current);
+        if s > f32::EPSILON && v > f32::EPSILON {
+            self.nebula_bg_picker_hsv = (h, s, v);
+        } else {
+            self.nebula_bg_picker_hsv = (self.nebula_bg_picker_hsv.0, s, v);
+        }
         self.toggle_settings_dropdown(settings::SettingsDropdown::BackgroundColor);
     }
 
@@ -4856,10 +4964,59 @@ impl Display {
         if let Some(color) = settings::BACKGROUND_SWATCHES.get(index) {
             self.nebula_bg_palette_index = index;
             self.nebula_background = Some(*color);
+            self.nebula_bg_picker_hsv = settings::rgb_to_hsv(*color);
             self.persist_nebula_settings();
         }
         self.close_settings_dropdown();
         self.pending_update.dirty = true;
+    }
+
+    /// 调色盘按下：记录拖拽目标并立即按指针位置取一次色。
+    pub fn begin_bg_picker_drag(&mut self, part: settings::BgPickerPart, x: f32, y: f32) {
+        self.nebula_bg_picker_drag = Some(part);
+        self.update_bg_picker_drag(x, y);
+    }
+
+    /// 调色盘拖拽中：指针 → HSV → 实时应用为背景色（不落盘）。
+    /// 预览卡、终端和 hex 草稿同步跟随，松手才写设置文件。
+    pub fn update_bg_picker_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some(part) = self.nebula_bg_picker_drag else {
+            return false;
+        };
+        let (sv, hue) = settings::background_color_picker_rects(
+            &self.ui_size_info(),
+            self.window.scale_factor as f32,
+            self.terminal_card_rect(),
+            self.nebula_settings_scroll,
+            self.nebula_density,
+        );
+        let (h, s, v) = &mut self.nebula_bg_picker_hsv;
+        match part {
+            settings::BgPickerPart::Sv => {
+                *s = ((x - sv.0) / sv.2.max(1.0)).clamp(0.0, 1.0);
+                *v = (1.0 - (y - sv.1) / sv.3.max(1.0)).clamp(0.0, 1.0);
+            },
+            settings::BgPickerPart::Hue => {
+                *h = ((x - hue.0) / hue.2.max(1.0)).clamp(0.0, 1.0) * 360.0;
+            },
+        }
+        let color = settings::hsv_to_rgb(*h, *s, *v);
+        self.nebula_background = Some(color);
+        self.nebula_bg_hex_input = format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b);
+        self.nebula_bg_hex_active = false;
+        self.pending_update.dirty = true;
+        self.window.request_redraw();
+        true
+    }
+
+    /// 调色盘松手：集中落盘（拖动过程只刷新画面，避免连续写设置文件）。
+    pub fn finish_bg_picker_drag(&mut self) -> bool {
+        if self.nebula_bg_picker_drag.take().is_none() {
+            return false;
+        }
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
+        true
     }
 
     pub fn focus_bg_hex_input(&mut self) {
@@ -4888,6 +5045,7 @@ impl Display {
             return false;
         };
         self.nebula_background = Some(color);
+        self.nebula_bg_picker_hsv = settings::rgb_to_hsv(color);
         self.persist_nebula_settings();
         self.close_settings_dropdown();
         self.pending_update.dirty = true;
@@ -6898,7 +7056,15 @@ impl Display {
             self.nebula_background_image_cover_chrome,
             provider.is_some_and(|provider| provider.codex_goals),
             provider.is_some_and(|provider| provider.codex_remote_compaction),
+            self.nebula_resume_ai,
         ]
+    }
+
+    /// 高级·会话：「恢复时接续 AI 对话」开关。
+    pub fn toggle_resume_ai(&mut self) {
+        self.nebula_resume_ai = !self.nebula_resume_ai;
+        self.persist_nebula_settings();
+        self.pending_update.dirty = true;
     }
 
     pub fn step_chrome_anims(&mut self) {
@@ -7334,6 +7500,7 @@ impl Display {
             language: self.nebula_language_preference,
             ghost: self.nebula_ghost_enabled,
             accept: self.nebula_accept,
+            completion_style: self.nebula_completion_style,
             shell: self.nebula_shell,
             shell_id: self.nebula_shell_id.clone(),
             startup_directory: self.nebula_startup_directory.clone(),
@@ -7343,6 +7510,7 @@ impl Display {
             blur: self.nebula_blur,
             keep_session: self.nebula_keep_session,
             restore_session: self.nebula_restore_session,
+            resume_ai: self.nebula_resume_ai,
             opacity: self.nebula_window_opacity,
             background: self.nebula_background,
             background_image: self.nebula_background_image.clone(),
@@ -7419,6 +7587,7 @@ impl Display {
         }
         self.nebula_ghost_enabled = settings.ghost;
         self.nebula_accept = settings.accept;
+        self.nebula_completion_style = settings.completion_style;
         self.nebula_shell = settings.shell;
         self.nebula_shell_id = settings.shell_id;
         self.nebula_startup_directory = settings.startup_directory;
@@ -7440,6 +7609,7 @@ impl Display {
         self.nebula_blur = settings.blur;
         self.nebula_keep_session = settings.keep_session;
         self.nebula_restore_session = settings.restore_session;
+        self.nebula_resume_ai = settings.resume_ai;
         self.nebula_panel_resize = settings.panel_resize;
         // 手改文件把宽度调了的话，和拖拽一样要触发一次 reflow。
         let panel_dims_changed = (self.nebula_sidebar_w - settings.sidebar_w).abs() > 0.5
@@ -7809,7 +7979,10 @@ impl Display {
     /// Process update events.
     pub fn handle_update<T>(
         &mut self,
-        terminal: &mut Term<T>,
+        // Grid resizes are committed together with the PTY by the window
+        // context (leading edge / settle); the handle stays in the signature
+        // so the call sites don't churn if an immediate path returns.
+        _terminal: &mut Term<T>,
         // PTY resizes are deferred to the settle timer (see
         // `nebula_pty_resize_pending`); the handle stays in the signature so
         // the call sites don't churn if an immediate path returns.
@@ -7902,7 +8075,7 @@ impl Display {
             self.window.set_resize_increments(increments);
         }
 
-        // Resize when terminal when its dimensions have changed.
+        // Update the visible terminal viewport when its dimensions have changed.
         if self.size_info.screen_lines() != new_size.screen_lines
             || self.size_info.columns() != new_size.columns()
         {
@@ -7910,12 +8083,11 @@ impl Display {
             // per tick: the in-box ConPTY repaints its entire viewport on
             // every resize, so drag-resizing would flood the scrollback with
             // dozens of shredded repaints (and TUIs like Claude Code redraw
-            // storms). The grid resizes live below, so rendering stays exact;
-            // only the child's SIGWINCH-equivalent waits for the drag to end.
+            // storms).  The window context commits the grid and ConPTY
+            // together at the leading/trailing edges; until then rendering is
+            // clipped to the last committed grid, so both sides retain the
+            // same reflow history.
             self.nebula_pty_resize_pending = true;
-
-            // Resize terminal.
-            terminal.resize(new_size);
 
             // Resize damage tracking.
             self.damage_tracker.resize(new_size.screen_lines(), new_size.columns());
@@ -7928,7 +8100,7 @@ impl Display {
             }
             self.nebula_resize_hud_armed = true;
             nebula_link_log(format!(
-                "grid_resize {}x{} px={width}x{height} pad_x={} pad_r={} pad_y={} \
+                "viewport_resize {}x{} px={width}x{height} pad_x={} pad_r={} pad_y={} \
                  cell={cell_width}x{cell_height} drawer={drawer} sidebar={sidebar} \
                  reserved={}",
                 new_size.columns(),
@@ -8051,6 +8223,7 @@ impl Display {
         let background_color =
             custom_background.unwrap_or_else(|| content.color(NamedColor::Background as usize));
         let display_offset = content.display_offset();
+        let viewport_origin = content.viewport_origin();
         let cursor = content.cursor();
 
         let cursor_point = terminal.grid().cursor.point;
@@ -8092,7 +8265,8 @@ impl Display {
             && search_state.regex().is_none()
             && selection_range.is_none()
         {
-            let visible_cursor = term::point_to_viewport(display_offset, cursor_point);
+            let visible_cursor = term::point_to_viewport_from(viewport_origin, cursor_point)
+                .filter(|point| point.line < view.screen_lines() && point.column.0 < view.columns());
             terminal_math::scan_visible(
                 &mut pane_state.terminal_math,
                 &terminal,
@@ -8146,7 +8320,7 @@ impl Display {
         // against the focused pane, so a background pane's output (build log,
         // `top`) must not tear down the foreground's highlight.
         if force_focus != Some(false) {
-            self.validate_hint_highlights(display_offset, term_damage_full, &term_damage_lines);
+            self.validate_hint_highlights(viewport_origin, term_damage_full, &term_damage_lines);
         }
 
         // OSC 1337 inline images: prune rows that scrolled out of history for
@@ -8158,7 +8332,7 @@ impl Display {
                 let rows = (img.height / cell_h).ceil().max(1.0) as usize;
                 img.abs_line + rows >= grid_scrolled_out
             });
-            let top_abs = (image_anchor - display_offset) as f32;
+            let top_abs = (image_anchor as i64 + viewport_origin.0 as i64) as f32;
             for img in &pane_state.inline_images {
                 let y = view.padding_y() + (img.abs_line as f32 - top_abs) * cell_h;
                 // Cull images entirely outside this pane's band.
@@ -8181,8 +8355,7 @@ impl Display {
         // `line_buf` is used. Only on the primary screen, never during vi/search
         // overlays.
         if alt_screen || vi_mode || search_state.regex().is_some() {
-            pane_state.suggestion.clear();
-            pane_state.suggestion_key.clear();
+            pane_state.clear_completion_hints();
         } else {
             #[cfg(windows)]
             {
@@ -8208,8 +8381,7 @@ impl Display {
                     },
                     None => {
                         pane_state.screen_line.clear();
-                        pane_state.suggestion.clear();
-                        pane_state.suggestion_key.clear();
+                        pane_state.clear_completion_hints();
                     },
                 }
             }
@@ -8227,8 +8399,10 @@ impl Display {
         self.damage_tracker.frame().mark_fully_damaged();
         self.damage_tracker.next_frame().mark_fully_damaged();
 
-        let vi_cursor_viewport_point =
-            vi_cursor_point.and_then(|cursor| term::point_to_viewport(display_offset, cursor));
+        let vi_cursor_viewport_point = vi_cursor_point.and_then(|cursor| {
+            term::point_to_viewport_from(viewport_origin, cursor)
+                .filter(|point| point.line < size_info.screen_lines() && point.column.0 < size_info.columns())
+        });
         self.damage_tracker.damage_vi_cursor(vi_cursor_viewport_point);
         self.damage_tracker.damage_selection(selection_range, display_offset);
 
@@ -8307,7 +8481,7 @@ impl Display {
                     _ => (),
                 }
 
-                let point = term::viewport_to_point(display_offset, source_point);
+                let point = term::viewport_to_point_from(viewport_origin, source_point);
                 while clickable_matches
                     .get(clickable_index)
                     .is_some_and(|bounds| bounds.end() < &point)
@@ -8430,8 +8604,8 @@ impl Display {
             None => {
                 let num_lines = size_info.screen_lines();
                 match vi_cursor_viewport_point {
-                    None => term::point_to_viewport(display_offset, cursor_point)
-                        .filter(|point| point.line < num_lines),
+                    None => term::point_to_viewport_from(viewport_origin, cursor_point)
+                        .filter(|point| point.line < num_lines && point.column.0 < size_info.columns()),
                     point => point,
                 }
             },
@@ -8528,7 +8702,7 @@ impl Display {
         // stays clearly weaker than the near-black real input instead of
         // colliding with it.
         if !pane_state.suggestion.is_empty() && self.ime.preedit().is_none() {
-            if let Some(point) = term::point_to_viewport(display_offset, cursor_point)
+            if let Some(point) = term::point_to_viewport_from(viewport_origin, cursor_point)
                 .filter(|p| p.line < size_info.screen_lines() && p.column.0 < size_info.columns())
             {
                 let avail = size_info.columns() - point.column.0;
@@ -8546,12 +8720,29 @@ impl Display {
             }
         }
 
+        // Popup-style completion list (弹窗补齐): candidate rows anchored to
+        // the prompt cursor, keyboard-selected. Mutually exclusive with the
+        // ghost above by construction; same IME suppression.
+        if !pane_state.completion_items.is_empty() && self.ime.preedit().is_none() {
+            if let Some(anchor) = term::point_to_viewport_from(viewport_origin, cursor_point)
+                .filter(|p| p.line < size_info.screen_lines() && p.column.0 < size_info.columns())
+            {
+                self.draw_completion_popup(
+                    &pane_state.completion_items,
+                    pane_state.completion_selected,
+                    anchor,
+                    &size_info,
+                    background_color,
+                );
+            }
+        }
+
         self.draw_render_timer(config);
 
         // Draw hyperlink uri preview.
         if has_highlighted_hint {
             let cursor_point = vi_cursor_point.or(Some(cursor_point));
-            self.draw_hyperlink_preview(config, cursor_point, display_offset);
+            self.draw_hyperlink_preview(config, cursor_point, viewport_origin);
         }
 
         // Overlay scrollbar on the right edge while scrolled into history.
@@ -9124,17 +9315,25 @@ impl Display {
 
         // Keycaps: 图8 键帽规范（2026-07-29）——与 Ctrl+K/设置页共用
         // `keycap::push_chip` 配方（hairline 圈 + panel/surface 叠底），
-        // 不再按按钮墨色自造描边圈。chip 底是中性 panel，所以放在 accent
-        // 主按钮上天然成为浅色小块（图3 mockup 的 Enter 键帽即此形态）。
-        // Returns its quads instead of pushing: a closure capturing `quads`
-        // mutably would lock it for the rest of the batch.
+        // 不再按按钮墨色自造描边圈。该配方只用于中性底的取消键；中性
+        // panel 在深色主题里近黑，放到 accent 主按钮上会读成一块突兀的
+        // 深色（issue #35），主键帽因此改走 `push_chip_on_fill`：底与
+        // 底边从按钮自己的墨（`on_primary`）派生，深浅主题都成立。
         let cap = |x: f32, key: &str| -> Vec<UiQuad> {
             let mut out = Vec::new();
             ui::keycap::push_chip(&mut out, &sk, x, cap_y, cap_w(key), cap_h, scale);
             out
         };
         quads.extend(cap(cancel_cap_x, cancel_key));
-        quads.extend(cap(primary_cap_x, primary_key));
+        ui::keycap::push_chip_on_fill(
+            &mut quads,
+            on_primary,
+            primary_cap_x,
+            cap_y,
+            cap_w(primary_key),
+            cap_h,
+            scale,
+        );
         self.renderer.draw_ui(&size, &quads);
 
         // Text: free-pixel chrome text (no opaque cell backgrounds), left
@@ -9199,13 +9398,14 @@ impl Display {
             primary_label,
             glyph_cache,
         );
-        // 键帽文字统一走 chip 自己的墨（sk.ink）：chip 底是中性 panel，
-        // 不随按钮填充翻转，主按钮上的键名也保持可读。
+        // 主键帽文字随键帽底走按钮墨（`on_primary`）：键帽底就是这支墨的
+        // 低透明度洗色，满强度的同一支墨在其上必然可读；取消键帽仍是中性
+        // chip + sk.ink。
         self.renderer.draw_chrome_text(
             &size,
             primary_cap_x + cap_pad,
             btn_text_y,
-            txt,
+            on_primary,
             primary_key,
             glyph_cache,
         );
@@ -9842,6 +10042,8 @@ impl Display {
         state.touched = true;
         state.suggestion.clear();
         state.suggestion_key.clear();
+        state.completion_items.clear();
+        state.completion_selected = 0;
         nebula_debug_log(format!("input_char c={c:?} line_buf={:?}", state.line_buf));
     }
 
@@ -9849,8 +10051,7 @@ impl Display {
     pub fn nebula_input_backspace(state: &mut NebulaPaneState) {
         state.line_buf.pop();
         state.touched = true;
-        state.suggestion.clear();
-        state.suggestion_key.clear();
+        state.clear_completion_hints();
         nebula_debug_log(format!("input_backspace line_buf={:?}", state.line_buf));
     }
 
@@ -9864,8 +10065,7 @@ impl Display {
         while state.line_buf.chars().last().is_some_and(|c| !c.is_whitespace()) {
             state.line_buf.pop();
         }
-        state.suggestion.clear();
-        state.suggestion_key.clear();
+        state.clear_completion_hints();
         nebula_debug_log(format!("input_delete_word line_buf={:?}", state.line_buf));
     }
 
@@ -9882,8 +10082,7 @@ impl Display {
 
         state.line_buf.push_str(text);
         state.touched = true;
-        state.suggestion.clear();
-        state.suggestion_key.clear();
+        state.clear_completion_hints();
         nebula_debug_log(format!("input_text text={text:?} line_buf={:?}", state.line_buf));
     }
 
@@ -9940,8 +10139,7 @@ impl Display {
         }
         state.line_buf.clear();
         state.screen_line.clear();
-        state.suggestion.clear();
-        state.suggestion_key.clear();
+        state.clear_completion_hints();
     }
 
     /// Read the real, echoed input off the cursor's grid row on Windows.
@@ -10066,8 +10264,7 @@ impl Display {
     ) {
         let line = line_override.unwrap_or_else(|| state.line_buf.clone());
         if !self.nebula_ghost_enabled || line.is_empty() {
-            state.suggestion.clear();
-            state.suggestion_key.clear();
+            state.clear_completion_hints();
             nebula_debug_log(format!(
                 "suggest_skip enabled={} cwd={:?} line={:?} line_buf={:?}",
                 self.nebula_ghost_enabled, state.cwd, line, state.line_buf
@@ -10077,15 +10274,27 @@ impl Display {
 
         let key = format!("{}\u{0}{line}", state.cwd);
         if key == state.suggestion_key {
+            // Cache hit also protects an Esc-dismissed popup: dismissal clears
+            // the items but keeps the key, so nothing reopens until the line
+            // actually changes.
             return;
         }
         state.suggestion_key = key;
         state.suggestion.clear();
+        state.completion_items.clear();
+        state.completion_selected = 0;
 
         nebula_debug_log(format!(
             "suggest_begin cwd={:?} line={:?} line_buf={:?}",
             state.cwd, line, state.line_buf
         ));
+
+        // Popup style computes a multi-candidate list instead of the single
+        // ghost remainder; the two are mutually exclusive per pane.
+        if self.nebula_completion_style == CompletionStyle::Popup {
+            self.nebula_collect_completions(state, &line);
+            return;
+        }
 
         // History first: newest command that extends the whole line (indexed
         // prefix lookup — scales with matches, not history size).
@@ -10190,6 +10399,237 @@ impl Display {
     /// Cap ghost length so a long path/command can't spill into the chrome.
     fn nebula_clamp_ghost(rem: &str) -> String {
         rem.chars().take(NEBULA_GHOST_MAX).collect()
+    }
+
+    /// Elide long popup labels from the LEFT (paths keep their informative
+    /// tail; the head the user already typed is the expendable part).
+    fn nebula_elide_left(text: &str, max_chars: usize) -> String {
+        let count = text.chars().count();
+        if count <= max_chars {
+            return text.to_owned();
+        }
+        let tail: String = text.chars().skip(count + 1 - max_chars).collect();
+        format!("…{tail}")
+    }
+
+    /// Fill `state.completion_items` for the popup style: the same sources as
+    /// the ghost hint (history → directory history → PATH commands → file
+    /// system), but keeping several candidates each instead of the first hit.
+    fn nebula_collect_completions(&mut self, state: &mut NebulaPaneState, line: &str) {
+        const POPUP_MAX: usize = 8;
+        const LABEL_MAX: usize = 44;
+
+        let mut items: Vec<NebulaCompletionItem> = Vec::new();
+        let push = |items: &mut Vec<NebulaCompletionItem>, item: NebulaCompletionItem| {
+            if item.insert.is_empty() {
+                return;
+            }
+            if items.iter().any(|seen| seen.insert == item.insert && seen.kind == item.kind) {
+                return;
+            }
+            if items.len() < POPUP_MAX {
+                items.push(item);
+            }
+        };
+
+        // Whole-line history matches, newest first.
+        for (full, rem) in self.nebula_history.hints(line, 3) {
+            push(&mut items, NebulaCompletionItem {
+                label: Self::nebula_elide_left(full, LABEL_MAX),
+                insert: rem.to_owned(),
+                kind: NebulaCompletionKind::History,
+            });
+        }
+
+        let token = line.rsplit([' ', '\t']).next().unwrap_or("");
+
+        // Frecency-ranked directory completion for cd-like commands.
+        if let Some(rem) = self.directory_history.hint(line, &state.cwd) {
+            push(&mut items, NebulaCompletionItem {
+                label: Self::nebula_elide_left(&format!("{token}{rem}"), LABEL_MAX),
+                insert: rem,
+                kind: NebulaCompletionKind::Dir,
+            });
+        }
+
+        // PATH executables while the first token is being typed.
+        if nebula_is_command_position(line) {
+            if let Ok(commands) = self.nebula_commands.lock() {
+                for command in nebula_command_hints(commands.as_slice(), line, POPUP_MAX) {
+                    push(&mut items, NebulaCompletionItem {
+                        label: Self::nebula_elide_left(command, LABEL_MAX),
+                        insert: command[line.len()..].to_owned(),
+                        kind: NebulaCompletionKind::Command,
+                    });
+                }
+            }
+        }
+
+        // Filesystem candidates for the final token (same gating as the ghost
+        // path: absolute tokens work without a cwd, relative ones need one).
+        if !token.is_empty() {
+            let absolute = token.starts_with(['/', '\\', '~'])
+                || token.as_bytes().get(1) == Some(&b':');
+            if absolute || !state.cwd.is_empty() {
+                let options =
+                    CompletionOptions { case_sensitive: false, ..CompletionOptions::default() };
+                let want_dir = nebula_path_wants_directory(line);
+                let span = Span::new(0, token.len());
+                let cwd = state.cwd.clone();
+                let cwd_slot = [cwd.as_str()];
+                let cwds: &[&str] = if cwd.is_empty() { &[] } else { &cwd_slot };
+                let matches = complete_item(want_dir, span, token, cwds, &options, false, None);
+                let matches = if want_dir {
+                    self.directory_history.rank_file_suggestions(matches, &state.cwd)
+                } else {
+                    matches
+                };
+                for candidate in matches.iter().take(POPUP_MAX) {
+                    let path = candidate.display_override.as_deref().unwrap_or(&candidate.path);
+                    if path.len() <= token.len() || !path.is_char_boundary(token.len()) {
+                        continue;
+                    }
+                    let (head, rem) = path.split_at(token.len());
+                    if !head.eq_ignore_ascii_case(token) {
+                        continue;
+                    }
+                    // One segment at a time, like the ghost: a deep match
+                    // drills the tree one directory per acceptance.
+                    let (insert, cut_at_dir) = match rem.find(['/', '\\']) {
+                        Some(i) => (&rem[..=i], true),
+                        None => (rem, false),
+                    };
+                    let kind = if cut_at_dir || candidate.is_dir {
+                        NebulaCompletionKind::Dir
+                    } else {
+                        NebulaCompletionKind::File
+                    };
+                    push(&mut items, NebulaCompletionItem {
+                        label: Self::nebula_elide_left(&format!("{token}{insert}"), LABEL_MAX),
+                        insert: insert.to_owned(),
+                        kind,
+                    });
+                }
+            }
+        }
+
+        nebula_debug_log(format!(
+            "suggest_result kind=popup line={:?} items={}",
+            line,
+            items.len()
+        ));
+        state.completion_items = items;
+        state.completion_selected = 0;
+    }
+
+    /// Render the popup completion list on the terminal cell grid: one padded
+    /// row per candidate directly below the cursor (above when the prompt sits
+    /// near the bottom), the selected row on the theme accent. Cell-grid
+    /// `draw_string` keeps this inside the pane projection — no chrome quads,
+    /// so splits and scrolled panes behave like the ghost text does.
+    fn draw_completion_popup(
+        &mut self,
+        items: &[NebulaCompletionItem],
+        selected: usize,
+        anchor: Point<usize>,
+        size_info: &SizeInfo,
+        term_bg: Rgb,
+    ) {
+        let columns = size_info.columns();
+        let screen_lines = size_info.screen_lines();
+        if columns < 12 || screen_lines < 2 {
+            return;
+        }
+
+        // Rows: prefer the space below the cursor, else above; clamp count.
+        let below = screen_lines.saturating_sub(anchor.line + 1);
+        let above = anchor.line;
+        let want = items.len().min(8);
+        let (rows, start_line) = if below >= want || below >= above {
+            (want.min(below), anchor.line + 1)
+        } else {
+            (want.min(above), anchor.line - want.min(above))
+        };
+        if rows == 0 {
+            return;
+        }
+        // When the list is cut short keep the selected row visible.
+        let offset = if selected >= rows { selected + 1 - rows } else { 0 };
+
+        let language = self.nebula_language;
+        let tag = |kind: NebulaCompletionKind| -> &'static str {
+            match kind {
+                NebulaCompletionKind::History => language.pick("历史", "hist"),
+                NebulaCompletionKind::Command => language.pick("命令", "cmd"),
+                NebulaCompletionKind::Dir => language.pick("目录", "dir"),
+                NebulaCompletionKind::File => language.pick("文件", "file"),
+            }
+        };
+        let cell_width = |text: &str| -> usize {
+            text.chars().map(|c| c.width().unwrap_or(0)).sum()
+        };
+
+        let visible = &items[offset..(offset + rows).min(items.len())];
+        let tag_w = visible.iter().map(|item| cell_width(tag(item.kind))).max().unwrap_or(0);
+        let label_w_max = visible.iter().map(|item| cell_width(&item.label)).max().unwrap_or(0);
+
+        // ` label  tag ` — 1 cell padding each side, 2 cells between.
+        let mut start_col = anchor.column.0;
+        let mut avail = columns - start_col;
+        let full_w = label_w_max + tag_w + 4;
+        if full_w > avail {
+            // Slide left rather than shrink first; narrow panes then clamp.
+            let slide = (full_w - avail).min(start_col);
+            start_col -= slide;
+            avail += slide;
+        }
+        let width = full_w.min(avail);
+        let label_w = width.saturating_sub(tag_w + 4);
+        if label_w < 4 {
+            return;
+        }
+
+        let sk = self.nebula_theme.skin();
+        let opaque = |c: Rgb| Rgba::new(c.r, c.g, c.b, 255);
+        let rgb = |c: Rgba| Rgb::new(c.r, c.g, c.b);
+        let row_bg = rgb(ui::icons::blend_over(opaque(term_bg), sk.panel));
+        let (sel_bg, sel_fg) = (sk.accent, sk.ink_on_accent);
+
+        for (row, item) in visible.iter().enumerate() {
+            let line = start_line + row;
+            if line >= screen_lines {
+                break;
+            }
+            let is_selected = offset + row == selected;
+            let (bg, label_fg, tag_fg) = if is_selected {
+                (sel_bg, sel_fg, sel_fg)
+            } else {
+                (row_bg, sk.ink, sk.ink_faint)
+            };
+            let label = format!(" {}", nebula_pad_to_cells(&item.label, label_w + 2));
+            let tag_text = format!("{} ", nebula_pad_to_cells(tag(item.kind), tag_w));
+            let glyph_cache = &mut self.glyph_cache;
+            self.renderer.draw_string(
+                Point::new(line, Column(start_col)),
+                label_fg,
+                bg,
+                label.chars(),
+                size_info,
+                glyph_cache,
+            );
+            // Fits by construction (start_col + width <= columns); the
+            // renderer clips at the grid edge regardless.
+            let tag_col = start_col + 1 + label_w + 2;
+            let glyph_cache = &mut self.glyph_cache;
+            self.renderer.draw_string(
+                Point::new(line, Column(tag_col)),
+                tag_fg,
+                bg,
+                tag_text.chars(),
+                size_info,
+                glyph_cache,
+            );
+        }
     }
 
     fn draw_powerline_icons(&mut self, icons: &[NebulaPowerlineIcon], view: SizeInfo) {
@@ -10496,7 +10936,7 @@ impl Display {
         &mut self,
         config: &UiConfig,
         _cursor_point: Option<Point>,
-        display_offset: usize,
+        viewport_origin: Line,
     ) {
         let num_cols = self.size_info.columns();
 
@@ -10510,8 +10950,8 @@ impl Display {
             return;
         };
         // Hint start scrolled out of the viewport → fall back to the mouse cell.
-        let anchor = term::point_to_viewport(display_offset, hint_start).or_else(|| {
-            self.hint_mouse_point.and_then(|p| term::point_to_viewport(display_offset, p))
+        let anchor = term::point_to_viewport_from(viewport_origin, hint_start).or_else(|| {
+            self.hint_mouse_point.and_then(|p| term::point_to_viewport_from(viewport_origin, p))
         });
         let Some(anchor) = anchor else {
             return;
@@ -10692,7 +11132,7 @@ impl Display {
     /// （`draw_pane` 在污染 tracker 之前捕获），语义回到上游本意。
     fn validate_hint_highlights(
         &mut self,
-        display_offset: usize,
+        viewport_origin: Line,
         term_damage_full: bool,
         term_damage_lines: &[LineDamageBounds],
     ) {
@@ -10715,10 +11155,10 @@ impl Display {
             }
 
             // Convert hint bounds to viewport coordinates.
-            let start = term::point_to_viewport(display_offset, start)
+            let start = term::point_to_viewport_from(viewport_origin, start)
                 .filter(|point| point.line < num_lines)
                 .unwrap_or_default();
-            let end = term::point_to_viewport(display_offset, end)
+            let end = term::point_to_viewport_from(viewport_origin, end)
                 .filter(|point| point.line < num_lines)
                 .unwrap_or_else(|| Point::new(num_lines - 1, self.size_info.last_column()));
 
@@ -10988,9 +11428,10 @@ mod nebula_ux_tests {
     use winit::window::Theme as WinitTheme;
 
     use super::{
-        AI_LOGO_GROK_DARK_PNG, AI_LOGO_GROK_LIGHT_PNG, AiLogo, NebulaConfirm, SizeInfo, ai_logo,
-        alt_screen_vertical_padding_bands, compute_cell_size, extract_program, nebula_command_hint,
-        percent_decode_lossy, prepare_ai_logo_texture, program_icon, remove_ssh_host_from_lists,
+        AI_LOGO_GROK_DARK_PNG, AI_LOGO_GROK_LIGHT_PNG, AiLogo, Display, NebulaConfirm, SizeInfo,
+        ai_logo, alt_screen_vertical_padding_bands, compute_cell_size, extract_program,
+        nebula_command_hint, nebula_command_hints, nebula_pad_to_cells, percent_decode_lossy,
+        prepare_ai_logo_texture, program_icon, remove_ssh_host_from_lists,
         replays_untrusted_terminal_output, restore_ssh_host_to_lists, strip_file_scheme,
         system_theme_snapshot,
     };
@@ -11193,6 +11634,30 @@ mod nebula_ux_tests {
     }
 
     #[test]
+    fn popup_command_hints_keep_longer_neighbors_and_dedup() {
+        let commands = strings(&["claude", "claude-agent-acp", "claude", "cargo"]);
+        // 弹窗列表与 ghost 相反：完整命令也要把更长的邻居列出来。
+        assert_eq!(nebula_command_hints(&commands, "claude", 8), vec!["claude-agent-acp"]);
+        assert_eq!(nebula_command_hints(&commands, "c", 2), vec!["claude", "claude-agent-acp"]);
+        assert!(nebula_command_hints(&commands, "", 8).is_empty());
+    }
+
+    #[test]
+    fn popup_pad_counts_display_cells_and_drops_straddling_wide_chars() {
+        assert_eq!(nebula_pad_to_cells("ab", 4), "ab  ");
+        assert_eq!(nebula_pad_to_cells("目录", 4), "目录");
+        // 第二个全宽字符放不进 3 格：丢弃并用空格补齐。
+        assert_eq!(nebula_pad_to_cells("目录", 3), "目 ");
+        assert_eq!(nebula_pad_to_cells("abcd", 3), "abc");
+    }
+
+    #[test]
+    fn popup_label_elides_from_the_left() {
+        assert_eq!(Display::nebula_elide_left("short", 10), "short");
+        assert_eq!(Display::nebula_elide_left("abcdefgh", 5), "…efgh");
+    }
+
+    #[test]
     fn system_theme_snapshot_beats_a_stale_window_override() {
         assert_eq!(
             system_theme_snapshot(Some(WinitTheme::Dark), Some(WinitTheme::Light)),
@@ -11207,11 +11672,14 @@ mod nebula_ux_tests {
         let mut pinned = strings(&["target", "alpha"]);
         let mut hidden = strings(&["already-hidden"]);
 
-        let snapshot = remove_ssh_host_from_lists("target", &mut saved, &mut pinned, &mut hidden);
+        let snapshot =
+            remove_ssh_host_from_lists("target", false, &mut saved, &mut pinned, &mut hidden);
         assert_eq!(snapshot, (Some(1), Some(0), false));
         assert_eq!(saved, strings(&["alpha", "omega"]));
         assert_eq!(pinned, strings(&["alpha"]));
-        assert_eq!(hidden, strings(&["already-hidden", "target"]));
+        // A Nebula-managed host is deleted, not renamed to "hidden": nothing
+        // may linger in the hidden section for it.
+        assert_eq!(hidden, strings(&["already-hidden"]));
 
         restore_ssh_host_to_lists(
             "target",
@@ -11234,7 +11702,7 @@ mod nebula_ux_tests {
         let mut hidden = Vec::new();
 
         let snapshot =
-            remove_ssh_host_from_lists("config-alias", &mut saved, &mut pinned, &mut hidden);
+            remove_ssh_host_from_lists("config-alias", true, &mut saved, &mut pinned, &mut hidden);
         assert_eq!(snapshot, (None, None, false));
         assert_eq!(hidden, strings(&["config-alias"]));
 
@@ -11249,6 +11717,34 @@ mod nebula_ux_tests {
         );
         assert!(saved.is_empty());
         assert!(pinned.is_empty());
+        assert!(hidden.is_empty());
+    }
+
+    /// A host that exists both as a saved entry and as a `~/.ssh/config`
+    /// alias must be hidden on top of the saved-list removal, otherwise the
+    /// config merge resurrects it on the next restart.
+    #[test]
+    fn ssh_delete_of_a_config_backed_saved_host_also_hides_the_alias() {
+        let mut saved = strings(&["dual"]);
+        let mut pinned = Vec::new();
+        let mut hidden = Vec::new();
+
+        let snapshot =
+            remove_ssh_host_from_lists("dual", true, &mut saved, &mut pinned, &mut hidden);
+        assert_eq!(snapshot, (Some(0), None, false));
+        assert!(saved.is_empty());
+        assert_eq!(hidden, strings(&["dual"]));
+
+        restore_ssh_host_to_lists(
+            "dual",
+            snapshot.0,
+            snapshot.1,
+            snapshot.2,
+            &mut saved,
+            &mut pinned,
+            &mut hidden,
+        );
+        assert_eq!(saved, strings(&["dual"]));
         assert!(hidden.is_empty());
     }
 

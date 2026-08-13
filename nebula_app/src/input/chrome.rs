@@ -922,6 +922,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
+                    crate::display::SettingsHit::ResumeAiToggle => {
+                        self.ctx.display().toggle_resume_ai();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
                     crate::display::SettingsHit::AcceptCycle => {
                         self.ctx
                             .display()
@@ -931,6 +936,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     crate::display::SettingsHit::AcceptOption(index) => {
                         self.ctx.display().set_accept_option(index);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::CompletionStyleCycle => {
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::CompletionStyle,
+                        );
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::CompletionStyleOption(index) => {
+                        self.ctx.display().set_completion_style_option(index);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1099,7 +1116,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.mark_dirty();
                         return;
                     },
-                    crate::display::SettingsHit::SshHostHide(index) => {
+                    crate::display::SettingsHit::SshHostDelete(index) => {
                         self.ctx.display().request_delete_ssh_host(index);
                         self.ctx.mark_dirty();
                         return;
@@ -1294,6 +1311,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     crate::display::SettingsHit::BackgroundColor => {
                         // 打开色板 + 16 进制输入浮层（不再点击循环切换）。
                         self.ctx.display().open_background_color_picker();
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundSvPlane => {
+                        self.ctx
+                            .display()
+                            .begin_bg_picker_drag(crate::display::BgPickerPart::Sv, x, y);
+                        self.ctx.mark_dirty();
+                        return;
+                    },
+                    crate::display::SettingsHit::BackgroundHueBar => {
+                        self.ctx
+                            .display()
+                            .begin_bg_picker_drag(crate::display::BgPickerPart::Hue, x, y);
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1596,8 +1627,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         } else {
             // Multi-click state was advanced once at the top of this function.
             // Load mouse point, treating message bar and padding as the closest cell.
-            let display_offset = self.ctx.terminal().grid().display_offset();
-            let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+            let point = self.ctx.mouse().point(&self.ctx.size_info(), self.ctx.terminal());
             let (point, side) =
                 self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side);
             self.ctx.mouse_mut().cell_side = side;
@@ -1630,6 +1660,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::Language(_)
             | Hit::AcceptCycle
             | Hit::AcceptOption(_)
+            | Hit::CompletionStyleCycle
+            | Hit::CompletionStyleOption(_)
             | Hit::TabRevealDropdown
             | Hit::TabRevealOption(_)
             | Hit::DensityDropdown
@@ -1648,6 +1680,8 @@ fn settings_dropdown_keeps_open(hit: crate::display::SettingsHit) -> bool {
             | Hit::SshJumpHostDropdown
             | Hit::SshJumpHostOption(_)
             | Hit::BackgroundColor
+            | Hit::BackgroundSvPlane
+            | Hit::BackgroundHueBar
             | Hit::BackgroundSwatch(_)
             | Hit::BackgroundHexInput
             | Hit::BackgroundPopupPanel

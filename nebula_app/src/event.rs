@@ -371,6 +371,25 @@ impl Processor {
 
         let id = window_context.id();
         self.windows.insert(id, window_context);
+
+        // Arm the 1 Hz chrome clock / render-gate watchdog right now, before
+        // the first frame. `draw()` also (re)schedules it, but `draw()` only
+        // runs on a `RedrawRequested`, and a redraw request is gated behind
+        // `has_frame && !occluded`. If a startup occlusion misreport or a lost
+        // frame callback closes one of those gates before the first draw ever
+        // lands, the very watchdog that exists to reopen them
+        // (`unstick_render_gates_if_visible`) would never be armed — the window
+        // stays visible but frozen, repainting only after a manual
+        // minimize/restore (issues #21 and #32). Scheduling here breaks that
+        // bootstrap deadlock so recovery always happens within one tick. The
+        // interval matches the idle chrome-clock cadence, so the first `draw()`
+        // finds the timer already in place and leaves it untouched.
+        let clock_timer = TimerId::new(Topic::NebulaClock, id);
+        if !self.scheduler.scheduled(clock_timer) {
+            let tick = Event::new(EventType::NebulaTick, id);
+            self.scheduler.schedule(tick, Duration::from_secs(1), true, clock_timer);
+        }
+
         Ok(id)
     }
 
@@ -517,13 +536,16 @@ impl Processor {
                     "pane_id": pane_id
                 }))
             },
-            RuntimeCommand::NewTab { window_id } => {
+            RuntimeCommand::NewTab { window_id, cwd } => {
                 let id = self.runtime_target_window(*window_id, None)?;
-                let pane_id = self
-                    .windows
-                    .get_mut(&id)
-                    .expect("resolved runtime window exists")
-                    .runtime_new_tab()?;
+                let window = self.windows.get_mut(&id).expect("resolved runtime window exists");
+                let pane_id = window.runtime_new_tab(cwd.clone())?;
+                // 带目录的 tab.new 来自一次用户手势（Explorer 右键并入）：
+                // 把窗口带到前台，不然标签开在了别人身后。无目录的编程调用
+                // （agent/CLI）保持原来的不抢焦点语义。
+                if cwd.is_some() {
+                    window.runtime_focus(None)?;
+                }
                 self.runtime_result(serde_json::json!({
                     "window_id": u64::from(id),
                     "pane_id": pane_id
@@ -1446,10 +1468,12 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     }
 
     fn terminal_math_source_point(&self, point: Point, side: Side) -> (Point, Side) {
+        // Formula projection spans live in rendered-viewport coordinates,
+        // which can be a crop of the grid while a resize commit is pending.
         self.nebula_state.terminal_math_source_point(
             point,
             side,
-            self.terminal.grid().display_offset(),
+            self.terminal.viewport_origin_for(self.size_info().screen_lines()),
         )
     }
 
@@ -1474,8 +1498,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         } else if self.mouse.left_button_state == ElementState::Pressed
             || self.mouse.right_button_state == ElementState::Pressed
         {
-            let display_offset = self.terminal.grid().display_offset();
-            let point = self.mouse.point(&self.size_info(), display_offset);
+            let point = self.mouse.point(&self.size_info(), &*self.terminal);
             let (point, side) = self.terminal_math_source_point(point, self.mouse.cell_side);
             self.update_selection(point, side);
         }
@@ -1658,6 +1681,46 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     #[inline]
     fn nebula_take_suggestion(&mut self) -> String {
         mem::take(&mut self.nebula_state.suggestion)
+    }
+
+    #[inline]
+    fn nebula_completion_popup_active(&self) -> bool {
+        !self.nebula_state.completion_items.is_empty()
+    }
+
+    fn nebula_completion_popup_move(&mut self, delta: isize) {
+        let len = self.nebula_state.completion_items.len();
+        if len == 0 {
+            return;
+        }
+        let current = self.nebula_state.completion_selected as isize;
+        self.nebula_state.completion_selected =
+            (current + delta).rem_euclid(len as isize) as usize;
+        *self.dirty = true;
+    }
+
+    fn nebula_completion_popup_take(&mut self) -> Option<String> {
+        let state = &mut self.nebula_state;
+        let insert =
+            state.completion_items.get(state.completion_selected).map(|item| item.insert.clone());
+        state.completion_items.clear();
+        state.completion_selected = 0;
+        *self.dirty = true;
+        insert
+    }
+
+    fn nebula_completion_popup_dismiss(&mut self) -> bool {
+        let state = &mut self.nebula_state;
+        if state.completion_items.is_empty() {
+            return false;
+        }
+        // Items go, the recompute key stays: the cache guard in
+        // `nebula_update_suggestion` then keeps the list closed until the
+        // line itself changes.
+        state.completion_items.clear();
+        state.completion_selected = 0;
+        *self.dirty = true;
+        true
     }
 
     fn nebula_take_ai_fix(&mut self) -> Option<String> {
@@ -2319,8 +2382,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         };
 
         // Load mouse point, treating message bar and padding as the closest cell.
-        let display_offset = self.terminal().grid().display_offset();
-        let point = self.mouse().point(&self.size_info(), display_offset);
+        let point = self.mouse().point(&self.size_info(), self.terminal());
         let (point, cell_side) = self.terminal_math_source_point(point, self.mouse().cell_side);
 
         let selection = match &mut self.terminal_mut().selection {
@@ -2396,13 +2458,50 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         }
     }
 
+    /// 剪贴板截图转路径粘贴（无文本时的回退）。本地 pane 同步落盘临时 PNG
+    /// 直接粘；SSH pane 交给 SFTP 后台上传，路径经 runtime Prompt 通道回粘
+    /// ——期间不阻塞任何输入。
+    fn paste_clipboard_image(&mut self) -> bool {
+        let Some(png) = crate::clipboard::clipboard_image_png() else {
+            return false;
+        };
+        if let Some(destination) = self.ssh_destination {
+            crate::ssh_sftp::upload_clipboard_image(
+                destination.to_owned(),
+                png,
+                self.pane_id,
+                self.event_proxy.clone(),
+            );
+            return true;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("nebula-paste-{stamp}.png"));
+        if std::fs::write(&path, &png).is_err() {
+            return false;
+        }
+        self.paste(&path.display().to_string(), true);
+        true
+    }
+
     /// Paste a text into the terminal.
     fn paste(&mut self, text: &str, bracketed: bool) {
-        // Multi-line paste confirmation (#18): anything with a newline would
-        // start executing in most shells the moment it lands. Search and
-        // pending-char inputs are exempt (they consume text locally).
+        // Multi-line paste confirmation (#18): a newline heading to a bare
+        // shell starts executing the moment it lands. But an app in
+        // bracketed-paste mode — codex, vim, a REPL, modern PSReadLine —
+        // receives the whole paste as one chunk (wrapped below in
+        // `\x1b[200~`…`\x1b[201~`) and decides what to do with the newlines
+        // itself, so it is *not* executed line by line and the warning both
+        // misleads and gets in the way (#35). Confirm only for the genuinely
+        // dangerous case: newlines going to a shell that is not bracketing.
+        // Search and pending-char inputs are exempt (they consume text
+        // locally).
         let goes_to_pty = !self.search_active() && !self.inline_search_state.char_pending;
+        let bracketing = bracketed && self.terminal().mode().contains(TermMode::BRACKETED_PASTE);
         if goes_to_pty
+            && !bracketing
             && self.display.nebula_confirm.is_none()
             && (text.contains('\n') || text.contains('\r'))
         {
@@ -3040,6 +3139,9 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // names it, and reading the field after the reset used
                         // to hand the toast a permanent `None`.
                         let program = self.ctx.nebula_state.running_program.take();
+                        // CLI 退回提示符，对话不再是这个 pane 的前台事实；
+                        // 留着它，快照会把一个已经退出的会话当活的接续。
+                        self.ctx.nebula_state.ai_session = None;
                         let pending_ssh = self.ctx.nebula_state.pending_ssh_host.take();
                         self.ctx.nebula_state.awaiting_input = false;
                         // 助手错误恢复（spec 001）：Nebula 集成上报的退出码
@@ -3142,6 +3244,17 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
 
                         // Ring visual bell.
                         self.ctx.display.visual_bell.ring();
+
+                        // Audible bell. AI CLIs ring BEL when a turn ends or
+                        // they need input, so this is the "needs you" sound
+                        // even with Nebula focused on another tab — the toast
+                        // above only fires when the window is unfocused, and
+                        // the visual bell is invisible from another tab.
+                        // Plays regardless of focus; `platform::beep` throttles
+                        // so a looping BEL cannot machine-gun it.
+                        if self.ctx.config.bell.audible {
+                            crate::platform::beep();
+                        }
 
                         // Execute bell command.
                         if let Some(bell_command) = &self.ctx.config.bell.command {

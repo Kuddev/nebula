@@ -540,6 +540,47 @@ async fn upload_local_paths(
     Ok(())
 }
 
+/// 剪贴板截图 → 远端 `/tmp` 的一次性 PNG 上传（SSH pane 的图片粘贴，
+/// Netcatty 同款交互）。成功后经 runtime Prompt 通道把远端路径作为输入敲进
+/// 目标 pane——上传在 SSH runtime 上异步进行，UI 线程零阻塞；失败只留日志，
+/// 绝不把错误文本粘进终端。
+pub fn upload_clipboard_image(
+    destination: String,
+    png: Vec<u8>,
+    pane_id: u64,
+    proxy: EventLoopProxy<Event>,
+) {
+    let Ok(runtime) = crate::ssh_session::runtime() else {
+        return;
+    };
+    runtime.spawn(async move {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0);
+        // `/tmp` 而不是远端 cwd：绝对路径对 codex/claude 一样可读，且不往
+        // 用户的项目目录里排泄粘贴产物；`~` 需要展开，这里没有 shell。
+        let remote = format!("/tmp/nebula-paste-{stamp}.png");
+        let result = async {
+            let sftp = crate::ssh_session::open_sftp(&destination).await?;
+            let mut file = sftp
+                .open_with_flags(
+                    remote.clone(),
+                    OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+                )
+                .await?;
+            file.write_all(&png).await?;
+            file.shutdown().await?;
+            Ok::<_, SftpError>(())
+        }
+        .await;
+        match result {
+            Ok(()) => crate::runtime_api::dispatch_prompt(&proxy, pane_id, remote),
+            Err(err) => log::warn!("剪贴板图片上传失败（{destination}）: {err}"),
+        }
+    });
+}
+
 async fn upload_file_atomic(
     sftp: &SftpSession,
     local: &Path,

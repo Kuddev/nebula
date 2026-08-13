@@ -28,7 +28,7 @@ use super::keymap;
 use super::ui::theme::Skin;
 use super::ui::{icons, os_icons, surface, text_field, tokens, widgets};
 use super::{
-    AcceptKey, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
+    AcceptKey, CompletionStyle, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
     chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label,
 };
 
@@ -124,6 +124,7 @@ pub enum SettingsDropdown {
     BackgroundAlignment,
     Language,
     Accept,
+    CompletionStyle,
     CursorShape,
     TabReveal,
     /// 代理：SSH 连接代理模式（关闭/系统/自定义）。
@@ -181,6 +182,9 @@ pub(super) const LANGUAGE_OPTIONS: [LanguagePreference; 3] =
 
 pub(super) const ACCEPT_OPTIONS: [AcceptKey; 3] =
     [AcceptKey::Both, AcceptKey::Tab, AcceptKey::Right];
+
+pub(super) const COMPLETION_STYLE_OPTIONS: [CompletionStyle; 2] =
+    [CompletionStyle::Inline, CompletionStyle::Popup];
 
 pub(super) const TAB_REVEAL_OPTIONS: [TabRevealMotion; 2] =
     [TabRevealMotion::Slide, TabRevealMotion::Instant];
@@ -488,6 +492,13 @@ fn accept_label(accept: AcceptKey, language: UiLanguage) -> &'static str {
     }
 }
 
+fn completion_style_label(style: CompletionStyle, language: UiLanguage) -> &'static str {
+    match style {
+        CompletionStyle::Inline => language.pick("行内灰字", "Inline ghost"),
+        CompletionStyle::Popup => language.pick("弹窗列表", "Popup list"),
+    }
+}
+
 fn language_label(preference: LanguagePreference, language: UiLanguage) -> &'static str {
     match preference {
         LanguagePreference::System => language.pick("跟随系统", "Follow system"),
@@ -508,6 +519,9 @@ pub enum SettingsHit {
     SystemThemeToggle,
     GhostToggle,
     AcceptCycle,
+    /// Completion style combobox trigger + its expanded option rows.
+    CompletionStyleCycle,
+    CompletionStyleOption(usize),
     ShellCycle,
     StartupDirectory,
     StartupDirectoryClear,
@@ -555,8 +569,9 @@ pub enum SettingsHit {
     SshHostConnect(usize),
     /// SSH settings page: edit a saved destination.
     SshHostEdit(usize),
-    /// SSH settings page: hide a destination without editing ~/.ssh/config.
-    SshHostHide(usize),
+    /// SSH settings page: delete a saved destination (config aliases are
+    /// hidden instead — Nebula never edits ~/.ssh/config).
+    SshHostDelete(usize),
     /// SSH settings page: re-read ~/.ssh/config immediately.
     SshImportConfig,
     /// SSH settings page: open the existing SSH editor for a new host.
@@ -577,6 +592,10 @@ pub enum SettingsHit {
     BlurToggle,
     OpacitySlider,
     BackgroundColor,
+    /// 背景色浮层：真调色盘的饱和度/明度面（按下开始拖拽取色）。
+    BackgroundSvPlane,
+    /// 背景色浮层：色相横条。
+    BackgroundHueBar,
     /// 背景色浮层：色板网格里的一格。
     BackgroundSwatch(usize),
     /// 背景色浮层：16 进制输入框。
@@ -596,6 +615,8 @@ pub enum SettingsHit {
     KeepSessionToggle,
     /// 高级: 启动时恢复上次会话（也是崩溃恢复的总开关）。
     RestoreSessionToggle,
+    /// 高级: 冷恢复时自动接续各 pane 里的 AI 对话（claude/codex resume）。
+    ResumeAiToggle,
     /// 高级→同步: 输入框（0=url 1=用户名 2=WebDAV 密码 3=E2E 口令）。
     SyncInput(usize),
     SyncAutoPullToggle,
@@ -636,7 +657,7 @@ pub enum SettingsHit {
 /// Stable animation slots for the settings switches. Rendering and the shared
 /// motion clock both use this mapping, so one switch can never borrow another
 /// switch's thumb position while the pointer moves between rows.
-pub(super) const SETTINGS_TOGGLE_COUNT: usize = 15;
+pub(super) const SETTINGS_TOGGLE_COUNT: usize = 16;
 
 pub(super) fn settings_toggle_slot(hit: SettingsHit) -> Option<usize> {
     Some(match hit {
@@ -655,6 +676,8 @@ pub(super) fn settings_toggle_slot(hit: SettingsHit) -> Option<usize> {
         SettingsHit::BackgroundImageCoverChrome => 12,
         SettingsHit::ProviderCodexGoalsToggle => 13,
         SettingsHit::ProviderCodexRemoteToggle => 14,
+        // 追加在尾部：槽位是稳定映射，重排会让开关借走彼此的动画状态。
+        SettingsHit::ResumeAiToggle => 15,
         _ => return None,
     })
 }
@@ -665,6 +688,8 @@ pub(super) struct NebulaRuntimeSettings {
     pub(super) language: LanguagePreference,
     pub(super) ghost: bool,
     pub(super) accept: AcceptKey,
+    /// Inline ghost remainder vs popup candidate list.
+    pub(super) completion_style: CompletionStyle,
     pub(super) shell: NebulaShell,
     /// Raw default-shell id (`shell=<id>`), when the user picked a detected
     /// shell the 2-value `shell` enum can't represent (cmd, pwsh, nushell, a
@@ -699,6 +724,8 @@ pub(super) struct NebulaRuntimeSettings {
     pub(super) keep_session: bool,
     /// 高级·会话：启动时恢复上次的标签。
     pub(super) restore_session: bool,
+    /// 高级·会话：冷恢复时自动接续各 pane 的 AI 对话（claude/codex resume）。
+    pub(super) resume_ai: bool,
     /// 窗口背景模糊。Windows 11 上是 Mica（见
     /// `display::window::apply_windows_backdrop`），macOS / Wayland 上走
     /// winit 自己的实现。默认开：纯 alpha 会让背景的高频细节直接透上来压在
@@ -761,6 +788,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         language: LanguagePreference::System,
         ghost: true,
         accept: AcceptKey::Both,
+        completion_style: CompletionStyle::Inline,
         shell: NebulaShell::PowerShell,
         shell_id: None,
         startup_directory: None,
@@ -784,6 +812,9 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         // which reads as "the app didn't really exit" — opt IN, not out.
         keep_session: false,
         restore_session: true,
+        // 默认开：恢复布局却丢下正聊到一半的对话，等于只恢复了一半现场。
+        // 关掉它仍恢复标签/分屏/目录，只是不再敲 resume。
+        resume_ai: true,
         // 2026-07-31 用户裁定：默认开。纯 alpha 下背景的高频细节压着文字，
         // 那正是"透明度调低就看不清"的物理来源；模糊把它拍成低频色块。想
         // 真透出后面窗口内容的人可以关掉。
@@ -829,6 +860,11 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("accept", "right")) => settings.accept = AcceptKey::Right,
                 Some(("accept", "tab")) => settings.accept = AcceptKey::Tab,
                 Some(("accept", "both")) => settings.accept = AcceptKey::Both,
+                Some(("completion_style", v)) => {
+                    if let Some(style) = CompletionStyle::from_settings(v) {
+                        settings.completion_style = style;
+                    }
+                },
                 Some(("shell" | "executor", v)) => {
                     let v = v.trim();
                     if let Some(shell) = NebulaShell::from_settings(v) {
@@ -883,6 +919,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("powerline", v)) => settings.powerline = parse_bool(v, true),
                 Some(("keep_session", v)) => settings.keep_session = parse_bool(v, false),
                 Some(("restore_session", v)) => settings.restore_session = parse_bool(v, true),
+                Some(("resume_ai", v)) => settings.resume_ai = parse_bool(v, true),
                 Some(("panel_resize", v)) => settings.panel_resize = parse_bool(v, false),
                 Some(("sidebar_w", v)) => {
                     if let Ok(w) = v.trim().parse::<f32>() {
@@ -1067,6 +1104,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         AcceptKey::Tab => "tab",
         AcceptKey::Both => "both",
     };
+    let completion_style = settings.completion_style.settings_value();
     let background = settings.background.map(format_hex_rgb).unwrap_or_default();
     let background_image = settings.background_image.as_deref().unwrap_or("");
     // A picked detected-shell id (cmd/pwsh/nu/wsl:X) is written verbatim; the
@@ -1095,8 +1133,8 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let _ = std::fs::write(
         path,
         format!(
-            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nssh_proxy_mode={ssh_proxy_mode}\nssh_proxy_url={ssh_proxy_url}\nssh_proxy_no_proxy={ssh_proxy_no_proxy}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\ncompletion_style={completion_style}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
+tab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nresume_ai={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nssh_proxy_mode={ssh_proxy_mode}\nssh_proxy_url={ssh_proxy_url}\nssh_proxy_no_proxy={ssh_proxy_no_proxy}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -1113,6 +1151,7 @@ tab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npo
             settings.powerline as u8,
             settings.keep_session as u8,
             settings.restore_session as u8,
+            settings.resume_ai as u8,
             settings.blur as u8,
             settings.opacity,
             settings.background_image_opacity,
@@ -1158,6 +1197,7 @@ struct SettingsGeometry {
     powerline: (f32, f32, f32, f32),
     ghost: (f32, f32, f32, f32),
     accept: (f32, f32, f32, f32),
+    completion_style: (f32, f32, f32, f32),
     open_config_file: (f32, f32, f32, f32),
     terminal_import: (f32, f32, f32, f32),
     ssh_host_row0: (f32, f32, f32, f32),
@@ -1236,6 +1276,8 @@ struct SettingsGeometry {
     keep_session: (f32, f32, f32, f32),
     /// 高级·会话：启动时恢复上次的标签（崩溃/强杀后同样走这条路）。
     restore_session: (f32, f32, f32, f32),
+    /// 高级·会话：冷恢复自动接续 AI 对话。
+    resume_ai: (f32, f32, f32, f32),
     /// 网络页：主模式仍是下拉框；指定代理分支按 HTML 原型排成扫描标题、
     /// 一张连续列表卡、选中项展开、绕过列表与每主机覆盖。
     ssh_proxy_mode: (f32, f32, f32, f32),
@@ -1269,7 +1311,7 @@ fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
 }
 
 fn advanced_content_end(advanced_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
-    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + 2.0 * row_h }
+    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + 3.0 * row_h }
 }
 
 /// Max scroll offset for `section` at the current window size. The input
@@ -1479,7 +1521,7 @@ fn settings_geometry(
     let startup_directory_y0 = terminal_import_y0 + ROW_H;
     let font_y0 = startup_directory_y0 + ROW_H;
     let ghost_y0 = font_y0 + ROW_H + GROUP_ADVANCE;
-    let open_y0 = ghost_y0 + 2.0 * ROW_H + GROUP_ADVANCE;
+    let open_y0 = ghost_y0 + 3.0 * ROW_H + GROUP_ADVANCE;
     let profiles_h = s(open_y0 + ROW_H + 32.0 - 72.0);
 
     // AI providers intentionally use a denser list + editor flow inspired by
@@ -1584,7 +1626,8 @@ fn settings_geometry(
     let advanced_y0 = 146.0;
     let keep_session = (row_x, at(advanced_y0), row_w, row_h);
     let restore_session = (row_x, at(advanced_y0 + ROW_H), row_w, row_h);
-    let sync_y0 = advanced_y0 + ROW_H * 2.0 + GROUP_ADVANCE;
+    let resume_ai = (row_x, at(advanced_y0 + ROW_H * 2.0), row_w, row_h);
+    let sync_y0 = advanced_y0 + ROW_H * 3.0 + GROUP_ADVANCE;
     let sync_row = |i: f32| (row_x, at(sync_y0 + i * ROW_H), row_w, row_h);
     let sync_rows = [sync_row(0.0), sync_row(1.0), sync_row(2.0), sync_row(3.0)];
     let sync_auto_pull = sync_row(4.0);
@@ -1728,6 +1771,7 @@ fn settings_geometry(
         powerline: (row_x, at(terminal_appearance_y0 + 3.0 * ROW_H), row_w, row_h),
         ghost: (row_x, at(ghost_y0), row_w, row_h),
         accept: (row_x, at(ghost_y0 + ROW_H), row_w, row_h),
+        completion_style: (row_x, at(ghost_y0 + 2.0 * ROW_H), row_w, row_h),
         open_config_file: (row_x, at(open_y0), row_w, row_h),
         terminal_import: (row_x, at(terminal_import_y0), row_w, row_h),
         ssh_host_row0,
@@ -1779,6 +1823,7 @@ fn settings_geometry(
         advanced_h,
         keep_session,
         restore_session,
+        resume_ai,
         ssh_proxy_mode,
         ssh_proxy_scan_head,
         ssh_proxy_scan_button,
@@ -1853,11 +1898,36 @@ pub(crate) fn opacity_from_pointer(pointer_x: f32, slider: (f32, f32, f32, f32))
     ((pointer_x - slider.0) / slider.2.max(1.0)).clamp(0.0, 1.0)
 }
 
+/// 调色盘拖拽要用的 SV 面与色相条矩形。与 `opacity_slider_rect` 同款：
+/// 外观页几何不依赖 shell/font/proxy/keymap 状态，默认值重建即可，绘制、
+/// 命中与拖拽三方共用同一几何来源。
+pub(crate) fn background_color_picker_rects(
+    size_info: &SizeInfo,
+    scale_factor: f32,
+    area: (f32, f32, f32, f32),
+    scroll: f32,
+    density: super::ui::tokens::Density,
+) -> ((f32, f32, f32, f32), (f32, f32, f32, f32)) {
+    let geometry = settings_geometry(
+        size_info,
+        scale_factor,
+        area,
+        scroll,
+        0,
+        0,
+        density,
+        ProxyPaneState::default(),
+        KeymapPaneState::default(),
+    );
+    let popup = background_color_popup(&geometry, scale_factor);
+    (popup.sv, popup.hue)
+}
+
 /// 主机行右缘的动作槽。绘制与命中共用这一处推导，是"看得见的按钮点不中"的
 /// 唯一防线。
 ///
 /// 2026-08-11 对齐原型：**主动作「连接」是文字按钮**（白底+描边+"连接"二字），
-/// 编辑/隐藏是方形图标槽。原型里唯一带底的就是主动作——一行五个等价图标会让
+/// 编辑/删除是方形图标槽。原型里唯一带底的就是主动作——一行五个等价图标会让
 /// 人逐个悬停去猜哪个是"进去"，文字消掉这次猜测。三个槽都只在 hover 时显形，
 /// 静态那一行只剩身份信息。命中区比墨迹宽，指针容差不被视觉尺寸绑死。
 fn ssh_host_action_rect(
@@ -1871,7 +1941,7 @@ fn ssh_host_action_rect(
     let right = x + w - s(14.0);
     let slot = s(26.0).min((h - s(10.0)).max(s(18.0)));
     let connect_w = s(52.0);
-    // 从右往左排：隐藏、编辑、连接。连接最宽，所以单独算。
+    // 从右往左排：删除、编辑、连接。连接最宽，所以单独算。
     match action {
         2 => {
             let bx = right - slot;
@@ -1937,10 +2007,15 @@ pub(super) fn appearance_preview_wallpaper_rects(
 /// The combobox anchor rect + option count for `dropdown`, IF it belongs to
 /// the active section. Hit-testing, popup quads and popup text all resolve
 /// the floating list through this one helper so the three can never disagree.
-/// 背景色浮层的几何：面板矩形、12 个色板格、16 进制输入框。绘制与命中
-/// 测试共用这一个来源（组件化范式：几何同源，控件与点击区不漂移）。
+/// 背景色浮层的几何：真调色盘（SV 面 + 色相条）、12 个预设色板格、16 进制
+/// 输入框。绘制与命中测试共用这一个来源（组件化范式：几何同源，控件与
+/// 点击区不漂移）。
 pub(super) struct BackgroundColorPopup {
     pub(super) rect: (f32, f32, f32, f32),
+    /// 饱和度（→右增）/ 明度（→下减）取色面，底色跟随当前色相。
+    pub(super) sv: (f32, f32, f32, f32),
+    /// 色相横条（0–360°）。
+    pub(super) hue: (f32, f32, f32, f32),
     pub(super) swatch: [(f32, f32, f32, f32); 12],
     pub(super) hex: (f32, f32, f32, f32),
 }
@@ -1957,21 +2032,75 @@ pub(super) fn background_color_popup(
     let pad = s(12.0);
     let grid_w = COLS as f32 * cell + (COLS - 1) as f32 * gap;
     let grid_h = 2.0 * cell + gap;
+    let sv_h = s(128.0);
+    let hue_h = s(14.0);
     let hex_h = s(34.0);
     let w = (grid_w + 2.0 * pad).max(aw);
-    let h = pad + grid_h + gap + hex_h + pad;
+    let h = pad + sv_h + gap + hue_h + gap + grid_h + gap + hex_h + pad;
     // 与 combobox 浮层同规则：锚行右缘对齐，紧贴行下方展开。
     let x = ax + aw - w;
     let y = ay + ah + s(6.0);
+    let sv = (x + pad, y + pad, w - 2.0 * pad, sv_h);
+    let hue = (x + pad, y + pad + sv_h + gap, w - 2.0 * pad, hue_h);
+    let grid_y = y + pad + sv_h + gap + hue_h + gap;
     let mut swatch = [(0.0, 0.0, 0.0, 0.0); 12];
     for (i, rect) in swatch.iter_mut().enumerate() {
         let row = i / COLS;
         let col = i % COLS;
         *rect =
-            (x + pad + col as f32 * (cell + gap), y + pad + row as f32 * (cell + gap), cell, cell);
+            (x + pad + col as f32 * (cell + gap), grid_y + row as f32 * (cell + gap), cell, cell);
     }
-    let hex = (x + pad, y + pad + grid_h + gap, w - 2.0 * pad, hex_h);
-    BackgroundColorPopup { rect: (x, y, w, h), swatch, hex }
+    let hex = (x + pad, grid_y + grid_h + gap, w - 2.0 * pad, hex_h);
+    BackgroundColorPopup { rect: (x, y, w, h), sv, hue, swatch, hex }
+}
+
+/// HSV → RGB。`h` 度（任意实数，内部归一到 [0,360)），`s`/`v` ∈ [0,1]。
+pub(crate) fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Rgb {
+    let h = h.rem_euclid(360.0);
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h {
+        _ if h < 60.0 => (c, x, 0.0),
+        _ if h < 120.0 => (x, c, 0.0),
+        _ if h < 180.0 => (0.0, c, x),
+        _ if h < 240.0 => (0.0, x, c),
+        _ if h < 300.0 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let to = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Rgb::new(to(r), to(g), to(b))
+}
+
+/// RGB → HSV。灰色（s = 0）时 h 报 0；调用方要在拖动中保住既有色相，
+/// 别用本函数的返回覆盖它（见 `Display::open_background_color_picker`）。
+pub(crate) fn rgb_to_hsv(color: Rgb) -> (f32, f32, f32) {
+    let r = color.r as f32 / 255.0;
+    let g = color.g as f32 / 255.0;
+    let b = color.b as f32 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let h = if delta <= f32::EPSILON {
+        0.0
+    } else if max == r {
+        60.0 * (((g - b) / delta).rem_euclid(6.0))
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    let s = if max <= f32::EPSILON { 0.0 } else { delta / max };
+    (h, s, max)
+}
+
+/// 调色盘拖拽的目标部件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgPickerPart {
+    Sv,
+    Hue,
 }
 
 /// 字体弹层的总行数：候选行 + 顶部那个搜索框。
@@ -2032,6 +2161,9 @@ fn dropdown_anchor(
         },
         (Section::Profiles, SettingsDropdown::Accept) => {
             Some((anchor(geometry.accept), ACCEPT_OPTIONS.len()))
+        },
+        (Section::Profiles, SettingsDropdown::CompletionStyle) => {
+            Some((anchor(geometry.completion_style), COMPLETION_STYLE_OPTIONS.len()))
         },
         (Section::Appearance, SettingsDropdown::CellWidthMode) => {
             Some((anchor(geometry.cell_width_mode), CELL_WIDTH_MODE_OPTIONS.len()))
@@ -2316,6 +2448,12 @@ pub fn settings_hit(
         if dropdown == SettingsDropdown::BackgroundColor {
             if section == NebulaSettingsSection::Appearance {
                 let popup = background_color_popup(&geometry, scale_factor);
+                if contains_rect(popup.sv, x, y) {
+                    return SettingsHit::BackgroundSvPlane;
+                }
+                if contains_rect(popup.hue, x, y) {
+                    return SettingsHit::BackgroundHueBar;
+                }
                 for (index, rect) in popup.swatch.iter().enumerate() {
                     if contains_rect(*rect, x, y) {
                         return SettingsHit::BackgroundSwatch(index);
@@ -2359,6 +2497,7 @@ pub fn settings_hit(
                     SettingsDropdown::BackgroundAlignment => SettingsHit::AlignOption(index),
                     SettingsDropdown::Language => SettingsHit::Language(LANGUAGE_OPTIONS[index]),
                     SettingsDropdown::Accept => SettingsHit::AcceptOption(index),
+                    SettingsDropdown::CompletionStyle => SettingsHit::CompletionStyleOption(index),
                     SettingsDropdown::TabReveal => SettingsHit::TabRevealOption(index),
                     SettingsDropdown::Density => SettingsHit::DensityOption(index),
                     SettingsDropdown::NewTabPosition => SettingsHit::NewTabPositionOption(index),
@@ -2522,6 +2661,13 @@ pub fn settings_hit(
                     return SettingsHit::AcceptCycle;
                 }
                 if contains_rect(
+                    widgets::combobox_rect(geometry.completion_style, scale_factor),
+                    x,
+                    y,
+                ) {
+                    return SettingsHit::CompletionStyleCycle;
+                }
+                if contains_rect(
                     row_action_rect(geometry.open_config_file, scale_factor, STANDARD_ROW_ACTION_W),
                     x,
                     y,
@@ -2599,7 +2745,7 @@ pub fn settings_hit(
                         return SettingsHit::SshHostEdit(index);
                     }
                     if contains_rect(ssh_host_action_rect(row, scale_factor, 2), x, y) {
-                        return SettingsHit::SshHostHide(index);
+                        return SettingsHit::SshHostDelete(index);
                     }
                     // 三枚图标之后才轮到行本体，顺序反了图标就永远拿不到命中。
                     if contains_rect(row, x, y) {
@@ -2702,6 +2848,9 @@ pub fn settings_hit(
                 {
                     return SettingsHit::RestoreSessionToggle;
                 }
+                if contains_rect(widgets::toggle_rect(geometry.resume_ai, scale_factor), x, y) {
+                    return SettingsHit::ResumeAiToggle;
+                }
                 if SHOW_WEBDAV_SYNC_SETTINGS {
                     for (index, rect) in geometry.sync_rows.iter().enumerate() {
                         // 命中整行都算输入框：行左侧是它的 label，点标签聚焦
@@ -2780,6 +2929,7 @@ pub(super) struct SettingsView {
     pub(super) follow_system_theme: bool,
     pub(super) ghost: bool,
     pub(super) accept: AcceptKey,
+    pub(super) completion_style: CompletionStyle,
     /// Pre-rendered "默认 Shell" value (icon + name) — resolved by `Display`
     /// from the rich `shell_id` when set, else the 2-value enum label.
     pub(super) shell_label: String,
@@ -2824,6 +2974,8 @@ pub(super) struct SettingsView {
     pub(super) keep_session: bool,
     /// 高级·会话：启动时恢复上次的标签。
     pub(super) restore_session: bool,
+    /// 高级·会话：冷恢复自动接续 AI 对话。
+    pub(super) resume_ai: bool,
     pub(super) blur: bool,
     pub(super) opacity: f32,
     /// Which opacity slider is mid-drag, for thumb-dot grow feedback.
@@ -2846,6 +2998,9 @@ pub(super) struct SettingsView {
     /// 背景色浮层的 16 进制草稿（形如 `#0A0C18`）与输入聚焦态。
     pub(super) bg_hex_input: String,
     pub(super) bg_hex_active: bool,
+    /// 调色盘草稿 HSV（打开浮层时从生效色初始化；拖动期间是唯一权威，
+    /// 灰色/黑白下的色相不会因 RGB 往返而丢失）。
+    pub(super) bg_picker_hsv: (f32, f32, f32),
     pub(super) background_image: Option<String>,
     pub(super) background_image_opacity: f32,
     pub(super) background_image_fit: BackgroundImageFit,
@@ -3245,6 +3400,9 @@ fn dropdown_selected_index(view: &SettingsView, dropdown: SettingsDropdown) -> O
             LANGUAGE_OPTIONS.iter().position(|preference| *preference == view.language_preference)
         },
         SettingsDropdown::Accept => ACCEPT_OPTIONS.iter().position(|key| *key == view.accept),
+        SettingsDropdown::CompletionStyle => {
+            COMPLETION_STYLE_OPTIONS.iter().position(|style| *style == view.completion_style)
+        },
         SettingsDropdown::TabReveal => {
             TAB_REVEAL_OPTIONS.iter().position(|motion| *motion == view.tab_reveal)
         },
@@ -3282,6 +3440,9 @@ fn dropdown_hover_index(hover: SettingsHit, dropdown: SettingsDropdown) -> Optio
             LANGUAGE_OPTIONS.iter().position(|option| *option == preference)
         },
         (SettingsDropdown::Accept, SettingsHit::AcceptOption(index)) => Some(index),
+        (SettingsDropdown::CompletionStyle, SettingsHit::CompletionStyleOption(index)) => {
+            Some(index)
+        },
         (SettingsDropdown::TabReveal, SettingsHit::TabRevealOption(index)) => Some(index),
         (SettingsDropdown::Density, SettingsHit::DensityOption(index)) => Some(index),
         (SettingsDropdown::NewTabPosition, SettingsHit::NewTabPositionOption(index)) => Some(index),
@@ -3843,7 +4004,7 @@ pub(super) fn push_quads(
             group_frame(quads, geometry.shell, 2);
             group_frame(quads, geometry.startup_directory, 1);
             group_frame(quads, geometry.font, 1);
-            group_frame(quads, geometry.ghost, 2);
+            group_frame(quads, geometry.ghost, 3);
             group_frame(quads, geometry.open_config_file, 1);
             for (hit, rect) in [
                 (SettingsHit::ShellCycle, geometry.shell),
@@ -3852,6 +4013,7 @@ pub(super) fn push_quads(
                 (SettingsHit::FontCycle, geometry.font),
                 (SettingsHit::GhostToggle, geometry.ghost),
                 (SettingsHit::AcceptCycle, geometry.accept),
+                (SettingsHit::CompletionStyleCycle, geometry.completion_style),
                 (SettingsHit::OpenConfigFile, geometry.open_config_file),
             ] {
                 row_hover(quads, rect, view.hover == hit);
@@ -3895,6 +4057,13 @@ pub(super) fn push_quads(
                 geometry.accept,
                 view.hover == SettingsHit::AcceptCycle,
                 view.dropdown == Some(SettingsDropdown::Accept),
+            );
+            combobox(
+                quads,
+                &mut staged,
+                geometry.completion_style,
+                view.hover == SettingsHit::CompletionStyleCycle,
+                view.dropdown == Some(SettingsDropdown::CompletionStyle),
             );
             // Boolean rows render a real switch instead of an "On/Off" string.
             for (rect, on) in [(geometry.ghost, view.ghost)] {
@@ -4031,7 +4200,7 @@ pub(super) fn push_quads(
                     SettingsHit::SshHostRow(i)
                         | SettingsHit::SshHostConnect(i)
                         | SettingsHit::SshHostEdit(i)
-                        | SettingsHit::SshHostHide(i)
+                        | SettingsHit::SshHostDelete(i)
                         if i == index
                 );
                 if row_hovered {
@@ -4060,13 +4229,16 @@ pub(super) fn push_quads(
                     }
                     // 次级动作用图标，挖空色取图标脚下的实际底色——半透明的
                     // hover wash 叠起来若用错基色，眼睛的瞳孔周围会留一圈脏边。
-                    for (action, icon) in
-                        [(1usize, icons::RowActionIcon::Edit), (2usize, icons::RowActionIcon::Hide)]
-                    {
+                    // 第三槽是真删除（带确认 + 撤销），不再伪装成"隐藏"眼睛：
+                    // 用户找的是删除，config 别名的差异由确认弹窗的文案说明。
+                    for (action, icon) in [
+                        (1usize, icons::RowActionIcon::Edit),
+                        (2usize, icons::RowActionIcon::Delete),
+                    ] {
                         let rect = ssh_host_action_rect(row, scale, action);
                         let icon_hovered = match (action, view.hover) {
                             (1, SettingsHit::SshHostEdit(i)) => i == index,
-                            (2, SettingsHit::SshHostHide(i)) => i == index,
+                            (2, SettingsHit::SshHostDelete(i)) => i == index,
                             _ => false,
                         };
                         let (ink, cutout) = if icon_hovered {
@@ -4461,7 +4633,7 @@ pub(super) fn push_quads(
             }
         },
         NebulaSettingsSection::Advanced => {
-            group_frame(quads, geometry.keep_session, 2);
+            group_frame(quads, geometry.keep_session, 3);
             row_hover(quads, geometry.keep_session, view.hover == SettingsHit::KeepSessionToggle);
             toggle(
                 quads,
@@ -4485,6 +4657,16 @@ pub(super) fn push_quads(
                 view.restore_session,
                 view.hover == SettingsHit::RestoreSessionToggle,
                 view.pressed == SettingsHit::RestoreSessionToggle,
+            );
+            row_hover(quads, geometry.resume_ai, view.hover == SettingsHit::ResumeAiToggle);
+            toggle(
+                quads,
+                &mut staged,
+                geometry.resume_ai,
+                SettingsHit::ResumeAiToggle,
+                view.resume_ai,
+                view.hover == SettingsHit::ResumeAiToggle,
+                view.pressed == SettingsHit::ResumeAiToggle,
             );
 
             if SHOW_WEBDAV_SYNC_SETTINGS {
@@ -4785,6 +4967,102 @@ pub(super) fn push_popup_quads(
         quads.push(UiQuad::solid(px2, py2, pw2, ph2, s(10.0), plate));
         quads.push(UiQuad::solid(px2, py2, pw2, ph2, s(10.0), sk.surface));
 
+        // ---- 真调色盘：SV 取色面 + 色相条 ----
+        // 连续渐变用小色块阵列近似：UiQuad 只有纯色，24×16 的格阵在
+        // 128px 高的面上每格 ~8px，肉眼已无明显色带；总量 ~400 quad，
+        // 相对设置页整体的 quad 预算可忽略。
+        let (h0, s0, v0) = view.bg_picker_hsv;
+        let (svx, svy, svw, svh) = popup.sv;
+        surface::push_stroke(quads, popup.sv, tokens::radius::CHIP * scale, scale, sk.hairline);
+        const SV_COLS: usize = 24;
+        const SV_ROWS: usize = 16;
+        let cell_w = svw / SV_COLS as f32;
+        let cell_h = svh / SV_ROWS as f32;
+        for row in 0..SV_ROWS {
+            for col in 0..SV_COLS {
+                // 格中心取样：边缘格也能到达 s/v 的 0 和 1 近旁。
+                let sat = (col as f32 + 0.5) / SV_COLS as f32;
+                let val = 1.0 - (row as f32 + 0.5) / SV_ROWS as f32;
+                let c = hsv_to_rgb(h0, sat, val);
+                quads.push(UiQuad::solid(
+                    svx + col as f32 * cell_w,
+                    svy + row as f32 * cell_h,
+                    cell_w + 0.5,
+                    cell_h + 0.5,
+                    0.0,
+                    Rgba::new(c.r, c.g, c.b, 255),
+                ));
+            }
+        }
+        // 当前取点：白环 + 黑环双圈，在亮暗底上都可见。
+        let dot_x = svx + s0.clamp(0.0, 1.0) * svw;
+        let dot_y = svy + (1.0 - v0.clamp(0.0, 1.0)) * svh;
+        let dot_r = s(6.0);
+        quads.push(UiQuad::solid(
+            dot_x - dot_r,
+            dot_y - dot_r,
+            dot_r * 2.0,
+            dot_r * 2.0,
+            dot_r,
+            Rgba::new(255, 255, 255, 255),
+        ));
+        quads.push(UiQuad::solid(
+            dot_x - dot_r + s(1.5),
+            dot_y - dot_r + s(1.5),
+            (dot_r - s(1.5)) * 2.0,
+            (dot_r - s(1.5)) * 2.0,
+            dot_r - s(1.5),
+            Rgba::new(0, 0, 0, 200),
+        ));
+        let picked = hsv_to_rgb(h0, s0, v0);
+        quads.push(UiQuad::solid(
+            dot_x - dot_r + s(3.0),
+            dot_y - dot_r + s(3.0),
+            (dot_r - s(3.0)) * 2.0,
+            (dot_r - s(3.0)) * 2.0,
+            dot_r - s(3.0),
+            Rgba::new(picked.r, picked.g, picked.b, 255),
+        ));
+
+        // 色相条：36 段近似 0–360°，游标为竖向双色线。
+        let (hux, huy, huw, huh) = popup.hue;
+        surface::push_stroke(quads, popup.hue, tokens::radius::CHIP * scale, scale, sk.hairline);
+        const HUE_STEPS: usize = 36;
+        let hue_w = huw / HUE_STEPS as f32;
+        for step in 0..HUE_STEPS {
+            let hue = (step as f32 + 0.5) / HUE_STEPS as f32 * 360.0;
+            let c = hsv_to_rgb(hue, 1.0, 1.0);
+            quads.push(UiQuad::solid(
+                hux + step as f32 * hue_w,
+                huy,
+                hue_w + 0.5,
+                huh,
+                0.0,
+                Rgba::new(c.r, c.g, c.b, 255),
+            ));
+        }
+        // 游标：白底黑芯的胶囊竖线，在任意色相段上都可见。圆角从自身宽度
+        // 派生（胶囊），不是阶梯常量。
+        let cursor_x = hux + (h0.rem_euclid(360.0) / 360.0) * huw;
+        let cursor_outer = s(4.0);
+        let cursor_inner = s(2.0);
+        quads.push(UiQuad::solid(
+            cursor_x - cursor_outer * 0.5,
+            huy - cursor_inner,
+            cursor_outer,
+            huh + cursor_inner * 2.0,
+            cursor_outer * 0.5,
+            Rgba::new(255, 255, 255, 255),
+        ));
+        quads.push(UiQuad::solid(
+            cursor_x - cursor_inner * 0.5,
+            huy - cursor_inner * 0.5,
+            cursor_inner,
+            huh + cursor_inner,
+            cursor_inner * 0.5,
+            Rgba::new(0, 0, 0, 180),
+        ));
+
         let selected = dropdown_selected_index(view, dropdown);
         for (index, rect) in popup.swatch.iter().enumerate() {
             let (sx, sy, sw2, sh2) = *rect;
@@ -5077,6 +5355,9 @@ pub(super) fn draw_popup_text(
                 language_label(LANGUAGE_OPTIONS[index], language).to_owned()
             },
             SettingsDropdown::Accept => accept_label(ACCEPT_OPTIONS[index], language).to_owned(),
+            SettingsDropdown::CompletionStyle => {
+                completion_style_label(COMPLETION_STYLE_OPTIONS[index], language).to_owned()
+            },
             SettingsDropdown::TabReveal => {
                 tab_reveal_label(TAB_REVEAL_OPTIONS[index], language).to_owned()
             },
@@ -6138,6 +6419,26 @@ pub(super) fn draw_text(
                     sk.accent,
                 );
             }
+            if visible(geometry.completion_style.1, geometry.completion_style.3) {
+                row_label(
+                    r,
+                    gc,
+                    size,
+                    scale,
+                    &sk,
+                    geometry.completion_style,
+                    language.pick("补全样式", "Completion style"),
+                    "",
+                    sk.ink,
+                );
+                combobox_value(
+                    r,
+                    gc,
+                    geometry.completion_style,
+                    completion_style_label(view.completion_style, language),
+                    sk.accent,
+                );
+            }
 
             let (ocx, ocy, _ocw, och) = geometry.open_config_file;
             if visible(group_y(ocy), title_h) {
@@ -6416,7 +6717,7 @@ pub(super) fn draw_text(
                 if host.pinned {
                     r.draw_chrome_text(size, row.0 + s(27.0), title_y, sk.accent, "\u{eab4}", gc);
                 }
-                // 编辑 / 隐藏是纯图标（quad pass 画），主动作「连接」保留文字：
+                // 编辑 / 删除是纯图标（quad pass 画），主动作「连接」保留文字：
                 // 一行全是等价图标会逼人逐个悬停去猜哪个是"进去"。整组同样只在
                 // hover 时显形。
                 let row_hovered = matches!(
@@ -6424,7 +6725,7 @@ pub(super) fn draw_text(
                     SettingsHit::SshHostRow(i)
                         | SettingsHit::SshHostConnect(i)
                         | SettingsHit::SshHostEdit(i)
-                        | SettingsHit::SshHostHide(i)
+                        | SettingsHit::SshHostDelete(i)
                         if i == index
                 );
                 if row_hovered {
@@ -7026,6 +7327,26 @@ pub(super) fn draw_text(
                     );
                 }
             }
+            {
+                let (_, ry, _, rh) = geometry.resume_ai;
+                if visible(ry, rh) {
+                    // 关掉只是不敲 resume 命令：标签、分屏、目录照常恢复。
+                    row_label(
+                        r,
+                        gc,
+                        size,
+                        scale,
+                        &sk,
+                        geometry.resume_ai,
+                        language.pick(
+                            "恢复时自动接续 AI 对话（claude / codex 自动 resume）",
+                            "Resume AI conversations on restore (claude / codex)",
+                        ),
+                        "",
+                        sk.ink,
+                    );
+                }
+            }
 
             if SHOW_WEBDAV_SYNC_SETTINGS {
                 // ---- 同步（WebDAV）----
@@ -7324,15 +7645,68 @@ mod tests {
     use super::{
         CELL_WIDTH_MODE_OPTIONS, CellWidthMode, KeymapPaneState, ManualProxyProtocol,
         NEW_TAB_POSITION_OPTIONS, NebulaSettingsSection, NewTabPosition, ProxyChoice,
-        ProxyPaneState, SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS, STANDARD_ROW_ACTION_W,
-        SettingsHit, TabRevealMotion, UiLanguage, advanced_content_end, cell_width_mode_label,
-        font_popup_row_count, font_popup_slot, manual_proxy_parts, manual_proxy_value,
-        new_tab_position_label, opacity_from_pointer, proxy_section_title_y, row_action_rect,
-        settings_geometry, settings_hit, ssh_proxy_manual_controls,
+        ProxyPaneState, Rgb, SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS,
+        STANDARD_ROW_ACTION_W, SettingsHit, TabRevealMotion, UiLanguage, advanced_content_end,
+        background_color_popup, cell_width_mode_label, font_popup_row_count, font_popup_slot,
+        hsv_to_rgb, manual_proxy_parts, manual_proxy_value, new_tab_position_label,
+        opacity_from_pointer, proxy_section_title_y, rgb_to_hsv, row_action_rect,
+        settings_geometry, settings_hit, ssh_proxy_manual_controls, ssh_proxy_mode_control,
+        ssh_proxy_test_button,
     };
     use crate::display::SizeInfo;
     use crate::display::ui::tokens::Density;
     use crate::display::ui::widgets;
+
+    #[test]
+    fn hsv_rgb_round_trip_and_gray_hue_convention() {
+        // 三原色与灰阶的锚点值。
+        assert_eq!(hsv_to_rgb(0.0, 1.0, 1.0), Rgb::new(255, 0, 0));
+        assert_eq!(hsv_to_rgb(120.0, 1.0, 1.0), Rgb::new(0, 255, 0));
+        assert_eq!(hsv_to_rgb(240.0, 1.0, 1.0), Rgb::new(0, 0, 255));
+        assert_eq!(hsv_to_rgb(0.0, 0.0, 1.0), Rgb::new(255, 255, 255));
+        assert_eq!(hsv_to_rgb(123.0, 0.7, 0.0), Rgb::new(0, 0, 0));
+        // 负角度与超圈角度归一（拖拽把手不夹角度）。
+        assert_eq!(hsv_to_rgb(360.0, 1.0, 1.0), hsv_to_rgb(0.0, 1.0, 1.0));
+        assert_eq!(hsv_to_rgb(-120.0, 1.0, 1.0), hsv_to_rgb(240.0, 1.0, 1.0));
+
+        // 往返：RGB → HSV → RGB 在 8bit 量化内闭合。
+        for color in [Rgb::new(8, 10, 24), Rgb::new(253, 246, 227), Rgb::new(40, 42, 54)] {
+            let (h, s, v) = rgb_to_hsv(color);
+            let back = hsv_to_rgb(h, s, v);
+            assert!(
+                (back.r as i32 - color.r as i32).abs() <= 1
+                    && (back.g as i32 - color.g as i32).abs() <= 1
+                    && (back.b as i32 - color.b as i32).abs() <= 1,
+                "{color:?} -> ({h},{s},{v}) -> {back:?}"
+            );
+        }
+        // 灰色的色相按约定报 0，饱和度 0。
+        assert_eq!(rgb_to_hsv(Rgb::new(128, 128, 128)).0, 0.0);
+        assert_eq!(rgb_to_hsv(Rgb::new(128, 128, 128)).1, 0.0);
+    }
+
+    #[test]
+    fn color_picker_popup_keeps_sv_hue_and_swatches_disjoint() {
+        // 三个交互区不重叠：SV 面、色相条、第一格色板按序垂直排布。
+        let size = SizeInfo::new(1280.0, 900.0, 8.0, 16.0, 0.0, 0.0, false);
+        let geometry = settings_geometry(
+            &size,
+            1.0,
+            (0.0, 0.0, 1280.0, 900.0),
+            0.0,
+            0,
+            0,
+            Density::Standard,
+            ProxyPaneState::default(),
+            KeymapPaneState::default(),
+        );
+        let popup = background_color_popup(&geometry, 1.0);
+        assert!(popup.sv.1 + popup.sv.3 <= popup.hue.1);
+        assert!(popup.hue.1 + popup.hue.3 <= popup.swatch[0].1);
+        assert!(popup.swatch[11].1 + popup.swatch[11].3 <= popup.hex.1);
+        // 全部落在面板内。
+        assert!(popup.hex.1 + popup.hex.3 <= popup.rect.1 + popup.rect.3);
+    }
 
     #[test]
     fn the_font_popup_reserves_its_first_row_for_the_search_field() {
@@ -7359,8 +7733,9 @@ mod tests {
     #[test]
     fn hidden_webdav_group_does_not_extend_advanced_content() {
         assert!(!SHOW_WEBDAV_SYNC_SETTINGS);
-        // SSH 已迁到独立页面；隐藏同步组不能继续把 Advanced 撑高。
-        assert_eq!(advanced_content_end(146.0, 308.0, 44.0), 234.0);
+        // SSH 已迁到独立页面；隐藏同步组不能继续把 Advanced 撑高。会话组
+        // 现为 3 行：保留会话 / 恢复会话 / 恢复时接续 AI 对话（resume_ai）。
+        assert_eq!(advanced_content_end(146.0, 308.0, 44.0), 278.0);
     }
 
     #[test]
@@ -7497,19 +7872,22 @@ mod tests {
         assert_eq!(hit, SettingsHit::ProviderRow(13));
     }
 
+    /// 网络页收口成单张紧凑卡后的几何合同：只有**模式 = 自定义**才展开
+    /// 地址行（撑高滚动区）；旧扫描/发现列表/覆盖行已经全部收成零尺寸，
+    /// 绘制与命中都不得再消费它们——这条测试原来验证的是旧多组件布局，
+    /// 重设计时一并改写。
     #[test]
-    fn custom_proxy_geometry_expands_selected_component_and_scroll_height() {
+    fn custom_proxy_mode_expands_the_card_and_legacy_scan_geometry_stays_zero() {
         let size = proxy_test_size();
         let area = (0.0, 0.0, 1200.0, 900.0);
-        let manual = ProxyPaneState {
+        let custom = ProxyPaneState {
             mode: crate::ssh_proxy::ProxyMode::Custom,
             choice: ProxyChoice::Manual,
             found_count: 3,
             override_count: 2,
             ..Default::default()
         };
-        let detected = ProxyPaneState { choice: ProxyChoice::Detected(0), ..manual };
-        let manual_geometry = settings_geometry(
+        let custom_geometry = settings_geometry(
             &size,
             1.0,
             area,
@@ -7517,10 +7895,10 @@ mod tests {
             0,
             4,
             Density::Standard,
-            manual,
+            custom,
             KeymapPaneState::default(),
         );
-        let detected_geometry = settings_geometry(
+        let off_geometry = settings_geometry(
             &size,
             1.0,
             area,
@@ -7528,13 +7906,24 @@ mod tests {
             0,
             4,
             Density::Standard,
-            detected,
+            ProxyPaneState::default(),
             KeymapPaneState::default(),
         );
-        assert!(manual_geometry.ssh_proxy_list.3 > detected_geometry.ssh_proxy_list.3);
-        assert!(manual_geometry.proxy_h > detected_geometry.proxy_h);
-        assert!(manual_geometry.ssh_proxy_expand.1 > manual_geometry.ssh_proxy_other_rows[0].1);
-        assert!(manual_geometry.ssh_proxy_expand.1 < manual_geometry.ssh_proxy_other_rows[1].1);
+        // 自定义模式追加地址行，页面必须比关闭模式高。
+        assert!(custom_geometry.proxy_h > off_geometry.proxy_h);
+        // 展开行紧跟模式行之后。
+        assert!(custom_geometry.ssh_proxy_expand.1 > custom_geometry.ssh_proxy_mode.1);
+        // 旧结构零尺寸（即便 found/override 计数非零也不得复活）。
+        for legacy in [
+            custom_geometry.ssh_proxy_list,
+            custom_geometry.ssh_proxy_scan_button,
+            custom_geometry.ssh_proxy_scan_head,
+            custom_geometry.ssh_proxy_found_row0,
+            custom_geometry.ssh_proxy_override_row0,
+            custom_geometry.ssh_proxy_other_rows[0],
+        ] {
+            assert_eq!((legacy.2, legacy.3), (0.0, 0.0), "legacy proxy geometry must stay zero");
+        }
     }
 
     #[test]
@@ -7556,13 +7945,16 @@ mod tests {
         assert!(title_y + 26.0 <= geometry.ssh_proxy_test.1);
     }
 
+    /// 紧凑代理卡的命中合同：自定义模式下可点的只有模式下拉、协议下拉、
+    /// 地址输入和出网测试按钮四个控件；旧扫描按钮/发现行是零尺寸幽灵几何，
+    /// 永远命不中。原测试断言旧布局的 Rescan/LinkPick，重设计时一并改写。
     #[test]
-    fn custom_proxy_hit_test_tracks_found_rows_rescan_and_selected_input() {
+    fn custom_proxy_hit_test_exposes_mode_protocol_address_and_test_only() {
         let size = proxy_test_size();
         let area = (0.0, 0.0, 1200.0, 900.0);
         let proxy = ProxyPaneState {
             mode: crate::ssh_proxy::ProxyMode::Custom,
-            choice: ProxyChoice::Command,
+            choice: ProxyChoice::Manual,
             found_count: 2,
             ..Default::default()
         };
@@ -7599,10 +7991,18 @@ mod tests {
                 6,
             )
         };
-        assert_eq!(hit(geometry.ssh_proxy_scan_button), SettingsHit::SshProxyRescan);
-        assert_eq!(hit(geometry.ssh_proxy_found_row0), SettingsHit::SshProxyLinkPick(0));
-        assert_eq!(hit(geometry.ssh_proxy_other_rows[2]), SettingsHit::SshProxyLinkPick(4));
-        assert_eq!(hit(geometry.ssh_proxy_expand), SettingsHit::SshProxyInput(2));
+        // 命中矩形与绘制矩形同源：用 hit-test 内部同款控件几何函数取靶。
+        assert_eq!(
+            hit(ssh_proxy_mode_control(geometry.ssh_proxy_mode, 1.0)),
+            SettingsHit::SshProxyModeDropdown
+        );
+        let (protocol, address) = ssh_proxy_manual_controls(geometry.ssh_proxy_expand, 1.0);
+        assert_eq!(hit(protocol), SettingsHit::SshProxyProtocolDropdown);
+        assert_eq!(hit(address), SettingsHit::SshProxyInput(0));
+        assert_eq!(
+            hit(ssh_proxy_test_button(geometry.ssh_proxy_test, 1.0)),
+            SettingsHit::SshProxyTest
+        );
     }
 
     #[test]

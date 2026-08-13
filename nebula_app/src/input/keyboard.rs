@@ -951,11 +951,52 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // `nebula_settings.txt` `keybind=` overrides + TOML remaps all funnel
         // through `process_key_bindings` below (spec 002).
 
+        // 弹窗补齐：列表可见时接管上下键（选行）、接受键（按 accept 配置的
+        // Tab/Right 键入选中候选的余量）和 Esc（关闭）。其余按键穿透——字符
+        // 照常进 shell 并触发重算，Enter 照常执行当前行。列表关闭后按键立即
+        // 恢复原义（上下键回到 shell 历史）。
+        let accept = self.ctx.nebula_accept();
+        if mods.is_empty()
+            && self.ctx.nebula_completion_popup_active()
+            && !self.ctx.display().hint_state.active()
+            && !self.ctx.search_active()
+        {
+            let popup_accept = match &key.logical_key {
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.ctx.nebula_completion_popup_move(1);
+                    return;
+                },
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.ctx.nebula_completion_popup_move(-1);
+                    return;
+                },
+                Key::Named(NamedKey::Escape) => {
+                    if self.ctx.nebula_completion_popup_dismiss() {
+                        return;
+                    }
+                    false
+                },
+                Key::Named(NamedKey::Tab) => accept.accepts_tab(),
+                Key::Named(NamedKey::ArrowRight) => accept.accepts_right(),
+                _ => false,
+            };
+            if popup_accept {
+                if let Some(insert) = self.ctx.nebula_completion_popup_take() {
+                    if !insert.is_empty() {
+                        for c in insert.chars() {
+                            self.ctx.nebula_input_char(c);
+                        }
+                        self.ctx.write_to_pty(insert.into_bytes());
+                        return;
+                    }
+                }
+            }
+        }
+
         // Accept the Nebula ghost-text suggestion with the configured key
         // (Right/Tab/both): write the remaining text so the shell echoes it,
         // as if typed. Tab only accepts when a suggestion exists; otherwise it
         // falls through to the shell's own completion below.
-        let accept = self.ctx.nebula_accept();
         let is_accept = mods.is_empty()
             && matches!(&key.logical_key,
                 Key::Named(NamedKey::ArrowRight) if accept.accepts_right())
@@ -1143,6 +1184,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             OpenSettingsFile => self.ctx.display().open_user_config_file(),
             ToggleGhost => self.ctx.display().toggle_ghost(),
             CycleAccept => self.ctx.display().cycle_accept(),
+            CycleCompletionStyle => self.ctx.display().cycle_completion_style(),
             PickBackgroundImage => self.ctx.display().pick_background_image(),
             CycleBackground => self.ctx.display().cycle_background_color(),
             ResetAppearance => self.ctx.display().reset_appearance_settings(),

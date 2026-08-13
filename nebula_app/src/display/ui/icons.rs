@@ -345,8 +345,8 @@ pub(crate) fn push_check(
 pub(crate) enum RowActionIcon {
     /// 编辑：斜置笔杆 + 笔尖。
     Edit,
-    /// 隐藏：眼睛加一道斜杠。
-    Hide,
+    /// 删除：盖沿 + 提手 + 挖空桶身的垃圾桶。
+    Delete,
 }
 
 pub(crate) fn push_row_action_icon(
@@ -367,7 +367,7 @@ pub(crate) fn push_row_action_icon(
     match icon {
         RowActionIcon::Edit => {
             // 笔杆：左下到右上一道斜线；笔尖再补一小段加粗，让它读成"笔"
-            // 而不是"斜杠"（斜杠已经被 Hide 占用，两枚不能撞形）。
+            // 而不是"斜杠"，避免与删除图标的轮廓混淆。
             let tip = (cx - 4.4 * scale, cy + 4.4 * scale);
             let tail = (cx + 4.4 * scale, cy - 4.4 * scale);
             push_segment(quads, tip, tail, stroke, ink);
@@ -379,35 +379,35 @@ pub(crate) fn push_row_action_icon(
                 ink,
             );
         },
-        RowActionIcon::Hide => {
-            // 眼睛：圆角胶囊挖空当外圈轮廓 + 中心瞳孔，再压一道斜杠。
-            let w = 11.5 * scale;
-            let h = 7.0 * scale;
-            let ex = (cx - w * 0.5).round();
-            let ey = (cy - h * 0.5).round();
-            quads.push(UiQuad::solid(ex, ey, w, h, h * 0.5, ink));
+        RowActionIcon::Delete => {
+            // 盖沿横线略宽于桶身，桶身用挖空矩形读作"容器"而不是方框；
+            // 提手是盖沿上方居中的一小段，三件套一起才读成垃圾桶。
+            let lid_y = (cy - 4.6 * scale).round();
+            let lid_half = 5.4 * scale;
+            push_segment(quads, (cx - lid_half, lid_y), (cx + lid_half, lid_y), stroke, ink);
+            let handle_half = 1.9 * scale;
+            let handle_y = lid_y - 1.6 * scale;
+            push_segment(
+                quads,
+                (cx - handle_half, handle_y),
+                (cx + handle_half, handle_y),
+                stroke,
+                ink,
+            );
+            let body_w = 8.2 * scale;
+            let body_x = (cx - body_w * 0.5).round();
+            let body_top = lid_y + 1.4 * scale;
+            let body_h = (cy + 5.2 * scale) - body_top;
+            let radius = 1.6 * scale;
+            quads.push(UiQuad::solid(body_x, body_top, body_w, body_h, radius, ink));
             quads.push(UiQuad::solid(
-                ex + stroke,
-                ey + stroke,
-                w - stroke * 2.0,
-                h - stroke * 2.0,
-                (h * 0.5 - stroke).max(0.0),
+                body_x + stroke,
+                body_top + stroke,
+                body_w - stroke * 2.0,
+                body_h - stroke * 2.0,
+                (radius - stroke).max(0.0),
                 cutout,
             ));
-            let pupil = 2.8 * scale;
-            quads.push(UiQuad::solid(
-                cx - pupil * 0.5,
-                cy - pupil * 0.5,
-                pupil,
-                pupil,
-                pupil * 0.5,
-                ink,
-            ));
-            // 斜杠先垫一条底色的更宽段，避免与眼睛墨迹糊成一团黑。
-            let a = (cx - 5.6 * scale, cy + 5.6 * scale);
-            let b = (cx + 5.6 * scale, cy - 5.6 * scale);
-            push_segment(quads, a, b, stroke * 2.8, cutout);
-            push_segment(quads, a, b, stroke, ink);
         },
     }
 }

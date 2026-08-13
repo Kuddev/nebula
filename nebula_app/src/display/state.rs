@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nebula_terminal::index::{Point, Side};
+use nebula_terminal::index::{Line, Point, Side};
 
 use super::terminal_math::TerminalMathState;
 
@@ -14,6 +14,60 @@ pub enum AcceptKey {
     Tab,
     #[default]
     Both,
+}
+
+/// How completion candidates surface while typing: as a single inline ghost
+/// remainder after the cursor, or as a floating list the user picks from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompletionStyle {
+    #[default]
+    Inline,
+    Popup,
+}
+
+impl CompletionStyle {
+    pub(super) fn cycle(self) -> Self {
+        match self {
+            Self::Inline => Self::Popup,
+            Self::Popup => Self::Inline,
+        }
+    }
+
+    pub(super) fn settings_value(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::Popup => "popup",
+        }
+    }
+
+    pub(super) fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "inline" | "ghost" => Some(Self::Inline),
+            "popup" | "menu" | "list" => Some(Self::Popup),
+            _ => None,
+        }
+    }
+}
+
+/// Source of a popup completion candidate; drives the right-aligned tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NebulaCompletionKind {
+    History,
+    Command,
+    Dir,
+    File,
+}
+
+/// One row of the popup completion list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NebulaCompletionItem {
+    /// Text shown in the list (the token/command as it would read once
+    /// accepted, possibly elided for display).
+    pub label: String,
+    /// Characters typed into the PTY on acceptance (remainder past what the
+    /// user already typed).
+    pub insert: String,
+    pub kind: NebulaCompletionKind,
 }
 
 impl AcceptKey {
@@ -151,12 +205,22 @@ pub struct NebulaPaneState {
     pub branch: String,
     pub suggestion: String,
     pub(super) suggestion_key: String,
+    /// Popup-style completion candidates for the current line (empty = no
+    /// popup). Mutually exclusive with `suggestion`: which one fills depends
+    /// on the configured [`CompletionStyle`].
+    pub completion_items: Vec<NebulaCompletionItem>,
+    /// Index of the highlighted popup row.
+    pub completion_selected: usize,
     pub line_buf: String,
     pub(crate) screen_line: String,
     pub touched: bool,
     pub inline_images: Vec<NebulaInlineImage>,
     pub command_started: Option<std::time::Instant>,
     pub running_program: Option<String>,
+    /// hook 直报的 AI CLI 会话身份（claude `session_id` / codex `thread-id`）。
+    /// 与 `running_program` 同生命周期：133;D 命令收尾时一起清除，快照据此
+    /// 判断「关窗那一刻这个 pane 里还开着哪个对话」，冷恢复接续它。
+    pub ai_session: Option<AiSessionIdentity>,
     pub last_committed: String,
     pub awaiting_input: bool,
     pub finished_unseen: bool,
@@ -180,14 +244,32 @@ pub struct NebulaPaneState {
     pub(super) terminal_math: TerminalMathState,
 }
 
+/// 一个 AI CLI 对话的身份：哪家 CLI + 它自己上报的会话 id。来源必须和
+/// id 绑在一起存——`running_program` 可能在 id 记录之后被另一个程序覆盖，
+/// 快照时两者对得上才算「这个对话还活着」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiSessionIdentity {
+    pub source: String,
+    pub session_id: String,
+}
+
 impl NebulaPaneState {
+    /// Drop every completion hint (ghost remainder AND popup list) plus the
+    /// recompute cache, so the next frame re-derives them from the new line.
+    pub(crate) fn clear_completion_hints(&mut self) {
+        self.suggestion.clear();
+        self.suggestion_key.clear();
+        self.completion_items.clear();
+        self.completion_selected = 0;
+    }
+
     pub(crate) fn terminal_math_source_point(
         &self,
         point: Point,
         side: Side,
-        display_offset: usize,
+        viewport_origin: Line,
     ) -> (Point, Side) {
-        self.terminal_math.source_point(point, side, display_offset)
+        self.terminal_math.source_point(point, side, viewport_origin)
     }
 }
 

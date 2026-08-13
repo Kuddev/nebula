@@ -168,6 +168,26 @@ pub struct TerminalOptions {
     command: Vec<String>,
 }
 
+/// Undo the trailing-backslash mangling Explorer's context-menu quoting
+/// inflicts on drive-root working directories.
+///
+/// The installed verb passes `--working-directory "%V"`; for a drive root
+/// `%V` is `D:\`, so the command line ends in `\"` and `CommandLineToArgvW`
+/// reads that trailing backslash as an escaped quote — Nebula receives `D:"`
+/// and rejects it as an invalid directory (issue #36). A double quote can
+/// never appear in a Windows path, so a trailing one is unambiguously that
+/// swallowed separator: restore it. Any other path is returned unchanged, and
+/// off Windows the input is untouched (a quote is a legal Unix filename byte).
+pub(crate) fn repair_context_menu_dir(dir: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(stripped) = dir.to_string_lossy().strip_suffix('"') {
+            return PathBuf::from(format!("{stripped}\\"));
+        }
+    }
+    dir
+}
+
 impl TerminalOptions {
     /// Shell override passed through the CLI.
     pub fn command(&self) -> Option<Program> {
@@ -175,11 +195,18 @@ impl TerminalOptions {
         Some(Program::WithArgs { program: program.clone(), args: args.to_vec() })
     }
 
+    /// Working directory with Explorer's context-menu quote-mangling undone.
+    /// Every shell-launching path resolves the directory through here so the
+    /// repair applies whether the options came from the CLI or over IPC.
+    pub fn resolved_working_directory(&self) -> Option<PathBuf> {
+        self.working_directory.clone().map(repair_context_menu_dir)
+    }
+
     /// Override the [`PtyOptions`]'s fields with the [`TerminalOptions`].
     pub fn override_pty_config(&self, pty_config: &mut PtyOptions) {
-        if let Some(working_directory) = &self.working_directory {
+        if let Some(working_directory) = self.resolved_working_directory() {
             if working_directory.is_dir() {
-                pty_config.working_directory = Some(working_directory.to_owned());
+                pty_config.working_directory = Some(working_directory);
             } else {
                 error!("Invalid working directory: {working_directory:?}");
             }
@@ -195,8 +222,10 @@ impl TerminalOptions {
 
 impl From<TerminalOptions> for PtyOptions {
     fn from(mut options: TerminalOptions) -> Self {
+        let working_directory = options.resolved_working_directory();
+        options.working_directory = None;
         PtyOptions {
-            working_directory: options.working_directory.take(),
+            working_directory,
             shell: options.command().map(Into::into),
             drain_on_exit: options.hold,
             env: HashMap::new(),
@@ -730,6 +759,23 @@ mod tests {
     fn parse_invalid_class() {
         let class = parse_class("one,two,three");
         assert!(class.is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repairs_drive_root_mangled_by_explorer_quoting() {
+        // `--working-directory "D:\"` reaches us as `D:"` because the trailing
+        // backslash escaped the closing quote (issue #36); restore the root.
+        assert_eq!(repair_context_menu_dir(PathBuf::from("D:\"")), PathBuf::from("D:\\"));
+        assert_eq!(
+            repair_context_menu_dir(PathBuf::from("\\\\server\\share\"")),
+            PathBuf::from("\\\\server\\share\\")
+        );
+        // A normal folder (no trailing backslash, so no mangling) is untouched.
+        assert_eq!(
+            repair_context_menu_dir(PathBuf::from("D:\\temp_build")),
+            PathBuf::from("D:\\temp_build")
+        );
     }
 
     #[test]

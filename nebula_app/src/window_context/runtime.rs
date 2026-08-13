@@ -103,9 +103,16 @@ impl WindowContext {
         Ok(())
     }
 
-    pub(crate) fn runtime_new_tab(&mut self) -> Result<u64, ApiError> {
+    pub(crate) fn runtime_new_tab(
+        &mut self,
+        cwd: Option<std::path::PathBuf>,
+    ) -> Result<u64, ApiError> {
         let before = self.tabs.len();
-        self.handle_tab_request(TabRequest::New);
+        let request = match cwd {
+            Some(dir) => TabRequest::NewAtDirectory(dir),
+            None => TabRequest::New,
+        };
+        self.handle_tab_request(request);
         if self.tabs.len() == before {
             return Err(ApiError::new(
                 "action_failed",

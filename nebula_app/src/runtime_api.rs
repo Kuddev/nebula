@@ -272,7 +272,7 @@ pub enum RuntimeCommand {
     Snapshot,
     NewWindow,
     Focus { window_id: Option<u64>, pane_id: Option<u64> },
-    NewTab { window_id: Option<u64> },
+    NewTab { window_id: Option<u64>, cwd: Option<PathBuf> },
     Split { window_id: Option<u64>, direction: RuntimeSplitDirection },
     Prompt { window_id: Option<u64>, pane_id: u64, text: String, submit: bool },
 }
@@ -400,6 +400,9 @@ struct TargetParams {
 struct WindowParams {
     #[serde(default)]
     window_id: Option<u64>,
+    /// `tab.new` 可选：新标签的工作目录（Explorer 右键并入驻留实例时携带）。
+    #[serde(default)]
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -471,7 +474,7 @@ impl RuntimeCommand {
             },
             "tab.new" => {
                 let params: WindowParams = parse_params(&request.params)?;
-                Ok(Self::NewTab { window_id: params.window_id })
+                Ok(Self::NewTab { window_id: params.window_id, cwd: params.cwd })
             },
             "pane.split" => {
                 let params: SplitParams = parse_params(&request.params)?;
@@ -584,6 +587,33 @@ fn fresh_token() -> String {
 /// supported while both paths share the same authenticated endpoint.
 pub fn try_attach_existing() -> bool {
     legacy_request("ATTACH").is_some()
+}
+
+/// 后台任务把一行文本作为输入敲进某个 pane（不回车）。复用 runtime Prompt
+/// 的窗口定位与写入路径（`window_id=None` 按 pane 自动定位）；响应通道即弃
+/// ——调用方不关心结果，失败在事件线程侧留日志即可。SFTP 图片粘贴用它回粘
+/// 远端路径。
+pub fn dispatch_prompt(proxy: &EventLoopProxy<Event>, pane_id: u64, text: String) {
+    let (dispatch, _receiver) =
+        RuntimeDispatch::new(RuntimeCommand::Prompt { window_id: None, pane_id, text, submit: false });
+    if proxy.send_event(Event::new(EventType::RuntimeControl(dispatch), None)).is_err() {
+        warn!("prompt dispatch failed: event loop is gone");
+    }
+}
+
+/// Explorer 右键「在 Nebula 中打开」/ CLI 带 `--working-directory` 的启动并入
+/// 驻留实例：先经 ATTACH 恢复或聚焦既有窗口（与平启动同一套交接，detached
+/// 的标签因此先回来），再请求在该窗口打开定目录标签。任一步失败都返回
+/// false，调用方回落为独立启动——绝不吞掉用户的手势。
+pub fn try_open_directory_existing(dir: &std::path::Path) -> bool {
+    if legacy_request("ATTACH").is_none() {
+        return false;
+    }
+    // ATTACH 与 tab.new 都落到同一条 winit 事件队列上，先后有序：窗口先
+    // 恢复，新标签随后落在恢复出来的窗口里。
+    request_once("tab.new", json!({ "cwd": dir }), IO_TIMEOUT)
+        .map(|response| response.ok)
+        .unwrap_or(false)
 }
 
 fn legacy_request(verb: &str) -> Option<()> {

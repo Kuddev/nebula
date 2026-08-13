@@ -213,6 +213,7 @@ pub enum PaletteAction {
     OpenSettingsFile,
     ToggleGhost,
     CycleAccept,
+    CycleCompletionStyle,
     PickBackgroundImage,
     CycleBackground,
     ResetAppearance,
@@ -400,6 +401,12 @@ const ITEMS: &[PaletteItem] = &[
         hint: "",
         search: "切换补全接受键 cycle accept key completion jieshou",
         action: PaletteAction::CycleAccept,
+    },
+    PaletteItem {
+        label: "切换补全样式（行内 / 弹窗）",
+        hint: "",
+        search: "切换补全样式 行内 弹窗 completion style inline popup list buquan yangshi",
+        action: PaletteAction::CycleCompletionStyle,
     },
     PaletteItem {
         label: "选择背景图片…",
@@ -1495,6 +1502,7 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
         OpenSettingsFile => "Open configuration file",
         ToggleGhost => "Toggle ghost completion",
         CycleAccept => "Cycle completion accept key",
+        CycleCompletionStyle => "Toggle completion style (inline / popup)",
         PickBackgroundImage => "Choose background image...",
         CycleBackground => "Cycle background color",
         ResetAppearance => "Restore appearance defaults",

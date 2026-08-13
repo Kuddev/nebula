@@ -160,6 +160,10 @@ windows-sys = { version = "0.59", features = [
     # gate ConnectNamedPipe/ReadFile/CreateNamedPipeW's OVERLAPPED/DACL params.
     "Win32_System_Pipes",
     "Win32_Storage_FileSystem",
+    # 剪贴板截图粘贴（clipboard::clipboard_image_png）：OpenClipboard/
+    # GetClipboardData(CF_DIB) 与 GlobalLock/GlobalSize。
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Win32_System_IO",
     "Win32_Security",
     "Win32_Security_Credentials",

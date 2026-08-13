@@ -133,17 +133,21 @@ impl TerminalMathState {
     /// Convert the visual mouse cell back to the immutable terminal-grid cell.
     /// Formula spans are atoms: their left/right halves select the corresponding
     /// source boundary instead of inventing cursor positions inside TeX syntax.
+    ///
+    /// `viewport_origin` is the renderer's viewport top row: projection spans
+    /// live in rendered-viewport coordinates, which can be cropped relative to
+    /// the grid while a resize commit is pending.
     pub(super) fn source_point(
         &self,
         point: Point,
         side: Side,
-        display_offset: usize,
+        viewport_origin: Line,
     ) -> (Point, Side) {
-        let Some(viewport_point) = term::point_to_viewport(display_offset, point) else {
+        let Some(viewport_point) = term::point_to_viewport_from(viewport_origin, point) else {
             return (point, side);
         };
         let (source, source_side) = self.projection.source_from_visual(viewport_point, side);
-        (term::viewport_to_point(display_offset, source), source_side)
+        (term::viewport_to_point_from(viewport_origin, source), source_side)
     }
 
     fn synchronize_grid(&mut self, grid: &TextGrid) {
@@ -721,25 +725,29 @@ impl TextGrid {
         requested_lookback: usize,
     ) -> Self {
         let grid = terminal.grid();
-        // PTY resize is debounced during a live window drag, so display geometry
-        // can lead the grid by one frame. Scan only their shared rectangle.
+        // Grid and PTY resizes are committed together while display geometry
+        // updates every drag tick, so the visual viewport can differ from the
+        // grid. Anchor the scan to the renderer's viewport origin and only
+        // cover their shared rectangle, keeping overlay coordinates in the
+        // same space as the rendered cells they are matched against.
+        let origin = terminal.viewport_origin_for(size.screen_lines());
         let columns = size.columns().min(grid.columns());
-        let screen_lines = size.screen_lines().min(grid.screen_lines());
-        let display_offset = grid.display_offset();
+        let screen_lines = size
+            .screen_lines()
+            .min(((grid.bottommost_line() - origin).0.max(0) as usize).saturating_add(1));
         let scrolled_out = grid.scrolled_out();
         let history_size = grid.history_size();
-        let available_lookback = history_size.saturating_sub(display_offset);
+        let available_lookback = (history_size as i64 + origin.0 as i64).max(0) as usize;
         let lookback = requested_lookback.min(available_lookback);
-        let absolute_top = scrolled_out
-            .saturating_add(history_size)
-            .saturating_sub(display_offset)
-            .saturating_sub(lookback);
+        let absolute_top = (scrolled_out as i64 + history_size as i64 + origin.0 as i64
+            - lookback as i64)
+            .max(0) as usize;
         let row_count = screen_lines.saturating_add(lookback);
         let mut rows = Vec::with_capacity(row_count);
         let mut wrapped = Vec::with_capacity(row_count);
 
         for row in 0..row_count {
-            let line = Line(row as i32 - display_offset as i32 - lookback as i32);
+            let line = origin + (row as i32 - lookback as i32);
             let mut cells = Vec::with_capacity(columns);
             for column in 0..columns {
                 let cell = &grid[line][Column(column)];

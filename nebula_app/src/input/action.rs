@@ -201,6 +201,11 @@ impl<T: EventListener> Execute<T> for Action {
             Action::ClearSelection => ctx.clear_selection(),
             Action::Paste => {
                 let text = ctx.clipboard_mut().load(ClipboardType::Clipboard);
+                // 截图粘贴（Win+Shift+S 之后剪贴板只有位图没有文本）：转成
+                // 文件路径粘给 codex/claude 这类吃图的 CLI；有文本时文本优先。
+                if text.is_empty() && ctx.paste_clipboard_image() {
+                    return;
+                }
                 ctx.paste(&text, true);
             },
             Action::PasteSelection => {

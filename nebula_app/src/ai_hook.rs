@@ -98,6 +98,10 @@ pub struct AiHookEvent {
     /// Human text when the event carries one (claude's notification message,
     /// codex's last assistant message).
     pub message: Option<String>,
+    /// CLI 自己的会话身份：claude hook 载荷的 `session_id`、codex notify 的
+    /// `thread-id`（即 rollout 文件名尾部的 uuid，`codex resume` 认它）。
+    /// 冷恢复接续对话的唯一事实源——文件系统扫描只能靠 mtime 猜。
+    pub session_id: Option<String>,
 }
 
 /// Parse one pipe message: a `nebula-hook/1 source=<s> pane=<n>` header line,
@@ -123,6 +127,14 @@ fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
     let source = source?;
 
     let payload: Value = serde_json::from_slice(raw).unwrap_or(Value::Null);
+    // 会话身份随事件顺带捕获：claude 每个 hook 载荷都带 `session_id`
+    // （snake_case）；codex notify 带 `thread-id`（kebab-case，即 rollout
+    // uuid）。opencode/pi 的桥接载荷不带 id，读不到就是 None。
+    let session_id = payload
+        .get("session_id")
+        .or_else(|| payload.get("thread-id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let (kind, message) = match source.as_str() {
         "claude" => match payload.get("hook_event_name").and_then(Value::as_str) {
             Some("UserPromptSubmit") => (AiHookKind::PromptSubmit, None),
@@ -159,7 +171,7 @@ fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         },
         _ => return None,
     };
-    Some(AiHookEvent { pane, source, kind, message })
+    Some(AiHookEvent { pane, source, kind, message, session_id })
 }
 
 /// 远端会话只能提交事件语义，Pane 身份始终由本地 SSH 通道覆盖，
@@ -234,6 +246,24 @@ mod remote_tests {
         assert_eq!(event.pane, Some(7));
         assert_eq!(event.kind, AiHookKind::TurnDone);
         assert_eq!(event.message.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn claude_events_carry_their_session_id_for_cold_resume() {
+        let raw = b"nebula-hook/1 source=claude pane=3\n{\"session_id\":\"0199a213-c2a4-7cf5-8f6b-d746fbb6e86c\",\"hook_event_name\":\"Stop\"}";
+        let event = parse_remote_envelope(raw, Some(3)).unwrap();
+        assert_eq!(event.session_id.as_deref(), Some("0199a213-c2a4-7cf5-8f6b-d746fbb6e86c"));
+    }
+
+    #[test]
+    fn codex_thread_id_is_the_session_identity() {
+        // codex notify 的 `thread-id` 就是 rollout uuid，`codex resume` 认它。
+        let raw = b"nebula-hook/1 source=codex pane=3\n{\"type\":\"agent-turn-complete\",\"thread-id\":\"b5f6c1c2-1111-2222-3333-444455556666\"}";
+        let event = parse_remote_envelope(raw, Some(3)).unwrap();
+        assert_eq!(event.session_id.as_deref(), Some("b5f6c1c2-1111-2222-3333-444455556666"));
+        // 桥接载荷没有 id 的来源读出 None，不许瞎编。
+        let raw = b"nebula-hook/1 source=opencode pane=3\n{\"kind\":\"done\"}";
+        assert_eq!(parse_remote_envelope(raw, Some(3)).unwrap().session_id, None);
     }
 
     #[test]

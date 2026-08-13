@@ -1522,7 +1522,47 @@ impl WindowContext {
             entry.custom_name = tab.custom_name.clone();
         }
         entry.custom_color = tab.color;
+        self.resume_agent_sessions(tab);
         true
+    }
+
+    /// 冷恢复接续 AI 对话（T1-2）：把保存的叶子与重建后的活动布局按同一
+    /// DFS 序配对，给记录了前台对话的 pane 敲入 resume 命令。
+    ///
+    /// 注入走 ConPTY 输入队列（fastfetch intro 同款机制）：字节安静排队，
+    /// shell 就绪后读到第一行输入才执行，不需要等提示符出现。首叶继承 tab
+    /// 的 launch 身份，只有确定它是裸 shell（Default / Shell）才注入——
+    /// Profile 可能直接启动任意程序（甚至就是 claude，命令会变成发给新
+    /// 对话的假消息），SSH 连接期还有密码/口令交互，字节会落进错误的
+    /// 输入框；其余叶子由 `rebuild_layout` 统一以默认 shell 重建，安全。
+    fn resume_agent_sessions(&mut self, tab: &session::TabSession) {
+        if !self.display.nebula_resume_ai {
+            return;
+        }
+        let Some(saved) = tab.layout.as_ref() else { return };
+        let mut live = Vec::new();
+        self.tabs[self.active_tab].layout.leaves(&mut live);
+        let launch = tab.launch.as_ref().unwrap_or(&session::LaunchSession::Default);
+        let seed_is_plain_shell = matches!(
+            launch,
+            session::LaunchSession::Default | session::LaunchSession::Shell { .. }
+        );
+        // 某个叶子 spawn 失败时 rebuild_layout 会折叠父节点，后续配对右移
+        // 错位——zip 在较短一侧截止。错位注入最多把 resume 敲进错的兄弟
+        // pane，claude/codex 自己会报「找不到会话」，不会破坏任何数据。
+        for (index, (leaf, pane_id)) in saved.leaves().iter().zip(live).enumerate() {
+            let session::LayoutSession::Pane { agent: Some(agent), .. } = leaf else {
+                continue;
+            };
+            if index == 0 && !seed_is_plain_shell {
+                continue;
+            }
+            let Some(command) = agent.resume_command() else { continue };
+            let Some(i) = self.pane_index(pane_id) else { continue };
+            let pane = &mut self.panes[i];
+            pane.notifier.notify(command.into_bytes());
+            pane.notifier.notify(vec![b'\r']);
+        }
     }
 
     /// Spawn a default-shell tab in a saved tab's first-leaf directory —
@@ -1568,7 +1608,7 @@ impl WindowContext {
         seed: &mut Option<PaneId>,
     ) -> Option<Layout> {
         match node {
-            session::LayoutSession::Pane { cwd } => {
+            session::LayoutSession::Pane { cwd, .. } => {
                 if let Some(id) = seed.take() {
                     return Some(Layout::Leaf(id));
                 }
@@ -1701,6 +1741,26 @@ impl WindowContext {
         let pane_cwd = |id: PaneId| {
             self.pane(id).map(|p| p.nebula_state.cwd.trim().to_owned()).unwrap_or_default()
         };
+        // 每个叶子除 cwd 外还记录「此刻前台的 AI 对话」：running_program 由
+        // hook/OSC 设置、133;D 收尾清除，是「快照瞬间它还开着」的存活判据；
+        // 会话 id 必须与它同源（id 记录后前台可能换了别的程序）。只有 hook
+        // 能报 id 的 claude/codex 走精确 resume，OSC 认出的裸 claude 退化
+        // `--continue`，其余来源不接续。
+        let pane_agent = |id: PaneId| -> Option<session::AgentSession> {
+            let state = &self.pane(id)?.nebula_state;
+            let program = state.running_program.as_deref()?;
+            match &state.ai_session {
+                Some(identity) if identity.source == program => Some(session::AgentSession {
+                    source: identity.source.clone(),
+                    session_id: Some(identity.session_id.clone()),
+                }),
+                _ if matches!(program, "claude" | "codex") => Some(session::AgentSession {
+                    source: program.to_owned(),
+                    session_id: None,
+                }),
+                _ => None,
+            }
+        };
         let mut leaves = Vec::new();
         tab.layout.leaves(&mut leaves);
         session::TabSession {
@@ -1708,7 +1768,7 @@ impl WindowContext {
             custom_name: tab.custom_name.clone(),
             color: tab.custom_color,
             launch: Some(Self::launch_session(&tab.launch)),
-            layout: Some(Self::layout_session(&tab.layout, &pane_cwd)),
+            layout: Some(Self::layout_session(&tab.layout, &pane_cwd, &pane_agent)),
             active_pane: leaves.iter().position(|id| *id == tab.active_pane).unwrap_or(0),
         }
     }
@@ -1738,13 +1798,17 @@ impl WindowContext {
         }
     }
 
-    /// Serialize a layout tree, resolving each leaf to its pane's cwd.
+    /// Serialize a layout tree, resolving each leaf to its pane's cwd plus the
+    /// AI conversation running in it (if any).
     fn layout_session(
         layout: &Layout,
         pane_cwd: &impl Fn(PaneId) -> String,
+        pane_agent: &impl Fn(PaneId) -> Option<session::AgentSession>,
     ) -> session::LayoutSession {
         match layout {
-            Layout::Leaf(id) => session::LayoutSession::Pane { cwd: pane_cwd(*id) },
+            Layout::Leaf(id) => {
+                session::LayoutSession::Pane { cwd: pane_cwd(*id), agent: pane_agent(*id) }
+            },
             Layout::Split { direction, ratio, first, second, .. } => {
                 session::LayoutSession::Split {
                     axis: match direction {
@@ -1752,8 +1816,8 @@ impl WindowContext {
                         crate::display::SplitDirection::TopBottom => session::SplitAxis::TopBottom,
                     },
                     ratio_permille: (ratio.clamp(0.0, 1.0) * 1000.0).round() as u16,
-                    first: Box::new(Self::layout_session(first, pane_cwd)),
-                    second: Box::new(Self::layout_session(second, pane_cwd)),
+                    first: Box::new(Self::layout_session(first, pane_cwd, pane_agent)),
+                    second: Box::new(Self::layout_session(second, pane_cwd, pane_agent)),
                 }
             },
         }
@@ -2049,6 +2113,14 @@ impl WindowContext {
         {
             let state = &mut self.panes[idx].nebula_state;
             state.running_program = Some(ev.source.clone());
+            // 会话身份跟着事件走：同一个 pane 里 /clear、重开会话都会带来
+            // 新 id，最后一次上报永远是权威。133;D（CLI 退回提示符）清除。
+            if let Some(id) = ev.session_id.as_deref() {
+                state.ai_session = Some(crate::display::AiSessionIdentity {
+                    source: ev.source.clone(),
+                    session_id: id.to_owned(),
+                });
+            }
         }
 
         match ev.kind {
@@ -3049,28 +3121,27 @@ impl WindowContext {
                         Event::new(EventType::NebulaResizeSettled, self.display.window.id());
                     scheduler.schedule(event, Duration::from_millis(150), false, timer);
                 } else {
-                    // Leading edge: flush now. `resize_active_layout_ptys`
-                    // only touches notifiers/intro (no terminal lock), so the
-                    // focused pane's guard held above stays safe.
+                    // Leading edge: commit every grid before its PTY.  This is
+                    // the first size in the drag sequence, so committing it
+                    // immediately preserves startup/single-resize latency
+                    // while every following tick can remain visual-only.
                     self.display.nebula_pty_resize_pending = false;
                     self.last_pty_resize = Some(now);
-                    self.resize_active_layout_ptys();
+                    drop(terminal);
+                    self.resize_active_layout();
+                    terminal = terminal_arc.lock();
                 }
             }
 
-            // A window resize rebuilt `self.display.size_info`; re-derive every
-            // pane's grid so a split tracks the new dimensions. PTY-side
-            // notification waits for the settle timer above.
-            if !matches!(self.active_layout(), Layout::Leaf(_)) {
-                drop(terminal);
-                self.resize_active_layout_grids();
-                return;
-            }
+            // During a drag the renderer uses each pane's new visual viewport,
+            // while its grid deliberately remains at the last ConPTY-committed
+            // size. Do not reflow split grids here: that would recreate the
+            // width-history divergence this debounce exists to prevent.
         }
 
         if self.dirty || self.mouse.hint_highlight_dirty {
-            let visual_point =
-                self.mouse.point(&self.display.pane_view(), terminal.grid().display_offset());
+            let view = self.display.pane_view();
+            let visual_point = self.mouse.point(&view, &*terminal);
             let pane = match focused {
                 Some(index) => &self.panes[index],
                 None => &self.doc_pane,
@@ -3080,7 +3151,7 @@ impl WindowContext {
                 .terminal_math_source_point(
                     visual_point,
                     self.mouse.cell_side,
-                    terminal.grid().display_offset(),
+                    terminal.viewport_origin_for(view.screen_lines()),
                 )
                 .0;
             self.dirty |= self.display.update_highlighted_hints(
@@ -3149,7 +3220,10 @@ impl WindowContext {
             return;
         }
         self.last_pty_resize = Some(Instant::now());
-        self.resize_active_layout_ptys();
+        // Commit the final geometry in the same ordering as the leading edge:
+        // output parsed after the PTY resize now sees the exact grid reflow
+        // history used by ConPTY, without paying for per-tick resize storms.
+        self.resize_active_layout();
     }
 
     /// Submit the pending changes to the `Display`.

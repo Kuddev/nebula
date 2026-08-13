@@ -43,12 +43,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         let lmb_pressed = self.ctx.mouse().left_button_state == ElementState::Pressed;
         let rmb_pressed = self.ctx.mouse().right_button_state == ElementState::Pressed;
-        if !self.ctx.selection_is_empty() && (lmb_pressed || rmb_pressed) {
+        // Auto-scroll only for drags that actually extend the selection (same
+        // guard as the update below): inside a mouse-mode TUI a plain drag is
+        // reported to the application, and a stale selection from an earlier
+        // Shift+drag must not arm the repeating scroll timer.
+        if !self.ctx.selection_is_empty()
+            && (lmb_pressed || rmb_pressed)
+            && (self.ctx.modifiers().state().shift_key() || !self.ctx.mouse_mode())
+        {
             self.update_selection_scrolling(y);
         }
 
-        let display_offset = self.ctx.terminal().grid().display_offset();
-        let old_point = self.ctx.mouse().point(&size_info, display_offset);
+        let old_point = self.ctx.mouse().point(&size_info, self.ctx.terminal());
         let (old_point, _) =
             self.ctx.terminal_math_source_point(old_point, self.ctx.mouse().cell_side);
 
@@ -66,6 +72,19 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 self.ctx.display().finish_settings_opacity_drag();
             }
             self.ctx.window().set_mouse_cursor(CursorIcon::EwResize);
+            self.ctx.mark_dirty();
+            return;
+        }
+
+        // 背景色调色盘拖拽：SV 面 / 色相条按住即连续取色，与不透明度滑条
+        // 同一套"拖动实时应用、松手落盘"节奏。
+        if self.ctx.display().nebula_bg_picker_drag.is_some() {
+            if lmb_pressed {
+                self.ctx.display().update_bg_picker_drag(x as f32, y as f32);
+            } else {
+                self.ctx.display().finish_bg_picker_drag();
+            }
+            self.ctx.window().set_mouse_cursor(CursorIcon::Crosshair);
             self.ctx.mark_dirty();
             return;
         }
@@ -400,6 +419,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::SystemThemeToggle
             | crate::display::SettingsHit::GhostToggle
             | crate::display::SettingsHit::AcceptCycle
+            | crate::display::SettingsHit::CompletionStyleCycle
+            | crate::display::SettingsHit::CompletionStyleOption(_)
             | crate::display::SettingsHit::ShellCycle
             | crate::display::SettingsHit::ShellPickerRow(_)
             | crate::display::SettingsHit::StartupDirectory
@@ -409,7 +430,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::RestoreHiddenSsh(_)
             | crate::display::SettingsHit::SshHostConnect(_)
             | crate::display::SettingsHit::SshHostEdit(_)
-            | crate::display::SettingsHit::SshHostHide(_)
+            | crate::display::SettingsHit::SshHostDelete(_)
             | crate::display::SettingsHit::SshImportConfig
             | crate::display::SettingsHit::SshAddHost
             | crate::display::SettingsHit::ProviderAdd
@@ -426,7 +447,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             | crate::display::SettingsHit::BlurToggle
             | crate::display::SettingsHit::KeepSessionToggle
             | crate::display::SettingsHit::RestoreSessionToggle
+            | crate::display::SettingsHit::ResumeAiToggle
             | crate::display::SettingsHit::BackgroundColor
+            | crate::display::SettingsHit::BackgroundSvPlane
+            | crate::display::SettingsHit::BackgroundHueBar
             | crate::display::SettingsHit::BackgroundImage
             | crate::display::SettingsHit::BackgroundImageClear
             | crate::display::SettingsHit::BackgroundImageFit
@@ -648,7 +672,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
         }
 
-        let point = self.ctx.mouse().point(&size_info, display_offset);
+        let point = self.ctx.mouse().point(&size_info, self.ctx.terminal());
         let (point, cell_side) = self.ctx.terminal_math_source_point(point, visual_cell_side);
         let cell_changed = old_point != point;
 
@@ -754,8 +778,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     pub(super) fn mouse_report(&mut self, button: u8, state: ElementState) {
-        let display_offset = self.ctx.terminal().grid().display_offset();
-        let point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        let point = self.ctx.mouse().point(&self.ctx.size_info(), self.ctx.terminal());
         let (point, _) = self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side);
 
         // Assure the mouse point is not in the scrollback.
@@ -859,8 +882,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     // the wrong row and miss links the hover clearly marked.
                     let hint_point = {
                         let view = self.ctx.display().pane_view();
-                        let display_offset = self.ctx.terminal().grid().display_offset();
-                        let point = self.ctx.mouse().point(&view, display_offset);
+                        let point = self.ctx.mouse().point(&view, self.ctx.terminal());
                         self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side).0
                     };
                     if let Some(hint) = crate::display::hint::highlighted_at(
@@ -934,6 +956,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     }
 
     fn on_mouse_release(&mut self, button: MouseButton) {
+        // A release ALWAYS ends selection-drag auto-scrolling, before any of
+        // the early returns below. The repeating 15 ms timer is armed by any
+        // selection drag that crosses the text-area edge (the top band covers
+        // the whole chrome, so it is easy to hit). If the release is then
+        // consumed early — most commonly Shift+drag-select inside a mouse-mode
+        // TUI (claude/codex/cursor CLI) with Shift let go first, which lands
+        // in the mouse_report branch — the timer used to survive and kept
+        // scrolling the viewport forever: the "view teleports through a long
+        // session / tab looks frozen until a keystroke snaps it back" bug.
+        let selection_scrolling = TimerId::new(Topic::SelectionScrolling, self.ctx.window().id());
+        self.ctx.scheduler_mut().unschedule(selection_scrolling);
+
         // Nebula: finish an in-progress tab-bar reorder drag first, so it works
         // even while a TUI has grabbed the mouse. A plain click (never dragged)
         // returns `None` here and falls through to normal release handling.
@@ -944,6 +978,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             // 都会把这个拖拽状态留下，于是下一次移动鼠标还在选字。
             self.ctx.display().ssh_editor_end_drag();
             if self.ctx.display().finish_settings_opacity_drag() {
+                self.ctx.mark_dirty();
+                return;
+            }
+            if self.ctx.display().finish_bg_picker_drag() {
                 self.ctx.mark_dirty();
                 return;
             }
@@ -1061,9 +1099,6 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             }
         }
         self.ctx.display().highlighted_hint = hint;
-
-        let timer_id = TimerId::new(Topic::SelectionScrolling, self.ctx.window().id());
-        self.ctx.scheduler_mut().unschedule(timer_id);
 
         if let MouseButton::Left | MouseButton::Right = button {
             // Copy selection on release, to prevent flooding the display server.
@@ -1523,8 +1558,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     /// Icon state of the cursor.
     fn cursor_state(&mut self) -> CursorIcon {
         self.update_message_close_hover();
-        let display_offset = self.ctx.terminal().grid().display_offset();
-        let mut point = self.ctx.mouse().point(&self.ctx.size_info(), display_offset);
+        let mut point = self.ctx.mouse().point(&self.ctx.size_info(), self.ctx.terminal());
         point = self.ctx.terminal_math_source_point(point, self.ctx.mouse().cell_side).0;
         // `point` is clamped to `size_info`, but we're about to index the grid,
         // whose column/line count can trail `size_info` by one during a resize

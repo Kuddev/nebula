@@ -79,6 +79,31 @@ impl NebulaHistory {
         best.map(|(_, rem)| rem)
     }
 
+    /// Up to `limit` commands beginning with `prefix` (strict extensions
+    /// only), newest first, as `(full_command, remainder)` pairs. Same indexed
+    /// range scan as [`Self::hint`]; feeds the popup completion list.
+    pub fn hints(&self, prefix: &str, limit: usize) -> Vec<(&str, &str)> {
+        if prefix.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let mut matches: Vec<(usize, &str)> = Vec::new();
+        for (cmd, &pos) in self.index.range(prefix.to_owned()..) {
+            if !cmd.starts_with(prefix) {
+                break;
+            }
+            if cmd.len() == prefix.len() {
+                continue; // exact match — nothing to complete
+            }
+            matches.push((pos, cmd.as_str()));
+        }
+        matches.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        matches
+            .into_iter()
+            .take(limit)
+            .map(|(_, cmd)| (cmd, &cmd[prefix.len()..]))
+            .collect()
+    }
+
     /// Insert a command, deduplicating and rebuilding the index when an old
     /// copy is displaced, and trimming to [`HISTORY_MAX`].
     fn insert(&mut self, cmd: String) {
@@ -215,5 +240,20 @@ mod tests {
         let h = hist(&["git push", "gitk"]);
         // "git " must not match "gitk" (no space).
         assert_eq!(h.hint("git "), Some("push"));
+    }
+
+    #[test]
+    fn hints_lists_matches_newest_first_and_caps_at_limit() {
+        let h = hist(&["git pull", "git push", "git status", "ls"]);
+        assert_eq!(h.hints("git ", 2), vec![("git status", "status"), ("git push", "push")]);
+        assert_eq!(h.hints("git ", 8).len(), 3);
+        assert!(h.hints("npm ", 8).is_empty());
+        assert!(h.hints("", 8).is_empty());
+    }
+
+    #[test]
+    fn hints_skips_the_exact_match_like_hint_does() {
+        let h = hist(&["cargo build", "cargo b"]);
+        assert_eq!(h.hints("cargo b", 8), vec![("cargo build", "uild")]);
     }
 }

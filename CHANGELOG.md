@@ -10,6 +10,9 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Added
 
+- **Two completion styles with a switch** — Settings → Terminal → Completion adds a "Completion style" choice between the existing inline ghost text and a new popup candidate list. The popup gathers history, frecency directories, PATH commands, and filesystem matches (up to 8, with source tags), navigates with Up/Down, accepts with the configured accept key (Tab/Right), and dismisses with Esc without re-opening until the line changes. A command-palette action toggles the style, and the choice persists as `completion_style`.
+- **A real color picker for the custom background** — the background-color popup now leads with a saturation/value plane and a hue bar; dragging picks continuously with live terminal preview and persists on release. The preset swatches and the hex field remain, and all three inputs stay in sync (including hue retention across gray/black/white picks).
+- **Clipboard screenshot paste, locally and over SSH** — pasting with an image-only clipboard (e.g. right after Win+Shift+S) now converts the bitmap to PNG and pastes a file path instead of nothing. Local panes write a temp file; SSH panes upload via the existing SFTP stack to `/tmp/nebula-paste-<ts>.png` in the background and then type the remote path into the pane — so image-accepting CLIs like codex and claude receive a usable path on both sides (interaction modeled on Netcatty).
 - **Configurable new-tab placement** — Settings → Interaction can place newly created tabs immediately after the active tab or at the end of the tab list. The choice persists, while restored tabs keep their original ordering semantics.
 - **Configurable terminal cell width** — Settings → Appearance offers Compact and Relaxed cell-width modes. Changing the mode immediately rebuilds font metrics, the terminal grid, pane layout, and PTY dimensions, and the choice persists across launches.
 - **Ordered font fallback chains** — `font_family` accepts comma-separated families such as `JetBrains Mono, LXGW WenKai, Cascadia Code`. The first family remains the primary face, later families fill missing glyphs in order for regular, bold, italic, and bold-italic text, and the embedded Maple font remains the final fallback. System and imported/private fonts now use the same family lookup path for validation, preview, and rendering. (#33)
@@ -17,7 +20,9 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Fixed
 
-- **Cursor focus and blinking stay in sync across tabs and panes** — cursor rendering now combines the live window focus with the active pane, and switching tabs or panes re-evaluates blinking for the newly focused terminal. Unfocused cursors remain hollow and do not retain a stale blink timer.
+- **Explorer context-menu launches join the resident instance** — "Open in Nebula" used to be treated as explicit intent and always started an independent window, so tabs detached in the resident process looked lost. A directory launch without `-e` now attaches the existing instance first (restoring its tabs) and opens the directory as a new tab in that window, brought to the foreground; without a resident instance it still starts standalone. The runtime API's `tab.new` gained an optional `cwd` parameter to carry this.
+- **Imported terminals become selectable in the default-shell dropdown** — the dropdown's hit test counted only detected shells while the list also renders imported quick-launch profiles, leaving the trailing rows visible but unclickable. Both sides now share one count.
+- **Git panel no longer blanks on repositories owned by another user** — `git status`/`diff` in the drawer run with a per-invocation `safe.directory` exemption, fixing the silently empty Git view on `\\wsl$\…` roots and elevated-owner checkouts where the same commands work in the user's own shell. Failures now leave a debug-log trace instead of a silent blank.
 - **Visible Windows windows recover from stuck render gates** — startup-time occlusion misreports and missing frame callbacks can no longer leave an already visible window accepting input without repainting. Occlusion is ignored unless the window is actually minimized, and the existing 1 Hz window heartbeat idempotently releases stale `occluded` and `has_frame` gates. (#21)
 
 #### Improved
@@ -28,6 +33,9 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### 新增
 
+- **两种补全样式可切换** — “设置 → 终端 → 补全”新增「补全样式」：在既有的行内灰字与新的弹窗候选列表之间选择。弹窗汇总历史命令、常用目录、PATH 命令与文件系统匹配（至多 8 项，带来源标签），↑/↓ 选行、按补全接受键（Tab/→）接受、Esc 关闭且同一行不再重弹；命令面板提供切换动作，选择以 `completion_style` 持久化。
+- **自定义背景色改用真调色盘** — 背景色浮层顶部新增饱和度/明度取色面与色相条，按住拖动即连续取色、终端实时预览、松手落盘。预设色板与 16 进制输入保留，三种输入互相同步（灰/黑/白取色时保留既有色相）。
+- **剪贴板截图粘贴（本地与 SSH）** — 剪贴板只有位图没有文本时（如 Win+Shift+S 之后），粘贴会把位图转成 PNG 并粘出文件路径：本地 pane 写入临时文件；SSH pane 经既有 SFTP 栈后台上传到远端 `/tmp/nebula-paste-<时间戳>.png` 再把远端路径敲进会话——codex/claude 这类接受图片路径的 CLI 在两侧都能直接用（交互参考 Netcatty）。
 - **可配置新标签页插入位置** — “设置 → 交互”可选择把新建标签页插在当前标签页之后，或放到标签列表末尾。选择会持久化；恢复会话中的标签页仍保持原有顺序语义。
 - **可配置终端单元格宽度** — “设置 → 外观”新增“紧凑”和“宽松”两种单元格宽度模式。切换后会立即重算字体度量、终端网格、分屏布局和 PTY 尺寸，并在下次启动时保留选择。
 - **有序字体 fallback 链** — `font_family` 支持逗号分隔的字体族，例如 `JetBrains Mono, 霞鹜文楷, Cascadia Code`。第一个字体族仍是主字体，后续字体族按顺序为常规、粗体、斜体和粗斜体补齐缺失字形，内置 Maple 字体始终作为最后兜底。系统字体与导入/私有字体现在统一通过同一族名查找路径完成校验、预览和渲染。（#33）
@@ -35,7 +43,9 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### 修复
 
-- **切换标签页和分屏后光标焦点与闪烁保持同步** — 光标渲染现在同时依据实时窗口焦点与活动分屏，切换标签页或分屏时会重新评估新终端的闪烁状态。失焦光标保持空心，也不会残留旧终端的闪烁计时器。
+- **资源管理器右键打开并入驻留实例** — 「在 Nebula 中打开」此前被当作显式意图而总是启动独立窗口，驻留进程里 detached 的标签看起来就“丢了”。带目录、无 `-e` 命令的启动现在会先 ATTACH 既有实例（找回原有标签），再在该窗口新开定目录标签并置前；没有驻留实例时仍独立启动。runtime API 的 `tab.new` 为此新增可选 `cwd` 参数。
+- **导入的终端在默认 Shell 下拉中可以选中** — 下拉的命中测试此前只统计检测到的 shell，而列表还渲染了导入的快速启动配置，末尾几行看得见点不中。绘制与命中现在共用同一计数。
+- **Git 面板在他人所有的仓库上不再空白** — 抽屉里的 `git status`/`diff` 以单次调用范围的 `safe.directory` 豁免运行，修复 `\\wsl$\…` 根目录与提升权限检出下“自己 shell 里 git status 正常、面板却空白”的问题；失败现在会留下调试日志而不是无声空白。
 - **Windows 可见窗口可从卡死的渲染门控中恢复** — 启动期的遮挡误报或帧回调丢失不再让可见窗口陷入“能接收输入但不重绘”。窗口没有真正最小化时会忽略遮挡误报，既有的 1 Hz 窗口心跳也会以幂等方式释放卡住的 `occluded` 与 `has_frame` 门控。（#21）
 
 #### 改进

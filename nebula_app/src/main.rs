@@ -239,14 +239,30 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     // Mux hand-over: a plain re-launch of Nebula does not start a second
     // terminal — the resident instance re-attaches its detached tabs (their
     // PTYs never stopped) or focuses its window. Explicit intent (-e,
-    // --working-directory, --daemon) always starts a real instance.
+    // --daemon) always starts a real instance.
     #[cfg(windows)]
     {
+        let has_command = options.window_options.terminal_options.command().is_some();
         let plain_launch = !options.daemon
             && options.window_options.terminal_options.working_directory.is_none()
-            && options.window_options.terminal_options.command().is_none();
+            && !has_command;
         if plain_launch && runtime_api::try_attach_existing() {
             return Ok(());
+        }
+        // Explorer 右键「在 Nebula 中打开」带着 --working-directory 走到这里。
+        // 此前它被一律判成"显式意图 → 独立实例"，绕过 mux 交接：驻留进程里
+        // detached 的标签接不回来，表现就是"之前的标签没了 + 多出一个独立
+        // 窗口"。带目录、无 -e 命令的启动现在优先并入驻留实例——ATTACH 恢复
+        // 窗口，再在其中打开定目录标签；没有驻留实例时照旧独立启动。
+        let dir_launch = !options.daemon && !has_command;
+        if dir_launch {
+            if let Some(dir) =
+                options.window_options.terminal_options.resolved_working_directory()
+            {
+                if dir.is_dir() && runtime_api::try_open_directory_existing(&dir) {
+                    return Ok(());
+                }
+            }
         }
     }
     boot_trace("mux probe done");

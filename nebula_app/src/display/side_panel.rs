@@ -1081,9 +1081,17 @@ fn build_search_index(dir: &Path, depth: usize, index: &mut Vec<FileRow>, budget
 /// synchronously — callers throttle (see [`SidePanel::sync`]).
 fn read_git(root: &Path) -> Option<GitInfo> {
     use std::process::Command;
+    // `safe.directory` scoped to this one invocation: repos owned by another
+    // user — most commonly a `\\wsl$\…` UNC root, where every file belongs to
+    // the WSL distro — make git bail with "dubious ownership" and the Git view
+    // silently blanked while `git status` in the user's own shell worked fine
+    // (个别情况 status 可用但面板不显示). Read-only status/diff on a directory
+    // the user is already browsing carries none of the write risks the global
+    // opt-in guards against.
+    let safe_directory = format!("safe.directory={}", root.display());
     let run = |args: &[&str]| -> Option<String> {
         let mut cmd = Command::new("git");
-        cmd.arg("--no-optional-locks").args(args).current_dir(root);
+        cmd.args(["-c", &safe_directory, "--no-optional-locks"]).args(args).current_dir(root);
         // Suppress the console window that `Command` flashes on Windows GUI apps.
         #[cfg(windows)]
         {
@@ -1091,7 +1099,15 @@ fn read_git(root: &Path) -> Option<GitInfo> {
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         let out = cmd.output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        if !out.status.success() {
+            // Leave a trace instead of a silent blank panel: the first stderr
+            // line names the actual refusal (ownership, not-a-repo, …).
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let reason = stderr.lines().next().unwrap_or("unknown error");
+            log::debug!("git {:?} failed in {}: {reason}", args.first(), root.display());
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
     };
 
     // `-b --porcelain` yields `## branch...upstream [ahead N]` + one `XY path`

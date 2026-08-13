@@ -65,6 +65,50 @@ pub enum SplitAxis {
     TopBottom,
 }
 
+/// 快照瞬间仍在一个 pane 前台运行的 AI CLI 对话。冷恢复用它接续会话：
+/// 身份来自 hook 直报（claude `session_id` / codex `thread-id`），缺 id 的
+/// claude 退化成 `--continue`（按 cwd 找最近对话，恰好匹配恢复语义）。
+///
+/// 只存「安全启动描述」——来源名 + id，不存正文、不存启动参数原文。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSession {
+    /// CLI identity as the hook reports it (`claude` / `codex`).
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+impl AgentSession {
+    /// 恢复时敲进 shell 的命令行；无法安全构造（未知来源、异形 id、codex
+    /// 缺 id）时返回 `None`，宁可只恢复布局也不上屏可疑字节。命令形状与
+    /// `ai_sessions::AiSession::resume_command`（手动恢复面板）保持一致。
+    pub fn resume_command(&self) -> Option<String> {
+        let id = match self.session_id.as_deref() {
+            Some(id) if valid_session_id(id) => Some(id),
+            // 有 id 但形状可疑：绝不把它敲进终端。
+            Some(_) => return None,
+            None => None,
+        };
+        match (self.source.as_str(), id) {
+            ("claude", Some(id)) => Some(format!("claude --resume {id}")),
+            // claude 无 id（hook 未装、OSC 认出的启动）：`--continue` 恢复
+            // 当前目录最近一次对话——pane 的 cwd 已经先被恢复，语义正好。
+            ("claude", None) => Some("claude --continue".to_owned()),
+            ("codex", Some(id)) => Some(format!("codex resume {id}")),
+            // codex 没有按目录 continue 的形式，缺 id 只能放弃接续。
+            _ => None,
+        }
+    }
+}
+
+/// 会话 id 只可能是 uuid 一族的字符集；其余一律拒绝，这行字符串会被敲进
+/// 用户的 shell，必须按不可信输入对待。
+fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// A tab's pane tree. Leaves carry each pane's working directory; splits carry
 /// the axis and the first child's share in permille — an integer, so autosave
 /// change detection and file diffs never trip on f32 serialization noise.
@@ -73,6 +117,10 @@ pub enum SplitAxis {
 pub enum LayoutSession {
     Pane {
         cwd: String,
+        /// v4 的追加可选字段（老文件缺省、老版本忽略，无需升版）：快照时
+        /// 该 pane 前台的 AI CLI 对话，冷恢复据此自动接续。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentSession>,
     },
     Split {
         axis: SplitAxis,
@@ -95,9 +143,26 @@ impl LayoutSession {
     /// tab's first pane adopts.
     pub fn first_cwd(&self) -> &str {
         match self {
-            Self::Pane { cwd } => cwd,
+            Self::Pane { cwd, .. } => cwd,
             Self::Split { first, .. } => first.first_cwd(),
         }
+    }
+
+    /// Depth-first leaves — the SAME order `rebuild_layout` spawns panes in,
+    /// so index i here pairs with the i-th live leaf after a restore.
+    pub fn leaves(&self) -> Vec<&LayoutSession> {
+        fn walk<'tree>(node: &'tree LayoutSession, out: &mut Vec<&'tree LayoutSession>) {
+            match node {
+                LayoutSession::Pane { .. } => out.push(node),
+                LayoutSession::Split { first, second, .. } => {
+                    walk(first, out);
+                    walk(second, out);
+                },
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut out);
+        out
     }
 }
 
@@ -358,12 +423,18 @@ mod tests {
         tab.layout = Some(LayoutSession::Split {
             axis: SplitAxis::LeftRight,
             ratio_permille: 618,
-            first: Box::new(LayoutSession::Pane { cwd: "D:/work".into() }),
+            first: Box::new(LayoutSession::Pane {
+                cwd: "D:/work".into(),
+                agent: Some(AgentSession {
+                    source: "claude".into(),
+                    session_id: Some("0199a213-c2a4-7cf5-8f6b-d746fbb6e86c".into()),
+                }),
+            }),
             second: Box::new(LayoutSession::Split {
                 axis: SplitAxis::TopBottom,
                 ratio_permille: 500,
-                first: Box::new(LayoutSession::Pane { cwd: "D:/logs".into() }),
-                second: Box::new(LayoutSession::Pane { cwd: String::new() }),
+                first: Box::new(LayoutSession::Pane { cwd: "D:/logs".into(), agent: None }),
+                second: Box::new(LayoutSession::Pane { cwd: String::new(), agent: None }),
             }),
         });
         tab.active_pane = 2;
@@ -373,6 +444,79 @@ mod tests {
         let restored = parse(&json).expect("v4 must parse");
         assert_eq!(restored, session);
         assert_eq!(restored.tabs[0].layout.as_ref().unwrap().pane_count(), 3);
+    }
+
+    /// agent 是 v4 的追加可选字段：带 agent 的树往返不丢；没有这个字段的
+    /// 旧 v4 文件照常解析（缺省 None），两个方向都不需要升版。
+    #[test]
+    fn pane_agent_field_is_additive_on_v4() {
+        let json = r#"{"version":4,"boot_attempts":0,"active_tab":0,"tabs":[{"cwd":"D:/w","layout":{"kind":"pane","cwd":"D:/w"}}]}"#;
+        let session = parse(json).expect("v4 without agent must parse");
+        assert_eq!(
+            session.tabs[0].layout,
+            Some(LayoutSession::Pane { cwd: "D:/w".into(), agent: None })
+        );
+
+        let with_agent = LayoutSession::Pane {
+            cwd: "D:/w".into(),
+            agent: Some(AgentSession { source: "codex".into(), session_id: Some("abc-1".into()) }),
+        };
+        let json = serde_json::to_string(&with_agent).unwrap();
+        assert_eq!(serde_json::from_str::<LayoutSession>(&json).unwrap(), with_agent);
+    }
+
+    /// resume 命令是要敲进用户 shell 的字节：形状必须与手动恢复面板一致，
+    /// 异形 id 一律拒绝，未知来源与缺 id 的 codex 放弃接续。
+    #[test]
+    fn agent_resume_commands_are_exact_and_injection_safe() {
+        let agent = |source: &str, id: Option<&str>| AgentSession {
+            source: source.into(),
+            session_id: id.map(str::to_owned),
+        };
+        assert_eq!(
+            agent("claude", Some("abc-123")).resume_command().as_deref(),
+            Some("claude --resume abc-123")
+        );
+        assert_eq!(
+            agent("claude", None).resume_command().as_deref(),
+            Some("claude --continue")
+        );
+        assert_eq!(
+            agent("codex", Some("b5f6c1c2-1111-2222-3333-444455556666")).resume_command().as_deref(),
+            Some("codex resume b5f6c1c2-1111-2222-3333-444455556666")
+        );
+        assert_eq!(agent("codex", None).resume_command(), None);
+        assert_eq!(agent("gemini", Some("abc")).resume_command(), None, "无 resume 语法的来源");
+        // shell 元字符、空串、超长——全都不许上屏。
+        assert_eq!(agent("claude", Some("abc; rm -rf /")).resume_command(), None);
+        assert_eq!(agent("claude", Some("")).resume_command(), None);
+        assert_eq!(agent("claude", Some(&"a".repeat(65))).resume_command(), None);
+    }
+
+    /// leaves 的 DFS 序必须与 pane_count/重建顺序一致——恢复注入靠索引配对。
+    #[test]
+    fn leaves_walk_depth_first_matching_rebuild_order() {
+        let tree = LayoutSession::Split {
+            axis: SplitAxis::LeftRight,
+            ratio_permille: 500,
+            first: Box::new(LayoutSession::Pane { cwd: "a".into(), agent: None }),
+            second: Box::new(LayoutSession::Split {
+                axis: SplitAxis::TopBottom,
+                ratio_permille: 500,
+                first: Box::new(LayoutSession::Pane { cwd: "b".into(), agent: None }),
+                second: Box::new(LayoutSession::Pane { cwd: "c".into(), agent: None }),
+            }),
+        };
+        let leaves = tree.leaves();
+        assert_eq!(leaves.len(), tree.pane_count());
+        let cwds: Vec<_> = leaves
+            .iter()
+            .map(|leaf| match leaf {
+                LayoutSession::Pane { cwd, .. } => cwd.as_str(),
+                LayoutSession::Split { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(cwds, ["a", "b", "c"]);
     }
 
     #[test]

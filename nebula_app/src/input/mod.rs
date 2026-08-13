@@ -99,6 +99,20 @@ pub trait ActionContext<T: EventListener> {
     fn nebula_take_suggestion(&mut self) -> String {
         String::new()
     }
+    /// 弹窗补齐：列表是否正显示（决定方向键/接受键是否被弹窗接管）。
+    fn nebula_completion_popup_active(&self) -> bool {
+        false
+    }
+    /// 弹窗补齐：高亮行上下移动（循环）。
+    fn nebula_completion_popup_move(&mut self, _delta: isize) {}
+    /// 弹窗补齐：取走选中候选要输入的余量并关闭列表。
+    fn nebula_completion_popup_take(&mut self) -> Option<String> {
+        None
+    }
+    /// 弹窗补齐：Esc 关闭列表；返回是否真的关闭了（决定按键是否吞掉）。
+    fn nebula_completion_popup_dismiss(&mut self) -> bool {
+        false
+    }
     /// 助手建议条（spec 001）：取走 Ready 状态里的命令（Ctrl+. 贴入用）。
     /// Pending 不受影响——分析中的请求不因误按 Ctrl+. 而丢。
     fn nebula_take_ai_fix(&mut self) -> Option<String> {
@@ -199,6 +213,12 @@ pub trait ActionContext<T: EventListener> {
     /// Paste without the multi-line confirmation gate (used by the confirm
     /// modal's Enter handler once the user approved).
     fn paste_now(&mut self, _text: &str, _bracketed: bool) {}
+    /// 剪贴板没有文本但有截图时的粘贴回退：本地 pane 存临时 PNG 后粘路径，
+    /// SSH pane 经 SFTP 上传到远端 `/tmp` 后回粘远端路径（codex/claude 这类
+    /// 接受图片路径的 CLI 因此在两侧都能"粘图"）。返回是否接管了这次粘贴。
+    fn paste_clipboard_image(&mut self) -> bool {
+        false
+    }
     fn spawn_daemon<I, S>(&self, _program: &str, _args: I)
     where
         I: IntoIterator<Item = S> + Debug + Copy,
