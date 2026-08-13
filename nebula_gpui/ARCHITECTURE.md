@@ -4,6 +4,11 @@
 incremental migration surface; it does not replace the existing `nebula_app`
 runtime yet.
 
+It is a laboratory, not a home: the single maintained product is
+`nebula_app` (`nebula.exe`), and modules proven here are integrated into
+`nebula_app` rather than accumulating product code in this crate. The
+staged plan lives in the repo-root `ROADMAP.md`.
+
 ## Adoption & Rollback Discipline
 
 GPUI adoption is direct: once a surface is judged genuinely better served by

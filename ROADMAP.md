@@ -1,0 +1,82 @@
+# Nebula UI 终局路线图
+
+定案时间：2026-08-13。本文件是唯一的长期计划权威；阶段推进、闸门结果、
+裁定变更都回写到这里。
+
+## 终局形态（不可协商的三条）
+
+1. **唯一产品、唯一代码库**：`nebula.exe`（`nebula_app`）。GPUI 最终作为
+   `nebula_app` 体内的 UI 层接入——不是第二个产品 exe。`nebula_gpui` crate
+   永远只是**实验场**：快速验证组件、交互与渲染方案；验证通过的模块**并入
+   `nebula_app`**，产品代码不在实验场安家。
+2. **网格渲染永远自有**：`nebula_terminal` 引擎 + 渲染合同
+   （`render.rs` / `render/boxdraw.rs`）+ 终端 Element。终端内容只存在
+   "单元格网格"一种形态，排版引擎（任何字体系统）无权移动网格字形。
+   powerline、fastfetch、TUI 边框、CJK 对齐是**验收闸门**，不是愿望。
+3. **回滚 = 代码保留 + git 历史**：旧 winit/OpenGL UI 保留在树上、保持可
+   构建，直到闸门全过 + 稳定期结束；删除旧 UI 是迁移的最后一步。不设
+   运行时开关、不留长期 feature flag 双路径。
+
+## 三道闸门（任一否决即停在原地）
+
+| 闸门 | 内容 | 验收方式 |
+|---|---|---|
+| G1 性能 | 大流量吞吐与滚动流畅度不低于旧渲染器既定比例（首测后定阈值） | `scripts/perf_baseline.ps1` 可重复测量，新旧同负载对比 |
+| G2 IME | 中文输入全链路：预编辑、候选窗跟随光标、提交、退格 | 人工清单（用户亲手验收） |
+| G3 视觉保真 | powerline 提示符、fastfetch（logo/色块/宽字符）、boxdraw 边框、CJK 对齐、光标形态 | 新旧并排截图对账 |
+
+## 阶段
+
+### P0 地基（已完成）
+
+- workspace 合并（804bc2c）：crossfont 0.9 解除 links 冲突，单 lockfile。
+- 渲染合同（f011d9e、84117c9）：viewport 合流 + 纯数据快照，引擎零框架类型。
+- boxdraw 几何（57dd932）：框线/块/Powerline 收归合同，字体无权染指。
+- 终端 Element + 多 tab 工作区（185e5af、347515f）：真 ConPTY 在 GPUI 内跑通。
+- lib+bin 双形态与进程内拉起验证（a2c4bb0）：双 UI 运行时同进程共存已证实。
+
+### P1 闸门建设（当前）
+
+- **1a 性能基线**：`scripts/perf_baseline.ps1`——同一负载（含 ANSI 色、
+  CJK、boxdraw 字符的大流量输出）打进新旧两壳，量吞吐与内存，写入 CSV。
+  首测数字决定 G1 阈值。
+- **1b IME 清单**：输出一页人工验收清单，等用户有空亲手敲。
+- **1c 视觉对账集**：fastfetch + powerline 提示符 + TUI 边框在新旧两壳的
+  并排截图脚本与基准图。
+
+### P2 实验场补齐终端体验（在 `nebula_gpui` 快速迭代）
+
+迁入前必须在实验场达到"日用无感"：
+
+- 选择/复制细节对齐旧壳（双击选词、行选、复制行为）。
+- 滚动细节：翻页快捷键、回滚缓冲行为、滚动条（如旧壳有）。
+- 分屏：先把分屏规则抽成共享 `SplitTree`（纯数据 + 单测），再接 GPUI 面板。
+- config 共享化：还掉实验场里复制 config 解析的债——共享 crate，一份
+  nebula.toml 两壳同读。
+- 会话/SSH 逻辑共享化评估（能抽则抽，抽不动的记录原因）。
+
+### P3 接入 `nebula_app`（GPUI 成为产品 UI 层）
+
+- GPUI 窗口成为 nebula.exe 的主窗（进程内，主线程或专用线程按 spike 结论）。
+- 验证过的 view/element 模块**物理移入** `nebula_app`（如
+  `nebula_app/src/ui/`），`nebula_gpui` 只留 scratch 实验代码。
+- 产品面在 nebula_app 内直接用组件库实现：设置**原生内嵌侧栏 pane**、
+  启动器/命令面板、SSH 管理、标题栏/Acrylic 对齐。
+- 三闸门在接入形态下复测（实验场数字不能替代产品形态数字）。
+
+### P4 清场与重构（GPUI 接入完成后）
+
+- 稳定期（≥2 周日用）后删除旧 winit/OpenGL UI 与 `gpui-shell` 脚手架。
+- **大文件拆分分层**（用户裁定，接入完成后统一做一次）：
+  - `display/mod.rs`（10342 行）→ 按面拆：终端视图、布局、消息条、弹层等。
+  - `display/settings.rs`（7264 行）→ 设置分组模块化。
+  - `event.rs`（3178 行）/ `window_context.rs`（3100 行）→ 输入/窗口分层。
+  - 拆分原则：先划模块边界再搬代码，行为零变化，每步独立 commit 可回退。
+- crossfont 退场评估（旧渲染器删除后它应随之离开依赖图）。
+
+## 纪律（引用 `nebula_gpui/ARCHITECTURE.md`）
+
+- 功能只写一次，进共享 crate；两壳都只写薄视图。
+- 直接采用：GPUI 赢下某个面后就是该面的唯一实现。
+- 引擎与渲染合同禁止出现 UI 框架类型（Cargo 依赖方向物理执行）。
+- fork 只允许组件级小行为补丁，平台窗口层不碰。
