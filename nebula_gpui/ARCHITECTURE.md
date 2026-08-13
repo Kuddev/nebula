@@ -4,6 +4,30 @@
 incremental migration surface; it does not replace the existing `nebula_app`
 runtime yet.
 
+## Adoption & Rollback Discipline
+
+GPUI adoption is direct: once a surface is judged genuinely better served by
+GPUI components than by the hand-drawn UI, the GPUI implementation becomes
+that surface's code path — no runtime switches, no long-lived feature flags
+keeping two UI paths alive. Parallel paths rot; the component library's value
+is precisely that we stop maintaining hand-drawn widgets.
+
+Rollback is provided by code retention and git history instead:
+
+- The winit shell and the existing hand-drawn UI modules stay in the tree and
+  stay buildable until the GPUI shell has passed the three gates (IME,
+  performance baseline, CJK clarity) plus a stabilization period. Deleting
+  them is the final step of the migration, not a side effect of it.
+- Shared logic (terminal engine, render contract, config, sessions) lives in
+  shared crates, so moving between shells never loses behavior.
+- Each migration step is an isolated commit; if GPUI develops serious bugs,
+  rollback = reverting commits. The old code is still there and still
+  compiles.
+
+The `gpui-shell` cargo feature that currently gates the in-process hook is
+scaffolding for the dual-runtime spike only — it is slated for removal, not a
+rollback mechanism.
+
 ## Direct Component Use
 
 Views should import approved upstream components from `ui::prelude`:
