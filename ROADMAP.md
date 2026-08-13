@@ -56,8 +56,14 @@
   全部 0% CPU）。旧壳发行版始终带侧载对所以从未暴露。修复列入 P2；
   运维规则：任何 nebula 系 exe 旁必须部署侧载对。
 - **1b IME 清单**：输出一页人工验收清单，等用户有空亲手敲。
-- **1c 视觉对账集**：fastfetch + powerline 提示符 + TUI 边框在新旧两壳的
-  并排截图脚本与基准图。
+- **1c 视觉对账集**：`scripts/visual_parity.ps1`——固定样张（boxdraw 全家
+  桶、块/浓度/象限、Powerline 分隔符、CJK 对齐标尺、256 色/真彩）注入
+  两壳并截图（`.tmp_parity_<tag>.png`）。
+  **首轮对账 2026-08-13：结构级持平**——框线闭合无缝、CJK 标尺逐列对
+  齐、Powerline 三角在 GPUI 侧（boxdraw 几何）边缘更干净；`mixed/half/
+  trans` 几行两壳同样偏怪（旧壳像素栅格化的既有观感，非回归）。
+  待办：config 共享后做同主题对比；fastfetch 未安装（装上即可入集）；
+  放大级笔画粗细对账。
 
 ### P2 实验场补齐终端体验（在 `nebula_gpui` 快速迭代）
 
