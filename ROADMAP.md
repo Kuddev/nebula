@@ -67,28 +67,45 @@
   待办：config 共享后做同主题对比；fastfetch 未安装（装上即可入集）；
   放大级笔画粗细对账。
 
-### P2 实验场补齐终端体验（在 `nebula_gpui` 快速迭代）
+### P2 终端体验齐平（裁定修订 2026-08-13：直接在产品内做）
 
-迁入前必须在实验场达到"日用无感"：
+用户裁定：实验场不再堆产品功能——`nebula_gpui` 只是验证场，验证过即进
+`nebula_app`；P2 剩余项全部在 `nebula_app/src/gpui_shell/` 内继续。
 
-- 选择/复制细节对齐旧壳（双击选词、行选、复制行为）。
-- 滚动细节：翻页快捷键、回滚缓冲行为、滚动条（如旧壳有）。
-- 分屏：先把分屏规则抽成共享 `SplitTree`（纯数据 + 单测），再接 GPUI 面板。
+- 选择/复制/鼠标语义 **✔（2026-08-13，1244f1a）**：鼠标模式上报（SGR/
+  normal/UTF-8 扩展，`mouse_protocol.rs` 纯函数逐字对照旧壳 + 字节级单测；
+  vim/htop 接管指针，Shift 旁路）、右键复制/粘贴（旧壳 Windows 惯例）、
+  copy_on_select 抬手复制、Shift+点击扩展选区、Shift+PageUp/PageDown/
+  Home/End 回滚翻页（仅主屏）。
+- 分屏规则共享化 **✔（2026-08-13，9e21bc9）**：新共享 crate
+  `nebula-split`（零依赖）——布局树、几何切割（floor+逐侧单元格钳制）、
+  分隔条拖拽（关闭边距/预览钉边/整格量化提交）、方向聚焦（垂直漂移 4x
+  惩罚），数学逐字对照旧壳 `split.rs`，12 个单测锁定。**GPUI 面板接线
+  待办（在产品内做）**。
 - config 共享化 **✔ 第一刀完成（2026-08-13，9e29331）**：新共享 crate
   `nebula-settings`（零依赖）承接 `nebula_settings.txt` 路径/键值语义与
-  主题终端色表；实验场按旧壳同序叠加（toml → 主题），字体/光标/
-  copy_on_select 均读运行时设置。同主题对账样张已验（SilverLight 白底 +
-  Primer Light ANSI + 16.3pt + beam 光标）。剩余：toml 侧 font offset、
+  主题终端色表；按旧壳同序叠加（toml → 主题），字体/光标/copy_on_select
+  均读运行时设置。同主题对账样张已验。剩余：toml 侧 font offset、
   cursor 反色语义、follow_system_theme、热重载。
-- 会话/SSH 逻辑共享化评估（能抽则抽，抽不动的记录原因）。
+- 剩余：滚动条（如旧壳有）、会话/SSH 逻辑共享化评估。
 
 ### P3 接入 `nebula_app`（GPUI 成为产品 UI 层）
 
-- GPUI 窗口成为 nebula.exe 的主窗（进程内，主线程或专用线程按 spike 结论）。
-- 验证过的 view/element 模块**物理移入** `nebula_app`（如
-  `nebula_app/src/ui/`），`nebula_gpui` 只留 scratch 实验代码。
-- 产品面在 nebula_app 内直接用组件库实现：设置**原生内嵌侧栏 pane**、
-  启动器/命令面板、SSH 管理、标题栏/Acrylic 对齐。
+- **✔ 第一刀（2026-08-13，791fdc8）：GPUI UI 层物理迁入产品**。
+  `git mv` 保历史：终端栈（view/element/session/keymap/mouse_protocol/
+  colors）、config 桥、workspace、theme/prelude 全部住进
+  `nebula_app/src/gpui_shell/`；`gpui-shell` feature 自足（直接依赖
+  gpui/gpui-component/-assets + nebula-settings + futures，fork 经根
+  patch 表重定向），不再依赖 `nebula-gpui` crate。
+  **`nebula --gpui` = GPUI 主窗形态**：主线程直接进 GPUI 消息循环，
+  winit 完全不启动；已实跑验证（Nebula 主窗 + tabs + ConPTY 终端 +
+  CJK + powerline，样张 `.tmp_parity_gpui-in-nebula.png`）。
+  `nebula_gpui` 瘦身为组件 gallery（终端预览移除；theme/prelude 留
+  注记副本），产品代码零残留。
+- 剩余：GPUI 主窗成为默认 UI（三闸门在 `--gpui` 形态复测通过后切换）；
+  分屏面板接线（消费 `nebula-split`）；产品面直接用组件库实现：设置
+  **原生内嵌侧栏 pane**、启动器/命令面板、SSH 管理、标题栏/Acrylic
+  对齐；`NEBULA_GPUI_SHELL` spike 移除。
 - 三闸门在接入形态下复测（实验场数字不能替代产品形态数字）。
 
 ### P4 重构与收尾（GPUI 接入完成后）
