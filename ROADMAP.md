@@ -29,11 +29,12 @@
 
 ### P0 地基（已完成）
 
-- workspace 合并（804bc2c）：crossfont 0.9 解除 links 冲突，单 lockfile。
-- 渲染合同（f011d9e、84117c9）：viewport 合流 + 纯数据快照，引擎零框架类型。
-- boxdraw 几何（57dd932）：框线/块/Powerline 收归合同，字体无权染指。
-- 终端 Element + 多 tab 工作区（185e5af、347515f）：真 ConPTY 在 GPUI 内跑通。
-- lib+bin 双形态与进程内拉起验证（a2c4bb0）：双 UI 运行时同进程共存已证实。
+- workspace 合并（120859b）：crossfont 0.9 解除 links 冲突，单 lockfile。
+- 渲染合同（73c584a、d049894）：viewport 合流 + 纯数据快照，引擎零框架类型。
+- boxdraw 几何（5c6745d）：框线/块/Powerline 收归合同，字体无权染指。
+- 终端 Element + 多 tab 工作区（5815b95、05ab821）：真 ConPTY 在 GPUI 内跑通。
+- lib+bin 双形态与进程内拉起验证（f315edc）：双 UI 运行时同进程共存已证实。
+- 注：2026-08-13 全库改写剔除联合作者尾注，本节哈希已同步为新值。
 
 ### P1 闸门建设（当前）
 
