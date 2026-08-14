@@ -13,6 +13,7 @@ use super::*;
 // symbols on that block: newer Codicon additions such as U+EC86 are absent
 // from the installed Maple version and rasterize as a missing-glyph box.
 const ICON_COPY: &str = "\u{ebcc}";
+const ICON_FORK: &str = "\u{ea68}";
 const ICON_EXPORT: &str = "\u{eb4b}";
 const ICON_SPLIT_RIGHT: &str = "\u{eb56}";
 const ICON_SPLIT_DOWN: &str = "\u{eb57}";
@@ -46,6 +47,7 @@ pub enum ContextMenuTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuAction {
+    ForkAiSession(usize),
     DuplicateTab(usize),
     ExportTab(usize),
     SplitTabRight(usize),
@@ -86,6 +88,7 @@ pub(super) struct ContextMenu {
     motion: crate::motion::Tween,
     hover: Option<ContextMenuAction>,
     current_color: Option<Rgb>,
+    ai_fork: bool,
 }
 
 impl ContextMenu {
@@ -100,7 +103,14 @@ impl ContextMenu {
             crate::motion::MotionRole::Enter,
             crate::motion::MotionPolicy::Full,
         );
-        Self { target, anchor, motion, hover: None, current_color }
+        Self { target, anchor, motion, hover: None, current_color, ai_fork: false }
+    }
+
+    /// Enable the current-session fork row only after the pane owner has
+    /// verified both a hook identity and an official fork command shape.
+    pub(super) fn with_ai_fork(mut self, enabled: bool) -> Self {
+        self.ai_fork = enabled;
+        self
     }
 
     pub(super) fn begin_close(&mut self) {
@@ -174,6 +184,7 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
     let color_bottom_pad = s(10.0);
     let color_h = color_top_pad + size.cell_height() + color_label_gap + swatch + color_bottom_pad;
     let (row_count, separators, extra) = match menu.target {
+        ContextMenuTarget::Tab(_) if menu.ai_fork => (7usize, 3usize, color_h),
         ContextMenuTarget::Tab(_) => (6usize, 2usize, color_h),
         ContextMenuTarget::Ssh(_) => (5usize, 1usize, 0.0),
         ContextMenuTarget::Sftp(_) => (3usize, 1usize, 0.0),
@@ -220,6 +231,18 @@ fn layout(menu: &ContextMenu, size: SizeInfo, scale: f32, animated_y_offset: f32
     let mut colors = Vec::new();
     match menu.target {
         ContextMenuTarget::Tab(index) => {
+            if menu.ai_fork {
+                rows.push(row(
+                    ContextMenuAction::ForkAiSession(index),
+                    ICON_FORK,
+                    "分叉 AI 会话",
+                    "",
+                    cursor_y,
+                    false,
+                ));
+                cursor_y += row_h;
+                separator(&mut cursor_y);
+            }
             rows.push(row(
                 ContextMenuAction::DuplicateTab(index),
                 ICON_COPY,
@@ -677,6 +700,19 @@ mod tests {
         assert_eq!(layout.colors.len(), 8);
         assert_eq!(layout.colors[0].0, None);
         assert_eq!(layout.colors[0].1, ContextMenuAction::SetTabColor { index: 3, color: None });
+    }
+
+    #[test]
+    fn ai_fork_row_only_appears_for_verified_live_sessions() {
+        let plain = ContextMenu::new(ContextMenuTarget::Tab(3), (100.0, 100.0), None);
+        assert_eq!(layout(&plain, size(), 1.0, 0.0).rows.len(), 6);
+
+        let forkable = ContextMenu::new(ContextMenuTarget::Tab(3), (100.0, 100.0), None)
+            .with_ai_fork(true);
+        let layout = layout(&forkable, size(), 1.0, 0.0);
+        assert_eq!(layout.rows.len(), 7);
+        assert_eq!(layout.rows[0].action, ContextMenuAction::ForkAiSession(3));
+        assert_eq!(layout.rows[1].action, ContextMenuAction::DuplicateTab(3));
     }
 
     #[test]

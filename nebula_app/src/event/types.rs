@@ -164,6 +164,9 @@ pub enum TabRequest {
     Close,
     CloseIndex(usize),
     Duplicate(usize),
+    /// Create a new local terminal and continue this tab's live AI session
+    /// under a new independent session id.
+    ForkAiSession(usize),
     CloseWindow,
     SelectNext,
     SelectPrev,

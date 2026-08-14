@@ -166,6 +166,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
     fn run_context_menu_action(&mut self, action: crate::display::ContextMenuAction) {
         use crate::display::ContextMenuAction::*;
         match action {
+            ForkAiSession(index) => {
+                self.ctx.nebula_tab(crate::event::TabRequest::ForkAiSession(index));
+            },
             DuplicateTab(index) => {
                 self.ctx.nebula_tab(crate::event::TabRequest::Duplicate(index));
             },

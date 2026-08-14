@@ -1586,6 +1586,9 @@ pub struct Display {
     /// owns its short open/close animation so no input path needs timers.
     nebula_context_menu: Option<context_menu::ContextMenu>,
     nebula_tab_labels: Vec<String>,
+    /// 只有当前活动 pane 持有可信会话 ID 且 CLI 支持 fork 时为 true；
+    /// 右键菜单据此决定是否展示“分叉 AI 会话”。
+    nebula_tab_ai_fork: Vec<bool>,
     /// Per-tab custom accent. `None` follows the live theme accent.
     nebula_tab_colors: Vec<Option<Rgb>>,
     nebula_tab_bells: Vec<bool>,
@@ -2407,6 +2410,7 @@ impl Display {
             nebula_font_proportional: std::collections::HashSet::new(),
             nebula_font_notice: font_notice,
             nebula_tab_labels: vec![".".to_owned()],
+            nebula_tab_ai_fork: vec![false],
             nebula_tab_colors: vec![None],
             nebula_tab_bells: vec![false],
             nebula_tab_running: vec![false],
@@ -2832,6 +2836,7 @@ impl Display {
         mut flashing: Vec<bool>,
         mut logos: Vec<Option<AiLogo>>,
         mut shells: Vec<String>,
+        mut ai_fork: Vec<bool>,
         active: usize,
         reorderable: bool,
     ) {
@@ -2860,6 +2865,9 @@ impl Display {
         shells.truncate(self.nebula_tab_labels.len());
         shells.resize(self.nebula_tab_labels.len(), String::new());
         self.nebula_tab_shells = shells;
+        ai_fork.truncate(self.nebula_tab_labels.len());
+        ai_fork.resize(self.nebula_tab_labels.len(), false);
+        self.nebula_tab_ai_fork = ai_fork;
         self.nebula_active_tab = active.min(self.nebula_tab_labels.len().saturating_sub(1));
         self.nebula_tabs_reorderable = reorderable;
         // A tab count change (close/open) mid-drag invalidates the grabbed slot.
@@ -3203,8 +3211,11 @@ impl Display {
         }
         let anchor = self.sidebar_row_anchor(true, index, (x, y));
         let color = self.nebula_tab_colors.get(index).copied().flatten();
-        self.nebula_context_menu =
-            Some(context_menu::ContextMenu::new(ContextMenuTarget::Tab(index), anchor, color));
+        let ai_fork = self.nebula_tab_ai_fork.get(index).copied().unwrap_or(false);
+        self.nebula_context_menu = Some(
+            context_menu::ContextMenu::new(ContextMenuTarget::Tab(index), anchor, color)
+                .with_ai_fork(ai_fork),
+        );
         self.nebula_tab_drag = None;
         self.pending_update.dirty = true;
         self.window.request_redraw();

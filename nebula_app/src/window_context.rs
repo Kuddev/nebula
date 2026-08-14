@@ -754,6 +754,10 @@ impl WindowContext {
                 self.duplicate_tab(index);
                 false
             },
+            TabRequest::ForkAiSession(index) => {
+                self.fork_ai_session(index);
+                false
+            },
             TabRequest::ExportWorkspace => {
                 self.export_workspace(None);
                 false
@@ -1315,6 +1319,63 @@ impl WindowContext {
             self.sync_chrome_tabs();
             self.mark_session_dirty();
         }
+    }
+
+    /// Continue one live AI conversation in a fresh tab with a new session id.
+    ///
+    /// This deliberately recreates the shell instead of cloning a PTY/process.
+    /// Profile/SSH tabs are excluded: injecting into a profile that starts the
+    /// agent directly, or into an SSH authentication prompt, would turn the
+    /// command into user input at the wrong protocol layer.
+    fn fork_ai_session(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let launch = match &tab.launch {
+            TabLaunch::Default => TabLaunch::Default,
+            TabLaunch::Shell { name, shell } => {
+                TabLaunch::Shell { name: name.clone(), shell: shell.clone() }
+            },
+            _ => return,
+        };
+        let Some(pane) = self.pane(tab.active_pane) else { return };
+        let Some(identity) = pane.nebula_state.ai_session.as_ref() else { return };
+        let Some(agent) = crate::ai_agents::AgentKind::parse(&identity.source) else { return };
+        let Some(command) = agent.fork_command(&identity.session_id) else { return };
+        let cwd = (!pane.nebula_state.cwd.trim().is_empty())
+            .then(|| std::path::PathBuf::from(pane.nebula_state.cwd.trim()))
+            .filter(|path| path.is_dir());
+        let color = tab.custom_color;
+
+        self.select_tab(index);
+        let shell = match &launch {
+            TabLaunch::Default => Self::default_shell_override(&self.config),
+            TabLaunch::Shell { shell, .. } => Some(shell.clone()),
+            _ => unreachable!("launch was restricted above"),
+        };
+        let Some(pane_id) = self.spawn_pane_detached_with(cwd, self.display.size_info, shell) else {
+            return;
+        };
+        self.insert_tab(
+            TabEntry {
+                layout: Layout::Leaf(pane_id),
+                active_pane: pane_id,
+                has_bell: false,
+                custom_name: Some(format!("{} 分叉", agent.display_name())),
+                custom_color: color,
+                launch,
+                doc: None,
+                image: None,
+                settings: false,
+            },
+            TabPlacement::Created,
+        );
+        self.resize_active_layout();
+        if let Some(pane) = self.pane(pane_id) {
+            pane.notifier.notify(command.into_bytes());
+            pane.notifier.notify(vec![b'\r']);
+        }
+        self.sync_chrome_tabs();
+        self.mark_session_dirty();
+        self.dirty = true;
     }
 
     /// Export the whole window (`None`) or a single tab (`Some(index)`) as a
@@ -2891,6 +2952,7 @@ impl WindowContext {
         let mut flashing = Vec::with_capacity(self.tabs.len());
         let mut logos = Vec::with_capacity(self.tabs.len());
         let mut shells = Vec::with_capacity(self.tabs.len());
+        let mut ai_fork = Vec::with_capacity(self.tabs.len());
         // 静默行右侧的 shell 短标；Default 启动的 tab 用当前默认 shell 的。
         let default_tag = self.display.default_shell_tag();
         let ui_language = self.display.ui_language();
@@ -2929,6 +2991,16 @@ impl WindowContext {
                 | TabLaunch::Image(_)
                 | TabLaunch::Settings => String::new(),
             });
+            ai_fork.push(
+                matches!(&tab.launch, TabLaunch::Default | TabLaunch::Shell { .. })
+                    && state
+                        .and_then(|state| state.ai_session.as_ref())
+                        .and_then(|identity| {
+                            crate::ai_agents::AgentKind::parse(&identity.source)
+                                .and_then(|agent| agent.fork_command(&identity.session_id))
+                        })
+                        .is_some(),
+            );
             // Unseen-result dot: bell in a background tab, a tracked command
             // that finished unseen, or a tracked program parked at "waiting
             // for input" (claude between turns). The ring collapsing into a
@@ -2953,7 +3025,8 @@ impl WindowContext {
         let active = self.active_tab.min(labels.len().saturating_sub(1));
         // displayed == storage index always holds now, so the bar is reorderable.
         self.display.set_chrome_tabs(
-            labels, colors, dots, running, attention, failed, flashing, logos, shells, active, true,
+            labels, colors, dots, running, attention, failed, flashing, logos, shells, ai_fork,
+            active, true,
         );
     }
 
