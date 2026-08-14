@@ -1,0 +1,28 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "antigravity"
+aliases = ["agy", "antigravity-cli"]
+
+[[rules]]
+id = "permission_prompt"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+contains = ["requesting permission for:"]
+any = [
+  { contains = ["do you want to proceed?"] },
+  { contains = ["tab amend", "edit command"] },
+]
+
+[[rules]]
+id = "spinner_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+line_regex = ['^\s*[\u2800-\u28FF]+\s+\p{Alphabetic}+\w*ing\b']
+
+[[rules]]
+id = "background_tasks_working"
+state = "working"
+priority = 90
+region = "bottom_non_empty_lines(5)"
+line_regex = ['(?i)·\s*[1-9][0-9]*\s+task']

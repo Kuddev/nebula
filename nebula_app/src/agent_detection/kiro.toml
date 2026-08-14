@@ -1,0 +1,40 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "kiro"
+aliases = ["kiro-cli"]
+
+[[rules]]
+id = "tool_approval"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+contains = ["requires approval"]
+any = [
+  { contains = ["yes, single permission"] },
+  { contains = ["trust, always allow"] },
+  { contains = ["no (tab to edit)"] },
+  { contains = ["esc to close"] },
+]
+
+[[rules]]
+id = "subagent_approval"
+state = "blocked"
+priority = 290
+region = "whole_recent"
+contains = ["pending from subagents"]
+any = [{ contains = ["tool approval"] }, { contains = ["tool approvals"] }]
+all = [{ any = [{ contains = ["approve all pending"] }, { contains = ["configure individually"] }, { contains = ["exit (cancel subagents)"] }] }]
+
+[[rules]]
+id = "kiro_working_marker"
+state = "working"
+priority = 100
+region = "whole_recent"
+contains = ["kiro is working"]
+
+[[rules]]
+id = "tool_spinner_working"
+state = "working"
+priority = 90
+region = "whole_recent"
+contains = ["esc to cancel"]
+line_regex = ['^\s*(◔|◑|◕|●)\s+\p{Alphabetic}']

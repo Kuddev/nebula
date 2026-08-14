@@ -1,0 +1,45 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "kimi"
+aliases = ["kimi-code"]
+
+[[rules]]
+id = "current_approval_panel"
+state = "blocked"
+priority = 400
+region = "whole_recent"
+contains = ["↵ confirm", " choose"]
+any = [
+  { contains = ["run this command?"] },
+  { contains = ["write this file?"] },
+  { contains = ["apply these edits?"] },
+  { contains = ["stop this task?"] },
+  { contains = ["ready to build with this plan?"] },
+]
+all = [{ any = [{ contains = ["approve"] }, { contains = ["reject"] }, { contains = ["revise"] }] }]
+
+[[rules]]
+id = "question_panel"
+state = "blocked"
+priority = 390
+region = "whole_recent"
+contains = ["↑↓ select", "esc cancel"]
+line_regex = ['^\s*question\s*$', '^\s*\? ']
+any = [
+  { contains = ["↵ choose"] },
+  { contains = ["↵ toggle"] },
+  { contains = ["↵ save"] },
+]
+
+[[rules]]
+id = "background_agent_status_working"
+state = "working"
+priority = 120
+region = "bottom_non_empty_lines(3)"
+line_regex = ['(?i)\bkimi[-\w.]*\s+thinking\b.*\[[1-9][0-9]*\s+agents?\s+running\]']
+
+[[rules]]
+id = "braille_spinner_working"
+state = "working"
+priority = 90
+region = "whole_recent"
+line_regex = ['(?i)^\s*[\u2800-\u28FF]+\s*(thinking\.\.\.|working\.\.\.|using )']

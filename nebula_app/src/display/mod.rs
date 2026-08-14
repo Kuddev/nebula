@@ -6675,30 +6675,38 @@ impl Display {
         crate::shell_detect::shell_short_tag(id)
     }
 
-    /// 「恢复 AI 会话」面板：现扫 claude / codex 的本地会话档（最近 30 条，
-    /// 只读文件头取标题，见 `ai_sessions` 模块），确认后把 resume 命令行敲
-    /// 进当前聚焦的终端。
+    /// 「恢复 AI 会话」面板：原生 Claude/Codex 档案与 Nebula hook 索引
+    /// 合并去重；只展示已验证有 resume 语法的来源。
     pub fn open_ai_session_palette(&mut self) {
-        let rows = crate::ai_sessions::scan(30)
-            .into_iter()
-            .map(|session| {
-                // 右列 = 「位置 · 相对时间」。来源不再挤进这段文字——行首
-                // 品牌 logo + 右缘 chip 已经把 claude/codex 标满了（纯文字
-                // 的来源在长标题下会被挤没，用户 08-02 截图的现场）。
-                let time = crate::ai_sessions::relative_label(session.modified);
-                let place = session.place_label();
-                let hint = if place.is_empty() { time } else { format!("{place} · {time}") };
-                let search =
-                    format!("{} {} {}", session.title, session.project, session.source.label());
-                command_palette::AiSessionRow {
-                    label: session.title.clone(),
+        let mut rows = Vec::new();
+        for session in crate::ai_sessions::scan(30) {
+            // 右列 = 「位置 · 相对时间」。来源不再挤进这段文字——行首
+            // 品牌 logo + 右缘 chip 已经把 claude/codex 标满了。
+            let time = crate::ai_sessions::relative_label(session.modified);
+            let place = session.place_label();
+            let hint = if place.is_empty() { time } else { format!("{place} · {time}") };
+            let search =
+                format!("{} {} {}", session.title, session.project, session.source.label());
+            let Some(resume) = session.resume_command() else {
+                continue;
+            };
+            rows.push(command_palette::AiSessionRow {
+                label: session.title.clone(),
+                hint: hint.clone(),
+                search: format!("恢复 resume {search}"),
+                command: resume,
+                source: session.source,
+            });
+            if let Some(command) = session.fork_command() {
+                rows.push(command_palette::AiSessionRow {
+                    label: format!("分叉 · {}", session.title),
                     hint,
-                    search,
-                    command: session.resume_command(),
+                    search: format!("分叉 fork {search}"),
+                    command,
                     source: session.source,
-                }
-            })
-            .collect();
+                });
+            }
+        }
         self.nebula_palette.open_ai_sessions(rows);
         self.pending_update.dirty = true;
         self.window.request_redraw();

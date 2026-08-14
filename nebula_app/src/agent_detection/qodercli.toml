@@ -1,0 +1,33 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "qodercli"
+aliases = ["qoderclicn", "qoder", "qodercn"]
+
+[[rules]]
+id = "confirmation_or_input_blocker"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+any = [
+  { contains = ["waiting for user confirmation"], any = [{ contains = ["yes"] }, { contains = ["no"] }, { contains = ["allow"] }, { contains = ["reject"] }] },
+  { contains = ["awaiting approval"], any = [{ contains = ["allow"] }, { contains = ["reject"] }] },
+  { contains = ["permission required"] },
+  { contains = ["allow once or always?"] },
+  { contains = ["asking user"] },
+  { contains = ["enter your response"] },
+  { contains = ["review your answers:"] },
+  { contains = ["shell awaiting input"] },
+]
+
+[[rules]]
+id = "cancel_hint_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+contains = ["(esc to cancel,"]
+
+[[rules]]
+id = "spinner_working"
+state = "working"
+priority = 90
+region = "whole_recent"
+line_regex = ['^\s*[\u2800-\u28FF]\s+.*\p{Alphabetic}']

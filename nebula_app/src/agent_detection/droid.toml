@@ -1,0 +1,32 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "droid"
+
+[[rules]]
+id = "execute_selection_blocker"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+contains = ["enter to select", "esc to cancel"]
+any = [
+  { contains = ["↑↓ to navigate"] },
+  { contains = ["use ↑↓ to navigate"] },
+]
+all = [{ any = [{ contains = ["> yes, allow"] }, { contains = ["> no, cancel"] }] }]
+
+[[rules]]
+id = "selection_menu_blocker"
+state = "blocked"
+priority = 290
+region = "bottom_non_empty_lines(8)"
+contains = ["enter select", "esc cancel"]
+any = [
+  { contains = ["↑/↓ navigate"] },
+  { contains = ["↑↓ navigate"] },
+]
+
+[[rules]]
+id = "stop_hint_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+contains = ["esc to stop"]

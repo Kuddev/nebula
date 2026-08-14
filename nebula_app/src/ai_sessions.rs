@@ -8,35 +8,18 @@
 //! user 消息；codex 的 rollout 第一行是 session_meta（带 cwd）。所以这里
 //! 每个文件最多读 [`HEAD_BYTES`]，而且只为**真正要显示**的前 N 条读。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 /// 每个会话文件最多读多少字节找标题。
 const HEAD_BYTES: usize = 64 * 1024;
 /// 标题最长几个字符（超出截断加省略号）。
 const TITLE_CHARS: usize = 60;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AiSessionSource {
-    Claude,
-    Codex,
-}
-
-impl AiSessionSource {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-        }
-    }
-
-    fn agent(self) -> crate::ai_agents::AgentKind {
-        match self {
-            Self::Claude => crate::ai_agents::AgentKind::Claude,
-            Self::Codex => crate::ai_agents::AgentKind::Codex,
-        }
-    }
-}
+pub type AiSessionSource = crate::ai_agents::AgentKind;
 
 #[derive(Debug, Clone)]
 pub struct AiSession {
@@ -49,21 +32,18 @@ pub struct AiSession {
     /// 副信息：claude 是项目目录，codex 是会话的 cwd。
     pub project: String,
     pub modified: SystemTime,
-    path: PathBuf,
+    path: Option<PathBuf>,
 }
 
 impl AiSession {
     /// 在终端里敲下去就能恢复这个会话的命令行。
-    pub fn resume_command(&self) -> String {
-        self.source
-            .agent()
-            .resume_command(&self.id)
-            .expect("filesystem-derived Claude/Codex ids are valid session tokens")
+    pub fn resume_command(&self) -> Option<String> {
+        self.source.resume_command(&self.id)
     }
 
     /// 从这条历史会话创建独立分叉，不改变原会话。
     pub fn fork_command(&self) -> Option<String> {
-        self.source.agent().fork_command(&self.id)
+        self.source.fork_command(&self.id)
     }
 
     /// hint 里的位置词。codex 有真实 cwd，取末段目录名；claude 只有编码过的
@@ -71,23 +51,36 @@ impl AiSession {
     /// 取最后一个 `-` 后的尾段——不完整但足够认出"是哪个项目"。
     pub fn place_label(&self) -> String {
         match self.source {
-            AiSessionSource::Codex => Path::new(&self.project)
+            crate::ai_agents::AgentKind::Codex => Path::new(&self.project)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            AiSessionSource::Claude => self.project.rsplit('-').next().unwrap_or("").to_owned(),
+            crate::ai_agents::AgentKind::Claude => {
+                self.project.rsplit('-').next().unwrap_or("").to_owned()
+            },
+            _ => Path::new(&self.project)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.project.clone()),
         }
     }
 
     fn fill_details(&mut self) {
-        let Ok(head) = read_head(&self.path, HEAD_BYTES) else { return };
+        let Some(path) = self.path.as_deref() else {
+            self.ensure_title();
+            return;
+        };
+        let Ok(head) = read_head(path, HEAD_BYTES) else {
+            self.ensure_title();
+            return;
+        };
         match self.source {
-            AiSessionSource::Claude => {
+            crate::ai_agents::AgentKind::Claude => {
                 if let Some(title) = claude_title(&head) {
                     self.title = title;
                 }
             },
-            AiSessionSource::Codex => {
+            crate::ai_agents::AgentKind::Codex => {
                 let (title, cwd) = codex_details(&head);
                 if let Some(title) = title {
                     self.title = title;
@@ -96,21 +89,179 @@ impl AiSession {
                     self.project = cwd;
                 }
             },
+            _ => {},
         }
+        self.ensure_title();
+    }
+
+    fn ensure_title(&mut self) {
         if self.title.is_empty() {
-            // 兜底：读不出标题也得给人一行能认的字，id 前八位是 claude
-            // `--resume` 补全里露出的同一串，两边能对上。
             let short = self.id.chars().take(8).collect::<String>();
-            self.title = format!("{} 会话 {short}", self.source.label());
+            self.title = format!("{} 会话 {short}", self.source.display_name());
         }
     }
 }
 
-/// 扫描两家的会话目录，按最近活动排序，取前 `limit` 条并补齐标题。
+const REGISTRY_VERSION: u32 = 1;
+const REGISTRY_LIMIT: usize = 256;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SessionRegistry {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    sessions: Vec<RegistrySession>,
+}
+
+/// Nebula 只记“如何重新找到会话”，不复制 AI 对话正文。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RegistrySession {
+    source: String,
+    id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    cwd: String,
+    last_seen: u64,
+}
+
+fn registry_path() -> PathBuf {
+    settings_dir().join("ai_sessions.json")
+}
+
+fn settings_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("NEBULA_CONFIG_DIR").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Nebula")
+}
+
+/// Upsert one hook-reported identity. The registry stores no transcript or
+/// prompt content; title is an optional user-facing label supplied by Nebula.
+pub fn record_hook_session(
+    source: &str,
+    id: &str,
+    cwd: &str,
+    title: Option<&str>,
+) -> std::io::Result<()> {
+    record_hook_session_at(&registry_path(), source, id, cwd, title)
+}
+
+fn record_hook_session_at(
+    path: &Path,
+    source: &str,
+    id: &str,
+    cwd: &str,
+    title: Option<&str>,
+) -> std::io::Result<()> {
+    let Some(agent) = crate::ai_agents::AgentKind::parse(source) else {
+        return Ok(());
+    };
+    // Reuse command construction as the untrusted-id validator. Unsupported
+    // clients are still worth remembering for future syntax support.
+    if agent.resume_command(id).is_none()
+        && agent.fork_command(id).is_none()
+        && !valid_registry_id(id)
+    {
+        return Ok(());
+    }
+    let Some(_lock) = crate::atomic_file::try_lock(path)? else {
+        return Ok(());
+    };
+    let mut registry = load_registry(path);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let title = title.map(truncate_title).unwrap_or_default();
+    if let Some(existing) = registry
+        .sessions
+        .iter_mut()
+        .find(|session| session.source == agent.slug() && session.id == id)
+    {
+        existing.last_seen = now;
+        if !cwd.trim().is_empty() {
+            existing.cwd = cwd.trim().to_owned();
+        }
+        if !title.is_empty() {
+            existing.title = title;
+        }
+    } else {
+        registry.sessions.push(RegistrySession {
+            source: agent.slug().to_owned(),
+            id: id.to_owned(),
+            title,
+            cwd: cwd.trim().to_owned(),
+            last_seen: now,
+        });
+    }
+    registry.sessions.sort_by_key(|session| std::cmp::Reverse(session.last_seen));
+    registry.sessions.truncate(REGISTRY_LIMIT);
+    registry.version = REGISTRY_VERSION;
+    let bytes = serde_json::to_vec_pretty(&registry).map_err(std::io::Error::other)?;
+    crate::atomic_file::write(path, &bytes)
+}
+
+fn valid_registry_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn load_registry(path: &Path) -> SessionRegistry {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn registry_sessions() -> Vec<AiSession> {
+    load_registry(&registry_path())
+        .sessions
+        .into_iter()
+        .filter_map(|session| {
+            let source = crate::ai_agents::AgentKind::parse(&session.source)?;
+            Some(AiSession {
+                source,
+                id: session.id,
+                title: session.title,
+                project: session.cwd,
+                modified: UNIX_EPOCH + Duration::from_secs(session.last_seen),
+                path: None,
+            })
+        })
+        .collect()
+}
+
+/// 扫描 CLI 原生档案并与 hook 索引合并；同一 source/id 只保留一条。
 pub fn scan(limit: usize) -> Vec<AiSession> {
     let mut all = Vec::new();
     all.extend(scan_claude());
     all.extend(scan_codex());
+    let mut by_key: HashMap<(crate::ai_agents::AgentKind, String), usize> = all
+        .iter()
+        .enumerate()
+        .map(|(index, session)| ((session.source, session.id.clone()), index))
+        .collect();
+    for indexed in registry_sessions() {
+        let key = (indexed.source, indexed.id.clone());
+        if let Some(&position) = by_key.get(&key) {
+            let existing = &mut all[position];
+            existing.modified = existing.modified.max(indexed.modified);
+            if existing.project.is_empty() {
+                existing.project = indexed.project;
+            }
+            if existing.title.is_empty() {
+                existing.title = indexed.title;
+            }
+        } else {
+            by_key.insert(key, all.len());
+            all.push(indexed);
+        }
+    }
     all.sort_by(|a, b| b.modified.cmp(&a.modified));
     all.truncate(limit);
     for session in &mut all {
@@ -165,12 +316,12 @@ fn scan_claude() -> Vec<AiSession> {
                 continue;
             };
             out.push(AiSession {
-                source: AiSessionSource::Claude,
+                source: crate::ai_agents::AgentKind::Claude,
                 id,
                 title: String::new(),
                 project: project_label.clone(),
                 modified: modified_of(&path),
-                path,
+                path: Some(path),
             });
         }
     }
@@ -200,12 +351,12 @@ fn scan_codex() -> Vec<AiSession> {
             }
             let Some(id) = codex_session_id(&path) else { continue };
             out.push(AiSession {
-                source: AiSessionSource::Codex,
+                source: crate::ai_agents::AgentKind::Codex,
                 id,
                 title: String::new(),
                 project: String::new(),
                 modified: modified_of(&path),
-                path,
+                path: Some(path),
             });
         }
     }
@@ -397,7 +548,7 @@ mod tests {
             title: String::new(),
             project: r"D:\temp_build\nebula".into(),
             modified: SystemTime::UNIX_EPOCH,
-            path: PathBuf::new(),
+            path: None,
         };
         assert_eq!(codex.place_label(), "nebula");
         let claude = AiSession {
@@ -440,16 +591,41 @@ mod tests {
             title: String::new(),
             project: String::new(),
             modified: SystemTime::UNIX_EPOCH,
-            path: PathBuf::new(),
+            path: None,
         };
-        assert_eq!(claude.resume_command(), "claude --resume abc-123");
+        assert_eq!(claude.resume_command().as_deref(), Some("claude --resume abc-123"));
         assert_eq!(
             claude.fork_command().as_deref(),
             Some("claude --resume abc-123 --fork-session")
         );
         let codex = AiSession { source: AiSessionSource::Codex, ..claude };
-        assert_eq!(codex.resume_command(), "codex resume abc-123");
+        assert_eq!(codex.resume_command().as_deref(), Some("codex resume abc-123"));
         assert_eq!(codex.fork_command().as_deref(), Some("codex fork abc-123"));
+    }
+
+    #[test]
+    fn hook_registry_upserts_identity_without_transcript_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ai_sessions.json");
+        record_hook_session_at(&path, "opencode", "session-1", r"D:\repo", None).unwrap();
+        record_hook_session_at(
+            &path,
+            "opencode",
+            "session-1",
+            r"D:\repo\worktree",
+            Some("修复登录"),
+        )
+        .unwrap();
+        let registry = load_registry(&path);
+        assert_eq!(registry.sessions.len(), 1);
+        let saved = &registry.sessions[0];
+        assert_eq!(saved.source, "opencode");
+        assert_eq!(saved.id, "session-1");
+        assert_eq!(saved.cwd, r"D:\repo\worktree");
+        assert_eq!(saved.title, "修复登录");
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert!(!raw.contains("message"));
+        assert!(!raw.contains("transcript"));
     }
 
     #[test]

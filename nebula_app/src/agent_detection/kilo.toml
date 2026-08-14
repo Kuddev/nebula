@@ -1,0 +1,20 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "kilo"
+aliases = ["kilo-code"]
+
+[[rules]]
+id = "opencode_permission"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+any = [
+  { contains = ["△ Permission required"] },
+  { contains = ["esc dismiss"], any = [{ contains = ["enter confirm"] }, { contains = ["enter submit"] }, { contains = ["enter toggle"] }], all = [{ any = [{ contains = ["↑↓ select"] }, { contains = ["⇆ tab"] }] }] },
+]
+
+[[rules]]
+id = "esc_interrupt_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+contains = ["esc interrupt"]

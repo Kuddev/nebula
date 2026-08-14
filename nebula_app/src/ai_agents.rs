@@ -40,10 +40,17 @@ pub enum AgentKind {
     Grok,
     Qwen,
     OhMyPi,
+    Cline,
+    Devin,
+    Kimi,
+    Kiro,
+    Kilo,
+    Qoder,
+    Maki,
 }
 
 impl AgentKind {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 25] = [
         Self::Claude,
         Self::Codex,
         Self::Gemini,
@@ -62,6 +69,13 @@ impl AgentKind {
         Self::Grok,
         Self::Qwen,
         Self::OhMyPi,
+        Self::Cline,
+        Self::Devin,
+        Self::Kimi,
+        Self::Kiro,
+        Self::Kilo,
+        Self::Qoder,
+        Self::Maki,
     ];
 
     pub fn slug(self) -> &'static str {
@@ -84,7 +98,48 @@ impl AgentKind {
             Self::Grok => "grok",
             Self::Qwen => "qwen",
             Self::OhMyPi => "omp",
+            Self::Cline => "cline",
+            Self::Devin => "devin",
+            Self::Kimi => "kimi",
+            Self::Kiro => "kiro",
+            Self::Kilo => "kilo",
+            Self::Qoder => "qodercli",
+            Self::Maki => "maki",
         }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+            Self::Gemini => "Gemini",
+            Self::Aider => "Aider",
+            Self::Amp => "Amp",
+            Self::OpenCode => "OpenCode",
+            Self::Copilot => "GitHub Copilot",
+            Self::Cursor => "Cursor Agent",
+            Self::Goose => "Goose",
+            Self::Droid => "Droid",
+            Self::Pi => "Pi",
+            Self::Auggie => "Auggie",
+            Self::Hermes => "Hermes",
+            Self::Vibe => "Vibe",
+            Self::Antigravity => "Antigravity",
+            Self::Grok => "Grok",
+            Self::Qwen => "Qwen Code",
+            Self::OhMyPi => "Oh My Pi",
+            Self::Cline => "Cline",
+            Self::Devin => "Devin",
+            Self::Kimi => "Kimi Code",
+            Self::Kiro => "Kiro",
+            Self::Kilo => "Kilo Code",
+            Self::Qoder => "Qoder",
+            Self::Maki => "Maki",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        self.slug()
     }
 
     fn aliases(self) -> &'static [&'static str] {
@@ -107,6 +162,13 @@ impl AgentKind {
             Self::Grok => &["grok", "grok-cli", "grok-build"],
             Self::Qwen => &["qwen", "qwen-code"],
             Self::OhMyPi => &["omp", "oh-my-pi"],
+            Self::Cline => &["cline"],
+            Self::Devin => &["devin", "devin-cli"],
+            Self::Kimi => &["kimi", "kimi-code"],
+            Self::Kiro => &["kiro", "kiro-cli"],
+            Self::Kilo => &["kilo", "kilo-code"],
+            Self::Qoder => &["qodercli", "qoderclicn", "qoder", "qodercn"],
+            Self::Maki => &["maki"],
         }
     }
 
@@ -148,7 +210,14 @@ impl AgentKind {
             | Self::Hermes
             | Self::Vibe
             | Self::Antigravity
-            | Self::Qwen => return None,
+            | Self::Qwen
+            | Self::Cline
+            | Self::Devin
+            | Self::Kimi
+            | Self::Kiro
+            | Self::Kilo
+            | Self::Qoder
+            | Self::Maki => return None,
         })
     }
 
@@ -290,6 +359,17 @@ const BUNDLED: &[(AgentKind, &str)] = &[
     (AgentKind::Copilot, include_str!("agent_detection/copilot.toml")),
     (AgentKind::Grok, include_str!("agent_detection/grok.toml")),
     (AgentKind::Pi, include_str!("agent_detection/pi.toml")),
+    (AgentKind::Amp, include_str!("agent_detection/amp.toml")),
+    (AgentKind::Antigravity, include_str!("agent_detection/antigravity.toml")),
+    (AgentKind::Cline, include_str!("agent_detection/cline.toml")),
+    (AgentKind::Devin, include_str!("agent_detection/devin.toml")),
+    (AgentKind::Droid, include_str!("agent_detection/droid.toml")),
+    (AgentKind::Hermes, include_str!("agent_detection/hermes.toml")),
+    (AgentKind::Kimi, include_str!("agent_detection/kimi.toml")),
+    (AgentKind::Kiro, include_str!("agent_detection/kiro.toml")),
+    (AgentKind::Kilo, include_str!("agent_detection/kilo.toml")),
+    (AgentKind::Qoder, include_str!("agent_detection/qodercli.toml")),
+    (AgentKind::Maki, include_str!("agent_detection/maki.toml")),
 ];
 
 static CACHE: OnceLock<RwLock<Cache>> = OnceLock::new();

@@ -1,0 +1,24 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "hermes"
+aliases = ["hermes-agent"]
+
+[[rules]]
+id = "dangerous_command_approval"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+any = [
+  { contains = ["dangerous command"] },
+  { contains = ["allow once", "allow for this session", "deny"] },
+]
+all = [{ any = [{ contains = ["enter to confirm"] }, { contains = ["↑/↓ to select"] }, { contains = ["show full command"] }] }]
+
+[[rules]]
+id = "interrupt_status_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+any = [
+  { contains = ["msg=interrupt"] },
+  { contains = ["ctrl+c cancel"] },
+]

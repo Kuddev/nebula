@@ -1,0 +1,51 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+id = "maki"
+
+[[rules]]
+id = "permission_prompt"
+state = "blocked"
+priority = 980
+region = "whole_recent"
+contains = ["permission required"]
+any = [
+  { contains = ["y allow", "n deny"] },
+  { contains = ["confirm allow"] },
+  { contains = ["confirm deny"] },
+  { contains = ["enter deny", "esc cancel"] },
+]
+
+[[rules]]
+id = "plan_complete_form"
+state = "blocked"
+priority = 970
+region = "whole_recent"
+contains = ["plan complete", "enter confirm"]
+any = [
+  { contains = ["space toggle parallel"] },
+  { contains = ["edit plan"] },
+]
+
+[[rules]]
+id = "status_bar_spinner_working"
+state = "working"
+priority = 900
+region = "bottom_non_empty_lines(1)"
+line_regex = ['^( [\x{2800}-\x{28FF}]){1,2} \[(BUILD|PLAN|BASH)\]']
+
+[[rules]]
+id = "status_bar_idle"
+state = "idle"
+priority = 850
+region = "bottom_non_empty_lines(1)"
+line_regex = ['^ \[(BUILD|PLAN|BASH)\]']
+
+[[rules]]
+id = "prompt_box_idle"
+state = "idle"
+priority = 840
+region = "bottom_non_empty_lines(3)"
+line_regex = ['^❯ ']
+not = [
+  { contains = ["queue another prompt"] },
+  { line_regex = ['^( [\x{2800}-\x{28FF}]){1,2} '] },
+]

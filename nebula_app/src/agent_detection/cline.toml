@@ -1,0 +1,17 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+# The upstream catch-all working rule is intentionally omitted: it would make
+# every visible Cline screen look busy after a turn has already stopped.
+id = "cline"
+
+[[rules]]
+id = "tool_permission"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+any = [
+  { contains = ["let cline use this tool"] },
+  { contains = ["[act mode]", "execute command?", "yes"] },
+  { contains = ["[act mode]", "use this tool?", "yes"] },
+  { contains = ["[plan mode]", "execute command?", "yes"] },
+  { contains = ["[plan mode]", "use this tool?", "yes"] },
+]

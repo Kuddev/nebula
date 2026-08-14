@@ -1574,13 +1574,8 @@ impl CommandGroup {
     }
 }
 
-/// AI 会话分组表头的文案。用产品名而不是 `AiSessionSource::label()` 的小写
-/// 短标（`claude` / `codex`）：表头是给人读的标题，不是数据里的枚举值。
 fn source_group_label(source: crate::ai_sessions::AiSessionSource) -> String {
-    match source {
-        crate::ai_sessions::AiSessionSource::Claude => "CLAUDE CODE 会话".to_owned(),
-        crate::ai_sessions::AiSessionSource::Codex => "CODEX 会话".to_owned(),
-    }
+    format!("{} 会话", source.display_name().to_uppercase())
 }
 
 /// AI 会话行的行首字形：mdi-creation，一大一小两颗四角星。见 `row_for`
@@ -3563,7 +3558,7 @@ mod tests {
     /// 拥有最新一条会话的来源，「我刚才在做的那件事」不会被压到第二组。
     #[test]
     fn ai_sessions_stay_grouped_by_source_even_while_searching() {
-        use crate::ai_sessions::AiSessionSource::{Claude, Codex};
+        use crate::ai_agents::AgentKind::{Claude, Codex};
         let row = |source, label: &str| AiSessionRow {
             label: label.to_owned(),
             hint: String::new(),
@@ -3598,7 +3593,7 @@ mod tests {
 
     #[test]
     fn ai_session_panel_height_stays_fixed_while_filtering() {
-        use crate::ai_sessions::AiSessionSource::{Claude, Codex};
+        use crate::ai_agents::AgentKind::{Claude, Codex};
         let rows = (0..12)
             .map(|index| AiSessionRow {
                 label: format!("session {index}"),

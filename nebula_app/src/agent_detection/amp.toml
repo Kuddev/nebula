@@ -1,0 +1,31 @@
+# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+# OSC-title-only rules are omitted because Nebula detects against terminal text.
+id = "amp"
+aliases = ["amp-local"]
+
+[[rules]]
+id = "approval_footer"
+state = "blocked"
+priority = 300
+region = "whole_recent"
+any = [
+  { contains = ["waiting for approval"] },
+  { contains = ["run this command?"] },
+  { contains = ["allow editing file:"] },
+  { contains = ["allow creating file:"] },
+  { contains = ["confirm tool call"] },
+]
+
+[[rules]]
+id = "status_footer_working"
+state = "working"
+priority = 200
+region = "bottom_non_empty_lines(5)"
+line_regex = ['(?i)^\s*╰\s+\S+\s+(thinking|streaming|running tools|waiting)\s+─']
+
+[[rules]]
+id = "esc_cancel_working"
+state = "working"
+priority = 100
+region = "whole_recent"
+contains = ["esc to cancel"]

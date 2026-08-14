@@ -2125,6 +2125,14 @@ impl WindowContext {
                 });
             }
         }
+        if let Some(id) = ev.session_id.as_deref() {
+            let cwd = self.panes[idx].nebula_state.cwd.clone();
+            if let Err(error) =
+                crate::ai_sessions::record_hook_session(&ev.source, id, &cwd, None)
+            {
+                log::warn!("agent session index: could not record {} {id}: {error}", ev.source);
+            }
+        }
 
         match ev.kind {
             crate::ai_hook::AiHookKind::SessionStart => {
