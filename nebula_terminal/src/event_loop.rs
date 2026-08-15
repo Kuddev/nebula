@@ -7,15 +7,17 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use log::error;
 use polling::{Event as PollingEvent, Events, PollMode, Poller};
 
 use crate::event::{self, Event, EventListener, WindowSize};
 use crate::grid::Dimensions as _;
+use crate::index::{Column, Line};
 use crate::osc_cwd::OscEvent;
 use crate::sync::FairMutex;
 use crate::term::Term;
@@ -27,6 +29,110 @@ pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
 
 /// Max bytes to read from the PTY while the terminal is locked.
 const MAX_LOCKED_READ: usize = u16::MAX as usize;
+
+/// ConPTY 光标对账的静默期：最后一次 resize 提交后等这么久再探针，给
+/// conhost 的内部整理（缓冲区塌缩/重锚）和 shell 的 resize 反应留时间。
+const ALIGN_DELAY: Duration = Duration::from_millis(120);
+
+/// Resize diagnostics are opt-in because PTY reads are a hot path. The trace
+/// records the local grid state at the exact stream boundaries where bytes are
+/// parsed or a resize is committed, so it can be aligned with
+/// `NEBULA_PTY_RECORD=1` without changing terminal behavior.
+fn resize_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("NEBULA_RESIZE_TRACE").is_some())
+}
+
+fn trace_terminal_state<U: EventListener>(stage: &str, terminal: &Term<U>) {
+    if !resize_trace_enabled() {
+        return;
+    }
+
+    // PowerShell's configured prompt uses U+276F. Recording every visible
+    // occurrence exposes stale prompt rows immediately after a reflow.
+    let mut prompt_rows = Vec::new();
+    for row in 0..terminal.screen_lines() {
+        if (0..terminal.columns())
+            .any(|column| terminal.grid()[Line(row as i32)][Column(column)].c == '❯')
+        {
+            prompt_rows.push(row);
+        }
+    }
+
+    let cursor = terminal.grid().cursor.point;
+    eprintln!(
+        "[nebula:resize-trace] {stage} grid={}x{} cursor={}:{} wrap={} history={} display_offset={} prompts={prompt_rows:?}",
+        terminal.columns(),
+        terminal.screen_lines(),
+        cursor.line.0,
+        cursor.column.0,
+        terminal.grid().cursor.input_needs_wrap,
+        terminal.history_size(),
+        terminal.grid().display_offset(),
+    );
+}
+
+/// 向 conhost 要光标真值：临时 `AttachConsole` 到 ConPTY 子进程的控制台，
+/// 读 `GetConsoleScreenBufferInfo`，换算成视口相对行（0 基）。
+///
+/// 进程同一时刻只能挂一个控制台，多 pane 并发对账用全局锁串行化；每次
+/// 探针都 attach→读→detach，窗口只有微秒级。Nebula 主进程是 GUI 子系统
+/// （自身无控制台），detach 后回到无控制台状态，不影响任何组件。失败
+/// （子进程已退出、权限等）一律返回 None，对账静默放弃。
+#[cfg(windows)]
+fn conpty_cursor_viewport_row(pid: u32) -> Option<usize> {
+    use std::sync::Mutex;
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, CONSOLE_SCREEN_BUFFER_INFO, FreeConsole, GetConsoleScreenBufferInfo,
+    };
+
+    static ATTACH_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = ATTACH_LOCK.lock().ok()?;
+
+    // SAFETY: 纯 Win32 控制台句柄操作；FreeConsole 对无控制台进程是无害
+    // no-op，收尾的 FreeConsole 恢复 GUI 进程的无控制台状态。
+    unsafe {
+        FreeConsole();
+        if AttachConsole(pid) == 0 {
+            return None;
+        }
+        let mut conout: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+        let handle = CreateFileW(
+            conout.as_mut_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            FreeConsole();
+            return None;
+        }
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        let ok = GetConsoleScreenBufferInfo(handle, &mut info);
+        CloseHandle(handle);
+        FreeConsole();
+        if ok == 0 {
+            return None;
+        }
+        let row = i32::from(info.dwCursorPosition.Y) - i32::from(info.srWindow.Top);
+        usize::try_from(row).ok()
+    }
+}
+
+#[cfg(not(windows))]
+fn conpty_cursor_viewport_row(_pid: u32) -> Option<usize> {
+    None
+}
 
 /// 本地 PTY 与远端传输共用的有状态终端字节流处理器。
 /// OSC 提取必须紧贴 VT 解析，避免两类会话产生不同的目录、命令和图片状态。
@@ -266,6 +372,7 @@ where
             }
 
             state.stream.feed(&mut **terminal, &self.event_proxy, &buf[..unprocessed]);
+            trace_terminal_state("after-pty-read", &terminal);
 
             processed += unprocessed;
             unprocessed = 0;
@@ -344,11 +451,13 @@ where
             let mut failure: Option<String> = None;
 
             'event_loop: loop {
-                // Wakeup the event loop when a synchronized update timeout was reached.
-                let timeout = state
-                    .stream
-                    .next_sync_timeout()
-                    .map(|st| st.saturating_duration_since(Instant::now()));
+                // Wakeup the event loop when a synchronized update timeout or
+                // the pending ConPTY align deadline was reached.
+                let deadline = match (state.stream.next_sync_timeout(), state.align_at) {
+                    (Some(sync), Some(align)) => Some(sync.min(align)),
+                    (sync, align) => sync.or(align),
+                };
+                let timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
 
                 events.clear();
                 if let Err(err) = self.poll.wait(&mut events, timeout) {
@@ -362,10 +471,28 @@ where
                     }
                 }
 
-                // Handle synchronized update timeout.
+                // ConPTY 光标对账到点：向 conhost 要真值并把本地网格滚到同
+                // 一坐标系（机理见 `Term::conpty_realign`）。
+                if state.align_at.is_some_and(|at| Instant::now() >= at) {
+                    state.align_at = None;
+                    if let Some(target) = self.pty.child_pid().and_then(conpty_cursor_viewport_row) {
+                        let mut terminal = self.terminal.lock();
+                        trace_terminal_state("before-align", &terminal);
+                        terminal.conpty_realign(target);
+                        trace_terminal_state("after-align", &terminal);
+                        drop(terminal);
+                        self.event_proxy.send_event(Event::Wakeup);
+                    }
+                }
+
+                // Handle synchronized update timeout. The align deadline can
+                // wake the loop early with empty events — only a genuinely
+                // expired sync window may force-stop the synchronized update.
                 if events.is_empty() && self.rx.peek().is_none() {
-                    state.stream.stop_sync(&mut *self.terminal.lock());
-                    self.event_proxy.send_event(Event::Wakeup);
+                    if state.stream.next_sync_timeout().is_some_and(|st| Instant::now() >= st) {
+                        state.stream.stop_sync(&mut *self.terminal.lock());
+                        self.event_proxy.send_event(Event::Wakeup);
+                    }
                     continue;
                 }
 
@@ -397,9 +524,17 @@ where
                     // first, then ask ConPTY to resize. ResizePseudoConsole is
                     // synchronous; repaint bytes it produces are consumed by
                     // the normal readable-event path below against this grid.
-                    self.terminal.lock().resize(window_size);
+                    {
+                        let mut terminal = self.terminal.lock();
+                        trace_terminal_state("before-resize", &terminal);
+                        terminal.resize(window_size);
+                        trace_terminal_state("after-resize", &terminal);
+                    }
                     self.pty.on_resize(window_size);
                     state.stream.resize(window_size);
+                    // resize 尘埃落定后做一次 ConPTY 光标对账；新 resize 顺
+                    // 延死线，风暴天然合并成一次探针。
+                    state.align_at = Some(Instant::now() + ALIGN_DELAY);
                     self.event_proxy.send_event(Event::Wakeup);
                 }
 
@@ -578,6 +713,9 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     stream: StreamProcessor,
+    /// ConPTY 光标对账的死线：resize 提交后 `ALIGN_DELAY` 触发，见
+    /// `conpty_cursor_viewport_row`。
+    align_at: Option<Instant>,
 }
 
 impl State {

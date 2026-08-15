@@ -104,6 +104,14 @@ pub trait EventedPty: EventedReadWrite {
     ///
     /// Returns `Some(event)` on success, or `None` if there are no events to retrieve.
     fn next_child_event(&mut self) -> Option<ChildEvent>;
+
+    /// PID of the direct child attached to this PTY, when the backend knows
+    /// it. Windows uses it for the ConPTY cursor-realign probe
+    /// (`AttachConsole` + `GetConsoleScreenBufferInfo`); other backends have
+    /// no equivalent and keep the default.
+    fn child_pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Setup environment variables.

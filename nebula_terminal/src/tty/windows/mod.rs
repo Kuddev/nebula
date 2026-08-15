@@ -139,6 +139,10 @@ impl EventedPty for Pty {
             Err(TryRecvError::Disconnected) => Some(ChildEvent::Exited(None)),
         }
     }
+
+    fn child_pid(&self) -> Option<u32> {
+        self.child_watcher.pid().map(std::num::NonZeroU32::get)
+    }
 }
 
 impl OnResize for Pty {

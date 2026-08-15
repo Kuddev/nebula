@@ -902,6 +902,39 @@ impl<T> Term<T> {
         self.mark_fully_damaged();
     }
 
+    /// ConPTY 对账重锚：把主屏光标搬到 `target` 视口行，多出的顶部行滚入
+    /// 历史、底部补空行。
+    ///
+    /// 背景（字节级取证，2026-08）：`ResizePseudoConsole` 之后 conhost 可能
+    /// 把自身缓冲区塌缩成"视口高、零回滚、内容顶端对齐"，其光标停在内容末
+    /// 行——高于视口底；而本地 reflow 保留完整历史、光标钉在视口底。此后
+    /// PSReadLine 按 conhost 坐标发出的绝对 CUP 会落进我们视口中部（回显
+    /// 砸在滚动输出上）。该塌缩在 conhost 内部且非确定性，事前无法预测，
+    /// conhost 也不重绘（直通模式零字节），唯一可靠做法是事后向 conhost
+    /// 要真值（`AttachConsole` + `GetConsoleScreenBufferInfo`，见
+    /// event_loop 的对账探针）并把本地网格滚到同一坐标系。滚动后两侧光标
+    /// 同行，后续输出同步推进，永久对齐；被滚走的行仍在历史里可回看。
+    pub fn conpty_realign(&mut self, target: usize) {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let cursor = self.grid.cursor.point.line.0;
+        if cursor < 0 {
+            return;
+        }
+        let Some(delta) = (cursor as usize).checked_sub(target).filter(|d| *d > 0) else {
+            return;
+        };
+        if delta >= self.screen_lines() {
+            return;
+        }
+        let region = Line(0)..Line(self.screen_lines() as i32);
+        self.selection = self.selection.take().and_then(|s| s.rotate(self, &region, delta as i32));
+        self.grid.scroll_up(&region, delta);
+        self.grid.cursor.point.line = self.grid.cursor.point.line - delta;
+        self.mark_fully_damaged();
+    }
+
     fn deccolm(&mut self)
     where
         T: EventListener,
@@ -3124,6 +3157,27 @@ mod tests {
 
         assert_eq!(term.history_size(), 15);
         assert_eq!(term.grid.cursor.point, Point::new(Line(4), Column(0)));
+    }
+
+    #[test]
+    fn conpty_realign_scrolls_excess_rows_into_history() {
+        let size = TermSize::new(8, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        for (row, marker) in ['a', 'b', 'c', 'd', 'e'].into_iter().enumerate() {
+            term.grid[Line(row as i32)][Column(0)].c = marker;
+        }
+        term.grid.cursor.point = Point::new(Line(4), Column(0));
+
+        term.conpty_realign(2);
+
+        assert_eq!(term.grid.cursor.point, Point::new(Line(2), Column(0)));
+        assert_eq!(term.history_size(), 2);
+        assert_eq!(term.grid[Line(0)][Column(0)].c, 'c');
+        assert_eq!(term.grid[Line(1)][Column(0)].c, 'd');
+        assert_eq!(term.grid[Line(2)][Column(0)].c, 'e');
+        assert_eq!(term.grid[Line(3)][Column(0)].c, ' ');
+        assert_eq!(term.grid[Line(4)][Column(0)].c, ' ');
     }
 
     #[test]
