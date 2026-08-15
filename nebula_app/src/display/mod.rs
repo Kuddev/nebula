@@ -75,7 +75,7 @@ pub mod window;
 
 mod chrome;
 pub mod command_palette;
-mod context_menu;
+pub(crate) mod context_menu;
 mod i18n;
 pub mod markdown_view;
 mod message_queue_entry;
@@ -96,11 +96,11 @@ pub(crate) fn quick_terminal_hotkey_from_settings(config: &UiConfig) -> String {
 }
 
 pub(crate) use chrome::chrome_settings_button_rect;
+// GPUI 壳的侧栏共用同一套「按列截断 + 省略号」规则：省略号是合同的一部分，
+// 两个壳各写一份必然漂移（GPUI 曾靠字符数上限截断，末尾直接吃掉）。
+pub(crate) use chrome::truncate_tab_label;
 pub use chrome::{ChromeHit, TabDropAction, in_chrome_bar, resize_edge};
-use chrome::{
-    ChromeTabLayout, TabDrag, chrome_hit_with_tabs, chrome_tab_layout, contains_rect,
-    truncate_tab_label,
-};
+use chrome::{ChromeTabLayout, TabDrag, chrome_hit_with_tabs, chrome_tab_layout, contains_rect};
 pub use context_menu::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
 pub use i18n::{LanguagePreference, UiLanguage};
 pub use size_info::SizeInfo;

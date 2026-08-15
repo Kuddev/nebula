@@ -34,6 +34,7 @@ use gpui::{
 };
 use image::Frame;
 
+use crate::display::color::Rgb;
 use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::settings_pane::{SettingsPane, SettingsPaneEvent};
 use crate::gpui_shell::terminal::view::{SidebarActivity, TerminalView, TerminalViewEvent};
@@ -56,6 +57,7 @@ gpui::actions!(
         ToggleFileTree,
         SplitRight,
         SplitDown,
+        RenameActiveTab,
         ToggleZoom,
         FocusPaneLeft,
         FocusPaneRight,
@@ -78,6 +80,8 @@ pub fn init(cx: &mut App) {
         // ctrl+shift+s 上下、ctrl+shift+enter 缩放、ctrl+alt+方向切聚焦。
         KeyBinding::new("ctrl-shift-d", SplitRight, None),
         KeyBinding::new("ctrl-shift-s", SplitDown, None),
+        // F2 重命名活动标签（旧壳同键位）；右键菜单的键帽读的就是这条。
+        KeyBinding::new("f2", RenameActiveTab, None),
         KeyBinding::new("ctrl-shift-enter", ToggleZoom, None),
         KeyBinding::new("ctrl-alt-left", FocusPaneLeft, None),
         KeyBinding::new("ctrl-alt-right", FocusPaneRight, None),
@@ -243,6 +247,27 @@ const TAB_ROW_H: f32 = 34.0;
 const TAB_ROW_PITCH: f32 = TAB_ROW_H + 8.0;
 const SIDE_PANEL_SLOT_W: f32 = 328.0;
 
+/// 侧栏 tab 行的关闭按钮边长。旧壳 `chrome_tab_layout` 取
+/// `max(row_h * 0.58, 16)`；`Button::xsmall()` 的 `size_5` 恰好落在这个数上，
+/// 所以两个壳的 × 命中区同尺寸。垂直位置**必须**由 flex 居中给出：曾用
+/// `absolute().top(px(3.0))` 硬写，34px 行里整枚按钮偏上 4px（用户报的
+/// "删除按钮偏移了"）。
+const TAB_CLOSE_SIZE: f32 = 20.0;
+
+/// 侧栏文字的字号档位，**乘在终端字号上**（旧壳 chrome 同源）：标签行走
+/// BODY(1.0)——旧壳 `draw_ui_text_tracked(.., 1.0, ..)`，分组标题与右侧
+/// shell 短标各压一档。硬编码 `text_sm`(14px) 时侧栏比旧壳整体小一号，
+/// 且用户调大字号也不跟——那是用户报的"按钮比旧版小太多"。
+const SIDEBAR_TITLE_SCALE: f32 = 0.82;
+const SIDEBAR_TAG_SCALE: f32 = 0.80;
+
+/// 侧栏 tab 标签的水平预算（逻辑 px）：外层 `p_2`、行内 `px_2`、行内
+/// `gap_2` 与右侧状态槽都从侧栏宽里扣掉，剩下的除以实测 cell 宽就是可用
+/// 列数。旧壳同一算法（可用像素跨度 ÷ cell_w = 列），所以省略号出现的
+/// 位置两壳一致。
+const TAB_STATUS_SLOT_W: f32 = 52.0;
+const TAB_LABEL_ICON_W: f32 = 18.0;
+
 /// 拖拽启动阈值（逻辑 px）：按住不动/轻微抖动是点击，越过才进入拖拽。
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
 
@@ -364,8 +389,36 @@ fn ai_session_palette_rows(
     rows
 }
 
+/// 标签的用户可编辑元数据：重命名与色标（旧壳 `TabEntry::custom_name` /
+/// `custom_color` 的对应物，字段与共享 session v4 的 `TabSession` 同名同义，
+/// 所以导出/恢复不需要转换层）。
+///
+/// 与 `tabs` **同下标**。长度必须一致，所以增删移三种结构性改动只允许走
+/// `insert_tab_at` / `remove_tab_at` / `move_tab`——别处直接 `self.tabs.push`
+/// 会让色条和名字错位到邻居身上。
+#[derive(Clone, Debug, Default)]
+struct TabMeta {
+    /// 用户重命名过的标签名；`None` = 跟着 cwd/文件名自动走。
+    custom_name: Option<String>,
+    /// 色标（右键菜单的标签颜色）；`None` = 不画色条。
+    color: Option<Rgb>,
+}
+
+/// 侧栏行内重命名的活动状态（旧壳 `nebula_tab_rename` 同形态：被编辑的那
+/// 一行原地变输入框，而不是弹一个对话框）。Enter 提交、Esc 取消、失焦提交；
+/// 提交空串 = 恢复自动标签名。
+struct TabRename {
+    ix: usize,
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
 pub struct NebulaWorkspace {
     tabs: Vec<WorkspaceTab>,
+    /// 与 `tabs` 同下标的用户元数据，见 [`TabMeta`]。
+    tab_meta: Vec<TabMeta>,
+    /// 正在行内重命名的标签，见 [`TabRename`]。
+    tab_rename: Option<TabRename>,
     next_pane_id: u64,
     active: usize,
     sidebar_collapsed: bool,
@@ -376,6 +429,8 @@ pub struct NebulaWorkspace {
     /// 首次手动切换后才启用折叠动画：启动帧保持静止落位（旧壳同感，
     /// spring 构造时直接初始化在端点上）。
     sidebar_fold_armed: bool,
+    /// 同理，tab 列表的折叠动画也只在首次手动切换后启用。
+    tabs_fold_armed: bool,
     /// 开窗时反推的目标网格（含小屏收拢）；首个终端按它 spawn。
     initial_grid: (u16, u16),
     /// 静默行右侧的 shell 短标（旧壳 `default_shell_tag` 语义）：配置的
@@ -417,8 +472,32 @@ impl NebulaWorkspace {
     fn insert_new_tab(&mut self, tab: WorkspaceTab) {
         let position = nebula_settings::RuntimeSettings::load().new_tab_position;
         let at = new_tab_insert_index(position, self.active, self.tabs.len());
-        self.tabs.insert(at, tab);
+        self.insert_tab_at(at, tab, TabMeta::default());
         self.active = at;
+    }
+
+    /// `tabs` + `tab_meta` 的唯一插入口（见 [`TabMeta`] 的同下标合同）。
+    fn insert_tab_at(&mut self, at: usize, tab: WorkspaceTab, meta: TabMeta) {
+        let at = at.min(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.tab_meta.insert(at, meta);
+    }
+
+    /// `tabs` + `tab_meta` 的唯一移除口；返回被摘的 tab 供调用方回收会话。
+    fn remove_tab_at(&mut self, ix: usize) -> Option<(WorkspaceTab, TabMeta)> {
+        if ix >= self.tabs.len() {
+            return None;
+        }
+        let tab = self.tabs.remove(ix);
+        // 长度不齐时（理论上不会）宁可给默认元数据，也不要 panic。
+        let meta =
+            if ix < self.tab_meta.len() { self.tab_meta.remove(ix) } else { TabMeta::default() };
+        Some((tab, meta))
+    }
+
+    /// 当前标签的元数据（下标越界时给一份默认值，读取点因此不必各自判空）。
+    fn meta(&self, ix: usize) -> TabMeta {
+        self.tab_meta.get(ix).cloned().unwrap_or_default()
     }
 
     pub fn new(
@@ -460,12 +539,15 @@ impl NebulaWorkspace {
         );
         let mut this = Self {
             tabs: Vec::new(),
+            tab_meta: Vec::new(),
+            tab_rename: None,
             next_pane_id: 1,
             active: 0,
             sidebar_collapsed: false,
             tabs_section_collapsed: false,
             sidebar_width,
             sidebar_fold_armed: false,
+            tabs_fold_armed: false,
             shell_tag: Self::default_shell_tag(),
             initial_grid,
             tab_drag: None,
@@ -896,7 +978,13 @@ impl NebulaWorkspace {
         let focused =
             panes.get(tab.active_pane).or_else(|| panes.first()).map(|pane| pane.id).unwrap_or(0);
         // 恢复期保持文件里的既有次序，不套「新标签插入位置」策略。
-        self.tabs.push(WorkspaceTab::Terminal { panes, tree, focused, zoomed: false });
+        // 重命名与色标随会话一起回来（旧壳同合同）。
+        let at = self.tabs.len();
+        self.insert_tab_at(
+            at,
+            WorkspaceTab::Terminal { panes, tree, focused, zoomed: false },
+            TabMeta { custom_name: tab.custom_name.clone(), color: tab.color },
+        );
         true
     }
 
@@ -953,10 +1041,11 @@ impl NebulaWorkspace {
                 .map(|host| LaunchSession::Ssh { host });
             let active_pane =
                 tree.leaves().iter().position(|id| id == focused).unwrap_or(0);
+            let meta = self.meta(ix);
             tabs.push(TabSession {
                 cwd,
-                custom_name: None,
-                color: None,
+                custom_name: meta.custom_name,
+                color: meta.color,
                 launch,
                 layout: Some(layout),
                 active_pane,
@@ -1191,10 +1280,7 @@ impl NebulaWorkspace {
     /// 终端应用惯例：最后一个 Tab 关闭即退出应用。整 tab 关闭（侧栏 ×）
     /// 逐 pane 回收会话；实体引用清零后 `TerminalView::drop` 再兜底。
     fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.tabs.len() {
-            return;
-        }
-        let tab = self.tabs.remove(ix);
+        let Some((tab, _meta)) = self.remove_tab_at(ix) else { return };
         if let WorkspaceTab::Terminal { panes, .. } = &tab {
             let mut bounds = self.pane_bounds.borrow_mut();
             for pane in panes {
@@ -1354,12 +1440,12 @@ impl NebulaWorkspace {
         if !self.dock_allowed(source) {
             return;
         }
-        let WorkspaceTab::Terminal {
-            panes: src_panes,
-            tree: src_tree,
-            focused: src_focused,
-            ..
-        } = self.tabs.remove(source)
+        let Some((
+            WorkspaceTab::Terminal {
+                panes: src_panes, tree: src_tree, focused: src_focused, ..
+            },
+            _meta,
+        )) = self.remove_tab_at(source)
         else {
             unreachable!("dock_allowed 已保证 source 是 Terminal");
         };
@@ -1388,8 +1474,8 @@ impl NebulaWorkspace {
         if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
             return;
         }
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
+        let Some((tab, meta)) = self.remove_tab_at(from) else { return };
+        self.insert_tab_at(to, tab, meta);
         self.active = if self.active == from {
             to
         } else {
@@ -1775,20 +1861,17 @@ impl NebulaWorkspace {
         cx.notify();
     }
 
+    /// 完整标签文本。**不在这里截断**：可见宽度是布局问题，字符数上限会在
+    /// 窄侧栏下漏出、在宽侧栏下白扔字符。截断由 `render_sidebar` 按实测
+    /// cell 宽换算成列数后交给旧壳的 `truncate_tab_label`（带省略号）。
     fn tab_title(&self, ix: usize, cx: &App) -> SharedString {
-        const MAX_CHARS: usize = 20;
-        let clip = |label: &str| -> String {
-            let mut chars = label.chars();
-            let mut head: String = chars.by_ref().take(MAX_CHARS).collect();
-            if chars.next().is_some() {
-                head.push('…');
-            }
-            head
-        };
+        if let Some(custom) = self.meta(ix).custom_name {
+            return custom.into();
+        }
         match &self.tabs[ix] {
             WorkspaceTab::Settings { .. } => "设置".into(),
-            WorkspaceTab::Image { view } => clip(&view.read(cx).title).into(),
-            WorkspaceTab::Document { view } => clip(&view.read(cx).title).into(),
+            WorkspaceTab::Image { view } => view.read(cx).title.clone().into(),
+            WorkspaceTab::Document { view } => view.read(cx).title.clone().into(),
             tab @ WorkspaceTab::Terminal { panes, .. } => {
                 // 标签 = 聚焦 pane 的 cwd 末级目录名（旧壳 chrome_tab_label
                 // 规则）；分屏时缀 pane 计数，一眼可见这行是一组。
@@ -1796,7 +1879,7 @@ impl NebulaWorkspace {
                     Some(view) => view.read(cx).tab_label(),
                     None => String::from("shell"),
                 };
-                let mut head = clip(&label);
+                let mut head = label;
                 if panes.len() > 1 {
                     head.push_str(&format!(" ⊞{}", panes.len()));
                 }
@@ -2155,7 +2238,8 @@ impl NebulaWorkspace {
             .map(|settings| settings.font_family.clone())
             .unwrap_or_else(|| String::from("Maple Mono Normal NF CN"))
             .into();
-        let root = self.side_panel.root().map(Path::to_path_buf);
+        // Git 视图看的是终端当前目录，不是目录树浏览到的位置（`vcs_root`）。
+        let root = self.side_panel.vcs_root().map(Path::to_path_buf);
         let selected = self.side_panel.selected.clone();
         let git = self.side_panel.git().cloned();
         let vcs = git.as_ref().map(|info| info.vcs);
@@ -2434,13 +2518,126 @@ impl NebulaWorkspace {
         }
     }
 
+    /// 进入行内重命名：输入框预填当前显示名（自定义名优先，否则自动标签），
+    /// 焦点直接落进去。已在编辑别的行时先提交前一行。
+    fn begin_rename(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        self.commit_rename(window, cx);
+        let current = self
+            .meta(ix)
+            .custom_name
+            .unwrap_or_else(|| self.tab_title(ix, cx).to_string());
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _: &Entity<InputState>, event: &InputEvent, window, cx| {
+                match event {
+                    InputEvent::PressEnter { .. } => this.commit_rename(window, cx),
+                    // 点走 = 提交（旧壳空串语义：清空即恢复自动名），不静默丢弃。
+                    InputEvent::Blur => this.commit_rename(window, cx),
+                    _ => {},
+                }
+            },
+        );
+        input.read(cx).focus_handle(cx).focus(window);
+        self.tab_rename = Some(TabRename { ix, input, _subscription: subscription });
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.tab_rename.take() else { return };
+        let name = rename.input.read(cx).value().trim().to_owned();
+        if let Some(meta) = self.tab_meta.get_mut(rename.ix) {
+            meta.custom_name = (!name.is_empty()).then_some(name);
+        }
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_rename.take().is_some() {
+            self.focus_active(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// 标签色标：同色再点一次即取消（旧壳菜单里选中的那枚色块 = 当前色）。
+    fn set_tab_color(&mut self, ix: usize, color: Option<Rgb>, cx: &mut Context<Self>) {
+        if let Some(meta) = self.tab_meta.get_mut(ix) {
+            meta.color = color;
+            cx.notify();
+        }
+    }
+
+    /// 导出单个标签为工作区文件（旧壳 `export_workspace(Some(ix))` 同合同：
+    /// 只导出可恢复的终端标签，文件名取标签名，扩展名 `.nebula-workspace.json`，
+    /// 落盘走共享 v4 schema）。
+    fn export_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.snapshot_session(cx);
+        // snapshot 只收终端标签，所以下标要按「第几个可导出标签」重算。
+        let exportable_before = self
+            .tabs
+            .iter()
+            .take(ix)
+            .filter(|tab| matches!(tab, WorkspaceTab::Terminal { .. }))
+            .count();
+        let Some(tab) = session.tabs.get(exportable_before).cloned() else { return };
+        let stem = tab
+            .custom_name
+            .clone()
+            .or_else(|| {
+                tab.cwd.rsplit(['/', '\\']).find(|part| !part.is_empty()).map(str::to_owned)
+            })
+            .unwrap_or_else(|| "tab".to_owned());
+        let stem: String = stem
+            .chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        let export = crate::session::Session::new(0, vec![tab]);
+        let directory = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let prompt =
+            cx.prompt_for_new_path(&directory, Some(&format!("{stem}.nebula-workspace.json")));
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(path))) = prompt.await else { return };
+            let result = crate::session::save_to(&path, &export);
+            let _ = this.update_in(cx, |_, window, cx| match result {
+                Ok(()) => crate::gpui_shell::toast::toast(
+                    window,
+                    cx,
+                    crate::display::ToastKind::Success,
+                    format!("已导出到 {}", path.display()),
+                ),
+                Err(error) => crate::gpui_shell::toast::toast(
+                    window,
+                    cx,
+                    // 失败即时可重试（换个目录再来一次），不占消息栏的
+                    // "待办动作"层级——分三层的判据是有没有待办，不是严重度。
+                    crate::display::ToastKind::Warning,
+                    format!("工作区导出失败：{error}"),
+                ),
+            });
+        })
+        .detach();
+    }
+
     /// 标签行右键与三点按钮共用一份命令表，避免两个入口继续漂移。
+    /// 条目、分组与键帽对齐旧壳 `display::context_menu` 的 Tab 目标。
     fn tab_popup_menu(
         mut menu: PopupMenu,
         workspace: gpui::WeakEntity<Self>,
         ix: usize,
         terminal: bool,
         ai_fork: bool,
+        color: Option<Rgb>,
     ) -> PopupMenu {
         if ai_fork {
             let target = workspace.clone();
@@ -2456,10 +2653,11 @@ impl NebulaWorkspace {
         }
         if terminal {
             let duplicate = workspace.clone();
+            let export = workspace.clone();
             let split_right = workspace.clone();
             let split_down = workspace.clone();
             menu = menu
-                .item(PopupMenuItem::new("复制标签").icon(IconName::Copy).on_click(
+                .item(PopupMenuItem::new("复制标签页").icon(IconName::Copy).on_click(
                     move |_, window, cx| {
                         if let Some(workspace) = duplicate.upgrade() {
                             workspace.update(cx, |workspace, cx| {
@@ -2468,35 +2666,141 @@ impl NebulaWorkspace {
                         }
                     },
                 ))
-                .item(PopupMenuItem::new("向右分屏").icon(IconName::PanelRight).on_click(
+                .item(PopupMenuItem::new("导出为工作区…").icon(IconName::Inbox).on_click(
                     move |_, window, cx| {
-                        if let Some(workspace) = split_right.upgrade() {
+                        if let Some(workspace) = export.upgrade() {
                             workspace.update(cx, |workspace, cx| {
-                                workspace.activate_tab(ix, window, cx);
-                                workspace.split_focused(SplitDirection::LeftRight, window, cx);
+                                workspace.export_tab(ix, window, cx);
                             });
                         }
                     },
                 ))
-                .item(PopupMenuItem::new("向下分屏").icon(IconName::PanelBottom).on_click(
-                    move |_, window, cx| {
-                        if let Some(workspace) = split_down.upgrade() {
+                .separator()
+                // `action` 只用来渲染键帽：handler 存在时组件不会 dispatch
+                // 它（见 PopupMenu::confirm），所以命令仍然作用在 `ix` 上，
+                // 而不是"活动标签"——右键别的标签也不会打错对象。
+                .item(
+                    PopupMenuItem::new("左右分屏")
+                        .icon(IconName::PanelRight)
+                        .action(Box::new(SplitRight))
+                        .on_click(move |_, window, cx| {
+                            if let Some(workspace) = split_right.upgrade() {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.activate_tab(ix, window, cx);
+                                    workspace
+                                        .split_focused(SplitDirection::LeftRight, window, cx);
+                                });
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("上下分屏")
+                        .icon(IconName::PanelBottom)
+                        .action(Box::new(SplitDown))
+                        .on_click(move |_, window, cx| {
+                            if let Some(workspace) = split_down.upgrade() {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.activate_tab(ix, window, cx);
+                                    workspace
+                                        .split_focused(SplitDirection::TopBottom, window, cx);
+                                });
+                            }
+                        }),
+                );
+        }
+        let rename = workspace.clone();
+        let close = workspace.clone();
+        menu = menu
+            .separator()
+            .item(
+                PopupMenuItem::new("重命名")
+                    .icon(IconName::ALargeSmall)
+                    .action(Box::new(RenameActiveTab))
+                    .on_click(move |_, window, cx| {
+                        if let Some(workspace) = rename.upgrade() {
                             workspace.update(cx, |workspace, cx| {
-                                workspace.activate_tab(ix, window, cx);
-                                workspace.split_focused(SplitDirection::TopBottom, window, cx);
+                                workspace.begin_rename(ix, window, cx);
                             });
                         }
-                    },
-                ));
-        }
-        let close = workspace;
-        menu.separator().item(PopupMenuItem::new("关闭标签").icon(IconName::Close).on_click(
-            move |_, window, cx| {
-                if let Some(workspace) = close.upgrade() {
-                    workspace.update(cx, |workspace, cx| {
-                        workspace.close_tab(ix, window, cx);
-                    });
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("关闭")
+                    .icon(IconName::Close)
+                    .action(Box::new(CloseActiveTerminal))
+                    .on_click(move |_, window, cx| {
+                        if let Some(workspace) = close.upgrade() {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.close_tab(ix, window, cx);
+                            });
+                        }
+                    }),
+            );
+        Self::tab_color_items(menu, workspace, ix, color)
+    }
+
+    /// 标签颜色行（旧壳菜单尾部的色板）：首槽 `A` = 无色，其后是 7 枚品牌
+    /// 色。当前色带一圈选中环，再点一次同色即取消。
+    ///
+    /// 整行是一个 `ElementItem`：色块自己吃 mouse_down 落色，外层的 click
+    /// 没有 handler，只负责收起菜单（见 `PopupMenu::confirm`）。
+    fn tab_color_items(
+        menu: PopupMenu,
+        workspace: gpui::WeakEntity<Self>,
+        ix: usize,
+        current: Option<Rgb>,
+    ) -> PopupMenu {
+        menu.separator().item(PopupMenuItem::label("标签颜色")).item(PopupMenuItem::element(
+            move |_, cx| {
+                let swatches = std::iter::once(None)
+                    .chain(crate::display::context_menu::TAB_COLORS.into_iter().map(Some));
+                let mut row = h_flex().gap_1().py_1();
+                for (slot, color) in swatches.enumerate() {
+                    let selected = color == current;
+                    let target = workspace.clone();
+                    // 无色槽用主题 accent 打底并压一个 "A"，与旧壳一致：
+                    // 它是"自动"，不是第八种颜色。
+                    let fill = color
+                        .map(|color| gpui::Rgba {
+                            r: color.r as f32 / 255.0,
+                            g: color.g as f32 / 255.0,
+                            b: color.b as f32 / 255.0,
+                            a: 1.0,
+                        })
+                        .unwrap_or_else(|| cx.theme().primary.into());
+                    row = row.child(
+                        div()
+                            .id(("tab-color", slot))
+                            .size(px(20.0))
+                            .rounded(px(5.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(fill)
+                            .cursor_pointer()
+                            .when(selected, |swatch| {
+                                swatch.border_2().border_color(cx.theme().foreground)
+                            })
+                            .when(color.is_none(), |swatch| {
+                                swatch
+                                    .text_size(px(11.0))
+                                    .text_color(cx.theme().primary_foreground)
+                                    .child("A")
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                move |_, _, cx| {
+                                    if let Some(workspace) = target.upgrade() {
+                                        workspace.update(cx, |workspace, cx| {
+                                            let next = if selected { None } else { color };
+                                            workspace.set_tab_color(ix, next, cx);
+                                        });
+                                    }
+                                },
+                            ),
+                    );
                 }
+                row
             },
         ))
     }
@@ -2543,7 +2847,33 @@ impl NebulaWorkspace {
         ))
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 侧栏等宽标签的 cell 宽：与终端元素同一套度量法（塑形一个 "M" 取
+    /// advance），列数换算与省略号都建立在它上面。字体缺失时回落 0.6em，
+    /// 只影响截断位置、不会画错。
+    fn sidebar_cell_width(
+        &self,
+        window: &mut Window,
+        family: &SharedString,
+        size_px: f32,
+    ) -> f32 {
+        let shaped = window.text_system().shape_line(
+            SharedString::new_static("M"),
+            px(size_px),
+            &[gpui::TextRun {
+                len: 1,
+                font: gpui::font(family.clone()),
+                color: gpui::Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+        let width = f32::from(shaped.width);
+        if width > 0.5 { width } else { size_px * 0.6 }
+    }
+
+    fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let active_bg = theme.sidebar_accent;
@@ -2552,11 +2882,17 @@ impl NebulaWorkspace {
         let dark = theme.is_dark();
         // 运行程序图标是 Nerd Font 字位，chrome 的 UI 字体没有——用终端等
         // 宽字体渲染（旧壳 chrome 同理，其内置字体本就带全部图标字位）。
-        let mono_family: SharedString = cx
-            .try_global::<crate::gpui_shell::config::Settings>()
+        let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
+        let mono_family: SharedString = settings
             .map(|settings| settings.font_family.clone())
             .unwrap_or_else(|| String::from("Cascadia Mono"))
             .into();
+        // 标签字号跟着终端字号走（旧壳 chrome 只有这一套度量），所以设置页
+        // 调字号、Ctrl+滚轮缩放之后侧栏一起变，不再固定 14px。
+        let label_px = settings.map(|settings| settings.font_size_px).unwrap_or(15.0);
+        // 等宽 advance 的唯一事实源：与终端元素同款——塑形一个 "M" 量出来，
+        // 而不是按 0.6em 猜。列数换算和省略号都建立在这个数上。
+        let cell_w = self.sidebar_cell_width(window, &mono_family, label_px);
 
         // 受约束拖拽的渲染参数：激活后被拖行骑指针位移，落点槽位由位移换算。
         let drag = self
@@ -2606,6 +2942,33 @@ impl NebulaWorkspace {
             let shell_tag =
                 (is_terminal && activity == SidebarActivity::Idle && !self.shell_tag.is_empty())
                     .then(|| self.shell_tag.clone());
+            // 可用列数 = （侧栏宽 − 外层 p_2 − 行内 px_2 − 行内 gap − 状态槽
+            // − 行首图标槽）÷ cell 宽。省略号由旧壳同一份 `truncate_tab_label`
+            // 追加，两壳的裁切位置因此一致。
+            let has_icon = is_settings || logo_image.is_some() || program_glyph.is_some();
+            let label_avail = self.sidebar_width
+                - 16.0
+                - 16.0
+                - TAB_STATUS_SLOT_W
+                - 8.0
+                - if has_icon { TAB_LABEL_ICON_W + 8.0 } else { 0.0 };
+            let label_cols = (label_avail / cell_w).floor().max(1.0) as usize;
+            let title: SharedString = crate::display::truncate_tab_label(&title, label_cols).into();
+            // 用户明确设置过的标签色：行左侧一条竖光条（旧壳 strip，位置与
+            // 尺寸同源：左内缩 4、上下各留 7、宽 2.5）。默认标签不占这层
+            // 视觉层级。
+            let tab_color = self.meta(ix).color;
+            let strip = tab_color.map(|color| gpui::Rgba {
+                r: color.r as f32 / 255.0,
+                g: color.g as f32 / 255.0,
+                b: color.b as f32 / 255.0,
+                a: 1.0,
+            });
+            let renaming = self
+                .tab_rename
+                .as_ref()
+                .filter(|rename| rename.ix == ix)
+                .map(|rename| rename.input.clone());
             let status_color = if active { active_fg } else { muted };
             let resting_status: Option<gpui::AnyElement> = match activity {
                 SidebarActivity::Running => {
@@ -2618,7 +2981,12 @@ impl NebulaWorkspace {
                         .into_any_element(),
                 ),
                 SidebarActivity::Idle => shell_tag.map(|tag| {
-                    div().text_xs().text_color(status_color).child(tag).into_any_element()
+                    div()
+                        .font_family(mono_family.clone())
+                        .text_size(px(label_px * SIDEBAR_TAG_SCALE))
+                        .text_color(status_color)
+                        .child(tag)
+                        .into_any_element()
                 }),
             };
             // 三类行位移（旧壳 tab_drag_draw_y 的语义）：被拖行骑指针，
@@ -2666,17 +3034,31 @@ impl NebulaWorkspace {
                         });
                     }),
                 )
+                .when_some(strip, |row, color| {
+                    row.child(
+                        div()
+                            .absolute()
+                            .left(px(4.0))
+                            .top(px(7.0))
+                            .w(px(2.5))
+                            .h(px(TAB_ROW_H - 14.0))
+                            .rounded_full()
+                            .bg(color),
+                    )
+                })
                 .when(is_settings, |row| {
                     row.child(
-                        Icon::new(IconName::Settings)
-                            .small()
-                        .text_color(if active { active_fg } else { muted }),
+                        div().w(px(TAB_LABEL_ICON_W)).flex_shrink_0().flex().justify_center().child(
+                            Icon::new(IconName::Settings)
+                                .small()
+                                .text_color(if active { active_fg } else { muted }),
+                        ),
                     )
                 })
                 .when_some(logo_image, |row, image| {
                     row.child(
                         img(image)
-                            .size(px(18.0))
+                            .size(px(TAB_LABEL_ICON_W))
                             .flex_shrink_0()
                             .object_fit(ObjectFit::Contain),
                     )
@@ -2684,19 +3066,45 @@ impl NebulaWorkspace {
                 .when_some(program_glyph, |row, glyph| {
                     row.child(
                         div()
-                            .w(px(18.0))
+                            .w(px(TAB_LABEL_ICON_W))
                             .flex_shrink_0()
                             .font_family(mono_family.clone())
-                            .text_sm()
+                            .text_size(px(label_px))
                             .text_color(if active { active_fg } else { muted })
                             .child(glyph),
                     )
                 })
-                .child(div().flex_1().min_w_0().text_sm().truncate().child(title))
+                // 标签走终端字体 + 终端字号（旧壳 chrome 同源）。文本已按列
+                // 截断，这里只需要不换行；再叠一层 `truncate()` 会把省略号
+                // 自己裁掉（用户报的"直接截断"）。重命名中的那一行原地换成
+                // 输入框：点进去不该触发选中/拖拽，所以自己吃掉 mouse_down。
+                .child(match renaming {
+                    Some(input) => div()
+                        .flex_1()
+                        .min_w_0()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            if event.keystroke.key == "escape" {
+                                cx.stop_propagation();
+                                this.cancel_rename(window, cx);
+                            }
+                        }))
+                        .child(Input::new(&input).xsmall())
+                        .into_any_element(),
+                    None => div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(mono_family.clone())
+                        .text_size(px(label_px))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child(title)
+                        .into_any_element(),
+                })
                 .child(
                     div()
                         .relative()
-                        .w(px(52.0))
+                        .w(px(TAB_STATUS_SLOT_W))
                         .h_full()
                         .flex_shrink_0()
                         .when_some(resting_status, |slot, status| {
@@ -2711,19 +3119,25 @@ impl NebulaWorkspace {
                             )
                         })
                         .child(
-                            Button::new(("close-tab", ix))
-                                .icon(IconName::Close)
-                                .ghost()
-                                .xsmall()
+                            // 关闭按钮跟状态徽章共用同一个居中槽位：位置由
+                            // flex 给出，不再硬写 top 偏移。
+                            h_flex()
                                 .absolute()
-                                .right_0()
-                                .top(px(3.0))
+                                .inset_0()
+                                .justify_end()
+                                .items_center()
                                 .invisible()
-                                .group_hover(hover_group, |item| item.visible())
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.close_tab(ix, window, cx);
-                                })),
+                                .group_hover(hover_group, |slot| slot.visible())
+                                .child(
+                                    Button::new(("close-tab", ix))
+                                        .icon(IconName::Close)
+                                        .ghost()
+                                        .xsmall()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.close_tab(ix, window, cx);
+                                        })),
+                                ),
                         ),
                 )
                 .context_menu(move |menu, _window, _| {
@@ -2733,6 +3147,7 @@ impl NebulaWorkspace {
                         ix,
                         is_terminal,
                         ai_fork,
+                        tab_color,
                     )
                 });
             if dragged {
@@ -2775,39 +3190,50 @@ impl NebulaWorkspace {
                     .pb_1()
                     .items_center()
                     .child(
-                        Button::new("sidebar-tabs-collapse")
-                            .icon(if self.tabs_section_collapsed {
-                                IconName::ChevronRight
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .ghost()
-                            .xsmall()
-                            .tooltip("折叠/展开标签列表")
+                        // 折叠热区 = 箭头 + TABS + 计数一整段，不只是那枚
+                        // 12px 的小箭头（旧壳整条标题行都收折叠命中）。右侧
+                        // 的 +/⋯ 两枚按钮在 flex_1 之后，自己处理点击。
+                        h_flex()
+                            .id("sidebar-tabs-toggle")
+                            .h_full()
+                            .items_center()
+                            .gap_1()
+                            .pr_1()
+                            .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.tabs_section_collapsed = !this.tabs_section_collapsed;
+                                this.tabs_fold_armed = true;
                                 cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child("TABS"),
-                    )
-                    .child(
-                        h_flex()
-                            .ml_2()
-                            .h(px(22.0))
-                            .min_w(px(28.0))
-                            .px_2()
-                            .justify_center()
-                            .items_center()
-                            .rounded_full()
-                            .bg(theme.muted)
-                            .text_xs()
-                            .text_color(muted)
-                            .child(count),
+                            }))
+                            .child(
+                                Icon::new(if self.tabs_section_collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .xsmall()
+                                .text_color(muted),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
+                                    .text_color(muted)
+                                    .child("TABS"),
+                            )
+                            .child(
+                                h_flex()
+                                    .ml_2()
+                                    .h(px(22.0))
+                                    .min_w(px(28.0))
+                                    .px_2()
+                                    .justify_center()
+                                    .items_center()
+                                    .rounded_full()
+                                    .bg(theme.muted)
+                                    .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
+                                    .text_color(muted)
+                                    .child(count),
+                            ),
                     )
                     .child(div().flex_1())
                     .child(
@@ -2833,22 +3259,52 @@ impl NebulaWorkspace {
                             }),
                     ),
             )
-            .when(!self.tabs_section_collapsed, |sidebar| {
-                sidebar.child(v_flex().flex_1().gap_2().children(items))
-            })
+            .child(self.render_tabs_section(items))
+    }
+
+    /// Tab 列表的折叠槽位：`max_h` 在 0..内容高之间走与侧栏折叠同一条 240ms
+    /// ease-out 曲线，`overflow_hidden` 负责动画期间的裁剪，观感是卷帘而不是
+    /// 瞬间闪现。首次手动切换后才启用——启动帧必须静止落位。
+    ///
+    /// 内容高算得出来（`TAB_ROW_H` + `gap_2` 都是常量），不用等布局回写；插
+    /// `max_h` 而不是 `h` 是为了保住列表原本的 `flex_1`：tab 多到超出可用空间
+    /// 时上限不生效，压缩行为与折叠前一致。
+    fn render_tabs_section<I>(&self, items: I) -> gpui::AnyElement
+    where
+        I: IntoIterator,
+        I::Item: IntoElement,
+    {
+        let collapsed = self.tabs_section_collapsed;
+        let list = v_flex().flex_1().gap_2().children(items);
+        if !self.tabs_fold_armed {
+            return if collapsed { div().into_any_element() } else { list.into_any_element() };
+        }
+        let rows = self.tabs.len().max(1) as f32;
+        let content_h = rows * TAB_ROW_H + (rows - 1.0) * (TAB_ROW_PITCH - TAB_ROW_H);
+        let (from, to) = if collapsed { (content_h, 0.0) } else { (0.0, content_h) };
+        div()
+            .flex_1()
+            .overflow_hidden()
+            .child(list)
+            .with_animation(
+                ("tabs-fold", collapsed as usize),
+                Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
+                move |slot, t| slot.max_h(px(from + (to - from) * t)),
+            )
+            .into_any_element()
     }
 
     /// 侧栏槽位：宽度在 0..持久化宽度间以 ease-out 滑动，近似旧壳
     /// response=0.14 的 swift-out 弹簧；内容保持固定宽、由槽位裁剪，
     /// 终端卡随 flex 布局自然滑移收编空间（对齐旧壳"卡骑在折叠动画上"
     /// 的观感）。动画按方向换 key 重启，端点随运行时设置变化。
-    fn render_sidebar_slot(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_sidebar_slot(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let collapsed = self.sidebar_collapsed;
         if !self.sidebar_fold_armed {
             return if collapsed {
                 div().into_any_element()
             } else {
-                self.render_sidebar(cx).into_any_element()
+                self.render_sidebar(window, cx).into_any_element()
             };
         }
         let width = self.sidebar_width;
@@ -2857,7 +3313,7 @@ impl NebulaWorkspace {
             .h_full()
             .flex_shrink_0()
             .overflow_hidden()
-            .child(self.render_sidebar(cx))
+            .child(self.render_sidebar(window, cx))
             .with_animation(
                 ("sidebar-fold", collapsed as usize),
                 Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
@@ -3237,6 +3693,10 @@ impl Render for NebulaWorkspace {
             .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
                 this.split_focused(SplitDirection::TopBottom, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &RenameActiveTab, window, cx| {
+                let ix = this.active;
+                this.begin_rename(ix, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleZoom, _, cx| {
                 this.toggle_zoom(cx);
             }))
@@ -3339,7 +3799,7 @@ impl Render for NebulaWorkspace {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(self.render_sidebar_slot(cx))
+                    .child(self.render_sidebar_slot(window, cx))
                     .child(
                         // 终端卡（一体化外壳）：唯一的结构分界。圆角与旧壳卡
                         // 同源（UI_SHELL_RADIUS_LOGICAL=14），无描边——融合靠
