@@ -393,6 +393,8 @@ impl OnResize for Conpty {
         // not take the whole process down — log and let the exit path handle it.
         let result = unsafe { (self.api.resize)(self.handle, window_size.into()) };
         if result != S_OK {
+            // stderr 兜底：GPUI 主窗形态没有装 logger，失败不能无声。
+            eprintln!("[nebula:conpty] ResizePseudoConsole failed: HRESULT {result:#x}");
             warn!("ResizePseudoConsole failed: HRESULT {result:#x}");
         }
     }

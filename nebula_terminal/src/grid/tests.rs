@@ -402,10 +402,8 @@ fn display_iterator_can_crop_to_the_bottom_of_the_live_viewport() {
         }
     }
 
-    let points: Vec<_> = grid
-        .display_iter_from(Line(2), 2, 2)
-        .map(|cell| (cell.point, *cell.cell))
-        .collect();
+    let points: Vec<_> =
+        grid.display_iter_from(Line(2), 2, 2).map(|cell| (cell.point, *cell.cell)).collect();
 
     assert_eq!(
         points,

@@ -22,6 +22,24 @@ debug = 0
 strip = "debuginfo"
 incremental = false
 
+# Debug 壳仍要承担真实终端负载：GPUI 布局/字体塑形和 VT 解析若以
+# opt-level 0 运行，窗口拖拽与持续输入都会出现发布版没有的延迟。
+# 只优化热依赖，主 crate 继续使用增量 debug，避免把日常构建变成 release。
+[profile.dev]
+codegen-units = 16
+debug = "limited"
+split-debuginfo = "unpacked"
+
+[profile.dev.package]
+resvg = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+smol = { opt-level = 3 }
+gpui = { opt-level = 3 }
+gpui_macros = { opt-level = 3 }
+nebula_terminal = { opt-level = 3 }
+
 [workspace.dependencies]
 mlua = { version = "0.11.4", features = ["lua54", "vendored", "serialize", "send"] }
 serde_path_to_error = "0.1.20"

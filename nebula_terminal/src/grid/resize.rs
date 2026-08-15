@@ -1,6 +1,6 @@
 //! Grid resize and reflow.
 
-use std::cmp::{max, min, Ordering};
+use std::cmp::{Ordering, max, min};
 use std::mem;
 
 use crate::index::{Boundary, Column, Line};
@@ -99,8 +99,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     /// is scrollback available. Once scrollback is exhausted, new lines are
     /// simply added to the bottom of the screen.
     ///
-    /// ConPTY does not restore scrollback when growing. It leaves visible rows
-    /// and the cursor pinned, opening blank rows below them instead.
+    /// ConPTY 增高时不会把先前推出视口的行重新拉回：现有内容和光标保持
+    /// 原位，只在底部补空行。这里必须复刻 host 的行坐标，否则下一次
+    /// PSReadLine 绝对定位重绘会落到旧输出中间。
     fn grow_lines<D>(&mut self, conpty: bool, target: usize)
     where
         T: ResetDiscriminant<D>,
@@ -192,10 +193,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
     /// Bottommost viewport row containing a non-empty cell.
     #[inline]
     fn bottommost_occupied_line(&self) -> usize {
-        (0..self.lines)
-            .rev()
-            .find(|&line| !self.raw[Line(line as i32)].is_clear())
-            .unwrap_or(0)
+        (0..self.lines).rev().find(|&line| !self.raw[Line(line as i32)].is_clear()).unwrap_or(0)
     }
 
     /// Grow number of columns in each row, reflowing if necessary.
@@ -402,7 +400,8 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 let mut wrapped = match row.shrink_with_minimum(columns, minimum) {
                     Some(wrapped) if reflow => wrapped,
                     _ => {
-                        if reflow && i == cursor_buffer_line && self.cursor.point.column >= columns {
+                        if reflow && i == cursor_buffer_line && self.cursor.point.column >= columns
+                        {
                             // If there are empty cells before the cursor, we assume it is explicit
                             // whitespace and need to wrap it like normal content.
                             Vec::new()

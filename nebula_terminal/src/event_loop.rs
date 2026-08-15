@@ -181,8 +181,9 @@ where
 
     /// Drain the channel.
     ///
-    /// Returns `false` when a shutdown message was received.
-    fn drain_recv_channel(&mut self, state: &mut State) -> bool {
+    /// Returns `Err(())` when a shutdown message was received; otherwise the
+    /// last resize in this channel batch is returned for an ordered commit.
+    fn drain_recv_channel(&mut self, state: &mut State) -> Result<Option<WindowSize>, ()> {
         // Resize storms (live window drags) queue faster than
         // ResizePseudoConsole drains them — the console host performs a full
         // viewport reflow per call. Within one drain only the newest size
@@ -195,16 +196,11 @@ where
             match msg {
                 Msg::Input(input) => state.write_list.push_back(input),
                 Msg::Resize(window_size) => resize = Some(window_size),
-                Msg::Shutdown => return false,
+                Msg::Shutdown => return Err(()),
             }
         }
 
-        if let Some(window_size) = resize {
-            state.stream.resize(window_size);
-            self.pty.on_resize(window_size);
-        }
-
-        true
+        Ok(resize)
     }
 
     #[inline]
@@ -213,7 +209,7 @@ where
         state: &mut State,
         buf: &mut [u8],
         mut writer: Option<&mut X>,
-    ) -> io::Result<()>
+    ) -> io::Result<usize>
     where
         X: Write,
     {
@@ -285,7 +281,7 @@ where
             self.event_proxy.send_event(Event::Wakeup);
         }
 
-        Ok(())
+        Ok(processed)
     }
 
     #[inline]
@@ -374,8 +370,37 @@ where
                 }
 
                 // Handle channel events, if there are any.
-                if !self.drain_recv_channel(&mut state) {
-                    break;
+                let pending_resize = match self.drain_recv_channel(&mut state) {
+                    Ok(resize) => resize,
+                    Err(()) => break,
+                };
+
+                if let Some(window_size) = pending_resize {
+                    // A resize is a stream boundary, not a UI-side property.
+                    // Drain everything already readable while the grid still
+                    // has the old geometry; otherwise old-width absolute CUP
+                    // output can be parsed into a new-width grid. This is the
+                    // local equivalent of tty7's ordered Size echo.
+                    loop {
+                        match self.pty_read(&mut state, &mut buf, pipe.as_mut()) {
+                            Ok(processed) if processed >= MAX_LOCKED_READ => continue,
+                            Ok(_) => break,
+                            Err(err) => {
+                                error!("PTY read before resize failed: {err}");
+                                failure = Some(format!("PTY read before resize failed: {err}"));
+                                break 'event_loop;
+                            },
+                        }
+                    }
+
+                    // Match Windows Terminal's order: reflow the client model
+                    // first, then ask ConPTY to resize. ResizePseudoConsole is
+                    // synchronous; repaint bytes it produces are consumed by
+                    // the normal readable-event path below against this grid.
+                    self.terminal.lock().resize(window_size);
+                    self.pty.on_resize(window_size);
+                    state.stream.resize(window_size);
+                    self.event_proxy.send_event(Event::Wakeup);
                 }
 
                 for event in events.iter() {
