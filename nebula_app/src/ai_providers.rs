@@ -169,14 +169,65 @@ pub struct ProviderStore {
     pub providers: Vec<AiProvider>,
 }
 
+/// Editable non-secret provider fields shared by both presentations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderMetadataDraft {
+    pub name: String,
+    pub note: String,
+    pub website_url: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+impl From<&AiProvider> for ProviderMetadataDraft {
+    fn from(provider: &AiProvider) -> Self {
+        Self {
+            name: provider.name.clone(),
+            note: provider.note.clone(),
+            website_url: provider.website_url.clone(),
+            base_url: provider.base_url.clone(),
+            model: provider.model.clone(),
+        }
+    }
+}
+
+fn clean_provider_field(value: &str, allow_whitespace: bool) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control() && (allow_whitespace || !ch.is_whitespace()))
+        .take(512)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// Apply the old editor's exact input policy without involving either UI.
+pub fn apply_metadata_draft(provider: &mut AiProvider, draft: ProviderMetadataDraft) {
+    provider.name = clean_provider_field(&draft.name, false);
+    provider.note = clean_provider_field(&draft.note, true);
+    provider.website_url = clean_provider_field(&draft.website_url, false);
+    provider.base_url = clean_provider_field(&draft.base_url, false);
+    provider.model = clean_provider_field(&draft.model, false);
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderTestRequest {
     pub request_id: u64,
     pub provider: AiProvider,
 }
 
+/// UI-neutral provider connectivity outcome. Old winit events and GPUI tasks
+/// both adapt this same result; no presentation runtime owns HTTP behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderTestResult {
+    pub provider_id: String,
+    pub ok: bool,
+    pub message: String,
+    pub elapsed_ms: u64,
+}
+
 pub fn store_path() -> PathBuf {
-    crate::display::nebula_data_dir().join(STORE_FILE)
+    crate::platform::dirs::data_dir().join(STORE_FILE)
 }
 
 pub fn load() -> ProviderStore {
@@ -274,6 +325,44 @@ pub fn save_api_key(id: &str, key: &str) -> io::Result<String> {
     Ok(api_key_hint(key))
 }
 
+/// Store a replacement key and update only its non-secret metadata.
+///
+/// The plaintext never enters `ProviderStore` and callers must clear their
+/// write-only draft immediately after this returns.
+pub fn store_provider_api_key(provider: &mut AiProvider, key: &str) -> io::Result<()> {
+    let hint = save_api_key(&provider.id, key)?;
+    provider.api_key_set = true;
+    provider.api_key_hint = hint;
+    Ok(())
+}
+
+/// Ask for and persist a provider key through the native OS credential dialog.
+///
+/// This is the secure UI-neutral path for GPUI: unlike a masked text widget,
+/// the native password control does not expose copy/cut actions to the app.
+#[cfg(windows)]
+pub fn prompt_and_store_api_key(provider: &mut AiProvider) -> io::Result<bool> {
+    let Some(bytes) =
+        crate::ssh_credentials::prompt_generic_secret(&credential_target(&provider.id), "Nebula")?
+    else {
+        return Ok(false);
+    };
+    let key = Zeroizing::new(
+        String::from_utf8(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "API key is not UTF-8"))?,
+    );
+    store_provider_api_key(provider, key.as_str())?;
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+pub fn prompt_and_store_api_key(_provider: &mut AiProvider) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "system credential prompt is not available on this build",
+    ))
+}
+
 pub fn delete_api_key(id: &str) -> io::Result<()> {
     #[cfg(windows)]
     crate::ssh_credentials::delete_generic_secret(&credential_target(id))?;
@@ -283,6 +372,22 @@ pub fn delete_api_key(id: &str) -> io::Result<()> {
         "system credential storage is not available on this build",
     ));
     Ok(())
+}
+
+/// Remove a provider and its credential through one presentation-neutral
+/// transition. Metadata is mutated only after credential deletion succeeds,
+/// avoiding an unreachable orphaned secret.
+pub fn remove_provider(store: &mut ProviderStore, id: &str) -> io::Result<()> {
+    delete_api_key(id)?;
+    let Some(index) = store.providers.iter().position(|provider| provider.id == id) else {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "provider not found"));
+    };
+    store.providers.remove(index);
+    if store.active_id == id {
+        store.active_id =
+            store.providers.first().map(|provider| provider.id.clone()).unwrap_or_default();
+    }
+    save(store)
 }
 
 pub fn load_api_key(id: &str) -> io::Result<Option<Vec<u8>>> {
@@ -324,25 +429,35 @@ fn sanitized_error(error: &ureq::Error) -> String {
     message.chars().take(180).collect()
 }
 
-fn run_test(provider: &AiProvider) -> (bool, String, u64) {
+/// Blocking provider connectivity test shared by every UI runtime.
+///
+/// Callers must run this off their UI thread. Credential lookup stays inside
+/// this function; no UI receives plaintext from the OS credential store.
+pub fn test_provider(provider: &AiProvider) -> ProviderTestResult {
     let started = Instant::now();
     let elapsed = || started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let finish = |ok: bool, message: String| ProviderTestResult {
+        provider_id: provider.id.clone(),
+        ok,
+        message,
+        elapsed_ms: elapsed(),
+    };
     let url = match test_url(provider) {
         Ok(url) => url,
-        Err(message) => return (false, message, elapsed()),
+        Err(message) => return finish(false, message),
     };
     if provider.model.trim().is_empty() {
-        return (false, "请先填写默认模型".to_owned(), elapsed());
+        return finish(false, "请先填写默认模型".to_owned());
     }
     let key = if provider.kind.requires_api_key() {
         let secret = match load_api_key(&provider.id) {
             Ok(Some(secret)) if !secret.is_empty() => secret,
-            Ok(_) => return (false, "请先保存 API Key".to_owned(), elapsed()),
-            Err(_) => return (false, "无法从凭据管理器读取 API Key".to_owned(), elapsed()),
+            Ok(_) => return finish(false, "请先保存 API Key".to_owned()),
+            Err(_) => return finish(false, "无法从凭据管理器读取 API Key".to_owned()),
         };
         match String::from_utf8(secret) {
             Ok(key) => Zeroizing::new(key),
-            Err(_) => return (false, "凭据管理器中的 API Key 编码无效".to_owned(), elapsed()),
+            Err(_) => return finish(false, "凭据管理器中的 API Key 编码无效".to_owned()),
         }
     } else {
         Zeroizing::new(String::new())
@@ -367,7 +482,7 @@ fn run_test(provider: &AiProvider) -> (bool, String, u64) {
     };
     let response = match request.call() {
         Ok(response) => response,
-        Err(error) => return (false, sanitized_error(&error), elapsed()),
+        Err(error) => return finish(false, sanitized_error(&error)),
     };
     let status = response.status().as_u16();
     let (ok, message) = match status {
@@ -377,7 +492,7 @@ fn run_test(provider: &AiProvider) -> (bool, String, u64) {
         429 => (false, "服务限流（HTTP 429），连接可达但当前无法验证额度".to_owned()),
         _ => (false, format!("服务返回 HTTP {status}")),
     };
-    (ok, message, elapsed())
+    finish(ok, message)
 }
 
 pub fn spawn_test(
@@ -388,15 +503,14 @@ pub fn spawn_test(
     std::thread::Builder::new()
         .name("nebula-provider-test".into())
         .spawn(move || {
-            let provider_id = request.provider.id.clone();
-            let (ok, message, elapsed_ms) = run_test(&request.provider);
+            let result = test_provider(&request.provider);
             let _ = proxy.send_event(Event::new(
                 EventType::ProviderTestDone {
                     request_id: request.request_id,
-                    provider_id,
-                    ok,
-                    message,
-                    elapsed_ms,
+                    provider_id: result.provider_id,
+                    ok: result.ok,
+                    message: result.message,
+                    elapsed_ms: result.elapsed_ms,
                 },
                 window_id,
             ));
@@ -417,6 +531,36 @@ mod tests {
             }
             assert!(!provider.api_key_set);
         }
+    }
+
+    #[test]
+    fn metadata_draft_uses_one_shared_sanitizer() {
+        let mut provider = AiProvider::preset(ProviderKind::Custom, "custom-test");
+        apply_metadata_draft(
+            &mut provider,
+            ProviderMetadataDraft {
+                name: " My Provider \n".into(),
+                note: " keep spaces \n but no controls ".into(),
+                website_url: " https://example.com/a b ".into(),
+                base_url: " https://api.example.com /v1 ".into(),
+                model: " model name ".into(),
+            },
+        );
+        assert_eq!(provider.name, "MyProvider");
+        assert_eq!(provider.note, "keep spaces  but no controls");
+        assert_eq!(provider.website_url, "https://example.com/ab");
+        assert_eq!(provider.base_url, "https://api.example.com/v1");
+        assert_eq!(provider.model, "modelname");
+    }
+
+    #[test]
+    fn ui_neutral_test_returns_provider_identity_on_preflight_failure() {
+        let mut provider = AiProvider::preset(ProviderKind::Custom, "broken");
+        provider.base_url = "not-a-url".into();
+        let result = test_provider(&provider);
+        assert_eq!(result.provider_id, "broken");
+        assert!(!result.ok);
+        assert!(result.message.contains("http://"));
     }
 
     #[test]

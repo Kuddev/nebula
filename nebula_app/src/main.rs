@@ -89,7 +89,8 @@ mod terminal_profiles;
 mod tray;
 mod update_check;
 mod ux;
-mod window_context;
+// pub(crate)：GPUI 壳复用 welcome 的 fastfetch 欢迎屏命令生成。
+pub(crate) mod window_context;
 mod window_transition;
 
 mod gl {

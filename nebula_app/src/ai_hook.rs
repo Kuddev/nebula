@@ -331,7 +331,13 @@ fn truncate(s: &str, max_chars: usize) -> String {
 }
 
 #[cfg(windows)]
-pub use win::{setup_ai_cli, spawn_config_guard, spawn_server};
+pub use win::{setup_ai_cli, spawn_config_guard, spawn_gpui_server, spawn_server};
+
+#[cfg(not(windows))]
+pub fn spawn_gpui_server() -> std::sync::mpsc::Receiver<AiHookEvent> {
+    let (_tx, rx) = std::sync::mpsc::channel();
+    rx
+}
 
 #[cfg(windows)]
 mod win {
@@ -350,6 +356,23 @@ mod win {
     /// Create the per-instance pipe, export its name to future children, and
     /// start the accept loop. Must run before the first PTY spawns.
     pub fn spawn_server(proxy: EventLoopProxy<Event>) {
+        spawn_pipe_server(move |event| {
+            proxy.send_event(Event::new(EventType::AiHook(event), None)).is_ok()
+        });
+    }
+
+    /// GPUI owns a different event loop, but hook parsing and pipe ownership
+    /// stay identical. The workspace drains this channel on its foreground
+    /// executor and routes events by the same stable pane id contract.
+    pub fn spawn_gpui_server() -> std::sync::mpsc::Receiver<super::AiHookEvent> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        spawn_pipe_server(move |event| tx.send(event).is_ok());
+        rx
+    }
+
+    fn spawn_pipe_server(
+        sink: impl Fn(super::AiHookEvent) -> bool + Send + 'static,
+    ) {
         let name = format!(r"\\.\pipe\nebula-notify-{}", std::process::id());
         // SAFETY: single-threaded startup; no other thread reads the env yet.
         unsafe { std::env::set_var(PIPE_ENV, &name) };
@@ -363,7 +386,7 @@ mod win {
         }
         if let Err(err) = std::thread::Builder::new()
             .name("nebula-ai-pipe".into())
-            .spawn(move || serve(&name, proxy))
+            .spawn(move || serve(&name, sink))
         {
             log::warn!("ai_hook: failed to spawn pipe server: {err}");
         }
@@ -372,7 +395,7 @@ mod win {
     /// Accept loop. One fresh pipe instance per connection: a client racing
     /// the turnaround sees a failed open for microseconds and retries (the
     /// helper retries for ~100 ms — an eternity at this message rate).
-    fn serve(name: &str, proxy: EventLoopProxy<Event>) {
+    fn serve(name: &str, sink: impl Fn(super::AiHookEvent) -> bool) {
         use windows_sys::Win32::Foundation::{
             CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE,
         };
@@ -435,7 +458,7 @@ mod win {
                 }
                 if let Some(event) = parse_envelope(&buf) {
                     log::debug!("ai_hook: {event:?}");
-                    if proxy.send_event(Event::new(EventType::AiHook(event), None)).is_err() {
+                    if !sink(event) {
                         // Event loop gone: shutting down.
                         // SAFETY: `pipe` is still the valid handle from above.
                         unsafe {

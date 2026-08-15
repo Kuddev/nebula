@@ -250,11 +250,11 @@ pub enum PaletteAction {
 ///   latin aliases (pinyin / English) so the palette is reachable even when the
 ///   IME can't feed CJK into it.
 /// * `action` — what to run on confirm.
-struct PaletteItem {
-    label: &'static str,
-    hint: &'static str,
-    search: &'static str,
-    action: PaletteAction,
+pub(crate) struct PaletteItem {
+    pub(crate) label: &'static str,
+    pub(crate) hint: &'static str,
+    pub(crate) search: &'static str,
+    pub(crate) action: PaletteAction,
 }
 
 /// The full action table, in declaration order (also the tie-break order when
@@ -469,6 +469,15 @@ const ITEMS: &[PaletteItem] = &[
         action: PaletteAction::SelectTheme(NebulaTheme::MossDark),
     },
 ];
+
+/// Shared command catalog for alternate presentation layers.
+///
+/// The old renderer and the GPUI overlay consume the same labels, aliases,
+/// shortcuts and actions. GPUI may filter actions it cannot execute yet, but
+/// must not maintain a second command table that would drift from this one.
+pub(crate) fn catalog() -> &'static [PaletteItem] {
+    ITEMS
+}
 
 /// How many recently-run actions are remembered for the empty-query ordering.
 const RECENT_MAX: usize = 6;
@@ -1574,7 +1583,24 @@ impl CommandGroup {
     }
 }
 
-fn source_group_label(source: crate::ai_sessions::AiSessionSource) -> String {
+/// Alternate presentation layers must use the same category mapping and order
+/// as the legacy palette instead of maintaining a second action table.
+pub(crate) fn command_group_metadata(
+    action: &PaletteAction,
+    language: super::UiLanguage,
+    cwd_available: bool,
+    new_tab_inherits_cwd: bool,
+) -> (usize, String) {
+    let mut group = CommandGroup::of(action);
+    if group == CommandGroup::Cwd
+        && (!cwd_available || (*action == PaletteAction::NewTab && !new_tab_inherits_cwd))
+    {
+        group = CommandGroup::Tabs;
+    }
+    (group as usize, group.label(language))
+}
+
+pub(crate) fn source_group_label(source: crate::ai_sessions::AiSessionSource) -> String {
     format!("{} 会话", source.display_name().to_uppercase())
 }
 

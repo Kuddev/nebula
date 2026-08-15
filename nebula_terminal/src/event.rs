@@ -145,6 +145,23 @@ pub struct WindowSize {
     pub cell_height: u16,
 }
 
+impl crate::grid::Dimensions for WindowSize {
+    #[inline]
+    fn total_lines(&self) -> usize {
+        usize::from(self.num_lines)
+    }
+
+    #[inline]
+    fn screen_lines(&self) -> usize {
+        usize::from(self.num_lines)
+    }
+
+    #[inline]
+    fn columns(&self) -> usize {
+        usize::from(self.num_cols)
+    }
+}
+
 /// Types that are interested in when the display is resized.
 pub trait OnResize {
     fn on_resize(&mut self, window_size: WindowSize);

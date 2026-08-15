@@ -56,8 +56,7 @@ pub fn primitives(c: char, width: f32, height: f32, scale: f32) -> Option<Vec<Pr
         return None;
     }
     let scale = if scale > 0.0 { scale } else { 1.0 };
-    let mut geom =
-        Geom::new((width * scale).round().max(1.0), (height * scale).round().max(1.0));
+    let mut geom = Geom::new((width * scale).round().max(1.0), (height * scale).round().max(1.0));
     draw(c, &mut geom);
     Some(geom.finish(scale))
 }
@@ -186,8 +185,9 @@ fn draw(c: char, g: &mut Geom) {
                 _ => unreachable!(),
             };
             let gap_len = (w / 8.0).floor().max(1.0);
-            let dash_len =
-                (((w - gap_len * num_gaps as f32).max(0.0)) / (num_gaps + 1) as f32).floor().max(1.0);
+            let dash_len = (((w - gap_len * num_gaps as f32).max(0.0)) / (num_gaps + 1) as f32)
+                .floor()
+                .max(1.0);
             let y = g.y_center();
             for gap in 0..=num_gaps {
                 let x = (gap as f32 * (dash_len + gap_len)).min(w);
@@ -206,8 +206,9 @@ fn draw(c: char, g: &mut Geom) {
                 _ => unreachable!(),
             };
             let gap_len = (h / 8.0).floor().max(1.0);
-            let dash_len =
-                (((h - gap_len * num_gaps as f32).max(0.0)) / (num_gaps + 1) as f32).floor().max(1.0);
+            let dash_len = (((h - gap_len * num_gaps as f32).max(0.0)) / (num_gaps + 1) as f32)
+                .floor()
+                .max(1.0);
             let x = g.x_center();
             for gap in 0..=num_gaps {
                 let y = (gap as f32 * (dash_len + gap_len)).min(h);
@@ -782,8 +783,7 @@ mod tests {
     fn corner_arms_meet_at_joint() {
         let rects = rects('\u{250c}');
         // 一条横带（右臂）+ 一条竖带（下臂）。
-        let horizontal =
-            rects.iter().find(|(r, _)| r.w > r.h).map(|(r, _)| *r).expect("横臂");
+        let horizontal = rects.iter().find(|(r, _)| r.w > r.h).map(|(r, _)| *r).expect("横臂");
         let vertical = rects.iter().find(|(r, _)| r.h > r.w).map(|(r, _)| *r).expect("竖臂");
         assert!(horizontal.x <= vertical.x && horizontal.x + horizontal.w == W);
         assert!(vertical.y <= horizontal.y && vertical.y + vertical.h == H);
@@ -809,10 +809,7 @@ mod tests {
             for prim in primitives(c, W, H, scale).unwrap() {
                 if let Primitive::Rect { rect, .. } = prim {
                     for v in [rect.y * scale, (rect.y + rect.h) * scale] {
-                        assert!(
-                            (v - v.round()).abs() < 1e-4,
-                            "{c:?} 的 y 边界 {v} 未吸附设备像素"
-                        );
+                        assert!((v - v.round()).abs() < 1e-4, "{c:?} 的 y 边界 {v} 未吸附设备像素");
                     }
                 }
             }

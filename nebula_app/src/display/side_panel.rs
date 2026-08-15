@@ -41,9 +41,22 @@ pub struct FileRow {
     pub ignored: bool,
 }
 
+/// Which VCS produced a [`GitInfo`] snapshot. SVN reuses the same carrier so
+/// both shells' thin views render one shape; semantic gaps (no staging area,
+/// no push) are encoded where the operations dispatch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VcsKind {
+    #[default]
+    Git,
+    Svn,
+}
+
 /// Parsed `git status` snapshot.
 #[derive(Debug, Clone, Default)]
 pub struct GitInfo {
+    /// Which VCS this snapshot came from（SVN 时 `branch` 放 `rNNN` 修订号，
+    /// `staged` 恒空、`ahead` 恒 0——SVN 集中式，提交即发布）。
+    pub vcs: VcsKind,
     /// Current branch (or short detached-HEAD description).
     pub branch: String,
     /// Working-tree line insertions/deletions (unstaged + staged).
@@ -152,9 +165,11 @@ impl FileDrag {
 /// Re-run the (throttled) refresh at most this often while the panel is open.
 const REFRESH_EVERY: Duration = Duration::from_secs(4);
 /// Hard cap on flattened tree rows, bounding both fs walking and rendering.
-const MAX_ROWS: usize = 400;
-/// Hard cap on entries listed per directory.
-const MAX_PER_DIR: usize = 200;
+const MAX_ROWS: usize = 1000;
+/// Hard cap on entries listed per directory. Applied *after* sorting, so the
+/// cap keeps the alphabetical head of the directory rather than whatever
+/// `read_dir` happened to yield first.
+const MAX_PER_DIR: usize = 600;
 /// Total directory entries the filter index may VISIT while being built.
 /// This bounds the walk itself (a `target/` or `node_modules/` tree has
 /// hundreds of thousands of entries — walking it per keystroke froze the UI),
@@ -474,7 +489,7 @@ impl SidePanel {
         let slot = std::sync::Arc::clone(&self.snapshot_slot);
         std::thread::spawn(move || {
             let rows = SidePanel::tree_rows(&root, &expanded);
-            let git = read_git(&root);
+            let git = read_git(&root).or_else(|| read_svn(&root));
             if let Ok(mut slot) = slot.lock() {
                 *slot = Some(PanelSnapshot { root, rows, git });
             }
@@ -562,10 +577,10 @@ impl SidePanel {
         (!e.is_empty()).then(|| e.clone())
     }
 
-    /// Run `git <args>` on a worker thread; UI stays live (a push can take
-    /// seconds over the network). Completion flips `op_done`, which the next
-    /// drawn frame folds into a refresh.
-    fn spawn_git(&mut self, args: Vec<String>) {
+    /// Run `<program> <args>` on a worker thread; UI stays live (a push can
+    /// take seconds over the network). Completion flips `op_done`, which the
+    /// next drawn frame folds into a refresh.
+    fn spawn_vcs(&mut self, program: &'static str, args: Vec<String>) {
         use std::sync::atomic::Ordering;
         let Some(root) = self.root.clone() else { return };
         if self.op_running.swap(true, Ordering::Relaxed) {
@@ -575,9 +590,9 @@ impl SidePanel {
         let done = self.op_done.clone();
         let error = self.op_error.clone();
         std::thread::Builder::new()
-            .name("nebula-git-op".into())
+            .name("nebula-vcs-op".into())
             .spawn(move || {
-                let mut cmd = std::process::Command::new("git");
+                let mut cmd = std::process::Command::new(program);
                 cmd.args(&args).current_dir(&root);
                 #[cfg(windows)]
                 {
@@ -589,9 +604,12 @@ impl SidePanel {
                     Ok(out) => {
                         let err = String::from_utf8_lossy(&out.stderr);
                         // First meaningful line is enough for a status strip.
-                        err.lines().find(|l| !l.trim().is_empty()).unwrap_or("git 失败").to_string()
+                        err.lines()
+                            .find(|l| !l.trim().is_empty())
+                            .unwrap_or(&format!("{program} 失败"))
+                            .to_string()
                     },
-                    Err(e) => format!("git: {e}"),
+                    Err(e) => format!("{program}: {e}"),
                 };
                 if let Ok(mut slot) = error.lock() {
                     *slot = msg;
@@ -602,8 +620,21 @@ impl SidePanel {
             .ok();
     }
 
-    /// `git add -A`: stage everything (the ⊕ button).
+    fn spawn_git(&mut self, args: Vec<String>) {
+        self.spawn_vcs("git", args);
+    }
+
+    /// 当前快照的 VCS 种类；None = 不在任何仓库里。
+    pub fn vcs(&self) -> Option<VcsKind> {
+        self.git.as_ref().map(|info| info.vcs)
+    }
+
+    /// `git add -A`: stage everything (the ⊕ button). SVN 没有暂存区，
+    /// no-op（按钮层按 [`Self::vcs`] 直接不画）。
     pub fn git_stage_all(&mut self) {
+        if self.vcs() != Some(VcsKind::Git) {
+            return;
+        }
         if self.git.as_ref().is_some_and(|g| !g.unstaged.is_empty()) && !self.op_running() {
             self.spawn_git(vec!["add".into(), "-A".into()]);
         }
@@ -658,10 +689,33 @@ impl SidePanel {
         self.commit_focus = false;
         self.commit_msg.clear();
         self.commit_selection.clear();
-        self.spawn_git(vec!["commit".into(), "-m".into(), msg]);
+        self.vcs_commit_message(&msg);
+    }
+
+    /// 直接以给定消息提交（GPUI 壳的输入组件走这里，不经旧壳的内部输入
+    /// 状态机）。按 VCS 分派：git 提交暂存区；svn 没有暂存区，提交整个
+    /// 工作副本的修改。
+    pub fn vcs_commit_message(&mut self, message: &str) {
+        let message = message.trim();
+        if message.is_empty() || self.op_running() {
+            return;
+        }
+        match self.vcs() {
+            Some(VcsKind::Git) => {
+                self.spawn_git(vec!["commit".into(), "-m".into(), message.to_owned()]);
+            },
+            Some(VcsKind::Svn) => {
+                self.spawn_vcs(
+                    "svn",
+                    vec!["commit".into(), "-m".into(), message.to_owned(), "--non-interactive".into()],
+                );
+            },
+            None => {},
+        }
     }
 
     /// Push button — only enabled with committed-but-unpushed work (`ahead`).
+    /// SVN 的 `ahead` 恒 0（提交即发布），按钮自然不亮。
     pub fn git_push(&mut self) {
         if self.git.as_ref().is_some_and(|g| g.ahead > 0) && !self.op_running() {
             self.spawn_git(vec!["push".into()]);
@@ -669,9 +723,17 @@ impl SidePanel {
     }
 
     /// Pull only fast-forward updates, never creating an implicit merge commit.
+    /// SVN 对应 `svn update`。
     pub fn git_pull(&mut self) {
-        if self.git.is_some() && !self.op_running() {
-            self.spawn_git(git_pull_args());
+        if self.op_running() {
+            return;
+        }
+        match self.vcs() {
+            Some(VcsKind::Git) => self.spawn_git(git_pull_args()),
+            Some(VcsKind::Svn) => {
+                self.spawn_vcs("svn", vec!["update".into(), "--non-interactive".into()]);
+            },
+            None => {},
         }
     }
 
@@ -706,9 +768,8 @@ impl SidePanel {
             return;
         }
         let Ok(read) = std::fs::read_dir(dir) else { return };
-        let mut entries: Vec<(bool, String, PathBuf)> = read
+        let entries: Vec<(bool, String, PathBuf)> = read
             .flatten()
-            .take(MAX_PER_DIR)
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
                 // `.git` is noise in a file tree; everything else shows.
@@ -719,9 +780,7 @@ impl SidePanel {
                 Some((is_dir, name, e.path()))
             })
             .collect();
-        // Directories first, then case-insensitive alphabetical order.
-        entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
-        for (is_dir, name, path) in entries {
+        for (is_dir, name, path) in Self::ordered_entries(entries, MAX_PER_DIR) {
             if rows.len() >= MAX_ROWS {
                 return;
             }
@@ -739,6 +798,22 @@ impl SidePanel {
                 Self::flatten_dir_into(rows, expanded, &path, depth + 1);
             }
         }
+    }
+
+    /// Order one directory's entries and apply the per-directory cap.
+    ///
+    /// Order: directories first, then case-insensitive alphabetical. The cap is
+    /// applied *after* sorting — capping the `read_dir` iterator instead samples
+    /// whatever order the filesystem yields, and in a dot-heavy root (274 of
+    /// this repo's 318 entries start with `.`) that pushes `nebula_app`, `docs`
+    /// and the rest of the real tree past the cap, leaving a screen of `.tmp-*`.
+    fn ordered_entries(
+        mut entries: Vec<(bool, String, PathBuf)>,
+        cap: usize,
+    ) -> Vec<(bool, String, PathBuf)> {
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+        entries.truncate(cap);
+        entries
     }
 
     /// Annotate the already-sorted snapshot in one `git check-ignore` call. This
@@ -1158,6 +1233,68 @@ fn read_git(root: &Path) -> Option<GitInfo> {
     Some(info)
 }
 
+/// SVN fallback（`read_git` 判空后才尝试）：工作副本检测走祖先链找 `.svn`
+/// ——零子进程的廉价预检，svn 未安装或普通目录都在这里就地退出，不为
+/// 每次快照付一次 CLI 启动开销。
+fn svn_working_copy(root: &Path) -> bool {
+    root.ancestors().any(|dir| dir.join(".svn").is_dir())
+}
+
+/// `svn status` 每行：第 1 列 item 状态（M/A/D/C/?/!…），第 8 列起路径。
+/// SVN 没有暂存区——所有变化都归 `unstaged`，与 Git 视图同列渲染。
+fn parse_svn_status(status: &str) -> Vec<(char, String)> {
+    status
+        .lines()
+        .filter_map(|line| {
+            let mut chars = line.chars();
+            let state = chars.next()?;
+            if state == ' ' || line.len() < 9 {
+                return None;
+            }
+            let path = line[8..].trim();
+            (!path.is_empty()).then(|| (state, path.replace('\\', "/")))
+        })
+        .collect()
+}
+
+/// Snapshot SVN state for `root`: revision + working-copy changes. `None`
+/// when `root` isn't inside a working copy or the `svn` CLI is missing.
+/// 认证失败等错误同样落 `None` + debug 日志——面板留白，操作路径
+/// （commit/update）的错误才经 `op_error` 呈现给用户。
+fn read_svn(root: &Path) -> Option<GitInfo> {
+    use std::process::Command;
+    if !svn_working_copy(root) {
+        return None;
+    }
+    let run = |args: &[&str]| -> Option<String> {
+        let mut cmd = Command::new("svn");
+        // 交互式认证提示会把无头子进程挂死；快照必须是非交互的。
+        cmd.arg("--non-interactive").args(args).current_dir(root);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let out = cmd.output().ok()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let reason = stderr.lines().next().unwrap_or("unknown error");
+            log::debug!("svn {:?} failed in {}: {reason}", args.first(), root.display());
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+
+    let revision = run(&["info", "--show-item", "revision"])?;
+    let status = run(&["status"])?;
+    Some(GitInfo {
+        vcs: VcsKind::Svn,
+        branch: format!("r{}", revision.trim()),
+        unstaged: parse_svn_status(&status),
+        ..GitInfo::default()
+    })
+}
+
 // ---- rendering (mirrors the `settings.rs` split: the parent `display::mod`
 // hands in a snapshot + renderer; this module owns the drawer's pixels) ----
 
@@ -1170,12 +1307,22 @@ use super::{NebulaTheme, SizeInfo, UI_CORNER_RADIUS_LOGICAL};
 
 // Nerd Font glyphs verified in the bundled Maple Mono font. The folder pair
 // intentionally uses the lighter outline family from the approved prototype.
-pub(super) const ICON_FOLDER: &str = "\u{f114}";
-pub(super) const ICON_FOLDER_OPEN: &str = "\u{f115}";
+pub(crate) const ICON_FOLDER: &str = "\u{f114}";
+pub(crate) const ICON_FOLDER_OPEN: &str = "\u{f115}";
 const ICON_TERMINAL: &str = "\u{ea85}";
 const ICON_FILE: &str = "\u{ea7b}";
-pub(super) const ICON_CHEVRON_RIGHT: &str = "\u{eab6}";
+pub(crate) const ICON_CHEVRON_RIGHT: &str = "\u{eab6}";
 const ICON_CHEVRON_DOWN: &str = "\u{eab4}";
+
+/// GPUI 文件树与旧壳共用同一组 Nerd Font 字形，避免两套图标在展开状态
+/// 和字宽上出现细微漂移。
+pub(crate) fn folder_icon(expanded: bool) -> &'static str {
+    if expanded { ICON_FOLDER_OPEN } else { ICON_FOLDER }
+}
+
+pub(crate) fn chevron_icon(expanded: bool) -> &'static str {
+    if expanded { ICON_CHEVRON_DOWN } else { ICON_CHEVRON_RIGHT }
+}
 const ICON_BRANCH: &str = "\u{ea68}";
 const ICON_SEARCH: &str = "\u{f002}";
 const ICON_HOME: &str = "\u{f015}";
@@ -2102,6 +2249,31 @@ mod tests {
         assert_eq!(panel.root_notice(), Some("所选目录不可用，已跟随当前目录"));
     }
 
+    /// The per-directory cap must be applied *after* ordering. Capping the
+    /// `read_dir` iterator instead samples filesystem order, which in a
+    /// dot-heavy repo root pushes the real source directories past the cap and
+    /// leaves the tree showing nothing but `.tmp-*` scratch dirs.
+    #[test]
+    fn per_directory_cap_keeps_the_ordered_head() {
+        let e = |dir: bool, name: &str| (dir, name.to_owned(), PathBuf::from(name));
+        let raw = vec![
+            e(true, "zz-last-dir"),
+            e(true, ".tmp-scratch"),
+            e(false, "a.txt"),
+            e(true, "nebula_app"),
+        ];
+        let kept = SidePanel::ordered_entries(raw, 2);
+        let names: Vec<_> = kept.iter().map(|(_, name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [".tmp-scratch", "nebula_app"],
+            "cap keeps the ordered head (dirs first, alphabetical), not read_dir order"
+        );
+        // Files still sort behind every directory, and the cap never reorders.
+        let all = SidePanel::ordered_entries(vec![e(false, "a.txt"), e(true, "zz-last-dir")], 10);
+        assert_eq!(all[0].1, "zz-last-dir", "directories precede files");
+    }
+
     #[test]
     fn tree_lists_dirs_first_and_expands_on_click() {
         let base = std::env::temp_dir().join(format!("nebula-panel-test-{}", std::process::id()));
@@ -2251,6 +2423,7 @@ mod tests {
         let mut panel = SidePanel::new();
         panel.view = PanelView::Git;
         panel.git = Some(GitInfo {
+            vcs: VcsKind::Git,
             branch: "main".into(),
             plus: 0,
             minus: 0,
@@ -2362,5 +2535,34 @@ mod tests {
     #[test]
     fn git_pull_is_fast_forward_only() {
         assert_eq!(git_pull_args(), vec!["pull", "--ff-only"]);
+    }
+
+    #[test]
+    fn svn_status_parses_item_state_and_normalizes_separators() {
+        let status = "M       src\\main.rs\nA       docs/new.md\n?       target\n!       gone.rs\n        props-only-ignored\n";
+        let changes = parse_svn_status(status);
+        assert_eq!(
+            changes,
+            vec![
+                ('M', "src/main.rs".to_owned()),
+                ('A', "docs/new.md".to_owned()),
+                ('?', "target".to_owned()),
+                ('!', "gone.rs".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn svn_snapshot_disables_stage_and_push_semantics() {
+        // SVN 没有暂存区、没有 push：快照层用 staged 恒空 + ahead 恒 0 编码，
+        // 两壳按钮的既有 gating（staged/ahead）不改一行就得到正确禁用。
+        let info = GitInfo {
+            vcs: VcsKind::Svn,
+            branch: "r42".into(),
+            unstaged: vec![('M', "a.rs".into())],
+            ..GitInfo::default()
+        };
+        assert!(info.staged.is_empty());
+        assert_eq!(info.ahead, 0);
     }
 }

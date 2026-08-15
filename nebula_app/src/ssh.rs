@@ -22,8 +22,12 @@
 /// `bash --rcfile`. Mirrors the local bash rc but drops all Windows path
 /// translation (the remote cwd is already a real POSIX path) and adds the
 /// `program` field to the title so the tab icon resolves over SSH.
+///
+/// `pub(crate)`: the WSL guest integration (`shell_detect`) feeds the *same*
+/// script to `wsl --exec bash --rcfile` — a WSL guest is a POSIX host exactly
+/// like an SSH remote, so cwd/branch/program semantics stay one source.
 #[cfg(windows)]
-const REMOTE_BASH: &str = r#"
+pub(crate) const REMOTE_BASH: &str = r#"
 [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 __nebula_branch=""
 __nebula_at_prompt=0
@@ -541,7 +545,9 @@ fn git_bash_path(path: &std::path::Path) -> String {
     slash_drive_path(path, "")
 }
 
-fn wsl_path(path: &std::path::Path) -> String {
+/// Windows 路径 → WSL automount 视角（`C:\x` → `/mnt/c/x`）。`pub(crate)`：
+/// WSL 来宾集成（`shell_detect`）用它把 rcfile 的宿主路径交给来宾 bash。
+pub(crate) fn wsl_path(path: &std::path::Path) -> String {
     slash_drive_path(path, "/mnt")
 }
 

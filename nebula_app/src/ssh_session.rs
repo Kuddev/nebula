@@ -29,6 +29,29 @@ type SessionError = Box<dyn std::error::Error + Send + Sync>;
 type ClientSession = client::Handle<ClientHandler>;
 type SharedSession = Arc<tokio::sync::Mutex<ClientSession>>;
 
+/// 直连 SSH 会话的宿主回调抽象：终端事件泵（[`EventListener`]）+ 连接
+/// 阶段上报。旧壳 `EventProxy`（winit 事件循环）与 GPUI 会话代理都实现
+/// 它，[`spawn_session`] 因此对 UI 壳无感——同一条 russh 业务路径服务
+/// 两个壳，不产生第二套连接语义。
+///
+/// [`EventListener`]: nebula_terminal::event::EventListener
+pub trait SshEventHost:
+    nebula_terminal::event::EventListener + Clone + Send + Sync + 'static
+{
+    /// 连接阶段变化（连接卡片/横幅的数据源）。默认丢弃。
+    fn ssh_stage(&self, stage: SshStage) {
+        let _ = stage;
+    }
+}
+
+impl SshEventHost for EventProxy {
+    fn ssh_stage(&self, stage: SshStage) {
+        // [`EventProxy`] 自带 `tab_id`，后台 runtime 不需要知道 pane id
+        // 或 window id（固有 `send_event(EventType)`，非 trait 方法）。
+        self.send_event(crate::event::EventType::SshConnect(stage));
+    }
+}
+
 /// 直连 SSH 会话的连接阶段。
 ///
 /// 这些取值不是估算的进度百分比——因为我们用 russh 自己实现客户端，而不是
@@ -54,11 +77,10 @@ pub enum SshStage {
     Failed(String),
 }
 
-/// 向拥有该 pane 的窗口上报连接阶段。[`EventProxy`] 自带 `tab_id`，所以
-/// 后台 runtime 不需要知道 pane id 或 window id。
-fn report_stage(progress: Option<&EventProxy>, stage: SshStage) {
+/// 向拥有该 pane 的窗口上报连接阶段（[`SshEventHost::ssh_stage`]）。
+fn report_stage<H: SshEventHost>(progress: Option<&H>, stage: SshStage) {
     if let Some(proxy) = progress {
-        proxy.send_event(crate::event::EventType::SshConnect(stage));
+        proxy.ssh_stage(stage);
     }
 }
 
@@ -340,11 +362,11 @@ fn connection_pool() -> &'static tokio::sync::Mutex<HashMap<String, SharedSessio
 }
 
 /// 启动 SSH Pane。地址解析和认证在共享 Runtime 中执行，避免阻塞窗口线程。
-pub fn spawn_session(
+pub fn spawn_session<H: SshEventHost>(
     destination: String,
     initial_size: WindowSize,
-    terminal: Arc<FairMutex<Term<EventProxy>>>,
-    event_proxy: EventProxy,
+    terminal: Arc<FairMutex<Term<H>>>,
+    event_proxy: H,
 ) -> io::Result<EventLoopSender> {
     let (sender, receiver) = EventLoopSender::standalone()?;
     let profiles_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
@@ -405,17 +427,17 @@ pub fn spawn_session(
             },
             Ok(()) => terminal.lock().exit(),
         }
-        event_proxy.send_event(TerminalEvent::Wakeup.into());
+        event_proxy.send_event(TerminalEvent::Wakeup);
     });
     Ok(sender)
 }
 
-async fn run_session_async(
+async fn run_session_async<H: SshEventHost>(
     destination: SshDestination,
     profile: crate::ssh_profiles::SshProfileAuth,
     initial_size: WindowSize,
-    terminal: Arc<FairMutex<Term<EventProxy>>>,
-    event_proxy: EventProxy,
+    terminal: Arc<FairMutex<Term<H>>>,
+    event_proxy: H,
     receiver: Receiver<Msg>,
     ready: Arc<AtomicBool>,
 ) -> Result<(), SessionError> {
@@ -478,14 +500,14 @@ async fn run_session_async(
             message = channel.wait() => match message {
                 Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
                     stream.feed(&mut *terminal.lock(), &event_proxy, data.as_ref());
-                    event_proxy.send_event(TerminalEvent::Wakeup.into());
+                    event_proxy.send_event(TerminalEvent::Wakeup);
                 },
                 Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | None => break,
                 _ => {},
             },
             _ = wait_for_sync(sync_deadline), if sync_deadline.is_some() => {
                 stream.stop_sync(&mut *terminal.lock());
-                event_proxy.send_event(TerminalEvent::Wakeup.into());
+                event_proxy.send_event(TerminalEvent::Wakeup);
             },
         }
     }
@@ -498,10 +520,10 @@ async fn wait_for_sync(deadline: Option<std::time::Instant>) {
     }
 }
 
-async fn authenticated_session(
+async fn authenticated_session<H: SshEventHost>(
     destination: &SshDestination,
     profile: &crate::ssh_profiles::SshProfileAuth,
-    progress: Option<&EventProxy>,
+    progress: Option<&H>,
 ) -> Result<SharedSession, SessionError> {
     authenticated_session_at(destination, profile, progress, 0).await
 }
@@ -509,10 +531,10 @@ async fn authenticated_session(
 /// [`authenticated_session`] 的带深度版本。`depth` 是当前跳板层级：目标连接
 /// 为 0，它的跳板为 1……跳板递归（[`open_transport`] 的 `Jump` 分支）经
 /// [`authenticated_session_boxed`] 回到这里，深度上限在那边把关。
-async fn authenticated_session_at(
+async fn authenticated_session_at<H: SshEventHost>(
     destination: &SshDestination,
     profile: &crate::ssh_profiles::SshProfileAuth,
-    progress: Option<&EventProxy>,
+    progress: Option<&H>,
     depth: u8,
 ) -> Result<SharedSession, SessionError> {
     // 代理决策先于连接池查找：pool key 必须带上代理身份，否则改完代理设置
@@ -571,10 +593,10 @@ fn resolve_network_proxy(
 
 /// 跳板递归需要的类型擦除：async fn 相互递归时 future 类型无限展开，
 /// `Box<dyn Future>` 在这里切断它。
-fn authenticated_session_boxed<'a>(
+fn authenticated_session_boxed<'a, H: SshEventHost>(
     destination: &'a SshDestination,
     profile: &'a crate::ssh_profiles::SshProfileAuth,
-    progress: Option<&'a EventProxy>,
+    progress: Option<&'a H>,
     depth: u8,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<SharedSession, SessionError>> + Send + 'a>,
@@ -629,10 +651,14 @@ async fn open_transport(
             .map_err(|err| format!("解析跳板 {spec} 失败: {err}"))?;
             // 跳板阶段不上报进度：连接卡片的阶段属于目标主机，来回横跳
             // 只会让用户以为连接在抽风。
-            let jump_session =
-                authenticated_session_boxed(&jump_destination, &jump_profile, None, depth + 1)
-                    .await
-                    .map_err(|err| format!("连接跳板 {spec} 失败: {err}"))?;
+            let jump_session = authenticated_session_boxed(
+                &jump_destination,
+                &jump_profile,
+                None::<&EventProxy>,
+                depth + 1,
+            )
+            .await
+            .map_err(|err| format!("连接跳板 {spec} 失败: {err}"))?;
             let channel = {
                 let session = jump_session.lock().await;
                 session
@@ -776,7 +802,7 @@ pub(crate) async fn open_sftp(
     }
 
     // SFTP 面板自己有加载态，不参与终端 pane 的连接卡片。
-    let session = authenticated_session(&destination, &profile, None).await?;
+    let session = authenticated_session(&destination, &profile, None::<&EventProxy>).await?;
     let channel = {
         let session = session.lock().await;
         session.channel_open_session().await?
@@ -969,7 +995,13 @@ async fn proxy_test_stream(
             })
             .await
             .map_err(|err| format!("解析跳板任务失败: {err}"))??;
-            let jump = authenticated_session_at(&jump_destination, &jump_profile, None, 1).await?;
+            let jump = authenticated_session_at::<EventProxy>(
+                &jump_destination,
+                &jump_profile,
+                None,
+                1,
+            )
+            .await?;
             let channel = {
                 let session = jump.lock().await;
                 session
@@ -1293,15 +1325,15 @@ fn remote_hook_token() -> io::Result<String> {
     Ok(token)
 }
 
-fn render_error(
-    terminal: &Arc<FairMutex<Term<EventProxy>>>,
-    event_proxy: &EventProxy,
+fn render_error<H: SshEventHost>(
+    terminal: &Arc<FairMutex<Term<H>>>,
+    event_proxy: &H,
     message: &str,
 ) {
     let mut stream = StreamProcessor::default();
     let text = format!("\r\n\x1b[31m{message}\x1b[0m\r\n");
     stream.feed(&mut *terminal.lock(), event_proxy, text.as_bytes());
-    event_proxy.send_event(TerminalEvent::Wakeup.into());
+    event_proxy.send_event(TerminalEvent::Wakeup);
 }
 
 #[cfg(windows)]

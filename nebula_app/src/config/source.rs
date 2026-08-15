@@ -139,6 +139,26 @@ pub fn default_lua_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "unable to determine the user configuration directory".to_owned())
 }
 
+/// Resolve the Lua file edited by the settings command.
+///
+/// Only the first loaded config is authoritative. Later entries can be imports;
+/// opening one of those merely because it has a `.lua` suffix would edit a
+/// dependency instead of the user's entry point.
+pub fn user_lua_path(active_paths: &[PathBuf]) -> Result<PathBuf, String> {
+    active_user_lua_path(active_paths).map(Ok).unwrap_or_else(default_lua_path)
+}
+
+fn active_user_lua_path(active_paths: &[PathBuf]) -> Option<PathBuf> {
+    active_paths
+        .first()
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("lua"))
+        })
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -183,5 +203,19 @@ mod tests {
     fn rejects_unknown_explicit_extension() {
         let error = source_for_path(PathBuf::from("nebula.json"), true).unwrap_err();
         assert!(error.contains("unsupported configuration extension"));
+    }
+
+    #[test]
+    fn user_lua_path_prefers_the_active_lua_entry_point() {
+        let active = PathBuf::from("D:/config/NEBULA.LUA");
+        let imported = PathBuf::from("D:/config/import.lua");
+        assert_eq!(user_lua_path(&[active.clone(), imported]).unwrap(), active);
+    }
+
+    #[test]
+    fn imported_lua_is_not_treated_as_the_entry_point() {
+        let active = PathBuf::from("D:/config/nebula.toml");
+        let imported = PathBuf::from("D:/config/import.lua");
+        assert_eq!(active_user_lua_path(&[active, imported]), None);
     }
 }

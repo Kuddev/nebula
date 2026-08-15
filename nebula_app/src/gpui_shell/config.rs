@@ -33,26 +33,57 @@ pub struct Settings {
     pub font_bold_italic_family: String,
     /// GPUI 逻辑像素（配置里是 pt，1pt = 4/3 px @96dpi）。
     pub font_size_px: f32,
+    /// 配置文件的基准字号，不含设置页/Ctrl+滚轮持久化的终端缩放。
+    /// 启动窗口按它定形，和旧壳的 `window_size` 契约一致。
+    pub base_font_size_px: f32,
+    /// 字体 cell 的物理像素偏移；旧壳 Windows 默认 y=4，必须在设备像素
+    /// 域参与取整，才能在 125%/150% DPI 下保持同一行数。
+    pub font_offset_x: f32,
+    pub font_offset_y: f32,
     pub palette: Palette,
     pub cursor_shape: Option<CursorShape>,
     pub cursor_blink: Option<bool>,
     /// 选区完成即复制（旧壳 `copy_on_select` 设置）。
     pub copy_on_select: bool,
+    /// 命令补全三设置（settings.txt 的 `ghost`/`accept`/`completion_style`），
+    /// 类型直接用旧壳 display 的语义枚举：接受键判定与样式分支两壳同源。
+    pub ghost: bool,
+    pub accept: crate::display::AcceptKey,
+    pub completion_style: crate::display::CompletionStyle,
+    /// 单元格宽度取整方式；同一窗口宽度下必须与旧壳得到相同列数。
+    pub cell_width_mode: nebula_settings::CellWidthModeName,
+    /// 默认 shell 的稳定 id（`nebula_settings.txt` 的 `shell=`，如
+    /// "pwsh" / "cmd" / "wsl:Ubuntu"）。None = 引擎默认。
+    pub shell_id: Option<String>,
     /// 实际加载的 toml 配置文件（诊断用；None 表示无 toml）。
     pub source_path: Option<PathBuf>,
+    /// 配置装载时吞掉的第一个错误（toml 解析失败/字段形状不符）。解析
+    /// 保持宽容——任何用户配置都不能阻止启动——但错误必须有去处：
+    /// 开窗后由工作区放进驻留消息栏（提示三层裁定：这是有待办的事）。
+    pub load_notice: Option<String>,
 }
 
 impl Global for Settings {}
 
 impl Settings {
-    pub fn load() -> Self {
+    /// `theme`：**生效**主题（follow_system 折算后，见
+    /// `theme::effective_theme_name`）。不在这里自行读 RuntimeSettings 的
+    /// 原始主题，否则 chrome 层与终端 palette 会在跟随系统时分家。
+    pub fn load(theme: nebula_settings::ThemeName) -> Self {
         let runtime = RuntimeSettings::load();
         let path = find_config_file();
+        let mut load_notice = None;
         let raw = path
             .as_deref()
-            .map(load_merged_toml)
+            .map(|p| load_merged_toml(p, &mut load_notice))
             .unwrap_or_else(|| toml::Value::Table(Default::default()));
-        let raw: RawConfig = raw.try_into().unwrap_or_default();
+        let raw: RawConfig = match raw.try_into() {
+            Ok(config) => config,
+            Err(err) => {
+                load_notice.get_or_insert_with(|| format!("nebula.toml 字段解析失败：{err}"));
+                RawConfig::default()
+            },
+        };
 
         // 字体：settings.txt（设置界面）覆盖 toml，最后落内置默认。
         let normal_family = runtime
@@ -66,15 +97,16 @@ impl Settings {
         // 字号语义（对齐旧壳写盘）：settings.txt 的 font_size 是**逻辑像素**
         // （设置 spinner/Ctrl+滚轮持久化时已除 scale）；toml 的 font.size
         // 才是 pt（1pt = 4/3 px @96dpi）。
-        let font_size_px = runtime
-            .font_size_px
-            .unwrap_or_else(|| raw.font.size.unwrap_or(11.25).clamp(4.0, 96.0) * 4.0 / 3.0);
+        let base_font_size_px = raw.font.size.unwrap_or(11.25).clamp(4.0, 96.0) * 4.0 / 3.0;
+        let font_size_px = runtime.font_size_px.unwrap_or(base_font_size_px);
+        let offset = raw.font.offset.unwrap_or_else(default_font_offset);
 
-        // 配色：toml 覆盖内置默认，主题裁定背景/浅色替换/Powerline 槽位，
-        // 用户的背景覆盖色（设置页取色器）最后压轴——与旧壳同序。
+        // 配色：toml 覆盖内置默认，主题裁定背景/浅色替换/Powerline 槽位。
+        // 跟随系统时由当前亮/暗主题全权决定终端底色；否则用户取色器压轴。
         let mut palette = build_palette(&raw.colors);
-        apply_theme(&mut palette, runtime.theme);
-        if let Some(background) = runtime.background {
+        apply_theme(&mut palette, theme);
+        if let Some(background) = runtime_background(runtime.follow_system_theme, runtime.background)
+        {
             palette.background = rgba8(background);
         }
 
@@ -83,6 +115,9 @@ impl Settings {
             font_italic_family: secondary(&raw.font.italic),
             font_bold_italic_family: secondary(&raw.font.bold_italic),
             font_size_px,
+            base_font_size_px,
+            font_offset_x: f32::from(offset.x),
+            font_offset_y: f32::from(offset.y),
             palette,
             cursor_shape: runtime.cursor_shape.map(|shape| match shape {
                 CursorShapeName::Block => CursorShape::Block,
@@ -92,8 +127,21 @@ impl Settings {
             }),
             cursor_blink: runtime.cursor_blink,
             copy_on_select: runtime.copy_on_select,
+            ghost: runtime.ghost,
+            accept: match runtime.accept.settings_value() {
+                "right" => crate::display::AcceptKey::Right,
+                "tab" => crate::display::AcceptKey::Tab,
+                _ => crate::display::AcceptKey::Both,
+            },
+            completion_style: match runtime.completion_style.settings_value() {
+                "popup" => crate::display::CompletionStyle::Popup,
+                _ => crate::display::CompletionStyle::Inline,
+            },
+            cell_width_mode: runtime.cell_width_mode,
+            shell_id: runtime.shell.clone(),
             font_family: normal_family,
             source_path: path,
+            load_notice,
         }
     }
 
@@ -106,8 +154,40 @@ impl Settings {
         if let Some(blinking) = self.cursor_blink {
             config.default_cursor_style.blinking = blinking;
         }
+        // 与旧壳 `UiConfig::term_options` 对齐的关键位（ui_config.rs）——
+        // 裸默认在 ConPTY 下会出两类肉眼可见的错：
+        // - 起桥 DA1 由 conpty 预应答过，Term 必须吞掉自己的重复应答，
+        //   否则它作为击键进入 shell（首行提示符上的 `[?6c` 回显，光标
+        //   随之后移）。
+        // - resize 后 ConPTY 静默重锚主屏并按绝对坐标重绘，网格必须用
+        //   同一行语义，否则光标漂移。
+        #[cfg(windows)]
+        {
+            config.suppress_bringup_da1 =
+                nebula_terminal::tty::windows::conpty_sideload_enabled();
+            config.conpty_resize = true;
+        }
+        config.kitty_keyboard = true;
         config
     }
+}
+
+fn default_font_offset() -> RawDelta {
+    #[cfg(windows)]
+    {
+        RawDelta { x: 0, y: 4 }
+    }
+    #[cfg(not(windows))]
+    {
+        RawDelta { x: 0, y: 0 }
+    }
+}
+
+fn runtime_background(
+    follow_system_theme: bool,
+    background: Option<nebula_settings::Rgb8>,
+) -> Option<nebula_settings::Rgb8> {
+    (!follow_system_theme).then_some(background).flatten()
 }
 
 /// 主题叠加在 toml 配色之上（镜像旧壳 `apply_term_colors` 的范围与次序）：
@@ -198,8 +278,9 @@ fn find_config_file() -> Option<PathBuf> {
 }
 
 /// 读取主文件并按主应用语义合并 imports：imports 先加载，主文件最后覆盖。
-fn load_merged_toml(path: &Path) -> toml::Value {
-    let main = read_toml(path);
+/// 途中吞掉的第一个错误经 `notice` 上浮（宽容解析 + 有去处的错误）。
+fn load_merged_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
+    let main = read_toml(path, notice);
 
     let imports: Vec<String> = [main.get("general").and_then(|g| g.get("import")), main.get("import")]
         .into_iter()
@@ -213,7 +294,7 @@ fn load_merged_toml(path: &Path) -> toml::Value {
     for import in imports {
         let import_path = resolve_import_path(&import, path);
         if import_path.exists() {
-            merged = merge_values(merged, read_toml(&import_path));
+            merged = merge_values(merged, read_toml(&import_path, notice));
         } else {
             eprintln!("[nebula:gpui] config import not found: {}", import_path.display());
         }
@@ -221,11 +302,12 @@ fn load_merged_toml(path: &Path) -> toml::Value {
     merge_values(merged, main)
 }
 
-fn read_toml(path: &Path) -> toml::Value {
+fn read_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
             eprintln!("[nebula:gpui] failed to read config {}: {err}", path.display());
+            notice.get_or_insert_with(|| format!("无法读取配置 {}: {err}", path.display()));
             return toml::Value::Table(Default::default());
         },
     };
@@ -234,6 +316,10 @@ fn read_toml(path: &Path) -> toml::Value {
         Ok(table) => toml::Value::Table(table),
         Err(err) => {
             eprintln!("[nebula:gpui] failed to parse config {}: {err}", path.display());
+            let first_line = err.to_string().lines().next().unwrap_or("解析失败").to_owned();
+            notice.get_or_insert_with(|| {
+                format!("配置 {} 解析失败：{first_line}", path.display())
+            });
             toml::Value::Table(Default::default())
         },
     }
@@ -292,12 +378,27 @@ struct RawFont {
     bold_italic: RawFontDesc,
     /// pt，允许整数或浮点。
     size: Option<f32>,
+    /// 与旧壳 `font.offset` 同义，单位是设备像素。
+    offset: Option<RawDelta>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawFontDesc {
     family: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(default)]
+struct RawDelta {
+    x: i8,
+    y: i8,
+}
+
+impl Default for RawDelta {
+    fn default() -> Self {
+        Self { x: 0, y: 0 }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -441,4 +542,16 @@ fn build_palette(raw: &RawColors) -> Palette {
     }
 
     palette
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_background;
+
+    #[test]
+    fn system_theme_owns_terminal_background_while_following_system() {
+        let custom = Some([0x0f, 0x11, 0x1a]);
+        assert_eq!(runtime_background(true, custom), None);
+        assert_eq!(runtime_background(false, custom), custom);
+    }
 }

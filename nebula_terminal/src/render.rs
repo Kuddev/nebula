@@ -20,7 +20,7 @@ pub mod boxdraw;
 use crate::event::{EventListener, WindowSize};
 use crate::term::cell::Flags;
 use crate::term::color::Colors;
-use crate::term::{Term, point_to_viewport};
+use crate::term::{Term, point_to_viewport_from};
 use crate::vte::ansi::{Color, CursorShape, NamedColor};
 
 /// Cell metrics measured by the frontend (logical pixels + device scale).
@@ -139,8 +139,14 @@ impl ViewportTracker {
         self.current.as_ref()
     }
 
-    pub fn observe(&mut self, width: f32, height: f32, metrics: &CellMetrics) -> Option<ViewportChange> {
-        let candidate = TerminalViewport::from_content_size(width, height, metrics, self.issued + 1);
+    pub fn observe(
+        &mut self,
+        width: f32,
+        height: f32,
+        metrics: &CellMetrics,
+    ) -> Option<ViewportChange> {
+        let candidate =
+            TerminalViewport::from_content_size(width, height, metrics, self.issued + 1);
         let (grid_changed, pixel_changed) = match &self.current {
             Some(current) => (!current.grid_eq(&candidate), !current.pixel_eq(&candidate)),
             None => (true, true),
@@ -240,9 +246,6 @@ pub struct RenderSnapshot {
 pub struct SnapshotConfig {
     pub rows: u16,
     pub cols: u16,
-    /// Force the cursor cell into its own single-cell segment so the
-    /// frontend can recolor it (focused block cursor draws inverted).
-    pub isolate_cursor_cell: bool,
 }
 
 impl RenderSnapshot {
@@ -251,8 +254,9 @@ impl RenderSnapshot {
         let cols = cfg.cols as usize;
         let content = term.renderable_content_with_viewport(rows, cols);
         let display_offset = content.display_offset;
+        let viewport_origin = content.viewport_origin;
         let selection_range = content.selection;
-        let cursor_vp = point_to_viewport(display_offset, content.cursor.point);
+        let cursor_vp = point_to_viewport_from(viewport_origin, content.cursor.point);
         let cursor_shape = content.cursor.shape;
 
         let mut snap = Self {
@@ -296,7 +300,7 @@ impl RenderSnapshot {
         };
 
         for indexed in content.display_iter {
-            let Some(vp) = point_to_viewport(display_offset, indexed.point) else { continue };
+            let Some(vp) = point_to_viewport_from(viewport_origin, indexed.point) else { continue };
             let (row, col) = (vp.line, vp.column.0);
             if row >= rows || col >= cols {
                 continue;
@@ -325,9 +329,6 @@ impl RenderSnapshot {
                 continue;
             }
 
-            let at_cursor = cfg.isolate_cursor_cell
-                && cursor_vp.is_some_and(|c| c.line == row as usize && c.column.0 == col as usize);
-
             let c = indexed.cell.c;
             if boxdraw::is_builtin(c) {
                 // Built-in geometry cells never enter a text segment — the
@@ -346,7 +347,6 @@ impl RenderSnapshot {
             if c == ' '
                 && indexed.cell.extra.is_none()
                 && !flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
-                && !at_cursor
             {
                 continue;
             }
@@ -368,12 +368,15 @@ impl RenderSnapshot {
                 strikethrough: flags.contains(Flags::STRIKEOUT),
             };
 
+            // 分段只由内容与宽度类决定，任何光标/焦点/闪烁状态都不得掺入：
+            // 前端按 cell 原点逐字起笔，反色只是换色；若分段随光标状态变化，
+            // 行缓存键会跟着抖动，重塑形本身就是可见的跳字。
             let continues = open.as_ref().is_some_and(|seg| {
                 seg.row == row
                     && seg.wide == wide
                     && seg.start_col + seg.step() * seg.cells.len() as u16 == col
             });
-            if !continues || at_cursor {
+            if !continues {
                 flush(&mut snap.segments, &mut open);
             }
             match &mut open {
@@ -382,16 +385,12 @@ impl RenderSnapshot {
                     open = Some(TextSegment { row, start_col: col, wide, cells: vec![cell] });
                 },
             }
-            if at_cursor {
-                flush(&mut snap.segments, &mut open);
-            }
         }
         flush(&mut snap.segments, &mut open);
 
         if let Some(vp) = cursor_vp {
             if vp.line < rows && vp.column.0 < cols && cursor_shape != CursorShape::Hidden {
-                let wide =
-                    term.grid()[content.cursor.point].flags.contains(Flags::WIDE_CHAR);
+                let wide = term.grid()[content.cursor.point].flags.contains(Flags::WIDE_CHAR);
                 snap.cursor = Some(CursorSnapshot {
                     row: vp.line as u16,
                     col: vp.column.0 as u16,
@@ -472,9 +471,7 @@ mod tests {
         // grid): pixel change alone must still be reported (Ghostty rule).
         let mut larger = metrics();
         larger.scale = 3.0;
-        let third = tracker
-            .observe(911.0 / 9.0 * 9.0, 360.0, &larger)
-            .expect("pixel change");
+        let third = tracker.observe(911.0 / 9.0 * 9.0, 360.0, &larger).expect("pixel change");
         assert!(third.pixel_changed);
     }
 
@@ -499,7 +496,7 @@ mod tests {
     }
 
     fn cfg(rows: u16, cols: u16) -> SnapshotConfig {
-        SnapshotConfig { rows, cols, isolate_cursor_cell: false }
+        SnapshotConfig { rows, cols }
     }
 
     #[test]
@@ -514,18 +511,38 @@ mod tests {
     }
 
     #[test]
-    fn capture_isolates_cursor_cell_for_inversion() {
+    fn capture_segments_ignore_cursor_position() {
+        // 分段随光标状态变化曾导致整行按闪烁相位重塑形（可见跳字）；
+        // 光标只能以 CursorSnapshot 形式出现，绝不改变文本分段。
         let mut term = term_with(&["abc"]);
         term.grid_mut().cursor.point = crate::index::Point::new(Line(0), Column(1));
-        let snap = RenderSnapshot::capture(
-            &term,
-            &SnapshotConfig { rows: 4, cols: 8, isolate_cursor_cell: true },
-        );
-        let shape: Vec<_> =
-            snap.segments.iter().map(|s| (s.start_col, s.cells.len())).collect();
-        assert_eq!(shape, vec![(0, 1), (1, 1), (2, 1)]);
+        let snap = RenderSnapshot::capture(&term, &cfg(4, 8));
+        let shape: Vec<_> = snap.segments.iter().map(|s| (s.start_col, s.cells.len())).collect();
+        assert_eq!(shape, vec![(0, 3)]);
         let cursor = snap.cursor.expect("cursor visible");
         assert_eq!((cursor.row, cursor.col, cursor.wide), (0, 1, false));
+    }
+
+    #[test]
+    fn capture_maps_a_deferred_resize_crop_to_visual_rows() {
+        let size = TestSize { cols: 8, rows: 4 };
+        let config = Config { conpty_resize: true, ..Config::default() };
+        let mut term = Term::new(config, &size, VoidListener);
+        for (line, ch) in ['a', 'b', 'c', 'd'].into_iter().enumerate() {
+            term.grid_mut()[Line(line as i32)][Column(0)].c = ch;
+        }
+        term.grid_mut().cursor.point = crate::index::Point::new(Line(2), Column(0));
+
+        // A two-row visual viewport previews the same bottom crop that the
+        // settled ConPTY resize will commit: grid rows 2..4 become visual 0..2.
+        let snap = RenderSnapshot::capture(&term, &cfg(2, 8));
+        let rows: Vec<_> = snap
+            .segments
+            .iter()
+            .map(|segment| (segment.row, segment.cells[0].text.as_str()))
+            .collect();
+        assert_eq!(rows, vec![(0, "c"), (1, "d")]);
+        assert_eq!(snap.cursor.expect("cropped cursor").row, 0);
     }
 
     #[test]
@@ -545,8 +562,7 @@ mod tests {
         assert_eq!(boxes, vec![(0, 1, '─', false), (0, 2, '█', false)]);
 
         // Text segments keep only 'a' and 'b', split at the geometry cells.
-        let segments: Vec<_> =
-            snap.segments.iter().map(|s| (s.start_col, s.cells.len())).collect();
+        let segments: Vec<_> = snap.segments.iter().map(|s| (s.start_col, s.cells.len())).collect();
         assert_eq!(segments, vec![(0, 1), (3, 1)]);
     }
 }

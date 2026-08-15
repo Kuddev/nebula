@@ -5,6 +5,13 @@ use sha2::{Digest, Sha256};
 
 pub const REQUIRED_FONT_FAMILY: &str = "Maple Mono Normal NF CN";
 
+/// The bundled face is shared by the legacy rasterizer and the GPUI text
+/// system. Keeping one static byte slice avoids letting the two shells drift
+/// to different font revisions.
+#[cfg(windows)]
+pub static REQUIRED_FONT_BYTES: &[u8] =
+    include_bytes!("../../assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf");
+
 /// 一个系统已安装字体族，连同平台给出的等宽判定。
 ///
 /// 平台枚举本身留在这个类型之外：目录装配只吃普通字符串与布尔，因此可以
@@ -86,7 +93,74 @@ pub fn font_catalog(
     entries.sort_by_key(|entry| entry.name.to_lowercase());
     entries
 }
+
+/// Replace the primary family while preserving the user's ordered fallback
+/// chain. The picker owns only the primary slot; hand-written fallbacks remain
+/// intact so selecting a font cannot silently reduce glyph coverage.
+pub fn replace_primary_font_family(current: &str, replacement: &str) -> String {
+    let replacement = replacement.trim();
+    if replacement.is_empty() {
+        return current.to_owned();
+    }
+
+    let fallbacks = current
+        .split(',')
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .skip(1)
+        .filter(|fallback| *fallback != replacement)
+        .collect::<Vec<_>>();
+    if fallbacks.is_empty() {
+        replacement.to_owned()
+    } else {
+        format!("{replacement}, {}", fallbacks.join(", "))
+    }
+}
 pub const REQUIRED_FONT_FILE: &str = "MapleMonoNormal-NF-CN-Regular.ttf";
+
+/// 枚举系统已安装字体族，带 DirectWrite 的权威等宽判定（`IsMonospacedFont`）。
+///
+/// 两壳共用的唯一实现（旧壳栅格化器与 GPUI 字体选择器都吃它）。逐族取首
+/// 字体问等宽在装了几百个字体的机器上是实打实的开销——调用方自己决定
+/// 惰性时机（首次展开目录 / 后台线程），不要放在启动路径上。
+#[cfg(windows)]
+pub fn enumerate_system_font_families() -> Vec<SystemFontFamily> {
+    let collection = dwrote::FontCollection::system();
+    let mut families = collection
+        .families_iter()
+        .filter_map(|family| {
+            let name = family.family_name().ok()?;
+            // 取该族的首个字体问等宽：族内字重不同但等宽属性一致。
+            // 拿不到就按非等宽处理——宁可让它落进「显示全部」，也不要
+            // 把一个比例字体混进默认的等宽视图。
+            let monospaced =
+                family.font(0).ok().and_then(|font| font.is_monospace()).unwrap_or(false);
+            Some(SystemFontFamily { name, monospaced })
+        })
+        .collect::<Vec<_>>();
+    families.sort_by_key(|family| family.name.to_lowercase());
+    families.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
+    families
+}
+
+/// 探测一个字体文件包含的字体族名（DirectWrite 私有集合，不安装不注册）。
+/// 导入路径两壳共用：旧壳把文件加进 crossfont 私有集合，GPUI 把字节交给
+/// 自己的 text system；族名判定都以这里为准。
+#[cfg(windows)]
+pub fn probe_font_file_families(path: &Path) -> Result<Vec<String>, String> {
+    let file = dwrote::FontFile::new_from_path(path)
+        .ok_or_else(|| format!("DirectWrite 无法解析 {}", path.display()))?;
+    let loader = dwrote::CustomFontCollectionLoaderImpl::new(&[file]);
+    let collection = dwrote::FontCollection::from_loader(loader);
+    let families = collection
+        .families_iter()
+        .filter_map(|family| family.family_name().ok())
+        .collect::<Vec<_>>();
+    if families.is_empty() {
+        return Err("字体文件不含可用的字体族".to_owned());
+    }
+    Ok(families)
+}
 
 #[cfg(windows)]
 const MAX_IMPORTED_FONT_BYTES: usize = 64 * 1024 * 1024;
@@ -247,6 +321,28 @@ mod tests {
 
         let searched = font_catalog(&system, &[], false, "conso", "Arial");
         assert!(names(&searched).contains(&"Arial"), "搜索不命中当前字体时也要保留它");
+    }
+
+    #[test]
+    fn replacing_the_primary_font_preserves_ordered_fallbacks() {
+        assert_eq!(
+            replace_primary_font_family("Consolas, Microsoft YaHei, Symbols", "Cascadia Mono"),
+            "Cascadia Mono, Microsoft YaHei, Symbols"
+        );
+    }
+
+    #[test]
+    fn replacing_the_primary_font_does_not_duplicate_an_existing_fallback() {
+        assert_eq!(
+            replace_primary_font_family("Consolas, Cascadia Mono, Symbols", "Cascadia Mono"),
+            "Cascadia Mono, Symbols"
+        );
+        assert_eq!(replace_primary_font_family("Consolas", "JetBrains Mono"), "JetBrains Mono");
+    }
+
+    #[test]
+    fn blank_primary_replacement_leaves_the_setting_unchanged() {
+        assert_eq!(replace_primary_font_family("Consolas, Symbols", "  "), "Consolas, Symbols");
     }
 
     #[test]

@@ -45,6 +45,11 @@ optional = true
 path = "../nebula_settings"
 optional = true
 
+# 分屏规则的共享权威实现（布局树/拖拽比例/方向导航）；GPUI 壳消费。
+[dependencies.nebula-split]
+path = "../nebula_split"
+optional = true
+
 [dependencies.futures]
 version = "0.3"
 optional = true
@@ -229,5 +234,6 @@ gpui-shell = [
     "dep:gpui-component",
     "dep:gpui-component-assets",
     "dep:nebula-settings",
+    "dep:nebula-split",
     "dep:futures",
 ]

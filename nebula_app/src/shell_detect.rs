@@ -39,6 +39,11 @@ enum ShellIntegration {
     /// Nushell 原生发 OSC 133；不能替换 config，否则会连带覆盖内置/外部
     /// completer、menus 与 keybindings。
     NativeOsc133,
+    /// WSL 来宾：宿主端只见 wsl.exe，本地三条识别通道全盲。来宾侧是标准
+    /// POSIX 环境，与 SSH 远端同构——把 `nebula ssh` 的远端 bash 集成脚本
+    /// （OSC 133 生命周期 + `NEBULA|cwd|branch|program` 标题，git 分支来自
+    /// 脚本内的 `git rev-parse`）经 automount 路径喂给来宾 bash 即可。
+    WslBash,
     Unsupported,
 }
 
@@ -58,6 +63,12 @@ impl DetectedShell {
                     self.args.clone(),
                 );
             },
+            ShellIntegration::WslBash => {
+                if let Some(shell) = wsl_bash_with_nebula_integration(&self.program, &self.args) {
+                    return shell;
+                }
+                // rcfile 落不了盘（temp 目录异常等）：裸拉起，行为同注入前。
+            },
             ShellIntegration::NativeOsc133 | ShellIntegration::Unsupported => {},
         }
 
@@ -65,12 +76,15 @@ impl DetectedShell {
     }
 
     fn integration(&self) -> ShellIntegration {
-        match self.id.trim().to_ascii_lowercase().as_str() {
+        let id = self.id.trim().to_ascii_lowercase();
+        if id == "wsl" || id.starts_with("wsl:") {
+            return ShellIntegration::WslBash;
+        }
+        match id.as_str() {
             "powershell" | "pwsh" => ShellIntegration::PowerShell,
             "bash" | "git-bash" | "gitbash" => ShellIntegration::Bash,
             "nu" => ShellIntegration::NativeOsc133,
-            // CMD 没有可靠的原生 pre-exec hook；WSL 只是宿主，未识别来宾
-            // shell 前注入任何一家的参数都会破坏启动。
+            // CMD 没有可靠的原生 pre-exec hook。
             _ => ShellIntegration::Unsupported,
         }
     }
@@ -486,6 +500,46 @@ fn find_wsl_distros() -> Vec<DetectedShell> {
     distros
 }
 
+/// WSL 来宾 shell 集成：`wsl [-d X] --exec bash --rcfile /mnt/<盘>/…`。
+///
+/// - `--exec` 绕过来宾默认 shell 直接 exec，参数按 argv 原样传递（不经来宾
+///   shell 再解释，宿主路径带空格也安全）。
+/// - v1 范围与 `nebula ssh` 相同：bash。脚本先 source `~/.bashrc`，bash
+///   用户无感；默认 shell 是 zsh/fish 的来宾会换到 bash——代价与远端注入
+///   一致，换来 cwd/git 分支/命令转圈全通。
+/// - 依赖 automount 默认根 `/mnt`（`wsl.conf` 改根的场景 rcfile 打不开，
+///   bash 落到无 rc 的交互会话，仍可用）。
+#[cfg(windows)]
+fn wsl_bash_with_nebula_integration(
+    program: &str,
+    args: &[String],
+) -> Option<nebula_terminal::tty::Shell> {
+    let rcfile = wsl_integration_rcfile()?;
+    let mut args = args.to_vec();
+    args.extend([
+        "--exec".to_owned(),
+        "bash".to_owned(),
+        "--rcfile".to_owned(),
+        crate::ssh::wsl_path(&rcfile),
+    ]);
+    Some(nebula_terminal::tty::Shell::new(program.to_owned(), args))
+}
+
+/// 集成 rcfile 落盘（进程内写一次，所有 WSL tab 复用同一份）；内容与
+/// `nebula ssh` 注入远端的脚本完全同源（`ssh::REMOTE_BASH`）。
+#[cfg(windows)]
+fn wsl_integration_rcfile() -> Option<PathBuf> {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = std::env::temp_dir().join("nebula-wsl-integration.bashrc");
+        // 脚本常量本身就是 LF 行尾；bash 读 CRLF rcfile 会把 \r 当内容。
+        std::fs::write(&path, crate::ssh::REMOTE_BASH.as_bytes()).ok()?;
+        Some(path)
+    })
+    .clone()
+}
+
 #[cfg(test)]
 mod tests {
     fn detected(id: &str, program: &str, args: &[&str]) -> super::DetectedShell {
@@ -523,10 +577,28 @@ mod tests {
         assert_eq!(detected("bash", "bash.exe", &[]).integration(), ShellIntegration::Bash);
         assert_eq!(detected("nu", "nu.exe", &[]).integration(), ShellIntegration::NativeOsc133);
         assert_eq!(detected("cmd", "cmd.exe", &[]).integration(), ShellIntegration::Unsupported);
+        // WSL 来宾走 bash rcfile 注入（`nebula ssh` 远端同款脚本）。
         assert_eq!(
             detected("wsl:Ubuntu", "wsl.exe", &[]).integration(),
-            ShellIntegration::Unsupported
+            ShellIntegration::WslBash
         );
+        assert_eq!(detected("wsl", "wsl.exe", &[]).integration(), ShellIntegration::WslBash);
+    }
+
+    /// WSL 注入的参数形态：保留原 `-d <发行版>`，追加
+    /// `--exec bash --rcfile /mnt/...`（`--exec` 保证 argv 不被来宾 shell
+    /// 二次解释）。rcfile 写进 %TEMP%，路径必然是 automount 形态。
+    #[cfg(windows)]
+    #[test]
+    fn wsl_shells_launch_bash_with_the_shared_integration_rcfile() {
+        let launched = detected("wsl:Ubuntu", "wsl.exe", &["-d", "Ubuntu"]).shell();
+        assert_eq!(launched.program(), "wsl.exe");
+        let args = launched.args();
+        assert_eq!(&args[..2], &["-d".to_owned(), "Ubuntu".to_owned()]);
+        assert_eq!(&args[2..4], &["--exec".to_owned(), "bash".to_owned()]);
+        assert_eq!(args[4], "--rcfile");
+        assert!(args[5].starts_with("/mnt/"), "automount path, got {}", args[5]);
+        assert!(args[5].ends_with("nebula-wsl-integration.bashrc"));
     }
 
     #[test]

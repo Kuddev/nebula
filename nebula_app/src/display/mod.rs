@@ -83,6 +83,7 @@ pub mod sftp_panel;
 pub mod side_panel;
 mod size_info;
 mod state;
+pub(crate) mod suggest_engine;
 mod surface_opacity;
 mod terminal_color;
 mod terminal_math;
@@ -247,13 +248,20 @@ pub(crate) const BADGE_FLASH: std::time::Duration = std::time::Duration::from_mi
 /// Shared chrome/control corner radius. Used for the small in-shell affordances
 /// (window-control hover pills, tab pills, the "+" square) — kept modest so the
 /// controls stay crisp.
-pub(super) const UI_CORNER_RADIUS_LOGICAL: f32 = 8.0;
+///
+/// `pub(crate)`: the GPUI shell maps this onto `gpui_component::Theme::radius`
+/// so its controls share the legacy pill curve.
+pub(crate) const UI_CORNER_RADIUS_LOGICAL: f32 = 8.0;
 
 /// Outer radius of the connected chrome shell (the L-frame formed by the top
 /// bar + left sidebar). Larger than the control radius so the whole window
 /// chrome reads as one soft-cornered card while the affordances inside keep
 /// their tighter [`UI_CORNER_RADIUS_LOGICAL`] curve.
-pub(super) const UI_SHELL_RADIUS_LOGICAL: f32 = 14.0;
+///
+/// `pub(crate)`: the GPUI shell's terminal card borrows this exact value
+/// (see `gpui_shell::theme::card_radius`) so both shells round the card
+/// identically.
+pub(crate) const UI_SHELL_RADIUS_LOGICAL: f32 = 14.0;
 
 /// Gap between the terminal card and the window's right/bottom edges, in
 /// logical pixels — the visible "seam" of shell color that makes the terminal
@@ -652,8 +660,9 @@ struct NebulaPowerlineIcon {
 /// Sidebar SSH HOSTS content: auto-saved destinations (most recent first) +
 /// `~/.ssh/config` aliases (file order), deduped, pinned entries floated to
 /// the top in pin order. One function so startup and settings hot-reload
-/// build the exact same list.
-fn merge_ssh_hosts(saved: &[String], pinned: &[String], hidden: &[String]) -> Vec<String> {
+/// build the exact same list — the GPUI shell reads the same authority
+/// (`pub(crate)`) instead of growing a second ordering policy.
+pub(crate) fn merge_ssh_hosts(saved: &[String], pinned: &[String], hidden: &[String]) -> Vec<String> {
     let mut hosts: Vec<_> = saved.iter().filter(|host| !hidden.contains(host)).cloned().collect();
     for host in crate::ssh::ssh_config_hosts() {
         if !hidden.contains(&host) && !hosts.contains(&host) {
@@ -1200,7 +1209,7 @@ fn nebula_powershell_commands() -> Vec<String> {
 /// Process-wide handle to the command list, populated once on a background
 /// thread so the (PowerShell-invoking) collection never blocks window startup.
 /// Readers see an empty list until collection finishes, then the merged set.
-fn nebula_commands_handle() -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+pub(crate) fn nebula_commands_handle() -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
     static COMMANDS: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<Vec<String>>>> =
         std::sync::OnceLock::new();
     COMMANDS
@@ -5688,10 +5697,8 @@ impl Display {
             4 => provider.model = value,
             5 => {
                 if !value.is_empty() {
-                    match crate::ai_providers::save_api_key(&provider.id, &value) {
-                        Ok(hint) => {
-                            provider.api_key_set = true;
-                            provider.api_key_hint = hint;
+                    match crate::ai_providers::store_provider_api_key(provider, &value) {
+                        Ok(()) => {
                             self.nebula_provider_status = Some((
                                 self.ui_language()
                                     .pick(
@@ -5788,12 +5795,17 @@ impl Display {
         self.nebula_provider_test_seq = self.nebula_provider_test_seq.wrapping_add(1);
         self.nebula_provider_test_request = None;
         self.nebula_provider_codex_confirm = None;
-        let _ = crate::ai_providers::delete_api_key(&id);
-        self.nebula_providers.providers.remove(index);
-        self.nebula_providers.active_id =
-            self.nebula_providers.providers.first().map(|p| p.id.clone()).unwrap_or_default();
-        self.provider_sync_inputs();
-        let _ = crate::ai_providers::save(&self.nebula_providers);
+        self.nebula_provider_status =
+            match crate::ai_providers::remove_provider(&mut self.nebula_providers, &id) {
+                Ok(()) => {
+                    self.provider_sync_inputs();
+                    Some((
+                        self.ui_language().pick("供应商已删除", "Provider deleted").to_owned(),
+                        false,
+                    ))
+                },
+                Err(error) => Some((error.to_string(), true)),
+            };
         self.pending_update.dirty = true;
     }
 
@@ -10576,264 +10588,17 @@ impl Display {
         state: &mut NebulaPaneState,
         line_override: Option<String>,
     ) {
-        let line = line_override.unwrap_or_else(|| state.line_buf.clone());
-        if !self.nebula_ghost_enabled || line.is_empty() {
-            state.clear_completion_hints();
-            nebula_debug_log(format!(
-                "suggest_skip enabled={} cwd={:?} line={:?} line_buf={:?}",
-                self.nebula_ghost_enabled, state.cwd, line, state.line_buf
-            ));
-            return;
-        }
-
-        let key = format!("{}\u{0}{line}", state.cwd);
-        if key == state.suggestion_key {
-            // Cache hit also protects an Esc-dismissed popup: dismissal clears
-            // the items but keeps the key, so nothing reopens until the line
-            // actually changes.
-            return;
-        }
-        state.suggestion_key = key;
-        state.suggestion.clear();
-        state.completion_items.clear();
-        state.completion_selected = 0;
-
-        nebula_debug_log(format!(
-            "suggest_begin cwd={:?} line={:?} line_buf={:?}",
-            state.cwd, line, state.line_buf
-        ));
-
-        // Popup style computes a multi-candidate list instead of the single
-        // ghost remainder; the two are mutually exclusive per pane.
-        if self.nebula_completion_style == CompletionStyle::Popup {
-            self.nebula_collect_completions(state, &line);
-            return;
-        }
-
-        // History first: newest command that extends the whole line (indexed
-        // prefix lookup — scales with matches, not history size).
-        if let Some(rem) = self.nebula_history.hint(&line) {
-            state.suggestion = Self::nebula_clamp_ghost(rem);
-            nebula_debug_log(format!("suggest_result kind=history rem={:?}", state.suggestion));
-            return;
-        }
-
-        // Directory-history hint for cd-like commands. This normalizes Windows
-        // slash style/case, so `cd D:\te` can pick a previous
-        // `cd D:/temp_build/wuwei` before generic filesystem completion falls
-        // back to alphabetic candidates like `D:\Telegram\`.
-        if let Some(rem) = self.directory_history.hint(&line, &state.cwd) {
-            state.suggestion = Self::nebula_clamp_ghost(&rem);
-            nebula_debug_log(format!("suggest_result kind=dir rem={:?}", state.suggestion));
-            return;
-        }
-
-        // First token with no path separators is a command position. Reuse the
-        // process PATH inherited by the shell so typing `ca` can ghost `rgo`
-        // even before that command has appeared in Nebula/Nushell history.
-        if nebula_is_command_position(&line) {
-            if let Ok(commands) = self.nebula_commands.lock() {
-                if let Some(rem) = nebula_command_hint(commands.as_slice(), &line) {
-                    state.suggestion = Self::nebula_clamp_ghost(rem);
-                    nebula_debug_log(format!(
-                        "suggest_result kind=command rem={:?}",
-                        state.suggestion
-                    ));
-                    return;
-                }
-            }
-        }
-
-        // Otherwise complete the final path token. Absolute tokens (drive,
-        // root or `~`) resolve without a cwd; relative ones need the tracked
-        // cwd, so bail if it is unknown.
-        let token = line.rsplit([' ', '\t']).next().unwrap_or("");
-        if token.is_empty() {
-            return;
-        }
-        let absolute =
-            token.starts_with(['/', '\\', '~']) || token.as_bytes().get(1) == Some(&b':'); // Windows drive, e.g. `D:`
-        if !absolute && state.cwd.is_empty() {
-            return;
-        }
-
-        // Case-insensitive so `mor` completes `MoRealm` on Windows; prefer
-        // directories for the common directory-changing commands.
-        let options = CompletionOptions { case_sensitive: false, ..CompletionOptions::default() };
-        let want_dir = nebula_path_wants_directory(&line);
-        let span = Span::new(0, token.len());
-        let cwd = state.cwd.clone();
-        let cwd_slot = [cwd.as_str()];
-        let cwds: &[&str] = if cwd.is_empty() { &[] } else { &cwd_slot };
-        let matches = complete_item(want_dir, span, token, cwds, &options, false, None);
-        let matches = if want_dir {
-            self.directory_history.rank_file_suggestions(matches, &state.cwd)
-        } else {
-            matches
-        };
-        let candidates: Vec<_> = matches
-            .iter()
-            .take(6)
-            .map(|s| s.display_override.as_deref().unwrap_or(&s.path).to_owned())
-            .collect();
-        let remainder = matches.into_iter().find_map(|s| {
-            let path = s.display_override.as_deref().unwrap_or(&s.path);
-            // The match was case-insensitive, so the suggestion is the slice of
-            // `path` past what the user typed. Compare the head ignoring ASCII
-            // case (so `mor` matches `MoRealm`) and guard the byte split against
-            // multibyte boundaries.
-            if path.len() <= token.len() || !path.is_char_boundary(token.len()) {
-                return None;
-            }
-            let (head, rem) = path.split_at(token.len());
-            if !head.eq_ignore_ascii_case(token) {
-                return None;
-            }
-            // Stop at the first separator so a single deep match doesn't drill
-            // the whole tree into the ghost; suggest one segment.
-            Some(match rem.find(['/', '\\']) {
-                Some(i) => rem[..=i].to_owned(),
-                None => rem.to_owned(),
-            })
-        });
-        if let Some(rem) = remainder {
-            state.suggestion = Self::nebula_clamp_ghost(&rem);
-            nebula_debug_log(format!(
-                "suggest_result kind=path token={:?} candidates={:?} rem={:?}",
-                token, candidates, state.suggestion
-            ));
-        } else {
-            nebula_debug_log(format!(
-                "suggest_result kind=none token={:?} candidates={:?}",
-                token, candidates
-            ));
-        }
-    }
-
-    /// Cap ghost length so a long path/command can't spill into the chrome.
-    fn nebula_clamp_ghost(rem: &str) -> String {
-        rem.chars().take(NEBULA_GHOST_MAX).collect()
-    }
-
-    /// Elide long popup labels from the LEFT (paths keep their informative
-    /// tail; the head the user already typed is the expendable part).
-    fn nebula_elide_left(text: &str, max_chars: usize) -> String {
-        let count = text.chars().count();
-        if count <= max_chars {
-            return text.to_owned();
-        }
-        let tail: String = text.chars().skip(count + 1 - max_chars).collect();
-        format!("…{tail}")
-    }
-
-    /// Fill `state.completion_items` for the popup style: the same sources as
-    /// the ghost hint (history → directory history → PATH commands → file
-    /// system), but keeping several candidates each instead of the first hit.
-    fn nebula_collect_completions(&mut self, state: &mut NebulaPaneState, line: &str) {
-        const POPUP_MAX: usize = 8;
-        const LABEL_MAX: usize = 44;
-
-        let mut items: Vec<NebulaCompletionItem> = Vec::new();
-        let push = |items: &mut Vec<NebulaCompletionItem>, item: NebulaCompletionItem| {
-            if item.insert.is_empty() {
-                return;
-            }
-            if items.iter().any(|seen| seen.insert == item.insert && seen.kind == item.kind) {
-                return;
-            }
-            if items.len() < POPUP_MAX {
-                items.push(item);
-            }
-        };
-
-        // Whole-line history matches, newest first.
-        for (full, rem) in self.nebula_history.hints(line, 3) {
-            push(&mut items, NebulaCompletionItem {
-                label: Self::nebula_elide_left(full, LABEL_MAX),
-                insert: rem.to_owned(),
-                kind: NebulaCompletionKind::History,
-            });
-        }
-
-        let token = line.rsplit([' ', '\t']).next().unwrap_or("");
-
-        // Frecency-ranked directory completion for cd-like commands.
-        if let Some(rem) = self.directory_history.hint(line, &state.cwd) {
-            push(&mut items, NebulaCompletionItem {
-                label: Self::nebula_elide_left(&format!("{token}{rem}"), LABEL_MAX),
-                insert: rem,
-                kind: NebulaCompletionKind::Dir,
-            });
-        }
-
-        // PATH executables while the first token is being typed.
-        if nebula_is_command_position(line) {
-            if let Ok(commands) = self.nebula_commands.lock() {
-                for command in nebula_command_hints(commands.as_slice(), line, POPUP_MAX) {
-                    push(&mut items, NebulaCompletionItem {
-                        label: Self::nebula_elide_left(command, LABEL_MAX),
-                        insert: command[line.len()..].to_owned(),
-                        kind: NebulaCompletionKind::Command,
-                    });
-                }
-            }
-        }
-
-        // Filesystem candidates for the final token (same gating as the ghost
-        // path: absolute tokens work without a cwd, relative ones need one).
-        if !token.is_empty() {
-            let absolute = token.starts_with(['/', '\\', '~'])
-                || token.as_bytes().get(1) == Some(&b':');
-            if absolute || !state.cwd.is_empty() {
-                let options =
-                    CompletionOptions { case_sensitive: false, ..CompletionOptions::default() };
-                let want_dir = nebula_path_wants_directory(line);
-                let span = Span::new(0, token.len());
-                let cwd = state.cwd.clone();
-                let cwd_slot = [cwd.as_str()];
-                let cwds: &[&str] = if cwd.is_empty() { &[] } else { &cwd_slot };
-                let matches = complete_item(want_dir, span, token, cwds, &options, false, None);
-                let matches = if want_dir {
-                    self.directory_history.rank_file_suggestions(matches, &state.cwd)
-                } else {
-                    matches
-                };
-                for candidate in matches.iter().take(POPUP_MAX) {
-                    let path = candidate.display_override.as_deref().unwrap_or(&candidate.path);
-                    if path.len() <= token.len() || !path.is_char_boundary(token.len()) {
-                        continue;
-                    }
-                    let (head, rem) = path.split_at(token.len());
-                    if !head.eq_ignore_ascii_case(token) {
-                        continue;
-                    }
-                    // One segment at a time, like the ghost: a deep match
-                    // drills the tree one directory per acceptance.
-                    let (insert, cut_at_dir) = match rem.find(['/', '\\']) {
-                        Some(i) => (&rem[..=i], true),
-                        None => (rem, false),
-                    };
-                    let kind = if cut_at_dir || candidate.is_dir {
-                        NebulaCompletionKind::Dir
-                    } else {
-                        NebulaCompletionKind::File
-                    };
-                    push(&mut items, NebulaCompletionItem {
-                        label: Self::nebula_elide_left(&format!("{token}{insert}"), LABEL_MAX),
-                        insert: insert.to_owned(),
-                        kind,
-                    });
-                }
-            }
-        }
-
-        nebula_debug_log(format!(
-            "suggest_result kind=popup line={:?} items={}",
-            line,
-            items.len()
-        ));
-        state.completion_items = items;
-        state.completion_selected = 0;
+        suggest_engine::suggest_update(
+            &suggest_engine::SuggestSources {
+                history: &self.nebula_history,
+                directories: &self.directory_history,
+                commands: &self.nebula_commands,
+                enabled: self.nebula_ghost_enabled,
+                style: self.nebula_completion_style,
+            },
+            state,
+            line_override,
+        );
     }
 
     /// Render the popup completion list on the terminal cell grid: one padded
@@ -11967,8 +11732,8 @@ mod nebula_ux_tests {
 
     #[test]
     fn popup_label_elides_from_the_left() {
-        assert_eq!(Display::nebula_elide_left("short", 10), "short");
-        assert_eq!(Display::nebula_elide_left("abcdefgh", 5), "…efgh");
+        assert_eq!(super::suggest_engine::elide_left("short", 10), "short");
+        assert_eq!(super::suggest_engine::elide_left("abcdefgh", 5), "…efgh");
     }
 
     #[test]

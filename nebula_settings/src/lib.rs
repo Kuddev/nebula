@@ -582,7 +582,18 @@ pub struct RuntimeSettings {
     pub opacity: f32,
     /// 终端背景覆盖色（设置页取色器写入，优先于主题背景）。
     pub background: Option<Rgb8>,
+    /// 壁纸路径（空 = 无壁纸）。fit/alignment 存原文，解析归渲染层
+    /// （旧壳 `renderer::image` 的 parse 是权威记号表）。
+    pub background_image: Option<String>,
+    /// 壁纸自身透明度，独立于窗口 opacity（保文字对比度，旧壳同语义）。
+    pub background_image_opacity: f32,
+    pub background_image_fit: Option<String>,
+    pub background_image_alignment: Option<String>,
+    /// 壁纸铺满整窗（含侧栏/标题栏）而非仅终端卡。
+    pub background_image_cover_chrome: bool,
     pub panel_resize: bool,
+    /// 左侧 Tab 栏逻辑宽；与旧壳的持久化键、钳制范围共用。
+    pub sidebar_width: f32,
     pub ssh_proxy_mode: ProxyModeName,
     pub ssh_proxy_url: String,
     pub ssh_proxy_no_proxy: String,
@@ -591,6 +602,9 @@ pub struct RuntimeSettings {
 
 /// 旧壳默认快速终端热键。
 pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+`";
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 230.0;
+pub const MIN_SIDEBAR_WIDTH: f32 = 170.0;
+pub const MAX_SIDEBAR_WIDTH: f32 = 420.0;
 
 impl RuntimeSettings {
     pub fn load() -> Self {
@@ -641,7 +655,28 @@ impl RuntimeSettings {
             blur: raw.bool_on("blur").unwrap_or(true),
             opacity: raw.f32("opacity").map(|o| o.clamp(0.0, 1.0)).unwrap_or(1.0),
             background: raw.value("background").and_then(parse_hex_rgb),
+            background_image: raw
+                .value("background_image")
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned),
+            // 默认 0.38：旧壳 display/settings 同值（壁纸压不过文字）。
+            background_image_opacity: raw
+                .f32("background_image_opacity")
+                .map(|o| o.clamp(0.0, 1.0))
+                .unwrap_or(0.38),
+            background_image_fit: raw.value("background_image_fit").map(str::to_owned),
+            background_image_alignment: raw
+                .value("background_image_alignment")
+                .map(str::to_owned),
+            background_image_cover_chrome: raw
+                .bool_on("background_image_cover_chrome")
+                .unwrap_or(false),
             panel_resize: raw.bool_on("panel_resize").unwrap_or(false),
+            sidebar_width: raw
+                .f32("sidebar_w")
+                .map(|width| width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH))
+                .unwrap_or(DEFAULT_SIDEBAR_WIDTH),
             ssh_proxy_mode: raw
                 .value("ssh_proxy_mode")
                 .and_then(ProxyModeName::from_settings)
@@ -708,6 +743,7 @@ mod tests {
              opacity=0.87\n\
              background=#101216\n\
              panel_resize=1\n\
+             sidebar_w=222\n\
              ssh_proxy_mode=custom\n\
              ssh_proxy_url=socks5://127.0.0.1:7890\n\
              quick_terminal_hotkey=alt+`\n\
@@ -739,6 +775,7 @@ mod tests {
         assert!((settings.opacity - 0.87).abs() < 1e-6);
         assert_eq!(settings.background, Some([0x10, 0x12, 0x16]));
         assert!(settings.panel_resize);
+        assert_eq!(settings.sidebar_width, 222.0);
         assert_eq!(settings.ssh_proxy_mode, ProxyModeName::Custom);
         assert_eq!(settings.ssh_proxy_url, "socks5://127.0.0.1:7890");
         assert_eq!(settings.quick_terminal_hotkey, "alt+`");
@@ -772,6 +809,7 @@ mod tests {
         assert!((settings.opacity - 1.0).abs() < 1e-6);
         assert_eq!(settings.background, None);
         assert!(!settings.panel_resize);
+        assert_eq!(settings.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
         assert_eq!(settings.ssh_proxy_mode, ProxyModeName::Off);
         assert_eq!(settings.quick_terminal_hotkey, DEFAULT_QUICK_TERMINAL_HOTKEY);
     }

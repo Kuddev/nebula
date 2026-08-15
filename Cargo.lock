@@ -4587,6 +4587,7 @@ dependencies = [
  "mlua",
  "nebula-completions",
  "nebula-settings",
+ "nebula-split",
  "nebula_config",
  "nebula_config_derive",
  "nebula_terminal",

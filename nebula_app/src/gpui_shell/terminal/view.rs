@@ -1,20 +1,22 @@
 //! 终端视图：持有会话、处理输入与 IME、驱动重绘。
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
-    FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollWheelEvent,
-    Size, Styled as _, UTF16Selection, Window, div, point, px,
+    App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontFeatures,
+    FontStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, Size, Styled as _, TextRun, UTF16Selection, Window, div, point,
+    px,
 };
-use gpui_component::PixelsExt as _;
+use gpui_component::{PixelsExt as _, WindowExt as _};
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
 use nebula_terminal::event_loop::Msg;
-use nebula_terminal::grid::Scroll;
-use nebula_terminal::index::{Column, Point as TermPoint, Side};
-use nebula_terminal::render::{CellMetrics, ViewportTracker};
+use nebula_terminal::grid::{Dimensions as _, Scroll};
+use nebula_terminal::index::{Column, Line, Point as TermPoint, Side};
+use nebula_terminal::render::{CellMetrics, TerminalViewport, ViewportTracker};
 use nebula_terminal::selection::{Selection, SelectionType};
 use nebula_terminal::term::TermMode;
-use nebula_terminal::term::viewport_to_point;
+use nebula_terminal::vte::ansi::CursorStyle;
 
 use std::sync::Arc;
 
@@ -22,15 +24,64 @@ use super::colors::Palette;
 use super::element::TerminalElement;
 use super::keymap;
 use super::mouse_protocol;
-use super::session::{self, GridSize, TerminalSession};
+use super::session::{self, TerminalSession};
+use super::suggest;
+use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
 use crate::gpui_shell::config::Settings;
+use crate::gpui_shell::prelude::DialogButtonProps;
 
 use futures::StreamExt as _;
 
-/// 等宽字体描述。SharedString 的 &str 转换要求 'static，字体名是运行时值，
-/// 因此走 to_string。
+/// 等宽字体描述。GPUI 的 Windows 后端收到空 feature 列表会在
+/// `apply_font_features` 里提前返回，Maple 的 contextual ligature 因而不会
+/// 生效；显式给出 calt=1 会让该后端一并注册 liga/clig/calt。
 fn mono_font(family: &str, weight: FontWeight, style: FontStyle) -> Font {
-    Font { weight, style, ..gpui::font(family.to_string()) }
+    Font {
+        weight,
+        style,
+        features: FontFeatures(Arc::new(vec![("calt".to_owned(), 1)])),
+        ..gpui::font(family.to_string())
+    }
+}
+
+/// 粘贴确认阈值：一次粘进来达到这个行数，先弹模态问一句。
+///
+/// 旧壳的判据是「非 bracketed 且含任何换行」（`event.rs` 的 `paste`）。那条
+/// 规则对裸 shell 是对的——换行落地即执行——但 codex/vim/PSReadLine 这类自己
+/// 接管换行的应用也跟着挨弹窗，#35 因此给 bracketed 模式开了豁免；豁免之后
+/// 往 PSReadLine 里糊三十行反而一声不响。这里换成体量判据：值得再看一眼的
+/// 是「一次糊进来几十行」，与对端是否 bracketing 无关；两三行仍旧直接放行。
+const PASTE_CONFIRM_LINES: usize = 20;
+
+/// Overlay 滚动条的拇指宽度、最小高度与命中放宽量（逻辑 px；旧壳
+/// `scrollbar_geometry` 的 4/24/8 设备 px 在同一 DPI 语义下等值）。4px 的细条
+/// 不好抓，所以命中带比可见拇指左右各宽 `SLOP`。
+const SCROLLBAR_W: f32 = 4.0;
+const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+const SCROLLBAR_SLOP: f32 = 8.0;
+
+/// 粘贴体量按「落到终端算几行」数，不用 `str::lines`。
+///
+/// `str::lines` 只认 `\n`，纯 `\r` 的剪贴板内容（老式 Mac 换行、部分 Windows
+/// 程序导出的选区）会被算成一行，可它进了 PTY 一样是回车。这里 `\r\n` 算一次
+/// 换行，末尾那个换行不额外多算一行。
+fn paste_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let breaks = text.replace("\r\n", "\n").matches(['\n', '\r']).count();
+    if text.ends_with('\n') || text.ends_with('\r') { breaks } else { breaks + 1 }
+}
+
+/// 当前 UI 语言。`RuntimeSettings` 每次读盘，所以只在用户动作（复制提示、
+/// 粘贴确认）时取，不进渲染热路径。
+fn ui_language() -> crate::display::UiLanguage {
+    match nebula_settings::RuntimeSettings::load().language {
+        nebula_settings::LanguagePref::System => crate::display::LanguagePreference::System,
+        nebula_settings::LanguagePref::ZhCn => crate::display::LanguagePreference::ZhCn,
+        nebula_settings::LanguagePref::EnUs => crate::display::LanguagePreference::EnUs,
+    }
+    .resolved()
 }
 
 /// 终端视图对宿主（Panel/Workspace）暴露的状态变化。
@@ -39,9 +90,27 @@ pub enum TerminalViewEvent {
     TitleChanged,
     /// 会话结束（子进程退出或 PTY 故障），只发一次。
     Exited,
+    /// 用户在本视图内按下鼠标：分屏宿主据此更新聚焦 pane（键盘焦点已由
+    /// 视图自己 `window.focus` 拿走，这里只同步宿主的 pane 级焦点记账）。
+    FocusRequested,
+}
+
+/// 会话种类：本地 shell 或 SSH 直连（russh，共享旧壳业务层）。
+pub enum TerminalLaunch {
+    Local { cwd: Option<std::path::PathBuf> },
+    Ssh { destination: String },
+}
+
+/// 侧边栏只消费稳定的三态，不直接窥探终端/SSH 的内部错误字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarActivity {
+    Idle,
+    Running,
+    Failed,
 }
 
 pub struct TerminalView {
+    pub pane_id: u64,
     pub session: Option<TerminalSession>,
     pub focus_handle: FocusHandle,
     pub font: Font,
@@ -49,34 +118,237 @@ pub struct TerminalView {
     pub font_italic: Font,
     pub font_bold_italic: Font,
     pub font_size: Pixels,
-    pub line_height_mul: f32,
+    cell_width_mode: nebula_settings::CellWidthModeName,
+    /// Cell offsets use physical pixels, matching the legacy crossfont
+    /// contract. They are applied after GPUI has shaped the actual face.
+    font_offset_x: f32,
+    font_offset_y: f32,
     pub palette: Arc<Palette>,
     pub marked_text: Option<String>,
     pub ime_bounds: Bounds<Pixels>,
     pub title: String,
+    /// shell 集成 `NEBULA|cwd|branch|program` 标题上报的工作目录；tab 标签
+    /// 的第一优先来源（与旧壳 `nebula_state.cwd` 同源同义）。
+    pub cwd: String,
+    /// 同上标题协议的 git 分支字段（当前仅存备用）。
+    pub branch: String,
+    /// 标题协议第 4 字段：远端 `nebula ssh` 上报的运行中程序，本地为空。
+    pub running_program: Option<String>,
+    /// SSH 直连目的地（`user@host[:port]`）；本地会话为 None。
+    pub ssh_destination: Option<String>,
+    /// SSH 连接阶段（业务层上报）：Ready 前画连接横幅，Failed 驻留错误。
+    ssh_stage: Option<crate::ssh_session::SshStage>,
+    /// Hook-reported identity for exact resume/fork. Process/title inference is
+    /// never accepted here because a wrong id would continue the wrong chat.
+    pub ai_session: Option<crate::display::AiSessionIdentity>,
     error: Option<String>,
     exited: Option<String>,
+    /// 滚动条拖拽中：按下时记下的「指针在拇指内的 y 偏移」，拖动全程据此
+    /// 反算 `display_offset`，拇指不会在按下那一刻跳到指针中心。
+    scrollbar_drag: Option<f32>,
     origin: Point<Pixels>,
     cell_width: Pixels,
     line_height: Pixels,
     cols: usize,
     rows: usize,
+    /// Last geometry committed to both the terminal grid and ConPTY. During
+    /// an interactive resize `cols`/`rows` are the live visual viewport while
+    /// this remains at the last coalesced boundary.
     window_size: WindowSize,
+    /// 启动稳定闸：开窗 resize 是异步落地的，首帧可能还是旧尺寸。闸门
+    /// 关着时不向 Term/ConPTY 下发布局，直到布局命中 spawn 网格（零下发
+    /// 收口）或宽限期超时（小屏收拢等真实差异，放行一次性纠正）。没有
+    /// 这道闸，ConPTY 会在 shell 首屏输出中途被 目标→旧→目标 来回重排
+    /// （shrink 重排具破坏性，参见 WT Terminal::UserResize 注释），
+    /// PSReadLine 的坐标缓存随之错位——表现为打字回显落到陈旧行。
+    grid_synced: bool,
+    spawn_at: std::time::Instant,
     viewports: ViewportTracker,
+    /// Final visual viewport waiting for the trailing-edge resize commit.
+    pending_resize: Option<TerminalViewport>,
+    /// Invalidates older settle timers when a newer layout observation wins.
+    resize_epoch: u64,
     scroll_px: f32,
     selecting: bool,
     /// 选中即复制（旧壳 `copy_on_select`）；关闭时复制交给右键路径。
     copy_on_select: bool,
     /// 鼠标模式下最后上报的单元格：move 事件按"进入新单元格"去重。
     last_report_point: Option<TermPoint>,
+    /// GPUI 没有旧壳 scheduler 的 `BlinkCursor` 事件，视图自己只维护可见相位；
+    /// 光标是否允许闪烁仍由共享 `Term::cursor_style()` 裁定。
+    cursor_visible: bool,
+    cursor_blink_epoch: u64,
+    /// 最近一次由设置页下发的默认样式。只在它真正变化时清理 shell 的
+    /// DECSCUSR/DEC mode 12 覆盖，避免无关设置变更打断 vim 等程序光标。
+    default_cursor_style: CursorStyle,
+    /// 补全运行时状态（行镜像/ghost 余量/弹窗候选），引擎与旧壳共享：
+    /// 计算在 `display::suggest_engine`，数据源在 `terminal::suggest` 的
+    /// 进程级单例。cwd 由 NEBULA| 标题协议同步进来。
+    pub(super) suggest: crate::display::NebulaPaneState,
+    /// `suggest` 取样时的可视光标位置。旧壳在一次 Term 锁内同时读取提示行
+    /// 与光标；GPUI 的 render/paint 分两次取锁，因此用此锚点拒绝跨世代组合
+    /// （典型是退格回显夹在两次取锁之间造成 ghost 左右跳）。
+    pub(super) suggest_anchor: Option<(usize, usize)>,
+    ghost_enabled: bool,
+    accept: crate::display::AcceptKey,
+    completion_style: crate::display::CompletionStyle,
 }
 
 impl TerminalView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    /// 默认画布（旧壳 `display` 的 `Dimensions { columns: 116, lines: 30 }`
+    /// 同源）：窗口按基准字号定形，spawn 网格再按当前缩放字号反推。
+    pub const DEFAULT_GRID_COLUMNS: u16 = 116;
+    pub const DEFAULT_GRID_LINES: u16 = 30;
+
+    fn effective_cell_width(
+        raw_width: f32,
+        mode: nebula_settings::CellWidthModeName,
+        scale: f32,
+        offset_x: f32,
+    ) -> Pixels {
+        // 旧壳的 crossfont 度量与取整都发生在设备像素域。若先在 GPUI
+        // 逻辑像素域取整，150% DPI 下每列会多出半个物理像素，116 列会
+        // 把启动窗口横向撑大几十像素。
+        let scale = scale.max(0.5);
+        let device_width = raw_width * scale + offset_x;
+        let device_width = match mode {
+            nebula_settings::CellWidthModeName::Compact => device_width.floor(),
+            nebula_settings::CellWidthModeName::Relaxed => device_width.round(),
+        };
+        px(device_width.max(1.0) / scale)
+    }
+
+    pub(super) fn cell_width_for_advance(&self, raw_width: f32, scale: f32) -> Pixels {
+        Self::effective_cell_width(raw_width, self.cell_width_mode, scale, self.font_offset_x)
+    }
+
+    fn effective_line_height(natural_height: f32, offset_y: f32, scale: f32) -> Pixels {
+        let scale = scale.max(0.5);
+        // GPUI's shaped line exposes the platform's ascent+descent, which on
+        // DirectWrite includes the same font line gap used by crossfont. The
+        // old shell then floors natural height + offset in device pixels.
+        px(((natural_height * scale + offset_y).floor().max(1.0)) / scale)
+    }
+
+    pub(super) fn line_height_for_metrics(&self, natural_height: f32, scale: f32) -> Pixels {
+        Self::effective_line_height(natural_height, self.font_offset_y, scale)
+    }
+
+    /// 启动稳定闸的宽限期：等待开窗 resize 落地到布局的最长时间。超时
+    /// 即认定差异是真实的（如小屏收拢），按当前视口放行纠正。
+    const STARTUP_GRID_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+
+    /// 尾沿去抖窗口：视口静默这么久才向 Term/ConPTY 提交一次 resize。
+    /// 见 `set_layout` 内的合同注释（conhost rewrap 漂移取证）。
+    const RESIZE_SETTLE_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+    const CURSOR_BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+    fn measure_cell_metrics(
+        window: &Window,
+        family: &str,
+        font_size: Pixels,
+        mode: nebula_settings::CellWidthModeName,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> (Pixels, Pixels) {
+        let font = mono_font(&family, FontWeight::NORMAL, FontStyle::Normal);
+        let sample = window.text_system().shape_line(
+            SharedString::new_static("M"),
+            font_size,
+            &[TextRun {
+                len: 1,
+                font,
+                color: Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+        (
+            Self::effective_cell_width(
+                sample.width.as_f32(),
+                mode,
+                window.scale_factor(),
+                offset_x,
+            ),
+            Self::effective_line_height(
+                sample.ascent.as_f32() + sample.descent.as_f32(),
+                offset_y,
+                window.scale_factor(),
+            ),
+        )
+    }
+
+    /// 首帧前的当前单元格度量（与 element prepaint 同一公式：shape "M" 的
+    /// advance / ascent / descent + 配置 offset）。让 spawn 网格与首帧布局一致，避免启动
+    /// 即触发一次 ConPTY resize（DA 探询与回显竞态的温床）。
+    pub fn cell_metrics(window: &Window, cx: &App) -> (Pixels, Pixels) {
+        let (family, font_size, mode, offset_x, offset_y) = match cx.try_global::<Settings>() {
+            Some(settings) => {
+                (
+                    settings.font_family.as_str(),
+                    settings.font_size_px,
+                    settings.cell_width_mode,
+                    settings.font_offset_x,
+                    settings.font_offset_y,
+                )
+            },
+            None => (
+                "Cascadia Mono",
+                15.0,
+                nebula_settings::CellWidthModeName::Compact,
+                0.0,
+                0.0,
+            ),
+        };
+        Self::measure_cell_metrics(window, family, px(font_size), mode, offset_x, offset_y)
+    }
+
+    /// 旧壳窗口定形使用配置基准字号，不使用持久化缩放；缩放后的字号只
+    /// 影响最终能容纳的行列数。否则放大一级就会把 116 列全部加到窗宽上。
+    pub fn startup_cell_metrics(window: &Window, cx: &App) -> (Pixels, Pixels) {
+        let (family, font_size, mode, offset_x, offset_y) = match cx.try_global::<Settings>() {
+            Some(settings) => (
+                settings.font_family.as_str(),
+                settings.base_font_size_px,
+                settings.cell_width_mode,
+                settings.font_offset_x,
+                settings.font_offset_y,
+            ),
+            None => (
+                "Cascadia Mono",
+                15.0,
+                nebula_settings::CellWidthModeName::Compact,
+                0.0,
+                0.0,
+            ),
+        };
+        Self::measure_cell_metrics(window, family, px(font_size), mode, offset_x, offset_y)
+    }
+
+    /// `spawn_grid`：PTY 出生网格（宿主已把窗口定形到该几何）。首帧布局
+    /// 与之相同则零下发；见 `set_layout` 的启动稳定闸。
+    pub fn new(
+        pane_id: u64,
+        spawn_grid: (u16, u16),
+        launch: TerminalLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // 字体、调色板与终端启动配置来自用户配置（nebula.toml +
         // nebula_settings.txt，bootstrap 时装载为全局 Settings）。
-        let (families, font_size, palette, term_config, copy_on_select) =
-            match cx.try_global::<Settings>() {
+        let (
+            families,
+            font_size,
+            cell_width_mode,
+            font_offset_x,
+            font_offset_y,
+            palette,
+            term_config,
+            copy_on_select,
+            shell,
+        ) = match cx.try_global::<Settings>() {
                 Some(settings) => (
                     [
                         settings.font_family.clone(),
@@ -85,22 +357,82 @@ impl TerminalView {
                         settings.font_bold_italic_family.clone(),
                     ],
                     px(settings.font_size_px),
+                    settings.cell_width_mode,
+                    settings.font_offset_x,
+                    settings.font_offset_y,
                     Arc::new(settings.palette.clone()),
                     settings.term_config(),
                     settings.copy_on_select,
+                    // 设置选定的默认 shell（旧壳 default_shell_launch 同径：
+                    // resolve 失败或 PTY 集成 id 落回引擎默认）。WSL id 在
+                    // 这里换上 bash 集成注入，cwd/git 分支经 NEBULA| 标题回流。
+                    settings
+                        .shell_id
+                        .as_deref()
+                        .and_then(crate::shell_detect::resolve_id)
+                        .map(|detected| detected.shell()),
                 ),
                 None => (
                     std::array::from_fn(|_| String::from("Cascadia Mono")),
                     px(15.0),
+                    nebula_settings::CellWidthModeName::Compact,
+                    0.0,
+                    0.0,
                     Arc::new(Palette::default()),
                     nebula_terminal::term::Config::default(),
                     // 旧壳的出厂默认即开。
                     true,
+                    None,
                 ),
             };
-        let initial = WindowSize { num_lines: 30, num_cols: 100, cell_width: 9, cell_height: 18 };
-        let (session, error) = match session::spawn(initial, term_config) {
-            Ok((session, mut rx)) => {
+        let default_cursor_style = term_config.default_cursor_style;
+        let (cell_w, line_h) = Self::cell_metrics(window, cx);
+        // 像素口径与 viewport 上报一致（设备 px），避免首帧一次像素级差异。
+        let scale = window.scale_factor();
+        let initial = WindowSize {
+            num_lines: spawn_grid.1.max(2),
+            num_cols: spawn_grid.0.max(2),
+            cell_width: (cell_w.as_f32() * scale).round().max(1.0) as u16,
+            cell_height: (line_h.as_f32() * scale).round().max(1.0) as u16,
+        };
+        let (ssh_destination, initial_title, spawned) = match launch {
+            TerminalLaunch::Local { cwd } => (
+                None,
+                String::from("shell"),
+                session::spawn(initial, term_config, shell, pane_id, cwd),
+            ),
+            TerminalLaunch::Ssh { destination } => (
+                Some(destination.clone()),
+                destination.clone(),
+                session::spawn_ssh(destination, initial, term_config),
+            ),
+        };
+        let is_ssh = ssh_destination.is_some();
+        let (session, error) = match spawned {
+            Ok((session, mut rx, mut stage_rx)) => {
+                // 新会话欢迎屏（设置 fetch=1，旧壳 fastfetch 同一入口）：
+                // 命令先进 conhost 输入队列，shell 出提示符即执行。宽度按
+                // 出生网格裁定双列/堆叠版式；bash/WSL id 走 fastfetch 回退
+                // 链，其余按 PowerShell 智能双列脚本。SSH 会话不注入本地
+                // 欢迎屏（远端 shell 有自己的首屏）。
+                let runtime = nebula_settings::RuntimeSettings::load();
+                if runtime.fetch && !is_ssh {
+                    use nebula_terminal::event::Notify as _;
+                    let id = runtime.shell.as_deref().unwrap_or_default().to_ascii_lowercase();
+                    let intro_shell = if id.contains("wsl") || id.contains("bash") {
+                        crate::display::NebulaShell::Bash
+                    } else {
+                        crate::display::NebulaShell::PowerShell
+                    };
+                    let notifier =
+                        nebula_terminal::event_loop::Notifier(session.notifier.0.clone());
+                    notifier.notify(
+                        crate::window_context::welcome::nebula_fastfetch_intro_command_for(
+                            usize::from(spawn_grid.0),
+                            intro_shell,
+                        ),
+                    );
+                }
                 cx.spawn(async move |this, cx| {
                     while let Some(event) = rx.next().await {
                         // 合并同一批到达的事件，避免每个 Wakeup 都独立触发一帧。
@@ -126,12 +458,39 @@ impl TerminalView {
                     }
                 })
                 .detach();
+                if is_ssh {
+                    // SSH 连接阶段泵：横幅数据源（与旧壳连接卡片同一
+                    // 上报流，350ms 门槛之类的视觉策略交给渲染端）。
+                    cx.spawn(async move |this, cx| {
+                        while let Some(stage) = stage_rx.next().await {
+                            if this
+                                .update(cx, |view: &mut Self, cx| {
+                                    view.ssh_stage = Some(stage);
+                                    cx.notify();
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                }
                 (Some(session), None)
             },
-            Err(err) => (None, Some(format!("PTY 启动失败: {err}"))),
+            Err(err) => {
+                let what = if is_ssh { "SSH 会话启动失败" } else { "PTY 启动失败" };
+                (None, Some(format!("{what}: {err}")))
+            },
         };
 
-        Self {
+        let (ghost_enabled, accept, completion_style) = match cx.try_global::<Settings>() {
+            Some(settings) => (settings.ghost, settings.accept, settings.completion_style),
+            None => (true, Default::default(), Default::default()),
+        };
+
+        let mut view = Self {
+            pane_id,
             session,
             focus_handle: cx.focus_handle(),
             font: mono_font(&families[0], FontWeight::NORMAL, FontStyle::Normal),
@@ -139,33 +498,73 @@ impl TerminalView {
             font_italic: mono_font(&families[2], FontWeight::NORMAL, FontStyle::Italic),
             font_bold_italic: mono_font(&families[3], FontWeight::BOLD, FontStyle::Italic),
             font_size,
-            line_height_mul: 1.25,
+            cell_width_mode,
+            font_offset_x,
+            font_offset_y,
             palette,
             marked_text: None,
             ime_bounds: Bounds::default(),
-            title: String::from("shell"),
+            title: initial_title,
+            cwd: String::new(),
+            branch: String::new(),
+            running_program: None,
+            ssh_destination,
+            ssh_stage: None,
+            ai_session: None,
             error,
             exited: None,
+            scrollbar_drag: None,
             origin: point(px(0.0), px(0.0)),
-            cell_width: px(8.0),
-            line_height: px(18.0),
+            cell_width: cell_w,
+            line_height: line_h,
             cols: initial.num_cols as usize,
             rows: initial.num_lines as usize,
             window_size: initial,
+            grid_synced: false,
+            spawn_at: std::time::Instant::now(),
             viewports: ViewportTracker::default(),
+            pending_resize: None,
+            resize_epoch: 0,
             scroll_px: 0.0,
             selecting: false,
             copy_on_select,
             last_report_point: None,
-        }
+            cursor_visible: true,
+            cursor_blink_epoch: 0,
+            default_cursor_style,
+            suggest: Default::default(),
+            suggest_anchor: None,
+            ghost_enabled,
+            accept,
+            completion_style,
+        };
+        view.restart_cursor_blink(cx);
+        view
     }
 
     fn process_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         match event {
-            TermEvent::Wakeup | TermEvent::MouseCursorDirty | TermEvent::CursorBlinkingChange => {
+            TermEvent::Wakeup | TermEvent::MouseCursorDirty => {
                 cx.notify();
             },
+            TermEvent::CursorBlinkingChange => self.restart_cursor_blink(cx),
             TermEvent::Title(title) => {
+                // `NEBULA|cwd|branch|program` 标题协议（与旧壳 event.rs 的
+                // 解析同构）：shell 集成把 cwd/分支塞在标题里喂玻璃 powerline
+                // 与 tab 标签，而不是真拿来当窗口标题。
+                if let Some(rest) = title.strip_prefix("NEBULA|") {
+                    let mut parts = rest.splitn(3, '|');
+                    self.cwd = parts.next().unwrap_or("").trim().to_owned();
+                    self.branch = parts.next().unwrap_or("").trim().to_owned();
+                    self.running_program =
+                        parts.next().map(|p| p.trim().to_owned()).filter(|p| !p.is_empty());
+                    // 补全引擎的 cwd 与目录 frecency 同步吃 shell 的权威上报
+                    // （旧壳 nebula_record_directory 同径）。
+                    if self.suggest.cwd != self.cwd {
+                        self.suggest.cwd = self.cwd.clone();
+                        super::suggest::record_directory(&self.cwd);
+                    }
+                }
                 self.title = title;
                 cx.emit(TerminalViewEvent::TitleChanged);
                 cx.notify();
@@ -226,6 +625,69 @@ impl TerminalView {
         }
     }
 
+    /// Apply one lifecycle event already routed to this pane by the workspace.
+    pub fn handle_ai_hook(&mut self, event: &crate::ai_hook::AiHookEvent, cx: &mut Context<Self>) {
+        // SessionEnd 可能是第一次携带最终权威 id 的事件；必须先落盘再清理
+        // pane 现场，否则 CLI 正常退出后反而无法冷恢复。
+        if let Some(id) = event.session_id.as_deref() {
+            if let Err(error) =
+                crate::ai_sessions::record_hook_session(&event.source, id, &self.cwd, None)
+            {
+                log::warn!("agent session index: could not record {} {id}: {error}", event.source);
+            }
+        }
+        if event.kind == crate::ai_hook::AiHookKind::SessionEnd {
+            self.ai_session = None;
+            self.running_program = None;
+        } else {
+            self.running_program = Some(event.source.clone());
+            if let Some(id) = event.session_id.as_deref() {
+                self.ai_session = Some(crate::display::AiSessionIdentity {
+                    source: event.source.clone(),
+                    session_id: id.to_owned(),
+                });
+            }
+        }
+        cx.emit(TerminalViewEvent::TitleChanged);
+        cx.notify();
+    }
+
+    pub fn ai_fork_command(&self) -> Option<String> {
+        let identity = self.ai_session.as_ref()?;
+        crate::ai_agents::AgentKind::parse(&identity.source)?.fork_command(&identity.session_id)
+    }
+
+    pub fn sidebar_activity(&self) -> SidebarActivity {
+        if self.error.is_some()
+            || self.exited.is_some()
+            || matches!(
+                self.ssh_stage.as_ref(),
+                Some(crate::ssh_session::SshStage::Failed(_))
+            )
+        {
+            SidebarActivity::Failed
+        } else if self.running_program.is_some()
+            || self.ssh_stage.as_ref().is_some_and(|stage| {
+                !matches!(stage, crate::ssh_session::SshStage::Ready)
+            })
+        {
+            SidebarActivity::Running
+        } else {
+            SidebarActivity::Idle
+        }
+    }
+
+    /// Queue a full shell command. Like cold resume, input may arrive before
+    /// the first prompt; ConPTY preserves ordering until the shell reads it.
+    pub fn run_command(&mut self, command: String, cx: &mut Context<Self>) {
+        if command.is_empty() || self.exited.is_some() {
+            return;
+        }
+        let mut bytes = command.into_bytes();
+        bytes.push(b'\r');
+        self.write_input(bytes, cx);
+    }
+
     fn write_bytes(&self, bytes: Vec<u8>) {
         if let Some(session) = &self.session {
             session.notifier.notify(bytes);
@@ -242,7 +704,50 @@ impl TerminalView {
             }
             session.notifier.notify(bytes);
         }
+        self.restart_cursor_blink(cx);
         cx.notify();
+    }
+
+    fn cursor_should_blink(&self) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            let term = session.term.lock();
+            term.cursor_style().blinking && term.mode().contains(TermMode::SHOW_CURSOR)
+        })
+    }
+
+    fn restart_cursor_blink(&mut self, cx: &mut Context<Self>) {
+        self.cursor_visible = true;
+        self.cursor_blink_epoch = self.cursor_blink_epoch.wrapping_add(1);
+        let epoch = self.cursor_blink_epoch;
+        self.schedule_cursor_blink_tick(epoch, cx);
+        cx.notify();
+    }
+
+    fn schedule_cursor_blink_tick(&self, epoch: u64, cx: &mut Context<Self>) {
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(Self::CURSOR_BLINK_INTERVAL).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.cursor_blink_epoch != epoch {
+                    return;
+                }
+                if !view.cursor_should_blink() {
+                    if !view.cursor_visible {
+                        view.cursor_visible = true;
+                        cx.notify();
+                    }
+                    return;
+                }
+                view.cursor_visible = !view.cursor_visible;
+                view.schedule_cursor_blink_tick(epoch, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
     }
 
     /// 元素 prepaint 回写布局：内容矩形与度量交给渲染合同裁定网格。
@@ -255,6 +760,7 @@ impl TerminalView {
         line_height: Pixels,
         content: Size<Pixels>,
         scale: f32,
+        cx: &mut Context<Self>,
     ) {
         self.origin = origin;
         self.cell_width = cell_width;
@@ -264,30 +770,125 @@ impl TerminalView {
             cell_height: line_height.as_f32(),
             scale,
         };
-        let Some(change) =
-            self.viewports.observe(content.width.as_f32(), content.height.as_f32(), &metrics)
-        else {
+        let change =
+            self.viewports.observe(content.width.as_f32(), content.height.as_f32(), &metrics);
+
+        // 启动稳定闸：开窗 resize 异步落地，首帧可能还是开窗前的旧尺寸。
+        // 命中 spawn 网格前不向 Term/ConPTY 下发（PTY 出生即目标几何，
+        // 零下发收口）；宽限期后仍未命中（小屏收拢等真实差异）则放行，
+        // 一次性按当前视口纠正。observe 会把过渡帧并进 current，因此
+        // 释放判定不依赖本帧是否有增量。
+        if !self.grid_synced {
+            let Some(viewport) =
+                change.map(|c| c.viewport).or_else(|| self.viewports.current().copied())
+            else {
+                return;
+            };
+            let landed = (viewport.cols, viewport.rows)
+                == (self.window_size.num_cols, self.window_size.num_lines);
+            if !landed && self.spawn_at.elapsed() < Self::STARTUP_GRID_GRACE {
+                return;
+            }
+            self.grid_synced = true;
+            self.cols = viewport.cols as usize;
+            self.rows = viewport.rows as usize;
+            if !landed {
+                self.commit_viewport(viewport);
+            } else {
+                self.window_size = viewport.window_size();
+            }
+            return;
+        }
+
+        let Some(change) = change else {
             return;
         };
         let viewport = change.viewport;
         self.cols = viewport.cols as usize;
         self.rows = viewport.rows as usize;
-        self.window_size = viewport.window_size();
-        if let Some(session) = &self.session {
-            if change.grid_changed {
-                session
-                    .term
-                    .lock()
-                    .resize(GridSize { columns: self.cols, screen_lines: self.rows });
-            }
-            let mut notifier = nebula_terminal::event_loop::Notifier(session.notifier.0.clone());
-            notifier.on_resize(viewport.window_size());
-        }
+
+        // ConPTY 的直通式 conhost 在 resize 时零输出，指望终端侧 reflow 与
+        // 它内部 buffer rewrap 一致；两者的换行语义存在路径依赖差异，每多
+        // 一次中间宽度的 ResizePseudoConsole 就多攒一分光标行漂移（字节取
+        // 证：13 次提交后 PSReadLine 的 CUP 行比真实提示行高 7 行）。旧壳
+        // (winit) 的模态拖拽天然只在松手后送达一次 resize，从不累积。这里
+        // 复刻该合同：纯尾沿去抖——任何网格/像素变化都只进 pending，视口
+        // 静默 RESIZE_SETTLE_DELAY 后一次性提交。净零手势（挤压后拖回原宽）
+        // 最终提交同尺寸 no-op，rewrap 次数为零。
+        self.pending_resize = Some(viewport);
+        self.schedule_settled_resize(cx);
     }
 
-    /// 热应用运行时设置（设置页改动后由宿主调用）：配色/字号/字体/
-    /// copy_on_select 即时生效；已开会话的默认光标形状不动——DECSCUSR
-    /// 属程序权威（vim 模式光标），默认值只对新标签页生效，对齐旧壳语义。
+    /// Commit one viewport in grid-before-PTY order. Output produced after
+    /// `ResizePseudoConsole` therefore always parses against the same geometry
+    /// history ConPTY used to generate its absolute cursor coordinates.
+    fn commit_viewport(&mut self, viewport: TerminalViewport) {
+        let next = viewport.window_size();
+        let grid_changed = (self.window_size.num_cols, self.window_size.num_lines)
+            != (next.num_cols, next.num_lines);
+        let pixel_changed = (self.window_size.cell_width, self.window_size.cell_height)
+            != (next.cell_width, next.cell_height);
+        if !grid_changed && !pixel_changed {
+            return;
+        }
+
+        if let Some(session) = &self.session {
+            let mut notifier = nebula_terminal::event_loop::Notifier(session.notifier.0.clone());
+            notifier.on_resize(next);
+        }
+        self.window_size = next;
+    }
+
+    /// 一次拖拽手势（窗口边框/分屏把手）是否仍在进行。conhost 的 buffer
+    /// rewrap 与本地 reflow 的换行语义存在路径依赖差异，每一次中间几何的
+    /// `ResizePseudoConsole` 都会累积光标行漂移（字节取证：一次拖拽 14 次
+    /// 提交后 PSReadLine 的 CUP 行比真实提示行高 7 行，且 conhost 全程零
+    /// 重绘字节，漂移无法事后察觉）。旧壳 (winit) 的模态拖拽天然只在松手
+    /// 后送达一次 resize，从不出这个问题；GPUI 在模态循环内持续派发布局，
+    /// 时间去抖（150ms settle）与布局批次同周期，挡不住中间提交。因此按
+    /// 手势门控：左键仍按住就不提交，settle 定时器自我续期到松手为止。
+    #[cfg(windows)]
+    fn drag_gesture_active() -> bool {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+        // SAFETY: GetAsyncKeyState 只读全局按键状态，无副作用。
+        (unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } as u16 & 0x8000) != 0
+    }
+
+    #[cfg(not(windows))]
+    fn drag_gesture_active() -> bool {
+        false
+    }
+
+    fn schedule_settled_resize(&mut self, cx: &mut Context<Self>) {
+        self.resize_epoch = self.resize_epoch.wrapping_add(1);
+        let epoch = self.resize_epoch;
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(Self::RESIZE_SETTLE_DELAY).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.resize_epoch != epoch {
+                    return;
+                }
+                let gate = Self::drag_gesture_active();
+                if std::env::var_os("NEBULA_RESIZE_TRACE").is_some() {
+                    eprintln!("[nebula:resize-trace] settle-timer gate={gate}");
+                }
+                if gate {
+                    // 手势未松开：净零手势（挤压后拖回原宽）最终提交同尺寸
+                    // no-op，ConPTY 一次 rewrap 都不做。
+                    view.schedule_settled_resize(cx);
+                    return;
+                }
+                let Some(viewport) = view.pending_resize.take() else { return };
+                view.commit_viewport(viewport);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 热应用运行时设置（设置页改动后由宿主调用）。默认光标样式只更新
+    /// `Term` 的 fallback；程序通过 DECSCUSR 设置的临时样式仍保持权威。
     pub fn apply_settings(&mut self, cx: &mut Context<Self>) {
         let Some(settings) = cx.try_global::<Settings>() else { return };
         let families = [
@@ -299,15 +900,62 @@ impl TerminalView {
         let font_size = px(settings.font_size_px);
         let palette = Arc::new(settings.palette.clone());
         let copy_on_select = settings.copy_on_select;
+        let default_cursor_style = settings.term_config().default_cursor_style;
+        let cursor_style_changed = self.default_cursor_style != default_cursor_style;
+        self.ghost_enabled = settings.ghost;
+        self.accept = settings.accept;
+        self.completion_style = settings.completion_style;
+        // 样式/开关热切换即作废当前提示：缓存键留着会挡住新样式的首次重算。
+        self.suggest.clear_completion_hints();
 
         self.font = mono_font(&families[0], FontWeight::NORMAL, FontStyle::Normal);
         self.font_bold = mono_font(&families[1], FontWeight::BOLD, FontStyle::Normal);
         self.font_italic = mono_font(&families[2], FontWeight::NORMAL, FontStyle::Italic);
         self.font_bold_italic = mono_font(&families[3], FontWeight::BOLD, FontStyle::Italic);
         self.font_size = font_size;
+        self.cell_width_mode = settings.cell_width_mode;
+        self.font_offset_x = settings.font_offset_x;
+        self.font_offset_y = settings.font_offset_y;
         self.palette = palette;
         self.copy_on_select = copy_on_select;
+        self.default_cursor_style = default_cursor_style;
+        if let Some(session) = &self.session {
+            let mut term = session.term.lock();
+            term.set_default_cursor_style(default_cursor_style);
+            if cursor_style_changed {
+                // 与旧壳 apply_default_cursor_style 同合同：用户显式改光标后，
+                // 立即解除 shell 启动阶段钉住的旧样式，让新默认当场可见。
+                term.reset_cursor_style_override();
+            }
+        }
+        self.restart_cursor_blink(cx);
         cx.notify();
+    }
+
+    /// 侧栏 tab 标签（旧壳 `chrome_tab_label` 的移植）：cwd 的末级目录名
+    /// →（非 "shell" 的）标题 → 进程当前目录名 → "."。整条路径永远不显示，
+    /// 它会把侧栏行顶满、毁掉呼吸感。
+    pub fn tab_label(&self) -> String {
+        let cwd = self.cwd.trim();
+        if !cwd.is_empty() {
+            let name = cwd
+                .trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(cwd);
+            return name.to_owned();
+        }
+
+        if self.title != "shell" && !self.title.trim().is_empty() {
+            return self.title.clone();
+        }
+
+        std::env::current_dir()
+            .ok()
+            .and_then(|path| path.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| ".".to_owned())
     }
 
     pub fn grid_rows(&self) -> usize {
@@ -318,22 +966,125 @@ impl TerminalView {
         self.cols
     }
 
+    /// Local cwd reported by shell integration, for host chrome services
+    /// (file tree/directory picker). Remote POSIX paths naturally fail
+    /// `is_dir` at the host boundary and are left to the SFTP adapter.
+    pub fn local_cwd(&self) -> Option<std::path::PathBuf> {
+        let path = std::path::PathBuf::from(self.cwd.trim());
+        path.is_dir().then_some(path)
+    }
+
     fn term_mode(&self) -> TermMode {
         self.session.as_ref().map(|s| *s.term.lock().mode()).unwrap_or_default()
     }
 
-    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+    /// 复制选区。`notify`：显式复制（Ctrl+Shift+C、右键复制）弹「已复制
+    /// N 行」的确认 toast——键盘与右键共用这一条通知路径；copy_on_select
+    /// 的选区存储刻意静默（旧壳 `copy_selection` 同合同，抬手一次就可能
+    /// 触发，弹起来会刷屏）。
+    fn copy_selection(&mut self, notify: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = &self.session {
             let text = session.term.lock().selection_to_string();
             if let Some(text) = text.filter(|t| !t.is_empty()) {
+                let lines = text.lines().count().max(1);
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
+                if notify {
+                    let message = match ui_language() {
+                        crate::display::UiLanguage::EnUs => {
+                            format!("Copied {lines} lines to clipboard")
+                        },
+                        _ => format!("已复制 {lines} 行到剪贴板"),
+                    };
+                    crate::gpui_shell::toast::toast(
+                        window,
+                        cx,
+                        crate::display::ToastKind::Info,
+                        message,
+                    );
+                }
             }
         }
     }
 
-    fn paste(&mut self, cx: &mut Context<Self>) {
+    /// 读剪贴板并粘贴。体量达到 [`PASTE_CONFIRM_LINES`] 时先弹确认模态，确认
+    /// 后才走 [`Self::paste_now`]；小段粘贴一路直通，不打断手感。
+    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        let lines = paste_line_count(&text);
+        if lines >= PASTE_CONFIRM_LINES {
+            self.confirm_paste(text, lines, window, cx);
+            return;
+        }
+        self.paste_now(&text, cx);
+    }
+
+    /// 大批量粘贴的阻断式确认——提示三层里的「模态」：有待办动作、必须先决策。
+    ///
+    /// 粘贴内容随模态一起快照，确认时不再回读剪贴板：弹窗期间用户完全可能又
+    /// 复制了别的东西，回读会把「已经看过并确认的那一份」换成没人看过的内容。
+    fn confirm_paste(
+        &mut self,
+        text: String,
+        lines: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let language = ui_language();
+        // bracketed 的对端（codex/vim/PSReadLine）整块收下、自己决定怎么处理；
+        // 裸 shell 是换行落地即执行。风险不同，话就得说得不一样。
+        let runs_line_by_line = !self.term_mode().contains(TermMode::BRACKETED_PASTE);
+        let title: SharedString = match language {
+            crate::display::UiLanguage::EnUs => format!("Paste {lines} lines?"),
+            _ => format!("粘贴 {lines} 行文本？"),
+        }
+        .into();
+        let body: SharedString = if runs_line_by_line {
+            language.pick(
+                "shell 会把这些内容逐行执行。请确认来源可信。",
+                "The shell will run these lines one by one. Make sure you trust the source.",
+            )
+        } else {
+            language.pick(
+                "内容会作为一整块交给当前程序，不会逐行执行；但行数不少，请确认来源可信。",
+                "The app receives this as a single paste and will not run it line by line, but \
+                 it is a lot of text — make sure you trust the source.",
+            )
+        }
+        .into();
+        let ok_text: SharedString = language.pick("粘贴", "Paste").into();
+        let cancel_text: SharedString = language.pick("取消", "Cancel").into();
+
+        // builder 每帧重跑、`on_ok` 也是 `Fn`：文本与视图句柄都得可克隆共享。
+        // 视图用弱引用——模态活在窗口 `Root` 里，强引用会让「弹窗期间关掉这个
+        // pane」的 view 释放不掉。
+        let text = Arc::new(text);
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let text = text.clone();
+            let view = view.clone();
+            dialog
+                .title(title.clone())
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(ok_text.clone())
+                        .cancel_text(cancel_text.clone()),
+                )
+                .child(body.clone())
+                .on_ok(move |_, _window, cx| {
+                    let _ = view.update(cx, |this, cx| this.paste_now(&text, cx));
+                    true
+                })
+        });
+    }
+
+    fn paste_now(&mut self, text: &str, cx: &mut Context<Self>) {
         let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+        // 行镜像吃粘贴的字面文本；多行/控制字符由引擎侧作废（与旧壳
+        // `nebula_input_text` 的防注入契约一致）。
+        if !self.term_mode().contains(TermMode::ALT_SCREEN) {
+            crate::display::Display::nebula_input_text(&mut self.suggest, &normalized);
+        }
         let bytes = if self.term_mode().contains(TermMode::BRACKETED_PASTE) {
             let mut b = b"\x1b[200~".to_vec();
             // 过滤粘贴内容里的收尾哨兵，防止注入截断。
@@ -346,7 +1097,72 @@ impl TerminalView {
         self.write_input(bytes, cx);
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Enter 提交：从 grid 读回显真值（screen truth）记入共享历史，然后清
+    /// 行镜像。读法与旧壳 `nebula_commit_line` 的 Windows 契约一致：无提示
+    /// 箭头（cmd/ssh/REPL）或中线编辑读不到就宁缺毋滥——键击重构的
+    /// line_buf 在光标移动/Tab 补全后就是拼接垃圾，不能进历史。
+    fn commit_line(&mut self) {
+        #[cfg(windows)]
+        if let Some(session) = &self.session {
+            let term = session.term.lock();
+            if !term.mode().intersects(TermMode::ALT_SCREEN | TermMode::VI) {
+                let cursor = term.grid().cursor.point;
+                match crate::display::Display::nebula_input_from_raw_grid(&term, cursor) {
+                    Some(line) => self.suggest.screen_line = line,
+                    None => self.suggest.screen_line.clear(),
+                }
+            } else {
+                self.suggest.screen_line.clear();
+            }
+        }
+        suggest::commit_line(&mut self.suggest);
+    }
+
+    /// 用元素在网格快照同一次 `Term` 锁内取得的提示行重算 ghost/弹窗。
+    /// 这与旧壳 `draw_pane` 的锁序一致，避免退格回显夹在 render/paint 两次
+    /// 取锁之间时拼成“旧提示 + 新光标”的跳动帧。
+    pub(super) fn refresh_suggestion_from_snapshot(
+        &mut self,
+        line: Option<String>,
+        anchor: Option<(usize, usize)>,
+    ) {
+        #[cfg(windows)]
+        {
+            if self.exited.is_some() || !self.ghost_enabled {
+                self.suggest_anchor = None;
+                self.suggest.clear_completion_hints();
+                return;
+            }
+            if self.session.is_none() {
+                self.suggest_anchor = None;
+                self.suggest.clear_completion_hints();
+                return;
+            }
+            match line {
+                Some(line) => {
+                    self.suggest_anchor = anchor;
+                    self.suggest.screen_line = line.clone();
+                    suggest::update(
+                        &mut self.suggest,
+                        Some(line),
+                        self.ghost_enabled,
+                        self.completion_style,
+                    );
+                },
+                None => {
+                    self.suggest_anchor = None;
+                    self.suggest.screen_line.clear();
+                    self.suggest.clear_completion_hints();
+                },
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (line, anchor);
+        }
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.exited.is_some() {
             return;
         }
@@ -357,23 +1173,90 @@ impl TerminalView {
         if mods.control && mods.shift {
             match ks.key.as_str() {
                 "c" => {
-                    self.copy_selection(cx);
+                    self.copy_selection(true, window, cx);
                     cx.stop_propagation();
                     return;
                 },
                 "v" => {
-                    self.paste(cx);
+                    self.paste(window, cx);
                     cx.stop_propagation();
                     return;
                 },
-                // 应用级快捷键（新建/关闭 Tab）：不编码、不拦截，
-                // 让按键冒泡到 workspace 的 action 绑定。
-                "t" | "w" => return,
+                // 应用级快捷键（新建/关闭 Tab、折叠侧栏、分屏、缩放）：
+                // 不编码、不拦截，让按键冒泡到 workspace 的 action 绑定。
+                "t" | "w" | "b" | "p" | "f" | "d" | "s" | "enter" => return,
                 _ => {},
             }
         }
+        // 分屏焦点导航（ctrl+alt+方向）同样冒泡给 workspace，不编码成
+        // CSI 1;7 序列（旧壳 FocusPane* 绑定的对应物）。
+        if mods.control && mods.alt && matches!(ks.key.as_str(), "left" | "right" | "up" | "down") {
+            return;
+        }
 
         let mode = self.term_mode();
+
+        // ---- 补全接管（对齐旧壳 keyboard.rs 的弹窗/ghost 协议）----
+        // IME 组合中不截流；备用屏（TUI）没有提示可接；修饰组合全部放行，
+        // 列表关闭后按键立即恢复原义（上下键回到 shell 历史）。
+        let plain = !mods.control
+            && !mods.alt
+            && !mods.platform
+            && !mods.function
+            && !mods.shift
+            && self.marked_text.is_none()
+            && !mode.contains(TermMode::ALT_SCREEN);
+        if plain {
+            if suggest::popup_active(&self.suggest) {
+                match ks.key.as_str() {
+                    "down" | "up" => {
+                        suggest::popup_move(
+                            &mut self.suggest,
+                            if ks.key.as_str() == "down" { 1 } else { -1 },
+                        );
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    },
+                    "escape" => {
+                        if suggest::popup_dismiss(&mut self.suggest) {
+                            cx.notify();
+                            cx.stop_propagation();
+                            return;
+                        }
+                    },
+                    key @ ("tab" | "right") if suggest::accepts(self.accept, key) => {
+                        if let Some(insert) = suggest::popup_take(&mut self.suggest) {
+                            if !insert.is_empty() {
+                                for c in insert.chars() {
+                                    crate::display::Display::nebula_input_char(
+                                        &mut self.suggest,
+                                        c,
+                                    );
+                                }
+                                self.write_input(insert.into_bytes(), cx);
+                                cx.stop_propagation();
+                                return;
+                            }
+                        }
+                    },
+                    _ => {},
+                }
+            } else if !self.suggest.suggestion.is_empty()
+                && matches!(ks.key.as_str(), "tab" | "right")
+                && suggest::accepts(self.accept, ks.key.as_str())
+            {
+                // ghost：接受键把余量如同击键般写入，shell 自己回显；Tab 在
+                // 无提示时穿透给 shell 自己的补全（encode 兜底）。
+                let ghost = std::mem::take(&mut self.suggest.suggestion);
+                for c in ghost.chars() {
+                    crate::display::Display::nebula_input_char(&mut self.suggest, c);
+                }
+                self.write_input(ghost.into_bytes(), cx);
+                cx.stop_propagation();
+                return;
+            }
+        }
 
         // 回滚快捷键（对齐旧壳默认绑定，仅主屏）：Shift+PageUp/PageDown
         // 翻页、Shift+Home/End 到顶/到底；备用屏下不拦截，交给编码器
@@ -396,9 +1279,176 @@ impl TerminalView {
             }
         }
 
+        // ---- 提示行镜像（旧壳 prompt-line tracker 同构）----
+        // 可打印字符走 IME 管道、在 replace_text_in_range 镜像；这里只看
+        // 编码器处理的键。凡是让 shell 编辑器偏离"直排追加"假设的键（方向、
+        // Tab、Esc、Home、Ctrl+C……）一律作废本行镜像与提示，宁缺毋滥。
+        if self.marked_text.is_none() && !mode.contains(TermMode::ALT_SCREEN) {
+            let plain_mods = !mods.control && !mods.alt && !mods.platform;
+            match ks.key.as_str() {
+                "enter" => self.commit_line(),
+                "backspace" if mods.control && !mods.alt && !mods.platform => {
+                    crate::display::Display::nebula_input_delete_word(&mut self.suggest);
+                },
+                "backspace" if plain_mods => {
+                    crate::display::Display::nebula_input_backspace(&mut self.suggest);
+                },
+                "space" if plain_mods => {
+                    crate::display::Display::nebula_input_char(&mut self.suggest, ' ');
+                },
+                key => {
+                    let is_modifier = matches!(
+                        key,
+                        "shift" | "control" | "alt" | "platform" | "function" | "capslock"
+                    );
+                    // key_char 非空 = 平台判定它产生文本（随后从 IME 管道
+                    // 到达并在那里镜像），不能在这里预清。
+                    let produces_text =
+                        ks.key_char.as_deref().is_some_and(|text| !text.is_empty());
+                    if !is_modifier && !produces_text {
+                        crate::display::Display::nebula_clear_line(&mut self.suggest);
+                    }
+                },
+            }
+        }
+
         if let Some(bytes) = keymap::encode(ks, &mode) {
             self.write_input(bytes, cx);
             cx.stop_propagation();
+        }
+    }
+
+    /// 用终端局部 action 截住 gpui-component Root 的 Tab 焦点遍历，再回灌
+    /// 同一条终端按键路径。有补齐时只接受补齐；无补齐时仍由编码器发送 Tab，
+    /// 因而不会产生第二套补齐/按键语义。
+    fn dispatch_terminal_tab(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut modifiers = gpui::Modifiers::default();
+        modifiers.shift = shift;
+        self.on_key_down(
+            &KeyDownEvent {
+                keystroke: gpui::Keystroke { modifiers, key: "tab".to_owned(), key_char: None },
+                is_held: false,
+            },
+            window,
+            cx,
+        );
+    }
+
+    fn on_terminal_tab(&mut self, _: &TerminalTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.dispatch_terminal_tab(false, window, cx);
+    }
+
+    fn on_terminal_back_tab(
+        &mut self,
+        _: &TerminalBackTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch_terminal_tab(true, window, cx);
+    }
+
+    /// 终端 overlay 滚动条的拇指矩形——渲染与命中测试共用的唯一真值源（旧壳
+    /// `scrollbar_geometry` 同合同）。`None` = 不该出现：贴着底部时自动隐藏，
+    /// 没有回滚历史时也不画。
+    pub(super) fn scrollbar_thumb(
+        &self,
+        display_offset: usize,
+        history: usize,
+    ) -> Option<Bounds<Pixels>> {
+        let screen = self.rows;
+        let total = history + screen;
+        if display_offset == 0 || screen == 0 || total <= screen {
+            return None;
+        }
+        let track_top = self.origin.y.as_f32();
+        let track_h = self.line_height.as_f32() * screen as f32;
+        if track_h <= 1.0 {
+            return None;
+        }
+        let min_thumb = SCROLLBAR_MIN_THUMB.min(track_h);
+        let thumb_h = (track_h * screen as f32 / total as f32).clamp(min_thumb, track_h);
+        // 视口顶端之上还剩多少行历史：0 = 拉到最顶，history = 贴着底部。
+        let above = (history - display_offset) as f32;
+        let max_y = (track_h - thumb_h).max(0.0);
+        let thumb_y = track_top + (track_h * above / total as f32).clamp(0.0, max_y);
+        // 浮在网格右缘（overlay 风格：不占列宽、不画轨道）。
+        let grid_right = self.origin.x.as_f32() + self.cell_width.as_f32() * self.cols as f32;
+        Some(Bounds::new(
+            point(px(grid_right - SCROLLBAR_W), px(thumb_y)),
+            gpui::size(px(SCROLLBAR_W), px(thumb_h)),
+        ))
+    }
+
+    pub(super) fn scrollbar_dragging(&self) -> bool {
+        self.scrollbar_drag.is_some()
+    }
+
+    /// 回滚历史行数：拇指高度与拖拽反算的分母来源。
+    pub(super) fn history_size(&self) -> usize {
+        self.session.as_ref().map(|s| s.term.lock().history_size()).unwrap_or(0)
+    }
+
+    /// 命中滚动条则返回「指针在拇指内的 y 偏移」；落在轨道上（拇指上下方）
+    /// 返回半个拇指高＝拇指跳到指针处居中（旧壳 `scrollbar_grab` 同合同）。
+    fn scrollbar_grab(
+        &self,
+        position: Point<Pixels>,
+        display_offset: usize,
+        history: usize,
+    ) -> Option<f32> {
+        let thumb = self.scrollbar_thumb(display_offset, history)?;
+        let x = position.x.as_f32();
+        let thumb_x = thumb.origin.x.as_f32();
+        if x < thumb_x - SCROLLBAR_SLOP || x > thumb_x + SCROLLBAR_W + SCROLLBAR_SLOP {
+            return None;
+        }
+        let track_top = self.origin.y.as_f32();
+        let track_h = self.line_height.as_f32() * self.rows as f32;
+        let y = position.y.as_f32();
+        if y < track_top || y > track_top + track_h {
+            return None;
+        }
+        let thumb_top = thumb.origin.y.as_f32();
+        let thumb_h = thumb.size.height.as_f32();
+        if y >= thumb_top && y <= thumb_top + thumb_h {
+            Some(y - thumb_top)
+        } else {
+            Some(thumb_h / 2.0)
+        }
+    }
+
+    /// 把拖动中的指针 y 反算回 `display_offset`——`scrollbar_thumb` 那套定位
+    /// 数学的逆运算（旧壳 `scrollbar_target_offset` 同合同）。
+    fn scrollbar_target_offset(&self, y: f32, grab: f32, history: usize) -> usize {
+        if history == 0 {
+            return 0;
+        }
+        let total = (history + self.rows) as f32;
+        let track_top = self.origin.y.as_f32();
+        let track_h = (self.line_height.as_f32() * self.rows as f32).max(1.0);
+        let above =
+            ((y - grab - track_top) / track_h * total).round().clamp(0.0, history as f32) as usize;
+        history - above
+    }
+
+    /// 一次取锁读出滚动条几何要的两个量：当前回滚位置与历史行数。
+    fn scroll_state(&self) -> (usize, usize) {
+        self.session
+            .as_ref()
+            .map(|s| {
+                let term = s.term.lock();
+                (term.grid().display_offset(), term.history_size())
+            })
+            .unwrap_or((0, 0))
+    }
+
+    /// 把回滚位置落到 `target`（滚动条拖拽的落点提交）。
+    fn scroll_to_offset(&self, target: usize, current: usize) {
+        if target == current {
+            return;
+        }
+        if let Some(session) = &self.session {
+            session.term.lock().scroll_display(Scroll::Delta(target as i32 - current as i32));
         }
     }
 
@@ -409,9 +1459,16 @@ impl TerminalView {
         let col = (rel_x.floor().max(0.0) as usize).min(self.cols.saturating_sub(1));
         let row = (rel_y.floor().max(0.0) as usize).min(self.rows.saturating_sub(1));
         let side = if rel_x.fract() > 0.5 { Side::Right } else { Side::Left };
-        let display_offset =
-            self.session.as_ref().map(|s| s.term.lock().grid().display_offset()).unwrap_or(0);
-        (viewport_to_point(display_offset, TermPoint::new(row, Column(col))), side)
+        let point = self.session.as_ref().map_or_else(
+            || TermPoint::new(Line(row as i32), Column(col)),
+            |session| {
+                session
+                    .term
+                    .lock()
+                    .visual_viewport_to_point(self.rows, TermPoint::new(row, Column(col)))
+            },
+        );
+        (point, side)
     }
 
     /// 应用是否接管了鼠标（vim/htop 等）。Shift 按住时强制旁路——这是
@@ -445,7 +1502,18 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        cx.emit(TerminalViewEvent::FocusRequested);
         if self.session.is_none() {
+            return;
+        }
+        // 滚动条是壳的控件，命中优先于选区和鼠标上报——否则在开了鼠标追踪的
+        // TUI 里（codex/vim）根本抓不住条。贴底时拇指为 None，正常操作零影响。
+        let (display_offset, history) = self.scroll_state();
+        if let Some(grab) = self.scrollbar_grab(event.position, display_offset, history) {
+            self.scrollbar_drag = Some(grab);
+            let target = self.scrollbar_target_offset(event.position.y.as_f32(), grab, history);
+            self.scroll_to_offset(target, display_offset);
+            cx.notify();
             return;
         }
         if self.mouse_mode_active(&event.modifiers) {
@@ -485,6 +1553,18 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 拖条中：指针的整段轨迹都归滚动条，不进选区也不上报。
+        if let Some(grab) = self.scrollbar_drag {
+            if event.pressed_button != Some(MouseButton::Left) {
+                self.scrollbar_drag = None;
+                return;
+            }
+            let (display_offset, history) = self.scroll_state();
+            let target = self.scrollbar_target_offset(event.position.y.as_f32(), grab, history);
+            self.scroll_to_offset(target, display_offset);
+            cx.notify();
+            return;
+        }
         if self.selecting {
             if event.pressed_button != Some(MouseButton::Left) {
                 return;
@@ -527,7 +1607,11 @@ impl TerminalView {
         self.send_mouse_report(event.position, button, true, &event.modifiers);
     }
 
-    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scrollbar_drag.take().is_some() {
+            cx.notify();
+            return;
+        }
         if !self.selecting && self.mouse_mode_active(&event.modifiers) {
             self.send_mouse_report(
                 event.position,
@@ -539,9 +1623,10 @@ impl TerminalView {
         }
         self.selecting = false;
         // 选中即复制：在抬手时一次性入剪贴板（旧壳同样在 release 复制，
-        // 避免拖动过程刷爆剪贴板）。空选区在 copy_selection 内自然短路。
+        // 避免拖动过程刷爆剪贴板）。空选区在 copy_selection 内自然短路；
+        // 选区存储静默——显式复制才有确认 toast。
         if self.copy_on_select {
-            self.copy_selection(cx);
+            self.copy_selection(false, window, cx);
         }
         cx.notify();
     }
@@ -555,6 +1640,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        cx.emit(TerminalViewEvent::FocusRequested);
         if self.session.is_none() {
             return;
         }
@@ -572,13 +1658,13 @@ impl TerminalView {
             .as_ref()
             .is_some_and(|s| s.term.lock().selection.as_ref().is_some_and(|sel| !sel.is_empty()));
         if has_selection {
-            self.copy_selection(cx);
+            self.copy_selection(true, window, cx);
             if let Some(session) = &self.session {
                 session.term.lock().selection = None;
             }
             cx.notify();
         } else {
-            self.paste(cx);
+            self.paste(window, cx);
         }
     }
 
@@ -603,6 +1689,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle);
+        cx.emit(TerminalViewEvent::FocusRequested);
         if self.mouse_mode_active(&event.modifiers) {
             self.send_mouse_report(
                 event.position,
@@ -736,6 +1823,10 @@ impl gpui::EntityInputHandler for TerminalView {
     ) {
         self.marked_text = None;
         if !text.is_empty() && self.exited.is_none() {
+            // 行镜像吃 IME 管道的字符（含中文提交与普通击键文本）。
+            if !self.term_mode().contains(TermMode::ALT_SCREEN) {
+                crate::display::Display::nebula_input_text(&mut self.suggest, text);
+            }
             self.write_input(text.as_bytes().to_vec(), cx);
         }
         cx.notify();
@@ -777,10 +1868,20 @@ impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut root = div()
             .id("nebula-terminal")
+            .key_context(KEY_CONTEXT)
             .size_full()
             .overflow_hidden()
-            .bg(self.palette.background)
+            // 不画自己的背景：卡容器统一负责"卡底色（带窗口透明度）→
+            // 壁纸"两层，这里再铺一层不透明 bg 会把它们全部盖死。
+            .rounded(crate::gpui_shell::theme::card_radius())
+            // 卡内呼吸边距，对齐旧壳网格 reserve 的换算值：上下 8（chrome
+            // 64/底 16 各减 8px 卡缝），左右 12（CONTENT_PAD_X 20 − 卡缝 8）。
+            // 网格因此不贴圆角；padding 区点击由 grid_point 的钳制兜底。
+            .py(px(8.0))
+            .px(px(12.0))
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_terminal_tab))
+            .on_action(cx.listener(Self::on_terminal_back_tab))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
@@ -795,6 +1896,36 @@ impl Render for TerminalView {
             root = root.child(div().p_4().text_color(gpui::red()).child(error.clone()));
         } else {
             root = root.child(TerminalElement::new(cx.entity()));
+            // SSH 连接阶段横幅（右上角，Ready 即撤）：每个取值对应业务层
+            // 一个真实调用点（resolve → connect → auth → open shell），
+            // 不是估算进度。失败原因由业务层写进 grid，横幅只留短标。
+            if let Some(stage) = &self.ssh_stage {
+                use crate::ssh_session::SshStage;
+                let (label, failed): (Option<String>, bool) = match stage {
+                    SshStage::Resolve => (Some("解析地址…".into()), false),
+                    SshStage::Connect => (Some("建立连接…".into()), false),
+                    SshStage::Authenticate => (Some("认证…".into()), false),
+                    SshStage::OpenShell => (Some("打开远端终端…".into()), false),
+                    SshStage::Ready => (None, false),
+                    SshStage::Failed(_) => (Some("连接失败".into()), true),
+                };
+                if let Some(label) = label {
+                    let host = self.ssh_destination.clone().unwrap_or_default();
+                    root = root.child(
+                        div()
+                            .absolute()
+                            .top_2()
+                            .right_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(gpui::opaque_grey(0.2, 0.9))
+                            .text_sm()
+                            .when(failed, |banner| banner.text_color(gpui::red()))
+                            .child(format!("SSH {host} · {label}")),
+                    );
+                }
+            }
             if let Some(exited) = &self.exited {
                 root = root.child(
                     div()
@@ -811,5 +1942,89 @@ impl Render for TerminalView {
             }
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{FontStyle, FontWeight};
+
+    use super::{PASTE_CONFIRM_LINES, TerminalView, mono_font, paste_line_count};
+
+    /// 行数判据数的是「落到终端算几行」，不是 `str::lines`：CRLF 一次换行、
+    /// 裸 CR 也是换行（`str::lines` 会把它整段算成 1 行）、末尾那个换行不多
+    /// 算一行。20 行确认弹窗的触发全靠这个函数，所以它就是那条合同。
+    #[test]
+    fn paste_line_count_counts_terminal_rows_not_str_lines() {
+        assert_eq!(paste_line_count(""), 0);
+        assert_eq!(paste_line_count("one"), 1);
+        assert_eq!(paste_line_count("one\n"), 1, "末尾换行不额外多算一行");
+        assert_eq!(paste_line_count("a\r\nb"), 2, "CRLF 只算一次换行");
+        assert_eq!(paste_line_count("a\rb\rc"), 3, "裸 CR 也是换行");
+        assert_eq!(paste_line_count("a\r\nb\r\n"), 2);
+    }
+
+    /// 阈值边界：19 行直通、20 行拦下问一句。
+    #[test]
+    fn paste_confirmation_triggers_at_the_threshold() {
+        let rows = |n: usize| "x\n".repeat(n);
+        assert!(paste_line_count(&rows(PASTE_CONFIRM_LINES - 1)) < PASTE_CONFIRM_LINES);
+        assert!(paste_line_count(&rows(PASTE_CONFIRM_LINES)) >= PASTE_CONFIRM_LINES);
+    }
+
+    #[test]
+    fn terminal_font_explicitly_enables_maple_ligatures() {
+        let font = mono_font(
+            crate::font_install::REQUIRED_FONT_FAMILY,
+            FontWeight::NORMAL,
+            FontStyle::Normal,
+        );
+        assert_eq!(font.features.tag_value_list(), &[("calt".to_owned(), 1)]);
+    }
+
+    #[test]
+    fn cell_width_mode_matches_the_legacy_grid_rounding_contract() {
+        assert_eq!(
+            f32::from(TerminalView::effective_cell_width(
+                10.8,
+                nebula_settings::CellWidthModeName::Compact,
+                1.0,
+                0.0,
+            )),
+            10.0
+        );
+        assert_eq!(
+            f32::from(TerminalView::effective_cell_width(
+                10.8,
+                nebula_settings::CellWidthModeName::Relaxed,
+                1.0,
+                0.0,
+            )),
+            11.0
+        );
+
+        let compact = f32::from(TerminalView::effective_cell_width(
+            9.2,
+            nebula_settings::CellWidthModeName::Compact,
+            1.5,
+            0.0,
+        ));
+        assert!((compact - 13.0 / 1.5).abs() < f32::EPSILON);
+
+        let relaxed = f32::from(TerminalView::effective_cell_width(
+            9.2,
+            nebula_settings::CellWidthModeName::Relaxed,
+            1.5,
+            0.0,
+        ));
+        assert!((relaxed - 14.0 / 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn line_height_uses_shaped_metrics_and_device_pixel_offset() {
+        // Maple's hhea metrics are 1.32em. At 150% DPI, the legacy 4px
+        // Windows offset yields floor(15 * 1.32 * 1.5 + 4) = 33 device px.
+        let height = TerminalView::effective_line_height(15.0 * 1.32, 4.0, 1.5);
+        assert!((f32::from(height) - 22.0).abs() < f32::EPSILON);
     }
 }

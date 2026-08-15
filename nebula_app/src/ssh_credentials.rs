@@ -151,6 +151,59 @@ pub(crate) mod windows_store {
         Ok(())
     }
 
+    /// Native write-only secret prompt for non-SSH credential consumers.
+    ///
+    /// The Windows credential dialog owns editing/masking, so presentation
+    /// layers never hold a copyable plaintext input widget. The returned
+    /// buffer must be zeroized by the caller immediately after storage.
+    pub fn prompt_generic_secret(
+        target_name: &str,
+        username_hint: &str,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let mut target = wide(target_name);
+        let mut username = vec![0u16; 512];
+        for (slot, value) in username.iter_mut().zip(username_hint.encode_utf16()) {
+            *slot = value;
+        }
+        let mut password = vec![0u16; 512];
+        let mut save = 0;
+        let flags = CREDUI_FLAGS_GENERIC_CREDENTIALS
+            | CREDUI_FLAGS_ALWAYS_SHOW_UI
+            | CREDUI_FLAGS_DO_NOT_PERSIST;
+        let result = unsafe {
+            CredUIPromptForCredentialsW(
+                null(),
+                target.as_ptr(),
+                null(),
+                0,
+                username.as_mut_ptr(),
+                username.len() as u32,
+                password.as_mut_ptr(),
+                password.len() as u32,
+                &mut save,
+                flags,
+            )
+        };
+        target.fill(0);
+        username.fill(0);
+        if result == ERROR_CANCELLED {
+            password.fill(0);
+            return Ok(None);
+        }
+        if result != ERROR_SUCCESS {
+            password.fill(0);
+            return Err(io::Error::from_raw_os_error(result as i32));
+        }
+        let end = password.iter().position(|x| *x == 0).unwrap_or(password.len());
+        let bytes = String::from_utf16(&password[..end])
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "secret is not valid UTF-16")
+            })?
+            .into_bytes();
+        password.fill(0);
+        Ok(Some(bytes))
+    }
+
     pub fn load_password(destination: &str) -> io::Result<Option<Vec<u8>>> {
         load_secret(&credential_target(destination))
     }
@@ -391,6 +444,14 @@ pub fn load_generic_secret(target: &str) -> std::io::Result<Option<Vec<u8>>> {
 #[cfg(windows)]
 pub fn delete_generic_secret(target: &str) -> std::io::Result<()> {
     windows_store::delete_secret(target)
+}
+
+#[cfg(windows)]
+pub fn prompt_generic_secret(
+    target: &str,
+    username_hint: &str,
+) -> std::io::Result<Option<Vec<u8>>> {
+    windows_store::prompt_generic_secret(target, username_hint)
 }
 
 #[cfg(test)]

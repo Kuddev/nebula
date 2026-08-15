@@ -17,8 +17,7 @@ use dwrote::{
 };
 
 #[cfg(windows)]
-pub(super) static EMBEDDED_FONT_BYTES: &[u8] =
-    include_bytes!("../../../../assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf");
+pub(super) static EMBEDDED_FONT_BYTES: &[u8] = crate::font_install::REQUIRED_FONT_BYTES;
 
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,24 +170,10 @@ impl Rasterizer {
     ///
     /// 只在**字体目录**首次展开时调用：`FontCollection::system()` 加上逐族
     /// 取首字体问 `IsMonospacedFont` 在装了几百个字体的机器上是实打实的
-    /// 开销，放在启动路径上会拖慢每一次冷启。
+    /// 开销，放在启动路径上会拖慢每一次冷启。实现在共享层
+    /// `font_install::enumerate_system_font_families`（GPUI 字体选择器同源）。
     pub(crate) fn system_font_families(&self) -> Vec<crate::font_install::SystemFontFamily> {
-        let collection = FontCollection::system();
-        let mut families = collection
-            .families_iter()
-            .filter_map(|family| {
-                let name = family.family_name().ok()?;
-                // 取该族的首个字体问等宽：族内字重不同但等宽属性一致。
-                // 拿不到就按非等宽处理——宁可让它落进「显示全部」，也不要
-                // 把一个比例字体混进默认的等宽视图。
-                let monospaced =
-                    family.font(0).ok().and_then(|font| font.is_monospace()).unwrap_or(false);
-                Some(crate::font_install::SystemFontFamily { name, monospaced })
-            })
-            .collect::<Vec<_>>();
-        families.sort_by_key(|family| family.name.to_lowercase());
-        families.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
-        families
+        crate::font_install::enumerate_system_font_families()
     }
 
     pub(crate) fn private_font_families(&self) -> Vec<String> {

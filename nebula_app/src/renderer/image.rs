@@ -127,7 +127,9 @@ impl BackgroundImageAlignment {
         }
     }
 
-    const fn factors(self) -> (f32, f32) {
+    /// 对齐锚点系数（0=贴起始边，0.5=居中，1=贴结束边）。`pub`：GPUI 壳
+    /// 的壁纸绘制复用同一套布局数学（gpui_shell::wallpaper）。
+    pub const fn factors(self) -> (f32, f32) {
         match self {
             Self::TopLeft => (0.0, 0.0),
             Self::Top => (0.5, 0.0),

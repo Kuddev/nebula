@@ -36,6 +36,18 @@ pub struct AiSession {
 }
 
 impl AiSession {
+    #[cfg(test)]
+    pub(crate) fn test_session(source: AiSessionSource, id: &str, title: &str) -> Self {
+        Self {
+            source,
+            id: id.to_owned(),
+            title: title.to_owned(),
+            project: String::new(),
+            modified: SystemTime::UNIX_EPOCH,
+            path: None,
+        }
+    }
+
     /// 在终端里敲下去就能恢复这个会话的命令行。
     pub fn resume_command(&self) -> Option<String> {
         self.source.resume_command(&self.id)

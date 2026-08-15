@@ -152,8 +152,9 @@ pub(super) fn nebula_fastfetch_intro_command() -> Vec<u8> {
 /// Width-aware intro: the two-column layout needs ~150 columns (62-col art +
 /// info at column 65); anything narrower gets the stacked layout instead.
 /// Also used to *re-print* the intro after a resize reflows a pristine pane.
+/// `pub(crate)`：GPUI 壳的新会话欢迎屏走同一入口（fetch=1 设置）。
 #[cfg(windows)]
-pub(super) fn nebula_fastfetch_intro_command_for(columns: usize, shell: NebulaShell) -> Vec<u8> {
+pub(crate) fn nebula_fastfetch_intro_command_for(columns: usize, shell: NebulaShell) -> Vec<u8> {
     if shell == NebulaShell::Bash {
         return b"clear; if command -v fastfetch >/dev/null 2>&1; then fastfetch; else printf '\\033[36mNebula Terminal\\033[0m\\n'; uname -a; fi\n".to_vec();
     }
@@ -178,7 +179,7 @@ pub(super) fn nebula_fastfetch_intro_command() -> Vec<u8> {
 /// Width-aware variant; the Unix intro delegates to fastfetch, which already
 /// adapts to the terminal width, so `columns` is unused there.
 #[cfg(not(windows))]
-pub(super) fn nebula_fastfetch_intro_command_for(
+pub(crate) fn nebula_fastfetch_intro_command_for(
     _columns: usize,
     _shell: crate::display::NebulaShell,
 ) -> Vec<u8> {

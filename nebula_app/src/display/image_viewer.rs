@@ -95,6 +95,17 @@ impl ImageView {
         self.drag_last.take().is_some()
     }
 
+    /// 渲染矩形（zoom/pan/边缘钳制后的最终几何）。GPUI 壳按它摆放图片，
+    /// 与 [`Self::draw`] 的旧壳渲染同一份数学。
+    pub fn render_rect(&self, area: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+        self.target_rect(area)
+    }
+
+    /// 文件头读出的像素尺寸；None = 打开/解析失败。
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        self.dimensions
+    }
+
     pub fn draw(
         &self,
         renderer: &mut Renderer,
