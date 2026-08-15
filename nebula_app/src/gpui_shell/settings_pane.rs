@@ -36,14 +36,23 @@ const THEME_VALUES: [&str; 7] =
 const SECTIONS: [&str; 9] =
     ["外观", "配置文件", "供应商", "SSH", "网络", "交互", "按键映射", "高级", "备份"];
 
-/// 导航的显示顺序与分组，对照旧壳 `settings.rs` 的 `nav_groups`：前四项裸列
-/// 不带标题，「连接」收拢供应商/SSH/网络，「系统」收拢高级/备份。
+/// 导航的显示顺序与分组，对照旧壳 `settings.rs` 的 `nav_groups`：供应商是
+/// 常用业务设置，和外观/配置/交互/按键同列；「连接」只收拢 SSH 与网络。
 ///
 /// 第二项是组内成员在 [`SECTIONS`] 里的下标——**下标就是 section 身份**
 /// （`section_content`/`section_icon` 都按它分派），所以调显示顺序或重新分组
 /// 只动这张表，不必碰分派代码。
 const NAV_GROUPS: [(Option<&str>, &[usize]); 3] =
-    [(None, &[0, 1, 5, 6]), (Some("连接"), &[2, 3, 4]), (Some("系统"), &[7, 8])];
+    [(None, &[0, 1, 2, 5, 6]), (Some("连接"), &[3, 4]), (Some("系统"), &[7, 8])];
+
+// 这些几何值逐项来自旧壳 `display/settings.rs::settings_geometry`。GPUI
+// 设置页沿用同一节奏，避免组件默认间距把标题、分组和表单压成一条均匀列表。
+const SETTINGS_NAV_WIDTH: f32 = 196.0;
+const SETTINGS_HEADER_HEIGHT: f32 = 72.0;
+const SETTINGS_GROUP_GAP: f32 = 32.0;
+const SETTINGS_GROUP_TITLE_HEIGHT: f32 = 26.0;
+const SETTINGS_GROUP_TITLE_GAP: f32 = 16.0;
+const SETTINGS_ROW_HEIGHT: f32 = 44.0;
 
 const THEME_NAMES: [ThemeName; 7] = [
     ThemeName::Nebula,
@@ -83,13 +92,8 @@ fn chrome_theme(theme: ThemeName) -> crate::display::NebulaTheme {
 }
 
 fn rgb_hsla(r: u8, g: u8, b: u8) -> Hsla {
-    GpuiRgba {
-        r: f32::from(r) / 255.0,
-        g: f32::from(g) / 255.0,
-        b: f32::from(b) / 255.0,
-        a: 1.0,
-    }
-    .into()
+    GpuiRgba { r: f32::from(r) / 255.0, g: f32::from(g) / 255.0, b: f32::from(b) / 255.0, a: 1.0 }
+        .into()
 }
 
 /// 宿主（workspace）监听：设置已写盘 / 请求打开 SSH 会话。
@@ -384,8 +388,7 @@ impl SettingsPane {
         let backup_remote_inputs: Vec<Entity<InputState>> =
             (0..4).map(|_| cx.new(|cx| InputState::new(window, cx))).collect();
 
-        let font_query_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索字体…"));
+        let font_query_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索字体…"));
         subscriptions.push(cx.subscribe_in(
             &font_query_input,
             window,
@@ -522,9 +525,7 @@ impl SettingsPane {
                 let system = crate::font_install::enumerate_system_font_families();
                 let imported: Vec<String> = crate::font_install::imported_font_files()
                     .iter()
-                    .filter_map(|path| {
-                        crate::font_install::probe_font_file_families(path).ok()
-                    })
+                    .filter_map(|path| crate::font_install::probe_font_file_families(path).ok())
                     .flatten()
                     .collect();
                 (system, imported)
@@ -618,9 +619,7 @@ impl SettingsPane {
                 return;
             },
         };
-        if let Err(error) =
-            cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(bytes)])
-        {
+        if let Err(error) = cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(bytes)]) {
             cleanup(&stored);
             self.font_notice = Some(format!("字体注册失败：{error}"));
             cx.notify();
@@ -645,12 +644,7 @@ impl SettingsPane {
             h_flex()
                 .gap_2()
                 .items_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_family(primary.clone())
-                        .child(primary),
-                )
+                .child(div().text_sm().font_family(primary.clone()).child(primary))
                 .child(
                     Button::new("font-picker-toggle")
                         .label(if self.font_picker_open { "收起" } else { "更换" })
@@ -769,15 +763,13 @@ impl SettingsPane {
                     .items_center()
                     .child(div().flex_1().child(Input::new(&self.font_query_input)))
                     .child(div().text_sm().text_color(muted).child("显示全部"))
-                    .child(
-                        Switch::new("font-show-all")
-                            .checked(self.font_show_all)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                // 临时过滤，不写入设置（旧壳 toggle_font_show_all）。
-                                this.font_show_all = *checked;
-                                cx.notify();
-                            })),
-                    ),
+                    .child(Switch::new("font-show-all").checked(self.font_show_all).on_click(
+                        cx.listener(|this, checked: &bool, _, cx| {
+                            // 临时过滤，不写入设置（旧壳 toggle_font_show_all）。
+                            this.font_show_all = *checked;
+                            cx.notify();
+                        }),
+                    )),
             )
             .when(self.font_loading, |panel| {
                 panel.child(
@@ -790,20 +782,14 @@ impl SettingsPane {
             })
             .when(!self.font_loading, |panel| {
                 panel.child(
-                    v_flex()
-                        .max_h(px(320.0))
-                        .gap_1()
-                        .overflow_y_scrollbar()
-                        .children(rows)
-                        .when(empty, |list| {
+                    v_flex().max_h(px(320.0)).gap_1().overflow_y_scrollbar().children(rows).when(
+                        empty,
+                        |list| {
                             list.child(
-                                div()
-                                    .py_2()
-                                    .text_sm()
-                                    .text_color(muted)
-                                    .child("没有匹配的字体"),
+                                div().py_2().text_sm().text_color(muted).child("没有匹配的字体"),
                             )
-                        }),
+                        },
+                    ),
                 )
             })
             .child(
@@ -818,7 +804,9 @@ impl SettingsPane {
                         }));
                         button
                     })
-                    .child(div().text_xs().text_color(muted).child("支持 .ttf / .otf / .ttc / .otc"))
+                    .child(
+                        div().text_xs().text_color(muted).child("支持 .ttf / .otf / .ttc / .otc"),
+                    )
                     .when_some(self.font_notice.clone(), |row, notice| {
                         row.child(div().text_xs().text_color(theme.danger).child(notice))
                     }),
@@ -833,14 +821,28 @@ impl SettingsPane {
     fn group(&self, title: &'static str, cx: &Context<Self>) -> gpui::Div {
         v_flex()
             .w_full()
-            .max_w(px(760.0))
-            .gap_4()
-            .py_2()
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(title))
+            .child(
+                div()
+                    .h(px(SETTINGS_GROUP_TITLE_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(title),
+            )
+            // 旧壳组标题占 26px，首行位于标题顶端下方 42px；中间这 16px
+            // 是形成分组呼吸感的关键，不能交给组件默认 gap 随意变化。
+            .child(div().h(px(SETTINGS_GROUP_TITLE_GAP)).flex_shrink_0())
     }
 
     fn row(label: &'static str, control: impl IntoElement) -> impl IntoElement {
-        h_flex().w_full().items_center().child(div().flex_1().text_sm().child(label)).child(control)
+        h_flex()
+            .w_full()
+            .h(px(SETTINGS_ROW_HEIGHT))
+            .flex_shrink_0()
+            .items_center()
+            .child(div().flex_1().min_w_0().text_sm().child(label))
+            .child(control)
     }
 
     fn select_row(&self, key: &'static str, label: &'static str) -> impl IntoElement {
@@ -863,14 +865,7 @@ impl SettingsPane {
                 .w(px(220.0))
                 .gap_2()
                 .items_center()
-                .child(
-                    div()
-                        .w(px(18.0))
-                        .flex_shrink_0()
-                        .font_family(family)
-                        .text_sm()
-                        .child(glyph),
-                )
+                .child(div().w(px(18.0)).flex_shrink_0().font_family(family).text_sm().child(glyph))
                 .child(div().flex_1().min_w_0().children(select.map(|state| Select::new(&state)))),
         )
     }
@@ -879,10 +874,11 @@ impl SettingsPane {
         let theme = chrome_theme(self.runtime.theme);
         let palette = theme.palette();
         let ink = theme.card_ink().fg;
-        let background = self
-            .runtime
-            .background
-            .unwrap_or([palette.term_bg.r, palette.term_bg.g, palette.term_bg.b]);
+        let background = self.runtime.background.unwrap_or([
+            palette.term_bg.r,
+            palette.term_bg.g,
+            palette.term_bg.b,
+        ]);
         let family: SharedString = cx
             .try_global::<crate::gpui_shell::config::Settings>()
             .map(|settings| settings.font_family.clone())
@@ -894,8 +890,7 @@ impl SettingsPane {
 
         v_flex()
             .w_full()
-            .max_w(px(680.0))
-            .h(px(118.0))
+            .h(px(150.0))
             .p_4()
             .gap_1()
             .rounded_lg()
@@ -904,7 +899,11 @@ impl SettingsPane {
             .text_size(px(size))
             .text_color(foreground)
             .child("user@nebula ~ $ nebula --version")
-            .child(format!("Nebula Terminal · {} · {:.0}px", self.runtime.font_family.as_deref().unwrap_or("Maple Mono Normal NF CN"), size))
+            .child(format!(
+                "Nebula Terminal · {} · {:.0}px",
+                self.runtime.font_family.as_deref().unwrap_or("Maple Mono Normal NF CN"),
+                size
+            ))
             .child(
                 h_flex()
                     .gap_1()
@@ -915,73 +914,75 @@ impl SettingsPane {
     }
 
     fn theme_previews(&self, cx: &mut Context<Self>) -> gpui::Div {
-        h_flex().w_full().flex_wrap().gap_3().children(THEME_NAMES.into_iter().map(|name| {
+        h_flex().w_full().flex_wrap().gap(px(20.0)).children(THEME_NAMES.into_iter().map(|name| {
             let theme = chrome_theme(name);
             let palette = theme.palette();
             let accent = theme.accent();
             let selected = self.runtime.theme == name;
-            div()
+            v_flex()
                 .id(SharedString::from(format!("theme-preview-{}", name.prompt_name())))
-                .w(px(142.0))
+                .w(px(170.0))
                 .h(px(92.0))
-                .p_2()
-                .flex()
-                .flex_col()
                 .gap_2()
-                .rounded_lg()
                 .cursor_pointer()
-                .bg(rgb_hsla(palette.shell_bg.r, palette.shell_bg.g, palette.shell_bg.b))
-                .when(selected, |card| {
-                    card.border_1().border_color(rgb_hsla(accent.r, accent.g, accent.b))
-                })
-                .when(!selected, |card| card.hover(|style| style.shadow_md()))
                 .child(
                     v_flex()
-                        .flex_1()
+                        .h(px(64.0))
+                        .flex_shrink_0()
                         .p_2()
                         .gap_1()
-                        .rounded_md()
-                        .bg(rgb_hsla(palette.term_bg.r, palette.term_bg.g, palette.term_bg.b))
+                        .rounded_lg()
+                        .bg(rgb_hsla(palette.shell_bg.r, palette.shell_bg.g, palette.shell_bg.b))
+                        .when(selected, |card| {
+                            card.border_1().border_color(rgb_hsla(accent.r, accent.g, accent.b))
+                        })
+                        .when(!selected, |card| card.hover(|style| style.shadow_md()))
                         .child(
-                            h_flex()
+                            v_flex()
+                                .flex_1()
+                                .p_2()
                                 .gap_1()
+                                .rounded_md()
+                                .bg(rgb_hsla(
+                                    palette.term_bg.r,
+                                    palette.term_bg.g,
+                                    palette.term_bg.b,
+                                ))
                                 .child(
-                                    div()
-                                        .w(px(10.0))
-                                        .h(px(4.0))
-                                        .rounded_full()
-                                        .bg(rgb_hsla(accent.r, accent.g, accent.b)),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(52.0))
-                                        .h(px(4.0))
-                                        .rounded_full()
-                                        .bg(rgb_hsla(
-                                            theme.card_ink().fg.r,
-                                            theme.card_ink().fg.g,
-                                            theme.card_ink().fg.b,
+                                    h_flex()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .w(px(10.0))
+                                                .h(px(4.0))
+                                                .rounded_full()
+                                                .bg(rgb_hsla(accent.r, accent.g, accent.b)),
+                                        )
+                                        .child(div().w(px(52.0)).h(px(4.0)).rounded_full().bg(
+                                            rgb_hsla(
+                                                theme.card_ink().fg.r,
+                                                theme.card_ink().fg.g,
+                                                theme.card_ink().fg.b,
+                                            ),
                                         )),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .w(px(82.0))
-                                .h(px(4.0))
-                                .rounded_full()
-                                .bg(rgb_hsla(palette.edge_l.r, palette.edge_l.g, palette.edge_l.b)),
-                        )
-                        .child(
-                            div()
-                                .w(px(58.0))
-                                .h(px(4.0))
-                                .rounded_full()
-                                .bg(rgb_hsla(palette.edge_r.r, palette.edge_r.g, palette.edge_r.b)),
+                                )
+                                .child(div().w(px(82.0)).h(px(4.0)).rounded_full().bg(rgb_hsla(
+                                    palette.edge_l.r,
+                                    palette.edge_l.g,
+                                    palette.edge_l.b,
+                                )))
+                                .child(div().w(px(58.0)).h(px(4.0)).rounded_full().bg(rgb_hsla(
+                                    palette.edge_r.r,
+                                    palette.edge_r.g,
+                                    palette.edge_r.b,
+                                ))),
                         ),
                 )
                 .child(
                     div()
+                        .w_full()
                         .text_xs()
+                        .text_center()
                         .text_color(if selected {
                             rgb_hsla(accent.r, accent.g, accent.b)
                         } else {
@@ -1257,40 +1258,27 @@ impl SettingsPane {
         let opacity: SharedString = format!("{:.0}%", self.runtime.opacity * 100.0).into();
         let wallpaper_opacity: SharedString =
             format!("{:.0}%", self.runtime.background_image_opacity * 100.0).into();
-        self.group("外观", cx)
-            .child(self.appearance_preview(cx))
-            .child(self.theme_previews(cx))
-            .child(self.select_row("theme", "主题"))
-            .child(self.switch_row(
-                "follow_system_theme",
-                "跟随系统外观自动切换深浅",
-                self.runtime.follow_system_theme,
-                cx,
-            ))
+        let preview = self.group("预览", cx).child(self.appearance_preview(cx));
+        let themes = self.group("主题", cx).child(self.theme_previews(cx));
+        let theme_mode = self.group("主题模式", cx).child(self.switch_row(
+            "follow_system_theme",
+            "跟随系统明暗模式",
+            self.runtime.follow_system_theme,
+            cx,
+        ));
+        let custom_background = self
+            .group("自定义背景", cx)
+            .child(self.input_row("背景色", "background", &self.bg_input.clone(), cx))
             .child(self.input_row(
-                "终端背景色（覆盖主题）",
-                "background",
-                &self.bg_input.clone(),
+                "背景图片",
+                "background_image",
+                &self.wallpaper_input.clone(),
                 cx,
             ))
+            .child(self.select_row("background_image_fit", "背景图像拉伸模式"))
+            .child(self.select_row("background_image_alignment", "背景图像对齐"))
             .child(self.stepper_row(
-                "窗口透明度",
-                "opacity",
-                opacity,
-                |this, cx| {
-                    let opacity = this.runtime.opacity - 0.05;
-                    this.set_opacity(opacity, cx);
-                },
-                |this, cx| {
-                    let opacity = this.runtime.opacity + 0.05;
-                    this.set_opacity(opacity, cx);
-                },
-                cx,
-            ))
-            .child(self.switch_row("blur", "背景模糊", self.runtime.blur, cx))
-            .child(self.input_row("背景图", "background_image", &self.wallpaper_input.clone(), cx))
-            .child(self.stepper_row(
-                "背景图不透明度",
+                "背景图像不透明度",
                 "bgimg-opacity",
                 wallpaper_opacity,
                 |this, cx| {
@@ -1303,17 +1291,44 @@ impl SettingsPane {
                 },
                 cx,
             ))
-            .child(self.select_row("background_image_fit", "背景图适配"))
-            .child(self.select_row("background_image_alignment", "背景图对齐"))
             .child(self.switch_row(
                 "background_image_cover_chrome",
-                "背景图铺满整窗（含侧栏/标题栏）",
+                "将背景图扩展到标题栏和侧边栏",
                 self.runtime.background_image_cover_chrome,
                 cx,
-            ))
-            .child(self.select_row("density", "界面密度"))
+            ));
+        let cursor = self
+            .group("光标", cx)
+            .child(self.select_row("cursor_shape", "光标形状"))
+            .child(self.switch_row(
+                "cursor_blink",
+                "光标闪烁",
+                self.runtime.cursor_blink.unwrap_or(true),
+                cx,
+            ));
+        let interface = self
+            .group("界面", cx)
+            .child(self.select_row("language", "语言"))
+            .child(self.select_row("density", "界面外观"))
             .child(self.stepper_row(
-                "字号",
+                "终端正文不透明度",
+                "opacity",
+                opacity,
+                |this, cx| {
+                    let opacity = this.runtime.opacity - 0.05;
+                    this.set_opacity(opacity, cx);
+                },
+                |this, cx| {
+                    let opacity = this.runtime.opacity + 0.05;
+                    this.set_opacity(opacity, cx);
+                },
+                cx,
+            ))
+            .child(self.switch_row("blur", "背景模糊", self.runtime.blur, cx));
+        let terminal = self
+            .group("终端外观", cx)
+            .child(self.stepper_row(
+                "终端字号（Ctrl+滚轮缩放）",
                 "font-size",
                 font_size,
                 |this, cx| {
@@ -1326,33 +1341,38 @@ impl SettingsPane {
                 },
                 cx,
             ))
-            .child(self.select_row("cursor_shape", "光标形状（新标签页生效）"))
-            .child(self.switch_row(
-                "cursor_blink",
-                "光标闪烁",
-                self.runtime.cursor_blink.unwrap_or(true),
-                cx,
-            ))
+            .child(self.select_row("cell_width_mode", "字体间距"))
+            .child(self.switch_row("fetch", "启动欢迎信息", self.runtime.fetch, cx))
+            .child(self.switch_row("powerline", "Powerline 提示符", self.runtime.powerline, cx));
+
+        v_flex()
+            .w_full()
+            .gap(px(SETTINGS_GROUP_GAP))
+            .child(preview)
+            .child(themes)
+            .child(theme_mode)
+            .child(custom_background)
+            .child(cursor)
+            .child(interface)
+            .child(terminal)
     }
 
     fn section_profiles(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        self.group("配置文件", cx)
-            .child(self.select_row("language", "界面语言"))
+        let terminal = self
+            .group("终端", cx)
             .child(self.shell_select_row(cx))
-            .child(self.input_row(
-                "新标签启动目录",
-                "startup_directory",
-                &self.dir_input.clone(),
-                cx,
-            ))
-            .child(self.font_picker_row(cx))
-            .when(self.font_picker_open, |group| {
-                let panel = self.font_picker_panel(cx);
-                group.child(panel)
-            })
+            .child(self.input_row("启动目录", "startup_directory", &self.dir_input.clone(), cx))
+            .child(self.font_picker_row(cx));
+        let terminal = terminal.when(self.font_picker_open, |group| {
+            let panel = self.font_picker_panel(cx);
+            group.child(panel)
+        });
+        let completion = self
+            .group("补全", cx)
             .child(self.switch_row("ghost", "启用命令补全", self.runtime.ghost, cx))
             .child(self.select_row("accept", "补全接受键"))
-            .child(self.select_row("completion_style", "补全样式"))
+            .child(self.select_row("completion_style", "补全样式"));
+        v_flex().w_full().gap(px(SETTINGS_GROUP_GAP)).child(terminal).child(completion)
     }
 
     fn section_providers(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -2225,7 +2245,6 @@ impl SettingsPane {
             ))
             .child(self.select_row("tab_reveal", "标签展开动效"))
             .child(self.select_row("new_tab_position", "新标签位置"))
-            .child(self.select_row("cell_width_mode", "单元格宽度"))
             .child(self.switch_row(
                 "panel_resize",
                 "拖拽调节侧栏宽度",
@@ -2255,13 +2274,6 @@ impl SettingsPane {
 
     fn section_advanced(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         self.group("高级", cx)
-            .child(self.switch_row("fetch", "新会话欢迎屏 fastfetch", self.runtime.fetch, cx))
-            .child(self.switch_row(
-                "powerline",
-                "Powerline 提示符（新会话生效）",
-                self.runtime.powerline,
-                cx,
-            ))
             .child(self.switch_row(
                 "keep_session",
                 "关窗后保留后台会话",
@@ -2306,17 +2318,33 @@ impl SettingsPane {
         let active_bg = crate::gpui_shell::theme::settings_hover_bg(cx, true);
         let active_fg = theme.sidebar_accent_foreground;
         let hover_bg = crate::gpui_shell::theme::settings_hover_bg(cx, false);
-        // 行高走 token 阶梯（旧壳导航行同档）：34px 挤得读不出层级，也把
-        // 点击热区压到了 token 规定的最小命中之下。
-        let row_h = px(crate::display::ui::tokens::control::ROW);
+        let row_h = px(32.0);
 
-        let mut nav = v_flex().w(px(174.0)).h_full().flex_shrink_0().p_3().gap_1();
+        // 86 + 根容器的 2px gap = 旧壳 nav_y0(88)。标题和导航从此共享
+        // 同一坐标节奏，连接/系统 caption 也精确占用一个 24px 槽位。
+        let mut nav =
+            v_flex().w(px(SETTINGS_NAV_WIDTH)).h_full().flex_shrink_0().px_2().gap(px(2.0)).child(
+                div()
+                    .h(px(86.0))
+                    .px_3()
+                    .pt_5()
+                    .text_xl()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child("Nebula 设置"),
+            );
         for (caption, members) in NAV_GROUPS {
             if let Some(caption) = caption {
-                // 分组标题（旧壳 nav_groups 的「连接」/「系统」）：只做视觉
-                // 分隔，不参与命中；上留白比下大，标题贴住它统领的那一组。
+                // 根容器在 caption 后还会补 2px gap，所以正文高度取 22px，
+                // 合计正好复刻旧壳 `nav_groups` 的 24px 占位。
                 nav = nav.child(
-                    div().px_3().pt_4().pb_1().text_xs().text_color(muted).child(caption),
+                    div()
+                        .h(px(22.0))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(caption),
                 );
             }
             for &ix in members {
@@ -2324,7 +2352,7 @@ impl SettingsPane {
                 nav = nav.child(
                     div()
                         .id(("settings-nav", ix))
-                        .px_3()
+                        .px_2()
                         .h(row_h)
                         .flex()
                         .items_center()
@@ -2333,54 +2361,21 @@ impl SettingsPane {
                         .cursor_pointer()
                         .text_sm()
                         .when(active, |item| item.bg(active_bg).text_color(active_fg))
-                        .when(!active, |item| {
-                            item.text_color(muted).hover(|s| s.bg(hover_bg))
-                        })
+                        .when(!active, |item| item.text_color(muted).hover(|s| s.bg(hover_bg)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.active_section = ix;
                             cx.notify();
                         }))
-                        .child(
-                            Icon::new(section_icon(ix))
-                                .small()
-                                .text_color(if active { active_fg } else { muted }),
-                        )
+                        .child(Icon::new(section_icon(ix)).small().text_color(if active {
+                            active_fg
+                        } else {
+                            muted
+                        }))
                         .child(SECTIONS[ix]),
                 );
             }
         }
         nav.into_any_element()
-    }
-}
-            .flex_shrink_0()
-            .p_3()
-            .gap_2()
-            .children(SECTIONS.iter().enumerate().map(|(ix, label)| {
-                let active = ix == self.active_section;
-                div()
-                    .id(("settings-nav", ix))
-                    .px_3()
-                    .h(px(34.0))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_sm()
-                    .when(active, |item| item.bg(active_bg).text_color(active_fg))
-                    .when(!active, |item| item.text_color(muted).hover(|s| s.bg(hover_bg)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.active_section = ix;
-                        cx.notify();
-                    }))
-                    .child(
-                        Icon::new(section_icon(ix))
-                            .small()
-                            .text_color(if active { active_fg } else { muted }),
-                    )
-                    .child(*label)
-            }))
-            .into_any_element()
     }
 }
 
@@ -2417,22 +2412,38 @@ impl Render for SettingsPane {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .p_8()
-                    .gap_6()
-                    .overflow_y_scrollbar()
+                    // 旧壳标题栏固定 72px；正文单独滚动，滚动设置时仍能知道
+                    // 自己在哪个分区，也不会让标题与首组的距离随内容变化。
                     .child(
                         div()
+                            .h(px(SETTINGS_HEADER_HEIGHT))
+                            .flex_shrink_0()
+                            .px_6()
+                            .flex()
+                            .items_center()
                             .text_xl()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(SharedString::from(format!(
-                                "设置 · {}",
-                                SECTIONS[self.active_section]
-                            ))),
+                            .child(SECTIONS[self.active_section]),
                     )
-                    .child(content)
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(
-                        "写入 nebula_settings.txt，与旧壳共享同一份设置；两边可交替修改。",
-                    )),
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .px_6()
+                            .pt_8()
+                            .pb_8()
+                            .overflow_y_scrollbar()
+                            .child(content)
+                            .child(
+                                div()
+                                    .pt_8()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        "写入 nebula_settings.txt，与旧壳共享同一份设置；两边可交替修改。",
+                                    ),
+                            ),
+                    )
             )
     }
 }
