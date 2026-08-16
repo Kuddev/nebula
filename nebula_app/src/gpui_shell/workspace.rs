@@ -733,11 +733,14 @@ impl NebulaWorkspace {
         (cols, rows)
     }
 
-    /// 配置的默认 shell 的口语短标；未配置时引擎默认拉起 PowerShell。
+    /// `LaunchSession::Default` 的口语短标。
+    ///
+    /// 这里不能再读运行时的“当前默认 Shell”：`Default` 已经是这个 Tab 创建
+    /// 时冻结下来的启动身份，PTY 侧实际走的是引擎默认 PowerShell。恢复时若
+    /// 重新读取设置，只会让右侧短标漂成新的默认值，和仍在运行/恢复出来的
+    /// 进程身份相互矛盾。
     fn default_shell_tag() -> SharedString {
-        let runtime = nebula_settings::RuntimeSettings::load();
-        crate::shell_detect::shell_short_tag(runtime.shell.as_deref().unwrap_or("powershell"))
-            .into()
+        crate::shell_detect::shell_short_tag("powershell").into()
     }
 
     /// 冻结“新建这一刻”的默认 Shell 为共享 v4 launch 身份。
@@ -3443,6 +3446,9 @@ impl NebulaWorkspace {
                 .id(("sidebar-tab", ix))
                 .group(hover_group.clone())
                 .relative()
+                // 旧壳 `layout.tabs[i]` 的命中矩形覆盖整条可见行。显式全宽
+                // 避免内容较短时 flex 项按内容收缩，导致右侧空白点击不到。
+                .w_full()
                 .gap_2()
                 .px_2()
                 .h(px(TAB_ROW_H))
@@ -3631,6 +3637,7 @@ impl NebulaWorkspace {
                 h_flex()
                     .id("sidebar-tabs-toggle")
                     .group(header_group.clone())
+                    .w_full()
                     .h(px(34.0))
                     .pb_1()
                     // 旧壳标题文字从 panel_x + 16px 起；侧栏根已有 8px
@@ -3756,7 +3763,7 @@ impl NebulaWorkspace {
         I::Item: IntoElement,
     {
         let collapsed = self.tabs_section_collapsed;
-        let list = v_flex().flex_1().gap_2().children(items);
+        let list = v_flex().w_full().flex_1().gap_2().children(items);
         if !self.tabs_fold_armed {
             return if collapsed { div().into_any_element() } else { list.into_any_element() };
         }
@@ -4437,6 +4444,18 @@ mod tests {
         assert_eq!(new_tab_insert_index(End, 1, 4), 4);
         assert_eq!(new_tab_insert_index(AfterCurrent, 9, 2), 2);
         assert_eq!(new_tab_insert_index(AfterCurrent, 0, 0), 0);
+    }
+
+    #[test]
+    fn default_launch_tag_does_not_follow_later_default_shell_changes() {
+        use crate::session::LaunchSession;
+
+        // `Default` 的实际 PTY 启动是引擎默认 PowerShell；标签必须只由这个
+        // 已保存身份决定，不能在恢复时重新采样可变的用户设置。
+        assert_eq!(
+            NebulaWorkspace::launch_shell_tag(&LaunchSession::Default).map(|tag| tag.to_string()),
+            Some("pwsh".to_owned())
+        );
     }
 
     /// 分屏生命周期合同的树侧不变式：split 后叶集扩张、关到最后一个叶
