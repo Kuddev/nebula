@@ -114,26 +114,41 @@ type SharedShellSelect = Entity<SelectState<Vec<ShellSelectItem>>>;
 struct ShellSelectItem {
     id: String,
     name: SharedString,
-    image: Option<Arc<RenderImage>>,
+    closed_image: Option<Arc<RenderImage>>,
+    row_image: Option<Arc<RenderImage>>,
 }
 
 impl ShellSelectItem {
-    fn new(id: String, name: String) -> Self {
-        let image = crate::shell_detect::color_icon_png(&id).and_then(|bytes| {
-            let mut rgba = image::load_from_memory(bytes).ok()?.into_rgba8();
-            // GPUI RenderImage consumes BGRA frames, matching the workspace
-            // sidebar loader; keeping the original colors is the point of this
-            // picker, unlike the old glyph-only label.
-            for pixel in rgba.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-            Some(Arc::new(RenderImage::new([Frame::new(rgba)])))
-        });
-        Self { id, name: name.into(), image }
+    fn new(id: String, name: String, scale_factor: f32) -> Self {
+        let bytes = crate::shell_detect::color_icon_png(&id);
+        // Select 的闭态和菜单行尺寸不同。分别生成与物理像素一一对应的纹理，
+        // 避免把 128px 原图交给 GPUI 在每帧缩小而产生模糊边缘。
+        let closed_image = bytes.and_then(|bytes| Self::decode_image(bytes, 20.0, scale_factor));
+        let row_image = bytes.and_then(|bytes| Self::decode_image(bytes, 24.0, scale_factor));
+        Self { id, name: name.into(), closed_image, row_image }
     }
 
-    fn view(&self, size: f32) -> gpui::AnyElement {
-        let icon: gpui::AnyElement = if let Some(image) = &self.image {
+    fn decode_image(bytes: &[u8], logical_size: f32, scale_factor: f32) -> Option<Arc<RenderImage>> {
+        let source = image::load_from_memory(bytes).ok()?.into_rgba8();
+        let (width, height) = source.dimensions();
+        let target_size = (logical_size * scale_factor).round().max(1.0) as u32;
+        let (mut rgba, width, height) = crate::display::prepare_ai_logo_texture(
+            source.as_raw(),
+            width,
+            height,
+            target_size,
+        );
+        // GPUI RenderImage 使用 BGRA；预缩放必须在 RGBA 上完成，换序放在最后，
+        // 否则 Lanczos 会把红蓝通道按错误语义混合。
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let rgba = image::RgbaImage::from_raw(width, height, rgba)?;
+        Some(Arc::new(RenderImage::new([Frame::new(rgba)])))
+    }
+
+    fn view(&self, size: f32, image: Option<&Arc<RenderImage>>) -> gpui::AnyElement {
+        let icon: gpui::AnyElement = if let Some(image) = image {
             gpui::StyledImage::object_fit(
                 img(image.clone()).size(px(size)).flex_shrink_0(),
                 gpui::ObjectFit::Contain,
@@ -160,12 +175,12 @@ impl SelectItem for ShellSelectItem {
 
     fn display_title(&self) -> Option<gpui::AnyElement> {
         // 闭态留出 chevron 与上下内边距；20px 在 32px Select 内不会挤字。
-        Some(self.view(20.0))
+        Some(self.view(20.0, self.closed_image.as_ref()))
     }
 
     fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
         // 旧壳 ShellPickerRow 的品牌图标是 24×24 逻辑像素。
-        self.view(24.0)
+        self.view(24.0, self.row_image.as_ref())
     }
 
     fn value(&self) -> &Self::Value {
@@ -405,10 +420,11 @@ impl SettingsPane {
         // 白名单，否则 CMD/Nushell/WSL 会出现在新建终端菜单，却无法设为默认。
         // 选项 = 彩色品牌 PNG（extra/shell-icons，与旧壳设置页/命令面板同
         // 一批资产）+ 名称，闭态与下拉同源（SelectItem::display_title/render）。
+        let shell_icon_scale = window.scale_factor().max(0.5);
         let detected = crate::shell_detect::detect_shells();
         let mut shell_items: Vec<ShellSelectItem> = detected
             .into_iter()
-            .map(|shell| ShellSelectItem::new(shell.id, shell.name))
+            .map(|shell| ShellSelectItem::new(shell.id, shell.name, shell_icon_scale))
             .collect();
         if shell_items.is_empty() {
             // 非 Windows 构建不做安装探测，但历史配置仍支持这两个由 PTY
@@ -417,8 +433,9 @@ impl SettingsPane {
                 ShellSelectItem::new(
                     "powershell".into(),
                     "PowerShell".into(),
+                    shell_icon_scale,
                 ),
-                ShellSelectItem::new("bash".into(), "Git Bash".into()),
+                ShellSelectItem::new("bash".into(), "Git Bash".into(), shell_icon_scale),
             ];
         }
         if !shell_items.iter().any(|item| item.id == shell_current) {
@@ -429,6 +446,7 @@ impl SettingsPane {
                 ShellSelectItem::new(
                     shell_current.clone(),
                     crate::shell_detect::display_name_for_id(&shell_current).to_owned(),
+                    shell_icon_scale,
                 ),
             );
         }
