@@ -680,12 +680,37 @@ impl SettingsPane {
             .unwrap_or_else(|| String::from(crate::font_install::REQUIRED_FONT_FAMILY))
     }
 
-    fn toggle_font_picker(&mut self, cx: &mut Context<Self>) {
-        self.font_picker_open = !self.font_picker_open;
+    fn toggle_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.font_picker_open {
-            // 首次展开才枚举——整个功能里唯一昂贵的一步，放在用户已经
-            // 预期有一次加载的时刻（旧壳同判）。
-            self.ensure_font_catalog(cx);
+            self.close_font_picker(window, true, cx);
+            return;
+        }
+
+        // 旧壳每次重新展开都从完整目录开始，搜索串和上次错误不跨弹层
+        // 生命周期残留；昂贵目录只在第一次打开时异步枚举。
+        self.font_notice = None;
+        self.font_query_input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.font_picker_open = true;
+        self.ensure_font_catalog(cx);
+        self.font_query_input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    /// 关闭字体弹层并清理这次展开的临时查询。`restore_focus` 只在 Esc、
+    /// 选中和点击外部时使用；系统文件选择器接管焦点期间不强抢窗口焦点。
+    fn close_font_picker(
+        &mut self,
+        window: &mut Window,
+        restore_focus: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.font_picker_open {
+            return;
+        }
+        self.font_picker_open = false;
+        self.font_query_input.update(cx, |input, cx| input.set_value("", window, cx));
+        if restore_focus {
+            window.focus(&self.focus_handle);
         }
         cx.notify();
     }
@@ -737,26 +762,33 @@ impl SettingsPane {
     /// `replace_primary_font_family`），写盘后经 `persist` 的 Changed 事件
     /// 让宿主逐终端热应用——字体度量变化会走 viewport observe 自动重排
     /// 网格并 resize PTY。
-    fn pick_font_family(&mut self, family: String, cx: &mut Context<Self>) {
+    fn pick_font_family(
+        &mut self,
+        family: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let chain = self.current_font_chain(cx);
         let next = crate::font_install::replace_primary_font_family(&chain, &family);
-        self.font_picker_open = false;
         self.font_notice = None;
+        self.close_font_picker(window, true, cx);
         self.persist(&[("font_family", next)], cx);
     }
 
     #[cfg(windows)]
-    fn import_font_file(&mut self, cx: &mut Context<Self>) {
+    fn import_font_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
             prompt: Some("导入终端字体".into()),
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = receiver.await else { return };
             let Some(source) = paths.into_iter().next() else { return };
-            let _ = this.update(cx, |pane, cx| pane.finish_font_import(&source, cx));
+            let _ = this.update_in(cx, |pane, window, cx| {
+                pane.finish_font_import(&source, window, cx);
+            });
         })
         .detach();
     }
@@ -765,7 +797,12 @@ impl SettingsPane {
     /// DirectWrite 探测族名 → 注册进 GPUI text system → 立即应用首族
     /// （旧壳 `set_terminal_font_by_index` 的导入分支同义）。
     #[cfg(windows)]
-    fn finish_font_import(&mut self, source: &std::path::Path, cx: &mut Context<Self>) {
+    fn finish_font_import(
+        &mut self,
+        source: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let stored = match crate::font_install::store_imported_font(source) {
             Ok(stored) => stored,
             Err(error) => {
@@ -809,28 +846,47 @@ impl SettingsPane {
             }
         }
         if let Some(first) = families.into_iter().next() {
-            self.pick_font_family(first, cx);
+            self.pick_font_family(first, window, cx);
         }
     }
 
-    /// 字体行（收起态）：当前主族用它自己渲染（最诚实的预览）+ 更换按钮。
+    /// 字体行（收起态）：用真实 GPUI Button 承载下拉锚点。当前主族继承
+    /// 设置页正在使用的字体链，因而按钮文字本身就是 WYSIWYG 预览。
     fn font_picker_row(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let chain = self.current_font_chain(cx);
         let primary: SharedString = crate::renderer::primary_font_family(&chain).to_owned().into();
         Self::row(
             "字体",
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(div().text_sm().font_family(primary.clone()).child(primary))
+            Button::new("font-picker-toggle")
+                .w(px(220.0))
+                .selected(self.font_picker_open)
                 .child(
-                    Button::new("font-picker-toggle")
-                        .label(if self.font_picker_open { "收起" } else { "更换" })
-                        .small()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_font_picker(cx);
-                        })),
-                ),
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_left()
+                                .font_family(primary.clone())
+                                .child(primary),
+                        )
+                        .child(
+                            Icon::new(if self.font_picker_open {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .xsmall(),
+                        ),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_font_picker(window, cx);
+                })),
         )
         .into_any_element()
     }
@@ -922,8 +978,8 @@ impl SettingsPane {
                             .font_family(family)
                             .child("AaBb 123 终端"),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.pick_font_family(name.clone(), cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.pick_font_family(name.clone(), window, cx);
                     }))
             })
             .collect();
@@ -934,14 +990,12 @@ impl SettingsPane {
             // 固定宽度让族名、徽标和 WYSIWYG 样张同时可读，窄窗由 anchored
             // 自动贴边，行为与组件库 Select 的弹层一致。
             .w(px(520.0))
+            .max_w_full()
             .p_3()
             .gap_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .text_color(theme.popover_foreground)
-            .shadow_lg()
+            // 与 Select/Popover 共用组件库表面，避免字体菜单成为另一套
+            // 边框、圆角和阴影语言。
+            .popover_style(cx)
             .occlude()
             .child(
                 h_flex()
@@ -985,8 +1039,8 @@ impl SettingsPane {
                     .child({
                         let button = Button::new("font-import").label("导入字体文件…").small();
                         #[cfg(windows)]
-                        let button = button.on_click(cx.listener(|this, _, _, cx| {
-                            this.import_font_file(cx);
+                        let button = button.on_click(cx.listener(|this, _, window, cx| {
+                            this.import_font_file(window, cx);
                         }));
                         button
                     })
@@ -1013,11 +1067,16 @@ impl SettingsPane {
             .flex_shrink_0()
             .child(row)
             .when_some(panel, |anchor, panel| {
-                anchor.child(deferred(
-                    anchored()
-                        .snap_to_window_with_margin(px(8.0))
-                        .child(panel.mt_1p5()),
-                ))
+                anchor.child(
+                    deferred(
+                        anchored()
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(panel.mt_1p5()),
+                    )
+                    // 页面级透明拦截层优先级为普通元素；弹层必须始终压在
+                    // 它上面，否则鼠标到不了搜索框和候选行。
+                    .with_priority(2),
+                )
             })
     }
 
@@ -3160,6 +3219,7 @@ impl Render for SettingsPane {
         // sans 只属于组件库默认；根上挂一次，nav/表单/下拉弹层全部继承。
         let family: SharedString = self.current_font_chain(cx).into();
         let base_px = self.font_size_px(cx);
+        let font_picker_open = self.font_picker_open;
 
         div()
             .size_full()
@@ -3269,7 +3329,40 @@ impl Render for SettingsPane {
                                         "写入 nebula_settings.txt，与旧壳共享同一份设置；两边可交替修改。",
                                     ),
                             ),
-                    )
+                    ),
             )
+            .when(font_picker_open, |root| {
+                root
+                    // 搜索框是当前焦点时 Escape 仍沿元素树冒泡到设置根；
+                    // 这里只接管弹层生命周期，不干扰其它设置输入。
+                    .on_key_down(cx.listener(
+                        |this, event: &KeyDownEvent, window, cx| {
+                            if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                                cx.stop_propagation();
+                                this.close_font_picker(window, true, cx);
+                            }
+                        },
+                    ))
+                    // 旧壳的“第一击只关闭浮层”合同：透明层覆盖设置页其余
+                    // 控件并吃掉 mouse-down；字体面板自身通过 deferred
+                    // priority=2 绘制在该层之上，内部搜索/滚动/点击照常工作。
+                    .child(
+                        div()
+                            .id("font-picker-dismiss-layer")
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .left_0()
+                            .cursor_default()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.close_font_picker(window, true, cx);
+                                }),
+                            ),
+                    )
+            })
     }
 }

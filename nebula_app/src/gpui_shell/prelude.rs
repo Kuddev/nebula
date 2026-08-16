@@ -7,7 +7,7 @@
 #[allow(unused_imports)]
 pub use gpui_component::{
     ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, InteractiveElementExt as _,
-    Selectable as _, Sizable as _, TitleBar,
+    Selectable as _, Sizable as _, StyledExt as _, TitleBar,
     alert::{Alert, AlertVariant},
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
