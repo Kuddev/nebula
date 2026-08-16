@@ -3618,6 +3618,9 @@ impl NebulaWorkspace {
             .w(px(self.sidebar_width))
             .h_full()
             .flex_shrink_0()
+            // workspace 根保持透明，侧栏自己只铺一层壳色；否则终端卡会
+            // 叠到根底色上，把 Acrylic 的目标透明度二次增浓。
+            .bg(theme.background)
             .p_2()
             .gap_2()
             // 待命阶段（未过阈值）的指针跟踪；激活后由根部罩层独占接管。
@@ -4132,7 +4135,9 @@ impl Render for NebulaWorkspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(cx.theme().background)
+            // 旧壳每个像素只画一次：整窗先透明清屏，再分别画标题栏、侧栏、
+            // 卡外壳与卡底。根节点不能再铺一张半透明底。
+            .bg(gpui::transparent_black())
             .text_color(cx.theme().foreground)
             // 兜底：未过阈值的按-放在任意位置松开都清掉待命拖拽
             //（点击语义不受影响——行的 on_click 在冒泡链更早触发）。
@@ -4293,7 +4298,24 @@ impl Render for NebulaWorkspace {
                         // 终端卡（一体化外壳）：唯一的结构分界。圆角与旧壳卡
                         // 同源（UI_SHELL_RADIUS_LOGICAL=14），无描边——融合靠
                         // 壳色包围圆角卡本身，不靠线框。p_2 = 旧壳 8px 卡缝。
-                        div().flex_1().min_w_0().p_2().child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .relative()
+                            .child(
+                                gpui::canvas(
+                                    |_, _, _| (),
+                                    |bounds, _, window, cx| {
+                                        crate::gpui_shell::theme::paint_shell_around_card(
+                                            bounds, window, cx,
+                                        );
+                                    },
+                                )
+                                .absolute()
+                                .inset_0(),
+                            )
+                            .p_2()
+                            .child(
                             div()
                                 .size_full()
                                 .rounded(crate::gpui_shell::theme::card_radius())

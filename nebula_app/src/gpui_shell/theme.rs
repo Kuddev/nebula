@@ -1,4 +1,6 @@
-use gpui::{App, Hsla, Pixels, Rgba as GpuiRgba, hsla, px};
+use gpui::{
+    App, Bounds, Hsla, Pixels, Rgba as GpuiRgba, Window, fill, hsla, point, px, size,
+};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode};
 
 use crate::display::color::Rgb;
@@ -33,6 +35,12 @@ fn settings_theme_name(theme: NebulaTheme) -> ThemeName {
     }
 }
 
+/// 当前生效的旧壳 chrome 主题（SSH 连接卡片等复用旧 Skin/palette 的
+/// 视图从这里取色，避免第二套品牌色定义）。
+pub(crate) fn chrome_theme_resolved(cx: &App) -> NebulaTheme {
+    chrome_theme(effective_theme_name(cx))
+}
+
 /// 生效主题：`follow_system_theme` 开启时按系统外观折算到用户主题家族的
 /// 亮/暗成员（规则与旧壳 `NebulaTheme::for_system_appearance` 同一来源）。
 /// chrome 令牌与终端 palette 都必须走这里，两层才不会分家。
@@ -56,6 +64,41 @@ fn to_hsla(r: u8, g: u8, b: u8) -> Hsla {
 /// 不透明 ink（旧壳 `Rgb` 令牌）。
 fn ink(c: Rgb) -> Hsla {
     to_hsla(c.r, c.g, c.b)
+}
+
+/// 最淡一档墨色（旧壳 `Skin::ink_faint`）：比 `muted_foreground`(ink_dim)
+/// 再暗一档，旧壳只用于「确实在场但不参与层级竞争」的元素——侧栏数量
+/// chip 的数字、未绑定键帽等。GPUI 全局 token 没有这一档，按需来取。
+pub(crate) fn faint_ink(cx: &App) -> Hsla {
+    ink(chrome_theme(effective_theme_name(cx)).skin().ink_faint)
+}
+
+/// 侧栏运行 spinner 的两端颜色，逐字复用旧壳 `draw_chrome` 的底色裁定：
+/// hairline / ink_dim 先与该 Tab 行的真实不透明底色合成。环由大量相交小圆
+/// 铺成；若直接交给 GPUI 用半透明 hairline 叠画，交叠处会变深，看起来像
+/// 一圈模糊珠子而不是连续圆环。
+pub(crate) fn sidebar_spinner_colors(cx: &App, active: bool) -> (GpuiRgba, GpuiRgba) {
+    let chrome = chrome_theme(effective_theme_name(cx));
+    let palette = chrome.palette();
+    let sk = chrome.skin();
+    let shell = Rgba::new(palette.shell_bg.r, palette.shell_bg.g, palette.shell_bg.b, 255);
+    let base = if active {
+        crate::display::ui::surface::over(sk.accent_soft, shell)
+    } else {
+        shell
+    };
+    let track = crate::display::ui::surface::over(sk.hairline, base);
+    let head = crate::display::ui::surface::over(
+        Rgba::new(sk.ink_dim.r, sk.ink_dim.g, sk.ink_dim.b, 255),
+        base,
+    );
+    let gpui = |color: Rgba| GpuiRgba {
+        r: f32::from(color.r) / 255.0,
+        g: f32::from(color.g) / 255.0,
+        b: f32::from(color.b) / 255.0,
+        a: 1.0,
+    };
+    (gpui(track), gpui(head))
 }
 
 /// 保留 alpha 的水洗层（hover/surface/hairline 这类叠加色）。
@@ -135,6 +178,71 @@ pub fn card_content_bg(cx: &App) -> Hsla {
     bg
 }
 
+/// 旧壳的透明清屏模型：只在圆角卡**外部**画一层壳色，卡内部保持透明，
+/// 随后由卡自己的 `term_bg × opacity` 覆盖。若直接给 workspace 根节点上底色，
+/// 卡区域会先吃一次 shell alpha、再吃一次 card alpha，实际不透明度从 `o`
+/// 变成 `1-(1-o)^2`，DWM Acrylic 看起来就会发糊、发实。
+///
+/// GPUI 没有凹圆角 primitive，因此四角按物理像素扫描圆外区域；卡本身的
+/// 抗锯齿圆角仍是唯一可见边，壳色不会侵入卡内形成第二次 alpha 叠加。
+pub fn paint_shell_around_card(bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
+    let color = cx.theme().background;
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let inset = 8.0_f32.min(width * 0.5).min(height * 0.5);
+    if width <= 0.0 || height <= 0.0 || inset <= 0.0 {
+        return;
+    }
+
+    let x = f32::from(bounds.origin.x);
+    let y = f32::from(bounds.origin.y);
+    let card_w = (width - inset * 2.0).max(0.0);
+    let card_h = (height - inset * 2.0).max(0.0);
+    let paint = |window: &mut Window, x: f32, y: f32, w: f32, h: f32| {
+        if w > 0.0 && h > 0.0 {
+            window.paint_quad(fill(
+                Bounds::new(point(px(x), px(y)), size(px(w), px(h))),
+                color,
+            ));
+        }
+    };
+
+    // 四条带互不重叠，每个像素只承受一次壳色 alpha。
+    paint(window, x, y, width, inset);
+    paint(window, x, y + height - inset, width, inset);
+    paint(window, x, y + inset, inset, card_h);
+    paint(window, x + width - inset, y + inset, inset, card_h);
+
+    let radius = crate::display::UI_SHELL_RADIUS_LOGICAL.min(card_w * 0.5).min(card_h * 0.5);
+    if radius <= 0.0 {
+        return;
+    }
+    let step = 1.0 / window.scale_factor().max(1.0);
+    let rows = (radius / step).ceil() as usize;
+    let card_x = x + inset;
+    let card_y = y + inset;
+    let card_right = card_x + card_w;
+    let card_bottom = card_y + card_h;
+    for row in 0..rows {
+        let row_top = row as f32 * step;
+        let row_h = step.min(radius - row_top).max(0.0);
+        let sample_y = (row_top + row_h * 0.5).min(radius);
+        let dy = radius - sample_y;
+        let outside =
+            (radius - (radius * radius - dy * dy).max(0.0).sqrt()).clamp(0.0, radius);
+        paint(window, card_x, card_y + row_top, outside, row_h);
+        paint(window, card_right - outside, card_y + row_top, outside, row_h);
+        paint(window, card_x, card_bottom - row_top - row_h, outside, row_h);
+        paint(
+            window,
+            card_right - outside,
+            card_bottom - row_top - row_h,
+            outside,
+            row_h,
+        );
+    }
+}
+
 /// 旧壳设置页使用不透明 `Skin.panel`，不让终端壁纸穿透设置内容。
 pub fn settings_panel_bg(cx: &App) -> Hsla {
     solid(chrome_theme(effective_theme_name(cx)).skin().panel)
@@ -142,14 +250,19 @@ pub fn settings_panel_bg(cx: &App) -> Hsla {
 
 /// 终端内补全浮层（ghost/弹窗）的配色切片，与旧壳 `draw_completion_popup`
 /// 同源同义：ghost/tag 用最淡墨，行底=panel 预合成到终端底色（浮层底基准
-/// 从卡底提亮，不透出壁纸），选中行=accent + 其上墨色。
+/// 从卡底提亮，不透出壁纸）。弹窗本身使用低对比边框与 accent 水洗选中态，
+/// 避免把整块候选列表染成高饱和按钮。
 pub(crate) struct CompletionColors {
     pub ghost: Hsla,
+    pub panel_bg: Hsla,
+    pub panel_border: Hsla,
     pub row_bg: Hsla,
     pub row_fg: Hsla,
     pub tag_fg: Hsla,
     pub selected_bg: Hsla,
     pub selected_fg: Hsla,
+    pub scroll_track: Hsla,
+    pub scroll_thumb: Hsla,
 }
 
 pub(crate) fn completion_colors(cx: &App, term_bg: GpuiRgba) -> CompletionColors {
@@ -163,13 +276,19 @@ pub(crate) fn completion_colors(cx: &App, term_bg: GpuiRgba) -> CompletionColors
         a: 1.0,
     }
     .into();
+    let accent: Hsla = ink(sk.accent);
+    let selected_bg = accent.opacity(if sk.is_light { 0.16 } else { 0.24 });
     CompletionColors {
         ghost: ink(sk.ink_faint),
+        panel_bg: row_bg,
+        panel_border: accent.opacity(if sk.is_light { 0.28 } else { 0.34 }),
         row_bg,
         row_fg: ink(sk.ink),
         tag_fg: ink(sk.ink_faint),
-        selected_bg: ink(sk.accent),
-        selected_fg: ink(sk.ink_on_accent),
+        selected_bg,
+        selected_fg: ink(sk.ink),
+        scroll_track: ink(sk.ink_faint).opacity(if sk.is_light { 0.24 } else { 0.32 }),
+        scroll_thumb: ink(sk.ink_dim).opacity(if sk.is_light { 0.62 } else { 0.72 }),
     }
 }
 
