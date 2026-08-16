@@ -110,7 +110,7 @@ pub use state::{
 };
 pub use toast::ToastKind;
 
-mod file_dialog;
+pub(crate) mod file_dialog;
 pub(crate) mod keymap;
 mod settings;
 pub(crate) mod ssh_connect;
@@ -122,6 +122,7 @@ mod text_input;
 use ssh_ui::SshDeleteUndo;
 pub use ssh_ui::{
     SSH_DELETE_UNDO_DURATION, SshEditorField, SshEditorHit, SshEditorRects, SshHostEditor,
+    auth_sections, join_destination_port, push_private_key, split_destination_port,
 };
 pub use ui::theme::NebulaTheme;
 pub(crate) use ui::theme::write_nebula_prompt_theme;

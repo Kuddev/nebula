@@ -13,8 +13,8 @@
 //! 字体族与默认光标形状对新标签页生效；窗口透明/模糊/托盘/快速终端热键
 //! 等依赖尚未迁移的窗口子系统，写盘后由旧壳消费（本页如实标注）。
 //!
-//! 未迁移的编辑器（依赖各自功能子系统）：按键映射、SSH 主机管理、
-//! AI Provider、备份/同步。对应分区放明确的占位说明。
+//! 仍依赖旧壳窗口子系统的设置会在对应分区明确标注；SSH 主机、AI
+//! Provider、按键映射和备份编辑器已经复用共享业务层与持久化合同。
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -40,14 +40,32 @@ const THEME_VALUES: [&str; 7] =
 const SECTIONS: [&str; 9] =
     ["外观", "配置文件", "供应商", "SSH", "网络", "交互", "按键映射", "高级", "备份"];
 
-/// 导航的显示顺序与分组，对照旧壳 `settings.rs` 的 `nav_groups`：供应商是
-/// 常用业务设置，和外观/配置/交互/按键同列；「连接」只收拢 SSH 与网络。
-///
-/// 第二项是组内成员在 [`SECTIONS`] 里的下标——**下标就是 section 身份**
-/// （`section_content`/`section_icon` 都按它分派），所以调显示顺序或重新分组
-/// 只动这张表，不必碰分派代码。
-const NAV_GROUPS: [(Option<&str>, &[usize]); 3] =
-    [(None, &[0, 1, 2, 5, 6]), (Some("连接"), &[3, 4]), (Some("系统"), &[7, 8])];
+/// 左侧导航按原有业务顺序平铺。下标仍是 [`SECTIONS`] 的稳定 section
+/// 身份；这里只控制显示顺序，不再插入“连接”“系统”等分类标题。
+const NAV_ORDER: [usize; 9] = [0, 1, 2, 5, 6, 3, 4, 7, 8];
+
+/// 设置搜索的分区索引。当前设置页由九个高内聚 section 自己渲染，搜索层
+/// 只负责把用户常用字段词映射到 section，不把持久化键或业务语义搬进导航。
+const SECTION_SEARCH_TERMS: [&str; 9] = [
+    "外观 主题 配色 背景 壁纸 透明度 模糊 字体 字号 字间距 光标 语言 密度 fetch powerline appearance theme color background wallpaper opacity blur font cursor language",
+    "配置文件 终端 shell 启动目录 补全 ghost 接受键 profile terminal startup directory completion",
+    "供应商 AI 助手 模型 API endpoint provider assistant model codex claude gemini",
+    "SSH 主机 连接 认证 密码 私钥 跳板 host connection auth password key",
+    "网络 代理 系统代理 自定义代理 bypass proxy network socks http",
+    "交互 标签 动效 新标签 复制 粘贴 选择 interaction tab animation copy paste select",
+    "按键映射 快捷键 热键 键位 keymap keyboard shortcut hotkey binding",
+    "高级 会话 保留 恢复 AI 接续 托盘 keep session restore resume tray",
+    "备份 加密 密码 导出 恢复 远程 同步 WebDAV S3 SFTP backup encryption export import remote sync",
+];
+
+fn section_matches(index: usize, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    let haystack = format!("{} {}", SECTIONS[index], SECTION_SEARCH_TERMS[index]).to_lowercase();
+    query.split_whitespace().all(|term| haystack.contains(term))
+}
 
 // 这些几何值逐项来自旧壳 `display/settings.rs::settings_geometry`。GPUI
 // 设置页沿用同一节奏，避免组件默认间距把标题、分组和表单压成一条均匀列表。
@@ -116,6 +134,46 @@ struct ShellSelectItem {
     name: SharedString,
     closed_image: Option<Arc<RenderImage>>,
     row_image: Option<Arc<RenderImage>>,
+}
+
+/// 设置页 SSH 添加/编辑面板的非文本草稿。文字实体常驻在 `SettingsPane`，
+/// 这样输入事件可以统一使测试结果失效；草稿只保存认证、密钥和编辑身份。
+#[derive(Clone)]
+struct SshEditorState {
+    /// 每次打开递增。文件选择器等异步回调只可写回发起它的编辑会话。
+    id: u64,
+    original_destination: Option<String>,
+    auth: crate::ssh_profiles::SshAuthMode,
+    icon: Option<String>,
+    private_keys: Vec<std::path::PathBuf>,
+    save_password: bool,
+    show_password: bool,
+    revision: u64,
+    test_request_id: Option<u64>,
+    test_status: Option<(String, bool)>,
+}
+
+impl SshEditorState {
+    fn new(id: u64, original_destination: Option<String>) -> Self {
+        Self {
+            id,
+            original_destination,
+            // 与旧壳新增主机一致：第一次通常有密码，默认密码模式避免让
+            // 新用户先因 Auto 没有可用私钥而得到一次无意义的认证失败。
+            auth: crate::ssh_profiles::SshAuthMode::Password,
+            icon: None,
+            private_keys: Vec::new(),
+            save_password: true,
+            show_password: false,
+            revision: 0,
+            test_request_id: None,
+            test_status: None,
+        }
+    }
+
+    fn testing(&self) -> bool {
+        self.test_request_id.is_some()
+    }
 }
 
 impl ShellSelectItem {
@@ -199,6 +257,9 @@ pub struct SettingsPane {
     runtime: RuntimeSettings,
     /// 当前分区（`SECTIONS` 下标）；旧壳默认落在外观。
     active_section: usize,
+    /// tty7 Settings 同款左上角搜索。它过滤平铺导航，并把当前页定位到
+    /// 第一个命中的高内聚 section；各 section 仍独立拥有自己的业务状态。
+    settings_search_input: Entity<InputState>,
     selects: Vec<(&'static str, SharedSelect)>,
     shell_select: SharedShellSelect,
     dir_input: Entity<InputState>,
@@ -218,7 +279,15 @@ pub struct SettingsPane {
     provider_codex_confirm: Option<String>,
     /// SSH 主机列表（共享三键 + merge 权威）；操作后整体重载防漂移。
     ssh_hosts: crate::gpui_shell::ssh_hosts::SshHostLists,
-    ssh_new_input: Entity<InputState>,
+    /// SSH 编辑器的文本字段常驻，以便所有文本改动都能使进行中的测试失效。
+    ssh_destination_input: Entity<InputState>,
+    ssh_port_input: Entity<InputState>,
+    ssh_label_input: Entity<InputState>,
+    ssh_password_input: Entity<InputState>,
+    ssh_icon_select: SharedSelect,
+    ssh_editor: Option<SshEditorState>,
+    ssh_editor_seq: u64,
+    ssh_test_seq: u64,
     ssh_status: Option<(String, bool)>,
     ssh_show_hidden: bool,
     /// 删除确认（二次点击生效，旧壳确认对话框的轻量对应）。
@@ -234,6 +303,9 @@ pub struct SettingsPane {
     /// GPUI text system 已注册的导入族名（启动扫描 + 本次导入累计）。
     font_imported: Vec<String>,
     font_query_input: Entity<InputState>,
+    /// 触发按钮上一帧的窗口坐标。字体目录是宽弹层，不能把整条设置行当
+    /// 锚点；否则按钮在右侧、菜单却会从正文左缘展开。
+    font_picker_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     /// 导入/选择的错误驻留条（旧壳 `nebula_font_notice` 同义）。
     font_notice: Option<String>,
     /// 备份类别选择（本地 UI 态；出厂默认 = 共享 `BackupSelection::default`）。
@@ -564,6 +636,93 @@ impl SettingsPane {
         let backup_remote_inputs: Vec<Entity<InputState>> =
             (0..4).map(|_| cx.new(|cx| InputState::new(window, cx))).collect();
 
+        let ssh_destination_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("user@host 或 ~/.ssh/config 别名")
+        });
+        let ssh_port_input = cx.new(|cx| InputState::new(window, cx).placeholder("22"));
+        let ssh_label_input = cx.new(|cx| InputState::new(window, cx).placeholder("可选，留空自动命名"));
+        let ssh_password_input =
+            cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("留空保留已有凭据"));
+        let ssh_icon_items = std::iter::once(SharedString::from("自动识别"))
+            .chain(crate::display::ui::os_icons::CATALOG.iter().map(|icon| {
+                SharedString::from(format!("{}  {}", icon.glyph, icon.zh))
+            }))
+            .collect::<Vec<_>>();
+        let ssh_icon_select = cx.new(|cx| {
+            SelectState::new(
+                ssh_icon_items,
+                Some(IndexPath::default().row(0)),
+                window,
+                cx,
+            )
+        });
+        subscriptions.push(cx.subscribe_in(
+            &ssh_icon_select,
+            window,
+            |this: &mut Self,
+             entity: &SharedSelect,
+             event: &SelectEvent<Vec<SharedString>>,
+             _window: &mut Window,
+             cx: &mut Context<Self>| {
+                if !matches!(event, SelectEvent::Confirm(Some(_))) {
+                    return;
+                }
+                let Some(editor) = this.ssh_editor.as_mut() else { return };
+                let row = entity.read(cx).selected_index(cx).map(|path| path.row).unwrap_or(0);
+                editor.icon = row
+                    .checked_sub(1)
+                    .and_then(|index| crate::display::ui::os_icons::CATALOG.get(index))
+                    .map(|icon| icon.id.to_owned());
+                // 图标不影响连接有效性，因此保留测试结果；只清掉上一条
+                // 保存/校验提示，避免它看起来仍在描述当前草稿。
+                this.ssh_status = None;
+                cx.notify();
+            },
+        ));
+        for input in [
+            ssh_destination_input.clone(),
+            ssh_port_input.clone(),
+            ssh_label_input.clone(),
+            ssh_password_input.clone(),
+        ] {
+            subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |this: &mut Self, _, event: &InputEvent, _, cx: &mut Context<Self>| {
+                    if matches!(event, InputEvent::Change) {
+                        this.touch_ssh_editor(cx);
+                    }
+                },
+            ));
+        }
+
+        let settings_search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索设置…"));
+        subscriptions.push(cx.subscribe_in(
+            &settings_search_input,
+            window,
+            |this: &mut Self,
+             input: &Entity<InputState>,
+             event: &InputEvent,
+             _: &mut Window,
+             cx: &mut Context<Self>| {
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                let query = input.read(cx).value().to_string();
+                if !section_matches(this.active_section, &query) {
+                    if let Some(first) = NAV_ORDER
+                        .iter()
+                        .copied()
+                        .find(|index| section_matches(*index, &query))
+                    {
+                        this.active_section = first;
+                    }
+                }
+                cx.notify();
+            },
+        ));
+
         let font_query_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索字体…"));
         subscriptions.push(cx.subscribe_in(
             &font_query_input,
@@ -581,6 +740,7 @@ impl SettingsPane {
             focus_handle: cx.focus_handle(),
             runtime,
             active_section: 0,
+            settings_search_input,
             selects,
             shell_select,
             dir_input,
@@ -596,9 +756,14 @@ impl SettingsPane {
             provider_test_running: false,
             provider_codex_confirm: None,
             ssh_hosts: crate::gpui_shell::ssh_hosts::SshHostLists::load(),
-            ssh_new_input: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("user@host[:port] 或 ~/.ssh/config 别名")
-            }),
+            ssh_destination_input,
+            ssh_port_input,
+            ssh_label_input,
+            ssh_password_input,
+            ssh_icon_select,
+            ssh_editor: None,
+            ssh_editor_seq: 0,
+            ssh_test_seq: 0,
             ssh_status: None,
             ssh_show_hidden: false,
             ssh_delete_confirm: None,
@@ -608,6 +773,7 @@ impl SettingsPane {
             font_system: None,
             font_imported: Vec::new(),
             font_query_input,
+            font_picker_trigger_bounds: None,
             font_notice: None,
             backup_selection: crate::encrypted_backup::BackupSelection::default(),
             backup_pass_input: cx.new(|cx| {
@@ -668,10 +834,9 @@ impl SettingsPane {
         self.persist(&[(key, (value as u8).to_string())], cx);
     }
 
+    /// Workspace tab、设置导航和设置内容共用的主文字字号事实源。
     fn font_size_px(&self, cx: &App) -> f32 {
-        self.runtime
-            .font_size_px
-            .unwrap_or_else(|| cx.global::<crate::gpui_shell::config::Settings>().font_size_px)
+        cx.global::<crate::gpui_shell::config::Settings>().font_size_px
     }
 
     fn set_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
@@ -873,40 +1038,57 @@ impl SettingsPane {
     fn font_picker_row(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let chain = self.current_font_chain(cx);
         let primary: SharedString = crate::renderer::primary_font_family(&chain).to_owned().into();
-        Self::row(
-            "字体",
-            Button::new("font-picker-toggle")
-                .w(px(220.0))
-                .selected(self.font_picker_open)
-                .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_left()
-                                .font_family(primary.clone())
-                                .child(primary),
-                        )
-                        .child(
-                            Icon::new(if self.font_picker_open {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .xsmall(),
-                        ),
+        let picker = cx.entity().downgrade();
+        let control = div()
+            .relative()
+            .w(px(220.0))
+            .child(
+                Button::new("font-picker-toggle")
+                    .w_full()
+                    .selected(self.font_picker_open)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_left()
+                                    .font_family(primary.clone())
+                                    .child(primary),
+                            )
+                            .child(
+                                Icon::new(if self.font_picker_open {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .xsmall(),
+                            ),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_font_picker(window, cx);
+                    })),
+            )
+            // 与组件库 Popover 相同：用零绘制 canvas 捕获触发控件真实
+            // Bounds。坐标来自布局结果，滚动、DPI 和窗口缩放后仍然准确。
+            .child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        let _ = picker.update(cx, |picker, _| {
+                            picker.font_picker_trigger_bounds = Some(bounds);
+                        });
+                    },
+                    |_, _, _, _| {},
                 )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.toggle_font_picker(window, cx);
-                })),
-        )
-        .into_any_element()
+                .absolute()
+                .size_full(),
+            );
+        Self::row("字体", control).into_any_element()
     }
 
     /// 展开面板：搜索 + 「显示全部」临时过滤 + 目录列表（真实字体预览、
@@ -1071,12 +1253,13 @@ impl SettingsPane {
             )
     }
 
-    /// 字体行和浮层的锚点。使用 GPUI 与 `Select` 相同的
-    /// `deferred(anchored())` 管线，浮层不会把下面的补全分组向下推，也不会
-    /// 被设置正文的滚动容器按普通子项布局。
+    /// 字体行和浮层的锚点。使用 GPUI 与 `Popover` 相同的真实触发框
+    /// Bounds + `deferred(anchored())` 管线：浮层不参与文档流，右边缘与
+    /// 按钮右边缘对齐，窗口空间不足时再由 anchored 贴边收拢。
     fn font_picker_dropdown(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let row = self.font_picker_row(cx);
         let panel = self.font_picker_open.then(|| self.font_picker_panel(cx));
+        let trigger_bounds = self.font_picker_trigger_bounds;
 
         div()
             .relative()
@@ -1084,12 +1267,15 @@ impl SettingsPane {
             .h(px(SETTINGS_ROW_HEIGHT))
             .flex_shrink_0()
             .child(row)
-            .when_some(panel, |anchor, panel| {
+            .when_some(panel.zip(trigger_bounds), |anchor, (panel, trigger_bounds)| {
                 anchor.child(
                     deferred(
                         anchored()
+                            .anchor(gpui::Corner::TopRight)
+                            .position(trigger_bounds.bottom_right())
+                            .offset(gpui::point(px(0.0), px(6.0)))
                             .snap_to_window_with_margin(px(8.0))
-                            .child(panel.mt_1p5()),
+                            .child(panel),
                     )
                     // 页面级透明拦截层优先级为普通元素；弹层必须始终压在
                     // 它上面，否则鼠标到不了搜索框和候选行。
@@ -1104,9 +1290,9 @@ impl SettingsPane {
 
     /// 旧壳设置页靠留白与标题分组，不用外层线框把每段内容圈成盒子。
     fn group(&self, title: &'static str, cx: &Context<Self>) -> gpui::Div {
-        // 分组标题：1.2× 字号 + ink_strong（旧壳 settings.rs 分组标题裁定）。
-        // text_sm + muted 那一档是正文注释的层级，分组标题要压得住下面的行。
-        let title_px = self.font_size_px(cx) * 1.2;
+        // 分组标题与侧栏 tab、设置导航共用正文基准字号和 Regular 字重；
+        // 层级只靠颜色与留白表达，避免标题额外放大后整页出现三套字号。
+        let title_px = self.font_size_px(cx);
         v_flex()
             .w_full()
             .child(
@@ -1115,12 +1301,25 @@ impl SettingsPane {
                     .flex()
                     .items_center()
                     .text_size(px(title_px))
+                    .font_weight(gpui::FontWeight::NORMAL)
                     .text_color(cx.theme().sidebar_accent_foreground)
                     .child(title),
             )
             // 旧壳组标题占 26px，首行位于标题顶端下方 42px；中间这 16px
             // 是形成分组呼吸感的关键，不能交给组件默认 gap 随意变化。
             .child(div().h(px(SETTINGS_GROUP_TITLE_GAP)).flex_shrink_0())
+    }
+
+    /// 一级设置组之间的分隔。容器高度保持原有 32px 组间距，细线位于
+    /// 中央，因此增加层级提示但不改变页面纵向密度。
+    fn group_divider(cx: &Context<Self>) -> gpui::Div {
+        div()
+            .w_full()
+            .h(px(SETTINGS_GROUP_GAP))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .child(div().w_full().h(px(1.0)).bg(cx.theme().border))
     }
 
     fn row(label: &'static str, control: impl IntoElement) -> impl IntoElement {
@@ -1360,7 +1559,7 @@ impl SettingsPane {
                             on_minus(this, cx);
                         })),
                 )
-                .child(div().text_sm().min_w(px(64.0)).child(display))
+                .child(div().min_w(px(64.0)).child(display))
                 .child(
                     Button::new(SharedString::from(format!("plus-{id}")))
                         .label("+")
@@ -1391,7 +1590,6 @@ impl SettingsPane {
                     div()
                         .w(px(48.0))
                         .flex_shrink_0()
-                        .text_sm()
                         // 固定数值列宽，百分比位数变化时轨道不会左右跳动。
                         .child(display),
                 ),
@@ -1424,7 +1622,7 @@ impl SettingsPane {
                         .featured_colors(featured)
                         .small(),
                 )
-                .child(div().flex_1().min_w_0().text_sm().truncate().child(current))
+                .child(div().flex_1().min_w_0().truncate().child(current))
                 .child(
                     Button::new("background-color-reset")
                         .label("跟随主题")
@@ -1478,7 +1676,6 @@ impl SettingsPane {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .truncate()
                         .child(display),
@@ -1752,13 +1949,18 @@ impl SettingsPane {
 
         v_flex()
             .w_full()
-            .gap(px(SETTINGS_GROUP_GAP))
             .child(preview)
+            .child(Self::group_divider(cx))
             .child(themes)
+            .child(Self::group_divider(cx))
             .child(theme_mode)
+            .child(Self::group_divider(cx))
             .child(custom_background)
+            .child(Self::group_divider(cx))
             .child(cursor)
+            .child(Self::group_divider(cx))
             .child(interface)
+            .child(Self::group_divider(cx))
             .child(terminal)
     }
 
@@ -1774,7 +1976,11 @@ impl SettingsPane {
             .child(self.switch_row("ghost", "启用命令补全", self.runtime.ghost, cx))
             .child(self.select_row("accept", "补全接受键", cx))
             .child(self.select_row("completion_style", "补全样式", cx));
-        v_flex().w_full().gap(px(SETTINGS_GROUP_GAP)).child(terminal).child(completion)
+        v_flex()
+            .w_full()
+            .child(terminal)
+            .child(Self::group_divider(cx))
+            .child(completion)
     }
 
     fn section_providers(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1799,7 +2005,7 @@ impl SettingsPane {
                 .when(selected, |row| row.bg(theme.list_active))
                 .hover(move |row| row.bg(hover_bg))
                 .child(Icon::new(IconName::Bot).xsmall().text_color(theme.muted_foreground))
-                .child(div().flex_1().min_w_0().text_sm().truncate().child(name))
+                .child(div().flex_1().min_w_0().truncate().child(name))
                 .child(
                     div()
                         .max_w(px(78.0))
@@ -1926,7 +2132,7 @@ impl SettingsPane {
                 );
         } else {
             editor = editor
-                .child(div().text_sm().text_color(theme.muted_foreground).child("没有供应商配置"));
+                .child(div().text_color(theme.muted_foreground).child("没有供应商配置"));
         }
 
         self.group("供应商", cx)
@@ -1957,15 +2163,14 @@ impl SettingsPane {
             .when_some(self.provider_status.clone(), |group, (message, error)| {
                 group.child(
                     div()
-                        .text_sm()
                         .text_color(if error { theme.danger } else { theme.success })
                         .child(message),
                 )
             })
     }
 
-    /// SSH 列表操作的统一收尾：写盘、报状态、清确认态。列表操作永不触碰
-    /// Credential Manager——删除主机保留凭据（连接语义归业务层）。
+    /// SSH 非破坏性列表操作的统一收尾：写盘、报状态、清确认态。
+    /// Profile/凭据的最终删除走 [`Self::delete_ssh_host`]，不能混进置顶/恢复。
     fn ssh_apply(
         &mut self,
         mutate: impl FnOnce(&mut crate::gpui_shell::ssh_hosts::SshHostLists),
@@ -1979,6 +2184,653 @@ impl SettingsPane {
         }
         self.ssh_delete_confirm = None;
         cx.notify();
+    }
+
+    /// 二次确认后的最终删除。列表层仍只管理三组地址；这里作为设置编辑器
+    /// 协调 Profile 与 Credential Manager，和旧壳撤销期结束后的提交同义。
+    fn delete_ssh_host(&mut self, host: &str, cx: &mut Context<Self>) {
+        let from_config = self.ssh_hosts.is_from_config(host);
+        let mut hosts = self.ssh_hosts.clone();
+        hosts.remove(host);
+        if let Err(error) = hosts.persist() {
+            self.ssh_status = Some((format!("删除主机失败: {error}"), true));
+            self.ssh_delete_confirm = None;
+            cx.notify();
+            return;
+        }
+        self.ssh_hosts = hosts;
+
+        let mut cleanup_errors = Vec::new();
+        let profile_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
+        match crate::ssh_profiles::SshProfiles::load(&profile_path) {
+            Ok(mut profiles) => {
+                profiles.remove(host);
+                if let Err(error) = profiles.save(&profile_path) {
+                    cleanup_errors.push(format!("Profile: {error}"));
+                }
+            },
+            Err(error) => cleanup_errors.push(format!("Profile: {error}")),
+        }
+        #[cfg(windows)]
+        if let Err(error) = crate::ssh_credentials::forget_password(host) {
+            cleanup_errors.push(format!("凭据: {error}"));
+        }
+
+        self.ssh_delete_confirm = None;
+        self.ssh_status = if cleanup_errors.is_empty() {
+            Some((
+                if from_config {
+                    "已隐藏 config 别名，并清理 Nebula Profile 与凭据".to_owned()
+                } else {
+                    "已删除主机、Profile 与凭据".to_owned()
+                },
+                false,
+            ))
+        } else {
+            Some((
+                format!(
+                    "主机已从列表移除，但部分清理失败: {}",
+                    cleanup_errors.join("；")
+                ),
+                true,
+            ))
+        };
+        cx.notify();
+    }
+
+    /// 一旦草稿字段变动，之前那次测试就不再能证明当前配置。请求本身不取消
+    /// （网络任务应当自行收尾），但它返回时会按 revision 丢弃过期结果。
+    fn touch_ssh_editor(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.ssh_editor.as_mut() {
+            editor.revision = editor.revision.wrapping_add(1);
+            editor.test_request_id = None;
+            editor.test_status = None;
+            self.ssh_status = None;
+            cx.notify();
+        }
+    }
+
+    fn set_ssh_editor_masking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let masked = self.ssh_editor.as_ref().is_none_or(|editor| !editor.show_password);
+        self.ssh_password_input.update(cx, |input, cx| input.set_masked(masked, window, cx));
+    }
+
+    fn open_ssh_editor(
+        &mut self,
+        destination: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let profile_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
+        let profiles = crate::ssh_profiles::SshProfiles::load(&profile_path).unwrap_or_else(|err| {
+            log::warn!("加载 SSH Profile 失败，使用默认草稿: {err}");
+            crate::ssh_profiles::SshProfiles::default()
+        });
+        let profile = destination
+            .as_deref()
+            .map(|host| profiles.for_destination(host));
+        let (address, port) = destination
+            .as_deref()
+            .map(crate::display::split_destination_port)
+            .unwrap_or_default();
+        self.ssh_editor_seq = self.ssh_editor_seq.wrapping_add(1).max(1);
+        let mut editor = SshEditorState::new(self.ssh_editor_seq, destination);
+        if let Some(profile) = profile.as_ref() {
+            editor.auth = profile.auth;
+            editor.icon = profile.icon.clone();
+            editor.private_keys = profile.private_keys.clone();
+        }
+        let label = profile.and_then(|profile| profile.label).unwrap_or_default();
+        let icon_index = editor
+            .icon
+            .as_deref()
+            .and_then(|id| crate::display::ui::os_icons::CATALOG.iter().position(|icon| icon.id == id))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.ssh_destination_input.update(cx, |input, cx| input.set_value(address, window, cx));
+        self.ssh_port_input.update(cx, |input, cx| input.set_value(port, window, cx));
+        self.ssh_label_input.update(cx, |input, cx| input.set_value(label, window, cx));
+        // 存储的秘密绝不回填文本框；空值意味着编辑已有主机时保留原凭据。
+        self.ssh_password_input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.ssh_icon_select.update(cx, |select, cx| {
+            select.set_selected_index(Some(IndexPath::default().row(icon_index)), window, cx);
+        });
+        // 弹层只能有一个；字体目录若还开着会用它的页面级拦截层盖住
+        // SSH 编辑器，因此先把它收起。
+        self.font_picker_open = false;
+        self.ssh_editor = Some(editor);
+        self.ssh_status = None;
+        self.set_ssh_editor_masking(window, cx);
+        self.ssh_destination_input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn close_ssh_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ssh_editor = None;
+        self.ssh_password_input.update(cx, |input, cx| input.set_value("", window, cx));
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn ssh_destination_from_draft(&self, cx: &App) -> Result<String, String> {
+        let port = self.ssh_port_input.read(cx).value().trim().to_string();
+        if !port.is_empty() && !port.parse::<u16>().is_ok_and(|value| value > 0) {
+            return Err("端口需要是 1-65535 之间的数字".to_owned());
+        }
+        let address = self.ssh_destination_input.read(cx).value().trim().to_string();
+        let destination = crate::display::join_destination_port(&address, &port);
+        if destination.is_empty() {
+            return Err("请输入 SSH 地址，例如 user@example.com".to_owned());
+        }
+        if destination
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || ";&|<>\"'`".contains(ch))
+        {
+            return Err("地址不能包含空白、控制字符或 shell 分隔符".to_owned());
+        }
+        Ok(destination)
+    }
+
+    fn add_ssh_private_key(&mut self, cx: &mut Context<Self>) {
+        let Some(editor_id) = self.ssh_editor.as_ref().map(|editor| editor.id) else {
+            return;
+        };
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("选择 SSH 私钥".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let _ = this.update(cx, |pane, cx| {
+                // 用户可能在原生文件选择器打开期间关闭表单并编辑另一台
+                // 主机；旧选择结果绝不能落进后来打开的编辑会话。
+                if pane.ssh_editor.as_ref().map(|editor| editor.id) != Some(editor_id) {
+                    return;
+                }
+                let result = crate::display::file_dialog::validate_private_key_path(&path);
+                match result {
+                    Ok(path) => {
+                        if let Some(editor) = pane.ssh_editor.as_mut() {
+                            if crate::display::push_private_key(&mut editor.private_keys, path) {
+                                editor.revision = editor.revision.wrapping_add(1);
+                                editor.test_request_id = None;
+                                editor.test_status = None;
+                                pane.ssh_status = None;
+                            }
+                        }
+                    },
+                    Err(message) => pane.ssh_status = Some((message, true)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn test_ssh_editor(&mut self, cx: &mut Context<Self>) {
+        let destination = match self.ssh_destination_from_draft(cx) {
+            Ok(destination) => destination,
+            Err(message) => {
+                self.ssh_status = Some((message, true));
+                cx.notify();
+                return;
+            },
+        };
+        let Some(editor) = self.ssh_editor.as_mut() else { return };
+        if editor.testing() {
+            return;
+        }
+        self.ssh_test_seq = self.ssh_test_seq.wrapping_add(1).max(1);
+        let request_id = self.ssh_test_seq;
+        let revision = editor.revision;
+        let request = crate::ssh_session::SshTestRequest {
+            request_id,
+            destination: destination.clone(),
+            auth: editor.auth,
+            private_keys: editor.private_keys.clone(),
+            password: crate::display::auth_sections(editor.auth).0.then(|| {
+                self.ssh_password_input.read(cx).value().to_string()
+            }).filter(|password| !password.is_empty()),
+        };
+        let receiver = match crate::ssh_session::start_test(request) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.ssh_status = Some((format!("无法启动连接测试: {error}"), true));
+                cx.notify();
+                return;
+            },
+        };
+        editor.test_request_id = Some(request_id);
+        editor.test_status = Some(("正在测试连接…".to_owned(), false));
+        self.ssh_status = None;
+        cx.spawn(async move |this, cx| {
+            let result = receiver.await;
+            let _ = this.update(cx, |pane, cx| {
+                let Some(editor) = pane.ssh_editor.as_mut() else { return };
+                if editor.revision != revision || editor.test_request_id != Some(request_id) {
+                    return;
+                }
+                editor.test_request_id = None;
+                editor.test_status = Some(match result {
+                    Ok(result) if result.ok => {
+                        (format!("连接成功 · {} ms", result.elapsed_ms), false)
+                    },
+                    Ok(result) => (result.message, true),
+                    Err(_) => ("连接测试任务意外结束，请重试".to_owned(), true),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn save_ssh_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let destination = match self.ssh_destination_from_draft(cx) {
+            Ok(destination) => destination,
+            Err(message) => {
+                self.ssh_status = Some((message, true));
+                cx.notify();
+                return;
+            },
+        };
+        let Some(mut editor) = self.ssh_editor.take() else { return };
+        let original = editor.original_destination.clone();
+        let profile_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
+        let mut profiles = match crate::ssh_profiles::SshProfiles::load(&profile_path) {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                self.ssh_status = Some((format!("加载 SSH Profile 失败: {error}"), true));
+                self.ssh_editor = Some(editor);
+                cx.notify();
+                return;
+            },
+        };
+        // 先在副本里计算新列表，直到 Profile 与 settings 两份数据都写成功
+        // 才替换页面状态；Profile 写盘失败时背景列表不能先显示新地址。
+        let mut hosts = self.ssh_hosts.clone();
+        if let Some(original) = original.as_deref().filter(|old| *old != destination) {
+            profiles.rename(original, &destination);
+            hosts.remove(original);
+        }
+        let label = match self.ssh_label_input.read(cx).value().trim() {
+            "" => profiles.next_default_label("主机"),
+            value => value.to_owned(),
+        };
+        profiles.upsert(crate::ssh_profiles::SshProfileAuth {
+            destination: destination.clone(),
+            auth: editor.auth,
+            private_keys: editor.private_keys.clone(),
+            label: Some(label),
+            icon: editor.icon.clone(),
+        });
+        if let Err(error) = profiles.save(&profile_path) {
+            self.ssh_status = Some((format!("保存 SSH Profile 失败: {error}"), true));
+            self.ssh_editor = Some(editor);
+            cx.notify();
+            return;
+        }
+        hosts.remember(&destination);
+        if let Err(error) = hosts.persist() {
+            self.ssh_status = Some((format!("保存主机列表失败: {error}"), true));
+            self.ssh_editor = Some(editor);
+            cx.notify();
+            return;
+        }
+        self.ssh_hosts = hosts;
+        let password = self.ssh_password_input.read(cx).value().to_string();
+        if crate::display::auth_sections(editor.auth).0 && editor.save_password && !password.is_empty() {
+            #[cfg(windows)]
+            if let Err(error) = crate::ssh_credentials::store_password(&destination, password.as_bytes()) {
+                self.ssh_status = Some((format!("Profile 已保存，但密码写入凭据管理器失败: {error}"), true));
+                self.ssh_editor = Some(editor);
+                cx.notify();
+                return;
+            }
+        }
+        // Credential Manager 以 destination 为键。重命名后旧键既不会被新
+        // 连接使用，也不应无限留下；与旧壳一致，在配置和列表都成功写入后
+        // 才删除它，避免前面的落盘失败反而丢掉仍可用的凭据。
+        let credential_cleanup_error = original
+            .as_deref()
+            .filter(|old| *old != destination)
+            .and_then(|old| {
+                #[cfg(windows)]
+                {
+                    crate::ssh_credentials::forget_password(old).err()
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = old;
+                    None
+                }
+            });
+        // 只在落盘流程结束后清掉明文；编辑已有主机且密码框为空时不触碰
+        // 当前 destination 的凭据。
+        self.ssh_password_input.update(cx, |input, cx| input.set_value("", window, cx));
+        editor.private_keys.clear();
+        self.ssh_editor = None;
+        self.ssh_status = credential_cleanup_error.map_or_else(
+            || Some((format!("已保存 {destination}"), false)),
+            |error| Some((format!("已保存 {destination}，但旧地址凭据清理失败: {error}"), true)),
+        );
+        window.focus(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn ssh_editor_modal(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let editor = self.ssh_editor.as_ref()?.clone();
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let danger = theme.danger;
+        let (shows_password, shows_keys) = crate::display::auth_sections(editor.auth);
+        let title = if editor.original_destination.is_some() { "编辑 SSH 主机" } else { "添加 SSH 主机" };
+        let status = editor.test_status.clone().or_else(|| self.ssh_status.clone());
+        let icon = crate::display::ui::os_icons::resolve(editor.icon.as_deref());
+        let mode_button = |id: &'static str,
+                           label: &'static str,
+                           mode: crate::ssh_profiles::SshAuthMode,
+                           selected: bool| {
+            Button::new(id)
+                .label(label)
+                .small()
+                .selected(selected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(editor) = this.ssh_editor.as_mut() {
+                        editor.auth = mode;
+                        editor.revision = editor.revision.wrapping_add(1);
+                        editor.test_request_id = None;
+                        editor.test_status = None;
+                    }
+                    this.ssh_status = None;
+                    cx.notify();
+                }))
+        };
+        let key_rows = editor.private_keys.iter().enumerate().map(|(index, path)| {
+            let shown: SharedString = path.to_string_lossy().into_owned().into();
+            h_flex()
+                .id(SharedString::from(format!("ssh-key-{index}")))
+                .w_full()
+                .h(px(30.0))
+                .px_2()
+                .gap_2()
+                .items_center()
+                .rounded_md()
+                .bg(theme.input)
+                .child(div().flex_1().min_w_0().text_xs().truncate().child(shown))
+                .child(
+                    Button::new(SharedString::from(format!("ssh-key-remove-{index}")))
+                        .icon(IconName::Close)
+                        .ghost()
+                        .xsmall()
+                        .tooltip("移除私钥")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(editor) = this.ssh_editor.as_mut() {
+                                if index < editor.private_keys.len() {
+                                    editor.private_keys.remove(index);
+                                    editor.revision = editor.revision.wrapping_add(1);
+                                    editor.test_request_id = None;
+                                    editor.test_status = None;
+                                }
+                            }
+                            this.ssh_status = None;
+                            cx.notify();
+                        })),
+                )
+        });
+
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(theme.overlay)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                        cx.stop_propagation();
+                        this.close_ssh_editor(window, cx);
+                    }
+                }))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p_6()
+                        .child(
+                            v_flex()
+                                .w(px(560.0))
+                                .max_w(gpui::relative(1.0))
+                                .max_h(gpui::relative(1.0))
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.popover)
+                                .shadow_md()
+                                .overflow_hidden()
+                                .child(
+                                    h_flex()
+                                        .h(px(52.0))
+                                        .px_5()
+                                        .items_center()
+                                        .border_b_1()
+                                        .border_color(theme.border)
+                                        .child(div().flex_1().text_lg().child(title))
+                                        .child(
+                                            Button::new("ssh-editor-close")
+                                                .icon(IconName::Close)
+                                                .ghost()
+                                                .tooltip("关闭")
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.close_ssh_editor(window, cx);
+                                                })),
+                                        ),
+                                )
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .overflow_y_scrollbar()
+                                        .p_5()
+                                        .gap_4()
+                                        .child(
+                                            h_flex()
+                                                .gap_3()
+                                                .items_center()
+                                                .child(
+                                                    div()
+                                                        .size(px(42.0))
+                                                        .rounded(px(6.0))
+                                                        .border_1()
+                                                        .border_color(theme.border)
+                                                        .bg(theme.input)
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .font_family(self.current_font_chain(cx))
+                                                        .text_size(px(20.0))
+                                                        .child(icon.glyph.to_string()),
+                                                )
+                                                .child(
+                                                    v_flex()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .gap_1()
+                                                        .child(div().text_xs().text_color(muted).child("主机名称"))
+                                                        .child(Input::new(&self.ssh_label_input)),
+                                                )
+                                                .child(div().w(px(170.0)).child(Select::new(&self.ssh_icon_select))),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_2()
+                                                .child(div().text_color(theme.sidebar_accent_foreground).child("连接"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_3()
+                                                        .child(
+                                                            v_flex()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .gap_1()
+                                                                .child(div().text_xs().text_color(muted).child("地址"))
+                                                                .child(Input::new(&self.ssh_destination_input)),
+                                                        )
+                                                        .child(
+                                                            v_flex()
+                                                                .w(px(86.0))
+                                                                .gap_1()
+                                                                .child(div().text_xs().text_color(muted).child("端口"))
+                                                                .child(Input::new(&self.ssh_port_input)),
+                                                        ),
+                                                )
+                                                .child(div().text_xs().text_color(muted).child(
+                                                    "支持 user@host、ssh://user@host:2222 和 ~/.ssh/config 别名",
+                                                )),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .gap_2()
+                                                .child(div().text_color(theme.sidebar_accent_foreground).child("认证"))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .child(mode_button("ssh-auth-password", "密码", crate::ssh_profiles::SshAuthMode::Password, editor.auth == crate::ssh_profiles::SshAuthMode::Password))
+                                                        .child(mode_button("ssh-auth-key", "私钥", crate::ssh_profiles::SshAuthMode::PublicKey, editor.auth == crate::ssh_profiles::SshAuthMode::PublicKey))
+                                                        .child(mode_button("ssh-auth-auto", "自动", crate::ssh_profiles::SshAuthMode::Auto, editor.auth == crate::ssh_profiles::SshAuthMode::Auto))
+                                                        .child(mode_button("ssh-auth-interactive", "交互式", crate::ssh_profiles::SshAuthMode::KeyboardInteractive, editor.auth == crate::ssh_profiles::SshAuthMode::KeyboardInteractive)),
+                                                )
+                                                .when(shows_password, |section| {
+                                                    section
+                                                        .child(div().text_xs().text_color(muted).child("密码不会写入配置文件，只保存到 Windows 凭据管理器。"))
+                                                        .child(
+                                                            h_flex()
+                                                                .gap_2()
+                                                                .items_center()
+                                                                .child(div().flex_1().child(Input::new(&self.ssh_password_input)))
+                                                                .child(
+                                                                    Button::new("ssh-password-visibility")
+                                                                        .icon(if editor.show_password { IconName::EyeOff } else { IconName::Eye })
+                                                                        .ghost()
+                                                                        .tooltip(if editor.show_password { "隐藏密码" } else { "显示密码" })
+                                                                        .on_click(cx.listener(|this, _, window, cx| {
+                                                                            if let Some(editor) = this.ssh_editor.as_mut() {
+                                                                                editor.show_password = !editor.show_password;
+                                                                            }
+                                                                            this.set_ssh_editor_masking(window, cx);
+                                                                            cx.notify();
+                                                                        })),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            h_flex()
+                                                                .gap_2()
+                                                                .items_center()
+                                                                .child(Switch::new("ssh-save-password").checked(editor.save_password).on_click(
+                                                                    cx.listener(|this, value: &bool, _, cx| {
+                                                                        if let Some(editor) = this.ssh_editor.as_mut() {
+                                                                            editor.save_password = *value;
+                                                                            editor.revision = editor.revision.wrapping_add(1);
+                                                                            editor.test_request_id = None;
+                                                                            editor.test_status = None;
+                                                                        }
+                                                                        this.ssh_status = None;
+                                                                        cx.notify();
+                                                                    }),
+                                                                ))
+                                                                .child(div().child("保存密码")),
+                                                        )
+                                                })
+                                                .when(shows_keys, |section| {
+                                                    section
+                                                        .child(
+                                                            h_flex()
+                                                                .items_center()
+                                                                .child(div().flex_1().text_xs().text_color(muted).child(
+                                                                    if editor.private_keys.is_empty() {
+                                                                        "未指定时使用 ~/.ssh/config 的 IdentityFile 和默认 id_* 私钥"
+                                                                    } else {
+                                                                        "按列出的顺序尝试私钥"
+                                                                    },
+                                                                ))
+                                                                .child(
+                                                                    Button::new("ssh-add-private-key")
+                                                                        .icon(IconName::Plus)
+                                                                        .ghost()
+                                                                        .small()
+                                                                        .tooltip("添加私钥")
+                                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                                            this.add_ssh_private_key(cx);
+                                                                        })),
+                                                                ),
+                                                        )
+                                                        .children(key_rows)
+                                                })
+                                                .when(!shows_password && !shows_keys, |section| {
+                                                    section.child(
+                                                        div().text_xs().text_color(muted).child(
+                                                            "连接时在终端中按服务器提示输入密码或 MFA，不保存任何凭据。",
+                                                        ),
+                                                    )
+                                                }),
+                                        )
+                                        .when_some(status, |content, (message, error)| {
+                                            content.child(
+                                                h_flex()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .text_color(if error { danger } else { theme.success })
+                                                    .child(if error { Icon::new(IconName::CircleX).xsmall() } else { Icon::new(IconName::CircleCheck).xsmall() })
+                                                    .child(message),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    h_flex()
+                                        .h(px(58.0))
+                                        .px_5()
+                                        .gap_2()
+                                        .items_center()
+                                        .justify_end()
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(
+                                            Button::new("ssh-editor-test")
+                                                .label(if editor.testing() { "测试中…" } else { "测试连接" })
+                                                .outline()
+                                                .small()
+                                                .disabled(editor.testing())
+                                                .on_click(cx.listener(|this, _, _, cx| this.test_ssh_editor(cx))),
+                                        )
+                                        .child(
+                                            Button::new("ssh-editor-cancel")
+                                                .label("取消")
+                                                .outline()
+                                                .small()
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.close_ssh_editor(window, cx);
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("ssh-editor-save")
+                                                .label("保存")
+                                                .primary()
+                                                .small()
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.save_ssh_editor(window, cx);
+                                                })),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn section_ssh(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -2014,11 +2866,11 @@ impl SettingsPane {
                 format!("已保存 · {host}")
             };
             let connect_host = host.clone();
+            let edit_host = host.clone();
             let pin_host = host.clone();
             let delete_host = host.clone();
-            // 旧壳裁定（display/settings.rs 的 `ssh_host_action_rect` 注释）：
-            // 三个动作槽只在 hover 时显形，静态那一行只剩身份信息——一行常显
-            // 三枚等价按钮会让人逐个悬停去猜哪个是「进去」。
+            // 主机动作只在 hover 时显形，静态行只保留身份信息；编辑器迁移后
+            // 「编辑」与连接/置顶/删除同层，不再把认证配置藏在旧壳里。
             let row_group = SharedString::from(format!("ssh-host-actions-{ix}"));
             h_flex()
                 .id(SharedString::from(format!("ssh-host-row-{ix}")))
@@ -2065,7 +2917,7 @@ impl SettingsPane {
                         .flex_1()
                         .min_w_0()
                         .gap_1()
-                        .child(div().text_sm().truncate().child(label))
+                        .child(div().truncate().child(label))
                         .child(div().text_xs().text_color(muted).truncate().child(subtitle)),
                 )
                 .child(
@@ -2078,6 +2930,16 @@ impl SettingsPane {
                             cx.emit(SettingsPaneEvent::LaunchSsh(connect_host.clone()));
                             this.ssh_status = Some((format!("正在打开 {connect_host}…"), false));
                             cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("ssh-edit-{ix}")))
+                        .label("编辑")
+                        .small()
+                        .invisible()
+                        .group_hover(row_group.clone(), |button| button.visible())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_ssh_editor(Some(edit_host.clone()), window, cx);
                         })),
                 )
                 .child(
@@ -2113,13 +2975,7 @@ impl SettingsPane {
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this.ssh_delete_confirm.as_deref() == Some(delete_host.as_str()) {
-                                let host = delete_host.clone();
-                                let status = if this.ssh_hosts.is_from_config(&host) {
-                                    "已隐藏（~/.ssh/config 本身未改动，凭据保留）"
-                                } else {
-                                    "已从列表移除（凭据保留）"
-                                };
-                                this.ssh_apply(|lists| lists.remove(&host), status, cx);
+                                this.delete_ssh_host(&delete_host, cx);
                             } else {
                                 this.ssh_delete_confirm = Some(delete_host.clone());
                                 cx.notify();
@@ -2144,7 +3000,6 @@ impl SettingsPane {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_sm()
                                 .text_color(muted)
                                 .truncate()
                                 .child(host.clone()),
@@ -2165,8 +3020,6 @@ impl SettingsPane {
                 .collect::<Vec<_>>()
         });
 
-        let new_input = self.ssh_new_input.clone();
-        let focus_input = self.ssh_new_input.clone();
         let hidden_count = self.ssh_hosts.hidden_hosts().len();
 
         self.group("SSH 主机", cx)
@@ -2177,7 +3030,6 @@ impl SettingsPane {
                     .child(
                         div()
                             .flex_1()
-                            .text_sm()
                             .text_color(theme.foreground)
                             .child("已保存主机"),
                     )
@@ -2185,37 +3037,16 @@ impl SettingsPane {
                         Button::new("ssh-add-host")
                             .label("+ 添加主机")
                             .small()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                focus_input.update(cx, |input, cx| input.focus(window, cx));
-                                this.ssh_status = None;
-                                cx.notify();
+                            .primary()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_ssh_editor(None, window, cx);
                             })),
                     ),
             )
             .child(div().text_xs().text_color(muted).child(
                 "保存的目的地 + ~/.ssh/config 别名合并展示（与旧壳同一份数据）。\
-                 认证方式/私钥编辑器待迁移：默认自动依次尝试私钥、已存密码与交互认证。",
+                 添加/编辑面板可配置认证方式、私钥、密码凭据、名称和图标。",
             ))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().flex_1().child(Input::new(&self.ssh_new_input)))
-                    .child(Button::new("ssh-save").label("保存").small().on_click(cx.listener(
-                        move |this, _, window, cx| {
-                            let value = new_input.read(cx).value().trim().to_string();
-                            if value.is_empty() {
-                                this.ssh_status = Some(("目的地不能为空".to_owned(), true));
-                                cx.notify();
-                                return;
-                            }
-                            this.ssh_apply(|lists| lists.remember(&value), "已保存到主机列表", cx);
-                            this.ssh_new_input.update(cx, |input, cx| {
-                                input.set_value("", window, cx);
-                            });
-                        },
-                    ))),
-            )
             .child(v_flex().gap_1().children(host_rows))
             .child(
                 h_flex()
@@ -2253,7 +3084,6 @@ impl SettingsPane {
             .when_some(self.ssh_status.clone(), |group, (message, error)| {
                 group.child(
                     div()
-                        .text_sm()
                         .text_color(if error { theme.danger } else { theme.success })
                         .child(message),
                 )
@@ -2654,7 +3484,8 @@ impl SettingsPane {
             );
         }
 
-        self.group("加密备份", cx)
+        let local_group = self
+            .group("加密备份", cx)
             .child(
                 div()
                     .text_xs()
@@ -2687,12 +3518,17 @@ impl SettingsPane {
                                 this.restore_backup(cx);
                             })),
                     ),
-            )
+            );
+
+        v_flex()
+            .w_full()
+            .child(local_group)
+            .child(Self::group_divider(cx))
             .child(remote_group)
-            .when_some(self.backup_status.clone(), |group, (message, error)| {
-                group.child(
+            .when_some(self.backup_status.clone(), |page, (message, error)| {
+                page.child(
                     div()
-                        .text_sm()
+                        .pt_4()
                         .text_color(if error { theme.danger } else { theme.success })
                         .child(message),
                 )
@@ -3157,65 +3993,76 @@ impl SettingsPane {
         use gpui::IntoElement as _;
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let query = self.settings_search_input.read(cx).value().to_string();
         let active_bg = crate::gpui_shell::theme::settings_hover_bg(cx, true);
         let active_fg = theme.sidebar_accent_foreground;
         let hover_bg = crate::gpui_shell::theme::settings_hover_bg(cx, false);
         let row_h = px(32.0);
+        // 设置导航、内容和 workspace 左侧 tab 共享这一个主文字字号。
+        let main_text_px = self.font_size_px(cx);
 
-        // 86 + 根容器的 2px gap = 旧壳 nav_y0(88)。标题和导航从此共享
-        // 同一坐标节奏，连接/系统 caption 也精确占用一个 24px 槽位。
-        let mut nav =
-            v_flex().w(px(SETTINGS_NAV_WIDTH)).h_full().flex_shrink_0().px_2().gap(px(2.0)).child(
+        // tty7 Settings：左栏顶部是搜索框，页面入口直接平铺在下面。保留
+        // Nebula 原有 section 身份与显示顺序，只移除分类 caption。
+        let mut nav = v_flex()
+            .w(px(SETTINGS_NAV_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .px_2()
+            .gap(px(2.0))
+            .child(
                 div()
-                    .h(px(86.0))
-                    .px_3()
-                    .pt_5()
-                    .text_xl()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child("Nebula 设置"),
+                    .h(px(72.0))
+                    .w_full()
+                    .px_1()
+                    .pt_4()
+                    .child(
+                        Input::new(&self.settings_search_input)
+                            .prefix(IconName::Search)
+                            .small(),
+                    ),
             );
-        for (caption, members) in NAV_GROUPS {
-            if let Some(caption) = caption {
-                // 根容器在 caption 后还会补 2px gap，所以正文高度取 22px，
-                // 合计正好复刻旧壳 `nav_groups` 的 24px 占位。
-                nav = nav.child(
-                    div()
-                        .h(px(22.0))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(caption),
-                );
+        let mut visible_count = 0usize;
+        for ix in NAV_ORDER {
+            if !section_matches(ix, &query) {
+                continue;
             }
-            for &ix in members {
-                let active = ix == self.active_section;
-                nav = nav.child(
-                    div()
-                        .id(("settings-nav", ix))
-                        .px_2()
-                        .h(row_h)
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_sm()
-                        .when(active, |item| item.bg(active_bg).text_color(active_fg))
-                        .when(!active, |item| item.text_color(muted).hover(|s| s.bg(hover_bg)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.active_section = ix;
-                            cx.notify();
-                        }))
-                        .child(Icon::new(section_icon(ix)).small().text_color(if active {
-                            active_fg
-                        } else {
-                            muted
-                        }))
-                        .child(SECTIONS[ix]),
-                );
-            }
+            visible_count += 1;
+            let active = ix == self.active_section;
+            nav = nav.child(
+                div()
+                    .id(("settings-nav", ix))
+                    .px_2()
+                    .h(row_h)
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(main_text_px))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .when(active, |item| item.bg(active_bg).text_color(active_fg))
+                    .when(!active, |item| item.text_color(muted).hover(|s| s.bg(hover_bg)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.active_section = ix;
+                        cx.notify();
+                    }))
+                    .child(Icon::new(section_icon(ix)).small().text_color(if active {
+                        active_fg
+                    } else {
+                        muted
+                    }))
+                    .child(SECTIONS[ix]),
+            );
+        }
+        if visible_count == 0 {
+            nav = nav.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("没有匹配的设置"),
+            );
         }
         nav.into_any_element()
     }
@@ -3238,6 +4085,7 @@ impl Render for SettingsPane {
         let family: SharedString = self.current_font_chain(cx).into();
         let base_px = self.font_size_px(cx);
         let font_picker_open = self.font_picker_open;
+        let ssh_editor_modal = self.ssh_editor_modal(cx);
 
         div()
             .size_full()
@@ -3304,6 +4152,10 @@ impl Render for SettingsPane {
             .bg(crate::gpui_shell::theme::settings_panel_bg(cx))
             .text_color(cx.theme().foreground)
             .font_family(family)
+            // 主文字的字号/字重从设置根向两栏继承；局部仅允许说明文字、
+            // 徽标等语义上的次级信息覆盖为更小字号。
+            .text_size(px(base_px))
+            .font_weight(gpui::FontWeight::NORMAL)
             .flex()
             .flex_row()
             .child(nav)
@@ -3321,8 +4173,8 @@ impl Render for SettingsPane {
                             .px_6()
                             .flex()
                             .items_center()
-                            .text_xl()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_size(px(base_px))
+                            .font_weight(gpui::FontWeight::NORMAL)
                             .child(SECTIONS[self.active_section]),
                     )
                     .child(
@@ -3332,10 +4184,8 @@ impl Render for SettingsPane {
                             .px_6()
                             .pt_8()
                             .pb_8()
-                            // 正文基准字号跟随终端字号（旧壳 draw_chrome_text
-                            // 用 cell 尺寸；用户调字号设置页一起变）。行内不
-                            // 再自带 text_sm，缺省继承这里的档位。
-                            .text_size(px(base_px))
+                            // 正文继承设置根的统一主字号；只有说明、徽标、
+                            // 快捷键提示等次级信息在各自元素上显式缩小。
                             .overflow_y_scrollbar()
                             .child(content)
                             .child(
@@ -3349,6 +4199,7 @@ impl Render for SettingsPane {
                             ),
                     ),
             )
+            .when_some(ssh_editor_modal, |root, modal| root.child(modal))
             .when(font_picker_open, |root| {
                 root
                     // 搜索框是当前焦点时 Escape 仍沿元素树冒泡到设置根；

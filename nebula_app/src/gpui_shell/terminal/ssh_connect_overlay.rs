@@ -9,9 +9,9 @@
 //! - 等宽 cell 度量（`SizeInfo`）→ UI 基准字号（同一设置源）
 
 use gpui::{
-    AnyElement, Bounds, Context, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, canvas, div, fill, hsla, point,
+    AnyElement, Bounds, Context, Hsla, InteractiveElement as _, StatefulInteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, SharedString,
+    Styled as _, canvas, div, fill, hsla, point,
     px, size,
 };
 
@@ -93,11 +93,17 @@ pub(super) fn rail_canvas(
         move |bounds, _, window, _| {
             let w = f32::from(bounds.size.width);
             let node_d = 10.0_f32;
-            let x0 = node_d * 0.5;
-            let x1 = (w - node_d * 0.5).max(x0 + 1.0);
+            // 当前节点外圈比本体再大 7px；把首尾中心一并内缩，确保
+            // canvas 即使启用内容蒙版也不会把两端 halo 裁成半圆。
+            let halo_pad = 7.0_f32;
+            let x0 = node_d * 0.5 + halo_pad;
+            let x1 = (w - node_d * 0.5 - halo_pad).max(x0 + 1.0);
             let ox = f32::from(bounds.origin.x);
             let oy = f32::from(bounds.origin.y);
-            let cy = oy + f32::from(bounds.size.height) * 0.5;
+            // x/y/cy 全部保持 canvas 局部坐标；quad 提交时才加一次窗口
+            // origin。此前 cy 已含 oy，quad 又加 oy，整条轨道因此被画到
+            // canvas 下方（截图只剩阶段文字，节点/粒子全部不可见）。
+            let cy = f32::from(bounds.size.height) * 0.5;
 
             let mut quad = |x: f32, y: f32, w: f32, h: f32, r: f32, bg: Hsla| {
                 window.paint_quad(
@@ -170,9 +176,13 @@ pub(super) fn rail_canvas(
                         let mut col = color;
                         col.a = alpha * if k == 0 { 1.0 } else { 0.78 };
                         if !light {
-                            let rad = if k == 0 { 5.4 } else { 4.4 * fade + 1.2 };
+                            // GPUI 没有旧壳 `UiQuad::glow` 的软边 primitive；缩小近似盘面，
+                            // 避免轨道中段被一串大圆斑连成粗流。
+                            let rad = if k == 0 { 3.4 } else { 2.6 * fade + 0.8 };
                             let mut g = color;
-                            g.a = alpha * 0.22;
+                            // GPUI 用普通 quad 模拟旧壳的软 glow，降低 alpha
+                            // 才不会把粒子画成一串高亮斑块。
+                            g.a = alpha * 0.14;
                             quad(x - rad, cy - rad, rad * 2.0, rad * 2.0, rad, g);
                         }
                         quad(x - cr, cy - cr, cr * 2.0, cr * 2.0, cr, col);
@@ -193,9 +203,11 @@ pub(super) fn rail_canvas(
                     quad(x, y, d, d, d * 0.5, brand_r);
                 } else if i == active {
                     if !light {
-                        let mut g = accent;
-                        g.a = 0.45;
-                        quad(x - 3.0, y - 3.0, d + 6.0, d + 6.0, (d + 6.0) * 0.5, g);
+                        // 与旧壳单层 UiQuad::glow 对齐；额外的大外圈会让
+                        // 当前阶段节点显得像一枚持续发亮的按钮。
+                        let mut glow = accent;
+                        glow.a = 0.45;
+                        quad(x - 3.0, y - 3.0, d + 6.0, d + 6.0, (d + 6.0) * 0.5, glow);
                     }
                     quad(x, y, d, d, d * 0.5, accent);
                 } else {
@@ -213,7 +225,9 @@ pub(super) fn rail_canvas(
             }
         },
     )
-    .h(px(10.0))
+    // 节点本体 10px；最外层节点 halo 向两侧各溢出 7px。给足 24px，
+    // 否则 GPUI canvas 会把刚恢复的光晕上下裁平。
+    .h(px(24.0))
     .w_full()
     .into_any_element()
 }
@@ -246,7 +260,16 @@ pub(super) fn overlay(
     let panel = theme.popover;
     let card_bg = theme.group_box;
     let hairline = theme.border;
-    let accent = theme.link;
+    let dark = theme.is_dark();
+    let elevation = gpui::hsla(
+        0.0,
+        0.0,
+        0.0,
+        if dark { 56.0 / 255.0 } else { 26.0 / 255.0 },
+    );
+    // 遮罩沿用终端 pane 的真实底色；直接铺 popover 会把空网格区域
+    // 换成另一层面板色，尤其在浅色主题下会显得整块发白。
+    let backdrop = crate::gpui_shell::theme::card_content_bg(cx);
 
     // ── 身份行：机架图标 + 两行文字 + Logs 按钮 ──
     let rack_ink = ink_dim;
@@ -298,8 +321,48 @@ pub(super) fn overlay(
     let name: SharedString = ssh_connect::short_name(state.destination()).into();
     let meta: SharedString = format!("SSH · {}", state.destination()).into();
     let logs_target = cx.entity().downgrade();
-    let logs_label: SharedString =
-        format!("Logs  {}", if state.is_logs_open() { "⌃" } else { "⌄" }).into();
+    let logs_open = state.is_logs_open();
+    let logs_hover = theme.list_hover;
+    let logs_chevron = Icon::new(if logs_open {
+        IconName::ChevronUp
+    } else {
+        IconName::ChevronDown
+    })
+    .xsmall()
+    .text_color(ink_dim);
+    let logs_button = h_flex()
+        .id("ssh-connect-logs")
+        .h(px(30.0))
+        .w(px(68.0))
+        .px(px(12.0))
+        .items_center()
+        .justify_between()
+        .gap(px(4.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(hairline)
+        .bg(card_bg)
+        .cursor_pointer()
+        .hover(move |button| button.bg(logs_hover))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| {
+            if let Some(view) = logs_target.upgrade() {
+                view.update(cx, |this, cx| {
+                    if let Some(state) = &mut this.ssh_connect {
+                        state.toggle_logs();
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .child(
+            div()
+                .font_family(family.clone())
+                .text_size(px(ui_px * 0.80))
+                .text_color(ink_dim)
+                .child("Logs"),
+        )
+        .child(logs_chevron);
     let identity = h_flex()
         .gap(px(16.0))
         .items_center()
@@ -340,20 +403,7 @@ pub(super) fn overlay(
         .child(
             // 可交互按钮统一走 gpui-component：命中、Hover、键盘焦点与
             // 主题 token 都由组件库负责，不在业务卡片里维护第二套按钮。
-            Button::new("ssh-connect-logs")
-                .label(logs_label)
-                .outline()
-                .small()
-                .on_click(move |_, _, cx| {
-                    if let Some(view) = logs_target.upgrade() {
-                        view.update(cx, |this, cx| {
-                            if let Some(state) = &mut this.ssh_connect {
-                                state.toggle_logs();
-                                cx.notify();
-                            }
-                        });
-                    }
-                }),
+            logs_button,
         );
 
     // ── 轨道 + 阶段标签（首尾贴齐轨道两端，中间以节点为中心）──
@@ -386,21 +436,20 @@ pub(super) fn overlay(
                             .text_color(ink_i)
                             .child(label.clone());
                         match i {
-                            0 => div().absolute().left(px(0.0)).child(text).into_any_element(),
-                            3 => div().absolute().right(px(0.0)).child(text).into_any_element(),
-                            // 中间：零宽锚点 + 140px 居中槽（节点近似中心）
+                            // 节点中心是 12px / width-12px，旧壳首尾标签从
+                            // 节点本体边缘（中心 ±5px）起止，因此各留 7px。
+                            0 => div().absolute().left(px(7.0)).child(text).into_any_element(),
+                            3 => div().absolute().right(px(7.0)).child(text).into_any_element(),
+                            // 中间节点精确位于 width/3+4px 与 2*width/3-4px。
+                            // 140px 槽以该点为中心，标签与节点共享同一套几何。
                             _ => div()
                                 .absolute()
-                                .left(gpui::relative(if i == 1 {
-                                    0.328
-                                } else {
-                                    0.659
-                                }))
+                                .left(gpui::relative(if i == 1 { 1.0 / 3.0 } else { 2.0 / 3.0 }))
                                 .w(px(0.0))
                                 .child(
                                     div()
                                         .w(px(140.0))
-                                        .ml(px(-70.0))
+                                        .ml(px(if i == 1 { -66.0 } else { -74.0 }))
                                         .flex()
                                         .justify_center()
                                         .child(text),
@@ -530,7 +579,7 @@ pub(super) fn overlay(
             cx.stop_propagation();
         })
         // 遮罩：pane 底色整块盖住（连接期间 grid 是空的，跟着重绘会闪）
-        .child(div().absolute().inset_0().bg(panel))
+        .child(div().absolute().inset_0().bg(backdrop))
         .child(
             div()
                 .absolute()
@@ -548,7 +597,16 @@ pub(super) fn overlay(
                         .border_1()
                         .border_color(hairline)
                         .bg(panel)
-                        .shadow_md()
+                        // 旧壳只使用一层黑色阴影：20px 模糊、向下 7px，
+                        // 浅色 26/255、深色 56/255。品牌色不参与卡片投影。
+                        .shadow(vec![
+                            gpui::BoxShadow {
+                                color: elevation,
+                                offset: point(px(0.0), px(7.0)),
+                                blur_radius: px(20.0),
+                                spread_radius: px(0.0),
+                            },
+                        ])
                         .child(identity)
                         .child(rail_block)
                         .child(status_row)

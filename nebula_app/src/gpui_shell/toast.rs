@@ -28,6 +28,11 @@ pub use crate::display::ToastKind;
 /// `DUPLICATE_COOLDOWN` 同值同义；只挡逐字相同的文本）。
 const DUPLICATE_COOLDOWN: Duration = Duration::from_millis(600);
 
+/// 组件库 Notification 默认固定 `w_112`，短短一句也会铺成近半个窗口。
+/// Nebula 的 toast 按内容收缩；过长消息到此上限后自然换行。
+const TOAST_MIN_WIDTH: f32 = 240.0;
+const TOAST_MAX_WIDTH: f32 = 440.0;
+
 static LAST_TOAST: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
 fn is_duplicate(text: &str) -> bool {
@@ -42,11 +47,14 @@ fn is_duplicate(text: &str) -> bool {
 }
 
 fn note(kind: ToastKind, text: String) -> Notification {
-    match kind {
+    let note = match kind {
         ToastKind::Info => Notification::info(text),
         ToastKind::Success => Notification::success(text),
         ToastKind::Warning => Notification::warning(text),
-    }
+    };
+    // `refine_style` 在组件自身的 `w_112` 之后应用，所以这里能可靠覆盖
+    // 固定宽度；auto 让短消息收紧，max_w 给长路径/错误信息提供换行约束。
+    note.w_auto().min_w(px(TOAST_MIN_WIDTH)).max_w(px(TOAST_MAX_WIDTH))
 }
 
 /// 窗口构造闭包里 `NebulaWorkspace::new` 早于外层 `Root::new` 返回；此时

@@ -112,17 +112,22 @@ pub(super) fn pick_font_file(owner: &Window) -> Option<PathBuf> {
 
 pub(super) fn pick_private_key_file(owner: &Window) -> Option<Result<PathBuf, String>> {
     let path = platform::pick_file(owner, "Choose SSH private key", PRIVATE_KEY_FILTERS)?;
-    let contents = match std::fs::read(&path) {
-        Ok(contents) => contents,
-        Err(err) => return Some(Err(format!("无法读取私钥 {}: {err}", path.display()))),
-    };
-    Some(match classify_private_key_contents(&contents) {
-        PrivateKeyFileKind::PrivateKey => Ok(path),
+    Some(validate_private_key_path(&path))
+}
+
+/// Validate a path selected by a non-winit UI shell. The legacy picker and GPUI
+/// both use this exact classifier so a `.pub` file can never silently enter a
+/// profile just because the shell used a different native file-dialog API.
+pub(crate) fn validate_private_key_path(path: &std::path::Path) -> Result<PathBuf, String> {
+    let contents = std::fs::read(path)
+        .map_err(|err| format!("无法读取私钥 {}: {err}", path.display()))?;
+    match classify_private_key_contents(&contents) {
+        PrivateKeyFileKind::PrivateKey => Ok(path.to_path_buf()),
         PrivateKeyFileKind::PublicKey => Err("请选择私钥文件，不要选择 .pub 公钥".to_owned()),
         PrivateKeyFileKind::Unsupported => {
             Err("文件不是受支持的 OpenSSH、PEM 或 PPK 私钥".to_owned())
         },
-    })
+    }
 }
 
 pub(super) fn pick_upload_files(owner: &Window) -> Vec<PathBuf> {

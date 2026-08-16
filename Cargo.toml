@@ -65,15 +65,15 @@ winit = { path = "third_party/winit-0.30.13" }
 # "=0.5.1" 精确 pin；[patch] 要求版本匹配，fork 上的版本号保持不动。
 #
 # 下面两个 fork 的 `nebula` 分支基于 crates.io 发布基点（读自 registry 包内
-# 的 .cargo_vcs_info.json，包名/版本已在基点 rev 上核对过），当前补丁栈为空，
-# 构建产物应与 crates.io 版本一致：
+# 的 .cargo_vcs_info.json，包名/版本已在基点 rev 上核对过）。gpui 保持发布
+# 基点；gpui-component 仅带 popover 紧凑阴影补丁：
 #   Kuddev/zed            nebula @ 69e2130295c2649963eb639fc70b4f2ee8ea1624
 #                         （= zed-industries/zed 发布 gpui 0.2.2 的 rev，
 #                         crates/gpui；上游发布时 dirty=true，若首次编译出现
 #                         与 registry src 的差异以 diff 为准补一个对齐 commit）
-#   Kuddev/gpui-component nebula @ 0f0ab35233212f8f3277028995caf0c41e13ee6c
-#                         （= longbridge/gpui-component v0.5.1，crates/ui；
-#                         上级目录 gpui-component-v0.5.1/ 有源码检出可对照）
+#   Kuddev/gpui-component nebula @ a59f704c497d6e6e628ec2d401466d825d4a51b2
+#                         （= longbridge/gpui-component v0.5.1 + popover
+#                         单层紧凑阴影；不修改 gpui）
 #
 # 加补丁 = 提交到 fork 的 nebula 分支 → push → 更新下面的 rev（永远 pin
 # exact rev、不 pin branch）。每个补丁注明原因 + upstream PR 链接，上游合并
@@ -92,5 +92,5 @@ winit = { path = "third_party/winit-0.30.13" }
 #      shaper 遇换行 panic；替换保 byte 长度，run 偏移不失效）
 # 本地 fork 工作拷贝在 ../gpui-component-fork（已挂 tty7 remote 可 diff）。
 gpui = { git = "https://github.com/Kuddev/zed", rev = "69e2130295c2649963eb639fc70b4f2ee8ea1624" }
-gpui-component = { git = "https://github.com/Kuddev/gpui-component", rev = "0f0ab35233212f8f3277028995caf0c41e13ee6c" }
-gpui-component-assets = { git = "https://github.com/Kuddev/gpui-component", rev = "0f0ab35233212f8f3277028995caf0c41e13ee6c" }
+gpui-component = { git = "https://github.com/Kuddev/gpui-component", rev = "a59f704c497d6e6e628ec2d401466d825d4a51b2" }
+gpui-component-assets = { git = "https://github.com/Kuddev/gpui-component", rev = "a59f704c497d6e6e628ec2d401466d825d4a51b2" }

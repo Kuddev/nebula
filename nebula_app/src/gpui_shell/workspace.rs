@@ -412,6 +412,15 @@ fn ai_hook_target_pane(
     }
 }
 
+/// AI 接续是会话回放的独立闸门：关掉时 pane 的 cwd/launch/layout 仍可
+/// 恢复，但绝不把 AgentSession 转成会敲进新 shell 的命令。
+fn restored_agent_command(
+    resume_ai: bool,
+    agent: Option<&crate::session::AgentSession>,
+) -> Option<String> {
+    if resume_ai { agent.and_then(|agent| agent.resume_command()) } else { None }
+}
+
 fn open_in_file_manager(path: &Path) {
     #[cfg(windows)]
     let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
@@ -608,7 +617,10 @@ impl NebulaWorkspace {
         ai_events: std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let sidebar_width = nebula_settings::RuntimeSettings::load().sidebar_width;
+        // 启动相关设置只取样一次：本次开窗的恢复决策不能被恢复过程中的
+        // 文件变化拆成互相矛盾的 restore/resume 状态。
+        let runtime = nebula_settings::RuntimeSettings::load();
+        let sidebar_width = runtime.sidebar_width;
         let initial_grid = Self::size_window_to_default_grid(window, cx, sidebar_width);
         let this = cx.entity().downgrade();
         let appearance_sub = window.observe_window_appearance(move |_, cx| {
@@ -689,10 +701,11 @@ impl NebulaWorkspace {
                 notice,
             );
         }
-        // 会话恢复（共享 v4 schema + 崩溃断路器）：恢复不出任何 tab 才落
-        // 到出厂的单终端。1 Hz 自动保存随后启动，首笔成功写盘自然把
-        // `boot_attempts` 清零（快照恒以 0 构造，旧壳同义）。
-        if !this.try_restore_session(window, cx) {
+        // 会话恢复（共享 v4 schema + 崩溃断路器）：restore_session 关闭时
+        // 用短路保证不碰 session.json（不加载、隔离、标记或回放），直接落
+        // 到出厂的单终端。恢复开启但 resume_ai 关闭时仍回放布局/cwd，只不
+        // 注入 AI 接续命令。1 Hz 自动保存随后照常启动。
+        if !runtime.restore_session || !this.try_restore_session(runtime.resume_ai, window, cx) {
             this.add_terminal(window, cx);
         }
         Self::start_ai_hook_pump(ai_events, cx);
@@ -1296,7 +1309,12 @@ impl NebulaWorkspace {
 
     /// 启动恢复：断路器跳闸就隔离现场并走干净路径；恢复成功弹一条
     /// 自动消失的提示（崩溃现场多一句来源说明）。返回是否恢复出了 tab。
-    fn try_restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn try_restore_session(
+        &mut self,
+        resume_ai: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         use crate::display::ToastKind;
 
         let Some(mut session) = crate::session::load() else { return false };
@@ -1319,7 +1337,7 @@ impl NebulaWorkspace {
         crate::session::mark_boot_attempt(&mut session);
         let mut restored = 0usize;
         for tab in &session.tabs {
-            if self.restore_tab(tab, window, cx) {
+            if self.restore_tab(tab, resume_ai, window, cx) {
                 restored += 1;
             }
         }
@@ -1344,6 +1362,7 @@ impl NebulaWorkspace {
     fn restore_tab(
         &mut self,
         tab: &crate::session::TabSession,
+        resume_ai: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1374,7 +1393,7 @@ impl NebulaWorkspace {
                     shell_name: None,
                 }
             };
-            let command = agent.as_ref().and_then(|agent| agent.resume_command());
+            let command = restored_agent_command(resume_ai, agent.as_ref());
             panes.push(self.new_pane(grid, launch, command, window, cx));
         }
         if panes.is_empty() {
@@ -3492,6 +3511,7 @@ impl NebulaWorkspace {
                     div()
                         .font_family(mono_family.clone())
                         .text_size(px(label_px * SIDEBAR_TAG_SCALE))
+                        .font_weight(FontWeight::NORMAL)
                         .text_color(status_color)
                         .child(tag)
                         .into_any_element()
@@ -3522,6 +3542,9 @@ impl NebulaWorkspace {
                 // 旧壳 pill 圆角 = UI_CORNER_RADIUS_LOGICAL(8)，rounded_md(6)
                 // 偏小一圈，选中水洗的轮廓形状会不一样。
                 .rounded(px(crate::display::UI_CORNER_RADIUS_LOGICAL))
+                // GPUI 默认文本样式可能把侧栏整行带到中等/粗体；旧壳
+                // tab chrome 使用终端 Regular face，所有子文本从这里继承常规字重。
+                .font_weight(FontWeight::NORMAL)
                 .cursor_pointer()
                 .when(active, |item| item.bg(active_bg).text_color(active_fg))
                 .when(!active && !dragged, |item| {
@@ -3583,6 +3606,7 @@ impl NebulaWorkspace {
                             .flex_shrink_0()
                             .font_family(mono_family.clone())
                             .text_size(px(label_px))
+                            .font_weight(FontWeight::NORMAL)
                             .text_color(if active { active_fg } else { muted })
                             .child(glyph),
                     )
@@ -3609,6 +3633,9 @@ impl NebulaWorkspace {
                         .min_w_0()
                         .font_family(mono_family.clone())
                         .text_size(px(label_px))
+                        // 标签标题本身使用 Light；活动态只换前景/背景色，
+                        // 不再靠更粗字重强调，避免选中行看起来突然加粗。
+                        .font_weight(FontWeight::LIGHT)
                         .whitespace_nowrap()
                         .overflow_hidden()
                         .child(title)
@@ -3728,14 +3755,14 @@ impl NebulaWorkspace {
                             .pr_1()
                             .child(
                                 // 箭头与标题同一条 mono 文本 run（旧壳 codicon
-                                // 字位 \u{eab4}/\u{eab6} + BOLD），不用细线 SVG——
-                                // 实心字形才和旧壳一样有存在感。
+                                // 字位 \u{eab4}/\u{eab6} + Regular），不用细线 SVG——
+                                // 保持旧壳的常规字重。
                                 div()
                                     .w(px(tabs_disclosure_slot_w))
                                     .flex_shrink_0()
                                     .font_family(mono_family.clone())
                                     .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
-                                    .font_weight(FontWeight::BOLD)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(muted)
                                     .child(if self.tabs_section_collapsed {
                                         "\u{eab6}"
@@ -3746,7 +3773,7 @@ impl NebulaWorkspace {
                             .child(
                                 div()
                                     .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
-                                    .font_weight(FontWeight::BOLD)
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(muted)
                                     .child("TABS"),
                             )
@@ -3764,6 +3791,7 @@ impl NebulaWorkspace {
                                     .rounded_full()
                                     .bg(theme.muted)
                                     .text_size(px(label_px * SIDEBAR_TITLE_SCALE))
+                                    .font_weight(FontWeight::NORMAL)
                                     .text_color(faint)
                                     .child(count),
                             ),
@@ -4294,7 +4322,13 @@ impl Render for NebulaWorkspace {
             .child(
                 // 标题栏左上与旧壳同构：侧栏开关 + 齿轮，两枚裸图标，无应用名
                 // 文案。图标用静态 PanelLeft（旧壳折叠/展开共用同一枚方块标）。
+                //
+                // 组件库默认 TitleBar 只有 34px，而普通 Button 的命中块是
+                // 32px，上下各剩 1px，视觉上就会紧贴窗口顶边。旧壳合同是
+                // 8px 外边距 + 40px 标题带，总高 48px；显式覆写后按钮垂直
+                // 居中，上下各留 8px，且右侧窗口控制仍共享同一标题带。
                 TitleBar::new()
+                    .h(px(48.0))
                     .child(
                         h_flex()
                             // 旧壳两枚 32px 命中块之间固定留 8px；默认 Button
@@ -4500,6 +4534,21 @@ mod tests {
         assert_eq!(ai_hook_target_pane(&pane_ids, Some(99), Some(7)), None);
         assert_eq!(ai_hook_target_pane(&pane_ids, None, Some(7)), Some(7));
         assert_eq!(ai_hook_target_pane(&pane_ids, None, None), None);
+    }
+
+    #[test]
+    fn restored_agent_command_honors_resume_ai_without_changing_session_data() {
+        let agent = crate::session::AgentSession {
+            source: "claude".to_owned(),
+            session_id: Some("session-42".to_owned()),
+        };
+
+        assert_eq!(
+            restored_agent_command(true, Some(&agent)),
+            Some("claude --resume session-42".to_owned())
+        );
+        assert_eq!(restored_agent_command(false, Some(&agent)), None);
+        assert_eq!(restored_agent_command(true, None), None);
     }
 
     #[test]

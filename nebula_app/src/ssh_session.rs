@@ -830,51 +830,84 @@ pub struct SshTestRequest {
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(12);
 
-/// 解析 + 连接 + 无人值守认证一轮，结果连同耗时经事件送回窗口线程。
-/// 绝不弹 AskPass：交互式方法在测试中一律跳过（见 [`test_authenticate`]）。
+/// 一次草稿测试的完成数据。旧 winit 壳与 GPUI 设置页共用它：业务层只负责
+/// 解析、代理和认证，具体 UI 决定怎样把结果投递回自己的事件循环。
+#[derive(Debug, Clone)]
+pub struct SshTestResult {
+    pub request_id: u64,
+    pub destination: String,
+    pub ok: bool,
+    pub message: String,
+    pub elapsed_ms: u64,
+}
+
+/// 执行一次无人值守的草稿测试。绝不弹 AskPass：交互式方法在测试中一律跳过
+/// （见 [`test_authenticate`]）。
+async fn run_test(request: SshTestRequest) -> SshTestResult {
+    let started = std::time::Instant::now();
+    let request_id = request.request_id;
+    let raw = request.destination.clone();
+    let outcome = tokio::time::timeout(TEST_TIMEOUT, async {
+        let (resolved, global) = tokio::task::spawn_blocking({
+            let raw = raw.clone();
+            move || {
+                let resolved = SshDestination::resolve(&raw)?;
+                let global = crate::ssh_proxy::SshProxyConfig::load_global();
+                Ok::<_, io::Error>((resolved, global))
+            }
+        })
+        .await
+        .map_err(|err| -> SessionError { format!("SSH 地址解析任务失败: {err}").into() })??;
+        // SSH 编辑器不再维护重复的每主机代理；测试与真连都只读取网络页
+        // 的当前配置。`ProxyJump` 属于 OpenSSH 目标解析，仍按其原语义保留。
+        let proxy = resolve_network_proxy(&global, &resolved)
+            .map_err(|err| -> SessionError { format!("SSH 代理配置无效: {err}").into() })?;
+        test_connect(&resolved, &request, proxy.as_ref()).await
+    })
+    .await;
+    let (ok, message) = match outcome {
+        Ok(Ok(())) => (true, String::new()),
+        Ok(Err(err)) => (false, err.to_string()),
+        Err(_) => (false, format!("连接超时（{} 秒无响应）", TEST_TIMEOUT.as_secs())),
+    };
+    SshTestResult {
+        request_id,
+        destination: raw,
+        ok,
+        message,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    }
+}
+
+/// 启动测试并交给调用方异步等待结果。GPUI 没有旧壳的 winit `EventLoopProxy`，
+/// 所以它通过这个 receiver 把结果安全地回写到自己的 Entity；网络与认证仍然
+/// 完全复用同一条 Tokio SSH runtime。
+pub fn start_test(
+    request: SshTestRequest,
+) -> io::Result<tokio::sync::oneshot::Receiver<SshTestResult>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    runtime()?.spawn(async move {
+        let _ = sender.send(run_test(request).await);
+    });
+    Ok(receiver)
+}
+
+/// 旧 winit 壳的事件投递适配器。测试实现本身在 [`run_test`]，避免两个壳
+/// 各自维护解析、代理和认证的近似副本。
 pub fn spawn_test(
     request: SshTestRequest,
     proxy: winit::event_loop::EventLoopProxy<crate::event::Event>,
     window_id: winit::window::WindowId,
 ) -> io::Result<()> {
     runtime()?.spawn(async move {
-        let started = std::time::Instant::now();
-        let request_id = request.request_id;
-        let raw = request.destination.clone();
-        let outcome = tokio::time::timeout(TEST_TIMEOUT, async {
-            let (resolved, global) = tokio::task::spawn_blocking({
-                let raw = raw.clone();
-                move || {
-                    let resolved = SshDestination::resolve(&raw)?;
-                    let global = crate::ssh_proxy::SshProxyConfig::load_global();
-                    Ok::<_, io::Error>((resolved, global))
-                }
-            })
-            .await
-            .map_err(|err| -> SessionError {
-                format!("SSH 地址解析任务失败: {err}").into()
-            })??;
-            // SSH 编辑器不再维护重复的每主机代理；测试与真连都只读取网络页
-            // 的当前配置。`ProxyJump` 属于 OpenSSH 目标解析，仍按其原语义保留。
-            let proxy =
-                resolve_network_proxy(&global, &resolved).map_err(|err| -> SessionError {
-                    format!("SSH 代理配置无效: {err}").into()
-                })?;
-            test_connect(&resolved, &request, proxy.as_ref()).await
-        })
-        .await;
-        let (ok, message) = match outcome {
-            Ok(Ok(())) => (true, String::new()),
-            Ok(Err(err)) => (false, err.to_string()),
-            Err(_) => (false, format!("连接超时（{} 秒无响应）", TEST_TIMEOUT.as_secs())),
-        };
+        let result = run_test(request).await;
         let _ = proxy.send_event(crate::event::Event::new(
             crate::event::EventType::SshTestDone {
-                request_id,
-                destination: raw,
-                ok,
-                message,
-                elapsed_ms: started.elapsed().as_millis() as u64,
+                request_id: result.request_id,
+                destination: result.destination,
+                ok: result.ok,
+                message: result.message,
+                elapsed_ms: result.elapsed_ms,
             },
             window_id,
         ));
