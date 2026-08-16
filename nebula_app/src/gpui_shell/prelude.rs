@@ -6,10 +6,12 @@
 // 重新从上游散落导入而绕过升级边界。
 #[allow(unused_imports)]
 pub use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, InteractiveElementExt as _, Selectable as _,
-    Sizable as _, TitleBar,
+    ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, InteractiveElementExt as _,
+    Selectable as _, Sizable as _, TitleBar,
+    alert::{Alert, AlertVariant},
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
+    color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
     dialog::{Dialog, DialogButtonProps},
     dock::{DockArea, DockAreaState, DockItem, Panel, PanelControl, PanelEvent, PanelState, TabPanel},
     h_flex,
@@ -19,6 +21,7 @@ pub use gpui_component::{
     scroll::ScrollableElement as _,
     select::{Select, SelectState},
     sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem},
+    slider::{Slider, SliderEvent, SliderState},
     spinner::Spinner,
     switch::Switch,
     tab::{Tab, TabBar},

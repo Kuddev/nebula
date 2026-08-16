@@ -157,7 +157,9 @@ pub(crate) fn caret_blink_on() -> bool {
 pub use settings::{
     BgPickerPart, NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit,
 };
-pub(crate) use settings::{CellWidthMode, NewTabPosition, SettingsOpacityTarget};
+pub(crate) use settings::{
+    BACKGROUND_SWATCHES, CellWidthMode, NewTabPosition, SettingsOpacityTarget,
+};
 
 /// 按显示列宽贪心断行（确认框正文等 UI 段落用）：CJK 逐字可断，行首空
 /// 格吞掉；零宽字符跟随前一个字。不做拉丁连词回退——正文以中文为主，
@@ -797,7 +799,7 @@ const AI_LOGO_PI_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_pi.png");
 /// (which starts at 1), so the two id spaces can share the renderer cache.
 const AI_LOGO_ID_BASE: u64 = 1 << 62;
 
-fn prepare_ai_logo_texture(
+pub(crate) fn prepare_ai_logo_texture(
     rgba: &[u8],
     width: u32,
     height: u32,
@@ -852,11 +854,10 @@ fn prepare_ai_logo_texture(
 /// Real-logo mapping for AI clients; everything else falls back to the
 /// [`program_icon`] glyph. Gated on PNG support: without it there is no
 /// texture to draw and the glyph must stay.
-pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
-    if cfg!(any(not(feature = "png"), target_os = "macos")) {
-        return None;
-    }
-    match program {
+pub(crate) fn ai_logo_for_program(program: &str) -> Option<AiLogo> {
+    let normalized =
+        extract_program(program).unwrap_or_else(|| program.trim().to_ascii_lowercase());
+    match normalized.as_str() {
         "claude" => Some(AiLogo::Claude),
         "codex" => Some(AiLogo::OpenAi),
         "opencode" => Some(AiLogo::OpenCode),
@@ -864,6 +865,13 @@ pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
         "grok" | "grok-cli" => Some(AiLogo::Grok),
         _ => None,
     }
+}
+
+pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
+    if cfg!(any(not(feature = "png"), target_os = "macos")) {
+        return None;
+    }
+    ai_logo_for_program(program)
 }
 
 /// Drop a `file://` / `file:///` scheme so a local link reads as a plain
@@ -1247,10 +1255,10 @@ fn nebula_command_hint<'a>(commands: &'a [String], prefix: &str) -> Option<&'a s
             return None;
         }
         let (head, rem) = command.split_at(prefix.len());
-        #[cfg(windows)]
-        let matches = head.eq_ignore_ascii_case(prefix);
-        #[cfg(not(windows))]
-        let matches = head == prefix;
+            #[cfg(windows)]
+            let matches = head.eq_ignore_ascii_case(prefix);
+            #[cfg(not(windows))]
+            let matches = head == prefix;
 
         matches.then_some(rem)
     })
@@ -1265,19 +1273,35 @@ fn nebula_command_hints<'a>(commands: &'a [String], prefix: &str, limit: usize) 
         return Vec::new();
     }
     let mut out: Vec<&'a str> = Vec::new();
-    for command in commands {
-        if command.len() <= prefix.len() || !command.is_char_boundary(prefix.len()) {
-            continue;
-        }
-        let head = &command[..prefix.len()];
+
+    // 精确命令先列出来：用户输入 `ls` 时，第一感知应该是“这个命令可以
+    // 直接接受”，而不是从 `LsaIso` 开始的一串较长邻居。命令表通常已排
+    // 序，但这里不能把 UX 合同寄托在数据源顺序上，所以显式分两趟。
+    for exact_only in [true, false] {
+        for command in commands {
+            if command.len() < prefix.len() || !command.is_char_boundary(prefix.len()) {
+                continue;
+            }
+            let head = &command[..prefix.len()];
+            let exact = command.len() == prefix.len();
+            if exact != exact_only {
+                continue;
+            }
         #[cfg(windows)]
         let matches = head.eq_ignore_ascii_case(prefix);
         #[cfg(not(windows))]
         let matches = head == prefix;
-        if matches && !out.iter().any(|seen| *seen == command.as_str()) {
-            out.push(command);
-            if out.len() == limit {
-                break;
+
+            #[cfg(windows)]
+            let duplicate = out.iter().any(|seen| seen.eq_ignore_ascii_case(command));
+            #[cfg(not(windows))]
+            let duplicate = out.iter().any(|seen| *seen == command.as_str());
+
+            if matches && !duplicate {
+                out.push(command);
+                if out.len() == limit {
+                    return out;
+                }
             }
         }
     }
@@ -10465,6 +10489,7 @@ impl Display {
         }
         state.line_buf.clear();
         state.screen_line.clear();
+        state.completion_suppressed_line = None;
         state.clear_completion_hints();
     }
 
@@ -11715,9 +11740,13 @@ mod nebula_ux_tests {
     #[test]
     fn popup_command_hints_keep_longer_neighbors_and_dedup() {
         let commands = strings(&["claude", "claude-agent-acp", "claude", "cargo"]);
-        // 弹窗列表与 ghost 相反：完整命令也要把更长的邻居列出来。
-        assert_eq!(nebula_command_hints(&commands, "claude", 8), vec!["claude-agent-acp"]);
+        // 弹窗列表与 ghost 相反：精确命令置顶，同时保留更长的邻居。
+        assert_eq!(
+            nebula_command_hints(&commands, "claude", 8),
+            vec!["claude", "claude-agent-acp"]
+        );
         assert_eq!(nebula_command_hints(&commands, "c", 2), vec!["claude", "claude-agent-acp"]);
+        assert_eq!(nebula_command_hints(&strings(&["LsaIso", "lsass", "ls"]), "ls", 8)[0], "ls");
         assert!(nebula_command_hints(&commands, "", 8).is_empty());
     }
 

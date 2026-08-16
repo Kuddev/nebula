@@ -19,11 +19,15 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, Rgba as GpuiRgba,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ModifiersChangedEvent, MouseButton,
+    ParentElement as _, Render, RenderImage, Rgba as GpuiRgba, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, anchored, deferred, div,
+    img, px,
 };
+use image::Frame;
+use std::sync::Arc;
 use gpui_component::input::InputEvent;
-use gpui_component::select::SelectEvent;
+use gpui_component::select::{SelectEvent, SelectItem};
 use nebula_settings::{RuntimeSettings, ThemeName, format_hex_rgb, persist_keys};
 
 use crate::gpui_shell::prelude::*;
@@ -104,6 +108,75 @@ pub enum SettingsPaneEvent {
 }
 
 type SharedSelect = Entity<SelectState<Vec<SharedString>>>;
+type SharedShellSelect = Entity<SelectState<Vec<ShellSelectItem>>>;
+
+#[derive(Clone)]
+struct ShellSelectItem {
+    id: String,
+    name: SharedString,
+    image: Option<Arc<RenderImage>>,
+}
+
+impl ShellSelectItem {
+    fn new(id: String, name: String) -> Self {
+        let image = crate::shell_detect::color_icon_png(&id).and_then(|bytes| {
+            let mut rgba = image::load_from_memory(bytes).ok()?.into_rgba8();
+            // GPUI RenderImage consumes BGRA frames, matching the workspace
+            // sidebar loader; keeping the original colors is the point of this
+            // picker, unlike the old glyph-only label.
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            Some(Arc::new(RenderImage::new([Frame::new(rgba)])))
+        });
+        Self { id, name: name.into(), image }
+    }
+
+    fn view(&self, size: f32) -> gpui::AnyElement {
+        let icon: gpui::AnyElement = if let Some(image) = &self.image {
+            gpui::StyledImage::object_fit(
+                img(image.clone()).size(px(size)).flex_shrink_0(),
+                gpui::ObjectFit::Contain,
+            )
+            .into_any_element()
+        } else {
+            Icon::new(IconName::SquareTerminal).xsmall().into_any_element()
+        };
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(icon)
+            .child(div().flex_1().min_w_0().child(self.name.clone()))
+            .into_any_element()
+    }
+}
+
+impl SelectItem for ShellSelectItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.name.clone()
+    }
+
+    fn display_title(&self) -> Option<gpui::AnyElement> {
+        // 闭态留出 chevron 与上下内边距；20px 在 32px Select 内不会挤字。
+        Some(self.view(20.0))
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        // 旧壳 ShellPickerRow 的品牌图标是 24×24 逻辑像素。
+        self.view(24.0)
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+
+    fn matches(&self, query: &str) -> bool {
+        self.name.to_lowercase().contains(&query.to_lowercase())
+            || self.id.to_lowercase().contains(&query.to_lowercase())
+    }
+}
 
 pub struct SettingsPane {
     focus_handle: FocusHandle,
@@ -112,9 +185,12 @@ pub struct SettingsPane {
     /// 当前分区（`SECTIONS` 下标）；旧壳默认落在外观。
     active_section: usize,
     selects: Vec<(&'static str, SharedSelect)>,
+    shell_select: SharedShellSelect,
     dir_input: Entity<InputState>,
-    bg_input: Entity<InputState>,
-    wallpaper_input: Entity<InputState>,
+    /// 外观页使用组件库的真实交互控件；状态实体是渲染与拖拽的唯一来源。
+    background_color: Entity<ColorPickerState>,
+    opacity_slider: Entity<SliderState>,
+    wallpaper_opacity_slider: Entity<SliderState>,
     proxy_url_input: Entity<InputState>,
     proxy_bypass_input: Entity<InputState>,
     provider_store: crate::ai_providers::ProviderStore,
@@ -159,6 +235,13 @@ pub struct SettingsPane {
     backup_remote_inputs: Vec<Entity<InputState>>,
     /// 密文槽（WebDAV 密码 / S3 Secret）：masked，写入凭据管理器后即清。
     backup_secret_input: Entity<InputState>,
+    /// 按键映射编辑器（旧壳 spec 002 的 GPUI 形态）：搜索输入 + 捕获态 +
+    /// `keybind=` 行的工作镜像。模型层（combo 解析/展示/冲突/默认表）复用
+    /// `display::keymap`，两壳同一套存储与语义。
+    keymap_search_input: Entity<InputState>,
+    keymap_capture: Option<usize>,
+    keymap_capture_preview: String,
+    keymap_binds: Vec<(String, String)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -211,14 +294,6 @@ impl SettingsPane {
             &["跟随系统", "简体中文", "English"],
             &["system", "zh-CN", "en-US"],
             runtime.language.settings_value(),
-            window,
-            cx,
-        );
-        add_select(
-            "shell",
-            &["PowerShell", "Bash (Git Bash)"],
-            &["powershell", "bash"],
-            &shell_current,
             window,
             cx,
         );
@@ -326,21 +401,104 @@ impl SettingsPane {
             cx,
         );
 
+        // 与旧壳的默认 Shell 菜单共用检测层：不能在设置页另维护一份两项
+        // 白名单，否则 CMD/Nushell/WSL 会出现在新建终端菜单，却无法设为默认。
+        // 选项 = 彩色品牌 PNG（extra/shell-icons，与旧壳设置页/命令面板同
+        // 一批资产）+ 名称，闭态与下拉同源（SelectItem::display_title/render）。
+        let detected = crate::shell_detect::detect_shells();
+        let mut shell_items: Vec<ShellSelectItem> = detected
+            .into_iter()
+            .map(|shell| ShellSelectItem::new(shell.id, shell.name))
+            .collect();
+        if shell_items.is_empty() {
+            // 非 Windows 构建不做安装探测，但历史配置仍支持这两个由 PTY
+            // 集成层负责启动的稳定 id，设置页不能因此变成空下拉。
+            shell_items = vec![
+                ShellSelectItem::new(
+                    "powershell".into(),
+                    "PowerShell".into(),
+                ),
+                ShellSelectItem::new("bash".into(), "Git Bash".into()),
+            ];
+        }
+        if !shell_items.iter().any(|item| item.id == shell_current) {
+            // 检测结果可能暂时找不到已保存的 WSL/profile id；先把它保留在首位，
+            // 用户仍可看到并重新选择，下一次检测恢复后不会丢失持久化值。
+            shell_items.insert(
+                0,
+                ShellSelectItem::new(
+                    shell_current.clone(),
+                    crate::shell_detect::display_name_for_id(&shell_current).to_owned(),
+                ),
+            );
+        }
+        let shell_index = shell_items
+            .iter()
+            .position(|item| item.id == shell_current)
+            .unwrap_or(0);
+        let shell_select = cx.new(|cx| {
+            SelectState::new(shell_items, Some(IndexPath::default().row(shell_index)), window, cx)
+        });
+        subscriptions.push(cx.subscribe_in(
+            &shell_select,
+            window,
+            move |this: &mut Self,
+                  _entity: &SharedShellSelect,
+                  event: &SelectEvent<Vec<ShellSelectItem>>,
+                  _window: &mut Window,
+                  cx: &mut Context<Self>| {
+                if let SelectEvent::Confirm(Some(id)) = event {
+                    this.persist(&[("shell", id.clone())], cx);
+                }
+            },
+        ));
+
         let dir_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("留空 = 继承当前窗格目录")
                 .default_value(runtime.startup_directory.clone().unwrap_or_default())
         });
-        let bg_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("#rrggbb，留空跟随主题")
-                .default_value(runtime.background.map(format_hex_rgb).unwrap_or_default())
+        let background_color_value = runtime
+            .background
+            .map(|[r, g, b]| rgb_hsla(r, g, b))
+            .unwrap_or_else(|| cx.theme().background);
+        let background_color = cx.new(|cx| {
+            ColorPickerState::new(window, cx).default_value(background_color_value)
         });
-        let wallpaper_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(r"本地图片路径（png/jpg/webp/bmp），留空关闭")
-                .default_value(runtime.background_image.clone().unwrap_or_default())
+        subscriptions.push(cx.subscribe(
+            &background_color,
+            |this, _, event: &ColorPickerEvent, cx| {
+                if let ColorPickerEvent::Change(Some(color)) = event {
+                    this.persist(&[("background", color.to_hex())], cx);
+                }
+            },
+        ));
+        let opacity_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.20)
+                .max(1.00)
+                .step(0.05)
+                .default_value(runtime.opacity)
         });
+        subscriptions.push(cx.subscribe(
+            &opacity_slider,
+            |this, _, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(value) => this.set_opacity(value.start(), cx),
+            },
+        ));
+        let wallpaper_opacity_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.05)
+                .max(1.00)
+                .step(0.05)
+                .default_value(runtime.background_image_opacity)
+        });
+        subscriptions.push(cx.subscribe(
+            &wallpaper_opacity_slider,
+            |this, _, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(value) => this.set_wallpaper_opacity(value.start(), cx),
+            },
+        ));
         let proxy_url_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("socks5://127.0.0.1:7890")
@@ -406,9 +564,11 @@ impl SettingsPane {
             runtime,
             active_section: 0,
             selects,
+            shell_select,
             dir_input,
-            bg_input,
-            wallpaper_input,
+            background_color,
+            opacity_slider,
+            wallpaper_opacity_slider,
             proxy_url_input,
             proxy_bypass_input,
             provider_store,
@@ -450,6 +610,24 @@ impl SettingsPane {
             backup_secret_input: cx.new(|cx| {
                 InputState::new(window, cx).masked(true).placeholder("凭据只写入系统凭据管理器")
             }),
+            keymap_search_input: {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索动作或按键…"));
+                subscriptions.push(cx.subscribe_in(
+                    &input,
+                    window,
+                    |_this: &mut Self, _: &Entity<InputState>, event: &InputEvent, _: &mut Window, cx: &mut Context<Self>| {
+                        // 搜索词变化只影响可见行集合；捕获态不因打字被打断
+                        // （捕获期间焦点在分区根上，输入框收不到键）。
+                        if matches!(event, InputEvent::Change) {
+                            cx.notify();
+                        }
+                    },
+                ));
+                input
+            },
+            keymap_capture: None,
+            keymap_capture_preview: String::new(),
+            keymap_binds: nebula_settings::keybind_pairs(),
             _subscriptions: subscriptions,
         }
     }
@@ -636,7 +814,7 @@ impl SettingsPane {
     }
 
     /// 字体行（收起态）：当前主族用它自己渲染（最诚实的预览）+ 更换按钮。
-    fn font_picker_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn font_picker_row(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let chain = self.current_font_chain(cx);
         let primary: SharedString = crate::renderer::primary_font_family(&chain).to_owned().into();
         Self::row(
@@ -654,6 +832,7 @@ impl SettingsPane {
                         })),
                 ),
         )
+        .into_any_element()
     }
 
     /// 展开面板：搜索 + 「显示全部」临时过滤 + 目录列表（真实字体预览、
@@ -751,12 +930,19 @@ impl SettingsPane {
         let empty = rows.is_empty();
 
         v_flex()
-            .w_full()
+            // 面板由字体行的 deferred/anchored 槽托管，不参与设置文档流高度；
+            // 固定宽度让族名、徽标和 WYSIWYG 样张同时可读，窄窗由 anchored
+            // 自动贴边，行为与组件库 Select 的弹层一致。
+            .w(px(520.0))
             .p_3()
             .gap_2()
             .rounded_lg()
             .border_1()
             .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .shadow_lg()
+            .occlude()
             .child(
                 h_flex()
                     .gap_3()
@@ -813,12 +999,37 @@ impl SettingsPane {
             )
     }
 
+    /// 字体行和浮层的锚点。使用 GPUI 与 `Select` 相同的
+    /// `deferred(anchored())` 管线，浮层不会把下面的补全分组向下推，也不会
+    /// 被设置正文的滚动容器按普通子项布局。
+    fn font_picker_dropdown(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let row = self.font_picker_row(cx);
+        let panel = self.font_picker_open.then(|| self.font_picker_panel(cx));
+
+        div()
+            .relative()
+            .w_full()
+            .h(px(SETTINGS_ROW_HEIGHT))
+            .flex_shrink_0()
+            .child(row)
+            .when_some(panel, |anchor, panel| {
+                anchor.child(deferred(
+                    anchored()
+                        .snap_to_window_with_margin(px(8.0))
+                        .child(panel.mt_1p5()),
+                ))
+            })
+    }
+
     fn select_of(&self, key: &str) -> Option<SharedSelect> {
         self.selects.iter().find(|(k, _)| *k == key).map(|(_, entity)| entity.clone())
     }
 
     /// 旧壳设置页靠留白与标题分组，不用外层线框把每段内容圈成盒子。
     fn group(&self, title: &'static str, cx: &Context<Self>) -> gpui::Div {
+        // 分组标题：1.2× 字号 + ink_strong（旧壳 settings.rs 分组标题裁定）。
+        // text_sm + muted 那一档是正文注释的层级，分组标题要压得住下面的行。
+        let title_px = self.font_size_px(cx) * 1.2;
         v_flex()
             .w_full()
             .child(
@@ -826,8 +1037,8 @@ impl SettingsPane {
                     .h(px(SETTINGS_GROUP_TITLE_HEIGHT))
                     .flex()
                     .items_center()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_size(px(title_px))
+                    .text_color(cx.theme().sidebar_accent_foreground)
                     .child(title),
             )
             // 旧壳组标题占 26px，首行位于标题顶端下方 42px；中间这 16px
@@ -841,19 +1052,29 @@ impl SettingsPane {
             .h(px(SETTINGS_ROW_HEIGHT))
             .flex_shrink_0()
             .items_center()
-            .child(div().flex_1().min_w_0().text_sm().child(label))
+            // 旧壳 `settings_geometry`：标签起 row_x+16，控件右缘距行右 16
+            // （ROW_INSET）。GPUI 行内两端原来都贴边，长表单左缘和右缘会
+            // 呈一条光柱——旧壳的两档缩进是刻意留的呼吸边。
+            .pr_4()
+            .child(div().flex_1().min_w_0().pl_4().child(label))
             .child(control)
     }
 
-    fn select_row(&self, key: &'static str, label: &'static str) -> impl IntoElement {
+    fn select_row(&self, key: &'static str, label: &'static str, cx: &Context<Self>) -> impl IntoElement {
         let select = self.select_of(key);
-        Self::row(label, div().w(px(220.0)).children(select.map(|state| Select::new(&state))))
+        // 闭态选中值 = accent（旧壳 combobox_value 15 处调用 14 处传
+        // sk.accent）。闭框/背景都不带文字色，包一层就能继承下去；右侧
+        // chevron 在组件内自带 muted，不会被染色。
+        Self::row(
+            label,
+            div()
+                .w(px(220.0))
+                .text_color(cx.theme().link)
+                .children(select.map(|state| Select::new(&state))),
+        )
     }
 
     fn shell_select_row(&self, cx: &Context<Self>) -> impl IntoElement {
-        let select = self.select_of("shell");
-        let shell_id = self.runtime.shell.as_deref().unwrap_or("powershell");
-        let glyph = crate::shell_detect::icon_for_id(shell_id);
         let family: SharedString = cx
             .try_global::<crate::gpui_shell::config::Settings>()
             .map(|settings| settings.font_family.clone())
@@ -861,12 +1082,11 @@ impl SettingsPane {
             .into();
         Self::row(
             "默认 Shell",
-            h_flex()
+            div()
                 .w(px(220.0))
-                .gap_2()
-                .items_center()
-                .child(div().w(px(18.0)).flex_shrink_0().font_family(family).text_sm().child(glyph))
-                .child(div().flex_1().min_w_0().children(select.map(|state| Select::new(&state)))),
+                .font_family(family)
+                .text_color(cx.theme().link)
+                .child(Select::new(&self.shell_select)),
         )
     }
 
@@ -1075,6 +1295,137 @@ impl SettingsPane {
         )
     }
 
+    /// 旧壳连续量使用轨道而不是加减按钮；数值和轨道共享同一个
+    /// `SliderState`，拖动时由订阅统一写盘并热应用。
+    fn slider_row(
+        &self,
+        label: &'static str,
+        state: &Entity<SliderState>,
+        display: SharedString,
+    ) -> impl IntoElement {
+        Self::row(
+            label,
+            h_flex()
+                .w(px(220.0))
+                .items_center()
+                .gap_3()
+                .child(div().flex_1().min_w_0().child(Slider::new(state)))
+                .child(
+                    div()
+                        .w(px(48.0))
+                        .flex_shrink_0()
+                        .text_sm()
+                        // 固定数值列宽，百分比位数变化时轨道不会左右跳动。
+                        .child(display),
+                ),
+        )
+    }
+
+    fn background_color_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let featured = crate::display::BACKGROUND_SWATCHES
+            .iter()
+            .map(|color| {
+                let (r, g, b) = color.as_tuple();
+                rgb_hsla(r, g, b)
+            })
+            .collect::<Vec<_>>();
+        let current: SharedString = self
+            .runtime
+            .background
+            .map(format_hex_rgb)
+            .unwrap_or_else(|| "跟随主题".to_owned())
+            .into();
+        let custom = self.runtime.background.is_some();
+        Self::row(
+            "背景色",
+            h_flex()
+                .w(px(280.0))
+                .items_center()
+                .gap_2()
+                .child(
+                    ColorPicker::new(&self.background_color)
+                        .featured_colors(featured)
+                        .small(),
+                )
+                .child(div().flex_1().min_w_0().text_sm().truncate().child(current))
+                .child(
+                    Button::new("background-color-reset")
+                        .label("跟随主题")
+                        .small()
+                        .disabled(!custom)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let theme_background = cx.theme().background;
+                            this.background_color.update(cx, |state, cx| {
+                                state.set_value(theme_background, window, cx);
+                            });
+                            this.persist(&[("background", String::new())], cx);
+                        })),
+                ),
+        )
+    }
+
+    fn choose_background_image(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("选择终端背景图片".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let value = path.to_string_lossy().into_owned();
+            let _ = this.update(cx, |pane, cx| {
+                pane.persist(&[("background_image", value)], cx);
+            });
+        })
+        .detach();
+    }
+
+    fn background_image_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.runtime.background_image.clone();
+        let has_image = current.as_ref().is_some_and(|path| !path.trim().is_empty());
+        let display: SharedString = current
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or("未选择")
+            .to_owned()
+            .into();
+        Self::row(
+            "背景图片",
+            h_flex()
+                .w(px(420.0))
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .truncate()
+                        .child(display),
+                )
+                .child(
+                    Button::new("background-image-choose")
+                        .label("选择图片…")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.choose_background_image(cx);
+                        })),
+                )
+                .child(
+                    Button::new("background-image-clear")
+                        .label("清除")
+                        .small()
+                        .disabled(!has_image)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.persist(&[("background_image", String::new())], cx);
+                        })),
+                ),
+        )
+    }
+
     fn active_provider_index(&self) -> Option<usize> {
         self.provider_store
             .providers
@@ -1268,28 +1619,14 @@ impl SettingsPane {
         ));
         let custom_background = self
             .group("自定义背景", cx)
-            .child(self.input_row("背景色", "background", &self.bg_input.clone(), cx))
-            .child(self.input_row(
-                "背景图片",
-                "background_image",
-                &self.wallpaper_input.clone(),
-                cx,
-            ))
-            .child(self.select_row("background_image_fit", "背景图像拉伸模式"))
-            .child(self.select_row("background_image_alignment", "背景图像对齐"))
-            .child(self.stepper_row(
+            .child(self.background_color_row(cx))
+            .child(self.background_image_row(cx))
+            .child(self.select_row("background_image_fit", "背景图像拉伸模式", cx))
+            .child(self.select_row("background_image_alignment", "背景图像对齐", cx))
+            .child(self.slider_row(
                 "背景图像不透明度",
-                "bgimg-opacity",
+                &self.wallpaper_opacity_slider,
                 wallpaper_opacity,
-                |this, cx| {
-                    let opacity = this.runtime.background_image_opacity - 0.05;
-                    this.set_wallpaper_opacity(opacity, cx);
-                },
-                |this, cx| {
-                    let opacity = this.runtime.background_image_opacity + 0.05;
-                    this.set_wallpaper_opacity(opacity, cx);
-                },
-                cx,
             ))
             .child(self.switch_row(
                 "background_image_cover_chrome",
@@ -1299,7 +1636,7 @@ impl SettingsPane {
             ));
         let cursor = self
             .group("光标", cx)
-            .child(self.select_row("cursor_shape", "光标形状"))
+            .child(self.select_row("cursor_shape", "光标形状", cx))
             .child(self.switch_row(
                 "cursor_blink",
                 "光标闪烁",
@@ -1308,21 +1645,12 @@ impl SettingsPane {
             ));
         let interface = self
             .group("界面", cx)
-            .child(self.select_row("language", "语言"))
-            .child(self.select_row("density", "界面外观"))
-            .child(self.stepper_row(
+            .child(self.select_row("language", "语言", cx))
+            .child(self.select_row("density", "界面外观", cx))
+            .child(self.slider_row(
                 "终端正文不透明度",
-                "opacity",
+                &self.opacity_slider,
                 opacity,
-                |this, cx| {
-                    let opacity = this.runtime.opacity - 0.05;
-                    this.set_opacity(opacity, cx);
-                },
-                |this, cx| {
-                    let opacity = this.runtime.opacity + 0.05;
-                    this.set_opacity(opacity, cx);
-                },
-                cx,
             ))
             .child(self.switch_row("blur", "背景模糊", self.runtime.blur, cx));
         let terminal = self
@@ -1341,7 +1669,7 @@ impl SettingsPane {
                 },
                 cx,
             ))
-            .child(self.select_row("cell_width_mode", "字体间距"))
+            .child(self.select_row("cell_width_mode", "字体间距", cx))
             .child(self.switch_row("fetch", "启动欢迎信息", self.runtime.fetch, cx))
             .child(self.switch_row("powerline", "Powerline 提示符", self.runtime.powerline, cx));
 
@@ -1358,20 +1686,17 @@ impl SettingsPane {
     }
 
     fn section_profiles(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let font_picker = self.font_picker_dropdown(cx);
         let terminal = self
             .group("终端", cx)
             .child(self.shell_select_row(cx))
             .child(self.input_row("启动目录", "startup_directory", &self.dir_input.clone(), cx))
-            .child(self.font_picker_row(cx));
-        let terminal = terminal.when(self.font_picker_open, |group| {
-            let panel = self.font_picker_panel(cx);
-            group.child(panel)
-        });
+            .child(font_picker);
         let completion = self
             .group("补全", cx)
             .child(self.switch_row("ghost", "启用命令补全", self.runtime.ghost, cx))
-            .child(self.select_row("accept", "补全接受键"))
-            .child(self.select_row("completion_style", "补全样式"));
+            .child(self.select_row("accept", "补全接受键", cx))
+            .child(self.select_row("completion_style", "补全样式", cx));
         v_flex().w_full().gap(px(SETTINGS_GROUP_GAP)).child(terminal).child(completion)
     }
 
@@ -1584,11 +1909,17 @@ impl SettingsPane {
         let hover_bg = crate::gpui_shell::theme::settings_hover_bg(cx, false);
         let muted = theme.muted_foreground;
         let hosts = self.ssh_hosts.merged();
-        let labels = crate::ssh_profiles::SshProfiles::load(
+        let profiles = crate::ssh_profiles::SshProfiles::load(
             &crate::display::nebula_data_dir().join("ssh_profiles.json"),
         )
-        .map(|profiles| profiles.labels())
-        .unwrap_or_default();
+        .ok();
+        let labels = profiles.as_ref().map(|profiles| profiles.labels()).unwrap_or_default();
+        let icons = profiles.as_ref().map(|profiles| profiles.icons()).unwrap_or_default();
+        let family: SharedString = cx
+            .try_global::<crate::gpui_shell::config::Settings>()
+            .map(|settings| settings.font_family.clone())
+            .unwrap_or_else(|| String::from("Maple Mono Normal NF CN"))
+            .into();
         let hidden: Vec<String> = self.ssh_hosts.hidden_hosts().to_vec();
         let delete_confirm = self.ssh_delete_confirm.clone();
 
@@ -1597,6 +1928,9 @@ impl SettingsPane {
             let from_config = self.ssh_hosts.is_from_config(&host);
             let confirm = delete_confirm.as_deref() == Some(host.as_str());
             let label = labels.get(&host).cloned().unwrap_or_else(|| host.clone());
+            // 行首 OS 图标（旧壳裁定 2026-08-09）：id 取自 ssh_profiles 存储，
+            // 未认出回落通用终端形状；mono 字体渲染 Nerd Font 字位。
+            let os_icon = crate::display::ui::os_icons::resolve(icons.get(&host).map(String::as_str));
             let subtitle = if from_config {
                 format!("~/.ssh/config · {host}")
             } else {
@@ -1605,19 +1939,50 @@ impl SettingsPane {
             let connect_host = host.clone();
             let pin_host = host.clone();
             let delete_host = host.clone();
+            // 旧壳裁定（display/settings.rs 的 `ssh_host_action_rect` 注释）：
+            // 三个动作槽只在 hover 时显形，静态那一行只剩身份信息——一行常显
+            // 三枚等价按钮会让人逐个悬停去猜哪个是「进去」。
+            let row_group = SharedString::from(format!("ssh-host-actions-{ix}"));
             h_flex()
                 .id(SharedString::from(format!("ssh-host-row-{ix}")))
-                .h(px(48.0))
+                .group(row_group.clone())
+                // 旧壳 `SSH_HOST_ROW_H` 固定 58px；两行文字与 OS 图标在
+                // 这个高度里共用中线，不能压成普通 48px 设置行。
+                .h(px(58.0))
                 .w_full()
                 .px_2()
                 .items_center()
                 .gap_2()
                 .rounded_md()
                 .hover(move |row| row.bg(hover_bg))
-                .child(Icon::new(IconName::SquareTerminal).small().text_color(muted))
-                .when(pinned, |row| {
-                    row.child(div().text_xs().text_color(theme.primary).child("置顶"))
-                })
+                .child(
+                    div()
+                        .w(px(22.0))
+                        .h_full()
+                        .flex_shrink_0()
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .font_family(family.clone())
+                        .text_size(px(18.0))
+                        .text_color(muted)
+                        .text_center()
+                        .child(os_icon.glyph.to_string())
+                        // 旧壳把置顶记号压在图标槽右缘，不额外占一列；否则
+                        // 置顶行的主机标题会比其它行整体右移。
+                        .when(pinned, |slot| {
+                            slot.child(
+                                div()
+                                    .absolute()
+                                    .right(px(-2.0))
+                                    .bottom(px(7.0))
+                                    .text_size(px(8.0))
+                                    .text_color(theme.primary)
+                                    .child("\u{eab4}"),
+                            )
+                        }),
+                )
                 .child(
                     v_flex()
                         .flex_1()
@@ -1630,6 +1995,8 @@ impl SettingsPane {
                     Button::new(SharedString::from(format!("ssh-connect-{ix}")))
                         .label("连接")
                         .small()
+                        .invisible()
+                        .group_hover(row_group.clone(), |button| button.visible())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.emit(SettingsPaneEvent::LaunchSsh(connect_host.clone()));
                             this.ssh_status = Some((format!("正在打开 {connect_host}…"), false));
@@ -1640,6 +2007,8 @@ impl SettingsPane {
                     Button::new(SharedString::from(format!("ssh-pin-{ix}")))
                         .label(if pinned { "取消置顶" } else { "置顶" })
                         .small()
+                        .invisible()
+                        .group_hover(row_group.clone(), |button| button.visible())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.ssh_apply(
                                 |lists| lists.toggle_pin(&pin_host),
@@ -1658,6 +2027,13 @@ impl SettingsPane {
                             "删除"
                         })
                         .small()
+                        // 进了确认态就常显：指针移开还让它隐形，等于把「再点
+                        // 一次才真删」这个状态藏起来。
+                        .when(!confirm, |button| {
+                            button
+                                .invisible()
+                                .group_hover(row_group.clone(), |button| button.visible())
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this.ssh_delete_confirm.as_deref() == Some(delete_host.as_str()) {
                                 let host = delete_host.clone();
@@ -1713,9 +2089,32 @@ impl SettingsPane {
         });
 
         let new_input = self.ssh_new_input.clone();
+        let focus_input = self.ssh_new_input.clone();
         let hidden_count = self.ssh_hosts.hidden_hosts().len();
 
         self.group("SSH 主机", cx)
+            .child(
+                h_flex()
+                    .h(px(32.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(theme.foreground)
+                            .child("已保存主机"),
+                    )
+                    .child(
+                        Button::new("ssh-add-host")
+                            .label("+ 添加主机")
+                            .small()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                focus_input.update(cx, |input, cx| input.focus(window, cx));
+                                this.ssh_status = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(div().text_xs().text_color(muted).child(
                 "保存的目的地 + ~/.ssh/config 别名合并展示（与旧壳同一份数据）。\
                  认证方式/私钥编辑器待迁移：默认自动依次尝试私钥、已存密码与交互认证。",
@@ -1725,7 +2124,7 @@ impl SettingsPane {
                     .gap_2()
                     .items_center()
                     .child(div().flex_1().child(Input::new(&self.ssh_new_input)))
-                    .child(Button::new("ssh-add").label("添加").small().on_click(cx.listener(
+                    .child(Button::new("ssh-save").label("保存").small().on_click(cx.listener(
                         move |this, _, window, cx| {
                             let value = new_input.read(cx).value().trim().to_string();
                             if value.is_empty() {
@@ -2225,7 +2624,7 @@ impl SettingsPane {
 
     fn section_network(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         self.group("网络（SSH 出站代理）", cx)
-            .child(self.select_row("ssh_proxy_mode", "代理模式"))
+            .child(self.select_row("ssh_proxy_mode", "代理模式", cx))
             .child(self.input_row("代理 URL", "ssh_proxy_url", &self.proxy_url_input.clone(), cx))
             .child(self.input_row(
                 "绕过列表",
@@ -2243,8 +2642,8 @@ impl SettingsPane {
                 self.runtime.copy_on_select,
                 cx,
             ))
-            .child(self.select_row("tab_reveal", "标签展开动效"))
-            .child(self.select_row("new_tab_position", "新标签位置"))
+            .child(self.select_row("tab_reveal", "标签展开动效", cx))
+            .child(self.select_row("new_tab_position", "新标签位置", cx))
             .child(self.switch_row(
                 "panel_resize",
                 "拖拽调节侧栏宽度",
@@ -2259,17 +2658,383 @@ impl SettingsPane {
             ))
     }
 
+    // ---- 按键映射编辑器（模型层 `display::keymap`，两壳同读同写）----
+
+    /// 搜索口径与旧壳一致：动作名（中/英）+ 当前生效键文本。
+    fn keymap_row_haystack(&self, flat: usize) -> String {
+        use crate::display::keymap;
+        let custom = keymap::build_bindings(&self.keymap_binds);
+        let combo = if flat == keymap::QUICK_TERMINAL_ROW {
+            keymap::display_stored_combo(&self.runtime.quick_terminal_hotkey)
+        } else {
+            keymap::EDITABLE_ACTIONS
+                .get(flat - 1)
+                .and_then(|(action, ..)| keymap::effective_combo(action, &custom))
+                .map(|(combo, _)| combo)
+                .unwrap_or_default()
+        };
+        let (zh, en) = if flat == keymap::QUICK_TERMINAL_ROW {
+            ("快速终端", "Quick terminal")
+        } else {
+            keymap::EDITABLE_ACTIONS.get(flat - 1).map(|(_, zh, en)| (*zh, *en)).unwrap_or(("", ""))
+        };
+        format!("{zh} {en} {combo}").to_lowercase()
+    }
+
+    /// 过滤后的可见行（flat 下标，升序）。空查询 = 全部。
+    fn keymap_visible(&self, cx: &App) -> Vec<usize> {
+        use crate::display::keymap;
+        let query = self.keymap_search_input.read(cx).value().trim().to_lowercase();
+        (0..keymap::editable_row_count())
+            .filter(|flat| query.is_empty() || self.keymap_row_haystack(*flat).contains(&query))
+            .collect()
+    }
+
+    /// 冲突检测（旧壳 `keymap_clash_info` 同义）：同一 combo 多动作 → 逐行
+    /// 标记 + 只报第一组的提示条。
+    fn keymap_clashes(&self) -> (Vec<bool>, Option<String>) {
+        use crate::display::keymap;
+        let total = keymap::editable_row_count();
+        let custom = keymap::build_bindings(&self.keymap_binds);
+        let mut combos: Vec<Option<String>> = Vec::with_capacity(total);
+        for flat in 0..total {
+            let combo = if flat == keymap::QUICK_TERMINAL_ROW {
+                Some(keymap::display_stored_combo(&self.runtime.quick_terminal_hotkey))
+            } else {
+                keymap::EDITABLE_ACTIONS
+                    .get(flat - 1)
+                    .and_then(|(action, ..)| keymap::effective_combo(action, &custom))
+                    .map(|(combo, _)| combo)
+            };
+            combos.push(combo.filter(|combo| !combo.is_empty()));
+        }
+        let name = |flat: usize| -> String {
+            if flat == keymap::QUICK_TERMINAL_ROW {
+                "快速终端".to_owned()
+            } else {
+                keymap::EDITABLE_ACTIONS
+                    .get(flat - 1)
+                    .map(|(_, zh, _)| (*zh).to_owned())
+                    .unwrap_or_default()
+            }
+        };
+        let mut rows = vec![false; total];
+        let mut note = None;
+        for a in 0..total {
+            let Some(combo_a) = combos[a].clone() else { continue };
+            for b in (a + 1)..total {
+                let Some(combo_b) = &combos[b] else { continue };
+                if !combo_a.eq_ignore_ascii_case(combo_b) {
+                    continue;
+                }
+                rows[a] = true;
+                rows[b] = true;
+                if note.is_none() {
+                    let (a_name, b_name) = (name(a), name(b));
+                    note = Some(format!(
+                        "{combo_a} 同时绑定了「{a_name}」与「{b_name}」——只有排前面的「{a_name}」会触发"
+                    ));
+                }
+            }
+        }
+        (rows, note)
+    }
+
+    /// 捕获完成：一个动作只保留一条自定义绑定，但同一 combo 可以同时归属
+    /// 多个动作。冲突不再靠静默注销旧动作来“解决”，而是由
+    /// `keymap_clashes` 标记双方并显示警告条，让用户自己决定改哪一行。
+    fn keymap_assign(&mut self, row: usize, combo: String, cx: &mut Context<Self>) {
+        use crate::display::keymap;
+        self.keymap_capture = None;
+        self.keymap_capture_preview.clear();
+        if row == keymap::QUICK_TERMINAL_ROW {
+            self.persist(&[("quick_terminal_hotkey", combo)], cx);
+            return;
+        }
+        let Some((action, ..)) = keymap::EDITABLE_ACTIONS.get(row - 1) else { return };
+        let name = keymap::action_storage_name(action);
+        self.keymap_binds.retain(|(_, a)| !a.eq_ignore_ascii_case(&name));
+        self.keymap_binds.push((combo, name));
+        self.persist_keybinds(cx);
+    }
+
+    /// 捕获态裸 Backspace：删除自定义绑定，回落内置默认。
+    fn keymap_clear_custom(&mut self, row: usize, cx: &mut Context<Self>) {
+        use crate::display::keymap;
+        self.keymap_capture = None;
+        self.keymap_capture_preview.clear();
+        if row == keymap::QUICK_TERMINAL_ROW {
+            self.persist(
+                &[("quick_terminal_hotkey", keymap::DEFAULT_QUICK_TERMINAL_HOTKEY.to_owned())],
+                cx,
+            );
+            return;
+        }
+        let Some((action, ..)) = keymap::EDITABLE_ACTIONS.get(row - 1) else { return };
+        let name = keymap::action_storage_name(action);
+        self.keymap_binds.retain(|(_, a)| !a.eq_ignore_ascii_case(&name));
+        self.persist_keybinds(cx);
+    }
+
+    /// keybind= 整表落盘 → 重载镜像 → 通知宿主热应用（工作区会重注入
+    /// gpui 键位表）。persist 走通用路径拿重载与事件，这里补镜像。
+    fn persist_keybinds(&mut self, cx: &mut Context<Self>) {
+        if let Err(err) = nebula_settings::persist_keybinds(&self.keymap_binds) {
+            eprintln!("[nebula:gpui] failed to persist keybinds: {err}");
+        }
+        self.keymap_binds = nebula_settings::keybind_pairs();
+        self.runtime = RuntimeSettings::load();
+        cx.emit(SettingsPaneEvent::Changed);
+        cx.notify();
+    }
+
+    /// 键帽 chip：捕获行回显预览；自定义 accent 描边；冲突 danger 底；
+    /// 默认 ink_dim；未绑定 ink_faint（旧壳墨色分级裁定）。
+    fn keymap_keycap(
+        &self,
+        text: &str,
+        custom: bool,
+        clash: bool,
+        capturing: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let color = if clash {
+            theme.danger
+        } else if capturing {
+            theme.link
+        } else if custom {
+            theme.link
+        } else if text.is_empty() {
+            crate::gpui_shell::theme::faint_ink(cx)
+        } else {
+            theme.muted_foreground
+        };
+        div()
+            .min_w(px(72.0))
+            .px_2()
+            .h(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(crate::display::UI_CORNER_RADIUS_LOGICAL * 0.75))
+            .text_size(px(self.font_size_px(cx) * 0.86))
+            .when(clash, |chip| chip.bg(theme.danger).text_color(theme.danger_foreground))
+            .when(!clash && (custom || capturing), |chip| {
+                chip.border_1().border_color(theme.link).text_color(color)
+            })
+            .when(!clash && !custom && !capturing, |chip| {
+                chip.border_1().border_color(theme.border).text_color(color)
+            })
+            .child(if text.is_empty() && !capturing {
+                SharedString::from("未绑定")
+            } else {
+                SharedString::from(text.to_owned())
+            })
+    }
+
+    /// 一行「动作 + 键帽」。点击行进入捕获态（旧壳点行即捕获）。
+    fn keymap_row(
+        &self,
+        flat: usize,
+        clash: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        use crate::display::keymap;
+        let custom = keymap::build_bindings(&self.keymap_binds);
+        let label: SharedString = if flat == keymap::QUICK_TERMINAL_ROW {
+            "快速终端".into()
+        } else {
+            keymap::EDITABLE_ACTIONS
+                .get(flat - 1)
+                .map(|(_, zh, _)| (*zh).to_owned())
+                .unwrap_or_default()
+                .into()
+        };
+        let (text, is_custom) = if flat == keymap::QUICK_TERMINAL_ROW {
+            (
+                keymap::display_stored_combo(&self.runtime.quick_terminal_hotkey),
+                self.runtime.quick_terminal_hotkey != keymap::DEFAULT_QUICK_TERMINAL_HOTKEY,
+            )
+        } else {
+            keymap::EDITABLE_ACTIONS
+                .get(flat - 1)
+                .and_then(|(action, ..)| keymap::effective_combo(action, &custom))
+                .map(|(combo, custom)| (combo, custom))
+                .unwrap_or_else(|| (String::new(), false))
+        };
+        let capturing = self.keymap_capture == Some(flat);
+        let cap_text = if capturing {
+            if self.keymap_capture_preview.is_empty() {
+                "按新按键…".to_owned()
+            } else {
+                format!("{}…", self.keymap_capture_preview)
+            }
+        } else {
+            text.clone()
+        };
+        h_flex()
+            .id(("keymap-row", flat))
+            .w_full()
+            .h(px(SETTINGS_ROW_HEIGHT))
+            .flex_shrink_0()
+            .items_center()
+            .pr_4()
+            .rounded(px(crate::display::UI_CORNER_RADIUS_LOGICAL))
+            .cursor_pointer()
+            .hover(|style| style.bg(crate::gpui_shell::theme::settings_hover_bg(cx, false)))
+            // mouse_down 而非 click：容器（section 根）同捕一个 mouse_down
+            // 做「点击任何位置先撤销」，这里 stop_propagation 抢先处理
+            // 「点别的行 = 捕获转移、点同一行 = 取消」（旧壳 input/chrome.rs
+            // 的 SettingsHit::KeymapRow 分支同合同）。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    if this.keymap_capture == Some(flat) {
+                        this.keymap_capture = None;
+                        this.keymap_capture_preview.clear();
+                    } else {
+                        this.keymap_capture = Some(flat);
+                        this.keymap_capture_preview.clear();
+                        // 焦点收到分区根：键盘事件沿根路径冒泡给捕获处理器，
+                        // 搜索框不再分走按键。
+                        window.focus(&this.focus_handle);
+                    }
+                    cx.notify();
+                }),
+            )
+            .child(div().flex_1().min_w_0().pl_4().child(label))
+            .child(self.keymap_keycap(&cap_text, is_custom, clash, capturing, cx))
+    }
+
     fn section_keymap(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let hotkey: SharedString = self.runtime.quick_terminal_hotkey.clone().into();
+        use crate::display::keymap;
+
+        let visible = self.keymap_visible(cx);
+        let (clash_rows, clash_note) = self.keymap_clashes();
+
+        // 分组渲染（旧壳无框分组裁定）：组内可见行为空的组整组隐藏；组
+        // 标题 0.86× 小字压在行块上方。
+        let mut groups_block = v_flex().w_full().gap_1();
+        let mut start = 0usize;
+        for (zh, _en, count) in keymap::GROUPS {
+            let end = start + count;
+            let rows: Vec<_> = visible
+                .iter()
+                .filter(|flat| (start..end).contains(*flat))
+                .map(|flat| self.keymap_row(*flat, clash_rows[*flat], cx))
+                .collect();
+            if !rows.is_empty() {
+                groups_block = groups_block.child(
+                    div()
+                        .pt_3()
+                        .pb_1()
+                        .text_size(px(self.font_size_px(cx) * 0.86))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(*zh),
+                );
+                for row in rows {
+                    groups_block = groups_block.child(row);
+                }
+            }
+            start = end;
+        }
+
+        // 只读行：数字系/AI 贴入键（表驱动，不可在图形页编辑）。随搜索过滤。
+        let query = self.keymap_search_input.read(cx).value().trim().to_lowercase();
+        let readonly: Vec<&(&str, &str, &str)> = keymap::READONLY_ROWS
+            .iter()
+            .filter(|(zh, en, combo)| {
+                query.is_empty() || format!("{zh} {en} {combo}").to_lowercase().contains(&query)
+            })
+            .collect();
+        if !readonly.is_empty() {
+            groups_block = groups_block.child(
+                div()
+                    .pt_3()
+                    .pb_1()
+                    .text_size(px(self.font_size_px(cx) * 0.86))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("只读"),
+            );
+            for (zh, _en, combo) in readonly {
+                groups_block = groups_block.child(
+                    h_flex()
+                        .w_full()
+                        .h(px(SETTINGS_ROW_HEIGHT))
+                        .flex_shrink_0()
+                        .items_center()
+                        .pr_4()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .pl_4()
+                                .text_color(crate::gpui_shell::theme::faint_ink(cx))
+                                .child(*zh),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(72.0))
+                                .px_2()
+                                .h(px(24.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(crate::display::UI_CORNER_RADIUS_LOGICAL * 0.75))
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .text_size(px(self.font_size_px(cx) * 0.86))
+                                .text_color(crate::gpui_shell::theme::faint_ink(cx))
+                                .child(*combo),
+                        ),
+                );
+            }
+        }
+
         self.group("按键映射", cx)
-            .child(Self::row(
-                "快速终端热键",
-                div().text_sm().text_color(cx.theme().muted_foreground).child(hotkey),
-            ))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
-                "快捷键编辑器待迁移：绑定表当前请在旧壳设置页修改，\
-                 存储于 nebula_settings.txt 的 keybind= 行，两壳同读。",
-            ))
+            // 捕获态的「点击任何位置先撤销」（旧壳 input/chrome.rs 的统一撤
+            // 销合同）：行的 mouse_down 会 stop_propagation 自行处理转移/
+            // 取消，搜索框这里显式撤销（旧壳点搜索框 = blur 捕获），其余
+            // 任何落点冒泡到这里 = 纯取消。
+            .when(self.keymap_capture.is_some(), |section| {
+                section.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if this.keymap_capture.take().is_some() {
+                            this.keymap_capture_preview.clear();
+                            cx.notify();
+                        }
+                    }),
+                )
+            })
+            // 搜索框：宽度同其它控件右列（220），旧壳搜索行几何的对应物。
+            .child(
+                h_flex()
+                    .w_full()
+                    .h(px(SETTINGS_ROW_HEIGHT))
+                    .flex_shrink_0()
+                    .items_center()
+                    .pr_4()
+                    .child(div().flex_1().min_w_0().pl_4().child("搜索"))
+                    .child(
+                        div().w(px(220.0)).child(Input::new(&self.keymap_search_input).small()),
+                    ),
+            )
+            // 冲突是允许存在的可见状态，用组件库的 Warning Alert 呈现；
+            // 不再用自绘 danger 色块，也不静默删掉另一个动作。
+            .when_some(clash_note, |section, note| {
+                section.child(Alert::warning("keymap-clash-warning", note).small().mt_2())
+            })
+            .child(groups_block)
+            .child(
+                div()
+                    .pt_4()
+                    .text_size(px(self.font_size_px(cx) * 0.86))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("点击行改键 · Backspace 恢复默认 · Esc 取消"),
+            )
     }
 
     fn section_advanced(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -2391,10 +3156,66 @@ impl Render for SettingsPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let nav = self.render_nav(cx);
         let content = self.section_content(cx);
+        // 旧壳设置页全部文字走终端 mono 字体（draw_chrome_text 的字形缓存），
+        // sans 只属于组件库默认；根上挂一次，nav/表单/下拉弹层全部继承。
+        let family: SharedString = self.current_font_chain(cx).into();
+        let base_px = self.font_size_px(cx);
 
         div()
             .size_full()
             .track_focus(&self.focus_handle)
+            // 旧壳 `input/chrome.rs` 的合同是页面任何左键先撤销捕获。
+            // 行自身会 stop_propagation 并完成「同行取消 / 他行转移」；其它
+            // 控件的 mouse_down 仍先取得自己的焦点，这里只清状态，不抢焦点，
+            // 因而点进搜索框后键盘完整归 InputState。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.keymap_capture.take().is_some() {
+                        this.keymap_capture_preview.clear();
+                        cx.notify();
+                    }
+                }),
+            )
+            // 按键捕获态的键盘独占：焦点在本根 div（点行时收进来），键盘
+            // 事件沿焦点路径冒泡到这里；捕获未激活时不挂处理器，输入框、
+            // 下拉等组件照常吃键。修饰键实时回显同址（ModifiersChanged
+            // 不是 KeyDown，走独立通道）。
+            .when_some(self.keymap_capture, |root, _| {
+                root.on_key_down(cx.listener(
+                    |this, event: &KeyDownEvent, _window, cx| {
+                        let Some(row) = this.keymap_capture else { return };
+                        cx.stop_propagation();
+                        match crate::display::keymap::capture_gpui(&event.keystroke) {
+                            crate::display::keymap::CaptureOutcome::Cancel => {
+                                this.keymap_capture = None;
+                                this.keymap_capture_preview.clear();
+                                cx.notify();
+                            },
+                            crate::display::keymap::CaptureOutcome::ClearCustom => {
+                                this.keymap_clear_custom(row, cx);
+                            },
+                            crate::display::keymap::CaptureOutcome::Bind(combo) => {
+                                this.keymap_assign(row, combo, cx);
+                            },
+                            crate::display::keymap::CaptureOutcome::Pending => {},
+                        }
+                    },
+                ))
+                .on_modifiers_changed(cx.listener(
+                    |this, event: &ModifiersChangedEvent, _window, cx| {
+                        if this.keymap_capture.is_none() {
+                            return;
+                        }
+                        let prefix =
+                            crate::display::keymap::gpui_mods_prefix(&event.modifiers);
+                        if this.keymap_capture_preview != prefix {
+                            this.keymap_capture_preview = prefix;
+                            cx.notify();
+                        }
+                    },
+                ))
+            })
             // 旧壳设置页是独立的不透明 panel；终端壁纸只属于终端内容，
             // 不应穿透设置文字和控件。
             //
@@ -2404,6 +3225,7 @@ impl Render for SettingsPane {
             .rounded(crate::gpui_shell::theme::card_radius())
             .bg(crate::gpui_shell::theme::settings_panel_bg(cx))
             .text_color(cx.theme().foreground)
+            .font_family(family)
             .flex()
             .flex_row()
             .child(nav)
@@ -2432,6 +3254,10 @@ impl Render for SettingsPane {
                             .px_6()
                             .pt_8()
                             .pb_8()
+                            // 正文基准字号跟随终端字号（旧壳 draw_chrome_text
+                            // 用 cell 尺寸；用户调字号设置页一起变）。行内不
+                            // 再自带 text_sm，缺省继承这里的档位。
+                            .text_size(px(base_px))
                             .overflow_y_scrollbar()
                             .child(content)
                             .child(
