@@ -3255,8 +3255,6 @@ impl NebulaWorkspace {
                 // 留珠链缝，也不以过密叠加制造额外模糊。
                 let steps =
                     ((mid * std::f32::consts::TAU / (stroke * 0.5)).ceil() as usize).clamp(24, 96);
-                let scale = window.scale_factor().max(0.5);
-                let snap = |value: f32| (value * scale).round() / scale;
                 const ARC: f32 = 0.34;
                 for step in 0..steps {
                     let at = step as f32 / steps as f32;
@@ -3275,21 +3273,19 @@ impl NebulaWorkspace {
                     .into();
                     let x0 = cx + mid * angle.cos() - stroke * 0.5;
                     let y0 = cy + mid * angle.sin() - stroke * 0.5;
-                    let x1 = x0 + stroke;
-                    let y1 = y0 + stroke;
-                    let snapped_x0 = snap(x0);
-                    let snapped_y0 = snap(y0);
-                    let snapped_w = (snap(x1) - snapped_x0).max(1.0 / scale);
-                    let snapped_h = (snap(y1) - snapped_y0).max(1.0 / scale);
+                    // 旧壳不对组成圆环的每个点单独做像素吸附。圆周点本来就落
+                    // 在连续坐标上，强制取整会让相邻点忽近忽远、半径跳变，低
+                    // DPI 下尤其容易显成锯齿珠链；交给 GPUI 统一抗锯齿才与
+                    // `icons::push_spinner` 的几何一致。
                     window.paint_quad(
                         gpui::fill(
                             Bounds::new(
-                                gpui::point(px(snapped_x0), px(snapped_y0)),
-                                size(px(snapped_w), px(snapped_h)),
+                                gpui::point(px(x0), px(y0)),
+                                size(px(stroke), px(stroke)),
                             ),
                             c,
                         )
-                        .corner_radii(px(snapped_w.min(snapped_h) * 0.5)),
+                        .corner_radii(px(stroke * 0.5)),
                     );
                 }
             },
