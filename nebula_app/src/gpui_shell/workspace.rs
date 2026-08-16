@@ -566,6 +566,8 @@ pub struct NebulaWorkspace {
     spinner_last: std::time::Instant,
     /// 最近一次写盘的会话快照（1 Hz 自动保存的去重 + 退出收尾的素材）。
     last_saved_session: Option<crate::session::Session>,
+    /// 系统关闭按钮可能连续送来多次 should-close；确认框在场时只保留一份。
+    window_close_confirm_open: bool,
 }
 
 impl NebulaWorkspace {
@@ -672,6 +674,7 @@ impl NebulaWorkspace {
             spinner_phase: 0.0,
             spinner_last: std::time::Instant::now(),
             last_saved_session: None,
+            window_close_confirm_open: false,
         };
         // 配置装载错误的驻留横幅（消息栏层：用户要去修文件，必须看见）。
         // 只在开窗时呈现一次；设置页 persist 的重载不重复弹。
@@ -695,6 +698,12 @@ impl NebulaWorkspace {
         Self::start_ai_hook_pump(ai_events, cx);
         this.start_session_autosave(cx);
         this.apply_custom_keybinds(cx);
+        let workspace = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| workspace.should_close_window(window, cx))
+                .unwrap_or(true)
+        });
         this
     }
 
@@ -1094,6 +1103,67 @@ impl NebulaWorkspace {
             .iter()
             .filter(|pane| pane_id.is_none_or(|id| pane.id == id))
             .find_map(|pane| pane.view.read(cx).busy_process())
+    }
+
+    /// 系统标题栏关闭的是整个窗口，必须把所有 Tab/Pane 都纳入同一份旧壳
+    /// `busy_child(shell_pid)` 判据；只检查当前 Tab 会漏掉后台仍在编译的任务。
+    fn busy_process_in_window(&self, cx: &App) -> Option<String> {
+        (0..self.tabs.len()).find_map(|tab_ix| self.busy_process_in_tab(tab_ix, None, cx))
+    }
+
+    fn save_clean_window_session(&mut self, cx: &App) {
+        let mut snapshot = self.snapshot_session(cx);
+        crate::session::save_final(&mut snapshot);
+        // Drop 不再用最多滞后一秒的自动保存副本覆盖刚写下的准确快照。
+        self.last_saved_session = None;
+    }
+
+    /// GPUI 的 should-close 回调必须同步返回：无繁忙进程时直接允许系统关闭；
+    /// 有繁忙进程时先返回 false，再由对话框确认回调显式移除窗口。
+    fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(process) = self.busy_process_in_window(cx) else {
+            self.save_clean_window_session(cx);
+            return true;
+        };
+        if self.window_close_confirm_open {
+            return false;
+        }
+        self.window_close_confirm_open = true;
+
+        let body: SharedString = format!("{process} 仍在运行，关闭窗口会中止它。").into();
+        let confirm_workspace = cx.entity().downgrade();
+        let close_workspace = confirm_workspace.clone();
+        window.open_dialog(cx, move |dialog, _window, _cx| {
+            let confirm_workspace = confirm_workspace.clone();
+            let close_workspace = close_workspace.clone();
+            dialog
+                .title("关闭窗口？")
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("关闭")
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
+                        .cancel_text("取消"),
+                )
+                .child(body.clone())
+                .on_ok(move |_, window, cx| {
+                    let _ = confirm_workspace.update(cx, |workspace, cx| {
+                        workspace.save_clean_window_session(cx);
+                        workspace.window_close_confirm_open = false;
+                        // `remove_window` 是确认后的最终动作，不会重新触发
+                        // should-close，从而避免再次弹出同一确认框。
+                        window.remove_window();
+                    });
+                    true
+                })
+                .on_close(move |_, _, cx| {
+                    let _ = close_workspace.update(cx, |workspace, cx| {
+                        workspace.window_close_confirm_open = false;
+                        cx.notify();
+                    });
+                })
+        });
+        false
     }
 
     fn request_close_pane(
