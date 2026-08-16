@@ -20,20 +20,20 @@ use crate::config::{Action, BindingKey, BindingMode, KeyBinding, KeyLocation};
 /// `QUICK_TERMINAL_ROW` 是设置页专用的全局快捷键行，不属于终端
 /// `config::Action`；它放在动作行之前，保证用户在按键页打开时第一眼就能
 /// 找到快速终端入口，同时仍复用同一套捕获/键帽交互。
-pub(super) const QUICK_TERMINAL_ROW: usize = 0;
-pub(super) const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+`";
+pub(crate) const QUICK_TERMINAL_ROW: usize = 0;
+pub(crate) const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+`";
 
-pub(super) fn editable_row_count() -> usize {
+pub(crate) fn editable_row_count() -> usize {
     EDITABLE_ACTIONS.len() + 1
 }
 
-pub(super) fn display_stored_combo(combo: &str) -> String {
+pub(crate) fn display_stored_combo(combo: &str) -> String {
     parse_combo(combo)
         .and_then(|(mods, key)| display_combo(mods, &key))
         .unwrap_or_else(|| combo.to_owned())
 }
 
-pub(super) const EDITABLE_ACTIONS: &[(Action, &str, &str)] = &[
+pub(crate) const EDITABLE_ACTIONS: &[(Action, &str, &str)] = &[
     // 顺序 = 设置页展示顺序：按 GROUPS 的连续区间分组（2026-08-09 学原型
     // 分组裁定）。持久化按 Action 名存储，重排只影响展示，不动用户数据。
     // -- 全局（快速终端行占本组第 0 行，见 QUICK_TERMINAL_ROW）--
@@ -72,7 +72,7 @@ pub(super) const EDITABLE_ACTIONS: &[(Action, &str, &str)] = &[
 
 /// 设置页分组（无框裁定 2026-08-09：只用段标题+间距分组，不画容器）。
 /// `usize` 是本组行数；区间连续覆盖全部可编辑行（含第 0 行快速终端）。
-pub(super) const GROUPS: &[(&str, &str, usize)] = &[
+pub(crate) const GROUPS: &[(&str, &str, usize)] = &[
     ("全局", "Global", 6),
     ("标签页", "Tabs", 4),
     ("窗格", "Panes", 7),
@@ -81,7 +81,7 @@ pub(super) const GROUPS: &[(&str, &str, usize)] = &[
 ];
 
 /// 只读展示行（无法在图形页编辑，TOML/settings 行仍可覆盖其中的表驱动键）。
-pub(super) const READONLY_ROWS: &[(&str, &str, &str)] = &[
+pub(crate) const READONLY_ROWS: &[(&str, &str, &str)] = &[
     ("切换到第 N 个标签页", "Select tab N", "Alt+1..9 / Ctrl+1..9"),
     ("启动 Profile N", "Launch Profile N", "Ctrl+Shift+1..9"),
     ("贴入 AI 修复建议", "Paste AI fix suggestion", "Ctrl+."),
@@ -165,7 +165,7 @@ const DIGIT_CODES: [(&str, KeyCode); 10] = [
 ];
 
 /// `ctrl+shift+t` → (mods, key)。`plus` 是 `+` 键的别名（`+` 是分隔符）。
-pub(super) fn parse_combo(combo: &str) -> Option<(ModifiersState, BindingKey)> {
+pub(crate) fn parse_combo(combo: &str) -> Option<(ModifiersState, BindingKey)> {
     let mut mods = ModifiersState::empty();
     let mut key: Option<BindingKey> = None;
     for part in combo.split('+') {
@@ -207,7 +207,7 @@ fn parse_key_name(lower: &str) -> Option<BindingKey> {
 }
 
 /// (mods, key) → 存储格式 `ctrl+shift+t`。捕获结果与 parse 往返一致。
-pub(super) fn canonical_combo(mods: ModifiersState, key: &BindingKey) -> Option<String> {
+pub(crate) fn canonical_combo(mods: ModifiersState, key: &BindingKey) -> Option<String> {
     let mut out = String::new();
     if mods.control_key() {
         out.push_str("ctrl+");
@@ -268,7 +268,7 @@ pub(crate) fn mods_prefix(mods: ModifiersState) -> String {
     out
 }
 
-pub(super) fn display_combo(mods: ModifiersState, key: &BindingKey) -> Option<String> {
+pub(crate) fn display_combo(mods: ModifiersState, key: &BindingKey) -> Option<String> {
     let mut out = mods_prefix(mods);
     let name = match key {
         BindingKey::Scancode(physical) => DIGIT_CODES
@@ -305,7 +305,7 @@ pub(super) fn display_combo(mods: ModifiersState, key: &BindingKey) -> Option<St
 
 /// `keybind=` 行的动作名 → Action。variant 名大小写不敏感（复用
 /// ConfigDeserialize），`none`/`unbound` 显式禁用。
-pub(super) fn parse_action(name: &str) -> Option<Action> {
+pub(crate) fn parse_action(name: &str) -> Option<Action> {
     use serde::Deserialize as _;
     let name = name.trim();
     if name.eq_ignore_ascii_case("unbound") {
@@ -316,13 +316,13 @@ pub(super) fn parse_action(name: &str) -> Option<Action> {
 
 /// Action → 存储名（Debug 名即 variant 名；仅 unit variants 会出现在
 /// 自定义表里，Debug 输出必然干净）。
-pub(super) fn action_storage_name(action: &Action) -> String {
+pub(crate) fn action_storage_name(action: &Action) -> String {
     format!("{action:?}")
 }
 
 /// raw `keybind=` 行 → 自定义绑定表。非法行静默跳过（与该文件其余键的
 /// 容错一致）；行序即优先级（后写的行先匹配）。
-pub(super) fn build_bindings(raw: &[(String, String)]) -> Vec<KeyBinding> {
+pub(crate) fn build_bindings(raw: &[(String, String)]) -> Vec<KeyBinding> {
     let mut bindings = Vec::new();
     for (combo, action) in raw {
         let Some((mods, trigger)) = parse_combo(combo) else { continue };
@@ -342,7 +342,7 @@ pub(super) fn build_bindings(raw: &[(String, String)]) -> Vec<KeyBinding> {
 
 /// 一个动作当前的有效键（设置页展示用）。
 /// 返回 (展示文本, 是否来自用户自定义)；None = 未绑定。
-pub(super) fn effective_combo(action: &Action, custom: &[KeyBinding]) -> Option<(String, bool)> {
+pub(crate) fn effective_combo(action: &Action, custom: &[KeyBinding]) -> Option<(String, bool)> {
     // custom 已是倒序（最新在前）。该动作的候选行必须没被更新的同键行
     // 遮蔽（手编文件可能给同一个键堆多行，运行时只有最前面那条生效——
     // 展示必须与匹配层口径一致，否则显示的键按下去没反应）。
@@ -445,6 +445,75 @@ pub(crate) fn capture_combo(key: &KeyEvent, mods: ModifiersState) -> CaptureOutc
         Some(combo) => CaptureOutcome::Bind(combo),
         None => CaptureOutcome::Pending,
     }
+}
+
+/// GPUI 壳的捕获桥：`gpui::Keystroke` → 同一套 [`CaptureOutcome`] 语义
+/// （Esc 取消、裸 Backspace 恢复默认、纯修饰键等待、可存储组合落盘）。
+///
+/// 键名对齐：gpui 在 Windows 把命名键报成小写名（"escape"/"up"/"f5"…），
+/// 与 `NAMED_ALIASES` 的存储别名一一对应；单字符键即 `Key::Character`。
+/// 两处已知偏差，均不伤可编辑动作（默认表里没有带数字/Shift+符号的）：
+/// - 数字键报成 "1".."0"，这里折回 digitN scancode，保证与旧壳存储同构；
+/// - Shift+符号（gpui 直接给出变换后的字符并清掉 shift 位）只能按字符
+///   存储，旧壳 winit 层不会命中这类行——与旧壳编辑器「无法表示 → 等待」
+///   相比是多存了一条死绑定，可接受。
+pub(crate) fn capture_gpui(keystroke: &::gpui::Keystroke) -> CaptureOutcome {
+    let mods = gpui_modifiers(&keystroke.modifiers);
+    let key = keystroke.key.trim().to_lowercase();
+    match key.as_str() {
+        "escape" if mods.is_empty() => return CaptureOutcome::Cancel,
+        "backspace" if mods.is_empty() => return CaptureOutcome::ClearCustom,
+        // 裸修饰键按下在 Windows 走 ModifiersChanged 而非 KeyDown，这里
+        // 兜住其它平台的命名差异（"control"/"super"/"meta"…）。
+        "control" | "ctrl" | "shift" | "alt" | "alternate" | "super" | "meta"
+        | "command" | "win" | "function" | "capslock" | "numlock" | "scrolllock" => {
+            return CaptureOutcome::Pending;
+        },
+        _ => {},
+    }
+    let storage_name = match key.as_str() {
+        "0" => "digit0".to_owned(),
+        "1" => "digit1".to_owned(),
+        "2" => "digit2".to_owned(),
+        "3" => "digit3".to_owned(),
+        "4" => "digit4".to_owned(),
+        "5" => "digit5".to_owned(),
+        "6" => "digit6".to_owned(),
+        "7" => "digit7".to_owned(),
+        "8" => "digit8".to_owned(),
+        "9" => "digit9".to_owned(),
+        other => other.to_owned(),
+    };
+    let Some(binding_key) = parse_key_name(&storage_name) else {
+        return CaptureOutcome::Pending;
+    };
+    match canonical_combo(mods, &binding_key) {
+        Some(combo) => CaptureOutcome::Bind(combo),
+        None => CaptureOutcome::Pending,
+    }
+}
+
+/// gpui `Modifiers` → winit `ModifiersState`（位语义一致，直接搬运）。
+pub(crate) fn gpui_modifiers(modifiers: &::gpui::Modifiers) -> ModifiersState {
+    let mut mods = ModifiersState::empty();
+    if modifiers.control {
+        mods |= ModifiersState::CONTROL;
+    }
+    if modifiers.shift {
+        mods |= ModifiersState::SHIFT;
+    }
+    if modifiers.alt {
+        mods |= ModifiersState::ALT;
+    }
+    if modifiers.platform {
+        mods |= ModifiersState::SUPER;
+    }
+    mods
+}
+
+/// gpui `Modifiers` 的修饰键前缀回显（捕获态实时显示 "Ctrl+…"）。
+pub(crate) fn gpui_mods_prefix(modifiers: &::gpui::Modifiers) -> String {
+    mods_prefix(gpui_modifiers(modifiers))
 }
 
 #[cfg(test)]

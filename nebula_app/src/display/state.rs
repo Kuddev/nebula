@@ -211,6 +211,9 @@ pub struct NebulaPaneState {
     pub completion_items: Vec<NebulaCompletionItem>,
     /// Index of the highlighted popup row.
     pub completion_selected: usize,
+    /// 用户已接受或主动关闭弹窗的整行。只要屏幕行未变化，即使命令目录的
+    /// 异步代次更新也不重新弹出；下一次真实输入会自然让行值失配并清除此项。
+    pub(crate) completion_suppressed_line: Option<String>,
     pub line_buf: String,
     pub(crate) screen_line: String,
     pub touched: bool,

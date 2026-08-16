@@ -90,6 +90,66 @@ pub fn persist_keys(updates: &[(&str, String)]) -> std::io::Result<()> {
     std::fs::write(&path, updated)
 }
 
+/// `nebula_settings.txt` 里的 `keybind=combo:Action` 行（行序即优先级，
+/// 后写者胜）。两壳共读这一份；`RawSettings` 的哈希视图按 key 去重，表达
+/// 不了多行 keybind，必须走行级解析。
+pub fn keybind_pairs() -> Vec<(String, String)> {
+    std::fs::read_to_string(settings_path())
+        .map(|text| keybind_pairs_from_text(&text))
+        .unwrap_or_default()
+}
+
+/// [`keybind_pairs`] 的纯文本解析，单测锁定。
+pub fn keybind_pairs_from_text(text: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if !key.trim().eq_ignore_ascii_case("keybind") {
+            continue;
+        }
+        let Some((combo, action)) = value.split_once(':') else { continue };
+        let (combo, action) = (combo.trim(), action.trim());
+        if combo.is_empty() || action.is_empty() {
+            continue;
+        }
+        pairs.push((combo.to_owned(), action.to_owned()));
+    }
+    pairs
+}
+
+/// 整表替换全部 `keybind=` 行（删除旧行、按给定顺序追加到尾部），其余行
+/// 原样保留（注释、未知键、行序）。键位编辑器的提交路径——逐行增删的
+/// 语义由调用方（keymap.rs）先算好整表再落盘。
+pub fn persist_keybinds(pairs: &[(String, String)]) -> std::io::Result<()> {
+    let path = settings_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let updated = apply_keybinds(&text, pairs);
+    std::fs::create_dir_all(settings_dir())?;
+    std::fs::write(&path, updated)
+}
+
+/// [`persist_keybinds`] 的纯文本变换，单测锁定。
+pub fn apply_keybinds(text: &str, pairs: &[(String, String)]) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.lines() {
+        let is_keybind = line
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("keybind"));
+        if !is_keybind {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    for (combo, action) in pairs {
+        out.push_str("keybind=");
+        out.push_str(combo);
+        out.push(':');
+        out.push_str(action);
+        out.push('\n');
+    }
+    out
+}
+
 /// [`persist_keys`] 的纯文本变换，单测锁定行为。
 pub fn apply_updates(text: &str, updates: &[(&str, String)]) -> String {
     let mut pending: Vec<(usize, &(&str, String))> = updates.iter().enumerate().collect();
@@ -866,6 +926,23 @@ mod tests {
         assert_eq!(
             updated,
             "language=system\ntheme=SilverLight\nshell=powershell\ncursor_blink=1\n"
+        );
+    }
+
+    #[test]
+    fn keybind_pairs_parse_and_rewrite() {
+        let text = "theme=Nebula\nkeybind=ctrl+x:Copy\n# comment\nkeybind=alt+f1:SplitRight\n";
+        assert_eq!(
+            keybind_pairs_from_text(text),
+            vec![
+                ("ctrl+x".to_owned(), "Copy".to_owned()),
+                ("alt+f1".to_owned(), "SplitRight".to_owned()),
+            ]
+        );
+        let rewritten = apply_keybinds(text, &[("ctrl+y".to_owned(), "Paste".to_owned())]);
+        assert_eq!(
+            rewritten,
+            "theme=Nebula\n# comment\nkeybind=ctrl+y:Paste\n"
         );
     }
 

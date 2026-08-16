@@ -435,6 +435,13 @@ impl SidePanel {
         self.custom_root.is_some()
     }
 
+    /// 目录：Git/SVN 状态所属的那一个。始终是终端当前目录，与目录树的浏览
+    /// 位置（`custom_root`）无关——`refresh` 就是按这个路径抓 git 的，路径摘要
+    /// 必须显示同一个值，否则用户会看到「树在 A、状态是 B」的错位。
+    pub fn vcs_root(&self) -> Option<&Path> {
+        self.followed_cwd.as_deref().or(self.root.as_deref())
+    }
+
     pub fn root_notice(&self) -> Option<&str> {
         self.root_notice.as_deref()
     }
@@ -485,11 +492,17 @@ impl SidePanel {
             return;
         }
         let expanded = self.expanded.clone();
+        // VCS 状态始终读**终端当前目录**，不跟着目录树的浏览位置走。在树里点
+        // `..` 往上翻是纯浏览动作（`custom_root`，窗口内覆盖），把仓库状态一起
+        // 带走的后果是：翻到仓库外面之后 Git 视图只剩「当前目录不在 Git/SVN
+        // 仓库中」，而回头的入口偏偏只画在 Files 视图里。行与状态在这里解耦：
+        // 行看 `root`，git 看 `followed_cwd`。
+        let git_root = self.followed_cwd.clone().unwrap_or_else(|| root.clone());
         let running = std::sync::Arc::clone(&self.snapshot_running);
         let slot = std::sync::Arc::clone(&self.snapshot_slot);
         std::thread::spawn(move || {
             let rows = SidePanel::tree_rows(&root, &expanded);
-            let git = read_git(&root).or_else(|| read_svn(&root));
+            let git = read_git(&git_root).or_else(|| read_svn(&git_root));
             if let Ok(mut slot) = slot.lock() {
                 *slot = Some(PanelSnapshot { root, rows, git });
             }

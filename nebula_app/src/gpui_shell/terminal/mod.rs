@@ -10,6 +10,7 @@ pub mod mouse_protocol;
 pub mod session;
 pub mod suggest;
 pub mod view;
+mod ssh_connect_overlay;
 
 use gpui::{App, KeyBinding};
 

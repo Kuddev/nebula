@@ -15,6 +15,7 @@ use nebula_terminal::grid::Dimensions;
 use nebula_terminal::sync::FairMutex;
 use nebula_terminal::term::Config;
 use nebula_terminal::tty;
+use nebula_terminal::tty::EventedPty as _;
 
 /// 把 PTY/SSH 线程发出的终端事件转投到 GPUI 前台的异步通道。本地与 SSH
 /// 会话共用同一形状：`stages` 只有 SSH 业务层会写（连接阶段横幅的数据
@@ -62,6 +63,9 @@ impl Dimensions for GridSize {
 pub struct TerminalSession {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub notifier: Notifier,
+    /// PTY 直系 shell PID；关闭确认沿用旧壳 `busy_child(shell_pid)` 判据。
+    /// SSH 没有本地 shell 进程，固定为 0。
+    pub shell_pid: u32,
 }
 
 /// 一次会话 spawn 的完整出口：会话句柄 + 终端事件流 + SSH 阶段流
@@ -98,6 +102,7 @@ pub fn spawn(
     options.env.insert(crate::ai_hook::PANE_ENV.to_owned(), pane_id.to_string());
     tty::setup_env();
     let pty = tty::new(&options, window_size, 0)?;
+    let shell_pid = pty.child_pid().unwrap_or(0);
 
     // NEBULA_PTY_RECORD=1 复用 ref_test 的 conout 录制（./nebula.recording），
     // 用于 resize 锚定问题的字节级取证。
@@ -106,7 +111,7 @@ pub fn spawn(
     let notifier = Notifier(event_loop.channel());
     let _io_thread = event_loop.spawn();
 
-    Ok((TerminalSession { term, notifier }, rx, stage_rx))
+    Ok((TerminalSession { term, notifier, shell_pid }, rx, stage_rx))
 }
 
 /// 启动一个 SSH 直连会话（russh，与旧壳 `create_ssh_pane` 同一业务层）：
@@ -129,5 +134,5 @@ pub fn spawn_ssh(
     let sender =
         crate::ssh_session::spawn_session(destination, window_size, Arc::clone(&term), proxy)?;
 
-    Ok((TerminalSession { term, notifier: Notifier(sender) }, rx, stage_rx))
+    Ok((TerminalSession { term, notifier: Notifier(sender), shell_pid: 0 }, rx, stage_rx))
 }

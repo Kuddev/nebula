@@ -41,7 +41,18 @@ pub(crate) fn suggest_update(
         return;
     }
 
-    let key = format!("{}\u{0}{line}", state.cwd);
+    // 命令目录由后台 PowerShell 探针填充；目录从 0 变为完整集合时，即使
+    // 用户没有继续输入，也必须让上一帧的“无候选”缓存失效。
+    let command_generation = sources.commands.lock().map(|commands| commands.len()).unwrap_or(0);
+    let key = format!("{}\u{0}{line}\u{0}{command_generation}", state.cwd);
+    if state.completion_suppressed_line.as_deref() == Some(line.as_str()) {
+        state.suggestion_key = key;
+        state.suggestion.clear();
+        state.completion_items.clear();
+        state.completion_selected = 0;
+        return;
+    }
+    state.completion_suppressed_line = None;
     if key == state.suggestion_key {
         // Cache hit also protects an Esc-dismissed popup: dismissal clears
         // the items but keeps the key, so nothing reopens until the line
@@ -182,7 +193,9 @@ pub(crate) fn elide_left(text: &str, max_chars: usize) -> String {
 /// the ghost hint (history → directory history → PATH commands → file
 /// system), but keeping several candidates each instead of the first hit.
 fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, line: &str) {
-    const POPUP_MAX: usize = 8;
+    // 8 是视口行数，不是数据上限。旧实现把两者混成一个常量，候选在收集
+    // 阶段就被截断，因而既画不出滚动条，Tab 也永远走不到第九项以后。
+    const POPUP_LIMIT: usize = 256;
     const LABEL_MAX: usize = 44;
 
     let mut items: Vec<NebulaCompletionItem> = Vec::new();
@@ -193,7 +206,7 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
         if items.iter().any(|seen| seen.insert == item.insert && seen.kind == item.kind) {
             return;
         }
-        if items.len() < POPUP_MAX {
+        if items.len() < POPUP_LIMIT {
             items.push(item);
         }
     };
@@ -221,10 +234,17 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
     // PATH executables while the first token is being typed.
     if nebula_is_command_position(line) {
         if let Ok(commands) = sources.commands.lock() {
-            for command in nebula_command_hints(commands.as_slice(), line, POPUP_MAX) {
+            for command in nebula_command_hints(commands.as_slice(), line, POPUP_LIMIT) {
+                // 精确命令也必须成为可接受项；补一个空格既给用户明确反馈，
+                // 又让 Enter 只完成选择而不立刻执行命令。
+                let insert = if command.len() == line.len() {
+                    " ".to_owned()
+                } else {
+                    command[line.len()..].to_owned()
+                };
                 push(&mut items, NebulaCompletionItem {
                     label: elide_left(command, LABEL_MAX),
-                    insert: command[line.len()..].to_owned(),
+                    insert,
                     kind: NebulaCompletionKind::Command,
                 });
             }
@@ -250,7 +270,7 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
             } else {
                 matches
             };
-            for candidate in matches.iter().take(POPUP_MAX) {
+            for candidate in matches.iter().take(POPUP_LIMIT) {
                 let path = candidate.display_override.as_deref().unwrap_or(&candidate.path);
                 if path.len() <= token.len() || !path.is_char_boundary(token.len()) {
                     continue;

@@ -1,6 +1,5 @@
 //! 终端视图：持有会话、处理输入与 IME、驱动重绘。
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontFeatures,
     FontStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
@@ -21,7 +20,7 @@ use nebula_terminal::vte::ansi::CursorStyle;
 use std::sync::Arc;
 
 use super::colors::Palette;
-use super::element::TerminalElement;
+use super::element::{TerminalElement, completion_popup_layout};
 use super::keymap;
 use super::mouse_protocol;
 use super::session::{self, TerminalSession};
@@ -93,11 +92,22 @@ pub enum TerminalViewEvent {
     /// 用户在本视图内按下鼠标：分屏宿主据此更新聚焦 pane（键盘焦点已由
     /// 视图自己 `window.focus` 拿走，这里只同步宿主的 pane 级焦点记账）。
     FocusRequested,
+    /// 连接卡片的取消/关闭（旧壳 TabRequest::Close 的对应物）。
+    RequestClose,
 }
 
 /// 会话种类：本地 shell 或 SSH 直连（russh，共享旧壳业务层）。
+///
+/// `shell` 是 Tab 创建/恢复时已经裁定好的启动命令。不能只传 cwd 再在
+/// `TerminalView::new` 里读取“此刻的默认 Shell”，否则恢复混合的 PowerShell /
+/// WSL 工作区时，每个 Tab 都会被重新解释成同一个当前默认值。
 pub enum TerminalLaunch {
-    Local { cwd: Option<std::path::PathBuf> },
+    Local {
+        cwd: Option<std::path::PathBuf>,
+        shell: Option<nebula_terminal::tty::Shell>,
+        /// 只用于欢迎屏选择 PowerShell/Bash 形态，不参与 PTY 启动。
+        shell_name: Option<String>,
+    },
     Ssh { destination: String },
 }
 
@@ -134,10 +144,21 @@ pub struct TerminalView {
     pub branch: String,
     /// 标题协议第 4 字段：远端 `nebula ssh` 上报的运行中程序，本地为空。
     pub running_program: Option<String>,
+    /// OSC 133;C 起、133;D 止：命令正在执行。自带 PowerShell prompt 靠
+    /// `NEBULA|` 标题报 `running_program`，装了 OSC133 集成的 bash/zsh/nu 只
+    /// 发这一对语义标记——两条路都要能点亮侧栏的「运行中」。
+    command_running: bool,
+    /// OSC 9 程序通知，攒到 render（那里才有 `Window` 判聚焦）再呈现。
+    pending_notify: Vec<String>,
     /// SSH 直连目的地（`user@host[:port]`）；本地会话为 None。
     pub ssh_destination: Option<String>,
     /// SSH 连接阶段（业务层上报）：Ready 前画连接横幅，Failed 驻留错误。
     ssh_stage: Option<crate::ssh_session::SshStage>,
+    /// SSH 连接卡片状态（旧壳 `display::ssh_connect::SshConnectState` 的
+    /// 直接复用：阶段日志、粒子相位、进度插值、350ms 显示门槛都在里面）。
+    pub(super) ssh_connect: Option<crate::display::ssh_connect::SshConnectState>,
+    /// 上一次动画帧时刻（卡片 step 的 delta 来源）。
+    ssh_connect_last_step: std::time::Instant,
     /// Hook-reported identity for exact resume/fork. Process/title inference is
     /// never accepted here because a wrong id would continue the wrong chat.
     pub ai_session: Option<crate::display::AiSessionIdentity>,
@@ -395,15 +416,25 @@ impl TerminalView {
             cell_width: (cell_w.as_f32() * scale).round().max(1.0) as u16,
             cell_height: (line_h.as_f32() * scale).round().max(1.0) as u16,
         };
-        let (ssh_destination, initial_title, spawned) = match launch {
-            TerminalLaunch::Local { cwd } => (
+        let (ssh_destination, initial_title, intro_shell_name, spawned) = match launch {
+            TerminalLaunch::Local { cwd, shell: launch_shell, shell_name } => (
                 None,
                 String::from("shell"),
-                session::spawn(initial, term_config, shell, pane_id, cwd),
+                shell_name,
+                session::spawn(
+                    initial,
+                    term_config,
+                    // 显式 launch（会话恢复/创建时冻结）优先；只有旧会话没有
+                    // 身份时才回退当前设置。这正是共享 v4 的 Default 语义。
+                    launch_shell.or(shell),
+                    pane_id,
+                    cwd,
+                ),
             ),
             TerminalLaunch::Ssh { destination } => (
                 Some(destination.clone()),
                 destination.clone(),
+                None,
                 session::spawn_ssh(destination, initial, term_config),
             ),
         };
@@ -418,7 +449,11 @@ impl TerminalView {
                 let runtime = nebula_settings::RuntimeSettings::load();
                 if runtime.fetch && !is_ssh {
                     use nebula_terminal::event::Notify as _;
-                    let id = runtime.shell.as_deref().unwrap_or_default().to_ascii_lowercase();
+                    let id = intro_shell_name
+                        .as_deref()
+                        .or(runtime.shell.as_deref())
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
                     let intro_shell = if id.contains("wsl") || id.contains("bash") {
                         crate::display::NebulaShell::Bash
                     } else {
@@ -465,7 +500,37 @@ impl TerminalView {
                         while let Some(stage) = stage_rx.next().await {
                             if this
                                 .update(cx, |view: &mut Self, cx| {
-                                    view.ssh_stage = Some(stage);
+                                    view.ssh_stage = Some(stage.clone());
+                                    // 连接卡片状态机（旧壳 ssh_connect_stage
+                                    // 同款合同）：Ready 移除；Resolve 开新卡
+                                    // 片；其余阶段推进。中途断线不会让用
+                                    // 了半天的终端凭空复活一张卡片。
+                                    match stage {
+                                        crate::ssh_session::SshStage::Ready => {
+                                            view.ssh_connect = None;
+                                        },
+                                        other => {
+                                            match &mut view.ssh_connect {
+                                                Some(state) => state.set_stage(other),
+                                                None => {
+                                                    if matches!(
+                                                        other,
+                                                        crate::ssh_session::SshStage::Resolve
+                                                    ) {
+                                                        if let Some(dest) =
+                                                            view.ssh_destination.clone()
+                                                        {
+                                                            view.ssh_connect = Some(
+                                                                crate::display::ssh_connect::SshConnectState::new(dest),
+                                                            );
+                                                            view.ssh_connect_last_step =
+                                                                std::time::Instant::now();
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                        },
+                                    }
                                     cx.notify();
                                 })
                                 .is_err()
@@ -508,8 +573,12 @@ impl TerminalView {
             cwd: String::new(),
             branch: String::new(),
             running_program: None,
+            command_running: false,
+            pending_notify: Vec::new(),
             ssh_destination,
             ssh_stage: None,
+            ssh_connect: None,
+            ssh_connect_last_step: std::time::Instant::now(),
             ai_session: None,
             error,
             exited: None,
@@ -604,7 +673,73 @@ impl TerminalView {
             TermEvent::Exit => {
                 self.mark_exited(String::from("会话已结束"), cx);
             },
-            // 垂直切片不处理：铃声、cwd 上报、内联图片、OSC133、AI hook 等。
+            TermEvent::CwdReport(cwd) => {
+                // 标准 OSC 7 / 9;9 的目录上报。只动 cwd，`NEBULA|` 标题带来的
+                // branch/program 保持不变——两条通道并存（旧壳 event.rs:3142
+                // 同合同）。少了这一条，只有自带 PowerShell prompt 的 tab 能被
+                // 目录树/git 跟随，bash/zsh/nu 一律跟不动。
+                let cwd = cwd.trim().to_owned();
+                if !cwd.is_empty() && self.cwd != cwd {
+                    self.cwd = cwd;
+                    self.suggest.cwd = self.cwd.clone();
+                    super::suggest::record_directory(&self.cwd);
+                    cx.notify();
+                }
+            },
+            TermEvent::CommandStart => {
+                // 程序身份（旧壳 event.rs CommandStart 分支原样）：从 Enter
+                // 时捕获的命令行提取首 token，AgentKind 认得的归一成 slug。
+                // 这是侧栏 AI 图标对「直接敲 codex/grok 而没装 hook」的
+                // 会话也点亮的那条路——hook 信封只是更准的覆盖层。
+                let identity = crate::display::extract_program(&self.suggest.last_committed)
+                    .map(|program| {
+                        crate::ai_agents::AgentKind::parse(&program)
+                            .map(|agent| agent.slug().to_owned())
+                            .unwrap_or(program)
+                    });
+                if identity != self.running_program {
+                    self.running_program = identity;
+                    cx.emit(TerminalViewEvent::TitleChanged);
+                }
+                self.command_running = true;
+                cx.notify();
+            },
+            // 退出码先只用来结束「运行中」；失败命令的未读标记要等
+            // `SidebarActivity` 扩出未读态再接，现在记下来也没有呈现位置。
+            TermEvent::CommandDone { exit_code: _ } => {
+                // 旧壳同款收尾：CLI 退回提示符后，它不再是这个 pane 的前台
+                // 事实——hook 稍后若仍在跑会重新点亮（handle_ai_hook 覆写）。
+                if self.running_program.take().is_some() || self.ai_session.take().is_some() {
+                    cx.emit(TerminalViewEvent::TitleChanged);
+                }
+                self.command_running = false;
+                cx.notify();
+            },
+            TermEvent::Notify(body) => {
+                // 程序自己发的 OSC 9 通知：旧壳只在窗口没聚焦时才递出去
+                // （event.rs:3291），聚焦时用户本来就在看这个 pane。这里攒着，
+                // render 拿到 `Window` 才判聚焦。
+                let body = body.trim().to_owned();
+                if !body.is_empty() {
+                    self.pending_notify.push(body);
+                    cx.notify();
+                }
+            },
+            TermEvent::AiHookEnvelope(envelope) => {
+                // SSH pane 里的 agent 靠私有 OSC 把 hook 信封带回本地（本地
+                // agent 走 workspace 的 ai_events 通道）。信封在 event_loop 里
+                // 已核过通道令牌，这里解析出来喂进同一个应用路径。
+                //
+                // hook 自报客户端名（claude/codex），是**程序身份的权威来源**
+                // ——比 OSC 133 的命令行嗅探准，后者漏掉包装启动和没有 shell
+                // 集成的会话。少了这一条，远端 agent 的侧栏图标和会话身份
+                // （fork/恢复要用）全都缺席。
+                if let Some(hook) = crate::ai_hook::parse_remote_envelope(&envelope, None) {
+                    self.handle_ai_hook(&hook, cx);
+                }
+            },
+            // 仍未接线：内联图片（要图片管线把 abs_line 锚到网格）、OSC 1337
+            // UserVar（AI 查询拦截）、铃声。
             _ => {},
         }
     }
@@ -623,6 +758,20 @@ impl TerminalView {
         if let Some(session) = &self.session {
             let _ = session.notifier.0.send(Msg::Shutdown);
         }
+    }
+
+    /// 旧壳 `WindowContext::busy_process_in` 的单 Pane 形态：进程树只负责
+    /// 判断 shell 下面是否仍有子进程；展示名称优先采用终端协议识别出的
+    /// 程序名，避免把 Claude Code 一律显示成承载它的 `node.exe`。
+    pub fn busy_process(&self) -> Option<String> {
+        let shell_pid = self.session.as_ref()?.shell_pid;
+        if shell_pid == 0 {
+            return None;
+        }
+        let executable = crate::process_tree::busy_child(shell_pid)?;
+        Some(self.running_program.clone().unwrap_or_else(|| {
+            crate::process_tree::display_name(&executable)
+        }))
     }
 
     /// Apply one lifecycle event already routed to this pane by the workspace.
@@ -666,7 +815,8 @@ impl TerminalView {
             )
         {
             SidebarActivity::Failed
-        } else if self.running_program.is_some()
+        } else if self.command_running
+            || self.running_program.is_some()
             || self.ssh_stage.as_ref().is_some_and(|stage| {
                 !matches!(stage, crate::ssh_session::SshStage::Ready)
             })
@@ -1209,10 +1359,10 @@ impl TerminalView {
         if plain {
             if suggest::popup_active(&self.suggest) {
                 match ks.key.as_str() {
-                    "down" | "up" => {
+                    "down" | "up" | "tab" => {
                         suggest::popup_move(
                             &mut self.suggest,
-                            if ks.key.as_str() == "down" { 1 } else { -1 },
+                            if ks.key.as_str() == "up" { -1 } else { 1 },
                         );
                         cx.notify();
                         cx.stop_propagation();
@@ -1225,19 +1375,18 @@ impl TerminalView {
                             return;
                         }
                     },
-                    key @ ("tab" | "right") if suggest::accepts(self.accept, key) => {
-                        if let Some(insert) = suggest::popup_take(&mut self.suggest) {
-                            if !insert.is_empty() {
-                                for c in insert.chars() {
-                                    crate::display::Display::nebula_input_char(
-                                        &mut self.suggest,
-                                        c,
-                                    );
-                                }
-                                self.write_input(insert.into_bytes(), cx);
-                                cx.stop_propagation();
-                                return;
-                            }
+                    "enter" => {
+                        if self.accept_completion_popup(cx) {
+                            cx.notify();
+                            cx.stop_propagation();
+                            return;
+                        }
+                    },
+                    "right" if suggest::accepts(self.accept, "right") => {
+                        if self.accept_completion_popup(cx) {
+                            cx.notify();
+                            cx.stop_propagation();
+                            return;
                         }
                     },
                     _ => {},
@@ -1495,6 +1644,78 @@ impl TerminalView {
         }
     }
 
+    /// 像素命中与绘制共用同一份候选几何，截短列表或上翻时也不会点错行。
+    fn completion_popup_hit(&self, position: Point<Pixels>) -> Option<usize> {
+        let (cursor_row, cursor_col) = self.suggest_anchor?;
+        let popup = completion_popup_layout(
+            &self.suggest.completion_items,
+            self.suggest.completion_selected,
+            cursor_row,
+            cursor_col,
+            self.rows,
+            self.cols,
+        )?;
+        let left = self.origin.x + self.cell_width * popup.start_col as f32;
+        let top = self.origin.y + self.line_height * popup.start_line as f32;
+        let right = left + self.cell_width * popup.width as f32;
+        let bottom = top + self.line_height * popup.rows as f32;
+        if position.x < left || position.x >= right || position.y < top || position.y >= bottom {
+            return None;
+        }
+        let row = ((position.y - top).as_f32() / self.line_height.as_f32().max(1.0)) as usize;
+        let index = popup.offset + row;
+        (index < self.suggest.completion_items.len()).then_some(index)
+    }
+
+    /// 右侧窄条不覆盖候选字符列；点击轨道按指针比例跳到完整候选集中的位置。
+    fn completion_popup_scrollbar_target(&self, position: Point<Pixels>) -> Option<usize> {
+        let (cursor_row, cursor_col) = self.suggest_anchor?;
+        let popup = completion_popup_layout(
+            &self.suggest.completion_items,
+            self.suggest.completion_selected,
+            cursor_row,
+            cursor_col,
+            self.rows,
+            self.cols,
+        )?;
+        let len = self.suggest.completion_items.len();
+        if len <= popup.rows {
+            return None;
+        }
+        let content_right = self.origin.x + self.cell_width * (popup.start_col + popup.width) as f32;
+        let top = self.origin.y + self.line_height * popup.start_line as f32;
+        let height = self.line_height * popup.rows as f32;
+        if position.x < content_right
+            || position.x >= content_right + px(5.0)
+            || position.y < top
+            || position.y >= top + height
+        {
+            return None;
+        }
+        let progress =
+            ((position.y - top).as_f32() / height.as_f32().max(1.0)).clamp(0.0, 1.0);
+        Some((progress * (len - 1) as f32).round() as usize)
+    }
+
+    /// 接受当前候选时只写入补全余量。即使余量为空也算已处理，Enter 不能
+    /// 继续透传成一次命令执行。
+    fn accept_completion_popup(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(insert) = suggest::popup_take(&mut self.suggest) else { return false };
+        let before = if self.suggest.screen_line.is_empty() {
+            self.suggest.line_buf.clone()
+        } else {
+            self.suggest.screen_line.clone()
+        };
+        for c in insert.chars() {
+            crate::display::Display::nebula_input_char(&mut self.suggest, c);
+        }
+        self.suggest.completion_suppressed_line = Some(format!("{before}{insert}"));
+        if !insert.is_empty() {
+            self.write_input(insert.into_bytes(), cx);
+        }
+        true
+    }
+
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -1504,6 +1725,31 @@ impl TerminalView {
         window.focus(&self.focus_handle);
         cx.emit(TerminalViewEvent::FocusRequested);
         if self.session.is_none() {
+            return;
+        }
+        if event.button == MouseButton::Left
+            && let Some(index) = self.completion_popup_scrollbar_target(event.position)
+        {
+            self.suggest.completion_selected = index;
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if event.button == MouseButton::Left
+            && let Some(index) = self.completion_popup_hit(event.position)
+        {
+            self.suggest.completion_selected = index;
+            if self.accept_completion_popup(cx) {
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+        }
+        // 面板外第一次点击只负责关闭浮层，避免同一击又在终端里开选区或触发
+        // TUI 鼠标协议；缓存当前行，行不变时浮层不会下一帧原地复活。
+        if suggest::popup_dismiss(&mut self.suggest) {
+            cx.notify();
+            cx.stop_propagation();
             return;
         }
         // 滚动条是壳的控件，命中优先于选区和鼠标上报——否则在开了鼠标追踪的
@@ -1553,6 +1799,17 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 候选行 hover 与键盘高亮共用选中索引；这样鼠标所见即 Enter 所收。
+        // 移出面板时保留最后选择，继续按 Tab 不会突然跳回第一项。
+        if event.pressed_button.is_none()
+            && let Some(index) = self.completion_popup_hit(event.position)
+        {
+            if self.suggest.completion_selected != index {
+                self.suggest.completion_selected = index;
+                cx.notify();
+            }
+            return;
+        }
         // 拖条中：指针的整段轨迹都归滚动条，不进选区也不上报。
         if let Some(grab) = self.scrollbar_drag {
             if event.pressed_button != Some(MouseButton::Left) {
@@ -1641,6 +1898,11 @@ impl TerminalView {
     ) {
         window.focus(&self.focus_handle);
         cx.emit(TerminalViewEvent::FocusRequested);
+        if suggest::popup_dismiss(&mut self.suggest) {
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if self.session.is_none() {
             return;
         }
@@ -1690,6 +1952,11 @@ impl TerminalView {
     ) {
         window.focus(&self.focus_handle);
         cx.emit(TerminalViewEvent::FocusRequested);
+        if suggest::popup_dismiss(&mut self.suggest) {
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if self.mouse_mode_active(&event.modifiers) {
             self.send_mouse_report(
                 event.position,
@@ -1720,6 +1987,20 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         let delta_y = event.delta.pixel_delta(self.line_height).y.as_f32();
+        if suggest::popup_active(&self.suggest)
+            && (self.completion_popup_hit(event.position).is_some()
+                || self.completion_popup_scrollbar_target(event.position).is_some())
+        {
+            if delta_y != 0.0 {
+                // 系统会把一格滚轮编码成“滚动 N 行”（Windows 常见为 3），
+                // 终端回滚区需要尊重这个倍率，候选选择器则不应该：一次滚轮
+                // 手势只跨一个 item，否则 8 行视口会瞬间跳过半屏。
+                suggest::popup_move(&mut self.suggest, if delta_y > 0.0 { -1 } else { 1 });
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
         self.scroll_px += delta_y;
         let lines = (self.scroll_px / self.line_height.as_f32().max(1.0)).trunc() as i32;
         if lines == 0 {
@@ -1865,11 +2146,34 @@ impl gpui::EntityInputHandler for TerminalView {
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // OSC 9 程序通知：旧壳只在窗口没聚焦时递出去，聚焦时用户本来就在看这
+        // 个 pane。这里是最早能同时拿到 `Window` 和 view 可变引用的地方。用驻留
+        // 式 banner 而不是 toast——人不在看的时候弹一条 5 秒自动消失的提示等于
+        // 没弹。推送 defer 到本轮 effect 之后，不在 render 中途改 `Root`。
+        if !self.pending_notify.is_empty() {
+            let notes = std::mem::take(&mut self.pending_notify);
+            if !window.is_window_active() {
+                window.defer(cx, move |window, cx| {
+                    for body in notes {
+                        crate::gpui_shell::toast::banner(
+                            window,
+                            cx,
+                            crate::display::ToastKind::Info,
+                            body,
+                        );
+                    }
+                });
+            }
+        }
         let mut root = div()
             .id("nebula-terminal")
             .key_context(KEY_CONTEXT)
             .size_full()
+            // SSH 连接卡片使用 absolute + inset_0；本 pane 必须成为它的
+            // containing block，否则坐标会逃到工作区/窗口根，轨道和粒子
+            // 就会出现在终端卡片之外甚至窗口底部。
+            .relative()
             .overflow_hidden()
             // 不画自己的背景：卡容器统一负责"卡底色（带窗口透明度）→
             // 壁纸"两层，这里再铺一层不透明 bg 会把它们全部盖死。
@@ -1896,34 +2200,26 @@ impl Render for TerminalView {
             root = root.child(div().p_4().text_color(gpui::red()).child(error.clone()));
         } else {
             root = root.child(TerminalElement::new(cx.entity()));
-            // SSH 连接阶段横幅（右上角，Ready 即撤）：每个取值对应业务层
-            // 一个真实调用点（resolve → connect → auth → open shell），
-            // 不是估算进度。失败原因由业务层写进 grid，横幅只留短标。
-            if let Some(stage) = &self.ssh_stage {
-                use crate::ssh_session::SshStage;
-                let (label, failed): (Option<String>, bool) = match stage {
-                    SshStage::Resolve => (Some("解析地址…".into()), false),
-                    SshStage::Connect => (Some("建立连接…".into()), false),
-                    SshStage::Authenticate => (Some("认证…".into()), false),
-                    SshStage::OpenShell => (Some("打开远端终端…".into()), false),
-                    SshStage::Ready => (None, false),
-                    SshStage::Failed(_) => (Some("连接失败".into()), true),
-                };
-                if let Some(label) = label {
-                    let host = self.ssh_destination.clone().unwrap_or_default();
-                    root = root.child(
-                        div()
-                            .absolute()
-                            .top_2()
-                            .right_2()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .bg(gpui::opaque_grey(0.2, 0.9))
-                            .text_sm()
-                            .when(failed, |banner| banner.text_color(gpui::red()))
-                            .child(format!("SSH {host} · {label}")),
-                    );
+            // SSH 连接卡片（旧壳 `display::ssh_connect` 的 GPUI 形态）：
+            // 状态机/文案/常量直接复用，卡片遮罩盖住空 grid。350ms 显示
+            // 门槛由 `visible()` 决定；动画帧驱动粒子与进度插值。
+            if let Some(state) = &self.ssh_connect {
+                if state.visible() {
+                    root = root.child(super::ssh_connect_overlay::overlay(state, cx));
+                    if !state.failed() {
+                        // 每帧 step + 重绘（旧壳吃共享 motion frame，GPUI 用
+                        // 下一帧回调自驱）：notify 触发下一次 render，render
+                        // 再续下一帧——环由渲染侧闭合，无需递归闭包。
+                        cx.on_next_frame(window, |this, _, cx| {
+                            let now = std::time::Instant::now();
+                            let dt = now - this.ssh_connect_last_step;
+                            this.ssh_connect_last_step = now;
+                            if let Some(state) = &mut this.ssh_connect {
+                                state.step(dt);
+                            }
+                            cx.notify();
+                        });
+                    }
                 }
             }
             if let Some(exited) = &self.exited {

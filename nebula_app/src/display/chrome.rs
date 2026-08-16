@@ -165,7 +165,7 @@ pub(super) fn contains_rect((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f
 /// columns, appending an ellipsis when clipped. CJK glyphs count as two columns,
 /// matching how `draw_chrome_text` lays them out — callers already compute
 /// `max_cols` as the available pixel span divided by `cell_w`, i.e. columns.
-pub(super) fn truncate_tab_label(label: &str, max_cols: usize) -> String {
+pub(crate) fn truncate_tab_label(label: &str, max_cols: usize) -> String {
     let total: usize = label.chars().map(|c| c.width().unwrap_or(0)).sum();
     if total <= max_cols {
         return label.to_owned();

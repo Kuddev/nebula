@@ -16,9 +16,11 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use gpui::{App, Window};
+use gpui::{AnyElement, App, IntoElement as _, ParentElement as _, Styled as _, Window, div, px};
 use gpui_component::{Root, WindowExt as _};
 use gpui_component::notification::Notification;
+
+use crate::gpui_shell::prelude::v_flex;
 
 pub use crate::display::ToastKind;
 
@@ -62,6 +64,32 @@ fn push(window: &mut Window, cx: &mut App, notification: Notification) {
             }
         });
     }
+}
+
+/// Nebula 的通知层定位：右下角固定 20px 安全边距，最新一条在最下，旧的
+/// 向上堆叠。组件库默认 `NotificationList` 写死在右上角且拉满视口高度；
+/// 这里继续复用它的 Notification 实体、生命周期、关闭和动画，只替换宿主
+/// 的排列层，不复制组件内部状态机。
+pub fn render_layer(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+    let root = window.root::<Root>()??;
+    let list = root.read(cx).notification.clone();
+    let mut items = list.read(cx).notifications();
+    // 与旧壳同屏上限一致。保留队尾三条，顺序仍是旧→新，因此 v_flex
+    // 底部锚定后最新项自然落在最下面。
+    if items.len() > 3 {
+        items.drain(..items.len() - 3);
+    }
+    if items.is_empty() {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .right(px(20.0))
+            .bottom(px(20.0))
+            .child(v_flex().items_end().gap_2().children(items))
+            .into_any_element(),
+    )
 }
 
 /// 弹一条自动消失的提示（toast 层）。空文本与 600ms 内的重复文本静默丢弃。

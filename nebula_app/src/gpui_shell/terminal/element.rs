@@ -547,9 +547,90 @@ fn grid_text(
     used
 }
 
-/// 弹窗补全列表：布局与配色对齐旧壳 `draw_completion_popup`——下方优先、
-/// 放不下上移、宽度不足先左滑再截 label；` label  tag ` 两端各 1 格、中缝
-/// 2 格，选中行落在主题 accent 上。
+/// 绘制与命中测试共用的弹窗几何。旧壳的候选列表是在 cell 网格中绘制的，
+/// GPUI 也必须用同一套偏移，否则鼠标看到的行和实际接受的行会错位。
+#[derive(Clone, Copy)]
+pub(super) struct CompletionPopupLayout {
+    pub start_line: usize,
+    pub start_col: usize,
+    pub offset: usize,
+    pub rows: usize,
+    pub width: usize,
+    pub label_width: usize,
+    pub tag_width: usize,
+    pub selected: usize,
+}
+
+pub(super) fn completion_popup_layout(
+    items: &[crate::display::NebulaCompletionItem],
+    selected: usize,
+    cursor_row: usize,
+    cursor_col: usize,
+    screen_lines: usize,
+    columns: usize,
+) -> Option<CompletionPopupLayout> {
+    use unicode_width::UnicodeWidthChar as _;
+
+    if columns < 12 || screen_lines < 2 || items.is_empty() {
+        return None;
+    }
+
+    // 行位：优先光标下方，不够放则上方；最多显示八项。
+    let below = screen_lines.saturating_sub(cursor_row + 1);
+    let above = cursor_row;
+    let want = items.len().min(8);
+    let (rows, start_line) = if below >= want || below >= above {
+        (want.min(below), cursor_row + 1)
+    } else {
+        (want.min(above), cursor_row - want.min(above))
+    };
+    if rows == 0 {
+        return None;
+    }
+
+    let selected = selected.min(items.len() - 1);
+    let offset = if selected >= rows { selected + 1 - rows } else { 0 };
+    let visible = &items[offset..(offset + rows).min(items.len())];
+    let tag = |kind: crate::display::NebulaCompletionKind| -> &'static str {
+        match kind {
+            crate::display::NebulaCompletionKind::History => "历史",
+            crate::display::NebulaCompletionKind::Command => "命令",
+            crate::display::NebulaCompletionKind::Dir => "目录",
+            crate::display::NebulaCompletionKind::File => "文件",
+        }
+    };
+    let cells_of = |text: &str| -> usize { text.chars().map(|c| c.width().unwrap_or(0)).sum() };
+    let tag_width = visible.iter().map(|item| cells_of(tag(item.kind))).max().unwrap_or(0);
+    let label_width_max = visible.iter().map(|item| cells_of(&item.label)).max().unwrap_or(0);
+
+    let mut start_col = cursor_col.min(columns - 1);
+    let mut avail = columns - start_col;
+    let full_width = label_width_max + tag_width + 4;
+    if full_width > avail {
+        let slide = (full_width - avail).min(start_col);
+        start_col -= slide;
+        avail += slide;
+    }
+    let width = full_width.min(avail);
+    let label_width = width.saturating_sub(tag_width + 4);
+    // 这里的 4 是窄窗口裁切后“至少还能读”的标签宽度，不是候选本身的
+    // 最小长度。`cat` 这类没有更长邻居的短命令，其自然宽度只有 3；旧判
+    // 定会让引擎已生成的精确候选在布局阶段直接消失。只拒绝完全没有标签
+    // 空间的布局，短标签照常按自然宽度显示。
+    (label_width > 0).then_some(CompletionPopupLayout {
+        start_line,
+        start_col,
+        offset,
+        rows,
+        width,
+        label_width,
+        tag_width,
+        selected,
+    })
+}
+
+/// 弹窗补全列表：下方优先、放不下上移、宽度不足先左滑再截 label；
+/// 面板底和行内容都对齐主题色，选中态使用柔和 accent 水洗。
 #[allow(clippy::too_many_arguments)]
 fn paint_completion_popup(
     window: &mut Window,
@@ -564,27 +645,18 @@ fn paint_completion_popup(
     font: &gpui::Font,
     font_size: Pixels,
 ) {
-    use unicode_width::UnicodeWidthChar as _;
     let columns = layout.cols;
     let screen_lines = layout.rows;
-    if columns < 12 || screen_lines < 2 {
+    let Some(popup) = completion_popup_layout(
+        items,
+        selected,
+        cursor_row,
+        cursor_col,
+        screen_lines,
+        columns,
+    ) else {
         return;
-    }
-
-    // 行位：优先光标下方，不够放则上方；截短时保证选中行可见。
-    let below = screen_lines.saturating_sub(cursor_row + 1);
-    let above = cursor_row;
-    let want = items.len().min(8);
-    let (rows, start_line) = if below >= want || below >= above {
-        (want.min(below), cursor_row + 1)
-    } else {
-        (want.min(above), cursor_row - want.min(above))
     };
-    if rows == 0 {
-        return;
-    }
-    let offset = if selected >= rows { selected + 1 - rows } else { 0 };
-
     let tag = |kind: crate::display::NebulaCompletionKind| -> &'static str {
         match kind {
             crate::display::NebulaCompletionKind::History => "历史",
@@ -593,44 +665,43 @@ fn paint_completion_popup(
             crate::display::NebulaCompletionKind::File => "文件",
         }
     };
-    let cells_of = |text: &str| -> usize { text.chars().map(|c| c.width().unwrap_or(0)).sum() };
+    let visible = &items[popup.offset..(popup.offset + popup.rows).min(items.len())];
 
-    let visible = &items[offset..(offset + rows).min(items.len())];
-    let tag_w = visible.iter().map(|item| cells_of(tag(item.kind))).max().unwrap_or(0);
-    let label_w_max = visible.iter().map(|item| cells_of(&item.label)).max().unwrap_or(0);
-
-    let mut start_col = cursor_col.min(columns.saturating_sub(1));
-    let mut avail = columns - start_col;
-    let full_w = label_w_max + tag_w + 4;
-    if full_w > avail {
-        // 先整体左滑保住宽度，窄 pane 再钳制。
-        let slide = (full_w - avail).min(start_col);
-        start_col -= slide;
-        avail += slide;
-    }
-    let width = full_w.min(avail);
-    let label_w = width.saturating_sub(tag_w + 4);
-    if label_w < 4 {
-        return;
-    }
+    // 四周留出少量呼吸边，圆角和边框不会压到候选文字。
+    let panel_pad = px(4.0);
+    let panel_origin = point(
+        bounds.origin.x + layout.cell_width * popup.start_col as f32 - panel_pad,
+        bounds.origin.y + layout.line_height * popup.start_line as f32 - panel_pad,
+    );
+    let panel_bounds = Bounds::new(
+        panel_origin,
+        size(
+            layout.cell_width * popup.width as f32 + panel_pad * 2.0,
+            layout.line_height * popup.rows as f32 + panel_pad * 2.0,
+        ),
+    );
+    window.paint_quad(fill(panel_bounds, colors.panel_bg).corner_radii(px(8.0)));
+    window.paint_quad(
+        outline(panel_bounds, colors.panel_border, gpui::BorderStyle::Solid).corner_radii(px(8.0)),
+    );
 
     for (row, item) in visible.iter().enumerate() {
-        let line = start_line + row;
+        let line = popup.start_line + row;
         if line >= screen_lines {
             break;
         }
-        let is_selected = offset + row == selected;
+        let is_selected = popup.offset + row == popup.selected;
         let (bg, label_fg, tag_fg) = if is_selected {
             (colors.selected_bg, colors.selected_fg, colors.selected_fg)
         } else {
             (colors.row_bg, colors.row_fg, colors.tag_fg)
         };
         let origin = point(
-            bounds.origin.x + layout.cell_width * start_col as f32,
+            bounds.origin.x + layout.cell_width * popup.start_col as f32,
             bounds.origin.y + layout.line_height * line as f32,
         );
         window.paint_quad(fill(
-            Bounds::new(origin, size(layout.cell_width * width as f32, layout.line_height)),
+            Bounds::new(origin, size(layout.cell_width * popup.width as f32, layout.line_height)),
             bg,
         ));
         grid_text(
@@ -643,9 +714,9 @@ fn paint_completion_popup(
             point(origin.x + layout.cell_width, origin.y),
             layout.cell_width,
             layout.line_height,
-            label_w,
+            popup.label_width,
         );
-        let tag_start = width.saturating_sub(1 + tag_w);
+        let tag_start = popup.width.saturating_sub(1 + popup.tag_width);
         grid_text(
             window,
             cx,
@@ -656,7 +727,56 @@ fn paint_completion_popup(
             point(origin.x + layout.cell_width * tag_start as f32, origin.y),
             layout.cell_width,
             layout.line_height,
-            tag_w,
+            popup.tag_width,
         );
+    }
+
+    if items.len() > popup.rows {
+        // 滚动条覆在面板右侧 4px 呼吸边内，不占终端字符列，也不遮住 tag。
+        // 拇指跟随可见窗口的 offset；Tab、hover、滚轮三条路径共享同一个
+        // 可视位置，不会出现键盘已翻页而滚动条仍停在顶部。
+        let track_h = layout.line_height * popup.rows as f32 - px(4.0);
+        let track_top =
+            bounds.origin.y + layout.line_height * popup.start_line as f32 + px(2.0);
+        let content_right =
+            bounds.origin.x + layout.cell_width * (popup.start_col + popup.width) as f32;
+        let track_bounds = Bounds::new(
+            point(content_right + px(1.0), track_top),
+            size(px(2.0), track_h),
+        );
+        window.paint_quad(fill(track_bounds, colors.scroll_track).corner_radii(px(1.0)));
+
+        let visible_ratio = popup.rows as f32 / items.len() as f32;
+        let thumb_h = (track_h * visible_ratio).max(px(14.0)).min(track_h);
+        let max_offset = items.len() - popup.rows;
+        let progress = popup.offset.min(max_offset) as f32 / max_offset as f32;
+        let thumb_top = track_top + (track_h - thumb_h) * progress;
+        window.paint_quad(
+            fill(
+                Bounds::new(point(content_right + px(1.0), thumb_top), size(px(2.0), thumb_h)),
+                colors.scroll_thumb,
+            )
+            .corner_radii(px(1.0)),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::completion_popup_layout;
+    use crate::display::{NebulaCompletionItem, NebulaCompletionKind};
+
+    #[test]
+    fn popup_keeps_a_single_short_exact_command_visible() {
+        let items = [NebulaCompletionItem {
+            label: "cat".to_owned(),
+            insert: " ".to_owned(),
+            kind: NebulaCompletionKind::Command,
+        }];
+
+        let popup = completion_popup_layout(&items, 0, 2, 7, 24, 80)
+            .expect("短命令的精确候选也必须形成可见面板");
+        assert_eq!(popup.rows, 1);
+        assert_eq!(popup.label_width, 3);
     }
 }

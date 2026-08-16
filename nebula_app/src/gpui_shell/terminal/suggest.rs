@@ -67,6 +67,11 @@ pub fn commit_line(state: &mut NebulaPaneState) {
     if !line.is_empty() {
         shared().history.record(&line, &state.cwd);
     }
+    // 旧壳 `nebula_commit_line` 同一条：OSC 133;C 到达时 PTY 已把行缓冲清
+    // 空，程序身份（侧栏 tab 图标）必须在 Enter 这一刻从屏幕真值捕获。
+    // grid 读失败时退回按键镜像——取首 token 做身份已足够。
+    state.last_committed =
+        if line.is_empty() { state.line_buf.trim().to_owned() } else { line };
     crate::display::Display::nebula_clear_line(state);
 }
 
@@ -106,6 +111,10 @@ pub fn popup_take(state: &mut NebulaPaneState) -> Option<String> {
 pub fn popup_dismiss(state: &mut NebulaPaneState) -> bool {
     if state.completion_items.is_empty() {
         return false;
+    }
+    let line = if state.screen_line.is_empty() { &state.line_buf } else { &state.screen_line };
+    if !line.is_empty() {
+        state.completion_suppressed_line = Some(line.clone());
     }
     state.completion_items.clear();
     state.completion_selected = 0;

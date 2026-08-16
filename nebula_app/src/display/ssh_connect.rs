@@ -155,13 +155,38 @@ impl SshConnectState {
         self.failure.is_some()
     }
 
+    /// 当前阶段（GPUI 覆盖层文案用）。
+    pub(crate) fn stage(&self) -> SshStage {
+        self.stage.clone()
+    }
+
+    /// 失败原因（GPUI 覆盖层详情区用）。
+    pub(crate) fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    /// Logs 是否展开（GPUI 覆盖层用）。
+    pub(crate) fn is_logs_open(&self) -> bool {
+        self.logs_open
+    }
+
+    /// 连接日志（GPUI 覆盖层 Logs 区用）。
+    pub(crate) fn logs(&self) -> &[String] {
+        &self.log
+    }
+
+    /// 计时文本（GPUI 覆盖层状态行用）。
+    pub(crate) fn elapsed_text(&self) -> String {
+        format!("{:.1}s", self.started.elapsed().as_secs_f32())
+    }
+
     /// 卡片是否该出现。失败态无视门槛立刻显示——用户已经在等结果了。
     pub(crate) fn visible(&self) -> bool {
         self.failed() || self.started.elapsed() >= REVEAL_DELAY
     }
 
     /// 当前阶段在四格轨道上的下标。
-    fn stage_index(&self) -> usize {
+    pub(crate) fn stage_index(&self) -> usize {
         match self.stage {
             SshStage::Resolve => 0,
             SshStage::Connect => 1,
@@ -185,38 +210,44 @@ impl SshConnectState {
         self.fill += (target - self.fill) * k;
     }
 
-    fn elapsed_text(&self) -> String {
-        format!("{:.1}s", self.started.elapsed().as_secs_f32())
+    /// 当前填充进度（0..3）的只读视图（GPUI 覆盖层绘制用）。
+    pub(crate) fn fill_now(&self) -> f32 {
+        self.fill
+    }
+
+    /// 粒子相位（0..1）的只读视图（GPUI 覆盖层绘制用）。
+    pub(crate) fn phase_now(&self) -> f32 {
+        self.phase
     }
 }
 
 /// 卡片的像素布局。所有矩形都在窗口像素坐标系里，与文字共用同一套坐标 ——
 /// resize HUD 那次事故（框按窗口居中、文字按终端网格居中）的教训。
-struct Layout {
-    card: (f32, f32, f32, f32),
+pub(crate) struct Layout {
+    pub(crate) card: (f32, f32, f32, f32),
     /// 主机图标方块。
-    icon: (f32, f32, f32, f32),
+    pub(crate) icon: (f32, f32, f32, f32),
     /// 身份文字的左边缘与两行基线。
-    name_x: f32,
-    name_y: f32,
-    meta_y: f32,
+    pub(crate) name_x: f32,
+    pub(crate) name_y: f32,
+    pub(crate) meta_y: f32,
     /// 右上角 Logs 折叠开关。
-    logs_btn: (f32, f32, f32, f32),
+    pub(crate) logs_btn: (f32, f32, f32, f32),
     /// 轨道：左端节点中心、右端节点中心、纵向中心。
-    rail_x0: f32,
-    rail_x1: f32,
-    rail_cy: f32,
+    pub(crate) rail_x0: f32,
+    pub(crate) rail_x1: f32,
+    pub(crate) rail_cy: f32,
     /// 阶段标签基线。
-    labels_y: f32,
+    pub(crate) labels_y: f32,
     /// 状态行基线。
-    status_y: f32,
+    pub(crate) status_y: f32,
     /// 失败详情基线（失败态才用）。
-    detail_y: f32,
+    pub(crate) detail_y: f32,
     /// 日志区外框（展开时才有）。
-    logs_area: Option<(f32, f32, f32, f32)>,
+    pub(crate) logs_area: Option<(f32, f32, f32, f32)>,
     /// 底部按钮：矩形、语义、是否主按钮。绘制与命中同源。
-    buttons: Vec<((f32, f32, f32, f32), SshConnectHit, bool)>,
-    pad: f32,
+    pub(crate) buttons: Vec<((f32, f32, f32, f32), SshConnectHit, bool)>,
+    pub(crate) pad: f32,
 }
 
 /// 底部按钮的文案与语义，随状态切换：连接中只能放弃，失败后只剩收尾。
@@ -224,7 +255,7 @@ struct Layout {
 /// 这里**没有**「重试」——它要在同一个 tab 位上原子地重连，而 `Close` +
 /// `NewSsh` 两个事件按序执行会先把最后一个 tab 连窗口一起关掉。宁可少一个
 /// 按钮，也不放一个按下去会出事的。
-fn button_specs(
+pub(crate) fn button_specs(
     state: &SshConnectState,
     language: UiLanguage,
 ) -> Vec<(String, SshConnectHit, bool)> {
@@ -236,7 +267,7 @@ fn button_specs(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn layout(
+pub(crate) fn layout(
     state: &SshConnectState,
     size: &SizeInfo,
     view: (f32, f32, f32, f32),
@@ -377,7 +408,7 @@ pub(super) fn covers(view: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
 }
 
 /// 节点中心的 x 坐标。
-fn node_x(l: &Layout, index: usize) -> f32 {
+pub(crate) fn node_x(l: &Layout, index: usize) -> f32 {
     l.rail_x0 + (l.rail_x1 - l.rail_x0) * index as f32 / 3.0
 }
 
@@ -782,13 +813,13 @@ fn text_w(text: &str, cell_w: f32, scale: f32) -> f32 {
 const TEXT_SAFETY: f32 = 0.94;
 
 /// 一块宽度能放下多少列。
-pub(super) fn cols_that_fit(width: f32, cell_w: f32, scale: f32) -> usize {
+pub(crate) fn cols_that_fit(width: f32, cell_w: f32, scale: f32) -> usize {
     ((width * TEXT_SAFETY / (cell_w * scale)).floor() as usize).max(4)
 }
 
 /// 按列宽截断，超出部分收成省略号。日志行里那条中文系统错误消息不截断就
 /// 会一路画到窗口外面去。
-pub(super) fn truncate_cols(text: &str, max_cols: usize) -> String {
+pub(crate) fn truncate_cols(text: &str, max_cols: usize) -> String {
     let total: usize = text.chars().map(|c| c.width().unwrap_or(0)).sum();
     if total <= max_cols {
         return text.to_owned();
@@ -1003,12 +1034,12 @@ fn s_half(scale: f32) -> f32 {
 }
 
 /// 列表和卡片共用的短名：有别名就用别名，否则去掉 user@ 只留主机。
-fn short_name(destination: &str) -> String {
+pub(crate) fn short_name(destination: &str) -> String {
     let host = destination.rsplit('@').next().unwrap_or(destination);
     host.to_owned()
 }
 
-fn stage_labels(language: UiLanguage) -> [String; 4] {
+pub(crate) fn stage_labels(language: UiLanguage) -> [String; 4] {
     [
         language.pick("解析", "Resolve").to_owned(),
         language.pick("连接", "Connect").to_owned(),
@@ -1017,7 +1048,7 @@ fn stage_labels(language: UiLanguage) -> [String; 4] {
     ]
 }
 
-fn stage_message(stage: &SshStage, language: UiLanguage) -> String {
+pub(crate) fn stage_message(stage: &SshStage, language: UiLanguage) -> String {
     match stage {
         SshStage::Resolve => language.pick("正在解析主机…", "Resolving host…"),
         SshStage::Connect => language.pick("正在建立连接…", "Connecting…"),
@@ -1029,12 +1060,12 @@ fn stage_message(stage: &SshStage, language: UiLanguage) -> String {
     .to_owned()
 }
 
-fn failure_headline(language: UiLanguage) -> String {
+pub(crate) fn failure_headline(language: UiLanguage) -> String {
     language.pick("连接失败", "Connection failed").to_owned()
 }
 
 /// 按列宽换行。中日韩宽字符按 2 列计，所以不能按 char 数切。
-fn wrap(text: &str, per_line: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, per_line: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     let mut cols = 0usize;
