@@ -92,11 +92,21 @@ if (-not $SkipBuild) {
         $env:CARGO_TARGET_DIR = $cargoTargetRoot
         if ($Configuration -eq 'release') {
             & cargo build --workspace --release
+            if ($LASTEXITCODE -ne 0) {
+                throw "Cargo workspace build failed with exit code $LASTEXITCODE"
+            }
+            # 产品主窗是 GPUI（`nebula --gpui`），链接本地 gpui-component fork。
+            # workspace 默认 feature 不含 gpui-shell，不补这一步装出来的是旧壳。
+            & cargo build -p nebula --bin nebula --release --features gpui-shell
         } else {
             & cargo build --workspace
+            if ($LASTEXITCODE -ne 0) {
+                throw "Cargo workspace build failed with exit code $LASTEXITCODE"
+            }
+            & cargo build -p nebula --bin nebula --features gpui-shell
         }
         if ($LASTEXITCODE -ne 0) {
-            throw "Cargo build failed with exit code $LASTEXITCODE"
+            throw "Cargo gpui-shell build failed with exit code $LASTEXITCODE"
         }
     } finally {
         $env:CARGO_TARGET_DIR = $previousTargetDirectory

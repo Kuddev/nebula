@@ -36,6 +36,11 @@ try {
         throw 'Release builds must strip debuginfo before packaging'
     }
 
+    $scriptBody = Get-Content -LiteralPath $packageScript -Raw -Encoding UTF8
+    if ($scriptBody -notmatch '--features gpui-shell') {
+        throw 'Release packaging must rebuild nebula with --features gpui-shell so the zip ships the GPUI shell.'
+    }
+
     & $packageScript -Version 'unreleased' -SkipBuild -OutputDirectory $resolvedOutput
     $zipPath = Join-Path $resolvedOutput 'NebulaTerminal-vunreleased-windows-x64.zip'
     if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {

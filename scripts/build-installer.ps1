@@ -10,6 +10,7 @@ param(
     [switch] $Force,
     [switch] $ValidateOnly,
     [string] $OutputDirectory,
+    [string] $TargetDirectory,
     [string] $InnoCompiler
 )
 
@@ -43,7 +44,13 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $repo $OutputDirectory
 }
 $outputRoot = [System.IO.Path]::GetFullPath($OutputDirectory)
-$targetRoot = Join-Path $repo "target\$Configuration"
+if ([string]::IsNullOrWhiteSpace($TargetDirectory)) {
+    $TargetDirectory = Join-Path $repo 'target'
+} elseif (-not [System.IO.Path]::IsPathRooted($TargetDirectory)) {
+    $TargetDirectory = Join-Path $repo $TargetDirectory
+}
+$cargoTargetRoot = [System.IO.Path]::GetFullPath($TargetDirectory)
+$targetRoot = Join-Path $cargoTargetRoot $Configuration
 $setupPath = Join-Path $outputRoot "NebulaTerminal-$Version-windows-x64-setup.exe"
 
 $requiredFiles = @(
@@ -68,16 +75,25 @@ if (-not (Test-Path -LiteralPath $installerScript -PathType Leaf)) {
 
 if (-not $SkipBuild) {
     Push-Location $repo
+    $previousTargetDirectory = $env:CARGO_TARGET_DIR
     try {
-        $cargoArgs = @('build', '--workspace')
+        $env:CARGO_TARGET_DIR = $cargoTargetRoot
+        $workspaceArgs = @('build', '--workspace')
+        $gpuiArgs = @('build', '-p', 'nebula', '--bin', 'nebula', '--features', 'gpui-shell')
         if ($Configuration -eq 'release') {
-            $cargoArgs += '--release'
+            $workspaceArgs += '--release'
+            $gpuiArgs += '--release'
         }
-        & cargo @cargoArgs
+        & cargo @workspaceArgs
         if ($LASTEXITCODE -ne 0) {
-            throw "Cargo build failed with exit code $LASTEXITCODE"
+            throw "Cargo workspace build failed with exit code $LASTEXITCODE"
+        }
+        & cargo @gpuiArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cargo gpui-shell build failed with exit code $LASTEXITCODE"
         }
     } finally {
+        $env:CARGO_TARGET_DIR = $previousTargetDirectory
         Pop-Location
     }
 }
@@ -149,7 +165,7 @@ if (-not $translationValid) {
 
 Push-Location $PSScriptRoot
 try {
-    & $InnoCompiler "/DAppVersion=$Version" "/DNumericVersion=$numericVersion" "/DConfiguration=$Configuration" "/O$outputRoot" $installerScript
+    & $InnoCompiler "/DAppVersion=$Version" "/DNumericVersion=$numericVersion" "/DConfiguration=$Configuration" "/DBuildRoot=$targetRoot" "/O$outputRoot" $installerScript
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup compilation failed with exit code $LASTEXITCODE"
     }

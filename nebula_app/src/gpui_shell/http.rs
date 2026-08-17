@@ -63,13 +63,75 @@ fn fetch_blocking(
     for (name, value) in response.headers().iter() {
         header_pairs.push((name.as_str().to_owned(), value.as_bytes().to_vec()));
     }
-    let bytes = response
+    let mut bytes = response
         .body_mut()
         .with_config()
         .limit(MAX_RESPONSE_BYTES)
         .read_to_vec()
         .map_err(|error| anyhow!("读取响应失败: {error}"))?;
+    // 不是 anyhow：gpui img 把 GIF 帧下标存在 element state，markdown
+    // 多图共用 `.id(序号)` 时会把第 N 帧套到只有 1 帧的 PNG/SVG 上 panic。
+    // 网络动图进 gpui 前压成单帧 PNG。
+    if let Some(png) = flatten_animated_to_png(&bytes) {
+        header_pairs.retain(|(name, _)| {
+            let lower = name.to_ascii_lowercase();
+            lower != "content-type" && lower != "content-length"
+        });
+        header_pairs.push(("content-type".to_owned(), b"image/png".to_vec()));
+        header_pairs.push(("content-length".to_owned(), png.len().to_string().into_bytes()));
+        bytes = png;
+    }
     Ok((status, header_pairs, bytes))
+}
+
+/// GIF 一律压成单帧 PNG；动画 WebP 同样处理。
+///
+/// 不能只判断「是否多帧」：解码失败时旧逻辑会把原 GIF 交给 gpui，
+/// gpui 的 GifDecoder 仍会播动画，markdown 多图共用 `.id(序号)` 越界 panic。
+pub(crate) fn flatten_animated_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    if is_gif(bytes) || is_animated_webp(bytes) {
+        return Some(first_frame_png(bytes));
+    }
+    None
+}
+
+fn is_gif(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+        || matches!(image::guess_format(bytes), Ok(image::ImageFormat::Gif))
+}
+
+fn is_animated_webp(bytes: &[u8]) -> bool {
+    image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))
+        .map(|decoder| decoder.has_animation())
+        .unwrap_or(false)
+}
+
+fn first_frame_png(bytes: &[u8]) -> Vec<u8> {
+    encode_png(bytes).unwrap_or_else(placeholder_png)
+}
+
+fn encode_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageEncoder as _;
+    let rgba = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(rgba.as_raw(), rgba.width(), rgba.height(), image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(out)
+}
+
+fn placeholder_png() -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let rgba = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]));
+    let mut out = Vec::new();
+    let _ = image::codecs::png::PngEncoder::new(&mut out).write_image(
+        rgba.as_raw(),
+        1,
+        1,
+        image::ExtendedColorType::Rgba8,
+    );
+    out
 }
 
 impl HttpClient for UreqClient {

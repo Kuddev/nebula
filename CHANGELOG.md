@@ -36,7 +36,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **Multi-line paste stops interrupting codex** — the multi-line paste confirmation now only fires when newlines are actually headed to a shell that would execute them line by line. Applications in bracketed-paste mode (codex, vim, modern PSReadLine) receive the paste as one atomic chunk, so the warning no longer blocks them. The dark-theme "Enter" keycap on the confirm dialog's accent button also derives from the button's own ink instead of the near-black panel color. (#35)
 - **Math overlays survive markdown-unescaped delimiters (GPUI shell)** — some AI CLIs render their markdown before printing and eat the backslashes of `\[ \]` / `\( \)` (markdown punctuation escapes), leaving bare `[ … ]` blocks and `(\sqrt{…})` spans that never overlaid. The shared scanner now recognizes those bare forms when the content carries a known TeX command (`\int`, `\frac`, …) and the brackets sit alone on their line edges; JSON arrays, `[INFO]` logs and regex `(\d+)` stay literal. Explicit TeX lengths (`\\[6pt]`, `\kern`) also regained their point-to-pixel scale in the GPUI shell, matching the legacy renderer.
 - **Markdown reader fills the reading column (GPUI shell)** — soft line breaks inside a paragraph (hand-wrapped README prose) rendered as hard line breaks, leaving the right side of the column empty and ragged. They now merge into spaces per CommonMark, with CJK neighbours joining directly.
-- **Markdown images actually load (GPUI shell)** — the document tab now resolves relative image paths against the document's own directory, loads absolute local paths from disk, and fetches `http(s)` images through a ureq HTTP client on the background executor (gpui ships a null client by default), so README logos, shields badges (SVG included) and screenshots finally display.
+- **Markdown images actually load (GPUI shell)** — the document tab now resolves relative image paths against the document's own directory, loads absolute local paths from disk, and fetches `http(s)` images through a ureq HTTP client on the background executor (gpui ships a null client by default), so README logos, shields badges (SVG included) and screenshots finally display. Animated GIF/WebP (local or remote) are flattened to a still PNG first, because gpui panics when a multi-frame image's frame index is reused on a static image.
 
 #### Improved
 
@@ -73,7 +73,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **多行粘贴不再打断 codex** — 多行粘贴确认现在只在换行真的会被 shell 逐行执行时弹出。处于 bracketed paste 模式的应用（codex、vim、新版 PSReadLine）会把粘贴当作一个整体接收，警告不再拦路。确认框里深色主题下 accent 主按钮上的「Enter」键帽也改从按钮自身墨色派生，不再是一块近黑色。（#35）
 - **公式覆盖层兼容被 markdown 反转义的定界符（GPUI 壳）** — 部分 AI CLI 先渲染 markdown 再上屏，`\[ \]` / `\( \)` 的反斜杠被当作 markdown 标点转义吃掉，屏幕上只剩裸 `[ … ]` 块与 `(\sqrt{…})`，公式从不渲染。共享扫描器现在识别这些裸形态：内容须携带已知 TeX 命令（`\int`、`\frac`……）且方括号独占行首/行尾；JSON 数组、`[INFO]` 日志、正则 `(\d+)` 保持原样。GPUI 壳里 TeX 显式长度（`\\[6pt]`、`\kern`）的 pt→px 换算也已对齐旧壳。
 - **Markdown 阅读器铺满阅读列（GPUI 壳）** — 段落内的软换行（README 手工折行的正文）此前渲染成硬换行，右侧留出一大片参差空白。现按 CommonMark 合并为空格，中日韩相邻行直接相连不插空格。
-- **Markdown 图片真正能加载（GPUI 壳）** — 文档 tab 现在把相对图片路径按文档所在目录解析、绝对路径直接读盘、`http(s)` 图源经后台 ureq 客户端拉取（gpui 默认装的是空客户端），README 的 logo、shields 徽章（含 SVG）与截图终于都能显示。
+- **Markdown 图片真正能加载（GPUI 壳）** — 文档 tab 现在把相对图片路径按文档所在目录解析、绝对路径直接读盘、`http(s)` 图源经后台 ureq 客户端拉取（gpui 默认装的是空客户端），README 的 logo、shields 徽章（含 SVG）与截图终于都能显示。本地和网络的 GIF / 动画 WebP 会先压成单帧 PNG：gpui 在多帧图的帧下标被静态图复用时会直接 panic。
 
 #### 改进
 

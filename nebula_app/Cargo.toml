@@ -137,7 +137,7 @@ xdg = "3.0.0"
 rfd = "0.17.2"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-image = { version = "0.25.8", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
+image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 png = { version = "0.17.5", default-features = false, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

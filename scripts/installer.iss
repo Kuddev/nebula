@@ -1,9 +1,9 @@
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.1.0"
 #endif
 
 #ifndef NumericVersion
-  #define NumericVersion "1.0.0.0"
+  #define NumericVersion "1.1.0.0"
 #endif
 
 #ifndef Configuration
@@ -11,7 +11,9 @@
 #endif
 
 #define RepoRoot ".."
-#define BuildRoot RepoRoot + "\target\" + Configuration
+#ifndef BuildRoot
+  #define BuildRoot RepoRoot + "\target\" + Configuration
+#endif
 
 [Setup]
 AppId={{61022144-7D0A-4E54-94F2-C329A8F58656}
