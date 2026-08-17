@@ -1,0 +1,69 @@
+name: Feature Request
+description: Suggest an improvement or new capability for Nebula
+title: "[Feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the workflow problem first, then the change you want. Concrete examples make the request easier to evaluate.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / pain point
+      description: What is hard, missing, or repetitive today?
+      placeholder: When I work with multiple terminals or hosts, I cannot ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like Nebula to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: List workarounds, other tools, or designs you considered.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Related area
+      multiple: true
+      options:
+        - Local terminal / shell
+        - SSH / SFTP
+        - Tabs / splits / sessions
+        - AI assistant / providers
+        - Settings / backup / sync
+        - UI / UX
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: How important is this to you?
+      options:
+        - Nice to have
+        - Would improve my daily workflow
+        - Blocking / critical for my use case
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for similar requests
+          required: true

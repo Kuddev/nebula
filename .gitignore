@@ -123,3 +123,6 @@ impeccable/
 /false
 /Microsoft/
 
+
+# git filter-branch scratch directory
+.git-rewrite/

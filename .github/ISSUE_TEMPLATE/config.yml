@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Existing issues
+    url: https://github.com/Kuddev/nebula/issues
+    about: Search existing reports before opening a new issue.
+  - name: Latest release
+    url: https://github.com/Kuddev/nebula/releases/latest
+    about: Check whether the problem is already fixed in the latest version.

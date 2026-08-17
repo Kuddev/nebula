@@ -1,0 +1,114 @@
+name: Bug Report
+description: Report a reproducible problem in Nebula
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please search existing issues first and include enough detail for someone else to reproduce the problem.
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Nebula version
+      description: Find it in Settings > Home, or on the latest release page.
+      placeholder: "e.g. 1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_source
+    attributes:
+      label: How did you install Nebula?
+      options:
+        - GitHub Release (.msi / .exe / portable archive)
+        - Built from source (cargo build / cargo run)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - Local terminal / shell
+        - SSH connection / authentication
+        - SFTP / file tree
+        - Tabs / splits / sessions
+        - AI assistant / providers
+        - Settings / backup / sync
+        - UI / layout / rendering
+        - Startup / crash
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: Can you reproduce it?
+      options:
+        - Always (100%)
+        - Often (>50%)
+        - Sometimes
+        - Once / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use numbered steps and include the shell or connection type when relevant.
+      placeholder: |
+        1. Open Nebula
+        2. Create or connect to ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Include relevant lines or screenshots. Remove passwords, private keys, tokens, host addresses, and other secrets.
+      placeholder: Paste redacted logs or drag screenshots here.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find a duplicate
+          required: true
+        - label: I removed passwords, private keys, tokens, and other secrets from this report
+          required: true
