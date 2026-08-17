@@ -41,19 +41,50 @@ pub(crate) fn chrome_theme_resolved(cx: &App) -> NebulaTheme {
     chrome_theme(effective_theme_name(cx))
 }
 
+/// 当前 OS 外观是否为浅色。跟随系统时与旧壳 `WinitTheme::Light` 同一判定。
+pub(crate) fn system_is_light(cx: &App) -> bool {
+    matches!(
+        cx.window_appearance(),
+        gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight
+    )
+}
+
+/// 把用户点选的主题家族折算成此刻该显示的成员。
+/// `follow_system` 关闭时原样返回 preference；开启时走
+/// [`NebulaTheme::for_system_appearance`]。
+pub(crate) fn resolve_theme_name(
+    preference: ThemeName,
+    follow_system: bool,
+    system_is_light: bool,
+) -> ThemeName {
+    if !follow_system {
+        return preference;
+    }
+    settings_theme_name(chrome_theme(preference).for_system_appearance(system_is_light))
+}
+
 /// 生效主题：`follow_system_theme` 开启时按系统外观折算到用户主题家族的
 /// 亮/暗成员（规则与旧壳 `NebulaTheme::for_system_appearance` 同一来源）。
 /// chrome 令牌与终端 palette 都必须走这里，两层才不会分家。
 pub fn effective_theme_name(cx: &App) -> ThemeName {
     let rt = nebula_settings::RuntimeSettings::load();
-    if !rt.follow_system_theme {
-        return rt.theme;
-    }
-    let is_light = matches!(
-        cx.window_appearance(),
-        gpui::WindowAppearance::Light | gpui::WindowAppearance::VibrantLight
-    );
-    settings_theme_name(chrome_theme(rt.theme).for_system_appearance(is_light))
+    resolve_theme_name(rt.theme, rt.follow_system_theme, system_is_light(cx))
+}
+
+/// 点选一张主题卡时要写盘的键：对齐旧壳 `select_nebula_theme`
+/// （关掉跟随系统）+ `apply_nebula_theme`（底色换成该主题 `term_bg`）。
+pub(crate) fn theme_card_persist_updates(name: ThemeName) -> [(&'static str, String); 3] {
+    [
+        ("theme", name.prompt_name().to_owned()),
+        ("follow_system_theme", "0".to_owned()),
+        ("background", nebula_settings::format_hex_rgb(name.term_theme().background)),
+    ]
+}
+
+/// 当前生效主题的终端底色（给「跟随主题」取色器同步用，不是壳色）。
+pub(crate) fn theme_term_background(cx: &App) -> Hsla {
+    let c = chrome_theme(effective_theme_name(cx)).palette().term_bg;
+    to_hsla(c.r, c.g, c.b)
 }
 
 fn to_hsla(r: u8, g: u8, b: u8) -> Hsla {
@@ -424,4 +455,37 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     theme.mono_font_size = px(13.0);
     theme.radius = px(crate::display::UI_CORNER_RADIUS_LOGICAL);
     theme.radius_lg = px(12.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_theme_name, theme_card_persist_updates};
+    use nebula_settings::ThemeName;
+
+    #[test]
+    fn follow_system_remaps_theme_family_and_manual_mode_keeps_preference() {
+        assert_eq!(
+            resolve_theme_name(ThemeName::SilverLight, true, false),
+            ThemeName::SteelDark
+        );
+        assert_eq!(
+            resolve_theme_name(ThemeName::Nebula, true, true),
+            ThemeName::SilverLight
+        );
+        assert_eq!(
+            resolve_theme_name(ThemeName::SilverLight, false, false),
+            ThemeName::SilverLight
+        );
+    }
+
+    #[test]
+    fn picking_a_theme_card_disables_follow_system_and_writes_that_theme_background() {
+        let updates = theme_card_persist_updates(ThemeName::LinenLight);
+        assert_eq!(updates[0], ("theme", "LinenLight".to_owned()));
+        assert_eq!(updates[1], ("follow_system_theme", "0".to_owned()));
+        assert_eq!(
+            updates[2],
+            ("background", nebula_settings::format_hex_rgb(ThemeName::LinenLight.term_theme().background))
+        );
+    }
 }

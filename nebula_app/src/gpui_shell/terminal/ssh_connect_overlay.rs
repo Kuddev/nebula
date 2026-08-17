@@ -9,13 +9,12 @@
 //! - 等宽 cell 度量（`SizeInfo`）→ UI 基准字号（同一设置源）
 
 use gpui::{
-    AnyElement, Bounds, Context, Hsla, InteractiveElement as _, StatefulInteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, SharedString,
-    Styled as _, canvas, div, fill, hsla, point,
-    px, size,
+    canvas, div, fill, hsla, point, px, size, AnyElement, Bounds, Context, Hsla,
+    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _,
 };
 
-use crate::display::ssh_connect::{self, SshConnectState, stage_labels, stage_message};
+use crate::display::ssh_connect::{self, stage_labels, stage_message, SshConnectState};
 use crate::gpui_shell::prelude::*;
 
 /// UiLanguage 由设置折算（两壳同源）。
@@ -48,12 +47,7 @@ fn hsla_from_rgba(r: u8, g: u8, b: u8) -> Hsla {
 
 fn lerp_hsla(a: Hsla, b: Hsla, k: f32) -> Hsla {
     let k = k.clamp(0.0, 1.0);
-    hsla(
-        a.h + (b.h - a.h) * k,
-        a.s + (b.s - a.s) * k,
-        a.l + (b.l - a.l) * k,
-        1.0,
-    )
+    hsla(a.h + (b.h - a.h) * k, a.s + (b.s - a.s) * k, a.l + (b.l - a.l) * k, 1.0)
 }
 
 /// 品牌紫→青（旧壳 palette.edge_l/edge_r；浅色主题压暗 0.28）。
@@ -243,9 +237,10 @@ pub(super) fn overlay(
 
     let theme = cx.theme();
     let lang = language();
+    // chrome 文本锚定配置字号（旧壳 ui_font 合同），不跟终端缩放。
     let ui_px = cx
         .try_global::<crate::gpui_shell::config::Settings>()
-        .map(|settings| settings.font_size_px)
+        .map(|settings| settings.base_font_size_px)
         .unwrap_or(15.0);
     let family: SharedString = cx
         .try_global::<crate::gpui_shell::config::Settings>()
@@ -261,12 +256,7 @@ pub(super) fn overlay(
     let card_bg = theme.group_box;
     let hairline = theme.border;
     let dark = theme.is_dark();
-    let elevation = gpui::hsla(
-        0.0,
-        0.0,
-        0.0,
-        if dark { 56.0 / 255.0 } else { 26.0 / 255.0 },
-    );
+    let elevation = gpui::hsla(0.0, 0.0, 0.0, if dark { 56.0 / 255.0 } else { 26.0 / 255.0 });
     // 遮罩沿用终端 pane 的真实底色；直接铺 popover 会把空网格区域
     // 换成另一层面板色，尤其在浅色主题下会显得整块发白。
     let backdrop = crate::gpui_shell::theme::card_content_bg(cx);
@@ -304,14 +294,7 @@ pub(super) fn overlay(
                     rack_panel,
                 );
                 let d = 2.4;
-                quad(
-                    bx + stroke + 2.2,
-                    by + bh * 0.5 - d * 0.5,
-                    d,
-                    d,
-                    d * 0.5,
-                    rack_ink,
-                );
+                quad(bx + stroke + 2.2, by + bh * 0.5 - d * 0.5, d, d, d * 0.5, rack_ink);
             }
         },
     )
@@ -323,13 +306,10 @@ pub(super) fn overlay(
     let logs_target = cx.entity().downgrade();
     let logs_open = state.is_logs_open();
     let logs_hover = theme.list_hover;
-    let logs_chevron = Icon::new(if logs_open {
-        IconName::ChevronUp
-    } else {
-        IconName::ChevronDown
-    })
-    .xsmall()
-    .text_color(ink_dim);
+    let logs_chevron =
+        Icon::new(if logs_open { IconName::ChevronUp } else { IconName::ChevronDown })
+            .xsmall()
+            .text_color(ink_dim);
     let logs_button = h_flex()
         .id("ssh-connect-logs")
         .h(px(30.0))
@@ -410,12 +390,8 @@ pub(super) fn overlay(
     let labels = stage_labels(lang);
     let active = state.stage_index();
     let caption_h = ui_px * 0.75;
-    let rail_block = v_flex()
-        .w_full()
-        .gap(px(8.0))
-        .mt(px(24.0))
-        .child(rail_canvas(state, cx, &theme))
-        .child(
+    let rail_block =
+        v_flex().w_full().gap(px(8.0)).mt(px(24.0)).child(rail_canvas(state, cx, &theme)).child(
             div().relative().h(px(caption_h)).children(
                 labels
                     .iter()
@@ -472,11 +448,7 @@ pub(super) fn overlay(
         .mt(px(24.0))
         .justify_between()
         .child(
-            div()
-                .font_family(family.clone())
-                .text_size(px(ui_px))
-                .text_color(msg_ink)
-                .child(msg),
+            div().font_family(family.clone()).text_size(px(ui_px)).text_color(msg_ink).child(msg),
         )
         .when(!state.failed(), |row| {
             row.child(
@@ -491,22 +463,19 @@ pub(super) fn overlay(
     // ── 失败详情（两行，超出收省略号）──
     let per_line = 44usize;
     let detail = state.failure().map(|reason| {
-        v_flex()
-            .mt(px(8.0))
-            .gap(px(ui_px * 0.28))
-            .children(
-                ssh_connect::wrap(reason, per_line)
-                    .into_iter()
-                    .take(2)
-                    .map(|line| {
-                        div()
-                            .font_family(family.clone())
-                            .text_size(px(ui_px * 0.80))
-                            .text_color(ink_dim)
-                            .child(ssh_connect::truncate_cols(&line, per_line))
-                    })
-                    .collect::<Vec<_>>(),
-            )
+        v_flex().mt(px(8.0)).gap(px(ui_px * 0.28)).children(
+            ssh_connect::wrap(reason, per_line)
+                .into_iter()
+                .take(2)
+                .map(|line| {
+                    div()
+                        .font_family(family.clone())
+                        .text_size(px(ui_px * 0.80))
+                        .text_color(ink_dim)
+                        .child(ssh_connect::truncate_cols(&line, per_line))
+                })
+                .collect::<Vec<_>>(),
+        )
     });
 
     // ── Logs 区（末尾 6 行，最新在最下）──
@@ -546,27 +515,22 @@ pub(super) fn overlay(
     };
     let failed = state.failed();
     let action_target = cx.entity().downgrade();
-    let buttons = h_flex()
-        .w_full()
-        .mt(px(24.0))
-        .justify_end()
-        .child(
-            Button::new("ssh-connect-action")
-                .label(action_label)
-                .small()
-                .map(|button| if failed { button.primary() } else { button.outline() })
-                .on_click(move |_, _, cx| {
-                    if let Some(view) = action_target.upgrade() {
-                        view.update(cx, |this, cx| {
-                            // 取消与关闭是同一个动作（旧裁定）：这个 pane
-                            // 除了这条连接没有别的内容。
-                            this.ssh_connect = None;
-                            cx.emit(super::view::TerminalViewEvent::RequestClose);
-                            cx.notify();
-                        });
-                    }
-                }),
-        );
+    let buttons = h_flex().w_full().mt(px(24.0)).justify_end().child({
+        let button =
+            crate::gpui_shell::widgets::NebulaButton::new("ssh-connect-action").label(action_label);
+        let button = if failed { button.primary() } else { button.outline() };
+        button.on_click(move |_, _, cx| {
+            if let Some(view) = action_target.upgrade() {
+                view.update(cx, |this, cx| {
+                    // 取消与关闭是同一个动作（旧裁定）：这个 pane
+                    // 除了这条连接没有别的内容。
+                    this.ssh_connect = None;
+                    cx.emit(super::view::TerminalViewEvent::RequestClose);
+                    cx.notify();
+                });
+            }
+        })
+    });
 
     // ── 组装 ──
     div()

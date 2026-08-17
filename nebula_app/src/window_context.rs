@@ -2177,6 +2177,9 @@ impl WindowContext {
             state.agent_hook_seen = true;
             state.agent_status_source = crate::ai_agents::AgentStatusSource::Hook;
             state.agent_status_rule = None;
+            // 精确边沿抵达 = 屏幕检测的空闲计数作废（上一回合攒下的拍数
+            // 不能把新回合的第一个空闲闪现立即降级）。
+            state.idle_screen_streak = 0;
             // 会话身份跟着事件走：同一个 pane 里 /clear、重开会话都会带来
             // 新 id，最后一次上报永远是权威。133;D（CLI 退回提示符）清除。
             if let Some(id) = ev.session_id.as_deref() {
@@ -2216,13 +2219,15 @@ impl WindowContext {
             },
             crate::ai_hook::AiHookKind::ToolComplete => {
                 let state = &mut self.panes[idx].nebula_state;
-                // Tool completion is meaningful chiefly after a permission
-                // wait: the user answered and work resumed.
-                if state.agent_status == crate::ai_agents::AgentStatus::Blocked {
-                    state.agent_status = crate::ai_agents::AgentStatus::Working;
-                    state.awaiting_input = false;
-                    state.needs_attention = false;
-                }
+                // 一个工具刚跑完 = agent 正在干活，这是无条件事实。此前只
+                // 认 Blocked→Working，漏掉了「回合经不发 PromptSubmit 的路径
+                // 继续（授权点头、队列消息）后状态还挂在 Done」的场景——
+                // 也就是用户看到的「还在执行却已经显示完成蓝点」。
+                state.agent_status = crate::ai_agents::AgentStatus::Working;
+                state.awaiting_input = false;
+                state.needs_attention = false;
+                state.finished_unseen = false;
+                state.command_started.get_or_insert_with(Instant::now);
             },
             crate::ai_hook::AiHookKind::TurnDone | crate::ai_hook::AiHookKind::NeedsAttention => {
                 // codex 的 notify 只有"回合完成"一种事件：弹出交互式提问时
@@ -2338,11 +2343,29 @@ impl WindowContext {
             };
 
             let state = &mut pane.nebula_state;
-            // An exact hook-done must not be downgraded merely because an idle
-            // prompt is visible. Strong live blocker/working chrome may still
-            // correct a missed/new event.
-            if detection.status == crate::ai_agents::AgentStatus::Idle && state.agent_hook_seen {
-                continue;
+            // 空闲提示符降级要分三档（#「转圈不停」的根修）：
+            // - hook 报过的 Done/Blocked 是精确终态，不被提示符降级；
+            // - Working 可能是丢了 TurnDone 的僵尸态（打断的回合没有 Stop
+            //   事件），但单拍空闲可能只是重绘间隙——连续两拍才收场；
+            // - 其余状态照常应用。
+            if detection.status == crate::ai_agents::AgentStatus::Idle {
+                if state.agent_hook_seen
+                    && matches!(
+                        state.agent_status,
+                        crate::ai_agents::AgentStatus::Done
+                            | crate::ai_agents::AgentStatus::Blocked
+                    )
+                {
+                    continue;
+                }
+                if state.agent_status == crate::ai_agents::AgentStatus::Working {
+                    state.idle_screen_streak = state.idle_screen_streak.saturating_add(1);
+                    if state.idle_screen_streak < 2 {
+                        continue;
+                    }
+                }
+            } else {
+                state.idle_screen_streak = 0;
             }
             let previous = state.agent_status;
             if previous != detection.status

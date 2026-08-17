@@ -10,16 +10,20 @@
 //! - `NEBULA_GPUI_SHELL=1`（需 gpui-shell 构建）：spike 形态——GPUI 跑在
 //!   专用线程，与 winit 旧壳同进程并存，仅用于双运行时验证，P3 完成后移除。
 
+pub mod code_tab;
 pub mod config;
 pub mod doc_tabs;
+pub mod math_view;
 pub mod prelude;
 pub mod session_restore;
 pub mod settings_pane;
 pub mod ssh_hosts;
+pub mod ssh_settings;
 pub mod terminal;
 pub mod theme;
 pub mod toast;
 pub mod wallpaper;
+pub mod widgets;
 pub mod workspace;
 
 use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
@@ -55,6 +59,9 @@ fn init(cx: &mut App) {
 
     // 组件库必须只初始化一次，否则全局 action、菜单和主题状态会重复注册。
     gpui_component::init(cx);
+    // TextView 的公式渲染钩子：旧壳数学管线（compile → 栅格化）接入组件库
+    // 的 markdown 渲染；不注册时公式回退为源码文本。
+    math_view::register(cx);
     theme::apply_chrome_theme(cx);
     terminal::init(cx);
     workspace::init(cx);
@@ -124,6 +131,14 @@ fn open_main_window(
 
     cx.open_window(options, move |window, cx| {
         let workspace = cx.new(|cx| NebulaWorkspace::new(window, ai_events, cx));
+        // 调试/验收后门：启动即打开指定文档（见 open_document_at_startup）。
+        if let Ok(path) = std::env::var("NEBULA_GPUI_OPEN_DOC")
+            && !path.is_empty()
+        {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_document_at_startup(path.into(), window, cx);
+            });
+        }
         cx.new(|cx| Root::new(workspace, window, cx))
     })
     .expect("failed to open Nebula GPUI window");

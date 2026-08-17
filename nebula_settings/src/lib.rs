@@ -550,6 +550,35 @@ impl NewTabPositionName {
     }
 }
 
+/// 侧栏版本控制视图的数据源：自动探测（就近的 .svn 提示 + git 优先），
+/// 或强制只认 Git / SVN（混合仓库、或想屏蔽其中一种时用）。
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum VcsDisplayName {
+    #[default]
+    Auto,
+    Git,
+    Svn,
+}
+
+impl VcsDisplayName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "git" => Some(Self::Git),
+            "svn" => Some(Self::Svn),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Git => "git",
+            Self::Svn => "svn",
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum CellWidthModeName {
     #[default]
@@ -631,6 +660,8 @@ pub struct RuntimeSettings {
     pub density: DensityName,
     pub new_tab_position: NewTabPositionName,
     pub cell_width_mode: CellWidthModeName,
+    /// 侧栏版本控制视图的数据源（auto/git/svn）。
+    pub vcs_display: VcsDisplayName,
     /// 新会话欢迎屏 fastfetch（默认关：启动速度优先于观感，旧壳裁定）。
     pub fetch: bool,
     pub keep_session: bool,
@@ -706,6 +737,10 @@ impl RuntimeSettings {
             cell_width_mode: raw
                 .value("cell_width_mode")
                 .and_then(CellWidthModeName::from_settings)
+                .unwrap_or_default(),
+            vcs_display: raw
+                .value("vcs_display")
+                .and_then(VcsDisplayName::from_settings)
                 .unwrap_or_default(),
             fetch: raw.bool_on("fetch").unwrap_or(false),
             keep_session: raw.bool_on("keep_session").unwrap_or(false),

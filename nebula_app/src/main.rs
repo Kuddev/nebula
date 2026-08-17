@@ -74,6 +74,7 @@ mod session;
 mod shell_detect;
 #[cfg(windows)]
 mod ssh;
+mod svn_status;
 #[cfg(windows)]
 mod ssh_credentials;
 #[cfg(windows)]

@@ -86,7 +86,7 @@ mod state;
 pub(crate) mod suggest_engine;
 mod surface_opacity;
 mod terminal_color;
-mod terminal_math;
+pub(crate) mod terminal_math;
 mod toast;
 
 /// Processor uses the same persisted value before the first window exists so

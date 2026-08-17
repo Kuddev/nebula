@@ -24,6 +24,32 @@ public class W {
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
   [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  public delegate bool EnumProc(IntPtr h, IntPtr lparam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lparam);
+  // Process.MainWindowHandle picks whatever top-level window answers first --
+  // for nebula that is a 6x6 helper window (and a minimized one reports
+  // -32000,-32000). Enumerate instead and keep the largest visible window
+  // owned by the pid: that is the real shell window in both shells.
+  public static IntPtr FindMainWindow(int pid) {
+    IntPtr best = IntPtr.Zero;
+    long bestArea = 0;
+    EnumWindows(delegate(IntPtr h, IntPtr l) {
+      uint wpid;
+      GetWindowThreadProcessId(h, out wpid);
+      if (wpid != (uint)pid) return true;
+      if (!IsWindowVisible(h)) return true;
+      RECT r;
+      GetWindowRect(h, out r);
+      long area = (long)(r.R - r.L) * (long)(r.B - r.T);
+      // Minimized windows sit at -32000; never let one win the comparison.
+      if (r.L <= -30000 || r.T <= -30000) return true;
+      if (area > bestArea) { bestArea = area; best = h; }
+      return true;
+    }, IntPtr.Zero);
+    return best;
+  }
   public struct RECT { public int L, T, R, B; }
 }
 '@
@@ -45,8 +71,14 @@ if ($ProcId -eq 0) {
 $proc = Get-Process -Id $ProcId -ErrorAction SilentlyContinue
 if (-not $proc) { Write-Output "PROCESS $ProcId GONE"; exit 1 }
 if ($Kill) { $proc.Kill(); Write-Output "killed $ProcId"; exit 0 }
-$h = $proc.MainWindowHandle
-if ($h -eq 0) { Write-Output "NO WINDOW for $ProcId"; exit 1 }
+$h = [W]::FindMainWindow($ProcId)
+if ($h -eq [IntPtr]::Zero) {
+    # Fall back to the (unreliable) handle so a minimized-only state still
+    # reports something actionable instead of looking like a dead process.
+    $h = $proc.MainWindowHandle
+    if ($h -eq 0) { Write-Output "NO WINDOW for $ProcId"; exit 1 }
+    Write-Output "WARN: no visible top-level window; falling back to MainWindowHandle"
+}
 $r = New-Object W+RECT
 [void][W]::GetWindowRect($h, [ref]$r)
 Write-Output "pid=$ProcId rect=($($r.L),$($r.T),$($r.R),$($r.B)) size=$($r.R-$r.L)x$($r.B-$r.T) dpi=$([W]::GetDpiForWindow($h))"
@@ -80,7 +112,11 @@ if ($RightClick -ne "") {
 if ($Scroll -ne 0) {
     $sx = [int]($r.L + ($r.R - $r.L) * 0.6); $sy = [int]($r.T + ($r.B - $r.T) * 0.5)
     [void][W]::SetCursorPos($sx, $sy); Start-Sleep -Milliseconds 150
-    [W]::mouse_event(0x0800, 0, 0, [uint32]($Scroll * 120), [UIntPtr]::Zero)
+    # WHEEL_DELTA is signed (negative scrolls down) but the P/Invoke signature
+    # declares dwData as uint: casting a negative int straight to [uint32]
+    # throws InvalidCast. Mask to the two's-complement bit pattern instead.
+    $wheel = [uint32]([int64]($Scroll * 120) -band 0xFFFFFFFFL)
+    [W]::mouse_event(0x0800, 0, 0, $wheel, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 500
 }
 if ($CtrlScroll -ne 0) {

@@ -482,11 +482,36 @@ mod win {
 
     /// Boot entrypoint: install now, then keep installed (see module docs).
     pub fn spawn_config_guard() {
+        // `setup-ai --remove` 落下的持久开关：用户明确断开过就不再自动
+        // 装回（#38 的自愈复发面 / #8 卸载后仍在 hook）。重新启用走
+        // `nebula setup-ai`。
+        if hooks_disabled() {
+            log::info!("ai_hook: ai_hooks=0 (setup-ai --remove); auto-install disabled");
+            return;
+        }
         if let Err(err) =
             std::thread::Builder::new().name("nebula-ai-setup".into()).spawn(config_guard)
         {
             log::warn!("ai_hook: failed to spawn settings guard: {err}");
         }
+    }
+
+    /// `nebula_settings.txt` 里 `ai_hooks=0`（由 `setup-ai --remove` 写入）。
+    fn hooks_disabled() -> bool {
+        nebula_settings::RawSettings::load().bool_on("ai_hooks") == Some(false)
+    }
+
+    /// 一轮完整自愈。每轮都重读开关：`setup-ai --remove` 可能发生在本进程
+    /// 存活期间，它触发的 config 变更事件会立刻打回这里——不重读就会在
+    /// 400ms 内把刚移除的接线原样装回（#38 实测的自愈复发路径）。
+    fn heal_all() {
+        if hooks_disabled() {
+            return;
+        }
+        ensure_claude_hooks();
+        ensure_codex_notify();
+        ensure_opencode_plugin();
+        ensure_pi_extension();
     }
 
     fn config_guard() {
@@ -507,10 +532,7 @@ mod win {
             std::thread::sleep(Duration::from_secs(300));
         };
 
-        ensure_claude_hooks();
-        ensure_codex_notify();
-        ensure_opencode_plugin();
-        ensure_pi_extension();
+        heal_all();
 
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = match notify::recommended_watcher(move |res| {
@@ -551,10 +573,7 @@ mod win {
                     // Debounce the writer's burst, then heal. Our own atomic
                     // rename lands here once and heals to a no-op.
                     while rx.recv_timeout(Duration::from_millis(400)).is_ok() {}
-                    ensure_claude_hooks();
-                    ensure_codex_notify();
-                    ensure_opencode_plugin();
-                    ensure_pi_extension();
+                    heal_all();
                 },
                 Err(_) => return, // channel closed: shutting down
             }
@@ -565,10 +584,7 @@ mod win {
     fn poll_guard() -> ! {
         loop {
             std::thread::sleep(Duration::from_secs(300));
-            ensure_claude_hooks();
-            ensure_codex_notify();
-            ensure_opencode_plugin();
-            ensure_pi_extension();
+            heal_all();
         }
     }
 
@@ -595,6 +611,53 @@ mod win {
         Some(PathBuf::from(std::env::var_os("USERPROFILE")?).join(".codex"))
     }
 
+    /// notify 序列化后的字节预算。正常接线只有几百字节；超过它的唯一已知
+    /// 途径是与其他 notify 包装器互相包装的指数膨胀（#38，最终 130 MB 撑爆
+    /// config.toml 让 codex 起不来）。宁可这一轮不接线，也不把病态值落盘。
+    const NOTIFY_BYTE_BUDGET: usize = 8 * 1024;
+
+    /// 由现有 notify argv 算出应写入的新 argv；`None` = 不动文件。
+    ///
+    /// 与 codex-computer-use 的共存规则（#38）：它重新注册时若认不出
+    /// notify\[0\] 是自己，会把整个旧数组 JSON 序列化进自己的
+    /// `--previous-notify` 参数。此时 nebula-hook 不在最外层，但仍在链中
+    /// ——事件会沿链回流。若这时再包一层，两个包装器互相包装、转义反斜杠
+    /// 每轮翻倍。所以：helper 标记出现在**任何位置**（含 JSON 字符串内部）
+    /// 都算已接线，只有最外层是自己时才做路径自愈。
+    fn desired_codex_notify(current: &[String], helper: &str) -> Option<Vec<String>> {
+        let desired: Vec<String> = match current.first() {
+            // Already ours: heal the helper path, keep any chain tail as-is.
+            Some(first) if first.contains(HELPER_MARK) => {
+                let mut argv = current.to_vec();
+                argv[0] = helper.to_owned();
+                argv
+            },
+            // 已在链中但不在最外层：保持现状，绝不再包（见上）。
+            Some(_) if current.iter().any(|arg| arg.contains(HELPER_MARK)) => return None,
+            // Occupied: wrap the existing notifier behind --chain.
+            Some(_) => {
+                let mut argv = vec![helper.to_owned(), "codex".to_owned(), "--chain".to_owned()];
+                argv.extend(current.iter().cloned());
+                argv
+            },
+            None => vec![helper.to_owned(), "codex".to_owned()],
+        };
+        if current == desired {
+            return None;
+        }
+        // 长度兜底：对任何形态的膨胀（不止 #38 这一种循环）一律拒写。
+        // +4 ≈ 每个元素的引号、逗号与空格开销。
+        let bytes: usize = desired.iter().map(|arg| arg.len() + 4).sum();
+        if bytes > NOTIFY_BYTE_BUDGET {
+            log::warn!(
+                "ai_hook: codex notify would serialize to {bytes} bytes (> {NOTIFY_BYTE_BUDGET}); \
+                 refusing to write (wrapper loop guard, #38)"
+            );
+            return None;
+        }
+        Some(desired)
+    }
+
     /// Wire codex's `notify` to nebula-hook. Codex has a SINGLE notify slot
     /// which may already be taken (e.g. OpenAI's own computer-use notifier),
     /// so an occupied slot is wrapped, not evicted: nebula-hook forwards to
@@ -618,24 +681,9 @@ mod win {
             .map(|a| a.iter().filter_map(|i| i.as_str().map(str::to_owned)).collect())
             .unwrap_or_default();
 
-        let desired: Vec<String> = match current.first() {
-            // Already ours: heal the helper path, keep any chain tail as-is.
-            Some(first) if first.contains(HELPER_MARK) => {
-                let mut argv = current.clone();
-                argv[0] = helper;
-                argv
-            },
-            // Occupied: wrap the existing notifier behind --chain.
-            Some(_) => {
-                let mut argv = vec![helper, "codex".to_owned(), "--chain".to_owned()];
-                argv.extend(current.iter().cloned());
-                argv
-            },
-            None => vec![helper, "codex".to_owned()],
-        };
-        if current == desired {
+        let Some(desired) = desired_codex_notify(&current, &helper) else {
             return false;
-        }
+        };
 
         let mut array = toml_edit::Array::new();
         for arg in &desired {
@@ -980,6 +1028,17 @@ export default function (pi: ExtensionAPI) {
                     failed = true;
                 },
             }
+            // 持久开关：不写它，下次 Nebula 启动（含开机自启）会把上面
+            // 刚清掉的四处原样装回——移除必须比自愈活得久（#8、#38）。
+            match nebula_settings::persist_keys(&[("ai_hooks", "0".to_owned())]) {
+                Ok(()) => println!(
+                    "已写入 ai_hooks=0：Nebula 启动时不再自动接线（重新启用：nebula setup-ai）。"
+                ),
+                Err(err) => {
+                    eprintln!("警告：无法写入 ai_hooks=0（{err}），下次启动仍会自动装回。");
+                    failed = true;
+                },
+            }
             // 卸载器必须尽最大努力清理所有集成，不能因一个损坏的用户配置
             // 提前返回而让其他 Hook 永久指向即将被删除的程序目录。
             return i32::from(failed);
@@ -990,6 +1049,11 @@ export default function (pi: ExtensionAPI) {
                 eprintln!("runtime/ 和 nebula.exe 同目录中均未找到 nebula-hook.exe，无法安装。");
                 return 1;
             },
+        }
+        // 显式安装即重新授权：清掉 --remove 落下的持久开关，守护线程下次
+        // 启动恢复自愈。
+        if let Err(err) = nebula_settings::persist_keys(&[("ai_hooks", "1".to_owned())]) {
+            eprintln!("警告：无法写入 ai_hooks=1（{err}）；若之前执行过 --remove，自动接线仍是关闭状态。");
         }
         if dir.exists() {
             if ensure_claude_hooks() {
@@ -1211,6 +1275,78 @@ export default function (pi: ExtensionAPI) {
         let tmp = path.with_extension(format!("nebula-tmp-{}", std::process::id()));
         std::fs::write(&tmp, data)?;
         std::fs::rename(&tmp, path)
+    }
+
+    #[cfg(test)]
+    mod codex_notify_tests {
+        use super::desired_codex_notify;
+
+        const HELPER: &str = "C:/Program Files/Nebula/runtime/nebula-hook.exe";
+
+        fn argv(args: &[&str]) -> Vec<String> {
+            args.iter().map(|s| (*s).to_owned()).collect()
+        }
+
+        #[test]
+        fn an_empty_slot_is_claimed_outright() {
+            assert_eq!(
+                desired_codex_notify(&[], HELPER),
+                Some(argv(&[HELPER, "codex"]))
+            );
+        }
+
+        #[test]
+        fn a_foreign_notifier_is_wrapped_behind_chain() {
+            let current = argv(&["C:/cua/codex-computer-use.exe", "turn-ended"]);
+            assert_eq!(
+                desired_codex_notify(&current, HELPER),
+                Some(argv(&[
+                    HELPER,
+                    "codex",
+                    "--chain",
+                    "C:/cua/codex-computer-use.exe",
+                    "turn-ended",
+                ]))
+            );
+        }
+
+        #[test]
+        fn our_stale_helper_path_heals_and_keeps_the_chain_tail() {
+            let current = argv(&["D:/old/nebula-hook.exe", "codex", "--chain", "C:/cua/cua.exe"]);
+            assert_eq!(
+                desired_codex_notify(&current, HELPER),
+                Some(argv(&[HELPER, "codex", "--chain", "C:/cua/cua.exe"]))
+            );
+        }
+
+        #[test]
+        fn an_up_to_date_wiring_is_left_alone() {
+            let current = argv(&[HELPER, "codex"]);
+            assert_eq!(desired_codex_notify(&current, HELPER), None);
+        }
+
+        // #38 的核心形态：codex-computer-use 重新注册时把我们的 chain JSON
+        // 编码进 --previous-notify。我们不在最外层，但已在链中——再包一层
+        // 就进入互相包装、反斜杠每轮翻倍的指数爆炸。
+        #[test]
+        fn a_notifier_that_swallowed_us_into_previous_notify_is_not_wrapped_again() {
+            let current = argv(&[
+                "C:/cua/codex-computer-use.exe",
+                "--previous-notify",
+                r#"["C:\\Program Files\\Nebula\\runtime\\nebula-hook.exe", "codex", "--chain", "C:\\cua\\cua.exe", "turn-ended"]"#,
+                "turn-ended",
+            ]);
+            assert_eq!(desired_codex_notify(&current, HELPER), None);
+        }
+
+        // 兜底：即使标记检测失手（比如未来某个包装器改了我们的文件名），
+        // 病态膨胀也会被字节预算拦住，config.toml 不会被写到 codex 起不来。
+        #[test]
+        fn an_oversized_result_is_refused() {
+            let ballooned = "\\".repeat(64 * 1024);
+            let current = argv(&["C:/cua/codex-computer-use.exe", &ballooned]);
+            assert_eq!(desired_codex_notify(&current, HELPER), None);
+        }
     }
 
     #[cfg(test)]

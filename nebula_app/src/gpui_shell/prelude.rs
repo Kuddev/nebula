@@ -30,3 +30,18 @@ pub use gpui_component::{
 
 pub use gpui_component::IndexPath;
 pub use gpui_component::WindowExt as _;
+
+use gpui::{Window, px};
+use gpui_component::PixelsExt as _;
+
+/// 旧壳 `draw_confirm_modal`：`(win_w - box_w)/2`、`(win_h - box_h)/2`。
+/// 组件库 Dialog 水平已经居中，垂直默认贴在 `height/10`。不改 gpui-component，
+/// 只把 `margin_top` 调到窗口中线。关闭/粘贴确认约 200px 高；入场动画结束
+/// 时还会把 top 再加 30px，所以这里先减去这段位移，落点才是正中。
+pub fn center_confirm_dialog(dialog: Dialog, window: &Window) -> Dialog {
+    let height = window.viewport_size().height.as_f32();
+    const DIALOG_H: f32 = 200.0;
+    const SLIDE: f32 = 30.0;
+    let top = ((height - DIALOG_H) / 2.0 - SLIDE).max(16.0);
+    dialog.margin_top(px(top))
+}

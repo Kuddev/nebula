@@ -61,7 +61,7 @@ const HEIGHT_OVERRUN_TOLERANCE: f32 = 0.12;
 /// Per-pane state. Layout data is intentionally discarded when a pane state is
 /// cloned: cloned UI metadata can outlive a renderer/font scale, while layouts
 /// are cheap to rebuild and remain bounded by `MathLayoutCache` afterwards.
-pub(super) struct TerminalMathState {
+pub(crate) struct TerminalMathState {
     cache: MathLayoutCache,
     projection: LineProjection,
     ai_cli_seen: bool,
@@ -110,15 +110,15 @@ impl fmt::Debug for TerminalMathState {
 }
 
 impl TerminalMathState {
-    pub(super) fn observe_program(&mut self, program: Option<&str>) {
+    pub(crate) fn observe_program(&mut self, program: Option<&str>) {
         self.ai_cli_seen |= program.is_some_and(is_ai_cli);
     }
 
-    pub(super) fn inline_dollar_enabled(&self) -> bool {
+    pub(crate) fn inline_dollar_enabled(&self) -> bool {
         self.ai_cli_seen
     }
 
-    pub(super) fn update_projection(
+    pub(crate) fn update_projection(
         &mut self,
         overlays: &[FormulaOverlay],
         prepared: &[Option<PreparedFormula>],
@@ -126,7 +126,7 @@ impl TerminalMathState {
         self.projection.rebuild(overlays, prepared);
     }
 
-    pub(super) fn project_cell(&self, point: Point<usize>, columns: usize) -> Option<Point<usize>> {
+    pub(crate) fn project_cell(&self, point: Point<usize>, columns: usize) -> Option<Point<usize>> {
         self.projection.project_cell(point, columns)
     }
 
@@ -137,7 +137,7 @@ impl TerminalMathState {
     /// `viewport_origin` is the renderer's viewport top row: projection spans
     /// live in rendered-viewport coordinates, which can be cropped relative to
     /// the grid while a resize commit is pending.
-    pub(super) fn source_point(
+    pub(crate) fn source_point(
         &self,
         point: Point,
         side: Side,
@@ -580,14 +580,14 @@ struct GridPosition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct RowSpan {
+pub(crate) struct RowSpan {
     row: i32,
     start: usize,
     end: usize,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct FormulaOverlay {
+pub(crate) struct FormulaOverlay {
     source: Arc<str>,
     display: bool,
     formula_id: u64,
@@ -615,6 +615,21 @@ pub(super) struct FormulaOverlay {
 }
 
 impl FormulaOverlay {
+    /// GPUI 壳的只读视图：该公式覆盖的 (行, 起列, 止列) 序列。行可为负
+    /// （部分滚出视口的持久公式）。用于围栏背景过滤与源格跳过。
+    pub(crate) fn covered_ranges(&self) -> impl Iterator<Item = (i32, usize, usize)> + '_ {
+        self.spans.iter().map(|span| (span.row, span.start, span.end))
+    }
+
+    /// 归一化后的 TeX 源（GPUI 壳绘制/缓存键用）。
+    pub(crate) fn source_arc(&self) -> Arc<str> {
+        Arc::clone(&self.source)
+    }
+
+    pub(crate) fn formula_id(&self) -> u64 {
+        self.formula_id
+    }
+
     fn contains(&self, point: Point<usize>) -> bool {
         self.spans.iter().any(|span| {
             usize::try_from(span.row) == Ok(point.line)
@@ -981,7 +996,7 @@ impl Ord for GridPosition {
 
 /// Scan the visible grid and attach renderer-resolved colors/fallback cells.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn scan_visible<T>(
+pub(crate) fn scan_visible<T>(
     state: &mut TerminalMathState,
     terminal: &Term<T>,
     size: &SizeInfo,
@@ -1452,7 +1467,7 @@ fn make_overlay(
 /// Every geometric decision is taken here, so the fit and the clip can never
 /// disagree about how much room the formula was given.
 #[derive(Clone, Copy)]
-pub(super) struct PreparedFormula {
+pub(crate) struct PreparedFormula {
     fitted_pixel_size: f32,
     /// Typesetting style actually used. A block formula that does not fit its
     /// row falls back to text style before it gives up any size: readers judge
@@ -1656,7 +1671,7 @@ fn ink_columns(
 /// Pre-compile every overlay before the cell pass so the renderer knows which
 /// source cells to skip. Returns one entry per overlay; `None` keeps the raw
 /// source visible (layout failure, or the fitted size would be unreadable).
-pub(super) fn prepare_overlays(
+pub(crate) fn prepare_overlays(
     state: &mut TerminalMathState,
     overlays: &[FormulaOverlay],
     size: &SizeInfo,
@@ -1803,15 +1818,19 @@ pub(super) fn prepare_overlays(
 /// pass can skip those glyphs. Painting them and covering the area with an
 /// opaque patch afterwards is what produced the black/white formula slabs on
 /// transparent and background-image windows.
-pub(super) struct CoverageMask {
+#[derive(Default)]
+pub(crate) struct CoverageMask {
     rows: BTreeMap<usize, Vec<(usize, usize)>>,
 }
 
 impl CoverageMask {
-    pub(super) fn build(overlays: &[FormulaOverlay], prepared: &[Option<PreparedFormula>]) -> Self {
+    /// `gates` 与 overlays 一一对应；`None` 的公式保留原文（其源格不进
+    /// 掩码）。旧壳传 `Option<PreparedFormula>`，GPUI 壳传
+    /// `Option<OverlayDrawPlan>`——覆盖判定与各自的回退路径保持一致。
+    pub(crate) fn build<T>(overlays: &[FormulaOverlay], gates: &[Option<T>]) -> Self {
         let mut rows: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
-        for (overlay, prepared) in overlays.iter().zip(prepared) {
-            if prepared.is_none() {
+        for (overlay, gate) in overlays.iter().zip(gates) {
+            if gate.is_none() {
                 continue;
             }
             for span in &overlay.spans {
@@ -1822,22 +1841,123 @@ impl CoverageMask {
         Self { rows }
     }
 
-    pub(super) fn covers(&self, point: Point<usize>) -> bool {
+    pub(crate) fn covers(&self, point: Point<usize>) -> bool {
         self.rows.get(&point.line).is_some_and(|spans| {
             spans.iter().any(|&(start, end)| (start..end).contains(&point.column.0))
         })
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
+}
+
+/// 一个 overlay 的后端无关绘制计划：几何决策（fit/居中/bleed/裁剪）的
+/// 单一出口，OpenGL（旧壳 [`draw_overlays`]）与 GPUI 壳共同消费，保证两壳
+/// 的公式落点与裁剪像素级同源。坐标系与 [`SizeInfo`] 一致。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OverlayDrawPlan {
+    pub(crate) fitted_pixel_size: f32,
+    pub(crate) display_style: bool,
+    pub(crate) origin_x: f32,
+    pub(crate) baseline_y: f32,
+    pub(crate) clip_left: f32,
+    pub(crate) clip_top: f32,
+    pub(crate) clip_right: f32,
+    pub(crate) clip_bottom: f32,
+    pub(crate) foreground: Rgb,
+}
+
+/// 计算一个已通过预检的 overlay 的绘制几何。`None` = 本帧回退原文
+/// （布局失败或裁剪退化），调用方自行决定回退方式（旧壳补画源格，GPUI
+/// 壳保留源格不跳过）。
+pub(crate) fn plan_overlay_draw(
+    state: &mut TerminalMathState,
+    overlay: &FormulaOverlay,
+    prepared: &PreparedFormula,
+    size: &SizeInfo,
+    pixels_per_point: f32,
+) -> Option<OverlayDrawPlan> {
+    let mut bounds = overlay.bounds(size)?;
+    let shift_columns = match overlay.spans.as_slice() {
+        [span] => usize::try_from(span.row)
+            .ok()
+            .map_or(0, |row| state.projection.shift_before(row, span.start)),
+        _ => 0,
+    };
+    let shift_pixels = shift_columns as f32 * size.cell_width();
+    bounds.left += shift_pixels;
+    bounds.right += shift_pixels;
+    let projected_box_right = prepared.box_right + shift_pixels;
+
+    // Pre-flight succeeded, so failure here is unreachable in practice.
+    let metrics = state
+        .layout(
+            overlay.formula_id,
+            &overlay.source,
+            prepared.fitted_pixel_size,
+            pixels_per_point,
+            prepared.display_style,
+        )
+        .ok()?
+        .metrics;
+    let total_height = metrics.height + metrics.depth;
+    let viewport_right = size.padding_x() + size.columns() as f32 * size.cell_width();
+    let viewport_bottom = size.padding_y() + size.screen_lines() as f32 * size.cell_height();
+    let box_right = projected_box_right;
+    let box_width = box_right - bounds.left;
+    let origin_x = if prepared.centered {
+        bounds.left + (box_width - metrics.width) / 2.0
+    } else {
+        bounds.left + FORMULA_INSET
+    };
+    // Centre inside the source rows while the ink fits them. What does not
+    // fit is split between the sides in proportion to what each side can
+    // actually lend: with a blank row above and prose below, the overflow
+    // goes up, and the formula keeps the full line gap between itself and
+    // the text underneath instead of splitting the crowding evenly.
+    let slack = bounds.height() - total_height;
+    let room = prepared.bleed_top + prepared.bleed_bottom;
+    let top = if slack >= 0.0 {
+        bounds.top + slack / 2.0
+    } else if room > 0.0 {
+        bounds.top + slack * (prepared.bleed_top / room)
+    } else {
+        bounds.top + slack / 2.0
+    };
+    let baseline_y = (top + metrics.height)
+        .max(bounds.top - prepared.bleed_top + metrics.height)
+        .min(bounds.bottom + prepared.bleed_bottom - metrics.depth);
+
+    // The clip follows the bleed budget, never the ink: whatever the fit
+    // could not absorb gets cropped instead of landing on neighbouring
+    // prose. (Following the ink is what painted formulas over adjacent
+    // rows.)
+    let clip_left = bounds.left.max(size.padding_x());
+    let clip_top = (bounds.top - prepared.bleed_top).max(size.padding_y());
+    let clip_right = box_right.min(viewport_right);
+    let clip_bottom = (bounds.bottom + prepared.bleed_bottom).min(viewport_bottom);
+    if clip_right <= clip_left || clip_bottom <= clip_top {
+        return None;
+    }
+    Some(OverlayDrawPlan {
+        fitted_pixel_size: prepared.fitted_pixel_size,
+        display_style: prepared.display_style,
+        origin_x,
+        baseline_y,
+        clip_left,
+        clip_top,
+        clip_right,
+        clip_bottom,
+        foreground: overlay.foreground,
+    })
 }
 
 /// Draw prepared overlays after terminal rectangles. The source cells were
 /// already skipped during the grid pass, so the formula renders directly on
 /// the window background — no cover quad, transparency and wallpaper intact.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_overlays(
+pub(crate) fn draw_overlays(
     renderer: &mut Renderer,
     glyph_cache: &mut GlyphCache,
     state: &mut TerminalMathState,
@@ -1850,78 +1970,34 @@ pub(super) fn draw_overlays(
         let Some(prepared) = prepared else {
             continue;
         };
-        let Some(mut bounds) = overlay.bounds(size) else {
+        let Some(plan) = plan_overlay_draw(state, overlay, prepared, size, pixels_per_point)
+        else {
+            // Repaint the skipped source cells rather than leave a hole.
+            renderer.draw_cells(size, glyph_cache, overlay.fallback.iter().cloned());
             continue;
         };
-        let shift_columns = match overlay.spans.as_slice() {
-            [span] => usize::try_from(span.row)
-                .ok()
-                .map_or(0, |row| state.projection.shift_before(row, span.start)),
-            _ => 0,
-        };
-        let shift_pixels = shift_columns as f32 * size.cell_width();
-        bounds.left += shift_pixels;
-        bounds.right += shift_pixels;
-        let projected_box_right = prepared.box_right + shift_pixels;
-
         let layout = match state.layout(
             overlay.formula_id,
             &overlay.source,
-            prepared.fitted_pixel_size,
+            plan.fitted_pixel_size,
             pixels_per_point,
-            prepared.display_style,
+            plan.display_style,
         ) {
             Ok(layout) => layout,
             Err(_) => {
-                // Pre-flight succeeded, so this is unreachable in practice;
-                // repaint the skipped source cells rather than leave a hole.
                 renderer.draw_cells(size, glyph_cache, overlay.fallback.iter().cloned());
                 continue;
             },
         };
-        let total_height = layout.metrics.height + layout.metrics.depth;
-        let viewport_right = size.padding_x() + size.columns() as f32 * size.cell_width();
-        let viewport_bottom = size.padding_y() + size.screen_lines() as f32 * size.cell_height();
-        let box_right = projected_box_right;
-        let box_width = box_right - bounds.left;
-        let origin_x = if prepared.centered {
-            bounds.left + (box_width - layout.metrics.width) / 2.0
-        } else {
-            bounds.left + FORMULA_INSET
-        };
-        // Centre inside the source rows while the ink fits them. What does not
-        // fit is split between the sides in proportion to what each side can
-        // actually lend: with a blank row above and prose below, the overflow
-        // goes up, and the formula keeps the full line gap between itself and
-        // the text underneath instead of splitting the crowding evenly.
-        let slack = bounds.height() - total_height;
-        let room = prepared.bleed_top + prepared.bleed_bottom;
-        let top = if slack >= 0.0 {
-            bounds.top + slack / 2.0
-        } else if room > 0.0 {
-            bounds.top + slack * (prepared.bleed_top / room)
-        } else {
-            bounds.top + slack / 2.0
-        };
-        let baseline_y = (top + layout.metrics.height)
-            .max(bounds.top - prepared.bleed_top + layout.metrics.height)
-            .min(bounds.bottom + prepared.bleed_bottom - layout.metrics.depth);
-
-        // The clip follows the bleed budget, never the ink: whatever the fit
-        // could not absorb gets cropped instead of landing on neighbouring
-        // prose. (Following the ink is what painted formulas over adjacent
-        // rows.)
         let clip = MathClip {
-            left: bounds.left.max(size.padding_x()),
-            top: (bounds.top - prepared.bleed_top).max(size.padding_y()),
-            right: box_right.min(viewport_right),
-            bottom: (bounds.bottom + prepared.bleed_bottom).min(viewport_bottom),
+            left: plan.clip_left,
+            top: plan.clip_top,
+            right: plan.clip_right,
+            bottom: plan.clip_bottom,
         };
-        if clip.right <= clip.left || clip.bottom <= clip.top {
-            renderer.draw_cells(size, glyph_cache, overlay.fallback.iter().cloned());
-            continue;
-        }
-        if renderer.draw_math(size, layout, origin_x, baseline_y, overlay.foreground, clip).is_err()
+        if renderer
+            .draw_math(size, layout, plan.origin_x, plan.baseline_y, plan.foreground, clip)
+            .is_err()
         {
             renderer.draw_cells(size, glyph_cache, overlay.fallback.iter().cloned());
             continue;
@@ -1929,12 +2005,16 @@ pub(super) fn draw_overlays(
 
         let base_ascent = (size.cell_height() + glyph_cache.font_metrics().descent).max(1.0);
         for operation in &layout.text {
-            let scale = operation.pixel_size / prepared.fitted_pixel_size;
-            let x = origin_x + operation.x;
-            let y = baseline_y + operation.baseline_y - base_ascent * scale;
+            let scale = operation.pixel_size / plan.fitted_pixel_size;
+            let x = plan.origin_x + operation.x;
+            let y = plan.baseline_y + operation.baseline_y - base_ascent * scale;
             let width = size.cell_width() * scale;
             let height = size.cell_height() * scale;
-            if x < clip.left || x + width > clip.right || y < clip.top || y + height > clip.bottom {
+            if x < plan.clip_left
+                || x + width > plan.clip_right
+                || y < plan.clip_top
+                || y + height > plan.clip_bottom
+            {
                 continue;
             }
             let mut text = [0u8; 4];
@@ -1943,7 +2023,7 @@ pub(super) fn draw_overlays(
                 x,
                 y,
                 scale,
-                overlay.foreground,
+                plan.foreground,
                 Flags::empty(),
                 operation.character.encode_utf8(&mut text),
                 glyph_cache,

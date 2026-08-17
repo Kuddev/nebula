@@ -26,11 +26,12 @@ use crate::display::image_viewer::ImageView;
 use crate::gpui_shell::prelude::*;
 use gpui_component::text::TextView;
 
-/// 双击路由与旧壳 `input/chrome.rs` 同合同：应用内能读的开 tab，其余交
-/// 系统处理器。
+/// 双击路由：应用内能读的开 tab（图片/文档/源码），其余交系统处理器。
+/// 源码查看是 GPUI 壳新增能力，旧壳合同（`input/chrome.rs`）之上的超集。
 pub fn openable_in_app(path: &Path) -> bool {
     crate::display::image_viewer::viewable_file(path)
         || crate::display::markdown_view::viewable_file(path)
+        || crate::gpui_shell::code_tab::viewable_file(path)
 }
 
 /// 文档一次性读入的上限。组件 TextView 是全量解析（没有旧壳 DocView 的

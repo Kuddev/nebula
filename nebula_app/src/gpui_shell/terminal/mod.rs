@@ -6,6 +6,7 @@
 pub mod colors;
 pub mod element;
 pub mod keymap;
+pub mod math_overlay;
 pub mod mouse_protocol;
 pub mod session;
 pub mod suggest;

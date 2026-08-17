@@ -91,6 +91,30 @@ winit = { path = "third_party/winit-0.30.13" }
 #   3. 新增的 text/inline_flow.rs：shape_line 前把 \n\r 换成空格（gpui
 #      shaper 遇换行 panic；替换保 byte 长度，run 偏移不失效）
 # 本地 fork 工作拷贝在 ../gpui-component-fork（已挂 tty7 remote 可 diff）。
+#
+# 上游行为备忘（不是补丁，是调用侧要知道的事）：`Scrollable`
+# （scroll/scrollable.rs 的 overflow_*_scrollbar）不是就地加滚动条，而是把
+# 被包装元素的 StyleRefinement 整个 clone 到它新建的外层 div，再把原元素
+# 样式清空、只补 flex_1，然后塞进一层 `overflow_y_scroll` 的 scroll-area。
+# 后果：真正承载 children 的那层退回 gpui 默认的 Display::Block 且宽度不
+# 确定，children 上的 `w_full`（width:100%）无从解析、回落到 max-content，
+# 于是每个子块按自己的内容宽度收缩，看起来就是"分组宽度参差、控件既不贴
+# 左也不贴右"（2026-08-17 设置页实测 A/B 确认）。**调用侧约定：滚动区内
+# 先放一层 `v_flex().w_full()`，内容写在它里面**——竖向 flex 的子项走交叉
+# 轴 stretch 拿宽度，绕开百分比解析。settings_pane.rs 的设置正文即按此写。
+#
+# 补丁清单（nebula 分支，rebase 新基点时逐条核对）：
+#   1. popover 单层紧凑阴影（a59f704c，见上）。
+#   2. TextView 数学公式钩子（本地 nebula-math 分支，待 push 后恢复 rev pin）：
+#      markdown 解析启用 math 构造；新增 text/math.rs 的 set_math_renderer
+#      全局注册点；InlineNode/Node 增加数学节点并在渲染时调钩子，未注册时
+#      回退现状（inline=code 文本、block=CodeBlock）。TeX 引擎/栅格化/绘制
+#      全部住在 nebula_app::gpui_shell::math_view，fork 只有接线层。上游
+#      0.6 线出现 MarkdownPlugin/Custom block 后应迁过去并撤掉本补丁。
+#
+# ⚠ 临时状态：gpui-component 走本地 path patch（nebula-math 分支工作树），
+# 便于数学补丁的本地迭代；验收后 push 到 Kuddev/gpui-component 并恢复
+# `git + rev` 精确 pin（gpui 不受影响，仍是 rev pin）。
 gpui = { git = "https://github.com/Kuddev/zed", rev = "69e2130295c2649963eb639fc70b4f2ee8ea1624" }
-gpui-component = { git = "https://github.com/Kuddev/gpui-component", rev = "a59f704c497d6e6e628ec2d401466d825d4a51b2" }
-gpui-component-assets = { git = "https://github.com/Kuddev/gpui-component", rev = "a59f704c497d6e6e628ec2d401466d825d4a51b2" }
+gpui-component = { path = "../gpui-component-fork/crates/ui" }
+gpui-component-assets = { path = "../gpui-component-fork/crates/assets" }

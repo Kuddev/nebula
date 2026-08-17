@@ -205,7 +205,7 @@ fn cursor_follows_theme(color: InvertedCellColors) -> bool {
     color == NEBULA_DEFAULT_CURSOR
 }
 
-fn themed_cursor_style(
+pub(crate) fn themed_cursor_style(
     shape: CursorShape,
     theme_is_light: bool,
     theme_anchor: Rgb,
@@ -553,7 +553,16 @@ fn is_terminal_graphic(character: char) -> bool {
     )
 }
 
-fn is_application_cursor_cell(
+pub(crate) fn is_application_cursor_glyph(
+    character: char,
+    flags: Flags,
+    fixed_background: bool,
+) -> bool {
+    matches!(character, '\u{2580}'..='\u{259f}')
+        || (character == ' ' && (flags.contains(Flags::INVERSE) || fixed_background))
+}
+
+pub(crate) fn is_application_cursor_cell(
     terminal_cursor_shape: CursorShape,
     terminal_cursor_point: Point,
     cell_point: Point,
@@ -563,14 +572,20 @@ fn is_application_cursor_cell(
 ) -> bool {
     terminal_cursor_shape == CursorShape::Hidden
         && terminal_cursor_point == cell_point
-        && (matches!(character, '\u{2580}'..='\u{259f}')
-            || (character == ' ' && (flags.contains(Flags::INVERSE) || fixed_background)))
+        && is_application_cursor_glyph(character, flags, fixed_background)
+}
+
+pub(crate) fn cell_background_is_fixed(
+    color: Color,
+    overrides: &nebula_terminal::term::color::Colors,
+) -> bool {
+    is_fixed_color(color, overrides)
 }
 
 /// Alpha-compose a theme overlay over the cell's existing background. Keeping
 /// this in the render model preserves explicit ANSI cell backgrounds while
 /// still allowing the default transparent terminal surface/image to show.
-fn composite_overlay(overlay: Rgb, overlay_alpha: f32, base: Rgb, base_alpha: f32) -> (Rgb, f32) {
+pub(crate) fn composite_overlay(overlay: Rgb, overlay_alpha: f32, base: Rgb, base_alpha: f32) -> (Rgb, f32) {
     let oa = overlay_alpha.clamp(0.0, 1.0);
     let ba = base_alpha.clamp(0.0, 1.0);
     let out_a = oa + ba * (1.0 - oa);
@@ -589,7 +604,7 @@ fn composite_overlay(overlay: Rgb, overlay_alpha: f32, base: Rgb, base_alpha: f3
     )
 }
 
-fn mix_rgb(color: Rgb, neutral: Rgb, neutral_amount: f32) -> Rgb {
+pub(crate) fn mix_rgb(color: Rgb, neutral: Rgb, neutral_amount: f32) -> Rgb {
     let t = neutral_amount.clamp(0.0, 1.0);
     let channel = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
     Rgb::new(channel(color.r, neutral.r), channel(color.g, neutral.g), channel(color.b, neutral.b))
@@ -653,8 +668,8 @@ mod tests {
     use nebula_terminal::vte::ansi::CursorShape;
 
     use super::{
-        composite_overlay, cursor_follows_theme, is_application_cursor_cell, is_terminal_graphic,
-        mix_rgb, themed_cursor_style,
+        composite_overlay, cursor_follows_theme, is_application_cursor_cell,
+        is_application_cursor_glyph, is_terminal_graphic, mix_rgb, themed_cursor_style,
     };
     use crate::config::color::NEBULA_DEFAULT_CURSOR;
     use crate::display::color::Rgb;
@@ -742,6 +757,9 @@ mod tests {
             Flags::empty(),
             false,
         ));
+        assert!(is_application_cursor_glyph('█', Flags::empty(), false));
+        assert!(is_application_cursor_glyph(' ', Flags::INVERSE, false));
+        assert!(!is_application_cursor_glyph(' ', Flags::empty(), false));
 
         let (light_cursor, _) = composite_overlay(
             Rgb::new(124, 90, 196),

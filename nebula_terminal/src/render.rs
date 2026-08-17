@@ -210,6 +210,12 @@ pub struct CursorSnapshot {
     pub shape: CursorShape,
     /// Cursor sits on a wide char: draw it two cells wide.
     pub wide: bool,
+    /// Glyph under the cursor. Claude Code / Codex hide DECSCUSR and draw a
+    /// reverse-video space or block element; the frontend needs the cell to
+    /// recolor that fake cursor (old shell `is_application_cursor_cell`).
+    pub cell_ch: char,
+    pub cell_flags: Flags,
+    pub cell_bg: Color,
 }
 
 /// A cell rendered by built-in geometry ([`boxdraw`]) instead of a font:
@@ -389,13 +395,16 @@ impl RenderSnapshot {
         flush(&mut snap.segments, &mut open);
 
         if let Some(vp) = cursor_vp {
-            if vp.line < rows && vp.column.0 < cols && cursor_shape != CursorShape::Hidden {
-                let wide = term.grid()[content.cursor.point].flags.contains(Flags::WIDE_CHAR);
+            if vp.line < rows && vp.column.0 < cols {
+                let cell = &term.grid()[content.cursor.point];
                 snap.cursor = Some(CursorSnapshot {
                     row: vp.line as u16,
                     col: vp.column.0 as u16,
                     shape: cursor_shape,
-                    wide,
+                    wide: cell.flags.contains(Flags::WIDE_CHAR),
+                    cell_ch: cell.c,
+                    cell_flags: cell.flags,
+                    cell_bg: cell.bg,
                 });
             }
         }
@@ -551,6 +560,40 @@ mod tests {
         term.grid_mut().cursor.point = crate::index::Point::new(Line(0), Column(0));
         let snap = RenderSnapshot::capture(&term, &cfg(4, 8));
         assert!(snap.cursor.expect("cursor").wide);
+    }
+
+    #[test]
+    fn capture_keeps_a_hidden_cursor_and_its_cell() {
+        use crate::vte::ansi::{Handler, NamedPrivateMode};
+
+        let mut term = term_with(&[" "]);
+        term.grid_mut().cursor.point = crate::index::Point::new(Line(0), Column(0));
+        term.grid_mut()[Line(0)][Column(0)].flags.insert(Flags::INVERSE);
+        term.unset_private_mode(NamedPrivateMode::ShowCursor.into());
+        let snap = RenderSnapshot::capture(&term, &cfg(4, 8));
+        let cursor = snap.cursor.expect("hidden cursor still has a cell");
+        assert_eq!(cursor.shape, CursorShape::Hidden);
+        assert_eq!((cursor.row, cursor.col), (0, 0));
+        assert!(cursor.cell_flags.contains(Flags::INVERSE));
+        assert_eq!(cursor.cell_ch, ' ');
+        assert!(
+            snap.bg_runs.iter().any(|run| run.row == 0 && run.start <= 0 && 0 < run.end),
+            "inverse space still emits a bg run so the frontend can skip the black cell"
+        );
+    }
+
+    #[test]
+    fn capture_keeps_decscusr_hidden_block_glyph() {
+        use crate::vte::ansi::Handler;
+
+        let mut term = term_with(&["█"]);
+        term.grid_mut().cursor.point = crate::index::Point::new(Line(0), Column(0));
+        term.set_cursor_shape(CursorShape::Hidden);
+        let snap = RenderSnapshot::capture(&term, &cfg(4, 8));
+        let cursor = snap.cursor.expect("DECSCUSR hidden cursor still has a cell");
+        assert_eq!(cursor.shape, CursorShape::Hidden);
+        assert_eq!(cursor.cell_ch, '█');
+        assert_eq!(snap.box_glyphs.iter().map(|g| g.ch).collect::<Vec<_>>(), vec!['█']);
     }
 
     #[test]

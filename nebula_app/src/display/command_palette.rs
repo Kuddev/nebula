@@ -112,7 +112,7 @@ impl LauncherGroup {
 }
 
 impl LauncherFilter {
-    fn label(self, language: super::UiLanguage) -> &'static str {
+    pub(crate) fn label(self, language: super::UiLanguage) -> &'static str {
         match self {
             Self::All => language.pick("全部", "All"),
             Self::Ssh => "SSH",

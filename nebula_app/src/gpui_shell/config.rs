@@ -52,6 +52,9 @@ pub struct Settings {
     pub completion_style: crate::display::CompletionStyle,
     /// 单元格宽度取整方式；同一窗口宽度下必须与旧壳得到相同列数。
     pub cell_width_mode: nebula_settings::CellWidthModeName,
+    /// 全宽字形（CJK 等）的 bold run 用 Regular 字形栅格（粗体只提亮不加粗，
+    /// 旧壳 `glyph_cache.wide_bold_use_regular` 同义）。
+    pub cjk_bold_regular: bool,
     /// 默认 shell 的稳定 id（`nebula_settings.txt` 的 `shell=`，如
     /// "pwsh" / "cmd" / "wsl:Ubuntu"）。None = 引擎默认。
     pub shell_id: Option<String>,
@@ -138,6 +141,7 @@ impl Settings {
                 _ => crate::display::CompletionStyle::Inline,
             },
             cell_width_mode: runtime.cell_width_mode,
+            cjk_bold_regular: runtime.cjk_bold_regular,
             shell_id: runtime.shell.clone(),
             font_family: normal_family,
             source_path: path,

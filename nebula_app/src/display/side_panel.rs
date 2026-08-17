@@ -69,6 +69,10 @@ pub struct GitInfo {
     pub unstaged: Vec<(char, String)>,
     /// Index changes ready to commit.
     pub staged: Vec<(char, String)>,
+    /// 合并冲突（porcelain 的 U*/AA/DD；SVN 的 `C`）。冲突路径**同时**保留
+    /// 在 `staged`/`unstaged` 里：旧壳视图零改动照常显示，GPUI 壳按本列表
+    /// 单独分组并从另两组过滤（VS Code 的 Merge Changes 合同）。
+    pub conflicts: Vec<(char, String)>,
 }
 
 /// Result of hit-testing a pixel against the open drawer.
@@ -502,7 +506,22 @@ impl SidePanel {
         let slot = std::sync::Arc::clone(&self.snapshot_slot);
         std::thread::spawn(move || {
             let rows = SidePanel::tree_rows(&root, &expanded);
-            let git = read_git(&git_root).or_else(|| read_svn(&git_root));
+            // 设置可强制只认 Git / SVN（混合仓库场景）；Auto 保持既有探测：
+            // a checkout nested inside a Git tree must remain visible as SVN.
+            // Prefer SVN only when its metadata is in the current path's
+            // ancestor chain; ordinary Git directories keep the cheaper Git
+            // first path and only probe SVN as a fallback.
+            let git = match nebula_settings::RuntimeSettings::load().vcs_display {
+                nebula_settings::VcsDisplayName::Git => read_git(&git_root),
+                nebula_settings::VcsDisplayName::Svn => read_svn(&git_root),
+                nebula_settings::VcsDisplayName::Auto => {
+                    if svn_working_copy_hint(&git_root) {
+                        read_svn(&git_root).or_else(|| read_git(&git_root))
+                    } else {
+                        read_git(&git_root).or_else(|| read_svn(&git_root))
+                    }
+                },
+            };
             if let Ok(mut slot) = slot.lock() {
                 *slot = Some(PanelSnapshot { root, rows, git });
             }
@@ -650,6 +669,33 @@ impl SidePanel {
         }
         if self.git.as_ref().is_some_and(|g| !g.unstaged.is_empty()) && !self.op_running() {
             self.spawn_git(vec!["add".into(), "-A".into()]);
+        }
+    }
+
+    /// `git add -- <path>`：单文件暂存（VS Code 行内 ＋ 的合同）。
+    pub fn git_stage_path(&mut self, path: &str) {
+        if self.vcs() == Some(VcsKind::Git) && !self.op_running() {
+            self.spawn_git(vec!["add".into(), "--".into(), path.to_owned()]);
+        }
+    }
+
+    /// `git restore --staged -- <path>`：单文件取消暂存（VS Code 行内 −）。
+    pub fn git_unstage_path(&mut self, path: &str) {
+        if self.vcs() == Some(VcsKind::Git) && !self.op_running() {
+            self.spawn_git(vec![
+                "restore".into(),
+                "--staged".into(),
+                "--".into(),
+                path.to_owned(),
+            ]);
+        }
+    }
+
+    /// `git restore -- <path>`：丢弃工作区改动（调用方负责确认交互；
+    /// untracked 文件不适用——restore 不删新文件，按钮层不对 `?` 提供）。
+    pub fn git_discard_path(&mut self, path: &str) {
+        if self.vcs() == Some(VcsKind::Git) && !self.op_running() {
+            self.spawn_git(vec!["restore".into(), "--".into(), path.to_owned()]);
         }
     }
 
@@ -1222,6 +1268,12 @@ fn read_git(root: &Path) -> Option<GitInfo> {
                 info.unstaged.push(('?', path));
                 continue;
             }
+            // Merge conflicts (VS Code's "Merge Changes" group). The path
+            // also stays in staged/unstaged below so the legacy view keeps
+            // rendering it untouched.
+            if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
+                info.conflicts.push(('U', path.clone()));
+            }
             // One file can be in BOTH lists (partially staged).
             if x != ' ' {
                 info.staged.push((x, path.clone()));
@@ -1246,10 +1298,10 @@ fn read_git(root: &Path) -> Option<GitInfo> {
     Some(info)
 }
 
-/// SVN fallback（`read_git` 判空后才尝试）：工作副本检测走祖先链找 `.svn`
-/// ——零子进程的廉价预检，svn 未安装或普通目录都在这里就地退出，不为
-/// 每次快照付一次 CLI 启动开销。
-fn svn_working_copy(root: &Path) -> bool {
+/// Cheap preference hint for nested checkouts. `read_svn` still runs the
+/// authoritative `svn info` command, so this hint cannot make detection
+/// incorrect when metadata is represented differently by an SVN client.
+fn svn_working_copy_hint(root: &Path) -> bool {
     root.ancestors().any(|dir| dir.join(".svn").is_dir())
 }
 
@@ -1270,15 +1322,71 @@ fn parse_svn_status(status: &str) -> Vec<(char, String)> {
         .collect()
 }
 
-/// Snapshot SVN state for `root`: revision + working-copy changes. `None`
-/// when `root` isn't inside a working copy or the `svn` CLI is missing.
-/// 认证失败等错误同样落 `None` + debug 日志——面板留白，操作路径
-/// （commit/update）的错误才经 `op_error` 呈现给用户。
+/// Snapshot SVN state for `root`. The CLI（`svn info`/`svn status`）is tried
+/// first for maximum fidelity; machines without a command-line client
+/// (TortoiseSVN installs GUI only) fall back to reading `.svn/wc.db`
+/// directly（`svn_status` 模块，TSVNCache 同款路线）。`None` means the path
+/// is not a working copy at all.
 fn read_svn(root: &Path) -> Option<GitInfo> {
-    use std::process::Command;
-    if !svn_working_copy(root) {
+    read_svn_cli(root).map(fill_svn_conflicts).or_else(|| read_svn_wc_db(root))
+}
+
+/// CLI 输出没有单独的冲突列表：从 `unstaged` 里把 `C` 行登记到
+/// [`GitInfo::conflicts`]（路径保留原位，合同见字段注释）。
+fn fill_svn_conflicts(mut info: GitInfo) -> GitInfo {
+    info.conflicts = info
+        .unstaged
+        .iter()
+        .filter(|(state, _)| *state == 'C')
+        .map(|(_, path)| ('C', path.clone()))
+        .collect();
+    info
+}
+
+/// 零外部依赖的 SVN 快照：`svn_status` 读 `.svn/wc.db` 推导状态字母表，
+/// 修订号取 NODES 根行。路径统一转成相对 `root` 的正斜杠形式，与 CLI
+/// `svn status` 的展示合同一致（只显示 `root` 之下的条目）。
+fn read_svn_wc_db(root: &Path) -> Option<GitInfo> {
+    let crate::svn_status::SvnDirKind::WorkingCopy(wc_root) = crate::svn_status::classify_dir(root)
+    else {
         return None;
+    };
+    let changes = crate::svn_status::working_copy_status(&wc_root).ok()?;
+    let revision = crate::svn_status::working_copy_revision(&wc_root);
+    let mut info = GitInfo {
+        vcs: VcsKind::Svn,
+        branch: revision.map(|value| format!("r{value}")).unwrap_or_else(|| "svn".to_owned()),
+        ..GitInfo::default()
+    };
+    let prefix = root.strip_prefix(&wc_root).ok().map(|relative| {
+        let mut text = relative.to_string_lossy().replace('\\', "/");
+        if !text.is_empty() && !text.ends_with('/') {
+            text.push('/');
+        }
+        text
+    });
+    for change in changes {
+        let shown = match prefix.as_deref() {
+            None | Some("") => change.rel_path.clone(),
+            Some(prefix) => match change.rel_path.strip_prefix(prefix) {
+                Some(inside) => inside.to_owned(),
+                // `root` 子目录之外的变更不在本视图的展示合同内。
+                None => continue,
+            },
+        };
+        let state = change.state.letter().chars().next().unwrap_or('M');
+        if change.state == crate::svn_status::SvnState::Conflicted {
+            info.conflicts.push(('C', shown.clone()));
+        }
+        // SVN 无暂存区：全部归 unstaged（GPUI 会把冲突条目过滤出去单独分组）。
+        info.unstaged.push((if state == 'U' { '?' } else { state }, shown));
     }
+    Some(info)
+}
+
+/// CLI 路线（现代客户端的权威路径）。
+fn read_svn_cli(root: &Path) -> Option<GitInfo> {
+    use std::process::Command;
     let run = |args: &[&str]| -> Option<String> {
         let mut cmd = Command::new("svn");
         // 交互式认证提示会把无头子进程挂死；快照必须是非交互的。
@@ -1298,13 +1406,24 @@ fn read_svn(root: &Path) -> Option<GitInfo> {
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     };
 
-    let revision = run(&["info", "--show-item", "revision"])?;
+    // `--show-item` is available in modern SVN. Fall back to regular
+    // `svn info` so older clients still produce a revision number.
+    let revision = run(&["info", "--show-item", "revision"])
+        .and_then(|value| (!value.trim().is_empty()).then_some(value))
+        .or_else(|| run(&["info"]).and_then(|value| parse_svn_revision(&value)))?;
     let status = run(&["status"])?;
     Some(GitInfo {
         vcs: VcsKind::Svn,
         branch: format!("r{}", revision.trim()),
         unstaged: parse_svn_status(&status),
         ..GitInfo::default()
+    })
+}
+
+fn parse_svn_revision(info: &str) -> Option<String> {
+    info.lines().find_map(|line| {
+        let value = line.strip_prefix("Revision:")?.trim();
+        (!value.is_empty()).then_some(value.to_owned())
     })
 }
 
@@ -2443,6 +2562,7 @@ mod tests {
             ahead: 0,
             unstaged: vec![('?', "one.txt".into()), ('M', "two.txt".into())],
             staged: vec![('A', "three.txt".into())],
+            conflicts: Vec::new(),
         });
 
         assert!(!panel.git_row_is_file(0), "未暂存标题");
@@ -2563,6 +2683,13 @@ mod tests {
                 ('!', "gone.rs".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn svn_info_revision_parser_accepts_standard_output() {
+        let info = "Path: .\r\nWorking Copy Root Path: D:\\checkout\r\nRevision: 42\r\nNode Kind: directory\r\n";
+        assert_eq!(parse_svn_revision(info).as_deref(), Some("42"));
+        assert_eq!(parse_svn_revision("Path: .\nNode Kind: directory\n"), None);
     }
 
     #[test]

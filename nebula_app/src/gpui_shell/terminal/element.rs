@@ -22,7 +22,7 @@ use nebula_terminal::grid::Dimensions as _;
 use nebula_terminal::render::{RenderSnapshot, SnapshotConfig, boxdraw};
 #[cfg(windows)]
 use nebula_terminal::term::TermMode;
-use nebula_terminal::vte::ansi::CursorShape;
+use nebula_terminal::vte::ansi::{Color, CursorShape};
 
 use super::view::TerminalView;
 
@@ -187,6 +187,71 @@ impl Element for TerminalElement {
             view.refresh_suggestion_from_snapshot(prompt_line, suggest_anchor);
         });
         let overrides = snap.color_overrides;
+        let (theme_anchor, theme_is_light) = themed_anchor(&theme, cx);
+        let host_cursor_follows_theme = is_default_host_cursor(&theme);
+        let app_cursor = snap.cursor.as_ref().filter(|cursor| {
+            cursor.shape == CursorShape::Hidden
+                && crate::display::content::is_application_cursor_glyph(
+                    cursor.cell_ch,
+                    cursor.cell_flags,
+                    crate::display::content::cell_background_is_fixed(cursor.cell_bg, &overrides),
+                )
+        });
+        let themed_block = host_cursor_follows_theme
+            && snap
+                .cursor
+                .as_ref()
+                .is_some_and(|cursor| matches!(cursor.shape, CursorShape::Block));
+
+        // 公式覆盖层：与本帧快照同一份网格状态（term 锁内扫描 + 计划），
+        // 探测/fit/几何合同全部由共享的 display::terminal_math 裁定。
+        let scale_factor = window.scale_factor();
+        let math_frame = {
+            let cell_w = layout.cell_width.as_f32();
+            let line_h = layout.line_height.as_f32();
+            let font_px = f32::from(self.view.read(cx).font_size);
+            let fg = self.view.read(cx).palette.foreground;
+            let foreground = crate::display::color::Rgb::new(
+                (fg.r * 255.0).round() as u8,
+                (fg.g * 255.0).round() as u8,
+                (fg.b * 255.0).round() as u8,
+            );
+            let cursor = snap.cursor.as_ref().map(|c| (c.row as usize, c.col as usize));
+            let has_selection = !snap.selection_runs.is_empty();
+            let bg_runs = &snap.bg_runs;
+            self.view.update(cx, |view, _| {
+                let Some(term) = view.session.as_ref().map(|session| session.term.clone()) else {
+                    return super::math_overlay::MathFrame::default();
+                };
+                view.math.observe_program(view.running_program.as_deref());
+                let size_info = crate::display::SizeInfo::new(
+                    cell_w * layout.cols as f32,
+                    line_h * layout.rows as f32,
+                    cell_w,
+                    line_h,
+                    0.0,
+                    0.0,
+                    false,
+                );
+                let term = term.lock();
+                view.math.plan_frame(
+                    &term,
+                    &size_info,
+                    has_selection,
+                    cursor,
+                    foreground,
+                    font_px,
+                    scale_factor,
+                    |row, start, end| {
+                        bg_runs.iter().any(|run| {
+                            run.row as usize == row
+                                && (run.start as usize) < end
+                                && start < (run.end as usize)
+                        })
+                    },
+                )
+            })
+        };
 
         let cell_rect = |row: usize, start: usize, count: usize| -> Bounds<Pixels> {
             Bounds::new(
@@ -199,27 +264,92 @@ impl Element for TerminalElement {
         };
 
         for run in &snap.bg_runs {
-            let color = theme.resolve(run.color, &overrides, false);
-            window.paint_quad(fill(
-                cell_rect(run.row as usize, run.start as usize, (run.end - run.start) as usize),
-                color,
-            ));
+            let mut paint = |start: u16, end: u16, color: Color| {
+                if start >= end {
+                    return;
+                }
+                let color = theme.resolve(color, &overrides, false);
+                window.paint_quad(fill(
+                    cell_rect(run.row as usize, start as usize, (end - start) as usize),
+                    color,
+                ));
+            };
+            if let Some(cursor) = app_cursor {
+                if run.row == cursor.row {
+                    let skip_end = cursor.col.saturating_add(if cursor.wide { 2 } else { 1 });
+                    if run.start < skip_end && cursor.col < run.end {
+                        paint(run.start, cursor.col, run.color);
+                        paint(skip_end, run.end, run.color);
+                        continue;
+                    }
+                }
+            }
+            paint(run.start, run.end, run.color);
         }
+        let selection_fill = if is_default_selection(&theme) {
+            let alpha = if theme_is_light {
+                crate::display::ui::tokens::terminal_feedback::SELECTION_ALPHA_LIGHT
+            } else {
+                crate::display::ui::tokens::terminal_feedback::SELECTION_ALPHA_DARK
+            };
+            rgba_rgb(theme_anchor, alpha)
+        } else {
+            theme.selection
+        };
         for run in &snap.selection_runs {
             window.paint_quad(fill(
                 cell_rect(run.row as usize, run.start as usize, (run.end - run.start) as usize),
-                theme.selection,
+                selection_fill,
             ));
         }
 
-        // 聚焦时的块状光标垫在文字下面，让字形以反色盖在上面。
+        // 聚焦时的块状光标：旧壳默认主题走半透明 theme_anchor（浅色 0.20），
+        // 叠在格子/壁纸上，不反色文字；用户显式配置光标才用实心色。
         if let Some(cursor) = &snap.cursor {
             if focused && cursor_visible && matches!(cursor.shape, CursorShape::Block) {
                 let width = if cursor.wide { 2 } else { 1 };
+                let fill_color = if host_cursor_follows_theme {
+                    let alpha = if theme_is_light {
+                        crate::display::ui::tokens::terminal_feedback::BLOCK_CURSOR_ALPHA_LIGHT
+                    } else {
+                        crate::display::ui::tokens::terminal_feedback::BLOCK_CURSOR_ALPHA_DARK
+                    };
+                    rgba_rgb(theme_anchor, alpha)
+                } else {
+                    theme.cursor
+                };
                 window.paint_quad(fill(
                     cell_rect(cursor.row as usize, cursor.col as usize, width),
-                    theme.cursor,
+                    fill_color,
                 ));
+            }
+        }
+        // CC/Codex：DECSCUSR Hidden 后自己画反色空格。旧壳把那格从反色黑
+        // 改成叠在主题底上的 theme_anchor；块元素则只换前景，保留字形。
+        let app_cursor_color = app_cursor.map(|cursor| {
+            let alpha = if theme_is_light {
+                crate::display::ui::tokens::terminal_feedback::BLOCK_CURSOR_ALPHA_LIGHT
+            } else {
+                crate::display::ui::tokens::terminal_feedback::BLOCK_CURSOR_ALPHA_DARK
+            };
+            let base = if cursor.cell_ch == ' ' {
+                rgb_from_rgba(theme.background)
+            } else {
+                rgb_from_rgba(theme.resolve(cursor.cell_bg, &overrides, false))
+            };
+            let (color, _) =
+                crate::display::content::composite_overlay(theme_anchor, alpha, base, 1.0);
+            rgba_rgb(color, 1.0)
+        });
+        if let Some(cursor) = app_cursor {
+            if cursor.cell_ch == ' ' {
+                if let Some(color) = app_cursor_color {
+                    let width = if cursor.wide { 2 } else { 1 };
+                    window.paint_quad(fill(
+                        cell_rect(cursor.row as usize, cursor.col as usize, width),
+                        color,
+                    ));
+                }
             }
         }
 
@@ -233,16 +363,28 @@ impl Element for TerminalElement {
                 view.font_size,
             )
         };
-        let pick_font = |bold: bool, italic: bool| match (bold, italic) {
-            (false, false) => font.clone(),
-            (true, false) => bold_font.clone(),
-            (false, true) => italic_font.clone(),
-            (true, true) => bold_italic_font.clone(),
+        // 全宽（CJK 等）bold run 的字形策略（设置 `cjk_bold_regular`，默认
+        // 开）：bold 只提亮颜色（resolve 已做），字形保持 Regular——旧壳
+        // `wide_bold_use_regular` 的同义移植。CJK 假粗体在小字号糊成一团，
+        // 这是旧壳早已裁定过的取舍。
+        let cjk_bold_regular = cx
+            .try_global::<crate::gpui_shell::config::Settings>()
+            .map(|settings| settings.cjk_bold_regular)
+            .unwrap_or(true);
+        let pick_font = |bold: bool, italic: bool, wide: bool| {
+            let bold = bold && !(wide && cjk_bold_regular);
+            match (bold, italic) {
+                (false, false) => font.clone(),
+                (true, false) => bold_font.clone(),
+                (false, true) => italic_font.clone(),
+                (true, true) => bold_italic_font.clone(),
+            }
         };
         // 聚焦块光标下的字形反色（合同保证该格是独立段）。
         let cursor_inverts = |row: u16, col: u16| {
             focused
                 && cursor_visible
+                && !themed_block
                 && snap.cursor.as_ref().is_some_and(|c| {
                     matches!(c.shape, CursorShape::Block) && c.row == row && c.col == col
                 })
@@ -253,7 +395,11 @@ impl Element for TerminalElement {
         // —— CJK 字体下的框线错位就此根治。
         let scale = window.scale_factor();
         for glyph in &snap.box_glyphs {
-            let fg = if cursor_inverts(glyph.row, glyph.col) {
+            let fg = if app_cursor
+                .is_some_and(|cursor| cursor.row == glyph.row && cursor.col == glyph.col)
+            {
+                app_cursor_color.unwrap_or_else(|| theme.resolve(glyph.fg, &overrides, glyph.bold))
+            } else if cursor_inverts(glyph.row, glyph.col) {
                 theme.background
             } else {
                 theme.resolve(glyph.fg, &overrides, glyph.bold)
@@ -302,6 +448,11 @@ impl Element for TerminalElement {
         // 光标反色在这里只是换色，不影响任何字形位置。
         for seg in &snap.segments {
             for cell in &seg.cells {
+                // 被公式覆盖的源格不画原文（公式直接落在卡底上，与旧壳
+                // CoverageMask 合同一致；计划失败的公式不进掩码、原文保留）。
+                if math_frame.covers(seg.row as usize, cell.col as usize) {
+                    continue;
+                }
                 let fg: Hsla = if cursor_inverts(seg.row, cell.col) {
                     theme.background.into()
                 } else {
@@ -317,7 +468,7 @@ impl Element for TerminalElement {
                     .then(|| gpui::StrikethroughStyle { thickness: px(1.0), color: Some(fg) });
                 let run = TextRun {
                     len: cell.text.len(),
-                    font: pick_font(cell.bold, cell.italic),
+                    font: pick_font(cell.bold, cell.italic, seg.wide),
                     color: fg,
                     background_color: None,
                     underline,
@@ -337,6 +488,19 @@ impl Element for TerminalElement {
                     layout.line_height,
                 );
             }
+        }
+
+        // 公式位图画在格子文本之后、装饰（ghost/光标/滚动条）之前，
+        // 与旧壳 draw_rects → draw_overlays 的次序一致。
+        if !math_frame.is_empty() {
+            super::math_overlay::paint_frame(
+                &math_frame,
+                bounds.origin,
+                (layout.cell_width.as_f32(), layout.line_height.as_f32()),
+                scale_factor,
+                window,
+                cx,
+            );
         }
 
         if let Some(cursor) = &snap.cursor {
@@ -401,6 +565,16 @@ impl Element for TerminalElement {
             // ghost 从光标单元格起笔；GPUI 的字形抗锯齿可能盖住同一位置的
             // beam/underline 边缘，所以非块状光标的前景必须在 ghost 后补画。
             // 聚焦块状光标仍在文字层下方填充，保持旧壳的反色合同。
+            let stroke = if host_cursor_follows_theme {
+                let alpha = if theme_is_light {
+                    crate::display::ui::tokens::terminal_feedback::STROKE_CURSOR_ALPHA_LIGHT
+                } else {
+                    crate::display::ui::tokens::terminal_feedback::STROKE_CURSOR_ALPHA_DARK
+                };
+                rgba_rgb(theme_anchor, alpha)
+            } else {
+                theme.cursor
+            };
             let width = if cursor.wide { 2 } else { 1 };
             let rect = cell_rect(cursor.row as usize, cursor.col as usize, width);
             if !focused || cursor_visible {
@@ -408,12 +582,12 @@ impl Element for TerminalElement {
                     (true, CursorShape::Block) => {}, // 已在文字层下方填充
                     (false, CursorShape::Block | CursorShape::HollowBlock)
                     | (true, CursorShape::HollowBlock) => {
-                        window.paint_quad(outline(rect, theme.cursor, gpui::BorderStyle::Solid));
+                        window.paint_quad(outline(rect, stroke, gpui::BorderStyle::Solid));
                     },
                     (_, CursorShape::Beam) => {
                         window.paint_quad(fill(
                             Bounds::new(rect.origin, size(px(2.0), layout.line_height)),
-                            theme.cursor,
+                            stroke,
                         ));
                     },
                     (_, CursorShape::Underline) => {
@@ -422,7 +596,7 @@ impl Element for TerminalElement {
                                 point(rect.origin.x, rect.origin.y + layout.line_height - px(2.0)),
                                 size(rect.size.width, px(2.0)),
                             ),
-                            theme.cursor,
+                            stroke,
                         ));
                     },
                     (_, CursorShape::Hidden) => {},
@@ -759,6 +933,56 @@ fn paint_completion_popup(
             .corner_radii(px(1.0)),
         );
     }
+}
+
+fn rgba_channels(color: Rgba) -> (u8, u8, u8) {
+    (
+        (color.r * 255.0).round() as u8,
+        (color.g * 255.0).round() as u8,
+        (color.b * 255.0).round() as u8,
+    )
+}
+
+fn is_default_host_cursor(palette: &super::colors::Palette) -> bool {
+    rgba_channels(palette.cursor) == default_cursor_rgb()
+}
+
+fn is_default_selection(palette: &super::colors::Palette) -> bool {
+    rgba_channels(palette.selection) == default_cursor_rgb()
+        && (palette.selection.a - 0.60).abs() < 0.05
+}
+
+fn default_cursor_rgb() -> (u8, u8, u8) {
+    match crate::config::color::NEBULA_DEFAULT_CURSOR.background {
+        crate::display::color::CellRgb::Rgb(rgb) => (rgb.r, rgb.g, rgb.b),
+        _ => (0x49, 0x4d, 0x72),
+    }
+}
+
+fn rgb_from_rgba(color: Rgba) -> crate::display::color::Rgb {
+    let (r, g, b) = rgba_channels(color);
+    crate::display::color::Rgb::new(r, g, b)
+}
+
+fn rgba_rgb(color: crate::display::color::Rgb, alpha: f32) -> Rgba {
+    Rgba {
+        r: f32::from(color.r) / 255.0,
+        g: f32::from(color.g) / 255.0,
+        b: f32::from(color.b) / 255.0,
+        a: alpha,
+    }
+}
+
+fn themed_anchor(palette: &super::colors::Palette, cx: &App) -> (crate::display::color::Rgb, bool) {
+    let sk = crate::gpui_shell::theme::chrome_theme_resolved(cx).skin();
+    // ANSI magenta = index 5；旧壳 `display.colors[NamedColor::Magenta]`。
+    let magenta = rgb_from_rgba(palette.ansi[5]);
+    let mix = if sk.is_light {
+        crate::display::ui::tokens::terminal_feedback::ANCHOR_NEUTRAL_MIX_LIGHT
+    } else {
+        crate::display::ui::tokens::terminal_feedback::ANCHOR_NEUTRAL_MIX_DARK
+    };
+    (crate::display::content::mix_rgb(magenta, sk.ink_dim, mix), sk.is_light)
 }
 
 #[cfg(test)]

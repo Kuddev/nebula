@@ -233,6 +233,9 @@ pub struct NebulaPaneState {
     /// 本次前台 agent 命令是否收到过 hook。屏幕规则的 idle 不得覆盖精确的
     /// hook done；可见 blocker/working 仍可纠正漏报或过时事件。
     pub agent_hook_seen: bool,
+    /// 屏幕检测连续看到空闲提示符的拍数。Working 要连续两拍空闲才降级
+    /// （单拍可能是重绘间隙）；任何非 idle 检测都会清零。
+    pub idle_screen_streak: u8,
     pub last_committed: String,
     pub awaiting_input: bool,
     pub finished_unseen: bool,

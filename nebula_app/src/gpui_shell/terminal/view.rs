@@ -27,7 +27,7 @@ use super::session::{self, TerminalSession};
 use super::suggest;
 use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
 use crate::gpui_shell::config::Settings;
-use crate::gpui_shell::prelude::DialogButtonProps;
+use crate::gpui_shell::prelude::{DialogButtonProps, center_confirm_dialog};
 
 use futures::StreamExt as _;
 
@@ -111,11 +111,17 @@ pub enum TerminalLaunch {
     Ssh { destination: String },
 }
 
-/// 侧边栏只消费稳定的三态，不直接窥探终端/SSH 的内部错误字段。
+/// 侧边栏只消费稳定的枚举态，不直接窥探终端/SSH 的内部错误字段。
+/// `Done`/`Attention` 是旧壳 `AgentStatus::Done`/`Blocked` 的呈现位：
+/// 回合结束≠会话结束，转圈必须停，但要留下「有结果没看」的痕迹。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarActivity {
     Idle,
     Running,
+    /// Agent 回合完成，等待下一条指令（旧壳蓝点语义）。
+    Done,
+    /// Agent 停在授权/提问上，需要用户表态（旧壳手掌语义）。
+    Attention,
     Failed,
 }
 
@@ -123,6 +129,8 @@ pub struct TerminalView {
     pub pane_id: u64,
     pub session: Option<TerminalSession>,
     pub focus_handle: FocusHandle,
+    /// 公式覆盖层（探测/持久化状态复用旧壳 `terminal_math`，每 pane 一份）。
+    pub math: super::math_overlay::MathOverlay,
     pub font: Font,
     pub font_bold: Font,
     pub font_italic: Font,
@@ -148,6 +156,16 @@ pub struct TerminalView {
     /// `NEBULA|` 标题报 `running_program`，装了 OSC133 集成的 bash/zsh/nu 只
     /// 发这一对语义标记——两条路都要能点亮侧栏的「运行中」。
     command_running: bool,
+    /// Hook 事件驱动的 agent 回合状态（旧壳 `nebula_state.agent_status` 的
+    /// 边沿触发版）。`Unknown` = 本 pane 没有 agent 参与，spinner 完全由
+    /// `command_running`/`running_program` 决定。
+    agent_status: crate::ai_agents::AgentStatus,
+    /// 本次前台 agent 会话是否收到过 hook（旧壳同名字段同语义）：屏幕
+    /// 检测的空闲提示符不得降级 hook 报出的 Done/Blocked 精确终态。
+    agent_hook_seen: bool,
+    /// 屏幕检测连续看到空闲提示符的拍数；Working 连续两拍空闲才降级
+    /// （单拍可能是重绘间隙），非 idle 检测与任何 hook 边沿都清零。
+    idle_screen_streak: u8,
     /// OSC 9 程序通知，攒到 render（那里才有 `Window` 判聚焦）再呈现。
     pending_notify: Vec<String>,
     /// SSH 直连目的地（`user@host[:port]`）；本地会话为 None。
@@ -558,6 +576,7 @@ impl TerminalView {
             pane_id,
             session,
             focus_handle: cx.focus_handle(),
+            math: super::math_overlay::MathOverlay::default(),
             font: mono_font(&families[0], FontWeight::NORMAL, FontStyle::Normal),
             font_bold: mono_font(&families[1], FontWeight::BOLD, FontStyle::Normal),
             font_italic: mono_font(&families[2], FontWeight::NORMAL, FontStyle::Italic),
@@ -574,6 +593,9 @@ impl TerminalView {
             branch: String::new(),
             running_program: None,
             command_running: false,
+            agent_status: crate::ai_agents::AgentStatus::Unknown,
+            agent_hook_seen: false,
+            idle_screen_streak: 0,
             pending_notify: Vec::new(),
             ssh_destination,
             ssh_stage: None,
@@ -713,6 +735,9 @@ impl TerminalView {
                     cx.emit(TerminalViewEvent::TitleChanged);
                 }
                 self.command_running = false;
+                self.agent_status = crate::ai_agents::AgentStatus::Unknown;
+                self.agent_hook_seen = false;
+                self.idle_screen_streak = 0;
                 cx.notify();
             },
             TermEvent::Notify(body) => {
@@ -775,7 +800,15 @@ impl TerminalView {
     }
 
     /// Apply one lifecycle event already routed to this pane by the workspace.
+    ///
+    /// 旧壳 `WindowContext::handle_ai_hook` 状态机的忠实移植：此前这里把
+    /// 所有非 SessionEnd 事件压平成「点亮 running_program」，于是回合结束
+    /// （TurnDone）后 spinner 也永远转下去——「CLI 都答完了侧栏还在转圈」
+    /// 的病根就是这次压平。
     pub fn handle_ai_hook(&mut self, event: &crate::ai_hook::AiHookEvent, cx: &mut Context<Self>) {
+        use crate::ai_agents::AgentStatus;
+        use crate::ai_hook::AiHookKind;
+
         // SessionEnd 可能是第一次携带最终权威 id 的事件；必须先落盘再清理
         // pane 现场，否则 CLI 正常退出后反而无法冷恢复。
         if let Some(id) = event.session_id.as_deref() {
@@ -785,20 +818,140 @@ impl TerminalView {
                 log::warn!("agent session index: could not record {} {id}: {error}", event.source);
             }
         }
-        if event.kind == crate::ai_hook::AiHookKind::SessionEnd {
-            self.ai_session = None;
-            self.running_program = None;
-        } else {
-            self.running_program = Some(event.source.clone());
-            if let Some(id) = event.session_id.as_deref() {
-                self.ai_session = Some(crate::display::AiSessionIdentity {
-                    source: event.source.clone(),
-                    session_id: id.to_owned(),
-                });
-            }
+        match event.kind {
+            AiHookKind::SessionEnd => {
+                self.ai_session = None;
+                self.running_program = None;
+                self.agent_status = AgentStatus::Unknown;
+                self.agent_hook_seen = false;
+                self.idle_screen_streak = 0;
+            },
+            kind => {
+                self.running_program = Some(event.source.clone());
+                self.agent_hook_seen = true;
+                // 精确边沿抵达 = 屏幕检测的空闲计数作废（上一回合攒下的
+                // 拍数不能把新回合的第一个空闲闪现立即降级）。
+                self.idle_screen_streak = 0;
+                if let Some(id) = event.session_id.as_deref() {
+                    self.ai_session = Some(crate::display::AiSessionIdentity {
+                        source: event.source.clone(),
+                        session_id: id.to_owned(),
+                    });
+                }
+                match kind {
+                    // 会话起来了但还没干活：亮图标，不转圈。
+                    AiHookKind::SessionStart => self.agent_status = AgentStatus::Idle,
+                    AiHookKind::PromptSubmit => self.agent_status = AgentStatus::Working,
+                    // 一个工具刚跑完 = agent 正在干活，这是无条件事实（回合
+                    // 可能经不发 PromptSubmit 的路径继续——授权点头、队列
+                    // 消息——状态却还挂在 Done：「还在执行却显示完成」）。
+                    AiHookKind::ToolComplete => self.agent_status = AgentStatus::Working,
+                    AiHookKind::TurnDone | AiHookKind::NeedsAttention => {
+                        // codex 的 notify 只有「回合完成」一种事件：弹交互式
+                        // 提问时发的也是 turn-complete。回合结束的瞬间看一眼
+                        // 屏幕尾部——还挂着选择框/确认提示，就按「等你批准」
+                        // 处理（旧壳同款嗅探）。
+                        let screen_asks =
+                            event.kind == AiHookKind::TurnDone && self.screen_tail_asks();
+                        self.agent_status =
+                            if event.kind == AiHookKind::NeedsAttention || screen_asks {
+                                AgentStatus::Blocked
+                            } else {
+                                AgentStatus::Done
+                            };
+                    },
+                    AiHookKind::SessionEnd => unreachable!("handled above"),
+                }
+            },
         }
         cx.emit(TerminalViewEvent::TitleChanged);
         cx.notify();
+    }
+
+    /// 旧壳 TurnDone 分支的屏尾提问嗅探：取可视区最后 ≤15 行喂
+    /// `tail_looks_like_question`。
+    fn screen_tail_asks(&self) -> bool {
+        let Some(session) = &self.session else { return false };
+        let term = session.term.lock();
+        let lines = term.screen_lines();
+        let take = lines.min(15);
+        let start = TermPoint::new(Line((lines - take) as i32), Column(0));
+        let end = TermPoint::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
+        crate::ai_hook::tail_looks_like_question(&term.bounds_to_string(start, end))
+    }
+
+    /// 1 Hz 声明式屏幕看门狗（旧壳 `refresh_agent_screen_states` 的单 pane
+    /// 版）。Hook 是精确边沿，但边会丢：打断的回合没有 Stop 事件、codex
+    /// 只有 turn-complete 一种事件。屏幕负责两件事——给无 hook 客户端补位，
+    /// 以及纠正与可见现场矛盾的僵尸状态：
+    /// - 可见的 working/blocked chrome 永远可以纠正（现场比旧事件可信）；
+    /// - 空闲提示符降级分档：hook 报过的 Done/Blocked 精确终态不动；
+    ///   Working 连续两拍空闲才按「完成未读」收场（单拍可能是重绘间隙）。
+    pub fn refresh_agent_screen_state(&mut self, cx: &mut Context<Self>) {
+        use crate::ai_agents::AgentStatus;
+        let Some(program) = self.running_program.clone() else {
+            self.idle_screen_streak = 0;
+            return;
+        };
+        if crate::ai_agents::AgentKind::parse(&program).is_none() {
+            return;
+        }
+        let Some(session) = &self.session else { return };
+        let screen = {
+            let term = session.term.lock();
+            let lines = term.screen_lines();
+            if lines == 0 || term.columns() == 0 {
+                return;
+            }
+            let take = lines.min(24);
+            let start = TermPoint::new(Line((lines - take) as i32), Column(0));
+            let end =
+                TermPoint::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
+            term.bounds_to_string(start, end)
+        };
+        let Some(detection) = crate::ai_agents::detect(&program, &screen) else { return };
+
+        let next = match detection.status {
+            AgentStatus::Idle => {
+                if self.agent_hook_seen
+                    && matches!(self.agent_status, AgentStatus::Done | AgentStatus::Blocked)
+                {
+                    return;
+                }
+                if self.agent_status == AgentStatus::Working {
+                    self.idle_screen_streak = self.idle_screen_streak.saturating_add(1);
+                    if self.idle_screen_streak < 2 {
+                        return;
+                    }
+                    // 连续空闲 = TurnDone 丢了：按「回合完成未读」收场
+                    // （蓝点），而不是无痕回 Idle——用户没盯着屏幕时这个
+                    // 结果仍然值得一个标记。
+                    AgentStatus::Done
+                } else {
+                    AgentStatus::Idle
+                }
+            },
+            status @ (AgentStatus::Working | AgentStatus::Blocked) => {
+                self.idle_screen_streak = 0;
+                status
+            },
+            AgentStatus::Done | AgentStatus::Unknown => {
+                self.idle_screen_streak = 0;
+                return;
+            },
+        };
+        if next != self.agent_status {
+            log::debug!(
+                "agent screen state: pane={} program={} {:?}->{next:?} rule={}",
+                self.pane_id,
+                program,
+                self.agent_status,
+                detection.rule_id
+            );
+            self.agent_status = next;
+            cx.emit(TerminalViewEvent::TitleChanged);
+            cx.notify();
+        }
     }
 
     pub fn ai_fork_command(&self) -> Option<String> {
@@ -807,6 +960,7 @@ impl TerminalView {
     }
 
     pub fn sidebar_activity(&self) -> SidebarActivity {
+        use crate::ai_agents::AgentStatus;
         if self.error.is_some()
             || self.exited.is_some()
             || matches!(
@@ -814,8 +968,18 @@ impl TerminalView {
                 Some(crate::ssh_session::SshStage::Failed(_))
             )
         {
-            SidebarActivity::Failed
-        } else if self.command_running
+            return SidebarActivity::Failed;
+        }
+        // Agent 会话在场时回合状态是权威：TurnDone 之后 spinner 必须停，
+        // 不能因为 `running_program` 还亮着（图标要继续显示）就一直转。
+        match self.agent_status {
+            AgentStatus::Working => return SidebarActivity::Running,
+            AgentStatus::Blocked => return SidebarActivity::Attention,
+            AgentStatus::Done => return SidebarActivity::Done,
+            AgentStatus::Idle => return SidebarActivity::Idle,
+            AgentStatus::Unknown => {},
+        }
+        if self.command_running
             || self.running_program.is_some()
             || self.ssh_stage.as_ref().is_some_and(|stage| {
                 !matches!(stage, crate::ssh_session::SshStage::Ready)
@@ -1209,10 +1373,10 @@ impl TerminalView {
         // pane」的 view 释放不掉。
         let text = Arc::new(text);
         let view = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _window, _cx| {
+        window.open_dialog(cx, move |dialog, window, _cx| {
             let text = text.clone();
             let view = view.clone();
-            dialog
+            center_confirm_dialog(dialog, window)
                 .title(title.clone())
                 .confirm()
                 .button_props(

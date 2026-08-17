@@ -405,9 +405,19 @@ pub fn shell_short_tag(name_or_id: &str) -> String {
         return distro.trim().to_ascii_lowercase();
     }
     let lower = raw.to_ascii_lowercase();
+    // 两个 PowerShell 各有稳定 id，先精确匹配 id 再看显示名：同一台 shell
+    // 经 `TabLaunch::Default`（喂 id）和 `TabLaunch::Shell`（喂菜单名）两条
+    // 管道进来，必须标成同一个词，否则「新建的 tab」和「恢复出来的 tab」
+    // 明明是同一个 shell 却挂着两个短标。
+    match lower.as_str() {
+        "pwsh" => return "pwsh".into(),
+        "powershell" | "ps" => return "ps".into(),
+        _ => {},
+    }
     if lower.contains("powershell") {
-        // 用户口头就用 pwsh 区分 7 和老 5.1，只有 Windows PowerShell 保留全名。
-        return if lower.contains("windows") { "powershell".into() } else { "pwsh".into() };
+        // 用户口头就用 pwsh 指 7、ps 指系统自带的 5.1；两者都是缩写，且
+        // 同时装着两版时在侧栏一眼分得开。
+        return if lower.contains("windows") { "ps".into() } else { "pwsh".into() };
     }
     if lower.contains("bash") {
         return "bash".into();
@@ -559,10 +569,28 @@ mod tests {
         assert_eq!(shell_short_tag("WSL · Debian"), "debian");
         assert_eq!(shell_short_tag("PowerShell 7"), "pwsh");
         assert_eq!(shell_short_tag("pwsh"), "pwsh");
-        assert_eq!(shell_short_tag("Windows PowerShell"), "powershell");
+        assert_eq!(shell_short_tag("Windows PowerShell"), "ps");
         assert_eq!(shell_short_tag("Git Bash"), "bash");
         assert_eq!(shell_short_tag("Nushell"), "nu");
         assert_eq!(shell_short_tag("CMD"), "cmd");
+    }
+
+    /// 同一台 shell 的 settings id 与菜单显示名必须给出同一个短标。
+    /// 回归锁：`powershell`(id) 曾标成 `pwsh` 而「Windows PowerShell」(名)
+    /// 标成 `powershell`——同一台机器因为 tab 的启动方式不同挂了两个词，
+    /// 而其中一个还不是缩写。
+    #[test]
+    fn shell_short_tags_agree_across_id_and_display_name() {
+        use super::{display_name_for_id, shell_short_tag};
+        for id in ["pwsh", "powershell", "cmd", "bash", "nu", "wsl:Ubuntu"] {
+            assert_eq!(
+                shell_short_tag(id),
+                shell_short_tag(&display_name_for_id(id)),
+                "id `{id}` 与它的显示名短标不一致"
+            );
+        }
+        // 两个 PowerShell 仍然分得开。
+        assert_ne!(shell_short_tag("powershell"), shell_short_tag("pwsh"));
     }
 
     use super::*;

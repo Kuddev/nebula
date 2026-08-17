@@ -35,15 +35,18 @@ optional = true
 [dependencies.gpui-component]
 version = "=0.5.1"
 optional = true
+# 代码查看 tab 的 tree-sitter 语法高亮语言包（不开只有 JSON）。
+features = ["tree-sitter-languages"]
 
 [dependencies.gpui-component-assets]
 version = "=0.5.1"
 optional = true
 
 # 运行时用户设置（nebula_settings.txt + 主题终端色表）的共享权威实现。
+# 非可选：ai_hook 的 `ai_hooks` 持久开关（setup-ai --remove）在所有壳形态
+# 下都要读写这份设置。
 [dependencies.nebula-settings]
 path = "../nebula_settings"
-optional = true
 
 # 分屏规则的共享权威实现（布局树/拖拽比例/方向导航）；GPUI 壳消费。
 [dependencies.nebula-split]
@@ -118,6 +121,8 @@ getrandom = "0.3.3"
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "25.0.2", optional = true }
 regex = "1.13.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha1 = "0.11.0"
 
 [build-dependencies]
 gl_generator = "0.14.0"
@@ -233,7 +238,6 @@ gpui-shell = [
     "dep:gpui",
     "dep:gpui-component",
     "dep:gpui-component-assets",
-    "dep:nebula-settings",
     "dep:nebula-split",
     "dep:futures",
 ]

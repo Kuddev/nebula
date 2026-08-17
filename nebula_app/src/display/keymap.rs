@@ -457,6 +457,7 @@ pub(crate) fn capture_combo(key: &KeyEvent, mods: ModifiersState) -> CaptureOutc
 /// - Shift+符号（gpui 直接给出变换后的字符并清掉 shift 位）只能按字符
 ///   存储，旧壳 winit 层不会命中这类行——与旧壳编辑器「无法表示 → 等待」
 ///   相比是多存了一条死绑定，可接受。
+#[cfg(feature = "gpui-shell")]
 pub(crate) fn capture_gpui(keystroke: &::gpui::Keystroke) -> CaptureOutcome {
     let mods = gpui_modifiers(&keystroke.modifiers);
     let key = keystroke.key.trim().to_lowercase();
@@ -494,6 +495,7 @@ pub(crate) fn capture_gpui(keystroke: &::gpui::Keystroke) -> CaptureOutcome {
 }
 
 /// gpui `Modifiers` → winit `ModifiersState`（位语义一致，直接搬运）。
+#[cfg(feature = "gpui-shell")]
 pub(crate) fn gpui_modifiers(modifiers: &::gpui::Modifiers) -> ModifiersState {
     let mut mods = ModifiersState::empty();
     if modifiers.control {
@@ -512,6 +514,7 @@ pub(crate) fn gpui_modifiers(modifiers: &::gpui::Modifiers) -> ModifiersState {
 }
 
 /// gpui `Modifiers` 的修饰键前缀回显（捕获态实时显示 "Ctrl+…"）。
+#[cfg(feature = "gpui-shell")]
 pub(crate) fn gpui_mods_prefix(modifiers: &::gpui::Modifiers) -> String {
     mods_prefix(gpui_modifiers(modifiers))
 }
