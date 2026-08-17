@@ -571,6 +571,17 @@ enum DelimiterKind {
     Parenthesized,
     DollarDisplay,
     BracketDisplay,
+    /// Markdown-unescaped `\[ … \]`: bare `[` / `]` left behind by an AI CLI
+    /// whose markdown renderer ate the backslashes.
+    BareBracketDisplay,
+    /// Markdown-unescaped `\( … \)`: bare `( … )` around TeX content.
+    BareParenInline,
+}
+
+impl DelimiterKind {
+    fn is_display(self) -> bool {
+        matches!(self, Self::DollarDisplay | Self::BracketDisplay | Self::BareBracketDisplay)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1214,6 +1225,10 @@ fn scan_grid_result(grid: &TextGrid, allow_inline_dollar: bool) -> GridScanResul
                     ),
                     None,
                 )
+            } else if grid.character(position) == Some('[') && !grid.is_escaped(position) {
+                (find_bare_bracket_formula(grid, position), None)
+            } else if grid.character(position) == Some('(') && !grid.is_escaped(position) {
+                (find_bare_paren_formula(grid, position), None)
             } else if allow_inline_dollar
                 && grid.character(position) == Some('$')
                 && !grid.is_escaped(position)
@@ -1254,7 +1269,7 @@ fn find_formula(
     let close = grid.find_closing(source_start, closing, same_row)?;
     let after = grid.after(close, closing.len());
     let source = grid.extract(source_start, close)?;
-    let display = matches!(kind, DelimiterKind::DollarDisplay | DelimiterKind::BracketDisplay);
+    let display = kind.is_display();
     if !plausible_math_source(&source, display) {
         return None;
     }
@@ -1293,6 +1308,136 @@ fn find_dollar_formula(
         return None;
     }
     None
+}
+
+/// Markdown-unescaped display block: some AI CLIs run their answer through a
+/// markdown renderer that eats the backslash of `\[` / `\]` / `\,` (they are
+/// markdown punctuation escapes) while `\int`, `\frac` … survive, leaving a
+/// bare `[` block on screen. Bare brackets carry no math intent of their own —
+/// JSON, arrays and `[INFO]` logs all use them — so this form is held to a
+/// stricter shape than `\[`: `[` must start its row, `]` must end its row (or
+/// stand alone), and the content must contain a known TeX command.
+fn find_bare_bracket_formula(
+    grid: &TextGrid,
+    open: GridPosition,
+) -> Option<(FormulaOverlay, GridPosition)> {
+    if !grid.span_is_blank(open.row, 0, open.column) {
+        return None;
+    }
+    let source_start = grid.after(open, 1);
+    let close = if grid.span_is_blank(open.row, open.column + 1, grid.columns) {
+        // 多行形态：`[` 独占一行，闭合 `]` 也必须独占一行。数学源码里
+        // `[0, 1]` 区间的 `]` 不具备闭合资格，跳过继续找。
+        let mut search = source_start;
+        loop {
+            let candidate = grid.find_closing(search, &[']'], false)?;
+            if grid.span_is_blank(candidate.row, 0, candidate.column)
+                && grid.span_is_blank(candidate.row, candidate.column + 1, grid.columns)
+            {
+                break candidate;
+            }
+            search = grid.next(candidate)?;
+        }
+    } else {
+        // 单行形态 `[ … ]`：闭合必须是本行最后一个非空白字符。
+        let cells = grid.rows.get(open.row)?;
+        let last = cells.iter().rposition(|cell| cell.is_some_and(|c| c != ' '))?;
+        let close = GridPosition { row: open.row, column: last };
+        if last <= open.column || grid.character(close) != Some(']') {
+            return None;
+        }
+        close
+    };
+    let after = grid.after(close, 1);
+    let source = grid.extract(source_start, close)?;
+    if !has_known_tex_command(&source) || !plausible_math_source(&source, true) {
+        return None;
+    }
+    Some((make_overlay(grid, open, after, source, DelimiterKind::BareBracketDisplay), after))
+}
+
+/// Markdown-unescaped inline formula: `\( … \)` stripped down to bare
+/// parentheses. Bare parens are prose punctuation, so only content that leads
+/// with a backslash and carries a known TeX command qualifies (`(\sqrt{…})`);
+/// single-letter regex escapes like `(\d+)` are not in the whitelist and stay
+/// literal. The closer is matched by paren depth so `(\sin(x))` keeps its
+/// inner `)`.
+fn find_bare_paren_formula(
+    grid: &TextGrid,
+    open: GridPosition,
+) -> Option<(FormulaOverlay, GridPosition)> {
+    let source_start = grid.after(open, 1);
+    if grid.character(source_start) != Some('\\') {
+        return None;
+    }
+
+    let mut depth = 1usize;
+    let mut position = source_start;
+    let close = loop {
+        match grid.character(position) {
+            Some('(') if !grid.is_escaped(position) => depth += 1,
+            Some(')') if !grid.is_escaped(position) => {
+                depth -= 1;
+                if depth == 0 {
+                    break position;
+                }
+            },
+            _ => {},
+        }
+        position = grid.next(position)?;
+        // 与 `\(…\)` 的 same_row 合同一致：行内公式不跨物理行。
+        if position.row != open.row {
+            return None;
+        }
+    };
+    let after = grid.after(close, 1);
+    let source = grid.extract(source_start, close)?;
+    if !has_known_tex_command(&source) || !plausible_math_source(&source, false) {
+        return None;
+    }
+    Some((make_overlay(grid, open, after, source, DelimiterKind::BareParenInline), after))
+}
+
+/// Commands that justify treating bare delimiters as math. Deliberately a
+/// whitelist instead of "any `\` + letters": regex escapes (`\d`, `\w`), C
+/// escapes and Windows paths all match the loose shape. Single-letter
+/// commands are excluded wholesale by the caller-side length check baked in
+/// here (every entry is ≥2 chars).
+const KNOWN_TEX_COMMANDS: &[&str] = &[
+    "alpha", "approx", "arccos", "arcsin", "arctan", "bar", "begin", "beta", "big", "bigg",
+    "binom", "boldsymbol", "bullet", "cap", "cdot", "cdots", "chi", "circ", "cos", "cosh", "cot",
+    "csc", "cup", "ddot", "ddots", "delta", "det", "dfrac", "div", "dot", "dots", "emptyset",
+    "end", "epsilon", "equiv", "eta", "exists", "exp", "forall", "frac", "gamma", "gcd", "ge",
+    "geq", "gg", "hat", "iff", "iiint", "iint", "implies", "in", "inf", "infty", "int", "iota",
+    "kappa", "lambda", "land", "langle", "lceil", "ldots", "le", "left", "leftarrow",
+    "leftrightarrow", "leq", "lfloor", "lg", "lim", "liminf", "limsup", "ll", "ln", "log", "lor",
+    "mapsto", "mathbb", "mathbf", "mathcal", "mathfrak", "mathit", "mathrm", "mathsf", "max",
+    "min", "mp", "mu", "nabla", "ne", "neg", "neq", "notin", "nu", "odot", "oint", "omega",
+    "ominus", "operatorname", "oplus", "otimes", "overbrace", "overline", "partial", "phi", "pi",
+    "pm", "prod", "propto", "psi", "qquad", "quad", "rangle", "rceil", "rfloor", "rho", "right",
+    "rightarrow", "sec", "sigma", "sim", "simeq", "sin", "sinh", "sqrt", "subset", "subseteq",
+    "sum", "sup", "supset", "supseteq", "tan", "tanh", "tau", "text", "textbf", "textit",
+    "textrm", "theta", "tilde", "times", "to", "underbrace", "underline", "upsilon", "varepsilon",
+    "varnothing", "varphi", "varpi", "varrho", "varsigma", "vartheta", "vec", "vert", "widehat",
+    "widetilde", "xi", "zeta", "Big", "Bigg", "Delta", "Gamma", "Lambda", "Leftarrow",
+    "Leftrightarrow", "Omega", "Phi", "Pi", "Psi", "Rightarrow", "Sigma", "Theta", "Upsilon",
+    "Vert", "Xi",
+];
+
+/// Whether `source` contains at least one whitelisted TeX command. Bare
+/// delimiters have no `\[` / `\(` intent statement backing them, so a real
+/// math command is required as evidence before they may render.
+fn has_known_tex_command(source: &str) -> bool {
+    let mut rest = source;
+    while let Some(index) = rest.find('\\') {
+        rest = &rest[index + 1..];
+        let end = rest.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(rest.len());
+        if end > 1 && KNOWN_TEX_COMMANDS.contains(&&rest[..end]) {
+            return true;
+        }
+        rest = &rest[end..];
+    }
+    false
 }
 
 /// Delimiters state intent, content supplies evidence. Display blocks
@@ -1440,7 +1585,7 @@ fn make_overlay(
     source: Box<str>,
     kind: DelimiterKind,
 ) -> FormulaOverlay {
-    let display = matches!(kind, DelimiterKind::DollarDisplay | DelimiterKind::BracketDisplay);
+    let display = kind.is_display();
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     kind.hash(&mut hasher);
@@ -2263,6 +2408,63 @@ d & -b \\
         // （`$foo^bar$` 在 shell 输出里太常见），块级定界已宣告意图，放行。
         assert_eq!(sources(&["$$", "E = mc^2", "$$"], false), vec![("E = mc^2".into(), true)]);
         assert!(sources(&["$mc^2$"], true).is_empty());
+    }
+
+    #[test]
+    fn markdown_unescaped_bare_brackets_render_as_display_math() {
+        // 部分 AI CLI 的 markdown 渲染会吃掉 `\[` `\]` `\,` 的反斜杠
+        // （它们是 markdown 标点转义），`\int`/`\frac` 不是转义所以幸存，
+        // 屏幕上只剩裸 `[` 块——2026-08-17 截图的真实形态。
+        assert_eq!(
+            sources(&["[", r"\int_0^1 x^2,dx = \frac{1}{3}", "]"], false),
+            vec![(r"\int_0^1 x^2,dx = \frac{1}{3}".into(), true)]
+        );
+        assert_eq!(
+            sources(&["[", r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}", "]"], false),
+            vec![(r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}".into(), true)]
+        );
+        assert_eq!(
+            sources(&[r"[ \lim_{x\to 0}\frac{\sin x}{x}=1 ]"], false),
+            vec![(r"\lim_{x\to 0}\frac{\sin x}{x}=1".into(), true)]
+        );
+    }
+
+    #[test]
+    fn bare_bracket_interval_inside_formula_does_not_close_early() {
+        // 内容行里的 `[0, 1]` 区间：其 `]` 不独占一行，没有闭合资格。
+        assert_eq!(
+            sources(&["[", r"x \in [0, 1]", "]"], false),
+            vec![(r"x \in [0, 1]".into(), true)]
+        );
+    }
+
+    #[test]
+    fn bare_brackets_without_tex_evidence_stay_literal() {
+        assert!(sources(&["[", "  1, 2, 3,", "]"], false).is_empty());
+        assert!(sources(&[r#"["alpha", "beta"]"#], false).is_empty());
+        assert!(sources(&["[INFO] server started"], false).is_empty());
+        assert!(sources(&["[x^2]"], false).is_empty());
+        assert!(sources(&["result [ x^2 ] done"], false).is_empty());
+        assert!(sources(&["[", r"C:\temp\integral.txt", "]"], false).is_empty());
+    }
+
+    #[test]
+    fn markdown_unescaped_bare_parens_render_inline() {
+        assert_eq!(
+            sources(&[r"也可以使用 (\sqrt{x^2+y^2}) 表示行内公式"], false),
+            vec![(r"\sqrt{x^2+y^2}".into(), false)]
+        );
+        // 括号深度配对：`\sin(x)` 的内层 `)` 不提前截断。
+        assert_eq!(sources(&[r"值 (\sin(x)) 收敛"], false), vec![(r"\sin(x)".into(), false)]);
+    }
+
+    #[test]
+    fn bare_parens_reject_regex_prose_and_single_letter_escapes() {
+        assert!(sources(&[r"grep -E (\d+) input.txt"], false).is_empty());
+        assert!(sources(&[r"match (\w*) here"], false).is_empty());
+        assert!(sources(&["plain (normal prose) text"], false).is_empty());
+        assert!(sources(&[r"case (\n) newline"], false).is_empty());
+        assert!(sources(&[r"path (C:\temp\frac) oops"], false).is_empty());
     }
 
     #[test]

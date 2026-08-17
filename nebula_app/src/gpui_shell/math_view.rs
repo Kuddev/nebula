@@ -63,9 +63,7 @@ pub fn register(cx: &mut App) {
         }
         // 探针编译：失败的公式仍是文档文本，交回组件库按代码样式排版。
         assets.layout(&spec.source, spec.display, PROBE_PX, 1.0)?;
-        Some(
-            MathView { source: spec.source.clone(), display: spec.display }.into_any_element(),
-        )
+        Some(MathView { source: spec.source.clone(), display: spec.display }.into_any_element())
     });
 }
 
@@ -119,6 +117,11 @@ impl MathAssets {
         }
     }
 
+    /// 数学字体加载失败时终端覆盖层必须保留源码，不能先跳格再画空位图。
+    pub(crate) fn can_rasterize(&self) -> bool {
+        self.rasterizer.is_some()
+    }
+
     /// 编排（含负缓存：失败公式不逐帧重试）。
     pub(crate) fn layout(
         &mut self,
@@ -137,10 +140,15 @@ impl MathAssets {
             if self.layouts.len() >= MAX_LAYOUTS {
                 self.layouts.clear();
             }
-            let compiled =
-                compile_formula(source.as_ref(), display, pixel_size, pixels_per_point, DEFAULT_LIMITS)
-                    .ok()
-                    .map(Arc::new);
+            let compiled = compile_formula(
+                source.as_ref(),
+                display,
+                pixel_size,
+                pixels_per_point,
+                DEFAULT_LIMITS,
+            )
+            .ok()
+            .map(Arc::new);
             self.layouts.insert(key.clone(), compiled);
         }
         self.layouts.get(&key).and_then(Clone::clone)
@@ -275,8 +283,7 @@ fn compose_image(
         pixel[3] = *alpha;
     }
     let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
-    let geometry =
-        ImageGeometry { baseline: baseline as u32, pad: CANVAS_PAD, width, height };
+    let geometry = ImageGeometry { baseline: baseline as u32, pad: CANVAS_PAD, width, height };
     Some((Arc::new(gpui::RenderImage::new([Frame::new(buffer)])), geometry))
 }
 
@@ -375,14 +382,15 @@ impl Element for MathView {
         let run = text_style.to_run(self.source.len());
         // 文本行盒里基线到底边的距离 = descent + 半行距；行内公式用它把
         // 自己的基线抬到与同行文本一致（旧壳 push_with_math 的基线合同）。
-        let probe = window.text_system().shape_line("M".into(), font_size, &[text_style.to_run(1)], None);
+        let probe =
+            window.text_system().shape_line("M".into(), font_size, &[text_style.to_run(1)], None);
         let text_baseline_from_bottom = f32::from(probe.descent)
             + (line_height - f32::from(probe.ascent) - f32::from(probe.descent)).max(0.0) / 2.0;
 
         let source = self.source.clone();
         let display = self.display;
         let nominal_px = f32::from(font_size);
-        let pixels_per_point = window.scale_factor();
+        let pixels_per_point = crate::math::pixels_per_point(window.scale_factor());
         let measure_slot = slot.clone();
         let style = Style { flex_shrink: 0.0, ..Style::default() };
         let layout_id = window.request_measured_layout(style, move |_, available, window, cx| {
@@ -455,13 +463,13 @@ impl Element for MathView {
                 // bounds 重新 fit，保证不越界绘制。
                 if layout.metrics.width > bounds_width + 0.5 {
                     let nominal = f32::from(text_style.font_size.to_pixels(window.rem_size()));
-                    let scale_factor = window.scale_factor();
+                    let pixels_per_point = crate::math::pixels_per_point(window.scale_factor());
                     let assets = cx.global_mut::<MathAssets>();
                     let Some((layout, pixel_size)) = assets.fit(
                         &self.source,
                         self.display,
                         nominal,
-                        scale_factor,
+                        pixels_per_point,
                         bounds_width,
                     ) else {
                         return;
@@ -496,7 +504,7 @@ impl MathView {
             &self.source,
             self.display,
             pixel_size,
-            window.scale_factor(),
+            crate::math::pixels_per_point(window.scale_factor()),
             bounds.left(),
             baseline,
             color,
@@ -508,12 +516,14 @@ impl MathView {
             let mut buffer = [0u8; 4];
             let text: SharedString = op.character.encode_utf8(&mut buffer).to_string().into();
             let run = text_style.to_run(text.len());
-            let line =
-                window.text_system().shape_line(text, px(op.pixel_size), std::slice::from_ref(&run), None);
-            let origin = point(
-                bounds.left() + px(op.x),
-                baseline + px(op.baseline_y) - line.ascent,
+            let line = window.text_system().shape_line(
+                text,
+                px(op.pixel_size),
+                std::slice::from_ref(&run),
+                None,
             );
+            let origin =
+                point(bounds.left() + px(op.x), baseline + px(op.baseline_y) - line.ascent);
             let _ = line.paint(origin, line.ascent + line.descent, window, cx);
         }
     }
@@ -548,10 +558,8 @@ pub(crate) fn paint_formula_image(
         px((left_physical - geometry.pad as f32) / raster_scale),
         px((baseline_physical - geometry.baseline as f32) / raster_scale),
     );
-    let image_size = size(
-        px(geometry.width as f32 / raster_scale),
-        px(geometry.height as f32 / raster_scale),
-    );
+    let image_size =
+        size(px(geometry.width as f32 / raster_scale), px(geometry.height as f32 / raster_scale));
     let _ = window.paint_image(
         Bounds::new(origin, image_size),
         Corners::default(),

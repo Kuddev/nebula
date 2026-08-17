@@ -1069,8 +1069,8 @@ mod test {
     }
 
     /// `-NoProfile` on the default-shell path silently skipped the user's
-    /// `$PROFILE`, so functions added there never loaded in a new tab while
-    /// Windows Terminal loaded them fine. The explicit-shell path had its own
+    /// `$PROFILE`, so functions added there never loaded in a new tab.
+    /// The explicit-shell path had its own
     /// guard already; this covers the path that actually regressed.
     #[test]
     fn default_powershell_loads_the_user_profile_and_ends_with_the_integration() {

@@ -68,6 +68,7 @@ mod platform;
 mod polling;
 mod process_tree;
 mod renderer;
+mod mux;
 mod runtime_api;
 mod scheduler;
 mod session;
@@ -136,10 +137,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Load command line options.
     let options = Options::new();
 
+    #[cfg(windows)]
+    if options.subcommands.is_none() && env::var_os("NEBULA_DETACHED_LAUNCH").is_some() {
+        // 必须在进任何消息循环之前脱离启动控制台。GPUI 以前在这条
+        // FreeConsole 之前就 `return`，启动器（agent 作业对象）一退出
+        // 窗口就被带走。旧壳注释同一合同。
+        unsafe {
+            FreeConsole();
+        }
+    }
+
     // P3 主窗形态：GPUI 作为 nebula.exe 的 UI 层，从主线程直接进 GPUI
     // 消息循环，winit 旧壳完全不启动。三闸门在此形态复测。
+    //
+    // mux probe 必须在 `run_shell` 之前：第二份 `nebula --gpui` 交给驻留
+    // 实例（ATTACH），不能再拉一套 PTY。
     #[cfg(feature = "gpui-shell")]
     if options.gpui {
+        #[cfg(windows)]
+        if options.subcommands.is_none() && try_hand_over_to_resident(&options) {
+            return Ok(());
+        }
         gpui_shell::run_shell();
         return Ok(());
     }
@@ -153,15 +171,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             .name("gpui-shell".into())
             .spawn(gpui_shell::run_shell)
             .expect("spawn gpui-shell thread");
-    }
-
-    #[cfg(windows)]
-    if options.subcommands.is_none() && env::var_os("NEBULA_DETACHED_LAUNCH").is_some() {
-        // 独立验证实例必须在创建窗口和 ConPTY 前脱离短生命周期的启动控制台，
-        // 否则启动器退出会连带关闭窗口，只留下后台会话进程。
-        unsafe {
-            FreeConsole();
-        }
     }
 
     match options.subcommands {
@@ -256,29 +265,8 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     // PTYs never stopped) or focuses its window. Explicit intent (-e,
     // --daemon) always starts a real instance.
     #[cfg(windows)]
-    {
-        let has_command = options.window_options.terminal_options.command().is_some();
-        let plain_launch = !options.daemon
-            && options.window_options.terminal_options.working_directory.is_none()
-            && !has_command;
-        if plain_launch && runtime_api::try_attach_existing() {
-            return Ok(());
-        }
-        // Explorer 右键「在 Nebula 中打开」带着 --working-directory 走到这里。
-        // 此前它被一律判成"显式意图 → 独立实例"，绕过 mux 交接：驻留进程里
-        // detached 的标签接不回来，表现就是"之前的标签没了 + 多出一个独立
-        // 窗口"。带目录、无 -e 命令的启动现在优先并入驻留实例——ATTACH 恢复
-        // 窗口，再在其中打开定目录标签；没有驻留实例时照旧独立启动。
-        let dir_launch = !options.daemon && !has_command;
-        if dir_launch {
-            if let Some(dir) =
-                options.window_options.terminal_options.resolved_working_directory()
-            {
-                if dir.is_dir() && runtime_api::try_open_directory_existing(&dir) {
-                    return Ok(());
-                }
-            }
-        }
+    if try_hand_over_to_resident(&options) {
+        return Ok(());
     }
     boot_trace("mux probe done");
 
@@ -426,6 +414,32 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     info!("Goodbye");
 
     result
+}
+
+/// Windows 单实例交接：普通启动 ATTACH 到驻留进程；带工作目录、无 `-e`
+/// 则先 ATTACH 再 `tab.new`。GPUI 与 winit 共用，避免 `--gpui` 抢在 probe
+/// 前面再拉一套 PTY。
+#[cfg(windows)]
+fn try_hand_over_to_resident(options: &Options) -> bool {
+    let has_command = options.window_options.terminal_options.command().is_some();
+    let plain_launch = !options.daemon
+        && options.window_options.terminal_options.working_directory.is_none()
+        && !has_command;
+    if plain_launch && runtime_api::try_attach_existing() {
+        return true;
+    }
+    // Explorer 右键「在 Nebula 中打开」带着 --working-directory 走到这里。
+    // 带目录、无 -e 命令的启动优先并入驻留实例——ATTACH 恢复窗口，再在
+    // 其中打开定目录标签；没有驻留实例时照旧独立启动。
+    let dir_launch = !options.daemon && !has_command;
+    if dir_launch {
+        if let Some(dir) = options.window_options.terminal_options.resolved_working_directory() {
+            if dir.is_dir() && runtime_api::try_open_directory_existing(&dir) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn log_config_path(config: &UiConfig) {

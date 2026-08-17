@@ -4,8 +4,8 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontFeatures,
     FontStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Size, Styled as _, TextRun, UTF16Selection, Window, div, point,
-    px,
+    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _, Styled as _, TextRun,
+    UTF16Selection, Window, div, point, px,
 };
 use gpui_component::{PixelsExt as _, WindowExt as _};
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
@@ -28,6 +28,7 @@ use super::suggest;
 use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
 use crate::gpui_shell::config::Settings;
 use crate::gpui_shell::prelude::{DialogButtonProps, center_confirm_dialog};
+use crate::config::UiConfig;
 
 use futures::StreamExt as _;
 
@@ -94,6 +95,10 @@ pub enum TerminalViewEvent {
     FocusRequested,
     /// 连接卡片的取消/关闭（旧壳 TabRequest::Close 的对应物）。
     RequestClose,
+    /// Ctrl+滚轮改了终端字号：宿主应对所有 pane 热应用并写盘。
+    FontSizeChanged,
+    /// BEL（`^G`）。后台 tab 记铃点；本 tab 的闪烁/声音由视图自己处理。
+    Bell,
 }
 
 /// 会话种类：本地 shell 或 SSH 直连（russh，共享旧壳业务层）。
@@ -108,7 +113,19 @@ pub enum TerminalLaunch {
         /// 只用于欢迎屏选择 PowerShell/Bash 形态，不参与 PTY 启动。
         shell_name: Option<String>,
     },
-    Ssh { destination: String },
+    Ssh {
+        destination: String,
+    },
+}
+
+pub(crate) fn last_path_component(path: &str) -> Option<String> {
+    let name = path
+        .trim()
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())?;
+    Some(name.to_owned())
 }
 
 /// 侧边栏只消费稳定的枚举态，不直接窥探终端/SSH 的内部错误字段。
@@ -209,6 +226,10 @@ pub struct TerminalView {
     resize_epoch: u64,
     scroll_px: f32,
     selecting: bool,
+    /// OSC 8 / 正则 URL：虚线下划线、悬停预览、Ctrl+点击打开。
+    pub(super) hint_config: Arc<UiConfig>,
+    pub(super) link_hover: Option<super::osc_links::LinkHover>,
+    pending_link_open: bool,
     /// 选中即复制（旧壳 `copy_on_select`）；关闭时复制交给右键路径。
     copy_on_select: bool,
     /// 鼠标模式下最后上报的单元格：move 事件按"进入新单元格"去重。
@@ -231,6 +252,13 @@ pub struct TerminalView {
     ghost_enabled: bool,
     accept: crate::display::AcceptKey,
     completion_style: crate::display::CompletionStyle,
+    /// BEL 后暂停侧栏转圈，直到用户再往 PTY 打字（旧壳 `awaiting_input`）。
+    awaiting_input: bool,
+    /// BEL 视觉闪烁：整 pane 盖一层前景 12%，约 150ms。
+    pub(super) bell_flash: bool,
+    bell_flash_epoch: u64,
+    /// 失焦时再递系统 toast / 驻留横幅（render 里才有 Window）。
+    pending_bell_notify: Option<(String, String)>,
 }
 
 impl TerminalView {
@@ -324,22 +352,14 @@ impl TerminalView {
     /// 即触发一次 ConPTY resize（DA 探询与回显竞态的温床）。
     pub fn cell_metrics(window: &Window, cx: &App) -> (Pixels, Pixels) {
         let (family, font_size, mode, offset_x, offset_y) = match cx.try_global::<Settings>() {
-            Some(settings) => {
-                (
-                    settings.font_family.as_str(),
-                    settings.font_size_px,
-                    settings.cell_width_mode,
-                    settings.font_offset_x,
-                    settings.font_offset_y,
-                )
-            },
-            None => (
-                "Cascadia Mono",
-                15.0,
-                nebula_settings::CellWidthModeName::Compact,
-                0.0,
-                0.0,
+            Some(settings) => (
+                settings.font_family.as_str(),
+                settings.font_size_px,
+                settings.cell_width_mode,
+                settings.font_offset_x,
+                settings.font_offset_y,
             ),
+            None => ("Cascadia Mono", 15.0, nebula_settings::CellWidthModeName::Compact, 0.0, 0.0),
         };
         Self::measure_cell_metrics(window, family, px(font_size), mode, offset_x, offset_y)
     }
@@ -355,13 +375,7 @@ impl TerminalView {
                 settings.font_offset_x,
                 settings.font_offset_y,
             ),
-            None => (
-                "Cascadia Mono",
-                15.0,
-                nebula_settings::CellWidthModeName::Compact,
-                0.0,
-                0.0,
-            ),
+            None => ("Cascadia Mono", 15.0, nebula_settings::CellWidthModeName::Compact, 0.0, 0.0),
         };
         Self::measure_cell_metrics(window, family, px(font_size), mode, offset_x, offset_y)
     }
@@ -388,42 +402,42 @@ impl TerminalView {
             copy_on_select,
             shell,
         ) = match cx.try_global::<Settings>() {
-                Some(settings) => (
-                    [
-                        settings.font_family.clone(),
-                        settings.font_bold_family.clone(),
-                        settings.font_italic_family.clone(),
-                        settings.font_bold_italic_family.clone(),
-                    ],
-                    px(settings.font_size_px),
-                    settings.cell_width_mode,
-                    settings.font_offset_x,
-                    settings.font_offset_y,
-                    Arc::new(settings.palette.clone()),
-                    settings.term_config(),
-                    settings.copy_on_select,
-                    // 设置选定的默认 shell（旧壳 default_shell_launch 同径：
-                    // resolve 失败或 PTY 集成 id 落回引擎默认）。WSL id 在
-                    // 这里换上 bash 集成注入，cwd/git 分支经 NEBULA| 标题回流。
-                    settings
-                        .shell_id
-                        .as_deref()
-                        .and_then(crate::shell_detect::resolve_id)
-                        .map(|detected| detected.shell()),
-                ),
-                None => (
-                    std::array::from_fn(|_| String::from("Cascadia Mono")),
-                    px(15.0),
-                    nebula_settings::CellWidthModeName::Compact,
-                    0.0,
-                    0.0,
-                    Arc::new(Palette::default()),
-                    nebula_terminal::term::Config::default(),
-                    // 旧壳的出厂默认即开。
-                    true,
-                    None,
-                ),
-            };
+            Some(settings) => (
+                [
+                    settings.font_family.clone(),
+                    settings.font_bold_family.clone(),
+                    settings.font_italic_family.clone(),
+                    settings.font_bold_italic_family.clone(),
+                ],
+                px(settings.font_size_px),
+                settings.cell_width_mode,
+                settings.font_offset_x,
+                settings.font_offset_y,
+                Arc::new(settings.palette.clone()),
+                settings.term_config(),
+                settings.copy_on_select,
+                // 设置选定的默认 shell（旧壳 default_shell_launch 同径：
+                // resolve 失败或 PTY 集成 id 落回引擎默认）。WSL id 在
+                // 这里换上 bash 集成注入，cwd/git 分支经 NEBULA| 标题回流。
+                settings
+                    .shell_id
+                    .as_deref()
+                    .and_then(crate::shell_detect::resolve_id)
+                    .map(|detected| detected.shell()),
+            ),
+            None => (
+                std::array::from_fn(|_| String::from("Cascadia Mono")),
+                px(15.0),
+                nebula_settings::CellWidthModeName::Compact,
+                0.0,
+                0.0,
+                Arc::new(Palette::default()),
+                nebula_terminal::term::Config::default(),
+                // 旧壳的出厂默认即开。
+                true,
+                None,
+            ),
+        };
         let default_cursor_style = term_config.default_cursor_style;
         let (cell_w, line_h) = Self::cell_metrics(window, cx);
         // 像素口径与 viewport 上报一致（设备 px），避免首帧一次像素级差异。
@@ -433,6 +447,13 @@ impl TerminalView {
             num_cols: spawn_grid.0.max(2),
             cell_width: (cell_w.as_f32() * scale).round().max(1.0) as u16,
             cell_height: (line_h.as_f32() * scale).round().max(1.0) as u16,
+        };
+        let initial_cwd = match &launch {
+            TerminalLaunch::Local { cwd, .. } => cwd
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            TerminalLaunch::Ssh { destination } => destination.clone(),
         };
         let (ssh_destination, initial_title, intro_shell_name, spawned) = match launch {
             TerminalLaunch::Local { cwd, shell: launch_shell, shell_name } => (
@@ -589,7 +610,7 @@ impl TerminalView {
             marked_text: None,
             ime_bounds: Bounds::default(),
             title: initial_title,
-            cwd: String::new(),
+            cwd: initial_cwd,
             branch: String::new(),
             running_program: None,
             command_running: false,
@@ -618,6 +639,9 @@ impl TerminalView {
             resize_epoch: 0,
             scroll_px: 0.0,
             selecting: false,
+            hint_config: super::osc_links::hint_config(),
+            link_hover: None,
+            pending_link_open: false,
             copy_on_select,
             last_report_point: None,
             cursor_visible: true,
@@ -628,6 +652,10 @@ impl TerminalView {
             ghost_enabled,
             accept,
             completion_style,
+            awaiting_input: false,
+            bell_flash: false,
+            bell_flash_epoch: 0,
+            pending_bell_notify: None,
         };
         view.restart_cursor_blink(cx);
         view
@@ -655,8 +683,10 @@ impl TerminalView {
                         self.suggest.cwd = self.cwd.clone();
                         super::suggest::record_directory(&self.cwd);
                     }
+                    // 协议串不是窗口标题，更不是 tab 名。
+                } else {
+                    self.title = title;
                 }
-                self.title = title;
                 cx.emit(TerminalViewEvent::TitleChanged);
                 cx.notify();
             },
@@ -705,6 +735,10 @@ impl TerminalView {
                     self.cwd = cwd;
                     self.suggest.cwd = self.cwd.clone();
                     super::suggest::record_directory(&self.cwd);
+                    // GPUI 没有旧壳每次 chrome 刷新都 `sync_chrome_tabs()` 的
+                    // 循环；侧栏标题画在 workspace 里，cwd 变了必须发
+                    // TitleChanged，`on_terminal_event` 才会 `cx.notify()` 重绘。
+                    cx.emit(TerminalViewEvent::TitleChanged);
                     cx.notify();
                 }
             },
@@ -713,8 +747,8 @@ impl TerminalView {
                 // 时捕获的命令行提取首 token，AgentKind 认得的归一成 slug。
                 // 这是侧栏 AI 图标对「直接敲 codex/grok 而没装 hook」的
                 // 会话也点亮的那条路——hook 信封只是更准的覆盖层。
-                let identity = crate::display::extract_program(&self.suggest.last_committed)
-                    .map(|program| {
+                let identity =
+                    crate::display::extract_program(&self.suggest.last_committed).map(|program| {
                         crate::ai_agents::AgentKind::parse(&program)
                             .map(|agent| agent.slug().to_owned())
                             .unwrap_or(program)
@@ -763,8 +797,9 @@ impl TerminalView {
                     self.handle_ai_hook(&hook, cx);
                 }
             },
+            TermEvent::Bell => self.on_bell(cx),
             // 仍未接线：内联图片（要图片管线把 abs_line 锚到网格）、OSC 1337
-            // UserVar（AI 查询拦截）、铃声。
+            // UserVar（AI 查询拦截）。
             _ => {},
         }
     }
@@ -794,9 +829,11 @@ impl TerminalView {
             return None;
         }
         let executable = crate::process_tree::busy_child(shell_pid)?;
-        Some(self.running_program.clone().unwrap_or_else(|| {
-            crate::process_tree::display_name(&executable)
-        }))
+        Some(
+            self.running_program
+                .clone()
+                .unwrap_or_else(|| crate::process_tree::display_name(&executable)),
+        )
     }
 
     /// Apply one lifecycle event already routed to this pane by the workspace.
@@ -959,14 +996,22 @@ impl TerminalView {
         crate::ai_agents::AgentKind::parse(&identity.source)?.fork_command(&identity.session_id)
     }
 
+    /// 冷恢复把快照里的 hook 身份种回 pane，右键分叉不必再等下一条事件。
+    pub fn seed_ai_session(&mut self, source: String, session_id: String, cx: &mut Context<Self>) {
+        if session_id.is_empty() {
+            return;
+        }
+        self.ai_session =
+            Some(crate::display::AiSessionIdentity { source, session_id });
+        cx.emit(TerminalViewEvent::TitleChanged);
+        cx.notify();
+    }
+
     pub fn sidebar_activity(&self) -> SidebarActivity {
         use crate::ai_agents::AgentStatus;
         if self.error.is_some()
             || self.exited.is_some()
-            || matches!(
-                self.ssh_stage.as_ref(),
-                Some(crate::ssh_session::SshStage::Failed(_))
-            )
+            || matches!(self.ssh_stage.as_ref(), Some(crate::ssh_session::SshStage::Failed(_)))
         {
             return SidebarActivity::Failed;
         }
@@ -980,10 +1025,11 @@ impl TerminalView {
             AgentStatus::Unknown => {},
         }
         if self.command_running
-            || self.running_program.is_some()
-            || self.ssh_stage.as_ref().is_some_and(|stage| {
-                !matches!(stage, crate::ssh_session::SshStage::Ready)
-            })
+            || (self.running_program.is_some() && !self.awaiting_input)
+            || self
+                .ssh_stage
+                .as_ref()
+                .is_some_and(|stage| !matches!(stage, crate::ssh_session::SshStage::Ready))
         {
             SidebarActivity::Running
         } else {
@@ -1010,6 +1056,7 @@ impl TerminalView {
 
     /// 输入后回到底部并请求重绘。
     fn write_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.awaiting_input = false;
         if let Some(session) = &self.session {
             {
                 let mut term = session.term.lock();
@@ -1064,9 +1111,53 @@ impl TerminalView {
         self.cursor_visible
     }
 
+    fn on_bell(&mut self, cx: &mut Context<Self>) {
+        let mode = nebula_settings::RuntimeSettings::load().bell;
+        if mode == nebula_settings::BellModeName::None {
+            return;
+        }
+        let audible_ok = if mode.audible() { Self::ring_audible() } else { false };
+        if mode.visual() || (mode.audible() && !audible_ok) {
+            self.flash_bell(cx);
+        }
+        if self.running_program.is_some() {
+            self.awaiting_input = true;
+        }
+        let program = self.running_program.clone();
+        self.pending_bell_notify = Some(match program {
+            Some(name) => (name, "任务完成，等待输入".to_owned()),
+            None => ("Nebula".to_owned(), "终端响铃".to_owned()),
+        });
+        cx.emit(TerminalViewEvent::Bell);
+        cx.notify();
+    }
+
+    fn ring_audible() -> bool {
+        crate::platform::beep();
+        cfg!(windows)
+    }
+
+    fn flash_bell(&mut self, cx: &mut Context<Self>) {
+        self.bell_flash = true;
+        self.bell_flash_epoch = self.bell_flash_epoch.wrapping_add(1);
+        let epoch = self.bell_flash_epoch;
+        cx.notify();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(std::time::Duration::from_millis(150)).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.bell_flash_epoch == epoch {
+                    view.bell_flash = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// 元素 prepaint 回写布局：内容矩形与度量交给渲染合同裁定网格。
     /// 网格变化时同步 Term 与 ConPTY；行列不变但像素口径变化也上报 PTY
-    /// （Ghostty 规则）；稳态帧 observe 返回 None，零额外开销。
+    /// （应用可能关心像素度量）；稳态帧 observe 返回 None，零额外开销。
     pub fn set_layout(
         &mut self,
         origin: Point<Pixels>,
@@ -1201,6 +1292,26 @@ impl TerminalView {
         .detach();
     }
 
+    /// 旧壳 `change_font_size`：一步 1 逻辑 px，钳 4–64。写盘后通知宿主
+    /// 给所有 pane 热应用，chrome 仍锚定 toml 字号。
+    fn zoom_font_size(&mut self, step: f32, cx: &mut Context<Self>) {
+        let current =
+            cx.try_global::<Settings>().map(|settings| settings.font_size_px).unwrap_or(15.0);
+        let next = (current.round() + step).clamp(4.0, 64.0);
+        if (next - current).abs() < f32::EPSILON {
+            return;
+        }
+        if let Err(err) = nebula_settings::persist_keys(&[("font_size", format!("{next:.2}"))]) {
+            eprintln!("[nebula:gpui] failed to persist font size: {err}");
+            return;
+        }
+        let theme = crate::gpui_shell::theme::effective_theme_name(cx);
+        cx.set_global(Settings::load(theme));
+        self.apply_settings(cx);
+        cx.emit(TerminalViewEvent::FontSizeChanged);
+        cx.notify();
+    }
+
     /// 热应用运行时设置（设置页改动后由宿主调用）。默认光标样式只更新
     /// `Term` 的 fallback；程序通过 DECSCUSR 设置的临时样式仍保持权威。
     pub fn apply_settings(&mut self, cx: &mut Context<Self>) {
@@ -1246,29 +1357,17 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// 侧栏 tab 标签（旧壳 `chrome_tab_label` 的移植）：cwd 的末级目录名
-    /// →（非 "shell" 的）标题 → 进程当前目录名 → "."。整条路径永远不显示，
-    /// 它会把侧栏行顶满、毁掉呼吸感。
+    /// 侧栏 tab 标签：旧壳 `chrome_tab_label` 只认**路径末级名**。
+    /// OSC 标题（脚本名、`NEBULA|…` 整串）只属于窗口标题，绝不能当标签，
+    /// 否则跑脚本时侧栏会变成 `foo.ps1`，cwd 上报失败时还会拼出
+    /// `.tmp-stay-launch.tmp-stay-launch` 这种重复段。
     pub fn tab_label(&self) -> String {
-        let cwd = self.cwd.trim();
-        if !cwd.is_empty() {
-            let name = cwd
-                .trim_end_matches(['/', '\\'])
-                .rsplit(['/', '\\'])
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(cwd);
-            return name.to_owned();
-        }
-
-        if self.title != "shell" && !self.title.trim().is_empty() {
-            return self.title.clone();
-        }
-
-        std::env::current_dir()
-            .ok()
-            .and_then(|path| path.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .filter(|name| !name.trim().is_empty())
+        last_path_component(&self.cwd)
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|path| last_path_component(&path.to_string_lossy()))
+            })
             .unwrap_or_else(|| ".".to_owned())
     }
 
@@ -1296,7 +1395,7 @@ impl TerminalView {
     /// N 行」的确认 toast——键盘与右键共用这一条通知路径；copy_on_select
     /// 的选区存储刻意静默（旧壳 `copy_selection` 同合同，抬手一次就可能
     /// 触发，弹起来会刷屏）。
-    fn copy_selection(&mut self, notify: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn copy_selection(&mut self, notify: bool, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = &self.session {
             let text = session.term.lock().selection_to_string();
             if let Some(text) = text.filter(|t| !t.is_empty()) {
@@ -1322,7 +1421,7 @@ impl TerminalView {
 
     /// 读剪贴板并粘贴。体量达到 [`PASTE_CONFIRM_LINES`] 时先弹确认模态，确认
     /// 后才走 [`Self::paste_now`]；小段粘贴一路直通，不打断手感。
-    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
         let lines = paste_line_count(&text);
         if lines >= PASTE_CONFIRM_LINES {
@@ -1480,6 +1579,12 @@ impl TerminalView {
         if self.exited.is_some() {
             return;
         }
+        // 旧壳 `keyboard.rs`：IME 组合中不编码、不拦截。GPUI Windows 在
+        // `stop_propagation` 后会跳过 `TranslateMessage`，组合中若把按键
+        // 吃掉，候选窗和退格都会坏。
+        if self.marked_text.is_some() {
+            return;
+        }
         let ks = &event.keystroke;
         let mods = &ks.modifiers;
 
@@ -1498,13 +1603,17 @@ impl TerminalView {
                 },
                 // 应用级快捷键（新建/关闭 Tab、折叠侧栏、分屏、缩放）：
                 // 不编码、不拦截，让按键冒泡到 workspace 的 action 绑定。
-                "t" | "w" | "b" | "p" | "f" | "d" | "s" | "enter" => return,
+                "t" | "w" | "b" | "p" | "f" | "d" | "s" | "g" | "o" | "enter" => return,
                 _ => {},
             }
         }
         // 分屏焦点导航（ctrl+alt+方向）同样冒泡给 workspace，不编码成
         // CSI 1;7 序列（旧壳 FocusPane* 绑定的对应物）。
         if mods.control && mods.alt && matches!(ks.key.as_str(), "left" | "right" | "up" | "down") {
+            return;
+        }
+        // 工作区切 tab（ctrl+tab / ctrl+shift+tab）：不编码进 PTY。
+        if mods.control && !mods.alt && ks.key.as_str() == "tab" {
             return;
         }
 
@@ -1616,8 +1725,7 @@ impl TerminalView {
                     );
                     // key_char 非空 = 平台判定它产生文本（随后从 IME 管道
                     // 到达并在那里镜像），不能在这里预清。
-                    let produces_text =
-                        ks.key_char.as_deref().is_some_and(|text| !text.is_empty());
+                    let produces_text = ks.key_char.as_deref().is_some_and(|text| !text.is_empty());
                     if !is_modifier && !produces_text {
                         crate::display::Display::nebula_clear_line(&mut self.suggest);
                     }
@@ -1784,6 +1892,59 @@ impl TerminalView {
         (point, side)
     }
 
+    fn selection_is_empty(&self) -> bool {
+        self.session.as_ref().is_none_or(|session| {
+            session.term.lock().selection.as_ref().is_none_or(|selection| selection.is_empty())
+        })
+    }
+
+    fn update_link_hover(
+        &mut self,
+        position: Point<Pixels>,
+        mods: &gpui::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        let next = if self.selecting {
+            None
+        } else {
+            self.session.as_ref().and_then(|session| {
+                let (point, _) = self.grid_point(position);
+                let term = session.term.lock();
+                super::osc_links::highlighted_at(&term, &self.hint_config, point, mods)
+                    .and_then(|hint| {
+                        super::osc_links::hover_from_hint(&term, hint, self.rows, self.cols)
+                    })
+            })
+        };
+        let changed = match (&self.link_hover, &next) {
+            (None, None) => false,
+            (Some(prev), Some(new)) => {
+                prev.preview != new.preview
+                    || prev.anchor_row != new.anchor_row
+                    || prev.anchor_col != new.anchor_col
+                    || prev.hint != new.hint
+            },
+            _ => true,
+        };
+        if changed {
+            self.link_hover = next;
+            cx.notify();
+        }
+    }
+
+    fn clear_link_hover(&mut self, cx: &mut Context<Self>) {
+        if self.link_hover.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn try_open_hovered_link(&self, cx: &Context<Self>) {
+        let Some(hover) = self.link_hover.as_ref() else { return };
+        let Some(session) = self.session.as_ref() else { return };
+        let term = session.term.lock();
+        super::osc_links::open_hint(&hover.hint, &term, cx);
+    }
+
     /// 应用是否接管了鼠标（vim/htop 等）。Shift 按住时强制旁路——这是
     /// 终端的通用逃生门：应用吃鼠标时用户仍能选择/复制。
     fn mouse_mode_active(&self, mods: &gpui::Modifiers) -> bool {
@@ -1846,7 +2007,8 @@ impl TerminalView {
         if len <= popup.rows {
             return None;
         }
-        let content_right = self.origin.x + self.cell_width * (popup.start_col + popup.width) as f32;
+        let content_right =
+            self.origin.x + self.cell_width * (popup.start_col + popup.width) as f32;
         let top = self.origin.y + self.line_height * popup.start_line as f32;
         let height = self.line_height * popup.rows as f32;
         if position.x < content_right
@@ -1856,8 +2018,7 @@ impl TerminalView {
         {
             return None;
         }
-        let progress =
-            ((position.y - top).as_f32() / height.as_f32().max(1.0)).clamp(0.0, 1.0);
+        let progress = ((position.y - top).as_f32() / height.as_f32().max(1.0)).clamp(0.0, 1.0);
         Some((progress * (len - 1) as f32).round() as usize)
     }
 
@@ -1935,6 +2096,23 @@ impl TerminalView {
             );
             return;
         }
+        if event.modifiers.control && event.click_count == 1 {
+            let (point, _) = self.grid_point(event.position);
+            let hit = self.session.as_ref().is_some_and(|session| {
+                let term = session.term.lock();
+                super::osc_links::highlighted_at(&term, &self.hint_config, point, &event.modifiers)
+                    .is_some()
+            });
+            if hit {
+                if let Some(session) = &self.session {
+                    session.term.lock().selection = None;
+                }
+                self.selecting = false;
+                self.pending_link_open = true;
+                self.update_link_hover(event.position, &event.modifiers, cx);
+                return;
+            }
+        }
         let (point, side) = self.grid_point(event.position);
         let ty = match event.click_count {
             1 => SelectionType::Simple,
@@ -1999,33 +2177,39 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        if !self.mouse_mode_active(&event.modifiers) {
+        if self.mouse_mode_active(&event.modifiers) {
+            self.clear_link_hover(cx);
+            // 鼠标模式的移动上报：拖动 = 按钮码+32（需 DRAG 或 MOTION 任一），
+            // 无按键纯移动 = 35（仅 MOTION）；同一单元格内的移动不重报。
+            let mode = self.term_mode();
+            if !mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
+                return;
+            }
+            let button = match event.pressed_button {
+                Some(MouseButton::Left) => {
+                    mouse_protocol::BUTTON_LEFT + mouse_protocol::DRAG_OFFSET
+                },
+                Some(MouseButton::Middle) => {
+                    mouse_protocol::BUTTON_MIDDLE + mouse_protocol::DRAG_OFFSET
+                },
+                Some(MouseButton::Right) => {
+                    mouse_protocol::BUTTON_RIGHT + mouse_protocol::DRAG_OFFSET
+                },
+                _ => {
+                    if !mode.contains(TermMode::MOUSE_MOTION) {
+                        return;
+                    }
+                    mouse_protocol::MOTION_ONLY
+                },
+            };
+            let (point, _) = self.grid_point(event.position);
+            if self.last_report_point == Some(point) {
+                return;
+            }
+            self.send_mouse_report(event.position, button, true, &event.modifiers);
             return;
         }
-        // 鼠标模式的移动上报：拖动 = 按钮码+32（需 DRAG 或 MOTION 任一），
-        // 无按键纯移动 = 35（仅 MOTION）；同一单元格内的移动不重报。
-        let mode = self.term_mode();
-        if !mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
-            return;
-        }
-        let button = match event.pressed_button {
-            Some(MouseButton::Left) => mouse_protocol::BUTTON_LEFT + mouse_protocol::DRAG_OFFSET,
-            Some(MouseButton::Middle) => {
-                mouse_protocol::BUTTON_MIDDLE + mouse_protocol::DRAG_OFFSET
-            },
-            Some(MouseButton::Right) => mouse_protocol::BUTTON_RIGHT + mouse_protocol::DRAG_OFFSET,
-            _ => {
-                if !mode.contains(TermMode::MOUSE_MOTION) {
-                    return;
-                }
-                mouse_protocol::MOTION_ONLY
-            },
-        };
-        let (point, _) = self.grid_point(event.position);
-        if self.last_report_point == Some(point) {
-            return;
-        }
-        self.send_mouse_report(event.position, button, true, &event.modifiers);
+        self.update_link_hover(event.position, &event.modifiers, cx);
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2043,12 +2227,15 @@ impl TerminalView {
             return;
         }
         self.selecting = false;
-        // 选中即复制：在抬手时一次性入剪贴板（旧壳同样在 release 复制，
-        // 避免拖动过程刷爆剪贴板）。空选区在 copy_selection 内自然短路；
-        // 选区存储静默——显式复制才有确认 toast。
-        if self.copy_on_select {
+        let open_link = (self.pending_link_open || event.modifiers.control)
+            && self.selection_is_empty()
+            && self.link_hover.is_some();
+        if open_link {
+            self.try_open_hovered_link(cx);
+        } else if self.copy_on_select {
             self.copy_selection(false, window, cx);
         }
+        self.pending_link_open = false;
         cx.notify();
     }
 
@@ -2151,6 +2338,15 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         let delta_y = event.delta.pixel_delta(self.line_height).y.as_f32();
+        // 旧壳 `mouse_wheel_input`：Ctrl+滚轮先于一切滚动消费者，一步 1
+        // 逻辑像素，钳在 4–64。设置页步进会写盘；这里同样写 `font_size=`，
+        // 让下次启动跟上（旧壳只在其它设置落盘时顺便带走当前字号）。
+        if event.modifiers.control && !event.modifiers.alt && delta_y != 0.0 {
+            let step = if delta_y > 0.0 { 1.0 } else { -1.0 };
+            self.zoom_font_size(step, cx);
+            cx.stop_propagation();
+            return;
+        }
         if suggest::popup_active(&self.suggest)
             && (self.completion_popup_hit(event.position).is_some()
                 || self.completion_popup_scrollbar_target(event.position).is_some())
@@ -2330,6 +2526,20 @@ impl Render for TerminalView {
                 });
             }
         }
+        if let Some((title, body)) = self.pending_bell_notify.take() {
+            if !window.is_window_active() {
+                #[cfg(windows)]
+                crate::notify::toast(&title, &body);
+                window.defer(cx, move |window, cx| {
+                    crate::gpui_shell::toast::banner(
+                        window,
+                        cx,
+                        crate::display::ToastKind::Info,
+                        format!("{title} · {body}"),
+                    );
+                });
+            }
+        }
         let mut root = div()
             .id("nebula-terminal")
             .key_context(KEY_CONTEXT)
@@ -2358,7 +2568,12 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_right_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_middle_up))
-            .on_scroll_wheel(cx.listener(Self::on_scroll));
+            .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.clear_link_hover(cx);
+                }
+            }));
 
         if let Some(error) = &self.error {
             root = root.child(div().p_4().text_color(gpui::red()).child(error.clone()));

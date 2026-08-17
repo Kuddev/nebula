@@ -4,16 +4,16 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
-## Unreleased
+## 1.1.0 - 2026-08-17
 
 ### English
 
 #### Added
 
-- **Remote backups over multiple protocols** — the Settings → Backup page is now available and gains a "Remote backup" group that pushes the existing password-protected archive (Argon2id + AES-256-GCM; servers only ever see ciphertext) to a destination of choice: a local/network folder (NAS UNC paths), WebDAV, S3-compatible storage (AWS/MinIO/R2/B2 via SigV4, path-style), or SFTP reusing saved SSH hosts and their authentication. Archives are timestamped (`nebula-backup-YYYYMMDD-HHMMSS.nbk`), the newest 10 are retained per destination, and "Restore latest" fetches and applies the most recent one after passphrase entry. WebDAV/S3 secrets live in the Windows Credential Manager (env-var fallback elsewhere), non-secret settings persist in `nebula_backup.txt`, and all packing, key derivation, and network I/O run on a background thread. Provider surface modeled on Netcatty's cloud-sync adapters (its OAuth providers — GitHub/Google Drive/OneDrive — are out of scope for now).
+- **Remote backups over multiple protocols** — the Settings → Backup page is now available and gains a "Remote backup" group that pushes the existing password-protected archive (Argon2id + AES-256-GCM; servers only ever see ciphertext) to a destination of choice: a local/network folder (NAS UNC paths), WebDAV, S3-compatible storage (AWS/MinIO/R2/B2 via SigV4, path-style), or SFTP reusing saved SSH hosts and their authentication. Archives are timestamped (`nebula-backup-YYYYMMDD-HHMMSS.nbk`), the newest 10 are retained per destination, and "Restore latest" fetches and applies the most recent one after passphrase entry. WebDAV/S3 secrets live in the Windows Credential Manager (env-var fallback elsewhere), non-secret settings persist in `nebula_backup.txt`, and all packing, key derivation, and network I/O run on a background thread. GitHub/Google Drive/OneDrive OAuth destinations are out of scope for now.
 - **Two completion styles with a switch** — Settings → Terminal → Completion adds a "Completion style" choice between the existing inline ghost text and a new popup candidate list. The popup gathers history, frecency directories, PATH commands, and filesystem matches (up to 8, with source tags), navigates with Up/Down, accepts with the configured accept key (Tab/Right), and dismisses with Esc without re-opening until the line changes. A command-palette action toggles the style, and the choice persists as `completion_style`.
 - **A real color picker for the custom background** — the background-color popup now leads with a saturation/value plane and a hue bar; dragging picks continuously with live terminal preview and persists on release. The preset swatches and the hex field remain, and all three inputs stay in sync (including hue retention across gray/black/white picks).
-- **Clipboard screenshot paste, locally and over SSH** — pasting with an image-only clipboard (e.g. right after Win+Shift+S) now converts the bitmap to PNG and pastes a file path instead of nothing. Local panes write a temp file; SSH panes upload via the existing SFTP stack to `/tmp/nebula-paste-<ts>.png` in the background and then type the remote path into the pane — so image-accepting CLIs like codex and claude receive a usable path on both sides (interaction modeled on Netcatty).
+- **Clipboard screenshot paste, locally and over SSH** — pasting with an image-only clipboard (e.g. right after Win+Shift+S) now converts the bitmap to PNG and pastes a file path instead of nothing. Local panes write a temp file; SSH panes upload via the existing SFTP stack to `/tmp/nebula-paste-<ts>.png` in the background and then type the remote path into the pane — so image-accepting CLIs like codex and claude receive a usable path on both sides.
 - **Configurable new-tab placement** — Settings → Interaction can place newly created tabs immediately after the active tab or at the end of the tab list. The choice persists, while restored tabs keep their original ordering semantics.
 - **Configurable terminal cell width** — Settings → Appearance offers Compact and Relaxed cell-width modes. Changing the mode immediately rebuilds font metrics, the terminal grid, pane layout, and PTY dimensions, and the choice persists across launches.
 - **Ordered font fallback chains** — `font_family` accepts comma-separated families such as `JetBrains Mono, LXGW WenKai, Cascadia Code`. The first family remains the primary face, later families fill missing glyphs in order for regular, bold, italic, and bold-italic text, and the embedded Maple font remains the final fallback. System and imported/private fonts now use the same family lookup path for validation, preview, and rendering. (#33)
@@ -21,6 +21,10 @@ Every release entry is provided in English and Simplified Chinese.
 - **Audible terminal bell** — BEL (`\a`) now plays the system notification sound in addition to the visual bell, so an AI CLI finishing a turn is audible even from another tab. Throttled so a bell-happy program cannot machine-gun it; disable with `bell.audible = false`. (#37)
 - **AI conversations resume across restarts** — panes that had a claude/codex conversation open when Nebula closed (or crashed) now type the exact resume command (`claude --resume <id>` / `codex resume <id>`) into the restored shell automatically. Session identity comes from the CLIs' own hook payloads; a claude detected without an id falls back to `claude --continue` in the restored directory. Injection only targets plain restored shells (never SSH/profile seeds), ids are validated before anything reaches the terminal, and Settings → Advanced offers the "resume AI conversations on restore" switch (`resume_ai`, on by default).
 - **System tray icon with agent attention** — a resident tray icon flips to an amber-dot state whenever any AI CLI stops and waits for input, even with every window buried or minimized. Right-click lists all agent panes with their state (running / waiting) and jumps straight to the source pane through the same focus path as toast clicks; left-click goes to the most urgent pane. The tray mirrors the sidebar badges (one source of truth) and can be turned off in Settings → Advanced (`tray`, on by default).
+- **Line numbers for plain-text files (GPUI shell)** — double-clicking `.txt` / `.log` / `.json` / `.jsonl` files in the file tree now opens the code viewer with line numbers and per-line virtualization (same as source files) instead of the markdown document view; Markdown keeps the rich reader.
+- **Clickable file and URL links in the GPUI shell** — OSC 8 hyperlinks and matched URLs draw a dashed underline in the cell's own foreground color. Hovering shows a preview (`decoded path · Ctrl+click`); Ctrl+click opens local `file://` paths in Explorer and other URIs with the default handler.
+- **Configurable terminal bell in the GPUI shell** — Settings → Profiles → Terminal bell chooses Off, Flash, Sound, or Flash + sound. A BEL still plays the throttled system beep, briefly flashes the pane, toasts when the window is unfocused, and dots background tabs. The choice persists as `bell` (`none` / `visual` / `audible` / `both`, default both).
+- **WYSIWYG font picker and folder-picker startup directory (GPUI shell)** — the font dropdown renders each family in its own face, strips junk extensions from display names, and the import button is just "Import font". Startup directory is a folder picker with "inherit current" / Clear, matching the legacy shell.
 
 #### Fixed
 
@@ -30,19 +34,23 @@ Every release entry is provided in English and Simplified Chinese.
 - **Visible Windows windows recover from stuck render gates** — startup-time occlusion misreports and missing frame callbacks can no longer leave an already visible window accepting input without repainting. Occlusion is ignored unless the window is actually minimized, the existing 1 Hz window heartbeat idempotently releases stale `occluded` and `has_frame` gates, and the watchdog is now armed at window creation so even a freeze before the first frame self-heals within a second. (#21, #32)
 - **Drive-root context menu launches work** — right-clicking the background of `D:\` (any drive root) and choosing "Open in Nebula" failed with "invalid working directory": Explorer expands `%V` to `D:\`, whose trailing backslash escapes the closing quote on the command line. The mangled path is now repaired, and the error's log hint uses PowerShell syntax (`$env:NEBULA_LOG`) so copy-paste resolves. (#36)
 - **Multi-line paste stops interrupting codex** — the multi-line paste confirmation now only fires when newlines are actually headed to a shell that would execute them line by line. Applications in bracketed-paste mode (codex, vim, modern PSReadLine) receive the paste as one atomic chunk, so the warning no longer blocks them. The dark-theme "Enter" keycap on the confirm dialog's accent button also derives from the button's own ink instead of the near-black panel color. (#35)
+- **Math overlays survive markdown-unescaped delimiters (GPUI shell)** — some AI CLIs render their markdown before printing and eat the backslashes of `\[ \]` / `\( \)` (markdown punctuation escapes), leaving bare `[ … ]` blocks and `(\sqrt{…})` spans that never overlaid. The shared scanner now recognizes those bare forms when the content carries a known TeX command (`\int`, `\frac`, …) and the brackets sit alone on their line edges; JSON arrays, `[INFO]` logs and regex `(\d+)` stay literal. Explicit TeX lengths (`\\[6pt]`, `\kern`) also regained their point-to-pixel scale in the GPUI shell, matching the legacy renderer.
+- **Markdown reader fills the reading column (GPUI shell)** — soft line breaks inside a paragraph (hand-wrapped README prose) rendered as hard line breaks, leaving the right side of the column empty and ragged. They now merge into spaces per CommonMark, with CJK neighbours joining directly.
+- **Markdown images actually load (GPUI shell)** — the document tab now resolves relative image paths against the document's own directory, loads absolute local paths from disk, and fetches `http(s)` images through a ureq HTTP client on the background executor (gpui ships a null client by default), so README logos, shields badges (SVG included) and screenshots finally display.
 
 #### Improved
 
 - **File/Git side-panel refreshes no longer block rendering** — directory traversal and Git status subprocesses now build a snapshot on a worker thread while the existing view stays usable. Completed snapshots are swapped in atomically; stale-root results are discarded and active search results are not overwritten.
+- **Tab disclosure and file-tree menus in the GPUI shell** — the TABS collapse control uses the shell's linear chevrons instead of Nerd Font glyphs. File-tree context menus no longer pick up the drawer drop shadow, so they match the tab menus.
 
 ### 简体中文
 
 #### 新增
 
-- **多协议远程备份** — “设置 → 备份”页面正式开放，并新增「远程备份」组：把既有的口令保护归档（Argon2id + AES-256-GCM，服务器只见密文）推送到所选目的地——本地/网络目录（含 NAS 的 UNC 路径）、WebDAV、S3 兼容存储（SigV4 签名、路径式 URL，AWS/MinIO/R2/B2 通吃）、或复用已保存 SSH 主机及其认证的 SFTP。归档按时间戳命名（`nebula-backup-YYYYMMDD-HHMMSS.nbk`），每个远端保留最近 10 份；「恢复最新备份」取回最新一份、输口令后落盘。WebDAV/S3 的密钥存 Windows 凭据管理器（其他平台走环境变量），非密文配置持久化在 `nebula_backup.txt`；打包、密钥派生与网络全部在后台线程完成。协议面参考 Netcatty 的云同步适配器（其 GitHub/Google Drive/OneDrive 三个 OAuth 后端暂不纳入）。
+- **多协议远程备份** — “设置 → 备份”页面正式开放，并新增「远程备份」组：把既有的口令保护归档（Argon2id + AES-256-GCM，服务器只见密文）推送到所选目的地——本地/网络目录（含 NAS 的 UNC 路径）、WebDAV、S3 兼容存储（SigV4 签名、路径式 URL，AWS/MinIO/R2/B2 通吃）、或复用已保存 SSH 主机及其认证的 SFTP。归档按时间戳命名（`nebula-backup-YYYYMMDD-HHMMSS.nbk`），每个远端保留最近 10 份；「恢复最新备份」取回最新一份、输口令后落盘。WebDAV/S3 的密钥存 Windows 凭据管理器（其他平台走环境变量），非密文配置持久化在 `nebula_backup.txt`；打包、密钥派生与网络全部在后台线程完成。GitHub/Google Drive/OneDrive 三个 OAuth 后端暂不纳入。
 - **两种补全样式可切换** — “设置 → 终端 → 补全”新增「补全样式」：在既有的行内灰字与新的弹窗候选列表之间选择。弹窗汇总历史命令、常用目录、PATH 命令与文件系统匹配（至多 8 项，带来源标签），↑/↓ 选行、按补全接受键（Tab/→）接受、Esc 关闭且同一行不再重弹；命令面板提供切换动作，选择以 `completion_style` 持久化。
 - **自定义背景色改用真调色盘** — 背景色浮层顶部新增饱和度/明度取色面与色相条，按住拖动即连续取色、终端实时预览、松手落盘。预设色板与 16 进制输入保留，三种输入互相同步（灰/黑/白取色时保留既有色相）。
-- **剪贴板截图粘贴（本地与 SSH）** — 剪贴板只有位图没有文本时（如 Win+Shift+S 之后），粘贴会把位图转成 PNG 并粘出文件路径：本地 pane 写入临时文件；SSH pane 经既有 SFTP 栈后台上传到远端 `/tmp/nebula-paste-<时间戳>.png` 再把远端路径敲进会话——codex/claude 这类接受图片路径的 CLI 在两侧都能直接用（交互参考 Netcatty）。
+- **剪贴板截图粘贴（本地与 SSH）** — 剪贴板只有位图没有文本时（如 Win+Shift+S 之后），粘贴会把位图转成 PNG 并粘出文件路径：本地 pane 写入临时文件；SSH pane 经既有 SFTP 栈后台上传到远端 `/tmp/nebula-paste-<时间戳>.png` 再把远端路径敲进会话——codex/claude 这类接受图片路径的 CLI 在两侧都能直接用。
 - **可配置新标签页插入位置** — “设置 → 交互”可选择把新建标签页插在当前标签页之后，或放到标签列表末尾。选择会持久化；恢复会话中的标签页仍保持原有顺序语义。
 - **可配置终端单元格宽度** — “设置 → 外观”新增“紧凑”和“宽松”两种单元格宽度模式。切换后会立即重算字体度量、终端网格、分屏布局和 PTY 尺寸，并在下次启动时保留选择。
 - **有序字体 fallback 链** — `font_family` 支持逗号分隔的字体族，例如 `JetBrains Mono, 霞鹜文楷, Cascadia Code`。第一个字体族仍是主字体，后续字体族按顺序为常规、粗体、斜体和粗斜体补齐缺失字形，内置 Maple 字体始终作为最后兜底。系统字体与导入/私有字体现在统一通过同一族名查找路径完成校验、预览和渲染。（#33）
@@ -50,6 +58,10 @@ Every release entry is provided in English and Simplified Chinese.
 - **终端铃声** — BEL（`\a`）现在在视觉铃声之外播放系统提示音：AI CLI 在别的标签页里完成回合也听得见。内置节流，刷铃声的程序不会连成机关枪；`bell.audible = false` 可关闭。（#37）
 - **AI 对话跨重启接续** — 关闭（或崩溃）时某个 pane 里还开着 claude/codex 对话的，冷恢复后会自动把 resume 命令（`claude --resume <id>` / `codex resume <id>`）敲进恢复出来的 shell。会话身份来自 CLI 自己的 hook 载荷；识别到 claude 但没有 id 时退化为在恢复目录里 `claude --continue`。注入只针对恢复出的裸 shell（绝不注入 SSH/Profile 首格），id 上屏前先做字符集校验；“设置 → 高级”提供「恢复时自动接续 AI 对话」开关（`resume_ai`，默认开）。
 - **托盘图标 agent 提醒** — 常驻系统托盘图标：任一 AI CLI 停下来等输入时翻转为橙点 attention 态，窗口全被压住或最小化也看得见。右键列出所有 agent pane 及状态（运行中/等待输入），点击经 toast 同一条聚焦路径直达来源 pane；左键直达最需要人的那个。托盘与侧栏徽章同一事实源；“设置 → 高级”可关（`tray`，默认开）。
+- **纯文本文件带行号打开（GPUI 壳）** — 文件树双击 `.txt` / `.log` / `.json` / `.jsonl` 现在进代码查看器：行号 + 按可视行虚拟化（与源码文件同款），不再进 markdown 文档视图；Markdown 仍走富文本阅读器。
+- **GPUI 壳可点击文件与 URL** — OSC 8 超链接和匹配到的 URL 用格子自身前景色画虚线下划线。悬停显示预览（`解码后的路径 · Ctrl+点击`）；Ctrl+点击用资源管理器打开本地 `file://`，其余 URI 走默认打开方式。
+- **GPUI 壳可配置终端铃声** — “设置 → 配置文件 → 终端铃声”可选关 / 闪烁 / 声音 / 闪烁 + 声音。BEL 仍播放节流后的系统提示音、短暂闪一下 pane、窗口失焦时出 toast、后台 tab 打点。选择以 `bell` 持久化（`none` / `visual` / `audible` / `both`，默认两者都开）。
+- **GPUI 壳所见即所得字体选择器与启动目录** — 字体下拉用各族自己的字形渲染，展示名剥掉多余扩展名，导入按钮改为「导入字体」。启动目录改为选文件夹，「继承当前目录」/「清除」，与旧壳一致。
 
 #### 修复
 
@@ -59,10 +71,14 @@ Every release entry is provided in English and Simplified Chinese.
 - **Windows 可见窗口可从卡死的渲染门控中恢复** — 启动期的遮挡误报或帧回调丢失不再让可见窗口陷入“能接收输入但不重绘”。窗口没有真正最小化时会忽略遮挡误报，既有的 1 Hz 窗口心跳也会以幂等方式释放卡住的 `occluded` 与 `has_frame` 门控；看门狗现在在建窗时即刻武装，首帧之前的冻结也能在一秒内自愈。（#21、#32）
 - **盘符根目录右键启动可用** — 在 `D:\` 这类盘符根目录背景右键「在 Nebula 中打开」此前报「无效的工作目录」：资源管理器把 `%V` 展开成 `D:\`，末尾反斜杠在命令行上转义了收尾引号。被吃掉的路径现在会被修复；错误提示里的日志变量改用 PowerShell 语法（`$env:NEBULA_LOG`），复制即可用。（#36）
 - **多行粘贴不再打断 codex** — 多行粘贴确认现在只在换行真的会被 shell 逐行执行时弹出。处于 bracketed paste 模式的应用（codex、vim、新版 PSReadLine）会把粘贴当作一个整体接收，警告不再拦路。确认框里深色主题下 accent 主按钮上的「Enter」键帽也改从按钮自身墨色派生，不再是一块近黑色。（#35）
+- **公式覆盖层兼容被 markdown 反转义的定界符（GPUI 壳）** — 部分 AI CLI 先渲染 markdown 再上屏，`\[ \]` / `\( \)` 的反斜杠被当作 markdown 标点转义吃掉，屏幕上只剩裸 `[ … ]` 块与 `(\sqrt{…})`，公式从不渲染。共享扫描器现在识别这些裸形态：内容须携带已知 TeX 命令（`\int`、`\frac`……）且方括号独占行首/行尾；JSON 数组、`[INFO]` 日志、正则 `(\d+)` 保持原样。GPUI 壳里 TeX 显式长度（`\\[6pt]`、`\kern`）的 pt→px 换算也已对齐旧壳。
+- **Markdown 阅读器铺满阅读列（GPUI 壳）** — 段落内的软换行（README 手工折行的正文）此前渲染成硬换行，右侧留出一大片参差空白。现按 CommonMark 合并为空格，中日韩相邻行直接相连不插空格。
+- **Markdown 图片真正能加载（GPUI 壳）** — 文档 tab 现在把相对图片路径按文档所在目录解析、绝对路径直接读盘、`http(s)` 图源经后台 ureq 客户端拉取（gpui 默认装的是空客户端），README 的 logo、shields 徽章（含 SVG）与截图终于都能显示。
 
 #### 改进
 
 - **文件/Git 侧栏刷新不再阻塞渲染** — 目录遍历与 Git 状态子进程改为在工作线程中生成快照，旧内容在刷新期间仍可正常使用。完成后的快照会整体替换；根目录已变化的过期结果会被丢弃，正在显示的搜索结果也不会被覆盖。
+- **GPUI 壳 Tab 折叠箭头与文件树菜单** — TABS 折叠控件改用壳自带的线性 Chevron，不再用 Nerd Font 字形。文件树右键菜单不再叠上抽屉阴影，观感与 Tab 菜单一致。
 
 ## 1.0.0 - 2026-08-10
 

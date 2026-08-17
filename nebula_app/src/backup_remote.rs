@@ -1,14 +1,14 @@
 //! 多协议远程备份：把 [`crate::encrypted_backup`] 的加密归档（NEBUBAK1，
 //! Argon2id + AES-256-GCM，服务器只见密文）推到远端，或取回最新一份恢复。
 //!
-//! 协议后端（对照 Netcatty 的 cloudSync 适配器面裁剪）：
+//! 协议后端：
 //! - 本地/网络目录（含 NAS 的 UNC 路径）
 //! - WebDAV（PUT/GET/PROPFIND/DELETE，Basic 认证，同 `sync.rs` 的栈）
 //! - S3 兼容（SigV4 签名，路径式 URL——AWS/MinIO/R2/B2/OSS 通吃）
-//! - SFTP（复用既有 SSH 会话栈与已保存主机的认证，Netcatty 没有的一路）
+//! - SFTP（复用既有 SSH 会话栈与已保存主机的认证）
 //!
-//! Netcatty 还有 GitHub/Google Drive/OneDrive 三个 OAuth 后端；桌面终端里
-//! 没有浏览器授权回环，先不做。归档按 UTC 时间戳命名（字典序即时间序），
+//! GitHub/Google Drive/OneDrive 三个 OAuth 后端需要浏览器授权回环，桌面终端里
+//! 先不做。归档按 UTC 时间戳命名（字典序即时间序），
 //! 每个远端保留最近 [`KEEP_ARCHIVES`] 份，多出的在推送成功后尽力清理。
 //! 网络/密钥派生都在调用方的后台线程阻塞完成（与 `sync.rs` 同一模型）。
 
@@ -539,7 +539,7 @@ impl WebDavBackend {
     }
 
     /// 目录不存在时的一次性补救。MKCOL 只建最后一级——多级路径请先在
-    /// 服务端建好（和 Netcatty 的 ensureDirectory 语义一致）。
+    /// 服务端建好。
     fn mkcol(&self) -> Result<(), String> {
         let request = ureq::http::Request::builder()
             .method("MKCOL")

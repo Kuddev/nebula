@@ -1,4 +1,4 @@
-﻿//! 读取用户配置：`nebula.toml` + `nebula_settings.txt`，与 `nebula_app`
+//! 读取用户配置：`nebula.toml` + `nebula_settings.txt`，与 `nebula_app`
 //! 共享同一套文件与语义。
 //!
 //! 两个来源、一个优先级：`nebula_settings.txt`（设置界面持久化的运行时
@@ -108,7 +108,8 @@ impl Settings {
         // 跟随系统时由当前亮/暗主题全权决定终端底色；否则用户取色器压轴。
         let mut palette = build_palette(&raw.colors);
         apply_theme(&mut palette, theme);
-        if let Some(background) = runtime_background(runtime.follow_system_theme, runtime.background)
+        if let Some(background) =
+            runtime_background(runtime.follow_system_theme, runtime.background)
         {
             palette.background = rgba8(background);
         }
@@ -167,8 +168,7 @@ impl Settings {
         //   同一行语义，否则光标漂移。
         #[cfg(windows)]
         {
-            config.suppress_bringup_da1 =
-                nebula_terminal::tty::windows::conpty_sideload_enabled();
+            config.suppress_bringup_da1 = nebula_terminal::tty::windows::conpty_sideload_enabled();
             config.conpty_resize = true;
         }
         config.kitty_keyboard = true;
@@ -267,10 +267,9 @@ fn find_config_file() -> Option<PathBuf> {
         }
         if let Ok(home) = std::env::var("HOME") {
             let home = PathBuf::from(home);
-            for candidate in [
-                home.join(".config/nebula").join(file_name),
-                home.join(format!(".{file_name}")),
-            ] {
+            for candidate in
+                [home.join(".config/nebula").join(file_name), home.join(format!(".{file_name}"))]
+            {
                 if candidate.exists() {
                     return Some(candidate);
                 }
@@ -286,13 +285,14 @@ fn find_config_file() -> Option<PathBuf> {
 fn load_merged_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
     let main = read_toml(path, notice);
 
-    let imports: Vec<String> = [main.get("general").and_then(|g| g.get("import")), main.get("import")]
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.as_array())
-        .flatten()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
+    let imports: Vec<String> =
+        [main.get("general").and_then(|g| g.get("import")), main.get("import")]
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_array())
+            .flatten()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
 
     let mut merged = toml::Value::Table(Default::default());
     for import in imports {
@@ -321,9 +321,7 @@ fn read_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
         Err(err) => {
             eprintln!("[nebula:gpui] failed to parse config {}: {err}", path.display());
             let first_line = err.to_string().lines().next().unwrap_or("解析失败").to_owned();
-            notice.get_or_insert_with(|| {
-                format!("配置 {} 解析失败：{first_line}", path.display())
-            });
+            notice.get_or_insert_with(|| format!("配置 {} 解析失败：{first_line}", path.display()));
             toml::Value::Table(Default::default())
         },
     }
@@ -480,12 +478,8 @@ fn build_palette(raw: &RawColors) -> Palette {
     set(&mut palette.foreground, &raw.primary.foreground);
     set(&mut palette.background, &raw.primary.background);
     // 主应用语义：bright/dim foreground 未配置时派生自 foreground。
-    palette.bright_foreground = raw
-        .primary
-        .bright_foreground
-        .as_deref()
-        .and_then(parse_rgb)
-        .unwrap_or(palette.foreground);
+    palette.bright_foreground =
+        raw.primary.bright_foreground.as_deref().and_then(parse_rgb).unwrap_or(palette.foreground);
     palette.dim_foreground = raw
         .primary
         .dim_foreground

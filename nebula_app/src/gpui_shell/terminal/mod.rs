@@ -7,11 +7,12 @@ pub mod colors;
 pub mod element;
 pub mod keymap;
 pub mod math_overlay;
+mod osc_links;
 pub mod mouse_protocol;
 pub mod session;
+mod ssh_connect_overlay;
 pub mod suggest;
 pub mod view;
-mod ssh_connect_overlay;
 
 use gpui::{App, KeyBinding};
 

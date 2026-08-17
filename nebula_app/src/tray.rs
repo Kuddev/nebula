@@ -21,6 +21,14 @@
 
 use winit::window::WindowId;
 
+/// GPUI 托盘动作：聚焦某个 pane，或真正退出驻留进程。
+/// 旧壳 `tray::init(EventLoopProxy)` 路径不使用此枚举，菜单也没有「退出」。
+#[derive(Debug, Clone, Copy)]
+pub enum GpuiTrayCommand {
+    Focus(Option<u64>),
+    Quit,
+}
+
 /// 托盘菜单里的一行：一个正在跑 AI CLI 的 pane。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrayAgent {
@@ -33,11 +41,15 @@ pub struct TrayAgent {
     pub needs_attention: bool,
 }
 
+#[cfg(all(windows, feature = "gpui-shell"))]
+pub use win::init_gpui;
 #[cfg(windows)]
 pub use win::{init, set_enabled, shutdown, update};
 
 #[cfg(not(windows))]
 pub fn init(_proxy: winit::event_loop::EventLoopProxy<crate::event::Event>) {}
+#[cfg(not(windows))]
+pub fn init_gpui(_on_command: impl Fn(GpuiTrayCommand) + Send + Sync + 'static) {}
 #[cfg(not(windows))]
 pub fn set_enabled(_enabled: bool) {}
 #[cfg(not(windows))]
@@ -73,6 +85,8 @@ mod win {
     const MENU_AGENT_BASE: usize = 1000;
     /// 「显示 Nebula」——没有 agent 时托盘仍要能把窗口捞回来。
     const MENU_SHOW: usize = 1;
+    /// GPUI 驻留：hide 之后可能只剩托盘，需要一条真退出。旧壳没有此项。
+    const MENU_QUIT: usize = 2;
 
     struct Shared {
         agents: Vec<TrayAgent>,
@@ -80,6 +94,8 @@ mod win {
     }
 
     static PROXY: OnceLock<EventLoopProxy<Event>> = OnceLock::new();
+    /// GPUI 主窗没有 winit `EventLoopProxy`：点击托盘时走命令回调。
+    static GPUI_COMMAND: OnceLock<Box<dyn Fn(super::GpuiTrayCommand) + Send + Sync>> = OnceLock::new();
     static STATE: Mutex<Shared> = Mutex::new(Shared { agents: Vec::new(), enabled: false });
     /// 托盘窗口句柄（isize 形态跨线程存取；0 = 线程未起或窗口未建）。
     static HWND: AtomicIsize = AtomicIsize::new(0);
@@ -93,6 +109,12 @@ mod win {
     /// 装好事件代理。真正的线程按需（首次启用）才起。
     pub fn init(proxy: EventLoopProxy<Event>) {
         let _ = PROXY.set(proxy);
+    }
+
+    /// GPUI 主窗：点击托盘时发 [`super::GpuiTrayCommand`]。
+    #[cfg_attr(not(feature = "gpui-shell"), allow(dead_code))]
+    pub fn init_gpui(on_command: impl Fn(super::GpuiTrayCommand) + Send + Sync + 'static) {
+        let _ = GPUI_COMMAND.set(Box::new(on_command));
     }
 
     /// 开/关托盘图标（设置·高级）。开 = 保证线程在跑并 NIM_ADD；
@@ -128,12 +150,7 @@ mod win {
             // SAFETY: hwnd 由托盘线程发布且只在 WM_APP_SHUTDOWN 后失效；
             // PostMessageW 对已销毁窗口安全失败。
             unsafe {
-                windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
-                    hwnd as _,
-                    message,
-                    0,
-                    0,
-                );
+                windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd as _, message, 0, 0);
             }
         }
     }
@@ -142,8 +159,7 @@ mod win {
         if THREAD_STARTED.swap(true, Ordering::SeqCst) {
             return;
         }
-        if let Err(err) =
-            std::thread::Builder::new().name("nebula-tray".into()).spawn(tray_thread)
+        if let Err(err) = std::thread::Builder::new().name("nebula-tray".into()).spawn(tray_thread)
         {
             THREAD_STARTED.store(false, Ordering::SeqCst);
             log::warn!("tray: failed to spawn tray thread: {err}");
@@ -211,11 +227,13 @@ mod win {
             HWND.store(hwnd as isize, Ordering::Release);
 
             let icons = build_icons();
-            ICONS.with(|slot| *slot.borrow_mut() = Some(Icons {
-                normal: icons.0 as isize,
-                attention: icons.1 as isize,
-                added: false,
-            }));
+            ICONS.with(|slot| {
+                *slot.borrow_mut() = Some(Icons {
+                    normal: icons.0 as isize,
+                    attention: icons.1 as isize,
+                    added: false,
+                })
+            });
             // init 与首次 set_enabled 之间可能已经积累了状态：起跑先对齐。
             apply_enabled(hwnd);
 
@@ -280,6 +298,10 @@ mod win {
     }
 
     fn send_focus(agent: Option<TrayAgent>) {
+        if let Some(command) = GPUI_COMMAND.get() {
+            command(super::GpuiTrayCommand::Focus(agent.as_ref().map(|agent| agent.pane)));
+            return;
+        }
         let Some(proxy) = PROXY.get() else { return };
         let event = match agent {
             Some(agent) => {
@@ -327,6 +349,12 @@ mod win {
             AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
             let show = wide("显示 Nebula");
             AppendMenuW(menu, MF_STRING, MENU_SHOW, show.as_ptr());
+            // 旧壳没有托盘「退出」：真退出是 window+detached 都空。GPUI hide
+            // 之后可能只剩托盘，所以只在 GPUI 回调路径上加这一项。
+            if GPUI_COMMAND.get().is_some() {
+                let quit = wide("退出 Nebula");
+                AppendMenuW(menu, MF_STRING, MENU_QUIT, quit.as_ptr());
+            }
 
             let mut point = POINT { x: 0, y: 0 };
             GetCursorPos(&mut point);
@@ -345,6 +373,10 @@ mod win {
 
             if cmd == MENU_SHOW {
                 send_focus(None);
+            } else if cmd == MENU_QUIT {
+                if let Some(command) = GPUI_COMMAND.get() {
+                    command(super::GpuiTrayCommand::Quit);
+                }
             } else if cmd >= MENU_AGENT_BASE {
                 send_focus(agents.get(cmd - MENU_AGENT_BASE).cloned());
             }
@@ -371,8 +403,7 @@ mod win {
 
         let (agent_count, attention_count) = {
             let shared = state();
-            let attention =
-                shared.agents.iter().filter(|agent| agent.needs_attention).count();
+            let attention = shared.agents.iter().filter(|agent| agent.needs_attention).count();
             (shared.agents.len(), attention)
         };
         ICONS.with(|slot| {
@@ -380,8 +411,7 @@ mod win {
             let Some(icons) = slot.as_ref().filter(|icons| icons.added) else { return };
             let mut data = notify_data(hwnd);
             data.uFlags = NIF_ICON | NIF_TIP;
-            data.hIcon =
-                (if attention_count > 0 { icons.attention } else { icons.normal }) as _;
+            data.hIcon = (if attention_count > 0 { icons.attention } else { icons.normal }) as _;
             let tip = if agent_count == 0 {
                 "Nebula".to_owned()
             } else if attention_count > 0 {
@@ -508,10 +538,7 @@ mod win {
     }
 
     /// RGBA（直 alpha）→ HICON：32bpp 预乘 BGRA DIB + 单色掩码。
-    fn create_icon(
-        size: u32,
-        rgba: &[u8],
-    ) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
+    fn create_icon(size: u32, rgba: &[u8]) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
         use windows_sys::Win32::Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
             DeleteObject,
@@ -555,13 +582,8 @@ mod win {
             }
 
             let mask = CreateBitmap(size as i32, size as i32, 1, 1, std::ptr::null());
-            let icon_info = ICONINFO {
-                fIcon: 1,
-                xHotspot: 0,
-                yHotspot: 0,
-                hbmMask: mask,
-                hbmColor: color,
-            };
+            let icon_info =
+                ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
             let icon = CreateIconIndirect(&icon_info);
             DeleteObject(color);
             DeleteObject(mask);

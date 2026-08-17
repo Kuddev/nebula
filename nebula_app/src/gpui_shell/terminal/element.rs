@@ -12,10 +12,12 @@
 //! 字符左右跳动。逐 cell 塑形时首字形天然落在 x=0，排版引擎没有移动
 //! 字形的权力；单字符行在 GPUI 行缓存中按 (字符, 字体) 去重，命中率极高。
 
+use std::collections::HashSet;
+
 use gpui::{
-    App, Bounds, Element, ElementId, GlobalElementId, HitboxBehavior, Hsla, InspectorElementId,
-    LayoutId, Pixels, Rgba, SharedString, Style, TextRun, UnderlineStyle, Window, fill, outline,
-    point, px, relative, size,
+    App, Bounds, CursorStyle, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, LayoutId, Pixels, Rgba, SharedString, Style, TextRun, UnderlineStyle,
+    Window, fill, outline, point, px, relative, size,
 };
 use gpui_component::{ActiveTheme as _, PixelsExt as _};
 use nebula_terminal::grid::Dimensions as _;
@@ -41,6 +43,7 @@ pub struct TermLayout {
     line_height: Pixels,
     rows: usize,
     cols: usize,
+    hitbox: Hitbox,
 }
 
 impl TerminalElement {
@@ -52,9 +55,10 @@ impl TerminalElement {
         rows: usize,
         cols: usize,
         cx: &App,
-    ) -> Option<(RenderSnapshot, Option<String>, usize)> {
+    ) -> Option<(RenderSnapshot, Option<String>, usize, HashSet<(u16, u16)>)> {
         let view = self.view.read(cx);
         let session = view.session.as_ref()?;
+        let hint_config = view.hint_config.clone();
         let term = session.term.lock();
         #[cfg(windows)]
         let prompt_line = if term.mode().intersects(TermMode::ALT_SCREEN | TermMode::VI) {
@@ -72,7 +76,8 @@ impl TerminalElement {
             &SnapshotConfig { rows: rows as u16, cols: cols as u16 },
         );
         let history = term.history_size();
-        Some((snapshot, prompt_line, history))
+        let dashed = super::osc_links::dashed_cells(&term, &hint_config, rows, cols);
+        Some((snapshot, prompt_line, history, dashed))
     }
 }
 
@@ -147,10 +152,16 @@ impl Element for TerminalElement {
             view.set_layout(bounds.origin, cell_width, line_height, bounds.size, scale, cx);
         });
 
-        window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
         let view = self.view.read(cx);
-        TermLayout { cell_width, line_height, rows: view.grid_rows(), cols: view.grid_cols() }
+        TermLayout {
+            cell_width,
+            line_height,
+            rows: view.grid_rows(),
+            cols: view.grid_cols(),
+            hitbox,
+        }
     }
 
     fn paint(
@@ -178,7 +189,7 @@ impl Element for TerminalElement {
         let focused = focus_handle.is_focused(window);
         // 旧壳只让光标本身参与闪烁；ghost、弹窗补齐和 IME 仍复用同一个坐标锚点。
         let cursor_visible = self.view.read(cx).cursor_visible();
-        let Some((snap, prompt_line, history)) = self.snapshot(layout.rows, layout.cols, cx) else {
+        let Some((snap, prompt_line, history, dashed)) = self.snapshot(layout.rows, layout.cols, cx) else {
             return;
         };
         let suggest_anchor =
@@ -206,6 +217,7 @@ impl Element for TerminalElement {
         // 公式覆盖层：与本帧快照同一份网格状态（term 锁内扫描 + 计划），
         // 探测/fit/几何合同全部由共享的 display::terminal_math 裁定。
         let scale_factor = window.scale_factor();
+        let math_pixels_per_point = crate::math::pixels_per_point(scale_factor);
         let math_frame = {
             let cell_w = layout.cell_width.as_f32();
             let line_h = layout.line_height.as_f32();
@@ -216,41 +228,32 @@ impl Element for TerminalElement {
                 (fg.g * 255.0).round() as u8,
                 (fg.b * 255.0).round() as u8,
             );
-            let cursor = snap.cursor.as_ref().map(|c| (c.row as usize, c.col as usize));
-            let has_selection = !snap.selection_runs.is_empty();
-            let bg_runs = &snap.bg_runs;
             self.view.update(cx, |view, _| {
                 let Some(term) = view.session.as_ref().map(|session| session.term.clone()) else {
                     return super::math_overlay::MathFrame::default();
                 };
-                view.math.observe_program(view.running_program.as_deref());
-                let size_info = crate::display::SizeInfo::new(
-                    cell_w * layout.cols as f32,
-                    line_h * layout.rows as f32,
-                    cell_w,
-                    line_h,
-                    0.0,
-                    0.0,
-                    false,
+                // CommandStart / NEBULA| / hook 都写入 running_program；回合
+                // 结束后 hook 身份仍可能留在 ai_session.source（旧壳同事实源）。
+                view.math.observe_program(
+                    view.running_program
+                        .as_deref()
+                        .or(view.ai_session.as_ref().map(|session| session.source.as_str())),
                 );
+                let size_info =
+                    super::math_overlay::grid_size_info(layout.cols, layout.rows, cell_w, line_h);
                 let term = term.lock();
-                view.math.plan_frame(
-                    &term,
-                    &size_info,
-                    has_selection,
-                    cursor,
-                    foreground,
-                    font_px,
-                    scale_factor,
-                    |row, start, end| {
-                        bg_runs.iter().any(|run| {
-                            run.row as usize == row
-                                && (run.start as usize) < end
-                                && start < (run.end as usize)
-                        })
-                    },
-                )
+                view.math.plan_frame(&term, &size_info, foreground, font_px, math_pixels_per_point)
             })
+        };
+        // 栅格器不可用时不能跳源格：旧壳 draw_math 失败会补画 fallback，
+        // GPUI 格子已经画过，只能整帧不覆盖，让 `\[` 源码留在屏幕上。
+        let math_frame = if cx
+            .try_global::<crate::gpui_shell::math_view::MathAssets>()
+            .is_some_and(|assets| assets.can_rasterize())
+        {
+            math_frame
+        } else {
+            super::math_overlay::MathFrame::default()
         };
 
         let cell_rect = |row: usize, start: usize, count: usize| -> Bounds<Pixels> {
@@ -458,7 +461,8 @@ impl Element for TerminalElement {
                 } else {
                     theme.resolve(cell.fg, &overrides, cell.bold).into()
                 };
-                let underline = cell.underline.then(|| UnderlineStyle {
+                let dashed_link = dashed.contains(&(seg.row, cell.col));
+                let underline = (cell.underline && !dashed_link).then(|| UnderlineStyle {
                     thickness: px(1.0),
                     color: Some(fg),
                     wavy: false,
@@ -487,6 +491,15 @@ impl Element for TerminalElement {
                     origin,
                     layout.line_height,
                 );
+                if dashed_link {
+                    paint_dashed_underline(
+                        window,
+                        origin,
+                        layout.cell_width,
+                        layout.line_height,
+                        fg,
+                    );
+                }
             }
         }
 
@@ -497,7 +510,7 @@ impl Element for TerminalElement {
                 &math_frame,
                 bounds.origin,
                 (layout.cell_width.as_f32(), layout.line_height.as_f32()),
-                scale_factor,
+                math_pixels_per_point,
                 window,
                 cx,
             );
@@ -648,7 +661,91 @@ impl Element for TerminalElement {
             let radius = thumb.size.width / 2.0;
             window.paint_quad(fill(thumb, color).corner_radii(radius));
         }
+
+        let (bell_flash, link_hover) = {
+            let view = self.view.read(cx);
+            (view.bell_flash, view.link_hover.clone())
+        };
+        if bell_flash {
+            let mut flash = theme.foreground;
+            flash.a = 0.12;
+            window.paint_quad(fill(bounds, flash));
+        }
+        if let Some(hover) = link_hover {
+            window.set_cursor_style(CursorStyle::PointingHand, &layout.hitbox);
+            paint_link_preview(
+                window,
+                cx,
+                &hover.preview,
+                hover.anchor_row as usize,
+                hover.anchor_col as usize,
+                layout,
+                &bounds,
+                &font,
+                font_size,
+            );
+        }
     }
+}
+
+fn paint_dashed_underline(
+    window: &mut Window,
+    origin: gpui::Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
+    color: Hsla,
+) {
+    let y = origin.y + line_height - px(1.0);
+    let end: f32 = origin.x.as_f32() + cell_width.as_f32();
+    let mut x: f32 = origin.x.as_f32();
+    let dash: f32 = 3.0;
+    let gap: f32 = 2.0;
+    while x < end {
+        let width = f32::min(dash, end - x);
+        if width > 0.0 {
+            window.paint_quad(fill(Bounds::new(point(px(x), y), size(px(width), px(1.0))), color));
+        }
+        x += dash + gap;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_link_preview(
+    window: &mut Window,
+    cx: &mut App,
+    preview: &str,
+    anchor_row: usize,
+    anchor_col: usize,
+    layout: &TermLayout,
+    bounds: &Bounds<Pixels>,
+    font: &gpui::Font,
+    font_size: Pixels,
+) {
+    let line = if anchor_row + 1 < layout.rows {
+        anchor_row + 1
+    } else {
+        anchor_row.saturating_sub(1)
+    };
+    let label_size = px(font_size.as_f32() * 0.85);
+    let run = TextRun {
+        len: preview.len(),
+        font: font.clone(),
+        color: cx.theme().popover_foreground,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let shaped = window.text_system().shape_line(SharedString::from(preview.to_owned()), label_size, &[run], None);
+    let pad = px(8.0);
+    let bubble_w = shaped.width + pad * 2.0;
+    let bubble_h = layout.line_height * 0.85 + pad;
+    let max_x = (bounds.origin.x + bounds.size.width - bubble_w).max(bounds.origin.x);
+    let x = (bounds.origin.x + layout.cell_width * anchor_col as f32).min(max_x);
+    let y = bounds.origin.y + layout.line_height * line as f32 + (layout.line_height - bubble_h) * 0.5;
+    let bubble = Bounds::new(point(x, y), size(bubble_w, bubble_h));
+    window.paint_quad(fill(bubble, cx.theme().popover).corner_radii(px(6.0)));
+    window.paint_quad(outline(bubble, cx.theme().border, gpui::BorderStyle::Solid).corner_radii(px(6.0)));
+    let _ = shaped.paint(point(x + pad, y + (bubble_h - layout.line_height * 0.85) * 0.5), layout.line_height * 0.85, window, cx);
 }
 
 /// 唯一的 cell 文本落笔原语：单 cell 文本塑形后从调用方给定的整数 cell
@@ -821,14 +918,9 @@ fn paint_completion_popup(
 ) {
     let columns = layout.cols;
     let screen_lines = layout.rows;
-    let Some(popup) = completion_popup_layout(
-        items,
-        selected,
-        cursor_row,
-        cursor_col,
-        screen_lines,
-        columns,
-    ) else {
+    let Some(popup) =
+        completion_popup_layout(items, selected, cursor_row, cursor_col, screen_lines, columns)
+    else {
         return;
     };
     let tag = |kind: crate::display::NebulaCompletionKind| -> &'static str {
@@ -910,14 +1002,11 @@ fn paint_completion_popup(
         // 拇指跟随可见窗口的 offset；Tab、hover、滚轮三条路径共享同一个
         // 可视位置，不会出现键盘已翻页而滚动条仍停在顶部。
         let track_h = layout.line_height * popup.rows as f32 - px(4.0);
-        let track_top =
-            bounds.origin.y + layout.line_height * popup.start_line as f32 + px(2.0);
+        let track_top = bounds.origin.y + layout.line_height * popup.start_line as f32 + px(2.0);
         let content_right =
             bounds.origin.x + layout.cell_width * (popup.start_col + popup.width) as f32;
-        let track_bounds = Bounds::new(
-            point(content_right + px(1.0), track_top),
-            size(px(2.0), track_h),
-        );
+        let track_bounds =
+            Bounds::new(point(content_right + px(1.0), track_top), size(px(2.0), track_h));
         window.paint_quad(fill(track_bounds, colors.scroll_track).corner_radii(px(1.0)));
 
         let visible_ratio = popup.rows as f32 / items.len() as f32;

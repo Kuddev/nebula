@@ -32,6 +32,9 @@ tocodex-docs/
 
 # `docs/` is private by default. Public documentation must be reviewed and
 # explicitly added to this file one path at a time; never allowlist another subtree.
+# Third-party research (gap analyses, design studies, local checkouts) stays in
+# this private tree and must never be allowlisted — tracked files bypass these
+# rules until `git rm --cached`.
 /docs/**
 !/docs/lua-configuration.md
 !/docs/math-rendering-test.md
@@ -39,6 +42,10 @@ tocodex-docs/
 !/docs/release-notes/**
 !/docs/screenshots/
 !/docs/screenshots/**
+# Belt-and-suspenders: even if a later allowlist opens more of docs/,
+# research filenames stay unpublished.
+docs/**/*-gap-analysis.md
+docs/**/*-study.md
 
 # Local interactive demos belong under the private docs tree.
 /*.html

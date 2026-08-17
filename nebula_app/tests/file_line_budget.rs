@@ -19,8 +19,8 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     // 2026-08-17 上调（4850 → 5150）：git 树 VS Code 化 + 源码 tab 接线；
     // 下一步应把 VCS 面板拆成独立文件后下调。
     ("nebula_app/src/gpui_shell/workspace.rs", 5150),
-    // 2026-08-17 下调（4600 → 3600）：SSH 区拆到 ssh_settings.rs 的成果锁定。
-    ("nebula_app/src/gpui_shell/settings_pane.rs", 3600),
+    // 2026-08-17 下调（3600 → 3550）：网络区拆到 network_settings.rs。
+    ("nebula_app/src/gpui_shell/settings_pane.rs", 3550),
     ("nebula_app/src/display/command_palette.rs", 3980),
     ("nebula_app/src/window_context.rs", 3800),
     ("nebula_app/src/event.rs", 3780),

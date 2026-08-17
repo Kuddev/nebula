@@ -77,20 +77,19 @@ winit = { path = "third_party/winit-0.30.13" }
 #
 # 加补丁 = 提交到 fork 的 nebula 分支 → push → 更新下面的 rev（永远 pin
 # exact rev、不 pin branch）。每个补丁注明原因 + upstream PR 链接，上游合并
-# 即撤；升级配对版本 = rebase nebula 分支到新发布基点（参照 ../tty7 的
-# Cargo.toml 注释风格与守护测试做法）。gpui 的仓内兄弟 crate（gpui_macros、
-# sum_tree、zed-reqwest 等）经 git 仓库内 path 依赖自动解析，无需逐个 patch。
+# 即撤；升级配对版本 = rebase nebula 分支到新发布基点。gpui 的仓内兄弟 crate
+# （gpui_macros、sum_tree、zed-reqwest 等）经 git 仓库内 path 依赖自动解析，
+# 无需逐个 patch。
 #
-# 升级基点到 gpui-component 0.5.2+ 时的回归检查单（2026-08-13 对照
-# l0ng-ai/gpui-component 的 tty7 分支得出；0.5.1 上这些行为本来是对的，
-# 是 0.5.2 重构 button 颜色推导时弄丢的，届时把 tty7 的两个 fix 带上）：
+# 升级基点到 gpui-component 0.5.2+ 时的回归检查单（0.5.1 上这些行为本来是对的，
+# 是 0.5.2 重构 button 颜色推导时弄丢的，届时把下面两个 fix 带上）：
 #   1. ButtonVariant::Custom 的 text_color 必须回 colors.foreground（0.5.2
-#      回归成背景色 colors.color，透明底按钮字直接隐形）→ tty7 3826fafacd3c
+#      回归成背景色 colors.color，透明底按钮字直接隐形）→ 3826fafacd3c
 #   2. hovered()/active() 必须读 ButtonCustomVariant::hover/active（0.5.2
 #      回归成从 color 派生，透明底按钮没有任何悬停/按下反馈）→ 469ab7a44f72
 #   3. 新增的 text/inline_flow.rs：shape_line 前把 \n\r 换成空格（gpui
 #      shaper 遇换行 panic；替换保 byte 长度，run 偏移不失效）
-# 本地 fork 工作拷贝在 ../gpui-component-fork（已挂 tty7 remote 可 diff）。
+# 本地 fork 工作拷贝在 ../gpui-component-fork。
 #
 # 上游行为备忘（不是补丁，是调用侧要知道的事）：`Scrollable`
 # （scroll/scrollable.rs 的 overflow_*_scrollbar）不是就地加滚动条，而是把

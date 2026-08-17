@@ -1,6 +1,4 @@
-use gpui::{
-    App, Bounds, Hsla, Pixels, Rgba as GpuiRgba, Window, fill, hsla, point, px, size,
-};
+use gpui::{App, Bounds, Hsla, Pixels, Rgba as GpuiRgba, Window, fill, hsla, point, px, size};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode};
 
 use crate::display::color::Rgb;
@@ -113,11 +111,8 @@ pub(crate) fn sidebar_spinner_colors(cx: &App, active: bool) -> (GpuiRgba, GpuiR
     let palette = chrome.palette();
     let sk = chrome.skin();
     let shell = Rgba::new(palette.shell_bg.r, palette.shell_bg.g, palette.shell_bg.b, 255);
-    let base = if active {
-        crate::display::ui::surface::over(sk.accent_soft, shell)
-    } else {
-        shell
-    };
+    let base =
+        if active { crate::display::ui::surface::over(sk.accent_soft, shell) } else { shell };
     let track = crate::display::ui::surface::over(sk.hairline, base);
     let head = crate::display::ui::surface::over(
         Rgba::new(sk.ink_dim.r, sk.ink_dim.g, sk.ink_dim.b, 255),
@@ -205,7 +200,7 @@ pub fn card_content_bg(cx: &App) -> Hsla {
         .try_global::<crate::gpui_shell::config::Settings>()
         .map(|s| s.palette.background.into())
         .unwrap_or_else(|| cx.theme().background);
-    bg.a *= crate::gpui_shell::wallpaper::window_opacity(cx);
+    bg.a *= crate::gpui_shell::wallpaper::chrome_surface_opacity(cx);
     bg
 }
 
@@ -231,10 +226,7 @@ pub fn paint_shell_around_card(bounds: Bounds<Pixels>, window: &mut Window, cx: 
     let card_h = (height - inset * 2.0).max(0.0);
     let paint = |window: &mut Window, x: f32, y: f32, w: f32, h: f32| {
         if w > 0.0 && h > 0.0 {
-            window.paint_quad(fill(
-                Bounds::new(point(px(x), px(y)), size(px(w), px(h))),
-                color,
-            ));
+            window.paint_quad(fill(Bounds::new(point(px(x), px(y)), size(px(w), px(h))), color));
         }
     };
 
@@ -259,18 +251,11 @@ pub fn paint_shell_around_card(bounds: Bounds<Pixels>, window: &mut Window, cx: 
         let row_h = step.min(radius - row_top).max(0.0);
         let sample_y = (row_top + row_h * 0.5).min(radius);
         let dy = radius - sample_y;
-        let outside =
-            (radius - (radius * radius - dy * dy).max(0.0).sqrt()).clamp(0.0, radius);
+        let outside = (radius - (radius * radius - dy * dy).max(0.0).sqrt()).clamp(0.0, radius);
         paint(window, card_x, card_y + row_top, outside, row_h);
         paint(window, card_right - outside, card_y + row_top, outside, row_h);
         paint(window, card_x, card_bottom - row_top - row_h, outside, row_h);
-        paint(
-            window,
-            card_right - outside,
-            card_bottom - row_top - row_h,
-            outside,
-            row_h,
-        );
+        paint(window, card_right - outside, card_bottom - row_top - row_h, outside, row_h);
     }
 }
 
@@ -340,6 +325,8 @@ pub fn apply_chrome_theme(cx: &mut App) {
     // 视效（模糊/透明度/壁纸）与主题同一时机刷新：设置热应用、系统外观
     // 变化都会走到这里，窗口级效果与 token 保持同帧一致。
     crate::gpui_shell::wallpaper::refresh(cx);
+    // 托盘与 chrome 同一热应用节拍：启动 / 设置变更 / 系统外观。
+    crate::gpui_shell::apply_tray_setting();
 
     let chrome = chrome_theme(effective_theme_name(cx));
     let mode = if chrome.skin().is_light { ThemeMode::Light } else { ThemeMode::Dark };
@@ -349,7 +336,7 @@ pub fn apply_chrome_theme(cx: &mut App) {
     // 一体化外壳（对齐旧壳 draw_chrome）：窗口背景、侧栏、顶栏是同一块
     // 壳色，各自的分隔线取同色隐形；唯一的结构分界是内容区那张圆角卡。
     // 壳色带用户透明度（文字 token 不带——对比度不塌，旧壳裁定）。
-    let opacity = crate::gpui_shell::wallpaper::window_opacity(cx);
+    let opacity = crate::gpui_shell::wallpaper::chrome_surface_opacity(cx);
     let mut shell = shell_color(chrome);
     shell.a *= opacity;
     let theme = Theme::global_mut(cx);
@@ -464,14 +451,8 @@ mod tests {
 
     #[test]
     fn follow_system_remaps_theme_family_and_manual_mode_keeps_preference() {
-        assert_eq!(
-            resolve_theme_name(ThemeName::SilverLight, true, false),
-            ThemeName::SteelDark
-        );
-        assert_eq!(
-            resolve_theme_name(ThemeName::Nebula, true, true),
-            ThemeName::SilverLight
-        );
+        assert_eq!(resolve_theme_name(ThemeName::SilverLight, true, false), ThemeName::SteelDark);
+        assert_eq!(resolve_theme_name(ThemeName::Nebula, true, true), ThemeName::SilverLight);
         assert_eq!(
             resolve_theme_name(ThemeName::SilverLight, false, false),
             ThemeName::SilverLight
@@ -485,7 +466,10 @@ mod tests {
         assert_eq!(updates[1], ("follow_system_theme", "0".to_owned()));
         assert_eq!(
             updates[2],
-            ("background", nebula_settings::format_hex_rgb(ThemeName::LinenLight.term_theme().background))
+            (
+                "background",
+                nebula_settings::format_hex_rgb(ThemeName::LinenLight.term_theme().background)
+            )
         );
     }
 }

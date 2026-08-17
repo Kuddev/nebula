@@ -76,7 +76,7 @@ gpui-component = "=0.5.1"
 gpui-component-assets = "=0.5.1"
 ```
 
-Do not use wildcard versions, Git `main`, or the tty7 forks. GPUI and
+Do not use wildcard versions, Git `main`, or third-party GPUI forks. GPUI and
 gpui-component must resolve to one GPUI version; verify each dependency change
 with:
 

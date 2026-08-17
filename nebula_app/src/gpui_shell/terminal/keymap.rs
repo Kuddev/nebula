@@ -87,8 +87,26 @@ fn ctrl_char(c: char) -> Option<u8> {
 /// 一旦子进程要过 kitty 键盘标志，那份标志就是线上合同，压过 DECSET 9001
 /// （口径逐字同旧壳 `input::terminal_input::use_win32_input_mode`）。
 fn use_win32_input_mode(mode: &TermMode) -> bool {
-    mode.contains(TermMode::WIN32_INPUT_MODE)
-        && !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL)
+    mode.contains(TermMode::WIN32_INPUT_MODE) && !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL)
+}
+
+/// 无修饰的字母/数字必须交给 IME / `TranslateMessage`，不能编进 PTY。
+///
+/// GPUI 的 Windows 后端：`on_key_down` 一旦 `stop_propagation`，就不会再
+/// `TranslateMessage`。IME 组字（微软拼音）是 TranslateMessage 喂进去的；
+/// 把 `n`/`i` 编成 KEY_EVENT_RECORD 等于把拼音当英文写进 shell，中文永远
+/// 起不来。旧壳对应合同是 `keyboard.rs`：`ime.preedit()` 期间直接 return。
+#[cfg(windows)]
+fn win32_encodes_keystroke(ks: &Keystroke) -> bool {
+    if ks.modifiers.control || ks.modifiers.alt || ks.modifiers.platform {
+        return true;
+    }
+    let key = ks.key.as_str();
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphanumeric() => false,
+        _ => true,
+    }
 }
 
 /// GPUI 键名 → Win32 虚拟键码。
@@ -227,11 +245,7 @@ fn kitty_escape(ks: &Keystroke, mode: &TermMode) -> Option<Vec<u8>> {
         return None;
     }
     let param = modifier_param(ks);
-    Some(if param == 1 {
-        b"\x1b[27u".to_vec()
-    } else {
-        format!("\x1b[27;{param}u").into_bytes()
-    })
+    Some(if param == 1 { b"\x1b[27u".to_vec() } else { format!("\x1b[27;{param}u").into_bytes() })
 }
 
 /// 返回 `None` 表示这次按键不由编码器处理（交给 IME/文本输入路径）。
@@ -244,7 +258,7 @@ pub fn encode(ks: &Keystroke, mode: &TermMode) -> Option<Vec<u8>> {
     // OpenConsole 的翻译层反译成 KEY_EVENT_RECORD，而它会丢掉 uChar=0 的
     // VK_ESCAPE——读字节流的应用（Claude Code）因此收不到 Esc。
     #[cfg(windows)]
-    if use_win32_input_mode(mode) {
+    if use_win32_input_mode(mode) && win32_encodes_keystroke(ks) {
         if let Some(record) = win32_press_and_release(ks) {
             return Some(record);
         }
@@ -358,10 +372,8 @@ mod tests {
         assert_eq!(records.len(), 2, "一次 Esc 必须是 down+up 两条记录：{text:?}");
 
         let parse = |record: &str| -> Vec<String> {
-            let body = record
-                .strip_prefix("\x1b[")
-                .and_then(|s| s.strip_suffix('_'))
-                .expect("CSI … _");
+            let body =
+                record.strip_prefix("\x1b[").and_then(|s| s.strip_suffix('_')).expect("CSI … _");
             body.split(';').map(str::to_owned).collect()
         };
         let down = parse(records[0]);
@@ -378,6 +390,22 @@ mod tests {
         assert_eq!(up[3], "0", "抬起");
         assert_eq!(up[4], down[4]);
         assert_eq!(up[5], "1");
+    }
+
+    /// 无修饰字母必须交给 IME：Win32 模式也不能把拼音编进 PTY，否则 GPUI
+    /// 当按键已处理、不再 TranslateMessage，中文组字起不来。
+    #[cfg(windows)]
+    #[test]
+    fn unmodified_letters_stay_on_the_ime_path_in_win32_mode() {
+        let mode = TermMode::WIN32_INPUT_MODE;
+        assert_eq!(encode(&keystroke("n"), &mode), None);
+        assert_eq!(encode(&keystroke("a"), &mode), None);
+        assert_eq!(encode(&keystroke("1"), &mode), None);
+        // Ctrl+C 仍走记录，不能为了 IME 把快捷键也放掉。
+        let mut ctrl_c = keystroke("c");
+        ctrl_c.modifiers.control = true;
+        assert!(encode(&ctrl_c, &mode).is_some());
+        assert!(encode(&keystroke("escape"), &mode).is_some());
     }
 
     /// kitty 键盘标志是子进程明确要过的线上合同，压过 DECSET 9001

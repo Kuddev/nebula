@@ -58,6 +58,9 @@ fn language_for_extension(extension: &str) -> Option<&'static str> {
         "ini" | "cfg" | "conf" => "ini",
         "vim" => "vim",
         "xml" => "xml",
+        "json" | "jsonl" | "ndjson" => "json",
+        // 纯文本走 Plain（无高亮）：诉求是行号 + 行级虚拟化，不是着色。
+        "txt" | "log" | "text" => "text",
         _ => return None,
     })
 }
@@ -96,8 +99,7 @@ impl CodeTabView {
                 .indent_guides(true)
                 .soft_wrap(false)
         });
-        let mut this =
-            Self { path, title, input, notice: None, lines: 0 };
+        let mut this = Self { path, title, input, notice: None, lines: 0 };
         this.reload(window, cx);
         this
     }
@@ -109,8 +111,9 @@ impl CodeTabView {
                 let truncated = bytes.len() > MAX_CODE_BYTES;
                 let slice = if truncated { &bytes[..MAX_CODE_BYTES] } else { &bytes[..] };
                 let text = String::from_utf8_lossy(slice).into_owned();
-                let notice = truncated
-                    .then(|| format!("文件超过 {} MB，仅显示开头部分", MAX_CODE_BYTES / 1024 / 1024));
+                let notice = truncated.then(|| {
+                    format!("文件超过 {} MB，仅显示开头部分", MAX_CODE_BYTES / 1024 / 1024)
+                });
                 (text, notice)
             },
             Err(error) => {

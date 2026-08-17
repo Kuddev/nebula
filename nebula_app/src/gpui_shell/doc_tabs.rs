@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Bounds, Context, ContentMask, Corners, InteractiveElement as _, IntoElement, MouseButton,
+    Bounds, ContentMask, Context, Corners, InteractiveElement as _, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, RenderImage,
     ScrollWheelEvent, SharedString, Styled as _, Window, div, px,
 };
@@ -24,7 +24,7 @@ use image::Frame;
 
 use crate::display::image_viewer::ImageView;
 use crate::gpui_shell::prelude::*;
-use gpui_component::text::TextView;
+use gpui_component::text::{TextView, TextViewStyle};
 
 /// 双击路由：应用内能读的开 tab（图片/文档/源码），其余交系统处理器。
 /// 源码查看是 GPUI 壳新增能力，旧壳合同（`input/chrome.rs`）之上的超集。
@@ -176,13 +176,8 @@ impl Render for ImageTabView {
                     gpui::size(px(target.2.max(1.0)), px(target.3.max(1.0))),
                 );
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                    let _ = window.paint_image(
-                        target_bounds,
-                        Corners::all(px(0.0)),
-                        image,
-                        0,
-                        false,
-                    );
+                    let _ =
+                        window.paint_image(target_bounds, Corners::all(px(0.0)), image, 0, false);
                 });
             },
         )
@@ -253,9 +248,8 @@ impl DocTabView {
                 let truncated = bytes.len() > MAX_DOC_BYTES;
                 let slice = if truncated { &bytes[..MAX_DOC_BYTES] } else { &bytes[..] };
                 let text = String::from_utf8_lossy(slice).into_owned();
-                self.notice = truncated.then(|| {
-                    format!("文件超过 {} KB，仅显示开头部分", MAX_DOC_BYTES / 1024)
-                });
+                self.notice = truncated
+                    .then(|| format!("文件超过 {} KB，仅显示开头部分", MAX_DOC_BYTES / 1024));
                 self.content = text.into();
             },
             Err(error) => {
@@ -311,7 +305,15 @@ impl Render for DocTabView {
                 div().flex_1().min_h_0().child(
                     TextView::markdown(doc_id, self.content.clone(), window, cx)
                         .selectable(true)
-                        .scrollable(true),
+                        .scrollable(true)
+                        // image_base：相对图片路径（README 的 logo/截图）按
+                        // 文档所在目录解析；高亮主题跟当前壳主题走。
+                        .style(TextViewStyle {
+                            image_base: self.path.parent().map(Arc::from),
+                            highlight_theme: cx.theme().highlight_theme.clone(),
+                            is_dark: cx.theme().is_dark(),
+                            ..TextViewStyle::default()
+                        }),
                 ),
             )
     }

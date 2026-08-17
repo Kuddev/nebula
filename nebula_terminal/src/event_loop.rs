@@ -507,7 +507,8 @@ where
                     // Drain everything already readable while the grid still
                     // has the old geometry; otherwise old-width absolute CUP
                     // output can be parsed into a new-width grid. This is the
-                    // local equivalent of tty7's ordered Size echo.
+                    // Drain readable bytes against the old grid before the
+                    // size change lands, so CUP sequences keep their geometry.
                     loop {
                         match self.pty_read(&mut state, &mut buf, pipe.as_mut()) {
                             Ok(processed) if processed >= MAX_LOCKED_READ => continue,
@@ -520,7 +521,7 @@ where
                         }
                     }
 
-                    // Match Windows Terminal's order: reflow the client model
+                    // Match ConPTY's order: reflow the client model
                     // first, then ask ConPTY to resize. ResizePseudoConsole is
                     // synchronous; repaint bytes it produces are consumed by
                     // the normal readable-event path below against this grid.

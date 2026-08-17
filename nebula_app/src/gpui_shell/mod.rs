@@ -13,9 +13,11 @@
 pub mod code_tab;
 pub mod config;
 pub mod doc_tabs;
+pub mod http;
 pub mod math_view;
 pub mod prelude;
 pub mod session_restore;
+pub mod network_settings;
 pub mod settings_pane;
 pub mod ssh_hosts;
 pub mod ssh_settings;
@@ -35,11 +37,47 @@ use std::borrow::Cow;
 
 use workspace::NebulaWorkspace;
 
+/// GPUI 壳的跨线程唤醒：托盘、mux ATTACH、runtime 控制都汇到工作区 pump。
+pub(crate) enum GpuiShellEvent {
+    TrayFocus(Option<u64>),
+    TrayQuit,
+    MuxAttach,
+    RuntimeControl(std::sync::Arc<crate::runtime_api::RuntimeDispatch>),
+}
+
 /// 在当前线程启动 GPUI 运行时并打开主窗口，阻塞直至 UI 退出。
 ///
 /// GPUI 拥有自己的消息循环：主窗形态从主线程调用（winit 不启动）；
 /// spike 形态从专用线程调用。一个进程内只允许调用一次。
 pub fn run_shell() {
+    let (shell_tx, shell_rx) = std::sync::mpsc::channel();
+    crate::tray::init_gpui({
+        let tx = shell_tx.clone();
+        move |command| {
+            let event = match command {
+                crate::tray::GpuiTrayCommand::Focus(pane) => GpuiShellEvent::TrayFocus(pane),
+                crate::tray::GpuiTrayCommand::Quit => GpuiShellEvent::TrayQuit,
+            };
+            let _ = tx.send(event);
+        }
+    });
+    // 驻留进程写 runtime.port：第二份 `nebula --gpui` 经 try_attach_existing
+    // ATTACH 回来，而不是再拉一套 PTY。Drop 会删 port 文件。
+    let _runtime_server = crate::runtime_api::RuntimeServer::spawn_callback(
+        {
+            let tx = shell_tx;
+            move |callback| {
+                let event = match callback {
+                    crate::runtime_api::RuntimeCallback::Attach => GpuiShellEvent::MuxAttach,
+                    crate::runtime_api::RuntimeCallback::Control(dispatch) => {
+                        GpuiShellEvent::RuntimeControl(dispatch)
+                    },
+                };
+                let _ = tx.send(event);
+            }
+        },
+        crate::runtime_api::RuntimeHub::new(),
+    );
     gpui::Application::new().with_assets(Assets).run(|cx| {
         // GPUI is the only event loop in `--gpui` mode, so it owns the same
         // per-process hook pipe before the first TerminalView spawns.
@@ -48,8 +86,9 @@ pub fn run_shell() {
         crate::ai_hook::spawn_config_guard();
         init(cx);
         cx.activate(true);
-        open_main_window(cx, ai_events);
+        open_main_window(cx, ai_events, shell_rx);
     });
+    crate::tray::shutdown();
 }
 
 /// 组件库/主题/快捷键/用户配置的一次性初始化。
@@ -62,6 +101,9 @@ fn init(cx: &mut App) {
     // TextView 的公式渲染钩子：旧壳数学管线（compile → 栅格化）接入组件库
     // 的 markdown 渲染；不注册时公式回退为源码文本。
     math_view::register(cx);
+    // 网络图片加载：gpui 默认 NullHttpClient，markdown 文档里的 http(s)
+    // 图源全部失败；换成 ureq 实现（跑在后台 executor）。
+    http::register(cx);
     theme::apply_chrome_theme(cx);
     terminal::init(cx);
     workspace::init(cx);
@@ -85,9 +127,8 @@ fn register_bundled_fonts(cx: &App) {
     // GPUI resolves a family through the system collection first and silently
     // falls back when it is absent. Add Maple before any component/window can
     // resolve a font so the default remains the same private face as winit.
-    if let Err(error) = cx
-        .text_system()
-        .add_fonts(vec![Cow::Borrowed(crate::font_install::REQUIRED_FONT_BYTES)])
+    if let Err(error) =
+        cx.text_system().add_fonts(vec![Cow::Borrowed(crate::font_install::REQUIRED_FONT_BYTES)])
     {
         eprintln!("[nebula:gpui] failed to register bundled Maple font: {error}");
     }
@@ -105,10 +146,9 @@ fn register_bundled_fonts(cx: &App) {
                     );
                 }
             },
-            Err(error) => eprintln!(
-                "[nebula:gpui] failed to read imported font {}: {error}",
-                path.display()
-            ),
+            Err(error) => {
+                eprintln!("[nebula:gpui] failed to read imported font {}: {error}", path.display())
+            },
         }
     }
 }
@@ -116,6 +156,7 @@ fn register_bundled_fonts(cx: &App) {
 fn open_main_window(
     cx: &mut App,
     ai_events: std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>,
+    shell_events: std::sync::mpsc::Receiver<GpuiShellEvent>,
 ) {
     let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
     let options = WindowOptions {
@@ -130,7 +171,7 @@ fn open_main_window(
     };
 
     cx.open_window(options, move |window, cx| {
-        let workspace = cx.new(|cx| NebulaWorkspace::new(window, ai_events, cx));
+        let workspace = cx.new(|cx| NebulaWorkspace::new(window, ai_events, shell_events, cx));
         // 调试/验收后门：启动即打开指定文档（见 open_document_at_startup）。
         if let Ok(path) = std::env::var("NEBULA_GPUI_OPEN_DOC")
             && !path.is_empty()
@@ -145,4 +186,66 @@ fn open_main_window(
 
     // 窗口存在后补一次视效应用（DWM backdrop 等窗口级效果此前无处落）。
     wallpaper::refresh(cx);
+}
+
+/// 按 `tray` 设置挂上或摘掉系统托盘图标（旧壳 `tray::set_enabled`）。
+/// 启动、设置热应用、系统外观变化都经 [`theme::apply_chrome_theme`] 落到这里。
+pub(crate) fn apply_tray_setting() {
+    crate::tray::set_enabled(nebula_settings::RuntimeSettings::load().tray);
+}
+
+/// 关窗保留会话：藏起 HWND，PTY 与工作区继续活着。
+///
+/// 旧壳 detach 是销毁窗口、进程无窗驻留。GPUI 用 `SW_HIDE` 达到同一
+/// 用户可见效果。禁止 `minimize_window`：托盘关着时任务栏不能留一个
+/// 点不掉的最小化窗口。
+pub(crate) fn hide_native_window(window: &gpui::Window) {
+    #[cfg(windows)]
+    {
+        native_show(window, false);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+    }
+}
+
+/// 托盘点击 / 关掉托盘后：把藏着的窗口捞回来。
+pub(crate) fn show_native_window(window: &gpui::Window) {
+    #[cfg(windows)]
+    {
+        native_show(window, true);
+    }
+    window.activate_window();
+}
+
+pub(crate) fn reveal_all_windows(cx: &mut App) {
+    for handle in cx.windows() {
+        let _ = handle.update(cx, |_, window, _| {
+            show_native_window(window);
+        });
+    }
+}
+
+#[cfg(windows)]
+fn native_show(window: &gpui::Window, show: bool) -> bool {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return false;
+    };
+    let hwnd = handle.hwnd.get() as *mut core::ffi::c_void;
+    let cmd = if show {
+        windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW
+    } else {
+        windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE
+    };
+    // SAFETY: hwnd 来自当前 GPUI 窗口；ShowWindow 对无效句柄安全失败。
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(hwnd, cmd);
+    }
+    true
 }

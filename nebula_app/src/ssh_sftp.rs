@@ -540,8 +540,8 @@ async fn upload_local_paths(
     Ok(())
 }
 
-/// 剪贴板截图 → 远端 `/tmp` 的一次性 PNG 上传（SSH pane 的图片粘贴，
-/// Netcatty 同款交互）。成功后经 runtime Prompt 通道把远端路径作为输入敲进
+/// 剪贴板截图 → 远端 `/tmp` 的一次性 PNG 上传（SSH pane 的图片粘贴）。
+/// 成功后经 runtime Prompt 通道把远端路径作为输入敲进
 /// 目标 pane——上传在 SSH runtime 上异步进行，UI 线程零阻塞；失败只留日志，
 /// 绝不把错误文本粘进终端。
 pub fn upload_clipboard_image(

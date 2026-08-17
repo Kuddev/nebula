@@ -579,6 +579,46 @@ impl VcsDisplayName {
     }
 }
 
+/// 终端 BEL（`^G`）的通知方式：关 / 闪烁 / 声音 / 两者。
+/// 缺省 `Both`：旧壳给 AI CLI 回合结束的可听提示默认是开的。
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum BellModeName {
+    None,
+    Visual,
+    Audible,
+    #[default]
+    Both,
+}
+
+impl BellModeName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" => Some(Self::None),
+            "visual" => Some(Self::Visual),
+            "audible" => Some(Self::Audible),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Visual => "visual",
+            Self::Audible => "audible",
+            Self::Both => "both",
+        }
+    }
+
+    pub fn visual(self) -> bool {
+        matches!(self, Self::Visual | Self::Both)
+    }
+
+    pub fn audible(self) -> bool {
+        matches!(self, Self::Audible | Self::Both)
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum CellWidthModeName {
     #[default]
@@ -662,6 +702,8 @@ pub struct RuntimeSettings {
     pub cell_width_mode: CellWidthModeName,
     /// 侧栏版本控制视图的数据源（auto/git/svn）。
     pub vcs_display: VcsDisplayName,
+    /// 终端 BEL：关 / 闪烁 / 声音 / 两者（缺省两者）。
+    pub bell: BellModeName,
     /// 新会话欢迎屏 fastfetch（默认关：启动速度优先于观感，旧壳裁定）。
     pub fetch: bool,
     pub keep_session: bool,
@@ -741,6 +783,10 @@ impl RuntimeSettings {
             vcs_display: raw
                 .value("vcs_display")
                 .and_then(VcsDisplayName::from_settings)
+                .unwrap_or_default(),
+            bell: raw
+                .value("bell")
+                .and_then(BellModeName::from_settings)
                 .unwrap_or_default(),
             fetch: raw.bool_on("fetch").unwrap_or(false),
             keep_session: raw.bool_on("keep_session").unwrap_or(false),
@@ -823,6 +869,7 @@ mod tests {
              cursor_shape=beam\n\
              cursor_blink=1\n\
              copy_on_select=1\n\
+             bell=audible\n\
              cjk_bold_regular=1\n\
              tab_reveal=instant\n\
              density=compact\n\
@@ -853,6 +900,7 @@ mod tests {
         assert_eq!(settings.cursor_shape, Some(CursorShapeName::Beam));
         assert_eq!(settings.cursor_blink, Some(true));
         assert!(settings.copy_on_select);
+        assert_eq!(settings.bell, BellModeName::Audible);
         assert!(!settings.powerline);
         assert_eq!(settings.shell.as_deref(), Some("pwsh"));
         assert_eq!(settings.accept, AcceptKeyName::Tab);
@@ -907,6 +955,21 @@ mod tests {
         assert_eq!(settings.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
         assert_eq!(settings.ssh_proxy_mode, ProxyModeName::Off);
         assert_eq!(settings.quick_terminal_hotkey, DEFAULT_QUICK_TERMINAL_HOTKEY);
+        assert_eq!(settings.bell, BellModeName::Both);
+    }
+
+    #[test]
+    fn bell_mode_parses_known_values_and_rejects_junk() {
+        assert_eq!(BellModeName::from_settings("none"), Some(BellModeName::None));
+        assert_eq!(BellModeName::from_settings("off"), Some(BellModeName::None));
+        assert_eq!(BellModeName::from_settings("visual"), Some(BellModeName::Visual));
+        assert_eq!(BellModeName::from_settings("audible"), Some(BellModeName::Audible));
+        assert_eq!(BellModeName::from_settings("both"), Some(BellModeName::Both));
+        assert_eq!(BellModeName::from_settings("loud"), None);
+        assert_eq!(
+            RuntimeSettings::from_raw(&RawSettings::from_text("bell=loud\n")).bell,
+            BellModeName::Both
+        );
     }
 
     #[test]

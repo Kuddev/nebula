@@ -17,8 +17,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, App, IntoElement as _, ParentElement as _, Styled as _, Window, div, px};
-use gpui_component::{Root, WindowExt as _};
 use gpui_component::notification::Notification;
+use gpui_component::{Root, WindowExt as _};
 
 use crate::gpui_shell::prelude::v_flex;
 

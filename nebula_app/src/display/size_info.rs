@@ -177,7 +177,7 @@ impl SizeInfo<f32> {
     /// of rows, and once those rows overflow the scrollback the oldest ones are
     /// dropped for good — widening back cannot resurrect what is no longer in
     /// the buffer. The window floor derived from this keeps the user out of that
-    /// region entirely (Windows Terminal does the same with a fixed 460 DIP
+    /// region entirely (a typical host uses a fixed ~460 DIP
     /// minimum; deriving it from `chrome` keeps it honest when the sidebar is
     /// open or the font changes).
     pub const MIN_USABLE_COLUMNS: usize = 20;

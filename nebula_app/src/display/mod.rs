@@ -159,7 +159,13 @@ pub use settings::{
     BgPickerPart, NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit,
 };
 pub(crate) use settings::{
-    BACKGROUND_SWATCHES, CellWidthMode, NewTabPosition, SettingsOpacityTarget,
+    BACKGROUND_SWATCHES, CellWidthMode, NewTabPosition, SettingsOpacityTarget, hsv_to_rgb,
+    rgb_to_hsv,
+};
+#[cfg(feature = "gpui-shell")]
+pub(crate) use settings::{
+    MANUAL_PROXY_PROTOCOL_OPTIONS, ManualProxyProtocol, ProxyTestStatus, manual_proxy_parts,
+    manual_proxy_value,
 };
 
 /// 按显示列宽贪心断行（确认框正文等 UI 段落用）：CJK 逐字可断，行首空
@@ -883,7 +889,7 @@ pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
 /// （一个汉字 → `%E6%98%9F` 九列），48 列预算被编码噪声吃光后再截尾，提示
 /// "显示不全"。file 路径解码后再展示；其他 scheme 保持原样（URL 的编码
 /// 属于其身份，不替它翻译）。
-fn strip_file_scheme(uri: &str) -> String {
+pub(crate) fn strip_file_scheme(uri: &str) -> String {
     match uri.strip_prefix("file:///").or_else(|| uri.strip_prefix("file://")) {
         // `file:///D:/x` yields `D:/x`; a UNC-ish `file://host/x` keeps `host/x`.
         Some(rest) => percent_decode_lossy(rest),
@@ -926,7 +932,7 @@ fn percent_decode_lossy(s: &str) -> String {
 /// Truncate `s` to at most `budget` display columns (CJK counts as 2), keeping
 /// the TAIL and prefixing `…` when cut — the filename end is what a hover
 /// tooltip most needs. Returns a string whose display width is `<= budget`.
-fn fit_tail(s: &str, budget: usize) -> String {
+pub(crate) fn fit_tail(s: &str, budget: usize) -> String {
     let width = |c: char| c.width().unwrap_or(0);
     let total: usize = s.chars().map(width).sum();
     if total <= budget {
@@ -2008,7 +2014,7 @@ fn alt_screen_vertical_padding_bands(
 /// 不弹系统确认（Nebula 自己的确认弹窗已经问过了），不弹系统错误框——
 /// 失败以 Err 返回给面板提示条。
 #[cfg(windows)]
-fn send_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
+pub(crate) fn send_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows_sys::Win32::UI::Shell::{
@@ -2042,7 +2048,7 @@ fn send_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn send_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
+pub(crate) fn send_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
     // 非 Windows 暂无回收站集成：递归删除前置确认已由弹窗承担。
     let result =
         if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
@@ -8631,7 +8637,7 @@ impl Display {
             Vec::new()
         };
         let math_pixel_size = self.glyph_cache.font_size.as_px();
-        let math_pixels_per_point = self.window.scale_factor as f32 * 96.0 / 72.27;
+        let math_pixels_per_point = crate::math::pixels_per_point(self.window.scale_factor as f32);
         let prepared_math = terminal_math::prepare_overlays(
             &mut pane_state.terminal_math,
             &terminal_math_overlays,
@@ -11561,7 +11567,7 @@ mod nebula_ux_tests {
     fn relaxed_cell_width_rounds_up_the_fraction_compact_floors_it() {
         let config = UiConfig::default();
         // Maple Mono NF CN 这类字体的平均 advance 常落在 .5 以上，紧凑向下
-        // 取整因此比 Windows Terminal 少一像素——宽松就是为补这一像素而设。
+        // 取整因此会少一像素——宽松就是为补这一像素而设。
         let m = metrics(9.6, 20.0);
         assert_eq!(compute_cell_size(&config, &m, CellWidthMode::Compact).0, 9.0);
         assert_eq!(compute_cell_size(&config, &m, CellWidthMode::Relaxed).0, 10.0);

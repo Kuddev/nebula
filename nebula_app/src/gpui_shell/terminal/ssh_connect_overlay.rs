@@ -9,12 +9,12 @@
 //! - 等宽 cell 度量（`SizeInfo`）→ UI 基准字号（同一设置源）
 
 use gpui::{
-    canvas, div, fill, hsla, point, px, size, AnyElement, Bounds, Context, Hsla,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _,
+    AnyElement, Bounds, Context, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, canvas, div,
+    fill, hsla, point, px, size,
 };
 
-use crate::display::ssh_connect::{self, stage_labels, stage_message, SshConnectState};
+use crate::display::ssh_connect::{self, SshConnectState, stage_labels, stage_message};
 use crate::gpui_shell::prelude::*;
 
 /// UiLanguage 由设置折算（两壳同源）。

@@ -1,4 +1,4 @@
-//! Renderer-agnostic terminal render contract (Ghostty-style layering).
+//! Renderer-agnostic terminal render contract (model → viewport → frontend).
 //!
 //! Layering: `Term`/grid (terminal model) → this module (viewport protocol +
 //! plain-data snapshot) → a frontend renderer (today the GPUI element; later
@@ -11,9 +11,9 @@
 //! - A viewport is immutable once issued and carries a monotonically
 //!   increasing `revision`: a stale resize must never override a newer one.
 //! - Pixel sizes reported to the PTY / applications are always the exact
-//!   `columns × cell_width` product (WezTerm rule), never leftover pixels.
-//! - A pixel-size change is reported even when rows/cols are unchanged
-//!   (Ghostty rule): applications may care about pixel metrics.
+//!   `columns × cell_width` product, never leftover pixels.
+//! - A pixel-size change is reported even when rows/cols are unchanged:
+//!   applications may care about pixel metrics.
 
 pub mod boxdraw;
 
@@ -82,12 +82,12 @@ impl TerminalViewport {
         }
     }
 
-    /// Exact text-area width: `cols × cell_width` (WezTerm rule).
+    /// Exact text-area width: `cols × cell_width`.
     pub fn text_area_width_px(&self) -> u32 {
         u32::from(self.cols) * u32::from(self.cell_width_px)
     }
 
-    /// Exact text-area height: `rows × cell_height` (WezTerm rule).
+    /// Exact text-area height: `rows × cell_height`.
     pub fn text_area_height_px(&self) -> u32 {
         u32::from(self.rows) * u32::from(self.cell_height_px)
     }
@@ -118,7 +118,7 @@ pub struct ViewportChange {
     /// Rows/cols changed: the grid and the PTY must be resized.
     pub grid_changed: bool,
     /// Device cell size changed: the PTY must be re-informed even when the
-    /// grid stayed the same (Ghostty rule).
+    /// grid stayed the same.
     pub pixel_changed: bool,
 }
 
@@ -477,7 +477,7 @@ mod tests {
         assert!(second.viewport.revision > first.viewport.revision);
 
         // Same grid but larger glyphs (font size change on a fluke-equal
-        // grid): pixel change alone must still be reported (Ghostty rule).
+        // grid): pixel change alone must still be reported.
         let mut larger = metrics();
         larger.scale = 3.0;
         let third = tracker.observe(911.0 / 9.0 * 9.0, 360.0, &larger).expect("pixel change");

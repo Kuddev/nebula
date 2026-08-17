@@ -304,10 +304,9 @@ fn shrink_then_grow_restores_the_original_layout() {
 /// where it started too, or the next keystroke overwrites the wrong cell.
 ///
 /// The cursor sits right after the text, which is where a shell prompt leaves
-/// it. Alacritty tracks the cursor through reflow by incremental bookkeeping
+/// it. Column reflow tracks the cursor by incremental bookkeeping
 /// (`cursor_line_delta` and friends in `grow_columns`) rather than deriving it
-/// from where the content landed, and its grid tests never assert on the cursor
-/// at all — so this is the property most likely to be wrong.
+/// from where the content landed — so this is the property most likely to be wrong.
 #[test]
 fn shrink_then_grow_restores_the_cursor() {
     let mut grid = Grid::<Cell>::new(3, 6, 4);
@@ -481,7 +480,7 @@ fn conpty_shrink_lines_keeps_the_last_written_row_visible() {
     assert_eq!(grid[Line(-2)][Column(0)], 1);
 }
 
-/// ConPTY and Windows Terminal reflow the blank cell immediately before the
+/// ConPTY reflows the blank cell immediately before the
 /// cursor even when it has the default attributes.  Without it, a cursor that
 /// lands exactly on the new right edge is stored as pending-wrap on the old
 /// row, while conhost has already moved it to the next row; the next absolute

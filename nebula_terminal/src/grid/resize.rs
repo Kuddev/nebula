@@ -58,8 +58,8 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // times for a 120→40 column drag, and 80 more on the way back — and the
         // error compounds until the cursor sits in the middle of old output.
         //
-        // Windows Terminal avoids the problem by not keeping a separate tally at
-        // all: `TextBuffer::Reflow` rewrites the content cell by cell and reads
+        // ConPTY `TextBuffer::Reflow` avoids the problem by not keeping a
+        // separate tally at all: it rewrites the content cell by cell and reads
         // the cursor back off wherever its cell landed
         // (`newCursorPos = { AdjustToGlyphStart(oldCursorPos.x - oldX + newX), newY }`,
         // textBuffer.cpp:2879). The cursor rides the content. This does the same
@@ -132,11 +132,8 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
     /// Remove lines from the visible area.
     ///
-    /// The behavior in Terminal.app and iTerm.app is to keep the cursor at the
-    /// bottom of the screen. This is achieved by pushing history "out the top"
-    /// of the terminal window.
-    ///
-    /// Nebula takes the same approach.
+    /// Keep the cursor at the bottom of the screen by pushing history
+    /// "out the top" of the terminal window.
     ///
     /// ConPTY anchors the shrink to the last written row rather than only the
     /// parser cursor: PSReadLine can leave a continuation hint below its cursor

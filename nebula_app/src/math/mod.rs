@@ -27,6 +27,14 @@ pub(crate) const MIN_READABLE_MATH_PX: f32 = 6.0;
 /// 阅读器）自动一致。
 pub(crate) const OPTICAL_SCALE: f32 = 1.21;
 
+/// 窗口 DPI scale → `compile_formula` 的 `pixels_per_point`。TeX 的 pt 是
+/// 1/72.27 英寸，逻辑分辨率按 96 dpi 计；该参数只决定 `\kern`/`\\[6pt]`
+/// 这类显式长度的换算。两壳所有编译调用共用这一个公式，显式行距/间距
+/// 才不会因壳而异（GPUI 壳曾直接传 scale factor，显式长度偏小 1/3）。
+pub(crate) fn pixels_per_point(scale_factor: f32) -> f32 {
+    scale_factor * 96.0 / 72.27
+}
+
 /// 上下标 / 分子分母的最小相对字号。Latin Modern 的 MATH 表给 70%，是为
 /// 纸面阅读字号调的；终端正文本来就小，0.7 em 的分子在 20px 字号下只有
 /// 14px，用户看到的就是"公式比正文小一圈"。这里抬到 0.8，代价是公式变高

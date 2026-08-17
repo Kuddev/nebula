@@ -1,4 +1,4 @@
-# Screen-chrome evidence adapted from Herdr's Apache-2.0 detection manifest.
+# Screen-chrome evidence for this CLI (idle / working / blocked).
 id = "antigravity"
 aliases = ["agy", "antigravity-cli"]
 

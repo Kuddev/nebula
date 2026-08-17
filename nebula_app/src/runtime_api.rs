@@ -294,6 +294,44 @@ impl RuntimeDispatch {
     }
 }
 
+/// Non-winit event loops (GPUI) receive attach / control without an
+/// `EventLoopProxy`. ATTACH is fire-and-forget; control still waits on
+/// [`RuntimeDispatch::respond`].
+#[derive(Clone)]
+pub enum RuntimeCallback {
+    Attach,
+    Control(Arc<RuntimeDispatch>),
+}
+
+#[derive(Clone)]
+enum EventSink {
+    Winit(EventLoopProxy<Event>),
+    Callback(Arc<dyn Fn(RuntimeCallback) + Send + Sync>),
+}
+
+impl EventSink {
+    fn emit_attach(&self) {
+        match self {
+            Self::Winit(proxy) => {
+                let _ = proxy.send_event(Event::new(EventType::NebulaAttach, None));
+            },
+            Self::Callback(callback) => callback(RuntimeCallback::Attach),
+        }
+    }
+
+    fn emit_control(&self, dispatch: Arc<RuntimeDispatch>) -> bool {
+        match self {
+            Self::Winit(proxy) => {
+                proxy.send_event(Event::new(EventType::RuntimeControl(dispatch), None)).is_ok()
+            },
+            Self::Callback(callback) => {
+                callback(RuntimeCallback::Control(dispatch));
+                true
+            },
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct RuntimeHub {
     inner: Arc<Mutex<HubState>>,
@@ -646,6 +684,20 @@ pub struct RuntimeServer {
 
 impl RuntimeServer {
     pub fn spawn(proxy: EventLoopProxy<Event>, hub: RuntimeHub) -> Option<Self> {
+        Self::spawn_with_sink(EventSink::Winit(proxy), hub)
+    }
+
+    /// Same discovery file and ATTACH/PING/JSON protocol as [`Self::spawn`],
+    /// but attach/control are delivered through a callback (GPUI has no winit
+    /// `EventLoopProxy`).
+    pub fn spawn_callback(
+        on_event: impl Fn(RuntimeCallback) + Send + Sync + 'static,
+        hub: RuntimeHub,
+    ) -> Option<Self> {
+        Self::spawn_with_sink(EventSink::Callback(Arc::new(on_event)), hub)
+    }
+
+    fn spawn_with_sink(sink: EventSink, hub: RuntimeHub) -> Option<Self> {
         if read_endpoint().and_then(|endpoint| legacy_request_to("PING", &endpoint)).is_some() {
             info!("Runtime API server already running; this instance stays client-only");
             return None;
@@ -663,7 +715,7 @@ impl RuntimeServer {
         let server_token = endpoint.token.clone();
         let spawned = std::thread::Builder::new()
             .name("nebula-runtime-api".into())
-            .spawn(move || serve(listener, server_token, proxy, hub))
+            .spawn(move || serve(listener, server_token, sink, hub))
             .is_ok();
         spawned.then(|| Self { endpoint, port_file: path })
     }
@@ -678,7 +730,7 @@ impl Drop for RuntimeServer {
     }
 }
 
-fn serve(listener: TcpListener, token: String, proxy: EventLoopProxy<Event>, hub: RuntimeHub) {
+fn serve(listener: TcpListener, token: String, sink: EventSink, hub: RuntimeHub) {
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
@@ -688,11 +740,11 @@ fn serve(listener: TcpListener, token: String, proxy: EventLoopProxy<Event>, hub
         }
         let active = active.clone();
         let token = token.clone();
-        let proxy = proxy.clone();
+        let sink = sink.clone();
         let hub = hub.clone();
         let _ = std::thread::Builder::new().name("nebula-runtime-client".into()).spawn(move || {
             let _guard = ActiveClient(active);
-            if let Err(error) = handle_connection(stream, &token, &proxy, &hub) {
+            if let Err(error) = handle_connection(stream, &token, &sink, &hub) {
                 log::debug!("Runtime API client disconnected: {error}");
             }
         });
@@ -710,7 +762,7 @@ impl Drop for ActiveClient {
 fn handle_connection(
     mut stream: TcpStream,
     token: &str,
-    proxy: &EventLoopProxy<Event>,
+    sink: &EventSink,
     hub: &RuntimeHub,
 ) -> Result<(), IoError> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
@@ -730,7 +782,7 @@ fn handle_connection(
     }
 
     if !line.trim_start().starts_with('{') {
-        return handle_legacy(&mut stream, &line, token, proxy);
+        return handle_legacy(&mut stream, &line, token, sink);
     }
 
     let raw: Value = match serde_json::from_str(&line) {
@@ -782,7 +834,7 @@ fn handle_connection(
         },
         "events.subscribe" => subscribe_connection(&mut stream, request, hub),
         "pane.wait" => wait_connection(&mut stream, request, hub),
-        _ => dispatch_connection(&mut stream, request, proxy),
+        _ => dispatch_connection(&mut stream, request, sink),
     }
 }
 
@@ -790,7 +842,7 @@ fn handle_legacy(
     stream: &mut TcpStream,
     line: &str,
     token: &str,
-    proxy: &EventLoopProxy<Event>,
+    sink: &EventSink,
 ) -> Result<(), IoError> {
     let mut parts = line.split_whitespace();
     let verb = parts.next().unwrap_or("");
@@ -799,7 +851,7 @@ fn handle_legacy(
     }
     match verb {
         "ATTACH" => {
-            let _ = proxy.send_event(Event::new(EventType::NebulaAttach, None));
+            sink.emit_attach();
             stream.write_all(b"OK\n")
         },
         "PING" => stream.write_all(b"OK\n"),
@@ -958,14 +1010,14 @@ fn wait_connection(
 fn dispatch_connection(
     stream: &mut TcpStream,
     request: ApiRequest,
-    proxy: &EventLoopProxy<Event>,
+    sink: &EventSink,
 ) -> Result<(), IoError> {
     let command = match RuntimeCommand::from_request(&request) {
         Ok(command) => command,
         Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
     };
     let (dispatch, receiver) = RuntimeDispatch::new(command);
-    if proxy.send_event(Event::new(EventType::RuntimeControl(dispatch), None)).is_err() {
+    if !sink.emit_control(dispatch) {
         return write_response(
             stream,
             &ApiResponse::failure(

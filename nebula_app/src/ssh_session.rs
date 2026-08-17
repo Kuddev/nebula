@@ -857,7 +857,9 @@ async fn run_test(request: SshTestRequest) -> SshTestResult {
             }
         })
         .await
-        .map_err(|err| -> SessionError { format!("SSH 地址解析任务失败: {err}").into() })??;
+        .map_err(|err| -> SessionError {
+            format!("SSH 地址解析任务失败: {err}").into()
+        })??;
         // SSH 编辑器不再维护重复的每主机代理；测试与真连都只读取网络页
         // 的当前配置。`ProxyJump` 属于 OpenSSH 目标解析，仍按其原语义保留。
         let proxy = resolve_network_proxy(&global, &resolved)
@@ -923,6 +925,50 @@ const NETWORK_TEST_PORT: u16 = 80;
 trait NetworkTestStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> NetworkTestStream for T {}
 
+/// 一次出网测试的完成数据。旧 winit 壳经事件投递；GPUI 设置页走 oneshot，
+/// 握手与 HTTP 探测仍是 [`proxy_test_once`] 这一条路径。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyTestResult {
+    pub request_id: u64,
+    pub ok: bool,
+    pub message: String,
+    pub elapsed_ms: u64,
+}
+
+fn proxy_test_timeout_message() -> String {
+    format!("网络测试超时（{} 秒无响应）", TEST_TIMEOUT.as_secs())
+}
+
+fn proxy_test_pair(
+    outcome: Result<Result<String, SessionError>, tokio::time::error::Elapsed>,
+) -> (bool, String) {
+    match outcome {
+        Ok(Ok(route)) => (true, route),
+        Ok(Err(err)) => (false, err.to_string()),
+        Err(_) => (false, proxy_test_timeout_message()),
+    }
+}
+
+async fn run_proxy_test(request_id: u64) -> ProxyTestResult {
+    let started = std::time::Instant::now();
+    let (ok, message) =
+        proxy_test_pair(tokio::time::timeout(TEST_TIMEOUT, proxy_test_once()).await);
+    ProxyTestResult { request_id, ok, message, elapsed_ms: started.elapsed().as_millis() as u64 }
+}
+
+/// 启动出网测试并交给调用方异步等待。GPUI 没有 winit `EventLoopProxy`，
+/// 所以通过这个 receiver 把结果回写到设置页 Entity；握手逻辑仍在
+/// [`proxy_test_once`]。
+pub fn start_proxy_test(
+    request_id: u64,
+) -> io::Result<tokio::sync::oneshot::Receiver<ProxyTestResult>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    runtime()?.spawn(async move {
+        let _ = sender.send(run_proxy_test(request_id).await);
+    });
+    Ok(receiver)
+}
+
 /// 使用与 SSH 新连接相同的全局配置解析和代理握手建立字节流，再请求一个
 /// 真实 HTTP 页面。只探测代理端口并不能证明代理有出网能力，所以这里必须
 /// 收到目标站点的 HTTP 状态行才算成功。
@@ -932,19 +978,13 @@ pub fn spawn_proxy_test(
     window_id: winit::window::WindowId,
 ) -> io::Result<()> {
     runtime()?.spawn(async move {
-        let started = std::time::Instant::now();
-        let outcome = tokio::time::timeout(TEST_TIMEOUT, proxy_test_once()).await;
-        let (ok, message) = match outcome {
-            Ok(Ok(route)) => (true, route),
-            Ok(Err(err)) => (false, err.to_string()),
-            Err(_) => (false, format!("网络测试超时（{} 秒无响应）", TEST_TIMEOUT.as_secs())),
-        };
+        let result = run_proxy_test(request_id).await;
         let _ = proxy.send_event(crate::event::Event::new(
             crate::event::EventType::ProxyTestDone {
-                request_id,
-                ok,
-                message,
-                elapsed_ms: started.elapsed().as_millis() as u64,
+                request_id: result.request_id,
+                ok: result.ok,
+                message: result.message,
+                elapsed_ms: result.elapsed_ms,
             },
             window_id,
         ));
@@ -1028,13 +1068,9 @@ async fn proxy_test_stream(
             })
             .await
             .map_err(|err| format!("解析跳板任务失败: {err}"))??;
-            let jump = authenticated_session_at::<EventProxy>(
-                &jump_destination,
-                &jump_profile,
-                None,
-                1,
-            )
-            .await?;
+            let jump =
+                authenticated_session_at::<EventProxy>(&jump_destination, &jump_profile, None, 1)
+                    .await?;
             let channel = {
                 let session = jump.lock().await;
                 session
@@ -1453,6 +1489,12 @@ mod tests {
         assert_eq!(destination.host, "server.internal");
         assert_eq!(destination.port, 2200);
         assert_eq!(destination.identity_files.len(), 1);
+    }
+
+    #[test]
+    fn proxy_test_timeout_copy_matches_shared_budget() {
+        assert_eq!(super::proxy_test_timeout_message(), "网络测试超时（12 秒无响应）");
+        assert_eq!(super::TEST_TIMEOUT.as_secs(), 12);
     }
 
     #[test]

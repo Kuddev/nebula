@@ -182,14 +182,30 @@ pub fn imported_font_directory() -> PathBuf {
 
 #[cfg(windows)]
 pub fn imported_font_files() -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(imported_font_directory()) else { return Vec::new() };
-    let mut files = entries
+    let mut files = font_files_in(&imported_font_directory());
+    // 隔离启动把 `data_dir` 指到临时配置时，用户以前导入到
+    // `%APPDATA%\Nebula\fonts` 的字体会「消失」。探测实例仍应能看见它们。
+    if std::env::var_os("NEBULA_CONFIG_DIR").is_some() {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let user_fonts = PathBuf::from(appdata).join("Nebula").join("fonts");
+            if user_fonts != imported_font_directory() {
+                files.extend(font_files_in(&user_fonts));
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+#[cfg(windows)]
+fn font_files_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_file() && supported_font_extension(path))
-        .collect::<Vec<_>>();
-    files.sort();
-    files
+        .collect()
 }
 
 #[cfg(windows)]

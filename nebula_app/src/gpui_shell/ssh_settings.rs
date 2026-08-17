@@ -26,6 +26,16 @@ use crate::gpui_shell::widgets::NebulaButton;
 /// 删除撤销窗口时长，旧壳 Undo 条同值。
 const SSH_DELETE_UNDO_SECS: u64 = 8;
 
+/// 对齐旧壳 `display/ssh_editor_render.rs` / `settings.rs` 的 SSH 几何。
+const SSH_EDITOR_W: f32 = 440.0;
+const SSH_EDITOR_LABEL_W: f32 = 84.0;
+const SSH_EDITOR_FIELD_GAP: f32 = 6.0;
+const SSH_EDITOR_SPACE_S: f32 = 12.0;
+const SSH_EDITOR_SPACE_XS: f32 = 8.0;
+const SSH_EDITOR_IDENT_NAME_H: f32 = 30.0;
+const SSH_HOST_ROW_H: f32 = 58.0;
+const SSH_HOST_GAP: f32 = 8.0;
+
 /// 设置页 SSH 添加/编辑面板的非文本草稿。文字实体常驻在 `SettingsPane`，
 /// 这样输入事件可以统一使测试结果失效；草稿只保存认证、密钥和编辑身份。
 #[derive(Clone)]
@@ -544,13 +554,23 @@ impl SettingsPane {
 
         let field_row = |label: &'static str, control: gpui::AnyElement| {
             h_flex()
-                .gap_3()
+                .gap(px(SSH_EDITOR_SPACE_S))
                 .items_center()
-                .child(div().w(px(72.0)).flex_shrink_0().text_sm().child(label))
+                .child(
+                    div()
+                        .w(px(SSH_EDITOR_LABEL_W))
+                        .flex_shrink_0()
+                        .text_sm()
+                        .child(label),
+                )
                 .child(div().flex_1().min_w_0().child(control))
         };
         let field_note = |text: &'static str| {
-            div().pl(px(84.0)).text_xs().text_color(muted).child(text)
+            div()
+                .pl(px(SSH_EDITOR_LABEL_W + SSH_EDITOR_SPACE_S))
+                .text_xs()
+                .text_color(muted)
+                .child(text)
         };
 
         Some(
@@ -588,7 +608,7 @@ impl SettingsPane {
                         .p_6()
                         .child(
                             v_flex()
-                                .w(px(500.0))
+                                .w(px(SSH_EDITOR_W))
                                 .max_w(gpui::relative(1.0))
                                 .max_h(gpui::relative(1.0))
                                 .rounded(px(8.0))
@@ -621,26 +641,29 @@ impl SettingsPane {
                                         .min_h_0()
                                         .overflow_y_scrollbar()
                                         .p_4()
-                                        .gap_3()
+                                        .gap(px(SSH_EDITOR_SPACE_S))
                                         .child(
                                             h_flex()
                                                 .relative()
-                                                .gap_3()
-                                                .items_center()
+                                                .gap(px(SSH_EDITOR_SPACE_S))
+                                                .items_start()
                                                 .child(avatar)
                                                 .child(
                                                     v_flex()
                                                         .flex_1()
                                                         .min_w_0()
+                                                        .h(px(46.0))
                                                         .child(
-                                                            Input::new(&self.ssh_label_input)
-                                                                .appearance(false)
-                                                                .bordered(false)
-                                                                .focus_bordered(false),
+                                                            div().h(px(SSH_EDITOR_IDENT_NAME_H)).w_full().child(
+                                                                Input::new(&self.ssh_label_input)
+                                                                    .appearance(false)
+                                                                    .bordered(false)
+                                                                    .focus_bordered(false),
+                                                            ),
                                                         )
                                                         .child(
                                                             div()
-                                                                .px_3()
+                                                                .pt(px(2.0))
                                                                 .text_xs()
                                                                 .text_color(muted)
                                                                 .truncate()
@@ -649,18 +672,19 @@ impl SettingsPane {
                                                 )
                                                 .children(icon_popup),
                                         )
-                                        .child(div().w_full().h(px(1.0)).my_1().bg(theme.border))
+                                        .child(div().w_full().h(px(1.0)).bg(theme.border))
                                         .child(
                                             v_flex()
                                                 .w_full()
-                                                .p_3()
-                                                .gap_3()
+                                                .p(px(SSH_EDITOR_SPACE_S))
+                                                .gap(px(SSH_EDITOR_FIELD_GAP))
                                                 .rounded(px(8.0))
                                                 .border_1()
                                                 .border_color(theme.border)
                                                 .bg(theme.group_box)
                                                 .child(
                                                     div()
+                                                        .mb(px(SSH_EDITOR_SPACE_XS - SSH_EDITOR_FIELD_GAP))
                                                         .text_sm()
                                                         .text_color(theme.group_box_foreground)
                                                         .child("连接"),
@@ -675,11 +699,11 @@ impl SettingsPane {
                                                 ))
                                                 .child(
                                                     h_flex()
-                                                        .gap_3()
+                                                        .gap(px(SSH_EDITOR_SPACE_S))
                                                         .items_center()
                                                         .child(
                                                             div()
-                                                                .w(px(72.0))
+                                                                .w(px(SSH_EDITOR_LABEL_W))
                                                                 .flex_shrink_0()
                                                                 .text_sm()
                                                                 .child("端口"),
@@ -700,14 +724,15 @@ impl SettingsPane {
                                         .child(
                                             v_flex()
                                                 .w_full()
-                                                .p_3()
-                                                .gap_3()
+                                                .p(px(SSH_EDITOR_SPACE_S))
+                                                .gap(px(SSH_EDITOR_FIELD_GAP))
                                                 .rounded(px(8.0))
                                                 .border_1()
                                                 .border_color(theme.border)
                                                 .bg(theme.group_box)
                                                 .child(
                                                     div()
+                                                        .mb(px(SSH_EDITOR_SPACE_XS - SSH_EDITOR_FIELD_GAP))
                                                         .text_sm()
                                                         .text_color(theme.group_box_foreground)
                                                         .child("认证"),
@@ -756,11 +781,11 @@ impl SettingsPane {
                                                     section
                                                         .child(
                                                             h_flex()
-                                                                .gap_3()
+                                                                .gap(px(SSH_EDITOR_SPACE_S))
                                                                 .items_center()
                                                                 .child(
                                                                     div()
-                                                                        .w(px(72.0))
+                                                                        .w(px(SSH_EDITOR_LABEL_W))
                                                                         .flex_shrink_0()
                                                                         .text_sm()
                                                                         .child("密码"),
@@ -804,7 +829,7 @@ impl SettingsPane {
                                                             "密码不会写入配置文件，只保存到 Windows 凭据管理器。",
                                                         ))
                                                         .child(
-                                                            div().pl(px(84.0)).child(
+                                                            div().pl(px(SSH_EDITOR_LABEL_W + SSH_EDITOR_SPACE_S)).child(
                                                                 Checkbox::new("ssh-save-password")
                                                                     .small()
                                                                     .checked(editor.save_password)
@@ -832,11 +857,11 @@ impl SettingsPane {
                                                     section
                                                         .child(
                                                             h_flex()
-                                                                .gap_3()
+                                                                .gap(px(SSH_EDITOR_SPACE_S))
                                                                 .items_center()
                                                                 .child(
                                                                     div()
-                                                                        .w(px(72.0))
+                                                                        .w(px(SSH_EDITOR_LABEL_W))
                                                                         .flex_shrink_0()
                                                                         .text_sm()
                                                                         .child("私钥"),
@@ -863,7 +888,7 @@ impl SettingsPane {
                                                                         })),
                                                                 ),
                                                         )
-                                                        .child(v_flex().pl(px(84.0)).gap_2().children(key_rows))
+                                                        .child(v_flex().pl(px(SSH_EDITOR_LABEL_W + SSH_EDITOR_SPACE_S)).gap(px(SSH_EDITOR_FIELD_GAP)).children(key_rows))
                                                 })
                                                 .when(!shows_password && !shows_keys, |section| {
                                                     section.child(field_note(
@@ -1156,6 +1181,14 @@ impl SettingsPane {
             .map(|settings| settings.font_family.clone())
             .unwrap_or_else(|| String::from("Maple Mono Normal NF CN"))
             .into();
+        let font_px = cx
+            .try_global::<crate::gpui_shell::config::Settings>()
+            .map(|settings| settings.base_font_size_px)
+            .unwrap_or(15.0);
+        // 只保留标题→地址的行距（旧壳 title_y + 0.95*cell_h / 副行 0.78）。
+        // 图标槽、行内 gap、卡片描边退回改前那套：整行重排后观感反而不如原来。
+        let title_h = font_px;
+        let subtitle_h = font_px * 0.78;
         let hidden: Vec<String> = self.ssh_hosts.hidden_hosts().to_vec();
         let delete_confirm = self.ssh_delete_confirm.clone();
 
@@ -1178,7 +1211,7 @@ impl SettingsPane {
                 .group(row_group.clone())
                 // 旧壳 `SSH_HOST_ROW_H` 固定 58px；两行文字与 OS 图标在
                 // 这个高度里共用中线，不能压成普通 48px 设置行。
-                .h(px(58.0))
+                .h(px(SSH_HOST_ROW_H))
                 .w_full()
                 .px_3()
                 .items_center()
@@ -1219,17 +1252,28 @@ impl SettingsPane {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .gap_1()
-                        .child(div().truncate().child(label))
+                        .justify_center()
+                        .child(
+                            div()
+                                .h(px(title_h * 0.95))
+                                .flex()
+                                .items_center()
+                                .text_size(px(title_h))
+                                .line_height(px(title_h))
+                                .truncate()
+                                .child(label),
+                        )
                         .child(
                             h_flex()
+                                .h(px(subtitle_h))
                                 .gap_2()
                                 .items_center()
                                 // 副行与旧壳同合同：只放目的地本身；来源用
                                 // 小徽章表达（config 源的删除语义是隐藏）。
                                 .child(
                                     div()
-                                        .text_xs()
+                                        .text_size(px(subtitle_h))
+                                        .line_height(px(subtitle_h))
                                         .text_color(muted)
                                         .truncate()
                                         .child(host.clone()),
@@ -1394,7 +1438,7 @@ impl SettingsPane {
                         ),
                     ),
             )
-            .child(div().h(px(8.0)))
+            .child(div().h(px(SSH_HOST_GAP)))
             .child(
                 v_flex()
                     .w_full()
@@ -1419,22 +1463,20 @@ impl SettingsPane {
                         )
                     }),
             )
-            .child(div().h(px(8.0)))
+            .child(div().h(px(SSH_HOST_GAP)))
             .child(
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(
-                        NebulaButton::new("ssh-import").label("导入 ~/.ssh/config").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.ssh_hosts = crate::gpui_shell::ssh_hosts::SshHostLists::load();
-                                let count = crate::ssh::ssh_config_hosts().len();
-                                this.ssh_status =
-                                    Some((format!("已导入，config 源共 {count} 个别名"), false));
-                                cx.notify();
-                            }),
-                        ),
-                    )
+                    .child(NebulaButton::new("ssh-import").label("导入 ~/.ssh/config").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.ssh_hosts = crate::gpui_shell::ssh_hosts::SshHostLists::load();
+                            let count = crate::ssh::ssh_config_hosts().len();
+                            this.ssh_status =
+                                Some((format!("已导入，config 源共 {count} 个别名"), false));
+                            cx.notify();
+                        }),
+                    ))
                     .when(hidden_count > 0, |row| {
                         let show = self.ssh_show_hidden;
                         row.child(
@@ -1479,17 +1521,15 @@ impl SettingsPane {
                         .rounded(px(6.0))
                         .bg(theme.muted)
                         .child(Icon::new(IconName::Undo2).xsmall().text_color(muted))
+                        .child(div().flex_1().text_sm().child(SharedString::from(format!(
+                            "已删除 {host}，{SSH_DELETE_UNDO_SECS} 秒内可撤销"
+                        ))))
                         .child(
-                            div()
-                                .flex_1()
-                                .text_sm()
-                                .child(SharedString::from(format!(
-                                    "已删除 {host}，{SSH_DELETE_UNDO_SECS} 秒内可撤销"
-                                ))),
-                        )
-                        .child(NebulaButton::new("ssh-undo-delete").label("撤销").outline().on_click(
-                            cx.listener(|this, _, _, cx| this.undo_ssh_delete(cx)),
-                        )),
+                            NebulaButton::new("ssh-undo-delete")
+                                .label("撤销")
+                                .outline()
+                                .on_click(cx.listener(|this, _, _, cx| this.undo_ssh_delete(cx))),
+                        ),
                 )
             })
             .when_some(self.ssh_status.clone(), |group, (message, error)| {

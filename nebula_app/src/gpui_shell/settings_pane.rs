@@ -9,20 +9,18 @@
 //! 锁定）。这里只负责用组件库把字段摆出来；改动经 `persist_keys` 原地
 //! 写回 `nebula_settings.txt`，与旧壳读写同一份文件、同一套语义。
 //!
-//! 生效时机（对齐旧壳）：主题/配色/背景色/字号/copy_on_select 即时热应用；
-//! 字体族与默认光标形状对新标签页生效；窗口透明/模糊/托盘/快速终端热键
-//! 等依赖尚未迁移的窗口子系统，写盘后由旧壳消费（本页如实标注）。
+//! 生效时机（对齐旧壳）：主题/配色/背景/字号/模糊/透明/copy_on_select
+//! 即时热应用；字体族与默认光标形状对新标签页生效。
 //!
-//! 仍依赖旧壳窗口子系统的设置会在对应分区明确标注；SSH 主机、AI
-//! Provider、按键映射和备份编辑器已经复用共享业务层与持久化合同。
+//! SSH 主机、AI Provider、按键映射和备份编辑器已经复用共享业务层与持久化合同。
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, Image,
     ImageFormat, InteractiveElement as _, IntoElement, KeyDownEvent, ModifiersChangedEvent,
-    MouseButton, ParentElement as _, Render, RenderImage, Rgba as GpuiRgba, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, anchored, deferred, div,
-    img, px,
+    MouseButton, MouseMoveEvent, ParentElement as _, Render, RenderImage, Rgba as GpuiRgba,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, anchored,
+    deferred, div, img, px,
 };
 use gpui_component::input::InputEvent;
 use gpui_component::select::{SelectEvent, SelectItem};
@@ -31,6 +29,9 @@ use std::sync::Arc;
 
 use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::widgets::NebulaButton;
+
+#[path = "background_color.rs"]
+mod background_color;
 
 /// 主题下拉（展示名 = 持久化名，与旧壳一致）。
 const THEME_VALUES: [&str; 7] =
@@ -56,10 +57,8 @@ const SETTINGS_GROUP_GAP: f32 = 32.0;
 const SETTINGS_GROUP_TITLE_HEIGHT: f32 = 26.0;
 const SETTINGS_GROUP_TITLE_GAP: f32 = 16.0;
 const SETTINGS_ROW_HEIGHT: f32 = 44.0;
-// 旧壳下拉框要求弹层与触发器同宽；集中维护可避免任一侧调整后再次漂移。
+// 触发条仍 220，对齐旧壳 combobox。弹层加宽，长族名 + 徽标才读得完。
 const FONT_PICKER_WIDTH: f32 = 220.0;
-/// 展开面板比触发按钮宽：长族名（"Maple Mono Normal NF CN"）+ 预览小样 +
-/// 徽标一行放下，名字不再被徽标挤断。
 const FONT_PICKER_PANEL_WIDTH: f32 = 400.0;
 
 const THEME_NAMES: [ThemeName; 7] = [
@@ -71,6 +70,18 @@ const THEME_NAMES: [ThemeName; 7] = [
     ThemeName::LinenLight,
     ThemeName::MossDark,
 ];
+
+/// 列表/触发条上的展示名：族名偶尔带着导入文件后缀，界面上剥掉。
+fn font_display_name(name: &str) -> String {
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    for ext in [".ttf", ".otf", ".ttc", ".otc", ".woff", ".woff2"] {
+        if let Some(stem) = lower.strip_suffix(ext) {
+            return trimmed[..stem.len()].to_owned();
+        }
+    }
+    trimmed.to_owned()
+}
 
 fn section_icon(index: usize) -> IconName {
     match index {
@@ -120,7 +131,7 @@ fn query_component(value: &str) -> String {
     encoded
 }
 
-/// 对齐 Netcatty 的 GitHub issue form 预填合同：模板、版本、平台、安装来源
+/// GitHub issue form 预填合同：模板、版本、平台、安装来源
 /// 和诊断摘要都来自当前运行实例，用户只需补充复现步骤与实际表现。
 fn issue_url() -> String {
     let version = env!("CARGO_PKG_VERSION");
@@ -163,7 +174,7 @@ pub enum SettingsPaneEvent {
     LaunchSsh(String),
 }
 
-type SharedSelect = Entity<SelectState<Vec<SharedString>>>;
+pub(super) type SharedSelect = Entity<SelectState<Vec<SharedString>>>;
 type SharedShellSelect = Entity<SelectState<Vec<ShellSelectItem>>>;
 
 #[derive(Clone)]
@@ -190,8 +201,7 @@ impl ShellSelectItem {
     fn new(id: String, name: String, scale_factor: f32) -> Self {
         // Select 的闭态和菜单行尺寸不同。分别生成与物理像素一一对应的纹理，
         // 避免把 128px 原图交给 GPUI 在每帧缩小而产生模糊边缘。
-        let closed_image =
-            crate::gpui_shell::widgets::shell_brand_image(&id, 20.0, scale_factor);
+        let closed_image = crate::gpui_shell::widgets::shell_brand_image(&id, 20.0, scale_factor);
         let row_image = crate::gpui_shell::widgets::shell_brand_image(&id, 24.0, scale_factor);
         Self { id, name: name.into(), closed_image, row_image }
     }
@@ -245,7 +255,7 @@ impl SelectItem for ShellSelectItem {
 pub struct SettingsPane {
     pub(super) focus_handle: FocusHandle,
     /// 渲染与写盘的单一事实源；每次 persist 后整体重载。
-    runtime: RuntimeSettings,
+    pub(super) runtime: RuntimeSettings,
     /// 当前分区（`SECTIONS` 下标）；默认落在应用主页。
     active_section: usize,
     about_logo: Arc<Image>,
@@ -253,13 +263,23 @@ pub struct SettingsPane {
     about_update_seq: u64,
     selects: Vec<(&'static str, SharedSelect)>,
     shell_select: SharedShellSelect,
-    dir_input: Entity<InputState>,
-    /// 外观页使用组件库的真实交互控件；状态实体是渲染与拖拽的唯一来源。
-    background_color: Entity<ColorPickerState>,
+    /// 外观页背景色：闭态 combobox + 开态 SV/色相/色板/hex 浮层（旧壳
+    /// `SettingsDropdown::BackgroundColor`，不是组件库 ColorPicker）。
+    bg_picker_open: bool,
+    bg_picker_hsv: (f32, f32, f32),
+    bg_picker_drag: Option<crate::display::BgPickerPart>,
+    bg_hex_input: Entity<InputState>,
+    bg_hex_focused: bool,
+    bg_hex_syncing: bool,
+    bg_picker_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    bg_sv_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    bg_hue_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     opacity_slider: Entity<SliderState>,
     wallpaper_opacity_slider: Entity<SliderState>,
-    proxy_url_input: Entity<InputState>,
-    proxy_bypass_input: Entity<InputState>,
+    pub(super) proxy_url_input: Entity<InputState>,
+    pub(super) proxy_protocol_select: SharedSelect,
+    pub(super) proxy_test_seq: u64,
+    pub(super) proxy_test_status: crate::display::ProxyTestStatus,
     provider_store: crate::ai_providers::ProviderStore,
     /// Name / note / website / endpoint / model. API keys deliberately do not
     /// use a GPUI text widget; the native credential dialog is write-only.
@@ -437,6 +457,14 @@ impl SettingsPane {
         );
         // 文案照抄旧壳 `accept_label` / `completion_style_label`。
         add_select(
+            "bell",
+            &["关", "闪烁", "声音", "闪烁 + 声音"],
+            &["none", "visual", "audible", "both"],
+            runtime.bell.settings_value(),
+            window,
+            cx,
+        );
+        add_select(
             "accept",
             &["右方向键", "Tab", "Tab 或右方向键"],
             &["right", "tab", "both"],
@@ -494,7 +522,7 @@ impl SettingsPane {
         );
         add_select(
             "ssh_proxy_mode",
-            &["关闭", "系统代理", "自定义"],
+            &["不使用代理", "跟随系统", "自定义代理"],
             &["off", "system", "custom"],
             runtime.ssh_proxy_mode.settings_value(),
             window,
@@ -549,25 +577,27 @@ impl SettingsPane {
             },
         ));
 
-        let dir_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("留空 = 继承当前窗格目录")
-                .default_value(runtime.startup_directory.clone().unwrap_or_default())
-        });
-        let background_color_value = runtime
-            .background
-            .map(|[r, g, b]| rgb_hsla(r, g, b))
-            .unwrap_or_else(|| cx.theme().background);
-        let background_color =
-            cx.new(|cx| ColorPickerState::new(window, cx).default_value(background_color_value));
-        subscriptions.push(cx.subscribe(
-            &background_color,
-            |this, _, event: &ColorPickerEvent, cx| {
-                if let ColorPickerEvent::Change(Some(color)) = event {
-                    this.persist(&[("background", color.to_hex())], cx);
-                }
-            },
-        ));
+        let bg_hex_input = {
+            let term = crate::gpui_shell::theme::chrome_theme_resolved(cx).palette().term_bg;
+            let rgb = runtime.background.unwrap_or([term.r, term.g, term.b]);
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("#rrggbb")
+                    .default_value(format_hex_rgb(rgb))
+            });
+            subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |this: &mut Self,
+                 _: &Entity<InputState>,
+                 event: &InputEvent,
+                 window: &mut Window,
+                 cx: &mut Context<Self>| {
+                    this.on_bg_hex_event(event, window, cx);
+                },
+            ));
+            input
+        };
         let opacity_slider = cx.new(|_| {
             SliderState::new().min(0.20).max(1.00).step(0.05).default_value(runtime.opacity)
         });
@@ -589,16 +619,46 @@ impl SettingsPane {
                 SliderEvent::Change(value) => this.set_wallpaper_opacity(value.start(), cx),
             },
         ));
+        let (proxy_protocol, proxy_address) =
+            crate::display::manual_proxy_parts(&runtime.ssh_proxy_url);
+        let proxy_protocol_ix = crate::display::MANUAL_PROXY_PROTOCOL_OPTIONS
+            .iter()
+            .position(|item| *item == proxy_protocol)
+            .unwrap_or(0);
+        let proxy_protocol_select = cx.new(|cx| {
+            SelectState::new(
+                vec![SharedString::from("SOCKS5"), SharedString::from("HTTP")],
+                Some(IndexPath::default().row(proxy_protocol_ix)),
+                window,
+                cx,
+            )
+        });
+        subscriptions.push(cx.subscribe_in(
+            &proxy_protocol_select,
+            window,
+            |this: &mut Self,
+             _,
+             event: &SelectEvent<Vec<SharedString>>,
+             _,
+             cx: &mut Context<Self>| {
+                if matches!(event, SelectEvent::Confirm(Some(_))) {
+                    this.commit_proxy_address(cx);
+                }
+            },
+        ));
         let proxy_url_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("socks5://127.0.0.1:7890")
-                .default_value(runtime.ssh_proxy_url.clone())
+                .placeholder("127.0.0.1:7890")
+                .pattern(regex::Regex::new(r"^[^\s]{0,256}$").expect("static regex"))
+                .default_value(proxy_address.to_owned())
         });
-        let proxy_bypass_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("逗号分隔，如 10.0.0.0/8,*.internal")
-                .default_value(runtime.ssh_proxy_no_proxy.clone())
-        });
+        subscriptions.push(cx.subscribe_in(
+            &proxy_url_input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, _, cx: &mut Context<Self>| {
+                this.on_proxy_address_event(event, cx);
+            },
+        ));
         let provider_store = crate::ai_providers::load();
         let active_provider = provider_store
             .providers
@@ -681,6 +741,12 @@ impl SettingsPane {
             },
         ));
 
+        let bg_picker_hsv = {
+            let term = crate::gpui_shell::theme::chrome_theme_resolved(cx).palette().term_bg;
+            let rgb = runtime.background.unwrap_or([term.r, term.g, term.b]);
+            crate::display::rgb_to_hsv(crate::display::color::Rgb::new(rgb[0], rgb[1], rgb[2]))
+        };
+
         Self {
             focus_handle: cx.focus_handle(),
             runtime,
@@ -693,12 +759,21 @@ impl SettingsPane {
             about_update_seq: 0,
             selects,
             shell_select,
-            dir_input,
-            background_color,
+            bg_picker_open: false,
+            bg_picker_hsv,
+            bg_picker_drag: None,
+            bg_hex_input,
+            bg_hex_focused: false,
+            bg_hex_syncing: false,
+            bg_picker_trigger_bounds: None,
+            bg_sv_bounds: None,
+            bg_hue_bounds: None,
             opacity_slider,
             wallpaper_opacity_slider,
             proxy_url_input,
-            proxy_bypass_input,
+            proxy_protocol_select,
+            proxy_test_seq: 0,
+            proxy_test_status: crate::display::ProxyTestStatus::Idle,
             provider_store,
             provider_inputs,
             provider_status: None,
@@ -775,7 +850,7 @@ impl SettingsPane {
     }
 
     /// 写盘 → 重载单一事实源与全局 `Settings` → 通知宿主热应用。
-    fn persist(&mut self, updates: &[(&str, String)], cx: &mut Context<Self>) {
+    pub(super) fn persist(&mut self, updates: &[(&str, String)], cx: &mut Context<Self>) {
         if let Err(err) = persist_keys(updates) {
             eprintln!("[nebula:gpui] failed to persist settings: {err}");
         }
@@ -784,16 +859,61 @@ impl SettingsPane {
             crate::gpui_shell::theme::effective_theme_name(cx),
         );
         cx.set_global(settings);
+        if updates.iter().any(|(key, _)| matches!(*key, "ssh_proxy_mode" | "ssh_proxy_url")) {
+            self.invalidate_proxy_test();
+        }
         cx.emit(SettingsPaneEvent::Changed);
         cx.notify();
     }
 
-    fn toggle(&mut self, key: &'static str, value: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle(
+        &mut self,
+        key: &'static str,
+        value: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if key == "follow_system_theme" {
             self.set_follow_system_theme(value, window, cx);
             return;
         }
+        if key == "background_image_cover_chrome" {
+            self.request_cover_chrome(value, window, cx);
+            return;
+        }
         self.persist(&[(key, (value as u8).to_string())], cx);
+    }
+
+    /// 旧壳 `request_toggle_background_image_cover_chrome`：关→开要确认
+    /// （壳变半透明、控件对比度下降）；开→关直接生效。
+    fn request_cover_chrome(&mut self, enable: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !enable {
+            self.persist(&[("background_image_cover_chrome", "0".to_owned())], cx);
+            return;
+        }
+        if self.runtime.background_image_cover_chrome {
+            return;
+        }
+        let pane = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, _cx| {
+            let pane = pane.clone();
+            center_confirm_dialog(dialog, window)
+                .title("让背景图覆盖窗口控件区域？")
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default().ok_text("开启").cancel_text("取消"),
+                )
+                .child(SharedString::from(
+                    "背景图会延伸到标题栏、窗口按钮、Tab 与 SSH 侧栏下方，低对比度图片可能影响操作可见性；界面仍会保留最低不透明度保护。",
+                ))
+                .on_ok(move |_, _, cx| {
+                    let _ = pane.update(cx, |this, cx| {
+                        this.persist(&[("background_image_cover_chrome", "1".to_owned())], cx);
+                    });
+                    true
+                })
+        });
+        cx.notify();
     }
 
     /// 对齐旧壳 `toggle_system_theme_following`：开关会 `apply_nebula_theme`，
@@ -813,27 +933,11 @@ impl SettingsPane {
         self.persist(
             &[
                 ("follow_system_theme", (follow as u8).to_string()),
-                (
-                    "background",
-                    format_hex_rgb(applied.term_theme().background),
-                ),
+                ("background", format_hex_rgb(applied.term_theme().background)),
             ],
             cx,
         );
         self.sync_background_color_picker(window, cx);
-    }
-
-    /// 取色器只是预览，不能当事实源：空 `background=` 表示跟随主题，
-    /// 色块要显示生效主题的 `term_bg`，而不是被劫持成壳色的 `theme.background`。
-    fn sync_background_color_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let color = self
-            .runtime
-            .background
-            .map(|[r, g, b]| rgb_hsla(r, g, b))
-            .unwrap_or_else(|| crate::gpui_shell::theme::theme_term_background(cx));
-        self.background_color.update(cx, |state, cx| {
-            state.set_value(color, window, cx);
-        });
     }
 
     /// 旧壳“恢复默认设置”只重置外观，不触碰 Shell、SSH、快捷键等业务配置。
@@ -1085,7 +1189,7 @@ impl SettingsPane {
                                     .truncate()
                                     .text_left()
                                     .font_family(primary.clone())
-                                    .child(primary),
+                                    .child(font_display_name(&primary)),
                             )
                             .child(
                                 Icon::new(if self.font_picker_open {
@@ -1117,8 +1221,8 @@ impl SettingsPane {
         self.row("字体", control).into_any_element()
     }
 
-    /// 展开面板：搜索 + 「显示全部」临时过滤 + 目录列表（真实字体预览、
-    /// 等宽/导入/内置徽标、当前项高亮）+ 导入按钮。目录装配走共享
+    /// 展开面板：搜索 + 「显示全部」临时过滤 + 目录列表（族名用本字体
+    /// 绘制、等宽/导入/内置徽标、当前项高亮）+ 导入按钮。目录装配走共享
     /// `font_catalog`（同名合并、当前项保底），内置字体按旧壳规则恒排首位。
     fn font_picker_panel(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         use crate::font_install::{FontCatalogEntry, FontSource, REQUIRED_FONT_FAMILY};
@@ -1183,16 +1287,16 @@ impl SettingsPane {
                     .cursor_pointer()
                     .when(selected, |row| row.bg(selected_bg))
                     .hover(|row| row.bg(hover_bg))
-                    // 族名用界面字体排：行高稳定、任何名字都可读；该字体的
-                    // 真实字形交给右侧预览小样展示。
-                    .child(div().flex_1().min_w_0().truncate().text_sm().child(entry.name.clone()))
+                    // 旧壳 begin_preview_face：候选行用该字体自己的字形画名字。
+                    // 展示名去掉文件后缀（导入路径偶尔会把 .ttf 带进族名）。
                     .child(
                         div()
-                            .flex_shrink_0()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
                             .text_sm()
-                            .text_color(muted)
-                            .font_family(family.clone())
-                            .child("AaBb 012"),
+                            .font_family(family)
+                            .child(font_display_name(&entry.name)),
                     )
                     .when(required, |row| row.child(badge("内置", muted)))
                     .when(!required && entry.source == FontSource::Imported, |row| {
@@ -1208,8 +1312,7 @@ impl SettingsPane {
 
         v_flex()
             // 面板由字体行的 deferred/anchored 槽托管，不参与设置文档流高度；
-            // 固定宽度让族名与徽标保持可读，窄窗由 anchored
-            // 自动贴边，行为与组件库 Select 的弹层一致。
+            // 弹层宽于触发条，长族名和「内置/导入/比例」徽标并排才读得完。
             .w(px(FONT_PICKER_PANEL_WIDTH))
             .max_w_full()
             .p_3()
@@ -1228,7 +1331,6 @@ impl SettingsPane {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .max_w(px(200.0))
                             .child(Input::new(&self.font_query_input)),
                     )
                     .child(div().flex_shrink_0().text_sm().text_color(muted).child("显示全部"))
@@ -1270,16 +1372,13 @@ impl SettingsPane {
                     .gap_2()
                     .items_center()
                     .child({
-                        let button = NebulaButton::new("font-import").label("导入字体文件…");
+                        let button = NebulaButton::new("font-import").label("导入字体");
                         #[cfg(windows)]
                         let button = button.on_click(cx.listener(|this, _, window, cx| {
                             this.import_font_file(window, cx);
                         }));
                         button
                     })
-                    .child(
-                        div().text_xs().text_color(muted).child("支持 .ttf / .otf / .ttc / .otc"),
-                    )
                     .when_some(self.font_notice.clone(), |row, notice| {
                         row.child(div().text_xs().text_color(theme.danger).child(notice))
                     }),
@@ -1314,7 +1413,7 @@ impl SettingsPane {
         )
     }
 
-    fn select_of(&self, key: &str) -> Option<SharedSelect> {
+    pub(super) fn select_of(&self, key: &str) -> Option<SharedSelect> {
         self.selects.iter().find(|(k, _)| *k == key).map(|(_, entity)| entity.clone())
     }
 
@@ -1352,7 +1451,47 @@ impl SettingsPane {
             .child(div().w_full().h(px(1.0)).bg(cx.theme().border))
     }
 
-    fn row(&self, label: &'static str, control: impl IntoElement) -> impl IntoElement {
+    pub(super) fn row(&self, label: &'static str, control: impl IntoElement) -> impl IntoElement {
+        self.row_inner(label, None, control)
+    }
+
+    /// 标题旁的撤销箭头只在该项被覆盖时出现，点下去清回默认
+    /// （旧壳背景图的「↶」同一合同）。
+    fn row_with_reset(
+        &self,
+        label: &'static str,
+        dirty: bool,
+        on_reset: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        control: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let reset = dirty.then(|| {
+            let id = SharedString::from(format!("setting-reset-{label}"));
+            div()
+                .id(id)
+                .size(px(22.0))
+                .rounded_md()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|el| el.bg(cx.theme().list_hover))
+                .tooltip(|window, cx| {
+                    gpui_component::tooltip::Tooltip::new("还原为默认值").build(window, cx)
+                })
+                .on_click(cx.listener(move |this, _, window, cx| on_reset(this, window, cx)))
+                .child(Icon::new(IconName::Undo2).xsmall())
+                .into_any_element()
+        });
+        self.row_inner(label, reset, control)
+    }
+
+    fn row_inner(
+        &self,
+        label: &'static str,
+        reset: Option<gpui::AnyElement>,
+        control: impl IntoElement,
+    ) -> impl IntoElement {
         // 行高走旧壳密度阶梯（`tokens::control::settings_row`）：标准 44、
         // 紧凑 38——「界面外观」设置由此对设置页真实生效。
         let row_h = if self.runtime.density == nebula_settings::DensityName::Compact {
@@ -1369,7 +1508,16 @@ impl SettingsPane {
             // （ROW_INSET）。GPUI 行内两端原来都贴边，长表单左缘和右缘会
             // 呈一条光柱——旧壳的两档缩进是刻意留的呼吸边。
             .pr_4()
-            .child(div().flex_1().min_w_0().pl_4().child(label))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_4()
+                    .items_center()
+                    .gap_1()
+                    .child(div().min_w_0().child(label))
+                    .children(reset),
+            )
             .child(control)
     }
 
@@ -1533,17 +1681,14 @@ impl SettingsPane {
                         .child(theme.short_label()),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.persist(
-                        &crate::gpui_shell::theme::theme_card_persist_updates(name),
-                        cx,
-                    );
+                    this.persist(&crate::gpui_shell::theme::theme_card_persist_updates(name), cx);
                     this.sync_background_color_picker(window, cx);
                 }))
         }))
     }
 
     /// 布尔项 = 滑动开关（旧壳设置的液态胶囊 toggle），不是勾选框。
-    /// 组件是移植的旧壳动画开关（48×26、0.3s ease、按压拉伸）。
+    /// 四通道动画对照 `SettingsToggleAnim`（LiquidToggle 过冲 / 按住拉伸 / recoil）。
     fn switch_row(
         &self,
         key: &'static str,
@@ -1559,6 +1704,76 @@ impl SettingsPane {
                 }),
             ),
         )
+    }
+
+    /// 旧壳启动目录：点路径打开选文件夹；空着显示「继承当前目录」；
+    /// 有值时右侧「清除」。不是手填文本框。
+    fn startup_directory_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self
+            .runtime
+            .startup_directory
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty());
+        let has_dir = current.is_some();
+        let label: SharedString = current
+            .map(str::to_owned)
+            .unwrap_or_else(|| "继承当前目录".to_owned())
+            .into();
+        let color = if has_dir { cx.theme().link } else { cx.theme().muted_foreground };
+        self.row(
+            "启动目录",
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .id("startup-directory")
+                        .min_w_0()
+                        .max_w(px(280.0))
+                        .truncate()
+                        .cursor_pointer()
+                        .text_color(color)
+                        .child(label)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.pick_startup_directory(cx);
+                        })),
+                )
+                .when(has_dir, |row| {
+                    row.child(
+                        NebulaButton::new("startup-directory-clear").label("清除").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.clear_startup_directory(cx);
+                            }),
+                        ),
+                    )
+                }),
+        )
+    }
+
+    fn pick_startup_directory(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择终端启动目录".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            if !path.is_dir() {
+                return;
+            }
+            let value = path.to_string_lossy().into_owned();
+            let _ = this.update(cx, |pane, cx| {
+                pane.persist(&[("startup_directory", value)], cx);
+            });
+        })
+        .detach();
+    }
+
+    fn clear_startup_directory(&mut self, cx: &mut Context<Self>) {
+        self.persist(&[("startup_directory", String::new())], cx);
     }
 
     /// 文本输入 + 保存按钮（保存时读值写盘）。
@@ -1642,41 +1857,6 @@ impl SettingsPane {
         )
     }
 
-    fn background_color_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let featured = crate::display::BACKGROUND_SWATCHES
-            .iter()
-            .map(|color| {
-                let (r, g, b) = color.as_tuple();
-                rgb_hsla(r, g, b)
-            })
-            .collect::<Vec<_>>();
-        let current: SharedString = self
-            .runtime
-            .background
-            .map(format_hex_rgb)
-            .unwrap_or_else(|| "跟随主题".to_owned())
-            .into();
-        let custom = self.runtime.background.is_some();
-        self.row(
-            "背景色",
-            h_flex()
-                .w(px(280.0))
-                .items_center()
-                .gap_2()
-                .child(ColorPicker::new(&self.background_color).featured_colors(featured).small())
-                .child(div().flex_1().min_w_0().truncate().child(current))
-                .child(
-                    NebulaButton::new("background-color-reset")
-                        .label("跟随主题")
-                        .disabled(!custom)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.persist(&[("background", String::new())], cx);
-                            this.sync_background_color_picker(window, cx);
-                        })),
-                ),
-        )
-    }
-
     fn choose_background_image(&mut self, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
@@ -1698,39 +1878,40 @@ impl SettingsPane {
     fn background_image_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.runtime.background_image.clone();
         let has_image = current.as_ref().is_some_and(|path| !path.trim().is_empty());
-        let display: SharedString = current
-            .as_deref()
-            .filter(|path| !path.trim().is_empty())
-            .unwrap_or("未选择")
-            .to_owned()
-            .into();
-        self.row(
+        let path_label: Option<SharedString> =
+            current.as_deref().filter(|path| !path.trim().is_empty()).map(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_owned()
+                    .into()
+            });
+        self.row_with_reset(
             "背景图片",
+            has_image,
+            |this, _, cx| {
+                this.persist(&[("background_image", String::new())], cx);
+            },
             h_flex()
-                .w(px(420.0))
                 .items_center()
                 .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(cx.theme().muted_foreground)
-                        .truncate()
-                        .child(display),
-                )
-                .child(NebulaButton::new("background-image-choose").label("选择图片…").on_click(
+                .child(NebulaButton::new("background-image-choose").label("选择图片").on_click(
                     cx.listener(|this, _, _, cx| {
                         this.choose_background_image(cx);
                     }),
                 ))
-                .child(
-                    NebulaButton::new("background-image-clear")
-                        .label("清除")
-                        .disabled(!has_image)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.persist(&[("background_image", String::new())], cx);
-                        })),
-                ),
+                .when_some(path_label, |row, name| {
+                    row.child(
+                        div()
+                            .max_w(px(180.0))
+                            .min_w_0()
+                            .truncate()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(name),
+                    )
+                }),
+            cx,
         )
     }
 
@@ -2165,7 +2346,8 @@ impl SettingsPane {
         let terminal = self
             .group("终端", cx)
             .child(self.shell_select_row(cx))
-            .child(self.input_row("启动目录", "startup_directory", &self.dir_input.clone(), cx))
+            .child(self.startup_directory_row(cx))
+            .child(self.select_row("bell", "终端铃声", cx))
             .child(font_picker);
         let completion = self
             .group("补全", cx)
@@ -2228,22 +2410,28 @@ impl SettingsPane {
             let goals = provider.codex_goals;
             let remote = provider.codex_remote_compaction;
             editor = editor
-                .child(self.row(
-                    "启用",
-                    crate::gpui_shell::widgets::NebulaSwitch::new("provider-enabled")
-                        .checked(enabled)
-                        .on_click(cx.listener(|this, value: &bool, _, cx| {
-                            this.toggle_provider_flag("enabled", *value, cx);
-                        })),
-                ))
-                .child(self.row(
-                    "名称",
-                    div().w(px(330.0)).child(Input::new(&self.provider_inputs[0])),
-                ))
-                .child(self.row(
-                    "备注",
-                    div().w(px(330.0)).child(Input::new(&self.provider_inputs[1])),
-                ))
+                .child(
+                    self.row(
+                        "启用",
+                        crate::gpui_shell::widgets::NebulaSwitch::new("provider-enabled")
+                            .checked(enabled)
+                            .on_click(cx.listener(|this, value: &bool, _, cx| {
+                                this.toggle_provider_flag("enabled", *value, cx);
+                            })),
+                    ),
+                )
+                .child(
+                    self.row(
+                        "名称",
+                        div().w(px(330.0)).child(Input::new(&self.provider_inputs[0])),
+                    ),
+                )
+                .child(
+                    self.row(
+                        "备注",
+                        div().w(px(330.0)).child(Input::new(&self.provider_inputs[1])),
+                    ),
+                )
                 .child(self.row(
                     "官方网站",
                     div().w(px(330.0)).child(Input::new(&self.provider_inputs[2])),
@@ -2256,36 +2444,51 @@ impl SettingsPane {
                     "默认模型",
                     div().w(px(330.0)).child(Input::new(&self.provider_inputs[4])),
                 ))
-                .child(self.row(
-                    "API Key",
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(key_status))
-                        .child(
-                            NebulaButton::new("provider-set-key")
-                                .label(if provider.api_key_set { "替换…" } else { "设置…" })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.prompt_provider_key(cx);
-                                })),
-                        ),
-                ))
-                .child(self.row(
-                    "Codex Goals",
-                    crate::gpui_shell::widgets::NebulaSwitch::new("provider-codex-goals")
-                        .checked(goals)
-                        .on_click(cx.listener(|this, value: &bool, _, cx| {
-                            this.toggle_provider_flag("codex_goals", *value, cx);
-                        })),
-                ))
-                .child(self.row(
-                    "Codex 远程压缩",
-                    crate::gpui_shell::widgets::NebulaSwitch::new("provider-codex-remote")
-                        .checked(remote)
-                        .on_click(cx.listener(|this, value: &bool, _, cx| {
-                            this.toggle_provider_flag("codex_remote_compaction", *value, cx);
-                        })),
-                ))
+                .child(
+                    self.row(
+                        "API Key",
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(key_status),
+                            )
+                            .child(
+                                NebulaButton::new("provider-set-key")
+                                    .label(if provider.api_key_set {
+                                        "替换…"
+                                    } else {
+                                        "设置…"
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.prompt_provider_key(cx);
+                                    })),
+                            ),
+                    ),
+                )
+                .child(
+                    self.row(
+                        "Codex Goals",
+                        crate::gpui_shell::widgets::NebulaSwitch::new("provider-codex-goals")
+                            .checked(goals)
+                            .on_click(cx.listener(|this, value: &bool, _, cx| {
+                                this.toggle_provider_flag("codex_goals", *value, cx);
+                            })),
+                    ),
+                )
+                .child(
+                    self.row(
+                        "Codex 远程压缩",
+                        crate::gpui_shell::widgets::NebulaSwitch::new("provider-codex-remote")
+                            .checked(remote)
+                            .on_click(cx.listener(|this, value: &bool, _, cx| {
+                                this.toggle_provider_flag("codex_remote_compaction", *value, cx);
+                            })),
+                    ),
+                )
                 .child(
                     h_flex()
                         .gap_2()
@@ -2307,18 +2510,18 @@ impl SettingsPane {
                                     this.test_provider(cx);
                                 })),
                         )
+                        .child(NebulaButton::new("provider-codex").label("应用到 Codex").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.apply_provider_to_codex(cx);
+                            }),
+                        ))
                         .child(
-                            NebulaButton::new("provider-codex").label("应用到 Codex").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.apply_provider_to_codex(cx);
+                            NebulaButton::new("provider-delete").label("删除").danger().on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.delete_provider(window, cx);
                                 }),
                             ),
-                        )
-                        .child(NebulaButton::new("provider-delete").label("删除").danger().on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.delete_provider(window, cx);
-                            }),
-                        )),
+                        ),
                 );
         } else {
             editor = editor.child(div().text_color(theme.muted_foreground).child("没有供应商配置"));
@@ -2339,11 +2542,11 @@ impl SettingsPane {
                             .overflow_y_scrollbar()
                             .children(provider_rows)
                             .child(
-                                NebulaButton::new("provider-add")
-                                    .label("+ 自定义供应商")
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                NebulaButton::new("provider-add").label("+ 自定义供应商").on_click(
+                                    cx.listener(|this, _, window, cx| {
                                         this.add_provider(window, cx);
-                                    })),
+                                    }),
+                                ),
                             ),
                     )
                     .child(editor),
@@ -2356,7 +2559,6 @@ impl SettingsPane {
                 )
             })
     }
-
 
     // ---- 备份（本地加密导出/恢复 + 远端同步）----
 
@@ -2704,23 +2906,25 @@ impl SettingsPane {
             .child(h_flex().gap_2().children(protocol_buttons))
             .children(slot_rows);
         if let Some(label) = secret_label {
-            remote_group = remote_group.child(self.row(
-                label,
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().text_xs().text_color(muted).child(if secret_ready {
-                        "已设置"
-                    } else {
-                        "未设置"
-                    }))
-                    .child(div().w(px(220.0)).child(Input::new(&self.backup_secret_input)))
-                    .child(NebulaButton::new("bk-store-secret").label("保存凭据").on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.store_remote_secret(window, cx);
-                        }),
-                    )),
-            ));
+            remote_group = remote_group.child(
+                self.row(
+                    label,
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_xs().text_color(muted).child(if secret_ready {
+                            "已设置"
+                        } else {
+                            "未设置"
+                        }))
+                        .child(div().w(px(220.0)).child(Input::new(&self.backup_secret_input)))
+                        .child(NebulaButton::new("bk-store-secret").label("保存凭据").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.store_remote_secret(window, cx);
+                            }),
+                        )),
+                ),
+            );
         }
         if protocol != BackupProtocol::Off {
             remote_group = remote_group.child(
@@ -2740,12 +2944,11 @@ impl SettingsPane {
                             })),
                     )
                     .child(
-                        NebulaButton::new("bk-pull")
-                            .label("恢复最新备份")
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
+                        NebulaButton::new("bk-pull").label("恢复最新备份").disabled(busy).on_click(
+                            cx.listener(|this, _, _, cx| {
                                 this.pull_remote(cx);
-                            })),
+                            }),
+                        ),
                     ),
             );
         }
@@ -2759,10 +2962,9 @@ impl SettingsPane {
                     .child("端到端加密（密码不落盘）；SSH 私钥永不进包，主机列表脱敏导出。"),
             )
             .children(category_rows)
-            .child(self.row(
-                "备份密码",
-                div().w(px(300.0)).child(Input::new(&self.backup_pass_input)),
-            ))
+            .child(
+                self.row("备份密码", div().w(px(300.0)).child(Input::new(&self.backup_pass_input))),
+            )
             .child(
                 h_flex()
                     .gap_2()
@@ -2797,18 +2999,6 @@ impl SettingsPane {
                         .child(message),
                 )
             })
-    }
-
-    fn section_network(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        self.group("网络（SSH 出站代理）", cx)
-            .child(self.select_row("ssh_proxy_mode", "代理模式", cx))
-            .child(self.input_row("代理 URL", "ssh_proxy_url", &self.proxy_url_input.clone(), cx))
-            .child(self.input_row(
-                "绕过列表",
-                "ssh_proxy_no_proxy",
-                &self.proxy_bypass_input.clone(),
-                cx,
-            ))
     }
 
     fn section_interaction(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -3166,7 +3356,10 @@ impl SettingsPane {
             }
         }
 
-        self.group("按键映射", cx)
+        // 旧壳按键映射页没有悬挂分组标题：搜索框独占整行（row_w × 34px），
+        // 占位「搜索动作或按键…」，下面再空 12px 才到冲突条 / 分组。
+        v_flex()
+            .w_full()
             // 捕获态的「点击任何位置先撤销」（旧壳 input/chrome.rs 的统一撤
             // 销合同）：行的 mouse_down 会 stop_propagation 自行处理转移/
             // 取消，搜索框这里显式撤销（旧壳点搜索框 = blur 捕获），其余
@@ -3182,23 +3375,18 @@ impl SettingsPane {
                     }),
                 )
             })
-            // 搜索框：宽度同其它控件右列（220），旧壳搜索行几何的对应物。
             .child(
-                h_flex()
+                div()
                     .w_full()
-                    .h(px(SETTINGS_ROW_HEIGHT))
+                    .h(px(34.0))
                     .flex_shrink_0()
-                    .items_center()
-                    .pr_4()
-                    .child(div().flex_1().min_w_0().pl_4().child("搜索"))
-                    .child(
-                        div().w(px(220.0)).child(Input::new(&self.keymap_search_input).small()),
-                    ),
+                    .child(Input::new(&self.keymap_search_input).w_full()),
             )
+            .child(div().h(px(12.0)).w_full().flex_shrink_0())
             // 冲突是允许存在的可见状态，用组件库的 Warning Alert 呈现；
             // 不再用自绘 danger 色块，也不静默删掉另一个动作。
             .when_some(clash_note, |section, note| {
-                section.child(Alert::warning("keymap-clash-warning", note).small().mt_2())
+                section.child(Alert::warning("keymap-clash-warning", note).small())
             })
             .child(groups_block)
             .child(
@@ -3230,7 +3418,7 @@ impl SettingsPane {
                 self.runtime.resume_ai,
                 cx,
             ))
-            .child(self.switch_row("tray", "常驻系统托盘图标（旧壳生效）", self.runtime.tray, cx))
+            .child(self.switch_row("tray", "常驻系统托盘图标", self.runtime.tray, cx))
     }
 
     fn section_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -3263,13 +3451,8 @@ impl SettingsPane {
 
         // 旧壳顶部是品牌标题而不是搜索框；导航入口保持连续排列，避免
         // 额外分组标题把旧版的行距和可视顺序撑开。
-        let mut nav = v_flex()
-            .w(px(SETTINGS_NAV_WIDTH))
-            .h_full()
-            .flex_shrink_0()
-            .px_2()
-            .gap(px(2.0))
-            .child(
+        let mut nav =
+            v_flex().w(px(SETTINGS_NAV_WIDTH)).h_full().flex_shrink_0().px_2().gap(px(2.0)).child(
                 div()
                     .h(px(72.0))
                     .w_full()
@@ -3329,11 +3512,10 @@ impl Render for SettingsPane {
         let family: SharedString = self.current_font_chain(cx).into();
         let base_px = self.font_size_px(cx);
         let font_picker_open = self.font_picker_open;
+        let bg_picker_open = self.bg_picker_open && self.active_section == 1;
+        let bg_dragging = self.bg_picker_drag.is_some();
         let ssh_editor_modal = self.ssh_editor_modal(cx);
         let show_reset = !matches!(self.active_section, 0 | 4);
-        let reset_button = NebulaButton::new("settings-reset")
-            .label("恢复默认设置")
-            .on_click(cx.listener(|this, _, window, cx| this.reset_appearance(window, cx)));
 
         div()
             .size_full()
@@ -3423,8 +3605,36 @@ impl Render for SettingsPane {
                             .items_center()
                             .text_size(px(base_px))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .child(div().flex_1().child(SECTIONS[self.active_section]))
-                            .when(show_reset, |header| header.child(reset_button)),
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(SECTIONS[self.active_section])
+                                    .when(show_reset, |header| {
+                                        header.child(
+                                            div()
+                                                .id("settings-reset")
+                                                .size(px(24.0))
+                                                .rounded_md()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .hover(|el| el.bg(cx.theme().list_hover))
+                                                .tooltip(|window, cx| {
+                                                    gpui_component::tooltip::Tooltip::new(
+                                                        "还原此页为默认值",
+                                                    )
+                                                    .build(window, cx)
+                                                })
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.reset_appearance(window, cx);
+                                                }))
+                                                .child(Icon::new(IconName::Undo2)),
+                                        )
+                                    }),
+                            ),
                     )
                     .child(
                         v_flex()
@@ -3446,20 +3656,7 @@ impl Render for SettingsPane {
                             // 1356 而主题组到 1762，一组一个宽度，控件既不贴左
                             // 也不贴右。补一层竖向 flex 后分组走交叉轴 stretch
                             // 取宽，症状消失。
-                            .child(
-                                v_flex()
-                                    .w_full()
-                                    .child(content)
-                                    .child(
-                                        div()
-                                            .pt_8()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(
-                                                "写入 nebula_settings.txt，与旧壳共享同一份设置；两边可交替修改。",
-                                            ),
-                                    ),
-                            ),
+                            .child(v_flex().w_full().child(content)),
                     ),
             )
             .when_some(ssh_editor_modal, |root, modal| root.child(modal))
@@ -3495,6 +3692,57 @@ impl Render for SettingsPane {
                                 }),
                             ),
                     )
+            })
+            .when(bg_picker_open, |root| {
+                root.on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                        cx.stop_propagation();
+                        this.close_background_picker(cx);
+                    }
+                }))
+                .when(bg_dragging, |root| {
+                    root.on_mouse_move(cx.listener(
+                        |this, event: &MouseMoveEvent, window, cx| {
+                            this.on_bg_picker_move(event, window, cx);
+                        },
+                    ))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.finish_bg_picker_drag(cx);
+                        }),
+                    )
+                })
+                .child(
+                    div()
+                        .id("bg-picker-dismiss-layer")
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .left_0()
+                        .cursor_default()
+                        .when(bg_dragging, |layer| {
+                            layer.on_mouse_move(cx.listener(
+                                |this, event: &MouseMoveEvent, window, cx| {
+                                    this.on_bg_picker_move(event, window, cx);
+                                },
+                            ))
+                        })
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.finish_bg_picker_drag(cx);
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_background_picker(cx);
+                            }),
+                        ),
+                )
             })
     }
 }

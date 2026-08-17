@@ -28,8 +28,8 @@ use super::keymap;
 use super::ui::theme::Skin;
 use super::ui::{icons, os_icons, surface, text_field, tokens, widgets};
 use super::{
-    AcceptKey, CompletionStyle, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
-    chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label,
+    chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label, AcceptKey,
+    CompletionStyle, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
 };
 
 // Visual language: one flat panel color, one hairline, three text grays, ONE
@@ -217,19 +217,19 @@ fn ssh_proxy_mode_label(mode: crate::ssh_proxy::ProxyMode, language: UiLanguage)
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ManualProxyProtocol {
+pub(crate) enum ManualProxyProtocol {
     #[default]
     Socks5,
     Http,
 }
 
-pub(super) const MANUAL_PROXY_PROTOCOL_OPTIONS: [ManualProxyProtocol; 2] =
+pub(crate) const MANUAL_PROXY_PROTOCOL_OPTIONS: [ManualProxyProtocol; 2] =
     [ManualProxyProtocol::Socks5, ManualProxyProtocol::Http];
 
 /// 网络页“测试网络”的窗口态。结果只代表发起测试时已经落盘的那份设置；
 /// 用户随后改动模式或地址时会回到 `Idle`，避免旧成功状态冒充新配置有效。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(super) enum ProxyTestStatus {
+pub(crate) enum ProxyTestStatus {
     #[default]
     Idle,
     Running,
@@ -254,7 +254,7 @@ fn manual_proxy_protocol_label(
 
 /// 把持久化 URL 拆成协议选择与可编辑地址。协议前缀由下拉框负责，输入框
 /// 只显示地址正文，避免用户在两个控件里重复维护同一份信息。
-pub(super) fn manual_proxy_parts(value: &str) -> (ManualProxyProtocol, &str) {
+pub(crate) fn manual_proxy_parts(value: &str) -> (ManualProxyProtocol, &str) {
     let value = value.trim();
     for (prefix, protocol) in [
         ("socks5://", ManualProxyProtocol::Socks5),
@@ -271,7 +271,7 @@ pub(super) fn manual_proxy_parts(value: &str) -> (ManualProxyProtocol, &str) {
     (ManualProxyProtocol::Socks5, value)
 }
 
-pub(super) fn manual_proxy_value(protocol: ManualProxyProtocol, address: &str) -> String {
+pub(crate) fn manual_proxy_value(protocol: ManualProxyProtocol, address: &str) -> String {
     let address = address.trim();
     if address.is_empty() {
         return String::new();
@@ -453,7 +453,7 @@ fn new_tab_position_label(position: NewTabPosition, language: UiLanguage) -> &'s
 
 /// 单元格宽度模式：终端把字体的非整数设计宽度转换为整像素列宽的方式。
 /// 「紧凑」保持上游的向下取整并作为兼容默认；「宽松」采用最接近整数取整，
-/// 补足与 Windows Terminal 相差的那一像素。它只影响列宽，不改变单元格高度、
+/// 补足向下取整丢掉的那一像素。它只影响列宽，不改变单元格高度、
 /// 字形比例或原生界面排版。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum CellWidthMode {
@@ -1431,7 +1431,11 @@ fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
 }
 
 fn advanced_content_end(advanced_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
-    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + 4.0 * row_h }
+    if SHOW_WEBDAV_SYNC_SETTINGS {
+        sync_y0 + 7.0 * row_h
+    } else {
+        advanced_y0 + 4.0 * row_h
+    }
 }
 
 /// Max scroll offset for `section` at the current window size. The input
@@ -1840,9 +1844,8 @@ fn settings_geometry(
     // 隐藏尾部行，动作行经 `backup_remote_actions_rect` 上移贴住可见行。
     let backup_remote_y0 = 944.0;
     let backup_remote_protocol = (row_x, at(backup_remote_y0), row_w, row_h);
-    let backup_remote_field = |index: usize| {
-        (row_x, at(backup_remote_y0 + (1.0 + index as f32) * ROW_H), row_w, row_h)
-    };
+    let backup_remote_field =
+        |index: usize| (row_x, at(backup_remote_y0 + (1.0 + index as f32) * ROW_H), row_w, row_h);
     let backup_remote_fields = [
         backup_remote_field(0),
         backup_remote_field(1),
@@ -1851,8 +1854,7 @@ fn settings_geometry(
         backup_remote_field(4),
     ];
     let backup_remote_actions_y = backup_remote_y0 + 6.0 * ROW_H + 12.0;
-    let backup_remote_actions =
-        (row_x, at(backup_remote_actions_y), s(300.0).min(row_w), s(38.0));
+    let backup_remote_actions = (row_x, at(backup_remote_actions_y), s(300.0).min(row_w), s(38.0));
     let backup_h = s(backup_remote_actions_y + 38.0 + 64.0 - 72.0);
 
     SettingsGeometry {
@@ -3057,8 +3059,7 @@ pub fn settings_hit(
                     }
                 }
                 if backup_protocol != crate::backup_remote::BackupProtocol::Off {
-                    let actions =
-                        backup_remote_actions_rect(&geometry, scale_factor, field_count);
+                    let actions = backup_remote_actions_rect(&geometry, scale_factor, field_count);
                     let [push, pull] = sync_button_rects(actions, scale_factor);
                     if contains_rect(push, x, y) {
                         return SettingsHit::BackupRemotePush;
@@ -3071,7 +3072,11 @@ pub fn settings_hit(
         }
     }
 
-    if contains_rect(geometry.popup, x, y) { SettingsHit::Panel } else { SettingsHit::None }
+    if contains_rect(geometry.popup, x, y) {
+        SettingsHit::Panel
+    } else {
+        SettingsHit::None
+    }
 }
 
 // ---- rendering ----
@@ -5584,7 +5589,11 @@ pub(super) fn draw_popup_text(
                 icon_draws
                     .push((id.clone(), (rx + s(8.0), ry + (rh - s(24.0)) / 2.0, s(24.0), s(24.0))));
                 text_x = rx + s(40.0);
-                if program.is_empty() { name.clone() } else { format!("{name}  ·  {program}") }
+                if program.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name}  ·  {program}")
+                }
             },
             SettingsDropdown::Font => {
                 // 第 0 行是搜索框：它的底与光标在 quads pass 里画，这里只
@@ -5906,7 +5915,11 @@ pub(super) fn draw_text(
     let clip_bot = py + ph - s(6.0);
     let visible = |ry: f32, rh: f32| ry >= clip_top && ry + rh <= clip_bot;
     let row_text_y = |ry: f32, rh: f32| {
-        if geometry.stacked_rows { ry + s(9.0) } else { ry + (rh - cell_h) / 2.0 }
+        if geometry.stacked_rows {
+            ry + s(9.0)
+        } else {
+            ry + (rh - cell_h) / 2.0
+        }
     };
     // 通用 combobox 的当前值：控件框内左对齐，截断在 chevron 井之前。
     let combobox_value = |r: &mut Renderer,
@@ -7476,7 +7489,11 @@ pub(super) fn draw_text(
                     rect.0 + s(16.0),
                     ty,
                     if i == keymap::QUICK_TERMINAL_ROW && view.quick_hotkey_error.is_some() {
-                        if sk.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) }
+                        if sk.is_light {
+                            Rgb::new(207, 34, 46)
+                        } else {
+                            Rgb::new(248, 81, 73)
+                        }
                     } else {
                         sk.ink
                     },
@@ -8000,7 +8017,14 @@ pub(super) fn draw_text(
                     let max_cols = (((iw - s(24.0)) / cell_w) as usize).max(1);
                     let (text, placeholder, _) = backup_remote_input_display(view, index, max_cols);
                     let ink = if placeholder { sk.ink_dim } else { sk.ink };
-                    r.draw_chrome_text(size, ix + s(12.0), iy + (ih - cell_h) / 2.0, ink, &text, gc);
+                    r.draw_chrome_text(
+                        size,
+                        ix + s(12.0),
+                        iy + (ih - cell_h) / 2.0,
+                        ink,
+                        &text,
+                        gc,
+                    );
                 }
                 if view.backup_protocol != crate::backup_remote::BackupProtocol::Off {
                     let actions = backup_remote_actions_rect(&geometry, scale, field_count);
@@ -8059,19 +8083,19 @@ pub(super) fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        CELL_WIDTH_MODE_OPTIONS, CellWidthMode, KeymapPaneState, ManualProxyProtocol,
-        NEW_TAB_POSITION_OPTIONS, NebulaSettingsSection, NewTabPosition, ProxyChoice,
-        ProxyPaneState, Rgb, SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS,
-        STANDARD_ROW_ACTION_W, SettingsHit, TabRevealMotion, UiLanguage, advanced_content_end,
-        background_color_popup, cell_width_mode_label, font_popup_row_count, font_popup_slot,
-        hsv_to_rgb, manual_proxy_parts, manual_proxy_value, new_tab_position_label,
-        opacity_from_pointer, proxy_section_title_y, rgb_to_hsv, row_action_rect,
-        settings_geometry, settings_hit, ssh_proxy_manual_controls, ssh_proxy_mode_control,
-        ssh_proxy_test_button,
+        advanced_content_end, background_color_popup, cell_width_mode_label, font_popup_row_count,
+        font_popup_slot, hsv_to_rgb, manual_proxy_parts, manual_proxy_value,
+        new_tab_position_label, opacity_from_pointer, proxy_section_title_y, rgb_to_hsv,
+        row_action_rect, settings_geometry, settings_hit, ssh_proxy_manual_controls,
+        ssh_proxy_mode_control, ssh_proxy_test_button, CellWidthMode, KeymapPaneState,
+        ManualProxyProtocol, NebulaSettingsSection, NewTabPosition, ProxyChoice, ProxyPaneState,
+        Rgb, SettingsHit, TabRevealMotion, UiLanguage, CELL_WIDTH_MODE_OPTIONS,
+        NEW_TAB_POSITION_OPTIONS, SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS,
+        STANDARD_ROW_ACTION_W,
     };
-    use crate::display::SizeInfo;
     use crate::display::ui::tokens::Density;
     use crate::display::ui::widgets;
+    use crate::display::SizeInfo;
 
     #[test]
     fn hsv_rgb_round_trip_and_gray_hue_convention() {

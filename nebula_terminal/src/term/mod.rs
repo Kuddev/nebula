@@ -314,8 +314,8 @@ pub enum Osc52 {
 /// Whether the grid may re-merge soft-wrapped rows when it grows wider.
 ///
 /// Nebula's grid is the terminal-side source of truth for cursor/content
-/// coordinates on every backend. ConPTY also reflows its private buffer, but
-/// Windows Terminal's `TextBuffer::Reflow` shows that this is intentionally
+/// coordinates on every backend. ConPTY also reflows its private buffer;
+/// `TextBuffer::Reflow` shows that this is intentionally
 /// allowed: ConPTY asks the terminal for the current cursor position instead
 /// of replacing the terminal's reflow state. Disabling grow reflow for one
 /// ConPTY variant therefore leaves the grid permanently split after a narrow
