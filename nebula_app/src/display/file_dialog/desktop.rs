@@ -8,6 +8,14 @@ pub(super) fn pick_file(owner: &Window, title: &str, filters: &[FileFilter]) -> 
     dialog(owner, title, filters).pick_file()
 }
 
+pub(super) fn pick_file_unowned(title: &str, filters: &[FileFilter]) -> Option<PathBuf> {
+    let mut dialog = FileDialog::new().set_title(title);
+    for filter in filters {
+        dialog = dialog.add_filter(filter.name, filter.extensions);
+    }
+    dialog.pick_file()
+}
+
 pub(super) fn pick_files(owner: &Window, title: &str, filters: &[FileFilter]) -> Vec<PathBuf> {
     dialog(owner, title, filters).pick_files().unwrap_or_default()
 }

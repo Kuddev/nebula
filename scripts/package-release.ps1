@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z.-]*$')]
     [string] $Version = 'unreleased',
@@ -7,6 +7,9 @@ param(
     [string] $Configuration = 'release',
 
     [switch] $SkipBuild,
+    # 与 -SkipBuild 联用：跳过「exe 必须比源码新」的陈旧检查。仅用于脚本
+    # 自测；发布产物一律走全新构建。
+    [switch] $AllowStale,
     [switch] $Force,
     [string] $OutputDirectory,
 
@@ -48,7 +51,9 @@ $manifest = [ordered]@{
     'runtime/nebula-hook.exe'                        = Join-Path $targetRoot 'nebula-hook.exe'
     'runtime/conpty.dll'                             = Join-Path $targetRoot 'conpty.dll'
     'runtime/OpenConsole.exe'                        = Join-Path $targetRoot 'OpenConsole.exe'
-    'fonts/MapleMonoNormal-NF-CN-Regular.ttf'        = Join-Path $repo 'assets\fonts\MapleMonoNormal-NF-CN-Regular.ttf'
+    # 1.1.0 起 zip 不再附带 20MB 字体副本：nebula.exe 内嵌同一份字节，
+    # 「安装字体」提示会把它落盘（font_install::ensure_bundled_font_on_disk）。
+    # 安装包仍带 ttf——Inno 的 FontInstall 任务需要真实文件。
     'docs/CHANGELOG.md'                              = Join-Path $repo 'CHANGELOG.md'
     'docs/INSTALL.md'                                = Join-Path $repo 'INSTALL.md'
     'docs/lua-configuration.md'                      = Join-Path $repo 'docs\lua-configuration.md'
@@ -85,21 +90,67 @@ function Remove-StageSafely([string] $Path) {
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }
 
+function Get-NewestSourceTime([string[]] $Roots) {
+    $newest = [datetime]::MinValue
+    foreach ($root in $Roots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        if (Test-Path -LiteralPath $root -PathType Leaf) {
+            $times = @((Get-Item -LiteralPath $root).LastWriteTime)
+        } else {
+            $times = Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -in '.rs', '.toml' } |
+                ForEach-Object { $_.LastWriteTime }
+        }
+        foreach ($time in @($times)) {
+            if ($time -gt $newest) { $newest = $time }
+        }
+    }
+    $newest
+}
+
+function Assert-FreshBinaries {
+    # 判据：打包的二进制不得早于其源码的最新改动（2026-08-18 事故：修复
+    # 已写进源码，包里却是前一晚的 exe）。cargo 对未变更目标不重链接，
+    # 所以不能拿「本次运行开始时刻」当基准。conpty.dll / OpenConsole.exe
+    # 是预编译供给件，不参与判定。
+    if ($AllowStale) { return }
+    $memberDirs = @(
+        'nebula_app', 'nebula_terminal', 'nebula_config', 'nebula_config_derive',
+        'nebula-completions', 'nebula_gpui', 'nebula_settings', 'nebula_split'
+    ) | ForEach-Object { Join-Path $repo $_ }
+    $appSources = $memberDirs + @(
+        (Join-Path $repo 'Cargo.toml'),
+        (Join-Path $repo '..\gpui-component-fork\crates')
+    )
+    $checks = @(
+        @{ Binary = $manifest['nebula.exe']; Newest = Get-NewestSourceTime $appSources },
+        @{ Binary = $manifest['runtime/nebula-hook.exe']; Newest = Get-NewestSourceTime @(
+            (Join-Path $repo 'nebula_hook'), (Join-Path $repo 'Cargo.toml')) }
+    )
+    foreach ($check in $checks) {
+        $item = Get-Item -LiteralPath $check.Binary
+        if ($item.LastWriteTime -lt $check.Newest) {
+            throw "Stale binary: $($check.Binary) ($($item.LastWriteTime)) is older than the newest source change ($($check.Newest)). Rebuild before packaging, or pass -AllowStale if you really mean it."
+        }
+    }
+}
+
 if (-not $SkipBuild) {
     Push-Location $repo
     $previousTargetDirectory = $env:CARGO_TARGET_DIR
     try {
         $env:CARGO_TARGET_DIR = $cargoTargetRoot
+        # Never build nebula without gpui-shell first: a workspace default
+        # binary overwrites the product exe with the legacy winit shell.
+        # Exclude nebula from the workspace build, then link GPUI last.
         if ($Configuration -eq 'release') {
-            & cargo build --workspace --release
+            & cargo build --workspace --release --exclude nebula
             if ($LASTEXITCODE -ne 0) {
                 throw "Cargo workspace build failed with exit code $LASTEXITCODE"
             }
-            # 产品主窗是 GPUI（`nebula --gpui`），链接本地 gpui-component fork。
-            # workspace 默认 feature 不含 gpui-shell，不补这一步装出来的是旧壳。
             & cargo build -p nebula --bin nebula --release --features gpui-shell
         } else {
-            & cargo build --workspace
+            & cargo build --workspace --exclude nebula
             if ($LASTEXITCODE -ne 0) {
                 throw "Cargo workspace build failed with exit code $LASTEXITCODE"
             }
@@ -119,6 +170,19 @@ $missing = @($manifest.GetEnumerator() | Where-Object {
 } | ForEach-Object { "$($_.Key) <- $($_.Value)" })
 if ($missing.Count -ne 0) {
     throw "Required package files are missing:`n$($missing -join "`n")"
+}
+
+$packagedExe = $manifest['nebula.exe']
+Assert-FreshBinaries
+$helpText = & $packagedExe --help 2>&1 | Out-String
+if ($helpText -notmatch '--gpui') {
+    throw "nebula.exe at $packagedExe is the legacy shell (no --gpui in --help). Rebuild with --features gpui-shell; do not package a workspace-default binary."
+}
+if ($Version -ne 'unreleased') {
+    $versionText = & $packagedExe --version 2>&1 | Out-String
+    if ($versionText -notmatch [regex]::Escape($Version)) {
+        throw "nebula.exe reports `"$($versionText.Trim())`" but the package version is $Version. The staged exe does not match this release."
+    }
 }
 
 New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null

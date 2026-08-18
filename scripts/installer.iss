@@ -98,10 +98,10 @@ Source: "{#RepoRoot}\licenses\LICENSE-MLUA"; DestDir: "{app}\licenses"; Flags: i
 Source: "{#RepoRoot}\THIRD-PARTY-NOTICES"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Nebula Terminal"; Filename: "{app}\nebula.exe"; WorkingDir: "{%USERPROFILE}"
+Name: "{group}\Nebula Terminal"; Filename: "{app}\nebula.exe"; Parameters: "--gpui"; WorkingDir: "{%USERPROFILE}"
 Name: "{group}\{cm:UninstallProgram}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Nebula Terminal"; Filename: "{app}\nebula.exe"; WorkingDir: "{%USERPROFILE}"; Tasks: desktopicon
-Name: "{userstartup}\Nebula Terminal"; Filename: "{app}\nebula.exe"; WorkingDir: "{%USERPROFILE}"; Tasks: autostart
+Name: "{autodesktop}\Nebula Terminal"; Filename: "{app}\nebula.exe"; Parameters: "--gpui"; WorkingDir: "{%USERPROFILE}"; Tasks: desktopicon
+Name: "{userstartup}\Nebula Terminal"; Filename: "{app}\nebula.exe"; Parameters: "--gpui"; WorkingDir: "{%USERPROFILE}"; Tasks: autostart
 
 [Registry]
 Root: HKCU; Subkey: "Software\Nebula Terminal"; ValueType: dword; ValueName: "InstallerAddedToPath"; ValueData: "1"; Tasks: addtopath; Check: NeedsAddToPath; Flags: uninsdeletevalue uninsdeletekeyifempty
@@ -112,13 +112,13 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\nebula.
 ; 每个动词使用独立的应用子键，卸载时只删除 Nebula 自己注册的菜单。
 Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\NebulaTerminal"; ValueType: string; ValueName: "MUIVerb"; ValueData: "{cm:OpenInNebula}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\NebulaTerminal"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\nebula.exe,0"
-Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\NebulaTerminal\command"; ValueType: string; ValueName: ""; ValueData: """{app}\nebula.exe"" --working-directory ""%V"""
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\NebulaTerminal\command"; ValueType: string; ValueName: ""; ValueData: """{app}\nebula.exe"" --gpui --working-directory ""%V"""
 Root: HKCU; Subkey: "Software\Classes\Directory\shell\NebulaTerminal"; ValueType: string; ValueName: "MUIVerb"; ValueData: "{cm:OpenInNebula}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\Directory\shell\NebulaTerminal"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\nebula.exe,0"
-Root: HKCU; Subkey: "Software\Classes\Directory\shell\NebulaTerminal\command"; ValueType: string; ValueName: ""; ValueData: """{app}\nebula.exe"" --working-directory ""%1"""
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\NebulaTerminal\command"; ValueType: string; ValueName: ""; ValueData: """{app}\nebula.exe"" --gpui --working-directory ""%1"""
 
 [Run]
-Filename: "{app}\nebula.exe"; Description: "{cm:LaunchProgram}"; WorkingDir: "{%USERPROFILE}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\nebula.exe"; Parameters: "--gpui"; Description: "{cm:LaunchProgram}"; WorkingDir: "{%USERPROFILE}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 ; 必须在 Inno 删除 nebula.exe 前调用应用自己的结构化清理逻辑，避免直接改写用户配置。

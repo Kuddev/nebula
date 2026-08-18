@@ -86,8 +86,11 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
             NebulaConfirm::DeleteFileTreePath { path, .. } => {
                 self.ctx.display().confirm_delete_file_tree(&path);
             },
-            NebulaConfirm::InstallRequiredFont { directory } => {
+            NebulaConfirm::InstallRequiredFont { .. } => {
                 self.ctx.display().nebula_confirm = None;
+                // 打开时现算目录：zip 包不带 fonts/ 副本，这里把内嵌字体
+                // 落盘后再开，保证目录里真有 ttf。
+                let directory = crate::font_install::ensure_bundled_font_on_disk();
                 self.ctx.open_path(&directory);
             },
             NebulaConfirm::BackupPassphrase { .. } => {

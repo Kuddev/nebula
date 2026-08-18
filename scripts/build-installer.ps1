@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$')]
     [string] $Version,
@@ -7,6 +7,9 @@ param(
     [string] $Configuration = 'release',
 
     [switch] $SkipBuild,
+    # 与 -SkipBuild 联用：跳过「exe 必须比源码新」的陈旧检查。仅用于脚本
+    # 自测；发布安装包一律走全新构建。
+    [switch] $AllowStale,
     [switch] $Force,
     [switch] $ValidateOnly,
     [string] $OutputDirectory,
@@ -78,7 +81,7 @@ if (-not $SkipBuild) {
     $previousTargetDirectory = $env:CARGO_TARGET_DIR
     try {
         $env:CARGO_TARGET_DIR = $cargoTargetRoot
-        $workspaceArgs = @('build', '--workspace')
+        $workspaceArgs = @('build', '--workspace', '--exclude', 'nebula')
         $gpuiArgs = @('build', '-p', 'nebula', '--bin', 'nebula', '--features', 'gpui-shell')
         if ($Configuration -eq 'release') {
             $workspaceArgs += '--release'
@@ -101,6 +104,50 @@ if (-not $SkipBuild) {
 $missing = @($requiredFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
 if ($missing.Count -ne 0) {
     throw "Required installer files are missing:`n$($missing -join "`n")"
+}
+
+$packagedExe = Join-Path $targetRoot 'nebula.exe'
+# 判据同 package-release.ps1：二进制不得早于其源码最新改动；cargo 对未
+# 变更目标不重链接，不能拿运行开始时刻当基准。
+if (-not $AllowStale) {
+    $memberDirs = @(
+        'nebula_app', 'nebula_terminal', 'nebula_config', 'nebula_config_derive',
+        'nebula-completions', 'nebula_gpui', 'nebula_settings', 'nebula_split'
+    ) | ForEach-Object { Join-Path $repo $_ }
+    $sourceScopes = @(
+        @{ Binary = $packagedExe; Roots = $memberDirs + @(
+            (Join-Path $repo 'Cargo.toml'), (Join-Path $repo '..\gpui-component-fork\crates')) },
+        @{ Binary = (Join-Path $targetRoot 'nebula-hook.exe'); Roots = @(
+            (Join-Path $repo 'nebula_hook'), (Join-Path $repo 'Cargo.toml')) }
+    )
+    foreach ($scope in $sourceScopes) {
+        $newestSource = [datetime]::MinValue
+        foreach ($root in $scope.Roots) {
+            if (-not (Test-Path -LiteralPath $root)) { continue }
+            if (Test-Path -LiteralPath $root -PathType Leaf) {
+                $times = @((Get-Item -LiteralPath $root).LastWriteTime)
+            } else {
+                $times = Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Extension -in '.rs', '.toml' } |
+                    ForEach-Object { $_.LastWriteTime }
+            }
+            foreach ($time in @($times)) {
+                if ($time -gt $newestSource) { $newestSource = $time }
+            }
+        }
+        $item = Get-Item -LiteralPath $scope.Binary
+        if ($item.LastWriteTime -lt $newestSource) {
+            throw "Stale binary: $($scope.Binary) ($($item.LastWriteTime)) is older than the newest source change ($newestSource). Rebuild before packaging, or pass -AllowStale if you really mean it."
+        }
+    }
+}
+$helpText = & $packagedExe --help 2>&1 | Out-String
+if ($helpText -notmatch '--gpui') {
+    throw "nebula.exe at $packagedExe is the legacy shell (no --gpui in --help). Rebuild with --features gpui-shell; do not package a workspace-default binary."
+}
+$versionText = & $packagedExe --version 2>&1 | Out-String
+if ($versionText -notmatch [regex]::Escape($Version)) {
+    throw "nebula.exe reports `"$($versionText.Trim())`" but the installer version is $Version. The staged exe does not match this release."
 }
 
 if ($ValidateOnly) {

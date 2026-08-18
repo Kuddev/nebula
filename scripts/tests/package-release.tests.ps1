@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -32,16 +32,23 @@ try {
     if ($releaseBody -notmatch '(?m)^debug\s*=\s*0\s*$') {
         throw 'Release builds must set debug = 0 so DWARF sections do not inflate nebula.exe'
     }
-    if ($releaseBody -notmatch '(?m)^strip\s*=\s*"debuginfo"\s*$') {
-        throw 'Release builds must strip debuginfo before packaging'
+    if ($releaseBody -notmatch '(?m)^strip\s*=\s*"symbols"\s*$') {
+        throw 'Release builds must strip symbols before packaging (size budget: installer <30MB)'
     }
 
     $scriptBody = Get-Content -LiteralPath $packageScript -Raw -Encoding UTF8
     if ($scriptBody -notmatch '--features gpui-shell') {
         throw 'Release packaging must rebuild nebula with --features gpui-shell so the zip ships the GPUI shell.'
     }
+    if ($scriptBody -notmatch '--exclude nebula') {
+        throw 'Release packaging must exclude nebula from the workspace build so the default-feature binary cannot overwrite the GPUI shell.'
+    }
 
-    & $packageScript -Version 'unreleased' -SkipBuild -OutputDirectory $resolvedOutput
+    if ($scriptBody -notmatch 'Assert-FreshBinaries') {
+        throw 'Release packaging must refuse stale binaries (freshness guard missing).'
+    }
+
+    & $packageScript -Version 'unreleased' -SkipBuild -AllowStale -OutputDirectory $resolvedOutput
     $zipPath = Join-Path $resolvedOutput 'NebulaTerminal-vunreleased-windows-x64.zip'
     if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
         throw "Packaging script did not create $zipPath"
@@ -63,7 +70,6 @@ try {
         'docs/CHANGELOG.md'
         'docs/INSTALL.md'
         'docs/lua-configuration.md'
-        'fonts/MapleMonoNormal-NF-CN-Regular.ttf'
         'licenses/LICENSE'
         'licenses/LICENSE-LUA'
         'licenses/LICENSE-MLUA'

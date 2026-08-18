@@ -115,6 +115,23 @@ pub(super) fn pick_private_key_file(owner: &Window) -> Option<Result<PathBuf, St
     Some(validate_private_key_path(&path))
 }
 
+/// GPUI 添加主机面板用：同一套 `pem` / `key` / `ppk` / `id_*` 过滤器，
+/// 不依赖 winit `Window`。Windows 上应优先走 [`pick_private_key_file_with_hwnd`]。
+#[cfg(not(windows))]
+pub(crate) fn pick_private_key_file_unowned() -> Option<Result<PathBuf, String>> {
+    let path = platform::pick_file_unowned("选择 SSH 私钥", PRIVATE_KEY_FILTERS)?;
+    Some(validate_private_key_path(&path))
+}
+
+/// 把系统文件对话框挂到 GPUI 窗口上，过滤规则与旧壳 `pick_private_key_file` 相同。
+#[cfg(windows)]
+pub(crate) fn pick_private_key_file_with_hwnd(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+) -> Option<Result<PathBuf, String>> {
+    let path = platform::pick_file_with_hwnd(hwnd, "选择 SSH 私钥", PRIVATE_KEY_FILTERS)?;
+    Some(validate_private_key_path(&path))
+}
+
 /// Validate a path selected by a non-winit UI shell. The legacy picker and GPUI
 /// both use this exact classifier so a `.pub` file can never silently enter a
 /// profile just because the shell used a different native file-dialog API.

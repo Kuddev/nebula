@@ -147,15 +147,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // P3 主窗形态：GPUI 作为 nebula.exe 的 UI 层，从主线程直接进 GPUI
-    // 消息循环，winit 旧壳完全不启动。三闸门在此形态复测。
+    // 产品主窗：GPUI 作为 nebula.exe 的 UI 层，从主线程直接进 GPUI
+    // 消息循环，winit 旧壳完全不启动。1.1.0 安装包 / 双击 / 资源管理器
+    // 右键都走这里；`--legacy-shell` 才回旧壳。
     //
-    // mux probe 必须在 `run_shell` 之前：第二份 `nebula --gpui` 交给驻留
-    // 实例（ATTACH），不能再拉一套 PTY。
+    // mux probe 必须在 `run_shell` 之前：第二份 GUI 进程交给驻留实例
+    // （ATTACH），不能再拉一套 PTY。
     #[cfg(feature = "gpui-shell")]
-    if options.gpui {
+    if wants_gpui_shell(&options) {
         #[cfg(windows)]
-        if options.subcommands.is_none() && try_hand_over_to_resident(&options) {
+        if try_hand_over_to_resident(&options) {
             return Ok(());
         }
         gpui_shell::run_shell();
@@ -416,8 +417,18 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     result
 }
 
+/// `gpui-shell` 构建的 GUI 默认进 GPUI。子命令、daemon、ref-test 和
+/// `--legacy-shell` 仍走旧路径。`--gpui` 只是显式同义开关。
+#[cfg(feature = "gpui-shell")]
+fn wants_gpui_shell(options: &Options) -> bool {
+    if options.legacy_shell || options.subcommands.is_some() || options.daemon || options.ref_test {
+        return false;
+    }
+    true
+}
+
 /// Windows 单实例交接：普通启动 ATTACH 到驻留进程；带工作目录、无 `-e`
-/// 则先 ATTACH 再 `tab.new`。GPUI 与 winit 共用，避免 `--gpui` 抢在 probe
+/// 则先 ATTACH 再 `tab.new`。GPUI 与 winit 共用，避免 GUI 抢在 probe
 /// 前面再拉一套 PTY。
 #[cfg(windows)]
 fn try_hand_over_to_resident(options: &Options) -> bool {

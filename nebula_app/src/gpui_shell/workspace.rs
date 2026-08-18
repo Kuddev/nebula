@@ -716,6 +716,10 @@ pub struct NebulaWorkspace {
     sidebar_fold_armed: bool,
     /// 同理，tab 列表的折叠动画也只在首次手动切换后启用。
     tabs_fold_armed: bool,
+    /// 折叠/展开动画期间冻结视口高度：旧壳 `tabs_avail` 来自面板剩余高度，
+    /// 绝不把卷帘裁剪量回去再算窗口，否则溢出列表会被锁成一行滚动区。
+    tabs_fold_frozen: bool,
+    tabs_fold_seq: u64,
     /// 旧壳 `nebula_tabs_scroll`：TABS 溢出时的整行窗口起点。
     tabs_scroll: usize,
     /// 列表视口（逻辑 px），由 canvas 回写；0 表示尚未量到。
@@ -877,6 +881,8 @@ impl NebulaWorkspace {
             sidebar_width,
             sidebar_fold_armed: false,
             tabs_fold_armed: false,
+            tabs_fold_frozen: false,
+            tabs_fold_seq: 0,
             tabs_scroll: 0,
             tabs_viewport_h: 0.0,
             tabs_list_width: 0.0,
@@ -3841,11 +3847,9 @@ impl NebulaWorkspace {
 
         // 本次渲染里是否有「运行中」行（spinner 帧循环的开关）。
         let items_running = std::cell::Cell::new(false);
-        let (tabs_scroll, tabs_show) = if self.tabs_section_collapsed {
-            (0, self.tabs.len())
-        } else {
-            self.tabs_visible_window()
-        };
+        // 折叠只裁剪槽位，不改窗口算法：旧壳 `tabs_avail` 与 `tabs_open`
+        // 分开——折起来时行矩形为零，但可用高度仍按面板剩余算。
+        let (tabs_scroll, tabs_show) = self.tabs_visible_window();
         let items = (0..self.tabs.len())
             .filter(|&ix| tab_scroll::index_visible(ix, tabs_scroll, tabs_show))
             .map(|ix| {
@@ -4210,9 +4214,7 @@ impl NebulaWorkspace {
                     // 挂在标题行根节点，右侧空白区同样可以折叠，而不是只有
                     // 箭头、标题和数量这一小段能点。
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.tabs_section_collapsed = !this.tabs_section_collapsed;
-                        this.tabs_fold_armed = true;
-                        cx.notify();
+                        this.toggle_tabs_section(cx);
                     }))
                     .child(
                         // 箭头、TABS 和计数仍作为一个排版段；折叠命中已经
@@ -4343,11 +4345,31 @@ impl NebulaWorkspace {
         sidebar
     }
 
-    /// Tab 列表的折叠槽位：`max_h` 在 0..内容高之间走与侧栏折叠同一条 240ms
-    /// ease-out 曲线，`overflow_hidden` 负责动画期间的裁剪，观感是卷帘而不是
-    /// 瞬间闪现。首次手动切换后才启用——启动帧必须静止落位。
-    ///
-    /// 展开后列表走旧壳整行窗口 + 覆盖滚动条；折叠动画仍按全部行高度收放。
+    /// 与旧壳 `nebula_tabs_section_open` 同义：点标题整行折叠/展开。
+    /// 卷帘只裁剪槽位，视口高度在动画期间冻结，避免量到裁剪高后把溢出
+    /// 列表锁成一行滚动区。
+    fn toggle_tabs_section(&mut self, cx: &mut Context<Self>) {
+        self.tabs_section_collapsed = !self.tabs_section_collapsed;
+        self.tabs_fold_armed = true;
+        self.tabs_fold_seq = self.tabs_fold_seq.wrapping_add(1).max(1);
+        let seq = self.tabs_fold_seq;
+        self.tabs_fold_frozen = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(250)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.tabs_fold_seq == seq {
+                    this.tabs_fold_frozen = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Tab 列表槽位。展开时列表是侧栏 `v_flex` 的 `flex_1` 子项，视口等于
+    /// 面板剩余高度（旧壳 `tabs_avail`）。折叠动画只按**上次量到的剩余
+    /// 高度**卷帘，绝不按全部行高，也不把裁剪高度写回窗口。
     fn render_tabs_section<I>(&self, items: I, cx: &mut Context<Self>) -> gpui::AnyElement
     where
         I: IntoIterator,
@@ -4355,20 +4377,31 @@ impl NebulaWorkspace {
     {
         let collapsed = self.tabs_section_collapsed;
         let list = self.wrap_tabs_scroll_list(items.into_iter().map(|item| item.into_any_element()), cx);
-        if !self.tabs_fold_armed {
+        if collapsed && !self.tabs_fold_frozen {
+            return div().into_any_element();
+        }
+        if !self.tabs_fold_armed || !self.tabs_fold_frozen {
             return if collapsed { div().into_any_element() } else { list };
         }
-        let rows = self.tabs.len().max(1) as f32;
-        let content_h = rows * TAB_ROW_H + (rows - 1.0) * (TAB_ROW_PITCH - TAB_ROW_H);
-        let (from, to) = if collapsed { (content_h, 0.0) } else { (0.0, content_h) };
-        div()
+        let slot_h = self.tabs_viewport_h;
+        let (from, to) = if collapsed { (slot_h, 0.0) } else { (0.0, slot_h) };
+        v_flex()
             .flex_1()
+            .min_h_0()
+            .w_full()
             .overflow_hidden()
             .child(list)
             .with_animation(
                 ("tabs-fold", collapsed as usize),
                 Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
-                move |slot, t| slot.max_h(px(from + (to - from) * t)),
+                move |slot, t| {
+                    let height = from + (to - from) * t;
+                    if !collapsed && t >= 1.0 {
+                        slot
+                    } else {
+                        slot.max_h(px(height))
+                    }
+                },
             )
             .into_any_element()
     }

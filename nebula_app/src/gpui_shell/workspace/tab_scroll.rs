@@ -27,6 +27,9 @@ pub(super) fn rows_h(n: usize, pitch: f32, gap: f32) -> f32 {
 }
 
 /// 视口里能放下几行。尚未量到高度时先展示全部，避免首帧空列表。
+///
+/// 与旧壳 `chrome_tab_layout` 同一条规则：不够一行就是 0，**绝不**退成
+/// 一行。折叠动画若把裁剪高度写回来，强制 1 行会把整列锁成一行滚动区。
 pub(super) fn visible_count(want: usize, avail_h: f32, pitch: f32, gap: f32) -> usize {
     if want == 0 {
         return 0;
@@ -38,7 +41,7 @@ pub(super) fn visible_count(want: usize, avail_h: f32, pitch: f32, gap: f32) -> 
     while show > 0 && rows_h(show, pitch, gap) > avail_h + 0.5 {
         show -= 1;
     }
-    if show == 0 { 1 } else { show }
+    show
 }
 
 pub(super) fn max_scroll(want: usize, show: usize) -> usize {
@@ -95,7 +98,7 @@ struct TabsWindow {
 
 impl NebulaWorkspace {
     fn tabs_window(&self) -> TabsWindow {
-        let want = if self.tabs_section_collapsed { 0 } else { self.tabs.len() };
+        let want = self.tabs.len();
         let show = visible_count(want, self.tabs_viewport_h, TAB_ROW_PITCH, TAB_ROW_GAP);
         let max = max_scroll(want, show);
         let scroll = clamp_scroll(self.tabs_scroll, max);
@@ -122,6 +125,9 @@ impl NebulaWorkspace {
     }
 
     fn tabs_overlay_bar(&self) -> Option<OverlayScrollbar> {
+        if self.tabs_section_collapsed {
+            return None;
+        }
         let window = self.tabs_window();
         if window.show == 0 || window.want <= window.show {
             return None;
@@ -292,7 +298,11 @@ impl NebulaWorkspace {
         if !height_changed && !width_changed {
             return;
         }
-        self.tabs_viewport_h = h;
+        // 折叠中/已折叠：裁剪高度不是 `tabs_avail`。写回去会让
+        // `visible_count` 按 20–40px 算出 0/1 行，展开后整列锁死。
+        if !self.tabs_section_collapsed && !self.tabs_fold_frozen && h >= TAB_ROW_H {
+            self.tabs_viewport_h = h;
+        }
         self.tabs_list_width = w;
         self.clamp_tabs_scroll();
         cx.notify();
@@ -349,6 +359,8 @@ mod tests {
         assert_eq!(visible_count(2, 100.0, PITCH, GAP), 2);
         assert_eq!(visible_count(10, 0.0, PITCH, GAP), 10);
         assert_eq!(visible_count(0, 100.0, PITCH, GAP), 0);
+        // 旧壳：不够一行就是 0，不能退成「一行滚动区」。
+        assert_eq!(visible_count(10, 20.0, PITCH, GAP), 0);
     }
 
     #[test]

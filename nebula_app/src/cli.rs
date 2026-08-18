@@ -33,10 +33,18 @@ pub struct Options {
     #[clap(long)]
     pub embed: Option<String>,
 
-    /// Launch the GPUI UI shell as the main window (P3 acceptance form).
+    /// Launch the GPUI UI shell as the main window.
+    ///
+    /// Optional on 1.1.0+ `gpui-shell` builds: the GUI already defaults to
+    /// GPUI. Kept so existing launchers and scripts keep working.
     #[cfg(feature = "gpui-shell")]
-    #[clap(long)]
+    #[clap(long, conflicts_with = "legacy_shell")]
     pub gpui: bool,
+
+    /// Launch the legacy winit shell instead of GPUI.
+    #[cfg(feature = "gpui-shell")]
+    #[clap(long = "legacy-shell")]
+    pub legacy_shell: bool,
 
     /// Specify alternative configuration file [default:
     /// $XDG_CONFIG_HOME/nebula/nebula.toml].

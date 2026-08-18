@@ -126,3 +126,7 @@ impeccable/
 
 # git filter-branch scratch directory
 .git-rewrite/
+
+# Claude packaging/probe scratch (this branch)
+dist-pack-*/
+.probe-pack/

@@ -17,10 +17,29 @@ edition = "2024"
 rust-version = "1.85.0"
 
 [profile.release]
+# fat LTO 会用顶层 opt-level 重跑全程序 codegen，把下面的热路径 O3 钉子
+# 冲掉；thin + codegen-units=1 保住钉子，体积差距只有个位数百分点。
 lto = "thin"
 debug = 0
-strip = "debuginfo"
+strip = "symbols"
 incremental = false
+codegen-units = 1
+# 发布包体积预算：安装包 <30MB。冷代码（协议栈、序列化、CLI、SSH 等
+# 几百个依赖）按体积编译；渲染/塑形/布局/VT 热路径在下面逐个钉回 O3，
+# 手感不受影响。改动这里必须重新跑 scripts/tests/package-release.tests.ps1。
+opt-level = "s"
+
+[profile.release.package]
+resvg = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+smol = { opt-level = 3 }
+gpui = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+nebula_terminal = { opt-level = 3 }
+nebula = { opt-level = 3 }
+image = { opt-level = 3 }
 
 # Debug 壳仍要承担真实终端负载：GPUI 布局/字体塑形和 VT 解析若以
 # opt-level 0 运行，窗口拖拽与持续输入都会出现发布版没有的延迟。
@@ -110,6 +129,15 @@ winit = { path = "third_party/winit-0.30.13" }
 #      回退现状（inline=code 文本、block=CodeBlock）。TeX 引擎/栅格化/绘制
 #      全部住在 nebula_app::gpui_shell::math_view，fork 只有接线层。上游
 #      0.6 线出现 MarkdownPlugin/Custom block 后应迁过去并撤掉本补丁。
+#   3. TextView 阅读器 GitHub 化（同分支，随 2 一起 push）：软换行按
+#      CommonMark 合并为空格（CJK 相邻直连）；图片 URL 分流（http(s)/data
+#      走 URI、绝对路径读盘、相对路径按 TextViewStyle::image_base 解析）；
+#      HTML `align="center"` 居中（Paragraph/Heading 的 align_center）；
+#      同一 <p> 内多枚 <img> 徽章同段横排不再逐图切段；<br/> 按文档序断行
+#      （旧逻辑先 push Break 再统一 flush 文本，A<br/>B 画成 <br/>AB）；
+#      <a><img/></a> 链接徽章不再整个丢失（图片转移并挂 link）。除
+#      image_base 外全部是 GitHub 语义对齐的纯 bug 修，上游 PR 候选，合并
+#      即撤。
 #
 # ⚠ 临时状态：gpui-component 走本地 path patch（nebula-math 分支工作树），
 # 便于数学补丁的本地迭代；验收后 push 到 Kuddev/gpui-component 并恢复

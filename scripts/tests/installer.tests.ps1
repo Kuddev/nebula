@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -15,6 +15,7 @@ $requiredPatterns = [ordered]@{
     'desktop shortcut task' = 'Tasks: desktopicon'
     'login startup task' = '\{userstartup\}\\Nebula Terminal'
     'hook cleanup command' = 'Parameters: "setup-ai --remove"'
+    'gpui start-menu shortcut' = 'Parameters: "--gpui"'
     'idempotent cleanup entry' = 'RunOnceId: "RemoveNebulaAiHooks"'
     'hook helper payload' = 'nebula-hook\.exe'
     'ConPTY payload' = 'conpty\.dll'
@@ -27,8 +28,8 @@ $requiredPatterns = [ordered]@{
     'directory background context menu' = 'Software\\Classes\\Directory\\Background\\shell\\NebulaTerminal'
     'selected directory context menu' = 'Software\\Classes\\Directory\\shell\\NebulaTerminal'
     'context menu executable icon' = 'ValueName: "Icon"; ValueData: "\{app\}\\nebula\.exe,0"'
-    'background working-directory command' = '--working-directory ""%V""'
-    'selected directory working-directory command' = '--working-directory ""%1""'
+    'background working-directory command' = '--gpui --working-directory ""%V""'
+    'selected directory working-directory command' = '--gpui --working-directory ""%1""'
     'PATH task' = 'Name: "addtopath"; Description: "\{cm:AddToPath\}"'
     'PATH registry entry' = 'Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"'
     'PATH ownership marker' = 'ValueName: "InstallerAddedToPath"'
@@ -60,9 +61,12 @@ foreach ($root in $contextMenuRoots) {
     }
 }
 
-& $builderPath -SkipBuild -ValidateOnly
+& $builderPath -SkipBuild -AllowStale -ValidateOnly
 
 $builder = Get-Content -LiteralPath $builderPath -Raw -Encoding UTF8
+if ($builder -notmatch 'Stale binary') {
+    throw 'build-installer.ps1 must refuse stale binaries (freshness guard missing).'
+}
 if ($builder -notmatch 'c495623a97376d524f298b1b160e8fd612375c62' -or
     $builder -notmatch '6753BE2C5E2740D859900FD902824DB2EC568DA5C5B52486524C9762D778B0B0') {
     throw 'The Chinese installer translation must use a pinned source commit and SHA-256.'

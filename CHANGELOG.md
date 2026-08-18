@@ -25,6 +25,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **Clickable file and URL links in the GPUI shell** — OSC 8 hyperlinks and matched URLs draw a dashed underline in the cell's own foreground color. Hovering shows a preview (`decoded path · Ctrl+click`); Ctrl+click opens local `file://` paths in Explorer and other URIs with the default handler.
 - **Configurable terminal bell in the GPUI shell** — Settings → Profiles → Terminal bell chooses Off, Flash, Sound, or Flash + sound. A BEL still plays the throttled system beep, briefly flashes the pane, toasts when the window is unfocused, and dots background tabs. The choice persists as `bell` (`none` / `visual` / `audible` / `both`, default both).
 - **WYSIWYG font picker and folder-picker startup directory (GPUI shell)** — the font dropdown renders each family in its own face, strips junk extensions from display names, and the import button is just "Import font". Startup directory is a folder picker with "inherit current" / Clear, matching the legacy shell.
+- **GPUI is the default window in 1.1.0 packages** — double-clicking `nebula.exe`, installer shortcuts, and Explorer "Open in Nebula" launch the GPUI shell. Pass `--legacy-shell` for the old winit UI.
 
 #### Fixed
 
@@ -37,6 +38,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **Math overlays survive markdown-unescaped delimiters (GPUI shell)** — some AI CLIs render their markdown before printing and eat the backslashes of `\[ \]` / `\( \)` (markdown punctuation escapes), leaving bare `[ … ]` blocks and `(\sqrt{…})` spans that never overlaid. The shared scanner now recognizes those bare forms when the content carries a known TeX command (`\int`, `\frac`, …) and the brackets sit alone on their line edges; JSON arrays, `[INFO]` logs and regex `(\d+)` stay literal. Explicit TeX lengths (`\\[6pt]`, `\kern`) also regained their point-to-pixel scale in the GPUI shell, matching the legacy renderer.
 - **Markdown reader fills the reading column (GPUI shell)** — soft line breaks inside a paragraph (hand-wrapped README prose) rendered as hard line breaks, leaving the right side of the column empty and ragged. They now merge into spaces per CommonMark, with CJK neighbours joining directly.
 - **Markdown images actually load (GPUI shell)** — the document tab now resolves relative image paths against the document's own directory, loads absolute local paths from disk, and fetches `http(s)` images through a ureq HTTP client on the background executor (gpui ships a null client by default), so README logos, shields badges (SVG included) and screenshots finally display. Animated GIF/WebP (local or remote) are flattened to a still PNG first, because gpui panics when a multi-frame image's frame index is reused on a static image.
+- **Raw HTML in Markdown renders like GitHub (GPUI shell)** — README-style HTML now matches GitHub's semantics: `align="center"` on `<p>` / `<div>` / headings centers the block, consecutive `<img>` badges inside one paragraph flow on a single centered row instead of stacking one per line, inline `<br/>` breaks in document order (it used to be hoisted above the text it followed), and `<a><img/></a>` linked badges are no longer dropped — the image renders and carries its link.
 
 #### Improved
 
@@ -62,6 +64,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **GPUI 壳可点击文件与 URL** — OSC 8 超链接和匹配到的 URL 用格子自身前景色画虚线下划线。悬停显示预览（`解码后的路径 · Ctrl+点击`）；Ctrl+点击用资源管理器打开本地 `file://`，其余 URI 走默认打开方式。
 - **GPUI 壳可配置终端铃声** — “设置 → 配置文件 → 终端铃声”可选关 / 闪烁 / 声音 / 闪烁 + 声音。BEL 仍播放节流后的系统提示音、短暂闪一下 pane、窗口失焦时出 toast、后台 tab 打点。选择以 `bell` 持久化（`none` / `visual` / `audible` / `both`，默认两者都开）。
 - **GPUI 壳所见即所得字体选择器与启动目录** — 字体下拉用各族自己的字形渲染，展示名剥掉多余扩展名，导入按钮改为「导入字体」。启动目录改为选文件夹，「继承当前目录」/「清除」，与旧壳一致。
+- **1.1.0 安装包默认进入 GPUI 主窗** — 双击 `nebula.exe`、开始菜单/桌面快捷方式和资源管理器「在 Nebula 中打开」都启动 GPUI 壳。旧 winit 壳用 `--legacy-shell`。
 
 #### 修复
 
@@ -74,6 +77,7 @@ Every release entry is provided in English and Simplified Chinese.
 - **公式覆盖层兼容被 markdown 反转义的定界符（GPUI 壳）** — 部分 AI CLI 先渲染 markdown 再上屏，`\[ \]` / `\( \)` 的反斜杠被当作 markdown 标点转义吃掉，屏幕上只剩裸 `[ … ]` 块与 `(\sqrt{…})`，公式从不渲染。共享扫描器现在识别这些裸形态：内容须携带已知 TeX 命令（`\int`、`\frac`……）且方括号独占行首/行尾；JSON 数组、`[INFO]` 日志、正则 `(\d+)` 保持原样。GPUI 壳里 TeX 显式长度（`\\[6pt]`、`\kern`）的 pt→px 换算也已对齐旧壳。
 - **Markdown 阅读器铺满阅读列（GPUI 壳）** — 段落内的软换行（README 手工折行的正文）此前渲染成硬换行，右侧留出一大片参差空白。现按 CommonMark 合并为空格，中日韩相邻行直接相连不插空格。
 - **Markdown 图片真正能加载（GPUI 壳）** — 文档 tab 现在把相对图片路径按文档所在目录解析、绝对路径直接读盘、`http(s)` 图源经后台 ureq 客户端拉取（gpui 默认装的是空客户端），README 的 logo、shields 徽章（含 SVG）与截图终于都能显示。本地和网络的 GIF / 动画 WebP 会先压成单帧 PNG：gpui 在多帧图的帧下标被静态图复用时会直接 panic。
+- **Markdown 里的原生 HTML 按 GitHub 语义渲染（GPUI 壳）** — README 常用的 HTML 写法现在与 GitHub 渲染一致：`<p>` / `<div>` / 标题上的 `align="center"` 让整块居中；同一段落里连续的 `<img>` 徽章在同一行居中横排（此前一枚一行竖着摞）；行内 `<br/>` 按文档顺序断行（此前会被提到所跟文本之前）；`<a><img/></a>` 链接徽章不再整个丢失——图片正常显示且带链接。
 
 #### 改进
 

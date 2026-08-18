@@ -233,7 +233,8 @@ wayland = [
 nightly = []
 wgpu-foundation = ["dep:pollster", "dep:wgpu"]
 # GPUI UI 层（产品代码在 src/gpui_shell/）。默认关闭，不影响常规构建。
-# 拉起：`nebula --gpui`（主窗形态）或 NEBULA_GPUI_SHELL=1（spike 并存形态）。
+# 带此 feature 的发布包：双击 / 无参 GUI 即进 GPUI；`--legacy-shell` 回旧壳。
+# `--gpui` 仍可用。NEBULA_GPUI_SHELL=1 是旧的 spike 并存形态。
 gpui-shell = [
     "dep:gpui",
     "dep:gpui-component",

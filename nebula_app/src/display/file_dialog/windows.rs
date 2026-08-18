@@ -12,11 +12,21 @@ use winit::raw_window_handle::RawWindowHandle;
 use super::{FileFilter, Window, windows_folder};
 
 pub(super) fn pick_file(owner: &Window, title: &str, filters: &[FileFilter]) -> Option<PathBuf> {
-    pick_files_inner(owner, title, filters, false).into_iter().next()
+    pick_files_inner_hwnd(owner_hwnd(owner), title, filters, false).into_iter().next()
 }
 
 pub(super) fn pick_files(owner: &Window, title: &str, filters: &[FileFilter]) -> Vec<PathBuf> {
-    pick_files_inner(owner, title, filters, true)
+    pick_files_inner_hwnd(owner_hwnd(owner), title, filters, true)
+}
+
+/// GPUI 壳没有 winit `Window`，但仍要把对话框挂到当前 HWND 上，
+/// 否则会落到 Nebula 后面。`hwnd` 为空时退化为无主窗口。
+pub(super) fn pick_file_with_hwnd(
+    hwnd: HWND,
+    title: &str,
+    filters: &[FileFilter],
+) -> Option<PathBuf> {
+    pick_files_inner_hwnd(hwnd, title, filters, false).into_iter().next()
 }
 
 pub(super) fn pick_folder(owner: &Window, title: &str) -> Option<PathBuf> {
@@ -60,13 +70,12 @@ fn owner_hwnd(owner: &Window) -> HWND {
     }
 }
 
-fn pick_files_inner(
-    owner: &Window,
+fn pick_files_inner_hwnd(
+    hwnd: HWND,
     title: &str,
     filters: &[FileFilter],
     multiple: bool,
 ) -> Vec<PathBuf> {
-    let hwnd: HWND = owner_hwnd(owner);
     let filter = build_filter_buffer(filters);
     let title = title.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
     let mut file_buffer = vec![0u16; 32768];

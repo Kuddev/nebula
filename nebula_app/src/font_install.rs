@@ -267,6 +267,26 @@ pub fn bundled_font_directory() -> PathBuf {
     packaged.unwrap_or_else(|| PathBuf::from("fonts"))
 }
 
+/// 「安装字体」提示要打开的目录，保证里面真有 ttf 可装。1.1.0 起 zip 不再
+/// 附带 20MB 字体副本（exe 内嵌同一字节），此时把内嵌字体落到数据目录，
+/// 与包内副本完全等价。落盘失败（只读盘等）退回原目录，提示仍可关闭。
+#[cfg(windows)]
+pub fn ensure_bundled_font_on_disk() -> PathBuf {
+    let directory = bundled_font_directory();
+    if directory.join(REQUIRED_FONT_FILE).is_file() {
+        return directory;
+    }
+    let fallback = imported_font_directory();
+    let path = fallback.join(REQUIRED_FONT_FILE);
+    if !path.is_file()
+        && (std::fs::create_dir_all(&fallback).is_err()
+            || std::fs::write(&path, REQUIRED_FONT_BYTES).is_err())
+    {
+        return directory;
+    }
+    fallback
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
