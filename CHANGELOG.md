@@ -4,7 +4,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
-## 1.1.0 - 2026-08-17
+## 1.1.0 - 2026-08-18
 
 ### English
 
@@ -39,6 +39,8 @@ Every release entry is provided in English and Simplified Chinese.
 - **Markdown reader fills the reading column (GPUI shell)** — soft line breaks inside a paragraph (hand-wrapped README prose) rendered as hard line breaks, leaving the right side of the column empty and ragged. They now merge into spaces per CommonMark, with CJK neighbours joining directly.
 - **Markdown images actually load (GPUI shell)** — the document tab now resolves relative image paths against the document's own directory, loads absolute local paths from disk, and fetches `http(s)` images through a ureq HTTP client on the background executor (gpui ships a null client by default), so README logos, shields badges (SVG included) and screenshots finally display. Animated GIF/WebP (local or remote) are flattened to a still PNG first, because gpui panics when a multi-frame image's frame index is reused on a static image.
 - **Raw HTML in Markdown renders like GitHub (GPUI shell)** — README-style HTML now matches GitHub's semantics: `align="center"` on `<p>` / `<div>` / headings centers the block, consecutive `<img>` badges inside one paragraph flow on a single centered row instead of stacking one per line, inline `<br/>` breaks in document order (it used to be hoisted above the text it followed), and `<a><img/></a>` linked badges are no longer dropped — the image renders and carries its link.
+- **Codex `notify` no longer wraps itself into an unusable config** — when another notify wrapper (codex-computer-use) re-registered without recognizing Nebula's helper, it serialized the whole existing array into its own `--previous-notify` argument; Nebula wrapped that again, and the escaped backslashes doubled every round until `config.toml` reached 130 MB and Codex refused to start. The helper mark now counts as "already wired" wherever it appears — including inside a JSON string — so Nebula only heals its own path and never re-wraps. A serialized `notify` over 8 KB is refused outright as a backstop against any other form of inflation, and `nebula setup-ai --remove` persists `ai_hooks=0` so auto-wiring stays off across launches. (#38)
+- **Tab context-menu shadow no longer thickens with the tab count (GPUI shell)** — the component library's context-menu extension keys its state by a fixed element id, so every tab row resolved to the same state and re-rendered the same open menu at the same anchor. The menu panel is opaque, but its shadow is not: with eight tabs the drop shadow was composited eight times. The tab menu now draws exactly once from the workspace root, like the file-tree menu.
 
 #### Improved
 
@@ -78,6 +80,8 @@ Every release entry is provided in English and Simplified Chinese.
 - **Markdown 阅读器铺满阅读列（GPUI 壳）** — 段落内的软换行（README 手工折行的正文）此前渲染成硬换行，右侧留出一大片参差空白。现按 CommonMark 合并为空格，中日韩相邻行直接相连不插空格。
 - **Markdown 图片真正能加载（GPUI 壳）** — 文档 tab 现在把相对图片路径按文档所在目录解析、绝对路径直接读盘、`http(s)` 图源经后台 ureq 客户端拉取（gpui 默认装的是空客户端），README 的 logo、shields 徽章（含 SVG）与截图终于都能显示。本地和网络的 GIF / 动画 WebP 会先压成单帧 PNG：gpui 在多帧图的帧下标被静态图复用时会直接 panic。
 - **Markdown 里的原生 HTML 按 GitHub 语义渲染（GPUI 壳）** — README 常用的 HTML 写法现在与 GitHub 渲染一致：`<p>` / `<div>` / 标题上的 `align="center"` 让整块居中；同一段落里连续的 `<img>` 徽章在同一行居中横排（此前一枚一行竖着摞）；行内 `<br/>` 按文档顺序断行（此前会被提到所跟文本之前）；`<a><img/></a>` 链接徽章不再整个丢失——图片正常显示且带链接。
+- **Codex `notify` 不再自我包装成起不来的配置** — 另一个 notify 包装器（codex-computer-use）重新注册时若认不出 Nebula 的 helper，会把整个旧数组序列化进自己的 `--previous-notify` 参数；Nebula 再包一层，转义反斜杠每轮翻倍，最终把 `config.toml` 撑到 130 MB，Codex 直接起不来。现在只要 helper 标记出现在**任何位置**（含 JSON 字符串内部）就算已接线，Nebula 只自愈自己的路径、绝不再包。序列化后超过 8 KB 的 `notify` 一律拒写，兜住其他形态的膨胀；`nebula setup-ai --remove` 会持久化 `ai_hooks=0`，重启后也不再自动装回。（#38）
+- **Tab 右键菜单阴影不再随标签数变厚（GPUI 壳）** — 组件库的右键菜单扩展用固定元素 id 存状态，于是每个标签行都解析到同一份状态、把同一个已打开的菜单重复画在同一锚点上。菜单面板不透明，阴影不是：8 个标签就叠 8 层投影。现在 Tab 菜单与文件树菜单一样，由 workspace 根只画一次。
 
 #### 改进
 

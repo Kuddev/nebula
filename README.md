@@ -241,6 +241,16 @@ Windows/Linux paths, arrays, modules, and reload behavior.
 
 Questions and feedback: [fickleheartedkeys@163.com](mailto:fickleheartedkeys@163.com)
 
+### 🙏 Acknowledgements
+
+Nebula's shell is built on **[GPUI](https://github.com/zed-industries/zed)** — the
+GPU-accelerated UI framework developed by the [Zed](https://zed.dev) team — together with
+**[gpui-component](https://github.com/longbridge/gpui-component)** from
+[Longbridge](https://github.com/longbridge), which supplies the widget library. Both are
+Apache-2.0 licensed and are used through lightly patched forks pinned in the workspace
+manifest. Thank you for releasing this work as open source — Nebula's interface would not
+look the way it does without it.
+
 ### 📜 License
 
 Released under the [GNU General Public License v3.0](LICENSE).
@@ -419,6 +429,15 @@ Nebula 内置 Lua 5.4，使用 `require 'nebula'` 与
 ### 联系方式
 
 问题与反馈：[fickleheartedkeys@163.com](mailto:fickleheartedkeys@163.com)
+
+### 🙏 致谢
+
+Nebula 的界面层构建在 **[GPUI](https://github.com/zed-industries/zed)** 之上——由
+[Zed](https://zed.dev) 团队开发的 GPU 加速 UI 框架——并使用
+[Longbridge](https://github.com/longbridge) 的
+**[gpui-component](https://github.com/longbridge/gpui-component)** 作为组件库。两者均以
+Apache-2.0 许可发布，Nebula 通过带少量补丁的 fork 使用，版本在 workspace 清单中精确锁定。
+感谢把这些工作开源——没有它，Nebula 现在的界面不会是这个样子。
 
 ### 📜 许可证
 

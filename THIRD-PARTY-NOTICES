@@ -29,6 +29,14 @@ The bundled conpty.dll and OpenConsole.exe come from the Windows
 Terminal project (github.com/microsoft/terminal), distributed under the
 MIT License.
 
+The GPUI interface layer is built with gpui 0.2.2, developed by Zed
+Industries (github.com/zed-industries/zed), and gpui-component 0.5.1,
+developed by Longbridge (github.com/longbridge/gpui-component). Both are
+distributed under the Apache License 2.0, whose text is reproduced below.
+Nebula compiles modified forks of both crates; the fork baselines and the
+applied patches are recorded in the workspace Cargo.toml under
+[patch.crates-io].
+
 ---------------------------------------------------------------------
 
                               Apache License

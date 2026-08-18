@@ -129,4 +129,6 @@ impeccable/
 
 # Claude packaging/probe scratch (this branch)
 dist-pack-*/
-.probe-pack/
+# 每次 A/B 对照都会开一个新的探针目录（.probe-pack、.probe-layout-daily、
+# .probe-tabmenu…），逐个补规则永远漏，所以整族忽略。
+.probe-*/

@@ -767,6 +767,9 @@ pub struct NebulaWorkspace {
     side_panel_anim_armed: bool,
     /// 文件树右键：画在 workspace 根上，不进抽屉子孙树。见 `file_tree.rs`。
     file_tree_menu: Option<file_tree::FileTreeContextMenu>,
+    /// 标签右键：同样画在根上。挂进标签行会让每一行都渲染同一份菜单，
+    /// popover 阴影按标签数叠厚。见 `tab_menu.rs` 模块头。
+    tab_menu: Option<tab_menu::TabContextMenu>,
     /// 复用旧壳随包分发的 AI 品牌图，不用近似字体图标替代。
     sidebar_logo_images: HashMap<(crate::display::AiLogo, bool), Arc<RenderImage>>,
     /// 品牌图缓存对应的整数物理像素边长；窗口跨 DPI 显示器时据此重建。
@@ -908,6 +911,7 @@ impl NebulaWorkspace {
             side_panel_polling: false,
             side_panel_anim_armed: false,
             file_tree_menu: None,
+            tab_menu: None,
             sidebar_logo_images: sidebar_logo_images(sidebar_logo_target_px),
             sidebar_logo_target_px,
             _appearance_sub: appearance_sub,
@@ -3898,8 +3902,6 @@ impl NebulaWorkspace {
                     },
                     _ => None,
                 });
-            let workspace = cx.entity().downgrade();
-            let context_workspace = workspace.clone();
             let hover_group: SharedString = format!("sidebar-tab-hover-{ix}").into();
             let shell_tag = (is_terminal && activity == SidebarActivity::Idle)
                 .then(|| self.meta(ix).shell_tag)
@@ -4152,9 +4154,16 @@ impl NebulaWorkspace {
                                 ),
                         ),
                 )
-                .context_menu(move |menu, window, cx| {
-                    Self::tab_context_menu(menu, context_workspace.clone(), ix, window, cx)
-                });
+                // 右键只记锚点：菜单由 workspace 根上唯一一份宿主画。挂
+                // `.context_menu()` 会让每个标签行都渲染同一个 PopupMenu，
+                // 阴影按标签数叠厚（见 `tab_menu.rs` 模块头）。
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_tab_context_menu(ix, event.position, window, cx);
+                    }),
+                );
             if dragged {
                 // 骑指针 + 提到最上层画（deferred 只延后绘制、不动布局），
                 // 阴影给"拿起来"的抬升感。
@@ -4350,6 +4359,8 @@ impl NebulaWorkspace {
     /// 列表锁成一行滚动区。
     fn toggle_tabs_section(&mut self, cx: &mut Context<Self>) {
         self.tabs_section_collapsed = !self.tabs_section_collapsed;
+        // 卷帘一动，菜单锚定的那一行就不在原处了。
+        self.tab_menu = None;
         self.tabs_fold_armed = true;
         self.tabs_fold_seq = self.tabs_fold_seq.wrapping_add(1).max(1);
         let seq = self.tabs_fold_seq;
@@ -5143,6 +5154,7 @@ impl Render for NebulaWorkspace {
             .when_some(self.render_file_tree_context_menu(), |root, menu| {
                 root.child(menu)
             })
+            .when_some(self.render_tab_context_menu(), |root, menu| root.child(menu))
             // 组件库的模态/通知层不会自己上屏：`Root::render` 只画宿主视图，
             // dialog/notification 两层由宿主显式挂。挂在最外层链尾＝盖住命令
             // 面板和所有拖拽罩层；dialog 在下、notification 在上，确认框弹着

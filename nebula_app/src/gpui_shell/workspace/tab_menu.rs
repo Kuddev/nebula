@@ -3,10 +3,27 @@
 //! 「分叉 AI 会话」必须在菜单打开当下按 hook 身份 + 官方 fork 语法重算，
 //! 不能吃侧栏上一帧的快照——否则刚接到 session_id、或冷恢复种下身份后
 //! 右键仍看不到这一行。
+//!
+//! # 为什么不用 `ContextMenuExt::context_menu()`
+//!
+//! 2026-08-18：那个扩展会把 `ContextMenu` 包在被挂载元素的**外面**，而它的
+//! `ElementId` 在 fork 里是硬编码的 `"context-menu"`
+//! （`crates/ui/src/menu/context_menu.rs`）。包裹层的 id 先于内层行 id 入
+//! `GlobalElementId` 栈，于是每个标签行的 `ContextMenu` 算出来的 id 路径完全
+//! 相同、共享同一份 element state（含那个 `Rc<RefCell<ContextMenuSharedState>>`）。
+//! 菜单一打开，`open == true` 对**所有**标签行同时成立，每一行都渲染同一个
+//! `PopupMenu` entity、落在同一个锚点上。面板底不透明，叠 N 次看不出来；
+//! popover 阴影是半透明的，alpha 叠 N 层——这就是「标签越多，右键菜单阴影
+//! 越厚」的全部原因，与打包资源和用户配置都无关。
+//!
+//! 所以这里跟 `file_tree.rs` 用同一套载体：标签行只记锚点和下标，菜单由
+//! workspace 根上唯一一份 `deferred(anchored)` 画，组件自带的 popover 阴影
+//! 因此保持单层。
 
 use gpui::{
-    App, InteractiveElement as _, MouseButton, ParentElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, Context, Corner, DismissEvent, Entity, Focusable as _,
+    InteractiveElement as _, IntoElement as _, MouseButton, ParentElement as _, Pixels, Point,
+    Styled as _, Subscription, Window, anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::menu::PopupMenuItem;
 
@@ -18,6 +35,17 @@ use nebula_split::SplitDirection;
 use super::{
     CloseActiveTerminal, NebulaWorkspace, RenameActiveTab, SplitDown, SplitRight, WorkspaceTab,
 };
+
+/// 标签右键菜单的宿主。画在 workspace 根上，不进标签行的子孙树——理由见
+/// 模块头。
+pub(super) struct TabContextMenu {
+    menu: Entity<PopupMenu>,
+    position: Point<Pixels>,
+    /// 菜单里每条命令捕获的都是下标。标签集合在菜单挂着的时候变了（远端
+    /// 或 AI 侧自动关标签），这一份就不该再画。
+    ix: usize,
+    _subscription: Subscription,
+}
 
 /// 旧壳 `sync_chrome_tabs`：只有 Default / 检测 Shell 的 tab 才允许分叉。
 /// Profile 可能直接启动 agent；SSH 会把命令打进认证提示。
@@ -38,36 +66,57 @@ pub(super) fn tab_ai_fork_enabled(workspace: &NebulaWorkspace, ix: usize, cx: &A
 }
 
 impl NebulaWorkspace {
-    /// 右键打开当下现查 fork 资格，并先选中该行（旧壳 chrome 同惯例）。
-    pub(super) fn tab_context_menu(
-        menu: PopupMenu,
-        workspace: gpui::WeakEntity<Self>,
+    /// 右键：先选中该行（旧壳 chrome 同惯例），再按当下的 hook 身份现查
+    /// fork 资格，最后把菜单交给根上那一份宿主。
+    pub(super) fn open_tab_context_menu(
+        &mut self,
         ix: usize,
+        position: Point<Pixels>,
         window: &mut Window,
-        cx: &mut App,
-    ) -> PopupMenu {
-        let (terminal, ai_fork, color) = workspace
-            .upgrade()
-            .map(|entity| {
-                entity.update(cx, |this, cx| {
-                    if ix < this.tabs.len() {
-                        this.activate_tab(ix, window, cx);
-                    }
-                    (
-                        this.tabs.get(ix).is_some_and(WorkspaceTab::is_terminal),
-                        tab_ai_fork_enabled(this, ix, cx),
-                        this.meta(ix).color,
-                    )
-                })
-            })
-            .unwrap_or((false, false, None));
-        Self::tab_popup_menu(
-            menu.external_link_icon(false),
-            workspace,
-            ix,
-            terminal,
-            ai_fork,
-            color,
+        cx: &mut Context<Self>,
+    ) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        self.activate_tab(ix, window, cx);
+        let terminal = self.tabs.get(ix).is_some_and(WorkspaceTab::is_terminal);
+        let ai_fork = tab_ai_fork_enabled(self, ix, cx);
+        let color = self.meta(ix).color;
+        let workspace = cx.entity().downgrade();
+        let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
+            Self::tab_popup_menu(
+                menu.external_link_icon(false),
+                workspace,
+                ix,
+                terminal,
+                ai_fork,
+                color,
+            )
+        });
+        menu.focus_handle(cx).focus(window);
+        let subscription = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
+            this.tab_menu = None;
+            cx.notify();
+        });
+        self.tab_menu = Some(TabContextMenu { menu, position, ix, _subscription: subscription });
+        cx.notify();
+    }
+
+    pub(super) fn render_tab_context_menu(&self) -> Option<AnyElement> {
+        let state = self.tab_menu.as_ref()?;
+        if state.ix >= self.tabs.len() {
+            return None;
+        }
+        Some(
+            deferred(
+                anchored()
+                    .position(state.position)
+                    .snap_to_window_with_margin(px(8.0))
+                    .anchor(Corner::TopLeft)
+                    .child(state.menu.clone()),
+            )
+            .with_priority(1)
+            .into_any_element(),
         )
     }
 
