@@ -9,8 +9,17 @@ Every release entry is provided in English and Simplified Chinese.
 ### English
 
 #### Added
+- **A rebuilt interface as the default window** — 1.1.0 packages open a new GPU-accelerated shell: the terminal grid, sidebar, settings, launcher and document views are all rendered by it. `--legacy-shell` still starts the previous winit UI, which stays in the codebase.
+- **AI session forking from the sidebar** — right-clicking a claude or codex tab offers "Fork AI session", opening a new tab that resumes the same conversation through the CLI's own fork syntax. Eligibility is recomputed when the menu opens, so a session that has just reported its id is immediately forkable.
+- **AI turn-state detection** — sidebar tabs show running, finished, waiting-for-input and failed states for claude and codex, driven by the CLIs' own hook payloads plus screen-state evidence. A watchdog releases zombie "working" states so the spinner cannot spin forever.
+- **A full settings page in the new shell** — every key-value setting from the legacy UI is migrated with the same section navigation, and Settings opens as one reusable tab instead of a floating window.
+- **Tab rename, color labels and single-tab export** — rename a tab in place, tag it with one of seven brand colors, or export just that tab as a workspace file.
+- **Split panes, drag-to-split and workspace session restore** — dragging a tab onto a pane edge splits it, and the split tree with per-pane launch identity comes back on the next launch.
+- **AI provider settings and a runtime control CLI** — provider credentials and models are configurable in Settings, and a runtime API lets scripts open tabs, run commands and query state.
+- **Built-in box-drawing geometry** — frames, blocks and separators are drawn geometrically in the render contract instead of relying on font glyphs, so they align in any font.
+- **Terminal mouse semantics parity** — application mouse reporting, right-click behavior and copy-on-select match the legacy shell.
+- **A Markdown and image reader** — documents render with rich text, native math and images, and PNG/JPEG/WebP/BMP open in their own viewer tab.
 
-- **Remote backups over multiple protocols** — the Settings → Backup page is now available and gains a "Remote backup" group that pushes the existing password-protected archive (Argon2id + AES-256-GCM; servers only ever see ciphertext) to a destination of choice: a local/network folder (NAS UNC paths), WebDAV, S3-compatible storage (AWS/MinIO/R2/B2 via SigV4, path-style), or SFTP reusing saved SSH hosts and their authentication. Archives are timestamped (`nebula-backup-YYYYMMDD-HHMMSS.nbk`), the newest 10 are retained per destination, and "Restore latest" fetches and applies the most recent one after passphrase entry. WebDAV/S3 secrets live in the Windows Credential Manager (env-var fallback elsewhere), non-secret settings persist in `nebula_backup.txt`, and all packing, key derivation, and network I/O run on a background thread. GitHub/Google Drive/OneDrive OAuth destinations are out of scope for now.
 - **Two completion styles with a switch** — Settings → Terminal → Completion adds a "Completion style" choice between the existing inline ghost text and a new popup candidate list. The popup gathers history, frecency directories, PATH commands, and filesystem matches (up to 8, with source tags), navigates with Up/Down, accepts with the configured accept key (Tab/Right), and dismisses with Esc without re-opening until the line changes. A command-palette action toggles the style, and the choice persists as `completion_style`.
 - **A real color picker for the custom background** — the background-color popup now leads with a saturation/value plane and a hue bar; dragging picks continuously with live terminal preview and persists on release. The preset swatches and the hex field remain, and all three inputs stay in sync (including hue retention across gray/black/white picks).
 - **Clipboard screenshot paste, locally and over SSH** — pasting with an image-only clipboard (e.g. right after Win+Shift+S) now converts the bitmap to PNG and pastes a file path instead of nothing. Local panes write a temp file; SSH panes upload via the existing SFTP stack to `/tmp/nebula-paste-<ts>.png` in the background and then type the remote path into the pane — so image-accepting CLIs like codex and claude receive a usable path on both sides.
@@ -25,7 +34,6 @@ Every release entry is provided in English and Simplified Chinese.
 - **Clickable file and URL links in the GPUI shell** — OSC 8 hyperlinks and matched URLs draw a dashed underline in the cell's own foreground color. Hovering shows a preview (`decoded path · Ctrl+click`); Ctrl+click opens local `file://` paths in Explorer and other URIs with the default handler.
 - **Configurable terminal bell in the GPUI shell** — Settings → Profiles → Terminal bell chooses Off, Flash, Sound, or Flash + sound. A BEL still plays the throttled system beep, briefly flashes the pane, toasts when the window is unfocused, and dots background tabs. The choice persists as `bell` (`none` / `visual` / `audible` / `both`, default both).
 - **WYSIWYG font picker and folder-picker startup directory (GPUI shell)** — the font dropdown renders each family in its own face, strips junk extensions from display names, and the import button is just "Import font". Startup directory is a folder picker with "inherit current" / Clear, matching the legacy shell.
-- **GPUI is the default window in 1.1.0 packages** — double-clicking `nebula.exe`, installer shortcuts, and Explorer "Open in Nebula" launch the GPUI shell. Pass `--legacy-shell` for the old winit UI.
 
 #### Fixed
 
@@ -41,17 +49,38 @@ Every release entry is provided in English and Simplified Chinese.
 - **Raw HTML in Markdown renders like GitHub (GPUI shell)** — README-style HTML now matches GitHub's semantics: `align="center"` on `<p>` / `<div>` / headings centers the block, consecutive `<img>` badges inside one paragraph flow on a single centered row instead of stacking one per line, inline `<br/>` breaks in document order (it used to be hoisted above the text it followed), and `<a><img/></a>` linked badges are no longer dropped — the image renders and carries its link.
 - **Codex `notify` no longer wraps itself into an unusable config** — when another notify wrapper (codex-computer-use) re-registered without recognizing Nebula's helper, it serialized the whole existing array into its own `--previous-notify` argument; Nebula wrapped that again, and the escaped backslashes doubled every round until `config.toml` reached 130 MB and Codex refused to start. The helper mark now counts as "already wired" wherever it appears — including inside a JSON string — so Nebula only heals its own path and never re-wraps. A serialized `notify` over 8 KB is refused outright as a backstop against any other form of inflation, and `nebula setup-ai --remove` persists `ai_hooks=0` so auto-wiring stays off across launches. (#38)
 - **Tab context-menu shadow no longer thickens with the tab count (GPUI shell)** — the component library's context-menu extension keys its state by a fixed element id, so every tab row resolved to the same state and re-rendered the same open menu at the same anchor. The menu panel is opaque, but its shadow is not: with eight tabs the drop shadow was composited eight times. The tab menu now draws exactly once from the workspace root, like the file-tree menu.
+- **The terminal cursor no longer drifts after a resize** — conhost collapses the screen buffer non-deterministically on resize and repaints nothing, so the cursor could end up rows away from where the shell thinks it is. Nebula now reconciles the real position through an AttachConsole probe after each resize and re-aligns the grid.
+- **The user PowerShell profile loads in the default shell** — the default launch skipped `$PROFILE`, so prompts, aliases and PSReadLine settings defined there never applied. (#30)
+- **Reflow survives a shrink-then-grow round trip** — narrowing and then widening the window no longer drops wrapped content, and the window now has a real minimum size.
+- **Cursor focus and blink, and a startup render-gate freeze** — the cursor state machine follows focus correctly, and a watchdog releases a startup gate that could leave the window visible but unpainted. (#21)
+- **Esc reaches Claude Code in the new shell** — the win32-input encoder filled the control-key `uChar` with 0, which OpenConsole drops, so Esc never arrived at CLIs reading the byte stream.
+- **The window-close confirmation accounts for busy processes** — closing while a build or an AI CLI is running now names the program instead of closing silently.
+- **Notifications anchor to the bottom-right corner.**
+- **The acrylic background composites at the configured opacity.**
+- **Shell picker brand icons are no longer blurry** — they are pre-scaled to the integer device pixel size instead of being stretched by the GPU.
+- **Built-in glyphs fill the cell in Relaxed width mode.**
+- **Tab launch identity and full-row hit areas** — a restored tab keeps the program it was launched with, and the whole row is clickable rather than just the label text.
 
 #### Improved
 
 - **File/Git side-panel refreshes no longer block rendering** — directory traversal and Git status subprocesses now build a snapshot on a worker thread while the existing view stays usable. Completed snapshots are swapped in atomically; stale-root results are discarded and active search results are not overwritten.
 - **Tab disclosure and file-tree menus in the GPUI shell** — the TABS collapse control uses the shell's linear chevrons instead of Nerd Font glyphs. File-tree context menus no longer pick up the drawer drop shadow, so they match the tab menus.
+- **The font picker previews candidates in their own glyphs** — each family is drawn in its own face before you commit to it.
 
 ### 简体中文
 
 #### 新增
+- **重写的界面成为默认窗口** — 1.1.0 安装包启动全新的 GPU 加速界面：终端网格、侧栏、设置、启动器与文档视图全部由它渲染。旧的 winit 界面仍保留在代码中，用 `--legacy-shell` 启动。
+- **侧栏 AI 会话分叉** — 右键 claude 或 codex 标签会出现「分叉 AI 会话」，用 CLI 自己的 fork 语法开一个新标签接续同一段对话。资格在菜单打开当下重算，刚上报 session id 的会话立刻就能分叉。
+- **AI 回合状态识别** — 侧栏标签会显示 claude 与 codex 的运行中、已完成、等待输入与失败四种状态，依据来自 CLI 自身的 hook 载荷加屏幕状态证据。看门狗会释放僵尸「运行中」状态，转圈不会一直转下去。
+- **新界面的完整设置页** — 旧界面的所有设置项与分区导航全部迁移，设置以一个可复用的标签打开，不再是浮动窗口。
+- **标签重命名、颜色标记与单标签导出** — 可以就地重命名标签、用七种品牌色之一标记，或只把这一个标签导出为工作区文件。
+- **分屏、拖拽分屏与工作区会话恢复** — 把标签拖到窗格边缘即分屏，分屏树与每个窗格的启动身份会在下次启动时恢复。
+- **AI 服务商设置与运行时控制 CLI** — 服务商凭据与模型可在设置中配置，运行时 API 让脚本可以开标签、执行命令与查询状态。
+- **内置制表符几何绘制** — 边框、方块与分隔线在渲染契约中按几何绘制，不再依赖字体字形，换任何字体都能对齐。
+- **终端鼠标语义对齐** — 应用级鼠标上报、右键行为与选中即复制均与旧壳一致。
+- **Markdown 与图片阅读器** — 文档带富文本、原生公式与图片渲染，PNG/JPEG/WebP/BMP 在独立的查看标签中打开。
 
-- **多协议远程备份** — “设置 → 备份”页面正式开放，并新增「远程备份」组：把既有的口令保护归档（Argon2id + AES-256-GCM，服务器只见密文）推送到所选目的地——本地/网络目录（含 NAS 的 UNC 路径）、WebDAV、S3 兼容存储（SigV4 签名、路径式 URL，AWS/MinIO/R2/B2 通吃）、或复用已保存 SSH 主机及其认证的 SFTP。归档按时间戳命名（`nebula-backup-YYYYMMDD-HHMMSS.nbk`），每个远端保留最近 10 份；「恢复最新备份」取回最新一份、输口令后落盘。WebDAV/S3 的密钥存 Windows 凭据管理器（其他平台走环境变量），非密文配置持久化在 `nebula_backup.txt`；打包、密钥派生与网络全部在后台线程完成。GitHub/Google Drive/OneDrive 三个 OAuth 后端暂不纳入。
 - **两种补全样式可切换** — “设置 → 终端 → 补全”新增「补全样式」：在既有的行内灰字与新的弹窗候选列表之间选择。弹窗汇总历史命令、常用目录、PATH 命令与文件系统匹配（至多 8 项，带来源标签），↑/↓ 选行、按补全接受键（Tab/→）接受、Esc 关闭且同一行不再重弹；命令面板提供切换动作，选择以 `completion_style` 持久化。
 - **自定义背景色改用真调色盘** — 背景色浮层顶部新增饱和度/明度取色面与色相条，按住拖动即连续取色、终端实时预览、松手落盘。预设色板与 16 进制输入保留，三种输入互相同步（灰/黑/白取色时保留既有色相）。
 - **剪贴板截图粘贴（本地与 SSH）** — 剪贴板只有位图没有文本时（如 Win+Shift+S 之后），粘贴会把位图转成 PNG 并粘出文件路径：本地 pane 写入临时文件；SSH pane 经既有 SFTP 栈后台上传到远端 `/tmp/nebula-paste-<时间戳>.png` 再把远端路径敲进会话——codex/claude 这类接受图片路径的 CLI 在两侧都能直接用。
@@ -66,7 +95,6 @@ Every release entry is provided in English and Simplified Chinese.
 - **GPUI 壳可点击文件与 URL** — OSC 8 超链接和匹配到的 URL 用格子自身前景色画虚线下划线。悬停显示预览（`解码后的路径 · Ctrl+点击`）；Ctrl+点击用资源管理器打开本地 `file://`，其余 URI 走默认打开方式。
 - **GPUI 壳可配置终端铃声** — “设置 → 配置文件 → 终端铃声”可选关 / 闪烁 / 声音 / 闪烁 + 声音。BEL 仍播放节流后的系统提示音、短暂闪一下 pane、窗口失焦时出 toast、后台 tab 打点。选择以 `bell` 持久化（`none` / `visual` / `audible` / `both`，默认两者都开）。
 - **GPUI 壳所见即所得字体选择器与启动目录** — 字体下拉用各族自己的字形渲染，展示名剥掉多余扩展名，导入按钮改为「导入字体」。启动目录改为选文件夹，「继承当前目录」/「清除」，与旧壳一致。
-- **1.1.0 安装包默认进入 GPUI 主窗** — 双击 `nebula.exe`、开始菜单/桌面快捷方式和资源管理器「在 Nebula 中打开」都启动 GPUI 壳。旧 winit 壳用 `--legacy-shell`。
 
 #### 修复
 
@@ -82,11 +110,23 @@ Every release entry is provided in English and Simplified Chinese.
 - **Markdown 里的原生 HTML 按 GitHub 语义渲染（GPUI 壳）** — README 常用的 HTML 写法现在与 GitHub 渲染一致：`<p>` / `<div>` / 标题上的 `align="center"` 让整块居中；同一段落里连续的 `<img>` 徽章在同一行居中横排（此前一枚一行竖着摞）；行内 `<br/>` 按文档顺序断行（此前会被提到所跟文本之前）；`<a><img/></a>` 链接徽章不再整个丢失——图片正常显示且带链接。
 - **Codex `notify` 不再自我包装成起不来的配置** — 另一个 notify 包装器（codex-computer-use）重新注册时若认不出 Nebula 的 helper，会把整个旧数组序列化进自己的 `--previous-notify` 参数；Nebula 再包一层，转义反斜杠每轮翻倍，最终把 `config.toml` 撑到 130 MB，Codex 直接起不来。现在只要 helper 标记出现在**任何位置**（含 JSON 字符串内部）就算已接线，Nebula 只自愈自己的路径、绝不再包。序列化后超过 8 KB 的 `notify` 一律拒写，兜住其他形态的膨胀；`nebula setup-ai --remove` 会持久化 `ai_hooks=0`，重启后也不再自动装回。（#38）
 - **Tab 右键菜单阴影不再随标签数变厚（GPUI 壳）** — 组件库的右键菜单扩展用固定元素 id 存状态，于是每个标签行都解析到同一份状态、把同一个已打开的菜单重复画在同一锚点上。菜单面板不透明，阴影不是：8 个标签就叠 8 层投影。现在 Tab 菜单与文件树菜单一样，由 workspace 根只画一次。
+- **窗口缩放后终端光标不再漂移** — conhost 在 resize 后会以非确定的方式塌缩屏幕缓冲区且零重绘，光标可能停在离 shell 认知好几行的位置。Nebula 现在在每次 resize 后通过 AttachConsole 探针对账真实光标位置并重新对齐网格。
+- **默认 Shell 会加载用户 PowerShell 配置文件** — 默认启动此前跳过了 `$PROFILE`，其中定义的提示符、别名与 PSReadLine 设置从未生效。（#30）
+- **先缩小再放大后 reflow 不再丢内容** — 窗口变窄再变宽不会丢掉折行内容，窗口也有了真正的最小尺寸。
+- **光标焦点与闪烁，以及启动期渲染门控冻结** — 光标状态机正确跟随焦点，看门狗会释放可能让窗口可见却不重绘的启动门控。（#21）
+- **新界面里 Esc 能送到 Claude Code** — win32-input 编码器把控制键的 `uChar` 硬填成 0，而 OpenConsole 会丢弃这种事件，读字节流的 CLI 因此收不到 Esc。
+- **关闭窗口确认会把忙碌进程算进去** — 构建或 AI CLI 正在运行时关闭窗口，会指名是哪个程序而不是直接关掉。
+- **通知贴到右下角。**
+- **背景模糊按配置的不透明度合成。**
+- **Shell 选择器品牌图标不再发虚** — 图标按整数物理像素预缩放，不再由 GPU 拉伸。
+- **“宽松”宽度模式下内置字形填满单元格。**
+- **标签启动身份与整行命中区** — 恢复出的标签保留它启动时的程序，整行都可点击而不只是标签文字。
 
 #### 改进
 
 - **文件/Git 侧栏刷新不再阻塞渲染** — 目录遍历与 Git 状态子进程改为在工作线程中生成快照，旧内容在刷新期间仍可正常使用。完成后的快照会整体替换；根目录已变化的过期结果会被丢弃，正在显示的搜索结果也不会被覆盖。
 - **GPUI 壳 Tab 折叠箭头与文件树菜单** — TABS 折叠控件改用壳自带的线性 Chevron，不再用 Nerd Font 字形。文件树右键菜单不再叠上抽屉阴影，观感与 Tab 菜单一致。
+- **字体选择器用候选字体自己的字形预览** — 每个字体族在确认前就以自己的字面呈现。
 
 ## 1.0.0 - 2026-08-10
 
