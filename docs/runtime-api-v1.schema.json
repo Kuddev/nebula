@@ -1,0 +1,523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Kuddev/nebula/docs/runtime-api-v1.schema.json",
+  "title": "Nebula Runtime API v1 frames",
+  "description": "JSON Lines request, response, and event frames for the authenticated local runtime control plane.",
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "const": "nebula.runtime"
+    },
+    "version": {
+      "const": 1
+    }
+  },
+  "required": [
+    "protocol",
+    "version"
+  ],
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/event"
+    }
+  ],
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "version",
+        "id",
+        "token",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "nebula.runtime"
+        },
+        "version": {
+          "const": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "token": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "enum": [
+            "runtime.describe",
+            "runtime.snapshot",
+            "events.subscribe",
+            "agents.list",
+            "window.create",
+            "window.focus",
+            "tab.new",
+            "pane.split",
+            "pane.prompt",
+            "pane.read",
+            "pane.wait"
+          ]
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "version",
+        "id",
+        "ok"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "nebula.runtime"
+        },
+        "version": {
+          "const": 1
+        },
+        "id": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "result": {},
+        "error": {
+          "$ref": "#/$defs/error"
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {}
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "version",
+        "event",
+        "revision",
+        "data"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "nebula.runtime"
+        },
+        "version": {
+          "const": 1
+        },
+        "event": {
+          "const": "runtime.snapshot"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "data": {
+          "$ref": "#/$defs/snapshot"
+        }
+      },
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "required": [
+        "revision",
+        "process_id",
+        "app_version",
+        "protocol_version",
+        "detached_windows",
+        "windows"
+      ],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "process_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "app_version": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "const": 1
+        },
+        "detached_windows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/window"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "window": {
+      "type": "object",
+      "required": [
+        "id",
+        "focused",
+        "session_exempt",
+        "active_tab",
+        "focused_pane_id",
+        "tabs"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "focused": {
+          "type": "boolean"
+        },
+        "session_exempt": {
+          "type": "boolean"
+        },
+        "active_tab": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "focused_pane_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tabs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/tab"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "tab": {
+      "type": "object",
+      "required": [
+        "index",
+        "active",
+        "label",
+        "kind",
+        "bell",
+        "focused_pane_id",
+        "layout",
+        "panes"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "shell",
+            "profile",
+            "ssh",
+            "document",
+            "image",
+            "code",
+            "settings"
+          ]
+        },
+        "bell": {
+          "type": "boolean"
+        },
+        "focused_pane_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "layout": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/layout"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "panes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pane"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "layout": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "pane_id"
+          ],
+          "properties": {
+            "type": {
+              "const": "pane"
+            },
+            "pane_id": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "direction",
+            "ratio",
+            "first",
+            "second"
+          ],
+          "properties": {
+            "type": {
+              "const": "split"
+            },
+            "direction": {
+              "enum": [
+                "left_right",
+                "top_bottom"
+              ]
+            },
+            "ratio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "first": {
+              "$ref": "#/$defs/layout"
+            },
+            "second": {
+              "$ref": "#/$defs/layout"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "pane": {
+      "type": "object",
+      "required": [
+        "id",
+        "active",
+        "title",
+        "cwd",
+        "branch",
+        "ssh_destination",
+        "running_program",
+        "task_state",
+        "state_change_seq"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "ssh_destination": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "running_program": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent": {
+          "$ref": "#/$defs/agent"
+        },
+        "task_state": {
+          "enum": [
+            "idle",
+            "running",
+            "waiting_input",
+            "attention",
+            "finished",
+            "failed"
+          ]
+        },
+        "state_change_seq": {
+          "description": "Monotonic per-pane counter, bumped every time task_state changes. Capture it before sending work, then pass it as wait's after_seq so an unchanged pane cannot satisfy the wait.",
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "agent": {
+      "type": "object",
+      "required": [
+        "kind",
+        "display_name",
+        "session_id",
+        "state_source",
+        "hook_seen"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state_source": {
+          "enum": [
+            "hook",
+            "screen",
+            "process"
+          ]
+        },
+        "state_rule": {
+          "type": "string"
+        },
+        "hook_seen": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "agent_pane": {
+      "type": "object",
+      "required": [
+        "window_id",
+        "tab_index",
+        "tab_active",
+        "pane_id",
+        "pane_active",
+        "title",
+        "cwd",
+        "branch",
+        "ssh_destination",
+        "agent",
+        "task_state",
+        "state_change_seq"
+      ],
+      "properties": {
+        "window_id": { "type": "integer", "minimum": 0 },
+        "tab_index": { "type": "integer", "minimum": 0 },
+        "tab_active": { "type": "boolean" },
+        "pane_id": { "type": "integer", "minimum": 0 },
+        "pane_active": { "type": "boolean" },
+        "title": { "type": "string" },
+        "cwd": { "type": "string" },
+        "branch": { "type": "string" },
+        "ssh_destination": { "type": ["string", "null"] },
+        "agent": { "$ref": "#/$defs/agent" },
+        "task_state": {
+          "enum": ["idle", "running", "waiting_input", "attention", "finished", "failed"]
+        },
+        "state_change_seq": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "agents_result": {
+      "type": "object",
+      "required": ["revision", "agents"],
+      "properties": {
+        "revision": { "type": "integer", "minimum": 1 },
+        "agents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/agent_pane" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "pane_read": {
+      "type": "object",
+      "required": [
+        "window_id",
+        "pane_id",
+        "text",
+        "requested_lines",
+        "returned_lines",
+        "history_available",
+        "truncated",
+        "task_state",
+        "exited"
+      ],
+      "properties": {
+        "window_id": { "type": "integer", "minimum": 0 },
+        "pane_id": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string" },
+        "requested_lines": { "type": "integer", "minimum": 1, "maximum": 2000 },
+        "returned_lines": { "type": "integer", "minimum": 0, "maximum": 2000 },
+        "history_available": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "task_state": {
+          "enum": ["idle", "running", "waiting_input", "attention", "finished", "failed"]
+        },
+        "exited": { "type": "boolean" },
+        "exit_reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

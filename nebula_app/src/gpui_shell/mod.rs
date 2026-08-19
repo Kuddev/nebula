@@ -51,6 +51,7 @@ pub(crate) enum GpuiShellEvent {
 /// spike 形态从专用线程调用。一个进程内只允许调用一次。
 pub fn run_shell() {
     let (shell_tx, shell_rx) = std::sync::mpsc::channel();
+    let runtime_hub = crate::runtime_api::RuntimeHub::new();
     crate::tray::init_gpui({
         let tx = shell_tx.clone();
         move |command| {
@@ -76,9 +77,9 @@ pub fn run_shell() {
                 let _ = tx.send(event);
             }
         },
-        crate::runtime_api::RuntimeHub::new(),
+        runtime_hub.clone(),
     );
-    gpui::Application::new().with_assets(Assets).run(|cx| {
+    gpui::Application::new().with_assets(Assets).run(move |cx| {
         // GPUI is the only event loop in `--gpui` mode, so it owns the same
         // per-process hook pipe before the first TerminalView spawns.
         let ai_events = crate::ai_hook::spawn_gpui_server();
@@ -86,7 +87,7 @@ pub fn run_shell() {
         crate::ai_hook::spawn_config_guard();
         init(cx);
         cx.activate(true);
-        open_main_window(cx, ai_events, shell_rx);
+        open_main_window(cx, ai_events, shell_rx, runtime_hub);
     });
     crate::tray::shutdown();
 }
@@ -157,6 +158,7 @@ fn open_main_window(
     cx: &mut App,
     ai_events: std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>,
     shell_events: std::sync::mpsc::Receiver<GpuiShellEvent>,
+    runtime_hub: crate::runtime_api::RuntimeHub,
 ) {
     let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
     let options = WindowOptions {
@@ -171,7 +173,9 @@ fn open_main_window(
     };
 
     cx.open_window(options, move |window, cx| {
-        let workspace = cx.new(|cx| NebulaWorkspace::new(window, ai_events, shell_events, cx));
+        let workspace = cx.new(|cx| {
+            NebulaWorkspace::new(window, ai_events, shell_events, 1, runtime_hub, cx)
+        });
         // 调试/验收后门：启动即打开指定文档（见 open_document_at_startup）。
         if let Ok(path) = std::env::var("NEBULA_GPUI_OPEN_DOC")
             && !path.is_empty()

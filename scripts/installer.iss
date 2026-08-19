@@ -92,6 +92,10 @@ Source: "{#RepoRoot}\assets\fonts\MapleMonoNormal-NF-CN-Regular.ttf"; DestDir: "
 Source: "{#RepoRoot}\CHANGELOG.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "{#RepoRoot}\INSTALL.md"; DestDir: "{app}\docs"; Flags: ignoreversion
 Source: "{#RepoRoot}\docs\lua-configuration.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "{#RepoRoot}\docs\runtime-control-api.md"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "{#RepoRoot}\docs\runtime-api-v1.schema.json"; DestDir: "{app}\docs"; Flags: ignoreversion
+Source: "{#RepoRoot}\docs\skills\nebula-runtime\SKILL.md"; DestDir: "{app}\skills\nebula-runtime"; Flags: ignoreversion
+Source: "{#RepoRoot}\docs\skills\nebula-runtime\agents\openai.yaml"; DestDir: "{app}\skills\nebula-runtime\agents"; Flags: ignoreversion
 Source: "{#RepoRoot}\LICENSE"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#RepoRoot}\licenses\LICENSE-LUA"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#RepoRoot}\licenses\LICENSE-MLUA"; DestDir: "{app}\licenses"; Flags: ignoreversion

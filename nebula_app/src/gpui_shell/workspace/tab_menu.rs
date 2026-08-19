@@ -178,7 +178,11 @@ impl NebulaWorkspace {
                             if let Some(workspace) = split_right.upgrade() {
                                 workspace.update(cx, |workspace, cx| {
                                     workspace.activate_tab(ix, window, cx);
-                                    workspace.split_focused(SplitDirection::LeftRight, window, cx);
+                                    let _ = workspace.split_focused(
+                                        SplitDirection::LeftRight,
+                                        window,
+                                        cx,
+                                    );
                                 });
                             }
                         }),
@@ -191,7 +195,11 @@ impl NebulaWorkspace {
                             if let Some(workspace) = split_down.upgrade() {
                                 workspace.update(cx, |workspace, cx| {
                                     workspace.activate_tab(ix, window, cx);
-                                    workspace.split_focused(SplitDirection::TopBottom, window, cx);
+                                    let _ = workspace.split_focused(
+                                        SplitDirection::TopBottom,
+                                        window,
+                                        cx,
+                                    );
                                 });
                             }
                         }),

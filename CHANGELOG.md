@@ -16,6 +16,8 @@ Every release entry is provided in English and Simplified Chinese.
 - **Tab rename, color labels and single-tab export** — rename a tab in place, tag it with one of seven brand colors, or export just that tab as a workspace file.
 - **Split panes, drag-to-split and workspace session restore** — dragging a tab onto a pane edge splits it, and the split tree with per-pane launch identity comes back on the next launch.
 - **AI provider settings and a runtime control CLI** — provider credentials and models are configurable in Settings, and a runtime API lets scripts open tabs, run commands and query state.
+- **A real GPUI agent-control loop** — the default shell now publishes its live workspace into the same RuntimeHub used by CLI waits and subscriptions. `nebula ctl agents` returns canonical agent identity, lifecycle state and evidence source; `nebula ctl read` reads the real terminal Grid/scrollback tail without moving the user's viewport; focus, prompt and wait act on the exact window/pane pair. SSH panes reject reads and prompts until their shell is ready, and unavailable GPUI multi-window creation now returns an explicit error instead of a synthetic success.
+- **A packaged Nebula Runtime skill and protocol contract** — release ZIPs and installers include the versioned Runtime API documentation/schema plus a `nebula-runtime` Skill that drives the list → observe → read → focus → prompt → wait workflow and treats terminal output as untrusted data.
 - **Built-in box-drawing geometry** — frames, blocks and separators are drawn geometrically in the render contract instead of relying on font glyphs, so they align in any font.
 - **Terminal mouse semantics parity** — application mouse reporting, right-click behavior and copy-on-select match the legacy shell.
 - **A Markdown and image reader** — documents render with rich text, native math and images, and PNG/JPEG/WebP/BMP open in their own viewer tab.
@@ -77,6 +79,8 @@ Every release entry is provided in English and Simplified Chinese.
 - **标签重命名、颜色标记与单标签导出** — 可以就地重命名标签、用七种品牌色之一标记，或只把这一个标签导出为工作区文件。
 - **分屏、拖拽分屏与工作区会话恢复** — 把标签拖到窗格边缘即分屏，分屏树与每个窗格的启动身份会在下次启动时恢复。
 - **AI 服务商设置与运行时控制 CLI** — 服务商凭据与模型可在设置中配置，运行时 API 让脚本可以开标签、执行命令与查询状态。
+- **默认 GPUI 壳的真实 Agent 控制闭环** — 默认界面把正在运行的 workspace 发布到 CLI wait/subscribe 共用的 RuntimeHub。`nebula ctl agents` 返回权威的 Agent 身份、生命周期状态与证据来源；`nebula ctl read` 从真实终端 Grid/scrollback 尾部读取且不移动用户视口；focus、prompt、wait 始终操作精确的 window/pane 组合。SSH pane 在 Shell Ready 前拒绝读写；GPUI 尚不可用的多窗口创建明确报错，不再伪造成功。
+- **随包 Nebula Runtime Skill 与协议合同** — ZIP 和安装器同时携带版本化 Runtime API 文档、Schema 与 `nebula-runtime` Skill，固化“列出 → 观察 → 读取 → 聚焦 → 派活 → 等待”流程，并把终端输出按不可信数据处理。
 - **内置制表符几何绘制** — 边框、方块与分隔线在渲染契约中按几何绘制，不再依赖字体字形，换任何字体都能对齐。
 - **终端鼠标语义对齐** — 应用级鼠标上报、右键行为与选中即复制均与旧壳一致。
 - **Markdown 与图片阅读器** — 文档带富文本、原生公式与图片渲染，PNG/JPEG/WebP/BMP 在独立的查看标签中打开。

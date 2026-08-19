@@ -36,6 +36,10 @@ $requiredPatterns = [ordered]@{
     'Win+R App Paths registration' = 'App Paths\\nebula\.exe'
     'environment change notification' = 'ChangesEnvironment=yes'
     'PATH uninstall cleanup' = 'CurUninstallStepChanged\(CurUninstallStep: TUninstallStep\)'
+    'runtime control API documentation' = 'Source: "\{#RepoRoot\}\\docs\\runtime-control-api\.md"; DestDir: "\{app\}\\docs";'
+    'runtime API schema' = 'Source: "\{#RepoRoot\}\\docs\\runtime-api-v1\.schema\.json"; DestDir: "\{app\}\\docs";'
+    'Nebula Runtime skill instructions' = 'Source: "\{#RepoRoot\}\\docs\\skills\\nebula-runtime\\SKILL\.md"; DestDir: "\{app\}\\skills\\nebula-runtime";'
+    'Nebula Runtime skill metadata' = 'Source: "\{#RepoRoot\}\\docs\\skills\\nebula-runtime\\agents\\openai\.yaml"; DestDir: "\{app\}\\skills\\nebula-runtime\\agents";'
 }
 
 foreach ($entry in $requiredPatterns.GetEnumerator()) {

@@ -395,6 +395,11 @@ pub enum ControlCommand {
     Describe,
     /// Read the authoritative window, tab, pane, and task-state projection.
     Snapshot,
+    /// List only panes Nebula recognizes as AI agents, with semantic state and session identity.
+    Agents {
+        #[clap(long)]
+        window: Option<u64>,
+    },
     /// Stream state snapshots whenever their semantic content changes.
     Subscribe {
         /// Resume after this revision; the current snapshot is sent when newer.
@@ -436,6 +441,16 @@ pub enum ControlCommand {
         /// After sending, wait until the pane reaches this task state.
         #[clap(long, value_enum)]
         wait: Option<ControlWaitState>,
+    },
+    /// Read the latest logical lines from a pane's real terminal buffer.
+    Read {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+        /// Number of logical terminal rows to read from the buffer tail.
+        #[clap(long, default_value_t = crate::runtime_api::DEFAULT_READ_LINES)]
+        lines: usize,
     },
     /// Wait until a pane reaches a semantic task state.
     Wait {

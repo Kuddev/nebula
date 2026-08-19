@@ -9,11 +9,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{App, Context, Window};
+use nebula_split::{SplitDirection, SplitTree};
 use serde_json::json;
 
-use super::{NebulaWorkspace, SidebarActivity, WorkspaceTab};
+use super::{NebulaWorkspace, WorkspaceTab};
 use crate::gpui_shell::GpuiShellEvent;
-use crate::runtime_api::{ApiError, RuntimeCommand, RuntimeDispatch};
+use crate::runtime_api::{
+    ApiError, RuntimeCommand, RuntimeDispatch, RuntimeLayout, RuntimePane, RuntimeSnapshot,
+    RuntimeSplitDirection, RuntimeTab, RuntimeTaskState, RuntimeWindow,
+};
 
 /// 关窗处置。`tray` 故意不参与：旧壳无托盘也会 detach，GPUI 一律 hide，
 /// 禁止「没托盘就 minimize」。
@@ -49,9 +53,6 @@ impl NebulaWorkspace {
                 while let Ok(event) = rx.try_recv() {
                     events.push(event);
                 }
-                if events.is_empty() {
-                    continue;
-                }
 
                 let handle = match this.update(cx, |workspace, cx| {
                     workspace.dispatch_shell_events(&events, cx);
@@ -64,6 +65,7 @@ impl NebulaWorkspace {
                 let _ = handle.update(cx, |_, window, cx| {
                     let _ = this.update(cx, |workspace, cx| {
                         workspace.drain_runtime_commands(window, cx);
+                        workspace.publish_runtime_snapshot(window, cx);
                     });
                 });
             }
@@ -87,37 +89,23 @@ impl NebulaWorkspace {
         }
     }
 
-    fn queue_or_answer_runtime(
-        &mut self,
-        dispatch: Arc<RuntimeDispatch>,
-        cx: &mut Context<Self>,
-    ) {
+    fn queue_or_answer_runtime(&mut self, dispatch: Arc<RuntimeDispatch>, cx: &mut Context<Self>) {
         match &dispatch.command {
-            RuntimeCommand::NewTab { .. } => {
+            RuntimeCommand::NewWindow => {
+                dispatch.respond(Err(ApiError::new(
+                    "runtime_unavailable",
+                    "the GPUI runtime currently owns one workspace window; window.create is unavailable",
+                )));
+            },
+            RuntimeCommand::Focus { .. }
+            | RuntimeCommand::NewTab { .. }
+            | RuntimeCommand::Split { .. }
+            | RuntimeCommand::Prompt { .. } => {
                 self.reveal_session(cx);
                 self.runtime_pending.push(dispatch);
             },
-            RuntimeCommand::Focus { pane_id, .. } => {
-                self.handle_tray_focus(*pane_id, cx);
-                dispatch.respond(Ok(json!({ "window_id": 1, "pane_id": pane_id })));
-            },
-            RuntimeCommand::NewWindow => {
-                self.reveal_session(cx);
-                dispatch.respond(Ok(json!({ "window_id": 1 })));
-            },
-            RuntimeCommand::Snapshot => {
-                dispatch.respond(Ok(json!({
-                    "revision": 0,
-                    "process_id": std::process::id(),
-                    "detached_windows": if self.window_hidden { 1 } else { 0 },
-                    "windows": []
-                })));
-            },
-            RuntimeCommand::Split { .. } | RuntimeCommand::Prompt { .. } => {
-                dispatch.respond(Err(ApiError::new(
-                    "method_not_found",
-                    "GPUI shell does not implement this runtime method",
-                )));
+            RuntimeCommand::Snapshot | RuntimeCommand::ReadPane { .. } => {
+                self.runtime_pending.push(dispatch);
             },
         }
     }
@@ -125,20 +113,217 @@ impl NebulaWorkspace {
     fn drain_runtime_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pending = std::mem::take(&mut self.runtime_pending);
         for dispatch in pending {
-            let RuntimeCommand::NewTab { cwd, .. } = &dispatch.command else {
-                dispatch.respond(Err(ApiError::new(
-                    "runtime_unavailable",
-                    "queued runtime command was not tab.new",
-                )));
-                continue;
-            };
-            self.add_terminal_at(cwd.clone(), None, window, cx);
-            let pane_id = match self.tabs.get(self.active) {
-                Some(WorkspaceTab::Terminal { focused, .. }) => *focused,
-                _ => 0,
-            };
-            dispatch.respond(Ok(json!({ "window_id": 1, "pane_id": pane_id })));
+            let response = self.execute_runtime_command(&dispatch.command, window, cx);
+            dispatch.respond(response);
         }
+    }
+
+    fn execute_runtime_command(
+        &mut self,
+        command: &RuntimeCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, ApiError> {
+        match command {
+            RuntimeCommand::Snapshot => {
+                serde_json::to_value(self.publish_runtime_snapshot(window, cx))
+                    .map_err(|error| ApiError::new("serialization_failed", error.to_string()))
+            },
+            RuntimeCommand::NewWindow => Err(ApiError::new(
+                "runtime_unavailable",
+                "window.create is not queued in the GPUI runtime",
+            )),
+            RuntimeCommand::Focus { window_id, pane_id } => {
+                self.runtime_window_requested(*window_id)?;
+                if let Some(pane_id) = pane_id {
+                    let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                        return Err(ApiError::new(
+                            "target_not_found",
+                            format!("pane {pane_id} does not exist"),
+                        ));
+                    };
+                    self.active = tab_ix;
+                    if let Some(WorkspaceTab::Terminal { focused, zoomed, .. }) =
+                        self.tabs.get_mut(tab_ix)
+                    {
+                        *focused = *pane_id;
+                        *zoomed = false;
+                    }
+                }
+                self.focus_active(window, cx);
+                self.runtime_result(
+                    json!({ "window_id": self.runtime_window_id, "pane_id": pane_id }),
+                    window,
+                    cx,
+                )
+            },
+            RuntimeCommand::NewTab { window_id, cwd } => {
+                self.runtime_window_requested(*window_id)?;
+                let pane_id = self.add_terminal_at(cwd.clone(), None, window, cx);
+                self.runtime_result(
+                    json!({ "window_id": self.runtime_window_id, "pane_id": pane_id }),
+                    window,
+                    cx,
+                )
+            },
+            RuntimeCommand::Split { window_id, direction } => {
+                self.runtime_window_requested(*window_id)?;
+                let direction = match direction {
+                    RuntimeSplitDirection::LeftRight => SplitDirection::LeftRight,
+                    RuntimeSplitDirection::TopBottom => SplitDirection::TopBottom,
+                };
+                let pane_id = self.split_focused(direction, window, cx)?;
+                self.runtime_result(
+                    json!({ "window_id": self.runtime_window_id, "pane_id": pane_id }),
+                    window,
+                    cx,
+                )
+            },
+            RuntimeCommand::Prompt { window_id, pane_id, text, submit } => {
+                self.runtime_window_requested(*window_id)?;
+                let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("pane {pane_id} does not exist"),
+                    ));
+                };
+                let view = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => {
+                        panes.iter().find(|pane| pane.id == *pane_id).map(|pane| pane.view.clone())
+                    },
+                    _ => None,
+                }
+                .expect("tab_of_pane resolved a terminal pane");
+                view.update(cx, |view, cx| view.runtime_prompt(text.clone(), *submit, cx))?;
+                self.runtime_result(
+                    json!({
+                        "window_id": self.runtime_window_id,
+                        "pane_id": pane_id,
+                        "submitted": submit
+                    }),
+                    window,
+                    cx,
+                )
+            },
+            RuntimeCommand::ReadPane { window_id, pane_id, lines } => {
+                self.runtime_window_requested(*window_id)?;
+                let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("pane {pane_id} does not exist"),
+                    ));
+                };
+                let read = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                        .iter()
+                        .find(|pane| pane.id == *pane_id)
+                        .expect("tab_of_pane resolved a terminal pane")
+                        .view
+                        .read(cx)
+                        .runtime_read(self.runtime_window_id, *lines),
+                    _ => unreachable!("tab_of_pane only resolves terminal tabs"),
+                }?;
+                serde_json::to_value(read)
+                    .map_err(|error| ApiError::new("serialization_failed", error.to_string()))
+            },
+        }
+    }
+
+    fn runtime_window_requested(&self, requested: Option<u64>) -> Result<(), ApiError> {
+        if requested.is_none_or(|id| id == self.runtime_window_id) {
+            Ok(())
+        } else {
+            Err(ApiError::new(
+                "target_not_found",
+                format!("window {} does not exist", requested.expect("checked Some")),
+            ))
+        }
+    }
+
+    fn runtime_result(
+        &self,
+        action: serde_json::Value,
+        window: &Window,
+        cx: &App,
+    ) -> Result<serde_json::Value, ApiError> {
+        let snapshot = self.publish_runtime_snapshot(window, cx);
+        Ok(json!({ "action": action, "snapshot": snapshot }))
+    }
+
+    fn runtime_snapshot(&self, window: &Window, cx: &App) -> RuntimeSnapshot {
+        let tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let (kind, focused_pane_id, layout, panes) = match tab {
+                    WorkspaceTab::Terminal { panes, tree, focused, .. } => {
+                        let runtime_panes = panes
+                            .iter()
+                            .map(|pane| {
+                                let view = pane.view.read(cx);
+                                RuntimePane {
+                                    id: pane.id,
+                                    active: pane.id == *focused,
+                                    title: view.title.clone(),
+                                    cwd: view.cwd.clone(),
+                                    branch: view.branch.clone(),
+                                    ssh_destination: view.ssh_destination.clone(),
+                                    running_program: view.running_program.clone(),
+                                    agent: view.runtime_agent(),
+                                    task_state: view.runtime_task_state(),
+                                    state_change_seq: 0,
+                                }
+                            })
+                            .collect();
+                        (
+                            if panes.iter().any(|pane| pane.view.read(cx).ssh_destination.is_some())
+                            {
+                                "ssh"
+                            } else {
+                                "shell"
+                            },
+                            Some(*focused),
+                            Some(runtime_layout(tree)),
+                            runtime_panes,
+                        )
+                    },
+                    WorkspaceTab::Settings { .. } => ("settings", None, None, Vec::new()),
+                    WorkspaceTab::Image { .. } => ("image", None, None, Vec::new()),
+                    WorkspaceTab::Document { .. } => ("document", None, None, Vec::new()),
+                    WorkspaceTab::Code { .. } => ("code", None, None, Vec::new()),
+                };
+                RuntimeTab {
+                    index,
+                    active: index == self.active,
+                    label: self.tab_title(index, cx).to_string(),
+                    kind: kind.to_owned(),
+                    bell: self.tab_meta.get(index).is_some_and(|meta| meta.has_bell),
+                    focused_pane_id,
+                    layout,
+                    panes,
+                }
+            })
+            .collect();
+        let focused_pane_id = self.tabs.get(self.active).and_then(|tab| match tab {
+            WorkspaceTab::Terminal { focused, .. } => Some(*focused),
+            _ => None,
+        });
+        RuntimeSnapshot::new(
+            usize::from(self.window_hidden),
+            vec![RuntimeWindow {
+                id: self.runtime_window_id,
+                focused: !self.window_hidden && window.is_window_active(),
+                session_exempt: false,
+                active_tab: self.active,
+                focused_pane_id,
+                tabs,
+            }],
+        )
+    }
+
+    fn publish_runtime_snapshot(&self, window: &Window, cx: &App) -> RuntimeSnapshot {
+        self.runtime_hub.publish(self.runtime_snapshot(window, cx))
     }
 
     fn handle_tray_focus(&mut self, pane: Option<u64>, cx: &mut Context<Self>) {
@@ -224,11 +409,7 @@ impl NebulaWorkspace {
             let WorkspaceTab::Terminal { panes, .. } = tab else { continue };
             for pane in panes {
                 let view = pane.view.read(cx);
-                let Some(program) = view
-                    .running_program
-                    .as_deref()
-                    .filter(|program| crate::ai_agents::AgentKind::parse(program).is_some())
-                else {
+                let Some(agent) = view.runtime_agent() else {
                     continue;
                 };
                 let place = Path::new(view.cwd.trim())
@@ -236,15 +417,15 @@ impl NebulaWorkspace {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let label = if place.is_empty() {
-                    program.to_owned()
+                    agent.display_name
                 } else {
-                    format!("{program} · {place}")
+                    format!("{} · {place}", agent.display_name)
                 };
                 agents.push(crate::tray::TrayAgent {
                     window,
                     pane: pane.id,
                     label,
-                    needs_attention: view.sidebar_activity() == SidebarActivity::Attention,
+                    needs_attention: view.runtime_task_state() == RuntimeTaskState::Attention,
                 });
             }
         }
@@ -252,9 +433,24 @@ impl NebulaWorkspace {
     }
 }
 
+fn runtime_layout(tree: &SplitTree<u64>) -> RuntimeLayout {
+    match tree {
+        SplitTree::Leaf(pane_id) => RuntimeLayout::Pane { pane_id: *pane_id },
+        SplitTree::Split { direction, ratio, first, second, .. } => RuntimeLayout::Split {
+            direction: match direction {
+                SplitDirection::LeftRight => RuntimeSplitDirection::LeftRight,
+                SplitDirection::TopBottom => RuntimeSplitDirection::TopBottom,
+            },
+            ratio: *ratio,
+            first: Box::new(runtime_layout(first)),
+            second: Box::new(runtime_layout(second)),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{residency_close_action, ResidencyCloseAction};
+    use super::{ResidencyCloseAction, residency_close_action};
 
     #[test]
     fn keep_session_hides_even_when_tray_is_off() {
@@ -263,17 +459,8 @@ mod tests {
             ResidencyCloseAction::Hide,
             "tray=false must still hide, never minimize"
         );
-        assert_eq!(
-            residency_close_action(true, true, true),
-            ResidencyCloseAction::Hide
-        );
-        assert_eq!(
-            residency_close_action(false, true, false),
-            ResidencyCloseAction::Close
-        );
-        assert_eq!(
-            residency_close_action(true, false, true),
-            ResidencyCloseAction::Close
-        );
+        assert_eq!(residency_close_action(true, true, true), ResidencyCloseAction::Hide);
+        assert_eq!(residency_close_action(false, true, false), ResidencyCloseAction::Close);
+        assert_eq!(residency_close_action(true, false, true), ResidencyCloseAction::Close);
     }
 }

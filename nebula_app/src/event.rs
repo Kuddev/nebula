@@ -576,6 +576,16 @@ impl Processor {
                     "submitted": submit
                 }))
             },
+            RuntimeCommand::ReadPane { window_id, pane_id, lines } => {
+                let id = self.runtime_target_window(*window_id, Some(*pane_id))?;
+                let read = self
+                    .windows
+                    .get(&id)
+                    .expect("resolved runtime window exists")
+                    .runtime_read(*pane_id, *lines)?;
+                serde_json::to_value(read)
+                    .map_err(|error| ApiError::new("serialization_failed", error.to_string()))
+            },
         }
     }
 

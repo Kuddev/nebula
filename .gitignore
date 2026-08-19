@@ -41,6 +41,13 @@ tocodex-docs/
 /docs/**
 !/docs/lua-configuration.md
 !/docs/math-rendering-test.md
+!/docs/runtime-control-api.md
+!/docs/runtime-api-v1.schema.json
+!/docs/skills/
+!/docs/skills/nebula-runtime/
+!/docs/skills/nebula-runtime/SKILL.md
+!/docs/skills/nebula-runtime/agents/
+!/docs/skills/nebula-runtime/agents/openai.yaml
 !/docs/release-notes/
 !/docs/release-notes/**
 !/docs/screenshots/

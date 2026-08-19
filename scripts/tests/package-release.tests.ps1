@@ -70,6 +70,8 @@ try {
         'docs/CHANGELOG.md'
         'docs/INSTALL.md'
         'docs/lua-configuration.md'
+        'docs/runtime-api-v1.schema.json'
+        'docs/runtime-control-api.md'
         'licenses/LICENSE'
         'licenses/LICENSE-LUA'
         'licenses/LICENSE-MLUA'
@@ -78,6 +80,8 @@ try {
         'runtime/OpenConsole.exe'
         'runtime/conpty.dll'
         'runtime/nebula-hook.exe'
+        'skills/nebula-runtime/SKILL.md'
+        'skills/nebula-runtime/agents/openai.yaml'
     ) | Sort-Object
 
     $difference = @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual)

@@ -177,6 +177,10 @@ pub struct TerminalView {
     /// 边沿触发版）。`Unknown` = 本 pane 没有 agent 参与，spinner 完全由
     /// `command_running`/`running_program` 决定。
     agent_status: crate::ai_agents::AgentStatus,
+    /// 状态证据来源与命中的屏幕规则。Runtime API 直接投影这两项，外部
+    /// Agent 可以区分 hook 权威边沿、屏幕补偿和仅进程识别。
+    agent_status_source: crate::ai_agents::AgentStatusSource,
+    agent_status_rule: Option<String>,
     /// 本次前台 agent 会话是否收到过 hook（旧壳同名字段同语义）：屏幕
     /// 检测的空闲提示符不得降级 hook 报出的 Done/Blocked 精确终态。
     agent_hook_seen: bool,
@@ -615,6 +619,8 @@ impl TerminalView {
             running_program: None,
             command_running: false,
             agent_status: crate::ai_agents::AgentStatus::Unknown,
+            agent_status_source: crate::ai_agents::AgentStatusSource::Unknown,
+            agent_status_rule: None,
             agent_hook_seen: false,
             idle_screen_streak: 0,
             pending_notify: Vec::new(),
@@ -757,6 +763,16 @@ impl TerminalView {
                     self.running_program = identity;
                     cx.emit(TerminalViewEvent::TitleChanged);
                 }
+                if self
+                    .running_program
+                    .as_deref()
+                    .and_then(crate::ai_agents::AgentKind::parse)
+                    .is_some()
+                    && !self.agent_hook_seen
+                {
+                    self.agent_status_source = crate::ai_agents::AgentStatusSource::Process;
+                    self.agent_status_rule = None;
+                }
                 self.command_running = true;
                 cx.notify();
             },
@@ -770,6 +786,8 @@ impl TerminalView {
                 }
                 self.command_running = false;
                 self.agent_status = crate::ai_agents::AgentStatus::Unknown;
+                self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
+                self.agent_status_rule = None;
                 self.agent_hook_seen = false;
                 self.idle_screen_streak = 0;
                 cx.notify();
@@ -860,12 +878,16 @@ impl TerminalView {
                 self.ai_session = None;
                 self.running_program = None;
                 self.agent_status = AgentStatus::Unknown;
+                self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
+                self.agent_status_rule = None;
                 self.agent_hook_seen = false;
                 self.idle_screen_streak = 0;
             },
             kind => {
                 self.running_program = Some(event.source.clone());
                 self.agent_hook_seen = true;
+                self.agent_status_source = crate::ai_agents::AgentStatusSource::Hook;
+                self.agent_status_rule = None;
                 // 精确边沿抵达 = 屏幕检测的空闲计数作废（上一回合攒下的
                 // 拍数不能把新回合的第一个空闲闪现立即降级）。
                 self.idle_screen_streak = 0;
@@ -986,6 +1008,8 @@ impl TerminalView {
                 detection.rule_id
             );
             self.agent_status = next;
+            self.agent_status_source = crate::ai_agents::AgentStatusSource::Screen;
+            self.agent_status_rule = Some(detection.rule_id);
             cx.emit(TerminalViewEvent::TitleChanged);
             cx.notify();
         }
@@ -1007,34 +1031,164 @@ impl TerminalView {
         cx.notify();
     }
 
-    pub fn sidebar_activity(&self) -> SidebarActivity {
+    pub fn runtime_task_state(&self) -> crate::runtime_api::RuntimeTaskState {
         use crate::ai_agents::AgentStatus;
+        use crate::runtime_api::RuntimeTaskState;
         if self.error.is_some()
             || self.exited.is_some()
             || matches!(self.ssh_stage.as_ref(), Some(crate::ssh_session::SshStage::Failed(_)))
         {
-            return SidebarActivity::Failed;
+            return RuntimeTaskState::Failed;
         }
-        // Agent 会话在场时回合状态是权威：TurnDone 之后 spinner 必须停，
-        // 不能因为 `running_program` 还亮着（图标要继续显示）就一直转。
+        if self.agent_status == AgentStatus::Blocked {
+            return RuntimeTaskState::Attention;
+        }
+        if self.awaiting_input {
+            return RuntimeTaskState::WaitingInput;
+        }
         match self.agent_status {
-            AgentStatus::Working => return SidebarActivity::Running,
-            AgentStatus::Blocked => return SidebarActivity::Attention,
-            AgentStatus::Done => return SidebarActivity::Done,
-            AgentStatus::Idle => return SidebarActivity::Idle,
+            AgentStatus::Working => return RuntimeTaskState::Running,
+            AgentStatus::Done => return RuntimeTaskState::Finished,
+            AgentStatus::Idle => return RuntimeTaskState::Idle,
+            AgentStatus::Blocked => unreachable!("handled above"),
             AgentStatus::Unknown => {},
         }
         if self.command_running
-            || (self.running_program.is_some() && !self.awaiting_input)
+            || self.running_program.is_some()
             || self
                 .ssh_stage
                 .as_ref()
                 .is_some_and(|stage| !matches!(stage, crate::ssh_session::SshStage::Ready))
         {
-            SidebarActivity::Running
+            RuntimeTaskState::Running
         } else {
-            SidebarActivity::Idle
+            RuntimeTaskState::Idle
         }
+    }
+
+    pub fn runtime_agent(&self) -> Option<crate::runtime_api::RuntimeAgent> {
+        let raw = self
+            .ai_session
+            .as_ref()
+            .map(|identity| identity.source.as_str())
+            .or(self.running_program.as_deref())?;
+        let kind = crate::ai_agents::AgentKind::parse(raw)?;
+        let state_source = match self.agent_status_source {
+            crate::ai_agents::AgentStatusSource::Hook => {
+                crate::runtime_api::RuntimeAgentStateSource::Hook
+            },
+            crate::ai_agents::AgentStatusSource::Screen => {
+                crate::runtime_api::RuntimeAgentStateSource::Screen
+            },
+            crate::ai_agents::AgentStatusSource::Process
+            | crate::ai_agents::AgentStatusSource::Unknown => {
+                crate::runtime_api::RuntimeAgentStateSource::Process
+            },
+        };
+        Some(crate::runtime_api::RuntimeAgent {
+            kind: kind.slug().to_owned(),
+            display_name: kind.display_name().to_owned(),
+            session_id: self.ai_session.as_ref().map(|identity| identity.session_id.clone()),
+            state_source,
+            state_rule: self.agent_status_rule.clone(),
+            hook_seen: self.agent_hook_seen,
+        })
+    }
+
+    pub fn sidebar_activity(&self) -> SidebarActivity {
+        match self.runtime_task_state() {
+            crate::runtime_api::RuntimeTaskState::Running => SidebarActivity::Running,
+            crate::runtime_api::RuntimeTaskState::Attention => SidebarActivity::Attention,
+            crate::runtime_api::RuntimeTaskState::Finished => SidebarActivity::Done,
+            crate::runtime_api::RuntimeTaskState::Failed => SidebarActivity::Failed,
+            crate::runtime_api::RuntimeTaskState::Idle
+            | crate::runtime_api::RuntimeTaskState::WaitingInput => SidebarActivity::Idle,
+        }
+    }
+
+    fn ensure_runtime_readable(&self) -> Result<(), crate::runtime_api::ApiError> {
+        if self.ssh_destination.is_none() {
+            return Ok(());
+        }
+        match self.ssh_stage.as_ref() {
+            Some(crate::ssh_session::SshStage::Ready) => Ok(()),
+            Some(crate::ssh_session::SshStage::Failed(reason)) => Err(
+                crate::runtime_api::ApiError::new("ssh_not_ready", "SSH pane is in a failed state")
+                    .details(serde_json::json!({ "reason": reason })),
+            ),
+            stage => Err(crate::runtime_api::ApiError::new(
+                "ssh_not_ready",
+                format!("SSH pane is not ready for terminal reads: {stage:?}"),
+            )),
+        }
+    }
+
+    pub fn runtime_read(
+        &self,
+        window_id: u64,
+        lines: usize,
+    ) -> Result<crate::runtime_api::RuntimePaneRead, crate::runtime_api::ApiError> {
+        self.ensure_runtime_readable()?;
+        let Some(session) = &self.session else {
+            return Err(crate::runtime_api::ApiError::new(
+                "runtime_unavailable",
+                "terminal session is unavailable for this pane",
+            ));
+        };
+        let term = session.term.lock();
+        Ok(crate::runtime_api::capture_terminal_tail(
+            &term,
+            window_id,
+            self.pane_id,
+            lines,
+            self.runtime_task_state(),
+            self.exited.is_some(),
+            self.exited.clone(),
+        ))
+    }
+
+    pub fn runtime_prompt(
+        &mut self,
+        text: String,
+        submit: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), crate::runtime_api::ApiError> {
+        crate::runtime_api::validate_prompt(&text)?;
+        if let Some(reason) = &self.exited {
+            return Err(crate::runtime_api::ApiError::new(
+                "invalid_state",
+                format!("pane has exited: {reason}"),
+            ));
+        }
+        self.ensure_runtime_readable()?;
+        if self.session.is_none() {
+            return Err(crate::runtime_api::ApiError::new(
+                "runtime_unavailable",
+                "terminal session is unavailable for this pane",
+            ));
+        }
+        let recognized_agent = submit && self.runtime_agent().is_some();
+        let mut bytes = text.into_bytes();
+        if submit {
+            bytes.push(b'\r');
+        }
+        self.write_input(bytes, cx);
+        if submit {
+            // 极短命令可能在 120ms runtime pump 的两拍之间完成。提交动作
+            // 本身先建立 Running 边沿，保证 prompt --wait 的 after_seq 不会
+            // 仍盯着提交前 Idle；真实 shell/hook 结束事件负责把它归位。
+            self.awaiting_input = false;
+            self.command_running = true;
+            if recognized_agent {
+                self.agent_status = crate::ai_agents::AgentStatus::Working;
+                self.agent_status_source = crate::ai_agents::AgentStatusSource::Process;
+                self.agent_status_rule = None;
+                self.idle_screen_streak = 0;
+            }
+            cx.emit(TerminalViewEvent::TitleChanged);
+            cx.notify();
+        }
+        Ok(())
     }
 
     /// Queue a full shell command. Like cold resume, input may arrive before

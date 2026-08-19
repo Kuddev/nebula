@@ -21,6 +21,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use winit::event_loop::EventLoopProxy;
 
+use nebula_terminal::event::EventListener;
+use nebula_terminal::grid::Dimensions as _;
+use nebula_terminal::index::{Column, Line, Point};
+use nebula_terminal::term::Term;
+
 use crate::cli::{
     ControlCommand as CliCommand, ControlOptions, ControlSplitDirection, ControlWaitState,
 };
@@ -35,6 +40,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_PROMPT_BYTES: usize = 32 * 1024;
+pub(crate) const DEFAULT_READ_LINES: usize = 120;
+pub(crate) const MAX_READ_LINES: usize = 2_000;
+const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_CLIENTS: usize = 64;
 const MAX_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -163,6 +171,28 @@ pub enum RuntimeTaskState {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum RuntimeAgentStateSource {
+    Hook,
+    Screen,
+    Process,
+}
+
+/// Identity and evidence attached only to panes Nebula recognizes as an AI
+/// agent. Lifecycle state remains on [`RuntimePane::task_state`] so the tray,
+/// sidebar, waits, and external clients all consume the same reducer output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeAgent {
+    pub kind: String,
+    pub display_name: String,
+    pub session_id: Option<String>,
+    pub state_source: RuntimeAgentStateSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_rule: Option<String>,
+    pub hook_seen: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeSplitDirection {
     LeftRight,
     TopBottom,
@@ -258,6 +288,8 @@ pub struct RuntimePane {
     pub branch: String,
     pub ssh_destination: Option<String>,
     pub running_program: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<RuntimeAgent>,
     pub task_state: RuntimeTaskState,
     /// Monotonic count of this pane's task-state transitions. A state value on
     /// its own cannot answer "did anything happen since I submitted?", so
@@ -265,6 +297,37 @@ pub struct RuntimePane {
     /// time. Stamped by [`RuntimeHub::publish`]; projection callers leave it 0.
     #[serde(default)]
     pub state_change_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeAgentPane {
+    pub window_id: u64,
+    pub tab_index: usize,
+    pub tab_active: bool,
+    pub pane_id: u64,
+    pub pane_active: bool,
+    pub title: String,
+    pub cwd: String,
+    pub branch: String,
+    pub ssh_destination: Option<String>,
+    pub agent: RuntimeAgent,
+    pub task_state: RuntimeTaskState,
+    pub state_change_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimePaneRead {
+    pub window_id: u64,
+    pub pane_id: u64,
+    pub text: String,
+    pub requested_lines: usize,
+    pub returned_lines: usize,
+    pub history_available: usize,
+    pub truncated: bool,
+    pub task_state: RuntimeTaskState,
+    pub exited: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +338,7 @@ pub enum RuntimeCommand {
     NewTab { window_id: Option<u64>, cwd: Option<PathBuf> },
     Split { window_id: Option<u64>, direction: RuntimeSplitDirection },
     Prompt { window_id: Option<u64>, pane_id: u64, text: String, submit: bool },
+    ReadPane { window_id: Option<u64>, pane_id: u64, lines: usize },
 }
 
 #[derive(Debug)]
@@ -422,6 +486,10 @@ impl RuntimeHub {
         state.subscribers.push((id, sender));
         (id, current, receiver)
     }
+
+    fn current(&self) -> Option<RuntimeSnapshot> {
+        self.lock().current.clone()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -464,6 +532,23 @@ struct PromptParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AgentsParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    pane_id: u64,
+    #[serde(default = "default_read_lines")]
+    lines: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SubscribeParams {
     #[serde(default)]
     since_revision: Option<u64>,
@@ -501,6 +586,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_read_lines() -> usize {
+    DEFAULT_READ_LINES
+}
+
 impl RuntimeCommand {
     fn from_request(request: &ApiRequest) -> Result<Self, ApiError> {
         match request.method.as_str() {
@@ -528,11 +617,96 @@ impl RuntimeCommand {
                     submit: params.submit,
                 })
             },
+            "pane.read" => {
+                let params: ReadParams = parse_params(&request.params)?;
+                if params.lines == 0 || params.lines > MAX_READ_LINES {
+                    return Err(ApiError::invalid_params(format!(
+                        "lines must be between 1 and {MAX_READ_LINES}"
+                    )));
+                }
+                Ok(Self::ReadPane {
+                    window_id: params.window_id,
+                    pane_id: params.pane_id,
+                    lines: params.lines,
+                })
+            },
             method => Err(ApiError::new(
                 "method_not_found",
                 format!("runtime API method {method:?} does not exist"),
             )),
         }
+    }
+}
+
+/// Read the logical tail of the terminal model. The range is anchored at the
+/// buffer bottom, never at `display_offset`, so a user scrolling through
+/// history cannot change what an external agent observes.
+pub(crate) fn capture_terminal_tail<T: EventListener>(
+    term: &Term<T>,
+    window_id: u64,
+    pane_id: u64,
+    requested_lines: usize,
+    task_state: RuntimeTaskState,
+    exited: bool,
+    exit_reason: Option<String>,
+) -> RuntimePaneRead {
+    let columns = term.columns();
+    let screen_lines = term.screen_lines();
+    let total_lines = term.total_lines();
+    let history_available = total_lines.saturating_sub(screen_lines);
+    if columns == 0 || screen_lines == 0 || total_lines == 0 {
+        return RuntimePaneRead {
+            window_id,
+            pane_id,
+            text: String::new(),
+            requested_lines,
+            returned_lines: 0,
+            history_available,
+            truncated: false,
+            task_state,
+            exited,
+            exit_reason,
+        };
+    }
+
+    let mut returned_lines = requested_lines.min(total_lines);
+    let end = Point::new(Line(screen_lines as i32 - 1), Column(columns - 1));
+    let capture = |lines: usize| {
+        let start_line = screen_lines as i64 - lines as i64;
+        let start = Point::new(Line(start_line.max(-(history_available as i64)) as i32), Column(0));
+        term.bounds_to_string(start, end)
+    };
+    let mut text = capture(returned_lines);
+
+    // Reduce by whole terminal rows first, preserving exact returned_lines.
+    // Only a pathological single row can fall through to UTF-8 byte slicing.
+    while text.len() > MAX_READ_BYTES && returned_lines > 1 {
+        let estimated = ((returned_lines as u128 * MAX_READ_BYTES as u128) / text.len() as u128)
+            .clamp(1, (returned_lines - 1) as u128) as usize;
+        returned_lines = estimated;
+        text = capture(returned_lines);
+    }
+    let mut byte_truncated = false;
+    if text.len() > MAX_READ_BYTES {
+        let mut start = text.len() - MAX_READ_BYTES;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        text = text[start..].to_owned();
+        byte_truncated = true;
+    }
+
+    RuntimePaneRead {
+        window_id,
+        pane_id,
+        text,
+        requested_lines,
+        returned_lines,
+        history_available,
+        truncated: returned_lines < total_lines || byte_truncated,
+        task_state,
+        exited,
+        exit_reason,
     }
 }
 
@@ -837,6 +1011,7 @@ fn handle_connection(
             write_response(&mut stream, &ApiResponse::success(request.id, runtime_description()))
         },
         "events.subscribe" => subscribe_connection(&mut stream, request, hub),
+        "agents.list" => agents_connection(&mut stream, request, hub),
         "pane.wait" => wait_connection(&mut stream, request, hub),
         _ => dispatch_connection(&mut stream, request, sink),
     }
@@ -874,11 +1049,13 @@ fn runtime_description() -> Value {
             "runtime.describe",
             "runtime.snapshot",
             "events.subscribe",
+            "agents.list",
             "window.create",
             "window.focus",
             "tab.new",
             "pane.split",
             "pane.prompt",
+            "pane.read",
             "pane.wait"
         ],
         // Additive params cannot be detected from `capabilities`: an older
@@ -888,6 +1065,74 @@ fn runtime_description() -> Value {
             "pane.wait.after_seq"
         ]
     })
+}
+
+fn agents_connection(
+    stream: &mut TcpStream,
+    request: ApiRequest,
+    hub: &RuntimeHub,
+) -> Result<(), IoError> {
+    let params: AgentsParams = match parse_params(&request.params) {
+        Ok(params) => params,
+        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
+    };
+    let Some(snapshot) = hub.current() else {
+        return write_response(
+            stream,
+            &ApiResponse::failure(
+                request.id,
+                ApiError::new(
+                    "runtime_unavailable",
+                    "Nebula has not published its first workspace snapshot yet",
+                ),
+            ),
+        );
+    };
+    if let Some(window_id) = params.window_id
+        && !snapshot.windows.iter().any(|window| window.id == window_id)
+    {
+        return write_response(
+            stream,
+            &ApiResponse::failure(
+                request.id,
+                ApiError::new("target_not_found", format!("window {window_id} does not exist")),
+            ),
+        );
+    }
+
+    let mut agents = Vec::new();
+    for window in snapshot
+        .windows
+        .iter()
+        .filter(|window| params.window_id.is_none_or(|id| window.id == id))
+    {
+        for tab in &window.tabs {
+            for pane in &tab.panes {
+                let Some(agent) = pane.agent.clone() else { continue };
+                agents.push(RuntimeAgentPane {
+                    window_id: window.id,
+                    tab_index: tab.index,
+                    tab_active: tab.active,
+                    pane_id: pane.id,
+                    pane_active: pane.active,
+                    title: pane.title.clone(),
+                    cwd: pane.cwd.clone(),
+                    branch: pane.branch.clone(),
+                    ssh_destination: pane.ssh_destination.clone(),
+                    agent,
+                    task_state: pane.task_state,
+                    state_change_seq: pane.state_change_seq,
+                });
+            }
+        }
+    }
+    write_response(
+        stream,
+        &ApiResponse::success(
+            request.id,
+            json!({ "revision": snapshot.revision, "agents": agents }),
+        ),
+    )
 }
 
 fn subscribe_connection(
@@ -1114,6 +1359,11 @@ pub fn run_cli(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             let response = request_once("runtime.snapshot", json!({}), timeout)?;
             print_response(&response, options.pretty)
         },
+        CliCommand::Agents { window } => {
+            let response =
+                request_once("agents.list", json!({ "window_id": window }), timeout)?;
+            print_response(&response, options.pretty)
+        },
         CliCommand::Subscribe { since } => subscribe_cli(since, timeout),
         CliCommand::NewWindow => {
             let response = request_once("window.create", json!({}), timeout)?;
@@ -1162,6 +1412,14 @@ pub fn run_cli(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             // follow-up wait mean "settled again", not "already settled".
             let baseline = pane_state_change_seq(&response, window, pane);
             wait_cli(window, pane, wait.expect("checked above"), baseline, timeout, options.pretty)
+        },
+        CliCommand::Read { window, pane, lines } => {
+            let response = request_once(
+                "pane.read",
+                json!({ "window_id": window, "pane_id": pane, "lines": lines }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
         },
         CliCommand::Wait { window, pane, state, after_seq } => {
             wait_cli(window, pane, state, after_seq, timeout, options.pretty)
@@ -1282,6 +1540,7 @@ mod tests {
                         branch: "main".into(),
                         ssh_destination: None,
                         running_program: None,
+                        agent: None,
                         task_state: state,
                         state_change_seq: 0,
                     }],
@@ -1382,5 +1641,49 @@ mod tests {
         let schema: Value =
             serde_json::from_str(include_str!("../../docs/runtime-api-v1.schema.json")).unwrap();
         assert_eq!(schema["properties"]["version"]["const"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn terminal_tail_reads_buffer_bottom_with_utf8_intact() {
+        let term = nebula_terminal::term::test::mock_term("old\r\n中间\r\nlatest");
+        let read = capture_terminal_tail(
+            &term,
+            7,
+            3,
+            2,
+            RuntimeTaskState::Finished,
+            false,
+            None,
+        );
+        assert_eq!(read.text, "中间\nlatest");
+        assert_eq!(read.requested_lines, 2);
+        assert_eq!(read.returned_lines, 2);
+        assert!(read.truncated);
+        assert!(std::str::from_utf8(read.text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn agents_list_projection_keeps_window_and_tab_identity() {
+        let mut snapshot = snapshot(RuntimeTaskState::Attention);
+        snapshot.windows[0].tabs[0].panes[0].agent = Some(RuntimeAgent {
+            kind: "codex".into(),
+            display_name: "Codex".into(),
+            session_id: Some("thread-7".into()),
+            state_source: RuntimeAgentStateSource::Hook,
+            state_rule: None,
+            hook_seen: true,
+        });
+        let hub = RuntimeHub::new();
+        let published = hub.publish(snapshot);
+        assert_eq!(published.windows[0].tabs[0].panes[0].state_change_seq, 1);
+        assert_eq!(
+            published.windows[0].tabs[0].panes[0]
+                .agent
+                .as_ref()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("thread-7")
+        );
     }
 }

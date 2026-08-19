@@ -793,6 +793,11 @@ pub struct NebulaWorkspace {
     window_hidden: bool,
     /// 开窗时记下，mux `tab.new` 需要从 pump 拿到 `&mut Window`。
     window_handle: gpui::AnyWindowHandle,
+    /// GPUI 当前只承载一个 workspace window；稳定 id 供 Runtime API 精确寻址。
+    runtime_window_id: u64,
+    /// 与 RuntimeServer 共享同一状态中心，快照、wait、subscribe 与 agents.list
+    /// 必须消费同一份 revision/state_change_seq 权威。
+    runtime_hub: crate::runtime_api::RuntimeHub,
     /// runtime API 里必须等窗口的命令（目前是 `tab.new`）。
     runtime_pending: Vec<std::sync::Arc<crate::runtime_api::RuntimeDispatch>>,
 }
@@ -837,6 +842,8 @@ impl NebulaWorkspace {
         window: &mut Window,
         ai_events: std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>,
         shell_events: std::sync::mpsc::Receiver<crate::gpui_shell::GpuiShellEvent>,
+        runtime_window_id: u64,
+        runtime_hub: crate::runtime_api::RuntimeHub,
         cx: &mut Context<Self>,
     ) -> Self {
         // 启动相关设置只取样一次：本次开窗的恢复决策不能被恢复过程中的
@@ -926,6 +933,8 @@ impl NebulaWorkspace {
             window_close_confirm_open: false,
             window_hidden: false,
             window_handle: window.window_handle(),
+            runtime_window_id,
+            runtime_hub,
             runtime_pending: Vec::new(),
         };
         // 配置装载错误的驻留横幅（消息栏层：用户要去修文件，必须看见）。
@@ -1206,12 +1215,12 @@ impl NebulaWorkspace {
         command: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> u64 {
         // 默认 shell 只在“创建新 Tab”的这一刻取样，并把实际 program/args
         // 一起冻结进 Tab launch。设置页随后改默认值只影响下一次创建；冷
         // 恢复也按本 Tab 的 launch 重建，不会把混合工作区抹成同一种 shell。
         let launch_session = Self::configured_local_launch(cx);
-        self.add_terminal_with(launch_session, cwd, command, window, cx);
+        self.add_terminal_with(launch_session, cwd, command, window, cx)
     }
 
     /// 用一份指定的 launch 身份建 Tab。默认路径（`add_terminal_at`）冻结
@@ -1223,7 +1232,7 @@ impl NebulaWorkspace {
         command: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> u64 {
         let shell_tag = Self::launch_shell_tag(&launch_session);
         let grid = self.inherited_grid(cx);
         let launch = Self::terminal_launch_from_session(&launch_session, cwd);
@@ -1246,6 +1255,7 @@ impl NebulaWorkspace {
         self.reveal_active_tab();
         self.focus_active(window, cx);
         cx.notify();
+        focused
     }
 
     /// 打开一个 SSH tab（启动器/设置页共用入口）：russh 直连业务层，连接
@@ -1303,13 +1313,21 @@ impl NebulaWorkspace {
         direction: SplitDirection,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Result<u64, crate::runtime_api::ApiError> {
         let active = self.active;
         let Some(WorkspaceTab::Terminal { panes, focused, .. }) = self.tabs.get(active) else {
-            return;
+            return Err(crate::runtime_api::ApiError::new(
+                "invalid_state",
+                "the active tab cannot be split",
+            ));
         };
         let focused = *focused;
-        let Some(anchor) = panes.iter().find(|pane| pane.id == focused) else { return };
+        let Some(anchor) = panes.iter().find(|pane| pane.id == focused) else {
+            return Err(crate::runtime_api::ApiError::new(
+                "action_failed",
+                "the focused pane is missing from the active split tree",
+            ));
+        };
         let (cols, rows, cwd) = {
             let view = anchor.view.read(cx);
             (view.grid_cols() as u16, view.grid_rows() as u16, view.local_cwd())
@@ -1331,17 +1349,24 @@ impl NebulaWorkspace {
             // new_pane 之后 tab 结构不可能已变（同一同步调用栈），但防御住：
             // 树上挂不进去就立即回收，不留孤儿 PTY。
             pane.view.read(cx).shutdown();
-            return;
+            return Err(crate::runtime_api::ApiError::new(
+                "action_failed",
+                "the active terminal tab changed while creating a split",
+            ));
         };
         if !tree.split_leaf(*focused, new_id, direction, 0.5) {
             pane.view.read(cx).shutdown();
-            return;
+            return Err(crate::runtime_api::ApiError::new(
+                "action_failed",
+                "the focused pane could not be attached to the split tree",
+            ));
         }
         panes.push(pane);
         *focused = new_id;
         *zoomed = false;
         self.focus_active(window, cx);
         cx.notify();
+        Ok(new_id)
     }
 
     /// 关一个 pane（pane 退出 / ctrl+shift+w）。树裁定结局：最后一个叶子
@@ -2614,10 +2639,10 @@ impl NebulaWorkspace {
             },
             PaletteAction::CloseTab => self.close_active(window, cx),
             PaletteAction::SplitRight => {
-                self.split_focused(SplitDirection::LeftRight, window, cx);
+                let _ = self.split_focused(SplitDirection::LeftRight, window, cx);
             },
             PaletteAction::SplitDown => {
-                self.split_focused(SplitDirection::TopBottom, window, cx);
+                let _ = self.split_focused(SplitDirection::TopBottom, window, cx);
             },
             PaletteAction::LaunchSsh(host) => {
                 self.add_ssh_terminal(host, window, cx);
@@ -4857,10 +4882,10 @@ impl Render for NebulaWorkspace {
                 this.toggle_file_tree(cx);
             }))
             .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
-                this.split_focused(SplitDirection::LeftRight, window, cx);
+                let _ = this.split_focused(SplitDirection::LeftRight, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
-                this.split_focused(SplitDirection::TopBottom, window, cx);
+                let _ = this.split_focused(SplitDirection::TopBottom, window, cx);
             }))
             .on_action(cx.listener(|this, _: &RenameActiveTab, window, cx| {
                 let ix = this.active;

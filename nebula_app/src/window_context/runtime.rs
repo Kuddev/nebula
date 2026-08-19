@@ -9,8 +9,8 @@ use nebula_terminal::event::Notify;
 use crate::display::SplitDirection;
 use crate::event::TabRequest;
 use crate::runtime_api::{
-    ApiError, RuntimeLayout, RuntimePane, RuntimeSplitDirection, RuntimeTab, RuntimeTaskState,
-    RuntimeWindow,
+    ApiError, RuntimeAgent, RuntimeAgentStateSource, RuntimeLayout, RuntimePane, RuntimePaneRead,
+    RuntimeSplitDirection, RuntimeTab, RuntimeTaskState, RuntimeWindow,
 };
 
 use super::{Layout, TabLaunch, WindowContext};
@@ -38,6 +38,7 @@ impl WindowContext {
                         branch: pane.nebula_state.branch.clone(),
                         ssh_destination: pane.ssh_destination.clone(),
                         running_program: pane.nebula_state.running_program.clone(),
+                        agent: runtime_agent(pane),
                         task_state: task_state(pane),
                         // Seeded to 0; the hub stamps the real transition
                         // counter at publish time, where the previous snapshot
@@ -180,6 +181,53 @@ impl WindowContext {
         self.display.window.request_redraw();
         Ok(())
     }
+
+    pub(crate) fn runtime_read(
+        &self,
+        pane_id: u64,
+        lines: usize,
+    ) -> Result<RuntimePaneRead, ApiError> {
+        let Some(pane) = self.pane(pane_id) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to the target window"),
+            ));
+        };
+        let term = pane.terminal.lock();
+        Ok(crate::runtime_api::capture_terminal_tail(
+            &term,
+            self.id().into(),
+            pane_id,
+            lines,
+            task_state(pane),
+            false,
+            None,
+        ))
+    }
+}
+
+fn runtime_agent(pane: &super::Pane) -> Option<RuntimeAgent> {
+    let state = &pane.nebula_state;
+    let raw = state
+        .ai_session
+        .as_ref()
+        .map(|identity| identity.source.as_str())
+        .or(state.running_program.as_deref())?;
+    let kind = crate::ai_agents::AgentKind::parse(raw)?;
+    let state_source = match state.agent_status_source {
+        crate::ai_agents::AgentStatusSource::Hook => RuntimeAgentStateSource::Hook,
+        crate::ai_agents::AgentStatusSource::Screen => RuntimeAgentStateSource::Screen,
+        crate::ai_agents::AgentStatusSource::Process
+        | crate::ai_agents::AgentStatusSource::Unknown => RuntimeAgentStateSource::Process,
+    };
+    Some(RuntimeAgent {
+        kind: kind.slug().to_owned(),
+        display_name: kind.display_name().to_owned(),
+        session_id: state.ai_session.as_ref().map(|identity| identity.session_id.clone()),
+        state_source,
+        state_rule: state.agent_status_rule.clone(),
+        hook_seen: state.agent_hook_seen,
+    })
 }
 
 fn task_state(pane: &super::Pane) -> RuntimeTaskState {
