@@ -49,6 +49,7 @@ use crate::{input, renderer, session};
 
 mod model;
 mod nebula_fetch_art;
+mod agents;
 mod runtime;
 /// New-tab welcome page (Windows logo + fastfetch intro). Stateless helpers.
 pub(crate) mod welcome;
@@ -2177,6 +2178,9 @@ impl WindowContext {
             state.agent_hook_seen = true;
             state.agent_status_source = crate::ai_agents::AgentStatusSource::Hook;
             state.agent_status_rule = None;
+            if !matches!(ev.kind, crate::ai_hook::AiHookKind::SessionStart) {
+                state.agent_runtime_submit_pending = false;
+            }
             // 精确边沿抵达 = 屏幕检测的空闲计数作废（上一回合攒下的拍数
             // 不能把新回合的第一个空闲闪现立即降级）。
             state.idle_screen_streak = 0;
@@ -2300,6 +2304,7 @@ impl WindowContext {
                 state.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
                 state.agent_status_rule = None;
                 state.agent_hook_seen = false;
+                state.agent_runtime_submit_pending = false;
                 state.ai_session = None;
                 state.running_program = None;
                 state.awaiting_input = false;
@@ -2319,6 +2324,12 @@ impl WindowContext {
     ///
     /// 只读底部 24 行，规则已预编译；普通 shell 或未知程序立即跳过。
     pub fn refresh_agent_screen_states(&mut self) {
+        // Wakeup 不是所有 synchronized PTY 输出的必发事件；NebulaTick 在做
+        // Agent 检测前先冲刷所有已看到 Grid 变化的 Runtime 提交 barrier。
+        let pane_ids: Vec<_> = self.panes.iter().map(|pane| pane.id).collect();
+        for pane_id in pane_ids {
+            self.runtime_flush_pending_submit(Some(pane_id));
+        }
         for pane in &mut self.panes {
             let Some(program) = pane.nebula_state.running_program.clone() else {
                 continue;
@@ -2343,6 +2354,18 @@ impl WindowContext {
             };
 
             let state = &mut pane.nebula_state;
+            if detection.status == crate::ai_agents::AgentStatus::Idle
+                && state.agent_runtime_submit_pending
+            {
+                state.idle_screen_streak = 0;
+                continue;
+            }
+            if matches!(
+                detection.status,
+                crate::ai_agents::AgentStatus::Working | crate::ai_agents::AgentStatus::Blocked
+            ) {
+                state.agent_runtime_submit_pending = false;
+            }
             // 空闲提示符降级要分三档（#「转圈不停」的根修）：
             // - hook 报过的 Done/Blocked 是精确终态，不被提示符降级；
             // - Working 可能是丢了 TurnDone 的僵尸态（打断的回合没有 Stop
@@ -2411,38 +2434,6 @@ impl WindowContext {
         // Chrome/tray read the established fields; rebuilding their compact
         // arrays here makes the detector visible in the same tick.
         self.sync_chrome_tabs();
-    }
-
-    /// 托盘菜单的数据面（T1-3）：本窗口所有正在跑 AI CLI 的 pane。与侧栏
-    /// 徽章同一事实源（`running_program` + `needs_attention`），托盘因此
-    /// 永远和 pane 徽章一致，不另立第二份 agent 状态。
-    pub fn tray_agents(&self) -> Vec<crate::tray::TrayAgent> {
-        self.panes
-            .iter()
-            .filter_map(|pane| {
-                let state = &pane.nebula_state;
-                let program = state
-                    .running_program
-                    .as_deref()
-                    .filter(|program| crate::ai_agents::AgentKind::parse(program).is_some())?;
-                // 「哪个项目」比「哪个 pane id」有意义：取 cwd 尾段。
-                let place = std::path::Path::new(state.cwd.trim())
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let label = if place.is_empty() {
-                    program.to_owned()
-                } else {
-                    format!("{program} · {place}")
-                };
-                Some(crate::tray::TrayAgent {
-                    window: self.display.window.id(),
-                    pane: pane.id,
-                    label,
-                    needs_attention: state.needs_attention,
-                })
-            })
-            .collect()
     }
 
     /// 后台修复请求（spec 001）的结果落地：pane 归属本窗口即认领（返回

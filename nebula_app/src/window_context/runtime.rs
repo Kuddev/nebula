@@ -5,6 +5,8 @@
 //! implementation types to transport threads.
 
 use nebula_terminal::event::Notify;
+use nebula_terminal::grid::Dimensions;
+use nebula_terminal::index::{Column, Line, Point};
 
 use crate::display::SplitDirection;
 use crate::event::TabRequest;
@@ -31,6 +33,17 @@ fn runtime_key_sequence(
         ));
     }
     Ok(bytes)
+}
+
+fn runtime_screen_snapshot(pane: &super::Pane) -> Option<String> {
+    let term = pane.terminal.lock();
+    let lines = term.screen_lines();
+    if lines == 0 || term.columns() == 0 {
+        return None;
+    }
+    let start = Point::new(Line(0), Column(0));
+    let end = Point::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
+    Some(term.bounds_to_string(start, end))
 }
 
 impl WindowContext {
@@ -186,19 +199,32 @@ impl WindowContext {
             ));
         };
         let pane = &mut self.panes[index];
-        let submit_bytes = submit
-            .then(|| {
-                runtime_key_sequence(pane, RuntimeKey::Enter, RuntimeKeyModifiers::default(), 1)
-            })
-            .transpose()?;
+        if submit && pane.nebula_state.runtime_submit_barrier.is_some() {
+            return Err(ApiError::new(
+                "input_in_progress",
+                "the pane is still committing previous runtime input",
+            ));
+        }
+        let recognized_agent = submit && runtime_agent(pane).is_some();
+        let mode = *pane.terminal.lock().mode();
+        let mut bytes = crate::input::terminal_input::build_runtime_text_sequence(&text, mode);
+        if submit {
+            let submit_bytes =
+                runtime_key_sequence(pane, RuntimeKey::Enter, RuntimeKeyModifiers::default(), 1)?;
+            if text.is_empty() {
+                bytes.extend(submit_bytes);
+            } else {
+                pane.nebula_state.runtime_submit_barrier =
+                    Some(crate::display::state::RuntimeSubmitBarrier {
+                        baseline_screen: runtime_screen_snapshot(pane).unwrap_or_default(),
+                        submit_bytes,
+                    });
+            }
+        }
         if submit {
             pane.nebula_state.last_committed.clone_from(&text);
         }
-        pane.notifier.notify(text.into_bytes());
-        if let Some(bytes) = submit_bytes {
-            // TUI 可切换 kitty/Win32 键盘协议，裸 CR 不一定代表 Enter。
-            pane.notifier.notify(bytes);
-        }
+        pane.notifier.notify(bytes);
         // Direct API input has the same semantic effect as keyboard input:
         // stale completion/attention badges must not survive a new turn.
         pane.nebula_state.touched = true;
@@ -206,6 +232,14 @@ impl WindowContext {
         pane.nebula_state.needs_attention = false;
         pane.nebula_state.finished_unseen = false;
         pane.nebula_state.failed_unseen = false;
+        if recognized_agent {
+            pane.nebula_state.agent_status = crate::ai_agents::AgentStatus::Working;
+            pane.nebula_state.agent_status_source = crate::ai_agents::AgentStatusSource::Process;
+            pane.nebula_state.agent_status_rule = None;
+            pane.nebula_state.agent_runtime_submit_pending = true;
+            pane.nebula_state.idle_screen_streak = 0;
+            pane.nebula_state.command_started.get_or_insert_with(std::time::Instant::now);
+        }
         self.dirty = true;
         self.display.window.request_redraw();
         Ok(())
@@ -292,8 +326,21 @@ impl WindowContext {
         if pane.nebula_state.command_started.is_some() || pane.nebula_state.active_run.is_some() {
             return Err(ApiError::new("run_in_progress", "the pane is already running a command"));
         }
+        if pane.nebula_state.runtime_submit_barrier.is_some() {
+            return Err(ApiError::new(
+                "input_in_progress",
+                "the pane is still committing previous runtime input",
+            ));
+        }
+        let mode = *pane.terminal.lock().mode();
+        let bytes = crate::input::terminal_input::build_runtime_text_sequence(&command, mode);
         let submit_bytes =
             runtime_key_sequence(pane, RuntimeKey::Enter, RuntimeKeyModifiers::default(), 1)?;
+        pane.nebula_state.runtime_submit_barrier =
+            Some(crate::display::state::RuntimeSubmitBarrier {
+                baseline_screen: runtime_screen_snapshot(pane).unwrap_or_default(),
+                submit_bytes,
+            });
         let run = crate::runtime_api::begin_runtime_run();
         let run_id = run.run_id;
         pane.nebula_state.active_run = Some(run);
@@ -301,8 +348,7 @@ impl WindowContext {
         pane.nebula_state.last_committed.clone_from(&command);
         pane.nebula_state.touched = true;
         pane.nebula_state.awaiting_input = false;
-        pane.notifier.notify(command.into_bytes());
-        pane.notifier.notify(submit_bytes);
+        pane.notifier.notify(bytes);
         self.dirty = true;
         self.display.window.request_redraw();
         Ok(run_id)
@@ -338,6 +384,24 @@ impl WindowContext {
         // 只回收本次启动产生的单 Pane 终端；若结构已变化，宁可保留也不
         // 能把用户并行操作创建或拆分出的 Tab 一并关闭。
         let _ = self.close_tab(tab_index);
+    }
+
+    pub(crate) fn runtime_flush_pending_submit(&mut self, pane_id: Option<u64>) {
+        let pane_id = pane_id.unwrap_or_else(|| self.focused_pane_id());
+        let Some(index) = self.pane_index(pane_id) else { return };
+        let ready = {
+            let pane = &self.panes[index];
+            let Some(pending) = pane.nebula_state.runtime_submit_barrier.as_ref() else {
+                return;
+            };
+            runtime_screen_snapshot(pane).is_some_and(|screen| screen != pending.baseline_screen)
+        };
+        if !ready {
+            return;
+        }
+        let pane = &mut self.panes[index];
+        let pending = pane.nebula_state.runtime_submit_barrier.take().expect("checked above");
+        pane.notifier.notify(pending.submit_bytes);
     }
 }
 

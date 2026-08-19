@@ -6,6 +6,30 @@ use super::Processor;
 use crate::runtime_api::{ApiError, RuntimeCommand};
 
 impl Processor {
+    pub(super) fn route_ai_hook(&mut self, hook: &crate::ai_hook::AiHookEvent) {
+        for window_context in self.windows.values_mut() {
+            if window_context.handle_ai_hook(hook) {
+                break;
+            }
+        }
+    }
+
+    pub(super) fn handle_terminal_wakeup(
+        &mut self,
+        window_id: &winit::window::WindowId,
+        pane_id: Option<u64>,
+    ) {
+        crate::input::latency::pty_wakeup();
+        let Some(window_context) = self.windows.get_mut(window_id) else { return };
+        window_context.runtime_flush_pending_submit(pane_id);
+        window_context.dirty = true;
+        // 远端在快速失败窗口后仍有输出，才把手输的 ssh 视为真实连接。
+        window_context.confirm_ssh_on_activity(pane_id);
+        if window_context.display.window.has_frame {
+            window_context.display.window.request_redraw();
+        }
+    }
+
     pub(super) fn execute_agent_runtime_command(
         &mut self,
         command: &RuntimeCommand,

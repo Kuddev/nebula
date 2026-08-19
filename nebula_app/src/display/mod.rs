@@ -82,7 +82,7 @@ mod message_queue_entry;
 pub mod sftp_panel;
 pub mod side_panel;
 mod size_info;
-mod state;
+pub(crate) mod state;
 pub(crate) mod suggest_engine;
 mod surface_opacity;
 mod terminal_color;

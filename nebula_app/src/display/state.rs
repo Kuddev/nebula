@@ -199,6 +199,12 @@ pub struct NebulaInlineImage {
 }
 
 /// Prompt metadata and overlays that must follow one concrete PTY/pane.
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeSubmitBarrier {
+    pub(crate) baseline_screen: String,
+    pub(crate) submit_bytes: Vec<u8>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct NebulaPaneState {
     pub cwd: String,
@@ -238,6 +244,9 @@ pub struct NebulaPaneState {
     /// 屏幕检测连续看到空闲提示符的拍数。Working 要连续两拍空闲才降级
     /// （单拍可能是重绘间隙）；任何非 idle 检测都会清零。
     pub idle_screen_streak: u8,
+    /// Runtime 派活后的旧提示符不能在新回合出现任何证据前覆盖 Working。
+    pub agent_runtime_submit_pending: bool,
+    pub(crate) runtime_submit_barrier: Option<RuntimeSubmitBarrier>,
     pub last_committed: String,
     pub awaiting_input: bool,
     pub finished_unseen: bool,

@@ -951,11 +951,7 @@ impl ApplicationHandler<Event> for Processor {
             // AI-CLI lifecycle events (nebula-hook pipe) route by pane id, so
             // the windows resolve them themselves; the owner claims it.
             (EventType::AiHook(hook), _) => {
-                for window_context in self.windows.values_mut() {
-                    if window_context.handle_ai_hook(&hook) {
-                        break;
-                    }
-                }
+                self.route_ai_hook(&hook);
             },
             // Assistant fix results route by pane id the same way.
             (EventType::AiFixReady { pane, seq, fix }, _) => {
@@ -1265,17 +1261,7 @@ impl ApplicationHandler<Event> for Processor {
                 }
             },
             (EventType::Terminal(TerminalEvent::Wakeup), Some(window_id)) => {
-                crate::input::latency::pty_wakeup();
-                if let Some(window_context) = self.windows.get_mut(window_id) {
-                    window_context.dirty = true;
-                    // A typed `ssh` login is confirmed by remote output still
-                    // arriving after the fast-failure window — save it to the
-                    // sidebar now, not when the session eventually exits.
-                    window_context.confirm_ssh_on_activity(tab_id);
-                    if window_context.display.window.has_frame {
-                        window_context.display.window.request_redraw();
-                    }
-                }
+                self.handle_terminal_wakeup(window_id, tab_id);
             },
             (EventType::Terminal(TerminalEvent::Exit), Some(window_id)) => {
                 if let Some(pane_id) = tab_id {
@@ -3298,6 +3284,11 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         }
                     },
                     TerminalEvent::CommandDone { exit_code } => {
+                        // 新 PTY 初始化提示符也可能先发一个 CommandDone。Runtime
+                        // 提交 barrier 尚未冲刷时，它不能结束当前请求。
+                        if self.ctx.nebula_state.runtime_submit_barrier.is_some() {
+                            return;
+                        }
                         // Take (not just clear) the program: the toast below
                         // names it, and reading the field after the reset used
                         // to hand the toast a permanent `None`.
