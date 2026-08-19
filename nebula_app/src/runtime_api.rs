@@ -621,10 +621,9 @@ fn fresh_token() -> String {
     format!("{:016x}{:016x}", a.finish(), b.finish())
 }
 
-/// Hand a plain launch to the resident instance. This legacy verb remains
-/// supported while both paths share the same authenticated endpoint.
-pub fn try_attach_existing() -> bool {
-    legacy_request("ATTACH").is_some()
+/// 普通二次启动并入驻留实例：先恢复/聚焦窗口，再新建一个默认 shell 标签页。
+pub fn try_open_default_tab_existing() -> bool {
+    try_open_tab_existing(None)
 }
 
 /// 后台任务把一行文本作为输入敲进某个 pane（不回车）。复用 runtime Prompt
@@ -644,12 +643,17 @@ pub fn dispatch_prompt(proxy: &EventLoopProxy<Event>, pane_id: u64, text: String
 /// 的标签因此先回来），再请求在该窗口打开定目录标签。任一步失败都返回
 /// false，调用方回落为独立启动——绝不吞掉用户的手势。
 pub fn try_open_directory_existing(dir: &std::path::Path) -> bool {
+    try_open_tab_existing(Some(dir))
+}
+
+fn try_open_tab_existing(dir: Option<&std::path::Path>) -> bool {
     if legacy_request("ATTACH").is_none() {
         return false;
     }
     // ATTACH 与 tab.new 都落到同一条 winit 事件队列上，先后有序：窗口先
     // 恢复，新标签随后落在恢复出来的窗口里。
-    request_once("tab.new", json!({ "cwd": dir }), IO_TIMEOUT)
+    let params = dir.map_or_else(|| json!({}), |dir| json!({ "cwd": dir }));
+    request_once("tab.new", params, IO_TIMEOUT)
         .map(|response| response.ok)
         .unwrap_or(false)
 }

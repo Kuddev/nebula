@@ -22,12 +22,8 @@
 /// `bash --rcfile`. Mirrors the local bash rc but drops all Windows path
 /// translation (the remote cwd is already a real POSIX path) and adds the
 /// `program` field to the title so the tab icon resolves over SSH.
-///
-/// `pub(crate)`: the WSL guest integration (`shell_detect`) feeds the *same*
-/// script to `wsl --exec bash --rcfile` — a WSL guest is a POSIX host exactly
-/// like an SSH remote, so cwd/branch/program semantics stay one source.
 #[cfg(windows)]
-pub(crate) const REMOTE_BASH: &str = r#"
+const REMOTE_BASH: &str = r#"
 [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 __nebula_branch=""
 __nebula_at_prompt=0

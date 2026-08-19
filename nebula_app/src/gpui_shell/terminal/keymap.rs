@@ -90,7 +90,7 @@ fn use_win32_input_mode(mode: &TermMode) -> bool {
     mode.contains(TermMode::WIN32_INPUT_MODE) && !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL)
 }
 
-/// 无修饰的字母/数字必须交给 IME / `TranslateMessage`，不能编进 PTY。
+/// 无修饰的字母/数字/空格必须交给 IME / `TranslateMessage`，不能编进 PTY。
 ///
 /// GPUI 的 Windows 后端：`on_key_down` 一旦 `stop_propagation`，就不会再
 /// `TranslateMessage`。IME 组字（微软拼音）是 TranslateMessage 喂进去的；
@@ -102,6 +102,9 @@ fn win32_encodes_keystroke(ks: &Keystroke) -> bool {
         return true;
     }
     let key = ks.key.as_str();
+    if key == "space" {
+        return false;
+    }
     let mut chars = key.chars();
     match (chars.next(), chars.next()) {
         (Some(c), None) if c.is_ascii_alphanumeric() => false,
@@ -336,10 +339,6 @@ pub fn encode(ks: &Keystroke, mode: &TermMode) -> Option<Vec<u8>> {
         }
     }
 
-    if ks.key.as_str() == "space" && !mods.control {
-        return Some(b" ".to_vec());
-    }
-
     None
 }
 
@@ -401,11 +400,19 @@ mod tests {
         assert_eq!(encode(&keystroke("n"), &mode), None);
         assert_eq!(encode(&keystroke("a"), &mode), None);
         assert_eq!(encode(&keystroke("1"), &mode), None);
+        assert_eq!(encode(&keystroke("space"), &mode), None);
         // Ctrl+C 仍走记录，不能为了 IME 把快捷键也放掉。
         let mut ctrl_c = keystroke("c");
         ctrl_c.modifiers.control = true;
         assert!(encode(&ctrl_c, &mode).is_some());
         assert!(encode(&keystroke("escape"), &mode).is_some());
+    }
+
+    /// 普通空格与字母使用同一文本输入路径：英语布局最终提交 `" "`，IME
+    /// 则先消费它完成候选词选择。keydown 抢先编码会让搜狗直接漏出空格。
+    #[test]
+    fn unmodified_space_stays_on_the_text_input_path() {
+        assert_eq!(encode(&keystroke("space"), &TermMode::default()), None);
     }
 
     /// kitty 键盘标志是子进程明确要过的线上合同，压过 DECSET 9001

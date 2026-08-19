@@ -427,16 +427,15 @@ fn wants_gpui_shell(options: &Options) -> bool {
     true
 }
 
-/// Windows 单实例交接：普通启动 ATTACH 到驻留进程；带工作目录、无 `-e`
-/// 则先 ATTACH 再 `tab.new`。GPUI 与 winit 共用，避免 GUI 抢在 probe
-/// 前面再拉一套 PTY。
+/// Windows 单实例交接：普通启动或带工作目录、无 `-e` 时，先 ATTACH 到
+/// 驻留进程，再 `tab.new`。GPUI 与 winit 共用，避免第二份进程无声退出。
 #[cfg(windows)]
 fn try_hand_over_to_resident(options: &Options) -> bool {
     let has_command = options.window_options.terminal_options.command().is_some();
     let plain_launch = !options.daemon
         && options.window_options.terminal_options.working_directory.is_none()
         && !has_command;
-    if plain_launch && runtime_api::try_attach_existing() {
+    if plain_launch && runtime_api::try_open_default_tab_existing() {
         return true;
     }
     // Explorer 右键「在 Nebula 中打开」带着 --working-directory 走到这里。

@@ -1715,9 +1715,6 @@ impl TerminalView {
                 "backspace" if plain_mods => {
                     crate::display::Display::nebula_input_backspace(&mut self.suggest);
                 },
-                "space" if plain_mods => {
-                    crate::display::Display::nebula_input_char(&mut self.suggest, ' ');
-                },
                 key => {
                     let is_modifier = matches!(
                         key,

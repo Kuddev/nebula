@@ -61,8 +61,8 @@ pub fn run_shell() {
             let _ = tx.send(event);
         }
     });
-    // 驻留进程写 runtime.port：第二份 `nebula --gpui` 经 try_attach_existing
-    // ATTACH 回来，而不是再拉一套 PTY。Drop 会删 port 文件。
+    // 驻留进程写 runtime.port：第二份 `nebula --gpui` 经 ATTACH + tab.new
+    // 并入当前窗口，而不是再拉一套进程。Drop 会删 port 文件。
     let _runtime_server = crate::runtime_api::RuntimeServer::spawn_callback(
         {
             let tx = shell_tx;

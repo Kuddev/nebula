@@ -1,9 +1,9 @@
 //! Single-instance mux service: the resident Nebula process owns the live
-//! sessions (multiplexer-style). A plain second launch does not start another
-//! terminal — it pings the resident instance over a loopback socket and
-//! exits; the resident instance re-opens a window, re-attaching the detached
-//! tabs whose PTYs never stopped. This is what lets a `claude` conversation
-//! survive closing the window.
+//! sessions (multiplexer-style). A plain second launch hands over to the
+//! resident instance over a loopback socket; the resident restores its window
+//! and opens a new tab without disturbing detached tabs whose PTYs never
+//! stopped. This is what lets a `claude` conversation survive closing the
+//! window while a deliberate second launch still has a visible effect.
 //!
 //! Discovery is a port file (`%APPDATA%\Nebula\mux.port`) holding
 //! `<port> <token>`. The token gates the loopback port against OTHER local
