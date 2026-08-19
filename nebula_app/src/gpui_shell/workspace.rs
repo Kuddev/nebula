@@ -4886,7 +4886,9 @@ impl Render for NebulaWorkspace {
                     .child(
                         // 终端卡（一体化外壳）：唯一的结构分界。圆角与旧壳卡
                         // 同源（UI_SHELL_RADIUS_LOGICAL=14），无描边——融合靠
-                        // 壳色包围圆角卡本身，不靠线框。p_2 = 旧壳 8px 卡缝。
+                        // 壳色包围圆角卡本身，不靠线框。侧栏模式四边保留旧壳
+                        // 8px 卡缝；顶部 tab 模式取消上边距，让 tab 底边与正文
+                        // 直接相接，左右和底部卡缝不变。
                         div()
                             .flex_1()
                             .min_w_0()
@@ -4903,7 +4905,8 @@ impl Render for NebulaWorkspace {
                                 .absolute()
                                 .inset_0(),
                             )
-                            .p_2()
+                            .when(top_tabs, |card| card.px_2().pb(px(8.0)))
+                            .when(!top_tabs, |card| card.p_2())
                             .child(
                             div()
                                 .size_full()
