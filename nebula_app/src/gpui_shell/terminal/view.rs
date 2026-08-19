@@ -1097,6 +1097,9 @@ impl TerminalView {
             },
         };
         Some(crate::runtime_api::RuntimeAgent {
+            agent_id: None,
+            generation: None,
+            name: None,
             kind: kind.slug().to_owned(),
             display_name: kind.display_name().to_owned(),
             session_id: self.ai_session.as_ref().map(|identity| identity.session_id.clone()),
@@ -1272,6 +1275,9 @@ impl TerminalView {
             ));
         }
         let recognized_agent = submit && self.runtime_agent().is_some();
+        if submit {
+            self.suggest.last_committed.clone_from(&text);
+        }
         let mut bytes = text.into_bytes();
         if submit {
             bytes.push(b'\r');

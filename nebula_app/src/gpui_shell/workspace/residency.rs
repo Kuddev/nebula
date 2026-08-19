@@ -102,13 +102,16 @@ impl NebulaWorkspace {
             | RuntimeCommand::Split { .. }
             | RuntimeCommand::Prompt { .. }
             | RuntimeCommand::SendKey { .. }
-            | RuntimeCommand::Run { .. } => {
+            | RuntimeCommand::Run { .. }
+            | RuntimeCommand::AgentStart { .. }
+            | RuntimeCommand::AgentPrompt { .. } => {
                 self.reveal_session(cx);
                 self.runtime_pending.push(dispatch);
             },
             RuntimeCommand::Snapshot
             | RuntimeCommand::ReadPane { .. }
-            | RuntimeCommand::Procs { .. } => {
+            | RuntimeCommand::Procs { .. }
+            | RuntimeCommand::AgentRead { .. } => {
                 self.runtime_pending.push(dispatch);
             },
         }
@@ -309,6 +312,94 @@ impl NebulaWorkspace {
                     window,
                     cx,
                 )
+            },
+            RuntimeCommand::AgentStart { window_id, name, kind, cwd, session_id, command } => {
+                self.runtime_window_requested(*window_id)?;
+                self.runtime_hub.ensure_agent_name_available(name)?;
+                let pane_id = self.add_terminal_at(cwd.clone(), None, window, cx);
+                let agent = self.runtime_hub.register_agent(
+                    name.clone(),
+                    *kind,
+                    self.runtime_window_id,
+                    pane_id,
+                    session_id.clone(),
+                )?;
+                if let Some(meta) = self.tab_meta.get_mut(self.active) {
+                    meta.custom_name = Some(name.clone());
+                }
+                let Some(tab_ix) = self.tab_of_pane(pane_id) else {
+                    self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
+                    return Err(ApiError::new(
+                        "action_failed",
+                        "the new agent pane was not registered in the workspace",
+                    ));
+                };
+                let view = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                        .iter()
+                        .find(|pane| pane.id == pane_id)
+                        .expect("tab_of_pane resolved a terminal pane")
+                        .view
+                        .clone(),
+                    _ => unreachable!("tab_of_pane only resolves terminal tabs"),
+                };
+                if let Err(error) =
+                    view.update(cx, |view, cx| view.runtime_prompt(command.clone(), true, cx))
+                {
+                    self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
+                    return Err(error);
+                }
+                self.runtime_result(
+                    json!({
+                        "agent": agent,
+                        "window_id": self.runtime_window_id,
+                        "pane_id": pane_id
+                    }),
+                    window,
+                    cx,
+                )
+            },
+            RuntimeCommand::AgentPrompt { agent, generation, text, submit } => {
+                let managed = self.runtime_hub.active_agent(agent, *generation)?;
+                self.runtime_window_requested(Some(managed.window_id))?;
+                let Some(tab_ix) = self.tab_of_pane(managed.pane_id) else {
+                    return Err(ApiError::new(
+                        "agent_closed",
+                        format!("agent {:?} no longer has a live pane", managed.name),
+                    ));
+                };
+                let view = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                        .iter()
+                        .find(|pane| pane.id == managed.pane_id)
+                        .expect("tab_of_pane resolved a terminal pane")
+                        .view
+                        .clone(),
+                    _ => unreachable!("tab_of_pane only resolves terminal tabs"),
+                };
+                view.update(cx, |view, cx| view.runtime_prompt(text.clone(), *submit, cx))?;
+                self.runtime_result(json!({ "agent": managed }), window, cx)
+            },
+            RuntimeCommand::AgentRead { agent, generation, lines } => {
+                let managed = self.runtime_hub.active_agent(agent, *generation)?;
+                self.runtime_window_requested(Some(managed.window_id))?;
+                let Some(tab_ix) = self.tab_of_pane(managed.pane_id) else {
+                    return Err(ApiError::new(
+                        "agent_closed",
+                        format!("agent {:?} no longer has a live pane", managed.name),
+                    ));
+                };
+                let read = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                        .iter()
+                        .find(|pane| pane.id == managed.pane_id)
+                        .expect("tab_of_pane resolved a terminal pane")
+                        .view
+                        .read(cx)
+                        .runtime_read(self.runtime_window_id, *lines),
+                    _ => unreachable!("tab_of_pane only resolves terminal tabs"),
+                }?;
+                Ok(json!({ "agent": managed, "read": read }))
             },
         }
     }

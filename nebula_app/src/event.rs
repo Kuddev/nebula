@@ -624,6 +624,66 @@ impl Processor {
                     "run_id": run_id
                 }))
             },
+            RuntimeCommand::AgentStart { window_id, name, kind, cwd, session_id, command } => {
+                let id = self.runtime_target_window(*window_id, None)?;
+                self.runtime_hub.ensure_agent_name_available(name)?;
+                let pane_id = self
+                    .windows
+                    .get_mut(&id)
+                    .expect("resolved runtime window exists")
+                    .runtime_new_tab(cwd.clone())?;
+                let agent = self.runtime_hub.register_agent(
+                    name.clone(),
+                    *kind,
+                    u64::from(id),
+                    pane_id,
+                    session_id.clone(),
+                )?;
+                let launch = self
+                    .windows
+                    .get_mut(&id)
+                    .expect("resolved runtime window exists")
+                    .runtime_set_tab_name(pane_id, name.clone())
+                    .and_then(|_| {
+                        self.windows
+                            .get_mut(&id)
+                            .expect("resolved runtime window exists")
+                            .runtime_prompt(pane_id, command.clone(), true)
+                    });
+                if let Err(error) = launch {
+                    self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
+                    return Err(error);
+                }
+                self.runtime_result(serde_json::json!({
+                    "agent": agent,
+                    "window_id": u64::from(id),
+                    "pane_id": pane_id
+                }))
+            },
+            RuntimeCommand::AgentPrompt { agent, generation, text, submit } => {
+                let managed = self.runtime_hub.active_agent(agent, *generation)?;
+                let id = WindowId::from(managed.window_id);
+                let Some(window) = self.windows.get_mut(&id) else {
+                    return Err(ApiError::new(
+                        "agent_closed",
+                        format!("agent {:?} no longer has a live window", managed.name),
+                    ));
+                };
+                window.runtime_prompt(managed.pane_id, text.clone(), *submit)?;
+                self.runtime_result(serde_json::json!({ "agent": managed }))
+            },
+            RuntimeCommand::AgentRead { agent, generation, lines } => {
+                let managed = self.runtime_hub.active_agent(agent, *generation)?;
+                let id = WindowId::from(managed.window_id);
+                let Some(window) = self.windows.get(&id) else {
+                    return Err(ApiError::new(
+                        "agent_closed",
+                        format!("agent {:?} no longer has a live window", managed.name),
+                    ));
+                };
+                let read = window.runtime_read(managed.pane_id, *lines)?;
+                Ok(serde_json::json!({ "agent": managed, "read": read }))
+            },
         }
     }
 

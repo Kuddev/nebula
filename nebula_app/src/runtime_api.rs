@@ -49,6 +49,7 @@ const MAX_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -184,6 +185,12 @@ pub enum RuntimeAgentStateSource {
 /// sidebar, waits, and external clients all consume the same reducer output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeAgent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub kind: String,
     pub display_name: String,
     pub session_id: Option<String>,
@@ -191,6 +198,22 @@ pub struct RuntimeAgent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_rule: Option<String>,
     pub hook_seen: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeManagedAgent {
+    pub agent_id: String,
+    pub generation: u64,
+    pub name: String,
+    pub kind: String,
+    pub window_id: u64,
+    pub pane_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub active: bool,
+    pub observed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -622,6 +645,25 @@ pub enum RuntimeCommand {
         wait: bool,
         timeout_ms: u64,
     },
+    AgentStart {
+        window_id: Option<u64>,
+        name: String,
+        kind: crate::ai_agents::AgentKind,
+        cwd: Option<PathBuf>,
+        session_id: Option<String>,
+        command: String,
+    },
+    AgentPrompt {
+        agent: String,
+        generation: Option<u64>,
+        text: String,
+        submit: bool,
+    },
+    AgentRead {
+        agent: String,
+        generation: Option<u64>,
+        lines: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -725,6 +767,8 @@ struct HubState {
     run_waiters:
         std::collections::HashMap<(u64, u64, u64), Vec<(u64, SyncSender<RuntimeRunResult>)>>,
     completed_runs: std::collections::VecDeque<RuntimeRunResult>,
+    agent_generations: std::collections::HashMap<String, u64>,
+    managed_agents: std::collections::HashMap<String, RuntimeManagedAgent>,
 }
 
 impl RuntimeHub {
@@ -740,15 +784,19 @@ impl RuntimeHub {
     /// revisions or flood subscribers with identical snapshots.
     pub(crate) fn publish(&self, mut snapshot: RuntimeSnapshot) -> RuntimeSnapshot {
         let mut state = self.lock();
+        let agent_lifecycle_changed = project_managed_agents(&mut state, &mut snapshot);
         // Stamp per-pane transition counters before the dedup compare. Panes
         // whose state is unchanged keep their previous counter, so an
         // otherwise-identical projection still compares equal here.
         stamp_state_change_seq(state.current.as_ref(), &mut snapshot);
         observe_run_lifecycle(&mut state, &snapshot);
-        if let Some(current) = &state.current {
+        if let Some(current) = state.current.clone() {
             snapshot.revision = current.revision;
-            if current == &snapshot {
-                return current.clone();
+            if current == snapshot {
+                if agent_lifecycle_changed {
+                    notify_snapshot_subscribers(&mut state, &current);
+                }
+                return current;
             }
             snapshot.revision = current.revision.saturating_add(1);
         } else {
@@ -756,12 +804,7 @@ impl RuntimeHub {
         }
 
         state.current = Some(snapshot.clone());
-        state.subscribers.retain(|(_, sender)| match sender.try_send(snapshot.clone()) {
-            Ok(()) => true,
-            // A subscriber that cannot keep up is disconnected instead of
-            // back-pressuring the GUI event thread.
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
-        });
+        notify_snapshot_subscribers(&mut state, &snapshot);
         snapshot
     }
 
@@ -777,6 +820,133 @@ impl RuntimeHub {
 
     fn current(&self) -> Option<RuntimeSnapshot> {
         self.lock().current.clone()
+    }
+
+    pub(crate) fn register_agent(
+        &self,
+        name: String,
+        kind: crate::ai_agents::AgentKind,
+        window_id: u64,
+        pane_id: u64,
+        session_id: Option<String>,
+    ) -> Result<RuntimeManagedAgent, ApiError> {
+        let mut state = self.lock();
+        if state.managed_agents.values().any(|agent| agent.active && agent.name == name) {
+            return Err(ApiError::new(
+                "agent_name_conflict",
+                format!("an active agent named {name:?} already exists"),
+            ));
+        }
+        let generation = state.agent_generations.get(&name).copied().unwrap_or(0).saturating_add(1);
+        state.agent_generations.insert(name.clone(), generation);
+        let sequence = NEXT_AGENT_ID.fetch_add(1, Ordering::Relaxed);
+        let agent_id = format!("agent-{}-{sequence}", std::process::id());
+        let agent = RuntimeManagedAgent {
+            agent_id: agent_id.clone(),
+            generation,
+            name,
+            kind: kind.slug().to_owned(),
+            window_id,
+            pane_id,
+            session_id,
+            active: true,
+            observed: false,
+            closed_reason: None,
+        };
+        state.managed_agents.insert(agent_id, agent.clone());
+        Ok(agent)
+    }
+
+    pub(crate) fn ensure_agent_name_available(&self, name: &str) -> Result<(), ApiError> {
+        if self.lock().managed_agents.values().any(|agent| agent.active && agent.name == name) {
+            return Err(ApiError::new(
+                "agent_name_conflict",
+                format!("an active agent named {name:?} already exists"),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn close_agent(&self, agent_id: &str, reason: &str) {
+        let mut state = self.lock();
+        let changed = if let Some(agent) = state.managed_agents.get_mut(agent_id) {
+            if agent.active {
+                agent.active = false;
+                agent.closed_reason = Some(reason.to_owned());
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed && let Some(snapshot) = state.current.clone() {
+            // Agent waits share the bounded snapshot channel with pane waits.
+            // Re-send the canonical snapshot so a registry-only close wakes
+            // immediately instead of degrading into an unrelated timeout.
+            notify_snapshot_subscribers(&mut state, &snapshot);
+        }
+    }
+
+    fn managed_agent(
+        &self,
+        selector: &str,
+        generation: Option<u64>,
+        require_active: bool,
+    ) -> Result<RuntimeManagedAgent, ApiError> {
+        let state = self.lock();
+        let by_name = || {
+            let exact_generation = generation.and_then(|generation| {
+                state
+                    .managed_agents
+                    .values()
+                    .filter(|agent| agent.name == selector && agent.generation == generation)
+                    .max_by_key(|agent| agent.generation)
+            });
+            exact_generation.or_else(|| {
+                state
+                    .managed_agents
+                    .values()
+                    .filter(|agent| agent.name == selector && (!require_active || agent.active))
+                    .max_by_key(|agent| agent.generation)
+            })
+        };
+        let agent =
+            state.managed_agents.get(selector).or_else(by_name).cloned().ok_or_else(|| {
+                ApiError::new("agent_not_found", format!("agent {selector:?} does not exist"))
+            })?;
+        if generation.is_some_and(|expected| expected != agent.generation) {
+            return Err(ApiError::new(
+                "agent_identity_mismatch",
+                format!(
+                    "agent {:?} is generation {}, not {}",
+                    agent.name,
+                    agent.generation,
+                    generation.expect("checked Some")
+                ),
+            )
+            .details(json!({
+                "agent_id": agent.agent_id,
+                "expected_generation": generation,
+                "actual_generation": agent.generation
+            })));
+        }
+        if require_active && !agent.active {
+            return Err(ApiError::new(
+                "agent_closed",
+                format!("agent {:?} is no longer active", agent.name),
+            )
+            .details(serde_json::to_value(agent).unwrap_or(Value::Null)));
+        }
+        Ok(agent)
+    }
+
+    pub(crate) fn active_agent(
+        &self,
+        selector: &str,
+        generation: Option<u64>,
+    ) -> Result<RuntimeManagedAgent, ApiError> {
+        self.managed_agent(selector, generation, true)
     }
 
     fn wait_run(
@@ -844,6 +1014,77 @@ impl RuntimeHub {
             },
         }
     }
+}
+
+fn notify_snapshot_subscribers(state: &mut HubState, snapshot: &RuntimeSnapshot) {
+    state.subscribers.retain(|(_, sender)| match sender.try_send(snapshot.clone()) {
+        Ok(()) => true,
+        // A subscriber that cannot keep up is disconnected instead of
+        // back-pressuring the GUI event thread.
+        Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
+    });
+}
+
+fn project_managed_agents(state: &mut HubState, snapshot: &mut RuntimeSnapshot) -> bool {
+    let mut lifecycle_changed = false;
+    for managed in state.managed_agents.values_mut().filter(|agent| agent.active) {
+        let pane =
+            snapshot.windows.iter_mut().find(|window| window.id == managed.window_id).and_then(
+                |window| {
+                    window
+                        .tabs
+                        .iter_mut()
+                        .flat_map(|tab| tab.panes.iter_mut())
+                        .find(|pane| pane.id == managed.pane_id)
+                },
+            );
+        let Some(pane) = pane else {
+            managed.active = false;
+            managed.closed_reason = Some("pane_closed".to_owned());
+            lifecycle_changed = true;
+            continue;
+        };
+        match &mut pane.agent {
+            Some(agent) if agent.kind == managed.kind => {
+                let session_mismatch = managed
+                    .session_id
+                    .as_deref()
+                    .zip(agent.session_id.as_deref())
+                    .is_some_and(|(expected, actual)| expected != actual);
+                let identity_mismatch =
+                    agent.agent_id.as_deref().is_some_and(|agent_id| agent_id != managed.agent_id);
+                if session_mismatch || identity_mismatch {
+                    managed.active = false;
+                    managed.closed_reason = Some("agent_replaced".to_owned());
+                    lifecycle_changed = true;
+                } else {
+                    if managed.session_id.is_none() && agent.session_id.is_some() {
+                        managed.session_id.clone_from(&agent.session_id);
+                        lifecycle_changed = true;
+                    }
+                    if !managed.observed {
+                        managed.observed = true;
+                        lifecycle_changed = true;
+                    }
+                    agent.agent_id = Some(managed.agent_id.clone());
+                    agent.generation = Some(managed.generation);
+                    agent.name = Some(managed.name.clone());
+                }
+            },
+            Some(_) if managed.observed => {
+                managed.active = false;
+                managed.closed_reason = Some("agent_replaced".to_owned());
+                lifecycle_changed = true;
+            },
+            None if managed.observed => {
+                managed.active = false;
+                managed.closed_reason = Some("agent_exited".to_owned());
+                lifecycle_changed = true;
+            },
+            Some(_) | None => {},
+        }
+    }
+    lifecycle_changed
 }
 
 const COMPLETED_RUN_CACHE: usize = 256;
@@ -1029,6 +1270,59 @@ struct RunParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AgentStartParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    name: String,
+    kind: String,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    resume_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentTargetParams {
+    agent: String,
+    #[serde(default)]
+    generation: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentPromptParams {
+    agent: String,
+    #[serde(default)]
+    generation: Option<u64>,
+    text: String,
+    #[serde(default = "default_true")]
+    submit: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentReadParams {
+    agent: String,
+    #[serde(default)]
+    generation: Option<u64>,
+    #[serde(default = "default_read_lines")]
+    lines: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentWaitParams {
+    agent: String,
+    generation: u64,
+    state: RuntimeWaitState,
+    timeout_ms: u64,
+    #[serde(default)]
+    after_seq: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SubscribeParams {
     #[serde(default)]
     since_revision: Option<u64>,
@@ -1156,6 +1450,61 @@ impl RuntimeCommand {
                     command: params.command,
                     wait: params.wait,
                     timeout_ms: params.timeout_ms,
+                })
+            },
+            "agent.start" => {
+                let params: AgentStartParams = parse_params(&request.params)?;
+                validate_agent_name(&params.name)?;
+                let kind = crate::ai_agents::AgentKind::parse(&params.kind).ok_or_else(|| {
+                    ApiError::invalid_params(format!("unknown agent kind {:?}", params.kind))
+                })?;
+                let session_id = params.resume_session_id;
+                let command = match session_id.as_deref() {
+                    Some(session_id) => kind.resume_command(session_id).ok_or_else(|| {
+                        ApiError::new(
+                            "agent_resume_unsupported",
+                            "the agent kind or session id does not have a verified resume command",
+                        )
+                    })?,
+                    None => kind.start_command().ok_or_else(|| {
+                        ApiError::new(
+                            "agent_launch_unsupported",
+                            format!("cold start is not verified for agent kind {:?}", kind.slug()),
+                        )
+                    })?,
+                };
+                Ok(Self::AgentStart {
+                    window_id: params.window_id,
+                    name: params.name,
+                    kind,
+                    cwd: params.cwd,
+                    session_id,
+                    command,
+                })
+            },
+            "agent.prompt" => {
+                let params: AgentPromptParams = parse_params(&request.params)?;
+                validate_agent_selector(&params.agent)?;
+                validate_prompt(&params.text)?;
+                Ok(Self::AgentPrompt {
+                    agent: params.agent,
+                    generation: params.generation,
+                    text: params.text,
+                    submit: params.submit,
+                })
+            },
+            "agent.read" => {
+                let params: AgentReadParams = parse_params(&request.params)?;
+                validate_agent_selector(&params.agent)?;
+                if params.lines == 0 || params.lines > MAX_READ_LINES {
+                    return Err(ApiError::invalid_params(format!(
+                        "lines must be between 1 and {MAX_READ_LINES}"
+                    )));
+                }
+                Ok(Self::AgentRead {
+                    agent: params.agent,
+                    generation: params.generation,
+                    lines: params.lines,
                 })
             },
             method => Err(ApiError::new(
@@ -1300,6 +1649,26 @@ pub(crate) fn validate_command_line(command: &str) -> Result<(), ApiError> {
         return Err(ApiError::invalid_params(
             "command contains control characters; pane.run accepts one plain-text shell line",
         ));
+    }
+    Ok(())
+}
+
+fn validate_agent_name(name: &str) -> Result<(), ApiError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return Err(ApiError::invalid_params("agent name must contain between 1 and 64 bytes"));
+    }
+    if trimmed != name || name.chars().any(char::is_control) {
+        return Err(ApiError::invalid_params(
+            "agent name must not have surrounding whitespace or control characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agent_selector(agent: &str) -> Result<(), ApiError> {
+    if agent.trim().is_empty() || agent.len() > 128 || agent.chars().any(char::is_control) {
+        return Err(ApiError::invalid_params("agent selector is invalid"));
     }
     Ok(())
 }
@@ -1586,6 +1955,8 @@ fn handle_connection(
         },
         "events.subscribe" => subscribe_connection(&mut stream, request, hub),
         "agents.list" => agents_connection(&mut stream, request, hub),
+        "agent.get" => agent_get_connection(&mut stream, request, hub),
+        "agent.wait" => agent_wait_connection(&mut stream, request, hub),
         "pane.wait" => wait_connection(&mut stream, request, hub),
         _ => dispatch_connection(&mut stream, request, sink, hub),
     }
@@ -1624,6 +1995,11 @@ fn runtime_description() -> Value {
             "runtime.snapshot",
             "events.subscribe",
             "agents.list",
+            "agent.start",
+            "agent.get",
+            "agent.prompt",
+            "agent.read",
+            "agent.wait",
             "window.create",
             "window.focus",
             "tab.new",
@@ -1706,6 +2082,145 @@ fn agents_connection(
         &ApiResponse::success(
             request.id,
             json!({ "revision": snapshot.revision, "agents": agents }),
+        ),
+    )
+}
+
+fn agent_get_connection(
+    stream: &mut TcpStream,
+    request: ApiRequest,
+    hub: &RuntimeHub,
+) -> Result<(), IoError> {
+    let params: AgentTargetParams = match parse_params(&request.params) {
+        Ok(params) => params,
+        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
+    };
+    if let Err(error) = validate_agent_selector(&params.agent) {
+        return write_response(stream, &ApiResponse::failure(request.id, error));
+    }
+    info!(
+        "runtime agent.get request_id={} agent={} generation={:?}",
+        request.id, params.agent, params.generation
+    );
+    let agent = match hub.managed_agent(&params.agent, params.generation, false) {
+        Ok(agent) => agent,
+        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
+    };
+    let pane = hub
+        .current()
+        .and_then(|snapshot| snapshot.pane(Some(agent.window_id), agent.pane_id).ok().cloned());
+    write_response(
+        stream,
+        &ApiResponse::success(request.id, json!({ "agent": agent, "pane": pane })),
+    )
+}
+
+fn agent_wait_connection(
+    stream: &mut TcpStream,
+    request: ApiRequest,
+    hub: &RuntimeHub,
+) -> Result<(), IoError> {
+    let params: AgentWaitParams = match parse_params(&request.params) {
+        Ok(params) => params,
+        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
+    };
+    if let Err(error) = validate_agent_selector(&params.agent) {
+        return write_response(stream, &ApiResponse::failure(request.id, error));
+    }
+    info!(
+        "runtime agent.wait request_id={} agent={} generation={} state={:?} after_seq={:?}",
+        request.id, params.agent, params.generation, params.state, params.after_seq
+    );
+    let timeout = Duration::from_millis(params.timeout_ms);
+    if timeout.is_zero() || timeout > MAX_WAIT {
+        return write_response(
+            stream,
+            &ApiResponse::failure(
+                request.id,
+                ApiError::invalid_params("timeout_ms must be between 1 and 86400000"),
+            ),
+        );
+    }
+    let agent = match hub.active_agent(&params.agent, Some(params.generation)) {
+        Ok(agent) => agent,
+        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
+    };
+    let (_, current, receiver) = hub.subscribe();
+    let deadline = Instant::now() + timeout;
+    let mut snapshot = current;
+    let mut observed = None;
+    loop {
+        if let Err(error) = hub.active_agent(&agent.agent_id, Some(agent.generation)) {
+            return write_response(stream, &ApiResponse::failure(request.id, error));
+        }
+        if let Some(current) = snapshot.take() {
+            match current.pane(Some(agent.window_id), agent.pane_id) {
+                Ok(pane) if wait_matches(pane, params.state, params.after_seq) => {
+                    let active = match hub.active_agent(&agent.agent_id, Some(agent.generation)) {
+                        Ok(active) => active,
+                        Err(error) => {
+                            return write_response(
+                                stream,
+                                &ApiResponse::failure(request.id, error),
+                            );
+                        },
+                    };
+                    return write_response(
+                        stream,
+                        &ApiResponse::success(
+                            request.id,
+                            json!({ "agent": active, "snapshot": current }),
+                        ),
+                    );
+                },
+                Ok(pane) => observed = Some((pane.task_state, pane.state_change_seq)),
+                Err(error) => {
+                    return write_response(
+                        stream,
+                        &ApiResponse::failure(
+                            request.id,
+                            ApiError::new("agent_closed", error.message).details(json!({
+                                "agent_id": agent.agent_id,
+                                "generation": agent.generation
+                            })),
+                        ),
+                    );
+                },
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(next) => snapshot = Some(next),
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => {
+                return write_response(
+                    stream,
+                    &ApiResponse::failure(
+                        request.id,
+                        ApiError::new("runtime_unavailable", "runtime subscription disconnected"),
+                    ),
+                );
+            },
+        }
+    }
+    write_response(
+        stream,
+        &ApiResponse::failure(
+            request.id,
+            ApiError::new(
+                "timeout",
+                format!("agent {:?} did not reach the requested state before timeout", agent.name),
+            )
+            .details(json!({
+                "agent_id": agent.agent_id,
+                "generation": agent.generation,
+                "after_seq": params.after_seq,
+                "observed_state": observed.map(|(state, _)| state),
+                "observed_state_change_seq": observed.map(|(_, seq)| seq)
+            })),
         ),
     )
 }
@@ -1841,15 +2356,41 @@ fn dispatch_connection(
         Ok(command) => command,
         Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
     };
-    if let RuntimeCommand::SendKey { window_id, pane_id, key, modifiers, repeat } = &command {
-        info!(
-            "runtime pane.send_key request_id={} window_id={window_id:?} pane_id={pane_id} key={} shift={} alt={} control={} repeat={repeat}",
-            request.id,
-            key.as_str(),
-            modifiers.shift,
-            modifiers.alt,
-            modifiers.control,
-        );
+    match &command {
+        RuntimeCommand::SendKey { window_id, pane_id, key, modifiers, repeat } => {
+            info!(
+                "runtime pane.send_key request_id={} window_id={window_id:?} pane_id={pane_id} key={} shift={} alt={} control={} repeat={repeat}",
+                request.id,
+                key.as_str(),
+                modifiers.shift,
+                modifiers.alt,
+                modifiers.control,
+            );
+        },
+        RuntimeCommand::AgentStart { window_id, name, kind, session_id, .. } => {
+            info!(
+                "runtime agent.start request_id={} window_id={window_id:?} name={} kind={} resume={}",
+                request.id,
+                name,
+                kind.slug(),
+                session_id.is_some()
+            );
+        },
+        RuntimeCommand::AgentPrompt { agent, generation, text, submit } => {
+            info!(
+                "runtime agent.prompt request_id={} agent={} generation={generation:?} submit={submit} prompt_bytes={}",
+                request.id,
+                agent,
+                text.len()
+            );
+        },
+        RuntimeCommand::AgentRead { agent, generation, lines } => {
+            info!(
+                "runtime agent.read request_id={} agent={} generation={generation:?} lines={lines}",
+                request.id, agent
+            );
+        },
+        _ => {},
     }
     let run_wait = match &command {
         RuntimeCommand::Run { wait: true, timeout_ms, .. } => {
@@ -1984,6 +2525,63 @@ pub fn run_cli(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             let response = request_once("agents.list", json!({ "window_id": window }), timeout)?;
             print_response(&response, options.pretty)
         },
+        CliCommand::AgentStart { window, name, kind, cwd, resume_session_id } => {
+            let response = request_once(
+                "agent.start",
+                json!({
+                    "window_id": window,
+                    "name": name,
+                    "kind": kind,
+                    "cwd": cwd,
+                    "resume_session_id": resume_session_id
+                }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::AgentGet { agent, generation } => {
+            let response = request_once(
+                "agent.get",
+                json!({ "agent": agent, "generation": generation }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::AgentPrompt { agent, generation, text, no_submit } => {
+            let response = request_once(
+                "agent.prompt",
+                json!({
+                    "agent": agent,
+                    "generation": generation,
+                    "text": text,
+                    "submit": !no_submit
+                }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::AgentRead { agent, generation, lines } => {
+            let response = request_once(
+                "agent.read",
+                json!({ "agent": agent, "generation": generation, "lines": lines }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::AgentWait { agent, generation, state, after_seq } => {
+            let response = request_once(
+                "agent.wait",
+                json!({
+                    "agent": agent,
+                    "generation": generation,
+                    "state": wait_state_name(state),
+                    "timeout_ms": timeout.as_millis() as u64,
+                    "after_seq": after_seq
+                }),
+                timeout.saturating_add(Duration::from_secs(1)),
+            )?;
+            print_response(&response, options.pretty)
+        },
         CliCommand::Subscribe { since } => subscribe_cli(since, timeout),
         CliCommand::NewWindow => {
             let response = request_once("window.create", json!({}), timeout)?;
@@ -2108,15 +2706,7 @@ fn wait_cli(
     timeout: Duration,
     pretty: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let state = match state {
-        ControlWaitState::Idle => "idle",
-        ControlWaitState::Running => "running",
-        ControlWaitState::WaitingInput => "waiting_input",
-        ControlWaitState::Attention => "attention",
-        ControlWaitState::Finished => "finished",
-        ControlWaitState::Failed => "failed",
-        ControlWaitState::Settled => "settled",
-    };
+    let state = wait_state_name(state);
     let response = request_once(
         "pane.wait",
         json!({
@@ -2129,6 +2719,18 @@ fn wait_cli(
         timeout.saturating_add(Duration::from_secs(1)),
     )?;
     print_response(&response, pretty)
+}
+
+fn wait_state_name(state: ControlWaitState) -> &'static str {
+    match state {
+        ControlWaitState::Idle => "idle",
+        ControlWaitState::Running => "running",
+        ControlWaitState::WaitingInput => "waiting_input",
+        ControlWaitState::Attention => "attention",
+        ControlWaitState::Finished => "finished",
+        ControlWaitState::Failed => "failed",
+        ControlWaitState::Settled => "settled",
+    }
 }
 
 fn subscribe_cli(since: Option<u64>, timeout: Duration) -> Result<(), Box<dyn Error>> {
@@ -2211,6 +2813,20 @@ mod tests {
         )
     }
 
+    fn detected_agent(kind: &str, session_id: Option<&str>) -> RuntimeAgent {
+        RuntimeAgent {
+            agent_id: None,
+            generation: None,
+            name: None,
+            kind: kind.to_owned(),
+            display_name: kind.to_owned(),
+            session_id: session_id.map(str::to_owned),
+            state_source: RuntimeAgentStateSource::Hook,
+            state_rule: None,
+            hook_seen: true,
+        }
+    }
+
     #[test]
     fn hub_revisions_change_only_when_semantic_state_changes() {
         let hub = RuntimeHub::new();
@@ -2237,6 +2853,130 @@ mod tests {
         assert!(validate_prompt("please inspect the build").is_ok());
         assert!(validate_prompt("unsafe\u{1b}[2J").is_err());
         assert!(validate_prompt("two\nlines").is_err());
+    }
+
+    #[test]
+    fn agent_start_exposes_only_verified_launch_contracts() {
+        let cold = ApiRequest::new(
+            "token".into(),
+            "agent.start",
+            json!({ "name": "reviewer", "kind": "codex" }),
+        );
+        assert!(matches!(
+            RuntimeCommand::from_request(&cold),
+            Ok(RuntimeCommand::AgentStart {
+                kind: crate::ai_agents::AgentKind::Codex,
+                session_id: None,
+                ref command,
+                ..
+            }) if command == "codex"
+        ));
+
+        let unsupported = ApiRequest::new(
+            "token".into(),
+            "agent.start",
+            json!({ "name": "reviewer", "kind": "gemini" }),
+        );
+        assert_eq!(
+            RuntimeCommand::from_request(&unsupported).unwrap_err().code,
+            "agent_launch_unsupported"
+        );
+
+        let invalid_resume = ApiRequest::new(
+            "token".into(),
+            "agent.start",
+            json!({
+                "name": "reviewer",
+                "kind": "codex",
+                "resume_session_id": "thread; calc"
+            }),
+        );
+        assert_eq!(
+            RuntimeCommand::from_request(&invalid_resume).unwrap_err().code,
+            "agent_resume_unsupported"
+        );
+    }
+
+    #[test]
+    fn managed_agent_names_are_unique_and_generations_are_stable() {
+        let hub = RuntimeHub::new();
+        let first = hub
+            .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 3, None)
+            .unwrap();
+        assert_eq!(first.generation, 1);
+        assert_eq!(
+            hub.ensure_agent_name_available("reviewer").unwrap_err().code,
+            "agent_name_conflict"
+        );
+
+        hub.close_agent(&first.agent_id, "agent_exited");
+        let closed = hub.managed_agent("reviewer", Some(1), false).unwrap();
+        assert!(!closed.active);
+        assert_eq!(closed.closed_reason.as_deref(), Some("agent_exited"));
+
+        let second = hub
+            .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 4, None)
+            .unwrap();
+        assert_eq!(second.generation, 2);
+        assert_eq!(hub.active_agent("reviewer", Some(1)).unwrap_err().code, "agent_closed");
+        assert_eq!(
+            hub.active_agent("reviewer", Some(99)).unwrap_err().code,
+            "agent_identity_mismatch"
+        );
+    }
+
+    #[test]
+    fn closing_an_agent_wakes_identity_aware_waiters() {
+        let hub = RuntimeHub::new();
+        let agent = hub
+            .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 3, None)
+            .unwrap();
+        hub.publish(snapshot(RuntimeTaskState::Idle));
+        let (_, _, receiver) = hub.subscribe();
+
+        hub.close_agent(&agent.agent_id, "pane_closed");
+        let wake = receiver.recv_timeout(Duration::from_millis(50)).unwrap();
+        assert_eq!(wake.revision, 1);
+        assert_eq!(
+            hub.active_agent(&agent.agent_id, Some(agent.generation)).unwrap_err().code,
+            "agent_closed"
+        );
+    }
+
+    #[test]
+    fn managed_identity_requires_real_agent_and_session_evidence() {
+        let hub = RuntimeHub::new();
+        let managed = hub
+            .register_agent(
+                "reviewer".into(),
+                crate::ai_agents::AgentKind::Codex,
+                7,
+                3,
+                Some("thread-1".into()),
+            )
+            .unwrap();
+
+        let no_evidence = hub.publish(snapshot(RuntimeTaskState::Running));
+        assert!(no_evidence.pane(Some(7), 3).unwrap().agent.is_none());
+        assert!(!hub.managed_agent(&managed.agent_id, None, false).unwrap().observed);
+
+        let mut observed = snapshot(RuntimeTaskState::Running);
+        observed.windows[0].tabs[0].panes[0].agent =
+            Some(detected_agent("codex", Some("thread-1")));
+        let projected = hub.publish(observed);
+        let projected_agent = projected.pane(Some(7), 3).unwrap().agent.as_ref().unwrap();
+        assert_eq!(projected_agent.agent_id.as_deref(), Some(managed.agent_id.as_str()));
+        assert_eq!(projected_agent.generation, Some(1));
+        assert_eq!(projected_agent.name.as_deref(), Some("reviewer"));
+
+        let mut replacement = snapshot(RuntimeTaskState::Running);
+        replacement.windows[0].tabs[0].panes[0].agent =
+            Some(detected_agent("codex", Some("thread-2")));
+        let replacement = hub.publish(replacement);
+        assert!(replacement.pane(Some(7), 3).unwrap().agent.as_ref().unwrap().agent_id.is_none());
+        let closed = hub.managed_agent(&managed.agent_id, None, false).unwrap();
+        assert!(!closed.active);
+        assert_eq!(closed.closed_reason.as_deref(), Some("agent_replaced"));
     }
 
     #[test]
@@ -2414,6 +3154,9 @@ mod tests {
     fn agents_list_projection_keeps_window_and_tab_identity() {
         let mut snapshot = snapshot(RuntimeTaskState::Attention);
         snapshot.windows[0].tabs[0].panes[0].agent = Some(RuntimeAgent {
+            agent_id: None,
+            generation: None,
+            name: None,
             kind: "codex".into(),
             display_name: "Codex".into(),
             session_id: Some("thread-7".into()),

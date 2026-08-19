@@ -400,6 +400,57 @@ pub enum ControlCommand {
         #[clap(long)]
         window: Option<u64>,
     },
+    /// Start a verified AI CLI in a new terminal tab and assign a stable name.
+    AgentStart {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        name: String,
+        #[clap(long)]
+        kind: String,
+        #[clap(long)]
+        cwd: Option<PathBuf>,
+        #[clap(long)]
+        resume_session_id: Option<String>,
+    },
+    /// Resolve one managed agent by stable id or active name.
+    AgentGet {
+        #[clap(long)]
+        agent: String,
+        #[clap(long)]
+        generation: Option<u64>,
+    },
+    /// Send one plain-text prompt to a managed agent.
+    AgentPrompt {
+        #[clap(long)]
+        agent: String,
+        #[clap(long)]
+        generation: Option<u64>,
+        #[clap(long)]
+        text: String,
+        #[clap(long)]
+        no_submit: bool,
+    },
+    /// Read the terminal-buffer tail owned by a managed agent.
+    AgentRead {
+        #[clap(long)]
+        agent: String,
+        #[clap(long)]
+        generation: Option<u64>,
+        #[clap(long, default_value_t = crate::runtime_api::DEFAULT_READ_LINES)]
+        lines: usize,
+    },
+    /// Wait for the same managed-agent generation to reach a semantic state.
+    AgentWait {
+        #[clap(long)]
+        agent: String,
+        #[clap(long)]
+        generation: u64,
+        #[clap(long, value_enum, default_value = "settled")]
+        state: ControlWaitState,
+        #[clap(long)]
+        after_seq: Option<u64>,
+    },
     /// Stream state snapshots whenever their semantic content changes.
     Subscribe {
         /// Resume after this revision; the current snapshot is sent when newer.

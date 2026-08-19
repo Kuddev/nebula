@@ -169,6 +169,9 @@ impl WindowContext {
             ));
         };
         let pane = &mut self.panes[index];
+        if submit {
+            pane.nebula_state.last_committed.clone_from(&text);
+        }
         pane.notifier.notify(text.into_bytes());
         if submit {
             pane.notifier.notify(vec![b'\r']);
@@ -287,6 +290,25 @@ impl WindowContext {
         self.display.window.request_redraw();
         Ok(run_id)
     }
+
+    pub(crate) fn runtime_set_tab_name(
+        &mut self,
+        pane_id: u64,
+        name: String,
+    ) -> Result<(), ApiError> {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| {
+            let mut ids = Vec::new();
+            tab.layout.leaves(&mut ids);
+            ids.contains(&pane_id)
+        }) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to a terminal tab"),
+            ));
+        };
+        tab.custom_name = Some(name);
+        Ok(())
+    }
 }
 
 fn runtime_agent(pane: &super::Pane) -> Option<RuntimeAgent> {
@@ -304,6 +326,9 @@ fn runtime_agent(pane: &super::Pane) -> Option<RuntimeAgent> {
         | crate::ai_agents::AgentStatusSource::Unknown => RuntimeAgentStateSource::Process,
     };
     Some(RuntimeAgent {
+        agent_id: None,
+        generation: None,
+        name: None,
         kind: kind.slug().to_owned(),
         display_name: kind.display_name().to_owned(),
         session_id: state.ai_session.as_ref().map(|identity| identity.session_id.clone()),

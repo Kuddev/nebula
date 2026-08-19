@@ -221,6 +221,17 @@ impl AgentKind {
         })
     }
 
+    /// Cold-start commands whose interactive CLI spelling is verified by the
+    /// existing Nebula integrations. Unsupported clients must not be guessed
+    /// from their detection slug.
+    pub fn start_command(self) -> Option<String> {
+        match self {
+            Self::Claude => Some("claude".to_owned()),
+            Self::Codex => Some("codex".to_owned()),
+            _ => None,
+        }
+    }
+
     /// Shell-safe fork command for clients with a verified fork syntax.
     pub fn fork_command(self, session_id: &str) -> Option<String> {
         valid_session_id(session_id)?;
@@ -595,6 +606,9 @@ mod tests {
 
     #[test]
     fn commands_are_exact_and_injection_safe() {
+        assert_eq!(AgentKind::Claude.start_command().as_deref(), Some("claude"));
+        assert_eq!(AgentKind::Codex.start_command().as_deref(), Some("codex"));
+        assert_eq!(AgentKind::Gemini.start_command(), None);
         assert_eq!(
             AgentKind::Claude.resume_command("abc-123").as_deref(),
             Some("claude --resume abc-123")
