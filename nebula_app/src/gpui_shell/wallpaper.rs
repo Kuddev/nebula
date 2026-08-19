@@ -158,58 +158,55 @@ pub fn chrome_surface_opacity(cx: &App) -> f32 {
     alpha
 }
 
-/// 开窗参数用。Windows 上必须一开始就声明 Transparent：GPUI 创建后再
-/// 改 appearance，合成器往往不补 alpha 通道，后开的模糊/铺满壁纸会失效。
+/// 开窗参数用。Windows 上必须一开始就声明最终外观：GPUI 创建后再改
+/// appearance，合成器往往不补 alpha 通道，后开的模糊/铺满壁纸会失效。
 pub fn initial_background_appearance() -> WindowBackgroundAppearance {
-    WindowBackgroundAppearance::Transparent
+    background_appearance(nebula_settings::RuntimeSettings::load().blur)
 }
 
-/// 把窗口层效果应用到所有窗口：gpui 背景外观（alpha 合成通道）+
-/// DWM 系统 backdrop（真正的模糊；旧壳同款，关闭写 NONE 不写 AUTO）。
+/// `blur` 开关 → GPUI 窗口外观。
+///
+/// **这里是模糊此前完全无效的根因。** GPUI 的 Windows 后端不走 DWM 系统
+/// backdrop，而是未文档化的 `SetWindowCompositionAttribute` ACCENT_POLICY
+/// （fork 内 `platform/windows/window.rs::set_background_appearance`）：
+///
+/// | appearance    | accent state                      | 实际效果         |
+/// | ------------- | --------------------------------- | ---------------- |
+/// | `Opaque`      | ACCENT_DISABLED                   | 不透明           |
+/// | `Transparent` | ACCENT_ENABLE_TRANSPARENTGRADIENT | **只透明，不模糊** |
+/// | `Blurred`     | ACCENT_ENABLE_ACRYLICBLURBEHIND   | 真正的亚克力模糊 |
+///
+/// accent policy 一旦生效就接管窗口合成，旧壳那三行
+/// `DWMWA_SYSTEMBACKDROP_TYPE` 会被它压掉。此前本模块无论开关都恒设
+/// `Transparent`，于是用户拉低透明度只看到「透出了桌面但没有一点模糊」
+/// —— 正是 TRANSPARENTGRADIENT 的行为，不是设置没生效。
+fn background_appearance(blur: bool) -> WindowBackgroundAppearance {
+    if blur {
+        WindowBackgroundAppearance::Blurred
+    } else {
+        WindowBackgroundAppearance::Transparent
+    }
+}
+
+/// 把窗口层效果应用到所有窗口。
+///
+/// 模糊只走 accent policy 一条路。**不再叠加 DWM `DWMWA_SYSTEMBACKDROP_TYPE`**：
+/// 旧壳靠它拿 acrylic，但 GPUI 的 accent policy 会接管合成，两套同时写只会
+/// 让 DWM 的内部状态含混——实测表现是模糊打开正常、关闭却关不掉。
+///
+/// 关闭那一步还要先写一次 `Opaque`（ACCENT_DISABLED）：Win11 的 DWM 缓存
+/// acrylic 合成层，从 ACRYLICBLURBEHIND 直接切到 TRANSPARENTGRADIENT 时模糊
+/// 往往留在原地。先把 accent policy 整个撤掉，再写目标外观，DWM 才会重建。
 fn apply_window_effects(cx: &mut App) {
     let blur = cx.try_global::<VisualEffects>().map(|v| v.blur).unwrap_or(false);
-    let appearance = WindowBackgroundAppearance::Transparent;
+    let appearance = background_appearance(blur);
     for handle in cx.windows() {
         let _ = handle.update(cx, |_, window, _| {
+            window.set_background_appearance(WindowBackgroundAppearance::Opaque);
             window.set_background_appearance(appearance);
-            apply_dwm_backdrop(window, blur);
         });
     }
 }
-
-/// 旧壳 `apply_windows_backdrop` 的 gpui 版：Win11 22621+ 的系统级
-/// acrylic（TRANSIENT），低版本上调用失败自动退化为纯 alpha。
-#[cfg(windows)]
-fn apply_dwm_backdrop(window: &Window, enabled: bool) {
-    use windows_sys::Win32::Graphics::Dwm::{
-        DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DwmSetWindowAttribute,
-    };
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    // 显式走 trait 方法：`Window` 自带的固有方法 `window_handle()`
-    // 返回的是 gpui 的 AnyWindowHandle，会遮蔽同名 trait 方法。
-    let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
-    };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-        return;
-    };
-    let hwnd = handle.hwnd.get() as *mut core::ffi::c_void;
-
-    // 关掉时写 NONE 而不是 AUTO：AUTO 把决定权交还系统，"关闭"会没反应。
-    let backdrop: i32 = if enabled { DWMSBT_TRANSIENTWINDOW } else { DWMSBT_NONE };
-    unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE as u32,
-            &backdrop as *const _ as *const core::ffi::c_void,
-            size_of::<i32>() as u32,
-        );
-    }
-}
-
-#[cfg(not(windows))]
-fn apply_dwm_backdrop(_window: &Window, _enabled: bool) {}
 
 /// 解码壁纸：RGBA8 → 把图片透明度烘进 alpha → BGRA（gpui 图像帧的
 /// 通道序，zed 的图片资产装载器同款处理）。

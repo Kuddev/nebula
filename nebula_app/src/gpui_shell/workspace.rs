@@ -3854,6 +3854,10 @@ impl NebulaWorkspace {
         // 折叠只裁剪槽位，不改窗口算法：旧壳 `tabs_avail` 与 `tabs_open`
         // 分开——折起来时行矩形为零，但可用高度仍按面板剩余算。
         let (tabs_scroll, tabs_show) = self.tabs_visible_window();
+        // 行的确定宽度：侧栏宽 − 侧栏 p_2 两边 − 列表右侧滚动条留白。
+        // 与下面 `label_avail` 同一份减法口径，两者不能各算一套。
+        let row_w =
+            (self.sidebar_width - 16.0 - tab_scroll::TAB_SCROLL_GUTTER).max(1.0);
         let items = (0..self.tabs.len())
             .filter(|&ix| tab_scroll::index_visible(ix, tabs_scroll, tabs_show))
             .map(|ix| {
@@ -3907,12 +3911,13 @@ impl NebulaWorkspace {
                 .then(|| self.meta(ix).shell_tag)
                 .flatten()
                 .filter(|tag| !tag.is_empty());
-            // 可用列数 = （侧栏宽 − 外层 p_2 − 行内 px_2 − 行内 gap − 状态槽
-            // − 行首图标槽）÷ cell 宽。省略号由旧壳同一份 `truncate_tab_label`
-            // 追加，两壳的裁切位置因此一致。
+            // 可用列数 = （行宽 − 行内 px_2 − 行内 gap − 状态槽 − 行首图标槽）
+            // ÷ cell 宽。基准取上面的 `row_w`（已扣掉侧栏 p_2 与滚动条留白），
+            // 与行的实际宽度同源——否则算出的列数会比行能容纳的多出一格，
+            // 截断后的标题反过来把行撑开。省略号由旧壳同一份
+            // `truncate_tab_label` 追加，两壳的裁切位置因此一致。
             let has_icon = is_settings || logo_image.is_some() || program_glyph.is_some();
-            let label_avail = self.sidebar_width
-                - 16.0
+            let label_avail = row_w
                 - 16.0
                 - TAB_STATUS_SLOT_W
                 - 8.0
@@ -3986,9 +3991,18 @@ impl NebulaWorkspace {
                 .id(("sidebar-tab", ix))
                 .group(hover_group.clone())
                 .relative()
-                // 旧壳 `layout.tabs[i]` 的命中矩形覆盖整条可见行。显式全宽
-                // 避免内容较短时 flex 项按内容收缩，导致右侧空白点击不到。
-                .w_full()
+                // 旧壳 `layout.tabs[i]` 的命中矩形覆盖整条可见行。
+                //
+                // 这里必须是**显式像素宽**，不能用 `w_full`：行在
+                // `tab_scroll::wrap_tabs_scroll_list` 的 overflow_hidden 容器
+                // 里，百分比宽度到不了这一层，会回落成 shrink-to-fit——表现
+                // 就是行宽跟着文件名长短变，带图标的行还整体右移一个图标宽
+                // （用户 08-19 报的侧栏 tab 宽度乱跳）。双击重命名"看起来正常"
+                // 只是因为 Input 恰好把容器撑满，不是宽度真的对了。
+                .w(px(row_w))
+                // 内容再宽也不许把行撑开：截断后的标题若比测量值宽一两像素，
+                // 撑开的行会重新引入上面那个症状。
+                .overflow_hidden()
                 .gap_2()
                 .px_2()
                 .h(px(TAB_ROW_H))

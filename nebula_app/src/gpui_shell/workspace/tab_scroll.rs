@@ -19,7 +19,7 @@ use super::{NebulaWorkspace, TAB_ROW_H, TAB_ROW_PITCH};
 /// 行间距（pitch − 行高）。旧壳 `gap = s(8)`。
 const TAB_ROW_GAP: f32 = TAB_ROW_PITCH - TAB_ROW_H;
 /// 旧壳 `tab_right_pad`：给覆盖式滚动条留的恒定沟槽，出现与否都不改行宽。
-const TAB_SCROLL_GUTTER: f32 = 9.0;
+pub(super) const TAB_SCROLL_GUTTER: f32 = 9.0;
 
 /// n 行占的高度：间距只在行之间，末行后面不留。
 pub(super) fn rows_h(n: usize, pitch: f32, gap: f32) -> f32 {

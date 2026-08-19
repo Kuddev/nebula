@@ -138,6 +138,19 @@ winit = { path = "third_party/winit-0.30.13" }
 #      <a><img/></a> 链接徽章不再整个丢失（图片转移并挂 link）。除
 #      image_base 外全部是 GitHub 语义对齐的纯 bug 修，上游 PR 候选，合并
 #      即撤。
+#   4. Input 水平滚动回不到行首（input/element.rs，光标越出左边界的分支）：
+#      原式 `scroll_offset.x - cursor_pos.x` 没有解方程，而是把当前偏移再减
+#      一次光标位置，于是光标每次往左移动内容反而更往左跑，长值永远滑不到
+#      开头（用户 08-19 在 tab 重命名框上报）。改成 `-cursor_pos.x`，与右
+#      边界分支同样的解法，也与同函数 is_selected_all 分支里既有的正确写法
+#      一致。纯 bug 修，上游 PR 候选，合并即撤。
+#   5. Input 拖选缺自动滚动（input/state.rs，新增 autoscroll_for_drag）：
+#      index_for_mouse_position 把「鼠标到内容原点的距离」换算成字符下标，而
+#      内容原点已含滚动偏移，于是要选到更前面的字符就得把鼠标再往可视框左边
+#      挪同样多的像素——输入框贴在侧栏左侧时根本没这段空间（撞屏幕边），长
+#      文本永远拖不到开头。改为越界即按越出距离推进滚动（复用既有的
+#      update_scroll_offset，边界 clamp 现成）。补丁 4 修的是键盘移动那条路，
+#      这条修的是鼠标拖选，两者都要。上游 PR 候选，合并即撤。
 #
 # ⚠ 临时状态：gpui-component 走本地 path patch（nebula-math 分支工作树），
 # 便于数学补丁的本地迭代；验收后 push 到 Kuddev/gpui-component 并恢复

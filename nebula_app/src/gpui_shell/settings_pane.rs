@@ -185,6 +185,13 @@ struct ShellSelectItem {
     row_image: Option<Arc<RenderImage>>,
 }
 
+/// 下拉首行那条「导入终端目录」动作行的哨兵 id。
+///
+/// 它不是任何真实 shell：选中只触发目录扫描，绝不会写进 `shell` 设置。
+/// 取这个形状是因为 `shell_detect` 的 id 全是普通标识符（`pwsh`、`cmd`、
+/// `wsl:<distro>`、`profile:<家族>|<id>`），双下划线包裹不可能与之相撞。
+const SHELL_IMPORT_ACTION_ID: &str = "__nebula_import_terminal_dir__";
+
 #[derive(Clone, Debug, Default)]
 enum AboutUpdateState {
     #[default]
@@ -206,6 +213,20 @@ impl ShellSelectItem {
         Self { id, name: name.into(), closed_image, row_image }
     }
 
+    /// 置顶的导入行。没有品牌贴图，[`Self::view`] 会给它文件夹图标。
+    fn import_action() -> Self {
+        Self {
+            id: SHELL_IMPORT_ACTION_ID.to_owned(),
+            name: "导入终端目录…".into(),
+            closed_image: None,
+            row_image: None,
+        }
+    }
+
+    fn is_import_action(&self) -> bool {
+        self.id == SHELL_IMPORT_ACTION_ID
+    }
+
     fn view(&self, size: f32, image: Option<&Arc<RenderImage>>) -> gpui::AnyElement {
         let icon: gpui::AnyElement = if let Some(image) = image {
             gpui::StyledImage::object_fit(
@@ -213,6 +234,9 @@ impl ShellSelectItem {
                 gpui::ObjectFit::Contain,
             )
             .into_any_element()
+        } else if self.is_import_action() {
+            // 动作行与真实 shell 行必须一眼分得开：文件夹口 = 「去别处拿」。
+            Icon::new(IconName::FolderOpen).xsmall().into_any_element()
         } else {
             Icon::new(IconName::SquareTerminal).xsmall().into_any_element()
         };
@@ -223,6 +247,72 @@ impl ShellSelectItem {
             .child(div().flex_1().min_w_0().child(self.name.clone()))
             .into_any_element()
     }
+}
+
+/// 默认 Shell 下拉的全部候选，以及应当选中的行号。
+///
+/// 顺序 = 置顶导入行 → 已安装 shell（`detect_shells` 菜单序）→ 用户导入的
+/// 终端 profile。导入项以 `profile:<家族>|<id>` 作设置值（[`Profile::settings_id`]
+/// 同一形状），品牌图标因此仍能按家族查到。
+fn shell_select_items(current: &str, scale_factor: f32) -> (Vec<ShellSelectItem>, usize) {
+    let mut items: Vec<ShellSelectItem> = crate::shell_detect::detect_shells()
+        .into_iter()
+        .map(|shell| ShellSelectItem::new(shell.id, shell.name, scale_factor))
+        .collect();
+    if items.is_empty() {
+        // 非 Windows 构建不做安装探测，但历史配置仍支持这两个由 PTY
+        // 集成层负责启动的稳定 id，设置页不能因此变成空下拉。
+        items = vec![
+            ShellSelectItem::new("powershell".into(), "PowerShell".into(), scale_factor),
+            ShellSelectItem::new("bash".into(), "Git Bash".into(), scale_factor),
+        ];
+    }
+    // 导入的终端目录：`merge_terminal_profiles` 已把它们并进配置的 profile
+    // 列表，这里让设置页也能直接选为默认 Shell——否则导入完看不见结果。
+    if let Ok(store) = crate::terminal_profiles::TerminalProfiles::load() {
+        for profile in store.as_config_profiles() {
+            let Some(id) = profile.settings_id() else { continue };
+            if items.iter().any(|item| item.id == id) {
+                continue;
+            }
+            items.push(ShellSelectItem::new(id, profile.name, scale_factor));
+        }
+    }
+    if !items.iter().any(|item| item.id == current) {
+        // 检测结果可能暂时找不到已保存的 WSL/profile id；先把它保留在首位，
+        // 用户仍可看到并重新选择，下一次检测恢复后不会丢失持久化值。
+        items.insert(
+            0,
+            ShellSelectItem::new(
+                current.to_owned(),
+                crate::shell_detect::display_name_for_id(current).to_owned(),
+                scale_factor,
+            ),
+        );
+    }
+    let selected = items.iter().position(|item| item.id == current).unwrap_or(0);
+    // 导入行最后才插到首位：它不参与选中判定，所以选中行号整体后移一位。
+    items.insert(0, ShellSelectItem::import_action());
+    (items, selected + 1)
+}
+
+/// 扫描目录并落盘（阻塞 IO，调用方须放后台执行器）。
+/// 逻辑与旧壳 `Display::import_terminal_directory` 逐句对齐，只是把 toast
+/// 换成 `Result`，由 UI 线程决定怎么呈现。
+fn import_terminal_directory_blocking(directory: &std::path::Path) -> Result<usize, String> {
+    let found = crate::terminal_profiles::scan_directory(directory)
+        .map_err(|error| format!("无法扫描终端目录：{error}"))?;
+    if found.is_empty() {
+        return Err("目录中未找到受支持的终端程序".to_owned());
+    }
+    let mut profiles = crate::terminal_profiles::TerminalProfiles::load()
+        .map_err(|error| format!("无法读取终端配置：{error}"))?;
+    let count = found.len();
+    for profile in found {
+        profiles.upsert(profile).map_err(|error| format!("无法导入终端：{error}"))?;
+    }
+    profiles.save().map_err(|error| format!("无法保存终端配置：{error}"))?;
+    Ok(count)
 }
 
 impl SelectItem for ShellSelectItem {
@@ -534,32 +624,7 @@ impl SettingsPane {
         // 选项 = 彩色品牌 PNG（extra/shell-icons，与旧壳设置页/命令面板同
         // 一批资产）+ 名称，闭态与下拉同源（SelectItem::display_title/render）。
         let shell_icon_scale = window.scale_factor().max(0.5);
-        let detected = crate::shell_detect::detect_shells();
-        let mut shell_items: Vec<ShellSelectItem> = detected
-            .into_iter()
-            .map(|shell| ShellSelectItem::new(shell.id, shell.name, shell_icon_scale))
-            .collect();
-        if shell_items.is_empty() {
-            // 非 Windows 构建不做安装探测，但历史配置仍支持这两个由 PTY
-            // 集成层负责启动的稳定 id，设置页不能因此变成空下拉。
-            shell_items = vec![
-                ShellSelectItem::new("powershell".into(), "PowerShell".into(), shell_icon_scale),
-                ShellSelectItem::new("bash".into(), "Git Bash".into(), shell_icon_scale),
-            ];
-        }
-        if !shell_items.iter().any(|item| item.id == shell_current) {
-            // 检测结果可能暂时找不到已保存的 WSL/profile id；先把它保留在首位，
-            // 用户仍可看到并重新选择，下一次检测恢复后不会丢失持久化值。
-            shell_items.insert(
-                0,
-                ShellSelectItem::new(
-                    shell_current.clone(),
-                    crate::shell_detect::display_name_for_id(&shell_current).to_owned(),
-                    shell_icon_scale,
-                ),
-            );
-        }
-        let shell_index = shell_items.iter().position(|item| item.id == shell_current).unwrap_or(0);
+        let (shell_items, shell_index) = shell_select_items(&shell_current, shell_icon_scale);
         let shell_select = cx.new(|cx| {
             SelectState::new(shell_items, Some(IndexPath::default().row(shell_index)), window, cx)
         });
@@ -569,10 +634,15 @@ impl SettingsPane {
             move |this: &mut Self,
                   _entity: &SharedShellSelect,
                   event: &SelectEvent<Vec<ShellSelectItem>>,
-                  _window: &mut Window,
+                  window: &mut Window,
                   cx: &mut Context<Self>| {
                 if let SelectEvent::Confirm(Some(id)) = event {
-                    this.persist(&[("shell", id.clone())], cx);
+                    // 置顶那行是动作不是选项：走导入流程，且不落盘。
+                    if id == SHELL_IMPORT_ACTION_ID {
+                        this.import_terminal_directory(window, cx);
+                    } else {
+                        this.persist(&[("shell", id.clone())], cx);
+                    }
                 }
             },
         ));
@@ -1086,6 +1156,83 @@ impl SettingsPane {
         self.font_notice = None;
         self.close_font_picker(window, true, cx);
         self.persist(&[("font_family", next)], cx);
+    }
+
+    /// 「导入终端目录…」：选目录 → 后台扫描落盘 → 刷新下拉。
+    ///
+    /// 对齐旧壳 `Display::import_terminal_directory`。扫描要遍历目录并读每个
+    /// 候选 exe 的 PE 头判架构，放 UI 线程会卡住整窗，因此下沉到后台执行器。
+    fn import_terminal_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 用户点的是动作行，不是换 shell：先把闭态标题拨回真正生效的那项，
+        // 否则扫描期间下拉会显示「导入终端目录…」，像是默认 shell 被改掉了。
+        self.restore_shell_selection(window, cx);
+
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择终端安装目录".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(directory) = paths.into_iter().next() else { return };
+            let outcome = cx
+                .background_spawn(async move { import_terminal_directory_blocking(&directory) })
+                .await;
+            let _ = this.update_in(cx, |pane, window, cx| {
+                pane.finish_terminal_import(outcome, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// 导入收尾：提示结果，成功则重建候选并广播配置变更。
+    fn finish_terminal_import(
+        &mut self,
+        outcome: Result<usize, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match outcome {
+            Ok(count) => {
+                crate::gpui_shell::toast::toast(
+                    window,
+                    cx,
+                    crate::display::ToastKind::Success,
+                    format!("已导入 {count} 个终端，立即可用"),
+                );
+                self.refresh_shell_items(window, cx);
+                // 新 profile 要进新建终端菜单/命令面板，让宿主重读配置。
+                cx.emit(SettingsPaneEvent::Changed);
+                cx.notify();
+            },
+            Err(message) => {
+                crate::gpui_shell::toast::toast(
+                    window,
+                    cx,
+                    crate::display::ToastKind::Warning,
+                    message,
+                );
+            },
+        }
+    }
+
+    /// 按当前设置值重建下拉候选（导入后新增行即时可见）。
+    fn refresh_shell_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.runtime.shell.clone().unwrap_or_else(|| "powershell".into());
+        let (items, selected) = shell_select_items(&current, window.scale_factor().max(0.5));
+        self.shell_select.update(cx, |state, cx| {
+            state.set_items(items, window, cx);
+            state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
+        });
+    }
+
+    /// 把下拉选中项拨回设置里真正生效的 shell。
+    fn restore_shell_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.runtime.shell.clone().unwrap_or_else(|| "powershell".into());
+        self.shell_select.update(cx, |state, cx| {
+            state.set_selected_value(&current, window, cx);
+        });
     }
 
     #[cfg(windows)]

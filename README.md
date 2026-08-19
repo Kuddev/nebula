@@ -138,15 +138,33 @@ experience that works without extra setup.
   `$env:KEY=value` assignments are auto-quoted, `ls` gets colors and
   clickable OSC 8 hyperlinks.
 
+**Markdown that renders like GitHub**
+
+<p align="center">
+  <img src="docs/screenshots/markdown-document.png" alt="Nebula rendering its own README: centred logo, badge row, and an embedded screenshot" width="920" />
+</p>
+
+- **Markdown/GFM document tabs** — open Markdown, JSON, and plain-text files
+  directly from the file drawer with headings, lists, tables, code blocks,
+  links, quotes, word wrapping, and virtualized scrolling.
+- **Images from anywhere** — remote `http(s)` URLs, `data:` URIs, absolute
+  paths, and paths relative to the document all resolve, so badge rows, logos,
+  and embedded screenshots land exactly where the file puts them. The
+  screenshot above is Nebula rendering its own README.
+- **The HTML that real READMEs use** — `<p align="center">` centres its
+  content, several `<img>` badges in one paragraph stay on a single row instead
+  of breaking into separate blocks, `<br/>` breaks in document order, and
+  `<a><img/></a>` link badges survive as clickable images.
+- **CJK-correct soft wraps** — CommonMark soft line breaks join as spaces, but
+  adjacent CJK characters join directly, so Chinese paragraphs don't pick up
+  the stray gaps other viewers insert.
+
 **Documents & native mathematics**
 
 <p align="center">
   <img src="docs/screenshots/native-math-rendering.png" alt="Native mathematics rendered in a Nebula Markdown document" width="920" />
 </p>
 
-- **Markdown/GFM document tabs** — open Markdown, JSON, and plain-text files
-  directly from the file drawer with headings, lists, tables, code blocks,
-  links, quotes, word wrapping, and virtualized scrolling.
 - **Native TeX mathematics** — inline `$...$` and display `$$...$$` formulas
   are parsed and laid out entirely in Rust, then drawn through cached Latin
   Modern Math glyphs and GPU rule quads. Fractions, radicals, scripts, limits,
@@ -226,7 +244,7 @@ Windows/Linux paths, arrays, modules, and reload behavior.
 | --- | --- |
 | Language | Rust (2024 edition) |
 | Rendering | OpenGL / OpenGL ES 2.0+, custom glyph & UI quad renderers |
-| Terminal core | GPU-resident grid + VTE escape-sequence parsing |
+| Terminal core | GPU-resident grid + VTE escape-sequence parsing, on an Alacritty-derived foundation |
 | Session model | Resident mux process, loopback attach protocol |
 | Shell integration | PowerShell + PSReadLine, Git Bash; OSC 7/8/9/133/1337 |
 | Document math | pulldown-cmark + pulldown-latex + OpenType MATH (Latin Modern Math) |
@@ -243,6 +261,12 @@ Questions and feedback: [fickleheartedkeys@163.com](mailto:fickleheartedkeys@163
 
 ### 🙏 Acknowledgements
 
+Nebula's terminal core — the grid, the VTE escape-sequence parsing, and the PTY
+plumbing — is derived from
+**[Alacritty](https://github.com/alacritty/alacritty)**, a masterpiece of
+terminal engineering. Sincere thanks to its maintainers and contributors;
+Nebula would not exist without their work.
+
 Nebula's shell is built on **[GPUI](https://github.com/zed-industries/zed)** — the
 GPU-accelerated UI framework developed by the [Zed](https://zed.dev) team — together with
 **[gpui-component](https://github.com/longbridge/gpui-component)** from
@@ -254,6 +278,11 @@ look the way it does without it.
 ### 📜 License
 
 Released under the [GNU General Public License v3.0](LICENSE).
+
+Parts of Nebula are derived from upstream open-source projects; their original
+license and copyright notices are preserved in
+[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES). The work as a whole is distributed
+under GPL-3.0.
 
 ---
 
@@ -338,14 +367,29 @@ Nebula 是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU
 - **顺手的小修正** — 不带引号的 `cd D:/Program Files` 直接可用，裸
   `$env:KEY=value` 自动加引号，`ls` 带颜色和可点击的 OSC 8 超链接。
 
+**Markdown 解析：照着 GitHub 的样子显示**
+
+<p align="center">
+  <img src="docs/screenshots/markdown-document.png" alt="Nebula 正在渲染自己的 README：居中 logo、徽章横排、内嵌截图" width="920" />
+</p>
+
+- **Markdown/GFM 文档标签页** — 可以从文件抽屉直接打开 Markdown、JSON 和
+  纯文本文件，原生显示标题、列表、表格、代码块、链接、引用、自动换行和虚拟滚动。
+- **图片来源不挑** — 远程 `http(s)` 链接、`data:` URI、绝对路径，以及相对文档
+  自身位置的路径都能解析，徽章行、logo 和内嵌截图都落在文件让它们出现的地方。
+  上面这张图就是 Nebula 在渲染自己的 README。
+- **真实 README 会用到的那些 HTML** — `<p align="center">` 居中生效，同一段里
+  的多枚 `<img>` 徽章横排显示而不会被拆成若干块，`<br/>` 按文档顺序断行，
+  `<a><img/></a>` 形式的链接徽章不会整个丢失。
+- **中文软换行不留空隙** — CommonMark 的软换行按规范并作空格，但相邻中日韩
+  字符直接相连，中文段落不会出现别的阅读器常见的那些多余空格。
+
 **文档与原生数学公式**
 
 <p align="center">
   <img src="docs/screenshots/native-math-rendering.png" alt="Nebula Markdown 文档中的原生数学公式" width="920" />
 </p>
 
-- **Markdown/GFM 文档标签页** — 可以从文件抽屉直接打开 Markdown、JSON 和
-  纯文本文件，原生显示标题、列表、表格、代码块、链接、引用、自动换行和虚拟滚动。
 - **原生 TeX 数学排版** — 行内 `$...$` 与块级 `$$...$$` 公式全部由 Rust
   解析和布局，再使用缓存的 Latin Modern Math 字形与 GPU 规则线 quad 绘制。
   分式、根式、上下标、极限、积分、矩阵、伸缩括号、希腊字母和常用符号均不经过
@@ -415,7 +459,7 @@ Nebula 内置 Lua 5.4，使用 `require 'nebula'` 与
 | --- | --- |
 | 语言 | Rust（2024 edition） |
 | 渲染 | OpenGL / OpenGL ES 2.0+，自定义字形与 UI 四边形渲染器 |
-| 终端内核 | GPU 常驻网格 + VTE 转义序列解析 |
+| 终端内核 | GPU 常驻网格 + VTE 转义序列解析，基于 Alacritty 衍生的地基 |
 | 会话模型 | 常驻 mux 进程，环回 attach 协议 |
 | Shell 集成 | PowerShell + PSReadLine、Git Bash；OSC 7/8/9/133/1337 |
 | 文档数学 | pulldown-cmark + pulldown-latex + OpenType MATH（Latin Modern Math） |
@@ -432,6 +476,10 @@ Nebula 内置 Lua 5.4，使用 `require 'nebula'` 与
 
 ### 🙏 致谢
 
+Nebula 的终端内核——网格、VTE 转义序列解析与 PTY 管路——衍生自
+**[Alacritty](https://github.com/alacritty/alacritty)**，终端工程的杰作。
+衷心感谢它的维护者与贡献者们；没有他们的工作就没有 Nebula。
+
 Nebula 的界面层构建在 **[GPUI](https://github.com/zed-industries/zed)** 之上——由
 [Zed](https://zed.dev) 团队开发的 GPU 加速 UI 框架——并使用
 [Longbridge](https://github.com/longbridge) 的
@@ -442,6 +490,9 @@ Apache-2.0 许可发布，Nebula 通过带少量补丁的 fork 使用，版本�
 ### 📜 许可证
 
 基于 [GNU 通用公共许可证 v3.0（GPL-3.0）](LICENSE) 发布。
+
+Nebula 的部分代码衍生自上游开源项目，其原始许可与版权声明保留于
+[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES)。整体作品以 GPL-3.0 分发。
 
 ---
 
