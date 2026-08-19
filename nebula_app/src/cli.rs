@@ -477,6 +477,18 @@ pub enum ControlCommand {
         #[clap(long, default_value_t = 1)]
         repeat: u16,
     },
+    /// Run one shell command and return its real OSC 133 exit status.
+    Run {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+        #[clap(long)]
+        command: String,
+        /// Submit the command and return its run id without waiting for completion.
+        #[clap(long)]
+        no_wait: bool,
+    },
     /// Wait until a pane reaches a semantic task state.
     Wait {
         #[clap(long)]

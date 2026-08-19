@@ -101,7 +101,8 @@ impl NebulaWorkspace {
             | RuntimeCommand::NewTab { .. }
             | RuntimeCommand::Split { .. }
             | RuntimeCommand::Prompt { .. }
-            | RuntimeCommand::SendKey { .. } => {
+            | RuntimeCommand::SendKey { .. }
+            | RuntimeCommand::Run { .. } => {
                 self.reveal_session(cx);
                 self.runtime_pending.push(dispatch);
             },
@@ -281,6 +282,34 @@ impl NebulaWorkspace {
                     cx,
                 )
             },
+            RuntimeCommand::Run { window_id, pane_id, command, .. } => {
+                self.runtime_window_requested(*window_id)?;
+                let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("pane {pane_id} does not exist"),
+                    ));
+                };
+                let view = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                        .iter()
+                        .find(|pane| pane.id == *pane_id)
+                        .expect("tab_of_pane resolved a terminal pane")
+                        .view
+                        .clone(),
+                    _ => unreachable!("tab_of_pane only resolves terminal tabs"),
+                };
+                let run_id = view.update(cx, |view, cx| view.runtime_run(command.clone(), cx))?;
+                self.runtime_result(
+                    json!({
+                        "window_id": self.runtime_window_id,
+                        "pane_id": pane_id,
+                        "run_id": run_id
+                    }),
+                    window,
+                    cx,
+                )
+            },
         }
     }
 
@@ -328,6 +357,8 @@ impl NebulaWorkspace {
                                     agent: view.runtime_agent(),
                                     task_state: view.runtime_task_state(),
                                     state_change_seq: 0,
+                                    active_run: view.runtime_active_run(),
+                                    last_run: view.runtime_last_run(),
                                 }
                             })
                             .collect();

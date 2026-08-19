@@ -45,6 +45,8 @@ impl WindowContext {
                         // counter at publish time, where the previous snapshot
                         // is available to compare against.
                         state_change_seq: 0,
+                        active_run: pane.nebula_state.active_run,
+                        last_run: pane.nebula_state.last_run.clone(),
                     })
                     .collect();
                 let label = tab.custom_name.clone().unwrap_or_else(|| {
@@ -252,6 +254,38 @@ impl WindowContext {
         self.dirty = true;
         self.display.window.request_redraw();
         Ok(bytes_sent)
+    }
+
+    pub(crate) fn runtime_run(&mut self, pane_id: u64, command: String) -> Result<u64, ApiError> {
+        crate::runtime_api::validate_command_line(&command)?;
+        let Some(index) = self.pane_index(pane_id) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to the target window"),
+            ));
+        };
+        let pane = &mut self.panes[index];
+        if pane.ssh_destination.is_some() {
+            return Err(ApiError::new(
+                "exit_code_unavailable",
+                "pane.run is unavailable for native SSH panes because the remote integration does not report exit codes",
+            ));
+        }
+        if pane.nebula_state.command_started.is_some() || pane.nebula_state.active_run.is_some() {
+            return Err(ApiError::new("run_in_progress", "the pane is already running a command"));
+        }
+        let run = crate::runtime_api::begin_runtime_run();
+        let run_id = run.run_id;
+        pane.nebula_state.active_run = Some(run);
+        pane.nebula_state.last_run = None;
+        pane.nebula_state.last_committed.clone_from(&command);
+        pane.nebula_state.touched = true;
+        pane.nebula_state.awaiting_input = false;
+        pane.notifier.notify(command.into_bytes());
+        pane.notifier.notify(vec![b'\r']);
+        self.dirty = true;
+        self.display.window.request_redraw();
+        Ok(run_id)
     }
 }
 

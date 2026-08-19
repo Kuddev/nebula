@@ -611,6 +611,19 @@ impl Processor {
                     "bytes_sent": bytes_sent
                 }))
             },
+            RuntimeCommand::Run { window_id, pane_id, command, .. } => {
+                let id = self.runtime_target_window(*window_id, Some(*pane_id))?;
+                let run_id = self
+                    .windows
+                    .get_mut(&id)
+                    .expect("resolved runtime window exists")
+                    .runtime_run(*pane_id, command.clone())?;
+                self.runtime_result(serde_json::json!({
+                    "window_id": u64::from(id),
+                    "pane_id": pane_id,
+                    "run_id": run_id
+                }))
+            },
         }
     }
 
@@ -3247,6 +3260,11 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         self.ctx.nebula_state.pending_ssh_host =
                             crate::ssh::ssh_destination(&self.ctx.nebula_state.last_committed);
                         self.ctx.nebula_state.awaiting_input = false;
+                        if let Some(run) = &mut self.ctx.nebula_state.active_run
+                            && run.phase == crate::runtime_api::RuntimeRunPhase::Submitted
+                        {
+                            run.phase = crate::runtime_api::RuntimeRunPhase::Started;
+                        }
                     },
                     TerminalEvent::CommandDone { exit_code } => {
                         // Take (not just clear) the program: the toast below
@@ -3263,6 +3281,11 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         self.ctx.nebula_state.agent_status_rule = None;
                         let pending_ssh = self.ctx.nebula_state.pending_ssh_host.take();
                         self.ctx.nebula_state.awaiting_input = false;
+                        if let Some(run) = self.ctx.nebula_state.active_run.take() {
+                            self.ctx.nebula_state.last_run = Some(
+                                crate::runtime_api::RuntimeRunOutcome::command_done(run, exit_code),
+                            );
+                        }
                         // 助手错误恢复（spec 001）：Nebula 集成上报的退出码
                         // 走触发判定；裸 133;D（第三方集成）码为 None，静默。
                         if let Some(code) = exit_code {

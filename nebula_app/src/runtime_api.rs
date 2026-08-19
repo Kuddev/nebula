@@ -48,6 +48,7 @@ const MAX_CLIENTS: usize = 64;
 const MAX_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -298,6 +299,10 @@ pub struct RuntimePane {
     /// time. Stamped by [`RuntimeHub::publish`]; projection callers leave it 0.
     #[serde(default)]
     pub state_change_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_run: Option<RuntimePaneRun>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<RuntimeRunOutcome>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -348,6 +353,94 @@ pub struct RuntimePaneProcesses {
     pub pane_id: u64,
     pub root_pid: u32,
     pub processes: Vec<RuntimeProcess>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRunPhase {
+    Submitted,
+    Started,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePaneRun {
+    pub run_id: u64,
+    pub phase: RuntimeRunPhase,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRunState {
+    Finished,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitCodeCapability {
+    Supported,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeRunOutcome {
+    pub run_id: u64,
+    pub state: RuntimeRunState,
+    pub exit_code: Option<i32>,
+    pub exit_code_capability: ExitCodeCapability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+impl RuntimeRunOutcome {
+    pub(crate) fn command_done(run: RuntimePaneRun, exit_code: Option<i32>) -> Self {
+        if run.phase != RuntimeRunPhase::Started {
+            return Self::unavailable(run.run_id, "command_start_not_observed");
+        }
+        match exit_code {
+            Some(0) => Self {
+                run_id: run.run_id,
+                state: RuntimeRunState::Finished,
+                exit_code,
+                exit_code_capability: ExitCodeCapability::Supported,
+                unavailable_reason: None,
+            },
+            Some(_) => Self {
+                run_id: run.run_id,
+                state: RuntimeRunState::Failed,
+                exit_code,
+                exit_code_capability: ExitCodeCapability::Supported,
+                unavailable_reason: None,
+            },
+            None => Self::unavailable(run.run_id, "exit_code_not_reported"),
+        }
+    }
+
+    pub(crate) fn unavailable(run_id: u64, reason: impl Into<String>) -> Self {
+        Self {
+            run_id,
+            state: RuntimeRunState::Unavailable,
+            exit_code: None,
+            exit_code_capability: ExitCodeCapability::Unavailable,
+            unavailable_reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeRunResult {
+    pub window_id: u64,
+    pub pane_id: u64,
+    #[serde(flatten)]
+    pub outcome: RuntimeRunOutcome,
+}
+
+pub(crate) fn begin_runtime_run() -> RuntimePaneRun {
+    RuntimePaneRun {
+        run_id: NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed),
+        phase: RuntimeRunPhase::Submitted,
+    }
 }
 
 /// Named control keys accepted by `pane.send_key`. Printable text is
@@ -522,6 +615,13 @@ pub enum RuntimeCommand {
         modifiers: RuntimeKeyModifiers,
         repeat: u16,
     },
+    Run {
+        window_id: Option<u64>,
+        pane_id: u64,
+        command: String,
+        wait: bool,
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -621,6 +721,10 @@ struct HubState {
     current: Option<RuntimeSnapshot>,
     next_subscription: u64,
     subscribers: Vec<(u64, SyncSender<RuntimeSnapshot>)>,
+    next_run_waiter: u64,
+    run_waiters:
+        std::collections::HashMap<(u64, u64, u64), Vec<(u64, SyncSender<RuntimeRunResult>)>>,
+    completed_runs: std::collections::VecDeque<RuntimeRunResult>,
 }
 
 impl RuntimeHub {
@@ -640,6 +744,7 @@ impl RuntimeHub {
         // whose state is unchanged keep their previous counter, so an
         // otherwise-identical projection still compares equal here.
         stamp_state_change_seq(state.current.as_ref(), &mut snapshot);
+        observe_run_lifecycle(&mut state, &snapshot);
         if let Some(current) = &state.current {
             snapshot.revision = current.revision;
             if current == &snapshot {
@@ -673,6 +778,164 @@ impl RuntimeHub {
     fn current(&self) -> Option<RuntimeSnapshot> {
         self.lock().current.clone()
     }
+
+    fn wait_run(
+        &self,
+        window_id: u64,
+        pane_id: u64,
+        run_id: u64,
+        timeout: Duration,
+    ) -> Result<RuntimeRunResult, ApiError> {
+        let key = (window_id, pane_id, run_id);
+        let (waiter_id, receiver) = {
+            let mut state = self.lock();
+            if let Some(result) = state.completed_runs.iter().find(|result| {
+                result.window_id == window_id
+                    && result.pane_id == pane_id
+                    && result.outcome.run_id == run_id
+            }) {
+                return run_result_or_capability_error(result.clone());
+            }
+            let (sender, receiver) = mpsc::sync_channel(1);
+            state.next_run_waiter = state.next_run_waiter.saturating_add(1);
+            let waiter_id = state.next_run_waiter;
+            state.run_waiters.entry(key).or_default().push((waiter_id, sender));
+            (waiter_id, receiver)
+        };
+
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => run_result_or_capability_error(result),
+            Err(RecvTimeoutError::Disconnected) => Err(ApiError::new(
+                "runtime_unavailable",
+                "runtime run completion channel disconnected",
+            )),
+            Err(RecvTimeoutError::Timeout) => {
+                let mut state = self.lock();
+                if let Some(waiters) = state.run_waiters.get_mut(&key) {
+                    waiters.retain(|(id, _)| *id != waiter_id);
+                    if waiters.is_empty() {
+                        state.run_waiters.remove(&key);
+                    }
+                }
+                let phase = state.current.as_ref().and_then(|snapshot| {
+                    snapshot
+                        .pane(Some(window_id), pane_id)
+                        .ok()
+                        .and_then(|pane| pane.active_run)
+                        .filter(|run| run.run_id == run_id)
+                        .map(|run| run.phase)
+                });
+                let (code, message) = match phase {
+                    Some(RuntimeRunPhase::Submitted) => (
+                        "run_start_timeout",
+                        "the shell did not report CommandStart before timeout",
+                    ),
+                    Some(RuntimeRunPhase::Started) => {
+                        ("timeout", "the command did not report CommandDone before timeout")
+                    },
+                    None => ("run_aborted", "the pane or run disappeared before completion"),
+                };
+                Err(ApiError::new(code, message).details(json!({
+                    "window_id": window_id,
+                    "pane_id": pane_id,
+                    "run_id": run_id,
+                    "phase": phase
+                })))
+            },
+        }
+    }
+}
+
+const COMPLETED_RUN_CACHE: usize = 256;
+
+fn observe_run_lifecycle(state: &mut HubState, snapshot: &RuntimeSnapshot) {
+    let mut observed = std::collections::HashMap::new();
+    for window in &snapshot.windows {
+        for tab in &window.tabs {
+            for pane in &tab.panes {
+                if let Some(active) = pane.active_run {
+                    observed.insert((window.id, pane.id, active.run_id), active.phase);
+                }
+                let Some(outcome) = pane.last_run.clone() else {
+                    continue;
+                };
+                let already_cached = state.completed_runs.iter().any(|result| {
+                    result.window_id == window.id
+                        && result.pane_id == pane.id
+                        && result.outcome.run_id == outcome.run_id
+                });
+                if !already_cached {
+                    complete_run(
+                        state,
+                        RuntimeRunResult { window_id: window.id, pane_id: pane.id, outcome },
+                    );
+                }
+            }
+        }
+    }
+
+    let previous_active: Vec<_> = state
+        .current
+        .iter()
+        .flat_map(|previous| previous.windows.iter())
+        .flat_map(|window| {
+            window.tabs.iter().flat_map(move |tab| {
+                tab.panes.iter().filter_map(move |pane| {
+                    pane.active_run.map(|run| (window.id, pane.id, run.run_id))
+                })
+            })
+        })
+        .collect();
+    for key @ (window_id, pane_id, run_id) in previous_active {
+        if observed.contains_key(&key)
+            || state.completed_runs.iter().any(|result| {
+                result.window_id == window_id
+                    && result.pane_id == pane_id
+                    && result.outcome.run_id == run_id
+            })
+        {
+            continue;
+        }
+        complete_run(
+            state,
+            RuntimeRunResult {
+                window_id,
+                pane_id,
+                outcome: RuntimeRunOutcome::unavailable(run_id, "pane_or_run_disappeared"),
+            },
+        );
+    }
+}
+
+fn complete_run(state: &mut HubState, result: RuntimeRunResult) {
+    let key = (result.window_id, result.pane_id, result.outcome.run_id);
+    if let Some(waiters) = state.run_waiters.remove(&key) {
+        for (_, sender) in waiters {
+            let _ = sender.try_send(result.clone());
+        }
+    }
+    state.completed_runs.push_back(result);
+    while state.completed_runs.len() > COMPLETED_RUN_CACHE {
+        state.completed_runs.pop_front();
+    }
+}
+
+fn run_result_or_capability_error(result: RuntimeRunResult) -> Result<RuntimeRunResult, ApiError> {
+    if result.outcome.state != RuntimeRunState::Unavailable {
+        return Ok(result);
+    }
+    let reason = result
+        .outcome
+        .unavailable_reason
+        .clone()
+        .unwrap_or_else(|| "exit_code_unavailable".to_owned());
+    let code = match reason.as_str() {
+        "command_start_not_observed" => "shell_integration_unavailable",
+        "pane_or_run_disappeared" => "run_aborted",
+        _ => "exit_code_unavailable",
+    };
+    Err(ApiError::new(code, "the command completed without a reliable exit-code result")
+        .details(serde_json::to_value(result).unwrap_or_else(|_| json!({ "reason": reason }))))
 }
 
 #[derive(Debug, Deserialize)]
@@ -753,6 +1016,19 @@ struct SendKeyParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RunParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    pane_id: u64,
+    command: String,
+    #[serde(default = "default_true")]
+    wait: bool,
+    #[serde(default = "default_run_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SubscribeParams {
     #[serde(default)]
     since_revision: Option<u64>,
@@ -796,6 +1072,10 @@ fn default_read_lines() -> usize {
 
 fn default_key_repeat() -> u16 {
     1
+}
+
+fn default_run_timeout_ms() -> u64 {
+    COMMAND_TIMEOUT.as_millis() as u64
 }
 
 impl RuntimeCommand {
@@ -860,6 +1140,22 @@ impl RuntimeCommand {
                     key: params.key,
                     modifiers: params.modifiers,
                     repeat: params.repeat,
+                })
+            },
+            "pane.run" => {
+                let params: RunParams = parse_params(&request.params)?;
+                validate_command_line(&params.command)?;
+                if params.timeout_ms == 0 || Duration::from_millis(params.timeout_ms) > MAX_WAIT {
+                    return Err(ApiError::invalid_params(
+                        "timeout_ms must be between 1 and 86400000",
+                    ));
+                }
+                Ok(Self::Run {
+                    window_id: params.window_id,
+                    pane_id: params.pane_id,
+                    command: params.command,
+                    wait: params.wait,
+                    timeout_ms: params.timeout_ms,
                 })
             },
             method => Err(ApiError::new(
@@ -986,6 +1282,23 @@ pub(crate) fn validate_prompt(text: &str) -> Result<(), ApiError> {
     if text.chars().any(char::is_control) {
         return Err(ApiError::invalid_params(
             "prompt text contains control characters; pane.prompt accepts one plain-text line",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_command_line(command: &str) -> Result<(), ApiError> {
+    if command.trim().is_empty() {
+        return Err(ApiError::invalid_params("command must not be empty"));
+    }
+    if command.len() > MAX_PROMPT_BYTES {
+        return Err(ApiError::invalid_params(format!(
+            "command exceeds the {MAX_PROMPT_BYTES}-byte limit"
+        )));
+    }
+    if command.chars().any(char::is_control) {
+        return Err(ApiError::invalid_params(
+            "command contains control characters; pane.run accepts one plain-text shell line",
         ));
     }
     Ok(())
@@ -1274,7 +1587,7 @@ fn handle_connection(
         "events.subscribe" => subscribe_connection(&mut stream, request, hub),
         "agents.list" => agents_connection(&mut stream, request, hub),
         "pane.wait" => wait_connection(&mut stream, request, hub),
-        _ => dispatch_connection(&mut stream, request, sink),
+        _ => dispatch_connection(&mut stream, request, sink, hub),
     }
 }
 
@@ -1319,6 +1632,7 @@ fn runtime_description() -> Value {
             "pane.read",
             "pane.procs",
             "pane.send_key",
+            "pane.run",
             "pane.wait"
         ],
         // Additive params cannot be detected from `capabilities`: an older
@@ -1521,6 +1835,7 @@ fn dispatch_connection(
     stream: &mut TcpStream,
     request: ApiRequest,
     sink: &EventSink,
+    hub: &RuntimeHub,
 ) -> Result<(), IoError> {
     let command = match RuntimeCommand::from_request(&request) {
         Ok(command) => command,
@@ -1536,6 +1851,12 @@ fn dispatch_connection(
             modifiers.control,
         );
     }
+    let run_wait = match &command {
+        RuntimeCommand::Run { wait: true, timeout_ms, .. } => {
+            Some(Duration::from_millis(*timeout_ms))
+        },
+        _ => None,
+    };
     let (dispatch, receiver) = RuntimeDispatch::new(command);
     if !sink.emit_control(dispatch) {
         return write_response(
@@ -1547,7 +1868,36 @@ fn dispatch_connection(
         );
     }
     let response = match receiver.recv_timeout(COMMAND_TIMEOUT) {
-        Ok(Ok(result)) => ApiResponse::success(request.id, result),
+        Ok(Ok(result)) => {
+            if let Some(timeout) = run_wait {
+                let action = result.get("action").unwrap_or(&result);
+                let target = (
+                    action.get("window_id").and_then(Value::as_u64),
+                    action.get("pane_id").and_then(Value::as_u64),
+                    action.get("run_id").and_then(Value::as_u64),
+                );
+                match target {
+                    (Some(window_id), Some(pane_id), Some(run_id)) => {
+                        match hub.wait_run(window_id, pane_id, run_id, timeout) {
+                            Ok(run) => ApiResponse::success(
+                                request.id,
+                                json!({ "run": run, "snapshot": hub.current() }),
+                            ),
+                            Err(error) => ApiResponse::failure(request.id, error),
+                        }
+                    },
+                    _ => ApiResponse::failure(
+                        request.id,
+                        ApiError::new(
+                            "invalid_runtime_response",
+                            "pane.run did not return its window, pane, and run identity",
+                        ),
+                    ),
+                }
+            } else {
+                ApiResponse::success(request.id, result)
+            }
+        },
         Ok(Err(error)) => ApiResponse::failure(request.id, error),
         Err(_) => ApiResponse::failure(
             request.id,
@@ -1717,6 +2067,20 @@ pub fn run_cli(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             )?;
             print_response(&response, options.pretty)
         },
+        CliCommand::Run { window, pane, command, no_wait } => {
+            let response = request_once(
+                "pane.run",
+                json!({
+                    "window_id": window,
+                    "pane_id": pane,
+                    "command": command,
+                    "wait": !no_wait,
+                    "timeout_ms": options.timeout_ms
+                }),
+                timeout.saturating_add(Duration::from_secs(1)),
+            )?;
+            print_response(&response, options.pretty)
+        },
         CliCommand::Wait { window, pane, state, after_seq } => {
             wait_cli(window, pane, state, after_seq, timeout, options.pretty)
         },
@@ -1839,6 +2203,8 @@ mod tests {
                         agent: None,
                         task_state: state,
                         state_change_seq: 0,
+                        active_run: None,
+                        last_run: None,
                     }],
                 }],
             }],
@@ -1903,6 +2269,68 @@ mod tests {
             RuntimeCommand::from_request(&arbitrary_bytes).unwrap_err().code,
             "invalid_params"
         );
+    }
+
+    #[test]
+    fn run_requires_one_plain_shell_line() {
+        let valid = ApiRequest::new(
+            "token".into(),
+            "pane.run",
+            json!({ "pane_id": 3, "command": "cargo test", "wait": true }),
+        );
+        assert!(matches!(
+            RuntimeCommand::from_request(&valid),
+            Ok(RuntimeCommand::Run { wait: true, .. })
+        ));
+
+        let multiline = ApiRequest::new(
+            "token".into(),
+            "pane.run",
+            json!({ "pane_id": 3, "command": "echo one\necho two" }),
+        );
+        assert_eq!(RuntimeCommand::from_request(&multiline).unwrap_err().code, "invalid_params");
+    }
+
+    #[test]
+    fn run_outcome_requires_a_real_start_and_exit_code() {
+        let submitted = RuntimePaneRun { run_id: 41, phase: RuntimeRunPhase::Submitted };
+        let no_start = RuntimeRunOutcome::command_done(submitted, Some(0));
+        assert_eq!(no_start.state, RuntimeRunState::Unavailable);
+        assert_eq!(no_start.unavailable_reason.as_deref(), Some("command_start_not_observed"));
+
+        let started = RuntimePaneRun { run_id: 42, phase: RuntimeRunPhase::Started };
+        assert_eq!(
+            RuntimeRunOutcome::command_done(started, Some(0)).state,
+            RuntimeRunState::Finished
+        );
+        assert_eq!(
+            RuntimeRunOutcome::command_done(started, Some(7)).state,
+            RuntimeRunState::Failed
+        );
+        let missing_code = RuntimeRunOutcome::command_done(started, None);
+        assert_eq!(missing_code.state, RuntimeRunState::Unavailable);
+        assert_eq!(missing_code.exit_code_capability, ExitCodeCapability::Unavailable);
+    }
+
+    #[test]
+    fn completed_run_cache_closes_the_waiter_registration_race() {
+        let hub = RuntimeHub::new();
+        let mut running = snapshot(RuntimeTaskState::Running);
+        running.windows[0].tabs[0].panes[0].active_run =
+            Some(RuntimePaneRun { run_id: 51, phase: RuntimeRunPhase::Started });
+        hub.publish(running);
+
+        let mut done = snapshot(RuntimeTaskState::Finished);
+        done.windows[0].tabs[0].panes[0].last_run = Some(RuntimeRunOutcome::command_done(
+            RuntimePaneRun { run_id: 51, phase: RuntimeRunPhase::Started },
+            Some(0),
+        ));
+        hub.publish(done);
+
+        // The result was published before this waiter existed. The bounded
+        // cache must still return the exact run rather than timing out.
+        let result = hub.wait_run(7, 3, 51, Duration::from_millis(10)).unwrap();
+        assert_eq!(result.outcome.exit_code, Some(0));
     }
 
     #[test]

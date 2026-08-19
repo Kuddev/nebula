@@ -173,6 +173,8 @@ pub struct TerminalView {
     /// `NEBULA|` 标题报 `running_program`，装了 OSC133 集成的 bash/zsh/nu 只
     /// 发这一对语义标记——两条路都要能点亮侧栏的「运行中」。
     command_running: bool,
+    active_run: Option<crate::runtime_api::RuntimePaneRun>,
+    last_run: Option<crate::runtime_api::RuntimeRunOutcome>,
     /// Hook 事件驱动的 agent 回合状态（旧壳 `nebula_state.agent_status` 的
     /// 边沿触发版）。`Unknown` = 本 pane 没有 agent 参与，spinner 完全由
     /// `command_running`/`running_program` 决定。
@@ -617,6 +619,8 @@ impl TerminalView {
             branch: String::new(),
             running_program: None,
             command_running: false,
+            active_run: None,
+            last_run: None,
             agent_status: crate::ai_agents::AgentStatus::Unknown,
             agent_status_source: crate::ai_agents::AgentStatusSource::Unknown,
             agent_status_rule: None,
@@ -773,17 +777,26 @@ impl TerminalView {
                     self.agent_status_rule = None;
                 }
                 self.command_running = true;
+                if let Some(run) = &mut self.active_run
+                    && run.phase == crate::runtime_api::RuntimeRunPhase::Submitted
+                {
+                    run.phase = crate::runtime_api::RuntimeRunPhase::Started;
+                }
                 cx.notify();
             },
             // 退出码先只用来结束「运行中」；失败命令的未读标记要等
             // `SidebarActivity` 扩出未读态再接，现在记下来也没有呈现位置。
-            TermEvent::CommandDone { exit_code: _ } => {
+            TermEvent::CommandDone { exit_code } => {
                 // 旧壳同款收尾：CLI 退回提示符后，它不再是这个 pane 的前台
                 // 事实——hook 稍后若仍在跑会重新点亮（handle_ai_hook 覆写）。
                 if self.running_program.take().is_some() || self.ai_session.take().is_some() {
                     cx.emit(TerminalViewEvent::TitleChanged);
                 }
                 self.command_running = false;
+                if let Some(run) = self.active_run.take() {
+                    self.last_run =
+                        Some(crate::runtime_api::RuntimeRunOutcome::command_done(run, exit_code));
+                }
                 self.agent_status = crate::ai_agents::AgentStatus::Unknown;
                 self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
                 self.agent_status_rule = None;
@@ -1190,6 +1203,52 @@ impl TerminalView {
         let bytes_sent = bytes.len();
         self.write_input(bytes, cx);
         Ok(bytes_sent)
+    }
+
+    pub fn runtime_run(
+        &mut self,
+        command: String,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, crate::runtime_api::ApiError> {
+        crate::runtime_api::validate_command_line(&command)?;
+        if self.ssh_destination.is_some() {
+            return Err(crate::runtime_api::ApiError::new(
+                "exit_code_unavailable",
+                "pane.run is unavailable for native SSH panes because the remote integration does not report exit codes",
+            ));
+        }
+        if let Some(reason) = &self.exited {
+            return Err(crate::runtime_api::ApiError::new(
+                "invalid_state",
+                format!("pane has exited: {reason}"),
+            ));
+        }
+        self.ensure_runtime_readable()?;
+        if self.command_running || self.active_run.is_some() {
+            return Err(crate::runtime_api::ApiError::new(
+                "run_in_progress",
+                "the pane is already running a command",
+            ));
+        }
+        let run = crate::runtime_api::begin_runtime_run();
+        let run_id = run.run_id;
+        self.active_run = Some(run);
+        self.last_run = None;
+        self.command_running = true;
+        self.suggest.last_committed.clone_from(&command);
+        let mut bytes = command.into_bytes();
+        bytes.push(b'\r');
+        self.write_input(bytes, cx);
+        cx.emit(TerminalViewEvent::TitleChanged);
+        Ok(run_id)
+    }
+
+    pub fn runtime_active_run(&self) -> Option<crate::runtime_api::RuntimePaneRun> {
+        self.active_run
+    }
+
+    pub fn runtime_last_run(&self) -> Option<crate::runtime_api::RuntimeRunOutcome> {
+        self.last_run.clone()
     }
 
     pub fn runtime_prompt(

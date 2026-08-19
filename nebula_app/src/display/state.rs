@@ -219,6 +219,8 @@ pub struct NebulaPaneState {
     pub touched: bool,
     pub inline_images: Vec<NebulaInlineImage>,
     pub command_started: Option<std::time::Instant>,
+    pub active_run: Option<crate::runtime_api::RuntimePaneRun>,
+    pub last_run: Option<crate::runtime_api::RuntimeRunOutcome>,
     pub running_program: Option<String>,
     /// hook 直报的 AI CLI 会话身份（claude `session_id` / codex `thread-id`）。
     /// 与 `running_program` 同生命周期：133;D 命令收尾时一起清除，快照据此
