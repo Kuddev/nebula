@@ -1783,6 +1783,8 @@ pub struct Display {
     pub nebula_keymap_capture: Option<usize>,
     /// 捕获态实时回显：当前按住的修饰键前缀（"Ctrl+Shift+"）。松开清空。
     pub nebula_keymap_capture_preview: String,
+    /// 与 GPUI 壳共用的标签栏位置。旧壳只负责原样保留，不改变自身布局。
+    pub nebula_tabs_position: nebula_settings::TabsPositionName,
     pub nebula_tab_reveal_motion: settings::TabRevealMotion,
     /// 界面外观预设。紧凑只在既有阶梯上降一档，不引入新的视觉数值
     /// （ADR-0002）；它不改变终端字体、单元格几何或 shell 输出。
@@ -2434,6 +2436,7 @@ impl Display {
             nebula_quick_hotkey_error: None,
             nebula_keymap_capture: None,
             nebula_keymap_capture_preview: String::new(),
+            nebula_tabs_position: settings_init.tabs_position,
             nebula_tab_reveal_motion: settings_init.tab_reveal,
             nebula_density: settings_init.density,
             nebula_new_tab_position: settings_init.new_tab_position,
@@ -7876,6 +7879,7 @@ impl Display {
             cursor_blink: self.nebula_cursor_blink,
             copy_on_select: self.nebula_copy_on_select,
             cjk_bold_regular: self.nebula_cjk_bold_regular,
+            tabs_position: self.nebula_tabs_position,
             tab_reveal: self.nebula_tab_reveal_motion,
             density: self.nebula_density,
             new_tab_position: self.nebula_new_tab_position,
@@ -7985,6 +7989,7 @@ impl Display {
             self.glyph_cache.wide_bold_use_regular = settings.cjk_bold_regular;
             self.reset_glyph_cache();
         }
+        self.nebula_tabs_position = settings.tabs_position;
         self.nebula_tab_reveal_motion = settings.tab_reveal;
         self.nebula_density = settings.density;
         self.nebula_new_tab_position = settings.new_tab_position;

@@ -506,6 +506,14 @@ impl SettingsPane {
             cx,
         );
         add_select(
+            "tabs_position",
+            &["左侧边栏", "顶部"],
+            &["sidebar", "top"],
+            runtime.tabs_position.settings_value(),
+            window,
+            cx,
+        );
+        add_select(
             "tab_reveal",
             &["滑动", "立即"],
             &["slide", "instant"],
@@ -3156,6 +3164,7 @@ impl SettingsPane {
                 self.runtime.copy_on_select,
                 cx,
             ))
+            .child(self.select_row("tabs_position", "标签栏位置", cx))
             .child(self.select_row("tab_reveal", "标签展开动效", cx))
             .child(self.select_row("new_tab_position", "新标签位置", cx))
             .child(self.select_row("vcs_display", "侧栏版本控制（Git/SVN）", cx))

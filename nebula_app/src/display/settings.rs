@@ -819,6 +819,9 @@ pub(super) struct NebulaRuntimeSettings {
     /// 全宽字形（CJK 等）在 bold run 里用 Regular 字形（粗体提亮不加粗）。
     /// 默认开：小字号下雅黑 Bold fallback 与 Regular 混排发闷（任务 #4）。
     pub(super) cjk_bold_regular: bool,
+    /// 旧壳不渲染顶部标签栏，但必须保留这个共享设置，否则它整体写回配置
+    /// 时会把 GPUI 壳选择的布局抹掉。
+    pub(super) tabs_position: nebula_settings::TabsPositionName,
     pub(super) tab_reveal: TabRevealMotion,
     /// 界面外观预设：标准 / 紧凑。
     pub(super) density: super::ui::tokens::Density,
@@ -907,6 +910,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         cursor_blink: true,
         copy_on_select: true,
         cjk_bold_regular: true,
+        tabs_position: nebula_settings::TabsPositionName::Sidebar,
         tab_reveal: TabRevealMotion::Slide,
         density: super::ui::tokens::Density::Standard,
         new_tab_position: NewTabPosition::AfterCurrent,
@@ -1009,6 +1013,10 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("cursor_blink", v)) => settings.cursor_blink = parse_bool(v, true),
                 Some(("copy_on_select", v)) => settings.copy_on_select = parse_bool(v, true),
                 Some(("cjk_bold_regular", v)) => settings.cjk_bold_regular = parse_bool(v, true),
+                Some(("tabs_position", v)) => {
+                    settings.tabs_position = nebula_settings::TabsPositionName::from_settings(v)
+                        .unwrap_or_default();
+                },
                 Some(("tab_reveal", v)) => {
                     settings.tab_reveal = TabRevealMotion::parse(v).unwrap_or_default();
                 },
@@ -1246,8 +1254,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
     let _ = std::fs::write(
         path,
         format!(
-            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\ncompletion_style={completion_style}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}
-tab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nresume_ai={}\ntray={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nssh_proxy_mode={ssh_proxy_mode}\nssh_proxy_url={ssh_proxy_url}\nssh_proxy_no_proxy={ssh_proxy_no_proxy}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
+            "language={}\ntheme={theme}\nfollow_system_theme={}\nghost={}\naccept={accept}\ncompletion_style={completion_style}\nshell={shell}\nstartup_directory={startup_directory}\nfont_family={}\nfont_size={font_size}\ncursor_shape={}\ncursor_blink={}\ncopy_on_select={}\ncjk_bold_regular={}\ntabs_position={}\ntab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npowerline={}\nkeep_session={}\nrestore_session={}\nresume_ai={}\ntray={}\nblur={}\nopacity={:.2}\nbackground={background}\nbackground_image={background_image}\nbackground_image_opacity={:.2}\nbackground_image_fit={}\nbackground_image_alignment={}\nbackground_image_cover_chrome={}\npanel_resize={}\nsidebar_w={:.0}\ndrawer_w={:.0}\nhosts_band={:.0}\npinned_hosts={pinned_hosts}\nsaved_hosts={saved_hosts}\nhidden_hosts={hidden_hosts}\nssh_proxy_mode={ssh_proxy_mode}\nssh_proxy_url={ssh_proxy_url}\nssh_proxy_no_proxy={ssh_proxy_no_proxy}\nquick_terminal_hotkey={quick_terminal_hotkey}\n{keybinds}",
             settings.language.as_str(),
             settings.follow_system_theme as u8,
             settings.ghost as u8,
@@ -1256,6 +1263,7 @@ tab_reveal={}\ndensity={}\nnew_tab_position={}\ncell_width_mode={}\nfetch={}\npo
             settings.cursor_blink as u8,
             settings.copy_on_select as u8,
             settings.cjk_bold_regular as u8,
+            settings.tabs_position.settings_value(),
             settings.tab_reveal.settings_value(),
             density_settings_value(settings.density),
             settings.new_tab_position.settings_value(),

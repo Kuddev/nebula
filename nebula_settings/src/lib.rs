@@ -478,6 +478,32 @@ impl CompletionStyleName {
     }
 }
 
+/// 标签栏位置。这里只提供产品当前支持的两种布局，避免把设置扩成未实现的
+/// 通用停靠系统。
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum TabsPositionName {
+    #[default]
+    Sidebar,
+    Top,
+}
+
+impl TabsPositionName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "sidebar" => Some(Self::Sidebar),
+            "top" => Some(Self::Top),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::Sidebar => "sidebar",
+            Self::Top => "top",
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum TabRevealName {
     #[default]
@@ -696,6 +722,7 @@ pub struct RuntimeSettings {
     pub completion_style: CompletionStyleName,
     /// 全宽字形（CJK 等）bold run 用 Regular 字形（粗体提亮不加粗）。
     pub cjk_bold_regular: bool,
+    pub tabs_position: TabsPositionName,
     pub tab_reveal: TabRevealName,
     pub density: DensityName,
     pub new_tab_position: NewTabPositionName,
@@ -767,6 +794,10 @@ impl RuntimeSettings {
                 .and_then(CompletionStyleName::from_settings)
                 .unwrap_or_default(),
             cjk_bold_regular: raw.bool_on("cjk_bold_regular").unwrap_or(true),
+            tabs_position: raw
+                .value("tabs_position")
+                .and_then(TabsPositionName::from_settings)
+                .unwrap_or_default(),
             tab_reveal: raw
                 .value("tab_reveal")
                 .and_then(TabRevealName::from_settings)
@@ -871,6 +902,7 @@ mod tests {
              copy_on_select=1\n\
              bell=audible\n\
              cjk_bold_regular=1\n\
+             tabs_position=top\n\
              tab_reveal=instant\n\
              density=compact\n\
              new_tab_position=end\n\
@@ -905,6 +937,7 @@ mod tests {
         assert_eq!(settings.shell.as_deref(), Some("pwsh"));
         assert_eq!(settings.accept, AcceptKeyName::Tab);
         assert_eq!(settings.completion_style, CompletionStyleName::Popup);
+        assert_eq!(settings.tabs_position, TabsPositionName::Top);
         assert_eq!(settings.tab_reveal, TabRevealName::Instant);
         assert_eq!(settings.density, DensityName::Compact);
         assert_eq!(settings.new_tab_position, NewTabPositionName::End);
@@ -939,6 +972,7 @@ mod tests {
         assert_eq!(settings.accept, AcceptKeyName::Both);
         assert_eq!(settings.completion_style, CompletionStyleName::Inline);
         assert!(settings.cjk_bold_regular);
+        assert_eq!(settings.tabs_position, TabsPositionName::Sidebar);
         assert_eq!(settings.tab_reveal, TabRevealName::Slide);
         assert_eq!(settings.density, DensityName::Standard);
         assert_eq!(settings.new_tab_position, NewTabPositionName::AfterCurrent);
@@ -969,6 +1003,21 @@ mod tests {
         assert_eq!(
             RuntimeSettings::from_raw(&RawSettings::from_text("bell=loud\n")).bell,
             BellModeName::Both
+        );
+    }
+
+    #[test]
+    fn tabs_position_parses_supported_values_and_defaults_to_sidebar() {
+        assert_eq!(
+            TabsPositionName::from_settings("sidebar"),
+            Some(TabsPositionName::Sidebar)
+        );
+        assert_eq!(TabsPositionName::from_settings("TOP"), Some(TabsPositionName::Top));
+        assert_eq!(TabsPositionName::from_settings("bottom"), None);
+        assert_eq!(
+            RuntimeSettings::from_raw(&RawSettings::from_text("tabs_position=bottom\n"))
+                .tabs_position,
+            TabsPositionName::Sidebar
         );
     }
 
