@@ -26,9 +26,9 @@ use super::mouse_protocol;
 use super::session::{self, TerminalSession};
 use super::suggest;
 use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
+use crate::config::UiConfig;
 use crate::gpui_shell::config::Settings;
 use crate::gpui_shell::prelude::{DialogButtonProps, center_confirm_dialog};
-use crate::config::UiConfig;
 
 use futures::StreamExt as _;
 
@@ -453,10 +453,9 @@ impl TerminalView {
             cell_height: (line_h.as_f32() * scale).round().max(1.0) as u16,
         };
         let initial_cwd = match &launch {
-            TerminalLaunch::Local { cwd, .. } => cwd
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            TerminalLaunch::Local { cwd, .. } => {
+                cwd.as_ref().map(|path| path.to_string_lossy().into_owned()).unwrap_or_default()
+            },
             TerminalLaunch::Ssh { destination } => destination.clone(),
         };
         let (ssh_destination, initial_title, intro_shell_name, spawned) = match launch {
@@ -1025,8 +1024,7 @@ impl TerminalView {
         if session_id.is_empty() {
             return;
         }
-        self.ai_session =
-            Some(crate::display::AiSessionIdentity { source, session_id });
+        self.ai_session = Some(crate::display::AiSessionIdentity { source, session_id });
         cx.emit(TerminalViewEvent::TitleChanged);
         cx.notify();
     }
@@ -1145,6 +1143,53 @@ impl TerminalView {
             self.exited.is_some(),
             self.exited.clone(),
         ))
+    }
+
+    pub fn runtime_procs(
+        &self,
+        window_id: u64,
+    ) -> Result<crate::runtime_api::RuntimePaneProcesses, crate::runtime_api::ApiError> {
+        if self.ssh_destination.is_some() {
+            return Err(crate::runtime_api::ApiError::new(
+                "remote_process_unavailable",
+                "pane.procs cannot infer a remote process tree from the local SSH transport",
+            ));
+        }
+        let Some(session) = &self.session else {
+            return Err(crate::runtime_api::ApiError::new(
+                "runtime_unavailable",
+                "terminal session is unavailable for this pane",
+            ));
+        };
+        crate::runtime_api::capture_process_tree(window_id, self.pane_id, session.shell_pid)
+    }
+
+    pub fn runtime_send_key(
+        &mut self,
+        key: crate::runtime_api::RuntimeKey,
+        modifiers: crate::runtime_api::RuntimeKeyModifiers,
+        repeat: u16,
+        cx: &mut Context<Self>,
+    ) -> Result<usize, crate::runtime_api::ApiError> {
+        if let Some(reason) = &self.exited {
+            return Err(crate::runtime_api::ApiError::new(
+                "invalid_state",
+                format!("pane has exited: {reason}"),
+            ));
+        }
+        self.ensure_runtime_readable()?;
+        let mode = self.term_mode();
+        let bytes =
+            crate::input::terminal_input::build_runtime_sequence(key, modifiers, repeat, mode);
+        if bytes.is_empty() {
+            return Err(crate::runtime_api::ApiError::new(
+                "input_encoding_unavailable",
+                "the requested key cannot be encoded for the pane's active terminal mode",
+            ));
+        }
+        let bytes_sent = bytes.len();
+        self.write_input(bytes, cx);
+        Ok(bytes_sent)
     }
 
     pub fn runtime_prompt(
@@ -2061,10 +2106,9 @@ impl TerminalView {
             self.session.as_ref().and_then(|session| {
                 let (point, _) = self.grid_point(position);
                 let term = session.term.lock();
-                super::osc_links::highlighted_at(&term, &self.hint_config, point, mods)
-                    .and_then(|hint| {
-                        super::osc_links::hover_from_hint(&term, hint, self.rows, self.cols)
-                    })
+                super::osc_links::highlighted_at(&term, &self.hint_config, point, mods).and_then(
+                    |hint| super::osc_links::hover_from_hint(&term, hint, self.rows, self.cols),
+                )
             })
         };
         let changed = match (&self.link_hover, &next) {

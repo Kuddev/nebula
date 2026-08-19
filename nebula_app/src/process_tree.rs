@@ -42,11 +42,21 @@ pub fn display_name(exe: &str) -> String {
     exe.strip_suffix(".exe").or_else(|| exe.strip_suffix(".EXE")).unwrap_or(exe).to_owned()
 }
 
-/// First non-stateless process under `root_pid` (the pane's shell), or `None`
-/// when the whole tree is safe to kill. The name is used in the confirm modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessEntry {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub executable: String,
+    pub depth: u32,
+}
+
+/// Snapshot the real local descendants owned by one terminal shell. The root
+/// is included at depth zero so clients can distinguish the PTY owner from the
+/// commands below it. Toolhelp is intentionally sampled on demand; running it
+/// on the 1 Hz UI state pump would scan the whole machine continuously.
 #[cfg(windows)]
-pub fn busy_child(root_pid: u32) -> Option<String> {
-    use std::collections::HashMap;
+pub fn descendants(root_pid: u32) -> Result<Vec<ProcessEntry>, String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::mem;
 
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
@@ -56,60 +66,87 @@ pub fn busy_child(root_pid: u32) -> Option<String> {
     };
 
     if root_pid == 0 {
-        return None;
+        return Err("the pane does not own a local shell process".to_owned());
     }
 
-    // One snapshot of every process: (pid -> (parent, exe name)).
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
-        return None;
+        return Err(format!(
+            "CreateToolhelp32Snapshot failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
 
-    let mut procs: HashMap<u32, (u32, String)> = HashMap::new();
-    unsafe {
+    let mut processes: HashMap<u32, (u32, String)> = HashMap::new();
+    let read_result = unsafe {
         let mut entry: PROCESSENTRY32W = mem::zeroed();
         entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
-        if Process32FirstW(snapshot, &mut entry) != 0 {
+        if Process32FirstW(snapshot, &mut entry) == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
             loop {
                 let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
                 let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
-                procs.insert(entry.th32ProcessID, (entry.th32ParentProcessID, name));
+                processes.insert(entry.th32ProcessID, (entry.th32ParentProcessID, name));
                 if Process32NextW(snapshot, &mut entry) == 0 {
                     break;
                 }
             }
+            Ok(())
         }
-        CloseHandle(snapshot);
+    };
+    unsafe { CloseHandle(snapshot) };
+    read_result.map_err(|error| format!("Process32FirstW failed: {error}"))?;
+
+    if !processes.contains_key(&root_pid) {
+        return Err(format!("shell process {root_pid} is no longer present"));
     }
 
-    // Parent -> children edges, then BFS down from the shell.
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (&pid, &(parent, _)) in &procs {
-        // PIDs are recycled; a stale parent id equal to itself would loop.
+    for (&pid, &(parent, _)) in &processes {
         if parent != pid {
             children.entry(parent).or_default().push(pid);
         }
     }
+    for child_ids in children.values_mut() {
+        child_ids.sort_unstable();
+    }
 
-    let mut queue = vec![root_pid];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(pid) = queue.pop() {
+    let mut result = Vec::new();
+    let mut queue = VecDeque::from([(root_pid, 0_u32)]);
+    let mut seen = HashSet::new();
+    while let Some((pid, depth)) = queue.pop_front() {
         if !seen.insert(pid) {
             continue;
         }
-        if pid != root_pid {
-            if let Some((_, name)) = procs.get(&pid) {
-                let lower = name.to_ascii_lowercase();
-                if !STATELESS.contains(&lower.as_str()) {
-                    return Some(name.clone());
-                }
-            }
+        if let Some((parent_pid, executable)) = processes.get(&pid) {
+            result.push(ProcessEntry {
+                pid,
+                parent_pid: *parent_pid,
+                executable: executable.clone(),
+                depth,
+            });
         }
-        if let Some(kids) = children.get(&pid) {
-            queue.extend_from_slice(kids);
+        if let Some(child_ids) = children.get(&pid) {
+            queue.extend(child_ids.iter().map(|child| (*child, depth.saturating_add(1))));
         }
     }
-    None
+    Ok(result)
+}
+
+#[cfg(not(windows))]
+pub fn descendants(_root_pid: u32) -> Result<Vec<ProcessEntry>, String> {
+    Err("pane.procs is not implemented on this platform".to_owned())
+}
+
+/// First non-stateless process under `root_pid` (the pane's shell), or `None`
+/// when the whole tree is safe to kill. The name is used in the confirm modal.
+#[cfg(windows)]
+pub fn busy_child(root_pid: u32) -> Option<String> {
+    descendants(root_pid).ok()?.into_iter().skip(1).find_map(|process| {
+        let lower = process.executable.to_ascii_lowercase();
+        (!STATELESS.contains(&lower.as_str())).then_some(process.executable)
+    })
 }
 
 #[cfg(not(windows))]

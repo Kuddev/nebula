@@ -100,11 +100,14 @@ impl NebulaWorkspace {
             RuntimeCommand::Focus { .. }
             | RuntimeCommand::NewTab { .. }
             | RuntimeCommand::Split { .. }
-            | RuntimeCommand::Prompt { .. } => {
+            | RuntimeCommand::Prompt { .. }
+            | RuntimeCommand::SendKey { .. } => {
                 self.reveal_session(cx);
                 self.runtime_pending.push(dispatch);
             },
-            RuntimeCommand::Snapshot | RuntimeCommand::ReadPane { .. } => {
+            RuntimeCommand::Snapshot
+            | RuntimeCommand::ReadPane { .. }
+            | RuntimeCommand::Procs { .. } => {
                 self.runtime_pending.push(dispatch);
             },
         }
@@ -225,6 +228,58 @@ impl NebulaWorkspace {
                 }?;
                 serde_json::to_value(read)
                     .map_err(|error| ApiError::new("serialization_failed", error.to_string()))
+            },
+            RuntimeCommand::Procs { window_id, pane_id } => {
+                self.runtime_window_requested(*window_id)?;
+                let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("pane {pane_id} does not exist"),
+                    ));
+                };
+                let processes = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                        .iter()
+                        .find(|pane| pane.id == *pane_id)
+                        .expect("tab_of_pane resolved a terminal pane")
+                        .view
+                        .read(cx)
+                        .runtime_procs(self.runtime_window_id),
+                    _ => unreachable!("tab_of_pane only resolves terminal tabs"),
+                }?;
+                serde_json::to_value(processes)
+                    .map_err(|error| ApiError::new("serialization_failed", error.to_string()))
+            },
+            RuntimeCommand::SendKey { window_id, pane_id, key, modifiers, repeat } => {
+                self.runtime_window_requested(*window_id)?;
+                let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("pane {pane_id} does not exist"),
+                    ));
+                };
+                let view = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                        .iter()
+                        .find(|pane| pane.id == *pane_id)
+                        .expect("tab_of_pane resolved a terminal pane")
+                        .view
+                        .clone(),
+                    _ => unreachable!("tab_of_pane only resolves terminal tabs"),
+                };
+                let bytes_sent = view
+                    .update(cx, |view, cx| view.runtime_send_key(*key, *modifiers, *repeat, cx))?;
+                self.runtime_result(
+                    json!({
+                        "window_id": self.runtime_window_id,
+                        "pane_id": pane_id,
+                        "key": key.as_str(),
+                        "repeat": repeat,
+                        "bytes_sent": bytes_sent
+                    }),
+                    window,
+                    cx,
+                )
             },
         }
     }

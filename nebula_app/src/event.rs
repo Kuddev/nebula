@@ -586,6 +586,31 @@ impl Processor {
                 serde_json::to_value(read)
                     .map_err(|error| ApiError::new("serialization_failed", error.to_string()))
             },
+            RuntimeCommand::Procs { window_id, pane_id } => {
+                let id = self.runtime_target_window(*window_id, Some(*pane_id))?;
+                let processes = self
+                    .windows
+                    .get(&id)
+                    .expect("resolved runtime window exists")
+                    .runtime_procs(*pane_id)?;
+                serde_json::to_value(processes)
+                    .map_err(|error| ApiError::new("serialization_failed", error.to_string()))
+            },
+            RuntimeCommand::SendKey { window_id, pane_id, key, modifiers, repeat } => {
+                let id = self.runtime_target_window(*window_id, Some(*pane_id))?;
+                let bytes_sent = self
+                    .windows
+                    .get_mut(&id)
+                    .expect("resolved runtime window exists")
+                    .runtime_send_key(*pane_id, *key, *modifiers, *repeat)?;
+                self.runtime_result(serde_json::json!({
+                    "window_id": u64::from(id),
+                    "pane_id": pane_id,
+                    "key": key.as_str(),
+                    "repeat": repeat,
+                    "bytes_sent": bytes_sent
+                }))
+            },
         }
     }
 
@@ -1749,8 +1774,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             return;
         }
         let current = self.nebula_state.completion_selected as isize;
-        self.nebula_state.completion_selected =
-            (current + delta).rem_euclid(len as isize) as usize;
+        self.nebula_state.completion_selected = (current + delta).rem_euclid(len as isize) as usize;
         *self.dirty = true;
     }
 
@@ -3193,31 +3217,29 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         self.ctx.nebula_state.command_started = Some(Instant::now());
                         // Program identity for the sidebar tab icon, from the
                         // line captured at Enter (buffers are cleared by now).
-                        self.ctx.nebula_state.running_program = crate::display::extract_program(
-                            &self.ctx.nebula_state.last_committed,
-                        )
-                        .map(|program| {
-                            crate::ai_agents::AgentKind::parse(&program)
-                                .map(|agent| agent.slug().to_owned())
-                                .unwrap_or(program)
-                        });
+                        self.ctx.nebula_state.running_program =
+                            crate::display::extract_program(&self.ctx.nebula_state.last_committed)
+                                .map(|program| {
+                                    crate::ai_agents::AgentKind::parse(&program)
+                                        .map(|agent| agent.slug().to_owned())
+                                        .unwrap_or(program)
+                                });
                         self.ctx.nebula_state.agent_hook_seen = false;
                         self.ctx.nebula_state.agent_status_rule = None;
                         self.ctx.nebula_state.agent_status_source =
                             crate::ai_agents::AgentStatusSource::Process;
-                        self.ctx.nebula_state.agent_status =
-                            if self
-                                .ctx
-                                .nebula_state
-                                .running_program
-                                .as_deref()
-                                .and_then(crate::ai_agents::AgentKind::parse)
-                                .is_some()
-                            {
-                                crate::ai_agents::AgentStatus::Working
-                            } else {
-                                crate::ai_agents::AgentStatus::Unknown
-                            };
+                        self.ctx.nebula_state.agent_status = if self
+                            .ctx
+                            .nebula_state
+                            .running_program
+                            .as_deref()
+                            .and_then(crate::ai_agents::AgentKind::parse)
+                            .is_some()
+                        {
+                            crate::ai_agents::AgentStatus::Working
+                        } else {
+                            crate::ai_agents::AgentStatus::Unknown
+                        };
                         // Arm the ssh host auto-save: when this command is an
                         // interactive ssh login, hold its destination until a
                         // remote NEBULA| title or a long-enough session
@@ -3235,8 +3257,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // 留着它，快照会把一个已经退出的会话当活的接续。
                         self.ctx.nebula_state.ai_session = None;
                         self.ctx.nebula_state.agent_hook_seen = false;
-                        self.ctx.nebula_state.agent_status =
-                            crate::ai_agents::AgentStatus::Unknown;
+                        self.ctx.nebula_state.agent_status = crate::ai_agents::AgentStatus::Unknown;
                         self.ctx.nebula_state.agent_status_source =
                             crate::ai_agents::AgentStatusSource::Unknown;
                         self.ctx.nebula_state.agent_status_rule = None;
@@ -3560,8 +3581,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // 么都没反应"，直到最小化再复原靠 Focused(true) 的
                         // 补丁解锁（issue #21）。窗口明明没最小化就发来的
                         // true 一律不信；false 永远接受。
-                        let minimized =
-                            self.ctx.display.window.is_minimized().unwrap_or(false);
+                        let minimized = self.ctx.display.window.is_minimized().unwrap_or(false);
                         if !occluded || minimized {
                             *self.ctx.occluded = occluded;
                         }

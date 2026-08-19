@@ -40,6 +40,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_PROMPT_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_KEY_REPEAT: u16 = 64;
 pub(crate) const DEFAULT_READ_LINES: usize = 120;
 pub(crate) const MAX_READ_LINES: usize = 2_000;
 const MAX_READ_BYTES: usize = 1024 * 1024;
@@ -330,15 +331,197 @@ pub struct RuntimePaneRead {
     pub exit_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeProcess {
+    pub pid: u32,
+    pub parent_pid: Option<u32>,
+    pub executable: String,
+    pub display_name: String,
+    pub depth: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePaneProcesses {
+    pub window_id: u64,
+    pub pane_id: u64,
+    pub root_pid: u32,
+    pub processes: Vec<RuntimeProcess>,
+}
+
+/// Named control keys accepted by `pane.send_key`. Printable text is
+/// intentionally absent; callers must use `pane.prompt` for text input.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeKey {
+    Escape,
+    Enter,
+    Tab,
+    Backspace,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    Insert,
+    Delete,
+    PageUp,
+    PageDown,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+}
+
+impl RuntimeKey {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Escape => "escape",
+            Self::Enter => "enter",
+            Self::Tab => "tab",
+            Self::Backspace => "backspace",
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Home => "home",
+            Self::End => "end",
+            Self::Insert => "insert",
+            Self::Delete => "delete",
+            Self::PageUp => "page_up",
+            Self::PageDown => "page_down",
+            Self::F1 => "f1",
+            Self::F2 => "f2",
+            Self::F3 => "f3",
+            Self::F4 => "f4",
+            Self::F5 => "f5",
+            Self::F6 => "f6",
+            Self::F7 => "f7",
+            Self::F8 => "f8",
+            Self::F9 => "f9",
+            Self::F10 => "f10",
+            Self::F11 => "f11",
+            Self::F12 => "f12",
+            Self::A => "a",
+            Self::B => "b",
+            Self::C => "c",
+            Self::D => "d",
+            Self::E => "e",
+            Self::F => "f",
+            Self::G => "g",
+            Self::H => "h",
+            Self::I => "i",
+            Self::J => "j",
+            Self::K => "k",
+            Self::L => "l",
+            Self::M => "m",
+            Self::N => "n",
+            Self::O => "o",
+            Self::P => "p",
+            Self::Q => "q",
+            Self::R => "r",
+            Self::S => "s",
+            Self::T => "t",
+            Self::U => "u",
+            Self::V => "v",
+            Self::W => "w",
+            Self::X => "x",
+            Self::Y => "y",
+            Self::Z => "z",
+        }
+    }
+
+    pub(crate) fn letter(self) -> Option<char> {
+        let value = self.as_str();
+        (value.len() == 1).then(|| value.as_bytes()[0] as char)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeKeyModifiers {
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub control: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum RuntimeCommand {
     Snapshot,
     NewWindow,
-    Focus { window_id: Option<u64>, pane_id: Option<u64> },
-    NewTab { window_id: Option<u64>, cwd: Option<PathBuf> },
-    Split { window_id: Option<u64>, direction: RuntimeSplitDirection },
-    Prompt { window_id: Option<u64>, pane_id: u64, text: String, submit: bool },
-    ReadPane { window_id: Option<u64>, pane_id: u64, lines: usize },
+    Focus {
+        window_id: Option<u64>,
+        pane_id: Option<u64>,
+    },
+    NewTab {
+        window_id: Option<u64>,
+        cwd: Option<PathBuf>,
+    },
+    Split {
+        window_id: Option<u64>,
+        direction: RuntimeSplitDirection,
+    },
+    Prompt {
+        window_id: Option<u64>,
+        pane_id: u64,
+        text: String,
+        submit: bool,
+    },
+    ReadPane {
+        window_id: Option<u64>,
+        pane_id: u64,
+        lines: usize,
+    },
+    Procs {
+        window_id: Option<u64>,
+        pane_id: u64,
+    },
+    SendKey {
+        window_id: Option<u64>,
+        pane_id: u64,
+        key: RuntimeKey,
+        modifiers: RuntimeKeyModifiers,
+        repeat: u16,
+    },
 }
 
 #[derive(Debug)]
@@ -549,6 +732,27 @@ struct ReadParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PaneParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    pane_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendKeyParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    pane_id: u64,
+    key: RuntimeKey,
+    #[serde(default)]
+    modifiers: RuntimeKeyModifiers,
+    #[serde(default = "default_key_repeat")]
+    repeat: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SubscribeParams {
     #[serde(default)]
     since_revision: Option<u64>,
@@ -590,6 +794,10 @@ fn default_read_lines() -> usize {
     DEFAULT_READ_LINES
 }
 
+fn default_key_repeat() -> u16 {
+    1
+}
+
 impl RuntimeCommand {
     fn from_request(request: &ApiRequest) -> Result<Self, ApiError> {
         match request.method.as_str() {
@@ -628,6 +836,30 @@ impl RuntimeCommand {
                     window_id: params.window_id,
                     pane_id: params.pane_id,
                     lines: params.lines,
+                })
+            },
+            "pane.procs" => {
+                let params: PaneParams = parse_params(&request.params)?;
+                Ok(Self::Procs { window_id: params.window_id, pane_id: params.pane_id })
+            },
+            "pane.send_key" => {
+                let params: SendKeyParams = parse_params(&request.params)?;
+                if params.repeat == 0 || params.repeat > MAX_KEY_REPEAT {
+                    return Err(ApiError::invalid_params(format!(
+                        "repeat must be between 1 and {MAX_KEY_REPEAT}"
+                    )));
+                }
+                if params.key.letter().is_some() && !params.modifiers.control {
+                    return Err(ApiError::invalid_params(
+                        "letter keys require control=true; use pane.prompt for printable text",
+                    ));
+                }
+                Ok(Self::SendKey {
+                    window_id: params.window_id,
+                    pane_id: params.pane_id,
+                    key: params.key,
+                    modifiers: params.modifiers,
+                    repeat: params.repeat,
                 })
             },
             method => Err(ApiError::new(
@@ -708,6 +940,33 @@ pub(crate) fn capture_terminal_tail<T: EventListener>(
         exited,
         exit_reason,
     }
+}
+
+pub(crate) fn capture_process_tree(
+    window_id: u64,
+    pane_id: u64,
+    root_pid: u32,
+) -> Result<RuntimePaneProcesses, ApiError> {
+    let entries = crate::process_tree::descendants(root_pid).map_err(|message| {
+        ApiError::new("process_query_failed", "failed to read the pane process tree")
+            .details(json!({ "root_pid": root_pid, "reason": message }))
+    })?;
+    let processes = entries
+        .into_iter()
+        .map(|entry| {
+            let agent_kind = crate::ai_agents::AgentKind::parse(&entry.executable)
+                .map(|kind| kind.slug().to_owned());
+            RuntimeProcess {
+                pid: entry.pid,
+                parent_pid: (entry.pid != root_pid).then_some(entry.parent_pid),
+                display_name: crate::process_tree::display_name(&entry.executable),
+                executable: entry.executable,
+                depth: entry.depth,
+                agent_kind,
+            }
+        })
+        .collect();
+    Ok(RuntimePaneProcesses { window_id, pane_id, root_pid, processes })
 }
 
 fn parse_params<T: DeserializeOwned>(value: &Value) -> Result<T, ApiError> {
@@ -805,8 +1064,12 @@ pub fn try_open_default_tab_existing() -> bool {
 /// ——调用方不关心结果，失败在事件线程侧留日志即可。SFTP 图片粘贴用它回粘
 /// 远端路径。
 pub fn dispatch_prompt(proxy: &EventLoopProxy<Event>, pane_id: u64, text: String) {
-    let (dispatch, _receiver) =
-        RuntimeDispatch::new(RuntimeCommand::Prompt { window_id: None, pane_id, text, submit: false });
+    let (dispatch, _receiver) = RuntimeDispatch::new(RuntimeCommand::Prompt {
+        window_id: None,
+        pane_id,
+        text,
+        submit: false,
+    });
     if proxy.send_event(Event::new(EventType::RuntimeControl(dispatch), None)).is_err() {
         warn!("prompt dispatch failed: event loop is gone");
     }
@@ -827,9 +1090,7 @@ fn try_open_tab_existing(dir: Option<&std::path::Path>) -> bool {
     // ATTACH 与 tab.new 都落到同一条 winit 事件队列上，先后有序：窗口先
     // 恢复，新标签随后落在恢复出来的窗口里。
     let params = dir.map_or_else(|| json!({}), |dir| json!({ "cwd": dir }));
-    request_once("tab.new", params, IO_TIMEOUT)
-        .map(|response| response.ok)
-        .unwrap_or(false)
+    request_once("tab.new", params, IO_TIMEOUT).map(|response| response.ok).unwrap_or(false)
 }
 
 fn legacy_request(verb: &str) -> Option<()> {
@@ -1056,6 +1317,8 @@ fn runtime_description() -> Value {
             "pane.split",
             "pane.prompt",
             "pane.read",
+            "pane.procs",
+            "pane.send_key",
             "pane.wait"
         ],
         // Additive params cannot be detected from `capabilities`: an older
@@ -1101,10 +1364,8 @@ fn agents_connection(
     }
 
     let mut agents = Vec::new();
-    for window in snapshot
-        .windows
-        .iter()
-        .filter(|window| params.window_id.is_none_or(|id| window.id == id))
+    for window in
+        snapshot.windows.iter().filter(|window| params.window_id.is_none_or(|id| window.id == id))
     {
         for tab in &window.tabs {
             for pane in &tab.panes {
@@ -1265,6 +1526,16 @@ fn dispatch_connection(
         Ok(command) => command,
         Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
     };
+    if let RuntimeCommand::SendKey { window_id, pane_id, key, modifiers, repeat } = &command {
+        info!(
+            "runtime pane.send_key request_id={} window_id={window_id:?} pane_id={pane_id} key={} shift={} alt={} control={} repeat={repeat}",
+            request.id,
+            key.as_str(),
+            modifiers.shift,
+            modifiers.alt,
+            modifiers.control,
+        );
+    }
     let (dispatch, receiver) = RuntimeDispatch::new(command);
     if !sink.emit_control(dispatch) {
         return write_response(
@@ -1360,8 +1631,7 @@ pub fn run_cli(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             print_response(&response, options.pretty)
         },
         CliCommand::Agents { window } => {
-            let response =
-                request_once("agents.list", json!({ "window_id": window }), timeout)?;
+            let response = request_once("agents.list", json!({ "window_id": window }), timeout)?;
             print_response(&response, options.pretty)
         },
         CliCommand::Subscribe { since } => subscribe_cli(since, timeout),
@@ -1417,6 +1687,32 @@ pub fn run_cli(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             let response = request_once(
                 "pane.read",
                 json!({ "window_id": window, "pane_id": pane, "lines": lines }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::Procs { window, pane } => {
+            let response = request_once(
+                "pane.procs",
+                json!({ "window_id": window, "pane_id": pane }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::SendKey { window, pane, key, shift, alt, control, repeat } => {
+            let response = request_once(
+                "pane.send_key",
+                json!({
+                    "window_id": window,
+                    "pane_id": pane,
+                    "key": key,
+                    "modifiers": {
+                        "shift": shift,
+                        "alt": alt,
+                        "control": control
+                    },
+                    "repeat": repeat
+                }),
                 timeout,
             )?;
             print_response(&response, options.pretty)
@@ -1578,6 +1874,38 @@ mod tests {
     }
 
     #[test]
+    fn send_key_accepts_only_the_restricted_control_contract() {
+        let valid = ApiRequest::new(
+            "token".into(),
+            "pane.send_key",
+            json!({
+                "pane_id": 3,
+                "key": "c",
+                "modifiers": { "control": true },
+                "repeat": 2
+            }),
+        );
+        assert!(matches!(
+            RuntimeCommand::from_request(&valid),
+            Ok(RuntimeCommand::SendKey { key: RuntimeKey::C, repeat: 2, .. })
+        ));
+
+        let printable =
+            ApiRequest::new("token".into(), "pane.send_key", json!({ "pane_id": 3, "key": "c" }));
+        assert_eq!(RuntimeCommand::from_request(&printable).unwrap_err().code, "invalid_params");
+
+        let arbitrary_bytes = ApiRequest::new(
+            "token".into(),
+            "pane.send_key",
+            json!({ "pane_id": 3, "key": "escape", "bytes": [27, 91, 50, 74] }),
+        );
+        assert_eq!(
+            RuntimeCommand::from_request(&arbitrary_bytes).unwrap_err().code,
+            "invalid_params"
+        );
+    }
+
+    #[test]
     fn settled_wait_excludes_only_running() {
         assert!(!wait_state_matches(RuntimeTaskState::Running, RuntimeWaitState::Settled));
         assert!(wait_state_matches(RuntimeTaskState::WaitingInput, RuntimeWaitState::Settled));
@@ -1646,15 +1974,7 @@ mod tests {
     #[test]
     fn terminal_tail_reads_buffer_bottom_with_utf8_intact() {
         let term = nebula_terminal::term::test::mock_term("old\r\n中间\r\nlatest");
-        let read = capture_terminal_tail(
-            &term,
-            7,
-            3,
-            2,
-            RuntimeTaskState::Finished,
-            false,
-            None,
-        );
+        let read = capture_terminal_tail(&term, 7, 3, 2, RuntimeTaskState::Finished, false, None);
         assert_eq!(read.text, "中间\nlatest");
         assert_eq!(read.requested_lines, 2);
         assert_eq!(read.returned_lines, 2);
@@ -1677,12 +1997,7 @@ mod tests {
         let published = hub.publish(snapshot);
         assert_eq!(published.windows[0].tabs[0].panes[0].state_change_seq, 1);
         assert_eq!(
-            published.windows[0].tabs[0].panes[0]
-                .agent
-                .as_ref()
-                .unwrap()
-                .session_id
-                .as_deref(),
+            published.windows[0].tabs[0].panes[0].agent.as_ref().unwrap().session_id.as_deref(),
             Some("thread-7")
         );
     }

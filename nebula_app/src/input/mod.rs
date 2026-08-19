@@ -34,7 +34,7 @@ mod chrome;
 pub mod keyboard;
 pub mod latency;
 mod mouse;
-mod terminal_input;
+pub(crate) mod terminal_input;
 mod touch;
 
 #[cfg(test)]

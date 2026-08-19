@@ -452,6 +452,31 @@ pub enum ControlCommand {
         #[clap(long, default_value_t = crate::runtime_api::DEFAULT_READ_LINES)]
         lines: usize,
     },
+    /// List the real local process tree rooted at a pane's PTY shell.
+    Procs {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+    },
+    /// Send a restricted named control key using the pane's active terminal mode.
+    SendKey {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+        /// Named key: escape, enter, arrows, navigation, f1-f12, or a-z with --control.
+        #[clap(long)]
+        key: String,
+        #[clap(long)]
+        shift: bool,
+        #[clap(long)]
+        alt: bool,
+        #[clap(long)]
+        control: bool,
+        #[clap(long, default_value_t = 1)]
+        repeat: u16,
+    },
     /// Wait until a pane reaches a semantic task state.
     Wait {
         #[clap(long)]

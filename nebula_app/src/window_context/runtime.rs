@@ -9,8 +9,9 @@ use nebula_terminal::event::Notify;
 use crate::display::SplitDirection;
 use crate::event::TabRequest;
 use crate::runtime_api::{
-    ApiError, RuntimeAgent, RuntimeAgentStateSource, RuntimeLayout, RuntimePane, RuntimePaneRead,
-    RuntimeSplitDirection, RuntimeTab, RuntimeTaskState, RuntimeWindow,
+    ApiError, RuntimeAgent, RuntimeAgentStateSource, RuntimeKey, RuntimeKeyModifiers,
+    RuntimeLayout, RuntimePane, RuntimePaneProcesses, RuntimePaneRead, RuntimeSplitDirection,
+    RuntimeTab, RuntimeTaskState, RuntimeWindow,
 };
 
 use super::{Layout, TabLaunch, WindowContext};
@@ -203,6 +204,54 @@ impl WindowContext {
             false,
             None,
         ))
+    }
+
+    pub(crate) fn runtime_procs(&self, pane_id: u64) -> Result<RuntimePaneProcesses, ApiError> {
+        let Some(pane) = self.pane(pane_id) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to the target window"),
+            ));
+        };
+        if pane.ssh_destination.is_some() {
+            return Err(ApiError::new(
+                "remote_process_unavailable",
+                "pane.procs cannot infer a remote process tree from the local SSH transport",
+            ));
+        }
+        crate::runtime_api::capture_process_tree(self.id().into(), pane_id, pane.shell_pid)
+    }
+
+    pub(crate) fn runtime_send_key(
+        &mut self,
+        pane_id: u64,
+        key: RuntimeKey,
+        modifiers: RuntimeKeyModifiers,
+        repeat: u16,
+    ) -> Result<usize, ApiError> {
+        let Some(index) = self.pane_index(pane_id) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to the target window"),
+            ));
+        };
+        let pane = &mut self.panes[index];
+        let mode = *pane.terminal.lock().mode();
+        let bytes =
+            crate::input::terminal_input::build_runtime_sequence(key, modifiers, repeat, mode);
+        if bytes.is_empty() {
+            return Err(ApiError::new(
+                "input_encoding_unavailable",
+                "the requested key cannot be encoded for the pane's active terminal mode",
+            ));
+        }
+        let bytes_sent = bytes.len();
+        pane.notifier.notify(bytes);
+        pane.nebula_state.touched = true;
+        pane.nebula_state.awaiting_input = false;
+        self.dirty = true;
+        self.display.window.request_redraw();
+        Ok(bytes_sent)
     }
 }
 

@@ -24,6 +24,8 @@ use winit::platform::windows::{KeyEventExtWindows, RawKeyEventInfo};
 
 use nebula_terminal::term::TermMode;
 
+use crate::runtime_api::{RuntimeKey, RuntimeKeyModifiers};
+
 /// Keyboard facts for one key transition, captured once from the platform
 /// event and consumed by every encoder.
 ///
@@ -240,6 +242,268 @@ pub(crate) fn build_sequence(input: &KeyInput, mods: ModifiersState, mode: TermM
     payload.push(terminator.encode_esc_sequence());
 
     payload.into_bytes()
+}
+
+/// Encode one API-level named key from normalized facts. This path deliberately
+/// excludes printable text and synthesizes a complete press/release pair only
+/// for protocols that report key state.
+pub(crate) fn build_runtime_sequence(
+    key: RuntimeKey,
+    modifiers: RuntimeKeyModifiers,
+    repeat: u16,
+    mode: TermMode,
+) -> Vec<u8> {
+    let mods = runtime_modifiers(modifiers);
+    let mut result = Vec::new();
+    for _ in 0..repeat {
+        if use_win32_input_mode(mode) {
+            #[cfg(target_os = "windows")]
+            {
+                let pressed = runtime_key_input(key, modifiers, ElementState::Pressed);
+                let released = runtime_key_input(key, modifiers, ElementState::Released);
+                result.extend(build_sequence(&pressed, mods, mode));
+                result.extend(build_sequence(&released, mods, mode));
+                continue;
+            }
+        }
+
+        if mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL) {
+            let pressed = runtime_key_input(key, modifiers, ElementState::Pressed);
+            result.extend(build_sequence(&pressed, mods, mode));
+            if mode.contains(TermMode::REPORT_EVENT_TYPES) {
+                let released = runtime_key_input(key, modifiers, ElementState::Released);
+                result.extend(build_sequence(&released, mods, mode));
+            }
+            continue;
+        }
+
+        result.extend(runtime_legacy_sequence(key, modifiers, mode));
+    }
+    result
+}
+
+fn runtime_modifiers(modifiers: RuntimeKeyModifiers) -> ModifiersState {
+    let mut state = ModifiersState::empty();
+    state.set(ModifiersState::SHIFT, modifiers.shift);
+    state.set(ModifiersState::ALT, modifiers.alt);
+    state.set(ModifiersState::CONTROL, modifiers.control);
+    state
+}
+
+fn runtime_key_input(
+    key: RuntimeKey,
+    modifiers: RuntimeKeyModifiers,
+    state: ElementState,
+) -> KeyInput {
+    let logical_key = runtime_logical_key(key);
+    KeyInput {
+        logical_key: logical_key.clone(),
+        state,
+        location: KeyLocation::Standard,
+        repeat: false,
+        key_without_modifiers: logical_key,
+        text_with_all_modifiers: key.letter().and_then(|letter| {
+            modifiers.control.then(|| SmolStr::new(((letter as u8 - b'a' + 1) as char).to_string()))
+        }),
+        #[cfg(target_os = "windows")]
+        raw: runtime_raw_key(key, modifiers),
+    }
+}
+
+fn runtime_logical_key(key: RuntimeKey) -> Key {
+    let named = match key {
+        RuntimeKey::Escape => NamedKey::Escape,
+        RuntimeKey::Enter => NamedKey::Enter,
+        RuntimeKey::Tab => NamedKey::Tab,
+        RuntimeKey::Backspace => NamedKey::Backspace,
+        RuntimeKey::Up => NamedKey::ArrowUp,
+        RuntimeKey::Down => NamedKey::ArrowDown,
+        RuntimeKey::Left => NamedKey::ArrowLeft,
+        RuntimeKey::Right => NamedKey::ArrowRight,
+        RuntimeKey::Home => NamedKey::Home,
+        RuntimeKey::End => NamedKey::End,
+        RuntimeKey::Insert => NamedKey::Insert,
+        RuntimeKey::Delete => NamedKey::Delete,
+        RuntimeKey::PageUp => NamedKey::PageUp,
+        RuntimeKey::PageDown => NamedKey::PageDown,
+        RuntimeKey::F1 => NamedKey::F1,
+        RuntimeKey::F2 => NamedKey::F2,
+        RuntimeKey::F3 => NamedKey::F3,
+        RuntimeKey::F4 => NamedKey::F4,
+        RuntimeKey::F5 => NamedKey::F5,
+        RuntimeKey::F6 => NamedKey::F6,
+        RuntimeKey::F7 => NamedKey::F7,
+        RuntimeKey::F8 => NamedKey::F8,
+        RuntimeKey::F9 => NamedKey::F9,
+        RuntimeKey::F10 => NamedKey::F10,
+        RuntimeKey::F11 => NamedKey::F11,
+        RuntimeKey::F12 => NamedKey::F12,
+        letter => return Key::Character(SmolStr::new(letter.as_str())),
+    };
+    Key::Named(named)
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_raw_key(key: RuntimeKey, modifiers: RuntimeKeyModifiers) -> RawKeyEventInfo {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        MAPVK_VK_TO_VSC, MapVirtualKeyW, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
+        VK_HOME, VK_INSERT, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP,
+    };
+
+    let virtual_key = match key {
+        RuntimeKey::Escape => VK_ESCAPE,
+        RuntimeKey::Enter => VK_RETURN,
+        RuntimeKey::Tab => VK_TAB,
+        RuntimeKey::Backspace => VK_BACK,
+        RuntimeKey::Up => VK_UP,
+        RuntimeKey::Down => VK_DOWN,
+        RuntimeKey::Left => VK_LEFT,
+        RuntimeKey::Right => VK_RIGHT,
+        RuntimeKey::Home => VK_HOME,
+        RuntimeKey::End => VK_END,
+        RuntimeKey::Insert => VK_INSERT,
+        RuntimeKey::Delete => VK_DELETE,
+        RuntimeKey::PageUp => VK_PRIOR,
+        RuntimeKey::PageDown => VK_NEXT,
+        RuntimeKey::F1
+        | RuntimeKey::F2
+        | RuntimeKey::F3
+        | RuntimeKey::F4
+        | RuntimeKey::F5
+        | RuntimeKey::F6
+        | RuntimeKey::F7
+        | RuntimeKey::F8
+        | RuntimeKey::F9
+        | RuntimeKey::F10
+        | RuntimeKey::F11
+        | RuntimeKey::F12 => VK_F1 + runtime_function_index(key) - 1,
+        letter => letter.as_str().as_bytes()[0].to_ascii_uppercase() as u16,
+    };
+    let scan_code = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_VSC) } as u8;
+    let mut control_key_state = 0;
+    if modifiers.shift {
+        control_key_state |= 0x0010;
+    }
+    if modifiers.alt {
+        control_key_state |= 0x0002;
+    }
+    if modifiers.control {
+        control_key_state |= 0x0008;
+    }
+    let unicode_char = match key {
+        RuntimeKey::Escape => 0x1b,
+        RuntimeKey::Enter => b'\r' as u16,
+        RuntimeKey::Tab => b'\t' as u16,
+        RuntimeKey::Backspace => 0x08,
+        letter if modifiers.control => {
+            letter.letter().map_or(0, |value| u16::from(value as u8 - b'a' + 1))
+        },
+        _ => 0,
+    };
+    RawKeyEventInfo {
+        virtual_key,
+        scan_code,
+        repeat_count: 1,
+        is_extended: false,
+        unicode_char,
+        control_key_state,
+    }
+}
+
+fn runtime_function_index(key: RuntimeKey) -> u16 {
+    match key {
+        RuntimeKey::F1 => 1,
+        RuntimeKey::F2 => 2,
+        RuntimeKey::F3 => 3,
+        RuntimeKey::F4 => 4,
+        RuntimeKey::F5 => 5,
+        RuntimeKey::F6 => 6,
+        RuntimeKey::F7 => 7,
+        RuntimeKey::F8 => 8,
+        RuntimeKey::F9 => 9,
+        RuntimeKey::F10 => 10,
+        RuntimeKey::F11 => 11,
+        RuntimeKey::F12 => 12,
+        _ => 0,
+    }
+}
+
+fn runtime_legacy_sequence(
+    key: RuntimeKey,
+    modifiers: RuntimeKeyModifiers,
+    mode: TermMode,
+) -> Vec<u8> {
+    let param = 1
+        + u8::from(modifiers.shift)
+        + 2 * u8::from(modifiers.alt)
+        + 4 * u8::from(modifiers.control);
+    let cursor = |letter: char| {
+        if param != 1 {
+            format!("\x1b[1;{param}{letter}").into_bytes()
+        } else if mode.contains(TermMode::APP_CURSOR) {
+            format!("\x1bO{letter}").into_bytes()
+        } else {
+            format!("\x1b[{letter}").into_bytes()
+        }
+    };
+    let tilde = |code: u8| {
+        if param == 1 {
+            format!("\x1b[{code}~").into_bytes()
+        } else {
+            format!("\x1b[{code};{param}~").into_bytes()
+        }
+    };
+    match key {
+        RuntimeKey::Escape => b"\x1b".to_vec(),
+        RuntimeKey::Enter => {
+            if modifiers.alt {
+                b"\x1b\r".to_vec()
+            } else {
+                b"\r".to_vec()
+            }
+        },
+        RuntimeKey::Tab => {
+            if modifiers.shift {
+                b"\x1b[Z".to_vec()
+            } else {
+                b"\t".to_vec()
+            }
+        },
+        RuntimeKey::Backspace => {
+            let value = if modifiers.control { 0x08 } else { 0x7f };
+            if modifiers.alt { vec![0x1b, value] } else { vec![value] }
+        },
+        RuntimeKey::Up => cursor('A'),
+        RuntimeKey::Down => cursor('B'),
+        RuntimeKey::Right => cursor('C'),
+        RuntimeKey::Left => cursor('D'),
+        RuntimeKey::Home => cursor('H'),
+        RuntimeKey::End => cursor('F'),
+        RuntimeKey::Insert => tilde(2),
+        RuntimeKey::Delete => tilde(3),
+        RuntimeKey::PageUp => tilde(5),
+        RuntimeKey::PageDown => tilde(6),
+        RuntimeKey::F1 | RuntimeKey::F2 | RuntimeKey::F3 | RuntimeKey::F4 => {
+            let letter = (b'P' + runtime_function_index(key) as u8 - 1) as char;
+            if param == 1 {
+                format!("\x1bO{letter}").into_bytes()
+            } else {
+                format!("\x1b[1;{param}{letter}").into_bytes()
+            }
+        },
+        RuntimeKey::F5 => tilde(15),
+        RuntimeKey::F6 => tilde(17),
+        RuntimeKey::F7 => tilde(18),
+        RuntimeKey::F8 => tilde(19),
+        RuntimeKey::F9 => tilde(20),
+        RuntimeKey::F10 => tilde(21),
+        RuntimeKey::F11 => tilde(23),
+        RuntimeKey::F12 => tilde(24),
+        letter => {
+            let value = letter.letter().expect("letter variant") as u8 - b'a' + 1;
+            if modifiers.alt { vec![0x1b, value] } else { vec![value] }
+        },
+    }
 }
 
 /// Select protocol precedence for ConPTY's native input mode. Child-requested
@@ -755,6 +1019,57 @@ mod vt_tests {
 
         let f5 = input(Key::Named(NamedKey::F5), ElementState::Pressed, None);
         assert_eq!(build_sequence(&f5, ModifiersState::SHIFT, TermMode::empty()), b"\x1b[15;2~");
+    }
+
+    #[test]
+    fn runtime_named_keys_follow_active_cursor_mode_and_repeat() {
+        let plain = build_runtime_sequence(
+            RuntimeKey::Up,
+            RuntimeKeyModifiers::default(),
+            2,
+            TermMode::empty(),
+        );
+        assert_eq!(plain, b"\x1b[A\x1b[A");
+
+        let application = build_runtime_sequence(
+            RuntimeKey::Up,
+            RuntimeKeyModifiers::default(),
+            1,
+            TermMode::APP_CURSOR,
+        );
+        assert_eq!(application, b"\x1bOA");
+    }
+
+    #[test]
+    fn runtime_ctrl_letter_uses_c0_or_kitty_without_printable_text() {
+        let modifiers = RuntimeKeyModifiers { control: true, ..Default::default() };
+        assert_eq!(
+            build_runtime_sequence(RuntimeKey::C, modifiers, 1, TermMode::empty()),
+            vec![0x03]
+        );
+
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES;
+        assert_eq!(
+            build_runtime_sequence(RuntimeKey::C, modifiers, 1, mode),
+            b"\x1b[99;5u\x1b[99;5:3u"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn runtime_win32_key_is_a_complete_press_and_release_pair() {
+        let bytes = build_runtime_sequence(
+            RuntimeKey::Escape,
+            RuntimeKeyModifiers::default(),
+            1,
+            TermMode::WIN32_INPUT_MODE,
+        );
+        let text = String::from_utf8(bytes).unwrap();
+        let records: Vec<_> = text.split_inclusive('_').collect();
+        assert_eq!(records.len(), 2);
+        assert!(records[0].starts_with("\x1b[27;"));
+        assert!(records[0].contains(";27;1;0;1_"));
+        assert!(records[1].contains(";27;0;0;1_"));
     }
 
     #[test]
