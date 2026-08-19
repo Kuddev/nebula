@@ -4350,21 +4350,13 @@ impl NebulaWorkspace {
                 let view = panes.iter().find(|pane| pane.id == id).map(|pane| pane.view.clone());
                 let store = self.pane_bounds.clone();
                 let is_focused = id == focused;
-                // 描边恒占 1px（聚焦换色而非出现/消失），pane 网格几何不随
-                // 焦点切换抖动。
-                let border = if is_focused {
-                    cx.theme().primary.opacity(0.45)
-                } else {
-                    gpui::transparent_black()
-                };
+                let dim = gpui::black().opacity(crate::display::NEBULA_UNFOCUSED_SPLIT_DIM);
+                let veil = div().absolute().inset_0().bg(dim);
                 div()
                     .size_full()
                     .relative()
                     .min_w_0()
                     .min_h_0()
-                    .border_1()
-                    .border_color(border)
-                    .rounded(crate::gpui_shell::theme::card_radius())
                     .child(
                         gpui::canvas(
                             move |bounds, _, _| {
@@ -4376,6 +4368,8 @@ impl NebulaWorkspace {
                         .inset_0(),
                     )
                     .children(view)
+                    // 与旧壳一致：不用焦点描边，仅给非活动 pane 覆 30% 黑色 veil。
+                    .when(!is_focused, |pane| pane.child(veil))
                     .into_any_element()
             },
             SplitTree::Split { direction, ratio, preview_ratio, dragging, first, second } => {
@@ -4403,7 +4397,8 @@ impl NebulaWorkspace {
                 let drag_path = path.clone();
                 let divider_id =
                     SharedString::from(format!("split-divider-{tab_ix}-{drag_path:?}"));
-                let bar_color = if dragging { cx.theme().primary } else { cx.theme().border };
+                let bar_color =
+                    if dragging { cx.theme().primary } else { cx.theme().border.opacity(0.35) };
                 // 视觉线 DIVIDER_GAP，命中区向两侧各扩 HIT_SLOP（旧壳同参）。
                 let hit = div()
                     .id(divider_id)

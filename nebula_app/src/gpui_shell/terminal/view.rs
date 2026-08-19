@@ -2547,8 +2547,8 @@ impl Render for TerminalView {
             .relative()
             .overflow_hidden()
             // 不画自己的背景：卡容器统一负责"卡底色（带窗口透明度）→
-            // 壁纸"两层，这里再铺一层不透明 bg 会把它们全部盖死。
-            .rounded(crate::gpui_shell::theme::card_radius())
+            // 壁纸"两层，这里再铺一层不透明 bg 会把它们全部盖死。圆角也
+            // 只属于整个终端卡外壳；分屏 pane 自己带圆角会露出四个独立卡片。
             // 卡内呼吸边距，对齐旧壳网格 reserve 的换算值：上下 8（chrome
             // 64/底 16 各减 8px 卡缝），左右 12（CONTENT_PAD_X 20 − 卡缝 8）。
             // 网格因此不贴圆角；padding 区点击由 grid_point 的钳制兜底。
