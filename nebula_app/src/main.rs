@@ -48,6 +48,7 @@ mod event;
 mod file_uri;
 #[cfg(windows)]
 mod font_install;
+mod git_worktree;
 #[cfg(feature = "gpui-shell")]
 mod gpui_shell;
 mod input;

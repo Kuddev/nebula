@@ -1041,6 +1041,24 @@ mod vt_tests {
     }
 
     #[test]
+    fn runtime_enter_follows_active_keyboard_protocol() {
+        let modifiers = RuntimeKeyModifiers::default();
+        assert_eq!(
+            build_runtime_sequence(RuntimeKey::Enter, modifiers, 1, TermMode::empty()),
+            b"\r"
+        );
+        assert_eq!(
+            build_runtime_sequence(
+                RuntimeKey::Enter,
+                modifiers,
+                1,
+                TermMode::DISAMBIGUATE_ESC_CODES,
+            ),
+            b"\x1b[13u"
+        );
+    }
+
+    #[test]
     fn runtime_ctrl_letter_uses_c0_or_kitty_without_printable_text() {
         let modifiers = RuntimeKeyModifiers { control: true, ..Default::default() };
         assert_eq!(

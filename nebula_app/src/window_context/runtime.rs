@@ -16,6 +16,23 @@ use crate::runtime_api::{
 
 use super::{Layout, TabLaunch, WindowContext};
 
+fn runtime_key_sequence(
+    pane: &super::Pane,
+    key: RuntimeKey,
+    modifiers: RuntimeKeyModifiers,
+    repeat: u16,
+) -> Result<Vec<u8>, ApiError> {
+    let mode = *pane.terminal.lock().mode();
+    let bytes = crate::input::terminal_input::build_runtime_sequence(key, modifiers, repeat, mode);
+    if bytes.is_empty() {
+        return Err(ApiError::new(
+            "input_encoding_unavailable",
+            "the requested key cannot be encoded for the pane's active terminal mode",
+        ));
+    }
+    Ok(bytes)
+}
+
 impl WindowContext {
     pub(crate) fn runtime_snapshot(&self) -> RuntimeWindow {
         let tabs = self
@@ -169,12 +186,18 @@ impl WindowContext {
             ));
         };
         let pane = &mut self.panes[index];
+        let submit_bytes = submit
+            .then(|| {
+                runtime_key_sequence(pane, RuntimeKey::Enter, RuntimeKeyModifiers::default(), 1)
+            })
+            .transpose()?;
         if submit {
             pane.nebula_state.last_committed.clone_from(&text);
         }
         pane.notifier.notify(text.into_bytes());
-        if submit {
-            pane.notifier.notify(vec![b'\r']);
+        if let Some(bytes) = submit_bytes {
+            // TUI 可切换 kitty/Win32 键盘协议，裸 CR 不一定代表 Enter。
+            pane.notifier.notify(bytes);
         }
         // Direct API input has the same semantic effect as keyboard input:
         // stale completion/attention badges must not survive a new turn.
@@ -241,15 +264,7 @@ impl WindowContext {
             ));
         };
         let pane = &mut self.panes[index];
-        let mode = *pane.terminal.lock().mode();
-        let bytes =
-            crate::input::terminal_input::build_runtime_sequence(key, modifiers, repeat, mode);
-        if bytes.is_empty() {
-            return Err(ApiError::new(
-                "input_encoding_unavailable",
-                "the requested key cannot be encoded for the pane's active terminal mode",
-            ));
-        }
+        let bytes = runtime_key_sequence(pane, key, modifiers, repeat)?;
         let bytes_sent = bytes.len();
         pane.notifier.notify(bytes);
         pane.nebula_state.touched = true;
@@ -277,6 +292,8 @@ impl WindowContext {
         if pane.nebula_state.command_started.is_some() || pane.nebula_state.active_run.is_some() {
             return Err(ApiError::new("run_in_progress", "the pane is already running a command"));
         }
+        let submit_bytes =
+            runtime_key_sequence(pane, RuntimeKey::Enter, RuntimeKeyModifiers::default(), 1)?;
         let run = crate::runtime_api::begin_runtime_run();
         let run_id = run.run_id;
         pane.nebula_state.active_run = Some(run);
@@ -285,7 +302,7 @@ impl WindowContext {
         pane.nebula_state.touched = true;
         pane.nebula_state.awaiting_input = false;
         pane.notifier.notify(command.into_bytes());
-        pane.notifier.notify(vec![b'\r']);
+        pane.notifier.notify(submit_bytes);
         self.dirty = true;
         self.display.window.request_redraw();
         Ok(run_id)
@@ -309,6 +326,19 @@ impl WindowContext {
         tab.custom_name = Some(name);
         Ok(())
     }
+
+    pub(crate) fn runtime_discard_agent_tab(&mut self, pane_id: u64) {
+        let Some(tab_index) = self.tabs.iter().position(|tab| {
+            let mut panes = Vec::new();
+            tab.layout.leaves(&mut panes);
+            panes == [pane_id] && tab.doc.is_none() && tab.image.is_none() && !tab.settings
+        }) else {
+            return;
+        };
+        // 只回收本次启动产生的单 Pane 终端；若结构已变化，宁可保留也不
+        // 能把用户并行操作创建或拆分出的 Tab 一并关闭。
+        let _ = self.close_tab(tab_index);
+    }
 }
 
 fn runtime_agent(pane: &super::Pane) -> Option<RuntimeAgent> {
@@ -329,6 +359,7 @@ fn runtime_agent(pane: &super::Pane) -> Option<RuntimeAgent> {
         agent_id: None,
         generation: None,
         name: None,
+        worktree: None,
         kind: kind.slug().to_owned(),
         display_name: kind.display_name().to_owned(),
         session_id: state.ai_session.as_ref().map(|identity| identity.session_id.clone()),

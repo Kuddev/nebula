@@ -1,4 +1,4 @@
 interface:
   display_name: "Nebula Runtime"
-  short_description: "Observe and control Nebula agent panes"
-  default_prompt: "Use $nebula-runtime to inspect Nebula agent panes and continue the task that needs attention."
+  short_description: "Create and control isolated Nebula agents"
+  default_prompt: "Use $nebula-runtime to create isolated Git-worktree agents, assign work by stable generation, and report their verified results."

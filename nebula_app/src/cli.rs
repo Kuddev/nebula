@@ -413,6 +413,29 @@ pub enum ControlCommand {
         #[clap(long)]
         resume_session_id: Option<String>,
     },
+    /// Create an isolated Git worktree, then start a named AI CLI in that checkout.
+    AgentFork {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        source_pane: Option<u64>,
+        #[clap(long)]
+        source_cwd: Option<PathBuf>,
+        #[clap(long)]
+        name: String,
+        #[clap(long)]
+        kind: String,
+        #[clap(long)]
+        resume_session_id: Option<String>,
+        #[clap(long)]
+        branch: Option<String>,
+        #[clap(long)]
+        base: Option<String>,
+        #[clap(long)]
+        path: Option<PathBuf>,
+        #[clap(long)]
+        allow_dirty_source: bool,
+    },
     /// Resolve one managed agent by stable id or active name.
     AgentGet {
         #[clap(long)]
@@ -766,14 +789,10 @@ impl DerefMut for ParsedOptions {
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
     use std::fs::File;
-    #[cfg(target_os = "linux")]
-    use std::io::Read;
+    use std::io::{Read, Write};
 
-    #[cfg(target_os = "linux")]
     use clap::CommandFactory;
-    #[cfg(target_os = "linux")]
     use clap_complete::Shell;
     use toml::Table;
 
@@ -912,7 +931,6 @@ mod tests {
         assert_eq!(value, None);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn completions() {
         let mut clap = Options::command();
@@ -930,14 +948,20 @@ mod tests {
 
             assert_eq!(generated, completion);
         }
+    }
 
-        // NOTE: Use this to generate new completions.
-        //
-        // let mut file = File::create("../extra/completions/nebula.bash").unwrap();
-        // clap_complete::generate(Shell::Bash, &mut clap, "nebula", &mut file);
-        // let mut file = File::create("../extra/completions/nebula.fish").unwrap();
-        // clap_complete::generate(Shell::Fish, &mut clap, "nebula", &mut file);
-        // let mut file = File::create("../extra/completions/_nebula").unwrap();
-        // clap_complete::generate(Shell::Zsh, &mut clap, "nebula", &mut file);
+    #[test]
+    #[ignore = "maintenance command: rewrites checked-in shell completions"]
+    fn regenerate_completions() {
+        let mut clap = Options::command();
+        for (shell, file) in
+            &[(Shell::Bash, "nebula.bash"), (Shell::Fish, "nebula.fish"), (Shell::Zsh, "_nebula")]
+        {
+            let mut generated = Vec::new();
+            clap_complete::generate(*shell, &mut clap, "nebula", &mut generated);
+            File::create(format!("../extra/completions/{file}"))
+                .and_then(|mut file| file.write_all(&generated))
+                .expect("write generated completion");
+        }
     }
 }

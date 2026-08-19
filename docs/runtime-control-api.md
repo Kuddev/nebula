@@ -2,7 +2,8 @@
 
 Nebula 的运行时控制面把 GUI、CLI、Agent 与未来插件统一到同一个状态权威。CLI 不会直接
 读取窗口内部结构，也不会从终端标题猜测 Pane 状态；它和其他客户端一样，通过本机回环
-连接发送带版本的 JSON Lines 请求，所有写操作再进入 winit 事件线程执行。
+连接发送带版本的 JSON Lines 请求，所有窗口、Tab 与 PTY 写操作再进入当前 UI 壳的 owner
+线程执行；Git worktree 准备留在 Runtime 客户端工作线程，不阻塞 GPUI。
 
 协议 Schema：[runtime-api-v1.schema.json](runtime-api-v1.schema.json)。
 
@@ -25,7 +26,15 @@ Nebula 的运行时控制面把 GUI、CLI、Agent 与未来插件统一到同一
 nebula ctl describe --pretty
 nebula ctl snapshot --pretty
 nebula ctl agents --pretty
+nebula ctl agent-fork --window <WINDOW_ID> --source-pane <PANE_ID> --name login-fixer --kind codex --pretty
+nebula ctl agent-get --agent login-fixer --pretty
+nebula ctl agent-prompt --agent login-fixer --generation 1 --text "修复登录回归" --pretty
+nebula ctl agent-wait --agent login-fixer --generation 1 --state settled --timeout-ms 300000 --pretty
+nebula ctl agent-read --agent login-fixer --generation 1 --lines 120 --pretty
 nebula ctl read --window <WINDOW_ID> --pane <PANE_ID> --lines 120 --pretty
+nebula ctl procs --window <WINDOW_ID> --pane <PANE_ID> --pretty
+nebula ctl send-key --window <WINDOW_ID> --pane <PANE_ID> --key c --control --pretty
+nebula ctl run --window <WINDOW_ID> --pane <PANE_ID> --command "cargo test" --pretty
 nebula ctl focus --window <WINDOW_ID> --pane <PANE_ID>
 nebula ctl new-tab --window <WINDOW_ID>
 nebula ctl split --window <WINDOW_ID> --direction right
@@ -48,16 +57,59 @@ Pane ID 当前在 Window 内稳定，而不是进程内全局唯一。存在多�
 | `runtime.snapshot` | 读取完整运行时投影 | 无 |
 | `events.subscribe` | 从 revision 开始订阅状态变化 | `since_revision?` |
 | `agents.list` | 只列出 Nebula 已识别的 Agent Pane、会话身份、状态和证据来源 | `window_id?` |
+| `agent.start` | 在指定目录新建 Tab 并启动命名 Agent | `window_id?`, `name`, `kind`, `cwd?`, `resume_session_id?` |
+| `agent.fork` | 事务化创建独立 Git branch/worktree，再启动命名 Agent | `source_pane_id?`/`source_cwd?`, `name`, `kind`, `branch?`, `base?`, `path?`, `allow_dirty_source?` |
+| `agent.get` | 按稳定 id 或名称解析 Agent generation 与 worktree provenance | `agent`, `generation?` |
+| `agent.prompt` | 向同一 Agent generation 发送纯文本 Prompt | `agent`, `generation?`, `text`, `submit?` |
+| `agent.read` | 读取命名 Agent 所在 Pane 的真实 Grid 尾部 | `agent`, `generation?`, `lines?` |
+| `agent.wait` | 等待同一 Agent generation 的状态跃迁；被替换/退出即明确失败 | `agent`, `generation`, `state`, `timeout_ms`, `after_seq?` |
 | `window.create` | 创建新窗口 | 无 |
 | `window.focus` | 聚焦窗口或 Pane | `window_id?`, `pane_id?` |
 | `tab.new` | 创建默认 Shell 标签 | `window_id?` |
 | `pane.split` | 向右或向下分屏 | `window_id?`, `direction` |
 | `pane.prompt` | 写入一行纯文本，可追加 Enter | `window_id?`, `pane_id`, `text`, `submit` |
 | `pane.read` | 从真实终端 Grid 尾部读取最近逻辑行 | `window_id?`, `pane_id`, `lines` |
+| `pane.procs` | 读取本地 PTY shell 为根的真实进程树 | `window_id?`, `pane_id` |
+| `pane.send_key` | 按当前终端模式编码受限的命名控制键 | `window_id?`, `pane_id`, `key`, `modifiers?`, `repeat?` |
+| `pane.run` | 运行单行命令，并以 OSC 133 返回真实 exit code | `window_id?`, `pane_id`, `command`, `wait?`, `timeout_ms?` |
 | `pane.wait` | 等待 Pane 到达语义状态 | `window_id?`, `pane_id`, `state`, `timeout_ms`, `after_seq?` |
 
 `pane.prompt` 有意拒绝换行、ESC 和其他控制字符，并限制为 32 KiB。它是 Prompt 接口，不是
-任意终端字节注入接口；以后若增加 raw input，必须单独定义权限和审计语义。
+任意终端字节注入接口。控制键走 `pane.send_key`：只开放命名键，字母必须配
+`control=true`，`repeat` 上限 64；API 不接受任意 bytes 或 ANSI 字符串。
+
+## 命名 Agent 与隔离 worktree
+
+`agent.start` 提供稳定的 `agent_id + generation + name`，目前冷启动只开放经过验证的 Codex
+与 Claude 命令。`agent.fork` 在此基础上增加 Git 隔离，完整顺序是：
+
+1. 由 `source_pane_id` 从 RuntimeHub 权威 snapshot 解析 cwd；没有 Pane 时必须提供绝对
+   `source_cwd`。SSH Pane 明确返回 `remote_worktree_unsupported`。
+2. 校验 Git、source dirty 状态、base commit、branch 与目标路径。默认拒绝 dirty source；
+   只有调用者明确传 `allow_dirty_source: true` 才跳过该检查。
+3. 在 Runtime 工作线程创建新 branch 与 worktree。默认 branch 为 `nebula/<agent-slug>`，默认
+   目录为主仓库同级的 `<repo>-worktrees/<agent-slug>`；既存 branch/path 都返回冲突，不覆盖。
+4. 把新 worktree 作为 cwd 交给真实 Tab/PTY 创建链，注册 Agent，再发送经过验证的启动命令。
+
+成功响应和之后的 `agent.get` 都包含同一份 `worktree`：`repo_root`、`source_root`、`path`、
+`branch`、`base_commit`、`created`。创建 Tab 或启动 Agent 明确失败时，Nebula 只删除本次事务
+确认创建成功的 worktree 与 branch；已有目录、已有分支和用户其他 worktree 不在回滚范围。
+若 UI dispatch 超时，结果处于未知态，服务端返回 `runtime_timeout`、
+`details.cleanup_deferred=true` 和 worktree provenance，并保留 checkout，避免晚到的 Tab 使用
+一个刚被删除的 cwd。
+
+`agent.fork` 只创建隔离环境并启动 Agent，不抢跑派发任务。调用者取得响应中的 generation 后，
+再用 `agent.prompt` 派活、`agent.wait` 等状态、`agent.read` 取结果；这样 CC 或另一个 Agent 能把
+多个独立 worktree 作为并行工位调度，而不会让它们同时修改同一个工作树。
+
+## 进程、控制键与真实命令结果
+
+`pane.procs` 在 Windows 通过 Toolhelp 从 PTY shell pid 遍历真实后代进程。原生 SSH 只看得到
+本地传输进程，因而明确返回 `remote_process_unavailable`，不会冒充远端进程树。
+
+`pane.run` 依赖 Shell integration 的 OSC 133 `CommandStart`/`CommandDone`。只有观察到
+`CommandDone` 携带的真实 exit code 才返回 `finished`/`failed`；没有集成或没有 exit code 时
+返回 `exit_code_unavailable`、`run_start_timeout` 或 `run_aborted`，绝不把未知结果伪造成 0。
 
 ## Agent 状态与终端读取
 
@@ -106,7 +158,8 @@ Shell/hook 结束事件归位；因此即使命令在 120ms Runtime pump 的两�
 2. 把它作为 `after_seq` 传给 `pane.wait`，服务端就只承认 `state_change_seq > after_seq`
    的观察结果。
 
-`nebula prompt --wait` 已经在内部串好这两步。独立调用 `nebula wait` 时需自己传 `--after-seq`；
+`nebula ctl prompt --wait` 已经在内部串好这两步。独立调用 `nebula ctl wait` 时需自己传
+`--after-seq`；
 省略则退回「立即匹配当前状态」的旧语义，仅适合观察一个已在运行的 Pane。
 
 计数器按 (窗口, Pane) 记账，因为 Pane ID 只在窗口内唯一；序号从 1 开始，`0` 不是合法基线。
@@ -127,6 +180,14 @@ Shell/hook 结束事件归位；因此即使命令在 120ms Runtime pump 的两�
 - `ambiguous_target`：Pane ID 在多个窗口中重复，必须补 Window ID。
 - `invalid_state`：当前标签类型不允许该动作，例如设置页不能分屏。
 - `action_failed`：窗口、Shell 或 Pane 创建失败。
+- `agent_name_conflict` / `agent_identity_mismatch`：名称已被活跃 Agent 使用，或 generation 已变化。
+- `agent_exited` / `agent_replaced`：等待的稳定 Agent 身份已退出或被同 Pane 中的新会话替换。
+- `dirty_source`：`agent.fork` 的源工作树有未提交变更，且调用者未显式允许。
+- `branch_conflict` / `worktree_path_conflict`：目标分支或目录已存在；Nebula 不覆盖。
+- `git_unavailable` / `invalid_base` / `invalid_branch`：Git 能力或 revision/ref 校验失败。
+- `remote_worktree_unsupported`：本地 Runtime 不能替 SSH Pane 创建远端 Git worktree。
+- `remote_process_unavailable`：本地 Runtime 不能从 SSH 传输进程推导远端进程树。
+- `exit_code_unavailable`：当前 Shell 没有提供可信的 OSC 133 exit code。
 - `ssh_not_ready`：SSH Pane 尚未进入可安全读写的 Ready 阶段，或连接已经失败。
 - `runtime_unavailable`：当前壳/生命周期没有该动作所需的真实 owner；不会伪造成功。
 - `timeout`：`pane.wait` 未在期限内观察到目标状态。`details` 会带上 `after_seq` 与最后

@@ -65,6 +65,7 @@ use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::window_context::{DetachedWindow, WindowBoot, WindowContext};
 use crate::window_transition::{NativeWindowStage, NativeWindowStageTracker};
 
+mod agent_runtime;
 mod input_state;
 mod proxy;
 mod search_state;
@@ -624,41 +625,8 @@ impl Processor {
                     "run_id": run_id
                 }))
             },
-            RuntimeCommand::AgentStart { window_id, name, kind, cwd, session_id, command } => {
-                let id = self.runtime_target_window(*window_id, None)?;
-                self.runtime_hub.ensure_agent_name_available(name)?;
-                let pane_id = self
-                    .windows
-                    .get_mut(&id)
-                    .expect("resolved runtime window exists")
-                    .runtime_new_tab(cwd.clone())?;
-                let agent = self.runtime_hub.register_agent(
-                    name.clone(),
-                    *kind,
-                    u64::from(id),
-                    pane_id,
-                    session_id.clone(),
-                )?;
-                let launch = self
-                    .windows
-                    .get_mut(&id)
-                    .expect("resolved runtime window exists")
-                    .runtime_set_tab_name(pane_id, name.clone())
-                    .and_then(|_| {
-                        self.windows
-                            .get_mut(&id)
-                            .expect("resolved runtime window exists")
-                            .runtime_prompt(pane_id, command.clone(), true)
-                    });
-                if let Err(error) = launch {
-                    self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
-                    return Err(error);
-                }
-                self.runtime_result(serde_json::json!({
-                    "agent": agent,
-                    "window_id": u64::from(id),
-                    "pane_id": pane_id
-                }))
+            RuntimeCommand::AgentStart { .. } | RuntimeCommand::AgentFork { .. } => {
+                self.execute_agent_runtime_command(command)
             },
             RuntimeCommand::AgentPrompt { agent, generation, text, submit } => {
                 let managed = self.runtime_hub.active_agent(agent, *generation)?;

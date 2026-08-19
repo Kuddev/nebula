@@ -111,7 +111,8 @@ impl NebulaWorkspace {
             RuntimeCommand::Snapshot
             | RuntimeCommand::ReadPane { .. }
             | RuntimeCommand::Procs { .. }
-            | RuntimeCommand::AgentRead { .. } => {
+            | RuntimeCommand::AgentRead { .. }
+            | RuntimeCommand::AgentFork { .. } => {
                 self.runtime_pending.push(dispatch);
             },
         }
@@ -313,22 +314,38 @@ impl NebulaWorkspace {
                     cx,
                 )
             },
-            RuntimeCommand::AgentStart { window_id, name, kind, cwd, session_id, command } => {
+            RuntimeCommand::AgentStart {
+                window_id,
+                name,
+                kind,
+                cwd,
+                session_id,
+                command,
+                worktree,
+            } => {
                 self.runtime_window_requested(*window_id)?;
                 self.runtime_hub.ensure_agent_name_available(name)?;
                 let pane_id = self.add_terminal_at(cwd.clone(), None, window, cx);
-                let agent = self.runtime_hub.register_agent(
+                let agent = match self.runtime_hub.register_agent(
                     name.clone(),
                     *kind,
                     self.runtime_window_id,
                     pane_id,
                     session_id.clone(),
-                )?;
+                    worktree.clone(),
+                ) {
+                    Ok(agent) => agent,
+                    Err(error) => {
+                        self.discard_runtime_agent_tab(pane_id, window, cx);
+                        return Err(error);
+                    },
+                };
                 if let Some(meta) = self.tab_meta.get_mut(self.active) {
                     meta.custom_name = Some(name.clone());
                 }
                 let Some(tab_ix) = self.tab_of_pane(pane_id) else {
                     self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
+                    self.discard_runtime_agent_tab(pane_id, window, cx);
                     return Err(ApiError::new(
                         "action_failed",
                         "the new agent pane was not registered in the workspace",
@@ -347,6 +364,7 @@ impl NebulaWorkspace {
                     view.update(cx, |view, cx| view.runtime_prompt(command.clone(), true, cx))
                 {
                     self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
+                    self.discard_runtime_agent_tab(pane_id, window, cx);
                     return Err(error);
                 }
                 self.runtime_result(
@@ -359,6 +377,10 @@ impl NebulaWorkspace {
                     cx,
                 )
             },
+            RuntimeCommand::AgentFork { .. } => Err(ApiError::new(
+                "invalid_runtime_command",
+                "agent.fork reached the UI before its Git worktree was prepared",
+            )),
             RuntimeCommand::AgentPrompt { agent, generation, text, submit } => {
                 let managed = self.runtime_hub.active_agent(agent, *generation)?;
                 self.runtime_window_requested(Some(managed.window_id))?;
@@ -401,6 +423,23 @@ impl NebulaWorkspace {
                 }?;
                 Ok(json!({ "agent": managed, "read": read }))
             },
+        }
+    }
+
+    fn discard_runtime_agent_tab(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_ix) = self.tab_of_pane(pane_id) else { return };
+        let owned = matches!(
+            self.tabs.get(tab_ix),
+            Some(WorkspaceTab::Terminal { panes, tree, .. })
+                if panes.len() == 1 && panes[0].id == pane_id && tree.leaves() == vec![pane_id]
+        );
+        if owned {
+            self.close_tab(tab_ix, window, cx);
         }
     }
 

@@ -5,6 +5,8 @@
 //! Rust types. GUI and PTY mutations are dispatched onto winit's event thread;
 //! transport workers only validate, wait, and serialize.
 
+mod agent_api;
+
 use std::error::Error;
 use std::fmt;
 use std::io::{BufRead, BufReader, Error as IoError, Read, Write};
@@ -156,7 +158,7 @@ impl ApiError {
         self
     }
 
-    fn invalid_params(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_params(message: impl Into<String>) -> Self {
         Self::new("invalid_params", message)
     }
 }
@@ -191,6 +193,8 @@ pub struct RuntimeAgent {
     pub generation: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::git_worktree::WorktreeProvenance>,
     pub kind: String,
     pub display_name: String,
     pub session_id: Option<String>,
@@ -210,6 +214,8 @@ pub struct RuntimeManagedAgent {
     pub pane_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::git_worktree::WorktreeProvenance>,
     pub active: bool,
     pub observed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -691,6 +697,20 @@ pub enum RuntimeCommand {
         cwd: Option<PathBuf>,
         session_id: Option<String>,
         command: String,
+        worktree: Option<crate::git_worktree::WorktreeProvenance>,
+    },
+    AgentFork {
+        window_id: Option<u64>,
+        source_pane_id: Option<u64>,
+        source_cwd: Option<PathBuf>,
+        name: String,
+        kind: crate::ai_agents::AgentKind,
+        session_id: Option<String>,
+        command: String,
+        branch: Option<String>,
+        base: Option<String>,
+        path: Option<PathBuf>,
+        allow_dirty_source: bool,
     },
     AgentPrompt {
         agent: String,
@@ -873,12 +893,7 @@ impl RuntimeHub {
         self.record_pane_lifecycle(window_id, pane_id, RuntimePaneLifecycleKind::Exited);
     }
 
-    fn record_pane_lifecycle(
-        &self,
-        window_id: u64,
-        pane_id: u64,
-        event: RuntimePaneLifecycleKind,
-    ) {
+    fn record_pane_lifecycle(&self, window_id: u64, pane_id: u64, event: RuntimePaneLifecycleKind) {
         let republish = {
             let mut state = self.lock();
             record_pane_lifecycle_locked(&mut state, window_id, pane_id, event)
@@ -890,18 +905,13 @@ impl RuntimeHub {
         }
     }
 
-    fn pane_lifecycle_error(
-        &self,
-        window_id: Option<u64>,
-        pane_id: u64,
-    ) -> Option<ApiError> {
+    fn pane_lifecycle_error(&self, window_id: Option<u64>, pane_id: u64) -> Option<ApiError> {
         let state = self.lock();
         let matches: Vec<_> = state
             .pane_lifecycles
             .iter()
             .filter(|lifecycle| {
-                lifecycle.pane_id == pane_id
-                    && window_id.is_none_or(|id| lifecycle.window_id == id)
+                lifecycle.pane_id == pane_id && window_id.is_none_or(|id| lifecycle.window_id == id)
             })
             .collect();
         match matches.as_slice() {
@@ -923,7 +933,9 @@ impl RuntimeHub {
             [] => None,
             _ => Some(ApiError::new(
                 "ambiguous_target",
-                format!("pane id {pane_id} has lifecycle events in multiple windows; provide window_id"),
+                format!(
+                    "pane id {pane_id} has lifecycle events in multiple windows; provide window_id"
+                ),
             )),
         }
     }
@@ -935,6 +947,7 @@ impl RuntimeHub {
         window_id: u64,
         pane_id: u64,
         session_id: Option<String>,
+        worktree: Option<crate::git_worktree::WorktreeProvenance>,
     ) -> Result<RuntimeManagedAgent, ApiError> {
         let mut state = self.lock();
         if state.managed_agents.values().any(|agent| agent.active && agent.name == name) {
@@ -955,6 +968,7 @@ impl RuntimeHub {
             window_id,
             pane_id,
             session_id,
+            worktree,
             active: true,
             observed: false,
             closed_reason: None,
@@ -1040,18 +1054,12 @@ impl RuntimeHub {
         if require_active && !agent.active {
             let code = match agent.closed_reason.as_deref() {
                 Some(
-                    reason @ ("agent_exited"
-                    | "agent_replaced"
-                    | "pane_closed"
-                    | "pane_exited"),
+                    reason @ ("agent_exited" | "agent_replaced" | "pane_closed" | "pane_exited"),
                 ) => reason,
                 _ => "agent_closed",
             };
-            return Err(ApiError::new(
-                code,
-                format!("agent {:?} is no longer active", agent.name),
-            )
-            .details(serde_json::to_value(agent).unwrap_or(Value::Null)));
+            return Err(ApiError::new(code, format!("agent {:?} is no longer active", agent.name))
+                .details(serde_json::to_value(agent).unwrap_or(Value::Null)));
         }
         Ok(agent)
     }
@@ -1139,28 +1147,25 @@ fn observe_removed_panes(state: &mut HubState, snapshot: &RuntimeSnapshot) {
         .windows
         .iter()
         .flat_map(|window| {
-            window.tabs.iter().flat_map(move |tab| {
-                tab.panes.iter().map(move |pane| (window.id, pane.id))
-            })
+            window
+                .tabs
+                .iter()
+                .flat_map(move |tab| tab.panes.iter().map(move |pane| (window.id, pane.id)))
         })
         .collect();
     let removed: Vec<_> = current
         .windows
         .iter()
         .flat_map(|window| {
-            window.tabs.iter().flat_map(move |tab| {
-                tab.panes.iter().map(move |pane| (window.id, pane.id))
-            })
+            window
+                .tabs
+                .iter()
+                .flat_map(move |tab| tab.panes.iter().map(move |pane| (window.id, pane.id)))
         })
         .filter(|target| !live.contains(target))
         .collect();
     for (window_id, pane_id) in removed {
-        record_pane_lifecycle_locked(
-            state,
-            window_id,
-            pane_id,
-            RuntimePaneLifecycleKind::Closed,
-        );
+        record_pane_lifecycle_locked(state, window_id, pane_id, RuntimePaneLifecycleKind::Closed);
     }
 }
 
@@ -1191,9 +1196,11 @@ fn record_pane_lifecycle_locked(
         state.pane_lifecycles.pop_front();
     }
     let closed_reason = event.error_code();
-    for agent in state.managed_agents.values_mut().filter(|agent| {
-        agent.active && agent.window_id == window_id && agent.pane_id == pane_id
-    }) {
+    for agent in state
+        .managed_agents
+        .values_mut()
+        .filter(|agent| agent.active && agent.window_id == window_id && agent.pane_id == pane_id)
+    {
         agent.active = false;
         agent.closed_reason = Some(closed_reason.to_owned());
     }
@@ -1253,6 +1260,7 @@ fn project_managed_agents(state: &mut HubState, snapshot: &mut RuntimeSnapshot) 
                     agent.agent_id = Some(managed.agent_id.clone());
                     agent.generation = Some(managed.generation);
                     agent.name = Some(managed.name.clone());
+                    agent.worktree.clone_from(&managed.worktree);
                 }
             },
             Some(_) if managed.observed => {
@@ -1403,13 +1411,6 @@ struct PromptParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AgentsParams {
-    #[serde(default)]
-    window_id: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ReadParams {
     #[serde(default)]
     window_id: Option<u64>,
@@ -1450,59 +1451,6 @@ struct RunParams {
     wait: bool,
     #[serde(default = "default_run_timeout_ms")]
     timeout_ms: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentStartParams {
-    #[serde(default)]
-    window_id: Option<u64>,
-    name: String,
-    kind: String,
-    #[serde(default)]
-    cwd: Option<PathBuf>,
-    #[serde(default)]
-    resume_session_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentTargetParams {
-    agent: String,
-    #[serde(default)]
-    generation: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentPromptParams {
-    agent: String,
-    #[serde(default)]
-    generation: Option<u64>,
-    text: String,
-    #[serde(default = "default_true")]
-    submit: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentReadParams {
-    agent: String,
-    #[serde(default)]
-    generation: Option<u64>,
-    #[serde(default = "default_read_lines")]
-    lines: usize,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentWaitParams {
-    agent: String,
-    generation: u64,
-    state: RuntimeWaitState,
-    timeout_ms: u64,
-    #[serde(default)]
-    after_seq: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1636,60 +1584,8 @@ impl RuntimeCommand {
                     timeout_ms: params.timeout_ms,
                 })
             },
-            "agent.start" => {
-                let params: AgentStartParams = parse_params(&request.params)?;
-                validate_agent_name(&params.name)?;
-                let kind = crate::ai_agents::AgentKind::parse(&params.kind).ok_or_else(|| {
-                    ApiError::invalid_params(format!("unknown agent kind {:?}", params.kind))
-                })?;
-                let session_id = params.resume_session_id;
-                let command = match session_id.as_deref() {
-                    Some(session_id) => kind.resume_command(session_id).ok_or_else(|| {
-                        ApiError::new(
-                            "agent_resume_unsupported",
-                            "the agent kind or session id does not have a verified resume command",
-                        )
-                    })?,
-                    None => kind.start_command().ok_or_else(|| {
-                        ApiError::new(
-                            "agent_launch_unsupported",
-                            format!("cold start is not verified for agent kind {:?}", kind.slug()),
-                        )
-                    })?,
-                };
-                Ok(Self::AgentStart {
-                    window_id: params.window_id,
-                    name: params.name,
-                    kind,
-                    cwd: params.cwd,
-                    session_id,
-                    command,
-                })
-            },
-            "agent.prompt" => {
-                let params: AgentPromptParams = parse_params(&request.params)?;
-                validate_agent_selector(&params.agent)?;
-                validate_prompt(&params.text)?;
-                Ok(Self::AgentPrompt {
-                    agent: params.agent,
-                    generation: params.generation,
-                    text: params.text,
-                    submit: params.submit,
-                })
-            },
-            "agent.read" => {
-                let params: AgentReadParams = parse_params(&request.params)?;
-                validate_agent_selector(&params.agent)?;
-                if params.lines == 0 || params.lines > MAX_READ_LINES {
-                    return Err(ApiError::invalid_params(format!(
-                        "lines must be between 1 and {MAX_READ_LINES}"
-                    )));
-                }
-                Ok(Self::AgentRead {
-                    agent: params.agent,
-                    generation: params.generation,
-                    lines: params.lines,
-                })
+            "agent.start" | "agent.fork" | "agent.prompt" | "agent.read" => {
+                agent_api::command_from_request(request)
             },
             method => Err(ApiError::new(
                 "method_not_found",
@@ -2138,9 +2034,9 @@ fn handle_connection(
             write_response(&mut stream, &ApiResponse::success(request.id, runtime_description()))
         },
         "events.subscribe" => subscribe_connection(&mut stream, request, hub),
-        "agents.list" => agents_connection(&mut stream, request, hub),
-        "agent.get" => agent_get_connection(&mut stream, request, hub),
-        "agent.wait" => agent_wait_connection(&mut stream, request, hub),
+        "agents.list" => agent_api::agents_connection(&mut stream, request, hub),
+        "agent.get" => agent_api::agent_get_connection(&mut stream, request, hub),
+        "agent.wait" => agent_api::agent_wait_connection(&mut stream, request, hub),
         "pane.wait" => wait_connection(&mut stream, request, hub),
         _ => dispatch_connection(&mut stream, request, sink, hub),
     }
@@ -2180,6 +2076,7 @@ fn runtime_description() -> Value {
             "events.subscribe",
             "agents.list",
             "agent.start",
+            "agent.fork",
             "agent.get",
             "agent.prompt",
             "agent.read",
@@ -2202,217 +2099,11 @@ fn runtime_description() -> Value {
             "pane.wait.after_seq",
             "pane.wait.lifecycle",
             "agent.wait.identity",
+            "agent.fork.transactional_worktree",
+            "agent.worktree.provenance",
             "events.pane_lifecycle"
         ]
     })
-}
-
-fn agents_connection(
-    stream: &mut TcpStream,
-    request: ApiRequest,
-    hub: &RuntimeHub,
-) -> Result<(), IoError> {
-    let params: AgentsParams = match parse_params(&request.params) {
-        Ok(params) => params,
-        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
-    };
-    let Some(snapshot) = hub.current() else {
-        return write_response(
-            stream,
-            &ApiResponse::failure(
-                request.id,
-                ApiError::new(
-                    "runtime_unavailable",
-                    "Nebula has not published its first workspace snapshot yet",
-                ),
-            ),
-        );
-    };
-    if let Some(window_id) = params.window_id
-        && !snapshot.windows.iter().any(|window| window.id == window_id)
-    {
-        return write_response(
-            stream,
-            &ApiResponse::failure(
-                request.id,
-                ApiError::new("target_not_found", format!("window {window_id} does not exist")),
-            ),
-        );
-    }
-
-    let mut agents = Vec::new();
-    for window in
-        snapshot.windows.iter().filter(|window| params.window_id.is_none_or(|id| window.id == id))
-    {
-        for tab in &window.tabs {
-            for pane in &tab.panes {
-                let Some(agent) = pane.agent.clone() else { continue };
-                agents.push(RuntimeAgentPane {
-                    window_id: window.id,
-                    tab_index: tab.index,
-                    tab_active: tab.active,
-                    pane_id: pane.id,
-                    pane_active: pane.active,
-                    title: pane.title.clone(),
-                    cwd: pane.cwd.clone(),
-                    branch: pane.branch.clone(),
-                    ssh_destination: pane.ssh_destination.clone(),
-                    agent,
-                    task_state: pane.task_state,
-                    state_change_seq: pane.state_change_seq,
-                });
-            }
-        }
-    }
-    write_response(
-        stream,
-        &ApiResponse::success(
-            request.id,
-            json!({ "revision": snapshot.revision, "agents": agents }),
-        ),
-    )
-}
-
-fn agent_get_connection(
-    stream: &mut TcpStream,
-    request: ApiRequest,
-    hub: &RuntimeHub,
-) -> Result<(), IoError> {
-    let params: AgentTargetParams = match parse_params(&request.params) {
-        Ok(params) => params,
-        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
-    };
-    if let Err(error) = validate_agent_selector(&params.agent) {
-        return write_response(stream, &ApiResponse::failure(request.id, error));
-    }
-    info!(
-        "runtime agent.get request_id={} agent={} generation={:?}",
-        request.id, params.agent, params.generation
-    );
-    let agent = match hub.managed_agent(&params.agent, params.generation, false) {
-        Ok(agent) => agent,
-        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
-    };
-    let pane = hub
-        .current()
-        .and_then(|snapshot| snapshot.pane(Some(agent.window_id), agent.pane_id).ok().cloned());
-    write_response(
-        stream,
-        &ApiResponse::success(request.id, json!({ "agent": agent, "pane": pane })),
-    )
-}
-
-fn agent_wait_connection(
-    stream: &mut TcpStream,
-    request: ApiRequest,
-    hub: &RuntimeHub,
-) -> Result<(), IoError> {
-    let params: AgentWaitParams = match parse_params(&request.params) {
-        Ok(params) => params,
-        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
-    };
-    if let Err(error) = validate_agent_selector(&params.agent) {
-        return write_response(stream, &ApiResponse::failure(request.id, error));
-    }
-    info!(
-        "runtime agent.wait request_id={} agent={} generation={} state={:?} after_seq={:?}",
-        request.id, params.agent, params.generation, params.state, params.after_seq
-    );
-    let timeout = Duration::from_millis(params.timeout_ms);
-    if timeout.is_zero() || timeout > MAX_WAIT {
-        return write_response(
-            stream,
-            &ApiResponse::failure(
-                request.id,
-                ApiError::invalid_params("timeout_ms must be between 1 and 86400000"),
-            ),
-        );
-    }
-    let agent = match hub.active_agent(&params.agent, Some(params.generation)) {
-        Ok(agent) => agent,
-        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
-    };
-    let (_, current, receiver) = hub.subscribe();
-    let deadline = Instant::now() + timeout;
-    let mut snapshot = current;
-    let mut observed = None;
-    loop {
-        if let Err(error) = hub.active_agent(&agent.agent_id, Some(agent.generation)) {
-            return write_response(stream, &ApiResponse::failure(request.id, error));
-        }
-        if let Some(current) = snapshot.take() {
-            match current.pane(Some(agent.window_id), agent.pane_id) {
-                Ok(pane) if wait_matches(pane, params.state, params.after_seq) => {
-                    let active = match hub.active_agent(&agent.agent_id, Some(agent.generation)) {
-                        Ok(active) => active,
-                        Err(error) => {
-                            return write_response(
-                                stream,
-                                &ApiResponse::failure(request.id, error),
-                            );
-                        },
-                    };
-                    return write_response(
-                        stream,
-                        &ApiResponse::success(
-                            request.id,
-                            json!({ "agent": active, "snapshot": current }),
-                        ),
-                    );
-                },
-                Ok(pane) => observed = Some((pane.task_state, pane.state_change_seq)),
-                Err(error) => {
-                    let error = hub
-                        .active_agent(&agent.agent_id, Some(agent.generation))
-                        .err()
-                        .unwrap_or_else(|| {
-                            ApiError::new("agent_closed", error.message).details(json!({
-                                "agent_id": agent.agent_id,
-                                "generation": agent.generation
-                            }))
-                        });
-                    return write_response(
-                        stream,
-                        &ApiResponse::failure(request.id, error),
-                    );
-                },
-            }
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match receiver.recv_timeout(remaining) {
-            Ok(next) => snapshot = Some(next),
-            Err(RecvTimeoutError::Timeout) => break,
-            Err(RecvTimeoutError::Disconnected) => {
-                return write_response(
-                    stream,
-                    &ApiResponse::failure(
-                        request.id,
-                        ApiError::new("runtime_unavailable", "runtime subscription disconnected"),
-                    ),
-                );
-            },
-        }
-    }
-    write_response(
-        stream,
-        &ApiResponse::failure(
-            request.id,
-            ApiError::new(
-                "timeout",
-                format!("agent {:?} did not reach the requested state before timeout", agent.name),
-            )
-            .details(json!({
-                "agent_id": agent.agent_id,
-                "generation": agent.generation,
-                "after_seq": params.after_seq,
-                "observed_state": observed.map(|(state, _)| state),
-                "observed_state_change_seq": observed.map(|(_, seq)| seq)
-            })),
-        ),
-    )
 }
 
 fn subscribe_connection(
@@ -2491,20 +2182,12 @@ fn wait_connection(
                 observed = Some((pane.task_state, pane.state_change_seq));
             },
             Err(error) if error.code == "target_not_found" => {
-                if let Some(lifecycle) =
-                    hub.pane_lifecycle_error(target_window, params.pane_id)
-                {
-                    return write_response(
-                        stream,
-                        &ApiResponse::failure(request.id, lifecycle),
-                    );
+                if let Some(lifecycle) = hub.pane_lifecycle_error(target_window, params.pane_id) {
+                    return write_response(stream, &ApiResponse::failure(request.id, lifecycle));
                 }
             },
             Err(error) => {
-                return write_response(
-                    stream,
-                    &ApiResponse::failure(request.id, error),
-                );
+                return write_response(stream, &ApiResponse::failure(request.id, error));
             },
         }
     } else if let Some(error) = hub.pane_lifecycle_error(target_window, params.pane_id) {
@@ -2539,10 +2222,7 @@ fn wait_connection(
                 observed = Some((pane.task_state, pane.state_change_seq));
             },
             Err(error) => {
-                return write_response(
-                    stream,
-                    &ApiResponse::failure(request.id, error),
-                );
+                return write_response(stream, &ApiResponse::failure(request.id, error));
             },
         }
     }
@@ -2586,6 +2266,11 @@ fn dispatch_connection(
         Ok(command) => command,
         Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
     };
+    let (command, mut worktree_transaction) =
+        match agent_api::prepare_dispatch_command(command, hub) {
+            Ok(prepared) => prepared,
+            Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
+        };
     match &command {
         RuntimeCommand::SendKey { window_id, pane_id, key, modifiers, repeat } => {
             info!(
@@ -2597,14 +2282,18 @@ fn dispatch_connection(
                 modifiers.control,
             );
         },
-        RuntimeCommand::AgentStart { window_id, name, kind, session_id, .. } => {
+        RuntimeCommand::AgentStart { window_id, name, kind, session_id, worktree, .. } => {
             info!(
-                "runtime agent.start request_id={} window_id={window_id:?} name={} kind={} resume={}",
+                "runtime agent.start request_id={} window_id={window_id:?} name={} kind={} resume={} worktree={}",
                 request.id,
                 name,
                 kind.slug(),
-                session_id.is_some()
+                session_id.is_some(),
+                worktree.is_some()
             );
+        },
+        RuntimeCommand::AgentFork { .. } => {
+            unreachable!("agent.fork must be prepared before UI dispatch")
         },
         RuntimeCommand::AgentPrompt { agent, generation, text, submit } => {
             info!(
@@ -2630,16 +2319,18 @@ fn dispatch_connection(
     };
     let (dispatch, receiver) = RuntimeDispatch::new(command);
     if !sink.emit_control(dispatch) {
-        return write_response(
-            stream,
-            &ApiResponse::failure(
-                request.id,
-                ApiError::new("runtime_unavailable", "Nebula's event loop is not available"),
-            ),
+        let error = agent_api::rollback_prepared_worktree(
+            ApiError::new("runtime_unavailable", "Nebula's event loop is not available"),
+            worktree_transaction.take(),
         );
+        return write_response(stream, &ApiResponse::failure(request.id, error));
     }
     let response = match receiver.recv_timeout(COMMAND_TIMEOUT) {
-        Ok(Ok(result)) => {
+        Ok(Ok(mut result)) => {
+            if let Some(transaction) = worktree_transaction.take() {
+                let provenance = transaction.commit();
+                agent_api::attach_worktree_result(&mut result, &provenance);
+            }
             if let Some(timeout) = run_wait {
                 let action = result.get("action").unwrap_or(&result);
                 let target = (
@@ -2669,11 +2360,25 @@ fn dispatch_connection(
                 ApiResponse::success(request.id, result)
             }
         },
-        Ok(Err(error)) => ApiResponse::failure(request.id, error),
-        Err(_) => ApiResponse::failure(
+        Ok(Err(error)) => ApiResponse::failure(
             request.id,
-            ApiError::new("runtime_timeout", "runtime event thread did not answer in time"),
+            agent_api::rollback_prepared_worktree(error, worktree_transaction.take()),
         ),
+        Err(_) => {
+            let mut error =
+                ApiError::new("runtime_timeout", "runtime event thread did not answer in time");
+            if let Some(transaction) = worktree_transaction.take() {
+                // UI dispatch may still arrive after the response channel times out. The
+                // checkout must stay alive because a late-created PTY can already use it.
+                let provenance = transaction.commit();
+                error.details = Some(json!({
+                    "worktree": provenance,
+                    "cleanup_deferred": true,
+                    "reason": "the UI outcome is unknown; Nebula did not remove the worktree"
+                }));
+            }
+            ApiResponse::failure(request.id, error)
+        },
     };
     write_response(stream, &response)
 }
@@ -2766,6 +2471,38 @@ pub fn run_cli(options: ControlOptions) -> Result<(), Box<dyn Error>> {
                     "resume_session_id": resume_session_id
                 }),
                 timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::AgentFork {
+            window,
+            source_pane,
+            source_cwd,
+            name,
+            kind,
+            resume_session_id,
+            branch,
+            base,
+            path,
+            allow_dirty_source,
+        } => {
+            let source_cwd = source_cwd.map(agent_api::absolute_cli_path).transpose()?;
+            let path = path.map(agent_api::absolute_cli_path).transpose()?;
+            let response = request_once(
+                "agent.fork",
+                json!({
+                    "window_id": window,
+                    "source_pane_id": source_pane,
+                    "source_cwd": source_cwd,
+                    "name": name,
+                    "kind": kind,
+                    "resume_session_id": resume_session_id,
+                    "branch": branch,
+                    "base": base,
+                    "path": path,
+                    "allow_dirty_source": allow_dirty_source
+                }),
+                timeout.saturating_add(COMMAND_TIMEOUT),
             )?;
             print_response(&response, options.pretty)
         },
@@ -3048,6 +2785,7 @@ mod tests {
             agent_id: None,
             generation: None,
             name: None,
+            worktree: None,
             kind: kind.to_owned(),
             display_name: kind.to_owned(),
             session_id: session_id.map(str::to_owned),
@@ -3096,6 +2834,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_capabilities_match_the_versioned_schema() {
+        let schema: Value =
+            serde_json::from_str(include_str!("../../docs/runtime-api-v1.schema.json"))
+                .expect("runtime schema must be valid JSON");
+        let schema_methods: std::collections::BTreeSet<_> =
+            schema["$defs"]["request"]["properties"]["method"]["enum"]
+                .as_array()
+                .expect("schema method enum")
+                .iter()
+                .map(|method| method.as_str().expect("method string"))
+                .collect();
+        let described = runtime_description();
+        let described_methods: std::collections::BTreeSet<_> = described["capabilities"]
+            .as_array()
+            .expect("runtime capabilities")
+            .iter()
+            .map(|method| method.as_str().expect("capability string"))
+            .collect();
+        assert_eq!(schema_methods, described_methods);
+    }
+
+    #[test]
     fn agent_start_exposes_only_verified_launch_contracts() {
         let cold = ApiRequest::new(
             "token".into(),
@@ -3138,10 +2898,53 @@ mod tests {
     }
 
     #[test]
+    fn agent_fork_prepares_a_runtime_agent_start_with_provenance() {
+        let repository = test_git_repository();
+        let target = repository.path().join("isolated-review");
+        let request = ApiRequest::new(
+            "token".into(),
+            "agent.fork",
+            json!({
+                "source_cwd": repository.path(),
+                "name": "reviewer",
+                "kind": "codex",
+                "branch": "nebula/runtime-reviewer",
+                "path": target
+            }),
+        );
+        let parsed = RuntimeCommand::from_request(&request).expect("agent.fork should parse");
+        let (prepared, transaction) =
+            agent_api::prepare_dispatch_command(parsed, &RuntimeHub::new())
+                .expect("worktree should prepare");
+        match prepared {
+            RuntimeCommand::AgentStart { cwd, worktree: Some(worktree), .. } => {
+                assert_eq!(cwd.as_deref(), Some(worktree.path.as_path()));
+                assert_eq!(worktree.branch, "nebula/runtime-reviewer");
+                assert!(!worktree.base_commit.is_empty());
+            },
+            _ => panic!("agent.fork must become a prepared AgentStart"),
+        }
+        transaction
+            .expect("agent.fork owns a transaction")
+            .rollback()
+            .expect("prepared resources should roll back");
+    }
+
+    #[test]
+    fn agent_fork_requires_an_explicit_source() {
+        let request = ApiRequest::new(
+            "token".into(),
+            "agent.fork",
+            json!({ "name": "reviewer", "kind": "codex" }),
+        );
+        assert_eq!(RuntimeCommand::from_request(&request).unwrap_err().code, "invalid_params");
+    }
+
+    #[test]
     fn managed_agent_names_are_unique_and_generations_are_stable() {
         let hub = RuntimeHub::new();
         let first = hub
-            .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 3, None)
+            .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 3, None, None)
             .unwrap();
         assert_eq!(first.generation, 1);
         assert_eq!(
@@ -3155,7 +2958,7 @@ mod tests {
         assert_eq!(closed.closed_reason.as_deref(), Some("agent_exited"));
 
         let second = hub
-            .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 4, None)
+            .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 4, None, None)
             .unwrap();
         assert_eq!(second.generation, 2);
         assert_eq!(hub.active_agent("reviewer", Some(1)).unwrap_err().code, "agent_exited");
@@ -3166,10 +2969,127 @@ mod tests {
     }
 
     #[test]
+    fn agent_fork_rolls_back_when_ui_launch_fails() {
+        let repository = test_git_repository();
+        let target = repository.path().join("failed-agent");
+        let request = ApiRequest::new(
+            "token".into(),
+            "agent.fork",
+            json!({
+                "source_cwd": repository.path(),
+                "name": "failed-agent",
+                "kind": "codex",
+                "branch": "nebula/failed-agent",
+                "path": target
+            }),
+        );
+        let sink = EventSink::Callback(Arc::new(|callback| {
+            if let RuntimeCallback::Control(dispatch) = callback {
+                assert!(matches!(
+                    &dispatch.command,
+                    RuntimeCommand::AgentStart { worktree: Some(_), .. }
+                ));
+                dispatch
+                    .respond(Err(ApiError::new("action_failed", "simulated UI launch failure")));
+            }
+        }));
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        dispatch_connection(&mut server, request, &sink, &RuntimeHub::new()).unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut client).read_line(&mut line).unwrap();
+        let response: ApiResponse = serde_json::from_str(&line).unwrap();
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "action_failed");
+        assert!(!target.exists());
+        assert!(
+            !std::process::Command::new("git")
+                .arg("-C")
+                .arg(repository.path())
+                .args(["show-ref", "--verify", "--quiet", "refs/heads/nebula/failed-agent"])
+                .status()
+                .expect("query branch")
+                .success()
+        );
+    }
+
+    #[test]
+    fn managed_agent_keeps_worktree_provenance() {
+        let hub = RuntimeHub::new();
+        let provenance = crate::git_worktree::WorktreeProvenance {
+            repo_root: PathBuf::from("D:/repo"),
+            source_root: PathBuf::from("D:/repo"),
+            path: PathBuf::from("D:/repo-worktrees/reviewer"),
+            branch: "nebula/reviewer".into(),
+            base_commit: "0123456789012345678901234567890123456789".into(),
+            created: true,
+        };
+        let managed = hub
+            .register_agent(
+                "reviewer".into(),
+                crate::ai_agents::AgentKind::Codex,
+                7,
+                3,
+                None,
+                Some(provenance.clone()),
+            )
+            .unwrap();
+        assert_eq!(managed.worktree.as_ref(), Some(&provenance));
+        assert_eq!(
+            hub.active_agent(&managed.agent_id, Some(managed.generation))
+                .unwrap()
+                .worktree
+                .as_ref(),
+            Some(&provenance)
+        );
+        let mut observed = snapshot(RuntimeTaskState::Running);
+        observed.windows[0].tabs[0].panes[0].agent = Some(detected_agent("codex", None));
+        let projected = hub.publish(observed);
+        assert_eq!(
+            projected.windows[0].tabs[0].panes[0]
+                .agent
+                .as_ref()
+                .and_then(|agent| agent.worktree.as_ref()),
+            Some(&provenance)
+        );
+    }
+
+    fn test_git_repository() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().expect("create repository directory");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(directory.path())
+                .args(args)
+                .output()
+                .expect("run git")
+        };
+        assert!(git(&["init", "--initial-branch=main"]).status.success());
+        std::fs::write(directory.path().join("tracked.txt"), "tracked")
+            .expect("write tracked file");
+        assert!(git(&["add", "tracked.txt"]).status.success());
+        assert!(
+            git(&[
+                "-c",
+                "user.name=Nebula Test",
+                "-c",
+                "user.email=nebula@example.invalid",
+                "commit",
+                "-m",
+                "initial"
+            ])
+            .status
+            .success()
+        );
+        directory
+    }
+
+    #[test]
     fn closing_an_agent_wakes_identity_aware_waiters() {
         let hub = RuntimeHub::new();
         let agent = hub
-            .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 3, None)
+            .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 3, None, None)
             .unwrap();
         hub.publish(snapshot(RuntimeTaskState::Idle));
         let (_, _, receiver) = hub.subscribe();
@@ -3193,6 +3113,7 @@ mod tests {
                 7,
                 3,
                 Some("thread-1".into()),
+                None,
             )
             .unwrap();
 
@@ -3218,9 +3139,7 @@ mod tests {
         assert!(!closed.active);
         assert_eq!(closed.closed_reason.as_deref(), Some("agent_replaced"));
         assert_eq!(
-            hub.active_agent(&managed.agent_id, Some(managed.generation))
-                .unwrap_err()
-                .code,
+            hub.active_agent(&managed.agent_id, Some(managed.generation)).unwrap_err().code,
             "agent_replaced"
         );
     }
@@ -3237,10 +3156,7 @@ mod tests {
         assert_eq!(closed.pane_lifecycles[0].window_id, 7);
         assert_eq!(closed.pane_lifecycles[0].pane_id, 3);
         assert_eq!(closed.pane_lifecycles[0].event, RuntimePaneLifecycleKind::Closed);
-        assert_eq!(
-            hub.pane_lifecycle_error(Some(7), 3).unwrap().code,
-            "pane_closed"
-        );
+        assert_eq!(hub.pane_lifecycle_error(Some(7), 3).unwrap().code, "pane_closed");
         assert_eq!(receiver.recv_timeout(Duration::from_millis(50)).unwrap(), closed);
     }
 
@@ -3254,10 +3170,7 @@ mod tests {
         let exited = receiver.recv_timeout(Duration::from_millis(50)).unwrap();
         assert_eq!(exited.revision, 2);
         assert_eq!(exited.pane_lifecycles[0].event, RuntimePaneLifecycleKind::Exited);
-        assert_eq!(
-            hub.pane_lifecycle_error(Some(7), 3).unwrap().code,
-            "pane_exited"
-        );
+        assert_eq!(hub.pane_lifecycle_error(Some(7), 3).unwrap().code, "pane_exited");
 
         hub.record_pane_closed(7, 3);
         assert_eq!(hub.current().unwrap().revision, 2);
@@ -3293,11 +3206,11 @@ mod tests {
                 7,
                 3,
                 Some("thread-1".into()),
+                None,
             )
             .unwrap();
         let mut running = snapshot(RuntimeTaskState::Running);
-        running.windows[0].tabs[0].panes[0].agent =
-            Some(detected_agent("codex", Some("thread-1")));
+        running.windows[0].tabs[0].panes[0].agent = Some(detected_agent("codex", Some("thread-1")));
         hub.publish(running);
 
         hub.record_pane_exited(7, 3);
@@ -3315,18 +3228,9 @@ mod tests {
         let hub = RuntimeHub::new();
         hub.record_pane_closed(7, 3);
         hub.record_pane_exited(8, 3);
-        assert_eq!(
-            hub.pane_lifecycle_error(Some(7), 3).unwrap().code,
-            "pane_closed"
-        );
-        assert_eq!(
-            hub.pane_lifecycle_error(Some(8), 3).unwrap().code,
-            "pane_exited"
-        );
-        assert_eq!(
-            hub.pane_lifecycle_error(None, 3).unwrap().code,
-            "ambiguous_target"
-        );
+        assert_eq!(hub.pane_lifecycle_error(Some(7), 3).unwrap().code, "pane_closed");
+        assert_eq!(hub.pane_lifecycle_error(Some(8), 3).unwrap().code, "pane_exited");
+        assert_eq!(hub.pane_lifecycle_error(None, 3).unwrap().code, "ambiguous_target");
     }
 
     #[test]
@@ -3507,6 +3411,7 @@ mod tests {
             agent_id: None,
             generation: None,
             name: None,
+            worktree: None,
             kind: "codex".into(),
             display_name: "Codex".into(),
             session_id: Some("thread-7".into()),
