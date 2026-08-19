@@ -155,7 +155,10 @@ impl NebulaWorkspace {
                     .items_center()
                     .gap_2()
                     .px_2()
-                    .rounded(px(crate::display::UI_CORNER_RADIUS_LOGICAL))
+                    // 顶部 tab 的底边直接接正文，只保留上侧圆角；四角全圆
+                    // 会把它重新画成悬浮在标题栏里的药丸。
+                    .rounded_tl(px(crate::display::UI_CORNER_RADIUS_LOGICAL))
+                    .rounded_tr(px(crate::display::UI_CORNER_RADIUS_LOGICAL))
                     .font_weight(FontWeight::NORMAL)
                     .cursor_pointer()
                     // TitleBar 的父层是 WindowControlArea::Drag；tab 必须自己
@@ -373,47 +376,56 @@ impl NebulaWorkspace {
                     })),
             )
             .child(
-                div()
-                    .id("top-tabs-viewport")
-                    .relative()
-                    .w(px(tab_viewport_w))
+                // Windows Terminal 的 TabView 贴住标题栏底边；只让 tab 与其
+                // 相邻操作按钮下沉，标题栏两侧的独立工具仍保持垂直居中。
+                h_flex()
+                    .h_full()
                     .flex_shrink()
                     .min_w_0()
-                    .h_full()
-                    .overflow_hidden()
-                    // 待命拖拽在越过 4px 前由此接收移动；激活后根罩层接管。
-                    .on_mouse_move(cx.listener(|this, event, window, cx| {
-                        this.update_tab_drag(event, window, cx);
-                    }))
-                    .on_scroll_wheel(cx.listener(Self::on_top_tabs_wheel))
+                    .items_end()
                     .child(
-                        h_flex()
-                            .id("top-tabs-scroll")
-                            .size_full()
-                            .items_center()
-                            .gap(px(TOP_TAB_GAP))
-                            .overflow_x_scroll()
-                            .track_scroll(&self.top_tabs_scroll)
-                            .children(items),
+                        div()
+                            .id("top-tabs-viewport")
+                            .relative()
+                            .w(px(tab_viewport_w))
+                            .flex_shrink()
+                            .min_w_0()
+                            .h(px(TOP_TAB_H))
+                            .overflow_hidden()
+                            // 待命拖拽在越过 4px 前由此接收移动；激活后根罩层接管。
+                            .on_mouse_move(cx.listener(|this, event, window, cx| {
+                                this.update_tab_drag(event, window, cx);
+                            }))
+                            .on_scroll_wheel(cx.listener(Self::on_top_tabs_wheel))
+                            .child(
+                                h_flex()
+                                    .id("top-tabs-scroll")
+                                    .size_full()
+                                    .items_center()
+                                    .gap(px(TOP_TAB_GAP))
+                                    .overflow_x_scroll()
+                                    .track_scroll(&self.top_tabs_scroll)
+                                    .children(items),
+                            ),
+                    )
+                    .child(
+                        Button::new("top-new-tab")
+                            .icon(IconName::Plus)
+                            .ghost()
+                            .tooltip("新建终端 (Ctrl+Shift+T)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_terminal(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("top-tabs-menu")
+                            .icon(IconName::EllipsisVertical)
+                            .ghost()
+                            .tooltip("选择终端 (Ctrl+K)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_shell_palette(window, cx);
+                            })),
                     ),
-            )
-            .child(
-                Button::new("top-new-tab")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .tooltip("新建终端 (Ctrl+Shift+T)")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.add_terminal(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("top-tabs-menu")
-                    .icon(IconName::EllipsisVertical)
-                    .ghost()
-                    .tooltip("选择终端 (Ctrl+K)")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_shell_palette(window, cx);
-                    })),
             )
             // Windows Terminal 的新建 split button 紧跟 TabView；剩余空间
             // 才是可拖拽标题栏，文件树与 Git 固定在其右侧。
