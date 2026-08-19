@@ -1382,6 +1382,9 @@ impl NebulaWorkspace {
             Some(WorkspaceTab::Terminal { tree, .. }) => tree.remove_leaf(pane_id),
             _ => return,
         };
+        if !matches!(outcome, RemoveOutcome::NotFound) {
+            self.runtime_hub.record_pane_closed(self.runtime_window_id, pane_id);
+        }
         match outcome {
             RemoveOutcome::NotFound => {},
             RemoveOutcome::WasRoot => self.close_tab(tab_ix, window, cx),
@@ -2113,6 +2116,7 @@ impl NebulaWorkspace {
             TerminalViewEvent::TitleChanged => cx.notify(),
             TerminalViewEvent::Exited => {
                 if let Some((tab_ix, pane_id)) = self.locate_pane(view.entity_id()) {
+                    self.runtime_hub.record_pane_exited(self.runtime_window_id, pane_id);
                     self.close_pane(tab_ix, pane_id, window, cx);
                 }
             },
@@ -2170,6 +2174,7 @@ impl NebulaWorkspace {
         if let WorkspaceTab::Terminal { panes, .. } = &tab {
             let mut bounds = self.pane_bounds.borrow_mut();
             for pane in panes {
+                self.runtime_hub.record_pane_closed(self.runtime_window_id, pane.id);
                 pane.view.read(cx).shutdown();
                 bounds.remove(&pane.id);
             }

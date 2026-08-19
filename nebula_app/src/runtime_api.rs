@@ -218,6 +218,30 @@ pub struct RuntimeManagedAgent {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum RuntimePaneLifecycleKind {
+    Closed,
+    Exited,
+}
+
+impl RuntimePaneLifecycleKind {
+    fn error_code(self) -> &'static str {
+        match self {
+            Self::Closed => "pane_closed",
+            Self::Exited => "pane_exited",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePaneLifecycle {
+    pub sequence: u64,
+    pub window_id: u64,
+    pub pane_id: u64,
+    pub event: RuntimePaneLifecycleKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeSplitDirection {
     LeftRight,
     TopBottom,
@@ -231,6 +255,8 @@ pub struct RuntimeSnapshot {
     pub protocol_version: u16,
     pub detached_windows: usize,
     pub windows: Vec<RuntimeWindow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pane_lifecycles: Vec<RuntimePaneLifecycle>,
 }
 
 impl RuntimeSnapshot {
@@ -242,20 +268,33 @@ impl RuntimeSnapshot {
             protocol_version: PROTOCOL_VERSION,
             detached_windows,
             windows,
+            pane_lifecycles: Vec::new(),
         }
     }
 
     fn pane(&self, window_id: Option<u64>, pane_id: u64) -> Result<&RuntimePane, ApiError> {
+        self.pane_target(window_id, pane_id).map(|(_, pane)| pane)
+    }
+
+    fn pane_target(
+        &self,
+        window_id: Option<u64>,
+        pane_id: u64,
+    ) -> Result<(u64, &RuntimePane), ApiError> {
         let matches: Vec<_> = self
             .windows
             .iter()
             .filter(|window| window_id.is_none_or(|id| window.id == id))
-            .flat_map(|window| window.tabs.iter())
-            .flat_map(|tab| tab.panes.iter())
-            .filter(|pane| pane.id == pane_id)
+            .flat_map(|window| {
+                window
+                    .tabs
+                    .iter()
+                    .flat_map(move |tab| tab.panes.iter().map(move |pane| (window.id, pane)))
+            })
+            .filter(|(_, pane)| pane.id == pane_id)
             .collect();
         match matches.as_slice() {
-            [pane] => Ok(*pane),
+            [target] => Ok(*target),
             [] => Err(ApiError::new(
                 "target_not_found",
                 format!("pane {pane_id} was not found in the requested window"),
@@ -763,6 +802,8 @@ struct HubState {
     current: Option<RuntimeSnapshot>,
     next_subscription: u64,
     subscribers: Vec<(u64, SyncSender<RuntimeSnapshot>)>,
+    next_pane_lifecycle: u64,
+    pane_lifecycles: std::collections::VecDeque<RuntimePaneLifecycle>,
     next_run_waiter: u64,
     run_waiters:
         std::collections::HashMap<(u64, u64, u64), Vec<(u64, SyncSender<RuntimeRunResult>)>>,
@@ -784,6 +825,8 @@ impl RuntimeHub {
     /// revisions or flood subscribers with identical snapshots.
     pub(crate) fn publish(&self, mut snapshot: RuntimeSnapshot) -> RuntimeSnapshot {
         let mut state = self.lock();
+        observe_removed_panes(&mut state, &snapshot);
+        snapshot.pane_lifecycles = state.pane_lifecycles.iter().cloned().collect();
         let agent_lifecycle_changed = project_managed_agents(&mut state, &mut snapshot);
         // Stamp per-pane transition counters before the dedup compare. Panes
         // whose state is unchanged keep their previous counter, so an
@@ -820,6 +863,69 @@ impl RuntimeHub {
 
     fn current(&self) -> Option<RuntimeSnapshot> {
         self.lock().current.clone()
+    }
+
+    pub(crate) fn record_pane_closed(&self, window_id: u64, pane_id: u64) {
+        self.record_pane_lifecycle(window_id, pane_id, RuntimePaneLifecycleKind::Closed);
+    }
+
+    pub(crate) fn record_pane_exited(&self, window_id: u64, pane_id: u64) {
+        self.record_pane_lifecycle(window_id, pane_id, RuntimePaneLifecycleKind::Exited);
+    }
+
+    fn record_pane_lifecycle(
+        &self,
+        window_id: u64,
+        pane_id: u64,
+        event: RuntimePaneLifecycleKind,
+    ) {
+        let republish = {
+            let mut state = self.lock();
+            record_pane_lifecycle_locked(&mut state, window_id, pane_id, event)
+                .then(|| state.current.clone())
+                .flatten()
+        };
+        if let Some(snapshot) = republish {
+            self.publish(snapshot);
+        }
+    }
+
+    fn pane_lifecycle_error(
+        &self,
+        window_id: Option<u64>,
+        pane_id: u64,
+    ) -> Option<ApiError> {
+        let state = self.lock();
+        let matches: Vec<_> = state
+            .pane_lifecycles
+            .iter()
+            .filter(|lifecycle| {
+                lifecycle.pane_id == pane_id
+                    && window_id.is_none_or(|id| lifecycle.window_id == id)
+            })
+            .collect();
+        match matches.as_slice() {
+            [lifecycle] => Some(
+                ApiError::new(
+                    lifecycle.event.error_code(),
+                    format!(
+                        "pane {} in window {} has {}",
+                        lifecycle.pane_id,
+                        lifecycle.window_id,
+                        match lifecycle.event {
+                            RuntimePaneLifecycleKind::Closed => "closed",
+                            RuntimePaneLifecycleKind::Exited => "exited",
+                        }
+                    ),
+                )
+                .details(serde_json::to_value(lifecycle).unwrap_or(Value::Null)),
+            ),
+            [] => None,
+            _ => Some(ApiError::new(
+                "ambiguous_target",
+                format!("pane id {pane_id} has lifecycle events in multiple windows; provide window_id"),
+            )),
+        }
     }
 
     pub(crate) fn register_agent(
@@ -932,8 +1038,17 @@ impl RuntimeHub {
             })));
         }
         if require_active && !agent.active {
+            let code = match agent.closed_reason.as_deref() {
+                Some(
+                    reason @ ("agent_exited"
+                    | "agent_replaced"
+                    | "pane_closed"
+                    | "pane_exited"),
+                ) => reason,
+                _ => "agent_closed",
+            };
             return Err(ApiError::new(
-                "agent_closed",
+                code,
                 format!("agent {:?} is no longer active", agent.name),
             )
             .details(serde_json::to_value(agent).unwrap_or(Value::Null)));
@@ -1014,6 +1129,75 @@ impl RuntimeHub {
             },
         }
     }
+}
+
+const PANE_LIFECYCLE_CACHE: usize = 256;
+
+fn observe_removed_panes(state: &mut HubState, snapshot: &RuntimeSnapshot) {
+    let Some(current) = state.current.as_ref() else { return };
+    let live: std::collections::HashSet<_> = snapshot
+        .windows
+        .iter()
+        .flat_map(|window| {
+            window.tabs.iter().flat_map(move |tab| {
+                tab.panes.iter().map(move |pane| (window.id, pane.id))
+            })
+        })
+        .collect();
+    let removed: Vec<_> = current
+        .windows
+        .iter()
+        .flat_map(|window| {
+            window.tabs.iter().flat_map(move |tab| {
+                tab.panes.iter().map(move |pane| (window.id, pane.id))
+            })
+        })
+        .filter(|target| !live.contains(target))
+        .collect();
+    for (window_id, pane_id) in removed {
+        record_pane_lifecycle_locked(
+            state,
+            window_id,
+            pane_id,
+            RuntimePaneLifecycleKind::Closed,
+        );
+    }
+}
+
+fn record_pane_lifecycle_locked(
+    state: &mut HubState,
+    window_id: u64,
+    pane_id: u64,
+    event: RuntimePaneLifecycleKind,
+) -> bool {
+    // The first terminal event is the cause. A real PTY exit must not be
+    // overwritten by the shutdown/close that the UI performs immediately
+    // afterwards.
+    if state
+        .pane_lifecycles
+        .iter()
+        .any(|lifecycle| lifecycle.window_id == window_id && lifecycle.pane_id == pane_id)
+    {
+        return false;
+    }
+    state.next_pane_lifecycle = state.next_pane_lifecycle.saturating_add(1);
+    state.pane_lifecycles.push_back(RuntimePaneLifecycle {
+        sequence: state.next_pane_lifecycle,
+        window_id,
+        pane_id,
+        event,
+    });
+    while state.pane_lifecycles.len() > PANE_LIFECYCLE_CACHE {
+        state.pane_lifecycles.pop_front();
+    }
+    let closed_reason = event.error_code();
+    for agent in state.managed_agents.values_mut().filter(|agent| {
+        agent.active && agent.window_id == window_id && agent.pane_id == pane_id
+    }) {
+        agent.active = false;
+        agent.closed_reason = Some(closed_reason.to_owned());
+    }
+    true
 }
 
 fn notify_snapshot_subscribers(state: &mut HubState, snapshot: &RuntimeSnapshot) {
@@ -2015,7 +2199,10 @@ fn runtime_description() -> Value {
         // build ignores an unknown `after_seq` and still races. Clients that
         // need the guarantee should require the feature string.
         "features": [
-            "pane.wait.after_seq"
+            "pane.wait.after_seq",
+            "pane.wait.lifecycle",
+            "agent.wait.identity",
+            "events.pane_lifecycle"
         ]
     })
 }
@@ -2175,15 +2362,18 @@ fn agent_wait_connection(
                 },
                 Ok(pane) => observed = Some((pane.task_state, pane.state_change_seq)),
                 Err(error) => {
-                    return write_response(
-                        stream,
-                        &ApiResponse::failure(
-                            request.id,
+                    let error = hub
+                        .active_agent(&agent.agent_id, Some(agent.generation))
+                        .err()
+                        .unwrap_or_else(|| {
                             ApiError::new("agent_closed", error.message).details(json!({
                                 "agent_id": agent.agent_id,
                                 "generation": agent.generation
-                            })),
-                        ),
+                            }))
+                        });
+                    return write_response(
+                        stream,
+                        &ApiResponse::failure(request.id, error),
                     );
                 },
             }
@@ -2281,20 +2471,44 @@ fn wait_connection(
     // Remember what the pane last looked like so a timeout can report why it
     // never matched rather than only that it did not.
     let mut observed = None;
+    let mut target_window = params.window_id;
     if let Some(snapshot) = current {
-        match snapshot.pane(params.window_id, params.pane_id) {
-            Ok(pane) if wait_matches(pane, params.state, params.after_seq) => {
+        match snapshot.pane_target(target_window, params.pane_id) {
+            Ok((window_id, pane)) => {
+                target_window = Some(window_id);
+                if let Some(error) = hub.pane_lifecycle_error(target_window, params.pane_id) {
+                    return write_response(stream, &ApiResponse::failure(request.id, error));
+                }
+                if wait_matches(pane, params.state, params.after_seq) {
+                    return write_response(
+                        stream,
+                        &ApiResponse::success(
+                            request.id,
+                            serde_json::to_value(snapshot).map_err(IoError::other)?,
+                        ),
+                    );
+                }
+                observed = Some((pane.task_state, pane.state_change_seq));
+            },
+            Err(error) if error.code == "target_not_found" => {
+                if let Some(lifecycle) =
+                    hub.pane_lifecycle_error(target_window, params.pane_id)
+                {
+                    return write_response(
+                        stream,
+                        &ApiResponse::failure(request.id, lifecycle),
+                    );
+                }
+            },
+            Err(error) => {
                 return write_response(
                     stream,
-                    &ApiResponse::success(
-                        request.id,
-                        serde_json::to_value(snapshot).map_err(IoError::other)?,
-                    ),
+                    &ApiResponse::failure(request.id, error),
                 );
             },
-            Ok(pane) => observed = Some((pane.task_state, pane.state_change_seq)),
-            Err(_) => (),
         }
+    } else if let Some(error) = hub.pane_lifecycle_error(target_window, params.pane_id) {
+        return write_response(stream, &ApiResponse::failure(request.id, error));
     }
 
     let deadline = Instant::now() + timeout;
@@ -2307,19 +2521,34 @@ fn wait_connection(
             Ok(snapshot) => snapshot,
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
         };
-        match snapshot.pane(params.window_id, params.pane_id) {
-            Ok(pane) if wait_matches(pane, params.state, params.after_seq) => {
+        if let Some(error) = hub.pane_lifecycle_error(target_window, params.pane_id) {
+            return write_response(stream, &ApiResponse::failure(request.id, error));
+        }
+        match snapshot.pane_target(target_window, params.pane_id) {
+            Ok((window_id, pane)) => {
+                target_window = Some(window_id);
+                if wait_matches(pane, params.state, params.after_seq) {
+                    return write_response(
+                        stream,
+                        &ApiResponse::success(
+                            request.id,
+                            serde_json::to_value(snapshot).map_err(IoError::other)?,
+                        ),
+                    );
+                }
+                observed = Some((pane.task_state, pane.state_change_seq));
+            },
+            Err(error) => {
                 return write_response(
                     stream,
-                    &ApiResponse::success(
-                        request.id,
-                        serde_json::to_value(snapshot).map_err(IoError::other)?,
-                    ),
+                    &ApiResponse::failure(request.id, error),
                 );
             },
-            Ok(pane) => observed = Some((pane.task_state, pane.state_change_seq)),
-            Err(_) => (),
         }
+    }
+
+    if let Some(error) = hub.pane_lifecycle_error(target_window, params.pane_id) {
+        return write_response(stream, &ApiResponse::failure(request.id, error));
     }
 
     let detail = match observed {
@@ -2339,6 +2568,7 @@ fn wait_connection(
             )
             .details(json!({
                 "pane_id": params.pane_id,
+                "window_id": target_window,
                 "after_seq": params.after_seq,
                 "observed_state_change_seq": observed.map(|(_, seq)| seq)
             })),
@@ -2827,6 +3057,16 @@ mod tests {
         }
     }
 
+    fn call_wait_connection(hub: &RuntimeHub, request: ApiRequest) -> ApiResponse {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        wait_connection(&mut server, request, hub).unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut client).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
     #[test]
     fn hub_revisions_change_only_when_semantic_state_changes() {
         let hub = RuntimeHub::new();
@@ -2918,7 +3158,7 @@ mod tests {
             .register_agent("reviewer".into(), crate::ai_agents::AgentKind::Codex, 7, 4, None)
             .unwrap();
         assert_eq!(second.generation, 2);
-        assert_eq!(hub.active_agent("reviewer", Some(1)).unwrap_err().code, "agent_closed");
+        assert_eq!(hub.active_agent("reviewer", Some(1)).unwrap_err().code, "agent_exited");
         assert_eq!(
             hub.active_agent("reviewer", Some(99)).unwrap_err().code,
             "agent_identity_mismatch"
@@ -2939,7 +3179,7 @@ mod tests {
         assert_eq!(wake.revision, 1);
         assert_eq!(
             hub.active_agent(&agent.agent_id, Some(agent.generation)).unwrap_err().code,
-            "agent_closed"
+            "pane_closed"
         );
     }
 
@@ -2977,6 +3217,116 @@ mod tests {
         let closed = hub.managed_agent(&managed.agent_id, None, false).unwrap();
         assert!(!closed.active);
         assert_eq!(closed.closed_reason.as_deref(), Some("agent_replaced"));
+        assert_eq!(
+            hub.active_agent(&managed.agent_id, Some(managed.generation))
+                .unwrap_err()
+                .code,
+            "agent_replaced"
+        );
+    }
+
+    #[test]
+    fn removed_panes_publish_closed_tombstones() {
+        let hub = RuntimeHub::new();
+        hub.publish(snapshot(RuntimeTaskState::Idle));
+        let (_, _, receiver) = hub.subscribe();
+
+        let closed = hub.publish(RuntimeSnapshot::new(0, Vec::new()));
+        assert_eq!(closed.revision, 2);
+        assert_eq!(closed.pane_lifecycles.len(), 1);
+        assert_eq!(closed.pane_lifecycles[0].window_id, 7);
+        assert_eq!(closed.pane_lifecycles[0].pane_id, 3);
+        assert_eq!(closed.pane_lifecycles[0].event, RuntimePaneLifecycleKind::Closed);
+        assert_eq!(
+            hub.pane_lifecycle_error(Some(7), 3).unwrap().code,
+            "pane_closed"
+        );
+        assert_eq!(receiver.recv_timeout(Duration::from_millis(50)).unwrap(), closed);
+    }
+
+    #[test]
+    fn explicit_pane_exit_precedes_the_following_ui_close() {
+        let hub = RuntimeHub::new();
+        hub.publish(snapshot(RuntimeTaskState::Running));
+        let (_, _, receiver) = hub.subscribe();
+
+        hub.record_pane_exited(7, 3);
+        let exited = receiver.recv_timeout(Duration::from_millis(50)).unwrap();
+        assert_eq!(exited.revision, 2);
+        assert_eq!(exited.pane_lifecycles[0].event, RuntimePaneLifecycleKind::Exited);
+        assert_eq!(
+            hub.pane_lifecycle_error(Some(7), 3).unwrap().code,
+            "pane_exited"
+        );
+
+        hub.record_pane_closed(7, 3);
+        assert_eq!(hub.current().unwrap().revision, 2);
+        assert_eq!(
+            hub.current().unwrap().pane_lifecycles[0].event,
+            RuntimePaneLifecycleKind::Exited
+        );
+
+        let response = call_wait_connection(
+            &hub,
+            ApiRequest::new(
+                "token".into(),
+                "pane.wait",
+                json!({
+                    "window_id": 7,
+                    "pane_id": 3,
+                    "state": "settled",
+                    "timeout_ms": 1000
+                }),
+            ),
+        );
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "pane_exited");
+    }
+
+    #[test]
+    fn pane_lifecycle_closes_managed_agents_with_the_same_cause() {
+        let hub = RuntimeHub::new();
+        let agent = hub
+            .register_agent(
+                "reviewer".into(),
+                crate::ai_agents::AgentKind::Codex,
+                7,
+                3,
+                Some("thread-1".into()),
+            )
+            .unwrap();
+        let mut running = snapshot(RuntimeTaskState::Running);
+        running.windows[0].tabs[0].panes[0].agent =
+            Some(detected_agent("codex", Some("thread-1")));
+        hub.publish(running);
+
+        hub.record_pane_exited(7, 3);
+        let closed = hub.managed_agent(&agent.agent_id, None, false).unwrap();
+        assert!(!closed.active);
+        assert_eq!(closed.closed_reason.as_deref(), Some("pane_exited"));
+        assert_eq!(
+            hub.active_agent(&agent.agent_id, Some(agent.generation)).unwrap_err().code,
+            "pane_exited"
+        );
+    }
+
+    #[test]
+    fn pane_lifecycle_identity_is_window_local() {
+        let hub = RuntimeHub::new();
+        hub.record_pane_closed(7, 3);
+        hub.record_pane_exited(8, 3);
+        assert_eq!(
+            hub.pane_lifecycle_error(Some(7), 3).unwrap().code,
+            "pane_closed"
+        );
+        assert_eq!(
+            hub.pane_lifecycle_error(Some(8), 3).unwrap().code,
+            "pane_exited"
+        );
+        assert_eq!(
+            hub.pane_lifecycle_error(None, 3).unwrap().code,
+            "ambiguous_target"
+        );
     }
 
     #[test]

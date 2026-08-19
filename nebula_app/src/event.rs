@@ -1310,6 +1310,9 @@ impl ApplicationHandler<Event> for Processor {
                 }
             },
             (EventType::Terminal(TerminalEvent::Exit), Some(window_id)) => {
+                if let Some(pane_id) = tab_id {
+                    self.runtime_hub.record_pane_exited(u64::from(*window_id), pane_id);
+                }
                 // Close the tab whose shell exited; only close the window when
                 // it was the last tab (respecting the hold option).
                 let close_window = match self.windows.get_mut(window_id) {
