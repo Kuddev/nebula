@@ -28,26 +28,29 @@ pub enum SvnDirKind {
     WorkingCopy(PathBuf),
     /// `svnadmin create` 生成的服务端仓库：只能被 svnserve/httpd 提供服务
     /// 或用 `file://` 协议 checkout，本身没有"文件状态"可言。
-    Repository,
+    Repository(PathBuf),
     /// 与 SVN 无关。
     Plain,
 }
 
-/// 判定 `dir` 的 SVN 身份：向上找 `.svn/wc.db`（工作拷贝），否则按
-/// `format` + `conf/db/hooks` 特征识别服务端仓库。
+/// 判定 `dir` 的 SVN 身份：沿祖先链同时查找 `.svn/wc.db`（工作拷贝）和
+/// `format` + `conf/db/hooks`（服务端仓库），并返回离 `dir` 最近的根。
 pub fn classify_dir(dir: &Path) -> SvnDirKind {
     let mut probe = Some(dir);
     while let Some(current) = probe {
         if current.join(".svn").join("wc.db").is_file() {
             return SvnDirKind::WorkingCopy(current.to_owned());
         }
+        let is_repository = current.join("format").is_file()
+            && current.join("conf").is_dir()
+            && current.join("db").is_dir()
+            && current.join("hooks").is_dir();
+        if is_repository {
+            return SvnDirKind::Repository(current.to_owned());
+        }
         probe = current.parent();
     }
-    let is_repository = dir.join("format").is_file()
-        && dir.join("conf").is_dir()
-        && dir.join("db").is_dir()
-        && dir.join("hooks").is_dir();
-    if is_repository { SvnDirKind::Repository } else { SvnDirKind::Plain }
+    SvnDirKind::Plain
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -353,7 +356,10 @@ mod tests {
             std::fs::create_dir_all(repo.join(sub)).unwrap();
         }
         std::fs::write(repo.join("format"), "8\n").unwrap();
-        assert_eq!(classify_dir(&repo), SvnDirKind::Repository);
+        assert_eq!(classify_dir(&repo), SvnDirKind::Repository(repo.clone()));
+        let repo_child = repo.join("db").join("revs");
+        std::fs::create_dir_all(&repo_child).unwrap();
+        assert_eq!(classify_dir(&repo_child), SvnDirKind::Repository(repo.clone()));
 
         let wc = temp.path().join("wc");
         fake_working_copy(&wc);

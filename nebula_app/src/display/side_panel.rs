@@ -12,6 +12,7 @@
 //! the index lock, so it can't corrupt or stall a concurrent git operation.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
@@ -48,7 +49,10 @@ pub struct FileRow {
 pub enum VcsKind {
     #[default]
     Git,
+    /// 可执行 add/commit/update 等工作副本命令。
     Svn,
+    /// `svnadmin create` 生成的服务端仓库；只能浏览或检出。
+    SvnRepository,
 }
 
 /// Parsed `git status` snapshot.
@@ -73,6 +77,20 @@ pub struct GitInfo {
     /// 在 `staged`/`unstaged` 里：旧壳视图零改动照常显示，GPUI 壳按本列表
     /// 单独分组并从另两组过滤（VS Code 的 Merge Changes 合同）。
     pub conflicts: Vec<(char, String)>,
+    /// 仅 [`VcsKind::SvnRepository`] 使用；工作副本和 Git 的操作目录取
+    /// [`SidePanel::vcs_root`]，服务端仓库必须保留祖先扫描得到的真实根。
+    pub repository_root: Option<PathBuf>,
+}
+
+impl GitInfo {
+    pub fn svn_add_ready(&self) -> bool {
+        self.vcs == VcsKind::Svn && self.unstaged.iter().any(|(status, _)| *status == '?')
+    }
+
+    pub fn svn_commit_ready(&self) -> bool {
+        self.vcs == VcsKind::Svn
+            && self.unstaged.iter().any(|(status, _)| matches!(status, 'A' | 'D' | 'M' | 'R'))
+    }
 }
 
 /// Result of hit-testing a pixel against the open drawer.
@@ -264,6 +282,198 @@ struct PanelSnapshot {
 
 fn git_pull_args() -> Vec<String> {
     vec!["pull".into(), "--ff-only".into()]
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SvnMutation {
+    Add(Vec<PathBuf>),
+    Commit(String),
+    Update,
+    Revert(PathBuf),
+    Resolve(PathBuf),
+    Cleanup,
+}
+
+impl SvnMutation {
+    fn cli_args(&self) -> Vec<OsString> {
+        let args: Vec<OsString> = match self {
+            Self::Add(paths) => {
+                let mut args = vec!["add".into(), "--parents".into(), "--".into()];
+                args.extend(paths.iter().map(|path| path.as_os_str().to_owned()));
+                args
+            },
+            Self::Commit(message) => vec![
+                "commit".into(),
+                "--non-interactive".into(),
+                "-m".into(),
+                message.as_str().into(),
+            ],
+            Self::Update => vec!["update".into(), "--non-interactive".into()],
+            Self::Revert(path) => vec![
+                "revert".into(),
+                "--depth".into(),
+                "infinity".into(),
+                "--".into(),
+                path.as_os_str().to_owned(),
+            ],
+            // `working` 保留用户解决后的文件内容，只把冲突状态标记为已处理。
+            Self::Resolve(path) => vec![
+                "resolve".into(),
+                "--accept".into(),
+                "working".into(),
+                "--".into(),
+                path.as_os_str().to_owned(),
+            ],
+            Self::Cleanup => vec!["cleanup".into()],
+        };
+        args
+    }
+
+    fn tortoise_args(&self, working_dir: &Path) -> Vec<OsString> {
+        let command = |name: &str| OsString::from(format!("/command:{name}"));
+        let path_arg = |path: &Path| OsString::from(format!("/path:{}", path.display()));
+        match self {
+            Self::Add(paths) => vec![
+                command("add"),
+                OsString::from(format!(
+                    "/path:{}",
+                    paths.iter().map(|path| path.to_string_lossy()).collect::<Vec<_>>().join("*")
+                )),
+            ],
+            Self::Commit(message) => vec![
+                command("commit"),
+                path_arg(working_dir),
+                OsString::from(format!("/logmsg:{message}")),
+            ],
+            Self::Update => vec![command("update"), path_arg(working_dir)],
+            Self::Revert(path) => vec![command("revert"), path_arg(path)],
+            Self::Resolve(path) => vec![command("resolve"), path_arg(path)],
+            // TortoiseProc 的 cleanup 对话框需要额外 `/cleanup` 才勾选基础清理。
+            Self::Cleanup => vec![command("cleanup"), path_arg(working_dir), "/cleanup".into()],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SvnVisual {
+    Log(PathBuf),
+    Diff(PathBuf),
+    BrowseRepository(PathBuf),
+    CheckoutRepository(PathBuf),
+}
+
+impl SvnVisual {
+    fn tortoise_args(&self) -> Vec<OsString> {
+        let path_arg = |path: &Path| OsString::from(format!("/path:{}", path.display()));
+        match self {
+            Self::Log(path) => vec!["/command:log".into(), path_arg(path)],
+            Self::Diff(path) => vec!["/command:diff".into(), path_arg(path)],
+            Self::BrowseRepository(path) => vec![
+                "/command:repobrowser".into(),
+                OsString::from(format!("/path:{}", local_repository_url(path))),
+            ],
+            // 不传 `/path`，让 TortoiseSVN 的检出窗口由用户选择工作副本目录。
+            Self::CheckoutRepository(path) => vec![
+                "/command:checkout".into(),
+                OsString::from(format!("/url:{}", local_repository_url(path))),
+            ],
+        }
+    }
+}
+
+fn local_repository_url(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let mut encoded = String::with_capacity(normalized.len());
+    for byte in normalized.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    if encoded.starts_with("//") {
+        format!("file:{encoded}")
+    } else if encoded.starts_with('/') {
+        format!("file://{encoded}")
+    } else {
+        format!("file:///{encoded}")
+    }
+}
+
+fn find_path_command(program: &str) -> Option<PathBuf> {
+    let requested = PathBuf::from(program);
+    if requested.components().count() > 1 {
+        return requested.is_file().then_some(requested);
+    }
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let direct = directory.join(program);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        #[cfg(windows)]
+        {
+            let executable = directory.join(format!("{program}.exe"));
+            if executable.is_file() {
+                return Some(executable);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn find_tortoise_proc() -> Option<PathBuf> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    // 自定义安装盘不会出现在 ProgramFiles；注册表的 ProcPath 才是权威位置。
+    for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        for key_name in [r"SOFTWARE\TortoiseSVN", r"SOFTWARE\WOW6432Node\TortoiseSVN"] {
+            let candidate = RegKey::predef(hive)
+                .open_subkey(key_name)
+                .and_then(|key| key.get_value::<String, _>("ProcPath"))
+                .ok()
+                .map(PathBuf::from);
+            if candidate.as_ref().is_some_and(|path| path.is_file()) {
+                return candidate;
+            }
+        }
+    }
+    if let Some(path) = find_path_command("TortoiseProc") {
+        return Some(path);
+    }
+    for root in
+        ["ProgramFiles", "ProgramFiles(x86)"].into_iter().filter_map(|name| std::env::var_os(name))
+    {
+        for relative in [r"TortoiseSVN\bin\TortoiseProc.exe", r"SVN\bin\TortoiseProc.exe"] {
+            let candidate = PathBuf::from(&root).join(relative);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn find_tortoise_proc() -> Option<PathBuf> {
+    None
+}
+
+fn svn_relative_target(root: &Path, relative: &str) -> Option<PathBuf> {
+    use std::path::Component;
+
+    let relative = Path::new(relative);
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|component| {
+            matches!(component, Component::Prefix(_) | Component::RootDir | Component::ParentDir)
+        })
+    {
+        return None;
+    }
+    Some(root.join(relative))
 }
 
 impl SidePanel {
@@ -515,7 +725,7 @@ impl SidePanel {
                 nebula_settings::VcsDisplayName::Git => read_git(&git_root),
                 nebula_settings::VcsDisplayName::Svn => read_svn(&git_root),
                 nebula_settings::VcsDisplayName::Auto => {
-                    if svn_working_copy_hint(&git_root) {
+                    if svn_dir_hint(&git_root) {
                         read_svn(&git_root).or_else(|| read_git(&git_root))
                     } else {
                         read_git(&git_root).or_else(|| read_svn(&git_root))
@@ -609,22 +819,30 @@ impl SidePanel {
         (!e.is_empty()).then(|| e.clone())
     }
 
+    fn set_op_error(&mut self, message: impl Into<String>) {
+        if let Ok(mut error) = self.op_error.lock() {
+            *error = message.into();
+        }
+    }
+
     /// Run `<program> <args>` on a worker thread; UI stays live (a push can
     /// take seconds over the network). Completion flips `op_done`, which the
     /// next drawn frame folds into a refresh.
-    fn spawn_vcs(&mut self, program: &'static str, args: Vec<String>) {
+    fn spawn_vcs_at(&mut self, program: PathBuf, args: Vec<OsString>, root: PathBuf) {
         use std::sync::atomic::Ordering;
-        let Some(root) = self.root.clone() else { return };
         if self.op_running.swap(true, Ordering::Relaxed) {
             return; // one at a time
         }
         let running = self.op_running.clone();
         let done = self.op_done.clone();
         let error = self.op_error.clone();
-        std::thread::Builder::new()
-            .name("nebula-vcs-op".into())
-            .spawn(move || {
-                let mut cmd = std::process::Command::new(program);
+        if let Ok(mut message) = error.lock() {
+            message.clear();
+        }
+        let display_name = program.display().to_string();
+        let spawn_result =
+            std::thread::Builder::new().name("nebula-vcs-op".into()).spawn(move || {
+                let mut cmd = std::process::Command::new(&program);
                 cmd.args(&args).current_dir(&root);
                 #[cfg(windows)]
                 {
@@ -638,22 +856,66 @@ impl SidePanel {
                         // First meaningful line is enough for a status strip.
                         err.lines()
                             .find(|l| !l.trim().is_empty())
-                            .unwrap_or(&format!("{program} 失败"))
+                            .unwrap_or(&format!("{display_name} 失败"))
                             .to_string()
                     },
-                    Err(e) => format!("{program}: {e}"),
+                    Err(e) => format!("{display_name}: {e}"),
                 };
                 if let Ok(mut slot) = error.lock() {
                     *slot = msg;
                 }
                 running.store(false, Ordering::Relaxed);
                 done.store(true, Ordering::Relaxed);
-            })
-            .ok();
+            });
+        if let Err(spawn_error) = spawn_result {
+            self.op_running.store(false, Ordering::Relaxed);
+            self.set_op_error(format!("无法启动版本控制任务: {spawn_error}"));
+        }
+    }
+
+    fn spawn_vcs(&mut self, program: impl Into<PathBuf>, args: Vec<OsString>) {
+        let Some(root) = self.vcs_root().map(Path::to_path_buf) else { return };
+        self.spawn_vcs_at(program.into(), args, root);
     }
 
     fn spawn_git(&mut self, args: Vec<String>) {
-        self.spawn_vcs("git", args);
+        self.spawn_vcs("git", args.into_iter().map(OsString::from).collect());
+    }
+
+    fn spawn_svn_mutation(&mut self, operation: SvnMutation) {
+        let Some(root) = self.vcs_root().map(Path::to_path_buf) else { return };
+        if let Some(svn) = find_path_command("svn") {
+            self.spawn_vcs_at(svn, operation.cli_args(), root);
+        } else if let Some(tortoise) = find_tortoise_proc() {
+            self.spawn_vcs_at(tortoise, operation.tortoise_args(&root), root);
+        } else {
+            self.set_op_error("未找到 svn.exe 或 TortoiseSVN，无法执行 SVN 操作");
+        }
+    }
+
+    fn launch_svn_visual(&mut self, visual: SvnVisual) -> bool {
+        let Some(program) = find_tortoise_proc() else {
+            self.set_op_error("此可视化操作需要 TortoiseSVN（TortoiseProc.exe）");
+            return false;
+        };
+        let Some(root) = self.vcs_root().map(Path::to_path_buf) else { return false };
+        let mut command = std::process::Command::new(&program);
+        command.args(visual.tortoise_args()).current_dir(root);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW 不会隐藏 Tortoise GUI。
+        }
+        match command.spawn() {
+            Ok(_) => {
+                self.set_op_error(String::new());
+                true
+            },
+            Err(error) => {
+                self.set_op_error(format!("无法启动 {}: {error}", program.display()));
+                false
+            },
+        }
     }
 
     /// 当前快照的 VCS 种类；None = 不在任何仓库里。
@@ -682,12 +944,7 @@ impl SidePanel {
     /// `git restore --staged -- <path>`：单文件取消暂存（VS Code 行内 −）。
     pub fn git_unstage_path(&mut self, path: &str) {
         if self.vcs() == Some(VcsKind::Git) && !self.op_running() {
-            self.spawn_git(vec![
-                "restore".into(),
-                "--staged".into(),
-                "--".into(),
-                path.to_owned(),
-            ]);
+            self.spawn_git(vec!["restore".into(), "--staged".into(), "--".into(), path.to_owned()]);
         }
     }
 
@@ -764,12 +1021,9 @@ impl SidePanel {
                 self.spawn_git(vec!["commit".into(), "-m".into(), message.to_owned()]);
             },
             Some(VcsKind::Svn) => {
-                self.spawn_vcs(
-                    "svn",
-                    vec!["commit".into(), "-m".into(), message.to_owned(), "--non-interactive".into()],
-                );
+                self.spawn_svn_mutation(SvnMutation::Commit(message.to_owned()));
             },
-            None => {},
+            Some(VcsKind::SvnRepository) | None => {},
         }
     }
 
@@ -789,10 +1043,100 @@ impl SidePanel {
         }
         match self.vcs() {
             Some(VcsKind::Git) => self.spawn_git(git_pull_args()),
-            Some(VcsKind::Svn) => {
-                self.spawn_vcs("svn", vec!["update".into(), "--non-interactive".into()]);
-            },
-            None => {},
+            Some(VcsKind::Svn) => self.spawn_svn_mutation(SvnMutation::Update),
+            Some(VcsKind::SvnRepository) | None => {},
+        }
+    }
+
+    /// SVN 的“添加”只接纳 `?` 未版本化项，不引入 Git 暂存区语义。
+    pub fn svn_add_all(&mut self) {
+        if self.op_running() {
+            return;
+        }
+        let Some(root) = self.vcs_root().map(Path::to_path_buf) else { return };
+        let paths: Vec<PathBuf> = self
+            .git
+            .as_ref()
+            .filter(|info| info.vcs == VcsKind::Svn)
+            .into_iter()
+            .flat_map(|info| info.unstaged.iter())
+            .filter(|(status, _)| *status == '?')
+            .filter_map(|(_, path)| svn_relative_target(&root, path))
+            .collect();
+        if !paths.is_empty() {
+            self.spawn_svn_mutation(SvnMutation::Add(paths));
+        }
+    }
+
+    pub fn svn_add_path(&mut self, path: &str) {
+        if self.vcs() != Some(VcsKind::Svn) || self.op_running() {
+            return;
+        }
+        let Some(root) = self.vcs_root().map(Path::to_path_buf) else { return };
+        let Some(path) = svn_relative_target(&root, path) else { return };
+        self.spawn_svn_mutation(SvnMutation::Add(vec![path]));
+    }
+
+    pub fn svn_revert_path(&mut self, path: &str) {
+        if self.vcs() != Some(VcsKind::Svn) || self.op_running() {
+            return;
+        }
+        let Some(root) = self.vcs_root().map(Path::to_path_buf) else { return };
+        let Some(path) = svn_relative_target(&root, path) else { return };
+        self.spawn_svn_mutation(SvnMutation::Revert(path));
+    }
+
+    pub fn svn_resolve_path(&mut self, path: &str) {
+        if self.vcs() != Some(VcsKind::Svn) || self.op_running() {
+            return;
+        }
+        let Some(root) = self.vcs_root().map(Path::to_path_buf) else { return };
+        let Some(path) = svn_relative_target(&root, path) else { return };
+        self.spawn_svn_mutation(SvnMutation::Resolve(path));
+    }
+
+    pub fn svn_cleanup(&mut self) {
+        if self.vcs() == Some(VcsKind::Svn) && !self.op_running() {
+            self.spawn_svn_mutation(SvnMutation::Cleanup);
+        }
+    }
+
+    pub fn svn_log(&mut self) {
+        if self.vcs() == Some(VcsKind::Svn) {
+            if let Some(root) = self.vcs_root().map(Path::to_path_buf) {
+                self.launch_svn_visual(SvnVisual::Log(root));
+            }
+        }
+    }
+
+    pub fn svn_diff_path(&mut self, path: &str) -> bool {
+        if self.vcs() != Some(VcsKind::Svn) {
+            return false;
+        }
+        let Some(root) = self.vcs_root().map(Path::to_path_buf) else { return false };
+        let Some(path) = svn_relative_target(&root, path) else { return false };
+        self.launch_svn_visual(SvnVisual::Diff(path))
+    }
+
+    pub fn svn_browse_repository(&mut self) {
+        let root = self
+            .git
+            .as_ref()
+            .filter(|info| info.vcs == VcsKind::SvnRepository)
+            .and_then(|info| info.repository_root.clone());
+        if let Some(root) = root {
+            self.launch_svn_visual(SvnVisual::BrowseRepository(root));
+        }
+    }
+
+    pub fn svn_checkout_repository(&mut self) {
+        let root = self
+            .git
+            .as_ref()
+            .filter(|info| info.vcs == VcsKind::SvnRepository)
+            .and_then(|info| info.repository_root.clone());
+        if let Some(root) = root {
+            self.launch_svn_visual(SvnVisual::CheckoutRepository(root));
         }
     }
 
@@ -1301,8 +1645,8 @@ fn read_git(root: &Path) -> Option<GitInfo> {
 /// Cheap preference hint for nested checkouts. `read_svn` still runs the
 /// authoritative `svn info` command, so this hint cannot make detection
 /// incorrect when metadata is represented differently by an SVN client.
-fn svn_working_copy_hint(root: &Path) -> bool {
-    root.ancestors().any(|dir| dir.join(".svn").is_dir())
+fn svn_dir_hint(root: &Path) -> bool {
+    !matches!(crate::svn_status::classify_dir(root), crate::svn_status::SvnDirKind::Plain)
 }
 
 /// `svn status` 每行：第 1 列 item 状态（M/A/D/C/?/!…），第 8 列起路径。
@@ -1328,7 +1672,19 @@ fn parse_svn_status(status: &str) -> Vec<(char, String)> {
 /// directly（`svn_status` 模块，TSVNCache 同款路线）。`None` means the path
 /// is not a working copy at all.
 fn read_svn(root: &Path) -> Option<GitInfo> {
-    read_svn_cli(root).map(fill_svn_conflicts).or_else(|| read_svn_wc_db(root))
+    match crate::svn_status::classify_dir(root) {
+        crate::svn_status::SvnDirKind::Repository(repository_root) => Some(GitInfo {
+            vcs: VcsKind::SvnRepository,
+            branch: "SVN 版本库".to_owned(),
+            repository_root: Some(repository_root),
+            ..GitInfo::default()
+        }),
+        crate::svn_status::SvnDirKind::WorkingCopy(_) => {
+            read_svn_cli(root).map(fill_svn_conflicts).or_else(|| read_svn_wc_db(root))
+        },
+        // 少数客户端的元数据布局可能不同，仍给权威 CLI 一次识别机会。
+        crate::svn_status::SvnDirKind::Plain => read_svn_cli(root).map(fill_svn_conflicts),
+    }
 }
 
 /// CLI 输出没有单独的冲突列表：从 `unstaged` 里把 `C` 行登记到
@@ -2563,6 +2919,7 @@ mod tests {
             unstaged: vec![('?', "one.txt".into()), ('M', "two.txt".into())],
             staged: vec![('A', "three.txt".into())],
             conflicts: Vec::new(),
+            repository_root: None,
         });
 
         assert!(!panel.git_row_is_file(0), "未暂存标题");
@@ -2704,5 +3061,85 @@ mod tests {
         };
         assert!(info.staged.is_empty());
         assert_eq!(info.ahead, 0);
+    }
+
+    #[test]
+    fn svn_snapshot_separates_addable_and_committable_changes() {
+        let only_unversioned = GitInfo {
+            vcs: VcsKind::Svn,
+            unstaged: vec![('?', "new.txt".into())],
+            ..GitInfo::default()
+        };
+        assert!(only_unversioned.svn_add_ready());
+        assert!(!only_unversioned.svn_commit_ready());
+
+        let versioned = GitInfo {
+            vcs: VcsKind::Svn,
+            unstaged: vec![('M', "tracked.txt".into()), ('C', "conflict.txt".into())],
+            ..GitInfo::default()
+        };
+        assert!(!versioned.svn_add_ready());
+        assert!(versioned.svn_commit_ready());
+    }
+
+    #[test]
+    fn svn_repository_snapshot_keeps_the_ancestor_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        for directory in ["conf", "db/revs", "hooks"] {
+            std::fs::create_dir_all(repository.join(directory)).unwrap();
+        }
+        std::fs::write(repository.join("format"), "8\n").unwrap();
+
+        let info = read_svn(&repository.join("db/revs")).expect("repository snapshot");
+        assert_eq!(info.vcs, VcsKind::SvnRepository);
+        assert_eq!(info.repository_root.as_deref(), Some(repository.as_path()));
+        assert!(info.unstaged.is_empty());
+    }
+
+    #[test]
+    fn svn_commands_keep_paths_and_messages_as_separate_arguments() {
+        let path = PathBuf::from(r"D:\工作副本\src\main.rs");
+        let cli = SvnMutation::Resolve(path.clone()).cli_args();
+        assert_eq!(
+            cli,
+            vec![
+                OsString::from("resolve"),
+                OsString::from("--accept"),
+                OsString::from("working"),
+                OsString::from("--"),
+                path.as_os_str().to_owned(),
+            ]
+        );
+
+        let commit = SvnMutation::Commit("修复空格 ; $(echo nope)".into())
+            .tortoise_args(Path::new(r"D:\工作副本"));
+        assert_eq!(commit[0], OsString::from("/command:commit"));
+        assert_eq!(commit[1], OsString::from(r"/path:D:\工作副本"));
+        assert_eq!(commit[2], OsString::from("/logmsg:修复空格 ; $(echo nope)"));
+    }
+
+    #[test]
+    fn tortoise_checkout_uses_an_encoded_local_repository_url() {
+        let repository = PathBuf::from("D:/新建 文件夹");
+        assert_eq!(
+            local_repository_url(&repository),
+            "file:///D:/%E6%96%B0%E5%BB%BA%20%E6%96%87%E4%BB%B6%E5%A4%B9"
+        );
+        assert_eq!(
+            SvnVisual::CheckoutRepository(repository).tortoise_args(),
+            vec![
+                OsString::from("/command:checkout"),
+                OsString::from("/url:file:///D:/%E6%96%B0%E5%BB%BA%20%E6%96%87%E4%BB%B6%E5%A4%B9"),
+            ]
+        );
+    }
+
+    #[test]
+    fn svn_relative_targets_cannot_escape_the_visible_root() {
+        let root = Path::new(r"D:\checkout");
+        assert_eq!(svn_relative_target(root, "src/main.rs"), Some(root.join("src/main.rs")));
+        assert!(svn_relative_target(root, "../outside.txt").is_none());
+        assert!(svn_relative_target(root, r"D:\outside.txt").is_none());
     }
 }
