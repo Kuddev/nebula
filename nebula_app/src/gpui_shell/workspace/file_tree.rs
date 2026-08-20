@@ -51,6 +51,8 @@ impl NebulaWorkspace {
             let path = row.path.clone();
             let open_path = path.clone();
             let menu_path = path.clone();
+            let guest_path = row.guest_path.clone();
+            let menu_guest_path = guest_path.clone();
             let is_dir = row.is_dir;
             let is_parent = row.is_parent;
             let selected = selected_path.as_ref() == Some(&path);
@@ -130,7 +132,7 @@ impl NebulaWorkspace {
                         cx.notify();
                     }
                 }))
-                .when(!is_dir && !is_parent, |item| {
+                .when(!is_dir && !is_parent && guest_path.is_none(), |item| {
                     item.on_double_click(cx.listener(move |this, _, window, cx| {
                         // 与旧壳 chrome 同合同：应用内能读的（图片/可读文本）
                         // 开查看 tab，其余交系统处理器。
@@ -147,6 +149,7 @@ impl NebulaWorkspace {
                             cx.stop_propagation();
                             this.open_file_tree_context_menu(
                                 menu_path.clone(),
+                                menu_guest_path.clone(),
                                 is_dir,
                                 event.position,
                                 window,
@@ -199,8 +202,8 @@ impl NebulaWorkspace {
                             .tooltip("刷新目录树")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.side_panel.request_refresh();
-                                let cwd = this.active_local_cwd(cx);
-                                this.side_panel.sync(cwd);
+                                let (cwd, wsl) = this.side_panel_follow(cx);
+                                this.side_panel.sync_at(cwd, wsl);
                                 cx.notify();
                             })),
                     )
@@ -231,6 +234,7 @@ impl NebulaWorkspace {
     fn open_file_tree_context_menu(
         &mut self,
         path: PathBuf,
+        guest_path: Option<String>,
         is_dir: bool,
         position: Point<Pixels>,
         window: &mut Window,
@@ -239,7 +243,14 @@ impl NebulaWorkspace {
         self.side_panel.selected = Some(path.clone());
         let workspace = cx.entity().downgrade();
         let menu = PopupMenu::build(window, cx, move |menu, window, _cx| {
-            file_tree_popup_menu(menu.external_link_icon(false), workspace, path, is_dir, window)
+            file_tree_popup_menu(
+                menu.external_link_icon(false),
+                workspace,
+                path,
+                guest_path,
+                is_dir,
+                window,
+            )
         });
         menu.focus_handle(cx).focus(window);
         let subscription = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
@@ -325,9 +336,17 @@ fn file_tree_popup_menu(
     menu: PopupMenu,
     workspace: gpui::WeakEntity<NebulaWorkspace>,
     path: PathBuf,
+    guest_path: Option<String>,
     is_dir: bool,
     _window: &mut Window,
 ) -> PopupMenu {
+    if let Some(guest_path) = guest_path {
+        return menu.item(PopupMenuItem::new("复制 Linux 路径").icon(IconName::Copy).on_click(
+            move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(guest_path.clone()));
+            },
+        ));
+    }
     let first = if is_dir {
         let open_here = workspace.clone();
         let dir = path.clone();

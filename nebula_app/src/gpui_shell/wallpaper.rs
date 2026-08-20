@@ -1,9 +1,8 @@
 //! GPUI 壳的窗口视效：背景模糊 / 窗口透明度 / 壁纸。
 //!
-//! 语义全部对齐旧壳：
-//! - 模糊 = DWM 系统 backdrop（`DWMSBT_TRANSIENTWINDOW`，旧壳
-//!   `display::window::apply_windows_backdrop` 同款调用；< 22621 的系统该
-//!   调用无效，自动回落纯 alpha 透明）。
+//! 语义全部对齐旧壳，但**模糊的实现手段不能照抄旧壳**（见
+//! [`background_appearance`]）：一律走 GPUI 自己的
+//! [`WindowBackgroundAppearance`]，由平台层落到各自的原生 API。
 //! - 透明度 = 壳底色与终端默认背景的 alpha（文字与彩色单元背景保持不
 //!   透明，对比度不塌——旧壳 `draw_window_backdrop` 裁定）。
 //! - 壁纸 = 底色之上、单元格之下的一层图（旧壳 `renderer::image` 的
@@ -74,7 +73,6 @@ struct CardWallpaper {
 /// 随后把窗口层效果（背景外观 + DWM backdrop）应用到所有已开窗口。
 pub fn refresh(cx: &mut App) {
     let rt = nebula_settings::RuntimeSettings::load();
-    let previous_blur = cx.try_global::<VisualEffects>().map(|effects| effects.blur);
 
     let wallpaper = rt.background_image.as_ref().and_then(|raw_path| {
         let path = PathBuf::from(raw_path);
@@ -132,7 +130,7 @@ pub fn refresh(cx: &mut App) {
     });
 
     cx.set_global(VisualEffects { opacity: rt.opacity, blur: rt.blur, wallpaper });
-    apply_window_effects(previous_blur, cx);
+    apply_window_effects(cx);
 }
 
 /// 当前窗口透明度（无全局时视为不透明）。
@@ -141,86 +139,127 @@ pub fn window_opacity(cx: &App) -> f32 {
     cx.try_global::<VisualEffects>().map(|v| v.opacity).unwrap_or(1.0)
 }
 
-/// 壳/卡要透出亚克力或铺满壁纸时，不能停在用户滑块的 1.0：
-/// 旧壳注释写的是「半透明壳浮在壁纸上」，但滑块默认 100%，实心壳会把
-/// 效果全部盖掉，开关看起来像坏了。模糊开着时顶到 0.88，铺满 chrome
-/// 再顶到 0.78，文字仍可读。
+/// 壳/卡透明度严格跟随用户滑块。模糊是独立的窗口背景外观属性，不能反向
+/// 篡改透明度；否则打开模糊会把用户设置的 100% 偷改成 88%，与旧壳语义
+/// 不一致。铺满 chrome 的壁纸仍沿用自己的可见性上限。
+///
+/// 推论：不透明度 100% 时开模糊在画面上看不出变化——模糊的是窗口**后方**
+/// 的内容，被完全不透明的像素挡住了。这是两个开关正交的必然结果，不是 bug。
 pub fn chrome_surface_opacity(cx: &App) -> f32 {
     let Some(effects) = cx.try_global::<VisualEffects>() else {
         return 1.0;
     };
     let mut alpha = effects.opacity.clamp(0.0, 1.0);
-    if effects.blur {
-        alpha = alpha.min(0.88);
-    }
     if effects.wallpaper.as_ref().is_some_and(|wp| wp.cover_chrome) {
         alpha = alpha.min(0.78);
     }
     alpha
 }
 
-/// 开窗参数用。Windows 上必须一开始就声明最终外观：GPUI 创建后再改
-/// appearance，合成器往往不补 alpha 通道，后开的模糊/铺满壁纸会失效。
+/// 开窗参数用。GPUI 通用层在窗口创建时就会把这个值下发到平台层
+/// （`gpui::Window::new` → `platform_window.set_background_appearance`），
+/// 所以启动即模糊不需要等 [`refresh`] 补第二次。
 pub fn initial_background_appearance() -> WindowBackgroundAppearance {
     background_appearance(nebula_settings::RuntimeSettings::load().blur)
 }
 
-/// `blur` 开关 → GPUI 窗口外观。
+/// 模糊开关 → 窗口背景外观。**唯一落笔点**，启动与热应用共用。
 ///
-/// **这里是模糊此前完全无效的根因。** GPUI 的 Windows 后端不走 DWM 系统
-/// backdrop，而是未文档化的 `SetWindowCompositionAttribute` ACCENT_POLICY
-/// （fork 内 `platform/windows/window.rs::set_background_appearance`）：
+/// # 为什么不能照抄旧壳的 DWM system backdrop
 ///
-/// | appearance    | accent state                      | 实际效果         |
-/// | ------------- | --------------------------------- | ---------------- |
-/// | `Opaque`      | ACCENT_DISABLED                   | 不透明           |
-/// | `Transparent` | ACCENT_ENABLE_TRANSPARENTGRADIENT | **只透明，不模糊** |
-/// | `Blurred`     | ACCENT_ENABLE_ACRYLICBLURBEHIND   | 真正的亚克力模糊 |
+/// 旧壳（winit）用 `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE,
+/// DWMSBT_TRANSIENTWINDOW)` 三行就拿到 Acrylic。同一段代码搬到 GPUI 壳上
+/// 调用成功、画面零变化——**因为窗口的合成结构不同**：GPUI 只要没禁用
+/// DirectComposition 就给窗口加 `WS_EX_NOREDIRECTIONBITMAP`
+/// （`gpui/src/platform/windows/window.rs`），DWM 因此不为它创建重定向
+/// 表面，system backdrop 材质没有挂载点，`DwmSetWindowAttribute` 返回
+/// `S_OK` 却什么都不画。旧壳是普通重定向窗口，才没这个问题。
 ///
-/// accent policy 一旦生效就接管窗口合成，旧壳那三行
-/// `DWMWA_SYSTEMBACKDROP_TYPE` 会被它压掉。此前本模块无论开关都恒设
-/// `Transparent`，于是用户拉低透明度只看到「透出了桌面但没有一点模糊」
-/// —— 正是 TRANSPARENTGRADIENT 的行为，不是设置没生效。
+/// 上游 Zed 走过同一条弯路：PR #41842 第一版把 `Blurred` 改成
+/// `DWMSBT_TRANSIENTWINDOW`，第二版又改回 `SetWindowCompositionAttribute`，
+/// 只把 Mica / MicaAlt 留给 DWM backdrop。所以这里直接用 GPUI 的
+/// [`WindowBackgroundAppearance::Blurred`]——Windows 平台层落到
+/// `ACCENT_ENABLE_ACRYLICBLURBEHIND`（且已处理 tint alpha 为 0 时 DWM 跳过
+/// 模糊的坑），macOS / Linux 各自落到原生毛玻璃。一处开关，三平台生效，
+/// 不必碰 fork 也不必自写 FFI。
+///
+/// # 关闭时为什么是 `Opaque` 而不是 `Transparent`
+///
+/// Windows 上窗口透明度完全由我们绘制的像素 alpha 决定（DirectComposition
+/// swapchain 固定预乘 alpha），`ACCENT_DISABLED` 下 0% 不透明度实测就能透
+/// 出后方内容。`Transparent` 会额外挂 `ACCENT_ENABLE_TRANSPARENTGRADIENT`
+/// 的纯色渐变层，对我们没有收益。其他平台维持原有 `Transparent` 语义。
 fn background_appearance(blur: bool) -> WindowBackgroundAppearance {
     if blur {
-        WindowBackgroundAppearance::Blurred
-    } else {
+        return WindowBackgroundAppearance::Blurred;
+    }
+    #[cfg(windows)]
+    {
+        WindowBackgroundAppearance::Opaque
+    }
+    #[cfg(not(windows))]
+    {
         WindowBackgroundAppearance::Transparent
     }
 }
 
-/// 把窗口层效果应用到所有窗口。
-///
-/// 模糊只走 accent policy 一条路。**不再叠加 DWM `DWMWA_SYSTEMBACKDROP_TYPE`**：
-/// 旧壳靠它拿 acrylic，但 GPUI 的 accent policy 会接管合成，两套同时写只会
-/// 让 DWM 的内部状态含混——实测表现是模糊打开正常、关闭却关不掉。
-///
-/// 关闭时不能在同一个 DWM 合成帧里连续写 `Opaque` 和 `Transparent`：Win32
-/// 调用虽然都已同步执行，合成器仍可能只呈现最后一个状态，让旧 acrylic 层
-/// 留到下一次窗口变化。先让 `ACCENT_DISABLED` 真正呈现一帧，再恢复纯透明。
-fn apply_window_effects(previous_blur: Option<bool>, cx: &mut App) {
+/// 把窗口层效果应用到所有窗口。透明度完全由绘制像素 alpha 控制，因此模糊
+/// 开关与 0%..100% 透明度互不绑死、无需跨帧时序补丁。
+fn apply_window_effects(cx: &mut App) {
     let blur = cx.try_global::<VisualEffects>().map(|v| v.blur).unwrap_or(false);
     let appearance = background_appearance(blur);
     for handle in cx.windows() {
         let _ = handle.update(cx, |_, window, _| {
-            if previous_blur == Some(true) && !blur {
-                window.set_background_appearance(WindowBackgroundAppearance::Opaque);
-                window.refresh();
-                window.on_next_frame(|window, cx| {
-                    // 回调执行前用户可能又打开了模糊；以最新全局值收敛，避免
-                    // 旧的关闭回调在快速连点后反向覆盖新设置。
-                    let latest_blur = cx
-                        .try_global::<VisualEffects>()
-                        .map(|effects| effects.blur)
-                        .unwrap_or(false);
-                    window.set_background_appearance(background_appearance(latest_blur));
-                    window.refresh();
-                });
-            } else {
-                window.set_background_appearance(appearance);
-                window.refresh();
+            window.set_background_appearance(appearance);
+            #[cfg(windows)]
+            if !blur {
+                clear_windows_system_backdrop(window);
             }
+            window.refresh();
         });
+    }
+}
+
+/// 清掉 Windows system-backdrop 层可能残留的材质。
+///
+/// GPUI 的 [`WindowBackgroundAppearance::Opaque`] 已经通过 AccentPolicy 写入
+/// `ACCENT_DISABLED`，它仍是主关闭入口。旧壳还会用官方
+/// `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE)` 清 system
+/// backdrop；实机证明只发 `SWP_FRAMECHANGED` 不会清属性，所以 GPUI 壳在关闭
+/// 时也补同一条清理。开启仍只走 GPUI `Blurred`，不叠加第二套材质。
+///
+/// 微软文档对 `DWMSBT_NONE` 的合同是 “Don't draw any system backdrop”。失败
+/// 必须留日志，否则视觉残留会再次被误判成“DWM 没重绘”。
+#[cfg(windows)]
+fn clear_windows_system_backdrop(window: &Window) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DwmSetWindowAttribute,
+    };
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = handle.hwnd.get() as *mut core::ffi::c_void;
+    let backdrop: i32 = DWMSBT_NONE;
+    // SAFETY: hwnd 来自当前存活的 GPUI 窗口；值与长度严格匹配 DWM 的
+    // `DWM_SYSTEMBACKDROP_TYPE`（i32）合同。无效句柄由 HRESULT 安全报告。
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE as u32,
+            &backdrop as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    if result < 0 {
+        log::warn!(
+            "DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE=NONE) failed: HRESULT=0x{:08X}",
+            result as u32
+        );
     }
 }
 

@@ -72,4 +72,7 @@ This file contains changes that are not part of a numbered release yet.
 The PowerShell/OSC changes need first-prompt checks for all profile creation
 routes. The mixed-DPI change still requires a real Windows two-monitor matrix,
 including Windows 11 150% -> 125% and the reverse direction. A compile check
-alone is not sufficient to claim that the physical monitor seam is fixed.
+alone is not sufficient to claim that the physical monitor seam is fixed. The
+WSL changes still require guest-path checks for both `/mnt/<drive>` and native
+Linux repositories, and the blur change requires a live Windows DWM toggle
+check in both directions.

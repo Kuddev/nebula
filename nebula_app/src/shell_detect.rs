@@ -426,6 +426,145 @@ pub fn shell_short_tag(name_or_id: &str) -> String {
     lower.split_whitespace().next().unwrap_or("").chars().take(10).collect()
 }
 
+/// 一次 WSL 启动用的发行版名：只认 `-d` / `--distribution` 显式给出的那个。
+///
+/// 裸 `wsl` 启动跑的是系统默认发行版，名字我们无从得知——宁可返回 `None`
+/// 让调用方保持现状，也不猜一个可能错的发行版去拼路径。非 WSL 程序同样
+/// 返回 `None`（按 `file_stem` 判断，`wsl.exe` / 全路径都认）。
+///
+/// 旧壳 `window_context::focused_wsl_cwd` 的判定原样固化在这里，两壳共用。
+pub fn wsl_launch_distro<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
+    let stem = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if stem != "wsl" {
+        return None;
+    }
+    let index = args.iter().position(|arg| arg == "-d" || arg == "--distribution")?;
+    args.get(index + 1).map(String::as_str).filter(|distro| !distro.is_empty())
+}
+
+/// 终端报的 cwd 是来宾侧的绝对路径吗（`/home/x`）。宿主路径（`D:\…`）不需要
+/// 映射，交给普通路径分支即可。
+pub fn wsl_guest_cwd(cwd: &str) -> Option<&str> {
+    let trimmed = cwd.trim();
+    trimmed.starts_with('/').then_some(trimmed)
+}
+
+/// 来宾绝对路径 → `\\wsl.localhost\<发行版>\…` 形式的宿主 UNC 路径（纯拼接，
+/// 不碰文件系统，便于单测）。
+///
+/// 用 `\\wsl.localhost\` 而非旧壳的 `\\wsl$\`：后者是 WSL 早期形式，新版
+/// Windows 只保留 `wsl.localhost` 作为正式名（`wsl_distro_names` 的注释里
+/// 早就写明目录选择器钉的是 `\\wsl.localhost\<名>`）。两种形式在不支持
+/// 9P 重定向的机器上都不可达，见 [`wsl_unc_cwd`]。
+pub fn wsl_unc_path(distro: &str, guest_path: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(
+        "\\\\wsl.localhost\\{distro}{}",
+        guest_path.replace('/', "\\")
+    ))
+}
+
+/// 一个 WSL 终端的位置：发行版名 + 来宾绝对路径。
+///
+/// 即使宿主看不见来宾文件系统（9P 重定向不可用，见 [`wsl_unc_cwd`]）这个位置
+/// 依然成立——拿着它可以用 `wsl.exe -d <发行版> -- <命令>` 直接在来宾里干活。
+/// Git 视图识别 WSL 仓库靠的就是它，不依赖任何 UNC 映射。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WslCwd {
+    pub distro: String,
+    pub guest: String,
+}
+
+/// 认出「聚焦终端属于某个 WSL 发行版、且正停在来宾的某个目录」。
+///
+/// 刻意**不**验证目录存在：宿主无法可靠地看到来宾文件系统，能验证的地方只有
+/// 来宾里——而那正是调用方紧接着要跑的那条命令本身。
+pub fn wsl_cwd(cwd: &str, program: &str, args: &[String]) -> Option<WslCwd> {
+    let guest = wsl_guest_cwd(cwd)?;
+    let distro = wsl_launch_distro(program, args)?;
+    Some(WslCwd { distro: distro.to_owned(), guest: guest.to_owned() })
+}
+
+/// [`WslCwd`] → 宿主可见的 UNC 路径，**且确认它真的可达**。两壳的抽屉都经这
+/// 一个入口，`is_dir` 把关只写一遍。
+///
+/// # 为什么必须 `is_dir()` 把关
+///
+/// `\\wsl.localhost\…` 依赖 WSL 的 9P 文件重定向（P9NP 网络提供程序）。
+/// 发行版没启动、或这台机器的 9P 重定向根本不工作时，UNC 路径不可达——
+/// 2026-08-20 实测：WSL 2.7.8 + Windows 22631 上 `\\wsl$\` 与
+/// `\\wsl.localhost\` 两种形式经 cmd / PowerShell / .NET 三条路都是"系统
+/// 找不到指定的路径"，而发行版 `wsl -l -v` 明确 Running、P9NP 也在
+/// `ProviderOrder` 里、进程未提升（排除 UAC 会话隔离）。这种环境下本函数
+/// 一律返回 `None`，调用方必须能接受「拿不到宿主路径」并另寻出路（拿
+/// [`WslCwd`] 在来宾里直接跑命令），不能假定映射一定成功。
+pub fn wsl_unc_cwd(located: &WslCwd) -> Option<std::path::PathBuf> {
+    let path = wsl_unc_path(&located.distro, &located.guest);
+    path.is_dir().then_some(path)
+}
+
+/// 让 WSL 来宾在每个提示符前上报 cwd（OSC 7）所需的环境变量；非 WSL 启动返回空。
+///
+/// # 为什么只能走环境变量
+///
+/// `wsl.exe` 必须原样启动来宾的登录 shell（`chsh` 语义，见
+/// [`ShellIntegration::WslDefault`]——追加 `--exec bash` 是 1.1.0 的实际回归），
+/// 所以既不能改启动参数、也没有宿主侧的 rc 文件可注入。可行的只剩环境变量：
+/// bash 每画一次提示符都会执行 `$PROMPT_COMMAND`，而 `WSLENV` 会把点名的宿主
+/// 变量原样送进来宾。
+///
+/// 少了这条，WSL tab 永远停在"等待终端上报工作目录"——目录树与 Git 视图都是
+/// 靠 shell 上报的 cwd 驱动的（`TermEvent::CwdReport`），而 Debian/Ubuntu 的
+/// 默认 `.bashrc` 只设 OSC 0 窗口标题，不发 OSC 7（实测 `PROMPT_COMMAND` 为空）。
+///
+/// 尽力而为、失败无害：来宾默认 shell 是 zsh/fish（不认 `PROMPT_COMMAND`），
+/// 或用户自己在 rc 里直接赋值把它覆盖掉，都只是回到"不上报"的现状，不会影响
+/// shell 正常启动。
+pub fn wsl_cwd_report_env(program: &str, args: &[String]) -> Vec<(String, String)> {
+    if wsl_launch_distro(program, args).is_none() {
+        return Vec::new();
+    }
+    // OSC 7 = `ESC ] 7 ; file://<host><path> BEL`。host 会被解析端丢掉（取第一个
+    // `/` 之后的部分），给个兜底值就够。用 `$PWD` 而不是 `$(pwd)`：每个提示符
+    // 都要跑一次，不能带 fork 开销。
+    const REPORT: &str = r#"printf '\033]7;file://%s%s\007' "${HOSTNAME:-wsl}" "$PWD""#;
+    // 宿主侧可能已经有 WSLENV（别的工具设的），必须追加而不是覆盖。
+    let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+    if !wslenv.is_empty() && !wslenv.split(':').any(|entry| entry == "PROMPT_COMMAND") {
+        wslenv.push(':');
+    }
+    if !wslenv.split(':').any(|entry| entry == "PROMPT_COMMAND") {
+        wslenv.push_str("PROMPT_COMMAND");
+    }
+    vec![("PROMPT_COMMAND".to_owned(), REPORT.to_owned()), ("WSLENV".to_owned(), wslenv)]
+}
+
+/// [`WslCwd`] → 宿主可见且**已确认可达**的路径，按两条路依次尝试。
+///
+/// 1. `/mnt/<盘>/…`（automount——WSL 里访问宿主盘的常规形态，也是绝大多数人
+///    实际工作的位置）本来就是宿主路径 `<盘>:\…`。这条不经任何网络重定向，
+///    永远可达，所以目录树在 `/mnt/d/...` 下能真正跟随 WSL 终端。
+/// 2. 来宾自有路径（`/home/…`）只能走 `\\wsl.localhost\…`，见 [`wsl_unc_cwd`]
+///    ——9P 重定向不可用的机器上会失败并返回 `None`，调用方按既有语义保持
+///    上一个已知目录。
+///
+/// 两条都失败也不影响 Git 视图：那条路走 [`WslCwd`] 在来宾里直接跑 git。
+pub fn wsl_host_cwd(located: &WslCwd) -> Option<std::path::PathBuf> {
+    // `/mnt/d/x` → `file:///mnt/d/x` → `D:\x`，复用 OSC 8 链接那套 automount /
+    // MSYS / cygwin 路径翻译（含"盘符真的存在"的门控），不另写一份。
+    #[cfg(windows)]
+    if let Some(path) =
+        crate::file_uri::file_uri_to_local_path(&format!("file://{}", located.guest))
+        && path.is_dir()
+    {
+        return Some(path);
+    }
+    wsl_unc_cwd(located)
+}
+
 /// 已注册 WSL 发行版的名字（注册表 `Lxss` 各子键的 `DistributionName`），
 /// 字母序。目录选择器用它把 `\\wsl.localhost\<名>` 钉进侧栏——系统的
 /// 「Linux」导航节点不是每台 Win11 都有（issue #12 的现场就没有），钉进
@@ -506,6 +645,54 @@ fn find_wsl_distros() -> Vec<DetectedShell> {
 
 #[cfg(test)]
 mod tests {
+    /// WSL 位置识别：发行版只认显式 `-d` / `--distribution`。裸 `wsl` 用的是
+    /// 系统默认发行版，名字无从得知——必须放弃而不是猜，否则会拼出一条指向
+    /// 错误发行版的路径。
+    #[test]
+    fn wsl_location_only_trusts_an_explicit_distribution() {
+        let owned =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|arg| (*arg).to_owned()).collect() };
+
+        for flag in ["-d", "--distribution"] {
+            let args = owned(&[flag, "Debian"]);
+            assert_eq!(super::wsl_launch_distro("wsl.exe", &args), Some("Debian"));
+            let located = super::wsl_cwd("/home/hello", r"C:\Windows\System32\wsl.exe", &args)
+                .expect("WSL 位置");
+            assert_eq!(located.distro, "Debian");
+            assert_eq!(located.guest, "/home/hello");
+        }
+
+        // 裸 `wsl`、缺发行版名、以及非 WSL 程序都不识别。
+        assert_eq!(super::wsl_launch_distro("wsl.exe", &[]), None);
+        assert_eq!(super::wsl_launch_distro("wsl.exe", &owned(&["-d"])), None);
+        assert_eq!(super::wsl_launch_distro("wsl.exe", &owned(&["-d", ""])), None);
+        assert_eq!(super::wsl_launch_distro("pwsh.exe", &owned(&["-d", "Debian"])), None);
+    }
+
+    /// 只有来宾绝对路径需要映射；宿主路径与空 cwd 走普通分支。
+    #[test]
+    fn wsl_guest_cwd_accepts_only_absolute_guest_paths() {
+        assert_eq!(super::wsl_guest_cwd("  /home/hello  "), Some("/home/hello"));
+        assert_eq!(super::wsl_guest_cwd("/"), Some("/"));
+        assert_eq!(super::wsl_guest_cwd(r"D:\temp_build"), None);
+        assert_eq!(super::wsl_guest_cwd(""), None);
+        assert_eq!(super::wsl_guest_cwd("home/hello"), None);
+    }
+
+    /// UNC 形式必须是 `\\wsl.localhost\<发行版>\…`：旧壳原来拼的 `\\wsl$\` 是
+    /// WSL 早期形式，新版 Windows 只保证 `wsl.localhost` 这个名字。
+    #[test]
+    fn wsl_unc_path_uses_the_localhost_form_with_backslashes() {
+        assert_eq!(
+            super::wsl_unc_path("Debian", "/home/hello/src"),
+            std::path::PathBuf::from(r"\\wsl.localhost\Debian\home\hello\src")
+        );
+        assert_eq!(
+            super::wsl_unc_path("Ubuntu-24.04", "/"),
+            std::path::PathBuf::from(r"\\wsl.localhost\Ubuntu-24.04\")
+        );
+    }
+
     fn detected(id: &str, program: &str, args: &[&str]) -> super::DetectedShell {
         super::DetectedShell {
             name: id.to_owned(),

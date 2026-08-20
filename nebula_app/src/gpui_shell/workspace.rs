@@ -2027,11 +2027,51 @@ impl NebulaWorkspace {
         window.defer(cx, move |window, _| window.focus(&focus));
     }
 
+    /// 聚焦 tab 的**宿主可见** cwd。WSL tab 报的是来宾路径（`/home/x`、
+    /// `/mnt/d/x`），在宿主侧不是有效目录，此时交给
+    /// [`crate::shell_detect::wsl_host_cwd`] 翻译：`/mnt/<盘>` 直接落到宿主盘
+    /// （永远可达），来宾自有路径退一步试 `\\wsl.localhost\…`（9P 不可用的机器
+    /// 上会失败，抽屉按既有语义保持上一个已知目录）。旧壳
+    /// `focused_cwd().or_else(focused_wsl_cwd)` 同合同，判定共用一份。
+    ///
+    /// Git 视图不受这里成败影响——它另有来宾直读路径，见 [`Self::active_wsl_cwd`]。
     fn active_local_cwd(&self, cx: &App) -> Option<std::path::PathBuf> {
-        self.tabs
-            .get(self.active)
-            .and_then(WorkspaceTab::focused_view)
-            .and_then(|view| view.read(cx).local_cwd())
+        let view = self.tabs.get(self.active).and_then(WorkspaceTab::focused_view)?;
+        if let Some(cwd) = view.read(cx).local_cwd() {
+            return Some(cwd);
+        }
+        let located = self.active_wsl_cwd(cx)?;
+        crate::shell_detect::wsl_host_cwd(&located)
+    }
+
+    /// 聚焦 tab 所在的 WSL 发行版 + 来宾目录；不是 WSL、或发行版无从确定
+    /// （裸 `wsl` 启动）时为 `None`。Git 视图拿它在来宾里直接跑 git，不经
+    /// 任何 UNC 映射，所以宿主看不见 WSL 文件系统时依然有效。
+    fn active_wsl_cwd(&self, cx: &App) -> Option<crate::shell_detect::WslCwd> {
+        let view = self.tabs.get(self.active).and_then(WorkspaceTab::focused_view)?;
+        let raw = view.read(cx).cwd.clone();
+        let Some(crate::session::LaunchSession::Shell { program, args, .. }) =
+            self.meta(self.active).launch
+        else {
+            return None;
+        };
+        crate::shell_detect::wsl_cwd(&raw, &program, &args)
+    }
+
+    /// 抽屉这一帧该跟随的位置：宿主 cwd，加上**仅当**宿主侧拿不到等价路径时
+    /// 才交出的 WSL 位置。
+    ///
+    /// 为什么要这个门：`/mnt/<盘>/…` 已经被 [`Self::active_local_cwd`] 落回宿
+    /// 主盘，此时宿主 git 与来宾 git 读的是同一个工作树，而宿主 git 快得多
+    /// （来宾路径每次快照都要起一个 `wsl.exe`，`/mnt` 上的 git 本身也慢）。
+    /// 只有 `/home/…` 这类来宾自有路径宿主根本读不到，才值得走来宾。
+    fn side_panel_follow(
+        &self,
+        cx: &App,
+    ) -> (Option<std::path::PathBuf>, Option<crate::shell_detect::WslCwd>) {
+        let cwd = self.active_local_cwd(cx);
+        let wsl = if cwd.is_some() { None } else { self.active_wsl_cwd(cx) };
+        (cwd, wsl)
     }
 
     fn toggle_side_panel(
@@ -2047,8 +2087,8 @@ impl NebulaWorkspace {
             return;
         }
 
-        let cwd = self.active_local_cwd(cx);
-        self.side_panel.sync(cwd);
+        let (cwd, wsl) = self.side_panel_follow(cx);
+        self.side_panel.sync_at(cwd, wsl);
 
         // The shared model builds snapshots on a worker and exposes a cheap,
         // throttled `sync`. GPUI polls only while the drawer is open; it does
@@ -2065,8 +2105,8 @@ impl NebulaWorkspace {
                                 workspace.side_panel_polling = false;
                                 return false;
                             }
-                            let cwd = workspace.active_local_cwd(cx);
-                            if workspace.side_panel.sync(cwd) {
+                            let (cwd, wsl) = workspace.side_panel_follow(cx);
+                            if workspace.side_panel.sync_at(cwd, wsl) {
                                 cx.notify();
                             }
                             true
@@ -2719,8 +2759,8 @@ impl NebulaWorkspace {
         }
         self.file_tree_menu = None;
         self.side_panel.toggle(view);
-        let cwd = self.active_local_cwd(cx);
-        self.side_panel.sync(cwd);
+        let (cwd, wsl) = self.side_panel_follow(cx);
+        self.side_panel.sync_at(cwd, wsl);
         cx.notify();
     }
 
@@ -3328,8 +3368,8 @@ impl NebulaWorkspace {
                             .tooltip(format!("刷新 {vcs_label} 状态"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.side_panel.request_refresh();
-                                let cwd = this.active_local_cwd(cx);
-                                this.side_panel.sync(cwd);
+                                let (cwd, wsl) = this.side_panel_follow(cx);
+                                this.side_panel.sync_at(cwd, wsl);
                                 cx.notify();
                             })),
                     )
@@ -3374,6 +3414,16 @@ impl NebulaWorkspace {
             .into_any_element()
     }
 
+    /// 复制标签页：另开一个**同身份**的 Tab，不克隆活动 PTY 也不克隆分屏树
+    /// （旧壳 `window_context::duplicate_tab` 同合同——副本是新进程/新会话，
+    /// 与 Windows Terminal 一致，也避开 PTY 共享所有权）。
+    ///
+    /// 关键是继承 launch 身份。WSL / Git Bash / Nushell 这类 Tab 的
+    /// program+args 记在 [`TabMeta::launch`]，而此前这里一律走
+    /// `add_terminal_at`——那是"现取设置里的默认 shell"，于是复制一个
+    /// WSL Tab 会得到 pwsh。`Default`（含旧快照没记身份的 `None`）仍按
+    /// "复制这一刻"的默认 shell 解析，与旧壳 `spawn_tab_at` 一致；用户
+    /// 元数据（自定义名字 / 色标）照旧壳一并带到副本上。
     fn duplicate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix) else { return };
         let Some(view) = tab.focused_view() else { return };
@@ -3381,11 +3431,24 @@ impl NebulaWorkspace {
             let view = view.read(cx);
             (view.ssh_destination.clone(), view.local_cwd())
         };
+        let meta = self.meta(ix);
         if let Some(destination) = ssh {
             self.add_ssh_terminal(destination, window, cx);
         } else {
-            self.add_terminal_at(cwd, None, window, cx);
+            let launch = match meta.launch {
+                None | Some(crate::session::LaunchSession::Default) => {
+                    Self::configured_local_launch(cx)
+                },
+                Some(launch) => launch,
+            };
+            self.add_terminal_with(launch, cwd, None, window, cx);
         }
+        // 两个 add_* 入口都已把副本设为 active，名字与色标在这里覆写。
+        if let Some(target) = self.tab_meta.get_mut(self.active) {
+            target.custom_name = meta.custom_name;
+            target.color = meta.color;
+        }
+        cx.notify();
     }
 
     /// 进入行内重命名：对照旧壳 `TabRequest::BeginRename`

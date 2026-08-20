@@ -30,6 +30,9 @@ pub enum PanelView {
 #[derive(Debug, Clone)]
 pub struct FileRow {
     pub path: PathBuf,
+    /// WSL 来宾中的真实绝对路径。`path` 仍作为现有选择/展开状态的稳定键，
+    /// 但绝不能把它交给宿主文件 API；来宾操作必须显式使用这一字段。
+    pub guest_path: Option<String>,
     pub name: String,
     pub depth: usize,
     pub is_dir: bool,
@@ -211,8 +214,15 @@ pub struct SidePanel {
     /// Latest focused pane cwd, retained while a custom root is active so the
     /// panel can resume following immediately without persisting any setting.
     followed_cwd: Option<PathBuf>,
+    /// 聚焦终端是 WSL 且停在来宾目录时的位置。宿主未必看得见 WSL 文件系统
+    /// （9P 重定向不一定可用），所以这不是"另一种 cwd"——它是让 Git 视图
+    /// 改用「在来宾里跑 git」的开关，与 [`Self::followed_cwd`] 各管一段。
+    followed_wsl: Option<crate::shell_detect::WslCwd>,
     /// Window-local override selected from the Files view.
     custom_root: Option<PathBuf>,
+    /// WSL guest tree 的窗口内浏览根（例如点 `..` 后得到的 `/home`）。与
+    /// `custom_root` 互斥，且不改变终端实际 cwd / Git 跟随位置。
+    custom_wsl_root: Option<crate::shell_detect::WslCwd>,
     /// Visible feedback for an invalid/disappeared custom root.
     root_notice: Option<String>,
     /// Flattened visible tree rows for the Files view.
@@ -276,6 +286,8 @@ struct PanelSnapshot {
     /// Root the snapshot was built from — stale snapshots (root changed while
     /// the worker ran) are dropped on harvest.
     root: PathBuf,
+    /// Files 快照所属的来宾位置；避免两个发行版恰好同为 `/home` 时串结果。
+    files_wsl: Option<crate::shell_detect::WslCwd>,
     rows: Vec<FileRow>,
     git: Option<GitInfo>,
 }
@@ -483,7 +495,9 @@ impl SidePanel {
             view: PanelView::Files,
             root: None,
             followed_cwd: None,
+            followed_wsl: None,
             custom_root: None,
+            custom_wsl_root: None,
             root_notice: None,
             rows: Vec::new(),
             expanded: HashSet::new(),
@@ -530,25 +544,63 @@ impl SidePanel {
     /// refresh was requested (toggle), or the throttle window has elapsed.
     /// Called once per drawn frame from the window context; cheap when nothing
     /// changed. Returns whether the snapshot was rebuilt (i.e. needs redraw).
+    ///
+    /// 抽屉内部的刷新（文件操作后、根切换后）走这一层就够；跟随聚焦终端的
+    /// 调用方请用 [`Self::sync_at`] 一并交出 WSL 位置。
     pub fn sync(&mut self, cwd: Option<PathBuf>) -> bool {
+        self.sync_at(cwd, None)
+    }
+
+    /// [`Self::sync`] 加上 WSL 位置。`wsl` = 聚焦终端所在的 WSL 发行版与来宾
+    /// 目录（[`crate::shell_detect::wsl_cwd`] 解析），`None` = 聚焦的是宿主
+    /// 终端或压根认不出发行版。
+    pub fn sync_at(
+        &mut self,
+        cwd: Option<PathBuf>,
+        wsl: Option<crate::shell_detect::WslCwd>,
+    ) -> bool {
         if !self.open {
             return false;
         }
         // 先收割落地的后台快照——旧内容在工人跑动期间一直显示，这里一次
         // 性换成新内容（先显示旧的、再更新，VSCode 的树刷新模式）。
-        let mut changed = self.harvest_snapshot();
+        let changed = self.harvest_snapshot();
         // 聚焦 pane 报不出本地有效目录时（SSH 远端路径、未映射的 WSL 路
         // 径、shell 还没发 OSC）保持现状：跟随的语义是"最后一个已知有效
         // 目录"，清空只会让切到远程 tab 的瞬间目录树闪成空白。
-        if cwd.is_some() {
+        // 先记下这次到底给出了哪些位置——两个字段各自会 move 掉入参。
+        let had_cwd = cwd.is_some();
+        let has_guest_cwd = !had_cwd && wsl.is_some();
+        if had_cwd {
             self.followed_cwd = cwd;
+        } else if has_guest_cwd {
+            // `/mnt/d` 能映射为 D:\，而 `/home` 只能由来宾读取。从前这里保留
+            // 旧 D:\，导致新 WSL 位置永远被宿主根盖住。
+            self.followed_cwd = None;
         }
+        // WSL 位置沿用同一套"最后一个已知有效位置"语义，但多一条清除规则：
+        // 切回一个宿主终端（cwd 有值而 wsl 没有）必须把它清掉，否则 Git 面板
+        // 会继续显示上一个 WSL 仓库的状态。两者都拿不到（SSH tab）才保持现状。
+        let wsl_before = self.followed_wsl.clone();
+        if wsl.is_some() {
+            self.followed_wsl = wsl;
+        } else if had_cwd {
+            self.followed_wsl = None;
+        }
+        // 换了 WSL 仓库、或从 WSL 切回宿主，都要立刻重算 Git 快照：这类切换
+        // 不改 `root`（宿主看不见来宾目录，树停在原处），光靠 `root_changed`
+        // 抓不到，只等节流窗口的话面板会挂着上一个仓库的分支名不动。
+        let wsl_changed = wsl_before != self.followed_wsl;
         let custom_invalidated = self.custom_root.as_ref().is_some_and(|root| !root.is_dir());
         if custom_invalidated {
             self.custom_root = None;
             self.root_notice = Some("所选目录不可用，已跟随当前目录".to_owned());
         }
-        let next_root = self.custom_root.clone().or_else(|| self.followed_cwd.clone());
+        let next_root = self
+            .custom_root
+            .clone()
+            .or_else(|| self.custom_wsl_root.as_ref().map(wsl_root_key))
+            .or_else(|| self.followed_tree_root());
         let root_changed = next_root != self.root;
         // While a filter query is live, skip the periodic re-snapshot: it
         // would drop and rebuild the search index under the user's fingers.
@@ -559,7 +611,7 @@ impl SidePanel {
         if self.op_done.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.needs_refresh = true;
         }
-        if !(root_changed || custom_invalidated || stale || self.needs_refresh) {
+        if !(root_changed || custom_invalidated || stale || wsl_changed || self.needs_refresh) {
             return changed;
         }
         if root_changed {
@@ -569,7 +621,7 @@ impl SidePanel {
             self.selected = None;
         }
         self.refresh();
-        changed || root_changed || custom_invalidated
+        changed || root_changed || custom_invalidated || wsl_changed
     }
 
     /// 测试辅助：等后台快照工人落地并收割。生产路径永不阻塞。
@@ -598,7 +650,9 @@ impl SidePanel {
         };
         let Some(snapshot) = snapshot else { return false };
         // 工人跑动期间根又变了：这份快照已经过期，丢弃。新刷新在路上。
-        if self.root.as_ref() != Some(&snapshot.root) {
+        if self.root.as_ref() != Some(&snapshot.root)
+            || self.file_wsl_root().cloned() != snapshot.files_wsl
+        {
             return false;
         }
         self.rows = snapshot.rows;
@@ -617,6 +671,7 @@ impl SidePanel {
         }
         let changed = self.custom_root.as_ref() != Some(&root) || self.root.as_ref() != Some(&root);
         self.custom_root = Some(root.clone());
+        self.custom_wsl_root = None;
         self.root_notice = None;
         if self.root.as_ref() != Some(&root) {
             self.root = Some(root);
@@ -630,11 +685,13 @@ impl SidePanel {
 
     /// Resume following the most recently observed focused pane cwd.
     pub fn clear_custom_root(&mut self) -> bool {
-        if self.custom_root.take().is_none() {
+        let cleared_host = self.custom_root.take().is_some();
+        let cleared_wsl = self.custom_wsl_root.take().is_some();
+        if !cleared_host && !cleared_wsl {
             return false;
         }
         self.root_notice = None;
-        let next_root = self.followed_cwd.clone();
+        let next_root = self.followed_tree_root();
         if self.root != next_root {
             self.root = next_root;
             self.expanded.clear();
@@ -646,7 +703,38 @@ impl SidePanel {
     }
 
     pub fn custom_root_active(&self) -> bool {
-        self.custom_root.is_some()
+        self.custom_root.is_some() || self.custom_wsl_root.is_some()
+    }
+
+    /// Files 视图当前是否由 WSL guest 提供。宿主可达的 `/mnt/<盘>` 与 UNC
+    /// 不会进入这里，仍保留完整的宿主打开、回收站和 Explorer 操作。
+    pub fn file_wsl_root(&self) -> Option<&crate::shell_detect::WslCwd> {
+        self.custom_wsl_root.as_ref().or_else(|| {
+            (self.custom_root.is_none() && self.followed_cwd.is_none())
+                .then_some(self.followed_wsl.as_ref())
+                .flatten()
+        })
+    }
+
+    fn followed_tree_root(&self) -> Option<PathBuf> {
+        self.followed_cwd.clone().or_else(|| self.followed_wsl.as_ref().map(wsl_root_key))
+    }
+
+    fn set_custom_wsl_root(&mut self, located: crate::shell_detect::WslCwd) -> bool {
+        let root = wsl_root_key(&located);
+        let changed =
+            self.custom_wsl_root.as_ref() != Some(&located) || self.root.as_ref() != Some(&root);
+        self.custom_root = None;
+        self.custom_wsl_root = Some(located);
+        self.root_notice = None;
+        if self.root.as_ref() != Some(&root) {
+            self.root = Some(root);
+            self.expanded.clear();
+            self.scroll = 0;
+            self.selected = None;
+            self.refresh();
+        }
+        changed
     }
 
     /// 目录：Git/SVN 状态所属的那一个。始终是终端当前目录，与目录树的浏览
@@ -706,34 +794,54 @@ impl SidePanel {
             return;
         }
         let expanded = self.expanded.clone();
+        let files_wsl = self.file_wsl_root().cloned();
         // VCS 状态始终读**终端当前目录**，不跟着目录树的浏览位置走。在树里点
         // `..` 往上翻是纯浏览动作（`custom_root`，窗口内覆盖），把仓库状态一起
         // 带走的后果是：翻到仓库外面之后 Git 视图只剩「当前目录不在 Git/SVN
         // 仓库中」，而回头的入口偏偏只画在 Files 视图里。行与状态在这里解耦：
         // 行看 `root`，git 看 `followed_cwd`。
         let git_root = self.followed_cwd.clone().unwrap_or_else(|| root.clone());
+        let wsl = self.followed_wsl.clone();
         let running = std::sync::Arc::clone(&self.snapshot_running);
         let slot = std::sync::Arc::clone(&self.snapshot_slot);
         std::thread::spawn(move || {
-            let rows = SidePanel::tree_rows(&root, &expanded);
+            let rows = match &files_wsl {
+                Some(located) => SidePanel::tree_rows_wsl(located, &expanded),
+                None => SidePanel::tree_rows(&root, &expanded),
+            };
             // 设置可强制只认 Git / SVN（混合仓库场景）；Auto 保持既有探测：
             // a checkout nested inside a Git tree must remain visible as SVN.
             // Prefer SVN only when its metadata is in the current path's
             // ancestor chain; ordinary Git directories keep the cheaper Git
             // first path and only probe SVN as a fallback.
-            let git = match nebula_settings::RuntimeSettings::load().vcs_display {
-                nebula_settings::VcsDisplayName::Git => read_git(&git_root),
-                nebula_settings::VcsDisplayName::Svn => read_svn(&git_root),
-                nebula_settings::VcsDisplayName::Auto => {
-                    if svn_dir_hint(&git_root) {
-                        read_svn(&git_root).or_else(|| read_git(&git_root))
-                    } else {
-                        read_git(&git_root).or_else(|| read_svn(&git_root))
-                    }
+            let git = match &wsl {
+                // 聚焦的是 WSL 终端：宿主的 `git_root` 与来宾目录毫无关系
+                // （UNC 不可达时它还停在上一个宿主目录），必须在来宾里跑
+                // git。SVN 不走这条——WSL 里用 svn 没有实据，不加没验证过
+                // 的分支；`vcs_display` 强制 Svn 时同理保持"无仓库"。
+                Some(located)
+                    if !matches!(
+                        nebula_settings::RuntimeSettings::load().vcs_display,
+                        nebula_settings::VcsDisplayName::Svn
+                    ) =>
+                {
+                    read_git_wsl(located)
+                },
+                Some(_) => None,
+                None => match nebula_settings::RuntimeSettings::load().vcs_display {
+                    nebula_settings::VcsDisplayName::Git => read_git(&git_root),
+                    nebula_settings::VcsDisplayName::Svn => read_svn(&git_root),
+                    nebula_settings::VcsDisplayName::Auto => {
+                        if svn_dir_hint(&git_root) {
+                            read_svn(&git_root).or_else(|| read_git(&git_root))
+                        } else {
+                            read_git(&git_root).or_else(|| read_svn(&git_root))
+                        }
+                    },
                 },
             };
             if let Ok(mut slot) = slot.lock() {
-                *slot = Some(PanelSnapshot { root, rows, git });
+                *slot = Some(PanelSnapshot { root, files_wsl, rows, git });
             }
             running.store(false, std::sync::atomic::Ordering::Release);
         });
@@ -746,7 +854,10 @@ impl SidePanel {
         let Some(root) = self.root.clone() else { return };
         let needle = self.search.trim().to_lowercase();
         if needle.is_empty() {
-            self.rows = Self::tree_rows(&root, &self.expanded);
+            self.rows = match self.file_wsl_root() {
+                Some(located) => Self::tree_rows_wsl(located, &self.expanded),
+                None => Self::tree_rows(&root, &self.expanded),
+            };
             return;
         }
         // Filter mode: string-match against the cached flat index. The index
@@ -756,8 +867,12 @@ impl SidePanel {
         if self.search_index.is_none() {
             let mut index = Vec::new();
             let mut budget = SEARCH_VISIT_BUDGET;
-            build_search_index(&root, 0, &mut index, &mut budget);
-            Self::mark_ignored(&root, &mut index);
+            if let Some(located) = self.file_wsl_root() {
+                build_wsl_search_index(located, &mut index, &mut budget);
+            } else {
+                build_search_index(&root, 0, &mut index, &mut budget);
+                Self::mark_ignored(&root, &mut index);
+            }
             self.search_index = Some(index);
         }
         let index = self.search_index.as_ref().unwrap();
@@ -879,7 +994,25 @@ impl SidePanel {
     }
 
     fn spawn_git(&mut self, args: Vec<String>) {
-        self.spawn_vcs("git", args.into_iter().map(OsString::from).collect());
+        if let Some(located) = self.followed_wsl.clone() {
+            let mut guest_args: Vec<OsString> = [
+                "-d",
+                located.distro.as_str(),
+                "--",
+                "git",
+                "-C",
+                located.guest.as_str(),
+                "--no-optional-locks",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            guest_args.extend(args.into_iter().map(OsString::from));
+            let host_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            self.spawn_vcs_at(PathBuf::from("wsl.exe"), guest_args, host_cwd);
+        } else {
+            self.spawn_vcs("git", args.into_iter().map(OsString::from).collect());
+        }
     }
 
     fn spawn_svn_mutation(&mut self, operation: SvnMutation) {
@@ -1148,6 +1281,7 @@ impl SidePanel {
         if let Some(parent) = root.parent() {
             rows.push(FileRow {
                 path: parent.to_path_buf(),
+                guest_path: None,
                 name: "..".to_owned(),
                 depth: 0,
                 is_dir: true,
@@ -1159,6 +1293,68 @@ impl SidePanel {
         Self::flatten_dir_into(&mut rows, expanded, root, 0);
         Self::mark_ignored(root, &mut rows);
         rows
+    }
+
+    /// UNC 不可达时直接从 WSL guest 枚举 Files 树。命令参数逐项传给
+    /// `CreateProcessW`，不经过 shell，因此发行版名、路径和文件名都不会参与
+    /// 命令拼接。`find -printf` 用 NUL 分隔，换行文件名也不会破坏记录边界。
+    fn tree_rows_wsl(
+        located: &crate::shell_detect::WslCwd,
+        expanded: &HashSet<PathBuf>,
+    ) -> Vec<FileRow> {
+        let root = normalize_wsl_guest_path(&located.guest);
+        let mut rows = Vec::new();
+        if let Some(parent) = wsl_guest_parent(&root) {
+            rows.push(FileRow {
+                path: PathBuf::from(&parent),
+                guest_path: Some(parent),
+                name: "..".to_owned(),
+                depth: 0,
+                is_dir: true,
+                expanded: false,
+                is_parent: true,
+                ignored: false,
+            });
+        }
+        Self::flatten_wsl_dir_into(&mut rows, expanded, &located.distro, &root, 0);
+        rows
+    }
+
+    fn flatten_wsl_dir_into(
+        rows: &mut Vec<FileRow>,
+        expanded: &HashSet<PathBuf>,
+        distro: &str,
+        guest_dir: &str,
+        depth: usize,
+    ) {
+        if rows.len() >= MAX_ROWS {
+            return;
+        }
+        let mut entries = wsl_read_dir(distro, guest_dir);
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+        entries.truncate(MAX_PER_DIR);
+        for (is_dir, name, guest_path) in entries {
+            if rows.len() >= MAX_ROWS {
+                return;
+            }
+            // 该 PathBuf 只作为展开/选中的稳定键；真实来宾路径始终取
+            // `guest_path`，绝不把这个键交给宿主文件系统。
+            let path_key = PathBuf::from(&guest_path);
+            let is_expanded = is_dir && expanded.contains(&path_key);
+            rows.push(FileRow {
+                path: path_key.clone(),
+                guest_path: Some(guest_path.clone()),
+                name,
+                depth,
+                is_dir,
+                expanded: is_expanded,
+                is_parent: false,
+                ignored: false,
+            });
+            if is_expanded {
+                Self::flatten_wsl_dir_into(rows, expanded, distro, &guest_path, depth + 1);
+            }
+        }
     }
 
     fn flatten_dir_into(
@@ -1190,6 +1386,7 @@ impl SidePanel {
             let is_expanded = is_dir && expanded.contains(&path);
             rows.push(FileRow {
                 path: path.clone(),
+                guest_path: None,
                 name,
                 depth,
                 is_dir,
@@ -1283,9 +1480,16 @@ impl SidePanel {
             return false;
         }
         let path = row.path.clone();
+        let guest_path = row.guest_path.clone();
         if row.is_parent {
             // 返回上级只改变窗口内的目录树根节点，不能连带修改终端 cwd；
             // 用户仍可通过现有“跟随”操作回到当前终端目录。
+            if let (Some(current), Some(guest)) = (self.file_wsl_root(), guest_path) {
+                return self.set_custom_wsl_root(crate::shell_detect::WslCwd {
+                    distro: current.distro.clone(),
+                    guest,
+                });
+            }
             return self.set_custom_root(path);
         }
         if !self.expanded.remove(&path) {
@@ -1542,6 +1746,7 @@ fn build_search_index(dir: &Path, depth: usize, index: &mut Vec<FileRow>, budget
         let path = entry.path();
         index.push(FileRow {
             path: path.clone(),
+            guest_path: None,
             name,
             depth: 0,
             is_dir,
@@ -1552,6 +1757,122 @@ fn build_search_index(dir: &Path, depth: usize, index: &mut Vec<FileRow>, budget
         if is_dir {
             build_search_index(&path, depth + 1, index, budget);
         }
+    }
+}
+
+fn wsl_root_key(located: &crate::shell_detect::WslCwd) -> PathBuf {
+    PathBuf::from(normalize_wsl_guest_path(&located.guest))
+}
+
+fn normalize_wsl_guest_path(path: &str) -> String {
+    let normalized = path.trim().replace('\\', "/");
+    if normalized == "/" {
+        return normalized;
+    }
+    normalized.trim_end_matches('/').to_owned()
+}
+
+fn wsl_guest_parent(path: &str) -> Option<String> {
+    let normalized = normalize_wsl_guest_path(path);
+    if normalized == "/" {
+        return None;
+    }
+    let parent = normalized
+        .rsplit_once('/')
+        .map_or("/", |(parent, _)| if parent.is_empty() { "/" } else { parent });
+    Some(parent.to_owned())
+}
+
+fn wsl_guest_join(parent: &str, name: &str) -> String {
+    if parent == "/" {
+        format!("/{name}")
+    } else {
+        format!("{}/{name}", parent.trim_end_matches('/'))
+    }
+}
+
+/// `find` 输出为重复的 `type NUL value NUL`。只接受完整记录；来宾进程被
+/// 中断时尾部半条记录会被自然丢弃，不会生成指向错误位置的行。
+fn parse_wsl_find_pairs(output: &[u8]) -> Vec<(u8, String)> {
+    let fields: Vec<&[u8]> = output
+        .split_inclusive(|byte| *byte == 0)
+        .filter_map(|field| field.strip_suffix(&[0]))
+        .collect();
+
+    fields
+        .chunks_exact(2)
+        .filter_map(|pair| {
+            let kind = pair[0].first().copied()?;
+            Some((kind, String::from_utf8_lossy(pair[1]).into_owned()))
+        })
+        .collect()
+}
+
+fn run_wsl_find(distro: &str, args: impl IntoIterator<Item = OsString>) -> Option<Vec<u8>> {
+    let mut command = std::process::Command::new("wsl.exe");
+    command.args(["-d", distro, "--", "find"]).args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        let reason = String::from_utf8_lossy(&output.stderr);
+        log::debug!("WSL file tree find failed in {distro}: {}", reason.trim());
+        return None;
+    }
+    Some(output.stdout)
+}
+
+fn wsl_read_dir(distro: &str, guest_dir: &str) -> Vec<(bool, String, String)> {
+    let args = [guest_dir, "-mindepth", "1", "-maxdepth", "1", "-printf", r"%y\0%f\0"]
+        .into_iter()
+        .map(OsString::from);
+    let Some(output) = run_wsl_find(distro, args) else { return Vec::new() };
+    parse_wsl_find_pairs(&output)
+        .into_iter()
+        .filter_map(|(kind, name)| {
+            (name != ".git").then(|| {
+                let guest_path = wsl_guest_join(guest_dir, &name);
+                (kind == b'd', name, guest_path)
+            })
+        })
+        .collect()
+}
+
+fn build_wsl_search_index(
+    located: &crate::shell_detect::WslCwd,
+    index: &mut Vec<FileRow>,
+    budget: &mut usize,
+) {
+    let root = normalize_wsl_guest_path(&located.guest);
+    let mut args: Vec<OsString> =
+        [root.as_str(), "-mindepth", "1", "-maxdepth", "8", "(", "-type", "d", "(", "-name", ".*"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+    for skipped in SEARCH_SKIP_DIRS.iter().filter(|name| !name.starts_with('.')) {
+        args.extend([OsString::from("-o"), OsString::from("-name"), OsString::from(skipped)]);
+    }
+    args.extend([")", "-prune", ")", "-o", "-printf", r"%y\0%p\0"].into_iter().map(OsString::from));
+    let Some(output) = run_wsl_find(&located.distro, args) else { return };
+    for (kind, guest_path) in parse_wsl_find_pairs(&output) {
+        if *budget == 0 || index.len() >= SEARCH_INDEX_CAP {
+            break;
+        }
+        *budget -= 1;
+        let name = guest_path.rsplit('/').next().unwrap_or(&guest_path).to_owned();
+        index.push(FileRow {
+            path: PathBuf::from(&guest_path),
+            guest_path: Some(guest_path),
+            name,
+            depth: 0,
+            is_dir: kind == b'd',
+            expanded: false,
+            is_parent: false,
+            ignored: false,
+        });
     }
 }
 
@@ -1567,27 +1888,63 @@ fn read_git(root: &Path) -> Option<GitInfo> {
     // the user is already browsing carries none of the write risks the global
     // opt-in guards against.
     let safe_directory = format!("safe.directory={}", root.display());
-    let run = |args: &[&str]| -> Option<String> {
+    let location = root.display().to_string();
+    collect_git_info(|args| {
         let mut cmd = Command::new("git");
         cmd.args(["-c", &safe_directory, "--no-optional-locks"]).args(args).current_dir(root);
-        // Suppress the console window that `Command` flashes on Windows GUI apps.
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let out = cmd.output().ok()?;
-        if !out.status.success() {
-            // Leave a trace instead of a silent blank panel: the first stderr
-            // line names the actual refusal (ownership, not-a-repo, …).
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let reason = stderr.lines().next().unwrap_or("unknown error");
-            log::debug!("git {:?} failed in {}: {reason}", args.first(), root.display());
-            return None;
-        }
-        Some(String::from_utf8_lossy(&out.stdout).into_owned())
-    };
+        run_git(cmd, args, &location)
+    })
+}
 
+/// 在 WSL 来宾里读 git 状态：`wsl.exe -d <发行版> -- git -C <来宾目录> …`。
+///
+/// # 为什么不走宿主 git
+///
+/// 宿主 git 要读 WSL 仓库，只能经 `\\wsl.localhost\…` UNC，而那条路依赖 9P
+/// 文件重定向——实测在 WSL 2.7.8 + Windows 22631 上完全不可达（见
+/// [`crate::shell_detect::wsl_unc_cwd`]）。来宾里的 git 反而什么都不缺：
+/// 输出格式与宿主 `git status --porcelain -b` 逐字相同，所以解析与宿主
+/// 路径完全共用 [`collect_git_info`]，没有第二套解析要维护。
+///
+/// 也不需要 `safe.directory`：来宾里的仓库属于来宾用户自己，不会触发
+/// dubious ownership——那本来就是跨 UNC 读别人的文件才有的问题。
+///
+/// 代价是每次快照多一次 `wsl.exe` 进程往返（发行版没运行时还会把它拉起
+/// 来）。快照本来就在后台线程上、且有节流，不进渲染路径。
+fn read_git_wsl(located: &crate::shell_detect::WslCwd) -> Option<GitInfo> {
+    use std::process::Command;
+    let location = format!("{}:{}", located.distro, located.guest);
+    collect_git_info(|args| {
+        let mut cmd = Command::new("wsl.exe");
+        cmd.args(["-d", &located.distro, "--", "git", "-C", &located.guest, "--no-optional-locks"])
+            .args(args);
+        run_git(cmd, args, &location)
+    })
+}
+
+/// 跑一条已配好的 git 命令，取 stdout。`location` 只用于失败日志。
+fn run_git(mut cmd: std::process::Command, args: &[&str], location: &str) -> Option<String> {
+    // Suppress the console window that `Command` flashes on Windows GUI apps.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        // Leave a trace instead of a silent blank panel: the first stderr
+        // line names the actual refusal (ownership, not-a-repo, …).
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let reason = stderr.lines().next().unwrap_or("unknown error");
+        log::debug!("git {:?} failed in {location}: {reason}", args.first());
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// 宿主与 WSL 来宾两条运行路径共用的 porcelain 解析。`run` 收一组 git 参数、
+/// 回 stdout（失败即 `None`）。
+fn collect_git_info(run: impl Fn(&[&str]) -> Option<String>) -> Option<GitInfo> {
     // `-b --porcelain` yields `## branch...upstream [ahead N]` + one `XY path`
     // per change, X = index (staged) status, Y = worktree status.
     let status = run(&["status", "--porcelain", "-b"])?;
@@ -2737,6 +3094,41 @@ mod tests {
         assert_eq!(panel.root_notice(), Some("所选目录不可用，已跟随当前目录"));
     }
 
+    #[test]
+    fn native_wsl_cwd_replaces_the_stale_host_root() {
+        let host = std::env::temp_dir();
+        let mut panel = SidePanel::new();
+        panel.toggle(PanelView::Files);
+        // 这里只验证状态切换，不让单测启动真实 WSL/文件快照工人。
+        panel.snapshot_running.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(panel.sync(Some(host)));
+
+        let located = crate::shell_detect::WslCwd {
+            distro: "Debian".to_owned(),
+            guest: "/home/hello".to_owned(),
+        };
+        assert!(panel.sync_at(None, Some(located.clone())));
+        assert_eq!(panel.root(), Some(Path::new("/home/hello")));
+        assert_eq!(panel.file_wsl_root(), Some(&located));
+        assert!(panel.followed_cwd.is_none(), "旧宿主根不能盖住来宾 cwd");
+    }
+
+    #[test]
+    fn wsl_find_records_preserve_newlines_and_drop_partial_tails() {
+        let parsed = parse_wsl_find_pairs(b"d\0hello\0f\0line\nname.txt\0f\0partial");
+        assert_eq!(parsed, vec![(b'd', "hello".to_owned()), (b'f', "line\nname.txt".to_owned())]);
+    }
+
+    #[test]
+    fn wsl_guest_path_helpers_keep_root_and_parent_boundaries() {
+        assert_eq!(normalize_wsl_guest_path("/home/hello/"), "/home/hello");
+        assert_eq!(wsl_guest_parent("/home/hello"), Some("/home".to_owned()));
+        assert_eq!(wsl_guest_parent("/home"), Some("/".to_owned()));
+        assert_eq!(wsl_guest_parent("/"), None);
+        assert_eq!(wsl_guest_join("/", "home"), "/home");
+        assert_eq!(wsl_guest_join("/home", "hello"), "/home/hello");
+    }
+
     /// The per-directory cap must be applied *after* ordering. Capping the
     /// `read_dir` iterator instead samples filesystem order, which in a
     /// dot-heavy repo root pushes the real source directories past the cap and
@@ -2795,6 +3187,7 @@ mod tests {
         let mut rows = vec![
             FileRow {
                 path: PathBuf::from("src"),
+                guest_path: None,
                 name: "src".into(),
                 depth: 0,
                 is_dir: true,
@@ -2804,6 +3197,7 @@ mod tests {
             },
             FileRow {
                 path: PathBuf::from("target"),
+                guest_path: None,
                 name: "target".into(),
                 depth: 0,
                 is_dir: true,

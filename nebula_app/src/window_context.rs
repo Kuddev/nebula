@@ -2065,41 +2065,26 @@ impl WindowContext {
         session::valid_dir(&cwd)
     }
 
-    /// The focused pane's cwd mapped through `\\wsl$` when the pane belongs
-    /// to a WSL tab reporting a Linux path — so the directory tree can follow
-    /// a WSL shell. Only the drawer uses this: spawning terminals in a UNC
-    /// directory has its own semantics and is deliberately not affected.
+    /// The focused pane's cwd mapped through `\\wsl.localhost` when the pane
+    /// belongs to a WSL tab reporting a Linux path — so the directory tree can
+    /// follow a WSL shell. Only the drawer uses this: spawning terminals in a
+    /// UNC directory has its own semantics and is deliberately not affected.
+    ///
+    /// 判定与拼接走 [`crate::shell_detect`] 的公共入口，与 GPUI 壳同一份
+    /// 规则。注意它在 9P 重定向不可用的机器上一律返回 `None`（见
+    /// [`crate::shell_detect::wsl_unc_cwd`]），届时目录树保持上一个已知根，
+    /// 不会跳到坏路径。GPUI 壳另有「在来宾里直接跑 git」的 Git 视图路径；
+    /// 旧壳刻意不接那条链——新功能只在主壳（GPUI）上长。
     fn focused_wsl_cwd(&self) -> Option<std::path::PathBuf> {
         let raw = self.pane(self.focused_pane_id()).map(|p| p.nebula_state.cwd.clone())?;
-        let raw = raw.trim();
-        if !raw.starts_with('/') {
-            return None;
-        }
         let tab = self.tabs.iter().find(|tab| {
             let mut ids = Vec::new();
             tab.layout.leaves(&mut ids);
             ids.contains(&self.focused_pane_id())
         })?;
         let TabLaunch::Shell { shell, .. } = &tab.launch else { return None };
-        let program = std::path::Path::new(shell.program())
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if program != "wsl" {
-            return None;
-        }
-        // `wsl -d <distro>` / `--distribution <distro>`; a bare `wsl` launch
-        // uses the default distro whose name we cannot know — skip mapping
-        // and let the tree keep its last known root.
-        let args = shell.args();
-        let distro = args
-            .iter()
-            .position(|arg| arg == "-d" || arg == "--distribution")
-            .and_then(|index| args.get(index + 1))?;
-        let unc = format!("\\\\wsl$\\{distro}{}", raw.replace('/', "\\"));
-        let path = std::path::PathBuf::from(unc);
-        path.is_dir().then_some(path)
+        let located = crate::shell_detect::wsl_cwd(&raw, shell.program(), shell.args())?;
+        crate::shell_detect::wsl_unc_cwd(&located)
     }
 
     /// Name of the first busy program under any of `pane_ids`, for the close

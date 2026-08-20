@@ -100,6 +100,14 @@ pub fn spawn(
     options.shell = shell;
     options.working_directory = cwd;
     options.env.insert(crate::ai_hook::PANE_ENV.to_owned(), pane_id.to_string());
+    // WSL tab 的 cwd 上报（OSC 7）：来宾登录 shell 默认不发，目录树与 Git 视图
+    // 因此永远停在"等待终端上报工作目录"。只对 `wsl.exe` 启动生效，见
+    // [`crate::shell_detect::wsl_cwd_report_env`]。
+    if let Some(launch) = &options.shell {
+        let program = launch.program().to_owned();
+        let args = launch.args().to_vec();
+        options.env.extend(crate::shell_detect::wsl_cwd_report_env(&program, &args));
+    }
     tty::setup_env();
     let pty = tty::new(&options, window_size, 0)?;
     let shell_pid = pty.child_pid().unwrap_or(0);
