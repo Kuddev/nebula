@@ -15,9 +15,9 @@ pub mod config;
 pub mod doc_tabs;
 pub mod http;
 pub mod math_view;
+pub mod network_settings;
 pub mod prelude;
 pub mod session_restore;
-pub mod network_settings;
 pub mod settings_pane;
 pub mod ssh_hosts;
 pub mod ssh_settings;
@@ -64,7 +64,7 @@ pub fn run_shell() {
     });
     // 驻留进程写 runtime.port：第二份 `nebula --gpui` 经 ATTACH + tab.new
     // 并入当前窗口，而不是再拉一套进程。Drop 会删 port 文件。
-    let _runtime_server = crate::runtime_api::RuntimeServer::spawn_callback(
+    let runtime_server = crate::runtime_api::RuntimeServer::spawn_callback(
         {
             let tx = shell_tx;
             move |callback| {
@@ -79,6 +79,18 @@ pub fn run_shell() {
         },
         runtime_hub.clone(),
     );
+    if runtime_server.is_none() {
+        // 与另一份进程同时启动时，对方可能已经拿到 owner lock、但尚未来得及
+        // 发布 endpoint。短暂等待并交接，避免继续打开一个无控制面的空窗口。
+        for _ in 0..40 {
+            if crate::runtime_api::try_open_default_tab_existing() {
+                crate::tray::shutdown();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    let _runtime_server = runtime_server;
     gpui::Application::new().with_assets(Assets).run(move |cx| {
         // GPUI is the only event loop in `--gpui` mode, so it owns the same
         // per-process hook pipe before the first TerminalView spawns.
@@ -173,9 +185,8 @@ fn open_main_window(
     };
 
     cx.open_window(options, move |window, cx| {
-        let workspace = cx.new(|cx| {
-            NebulaWorkspace::new(window, ai_events, shell_events, 1, runtime_hub, cx)
-        });
+        let workspace =
+            cx.new(|cx| NebulaWorkspace::new(window, ai_events, shell_events, 1, runtime_hub, cx));
         // 调试/验收后门：启动即打开指定文档（见 open_document_at_startup）。
         if let Ok(path) = std::env::var("NEBULA_GPUI_OPEN_DOC")
             && !path.is_empty()

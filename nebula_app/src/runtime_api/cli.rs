@@ -22,14 +22,18 @@ pub(super) fn request_once(
     params: Value,
     timeout: Duration,
 ) -> Result<ApiResponse, Box<dyn Error>> {
-    let endpoint =
-        read_endpoint().ok_or_else(|| CliError("no resident Nebula runtime found".into()))?;
+    let endpoint = read_endpoint()
+        .ok_or_else(|| CliError::new("runtime_unavailable", "no resident Nebula runtime found"))?;
     let request = ApiRequest::new(endpoint.token.clone(), method, params);
     let stream = client_stream(&endpoint, &request, Some(timeout))?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
     if line.is_empty() {
-        return Err(CliError("runtime closed the connection without a response".into()).into());
+        return Err(CliError::new(
+            "runtime_no_response",
+            "runtime closed the connection without a response",
+        )
+        .into());
     }
     Ok(serde_json::from_str(&line)?)
 }
@@ -45,15 +49,31 @@ fn print_response(response: &ApiResponse, pretty: bool) -> Result<(), Box<dyn Er
     } else {
         let error =
             response.error.as_ref().map_or("runtime request failed", |error| &error.message);
-        Err(CliError(error.to_owned()).into())
+        Err(PrintedCliError(error.to_owned()).into())
     }
 }
 
 /// CLI adapter. It deliberately speaks the same serialized protocol as any
 /// external client instead of calling Processor helpers in-process.
 pub fn run_cli(options: ControlOptions) -> Result<(), Box<dyn Error>> {
+    let pretty = options.pretty;
+    match run_cli_inner(options) {
+        result @ Ok(_) => result,
+        Err(error) if error.downcast_ref::<PrintedCliError>().is_some() => Err(error),
+        Err(error) => {
+            let code =
+                error.downcast_ref::<CliError>().map_or("cli_transport_error", |error| error.code);
+            let response = ApiResponse::failure("cli", ApiError::new(code, error.to_string()));
+            print_response(&response, pretty)
+        },
+    }
+}
+
+fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
     if options.timeout_ms == 0 || Duration::from_millis(options.timeout_ms) > MAX_WAIT {
-        return Err(CliError("--timeout-ms must be between 1 and 86400000".into()).into());
+        return Err(
+            CliError::new("invalid_params", "--timeout-ms must be between 1 and 86400000").into()
+        );
     }
     let timeout = Duration::from_millis(options.timeout_ms);
     match options.command {
@@ -310,8 +330,8 @@ fn wait_state_name(state: ControlWaitState) -> &'static str {
 }
 
 fn subscribe_cli(since: Option<u64>, timeout: Duration) -> Result<(), Box<dyn Error>> {
-    let endpoint =
-        read_endpoint().ok_or_else(|| CliError("no resident Nebula runtime found".into()))?;
+    let endpoint = read_endpoint()
+        .ok_or_else(|| CliError::new("runtime_unavailable", "no resident Nebula runtime found"))?;
     let request = ApiRequest::new(
         endpoint.token.clone(),
         "events.subscribe",
@@ -321,9 +341,11 @@ fn subscribe_cli(since: Option<u64>, timeout: Duration) -> Result<(), Box<dyn Er
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
-        return Err(
-            CliError("runtime closed the subscription without an acknowledgement".into()).into()
-        );
+        return Err(CliError::new(
+            "runtime_no_response",
+            "runtime closed the subscription without an acknowledgement",
+        )
+        .into());
     }
     print!("{line}");
     std::io::stdout().flush()?;
@@ -339,12 +361,32 @@ fn subscribe_cli(since: Option<u64>, timeout: Duration) -> Result<(), Box<dyn Er
 }
 
 #[derive(Debug)]
-struct CliError(String);
+struct CliError {
+    code: &'static str,
+    message: String,
+}
+
+impl CliError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self { code, message: message.into() }
+    }
+}
 
 impl fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for CliError {}
+
+#[derive(Debug)]
+struct PrintedCliError(String);
+
+impl fmt::Display for PrintedCliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl Error for CliError {}
+impl Error for PrintedCliError {}

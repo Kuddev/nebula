@@ -4,7 +4,7 @@
 //! so a crash cannot leave a half-written JSON document. A best-effort lock
 //! prevents two Nebula processes from compacting the same store at once.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -64,6 +64,50 @@ pub(crate) fn try_lock(path: &Path) -> io::Result<Option<FileLock>> {
     }
 }
 
+/// Try to own a lock for the full lifetime of a resident process.
+///
+/// 与短状态写锁不同，这里依赖 OS 句柄锁：进程崩溃时内核立即释放，健康进程
+/// 无论运行多久都不会被“超时回收”。锁文件本身可以保留，所有权只看句柄。
+pub(crate) fn try_lifetime_lock(path: &Path) -> io::Result<Option<LifetimeFileLock>> {
+    let lock_path = lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(windows)]
+    let mut file = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        match OpenOptions::new().read(true).write(true).create(true).share_mode(0).open(&lock_path)
+        {
+            Ok(file) => file,
+            Err(error) if matches!(error.raw_os_error(), Some(32) | Some(33)) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    };
+
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::fd::AsRawFd as _;
+
+        let file = OpenOptions::new().read(true).write(true).create(true).open(&lock_path)?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        file
+    };
+
+    file.set_len(0)?;
+    write!(file, "{}", std::process::id())?;
+    file.sync_data()?;
+    Ok(Some(LifetimeFileLock { file }))
+}
+
 fn create_lock(path: &Path) -> io::Result<FileLock> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -99,6 +143,20 @@ impl Drop for FileLock {
     }
 }
 
+pub(crate) struct LifetimeFileLock {
+    file: File,
+}
+
+impl Drop for LifetimeFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
 #[cfg(windows)]
 fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -131,7 +189,7 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{try_lock, write};
+    use super::{try_lifetime_lock, try_lock, write};
 
     #[test]
     fn atomic_write_replaces_and_lock_is_exclusive() {
@@ -145,5 +203,10 @@ mod tests {
         assert!(try_lock(&path).unwrap().is_none());
         drop(first);
         assert!(try_lock(&path).unwrap().is_some());
+
+        let owner = try_lifetime_lock(&path).unwrap().expect("first lifetime lock");
+        assert!(try_lifetime_lock(&path).unwrap().is_none());
+        drop(owner);
+        assert!(try_lifetime_lock(&path).unwrap().is_some());
     }
 }

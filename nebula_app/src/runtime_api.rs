@@ -8,12 +8,22 @@
 mod agent_api;
 mod cli;
 mod command;
+mod server;
 #[cfg(test)]
 mod tests;
 
 pub use cli::run_cli;
-pub(crate) use command::{capture_process_tree, capture_terminal_tail, validate_command_line, validate_prompt};
-use command::{RuntimeWaitState, SubscribeParams, WaitParams, default_read_lines, default_true, parse_params, validate_agent_name, validate_agent_selector, wait_matches};
+use command::{
+    RuntimeWaitState, SubscribeParams, WaitParams, default_read_lines, default_true, parse_params,
+    validate_agent_name, validate_agent_selector, wait_matches,
+};
+pub(crate) use command::{
+    capture_process_tree, capture_terminal_tail, validate_command_line, validate_prompt,
+};
+use server::{Endpoint, endpoint_addr, read_endpoint};
+pub use server::{
+    RuntimeServer, dispatch_prompt, try_open_default_tab_existing, try_open_directory_existing,
+};
 
 use std::error::Error;
 use std::fmt;
@@ -1377,164 +1387,6 @@ fn run_result_or_capability_error(result: RuntimeRunResult) -> Result<RuntimeRun
     };
     Err(ApiError::new(code, "the command completed without a reliable exit-code result")
         .details(serde_json::to_value(result).unwrap_or_else(|_| json!({ "reason": reason }))))
-}
-
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Endpoint {
-    port: u16,
-    token: String,
-}
-
-fn port_file() -> PathBuf {
-    crate::display::nebula_data_dir().join("runtime.port")
-}
-
-fn legacy_port_file() -> PathBuf {
-    crate::display::nebula_data_dir().join("mux.port")
-}
-
-fn read_endpoint() -> Option<Endpoint> {
-    read_endpoint_from(port_file())
-}
-
-fn read_endpoint_from(path: PathBuf) -> Option<Endpoint> {
-    let data = std::fs::read_to_string(path).ok()?;
-    let mut parts = data.split_whitespace();
-    Some(Endpoint { port: parts.next()?.parse().ok()?, token: parts.next()?.to_owned() })
-}
-
-fn endpoint_addr(endpoint: &Endpoint) -> SocketAddr {
-    SocketAddr::from((Ipv4Addr::LOCALHOST, endpoint.port))
-}
-
-fn fresh_token() -> String {
-    use std::hash::{BuildHasher, Hasher, RandomState};
-    let mut a = RandomState::new().build_hasher();
-    let mut b = RandomState::new().build_hasher();
-    a.write_u32(std::process::id());
-    b.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0),
-    );
-    format!("{:016x}{:016x}", a.finish(), b.finish())
-}
-
-/// 普通二次启动并入驻留实例：先恢复/聚焦窗口，再新建一个默认 shell 标签页。
-pub fn try_open_default_tab_existing() -> bool {
-    try_open_tab_existing(None)
-}
-
-/// 后台任务把一行文本作为输入敲进某个 pane（不回车）。复用 runtime Prompt
-/// 的窗口定位与写入路径（`window_id=None` 按 pane 自动定位）；响应通道即弃
-/// ——调用方不关心结果，失败在事件线程侧留日志即可。SFTP 图片粘贴用它回粘
-/// 远端路径。
-pub fn dispatch_prompt(proxy: &EventLoopProxy<Event>, pane_id: u64, text: String) {
-    let (dispatch, _receiver) = RuntimeDispatch::new(RuntimeCommand::Prompt {
-        window_id: None,
-        pane_id,
-        text,
-        submit: false,
-    });
-    if proxy.send_event(Event::new(EventType::RuntimeControl(dispatch), None)).is_err() {
-        warn!("prompt dispatch failed: event loop is gone");
-    }
-}
-
-/// Explorer 右键「在 Nebula 中打开」/ CLI 带 `--working-directory` 的启动并入
-/// 驻留实例：先经 ATTACH 恢复或聚焦既有窗口（与平启动同一套交接，detached
-/// 的标签因此先回来），再请求在该窗口打开定目录标签。任一步失败都返回
-/// false，调用方回落为独立启动——绝不吞掉用户的手势。
-pub fn try_open_directory_existing(dir: &std::path::Path) -> bool {
-    try_open_tab_existing(Some(dir))
-}
-
-fn try_open_tab_existing(dir: Option<&std::path::Path>) -> bool {
-    if legacy_request("ATTACH").is_none() {
-        return false;
-    }
-    // ATTACH 与 tab.new 都落到同一条 winit 事件队列上，先后有序：窗口先
-    // 恢复，新标签随后落在恢复出来的窗口里。
-    let params = dir.map_or_else(|| json!({}), |dir| json!({ "cwd": dir }));
-    cli::request_once("tab.new", params, IO_TIMEOUT).map(|response| response.ok).unwrap_or(false)
-}
-
-fn legacy_request(verb: &str) -> Option<()> {
-    read_endpoint()
-        .and_then(|endpoint| legacy_request_to(verb, &endpoint))
-        // Upgrade compatibility: an already-running pre-v1 Nebula still
-        // publishes mux.port. A plain launch can attach to it and exit; a new
-        // resident process writes runtime.port after the old process ends.
-        .or_else(|| {
-            read_endpoint_from(legacy_port_file())
-                .and_then(|endpoint| legacy_request_to(verb, &endpoint))
-        })
-}
-
-fn legacy_request_to(verb: &str, endpoint: &Endpoint) -> Option<()> {
-    let mut stream = TcpStream::connect_timeout(&endpoint_addr(&endpoint), CONNECT_TIMEOUT).ok()?;
-    stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
-    stream.write_all(format!("{verb} {}\n", endpoint.token).as_bytes()).ok()?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
-    (line.trim() == "OK").then_some(())
-}
-
-/// Resident versioned runtime API server.
-pub struct RuntimeServer {
-    endpoint: Endpoint,
-    port_file: PathBuf,
-}
-
-impl RuntimeServer {
-    pub fn spawn(proxy: EventLoopProxy<Event>, hub: RuntimeHub) -> Option<Self> {
-        Self::spawn_with_sink(EventSink::Winit(proxy), hub)
-    }
-
-    /// Same discovery file and ATTACH/PING/JSON protocol as [`Self::spawn`],
-    /// but attach/control are delivered through a callback (GPUI has no winit
-    /// `EventLoopProxy`).
-    pub fn spawn_callback(
-        on_event: impl Fn(RuntimeCallback) + Send + Sync + 'static,
-        hub: RuntimeHub,
-    ) -> Option<Self> {
-        Self::spawn_with_sink(EventSink::Callback(Arc::new(on_event)), hub)
-    }
-
-    fn spawn_with_sink(sink: EventSink, hub: RuntimeHub) -> Option<Self> {
-        if read_endpoint().and_then(|endpoint| legacy_request_to("PING", &endpoint)).is_some() {
-            info!("Runtime API server already running; this instance stays client-only");
-            return None;
-        }
-
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).ok()?;
-        let endpoint = Endpoint { port: listener.local_addr().ok()?.port(), token: fresh_token() };
-        let path = port_file();
-        let contents = format!("{} {} {}\n", endpoint.port, endpoint.token, PROTOCOL_VERSION);
-        if crate::atomic_file::write(&path, contents.as_bytes()).is_err() {
-            warn!("Runtime API: cannot write {path:?}; control plane disabled");
-            return None;
-        }
-
-        let server_token = endpoint.token.clone();
-        let spawned = std::thread::Builder::new()
-            .name("nebula-runtime-api".into())
-            .spawn(move || serve(listener, server_token, sink, hub))
-            .is_ok();
-        spawned.then(|| Self { endpoint, port_file: path })
-    }
-}
-
-impl Drop for RuntimeServer {
-    fn drop(&mut self) {
-        // Do not delete another process's newer discovery record.
-        if read_endpoint().as_ref() == Some(&self.endpoint) {
-            let _ = std::fs::remove_file(&self.port_file);
-        }
-    }
 }
 
 fn serve(listener: TcpListener, token: String, sink: EventSink, hub: RuntimeHub) {

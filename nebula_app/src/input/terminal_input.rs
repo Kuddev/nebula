@@ -282,33 +282,10 @@ pub(crate) fn build_runtime_sequence(
     result
 }
 
-/// Encode text injected by the Runtime API for the pane's active input protocol.
-///
-/// ConPTY's Win32 input mode deserializes `CSI Vk;Sc;Uc;Kd;Cs;Rc_` into
-/// `KEY_EVENT_RECORD`s. Mixing raw UTF-8 text and a serialized Enter record in
-/// one pipe batch can leave the control record in an interactive TUI's text
-/// input batch. Encode the text as `VK_PACKET` records as well, so a submitted
-/// prompt is one homogeneous protocol stream and needs no timing boundary.
-pub(crate) fn build_runtime_text_sequence(text: &str, mode: TermMode) -> Vec<u8> {
-    if use_win32_input_mode(mode) {
-        #[cfg(target_os = "windows")]
-        {
-            use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_PACKET;
-
-            let mut sequence = String::with_capacity(text.len().saturating_mul(40));
-            for unicode_char in text.encode_utf16() {
-                for key_down in [1, 0] {
-                    // VK_PACKET is the documented virtual key for Unicode
-                    // supplied by a non-keyboard input source. A zero scan
-                    // code and the UTF-16 unit preserve arbitrary prompt text.
-                    let _ =
-                        write!(sequence, "\x1b[{};0;{};{key_down};0;1_", VK_PACKET, unicode_char);
-                }
-            }
-            return sequence.into_bytes();
-        }
-    }
-
+/// Runtime 文本始终走终端的原生文本路径；ConPTY 会在 `WriteString` 中按当前
+/// Console/键盘布局生成事件。强制伪造成 `VK_PACKET` 会被旧 PSReadLine 丢弃。
+/// Enter 等控制键由 submit barrier 在下一批按当前协议单独编码。
+pub(crate) fn build_runtime_text_sequence(text: &str, _mode: TermMode) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
@@ -1122,28 +1099,14 @@ mod vt_tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn runtime_win32_text_and_enter_form_one_record_stream() {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_PACKET;
-
+    fn runtime_win32_text_uses_conpty_native_text_path() {
         let mode = TermMode::WIN32_INPUT_MODE;
-        let mut bytes = build_runtime_text_sequence("A中", mode);
-        bytes.extend(build_runtime_sequence(
-            RuntimeKey::Enter,
-            RuntimeKeyModifiers::default(),
-            1,
-            mode,
-        ));
+        assert_eq!(build_runtime_text_sequence("A中", mode), "A中".as_bytes());
 
-        let text = String::from_utf8(bytes).unwrap();
-        let records: Vec<_> = text.split_inclusive('_').collect();
-        assert_eq!(records.len(), 6);
-        assert_eq!(records[0], format!("\x1b[{VK_PACKET};0;65;1;0;1_"));
-        assert_eq!(records[1], format!("\x1b[{VK_PACKET};0;65;0;0;1_"));
-        assert_eq!(records[2], format!("\x1b[{VK_PACKET};0;20013;1;0;1_"));
-        assert_eq!(records[3], format!("\x1b[{VK_PACKET};0;20013;0;0;1_"));
-        assert!(records[4].starts_with("\x1b[13;"));
-        assert!(records[4].contains(";13;1;0;1_"));
-        assert!(records[5].contains(";13;0;0;1_"));
+        let enter =
+            build_runtime_sequence(RuntimeKey::Enter, RuntimeKeyModifiers::default(), 1, mode);
+        assert_ne!(enter, b"\r");
+        assert!(String::from_utf8(enter).unwrap().starts_with("\x1b[13;"));
     }
 
     #[test]
