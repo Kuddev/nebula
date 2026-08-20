@@ -19,6 +19,15 @@ This file contains changes that are not part of a numbered release yet.
 - Fixed PowerShell profiles created through the alternate profile path missing
   the Nebula command-completion integration.
 - Disabled the `fmt` command from Nebula's shell-injected command surface.
+- Fixed the GPUI Windows blur switch retaining Acrylic after it was disabled.
+  Nebula now applies an explicit zeroed `ACCENT_DISABLED` policy when turning
+  blur off, restores the Acrylic policy when turning it on, clears stale DWM
+  system backdrops, and flushes composition in both directions.
+- Fixed the shared Files panel losing the active pane after tab/pane switches
+  or manual tree navigation. WSL `/mnt/<drive>` paths map to the host drive,
+  while `/`, `/home`, `/etc`, and other guest paths are enumerated inside the
+  selected distribution. Refresh now resumes following the active pane, and
+  timed-out WSL workers can no longer disable later refreshes.
 
 ### Improved
 
@@ -37,6 +46,9 @@ This file contains changes that are not part of a numbered release yet.
 - Improved cross-monitor drag performance by coalescing intermediate DPI,
   physical-size, font, and UI updates until the native drag settles. Ordinary
   native messages remain on the fast path.
+- Matched the expanded sidebar toggle's selected background to the softer
+  surface color used by the legacy shell without changing other selected
+  buttons globally.
 
 ## 中文
 
@@ -52,6 +64,13 @@ This file contains changes that are not part of a numbered release yet.
   时可用，不需要先发送一轮对话。
 - 修复通过备用 profile 路径创建的 PowerShell 没有命令补齐的问题。
 - 禁用 shell 注入命令面板中的 `fmt` 命令。
+- 修复 GPUI Windows 壳关闭背景模糊后仍残留 Acrylic 的问题。关闭时现在明确
+  写入全零 `ACCENT_DISABLED` policy，开启时恢复 Acrylic policy；两向切换都
+  清理遗留 DWM system backdrop 并刷新合成状态。
+- 修复共享 Files 面板在切换 tab/pane 或手动浏览目录后不再跟随当前 pane 的
+  问题。WSL `/mnt/<盘>` 映射到宿主盘，`/`、`/home`、`/etc` 等来宾路径则在
+  对应发行版内枚举；刷新按钮会恢复跟随当前 pane，WSL 工人超时也不会再让
+  后续刷新永久失效。
 
 ### 改进
 
@@ -66,6 +85,8 @@ This file contains changes that are not part of a numbered release yet.
   重定位逻辑只对旧版本生效。
 - 改进跨显示器拖动性能：中间产生的 DPI、物理尺寸、字体和 UI 更新合并到
   原生拖动结束后执行，普通系统消息仍走快速路径。
+- 左上角侧栏折叠按钮展开时改用与旧壳一致的柔和 surface 选中色，不全局
+  改动其他 selected 按钮的主题状态。
 
 ## Verification
 

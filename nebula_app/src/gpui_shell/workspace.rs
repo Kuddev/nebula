@@ -1192,6 +1192,7 @@ impl NebulaWorkspace {
         self.active = at;
         self.reveal_active_tab();
         self.focus_active(window, cx);
+        self.sync_side_panel_to_active(true, cx);
         cx.notify();
         focused
     }
@@ -1240,6 +1241,7 @@ impl NebulaWorkspace {
         self.active = at;
         self.reveal_active_tab();
         self.focus_active(window, cx);
+        self.sync_side_panel_to_active(true, cx);
         cx.notify();
     }
 
@@ -1303,6 +1305,7 @@ impl NebulaWorkspace {
         *focused = new_id;
         *zoomed = false;
         self.focus_active(window, cx);
+        self.sync_side_panel_to_active(true, cx);
         cx.notify();
         Ok(new_id)
     }
@@ -1342,6 +1345,7 @@ impl NebulaWorkspace {
                 self.pane_bounds.borrow_mut().remove(&pane_id);
                 if tab_ix == self.active {
                     self.focus_active(window, cx);
+                    self.sync_side_panel_to_active(true, cx);
                 }
                 cx.notify();
             },
@@ -1503,6 +1507,7 @@ impl NebulaWorkspace {
         }
         if tab_ix == self.active {
             self.focus_active(window, cx);
+            self.sync_side_panel_to_active(true, cx);
         }
         cx.notify();
     }
@@ -1893,8 +1898,19 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         match event {
-            // 侧边栏标题渲染在本视图里，直接重绘。
-            TerminalViewEvent::TitleChanged => cx.notify(),
+            // OSC 7 cwd 与标题共用这条事件。只有当前聚焦 pane 能驱动共享文件树；
+            // 后台 pane 的提示符更新不能把前台目录覆盖掉。
+            TerminalViewEvent::TitleChanged => {
+                let is_active_pane = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(WorkspaceTab::focused_view)
+                    .is_some_and(|active| active.entity_id() == view.entity_id());
+                if is_active_pane {
+                    self.sync_side_panel_to_active(false, cx);
+                }
+                cx.notify();
+            },
             TerminalViewEvent::Exited => {
                 if let Some((tab_ix, pane_id)) = self.locate_pane(view.entity_id()) {
                     self.runtime_hub.record_pane_exited(self.runtime_window_id, pane_id);
@@ -1978,6 +1994,7 @@ impl NebulaWorkspace {
         }
         self.reveal_active_tab();
         self.focus_active(window, cx);
+        self.sync_side_panel_to_active(true, cx);
         cx.notify();
     }
 
@@ -1989,6 +2006,7 @@ impl NebulaWorkspace {
             }
             self.reveal_active_tab();
             self.focus_active(window, cx);
+            self.sync_side_panel_to_active(true, cx);
             cx.notify();
         }
     }
@@ -2027,21 +2045,17 @@ impl NebulaWorkspace {
         window.defer(cx, move |window, _| window.focus(&focus));
     }
 
-    /// 聚焦 tab 的**宿主可见** cwd。WSL tab 报的是来宾路径（`/home/x`、
-    /// `/mnt/d/x`），在宿主侧不是有效目录，此时交给
-    /// [`crate::shell_detect::wsl_host_cwd`] 翻译：`/mnt/<盘>` 直接落到宿主盘
-    /// （永远可达），来宾自有路径退一步试 `\\wsl.localhost\…`（9P 不可用的机器
-    /// 上会失败，抽屉按既有语义保持上一个已知目录）。旧壳
-    /// `focused_cwd().or_else(focused_wsl_cwd)` 同合同，判定共用一份。
+    /// 聚焦 tab 的**宿主可见** cwd。必须先识别 WSL，再读 `local_cwd()`：Windows
+    /// 会把来宾 `/` 当成当前盘根目录，反过来的顺序会把 WSL `/` 显示成 `D:\`。
+    /// WSL `/mnt/<盘>` 与可达 UNC 仍可供复制/Explorer 等宿主操作使用。
     ///
     /// Git 视图不受这里成败影响——它另有来宾直读路径，见 [`Self::active_wsl_cwd`]。
     fn active_local_cwd(&self, cx: &App) -> Option<std::path::PathBuf> {
-        let view = self.tabs.get(self.active).and_then(WorkspaceTab::focused_view)?;
-        if let Some(cwd) = view.read(cx).local_cwd() {
-            return Some(cwd);
+        if let Some(located) = self.active_wsl_cwd(cx) {
+            return crate::shell_detect::wsl_host_cwd(&located);
         }
-        let located = self.active_wsl_cwd(cx)?;
-        crate::shell_detect::wsl_host_cwd(&located)
+        let view = self.tabs.get(self.active).and_then(WorkspaceTab::focused_view)?;
+        view.read(cx).local_cwd()
     }
 
     /// 聚焦 tab 所在的 WSL 发行版 + 来宾目录；不是 WSL、或发行版无从确定
@@ -2058,8 +2072,8 @@ impl NebulaWorkspace {
         crate::shell_detect::wsl_cwd(&raw, &program, &args)
     }
 
-    /// 抽屉这一帧该跟随的位置：宿主 cwd，加上**仅当**宿主侧拿不到等价路径时
-    /// 才交出的 WSL 位置。
+    /// 抽屉这一帧该跟随的位置。WSL 先分流：只有 `/mnt/<盘>` 映射到宿主盘，
+    /// `/`、`/home`、`/etc` 等始终交给来宾 `find`，不依赖不稳定的 UNC。
     ///
     /// 为什么要这个门：`/mnt/<盘>/…` 已经被 [`Self::active_local_cwd`] 落回宿
     /// 主盘，此时宿主 git 与来宾 git 读的是同一个工作树，而宿主 git 快得多
@@ -2069,9 +2083,28 @@ impl NebulaWorkspace {
         &self,
         cx: &App,
     ) -> (Option<std::path::PathBuf>, Option<crate::shell_detect::WslCwd>) {
-        let cwd = self.active_local_cwd(cx);
-        let wsl = if cwd.is_some() { None } else { self.active_wsl_cwd(cx) };
-        (cwd, wsl)
+        if let Some(wsl) = self.active_wsl_cwd(cx) {
+            return match crate::shell_detect::wsl_mounted_host_cwd(&wsl) {
+                Some(cwd) => (Some(cwd), None),
+                None => (None, Some(wsl)),
+            };
+        }
+        (self.active_local_cwd(cx), None)
+    }
+
+    /// 让窗口级共享文件树立即绑定当前 active tab / focused pane。切 pane/tab
+    /// 时清掉树内手动浏览根；普通 OSC 7 轮询只在 cwd 真变化时由模型自动清掉。
+    fn sync_side_panel_to_active(
+        &mut self,
+        reset_browse_root: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.side_panel.open {
+            return false;
+        }
+        let (cwd, wsl) = self.side_panel_follow(cx);
+        let cleared = reset_browse_root && self.side_panel.clear_custom_root();
+        self.side_panel.sync_at(cwd, wsl) || cleared
     }
 
     fn toggle_side_panel(
@@ -2087,8 +2120,7 @@ impl NebulaWorkspace {
             return;
         }
 
-        let (cwd, wsl) = self.side_panel_follow(cx);
-        self.side_panel.sync_at(cwd, wsl);
+        self.sync_side_panel_to_active(true, cx);
 
         // The shared model builds snapshots on a worker and exposes a cheap,
         // throttled `sync`. GPUI polls only while the drawer is open; it does
@@ -2105,8 +2137,7 @@ impl NebulaWorkspace {
                                 workspace.side_panel_polling = false;
                                 return false;
                             }
-                            let (cwd, wsl) = workspace.side_panel_follow(cx);
-                            if workspace.side_panel.sync_at(cwd, wsl) {
+                            if workspace.sync_side_panel_to_active(false, cx) {
                                 cx.notify();
                             }
                             true
@@ -3368,8 +3399,7 @@ impl NebulaWorkspace {
                             .tooltip(format!("刷新 {vcs_label} 状态"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.side_panel.request_refresh();
-                                let (cwd, wsl) = this.side_panel_follow(cx);
-                                this.side_panel.sync_at(cwd, wsl);
+                                this.sync_side_panel_to_active(false, cx);
                                 cx.notify();
                             })),
                     )
@@ -4085,6 +4115,11 @@ impl Render for NebulaWorkspace {
                                         // 侧栏是开关而非一次性动作：展开期间必须持续
                                         // 显示选中底，和旧壳 `left_sidebar_visible()` 同义。
                                         .selected(!self.sidebar_collapsed)
+                                        // Ghost 的全局 selected 使用 hover_strong，静态
+                                        // 底比旧壳亮一档；仅此按钮覆写回旧壳 surface。
+                                        .when(!self.sidebar_collapsed, |button| {
+                                            button.bg(cx.theme().secondary)
+                                        })
                                         .tooltip("折叠/展开侧边栏 (Ctrl+Shift+B)")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.sidebar_collapsed = !this.sidebar_collapsed;

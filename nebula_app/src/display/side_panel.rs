@@ -189,6 +189,9 @@ impl FileDrag {
 
 /// Re-run the (throttled) refresh at most this often while the panel is open.
 const REFRESH_EVERY: Duration = Duration::from_secs(4);
+/// WSL terminal is already running when the drawer asks for a snapshot; a
+/// longer wait means the worker is wedged and must not disable future refreshes.
+const WSL_COMMAND_TIMEOUT: Duration = Duration::from_secs(6);
 /// Hard cap on flattened tree rows, bounding both fs walking and rendering.
 const MAX_ROWS: usize = 1000;
 /// Hard cap on entries listed per directory. Applied *after* sorting, so the
@@ -290,6 +293,15 @@ struct PanelSnapshot {
     files_wsl: Option<crate::shell_detect::WslCwd>,
     rows: Vec<FileRow>,
     git: Option<GitInfo>,
+}
+
+/// 工人 panic/提前返回也必须解锁；否则一次异常会让此窗口今后的所有刷新失效。
+struct SnapshotRunningGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for SnapshotRunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 fn git_pull_args() -> Vec<String> {
@@ -565,27 +577,38 @@ impl SidePanel {
         // 先收割落地的后台快照——旧内容在工人跑动期间一直显示，这里一次
         // 性换成新内容（先显示旧的、再更新，VSCode 的树刷新模式）。
         let changed = self.harvest_snapshot();
-        // 聚焦 pane 报不出本地有效目录时（SSH 远端路径、未映射的 WSL 路
-        // 径、shell 还没发 OSC）保持现状：跟随的语义是"最后一个已知有效
-        // 目录"，清空只会让切到远程 tab 的瞬间目录树闪成空白。
-        // 先记下这次到底给出了哪些位置——两个字段各自会 move 掉入参。
-        let had_cwd = cwd.is_some();
-        let has_guest_cwd = !had_cwd && wsl.is_some();
-        if had_cwd {
-            self.followed_cwd = cwd;
-        } else if has_guest_cwd {
-            // `/mnt/d` 能映射为 D:\，而 `/home` 只能由来宾读取。从前这里保留
-            // 旧 D:\，导致新 WSL 位置永远被宿主根盖住。
-            self.followed_cwd = None;
+        // 聚焦 pane 报不出位置时（SSH、shell 尚未发 OSC）保留最后一个有效根；
+        // 有明确新位置时则恢复实时跟随，树内点 `..` 产生的浏览覆盖不能继续压住
+        // 新 pane/cwd。相同 cwd 上的手动浏览仍保留，直到位置真的变化或用户刷新。
+        let followed_changed = match (cwd.as_ref(), wsl.as_ref()) {
+            (Some(next), _) => {
+                self.followed_cwd.as_ref() != Some(next) || self.followed_wsl.is_some()
+            },
+            (None, Some(next)) => {
+                self.followed_wsl.as_ref() != Some(next) || self.followed_cwd.is_some()
+            },
+            (None, None) => false,
+        };
+        let follow_override_cleared = if followed_changed {
+            let cleared_host = self.custom_root.take().is_some();
+            let cleared_wsl = self.custom_wsl_root.take().is_some();
+            cleared_host || cleared_wsl
+        } else {
+            false
+        };
+        if follow_override_cleared {
+            self.root_notice = None;
         }
-        // WSL 位置沿用同一套"最后一个已知有效位置"语义，但多一条清除规则：
-        // 切回一个宿主终端（cwd 有值而 wsl 没有）必须把它清掉，否则 Git 面板
-        // 会继续显示上一个 WSL 仓库的状态。两者都拿不到（SSH tab）才保持现状。
+
         let wsl_before = self.followed_wsl.clone();
-        if wsl.is_some() {
-            self.followed_wsl = wsl;
-        } else if had_cwd {
+        if let Some(cwd) = cwd {
+            self.followed_cwd = Some(cwd);
             self.followed_wsl = None;
+        } else if let Some(wsl) = wsl {
+            // `/mnt/d` 能映射为 D:\，而 `/home` 等必须由来宾读取；清掉旧宿主根
+            // 才不会让 WSL `/` 再次被上一份 Windows 快照覆盖。
+            self.followed_cwd = None;
+            self.followed_wsl = Some(wsl);
         }
         // 换了 WSL 仓库、或从 WSL 切回宿主，都要立刻重算 Git 快照：这类切换
         // 不改 `root`（宿主看不见来宾目录，树停在原处），光靠 `root_changed`
@@ -611,7 +634,13 @@ impl SidePanel {
         if self.op_done.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.needs_refresh = true;
         }
-        if !(root_changed || custom_invalidated || stale || wsl_changed || self.needs_refresh) {
+        if !(root_changed
+            || custom_invalidated
+            || follow_override_cleared
+            || stale
+            || wsl_changed
+            || self.needs_refresh)
+        {
             return changed;
         }
         if root_changed {
@@ -621,7 +650,7 @@ impl SidePanel {
             self.selected = None;
         }
         self.refresh();
-        changed || root_changed || custom_invalidated || wsl_changed
+        changed || root_changed || custom_invalidated || follow_override_cleared || wsl_changed
     }
 
     /// 测试辅助：等后台快照工人落地并收割。生产路径永不阻塞。
@@ -653,6 +682,9 @@ impl SidePanel {
         if self.root.as_ref() != Some(&snapshot.root)
             || self.file_wsl_root().cloned() != snapshot.files_wsl
         {
+            // 当前调用紧接着会看到 needs_refresh 并为新根启动工人；不能静默
+            // 丢弃后等四秒节流，否则 pane 切换看起来像没有跟随。
+            self.needs_refresh = true;
             return false;
         }
         self.rows = snapshot.rows;
@@ -805,6 +837,7 @@ impl SidePanel {
         let running = std::sync::Arc::clone(&self.snapshot_running);
         let slot = std::sync::Arc::clone(&self.snapshot_slot);
         std::thread::spawn(move || {
+            let _running_guard = SnapshotRunningGuard(running);
             let rows = match &files_wsl {
                 Some(located) => SidePanel::tree_rows_wsl(located, &expanded),
                 None => SidePanel::tree_rows(&root, &expanded),
@@ -843,7 +876,6 @@ impl SidePanel {
             if let Ok(mut slot) = slot.lock() {
                 *slot = Some(PanelSnapshot { root, files_wsl, rows, git });
             }
-            running.store(false, std::sync::atomic::Ordering::Release);
         });
     }
 
@@ -1808,6 +1840,59 @@ fn parse_wsl_find_pairs(output: &[u8]) -> Vec<(u8, String)> {
         .collect()
 }
 
+/// `Command::output` 没有超时；WSL 桥一旦卡住会永久占住 SidePanel 的唯一工人。
+/// 两根 pipe 各自排水，避免输出填满后子进程与父进程互相等待。
+fn command_output_with_timeout(
+    mut command: std::process::Command,
+    timeout: Option<Duration>,
+) -> std::io::Result<std::process::Output> {
+    let Some(timeout) = timeout else { return command.output() };
+    use std::io::Read as _;
+    use std::process::Stdio;
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "missing stdout pipe")
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "missing stderr pipe")
+    })?;
+    let read_pipe = |mut pipe: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+    };
+    let stdout_reader = read_pipe(Box::new(stdout));
+    let stderr_reader = read_pipe(Box::new(stderr));
+    let deadline = Instant::now() + timeout;
+
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("command exceeded {} seconds", timeout.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    };
+    let join = |reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
+        reader.join().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "command pipe reader panicked")
+        })?
+    };
+    Ok(std::process::Output { status, stdout: join(stdout_reader)?, stderr: join(stderr_reader)? })
+}
+
 fn run_wsl_find(distro: &str, args: impl IntoIterator<Item = OsString>) -> Option<Vec<u8>> {
     let mut command = std::process::Command::new("wsl.exe");
     command.args(["-d", distro, "--", "find"]).args(args);
@@ -1816,7 +1901,13 @@ fn run_wsl_find(distro: &str, args: impl IntoIterator<Item = OsString>) -> Optio
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let output = command.output().ok()?;
+    let output = match command_output_with_timeout(command, Some(WSL_COMMAND_TIMEOUT)) {
+        Ok(output) => output,
+        Err(error) => {
+            log::warn!("WSL file tree find failed in {distro}: {error}");
+            return None;
+        },
+    };
     if !output.status.success() {
         let reason = String::from_utf8_lossy(&output.stderr);
         log::debug!("WSL file tree find failed in {distro}: {}", reason.trim());
@@ -1892,7 +1983,7 @@ fn read_git(root: &Path) -> Option<GitInfo> {
     collect_git_info(|args| {
         let mut cmd = Command::new("git");
         cmd.args(["-c", &safe_directory, "--no-optional-locks"]).args(args).current_dir(root);
-        run_git(cmd, args, &location)
+        run_git(cmd, args, &location, None)
     })
 }
 
@@ -1918,19 +2009,30 @@ fn read_git_wsl(located: &crate::shell_detect::WslCwd) -> Option<GitInfo> {
         let mut cmd = Command::new("wsl.exe");
         cmd.args(["-d", &located.distro, "--", "git", "-C", &located.guest, "--no-optional-locks"])
             .args(args);
-        run_git(cmd, args, &location)
+        run_git(cmd, args, &location, Some(WSL_COMMAND_TIMEOUT))
     })
 }
 
 /// 跑一条已配好的 git 命令，取 stdout。`location` 只用于失败日志。
-fn run_git(mut cmd: std::process::Command, args: &[&str], location: &str) -> Option<String> {
+fn run_git(
+    mut cmd: std::process::Command,
+    args: &[&str],
+    location: &str,
+    timeout: Option<Duration>,
+) -> Option<String> {
     // Suppress the console window that `Command` flashes on Windows GUI apps.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let out = cmd.output().ok()?;
+    let out = match command_output_with_timeout(cmd, timeout) {
+        Ok(output) => output,
+        Err(error) => {
+            log::warn!("git {:?} failed in {location}: {error}", args.first());
+            return None;
+        },
+    };
     if !out.status.success() {
         // Leave a trace instead of a silent blank panel: the first stderr
         // line names the actual refusal (ownership, not-a-repo, …).
@@ -3027,7 +3129,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_root_is_window_local_and_ignores_cwd_sync_until_cleared() {
+    fn custom_root_survives_same_cwd_but_releases_when_terminal_moves() {
         let base =
             std::env::temp_dir().join(format!("nebula-panel-root-test-{}", std::process::id()));
         let cwd = base.join("cwd");
@@ -3039,14 +3141,15 @@ mod tests {
 
         let mut panel = SidePanel::new();
         panel.toggle(PanelView::Files);
-        assert!(panel.sync(Some(cwd)));
+        assert!(panel.sync(Some(cwd.clone())));
         assert!(panel.set_custom_root(custom.clone()));
         assert!(panel.custom_root_active());
 
-        panel.sync(Some(next_cwd.clone()));
+        panel.sync(Some(cwd));
         assert_eq!(panel.root(), Some(custom.as_path()));
+        assert!(panel.custom_root_active());
 
-        assert!(panel.clear_custom_root());
+        assert!(panel.sync(Some(next_cwd.clone())));
         assert!(!panel.custom_root_active());
         assert_eq!(panel.root(), Some(next_cwd.as_path()));
 
@@ -3111,6 +3214,28 @@ mod tests {
         assert_eq!(panel.root(), Some(Path::new("/home/hello")));
         assert_eq!(panel.file_wsl_root(), Some(&located));
         assert!(panel.followed_cwd.is_none(), "旧宿主根不能盖住来宾 cwd");
+    }
+
+    #[test]
+    fn new_wsl_cwd_releases_a_browsed_guest_root() {
+        let mut panel = SidePanel::new();
+        panel.toggle(PanelView::Files);
+        panel.snapshot_running.store(true, std::sync::atomic::Ordering::Relaxed);
+        let home =
+            crate::shell_detect::WslCwd { distro: "Debian".to_owned(), guest: "/home".to_owned() };
+        panel.sync_at(None, Some(home.clone()));
+        assert!(panel.set_custom_wsl_root(crate::shell_detect::WslCwd {
+            distro: "Debian".to_owned(),
+            guest: "/".to_owned(),
+        }));
+        assert!(panel.custom_root_active());
+
+        let etc =
+            crate::shell_detect::WslCwd { distro: "Debian".to_owned(), guest: "/etc".to_owned() };
+        assert!(panel.sync_at(None, Some(etc.clone())));
+        assert!(!panel.custom_root_active());
+        assert_eq!(panel.root(), Some(Path::new("/etc")));
+        assert_eq!(panel.file_wsl_root(), Some(&etc));
     }
 
     #[test]

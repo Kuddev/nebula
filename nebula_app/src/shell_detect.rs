@@ -542,6 +542,26 @@ pub fn wsl_cwd_report_env(program: &str, args: &[String]) -> Vec<(String, String
     vec![("PROMPT_COMMAND".to_owned(), REPORT.to_owned()), ("WSLENV".to_owned(), wslenv)]
 }
 
+/// WSL automount 路径（仅 `/mnt/<盘>`）→ 宿主可见且已确认存在的目录。
+///
+/// 先做严格形态门控很重要：Windows 会把 POSIX `/` 当成当前盘根目录；若先
+/// 交给通用路径转换，WSL `/` 就会被误显示成 Nebula 当前所在的 `D:\`。
+pub fn wsl_mounted_host_cwd(located: &WslCwd) -> Option<std::path::PathBuf> {
+    let suffix = located.guest.trim().strip_prefix("/mnt/")?;
+    let bytes = suffix.as_bytes();
+    if bytes.len() > 1 && bytes[1] != b'/' || !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+
+    #[cfg(windows)]
+    {
+        let path = crate::file_uri::file_uri_to_local_path(&format!("file://{}", located.guest))?;
+        return path.is_dir().then_some(path);
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 /// [`WslCwd`] → 宿主可见且**已确认可达**的路径，按两条路依次尝试。
 ///
 /// 1. `/mnt/<盘>/…`（automount——WSL 里访问宿主盘的常规形态，也是绝大多数人
@@ -553,16 +573,7 @@ pub fn wsl_cwd_report_env(program: &str, args: &[String]) -> Vec<(String, String
 ///
 /// 两条都失败也不影响 Git 视图：那条路走 [`WslCwd`] 在来宾里直接跑 git。
 pub fn wsl_host_cwd(located: &WslCwd) -> Option<std::path::PathBuf> {
-    // `/mnt/d/x` → `file:///mnt/d/x` → `D:\x`，复用 OSC 8 链接那套 automount /
-    // MSYS / cygwin 路径翻译（含"盘符真的存在"的门控），不另写一份。
-    #[cfg(windows)]
-    if let Some(path) =
-        crate::file_uri::file_uri_to_local_path(&format!("file://{}", located.guest))
-        && path.is_dir()
-    {
-        return Some(path);
-    }
-    wsl_unc_cwd(located)
+    wsl_mounted_host_cwd(located).or_else(|| wsl_unc_cwd(located))
 }
 
 /// 已注册 WSL 发行版的名字（注册表 `Lxss` 各子键的 `DistributionName`），
@@ -677,6 +688,18 @@ mod tests {
         assert_eq!(super::wsl_guest_cwd(r"D:\temp_build"), None);
         assert_eq!(super::wsl_guest_cwd(""), None);
         assert_eq!(super::wsl_guest_cwd("home/hello"), None);
+    }
+
+    #[test]
+    fn only_wsl_automount_paths_can_become_host_directories() {
+        for guest in ["/", "/home", "/etc", "/mnt/double"] {
+            let located = super::WslCwd { distro: "Debian".to_owned(), guest: guest.to_owned() };
+            assert_eq!(
+                super::wsl_mounted_host_cwd(&located),
+                None,
+                "{guest} 不能被解释为 Windows 当前盘"
+            );
+        }
     }
 
     /// UNC 形式必须是 `\\wsl.localhost\<发行版>\…`：旧壳原来拼的 `\\wsl$\` 是

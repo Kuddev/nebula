@@ -212,30 +212,48 @@ fn apply_window_effects(cx: &mut App) {
         let _ = handle.update(cx, |_, window, _| {
             window.set_background_appearance(appearance);
             #[cfg(windows)]
-            if !blur {
-                clear_windows_system_backdrop(window);
-            }
+            apply_windows_accent_policy(window, blur);
             window.refresh();
         });
     }
 }
 
-/// 清掉 Windows system-backdrop 层可能残留的材质。
+/// 明确落下 Windows AccentPolicy，并清掉可能残留的 system backdrop。
 ///
-/// GPUI 的 [`WindowBackgroundAppearance::Opaque`] 已经通过 AccentPolicy 写入
-/// `ACCENT_DISABLED`，它仍是主关闭入口。旧壳还会用官方
-/// `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE)` 清 system
-/// backdrop；实机证明只发 `SWP_FRAMECHANGED` 不会清属性，所以 GPUI 壳在关闭
-/// 时也补同一条清理。开启仍只走 GPUI `Blurred`，不叠加第二套材质。
+/// 当前锁定的 GPUI 后端在关闭时写的是 `state=0, flags=2`。2026-08-20
+/// 实机探针证明 DWM 会因此保留已有 Acrylic；同一 HWND 改写为全零 policy 后
+/// 画面立即去模糊。这里仍先走 GPUI 的跨平台入口，再只在 Windows 对齐它本应
+/// 写入的精确字段：关闭 = 全零，开启 = Acrylic(state 4) + 非零 alpha。
 ///
-/// 微软文档对 `DWMSBT_NONE` 的合同是 “Don't draw any system backdrop”。失败
-/// 必须留日志，否则视觉残留会再次被误判成“DWM 没重绘”。
+/// `SetWindowCompositionAttribute` 未进入公开 SDK，所以和 GPUI 上游一样动态取
+/// 函数地址；`DWMSBT_NONE` 与 `DwmFlush` 则用公开 DWM API。任一步失败都留日志，
+/// 避免把 API 失败再次误判成“设置没有热应用”。
 #[cfg(windows)]
-fn clear_windows_system_backdrop(window: &Window) {
+fn apply_windows_accent_policy(window: &Window, blur: bool) {
+    use windows_sys::Win32::Foundation::{BOOL, HWND};
     use windows_sys::Win32::Graphics::Dwm::{
-        DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DwmSetWindowAttribute,
+        DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DwmFlush, DwmSetWindowAttribute,
     };
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    #[repr(C)]
+    struct AccentPolicy {
+        state: u32,
+        flags: u32,
+        gradient_color: u32,
+        animation_id: u32,
+    }
+
+    #[repr(C)]
+    struct WindowCompositionAttributeData {
+        attribute: u32,
+        data: *mut core::ffi::c_void,
+        size: usize,
+    }
+
+    type SetWindowCompositionAttribute =
+        unsafe extern "system" fn(HWND, *mut WindowCompositionAttributeData) -> BOOL;
 
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
@@ -245,21 +263,60 @@ fn clear_windows_system_backdrop(window: &Window) {
     };
     let hwnd = handle.hwnd.get() as *mut core::ffi::c_void;
     let backdrop: i32 = DWMSBT_NONE;
-    // SAFETY: hwnd 来自当前存活的 GPUI 窗口；值与长度严格匹配 DWM 的
-    // `DWM_SYSTEMBACKDROP_TYPE`（i32）合同。无效句柄由 HRESULT 安全报告。
-    let result = unsafe {
-        DwmSetWindowAttribute(
+    let mut accent = if blur {
+        AccentPolicy {
+            state: 4, // ACCENT_ENABLE_ACRYLICBLURBEHIND
+            flags: 0,
+            // alpha=0 会让部分 DWM 版本直接跳过 Acrylic。
+            gradient_color: 0x0100_0000,
+            animation_id: 0,
+        }
+    } else {
+        AccentPolicy { state: 0, flags: 0, gradient_color: 0, animation_id: 0 }
+    };
+    let mut data = WindowCompositionAttributeData {
+        attribute: 19, // WCA_ACCENT_POLICY
+        data: &mut accent as *mut _ as *mut core::ffi::c_void,
+        size: std::mem::size_of::<AccentPolicy>(),
+    };
+
+    // SAFETY: hwnd 来自当前存活的 GPUI 窗口；DWM 属性值、AccentPolicy 与
+    // WCA 数据布局均与 Windows ABI/GPUI 后端一致。无效句柄由返回值安全报告。
+    let (backdrop_result, accent_result, flush_result) = unsafe {
+        let backdrop_result = DwmSetWindowAttribute(
             hwnd,
             DWMWA_SYSTEMBACKDROP_TYPE as u32,
             &backdrop as *const _ as *const core::ffi::c_void,
             std::mem::size_of::<i32>() as u32,
-        )
+        );
+
+        let user32 = GetModuleHandleA(c"user32.dll".as_ptr() as *const u8);
+        let accent_result = if user32.is_null() {
+            None
+        } else {
+            GetProcAddress(user32, c"SetWindowCompositionAttribute".as_ptr() as *const u8).map(
+                |procedure| {
+                    let set_attribute: SetWindowCompositionAttribute =
+                        std::mem::transmute(procedure);
+                    set_attribute(hwnd, &mut data)
+                },
+            )
+        };
+        (backdrop_result, accent_result, DwmFlush())
     };
-    if result < 0 {
+    if backdrop_result < 0 {
         log::warn!(
             "DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE=NONE) failed: HRESULT=0x{:08X}",
-            result as u32
+            backdrop_result as u32
         );
+    }
+    match accent_result {
+        Some(0) => log::warn!("SetWindowCompositionAttribute(WCA_ACCENT_POLICY) failed"),
+        None => log::warn!("SetWindowCompositionAttribute is unavailable in user32.dll"),
+        Some(_) => {},
+    }
+    if flush_result < 0 {
+        log::warn!("DwmFlush failed: HRESULT=0x{:08X}", flush_result as u32);
     }
 }
 

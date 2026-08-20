@@ -202,8 +202,9 @@ impl NebulaWorkspace {
                             .tooltip("刷新目录树")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.side_panel.request_refresh();
-                                let (cwd, wsl) = this.side_panel_follow(cx);
-                                this.side_panel.sync_at(cwd, wsl);
+                                // 刷新同时恢复“跟随当前 pane”；否则点过 `..` 后
+                                // custom root 会继续压住当前终端，按钮只会刷新旧目录。
+                                this.sync_side_panel_to_active(true, cx);
                                 cx.notify();
                             })),
                     )
@@ -319,8 +320,7 @@ impl NebulaWorkspace {
                         match crate::display::send_to_recycle_bin(&path) {
                             Ok(()) => {
                                 this.side_panel.request_refresh();
-                                let cwd = this.active_local_cwd(cx);
-                                this.side_panel.sync(cwd);
+                                this.sync_side_panel_to_active(false, cx);
                             },
                             Err(error) => this.side_panel.set_notice(format!("删除失败：{error}")),
                         }
