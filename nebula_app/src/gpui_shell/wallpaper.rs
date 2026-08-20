@@ -74,6 +74,7 @@ struct CardWallpaper {
 /// 随后把窗口层效果（背景外观 + DWM backdrop）应用到所有已开窗口。
 pub fn refresh(cx: &mut App) {
     let rt = nebula_settings::RuntimeSettings::load();
+    let previous_blur = cx.try_global::<VisualEffects>().map(|effects| effects.blur);
 
     let wallpaper = rt.background_image.as_ref().and_then(|raw_path| {
         let path = PathBuf::from(raw_path);
@@ -131,7 +132,7 @@ pub fn refresh(cx: &mut App) {
     });
 
     cx.set_global(VisualEffects { opacity: rt.opacity, blur: rt.blur, wallpaper });
-    apply_window_effects(cx);
+    apply_window_effects(previous_blur, cx);
 }
 
 /// 当前窗口透明度（无全局时视为不透明）。
@@ -194,16 +195,31 @@ fn background_appearance(blur: bool) -> WindowBackgroundAppearance {
 /// 旧壳靠它拿 acrylic，但 GPUI 的 accent policy 会接管合成，两套同时写只会
 /// 让 DWM 的内部状态含混——实测表现是模糊打开正常、关闭却关不掉。
 ///
-/// 关闭那一步还要先写一次 `Opaque`（ACCENT_DISABLED）：Win11 的 DWM 缓存
-/// acrylic 合成层，从 ACRYLICBLURBEHIND 直接切到 TRANSPARENTGRADIENT 时模糊
-/// 往往留在原地。先把 accent policy 整个撤掉，再写目标外观，DWM 才会重建。
-fn apply_window_effects(cx: &mut App) {
+/// 关闭时不能在同一个 DWM 合成帧里连续写 `Opaque` 和 `Transparent`：Win32
+/// 调用虽然都已同步执行，合成器仍可能只呈现最后一个状态，让旧 acrylic 层
+/// 留到下一次窗口变化。先让 `ACCENT_DISABLED` 真正呈现一帧，再恢复纯透明。
+fn apply_window_effects(previous_blur: Option<bool>, cx: &mut App) {
     let blur = cx.try_global::<VisualEffects>().map(|v| v.blur).unwrap_or(false);
     let appearance = background_appearance(blur);
     for handle in cx.windows() {
         let _ = handle.update(cx, |_, window, _| {
-            window.set_background_appearance(WindowBackgroundAppearance::Opaque);
-            window.set_background_appearance(appearance);
+            if previous_blur == Some(true) && !blur {
+                window.set_background_appearance(WindowBackgroundAppearance::Opaque);
+                window.refresh();
+                window.on_next_frame(|window, cx| {
+                    // 回调执行前用户可能又打开了模糊；以最新全局值收敛，避免
+                    // 旧的关闭回调在快速连点后反向覆盖新设置。
+                    let latest_blur = cx
+                        .try_global::<VisualEffects>()
+                        .map(|effects| effects.blur)
+                        .unwrap_or(false);
+                    window.set_background_appearance(background_appearance(latest_blur));
+                    window.refresh();
+                });
+            } else {
+                window.set_background_appearance(appearance);
+                window.refresh();
+            }
         });
     }
 }

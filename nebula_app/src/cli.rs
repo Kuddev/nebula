@@ -275,7 +275,8 @@ impl WindowIdentity {
 /// Available CLI subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Subcommands {
-    /// Control the resident Nebula runtime through the versioned local API.
+    /// Agent-oriented terminal control: split panes, run commands, start Codex/Claude,
+    /// send prompts, wait for state changes, and read verified terminal output.
     Ctl(ControlOptions),
     #[cfg(unix)]
     Msg(MessageOptions),
@@ -285,8 +286,8 @@ pub enum Subcommands {
     /// Test system notification (toast) delivery.
     #[cfg(windows)]
     NotifyTest,
-    /// Install (or --remove) the Claude Code hooks that feed Nebula's
-    /// real-time AI turn notifications.
+    /// Install (or --remove) AI hooks plus the Nebula Runtime Skill for
+    /// Codex and Claude Code.
     #[cfg(windows)]
     SetupAi(SetupAiOptions),
     /// SSH with Nebula shell integration bootstrapped on the remote host, so
@@ -373,7 +374,11 @@ pub struct SshOptions {
     pub args: Vec<String>,
 }
 
-/// Options for the cross-platform runtime control API.
+/// Options for the cross-platform runtime control API used by humans and coding agents.
+///
+/// Start with `nebula ctl describe --pretty` and `nebula ctl snapshot --pretty`.
+/// A split returns the new focused pane id; pass that id to `prompt`, `run`, `wait`,
+/// or `read` to build deterministic multi-pane workflows without GUI automation.
 #[derive(Args, Debug)]
 pub struct ControlOptions {
     /// Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines.

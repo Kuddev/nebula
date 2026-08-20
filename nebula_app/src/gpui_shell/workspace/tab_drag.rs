@@ -28,6 +28,32 @@ pub(super) struct TabDrag {
 }
 
 impl NebulaWorkspace {
+    /// 根节点只负责把移出 tab hitbox 的待命拖拽继续交给状态机。
+    /// GPUI 的元素监听离开 hover 后不再派发 move，因此这里不能只挂在 tab 行。
+    pub(super) fn continue_pending_tab_drag(
+        &mut self,
+        event: &gpui::MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tab_drag.as_ref().is_some_and(|drag| !drag.active) {
+            self.update_tab_drag(event, window, cx);
+        }
+    }
+
+    /// overlay 可能来不及在激活和松手之间渲染；根节点必须兜底提交已激活
+    /// 的 dock/reorder，而未过阈值时只清状态，保留 tab 的普通点击语义。
+    pub(super) fn release_tab_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.tab_drag.as_ref().map(|drag| drag.active) {
+            Some(true) => self.finish_tab_drag(window, cx),
+            Some(false) => {
+                self.tab_drag = None;
+                cx.notify();
+            },
+            None => {},
+        }
+    }
+
     /// 源下标加单轴位移换算出的整槽数；越过半格即换位。
     pub(super) fn drag_slot(drag: &TabDrag, len: usize) -> usize {
         let slots = (drag.offset / drag.pitch.max(1.0)).round() as isize;

@@ -3880,16 +3880,12 @@ impl Render for NebulaWorkspace {
             // 卡外壳与卡底。根节点不能再铺一张半透明底。
             .bg(gpui::transparent_black())
             .text_color(cx.theme().foreground)
-            // 兜底：未过阈值的按-放在任意位置松开都清掉待命拖拽
-            //（点击语义不受影响——行的 on_click 在冒泡链更早触发）。
+            .on_mouse_move(cx.listener(|this, event, window, cx| {
+                this.continue_pending_tab_drag(event, window, cx);
+            }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.tab_drag.as_ref().is_some_and(|d| !d.active) {
-                        this.tab_drag = None;
-                        cx.notify();
-                    }
-                }),
+                cx.listener(|this, _, window, cx| this.release_tab_drag(window, cx)),
             )
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 this.add_terminal(window, cx);

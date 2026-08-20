@@ -138,6 +138,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Load command line options.
     let options = Options::new();
 
+    // Portable builds are not necessarily on PATH. Export the exact executable
+    // before any PTY is created so Codex/Claude can call the supported control
+    // plane directly instead of scanning processes, port files, or source code.
+    #[cfg(windows)]
+    if options.subcommands.is_none()
+        && let Ok(executable) = env::current_exe()
+    {
+        // SAFETY: startup is still single-threaded here; all child PTYs are
+        // created later and inherit this stable value.
+        unsafe { env::set_var("NEBULA_CLI", executable) };
+    }
+
     #[cfg(windows)]
     if options.subcommands.is_none() && env::var_os("NEBULA_DETACHED_LAUNCH").is_some() {
         // 必须在进任何消息循环之前脱离启动控制台。GPUI 以前在这条

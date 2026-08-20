@@ -512,6 +512,22 @@ mod win {
         ensure_codex_notify();
         ensure_opencode_plugin();
         ensure_pi_extension();
+        for (agent, path, result) in ensure_runtime_skills() {
+            match result {
+                Ok(ManagedSkillInstall::Installed) => {
+                    log::info!("ai_hook: installed {agent} runtime skill at {}", path.display())
+                },
+                Ok(ManagedSkillInstall::Current) => {},
+                Ok(ManagedSkillInstall::Conflict) => log::warn!(
+                    "ai_hook: preserving unmanaged or edited {agent} skill at {}",
+                    path.display()
+                ),
+                Err(error) => log::warn!(
+                    "ai_hook: failed to install {agent} runtime skill at {}: {error}",
+                    path.display()
+                ),
+            }
+        }
     }
 
     fn config_guard() {
@@ -1028,6 +1044,27 @@ export default function (pi: ExtensionAPI) {
                     failed = true;
                 },
             }
+            for (agent, path) in runtime_skill_candidates() {
+                match remove_runtime_skill(&path) {
+                    Ok(ManagedSkillRemoval::Removed) => {
+                        println!("{agent}: 已移除 Nebula Runtime Skill（{}）。", path.display())
+                    },
+                    Ok(ManagedSkillRemoval::Absent) => {
+                        println!("{agent}: 没有 Nebula 管理的 Runtime Skill，未改动。")
+                    },
+                    Ok(ManagedSkillRemoval::Conflict) => {
+                        eprintln!(
+                            "{agent}: {} 已被用户修改，保留该 Skill；如需删除请手动确认内容。",
+                            path.display()
+                        );
+                        failed = true;
+                    },
+                    Err(error) => {
+                        eprintln!("{agent}: 移除 Runtime Skill 失败：{error}");
+                        failed = true;
+                    },
+                }
+            }
             // 持久开关：不写它，下次 Nebula 启动（含开机自启）会把上面
             // 刚清掉的四处原样装回——移除必须比自愈活得久（#8、#38）。
             match nebula_settings::persist_keys(&[("ai_hooks", "0".to_owned())]) {
@@ -1050,6 +1087,7 @@ export default function (pi: ExtensionAPI) {
                 return 1;
             },
         }
+        let mut setup_failed = false;
         // 显式安装即重新授权：清掉 --remove 落下的持久开关，守护线程下次
         // 启动恢复自愈。
         if let Err(err) = nebula_settings::persist_keys(&[("ai_hooks", "1".to_owned())]) {
@@ -1100,8 +1138,213 @@ export default function (pi: ExtensionAPI) {
             },
             _ => println!("pi: 未检测到（~/.pi/agent 不存在），跳过。"),
         }
+        for (agent, path, result) in ensure_runtime_skills() {
+            match result {
+                Ok(ManagedSkillInstall::Installed) => {
+                    println!("{agent}: 已安装 Nebula Runtime Skill 到 {}。", path.display())
+                },
+                Ok(ManagedSkillInstall::Current) => {
+                    println!("{agent}: Nebula Runtime Skill 已是最新。")
+                },
+                Ok(ManagedSkillInstall::Conflict) => {
+                    eprintln!(
+                        "{agent}: {} 已存在非 Nebula 管理或被编辑的同名 Skill，未覆盖。",
+                        path.display()
+                    );
+                    setup_failed = true;
+                },
+                Err(error) => {
+                    eprintln!("{agent}: 安装 Runtime Skill 失败：{error}");
+                    setup_failed = true;
+                },
+            }
+        }
         println!("对新启动的会话生效；正在运行的会话保持原快照。");
-        0
+        i32::from(setup_failed)
+    }
+
+    // ─── Runtime skill (Codex + Claude Code) ───────────────────────────────
+
+    const RUNTIME_SKILL_MD: &str =
+        include_str!("../../docs/skills/nebula-runtime/SKILL.md");
+    const RUNTIME_SKILL_OPENAI_YAML: &str =
+        include_str!("../../docs/skills/nebula-runtime/agents/openai.yaml");
+    const RUNTIME_SKILL_MARKER: &str = ".nebula-managed";
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ManagedSkillInstall {
+        Installed,
+        Current,
+        Conflict,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ManagedSkillRemoval {
+        Removed,
+        Absent,
+        Conflict,
+    }
+
+    fn runtime_skill_candidates() -> Vec<(&'static str, PathBuf)> {
+        let mut targets = Vec::new();
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            targets.push((
+                "codex",
+                PathBuf::from(profile).join(".agents").join("skills").join("nebula-runtime"),
+            ));
+        }
+        if let Some(claude) = claude_config_dir() {
+            targets.push(("claude", claude.join("skills").join("nebula-runtime")));
+        }
+        targets
+    }
+
+    fn ensure_runtime_skills(
+    ) -> Vec<(&'static str, PathBuf, std::io::Result<ManagedSkillInstall>)> {
+        runtime_skill_candidates()
+            .into_iter()
+            .filter(|(agent, _)| match *agent {
+                "codex" => codex_config_dir().is_some_and(|dir| dir.exists()),
+                "claude" => claude_config_dir().is_some_and(|dir| dir.exists()),
+                _ => false,
+            })
+            .map(|(agent, path)| {
+                let result = ensure_runtime_skill(&path);
+                (agent, path, result)
+            })
+            .collect()
+    }
+
+    fn skill_fingerprint(skill: &[u8], metadata: &[u8]) -> String {
+        use sha2::{Digest as _, Sha256};
+
+        let mut digest = Sha256::new();
+        digest.update(skill);
+        digest.update([0]);
+        digest.update(metadata);
+        digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn read_skill_fingerprint(dir: &Path) -> Option<String> {
+        let skill = std::fs::read(dir.join("SKILL.md")).ok()?;
+        let metadata = std::fs::read(dir.join("agents").join("openai.yaml")).ok()?;
+        Some(skill_fingerprint(&skill, &metadata))
+    }
+
+    fn ensure_runtime_skill(dir: &Path) -> std::io::Result<ManagedSkillInstall> {
+        let skill_path = dir.join("SKILL.md");
+        let metadata_path = dir.join("agents").join("openai.yaml");
+        let marker_path = dir.join(RUNTIME_SKILL_MARKER);
+        let expected = skill_fingerprint(
+            RUNTIME_SKILL_MD.as_bytes(),
+            RUNTIME_SKILL_OPENAI_YAML.as_bytes(),
+        );
+        let current = read_skill_fingerprint(dir);
+        let marker = std::fs::read_to_string(&marker_path).ok().map(|value| value.trim().to_owned());
+        let exact_skill = std::fs::read(&skill_path)
+            .is_ok_and(|contents| contents == RUNTIME_SKILL_MD.as_bytes());
+        let metadata_compatible = !metadata_path.exists()
+            || std::fs::read(&metadata_path)
+                .is_ok_and(|contents| contents == RUNTIME_SKILL_OPENAI_YAML.as_bytes());
+        let empty = !skill_path.exists() && !metadata_path.exists();
+        let owned = current.as_ref().zip(marker.as_ref()).is_some_and(|(a, b)| a == b);
+
+        if current.as_deref() == Some(expected.as_str())
+            && marker.as_deref() == Some(expected.as_str())
+        {
+            return Ok(ManagedSkillInstall::Current);
+        }
+        if !(empty || owned || (exact_skill && metadata_compatible)) {
+            return Ok(ManagedSkillInstall::Conflict);
+        }
+
+        // 标记只在两份内容都原子写完后落下；崩溃不会把半套文件误认成
+        // Nebula 所有，后续也绝不凭目录名覆盖用户同名 Skill。
+        crate::atomic_file::write(&skill_path, RUNTIME_SKILL_MD.as_bytes())?;
+        crate::atomic_file::write(&metadata_path, RUNTIME_SKILL_OPENAI_YAML.as_bytes())?;
+        crate::atomic_file::write(&marker_path, format!("{expected}\n").as_bytes())?;
+        Ok(ManagedSkillInstall::Installed)
+    }
+
+    fn remove_runtime_skill(dir: &Path) -> std::io::Result<ManagedSkillRemoval> {
+        let marker_path = dir.join(RUNTIME_SKILL_MARKER);
+        let Some(marker) = std::fs::read_to_string(&marker_path)
+            .ok()
+            .map(|value| value.trim().to_owned())
+        else {
+            return Ok(ManagedSkillRemoval::Absent);
+        };
+        if read_skill_fingerprint(dir).as_deref() != Some(marker.as_str()) {
+            return Ok(ManagedSkillRemoval::Conflict);
+        }
+
+        for path in [
+            dir.join("SKILL.md"),
+            dir.join("agents").join("openai.yaml"),
+            marker_path,
+        ] {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+        }
+        let metadata_dir = dir.join("agents");
+        if metadata_dir.is_dir() && std::fs::read_dir(&metadata_dir)?.next().is_none() {
+            std::fs::remove_dir(metadata_dir)?;
+        }
+        if dir.is_dir() && std::fs::read_dir(dir)?.next().is_none() {
+            std::fs::remove_dir(dir)?;
+        }
+        Ok(ManagedSkillRemoval::Removed)
+    }
+
+    #[cfg(test)]
+    mod runtime_skill_tests {
+        use super::{
+            ManagedSkillInstall, ManagedSkillRemoval, RUNTIME_SKILL_MD,
+            ensure_runtime_skill, remove_runtime_skill,
+        };
+
+        #[test]
+        fn managed_skill_installs_idempotently_and_removes_its_own_files() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().join("nebula-runtime");
+
+            assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Installed);
+            assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Current);
+            assert_eq!(
+                std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+                RUNTIME_SKILL_MD
+            );
+            assert_eq!(remove_runtime_skill(&dir).unwrap(), ManagedSkillRemoval::Removed);
+            assert!(!dir.exists());
+        }
+
+        #[test]
+        fn managed_skill_never_overwrites_an_unmanaged_same_name() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().join("nebula-runtime");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), "user-owned\n").unwrap();
+
+            assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Conflict);
+            assert_eq!(std::fs::read_to_string(dir.join("SKILL.md")).unwrap(), "user-owned\n");
+            assert_eq!(remove_runtime_skill(&dir).unwrap(), ManagedSkillRemoval::Absent);
+        }
+
+        #[test]
+        fn managed_skill_preserves_user_edits_during_update_and_remove() {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().join("nebula-runtime");
+            assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Installed);
+            std::fs::write(dir.join("SKILL.md"), "edited after install\n").unwrap();
+
+            assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Conflict);
+            assert_eq!(remove_runtime_skill(&dir).unwrap(), ManagedSkillRemoval::Conflict);
+            assert_eq!(
+                std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+                "edited after install\n"
+            );
+        }
     }
 
     /// Claude's config directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
