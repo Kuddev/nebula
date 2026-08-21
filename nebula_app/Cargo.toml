@@ -1,6 +1,6 @@
 [package]
 name = "nebula"
-version = "1.1.0"
+version = "1.2.0"
 license = "GPL-3.0-or-later"
 description = "Nebula Terminal — a premium GPU-accelerated terminal emulator"
 readme = "README.md"
@@ -15,15 +15,15 @@ path = "src/main.rs"
 
 [dependencies.nebula_terminal]
 path = "../nebula_terminal"
-version = "1.1.0"
+version = "1.2.0"
 
 [dependencies.nebula_config_derive]
 path = "../nebula_config_derive"
-version = "1.1.0"
+version = "1.2.0"
 
 [dependencies.nebula_config]
 path = "../nebula_config"
-version = "1.1.0"
+version = "1.2.0"
 
 # 可选：GPUI UI 层（feature = "gpui-shell"，模块 src/gpui_shell/）。
 # gpui 与 gpui-component 成对锁定：0.5.1 编译在 gpui 0.2.2 上；两者由根
@@ -59,7 +59,7 @@ optional = true
 
 [dependencies.nebula-completions]
 path = "../nebula-completions"
-version = "1.1.0"
+version = "1.2.0"
 
 [dependencies]
 ahash = { version = "0.8.6", features = ["no-rng"] }

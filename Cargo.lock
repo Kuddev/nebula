@@ -4629,7 +4629,7 @@ dependencies = [
 
 [[package]]
 name = "nebula"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ab_glyph_rasterizer",
  "aes-gcm",
@@ -4706,7 +4706,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-completions"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "lscolors",
  "nu-ansi-term",
@@ -4726,15 +4726,15 @@ dependencies = [
 
 [[package]]
 name = "nebula-settings"
-version = "1.1.0"
+version = "1.2.0"
 
 [[package]]
 name = "nebula-split"
-version = "1.1.0"
+version = "1.2.0"
 
 [[package]]
 name = "nebula_config"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "log",
  "nebula_config_derive",
@@ -4744,7 +4744,7 @@ dependencies = [
 
 [[package]]
 name = "nebula_config_derive"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "log",
  "nebula_config",
@@ -4761,7 +4761,7 @@ version = "0.6.0"
 
 [[package]]
 name = "nebula_terminal"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "base64",
  "bitflags 2.13.0",

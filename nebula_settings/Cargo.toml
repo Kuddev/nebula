@@ -1,6 +1,6 @@
 [package]
 name = "nebula-settings"
-version = "1.1.0"
+version = "1.2.0"
 license = "GPL-3.0-or-later"
 description = "Shared reader for Nebula runtime user settings (nebula_settings.txt) and theme terminal-color tables"
 publish = false

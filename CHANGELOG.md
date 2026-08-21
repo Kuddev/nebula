@@ -8,25 +8,81 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### English
 
+No unreleased changes yet.
+
+### 简体中文
+
+暂无未发布改动。
+
+## 1.2.0 - 2026-08-21
+
+### English
+
 #### Added
-- **`nebula ctl orchestrate`** — a strongly typed single-request workflow: a model submits its intent once and the Runtime performs the deterministic control steps locally, bounded by a step count, a byte ceiling and a readiness timeout, with per-workflow `stop`/`continue` error handling.
+- **Deterministic Runtime orchestration** — `nebula ctl orchestrate` accepts one typed request and executes bounded local control steps with workflow-specific `stop`/`continue` failure handling.
+- **Expanded Runtime control APIs** — named-agent operations, process and control-key commands, real command exit status, pane lifecycle events, and a stabilized transport/discovery path are available to automation clients.
+- **Transactional managed-agent worktrees** — agent forks create isolated branches and worktrees, retain stable agent identity, and roll back resources only when failure is confirmed.
+- **Packaged Runtime contract** — the versioned schema, control API documentation, and `nebula-runtime` Skill ship in both the ZIP and installer.
+- **Horizontal title-bar tabs** — top-mode tabs support selection, drag reordering, docking and splitting, plus horizontal auto-scroll while selecting or dragging. Settings now lives in the three-dot menu, and the first tab aligns with the terminal/powerline edge.
+- **SVN integration** — the GPUI repository workflow and status panel now support SVN working copies alongside Git.
+- **SSH failure retry** — both shells show Retry immediately to the left of Close only after a connection failure and replace that failed pane in place.
 
 #### Fixed
-- **The checked-in shell completions match the CLI again** — `ctl orchestrate`, `--gpui` and `--legacy-shell` were missing from the generated bash/fish/zsh scripts.
+- **Second launches reach the resident window** — opening Nebula again hands the request to the running instance and creates the requested tab/window instead of exiting silently. Addresses [#39](https://github.com/Kuddev/nebula/issues/39).
+- **Sogou and other IMEs keep ownership of unmodified text input** — ordinary letters and Space remain on the text-input path so IME composition can be confirmed. Addresses [#43](https://github.com/Kuddev/nebula/issues/43).
+- **WSL keeps the guest's configured default shell** — Nebula no longer forces Bash when launching `wsl.exe`. Addresses [#44](https://github.com/Kuddev/nebula/issues/44).
+- **Ctrl+C is conditional copy again** — with no selection it reaches the PTY; after an explicit copy, the selection is cleared before the next key event. Addresses [#48](https://github.com/Kuddev/nebula/issues/48).
+- **Legacy `user@host:port` SSH targets no longer fail the Windows configuration probe with `11001`** — only the `ssh -G` probe target is normalized to `ssh://user@host:port`; the actual connection destination is preserved.
+- **Codex Shift+Enter is encoded as a Win32 input record** — ConPTY Win32 input mode and DECSET 9001 tracking preserve the modified Enter key.
+- **Background blur can be toggled at runtime** and hidden windows recover correctly when tray support is disabled.
+- **Opacity sliders no longer rebuild fonts, themes, wallpaper textures, or DWM state on every drag event.**
+- **WSL file trees no longer report cold or timed-out reads as empty folders** and the Files panel follows the active local/WSL/SSH pane after switches and manual navigation.
+- **PowerShell startup injection is present before the first prompt** for three-dot launches, powerline-disabled sessions, and alternate profile paths.
+- **Checked-in bash, fish, and zsh completions match the CLI** for `ctl orchestrate`, `--gpui`, and `--legacy-shell`.
+- **Installer fallback and numeric version metadata now follow the application release version.**
 
 #### Improved
-- **The WSL file tree builds from one `find` call** — multiple starting points are batched into a single guest round trip instead of one subprocess per root.
+- **Completion is routed through each pane's filesystem** — local, WSL, and SSH panes fetch candidates from their own environment instead of the host filesystem.
+- **WSL tree enumeration batches starting points into one `find` call** and uses a realistic cold-start timeout; refreshes are event-driven instead of running every four seconds.
+- **Shell injection is selected by shell family** so PowerShell, cmd, Nushell, and fallback shells keep their compatible startup/completion behavior.
+- **Mixed-DPI window dragging coalesces intermediate work** and separates the native move transaction from the final DPI/size commit.
+- **GPUI split-pane chrome and title-bar integration were aligned**, while the sidebar mode and its settings control remain unchanged.
+- **The shell-injected `fmt` command was removed** and the expanded sidebar toggle now uses the legacy shell's softer selected surface.
+- **README Star History rendering was restored** by [@FaintFlower](https://github.com/FaintFlower) in [#49](https://github.com/Kuddev/nebula/pull/49).
 
 ### 简体中文
 
 #### 新增
-- **`nebula ctl orchestrate`** — 强类型单请求编排：模型只提交一次意图，Runtime 在本地完成确定性控制步骤，受步数、字节上限与就绪超时三重约束，并支持按工作流选择 `stop`/`continue` 的错误处理。
+- **确定性的 Runtime 编排** — `nebula ctl orchestrate` 接收一次强类型请求，在本地执行受步数、字节上限和就绪超时约束的控制步骤，并支持按工作流选择 `stop`/`continue` 错误处理。
+- **扩展 Runtime 控制 API** — 新增命名 agent 操作、进程与控制键命令、真实命令退出码、pane 生命周期事件，并稳定了传输与发现路径。
+- **事务式托管 agent worktree** — agent fork 会创建隔离分支与 worktree，保存稳定 agent 身份，并且只在确认失败时回滚本次创建的资源。
+- **随包提供 Runtime 契约** — ZIP 与安装器都包含带版本的 schema、控制 API 文档和 `nebula-runtime` Skill。
+- **水平标题栏标签页** — 顶部模式支持选择、拖拽排序、停靠与分屏，选择或拖拽时可水平自动滚动；设置入口已收进三个点菜单，首个标签与终端/powerline 左边缘严格对齐。
+- **SVN 集成** — GPUI 仓库工作流与状态面板现在除 Git 外也支持 SVN 工作副本。
+- **SSH 失败重试** — 两套界面都只在连接失败后显示“重试”，位置紧邻“关闭”左侧，并在原位替换失败的 pane。
 
 #### 修复
-- **签入的 shell 补全脚本与 CLI 重新同步** — 生成的 bash/fish/zsh 脚本里缺了 `ctl orchestrate`、`--gpui` 与 `--legacy-shell`。
+- **第二次启动会交给驻留窗口处理** — 再次打开 Nebula 会由现有实例创建所需标签/窗口，不再静默退出。对应 [#39](https://github.com/Kuddev/nebula/issues/39)。
+- **搜狗等输入法继续接管未修饰文本输入** — 普通字母与空格保留在 text-input 路径，输入法组合文本可以正常确认。对应 [#43](https://github.com/Kuddev/nebula/issues/43)。
+- **WSL 保留来宾系统配置的默认 shell** — 启动 `wsl.exe` 时不再强制使用 Bash。对应 [#44](https://github.com/Kuddev/nebula/issues/44)。
+- **Ctrl+C 恢复条件复制语义** — 没有选区时按键传给 PTY；明确复制后，在下一个按键事件前清除选区。对应 [#48](https://github.com/Kuddev/nebula/issues/48)。
+- **旧格式 `user@host:port` 不再让 Windows SSH 配置探测报 `11001`** — 只把 `ssh -G` 探测目标规范化为 `ssh://user@host:port`，实际连接目标保持不变。
+- **Codex 的 Shift+Enter 会编码为 Win32 输入记录** — ConPTY Win32 输入模式与 DECSET 9001 跟踪会保留带修饰键的 Enter。
+- **背景模糊开关可在运行时生效**，关闭托盘时也能正确找回之前隐藏的窗口。
+- **拖动不透明度滑块不再逐事件重建字体、主题、壁纸纹理或 DWM 状态。**
+- **WSL 文件树不再把冷启动或超时误报为空目录**；切换 pane 或手动导航后，Files 面板会继续跟随当前本地/WSL/SSH pane。
+- **PowerShell 在第一条提示符前完成启动注入**，覆盖三个点启动、关闭 powerline 和备用 profile 路径。
+- **签入的 bash、fish、zsh 补全脚本与 CLI 重新同步**，补齐 `ctl orchestrate`、`--gpui` 与 `--legacy-shell`。
+- **安装器兜底版本与数字文件版本会跟随应用发布版本。**
 
 #### 改进
-- **WSL 文件树只发一次 `find`** — 多个起点合并成一次来宾往返，不再每个根目录起一个子进程。
+- **补全按 pane 使用各自的文件系统** — 本地、WSL 与 SSH pane 都从自己的环境获取候选，不再错误读取宿主文件系统。
+- **WSL 文件树把多个起点合并成一次 `find`**，采用符合冷启动实际的超时，并改为事件驱动刷新，不再每四秒全量扫描。
+- **按 shell 家族选择注入逻辑**，让 PowerShell、cmd、Nushell 和通用 fallback 保持各自兼容的启动/补全行为。
+- **混合 DPI 窗口拖动会合并中间更新**，原生移动事务与最终 DPI/尺寸提交彼此分离。
+- **GPUI 分屏边框与标题栏整合已对齐**，侧边栏模式及其设置按钮保持不变。
+- **移除 shell 注入的 `fmt` 命令**，展开的侧栏切换按钮改用旧界面更柔和的选中色。
+- **README Star History 图表已恢复**，由 [@FaintFlower](https://github.com/FaintFlower) 在 [#49](https://github.com/Kuddev/nebula/pull/49) 中贡献。
 
 ## 1.1.0 - 2026-08-18
 
