@@ -26,8 +26,10 @@ No unreleased changes yet.
 - **Horizontal title-bar tabs** — top-mode tabs support selection, drag reordering, docking and splitting, plus horizontal auto-scroll while selecting or dragging. Settings now lives in the three-dot menu, and the first tab aligns with the terminal/powerline edge.
 - **SVN integration** — the GPUI repository workflow and status panel now support SVN working copies alongside Git.
 - **SSH failure retry** — both shells show Retry immediately to the left of Close only after a connection failure and replace that failed pane in place.
+- **The viewport auto-scrolls while drag-selecting** — dragging a selection past the top or bottom edge of the grid used to stop dead; it now keeps scrolling the scrollback with the legacy shell's ramp (1 line at the edge, +1 per 20px, 15ms cadence). The timer is armed on mouse-down rather than on the first out-of-grid move, so a fast flick past the edge still triggers it, and releasing over the tab strip or off-window no longer leaves the selection stuck on.
 
 #### Fixed
+- **Output could stop mid-frame until you pressed a key** — `piper` only registers its read waker on the read that finds the pipe empty, and drops it as soon as a read returns data, while the writer's `wake()` is a no-op against an empty waker. So when the reader stopped early (`pty_read` returns at its 64KB cap) and the source then went quiet — an AI CLI finishing its answer — the remaining bytes stayed in the pipe forever: the screen froze on a half-painted frame with the scrollbar still at the bottom, and only a keystroke or a resize could recover it. The level-triggered contract is now honored by re-posting the wakeup while data remains.
 - **Second launches reach the resident window** — opening Nebula again hands the request to the running instance and creates the requested tab/window instead of exiting silently. Addresses [#39](https://github.com/Kuddev/nebula/issues/39).
 - **Sogou and other IMEs keep ownership of unmodified text input** — ordinary letters and Space remain on the text-input path so IME composition can be confirmed. Addresses [#43](https://github.com/Kuddev/nebula/issues/43).
 - **WSL keeps the guest's configured default shell** — Nebula no longer forces Bash when launching `wsl.exe`. Addresses [#44](https://github.com/Kuddev/nebula/issues/44).
@@ -60,8 +62,10 @@ No unreleased changes yet.
 - **水平标题栏标签页** — 顶部模式支持选择、拖拽排序、停靠与分屏，选择或拖拽时可水平自动滚动；设置入口已收进三个点菜单，首个标签与终端/powerline 左边缘严格对齐。
 - **SVN 集成** — GPUI 仓库工作流与状态面板现在除 Git 外也支持 SVN 工作副本。
 - **SSH 失败重试** — 两套界面都只在连接失败后显示“重试”，位置紧邻“关闭”左侧，并在原位替换失败的 pane。
+- **拖动选区时视口自动滚动** — 以前把选区拖过网格上下边缘就停住了，现在会继续滚动回滚缓冲，斜率与旧界面一致（贴边 1 行，每多 20px 加 1 行，15ms 一拍）。计时器在按下时就武装，而不是等第一次「移出网格」的移动事件，所以快速甩到边缘也能触发；在 tab 栏上或窗口外松手也不会再让选区状态卡住。
 
 #### 修复
+- **输出会停在半帧，要按一下键才继续** — `piper` 只在「读到管道为空」的那一次注册 read waker，一旦读到数据就立刻把它摘掉，而写入侧的 `wake()` 对空 waker 是空操作。于是当读取方提前停下（`pty_read` 到 64KB 上限就返回）而源头随即安静下来——比如 AI CLI 答完就不再输出——剩下的字节便永久滞留在管道里：画面冻在一个画到一半的残帧上，滚动条却仍在底部，只有按键或 resize 能救回来。现在只要管道里还有数据就补投一次唤醒，兑现电平触发的承诺。
 - **第二次启动会交给驻留窗口处理** — 再次打开 Nebula 会由现有实例创建所需标签/窗口，不再静默退出。对应 [#39](https://github.com/Kuddev/nebula/issues/39)。
 - **搜狗等输入法继续接管未修饰文本输入** — 普通字母与空格保留在 text-input 路径，输入法组合文本可以正常确认。对应 [#43](https://github.com/Kuddev/nebula/issues/43)。
 - **WSL 保留来宾系统配置的默认 shell** — 启动 `wsl.exe` 时不再强制使用 Bash。对应 [#44](https://github.com/Kuddev/nebula/issues/44)。
