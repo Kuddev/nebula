@@ -29,6 +29,14 @@
 </p>
 
 <p align="center">
+  <img src="docs/screenshots/nebula-top-tabs.png" alt="Nebula Terminal horizontal title-bar tabs and translucent background" width="920" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/nebula-claude-session.png" alt="Claude Code running in Nebula Terminal" width="920" />
+</p>
+
+<p align="center">
   <!-- v0.5 主视觉：同一窗口中的 OpenCode、Claude Code 与 Codex 分屏工作流。 -->
   <img src="docs/screenshots/split-ai-workflows.png" alt="Nebula Terminal with OpenCode, Claude Code, and Codex in split panes" width="920" />
 </p>
