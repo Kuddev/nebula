@@ -33,6 +33,12 @@ pub use gpui_component::{
 pub use gpui_component::IndexPath;
 pub use gpui_component::WindowExt as _;
 
+// 上面那批 trait 是 `as _` 导出的：`prelude::*` 的使用者能拿到方法，但 `as _`
+// 抹掉了名字，别处再 `use prelude::ActiveTheme` 就找不到。只导入具体几项、
+// 不 glob 的模块（如 `terminal::view`）需要具名版本，这里补上——两种导出并存，
+// 现有的 glob 用法不受影响。
+pub use gpui_component::{ActiveTheme, Colorize};
+
 use gpui::{Window, px};
 use gpui_component::PixelsExt as _;
 

@@ -3,11 +3,11 @@
 mod runtime;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontFeatures,
-    FontStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _, Styled as _, TextRun,
-    UTF16Selection, Window, div, point, px,
+    App, AppContext as _, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable,
+    Font, FontFeatures, FontStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _,
+    Styled as _, TextRun, UTF16Selection, Window, div, point, px,
 };
 use gpui_component::{PixelsExt as _, WindowExt as _};
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
@@ -30,7 +30,9 @@ use super::suggest;
 use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
 use crate::config::UiConfig;
 use crate::gpui_shell::config::Settings;
-use crate::gpui_shell::prelude::{DialogButtonProps, center_confirm_dialog};
+use crate::gpui_shell::prelude::{
+    ActiveTheme as _, Colorize as _, DialogButtonProps, center_confirm_dialog,
+};
 
 use futures::StreamExt as _;
 
@@ -527,7 +529,7 @@ impl TerminalView {
                 Some(destination.clone()),
                 destination.clone(),
                 None,
-                crate::display::SuggestEnv::Ssh,
+                crate::display::SuggestEnv::Ssh { destination: destination.clone() },
                 session::spawn_ssh(destination, initial, term_config),
             ),
         };
@@ -1466,6 +1468,66 @@ impl TerminalView {
         #[cfg(not(windows))]
         {
             let _ = (line, anchor);
+        }
+    }
+
+    /// 补齐登记了一个还没缓存的来宾 / 远端目录时，去后台拉一次。
+    ///
+    /// 补齐本身跑在按键路径上，绝不能做 IO——一次 `wsl.exe -- find` 冷启动实测
+    /// 可达 7.5 秒，一次 SFTP 是完整的网络往返。所以它只把目录登记在
+    /// `pending_remote_dir`，真正的往返在这里发生：结果进 [`crate::remote_dirs`]
+    /// 的进程级缓存，代际一变，下一次重算就有候选了。
+    ///
+    /// 用户的体感是"第一次 Tab 没反应，之后都有"——而不是"每次 Tab 卡住整个
+    /// 窗口"。
+    pub(super) fn drive_pending_remote_dir(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.suggest.pending_remote_dir.take() else { return };
+        let env = self.suggest.suggest_env.clone();
+        // 连按 Tab 不该排出一串子进程 / 往返。
+        if !crate::remote_dirs::begin_fetch(&env, &dir) {
+            return;
+        }
+        match env.clone() {
+            crate::display::SuggestEnv::Wsl { distro } => {
+                cx.spawn(async move |this, cx| {
+                    let target = dir.clone();
+                    // 子进程往返是阻塞的，必须落在后台线程池上。
+                    let entries = cx
+                        .background_spawn(async move {
+                            crate::remote_dirs::fetch_wsl(&distro, &target)
+                        })
+                        .await;
+                    crate::remote_dirs::finish_fetch(&env, &dir, entries);
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            },
+            crate::display::SuggestEnv::Ssh { destination } => {
+                // SSH 的 async 只能跑在项目自己的 tokio runtime 上（连接池和
+                // 认证策略都在那儿），而这里要等的是 GPUI 的任务——用一条
+                // oneshot 把两个 executor 接起来。
+                let Ok(runtime) = crate::ssh_session::runtime() else { return };
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let target = dir.clone();
+                runtime.spawn(async move {
+                    let listed =
+                        crate::ssh_sftp::list_dir_for_completion(&destination, &target).await;
+                    let _ = tx.send(listed);
+                });
+                cx.spawn(async move |this, cx| {
+                    let entries = rx.await.ok().flatten().map(|entries| {
+                        entries
+                            .into_iter()
+                            .map(|(is_dir, name)| crate::remote_dirs::RemoteEntry { name, is_dir })
+                            .collect()
+                    });
+                    crate::remote_dirs::finish_fetch(&env, &dir, entries);
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            },
+            // 本机 pane 的补齐直接读 `std::fs`，走不到这条路。
+            crate::display::SuggestEnv::Local => {},
         }
     }
 
@@ -2569,6 +2631,9 @@ impl Render for TerminalView {
                 });
             }
         }
+        // 文件树拖到终端时的落点高亮：强调色压到很低的不透明度，与 hover 的
+        // 中性灰区分开——用户要能一眼看出"松手会落在这里"。
+        let drop_highlight = cx.theme().accent.opacity(0.18);
         let mut root = div()
             .id("nebula-terminal")
             .key_context(KEY_CONTEXT)
@@ -2600,6 +2665,30 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_right_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_middle_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
+            // 文件树拖进来 = 把路径粘进 shell（旧壳 `FileDrag` 同一合同：只
+            // 粘贴，绝不代按 Enter）。`drag_over` 给一层落点高亮，否则用户拖
+            // 到一半不知道松手会不会生效。
+            .drag_over::<crate::gpui_shell::file_drop::FileTreeDrag>(move |style, _, _, _| {
+                style.bg(drop_highlight)
+            })
+            .on_drop(cx.listener(
+                |this,
+                 drag: &crate::gpui_shell::file_drop::FileTreeDrag,
+                 window: &mut Window,
+                 cx| {
+                    let Some(bytes) =
+                        crate::display::side_panel::drop_text_for_path(&drag.path_text)
+                    else {
+                        // 含控制字符的路径写进 PTY 等于替用户执行命令。
+                        return;
+                    };
+                    this.write_bytes(bytes);
+                    // 粘完把焦点交回终端：用户接着就要敲命令，还要先点一下
+                    // 才能输入的话，这个手势就白省了。
+                    window.focus(&this.focus_handle);
+                    cx.notify();
+                },
+            ))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {
                     this.clear_link_hover(cx);

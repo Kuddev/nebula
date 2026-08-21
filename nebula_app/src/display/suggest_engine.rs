@@ -199,8 +199,9 @@ pub enum SuggestEnv {
     /// `wsl.exe -d <发行版> -- find`，那是子进程，冷启动可达数秒，绝不能挂在
     /// 按键路径上。
     Wsl { distro: String },
-    /// SSH tab：文件系统只能经 SFTP 往返，命令集是远端的。
-    Ssh,
+    /// SSH tab：文件系统只能经 SFTP 往返，命令集是远端的。`destination` 进
+    /// 缓存键——同一条 `/home/kud` 在两台远端上是两个不同的目录。
+    Ssh { destination: String },
 }
 
 impl SuggestEnv {
@@ -231,7 +232,11 @@ pub(crate) fn suggest_update(
     // 命令目录由后台 PowerShell 探针填充；目录从 0 变为完整集合时，即使
     // 用户没有继续输入，也必须让上一帧的“无候选”缓存失效。
     let command_generation = sources.commands.lock().map(|commands| commands.len()).unwrap_or(0);
-    let key = format!("{}\u{0}{line}\u{0}{command_generation}", state.cwd);
+    // 远端目录是异步拉回来的，那一刻 cwd 与行都没变——少了这个代际，拉到的
+    // 条目要等用户再多打一个字符才会显形。
+    let remote_generation = crate::remote_dirs::generation();
+    let key =
+        format!("{}\u{0}{line}\u{0}{command_generation}\u{0}{remote_generation}", state.cwd);
     if state.completion_suppressed_line.as_deref() == Some(line.as_str()) {
         state.suggestion_key = key;
         state.suggestion.clear();
@@ -313,15 +318,22 @@ pub(crate) fn suggest_update(
     if token.is_empty() {
         return;
     }
-    // 非本机的路径补齐要走各自的通道（来宾 `find` / SFTP），都是带往返的异步
-    // 来源，接线见 `suggest_paths`。这里**必须直接返回**而不是"顺手用
-    // `std::fs` 试试"：宿主会把 `/te` 解析成当前盘的 `\te`，补出来的是
-    // `D:\temp_build` 这种当前 shell 里根本不存在的路径——比补不出来更糟。
+    // 非本机的路径补齐走各自的通道（来宾 `find` / SFTP），都带往返，所以只
+    // 读缓存：miss 时把目录登记给壳去异步拉（见 [`remote_path_matches`]）。
+    // 这里**必须**分流而不是"顺手用 `std::fs` 试试"：宿主会把 `/te` 解析成
+    // 当前盘的 `\te`，补出来的是 `D:\temp_build` 这种在当前 shell 里根本不
+    // 存在的路径——比补不出来更糟。
     if !state.suggest_env.is_this_machine() {
-        nebula_debug_log(format!(
-            "suggest_result kind=none reason=foreign_fs env={:?} token={:?}",
-            state.suggest_env, token
-        ));
+        let remainder = remote_path_matches(state, &line, token).into_iter().next();
+        if let Some((rem, _)) = remainder {
+            state.suggestion = clamp_ghost(&rem);
+            nebula_debug_log(format!("suggest_result kind=remote_path rem={:?}", state.suggestion));
+        } else {
+            nebula_debug_log(format!(
+                "suggest_result kind=none env={:?} token={:?} pending={:?}",
+                state.suggest_env, token, state.pending_remote_dir
+            ));
+        }
         return;
     }
     let absolute = token.starts_with(['/', '\\', '~']) || token.as_bytes().get(1) == Some(&b':'); // Windows drive, e.g. `D:`
@@ -385,6 +397,35 @@ pub(crate) fn suggest_update(
 /// Cap ghost length so a long path/command can't spill into the chrome.
 fn clamp_ghost(rem: &str) -> String {
     rem.chars().take(NEBULA_GHOST_MAX).collect()
+}
+
+/// 来宾 / 远端目录里匹配当前 token 的候选，`(插入余量, 是否目录)`。
+///
+/// 只读 [`crate::remote_dirs`] 的缓存——列一个来宾目录要一次子进程往返（冷
+/// 启动实测可达 7.5 秒），挂在按键路径上整个 UI 都会卡住。缓存没有时把目录
+/// 登记到 `state.pending_remote_dir`，壳看到就去异步拉，回填后代际一变，下
+/// 一次重算就有候选了。
+///
+/// 命令位置（`gre<Tab>`）不问目录：那是在补命令名，为它跑一趟 SSH 往返纯属
+/// 浪费。带了 `/` 就不同了——`./scr` 或 `/usr/bin/l` 明确是在打路径。
+fn remote_path_matches(
+    state: &mut NebulaPaneState,
+    line: &str,
+    token: &str,
+) -> Vec<(String, bool)> {
+    if nebula_is_command_position(line) && !token.contains('/') {
+        return Vec::new();
+    }
+    let Some(request) = crate::remote_dirs::path_request(token, &state.cwd) else {
+        return Vec::new();
+    };
+    match crate::remote_dirs::lookup(&state.suggest_env, &request.dir) {
+        Some(entries) => crate::remote_dirs::candidates(&request, &entries),
+        None => {
+            state.pending_remote_dir = Some(request.dir);
+            Vec::new()
+        },
+    }
 }
 
 /// Elide long popup labels from the LEFT (paths keep their informative
@@ -481,9 +522,24 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
 
     // Filesystem candidates for the final token (same gating as the ghost
     // path: absolute tokens work without a cwd, relative ones need one).
-    // 非本机一律跳过：这个进程的 `std::fs` 描述的是另一台机器，补出来的路径
-    // 在当前 shell 里不存在（见 [`SuggestEnv`]）。
-    if !token.is_empty() && state.suggest_env.is_this_machine() {
+    // 非本机走 [`remote_path_matches`]：同一份缓存、同一套分流，只是这里保留
+    // 多个候选而不是第一个。
+    if !token.is_empty() && !state.suggest_env.is_this_machine() {
+        for (rem, is_dir) in remote_path_matches(state, line, token).into_iter().take(POPUP_LIMIT) {
+            push(
+                &mut items,
+                NebulaCompletionItem {
+                    label: elide_left(&format!("{token}{rem}"), LABEL_MAX),
+                    insert: rem,
+                    kind: if is_dir {
+                        NebulaCompletionKind::Dir
+                    } else {
+                        NebulaCompletionKind::File
+                    },
+                },
+            );
+        }
+    } else if !token.is_empty() && state.suggest_env.is_this_machine() {
         let absolute =
             token.starts_with(['/', '\\', '~']) || token.as_bytes().get(1) == Some(&b':');
         if absolute || !state.cwd.is_empty() {
@@ -615,7 +671,10 @@ mod tests {
             "dir\\",
             "本机 tab 的 std::fs 就是这个 pane 的文件系统（补到目录带尾分隔符）"
         );
-        for env in [SuggestEnv::Wsl { distro: "Debian".to_owned() }, SuggestEnv::Ssh] {
+        for env in [
+            SuggestEnv::Wsl { distro: "Debian".to_owned() },
+            SuggestEnv::Ssh { destination: "kud@box".to_owned() },
+        ] {
             assert_eq!(
                 fixture.ghost(env.clone(), &cwd, "ls host-only-"),
                 "",

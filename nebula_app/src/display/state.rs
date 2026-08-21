@@ -214,6 +214,11 @@ pub struct NebulaPaneState {
     /// 改写。`cwd` 只说"在哪个目录"，这个说"在哪台机器"——两者都对了补齐才
     /// 补得对，见 [`crate::display::suggest_engine::SuggestEnv`]。
     pub suggest_env: crate::display::suggest_engine::SuggestEnv,
+    /// 上一次重算发现"这个来宾/远端目录还没缓存"，壳该去异步拉一次。
+    ///
+    /// 补齐本身绝不做 IO（WSL 冷启动可达 7.5 秒），所以它只能把需求登记在
+    /// 这里，由拿得到异步上下文的壳去执行、回填，下一次重算就有候选了。
+    pub pending_remote_dir: Option<String>,
     pub suggestion: String,
     pub(super) suggestion_key: String,
     /// Popup-style completion candidates for the current line. A non-empty list

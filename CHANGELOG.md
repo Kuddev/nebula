@@ -4,6 +4,30 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
+## Unreleased
+
+### English
+
+#### Added
+- **`nebula ctl orchestrate`** — a strongly typed single-request workflow: a model submits its intent once and the Runtime performs the deterministic control steps locally, bounded by a step count, a byte ceiling and a readiness timeout, with per-workflow `stop`/`continue` error handling.
+
+#### Fixed
+- **The checked-in shell completions match the CLI again** — `ctl orchestrate`, `--gpui` and `--legacy-shell` were missing from the generated bash/fish/zsh scripts.
+
+#### Improved
+- **The WSL file tree builds from one `find` call** — multiple starting points are batched into a single guest round trip instead of one subprocess per root.
+
+### 简体中文
+
+#### 新增
+- **`nebula ctl orchestrate`** — 强类型单请求编排：模型只提交一次意图，Runtime 在本地完成确定性控制步骤，受步数、字节上限与就绪超时三重约束，并支持按工作流选择 `stop`/`continue` 的错误处理。
+
+#### 修复
+- **签入的 shell 补全脚本与 CLI 重新同步** — 生成的 bash/fish/zsh 脚本里缺了 `ctl orchestrate`、`--gpui` 与 `--legacy-shell`。
+
+#### 改进
+- **WSL 文件树只发一次 `find`** — 多个起点合并成一次来宾往返，不再每个根目录起一个子进程。
+
 ## 1.1.0 - 2026-08-18
 
 ### English

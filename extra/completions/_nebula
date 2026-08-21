@@ -27,12 +27,14 @@ _nebula() {
 '*--option=[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
 '--print-events[Print all events to STDOUT]' \
 '(--daemon)--ref-test[Generates ref test]' \
+'(--legacy-shell)--gpui[Launch the GPUI UI shell as the main window]' \
+'--legacy-shell[Launch the legacy winit shell instead of GPUI]' \
 '(-v)*-q[Reduces the level of verbosity (the min level is -qq)]' \
 '(-q)*-v[Increases the level of verbosity (the max level is -vvv)]' \
 '--daemon[Do not spawn an initial window]' \
 '--hold[Remain open after child process exit]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 '-V[Print version]' \
 '--version[Print version]' \
 ":: :_nebula_commands" \
@@ -70,6 +72,16 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (snapshot)
 _arguments "${_arguments_options[@]}" : \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(orchestrate)
+_arguments "${_arguments_options[@]}" : \
+'(--file)--spec=[Inline UTF-8 JSON object containing steps and on_error]:SPEC:_default' \
+'(--spec)--file=[Read the UTF-8 workflow JSON object from a file]:FILE:_files' \
 '--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
 '--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
 '-h[Print help]' \
@@ -206,6 +218,7 @@ _arguments "${_arguments_options[@]}" : \
 (split)
 _arguments "${_arguments_options[@]}" : \
 '--window=[]:WINDOW:_default' \
+'--pane=[Split this pane instead of the currently focused pane]:PANE:_default' \
 '--direction=[]:DIRECTION:((right\:"Create the new pane to the right of the focused pane"
 down\:"Create the new pane below the focused pane"))' \
 '--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
@@ -316,6 +329,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (snapshot)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(orchestrate)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -532,6 +549,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(orchestrate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (agents)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -664,11 +685,11 @@ esac
 (( $+functions[_nebula_commands] )) ||
 _nebula_commands() {
     local commands; commands=(
-'ctl:Control the resident Nebula runtime through the versioned local API' \
+'ctl:Agent-oriented terminal control\: split panes, run commands, start Codex/Claude, send prompts, wait for state changes, and read verified terminal output' \
 'migrate:Migrate the configuration file' \
 'config:Validate or create the Nebula configuration' \
 'notify-test:Test system notification (toast) delivery' \
-'setup-ai:Install (or --remove) the Claude Code hooks that feed Nebula'\''s real-time AI turn notifications' \
+'setup-ai:Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code' \
 'ssh:SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -722,6 +743,7 @@ _nebula__ctl_commands() {
     local commands; commands=(
 'describe:Describe the protocol version, runtime version, and available capabilities' \
 'snapshot:Read the authoritative window, tab, pane, and task-state projection' \
+'orchestrate:Execute one typed multi-step terminal workflow in a single Runtime request' \
 'agents:List only panes Nebula recognizes as AI agents, with semantic state and session identity' \
 'agent-start:Start a verified AI CLI in a new terminal tab and assign a stable name' \
 'agent-fork:Create an isolated Git worktree, then start a named AI CLI in that checkout' \
@@ -794,6 +816,7 @@ _nebula__ctl__help_commands() {
     local commands; commands=(
 'describe:Describe the protocol version, runtime version, and available capabilities' \
 'snapshot:Read the authoritative window, tab, pane, and task-state projection' \
+'orchestrate:Execute one typed multi-step terminal workflow in a single Runtime request' \
 'agents:List only panes Nebula recognizes as AI agents, with semantic state and session identity' \
 'agent-start:Start a verified AI CLI in a new terminal tab and assign a stable name' \
 'agent-fork:Create an isolated Git worktree, then start a named AI CLI in that checkout' \
@@ -876,6 +899,11 @@ _nebula__ctl__help__new-window_commands() {
     local commands; commands=()
     _describe -t commands 'nebula ctl help new-window commands' commands "$@"
 }
+(( $+functions[_nebula__ctl__help__orchestrate_commands] )) ||
+_nebula__ctl__help__orchestrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help orchestrate commands' commands "$@"
+}
 (( $+functions[_nebula__ctl__help__procs_commands] )) ||
 _nebula__ctl__help__procs_commands() {
     local commands; commands=()
@@ -931,6 +959,11 @@ _nebula__ctl__new-window_commands() {
     local commands; commands=()
     _describe -t commands 'nebula ctl new-window commands' commands "$@"
 }
+(( $+functions[_nebula__ctl__orchestrate_commands] )) ||
+_nebula__ctl__orchestrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl orchestrate commands' commands "$@"
+}
 (( $+functions[_nebula__ctl__procs_commands] )) ||
 _nebula__ctl__procs_commands() {
     local commands; commands=()
@@ -979,11 +1012,11 @@ _nebula__ctl__wait_commands() {
 (( $+functions[_nebula__help_commands] )) ||
 _nebula__help_commands() {
     local commands; commands=(
-'ctl:Control the resident Nebula runtime through the versioned local API' \
+'ctl:Agent-oriented terminal control\: split panes, run commands, start Codex/Claude, send prompts, wait for state changes, and read verified terminal output' \
 'migrate:Migrate the configuration file' \
 'config:Validate or create the Nebula configuration' \
 'notify-test:Test system notification (toast) delivery' \
-'setup-ai:Install (or --remove) the Claude Code hooks that feed Nebula'\''s real-time AI turn notifications' \
+'setup-ai:Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code' \
 'ssh:SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -1012,6 +1045,7 @@ _nebula__help__ctl_commands() {
     local commands; commands=(
 'describe:Describe the protocol version, runtime version, and available capabilities' \
 'snapshot:Read the authoritative window, tab, pane, and task-state projection' \
+'orchestrate:Execute one typed multi-step terminal workflow in a single Runtime request' \
 'agents:List only panes Nebula recognizes as AI agents, with semantic state and session identity' \
 'agent-start:Start a verified AI CLI in a new terminal tab and assign a stable name' \
 'agent-fork:Create an isolated Git worktree, then start a named AI CLI in that checkout' \
@@ -1087,6 +1121,11 @@ _nebula__help__ctl__new-tab_commands() {
 _nebula__help__ctl__new-window_commands() {
     local commands; commands=()
     _describe -t commands 'nebula help ctl new-window commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__orchestrate_commands] )) ||
+_nebula__help__ctl__orchestrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl orchestrate commands' commands "$@"
 }
 (( $+functions[_nebula__help__ctl__procs_commands] )) ||
 _nebula__help__ctl__procs_commands() {

@@ -13,6 +13,7 @@
 pub mod code_tab;
 pub mod config;
 pub mod doc_tabs;
+pub mod file_drop;
 pub mod http;
 pub mod math_view;
 pub mod network_settings;

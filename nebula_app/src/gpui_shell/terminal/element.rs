@@ -196,8 +196,11 @@ impl Element for TerminalElement {
         };
         let suggest_anchor =
             snap.cursor.as_ref().map(|cursor| (cursor.row as usize, cursor.col as usize));
-        self.view.update(cx, |view, _| {
+        self.view.update(cx, |view, cx| {
             view.refresh_suggestion_from_snapshot(prompt_line, suggest_anchor);
+            // 补齐只会**登记**要问哪个来宾/远端目录（按键路径上不做 IO），
+            // 真正的往返在这里派出去。
+            view.drive_pending_remote_dir(cx);
         });
         let overrides = snap.color_overrides;
         let (theme_anchor, theme_is_light) = themed_anchor(&theme, cx);

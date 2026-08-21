@@ -542,6 +542,36 @@ async fn upload_local_paths(
 
 /// 剪贴板截图 → 远端 `/tmp` 的一次性 PNG 上传（SSH pane 的图片粘贴）。
 /// 成功后经 runtime Prompt 通道把远端路径作为输入敲进
+/// 为补齐列一个远端目录，`(是否目录, 名字)`。
+///
+/// 与 [`SftpController::refresh`] 的区别在职责：那个驱动 SFTP 面板的状态机
+/// （phase / error / 当前路径都要更新），这里只要一份条目，而且失败是**正常**
+/// 结果——补齐补不出来就是没有候选，不该弹错误、不该改任何 UI 状态。
+///
+/// 符号链接一律当目录：远端的 `l` 十有八九指向目录（`/bin`、`/lib` 这些），
+/// 而补齐把它当文件的代价是不给尾随 `/`，用户得自己补一刀。
+pub async fn list_dir_for_completion(destination: &str, dir: &str) -> Option<Vec<(bool, String)>> {
+    let sftp = match crate::ssh_session::open_sftp(destination).await {
+        Ok(sftp) => sftp,
+        Err(err) => {
+            log::debug!("补齐列远端目录失败（{destination}:{dir}）: {err}");
+            return None;
+        },
+    };
+    match read_remote_dir(&sftp, dir).await {
+        Ok(entries) => Some(
+            entries
+                .into_iter()
+                .map(|entry| (entry.kind != SftpEntryKind::File, entry.name))
+                .collect(),
+        ),
+        Err(err) => {
+            log::debug!("补齐读远端目录失败（{destination}:{dir}）: {err}");
+            None
+        },
+    }
+}
+
 /// 目标 pane——上传在 SSH runtime 上异步进行，UI 线程零阻塞；失败只留日志，
 /// 绝不把错误文本粘进终端。
 pub fn upload_clipboard_image(

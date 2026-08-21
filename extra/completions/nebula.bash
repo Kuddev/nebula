@@ -91,6 +91,9 @@ _nebula() {
             nebula__ctl,new-window)
                 cmd="nebula__ctl__new__window"
                 ;;
+            nebula__ctl,orchestrate)
+                cmd="nebula__ctl__orchestrate"
+                ;;
             nebula__ctl,procs)
                 cmd="nebula__ctl__procs"
                 ;;
@@ -153,6 +156,9 @@ _nebula() {
                 ;;
             nebula__ctl__help,new-window)
                 cmd="nebula__ctl__help__new__window"
+                ;;
+            nebula__ctl__help,orchestrate)
+                cmd="nebula__ctl__help__orchestrate"
                 ;;
             nebula__ctl__help,procs)
                 cmd="nebula__ctl__help__procs"
@@ -241,6 +247,9 @@ _nebula() {
             nebula__help__ctl,new-window)
                 cmd="nebula__help__ctl__new__window"
                 ;;
+            nebula__help__ctl,orchestrate)
+                cmd="nebula__help__ctl__orchestrate"
+                ;;
             nebula__help__ctl,procs)
                 cmd="nebula__help__ctl__procs"
                 ;;
@@ -275,7 +284,7 @@ _nebula() {
 
     case "${cmd}" in
         nebula)
-            opts="-q -v -e -T -o -h -V --print-events --ref-test --embed --config-file --daemon --working-directory --hold --command --title --class --option --help --version ctl migrate config notify-test setup-ai ssh help"
+            opts="-q -v -e -T -o -h -V --print-events --ref-test --embed --gpui --legacy-shell --config-file --daemon --working-directory --hold --command --title --class --option --help --version ctl migrate config notify-test setup-ai ssh help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -483,7 +492,7 @@ _nebula() {
             return 0
             ;;
         nebula__ctl)
-            opts="-h --pretty --timeout-ms --help describe snapshot agents agent-start agent-fork agent-get agent-prompt agent-read agent-wait subscribe new-window focus new-tab split prompt read procs send-key run wait help"
+            opts="-h --pretty --timeout-ms --help describe snapshot orchestrate agents agent-start agent-fork agent-get agent-prompt agent-read agent-wait subscribe new-window focus new-tab split prompt read procs send-key run wait help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -779,7 +788,7 @@ _nebula() {
             return 0
             ;;
         nebula__ctl__help)
-            opts="describe snapshot agents agent-start agent-fork agent-get agent-prompt agent-read agent-wait subscribe new-window focus new-tab split prompt read procs send-key run wait help"
+            opts="describe snapshot orchestrate agents agent-start agent-fork agent-get agent-prompt agent-read agent-wait subscribe new-window focus new-tab split prompt read procs send-key run wait help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -960,6 +969,20 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        nebula__ctl__help__orchestrate)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         nebula__ctl__help__procs)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -1115,6 +1138,43 @@ _nebula() {
                 return 0
             fi
             case "${prev}" in
+                --timeout-ms)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        nebula__ctl__orchestrate)
+            opts="-h --spec --file --pretty --timeout-ms --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --spec)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --file)
+                    local oldifs
+                    if [ -n "${IFS+x}" ]; then
+                        oldifs="$IFS"
+                    fi
+                    IFS=$'\n'
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    if [ -n "${oldifs+x}" ]; then
+                        IFS="$oldifs"
+                    fi
+                    if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then
+                        compopt -o filenames
+                    fi
+                    return 0
+                    ;;
                 --timeout-ms)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -1299,13 +1359,17 @@ _nebula() {
             return 0
             ;;
         nebula__ctl__split)
-            opts="-h --window --direction --pretty --timeout-ms --help"
+            opts="-h --window --pane --direction --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --window)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --pane)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1437,7 +1501,7 @@ _nebula() {
             return 0
             ;;
         nebula__help__ctl)
-            opts="describe snapshot agents agent-start agent-fork agent-get agent-prompt agent-read agent-wait subscribe new-window focus new-tab split prompt read procs send-key run wait"
+            opts="describe snapshot orchestrate agents agent-start agent-fork agent-get agent-prompt agent-read agent-wait subscribe new-window focus new-tab split prompt read procs send-key run wait"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1591,6 +1655,20 @@ _nebula() {
             return 0
             ;;
         nebula__help__ctl__new__window)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        nebula__help__ctl__orchestrate)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    ClipboardItem, Context, Corner, DismissEvent, Entity, Focusable as _, InteractiveElement as _,
-    IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, anchored, deferred, div,
-    px,
+    AppContext as _, ClipboardItem, Context, Corner, DismissEvent, Entity, Focusable as _,
+    InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _,
+    Pixels, Point, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, anchored, deferred, div, px,
 };
 use gpui_component::menu::PopupMenuItem;
 
@@ -56,6 +56,9 @@ impl NebulaWorkspace {
             let menu_path = path.clone();
             let guest_path = row.guest_path.clone();
             let menu_guest_path = guest_path.clone();
+            let drag_guest_path = guest_path.clone();
+            let drag_path = path.clone();
+            let drag_name = row.name.clone();
             let is_dir = row.is_dir;
             let is_parent = row.is_parent;
             let selected = selected_path.as_ref() == Some(&path);
@@ -141,6 +144,22 @@ impl NebulaWorkspace {
                         // 开查看 tab，其余交系统处理器。
                         this.open_document_path(open_path.clone(), window, cx);
                     }))
+                })
+                .when(!is_parent, |item| {
+                    // 拖到终端 = 把路径粘进 shell（旧壳 `FileDrag` 同一合同）。
+                    // WSL 行拖的是**来宾**路径：宿主那份拼写只是展开用的键，
+                    // 在来宾的 shell 里不存在。
+                    let drag = crate::gpui_shell::file_drop::FileTreeDrag {
+                        path_text: drag_guest_path
+                            .clone()
+                            .unwrap_or_else(|| drag_path.display().to_string()),
+                        name: drag_name.clone(),
+                    };
+                    item.on_drag(drag, |drag, _offset, _window, cx| {
+                        cx.new(|_| {
+                            crate::gpui_shell::file_drop::FileDragGhost::new(drag.name.clone())
+                        })
+                    })
                 })
                 .when(!is_parent, |item| {
                     // 不在抽屉行上挂 `.context_menu()`：那会把 PopupMenu 挂回

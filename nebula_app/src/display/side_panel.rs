@@ -172,19 +172,31 @@ impl FileDrag {
         if !self.active || !over_terminal {
             return None;
         }
-        let mut text = self.path.display().to_string();
-        // Unix permits control characters (including CR/LF) in file names.
-        // Sending those bytes to a PTY could execute input despite the drop
-        // contract explicitly requiring paste-only behaviour.
-        if text.chars().any(char::is_control) {
-            return None;
-        }
-        if text.contains(char::is_whitespace) {
-            text = format!("\"{text}\"");
-        }
-        text.push(' ');
-        Some(text.into_bytes())
+        drop_text_for_path(&self.path.display().to_string())
     }
+}
+
+/// 一条路径落进 PTY 时该写出的字节。`None` = 这条路径不能安全地写进去。
+///
+/// 两个壳共用这一层。旧壳自己追踪按压阈值与命中（[`FileDrag`]），GPUI 壳用
+/// 引擎原生的拖放，但"什么样的路径可以写、写成什么形状"必须只有一处定义：
+/// 少了控制字符那道闸，一个换行就能让"粘贴路径"变成"执行命令"。
+///
+/// 参数是字符串而不是 `Path`：WSL 行要写的是**来宾**路径（`/home/x`），它在
+/// 宿主上不是一个有效的 `Path`，转一圈只会被 Windows 的路径语义改写。
+pub fn drop_text_for_path(path: &str) -> Option<Vec<u8>> {
+    let mut text = path.to_owned();
+    // Unix permits control characters (including CR/LF) in file names.
+    // Sending those bytes to a PTY could execute input despite the drop
+    // contract explicitly requiring paste-only behaviour.
+    if text.chars().any(char::is_control) {
+        return None;
+    }
+    if text.contains(char::is_whitespace) {
+        text = format!("\"{text}\"");
+    }
+    text.push(' ');
+    Some(text.into_bytes())
 }
 
 /// WSL 子命令预算。
@@ -2116,6 +2128,33 @@ fn bucket_wsl_find_output(output: &[u8]) -> HashMap<String, Vec<(bool, String, S
         entries.truncate(MAX_PER_DIR);
     }
     by_dir
+}
+
+/// 列**一个**来宾目录，给补齐用（文件树走多起点的 [`wsl_read_dirs`]）。
+///
+/// 返回 `(是否目录, 名字)`。`None` = 这次枚举失败，与"目录是空的"必须区分：
+/// 前者下次还该重试，后者不必（见 [`crate::remote_dirs::finish_fetch`]）。
+///
+/// **阻塞**：一次 `wsl.exe` 子进程往返，冷启动可达数秒。只能在后台线程上调。
+pub fn wsl_list_one_dir(distro: &str, guest_dir: &str) -> Option<Vec<(bool, String)>> {
+    let dir = normalize_wsl_guest_path(guest_dir);
+    let args = [dir.as_str(), "-mindepth", "1", "-maxdepth", "1", "-printf", WSL_FIND_PATH_FORMAT]
+        .into_iter()
+        .map(OsString::from);
+    let (output, exit_ok) = run_wsl_find_lenient(distro, args)?;
+    if !exit_ok {
+        // 单起点的非零退出就是"这个目录读不到"（不存在 / 无权限），没有
+        // 多起点那种"其余起点仍然有效"的余地。
+        return None;
+    }
+    Some(
+        bucket_wsl_find_output(&output)
+            .remove(&dir)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(is_dir, name, _)| (is_dir, name))
+            .collect(),
+    )
 }
 
 fn build_wsl_search_index(

@@ -69,6 +69,7 @@ mod platform;
 #[cfg(unix)]
 mod polling;
 mod process_tree;
+mod remote_dirs;
 mod renderer;
 mod runtime_api;
 mod scheduler;
