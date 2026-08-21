@@ -527,7 +527,7 @@ impl TerminalView {
                 Some(destination.clone()),
                 destination.clone(),
                 None,
-                SuggestEnv::Ssh,
+                crate::display::SuggestEnv::Ssh,
                 session::spawn_ssh(destination, initial, term_config),
             ),
         };
@@ -709,7 +709,14 @@ impl TerminalView {
             cursor_visible: true,
             cursor_blink_epoch: 0,
             default_cursor_style,
-            suggest: crate::display::NebulaPaneState { suggest_env, ..Default::default() },
+            suggest: {
+                // `NebulaPaneState` 有几个 display 模块私有的字段，函数式更新
+                // 语法（`..Default::default()`）在本模块用不了；先取默认值，再
+                // 写这里唯一要定制的公开字段。
+                let mut state = crate::display::NebulaPaneState::default();
+                state.suggest_env = suggest_env;
+                state
+            },
             suggest_anchor: None,
             ghost_enabled,
             accept,
@@ -2033,7 +2040,7 @@ impl TerminalView {
     fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // 候选行 hover 与键盘高亮共用选中索引；这样鼠标所见即 Enter 所收。
@@ -2069,10 +2076,9 @@ impl TerminalView {
                     selection.update(point, side);
                 }
             }
-            // 拖到网格上/下边界之外＝继续选下去，回滚由定时器接手（旧壳
-            // `update_selection_scrolling`）。指针一旦离开元素 hitbox 就不再
-            // 有 move 事件，所以判据也只能在这里「上弦」，续力靠 tick。
-            self.update_selection_scroll(event.position.y.as_f32(), window, cx);
+            // 越界回滚不在这里判：链在按下时就起了（见 `start_selection_scroll`），
+            // 指针是否出了网格由 tick 自己看——一甩到顶的拖法最后一个元素内
+            // 事件往往还在网格中间，靠 move 判定就永远起不来。
             cx.notify();
             return;
         }
@@ -2196,8 +2202,9 @@ impl TerminalView {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 executor.timer(SELECTION_SCROLL_INTERVAL).await;
-                let keep = this
-                    .update_in(cx, |view, window, cx| view.selection_scroll_tick(epoch, window, cx));
+                let keep = this.update_in(cx, |view, window, cx| {
+                    view.selection_scroll_tick(epoch, window, cx)
+                });
                 if !matches!(keep, Ok(true)) {
                     break;
                 }
