@@ -58,6 +58,8 @@ pub(crate) enum SshConnectHit {
     Logs,
     /// 连接中：放弃这次连接。
     Cancel,
+    /// 失败后：在当前 pane 原位重建同一目标的 SSH 会话。
+    Retry,
     /// 失败后：关掉这个 pane。
     Close,
 }
@@ -250,17 +252,17 @@ pub(crate) struct Layout {
     pub(crate) pad: f32,
 }
 
-/// 底部按钮的文案与语义，随状态切换：连接中只能放弃，失败后只剩收尾。
-///
-/// 这里**没有**「重试」——它要在同一个 tab 位上原子地重连，而 `Close` +
-/// `NewSsh` 两个事件按序执行会先把最后一个 tab 连窗口一起关掉。宁可少一个
-/// 按钮，也不放一个按下去会出事的。
+/// 底部按钮的文案与语义，随状态切换：连接中只能放弃，失败后可在原 pane
+/// 重试或关闭。返回顺序就是视觉上的从左到右顺序。
 pub(crate) fn button_specs(
     state: &SshConnectState,
     language: UiLanguage,
 ) -> Vec<(String, SshConnectHit, bool)> {
     if state.failed() {
-        vec![(language.pick("关闭", "Close").to_owned(), SshConnectHit::Close, true)]
+        vec![
+            (language.pick("重试", "Retry").to_owned(), SshConnectHit::Retry, false),
+            (language.pick("关闭", "Close").to_owned(), SshConnectHit::Close, true),
+        ]
     } else {
         vec![(language.pick("取消", "Cancel").to_owned(), SshConnectHit::Cancel, false)]
     }
@@ -1249,28 +1251,33 @@ mod tests {
     }
 
     #[test]
-    fn failed_card_offers_close_instead_of_cancel() {
+    fn failed_card_offers_retry_to_the_left_of_close() {
         let size = probe_size();
         let lang = UiLanguage::EnUs;
         let mut state = SshConnectState::new("root@h".into());
         state.set_stage(SshStage::Failed("boom".into()));
         let l = layout(&state, &size, VIEW, 1.0, lang, Density::Standard);
-        let (rect, hit, primary) = l.buttons[0];
-        assert_eq!(hit, SshConnectHit::Close);
-        assert!(primary, "唯一动作应当是主按钮");
-        assert_eq!(
-            hit_test(
-                &state,
-                &size,
-                VIEW,
-                1.0,
-                lang,
-                Density::Standard,
-                rect.0 + rect.2 * 0.5,
-                rect.1 + rect.3 * 0.5
-            ),
-            SshConnectHit::Close
-        );
+        assert_eq!(l.buttons.len(), 2, "失败态应同时提供重试与关闭");
+        let retry = l.buttons.iter().find(|(_, hit, _)| *hit == SshConnectHit::Retry).unwrap();
+        let close = l.buttons.iter().find(|(_, hit, _)| *hit == SshConnectHit::Close).unwrap();
+        assert!(retry.0.0 < close.0.0, "重试必须位于关闭左侧");
+        assert!(!retry.2, "重试使用次按钮，避免与关闭争夺主操作层级");
+        assert!(close.2, "关闭保持失败态主按钮");
+        for (rect, expected) in [(retry.0, SshConnectHit::Retry), (close.0, SshConnectHit::Close)] {
+            assert_eq!(
+                hit_test(
+                    &state,
+                    &size,
+                    VIEW,
+                    1.0,
+                    lang,
+                    Density::Standard,
+                    rect.0 + rect.2 * 0.5,
+                    rect.1 + rect.3 * 0.5
+                ),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -196,9 +196,7 @@ pub(crate) mod windows_store {
         }
         let end = password.iter().position(|x| *x == 0).unwrap_or(password.len());
         let bytes = String::from_utf16(&password[..end])
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "secret is not valid UTF-16")
-            })?
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "secret is not valid UTF-16"))?
             .into_bytes();
         password.fill(0);
         Ok(Some(bytes))

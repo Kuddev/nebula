@@ -153,8 +153,8 @@ fn serve_callback(listener: TcpListener, token: String, on_attach: impl Fn()) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn callback_server_writes_port_file_and_answers_ping_and_attach() {

@@ -142,6 +142,21 @@ impl DirectoryHistory {
         }
     }
 
+    /// 空的内存实例，不碰磁盘。给**其它模块**的测试用（补齐引擎要一个不产出
+    /// 任何 frecency 候选的数据源，好让断言只反映被测的那条分支）。
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ServiceState {
+                database: DirectoryDatabase { version: DATABASE_VERSION, entries: Vec::new() },
+                pending: Vec::new(),
+                unsaved_seed: None,
+                path: PathBuf::new(),
+                persistence_enabled: false,
+            })),
+        }
+    }
+
     /// Record a directory only after the shell reports it as the active cwd.
     pub(crate) fn record(&self, path: &str) -> bool {
         let Some(observation) = observation(path, current_time()) else { return false };

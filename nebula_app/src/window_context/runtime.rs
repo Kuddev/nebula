@@ -158,8 +158,24 @@ impl WindowContext {
 
     pub(crate) fn runtime_split(
         &mut self,
+        pane_id: Option<u64>,
         direction: RuntimeSplitDirection,
-    ) -> Result<u64, ApiError> {
+    ) -> Result<(u64, u64), ApiError> {
+        if let Some(pane_id) = pane_id {
+            let tab_index = self.tabs.iter().position(|tab| {
+                let mut ids = Vec::new();
+                tab.layout.leaves(&mut ids);
+                ids.contains(&pane_id)
+            });
+            let Some(tab_index) = tab_index else {
+                return Err(ApiError::new(
+                    "target_not_found",
+                    format!("pane {pane_id} does not belong to the target window"),
+                ));
+            };
+            self.select_tab(tab_index);
+            self.tabs[tab_index].active_pane = pane_id;
+        }
         let special = self
             .tabs
             .get(self.active_tab)
@@ -170,6 +186,7 @@ impl WindowContext {
                 "document, image, and settings tabs cannot be split",
             ));
         }
+        let source_pane_id = self.tabs[self.active_tab].active_pane;
         let before = self.panes.len();
         let direction = match direction {
             RuntimeSplitDirection::LeftRight => SplitDirection::LeftRight,
@@ -182,7 +199,7 @@ impl WindowContext {
                 "the default shell could not be started for a new pane",
             ));
         }
-        Ok(self.tabs[self.active_tab].active_pane)
+        Ok((source_pane_id, self.tabs[self.active_tab].active_pane))
     }
 
     pub(crate) fn runtime_prompt(

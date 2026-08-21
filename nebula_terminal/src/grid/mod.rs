@@ -485,7 +485,12 @@ impl<T> Grid<T> {
     /// the iterator bounded here avoids allocating a projected grid just to
     /// render the clipped viewport.
     #[inline]
-    pub fn display_iter_from(&self, top: Line, lines: usize, columns: usize) -> GridIterator<'_, T> {
+    pub fn display_iter_from(
+        &self,
+        top: Line,
+        lines: usize,
+        columns: usize,
+    ) -> GridIterator<'_, T> {
         debug_assert!(lines > 0);
         debug_assert!(columns > 0);
 

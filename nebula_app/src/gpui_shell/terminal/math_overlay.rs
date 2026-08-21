@@ -92,8 +92,10 @@ impl MathOverlay {
 
         let allow_inline_dollar = self.state.inline_dollar_enabled();
         let origin = term.viewport_origin_for(size.screen_lines());
-        let cursor = nebula_terminal::term::point_to_viewport_from(origin, term.grid().cursor.point)
-            .filter(|point| point.line < size.screen_lines() && point.column.0 < size.columns());
+        let cursor =
+            nebula_terminal::term::point_to_viewport_from(origin, term.grid().cursor.point).filter(
+                |point| point.line < size.screen_lines() && point.column.0 < size.columns(),
+            );
         let rendered_cells = scan_cells_from_term(term, size, default_foreground);
         let overlays = terminal_math::scan_visible(
             &mut self.state,
@@ -190,10 +192,7 @@ fn scan_cells_from_term<T: EventListener>(
         let line = origin + row as i32;
         for column in 0..columns {
             let cell = &grid[line][Column(column)];
-            if cell
-                .flags
-                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-            {
+            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                 continue;
             }
             let bg_alpha = if cell.flags.contains(Flags::INVERSE) {
@@ -470,11 +469,8 @@ mod tests {
     fn empty_selection_does_not_disable_overlays() {
         let mut overlay = MathOverlay::default();
         let mut term = term_with(16, 4, &[r"\[x\]", "", "prompt"]);
-        term.selection = Some(Selection::new(
-            SelectionType::Simple,
-            Point::new(Line(2), Column(0)),
-            Side::Left,
-        ));
+        term.selection =
+            Some(Selection::new(SelectionType::Simple, Point::new(Line(2), Column(0)), Side::Left));
         let frame = plan(&mut overlay, &term, 16, 4);
         assert!(!frame.is_empty(), "zero-width leftover selection must not gate the frame");
     }
@@ -505,8 +501,7 @@ mod tests {
         // AI CLI 的 markdown 渲染吃掉 `\[` `\]` `\,` 的反斜杠后屏幕上只剩
         // 裸 `[` 块（`\int`/`\frac` 幸存）；全链路必须照常出覆盖层。
         let mut overlay = MathOverlay::default();
-        let term =
-            term_with(40, 6, &["[", r"\int_0^1 x^2,dx = \frac{1}{3}", "]", "", "prompt"]);
+        let term = term_with(40, 6, &["[", r"\int_0^1 x^2,dx = \frac{1}{3}", "]", "", "prompt"]);
         let frame = plan(&mut overlay, &term, 40, 6);
         assert!(!frame.is_empty(), "markdown-unescaped bare bracket block must overlay");
         assert_eq!(frame.formulas[0].source.as_ref(), r"\int_0^1 x^2,dx = \frac{1}{3}");

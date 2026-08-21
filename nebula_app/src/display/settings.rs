@@ -28,8 +28,8 @@ use super::keymap;
 use super::ui::theme::Skin;
 use super::ui::{icons, os_icons, surface, text_field, tokens, widgets};
 use super::{
-    chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label, AcceptKey,
-    CompletionStyle, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
+    AcceptKey, CompletionStyle, LanguagePreference, NebulaShell, NebulaTheme, SizeInfo, UiLanguage,
+    chrome_settings_button_rect, contains_rect, nebula_data_dir, truncate_tab_label,
 };
 
 // Visual language: one flat panel color, one hairline, three text grays, ONE
@@ -1014,8 +1014,8 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                 Some(("copy_on_select", v)) => settings.copy_on_select = parse_bool(v, true),
                 Some(("cjk_bold_regular", v)) => settings.cjk_bold_regular = parse_bool(v, true),
                 Some(("tabs_position", v)) => {
-                    settings.tabs_position = nebula_settings::TabsPositionName::from_settings(v)
-                        .unwrap_or_default();
+                    settings.tabs_position =
+                        nebula_settings::TabsPositionName::from_settings(v).unwrap_or_default();
                 },
                 Some(("tab_reveal", v)) => {
                     settings.tab_reveal = TabRevealMotion::parse(v).unwrap_or_default();
@@ -1439,11 +1439,7 @@ fn settings_viewport_h(popup_h: f32, scale_factor: f32) -> f32 {
 }
 
 fn advanced_content_end(advanced_y0: f32, sync_y0: f32, row_h: f32) -> f32 {
-    if SHOW_WEBDAV_SYNC_SETTINGS {
-        sync_y0 + 7.0 * row_h
-    } else {
-        advanced_y0 + 4.0 * row_h
-    }
+    if SHOW_WEBDAV_SYNC_SETTINGS { sync_y0 + 7.0 * row_h } else { advanced_y0 + 4.0 * row_h }
 }
 
 /// Max scroll offset for `section` at the current window size. The input
@@ -3080,11 +3076,7 @@ pub fn settings_hit(
         }
     }
 
-    if contains_rect(geometry.popup, x, y) {
-        SettingsHit::Panel
-    } else {
-        SettingsHit::None
-    }
+    if contains_rect(geometry.popup, x, y) { SettingsHit::Panel } else { SettingsHit::None }
 }
 
 // ---- rendering ----
@@ -5597,11 +5589,7 @@ pub(super) fn draw_popup_text(
                 icon_draws
                     .push((id.clone(), (rx + s(8.0), ry + (rh - s(24.0)) / 2.0, s(24.0), s(24.0))));
                 text_x = rx + s(40.0);
-                if program.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{name}  ·  {program}")
-                }
+                if program.is_empty() { name.clone() } else { format!("{name}  ·  {program}") }
             },
             SettingsDropdown::Font => {
                 // 第 0 行是搜索框：它的底与光标在 quads pass 里画，这里只
@@ -5923,11 +5911,7 @@ pub(super) fn draw_text(
     let clip_bot = py + ph - s(6.0);
     let visible = |ry: f32, rh: f32| ry >= clip_top && ry + rh <= clip_bot;
     let row_text_y = |ry: f32, rh: f32| {
-        if geometry.stacked_rows {
-            ry + s(9.0)
-        } else {
-            ry + (rh - cell_h) / 2.0
-        }
+        if geometry.stacked_rows { ry + s(9.0) } else { ry + (rh - cell_h) / 2.0 }
     };
     // 通用 combobox 的当前值：控件框内左对齐，截断在 chevron 井之前。
     let combobox_value = |r: &mut Renderer,
@@ -7497,11 +7481,7 @@ pub(super) fn draw_text(
                     rect.0 + s(16.0),
                     ty,
                     if i == keymap::QUICK_TERMINAL_ROW && view.quick_hotkey_error.is_some() {
-                        if sk.is_light {
-                            Rgb::new(207, 34, 46)
-                        } else {
-                            Rgb::new(248, 81, 73)
-                        }
+                        if sk.is_light { Rgb::new(207, 34, 46) } else { Rgb::new(248, 81, 73) }
                     } else {
                         sk.ink
                     },
@@ -8091,19 +8071,19 @@ pub(super) fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        advanced_content_end, background_color_popup, cell_width_mode_label, font_popup_row_count,
-        font_popup_slot, hsv_to_rgb, manual_proxy_parts, manual_proxy_value,
-        new_tab_position_label, opacity_from_pointer, proxy_section_title_y, rgb_to_hsv,
-        row_action_rect, settings_geometry, settings_hit, ssh_proxy_manual_controls,
-        ssh_proxy_mode_control, ssh_proxy_test_button, CellWidthMode, KeymapPaneState,
-        ManualProxyProtocol, NebulaSettingsSection, NewTabPosition, ProxyChoice, ProxyPaneState,
-        Rgb, SettingsHit, TabRevealMotion, UiLanguage, CELL_WIDTH_MODE_OPTIONS,
-        NEW_TAB_POSITION_OPTIONS, SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS,
-        STANDARD_ROW_ACTION_W,
+        CELL_WIDTH_MODE_OPTIONS, CellWidthMode, KeymapPaneState, ManualProxyProtocol,
+        NEW_TAB_POSITION_OPTIONS, NebulaSettingsSection, NewTabPosition, ProxyChoice,
+        ProxyPaneState, Rgb, SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS,
+        STANDARD_ROW_ACTION_W, SettingsHit, TabRevealMotion, UiLanguage, advanced_content_end,
+        background_color_popup, cell_width_mode_label, font_popup_row_count, font_popup_slot,
+        hsv_to_rgb, manual_proxy_parts, manual_proxy_value, new_tab_position_label,
+        opacity_from_pointer, proxy_section_title_y, rgb_to_hsv, row_action_rect,
+        settings_geometry, settings_hit, ssh_proxy_manual_controls, ssh_proxy_mode_control,
+        ssh_proxy_test_button,
     };
+    use crate::display::SizeInfo;
     use crate::display::ui::tokens::Density;
     use crate::display::ui::widgets;
-    use crate::display::SizeInfo;
 
     #[test]
     fn hsv_rgb_round_trip_and_gray_hue_convention() {

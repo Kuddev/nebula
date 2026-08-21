@@ -95,7 +95,6 @@ impl AgentSession {
             _ => None,
         }
     }
-
 }
 
 /// A tab's pane tree. Leaves carry each pane's working directory; splits carry
@@ -466,12 +465,11 @@ mod tests {
             agent("claude", Some("abc-123")).resume_command().as_deref(),
             Some("claude --resume abc-123")
         );
+        assert_eq!(agent("claude", None).resume_command().as_deref(), Some("claude --continue"));
         assert_eq!(
-            agent("claude", None).resume_command().as_deref(),
-            Some("claude --continue")
-        );
-        assert_eq!(
-            agent("codex", Some("b5f6c1c2-1111-2222-3333-444455556666")).resume_command().as_deref(),
+            agent("codex", Some("b5f6c1c2-1111-2222-3333-444455556666"))
+                .resume_command()
+                .as_deref(),
             Some("codex resume b5f6c1c2-1111-2222-3333-444455556666")
         );
         assert_eq!(agent("codex", None).resume_command(), None);

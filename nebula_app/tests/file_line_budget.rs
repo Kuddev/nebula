@@ -93,10 +93,8 @@ fn every_source_file_respects_its_line_budget() {
         // 按换行字节计数：与编码无关，空文件为 0 行。
         let lines = content.iter().filter(|byte| **byte == b'\n').count()
             + usize::from(!content.is_empty() && content.last() != Some(&b'\n'));
-        let grant = GRANDFATHERED
-            .iter()
-            .find(|(name, _)| *name == relative)
-            .map(|(_, budget)| *budget);
+        let grant =
+            GRANDFATHERED.iter().find(|(name, _)| *name == relative).map(|(_, budget)| *budget);
         let budget = grant.unwrap_or(MAX_LINES);
         if lines > budget {
             violations.push(format!("{relative}: {lines} 行 > 预算 {budget}"));
@@ -105,7 +103,9 @@ fn every_source_file_respects_its_line_budget() {
         if let Some(budget) = grant
             && lines <= MAX_LINES
         {
-            stale_grants.push(format!("{relative}: 已降到 {lines} 行（≤{MAX_LINES}），豁免条目（{budget}）应删除"));
+            stale_grants.push(format!(
+                "{relative}: 已降到 {lines} 行（≤{MAX_LINES}），豁免条目（{budget}）应删除"
+            ));
         }
     }
 
@@ -114,9 +114,5 @@ fn every_source_file_respects_its_line_budget() {
         "以下文件超出行数预算（docs/project-constraints.md 第 1 条，正确动作是拆文件）：\n{}",
         violations.join("\n")
     );
-    assert!(
-        stale_grants.is_empty(),
-        "以下豁免条目已过期：\n{}",
-        stale_grants.join("\n")
-    );
+    assert!(stale_grants.is_empty(), "以下豁免条目已过期：\n{}", stale_grants.join("\n"));
 }

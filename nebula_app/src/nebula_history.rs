@@ -97,11 +97,7 @@ impl NebulaHistory {
             matches.push((pos, cmd.as_str()));
         }
         matches.sort_unstable_by(|a, b| b.0.cmp(&a.0));
-        matches
-            .into_iter()
-            .take(limit)
-            .map(|(_, cmd)| (cmd, &cmd[prefix.len()..]))
-            .collect()
+        matches.into_iter().take(limit).map(|(_, cmd)| (cmd, &cmd[prefix.len()..])).collect()
     }
 
     /// Insert a command, deduplicating and rebuilding the index when an old

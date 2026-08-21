@@ -38,10 +38,15 @@ impl NebulaWorkspace {
         self.apply_runtime_settings(cx);
     }
 
-    pub(super) fn copy_focused_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.tabs.get(self.active).and_then(WorkspaceTab::focused_view) {
-            view.update(cx, |view, cx| view.copy_selection(true, window, cx));
-        }
+    pub(super) fn copy_focused_terminal(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.tabs
+            .get(self.active)
+            .and_then(WorkspaceTab::focused_view)
+            .is_some_and(|view| view.update(cx, |view, cx| view.copy_selection(true, window, cx)))
     }
 
     pub(super) fn paste_focused_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {

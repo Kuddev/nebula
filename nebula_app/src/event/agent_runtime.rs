@@ -37,6 +37,7 @@ impl Processor {
         match command {
             RuntimeCommand::AgentStart {
                 window_id,
+                pane_id,
                 name,
                 kind,
                 cwd,
@@ -44,13 +45,17 @@ impl Processor {
                 command,
                 worktree,
             } => {
-                let id = self.runtime_target_window(*window_id, None)?;
+                let id = self.runtime_target_window(*window_id, *pane_id)?;
                 self.runtime_hub.ensure_agent_name_available(name)?;
-                let pane_id = self
-                    .windows
-                    .get_mut(&id)
-                    .expect("resolved runtime window exists")
-                    .runtime_new_tab(cwd.clone())?;
+                let created_tab = pane_id.is_none();
+                let pane_id = match pane_id {
+                    Some(pane_id) => *pane_id,
+                    None => self
+                        .windows
+                        .get_mut(&id)
+                        .expect("resolved runtime window exists")
+                        .runtime_new_tab(cwd.clone())?,
+                };
                 let agent = match self.runtime_hub.register_agent(
                     name.clone(),
                     *kind,
@@ -61,30 +66,37 @@ impl Processor {
                 ) {
                     Ok(agent) => agent,
                     Err(error) => {
+                        if created_tab {
+                            self.windows
+                                .get_mut(&id)
+                                .expect("resolved runtime window exists")
+                                .runtime_discard_agent_tab(pane_id);
+                        }
+                        return Err(error);
+                    },
+                };
+                let launch = if created_tab {
+                    self.windows
+                        .get_mut(&id)
+                        .expect("resolved runtime window exists")
+                        .runtime_set_tab_name(pane_id, name.clone())
+                } else {
+                    Ok(())
+                }
+                .and_then(|_| {
+                    self.windows
+                        .get_mut(&id)
+                        .expect("resolved runtime window exists")
+                        .runtime_prompt(pane_id, command.clone(), true)
+                });
+                if let Err(error) = launch {
+                    self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
+                    if created_tab {
                         self.windows
                             .get_mut(&id)
                             .expect("resolved runtime window exists")
                             .runtime_discard_agent_tab(pane_id);
-                        return Err(error);
-                    },
-                };
-                let launch = self
-                    .windows
-                    .get_mut(&id)
-                    .expect("resolved runtime window exists")
-                    .runtime_set_tab_name(pane_id, name.clone())
-                    .and_then(|_| {
-                        self.windows
-                            .get_mut(&id)
-                            .expect("resolved runtime window exists")
-                            .runtime_prompt(pane_id, command.clone(), true)
-                    });
-                if let Err(error) = launch {
-                    self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
-                    self.windows
-                        .get_mut(&id)
-                        .expect("resolved runtime window exists")
-                        .runtime_discard_agent_tab(pane_id);
+                    }
                     return Err(error);
                 }
                 self.runtime_result(serde_json::json!({

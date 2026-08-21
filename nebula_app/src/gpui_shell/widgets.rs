@@ -14,10 +14,10 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, App, Bounds, ClickEvent, ElementId, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, RenderImage, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, ease_in_out, fill, point, px,
-    size,
+    Animation, AnimationExt as _, App, Bounds, ClickEvent, ElementId, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, RenderImage, RenderOnce,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, ease_in_out,
+    fill, point, px, size,
 };
 use image::Frame;
 
@@ -253,7 +253,12 @@ impl RenderOnce for NebulaSwitch {
         );
         let track = mix(sk.toggle_track_off, sk.toggle_track_on, motion.color);
         let track = over(
-            Rgba::new(sk.icon_hover.r, sk.icon_hover.g, sk.icon_hover.b, (motion.hover * 12.0) as u8),
+            Rgba::new(
+                sk.icon_hover.r,
+                sk.icon_hover.g,
+                sk.icon_hover.b,
+                (motion.hover * 12.0) as u8,
+            ),
             track,
         );
         let knob = mix(sk.knob_off, sk.knob_on, motion.color);

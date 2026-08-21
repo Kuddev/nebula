@@ -552,16 +552,16 @@ impl Processor {
                     "pane_id": pane_id
                 }))
             },
-            RuntimeCommand::Split { window_id, direction } => {
-                let id = self.runtime_target_window(*window_id, None)?;
-                let pane_id = self
+            RuntimeCommand::Split { window_id, pane_id, direction } => {
+                let id = self.runtime_target_window(*window_id, *pane_id)?;
+                let (source_pane_id, pane_id) = self
                     .windows
                     .get_mut(&id)
                     .expect("resolved runtime window exists")
-                    .runtime_split(*direction)?;
+                    .runtime_split(*pane_id, *direction)?;
                 self.runtime_result(serde_json::json!({
                     "window_id": u64::from(id),
-                    "pane_id": pane_id
+                    "source_pane_id": source_pane_id, "pane_id": pane_id
                 }))
             },
             RuntimeCommand::Prompt { window_id, pane_id, text, submit } => {
@@ -1803,19 +1803,21 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         if len == 0 {
             return;
         }
-        let current = self.nebula_state.completion_selected as isize;
-        self.nebula_state.completion_selected = (current + delta).rem_euclid(len as isize) as usize;
+        self.nebula_state.completion_selected = Some(match self.nebula_state.completion_selected {
+            Some(current) => (current as isize + delta).rem_euclid(len as isize) as usize,
+            None => 0,
+        });
         *self.dirty = true;
     }
 
     fn nebula_completion_popup_take(&mut self) -> Option<String> {
         let state = &mut self.nebula_state;
-        let insert =
-            state.completion_items.get(state.completion_selected).map(|item| item.insert.clone());
+        let index = state.completion_selected?;
+        let insert = state.completion_items.get(index)?.insert.clone();
         state.completion_items.clear();
-        state.completion_selected = 0;
+        state.completion_selected = None;
         *self.dirty = true;
-        insert
+        Some(insert)
     }
 
     fn nebula_completion_popup_dismiss(&mut self) -> bool {
@@ -1827,7 +1829,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         // `nebula_update_suggestion` then keeps the list closed until the
         // line itself changes.
         state.completion_items.clear();
-        state.completion_selected = 0;
+        state.completion_selected = None;
         *self.dirty = true;
         true
     }

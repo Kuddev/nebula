@@ -493,11 +493,7 @@ pub(super) fn hit_test(
             return ContextMenuHit::Action(*action);
         }
     }
-    if contains(layout.panel, x, y) {
-        ContextMenuHit::Panel
-    } else {
-        ContextMenuHit::Outside
-    }
+    if contains(layout.panel, x, y) { ContextMenuHit::Panel } else { ContextMenuHit::Outside }
 }
 
 fn fade_ink(base: Rgba, ink: Rgb, opacity: f32) -> Rgb {
@@ -707,8 +703,8 @@ mod tests {
         let plain = ContextMenu::new(ContextMenuTarget::Tab(3), (100.0, 100.0), None);
         assert_eq!(layout(&plain, size(), 1.0, 0.0).rows.len(), 6);
 
-        let forkable = ContextMenu::new(ContextMenuTarget::Tab(3), (100.0, 100.0), None)
-            .with_ai_fork(true);
+        let forkable =
+            ContextMenu::new(ContextMenuTarget::Tab(3), (100.0, 100.0), None).with_ai_fork(true);
         let layout = layout(&forkable, size(), 1.0, 0.0);
         assert_eq!(layout.rows.len(), 7);
         assert_eq!(layout.rows[0].action, ContextMenuAction::ForkAiSession(3));

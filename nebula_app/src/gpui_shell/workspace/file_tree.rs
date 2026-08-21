@@ -46,6 +46,9 @@ impl NebulaWorkspace {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "等待终端上报工作目录…".to_owned());
         let rows: Vec<_> = self.side_panel.file_rows().iter().skip(scroll).cloned().collect();
+        let rows_empty = rows.is_empty();
+        let snapshot_pending = self.side_panel.snapshot_pending();
+        let enumeration_failed = self.side_panel.enumeration_failed();
 
         let row_elements = rows.into_iter().enumerate().map(|(visible_ix, row)| {
             let path = row.path.clone();
@@ -227,7 +230,32 @@ impl NebulaWorkspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .child(v_flex().w_full().gap_1().children(row_elements)),
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .children(row_elements)
+                            .when(rows_empty, |list| {
+                                list.child(
+                                    div()
+                                        .w_full()
+                                        .py_4()
+                                        .px_2()
+                                        .text_center()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .child(if snapshot_pending {
+                                            "正在读取目录…"
+                                        } else if enumeration_failed {
+                                            // 读不到 ≠ 目录是空的。WSL 冷启动可能
+                                            // 耗尽预算，那时必须给可重试的提示。
+                                            "读取目录失败，点上方刷新重试"
+                                        } else {
+                                            "此目录为空"
+                                        }),
+                                )
+                            }),
+                    ),
             )
             .into_any_element()
     }

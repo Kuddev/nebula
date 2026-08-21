@@ -86,23 +86,26 @@ pub fn popup_active(state: &NebulaPaneState) -> bool {
     !state.completion_items.is_empty()
 }
 
-/// 弹窗高亮行循环移动。
+/// 弹窗高亮行循环移动。初始没有选中项；首次向任一方向导航都从首项进入，
+/// 避免 Up 在无选择态直接跳到列表末尾。
 pub fn popup_move(state: &mut NebulaPaneState, delta: isize) {
     let len = state.completion_items.len();
     if len == 0 {
         return;
     }
-    let current = state.completion_selected as isize;
-    state.completion_selected = (current + delta).rem_euclid(len as isize) as usize;
+    state.completion_selected = Some(match state.completion_selected {
+        Some(current) => (current as isize + delta).rem_euclid(len as isize) as usize,
+        None => 0,
+    });
 }
 
 /// 取走选中候选要键入的余量并关闭列表。
 pub fn popup_take(state: &mut NebulaPaneState) -> Option<String> {
-    let insert =
-        state.completion_items.get(state.completion_selected).map(|item| item.insert.clone());
+    let index = state.completion_selected?;
+    let insert = state.completion_items.get(index)?.insert.clone();
     state.completion_items.clear();
-    state.completion_selected = 0;
-    insert
+    state.completion_selected = None;
+    Some(insert)
 }
 
 /// Esc 关闭列表；候选清空但重算键保留，列表在行变化前不会复开（与旧壳
@@ -116,8 +119,51 @@ pub fn popup_dismiss(state: &mut NebulaPaneState) -> bool {
         state.completion_suppressed_line = Some(line.clone());
     }
     state.completion_items.clear();
-    state.completion_selected = 0;
+    state.completion_selected = None;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{popup_active, popup_move, popup_take};
+    use crate::display::{NebulaCompletionItem, NebulaCompletionKind, NebulaPaneState};
+
+    fn popup_state() -> NebulaPaneState {
+        let mut state = NebulaPaneState::default();
+        state.completion_items = vec![
+            NebulaCompletionItem {
+                label: "git pull upstream".to_owned(),
+                insert: " upstream".to_owned(),
+                kind: NebulaCompletionKind::History,
+            },
+            NebulaCompletionItem {
+                label: "git pull --rebase".to_owned(),
+                insert: " --rebase".to_owned(),
+                kind: NebulaCompletionKind::Command,
+            },
+        ];
+        state
+    }
+
+    #[test]
+    fn popup_does_not_accept_before_explicit_navigation() {
+        let mut state = popup_state();
+        assert!(popup_active(&state));
+        assert_eq!(state.completion_selected, None);
+        assert_eq!(popup_take(&mut state), None);
+        assert!(popup_active(&state));
+    }
+
+    #[test]
+    fn popup_first_navigation_enters_at_the_first_item() {
+        for delta in [-1, 1] {
+            let mut state = popup_state();
+            popup_move(&mut state, delta);
+            assert_eq!(state.completion_selected, Some(0));
+            assert_eq!(popup_take(&mut state).as_deref(), Some(" upstream"));
+            assert!(!popup_active(&state));
+        }
+    }
 }
 
 /// 接受键（Tab/Right/Both）的判定复用旧壳 [`AcceptKey`]。

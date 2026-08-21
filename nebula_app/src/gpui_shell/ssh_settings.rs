@@ -563,7 +563,9 @@ impl SettingsPane {
                 .justify_center()
                 .rounded(px(4.0))
                 .cursor_pointer()
-                .when(selected, |chip| chip.bg(theme.background).font_weight(gpui::FontWeight::MEDIUM))
+                .when(selected, |chip| {
+                    chip.bg(theme.background).font_weight(gpui::FontWeight::MEDIUM)
+                })
                 .when(!selected, |chip| {
                     chip.text_color(muted).hover(|chip| chip.bg(theme.list_hover))
                 })
@@ -571,12 +573,8 @@ impl SettingsPane {
                 .on_click(select_auth(mode))
         };
         let visible_start = editor.private_keys.len().saturating_sub(SSH_EDITOR_KEY_ROWS_MAX);
-        let key_rows = editor
-            .private_keys
-            .iter()
-            .enumerate()
-            .skip(visible_start)
-            .map(|(index, path)| {
+        let key_rows =
+            editor.private_keys.iter().enumerate().skip(visible_start).map(|(index, path)| {
                 let shown: SharedString = ssh_key_path_tail(path, 36).into();
                 h_flex()
                     .id(SharedString::from(format!("ssh-key-{index}")))
@@ -649,13 +647,7 @@ impl SettingsPane {
                 .h(px(SSH_EDITOR_CTL_H))
                 .gap(px(SSH_EDITOR_SPACE_S))
                 .items_center()
-                .child(
-                    div()
-                        .w(px(SSH_EDITOR_LABEL_W))
-                        .flex_shrink_0()
-                        .text_sm()
-                        .child(label),
-                )
+                .child(div().w(px(SSH_EDITOR_LABEL_W)).flex_shrink_0().text_sm().child(label))
                 .child(div().flex_1().min_w_0().child(control))
         };
         let dest_hint = dest_error.as_deref().unwrap_or("支持 user@host，也可粘贴 ssh://host:2222");
@@ -1074,9 +1066,14 @@ impl SettingsPane {
         icon: &'static crate::display::ui::os_icons::OsIcon,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        const BASE_ICON_SIZE: f32 = 22.0;
+
         let theme = cx.theme();
         let open = self.ssh_icon_picker_open;
         let pane = cx.entity().downgrade();
+        let target_ink_width = SSH_EDITOR_AVATAR_H * 0.46;
+        let icon_size = BASE_ICON_SIZE
+            * crate::display::ui::os_icons::scale_for(icon, BASE_ICON_SIZE * 0.6, target_ink_width);
         div()
             .id("ssh-icon-avatar")
             .relative()
@@ -1091,9 +1088,16 @@ impl SettingsPane {
             .justify_center()
             .cursor_pointer()
             .hover(|avatar| avatar.bg(theme.list_hover))
-            .font_family(self.current_font_chain(cx))
-            .text_size(px(22.0))
-            .child(icon.glyph.to_string())
+            // Nerd Font 的 advance 固定为 0.6em，墨迹却能宽到 1.2em；直接
+            // 居中文本盒会把溢出的那一半全留在右边。固定墨迹槽后，视觉中心
+            // 才不会随图标变化。
+            .child(
+                div()
+                    .w(px(target_ink_width))
+                    .font_family(self.current_font_chain(cx))
+                    .text_size(px(icon_size))
+                    .child(icon.glyph.to_string()),
+            )
             .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_ssh_icon_picker(window, cx);
             }))
@@ -1146,7 +1150,13 @@ impl SettingsPane {
     /// 弹出的图标选择器：顶部搜索框 + 分组过的目录，锚在头像下方。
     /// 返回 `None` 表示收起态（或头像还没量到坐标）。
     fn ssh_icon_popup(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        use crate::display::ui::os_icons::{AUTO_ID, CATALOG, PickerRow, picker_rows};
+        use crate::display::ui::os_icons::{
+            AUTO_ID, CATALOG, PickerRow, picker_rows, resolve, scale_for,
+        };
+
+        const PICKER_ICON_SLOT_W: f32 = 22.0;
+        const PICKER_ICON_INK_W: f32 = 16.0;
+        const PICKER_ICON_BASE_SIZE: f32 = 15.0;
 
         if !self.ssh_icon_picker_open {
             return None;
@@ -1179,10 +1189,14 @@ impl SettingsPane {
                     .child(title)
                     .into_any_element(),
                 PickerRow::Option(option) => {
-                    let (glyph, name, id) = match option.and_then(|index| CATALOG.get(index)) {
-                        Some(icon) => (icon.glyph.to_string(), icon.zh, Some(icon.id)),
-                        None => ("\u{ea85}".to_owned(), "自动识别", None),
+                    let (icon, name, id) = match option.and_then(|index| CATALOG.get(index)) {
+                        Some(icon) => (icon, icon.zh, Some(icon.id)),
+                        // 未识别时头像本来就回落到 DEFAULT_ID；选择器也显示
+                        // 同一张脸，避免挑选前后出现两枚不同的“终端”图标。
+                        None => (resolve(None), "自动识别", None),
                     };
+                    let icon_size = PICKER_ICON_BASE_SIZE
+                        * scale_for(icon, PICKER_ICON_BASE_SIZE * 0.6, PICKER_ICON_INK_W);
                     let selected = match id {
                         Some(id) => current.as_deref() == Some(id),
                         None => current.is_none(),
@@ -1201,13 +1215,19 @@ impl SettingsPane {
                         .hover(|row| row.bg(hover_bg))
                         .child(
                             div()
-                                .w(px(22.0))
+                                .w(px(PICKER_ICON_SLOT_W))
+                                .h_full()
                                 .flex_shrink_0()
                                 .flex()
+                                .items_center()
                                 .justify_center()
-                                .font_family(font_chain.clone())
-                                .text_size(px(15.0))
-                                .child(glyph),
+                                .child(
+                                    div()
+                                        .w(px(PICKER_ICON_INK_W))
+                                        .font_family(font_chain.clone())
+                                        .text_size(px(icon_size))
+                                        .child(icon.glyph.to_string()),
+                                ),
                         )
                         .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
                         .on_click(cx.listener(move |this, _, window, cx| {

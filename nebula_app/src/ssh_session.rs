@@ -3,6 +3,7 @@
 //! 远端 Pane 不创建本地伪终端，但继续使用统一的输入、缩放和关闭消息协议，
 //! 从而让渲染与键盘处理保持传输层无关。
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -176,7 +177,13 @@ impl SshDestination {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "SSH 地址为空"));
         }
 
-        let output = Command::new(find_ssh()).arg("-G").arg("--").arg(&original).output();
+        // OpenSSH 不把裸 `user@host:port` 识别为端口语法，而会原样输出成
+        // `hostname host:port`。后续把它交给 socket 就会在 Windows 上得到
+        // WSAHOST_NOT_FOUND。只规范化配置探测参数，保留 original 作为列表、
+        // Profile 与凭据的稳定身份。
+        let config_target = ssh_config_probe_target(&original);
+        let output =
+            Command::new(find_ssh()).arg("-G").arg("--").arg(config_target.as_ref()).output();
         if let Ok(output) = output {
             if output.status.success() {
                 let text = String::from_utf8_lossy(&output.stdout);
@@ -208,6 +215,27 @@ impl SshDestination {
     fn pool_key(&self) -> String {
         format!("{}@{}:{}", self.user, self.host.to_ascii_lowercase(), self.port)
     }
+}
+
+/// 给 `ssh -G` 的离线配置探测目标。Nebula 历史存盘格式允许
+/// `user@host:port`，而 OpenSSH 只会从 `ssh://user@host:port` URI 中拆出
+/// 端口；无显式端口、已有 URI 与裸 IPv6 都保持原样，避免改变 Host 匹配。
+fn ssh_config_probe_target(value: &str) -> Cow<'_, str> {
+    if value.starts_with("ssh://") {
+        return Cow::Borrowed(value);
+    }
+    let host_port = value.rsplit_once('@').map_or(value, |(_, host_port)| host_port);
+    let has_explicit_port = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split_once(']')
+            .and_then(|(_, suffix)| suffix.strip_prefix(':'))
+            .is_some_and(|port| port.parse::<u16>().is_ok())
+    } else if let Some((host, port)) = host_port.rsplit_once(':') {
+        !host.is_empty() && !host.contains(':') && port.parse::<u16>().is_ok()
+    } else {
+        false
+    };
+
+    if has_explicit_port { Cow::Owned(format!("ssh://{value}")) } else { Cow::Borrowed(value) }
 }
 
 fn parse_host_port(host_port: &str) -> io::Result<(String, u16)> {
@@ -1456,7 +1484,7 @@ fn wide(value: &str) -> Vec<u16> {
 mod tests {
     use super::{
         AuthMethod, SshDestination, authentication_plan, parse_resolved_config,
-        resolve_network_proxy,
+        resolve_network_proxy, ssh_config_probe_target,
     };
     use crate::ssh_profiles::SshAuthMode;
     use crate::ssh_proxy::{ProxyLink, ProxyMode, SshProxyConfig};
@@ -1489,6 +1517,24 @@ mod tests {
         assert_eq!(destination.host, "server.internal");
         assert_eq!(destination.port, 2200);
         assert_eq!(destination.identity_files.len(), 1);
+    }
+
+    #[test]
+    fn openssh_probe_normalizes_legacy_destinations_with_explicit_ports() {
+        assert_eq!(
+            ssh_config_probe_target("root@154.64.232.109:20222"),
+            "ssh://root@154.64.232.109:20222"
+        );
+        assert_eq!(
+            ssh_config_probe_target("root@[2001:db8::1]:20222"),
+            "ssh://root@[2001:db8::1]:20222"
+        );
+        assert_eq!(
+            ssh_config_probe_target("ssh://root@example.com:20222"),
+            "ssh://root@example.com:20222"
+        );
+        assert_eq!(ssh_config_probe_target("root@example.com"), "root@example.com");
+        assert_eq!(ssh_config_probe_target("root@2001:db8::1"), "root@2001:db8::1");
     }
 
     #[test]

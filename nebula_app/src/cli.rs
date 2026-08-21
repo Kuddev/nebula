@@ -400,6 +400,15 @@ pub enum ControlCommand {
     Describe,
     /// Read the authoritative window, tab, pane, and task-state projection.
     Snapshot,
+    /// Execute one typed multi-step terminal workflow in a single Runtime request.
+    Orchestrate {
+        /// Inline UTF-8 JSON object containing steps and on_error.
+        #[clap(long, conflicts_with = "file", required_unless_present = "file")]
+        spec: Option<String>,
+        /// Read the UTF-8 workflow JSON object from a file.
+        #[clap(long, value_hint = ValueHint::FilePath, conflicts_with = "spec")]
+        file: Option<PathBuf>,
+    },
     /// List only panes Nebula recognizes as AI agents, with semantic state and session identity.
     Agents {
         #[clap(long)]
@@ -503,6 +512,9 @@ pub enum ControlCommand {
     Split {
         #[clap(long)]
         window: Option<u64>,
+        /// Split this pane instead of the currently focused pane.
+        #[clap(long)]
+        pane: Option<u64>,
         #[clap(long, value_enum, default_value = "right")]
         direction: ControlSplitDirection,
     },

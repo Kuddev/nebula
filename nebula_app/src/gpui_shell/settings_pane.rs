@@ -19,13 +19,14 @@ use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, Image,
     ImageFormat, InteractiveElement as _, IntoElement, KeyDownEvent, ModifiersChangedEvent,
     MouseButton, MouseMoveEvent, ParentElement as _, Render, RenderImage, Rgba as GpuiRgba,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, anchored,
-    deferred, div, img, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
+    anchored, deferred, div, img, px,
 };
 use gpui_component::input::InputEvent;
 use gpui_component::select::{SelectEvent, SelectItem};
 use nebula_settings::{RuntimeSettings, ThemeName, format_hex_rgb, persist_keys};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::widgets::NebulaButton;
@@ -440,6 +441,12 @@ pub struct SettingsPane {
     keymap_capture: Option<usize>,
     keymap_capture_preview: String,
     keymap_binds: Vec<(String, String)>,
+    /// 不透明度滑块的落盘 debounce。滑块只有 `Change` 事件（没有"松手"），
+    /// 而 [`Self::persist`] 是重操作：写盘 + 三次设置重载 + 每个终端
+    /// `apply_settings`（含四次字体构造）+ 主题全量重建 + 壁纸重烘焙。拖拽期间
+    /// 每帧走一遍就会卡死，所以拖拽只更新内存视效，落盘挪到停手之后。
+    /// 覆盖这个字段即取消上一个待落盘任务（旧 `Task` drop = 取消）。
+    slider_persist: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -677,7 +684,7 @@ impl SettingsPane {
             input
         };
         let opacity_slider = cx.new(|_| {
-            SliderState::new().min(0.20).max(1.00).step(0.05).default_value(runtime.opacity)
+            SliderState::new().min(0.00).max(1.00).step(0.05).default_value(runtime.opacity)
         });
         subscriptions.push(cx.subscribe(&opacity_slider, |this, _, event: &SliderEvent, cx| {
             match event {
@@ -825,6 +832,17 @@ impl SettingsPane {
             crate::display::rgb_to_hsv(crate::display::color::Rgb::new(rgb[0], rgb[1], rgb[2]))
         };
 
+        // GPUI 会先匹配 KeyBinding action，再派发元素的 capture/bubble KeyDown。
+        // 因此录制 PageDown 等已有快捷键必须在应用级 interceptor 提前截住；
+        // 焦点检查保证后台设置标签或普通设置输入不受影响。
+        let keymap_interceptor = cx.listener(|this, event: &gpui::KeystrokeEvent, window, cx| {
+            if this.keymap_capture.is_some() && this.focus_handle.contains_focused(window, cx) {
+                cx.stop_propagation();
+                this.handle_keymap_capture(&event.keystroke, cx);
+            }
+        });
+        subscriptions.push(cx.intercept_keystrokes(keymap_interceptor));
+
         Self {
             focus_handle: cx.focus_handle(),
             runtime,
@@ -923,6 +941,7 @@ impl SettingsPane {
             keymap_capture: None,
             keymap_capture_preview: String::new(),
             keymap_binds: nebula_settings::keybind_pairs(),
+            slider_persist: None,
             _subscriptions: subscriptions,
         }
     }
@@ -1057,14 +1076,61 @@ impl SettingsPane {
         self.persist(&[("font_size", format!("{size:.2}"))], cx);
     }
 
+    /// 拖拽期间只做"改 alpha + 重绘"这两件必须的事，落盘与整套热应用
+    /// 交给 [`Self::schedule_slider_persist`]。旧壳拖 opacity 就是改内存 + 重绘，
+    /// 这条快路径是为了对回那个手感。
     fn set_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
-        let opacity = opacity.clamp(0.2, 1.0);
-        self.persist(&[("opacity", format!("{opacity:.2}"))], cx);
+        let opacity = opacity.clamp(0.0, 1.0);
+        if (self.runtime.opacity - opacity).abs() < 1e-4 {
+            return;
+        }
+        self.runtime.opacity = opacity;
+        crate::gpui_shell::wallpaper::set_opacity_live(opacity, cx);
+        crate::gpui_shell::theme::reapply_shell_opacity(
+            self.runtime.theme,
+            self.runtime.follow_system_theme,
+            cx,
+        );
+        // 壳色是全局 token：只 `notify` 设置页不会让终端窗口的背景重绘。
+        // `refresh_windows` 只推一个 effect，同一 update cycle 内多次调用会合并
+        // 成一次重绘，所以每帧调是安全的。
+        cx.refresh_windows();
+        cx.notify();
+        self.schedule_slider_persist("opacity", format!("{opacity:.2}"), cx);
     }
 
+    /// 背景图透明度是**烘焙进纹理**的（decode + 长边压到 2560 + 逐像素乘
+    /// alpha），没有便宜的实时路径：每帧重烘焙一次会直接卡死。所以拖拽期间
+    /// 只让滑块跟手，图面在停手后随一次落盘统一重建。
     fn set_wallpaper_opacity(&mut self, opacity: f32, cx: &mut Context<Self>) {
         let opacity = opacity.clamp(0.05, 1.0);
-        self.persist(&[("background_image_opacity", format!("{opacity:.2}"))], cx);
+        if (self.runtime.background_image_opacity - opacity).abs() < 1e-4 {
+            return;
+        }
+        self.runtime.background_image_opacity = opacity;
+        cx.notify();
+        self.schedule_slider_persist("background_image_opacity", format!("{opacity:.2}"), cx);
+    }
+
+    /// 滑块停手后才落盘。滑块只有 `Change` 事件（组件库没有"松手"信号），
+    /// 所以用 debounce：每个新事件覆盖上一个待落盘任务，旧 `Task` drop 即取消。
+    ///
+    /// 落盘那一次会走完整的 [`Self::persist`]（写盘 + 设置重载 + 每终端
+    /// `apply_settings` + 主题重建 + 壁纸重烘焙），跑一次没问题；每帧跑就是
+    /// 2026-08-21 报的"拖拽卡顿的要死"。
+    fn schedule_slider_persist(
+        &mut self,
+        key: &'static str,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        let executor = cx.background_executor().clone();
+        self.slider_persist = Some(cx.spawn(async move |this, cx| {
+            executor.timer(Duration::from_millis(180)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.persist(&[(key, value)], cx);
+            });
+        }));
     }
 
     // ---- 字体选择器（旧壳 toggle_font_picker / font_catalog 的 GPUI 形态）----
@@ -1871,10 +1937,8 @@ impl SettingsPane {
             .map(str::trim)
             .filter(|path| !path.is_empty());
         let has_dir = current.is_some();
-        let label: SharedString = current
-            .map(str::to_owned)
-            .unwrap_or_else(|| "继承当前目录".to_owned())
-            .into();
+        let label: SharedString =
+            current.map(str::to_owned).unwrap_or_else(|| "继承当前目录".to_owned()).into();
         let color = if has_dir { cx.theme().link } else { cx.theme().muted_foreground };
         self.row(
             "启动目录",
@@ -1895,13 +1959,11 @@ impl SettingsPane {
                         })),
                 )
                 .when(has_dir, |row| {
-                    row.child(
-                        NebulaButton::new("startup-directory-clear").label("清除").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.clear_startup_directory(cx);
-                            }),
-                        ),
-                    )
+                    row.child(NebulaButton::new("startup-directory-clear").label("清除").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.clear_startup_directory(cx);
+                        }),
+                    ))
                 }),
         )
     }
@@ -3264,6 +3326,26 @@ impl SettingsPane {
         (rows, note)
     }
 
+    /// interceptor 与修饰键预览共用的录制状态机；按键是否应被独占由调用
+    /// 方在进入这里前裁定，避免数据转换层意外吞掉普通设置输入。
+    fn handle_keymap_capture(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some(row) = self.keymap_capture else { return };
+        match crate::display::keymap::capture_gpui(keystroke) {
+            crate::display::keymap::CaptureOutcome::Cancel => {
+                self.keymap_capture = None;
+                self.keymap_capture_preview.clear();
+                cx.notify();
+            },
+            crate::display::keymap::CaptureOutcome::ClearCustom => {
+                self.keymap_clear_custom(row, cx);
+            },
+            crate::display::keymap::CaptureOutcome::Bind(combo) => {
+                self.keymap_assign(row, combo, cx);
+            },
+            crate::display::keymap::CaptureOutcome::Pending => {},
+        }
+    }
+
     /// 捕获完成：一个动作只保留一条自定义绑定，但同一 combo 可以同时归属
     /// 多个动作。冲突不再靠静默注销旧动作来“解决”，而是由
     /// `keymap_clashes` 标记双方并显示警告条，让用户自己决定改哪一行。
@@ -3689,32 +3771,10 @@ impl Render for SettingsPane {
                     }
                 }),
             )
-            // 按键捕获态的键盘独占：焦点在本根 div（点行时收进来），键盘
-            // 事件沿焦点路径冒泡到这里；捕获未激活时不挂处理器，输入框、
-            // 下拉等组件照常吃键。修饰键实时回显同址（ModifiersChanged
-            // 不是 KeyDown，走独立通道）。
+            // KeyDown 已由构造期注册的 interceptor 在 action 前独占；这里仅
+            // 处理不走 KeystrokeEvent 的修饰键变化，用于实时回显 "Ctrl+…"。
             .when_some(self.keymap_capture, |root, _| {
-                root.on_key_down(cx.listener(
-                    |this, event: &KeyDownEvent, _window, cx| {
-                        let Some(row) = this.keymap_capture else { return };
-                        cx.stop_propagation();
-                        match crate::display::keymap::capture_gpui(&event.keystroke) {
-                            crate::display::keymap::CaptureOutcome::Cancel => {
-                                this.keymap_capture = None;
-                                this.keymap_capture_preview.clear();
-                                cx.notify();
-                            },
-                            crate::display::keymap::CaptureOutcome::ClearCustom => {
-                                this.keymap_clear_custom(row, cx);
-                            },
-                            crate::display::keymap::CaptureOutcome::Bind(combo) => {
-                                this.keymap_assign(row, combo, cx);
-                            },
-                            crate::display::keymap::CaptureOutcome::Pending => {},
-                        }
-                    },
-                ))
-                .on_modifiers_changed(cx.listener(
+                root.on_modifiers_changed(cx.listener(
                     |this, event: &ModifiersChangedEvent, _window, cx| {
                         if this.keymap_capture.is_none() {
                             return;

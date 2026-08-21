@@ -136,8 +136,8 @@ pub(crate) fn pick_private_key_file_with_hwnd(
 /// both use this exact classifier so a `.pub` file can never silently enter a
 /// profile just because the shell used a different native file-dialog API.
 pub(crate) fn validate_private_key_path(path: &std::path::Path) -> Result<PathBuf, String> {
-    let contents = std::fs::read(path)
-        .map_err(|err| format!("无法读取私钥 {}: {err}", path.display()))?;
+    let contents =
+        std::fs::read(path).map_err(|err| format!("无法读取私钥 {}: {err}", path.display()))?;
     match classify_private_key_contents(&contents) {
         PrivateKeyFileKind::PrivateKey => Ok(path.to_path_buf()),
         PrivateKeyFileKind::PublicKey => Err("请选择私钥文件，不要选择 .pub 公钥".to_owned()),

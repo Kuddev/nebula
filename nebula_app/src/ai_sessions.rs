@@ -218,9 +218,7 @@ fn record_hook_session_at(
 fn valid_registry_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn load_registry(path: &Path) -> SessionRegistry {

@@ -108,6 +108,7 @@ pub use state::{
     AcceptKey, AiSessionIdentity, CompletionStyle, NebulaCompletionItem, NebulaCompletionKind,
     NebulaConfirm, NebulaInlineImage, NebulaPaneState, NebulaShell, SplitDirection, SplitNav,
 };
+pub use suggest_engine::SuggestEnv;
 pub use toast::ToastKind;
 
 pub(crate) mod file_dialog;
@@ -155,12 +156,12 @@ pub(crate) struct RemoteBackupRequest {
 pub(crate) fn caret_blink_on() -> bool {
     ui::caret::is_on()
 }
-pub use settings::{
-    BgPickerPart, NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit,
-};
 pub(crate) use settings::{
     BACKGROUND_SWATCHES, CellWidthMode, NewTabPosition, SettingsOpacityTarget, hsv_to_rgb,
     rgb_to_hsv,
+};
+pub use settings::{
+    BgPickerPart, NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit,
 };
 #[cfg(feature = "gpui-shell")]
 pub(crate) use settings::{
@@ -360,10 +361,8 @@ fn apply_min_window_size(
         pad.1,
         nebula_terminal::term::MIN_SCREEN_LINES,
     );
-    window.set_min_inner_size(Some(LogicalSize::new(
-        (min_w / scale) as f64,
-        (min_h / scale) as f64,
-    )));
+    window
+        .set_min_inner_size(Some(LogicalSize::new((min_w / scale) as f64, (min_h / scale) as f64)));
 }
 
 /// 三条可拖拽的面板分界线（设置·交互的「拖拽调节」开关管辖）。
@@ -671,7 +670,11 @@ struct NebulaPowerlineIcon {
 /// the top in pin order. One function so startup and settings hot-reload
 /// build the exact same list — the GPUI shell reads the same authority
 /// (`pub(crate)`) instead of growing a second ordering policy.
-pub(crate) fn merge_ssh_hosts(saved: &[String], pinned: &[String], hidden: &[String]) -> Vec<String> {
+pub(crate) fn merge_ssh_hosts(
+    saved: &[String],
+    pinned: &[String],
+    hidden: &[String],
+) -> Vec<String> {
     let mut hosts: Vec<_> = saved.iter().filter(|host| !hidden.contains(host)).cloned().collect();
     for host in crate::ssh::ssh_config_hosts() {
         if !hidden.contains(&host) && !hosts.contains(&host) {
@@ -1262,10 +1265,10 @@ fn nebula_command_hint<'a>(commands: &'a [String], prefix: &str) -> Option<&'a s
             return None;
         }
         let (head, rem) = command.split_at(prefix.len());
-            #[cfg(windows)]
-            let matches = head.eq_ignore_ascii_case(prefix);
-            #[cfg(not(windows))]
-            let matches = head == prefix;
+        #[cfg(windows)]
+        let matches = head.eq_ignore_ascii_case(prefix);
+        #[cfg(not(windows))]
+        let matches = head == prefix;
 
         matches.then_some(rem)
     })
@@ -1294,10 +1297,10 @@ fn nebula_command_hints<'a>(commands: &'a [String], prefix: &str, limit: usize) 
             if exact != exact_only {
                 continue;
             }
-        #[cfg(windows)]
-        let matches = head.eq_ignore_ascii_case(prefix);
-        #[cfg(not(windows))]
-        let matches = head == prefix;
+            #[cfg(windows)]
+            let matches = head.eq_ignore_ascii_case(prefix);
+            #[cfg(not(windows))]
+            let matches = head == prefix;
 
             #[cfg(windows)]
             let duplicate = out.iter().any(|seen| seen.eq_ignore_ascii_case(command));
@@ -2194,13 +2197,7 @@ impl Display {
         // content into hundreds of soft-wrapped rows that overflow the
         // scrollback (data loss no reflow can undo).
         #[cfg(windows)]
-        apply_min_window_size(
-            &window,
-            config,
-            cell_width,
-            cell_height,
-            settings_init.sidebar_w,
-        );
+        apply_min_window_size(&window, config, cell_width, cell_height, settings_init.sidebar_w);
 
         // Create renderer.
         let mut renderer = Renderer::new(&context, config.debug.renderer)?;
@@ -3871,8 +3868,7 @@ impl Display {
         }
         // 密文槽允许内部空格（trim 在保存侧）；其余槽拒绝空白——URL、
         // 路径、区域名里出现空格只会是误粘贴。
-        let secret =
-            crate::backup_remote::secret_field(self.nebula_backup_protocol) == Some(index);
+        let secret = crate::backup_remote::secret_field(self.nebula_backup_protocol) == Some(index);
         if ch.is_whitespace() && !secret {
             return;
         }
@@ -3913,12 +3909,10 @@ impl Display {
                         &secret,
                     )
                 },
-                crate::backup_remote::BackupProtocol::S3 => {
-                    crate::backup_remote::store_s3_secret(
-                        self.nebula_backup_remote_inputs[3].trim(),
-                        &secret,
-                    )
-                },
+                crate::backup_remote::BackupProtocol::S3 => crate::backup_remote::store_s3_secret(
+                    self.nebula_backup_remote_inputs[3].trim(),
+                    &secret,
+                ),
                 _ => return,
             };
             match result {
@@ -3974,11 +3968,8 @@ impl Display {
             self.window.request_redraw();
             return;
         }
-        self.nebula_backup_operation = Some(if upload {
-            BackupOperation::RemotePush
-        } else {
-            BackupOperation::RemotePull
-        });
+        self.nebula_backup_operation =
+            Some(if upload { BackupOperation::RemotePush } else { BackupOperation::RemotePull });
         self.nebula_backup_passphrase.clear();
         self.nebula_backup_passphrase_select_all.clear();
         self.nebula_backup_status = None;
@@ -4102,8 +4093,16 @@ impl Display {
                 self.nebula_backup_status = Some((
                     self.ui_language()
                         .pick(
-                            if upload { "备份上传中…" } else { "正在取回远端备份…" },
-                            if upload { "Uploading backup…" } else { "Fetching remote backup…" },
+                            if upload {
+                                "备份上传中…"
+                            } else {
+                                "正在取回远端备份…"
+                            },
+                            if upload {
+                                "Uploading backup…"
+                            } else {
+                                "Fetching remote backup…"
+                            },
                         )
                         .to_owned(),
                     false,
@@ -8318,13 +8317,7 @@ impl Display {
     /// zooms to a 21px one.
     #[cfg(windows)]
     fn apply_min_window_size(&self, config: &UiConfig, cell_width: f32, cell_height: f32) {
-        apply_min_window_size(
-            &self.window,
-            config,
-            cell_width,
-            cell_height,
-            self.nebula_sidebar_w,
-        );
+        apply_min_window_size(&self.window, config, cell_width, cell_height, self.nebula_sidebar_w);
     }
 
     /// Reset glyph cache.
@@ -8628,7 +8621,9 @@ impl Display {
             && selection_range.is_none()
         {
             let visible_cursor = term::point_to_viewport_from(viewport_origin, cursor_point)
-                .filter(|point| point.line < view.screen_lines() && point.column.0 < view.columns());
+                .filter(|point| {
+                    point.line < view.screen_lines() && point.column.0 < view.columns()
+                });
             terminal_math::scan_visible(
                 &mut pane_state.terminal_math,
                 &terminal,
@@ -8762,8 +8757,9 @@ impl Display {
         self.damage_tracker.next_frame().mark_fully_damaged();
 
         let vi_cursor_viewport_point = vi_cursor_point.and_then(|cursor| {
-            term::point_to_viewport_from(viewport_origin, cursor)
-                .filter(|point| point.line < size_info.screen_lines() && point.column.0 < size_info.columns())
+            term::point_to_viewport_from(viewport_origin, cursor).filter(|point| {
+                point.line < size_info.screen_lines() && point.column.0 < size_info.columns()
+            })
         });
         self.damage_tracker.damage_vi_cursor(vi_cursor_viewport_point);
         self.damage_tracker.damage_selection(selection_range, display_offset);
@@ -8966,8 +8962,9 @@ impl Display {
             None => {
                 let num_lines = size_info.screen_lines();
                 match vi_cursor_viewport_point {
-                    None => term::point_to_viewport_from(viewport_origin, cursor_point)
-                        .filter(|point| point.line < num_lines && point.column.0 < size_info.columns()),
+                    None => term::point_to_viewport_from(viewport_origin, cursor_point).filter(
+                        |point| point.line < num_lines && point.column.0 < size_info.columns(),
+                    ),
                     point => point,
                 }
             },
@@ -10405,7 +10402,7 @@ impl Display {
         state.suggestion.clear();
         state.suggestion_key.clear();
         state.completion_items.clear();
-        state.completion_selected = 0;
+        state.completion_selected = None;
         nebula_debug_log(format!("input_char c={c:?} line_buf={:?}", state.line_buf));
     }
 
@@ -10646,7 +10643,7 @@ impl Display {
     fn draw_completion_popup(
         &mut self,
         items: &[NebulaCompletionItem],
-        selected: usize,
+        selected: Option<usize>,
         anchor: Point<usize>,
         size_info: &SizeInfo,
         term_bg: Rgb,
@@ -10669,8 +10666,10 @@ impl Display {
         if rows == 0 {
             return;
         }
-        // When the list is cut short keep the selected row visible.
-        let offset = if selected >= rows { selected + 1 - rows } else { 0 };
+        // When the list is cut short keep an explicitly selected row visible.
+        let selected = selected.filter(|index| *index < items.len());
+        let offset =
+            selected.filter(|index| *index >= rows).map(|index| index + 1 - rows).unwrap_or(0);
 
         let language = self.nebula_language;
         let tag = |kind: NebulaCompletionKind| -> &'static str {
@@ -10681,9 +10680,16 @@ impl Display {
                 NebulaCompletionKind::File => language.pick("文件", "file"),
             }
         };
-        let cell_width = |text: &str| -> usize {
-            text.chars().map(|c| c.width().unwrap_or(0)).sum()
+        let icon = |kind: NebulaCompletionKind| -> char {
+            match kind {
+                NebulaCompletionKind::History => '↶',
+                NebulaCompletionKind::Command => '›',
+                NebulaCompletionKind::Dir => '/',
+                NebulaCompletionKind::File => '·',
+            }
         };
+        let cell_width =
+            |text: &str| -> usize { text.chars().map(|c| c.width().unwrap_or(0)).sum() };
 
         let visible = &items[offset..(offset + rows).min(items.len())];
         let tag_w = visible.iter().map(|item| cell_width(tag(item.kind))).max().unwrap_or(0);
@@ -10701,7 +10707,7 @@ impl Display {
         }
         let width = full_w.min(avail);
         let label_w = width.saturating_sub(tag_w + 4);
-        if label_w < 4 {
+        if label_w == 0 {
             return;
         }
 
@@ -10709,27 +10715,68 @@ impl Display {
         let opaque = |c: Rgb| Rgba::new(c.r, c.g, c.b, 255);
         let rgb = |c: Rgba| Rgb::new(c.r, c.g, c.b);
         let row_bg = rgb(ui::icons::blend_over(opaque(term_bg), sk.panel));
-        let (sel_bg, sel_fg) = (sk.accent, sk.ink_on_accent);
+        let scale = self.window.scale_factor as f32;
+        let cell_w = size_info.cell_width();
+        let cell_h = size_info.cell_height();
+        let content_x = size_info.padding_x() + start_col as f32 * cell_w;
+        let content_y = size_info.padding_y() + start_line as f32 * cell_h;
+        let content_w = width as f32 * cell_w;
+        let content_h = rows as f32 * cell_h;
+        let panel_pad = (4.0 * scale).round();
+        let panel = (
+            content_x - panel_pad,
+            content_y - panel_pad,
+            content_w + panel_pad * 2.0,
+            content_h + panel_pad * 2.0,
+        );
+        let mut quads = Vec::with_capacity(4);
+        ui::surface::push_surface_with_radius(
+            &mut quads,
+            panel,
+            (0.0, 0.0, size_info.width(), size_info.height()),
+            0.0,
+            scale,
+            &sk,
+            ui::surface::Elevation::Menu,
+            1.0,
+            8.0,
+        );
+        if let Some(selected) = selected.filter(|index| *index >= offset && *index < offset + rows)
+        {
+            let row = selected - offset;
+            quads.push(UiQuad::solid(
+                content_x,
+                content_y + row as f32 * cell_h,
+                content_w,
+                cell_h,
+                6.0 * scale,
+                sk.accent_soft,
+            ));
+        }
+        self.renderer.draw_ui(size_info, &quads);
 
         for (row, item) in visible.iter().enumerate() {
             let line = start_line + row;
             if line >= screen_lines {
                 break;
             }
-            let is_selected = offset + row == selected;
-            let (bg, label_fg, tag_fg) = if is_selected {
-                (sel_bg, sel_fg, sel_fg)
+            let is_selected = Some(offset + row) == selected;
+            let (label_fg, tag_fg, style) = if is_selected {
+                (sk.ink_strong, sk.ink_strong, Flags::BOLD)
             } else {
-                (row_bg, sk.ink, sk.ink_faint)
+                (sk.ink, sk.ink_faint, Flags::empty())
             };
-            let label = format!(" {}", nebula_pad_to_cells(&item.label, label_w + 2));
+            let label =
+                format!("{} {}", icon(item.kind), nebula_pad_to_cells(&item.label, label_w + 1));
             let tag_text = format!("{} ", nebula_pad_to_cells(tag(item.kind), tag_w));
             let glyph_cache = &mut self.glyph_cache;
-            self.renderer.draw_string(
+            self.renderer.draw_string_styled(
                 Point::new(line, Column(start_col)),
                 label_fg,
-                bg,
+                row_bg,
                 label.chars(),
+                style,
+                0.0,
                 size_info,
                 glyph_cache,
             );
@@ -10737,11 +10784,13 @@ impl Display {
             // renderer clips at the grid edge regardless.
             let tag_col = start_col + 1 + label_w + 2;
             let glyph_cache = &mut self.glyph_cache;
-            self.renderer.draw_string(
+            self.renderer.draw_string_styled(
                 Point::new(line, Column(tag_col)),
                 tag_fg,
-                bg,
+                row_bg,
                 tag_text.chars(),
+                Flags::empty(),
+                0.0,
                 size_info,
                 glyph_cache,
             );

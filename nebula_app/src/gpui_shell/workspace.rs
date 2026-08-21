@@ -54,9 +54,9 @@ mod top_tabs;
 
 use tab_drag::{TabDrag, TabDragAxis};
 
-use agents::{ai_session_palette_rows, restored_agent_command};
 #[cfg(test)]
 use agents::ai_hook_target_pane;
+use agents::{ai_session_palette_rows, restored_agent_command};
 
 gpui::actions!(
     nebula_workspace,
@@ -123,6 +123,7 @@ const STATIC_DEFAULT_COMBOS: &[&str] = &[
     "ctrl--",
     "ctrl-0",
     "ctrl-shift-c",
+    "ctrl-v",
     "ctrl-shift-v",
     "alt-enter",
     "ctrl-shift-o",
@@ -210,6 +211,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl--", DecreaseFontSize, None),
         KeyBinding::new("ctrl-0", ResetFontSize, None),
         KeyBinding::new("ctrl-shift-c", CopySelection, None),
+        KeyBinding::new("ctrl-v", PasteClipboard, None),
         KeyBinding::new("ctrl-shift-v", PasteClipboard, None),
         KeyBinding::new("alt-enter", ToggleFullscreen, None),
         KeyBinding::new("ctrl-shift-o", OpenQuickJump, None),
@@ -540,8 +542,8 @@ fn shell_palette_rows(
     }
     let ssh_icons = ssh_host_icon_ids();
     rows.extend(ssh_hosts.into_iter().map(|host| {
-        let glyph = crate::display::ui::os_icons::resolve(ssh_icons.get(&host).map(String::as_str))
-            .glyph;
+        let glyph =
+            crate::display::ui::os_icons::resolve(ssh_icons.get(&host).map(String::as_str)).glyph;
         WorkspacePaletteRow {
             group_order: 2,
             group: ssh_group.to_owned(),
@@ -1245,6 +1247,63 @@ impl NebulaWorkspace {
         cx.notify();
     }
 
+    /// 在同一 tab、同一分屏位置替换失败的 SSH pane。先把新实体及订阅完整
+    /// 建好，再原子替换树叶和 pane 所有权；旧实体的异步泵只会更新旧 Entity，
+    /// 因而无法把迟到的 Failed/Ready 写进新连接。
+    fn retry_ssh_pane(
+        &mut self,
+        tab_ix: usize,
+        pane_id: u64,
+        destination: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(WorkspaceTab::Terminal { panes, .. }) = self.tabs.get(tab_ix) else { return };
+        let Some(old) = panes.iter().find(|pane| pane.id == pane_id) else { return };
+        let grid = {
+            let view = old.view.read(cx);
+            if view.ssh_destination.as_deref() != Some(destination.as_str()) {
+                return;
+            }
+            (view.grid_cols() as u16, view.grid_rows() as u16)
+        };
+
+        let launch = crate::gpui_shell::terminal::view::TerminalLaunch::Ssh {
+            destination: destination.clone(),
+        };
+        let replacement = self.new_pane(grid, launch, None, window, cx);
+        let replacement_id = replacement.id;
+        let old = {
+            let Some(WorkspaceTab::Terminal { panes, tree, focused, .. }) =
+                self.tabs.get_mut(tab_ix)
+            else {
+                replacement.view.read(cx).shutdown();
+                return;
+            };
+            let Some(index) = panes.iter().position(|pane| pane.id == pane_id) else {
+                replacement.view.read(cx).shutdown();
+                return;
+            };
+            if !tree.replace_leaf(pane_id, replacement_id) {
+                replacement.view.read(cx).shutdown();
+                return;
+            }
+            if *focused == pane_id {
+                *focused = replacement_id;
+            }
+            std::mem::replace(&mut panes[index], replacement)
+        };
+
+        self.runtime_hub.record_pane_closed(self.runtime_window_id, pane_id);
+        self.pane_bounds.borrow_mut().remove(&pane_id);
+        old.view.read(cx).shutdown();
+        if tab_ix == self.active {
+            self.focus_active(window, cx);
+            self.sync_side_panel_to_active(true, cx);
+        }
+        cx.notify();
+    }
+
     /// 在聚焦 pane 上开分屏（ctrl+shift+d / ctrl+shift+s，对齐旧壳
     /// SplitRight/SplitDown）：新 pane 继承聚焦 pane 的 cwd，spawn 网格按
     /// 切割方向对半预估——首帧 prepaint 回写真实矩形后自动收敛。
@@ -1634,9 +1693,10 @@ impl NebulaWorkspace {
             let pane = self.new_pane(grid, launch, command, window, cx);
             // 冷恢复已经知道这段对话的 hook 身份：种回 view，右键「分叉
             // AI 会话」不必再等下一条带 session_id 的 hook。
-            if let Some((source, session_id)) = agent.as_ref().and_then(|agent| {
-                Some((agent.source.clone(), agent.session_id.clone()?))
-            }) {
+            if let Some((source, session_id)) = agent
+                .as_ref()
+                .and_then(|agent| Some((agent.source.clone(), agent.session_id.clone()?)))
+            {
                 pane.view.update(cx, |view, cx| view.seed_ai_session(source, session_id, cx));
             }
             panes.push(pane);
@@ -1793,10 +1853,8 @@ impl NebulaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let is_markdown = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
+        let is_markdown =
+            path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
                 matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown")
             });
         if crate::display::image_viewer::viewable_file(&path) {
@@ -1927,6 +1985,11 @@ impl NebulaWorkspace {
             TerminalViewEvent::RequestClose => {
                 if let Some((tab_ix, pane_id)) = self.locate_pane(view.entity_id()) {
                     self.request_close_pane(tab_ix, pane_id, window, cx);
+                }
+            },
+            TerminalViewEvent::RetrySsh(destination) => {
+                if let Some((tab_ix, pane_id)) = self.locate_pane(view.entity_id()) {
+                    self.retry_ssh_pane(tab_ix, pane_id, destination.clone(), window, cx);
                 }
             },
             TerminalViewEvent::FontSizeChanged => self.apply_runtime_settings(cx),
@@ -2829,9 +2892,7 @@ impl NebulaWorkspace {
                     .when(is_git_vcs, |button| button.icon(IconName::GitHub))
                     .small()
                     .selected(git)
-                    .when(git_count > 0, |button| {
-                        button.label(format!("{vcs_name} {git_count}"))
-                    })
+                    .when(git_count > 0, |button| button.label(format!("{vcs_name} {git_count}")))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.select_side_panel_view(PanelView::Git, cx);
                     })),
@@ -3019,15 +3080,21 @@ impl NebulaWorkspace {
                                     .map(|button| {
                                         if discard_armed {
                                             button
-                                                .label(if svn_revert { "确认还原" } else { "确认丢弃" })
+                                                .label(if svn_revert {
+                                                    "确认还原"
+                                                } else {
+                                                    "确认丢弃"
+                                                })
                                                 .danger()
                                                 .xsmall()
                                         } else {
-                                            button
-                                                .icon(IconName::Undo2)
-                                                .ghost()
-                                                .xsmall()
-                                                .tooltip(if svn_revert { "还原 SVN 改动" } else { "丢弃改动" })
+                                            button.icon(IconName::Undo2).ghost().xsmall().tooltip(
+                                                if svn_revert {
+                                                    "还原 SVN 改动"
+                                                } else {
+                                                    "丢弃改动"
+                                                },
+                                            )
                                         }
                                     })
                                     .when(!discard_armed, |button| {
@@ -3088,11 +3155,13 @@ impl NebulaWorkspace {
                                     .tooltip("添加到 SVN")
                                     .invisible()
                                     .group_hover(row_group.clone(), |button| button.visible())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.vcs_discard_confirm = None;
-                                        this.side_panel.svn_add_path(&svn_add_path);
-                                        cx.notify();
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.vcs_discard_confirm = None;
+                                            this.side_panel.svn_add_path(&svn_add_path);
+                                            cx.notify();
+                                        },
+                                    )),
                                 )
                             })
                             .when(svn_resolve, |row| {
@@ -3106,11 +3175,13 @@ impl NebulaWorkspace {
                                     .tooltip("保留当前内容并标记冲突已解决")
                                     .invisible()
                                     .group_hover(row_group.clone(), |button| button.visible())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.vcs_discard_confirm = None;
-                                        this.side_panel.svn_resolve_path(&resolve_path);
-                                        cx.notify();
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.vcs_discard_confirm = None;
+                                            this.side_panel.svn_resolve_path(&resolve_path);
+                                            cx.notify();
+                                        },
+                                    )),
                                 )
                             })
                             .when(ops == RowOps::Staged, |row| {
@@ -3138,9 +3209,7 @@ impl NebulaWorkspace {
                                 cx.notify();
                             }))
                             .on_double_click(cx.listener(move |this, _, window, cx| {
-                                if !svn_diff
-                                    || !this.side_panel.svn_diff_path(&diff_path)
-                                {
+                                if !svn_diff || !this.side_panel.svn_diff_path(&diff_path) {
                                     // Git 与未版本化 SVN 文件仍走现有文档路由。
                                     this.open_document_path(open_path.clone(), window, cx);
                                 }
@@ -3180,10 +3249,8 @@ impl NebulaWorkspace {
                 })
         });
 
-        let repository_notice = git
-            .as_ref()
-            .filter(|info| info.vcs == VcsKind::SvnRepository)
-            .map(|info| {
+        let repository_notice =
+            git.as_ref().filter(|info| info.vcs == VcsKind::SvnRepository).map(|info| {
                 let path = info
                     .repository_root
                     .as_ref()
@@ -3210,24 +3277,21 @@ impl NebulaWorkspace {
                 VcsKind::SvnRepository => false,
             });
         let svn_add_ready = git.as_ref().is_some_and(|info| info.svn_add_ready());
-        let commit_row = git
-            .as_ref()
-            .filter(|info| info.vcs != VcsKind::SvnRepository)
-            .map(|_| {
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.git_commit_input)))
-                    .child(
-                        Button::new("vcs-commit")
-                            .label("提交")
-                            .small()
-                            .disabled(!commit_ready)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.submit_vcs_commit(window, cx);
-                            })),
-                    )
-            });
+        let commit_row = git.as_ref().filter(|info| info.vcs != VcsKind::SvnRepository).map(|_| {
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(div().flex_1().min_w_0().child(Input::new(&self.git_commit_input)))
+                .child(
+                    Button::new("vcs-commit")
+                        .label("提交")
+                        .small()
+                        .disabled(!commit_ready)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.submit_vcs_commit(window, cx);
+                        })),
+                )
+        });
         let action_strip = match vcs {
             Some(VcsKind::Git) => Some(
                 h_flex()
@@ -3295,14 +3359,12 @@ impl NebulaWorkspace {
                             })),
                     )
                     .child(
-                        Button::new("svn-log")
-                            .label("日志")
-                            .small()
-                            .disabled(op_running)
-                            .on_click(cx.listener(|this, _, _, cx| {
+                        Button::new("svn-log").label("日志").small().disabled(op_running).on_click(
+                            cx.listener(|this, _, _, cx| {
                                 this.side_panel.svn_log();
                                 cx.notify();
-                            })),
+                            }),
+                        ),
                     )
                     .child(
                         Button::new("svn-cleanup")
@@ -3321,15 +3383,12 @@ impl NebulaWorkspace {
                 h_flex()
                     .gap_1()
                     .items_center()
-                    .child(
-                        Button::new("svn-browse-repository")
-                            .label("浏览仓库")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_panel.svn_browse_repository();
-                                cx.notify();
-                            })),
-                    )
+                    .child(Button::new("svn-browse-repository").label("浏览仓库").small().on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.side_panel.svn_browse_repository();
+                            cx.notify();
+                        }),
+                    ))
                     .child(
                         Button::new("svn-checkout-repository")
                             .label("检出工作副本")
@@ -3343,11 +3402,8 @@ impl NebulaWorkspace {
             ),
             None => None,
         };
-        let vcs_label = if matches!(vcs, Some(VcsKind::Svn | VcsKind::SvnRepository)) {
-            "SVN"
-        } else {
-            "Git"
-        };
+        let vcs_label =
+            if matches!(vcs, Some(VcsKind::Svn | VcsKind::SvnRepository)) { "SVN" } else { "Git" };
 
         v_flex()
             .h_full()
@@ -3637,7 +3693,6 @@ impl NebulaWorkspace {
         })
         .detach();
     }
-
 
     /// Terminal tab 的内容区：单叶直渲、缩放态聚焦 pane 满卡，否则按
     /// 分屏树递归铺陈。
@@ -3976,10 +4031,16 @@ impl Render for NebulaWorkspace {
             .on_mouse_move(cx.listener(|this, event, window, cx| {
                 this.continue_pending_tab_drag(event, window, cx);
             }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.release_tab_drag(window, cx)),
-            )
+            // 旧壳在窗口级 mouse-up 无条件结束 tab drag。这里必须走 capture：
+            // TerminalView 可能在 bubble phase 消费释放，导致 dock 永远不提交。
+            .capture_any_mouse_up(cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
+                if event.button == MouseButton::Left
+                    && this.release_tab_drag_at(event.position, window, cx)
+                {
+                    // 真拖拽已经完成，不能再让源 tab 的 click 或终端选择收到释放。
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 this.add_terminal(window, cx);
             }))
@@ -4056,7 +4117,11 @@ impl Render for NebulaWorkspace {
                 this.bump_font_size(0.0, cx);
             }))
             .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
-                this.copy_focused_terminal(window, cx);
+                if !this.copy_focused_terminal(window, cx) {
+                    // Copy 是条件动作：无有效选区时继续派发原始 KeyDownEvent，
+                    // 让 Ctrl+C 等自定义组合键按终端原义进入 PTY。
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &PasteClipboard, window, cx| {
                 this.paste_focused_terminal(window, cx);

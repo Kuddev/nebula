@@ -3,7 +3,7 @@
 //! 左侧栏和顶部栏共享同一套存储顺序与 dock 语义；差别只有列表轴和每格
 //! 步距，因此拖拽状态捕获这两个量，而不是复制两套状态机。
 
-use gpui::{Context, MouseButton, Window};
+use gpui::{Context, MouseButton, Pixels, Point, Window};
 use nebula_split::{SplitNav, SplitTree};
 
 use super::{NebulaWorkspace, TAB_DRAG_THRESHOLD, WorkspaceTab, dock_tree};
@@ -54,6 +54,24 @@ impl NebulaWorkspace {
         }
     }
 
+    /// 释放事件走 workspace 根节点的 capture phase，确保终端子元素即使吞掉
+    /// bubble 事件，dock 仍能按松手位置完成。最后位置必须再算一次：激活
+    /// overlay 需要下一帧，快速拖放可能没有任何一次 move 落到 overlay 上。
+    pub(super) fn release_tab_drag_at(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.tab_drag.is_none() {
+            return false;
+        }
+        self.update_tab_drag_position(f32::from(position.x), f32::from(position.y), cx);
+        let active = self.tab_drag.as_ref().is_some_and(|drag| drag.active);
+        self.release_tab_drag(window, cx);
+        active
+    }
+
     /// 源下标加单轴位移换算出的整槽数；越过半格即换位。
     pub(super) fn drag_slot(drag: &TabDrag, len: usize) -> usize {
         let slots = (drag.offset / drag.pitch.max(1.0)).round() as isize;
@@ -73,15 +91,18 @@ impl NebulaWorkspace {
             self.finish_tab_drag(window, cx);
             return;
         }
+        self.update_tab_drag_position(f32::from(event.position.x), f32::from(event.position.y), cx);
+    }
+
+    fn update_tab_drag_position(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
         let len = self.tabs.len();
         // dock 必须在可变借用 drag 前计算；只有两个 Terminal tab 之间允许。
         let source = self.tab_drag.as_ref().map(|drag| drag.source);
-        let dock = source.filter(|&source| self.dock_allowed(source)).and_then(|_| {
-            self.dock_nav_at(f32::from(event.position.x), f32::from(event.position.y))
-        });
+        let dock =
+            source.filter(|&source| self.dock_allowed(source)).and_then(|_| self.dock_nav_at(x, y));
         let drag = self.tab_drag.as_mut().expect("checked above");
-        let dx = f32::from(event.position.x) - drag.press_x;
-        let dy = f32::from(event.position.y) - drag.press_y;
+        let dx = x - drag.press_x;
+        let dy = y - drag.press_y;
         if !drag.active && (dy.abs() >= TAB_DRAG_THRESHOLD || dx.abs() >= TAB_DRAG_THRESHOLD) {
             drag.active = true;
         }

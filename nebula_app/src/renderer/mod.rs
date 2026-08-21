@@ -246,6 +246,33 @@ impl Renderer {
         size_info: &SizeInfo,
         glyph_cache: &mut GlyphCache,
     ) {
+        self.draw_string_styled(
+            point,
+            fg,
+            bg,
+            string_chars,
+            Flags::empty(),
+            1.0,
+            size_info,
+            glyph_cache,
+        );
+    }
+
+    /// Grid-aligned string with explicit typeface flags and background alpha.
+    /// Completion popovers use transparent cells so their rounded surface and
+    /// selection quads are not overwritten by rectangular glyph backgrounds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_string_styled(
+        &mut self,
+        point: Point<usize>,
+        fg: Rgb,
+        bg: Rgb,
+        string_chars: impl Iterator<Item = char>,
+        style: Flags,
+        bg_alpha: f32,
+        size_info: &SizeInfo,
+        glyph_cache: &mut GlyphCache,
+    ) {
         // Lay out by display width: a wide char occupies two columns and is
         // flagged so the glyph rasterizes double-width. The input is a plain
         // string — nothing here consumes "spacer" characters; treating the
@@ -260,13 +287,16 @@ impl Renderer {
             if width == 0 || point.column.0 + offset + width > columns {
                 return None;
             }
-            let flags = if width == 2 { Flags::WIDE_CHAR } else { Flags::empty() };
+            let mut flags = style;
+            if width == 2 {
+                flags.insert(Flags::WIDE_CHAR);
+            }
             let cell = RenderableCell {
                 point: Point::new(point.line, point.column + offset),
                 character,
                 extra: None,
                 flags,
-                bg_alpha: 1.0,
+                bg_alpha,
                 fg,
                 bg,
                 underline: fg,

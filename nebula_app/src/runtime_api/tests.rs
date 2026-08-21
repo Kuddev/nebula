@@ -661,3 +661,246 @@ fn agents_list_projection_keeps_window_and_tab_identity() {
         Some("thread-7")
     );
 }
+
+#[test]
+fn orchestrate_accepts_typed_backward_references() {
+    let params = json!({
+        "steps": [
+            { "id": "right", "op": "split", "direction": "left_right" },
+            {
+                "id": "weather",
+                "op": "agent_launch",
+                "target": { "step": "right", "field": "pane_id" },
+                "name": "weather",
+                "kind": "claude",
+                "initial_prompt": "查询天气"
+            }
+        ]
+    });
+    super::orchestrate::validate_params(&params).unwrap();
+}
+
+#[test]
+fn orchestrate_rejects_unknown_fields_duplicate_ids_and_future_references() {
+    let unknown = json!({
+        "steps": [
+            { "id": "right", "op": "split", "direction": "left_right", "method": "pane.split" }
+        ]
+    });
+    assert_eq!(super::orchestrate::validate_params(&unknown).unwrap_err().code, "invalid_params");
+
+    let duplicate = json!({
+        "steps": [
+            { "id": "same", "op": "new_tab" },
+            { "id": "same", "op": "split", "direction": "top_bottom" }
+        ]
+    });
+    assert_eq!(super::orchestrate::validate_params(&duplicate).unwrap_err().code, "invalid_params");
+
+    let future = json!({
+        "steps": [
+            {
+                "id": "prompt",
+                "op": "prompt",
+                "target": { "step": "later", "field": "pane_id" },
+                "text": "hello"
+            },
+            { "id": "later", "op": "new_tab" }
+        ]
+    });
+    assert_eq!(super::orchestrate::validate_params(&future).unwrap_err().code, "invalid_reference");
+
+    let self_reference = json!({
+        "steps": [{
+            "id": "self",
+            "op": "prompt",
+            "target": { "step": "self", "field": "pane_id" },
+            "text": "hello"
+        }]
+    });
+    assert_eq!(
+        super::orchestrate::validate_params(&self_reference).unwrap_err().code,
+        "invalid_reference"
+    );
+}
+
+#[test]
+fn orchestrate_keeps_prompt_and_command_input_boundaries() {
+    let multiline_prompt = json!({
+        "steps": [{
+            "id": "prompt",
+            "op": "prompt",
+            "target": { "pane_id": 3 },
+            "text": "first\nsecond"
+        }]
+    });
+    assert_eq!(
+        super::orchestrate::validate_params(&multiline_prompt).unwrap_err().code,
+        "invalid_params"
+    );
+
+    let escaped_command = json!({
+        "steps": [{
+            "id": "run",
+            "op": "run",
+            "target": { "pane_id": 3 },
+            "command": "echo ok\u{001b}[2J"
+        }]
+    });
+    assert_eq!(
+        super::orchestrate::validate_params(&escaped_command).unwrap_err().code,
+        "invalid_params"
+    );
+}
+
+#[test]
+fn agent_start_can_bind_an_existing_pane_but_not_replace_its_cwd() {
+    let existing = ApiRequest::new(
+        "token".into(),
+        "agent.start",
+        json!({ "window_id": 7, "pane_id": 3, "name": "worker", "kind": "codex" }),
+    );
+    assert!(matches!(
+        RuntimeCommand::from_request(&existing),
+        Ok(RuntimeCommand::AgentStart { window_id: Some(7), pane_id: Some(3), .. })
+    ));
+
+    let invalid = ApiRequest::new(
+        "token".into(),
+        "agent.start",
+        json!({
+            "window_id": 7,
+            "pane_id": 3,
+            "name": "worker",
+            "kind": "codex",
+            "cwd": "D:/other"
+        }),
+    );
+    assert_eq!(RuntimeCommand::from_request(&invalid).unwrap_err().code, "invalid_params");
+}
+
+#[test]
+fn agent_ready_requires_observed_process_identity() {
+    let hub = RuntimeHub::new();
+    let agent = hub
+        .register_agent("worker".into(), crate::ai_agents::AgentKind::Codex, 7, 3, None, None)
+        .unwrap();
+    hub.publish(snapshot(RuntimeTaskState::Idle));
+    let error = super::orchestrate::wait_agent_ready(
+        &hub,
+        &agent.agent_id,
+        agent.generation,
+        Instant::now() + Duration::from_millis(5),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "agent_ready_timeout");
+
+    let mut detected = snapshot(RuntimeTaskState::Idle);
+    detected.windows[0].tabs[0].panes[0].agent = Some(detected_agent("codex", None));
+    hub.publish(detected);
+    let (ready, state) = super::orchestrate::wait_agent_ready(
+        &hub,
+        &agent.agent_id,
+        agent.generation,
+        Instant::now() + Duration::from_millis(50),
+    )
+    .unwrap();
+    assert!(ready.observed);
+    assert_eq!(state, RuntimeTaskState::Idle);
+}
+
+#[test]
+fn orchestrate_receipt_preserves_partial_success() {
+    let sink = EventSink::Callback(Arc::new(|callback| {
+        let RuntimeCallback::Control(dispatch) = callback else { return };
+        match &dispatch.command {
+            RuntimeCommand::NewTab { .. } => dispatch.respond(Ok(json!({
+                "action": { "window_id": 7, "pane_id": 9 },
+                "snapshot": null
+            }))),
+            RuntimeCommand::Prompt { .. } => {
+                dispatch.respond(Err(ApiError::new("input_in_progress", "pane is busy")))
+            },
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }));
+    let receipt = super::orchestrate::execute_for_test(
+        &json!({
+            "steps": [
+                { "id": "tab", "op": "new_tab" },
+                {
+                    "id": "prompt",
+                    "op": "prompt",
+                    "target": { "step": "tab", "field": "pane_id" },
+                    "text": "hello"
+                }
+            ]
+        }),
+        &sink,
+        &RuntimeHub::new(),
+    )
+    .unwrap();
+    assert_eq!(receipt["ok"], false);
+    assert_eq!(receipt["partial"], true);
+    assert_eq!(receipt["completed"], 1);
+    assert_eq!(receipt["failed_step"], "prompt");
+    assert_eq!(receipt["steps"][0]["action"]["pane_id"], 9);
+    assert_eq!(receipt["steps"][1]["error"]["code"], "input_in_progress");
+}
+
+#[test]
+fn orchestrate_does_not_expose_agent_receipt_before_ready() {
+    let hub = RuntimeHub::new();
+    hub.publish(snapshot(RuntimeTaskState::Idle));
+    let prompt_dispatches = Arc::new(AtomicUsize::new(0));
+    let sink_hub = hub.clone();
+    let sink_prompt_dispatches = prompt_dispatches.clone();
+    let sink = EventSink::Callback(Arc::new(move |callback| {
+        let RuntimeCallback::Control(dispatch) = callback else {
+            return;
+        };
+        match &dispatch.command {
+            RuntimeCommand::AgentStart { pane_id: Some(pane_id), name, kind, .. } => {
+                let agent =
+                    sink_hub.register_agent(name.clone(), *kind, 7, *pane_id, None, None).unwrap();
+                dispatch.respond(Ok(json!({
+                    "action": { "agent": agent, "window_id": 7, "pane_id": pane_id },
+                    "snapshot": null
+                })));
+            },
+            RuntimeCommand::Prompt { .. } | RuntimeCommand::AgentPrompt { .. } => {
+                sink_prompt_dispatches.fetch_add(1, Ordering::Relaxed);
+                dispatch.respond(Ok(json!({ "action": {} })));
+            },
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }));
+    let receipt = super::orchestrate::execute_for_test(
+        &json!({
+            "steps": [
+                {
+                    "id": "agent",
+                    "op": "agent_launch",
+                    "target": { "window_id": 7, "pane_id": 3 },
+                    "name": "worker",
+                    "kind": "codex",
+                    "initial_prompt": "first task",
+                    "ready_timeout_ms": 5
+                },
+                {
+                    "id": "too_early",
+                    "op": "prompt",
+                    "target": { "step": "agent", "field": "pane_id" },
+                    "text": "must not dispatch"
+                }
+            ]
+        }),
+        &sink,
+        &hub,
+    )
+    .unwrap();
+    assert_eq!(prompt_dispatches.load(Ordering::Relaxed), 0);
+    assert_eq!(receipt["failed_step"], "agent");
+    assert_eq!(receipt["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(receipt["steps"][0]["error"]["code"], "agent_ready_timeout");
+}

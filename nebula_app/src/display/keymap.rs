@@ -466,8 +466,8 @@ pub(crate) fn capture_gpui(keystroke: &::gpui::Keystroke) -> CaptureOutcome {
         "backspace" if mods.is_empty() => return CaptureOutcome::ClearCustom,
         // 裸修饰键按下在 Windows 走 ModifiersChanged 而非 KeyDown，这里
         // 兜住其它平台的命名差异（"control"/"super"/"meta"…）。
-        "control" | "ctrl" | "shift" | "alt" | "alternate" | "super" | "meta"
-        | "command" | "win" | "function" | "capslock" | "numlock" | "scrolllock" => {
+        "control" | "ctrl" | "shift" | "alt" | "alternate" | "super" | "meta" | "command"
+        | "win" | "function" | "capslock" | "numlock" | "scrolllock" => {
             return CaptureOutcome::Pending;
         },
         _ => {},
@@ -549,6 +549,20 @@ mod tests {
         assert!(parse_combo("ctrl+").is_none());
         assert!(parse_combo("ctrl+foo+t").is_none());
         assert!(parse_combo("notakey").is_none());
+    }
+
+    #[cfg(feature = "gpui-shell")]
+    #[test]
+    fn gpui_capture_records_page_down_instead_of_leaving_it_pending() {
+        let keystroke = gpui::Keystroke {
+            modifiers: gpui::Modifiers::default(),
+            key: "pagedown".to_owned(),
+            key_char: None,
+        };
+        let CaptureOutcome::Bind(combo) = capture_gpui(&keystroke) else {
+            panic!("PageDown 应结束录制并生成绑定");
+        };
+        assert_eq!(combo, "pagedown");
     }
 
     #[test]

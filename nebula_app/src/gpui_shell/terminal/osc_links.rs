@@ -9,7 +9,7 @@ use std::sync::Arc;
 use gpui::{App, ClipboardItem};
 use nebula_terminal::event::EventListener;
 use nebula_terminal::index::Point;
-use nebula_terminal::term::{point_to_viewport_from, Term};
+use nebula_terminal::term::{Term, point_to_viewport_from};
 use unicode_width::UnicodeWidthChar;
 use winit::keyboard::ModifiersState;
 
@@ -93,21 +93,16 @@ pub(super) fn hover_from_hint<T: EventListener>(
         .or_else(|| hint.text(term).map(|text| text.into_owned()))?;
     let origin = term.viewport_origin_for(rows);
     let start = *hint.bounds().start();
-    let vp = point_to_viewport_from(origin, start).filter(|vp| vp.line < rows && vp.column.0 < cols);
-    let (anchor_row, anchor_col) = vp
-        .map(|vp| (vp.line as u16, vp.column.0 as u16))
-        .unwrap_or((0, 0));
+    let vp =
+        point_to_viewport_from(origin, start).filter(|vp| vp.line < rows && vp.column.0 < cols);
+    let (anchor_row, anchor_col) =
+        vp.map(|vp| (vp.line as u16, vp.column.0 as u16)).unwrap_or((0, 0));
     const HINT: &str = " · Ctrl+点击";
     let width = |s: &str| -> usize { s.chars().map(|c| c.width().unwrap_or(0)).sum() };
     let target = crate::display::strip_file_scheme(&uri);
     let budget = cols.saturating_sub(width(HINT) + 1);
     let target = crate::display::fit_tail(&target, budget);
-    Some(LinkHover {
-        hint,
-        preview: format!("{target}{HINT}"),
-        anchor_row,
-        anchor_col,
-    })
+    Some(LinkHover { hint, preview: format!("{target}{HINT}"), anchor_row, anchor_col })
 }
 
 pub(super) fn open_hint<T: EventListener>(hint: &HintMatch, term: &Term<T>, cx: &App) {
@@ -126,7 +121,11 @@ pub(super) fn open_hint<T: EventListener>(hint: &HintMatch, term: &Term<T>, cx: 
         HintAction::Action(HintInternalAction::Copy) => {
             cx.write_to_clipboard(ClipboardItem::new_string(text.into_owned()));
         },
-        HintAction::Action(HintInternalAction::Paste | HintInternalAction::Select | HintInternalAction::MoveViModeCursor) => {
+        HintAction::Action(
+            HintInternalAction::Paste
+            | HintInternalAction::Select
+            | HintInternalAction::MoveViModeCursor,
+        ) => {
             // 默认 hint 走 Command（打开 URI）。这三项仍由旧壳键盘 hint 使用。
         },
     }

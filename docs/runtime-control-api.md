@@ -25,6 +25,7 @@ Nebula 的运行时控制面把 GUI、CLI、Agent 与未来插件统一到同一
 ```powershell
 nebula ctl describe --pretty
 nebula ctl snapshot --pretty
+nebula ctl orchestrate --file workflow.json --timeout-ms 30000 --pretty
 nebula ctl agents --pretty
 nebula ctl agent-fork --window <WINDOW_ID> --source-pane <PANE_ID> --name login-fixer --kind codex --pretty
 nebula ctl agent-get --agent login-fixer --pretty
@@ -55,9 +56,10 @@ Pane ID 当前在 Window 内稳定，而不是进程内全局唯一。存在多�
 |---|---|---|
 | `runtime.describe` | 读取应用版本、协议版本和能力列表 | 无 |
 | `runtime.snapshot` | 读取完整运行时投影 | 无 |
+| `runtime.orchestrate` | 一次提交强类型布局、PTY、命令与 Agent 首任务工作流 | `steps`, `on_error?` |
 | `events.subscribe` | 从 revision 开始订阅状态变化 | `since_revision?` |
 | `agents.list` | 只列出 Nebula 已识别的 Agent Pane、会话身份、状态和证据来源 | `window_id?` |
-| `agent.start` | 在指定目录新建 Tab 并启动命名 Agent | `window_id?`, `name`, `kind`, `cwd?`, `resume_session_id?` |
+| `agent.start` | 在新 Tab 或指定既有 Pane 中启动命名 Agent | `window_id?`, `pane_id?`, `name`, `kind`, `cwd?`, `resume_session_id?` |
 | `agent.fork` | 事务化创建独立 Git branch/worktree，再启动命名 Agent | `source_pane_id?`/`source_cwd?`, `name`, `kind`, `branch?`, `base?`, `path?`, `allow_dirty_source?` |
 | `agent.get` | 按稳定 id 或名称解析 Agent generation 与 worktree provenance | `agent`, `generation?` |
 | `agent.prompt` | 向同一 Agent generation 发送纯文本 Prompt | `agent`, `generation?`, `text`, `submit?` |
@@ -66,7 +68,7 @@ Pane ID 当前在 Window 内稳定，而不是进程内全局唯一。存在多�
 | `window.create` | 创建新窗口 | 无 |
 | `window.focus` | 聚焦窗口或 Pane | `window_id?`, `pane_id?` |
 | `tab.new` | 创建默认 Shell 标签 | `window_id?` |
-| `pane.split` | 向右或向下分屏 | `window_id?`, `direction` |
+| `pane.split` | 从当前或指定 Pane 向右/向下分屏 | `window_id?`, `pane_id?`, `direction` |
 | `pane.prompt` | 写入一行纯文本，可追加 Enter | `window_id?`, `pane_id`, `text`, `submit` |
 | `pane.read` | 从真实终端 Grid 尾部读取最近逻辑行 | `window_id?`, `pane_id`, `lines` |
 | `pane.procs` | 读取本地 PTY shell 为根的真实进程树 | `window_id?`, `pane_id` |
@@ -77,6 +79,51 @@ Pane ID 当前在 Window 内稳定，而不是进程内全局唯一。存在多�
 `pane.prompt` 有意拒绝换行、ESC 和其他控制字符，并限制为 32 KiB。它是 Prompt 接口，不是
 任意终端字节注入接口。控制键走 `pane.send_key`：只开放命名键，字母必须配
 `control=true`，`repeat` 上限 64；API 不接受任意 bytes 或 ANSI 字符串。
+
+## 单请求编排
+
+`runtime.orchestrate` 把模型已经确定的终端操作留在 Runtime 内执行，避免模型在每个步骤之间
+重复读取 snapshot、搬运 Pane ID 和再次推理。它不是通用脚本语言：每个步骤都是 Schema 中
+列出的强类型 `op`，步骤引用也是 `{ "step": "right", "field": "pane_id" }`，不执行字符串
+模板、任意方法名或嵌套 Runtime 请求。
+
+```json
+{
+  "steps": [
+    { "id": "right", "op": "split", "direction": "left_right" },
+    {
+      "id": "weather", "op": "agent_launch",
+      "target": { "step": "right", "field": "pane_id" },
+      "name": "weather", "kind": "claude",
+      "initial_prompt": "查询并简要回答今天的天气"
+    },
+    {
+      "id": "bottom", "op": "split",
+      "target": { "step": "right", "field": "pane_id" },
+      "direction": "top_bottom"
+    },
+    {
+      "id": "formula", "op": "agent_launch",
+      "target": { "step": "bottom", "field": "pane_id" },
+      "name": "formula", "kind": "codex",
+      "initial_prompt": "输出几组复杂数学公式供终端渲染测试"
+    }
+  ],
+  "on_error": "stop"
+}
+```
+
+首个无 `target` 的 `split` 相对当前聚焦 Pane 执行，因此常见自然语言布局不需要先请求
+snapshot。后续步骤只引用前面成功步骤的 receipt；未来引用、不存在的步骤、重复 ID、未知字段
+都在任何 UI 动作发生前被拒绝。普通 Pane 不做隐式回滚：中途失败时已完成动作保留，receipt
+返回 `failed_step`、逐步 `error` 和 `partial`，调用者可从失败点续作。
+
+`agent_launch` 是“绑定既有 Pane 启动 Agent + ready 握手 + 投递首任务”的原子产品语义。
+Runtime 先启动 workflow 中的所有 Agent，再并行等待各自被 registry 观察到且离开启动中的
+`running` 状态，随后投递 `initial_prompt`。这让多个 Claude/Codex 的冷启动互相重叠，同时
+避免启动命令尚在 submit barrier 中时第二次输入触发 `input_in_progress`。成功 receipt 只返回
+`window_id`、`pane_id`、`agent_id`、`generation`、ready 状态和 `submitted` 等必要字段，不附带
+每一步的完整 snapshot。
 
 ## 命名 Agent 与隔离 worktree
 
@@ -175,6 +222,7 @@ Shell/hook 结束事件归位；因此即使命令在 120ms Runtime pump 的两�
 
 - `invalid_request`：Envelope 或 JSON 无效。
 - `invalid_params`：参数类型、Prompt 内容或超时范围无效。
+- `invalid_reference`：编排步骤引用了未来、失败或不含目标字段的步骤。
 - `method_not_found`：方法不存在。
 - `target_not_found`：Window 或 Pane 已消失。
 - `ambiguous_target`：Pane ID 在多个窗口中重复，必须补 Window ID。
@@ -182,6 +230,7 @@ Shell/hook 结束事件归位；因此即使命令在 120ms Runtime pump 的两�
 - `action_failed`：窗口、Shell 或 Pane 创建失败。
 - `agent_name_conflict` / `agent_identity_mismatch`：名称已被活跃 Agent 使用，或 generation 已变化。
 - `agent_exited` / `agent_replaced`：等待的稳定 Agent 身份已退出或被同 Pane 中的新会话替换。
+- `agent_ready_timeout`：Agent 未在期限内完成进程身份观察与启动就绪握手。
 - `dirty_source`：`agent.fork` 的源工作树有未提交变更，且调用者未显式允许。
 - `branch_conflict` / `worktree_path_conflict`：目标分支或目录已存在；Nebula 不覆盖。
 - `git_unavailable` / `invalid_base` / `invalid_branch`：Git 能力或 revision/ref 校验失败。

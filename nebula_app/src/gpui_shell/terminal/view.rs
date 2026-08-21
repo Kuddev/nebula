@@ -62,6 +62,31 @@ const SCROLLBAR_W: f32 = 4.0;
 const SCROLLBAR_MIN_THUMB: f32 = 24.0;
 const SCROLLBAR_SLOP: f32 = 8.0;
 
+/// 拖选越过网格上/下边界后的自动回滚：tick 间隔与「每远离 20px 加一行」的
+/// 速度分档取自旧壳 `SELECTION_SCROLLING_INTERVAL` / `SELECTION_SCROLLING_STEP`
+/// （旧壳按设备像素存常量再乘 DPI；GPUI 的 `Pixels` 本就是逻辑像素，这里直接
+/// 是逻辑口径）。
+const SELECTION_SCROLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(15);
+const SELECTION_SCROLL_STEP: f32 = 20.0;
+
+/// 一次自动回滚该滚几行：指针在网格上方为正（往回滚历史）、下方为负，网格
+/// 内为 0。贴边即 1 行，之后每远离 `SELECTION_SCROLL_STEP` 像素加一档。
+///
+/// `max_lines` 是每 tick 的上限。旧壳不需要它——winit 不捕获指针，`mouse_y`
+/// 永远落在窗口内；GPUI 在 Windows 上按下即 `SetCapture`，指针甩到屏幕外时
+/// y 可以是很大的负数，不封顶就会「一抖到底」。
+fn selection_scroll_lines(y: f32, top: f32, bottom: f32, max_lines: i32) -> i32 {
+    let step = SELECTION_SCROLL_STEP.max(1.0);
+    let max = max_lines.max(1);
+    if y < top {
+        (1 + ((top - y) / step) as i32).min(max)
+    } else if y >= bottom {
+        -((1 + ((y - bottom) / step) as i32).min(max))
+    } else {
+        0
+    }
+}
+
 /// 粘贴体量按「落到终端算几行」数，不用 `str::lines`。
 ///
 /// `str::lines` 只认 `\n`，纯 `\r` 的剪贴板内容（老式 Mac 换行、部分 Windows
@@ -97,6 +122,8 @@ pub enum TerminalViewEvent {
     FocusRequested,
     /// 连接卡片的取消/关闭（旧壳 TabRequest::Close 的对应物）。
     RequestClose,
+    /// 失败后在当前分屏叶原位重建同一 SSH 目标。
+    RetrySsh(String),
     /// Ctrl+滚轮改了终端字号：宿主应对所有 pane 热应用并写盘。
     FontSizeChanged,
     /// BEL（`^G`）。后台 tab 记铃点；本 tab 的闪烁/声音由视图自己处理。
@@ -238,6 +265,11 @@ pub struct TerminalView {
     resize_epoch: u64,
     scroll_px: f32,
     selecting: bool,
+    /// 拖选越界后的自动回滚 tick 世代：停止或重开一轮就 +1，让在途的旧
+    /// 定时器链自行失效（同 `cursor_blink_epoch` 的模式）。
+    selection_scroll_epoch: u64,
+    /// 是否已有一条自动回滚定时器链在跑——每次 move 都开一条会叠出 N 倍速。
+    selection_scroll_active: bool,
     /// OSC 8 / 正则 URL：虚线下划线、悬停预览、Ctrl+点击打开。
     pub(super) hint_config: Arc<UiConfig>,
     pub(super) link_hover: Option<super::osc_links::LinkHover>,
@@ -466,25 +498,36 @@ impl TerminalView {
             },
             TerminalLaunch::Ssh { destination } => destination.clone(),
         };
-        let (ssh_destination, initial_title, intro_shell_name, spawned) = match launch {
-            TerminalLaunch::Local { cwd, shell: launch_shell, shell_name } => (
-                None,
-                String::from("shell"),
-                shell_name,
-                session::spawn(
-                    initial,
-                    term_config,
-                    // 显式 launch（会话恢复/创建时冻结）优先；只有旧会话没有
-                    // 身份时才回退当前设置。这正是共享 v4 的 Default 语义。
-                    launch_shell.or(shell),
-                    pane_id,
-                    cwd,
-                ),
-            ),
+        let (ssh_destination, initial_title, intro_shell_name, suggest_env, spawned) = match launch
+        {
+            TerminalLaunch::Local { cwd, shell: launch_shell, shell_name } => {
+                // 显式 launch（会话恢复/创建时冻结）优先；只有旧会话没有
+                // 身份时才回退当前设置。这正是共享 v4 的 Default 语义。
+                let effective = launch_shell.or(shell);
+                // 补齐要知道这个 pane 面对**哪台机器**：`wsl.exe -d <发行版>`
+                // 启动的 tab，文件系统和命令集都在来宾里，本进程的 `std::fs`
+                // 和 PATH 描述的是另一台机器。
+                let suggest_env = effective
+                    .as_ref()
+                    .and_then(|shell| {
+                        crate::shell_detect::wsl_launch_distro(shell.program(), shell.args())
+                    })
+                    .map_or(crate::display::SuggestEnv::Local, |distro| {
+                        crate::display::SuggestEnv::Wsl { distro: distro.to_owned() }
+                    });
+                (
+                    None,
+                    String::from("shell"),
+                    shell_name,
+                    suggest_env,
+                    session::spawn(initial, term_config, effective, pane_id, cwd),
+                )
+            },
             TerminalLaunch::Ssh { destination } => (
                 Some(destination.clone()),
                 destination.clone(),
                 None,
+                SuggestEnv::Ssh,
                 session::spawn_ssh(destination, initial, term_config),
             ),
         };
@@ -656,6 +699,8 @@ impl TerminalView {
             resize_epoch: 0,
             scroll_px: 0.0,
             selecting: false,
+            selection_scroll_epoch: 0,
+            selection_scroll_active: false,
             hint_config: super::osc_links::hint_config(),
             link_hover: None,
             pending_link_open: false,
@@ -664,7 +709,7 @@ impl TerminalView {
             cursor_visible: true,
             cursor_blink_epoch: 0,
             default_cursor_style,
-            suggest: Default::default(),
+            suggest: crate::display::NebulaPaneState { suggest_env, ..Default::default() },
             suggest_anchor: None,
             ghost_enabled,
             accept,
@@ -1230,32 +1275,35 @@ impl TerminalView {
         self.session.as_ref().map(|s| *s.term.lock().mode()).unwrap_or_default()
     }
 
-    /// 复制选区。`notify`：显式复制（Ctrl+Shift+C、右键复制）弹「已复制
-    /// N 行」的确认 toast——键盘与右键共用这一条通知路径；copy_on_select
-    /// 的选区存储刻意静默（旧壳 `copy_selection` 同合同，抬手一次就可能
-    /// 触发，弹起来会刷屏）。
-    pub fn copy_selection(&mut self, notify: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(session) = &self.session {
-            let text = session.term.lock().selection_to_string();
-            if let Some(text) = text.filter(|t| !t.is_empty()) {
-                let lines = text.lines().count().max(1);
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                if notify {
-                    let message = match ui_language() {
-                        crate::display::UiLanguage::EnUs => {
-                            format!("Copied {lines} lines to clipboard")
-                        },
-                        _ => format!("已复制 {lines} 行到剪贴板"),
-                    };
-                    crate::gpui_shell::toast::toast(
-                        window,
-                        cx,
-                        crate::display::ToastKind::Info,
-                        message,
-                    );
-                }
-            }
+    /// 复制选区并返回是否实际写入剪贴板。`notify` 表示显式复制
+    /// （Ctrl+Shift+C、右键或自定义 Copy）：成功后清除选区并弹确认 toast；
+    /// copy_on_select 刻意静默且保留选区，避免鼠标抬手后立刻失去视觉反馈。
+    pub fn copy_selection(
+        &mut self,
+        notify: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(session) = &self.session else { return false };
+        let text = session.term.lock().selection_to_string();
+        let Some(text) = text.filter(|text| !text.is_empty()) else { return false };
+
+        let lines = text.lines().count().max(1);
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        if notify {
+            // 原始按键可能紧接着再次到来；先清除选区，下一次 Copy 才能按
+            // “未处理”传播回终端，而不是重复复制并再次弹 toast。
+            session.term.lock().selection = None;
+            let message = match ui_language() {
+                crate::display::UiLanguage::EnUs => {
+                    format!("Copied {lines} lines to clipboard")
+                },
+                _ => format!("已复制 {lines} 行到剪贴板"),
+            };
+            crate::gpui_shell::toast::toast(window, cx, crate::display::ToastKind::Info, message);
+            cx.notify();
         }
+        true
     }
 
     /// 读剪贴板并粘贴。体量达到 [`PASTE_CONFIRM_LINES`] 时先弹确认模态，确认
@@ -1806,6 +1854,9 @@ impl TerminalView {
 
     /// 像素命中与绘制共用同一份候选几何，截短列表或上翻时也不会点错行。
     fn completion_popup_hit(&self, position: Point<Pixels>) -> Option<usize> {
+        if !suggest::popup_active(&self.suggest) {
+            return None;
+        }
         let (cursor_row, cursor_col) = self.suggest_anchor?;
         let popup = completion_popup_layout(
             &self.suggest.completion_items,
@@ -1829,6 +1880,9 @@ impl TerminalView {
 
     /// 右侧窄条不覆盖候选字符列；点击轨道按指针比例跳到完整候选集中的位置。
     fn completion_popup_scrollbar_target(&self, position: Point<Pixels>) -> Option<usize> {
+        if !suggest::popup_active(&self.suggest) {
+            return None;
+        }
         let (cursor_row, cursor_col) = self.suggest_anchor?;
         let popup = completion_popup_layout(
             &self.suggest.completion_items,
@@ -1890,7 +1944,7 @@ impl TerminalView {
         if event.button == MouseButton::Left
             && let Some(index) = self.completion_popup_scrollbar_target(event.position)
         {
-            self.suggest.completion_selected = index;
+            self.suggest.completion_selected = Some(index);
             cx.notify();
             cx.stop_propagation();
             return;
@@ -1898,7 +1952,7 @@ impl TerminalView {
         if event.button == MouseButton::Left
             && let Some(index) = self.completion_popup_hit(event.position)
         {
-            self.suggest.completion_selected = index;
+            self.suggest.completion_selected = Some(index);
             if self.accept_completion_popup(cx) {
                 cx.notify();
                 cx.stop_propagation();
@@ -1967,13 +2021,19 @@ impl TerminalView {
             }
         }
         self.selecting = true;
+        // 自动回滚在这里就上弦，而不是等第一次「拖出网格」的移动事件：指针
+        // 一旦离开元素 hitbox 就不再有 move 送进来，一甩到顶的拖法最后一个
+        // 元素内事件往往还在网格中间，等 move 判定＝永远等不到（用户报的
+        // 「甩到顶不动，往下再往上才滚」）。tick 自己看指针位置，网格内是
+        // 一次比较就返回的空转。
+        self.start_selection_scroll(window, cx);
         cx.notify();
     }
 
     fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // 候选行 hover 与键盘高亮共用选中索引；这样鼠标所见即 Enter 所收。
@@ -1981,8 +2041,8 @@ impl TerminalView {
         if event.pressed_button.is_none()
             && let Some(index) = self.completion_popup_hit(event.position)
         {
-            if self.suggest.completion_selected != index {
-                self.suggest.completion_selected = index;
+            if self.suggest.completion_selected != Some(index) {
+                self.suggest.completion_selected = Some(index);
                 cx.notify();
             }
             return;
@@ -2009,6 +2069,10 @@ impl TerminalView {
                     selection.update(point, side);
                 }
             }
+            // 拖到网格上/下边界之外＝继续选下去，回滚由定时器接手（旧壳
+            // `update_selection_scrolling`）。指针一旦离开元素 hitbox 就不再
+            // 有 move 事件，所以判据也只能在这里「上弦」，续力靠 tick。
+            self.update_selection_scroll(event.position.y.as_f32(), window, cx);
             cx.notify();
             return;
         }
@@ -2048,6 +2112,7 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.stop_selection_scroll();
         if self.scrollbar_drag.take().is_some() {
             cx.notify();
             return;
@@ -2072,6 +2137,128 @@ impl TerminalView {
         }
         self.pending_link_open = false;
         cx.notify();
+    }
+
+    /// 指针在终端之外松手（拖到 tab 栏、别的 pane，或按下后甩出窗口——
+    /// Windows 平台按下即 `SetCapture`，事件仍会送达）。GPUI 的 `on_mouse_up`
+    /// 只在 hitbox 命中时派发，没有这条兜底，`selecting` 会一直停在按下态：
+    /// 自动回滚停不下来，下一次移动还会继续改选区。
+    fn on_mouse_up_out(
+        &mut self,
+        _event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.stop_selection_scroll();
+        let dragging_scrollbar = self.scrollbar_drag.take().is_some();
+        if !self.selecting {
+            if dragging_scrollbar {
+                cx.notify();
+            }
+            return;
+        }
+        self.selecting = false;
+        self.pending_link_open = false;
+        // 指针不在终端上，链接打开不该发生；只补选中即复制这一条收尾。
+        if self.copy_on_select {
+            self.copy_selection(false, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// 网格的上下边界（窗口坐标），自动回滚的触发线。旧壳用的是
+    /// `padding_y` 与文本区底边，这里同义：卡内 8px 呼吸边距之内就已经
+    /// 算「出了网格」。
+    fn grid_vertical_bounds(&self) -> (f32, f32) {
+        let top = self.origin.y.as_f32();
+        (top, top + self.line_height.as_f32() * self.rows as f32)
+    }
+
+    fn selection_scroll_lines_at(&self, y: f32) -> i32 {
+        let (top, bottom) = self.grid_vertical_bounds();
+        selection_scroll_lines(y, top, bottom, self.rows as i32)
+    }
+
+    /// 选区拖拽全程常驻的自动回滚链：按下即起，松手才停。
+    ///
+    /// 不用「移动越界才起链」是因为那条判据依赖 move 事件送得到——指针离开
+    /// 元素 hitbox 后 GPUI 就不再派发，一甩到顶的拖法最后一个元素内事件通常
+    /// 还在网格中间，链于是永远起不来。常驻链把「是否越界」挪进 tick，指针
+    /// 在网格内时它只是一次比较加返回，不重绘也不取 Term 锁。
+    fn start_selection_scroll(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.selection_scroll_active {
+            return;
+        }
+        self.selection_scroll_active = true;
+        self.selection_scroll_epoch = self.selection_scroll_epoch.wrapping_add(1);
+        let epoch = self.selection_scroll_epoch;
+        let executor = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                executor.timer(SELECTION_SCROLL_INTERVAL).await;
+                let keep = this
+                    .update_in(cx, |view, window, cx| view.selection_scroll_tick(epoch, window, cx));
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn stop_selection_scroll(&mut self) {
+        if !self.selection_scroll_active {
+            return;
+        }
+        self.selection_scroll_active = false;
+        self.selection_scroll_epoch = self.selection_scroll_epoch.wrapping_add(1);
+    }
+
+    /// 一次自动回滚 tick：越界就滚 N 行，并把选区末端跟到指针**此刻**所在
+    /// 的格；没越界就什么都不做，等下一次 tick。
+    ///
+    /// 位置每 tick 从 `window.mouse_position()` 现取而不是沿用最后一次 move：
+    /// 指针停在元素外（tab 栏、下方的 pane）时根本不会再有 move 事件，沿用
+    /// 旧值就等于速度被钉死在贴边那一档，旧壳「越拖越快」的手感会丢。
+    ///
+    /// 返回 `false` 表示这条定时器链该结束（松手、换会话，或被新链顶掉）。
+    fn selection_scroll_tick(
+        &mut self,
+        epoch: u64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if epoch != self.selection_scroll_epoch || !self.selection_scroll_active {
+            return false;
+        }
+        if !self.selecting || self.session.is_none() {
+            self.stop_selection_scroll();
+            return false;
+        }
+        // 按下但还没拖出一个格：旧壳同样要求选区非空才滚，否则在卡片边距上
+        // 按一下不动就会开始翻历史。
+        if self.selection_is_empty() {
+            return true;
+        }
+        let position = window.mouse_position();
+        let lines = self.selection_scroll_lines_at(position.y.as_f32());
+        if lines == 0 {
+            return true;
+        }
+        if let Some(session) = &self.session {
+            session.term.lock().scroll_display(Scroll::Delta(lines));
+        }
+        // 滚动换了视口到绝对行的映射，选区末端必须按滚动后的网格重算——
+        // 否则视口滑过去了，选区还钉在原来那几行。两段各自取一次锁：
+        // `grid_point` 内部还要读 Term，握着锁进去会自锁。
+        let (point, side) = self.grid_point(position);
+        if let Some(session) = &self.session
+            && let Some(selection) = session.term.lock().selection.as_mut()
+        {
+            selection.update(point, side);
+        }
+        cx.notify();
+        true
     }
 
     /// 右键（旧壳 Windows 惯例）：有选区 → 复制并清除；无选区 → 粘贴。
@@ -2401,6 +2588,8 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            // 拖出终端范围松手的兜底（含拖到窗口外）：见 `on_mouse_up_out`。
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up_out))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_right_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_middle_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
@@ -2459,7 +2648,30 @@ impl Render for TerminalView {
 mod tests {
     use gpui::{FontStyle, FontWeight};
 
-    use super::{PASTE_CONFIRM_LINES, TerminalView, mono_font, paste_line_count};
+    use super::{
+        PASTE_CONFIRM_LINES, TerminalView, mono_font, paste_line_count, selection_scroll_lines,
+    };
+
+    /// 拖选自动回滚的判据（旧壳 `update_selection_scrolling` 的数值合同）：
+    /// 网格内不滚，越过上边界往回滚历史、越过下边界往前滚，贴边 1 行、每远离
+    /// 20px 加一档，并且封顶在一屏——指针甩出窗口不该一抖到底。
+    #[test]
+    fn selection_scroll_speed_scales_with_distance_past_the_grid() {
+        let (top, bottom, rows) = (100.0, 500.0, 30);
+        assert_eq!(selection_scroll_lines(300.0, top, bottom, rows), 0, "网格内不滚");
+        assert_eq!(selection_scroll_lines(top, top, bottom, rows), 0, "上边界本身仍在网格内");
+        assert_eq!(selection_scroll_lines(top - 1.0, top, bottom, rows), 1, "刚越界＝最慢一档");
+        assert_eq!(selection_scroll_lines(top - 20.0, top, bottom, rows), 2);
+        assert_eq!(selection_scroll_lines(top - 40.0, top, bottom, rows), 3);
+        assert_eq!(selection_scroll_lines(bottom, top, bottom, rows), -1, "底边像素属于下方");
+        assert_eq!(selection_scroll_lines(bottom + 20.0, top, bottom, rows), -2);
+        assert_eq!(
+            selection_scroll_lines(-10_000.0, top, bottom, rows),
+            rows,
+            "甩到屏幕外也每 tick 最多一屏"
+        );
+        assert_eq!(selection_scroll_lines(10_000.0, top, bottom, rows), -rows);
+    }
 
     /// 行数判据数的是「落到终端算几行」，不是 `str::lines`：CRLF 一次换行、
     /// 裸 CR 也是换行（`str::lines` 会把它整段算成 1 行）、末尾那个换行不多

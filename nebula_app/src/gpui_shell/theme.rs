@@ -272,6 +272,7 @@ pub(crate) struct CompletionColors {
     pub ghost: Hsla,
     pub panel_bg: Hsla,
     pub panel_border: Hsla,
+    pub panel_shadow: Hsla,
     pub row_bg: Hsla,
     pub row_fg: Hsla,
     pub tag_fg: Hsla,
@@ -298,11 +299,12 @@ pub(crate) fn completion_colors(cx: &App, term_bg: GpuiRgba) -> CompletionColors
         ghost: ink(sk.ink_faint),
         panel_bg: row_bg,
         panel_border: accent.opacity(if sk.is_light { 0.28 } else { 0.34 }),
+        panel_shadow: hsla(0.0, 0.0, 0.0, if sk.is_light { 0.18 } else { 0.42 }),
         row_bg,
         row_fg: ink(sk.ink),
         tag_fg: ink(sk.ink_faint),
         selected_bg,
-        selected_fg: ink(sk.ink),
+        selected_fg: ink(sk.ink_strong),
         scroll_track: ink(sk.ink_faint).opacity(if sk.is_light { 0.24 } else { 0.32 }),
         scroll_thumb: ink(sk.ink_dim).opacity(if sk.is_light { 0.62 } else { 0.72 }),
     }
@@ -332,10 +334,27 @@ pub fn apply_chrome_theme(cx: &mut App) {
     let mode = if chrome.skin().is_light { ThemeMode::Light } else { ThemeMode::Dark };
     Theme::change(mode, None, cx);
     apply_skin_tokens(chrome, cx);
+    apply_shell_opacity(chrome, cx);
+}
 
-    // 一体化外壳（对齐旧壳 draw_chrome）：窗口背景、侧栏、顶栏是同一块
-    // 壳色，各自的分隔线取同色隐形；唯一的结构分界是内容区那张圆角卡。
-    // 壳色带用户透明度（文字 token 不带——对比度不塌，旧壳裁定）。
+/// 只按当前不透明度重算壳色，不做别的。
+///
+/// 拖不透明度滑块的快路径：[`apply_chrome_theme`] 那一整套（读设置文件、
+/// 重建壁纸纹理、`Theme::change`、四十来个 token 重写、窗口级模糊）对"只改了
+/// alpha"这件事是纯浪费，而滑块一次拖拽会发几十上百个事件。2026-08-21 定案：
+/// 拖拽走这里，落盘与整套热应用等停手之后。
+///
+/// 主题名由调用方传入：[`effective_theme_name`] 内部会 `RuntimeSettings::load()`
+/// 读盘一次，那正是这条路径要避开的东西。设置页自己持有 `runtime` 镜像。
+pub fn reapply_shell_opacity(name: ThemeName, follow_system: bool, cx: &mut App) {
+    let chrome = chrome_theme(resolve_theme_name(name, follow_system, system_is_light(cx)));
+    apply_shell_opacity(chrome, cx);
+}
+
+/// 一体化外壳（对齐旧壳 draw_chrome）：窗口背景、侧栏、顶栏是同一块
+/// 壳色，各自的分隔线取同色隐形；唯一的结构分界是内容区那张圆角卡。
+/// 壳色带用户透明度（文字 token 不带——对比度不塌，旧壳裁定）。
+fn apply_shell_opacity(chrome: NebulaTheme, cx: &mut App) {
     let opacity = crate::gpui_shell::wallpaper::chrome_surface_opacity(cx);
     let mut shell = shell_color(chrome);
     shell.a *= opacity;

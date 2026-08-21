@@ -236,10 +236,7 @@ fn tab_chrome_commit_empty_clears_custom_name() {
 /// 旧壳 CancelRename：丢掉缓冲，custom_name 原样保留（含启动时写入的「分叉」）。
 #[test]
 fn tab_chrome_cancel_leaves_custom_name() {
-    let mut named = TabMeta {
-        custom_name: Some("Claude 分叉".to_owned()),
-        ..TabMeta::default()
-    };
+    let mut named = TabMeta { custom_name: Some("Claude 分叉".to_owned()), ..TabMeta::default() };
     apply_cancel_rename(&mut named);
     assert_eq!(named.custom_name.as_deref(), Some("Claude 分叉"));
 

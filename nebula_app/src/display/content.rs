@@ -88,8 +88,10 @@ impl<'a> RenderableContent<'a> {
 
         // Convert terminal cursor point to viewport position.
         let cursor_point = terminal_content.cursor.point;
-        let cursor_point = term::point_to_viewport_from(terminal_content.viewport_origin, cursor_point)
-            .filter(|point| point.line < size.screen_lines() && point.column.0 < size.columns());
+        let cursor_point =
+            term::point_to_viewport_from(terminal_content.viewport_origin, cursor_point).filter(
+                |point| point.line < size.screen_lines() && point.column.0 < size.columns(),
+            );
 
         let hint = if display.hint_state.active() {
             display.hint_state.update_matches(term);
@@ -585,7 +587,12 @@ pub(crate) fn cell_background_is_fixed(
 /// Alpha-compose a theme overlay over the cell's existing background. Keeping
 /// this in the render model preserves explicit ANSI cell backgrounds while
 /// still allowing the default transparent terminal surface/image to show.
-pub(crate) fn composite_overlay(overlay: Rgb, overlay_alpha: f32, base: Rgb, base_alpha: f32) -> (Rgb, f32) {
+pub(crate) fn composite_overlay(
+    overlay: Rgb,
+    overlay_alpha: f32,
+    base: Rgb,
+    base_alpha: f32,
+) -> (Rgb, f32) {
     let oa = overlay_alpha.clamp(0.0, 1.0);
     let ba = base_alpha.clamp(0.0, 1.0);
     let out_a = oa + ba * (1.0 - oa);

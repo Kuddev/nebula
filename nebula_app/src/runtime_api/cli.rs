@@ -85,6 +85,31 @@ fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             let response = request_once("runtime.snapshot", json!({}), timeout)?;
             print_response(&response, options.pretty)
         },
+        CliCommand::Orchestrate { spec, file } => {
+            let source = match (spec, file) {
+                (Some(spec), None) => spec,
+                (None, Some(path)) => std::fs::read_to_string(path)?,
+                _ => {
+                    return Err(CliError::new(
+                        "invalid_params",
+                        "exactly one of --spec or --file is required",
+                    )
+                    .into());
+                },
+            };
+            let params: Value = serde_json::from_str(&source).map_err(|error| {
+                CliError::new(
+                    "invalid_params",
+                    format!("workflow is not valid UTF-8 JSON: {error}"),
+                )
+            })?;
+            let response = request_once(
+                "runtime.orchestrate",
+                params,
+                timeout.saturating_add(Duration::from_secs(1)),
+            )?;
+            print_response(&response, options.pretty)
+        },
         CliCommand::Agents { window } => {
             let response = request_once("agents.list", json!({ "window_id": window }), timeout)?;
             print_response(&response, options.pretty)
@@ -195,14 +220,14 @@ fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             let response = request_once("tab.new", json!({ "window_id": window }), timeout)?;
             print_response(&response, options.pretty)
         },
-        CliCommand::Split { window, direction } => {
+        CliCommand::Split { window, pane, direction } => {
             let direction = match direction {
                 ControlSplitDirection::Right => RuntimeSplitDirection::LeftRight,
                 ControlSplitDirection::Down => RuntimeSplitDirection::TopBottom,
             };
             let response = request_once(
                 "pane.split",
-                json!({ "window_id": window, "direction": direction }),
+                json!({ "window_id": window, "pane_id": pane, "direction": direction }),
                 timeout,
             )?;
             print_response(&response, options.pretty)

@@ -371,13 +371,7 @@ pub(crate) fn push_row_action_icon(
             let tip = (cx - 4.4 * scale, cy + 4.4 * scale);
             let tail = (cx + 4.4 * scale, cy - 4.4 * scale);
             push_segment(quads, tip, tail, stroke, ink);
-            push_segment(
-                quads,
-                tip,
-                (tip.0 + 1.8 * scale, tip.1 - 1.8 * scale),
-                stroke * 2.1,
-                ink,
-            );
+            push_segment(quads, tip, (tip.0 + 1.8 * scale, tip.1 - 1.8 * scale), stroke * 2.1, ink);
         },
         RowActionIcon::Delete => {
             // 盖沿横线略宽于桶身，桶身用挖空矩形读作"容器"而不是方框；

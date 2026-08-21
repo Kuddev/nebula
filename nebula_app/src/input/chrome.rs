@@ -441,6 +441,15 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                                 self.ctx.display().ssh_connect_toggle_logs();
                                 self.ctx.mark_dirty();
                             },
+                            SshConnectHit::Retry => {
+                                if let Some(destination) =
+                                    self.ctx.display().ssh_connect_destination()
+                                {
+                                    self.ctx.nebula_tab(crate::event::TabRequest::RetrySsh(
+                                        destination,
+                                    ));
+                                }
+                            },
                             // 取消与关闭是同一个动作：这个 pane 除了这条连接
                             // 没有别的内容，留着它没有意义。
                             SshConnectHit::Cancel | SshConnectHit::Close => {
@@ -899,9 +908,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::SettingsHit::BackupProtocolCycle => {
-                        self.ctx
-                            .display()
-                            .toggle_settings_dropdown(crate::display::SettingsDropdown::BackupProtocol);
+                        self.ctx.display().toggle_settings_dropdown(
+                            crate::display::SettingsDropdown::BackupProtocol,
+                        );
                         self.ctx.mark_dirty();
                         return;
                     },
@@ -1361,16 +1370,20 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         return;
                     },
                     crate::display::SettingsHit::BackgroundSvPlane => {
-                        self.ctx
-                            .display()
-                            .begin_bg_picker_drag(crate::display::BgPickerPart::Sv, x, y);
+                        self.ctx.display().begin_bg_picker_drag(
+                            crate::display::BgPickerPart::Sv,
+                            x,
+                            y,
+                        );
                         self.ctx.mark_dirty();
                         return;
                     },
                     crate::display::SettingsHit::BackgroundHueBar => {
-                        self.ctx
-                            .display()
-                            .begin_bg_picker_drag(crate::display::BgPickerPart::Hue, x, y);
+                        self.ctx.display().begin_bg_picker_drag(
+                            crate::display::BgPickerPart::Hue,
+                            x,
+                            y,
+                        );
                         self.ctx.mark_dirty();
                         return;
                     },

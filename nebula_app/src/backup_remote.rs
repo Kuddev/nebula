@@ -307,7 +307,9 @@ fn utc_parts(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 
 fn archive_name(secs: u64) -> String {
     let (year, month, day, hour, minute, second) = utc_parts(secs);
-    format!("{ARCHIVE_PREFIX}{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}{ARCHIVE_SUFFIX}")
+    format!(
+        "{ARCHIVE_PREFIX}{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}{ARCHIVE_SUFFIX}"
+    )
 }
 
 /// 只认我们自己的归档名（前后缀精确匹配）。列表、恢复与清理共用这一道
@@ -357,7 +359,8 @@ fn backend(cfg: &BackupRemoteConfig) -> Result<Box<dyn Backend>, String> {
             if username.is_empty() {
                 return Err("未配置 WebDAV 用户名".to_owned());
             }
-            let password = webdav_password().ok_or("缺少 WebDAV 密码：在设置里输入或设 NEBULA_BACKUP_WEBDAV_PASSWORD")?;
+            let password = webdav_password()
+                .ok_or("缺少 WebDAV 密码：在设置里输入或设 NEBULA_BACKUP_WEBDAV_PASSWORD")?;
             Ok(Box::new(WebDavBackend { url, username, password }))
         },
         BackupProtocol::S3 => {
@@ -387,14 +390,16 @@ fn backend(cfg: &BackupRemoteConfig) -> Result<Box<dyn Backend>, String> {
             if access_key.is_empty() {
                 return Err("未配置 S3 Access Key".to_owned());
             }
-            let secret_key =
-                s3_secret().ok_or("缺少 S3 Secret Key：在设置里输入或设 NEBULA_BACKUP_S3_SECRET")?;
+            let secret_key = s3_secret()
+                .ok_or("缺少 S3 Secret Key：在设置里输入或设 NEBULA_BACKUP_S3_SECRET")?;
             Ok(Box::new(S3Backend { endpoint, region, bucket, prefix, access_key, secret_key }))
         },
         BackupProtocol::Sftp => {
             let destination = cfg.sftp_destination.trim().to_owned();
             if destination.is_empty() {
-                return Err("未配置 SFTP 目标（user@host[:port]，认证复用 SSH 主机配置）".to_owned());
+                return Err(
+                    "未配置 SFTP 目标（user@host[:port]，认证复用 SSH 主机配置）".to_owned()
+                );
             }
             let mut path = cfg.sftp_path.trim().trim_end_matches('/').to_owned();
             if path.is_empty() {
@@ -619,8 +624,7 @@ impl Backend for WebDavBackend {
             .header("Authorization", self.auth())
             .body(Vec::new())
             .map_err(|err| format!("构造删除请求失败：{err}"))?;
-        let response =
-            http_agent().run(request).map_err(|err| format!("删除旧备份失败：{err}"))?;
+        let response = http_agent().run(request).map_err(|err| format!("删除旧备份失败：{err}"))?;
         match response.status().as_u16() {
             200 | 204 | 404 => Ok(()),
             status => Err(format!("删除旧备份失败：HTTP {status}")),
@@ -846,11 +850,7 @@ fn sigv4_canonical_query(query: &[(&str, &str)]) -> String {
         .map(|(key, value)| (sigv4_uri_encode(key, true), sigv4_uri_encode(value, true)))
         .collect();
     pairs.sort();
-    pairs
-        .into_iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("&")
+    pairs.into_iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("&")
 }
 
 /// 组装 Authorization 头。签名头固定为 host + x-amz-content-sha256 +
@@ -874,18 +874,21 @@ fn sigv4_authorization(
         sigv4_canonical_query(query),
     );
     let scope = format!("{date}/{region}/s3/aws4_request");
-    let string_to_sign =
-        format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", sha256_hex(canonical_request.as_bytes()));
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
     let key = hmac_sha256(format!("AWS4{secret_key}").as_bytes(), date.as_bytes());
     let key = hmac_sha256(&key, region.as_bytes());
     let key = hmac_sha256(&key, b"s3");
     let key = hmac_sha256(&key, b"aws4_request");
-    let signature = hmac_sha256(&key, string_to_sign.as_bytes())
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
+    let signature = hmac_sha256(&key, string_to_sign.as_bytes()).iter().fold(
+        String::with_capacity(64),
+        |mut out, byte| {
             out.push_str(&format!("{byte:02x}"));
             out
-        });
+        },
+    );
     format!(
         "AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={signature}"
     )
@@ -1039,7 +1042,10 @@ mod tests {
         );
         assert_eq!(BackupRemoteConfig::parse(&text), cfg);
         // 未知键与坏行安静跳过。
-        assert_eq!(BackupRemoteConfig::parse("garbage\nunknown=1\n"), BackupRemoteConfig::default());
+        assert_eq!(
+            BackupRemoteConfig::parse("garbage\nunknown=1\n"),
+            BackupRemoteConfig::default()
+        );
     }
 
     #[test]

@@ -75,14 +75,8 @@ const HELPER_MARK: &str = "nebula-hook";
 /// Claude hook events we subscribe to. Session boundaries carry the id needed
 /// for resume/fork; PostToolUse lets a stale permission state return to working
 /// before the whole turn completes.
-const CLAUDE_EVENTS: [&str; 6] = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "Notification",
-    "PostToolUse",
-    "Stop",
-    "SessionEnd",
-];
+const CLAUDE_EVENTS: [&str; 6] =
+    ["SessionStart", "UserPromptSubmit", "Notification", "PostToolUse", "Stop", "SessionEnd"];
 
 /// What a lifecycle event means for the pane's turn state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,10 +305,9 @@ mod remote_tests {
                 .unwrap();
         assert_eq!(done.kind, AiHookKind::TurnDone);
 
-        for (kind, expected) in [
-            ("tool-complete", AiHookKind::ToolComplete),
-            ("session-end", AiHookKind::SessionEnd),
-        ] {
+        for (kind, expected) in
+            [("tool-complete", AiHookKind::ToolComplete), ("session-end", AiHookKind::SessionEnd)]
+        {
             let raw = format!("nebula-hook/1 source=pi pane=3\n{{\"kind\":\"{kind}\"}}");
             assert_eq!(parse_remote_envelope(raw.as_bytes(), Some(3)).unwrap().kind, expected);
         }
@@ -370,9 +363,7 @@ mod win {
         rx
     }
 
-    fn spawn_pipe_server(
-        sink: impl Fn(super::AiHookEvent) -> bool + Send + 'static,
-    ) {
+    fn spawn_pipe_server(sink: impl Fn(super::AiHookEvent) -> bool + Send + 'static) {
         let name = format!(r"\\.\pipe\nebula-notify-{}", std::process::id());
         // SAFETY: single-threaded startup; no other thread reads the env yet.
         unsafe { std::env::set_var(PIPE_ENV, &name) };
@@ -1091,7 +1082,9 @@ export default function (pi: ExtensionAPI) {
         // 显式安装即重新授权：清掉 --remove 落下的持久开关，守护线程下次
         // 启动恢复自愈。
         if let Err(err) = nebula_settings::persist_keys(&[("ai_hooks", "1".to_owned())]) {
-            eprintln!("警告：无法写入 ai_hooks=1（{err}）；若之前执行过 --remove，自动接线仍是关闭状态。");
+            eprintln!(
+                "警告：无法写入 ai_hooks=1（{err}）；若之前执行过 --remove，自动接线仍是关闭状态。"
+            );
         }
         if dir.exists() {
             if ensure_claude_hooks() {
@@ -1165,8 +1158,7 @@ export default function (pi: ExtensionAPI) {
 
     // ─── Runtime skill (Codex + Claude Code) ───────────────────────────────
 
-    const RUNTIME_SKILL_MD: &str =
-        include_str!("../../docs/skills/nebula-runtime/SKILL.md");
+    const RUNTIME_SKILL_MD: &str = include_str!("../../docs/skills/nebula-runtime/SKILL.md");
     const RUNTIME_SKILL_OPENAI_YAML: &str =
         include_str!("../../docs/skills/nebula-runtime/agents/openai.yaml");
     const RUNTIME_SKILL_MARKER: &str = ".nebula-managed";
@@ -1199,8 +1191,8 @@ export default function (pi: ExtensionAPI) {
         targets
     }
 
-    fn ensure_runtime_skills(
-    ) -> Vec<(&'static str, PathBuf, std::io::Result<ManagedSkillInstall>)> {
+    fn ensure_runtime_skills() -> Vec<(&'static str, PathBuf, std::io::Result<ManagedSkillInstall>)>
+    {
         runtime_skill_candidates()
             .into_iter()
             .filter(|(agent, _)| match *agent {
@@ -1235,12 +1227,11 @@ export default function (pi: ExtensionAPI) {
         let skill_path = dir.join("SKILL.md");
         let metadata_path = dir.join("agents").join("openai.yaml");
         let marker_path = dir.join(RUNTIME_SKILL_MARKER);
-        let expected = skill_fingerprint(
-            RUNTIME_SKILL_MD.as_bytes(),
-            RUNTIME_SKILL_OPENAI_YAML.as_bytes(),
-        );
+        let expected =
+            skill_fingerprint(RUNTIME_SKILL_MD.as_bytes(), RUNTIME_SKILL_OPENAI_YAML.as_bytes());
         let current = read_skill_fingerprint(dir);
-        let marker = std::fs::read_to_string(&marker_path).ok().map(|value| value.trim().to_owned());
+        let marker =
+            std::fs::read_to_string(&marker_path).ok().map(|value| value.trim().to_owned());
         let exact_skill = std::fs::read(&skill_path)
             .is_ok_and(|contents| contents == RUNTIME_SKILL_MD.as_bytes());
         let metadata_compatible = !metadata_path.exists()
@@ -1268,9 +1259,8 @@ export default function (pi: ExtensionAPI) {
 
     fn remove_runtime_skill(dir: &Path) -> std::io::Result<ManagedSkillRemoval> {
         let marker_path = dir.join(RUNTIME_SKILL_MARKER);
-        let Some(marker) = std::fs::read_to_string(&marker_path)
-            .ok()
-            .map(|value| value.trim().to_owned())
+        let Some(marker) =
+            std::fs::read_to_string(&marker_path).ok().map(|value| value.trim().to_owned())
         else {
             return Ok(ManagedSkillRemoval::Absent);
         };
@@ -1278,11 +1268,7 @@ export default function (pi: ExtensionAPI) {
             return Ok(ManagedSkillRemoval::Conflict);
         }
 
-        for path in [
-            dir.join("SKILL.md"),
-            dir.join("agents").join("openai.yaml"),
-            marker_path,
-        ] {
+        for path in [dir.join("SKILL.md"), dir.join("agents").join("openai.yaml"), marker_path] {
             if path.exists() {
                 std::fs::remove_file(path)?;
             }
@@ -1300,8 +1286,8 @@ export default function (pi: ExtensionAPI) {
     #[cfg(test)]
     mod runtime_skill_tests {
         use super::{
-            ManagedSkillInstall, ManagedSkillRemoval, RUNTIME_SKILL_MD,
-            ensure_runtime_skill, remove_runtime_skill,
+            ManagedSkillInstall, ManagedSkillRemoval, RUNTIME_SKILL_MD, ensure_runtime_skill,
+            remove_runtime_skill,
         };
 
         #[test]
@@ -1311,10 +1297,7 @@ export default function (pi: ExtensionAPI) {
 
             assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Installed);
             assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Current);
-            assert_eq!(
-                std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
-                RUNTIME_SKILL_MD
-            );
+            assert_eq!(std::fs::read_to_string(dir.join("SKILL.md")).unwrap(), RUNTIME_SKILL_MD);
             assert_eq!(remove_runtime_skill(&dir).unwrap(), ManagedSkillRemoval::Removed);
             assert!(!dir.exists());
         }
@@ -1532,10 +1515,7 @@ export default function (pi: ExtensionAPI) {
 
         #[test]
         fn an_empty_slot_is_claimed_outright() {
-            assert_eq!(
-                desired_codex_notify(&[], HELPER),
-                Some(argv(&[HELPER, "codex"]))
-            );
+            assert_eq!(desired_codex_notify(&[], HELPER), Some(argv(&[HELPER, "codex"])));
         }
 
         #[test]

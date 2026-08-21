@@ -986,13 +986,13 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         // `nebula_settings.txt` `keybind=` overrides + TOML remaps all funnel
         // through `process_key_bindings` below (spec 002).
 
-        // 弹窗补齐：列表可见时接管上下键（选行）、接受键（按 accept 配置的
-        // Tab/Right 键入选中候选的余量）和 Esc（关闭）。其余按键穿透——字符
-        // 照常进 shell 并触发重算，Enter 照常执行当前行。列表关闭后按键立即
-        // 恢复原义（上下键回到 shell 历史）。
+        // 弹窗补齐：出现时先保持空选中，Enter 因而提交用户实际输入；只有用户
+        // 用 Up/Down/Tab 主动进入列表后，Enter/Right 才接受候选。列表关闭后
+        // 按键立即恢复原义（上下键回到 shell 历史）。
         let accept = self.ctx.nebula_accept();
+        let popup_active = self.ctx.nebula_completion_popup_active();
         if mods.is_empty()
-            && self.ctx.nebula_completion_popup_active()
+            && popup_active
             && !self.ctx.display().hint_state.active()
             && !self.ctx.search_active()
         {
@@ -1005,13 +1005,17 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     self.ctx.nebula_completion_popup_move(-1);
                     return;
                 },
+                Key::Named(NamedKey::Tab) => {
+                    self.ctx.nebula_completion_popup_move(1);
+                    return;
+                },
                 Key::Named(NamedKey::Escape) => {
                     if self.ctx.nebula_completion_popup_dismiss() {
                         return;
                     }
                     false
                 },
-                Key::Named(NamedKey::Tab) => accept.accepts_tab(),
+                Key::Named(NamedKey::Enter) => true,
                 Key::Named(NamedKey::ArrowRight) => accept.accepts_right(),
                 _ => false,
             };
@@ -1022,8 +1026,8 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                             self.ctx.nebula_input_char(c);
                         }
                         self.ctx.write_to_pty(insert.into_bytes());
-                        return;
                     }
+                    return;
                 }
             }
         }

@@ -9,7 +9,9 @@ pub use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     dialog::{Dialog, DialogButtonProps},
-    dock::{DockArea, DockAreaState, DockItem, Panel, PanelControl, PanelEvent, PanelState, TabPanel},
+    dock::{
+        DockArea, DockAreaState, DockItem, Panel, PanelControl, PanelEvent, PanelState, TabPanel,
+    },
     h_flex,
     input::{Input, InputState},
     menu::{ContextMenuExt as _, PopupMenu},

@@ -23,6 +23,193 @@ pub(crate) struct SuggestSources<'a> {
     pub style: CompletionStyle,
 }
 
+/// WSL / SSH pane 在命令位置能补的东西。
+///
+/// 本进程的 PATH 描述的是 Windows，里面一个 `notepad.exe` 在来宾或远端都不存在，
+/// 拿它去补 tab 只会给出跑不起来的命令。真实的远端 PATH 要一次往返才问得到
+/// （见 [`SuggestEnv`] 的文档），在那之前这张表是诚实的兜底：全是 POSIX shell
+/// 内置与几乎每台 Linux 都装了的工具。
+///
+/// 排序无所谓——[`nebula_command_hints`] 会自己按长度和字典序收敛。
+const POSIX_COMMANDS: &[&str] = &[
+    // shell 内置
+    "alias",
+    "bg",
+    "cd",
+    "declare",
+    "echo",
+    "eval",
+    "exec",
+    "exit",
+    "export",
+    "false",
+    "fg",
+    "history",
+    "jobs",
+    "kill",
+    "local",
+    "printf",
+    "pwd",
+    "read",
+    "return",
+    "set",
+    "shift",
+    "source",
+    "test",
+    "trap",
+    "true",
+    "type",
+    "umask",
+    "unalias",
+    "unset",
+    "wait",
+    "which",
+    // coreutils 与文件操作
+    "basename",
+    "cat",
+    "chgrp",
+    "chmod",
+    "chown",
+    "cp",
+    "cut",
+    "df",
+    "dirname",
+    "du",
+    "find",
+    "grep",
+    "head",
+    "less",
+    "ln",
+    "ls",
+    "mkdir",
+    "more",
+    "mv",
+    "readlink",
+    "realpath",
+    "rm",
+    "rmdir",
+    "sed",
+    "sort",
+    "stat",
+    "tail",
+    "tee",
+    "touch",
+    "tr",
+    "uniq",
+    "wc",
+    "xargs",
+    // 进程 / 系统
+    "chsh",
+    "env",
+    "free",
+    "htop",
+    "id",
+    "journalctl",
+    "man",
+    "mount",
+    "nohup",
+    "ps",
+    "service",
+    "su",
+    "sudo",
+    "systemctl",
+    "top",
+    "uname",
+    "uptime",
+    "whoami",
+    // 网络与传输
+    "curl",
+    "dig",
+    "ip",
+    "netstat",
+    "ping",
+    "rsync",
+    "scp",
+    "ss",
+    "ssh",
+    "wget",
+    // 归档
+    "gunzip",
+    "gzip",
+    "tar",
+    "unzip",
+    "xz",
+    "zip",
+    // 包管理
+    "apt",
+    "apt-get",
+    "dnf",
+    "dpkg",
+    "pacman",
+    "snap",
+    "yum",
+    // 开发
+    "awk",
+    "cargo",
+    "cmake",
+    "docker",
+    "g++",
+    "gcc",
+    "gdb",
+    "git",
+    "go",
+    "make",
+    "nano",
+    "node",
+    "npm",
+    "pip",
+    "pip3",
+    "pnpm",
+    "python",
+    "python3",
+    "rustc",
+    "rustup",
+    "vim",
+    "yarn",
+];
+
+/// [`POSIX_COMMANDS`] 的 `Vec<String>` 视图。
+///
+/// `nebula_command_hint`/`_hints` 吃的是 `&[String]`（本机那份来自 PATH 探针）。
+/// 转换只做一次；等远端 PATH 真的探到了，替换的就是这个容器本身。
+fn posix_commands() -> &'static [String] {
+    static CACHE: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| POSIX_COMMANDS.iter().map(|name| (*name).to_owned()).collect())
+}
+
+/// 补齐面对的是**哪台机器**的文件系统与命令集。
+///
+/// 这是补齐正确性的根，不只是个功能开关。同一条 `ls /te<Tab>`：本地 tab 该查
+/// `D:\te*`，WSL tab 该查来宾的 `/te*`，SSH tab 该问远端。走错机器不是"补不
+/// 出来"这么轻——它会**补出另一台机器上的路径**，而那条路径在当前 shell 里
+/// 根本不存在。
+///
+/// 这不是假想的失败模式。宿主把 `/temp_build` 解析成"当前盘符下的
+/// `\temp_build`"，而这台机器的 D 盘恰好就有 `D:\temp_build`，于是
+/// [`crate::directory_history::DirectoryHistory::hint`] 的 `is_dir` 把关会当成
+/// 命中，把宿主的目录补进 WSL 的命令行里。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SuggestEnv {
+    /// 普通本地 tab：`std::fs` 与本进程 PATH 指向同一台机器。
+    #[default]
+    Local,
+    /// WSL tab：cwd 是来宾的 Linux 绝对路径。宿主的 `std::fs` 读不到它——本机
+    /// 的 9P 重定向不可用，`\\wsl.localhost\` 三条路实测全部失败，见
+    /// [`crate::shell_detect::wsl_unc_cwd`] 的记录。要列来宾目录只能
+    /// `wsl.exe -d <发行版> -- find`，那是子进程，冷启动可达数秒，绝不能挂在
+    /// 按键路径上。
+    Wsl { distro: String },
+    /// SSH tab：文件系统只能经 SFTP 往返，命令集是远端的。
+    Ssh,
+}
+
+impl SuggestEnv {
+    /// 本进程的 `std::fs` 与 PATH 是否描述这个 pane 所在的机器。
+    pub fn is_this_machine(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+}
+
 /// Refresh the inline ghost remainder or the popup candidate list for the
 /// current prompt line. Cached on `cwd + line`; dismissal keeps the key so a
 /// closed popup stays closed until the line itself changes.
@@ -49,7 +236,7 @@ pub(crate) fn suggest_update(
         state.suggestion_key = key;
         state.suggestion.clear();
         state.completion_items.clear();
-        state.completion_selected = 0;
+        state.completion_selected = None;
         return;
     }
     state.completion_suppressed_line = None;
@@ -62,7 +249,7 @@ pub(crate) fn suggest_update(
     state.suggestion_key = key;
     state.suggestion.clear();
     state.completion_items.clear();
-    state.completion_selected = 0;
+    state.completion_selected = None;
 
     nebula_debug_log(format!(
         "suggest_begin cwd={:?} line={:?} line_buf={:?}",
@@ -88,22 +275,34 @@ pub(crate) fn suggest_update(
     // slash style/case, so `cd D:\te` can pick a previous
     // `cd D:/temp_build/wuwei` before generic filesystem completion falls
     // back to alphabetic candidates like `D:\Telegram\`.
-    if let Some(rem) = sources.directories.hint(&line, &state.cwd) {
-        state.suggestion = clamp_ghost(&rem);
-        nebula_debug_log(format!("suggest_result kind=dir rem={:?}", state.suggestion));
-        return;
+    //
+    // 只在本机：frecency 池里混着三台机器访问过的路径，条目自身没有环境标签，
+    // 而 `hint` 是拿**宿主的** `is_dir` 把关的——在 WSL tab 里 `/temp_build`
+    // 会被解析成 `D:\temp_build` 并当成命中（见 [`SuggestEnv`]）。
+    if state.suggest_env.is_this_machine() {
+        if let Some(rem) = sources.directories.hint(&line, &state.cwd) {
+            state.suggestion = clamp_ghost(&rem);
+            nebula_debug_log(format!("suggest_result kind=dir rem={:?}", state.suggestion));
+            return;
+        }
     }
 
     // First token with no path separators is a command position. Reuse the
     // process PATH inherited by the shell so typing `ca` can ghost `rgo`
     // even before that command has appeared in Nebula/Nushell history.
+    // WSL/SSH 的 shell 没继承这个 PATH，那边走 [`POSIX_COMMANDS`]。
     if nebula_is_command_position(&line) {
-        if let Ok(commands) = sources.commands.lock() {
-            if let Some(rem) = nebula_command_hint(commands.as_slice(), &line) {
-                state.suggestion = clamp_ghost(rem);
-                nebula_debug_log(format!("suggest_result kind=command rem={:?}", state.suggestion));
-                return;
-            }
+        let hinted = if state.suggest_env.is_this_machine() {
+            sources.commands.lock().ok().and_then(|commands| {
+                nebula_command_hint(commands.as_slice(), &line).map(str::to_owned)
+            })
+        } else {
+            nebula_command_hint(posix_commands(), &line).map(str::to_owned)
+        };
+        if let Some(rem) = hinted {
+            state.suggestion = clamp_ghost(&rem);
+            nebula_debug_log(format!("suggest_result kind=command rem={:?}", state.suggestion));
+            return;
         }
     }
 
@@ -114,8 +313,18 @@ pub(crate) fn suggest_update(
     if token.is_empty() {
         return;
     }
-    let absolute =
-        token.starts_with(['/', '\\', '~']) || token.as_bytes().get(1) == Some(&b':'); // Windows drive, e.g. `D:`
+    // 非本机的路径补齐要走各自的通道（来宾 `find` / SFTP），都是带往返的异步
+    // 来源，接线见 `suggest_paths`。这里**必须直接返回**而不是"顺手用
+    // `std::fs` 试试"：宿主会把 `/te` 解析成当前盘的 `\te`，补出来的是
+    // `D:\temp_build` 这种当前 shell 里根本不存在的路径——比补不出来更糟。
+    if !state.suggest_env.is_this_machine() {
+        nebula_debug_log(format!(
+            "suggest_result kind=none reason=foreign_fs env={:?} token={:?}",
+            state.suggest_env, token
+        ));
+        return;
+    }
+    let absolute = token.starts_with(['/', '\\', '~']) || token.as_bytes().get(1) == Some(&b':'); // Windows drive, e.g. `D:`
     if !absolute && state.cwd.is_empty() {
         return;
     }
@@ -213,47 +422,68 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
 
     // Whole-line history matches, newest first.
     for (full, rem) in sources.history.hints(line, 3) {
-        push(&mut items, NebulaCompletionItem {
-            label: elide_left(full, LABEL_MAX),
-            insert: rem.to_owned(),
-            kind: NebulaCompletionKind::History,
-        });
+        push(
+            &mut items,
+            NebulaCompletionItem {
+                label: elide_left(full, LABEL_MAX),
+                insert: rem.to_owned(),
+                kind: NebulaCompletionKind::History,
+            },
+        );
     }
 
     let token = line.rsplit([' ', '\t']).next().unwrap_or("");
 
-    // Frecency-ranked directory completion for cd-like commands.
-    if let Some(rem) = sources.directories.hint(line, &state.cwd) {
-        push(&mut items, NebulaCompletionItem {
-            label: elide_left(&format!("{token}{rem}"), LABEL_MAX),
-            insert: rem,
-            kind: NebulaCompletionKind::Dir,
-        });
+    // Frecency-ranked directory completion for cd-like commands. 只在本机，
+    // 理由同 ghost 分支：frecency 池没有环境标签，而 `hint` 拿宿主的 `is_dir`
+    // 把关，会把 `D:\temp_build` 当成 WSL 的 `/temp_build`。
+    if state.suggest_env.is_this_machine() {
+        if let Some(rem) = sources.directories.hint(line, &state.cwd) {
+            push(
+                &mut items,
+                NebulaCompletionItem {
+                    label: elide_left(&format!("{token}{rem}"), LABEL_MAX),
+                    insert: rem,
+                    kind: NebulaCompletionKind::Dir,
+                },
+            );
+        }
     }
 
-    // PATH executables while the first token is being typed.
+    // PATH executables while the first token is being typed. 本机用 shell 继承
+    // 的进程 PATH；WSL/SSH 的 shell 没继承它，走 [`POSIX_COMMANDS`]。
     if nebula_is_command_position(line) {
-        if let Ok(commands) = sources.commands.lock() {
-            for command in nebula_command_hints(commands.as_slice(), line, POPUP_LIMIT) {
-                // 精确命令也必须成为可接受项；补一个空格既给用户明确反馈，
-                // 又让 Enter 只完成选择而不立刻执行命令。
-                let insert = if command.len() == line.len() {
-                    " ".to_owned()
-                } else {
-                    command[line.len()..].to_owned()
-                };
-                push(&mut items, NebulaCompletionItem {
+        let local = state.suggest_env.is_this_machine();
+        let guard = local.then(|| sources.commands.lock().ok()).flatten();
+        let commands: &[String] = match guard.as_deref() {
+            Some(commands) => commands,
+            None if local => &[],
+            None => posix_commands(),
+        };
+        for command in nebula_command_hints(commands, line, POPUP_LIMIT) {
+            // 精确命令也必须成为可接受项；补一个空格既给用户明确反馈，
+            // 又让 Enter 只完成选择而不立刻执行命令。
+            let insert = if command.len() == line.len() {
+                " ".to_owned()
+            } else {
+                command[line.len()..].to_owned()
+            };
+            push(
+                &mut items,
+                NebulaCompletionItem {
                     label: elide_left(command, LABEL_MAX),
                     insert,
                     kind: NebulaCompletionKind::Command,
-                });
-            }
+                },
+            );
         }
     }
 
     // Filesystem candidates for the final token (same gating as the ghost
     // path: absolute tokens work without a cwd, relative ones need one).
-    if !token.is_empty() {
+    // 非本机一律跳过：这个进程的 `std::fs` 描述的是另一台机器，补出来的路径
+    // 在当前 shell 里不存在（见 [`SuggestEnv`]）。
+    if !token.is_empty() && state.suggest_env.is_this_machine() {
         let absolute =
             token.starts_with(['/', '\\', '~']) || token.as_bytes().get(1) == Some(&b':');
         if absolute || !state.cwd.is_empty() {
@@ -290,16 +520,138 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
                 } else {
                     NebulaCompletionKind::File
                 };
-                push(&mut items, NebulaCompletionItem {
-                    label: elide_left(&format!("{token}{insert}"), LABEL_MAX),
-                    insert: insert.to_owned(),
-                    kind,
-                });
+                push(
+                    &mut items,
+                    NebulaCompletionItem {
+                        label: elide_left(&format!("{token}{insert}"), LABEL_MAX),
+                        insert: insert.to_owned(),
+                        kind,
+                    },
+                );
             }
         }
     }
 
     nebula_debug_log(format!("suggest_result kind=popup line={:?} items={}", line, items.len()));
     state.completion_items = items;
-    state.completion_selected = 0;
+    state.completion_selected = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::directory_history::DirectoryHistory;
+    use crate::nebula_history::NebulaHistory;
+
+    struct Fixture {
+        history: NebulaHistory,
+        directories: DirectoryHistory,
+        commands: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Fixture {
+        /// 历史与 frecency 都留空，断言才只反映被测的那条分支。`commands` 装的
+        /// 是**这台机器**的 PATH 探针结果，所以放一个只有 Windows 才有的名字。
+        fn new() -> Self {
+            Self {
+                history: NebulaHistory::default(),
+                directories: DirectoryHistory::empty(),
+                commands: std::sync::Arc::new(std::sync::Mutex::new(vec![
+                    "notepad.exe".to_owned(),
+                    "grepwin.exe".to_owned(),
+                ])),
+            }
+        }
+
+        fn sources(&self, style: CompletionStyle) -> SuggestSources<'_> {
+            SuggestSources {
+                history: &self.history,
+                directories: &self.directories,
+                commands: &self.commands,
+                enabled: true,
+                style,
+            }
+        }
+
+        /// 在给定环境下算一次 ghost，返回补出的余量。
+        fn ghost(&self, env: SuggestEnv, cwd: &str, line: &str) -> String {
+            let mut state =
+                NebulaPaneState { cwd: cwd.to_owned(), suggest_env: env, ..Default::default() };
+            suggest_update(
+                &self.sources(CompletionStyle::Inline),
+                &mut state,
+                Some(line.to_owned()),
+            );
+            state.suggestion
+        }
+
+        /// 同上但走弹窗，返回候选的插入余量。
+        fn popup(&self, env: SuggestEnv, cwd: &str, line: &str) -> Vec<String> {
+            let mut state =
+                NebulaPaneState { cwd: cwd.to_owned(), suggest_env: env, ..Default::default() };
+            suggest_update(
+                &self.sources(CompletionStyle::Popup),
+                &mut state,
+                Some(line.to_owned()),
+            );
+            state.completion_items.into_iter().map(|item| item.insert).collect()
+        }
+    }
+
+    /// 走错机器不是"补不出来"这么轻——它会把**宿主**的目录补进 WSL 的命令行。
+    ///
+    /// 同一条命令、同一个 cwd，只有环境不同：本机该补出来，WSL 必须一无所获。
+    /// 断言用的是同一份真实存在的宿主目录，所以"WSL 补不出"只可能来自环境
+    /// 分流，不可能是路径碰巧不存在。
+    #[test]
+    fn a_foreign_pane_never_completes_a_path_off_this_machine() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("host-only-dir")).unwrap();
+        let cwd = temp.path().to_string_lossy().into_owned();
+        let fixture = Fixture::new();
+
+        assert_eq!(
+            fixture.ghost(SuggestEnv::Local, &cwd, "ls host-only-"),
+            "dir\\",
+            "本机 tab 的 std::fs 就是这个 pane 的文件系统（补到目录带尾分隔符）"
+        );
+        for env in [SuggestEnv::Wsl { distro: "Debian".to_owned() }, SuggestEnv::Ssh] {
+            assert_eq!(
+                fixture.ghost(env.clone(), &cwd, "ls host-only-"),
+                "",
+                "{env:?} 的文件系统这个进程碰不到，补出宿主路径比补不出来更糟"
+            );
+            assert!(
+                fixture.popup(env.clone(), &cwd, "ls host-only-").is_empty(),
+                "弹窗与 ghost 必须同一套分流：{env:?}"
+            );
+        }
+    }
+
+    /// 进程 PATH 描述的是 Windows。把它当成来宾/远端的命令集，补出的
+    /// `notepad.exe` 在那边根本不存在。
+    #[test]
+    fn a_foreign_pane_completes_posix_commands_instead_of_this_machines_binaries() {
+        let fixture = Fixture::new();
+        assert_eq!(fixture.ghost(SuggestEnv::Local, "", "notepad"), ".exe");
+
+        let wsl = SuggestEnv::Wsl { distro: "Debian".to_owned() };
+        assert_eq!(fixture.ghost(wsl.clone(), "", "notepad"), "", "来宾没有 notepad.exe");
+        assert_eq!(fixture.ghost(wsl.clone(), "", "grep"), "", "精确命令不再往更长的邻居补");
+        assert_eq!(fixture.ghost(wsl.clone(), "", "systemc"), "tl");
+        assert!(fixture.popup(wsl, "", "gre").contains(&"p".to_owned()), "弹窗同样走 POSIX 表");
+    }
+
+    /// 这张表是"远端 PATH 还没探到"时的兜底，所以里面只能是那边真有的东西。
+    #[test]
+    fn the_posix_table_names_nothing_windows_only() {
+        assert!(
+            POSIX_COMMANDS.iter().all(|name| !name.ends_with(".exe")),
+            "Windows 可执行后缀不该出现在 POSIX 表里"
+        );
+        for expected in ["ls", "grep", "sudo", "systemctl", "apt", "cargo"] {
+            assert!(POSIX_COMMANDS.contains(&expected), "缺少常用命令 {expected}");
+        }
+        assert_eq!(posix_commands().len(), POSIX_COMMANDS.len(), "两个视图必须同源");
+    }
 }

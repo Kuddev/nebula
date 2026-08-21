@@ -95,7 +95,8 @@ mod win {
 
     static PROXY: OnceLock<EventLoopProxy<Event>> = OnceLock::new();
     /// GPUI 主窗没有 winit `EventLoopProxy`：点击托盘时走命令回调。
-    static GPUI_COMMAND: OnceLock<Box<dyn Fn(super::GpuiTrayCommand) + Send + Sync>> = OnceLock::new();
+    static GPUI_COMMAND: OnceLock<Box<dyn Fn(super::GpuiTrayCommand) + Send + Sync>> =
+        OnceLock::new();
     static STATE: Mutex<Shared> = Mutex::new(Shared { agents: Vec::new(), enabled: false });
     /// 托盘窗口句柄（isize 形态跨线程存取；0 = 线程未起或窗口未建）。
     static HWND: AtomicIsize = AtomicIsize::new(0);

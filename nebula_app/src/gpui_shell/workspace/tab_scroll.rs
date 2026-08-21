@@ -147,7 +147,10 @@ impl NebulaWorkspace {
     }
 
     fn local_tabs_point(&self, position: Point<Pixels>) -> (f32, f32) {
-        (f32::from(position.x - self.tabs_list_origin.x), f32::from(position.y - self.tabs_list_origin.y))
+        (
+            f32::from(position.x - self.tabs_list_origin.x),
+            f32::from(position.y - self.tabs_list_origin.y),
+        )
     }
 
     fn press_tabs_scrollbar(&mut self, event: &MouseDownEvent) -> bool {
@@ -156,11 +159,7 @@ impl NebulaWorkspace {
         if !bar.hit_test(x, y) {
             return false;
         }
-        let grab = if point_in_rect(bar.thumb, x, y) {
-            y - bar.thumb.1
-        } else {
-            bar.thumb.3 * 0.5
-        };
+        let grab = if point_in_rect(bar.thumb, x, y) { y - bar.thumb.1 } else { bar.thumb.3 * 0.5 };
         self.tabs_scroll_grab = Some(grab);
         self.tabs_scroll = bar.target_offset(y, grab, self.tabs_window().max);
         true
@@ -341,7 +340,10 @@ impl NebulaWorkspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_wheel, clamp_scroll, index_visible, max_scroll, reveal_index, rows_h, visible_count, wheel_rows};
+    use super::{
+        apply_wheel, clamp_scroll, index_visible, max_scroll, reveal_index, rows_h, visible_count,
+        wheel_rows,
+    };
 
     const PITCH: f32 = 42.0;
     const GAP: f32 = 8.0;

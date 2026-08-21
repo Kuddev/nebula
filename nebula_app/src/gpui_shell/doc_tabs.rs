@@ -324,16 +324,13 @@ impl Render for DocTabView {
 /// 仍会播 GIF，markdown 多图共用 element id 时越界 panic。
 fn rewrite_doc_images(text: &str, base: Option<&Path>) -> String {
     use std::sync::LazyLock;
-    static MARKDOWN_IMG: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"(!\[[^\]]*\]\()([^)\s]+)"#).unwrap()
-    });
+    static MARKDOWN_IMG: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r#"(!\[[^\]]*\]\()([^)\s]+)"#).unwrap());
     // `regex` crate 不支持反向引用 `\2`，双引号/单引号拆开写。
-    static HTML_IMG_DQ: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"(?i)(<img\b[^>]*?\bsrc\s*=\s*")([^"]+)""#).unwrap()
-    });
-    static HTML_IMG_SQ: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"(?i)(<img\b[^>]*?\bsrc\s*=\s*')([^']+)'"#).unwrap()
-    });
+    static HTML_IMG_DQ: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r#"(?i)(<img\b[^>]*?\bsrc\s*=\s*")([^"]+)""#).unwrap());
+    static HTML_IMG_SQ: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r#"(?i)(<img\b[^>]*?\bsrc\s*=\s*')([^']+)'"#).unwrap());
     let rewritten = MARKDOWN_IMG.replace_all(text, |caps: &regex::Captures<'_>| {
         format!("{}{}", &caps[1], flatten_local_image_url(&caps[2], base))
     });

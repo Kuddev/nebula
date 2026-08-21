@@ -47,9 +47,9 @@ use crate::message_bar::MessageBuffer;
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::{input, renderer, session};
 
+mod agents;
 mod model;
 mod nebula_fetch_art;
-mod agents;
 mod runtime;
 /// New-tab welcome page (Windows logo + fastfetch intro). Stateless helpers.
 pub(crate) mod welcome;
@@ -692,6 +692,10 @@ impl WindowContext {
                 self.spawn_tab_ssh(host, TabPlacement::Created);
                 false
             },
+            TabRequest::RetrySsh(host) => {
+                self.retry_focused_ssh(host);
+                false
+            },
             TabRequest::OpenDoc(path) => {
                 if crate::display::image_viewer::viewable_file(&path) {
                     self.open_image_tab(path);
@@ -1164,6 +1168,71 @@ impl WindowContext {
         }
     }
 
+    /// 用新的 pane id 在当前布局叶原位重建失败的 SSH 会话。先成功创建替代
+    /// 会话、再一次性换树和 pane 池，避免“关闭最后一个 tab 后再新建”导致
+    /// 窗口提前退出；新 id 也会隔离旧 runtime 的迟到阶段事件。
+    fn retry_focused_ssh(&mut self, destination: String) {
+        #[cfg(windows)]
+        {
+            let old_id = self.focused_pane_id();
+            let Some(old_index) = self.pane_index(old_id) else { return };
+            if self.panes[old_index].ssh_destination.as_deref() != Some(destination.as_str()) {
+                return;
+            }
+            let view = self
+                .layout_geometry(false)
+                .0
+                .into_iter()
+                .find_map(|(id, view)| (id == old_id).then_some(view))
+                .unwrap_or(self.display.size_info);
+            let new_id = self.next_pane_id;
+            let new_pane = match Self::create_ssh_pane(
+                &view,
+                self.display.window.id(),
+                &self.config,
+                &self.proxy,
+                new_id,
+                destination.clone(),
+            ) {
+                Ok(pane) => pane,
+                Err(error) => {
+                    self.display.ssh_connect_stage(
+                        old_id,
+                        destination,
+                        crate::ssh_session::SshStage::Failed(format!("无法重试 SSH 连接: {error}")),
+                    );
+                    self.dirty = true;
+                    self.display.window.request_redraw();
+                    return;
+                },
+            };
+
+            let tab = &mut self.tabs[self.active_tab];
+            if !tab.layout.replace_leaf(old_id, new_id) {
+                let _ = new_pane.notifier.0.send(nebula_terminal::event_loop::Msg::Shutdown);
+                return;
+            }
+            tab.active_pane = new_id;
+            if self.zoom == Some(old_id) {
+                self.zoom = Some(new_id);
+            }
+            self.next_pane_id = self.next_pane_id.saturating_add(1);
+            let old_pane = std::mem::replace(&mut self.panes[old_index], new_pane);
+            self.display.forget_ssh_connect(old_id);
+            self.display.ssh_connect_stage(
+                new_id,
+                destination,
+                crate::ssh_session::SshStage::Resolve,
+            );
+            let _ = old_pane.notifier.0.send(nebula_terminal::event_loop::Msg::Shutdown);
+            self.resize_active_layout();
+            self.dirty = true;
+            self.display.window.request_redraw();
+        }
+        #[cfg(not(windows))]
+        let _ = destination;
+    }
+
     /// Open `path` in a read-only document viewer tab. A tab already viewing
     /// this file is re-focused (and re-read, so the view is fresh) instead of
     /// duplicated — double-click twice shouldn't litter the bar.
@@ -1352,7 +1421,8 @@ impl WindowContext {
             TabLaunch::Shell { shell, .. } => Some(shell.clone()),
             _ => unreachable!("launch was restricted above"),
         };
-        let Some(pane_id) = self.spawn_pane_detached_with(cwd, self.display.size_info, shell) else {
+        let Some(pane_id) = self.spawn_pane_detached_with(cwd, self.display.size_info, shell)
+        else {
             return;
         };
         self.insert_tab(
@@ -1816,10 +1886,9 @@ impl WindowContext {
                     source: identity.source.clone(),
                     session_id: Some(identity.session_id.clone()),
                 }),
-                _ if matches!(program, "claude" | "codex") => Some(session::AgentSession {
-                    source: program.to_owned(),
-                    session_id: None,
-                }),
+                _ if matches!(program, "claude" | "codex") => {
+                    Some(session::AgentSession { source: program.to_owned(), session_id: None })
+                },
                 _ => None,
             }
         };
@@ -2180,8 +2249,7 @@ impl WindowContext {
         }
         if let Some(id) = ev.session_id.as_deref() {
             let cwd = self.panes[idx].nebula_state.cwd.clone();
-            if let Err(error) =
-                crate::ai_sessions::record_hook_session(&ev.source, id, &cwd, None)
+            if let Err(error) = crate::ai_sessions::record_hook_session(&ev.source, id, &cwd, None)
             {
                 log::warn!("agent session index: could not record {} {id}: {error}", ev.source);
             }
@@ -2412,8 +2480,7 @@ impl WindowContext {
                         state.finished_at = Some(Instant::now());
                     }
                 },
-                crate::ai_agents::AgentStatus::Done
-                | crate::ai_agents::AgentStatus::Unknown => {},
+                crate::ai_agents::AgentStatus::Done | crate::ai_agents::AgentStatus::Unknown => {},
             }
         }
         // Chrome/tray read the established fields; rebuilding their compact

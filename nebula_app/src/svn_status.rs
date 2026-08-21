@@ -93,11 +93,9 @@ pub struct SvnChange {
 /// 只有内容真的不同才报 Modified（touch 过的文件不误报）。
 pub fn working_copy_status(root: &Path) -> Result<Vec<SvnChange>, String> {
     let db_path = root.join(".svn").join("wc.db");
-    let connection = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|error| format!("无法打开 {}: {error}", db_path.display()))?;
+    let connection =
+        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("无法打开 {}: {error}", db_path.display()))?;
     // svn 客户端可能正持有写锁；等一小会而不是立刻失败。
     connection.busy_timeout(std::time::Duration::from_millis(300)).ok();
 
@@ -162,8 +160,8 @@ pub fn working_copy_status(root: &Path) -> Result<Vec<SvnChange>, String> {
 
     // 冲突从 ACTUAL_NODE 来（树冲突/文本冲突统一报 Conflicted）。
     let mut conflicted: HashSet<String> = HashSet::new();
-    if let Ok(mut statement) = connection
-        .prepare("SELECT local_relpath FROM actual_node WHERE conflict_data IS NOT NULL")
+    if let Ok(mut statement) =
+        connection.prepare("SELECT local_relpath FROM actual_node WHERE conflict_data IS NOT NULL")
     {
         if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
             for relpath in rows.flatten() {
@@ -204,9 +202,15 @@ pub fn working_copy_status(root: &Path) -> Result<Vec<SvnChange>, String> {
                     changes.push(SvnChange { rel_path: relpath.clone(), state: SvnState::Missing });
                     continue;
                 };
-                if is_modified(&disk, &metadata, node.recorded_size, node.recorded_time, node.checksum.as_deref())
-                {
-                    changes.push(SvnChange { rel_path: relpath.clone(), state: SvnState::Modified });
+                if is_modified(
+                    &disk,
+                    &metadata,
+                    node.recorded_size,
+                    node.recorded_time,
+                    node.checksum.as_deref(),
+                ) {
+                    changes
+                        .push(SvnChange { rel_path: relpath.clone(), state: SvnState::Modified });
                 }
             },
             // excluded/server-excluded/not-present 等：本地无实体，不报告。
@@ -216,8 +220,11 @@ pub fn working_copy_status(root: &Path) -> Result<Vec<SvnChange>, String> {
 
     // 未版本化：已版本化目录的磁盘直接子项里，不在 NODES 且不是 .svn 的。
     for dir in versioned_dirs {
-        let disk_dir =
-            if dir.is_empty() { root.to_owned() } else { root.join(dir.replace('/', std::path::MAIN_SEPARATOR_STR)) };
+        let disk_dir = if dir.is_empty() {
+            root.to_owned()
+        } else {
+            root.join(dir.replace('/', std::path::MAIN_SEPARATOR_STR))
+        };
         let Ok(entries) = std::fs::read_dir(&disk_dir) else { continue };
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -225,8 +232,7 @@ pub fn working_copy_status(root: &Path) -> Result<Vec<SvnChange>, String> {
             if name == ".svn" {
                 continue;
             }
-            let relpath =
-                if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
+            let relpath = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
             if !nodes.contains_key(&relpath) {
                 changes.push(SvnChange { rel_path: relpath, state: SvnState::Unversioned });
             }
@@ -428,25 +434,11 @@ mod tests {
         insert_node(&connection, "replaced.txt", 1, "normal", "file", None, None, None);
         insert_node(&connection, "deleted.txt", 0, "normal", "file", None, Some(1), Some(1));
         insert_node(&connection, "deleted.txt", 1, "base-deleted", "file", None, None, None);
-        insert_node(
-            &connection,
-            "missing.txt",
-            0,
-            "normal",
-            "file",
-            None,
-            Some(1),
-            Some(1),
-        );
+        insert_node(&connection, "missing.txt", 0, "normal", "file", None, Some(1), Some(1));
         // 冲突覆盖其他状态。
         std::fs::write(root.join("conflict.txt"), "x").unwrap();
         insert_node(&connection, "conflict.txt", 0, "normal", "file", None, Some(1), Some(1));
-        connection
-            .execute(
-                "INSERT INTO actual_node VALUES ('conflict.txt', x'00')",
-                [],
-            )
-            .unwrap();
+        connection.execute("INSERT INTO actual_node VALUES ('conflict.txt', x'00')", []).unwrap();
         // 未版本化的散文件。
         std::fs::write(root.join("stray.txt"), "?").unwrap();
         drop(connection);

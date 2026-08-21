@@ -85,6 +85,21 @@ impl Layout {
         }
     }
 
+    /// 原位替换一个布局叶。SSH 重试用新 pane id 隔离旧会话的迟到事件，但
+    /// 必须保留原来的分屏位置、比例与兄弟节点。
+    pub(super) fn replace_leaf(&mut self, target: PaneId, replacement: PaneId) -> bool {
+        match self {
+            Layout::Leaf(id) if *id == target => {
+                *id = replacement;
+                true
+            },
+            Layout::Leaf(_) => false,
+            Layout::Split { first, second, .. } => {
+                first.replace_leaf(target, replacement) || second.replace_leaf(target, replacement)
+            },
+        }
+    }
+
     /// Replace the `target` leaf with a `Split` of `[target, new]`. Returns
     /// `true` if `target` was found.
     fn split_leaf(
@@ -870,6 +885,17 @@ mod resize_layout_tests {
     use super::{Layout, collect_layout, pane_viewport_contains, terminal_content_rect};
     use crate::display::{SizeInfo, SplitDirection};
     use crate::window_context::pane_focus_button;
+
+    #[test]
+    fn replacing_a_leaf_preserves_its_split_position() {
+        let mut layout = Layout::Leaf(1);
+        assert!(layout.split_leaf(1, 2, SplitDirection::LeftRight, 0.5));
+        assert!(layout.replace_leaf(1, 9));
+        let mut leaves = Vec::new();
+        layout.leaves(&mut leaves);
+        assert_eq!(leaves, vec![9, 2]);
+        assert!(!layout.replace_leaf(7, 8));
+    }
 
     #[test]
     fn all_terminal_mouse_buttons_move_split_focus_before_routing() {

@@ -209,14 +209,20 @@ pub(crate) struct RuntimeSubmitBarrier {
 pub struct NebulaPaneState {
     pub cwd: String,
     pub branch: String,
+    /// 这个 pane 的补齐面对哪台机器的文件系统与命令集。启动时由 shell 的
+    /// program/args 定（`wsl.exe -d <发行版>` 认得出来），SSH 会话在连上后
+    /// 改写。`cwd` 只说"在哪个目录"，这个说"在哪台机器"——两者都对了补齐才
+    /// 补得对，见 [`crate::display::suggest_engine::SuggestEnv`]。
+    pub suggest_env: crate::display::suggest_engine::SuggestEnv,
     pub suggestion: String,
     pub(super) suggestion_key: String,
-    /// Popup-style completion candidates for the current line (empty = no
-    /// popup). Mutually exclusive with `suggestion`: which one fills depends
-    /// on the configured [`CompletionStyle`].
+    /// Popup-style completion candidates for the current line. A non-empty list
+    /// stays visible so users can discover completion without an extra action.
+    /// Mutually exclusive with `suggestion`: which one fills depends on the
+    /// configured [`CompletionStyle`].
     pub completion_items: Vec<NebulaCompletionItem>,
-    /// Index of the highlighted popup row.
-    pub completion_selected: usize,
+    /// 用户尚未主动导航时不高亮任何候选；这保证 Enter 仍提交原始输入。
+    pub completion_selected: Option<usize>,
     /// 用户已接受或主动关闭弹窗的整行。只要屏幕行未变化，即使命令目录的
     /// 异步代次更新也不重新弹出；下一次真实输入会自然让行值失配并清除此项。
     pub(crate) completion_suppressed_line: Option<String>,
@@ -286,7 +292,7 @@ impl NebulaPaneState {
         self.suggestion.clear();
         self.suggestion_key.clear();
         self.completion_items.clear();
-        self.completion_selected = 0;
+        self.completion_selected = None;
     }
 
     pub(crate) fn terminal_math_source_point(

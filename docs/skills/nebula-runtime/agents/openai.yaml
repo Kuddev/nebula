@@ -1,4 +1,4 @@
 interface:
   display_name: "Nebula Runtime"
   short_description: "Split panes and control Codex/Claude in Nebula"
-  default_prompt: "Use $nebula-runtime to control the live Nebula layout, start or prompt coding agents, wait for state changes, and verify terminal output."
+  default_prompt: "Use one typed Nebula runtime.orchestrate workflow for multi-step layout and first-task dispatch; use individual controls only for follow-up observation or recovery."

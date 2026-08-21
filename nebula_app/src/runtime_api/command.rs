@@ -26,6 +26,8 @@ struct WindowParams {
 struct SplitParams {
     #[serde(default)]
     window_id: Option<u64>,
+    #[serde(default)]
+    pane_id: Option<u64>,
     direction: RuntimeSplitDirection,
 }
 
@@ -150,7 +152,11 @@ impl RuntimeCommand {
             },
             "pane.split" => {
                 let params: SplitParams = parse_params(&request.params)?;
-                Ok(Self::Split { window_id: params.window_id, direction: params.direction })
+                Ok(Self::Split {
+                    window_id: params.window_id,
+                    pane_id: params.pane_id,
+                    direction: params.direction,
+                })
             },
             "pane.prompt" => {
                 let params: PromptParams = parse_params(&request.params)?;

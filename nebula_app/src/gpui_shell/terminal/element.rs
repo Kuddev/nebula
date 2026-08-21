@@ -189,7 +189,9 @@ impl Element for TerminalElement {
         let focused = focus_handle.is_focused(window);
         // 旧壳只让光标本身参与闪烁；ghost、弹窗补齐和 IME 仍复用同一个坐标锚点。
         let cursor_visible = self.view.read(cx).cursor_visible();
-        let Some((snap, prompt_line, history, dashed)) = self.snapshot(layout.rows, layout.cols, cx) else {
+        let Some((snap, prompt_line, history, dashed)) =
+            self.snapshot(layout.rows, layout.cols, cx)
+        else {
             return;
         };
         let suggest_anchor =
@@ -526,7 +528,7 @@ impl Element for TerminalElement {
                 let same_frame =
                     view.suggest_anchor == Some((cursor.row as usize, cursor.col as usize));
                 if ime_active || !same_frame {
-                    (None, Vec::new(), 0)
+                    (None, Vec::new(), None)
                 } else {
                     (
                         (!view.suggest.suggestion.is_empty())
@@ -570,6 +572,7 @@ impl Element for TerminalElement {
                         &bounds,
                         &colors,
                         &font,
+                        &bold_font,
                         font_size,
                     );
                 }
@@ -721,11 +724,8 @@ fn paint_link_preview(
     font: &gpui::Font,
     font_size: Pixels,
 ) {
-    let line = if anchor_row + 1 < layout.rows {
-        anchor_row + 1
-    } else {
-        anchor_row.saturating_sub(1)
-    };
+    let line =
+        if anchor_row + 1 < layout.rows { anchor_row + 1 } else { anchor_row.saturating_sub(1) };
     let label_size = px(font_size.as_f32() * 0.85);
     let run = TextRun {
         len: preview.len(),
@@ -735,17 +735,30 @@ fn paint_link_preview(
         underline: None,
         strikethrough: None,
     };
-    let shaped = window.text_system().shape_line(SharedString::from(preview.to_owned()), label_size, &[run], None);
+    let shaped = window.text_system().shape_line(
+        SharedString::from(preview.to_owned()),
+        label_size,
+        &[run],
+        None,
+    );
     let pad = px(8.0);
     let bubble_w = shaped.width + pad * 2.0;
     let bubble_h = layout.line_height * 0.85 + pad;
     let max_x = (bounds.origin.x + bounds.size.width - bubble_w).max(bounds.origin.x);
     let x = (bounds.origin.x + layout.cell_width * anchor_col as f32).min(max_x);
-    let y = bounds.origin.y + layout.line_height * line as f32 + (layout.line_height - bubble_h) * 0.5;
+    let y =
+        bounds.origin.y + layout.line_height * line as f32 + (layout.line_height - bubble_h) * 0.5;
     let bubble = Bounds::new(point(x, y), size(bubble_w, bubble_h));
     window.paint_quad(fill(bubble, cx.theme().popover).corner_radii(px(6.0)));
-    window.paint_quad(outline(bubble, cx.theme().border, gpui::BorderStyle::Solid).corner_radii(px(6.0)));
-    let _ = shaped.paint(point(x + pad, y + (bubble_h - layout.line_height * 0.85) * 0.5), layout.line_height * 0.85, window, cx);
+    window.paint_quad(
+        outline(bubble, cx.theme().border, gpui::BorderStyle::Solid).corner_radii(px(6.0)),
+    );
+    let _ = shaped.paint(
+        point(x + pad, y + (bubble_h - layout.line_height * 0.85) * 0.5),
+        layout.line_height * 0.85,
+        window,
+        cx,
+    );
 }
 
 /// 唯一的 cell 文本落笔原语：单 cell 文本塑形后从调用方给定的整数 cell
@@ -829,12 +842,12 @@ pub(super) struct CompletionPopupLayout {
     pub width: usize,
     pub label_width: usize,
     pub tag_width: usize,
-    pub selected: usize,
+    pub selected: Option<usize>,
 }
 
 pub(super) fn completion_popup_layout(
     items: &[crate::display::NebulaCompletionItem],
-    selected: usize,
+    selected: Option<usize>,
     cursor_row: usize,
     cursor_col: usize,
     screen_lines: usize,
@@ -859,8 +872,8 @@ pub(super) fn completion_popup_layout(
         return None;
     }
 
-    let selected = selected.min(items.len() - 1);
-    let offset = if selected >= rows { selected + 1 - rows } else { 0 };
+    let selected = selected.filter(|index| *index < items.len());
+    let offset = selected.filter(|index| *index >= rows).map(|index| index + 1 - rows).unwrap_or(0);
     let visible = &items[offset..(offset + rows).min(items.len())];
     let tag = |kind: crate::display::NebulaCompletionKind| -> &'static str {
         match kind {
@@ -907,13 +920,14 @@ fn paint_completion_popup(
     window: &mut Window,
     cx: &mut App,
     items: &[crate::display::NebulaCompletionItem],
-    selected: usize,
+    selected: Option<usize>,
     cursor_row: usize,
     cursor_col: usize,
     layout: &TermLayout,
     bounds: &Bounds<Pixels>,
     colors: &crate::gpui_shell::theme::CompletionColors,
     font: &gpui::Font,
+    bold_font: &gpui::Font,
     font_size: Pixels,
 ) {
     let columns = layout.cols;
@@ -931,6 +945,14 @@ fn paint_completion_popup(
             crate::display::NebulaCompletionKind::File => "文件",
         }
     };
+    let icon = |kind: crate::display::NebulaCompletionKind| -> &'static str {
+        match kind {
+            crate::display::NebulaCompletionKind::History => "↶",
+            crate::display::NebulaCompletionKind::Command => "›",
+            crate::display::NebulaCompletionKind::Dir => "/",
+            crate::display::NebulaCompletionKind::File => "·",
+        }
+    };
     let visible = &items[popup.offset..(popup.offset + popup.rows).min(items.len())];
 
     // 四周留出少量呼吸边，圆角和边框不会压到候选文字。
@@ -946,9 +968,29 @@ fn paint_completion_popup(
             layout.line_height * popup.rows as f32 + panel_pad * 2.0,
         ),
     );
-    window.paint_quad(fill(panel_bounds, colors.panel_bg).corner_radii(px(8.0)));
+    let panel_radius = px(8.0);
+    window.paint_shadows(
+        panel_bounds,
+        panel_radius.into(),
+        &[
+            gpui::BoxShadow {
+                color: colors.panel_shadow,
+                offset: point(px(0.0), px(8.0)),
+                blur_radius: px(30.0),
+                spread_radius: px(-2.0),
+            },
+            gpui::BoxShadow {
+                color: colors.panel_shadow.opacity(0.72),
+                offset: point(px(0.0), px(3.0)),
+                blur_radius: px(10.0),
+                spread_radius: px(-1.0),
+            },
+        ],
+    );
+    window.paint_quad(fill(panel_bounds, colors.panel_bg).corner_radii(panel_radius));
     window.paint_quad(
-        outline(panel_bounds, colors.panel_border, gpui::BorderStyle::Solid).corner_radii(px(8.0)),
+        outline(panel_bounds, colors.panel_border, gpui::BorderStyle::Solid)
+            .corner_radii(panel_radius),
     );
 
     for (row, item) in visible.iter().enumerate() {
@@ -956,7 +998,7 @@ fn paint_completion_popup(
         if line >= screen_lines {
             break;
         }
-        let is_selected = popup.offset + row == popup.selected;
+        let is_selected = Some(popup.offset + row) == popup.selected;
         let (bg, label_fg, tag_fg) = if is_selected {
             (colors.selected_bg, colors.selected_fg, colors.selected_fg)
         } else {
@@ -966,15 +1008,34 @@ fn paint_completion_popup(
             bounds.origin.x + layout.cell_width * popup.start_col as f32,
             bounds.origin.y + layout.line_height * line as f32,
         );
-        window.paint_quad(fill(
-            Bounds::new(origin, size(layout.cell_width * popup.width as f32, layout.line_height)),
-            bg,
-        ));
+        let row_radius = if is_selected { px(6.0) } else { px(0.0) };
+        window.paint_quad(
+            fill(
+                Bounds::new(
+                    origin,
+                    size(layout.cell_width * popup.width as f32, layout.line_height),
+                ),
+                bg,
+            )
+            .corner_radii(row_radius),
+        );
+        grid_text(
+            window,
+            cx,
+            icon(item.kind),
+            font,
+            font_size,
+            tag_fg,
+            origin,
+            layout.cell_width,
+            layout.line_height,
+            1,
+        );
         grid_text(
             window,
             cx,
             &item.label,
-            font,
+            if is_selected { bold_font } else { font },
             font_size,
             label_fg,
             point(origin.x + layout.cell_width, origin.y),
@@ -1087,9 +1148,23 @@ mod tests {
             kind: NebulaCompletionKind::Command,
         }];
 
-        let popup = completion_popup_layout(&items, 0, 2, 7, 24, 80)
+        let popup = completion_popup_layout(&items, Some(0), 2, 7, 24, 80)
             .expect("短命令的精确候选也必须形成可见面板");
         assert_eq!(popup.rows, 1);
         assert_eq!(popup.label_width, 3);
+    }
+
+    #[test]
+    fn popup_layout_preserves_the_unselected_state() {
+        let items = [NebulaCompletionItem {
+            label: "git pull upstream".to_owned(),
+            insert: " upstream".to_owned(),
+            kind: NebulaCompletionKind::History,
+        }];
+
+        let popup =
+            completion_popup_layout(&items, None, 2, 7, 24, 80).expect("空选中态仍应显示候选面板");
+        assert_eq!(popup.selected, None);
+        assert_eq!(popup.offset, 0);
     }
 }

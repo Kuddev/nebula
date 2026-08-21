@@ -8,6 +8,7 @@
 mod agent_api;
 mod cli;
 mod command;
+mod orchestrate;
 mod server;
 #[cfg(test)]
 mod tests;
@@ -677,6 +678,7 @@ pub enum RuntimeCommand {
     },
     Split {
         window_id: Option<u64>,
+        pane_id: Option<u64>,
         direction: RuntimeSplitDirection,
     },
     Prompt {
@@ -710,6 +712,7 @@ pub enum RuntimeCommand {
     },
     AgentStart {
         window_id: Option<u64>,
+        pane_id: Option<u64>,
         name: String,
         kind: crate::ai_agents::AgentKind,
         cwd: Option<PathBuf>,
@@ -1496,6 +1499,9 @@ fn handle_connection(
         "agent.get" => agent_api::agent_get_connection(&mut stream, request, hub),
         "agent.wait" => agent_api::agent_wait_connection(&mut stream, request, hub),
         "pane.wait" => wait_connection(&mut stream, request, hub),
+        "runtime.orchestrate" => {
+            orchestrate::orchestrate_connection(&mut stream, request, sink, hub)
+        },
         _ => dispatch_connection(&mut stream, request, sink, hub),
     }
 }
@@ -1531,6 +1537,7 @@ fn runtime_description() -> Value {
         "capabilities": [
             "runtime.describe",
             "runtime.snapshot",
+            "runtime.orchestrate",
             "events.subscribe",
             "agents.list",
             "agent.start",
@@ -1560,6 +1567,8 @@ fn runtime_description() -> Value {
             "agent.fork.transactional_worktree",
             "agent.worktree.provenance",
             "events.pane_lifecycle"
+            ,"runtime.orchestrate.typed_steps"
+            ,"runtime.orchestrate.agent_ready"
         ]
     })
 }
@@ -1724,11 +1733,6 @@ fn dispatch_connection(
         Ok(command) => command,
         Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
     };
-    let (command, mut worktree_transaction) =
-        match agent_api::prepare_dispatch_command(command, hub) {
-            Ok(prepared) => prepared,
-            Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
-        };
     match &command {
         RuntimeCommand::SendKey { window_id, pane_id, key, modifiers, repeat } => {
             info!(
@@ -1740,9 +1744,11 @@ fn dispatch_connection(
                 modifiers.control,
             );
         },
-        RuntimeCommand::AgentStart { window_id, name, kind, session_id, worktree, .. } => {
+        RuntimeCommand::AgentStart {
+            window_id, pane_id, name, kind, session_id, worktree, ..
+        } => {
             info!(
-                "runtime agent.start request_id={} window_id={window_id:?} name={} kind={} resume={} worktree={}",
+                "runtime agent.start request_id={} window_id={window_id:?} pane_id={pane_id:?} name={} kind={} resume={} worktree={}",
                 request.id,
                 name,
                 kind.slug(),
@@ -1750,8 +1756,13 @@ fn dispatch_connection(
                 worktree.is_some()
             );
         },
-        RuntimeCommand::AgentFork { .. } => {
-            unreachable!("agent.fork must be prepared before UI dispatch")
+        RuntimeCommand::AgentFork { name, kind, .. } => {
+            info!(
+                "runtime agent.fork request_id={} name={} kind={}",
+                request.id,
+                name,
+                kind.slug()
+            );
         },
         RuntimeCommand::AgentPrompt { agent, generation, text, submit } => {
             info!(
@@ -1769,6 +1780,21 @@ fn dispatch_connection(
         },
         _ => {},
     }
+    let response = match dispatch_runtime_command(command, sink, hub) {
+        Ok(result) => ApiResponse::success(request.id, result),
+        Err(error) => ApiResponse::failure(request.id, error),
+    };
+    write_response(stream, &response)
+}
+
+/// 执行一个已经解析的 Runtime 原语。普通请求与编排步骤共享这里，避免
+/// worktree 事务、run 等待和 UI 超时在两条路径上逐渐产生不同语义。
+fn dispatch_runtime_command(
+    command: RuntimeCommand,
+    sink: &EventSink,
+    hub: &RuntimeHub,
+) -> Result<Value, ApiError> {
+    let (command, mut worktree_transaction) = agent_api::prepare_dispatch_command(command, hub)?;
     let run_wait = match &command {
         RuntimeCommand::Run { wait: true, timeout_ms, .. } => {
             Some(Duration::from_millis(*timeout_ms))
@@ -1777,13 +1803,12 @@ fn dispatch_connection(
     };
     let (dispatch, receiver) = RuntimeDispatch::new(command);
     if !sink.emit_control(dispatch) {
-        let error = agent_api::rollback_prepared_worktree(
+        return Err(agent_api::rollback_prepared_worktree(
             ApiError::new("runtime_unavailable", "Nebula's event loop is not available"),
             worktree_transaction.take(),
-        );
-        return write_response(stream, &ApiResponse::failure(request.id, error));
+        ));
     }
-    let response = match receiver.recv_timeout(COMMAND_TIMEOUT) {
+    match receiver.recv_timeout(COMMAND_TIMEOUT) {
         Ok(Ok(mut result)) => {
             if let Some(transaction) = worktree_transaction.take() {
                 let provenance = transaction.commit();
@@ -1798,30 +1823,21 @@ fn dispatch_connection(
                 );
                 match target {
                     (Some(window_id), Some(pane_id), Some(run_id)) => {
-                        match hub.wait_run(window_id, pane_id, run_id, timeout) {
-                            Ok(run) => ApiResponse::success(
-                                request.id,
-                                json!({ "run": run, "snapshot": hub.current() }),
-                            ),
-                            Err(error) => ApiResponse::failure(request.id, error),
-                        }
+                        let run = hub.wait_run(window_id, pane_id, run_id, timeout)?;
+                        Ok(json!({ "run": run, "snapshot": hub.current() }))
                     },
-                    _ => ApiResponse::failure(
-                        request.id,
-                        ApiError::new(
-                            "invalid_runtime_response",
-                            "pane.run did not return its window, pane, and run identity",
-                        ),
-                    ),
+                    _ => Err(ApiError::new(
+                        "invalid_runtime_response",
+                        "pane.run did not return its window, pane, and run identity",
+                    )),
                 }
             } else {
-                ApiResponse::success(request.id, result)
+                Ok(result)
             }
         },
-        Ok(Err(error)) => ApiResponse::failure(
-            request.id,
-            agent_api::rollback_prepared_worktree(error, worktree_transaction.take()),
-        ),
+        Ok(Err(error)) => {
+            Err(agent_api::rollback_prepared_worktree(error, worktree_transaction.take()))
+        },
         Err(_) => {
             let mut error =
                 ApiError::new("runtime_timeout", "runtime event thread did not answer in time");
@@ -1835,10 +1851,9 @@ fn dispatch_connection(
                     "reason": "the UI outcome is unknown; Nebula did not remove the worktree"
                 }));
             }
-            ApiResponse::failure(request.id, error)
+            Err(error)
         },
-    };
-    write_response(stream, &response)
+    }
 }
 
 fn write_response(stream: &mut TcpStream, response: &ApiResponse) -> Result<(), IoError> {

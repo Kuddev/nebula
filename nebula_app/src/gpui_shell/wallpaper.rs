@@ -139,6 +139,17 @@ pub fn window_opacity(cx: &App) -> f32 {
     cx.try_global::<VisualEffects>().map(|v| v.opacity).unwrap_or(1.0)
 }
 
+/// 拖不透明度滑块的快路径：只把新值写进视效全局。
+///
+/// 不读设置文件、不重建壁纸纹理、不碰窗口级模糊——透明度只影响我们自己绘制的
+/// 像素 alpha 与壳色 token，那些都是纯浪费。调用方负责紧接着调
+/// [`crate::gpui_shell::theme::reapply_shell_opacity`] 与 `cx.notify()`。
+pub fn set_opacity_live(opacity: f32, cx: &mut App) {
+    if cx.has_global::<VisualEffects>() {
+        cx.global_mut::<VisualEffects>().opacity = opacity.clamp(0.0, 1.0);
+    }
+}
+
 /// 壳/卡透明度严格跟随用户滑块。模糊是独立的窗口背景外观属性，不能反向
 /// 篡改透明度；否则打开模糊会把用户设置的 100% 偷改成 88%，与旧壳语义
 /// 不一致。铺满 chrome 的壁纸仍沿用自己的可见性上限。
@@ -169,11 +180,21 @@ pub fn initial_background_appearance() -> WindowBackgroundAppearance {
 ///
 /// 旧壳（winit）用 `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE,
 /// DWMSBT_TRANSIENTWINDOW)` 三行就拿到 Acrylic。同一段代码搬到 GPUI 壳上
-/// 调用成功、画面零变化——**因为窗口的合成结构不同**：GPUI 只要没禁用
-/// DirectComposition 就给窗口加 `WS_EX_NOREDIRECTIONBITMAP`
-/// （`gpui/src/platform/windows/window.rs`），DWM 因此不为它创建重定向
-/// 表面，system backdrop 材质没有挂载点，`DwmSetWindowAttribute` 返回
-/// `S_OK` 却什么都不画。旧壳是普通重定向窗口，才没这个问题。
+/// **比无效更糟**——2026-08-21 同窗对照实测（`opacity=0`、后方放高频视频画面）：
+/// 写 `DWMSBT_TRANSIENTWINDOW` 后 `HRESULT=0`、属性能读回 3，但画面变成一块
+/// **不透明浅灰色板**，后方内容整块消失（既不透明也不模糊）；改回
+/// `DWMSBT_NONE` 并只写 AccentPolicy Acrylic，同一窗口立刻恢复真模糊。
+///
+/// 根因是合成结构不同：GPUI 只要没禁用 DirectComposition 就给窗口加
+/// `WS_EX_NOREDIRECTIONBITMAP`（`gpui/src/platform/windows/window.rs`），DWM
+/// 不为它创建重定向表面，system backdrop 没有正确的挂载点。旧壳是普通重定向
+/// 窗口，才没这个问题。
+///
+/// 两条已被实测否决、不要再试的"修法"：
+/// 1. 运行时 `SetWindowLongPtrW` 清掉 `WS_EX_NOREDIRECTIONBITMAP` 再配
+///    `SWP_FRAMECHANGED`——该样式在 `CreateWindowEx` 时就被 DWM 消费，事后改
+///    不回来（实测调用后读回样式位仍然置位），窗口内容也仍走 DComp visual。
+/// 2. 用 system backdrop "替代" AccentPolicy——见上，结果是不透明色板。
 ///
 /// 上游 Zed 走过同一条弯路：PR #41842 第一版把 `Blurred` 改成
 /// `DWMSBT_TRANSIENTWINDOW`，第二版又改回 `SetWindowCompositionAttribute`，
@@ -182,6 +203,13 @@ pub fn initial_background_appearance() -> WindowBackgroundAppearance {
 /// `ACCENT_ENABLE_ACRYLICBLURBEHIND`（且已处理 tint alpha 为 0 时 DWM 跳过
 /// 模糊的坑），macOS / Linux 各自落到原生毛玻璃。一处开关，三平台生效，
 /// 不必碰 fork 也不必自写 FFI。
+///
+/// # 不透明度 100% 时看不到模糊是正交结果，不是失效
+///
+/// Acrylic 层在窗口内容**下方**。`opacity=1.00` 下我们画的像素完全不透明，
+/// 模糊层被整块盖住——此时开关在画面上零变化是必然的。验收模糊必须先把
+/// 不透明度调到 100% 以下，否则任何实现都会被判成"没修复"。
+
 ///
 /// # 关闭时为什么是 `Opaque` 而不是 `Transparent`
 ///
@@ -203,27 +231,83 @@ fn background_appearance(blur: bool) -> WindowBackgroundAppearance {
     }
 }
 
+/// 已经真正落到窗口上的模糊态。拖不透明度滑块会每帧走一遍 [`refresh`]，而
+/// 窗口级模糊是**跨进程**调用（`SetWindowCompositionAttribute` 两次 +
+/// `DwmSetWindowAttribute`）。不做门控就等于每帧和 DWM 往返三次，滑块直接
+/// 拖成幻灯片——2026-08-21 实测。模糊态没变时一次都不碰。
+struct AppliedBlur(bool);
+
+impl gpui::Global for AppliedBlur {}
+
 /// 把窗口层效果应用到所有窗口。透明度完全由绘制像素 alpha 控制，因此模糊
 /// 开关与 0%..100% 透明度互不绑死、无需跨帧时序补丁。
+///
+/// # 必须 `defer`：否则热切换整条链路静默失效
+///
+/// 设置页开关是在**某个窗口自己的 update 回调里**点的（点击 → `toggle` →
+/// `persist` → `emit(Changed)` → `on_settings_event` → `apply_runtime_settings`
+/// → `apply_chrome_theme` → [`refresh`] → 这里），此时该窗口已经被
+/// `App::update_window` 从 slot 里 take 出来（`gpui/src/app.rs`：
+/// `cx.windows.get_mut(id)?.take()?`），对同一 handle 再 update 只会拿到
+/// `Err("window not found")`。
+///
+/// 2026-08-21 定案：这里原先写的是 `let _ = handle.update(..)`，把那个 Err 连同
+/// 整个 `set_background_appearance` 一起吞掉了——**启动时模糊有效（走
+/// `WindowOptions` 的 [`initial_background_appearance`]，不经过 update），运行中
+/// 点开关却完全没反应，且已经开着的 Acrylic 也关不掉**。这正是"关了还带模糊"
+/// 和"不切换实时生效"的同一个根因；旧壳 winit 直接对 HWND 落 API，没有这层
+/// 借用模型，所以一直是丝滑的。
+///
+/// [`App::defer`] 把应用推到本轮 effect cycle 末尾，那时窗口已归还 slot。
+/// update 失败不再静默：留 warn，避免同一个坑第三次被当成"DWM 不生效"。
+///
+/// # 模糊态没变就直接返回
+///
+/// 不透明度/壁纸改动也会走到这里，但它们只影响我们自己绘制的像素，窗口级
+/// 模糊属性一个字节都不用改。透明度是滑块，一次拖拽几十上百个事件，所以这条
+/// 短路是拖拽手感的必要条件，不是可选优化。重绘由调用链上的 `cx.notify()`
+/// 与主题重建负责。
 fn apply_window_effects(cx: &mut App) {
     let blur = cx.try_global::<VisualEffects>().map(|v| v.blur).unwrap_or(false);
-    let appearance = background_appearance(blur);
-    for handle in cx.windows() {
-        let _ = handle.update(cx, |_, window, _| {
-            window.set_background_appearance(appearance);
-            #[cfg(windows)]
-            apply_windows_accent_policy(window, blur);
-            window.refresh();
-        });
+    if cx.try_global::<AppliedBlur>().map(|applied| applied.0) == Some(blur) {
+        return;
     }
+    cx.set_global(AppliedBlur(blur));
+    let appearance = background_appearance(blur);
+    cx.defer(move |cx| {
+        for handle in cx.windows() {
+            if let Err(err) = handle.update(cx, |_, window, _| {
+                window.set_background_appearance(appearance);
+                #[cfg(windows)]
+                apply_windows_accent_policy(window, blur);
+                window.refresh();
+            }) {
+                log::warn!("failed to apply window visual effects: {err}");
+            }
+        }
+    });
 }
 
-/// 明确落下 Windows AccentPolicy，并清掉可能残留的 system backdrop。
+/// 显式落下 Windows AccentPolicy，并把 system backdrop 钉死在 `DWMSBT_NONE`。
 ///
-/// 当前锁定的 GPUI 后端在关闭时写的是 `state=0, flags=2`。2026-08-20
-/// 实机探针证明 DWM 会因此保留已有 Acrylic；同一 HWND 改写为全零 policy 后
-/// 画面立即去模糊。这里仍先走 GPUI 的跨平台入口，再只在 Windows 对齐它本应
-/// 写入的精确字段：关闭 = 全零，开启 = Acrylic(state 4) + 非零 alpha。
+/// # 这段 FFI 保留的理由（不是因为 GPUI 关不掉）
+///
+/// 2026-08-20 曾记录"GPUI 关闭时写 `state=0, flags=2`，DWM 会因此保留已有
+/// Acrylic"。**2026-08-21 同窗实测证伪**：在同一 HWND 上写 `state=0, flags=2`
+/// 画面立刻恢复清晰，与全零 policy 无差别。也就是说 GPUI 上游两个方向本来都
+/// 正确（`Blurred` → state 4 且已把 tint alpha 0 修正成 1，`Opaque` → state 0）。
+///
+/// 保留这段的真实理由只有两条：
+/// 1. **钉死 backdrop**：`DWMSBT_AUTO` 会把决定权交回系统，而 system backdrop
+///    在本壳的 DComp 窗口上表现为不透明色板（见 [`background_appearance`]）。
+///    显式写 `DWMSBT_NONE` 保证不论系统默认如何，都不会冒出那块色板。
+/// 2. **对 pin 漂移的防御**：上游在 `Blurred` 该用 AccentPolicy 还是 DWM
+///    backdrop 之间反复改过（PR #41842）。这里显式写下已实测生效的字段，
+///    GPUI pin 升级后即使上游再摆回 backdrop，本壳行为也不变。
+///
+/// 因此本函数的字段必须与实测生效值一致：关闭 = 全零，开启 = Acrylic(state 4)
+/// + 非零 alpha。**绝不要在这里写 `DWMSBT_TRANSIENTWINDOW` 或任何非 NONE 的
+/// system backdrop**——那正是 2026-08-21 那轮把模糊改成灰色色板的原因。
 ///
 /// `SetWindowCompositionAttribute` 未进入公开 SDK，所以和 GPUI 上游一样动态取
 /// 函数地址；`DWMSBT_NONE` 与 `DwmFlush` 则用公开 DWM API。任一步失败都留日志，
@@ -232,7 +316,7 @@ fn apply_window_effects(cx: &mut App) {
 fn apply_windows_accent_policy(window: &Window, blur: bool) {
     use windows_sys::Win32::Foundation::{BOOL, HWND};
     use windows_sys::Win32::Graphics::Dwm::{
-        DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DwmFlush, DwmSetWindowAttribute,
+        DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DwmSetWindowAttribute,
     };
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -282,7 +366,12 @@ fn apply_windows_accent_policy(window: &Window, blur: bool) {
 
     // SAFETY: hwnd 来自当前存活的 GPUI 窗口；DWM 属性值、AccentPolicy 与
     // WCA 数据布局均与 Windows ABI/GPUI 后端一致。无效句柄由返回值安全报告。
-    let (backdrop_result, accent_result, flush_result) = unsafe {
+    //
+    // 这里**不要**再调 `DwmFlush`：它会阻塞等待下一次 DWM 合成（一个 vsync，
+    // 约 8~16ms）。AccentPolicy 与 backdrop 的改动本来就在下一帧生效，配合
+    // 调用方的 `window.refresh()` 已经即时；而 2026-08-21 实测，一旦这条路径
+    // 被每帧走到（拖不透明度滑块），那次 flush 就把滑块拖成了幻灯片。
+    let (backdrop_result, accent_result) = unsafe {
         let backdrop_result = DwmSetWindowAttribute(
             hwnd,
             DWMWA_SYSTEMBACKDROP_TYPE as u32,
@@ -302,7 +391,7 @@ fn apply_windows_accent_policy(window: &Window, blur: bool) {
                 },
             )
         };
-        (backdrop_result, accent_result, DwmFlush())
+        (backdrop_result, accent_result)
     };
     if backdrop_result < 0 {
         log::warn!(
@@ -314,9 +403,6 @@ fn apply_windows_accent_policy(window: &Window, blur: bool) {
         Some(0) => log::warn!("SetWindowCompositionAttribute(WCA_ACCENT_POLICY) failed"),
         None => log::warn!("SetWindowCompositionAttribute is unavailable in user32.dll"),
         Some(_) => {},
-    }
-    if flush_result < 0 {
-        log::warn!("DwmFlush failed: HRESULT=0x{:08X}", flush_result as u32);
     }
 }
 

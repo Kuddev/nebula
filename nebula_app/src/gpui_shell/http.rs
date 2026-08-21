@@ -48,15 +48,12 @@ fn fetch_blocking(
     parts: gpui::http_client::http::request::Parts,
     request_bytes: Vec<u8>,
 ) -> HttpResult<FetchedBody> {
-    let mut builder = ureq::http::Request::builder()
-        .method(parts.method.as_str())
-        .uri(parts.uri.to_string());
+    let mut builder =
+        ureq::http::Request::builder().method(parts.method.as_str()).uri(parts.uri.to_string());
     for (name, value) in parts.headers.iter() {
         builder = builder.header(name.as_str(), value.as_bytes());
     }
-    let request = builder
-        .body(request_bytes)
-        .map_err(|error| anyhow!("构造请求失败: {error}"))?;
+    let request = builder.body(request_bytes).map_err(|error| anyhow!("构造请求失败: {error}"))?;
     let mut response = agent.run(request).map_err(|error| anyhow!("{error}"))?;
     let status = response.status().as_u16();
     let mut header_pairs: Vec<(String, Vec<u8>)> = Vec::new();
@@ -168,9 +165,7 @@ impl HttpClient for UreqClient {
             for (name, value) in header_pairs {
                 builder = builder.header(name, value);
             }
-            builder
-                .body(AsyncBody::from(bytes))
-                .map_err(|error| anyhow!("构造响应失败: {error}"))
+            builder.body(AsyncBody::from(bytes)).map_err(|error| anyhow!("构造响应失败: {error}"))
         })
     }
 }

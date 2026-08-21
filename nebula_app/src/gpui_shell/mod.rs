@@ -234,12 +234,29 @@ pub(crate) fn show_native_window(window: &gpui::Window) {
     window.activate_window();
 }
 
+/// 把藏起来的窗口全部显示出来。
+///
+/// 必须 `defer`：本函数会从 `apply_runtime_settings` →
+/// `reveal_if_tray_disabled` 被调到，而那条链路正处在某个窗口自己的 update
+/// 回调里（设置页事件）。此刻该窗口已被 `App::update_window` 从 slot 里 take
+/// 走，对同一 handle 再 update 只会拿到 `Err("window not found")`。
+///
+/// 2026-08-21：这里原先是 `let _ = handle.update(..)`，吞掉那个错误的后果很重
+/// ——「窗口已最小化到托盘 + 在设置页关掉托盘」时，托盘图标按设置消失了，窗口
+/// 却没被显示出来，而 `reveal_session` 已经把 `window_hidden` 置回 false，
+/// 守卫 `if self.window_hidden && ..` 从此永假、不再重试：应用变成既无窗口也无
+/// 托盘图标、只能从任务管理器结束的僵尸。与 `wallpaper::apply_window_effects`
+/// 同一个根因、同一个修法。
 pub(crate) fn reveal_all_windows(cx: &mut App) {
-    for handle in cx.windows() {
-        let _ = handle.update(cx, |_, window, _| {
-            show_native_window(window);
-        });
-    }
+    cx.defer(|cx| {
+        for handle in cx.windows() {
+            if let Err(err) = handle.update(cx, |_, window, _| {
+                show_native_window(window);
+            }) {
+                log::warn!("failed to reveal window: {err}");
+            }
+        }
+    });
 }
 
 #[cfg(windows)]

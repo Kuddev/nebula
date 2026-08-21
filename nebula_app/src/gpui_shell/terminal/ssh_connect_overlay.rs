@@ -507,7 +507,7 @@ pub(super) fn overlay(
             )
     });
 
-    // ── 底部按钮（旧裁定：没有重试；连接中=取消，失败=关闭=主按钮）──
+    // ── 底部按钮：连接中只有取消；失败后重试在关闭左侧 ──
     let action_label: SharedString = if state.failed() {
         lang.pick("关闭", "Close").into()
     } else {
@@ -515,7 +515,7 @@ pub(super) fn overlay(
     };
     let failed = state.failed();
     let action_target = cx.entity().downgrade();
-    let buttons = h_flex().w_full().mt(px(24.0)).justify_end().child({
+    let action_button = {
         let button =
             crate::gpui_shell::widgets::NebulaButton::new("ssh-connect-action").label(action_label);
         let button = if failed { button.primary() } else { button.outline() };
@@ -530,7 +530,38 @@ pub(super) fn overlay(
                 });
             }
         })
-    });
+    };
+    let retry_target = cx.entity().downgrade();
+    let retry_destination = state.destination().to_owned();
+    let buttons = h_flex()
+        .w_full()
+        .mt(px(24.0))
+        .gap(px(12.0))
+        .justify_end()
+        .when(failed, |buttons| {
+            buttons.child(
+                crate::gpui_shell::widgets::NebulaButton::new("ssh-connect-retry")
+                    .label(lang.pick("重试", "Retry"))
+                    .outline()
+                    .on_click(move |_, _, cx| {
+                        if let Some(view) = retry_target.upgrade() {
+                            view.update(cx, |this, cx| {
+                                let still_same_failure =
+                                    this.ssh_connect.as_ref().is_some_and(|state| {
+                                        state.failed()
+                                            && state.destination() == retry_destination.as_str()
+                                    });
+                                if still_same_failure {
+                                    cx.emit(super::view::TerminalViewEvent::RetrySsh(
+                                        retry_destination.clone(),
+                                    ));
+                                }
+                            });
+                        }
+                    }),
+            )
+        })
+        .child(action_button);
 
     // ── 组装 ──
     div()

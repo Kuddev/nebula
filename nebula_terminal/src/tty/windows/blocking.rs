@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::{io, thread};
 
-use piper::{pipe, Reader, Writer};
+use piper::{Reader, Writer, pipe};
 use polling::os::iocp::{CompletionPacket, PollerIocpExt};
 use polling::{Event, PollMode, Poller};
 
@@ -122,10 +122,27 @@ impl<R: Read + Send + 'static> UnblockedReader<R> {
     pub fn try_read(&mut self, buf: &mut [u8]) -> usize {
         let waker = Waker::from(self.interest.clone());
 
-        match self.pipe.poll_drain_bytes(&mut Context::from_waker(&waker), buf) {
+        let read = match self.pipe.poll_drain_bytes(&mut Context::from_waker(&waker), buf) {
             Poll::Pending => 0,
             Poll::Ready(n) => n,
+        };
+
+        // piper 只在「管道为空」的那次读取里注册 read waker，一旦读到数据就
+        // 立刻把它 take 掉，而写入侧的 `wake()` 对空 waker 是 no-op。于是调用
+        // 方在管道仍有数据时停止读取（`pty_read` 到 `MAX_LOCKED_READ` 就会
+        // 返回）时，会同时失去 waker 和待投递的 readable 事件 —— 对端随后一
+        // 静默（AI CLI 答完就不再输出），这批字节便永久留在管道里：画面停在
+        // 一个画到一半的残帧，滚动条却仍在底部，只有按键或 resize 能救回来
+        // （前者触发 reregister 补投，后者走 resize 前的强制排空循环）。
+        //
+        // `PollMode::Level` 承诺的是「只要还有数据就保持可读」，这里补上
+        // piper 不会替我们做的那次投递。正常读取路径下调用方的缓冲远大于
+        // 管道存量，一次就能读空，因此不会产生多余事件。
+        if read > 0 && !self.pipe.is_empty() {
+            waker.wake_by_ref();
         }
+
+        read
     }
 
     /// Hand the receiving end to a detached thread that keeps consuming until

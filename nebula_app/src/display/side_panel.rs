@@ -11,7 +11,7 @@
 //! every frame. `git --no-optional-locks` keeps the status call from touching
 //! the index lock, so it can't corrupt or stall a concurrent git operation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -187,11 +187,21 @@ impl FileDrag {
     }
 }
 
-/// Re-run the (throttled) refresh at most this often while the panel is open.
-const REFRESH_EVERY: Duration = Duration::from_secs(4);
-/// WSL terminal is already running when the drawer asks for a snapshot; a
-/// longer wait means the worker is wedged and must not disable future refreshes.
-const WSL_COMMAND_TIMEOUT: Duration = Duration::from_secs(6);
+/// WSL 子命令预算。
+///
+/// 原值是 6s，注释里的假设是"抽屉要快照时 WSL 终端已经在跑，等更久说明工人卡死"
+/// ——2026-08-21 实测推翻了这个假设。`wsl.exe -d Debian -- find /` 的耗时**高度
+/// 可变**：同一台机器上量到 346ms（VM 热）、7.5s（VM 热但要建新会话）、以及
+/// >20s（WSL2 的 VM 因空闲被整个关闭后冷启）。也就是说任何"短"预算都会在某些
+/// 时刻必然超时。
+///
+/// 超时的代价原本被完全隐藏：工人被 kill、[`wsl_read_dirs`] 返回空列表、UI 把空
+/// 结果显示成"此目录为空"——这就是 WSL 文件树空白的真正根因。
+///
+/// 现在预算给足，并且**失败不再伪装成空目录**（见 [`SidePanel::enumeration_failed`]）。
+/// 工人跑在后台线程，放宽预算不卡 UI；`snapshot_running` 保证同一时刻只有一个
+/// 工人；期间面板显示"正在读取目录…"，这是诚实的反馈。
+const WSL_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 /// Hard cap on flattened tree rows, bounding both fs walking and rendering.
 const MAX_ROWS: usize = 1000;
 /// Hard cap on entries listed per directory. Applied *after* sorting, so the
@@ -279,7 +289,9 @@ pub struct SidePanel {
     /// 切换视图/根不再同步跑 git——旧内容原样留在屏上，新快照落地后整体
     /// 替换（VSCode 的树刷新模式）。
     snapshot_slot: std::sync::Arc<std::sync::Mutex<Option<PanelSnapshot>>>,
-    last_refresh: Option<Instant>,
+    /// 上一份落地快照的枚举是否失败（WSL 超时 / find 非零退出）。UI 靠它区分
+    /// "读不到"和"目录真的是空的"。
+    enumeration_failed: bool,
     needs_refresh: bool,
 }
 
@@ -292,7 +304,12 @@ struct PanelSnapshot {
     /// Files 快照所属的来宾位置；避免两个发行版恰好同为 `/home` 时串结果。
     files_wsl: Option<crate::shell_detect::WslCwd>,
     rows: Vec<FileRow>,
-    git: Option<GitInfo>,
+    /// 这次枚举是否全部成功。WSL 冷启动可能耗尽预算被 kill，那时 `rows` 是空的
+    /// 但**不代表目录是空的**——UI 必须能区分，否则会把"读不到"说成"此目录为空"。
+    enumeration_ok: bool,
+    /// `None` 表示目录行先行发布、VCS 仍在读取；`Some(None)` 才表示当前
+    /// 目录不在仓库中。这样慢 WSL git 不会让 Files 一直显示空白。
+    git: Option<Option<GitInfo>>,
 }
 
 /// 工人 panic/提前返回也必须解锁；否则一次异常会让此窗口今后的所有刷新失效。
@@ -532,7 +549,7 @@ impl SidePanel {
             op_error: Default::default(),
             snapshot_running: Default::default(),
             snapshot_slot: Default::default(),
-            last_refresh: None,
+            enumeration_failed: false,
             needs_refresh: false,
         }
     }
@@ -625,19 +642,22 @@ impl SidePanel {
             .or_else(|| self.custom_wsl_root.as_ref().map(wsl_root_key))
             .or_else(|| self.followed_tree_root());
         let root_changed = next_root != self.root;
-        // While a filter query is live, skip the periodic re-snapshot: it
-        // would drop and rebuild the search index under the user's fingers.
-        let stale = self.search.trim().is_empty()
-            && self.last_refresh.is_none_or(|t| t.elapsed() >= REFRESH_EVERY);
         // A finished git mutation forces a refresh so the new state (staged
         // list, ahead count) shows on the next frame.
         if self.op_done.swap(false, std::sync::atomic::Ordering::Relaxed) {
             self.needs_refresh = true;
         }
+        // 目录内容**不做定时重扫**。这里原先有一条 `stale`（每 4 秒无条件重跑
+        // 工人），代价是每 4 秒重新拉一遍 WSL 子进程 + 三个 git 子进程；配上 WSL
+        // 冷路径要 7.5s，面板就在"正在读取目录…"和结果之间反复闪——2026-08-21
+        // 用户裁定：目录识别不要轮询。
+        //
+        // 剩下的触发点全是明确事件：cwd/根变化、手动刷新按钮（`needs_refresh`）、
+        // git 操作完成（`op_done`）、浏览覆盖失效。终端里新建/删除文件不再自动
+        // 反映，由刷新按钮兜底——这是这条裁定的显式代价。
         if !(root_changed
             || custom_invalidated
             || follow_override_cleared
-            || stale
             || wsl_changed
             || self.needs_refresh)
         {
@@ -688,7 +708,10 @@ impl SidePanel {
             return false;
         }
         self.rows = snapshot.rows;
-        self.git = snapshot.git;
+        self.enumeration_failed = !snapshot.enumeration_ok;
+        if let Some(git) = snapshot.git {
+            self.git = git;
+        }
         // New snapshot → the filter index is stale; rebuild lazily on demand.
         self.search_index = None;
         true
@@ -810,7 +833,6 @@ impl SidePanel {
     /// Rebuild the tree and git snapshot from `root`.
     fn refresh(&mut self) {
         self.needs_refresh = false;
-        self.last_refresh = Some(Instant::now());
         let Some(root) = self.root.clone() else {
             // 没有根：清空是即时且无成本的，不需要工人。
             self.rows.clear();
@@ -838,10 +860,21 @@ impl SidePanel {
         let slot = std::sync::Arc::clone(&self.snapshot_slot);
         std::thread::spawn(move || {
             let _running_guard = SnapshotRunningGuard(running);
-            let rows = match &files_wsl {
+            let (rows, enumeration_ok) = match &files_wsl {
                 Some(located) => SidePanel::tree_rows_wsl(located, &expanded),
-                None => SidePanel::tree_rows(&root, &expanded),
+                None => (SidePanel::tree_rows(&root, &expanded), true),
             };
+            // 文件列表是 Files 的主结果，不能被随后可能耗满超时预算的 WSL
+            // git 探测扣住。先发布目录行；VCS 完成后再用同一行集补全快照。
+            if let Ok(mut slot) = slot.lock() {
+                *slot = Some(PanelSnapshot {
+                    root: root.clone(),
+                    files_wsl: files_wsl.clone(),
+                    rows: rows.clone(),
+                    enumeration_ok,
+                    git: None,
+                });
+            }
             // 设置可强制只认 Git / SVN（混合仓库场景）；Auto 保持既有探测：
             // a checkout nested inside a Git tree must remain visible as SVN.
             // Prefer SVN only when its metadata is in the current path's
@@ -874,7 +907,8 @@ impl SidePanel {
                 },
             };
             if let Ok(mut slot) = slot.lock() {
-                *slot = Some(PanelSnapshot { root, files_wsl, rows, git });
+                *slot =
+                    Some(PanelSnapshot { root, files_wsl, rows, enumeration_ok, git: Some(git) });
             }
         });
     }
@@ -886,10 +920,17 @@ impl SidePanel {
         let Some(root) = self.root.clone() else { return };
         let needle = self.search.trim().to_lowercase();
         if needle.is_empty() {
-            self.rows = match self.file_wsl_root() {
-                Some(located) => Self::tree_rows_wsl(located, &self.expanded),
-                None => Self::tree_rows(&root, &self.expanded),
-            };
+            match self.file_wsl_root() {
+                Some(located) => {
+                    let (rows, ok) = Self::tree_rows_wsl(located, &self.expanded);
+                    self.rows = rows;
+                    self.enumeration_failed = !ok;
+                },
+                None => {
+                    self.rows = Self::tree_rows(&root, &self.expanded);
+                    self.enumeration_failed = false;
+                },
+            }
             return;
         }
         // Filter mode: string-match against the cached flat index. The index
@@ -1330,10 +1371,14 @@ impl SidePanel {
     /// UNC 不可达时直接从 WSL guest 枚举 Files 树。命令参数逐项传给
     /// `CreateProcessW`，不经过 shell，因此发行版名、路径和文件名都不会参与
     /// 命令拼接。`find -printf` 用 NUL 分隔，换行文件名也不会破坏记录边界。
+    /// 返回 `(行, 枚举是否全部成功)`。失败必须往上传，否则 UI 只能看到一个空
+    /// 列表、把"读不到"说成"此目录为空"。
+    ///
+    /// 整棵树只发**一条** `find`，见 [`wsl_read_dirs`]。
     fn tree_rows_wsl(
         located: &crate::shell_detect::WslCwd,
         expanded: &HashSet<PathBuf>,
-    ) -> Vec<FileRow> {
+    ) -> (Vec<FileRow>, bool) {
         let root = normalize_wsl_guest_path(&located.guest);
         let mut rows = Vec::new();
         if let Some(parent) = wsl_guest_parent(&root) {
@@ -1348,43 +1393,52 @@ impl SidePanel {
                 ignored: false,
             });
         }
-        Self::flatten_wsl_dir_into(&mut rows, expanded, &located.distro, &root, 0);
-        rows
+        let dirs = wsl_dirs_to_list(&root, expanded);
+        let Some(listing) = wsl_read_dirs(&located.distro, &dirs) else {
+            return (rows, false);
+        };
+        Self::flatten_wsl_dir_into(&mut rows, expanded, &listing, &root, 0);
+        // 非零退出通常只是某个已展开的子目录在两帧之间被删了——那一条起点报错，
+        // 其余起点的输出照样在 stdout 里。只有**根**也没读出条目时才是真失败：
+        // 根为空的目录不可能有已展开的后代，所以这时起点只有根一个，非零退出
+        // 就等于根读不到。
+        let ok = listing.exit_ok || listing.by_dir.contains_key(&root);
+        (rows, ok)
     }
 
+    /// 把一趟 `find` 的结果摊平成树行。已经没有子进程了：所有层的条目都在
+    /// `listing` 里，递归只是按 `expanded` 挑出要展开的桶。
     fn flatten_wsl_dir_into(
         rows: &mut Vec<FileRow>,
         expanded: &HashSet<PathBuf>,
-        distro: &str,
+        listing: &WslDirListing,
         guest_dir: &str,
         depth: usize,
     ) {
         if rows.len() >= MAX_ROWS {
             return;
         }
-        let mut entries = wsl_read_dir(distro, guest_dir);
-        entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
-        entries.truncate(MAX_PER_DIR);
+        let Some(entries) = listing.by_dir.get(guest_dir) else { return };
         for (is_dir, name, guest_path) in entries {
             if rows.len() >= MAX_ROWS {
                 return;
             }
             // 该 PathBuf 只作为展开/选中的稳定键；真实来宾路径始终取
             // `guest_path`，绝不把这个键交给宿主文件系统。
-            let path_key = PathBuf::from(&guest_path);
-            let is_expanded = is_dir && expanded.contains(&path_key);
+            let path_key = PathBuf::from(guest_path);
+            let is_expanded = *is_dir && expanded.contains(&path_key);
             rows.push(FileRow {
-                path: path_key.clone(),
+                path: path_key,
                 guest_path: Some(guest_path.clone()),
-                name,
+                name: name.clone(),
                 depth,
-                is_dir,
+                is_dir: *is_dir,
                 expanded: is_expanded,
                 is_parent: false,
                 ignored: false,
             });
             if is_expanded {
-                Self::flatten_wsl_dir_into(rows, expanded, distro, &guest_path, depth + 1);
+                Self::flatten_wsl_dir_into(rows, expanded, listing, guest_path, depth + 1);
             }
         }
     }
@@ -1560,6 +1614,17 @@ impl SidePanel {
 
     pub fn file_rows(&self) -> &[FileRow] {
         &self.rows
+    }
+
+    /// 首份目录快照是否仍在后台读取。GPUI 用它区分“正在读取”和真空目录。
+    pub fn snapshot_pending(&self) -> bool {
+        self.snapshot_running.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 上一次落地的枚举是否失败（WSL 冷启动耗尽预算、find 非零退出等）。
+    /// 行为空且这里为真时，UI 必须提示可重试，而不是宣称“此目录为空”。
+    pub fn enumeration_failed(&self) -> bool {
+        self.enumeration_failed
     }
 
     /// The tree row currently shown at visible index `idx` (post-scroll).
@@ -1850,7 +1915,10 @@ fn command_output_with_timeout(
     use std::io::Read as _;
     use std::process::Stdio;
 
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // stdin 显式关掉：这些子进程（`wsl.exe -d … -- find`、`git`）都不读 stdin，
+    // 而我们用 `CREATE_NO_WINDOW` 启动它们——不设置 stdin 会把父进程的控制台
+    // 句柄继承给一个没有控制台的子进程。这是卫生问题，不是任何已知 bug 的根因。
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let stdout = child.stdout.take().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::BrokenPipe, "missing stdout pipe")
@@ -1893,7 +1961,14 @@ fn command_output_with_timeout(
     Ok(std::process::Output { status, stdout: join(stdout_reader)?, stderr: join(stderr_reader)? })
 }
 
-fn run_wsl_find(distro: &str, args: impl IntoIterator<Item = OsString>) -> Option<Vec<u8>> {
+/// 跑一条来宾 `find`，返回 `(stdout, 退出码是否为 0)`。
+///
+/// 非零退出**不丢 stdout**：多起点的 `find` 只要有一个起点不存在就整体非零，
+/// 而其余起点的记录照样已经写出来了。调用方按自己的语义决定这算失败还是降级。
+fn run_wsl_find_lenient(
+    distro: &str,
+    args: impl IntoIterator<Item = OsString>,
+) -> Option<(Vec<u8>, bool)> {
     let mut command = std::process::Command::new("wsl.exe");
     command.args(["-d", distro, "--", "find"]).args(args);
     #[cfg(windows)]
@@ -1908,28 +1983,139 @@ fn run_wsl_find(distro: &str, args: impl IntoIterator<Item = OsString>) -> Optio
             return None;
         },
     };
-    if !output.status.success() {
+    let exit_ok = output.status.success();
+    if !exit_ok {
         let reason = String::from_utf8_lossy(&output.stderr);
-        log::debug!("WSL file tree find failed in {distro}: {}", reason.trim());
-        return None;
+        log::debug!("WSL file tree find exited non-zero in {distro}: {}", reason.trim());
     }
-    Some(output.stdout)
+    Some((output.stdout, exit_ok))
 }
 
-fn wsl_read_dir(distro: &str, guest_dir: &str) -> Vec<(bool, String, String)> {
-    let args = [guest_dir, "-mindepth", "1", "-maxdepth", "1", "-printf", r"%y\0%f\0"]
-        .into_iter()
-        .map(OsString::from);
-    let Some(output) = run_wsl_find(distro, args) else { return Vec::new() };
-    parse_wsl_find_pairs(&output)
-        .into_iter()
-        .filter_map(|(kind, name)| {
-            (name != ".git").then(|| {
-                let guest_path = wsl_guest_join(guest_dir, &name);
-                (kind == b'd', name, guest_path)
-            })
-        })
-        .collect()
+/// 退出码非零一律当失败的严格版；单起点调用（搜索索引）用它。
+fn run_wsl_find(distro: &str, args: impl IntoIterator<Item = OsString>) -> Option<Vec<u8>> {
+    let (stdout, exit_ok) = run_wsl_find_lenient(distro, args)?;
+    exit_ok.then_some(stdout)
+}
+
+/// `find -printf` 的格式串：类型 + NUL + 全路径 + NUL。**反斜杠必须写两遍**。
+///
+/// 2026-08-21 实测：`wsl.exe -d <发行版> -- <命令>` 在把参数转发给来宾时会吞掉
+/// 一层反斜杠。同一条 find、同一个目录，三种写法的输出对照：
+///
+/// | 传入 | NUL 个数 | 输出开头 |
+/// |---|---|---|
+/// | `%y\0%f\0`   | **0**  | `l0lib0d0opt0…` |
+/// | `%y\\0%f\\0` | 54     | `l\0lib\0d\0opt\0…` |
+/// | `sh -c` 包一层 | 54   | `l\0lib\0d\0opt\0…` |
+///
+/// 也就是说单反斜杠版本让 find 收到的是 `%y0%f0`，输出用字面字符 `'0'` 分隔、
+/// 一个 NUL 都没有，[`parse_wsl_find_pairs`] 因此永远配不出记录、返回空列表——
+/// UI 再把空列表显示成"此目录为空"。这就是 WSL 文件树空白的根因。
+///
+/// 用双反斜杠而不是 `sh -c` 包装：后者要为含空格/引号的来宾路径再做一层 shell
+/// 引用，而这里只需要把转义层数补对。
+const WSL_FIND_PATH_FORMAT: &str = r"%y\\0%p\\0";
+
+/// 一趟 `find` 的结果，按父目录分桶。
+struct WslDirListing {
+    /// 来宾父目录 → 该层条目 `(is_dir, 名字, 来宾全路径)`，已按"目录在前、
+    /// 名字不分大小写升序"排好并按 [`MAX_PER_DIR`] 截断。
+    by_dir: HashMap<String, Vec<(bool, String, String)>>,
+    /// `find` 自身的退出码是否为 0。多起点时一个起点不存在就会让它非零，
+    /// 所以这只是降级信号，判断"树是否可用"要看根桶在不在。
+    exit_ok: bool,
+}
+
+/// 这一趟要枚举的来宾目录：根，加上 `expanded` 里位于根之下的每一个。
+///
+/// 祖先链是否也展开无所谓——多列一个目录在同一条命令里几乎免费，漏列一个却会
+/// 让那层显示成空目录。排序后返回：`expanded` 是 `HashSet`，遍历顺序不定，而
+/// 截断必须是确定的。根一定排在首位（它是所有后代的真前缀且更短），所以截断
+/// 永远不会把根本身丢掉。
+fn wsl_dirs_to_list(root: &str, expanded: &HashSet<PathBuf>) -> Vec<String> {
+    /// 命令行长度是有上限的（Windows 约 32 KiB）。来宾路径平均几十字节，256 个
+    /// 起点离上限还很远，而真展开到 256 个目录本身已经超出 [`MAX_ROWS`] 的显示
+    /// 能力了。
+    const MAX_ROOTS: usize = 256;
+
+    let mut dirs = vec![root.to_owned()];
+    for path in expanded {
+        let Some(text) = path.to_str() else { continue };
+        let guest = normalize_wsl_guest_path(text);
+        if !wsl_path_is_descendant(root, &guest) {
+            continue;
+        }
+        dirs.push(guest);
+    }
+    dirs.sort_unstable();
+    dirs.dedup();
+    dirs.truncate(MAX_ROOTS);
+    dirs
+}
+
+/// `path` 是否严格位于 `root` 之下。两侧都已 [`normalize_wsl_guest_path`]。
+fn wsl_path_is_descendant(root: &str, path: &str) -> bool {
+    if root == "/" {
+        return path.starts_with('/') && path.len() > 1;
+    }
+    path.len() > root.len()
+        && path.starts_with(root)
+        && path.as_bytes().get(root.len()) == Some(&b'/')
+}
+
+/// 一条 `find` 枚举全部给定目录。`None` = 这次来宾枚举**根本没跑成**
+/// （wsl.exe 起不来 / 超时），与"目录真的是空的"必须区分：前者要让用户看到
+/// 可重试的提示，后者才是"此目录为空"。
+///
+/// # 为什么是一条而不是每层一条
+///
+/// 旧实现在递归里每展开一层就 fork 一次 `wsl.exe`。实测冷启动 7.5 秒、热约
+/// 300 ms，而快照工人每次重建整棵树都要把已展开的每一层重跑一遍——展开 5 层
+/// 就是 5 次串行往返。这就是"WSL 打开路径非常卡"的根因。`find` 原生接受多个
+/// 起点，而要枚举哪些目录**不需要先枚举才能知道**（`expanded` 集合已经持有），
+/// 所以一次调用就够。
+///
+/// 用 `%p`（全路径）而非 `%f`：多起点的输出是混在一起的，只有全路径才能按父
+/// 目录分桶还原成树。
+fn wsl_read_dirs(distro: &str, dirs: &[String]) -> Option<WslDirListing> {
+    if dirs.is_empty() {
+        return None;
+    }
+    let mut args: Vec<OsString> = dirs.iter().map(OsString::from).collect();
+    args.extend(
+        ["-mindepth", "1", "-maxdepth", "1", "-printf", WSL_FIND_PATH_FORMAT]
+            .into_iter()
+            .map(OsString::from),
+    );
+    let (output, exit_ok) = run_wsl_find_lenient(distro, args)?;
+    Some(WslDirListing { by_dir: bucket_wsl_find_output(&output), exit_ok })
+}
+
+/// 把一趟多起点 `find` 的扁平输出按父目录分桶还原成树的各层。
+///
+/// 每桶按"目录在前、名字不分大小写升序"排好并按 [`MAX_PER_DIR`] 截断——截断
+/// 必须在排序**之后**，否则采样到的是文件系统顺序（见
+/// `per_directory_cap_keeps_the_ordered_head`）。
+fn bucket_wsl_find_output(output: &[u8]) -> HashMap<String, Vec<(bool, String, String)>> {
+    let mut by_dir: HashMap<String, Vec<(bool, String, String)>> = HashMap::new();
+    for (kind, guest_path) in parse_wsl_find_pairs(output) {
+        let Some((parent, name)) = guest_path.rsplit_once('/') else { continue };
+        if name.is_empty() || name == ".git" {
+            continue;
+        }
+        // 根下的条目（`/home`）切出来的父是空串，归一化回 `/`。
+        let parent = if parent.is_empty() { "/" } else { parent };
+        by_dir.entry(parent.to_owned()).or_default().push((
+            kind == b'd',
+            name.to_owned(),
+            guest_path.clone(),
+        ));
+    }
+    for entries in by_dir.values_mut() {
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+        entries.truncate(MAX_PER_DIR);
+    }
+    by_dir
 }
 
 fn build_wsl_search_index(
@@ -1946,7 +2132,9 @@ fn build_wsl_search_index(
     for skipped in SEARCH_SKIP_DIRS.iter().filter(|name| !name.starts_with('.')) {
         args.extend([OsString::from("-o"), OsString::from("-name"), OsString::from(skipped)]);
     }
-    args.extend([")", "-prune", ")", "-o", "-printf", r"%y\0%p\0"].into_iter().map(OsString::from));
+    args.extend(
+        [")", "-prune", ")", "-o", "-printf", WSL_FIND_PATH_FORMAT].into_iter().map(OsString::from),
+    );
     let Some(output) = run_wsl_find(&located.distro, args) else { return };
     for (kind, guest_path) in parse_wsl_find_pairs(&output) {
         if *budget == 0 || index.len() >= SEARCH_INDEX_CAP {
@@ -3244,14 +3432,154 @@ mod tests {
         assert_eq!(parsed, vec![(b'd', "hello".to_owned()), (b'f', "line\nname.txt".to_owned())]);
     }
 
+    /// WSL 来宾根的枚举回归。依赖本机真实 Debian，所以默认忽略；
+    /// 用 `cargo test -p nebula --features gpui-shell -- --ignored` 手动跑。
+    #[test]
+    #[ignore = "需要本机注册 Debian 发行版"]
+    fn wsl_guest_root_enumerates_entries() {
+        let located =
+            crate::shell_detect::WslCwd { distro: "Debian".to_owned(), guest: "/".to_owned() };
+        let (rows, ok) = SidePanel::tree_rows_wsl(&located, &HashSet::new());
+        assert!(ok, "枚举必须成功（失败通常是 WSL 冷启动耗尽预算）");
+        assert!(!rows.is_empty(), "WSL `/` 必须枚举出来宾条目");
+        assert!(rows.iter().any(|row| row.name == "home"), "应当含 home：{rows:?}");
+        assert!(rows.iter().all(|row| !row.is_parent), "根目录不该有 `..` 行");
+    }
+
+    /// 展开多层的代价必须**不随层数增长**。
+    ///
+    /// 旧实现在递归里每层 fork 一次 `wsl.exe`（冷启动实测 7.5 秒），展开 5 层
+    /// 就是 5 次串行往返——这是"WSL 打开路径非常卡"的根因。现在整棵树只发一条
+    /// 多起点 `find`，所以展开若干层的耗时应当和只读根同量级。
+    ///
+    /// 判据用倍数而不是绝对秒数：`wsl.exe` 的耗时高度可变（346ms / 7.5s / >20s，
+    /// 见 [`WSL_COMMAND_TIMEOUT`] 的实测记录），任何硬编码的墙钟阈值都会在某些
+    /// 时刻误报。基准跑在被测调用**之前**，把冷启动的一次性代价算进基准里。
+    #[test]
+    #[ignore = "需要本机注册 Debian 发行版"]
+    fn expanding_many_levels_costs_one_find_not_one_per_level() {
+        let located =
+            crate::shell_detect::WslCwd { distro: "Debian".to_owned(), guest: "/".to_owned() };
+
+        let baseline_started = Instant::now();
+        let (root_rows, ok) = SidePanel::tree_rows_wsl(&located, &HashSet::new());
+        let baseline = baseline_started.elapsed();
+        assert!(ok, "基准枚举必须成功");
+
+        // 从根的真实条目里挑目录来展开，避免钉死在某个发行版才有的路径上。
+        let expanded: HashSet<PathBuf> =
+            root_rows.iter().filter(|row| row.is_dir).take(5).map(|row| row.path.clone()).collect();
+        assert!(expanded.len() >= 2, "根下至少要有两个目录才测得出层数效应");
+
+        let started = Instant::now();
+        let (rows, ok) = SidePanel::tree_rows_wsl(&located, &expanded);
+        let elapsed = started.elapsed();
+        assert!(ok, "多层枚举必须成功");
+        assert!(rows.len() > root_rows.len(), "展开后应当多出子层的行");
+
+        let ceiling = baseline.mul_f32(1.8);
+        assert!(
+            elapsed <= ceiling,
+            "展开 {} 层花了 {elapsed:?}，基准（只读根）是 {baseline:?}——按每层一次 \
+             子进程算本该接近 {:?}，说明合并 find 没有生效",
+            expanded.len(),
+            baseline * (expanded.len() as u32 + 1)
+        );
+    }
+
+    #[test]
+    fn partial_file_snapshot_keeps_vcs_until_the_final_snapshot() {
+        let located =
+            crate::shell_detect::WslCwd { distro: "Debian".to_owned(), guest: "/".to_owned() };
+        let root = PathBuf::from("/");
+        let mut panel = SidePanel::new();
+        panel.open = true;
+        panel.root = Some(root.clone());
+        panel.followed_wsl = Some(located.clone());
+        panel.git = Some(GitInfo { branch: "keep-until-ready".to_owned(), ..Default::default() });
+
+        *panel.snapshot_slot.lock().unwrap() = Some(PanelSnapshot {
+            root: root.clone(),
+            files_wsl: Some(located.clone()),
+            rows: Vec::new(),
+            enumeration_ok: true,
+            git: None,
+        });
+        assert!(panel.harvest_snapshot());
+        assert_eq!(panel.git().map(|git| git.branch.as_str()), Some("keep-until-ready"));
+
+        *panel.snapshot_slot.lock().unwrap() = Some(PanelSnapshot {
+            root,
+            files_wsl: Some(located),
+            rows: Vec::new(),
+            enumeration_ok: true,
+            git: Some(None),
+        });
+        assert!(panel.harvest_snapshot());
+        assert!(panel.git().is_none());
+    }
+
     #[test]
     fn wsl_guest_path_helpers_keep_root_and_parent_boundaries() {
         assert_eq!(normalize_wsl_guest_path("/home/hello/"), "/home/hello");
         assert_eq!(wsl_guest_parent("/home/hello"), Some("/home".to_owned()));
         assert_eq!(wsl_guest_parent("/home"), Some("/".to_owned()));
         assert_eq!(wsl_guest_parent("/"), None);
-        assert_eq!(wsl_guest_join("/", "home"), "/home");
-        assert_eq!(wsl_guest_join("/home", "hello"), "/home/hello");
+    }
+
+    /// 起点集合决定这一趟 `find` 的覆盖面，所以边界只能是"严格后代"：把兄弟
+    /// 目录（`/home/kudo` 之于 `/home/kud`）也塞进去会枚举出树上根本不存在的
+    /// 层，漏掉真后代则让那层显示成空目录。
+    #[test]
+    fn only_strict_descendants_of_the_root_join_the_find() {
+        assert!(wsl_path_is_descendant("/", "/home"));
+        assert!(!wsl_path_is_descendant("/", "/"), "根不是自己的后代");
+        assert!(wsl_path_is_descendant("/home/kud", "/home/kud/src"));
+        assert!(!wsl_path_is_descendant("/home/kud", "/home/kud"));
+        assert!(!wsl_path_is_descendant("/home/kud", "/home/kudo"), "前缀相同但不是子目录");
+        assert!(!wsl_path_is_descendant("/home/kud", "/etc"));
+    }
+
+    /// 根必须排在起点表首位：`expanded` 是 `HashSet`，遍历顺序不定，而超出上限
+    /// 的截断一旦把根切掉，整棵树就只剩 `..` 一行。
+    #[test]
+    fn the_root_always_survives_the_start_point_cap() {
+        let expanded: HashSet<PathBuf> = ["/home/kud/z", "/home/kud/a", "/elsewhere", "/home/kud"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let dirs = wsl_dirs_to_list("/home/kud", &expanded);
+        assert_eq!(dirs.first().map(String::as_str), Some("/home/kud"));
+        assert_eq!(dirs, vec!["/home/kud", "/home/kud/a", "/home/kud/z"], "根外的路径不参与");
+    }
+
+    /// 多起点的输出是混在一起的，只有全路径（`%p`）能分桶还原成树。
+    #[test]
+    fn a_single_find_output_splits_back_into_per_directory_buckets() {
+        let mut output = Vec::new();
+        for (kind, path) in [
+            (b'd', "/home/kud/src"),
+            (b'f', "/home/kud/a.txt"),
+            (b'f', "/home/kud/src/main.rs"),
+            (b'd', "/home/kud/.git"),
+            (b'd', "/home"),
+        ] {
+            output.push(kind);
+            output.push(0);
+            output.extend_from_slice(path.as_bytes());
+            output.push(0);
+        }
+        let by_dir = bucket_wsl_find_output(&output);
+        assert_eq!(
+            by_dir["/home/kud"],
+            vec![
+                (true, "src".to_owned(), "/home/kud/src".to_owned()),
+                (false, "a.txt".to_owned(), "/home/kud/a.txt".to_owned()),
+            ],
+            "同层目录在前，`.git` 不进树：{by_dir:?}"
+        );
+        assert_eq!(by_dir["/home/kud/src"].len(), 1, "子层单独成桶：{by_dir:?}");
+        assert_eq!(by_dir["/"].len(), 1, "根下的条目父是 `/` 而不是空串：{by_dir:?}");
     }
 
     /// The per-directory cap must be applied *after* ordering. Capping the

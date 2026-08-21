@@ -174,15 +174,50 @@ impl NebulaWorkspace {
                     cx,
                 )
             },
-            RuntimeCommand::Split { window_id, direction } => {
+            RuntimeCommand::Split { window_id, pane_id, direction } => {
                 self.runtime_window_requested(*window_id)?;
+                let source_pane_id = match pane_id {
+                    Some(pane_id) => {
+                        let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                            return Err(ApiError::new(
+                                "target_not_found",
+                                format!("pane {pane_id} does not exist"),
+                            ));
+                        };
+                        self.active = tab_ix;
+                        let Some(WorkspaceTab::Terminal { focused, zoomed, .. }) =
+                            self.tabs.get_mut(tab_ix)
+                        else {
+                            return Err(ApiError::new(
+                                "invalid_state",
+                                "only terminal panes can be split",
+                            ));
+                        };
+                        *focused = *pane_id;
+                        *zoomed = false;
+                        *pane_id
+                    },
+                    None => match self.tabs.get(self.active) {
+                        Some(WorkspaceTab::Terminal { focused, .. }) => *focused,
+                        _ => {
+                            return Err(ApiError::new(
+                                "invalid_state",
+                                "the active tab is not a terminal tab",
+                            ));
+                        },
+                    },
+                };
                 let direction = match direction {
                     RuntimeSplitDirection::LeftRight => SplitDirection::LeftRight,
                     RuntimeSplitDirection::TopBottom => SplitDirection::TopBottom,
                 };
                 let pane_id = self.split_focused(direction, window, cx)?;
                 self.runtime_result(
-                    json!({ "window_id": self.runtime_window_id, "pane_id": pane_id }),
+                    json!({
+                        "window_id": self.runtime_window_id,
+                        "source_pane_id": source_pane_id,
+                        "pane_id": pane_id
+                    }),
                     window,
                     cx,
                 )
@@ -316,6 +351,7 @@ impl NebulaWorkspace {
             },
             RuntimeCommand::AgentStart {
                 window_id,
+                pane_id,
                 name,
                 kind,
                 cwd,
@@ -325,7 +361,19 @@ impl NebulaWorkspace {
             } => {
                 self.runtime_window_requested(*window_id)?;
                 self.runtime_hub.ensure_agent_name_available(name)?;
-                let pane_id = self.add_terminal_at(cwd.clone(), None, window, cx);
+                let created_tab = pane_id.is_none();
+                let pane_id = match pane_id {
+                    Some(pane_id) => {
+                        if self.tab_of_pane(*pane_id).is_none() {
+                            return Err(ApiError::new(
+                                "target_not_found",
+                                format!("pane {pane_id} does not exist"),
+                            ));
+                        }
+                        *pane_id
+                    },
+                    None => self.add_terminal_at(cwd.clone(), None, window, cx),
+                };
                 let agent = match self.runtime_hub.register_agent(
                     name.clone(),
                     *kind,
@@ -336,16 +384,20 @@ impl NebulaWorkspace {
                 ) {
                     Ok(agent) => agent,
                     Err(error) => {
-                        self.discard_runtime_agent_tab(pane_id, window, cx);
+                        if created_tab {
+                            self.discard_runtime_agent_tab(pane_id, window, cx);
+                        }
                         return Err(error);
                     },
                 };
-                if let Some(meta) = self.tab_meta.get_mut(self.active) {
+                if created_tab && let Some(meta) = self.tab_meta.get_mut(self.active) {
                     meta.custom_name = Some(name.clone());
                 }
                 let Some(tab_ix) = self.tab_of_pane(pane_id) else {
                     self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
-                    self.discard_runtime_agent_tab(pane_id, window, cx);
+                    if created_tab {
+                        self.discard_runtime_agent_tab(pane_id, window, cx);
+                    }
                     return Err(ApiError::new(
                         "action_failed",
                         "the new agent pane was not registered in the workspace",
@@ -364,7 +416,9 @@ impl NebulaWorkspace {
                     view.update(cx, |view, cx| view.runtime_prompt(command.clone(), true, cx))
                 {
                     self.runtime_hub.close_agent(&agent.agent_id, "launch_failed");
-                    self.discard_runtime_agent_tab(pane_id, window, cx);
+                    if created_tab {
+                        self.discard_runtime_agent_tab(pane_id, window, cx);
+                    }
                     return Err(error);
                 }
                 self.runtime_result(

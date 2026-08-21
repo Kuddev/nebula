@@ -27,8 +27,8 @@ use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
 use nebula_terminal::tty;
 
-mod ai_assistant;
 mod ai_agents;
+mod ai_assistant;
 mod ai_hook;
 mod ai_providers;
 mod ai_sessions;
@@ -60,6 +60,7 @@ mod math;
 mod message_bar;
 mod migrate;
 mod motion;
+mod mux;
 mod nebula_history;
 mod notify;
 #[cfg(windows)]
@@ -69,14 +70,12 @@ mod platform;
 mod polling;
 mod process_tree;
 mod renderer;
-mod mux;
 mod runtime_api;
 mod scheduler;
 mod session;
 mod shell_detect;
 #[cfg(windows)]
 mod ssh;
-mod svn_status;
 #[cfg(windows)]
 mod ssh_credentials;
 #[cfg(windows)]
@@ -87,6 +86,7 @@ mod ssh_session;
 #[cfg(windows)]
 mod ssh_sftp;
 mod string;
+mod svn_status;
 mod sync;
 mod terminal_profiles;
 mod tray;

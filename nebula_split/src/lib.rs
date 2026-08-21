@@ -145,14 +145,22 @@ impl<T: Copy + Eq> SplitTree<T> {
         }
     }
 
+    /// 原位替换一个叶值，保留完整树形、分割方向和比例。
+    pub fn replace_leaf(&mut self, target: T, replacement: T) -> bool {
+        match self {
+            SplitTree::Leaf(id) if *id == target => {
+                *id = replacement;
+                true
+            },
+            SplitTree::Leaf(_) => false,
+            SplitTree::Split { first, second, .. } => {
+                first.replace_leaf(target, replacement) || second.replace_leaf(target, replacement)
+            },
+        }
+    }
+
     /// 把 `target` 叶子替换成 `[target, new]` 的 Split。找到返回 `true`。
-    pub fn split_leaf(
-        &mut self,
-        target: T,
-        new: T,
-        direction: SplitDirection,
-        ratio: f32,
-    ) -> bool {
+    pub fn split_leaf(&mut self, target: T, new: T, direction: SplitDirection, ratio: f32) -> bool {
         match self {
             SplitTree::Leaf(id) if *id == target => {
                 let old = *id;
@@ -462,6 +470,16 @@ mod tests {
         // 摘到只剩一个 → WasRoot。
         assert_eq!(tree.remove_leaf(1), RemoveOutcome::Collapsed(3));
         assert_eq!(tree.remove_leaf(3), RemoveOutcome::WasRoot);
+    }
+
+    #[test]
+    fn replace_leaf_preserves_depth_first_position() {
+        let mut tree = SplitTree::leaf(1u32);
+        assert!(tree.split_leaf(1, 2, SplitDirection::LeftRight, 0.5));
+        assert!(tree.split_leaf(2, 3, SplitDirection::TopBottom, 0.5));
+        assert!(tree.replace_leaf(2, 9));
+        assert_eq!(tree.leaves(), vec![1, 9, 3]);
+        assert!(!tree.replace_leaf(7, 8));
     }
 
     #[test]

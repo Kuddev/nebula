@@ -19,24 +19,75 @@ The examples below use `nebula` as a readable placeholder for the resolved invoc
 
 ## Workflow
 
-1. Run `nebula ctl describe --pretty`. Confirm every capability needed by the task is present. Require `agent.fork` for isolated workers and check `features` when relying on identity-aware waits.
-2. Run `nebula ctl snapshot --pretty`. Use its authoritative active window, focused pane, cwd, task state, and `state_change_seq`; never infer identity from a title or terminal text.
-3. Choose the narrow workflow below: direct pane layout for visible terminal work, or a named isolated Agent when the user explicitly asks for delegated repository work.
+Choose one of these paths without exploratory process or source-code searches:
 
-## Direct Pane Layout
+1. For a natural-language request that creates or changes a visible layout, starts Claude/Codex, sends first tasks, or runs commands, issue **one** `runtime.orchestrate` request. The first untargeted split uses Nebula's current focused pane, so do not take a preliminary snapshot merely to rediscover it.
+2. Use `snapshot`, `read`, `wait`, or `agent.get` only when the request depends on pre-existing identity/state, when observing work after the orchestration receipt, or when recovering from one named failed step.
+3. Use `agent-fork` separately only when the user explicitly requests an isolated Git worktree. The current typed workflow deliberately does not hide worktree creation inside a generic step.
+4. Run `describe` only for capability negotiation with an unknown/older Nebula build or after `method_not_found`; do not pay that round trip on every known v1 workflow.
 
-Use this for requests such as "split right and open Codex", "show README below it", or "run tests in another pane".
+## One-Request Layout And Dispatch
 
-1. Run `nebula ctl split --window <window> --direction right --pretty` or `--direction down`. The returned `result.pane_id` is the new focused pane; do not rediscover it by comparing titles.
-2. Start an interactive CLI with `nebula ctl prompt --window <window> --pane <new-pane> --text "codex" --wait idle --timeout-ms 60000 --pretty` (or `claude`). Then send the user's task with a second `prompt` call.
-3. To add a pane relative to that CLI, first run `nebula ctl focus --window <window> --pane <cli-pane> --pretty`, then split again. A `down` split is placed below the focused pane.
-4. For a visible README check, run one finite command in the new pane: PowerShell `Get-Content -Raw README.md`; POSIX `sed -n '1,240p' README.md`. Use `nebula ctl run --window <window> --pane <pane> --command "..." --pretty`, then `read` to verify the displayed content.
-5. Verify each requested pane with `nebula ctl read --window <window> --pane <pane> --lines 120 --pretty`. Keep panes visible unless the user asks to close them.
+Translate the user's whole deterministic terminal intent into one JSON object and invoke:
+
+```text
+nebula ctl orchestrate --spec <UTF-8-JSON> --timeout-ms 30000 --pretty
+```
+
+Use `--file <path>` instead when shell quoting would make the JSON ambiguous. `--spec` and `--file` are mutually exclusive; both still produce exactly one Runtime request.
+
+The step surface is intentionally closed and typed:
+
+- `new_tab`: optional `window_id` and `cwd`.
+- `focus`: required direct or prior-step `target`.
+- `split`: optional `window_id` or `target`, plus `direction: left_right|top_bottom`.
+- `prompt`: required `target` and one plain-text `text` line; `submit` defaults true.
+- `run`: required `target` and one command line; `wait` defaults true.
+- `agent_launch`: required `target`, unique `name`, verified `kind: claude|codex`, and one-line `initial_prompt`. Nebula internally waits for the correct Agent generation to become ready before sending the prompt.
+
+References must be structured and point backward:
+
+```json
+{ "step": "right", "field": "pane_id" }
+```
+
+Never emit `$right.pane_id`, a method name with arbitrary params, shell interpolation, or a future-step reference.
+
+For “右侧开 Claude 问天气，在它下面开 Codex 输出复杂数学公式”, submit this one workflow:
+
+```json
+{
+  "steps": [
+    { "id": "right", "op": "split", "direction": "left_right" },
+    {
+      "id": "weather", "op": "agent_launch",
+      "target": { "step": "right", "field": "pane_id" },
+      "name": "weather", "kind": "claude",
+      "initial_prompt": "查询并简要回答今天的天气"
+    },
+    {
+      "id": "bottom", "op": "split",
+      "target": { "step": "right", "field": "pane_id" },
+      "direction": "top_bottom"
+    },
+    {
+      "id": "formula", "op": "agent_launch",
+      "target": { "step": "bottom", "field": "pane_id" },
+      "name": "formula", "kind": "codex",
+      "initial_prompt": "输出几组复杂数学公式供终端渲染测试"
+    }
+  ],
+  "on_error": "stop"
+}
+```
+
+Nebula starts all declared Agents before waiting for readiness, so their cold starts overlap. Treat the returned workflow receipt as authoritative: `ok`, `partial`, `failed_step`, and each step's compact `action`/`error` replace intermediate snapshots. On partial failure, preserve successful panes and continue only from the named failed step; do not replay the whole workflow.
 
 Example intent mapping:
 
-- "分屏开一个 codex，让它输出数学公式；在 codex 下面打开 README" means: snapshot -> split right -> launch Codex in returned pane -> prompt it for the formula -> focus that Codex pane -> split down -> run the finite README display command in the returned lower pane -> read both panes.
-- "开一个 tab 让 codex 做 X" means `agent-start` when stable Agent identity is useful, or `new-tab` + `prompt` for an ordinary untracked CLI. Do not create a Git worktree unless isolation was requested.
+- "分屏开一个 codex，让它输出数学公式；在 codex 下面显示 README" means one workflow: split right -> `agent_launch` Codex with the formula as `initial_prompt` -> split down by reference -> `run` the platform-appropriate finite README command. Read afterward only if the user also asked to inspect/verify its output.
+- "开一个 tab 让 codex 做 X" means one workflow: `new_tab` -> `agent_launch` targeting its receipt. Do not create a Git worktree unless isolation was requested.
+- "在已有 pane 42 跑测试" may use one `run` step with direct target `{ "window_id": 1, "pane_id": 42 }`; take a snapshot first only if that identity was not already supplied or verified.
 
 ## Named Isolated Agents
 

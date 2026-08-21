@@ -57,6 +57,7 @@
           "enum": [
             "runtime.describe",
             "runtime.snapshot",
+            "runtime.orchestrate",
             "events.subscribe",
             "agents.list",
             "agent.start",
@@ -86,6 +87,10 @@
         {
           "if": { "properties": { "method": { "enum": ["runtime.describe", "runtime.snapshot", "window.create"] } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/empty_params" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "runtime.orchestrate" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/orchestrate_params" } } }
         },
         {
           "if": { "properties": { "method": { "const": "events.subscribe" } } },
@@ -179,11 +184,135 @@
       },
       "additionalProperties": false
     },
+    "orchestrate_params": {
+      "type": "object",
+      "required": ["steps"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/orchestrate_step" }
+        },
+        "on_error": { "enum": ["stop", "continue"], "default": "stop" }
+      },
+      "additionalProperties": false
+    },
+    "orchestrate_step": {
+      "oneOf": [
+        { "$ref": "#/$defs/orchestrate_new_tab" },
+        { "$ref": "#/$defs/orchestrate_focus" },
+        { "$ref": "#/$defs/orchestrate_split" },
+        { "$ref": "#/$defs/orchestrate_prompt" },
+        { "$ref": "#/$defs/orchestrate_run" },
+        { "$ref": "#/$defs/orchestrate_agent_launch" }
+      ]
+    },
+    "orchestrate_step_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,63}$"
+    },
+    "orchestrate_pane_target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["step", "field"],
+          "properties": {
+            "step": { "$ref": "#/$defs/orchestrate_step_id" },
+            "field": { "const": "pane_id" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["pane_id"],
+          "properties": {
+            "window_id": { "$ref": "#/$defs/nullable_window_id" },
+            "pane_id": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "orchestrate_new_tab": {
+      "type": "object",
+      "required": ["id", "op"],
+      "properties": {
+        "id": { "$ref": "#/$defs/orchestrate_step_id" },
+        "op": { "const": "new_tab" },
+        "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "cwd": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "orchestrate_focus": {
+      "type": "object",
+      "required": ["id", "op", "target"],
+      "properties": {
+        "id": { "$ref": "#/$defs/orchestrate_step_id" },
+        "op": { "const": "focus" },
+        "target": { "$ref": "#/$defs/orchestrate_pane_target" }
+      },
+      "additionalProperties": false
+    },
+    "orchestrate_split": {
+      "type": "object",
+      "required": ["id", "op", "direction"],
+      "properties": {
+        "id": { "$ref": "#/$defs/orchestrate_step_id" },
+        "op": { "const": "split" },
+        "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "target": { "$ref": "#/$defs/orchestrate_pane_target" },
+        "direction": { "enum": ["left_right", "top_bottom"] }
+      },
+      "additionalProperties": false
+    },
+    "orchestrate_prompt": {
+      "type": "object",
+      "required": ["id", "op", "target", "text"],
+      "properties": {
+        "id": { "$ref": "#/$defs/orchestrate_step_id" },
+        "op": { "const": "prompt" },
+        "target": { "$ref": "#/$defs/orchestrate_pane_target" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "submit": { "type": "boolean", "default": true }
+      },
+      "additionalProperties": false
+    },
+    "orchestrate_run": {
+      "type": "object",
+      "required": ["id", "op", "target", "command"],
+      "properties": {
+        "id": { "$ref": "#/$defs/orchestrate_step_id" },
+        "op": { "const": "run" },
+        "target": { "$ref": "#/$defs/orchestrate_pane_target" },
+        "command": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "wait": { "type": "boolean", "default": true },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000, "default": 30000 }
+      },
+      "additionalProperties": false
+    },
+    "orchestrate_agent_launch": {
+      "type": "object",
+      "required": ["id", "op", "target", "name", "kind", "initial_prompt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/orchestrate_step_id" },
+        "op": { "const": "agent_launch" },
+        "target": { "$ref": "#/$defs/orchestrate_pane_target" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "kind": { "enum": ["claude", "codex"] },
+        "resume_session_id": { "type": ["string", "null"] },
+        "initial_prompt": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "ready_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000, "default": 10000 }
+      },
+      "additionalProperties": false
+    },
     "agent_start_params": {
       "type": "object",
       "required": ["name", "kind"],
       "properties": {
         "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "pane_id": { "type": ["integer", "null"], "minimum": 0 },
         "name": { "type": "string", "minLength": 1, "maxLength": 64 },
         "kind": { "type": "string", "minLength": 1 },
         "cwd": { "type": ["string", "null"] },
@@ -275,6 +404,7 @@
       "required": ["direction"],
       "properties": {
         "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "pane_id": { "type": ["integer", "null"], "minimum": 0 },
         "direction": { "enum": ["left_right", "top_bottom"] }
       },
       "additionalProperties": false

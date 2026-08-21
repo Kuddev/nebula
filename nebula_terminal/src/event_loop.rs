@@ -475,7 +475,8 @@ where
                 // 一坐标系（机理见 `Term::conpty_realign`）。
                 if state.align_at.is_some_and(|at| Instant::now() >= at) {
                     state.align_at = None;
-                    if let Some(target) = self.pty.child_pid().and_then(conpty_cursor_viewport_row) {
+                    if let Some(target) = self.pty.child_pid().and_then(conpty_cursor_viewport_row)
+                    {
                         let mut terminal = self.terminal.lock();
                         trace_terminal_state("before-align", &terminal);
                         terminal.conpty_realign(target);

@@ -3,8 +3,8 @@ use std::io::{self, Result};
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::sync::mpsc::TryRecvError;
 use std::sync::Arc;
+use std::sync::mpsc::TryRecvError;
 
 use windows_sys::Win32::System::Threading::TerminateProcess;
 
@@ -1008,9 +1008,9 @@ mod test {
     use std::process::{Command, Stdio};
 
     use crate::tty::windows::{
-        cmdline, explicit_bash_integration_args, nebula_default_shell, nebula_find_bash,
-        powershell_integration_args, push_escaped_arg, NebulaRuntimeSettings, NebulaShellExecutor,
-        NEBULA_BASH_RC, NEBULA_PROMPT_PS1,
+        NEBULA_BASH_RC, NEBULA_PROMPT_PS1, NebulaRuntimeSettings, NebulaShellExecutor, cmdline,
+        explicit_bash_integration_args, nebula_default_shell, nebula_find_bash,
+        powershell_integration_args, push_escaped_arg,
     };
     use crate::tty::{Options, Shell};
 

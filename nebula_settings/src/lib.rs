@@ -132,9 +132,8 @@ pub fn persist_keybinds(pairs: &[(String, String)]) -> std::io::Result<()> {
 pub fn apply_keybinds(text: &str, pairs: &[(String, String)]) -> String {
     let mut out = String::with_capacity(text.len() + 64);
     for line in text.lines() {
-        let is_keybind = line
-            .split_once('=')
-            .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("keybind"));
+        let is_keybind =
+            line.split_once('=').is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("keybind"));
         if !is_keybind {
             out.push_str(line);
             out.push('\n');
@@ -157,9 +156,9 @@ pub fn apply_updates(text: &str, updates: &[(&str, String)]) -> String {
 
     for line in text.lines() {
         let key = line.split_once('=').map(|(key, _)| key.trim().to_ascii_lowercase());
-        let hit = key.as_deref().and_then(|key| {
-            pending.iter().position(|(_, (k, _))| k.eq_ignore_ascii_case(key))
-        });
+        let hit = key
+            .as_deref()
+            .and_then(|key| pending.iter().position(|(_, (k, _))| k.eq_ignore_ascii_case(key)));
         match hit {
             Some(ix) => {
                 let (_, (key, value)) = pending.remove(ix);
@@ -815,10 +814,7 @@ impl RuntimeSettings {
                 .value("vcs_display")
                 .and_then(VcsDisplayName::from_settings)
                 .unwrap_or_default(),
-            bell: raw
-                .value("bell")
-                .and_then(BellModeName::from_settings)
-                .unwrap_or_default(),
+            bell: raw.value("bell").and_then(BellModeName::from_settings).unwrap_or_default(),
             fetch: raw.bool_on("fetch").unwrap_or(false),
             keep_session: raw.bool_on("keep_session").unwrap_or(false),
             restore_session: raw.bool_on("restore_session").unwrap_or(true),
@@ -838,9 +834,7 @@ impl RuntimeSettings {
                 .map(|o| o.clamp(0.0, 1.0))
                 .unwrap_or(0.38),
             background_image_fit: raw.value("background_image_fit").map(str::to_owned),
-            background_image_alignment: raw
-                .value("background_image_alignment")
-                .map(str::to_owned),
+            background_image_alignment: raw.value("background_image_alignment").map(str::to_owned),
             background_image_cover_chrome: raw
                 .bool_on("background_image_cover_chrome")
                 .unwrap_or(false),
@@ -1008,10 +1002,7 @@ mod tests {
 
     #[test]
     fn tabs_position_parses_supported_values_and_defaults_to_sidebar() {
-        assert_eq!(
-            TabsPositionName::from_settings("sidebar"),
-            Some(TabsPositionName::Sidebar)
-        );
+        assert_eq!(TabsPositionName::from_settings("sidebar"), Some(TabsPositionName::Sidebar));
         assert_eq!(TabsPositionName::from_settings("TOP"), Some(TabsPositionName::Top));
         assert_eq!(TabsPositionName::from_settings("bottom"), None);
         assert_eq!(
@@ -1066,10 +1057,8 @@ mod tests {
     #[test]
     fn apply_updates_replaces_in_place_and_appends_missing() {
         let text = "language=system\ntheme=Nebula\nshell=powershell\n";
-        let updated = apply_updates(
-            text,
-            &[("theme", "SilverLight".into()), ("cursor_blink", "1".into())],
-        );
+        let updated =
+            apply_updates(text, &[("theme", "SilverLight".into()), ("cursor_blink", "1".into())]);
         assert_eq!(
             updated,
             "language=system\ntheme=SilverLight\nshell=powershell\ncursor_blink=1\n"
@@ -1087,10 +1076,7 @@ mod tests {
             ]
         );
         let rewritten = apply_keybinds(text, &[("ctrl+y".to_owned(), "Paste".to_owned())]);
-        assert_eq!(
-            rewritten,
-            "theme=Nebula\n# comment\nkeybind=ctrl+y:Paste\n"
-        );
+        assert_eq!(rewritten, "theme=Nebula\n# comment\nkeybind=ctrl+y:Paste\n");
     }
 
     #[test]

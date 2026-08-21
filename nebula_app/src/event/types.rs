@@ -159,6 +159,8 @@ pub enum TabRequest {
         shell: nebula_terminal::tty::Shell,
     },
     NewSsh(String),
+    /// 在当前布局叶位置重建失败的 SSH pane，不经过关闭 tab 的路径。
+    RetrySsh(String),
     OpenDoc(PathBuf),
     OpenSettings,
     Close,
