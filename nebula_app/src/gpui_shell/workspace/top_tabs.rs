@@ -12,22 +12,26 @@ use gpui::{
     ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
     Window, div, ease_out_quint, img, px,
 };
+use gpui_component::menu::PopupMenuItem;
 
 use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::terminal::view::SidebarActivity;
 
 use super::{
-    NebulaWorkspace, TAB_LABEL_ICON_SIZE, TAB_LABEL_ICON_W, TabDrag, TabDragAxis, TabPresentation,
+    NebulaWorkspace, OpenSettings, TAB_LABEL_ICON_SIZE, TAB_LABEL_ICON_W, TabDrag, TabDragAxis,
+    TabPresentation, ToggleShellPicker,
 };
 
 pub(super) const TOP_TAB_H: f32 = 34.0;
+/// 与顶部模式正文卡片的 `px_2` 左边距同源，让首个 tab 和终端左缘对齐。
+pub(super) const TOP_TAB_LEFT_INSET: f32 = 8.0;
 const TOP_TAB_MIN_W: f32 = 120.0;
 const TOP_TAB_MAX_W: f32 = 220.0;
 const TOP_TAB_GAP: f32 = 4.0;
 const TOP_TAB_STATUS_W: f32 = 28.0;
-/// 标题栏中不属于 tab 视口的固定预算：左内边距、五枚 32px 操作按钮、
+/// 标题栏中不属于 tab 视口的固定预算：左内边距、四枚 32px 操作按钮、
 /// 三枚 34px 窗口按钮，以及至少 72px 的可拖拽空白。
-const TOP_TAB_RESERVED_W: f32 = 12.0 + 32.0 * 5.0 + 34.0 * 3.0 + 72.0;
+const TOP_TAB_RESERVED_W: f32 = TOP_TAB_LEFT_INSET + 32.0 * 4.0 + 34.0 * 3.0 + 72.0;
 
 fn tab_width(viewport_w: f32, count: usize) -> f32 {
     if count == 0 || viewport_w <= 1.0 {
@@ -361,20 +365,12 @@ impl NebulaWorkspace {
             });
         }
 
+        let menu_workspace = cx.entity().downgrade();
+
         h_flex()
             .size_full()
             .min_w_0()
             .items_center()
-            .child(
-                Button::new("top-open-settings")
-                    .icon(IconName::Settings)
-                    .ghost()
-                    .selected(settings_active)
-                    .tooltip("设置 (Ctrl+,)")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_settings(window, cx);
-                    })),
-            )
             .child(
                 // Windows Terminal 的 TabView 贴住标题栏底边；只让 tab 与其
                 // 相邻操作按钮下沉，标题栏两侧的独立工具仍保持垂直居中。
@@ -421,10 +417,41 @@ impl NebulaWorkspace {
                         Button::new("top-tabs-menu")
                             .icon(IconName::EllipsisVertical)
                             .ghost()
-                            .tooltip("选择终端 (Ctrl+K)")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_shell_palette(window, cx);
-                            })),
+                            .selected(settings_active)
+                            .tooltip("更多")
+                            .dropdown_menu_with_anchor(
+                                gpui::Corner::TopRight,
+                                move |menu, _, _| {
+                                    let shell_picker = menu_workspace.clone();
+                                    let settings = menu_workspace.clone();
+                                    menu.external_link_icon(false)
+                                        .item(
+                                            PopupMenuItem::new("选择终端")
+                                                .icon(IconName::SquareTerminal)
+                                                .action(Box::new(ToggleShellPicker))
+                                                .on_click(move |_, window, cx| {
+                                                    if let Some(workspace) = shell_picker.upgrade() {
+                                                        workspace.update(cx, |this, cx| {
+                                                            this.open_shell_palette(window, cx);
+                                                        });
+                                                    }
+                                                }),
+                                        )
+                                        .separator()
+                                        .item(
+                                            PopupMenuItem::new("设置")
+                                                .icon(IconName::Settings)
+                                                .action(Box::new(OpenSettings))
+                                                .on_click(move |_, window, cx| {
+                                                    if let Some(workspace) = settings.upgrade() {
+                                                        workspace.update(cx, |this, cx| {
+                                                            this.open_settings(window, cx);
+                                                        });
+                                                    }
+                                                }),
+                                        )
+                                },
+                            ),
                     ),
             )
             // Windows Terminal 的新建 split button 紧跟 TabView；剩余空间

@@ -4147,23 +4147,23 @@ impl Render for NebulaWorkspace {
                 .inset_0(),
             )
             .child(
-                // 标题栏左上与旧壳同构：侧栏开关 + 齿轮，两枚裸图标，无应用名
-                // 文案。图标用静态 PanelLeft（旧壳折叠/展开共用同一枚方块标）。
-                //
-                // 组件库默认 TitleBar 只有 34px，而普通 Button 的命中块是
-                // 32px，上下各剩 1px，视觉上就会紧贴窗口顶边。旧壳合同是
-                // 8px 外边距 + 40px 标题带，总高 48px；显式覆写后按钮垂直
-                // 居中，上下各留 8px，且右侧窗口控制仍共享同一标题带。
+                // 侧栏模式保留旧壳的侧栏开关与齿轮。组件默认 34px 标题栏会让
+                // 32px 按钮几乎贴边，因此显式设为 48px、上下各留 8px；右侧
+                // 窗口控制仍共享同一标题带。
                 TitleBar::new()
                     .h(px(48.0))
                     .when(top_tabs, |bar| {
-                        bar.child(self.render_top_title_bar(
-                            files_active,
-                            git_active,
-                            settings_active,
-                            window,
-                            cx,
-                        ))
+                        // 正文卡在顶部模式保留 8px 左缝；标题栏默认 12px，
+                        // 这里覆写后首个 tab 才与卡内 powerline 严格同轴。
+                        bar.pl(px(top_tabs::TOP_TAB_LEFT_INSET)).child(
+                            self.render_top_title_bar(
+                                files_active,
+                                git_active,
+                                settings_active,
+                                window,
+                                cx,
+                            ),
+                        )
                     })
                     .when(!top_tabs, |bar| {
                         bar.child(
