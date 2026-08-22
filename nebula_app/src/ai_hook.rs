@@ -199,58 +199,14 @@ pub(crate) fn parse_remote_envelope(bytes: &[u8], pane: Option<u64>) -> Option<A
     Some(event)
 }
 
-/// 屏幕尾部的文本像不像「AI 正在等用户回答」。
-///
-/// codex 的 notify 只有一种事件——弹出交互式提问（选择框、批准确认）时它
-/// 发的也是 `agent-turn-complete`。光看事件流分不出"说完了"和"在等你"，
-/// 只能看屏幕：回合结束的瞬间尾部还挂着提交/确认类提示，就是在等人，
-/// 蓝点该升级成手掌。
-///
-/// 特征串取各家问题框的**操作提示行**——那一行只在等待输入时才存在。刻意
-/// 不收 "esc to interrupt"：它在整个回合运行期间都挂在状态栏上，收了它，
-/// 每次正常完成都会被误报成"在问你"。
-pub(crate) fn tail_looks_like_question(tail: &str) -> bool {
-    let lower = tail.to_ascii_lowercase();
-    [
-        // codex 的问题框底栏。
-        "enter to submit",
-        "tab to add notes",
-        // claude code 的选择框与权限确认。
-        "enter to confirm",
-        "do you want to proceed",
-        // 通用 CLI 确认式。
-        "(y/n)",
-        "[y/n]",
-    ]
-    .iter()
-    .any(|mark| lower.contains(mark))
-}
-
-#[cfg(test)]
-mod question_tail_tests {
-    use super::tail_looks_like_question;
-
-    #[test]
-    fn codex_question_footer_reads_as_asking() {
-        let tail = "Question 1/2 (2 unanswered)\n> 1. 深色主题 (Recommended)\n\
-                    tab to add notes | enter to submit answer | esc to interrupt";
-        assert!(tail_looks_like_question(tail));
-    }
-
-    #[test]
-    fn yes_no_prompts_read_as_asking() {
-        assert!(tail_looks_like_question("Overwrite existing file? (y/N)"));
-        assert!(tail_looks_like_question("Do you want to proceed?\n> 1. Yes"));
-    }
-
-    #[test]
-    fn a_running_status_bar_does_not_read_as_asking() {
-        // "esc to interrupt" 单独出现是**运行中**的状态栏；把它当特征收进
-        // 去，每次正常完成都会误报成提问。
-        assert!(!tail_looks_like_question("Working on it… esc to interrupt"));
-        assert!(!tail_looks_like_question("$ cargo build\n   Compiling nebula v0.8.0"));
-    }
-}
+/// 「回合结束时 AI 是不是其实在等人回答」这个判断，2026-08-22 起统一走
+/// `ai_agents::detect` 的 blocked 规则（`agent_detection/*.toml` 与
+/// `_shared.toml`）。此处原有一份 `tail_looks_like_question` 裸关键词表，
+/// 扫底部 15 行全文，只要 `(y/n)`、`do you want to proceed` 等字样落在正文
+/// 任何位置就算数——agent 打印的代码片段、上一轮答完还没滚走的旧框都会让
+/// 正常结束的回合挂上警告三角，而 Blocked 一旦点亮就再难落下。manifest 的
+/// 规则带 region 锚定（`after_last_horizontal_rule` / 底部 N 行），只认当前
+/// 活动框，两个壳现在共用它。
 
 #[cfg(test)]
 mod remote_tests {

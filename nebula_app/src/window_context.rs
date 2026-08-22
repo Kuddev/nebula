@@ -2292,15 +2292,24 @@ impl WindowContext {
                 // 回答"。回合结束的瞬间看一眼屏幕尾部——还挂着选择框或确认
                 // 提示，就按「等你批准」处理（蓝点升级成手掌）。
                 let screen_asks = ev.kind == crate::ai_hook::AiHookKind::TurnDone && {
+                    // 与 GPUI 壳同判据：走 per-agent manifest 的 blocked 规则
+                    // （带 region 锚定，只认当前活动框），不再拿裸关键词扫底部
+                    // 15 行全文——正文里出现 (y/n)、do you want to proceed 之类
+                    // 的字样（agent 打印的代码、上一轮没滚走的旧框）就会让正常
+                    // 结束的回合挂上警告三角，而 Blocked 一旦点亮就再难落下。
                     let term = self.panes[idx].terminal.lock();
                     let lines = term.screen_lines();
-                    let take = lines.min(15);
-                    let start = Point::new(Line((lines - take) as i32), Column(0));
-                    let end = Point::new(
-                        Line(lines as i32 - 1),
-                        Column(term.columns().saturating_sub(1)),
-                    );
-                    crate::ai_hook::tail_looks_like_question(&term.bounds_to_string(start, end))
+                    lines > 0 && term.columns() > 0 && {
+                        let start = Point::new(Line(0), Column(0));
+                        let end = Point::new(
+                            Line(lines as i32 - 1),
+                            Column(term.columns().saturating_sub(1)),
+                        );
+                        let screen = term.bounds_to_string(start, end);
+                        crate::ai_agents::detect(&ev.source, &screen).is_some_and(|detection| {
+                            detection.status == crate::ai_agents::AgentStatus::Blocked
+                        })
+                    }
                 };
                 {
                     let state = &mut self.panes[idx].nebula_state;

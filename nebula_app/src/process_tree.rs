@@ -154,6 +154,30 @@ pub fn busy_child(_root_pid: u32) -> Option<String> {
     None
 }
 
+/// First descendant that `AgentKind` recognizes as an AI CLI, as its slug.
+///
+/// `busy_child` walks BFS level order, so the first non-stateless hit is always
+/// the host interpreter rather than the agent: codex really runs as
+/// `powershell → node.exe → codex.exe → node_repl.exe`, and taking the depth-1
+/// `node.exe` as the identity yields "node", which `AgentKind::parse` rejects —
+/// the pane then has no logo and no semantic state at all.
+///
+/// 2026-08-22 实测（pane 4，issue #42 同批）：codex 已经答完，屏幕上就是空闲
+/// 输入框，但 `running_program` 是 None，于是 1 Hz 屏幕看门狗在入口处早退，
+/// 没有任何机制去看那块屏幕，转圈一直挂着。命令行首 token 是脆弱推断（会话
+/// 恢复、别名、`npx codex` 都会落空），进程树才是客观事实。
+#[cfg(windows)]
+pub fn agent_child(root_pid: u32) -> Option<String> {
+    descendants(root_pid).ok()?.into_iter().skip(1).find_map(|process| {
+        crate::ai_agents::AgentKind::parse(&process.executable).map(|kind| kind.slug().to_owned())
+    })
+}
+
+#[cfg(not(windows))]
+pub fn agent_child(_root_pid: u32) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::display_name;

@@ -1,0 +1,82 @@
+# 所有 AI CLI 共享的骨架规则，编译时自动并入每一份 per-agent manifest。
+#
+# 立此文件的原因（2026-08-22，真机取证）：per-agent manifest 各写各的
+# working 判据，写法五花八门且互相不知道对方踩过的坑——claude.toml 要求
+# 「盲文点阵 spinner 行 AND esc to interrupt」，而 Claude Code 的动画符号是
+# ✻✶✳·（U+2736 等）不是盲文，Gate 又是 AND 语义，于是那条规则从上线起
+# 从未命中过；漏判 working 之后屏幕只剩 idle 规则命中，回合进行中被连续
+# 两拍降级成「完成」蓝点。同类 AND 陷阱在 devin/kiro 里原样存在。
+#
+# 归一化的依据是所有 agent CLI 共有的一件事：**正在干活时，它必须告诉用户
+# 怎么打断它**。中断提示的出现与消失，比 spinner 字形、动词表、计时格式都
+# 稳定得多——字形每次改版都在变，"how to stop me" 不会。
+#
+# 优先级分层（per-agent 规则用 100/400/700/900 这几档）：
+#   900/700  per-agent 专有 blocked——最精确，永远优先
+#   800      shared blocked：给没写全 blocked 规则的 CLI 兜底
+#   400      per-agent 专有 working
+#   350      shared working：中断提示，本文件的主力
+#   100      per-agent 专有 idle
+# shared 不提供 idle 规则：空闲提示符字符（❯ › > ➜ $）差异大且与正文、引用
+# 撞脸，误判 idle 的代价（假完成）正是本次要修的 bug，不能由共享层引入。
+
+# 停在等人表态的框上。per-agent 的 900/700 规则更精确时由它们取胜；这里
+# 只保证「装了新 CLI 但还没写 blocked 规则」时不至于把权限框当成工作中。
+[[rules]]
+id = "shared_awaiting_answer"
+state = "blocked"
+priority = 800
+region = "bottom_non_empty_lines(12)"
+any = [
+  { contains = ["do you want to proceed"] },
+  { contains = ["waiting for permission"] },
+  { contains = ["requires approval"] },
+  { contains = ["enter to confirm"] },
+  { contains = ["enter to submit answer"] },
+  { contains = ["enter to submit all"] },
+  { contains = ["allow command?"] },
+  { contains = ["tab to amend"] },
+  { contains = ["(y/n)"] },
+  { contains = ["[y/n]"] },
+]
+
+# 工作中：屏幕上挂着「怎么中断我」的提示。
+#
+# region 取 10 个非空行而不是 4~6：中断提示通常在最底部的模式栏里，与
+# spinner 行之间往往隔着 Tip、分隔线和输入框——pane 12 实测底部结构是
+# 「spinner / Tip / 续行 / ─── / ❯ / ─── / ⏵⏵ … esc to interrupt」，spinner
+# 与中断提示相距 6 行，任何小 region 都会切掉其中一头。
+#
+# not 段是必需的：权限确认框同样打印「Esc to cancel」（pane 11 实测
+# 「Esc to cancel · Tab to amend · ctrl+e to explain」），只看中断词会把
+# 「等你点头」误判成「正在干活」。blocked 的专有规则优先级更高本来就能
+# 赢，这里再排一次，保证没写 blocked 规则的 CLI 也不会错点转圈。
+[[rules]]
+id = "shared_interrupt_hint_working"
+state = "working"
+priority = 350
+region = "bottom_non_empty_lines(10)"
+any = [
+  { contains = ["esc to interrupt"] },
+  { contains = ["press esc to interrupt"] },
+  { contains = ["ctrl+c to interrupt"] },
+  { contains = ["esc interrupt"] },
+  { contains = ["esc to cancel"] },
+  { contains = ["esc cancel"] },
+  { contains = ["esc:cancel"] },
+  { contains = ["esc to stop"] },
+  { contains = ["ctrl+c to stop"] },
+  { contains = ["ctrl+c cancel"] },
+  { contains = ["msg=interrupt"] },
+]
+not = [
+  { contains = ["do you want to proceed"] },
+  { contains = ["requires approval"] },
+  { contains = ["waiting for permission"] },
+  { contains = ["enter to confirm"] },
+  { contains = ["enter to select"] },
+  { contains = ["enter to submit answer"] },
+  { contains = ["tab to amend"] },
+  { contains = ["(y/n)"] },
+  { contains = ["[y/n]"] },
+]

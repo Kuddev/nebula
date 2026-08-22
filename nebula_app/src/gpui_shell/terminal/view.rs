@@ -204,6 +204,14 @@ pub struct TerminalView {
     /// `NEBULA|` 标题报 `running_program`，装了 OSC133 集成的 bash/zsh/nu 只
     /// 发这一对语义标记——两条路都要能点亮侧栏的「运行中」。
     command_running: bool,
+    /// 进程树给出的反证：`command_running` 为真、但 shell 树下只剩交互式
+    /// shell 与 console plumbing 时置位，转圈据此熄灭（issue #42）。判据与
+    /// 节流都在 `runtime::reconcile_shell_activity`，裁定理由见那里。
+    command_running_disproved: bool,
+    /// `command_running` 置位的时刻，进程树探测的节流窗口从这里起算。
+    command_started: Option<std::time::Instant>,
+    /// 上次跑进程树探测的时刻，用于节流。
+    last_process_probe: Option<std::time::Instant>,
     active_run: Option<crate::runtime_api::RuntimePaneRun>,
     last_run: Option<crate::runtime_api::RuntimeRunOutcome>,
     /// Hook 事件驱动的 agent 回合状态（旧壳 `nebula_state.agent_status` 的
@@ -217,6 +225,11 @@ pub struct TerminalView {
     /// 本次前台 agent 会话是否收到过 hook（旧壳同名字段同语义）：屏幕
     /// 检测的空闲提示符不得降级 hook 报出的 Done/Blocked 精确终态。
     agent_hook_seen: bool,
+    /// 本 pane 的 agent 在当前回合有过活动（hook 派活、屏幕判 working、或
+    /// Runtime 提交）。屏幕回到空闲提示符时据此区分「干完了、你还没看」
+    /// （Done，蓝点）与「从没开工」（Idle，只显示 shell 标签）——消费点在
+    /// `runtime::refresh_agent_screen_state`。
+    agent_turn_active: bool,
     /// 屏幕检测连续看到空闲提示符的拍数；Working 连续两拍空闲才降级
     /// （单拍可能是重绘间隙），非 idle 检测与任何 hook 边沿都清零。
     idle_screen_streak: u8,
@@ -670,12 +683,16 @@ impl TerminalView {
             branch: String::new(),
             running_program: None,
             command_running: false,
+            command_running_disproved: false,
+            command_started: None,
+            last_process_probe: None,
             active_run: None,
             last_run: None,
             agent_status: crate::ai_agents::AgentStatus::Unknown,
             agent_status_source: crate::ai_agents::AgentStatusSource::Unknown,
             agent_status_rule: None,
             agent_hook_seen: false,
+            agent_turn_active: false,
             idle_screen_streak: 0,
             agent_runtime_submit_pending: false,
             pending_runtime_submit: None,
@@ -842,7 +859,7 @@ impl TerminalView {
                     self.agent_status_source = crate::ai_agents::AgentStatusSource::Process;
                     self.agent_status_rule = None;
                 }
-                self.command_running = true;
+                self.mark_command_running();
                 if let Some(run) = &mut self.active_run
                     && run.phase == crate::runtime_api::RuntimeRunPhase::Submitted
                 {
@@ -865,6 +882,9 @@ impl TerminalView {
                     cx.emit(TerminalViewEvent::TitleChanged);
                 }
                 self.command_running = false;
+                self.command_running_disproved = false;
+                self.command_started = None;
+                self.last_process_probe = None;
                 if let Some(run) = self.active_run.take() {
                     self.last_run =
                         Some(crate::runtime_api::RuntimeRunOutcome::command_done(run, exit_code));
@@ -873,6 +893,7 @@ impl TerminalView {
                 self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
                 self.agent_status_rule = None;
                 self.agent_hook_seen = false;
+                self.agent_turn_active = false;
                 self.idle_screen_streak = 0;
                 self.agent_runtime_submit_pending = false;
                 self.pending_runtime_submit = None;

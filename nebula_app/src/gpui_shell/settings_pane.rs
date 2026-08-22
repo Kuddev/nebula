@@ -569,6 +569,17 @@ impl SettingsPane {
             window,
             cx,
         );
+        // 模糊三档的标签带上取舍提示：三者不是质量递进，而是三套成本模型
+        // （见 `nebula_settings::BlurModeName`）。用户按性能预算选，不是按
+        // "越靠后越好"选。
+        add_select(
+            "blur",
+            &["无", "平衡（Mica）", "高质量（Acrylic）"],
+            &["none", "mica", "acrylic"],
+            runtime.blur.settings_value(),
+            window,
+            cx,
+        );
         add_select(
             "accept",
             &["右方向键", "Tab", "Tab 或右方向键"],
@@ -2518,7 +2529,7 @@ impl SettingsPane {
             .child(self.select_row("language", "语言", cx))
             .child(self.select_row("density", "界面外观", cx))
             .child(self.slider_row("终端正文不透明度", &self.opacity_slider, opacity))
-            .child(self.switch_row("blur", "背景模糊", self.runtime.blur, cx));
+            .child(self.select_row("blur", "背景模糊", cx));
         let terminal = self
             .group("终端外观", cx)
             .child(self.stepper_row(

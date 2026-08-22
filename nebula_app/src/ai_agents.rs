@@ -290,6 +290,13 @@ struct Manifest {
     rules: Vec<Rule>,
 }
 
+/// `_shared.toml`: rules merged into every manifest, with no agent identity.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct SharedManifest {
+    rules: Vec<Rule>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct Rule {
@@ -360,6 +367,9 @@ struct Cache {
     manifests: HashMap<AgentKind, CompiledManifest>,
     last_override_scan: Instant,
 }
+
+/// Skeleton rules merged into every manifest below (and into user overrides).
+const SHARED: &str = include_str!("agent_detection/_shared.toml");
 
 const BUNDLED: &[(AgentKind, &str)] = &[
     (AgentKind::Claude, include_str!("agent_detection/claude.toml")),
@@ -495,16 +505,30 @@ fn compile_manifest(
     source: &str,
     override_mtime: Option<SystemTime>,
 ) -> Result<CompiledManifest, String> {
-    let manifest: Manifest = toml::from_str(source).map_err(|error| error.to_string())?;
+    let mut manifest: Manifest = toml::from_str(source).map_err(|error| error.to_string())?;
     if manifest.rules.is_empty() || manifest.rules.len() > 64 {
         return Err("manifest must contain 1..=64 rules".to_owned());
     }
+    // 共享骨架并入每一份 manifest——bundled 与用户 override 一视同仁，装了
+    // 新 CLI 或改了本地规则都自动带上中断提示判据。理由见 _shared.toml 顶部：
+    // per-agent 的 working 规则各写各的，同一个 AND 陷阱在多份文件里重复出现。
+    manifest.rules.extend(shared_rules().iter().cloned());
     let rules = manifest
         .rules
         .iter()
         .map(|rule| compile_gate(&rule.gate))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(CompiledManifest { manifest, rules, override_mtime })
+}
+
+/// Rules every agent manifest inherits. Parsed once; see `_shared.toml`.
+fn shared_rules() -> &'static Vec<Rule> {
+    static SHARED_RULES: OnceLock<Vec<Rule>> = OnceLock::new();
+    SHARED_RULES.get_or_init(|| {
+        let parsed: SharedManifest = toml::from_str(SHARED)
+            .unwrap_or_else(|error| panic!("bundled shared agent rules are invalid: {error}"));
+        parsed.rules
+    })
 }
 
 fn compile_gate(gate: &Gate) -> Result<CompiledGate, String> {
@@ -627,5 +651,89 @@ mod tests {
         assert_eq!(working.status, AgentStatus::Working);
         let idle = detect("claude", "────────────────\n❯ ").unwrap();
         assert_eq!(idle.status, AgentStatus::Idle);
+    }
+
+    /// 下面四段都是 2026-08-22 用 runtime `pane.read` 从真实窗口抓的原文，
+    /// 也就是判错的现场。规则改动必须对着它们回归，不能对着记忆里的格式写。
+    #[test]
+    fn real_claude_working_chrome_reads_working() {
+        // 正在干活的 pane。spinner 行用 ✶（U+2736）而不是盲文点阵，且与底部
+        // 中断提示相隔 6 行——旧规则要求「盲文行 AND 中断词」且 region 只有
+        // 6 行，两个条件同时落空，回合进行中因此被判成 idle，再连续两拍降级
+        // 成「完成」蓝点。
+        let screen = "  ⎿  Running…\n\
+                      ✶ Moseying… (8m 42s · ↓ 18.3k tokens)\n\
+                      \x20 ⎿  Tip: You haven't used the ui-ux-pro-max plugin in a while.\n\
+                      \x20    with /plugin\n\
+                      ────────────────────────────────────────\n\
+                      ❯ \n\
+                      ────────────────────────────────────────\n\
+                      \x20 ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents";
+        let detection = detect("claude", screen).unwrap();
+        assert_eq!(detection.status, AgentStatus::Working, "rule={}", detection.rule_id);
+    }
+
+    #[test]
+    fn real_claude_idle_chrome_reads_idle() {
+        // 回合已结束：没有中断提示，输入框空着。输入框可见本身不是判据——
+        // 上面那段工作中的屏幕里 ❯ 同样在。
+        let screen = "✻ Baked for 15m 24s\n\
+                      ────────────────────────────────────────\n\
+                      ❯ \n\
+                      ────────────────────────────────────────\n\
+                      \x20 ⏸ manual mode on · ? for shortcuts · ← for agents";
+        let detection = detect("claude", screen).unwrap();
+        assert_eq!(detection.status, AgentStatus::Idle, "rule={}", detection.rule_id);
+    }
+
+    #[test]
+    fn real_claude_permission_form_reads_blocked() {
+        // 真的停在权限框上。这段同时含「Esc to cancel」，共享 working 规则
+        // 必须被它的 not 段拦住，否则「等你点头」会被当成「正在干活」。
+        let screen = " List dist artifacts and query GitHub release assets\n\
+                      \x20This command requires approval\n\
+                      \x20Do you want to proceed?\n\
+                      \x20❯ 1. Yes\n\
+                      \x20  2. Yes, and don't ask again for: gh release *\n\
+                      \x20  3. No\n\
+                      \x20Esc to cancel · Tab to amend · ctrl+e to explain";
+        let detection = detect("claude", screen).unwrap();
+        assert_eq!(detection.status, AgentStatus::Blocked, "rule={}", detection.rule_id);
+    }
+
+    #[test]
+    fn real_codex_idle_chrome_reads_idle() {
+        // codex 早已答完，屏幕上就是空闲输入框。这块屏幕当初根本没人去匹:
+        // running_program 是 None，1 Hz 看门狗在入口就早退了，于是转圈长挂。
+        let screen = "  代码级修复和带 gpui-shell 的编译、针对性测试已经通过。\n\
+                      › Improve documentation in @filename\n\
+                      \x20 gpt-5.6-sol xhigh · D:\\temp_build\\nebula";
+        let detection = detect("codex", screen).unwrap();
+        assert_eq!(detection.status, AgentStatus::Idle, "rule={}", detection.rule_id);
+    }
+
+    #[test]
+    fn shared_rules_light_up_agents_without_their_own_working_rule() {
+        // 归一化的意义：中断提示对每个注册的 CLI 都点亮 working，新接的 CLI
+        // 不必从零再写一遍 spinner 正则（cline 至今就没有 working 规则）。
+        let screen = "some output\n────────\n> \n  esc to interrupt · ? for shortcuts";
+        for agent in ["grok", "pi", "opencode", "gemini", "cline", "kilo"] {
+            let found =
+                detect(agent, screen).unwrap_or_else(|| panic!("{agent} produced no detection"));
+            assert_eq!(found.status, AgentStatus::Working, "{agent} rule={}", found.rule_id);
+        }
+    }
+
+    #[test]
+    fn shared_blocked_rules_outrank_shared_working_on_confirmation_forms() {
+        // 确认框里几乎总有中断词；共享层必须自己把这一对张力解开，不能指望
+        // 每个 CLI 都记得写 blocked 规则。
+        let screen = "Run rm -rf /tmp/x ?\n  Do you want to proceed?\n  1. Yes\n  2. No\n\
+                      esc to cancel · enter to confirm";
+        for agent in ["grok", "pi", "cline", "kilo"] {
+            let found =
+                detect(agent, screen).unwrap_or_else(|| panic!("{agent} produced no detection"));
+            assert_eq!(found.status, AgentStatus::Blocked, "{agent} rule={}", found.rule_id);
+        }
     }
 }

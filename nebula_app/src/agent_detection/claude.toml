@@ -27,16 +27,21 @@ any = [
   { contains = ["[y/n]"] },
 ]
 
+# 回合进行中的唯一可靠证据是底栏的「esc to interrupt」：Claude Code 只在
+# 真正可中断（即回合未结束）时打印它，回合一结束整行消失。
+#
+# 2026-08-22：这条规则此前要求「盲文点阵 spinner 行」AND「esc to interrupt」
+# ——Gate 是 AND 语义（ai_agents.rs:528），而 Claude Code 的动画符号是
+# ·✢✳✶✻✽ 而非盲文点阵，第一个条件恒假，整条规则从未命中过。于是运行中的
+# 屏幕只剩 prompt_idle 命中，连续两拍把 Working 降级成 Done，侧栏在 Claude
+# 正干活时显示「完成」蓝点。动画符号本身不能当证据：回合结束的总结行
+# 「✳ Baked for 14m 41s」用的是同一组符号。
 [[rules]]
 id = "spinner_working"
 state = "working"
 priority = 400
-region = "bottom_non_empty_lines(6)"
-line_regex = ['^[\s]*[\x{2801}-\x{28FF}]\s+\S']
-any = [
-  { contains = ["esc to interrupt"] },
-  { contains = ["esc to cancel"] },
-]
+region = "bottom_non_empty_lines(8)"
+contains = ["esc to interrupt"]
 
 [[rules]]
 id = "prompt_idle"
@@ -47,4 +52,8 @@ line_regex = ['^\s*❯(?:\s|$)']
 not = [
   { contains = ["esc to cancel"] },
   { contains = ["enter to select"] },
+  # 输入框在回合进行中同样可见（Claude Code 允许排队输入），所以「看见 ❯」
+  # 本身不等于空闲。底栏离输入框足够近时这条 not 直接兜住；离得远时由
+  # spinner_working 的更高优先级取胜。
+  { contains = ["esc to interrupt"] },
 ]

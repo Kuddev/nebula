@@ -139,10 +139,38 @@ impl NebulaWorkspace {
     }
 
     pub(super) fn active_terminal_area(&self) -> Option<nebula_split::Rect> {
-        let Some(WorkspaceTab::Terminal { panes, .. }) = self.tabs.get(self.active) else {
+        let Some(WorkspaceTab::Terminal { panes, tree, focused, zoomed }) =
+            self.tabs.get(self.active)
+        else {
             return None;
         };
+        if !*zoomed && !tree.is_leaf() {
+            // 旧壳始终用当前 Tab 的完整终端视口做 dock 命中。分屏以后直接
+            // 取递归布局的根节点，不能再靠多个 Pane 的边界间接拼接；否则
+            // 第一次合并后几何源发生变化，后续 Tab 就无法稳定继续并入。
+            if let Some(b) = self.split_bounds.borrow().get(&(self.active, Vec::new())).copied() {
+                let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+                if w > 0.0 && h > 0.0 {
+                    return Some(nebula_split::Rect::new(
+                        f32::from(b.origin.x),
+                        f32::from(b.origin.y),
+                        w,
+                        h,
+                    ));
+                }
+            }
+        }
         let bounds = self.pane_bounds.borrow();
+        if *zoomed || tree.is_leaf() {
+            // 缩放态只认屏幕上实际可见的 Pane；其余 Pane 的上一帧边界可能
+            // 仍在缓存里，不能把 dock 命中区扩到当前终端之外。
+            let pane = panes.iter().find(|pane| pane.id == *focused).or_else(|| panes.first())?;
+            let b = bounds.get(&pane.id)?;
+            let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+            return (w > 0.0 && h > 0.0).then(|| {
+                nebula_split::Rect::new(f32::from(b.origin.x), f32::from(b.origin.y), w, h)
+            });
+        }
         let mut acc: Option<(f32, f32, f32, f32)> = None;
         for pane in panes {
             let Some(b) = bounds.get(&pane.id) else { continue };

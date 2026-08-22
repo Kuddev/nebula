@@ -1058,7 +1058,7 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
                             if h > 0.0 { h.max(super::HOSTS_BAND_MIN) } else { 0.0 };
                     }
                 },
-                Some(("blur", v)) => settings.blur = parse_bool(v, true),
+                Some(("blur", v)) => settings.blur = parse_blur_enabled(v),
                 Some(("opacity", v)) => {
                     if let Ok(opacity) = v.trim().parse::<f32>() {
                         settings.opacity = opacity.clamp(0.0, 1.0);
@@ -1149,6 +1149,21 @@ fn parse_bool(value: &str, default: bool) -> bool {
         "1" | "true" | "yes" | "on" => true,
         "0" | "false" | "no" | "off" => false,
         _ => default,
+    }
+}
+
+/// `blur` 键与 GPUI 壳共用，但那边是三档枚举（`nebula_settings::BlurModeName`：
+/// none / mica / acrylic），这边只有开关。
+///
+/// 不能直接套 [`parse_bool`]：它对认不出的值回落到 `default`，而这里的
+/// default 是 `true`——于是 GPUI 写下的 `blur=none` 会被旧壳读成"开"，用户
+/// 关掉的模糊一开旧壳就自己回来了。这里显式认三个枚举名，档位信息丢掉但
+/// 开关语义保住。
+fn parse_blur_enabled(value: &str) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => false,
+        "mica" | "acrylic" => true,
+        other => parse_bool(other, true),
     }
 }
 
@@ -1274,7 +1289,10 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
             settings.restore_session as u8,
             settings.resume_ai as u8,
             settings.tray as u8,
-            settings.blur as u8,
+            // 与 GPUI 壳共用 `blur` 键，写回枚举名而不是 0/1：写 0/1 会让那边
+            // 把它当成旧布尔值走迁移分支，用户显式选的 acrylic 每次经旧壳存盘
+            // 都会掉档。旧壳自己只有开关，开启一律落到性能安全的 mica。
+            if settings.blur { "mica" } else { "none" },
             settings.opacity,
             settings.background_image_opacity,
             settings.background_image_fit.settings_value(),

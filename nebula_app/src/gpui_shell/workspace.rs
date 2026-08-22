@@ -3702,12 +3702,23 @@ impl NebulaWorkspace {
             return div().into_any_element();
         };
         if *zoomed || tree.is_leaf() {
-            let view = panes
-                .iter()
-                .find(|pane| pane.id == *focused)
-                .or_else(|| panes.first())
-                .map(|pane| pane.view.clone());
-            return div().size_full().children(view).into_any_element();
+            let pane = panes.iter().find(|pane| pane.id == *focused).or_else(|| panes.first());
+            let view = pane.map(|pane| pane.view.clone());
+            let probe = pane.map(|pane| {
+                let pane_id = pane.id;
+                let store = self.pane_bounds.clone();
+                // 普通单 Pane 也必须记录窗口坐标；dock 命中与旧壳一样依赖
+                // 当前终端区域，不能只在进入分屏递归后才得到边界。
+                gpui::canvas(
+                    move |bounds, _, _| {
+                        store.borrow_mut().insert(pane_id, bounds);
+                    },
+                    |_, _, _, _| (),
+                )
+                .absolute()
+                .inset_0()
+            });
+            return div().size_full().relative().children(probe).children(view).into_any_element();
         }
         let mut path = Vec::new();
         self.render_split_node(tab_ix, tree, &mut path, panes, *focused, cx)
@@ -4133,11 +4144,18 @@ impl Render for NebulaWorkspace {
                 this.open_ai_session_palette(window, cx);
             }))
             .child(
-                // 壁纸"铺满整窗"底层（chrome 之下）：卡外区域由这层负责，
-                // 卡内切片由终端元素在卡底色之上重画（旧壳同一层模型）。
+                // 最底层壁纸（chrome 之下）：卡外区域由这层负责，卡内切片由
+                // 终端元素在卡底色之上重画（旧壳同一层模型）。Mica 的自绘
+                // tint + 噪点增强层暂时停用，保留在下面的注释调用与
+                // wallpaper.rs 实现中，待实机重新调参。
                 gpui::canvas(
                     |_, _, _| (),
                     |bounds, _, window, cx| {
+                        // 暂停 Mica 自绘增强层：当前 tint + 噪点会盖住系统 Mica
+                        // 自身的壁纸材质，尤其在 opacity=0 时仍留下约 13% 遮罩，
+                        // 反而削弱背景层次。实现完整保留在 wallpaper.rs，等后续
+                        // 基于实机截图重新调参后再恢复调用。
+                        // crate::gpui_shell::wallpaper::paint_glass_overlay(bounds, window, cx);
                         crate::gpui_shell::wallpaper::paint_wallpaper_under_chrome(
                             bounds, window, cx,
                         );
@@ -4331,9 +4349,11 @@ impl Render for NebulaWorkspace {
                         .w(px(w))
                         .h(px(h))
                         .rounded(crate::gpui_shell::theme::card_radius())
-                        .border_2()
-                        .border_color(cx.theme().primary)
-                        .bg(cx.theme().primary.opacity(0.15)),
+                        // 旧壳是低透明青色水洗，不是高饱和实线框；描边只
+                        // 提示落区边界，不能盖过终端内容成为视觉主体。
+                        .border_1()
+                        .border_color(cx.theme().primary.opacity(0.28))
+                        .bg(cx.theme().primary.opacity(0.08)),
                 )
             })
             .when(self.tab_drag.as_ref().is_some_and(|d| d.active), |root| {
