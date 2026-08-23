@@ -569,13 +569,13 @@ impl SettingsPane {
             window,
             cx,
         );
-        // 模糊三档的标签带上取舍提示：三者不是质量递进，而是三套成本模型
-        // （见 `nebula_settings::BlurModeName`）。用户按性能预算选，不是按
-        // "越靠后越好"选。
+        // 四档按 DWM 每帧成本排列，不是质量递进；用户按性能预算选择。
+        // Aero 是实时玻璃，Acrylic 是实时材质模糊；两者都会采样窗口后方真实内容。
+        // Mica 使用系统壁纸 backdrop，不由 Nebula 读取或重采样。
         add_select(
             "blur",
-            &["无", "平衡（Mica）", "高质量（Acrylic）"],
-            &["none", "mica", "acrylic"],
+            &["无", "Mica（低开销）", "Aero（玻璃）", "Acrylic（高开销）"],
+            &["none", "mica", "aero", "acrylic"],
             runtime.blur.settings_value(),
             window,
             cx,

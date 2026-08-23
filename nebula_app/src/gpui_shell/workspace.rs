@@ -4144,18 +4144,12 @@ impl Render for NebulaWorkspace {
                 this.open_ai_session_palette(window, cx);
             }))
             .child(
-                // 最底层壁纸（chrome 之下）：卡外区域由这层负责，卡内切片由
-                // 终端元素在卡底色之上重画（旧壳同一层模型）。Mica 的自绘
-                // tint + 噪点增强层暂时停用，保留在下面的注释调用与
-                // wallpaper.rs 实现中，待实机重新调参。
+                // 用户显式配置的背景图画在 chrome 之下；系统 Mica/Aero/Acrylic
+                // 位于整个 GPUI 内容层下方，由 DWM 合成，不能在这里读取壁纸仿画。
+                // 卡外区域由这层负责，卡内切片由终端元素在卡底色之上重画。
                 gpui::canvas(
                     |_, _, _| (),
                     |bounds, _, window, cx| {
-                        // 暂停 Mica 自绘增强层：当前 tint + 噪点会盖住系统 Mica
-                        // 自身的壁纸材质，尤其在 opacity=0 时仍留下约 13% 遮罩，
-                        // 反而削弱背景层次。实现完整保留在 wallpaper.rs，等后续
-                        // 基于实机截图重新调参后再恢复调用。
-                        // crate::gpui_shell::wallpaper::paint_glass_overlay(bounds, window, cx);
                         crate::gpui_shell::wallpaper::paint_wallpaper_under_chrome(
                             bounds, window, cx,
                         );

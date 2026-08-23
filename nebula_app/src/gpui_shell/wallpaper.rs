@@ -11,6 +11,7 @@
 //! 设置来源是共享层 `nebula_settings`（新增壁纸五键），解码结果按
 //! (路径, mtime, 透明度) 缓存；[`refresh`] 在启动与设置热应用时调用。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -171,40 +172,23 @@ pub fn chrome_surface_opacity(cx: &App) -> f32 {
 
 /// 开窗参数用。GPUI 通用层在窗口创建时就会把这个值下发到平台层
 /// （`gpui::Window::new` → `platform_window.set_background_appearance`），
-/// 所以启动即模糊不需要等 [`refresh`] 补第二次。
+/// Aero/Acrylic 可在创建时直接生效；Mica 的 DWM 属性需要 HWND，因此在窗口注册后
+/// 由 [`refresh`] 紧接着写入。
 pub fn initial_background_appearance() -> WindowBackgroundAppearance {
     background_appearance(nebula_settings::RuntimeSettings::load().blur)
 }
 
 /// 模糊开关 → 窗口背景外观。**唯一落笔点**，启动与热应用共用。
 ///
-/// # 为什么不能照抄旧壳的 DWM system backdrop
+/// # 两条 Windows 原生通道为什么要分开
 ///
-/// 旧壳（winit）用 `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE,
-/// DWMSBT_TRANSIENTWINDOW)` 三行就拿到 Acrylic。同一段代码搬到 GPUI 壳上
-/// **比无效更糟**——2026-08-21 同窗对照实测（`opacity=0`、后方放高频视频画面）：
-/// 写 `DWMSBT_TRANSIENTWINDOW` 后 `HRESULT=0`、属性能读回 3，但画面变成一块
-/// **不透明浅灰色板**，后方内容整块消失（既不透明也不模糊）；改回
-/// `DWMSBT_NONE` 并只写 AccentPolicy Acrylic，同一窗口立刻恢复真模糊。
+/// Mica 按 MicaForEveryone 的公开方案使用 `DWMSBT_MAINWINDOW`，由 DWM 提供系统
+/// 壁纸 backdrop。Nebula 不读取壁纸文件，也不自行猜测多显示器排布。
 ///
-/// 根因是合成结构不同：GPUI 只要没禁用 DirectComposition 就给窗口加
-/// `WS_EX_NOREDIRECTIONBITMAP`（`gpui/src/platform/windows/window.rs`），DWM
-/// 不为它创建重定向表面，system backdrop 没有正确的挂载点。旧壳是普通重定向
-/// 窗口，才没这个问题。
-///
-/// 两条已被实测否决、不要再试的"修法"：
-/// 1. 运行时 `SetWindowLongPtrW` 清掉 `WS_EX_NOREDIRECTIONBITMAP` 再配
-///    `SWP_FRAMECHANGED`——该样式在 `CreateWindowEx` 时就被 DWM 消费，事后改
-///    不回来（实测调用后读回样式位仍然置位），窗口内容也仍走 DComp visual。
-/// 2. 用 system backdrop "替代" AccentPolicy——见上，结果是不透明色板。
-///
-/// 上游 Zed 走过同一条弯路：PR #41842 第一版把 `Blurred` 改成
-/// `DWMSBT_TRANSIENTWINDOW`，第二版又改回 `SetWindowCompositionAttribute`，
-/// 只把 Mica / MicaAlt 留给 DWM backdrop。所以这里直接用 GPUI 的
-/// [`WindowBackgroundAppearance::Blurred`]——Windows 平台层落到
-/// `ACCENT_ENABLE_ACRYLICBLURBEHIND`（且已处理 tint alpha 为 0 时 DWM 跳过
-/// 模糊的坑），macOS / Linux 各自落到原生毛玻璃。一处开关，三平台生效，
-/// 不必碰 fork 也不必自写 FFI。
+/// Aero/Acrylic 继续使用 GPUI 已验证的 AccentPolicy 通道。Aero 额外沿用
+/// MicaForEveryone 的 `DwmEnableBlurBehindWindow` + 半透明深色玻璃配方；GPUI 的
+/// DirectComposition 窗口上，`DWMSBT_TRANSIENTWINDOW` 会形成不透明灰板，不能
+/// 因为 Mica 与它同属 system backdrop 就混用；切换档位时会显式清理另一条通道。
 ///
 /// # 不透明度 100% 时看不到模糊是正交结果，不是失效
 ///
@@ -220,23 +204,32 @@ pub fn initial_background_appearance() -> WindowBackgroundAppearance {
 /// 出后方内容。`Transparent` 会额外挂 `ACCENT_ENABLE_TRANSPARENTGRADIENT`
 /// 的纯色渐变层，对我们没有收益。其他平台维持原有 `Transparent` 语义。
 ///
-/// # Mica 为什么也要 `Blurred`
+/// # 哪些档位要窗口保持可透
 ///
-/// Windows 侧这个返回值只决定 GPUI 平台层预写哪套 AccentPolicy，随后
-/// [`apply_windows_accent_policy`] 会按档位覆写。Mica 需要的是「窗口保持可
-/// 透」这件事本身——材质在窗口内容**下方**，内容不透就看不见。两档模糊在这
-/// 一点上诉求相同，所以共用 `Blurred`，差异全部落在覆写那一步。
+/// `Aero` / `Acrylic` 的材质由 DWM 画在窗口内容**下方**，内容不透就看不见，所以
+/// 要 `Blurred`——这个返回值决定 GPUI 平台层预写哪套 AccentPolicy（启动即生效，
+/// 不必等 [`refresh`] 补第二次），随后 [`apply_windows_accent_policy`] 覆写成
+/// state 3 / state 4。
+///
+/// `Mica` 使用 `Transparent`，只让 GPUI 保持预乘 alpha；真正材质由
+/// [`apply_windows_accent_policy`] 写入 `DWMSBT_MAINWINDOW`。不能使用 `Opaque`，
+/// 否则客户区像素会遮住 DWM 在窗口下方合成的系统 backdrop。
 fn background_appearance(blur: BlurModeName) -> WindowBackgroundAppearance {
-    if blur.enabled() {
-        return WindowBackgroundAppearance::Blurred;
-    }
     #[cfg(windows)]
     {
-        WindowBackgroundAppearance::Opaque
+        match blur {
+            BlurModeName::Aero | BlurModeName::Acrylic => WindowBackgroundAppearance::Blurred,
+            BlurModeName::Mica => WindowBackgroundAppearance::Transparent,
+            BlurModeName::None => WindowBackgroundAppearance::Opaque,
+        }
     }
     #[cfg(not(windows))]
     {
-        WindowBackgroundAppearance::Transparent
+        if blur.enabled() {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Transparent
+        }
     }
 }
 
@@ -244,7 +237,10 @@ fn background_appearance(blur: BlurModeName) -> WindowBackgroundAppearance {
 /// 窗口级材质是**跨进程**调用（`SetWindowCompositionAttribute` 两次 +
 /// `DwmSetWindowAttribute`）。不做门控就等于每帧和 DWM 往返三次，滑块直接
 /// 拖成幻灯片——2026-08-21 实测。档位没变时一次都不碰。
-struct AppliedBlur(BlurModeName);
+struct AppliedBlur {
+    blur: BlurModeName,
+    windows: HashSet<gpui::WindowId>,
+}
 
 impl gpui::Global for AppliedBlur {}
 
@@ -270,23 +266,32 @@ impl gpui::Global for AppliedBlur {}
 /// [`App::defer`] 把应用推到本轮 effect cycle 末尾，那时窗口已归还 slot。
 /// update 失败不再静默：留 warn，避免同一个坑第三次被当成"DWM 不生效"。
 ///
-/// # 模糊态没变就直接返回
+/// # 模糊态没变时只处理新窗口
 ///
 /// 不透明度/壁纸改动也会走到这里，但它们只影响我们自己绘制的像素，窗口级
 /// 模糊属性一个字节都不用改。透明度是滑块，一次拖拽几十上百个事件，所以这条
-/// 短路是拖拽手感的必要条件，不是可选优化。重绘由调用链上的 `cx.notify()`
-/// 与主题重建负责。
+/// 短路是拖拽手感的必要条件，不是可选优化。多窗口下则按 `WindowId` 补应用新窗，
+/// 避免全局档位相同就让第二个窗口漏掉原生 backdrop。
 fn apply_window_effects(cx: &mut App) {
     // 全局缺失时按"关"处理而不是缺省档：这条路径只在极早期或异常态走到，
     // 宁可少一层材质，也不要凭空给窗口开上模糊再被 refresh 纠正一次。
     let blur = cx.try_global::<VisualEffects>().map(|v| v.blur).unwrap_or(BlurModeName::None);
-    if cx.try_global::<AppliedBlur>().map(|applied| applied.0) == Some(blur) {
-        return;
-    }
-    cx.set_global(AppliedBlur(blur));
     let appearance = background_appearance(blur);
     cx.defer(move |cx| {
-        for handle in cx.windows() {
+        // 必须在 defer 后枚举：触发设置变更的窗口此时才重新放回 App 窗口表。
+        let handles = cx.windows();
+        let window_ids = handles.iter().map(|handle| handle.window_id()).collect::<HashSet<_>>();
+        let already_applied = cx
+            .try_global::<AppliedBlur>()
+            .filter(|applied| applied.blur == blur)
+            .map(|applied| applied.windows.clone())
+            .unwrap_or_default();
+        let pending = handles
+            .into_iter()
+            .filter(|handle| !already_applied.contains(&handle.window_id()))
+            .collect::<Vec<_>>();
+        cx.set_global(AppliedBlur { blur, windows: window_ids });
+        for handle in pending {
             if let Err(err) = handle.update(cx, |_, window, _| {
                 window.set_background_appearance(appearance);
                 #[cfg(windows)]
@@ -299,48 +304,34 @@ fn apply_window_effects(cx: &mut App) {
     });
 }
 
-/// 显式落下 Windows 材质属性：AccentPolicy 与 system backdrop 二选一。
+/// 显式落下 Windows 材质属性。
 ///
-/// # 三档各自写什么
+/// # 四档各自写什么
 ///
 /// | 档位 | AccentPolicy | SYSTEMBACKDROP | DWM 每帧成本 |
 /// |---|---|---|---|
 /// | `None` | 全零 | `DWMSBT_NONE` | 无 |
-/// | `Mica` | 全零 | `DWMSBT_MAINWINDOW` | 无（只在窗口移动时重采样壁纸） |
-/// | `Acrylic` | state 4 + 非零 alpha | `DWMSBT_NONE` | 整窗实时高斯模糊 |
+/// | `Aero` | state 3 + 玻璃色调 | `DWMSBT_NONE` | 整窗实时玻璃模糊 |
+/// | `Mica` | 全零 | `DWMSBT_MAINWINDOW` | 系统壁纸 backdrop |
+/// | `Acrylic` | state 4 + 非零 alpha | `DWMSBT_NONE` | 实时模糊 + tint/噪点/饱和 |
+///
+/// `Mica` 与 MicaForEveryone 使用同一公开 DWM 属性。Nebula 不读取
+/// `SPI_GETDESKWALLPAPER` 或 `TranscodedWallpaper`；显示器选择、壁纸排布、模糊和
+/// 色调全部交给系统合成器。Windows 不支持该属性时退回 Acrylic，避免透明空洞。
 ///
 /// 两条通道**必须互斥**：同时开 Acrylic 与 system backdrop 时 DWM 的行为未
 /// 定义（实测表现为 backdrop 赢，Acrylic 被吞）。所以每档都要把另一条显式
 /// 写回中性值，不能只写自己那条。
 ///
-/// # `DWMSBT_MAINWINDOW`(Mica) 能用，`DWMSBT_TRANSIENTWINDOW`(Acrylic 材质) 不能
-///
-/// 2026-08-21 记录过 `DWMSBT_TRANSIENTWINDOW` 在本壳上变成不透明浅灰色板，
-/// 当时归因于 GPUI 的 `WS_EX_NOREDIRECTIONBITMAP`（DComp 窗口没有重定向表面
-/// 给 system backdrop 挂载）。**2026-08-22 用户实测推翻了这个外推**：同一族的
-/// `DWMSBT_MAINWINDOW` 在本壳上工作正常，能正确显示模糊的桌面壁纸色调。
-///
-/// 也就是说那次失败是 `TRANSIENTWINDOW` 这一个值的问题，不是整个 system
-/// backdrop 家族的问题。**不要**因为看到旧注释就把 Mica 一起判死；反过来也
-/// **不要**因为 Mica 能用就再去试 `TRANSIENTWINDOW`——那一条已经实测两次。
-///
-/// # Mica 天生没有玻璃感，靠壳侧自绘补
-///
-/// Acrylic 的观感由四层构成：实时背景采样 + 高斯模糊 + 噪点纹理 + 饱和度
-/// 提升。Mica 只有前两层的廉价版（采样桌面壁纸 + 强模糊 + 色调映射），刻意
-/// 不做噪点与饱和度——它的设计目标是"低调的材质底色"而非"毛玻璃"。
-///
-/// 所以 Mica 档的玻璃感由 [`paint_glass_overlay`] 在壳侧自绘补齐：噪点纹理与
-/// tint 恰好是 Acrylic 里最便宜的两层，自己画的成本接近零，还换来完全可调。
-///
 /// `SetWindowCompositionAttribute` 未进入公开 SDK，所以和 GPUI 上游一样动态取
-/// 函数地址；backdrop 与 `DwmFlush` 则用公开 DWM API。任一步失败都留日志，
-/// 避免把 API 失败再次误判成"设置没有热应用"。
+/// 函数地址；backdrop 则用公开 DWM API。任一步失败都留日志，避免把 API 失败
+/// 再次误判成"设置没有热应用"。
 #[cfg(windows)]
 fn apply_windows_accent_policy(window: &Window, blur: BlurModeName) {
     use windows_sys::Win32::Foundation::{BOOL, HWND};
     use windows_sys::Win32::Graphics::Dwm::{
-        DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DwmSetWindowAttribute,
+        DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
+        DwmEnableBlurBehindWindow, DwmSetWindowAttribute,
     };
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -370,10 +361,29 @@ fn apply_windows_accent_policy(window: &Window, blur: BlurModeName) {
         return;
     };
     let hwnd = handle.hwnd.get() as *mut core::ffi::c_void;
+    let blur_behind = DWM_BLURBEHIND {
+        dwFlags: DWM_BB_ENABLE,
+        fEnable: i32::from(blur == BlurModeName::Aero),
+        hRgnBlur: std::ptr::null_mut(),
+        fTransitionOnMaximized: 0,
+    };
+    // MicaForEveryone 会先开启 DWM blur-behind，再写 AccentPolicy。这里对所有
+    // 档位都落一次 enable/disable，避免从 Aero 热切换后遗留玻璃层。
+    let blur_behind_result = unsafe { DwmEnableBlurBehindWindow(hwnd, &blur_behind) };
     let backdrop: i32 = match blur {
         BlurModeName::Mica => DWMSBT_MAINWINDOW,
-        BlurModeName::None | BlurModeName::Acrylic => DWMSBT_NONE,
+        BlurModeName::None | BlurModeName::Aero | BlurModeName::Acrylic => DWMSBT_NONE,
     };
+    // SAFETY: hwnd 来自当前存活的 GPUI 窗口，属性和值均为公开 DWM ABI。
+    let backdrop_result = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE as u32,
+            &backdrop as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    let system_mica_available = blur == BlurModeName::Mica && backdrop_result >= 0;
     let mut accent = match blur {
         BlurModeName::Acrylic => AccentPolicy {
             state: 4, // ACCENT_ENABLE_ACRYLICBLURBEHIND
@@ -382,9 +392,23 @@ fn apply_windows_accent_policy(window: &Window, blur: BlurModeName) {
             gradient_color: 0x0100_0000,
             animation_id: 0,
         },
-        // Mica 走 backdrop 通道，AccentPolicy 必须让位——否则 Acrylic 残留会
-        // 盖住 Mica，切档时看起来像"没生效"。
-        BlurModeName::None | BlurModeName::Mica => {
+        // Aero = MicaForEveryone 的 Win32 玻璃配方：实时 BlurBehind + 约 60%
+        // 深色玻璃色调。它与 DWMBlurGlass 注入 DWM 后构造的完整 Aero effect graph
+        // 并非同一套私有实现，但使用的是普通应用能够安全调用的对应系统接口。
+        BlurModeName::Aero => AccentPolicy {
+            state: 3, // ACCENT_ENABLE_BLURBEHIND
+            flags: 0,
+            // 与 MicaForEveryone RuleService.EnableBlurBehind 一致：A=152，RGB=2B2B2B。
+            // 之前的 0x01000000 几乎没有玻璃色调，导致 Aero 与 Acrylic 肉眼难区分。
+            gradient_color: 0x982B_2B2B,
+            animation_id: 0,
+        },
+        // 不支持系统 Mica 的 Windows 版本退回 Acrylic；成功时必须关闭 Accent，
+        // 两套 backdrop 同开会互相覆盖。
+        BlurModeName::Mica if !system_mica_available => {
+            AccentPolicy { state: 4, flags: 0, gradient_color: 0x0100_0000, animation_id: 0 }
+        },
+        BlurModeName::Mica | BlurModeName::None => {
             AccentPolicy { state: 0, flags: 0, gradient_color: 0, animation_id: 0 }
         },
     };
@@ -401,16 +425,9 @@ fn apply_windows_accent_policy(window: &Window, blur: BlurModeName) {
     // 约 8~16ms）。AccentPolicy 与 backdrop 的改动本来就在下一帧生效，配合
     // 调用方的 `window.refresh()` 已经即时；而 2026-08-21 实测，一旦这条路径
     // 被每帧走到（拖不透明度滑块），那次 flush 就把滑块拖成了幻灯片。
-    let (backdrop_result, accent_result) = unsafe {
-        let backdrop_result = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE as u32,
-            &backdrop as *const _ as *const core::ffi::c_void,
-            std::mem::size_of::<i32>() as u32,
-        );
-
+    let accent_result = unsafe {
         let user32 = GetModuleHandleA(c"user32.dll".as_ptr() as *const u8);
-        let accent_result = if user32.is_null() {
+        if user32.is_null() {
             None
         } else {
             GetProcAddress(user32, c"SetWindowCompositionAttribute".as_ptr() as *const u8).map(
@@ -420,13 +437,26 @@ fn apply_windows_accent_policy(window: &Window, blur: BlurModeName) {
                     set_attribute(hwnd, &mut data)
                 },
             )
-        };
-        (backdrop_result, accent_result)
+        }
     };
     if backdrop_result < 0 {
+        if blur == BlurModeName::Mica {
+            log::warn!(
+                "system Mica is unavailable (HRESULT=0x{:08X}); falling back to Acrylic",
+                backdrop_result as u32
+            );
+        } else {
+            log::warn!(
+                "DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE={backdrop}) failed: HRESULT=0x{:08X}",
+                backdrop_result as u32
+            );
+        }
+    }
+    if blur_behind_result < 0 {
         log::warn!(
-            "DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE={backdrop}) failed: HRESULT=0x{:08X}",
-            backdrop_result as u32
+            "DwmEnableBlurBehindWindow(enable={}) failed: HRESULT=0x{:08X}",
+            blur == BlurModeName::Aero,
+            blur_behind_result as u32
         );
     }
     match accent_result {
@@ -464,26 +494,35 @@ fn decode(
     Some((image, source, width, height))
 }
 
+// ---- 以下一组只服务已停用的 [`paint_glass_overlay`]（见其文档）。按用户要求
+// ---- 保留实现，因此统一标 `dead_code`，不要因为"没人用"就删掉。
+
 /// 噪点 tile 边长（物理像素）。越大平铺次数越少、内存越高：512 时 3K 屏约
 /// 28 次 `paint_image`，1MB 纹理——两头都便宜。
+#[allow(dead_code)]
 const NOISE_TILE_PX: u32 = 512;
 /// 噪点强度。Acrylic 自带的颗粒非常细微（目测 3~5%），高于 ~8% 会从"玻璃"
 /// 变成"脏"。
+#[allow(dead_code)]
 const NOISE_ALPHA: u8 = 14;
 /// 白色 tint 浓度。暗色主题要更厚——Mica 的壁纸色调在暗色下偏沉，正是它
 /// "不够透亮"的主因；亮色主题本就够亮，加太多会过曝。
+#[allow(dead_code)]
 const TINT_ALPHA_DARK: f32 = 0.08;
+#[allow(dead_code)]
 const TINT_ALPHA_LIGHT: f32 = 0.05;
 
 thread_local! {
     /// 噪点 tile 只依赖上面几个常量，进程内生成一次即可。用 `thread_local`
     /// 而不是 `OnceLock`：`RenderImage` 只在渲染线程用，不必为跨线程共享去
     /// 背 `Send + Sync` 的约束。
+    #[allow(dead_code)]
     static NOISE_TILE: std::cell::RefCell<Option<Arc<RenderImage>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// 生成（并缓存）噪点 tile。
+#[allow(dead_code)]
 fn noise_tile() -> Arc<RenderImage> {
     NOISE_TILE.with(|slot| {
         if let Some(tile) = slot.borrow().as_ref() {
@@ -511,24 +550,20 @@ fn noise_tile() -> Arc<RenderImage> {
     })
 }
 
-/// Mica 档的玻璃增强层：白 tint + 噪点颗粒，把 DWM 那层寡淡的壁纸色调补成
-/// 接近 Acrylic 的毛玻璃观感。整窗一层，画在 chrome 与壁纸**之下**。
+/// 【已停用，保留作参考】Mica 档的玻璃增强层：白 tint + 噪点颗粒。
 ///
-/// # 为什么这层值得自己画
+/// # 为什么停用
 ///
-/// Acrylic 的观感由四层构成：实时背景采样 + 高斯模糊 + 噪点纹理 + 亮度/
-/// 饱和度提升。前两层是 DWM 每帧的重活，也正是 2026-08-22 实测里 `dwm.exe`
-/// 均值 28% 的来源；后两层则是**纯静态叠加**——一张平铺小图加一个半透明
-/// 矩形，在我们自己的绘制层里成本接近零。
+/// 这层的前提是"系统 Mica 已经提供了壁纸模糊，我们只补噪点与 tint"。2026-08-22
+/// 实测证明前提不成立——系统 Mica 在本壳上从未生效，底下是一块纯色兜底，于是
+/// 这层只是在纯色上再刷一层雾，观感上离 Mica 更远（用户判定"明显不是 Mica"）。
 ///
-/// Mica 恰好只给前两层的廉价版（采样桌面壁纸 + 强模糊，且只在窗口移动时
-/// 更新），刻意省掉后两层。于是"拿 Mica 的成本 + 补 Acrylic 的观感"成立，
-/// 这就是 2026-08-22 用户裁定的甜品区。
+/// Mica 现在由 DWM 的系统 backdrop 完整合成，噪点与 tint 不应在客户区重复叠加，
+/// 所以这层不再有调用点。代码按用户要求保留，供其他材质实验复用。
 ///
 /// 调玻璃感只动本文件顶部那四个常量，不要改绘制顺序：tint 必须在噪点之下，
 /// 否则颗粒会被 tint 冲淡到看不见。
-///
-/// Acrylic 档不叠这层——它自带噪点与亮度提升，再叠一遍就糊了。
+#[allow(dead_code)]
 pub fn paint_glass_overlay(bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
     let Some(effects) = cx.try_global::<VisualEffects>() else { return };
     if effects.blur != BlurModeName::Mica {

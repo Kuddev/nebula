@@ -27,6 +27,8 @@ pub mod theme;
 pub mod toast;
 pub mod wallpaper;
 pub mod widgets;
+#[cfg(windows)]
+mod windows_backdrop;
 pub mod workspace;
 
 use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
@@ -92,6 +94,10 @@ pub fn run_shell() {
         }
     }
     let _runtime_server = runtime_server;
+    // GPUI 默认给 DirectComposition 主窗加 NOREDIRECTIONBITMAP；DWM 在创建时消费
+    // 该样式，事后再清已经无法给 system backdrop 补回挂载表面。
+    #[cfg(windows)]
+    let _window_creation_hook = windows_backdrop::install_main_window_creation_hook();
     gpui::Application::new().with_assets(Assets).run(move |cx| {
         // GPUI is the only event loop in `--gpui` mode, so it owns the same
         // per-process hook pipe before the first TerminalView spawns.
