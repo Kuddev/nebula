@@ -31,14 +31,11 @@ pub mod widgets;
 mod windows_backdrop;
 pub mod workspace;
 
-use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_component::{Root, TitleBar};
+use gpui::{App, AppContext as _};
 use gpui_component_assets::Assets;
 
 #[cfg(windows)]
 use std::borrow::Cow;
-
-use workspace::NebulaWorkspace;
 
 /// GPUI 壳的跨线程唤醒：托盘、mux ATTACH、runtime 控制都汇到工作区 pump。
 pub(crate) enum GpuiShellEvent {
@@ -46,14 +43,16 @@ pub(crate) enum GpuiShellEvent {
     TrayQuit,
     MuxAttach,
     RuntimeControl(std::sync::Arc<crate::runtime_api::RuntimeDispatch>),
+    UpdateAvailable(crate::update_check::UpdateCheckResult),
 }
 
 /// 在当前线程启动 GPUI 运行时并打开主窗口，阻塞直至 UI 退出。
 ///
 /// GPUI 拥有自己的消息循环：主窗形态从主线程调用（winit 不启动）；
 /// spike 形态从专用线程调用。一个进程内只允许调用一次。
-pub fn run_shell() {
+pub fn run_shell(initial_cwd: Option<std::path::PathBuf>) {
     let (shell_tx, shell_rx) = std::sync::mpsc::channel();
+    crate::update_check::spawn_gpui_once(shell_tx.clone());
     let runtime_hub = crate::runtime_api::RuntimeHub::new();
     crate::tray::init_gpui({
         let tx = shell_tx.clone();
@@ -86,7 +85,17 @@ pub fn run_shell() {
         // 与另一份进程同时启动时，对方可能已经拿到 owner lock、但尚未来得及
         // 发布 endpoint。短暂等待并交接，避免继续打开一个无控制面的空窗口。
         for _ in 0..40 {
-            if crate::runtime_api::try_open_default_tab_existing() {
+            let behavior = nebula_settings::RuntimeSettings::load().windowing_behavior;
+            let handed_over = match behavior {
+                nebula_settings::WindowingBehaviorName::UseNew => {
+                    crate::runtime_api::try_open_window_existing(initial_cwd.as_deref())
+                },
+                _ => initial_cwd.as_deref().map_or_else(
+                    crate::runtime_api::try_open_default_tab_existing,
+                    crate::runtime_api::try_open_directory_existing,
+                ),
+            };
+            if handed_over {
                 crate::tray::shutdown();
                 return;
             }
@@ -106,7 +115,7 @@ pub fn run_shell() {
         crate::ai_hook::spawn_config_guard();
         init(cx);
         cx.activate(true);
-        open_main_window(cx, ai_events, shell_rx, runtime_hub);
+        open_main_window(cx, ai_events, shell_rx, runtime_hub, initial_cwd);
     });
     crate::tray::shutdown();
 }
@@ -178,36 +187,10 @@ fn open_main_window(
     ai_events: std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>,
     shell_events: std::sync::mpsc::Receiver<GpuiShellEvent>,
     runtime_hub: crate::runtime_api::RuntimeHub,
+    initial_cwd: Option<std::path::PathBuf>,
 ) {
-    let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(760.0), px(540.0))),
-        // 自绘 TitleBar 要求系统标题栏透明化，窗口控制按钮由组件库接管。
-        titlebar: Some(TitleBar::title_bar_options()),
-        app_id: Some("nebula".to_owned()),
-        // 透明/模糊窗口必须在创建时声明，否则合成器不给 alpha 通道。
-        window_background: wallpaper::initial_background_appearance(),
-        ..Default::default()
-    };
-
-    cx.open_window(options, move |window, cx| {
-        let workspace =
-            cx.new(|cx| NebulaWorkspace::new(window, ai_events, shell_events, 1, runtime_hub, cx));
-        // 调试/验收后门：启动即打开指定文档（见 open_document_at_startup）。
-        if let Ok(path) = std::env::var("NEBULA_GPUI_OPEN_DOC")
-            && !path.is_empty()
-        {
-            workspace.update(cx, |workspace, cx| {
-                workspace.open_document_at_startup(path.into(), window, cx);
-            });
-        }
-        cx.new(|cx| Root::new(workspace, window, cx))
-    })
-    .expect("failed to open Nebula GPUI window");
-
-    // 窗口存在后补一次视效应用（DWM backdrop 等窗口级效果此前无处落）。
-    wallpaper::refresh(cx);
+    workspace::windowing::initialize(cx, runtime_hub);
+    workspace::windowing::open_initial_window(cx, ai_events, shell_events, initial_cwd);
 }
 
 /// 按 `tray` 设置挂上或摘掉系统托盘图标（旧壳 `tray::set_enabled`）。

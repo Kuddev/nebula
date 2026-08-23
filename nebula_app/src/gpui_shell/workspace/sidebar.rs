@@ -81,6 +81,10 @@ impl NebulaWorkspace {
         let title = self.tab_title(ix, cx);
         let is_settings = self.tabs[ix].is_settings();
         let is_terminal = self.tabs[ix].is_terminal();
+        let pane_count = match &self.tabs[ix] {
+            WorkspaceTab::Terminal { panes, .. } => panes.len(),
+            _ => 0,
+        };
         let (program, activity) = self.tabs[ix]
             .focused_view()
             .map(|entity| {
@@ -117,7 +121,11 @@ impl NebulaWorkspace {
                 _ => None,
             });
         let meta = self.meta(ix);
-        let shell_tag = (is_terminal && activity == SidebarActivity::Idle)
+        // 分屏 tab 不画 shell 短标：一个 tab 里的 N 个 pane 完全可能跑着不同
+        // 的 shell，只贴其中一个（聚焦那个）是误导；数量胶囊「这是一组」才是
+        // 此时该占这个槽位的信息。顺带把 28px 让回标题——顶栏挤到 120px 时，
+        // 图标+胶囊+短标三样一起上，标题只剩两三个字符。
+        let shell_tag = (is_terminal && activity == SidebarActivity::Idle && pane_count <= 1)
             .then_some(meta.shell_tag.clone())
             .flatten()
             .filter(|tag| !tag.is_empty());
@@ -135,6 +143,7 @@ impl NebulaWorkspace {
             shell_tag,
             color: meta.color,
             renaming,
+            pane_count,
         }
     }
 
@@ -199,6 +208,7 @@ impl NebulaWorkspace {
                     shell_tag,
                     color: tab_color,
                     renaming,
+                    pane_count,
                 } = self.tab_presentation(ix, cx, dark);
                 let hover_group: SharedString = format!("sidebar-tab-hover-{ix}").into();
                 // 可用列数 = （行宽 − 行内 px_2 − 行内 gap − 状态槽 − 行首图标槽）
@@ -206,15 +216,25 @@ impl NebulaWorkspace {
                 // 与行的实际宽度同源——否则算出的列数会比行能容纳的多出一格，
                 // 截断后的标题反过来把行撑开。省略号由旧壳同一份
                 // `truncate_tab_label` 追加，两壳的裁切位置因此一致。
-                let has_icon = is_settings || logo_image.is_some() || program_glyph.is_some();
+                // 行首图标槽只有一个：身份图标（设置 / AI logo / 程序字位）优先，
+                // 都没有时分屏标记才补位。三者互斥，所以扣一份宽即可。
+                let has_program_glyph = program_glyph.is_some();
+                let has_icon =
+                    is_settings || logo_image.is_some() || has_program_glyph || pane_count > 1;
                 let label_avail = row_w
                     - 16.0
                     - TAB_STATUS_SLOT_W
                     - 8.0
-                    - if has_icon { TAB_LABEL_ICON_W + 8.0 } else { 0.0 };
+                    - if has_icon { TAB_LABEL_ICON_W + 8.0 } else { 0.0 }
+                    - if pane_count > 1 {
+                        pane_header::split_badge_slot_w(label_px)
+                    } else {
+                        0.0
+                    };
                 let label_cols = (label_avail / cell_w).floor().max(1.0) as usize;
                 let title: SharedString =
                     crate::display::truncate_tab_label(&title, label_cols).into();
+                let cross_window_drag = self.cross_window_drag_payload(ix, cx);
                 // 用户明确设置过的标签色：行左侧一条竖光条（旧壳 strip，位置与
                 // 尺寸同源：左内缩 4、上下各留 7、宽 2.5）。默认标签不占这层
                 // 视觉层级。
@@ -351,6 +371,12 @@ impl NebulaWorkspace {
                             .bg(color),
                     )
                 })
+                // 行首图标的优先级：**先身份、后形态**。AI 品牌图 / 程序字位
+                // 表达「这个 tab 里在跑什么」，它必须跟随聚焦 pane（旧壳与
+                // Netcatty 同行为）；2×2 分屏标记只在没有身份可显示时补位。
+                // 反过来（分屏就一律画 grid）会让 claude 分屏之后标签上再也
+                // 看不出跑着 claude——用户 08-23 报的「侧边 tab 不跟随激活
+                // tab 变化」就是这个。数量由尾部胶囊表达，不必和图标抢槽位。
                 .when(is_settings, |row| {
                     row.child(
                         div().w(px(TAB_LABEL_ICON_W)).flex_shrink_0().flex().justify_center().child(
@@ -360,7 +386,7 @@ impl NebulaWorkspace {
                         ),
                     )
                 })
-                .when_some(logo_image, |row, image| {
+                .when_some(logo_image.clone(), |row, image| {
                     row.child(
                         img(image)
                             .size(px(TAB_LABEL_ICON_SIZE))
@@ -380,6 +406,23 @@ impl NebulaWorkspace {
                             .child(glyph),
                     )
                 })
+                .when(
+                    pane_count > 1 && !is_settings && logo_image.is_none() && !has_program_glyph,
+                    |row| {
+                        row.child(
+                            div()
+                                .w(px(TAB_LABEL_ICON_W))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(pane_header::split_glyph(
+                                    label_px * 0.78,
+                                    if active { active_fg } else { muted },
+                                )),
+                        )
+                    },
+                )
                 // 标签走终端字体 + 终端字号（旧壳 chrome 同源）。文本已按列
                 // 截断，这里只需要不换行；再叠一层 `truncate()` 会把省略号
                 // 自己裁掉（用户报的"直接截断"）。重命名中的那一行原地换成
@@ -417,6 +460,24 @@ impl NebulaWorkspace {
                         .overflow_hidden()
                         .child(title)
                         .into_any_element(),
+                })
+                .when(pane_count > 1, |row| {
+                    row.child(
+                        div()
+                            .id(("sidebar-pane-count", ix))
+                            .flex_shrink_0()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.cycle_pane_focus(ix, window, cx);
+                            }))
+                            .child(pane_header::split_badge(
+                                pane_count,
+                                label_px,
+                                if active { active_fg } else { muted },
+                                if active { active_bg } else { theme.muted },
+                            )),
+                    )
                 })
                 .child(
                     div()
@@ -466,7 +527,12 @@ impl NebulaWorkspace {
                         cx.stop_propagation();
                         this.open_tab_context_menu(ix, event.position, window, cx);
                     }),
-                );
+                )
+                .when_some(cross_window_drag, |row, payload| {
+                    row.on_drag(payload, |payload, _, _, cx| {
+                        NebulaWorkspace::cross_window_drag_preview(payload, cx)
+                    })
+                });
                 if dragged {
                     // 骑指针 + 提到最上层画（deferred 只延后绘制、不动布局），
                     // 阴影给"拿起来"的抬升感。

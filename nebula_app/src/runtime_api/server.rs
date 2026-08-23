@@ -67,6 +67,20 @@ pub fn try_open_directory_existing(dir: &std::path::Path) -> bool {
     try_open_tab_existing(Some(dir))
 }
 
+/// 按“创建新窗口”策略把一次普通启动交给驻留进程。
+///
+/// 仍先发送 ATTACH，保证隐藏驻留进程被唤醒；真正的窗口由同一 GPUI App
+/// 创建，避免第二个进程争抢 runtime.port 和托盘所有权。
+pub fn try_open_window_existing(dir: Option<&std::path::Path>) -> bool {
+    if legacy_request("ATTACH").is_none() {
+        return false;
+    }
+    let params = dir.map_or_else(|| json!({}), |dir| json!({ "cwd": dir }));
+    cli::request_once("window.create", params, IO_TIMEOUT)
+        .map(|response| response.ok)
+        .unwrap_or(false)
+}
+
 fn try_open_tab_existing(dir: Option<&std::path::Path>) -> bool {
     if legacy_request("ATTACH").is_none() {
         return false;

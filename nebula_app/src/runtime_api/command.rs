@@ -109,7 +109,7 @@ pub(super) struct WaitParams {
     pub(super) after_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum RuntimeWaitState {
     Idle,
@@ -141,7 +141,10 @@ impl RuntimeCommand {
     pub(super) fn from_request(request: &ApiRequest) -> Result<Self, ApiError> {
         match request.method.as_str() {
             "runtime.snapshot" => Ok(Self::Snapshot),
-            "window.create" => Ok(Self::NewWindow),
+            "window.create" => {
+                let params: WindowParams = parse_params(&request.params)?;
+                Ok(Self::NewWindow { cwd: params.cwd })
+            },
             "window.focus" => {
                 let params: TargetParams = parse_params(&request.params)?;
                 Ok(Self::Focus { window_id: params.window_id, pane_id: params.pane_id })

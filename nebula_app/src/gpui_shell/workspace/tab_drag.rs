@@ -3,7 +3,7 @@
 //! 左侧栏和顶部栏共享同一套存储顺序与 dock 语义；差别只有列表轴和每格
 //! 步距，因此拖拽状态捕获这两个量，而不是复制两套状态机。
 
-use gpui::{Context, MouseButton, Pixels, Point, Window};
+use gpui::{Context, MouseButton, Pixels, Point, Window, px};
 use nebula_split::{SplitNav, SplitTree};
 
 use super::{NebulaWorkspace, TAB_DRAG_THRESHOLD, WorkspaceTab, dock_tree};
@@ -68,6 +68,19 @@ impl NebulaWorkspace {
         }
         self.update_tab_drag_position(f32::from(position.x), f32::from(position.y), cx);
         let active = self.tab_drag.as_ref().is_some_and(|drag| drag.active);
+        let viewport = window.viewport_size();
+        let outside = position.x < px(0.0)
+            || position.y < px(0.0)
+            || position.x > viewport.width
+            || position.y > viewport.height;
+        if active && outside {
+            let source = self.tab_drag.take().map(|drag| drag.source);
+            if let Some(source) = source {
+                self.schedule_move_tab_to_new_window(source, cx);
+                cx.notify();
+                return true;
+            }
+        }
         self.release_tab_drag(window, cx);
         active
     }
@@ -92,6 +105,13 @@ impl NebulaWorkspace {
             return;
         }
         self.update_tab_drag_position(f32::from(event.position.x), f32::from(event.position.y), cx);
+        // 拖到 tab 视口边缘就自动滚（仅顶栏模式且真的溢出时生效）。放在位移
+        // 换算之后：让位槽位仍按存储顺序算，滚动只改可视窗口。
+        if self.tab_drag.as_ref().is_some_and(|drag| {
+            drag.active && drag.axis == TabDragAxis::Horizontal
+        }) {
+            self.autoscroll_top_tabs_for_drag(f32::from(event.position.x), window, cx);
+        }
     }
 
     fn update_tab_drag_position(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
@@ -139,7 +159,7 @@ impl NebulaWorkspace {
     }
 
     pub(super) fn active_terminal_area(&self) -> Option<nebula_split::Rect> {
-        let Some(WorkspaceTab::Terminal { panes, tree, focused, zoomed }) =
+        let Some(WorkspaceTab::Terminal { panes, tree, focused, zoomed, .. }) =
             self.tabs.get(self.active)
         else {
             return None;
@@ -185,7 +205,7 @@ impl NebulaWorkspace {
         (x1 > x0 && y1 > y0).then(|| nebula_split::Rect::new(x0, y0, x1 - x0, y1 - y0))
     }
 
-    fn dock_nav_at(&self, x: f32, y: f32) -> Option<SplitNav> {
+    pub(crate) fn dock_nav_at(&self, x: f32, y: f32) -> Option<SplitNav> {
         let area = self.active_terminal_area()?;
         if !area.contains(x, y) {
             return None;
@@ -227,7 +247,7 @@ impl NebulaWorkspace {
         if source < self.active {
             self.active -= 1;
         }
-        let Some(WorkspaceTab::Terminal { panes, tree, focused, zoomed }) =
+        let Some(WorkspaceTab::Terminal { panes, tree, focused, zoomed, broadcast, .. }) =
             self.tabs.get_mut(self.active)
         else {
             unreachable!("dock_allowed 已保证 active 是 Terminal");
@@ -237,6 +257,9 @@ impl NebulaWorkspace {
         panes.extend(src_panes);
         *focused = src_focused;
         *zoomed = false;
+        // 两个原本独立的 tab 合并后，旧广播范围已经失真；显式关闭，避免
+        // 用户下一次击键意外扩散到刚并入的 pane。
+        *broadcast = false;
         self.focus_active(window, cx);
         cx.notify();
     }

@@ -40,17 +40,20 @@ use crate::gpui_shell::settings_pane::{SettingsPane, SettingsPaneEvent};
 use crate::gpui_shell::terminal::view::{SidebarActivity, TerminalView, TerminalViewEvent};
 use gpui_component::Root;
 use gpui_component::input::InputEvent;
+use gpui_component::notification::Notification;
 use nebula_split::{DIVIDER_GAP, HIT_SLOP, RemoveOutcome, SplitDirection, SplitNav, SplitTree};
 
 mod agents;
 mod file_tree;
 mod key_actions;
+mod pane_header;
 mod residency;
 mod sidebar;
 mod tab_drag;
 mod tab_menu;
 mod tab_scroll;
 mod top_tabs;
+pub(crate) mod windowing;
 
 use tab_drag::{TabDrag, TabDragAxis};
 
@@ -62,6 +65,7 @@ gpui::actions!(
     nebula_workspace,
     [
         NewTerminal,
+        NewWindow,
         CloseActiveTerminal,
         ToggleSidebar,
         OpenSettings,
@@ -82,6 +86,8 @@ gpui::actions!(
         FocusPaneDown,
         SelectNextTab,
         SelectPreviousTab,
+        MoveTabLeft,
+        MoveTabRight,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
@@ -100,6 +106,7 @@ const PALETTE_KEY_CONTEXT: &str = "NebulaCommandPalette";
 /// 注入时要排除：gpui 的 NoAction 打在静态默认键上会误杀基础功能。
 const STATIC_DEFAULT_COMBOS: &[&str] = &[
     "ctrl-shift-t",
+    "ctrl-shift-e",
     "ctrl-shift-w",
     "ctrl-shift-b",
     "ctrl-,",
@@ -117,6 +124,8 @@ const STATIC_DEFAULT_COMBOS: &[&str] = &[
     "ctrl-alt-down",
     "ctrl-tab",
     "ctrl-shift-tab",
+    "ctrl-shift-pageup",
+    "ctrl-shift-pagedown",
     "ctrl-shift-g",
     "ctrl-=",
     "ctrl-+",
@@ -130,9 +139,8 @@ const STATIC_DEFAULT_COMBOS: &[&str] = &[
 ];
 
 /// `keybind=` 自定义表（两壳共读）中 config::Action → GPUI 工作区动作的
-/// 映射。仍跳过未接线的动作（prompt 跳转、搜索、新建窗口）：编辑器可读写，
-/// 这里不注入。`CreateNewWindow` 旧壳是同进程 `CreateWindow`，不是再 spawn
-/// 一份 `nebula --gpui`；GPUI `run_shell` 单窗（一份 AI hook + 会话保存）。
+/// 映射。仍跳过未接线的动作（prompt 跳转、搜索）：编辑器可读写，这里不
+/// 注入。`CreateNewWindow` 复用同一个 GPUI App 和进程级 hook/runtime。
 fn custom_workspace_binding(combo: &str, action: &crate::config::Action) -> Option<KeyBinding> {
     use crate::config::Action;
     let combo = gpui_binding_combo(combo);
@@ -140,6 +148,7 @@ fn custom_workspace_binding(combo: &str, action: &crate::config::Action) -> Opti
         Action::ToggleCommandPalette => Some(KeyBinding::new(&combo, ToggleCommandPalette, None)),
         Action::ToggleShellPicker => Some(KeyBinding::new(&combo, ToggleShellPicker, None)),
         Action::CreateNewTab => Some(KeyBinding::new(&combo, NewTerminal, None)),
+        Action::CreateNewWindow => Some(KeyBinding::new(&combo, NewWindow, None)),
         Action::CloseTab => Some(KeyBinding::new(&combo, CloseActiveTerminal, None)),
         Action::ToggleFilesPanel => Some(KeyBinding::new(&combo, ToggleFileTree, None)),
         Action::ToggleGitPanel => Some(KeyBinding::new(&combo, ToggleGitPanel, None)),
@@ -183,6 +192,7 @@ fn gpui_binding_combo(combo: &str) -> String {
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-shift-t", NewTerminal, None),
+        KeyBinding::new("ctrl-shift-e", NewWindow, None),
         KeyBinding::new("ctrl-shift-w", CloseActiveTerminal, None),
         KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
@@ -205,6 +215,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-alt-down", FocusPaneDown, None),
         KeyBinding::new("ctrl-tab", SelectNextTab, None),
         KeyBinding::new("ctrl-shift-tab", SelectPreviousTab, None),
+        // 标签位置左右移动（WT 的 moveTab forward/backward；键位取 VS Code
+        // 的「移动编辑器」同构）。我们自己的回滚翻页只吃**不带 ctrl** 的
+        // shift+pageup（view.rs 的滚动分支），两者不冲突。
+        KeyBinding::new("ctrl-shift-pageup", MoveTabLeft, None),
+        KeyBinding::new("ctrl-shift-pagedown", MoveTabRight, None),
         KeyBinding::new("ctrl-shift-g", ToggleGitPanel, None),
         KeyBinding::new("ctrl-=", IncreaseFontSize, None),
         KeyBinding::new("ctrl-+", IncreaseFontSize, None),
@@ -237,6 +252,10 @@ enum WorkspaceTab {
         /// 缩放：聚焦 pane 临时满卡（ctrl+shift+enter，旧壳 ToggleZoom）；
         /// 任何结构性操作（split/close/导航/点击别的 pane）都先解除。
         zoomed: bool,
+        /// 广播输入：开启后聚焦 pane 的击键/文本同步到本 tab 其余 pane。
+        /// 只活在内存里——绝不写进 session 快照，重启不该带回一个看不见的
+        /// 「打一个字进四个 shell」模式。收敛到单 pane 时自动关。
+        broadcast: bool,
     },
     Settings {
         view: Entity<SettingsPane>,
@@ -488,6 +507,179 @@ fn workspace_ui_language() -> crate::display::UiLanguage {
     .resolved()
 }
 
+/// Netcatty 式轻提示：自动检查只在右下角短暂出现，不抢终端焦点；用户明确
+/// 点击“查看更新”后才进入带延迟选择的详情弹窗。
+pub(crate) fn show_update_notification(
+    result: crate::update_check::UpdateCheckResult,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let language = workspace_ui_language();
+    let title: SharedString = language.pick("发现新版本", "Update available").into();
+    let message: SharedString = match language {
+        crate::display::UiLanguage::ZhCn => {
+            format!("Nebula v{} 已发布（当前 v{}）", result.latest, result.current)
+        },
+        crate::display::UiLanguage::EnUs => {
+            format!("Nebula v{} is available (current v{})", result.latest, result.current)
+        },
+    }
+    .into();
+    let action_label: SharedString = language.pick("查看更新", "View update").into();
+    let action_result = result.clone();
+    let notification = Notification::warning(message)
+        .title(title)
+        .w_auto()
+        .min_w(px(300.0))
+        .max_w(px(440.0))
+        .action(move |_, _, cx| {
+            let result = action_result.clone();
+            Button::new("view-nebula-update").label(action_label.clone()).primary().on_click(
+                cx.listener(move |notification, _, window, cx| {
+                    notification.dismiss(window, cx);
+                    open_update_dialog(result.clone(), window, cx);
+                }),
+            )
+        });
+    log::info!(
+        "update-check: showing update notification for v{} (current v{})",
+        result.latest,
+        result.current
+    );
+    crate::gpui_shell::toast::push_notification(window, cx, notification);
+}
+
+/// TTY7 式延迟决策：关闭/Esc 与“3 天后提醒”同义；跳过只绑定当前版本，
+/// 手动检查仍可强制打开本弹窗查看详情。
+pub(crate) fn open_update_dialog(
+    result: crate::update_check::UpdateCheckResult,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Err(error) = crate::update_check::mark_prompted(&result.latest) {
+        log::warn!("update-check: failed to record prompt: {error}");
+    }
+
+    let language = workspace_ui_language();
+    let title: SharedString = language.pick("Nebula 更新", "Nebula Update").into();
+    let current_label: SharedString = language.pick("当前版本", "Current").into();
+    let latest_label: SharedString = language.pick("最新版本", "Latest").into();
+    let current_version: SharedString = format!("v{}", result.current).into();
+    let latest_version: SharedString = format!("v{}", result.latest).into();
+    let hint: SharedString = language
+        .pick(
+            "Nebula 目前不会在后台替换程序文件。打开 GitHub Releases 后，请下载适合当前平台的安装包。",
+            "Nebula does not replace application files in the background. Open GitHub Releases to download the build for this platform.",
+        )
+        .into();
+    let open_text: SharedString = language.pick("打开发布页", "Open Releases").into();
+    let later_text: SharedString = language.pick("3 天后提醒", "Remind me in 3 days").into();
+    let skip_text: SharedString = language.pick("跳过此版本", "Skip this version").into();
+    let save_failed_prefix =
+        language.pick("无法保存更新提醒设置", "Could not save update preference");
+    let error_separator = language.pick("：", ": ");
+    let muted = cx.theme().muted_foreground;
+    let latest_color = cx.theme().warning;
+    let version_background = cx.theme().muted;
+
+    let skip_version = result.latest.clone();
+    let remind_version = result.latest;
+    window.open_dialog(cx, move |dialog, window, _cx| {
+        let footer_skip_version = skip_version.clone();
+        let footer_skip_text = skip_text.clone();
+        let cancel_version = remind_version.clone();
+        let footer_save_failed_prefix = save_failed_prefix.to_owned();
+        let cancel_save_failed_prefix = save_failed_prefix.to_owned();
+        let footer_error_separator = error_separator.to_owned();
+        let cancel_error_separator = error_separator.to_owned();
+        let body = v_flex()
+            .gap_4()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .px_3()
+                    .py_3()
+                    .rounded_md()
+                    .bg(version_background)
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().text_xs().text_color(muted).child(current_label.clone()))
+                            .child(div().font_semibold().child(current_version.clone())),
+                    )
+                    .child(Icon::new(IconName::ArrowRight).small().text_color(muted))
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().text_xs().text_color(muted).child(latest_label.clone()))
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .text_color(latest_color)
+                                    .child(latest_version.clone()),
+                            ),
+                    ),
+            )
+            .child(
+                div().text_sm().line_height(relative(1.55)).text_color(muted).child(hint.clone()),
+            );
+        center_confirm_dialog(dialog, window)
+            .title(title.clone())
+            .confirm()
+            .footer(move |ok, cancel, window, cx| {
+                let version = footer_skip_version.clone();
+                let save_failed_prefix = footer_save_failed_prefix.clone();
+                let error_separator = footer_error_separator.clone();
+                vec![
+                    Button::new("skip-nebula-update")
+                        .label(footer_skip_text.clone())
+                        .ghost()
+                        .on_click(move |_, window, cx| {
+                            if let Err(error) = crate::update_check::skip_version(&version) {
+                                crate::gpui_shell::toast::toast(
+                                    window,
+                                    cx,
+                                    crate::display::ToastKind::Warning,
+                                    format!("{save_failed_prefix}{error_separator}{error}"),
+                                );
+                            }
+                            window.close_dialog(cx);
+                        })
+                        .into_any_element(),
+                    div().flex_1().into_any_element(),
+                    cancel(window, cx),
+                    ok(window, cx),
+                ]
+            })
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_text(open_text.clone())
+                    .cancel_text(later_text.clone()),
+            )
+            .child(body)
+            .on_ok(|_, _, cx| {
+                cx.open_url(crate::update_check::RELEASES_PAGE);
+                true
+            })
+            .on_cancel(move |_, window, cx| {
+                if let Err(error) = crate::update_check::remind_later(&cancel_version) {
+                    crate::gpui_shell::toast::toast(
+                        window,
+                        cx,
+                        crate::display::ToastKind::Warning,
+                        format!("{cancel_save_failed_prefix}{cancel_error_separator}{error}"),
+                    );
+                }
+                true
+            })
+    });
+}
+
 fn new_tab_insert_index(
     position: nebula_settings::NewTabPositionName,
     active: usize,
@@ -623,6 +815,9 @@ struct TabPresentation {
     shell_tag: Option<SharedString>,
     color: Option<Rgb>,
     renaming: Option<Entity<InputState>>,
+    /// 本 tab 的分屏数（Terminal tab 才 > 0）。`> 1` 时行首图标换成 2×2 分屏
+    /// 标记、行尾挂一枚数量胶囊；见 [`pane_header::split_badge`]。
+    pane_count: usize,
 }
 
 /// 旧壳 `TabRequest::CommitRename`（`window_context.rs` ~871-880）：
@@ -674,6 +869,11 @@ pub struct NebulaWorkspace {
     initial_grid: (u16, u16),
     /// 进行中的 tab 拖拽（含未过阈值的待命态）；见 [`TabDrag`]。
     tab_drag: Option<TabDrag>,
+    /// 进行中的 pane 拖拽（把分屏里的一个 pane 拉出来成独立 tab）；
+    /// 见 [`pane_header::PaneDrag`]。
+    pane_drag: Option<pane_header::PaneDrag>,
+    /// 其它窗口的标签悬停在本窗口终端区时的跨窗 dock 预览。
+    cross_window_dock: Option<SplitNav>,
     /// 进行中的分隔条拖拽；预览比例写进树节点，松手提交（吸附整格）。
     split_drag: Option<SplitDrag>,
     /// 进行中的侧栏拖宽（设置「面板拖拽调节」开启时才有入口）；宽度实时
@@ -733,7 +933,7 @@ pub struct NebulaWorkspace {
     window_hidden: bool,
     /// 开窗时记下，mux `tab.new` 需要从 pump 拿到 `&mut Window`。
     window_handle: gpui::AnyWindowHandle,
-    /// GPUI 当前只承载一个 workspace window；稳定 id 供 Runtime API 精确寻址。
+    /// 进程内稳定窗口 id，供 Runtime API、MRU 路由和跨窗迁移精确寻址。
     runtime_window_id: u64,
     /// 与 RuntimeServer 共享同一状态中心，快照、wait、subscribe 与 agents.list
     /// 必须消费同一份 revision/state_change_seq 权威。
@@ -780,10 +980,11 @@ impl NebulaWorkspace {
 
     pub fn new(
         window: &mut Window,
-        ai_events: std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>,
-        shell_events: std::sync::mpsc::Receiver<crate::gpui_shell::GpuiShellEvent>,
+        ai_events: Option<std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>>,
+        shell_events: Option<std::sync::mpsc::Receiver<crate::gpui_shell::GpuiShellEvent>>,
         runtime_window_id: u64,
         runtime_hub: crate::runtime_api::RuntimeHub,
+        startup: windowing::WorkspaceStartup,
         cx: &mut Context<Self>,
     ) -> Self {
         // 启动相关设置只取样一次：本次开窗的恢复决策不能被恢复过程中的
@@ -822,11 +1023,17 @@ impl NebulaWorkspace {
         );
         let sidebar_logo_target_px =
             (TAB_LABEL_ICON_SIZE * window.scale_factor()).round().max(1.0) as u32;
+        let process_dispatcher = shell_events.is_some();
         let mut this = Self {
             tabs: Vec::new(),
             tab_meta: Vec::new(),
             tab_rename: None,
-            next_pane_id: 1,
+            // 首窗仍从 1 起，保持既有 runtime/测试身份；后续窗口用高 32 位
+            // 分区，AI hook 只有 pane id 时也不会撞到另一窗口的同号 pane。
+            next_pane_id: runtime_window_id
+                .saturating_sub(1)
+                .saturating_mul(1u64 << 32)
+                .saturating_add(1),
             active: 0,
             sidebar_collapsed: false,
             tabs_section_collapsed: false,
@@ -845,6 +1052,8 @@ impl NebulaWorkspace {
             top_tabs_scroll: gpui::ScrollHandle::new(),
             initial_grid,
             tab_drag: None,
+            pane_drag: None,
+            cross_window_dock: None,
             split_drag: None,
             sidebar_resizing: false,
             split_bounds: Rc::new(RefCell::new(HashMap::new())),
@@ -890,17 +1099,30 @@ impl NebulaWorkspace {
                 notice,
             );
         }
-        // 会话恢复（共享 v4 schema + 崩溃断路器）：restore_session 关闭时
-        // 用短路保证不碰 session.json（不加载、隔离、标记或回放），直接落
-        // 到出厂的单终端。恢复开启但 resume_ai 关闭时仍回放布局/cwd，只不
-        // 注入 AI 接续命令。1 Hz 自动保存随后照常启动。
-        if !runtime.restore_session || !this.try_restore_session(runtime.resume_ai, window, cx) {
-            this.add_terminal(window, cx);
+        match startup {
+            windowing::WorkspaceStartup::RestoreOrDefault => {
+                // 只有首窗恢复全局 session，避免每个新窗口重复回放同一批 PTY。
+                if !runtime.restore_session
+                    || !this.try_restore_session(runtime.resume_ai, window, cx)
+                {
+                    this.add_terminal(window, cx);
+                }
+            },
+            windowing::WorkspaceStartup::NewTerminal { cwd } => {
+                this.add_terminal_at(cwd, None, window, cx);
+            },
+            windowing::WorkspaceStartup::Empty => {},
         }
-        Self::start_ai_hook_pump(ai_events, cx);
+        if let Some(ai_events) = ai_events {
+            Self::start_ai_hook_pump(ai_events, cx);
+        }
         Self::start_agent_screen_watchdog(cx);
-        Self::start_shell_event_pump(shell_events, cx);
-        this.start_session_autosave(cx);
+        if let Some(shell_events) = shell_events {
+            Self::start_shell_event_pump(shell_events, cx);
+        }
+        if process_dispatcher {
+            this.start_session_autosave(cx);
+        }
         this.apply_custom_keybinds(cx);
         let workspace = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -1183,6 +1405,7 @@ impl NebulaWorkspace {
             panes: vec![pane],
             focused,
             zoomed: false,
+            broadcast: false,
         };
         let position = nebula_settings::RuntimeSettings::load().new_tab_position;
         let at = new_tab_insert_index(position, self.active, self.tabs.len());
@@ -1228,6 +1451,7 @@ impl NebulaWorkspace {
             panes: vec![pane],
             focused,
             zoomed: false,
+            broadcast: false,
         };
         let position = nebula_settings::RuntimeSettings::load().new_tab_position;
         let at = new_tab_insert_index(position, self.active, self.tabs.len());
@@ -1342,7 +1566,7 @@ impl NebulaWorkspace {
         };
         let pane = self.new_pane(grid, launch, None, window, cx);
         let new_id = pane.id;
-        let Some(WorkspaceTab::Terminal { panes, tree, focused, zoomed }) =
+        let Some(WorkspaceTab::Terminal { panes, tree, focused, zoomed, .. }) =
             self.tabs.get_mut(active)
         else {
             // new_pane 之后 tab 结构不可能已变（同一同步调用栈），但防御住：
@@ -1389,7 +1613,13 @@ impl NebulaWorkspace {
             RemoveOutcome::NotFound => {},
             RemoveOutcome::WasRoot => self.close_tab(tab_ix, window, cx),
             RemoveOutcome::Collapsed(next_focus) => {
-                if let Some(WorkspaceTab::Terminal { panes, focused, zoomed, .. }) =
+                if let Some(WorkspaceTab::Terminal {
+                    panes,
+                    focused,
+                    zoomed,
+                    broadcast,
+                    ..
+                }) =
                     self.tabs.get_mut(tab_ix)
                 {
                     if let Some(pos) = panes.iter().position(|pane| pane.id == pane_id) {
@@ -1400,6 +1630,11 @@ impl NebulaWorkspace {
                         *focused = next_focus;
                     }
                     *zoomed = false;
+                    // 收敛到单 pane：广播没有语义了，留着开关状态只会骗人
+                    // ——标题条此时也不再绘制，用户根本没有入口关掉它。
+                    if panes.len() < 2 {
+                        *broadcast = false;
+                    }
                 }
                 self.pane_bounds.borrow_mut().remove(&pane_id);
                 if tab_ix == self.active {
@@ -1715,7 +1950,7 @@ impl NebulaWorkspace {
         let at = self.tabs.len();
         self.insert_tab_at(
             at,
-            WorkspaceTab::Terminal { panes, tree, focused, zoomed: false },
+            WorkspaceTab::Terminal { panes, tree, focused, zoomed: false, broadcast: false },
             TabMeta {
                 custom_name: tab.custom_name.clone(),
                 color: tab.color,
@@ -1730,7 +1965,7 @@ impl NebulaWorkspace {
     /// 当前工作区 → 共享 v4 快照。设置/文档/图片 tab 不进会话（旧壳同
     /// 合同）；AI 会话身份优先取 hook 直报的精确 id，退而取可解析的前台
     /// 程序名（claude 无 id 恢复成 `--continue`，安全判定在 schema 层）。
-    fn snapshot_session(&self, cx: &App) -> crate::session::Session {
+    pub(crate) fn snapshot_session(&self, cx: &App) -> crate::session::Session {
         use crate::session::{AgentSession, LaunchSession, Session, TabSession};
 
         let mut tabs = Vec::new();
@@ -1798,17 +2033,10 @@ impl NebulaWorkspace {
     /// 快照 `boot_attempts` 恒为 0，即旧壳「活过第一秒就解除断路器」。
     fn start_session_autosave(&self, cx: &mut Context<Self>) {
         let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |_this, cx| {
             loop {
                 executor.timer(Duration::from_millis(1000)).await;
-                let alive = this.update(cx, |workspace, cx| {
-                    let snapshot = workspace.snapshot_session(cx);
-                    if workspace.last_saved_session.as_ref() != Some(&snapshot) {
-                        crate::session::save(&snapshot);
-                        workspace.last_saved_session = Some(snapshot);
-                    }
-                });
-                if alive.is_err() {
+                if cx.update(crate::gpui_shell::workspace::windowing::autosave_tick).is_err() {
                     return;
                 }
             }
@@ -2003,6 +2231,12 @@ impl NebulaWorkspace {
                     cx.notify();
                 }
             },
+            // 视图无条件上报用户输入，宿主在事件发生时检查广播开关并扇出。
+            TerminalViewEvent::UserInput(input) => {
+                if let Some((_, pane_id)) = self.locate_pane(view.entity_id()) {
+                    self.fan_out_broadcast(pane_id, input, cx);
+                }
+            },
         }
     }
 
@@ -2046,7 +2280,7 @@ impl NebulaWorkspace {
             let mut empty = crate::session::Session::new(0, Vec::new());
             crate::session::save_final(&mut empty);
             self.last_saved_session = None;
-            cx.quit();
+            windowing::close_empty_workspace_window(self.runtime_window_id, window, cx);
             return;
         }
         if ix < self.active {
@@ -2245,6 +2479,7 @@ impl NebulaWorkspace {
         matches!(
             action,
             PaletteAction::NewTab
+                | PaletteAction::NewWindow
                 | PaletteAction::CopyCwd
                 | PaletteAction::RevealCwd
                 | PaletteAction::CloseTab
@@ -2543,6 +2778,13 @@ impl NebulaWorkspace {
         self.dismiss_palette_state();
         match action {
             PaletteAction::NewTab => self.add_terminal(window, cx),
+            PaletteAction::NewWindow => {
+                cx.defer(|cx| {
+                    if let Err(error) = windowing::open_new_window(cx, None) {
+                        log::warn!("failed to open GPUI window: {error}");
+                    }
+                });
+            },
             PaletteAction::CopyCwd => {
                 if let Some(path) = self.active_local_cwd(cx) {
                     cx.write_to_clipboard(ClipboardItem::new_string(
@@ -2646,18 +2888,17 @@ impl NebulaWorkspace {
             WorkspaceTab::Image { view } => view.read(cx).title.clone().into(),
             WorkspaceTab::Document { view } => view.read(cx).title.clone().into(),
             WorkspaceTab::Code { view } => view.read(cx).title.clone().into(),
-            tab @ WorkspaceTab::Terminal { panes, .. } => {
+            tab @ WorkspaceTab::Terminal { .. } => {
                 // 标签 = 聚焦 pane 的 cwd 末级目录名（旧壳 chrome_tab_label
-                // 规则）；分屏时缀 pane 计数，一眼可见这行是一组。
-                let label = match tab.focused_view() {
-                    Some(view) => view.read(cx).tab_label(),
-                    None => String::from("shell"),
-                };
-                let mut head = label;
-                if panes.len() > 1 {
-                    head.push_str(&format!(" ⊞{}", panes.len()));
+                // 规则）。分屏计数**不拼在这里**：这份字符串还要喂给 runtime
+                // API 的 tab label、跨窗拖拽标题和重命名预填，掺进 "⊞2" 会
+                // 一路泄漏，而且长标题下会被 truncate_tab_label 截掉、被
+                // custom_name 整条顶掉。计数改由 TabPresentation::pane_count
+                // 单独画成胶囊，见 sidebar/top_tabs 的渲染。
+                match tab.focused_view() {
+                    Some(view) => view.read(cx).tab_label().into(),
+                    None => SharedString::from("shell"),
                 }
-                head.into()
             },
         }
     }
@@ -3697,7 +3938,8 @@ impl NebulaWorkspace {
     /// Terminal tab 的内容区：单叶直渲、缩放态聚焦 pane 满卡，否则按
     /// 分屏树递归铺陈。
     fn render_terminal_tab(&self, tab_ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(WorkspaceTab::Terminal { tree, panes, focused, zoomed }) = self.tabs.get(tab_ix)
+        let Some(WorkspaceTab::Terminal { tree, panes, focused, zoomed, broadcast }) =
+            self.tabs.get(tab_ix)
         else {
             return div().into_any_element();
         };
@@ -3718,10 +3960,53 @@ impl NebulaWorkspace {
                 .absolute()
                 .inset_0()
             });
-            return div().size_full().relative().children(probe).children(view).into_any_element();
+            // 缩放态也要画标题条：否则进了独占就没有退出按钮，只剩快捷键。
+            // 满卡时标题条两个上角都贴着卡片圆角。
+            let header = pane
+                .filter(|_| pane_header::header_visible(panes.len()))
+                .map(|pane| {
+                    let ordinal = pane_header::pane_order(tree)
+                        .iter()
+                        .position(|id| *id == pane.id)
+                        .map_or(1, |at| at + 1);
+                    self.render_pane_header(
+                        tab_ix,
+                        pane.id,
+                        ordinal,
+                        &pane.view,
+                        true,
+                        *zoomed,
+                        *broadcast,
+                        pane_header::HeaderCorners { top_left: true, top_right: true },
+                        cx,
+                    )
+                });
+            return v_flex()
+                .size_full()
+                .children(header)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .children(probe)
+                        .children(view),
+                )
+                .into_any_element();
         }
         let mut path = Vec::new();
-        self.render_split_node(tab_ix, tree, &mut path, panes, *focused, cx)
+        let order = pane_header::pane_order(tree);
+        self.render_split_node(
+            tab_ix,
+            tree,
+            &mut path,
+            panes,
+            *focused,
+            &order,
+            *broadcast,
+            pane_header::HeaderCorners { top_left: true, top_right: true },
+            cx,
+        )
     }
 
     /// 递归渲染分屏树。Split 节点 = flex 容器：first 占 `relative(ratio)`、
@@ -3729,6 +4014,14 @@ impl NebulaWorkspace {
     /// 的切割数学等价到 ±divider×ratio ≤ 2px；比例在提交时按真实视口吸附
     /// 整格，不累积漂移）。节点视口与 pane 矩形经 canvas prepaint 回写
     /// 帧记录，供拖拽换算与方向导航消费。
+    /// `order` 是本 tab 的 pane 视觉次序（序号徽章的来源）：每层递归都传同一
+    /// 份，不在叶子里重新遍历子树——那样每个叶子都会把自己算成 1。
+    ///
+    /// `corners` 标记这个子树是否还贴着卡片的上两角。GPUI 的 `overflow_hidden`
+    /// 只按**矩形**裁剪，不跟圆角，所以带不透明底色的标题条会直接盖住卡片
+    /// 圆角（用户 08-23 报的「上面一行越界」）。谁该收角只能由树位置决定，
+    /// 在这里逐层往下传。
+    #[allow(clippy::too_many_arguments)]
     fn render_split_node(
         &self,
         tab_ix: usize,
@@ -3736,17 +4029,37 @@ impl NebulaWorkspace {
         path: &mut Vec<bool>,
         panes: &[TerminalPane],
         focused: u64,
+        order: &[u64],
+        broadcast: bool,
+        corners: pane_header::HeaderCorners,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         match node {
             SplitTree::Leaf(id) => {
                 let id = *id;
-                let view = panes.iter().find(|pane| pane.id == id).map(|pane| pane.view.clone());
+                let pane = panes.iter().find(|pane| pane.id == id);
+                let view = pane.map(|pane| pane.view.clone());
                 let store = self.pane_bounds.clone();
                 let is_focused = id == focused;
                 let dim = gpui::black().opacity(crate::display::NEBULA_UNFOCUSED_SPLIT_DIM);
                 let veil = div().absolute().inset_0().bg(dim);
-                div()
+                let ordinal = order.iter().position(|other| *other == id).map_or(1, |at| at + 1);
+                let header = pane.map(|pane| {
+                    self.render_pane_header(
+                        tab_ix,
+                        id,
+                        ordinal,
+                        &pane.view,
+                        is_focused,
+                        false,
+                        broadcast,
+                        corners,
+                        cx,
+                    )
+                });
+                // 布局：标题条固定高 + 终端吃剩余。canvas 探针仍量**整个叶子**
+                // ——方向导航与 dock 命中读的是 pane 矩形，不是终端矩形。
+                v_flex()
                     .size_full()
                     .relative()
                     .min_w_0()
@@ -3761,9 +4074,19 @@ impl NebulaWorkspace {
                         .absolute()
                         .inset_0(),
                     )
-                    .children(view)
-                    // 与旧壳一致：不用焦点描边，仅给非活动 pane 覆 30% 黑色 veil。
-                    .when(!is_focused, |pane| pane.child(veil))
+                    .children(header)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .relative()
+                            .children(view)
+                            // 与旧壳一致：不用焦点描边，仅给非活动 pane 覆 30%
+                            // 黑色 veil。veil 只盖终端区——压暗标题条会把四个
+                            // pane 的标题一起糊成灰。
+                            .when(!is_focused, |pane| pane.child(veil)),
+                    )
                     .into_any_element()
             },
             SplitTree::Split { direction, ratio, preview_ratio, dragging, first, second } => {
@@ -3782,10 +4105,30 @@ impl NebulaWorkspace {
                 .inset_0();
 
                 path.push(false);
-                let first_el = self.render_split_node(tab_ix, first, path, panes, focused, cx);
+                let first_el = self.render_split_node(
+                    tab_ix,
+                    first,
+                    path,
+                    panes,
+                    focused,
+                    order,
+                    broadcast,
+                    corners.first_child(direction),
+                    cx,
+                );
                 path.pop();
                 path.push(true);
-                let second_el = self.render_split_node(tab_ix, second, path, panes, focused, cx);
+                let second_el = self.render_split_node(
+                    tab_ix,
+                    second,
+                    path,
+                    panes,
+                    focused,
+                    order,
+                    broadcast,
+                    corners.second_child(direction),
+                    cx,
+                );
                 path.pop();
 
                 let drag_path = path.clone();
@@ -3987,6 +4330,12 @@ impl Drop for NebulaWorkspace {
 
 impl Render for NebulaWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if window.is_window_active() {
+            windowing::mark_active(self.runtime_window_id, cx);
+        }
+        if !cx.has_active_drag() {
+            self.cross_window_dock = None;
+        }
         let sidebar_logo_target_px =
             (TAB_LABEL_ICON_SIZE * window.scale_factor()).round().max(1.0) as u32;
         if sidebar_logo_target_px != self.sidebar_logo_target_px {
@@ -4019,17 +4368,20 @@ impl Render for NebulaWorkspace {
             matches!(self.tabs.get(self.active), Some(WorkspaceTab::Settings { .. }));
         let top_tabs = self.tabs_position == nebula_settings::TabsPositionName::Top;
         // dock 预览：被拖 tab 悬于终端区时高亮目标半区（松手即挂到那侧）。
-        let dock_preview =
-            self.tab_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.dock).and_then(
-                |nav| {
-                    self.active_terminal_area().map(|area| match nav {
-                        SplitNav::Left => (area.x, area.y, area.w * 0.5, area.h),
-                        SplitNav::Right => (area.x + area.w * 0.5, area.y, area.w * 0.5, area.h),
-                        SplitNav::Up => (area.x, area.y, area.w, area.h * 0.5),
-                        SplitNav::Down => (area.x, area.y + area.h * 0.5, area.w, area.h * 0.5),
-                    })
-                },
-            );
+        let dock_preview = self
+            .tab_drag
+            .as_ref()
+            .filter(|drag| drag.active)
+            .and_then(|drag| drag.dock)
+            .or(self.cross_window_dock)
+            .and_then(|nav| {
+                self.active_terminal_area().map(|area| match nav {
+                    SplitNav::Left => (area.x, area.y, area.w * 0.5, area.h),
+                    SplitNav::Right => (area.x + area.w * 0.5, area.y, area.w * 0.5, area.h),
+                    SplitNav::Up => (area.x, area.y, area.w, area.h * 0.5),
+                    SplitNav::Down => (area.x, area.y + area.h * 0.5, area.w, area.h * 0.5),
+                })
+            });
 
         div()
             .size_full()
@@ -4039,21 +4391,69 @@ impl Render for NebulaWorkspace {
             // 卡外壳与卡底。根节点不能再铺一张半透明底。
             .bg(gpui::transparent_black())
             .text_color(cx.theme().foreground)
+            .can_drop({
+                let runtime_window_id = self.runtime_window_id;
+                move |value, _, _| {
+                    value
+                        .downcast_ref::<windowing::CrossWindowTabDrag>()
+                        .is_some_and(|payload| {
+                            payload.source_window_id() != runtime_window_id
+                        })
+                }
+            })
+            .on_drag_move::<windowing::CrossWindowTabDrag>(cx.listener(
+                |this,
+                 event: &gpui::DragMoveEvent<windowing::CrossWindowTabDrag>,
+                 _window,
+                 cx| {
+                    let payload = event.drag(cx);
+                    if payload.source_window_id() == this.runtime_window_id {
+                        this.cross_window_dock = None;
+                        return;
+                    }
+                    let position = event.event.position;
+                    this.cross_window_dock = this
+                        .dock_nav_at(f32::from(position.x), f32::from(position.y));
+                    cx.notify();
+                },
+            ))
+            .on_drop(cx.listener(
+                |this, payload: &windowing::CrossWindowTabDrag, window, cx| {
+                    let dock = this.cross_window_dock.take();
+                    if this.accept_cross_window_tab(payload, dock, window, cx) {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .on_mouse_move(cx.listener(|this, event, window, cx| {
                 this.continue_pending_tab_drag(event, window, cx);
+                // pane 拖拽的待命态同理：罩层只在激活后才存在，越阈值那一下
+                // 的 move 必须由根节点喂进去。
+                this.continue_pending_pane_drag(event, cx);
             }))
             // 旧壳在窗口级 mouse-up 无条件结束 tab drag。这里必须走 capture：
             // TerminalView 可能在 bubble phase 消费释放，导致 dock 永远不提交。
             .capture_any_mouse_up(cx.listener(|this, event: &gpui::MouseUpEvent, window, cx| {
-                if event.button == MouseButton::Left
-                    && this.release_tab_drag_at(event.position, window, cx)
-                {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                // pane 拖拽先结算：它和 tab 拖拽互斥（起手位置不同），但待命态
+                // 必须在这里清掉，否则下一次点标题条会带着上一次的按点。
+                let pane_dragged = this.release_pane_drag(window, cx);
+                if this.release_tab_drag_at(event.position, window, cx) || pane_dragged {
                     // 真拖拽已经完成，不能再让源 tab 的 click 或终端选择收到释放。
                     cx.stop_propagation();
                 }
             }))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 this.add_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &NewWindow, _, cx| {
+                cx.defer(|cx| {
+                    if let Err(error) = windowing::open_new_window(cx, None) {
+                        log::warn!("failed to open GPUI window: {error}");
+                    }
+                });
             }))
             .on_action(cx.listener(|this, _: &CloseActiveTerminal, window, cx| {
                 this.close_active(window, cx);
@@ -4114,6 +4514,12 @@ impl Render for NebulaWorkspace {
             }))
             .on_action(cx.listener(|this, _: &SelectPreviousTab, window, cx| {
                 this.select_adjacent_tab(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MoveTabLeft, window, cx| {
+                this.move_active_tab(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &MoveTabRight, window, cx| {
+                this.move_active_tab(true, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleGitPanel, _, cx| {
                 this.toggle_git_tree(cx);
@@ -4371,6 +4777,7 @@ impl Render for NebulaWorkspace {
                 )
             })
             .children(self.tabs_scrollbar_drag_overlay(cx))
+            .children(self.pane_drag_overlay(cx))
             .when(self.sidebar_resizing, |root| {
                 // 侧栏拖宽罩层（同 split_drag 的指针捕获模式）：移动实时改宽
                 // （夹在共享层的 170..420 之间），松手写盘 `sidebar_w`。

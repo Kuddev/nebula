@@ -507,7 +507,7 @@ impl Processor {
         match command {
             RuntimeCommand::Snapshot => serde_json::to_value(self.publish_runtime_snapshot())
                 .map_err(|error| ApiError::new("serialization_failed", error.to_string())),
-            RuntimeCommand::NewWindow => {
+            RuntimeCommand::NewWindow { cwd: _ } => {
                 // GL backends require every current context to be released
                 // before another window surface is created.
                 for window in self.windows.values_mut() {

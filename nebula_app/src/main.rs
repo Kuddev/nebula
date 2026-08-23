@@ -173,7 +173,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         if try_hand_over_to_resident(&options) {
             return Ok(());
         }
-        gpui_shell::run_shell();
+        let initial_cwd = options
+            .window_options
+            .terminal_options
+            .resolved_working_directory()
+            .filter(|path| path.is_dir());
+        gpui_shell::run_shell(initial_cwd);
         return Ok(());
     }
 
@@ -184,7 +189,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::var_os("NEBULA_GPUI_SHELL").is_some() {
         std::thread::Builder::new()
             .name("gpui-shell".into())
-            .spawn(gpui_shell::run_shell)
+            .spawn(|| gpui_shell::run_shell(None))
             .expect("spawn gpui-shell thread");
     }
 
@@ -446,6 +451,18 @@ fn wants_gpui_shell(options: &Options) -> bool {
 #[cfg(windows)]
 fn try_hand_over_to_resident(options: &Options) -> bool {
     let has_command = options.window_options.terminal_options.command().is_some();
+    let launch_dir = options
+        .window_options
+        .terminal_options
+        .resolved_working_directory()
+        .filter(|path| path.is_dir());
+    if !options.daemon
+        && !has_command
+        && nebula_settings::RuntimeSettings::load().windowing_behavior
+            == nebula_settings::WindowingBehaviorName::UseNew
+    {
+        return runtime_api::try_open_window_existing(launch_dir.as_deref());
+    }
     let plain_launch = !options.daemon
         && options.window_options.terminal_options.working_directory.is_none()
         && !has_command;
@@ -456,12 +473,11 @@ fn try_hand_over_to_resident(options: &Options) -> bool {
     // 带目录、无 -e 命令的启动优先并入驻留实例——ATTACH 恢复窗口，再在
     // 其中打开定目录标签；没有驻留实例时照旧独立启动。
     let dir_launch = !options.daemon && !has_command;
-    if dir_launch {
-        if let Some(dir) = options.window_options.terminal_options.resolved_working_directory() {
-            if dir.is_dir() && runtime_api::try_open_directory_existing(&dir) {
-                return true;
-            }
-        }
+    if dir_launch
+        && let Some(dir) = launch_dir
+        && runtime_api::try_open_directory_existing(&dir)
+    {
+        return true;
     }
     false
 }

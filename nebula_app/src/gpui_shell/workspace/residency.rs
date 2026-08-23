@@ -46,7 +46,7 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |_this, cx| {
             loop {
                 executor.timer(Duration::from_millis(120)).await;
                 let mut events = Vec::new();
@@ -54,20 +54,14 @@ impl NebulaWorkspace {
                     events.push(event);
                 }
 
-                let handle = match this.update(cx, |workspace, cx| {
-                    workspace.dispatch_shell_events(&events, cx);
-                    workspace.window_handle
-                }) {
-                    Ok(handle) => handle,
-                    Err(_) => return,
-                };
-
-                let _ = handle.update(cx, |_, window, cx| {
-                    let _ = this.update(cx, |workspace, cx| {
-                        workspace.drain_runtime_commands(window, cx);
-                        workspace.publish_runtime_snapshot(window, cx);
-                    });
-                });
+                if cx
+                    .update(|cx| {
+                        crate::gpui_shell::workspace::windowing::dispatch_shell_events(events, cx)
+                    })
+                    .is_err()
+                {
+                    return;
+                }
             }
         })
         .detach();
@@ -85,13 +79,16 @@ impl NebulaWorkspace {
                 GpuiShellEvent::RuntimeControl(dispatch) => {
                     self.queue_or_answer_runtime(dispatch.clone(), cx);
                 },
+                // 更新通知由进程级 windowing dispatcher 选择 MRU 窗口；这个
+                // 旧的 workspace-local 分发器没有 Window，不能在此打开 Dialog。
+                GpuiShellEvent::UpdateAvailable(_) => {},
             }
         }
     }
 
     fn queue_or_answer_runtime(&mut self, dispatch: Arc<RuntimeDispatch>, cx: &mut Context<Self>) {
         match &dispatch.command {
-            RuntimeCommand::NewWindow => {
+            RuntimeCommand::NewWindow { .. } => {
                 dispatch.respond(Err(ApiError::new(
                     "runtime_unavailable",
                     "the GPUI runtime currently owns one workspace window; window.create is unavailable",
@@ -126,7 +123,7 @@ impl NebulaWorkspace {
         }
     }
 
-    fn execute_runtime_command(
+    pub(crate) fn execute_runtime_command(
         &mut self,
         command: &RuntimeCommand,
         window: &mut Window,
@@ -137,7 +134,7 @@ impl NebulaWorkspace {
                 serde_json::to_value(self.publish_runtime_snapshot(window, cx))
                     .map_err(|error| ApiError::new("serialization_failed", error.to_string()))
             },
-            RuntimeCommand::NewWindow => Err(ApiError::new(
+            RuntimeCommand::NewWindow { .. } => Err(ApiError::new(
                 "runtime_unavailable",
                 "window.create is not queued in the GPUI runtime",
             )),
@@ -512,13 +509,17 @@ impl NebulaWorkspace {
         &self,
         action: serde_json::Value,
         window: &Window,
-        cx: &App,
+        cx: &mut App,
     ) -> Result<serde_json::Value, ApiError> {
         let snapshot = self.publish_runtime_snapshot(window, cx);
         Ok(json!({ "action": action, "snapshot": snapshot }))
     }
 
-    fn runtime_snapshot(&self, window: &Window, cx: &App) -> RuntimeSnapshot {
+    pub(crate) fn runtime_window_snapshot(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> (bool, RuntimeWindow) {
         let tabs = self
             .tabs
             .iter()
@@ -579,21 +580,24 @@ impl NebulaWorkspace {
             WorkspaceTab::Terminal { focused, .. } => Some(*focused),
             _ => None,
         });
-        RuntimeSnapshot::new(
-            usize::from(self.window_hidden),
-            vec![RuntimeWindow {
+        (
+            self.window_hidden,
+            RuntimeWindow {
                 id: self.runtime_window_id,
                 focused: !self.window_hidden && window.is_window_active(),
                 session_exempt: false,
                 active_tab: self.active,
                 focused_pane_id,
                 tabs,
-            }],
+            },
         )
     }
 
-    fn publish_runtime_snapshot(&self, window: &Window, cx: &App) -> RuntimeSnapshot {
-        self.runtime_hub.publish(self.runtime_snapshot(window, cx))
+    fn publish_runtime_snapshot(&self, window: &Window, cx: &mut App) -> RuntimeSnapshot {
+        let (hidden, current) = self.runtime_window_snapshot(window, cx);
+        crate::gpui_shell::workspace::windowing::publish_runtime_snapshot_with_current(
+            hidden, current, cx,
+        )
     }
 
     fn handle_tray_focus(&mut self, pane: Option<u64>, cx: &mut Context<Self>) {
@@ -626,7 +630,7 @@ impl NebulaWorkspace {
         cx.quit();
     }
 
-    fn tab_of_pane(&self, pane_id: u64) -> Option<usize> {
+    pub(crate) fn tab_of_pane(&self, pane_id: u64) -> Option<usize> {
         self.tabs.iter().position(|tab| match tab {
             WorkspaceTab::Terminal { panes, .. } => panes.iter().any(|pane| pane.id == pane_id),
             _ => false,

@@ -575,6 +575,38 @@ impl NewTabPositionName {
     }
 }
 
+/// 新进程启动时如何选择承载新标签的窗口。
+///
+/// 默认保留 Nebula 既有的单实例行为：优先交给任意虚拟桌面上最近使用的
+/// 窗口。`UseExisting` 进一步限定为当前虚拟桌面；找不到合适窗口时，两者
+/// 都会回退为创建新窗口，不能把启动请求静默丢弃。
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum WindowingBehaviorName {
+    UseNew,
+    #[default]
+    UseAnyExisting,
+    UseExisting,
+}
+
+impl WindowingBehaviorName {
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "use_new" | "usenew" => Some(Self::UseNew),
+            "use_any_existing" | "useanyexisting" => Some(Self::UseAnyExisting),
+            "use_existing" | "useexisting" => Some(Self::UseExisting),
+            _ => None,
+        }
+    }
+
+    pub fn settings_value(self) -> &'static str {
+        match self {
+            Self::UseNew => "use_new",
+            Self::UseAnyExisting => "use_any_existing",
+            Self::UseExisting => "use_existing",
+        }
+    }
+}
+
 /// 侧栏版本控制视图的数据源：自动探测（就近的 .svn 提示 + git 优先），
 /// 或强制只认 Git / SVN（混合仓库、或想屏蔽其中一种时用）。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -644,6 +676,22 @@ impl BellModeName {
     }
 }
 
+/// 窗口背景模糊材质：关 / Mica（平衡）/ Acrylic（高质量）。
+///
+/// 三档对应三套完全不同的 DWM 成本模型，落点在
+/// `gpui_shell::wallpaper::apply_windows_accent_policy`：
+/// - `None`：AccentPolicy 全零 + `DWMSBT_NONE`，DWM 只贴一张不透明纹理。
+/// - `Mica`：`DWMSBT_MAINWINDOW`。系统合成器提供壁纸 backdrop、模糊和色调，
+///   Nebula 不读取壁纸文件，也不在客户区仿画材质；不逐帧采样其他窗口。
+/// - `Acrylic`：`ACCENT_ENABLE_ACRYLICBLURBEHIND`。DWM 对窗口后方**实时
+///   内容**逐帧高斯模糊 + 噪点 + 饱和度。观感最好，也是唯一能透出后方其他
+///   窗口的档位；2026-08-22 实测这一档把 dwm.exe 顶到 28% 均值。
+///
+/// # 缺省为什么是 Mica 而不是 Acrylic
+///
+/// 2026-08-22 用户实测：3K@165Hz 下 Acrylic 档 `nebula.exe` 22.7% +
+/// `dwm.exe` 28.3%，关掉模糊后卡顿立刻好转。默认档必须是性能安全的那个，
+/// 想要实时透视的用户显式选高质量。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 /// 窗口背景材质。**按 DWM 每帧成本递增排列**，不是质量递进——四者是四套成本
 /// 模型，不存在"越靠后越好"：
@@ -771,6 +819,7 @@ pub struct RuntimeSettings {
     pub tab_reveal: TabRevealName,
     pub density: DensityName,
     pub new_tab_position: NewTabPositionName,
+    pub windowing_behavior: WindowingBehaviorName,
     pub cell_width_mode: CellWidthModeName,
     /// 侧栏版本控制视图的数据源（auto/git/svn）。
     pub vcs_display: VcsDisplayName,
@@ -851,6 +900,10 @@ impl RuntimeSettings {
             new_tab_position: raw
                 .value("new_tab_position")
                 .and_then(NewTabPositionName::from_settings)
+                .unwrap_or_default(),
+            windowing_behavior: raw
+                .value("windowing_behavior")
+                .and_then(WindowingBehaviorName::from_settings)
                 .unwrap_or_default(),
             cell_width_mode: raw
                 .value("cell_width_mode")
@@ -946,6 +999,7 @@ mod tests {
              tab_reveal=instant\n\
              density=compact\n\
              new_tab_position=end\n\
+             windowing_behavior=use_existing\n\
              cell_width_mode=relaxed\n\
              fetch=1\n\
              powerline=0\n\
@@ -981,6 +1035,7 @@ mod tests {
         assert_eq!(settings.tab_reveal, TabRevealName::Instant);
         assert_eq!(settings.density, DensityName::Compact);
         assert_eq!(settings.new_tab_position, NewTabPositionName::End);
+        assert_eq!(settings.windowing_behavior, WindowingBehaviorName::UseExisting);
         assert_eq!(settings.cell_width_mode, CellWidthModeName::Relaxed);
         assert!(settings.fetch);
         assert!(settings.keep_session);
@@ -1016,6 +1071,7 @@ mod tests {
         assert_eq!(settings.tab_reveal, TabRevealName::Slide);
         assert_eq!(settings.density, DensityName::Standard);
         assert_eq!(settings.new_tab_position, NewTabPositionName::AfterCurrent);
+        assert_eq!(settings.windowing_behavior, WindowingBehaviorName::UseAnyExisting);
         assert_eq!(settings.cell_width_mode, CellWidthModeName::Compact);
         assert!(!settings.fetch);
         assert!(!settings.keep_session);
@@ -1100,6 +1156,27 @@ mod tests {
             RuntimeSettings::from_raw(&RawSettings::from_text("tabs_position=bottom\n"))
                 .tabs_position,
             TabsPositionName::Sidebar
+        );
+    }
+
+    #[test]
+    fn windowing_behavior_preserves_existing_default_and_accepts_terminal_aliases() {
+        assert_eq!(
+            WindowingBehaviorName::from_settings("use_new"),
+            Some(WindowingBehaviorName::UseNew)
+        );
+        assert_eq!(
+            WindowingBehaviorName::from_settings("useAnyExisting"),
+            Some(WindowingBehaviorName::UseAnyExisting)
+        );
+        assert_eq!(
+            WindowingBehaviorName::from_settings("useExisting"),
+            Some(WindowingBehaviorName::UseExisting)
+        );
+        assert_eq!(WindowingBehaviorName::from_settings("reuse_everything"), None);
+        assert_eq!(
+            RuntimeSettings::from_raw(&RawSettings::default()).windowing_behavior,
+            WindowingBehaviorName::UseAnyExisting
         );
     }
 

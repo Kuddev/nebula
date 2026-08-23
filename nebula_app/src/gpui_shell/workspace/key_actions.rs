@@ -4,6 +4,20 @@ use gpui::{Context, Window};
 
 use super::{NebulaWorkspace, WorkspaceTab};
 
+/// 标签左移/右移的落点。**不环绕**：首个标签再左移、末个再右移都是 no-op。
+/// 环绕在这里是有害的——用户按住键连点想把标签推到最左，环绕会让它突然
+/// 跳到最右端，而标签栏此时正好滚在另一头，人就找不着自己的标签了。
+pub(super) fn move_target(active: usize, len: usize, right: bool) -> Option<usize> {
+    if len < 2 || active >= len {
+        return None;
+    }
+    if right {
+        (active + 1 < len).then(|| active + 1)
+    } else {
+        active.checked_sub(1)
+    }
+}
+
 impl NebulaWorkspace {
     pub(super) fn select_adjacent_tab(
         &mut self,
@@ -17,6 +31,18 @@ impl NebulaWorkspace {
         }
         let ix = if next { (self.active + 1) % len } else { (self.active + len - 1) % len };
         self.activate_tab(ix, window, cx);
+    }
+
+    /// Ctrl+Shift+PageUp/PageDown（WT 的 `moveTab forward/backward`）：把活动
+    /// 标签在序列里挪一格。复用拖拽提交用的 [`Self::move_tab`]，两条路径共享
+    /// 同一份下标搬运与 active 修正，不会各自解释一套。
+    pub(super) fn move_active_tab(&mut self, right: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(to) = move_target(self.active, self.tabs.len(), right) else { return };
+        let from = self.active;
+        self.move_tab(from, to, window, cx);
+        // 顶栏模式下标签可能刚被挪出可视窗口；侧栏模式同样按整行窗口对齐。
+        self.reveal_active_tab();
+        cx.notify();
     }
 
     /// 设置步进同源：逻辑 px ±1，钳 4–64；`delta == 0` 回到 toml 基准字号。

@@ -7,6 +7,12 @@ use super::*;
 const MAX_ORCHESTRATE_STEPS: usize = 32;
 const MAX_ORCHESTRATE_BYTES: usize = 64 * 1024;
 const DEFAULT_READY_TIMEOUT_MS: u64 = 10_000;
+/// 步骤未能按预期结束时自动附带的屏幕行数。阻拦类型是开放集，Runtime 不猜
+/// "是什么挡住了"，只保证把现场交给能读懂任意画面的一方。
+const EVIDENCE_TAIL_LINES: usize = 40;
+/// 整份回执里所有动态屏幕内容共享的 UTF-8 字节预算。`tail_lines` 只决定观察
+/// 窗口，真正的上下文上限在这里——否则 32 步各带几百行就能吃光调用方的窗口。
+const MAX_RECEIPT_TAIL_BYTES: usize = 4 * 1024;
 
 static NEXT_WORKFLOW_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -68,6 +74,10 @@ enum OrchestrateStep {
         wait: bool,
         #[serde(default = "default_command_timeout_ms")]
         timeout_ms: u64,
+        /// 命令结束后顺手带回的屏幕尾部行数。省掉"跑完再单独读一轮"的往返；
+        /// 它只决定观察窗口，真正的上限是整份回执共享的字节预算。
+        #[serde(default)]
+        tail_lines: Option<usize>,
     },
     AgentLaunch {
         id: String,
@@ -80,6 +90,17 @@ enum OrchestrateStep {
         #[serde(default = "default_ready_timeout_ms")]
         ready_timeout_ms: u64,
     },
+    /// 等目标 pane 到达某个语义状态。基线(after_seq)自动取自被引用步骤的回执，
+    /// 因此"发 prompt 再等 settled"不会命中提交之前那个旧的空闲态。
+    Wait {
+        id: String,
+        target: PaneTarget,
+        state: RuntimeWaitState,
+        #[serde(default = "default_command_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default)]
+        tail_lines: Option<usize>,
+    },
 }
 
 impl OrchestrateStep {
@@ -90,7 +111,8 @@ impl OrchestrateStep {
             | Self::Split { id, .. }
             | Self::Prompt { id, .. }
             | Self::Run { id, .. }
-            | Self::AgentLaunch { id, .. } => id,
+            | Self::AgentLaunch { id, .. }
+            | Self::Wait { id, .. } => id,
         }
     }
 
@@ -102,6 +124,7 @@ impl OrchestrateStep {
             Self::Prompt { .. } => "prompt",
             Self::Run { .. } => "run",
             Self::AgentLaunch { .. } => "agent_launch",
+            Self::Wait { .. } => "wait",
         }
     }
 
@@ -110,7 +133,8 @@ impl OrchestrateStep {
             Self::Focus { target, .. }
             | Self::Prompt { target, .. }
             | Self::Run { target, .. }
-            | Self::AgentLaunch { target, .. } => Some(target),
+            | Self::AgentLaunch { target, .. }
+            | Self::Wait { target, .. } => Some(target),
             Self::Split { target, .. } => target.as_ref(),
             Self::NewTab { .. } => None,
         }
@@ -237,6 +261,11 @@ pub(super) fn execute_for_test(
         .map_err(|error| ApiError::new("serialization_failed", error.to_string()))
 }
 
+#[cfg(test)]
+pub(super) fn truncate_tail_for_test(tail: &mut Value, budget: usize) {
+    truncate_tail(tail, budget);
+}
+
 fn parse_and_validate(value: &Value) -> Result<OrchestrateParams, ApiError> {
     let encoded = serde_json::to_vec(value)
         .map_err(|error| ApiError::invalid_params(format!("invalid orchestration: {error}")))?;
@@ -303,9 +332,17 @@ fn validate_step_contract(step: &OrchestrateStep) -> Result<(), ApiError> {
             ))
         },
         OrchestrateStep::Prompt { text, .. } => validate_prompt(text),
-        OrchestrateStep::Run { command, timeout_ms, .. } => {
+        OrchestrateStep::Run { command, timeout_ms, tail_lines, wait, .. } => {
             validate_command_line(command)?;
-            validate_timeout(*timeout_ms, "run timeout_ms")
+            validate_timeout(*timeout_ms, "run timeout_ms")?;
+            match tail_lines {
+                // 不等待就没有"命令结束"这个时刻，此时读到的尾部只是提交瞬间的
+                // 画面，会被误当成命令输出。拒掉比返回误导性内容好。
+                Some(_) if !*wait => Err(ApiError::invalid_params(
+                    "tail_lines requires wait: true, because there is no completion moment to read at",
+                )),
+                _ => validate_tail_lines(*tail_lines),
+            }
         },
         OrchestrateStep::AgentLaunch {
             name,
@@ -320,9 +357,24 @@ fn validate_step_contract(step: &OrchestrateStep) -> Result<(), ApiError> {
             agent_start_command(None, 1, name.clone(), kind.clone(), resume_session_id.clone())?;
             Ok(())
         },
+        OrchestrateStep::Wait { timeout_ms, tail_lines, .. } => {
+            validate_timeout(*timeout_ms, "wait timeout_ms")?;
+            validate_tail_lines(*tail_lines)
+        },
         OrchestrateStep::NewTab { .. }
         | OrchestrateStep::Focus { .. }
         | OrchestrateStep::Split { .. } => Ok(()),
+    }
+}
+
+/// tail_lines 只决定观察窗口大小，字节量由回执预算兜住；这里只拦明显无意义的值。
+fn validate_tail_lines(tail_lines: Option<usize>) -> Result<(), ApiError> {
+    match tail_lines {
+        Some(0) => Err(ApiError::invalid_params("tail_lines must be at least 1")),
+        Some(lines) if lines > MAX_READ_LINES => {
+            Err(ApiError::invalid_params(format!("tail_lines must not exceed {MAX_READ_LINES}")))
+        },
+        _ => Ok(()),
     }
 }
 
@@ -408,6 +460,7 @@ fn execute(params: OrchestrateParams, sink: &EventSink, hub: &RuntimeHub) -> Wor
     let completed = receipts.iter().filter(|receipt| receipt.ok).count();
     let failed_step = receipts.iter().find(|receipt| !receipt.ok).map(|receipt| receipt.id.clone());
     let ok = failed_step.is_none();
+    enforce_tail_budget(&mut receipts, MAX_RECEIPT_TAIL_BYTES);
     WorkflowReceipt {
         workflow_id,
         ok,
@@ -417,6 +470,100 @@ fn execute(params: OrchestrateParams, sink: &EventSink, hub: &RuntimeHub) -> Wor
         failed_step,
         steps: receipts,
     }
+}
+
+/// 把整份回执的屏幕内容收进一个共享字节预算。总量没超就一字不动——常见情况零
+/// 代价；超了才按份均分，每份从末尾保留：命令的结论和报错都在输出末尾，掐头
+/// 比去尾安全。截断一律留下 `truncated` 与原始字节数，不做无声删减。
+fn enforce_tail_budget(receipts: &mut [StepReceipt], budget: usize) {
+    let mut slots = Vec::new();
+    for (index, receipt) in receipts.iter().enumerate() {
+        if let Some(len) = tail_slot(receipt).and_then(|tail| tail_text_len(tail)) {
+            slots.push((index, len));
+        }
+    }
+    if slots.is_empty() || slots.iter().map(|(_, len)| *len).sum::<usize>() <= budget {
+        return;
+    }
+    let per_slot = (budget / slots.len()).max(1);
+    for (index, _) in slots {
+        if let Some(tail) = receipts.get_mut(index).and_then(tail_slot_mut) {
+            truncate_tail(tail, per_slot);
+        }
+    }
+}
+
+fn tail_slot(receipt: &StepReceipt) -> Option<&Value> {
+    let from_action = receipt.action.as_ref().and_then(|action| action.get("tail"));
+    from_action.or_else(|| {
+        receipt.error.as_ref()?.details.as_ref().and_then(|details| details.get("tail"))
+    })
+}
+
+fn tail_slot_mut(receipt: &mut StepReceipt) -> Option<&mut Value> {
+    if let Some(action) = receipt.action.as_mut()
+        && let Some(tail) = action.get_mut("tail")
+    {
+        return Some(tail);
+    }
+    receipt.error.as_mut()?.details.as_mut()?.get_mut("tail")
+}
+
+/// tail 有两种形态：编排步骤写入的 `{text, ...}` 对象，以及 run 等待直接塞进
+/// 错误 details 的裸字符串。两者都要计入同一个预算。
+fn tail_text_len(tail: &Value) -> Option<usize> {
+    match tail {
+        Value::String(text) => Some(text.len()),
+        Value::Object(object) => object.get("text").and_then(Value::as_str).map(str::len),
+        _ => None,
+    }
+}
+
+fn truncate_tail(tail: &mut Value, budget: usize) {
+    let original = match tail {
+        Value::String(text) => std::mem::take(text),
+        Value::Object(object) => match object.get_mut("text") {
+            Some(Value::String(text)) => std::mem::take(text),
+            _ => return,
+        },
+        _ => return,
+    };
+    let kept = keep_trailing_bytes(&original, budget).to_owned();
+    let truncated = kept.len() < original.len();
+    match tail {
+        Value::String(slot) => {
+            if truncated {
+                // 裸字符串没有地方挂元数据，就地说明比静默丢内容好。
+                *slot = format!("[truncated to last {} of {} bytes]\n{kept}", kept.len(), original.len());
+            } else {
+                *slot = kept;
+            }
+        },
+        Value::Object(object) => {
+            object.insert("text".to_owned(), Value::String(kept.clone()));
+            if truncated {
+                object.insert("truncated".to_owned(), Value::Bool(true));
+                object.insert(
+                    "original_bytes".to_owned(),
+                    Value::Number(original.len().into()),
+                );
+                object.insert("returned_bytes".to_owned(), Value::Number(kept.len().into()));
+            }
+        },
+        _ => {},
+    }
+}
+
+/// 从末尾保留至多 `budget` 字节，并把起点推到最近的字符边界，避免切出半个字符。
+fn keep_trailing_bytes(text: &str, budget: usize) -> &str {
+    if text.len() <= budget {
+        return text;
+    }
+    let mut start = text.len() - budget;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
 }
 
 fn apply_agent_finalization(
@@ -494,6 +641,41 @@ fn execute_step(
         }));
     }
 
+    if let OrchestrateStep::Wait { id, target, state, timeout_ms, tail_lines } = step {
+        let (window_id, pane_id) = resolve_target(id, target, actions)?;
+        // 基线取自被引用步骤的回执：那一步提交时 pane 的状态序号。只有序号真的往前
+        // 走过，才算"这次等待等到了新变化"，而不是撞上提交之前的旧状态。
+        let after_seq = target_baseline_seq(target, actions);
+        let outcome = wait_for_pane_state(
+            hub,
+            window_id,
+            pane_id,
+            *state,
+            after_seq,
+            Duration::from_millis(*timeout_ms),
+        );
+        let lines = tail_lines.unwrap_or(0);
+        return match outcome {
+            Ok(mut action) => {
+                if lines > 0
+                    && let Some(tail) = read_pane_tail(sink, hub, window_id, pane_id, lines)
+                    && let Some(object) = action.as_object_mut()
+                {
+                    object.insert("tail".to_owned(), tail);
+                }
+                Ok(StepOutcome::Complete(action))
+            },
+            // 等不到就把现场带回来：为什么没到达目标状态，只有屏幕说得清。
+            Err(error) => Err(attach_failure_evidence(
+                error,
+                sink,
+                hub,
+                lines.max(EVIDENCE_TAIL_LINES),
+            )),
+        };
+    }
+
+    let mut tail_request = None;
     let command = match step {
         OrchestrateStep::NewTab { window_id, cwd, .. } => {
             RuntimeCommand::NewTab { window_id: *window_id, cwd: cwd.clone() }
@@ -516,8 +698,11 @@ fn execute_step(
             let (window_id, pane_id) = resolve_target(id, target, actions)?;
             RuntimeCommand::Prompt { window_id, pane_id, text: text.clone(), submit: *submit }
         },
-        OrchestrateStep::Run { id, target, command, wait, timeout_ms } => {
+        OrchestrateStep::Run { id, target, command, wait, timeout_ms, tail_lines } => {
             let (window_id, pane_id) = resolve_target(id, target, actions)?;
+            if let Some(lines) = *tail_lines {
+                tail_request = Some((window_id, pane_id, lines));
+            }
             RuntimeCommand::Run {
                 window_id,
                 pane_id,
@@ -527,9 +712,110 @@ fn execute_step(
             }
         },
         OrchestrateStep::AgentLaunch { .. } => unreachable!("handled above"),
+        OrchestrateStep::Wait { .. } => unreachable!("handled above"),
     };
-    let result = dispatch_runtime_command(command, sink, hub)?;
-    Ok(StepOutcome::Complete(essential_action(&result)))
+    let result = dispatch_runtime_command(command, sink, hub).map_err(|error| {
+        // 命令没能正常结束时，请求过 tail 的调用方同样需要现场——失败比成功更需要。
+        match tail_request {
+            Some((_, _, lines)) => attach_failure_evidence(error, sink, hub, lines),
+            None => error,
+        }
+    })?;
+    let mut action = essential_action(&result);
+    // 把提交这一刻的状态序号留在回执里。后面的 wait 步以它为基线，否则"发完 prompt
+    // 等 settled"会立刻命中提交之前那个还没变的空闲态。
+    if let Some(seq) = submitted_state_seq(&result, &action)
+        && let Some(object) = action.as_object_mut()
+    {
+        object.insert("state_change_seq".to_owned(), Value::Number(seq.into()));
+    }
+    if let Some((window_id, pane_id, lines)) = tail_request
+        && let Some(tail) = read_pane_tail(sink, hub, window_id, pane_id, lines)
+        && let Some(object) = action.as_object_mut()
+    {
+        object.insert("tail".to_owned(), tail);
+    }
+    Ok(StepOutcome::Complete(action))
+}
+
+/// 从这一步返回的内嵌快照里取出目标 pane 的状态序号。取不到就不写——基线缺失只是
+/// 让后续 wait 退回"任意匹配"，写一个猜的值才会真正骗到调用方。
+fn submitted_state_seq(result: &Value, action: &Value) -> Option<u64> {
+    let pane_id = action.get("pane_id").and_then(Value::as_u64)?;
+    let window_id = action.get("window_id").and_then(Value::as_u64);
+    let snapshot = result.get("snapshot")?;
+    let snapshot: RuntimeSnapshot = serde_json::from_value(snapshot.clone()).ok()?;
+    snapshot.pane(window_id, pane_id).ok().map(|pane| pane.state_change_seq)
+}
+
+/// 取被引用步骤回执里的状态序号做等待基线。直接指定 pane 的目标没有基线可言，
+/// 那种情况下等待退回"匹配即返回"。
+fn target_baseline_seq(target: &PaneTarget, actions: &HashMap<String, Value>) -> Option<u64> {
+    let PaneTarget::Reference(reference) = target else { return None };
+    actions.get(&reference.step)?.get("state_change_seq").and_then(Value::as_u64)
+}
+
+/// 等 pane 到达目标状态。循环判据与 `pane.wait` 完全一致——同一个谓词、同一个
+/// 生命周期错误检查，区别只是结果作为编排步骤的 action 返回而不是写回连接。
+fn wait_for_pane_state(
+    hub: &RuntimeHub,
+    window_id: Option<u64>,
+    pane_id: u64,
+    state: RuntimeWaitState,
+    after_seq: Option<u64>,
+    timeout: Duration,
+) -> Result<Value, ApiError> {
+    let (_, current, receiver) = hub.subscribe();
+    let mut target_window = window_id;
+    let mut observed = None;
+    let deadline = Instant::now() + timeout;
+    let mut snapshot = current;
+    loop {
+        if let Some(error) = hub.pane_lifecycle_error(target_window, pane_id) {
+            return Err(error);
+        }
+        if let Some(current) = snapshot.take() {
+            match current.pane_target(target_window, pane_id) {
+                Ok((resolved, pane)) => {
+                    target_window = Some(resolved);
+                    if command::wait_matches(pane, state, after_seq) {
+                        return Ok(json!({
+                            "window_id": resolved,
+                            "pane_id": pane_id,
+                            "task_state": pane.task_state,
+                            "state_change_seq": pane.state_change_seq
+                        }));
+                    }
+                    observed = Some((pane.task_state, pane.state_change_seq));
+                },
+                Err(error) if error.code == "target_not_found" => {},
+                Err(error) => return Err(error),
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        snapshot = match receiver.recv_timeout(remaining) {
+            Ok(snapshot) => Some(snapshot),
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+        };
+    }
+    if let Some(error) = hub.pane_lifecycle_error(target_window, pane_id) {
+        return Err(error);
+    }
+    Err(ApiError::new(
+        "timeout",
+        format!("pane {pane_id} did not reach the requested state before timeout"),
+    )
+    .details(json!({
+        "window_id": target_window,
+        "pane_id": pane_id,
+        "expected_state": state,
+        "after_seq": after_seq,
+        "observed_state": observed.map(|(state, _)| state),
+        "observed_state_change_seq": observed.map(|(_, seq)| seq)
+    })))
 }
 
 fn resolve_target(
@@ -595,6 +881,46 @@ fn essential_action(result: &Value) -> Value {
     })
 }
 
+/// 读一次 pane 尾部作为失败现场。读取本身失败不能覆盖原始错误，因此返回
+/// Option 而不是 Result：拿不到现场就只是少一份证据，原因仍照实上报。
+fn read_pane_tail(
+    sink: &EventSink,
+    hub: &RuntimeHub,
+    window_id: Option<u64>,
+    pane_id: u64,
+    lines: usize,
+) -> Option<Value> {
+    let (text, scanned) = read_pane_tail_text(hub, sink, window_id, pane_id, lines)?;
+    let returned_lines = if text.is_empty() { 0 } else { text.lines().count() };
+    Some(json!({
+        "text": text,
+        "returned_lines": returned_lines,
+        "requested_lines": lines,
+        "scanned_lines": scanned
+    }))
+}
+
+/// 把现场并进错误 details。目标坐标取错误自带的 window/pane，这样就绪超时与
+/// 驻留态阻断共用同一条补证据的路径，调用方不必按错误码分别处理。
+fn attach_failure_evidence(
+    mut error: ApiError,
+    sink: &EventSink,
+    hub: &RuntimeHub,
+    lines: usize,
+) -> ApiError {
+    let Some(details) = error.details.as_ref().and_then(Value::as_object) else { return error };
+    if details.contains_key("tail") {
+        return error;
+    }
+    let Some(pane_id) = details.get("pane_id").and_then(Value::as_u64) else { return error };
+    let window_id = details.get("window_id").and_then(Value::as_u64);
+    let Some(tail) = read_pane_tail(sink, hub, window_id, pane_id, lines) else { return error };
+    let mut details = details.clone();
+    details.insert("tail".to_owned(), tail);
+    error.details = Some(Value::Object(details));
+    error
+}
+
 fn finalize_agents(
     pending: Vec<PendingAgentLaunch>,
     sink: &EventSink,
@@ -654,7 +980,10 @@ fn finalize_agent(
             );
             action.insert("submitted".to_owned(), Value::Bool(true));
             Ok(Value::Object(action))
-        });
+        })
+        // 没能提交 prompt 时把屏幕尾部并进错误：调用方要判断"是登录页还是网络挂住"
+        // 只能靠现场，而这一步的现场在返回后就被下一帧覆盖了。
+        .map_err(|error| attach_failure_evidence(error, sink, hub, EVIDENCE_TAIL_LINES));
     AgentFinalization {
         receipt_index: pending.receipt_index,
         step_id: pending.step_id,
@@ -680,13 +1009,23 @@ pub(super) fn wait_agent_ready(
             && let Ok(pane) = current.pane(Some(agent.window_id), agent.pane_id)
         {
             observed_state = Some(pane.task_state);
-            if agent.observed && pane.task_state != RuntimeTaskState::Running {
-                return Ok((agent, pane.task_state));
+            if agent.observed {
+                // 只有确认空闲才算就绪。此前判据是 `!= Running`，于是停在登录、
+                // 更新确认或任何交互提问上的 Agent 都被当成就绪，initial_prompt
+                // 直接打进那个弹窗。非空闲的驻留态一律带现场返回，不提交 prompt。
+                match pane.task_state {
+                    RuntimeTaskState::Idle => return Ok((agent, pane.task_state)),
+                    RuntimeTaskState::Running => {},
+                    blocked => {
+                        return Err(agent_not_ready(&agent, blocked, observed_agent));
+                    },
+                }
             }
         }
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
+            let hint = agent_pane_hint(hub, agent_id, generation);
             return Err(ApiError::new(
                 "agent_ready_timeout",
                 "the launched agent was not ready for its initial prompt before timeout",
@@ -695,7 +1034,10 @@ pub(super) fn wait_agent_ready(
                 "agent_id": agent_id,
                 "generation": generation,
                 "observed": observed_agent,
-                "task_state": observed_state
+                "task_state": observed_state,
+                "submitted": false,
+                "window_id": hint.map(|(window, _)| window),
+                "pane_id": hint.map(|(_, pane)| pane)
             })));
         }
         snapshot = match receiver.recv_timeout(remaining) {
@@ -709,6 +1051,46 @@ pub(super) fn wait_agent_ready(
             },
         };
     }
+}
+
+/// Agent 进程活着但没停在可接受 prompt 的位置。错误码按驻留态区分，让调用方
+/// 一眼看出"被挡住了"和"启动就退出了"是两回事，两者的续作动作完全不同。
+fn agent_not_ready(
+    agent: &RuntimeManagedAgent,
+    state: RuntimeTaskState,
+    observed: bool,
+) -> ApiError {
+    let (code, message) = match state {
+        RuntimeTaskState::Attention | RuntimeTaskState::WaitingInput => (
+            "agent_not_ready",
+            "the agent stopped on a screen that needs an answer, so its initial prompt was not \
+             submitted",
+        ),
+        RuntimeTaskState::Finished => {
+            ("agent_exited_before_ready", "the agent process exited before accepting a prompt")
+        },
+        RuntimeTaskState::Failed => {
+            ("agent_failed_before_ready", "the agent process failed before accepting a prompt")
+        },
+        RuntimeTaskState::Idle | RuntimeTaskState::Running => {
+            ("agent_not_ready", "the agent was not idle when its initial prompt was due")
+        },
+    };
+    ApiError::new(code, message).details(json!({
+        "agent_id": agent.agent_id,
+        "generation": agent.generation,
+        "observed": observed,
+        "task_state": state,
+        "window_id": agent.window_id,
+        "pane_id": agent.pane_id,
+        "submitted": false
+    }))
+}
+
+fn agent_pane_hint(hub: &RuntimeHub, agent_id: &str, generation: u64) -> Option<(u64, u64)> {
+    hub.active_agent(agent_id, Some(generation))
+        .ok()
+        .map(|agent| (agent.window_id, agent.pane_id))
 }
 
 fn invalid_reference(step: &str, referenced: &str, message: &str) -> ApiError {

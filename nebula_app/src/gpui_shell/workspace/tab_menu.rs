@@ -33,7 +33,8 @@ use crate::session::LaunchSession;
 use nebula_split::SplitDirection;
 
 use super::{
-    CloseActiveTerminal, NebulaWorkspace, RenameActiveTab, SplitDown, SplitRight, WorkspaceTab,
+    CloseActiveTerminal, MoveTabLeft, MoveTabRight, NebulaWorkspace, RenameActiveTab, SplitDown,
+    SplitRight, WorkspaceTab,
 };
 
 /// 标签右键菜单的宿主。画在 workspace 根上，不进标签行的子孙树——理由见
@@ -82,6 +83,7 @@ impl NebulaWorkspace {
         let terminal = self.tabs.get(ix).is_some_and(WorkspaceTab::is_terminal);
         let ai_fork = tab_ai_fork_enabled(self, ix, cx);
         let color = self.meta(ix).color;
+        let tab_count = self.tabs.len();
         let workspace = cx.entity().downgrade();
         let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
             Self::tab_popup_menu(
@@ -91,6 +93,7 @@ impl NebulaWorkspace {
                 terminal,
                 ai_fork,
                 color,
+                tab_count,
             )
         });
         menu.focus_handle(cx).focus(window);
@@ -121,6 +124,7 @@ impl NebulaWorkspace {
     }
 
     /// 标签行右键命令表。条目、分组与键帽对齐旧壳 Tab 目标。
+    #[allow(clippy::too_many_arguments)]
     fn tab_popup_menu(
         mut menu: PopupMenu,
         workspace: gpui::WeakEntity<Self>,
@@ -128,6 +132,7 @@ impl NebulaWorkspace {
         terminal: bool,
         ai_fork: bool,
         color: Option<Rgb>,
+        tab_count: usize,
     ) -> PopupMenu {
         if ai_fork {
             let target = workspace.clone();
@@ -145,6 +150,7 @@ impl NebulaWorkspace {
         }
         if terminal {
             let duplicate = workspace.clone();
+            let move_to_window = workspace.clone();
             let export = workspace.clone();
             let split_right = workspace.clone();
             let split_down = workspace.clone();
@@ -158,6 +164,17 @@ impl NebulaWorkspace {
                         }
                     },
                 ))
+                .item(
+                    PopupMenuItem::new("移到新窗口")
+                        .icon(IconName::ExternalLink)
+                        .on_click(move |_, _, cx| {
+                            if let Some(workspace) = move_to_window.upgrade() {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.schedule_move_tab_to_new_window(ix, cx);
+                                });
+                            }
+                        }),
+                )
                 .item(PopupMenuItem::new("导出为工作区…").icon(IconName::Inbox).on_click(
                     move |_, window, cx| {
                         if let Some(workspace) = export.upgrade() {
@@ -207,7 +224,41 @@ impl NebulaWorkspace {
         }
         let rename = workspace.clone();
         let close = workspace.clone();
+        let move_left = workspace.clone();
+        let move_right = workspace.clone();
         menu = menu
+            .separator()
+            // 位置移动：`action` 只渲键帽，命令仍作用在 `ix` 上（见上面的
+            // 分屏两项）。首/末位灰掉而不是隐藏——菜单条目忽隐忽现比灰掉
+            // 更难认。
+            .item(
+                PopupMenuItem::new("向左移动")
+                    .icon(IconName::ArrowLeft)
+                    .action(Box::new(MoveTabLeft))
+                    .disabled(ix == 0)
+                    .on_click(move |_, window, cx| {
+                        if let Some(workspace) = move_left.upgrade() {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.activate_tab(ix, window, cx);
+                                workspace.move_active_tab(false, window, cx);
+                            });
+                        }
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("向右移动")
+                    .icon(IconName::ArrowRight)
+                    .action(Box::new(MoveTabRight))
+                    .disabled(ix + 1 >= tab_count)
+                    .on_click(move |_, window, cx| {
+                        if let Some(workspace) = move_right.upgrade() {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.activate_tab(ix, window, cx);
+                                workspace.move_active_tab(true, window, cx);
+                            });
+                        }
+                    }),
+            )
             .separator()
             .item(
                 PopupMenuItem::new("重命名")

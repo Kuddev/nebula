@@ -87,7 +87,7 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
+        cx.spawn(async move |_this, cx| {
             loop {
                 executor.timer(Duration::from_millis(75)).await;
                 let mut events = Vec::new();
@@ -101,11 +101,9 @@ impl NebulaWorkspace {
                 if events.is_empty() {
                     continue;
                 }
-                if this
-                    .update(cx, |workspace, cx| {
-                        for event in events {
-                            workspace.handle_ai_hook(event, cx);
-                        }
+                if cx
+                    .update(|cx| {
+                        crate::gpui_shell::workspace::windowing::dispatch_ai_events(events, cx)
                     })
                     .is_err()
                 {
@@ -148,7 +146,11 @@ impl NebulaWorkspace {
         .detach();
     }
 
-    fn handle_ai_hook(&mut self, event: crate::ai_hook::AiHookEvent, cx: &mut Context<Self>) {
+    pub(crate) fn handle_ai_hook(
+        &mut self,
+        event: crate::ai_hook::AiHookEvent,
+        cx: &mut Context<Self>,
+    ) {
         let pane_ids: Vec<u64> = self
             .tabs
             .iter()
@@ -224,6 +226,7 @@ impl NebulaWorkspace {
             panes: vec![pane],
             focused,
             zoomed: false,
+            broadcast: false,
         };
         let position = nebula_settings::RuntimeSettings::load().new_tab_position;
         let at = new_tab_insert_index(position, self.active, self.tabs.len());

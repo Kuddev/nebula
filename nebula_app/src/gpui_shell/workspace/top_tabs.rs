@@ -18,20 +18,28 @@ use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::terminal::view::SidebarActivity;
 
 use super::{
-    NebulaWorkspace, OpenSettings, TAB_LABEL_ICON_SIZE, TAB_LABEL_ICON_W, TabDrag, TabDragAxis,
-    TabPresentation, ToggleShellPicker,
+    NebulaWorkspace, NewWindow, OpenSettings, TAB_LABEL_ICON_SIZE, TAB_LABEL_ICON_W, TabDrag,
+    TabDragAxis, TabPresentation, ToggleShellPicker, pane_header,
 };
 
 pub(super) const TOP_TAB_H: f32 = 34.0;
 /// 与顶部模式正文卡片的 `px_2` 左边距同源，让首个 tab 和终端左缘对齐。
 pub(super) const TOP_TAB_LEFT_INSET: f32 = 8.0;
-const TOP_TAB_MIN_W: f32 = 120.0;
+/// 单个 tab 的最小宽。WT 的 TabView 同一条取舍：标签**不压到读不出来**，
+/// 宁可溢出让用户翻页。120 曾经是下限，但分屏 tab 的行首 2×2 图标 + 尾部
+/// 数量胶囊各要 20 多像素，120 里标题只剩两三个字符（实测挤成 `te`）。
+/// 翻页按钮到位之后，早一点溢出比早一点读不出来划算。
+const TOP_TAB_MIN_W: f32 = 160.0;
 const TOP_TAB_MAX_W: f32 = 220.0;
 const TOP_TAB_GAP: f32 = 4.0;
 const TOP_TAB_STATUS_W: f32 = 28.0;
 /// 标题栏中不属于 tab 视口的固定预算：左内边距、四枚 32px 操作按钮、
 /// 三枚 34px 窗口按钮，以及至少 72px 的可拖拽空白。
 const TOP_TAB_RESERVED_W: f32 = TOP_TAB_LEFT_INSET + 32.0 * 4.0 + 34.0 * 3.0 + 72.0;
+/// 溢出翻页按钮（WT 的 TabView 在 tab 溢出时于两端给 `‹ ›`）单枚占的宽。
+const TOP_TAB_NUDGE_W: f32 = 22.0;
+/// 拖拽越界自动滚的触发带宽：指针进到视口左/右这么近就开始滚。
+const TOP_TAB_EDGE_BAND: f32 = 24.0;
 
 fn tab_width(viewport_w: f32, count: usize) -> f32 {
     if count == 0 || viewport_w <= 1.0 {
@@ -42,6 +50,33 @@ fn tab_width(viewport_w: f32, count: usize) -> f32 {
 
 fn tab_strip_width(tab_w: f32, count: usize) -> f32 {
     tab_w * count as f32 + TOP_TAB_GAP * count.saturating_sub(1) as f32
+}
+
+/// tab 条是否装不下。装不下才画翻页按钮，也才允许自动滚。
+fn strip_overflows(strip_w: f32, capacity_w: f32) -> bool {
+    strip_w > capacity_w + 0.5
+}
+
+/// GPUI 横向滚动偏移是 ≤ 0（内容向左移），与 [`NebulaWorkspace::on_top_tabs_wheel`]
+/// 同一套符号。可滚范围因此是 `[-(strip - viewport), 0]`。
+fn clamp_strip_offset(x: f32, strip_w: f32, viewport_w: f32) -> f32 {
+    let max = (strip_w - viewport_w).max(0.0);
+    x.clamp(-max, 0.0)
+}
+
+/// 一次翻页：`dir` 为 -1 向左（露出前面的 tab）、+1 向右。
+fn nudge_offset(x: f32, step: f32, dir: f32, strip_w: f32, viewport_w: f32) -> f32 {
+    clamp_strip_offset(x - dir * step, strip_w, viewport_w)
+}
+
+/// 已经贴住某一端时按钮要灰掉——一枚点了没反应的箭头比没有箭头更让人怀疑
+/// 是不是卡了。
+fn at_strip_start(x: f32) -> bool {
+    x >= -0.5
+}
+
+fn at_strip_end(x: f32, strip_w: f32, viewport_w: f32) -> bool {
+    x <= -(strip_w - viewport_w).max(0.0) + 0.5
 }
 
 /// 普通鼠标滚轮没有 X 分量时，把主滚动轴映射到横向；触控板原生横向
@@ -74,7 +109,17 @@ impl NebulaWorkspace {
         let tab_capacity_w =
             (f32::from(window.viewport_size().width) - TOP_TAB_RESERVED_W).max(TOP_TAB_MIN_W);
         let tab_w = tab_width(tab_capacity_w, self.tabs.len());
-        let tab_viewport_w = tab_strip_width(tab_w, self.tabs.len()).min(tab_capacity_w);
+        let strip_w = tab_strip_width(tab_w, self.tabs.len());
+        // 溢出时两端各让出一枚翻页按钮。这个反馈是单调的：`tab_w` 已被
+        // `TOP_TAB_MIN_W` 钳死，扣掉按钮宽只会让溢出更成立，不会在"画了按钮
+        // → 不溢出了 → 撤掉按钮"之间抖。
+        let overflow = strip_overflows(strip_w, tab_capacity_w);
+        let tab_viewport_w = if overflow {
+            (tab_capacity_w - TOP_TAB_NUDGE_W * 2.0).max(TOP_TAB_MIN_W)
+        } else {
+            strip_w.min(tab_capacity_w)
+        };
+        let scroll_x = f32::from(self.top_tabs_scroll.offset().x);
         let pitch = tab_w + TOP_TAB_GAP;
         let drag = self
             .tab_drag
@@ -95,8 +140,10 @@ impl NebulaWorkspace {
                     shell_tag,
                     color,
                     renaming,
+                    pane_count,
                 } = self.tab_presentation(ix, cx, dark);
                 let hover_group: SharedString = format!("top-tab-hover-{ix}").into();
+                let cross_window_drag = self.cross_window_drag_payload(ix, cx);
                 let status_color = if active { active_fg } else { muted };
                 let resting_status: Option<gpui::AnyElement> = match activity {
                     SidebarActivity::Running => {
@@ -223,6 +270,8 @@ impl NebulaWorkspace {
                                 .bg(color),
                         )
                     })
+                    // 图标优先级与侧栏同源：先身份（跟随聚焦 pane），分屏标记
+                    // 只在没有身份图标时补位。理由见 sidebar.rs 同处注释。
                     .when(is_settings, |row| {
                         row.child(
                             div()
@@ -237,7 +286,7 @@ impl NebulaWorkspace {
                                 ),
                         )
                     })
-                    .when_some(logo_image, |row, image| {
+                    .when_some(logo_image.clone(), |row, image| {
                         row.child(
                             img(image)
                                 .size(px(TAB_LABEL_ICON_SIZE))
@@ -257,6 +306,26 @@ impl NebulaWorkspace {
                                 .child(glyph),
                         )
                     })
+                    .when(
+                        pane_count > 1
+                            && !is_settings
+                            && logo_image.is_none()
+                            && program_glyph.is_none(),
+                        |row| {
+                            row.child(
+                                div()
+                                    .w(px(TAB_LABEL_ICON_W))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(pane_header::split_glyph(
+                                        label_px * 0.78,
+                                        if active { active_fg } else { muted },
+                                    )),
+                            )
+                        },
+                    )
                     .child(match renaming {
                         Some(input) => div()
                             .flex_1()
@@ -289,6 +358,24 @@ impl NebulaWorkspace {
                             .font_weight(FontWeight::LIGHT)
                             .child(title)
                             .into_any_element(),
+                    })
+                    .when(pane_count > 1, |row| {
+                        row.child(
+                            div()
+                                .id(("top-pane-count", ix))
+                                .flex_shrink_0()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.cycle_pane_focus(ix, window, cx);
+                                }))
+                                .child(pane_header::split_badge(
+                                    pane_count,
+                                    label_px,
+                                    if active { active_fg } else { muted },
+                                    if active { active_bg } else { theme.muted },
+                                )),
+                        )
                     })
                     .child(
                         div()
@@ -328,7 +415,12 @@ impl NebulaWorkspace {
                                             )),
                                     ),
                             ),
-                    );
+                    )
+                    .when_some(cross_window_drag, |row, payload| {
+                        row.on_drag(payload, |payload, _, _, cx| {
+                            NebulaWorkspace::cross_window_drag_preview(payload, cx)
+                        })
+                    });
 
                 if dragged {
                     gpui::deferred(
@@ -379,6 +471,29 @@ impl NebulaWorkspace {
                     .flex_shrink()
                     .min_w_0()
                     .items_end()
+                    // 溢出翻页：只在装不下时出现。滚轮已经能滚，但滚轮是个
+                    // 看不见的入口——tab 一多，用户根本不知道右边还有东西。
+                    .when(overflow, |bar| {
+                        bar.child(
+                            div().h(px(TOP_TAB_H)).flex().items_center().child(
+                                Button::new("top-tabs-prev")
+                                    .icon(IconName::ChevronLeft)
+                                    .ghost()
+                                    .xsmall()
+                                    .disabled(at_strip_start(scroll_x))
+                                    .tooltip("向左翻标签")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.nudge_top_tabs(
+                                            -1.0,
+                                            pitch,
+                                            strip_w,
+                                            tab_viewport_w,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                        )
+                    })
                     .child(
                         div()
                             .id("top-tabs-viewport")
@@ -404,6 +519,27 @@ impl NebulaWorkspace {
                                     .children(items),
                             ),
                     )
+                    .when(overflow, |bar| {
+                        bar.child(
+                            div().h(px(TOP_TAB_H)).flex().items_center().child(
+                                Button::new("top-tabs-next")
+                                    .icon(IconName::ChevronRight)
+                                    .ghost()
+                                    .xsmall()
+                                    .disabled(at_strip_end(scroll_x, strip_w, tab_viewport_w))
+                                    .tooltip("向右翻标签")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.nudge_top_tabs(
+                                            1.0,
+                                            pitch,
+                                            strip_w,
+                                            tab_viewport_w,
+                                            cx,
+                                        );
+                                    })),
+                            ),
+                        )
+                    })
                     .child(
                         Button::new("top-new-tab")
                             .icon(IconName::Plus)
@@ -423,8 +559,23 @@ impl NebulaWorkspace {
                                 gpui::Corner::TopRight,
                                 move |menu, _, _| {
                                     let shell_picker = menu_workspace.clone();
+                                    let new_window = menu_workspace.clone();
                                     let settings = menu_workspace.clone();
                                     menu.external_link_icon(false)
+                                        .item(
+                                            PopupMenuItem::new("新建窗口")
+                                                .icon(IconName::Plus)
+                                                .action(Box::new(NewWindow))
+                                                .on_click(move |_, _, cx| {
+                                                    if new_window.upgrade().is_some() {
+                                                        cx.defer(|cx| {
+                                                            if let Err(error) = crate::gpui_shell::workspace::windowing::open_new_window(cx, None) {
+                                                                log::warn!("failed to open GPUI window: {error}");
+                                                            }
+                                                        });
+                                                    }
+                                                }),
+                                        )
                                         .item(
                                             PopupMenuItem::new("选择终端")
                                                 .icon(IconName::SquareTerminal)
@@ -493,6 +644,61 @@ impl NebulaWorkspace {
         cx.stop_propagation();
         cx.notify();
     }
+
+    /// 翻页按钮的落点：一次一个 tab 步距，钳在可滚范围内。
+    fn nudge_top_tabs(
+        &mut self,
+        dir: f32,
+        step: f32,
+        strip_w: f32,
+        viewport_w: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let mut offset = self.top_tabs_scroll.offset();
+        let next = nudge_offset(f32::from(offset.x), step, dir, strip_w, viewport_w);
+        if (next - f32::from(offset.x)).abs() < 0.5 {
+            return;
+        }
+        offset.x = px(next);
+        self.top_tabs_scroll.set_offset(offset);
+        cx.notify();
+    }
+
+    /// 横向拖拽越界自动滚：指针进到视口左/右边缘 [`TOP_TAB_EDGE_BAND`] 内就
+    /// 按半个步距推一次。翻页按钮解决的是"看不见后面还有 tab"，这条解决的是
+    /// "拖着 tab 推不过滚动边界"——两者少一个，tab 一多都还是废的。
+    ///
+    /// 视口几何这里现算：`update_tab_drag` 拿不到 render 时的那份局部量，而
+    /// 两处的减法必须同源，否则边缘带会和真实视口错开。
+    pub(super) fn autoscroll_top_tabs_for_drag(
+        &mut self,
+        pointer_x: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tabs_position != nebula_settings::TabsPositionName::Top {
+            return;
+        }
+        let capacity_w =
+            (f32::from(window.viewport_size().width) - TOP_TAB_RESERVED_W).max(TOP_TAB_MIN_W);
+        let tab_w = tab_width(capacity_w, self.tabs.len());
+        let strip_w = tab_strip_width(tab_w, self.tabs.len());
+        if !strip_overflows(strip_w, capacity_w) {
+            return;
+        }
+        let viewport_w = (capacity_w - TOP_TAB_NUDGE_W * 2.0).max(TOP_TAB_MIN_W);
+        // 视口左缘 = 左内边距 + 左侧翻页按钮。
+        let left = TOP_TAB_LEFT_INSET + TOP_TAB_NUDGE_W;
+        let right = left + viewport_w;
+        let dir = if pointer_x <= left + TOP_TAB_EDGE_BAND {
+            -1.0
+        } else if pointer_x >= right - TOP_TAB_EDGE_BAND {
+            1.0
+        } else {
+            return;
+        };
+        self.nudge_top_tabs(dir, (tab_w + TOP_TAB_GAP) * 0.5, strip_w, viewport_w, cx);
+    }
 }
 
 #[cfg(test)]
@@ -512,5 +718,43 @@ mod tests {
     fn wheel_uses_the_stronger_axis_for_horizontal_tabs() {
         assert_eq!(horizontal_wheel_delta(2.0, -40.0), -40.0);
         assert_eq!(horizontal_wheel_delta(24.0, -3.0), 24.0);
+    }
+
+    #[test]
+    fn nudge_buttons_only_exist_once_the_strip_overflows() {
+        assert!(!strip_overflows(600.0, 800.0));
+        assert!(!strip_overflows(800.0, 800.0));
+        assert!(strip_overflows(801.0, 800.0));
+    }
+
+    #[test]
+    fn strip_offset_stays_inside_the_scrollable_range() {
+        // 可滚 200px：偏移合法区间是 [-200, 0]。
+        assert_eq!(clamp_strip_offset(50.0, 1000.0, 800.0), 0.0);
+        assert_eq!(clamp_strip_offset(-500.0, 1000.0, 800.0), -200.0);
+        assert_eq!(clamp_strip_offset(-120.0, 1000.0, 800.0), -120.0);
+        // 装得下时根本不该有偏移。
+        assert_eq!(clamp_strip_offset(-30.0, 600.0, 800.0), 0.0);
+    }
+
+    #[test]
+    fn nudge_walks_one_step_and_stops_at_both_ends() {
+        assert_eq!(nudge_offset(0.0, 124.0, 1.0, 1000.0, 800.0), -124.0);
+        assert_eq!(nudge_offset(-124.0, 124.0, -1.0, 1000.0, 800.0), 0.0);
+        // 末端：再往右也只到 -200。
+        assert_eq!(nudge_offset(-150.0, 124.0, 1.0, 1000.0, 800.0), -200.0);
+        // 首端：再往左也只到 0。
+        assert_eq!(nudge_offset(-50.0, 124.0, -1.0, 1000.0, 800.0), 0.0);
+    }
+
+    #[test]
+    fn end_state_drives_the_disabled_arrows() {
+        assert!(at_strip_start(0.0));
+        assert!(!at_strip_start(-124.0));
+        assert!(at_strip_end(-200.0, 1000.0, 800.0));
+        assert!(!at_strip_end(-100.0, 1000.0, 800.0));
+        // 装得下时两端同时成立——按钮本来也不画。
+        assert!(at_strip_start(0.0));
+        assert!(at_strip_end(0.0, 600.0, 800.0));
     }
 }

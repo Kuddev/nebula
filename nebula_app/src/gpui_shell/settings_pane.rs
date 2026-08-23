@@ -44,7 +44,7 @@ const BUG_REPORT_TEMPLATE: &str = "bug_report.yml";
 /// 左侧分区导航。主页承载应用身份、版本与支持入口；供应商和备份仍保留
 /// 业务实现，但不作为设置主导航入口，避免把旧壳没有的管理页塞进侧栏。
 const SECTIONS: [&str; 10] =
-    ["主页", "外观", "配置文件", "供应商", "SSH", "网络", "交互", "按键映射", "高级", "备份"];
+    ["应用", "外观", "配置文件", "供应商", "SSH", "网络", "交互", "按键映射", "高级", "备份"];
 
 /// 左侧导航保留稳定的 [`SECTIONS`] 下标，只控制旧壳式显示顺序；AI
 /// 供应商（3）和备份（9）仍可由业务层复用，但不再出现在设置侧栏。
@@ -58,6 +58,7 @@ const SETTINGS_GROUP_GAP: f32 = 32.0;
 const SETTINGS_GROUP_TITLE_HEIGHT: f32 = 26.0;
 const SETTINGS_GROUP_TITLE_GAP: f32 = 16.0;
 const SETTINGS_ROW_HEIGHT: f32 = 44.0;
+const SETTINGS_ROW_GAP: f32 = 8.0;
 // 触发条仍 220，对齐旧壳 combobox。弹层加宽，长族名 + 徽标才读得完。
 const FONT_PICKER_WIDTH: f32 = 220.0;
 const FONT_PICKER_PANEL_WIDTH: f32 = 400.0;
@@ -541,6 +542,14 @@ impl SettingsPane {
             &["当前标签之后", "列表末尾"],
             &["after_current", "end"],
             runtime.new_tab_position.settings_value(),
+            window,
+            cx,
+        );
+        add_select(
+            "windowing_behavior",
+            &["创建新窗口", "附加到最近使用的窗口", "附加到此桌面最近使用的窗口"],
+            &["use_new", "use_any_existing", "use_existing"],
+            runtime.windowing_behavior.settings_value(),
             window,
             cx,
         );
@@ -1624,10 +1633,19 @@ impl SettingsPane {
         let row = self.font_picker_row(cx);
         let panel = self.font_picker_open.then(|| self.font_picker_panel(cx));
         let trigger_bounds = self.font_picker_trigger_bounds;
+        let row_h = if self.runtime.density == nebula_settings::DensityName::Compact {
+            38.0
+        } else {
+            SETTINGS_ROW_HEIGHT
+        };
 
-        div().relative().w_full().h(px(SETTINGS_ROW_HEIGHT)).flex_shrink_0().child(row).when_some(
-            panel.zip(trigger_bounds),
-            |anchor, (panel, trigger_bounds)| {
+        div()
+            .relative()
+            .w_full()
+            .h(px(row_h + SETTINGS_ROW_GAP))
+            .flex_shrink_0()
+            .child(row)
+            .when_some(panel.zip(trigger_bounds), |anchor, (panel, trigger_bounds)| {
                 anchor.child(
                     deferred(
                         anchored()
@@ -1641,8 +1659,7 @@ impl SettingsPane {
                     // 它上面，否则鼠标到不了搜索框和候选行。
                     .with_priority(2),
                 )
-            },
-        )
+            })
     }
 
     pub(super) fn select_of(&self, key: &str) -> Option<SharedSelect> {
@@ -1731,26 +1748,32 @@ impl SettingsPane {
         } else {
             SETTINGS_ROW_HEIGHT
         };
-        h_flex()
+        v_flex()
             .w_full()
-            .h(px(row_h))
+            .h(px(row_h + SETTINGS_ROW_GAP))
             .flex_shrink_0()
-            .items_center()
-            // 旧壳 `settings_geometry`：标签起 row_x+16，控件右缘距行右 16
-            // （ROW_INSET）。GPUI 行内两端原来都贴边，长表单左缘和右缘会
-            // 呈一条光柱——旧壳的两档缩进是刻意留的呼吸边。
-            .pr_4()
             .child(
                 h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .pl_4()
+                    .w_full()
+                    .h(px(row_h))
                     .items_center()
-                    .gap_1()
-                    .child(div().min_w_0().child(label))
-                    .children(reset),
+                    // 旧壳 `settings_geometry`：标签起 row_x+16，控件右缘距行右 16
+                    // （ROW_INSET）。行间距独立放在外层，控件的 hover/下拉锚点
+                    // 仍只占自身行高，不会把留白也变成可点击区域。
+                    .pr_4()
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .pl_4()
+                            .items_center()
+                            .gap_1()
+                            .child(div().min_w_0().child(label))
+                            .children(reset),
+                    )
+                    .child(control),
             )
-            .child(control)
+            .child(div().h(px(SETTINGS_ROW_GAP)).flex_shrink_0())
     }
 
     fn select_row(
@@ -2321,16 +2344,18 @@ impl SettingsPane {
 
     // ---- 分区内容（归属对照旧壳各 section）----
 
-    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+    fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.about_update, AboutUpdateState::Checking) {
             return;
         }
         self.about_update_seq = self.about_update_seq.wrapping_add(1);
         let sequence = self.about_update_seq;
         self.about_update = AboutUpdateState::Checking;
+        let window_handle = window.window_handle();
         let task = cx.background_executor().spawn(async { crate::update_check::check_now() });
         cx.spawn(async move |this, cx| {
             let result = task.await;
+            let prompt = result.as_ref().ok().filter(|result| result.update_available).cloned();
             let _ = this.update(cx, |pane, cx| {
                 if pane.about_update_seq != sequence {
                     return;
@@ -2344,6 +2369,11 @@ impl SettingsPane {
                 };
                 cx.notify();
             });
+            if let Some(result) = prompt {
+                let _ = window_handle.update(cx, move |_, window, cx| {
+                    crate::gpui_shell::workspace::open_update_dialog(result, window, cx);
+                });
+            }
         })
         .detach();
         cx.notify();
@@ -2403,22 +2433,22 @@ impl SettingsPane {
             .label(if checking { "正在检查…" } else { "检查更新" })
             .outline()
             .disabled(checking)
-            .on_click(cx.listener(|this, _, _, cx| this.check_for_updates(cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx)));
         let identity = v_flex()
-            .w(px(300.0))
-            .min_w(px(260.0))
+            .w(px(320.0))
+            .min_w(px(280.0))
             .flex_shrink_0()
             .child(
                 h_flex()
-                    .gap_4()
+                    .gap(px(18.0))
                     .items_center()
-                    .child(img(self.about_logo.clone()).size(px(64.0)).rounded(px(12.0)))
+                    .child(img(self.about_logo.clone()).size(px(68.0)).rounded(px(12.0)))
                     .child(
                         v_flex()
                             .gap(px(2.0))
                             .child(
                                 div()
-                                    .text_xl()
+                                    .text_size(px(self.font_size_px(cx) * 1.55))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("Nebula"),
                             )
@@ -2435,24 +2465,17 @@ impl SettingsPane {
                             ))),
                     ),
             )
-            .child(
-                div()
-                    .mt_4()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("面向本地 Shell、SSH、分屏与 AI 会话的终端工作区。"),
-            )
-            .child(h_flex().mt_4().gap_2().items_center().child(update_button))
-            .child(div().mt_2().text_xs().text_color(status_color).child(status));
+            .child(h_flex().mt_6().gap_2().items_center().child(update_button))
+            .child(div().mt_3().text_xs().text_color(status_color).child(status));
         let actions = v_flex()
             .flex_1()
             .min_w(px(320.0))
-            .gap(px(2.0))
+            .gap(px(8.0))
             .child(Self::about_action_row(
                 "about-report-issue",
                 IconName::TriangleAlert,
-                "提交 issue",
-                "生成包含版本、平台与构建方式的预填 GitHub issue",
+                "反馈问题",
+                "生成包含版本、平台与构建方式的预填 GitHub Issue",
                 issue_url(),
                 cx,
             ))
@@ -2460,28 +2483,20 @@ impl SettingsPane {
                 "about-github",
                 IconName::GitHub,
                 "GitHub",
-                "查看源码、开发进度与贡献指南",
+                "源代码",
                 REPOSITORY_URL.to_owned(),
                 cx,
             ))
             .child(Self::about_action_row(
                 "about-releases",
                 IconName::BookOpen,
-                "发布记录",
-                "查看版本说明并下载最新构建",
+                "更新内容",
+                "查看发布说明并下载最新版本",
                 crate::update_check::RELEASES_PAGE.to_owned(),
                 cx,
             ));
 
-        self.group("关于 Nebula", cx).child(
-            h_flex()
-                .w_full()
-                .items_start()
-                .flex_wrap()
-                .gap(px(48.0))
-                .child(identity)
-                .child(actions),
-        )
+        h_flex().w_full().items_start().flex_wrap().gap(px(56.0)).child(identity).child(actions)
     }
 
     fn section_appearance(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -3240,6 +3255,7 @@ impl SettingsPane {
             .child(self.select_row("tabs_position", "标签栏位置", cx))
             .child(self.select_row("tab_reveal", "标签展开动效", cx))
             .child(self.select_row("new_tab_position", "新标签位置", cx))
+            .child(self.select_row("windowing_behavior", "新建实例行为", cx))
             .child(self.select_row("vcs_display", "侧栏版本控制（Git/SVN）", cx))
             .child(self.switch_row(
                 "panel_resize",
@@ -3698,19 +3714,19 @@ impl SettingsPane {
         // 设置导航、内容和 workspace 左侧 tab 共享这一个主文字字号。
         let main_text_px = self.font_size_px(cx);
 
-        // 旧壳顶部是品牌标题而不是搜索框；导航入口保持连续排列，避免
-        // 额外分组标题把旧版的行距和可视顺序撑开。
+        // 一级标题靠左，二级导航略向右收进；只靠对齐关系建立层级，
+        // 不额外添加卡片或分组标题。
         let mut nav =
             v_flex().w(px(SETTINGS_NAV_WIDTH)).h_full().flex_shrink_0().px_2().gap(px(2.0)).child(
                 div()
                     .h(px(72.0))
                     .w_full()
-                    .px_3()
+                    .px_1()
                     .flex()
                     .items_center()
                     .text_size(px(main_text_px * 1.45))
                     .text_color(theme.foreground)
-                    .child("Nebula 设置"),
+                    .child("设置"),
             );
         for ix in NAV_ORDER {
             let active = ix == self.active_section;
@@ -3718,6 +3734,8 @@ impl SettingsPane {
                 div()
                     .id(("settings-nav", ix))
                     .px_2()
+                    .ml_2()
+                    .mr_1()
                     .h(row_h)
                     .flex()
                     .items_center()

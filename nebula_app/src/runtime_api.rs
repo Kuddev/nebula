@@ -24,6 +24,7 @@ pub(crate) use command::{
 use server::{Endpoint, endpoint_addr, read_endpoint};
 pub use server::{
     RuntimeServer, dispatch_prompt, try_open_default_tab_existing, try_open_directory_existing,
+    try_open_window_existing,
 };
 
 use std::error::Error;
@@ -67,6 +68,16 @@ pub(crate) const MAX_READ_LINES: usize = 2_000;
 const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_CLIENTS: usize = 64;
 const MAX_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+/// Enter 之后留给"命令确实开始了"的观察窗口。窗口内既没完成、没有 CommandStart、
+/// 屏幕也一个字节没动，就不再烧完整个超时——那通常是有东西吃掉了输入。
+const RUN_START_GRACE: Duration = Duration::from_secs(3);
+/// 判断"屏幕有没有动"只需要最后几行；这条路径只在 grace 超时后才走，不进热路径。
+const RUN_PROGRESS_PROBE_LINES: usize = 8;
+/// 两次取样的间隔。太短会把慢速输出误判成静默，太长会拖慢阻断的发现速度。
+const RUN_PROGRESS_PROBE_INTERVAL: Duration = Duration::from_millis(500);
+/// 终端网格的底部在内容不足一屏时是空白行，直接取"最后 N 行"会什么都读不到。
+/// 因此多扫一段再回退到最后 N 个非空行——与屏幕证据规则同一个判据。
+const TAIL_SCAN_EXTRA_LINES: usize = 200;
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
@@ -667,7 +678,10 @@ pub struct RuntimeKeyModifiers {
 #[derive(Debug, Clone)]
 pub enum RuntimeCommand {
     Snapshot,
-    NewWindow,
+    NewWindow {
+        /// 普通启动 / Explorer 右键要求新开窗口时，把目标目录一路带到首个标签。
+        cwd: Option<PathBuf>,
+    },
     Focus {
         window_id: Option<u64>,
         pane_id: Option<u64>,
@@ -806,11 +820,23 @@ pub struct RuntimeHub {
     inner: Arc<Mutex<HubState>>,
 }
 
+type PaneIdentity = (u64, u64);
+
+#[derive(Default)]
+struct ResolvedPaneRelocations {
+    by_source: std::collections::HashMap<PaneIdentity, PaneIdentity>,
+    by_target: std::collections::HashMap<PaneIdentity, PaneIdentity>,
+}
+
 /// Carry each pane's transition counter forward, incrementing only where the
 /// task state actually changed. Pane ids are window-local, so the identity key
 /// is (window, pane) — matching on the pane id alone would let a same-numbered
 /// pane in another window inherit an unrelated counter.
-fn stamp_state_change_seq(previous: Option<&RuntimeSnapshot>, next: &mut RuntimeSnapshot) {
+fn stamp_state_change_seq(
+    previous: Option<&RuntimeSnapshot>,
+    next: &mut RuntimeSnapshot,
+    relocations: &ResolvedPaneRelocations,
+) {
     let mut before = std::collections::HashMap::new();
     if let Some(previous) = previous {
         for window in &previous.windows {
@@ -826,7 +852,9 @@ fn stamp_state_change_seq(previous: Option<&RuntimeSnapshot>, next: &mut Runtime
         let window_id = window.id;
         for tab in &mut window.tabs {
             for pane in &mut tab.panes {
-                pane.state_change_seq = match before.get(&(window_id, pane.id)) {
+                let identity = (window_id, pane.id);
+                let previous_identity = relocations.by_target.get(&identity).unwrap_or(&identity);
+                pane.state_change_seq = match before.get(previous_identity) {
                     Some((state, seq)) if *state == pane.task_state => *seq,
                     Some((_, seq)) => seq.saturating_add(1),
                     // A pane observed for the first time starts at 1, so a
@@ -845,6 +873,7 @@ struct HubState {
     subscribers: Vec<(u64, SyncSender<RuntimeSnapshot>)>,
     next_pane_lifecycle: u64,
     pane_lifecycles: std::collections::VecDeque<RuntimePaneLifecycle>,
+    pending_pane_relocations: std::collections::HashMap<PaneIdentity, PaneIdentity>,
     next_run_waiter: u64,
     run_waiters:
         std::collections::HashMap<(u64, u64, u64), Vec<(u64, SyncSender<RuntimeRunResult>)>>,
@@ -866,14 +895,15 @@ impl RuntimeHub {
     /// revisions or flood subscribers with identical snapshots.
     pub(crate) fn publish(&self, mut snapshot: RuntimeSnapshot) -> RuntimeSnapshot {
         let mut state = self.lock();
-        observe_removed_panes(&mut state, &snapshot);
+        let relocations = resolve_pane_relocations(&mut state, &snapshot);
+        observe_removed_panes(&mut state, &snapshot, &relocations);
         snapshot.pane_lifecycles = state.pane_lifecycles.iter().cloned().collect();
         let agent_lifecycle_changed = project_managed_agents(&mut state, &mut snapshot);
         // Stamp per-pane transition counters before the dedup compare. Panes
         // whose state is unchanged keep their previous counter, so an
         // otherwise-identical projection still compares equal here.
-        stamp_state_change_seq(state.current.as_ref(), &mut snapshot);
-        observe_run_lifecycle(&mut state, &snapshot);
+        stamp_state_change_seq(state.current.as_ref(), &mut snapshot, &relocations);
+        observe_run_lifecycle(&mut state, &snapshot, &relocations);
         if let Some(current) = state.current.clone() {
             snapshot.revision = current.revision;
             if current == snapshot {
@@ -912,6 +942,43 @@ impl RuntimeHub {
 
     pub(crate) fn record_pane_exited(&self, window_id: u64, pane_id: u64) {
         self.record_pane_lifecycle(window_id, pane_id, RuntimePaneLifecycleKind::Exited);
+    }
+
+    /// 活体 pane 跨窗口移动时同步修正进程级 Agent / run 等待身份。
+    ///
+    /// 这里不能先把旧窗口快照发布出去再补新窗口，否则 hub 会把短暂消失的
+    /// pane 判成关闭并终止 Agent。迁移和下一份聚合快照必须是同一事务。
+    pub(crate) fn move_panes_to_window(&self, from: u64, to: u64, pane_ids: &[u64]) {
+        if from == to || pane_ids.is_empty() {
+            return;
+        }
+        let pane_ids: std::collections::HashSet<u64> = pane_ids.iter().copied().collect();
+        let mut state = self.lock();
+        for pane_id in &pane_ids {
+            state.pending_pane_relocations.insert((from, *pane_id), (to, *pane_id));
+        }
+        for agent in state.managed_agents.values_mut() {
+            if agent.window_id == from && pane_ids.contains(&agent.pane_id) {
+                agent.window_id = to;
+            }
+        }
+
+        let moved_waiters: Vec<_> = state
+            .run_waiters
+            .keys()
+            .filter(|(window_id, pane_id, _)| *window_id == from && pane_ids.contains(pane_id))
+            .copied()
+            .collect();
+        for old_key @ (_, pane_id, run_id) in moved_waiters {
+            if let Some(waiters) = state.run_waiters.remove(&old_key) {
+                state.run_waiters.entry((to, pane_id, run_id)).or_default().extend(waiters);
+            }
+        }
+        for result in &mut state.completed_runs {
+            if result.window_id == from && pane_ids.contains(&result.pane_id) {
+                result.window_id = to;
+            }
+        }
     }
 
     fn record_pane_lifecycle(&self, window_id: u64, pane_id: u64, event: RuntimePaneLifecycleKind) {
@@ -1162,9 +1229,25 @@ impl RuntimeHub {
 
 const PANE_LIFECYCLE_CACHE: usize = 256;
 
-fn observe_removed_panes(state: &mut HubState, snapshot: &RuntimeSnapshot) {
-    let Some(current) = state.current.as_ref() else { return };
-    let live: std::collections::HashSet<_> = snapshot
+fn resolve_pane_relocations(
+    state: &mut HubState,
+    snapshot: &RuntimeSnapshot,
+) -> ResolvedPaneRelocations {
+    let live = snapshot_pane_identities(snapshot);
+    // 迁移登记只对紧随其后的聚合快照有效，避免过期记录误匹配后来复用的 pane id。
+    let pending = std::mem::take(&mut state.pending_pane_relocations);
+    let mut resolved = ResolvedPaneRelocations::default();
+    for (source, target) in pending {
+        if live.contains(&target) {
+            resolved.by_source.insert(source, target);
+            resolved.by_target.insert(target, source);
+        }
+    }
+    resolved
+}
+
+fn snapshot_pane_identities(snapshot: &RuntimeSnapshot) -> std::collections::HashSet<PaneIdentity> {
+    snapshot
         .windows
         .iter()
         .flat_map(|window| {
@@ -1173,7 +1256,16 @@ fn observe_removed_panes(state: &mut HubState, snapshot: &RuntimeSnapshot) {
                 .iter()
                 .flat_map(move |tab| tab.panes.iter().map(move |pane| (window.id, pane.id)))
         })
-        .collect();
+        .collect()
+}
+
+fn observe_removed_panes(
+    state: &mut HubState,
+    snapshot: &RuntimeSnapshot,
+    relocations: &ResolvedPaneRelocations,
+) {
+    let Some(current) = state.current.as_ref() else { return };
+    let live = snapshot_pane_identities(snapshot);
     let removed: Vec<_> = current
         .windows
         .iter()
@@ -1183,7 +1275,8 @@ fn observe_removed_panes(state: &mut HubState, snapshot: &RuntimeSnapshot) {
                 .iter()
                 .flat_map(move |tab| tab.panes.iter().map(move |pane| (window.id, pane.id)))
         })
-        .filter(|target| !live.contains(target))
+        // 跨窗口迁移保留原 PTY；只有真正消失的 pane 才能产生关闭墓碑。
+        .filter(|target| !live.contains(target) && !relocations.by_source.contains_key(target))
         .collect();
     for (window_id, pane_id) in removed {
         record_pane_lifecycle_locked(state, window_id, pane_id, RuntimePaneLifecycleKind::Closed);
@@ -1302,7 +1395,11 @@ fn project_managed_agents(state: &mut HubState, snapshot: &mut RuntimeSnapshot) 
 
 const COMPLETED_RUN_CACHE: usize = 256;
 
-fn observe_run_lifecycle(state: &mut HubState, snapshot: &RuntimeSnapshot) {
+fn observe_run_lifecycle(
+    state: &mut HubState,
+    snapshot: &RuntimeSnapshot,
+    relocations: &ResolvedPaneRelocations,
+) {
     let mut observed = std::collections::HashMap::new();
     for window in &snapshot.windows {
         for tab in &window.tabs {
@@ -1340,7 +1437,13 @@ fn observe_run_lifecycle(state: &mut HubState, snapshot: &RuntimeSnapshot) {
             })
         })
         .collect();
-    for key @ (window_id, pane_id, run_id) in previous_active {
+    for (window_id, pane_id, run_id) in previous_active {
+        let (window_id, pane_id) = relocations
+            .by_source
+            .get(&(window_id, pane_id))
+            .copied()
+            .unwrap_or((window_id, pane_id));
+        let key = (window_id, pane_id, run_id);
         if observed.contains_key(&key)
             || state.completed_runs.iter().any(|result| {
                 result.window_id == window_id
@@ -1372,6 +1475,127 @@ fn complete_run(state: &mut HubState, result: RuntimeRunResult) {
     while state.completed_runs.len() > COMPLETED_RUN_CACHE {
         state.completed_runs.pop_front();
     }
+}
+
+/// run 等待的分段限时。Enter 之后的短窗口内既没完成也没有 CommandStart，且这一刻
+/// 屏幕不在产出——那通常是有东西吃掉了输入（更新页、授权确认、任意抢走键盘的 TUI）。
+/// 这种情况不该烧完整个超时才报。反之只要还在产出，就按原超时继续等：那可能只是
+/// 这个 shell 缺少 OSC 133 集成，命令本身跑得好好的。
+///
+/// Runtime 到此为止不解释"是什么挡住了"——阻拦形态是开放集，枚举追不上。它只负责
+/// 快速判定"不在进展"并把现场原样交出去。
+fn wait_run_phased(
+    hub: &RuntimeHub,
+    sink: &EventSink,
+    window_id: u64,
+    pane_id: u64,
+    run_id: u64,
+    timeout: Duration,
+) -> Result<RuntimeRunResult, ApiError> {
+    wait_run_phased_with_grace(hub, sink, window_id, pane_id, run_id, timeout, RUN_START_GRACE)
+}
+
+fn wait_run_phased_with_grace(
+    hub: &RuntimeHub,
+    sink: &EventSink,
+    window_id: u64,
+    pane_id: u64,
+    run_id: u64,
+    timeout: Duration,
+    start_grace: Duration,
+) -> Result<RuntimeRunResult, ApiError> {
+    let grace = start_grace.min(timeout);
+    let start_timeout = match hub.wait_run(window_id, pane_id, run_id, grace) {
+        Err(error) if error.code == "run_start_timeout" => error,
+        other => return other,
+    };
+    let remaining = timeout.saturating_sub(grace);
+    if remaining.is_zero() {
+        return Err(start_timeout);
+    }
+    let Some(tail) = quiet_pane_evidence(hub, sink, window_id, pane_id) else {
+        return hub.wait_run(window_id, pane_id, run_id, remaining);
+    };
+    // 取样期间命令可能刚好收尾，完成结果已经进了 completed_runs 缓存；宁可多查一次
+    // 也不要把一个已经成功的 run 报成没启动。
+    if let Ok(result) = hub.wait_run(window_id, pane_id, run_id, Duration::ZERO) {
+        return Ok(result);
+    }
+    Err(ApiError::new(
+        "run_not_started",
+        "the command was submitted but never reported CommandStart, and the pane is producing no \
+         output; something may be holding the input. The command was not cancelled and the pane \
+         was left untouched, so waiting again is safe.",
+    )
+    .details(json!({
+        "window_id": window_id,
+        "pane_id": pane_id,
+        "run_id": run_id,
+        "waited_ms": u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+        "remaining_ms": u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+        // 缺少 133 集成的 shell 里静默的慢命令看起来与被挡住完全一样，因此这里
+        // 只报证据，不宣称已经定性。
+        "shell_integration": "unconfirmed",
+        "tail": tail
+    })))
+}
+
+/// 连续两次取样 pane 尾部。两次相同即认为此刻没有产出，返回现场；只要有变化就
+/// 返回 None，表示"还在跑，别打断"。
+fn quiet_pane_evidence(
+    hub: &RuntimeHub,
+    sink: &EventSink,
+    window_id: u64,
+    pane_id: u64,
+) -> Option<String> {
+    let first = read_pane_text(hub, sink, window_id, pane_id, RUN_PROGRESS_PROBE_LINES)?;
+    std::thread::sleep(RUN_PROGRESS_PROBE_INTERVAL);
+    let second = read_pane_text(hub, sink, window_id, pane_id, RUN_PROGRESS_PROBE_LINES)?;
+    (first == second).then_some(second)
+}
+
+/// 读一次 pane 尾部文本。读取失败不能升级成调用方的错误——拿不到现场只是少一份
+/// 证据，原始结论照旧。
+fn read_pane_text(
+    hub: &RuntimeHub,
+    sink: &EventSink,
+    window_id: u64,
+    pane_id: u64,
+    lines: usize,
+) -> Option<String> {
+    read_pane_tail_text(hub, sink, Some(window_id), pane_id, lines).map(|(text, _)| text)
+}
+
+/// 读 pane 的"最后 `lines` 个非空行"，并一并返回这次实际请求的行数。
+///
+/// `pane.read` 的契约是"网格底部若干行"，内容不足一屏时那就是一片空白。做证据和
+/// 做静默比对都需要真正看得见的内容，所以这里多扫一段再回退。`pane.read` 自身的
+/// 语义保持不变——外部客户端依赖它。
+pub(crate) fn read_pane_tail_text(
+    hub: &RuntimeHub,
+    sink: &EventSink,
+    window_id: Option<u64>,
+    pane_id: u64,
+    lines: usize,
+) -> Option<(String, usize)> {
+    let requested = lines.saturating_add(TAIL_SCAN_EXTRA_LINES).min(MAX_READ_LINES);
+    let result = dispatch_runtime_command(
+        RuntimeCommand::ReadPane { window_id, pane_id, lines: requested },
+        sink,
+        hub,
+    )
+    .ok()?;
+    let read = result.get("action").unwrap_or(&result);
+    let text = read.get("text").and_then(Value::as_str)?;
+    Some((last_non_empty_lines(text, lines), requested))
+}
+
+/// 从末尾去掉空白行，再取最后 `lines` 行。
+fn last_non_empty_lines(text: &str, lines: usize) -> String {
+    let all: Vec<&str> = text.lines().collect();
+    let end = all.iter().rposition(|line| !line.trim().is_empty()).map_or(0, |index| index + 1);
+    let start = end.saturating_sub(lines);
+    all[start..end].join("\n")
 }
 
 fn run_result_or_capability_error(result: RuntimeRunResult) -> Result<RuntimeRunResult, ApiError> {
@@ -1823,7 +2047,8 @@ fn dispatch_runtime_command(
                 );
                 match target {
                     (Some(window_id), Some(pane_id), Some(run_id)) => {
-                        let run = hub.wait_run(window_id, pane_id, run_id, timeout)?;
+                        let run =
+                            wait_run_phased(hub, sink, window_id, pane_id, run_id, timeout)?;
                         Ok(json!({ "run": run, "snapshot": hub.current() }))
                     },
                     _ => Err(ApiError::new(

@@ -8,7 +8,7 @@ fn gpui_binding_combo_maps_plus_minus_and_digits() {
     assert_eq!(gpui_binding_combo("ctrl+minus"), "ctrl--");
     assert_eq!(gpui_binding_combo("ctrl+digit1"), "ctrl-1");
     assert!(
-        custom_workspace_binding("ctrl+shift+e", &crate::config::Action::CreateNewWindow).is_none()
+        custom_workspace_binding("ctrl+shift+e", &crate::config::Action::CreateNewWindow).is_some()
     );
 }
 
@@ -44,6 +44,24 @@ fn new_tab_position_uses_the_shared_runtime_semantics() {
     assert_eq!(new_tab_insert_index(End, 1, 4), 4);
     assert_eq!(new_tab_insert_index(AfterCurrent, 9, 2), 2);
     assert_eq!(new_tab_insert_index(AfterCurrent, 0, 0), 0);
+}
+
+/// 标签位置左右移动的落点：不环绕，两端各自到头就是 no-op。环绕会让"按住
+/// 键把标签推到最左"突然跳到最右端，而标签栏此时正滚在另一头，人就找不着
+/// 自己的标签了。
+#[test]
+fn moving_a_tab_stops_at_both_ends_instead_of_wrapping() {
+    use super::key_actions::move_target;
+
+    assert_eq!(move_target(1, 4, true), Some(2));
+    assert_eq!(move_target(1, 4, false), Some(0));
+    // 两端到头。
+    assert_eq!(move_target(0, 4, false), None);
+    assert_eq!(move_target(3, 4, true), None);
+    // 退化输入：单标签、空集合、越界 active 都不动。
+    assert_eq!(move_target(0, 1, true), None);
+    assert_eq!(move_target(0, 0, false), None);
+    assert_eq!(move_target(9, 4, true), None);
 }
 
 #[test]

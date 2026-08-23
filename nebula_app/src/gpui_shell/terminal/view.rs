@@ -1,6 +1,9 @@
 //! 终端视图：持有会话、处理输入与 IME、驱动重绘。
 
+mod broadcast;
 mod runtime;
+
+pub use broadcast::TerminalInput;
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable,
@@ -130,6 +133,9 @@ pub enum TerminalViewEvent {
     FontSizeChanged,
     /// BEL（`^G`）。后台 tab 记铃点；本 tab 的闪烁/声音由视图自己处理。
     Bell,
+    /// 用户语义输入。宿主可按 tab 的广播状态扇出；接收 pane 必须重新编码，
+    /// 不能复用发送方已经受终端 mode 影响的字节。
+    UserInput(TerminalInput),
 }
 
 /// 会话种类：本地 shell 或 SSH 直连（russh，共享旧壳业务层）。
@@ -1409,6 +1415,10 @@ impl TerminalView {
     }
 
     fn paste_now(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.paste_now_impl(text, true, cx);
+    }
+
+    fn paste_now_impl(&mut self, text: &str, emit: bool, cx: &mut Context<Self>) {
         let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
         // 行镜像吃粘贴的字面文本；多行/控制字符由引擎侧作废（与旧壳
         // `nebula_input_text` 的防注入契约一致）。
@@ -1424,7 +1434,11 @@ impl TerminalView {
         } else {
             normalized.into_bytes()
         };
-        self.write_input(bytes, cx);
+        if emit {
+            self.write_user_text(text.to_owned(), true, bytes, cx);
+        } else {
+            self.write_input(bytes, cx);
+        }
     }
 
     /// Enter 提交：从 grid 读回显真值（screen truth）记入共享历史，然后清
@@ -1552,6 +1566,34 @@ impl TerminalView {
         }
     }
 
+    fn track_encoded_key(&mut self, ks: &gpui::Keystroke, mode: &TermMode) {
+        if self.marked_text.is_some() || mode.contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        let mods = &ks.modifiers;
+        let plain_mods = !mods.control && !mods.alt && !mods.platform;
+        match ks.key.as_str() {
+            "enter" => self.commit_line(),
+            "backspace" if mods.control && !mods.alt && !mods.platform => {
+                crate::display::Display::nebula_input_delete_word(&mut self.suggest);
+            },
+            "backspace" if plain_mods => {
+                crate::display::Display::nebula_input_backspace(&mut self.suggest);
+            },
+            key => {
+                let is_modifier = matches!(
+                    key,
+                    "shift" | "control" | "alt" | "platform" | "function" | "capslock"
+                );
+                // key_char 非空 = 平台判定它产生文本（随后从 IME 管道到达）。
+                let produces_text = ks.key_char.as_deref().is_some_and(|text| !text.is_empty());
+                if !is_modifier && !produces_text {
+                    crate::display::Display::nebula_clear_line(&mut self.suggest);
+                }
+            },
+        }
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.exited.is_some() {
             return;
@@ -1578,9 +1620,13 @@ impl TerminalView {
                     cx.stop_propagation();
                     return;
                 },
-                // 应用级快捷键（新建/关闭 Tab、折叠侧栏、分屏、缩放）：
-                // 不编码、不拦截，让按键冒泡到 workspace 的 action 绑定。
-                "t" | "w" | "b" | "p" | "f" | "d" | "s" | "g" | "o" | "enter" => return,
+                // 应用级快捷键（新建/关闭 Tab、折叠侧栏、分屏、缩放、标签
+                // 位置移动）：不编码、不拦截，让按键冒泡到 workspace 的 action
+                // 绑定。少写一个键位，症状就是"快捷键没反应"外加一串 CSI
+                // 序列被打进 PTY——本文件下面的回滚翻页分支只吃**不带 ctrl**
+                // 的 shift+pageup，所以 ctrl+shift 这一组必须在这里放行。
+                "t" | "w" | "b" | "p" | "f" | "d" | "s" | "g" | "o" | "enter" | "pageup"
+                | "pagedown" => return,
                 _ => {},
             }
         }
@@ -1651,7 +1697,7 @@ impl TerminalView {
                 for c in ghost.chars() {
                     crate::display::Display::nebula_input_char(&mut self.suggest, c);
                 }
-                self.write_input(ghost.into_bytes(), cx);
+                self.write_user_text(ghost.clone(), false, ghost.into_bytes(), cx);
                 cx.stop_propagation();
                 return;
             }
@@ -1682,33 +1728,10 @@ impl TerminalView {
         // 可打印字符走 IME 管道、在 replace_text_in_range 镜像；这里只看
         // 编码器处理的键。凡是让 shell 编辑器偏离"直排追加"假设的键（方向、
         // Tab、Esc、Home、Ctrl+C……）一律作废本行镜像与提示，宁缺毋滥。
-        if self.marked_text.is_none() && !mode.contains(TermMode::ALT_SCREEN) {
-            let plain_mods = !mods.control && !mods.alt && !mods.platform;
-            match ks.key.as_str() {
-                "enter" => self.commit_line(),
-                "backspace" if mods.control && !mods.alt && !mods.platform => {
-                    crate::display::Display::nebula_input_delete_word(&mut self.suggest);
-                },
-                "backspace" if plain_mods => {
-                    crate::display::Display::nebula_input_backspace(&mut self.suggest);
-                },
-                key => {
-                    let is_modifier = matches!(
-                        key,
-                        "shift" | "control" | "alt" | "platform" | "function" | "capslock"
-                    );
-                    // key_char 非空 = 平台判定它产生文本（随后从 IME 管道
-                    // 到达并在那里镜像），不能在这里预清。
-                    let produces_text = ks.key_char.as_deref().is_some_and(|text| !text.is_empty());
-                    if !is_modifier && !produces_text {
-                        crate::display::Display::nebula_clear_line(&mut self.suggest);
-                    }
-                },
-            }
-        }
+        self.track_encoded_key(ks, &mode);
 
         if let Some(bytes) = keymap::encode(ks, &mode) {
-            self.write_input(bytes, cx);
+            self.write_user_key(ks.clone(), bytes, cx);
             cx.stop_propagation();
         }
     }
@@ -2015,7 +2038,7 @@ impl TerminalView {
         }
         self.suggest.completion_suppressed_line = Some(format!("{before}{insert}"));
         if !insert.is_empty() {
-            self.write_input(insert.into_bytes(), cx);
+            self.write_user_text(insert.clone(), false, insert.into_bytes(), cx);
         }
         true
     }
@@ -2580,7 +2603,7 @@ impl gpui::EntityInputHandler for TerminalView {
             if !self.term_mode().contains(TermMode::ALT_SCREEN) {
                 crate::display::Display::nebula_input_text(&mut self.suggest, text);
             }
-            self.write_input(text.as_bytes().to_vec(), cx);
+            self.write_user_text(text.to_owned(), false, text.as_bytes().to_vec(), cx);
         }
         cx.notify();
     }
