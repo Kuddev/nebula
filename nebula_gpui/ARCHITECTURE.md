@@ -68,27 +68,44 @@ application boundary.
 
 ## Dependency Policy
 
-The validated dependency set is pinned exactly:
+The v1.16.1 migration baseline is pinned by both package version and immutable
+Git revision:
 
 ```toml
 gpui = "=0.2.2"
-gpui-component = "=0.5.1"
+gpui_platform = "=0.1.0"
+gpui-component = "=0.5.2"
 gpui-component-assets = "=0.5.1"
 ```
 
-Do not use wildcard versions, Git `main`, or third-party GPUI forks. GPUI and
-gpui-component must resolve to one GPUI version; verify each dependency change
-with:
+- `gpui` and `gpui_platform` come from `zed-industries/zed` commit
+  `eb8e1c8b5502b7007465fbbc465f4a736fa39210` (the official `v1.16.1` tag).
+- `gpui-component` and its assets come from `Kuddev/gpui-component` commit
+  `4ee9f274e990d6228e4f276f0a1e48f62f6a2048`. This baseline contains the
+  upstream snapshot plus the Zed revision pin; it intentionally excludes
+  Nebula product patches.
+- The `nebula-v1.16.1-base` branch and tag in both Kuddev forks are audit and
+  recovery anchors. Cargo dependencies always use the full commit SHA, never
+  those movable names.
+
+Cargo source identity includes the repository URL. All Zed crates therefore
+use the official URL, including transitive dependencies from gpui-component;
+using the Kuddev Zed mirror for only part of the graph would create two
+incompatible copies of GPUI even when both URLs point to the same commit.
+
+Do not use wildcard versions, Git `main`, or branch-only pins. Verify every
+dependency revision change with:
 
 ```powershell
-cargo check --locked --offline
-cargo tree -i gpui
+cargo check -p nebula --features gpui-shell --locked --offline
+cargo tree -p nebula --features gpui-shell -i gpui --locked --offline
 ```
 
-GPUI upgrades happen in a dedicated change with component acceptance testing;
-they are not bundled with feature work. Do not fork an upstream crate unless a
-documented upstream issue blocks a release, the temporary patch has a defined
-removal condition, and the maintenance owner is explicit.
+GPUI upgrades happen in a dedicated branch with component acceptance testing;
+they are not bundled with feature work. Each required Nebula component patch
+must be restored in its own commit, advance the exact component revision, name
+the blocked behavior, and define its upstream or removal condition. The fixed
+baseline branch and tag must never move.
 
 ## Workspace Boundary
 

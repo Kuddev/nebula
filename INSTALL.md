@@ -40,7 +40,8 @@ Keep the extracted directory structure intact:
 
 ## Build from source
 
-Requirements: Windows 10 1809+ / 11, [Rust](https://rustup.rs) 1.85+.
+Requirements: Windows 10 1809+ / 11 and [rustup](https://rustup.rs). The
+repository pins Rust 1.97.1 in `rust-toolchain.toml`.
 
 ```powershell
 git clone https://github.com/Kuddev/nebula

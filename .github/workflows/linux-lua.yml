@@ -6,12 +6,14 @@ on:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/linux-lua.yml"
   pull_request:
     paths:
       - "**/*.rs"
       - "**/Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/linux-lua.yml"
 
 permissions:
@@ -34,7 +36,7 @@ jobs:
             libxcb-shape0-dev libxcb-xfixes0-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.85.0"
+          toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
       - name: Test Lua configuration on Wayland and X11 build
         run: cargo test -p nebula config::
