@@ -242,11 +242,8 @@ pub(super) fn overlay(
         .try_global::<crate::gpui_shell::config::Settings>()
         .map(|settings| settings.base_font_size_px)
         .unwrap_or(15.0);
-    let family: SharedString = cx
-        .try_global::<crate::gpui_shell::config::Settings>()
-        .map(|settings| settings.font_family.clone())
-        .unwrap_or_else(|| "Cascadia Mono".to_owned())
-        .into();
+    let chrome_family = theme.mono_font_family.clone();
+    let log_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
     let ink_strong = theme.sidebar_accent_foreground;
     let ink = theme.foreground;
     let ink_dim = theme.muted_foreground;
@@ -337,7 +334,7 @@ pub(super) fn overlay(
         })
         .child(
             div()
-                .font_family(family.clone())
+                .font_family(chrome_family.clone())
                 .text_size(px(ui_px * 0.80))
                 .text_color(ink_dim)
                 .child("Logs"),
@@ -365,7 +362,7 @@ pub(super) fn overlay(
                 .gap(px(2.0))
                 .child(
                     div()
-                        .font_family(family.clone())
+                        .font_family(chrome_family.clone())
                         .text_size(px(ui_px))
                         .text_color(ink_strong)
                         .truncate()
@@ -373,7 +370,7 @@ pub(super) fn overlay(
                 )
                 .child(
                     div()
-                        .font_family(family.clone())
+                        .font_family(chrome_family.clone())
                         .text_size(px(ui_px * 0.80))
                         .text_color(ink_dim)
                         .truncate()
@@ -407,7 +404,7 @@ pub(super) fn overlay(
                             ink_faint
                         };
                         let text = div()
-                            .font_family(family.clone())
+                            .font_family(chrome_family.clone())
                             .text_size(px(caption_h))
                             .text_color(ink_i)
                             .child(label.clone());
@@ -448,12 +445,16 @@ pub(super) fn overlay(
         .mt(px(24.0))
         .justify_between()
         .child(
-            div().font_family(family.clone()).text_size(px(ui_px)).text_color(msg_ink).child(msg),
+            div()
+                .font_family(chrome_family.clone())
+                .text_size(px(ui_px))
+                .text_color(msg_ink)
+                .child(msg),
         )
         .when(!state.failed(), |row| {
             row.child(
                 div()
-                    .font_family(family.clone())
+                    .font_family(chrome_family.clone())
                     .text_size(px(ui_px))
                     .text_color(ink_faint)
                     .child(state.elapsed_text()),
@@ -469,7 +470,7 @@ pub(super) fn overlay(
                 .take(2)
                 .map(|line| {
                     div()
-                        .font_family(family.clone())
+                        .font_family(chrome_family.clone())
                         .text_size(px(ui_px * 0.80))
                         .text_color(ink_dim)
                         .child(ssh_connect::truncate_cols(&line, per_line))
@@ -497,7 +498,7 @@ pub(super) fn overlay(
                     .map(|line| {
                         let color = if line.contains("error") { danger } else { ink_dim };
                         div()
-                            .font_family(family.clone())
+                            .font_family(log_family.clone())
                             .text_size(px(line_h))
                             .text_color(color)
                             .truncate()

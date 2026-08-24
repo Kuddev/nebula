@@ -108,9 +108,8 @@ pub(super) fn split_glyph(size_px: f32, color: Hsla) -> impl IntoElement {
     let cell = (size_px * 0.42).max(4.0);
     let gap = (size_px * 0.14).max(1.5);
     let radius = (cell * 0.28).max(1.0);
-    let square = move || {
-        div().size(px(cell)).rounded(px(radius)).border(px(1.0)).border_color(color)
-    };
+    let square =
+        move || div().size(px(cell)).rounded(px(radius)).border(px(1.0)).border_color(color);
     let row = move || h_flex().gap(px(gap)).child(square()).child(square());
     v_flex().gap(px(gap)).child(row()).child(row())
 }
@@ -256,12 +255,11 @@ impl NebulaWorkspace {
         // 聚焦 pane 的标题条比正文亮一档，失焦的贴回卡底——veil 只盖终端区，
         // 标题条自己用色阶表达焦点（把标题也压暗 30% 会让四个 pane 的标题
         // 全都糊成一片灰）。
-        let bar_bg = if focused { theme.sidebar_accent.opacity(0.55) } else { theme.muted.opacity(0.28) };
+        let bar_bg =
+            if focused { theme.sidebar_accent.opacity(0.55) } else { theme.muted.opacity(0.28) };
         let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
-        let mono_family: SharedString = settings
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from("Cascadia Mono"))
-            .into();
+        let chrome_family = theme.mono_font_family.clone();
+        let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         let label_px = settings.map(|settings| settings.base_font_size_px).unwrap_or(15.0);
         let title_px = label_px * 0.78;
         let PaneTitle { logo, glyph, text } = self.pane_title(view, cx, dark);
@@ -316,7 +314,7 @@ impl NebulaWorkspace {
                         div()
                             .flex_shrink_0()
                             .w(px(title_px * 1.1))
-                            .font_family(mono_family.clone())
+                            .font_family(chrome_family.clone())
                             .text_size(px(title_px * 0.92))
                             .text_color(if broadcast { accent } else { muted })
                             .child(SharedString::from(ordinal.to_string())),
@@ -333,7 +331,7 @@ impl NebulaWorkspace {
                         grip.child(
                             div()
                                 .flex_shrink_0()
-                                .font_family(mono_family.clone())
+                                .font_family(symbol_family)
                                 .text_size(px(title_px))
                                 .text_color(icon_ink)
                                 .child(glyph),
@@ -344,7 +342,7 @@ impl NebulaWorkspace {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .font_family(mono_family)
+                            .font_family(chrome_family)
                             .text_size(px(title_px))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(ink)
@@ -422,7 +420,8 @@ impl NebulaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(WorkspaceTab::Terminal { panes, broadcast, .. }) = self.tabs.get_mut(tab_ix) else {
+        let Some(WorkspaceTab::Terminal { panes, broadcast, .. }) = self.tabs.get_mut(tab_ix)
+        else {
             return;
         };
         if panes.len() < 2 {
@@ -492,9 +491,7 @@ impl NebulaWorkspace {
         for view in views {
             view.update(cx, |view, cx| match input {
                 TerminalInput::Key(keystroke) => view.apply_broadcast_key(keystroke, cx),
-                TerminalInput::Text { text, paste } => {
-                    view.apply_broadcast_text(text, *paste, cx)
-                },
+                TerminalInput::Text { text, paste } => view.apply_broadcast_text(text, *paste, cx),
             });
         }
     }

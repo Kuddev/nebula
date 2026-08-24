@@ -3064,11 +3064,7 @@ impl NebulaWorkspace {
         let muted = theme.muted_foreground;
         let hover = theme.list_hover;
         let selected_bg = theme.list_active;
-        let mono_family: SharedString = cx
-            .try_global::<crate::gpui_shell::config::Settings>()
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from("Maple Mono Normal NF CN"))
-            .into();
+        let symbol: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         // Git 视图看的是终端当前目录，不是目录树浏览到的位置（`vcs_root`）。
         let root = self.side_panel.vcs_root().map(Path::to_path_buf);
         let selected = self.side_panel.selected.clone();
@@ -3208,7 +3204,7 @@ impl NebulaWorkspace {
                                 div()
                                     .w(px(14.0))
                                     .flex_shrink_0()
-                                    .font_family(mono_family.clone())
+                                    .font_family(symbol.clone())
                                     .text_sm()
                                     .text_color(status_color)
                                     .child(status.to_string()),
@@ -3385,7 +3381,7 @@ impl NebulaWorkspace {
                 .h(px(30.0))
                 .items_center()
                 .gap_2()
-                .child(div().font_family(mono_family).text_sm().text_color(muted).child("\u{ea68}"))
+                .child(div().font_family(symbol).text_sm().text_color(muted).child("\u{ea68}"))
                 .child(div().flex_1().min_w_0().text_sm().truncate().child(
                     if info.branch.is_empty() {
                         "(no branch)".to_owned()

@@ -101,10 +101,8 @@ impl NebulaWorkspace {
         let hover_bg = theme.list_hover;
         let dark = theme.is_dark();
         let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
-        let mono_family: SharedString = settings
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from("Cascadia Mono"))
-            .into();
+        let chrome_family = theme.mono_font_family.clone();
+        let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         let label_px = settings.map(|settings| settings.base_font_size_px).unwrap_or(15.0);
         let tab_capacity_w =
             (f32::from(window.viewport_size().width) - TOP_TAB_RESERVED_W).max(TOP_TAB_MIN_W);
@@ -169,7 +167,7 @@ impl NebulaWorkspace {
                     ),
                     SidebarActivity::Idle => shell_tag.map(|tag| {
                         div()
-                            .font_family(mono_family.clone())
+                            .font_family(chrome_family.clone())
                             .text_size(px(label_px * 0.8))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(status_color)
@@ -206,6 +204,7 @@ impl NebulaWorkspace {
                     .items_center()
                     .gap_2()
                     .px_2()
+                    .font_family(chrome_family.clone())
                     // 顶部 tab 的底边直接接正文，只保留上侧圆角；四角全圆
                     // 会把它重新画成悬浮在标题栏里的药丸。
                     .rounded_tl(px(crate::display::UI_CORNER_RADIUS_LOGICAL))
@@ -299,7 +298,7 @@ impl NebulaWorkspace {
                             div()
                                 .w(px(TAB_LABEL_ICON_W))
                                 .flex_shrink_0()
-                                .font_family(mono_family.clone())
+                                .font_family(symbol_family.clone())
                                 .text_size(px(label_px))
                                 .font_weight(FontWeight::NORMAL)
                                 .text_color(if active { active_fg } else { muted })
@@ -346,14 +345,14 @@ impl NebulaWorkspace {
                                 Input::new(&input)
                                     .w_full()
                                     .text_size(px(label_px))
-                                    .font_family(mono_family.clone()),
+                                    .font_family(chrome_family.clone()),
                             )
                             .into_any_element(),
                         None => div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .font_family(mono_family.clone())
+                            .font_family(chrome_family.clone())
                             .text_size(px(label_px))
                             .font_weight(FontWeight::LIGHT)
                             .child(title)

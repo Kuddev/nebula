@@ -1301,11 +1301,7 @@ impl SettingsPane {
         .ok();
         let labels = profiles.as_ref().map(|profiles| profiles.labels()).unwrap_or_default();
         let icons = profiles.as_ref().map(|profiles| profiles.icons()).unwrap_or_default();
-        let family: SharedString = cx
-            .try_global::<crate::gpui_shell::config::Settings>()
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from("Maple Mono Normal NF CN"))
-            .into();
+        let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         let font_px = cx
             .try_global::<crate::gpui_shell::config::Settings>()
             .map(|settings| settings.base_font_size_px)
@@ -1354,7 +1350,7 @@ impl SettingsPane {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .font_family(family.clone())
+                        .font_family(symbol_family.clone())
                         .text_size(px(18.0))
                         .text_color(muted)
                         .text_center()

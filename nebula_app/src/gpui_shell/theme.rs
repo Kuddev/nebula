@@ -420,11 +420,6 @@ fn soften(c: crate::display::color::Rgb, keep: f32) -> crate::display::color::Rg
 fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     let sk = chrome.skin();
     let transparent = hsla(0.0, 0.0, 0.0, 0.0);
-    // 终端字体族要在拿到 `Theme::global_mut` 之前读出来：那之后 cx 已被可变借。
-    let terminal_family: Option<gpui::SharedString> = cx
-        .try_global::<crate::gpui_shell::config::Settings>()
-        .map(|settings| settings.font_family.clone().into());
-
     let theme = Theme::global_mut(cx);
 
     // 文字。
@@ -517,11 +512,13 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     // 我们是终端，所以等宽在这里是**语义标记**而不是全局字体：路径、键帽、
     // 命令、数值这类"机器读、要逐字符对齐、要能整段复制"的东西显式走 mono；
     // 标题和说明是给人读的，走 sans。
-    if cfg!(target_os = "windows") {
+    #[cfg(target_os = "windows")]
+    {
         theme.font_family = "Microsoft YaHei UI".into();
-    }
-    if let Some(family) = terminal_family {
-        theme.mono_font_family = family;
+        // UI 中的等宽语义也必须稳定。终端字体由 TerminalView 单独读取；
+        // 若把用户字体组写进全局 theme，tab、标题和代码字面量的字宽都会
+        // 随终端主字体变化，进而破坏 chrome 的既定间距。
+        theme.mono_font_family = crate::font_install::REQUIRED_FONT_FAMILY.into();
     }
     theme.radius = px(crate::display::UI_CORNER_RADIUS_LOGICAL);
     theme.radius_lg = px(12.0);

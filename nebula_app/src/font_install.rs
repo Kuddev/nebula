@@ -94,27 +94,98 @@ pub fn font_catalog(
     entries
 }
 
-/// Replace the primary family while preserving the user's ordered fallback
-/// chain. The picker owns only the primary slot; hand-written fallbacks remain
-/// intact so selecting a font cannot silently reduce glyph coverage.
+/// 解析逗号分隔的持久化字体链：清理空项、按名称去重，但不改变用户顺序。
+pub fn font_family_chain(value: &str) -> Vec<String> {
+    let mut families = Vec::<String>::new();
+    for family in value.split(',').map(str::trim).filter(|family| !family.is_empty()) {
+        if !families.iter().any(|known| known.eq_ignore_ascii_case(family)) {
+            families.push(family.to_owned());
+        }
+    }
+    families
+}
+
+fn format_font_family_chain(families: &[String]) -> String {
+    families.join(", ")
+}
+
+/// 替换主字体并保留有序 fallback。字体选择器只拥有首项，不能因为用户
+/// 更换主字体就静默丢掉手写的字形覆盖链。
 pub fn replace_primary_font_family(current: &str, replacement: &str) -> String {
     let replacement = replacement.trim();
     if replacement.is_empty() {
         return current.to_owned();
     }
 
-    let fallbacks = current
-        .split(',')
-        .map(str::trim)
-        .filter(|family| !family.is_empty())
-        .skip(1)
-        .filter(|fallback| *fallback != replacement)
-        .collect::<Vec<_>>();
-    if fallbacks.is_empty() {
-        replacement.to_owned()
-    } else {
-        format!("{replacement}, {}", fallbacks.join(", "))
+    let mut families = vec![replacement.to_owned()];
+    families.extend(
+        font_family_chain(current)
+            .into_iter()
+            .skip(1)
+            .filter(|fallback| !fallback.eq_ignore_ascii_case(replacement)),
+    );
+    format_font_family_chain(&families)
+}
+
+/// 追加一个尚未出现的 fallback；空链的第一次选择自然成为主字体。
+pub fn append_font_fallback(current: &str, addition: &str) -> String {
+    let addition = addition.trim();
+    if addition.is_empty() {
+        return current.to_owned();
     }
+
+    let mut families = font_family_chain(current);
+    if !families.iter().any(|family| family.eq_ignore_ascii_case(addition)) {
+        families.push(addition.to_owned());
+    }
+    format_font_family_chain(&families)
+}
+
+/// 移除字体组中的一项，但至少保留一个主字体。
+pub fn remove_font_family(current: &str, index: usize) -> String {
+    let mut families = font_family_chain(current);
+    if families.len() <= 1 || index >= families.len() {
+        return current.to_owned();
+    }
+    families.remove(index);
+    format_font_family_chain(&families)
+}
+
+/// 移动字体组中的一项；移到下标 0 的字体自然成为新的主字体。
+pub fn move_font_family(current: &str, index: usize, direction: i32) -> String {
+    let mut families = font_family_chain(current);
+    if index >= families.len() || direction == 0 {
+        return current.to_owned();
+    }
+    let target =
+        if direction < 0 { index.saturating_sub(1) } else { (index + 1).min(families.len() - 1) };
+    if target == index {
+        return current.to_owned();
+    }
+    families.swap(index, target);
+    format_font_family_chain(&families)
+}
+
+/// 按终端渲染合同构造 GPUI 字体：即使用户没显式列出，内置 Maple 也始终
+/// 作为最后一层字形兜底。
+#[cfg(feature = "gpui-shell")]
+pub fn gpui_font_with_fallbacks(value: &str) -> gpui::Font {
+    let mut families = font_family_chain(value);
+    if families.is_empty() {
+        families.push(REQUIRED_FONT_FAMILY.to_owned());
+    }
+    let primary = families.remove(0);
+    if !primary.eq_ignore_ascii_case(REQUIRED_FONT_FAMILY)
+        && !families.iter().any(|family| family.eq_ignore_ascii_case(REQUIRED_FONT_FAMILY))
+    {
+        families.push(REQUIRED_FONT_FAMILY.to_owned());
+    }
+
+    let mut font = gpui::font(primary);
+    if !families.is_empty() {
+        font.fallbacks = Some(gpui::FontFallbacks::from_fonts(families));
+    }
+    font
 }
 pub const REQUIRED_FONT_FILE: &str = "MapleMonoNormal-NF-CN-Regular.ttf";
 
@@ -373,12 +444,53 @@ mod tests {
             replace_primary_font_family("Consolas, Cascadia Mono, Symbols", "Cascadia Mono"),
             "Cascadia Mono, Symbols"
         );
+        assert_eq!(
+            replace_primary_font_family("Consolas, cascadia mono, Symbols", "Cascadia Mono"),
+            "Cascadia Mono, Symbols"
+        );
         assert_eq!(replace_primary_font_family("Consolas", "JetBrains Mono"), "JetBrains Mono");
     }
 
     #[test]
     fn blank_primary_replacement_leaves_the_setting_unchanged() {
         assert_eq!(replace_primary_font_family("Consolas, Symbols", "  "), "Consolas, Symbols");
+    }
+
+    #[test]
+    fn family_chain_operations_preserve_order_and_keep_one_primary() {
+        assert_eq!(
+            font_family_chain(" Consolas, Microsoft YaHei, consolas, Symbols, "),
+            ["Consolas", "Microsoft YaHei", "Symbols"]
+        );
+        assert_eq!(
+            append_font_fallback("Consolas, Microsoft YaHei", "Symbols"),
+            "Consolas, Microsoft YaHei, Symbols"
+        );
+        assert_eq!(
+            append_font_fallback("Consolas, Microsoft YaHei", "microsoft yahei"),
+            "Consolas, Microsoft YaHei"
+        );
+        assert_eq!(remove_font_family("Consolas", 0), "Consolas");
+        assert_eq!(remove_font_family("Consolas, CJK, Symbols", 0), "CJK, Symbols");
+        assert_eq!(remove_font_family("Consolas, CJK, Symbols", 1), "Consolas, Symbols");
+        assert_eq!(move_font_family("Consolas, CJK, Symbols", 2, -1), "Consolas, Symbols, CJK");
+        assert_eq!(move_font_family("Consolas, CJK, Symbols", 1, -1), "CJK, Consolas, Symbols");
+        assert_eq!(move_font_family("Consolas, CJK, Symbols", 0, 1), "CJK, Consolas, Symbols");
+    }
+
+    #[test]
+    #[cfg(feature = "gpui-shell")]
+    fn gpui_font_uses_the_configured_order_then_the_bundled_fallback() {
+        let font = gpui_font_with_fallbacks("Consolas, Microsoft YaHei");
+        assert_eq!(font.family.as_ref(), "Consolas");
+        assert_eq!(
+            font.fallbacks.as_ref().unwrap().fallback_list(),
+            &["Microsoft YaHei".to_owned(), REQUIRED_FONT_FAMILY.to_owned()]
+        );
+
+        let bundled = gpui_font_with_fallbacks(REQUIRED_FONT_FAMILY);
+        assert_eq!(bundled.family.as_ref(), REQUIRED_FONT_FAMILY);
+        assert!(bundled.fallbacks.is_none());
     }
 
     #[test]

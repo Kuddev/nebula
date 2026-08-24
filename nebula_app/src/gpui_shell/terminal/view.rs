@@ -13,6 +13,7 @@ use gpui::{
     Styled as _, TextRun, UTF16Selection, Window, div, point, px,
 };
 use gpui_component::{PixelsExt as _, WindowExt as _};
+use nebula_settings::CellWidthModeName;
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
 use nebula_terminal::event_loop::Msg;
 use nebula_terminal::grid::{Dimensions as _, Scroll};
@@ -31,12 +32,11 @@ use super::mouse_protocol;
 use super::session::{self, TerminalSession};
 use super::suggest;
 use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
-use crate::config::UiConfig;
+use crate::{config::UiConfig, font_install::REQUIRED_FONT_FAMILY};
 use crate::gpui_shell::config::Settings;
 use crate::gpui_shell::prelude::{
     ActiveTheme as _, Colorize as _, DialogButtonProps, center_confirm_dialog,
 };
-
 use futures::StreamExt as _;
 
 /// 等宽字体描述。GPUI 的 Windows 后端收到空 feature 列表会在
@@ -47,7 +47,7 @@ fn mono_font(family: &str, weight: FontWeight, style: FontStyle) -> Font {
         weight,
         style,
         features: FontFeatures(Arc::new(vec![("calt".to_owned(), 1)])),
-        ..gpui::font(family.to_string())
+        ..crate::font_install::gpui_font_with_fallbacks(family)
     }
 }
 
@@ -424,7 +424,7 @@ impl TerminalView {
                 settings.font_offset_x,
                 settings.font_offset_y,
             ),
-            None => ("Cascadia Mono", 15.0, nebula_settings::CellWidthModeName::Compact, 0.0, 0.0),
+            None => (REQUIRED_FONT_FAMILY, 15.0, CellWidthModeName::Compact, 0.0, 0.0),
         };
         Self::measure_cell_metrics(window, family, px(font_size), mode, offset_x, offset_y)
     }
@@ -440,7 +440,7 @@ impl TerminalView {
                 settings.font_offset_x,
                 settings.font_offset_y,
             ),
-            None => ("Cascadia Mono", 15.0, nebula_settings::CellWidthModeName::Compact, 0.0, 0.0),
+            None => (REQUIRED_FONT_FAMILY, 15.0, CellWidthModeName::Compact, 0.0, 0.0),
         };
         Self::measure_cell_metrics(window, family, px(font_size), mode, offset_x, offset_y)
     }
@@ -491,9 +491,9 @@ impl TerminalView {
                     .map(|detected| detected.shell()),
             ),
             None => (
-                std::array::from_fn(|_| String::from("Cascadia Mono")),
+                std::array::from_fn(|_| REQUIRED_FONT_FAMILY.to_owned()),
                 px(15.0),
-                nebula_settings::CellWidthModeName::Compact,
+                CellWidthModeName::Compact,
                 0.0,
                 0.0,
                 Arc::new(Palette::default()),

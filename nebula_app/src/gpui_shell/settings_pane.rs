@@ -36,6 +36,8 @@ use crate::gpui_shell::widgets::NebulaButton;
 #[path = "background_color.rs"]
 mod background_color;
 mod design;
+mod font_picker;
+
 mod keymap;
 
 /// 主题下拉（展示名 = 持久化名，与旧壳一致）。
@@ -64,9 +66,9 @@ const SETTINGS_GROUP_TITLE_HEIGHT: f32 = 26.0;
 const SETTINGS_GROUP_TITLE_GAP: f32 = 16.0;
 const SETTINGS_ROW_HEIGHT: f32 = 44.0;
 const SETTINGS_ROW_GAP: f32 = 8.0;
-// 触发条仍 220，对齐旧壳 combobox。弹层加宽，长族名 + 徽标才读得完。
-const FONT_PICKER_WIDTH: f32 = 220.0;
-const FONT_PICKER_PANEL_WIDTH: f32 = 400.0;
+// 对齐字体组 HTML 原型的桌面端上限：触发条和弹层共用 460px，展开时既不
+// 横向跳变，也给多段字体摘要留下真实可读空间。
+const FONT_PICKER_WIDTH: f32 = 460.0;
 
 const THEME_NAMES: [ThemeName; 7] = [
     ThemeName::Nebula,
@@ -455,8 +457,6 @@ pub struct SettingsPane {
     /// 触发按钮上一帧的窗口坐标。字体目录是宽弹层，不能把整条设置行当
     /// 锚点；否则按钮在右侧、菜单却会从正文左缘展开。
     font_picker_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
-    /// 导入/选择的错误驻留条（旧壳 `nebula_font_notice` 同义）。
-    font_notice: Option<String>,
     /// 备份类别选择（本地 UI 态；出厂默认 = 共享 `BackupSelection::default`）。
     backup_selection: crate::encrypted_backup::BackupSelection,
     /// 备份密码（masked；只在导出/恢复动作瞬时读取，不落任何配置）。
@@ -955,7 +955,6 @@ impl SettingsPane {
             font_imported: Vec::new(),
             font_query_input,
             font_picker_trigger_bounds: None,
-            font_notice: None,
             backup_selection: crate::encrypted_backup::BackupSelection::default(),
             backup_pass_input: cx.new(|cx| {
                 InputState::new(window, cx).masked(true).placeholder("备份密码（至少 8 位）")
@@ -1189,105 +1188,6 @@ impl SettingsPane {
         }));
     }
 
-    // ---- 字体选择器（旧壳 toggle_font_picker / font_catalog 的 GPUI 形态）----
-
-    /// 当前生效字体链（settings.txt 覆盖 toml 后的值，可能含逗号 fallback）。
-    pub(super) fn current_font_chain(&self, cx: &App) -> String {
-        cx.try_global::<crate::gpui_shell::config::Settings>()
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from(crate::font_install::REQUIRED_FONT_FAMILY))
-    }
-
-    fn toggle_font_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.font_picker_open {
-            self.close_font_picker(window, true, cx);
-            return;
-        }
-
-        // 旧壳每次重新展开都从完整目录开始，搜索串和上次错误不跨弹层
-        // 生命周期残留；昂贵目录只在第一次打开时异步枚举。
-        self.font_notice = None;
-        self.font_query_input.update(cx, |input, cx| input.set_value("", window, cx));
-        self.font_picker_open = true;
-        self.ensure_font_catalog(cx);
-        self.font_query_input.update(cx, |input, cx| input.focus(window, cx));
-        cx.notify();
-    }
-
-    /// 关闭字体弹层并清理这次展开的临时查询。`restore_focus` 只在 Esc、
-    /// 选中和点击外部时使用；系统文件选择器接管焦点期间不强抢窗口焦点。
-    fn close_font_picker(
-        &mut self,
-        window: &mut Window,
-        restore_focus: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.font_picker_open {
-            return;
-        }
-        self.font_picker_open = false;
-        self.font_query_input.update(cx, |input, cx| input.set_value("", window, cx));
-        if restore_focus {
-            window.focus(&self.focus_handle);
-        }
-        cx.notify();
-    }
-
-    /// 惰性装配字体目录：系统族枚举 + 已导入文件逐个探测族名，全部丢
-    /// 后台线程（旧壳在 UI 线程同步做；GPUI 帧预算更紧，不值得卡一帧）。
-    fn ensure_font_catalog(&mut self, cx: &mut Context<Self>) {
-        if self.font_system.is_some() || self.font_loading {
-            return;
-        }
-        #[cfg(windows)]
-        {
-            self.font_loading = true;
-            let task = cx.background_executor().spawn(async move {
-                let system = crate::font_install::enumerate_system_font_families();
-                let imported: Vec<String> = crate::font_install::imported_font_files()
-                    .iter()
-                    .filter_map(|path| crate::font_install::probe_font_file_families(path).ok())
-                    .flatten()
-                    .collect();
-                (system, imported)
-            });
-            cx.spawn(async move |this, cx| {
-                let (system, imported) = task.await;
-                let _ = this.update(cx, |pane, cx| {
-                    pane.font_system = Some(system);
-                    for family in imported {
-                        if !pane
-                            .font_imported
-                            .iter()
-                            .any(|known| known.eq_ignore_ascii_case(&family))
-                        {
-                            pane.font_imported.push(family);
-                        }
-                    }
-                    pane.font_loading = false;
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
-        #[cfg(not(windows))]
-        {
-            self.font_system = Some(Vec::new());
-        }
-    }
-
-    /// 选中即生效：只换主族、保留用户手写的 fallback 链（共享
-    /// `replace_primary_font_family`），写盘后经 `persist` 的 Changed 事件
-    /// 让宿主逐终端热应用——字体度量变化会走 viewport observe 自动重排
-    /// 网格并 resize PTY。
-    fn pick_font_family(&mut self, family: String, window: &mut Window, cx: &mut Context<Self>) {
-        let chain = self.current_font_chain(cx);
-        let next = crate::font_install::replace_primary_font_family(&chain, &family);
-        self.font_notice = None;
-        self.close_font_picker(window, true, cx);
-        self.persist(&[("font_family", next)], cx);
-    }
-
     /// 「导入终端目录…」：选目录 → 后台扫描落盘 → 刷新下拉。
     ///
     /// 对齐旧壳 `Display::import_terminal_directory`。扫描要遍历目录并读每个
@@ -1374,344 +1274,6 @@ impl SettingsPane {
         });
     }
 
-    #[cfg(windows)]
-    fn import_font_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("导入终端字体".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = receiver.await else { return };
-            let Some(source) = paths.into_iter().next() else { return };
-            let _ = this.update_in(cx, |pane, window, cx| {
-                pane.finish_font_import(&source, window, cx);
-            });
-        })
-        .detach();
-    }
-
-    /// 导入落库（共享 `store_imported_font`：哈希去重存入数据目录）→
-    /// DirectWrite 探测族名 → 注册进 GPUI text system → 立即应用首族
-    /// （旧壳 `set_terminal_font_by_index` 的导入分支同义）。
-    #[cfg(windows)]
-    fn finish_font_import(
-        &mut self,
-        source: &std::path::Path,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let stored = match crate::font_install::store_imported_font(source) {
-            Ok(stored) => stored,
-            Err(error) => {
-                self.font_notice = Some(error);
-                cx.notify();
-                return;
-            },
-        };
-        let cleanup = |stored: &crate::font_install::StoredFont| {
-            if stored.created {
-                let _ = std::fs::remove_file(&stored.path);
-            }
-        };
-        let families = match crate::font_install::probe_font_file_families(&stored.path) {
-            Ok(families) => families,
-            Err(error) => {
-                cleanup(&stored);
-                self.font_notice = Some(format!("字体无法加载：{error}"));
-                cx.notify();
-                return;
-            },
-        };
-        let bytes = match std::fs::read(&stored.path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                cleanup(&stored);
-                self.font_notice = Some(format!("无法读取导入字体：{error}"));
-                cx.notify();
-                return;
-            },
-        };
-        if let Err(error) = cx.text_system().add_fonts(vec![std::borrow::Cow::Owned(bytes)]) {
-            cleanup(&stored);
-            self.font_notice = Some(format!("字体注册失败：{error}"));
-            cx.notify();
-            return;
-        }
-        for family in &families {
-            if !self.font_imported.iter().any(|known| known.eq_ignore_ascii_case(family)) {
-                self.font_imported.push(family.clone());
-            }
-        }
-        if let Some(first) = families.into_iter().next() {
-            self.pick_font_family(first, window, cx);
-        }
-    }
-
-    /// 字体行（收起态）：用真实 GPUI Button 承载下拉锚点。当前主族继承
-    /// 设置页正在使用的字体链，因而按钮文字本身就是 WYSIWYG 预览。
-    fn font_picker_row(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let chain = self.current_font_chain(cx);
-        let primary: SharedString = crate::renderer::primary_font_family(&chain).to_owned().into();
-        let picker = cx.entity().downgrade();
-        let control = div()
-            .relative()
-            .w(px(FONT_PICKER_WIDTH))
-            .child(
-                Button::new("font-picker-toggle")
-                    .w_full()
-                    .selected(self.font_picker_open)
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_w_0()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_left()
-                                    .font_family(primary.clone())
-                                    .child(font_display_name(&primary)),
-                            )
-                            .child(
-                                Icon::new(if self.font_picker_open {
-                                    IconName::ChevronUp
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .xsmall(),
-                            ),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_font_picker(window, cx);
-                    })),
-            )
-            // 与组件库 Popover 相同：用零绘制 canvas 捕获触发控件真实
-            // Bounds。坐标来自布局结果，滚动、DPI 和窗口缩放后仍然准确。
-            .child(
-                gpui::canvas(
-                    move |bounds, _, cx| {
-                        let _ = picker.update(cx, |picker, _| {
-                            picker.font_picker_trigger_bounds = Some(bounds);
-                        });
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            );
-        self.row(
-            "字体",
-            "终端网格用的字体。界面文字走系统 UI 字体，不跟着这里变——换成非等宽的字体，终端里的表格和框线会错位。",
-            control,
-            cx,
-        ).into_any_element()
-    }
-
-    /// 展开面板：搜索 + 「显示全部」临时过滤 + 目录列表（族名用本字体
-    /// 绘制、等宽/导入/内置徽标、当前项高亮）+ 导入按钮。目录装配走共享
-    /// `font_catalog`（同名合并、当前项保底），内置字体按旧壳规则恒排首位。
-    fn font_picker_panel(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        use crate::font_install::{FontCatalogEntry, FontSource, REQUIRED_FONT_FAMILY};
-
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let hover_bg = theme.list_hover;
-        let selected_bg = theme.list_active;
-        let warning = theme.warning;
-        let chain = self.current_font_chain(cx);
-        let primary = crate::renderer::primary_font_family(&chain).to_owned();
-        let query = self.font_query_input.read(cx).value().to_string();
-        let system = self.font_system.clone().unwrap_or_default();
-        let mut catalog = crate::font_install::font_catalog(
-            &system,
-            &self.font_imported,
-            self.font_show_all,
-            &query,
-            &primary,
-        );
-        // 内置字体永远排在最前（旧壳 rebuild_font_catalog 同规则），
-        // 搜索不命中也不藏——它是出厂兜底，消失会让人以为坏了。
-        catalog.retain(|entry| !entry.name.eq_ignore_ascii_case(REQUIRED_FONT_FAMILY));
-        catalog.insert(
-            0,
-            FontCatalogEntry {
-                name: REQUIRED_FONT_FAMILY.to_owned(),
-                monospaced: true,
-                source: FontSource::Imported,
-            },
-        );
-
-        let badge = |text: &'static str, color: Hsla| {
-            div()
-                .flex_shrink_0()
-                .px(px(6.0))
-                .py(px(1.0))
-                .rounded_sm()
-                .text_xs()
-                .text_color(color)
-                .border_1()
-                .border_color(color.opacity(0.4))
-                .child(text)
-        };
-
-        let rows: Vec<_> = catalog
-            .into_iter()
-            .enumerate()
-            .map(|(ix, entry)| {
-                let name = entry.name.clone();
-                let family: SharedString = entry.name.clone().into();
-                let selected = entry.name.eq_ignore_ascii_case(&primary);
-                let required = entry.name.eq_ignore_ascii_case(REQUIRED_FONT_FAMILY);
-                h_flex()
-                    .id(SharedString::from(format!("font-row-{ix}")))
-                    .h(px(36.0))
-                    .w_full()
-                    .px_2()
-                    .gap_2()
-                    .items_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(selected, |row| row.bg(selected_bg))
-                    .hover(|row| row.bg(hover_bg))
-                    // 旧壳 begin_preview_face：候选行用该字体自己的字形画名字。
-                    // 展示名去掉文件后缀（导入路径偶尔会把 .ttf 带进族名）。
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .font_family(family)
-                            .child(font_display_name(&entry.name)),
-                    )
-                    .when(required, |row| row.child(badge("内置", muted)))
-                    .when(!required && entry.source == FontSource::Imported, |row| {
-                        row.child(badge("导入", muted))
-                    })
-                    .when(!entry.monospaced, |row| row.child(badge("比例", warning)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.pick_font_family(name.clone(), window, cx);
-                    }))
-            })
-            .collect();
-        let empty = rows.is_empty();
-
-        v_flex()
-            // 面板由字体行的 deferred/anchored 槽托管，不参与设置文档流高度；
-            // 弹层宽于触发条，长族名和「内置/导入/比例」徽标并排才读得完。
-            .w(px(FONT_PICKER_PANEL_WIDTH))
-            .max_w_full()
-            .p_3()
-            .gap_2()
-            // 与 Select/Popover 共用组件库表面，避免字体菜单成为另一套
-            // 边框、圆角和阴影语言。
-            .popover_style(cx)
-            .occlude()
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    // 搜索占剩余宽度；「显示全部」和开关 shrink_0 保证不被
-                    // 挤出面板。
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.font_query_input)),
-                    )
-                    .child(div().flex_shrink_0().text_sm().text_color(muted).child("显示全部"))
-                    .child(Switch::new("font-show-all").checked(self.font_show_all).on_click(
-                        cx.listener(|this, checked: &bool, _, cx| {
-                            // 临时过滤，不写入设置（旧壳 toggle_font_show_all）。
-                            this.font_show_all = *checked;
-                            cx.notify();
-                        }),
-                    )),
-            )
-            .when(self.font_loading, |panel| {
-                panel.child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(Spinner::new().xsmall())
-                        .child(div().text_sm().text_color(muted).child("正在枚举系统字体…")),
-                )
-            })
-            .when(!self.font_loading, |panel| {
-                panel.child(
-                    // gap/宽度都必须写在滚动区内层：`overflow_y_scrollbar` 会把
-                    // 外层样式搬走（见本文件设置正文处的详注），写在它之前的
-                    // gap_1 落在只有一个子项的外层、对行间距无效，行上的
-                    // w_full 也会因父级宽度不确定而回落 max-content，使每行
-                    // 宽度随字体名长短参差。
-                    v_flex().max_h(px(320.0)).overflow_y_scrollbar().child(
-                        v_flex().w_full().gap_1().children(rows).when(empty, |list| {
-                            list.child(
-                                div().py_2().text_sm().text_color(muted).child("没有匹配的字体"),
-                            )
-                        }),
-                    ),
-                )
-            })
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child({
-                        let button = NebulaButton::new("font-import").label("导入字体");
-                        #[cfg(windows)]
-                        let button = button.on_click(cx.listener(|this, _, window, cx| {
-                            this.import_font_file(window, cx);
-                        }));
-                        button
-                    })
-                    .when_some(self.font_notice.clone(), |row, notice| {
-                        row.child(div().text_xs().text_color(theme.danger).child(notice))
-                    }),
-            )
-    }
-
-    /// 字体行和浮层的锚点。使用 GPUI 与 `Popover` 相同的真实触发框
-    /// Bounds + `deferred(anchored())` 管线：浮层不参与文档流，右边缘与
-    /// 按钮右边缘对齐，窗口空间不足时再由 anchored 贴边收拢。
-    fn font_picker_dropdown(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let row = self.font_picker_row(cx);
-        let panel = self.font_picker_open.then(|| self.font_picker_panel(cx));
-        let trigger_bounds = self.font_picker_trigger_bounds;
-        let row_h = if self.runtime.density == nebula_settings::DensityName::Compact {
-            38.0
-        } else {
-            SETTINGS_ROW_HEIGHT
-        };
-
-        div()
-            .relative()
-            .w_full()
-            .h(px(row_h + SETTINGS_ROW_GAP))
-            .flex_shrink_0()
-            .child(row)
-            .when_some(panel.zip(trigger_bounds), |anchor, (panel, trigger_bounds)| {
-                anchor.child(
-                    deferred(
-                        anchored()
-                            .anchor(gpui::Corner::TopRight)
-                            .position(trigger_bounds.bottom_right())
-                            .offset(gpui::point(px(0.0), px(6.0)))
-                            .snap_to_window_with_margin(px(8.0))
-                            .child(panel),
-                    )
-                    // 页面级透明拦截层优先级为普通元素；弹层必须始终压在
-                    // 它上面，否则鼠标到不了搜索框和候选行。
-                    .with_priority(2),
-                )
-            })
-    }
-
     pub(super) fn select_of(&self, key: &str) -> Option<SharedSelect> {
         self.selects.iter().find(|(k, _)| *k == key).map(|(_, entity)| entity.clone())
     }
@@ -1735,17 +1297,12 @@ impl SettingsPane {
     }
 
     fn shell_select_row(&self, cx: &Context<Self>) -> impl IntoElement {
-        let family: SharedString = cx
-            .try_global::<crate::gpui_shell::config::Settings>()
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from("Maple Mono Normal NF CN"))
-            .into();
         self.row(
             "默认 Shell",
             "新标签用哪个程序开。已经开着的标签不受影响——它们跟的是各自创建时的选择。",
             div()
                 .w(px(220.0))
-                .font_family(family)
+                .font_family(cx.theme().mono_font_family.clone())
                 .text_color(cx.theme().link)
                 .child(Select::new(&self.shell_select)),
             cx,
@@ -1765,11 +1322,10 @@ impl SettingsPane {
                 palette.term_bg.b,
             ])
         };
-        let family: SharedString = cx
+        let family = cx
             .try_global::<crate::gpui_shell::config::Settings>()
             .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from("Maple Mono Normal NF CN"))
-            .into();
+            .unwrap_or_else(|| crate::font_install::REQUIRED_FONT_FAMILY.to_owned());
         let size = self.terminal_font_size_px(cx).clamp(11.0, 20.0);
         let foreground = rgb_hsla(ink.r, ink.g, ink.b);
         let accent = theme.accent();
@@ -1781,13 +1337,16 @@ impl SettingsPane {
             .gap_1()
             .rounded_lg()
             .bg(rgb_hsla(background[0], background[1], background[2]))
-            .font_family(family)
+            .font(crate::font_install::gpui_font_with_fallbacks(&family))
             .text_size(px(size))
             .text_color(foreground)
             .child("user@nebula ~ $ nebula --version")
             .child(format!(
                 "Nebula Terminal · {} · {:.0}px",
-                self.runtime.font_family.as_deref().unwrap_or("Maple Mono Normal NF CN"),
+                self.runtime
+                    .font_family
+                    .as_deref()
+                    .unwrap_or(crate::font_install::REQUIRED_FONT_FAMILY),
                 size
             ))
             .child(
@@ -1892,9 +1451,8 @@ impl SettingsPane {
     /// 同一段代码。以后谁调整某个键的默认值，这里自动跟上，不会失配。
     fn factory_defaults() -> &'static RuntimeSettings {
         static DEFAULTS: std::sync::OnceLock<RuntimeSettings> = std::sync::OnceLock::new();
-        DEFAULTS.get_or_init(|| {
-            RuntimeSettings::from_raw(&nebula_settings::RawSettings::from_text(""))
-        })
+        DEFAULTS
+            .get_or_init(|| RuntimeSettings::from_raw(&nebula_settings::RawSettings::from_text("")))
     }
 
     /// 这一项在这台机器上是否被改过，以及它的出厂值（供 ↶ 还原写回）。
@@ -2510,12 +2068,10 @@ impl SettingsPane {
             "Nebula {}
 {}",
             env!("CARGO_PKG_VERSION"),
-            facts
-                .iter()
-                .map(|(key, value)| format!("  {key:<9}{value}"))
-                .collect::<Vec<_>>()
-                .join("
-"),
+            facts.iter().map(|(key, value)| format!("  {key:<9}{value}")).collect::<Vec<_>>().join(
+                "
+"
+            ),
         );
         let fact_rows = facts.into_iter().map(|(key, value)| {
             h_flex()
@@ -2744,8 +2300,8 @@ impl SettingsPane {
             .child(terminal)
     }
 
-    fn section_profiles(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let font_picker = self.font_picker_dropdown(cx);
+    fn section_profiles(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let font_picker = self.font_picker_dropdown(window, cx);
         let terminal = self
             .group("终端", cx)
             .child(self.shell_select_row(cx))
@@ -3439,19 +2995,17 @@ impl SettingsPane {
                     ),
             );
 
-        v_flex()
-            .w_full()
-            .gap(px(GROUP_GAP))
-            .child(local_group)
-            .child(remote_group)
-            .when_some(self.backup_status.clone(), |page, (message, error)| {
+        v_flex().w_full().gap(px(GROUP_GAP)).child(local_group).child(remote_group).when_some(
+            self.backup_status.clone(),
+            |page, (message, error)| {
                 page.child(
                     div()
                         .pt_4()
                         .text_color(if error { theme.danger } else { theme.success })
                         .child(message),
                 )
-            })
+            },
+        )
     }
 
     fn section_interaction(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -3519,7 +3073,6 @@ impl SettingsPane {
             )
     }
 
-
     fn section_advanced(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         self.group("会话生命周期", cx)
             .child(self.switch_row(
@@ -3552,12 +3105,12 @@ impl SettingsPane {
             ))
     }
 
-    fn section_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn section_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui::IntoElement as _;
         match self.active_section {
             0 => self.section_home(cx),
             1 => self.section_appearance(cx),
-            2 => self.section_profiles(cx),
+            2 => self.section_profiles(window, cx),
             3 => self.section_providers(cx),
             4 => self.section_ssh(cx),
             5 => self.section_network(cx),
@@ -3643,9 +3196,9 @@ impl Focusable for SettingsPane {
 }
 
 impl Render for SettingsPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let nav = self.render_nav(cx);
-        let content = self.section_content(cx);
+        let content = self.section_content(window, cx);
         // 这里**不再**挂 font_family。旧壳设置页整页走终端 mono，是因为自绘
         // 只有一套字形缓存；GPUI 壳没有这个限制，继承那个观感只会让中文说明
         // 字距发虚、行更长。根字体由 `theme.font_family`（Windows 上是雅黑

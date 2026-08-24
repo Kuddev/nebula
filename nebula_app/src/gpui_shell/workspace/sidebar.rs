@@ -1,9 +1,11 @@
 use super::*;
 
+/// 折叠箭头的固定布局槽。图标是 SVG，不应借任一字体的 advance 决定留白。
+const TABS_DISCLOSURE_SLOT_W: f32 = 24.0;
+
 impl NebulaWorkspace {
-    /// 侧栏等宽标签的 cell 宽：与终端元素同一套度量法（塑形一个 "M" 取
-    /// advance），列数换算与省略号都建立在它上面。字体缺失时回落 0.6em，
-    /// 只影响截断位置、不会画错。
+    /// 侧栏标签的保守字宽：塑形一个 "M" 取 advance，供旧壳列数截断逻辑
+    /// 估算。必须使用 UI 字体；终端字体变化不属于 chrome 的布局输入。
     fn sidebar_cell_width(&self, window: &mut Window, family: &SharedString, size_px: f32) -> f32 {
         let shaped = window.text_system().shape_line(
             SharedString::new_static("M"),
@@ -157,28 +159,17 @@ impl NebulaWorkspace {
         let active_fg = theme.sidebar_accent_foreground;
         let hover_bg = theme.list_hover;
         let dark = theme.is_dark();
-        // 运行程序图标是 Nerd Font 字位，chrome 的 UI 字体没有——用终端等
-        // 宽字体渲染（旧壳 chrome 同理，其内置字体本就带全部图标字位）。
+        // 标题/标签走稳定的 UI 字体；程序图标是 Nerd Font 字位，固定走随
+        // 安装包提供的 Maple。用户设置的终端字体不得改变 chrome 几何。
         let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
-        let mono_family: SharedString = settings
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from("Cascadia Mono"))
-            .into();
+        let chrome_family = theme.mono_font_family.clone();
+        let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         // 旧壳合同（display/mod.rs `ui_font_px`）：chrome 锚定**配置字号**
         // （nebula.toml `font.size` 默认 11.25pt = 15px）。终端的持久化缩放
         // （`font_size=` 键）只影响终端网格，侧栏不得跟着变粗/变大；
         // 固定 14px 的旧毛病（比旧壳小一号）也不能回潮。
         let label_px = settings.map(|settings| settings.base_font_size_px).unwrap_or(15.0);
-        // 等宽 advance 的唯一事实源：与终端元素同款——塑形一个 "M" 量出来，
-        // 而不是按 0.6em 猜。列数换算和省略号都建立在这个数上。
-        let cell_w = self.sidebar_cell_width(window, &mono_family, label_px);
-        // 旧壳标题是同一个 tracked run：`"{chevron}  TABS"`。T 的起点
-        // 因而位于箭头起点之后三个完整字位（箭头自身 + 两个空格），不是
-        // Tailwind `gap_2` 的固定 8px。按标题字号实测 advance，再补回旧壳
-        // 0.65px/字的 tracking，字号和 DPI 改变时呼吸位仍保持同一比例。
-        let section_title_cell_w =
-            self.sidebar_cell_width(window, &mono_family, label_px * SIDEBAR_TITLE_SCALE);
-        let tabs_disclosure_slot_w = (section_title_cell_w + 0.65) * 3.0;
+        let cell_w = self.sidebar_cell_width(window, &chrome_family, label_px);
 
         // 受约束拖拽的渲染参数：激活后被拖行骑指针位移，落点槽位由位移换算。
         let drag = self
@@ -269,7 +260,7 @@ impl NebulaWorkspace {
                     ),
                     SidebarActivity::Idle => shell_tag.map(|tag| {
                         div()
-                            .font_family(mono_family.clone())
+                            .font_family(chrome_family.clone())
                             .text_size(px(label_px * SIDEBAR_TAG_SCALE))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(status_color)
@@ -395,7 +386,7 @@ impl NebulaWorkspace {
                         div()
                             .w(px(TAB_LABEL_ICON_W))
                             .flex_shrink_0()
-                            .font_family(mono_family.clone())
+                            .font_family(symbol_family.clone())
                             .text_size(px(label_px))
                             .font_weight(FontWeight::NORMAL)
                             .text_color(if active { active_fg } else { muted })
@@ -441,13 +432,13 @@ impl NebulaWorkspace {
                             Input::new(&input)
                                 .w_full()
                                 .text_size(px(label_px))
-                                .font_family(mono_family.clone()),
+                                .font_family(chrome_family.clone()),
                         )
                         .into_any_element(),
                     None => div()
                         .flex_1()
                         .min_w_0()
-                        .font_family(mono_family.clone())
+                        .font_family(chrome_family.clone())
                         .text_size(px(label_px))
                         // 标签标题本身使用 Light；活动态只换前景/背景色，
                         // 不再靠更粗字重强调，避免选中行看起来突然加粗。
@@ -599,13 +590,14 @@ impl NebulaWorkspace {
                         h_flex()
                             .h_full()
                             .items_center()
+                            .font_family(chrome_family.clone())
                             .pr_1()
                             .child(
                                 // 折叠三角用组件库线性 Chevron（lucide 细线），
                                 // 不再用 Nerd Font 实心字位——后者在侧栏标题
                                 // 上偏重、和右侧 +/⋯ 的 SVG 不一套语言。
                                 h_flex()
-                                    .w(px(tabs_disclosure_slot_w))
+                                    .w(px(TABS_DISCLOSURE_SLOT_W))
                                     .h_full()
                                     .flex_shrink_0()
                                     .items_center()
@@ -916,10 +908,8 @@ impl NebulaWorkspace {
         let (ink, dim, badge_fill) = (theme.foreground, theme.muted_foreground, theme.muted);
         let dark = theme.is_dark();
         let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
-        let mono_family: SharedString = settings
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from("Cascadia Mono"))
-            .into();
+        let chrome_family = theme.mono_font_family.clone();
+        let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         let label_px = settings.map(|settings| settings.base_font_size_px).unwrap_or(15.0);
         let TabPresentation { title, logo_image, program_glyph, pane_count, .. } =
             self.tab_presentation(self.active, cx, dark);
@@ -944,7 +934,7 @@ impl NebulaWorkspace {
                     row.child(
                         div()
                             .flex_shrink_0()
-                            .font_family(mono_family.clone())
+                            .font_family(symbol_family)
                             .text_size(px(label_px))
                             .text_color(dim)
                             .child(glyph),
@@ -954,7 +944,7 @@ impl NebulaWorkspace {
                     div()
                         .min_w_0()
                         .truncate()
-                        .font_family(mono_family)
+                        .font_family(chrome_family)
                         .text_size(px(label_px))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(ink)

@@ -48,11 +48,9 @@ impl NebulaWorkspace {
         let muted = theme.muted_foreground;
         let hover = theme.list_hover;
         let selected_bg = theme.list_active;
-        let mono_family: SharedString = cx
-            .try_global::<crate::gpui_shell::config::Settings>()
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| String::from("Maple Mono Normal NF CN"))
-            .into();
+        // 文件树字位是内置 Nerd Font 图标；固定 Maple，不能让终端主字体
+        // 改变折叠箭头和文件图标的 advance。
+        let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         let selected_path = self.side_panel.selected.clone();
         let scroll = self.side_panel.scroll;
         let root = self
@@ -109,7 +107,7 @@ impl NebulaWorkspace {
                     div()
                         .w(px(12.0))
                         .flex_shrink_0()
-                        .font_family(mono_family.clone())
+                        .font_family(symbol_family.clone())
                         .text_sm()
                         .text_color(muted)
                         .child(legacy_chevron.unwrap_or("")),
@@ -119,7 +117,7 @@ impl NebulaWorkspace {
                         div()
                             .w(px(16.0))
                             .flex_shrink_0()
-                            .font_family(mono_family.clone())
+                            .font_family(symbol_family.clone())
                             .text_sm()
                             .text_color(if row.ignored { muted } else { theme.foreground })
                             .child(crate::display::side_panel::folder_icon(row.expanded)),
@@ -130,7 +128,7 @@ impl NebulaWorkspace {
                         div()
                             .w(px(16.0))
                             .flex_shrink_0()
-                            .font_family(mono_family.clone())
+                            .font_family(symbol_family.clone())
                             .text_sm()
                             .child(glyph),
                     )

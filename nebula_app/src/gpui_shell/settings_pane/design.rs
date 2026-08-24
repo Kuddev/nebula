@@ -57,6 +57,15 @@ const CTRL_COL_W: f32 = 232.0;
 /// 脏值段升起的时长。
 const MARK_RISE: Duration = Duration::from_millis(260);
 
+#[derive(Clone, Copy)]
+enum RowLayout {
+    Standard,
+    /// HTML 字体组原型的宽控件行；窄窗口时切成说明在上、控件在下。
+    Wide {
+        stacked: bool,
+    },
+}
+
 impl SettingsPane {
     /// 一组设置的开头：标题出线。轨道不在这里画——它由组内每一行自己接续，
     /// 这样才能做到"同一条线，某几段是亮的"。
@@ -101,7 +110,20 @@ impl SettingsPane {
         control: impl IntoElement,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        self.row_shell(label, desc, None, false, control, cx)
+        self.row_shell(label, desc, None, false, RowLayout::Standard, control, cx)
+    }
+
+    /// 需要 460px 控件列的设置行。只复用现有行壳的层次、hover 与间距，
+    /// 布局按 HTML 原型在窄窗口切成上下两行。
+    pub(crate) fn responsive_wide_row(
+        &self,
+        label: &'static str,
+        desc: &'static str,
+        stacked: bool,
+        control: impl IntoElement,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        self.row_shell(label, desc, None, false, RowLayout::Wide { stacked }, control, cx)
     }
 
     /// 带撤销的设置行：该项被覆盖过时，左侧轨道这一段亮起来，行内出现 ↶。
@@ -138,7 +160,7 @@ impl SettingsPane {
                 .child(Icon::new(IconName::Undo2).xsmall())
                 .into_any_element()
         });
-        self.row_shell(label, desc, reset, dirty, control, cx)
+        self.row_shell(label, desc, reset, dirty, RowLayout::Standard, control, cx)
     }
 
     /// 行 hover 组名。↶ 要跟着**整行**的 hover 显形，而不是自己被指到才现
@@ -146,7 +168,6 @@ impl SettingsPane {
     fn row_hover_group(label: &'static str) -> SharedString {
         SharedString::from(format!("settings-row-{label}"))
     }
-
 
     /// 说明文字。反引号包起来的片段走等宽——这是全页 mono 唯一的用途。
     ///
@@ -195,6 +216,7 @@ impl SettingsPane {
         desc: &'static str,
         reset: Option<gpui::AnyElement>,
         dirty: bool,
+        layout: RowLayout,
         control: impl IntoElement,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -204,6 +226,60 @@ impl SettingsPane {
             ROW_PAD_Y_COMPACT
         } else {
             ROW_PAD_Y
+        };
+        let text = v_flex()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(base_px))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child(label),
+                    )
+                    .children(reset),
+            )
+            .when(!desc.is_empty(), |text| {
+                text.child(
+                    div()
+                        .mt(px(LABEL_DESC_GAP))
+                        .text_size(px(base_px * DESC_SCALE))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(theme.muted_foreground)
+                        .child(Self::desc_text(desc, cx)),
+                )
+            });
+        let control = control.into_any_element();
+        let columns = match layout {
+            RowLayout::Standard => h_flex()
+                .w_full()
+                .items_start()
+                .gap_4()
+                .child(text.flex_1().min_w(px(TEXT_COL_MIN_W)))
+                .child(
+                    h_flex()
+                        .w(px(CTRL_COL_W))
+                        .flex_shrink_0()
+                        .justify_end()
+                        .items_center()
+                        .child(control),
+                ),
+            RowLayout::Wide { stacked: false } => h_flex()
+                .w_full()
+                .items_start()
+                .gap(px(48.0))
+                .child(text.flex_1().min_w(px(280.0)))
+                .child(
+                    h_flex().w(px(FONT_PICKER_WIDTH)).flex_shrink_0().items_center().child(control),
+                ),
+            RowLayout::Wide { stacked: true } => v_flex()
+                .w_full()
+                .gap(px(22.0))
+                .child(text.w_full())
+                .child(div().w_full().child(control)),
         };
         div()
             .id(label)
@@ -244,53 +320,6 @@ impl SettingsPane {
                         ),
                 )
             })
-            .child(
-                h_flex()
-                    .w_full()
-                    // 顶对齐：控件锚在 label 那一行，说明再长也不会把开关拽到
-                    // 两行文字的中间去。
-                    .items_start()
-                    .gap_4()
-                    .child(
-                        v_flex()
-                            // 弹性：窗口拉宽，说明跟着变长，右边不留死白。
-                            .flex_1()
-                            .min_w(px(TEXT_COL_MIN_W))
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .text_size(px(base_px))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.foreground)
-                                            .child(label),
-                                    )
-                                    .children(reset),
-                            )
-                            .when(!desc.is_empty(), |text| {
-                                text.child(
-                                    div()
-                                        .mt(px(LABEL_DESC_GAP))
-                                        .text_size(px(base_px * DESC_SCALE))
-                                        .font_weight(FontWeight::NORMAL)
-                                        .text_color(theme.muted_foreground)
-                                        .child(Self::desc_text(desc, cx)),
-                                )
-                            }),
-                    )
-                    // 控件列：定宽 + 内部右对齐。定宽保证各行左右缘各成一条
-                    // 竖线，右对齐保证开关（窄）和下拉（宽）的右缘也齐。
-                    .child(
-                        h_flex()
-                            .w(px(CTRL_COL_W))
-                            .flex_shrink_0()
-                            .justify_end()
-                            .items_center()
-                            .child(control),
-                    ),
-            )
+            .child(columns)
     }
 }
