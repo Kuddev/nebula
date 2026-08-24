@@ -312,7 +312,14 @@ pub fn paint_frame(
                     origin.x + px(x),
                     origin.y + px(plan.baseline_y + op.baseline_y) - line.ascent,
                 );
-                let _ = line.paint(target, line.ascent + line.descent, window, cx);
+                let _ = line.paint(
+                    target,
+                    line.ascent + line.descent,
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
         });
     }

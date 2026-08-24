@@ -132,10 +132,6 @@ fn placeholder_png() -> Vec<u8> {
 }
 
 impl HttpClient for UreqClient {
-    fn type_name(&self) -> &'static str {
-        std::any::type_name::<Self>()
-    }
-
     fn user_agent(&self) -> Option<&gpui::http_client::http::HeaderValue> {
         None
     }

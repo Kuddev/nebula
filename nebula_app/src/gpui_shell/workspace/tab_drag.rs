@@ -107,9 +107,11 @@ impl NebulaWorkspace {
         self.update_tab_drag_position(f32::from(event.position.x), f32::from(event.position.y), cx);
         // 拖到 tab 视口边缘就自动滚（仅顶栏模式且真的溢出时生效）。放在位移
         // 换算之后：让位槽位仍按存储顺序算，滚动只改可视窗口。
-        if self.tab_drag.as_ref().is_some_and(|drag| {
-            drag.active && drag.axis == TabDragAxis::Horizontal
-        }) {
+        if self
+            .tab_drag
+            .as_ref()
+            .is_some_and(|drag| drag.active && drag.axis == TabDragAxis::Horizontal)
+        {
             self.autoscroll_top_tabs_for_drag(f32::from(event.position.x), window, cx);
         }
     }

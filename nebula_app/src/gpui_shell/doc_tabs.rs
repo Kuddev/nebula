@@ -19,7 +19,6 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, RenderImage,
     ScrollWheelEvent, SharedString, Styled as _, Window, div, px,
 };
-use gpui_component::PixelsExt as _;
 use image::Frame;
 
 use crate::display::image_viewer::ImageView;
@@ -176,8 +175,14 @@ impl Render for ImageTabView {
                     gpui::size(px(target.2.max(1.0)), px(target.3.max(1.0))),
                 );
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                    let _ =
-                        window.paint_image(target_bounds, Corners::all(px(0.0)), image, 0, false);
+                    let _ = window.paint_image(
+                        target_bounds,
+                        target_bounds,
+                        Corners::all(px(0.0)),
+                        image,
+                        0,
+                        false,
+                    );
                 });
             },
         )
@@ -303,7 +308,7 @@ impl Render for DocTabView {
             })
             .child(
                 div().flex_1().min_h_0().child(
-                    TextView::markdown(doc_id, self.content.clone(), window, cx)
+                    TextView::markdown(doc_id, self.content.clone())
                         .selectable(true)
                         .scrollable(true)
                         // image_base：相对图片路径（README 的 logo/截图）按

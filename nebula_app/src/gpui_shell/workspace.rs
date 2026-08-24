@@ -1573,12 +1573,12 @@ impl NebulaWorkspace {
             let close_workspace = close_workspace.clone();
             center_confirm_dialog(dialog, window)
                 .title("关闭窗口？")
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("关闭")
                         .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text("取消"),
+                        .cancel_text("取消")
+                        .show_cancel(true),
                 )
                 .child(body.clone())
                 .on_ok(move |_, window, cx| {
@@ -1618,12 +1618,12 @@ impl NebulaWorkspace {
             let workspace = workspace.clone();
             center_confirm_dialog(dialog, window)
                 .title("关闭此分栏？")
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("关闭")
                         .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text("取消"),
+                        .cancel_text("取消")
+                        .show_cancel(true),
                 )
                 .child(body.clone())
                 .on_ok(move |_, window, cx| {
@@ -1646,12 +1646,12 @@ impl NebulaWorkspace {
             let workspace = workspace.clone();
             center_confirm_dialog(dialog, window)
                 .title("关闭此标签页？")
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("关闭")
                         .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text("取消"),
+                        .cancel_text("取消")
+                        .show_cancel(true),
                 )
                 .child(body.clone())
                 .on_ok(move |_, window, cx| {
@@ -1918,9 +1918,7 @@ impl NebulaWorkspace {
         cx.spawn(async move |_this, cx| {
             loop {
                 executor.timer(Duration::from_millis(1000)).await;
-                if cx.update(crate::gpui_shell::workspace::windowing::autosave_tick).is_err() {
-                    return;
-                }
+                cx.update(crate::gpui_shell::workspace::windowing::autosave_tick);
             }
         })
         .detach();
@@ -2221,7 +2219,7 @@ impl NebulaWorkspace {
             )
             | None => return,
         };
-        window.defer(cx, move |window, _| window.focus(&focus));
+        window.defer(cx, move |window, cx| window.focus(&focus, cx));
     }
 
     /// 聚焦 tab 的**宿主可见** cwd。必须先识别 WSL，再读 `local_cwd()`：Windows
@@ -3048,7 +3046,7 @@ impl NebulaWorkspace {
             .child(
                 Button::new("side-panel-git")
                     .label(vcs_name)
-                    .when(is_git_vcs, |button| button.icon(IconName::GitHub))
+                    .when(is_git_vcs, |button| button.icon(IconName::Github))
                     .small()
                     .selected(git)
                     .when(git_count > 0, |button| button.label(format!("{vcs_name} {git_count}")))

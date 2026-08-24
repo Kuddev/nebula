@@ -271,7 +271,7 @@ impl SettingsPane {
     pub(super) fn close_ssh_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ssh_editor = None;
         self.ssh_password_input.update(cx, |input, cx| input.set_value("", window, cx));
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -492,7 +492,7 @@ impl SettingsPane {
             || Some((format!("已保存 {destination}"), false)),
             |error| Some((format!("已保存 {destination}，但旧地址凭据清理失败: {error}"), true)),
         );
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.notify();
     }
 
@@ -1273,7 +1273,7 @@ impl SettingsPane {
         Some(
             deferred(
                 anchored()
-                    .anchor(gpui::Corner::TopLeft)
+                    .anchor(gpui::Anchor::TopLeft)
                     .position(trigger.bottom_left())
                     .offset(gpui::point(px(0.0), px(6.0)))
                     .snap_to_window_with_margin(px(8.0))

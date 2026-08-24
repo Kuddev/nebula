@@ -54,14 +54,9 @@ impl NebulaWorkspace {
                     events.push(event);
                 }
 
-                if cx
-                    .update(|cx| {
-                        crate::gpui_shell::workspace::windowing::dispatch_shell_events(events, cx)
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+                cx.update(|cx| {
+                    crate::gpui_shell::workspace::windowing::dispatch_shell_events(events, cx)
+                });
             }
         })
         .detach();

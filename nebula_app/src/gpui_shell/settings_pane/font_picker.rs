@@ -46,7 +46,7 @@ impl SettingsPane {
         self.font_picker_open = false;
         self.font_query_input.update(cx, |input, cx| input.set_value("", window, cx));
         if restore_focus {
-            window.focus(&self.focus_handle);
+            window.focus(&self.focus_handle, cx);
         }
         cx.notify();
     }
@@ -534,7 +534,7 @@ impl SettingsPane {
                 anchor.child(
                     deferred(
                         anchored()
-                            .anchor(gpui::Corner::TopRight)
+                            .anchor(gpui::Anchor::TopRight)
                             .position(trigger_bounds.bottom_right())
                             .offset(gpui::point(px(0.0), px(6.0)))
                             .snap_to_window_with_margin(px(8.0))

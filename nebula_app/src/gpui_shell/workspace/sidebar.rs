@@ -881,7 +881,7 @@ impl NebulaWorkspace {
                     )
                     .child(
                         Button::new("toggle-git-tree")
-                            .icon(IconName::GitHub)
+                            .icon(IconName::Github)
                             .ghost()
                             .selected(git_active)
                             .tooltip("Git 状态 (Ctrl+Shift+G)")

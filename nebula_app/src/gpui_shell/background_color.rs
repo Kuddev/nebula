@@ -301,7 +301,7 @@ impl SettingsPane {
                 anchor.child(
                     deferred(
                         anchored()
-                            .anchor(gpui::Corner::TopRight)
+                            .anchor(gpui::Anchor::TopRight)
                             .position(trigger_bounds.bottom_right())
                             .offset(gpui::point(px(0.0), px(6.0)))
                             .snap_to_window_with_margin(px(8.0))
@@ -408,6 +408,7 @@ impl SettingsPane {
                                 offset: gpui::point(px(0.0), px(0.0)),
                                 blur_radius: px(0.0),
                                 spread_radius: px(2.0),
+                                inset: false,
                             }])
                         })
                         .bg(super::rgb_hsla(color.r, color.g, color.b))

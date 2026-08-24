@@ -467,7 +467,7 @@ impl NebulaWorkspace {
                 // 相邻操作按钮下沉，标题栏两侧的独立工具仍保持垂直居中。
                 h_flex()
                     .h_full()
-                    .flex_shrink()
+                    .flex_shrink(1.0)
                     .min_w_0()
                     .items_end()
                     // 溢出翻页：只在装不下时出现。滚轮已经能滚，但滚轮是个
@@ -498,7 +498,7 @@ impl NebulaWorkspace {
                             .id("top-tabs-viewport")
                             .relative()
                             .w(px(tab_viewport_w))
-                            .flex_shrink()
+                            .flex_shrink(1.0)
                             .min_w_0()
                             .h(px(TOP_TAB_H))
                             .overflow_hidden()
@@ -555,7 +555,7 @@ impl NebulaWorkspace {
                             .selected(settings_active)
                             .tooltip("更多")
                             .dropdown_menu_with_anchor(
-                                gpui::Corner::TopRight,
+                                gpui::Anchor::TopRight,
                                 move |menu, _, _| {
                                     let shell_picker = menu_workspace.clone();
                                     let new_window = menu_workspace.clone();
@@ -617,7 +617,7 @@ impl NebulaWorkspace {
             )
             .child(
                 Button::new("top-toggle-git-tree")
-                    .icon(IconName::GitHub)
+                    .icon(IconName::Github)
                     .ghost()
                     .selected(git_active)
                     .tooltip("Git 状态 (Ctrl+Shift+G)")

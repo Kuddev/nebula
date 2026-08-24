@@ -439,7 +439,6 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     // 悬停 / 选中水洗。
     theme.accent = wash(sk.hover);
     theme.accent_foreground = ink(sk.ink_strong);
-    theme.accordion_hover = wash(sk.hover);
     theme.list_hover = wash(sk.hover);
     theme.list_active = wash(sk.hover_strong);
     theme.list_active_border = transparent;

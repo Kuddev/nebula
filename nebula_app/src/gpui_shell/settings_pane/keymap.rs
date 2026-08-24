@@ -97,7 +97,11 @@ impl SettingsPane {
 
     /// interceptor 与修饰键预览共用的录制状态机；按键是否应被独占由调用
     /// 方在进入这里前裁定，避免数据转换层意外吞掉普通设置输入。
-    pub(super) fn handle_keymap_capture(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+    pub(super) fn handle_keymap_capture(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        cx: &mut Context<Self>,
+    ) {
         let Some(row) = self.keymap_capture else { return };
         match crate::display::keymap::capture_gpui(keystroke) {
             crate::display::keymap::CaptureOutcome::Cancel => {
@@ -269,7 +273,7 @@ impl SettingsPane {
                         this.keymap_capture_preview.clear();
                         // 焦点收到分区根：键盘事件沿根路径冒泡给捕获处理器，
                         // 搜索框不再分走按键。
-                        window.focus(&this.focus_handle);
+                        window.focus(&this.focus_handle, cx);
                     }
                     cx.notify();
                 }),

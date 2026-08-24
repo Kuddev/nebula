@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, ClipboardItem, Context, Corner, DismissEvent, Entity, Focusable as _,
+    Anchor, AppContext as _, ClipboardItem, Context, DismissEvent, Entity, Focusable as _,
     InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _,
     Pixels, Point, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
     Window, anchored, deferred, div, px,
@@ -323,7 +323,7 @@ impl NebulaWorkspace {
                 window,
             )
         });
-        menu.focus_handle(cx).focus(window);
+        menu.focus_handle(cx).focus(window, cx);
         let subscription = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
             this.file_tree_menu = None;
             cx.notify();
@@ -340,7 +340,7 @@ impl NebulaWorkspace {
                 anchored()
                     .position(state.position)
                     .snap_to_window_with_margin(px(8.0))
-                    .anchor(Corner::TopLeft)
+                    .anchor(Anchor::TopLeft)
                     .child(state.menu.clone()),
             )
             .with_priority(1)
@@ -419,12 +419,12 @@ impl NebulaWorkspace {
             let path = path.clone();
             center_confirm_dialog(dialog, window)
                 .title(title.clone())
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("删除")
                         .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text("取消"),
+                        .cancel_text("取消")
+                        .show_cancel(true),
                 )
                 .child(body.clone())
                 .on_ok(move |_, _, cx| {

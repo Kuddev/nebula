@@ -12,7 +12,7 @@ pub use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
-    dialog::{Dialog, DialogButtonProps},
+    dialog::{Dialog, DialogAction, DialogButtonProps, DialogClose, DialogFooter},
     dock::{
         DockArea, DockAreaState, DockItem, Panel, PanelControl, PanelEvent, PanelState, TabPanel,
     },
@@ -40,16 +40,9 @@ pub use gpui_component::WindowExt as _;
 pub use gpui_component::{ActiveTheme, Colorize};
 
 use gpui::{Window, px};
-use gpui_component::PixelsExt as _;
 
-/// 旧壳 `draw_confirm_modal`：`(win_w - box_w)/2`、`(win_h - box_h)/2`。
-/// 组件库 Dialog 水平已经居中，垂直默认贴在 `height/10`。不改 gpui-component，
-/// 只把 `margin_top` 调到窗口中线。关闭/粘贴确认约 200px 高；入场动画结束
-/// 时还会把 top 再加 30px，所以这里先减去这段位移，落点才是正中。
-pub fn center_confirm_dialog(dialog: Dialog, window: &Window) -> Dialog {
-    let height = window.viewport_size().height.as_f32();
-    const DIALOG_H: f32 = 200.0;
-    const SLIDE: f32 = 30.0;
-    let top = ((height - DIALOG_H) / 2.0 - SLIDE).max(16.0);
-    dialog.margin_top(px(top))
+/// 保留旧壳确认框的 480px 内容宽度；位置和交互采用新版 Dialog。
+pub fn center_confirm_dialog(dialog: Dialog, _window: &Window) -> Dialog {
+    const DIALOG_W: f32 = 480.0;
+    dialog.width(px(DIALOG_W))
 }

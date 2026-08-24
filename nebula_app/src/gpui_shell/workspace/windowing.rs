@@ -111,7 +111,7 @@ pub(crate) fn initialize(cx: &mut App, runtime_hub: crate::runtime_api::RuntimeH
         save_combined_session(cx, true);
         async {}
     });
-    let closed_subscription = cx.on_window_closed(|cx| {
+    let closed_subscription = cx.on_window_closed(|cx, _window_id| {
         prune_entries(cx);
         if !cx.global::<WindowRegistry>().entries.is_empty() {
             save_combined_session(cx, false);

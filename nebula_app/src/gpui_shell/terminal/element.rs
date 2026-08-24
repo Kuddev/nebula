@@ -19,7 +19,7 @@ use gpui::{
     InspectorElementId, LayoutId, Pixels, Rgba, SharedString, Style, TextRun, UnderlineStyle,
     Window, fill, outline, point, px, relative, size,
 };
-use gpui_component::{ActiveTheme as _, PixelsExt as _};
+use gpui_component::ActiveTheme as _;
 use nebula_terminal::grid::Dimensions as _;
 use nebula_terminal::render::{RenderSnapshot, SnapshotConfig, boxdraw};
 #[cfg(windows)]
@@ -647,7 +647,14 @@ impl Element for TerminalElement {
                 );
                 let bg = Bounds::new(anchor.origin, size(shaped.width, layout.line_height));
                 window.paint_quad(fill(bg, theme.background));
-                let _ = shaped.paint(anchor.origin, layout.line_height, window, cx);
+                let _ = shaped.paint(
+                    anchor.origin,
+                    layout.line_height,
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
         }
 
@@ -759,6 +766,8 @@ fn paint_link_preview(
     let _ = shaped.paint(
         point(x + pad, y + (bubble_h - layout.line_height * 0.85) * 0.5),
         layout.line_height * 0.85,
+        gpui::TextAlign::Left,
+        None,
         window,
         cx,
     );
@@ -778,7 +787,7 @@ fn paint_cell_text(
     line_height: Pixels,
 ) {
     let shaped = window.text_system().shape_line(text, font_size, &[run], None);
-    let _ = shaped.paint(origin, line_height, window, cx);
+    let _ = shaped.paint(origin, line_height, gpui::TextAlign::Left, None, window, cx);
 }
 
 /// 网格对齐的浮层文本（ghost/弹窗共用），与网格文字同一定位合同：每个可见
@@ -972,7 +981,7 @@ fn paint_completion_popup(
         ),
     );
     let panel_radius = px(8.0);
-    window.paint_shadows(
+    window.paint_drop_shadows(
         panel_bounds,
         panel_radius.into(),
         &[
@@ -981,12 +990,14 @@ fn paint_completion_popup(
                 offset: point(px(0.0), px(8.0)),
                 blur_radius: px(30.0),
                 spread_radius: px(-2.0),
+                inset: false,
             },
             gpui::BoxShadow {
                 color: colors.panel_shadow.opacity(0.72),
                 offset: point(px(0.0), px(3.0)),
                 blur_radius: px(10.0),
                 spread_radius: px(-1.0),
+                inset: false,
             },
         ],
     );

@@ -133,36 +133,38 @@ pub(crate) fn open_update_dialog(
             );
         center_confirm_dialog(dialog, window)
             .title(title.clone())
-            .confirm()
-            .footer(move |ok, cancel, window, cx| {
-                let version = footer_skip_version.clone();
-                let save_failed_prefix = footer_save_failed_prefix.clone();
-                let error_separator = footer_error_separator.clone();
-                vec![
-                    Button::new("skip-nebula-update")
-                        .label(footer_skip_text.clone())
-                        .ghost()
-                        .on_click(move |_, window, cx| {
-                            if let Err(error) = crate::update_check::skip_version(&version) {
-                                crate::gpui_shell::toast::toast(
-                                    window,
-                                    cx,
-                                    crate::display::ToastKind::Warning,
-                                    format!("{save_failed_prefix}{error_separator}{error}"),
-                                );
-                            }
-                            window.close_dialog(cx);
-                        })
-                        .into_any_element(),
-                    div().flex_1().into_any_element(),
-                    cancel(window, cx),
-                    ok(window, cx),
-                ]
-            })
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text(open_text.clone())
-                    .cancel_text(later_text.clone()),
+            .footer(
+                DialogFooter::new()
+                    .child(
+                        Button::new("skip-nebula-update")
+                            .label(footer_skip_text.clone())
+                            .ghost()
+                            .on_click({
+                                let version = footer_skip_version.clone();
+                                let save_failed_prefix = footer_save_failed_prefix.clone();
+                                let error_separator = footer_error_separator.clone();
+                                move |_, window, cx| {
+                                    if let Err(error) = crate::update_check::skip_version(&version)
+                                    {
+                                        crate::gpui_shell::toast::toast(
+                                            window,
+                                            cx,
+                                            crate::display::ToastKind::Warning,
+                                            format!("{save_failed_prefix}{error_separator}{error}"),
+                                        );
+                                    }
+                                    window.close_dialog(cx);
+                                }
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        DialogClose::new().child(Button::new("cancel").label(later_text.clone())),
+                    )
+                    .child(
+                        DialogAction::new()
+                            .child(Button::new("ok").label(open_text.clone()).primary()),
+                    ),
             )
             .child(body)
             .on_ok(|_, _, cx| {

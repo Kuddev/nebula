@@ -11,11 +11,7 @@ pub(super) fn move_target(active: usize, len: usize, right: bool) -> Option<usiz
     if len < 2 || active >= len {
         return None;
     }
-    if right {
-        (active + 1 < len).then(|| active + 1)
-    } else {
-        active.checked_sub(1)
-    }
+    if right { (active + 1 < len).then(|| active + 1) } else { active.checked_sub(1) }
 }
 
 impl NebulaWorkspace {
@@ -36,7 +32,12 @@ impl NebulaWorkspace {
     /// Ctrl+Shift+PageUp/PageDown（WT 的 `moveTab forward/backward`）：把活动
     /// 标签在序列里挪一格。复用拖拽提交用的 [`Self::move_tab`]，两条路径共享
     /// 同一份下标搬运与 active 修正，不会各自解释一套。
-    pub(super) fn move_active_tab(&mut self, right: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn move_active_tab(
+        &mut self,
+        right: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(to) = move_target(self.active, self.tabs.len(), right) else { return };
         let from = self.active;
         self.move_tab(from, to, window, cx);

@@ -743,8 +743,8 @@ impl SettingsPane {
             SliderState::new().min(0.00).max(1.00).step(0.05).default_value(runtime.opacity)
         });
         subscriptions.push(cx.subscribe(&opacity_slider, |this, _, event: &SliderEvent, cx| {
-            match event {
-                SliderEvent::Change(value) => this.set_opacity(value.start(), cx),
+            if let SliderEvent::Change(value) = event {
+                this.set_opacity(value.start(), cx);
             }
         }));
         let wallpaper_opacity_slider = cx.new(|_| {
@@ -756,8 +756,10 @@ impl SettingsPane {
         });
         subscriptions.push(cx.subscribe(
             &wallpaper_opacity_slider,
-            |this, _, event: &SliderEvent, cx| match event {
-                SliderEvent::Change(value) => this.set_wallpaper_opacity(value.start(), cx),
+            |this, _, event: &SliderEvent, cx| {
+                if let SliderEvent::Change(value) = event {
+                    this.set_wallpaper_opacity(value.start(), cx);
+                }
             },
         ));
         let (proxy_protocol, proxy_address) =
@@ -1051,10 +1053,7 @@ impl SettingsPane {
             let pane = pane.clone();
             center_confirm_dialog(dialog, window)
                 .title("让背景图覆盖窗口控件区域？")
-                .confirm()
-                .button_props(
-                    DialogButtonProps::default().ok_text("开启").cancel_text("取消"),
-                )
+                .button_props(DialogButtonProps::default().show_cancel(true).ok_text("开启").cancel_text("取消"))
                 .child(SharedString::from(
                     "背景图会延伸到标题栏、窗口按钮、Tab 与 SSH 侧栏下方，低对比度图片可能影响操作可见性；界面仍会保留最低不透明度保护。",
                 ))
@@ -2156,7 +2155,7 @@ impl SettingsPane {
             ))
             .child(Self::about_action_row(
                 "about-github",
-                IconName::GitHub,
+                IconName::Github,
                 "GitHub",
                 "源代码",
                 REPOSITORY_URL.to_owned(),

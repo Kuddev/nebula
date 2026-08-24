@@ -21,7 +21,7 @@
 //! 因此保持单层。
 
 use gpui::{
-    AnyElement, App, Context, Corner, DismissEvent, Entity, Focusable as _,
+    Anchor, AnyElement, App, Context, DismissEvent, Entity, Focusable as _,
     InteractiveElement as _, IntoElement as _, MouseButton, ParentElement as _, Pixels, Point,
     Styled as _, Subscription, Window, anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
@@ -96,7 +96,7 @@ impl NebulaWorkspace {
                 tab_count,
             )
         });
-        menu.focus_handle(cx).focus(window);
+        menu.focus_handle(cx).focus(window, cx);
         let subscription = cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _, cx| {
             this.tab_menu = None;
             cx.notify();
@@ -115,7 +115,7 @@ impl NebulaWorkspace {
                 anchored()
                     .position(state.position)
                     .snap_to_window_with_margin(px(8.0))
-                    .anchor(Corner::TopLeft)
+                    .anchor(Anchor::TopLeft)
                     .child(state.menu.clone()),
             )
             .with_priority(1)

@@ -27,7 +27,10 @@ pub enum TerminalInput {
     Key(gpui::Keystroke),
     /// `paste` = 走粘贴语义。接收端据此决定要不要套 bracketed-paste 哨兵：
     /// 给单个字符套上哨兵会让 zsh/fish 拒绝执行。
-    Text { text: String, paste: bool },
+    Text {
+        text: String,
+        paste: bool,
+    },
 }
 
 impl TerminalView {
@@ -72,12 +75,7 @@ impl TerminalView {
     }
 
     /// 文本提交与粘贴都保留语义，由接收端自行套 bracketed-paste 包装。
-    pub(crate) fn apply_broadcast_text(
-        &mut self,
-        text: &str,
-        paste: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn apply_broadcast_text(&mut self, text: &str, paste: bool, cx: &mut Context<Self>) {
         if text.is_empty() || self.exited.is_some() {
             return;
         }

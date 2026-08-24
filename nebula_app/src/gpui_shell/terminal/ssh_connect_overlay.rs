@@ -601,6 +601,7 @@ pub(super) fn overlay(
                                 offset: point(px(0.0), px(7.0)),
                                 blur_radius: px(20.0),
                                 spread_radius: px(0.0),
+                                inset: false,
                             },
                         ])
                         .child(identity)

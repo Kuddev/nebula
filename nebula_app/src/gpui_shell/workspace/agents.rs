@@ -101,14 +101,9 @@ impl NebulaWorkspace {
                 if events.is_empty() {
                     continue;
                 }
-                if cx
-                    .update(|cx| {
-                        crate::gpui_shell::workspace::windowing::dispatch_ai_events(events, cx)
-                    })
-                    .is_err()
-                {
-                    return;
-                }
+                cx.update(|cx| {
+                    crate::gpui_shell::workspace::windowing::dispatch_ai_events(events, cx)
+                });
             }
         })
         .detach();

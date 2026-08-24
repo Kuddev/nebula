@@ -593,6 +593,7 @@ pub fn paint_glass_overlay(bounds: Bounds<Pixels>, window: &mut Window, cx: &App
             while x < right {
                 let _ = window.paint_image(
                     Bounds::new(point(x, y), size(step, step)),
+                    Bounds::new(point(x, y), size(step, step)),
                     Corners::default(),
                     tile.clone(),
                     0,
@@ -620,6 +621,7 @@ pub fn paint_wallpaper_card(bounds: Bounds<Pixels>, window: &mut Window, cx: &Ap
     // 往往不等于卡片，直接画会把四角重新铺方。这里传入已裁成卡片尺寸的
     // 纹理，使图片 bounds 与旧壳 shader 的圆角 clip rect 完全重合。
     let _ = window.paint_image(
+        bounds,
         bounds,
         Corners::all(crate::gpui_shell::theme::card_radius()),
         image,
@@ -753,7 +755,7 @@ pub fn paint_wallpaper_under_chrome(bounds: Bounds<Pixels>, window: &mut Window,
     }
     let Some(image) = window_wallpaper(bounds, window, wp) else { return };
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
-        let _ = window.paint_image(bounds, Corners::all(px(0.0)), image, 0, false);
+        let _ = window.paint_image(bounds, bounds, Corners::all(px(0.0)), image, 0, false);
     });
 }
 

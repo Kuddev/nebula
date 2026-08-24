@@ -455,7 +455,8 @@ impl Element for MathView {
         match &*slot.borrow() {
             FitSlot::Pending => {},
             FitSlot::Text(line) => {
-                let _ = line.paint(bounds.origin, line_height, window, cx);
+                let _ =
+                    line.paint(bounds.origin, line_height, gpui::TextAlign::Left, None, window, cx);
             },
             FitSlot::Math { layout, pixel_size, baseline_from_bottom } => {
                 let bounds_width = f32::from(bounds.size.width);
@@ -524,7 +525,14 @@ impl MathView {
             );
             let origin =
                 point(bounds.left() + px(op.x), baseline + px(op.baseline_y) - line.ascent);
-            let _ = line.paint(origin, line.ascent + line.descent, window, cx);
+            let _ = line.paint(
+                origin,
+                line.ascent + line.descent,
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
     }
 }
@@ -561,6 +569,7 @@ pub(crate) fn paint_formula_image(
     let image_size =
         size(px(geometry.width as f32 / raster_scale), px(geometry.height as f32 / raster_scale));
     let _ = window.paint_image(
+        Bounds::new(origin, image_size),
         Bounds::new(origin, image_size),
         Corners::default(),
         render_image,

@@ -12,7 +12,7 @@ use gpui::{
     Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _,
     Styled as _, TextRun, UTF16Selection, Window, div, point, px,
 };
-use gpui_component::{PixelsExt as _, WindowExt as _};
+use gpui_component::WindowExt as _;
 use nebula_settings::CellWidthModeName;
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
 use nebula_terminal::event_loop::Msg;
@@ -32,11 +32,11 @@ use super::mouse_protocol;
 use super::session::{self, TerminalSession};
 use super::suggest;
 use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
-use crate::{config::UiConfig, font_install::REQUIRED_FONT_FAMILY};
 use crate::gpui_shell::config::Settings;
 use crate::gpui_shell::prelude::{
     ActiveTheme as _, Colorize as _, DialogButtonProps, center_confirm_dialog,
 };
+use crate::{config::UiConfig, font_install::REQUIRED_FONT_FAMILY};
 use futures::StreamExt as _;
 
 /// 等宽字体描述。GPUI 的 Windows 后端收到空 feature 列表会在
@@ -1400,11 +1400,11 @@ impl TerminalView {
             let view = view.clone();
             center_confirm_dialog(dialog, window)
                 .title(title.clone())
-                .confirm()
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text(ok_text.clone())
-                        .cancel_text(cancel_text.clone()),
+                        .cancel_text(cancel_text.clone())
+                        .show_cancel(true),
                 )
                 .child(body.clone())
                 .on_ok(move |_, _window, cx| {
@@ -1528,9 +1528,9 @@ impl TerminalView {
                     let target = dir.clone();
                     // 子进程往返是阻塞的，必须落在后台线程池上。
                     let entries = cx
-                        .background_spawn(async move {
-                            crate::remote_dirs::fetch_wsl(&distro, &target)
-                        })
+                        .background_spawn(
+                            async move { crate::remote_dirs::fetch_wsl(&distro, &target) },
+                        )
                         .await;
                     crate::remote_dirs::finish_fetch(&env, &dir, entries);
                     let _ = this.update(cx, |_, cx| cx.notify());
@@ -1736,9 +1736,8 @@ impl TerminalView {
         }
     }
 
-    /// 用终端局部 action 截住 gpui-component Root 的 Tab 焦点遍历，再回灌
-    /// 同一条终端按键路径。有补齐时只接受补齐；无补齐时仍由编码器发送 Tab，
-    /// 因而不会产生第二套补齐/按键语义。
+    /// 截住组件 Root 的 Tab 焦点遍历后回灌既有终端按键路径；有补齐时只接受补齐，
+    /// 否则仍由原编码器发送 Tab，避免产生第二套按键语义。
     fn dispatch_terminal_tab(&mut self, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
         let mut modifiers = gpui::Modifiers::default();
         modifiers.shift = shift;
@@ -1746,6 +1745,7 @@ impl TerminalView {
             &KeyDownEvent {
                 keystroke: gpui::Keystroke { modifiers, key: "tab".to_owned(), key_char: None },
                 is_held: false,
+                prefer_character_input: false,
             },
             window,
             cx,
@@ -2049,7 +2049,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.emit(TerminalViewEvent::FocusRequested);
         if self.session.is_none() {
             return;
@@ -2382,7 +2382,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.emit(TerminalViewEvent::FocusRequested);
         if suggest::popup_dismiss(&mut self.suggest) {
             cx.notify();
@@ -2436,7 +2436,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&self.focus_handle);
+        window.focus(&self.focus_handle, cx);
         cx.emit(TerminalViewEvent::FocusRequested);
         if suggest::popup_dismiss(&mut self.suggest) {
             cx.notify();
@@ -2729,7 +2729,7 @@ impl Render for TerminalView {
                     this.write_bytes(bytes);
                     // 粘完把焦点交回终端：用户接着就要敲命令，还要先点一下
                     // 才能输入的话，这个手势就白省了。
-                    window.focus(&this.focus_handle);
+                    window.focus(&this.focus_handle, cx);
                     cx.notify();
                 },
             ))
