@@ -78,20 +78,22 @@ gpui-component = "=0.5.2"
 gpui-component-assets = "=0.5.1"
 ```
 
-- `gpui` and `gpui_platform` come from `zed-industries/zed` commit
-  `eb8e1c8b5502b7007465fbbc465f4a736fa39210` (the official `v1.16.1` tag).
+- `gpui` and `gpui_platform` come from `Kuddev/zed` commit
+  `eb8e1c8b5502b7007465fbbc465f4a736fa39210`. The commit is byte-identical to
+  the official `zed-industries/zed` `v1.16.1` tag.
 - `gpui-component` and its assets come from `Kuddev/gpui-component` commit
-  `4ee9f274e990d6228e4f276f0a1e48f62f6a2048`. This baseline contains the
-  upstream snapshot plus the Zed revision pin; it intentionally excludes
-  Nebula product patches.
-- The `nebula-v1.16.1-base` branch and tag in both Kuddev forks are audit and
-  recovery anchors. Cargo dependencies always use the full commit SHA, never
-  those movable names.
+  `4eb3917678930561c7ea36742f432313cd30b275`. This baseline contains the
+  upstream snapshot, the Zed revision pin, and the unified `Kuddev/zed` source;
+  it intentionally excludes Nebula product patches.
+- The `nebula-v1.16.1-owned-base` branch and tag in both Kuddev forks are audit
+  and recovery anchors. Cargo dependencies always use the full commit SHA,
+  never those movable names. Earlier `nebula-v1.16.1-base` refs remain intact
+  as provenance records and are not active dependency targets.
 
 Cargo source identity includes the repository URL. All Zed crates therefore
-use the official URL, including transitive dependencies from gpui-component;
-using the Kuddev Zed mirror for only part of the graph would create two
-incompatible copies of GPUI even when both URLs point to the same commit.
+use the Kuddev URL, including transitive dependencies from gpui-component;
+mixing the official and Kuddev URLs would create two incompatible copies of
+GPUI even when both URLs point to the same commit.
 
 Do not use wildcard versions, Git `main`, or branch-only pins. Verify every
 dependency revision change with:

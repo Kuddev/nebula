@@ -69,7 +69,7 @@ toml = "0.9.11"
 toml_edit = "0.24.0"
 # GPUI v1.16.1 把平台启动入口拆到独立 crate。它必须与 `gpui` 使用完全相同
 # 的 Git URL 和 rev，否则 Cargo 会把同名类型解析成两套互不兼容的 crate。
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "eb8e1c8b5502b7007465fbbc465f4a736fa39210", version = "=0.1.0" }
+gpui_platform = { git = "https://github.com/Kuddev/zed", rev = "eb8e1c8b5502b7007465fbbc465f4a736fa39210", version = "=0.1.0" }
 
 # TODO: Drop this pin and return to the crates.io release once the fix ships there.
 [patch.crates-io]
@@ -86,16 +86,17 @@ winit = { path = "third_party/winit-0.30.13" }
 # 精确固定，禁止 main、通配版本或仅凭 branch 名解析。
 #
 # GitHub 固定点（branch/tag 只用于审计，Cargo 始终使用下面的完整 SHA）：
-#   zed-industries/zed v1.16.1 @ eb8e1c8b5502b7007465fbbc465f4a736fa39210
-#   Kuddev/zed nebula-v1.16.1-base @ 同一 SHA（纯上游镜像，应急锚点）
-#   Kuddev/gpui-component nebula-v1.16.1-base
-#     @ 4ee9f274e990d6228e4f276f0a1e48f62f6a2048
-#     （官方 46576ae7 快照 + 仅 Cargo 依赖固定，不含 Nebula 产品补丁）
+#   上游来源：zed-industries/zed v1.16.1
+#     @ eb8e1c8b5502b7007465fbbc465f4a736fa39210
+#   Kuddev/zed nebula-v1.16.1-owned-base @ 同一 SHA（纯上游镜像）
+#   Kuddev/gpui-component nebula-v1.16.1-owned-base
+#     @ 4eb3917678930561c7ea36742f432313cd30b275
+#     （4ee9f274 基线 + Zed source 统一为 Kuddev/zed，不含 Nebula 产品补丁）
 #
-# Zed 依赖继续使用官方 URL：component 基线内部也使用这个 URL，而 Cargo 的
-# source identity 包含 URL；若应用改用 Kuddev 镜像，即使 SHA 相同也会解析成
-# 两套 gpui 类型。新增 component 补丁必须从固定基线开独立分支、逐条提交并
-# 更新 exact rev，不能移动基线 branch/tag。
+# 所有 Zed 依赖统一使用 Kuddev URL：Cargo 的 source identity 包含 URL，应用
+# 与 component 内部若混用官方/自有 URL，即使 SHA 相同也会解析成两套 gpui
+# 类型。新增 Zed/component 补丁必须从固定基线开独立分支、逐条提交并更新
+# exact rev，不能移动基线 branch/tag。
 #
 # 升级基点到 gpui-component 0.5.2+ 时的回归检查单（0.5.1 上这些行为本来是对的，
 # 是 0.5.2 重构 button 颜色推导时弄丢的，届时把下面两个 fix 带上）：
@@ -150,6 +151,6 @@ winit = { path = "third_party/winit-0.30.13" }
 #      这条修的是鼠标拖选，两者都要。上游 PR 候选，合并即撤。
 #
 # 当前只落固定基线；数学、GFM、Input 与视觉补丁将在独立提交中逐项恢复。
-gpui = { git = "https://github.com/zed-industries/zed", rev = "eb8e1c8b5502b7007465fbbc465f4a736fa39210", version = "=0.2.2" }
-gpui-component = { git = "https://github.com/Kuddev/gpui-component", rev = "4ee9f274e990d6228e4f276f0a1e48f62f6a2048", version = "=0.5.2" }
-gpui-component-assets = { git = "https://github.com/Kuddev/gpui-component", rev = "4ee9f274e990d6228e4f276f0a1e48f62f6a2048", version = "=0.5.1" }
+gpui = { git = "https://github.com/Kuddev/zed", rev = "eb8e1c8b5502b7007465fbbc465f4a736fa39210", version = "=0.2.2" }
+gpui-component = { git = "https://github.com/Kuddev/gpui-component", rev = "4eb3917678930561c7ea36742f432313cd30b275", version = "=0.5.2" }
+gpui-component-assets = { git = "https://github.com/Kuddev/gpui-component", rev = "4eb3917678930561c7ea36742f432313cd30b275", version = "=0.5.1" }
