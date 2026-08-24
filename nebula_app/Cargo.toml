@@ -26,14 +26,17 @@ path = "../nebula_config"
 version = "1.2.0"
 
 # 可选：GPUI UI 层（feature = "gpui-shell"，模块 src/gpui_shell/）。
-# gpui 与 gpui-component 成对锁定：0.5.1 编译在 gpui 0.2.2 上；两者由根
-# Cargo.toml 的 [patch.crates-io] 重定向到我们的 fork。
+# GPUI/component 的版本和 Git 来源由根 Cargo.toml 统一精确固定。
 [dependencies.gpui]
 version = "=0.2.2"
 optional = true
 
+[dependencies.gpui_platform]
+workspace = true
+optional = true
+
 [dependencies.gpui-component]
-version = "=0.5.1"
+version = "=0.5.2"
 optional = true
 # 代码查看 tab 的 tree-sitter 语法高亮语言包（不开只有 JSON）。
 features = ["tree-sitter-languages"]
@@ -237,6 +240,7 @@ wgpu-foundation = ["dep:pollster", "dep:wgpu"]
 # `--gpui` 仍可用。NEBULA_GPUI_SHELL=1 是旧的 spike 并存形态。
 gpui-shell = [
     "dep:gpui",
+    "dep:gpui_platform",
     "dep:gpui-component",
     "dep:gpui-component-assets",
     "dep:nebula-split",

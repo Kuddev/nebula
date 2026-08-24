@@ -5,7 +5,7 @@ license = "GPL-3.0-or-later"
 description = "Nebula's GPUI component acceptance lab (scratch; product UI lives in nebula_app)"
 publish = false
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.97.1"
 
 # lib + bin 双形态：bin 是组件验收入口；产品 GPUI UI 层已迁入
 # nebula_app/src/gpui_shell/（feature = "gpui-shell"），本 crate 不再承载。
@@ -18,12 +18,10 @@ name = "nebula-gpui"
 path = "src/main.rs"
 
 [dependencies]
-# gpui 与 gpui-component 必须成对锁定：0.5.1 编译在 crates.io 的 gpui 0.2.2
-# 上。两者已经由工作区根 Cargo.toml 的 [patch.crates-io] 重定向到我们的
-# fork（Kuddev/zed、Kuddev/gpui-component 的 nebula 分支）；版本号语义不变，
-# 加补丁/升级流程见根清单的手册注释。
+# 精确 Git 来源与 rev 由工作区根清单统一固定。
 gpui = "=0.2.2"
-gpui-component = "=0.5.1"
+gpui_platform.workspace = true
+gpui-component = "=0.5.2"
 gpui-component-assets = "=0.5.1"
 
 [lints.clippy]
