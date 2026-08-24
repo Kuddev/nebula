@@ -132,6 +132,16 @@ pub(crate) fn pick_private_key_file_with_hwnd(
     Some(validate_private_key_path(&path))
 }
 
+/// GPUI 目录操作复用旧壳的 Windows IFileOpenDialog。该实现会把已注册的
+/// WSL 发行版钉入侧栏，并完整返回 `\\wsl.localhost\...` 路径。
+#[cfg(windows)]
+pub(crate) fn pick_folder_with_hwnd(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    title: &str,
+) -> Option<PathBuf> {
+    platform::pick_folder_with_hwnd(hwnd, title)
+}
+
 /// Validate a path selected by a non-winit UI shell. The legacy picker and GPUI
 /// both use this exact classifier so a `.pub` file can never silently enter a
 /// profile just because the shell used a different native file-dialog API.

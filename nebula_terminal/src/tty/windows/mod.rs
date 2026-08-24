@@ -185,6 +185,7 @@ fn push_escaped_arg(cmd: &mut String, arg: &str) {
 enum NebulaShellExecutor {
     PowerShell,
     Bash,
+    Wsl,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -219,7 +220,8 @@ fn nebula_runtime_settings() -> NebulaRuntimeSettings {
         .or_else(|| nebula_settings_value("executor"))
         .map(|value| value.to_ascii_lowercase());
     let shell = match shell_value.as_deref() {
-        Some("bash" | "git-bash" | "gitbash" | "wsl") => NebulaShellExecutor::Bash,
+        Some("bash" | "git-bash" | "gitbash") => NebulaShellExecutor::Bash,
+        Some("wsl") => NebulaShellExecutor::Wsl,
         _ => NebulaShellExecutor::PowerShell,
     };
 
@@ -933,6 +935,12 @@ fn nebula_bash_shell() -> Shell {
     }
 }
 
+/// 旧设置值 `shell=wsl` 没有发行版身份，只能交给 WSL 的默认发行版。
+/// 不追加 `--exec bash`：否则会绕过来宾账户通过 `chsh` 配置的默认 shell。
+fn nebula_wsl_shell() -> Shell {
+    Shell::new("wsl.exe".to_owned(), Vec::new())
+}
+
 fn powershell_integration_args(mut args: Vec<String>, script: &std::path::Path) -> Vec<String> {
     args.extend([
         "-NoExit".to_owned(),
@@ -956,8 +964,10 @@ pub fn powershell_with_nebula_integration(program: String, args: Vec<String>) ->
 
 /// Build the default shell, injecting the Nebula prompt when possible.
 fn nebula_default_shell(settings: NebulaRuntimeSettings) -> Shell {
-    if settings.shell == NebulaShellExecutor::Bash {
-        return nebula_bash_shell();
+    match settings.shell {
+        NebulaShellExecutor::Bash => return nebula_bash_shell(),
+        NebulaShellExecutor::Wsl => return nebula_wsl_shell(),
+        NebulaShellExecutor::PowerShell => {},
     }
 
     match nebula_prompt_script_path() {
@@ -1094,6 +1104,13 @@ mod test {
             args.last().is_some_and(|arg| arg.starts_with(". '")),
             "the trailing argument must dot-source the prompt script: {args:?}"
         );
+    }
+
+    #[test]
+    fn legacy_wsl_setting_preserves_the_guest_default_shell() {
+        let shell = nebula_default_shell(NebulaRuntimeSettings { shell: NebulaShellExecutor::Wsl });
+        assert_eq!(shell.program(), "wsl.exe");
+        assert!(shell.args().is_empty(), "WSL must choose the guest account's default shell");
     }
 
     #[test]

@@ -146,7 +146,14 @@ fn shell_palette_puts_the_default_shell_first() {
     let language = crate::display::UiLanguage::ZhCn;
 
     // 检测顺序里 nu 在最后，设成默认后必须提到首行。
-    let rows = shell_palette_rows(shells.clone(), ["box.example".to_owned()], "nu", language, 1.0);
+    let rows = shell_palette_rows(
+        shells.clone(),
+        Vec::new(),
+        ["box.example".to_owned()],
+        "nu",
+        language,
+        1.0,
+    );
     assert_eq!(rows.len(), 5, "四台 shell + 一台 SSH");
     assert!(matches!(
         &rows[0].action,
@@ -169,12 +176,58 @@ fn shell_palette_puts_the_default_shell_first() {
     assert_eq!(rows[4].group, "SSH 主机");
 
     // 默认 id 没在检测结果里（WSL 发行版被卸载等）：不置顶也不 panic。
-    let rows = shell_palette_rows(shells, None::<String>, "wsl:Ghost", language, 1.0);
+    let rows = shell_palette_rows(shells, Vec::new(), None::<String>, "wsl:Ghost", language, 1.0);
     assert!(matches!(
         &rows[0].action,
         WorkspacePaletteAction::LaunchShell(shell) if shell.id == "pwsh"
     ));
     assert_eq!(rows[0].group, "所有 Shell");
+}
+
+#[test]
+fn shell_palette_includes_imported_terminal_profiles() {
+    let profile = crate::config::ui_config::Profile {
+        name: "Portable PowerShell".to_owned(),
+        command: r"D:\Tools\pwsh.exe".to_owned(),
+        args: vec!["-NoLogo".to_owned()],
+        cwd: None,
+        shell_id: Some("pwsh".to_owned()),
+        terminal_profile_id: Some("pwsh-deadbeef".to_owned()),
+    };
+    let id = profile.settings_id().expect("imported profile id");
+    let rows = shell_palette_rows(
+        Vec::new(),
+        vec![profile],
+        None::<String>,
+        &id,
+        crate::display::UiLanguage::ZhCn,
+        1.0,
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].group, "推荐");
+    assert!(matches!(
+        &rows[0].action,
+        WorkspacePaletteAction::LaunchProfile(profile)
+            if profile.command == r"D:\Tools\pwsh.exe"
+    ));
+}
+
+#[test]
+fn wsl_file_tree_terminal_changes_directory_without_forcing_bash() {
+    let launch = super::file_tree::wsl_terminal_launch_at(
+        "WSL · Ubuntu".to_owned(),
+        "wsl.exe".to_owned(),
+        "Ubuntu".to_owned(),
+        "/home/user/project".to_owned(),
+    );
+    let crate::session::LaunchSession::Shell { program, args, .. } = launch else {
+        panic!("WSL file-tree launch must remain a shell session");
+    };
+
+    assert_eq!(program, "wsl.exe");
+    assert_eq!(args, ["-d", "Ubuntu", "--cd", "/home/user/project"]);
+    assert!(!args.iter().any(|arg| arg == "--exec" || arg.eq_ignore_ascii_case("bash")));
 }
 
 #[test]

@@ -312,6 +312,34 @@ pub(crate) fn completion_colors(cx: &App, term_bg: GpuiRgba) -> CompletionColors
 
 /// 设置页悬停/选中水洗与旧壳 `settings_skin` 同源：使用当前主题 accent，
 /// 深浅主题分别控制透明度。通用 chrome hover 仍保持中性，两种语义不混用。
+/// 设置页"这一项我改过"的标记色。
+///
+/// 不复用 accent：那是给按钮和选中底用的，饱和度是按"要被点"调的。这里只
+/// 需要在一条 2px 的细线上被扫到，高饱和的紫在深底上会发光振动，细元素尤其
+/// 明显——那就是"刺眼"的来源。所以**降饱和、保亮度**：可辨来自亮度差，刺眼
+/// 来自饱和度，两者可以拆开。
+pub fn settings_mark(cx: &App) -> Hsla {
+    if chrome_theme(effective_theme_name(cx)).skin().is_light {
+        // 浅色底上要更暗才看得见，同样压饱和。
+        hsla(250.0 / 360.0, 0.40, 0.47, 1.0)
+    } else {
+        hsla(250.0 / 360.0, 0.36, 0.71, 1.0)
+    }
+}
+
+/// 设置页的结构分割线（导航↔内容、页头↔正文）。
+///
+/// 比行左侧轨道更淡：轨道在说"这几行是一组"，是内容的一部分；这条线只是
+/// 在说"这是两个区"，属于容器。两者同色同粗的话，画面上就出现两条同等分量
+/// 的线在争同一件事的解释权。
+pub fn settings_hairline(cx: &App) -> Hsla {
+    let sk = chrome_theme(effective_theme_name(cx)).skin();
+    // 浅色底上黑线比深色底上白线更"重"（同 alpha 视觉对比更高），所以浅色
+    // 取更低的 alpha。
+    let alpha = if sk.is_light { 20 } else { 18 };
+    wash(Rgba::new(sk.ink.r, sk.ink.g, sk.ink.b, alpha))
+}
+
 pub fn settings_hover_bg(cx: &App, strong: bool) -> Hsla {
     let sk = chrome_theme(effective_theme_name(cx)).skin();
     let (hover_alpha, strong_alpha) = if sk.is_light { (22, 34) } else { (30, 46) };
@@ -377,9 +405,25 @@ fn apply_shell_opacity(chrome: NebulaTheme, cx: &mut App) {
 /// - accent → primary/ring/caret/link；浅色主题下 Skin 已把它折成中性
 ///   深灰（2026-07-31 裁定），无需此处分支
 /// - danger/ok/warn → 语义三色，不随主题 accent 变
+/// 面积色柔和化：把通道往自身亮度收，色相与明度都不动，只降饱和。
+///
+/// `keep` 是保留的饱和比例（1.0 原样）。用在开关轨道、主按钮、滑条填充这类
+/// 成片的品牌色上；`link` / `caret` / `ring` 那些发丝级用途继续用原值，它们
+/// 需要的是辨识度，而辨识度来自亮度差、不来自饱和度。
+fn soften(c: crate::display::color::Rgb, keep: f32) -> crate::display::color::Rgb {
+    let luma = 0.299 * f32::from(c.r) + 0.587 * f32::from(c.g) + 0.114 * f32::from(c.b);
+    let pull =
+        |channel: u8| (luma + (f32::from(channel) - luma) * keep).round().clamp(0.0, 255.0) as u8;
+    crate::display::color::Rgb::new(pull(c.r), pull(c.g), pull(c.b))
+}
+
 fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     let sk = chrome.skin();
     let transparent = hsla(0.0, 0.0, 0.0, 0.0);
+    // 终端字体族要在拿到 `Theme::global_mut` 之前读出来：那之后 cx 已被可变借。
+    let terminal_family: Option<gpui::SharedString> = cx
+        .try_global::<crate::gpui_shell::config::Settings>()
+        .map(|settings| settings.font_family.clone().into());
 
     let theme = Theme::global_mut(cx);
 
@@ -412,9 +456,14 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     theme.tab_active_foreground = ink(sk.ink_strong);
 
     // 按钮。
-    theme.primary = ink(sk.accent);
-    theme.primary_hover = shift3(sk.accent.r, sk.accent.g, sk.accent.b, 0.10);
-    theme.primary_active = shift3(sk.accent.r, sk.accent.g, sk.accent.b, 0.18);
+    // 面积色降饱和，细元素不降。同一个 accent 用在两种尺度上：开关轨道、主
+    // 按钮是成片的色块，link / caret / 焦点环是发丝级的细节。饱和度决定「刺
+    // 不刺眼」，亮度差决定「看不看得见」——所以色块压饱和（暗底上 #52a8ff
+    // 这种亮蓝铺开会发光，一整页只剩几个块在跳），细元素保持原值换辨识度。
+    let soft_accent = soften(sk.accent, 0.62);
+    theme.primary = ink(soft_accent);
+    theme.primary_hover = shift3(soft_accent.r, soft_accent.g, soft_accent.b, 0.10);
+    theme.primary_active = shift3(soft_accent.r, soft_accent.g, soft_accent.b, 0.18);
     theme.primary_foreground = ink(sk.ink_on_accent);
     theme.secondary = wash(sk.surface);
     theme.secondary_hover = wash(sk.hover);
@@ -449,7 +498,7 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     // 的开态专色（#1e222b 一族）要在 fork 加 token 才能接上，记为后续。
     theme.switch = solid(sk.toggle_track_off);
     theme.switch_thumb = solid(sk.knob_on);
-    theme.slider_bar = ink(sk.accent);
+    theme.slider_bar = ink(soft_accent);
     theme.slider_thumb = solid(sk.knob_on);
     theme.scrollbar = transparent;
     theme.scrollbar_thumb = wash(sk.track_off);
@@ -459,6 +508,21 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     // 12，低于终端卡的 14——三档呼应旧壳的圆角层级。
     theme.font_size = px(14.0);
     theme.mono_font_size = px(13.0);
+
+    // 整壳的兜底字体（fork `root.rs` 用 `theme.font_family` 给根容器）。上游
+    // 默认 `.SystemUIFont` 在 Windows 上没落到 UI 字体，中文最终回落进终端等
+    // 宽族，于是整页中文字距被拉开、拉丁与数字的节奏更明显。旧壳只有一套
+    // glyph cache 时这是架构限制，GPUI 壳没有这个限制，不该继承那个观感。
+    //
+    // 我们是终端，所以等宽在这里是**语义标记**而不是全局字体：路径、键帽、
+    // 命令、数值这类"机器读、要逐字符对齐、要能整段复制"的东西显式走 mono；
+    // 标题和说明是给人读的，走 sans。
+    if cfg!(target_os = "windows") {
+        theme.font_family = "Microsoft YaHei UI".into();
+    }
+    if let Some(family) = terminal_family {
+        theme.mono_font_family = family;
+    }
     theme.radius = px(crate::display::UI_CORNER_RADIUS_LOGICAL);
     theme.radius_lg = px(12.0);
 }

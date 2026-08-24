@@ -226,11 +226,7 @@ impl NebulaWorkspace {
                     - TAB_STATUS_SLOT_W
                     - 8.0
                     - if has_icon { TAB_LABEL_ICON_W + 8.0 } else { 0.0 }
-                    - if pane_count > 1 {
-                        pane_header::split_badge_slot_w(label_px)
-                    } else {
-                        0.0
-                    };
+                    - if pane_count > 1 { pane_header::split_badge_slot_w(label_px) } else { 0.0 };
                 let label_cols = (label_avail / cell_w).floor().max(1.0) as usize;
                 let title: SharedString =
                     crate::display::truncate_tab_label(&title, label_cols).into();
@@ -816,5 +812,158 @@ impl NebulaWorkspace {
                 move |slot, t| slot.w(px(from + (to - from) * t)),
             )
             .into_any_element()
+    }
+
+    /// 侧栏模式的标题栏：左边侧栏开关 + 齿轮，右边目录树 + Git，中间在侧栏
+    /// 折叠时顶上活动 tab 的名字。与顶部 tab 模式的 [`Self::render_top_title_bar`]
+    /// 对称——两种布局各自持有自己那条标题带的全部内容。
+    pub(super) fn render_sidebar_title_bar(
+        &self,
+        files_active: bool,
+        git_active: bool,
+        settings_active: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        // 颜色先取出来：`cx.theme()` 不可变借着 cx，后面每个 `cx.listener`
+        // 都要可变借，混在一个表达式里借用检查过不去。
+        let secondary = cx.theme().secondary;
+        h_flex()
+            .size_full()
+            .items_center()
+            .justify_between()
+            .child(
+                h_flex()
+                    // 旧壳两枚 32px 命中块之间固定留 8px；默认 Button 正好是
+                    // 32px，`.small()` 会把热区缩成 24px。
+                    .gap_2()
+                    .items_center()
+                    .occlude()
+                    .child(
+                        Button::new("toggle-sidebar")
+                            .icon(IconName::PanelLeft)
+                            .ghost()
+                            // 侧栏是开关而非一次性动作：展开期间必须持续显示
+                            // 选中底，和旧壳 `left_sidebar_visible()` 同义。
+                            .selected(!self.sidebar_collapsed)
+                            // Ghost 的全局 selected 使用 hover_strong，静态底比
+                            // 旧壳亮一档；仅此按钮覆写回旧壳 surface。
+                            .when(!self.sidebar_collapsed, |button| button.bg(secondary))
+                            .tooltip("折叠/展开侧边栏 (Ctrl+Shift+B)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sidebar_collapsed = !this.sidebar_collapsed;
+                                this.sidebar_fold_armed = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("open-settings")
+                            .icon(IconName::Settings)
+                            .ghost()
+                            .selected(settings_active)
+                            .tooltip("设置 (Ctrl+,)")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings(window, cx);
+                            })),
+                    ),
+            )
+            .child(self.render_collapsed_tab_title(cx))
+            .child(
+                h_flex()
+                    .h_full()
+                    .items_center()
+                    .gap_2()
+                    .occlude()
+                    .child(
+                        Button::new("toggle-file-tree")
+                            .icon(if files_active {
+                                IconName::FolderOpen
+                            } else {
+                                IconName::FolderClosed
+                            })
+                            .ghost()
+                            .selected(files_active)
+                            .tooltip("目录树 (Ctrl+Shift+F)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_file_tree(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("toggle-git-tree")
+                            .icon(IconName::GitHub)
+                            .ghost()
+                            .selected(git_active)
+                            .tooltip("Git 状态 (Ctrl+Shift+G)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_git_tree(cx);
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 折叠态的活动 tab 名（旧壳 `chrome.rs` ~2129：侧栏收起后顶栏居中画活动
+    /// tab 名，"没有侧栏也知道自己在哪"）。
+    ///
+    /// 弹性容器 + `absolute` 覆盖层的组合是刻意的：容器用 `flex_1` 抢下两侧
+    /// 工具之间的空档，文字走覆盖层不参与布局——既不会把左右按钮挤歪，也不
+    /// 吃鼠标事件，标题栏本身的拖窗和双击最大化照旧。
+    fn render_collapsed_tab_title(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let slot = div().relative().flex_1().min_w_0().h_full();
+        if !self.sidebar_collapsed || self.tabs.is_empty() {
+            return slot;
+        }
+        let theme = cx.theme();
+        let (ink, dim, badge_fill) = (theme.foreground, theme.muted_foreground, theme.muted);
+        let dark = theme.is_dark();
+        let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
+        let mono_family: SharedString = settings
+            .map(|settings| settings.font_family.clone())
+            .unwrap_or_else(|| String::from("Cascadia Mono"))
+            .into();
+        let label_px = settings.map(|settings| settings.base_font_size_px).unwrap_or(15.0);
+        let TabPresentation { title, logo_image, program_glyph, pane_count, .. } =
+            self.tab_presentation(self.active, cx, dark);
+        slot.child(
+            h_flex()
+                .absolute()
+                .inset_0()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                // 两侧工具靠 flex 天然让位，这点内缩只是别让长标题贴到按钮上。
+                .px_4()
+                .when_some(logo_image, |row, image| {
+                    row.child(
+                        img(image)
+                            .size(px(TAB_LABEL_ICON_SIZE))
+                            .flex_shrink_0()
+                            .object_fit(ObjectFit::Contain),
+                    )
+                })
+                .when_some(program_glyph, |row, glyph| {
+                    row.child(
+                        div()
+                            .flex_shrink_0()
+                            .font_family(mono_family.clone())
+                            .text_size(px(label_px))
+                            .text_color(dim)
+                            .child(glyph),
+                    )
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(mono_family)
+                        .text_size(px(label_px))
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(ink)
+                        .child(title),
+                )
+                // 折叠态没有侧栏行可看，分屏数量只能挂在这里；> 1 才画。
+                .when(pane_count > 1, |row| {
+                    row.child(pane_header::split_badge(pane_count, label_px, dim, badge_fill))
+                }),
+        )
     }
 }

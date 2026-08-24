@@ -26,6 +26,21 @@ pub(super) struct FileTreeContextMenu {
     _subscription: Subscription,
 }
 
+/// `--cd` 只指定来宾工作目录，不指定要执行的程序；这样 WSL 仍会读取
+/// `/etc/passwd` 中由 `chsh` 配置的默认 shell。
+pub(super) fn wsl_terminal_launch_at(
+    name: String,
+    program: String,
+    distro: String,
+    guest_path: String,
+) -> crate::session::LaunchSession {
+    crate::session::LaunchSession::Shell {
+        name,
+        program,
+        args: vec!["-d".to_owned(), distro, "--cd".to_owned(), guest_path],
+    }
+}
+
 impl NebulaWorkspace {
     pub(super) fn render_file_tree(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let view_switch = self.render_side_panel_switch(cx).into_any_element();
@@ -53,6 +68,7 @@ impl NebulaWorkspace {
         let row_elements = rows.into_iter().enumerate().map(|(visible_ix, row)| {
             let path = row.path.clone();
             let open_path = path.clone();
+            let open_guest_path = row.guest_path.clone();
             let menu_path = path.clone();
             let guest_path = row.guest_path.clone();
             let menu_guest_path = guest_path.clone();
@@ -138,11 +154,16 @@ impl NebulaWorkspace {
                         cx.notify();
                     }
                 }))
-                .when(!is_dir && !is_parent && guest_path.is_none(), |item| {
+                .when(!is_dir && !is_parent, |item| {
                     item.on_double_click(cx.listener(move |this, _, window, cx| {
                         // 与旧壳 chrome 同合同：应用内能读的（图片/可读文本）
-                        // 开查看 tab，其余交系统处理器。
-                        this.open_document_path(open_path.clone(), window, cx);
+                        // 开查看 tab，其余交系统处理器。WSL 行先映射为官方 UNC
+                        // 形式，不能把 `/home/...` 直接交给 Windows 文件 API。
+                        if let Some(guest) = open_guest_path.clone() {
+                            this.open_wsl_document_path(guest, window, cx);
+                        } else {
+                            this.open_document_path(open_path.clone(), window, cx);
+                        }
                     }))
                 })
                 .when(!is_parent, |item| {
@@ -289,6 +310,9 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.side_panel.selected = Some(path.clone());
+        let wsl_distro = guest_path
+            .as_ref()
+            .and_then(|_| self.side_panel.file_wsl_root().map(|root| root.distro.clone()));
         let workspace = cx.entity().downgrade();
         let menu = PopupMenu::build(window, cx, move |menu, window, _cx| {
             file_tree_popup_menu(
@@ -296,6 +320,7 @@ impl NebulaWorkspace {
                 workspace,
                 path,
                 guest_path,
+                wsl_distro,
                 is_dir,
                 window,
             )
@@ -323,6 +348,48 @@ impl NebulaWorkspace {
             .with_priority(1)
             .into_any_element(),
         )
+    }
+
+    /// WSL 文件树行只携带来宾路径；发行版身份来自当前树根。通过
+    /// `\\wsl.localhost` 交给现有文档/系统打开路由，保持文件类型行为一致。
+    fn open_wsl_document_path(
+        &mut self,
+        guest_path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.side_panel.file_wsl_root() else { return };
+        let path = crate::shell_detect::wsl_unc_path(&root.distro, &guest_path);
+        self.open_document_path(path, window, cx);
+    }
+
+    /// `wsl.exe --cd` 不执行指定命令，因此仍由来宾 `/etc/passwd` 选择 zsh/fish；
+    /// 这与普通 WSL 新标签相同，并避免重引入 v1.1.0 的 `--exec bash` 回归。
+    fn add_wsl_terminal_at(
+        &mut self,
+        distro: String,
+        guest_path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let detected = crate::shell_detect::detect_shells().into_iter().find(|shell| {
+            crate::shell_detect::wsl_launch_distro(&shell.program, &shell.args)
+                .is_some_and(|name| name.eq_ignore_ascii_case(&distro))
+        });
+        let (name, program) = detected
+            .map(|shell| (shell.name, shell.program))
+            .or_else(|| match self.meta(self.active).launch {
+                Some(crate::session::LaunchSession::Shell { name, program, args })
+                    if crate::shell_detect::wsl_launch_distro(&program, &args)
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&distro)) =>
+                {
+                    Some((name, program))
+                },
+                _ => None,
+            })
+            .unwrap_or_else(|| (format!("WSL · {distro}"), "wsl.exe".to_owned()));
+        let launch = wsl_terminal_launch_at(name, program, distro, guest_path);
+        self.add_terminal_with(launch, None, None, window, cx);
     }
 
     fn request_delete_file_tree_path(
@@ -384,15 +451,55 @@ fn file_tree_popup_menu(
     workspace: gpui::WeakEntity<NebulaWorkspace>,
     path: PathBuf,
     guest_path: Option<String>,
+    wsl_distro: Option<String>,
     is_dir: bool,
     _window: &mut Window,
 ) -> PopupMenu {
     if let Some(guest_path) = guest_path {
-        return menu.item(PopupMenuItem::new("复制 Linux 路径").icon(IconName::Copy).on_click(
-            move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(guest_path.clone()));
-            },
-        ));
+        let copy_guest = guest_path.clone();
+        let copy =
+            PopupMenuItem::new("复制 Linux 路径").icon(IconName::Copy).on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_guest.clone()));
+            });
+        let Some(distro) = wsl_distro else { return menu.item(copy) };
+        let first = if is_dir {
+            let open_here = workspace.clone();
+            let open_distro = distro.clone();
+            let open_guest = guest_path.clone();
+            PopupMenuItem::new("在此处打开终端").icon(IconName::SquareTerminal).on_click(
+                move |_, window, cx| {
+                    if let Some(workspace) = open_here.upgrade() {
+                        workspace.update(cx, |this, cx| {
+                            this.add_wsl_terminal_at(
+                                open_distro.clone(),
+                                open_guest.clone(),
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                },
+            )
+        } else {
+            let open = workspace.clone();
+            let open_guest = guest_path.clone();
+            PopupMenuItem::new("打开").icon(IconName::File).on_click(move |_, window, cx| {
+                if let Some(workspace) = open.upgrade() {
+                    workspace.update(cx, |this, cx| {
+                        this.open_wsl_document_path(open_guest.clone(), window, cx);
+                    });
+                }
+            })
+        };
+        let reveal_path = crate::shell_detect::wsl_unc_path(&distro, &guest_path);
+        return menu
+            .item(first)
+            .item(PopupMenuItem::new("在资源管理器中显示").icon(IconName::FolderOpen).on_click(
+                move |_, _, _| {
+                    super::reveal_in_file_manager(&reveal_path);
+                },
+            ))
+            .item(copy);
     }
     let first = if is_dir {
         let open_here = workspace.clone();
@@ -423,7 +530,7 @@ fn file_tree_popup_menu(
     menu.item(first)
         .item(PopupMenuItem::new("在资源管理器中显示").icon(IconName::FolderOpen).on_click(
             move |_, _, _| {
-                super::open_in_file_manager(&reveal_path);
+                super::reveal_in_file_manager(&reveal_path);
             },
         ))
         .item(PopupMenuItem::new("复制路径").icon(IconName::Copy).on_click(move |_, _, cx| {

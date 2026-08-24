@@ -10,6 +10,7 @@
 //! - `NEBULA_GPUI_SHELL=1`（需 gpui-shell 构建）：spike 形态——GPUI 跑在
 //!   专用线程，与 winit 旧壳同进程并存，仅用于双运行时验证，P3 完成后移除。
 
+mod assets;
 pub mod code_tab;
 pub mod config;
 pub mod doc_tabs;
@@ -32,7 +33,7 @@ mod windows_backdrop;
 pub mod workspace;
 
 use gpui::{App, AppContext as _};
-use gpui_component_assets::Assets;
+use assets::NebulaAssets;
 
 #[cfg(windows)]
 use std::borrow::Cow;
@@ -107,7 +108,7 @@ pub fn run_shell(initial_cwd: Option<std::path::PathBuf>) {
     // 该样式，事后再清已经无法给 system backdrop 补回挂载表面。
     #[cfg(windows)]
     let _window_creation_hook = windows_backdrop::install_main_window_creation_hook();
-    gpui::Application::new().with_assets(Assets).run(move |cx| {
+    gpui::Application::new().with_assets(NebulaAssets).run(move |cx| {
         // GPUI is the only event loop in `--gpui` mode, so it owns the same
         // per-process hook pipe before the first TerminalView spawns.
         let ai_events = crate::ai_hook::spawn_gpui_server();

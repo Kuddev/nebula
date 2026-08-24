@@ -286,6 +286,7 @@ impl SettingsPane {
         let trigger_bounds = self.bg_picker_trigger_bounds;
         let row = self.row_with_reset(
             "背景色",
+            "覆盖主题自带的终端底色。改了它，OSC 11 上报给程序的背景色也跟着变——TUI 判断明暗模式靠的就是这个值。",
             custom,
             |this, window, cx| {
                 this.persist(&[("background", String::new())], cx);

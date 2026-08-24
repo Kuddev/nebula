@@ -153,11 +153,17 @@ impl Drop for TaskMemWide {
 }
 
 pub(super) fn pick(owner: RawWindowHandle, title: &str) -> Option<PathBuf> {
-    let _apartment = ComApartment::initialize()?;
     let owner = match owner {
         RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
         _ => std::ptr::null_mut(),
     };
+    pick_with_hwnd(owner, title)
+}
+
+/// GPUI 壳复用旧壳的原生目录选择器。传入 HWND 而不是 winit handle，
+/// 让两个 UI 壳共享 WSL 发行版侧栏入口与 UNC 路径保真逻辑。
+pub(super) fn pick_with_hwnd(owner: HWND, title: &str) -> Option<PathBuf> {
+    let _apartment = ComApartment::initialize()?;
 
     let mut dialog_pointer = std::ptr::null_mut();
     let result = unsafe {

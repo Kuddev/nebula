@@ -33,6 +33,10 @@ pub(super) fn pick_folder(owner: &Window, title: &str) -> Option<PathBuf> {
     windows_folder::pick(owner.raw_window_handle(), title)
 }
 
+pub(super) fn pick_folder_with_hwnd(hwnd: HWND, title: &str) -> Option<PathBuf> {
+    windows_folder::pick_with_hwnd(hwnd, title)
+}
+
 pub(super) fn save_file(
     owner: &Window,
     title: &str,

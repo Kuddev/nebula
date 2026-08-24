@@ -203,16 +203,19 @@ impl SettingsPane {
         let select = self.select_of("ssh_proxy_mode");
         self.row(
             "代理方式",
+            "",
             div()
                 .w(px(PROXY_MODE_SELECT_W))
                 .text_color(cx.theme().link)
                 .children(select.map(|state| Select::new(&state))),
+            cx,
         )
     }
 
     fn proxy_address_row(&self, cx: &Context<Self>) -> impl IntoElement {
         self.row(
             "代理地址",
+            "",
             h_flex()
                 .flex_1()
                 .min_w(px(PROXY_PROTOCOL_SELECT_W + PROXY_MANUAL_GAP + 80.0))
@@ -227,6 +230,7 @@ impl SettingsPane {
                         .child(Select::new(&self.proxy_protocol_select)),
                 )
                 .child(div().flex_1().min_w_0().child(Input::new(&self.proxy_url_input))),
+            cx,
         )
     }
 }

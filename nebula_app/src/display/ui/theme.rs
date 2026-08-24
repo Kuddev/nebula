@@ -492,7 +492,17 @@ impl NebulaTheme {
                 // 深色主题不受影响：那边底暗，主题 accent 是唯一的亮点，反而
                 // 是画面的锚。
                 accent: Rgb::new(73, 80, 87),
-                accent_soft: Rgba::new(73, 80, 87, 36), // 14%
+                // 选中水洗不能复用上面那个中性灰：14% 的零色相灰叠白底，得到
+                // 的正是 2026-07-29 裁定里说的死灰——「中性灰在屏幕上永远显
+                // 脏」的物理来源。把主题 accent 自己的色相推足再叠 19%：淡到
+                // 不抢内容（07-31 裁定的顾虑针对的是焦点环、主按钮那类实心强
+                // 对比用途，实心 accent 上面保持不动），但足够让选中态读起来
+                // 是干净的浅色。三个浅色主题各自的色温也因此保住：Silver 冷、
+                // Limestone 暖、Linen 绿。
+                accent_soft: {
+                    let tinted = steer_hue(a, 5.5);
+                    Rgba::new(tinted.r, tinted.g, tinted.b, 48)
+                },
                 // 浅色的红要比深色那份更沉：同一个红压在白底上，明度对比大得多，
                 // 直接复用深色值会艳到从整张卡片里跳出来。
                 danger: Rgba::new(178, 58, 72, 255),
@@ -583,6 +593,22 @@ impl NebulaTheme {
             }
         }
     }
+}
+
+/// 把一个近中性色往它自身的色相推，亮度保持不动。
+///
+/// 浅色主题的 accent 是刻意选的中性深灰（2026-07-31 裁定：浅底亮度高，饱和
+/// 色压上去会抢过内容）。但那个值直接拿去做**水洗底**就会撞上另一条裁定：
+/// 中性灰在屏幕上永远显脏（2026-07-29）。两条都要守，就得分用途——实心的
+/// 焦点环、主按钮继续用中性灰，只有选中水洗从这里取回色温。
+///
+/// `gain` 是通道相对亮度的放大倍数：1.0 原样，>1 提饱和。亮度不变意味着水洗
+/// 的明度阶梯不会因为加色温而漂。
+fn steer_hue(c: Rgb, gain: f32) -> Rgb {
+    let luma = 0.299 * f32::from(c.r) + 0.587 * f32::from(c.g) + 0.114 * f32::from(c.b);
+    let push =
+        |channel: u8| (luma + (f32::from(channel) - luma) * gain).round().clamp(0.0, 255.0) as u8;
+    Rgb::new(push(c.r), push(c.g), push(c.b))
 }
 
 /// Per-theme chrome palette: the translucent panels, tab pills, edge accents
