@@ -5,9 +5,10 @@
 //! 绘制计划、把覆盖掩码交给格子绘制循环跳过源格、按计划用
 //! `math_view` 的位图管线上屏。
 //!
-//! 与旧壳 `draw_pane` 相同的门控：alt screen / vi 模式 / 存在选区时整帧
-//! 不覆盖（源码可正常选择复制）；光标所在逻辑行的排除在 `scan_visible`
-//! 内部完成。围栏过滤与前景色走同一条 `scan_visible(..., rendered_cells)`
+//! 与旧壳 `draw_pane` 相同的门控：vi 模式 / 存在选区时整帧不覆盖（源码可
+//! 正常选择复制）。备用屏幕中的 AI TUI 会把光标留在回答末行，因此不能把
+//! 那一行当作正在编辑而排除。围栏过滤与前景色走同一条
+//! `scan_visible(..., rendered_cells)`
 //! 合同：从 term 网格构造等价 cell 列表（`bg_alpha` = 非默认 ANSI 背景或
 //! 反色），不再把空切片丢进去再另用 `bg_runs` 事后过滤。
 
@@ -82,9 +83,11 @@ impl MathOverlay {
         font_pixel_size: f32,
         pixels_per_point: f32,
     ) -> MathFrame {
-        // 旧壳 draw_pane：alt / vi / 选区整帧不覆盖。空选区 `to_range` 为
-        // None，不会因为鼠标按下残留的零宽 Selection 把公式关掉。
-        if term.mode().intersects(TermMode::ALT_SCREEN | TermMode::VI)
+        // Vi 模式与有效选择由终端自身接管，避免覆盖层遮住光标或选区。备用
+        // 屏幕不能一概排除：opencode 等 AI TUI 在其中输出 TeX 公式。
+        // 空选区 `to_range` 为 None，不会因为鼠标按下残留的零宽 Selection
+        // 把公式关掉。
+        if term.mode().intersects(TermMode::VI)
             || term.selection.as_ref().and_then(|selection| selection.to_range(term)).is_some()
         {
             return MathFrame::default();
@@ -92,10 +95,16 @@ impl MathOverlay {
 
         let allow_inline_dollar = self.state.inline_dollar_enabled();
         let origin = term.viewport_origin_for(size.screen_lines());
-        let cursor =
-            nebula_terminal::term::point_to_viewport_from(origin, term.grid().cursor.point).filter(
-                |point| point.line < size.screen_lines() && point.column.0 < size.columns(),
-            );
+        // In a normal shell, the cursor row is active input and must keep its
+        // literal source. Full-screen AI TUIs commonly park that cursor on the
+        // final answer row; passing it through would filter the very formula
+        // we need to draw.
+        let cursor = (!term.mode().contains(TermMode::ALT_SCREEN))
+            .then(|| {
+                nebula_terminal::term::point_to_viewport_from(origin, term.grid().cursor.point)
+            })
+            .flatten()
+            .filter(|point| point.line < size.screen_lines() && point.column.0 < size.columns());
         let rendered_cells = scan_cells_from_term(term, size, default_foreground);
         let overlays = terminal_math::scan_visible(
             &mut self.state,
@@ -103,6 +112,7 @@ impl MathOverlay {
             size,
             &rendered_cells,
             allow_inline_dollar,
+            term.mode().contains(TermMode::ALT_SCREEN),
             cursor,
             default_foreground,
         );
@@ -483,12 +493,21 @@ mod tests {
     }
 
     #[test]
-    fn alt_screen_disables_overlays() {
+    fn alt_screen_renders_agent_math() {
         let mut overlay = MathOverlay::default();
-        let mut term = term_with(16, 4, &[r"\[x\]", "", "prompt"]);
-        assert!(!plan(&mut overlay, &term, 16, 4).is_empty());
+        let mut term = term_with(
+            96,
+            4,
+            &[r"$n! \approx \sqrt{2\pi n}\left(\dfrac{n}{e}\right)^n$", "", "prompt"],
+        );
+        assert!(!plan(&mut overlay, &term, 96, 4).is_empty());
         term.swap_alt();
-        assert!(plan(&mut overlay, &term, 16, 4).is_empty());
+        let frame = plan(&mut overlay, &term, 96, 4);
+        assert!(!frame.is_empty(), "alternate-screen AI TUI output must render TeX");
+        assert_eq!(
+            frame.formulas[0].source.as_ref(),
+            r"n! \approx \sqrt{2\pi n}\left(\dfrac{n}{e}\right)^n"
+        );
     }
 
     #[test]

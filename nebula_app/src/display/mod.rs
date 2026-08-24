@@ -8612,30 +8612,37 @@ impl Display {
         // 扫描本身不按 AI CLI 探测门控：$$/\[ \]/\( \) 定界符加上
         // plausible_math_source 已经足够抗误报，而 WSL/SSH 里跑的 AI CLI
         // 在本机进程树上只留下 wsl.exe/ssh.exe，按进程门控会把远程会话的
-        // 公式全部关掉。只有误报率最高的裸 $…$ 仍要求 AI CLI 上下文
-        // （进程探测命中，或本 pane 已渲染过块级公式）。
+        // 公式全部关掉。裸 `$…$` 中包含明确 TeX 命令时也可安全渲染；只
+        // 有 `$x$` 这类紧凑形式才仍要求 AI CLI 上下文。
         let allow_inline_dollar = pane_state.terminal_math.inline_dollar_enabled();
-        let terminal_math_overlays = if !alt_screen
-            && !vi_mode
-            && search_state.regex().is_none()
-            && selection_range.is_none()
-        {
-            let visible_cursor = term::point_to_viewport_from(viewport_origin, cursor_point)
-                .filter(|point| {
-                    point.line < view.screen_lines() && point.column.0 < view.columns()
-                });
-            terminal_math::scan_visible(
-                &mut pane_state.terminal_math,
-                &terminal,
-                &view,
-                &grid_cells,
-                allow_inline_dollar,
-                visible_cursor,
-                foreground_color,
-            )
-        } else {
-            Vec::new()
-        };
+        // opencode 等 AI TUI 使用备用屏幕；在这里排除 alt_screen 会让其中
+        // 的公式永远到不了扫描器。Vi、搜索和有效选区仍由终端自身接管。
+        let terminal_math_overlays =
+            if !vi_mode && search_state.regex().is_none() && selection_range.is_none() {
+                // In a regular shell the line containing the cursor is live input,
+                // so the scanner must leave it alone. Full-screen TUIs (opencode,
+                // codex, etc.) instead frequently leave the terminal cursor on the
+                // last rendered message. Treating that row as editable makes its
+                // formula disappear exactly while it is visible.
+                let visible_cursor = (!alt_screen)
+                    .then(|| term::point_to_viewport_from(viewport_origin, cursor_point))
+                    .flatten()
+                    .filter(|point| {
+                        point.line < view.screen_lines() && point.column.0 < view.columns()
+                    });
+                terminal_math::scan_visible(
+                    &mut pane_state.terminal_math,
+                    &terminal,
+                    &view,
+                    &grid_cells,
+                    allow_inline_dollar,
+                    alt_screen,
+                    visible_cursor,
+                    foreground_color,
+                )
+            } else {
+                Vec::new()
+            };
         let math_pixel_size = self.glyph_cache.font_size.as_px();
         let math_pixels_per_point = crate::math::pixels_per_point(self.window.scale_factor as f32);
         let prepared_math = terminal_math::prepare_overlays(
@@ -8647,7 +8654,15 @@ impl Display {
         );
         let math_coverage =
             terminal_math::CoverageMask::build(&terminal_math_overlays, &prepared_math);
-        pane_state.terminal_math.update_projection(&terminal_math_overlays, &prepared_math);
+        // A normal shell line may reflow its suffix around a compact formula.
+        // Full-screen TUIs own fixed grid geometry (sidebars, cards, status
+        // bands), so moving every cell after an inline formula would also move
+        // those ANSI backgrounds and tear the interface into coloured blocks.
+        pane_state.terminal_math.update_projection(
+            &terminal_math_overlays,
+            &prepared_math,
+            !alt_screen,
+        );
 
         // Add damage from the terminal, keeping a pane-local copy: the shared
         // tracker gets flooded with a full-window mark every frame further
@@ -8812,15 +8827,27 @@ impl Display {
 
             let cells = grid_cells.into_iter().filter_map(|mut cell| {
                 let source_point = cell.point;
-                // 会被公式覆盖的源码字形直接不画：公式落在真实窗口背景上，
-                // 不再需要事后用不透明色块把源文本盖掉。
-                if !math_coverage.is_empty() && math_coverage.covers(source_point) {
-                    return None;
+                // Hide formula source glyphs while retaining each terminal
+                // cell's resolved background. Full-screen TUIs such as
+                // opencode paint their own surface with ANSI backgrounds;
+                // dropping the entire cell exposes Nebula's card underneath
+                // and creates a differently coloured horizontal strip.
+                let formula_source =
+                    !math_coverage.is_empty() && math_coverage.covers(source_point);
+                if formula_source {
+                    cell.character = ' ';
+                    cell.flags.remove(Flags::ALL_UNDERLINES | Flags::STRIKEOUT);
+                    cell.extra = None;
                 }
                 // 这里只改 RenderableCell 副本的屏幕列，terminal grid 中的
                 // 源列始终不动；宽字符、背景和装饰随后都会读取同一个 point。
-                cell.point =
-                    pane_state.terminal_math.project_cell(source_point, size_info.columns())?;
+                cell.point = if formula_source {
+                    pane_state
+                        .terminal_math
+                        .project_formula_background(source_point, size_info.columns())?
+                } else {
+                    pane_state.terminal_math.project_cell(source_point, size_info.columns())?
+                };
                 match cell.character {
                     NEBULA_FOLDER_ICON_MARKER => {
                         powerline_icons.push(NebulaPowerlineIcon {

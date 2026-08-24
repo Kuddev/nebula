@@ -25,6 +25,10 @@ use crate::renderer::math::MathClip;
 use crate::renderer::{GlyphCache, Renderer};
 
 const MAX_VISIBLE_FORMULAS: usize = 64;
+/// A few terminal rows are enough for a TUI which separates a single-dollar
+/// opener from its TeX body while it reflows a Markdown response. Keeping this
+/// bounded prevents an unmatched `$` from consuming an arbitrary transcript.
+const MAX_SPLIT_SINGLE_DOLLAR_ROWS: usize = 8;
 const MAX_PERSISTED_FORMULAS: usize = 2_048;
 const PERSISTED_FORMULA_BUDGET: usize = 1024 * 1024;
 const MAX_HISTORY_FORMULA_ROWS: usize = 512;
@@ -36,6 +40,10 @@ const MAX_ABSORBED_BLANK_ROWS: usize = 2;
 /// Sliver of a lent blank row kept free, in rows, so the ink never reaches the
 /// row past it.
 const BLANK_ROW_MARGIN: f32 = 0.1;
+/// Minimum horizontal gutter that separates a TUI's main content from a
+/// right-hand status/sidebar region. Shorter runs are ordinary word spacing
+/// and must not change block-math centring.
+const MIN_PANE_GUTTER_COLUMNS: usize = 8;
 /// Neighbour state before [`apply_layout_hints`] has looked at the grid: the
 /// whole row counts as occupied, so an overlay that somehow skipped the scan
 /// gets the line gap and nothing more.
@@ -122,12 +130,25 @@ impl TerminalMathState {
         &mut self,
         overlays: &[FormulaOverlay],
         prepared: &[Option<PreparedFormula>],
+        reflow_inline: bool,
     ) {
-        self.projection.rebuild(overlays, prepared);
+        if reflow_inline {
+            self.projection.rebuild(overlays, prepared);
+        } else {
+            self.projection.spans.clear();
+        }
     }
 
     pub(crate) fn project_cell(&self, point: Point<usize>, columns: usize) -> Option<Point<usize>> {
         self.projection.project_cell(point, columns)
+    }
+
+    pub(crate) fn project_formula_background(
+        &self,
+        point: Point<usize>,
+        columns: usize,
+    ) -> Option<Point<usize>> {
+        self.projection.project_formula_background(point, columns)
     }
 
     /// Convert the visual mouse cell back to the immutable terminal-grid cell.
@@ -290,7 +311,16 @@ impl TerminalMathState {
         if self.formulas.get(&anchor).is_some_and(|existing| existing.same_content(&formula)) {
             return;
         }
-        self.remove(anchor);
+        let replaced: Vec<_> = self
+            .formulas
+            .iter()
+            .filter_map(|(&existing_anchor, existing)| {
+                existing.overlaps(&formula).then_some(existing_anchor)
+            })
+            .collect();
+        for existing_anchor in replaced {
+            self.remove(existing_anchor);
+        }
         if formula.charge > PERSISTED_FORMULA_BUDGET {
             return;
         }
@@ -478,6 +508,14 @@ impl PersistedFormula {
             && self.spans == other.spans
     }
 
+    fn overlaps(&self, other: &Self) -> bool {
+        self.spans.iter().any(|left| {
+            other.spans.iter().any(|right| {
+                left.row == right.row && left.start < right.end && right.start < left.end
+            })
+        })
+    }
+
     fn last_row(&self) -> usize {
         self.spans.last().map_or(self.anchor.row, |span| span.row)
     }
@@ -533,7 +571,7 @@ impl PersistedFormula {
             neighbours_below: [NEIGHBOUR_UNKNOWN; MAX_ABSORBED_BLANK_ROWS],
             formula_neighbours_above: [false; MAX_ABSORBED_BLANK_ROWS],
             formula_neighbours_below: [false; MAX_ABSORBED_BLANK_ROWS],
-            widen_right: false,
+            widen_right_to: None,
         }
     }
 }
@@ -619,10 +657,10 @@ pub(crate) struct FormulaOverlay {
     /// two adjacent math clips must meet at the row boundary, not overlap it.
     formula_neighbours_above: [bool; MAX_ABSORBED_BLANK_ROWS],
     formula_neighbours_below: [bool; MAX_ABSORBED_BLANK_ROWS],
-    /// Display formula whose rows hold nothing right of the source span, so
-    /// its layout may use the rest of the line. Keeps a formula's size
-    /// independent of how many columns its source happened to occupy.
-    widen_right: bool,
+    /// Right edge (in grid columns) available to a display formula whose rows
+    /// hold nothing after the source. This is normally the viewport edge, but
+    /// a split TUI may contribute a nearer main-pane boundary.
+    widen_right_to: Option<usize>,
 }
 
 impl FormulaOverlay {
@@ -978,6 +1016,44 @@ impl TextGrid {
         Some((start, end))
     }
 
+    /// Find the left edge of a visually separate right-hand pane. TUIs such as
+    /// opencode keep their answer and status sidebar in one terminal grid. A
+    /// display formula in the answer must be centred before that sidebar, not
+    /// across the combined grid width.
+    fn right_pane_boundary_after(&self, after: usize) -> Option<usize> {
+        let earliest_boundary = after.max(self.columns / 2);
+        let earliest_sidebar = self.columns.saturating_mul(2) / 3;
+        let is_blank = |cell: &Option<char>| cell.is_none_or(|character| character == ' ');
+
+        self.rows
+            .iter()
+            .filter_map(|cells| {
+                let mut column = earliest_boundary;
+                while column < cells.len() {
+                    if !is_blank(&cells[column]) {
+                        column += 1;
+                        continue;
+                    }
+                    let gutter_start = column;
+                    while column < cells.len() && is_blank(&cells[column]) {
+                        column += 1;
+                    }
+                    let sidebar_start = column;
+                    if gutter_start > 0
+                        && sidebar_start < cells.len()
+                        && sidebar_start - gutter_start >= MIN_PANE_GUTTER_COLUMNS
+                        && sidebar_start >= earliest_sidebar
+                        && cells[..gutter_start].iter().any(|cell| !is_blank(cell))
+                        && cells[sidebar_start..].iter().any(|cell| !is_blank(cell))
+                    {
+                        return Some(gutter_start);
+                    }
+                }
+                None
+            })
+            .min()
+    }
+
     fn spans(&self, start: GridPosition, end: GridPosition) -> Vec<RowSpan> {
         if start.row == end.row {
             return vec![RowSpan { row: start.row as i32, start: start.column, end: end.column }];
@@ -1013,6 +1089,7 @@ pub(crate) fn scan_visible<T>(
     size: &SizeInfo,
     rendered_cells: &[RenderableCell],
     allow_inline_dollar: bool,
+    filter_reasoning_style: bool,
     cursor: Option<Point<usize>>,
     default_foreground: Rgb,
 ) -> Vec<FormulaOverlay> {
@@ -1059,9 +1136,19 @@ pub(crate) fn scan_visible<T>(
                 .cloned()
                 .collect();
 
-            // AI tools commonly emit fenced code with an ANSI background. TeX
-            // delimiters there are source code, not presentation math.
-            if overlay.fallback.iter().any(|cell| cell.bg_alpha > 0.0) {
+            // ANSI backgrounds once meant “code fence”, but full-screen AI
+            // clients also use them for every answer card. A display delimiter
+            // carries enough intent on its own; inline math needs the AI
+            // context before it may paint over such a card. Ordinary terminal
+            // code blocks keep their literal source.
+            let has_ansi_background = overlay.fallback.iter().any(|cell| cell.bg_alpha > 0.0);
+            // `\(E=mc^2\)` may reach the grid as the already-validated bare
+            // `(E=mc^2)` form when a WSL-hosted Codex process cannot be
+            // identified locally. It has the same unambiguous mathematical
+            // shape as the delimiter that admitted it, so retain it too.
+            let is_bare_equation = looks_like_bare_parenthesized_equation(&overlay.source);
+            if has_ansi_background && !overlay.display && !allow_inline_dollar && !is_bare_equation
+            {
                 return None;
             }
 
@@ -1071,12 +1158,48 @@ pub(crate) fn scan_visible<T>(
                 .find(|cell| !cell.character.is_whitespace())
                 .map_or(default_foreground, |cell| cell.fg);
 
+            // Agent TUIs deliberately render chain-of-thought with a dim or
+            // opacity-reduced foreground, while their final answer uses the
+            // normal terminal foreground. Keep reasoning formulas literal:
+            // replacing them with a polished overlay makes internal work look
+            // like part of the answer. Restrict the heuristic to full-screen
+            // TUI callers so a user-coloured formula in an ordinary shell is
+            // never classified as reasoning.
+            if filter_reasoning_style && formula_uses_reasoning_style(&overlay, default_foreground)
+            {
+                return None;
+            }
+
             apply_layout_hints(&mut overlay, &grid);
             Some(overlay)
         })
         .collect();
     mark_formula_neighbours(&mut overlays);
     overlays
+}
+
+/// Whether the source glyphs carry the presentation used by agent reasoning.
+///
+/// Codex emits SGR DIM. OpenCode's configurable `thinkingOpacity` is resolved
+/// by its TUI into a foreground substantially closer to the cell background,
+/// so it is detected by relative contrast. Requiring three quarters of the
+/// source glyphs to agree avoids treating syntax-coloured final math as a
+/// reasoning block because of one muted token.
+fn formula_uses_reasoning_style(overlay: &FormulaOverlay, default_foreground: Rgb) -> bool {
+    let (source_cells, dim_cells, muted_cells) = overlay
+        .fallback
+        .iter()
+        .filter(|cell| !cell.character.is_whitespace())
+        .fold((0usize, 0usize, 0usize), |(total, dim, muted), cell| {
+            let normal = default_foreground.contrast(*cell.bg);
+            let is_muted = normal > 1.0 && cell.fg.contrast(*cell.bg) <= normal * 0.72;
+            (
+                total + 1,
+                dim + usize::from(cell.flags.contains(Flags::DIM)),
+                muted + usize::from(is_muted),
+            )
+        });
+    source_cells > 0 && (dim_cells * 4 >= source_cells * 3 || muted_cells * 4 >= source_cells * 3)
 }
 
 /// Room the surrounding grid can lend an overlay, decided purely by what its
@@ -1099,11 +1222,15 @@ fn apply_layout_hints(overlay: &mut FormulaOverlay, grid: &TextGrid) {
     // depends on how many columns the source happened to span. Rows scrolled
     // out of the viewport cannot be inspected; treating them as blank is safe
     // because only visible rows can show a horizontal collision.
-    overlay.widen_right = overlay.display
+    let source_right = overlay.spans.iter().map(|span| span.end).max().unwrap_or(0);
+    overlay.widen_right_to = (overlay.display
         && overlay.spans.iter().all(|span| match usize::try_from(span.row) {
             Ok(row) if row < grid.rows.len() => grid.span_is_blank(row, span.end, grid.columns),
             _ => true,
-        });
+        }))
+    .then(|| {
+        grid.right_pane_boundary_after(source_right).unwrap_or(grid.columns).max(source_right)
+    });
 }
 
 /// Mark rows occupied by a *different* formula after all visible overlays have
@@ -1229,11 +1356,8 @@ fn scan_grid_result(grid: &TextGrid, allow_inline_dollar: bool) -> GridScanResul
                 (find_bare_bracket_formula(grid, position), None)
             } else if grid.character(position) == Some('(') && !grid.is_escaped(position) {
                 (find_bare_paren_formula(grid, position), None)
-            } else if allow_inline_dollar
-                && grid.character(position) == Some('$')
-                && !grid.is_escaped(position)
-            {
-                (find_dollar_formula(grid, position), None)
+            } else if grid.character(position) == Some('$') && !grid.is_escaped(position) {
+                (find_dollar_formula(grid, position, allow_inline_dollar), None)
             } else {
                 (None, None)
             };
@@ -1279,11 +1403,20 @@ fn find_formula(
 fn find_dollar_formula(
     grid: &TextGrid,
     open: GridPosition,
+    allow_simple_formula: bool,
 ) -> Option<(FormulaOverlay, GridPosition)> {
     let source_start = grid.after(open, 1);
     let first = grid.character(source_start)?;
-    if first.is_whitespace() || first == '$' {
+    if first == '$' {
         return None;
+    }
+
+    // Some full-screen Markdown TUIs place the `$` just after the prose label
+    // and move the complete TeX source to the next terminal row. This is not
+    // regular inline Markdown, so only recognise it when both delimiters end
+    // their rows and the body supplies an explicit TeX command.
+    if first.is_whitespace() {
+        return find_split_dollar_display(grid, open);
     }
 
     let mut search = source_start;
@@ -1299,7 +1432,13 @@ fn find_dollar_formula(
         }
 
         let source = grid.extract(source_start, close)?;
-        if plausible_math_source(&source, false) {
+        // A recognised AI CLI (or an earlier display formula) may render compact
+        // `$x$`-style notation. In an ordinary shell, require an explicit TeX
+        // command so WSL process indirection cannot hide Agent output while
+        // currency and shell-like text stay literal.
+        if plausible_math_source(&source, false)
+            && (allow_simple_formula || has_known_tex_command(&source))
+        {
             return Some((
                 make_overlay(grid, open, after, source, DelimiterKind::DollarInline),
                 after,
@@ -1310,22 +1449,56 @@ fn find_dollar_formula(
     None
 }
 
+fn find_split_dollar_display(
+    grid: &TextGrid,
+    open: GridPosition,
+) -> Option<(FormulaOverlay, GridPosition)> {
+    if !grid.span_is_blank(open.row, open.column + 1, grid.columns) {
+        return None;
+    }
+    let body_row = open.row.checked_add(1)?;
+    let source_start = GridPosition { row: body_row, column: 0 };
+    let last_row = body_row
+        .saturating_add(MAX_SPLIT_SINGLE_DOLLAR_ROWS.saturating_sub(1))
+        .min(grid.rows.len().checked_sub(1)?);
+    let mut search = source_start;
+    let close = loop {
+        let candidate = grid.find_closing(search, &['$'], false)?;
+        if candidate.row > last_row {
+            return None;
+        }
+        if grid.span_is_blank(candidate.row, candidate.column + 1, grid.columns) {
+            break candidate;
+        }
+        search = grid.after(candidate, 1);
+    };
+    let after = grid.after(close, 1);
+    let source = grid.extract(source_start, close)?;
+    if !has_known_tex_command(&source) || !plausible_math_source(&source, true) {
+        return None;
+    }
+    Some((make_overlay(grid, open, after, source, DelimiterKind::DollarDisplay), after))
+}
+
 /// Markdown-unescaped display block: some AI CLIs run their answer through a
 /// markdown renderer that eats the backslash of `\[` / `\]` / `\,` (they are
 /// markdown punctuation escapes) while `\int`, `\frac` … survive, leaving a
 /// bare `[` block on screen. Bare brackets carry no math intent of their own —
 /// JSON, arrays and `[INFO]` logs all use them — so this form is held to a
-/// stricter shape than `\[`: `[` must start its row, `]` must end its row (or
-/// stand alone), and the content must contain a known TeX command.
+/// stricter shape than `\[`: `[` must start its row and `]` must end its row.
+/// A multi-line block also carries enough presentation intent to accept ordinary
+/// mathematical structure such as `E = mc^2`; the compact one-line form still
+/// requires a known TeX command so `[x^2]` does not turn into an overlay.
 fn find_bare_bracket_formula(
     grid: &TextGrid,
     open: GridPosition,
 ) -> Option<(FormulaOverlay, GridPosition)> {
-    if !grid.span_is_blank(open.row, 0, open.column) {
+    if !span_is_blank_or_markdown_list_marker(grid, open.row, open.column) {
         return None;
     }
     let source_start = grid.after(open, 1);
-    let close = if grid.span_is_blank(open.row, open.column + 1, grid.columns) {
+    let multiline = grid.span_is_blank(open.row, open.column + 1, grid.columns);
+    let close = if multiline {
         // 多行形态：`[` 独占一行，闭合 `]` 也必须独占一行。数学源码里
         // `[0, 1]` 区间的 `]` 不具备闭合资格，跳过继续找。
         let mut search = source_start;
@@ -1350,27 +1523,37 @@ fn find_bare_bracket_formula(
     };
     let after = grid.after(close, 1);
     let source = grid.extract(source_start, close)?;
-    if !has_known_tex_command(&source) || !plausible_math_source(&source, true) {
+    if !plausible_math_source(&source, true) || (!multiline && !has_known_tex_command(&source)) {
         return None;
     }
     Some((make_overlay(grid, open, after, source, DelimiterKind::BareBracketDisplay), after))
 }
 
+/// Codex-style Markdown renderers retain the list bullet while unescaping
+/// `\[` / `\]`, yielding `• [` followed by TeX and an indented `]`. A list
+/// marker is presentation-only, so it may precede an otherwise standalone
+/// opening bracket. Other prefixes still reject the candidate (JSON, logs,
+/// shell prompts, and prose remain literal).
+fn span_is_blank_or_markdown_list_marker(grid: &TextGrid, row: usize, end: usize) -> bool {
+    if grid.span_is_blank(row, 0, end) {
+        return true;
+    }
+    let marker: String =
+        grid.rows.get(row).into_iter().flat_map(|cells| cells.iter().take(end).flatten()).collect();
+    matches!(marker.trim(), "•" | "-" | "*" | "+")
+}
+
 /// Markdown-unescaped inline formula: `\( … \)` stripped down to bare
-/// parentheses. Bare parens are prose punctuation, so only content that leads
-/// with a backslash and carries a known TeX command qualifies (`(\sqrt{…})`);
-/// single-letter regex escapes like `(\d+)` are not in the whitelist and stay
-/// literal. The closer is matched by paren depth so `(\sin(x))` keeps its
-/// inner `)`.
+/// parentheses. Bare parens are prose punctuation, so a known TeX command
+/// (`(\sqrt{…})`) is normally required. Codex may also strip the delimiters
+/// around a compact equation such as `(E=mc^2)`; that narrow mathematical
+/// shape qualifies while regexes and ordinary prose remain literal. The closer
+/// is matched by paren depth so `(\sin(x))` keeps its inner `)`.
 fn find_bare_paren_formula(
     grid: &TextGrid,
     open: GridPosition,
 ) -> Option<(FormulaOverlay, GridPosition)> {
     let source_start = grid.after(open, 1);
-    if grid.character(source_start) != Some('\\') {
-        return None;
-    }
-
     let mut depth = 1usize;
     let mut position = source_start;
     let close = loop {
@@ -1392,10 +1575,31 @@ fn find_bare_paren_formula(
     };
     let after = grid.after(close, 1);
     let source = grid.extract(source_start, close)?;
-    if !has_known_tex_command(&source) || !plausible_math_source(&source, false) {
+    let known_tex = has_known_tex_command(&source);
+    let bare_equation = looks_like_bare_parenthesized_equation(&source);
+    if (!known_tex && !bare_equation) || !plausible_math_source(&source, bare_equation) {
         return None;
     }
     Some((make_overlay(grid, open, after, source, DelimiterKind::BareParenInline), after))
+}
+
+/// Strict fallback for Markdown renderers that turn `\(E=mc^2\)` into
+/// `(E=mc^2)`. Requiring an equality plus an arithmetic/exponent marker avoids
+/// rendering configuration prose such as `(key=value)`.
+fn looks_like_bare_parenthesized_equation(source: &str) -> bool {
+    let source = source.trim();
+    source.contains('=')
+        && source.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || character.is_ascii_whitespace()
+                || matches!(
+                    character,
+                    '=' | '+' | '-' | '*' | '/' | '^' | '_' | '{' | '}' | '.' | ','
+                )
+        })
+        && source.chars().any(|character| {
+            character.is_ascii_digit() || matches!(character, '+' | '-' | '*' | '/' | '^' | '_')
+        })
 }
 
 /// Commands that justify treating bare delimiters as math. Deliberately a
@@ -1759,7 +1963,7 @@ fn make_overlay(
         neighbours_below: [NEIGHBOUR_UNKNOWN; MAX_ABSORBED_BLANK_ROWS],
         formula_neighbours_above: [false; MAX_ABSORBED_BLANK_ROWS],
         formula_neighbours_below: [false; MAX_ABSORBED_BLANK_ROWS],
-        widen_right: false,
+        widen_right_to: None,
     }
 }
 
@@ -1827,26 +2031,41 @@ impl LineProjection {
                 shift_after: 0,
             });
         }
-        self.spans.sort_unstable_by_key(|span| (span.row, span.source_start));
+        self.spans.sort_unstable_by(|left, right| {
+            (left.row, left.source_start)
+                .cmp(&(right.row, right.source_start))
+                .then_with(|| right.source_end.cmp(&left.source_end))
+        });
+
+        // Streaming TUIs can briefly expose an inner formula before its outer
+        // delimiter arrives. Persistence normally replaces that stale entry,
+        // but projection remains defensive: prefer the widest earlier span and
+        // discard any overlapping remainder instead of panicking in a frame.
+        let mut retained_row = None;
+        let mut retained_end = 0usize;
+        self.spans.retain(|span| {
+            if retained_row != Some(span.row) {
+                retained_row = Some(span.row);
+                retained_end = 0;
+            }
+            if span.source_start < retained_end {
+                return false;
+            }
+            retained_end = span.source_end;
+            true
+        });
 
         let mut row = None;
-        let mut previous_end = 0usize;
         let mut shift = 0isize;
         for span in &mut self.spans {
             if row != Some(span.row) {
                 row = Some(span.row);
-                previous_end = 0;
                 shift = 0;
             }
-            // Scanner output is non-overlapping. Keeping this assertion close
-            // to the projection avoids silently constructing ambiguous inverse
-            // coordinates if that parser invariant changes later.
-            debug_assert!(span.source_start >= previous_end);
             span.shift_before = shift;
             let source_cells = span.source_end - span.source_start;
             shift = shift.saturating_add(span.visual_cells as isize - source_cells as isize);
             span.shift_after = shift;
-            previous_end = span.source_end;
         }
     }
 
@@ -1880,6 +2099,30 @@ impl LineProjection {
             None => 0,
         };
         let column = apply_shift(point.column.0, shift);
+        (column < columns).then(|| Point::new(point.line, Column(column)))
+    }
+
+    /// Map blanked source cells onto the compact visual box so their resolved
+    /// ANSI background remains behind an inline formula. Surplus source cells
+    /// are discarded when TeX is wider than the rendered formula.
+    fn project_formula_background(
+        &self,
+        point: Point<usize>,
+        columns: usize,
+    ) -> Option<Point<usize>> {
+        let span = self
+            .row_spans(point.line)
+            .iter()
+            .find(|span| (span.source_start..span.source_end).contains(&point.column.0));
+        let Some(span) = span else {
+            return (point.column.0 < columns).then_some(point);
+        };
+        let relative = point.column.0 - span.source_start;
+        if relative >= span.visual_cells {
+            return None;
+        }
+        let visual_start = apply_shift(span.source_start, span.shift_before);
+        let column = visual_start.saturating_add(relative);
         (column < columns).then(|| Point::new(point.line, Column(column)))
     }
 
@@ -2012,8 +2255,8 @@ pub(crate) fn prepare_overlays(
                 quantized_visual_cells(widest, size.cell_width(), remaining_columns);
             let box_right = if compact_inline {
                 (bounds.left + natural_cells as f32 * size.cell_width()).min(viewport_right)
-            } else if overlay.widen_right {
-                viewport_right.max(bounds.right)
+            } else if let Some(right_column) = overlay.widen_right_to {
+                (size.padding_x() + right_column as f32 * size.cell_width()).max(bounds.right)
             } else {
                 bounds.right
             };
@@ -2115,10 +2358,9 @@ pub(crate) fn prepare_overlays(
         .collect()
 }
 
-/// Row→span lookup of cells covered by formulas that WILL render, so the grid
-/// pass can skip those glyphs. Painting them and covering the area with an
-/// opaque patch afterwards is what produced the black/white formula slabs on
-/// transparent and background-image windows.
+/// Row→span lookup of source cells covered by formulas that WILL render.
+/// The grid pass keeps each source cell's resolved background but suppresses
+/// its glyph and decorations, so full-screen TUIs retain a continuous surface.
 #[derive(Default)]
 pub(crate) struct CoverageMask {
     rows: BTreeMap<usize, Vec<(usize, usize)>>,
@@ -2254,9 +2496,9 @@ pub(crate) fn plan_overlay_draw(
     })
 }
 
-/// Draw prepared overlays after terminal rectangles. The source cells were
-/// already skipped during the grid pass, so the formula renders directly on
-/// the window background — no cover quad, transparency and wallpaper intact.
+/// Draw prepared overlays after terminal rectangles. The grid pass has already
+/// replaced source glyphs with spaces while retaining their resolved terminal
+/// backgrounds, so no opaque cover quad is needed here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_overlays(
     renderer: &mut Renderer,
@@ -2336,6 +2578,28 @@ pub(crate) fn draw_overlays(
 mod tests {
     use super::*;
 
+    fn overlay_with_source_style(flags: Flags, foreground: Rgb, background: Rgb) -> FormulaOverlay {
+        let mut overlay = scan_grid(&TextGrid::from_rows(&[r"$$E=mc^2$$"]), true)
+            .into_iter()
+            .next()
+            .expect("test formula");
+        overlay.fallback = "$$E=mc^2$$"
+            .chars()
+            .enumerate()
+            .map(|(column, character)| RenderableCell {
+                character,
+                point: Point::new(0, Column(column)),
+                fg: foreground,
+                bg: background,
+                bg_alpha: 1.0,
+                underline: foreground,
+                flags,
+                extra: None,
+            })
+            .collect();
+        overlay
+    }
+
     fn compact_prepared(cells: usize) -> Option<PreparedFormula> {
         Some(PreparedFormula {
             fitted_pixel_size: TEST_FONT_PX,
@@ -2380,6 +2644,66 @@ mod tests {
     }
 
     #[test]
+    fn compact_projection_retains_background_under_visual_formula_box() {
+        let grid = TextGrid::from_rows(&["pre $x^2$ suffix"]);
+        let overlays = scan_grid(&grid, true);
+        let span = overlays[0].spans[0];
+        let projection = LineProjection::build(&overlays, &[compact_prepared(2)]);
+
+        let first = projection
+            .project_formula_background(Point::new(0, Column(span.start)), 80)
+            .expect("first visual formula cell keeps its background");
+        let second = projection
+            .project_formula_background(Point::new(0, Column(span.start + 1)), 80)
+            .expect("second visual formula cell keeps its background");
+        assert_eq!(first.column.0, span.start);
+        assert_eq!(second.column.0, span.start + 1);
+        assert!(
+            projection
+                .project_formula_background(Point::new(0, Column(span.start + 2)), 80)
+                .is_none(),
+            "source cells beyond the compact formula width must not create a background strip"
+        );
+    }
+
+    #[test]
+    fn alternate_screen_keeps_fixed_tui_columns() {
+        let grid = TextGrid::from_rows(&["pre $x^2$                         sidebar"]);
+        let overlays = scan_grid(&grid, true);
+        let span = overlays[0].spans[0];
+        let prepared = [compact_prepared(2)];
+        let mut state = TerminalMathState::default();
+
+        state.update_projection(&overlays, &prepared, false);
+
+        let source = state
+            .project_formula_background(Point::new(0, Column(span.start)), 80)
+            .expect("formula background remains at its TUI column");
+        let sidebar_column = grid.rows[0].iter().position(|cell| *cell == Some('s')).unwrap();
+        let sidebar = state
+            .project_cell(Point::new(0, Column(sidebar_column)), 80)
+            .expect("sidebar remains visible");
+        assert_eq!(source.column.0, span.start);
+        assert_eq!(sidebar.column.0, sidebar_column);
+    }
+
+    #[test]
+    fn compact_projection_discards_overlapping_streaming_candidate() {
+        let grid = TextGrid::from_rows(&["pre $x^2$ suffix"]);
+        let outer = scan_grid(&grid, true).remove(0);
+        let outer_span = outer.spans[0];
+        let mut inner = outer.clone();
+        inner.spans[0].start += 1;
+        inner.spans[0].end -= 1;
+        let projection =
+            LineProjection::build(&[inner, outer], &[compact_prepared(1), compact_prepared(2)]);
+
+        assert_eq!(projection.spans.len(), 1);
+        assert_eq!(projection.spans[0].source_start, outer_span.start);
+        assert_eq!(projection.spans[0].source_end, outer_span.end);
+    }
+
+    #[test]
     fn compact_projection_accumulates_multiple_formula_shifts() {
         let grid = TextGrid::from_rows(&["a $x^2$ b $y^2$ c"]);
         let overlays = scan_grid(&grid, true);
@@ -2419,10 +2743,58 @@ mod tests {
     }
 
     #[test]
+    fn completed_formula_replaces_overlapping_streaming_candidate() {
+        let grid = TextGrid::from_rows(&["pre $x^2$ suffix"]);
+        let outer = scan_grid(&grid, true).remove(0);
+        let mut inner = outer.clone();
+        inner.spans[0].start += 1;
+        inner.spans[0].end -= 1;
+
+        let mut state = TerminalMathState::default();
+        state.remember(&grid, &inner);
+        state.remember(&grid, &outer);
+
+        assert_eq!(state.formulas.len(), 1);
+        assert!(
+            state.formulas.contains_key(&FormulaAnchor { row: 0, column: outer.spans[0].start })
+        );
+    }
+
+    #[test]
     fn recognizes_cli_math_delimiters_and_utf8_prose() {
         assert_eq!(
             sources(&[r"中文 \(x^2+y^2=z^2\) and $\alpha+1$"], true),
             vec![("x^2+y^2=z^2".into(), false), (r"\alpha+1".into(), false)]
+        );
+    }
+
+    #[test]
+    fn agent_reasoning_style_is_distinct_from_final_answer_style() {
+        let normal = Rgb::new(240, 240, 240);
+        let background = Rgb::new(8, 8, 8);
+
+        let codex_reasoning = overlay_with_source_style(Flags::DIM, normal, background);
+        assert!(formula_uses_reasoning_style(&codex_reasoning, normal));
+
+        let opencode_reasoning =
+            overlay_with_source_style(Flags::empty(), Rgb::new(128, 128, 128), background);
+        assert!(formula_uses_reasoning_style(&opencode_reasoning, normal));
+
+        let final_answer = overlay_with_source_style(Flags::empty(), normal, background);
+        assert!(!formula_uses_reasoning_style(&final_answer, normal));
+    }
+
+    #[test]
+    fn tui_split_single_dollar_display_renders_when_tex_starts_on_next_row() {
+        assert_eq!(
+            sources(
+                &[
+                    "麦克斯韦方程组（高斯定律）：$",
+                    r"\nabla \cdot \mathbf{E} = \dfrac{\rho}{\varepsilon_0}$",
+                ],
+                true,
+            ),
+            vec![((r"\nabla \cdot \mathbf{E} = \dfrac{\rho}{\varepsilon_0}").into(), true)]
         );
     }
 
@@ -2582,6 +2954,14 @@ d & -b \\
             sources(&[r"[ \lim_{x\to 0}\frac{\sin x}{x}=1 ]"], false),
             vec![(r"\lim_{x\to 0}\frac{\sin x}{x}=1".into(), true)]
         );
+        // Codex CLI under WSL renders `\[ E = mc^2 \]` as three plain rows
+        // because its Markdown layer consumes the bracket escapes.
+        assert_eq!(sources(&["[", "E = mc^2", "]"], false), vec![("E = mc^2".into(), true)]);
+        // Codex's list renderer keeps the bullet on the opening delimiter.
+        assert_eq!(
+            sources(&["• [", r"  \int_{-\infty}^{+\infty} e^{-x^2}\,dx=\sqrt{\pi}", "  ]"], false),
+            vec![(r"\int_{-\infty}^{+\infty} e^{-x^2}\,dx=\sqrt{\pi}".into(), true)]
+        );
     }
 
     #[test]
@@ -2609,6 +2989,7 @@ d & -b \\
             sources(&[r"也可以使用 (\sqrt{x^2+y^2}) 表示行内公式"], false),
             vec![(r"\sqrt{x^2+y^2}".into(), false)]
         );
+        assert_eq!(sources(&["• 质能方程为 (E=mc^2)。"], false), vec![("E=mc^2".into(), false)]);
         // 括号深度配对：`\sin(x)` 的内层 `)` 不提前截断。
         assert_eq!(sources(&[r"值 (\sin(x)) 收敛"], false), vec![(r"\sin(x)".into(), false)]);
     }
@@ -2618,6 +2999,7 @@ d & -b \\
         assert!(sources(&[r"grep -E (\d+) input.txt"], false).is_empty());
         assert!(sources(&[r"match (\w*) here"], false).is_empty());
         assert!(sources(&["plain (normal prose) text"], false).is_empty());
+        assert!(sources(&["setting (key=value)"], false).is_empty());
         assert!(sources(&[r"case (\n) newline"], false).is_empty());
         assert!(sources(&[r"path (C:\temp\frac) oops"], false).is_empty());
     }
@@ -2647,11 +3029,21 @@ d & -b \\
     }
 
     #[test]
-    fn single_dollar_requires_an_ai_cli_context() {
-        assert!(sources(&["Euler: $e^{i\\pi}+1=0$"], false).is_empty());
+    fn single_dollar_requires_context_only_for_simple_math() {
+        assert!(sources(&["plain $x$ text"], false).is_empty());
+        assert_eq!(sources(&["plain $x$ text"], true), vec![("x".into(), false)]);
         assert_eq!(
-            sources(&["Euler: $e^{i\\pi}+1=0$"], true),
-            vec![(r"e^{i\pi}+1=0".into(), false)]
+            sources(
+                &[
+                    r"二次方程：$x = \dfrac{-b \pm \sqrt{b^2 - 4ac}}{2a}$",
+                    r"斯特林公式：$n! \approx \sqrt{2\pi n}\left(\dfrac{n}{e}\right)^n$",
+                ],
+                false,
+            ),
+            vec![
+                (r"x = \dfrac{-b \pm \sqrt{b^2 - 4ac}}{2a}".into(), false),
+                (r"n! \approx \sqrt{2\pi n}\left(\dfrac{n}{e}\right)^n".into(), false),
+            ]
         );
     }
 
@@ -3149,6 +3541,51 @@ d & -b \\
         }
     }
 
+    #[test]
+    fn display_math_centres_before_a_tui_right_pane() {
+        let grid = TextGrid::from_rows(&[
+            "     explanation in the main pane                                  $0.00 spent      ",
+            "     $$E = mc^2$$                                                                    ",
+        ]);
+        let overlays = scan_grid_with_hints(&grid, true);
+
+        assert_eq!(overlays.len(), 1);
+        assert_eq!(overlays[0].widen_right_to, Some(42));
+    }
+
+    #[test]
+    fn display_math_mask_only_covers_the_formula_source() {
+        let grid = TextGrid::from_rows(&[
+            "     explanation in the main pane                                  $0.00 spent      ",
+            "     $$E = mc^2$$                                                                    ",
+        ]);
+        let overlays = scan_grid_with_hints(&grid, true);
+        let coverage = CoverageMask::build(&overlays, &[Some(())]);
+
+        assert!(coverage.covers(Point::new(1, Column(5))), "formula source is hidden");
+        assert!(coverage.covers(Point::new(1, Column(16))), "formula source is hidden");
+        assert!(
+            !coverage.covers(Point::new(1, Column(17))),
+            "centering space keeps its TUI background"
+        );
+        assert!(
+            !coverage.covers(Point::new(1, Column(41))),
+            "trailing TUI background is preserved"
+        );
+    }
+
+    #[test]
+    fn display_math_without_a_right_pane_uses_the_viewport() {
+        let grid = TextGrid::from_rows(&[
+            "     ordinary prose across one terminal row                                      ",
+            "     $$E = mc^2$$                                                                  ",
+        ]);
+        let overlays = scan_grid_with_hints(&grid, true);
+
+        assert_eq!(overlays.len(), 1);
+        assert_eq!(overlays[0].widen_right_to, Some(grid.columns));
+    }
+
     /// 诊断用：打印各场景的缩放比例，`cargo test diagnose -- --nocapture`。
     #[test]
     fn diagnose_sizes() {
@@ -3246,9 +3683,9 @@ d & -b \\
             let mut state = TerminalMathState::default();
 
             let bounds = overlay.bounds(&size).expect("bounds");
-            let viewport_right = size.padding_x() + size.columns() as f32 * size.cell_width();
-            let right =
-                if overlay.widen_right { viewport_right.max(bounds.right) } else { bounds.right };
+            let right = overlay.widen_right_to.map_or(bounds.right, |column| {
+                (size.padding_x() + column as f32 * size.cell_width()).max(bounds.right)
+            });
             let base = state
                 .layout(overlay.formula_id, &overlay.source, TEST_FONT_PX, 1.0, overlay.display)
                 .expect("layout")
