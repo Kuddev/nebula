@@ -2120,8 +2120,7 @@ impl NebulaWorkspace {
         }
     }
 
-    /// 设置改动：全局 `Settings` 已由设置页重载，这里热应用到所有终端
-    /// 并联动窗口 chrome 主题深浅；SSH 连接请求转开新 tab。
+    /// 热应用设置页变更，并把 SSH 连接请求转为新标签。
     fn on_settings_event(
         &mut self,
         _: &Entity<SettingsPane>,
@@ -2135,6 +2134,7 @@ impl NebulaWorkspace {
                 // 键位编辑器可能改了 keybind= 表：注入/撤销随之热更新。
                 self.apply_custom_keybinds(cx);
             },
+            SettingsPaneEvent::TerminalProfilesChanged => self.refresh_shell_if_open(window, cx),
             SettingsPaneEvent::LaunchSsh(host) => {
                 self.add_ssh_terminal(host.clone(), window, cx);
             },

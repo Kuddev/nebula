@@ -22,9 +22,11 @@ pub struct SystemFontFamily {
     pub monospaced: bool,
 }
 
-/// 一个字体族在**字体目录**中的来源。同名冲突时系统记录优先。
+/// 一个字体族在**字体目录**中的来源。同名冲突时内置记录优先，确保即使
+/// 系统未安装 Maple，设置页也能准确说明应用自带的最终兜底字体。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontSource {
+    Bundled,
     System,
     Imported,
 }
@@ -38,9 +40,10 @@ pub struct FontCatalogEntry {
     pub source: FontSource,
 }
 
-/// 由系统字体族、Nebula 导入字体族、过滤开关与查询串装配**字体目录**。
+/// 由内置 Maple、系统字体族、Nebula 导入字体族、过滤开关与查询串装配
+/// **字体目录**。
 ///
-/// - 同名（忽略大小写）合并为一项，系统记录优先。
+/// - 同名（忽略大小写）合并为一项，内置记录优先，其次是系统记录。
 /// - 默认只列等宽族；`show_all` 临时显示全部。导入字体没有系统那样的等宽
 ///   元数据，视作可用，默认视图不隐藏它们。
 /// - 搜索匹配的是列表上显示的那个名字，不维护跨语言别名。
@@ -53,9 +56,16 @@ pub fn font_catalog(
     query: &str,
     current: &str,
 ) -> Vec<FontCatalogEntry> {
-    let mut entries: Vec<FontCatalogEntry> = Vec::with_capacity(system.len() + imported.len());
-    let mut seen: Vec<String> = Vec::with_capacity(system.len() + imported.len());
+    let mut entries: Vec<FontCatalogEntry> = Vec::with_capacity(system.len() + imported.len() + 1);
+    let mut seen: Vec<String> = Vec::with_capacity(system.len() + imported.len() + 1);
     let key = |name: &str| name.to_lowercase();
+
+    entries.push(FontCatalogEntry {
+        name: REQUIRED_FONT_FAMILY.to_owned(),
+        monospaced: true,
+        source: FontSource::Bundled,
+    });
+    seen.push(key(REQUIRED_FONT_FAMILY));
 
     for family in system {
         let k = key(&family.name);
@@ -107,6 +117,25 @@ pub fn font_family_chain(value: &str) -> Vec<String> {
 
 fn format_font_family_chain(families: &[String]) -> String {
     families.join(", ")
+}
+
+/// 规范化用户直接输入的字体链：逗号后统一留一个空格，并按首次出现去重。
+pub fn normalize_font_family_chain(value: &str) -> String {
+    format_font_family_chain(&font_family_chain(value))
+}
+
+/// 用建议项替换输入框最后一个逗号段。用户先键入尾逗号即可追加 fallback；
+/// 没有逗号时则替换主字体，这与 Windows Terminal 的 AutoSuggestBox 一致。
+pub fn complete_font_family_input(value: &str, completion: &str) -> String {
+    let completion = completion.trim();
+    if completion.is_empty() {
+        return normalize_font_family_chain(value);
+    }
+
+    match value.rsplit_once(',') {
+        Some((prefix, _)) => append_font_fallback(prefix, completion),
+        None => completion.to_owned(),
+    }
 }
 
 /// 替换主字体并保留有序 fallback。字体选择器只拥有首项，不能因为用户
@@ -374,14 +403,18 @@ mod tests {
     fn the_default_view_lists_only_monospaced_families() {
         let system = [sys("Consolas", true), sys("Arial", false), sys("Cascadia Mono", true)];
         let catalog = font_catalog(&system, &[], false, "", "Consolas");
-        assert_eq!(names(&catalog), ["Cascadia Mono", "Consolas"]);
+        assert_eq!(names(&catalog), ["Cascadia Mono", "Consolas", REQUIRED_FONT_FAMILY]);
+        assert_eq!(
+            catalog.iter().find(|entry| entry.name == REQUIRED_FONT_FAMILY).unwrap().source,
+            FontSource::Bundled
+        );
     }
 
     #[test]
     fn show_all_reveals_proportional_families_and_flags_them() {
         let system = [sys("Consolas", true), sys("Arial", false)];
         let catalog = font_catalog(&system, &[], true, "", "Consolas");
-        assert_eq!(names(&catalog), ["Arial", "Consolas"]);
+        assert_eq!(names(&catalog), ["Arial", "Consolas", REQUIRED_FONT_FAMILY]);
         let arial = catalog.iter().find(|entry| entry.name == "Arial").unwrap();
         assert!(!arial.monospaced, "比例字体要能被标记出来，界面才谈得上给兼容性警告");
     }
@@ -393,7 +426,7 @@ mod tests {
         let system = [sys("Consolas", true)];
         let imported = ["consolas".to_owned(), "Maple Mono".to_owned()];
         let catalog = font_catalog(&system, &imported, false, "", "Consolas");
-        assert_eq!(names(&catalog), ["Consolas", "Maple Mono"]);
+        assert_eq!(names(&catalog), ["Consolas", "Maple Mono", REQUIRED_FONT_FAMILY]);
         let consolas = catalog.iter().find(|entry| entry.name == "Consolas").unwrap();
         assert_eq!(consolas.source, FontSource::System);
     }
@@ -404,8 +437,11 @@ mod tests {
         // 默认视图不能把它们藏起来。
         let imported = ["Maple Mono".to_owned()];
         let catalog = font_catalog(&[], &imported, false, "", "Maple Mono");
-        assert_eq!(names(&catalog), ["Maple Mono"]);
-        assert_eq!(catalog[0].source, FontSource::Imported);
+        assert_eq!(names(&catalog), ["Maple Mono", REQUIRED_FONT_FAMILY]);
+        assert_eq!(
+            catalog.iter().find(|entry| entry.name == "Maple Mono").unwrap().source,
+            FontSource::Imported
+        );
     }
 
     #[test]
@@ -476,6 +512,23 @@ mod tests {
         assert_eq!(move_font_family("Consolas, CJK, Symbols", 2, -1), "Consolas, Symbols, CJK");
         assert_eq!(move_font_family("Consolas, CJK, Symbols", 1, -1), "CJK, Consolas, Symbols");
         assert_eq!(move_font_family("Consolas, CJK, Symbols", 0, 1), "CJK, Consolas, Symbols");
+    }
+
+    #[test]
+    fn font_input_completion_replaces_only_the_last_comma_segment() {
+        assert_eq!(complete_font_family_input("Consolas", "Cascadia Mono"), "Cascadia Mono");
+        assert_eq!(
+            complete_font_family_input("Consolas, Microsoft Ya", "Microsoft YaHei"),
+            "Consolas, Microsoft YaHei"
+        );
+        assert_eq!(
+            complete_font_family_input("Consolas, Microsoft YaHei,", "Symbols"),
+            "Consolas, Microsoft YaHei, Symbols"
+        );
+        assert_eq!(
+            normalize_font_family_chain(" Consolas,  CJK, consolas, Symbols, "),
+            "Consolas, CJK, Symbols"
+        );
     }
 
     #[test]

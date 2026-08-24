@@ -66,9 +66,8 @@ const SETTINGS_GROUP_TITLE_HEIGHT: f32 = 26.0;
 const SETTINGS_GROUP_TITLE_GAP: f32 = 16.0;
 const SETTINGS_ROW_HEIGHT: f32 = 44.0;
 const SETTINGS_ROW_GAP: f32 = 8.0;
-// 对齐字体组 HTML 原型的桌面端上限：触发条和弹层共用 460px，展开时既不
-// 横向跳变，也给多段字体摘要留下真实可读空间。
-const FONT_PICKER_WIDTH: f32 = 460.0;
+/// 标准设置选择器的实际宽度。字体输入与 Select 共用，避免同列控件漂移。
+const SETTINGS_SELECT_WIDTH: f32 = 220.0;
 
 const THEME_NAMES: [ThemeName; 7] = [
     ThemeName::Nebula,
@@ -182,9 +181,11 @@ fn issue_url() -> String {
     format!("{REPOSITORY_URL}/issues/new?{params}")
 }
 
-/// 宿主（workspace）监听：设置已写盘 / 请求打开 SSH 会话。
+/// 宿主（workspace）监听：设置已写盘 / 终端目录已变 / 请求打开 SSH 会话。
 pub enum SettingsPaneEvent {
     Changed,
+    /// 导入 Profile 已落盘；Tab 的 Shell 面板若正打开，需要重建候选快照。
+    TerminalProfilesChanged,
     /// 设置页"连接"按钮：宿主开 SSH tab（连接语义在业务层）。
     LaunchSsh(String),
 }
@@ -443,19 +444,17 @@ pub struct SettingsPane {
     /// 未决删除的撤销窗口（8 秒；见 `ssh_settings::SshDeleteUndo`）。
     pub(super) ssh_delete_undo: Option<SshDeleteUndo>,
     pub(super) ssh_undo_seq: u64,
-    /// 字体选择器（旧壳 `SettingsDropdown::Font` 的 GPUI 形态）：展开态 +
-    /// 「显示全部」临时过滤（不落盘）+ 惰性枚举的系统/导入字体目录。
+    /// 可直接编辑的字体链及其建议弹层；逗号分隔语义与 Windows Terminal 一致。
     pub(super) font_picker_open: bool,
-    font_show_all: bool,
     font_loading: bool,
     /// None = 尚未枚举；首次展开时在后台线程装配（几百字体的机器上
     /// `IsMonospacedFont` 逐族探询是实打实的开销，不挡 UI 帧）。
     font_system: Option<Vec<crate::font_install::SystemFontFamily>>,
     /// GPUI text system 已注册的导入族名（启动扫描 + 本次导入累计）。
     font_imported: Vec<String>,
-    font_query_input: Entity<InputState>,
-    /// 触发按钮上一帧的窗口坐标。字体目录是宽弹层，不能把整条设置行当
-    /// 锚点；否则按钮在右侧、菜单却会从正文左缘展开。
+    font_family_input: Entity<InputState>,
+    /// 字体输入框上一帧的窗口坐标。字体目录是宽弹层，不能把整条设置行当
+    /// 锚点；否则输入框在右侧、菜单却会从正文左缘展开。
     font_picker_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     /// 备份类别选择（本地 UI 态；出厂默认 = 共享 `BackupSelection::default`）。
     backup_selection: crate::encrypted_backup::BackupSelection,
@@ -871,16 +870,13 @@ impl SettingsPane {
             ));
         }
 
-        let font_query_input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索字体…"));
+        let font_family_input =
+            Self::new_font_family_input(runtime.font_family.clone(), window, cx);
         subscriptions.push(cx.subscribe_in(
-            &font_query_input,
+            &font_family_input,
             window,
-            |_: &mut Self, _, event: &InputEvent, _, cx| {
-                // 列表跟着打字走（旧壳「所见即所搜」）；目录装配在渲染时按
-                // 当前查询串现算，这里只需要触发一帧。
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                this.on_font_family_input_event(event, window, cx);
             },
         ));
 
@@ -951,11 +947,10 @@ impl SettingsPane {
             ssh_delete_undo: None,
             ssh_undo_seq: 0,
             font_picker_open: false,
-            font_show_all: false,
             font_loading: false,
             font_system: None,
             font_imported: Vec::new(),
-            font_query_input,
+            font_family_input,
             font_picker_trigger_bounds: None,
             backup_selection: crate::encrypted_backup::BackupSelection::default(),
             backup_pass_input: cx.new(|cx| {
@@ -1240,8 +1235,9 @@ impl SettingsPane {
                     format!("已导入 {count} 个终端，立即可用"),
                 );
                 self.refresh_shell_items(window, cx);
-                // 新 profile 要进新建终端菜单/命令面板，让宿主重读配置。
-                cx.emit(SettingsPaneEvent::Changed);
+                // 新 profile 要立即进入 Tab 的 Shell 面板；它不是普通运行时
+                // 设置，避免因此重建所有终端字体与主题。
+                cx.emit(SettingsPaneEvent::TerminalProfilesChanged);
                 cx.notify();
             },
             Err(message) => {
@@ -1289,7 +1285,7 @@ impl SettingsPane {
         // sk.accent）。闭框/背景都不带文字色，包一层就能继承下去；右侧
         // chevron 在组件内自带 muted，不会被染色。
         let control = div()
-            .w(px(220.0))
+            .w(px(SETTINGS_SELECT_WIDTH))
             .text_color(cx.theme().link)
             .children(select.map(|state| Select::new(&state)));
         self.maybe_marked(key, label, desc, control, cx)
@@ -1300,7 +1296,7 @@ impl SettingsPane {
             "默认 Shell",
             "新标签用哪个程序开。已经开着的标签不受影响——它们跟的是各自创建时的选择。",
             div()
-                .w(px(220.0))
+                .w(px(SETTINGS_SELECT_WIDTH))
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_color(cx.theme().link)
                 .child(Select::new(&self.shell_select)),

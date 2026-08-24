@@ -60,10 +60,6 @@ const MARK_RISE: Duration = Duration::from_millis(260);
 #[derive(Clone, Copy)]
 enum RowLayout {
     Standard,
-    /// HTML 字体组原型的宽控件行；窄窗口时切成说明在上、控件在下。
-    Wide {
-        stacked: bool,
-    },
 }
 
 impl SettingsPane {
@@ -111,19 +107,6 @@ impl SettingsPane {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         self.row_shell(label, desc, None, false, RowLayout::Standard, control, cx)
-    }
-
-    /// 需要 460px 控件列的设置行。只复用现有行壳的层次、hover 与间距，
-    /// 布局按 HTML 原型在窄窗口切成上下两行。
-    pub(crate) fn responsive_wide_row(
-        &self,
-        label: &'static str,
-        desc: &'static str,
-        stacked: bool,
-        control: impl IntoElement,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        self.row_shell(label, desc, None, false, RowLayout::Wide { stacked }, control, cx)
     }
 
     /// 带撤销的设置行：该项被覆盖过时，左侧轨道这一段亮起来，行内出现 ↶。
@@ -267,19 +250,6 @@ impl SettingsPane {
                         .items_center()
                         .child(control),
                 ),
-            RowLayout::Wide { stacked: false } => h_flex()
-                .w_full()
-                .items_start()
-                .gap(px(48.0))
-                .child(text.flex_1().min_w(px(280.0)))
-                .child(
-                    h_flex().w(px(FONT_PICKER_WIDTH)).flex_shrink_0().items_center().child(control),
-                ),
-            RowLayout::Wide { stacked: true } => v_flex()
-                .w_full()
-                .gap(px(22.0))
-                .child(text.w_full())
-                .child(div().w_full().child(control)),
         };
         div()
             .id(label)

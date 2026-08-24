@@ -819,6 +819,8 @@ impl NebulaWorkspace {
         // 颜色先取出来：`cx.theme()` 不可变借着 cx，后面每个 `cx.listener`
         // 都要可变借，混在一个表达式里借用检查过不去。
         let secondary = cx.theme().secondary;
+        let settings_active_bg = cx.theme().sidebar_accent;
+        let settings_active_fg = cx.theme().sidebar_accent_foreground;
         h_flex()
             .size_full()
             .items_center()
@@ -852,6 +854,9 @@ impl NebulaWorkspace {
                             .icon(IconName::Settings)
                             .ghost()
                             .selected(settings_active)
+                            .when(settings_active, |button| {
+                                button.bg(settings_active_bg).text_color(settings_active_fg)
+                            })
                             .tooltip("设置 (Ctrl+,)")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_settings(window, cx);

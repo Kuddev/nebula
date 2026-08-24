@@ -86,6 +86,13 @@ fn horizontal_wheel_delta(x: f32, y: f32) -> f32 {
 }
 
 impl NebulaWorkspace {
+    /// Shell 面板缓存打开时的候选；导入后只刷新现有面板，关闭态下次打开会读盘。
+    pub(super) fn refresh_shell_if_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shell_picker_open {
+            self.open_shell_palette(window, cx);
+        }
+    }
+
     pub(super) fn render_top_title_bar(
         &self,
         files_active: bool,

@@ -706,6 +706,7 @@ impl SettingsPane {
                                 .child(
                                     h_flex()
                                         .h(px(SSH_EDITOR_HEAD_H))
+                                        .flex_shrink_0()
                                         .px(px(SSH_EDITOR_SPACE_M))
                                         .items_center()
                                         .border_b_1()
@@ -722,7 +723,10 @@ impl SettingsPane {
                                         ),
                                 )
                                 .child(
+                                    // 标题栏和底栏固定，正文独占剩余高度；内容再高
+                                    // 也只在这里滚动，不能把操作栏挤进表单区域。
                                     v_flex()
+                                        .flex_1()
                                         .min_h_0()
                                         .overflow_y_scrollbar()
                                         .px(px(SSH_EDITOR_SPACE_M))
@@ -991,6 +995,7 @@ impl SettingsPane {
                                 .when_some(status, |card, (message, error)| {
                                     card.child(
                                         h_flex()
+                                            .flex_shrink_0()
                                             .px(px(SSH_EDITOR_SPACE_M))
                                             .py(px(SSH_EDITOR_SPACE_XS))
                                             .gap_2()
@@ -1011,6 +1016,7 @@ impl SettingsPane {
                                 .child(
                                     h_flex()
                                         .h(px(SSH_EDITOR_FOOTER_H))
+                                        .flex_shrink_0()
                                         .px(px(SSH_EDITOR_SPACE_M))
                                         .items_center()
                                         .justify_between()
