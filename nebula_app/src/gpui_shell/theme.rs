@@ -392,6 +392,15 @@ fn apply_shell_opacity(chrome: NebulaTheme, cx: &mut App) {
     theme.sidebar_border = shell;
     theme.title_bar = shell;
     theme.title_bar_border = shell;
+
+    // gpui-component 1.16 的壳组件改读 resolved background token；直接改
+    // ThemeColor 不会自动同步 tokens。这里只更新快路径实际改动的五个字段，
+    // 保持拖动不透明度时不重建整套主题。
+    theme.tokens.background = shell.into();
+    theme.tokens.sidebar = shell.into();
+    theme.tokens.sidebar_border = shell.into();
+    theme.tokens.title_bar = shell.into();
+    theme.tokens.title_bar_border = shell.into();
 }
 
 /// 旧壳 [`Skin`] → gpui-component 全局 token。改全局而不是逐组件覆样式：
@@ -478,6 +487,33 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     theme.warning_active = shift3(sk.warn.r, sk.warn.g, sk.warn.b, 0.18);
     theme.warning_foreground = on_solid(sk.warn);
 
+    // 1.16 为 Button 增加了独立 token。继续沿用 Nebula 原有的语义配色，
+    // 只接新版组件的取色入口，不改变 variant、尺寸、文字或交互。
+    theme.button = theme.secondary;
+    theme.button_hover = theme.secondary_hover;
+    theme.button_active = theme.secondary_active;
+    theme.button_foreground = theme.secondary_foreground;
+    theme.button_primary = theme.primary;
+    theme.button_primary_hover = theme.primary_hover;
+    theme.button_primary_active = theme.primary_active;
+    theme.button_primary_foreground = theme.primary_foreground;
+    theme.button_secondary = theme.secondary;
+    theme.button_secondary_hover = theme.secondary_hover;
+    theme.button_secondary_active = theme.secondary_active;
+    theme.button_secondary_foreground = theme.secondary_foreground;
+    theme.button_danger = theme.danger;
+    theme.button_danger_hover = theme.danger_hover;
+    theme.button_danger_active = theme.danger_active;
+    theme.button_danger_foreground = theme.danger_foreground;
+    theme.button_success = theme.success;
+    theme.button_success_hover = theme.success_hover;
+    theme.button_success_active = theme.success_active;
+    theme.button_success_foreground = theme.success_foreground;
+    theme.button_warning = theme.warning;
+    theme.button_warning_hover = theme.warning_hover;
+    theme.button_warning_active = theme.warning_active;
+    theme.button_warning_foreground = theme.warning_foreground;
+
     // 焦点 / 选择 / 链接 / 拖拽。
     theme.ring = ink(sk.accent);
     theme.caret = ink(sk.accent);
@@ -521,6 +557,11 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     }
     theme.radius = px(crate::display::UI_CORNER_RADIUS_LOGICAL);
     theme.radius_lg = px(12.0);
+
+    // 1.16 的 Button、Slider、Switch 等背景统一读取 ThemeTokens。Nebula 的
+    // Skin 是纯色权威来源，因此在所有 ThemeColor 覆写完成后一次性解析，避免
+    // 新组件悄悄回落到 gpui-component 的默认主题色。
+    theme.tokens = (&theme.colors).into();
 }
 
 #[cfg(test)]
