@@ -250,6 +250,48 @@ pub(crate) fn reveal_all_windows(cx: &mut App) {
     });
 }
 
+/// 给 GPUI 主窗补上任务栏悬停预览 / Alt+Tab 用的窗口图标。
+///
+/// exe 资源里有图标（`windows/nebula.rc` 的 `IDI_ICON`），任务栏按钮因此
+/// 是对的；但 GPUI 注册窗口类时不带 `hIcon`，也从不发 `WM_SETICON`，于是
+/// 悬停预览角标和 Alt+Tab 走系统默认白框占位图（用户 #51）。开窗后把资源
+/// 图标按系统尺寸各挂一份即可，`LR_SHARED` 句柄由系统缓存、无需释放。
+#[cfg(windows)]
+pub(crate) fn set_native_window_icon(window: &gpui::Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_SHARED, LoadImageW, SM_CXICON,
+        SM_CXSMICON, SendMessageW, WM_SETICON,
+    };
+
+    /// `windows/nebula.rc` 里的 `IDI_ICON`。
+    const IDI_ICON: u16 = 0x101;
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = handle.hwnd.get() as *mut core::ffi::c_void;
+
+    // SAFETY: 模块句柄取自身；LoadImageW 按 MAKEINTRESOURCE 约定接受资源序号，
+    // 失败返回 null；SendMessageW 对 null 图标只是清除该槽位，均安全失败。
+    unsafe {
+        let module = GetModuleHandleW(std::ptr::null());
+        let resource = IDI_ICON as usize as *const u16;
+        for (slot, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
+            let size = GetSystemMetrics(metric);
+            let icon = LoadImageW(module, resource, IMAGE_ICON, size, size, LR_SHARED);
+            if !icon.is_null() {
+                SendMessageW(hwnd, WM_SETICON, slot as usize, icon as isize);
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 fn native_show(window: &gpui::Window, show: bool) -> bool {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};

@@ -169,6 +169,8 @@ fn open_workspace_window(
     let hwnd_out = hwnd_slot.clone();
     let handle = cx.open_window(options, move |window, cx| {
         *hwnd_out.borrow_mut() = native_hwnd(window).unwrap_or_default();
+        #[cfg(windows)]
+        crate::gpui_shell::set_native_window_icon(window);
         let workspace = cx.new(|cx| {
             NebulaWorkspace::new(
                 window,
