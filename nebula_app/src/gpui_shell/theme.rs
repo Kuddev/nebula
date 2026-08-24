@@ -264,10 +264,8 @@ pub fn settings_panel_bg(cx: &App) -> Hsla {
     solid(chrome_theme(effective_theme_name(cx)).skin().panel)
 }
 
-/// 终端内补全浮层（ghost/弹窗）的配色切片，与旧壳 `draw_completion_popup`
-/// 同源同义：ghost/tag 用最淡墨，行底=panel 预合成到终端底色（浮层底基准
-/// 从卡底提亮，不透出壁纸）。弹窗本身使用低对比边框与 accent 水洗选中态，
-/// 避免把整块候选列表染成高饱和按钮。
+/// 终端补齐浮层严格复用交互原型的中性色阶与语义色。语义色只落在图标、
+/// 右侧短码和选中竖线上，面板/选中底保持中性，密集候选不会变成彩色按钮墙。
 pub(crate) struct CompletionColors {
     pub ghost: Hsla,
     pub panel_bg: Hsla,
@@ -275,38 +273,77 @@ pub(crate) struct CompletionColors {
     pub panel_shadow: Hsla,
     pub row_bg: Hsla,
     pub row_fg: Hsla,
-    pub tag_fg: Hsla,
+    pub match_fg: Hsla,
     pub selected_bg: Hsla,
     pub selected_fg: Hsla,
     pub scroll_track: Hsla,
     pub scroll_thumb: Hsla,
+    pub history: Hsla,
+    pub command: Hsla,
+    pub directory: Hsla,
+    pub rust_file: Hsla,
+    pub toml: Hsla,
+    pub markdown: Hsla,
+    pub file: Hsla,
 }
 
-pub(crate) fn completion_colors(cx: &App, term_bg: GpuiRgba) -> CompletionColors {
+pub(crate) fn completion_colors(cx: &App, _term_bg: GpuiRgba) -> CompletionColors {
     let sk = chrome_theme(effective_theme_name(cx)).skin();
-    let a = f32::from(sk.panel.a) / 255.0;
-    let mix = |p: u8, b: f32| (f32::from(p) / 255.0) * a + b * (1.0 - a);
-    let row_bg: Hsla = GpuiRgba {
-        r: mix(sk.panel.r, term_bg.r),
-        g: mix(sk.panel.g, term_bg.g),
-        b: mix(sk.panel.b, term_bg.b),
-        a: 1.0,
-    }
-    .into();
-    let accent: Hsla = ink(sk.accent);
-    let selected_bg = accent.opacity(if sk.is_light { 0.16 } else { 0.24 });
-    CompletionColors {
-        ghost: ink(sk.ink_faint),
-        panel_bg: row_bg,
-        panel_border: accent.opacity(if sk.is_light { 0.28 } else { 0.34 }),
-        panel_shadow: hsla(0.0, 0.0, 0.0, if sk.is_light { 0.18 } else { 0.42 }),
-        row_bg,
-        row_fg: ink(sk.ink),
-        tag_fg: ink(sk.ink_faint),
-        selected_bg,
-        selected_fg: ink(sk.ink_strong),
-        scroll_track: ink(sk.ink_faint).opacity(if sk.is_light { 0.24 } else { 0.32 }),
-        scroll_thumb: ink(sk.ink_dim).opacity(if sk.is_light { 0.62 } else { 0.72 }),
+    let opaque = |hex: u32| {
+        to_hsla(((hex >> 16) & 0xff) as u8, ((hex >> 8) & 0xff) as u8, (hex & 0xff) as u8)
+    };
+    let alpha = |hex: u32, a: f32| -> Hsla {
+        GpuiRgba {
+            r: f32::from(((hex >> 16) & 0xff) as u8) / 255.0,
+            g: f32::from(((hex >> 8) & 0xff) as u8) / 255.0,
+            b: f32::from((hex & 0xff) as u8) / 255.0,
+            a,
+        }
+        .into()
+    };
+
+    if sk.is_light {
+        CompletionColors {
+            ghost: opaque(0x8b938e),
+            panel_bg: opaque(0xffffff),
+            panel_border: alpha(0x2c5c48, 0.27),
+            panel_shadow: alpha(0x18221c, 0.20),
+            row_bg: opaque(0xffffff),
+            row_fg: opaque(0x5f6962),
+            match_fg: opaque(0x8b938e),
+            selected_bg: opaque(0xe6f0eb),
+            selected_fg: opaque(0x1d2520),
+            scroll_track: alpha(0x2c5c48, 0.18),
+            scroll_thumb: alpha(0x5f6962, 0.55),
+            history: opaque(0x916c2d),
+            command: opaque(0x247f68),
+            directory: opaque(0x3e7f49),
+            rust_file: opaque(0xa75935),
+            toml: opaque(0x8a567c),
+            markdown: opaque(0x39749b),
+            file: opaque(0x5f6962),
+        }
+    } else {
+        CompletionColors {
+            ghost: opaque(0x6f7872),
+            panel_bg: opaque(0x181b19),
+            panel_border: alpha(0xb0c9be, 0.23),
+            panel_shadow: alpha(0x000000, 0.46),
+            row_bg: opaque(0x181b19),
+            row_fg: opaque(0xa4ada7),
+            match_fg: opaque(0x6f7872),
+            selected_bg: opaque(0x29302c),
+            selected_fg: opaque(0xe9eeea),
+            scroll_track: alpha(0xb0c9be, 0.23),
+            scroll_thumb: alpha(0x6f7872, 0.72),
+            history: opaque(0xd7b06d),
+            command: opaque(0x79c9b4),
+            directory: opaque(0x88c58d),
+            rust_file: opaque(0xe59770),
+            toml: opaque(0xc596ba),
+            markdown: opaque(0x78afd5),
+            file: opaque(0xa4ada7),
+        }
     }
 }
 

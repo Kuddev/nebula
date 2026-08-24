@@ -16,8 +16,8 @@ use std::collections::HashSet;
 
 use gpui::{
     App, Bounds, CursorStyle, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, LayoutId, Pixels, Rgba, SharedString, Style, TextRun, UnderlineStyle,
-    Window, fill, outline, point, px, relative, size,
+    InspectorElementId, LayoutId, PathBuilder, Pixels, Rgba, SharedString, Style, TextRun,
+    UnderlineStyle, Window, fill, outline, point, px, relative, size,
 };
 use gpui_component::ActiveTheme as _;
 use nebula_terminal::grid::Dimensions as _;
@@ -575,7 +575,6 @@ impl Element for TerminalElement {
                         &bounds,
                         &colors,
                         &font,
-                        &bold_font,
                         font_size,
                     );
                 }
@@ -843,20 +842,135 @@ fn grid_text(
     used
 }
 
-/// 绘制与命中测试共用的弹窗几何。旧壳的候选列表是在 cell 网格中绘制的，
-/// GPUI 也必须用同一套偏移，否则鼠标看到的行和实际接受的行会错位。
+const COMPLETION_PANEL_WIDTH: f32 = 520.0;
+const COMPLETION_PANEL_PAD: f32 = 4.0;
+const COMPLETION_PANEL_GAP: f32 = 6.0;
+const COMPLETION_ROW_HEIGHT: f32 = 36.0;
+const COMPLETION_ROW_LEFT_PAD: f32 = 8.0;
+const COMPLETION_ROW_RIGHT_PAD: f32 = 9.0;
+const COMPLETION_ICON_WIDTH: f32 = 22.0;
+const COMPLETION_ICON_SIZE: f32 = 17.0;
+const COMPLETION_COLUMN_GAP: f32 = 8.0;
+const COMPLETION_TAG_WIDTH: f32 = 46.0;
+
+#[derive(Clone, Copy)]
+enum CompletionVisualKind {
+    History,
+    Command,
+    Directory,
+    Rust,
+    Toml,
+    Markdown,
+    File,
+}
+
+fn completion_visual_kind(item: &crate::display::NebulaCompletionItem) -> CompletionVisualKind {
+    use crate::display::NebulaCompletionKind;
+
+    match item.kind {
+        NebulaCompletionKind::History => CompletionVisualKind::History,
+        NebulaCompletionKind::Command => CompletionVisualKind::Command,
+        NebulaCompletionKind::Dir => CompletionVisualKind::Directory,
+        NebulaCompletionKind::File => {
+            // 候选 label 保留真实扩展名；先按 Path 解析，避免把目录名中间的点
+            // 或命令参数误认成文件类型。引号只可能包住整段显示文本。
+            let label = item.label.trim_matches(|c| c == '"' || c == '\'');
+            match std::path::Path::new(label).extension().and_then(|ext| ext.to_str()) {
+                Some(ext) if ext.eq_ignore_ascii_case("rs") => CompletionVisualKind::Rust,
+                Some(ext) if ext.eq_ignore_ascii_case("toml") => CompletionVisualKind::Toml,
+                Some(ext)
+                    if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown") =>
+                {
+                    CompletionVisualKind::Markdown
+                },
+                _ => CompletionVisualKind::File,
+            }
+        },
+    }
+}
+
+fn completion_tag(kind: CompletionVisualKind) -> &'static str {
+    match kind {
+        CompletionVisualKind::History => "HIS",
+        CompletionVisualKind::Command => "CMD",
+        CompletionVisualKind::Directory => "DIR",
+        CompletionVisualKind::Rust => "RS",
+        CompletionVisualKind::Toml => "TOML",
+        CompletionVisualKind::Markdown => "MD",
+        CompletionVisualKind::File => "FILE",
+    }
+}
+
+fn completion_kind_color(
+    colors: &crate::gpui_shell::theme::CompletionColors,
+    kind: CompletionVisualKind,
+) -> Hsla {
+    match kind {
+        CompletionVisualKind::History => colors.history,
+        CompletionVisualKind::Command => colors.command,
+        CompletionVisualKind::Directory => colors.directory,
+        CompletionVisualKind::Rust => colors.rust_file,
+        CompletionVisualKind::Toml => colors.toml,
+        CompletionVisualKind::Markdown => colors.markdown,
+        CompletionVisualKind::File => colors.file,
+    }
+}
+
+fn completion_cells(text: &str) -> usize {
+    use unicode_width::UnicodeWidthChar as _;
+
+    text.chars().map(|c| c.width().unwrap_or(0)).sum()
+}
+
+fn completion_label_parts(item: &crate::display::NebulaCompletionItem) -> (&str, &str) {
+    if !item.insert.is_empty() && item.label.ends_with(&item.insert) {
+        item.label.split_at(item.label.len() - item.insert.len())
+    } else {
+        ("", &item.label)
+    }
+}
+
+/// 绘制与命中共用的像素几何。这里刻意不再用终端 cell 拼凑 UI 列：
+/// 22px 图标槽、两段 8px 间距和 46px 标签槽必须与 HTML 原型一一对应。
 #[derive(Clone, Copy)]
 pub(super) struct CompletionPopupLayout {
-    pub start_line: usize,
-    pub start_col: usize,
+    content_x: Pixels,
+    content_y: Pixels,
+    content_width: Pixels,
+    pub row_height: Pixels,
     pub offset: usize,
     pub rows: usize,
-    pub width: usize,
     pub label_width: usize,
-    pub tag_width: usize,
     pub selected: Option<usize>,
 }
 
+impl CompletionPopupLayout {
+    pub(super) fn content_bounds(self, origin: gpui::Point<Pixels>) -> Bounds<Pixels> {
+        Bounds::new(
+            point(origin.x + self.content_x, origin.y + self.content_y),
+            size(self.content_width, self.row_height * self.rows),
+        )
+    }
+
+    fn panel_bounds(self, origin: gpui::Point<Pixels>) -> Bounds<Pixels> {
+        let content = self.content_bounds(origin);
+        let pad = px(COMPLETION_PANEL_PAD);
+        Bounds::new(
+            point(content.origin.x - pad, content.origin.y - pad),
+            size(content.size.width + pad * 2.0, content.size.height + pad * 2.0),
+        )
+    }
+
+    fn row_bounds(self, origin: gpui::Point<Pixels>, row: usize) -> Bounds<Pixels> {
+        let content = self.content_bounds(origin);
+        Bounds::new(
+            point(content.origin.x, content.origin.y + self.row_height * row),
+            size(content.size.width, self.row_height),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn completion_popup_layout(
     items: &[crate::display::NebulaCompletionItem],
     selected: Option<usize>,
@@ -864,69 +978,207 @@ pub(super) fn completion_popup_layout(
     cursor_col: usize,
     screen_lines: usize,
     columns: usize,
+    cell_width: Pixels,
+    line_height: Pixels,
 ) -> Option<CompletionPopupLayout> {
-    use unicode_width::UnicodeWidthChar as _;
-
     if columns < 12 || screen_lines < 2 || items.is_empty() {
         return None;
     }
 
-    // 行位：优先光标下方，不够放则上方；最多显示八项。
-    let below = screen_lines.saturating_sub(cursor_row + 1);
-    let above = cursor_row;
-    let want = items.len().min(8);
-    let (rows, start_line) = if below >= want || below >= above {
-        (want.min(below), cursor_row + 1)
-    } else {
-        (want.min(above), cursor_row - want.min(above))
+    let cell_width = cell_width.as_f32();
+    let line_height = line_height.as_f32();
+    if cell_width <= 0.0 || line_height <= 0.0 {
+        return None;
+    }
+
+    let viewport_width = cell_width * columns as f32;
+    let viewport_height = line_height * screen_lines as f32;
+    let panel_width = COMPLETION_PANEL_WIDTH.min(viewport_width);
+    let content_width = panel_width - COMPLETION_PANEL_PAD * 2.0;
+    let fixed_columns = COMPLETION_ROW_LEFT_PAD
+        + COMPLETION_ICON_WIDTH
+        + COMPLETION_COLUMN_GAP * 2.0
+        + COMPLETION_TAG_WIDTH
+        + COMPLETION_ROW_RIGHT_PAD;
+    let label_width = ((content_width - fixed_columns) / cell_width).floor() as isize;
+    if label_width <= 0 {
+        return None;
+    }
+
+    let cursor_row = cursor_row.min(screen_lines - 1);
+    let cursor_col = cursor_col.min(columns - 1);
+    let cursor_top = line_height * cursor_row as f32;
+    let cursor_bottom = cursor_top + line_height;
+    let below_space = (viewport_height - cursor_bottom - COMPLETION_PANEL_GAP).max(0.0);
+    let above_space = (cursor_top - COMPLETION_PANEL_GAP).max(0.0);
+    let rows_that_fit = |space: f32| {
+        ((space - COMPLETION_PANEL_PAD * 2.0).max(0.0) / COMPLETION_ROW_HEIGHT).floor() as usize
     };
+    let below = rows_that_fit(below_space);
+    let above = rows_that_fit(above_space);
+    let want = items.len().min(8);
+    let place_below = below >= want || below >= above;
+    let rows = want.min(if place_below { below } else { above });
     if rows == 0 {
         return None;
     }
 
+    let panel_height = COMPLETION_ROW_HEIGHT * rows as f32 + COMPLETION_PANEL_PAD * 2.0;
+    let panel_y = if place_below {
+        cursor_bottom + COMPLETION_PANEL_GAP
+    } else {
+        (cursor_top - COMPLETION_PANEL_GAP - panel_height).max(0.0)
+    };
+
+    // 光标处优先对齐列表内容；若 520px 面板越过右边界，整块向左滑，
+    // 而不是压缩图标/标签列，窄窗里只牺牲中间文字宽度。
+    let desired_panel_x = cell_width * cursor_col as f32 - COMPLETION_PANEL_PAD;
+    let max_panel_x = (viewport_width - panel_width).max(0.0);
+    let panel_x = desired_panel_x.clamp(0.0, max_panel_x);
+
     let selected = selected.filter(|index| *index < items.len());
     let offset = selected.filter(|index| *index >= rows).map(|index| index + 1 - rows).unwrap_or(0);
-    let visible = &items[offset..(offset + rows).min(items.len())];
-    let tag = |kind: crate::display::NebulaCompletionKind| -> &'static str {
-        match kind {
-            crate::display::NebulaCompletionKind::History => "历史",
-            crate::display::NebulaCompletionKind::Command => "命令",
-            crate::display::NebulaCompletionKind::Dir => "目录",
-            crate::display::NebulaCompletionKind::File => "文件",
-        }
-    };
-    let cells_of = |text: &str| -> usize { text.chars().map(|c| c.width().unwrap_or(0)).sum() };
-    let tag_width = visible.iter().map(|item| cells_of(tag(item.kind))).max().unwrap_or(0);
-    let label_width_max = visible.iter().map(|item| cells_of(&item.label)).max().unwrap_or(0);
-
-    let mut start_col = cursor_col.min(columns - 1);
-    let mut avail = columns - start_col;
-    let full_width = label_width_max + tag_width + 4;
-    if full_width > avail {
-        let slide = (full_width - avail).min(start_col);
-        start_col -= slide;
-        avail += slide;
-    }
-    let width = full_width.min(avail);
-    let label_width = width.saturating_sub(tag_width + 4);
-    // 这里的 4 是窄窗口裁切后“至少还能读”的标签宽度，不是候选本身的
-    // 最小长度。`cat` 这类没有更长邻居的短命令，其自然宽度只有 3；旧判
-    // 定会让引擎已生成的精确候选在布局阶段直接消失。只拒绝完全没有标签
-    // 空间的布局，短标签照常按自然宽度显示。
-    (label_width > 0).then_some(CompletionPopupLayout {
-        start_line,
-        start_col,
+    Some(CompletionPopupLayout {
+        content_x: px(panel_x + COMPLETION_PANEL_PAD),
+        content_y: px(panel_y + COMPLETION_PANEL_PAD),
+        content_width: px(content_width),
+        row_height: px(COMPLETION_ROW_HEIGHT),
         offset,
         rows,
-        width,
-        label_width,
-        tag_width,
+        label_width: label_width as usize,
         selected,
     })
 }
 
-/// 弹窗补全列表：下方优先、放不下上移、宽度不足先左滑再截 label；
-/// 面板底和行内容都对齐主题色，选中态使用柔和 accent 水洗。
+fn completion_icon_point(
+    origin: gpui::Point<Pixels>,
+    scale: f32,
+    x: f32,
+    y: f32,
+) -> gpui::Point<Pixels> {
+    point(origin.x + px(x * scale), origin.y + px(y * scale))
+}
+
+fn add_file_outline(path: &mut PathBuilder, origin: gpui::Point<Pixels>, scale: f32) {
+    let at = |x, y| completion_icon_point(origin, scale, x, y);
+    path.move_to(at(14.5, 2.0));
+    path.line_to(at(6.0, 2.0));
+    path.curve_to(at(4.0, 4.0), at(4.0, 2.0));
+    path.line_to(at(4.0, 20.0));
+    path.curve_to(at(6.0, 22.0), at(4.0, 22.0));
+    path.line_to(at(18.0, 22.0));
+    path.curve_to(at(20.0, 20.0), at(20.0, 22.0));
+    path.line_to(at(20.0, 7.5));
+    path.line_to(at(14.5, 2.0));
+    path.move_to(at(14.0, 2.0));
+    path.line_to(at(14.0, 8.0));
+    path.line_to(at(20.0, 8.0));
+}
+
+/// HTML 原型使用的 Lucide 线框被直接转换为 GPUI stroke path；不再用
+/// ↶、›、/、· 这些字符假装图标，字体变化也不会破坏列间距。
+fn paint_completion_icon(
+    window: &mut Window,
+    kind: CompletionVisualKind,
+    bounds: Bounds<Pixels>,
+    color: Hsla,
+) {
+    let scale = COMPLETION_ICON_SIZE / 24.0;
+    let origin = point(
+        bounds.origin.x + (bounds.size.width - px(COMPLETION_ICON_SIZE)) * 0.5,
+        bounds.origin.y + (bounds.size.height - px(COMPLETION_ICON_SIZE)) * 0.5,
+    );
+    let at = |x, y| completion_icon_point(origin, scale, x, y);
+    let mut path = PathBuilder::stroke(px(1.35));
+
+    match kind {
+        CompletionVisualKind::History => {
+            path.move_to(at(3.0, 12.0));
+            path.arc_to(
+                point(px(9.0 * scale), px(9.0 * scale)),
+                px(0.0),
+                true,
+                false,
+                at(6.0, 5.3),
+            );
+            path.line_to(at(3.0, 8.0));
+            path.move_to(at(3.0, 3.0));
+            path.line_to(at(3.0, 8.0));
+            path.line_to(at(8.0, 8.0));
+            path.move_to(at(12.0, 7.0));
+            path.line_to(at(12.0, 12.0));
+            path.line_to(at(15.0, 14.0));
+        },
+        CompletionVisualKind::Command => {
+            path.move_to(at(5.0, 4.0));
+            path.line_to(at(19.0, 4.0));
+            path.curve_to(at(21.0, 6.0), at(21.0, 4.0));
+            path.line_to(at(21.0, 18.0));
+            path.curve_to(at(19.0, 20.0), at(21.0, 20.0));
+            path.line_to(at(5.0, 20.0));
+            path.curve_to(at(3.0, 18.0), at(3.0, 20.0));
+            path.line_to(at(3.0, 6.0));
+            path.curve_to(at(5.0, 4.0), at(3.0, 4.0));
+            path.move_to(at(7.0, 9.0));
+            path.line_to(at(10.0, 12.0));
+            path.line_to(at(7.0, 15.0));
+            path.move_to(at(13.0, 15.0));
+            path.line_to(at(17.0, 15.0));
+        },
+        CompletionVisualKind::Directory => {
+            path.move_to(at(4.0, 3.0));
+            path.line_to(at(7.9, 3.0));
+            path.curve_to(at(9.6, 3.9), at(9.0, 3.0));
+            path.line_to(at(10.4, 5.1));
+            path.curve_to(at(12.1, 6.0), at(11.0, 6.0));
+            path.line_to(at(20.0, 6.0));
+            path.curve_to(at(22.0, 8.0), at(22.0, 6.0));
+            path.line_to(at(22.0, 18.0));
+            path.curve_to(at(20.0, 20.0), at(22.0, 20.0));
+            path.line_to(at(4.0, 20.0));
+            path.curve_to(at(2.0, 18.0), at(2.0, 20.0));
+            path.line_to(at(2.0, 5.0));
+            path.curve_to(at(4.0, 3.0), at(2.0, 3.0));
+        },
+        CompletionVisualKind::Rust => {
+            add_file_outline(&mut path, origin, scale);
+            path.move_to(at(10.0, 13.0));
+            path.line_to(at(8.0, 15.0));
+            path.line_to(at(10.0, 17.0));
+            path.move_to(at(14.0, 17.0));
+            path.line_to(at(16.0, 15.0));
+            path.line_to(at(14.0, 13.0));
+        },
+        CompletionVisualKind::Toml => {
+            add_file_outline(&mut path, origin, scale);
+            path.move_to(at(10.0, 13.0));
+            path.curve_to(at(9.0, 14.5), at(9.0, 13.0));
+            path.curve_to(at(7.0, 16.0), at(9.0, 16.0));
+            path.move_to(at(14.0, 13.0));
+            path.curve_to(at(15.0, 14.5), at(15.0, 13.0));
+            path.curve_to(at(17.0, 16.0), at(15.0, 16.0));
+        },
+        CompletionVisualKind::Markdown => {
+            add_file_outline(&mut path, origin, scale);
+            path.move_to(at(8.0, 13.0));
+            path.line_to(at(16.0, 13.0));
+            path.move_to(at(8.0, 17.0));
+            path.line_to(at(14.0, 17.0));
+        },
+        CompletionVisualKind::File => {
+            add_file_outline(&mut path, origin, scale);
+            path.move_to(at(8.0, 15.0));
+            path.line_to(at(16.0, 15.0));
+        },
+    }
+
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+
+/// 弹窗补全列表严格复用 HTML 原型的三列间距；底部空间容不下时整体翻到
+/// 光标上方。选中态没有箭头光标，只在行左侧画候选语义色的 2px 竖线。
 #[allow(clippy::too_many_arguments)]
 fn paint_completion_popup(
     window: &mut Window,
@@ -939,64 +1191,39 @@ fn paint_completion_popup(
     bounds: &Bounds<Pixels>,
     colors: &crate::gpui_shell::theme::CompletionColors,
     font: &gpui::Font,
-    bold_font: &gpui::Font,
     font_size: Pixels,
 ) {
-    let columns = layout.cols;
-    let screen_lines = layout.rows;
-    let Some(popup) =
-        completion_popup_layout(items, selected, cursor_row, cursor_col, screen_lines, columns)
-    else {
+    let Some(popup) = completion_popup_layout(
+        items,
+        selected,
+        cursor_row,
+        cursor_col,
+        layout.rows,
+        layout.cols,
+        layout.cell_width,
+        layout.line_height,
+    ) else {
         return;
     };
-    let tag = |kind: crate::display::NebulaCompletionKind| -> &'static str {
-        match kind {
-            crate::display::NebulaCompletionKind::History => "历史",
-            crate::display::NebulaCompletionKind::Command => "命令",
-            crate::display::NebulaCompletionKind::Dir => "目录",
-            crate::display::NebulaCompletionKind::File => "文件",
-        }
-    };
-    let icon = |kind: crate::display::NebulaCompletionKind| -> &'static str {
-        match kind {
-            crate::display::NebulaCompletionKind::History => "↶",
-            crate::display::NebulaCompletionKind::Command => "›",
-            crate::display::NebulaCompletionKind::Dir => "/",
-            crate::display::NebulaCompletionKind::File => "·",
-        }
-    };
     let visible = &items[popup.offset..(popup.offset + popup.rows).min(items.len())];
-
-    // 四周留出少量呼吸边，圆角和边框不会压到候选文字。
-    let panel_pad = px(4.0);
-    let panel_origin = point(
-        bounds.origin.x + layout.cell_width * popup.start_col as f32 - panel_pad,
-        bounds.origin.y + layout.line_height * popup.start_line as f32 - panel_pad,
-    );
-    let panel_bounds = Bounds::new(
-        panel_origin,
-        size(
-            layout.cell_width * popup.width as f32 + panel_pad * 2.0,
-            layout.line_height * popup.rows as f32 + panel_pad * 2.0,
-        ),
-    );
-    let panel_radius = px(8.0);
+    let panel_bounds = popup.panel_bounds(bounds.origin);
+    let panel_radius = px(6.0);
     window.paint_drop_shadows(
         panel_bounds,
         panel_radius.into(),
         &[
             gpui::BoxShadow {
                 color: colors.panel_shadow,
-                offset: point(px(0.0), px(8.0)),
-                blur_radius: px(30.0),
-                spread_radius: px(-2.0),
+                offset: point(px(0.0), px(20.0)),
+                blur_radius: px(45.0),
+                spread_radius: px(0.0),
                 inset: false,
             },
             gpui::BoxShadow {
-                color: colors.panel_shadow.opacity(0.72),
-                offset: point(px(0.0), px(3.0)),
-                blur_radius: px(10.0),
-                spread_radius: px(-1.0),
+                color: colors.panel_shadow.opacity(0.62),
+                offset: point(px(0.0), px(4.0)),
+                blur_radius: px(12.0),
+                spread_radius: px(0.0),
                 inset: false,
             },
         ],
@@ -1008,78 +1235,85 @@ fn paint_completion_popup(
     );
 
     for (row, item) in visible.iter().enumerate() {
-        let line = popup.start_line + row;
-        if line >= screen_lines {
-            break;
-        }
+        let row_bounds = popup.row_bounds(bounds.origin, row);
         let is_selected = Some(popup.offset + row) == popup.selected;
-        let (bg, label_fg, tag_fg) = if is_selected {
-            (colors.selected_bg, colors.selected_fg, colors.selected_fg)
-        } else {
-            (colors.row_bg, colors.row_fg, colors.tag_fg)
-        };
-        let origin = point(
-            bounds.origin.x + layout.cell_width * popup.start_col as f32,
-            bounds.origin.y + layout.line_height * line as f32,
-        );
-        let row_radius = if is_selected { px(6.0) } else { px(0.0) };
+        let visual_kind = completion_visual_kind(item);
+        let semantic = completion_kind_color(colors, visual_kind);
+        let row_radius = if is_selected { px(4.0) } else { px(0.0) };
         window.paint_quad(
-            fill(
-                Bounds::new(
-                    origin,
-                    size(layout.cell_width * popup.width as f32, layout.line_height),
-                ),
-                bg,
-            )
-            .corner_radii(row_radius),
+            fill(row_bounds, if is_selected { colors.selected_bg } else { colors.row_bg })
+                .corner_radii(row_radius),
         );
-        grid_text(
+        if is_selected {
+            window.paint_quad(fill(
+                Bounds::new(row_bounds.origin, size(px(2.0), row_bounds.size.height)),
+                semantic,
+            ));
+        }
+
+        let icon_slot = Bounds::new(
+            point(row_bounds.origin.x + px(COMPLETION_ROW_LEFT_PAD), row_bounds.origin.y),
+            size(px(COMPLETION_ICON_WIDTH), row_bounds.size.height),
+        );
+        paint_completion_icon(window, visual_kind, icon_slot, semantic);
+
+        let label_origin = point(
+            row_bounds.origin.x
+                + px(COMPLETION_ROW_LEFT_PAD + COMPLETION_ICON_WIDTH + COMPLETION_COLUMN_GAP),
+            row_bounds.origin.y,
+        );
+        let (matched, remainder) = completion_label_parts(item);
+        let used = grid_text(
             window,
             cx,
-            icon(item.kind),
+            matched,
             font,
             font_size,
-            tag_fg,
-            origin,
+            colors.match_fg,
+            label_origin,
             layout.cell_width,
-            layout.line_height,
-            1,
-        );
-        grid_text(
-            window,
-            cx,
-            &item.label,
-            if is_selected { bold_font } else { font },
-            font_size,
-            label_fg,
-            point(origin.x + layout.cell_width, origin.y),
-            layout.cell_width,
-            layout.line_height,
+            popup.row_height,
             popup.label_width,
         );
-        let tag_start = popup.width.saturating_sub(1 + popup.tag_width);
         grid_text(
             window,
             cx,
-            tag(item.kind),
+            remainder,
             font,
             font_size,
-            tag_fg,
-            point(origin.x + layout.cell_width * tag_start as f32, origin.y),
+            if is_selected { colors.selected_fg } else { colors.row_fg },
+            point(label_origin.x + layout.cell_width * used, label_origin.y),
             layout.cell_width,
-            layout.line_height,
-            popup.tag_width,
+            popup.row_height,
+            popup.label_width.saturating_sub(used),
+        );
+
+        let tag = completion_tag(visual_kind);
+        let tag_font_size = font_size * 0.75;
+        let tag_cell_width = layout.cell_width * 0.75;
+        let tag_cells = completion_cells(tag);
+        let tag_right = row_bounds.origin.x + row_bounds.size.width - px(COMPLETION_ROW_RIGHT_PAD);
+        let tag_origin = point(tag_right - tag_cell_width * tag_cells, row_bounds.origin.y);
+        grid_text(
+            window,
+            cx,
+            tag,
+            font,
+            tag_font_size,
+            semantic,
+            tag_origin,
+            tag_cell_width,
+            popup.row_height,
+            tag_cells,
         );
     }
 
     if items.len() > popup.rows {
-        // 滚动条覆在面板右侧 4px 呼吸边内，不占终端字符列，也不遮住 tag。
-        // 拇指跟随可见窗口的 offset；Tab、hover、滚轮三条路径共享同一个
-        // 可视位置，不会出现键盘已翻页而滚动条仍停在顶部。
-        let track_h = layout.line_height * popup.rows as f32 - px(4.0);
-        let track_top = bounds.origin.y + layout.line_height * popup.start_line as f32 + px(2.0);
-        let content_right =
-            bounds.origin.x + layout.cell_width * (popup.start_col + popup.width) as f32;
+        // 滚动条覆在面板右侧 4px 呼吸边内，不侵入固定 46px 标签列。
+        let content = popup.content_bounds(bounds.origin);
+        let track_h = content.size.height - px(4.0);
+        let track_top = content.origin.y + px(2.0);
+        let content_right = content.origin.x + content.size.width;
         let track_bounds =
             Bounds::new(point(content_right + px(1.0), track_top), size(px(2.0), track_h));
         window.paint_quad(fill(track_bounds, colors.scroll_track).corner_radii(px(1.0)));
@@ -1162,10 +1396,11 @@ mod tests {
             kind: NebulaCompletionKind::Command,
         }];
 
-        let popup = completion_popup_layout(&items, Some(0), 2, 7, 24, 80)
-            .expect("短命令的精确候选也必须形成可见面板");
+        let popup =
+            completion_popup_layout(&items, Some(0), 2, 7, 24, 80, gpui::px(8.0), gpui::px(21.0))
+                .expect("短命令的精确候选也必须形成可见面板");
         assert_eq!(popup.rows, 1);
-        assert_eq!(popup.label_width, 3);
+        assert!(popup.label_width >= 3);
     }
 
     #[test]
@@ -1177,8 +1412,34 @@ mod tests {
         }];
 
         let popup =
-            completion_popup_layout(&items, None, 2, 7, 24, 80).expect("空选中态仍应显示候选面板");
+            completion_popup_layout(&items, None, 2, 7, 24, 80, gpui::px(8.0), gpui::px(21.0))
+                .expect("空选中态仍应显示候选面板");
         assert_eq!(popup.selected, None);
         assert_eq!(popup.offset, 0);
+    }
+
+    #[test]
+    fn popup_flips_above_the_cursor_near_the_bottom_edge() {
+        let items = [NebulaCompletionItem {
+            label: "completion.rs".to_owned(),
+            insert: "ompletion.rs".to_owned(),
+            kind: NebulaCompletionKind::File,
+        }];
+
+        let line_height = gpui::px(21.0);
+        let cursor_row = 22;
+        let popup = completion_popup_layout(
+            &items,
+            None,
+            cursor_row,
+            7,
+            24,
+            80,
+            gpui::px(8.0),
+            line_height,
+        )
+        .expect("底部空间不足时仍应在光标上方显示候选");
+        let cursor_top = line_height * cursor_row;
+        assert!(popup.content_y + popup.row_height < cursor_top);
     }
 }

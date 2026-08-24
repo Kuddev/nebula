@@ -1978,15 +1978,14 @@ impl TerminalView {
             cursor_col,
             self.rows,
             self.cols,
+            self.cell_width,
+            self.line_height,
         )?;
-        let left = self.origin.x + self.cell_width * popup.start_col as f32;
-        let top = self.origin.y + self.line_height * popup.start_line as f32;
-        let right = left + self.cell_width * popup.width as f32;
-        let bottom = top + self.line_height * popup.rows as f32;
-        if position.x < left || position.x >= right || position.y < top || position.y >= bottom {
+        let content = popup.content_bounds(self.origin);
+        if !content.contains(&position) {
             return None;
         }
-        let row = ((position.y - top).as_f32() / self.line_height.as_f32().max(1.0)) as usize;
+        let row = ((position.y - content.origin.y).as_f32() / popup.row_height.as_f32()) as usize;
         let index = popup.offset + row;
         (index < self.suggest.completion_items.len()).then_some(index)
     }
@@ -2004,17 +2003,18 @@ impl TerminalView {
             cursor_col,
             self.rows,
             self.cols,
+            self.cell_width,
+            self.line_height,
         )?;
         let len = self.suggest.completion_items.len();
         if len <= popup.rows {
             return None;
         }
-        let content_right =
-            self.origin.x + self.cell_width * (popup.start_col + popup.width) as f32;
-        let top = self.origin.y + self.line_height * popup.start_line as f32;
-        let height = self.line_height * popup.rows as f32;
-        if position.x < content_right
-            || position.x >= content_right + px(5.0)
+        let content = popup.content_bounds(self.origin);
+        let top = content.origin.y;
+        let height = content.size.height;
+        if position.x < content.right()
+            || position.x >= content.right() + px(5.0)
             || position.y < top
             || position.y >= top + height
         {
