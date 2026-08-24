@@ -82,9 +82,10 @@ gpui-component-assets = "=0.5.1"
   `eb8e1c8b5502b7007465fbbc465f4a736fa39210`. The commit is byte-identical to
   the official `zed-industries/zed` `v1.16.1` tag.
 - `gpui-component` and its assets come from `Kuddev/gpui-component` commit
-  `4eb3917678930561c7ea36742f432313cd30b275`. This baseline contains the
-  upstream snapshot, the Zed revision pin, and the unified `Kuddev/zed` source;
-  it intentionally excludes Nebula product patches.
+  `c20dbef8ed0d4c0fbebbf2e8f02d39e4fa0ac0a7` on
+  `nebula-v1.16.1-math`. It extends the owned baseline with the app-owned math
+  bridge, GFM reader semantics, and the compact popover-shadow helper. Math
+  fitting, caching, rasterization, and product rendering remain in Nebula.
 - The `nebula-v1.16.1-owned-base` branch and tag in both Kuddev forks are audit
   and recovery anchors. Cargo dependencies always use the full commit SHA,
   never those movable names. Earlier `nebula-v1.16.1-base` refs remain intact
@@ -156,8 +157,10 @@ The boundary rule stays symmetric: no `nebula_terminal` type escapes
 
 `nebula_app/src/gpui_shell/workspace.rs` is the product shell: a custom
 `TitleBar`, sidebar and center content surface owning terminal and settings
-tabs. The workspace owns tab semantics only (title, close, focus forwarding
-and lifecycle); terminal behavior stays in `TerminalView`.
+tabs. `WorkspaceTab::Terminal` is the authoritative split owner; it holds the
+pane entities, `nebula_split::SplitTree`, focused pane, zoom state, and
+broadcast state. Terminal behavior stays in each `TerminalView`, while
+`nebula_split` remains a pure-data layout and navigation crate.
 
 Lifecycle rules proven by manual acceptance:
 
@@ -167,9 +170,15 @@ Lifecycle rules proven by manual acceptance:
   workspace tab-removal path.
 - Session teardown: explicit shutdown remains the primary path and
   `TerminalView::drop` is the backstop.
-- The current center layout intentionally has no split owner. Before consuming
-  `nebula-split`, define pane/tab ownership and prove that removing one pane
-  cannot leak or prematurely shut down another pane's PTY.
+- Pane close first removes the leaf from the split tree. `WasRoot` closes the
+  whole tab; `Collapsed` removes and shuts down only that pane, then transfers
+  focus to the surviving leaf.
+- Detaching a pane into a new tab moves the existing pane entity and PTY. It
+  must not call the close path or recreate the terminal, so scrollback and
+  process lifetime remain intact.
+- Divider movement updates only `preview_ratio`; mouse release commits the
+  final ratio. A drag-close target is valid only when the compressed child is
+  a single leaf, never an entire nested subtree.
 
 App-level hotkeys must be let through by the terminal key handler
 (`view.rs` passes `ctrl-shift-t/w` up instead of encoding them as C0 bytes).
