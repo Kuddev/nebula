@@ -32,6 +32,8 @@ const SSH_DELETE_UNDO_SECS: u64 = 8;
 
 /// 对齐旧壳 `display/ssh_editor_render.rs` 的 `editor_layout` 几何。
 const SSH_EDITOR_W: f32 = 440.0;
+/// 默认密码表单约 490px；多留一档呼吸，超出窗口时由 max-height 收缩正文。
+const SSH_EDITOR_H: f32 = 520.0;
 const SSH_EDITOR_HEAD_H: f32 = 48.0;
 const SSH_EDITOR_LABEL_W: f32 = 84.0;
 const SSH_EDITOR_FIELD_GAP: f32 = 6.0;
@@ -694,6 +696,7 @@ impl SettingsPane {
                         .child(
                             v_flex()
                                 .w(px(SSH_EDITOR_W))
+                                .h(px(SSH_EDITOR_H))
                                 .max_w(gpui::relative(1.0))
                                 .max_h(gpui::relative(1.0))
                                 .flex_none()
@@ -723,11 +726,10 @@ impl SettingsPane {
                                         ),
                                 )
                                 .child(
-                                    // 面板只有最大高度、没有固定高度，正文必须用固有
-                                    // 高度参与父级测量；设 flex_1 会以零基准求剩余空间，
-                                    // 让标题栏和底栏把正文压成 0。min_h_0 仍允许内容
-                                    // 超高时收缩，并只在正文区域滚动。
+                                    // 面板有明确高度后，正文才能可靠拿到标题栏与底栏
+                                    // 之外的剩余空间；小窗口和长密钥列表只滚动这里。
                                     v_flex()
+                                        .flex_1()
                                         .min_h_0()
                                         .overflow_y_scrollbar()
                                         .px(px(SSH_EDITOR_SPACE_M))
@@ -1182,7 +1184,16 @@ impl SettingsPane {
         let query = self.ssh_icon_filter_input.read(cx).value().to_string();
         // 目录、分组标题与搜索匹配全部走共享的 `picker_rows`：两壳的选择器
         // 因此永远列出同一批图标、按同一种方式分组、对同一个词命中。
-        let rows: Vec<gpui::AnyElement> = picker_rows(&query, true)
+        let picker_model = picker_rows(&query, true);
+        let picker_content_h = picker_model
+            .iter()
+            .map(|row| match row {
+                PickerRow::Group(_) => 24.0,
+                PickerRow::Option(_) => 30.0,
+            })
+            .sum::<f32>()
+            + picker_model.len().saturating_sub(1) as f32;
+        let rows: Vec<gpui::AnyElement> = picker_model
             .into_iter()
             .enumerate()
             .map(|(ix, row)| match row {
@@ -1268,10 +1279,10 @@ impl SettingsPane {
                     .child("没有匹配的图标")
                     .into_any_element()
             } else {
-                // gap 与行宽都要落在滚动区内层：`overflow_y_scrollbar` 会把
-                // 外层样式搬到它自建的容器上（详注见 settings_pane.rs）。
+                // 滚动组件必须拿到确定高度；只设 max-height 时，它在自动高度
+                // 弹层中会按内容测量，滚动视口和滚动条都无法建立。
                 v_flex()
-                    .max_h(px(260.0))
+                    .h(px(picker_content_h.min(260.0)))
                     .overflow_y_scrollbar()
                     .child(v_flex().w_full().gap(px(1.0)).children(rows))
                     .into_any_element()
