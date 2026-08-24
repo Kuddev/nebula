@@ -52,7 +52,7 @@ pub(crate) fn show_update_notification(
     crate::gpui_shell::toast::push_notification(window, cx, notification);
 }
 
-/// TTY7 式延迟决策：关闭/Esc 与“3 天后提醒”同义；跳过只绑定当前版本，
+/// 延迟决策策略：关闭/Esc 与“3 天后提醒”同义；跳过只绑定当前版本，
 /// 手动检查仍可强制打开本弹窗查看详情。
 pub(crate) fn open_update_dialog(
     result: crate::update_check::UpdateCheckResult,

@@ -11,8 +11,10 @@
 # UTF-8 script as ANSI (GBK here), which corrupts non-ASCII bytes and breaks
 # the parser.
 param(
-    [double]$Opacity = 0.75,
+    [double]$Opacity = 0.82,
     [switch]$NoBlur,
+    [ValidateSet('none', 'mica', 'mica-alt', 'aero', 'acrylic')]
+    [string]$BlurMode = 'mica',
     [string]$Build = 'D:\temp_build\nebula\dist\run-mica'
 )
 
@@ -22,13 +24,15 @@ New-Item -ItemType Directory -Force -Path "$root\appdata\Nebula", "$root\home" |
 
 # Written as ASCII on purpose: PS 5.1's -Encoding UTF8 emits a BOM, and the BOM
 # would glue itself to the first key so the parser never matches it.
+$effectiveBlurMode = if ($NoBlur) { 'none' } else { $BlurMode }
 $settings = @(
     "opacity=$([math]::Round($Opacity, 2))",
+    "blur=$effectiveBlurMode",
     'keep_session=false'
 ) -join [Environment]::NewLine
 Set-Content -Path "$root\appdata\Nebula\nebula_settings.txt" -Value $settings -Encoding ascii
 
-$blur = if ($NoBlur) { 'false' } else { 'true' }
+$blur = if ($effectiveBlurMode -eq 'none') { 'false' } else { 'true' }
 $toml = @(
     '[window]',
     "blur = $blur"
@@ -39,8 +43,10 @@ $env:APPDATA = "$root\appdata"
 $env:USERPROFILE = "$root\home"
 $env:XDG_CONFIG_HOME = "$root\appdata"
 
-# --working-directory is what bypasses the single-instance mux forwarding.
+# An explicit command bypasses single-instance handoff, so a stale isolated
+# runtime.port can never turn this visual probe into a headless resident.
 $proc = Start-Process -FilePath "$Build\nebula.exe" `
-    -ArgumentList '--working-directory', 'D:\temp_build\nebula' -PassThru
+    -ArgumentList '--working-directory', 'D:\temp_build\nebula', '-e', 'powershell.exe', '-NoLogo' `
+    -PassThru
 Start-Sleep -Seconds 7
-"pid=$($proc.Id) exited=$($proc.HasExited) responding=$($proc.Responding) opacity=$Opacity blur=$blur"
+"pid=$($proc.Id) exited=$($proc.HasExited) responding=$($proc.Responding) opacity=$Opacity blur=$effectiveBlurMode"

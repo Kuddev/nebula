@@ -1152,17 +1152,17 @@ fn parse_bool(value: &str, default: bool) -> bool {
     }
 }
 
-/// `blur` 键与 GPUI 壳共用，但那边是四档枚举（`nebula_settings::BlurModeName`：
-/// none / aero / mica / acrylic），这边只有开关。
+/// `blur` 键与 GPUI 壳共用，但那边是五档枚举（`nebula_settings::BlurModeName`：
+/// none / mica / mica-alt / aero / acrylic），这边只有开关。
 ///
 /// 不能直接套 [`parse_bool`]：它对认不出的值回落到 `default`，而这里的
 /// default 是 `true`——于是 GPUI 写下的 `blur=none` 会被旧壳读成"开"，用户
-/// 关掉的模糊一开旧壳就自己回来了。这里显式认四个枚举名，档位信息丢掉但
+/// 关掉的模糊一开旧壳就自己回来了。这里显式认五个枚举名，档位信息丢掉但
 /// 开关语义保住。
 fn parse_blur_enabled(value: &str) -> bool {
     match value.trim().to_ascii_lowercase().as_str() {
         "none" => false,
-        "aero" | "mica" | "acrylic" => true,
+        "aero" | "mica" | "mica-alt" | "acrylic" => true,
         other => parse_bool(other, true),
     }
 }

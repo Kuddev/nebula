@@ -676,13 +676,14 @@ impl BellModeName {
     }
 }
 
-/// 窗口背景模糊材质：关 / Mica（平衡）/ Acrylic（高质量）。
+/// 窗口背景模糊材质：关 / Mica 系列 / Aero / Acrylic。
 ///
-/// 三档对应三套完全不同的 DWM 成本模型，落点在
+/// 五档对应不同的 DWM 成本模型，落点在
 /// `gpui_shell::wallpaper::apply_windows_accent_policy`：
-/// - `None`：AccentPolicy 全零 + `DWMSBT_NONE`，DWM 只贴一张不透明纹理。
-/// - `Mica`：`DWMSBT_MAINWINDOW`。系统合成器提供壁纸 backdrop、模糊和色调，
+/// - `None`：AccentPolicy 全零 + `DWMSBT_NONE`，透明交换链直接按内容 alpha 合成。
+/// - `Mica` / `MicaAlt`：系统合成器提供壁纸 backdrop、模糊和色调，
 ///   Nebula 不读取壁纸文件，也不在客户区仿画材质；不逐帧采样其他窗口。
+/// - `Aero`：实时 BlurBehind + 半透明深色玻璃色调。
 /// - `Acrylic`：`ACCENT_ENABLE_ACRYLICBLURBEHIND`。DWM 对窗口后方**实时
 ///   内容**逐帧高斯模糊 + 噪点 + 饱和度。观感最好，也是唯一能透出后方其他
 ///   窗口的档位；2026-08-22 实测这一档把 dwm.exe 顶到 28% 均值。
@@ -693,17 +694,19 @@ impl BellModeName {
 /// `dwm.exe` 28.3%，关掉模糊后卡顿立刻好转。默认档必须是性能安全的那个，
 /// 想要实时透视的用户显式选高质量。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-/// 窗口背景材质。**按 DWM 每帧成本递增排列**，不是质量递进——四者是四套成本
+/// 窗口背景材质。**按 DWM 每帧成本递增排列**，不是质量递进——五者是五套成本
 /// 模型，不存在"越靠后越好"：
 ///
 /// - `None`：无材质。窗口按不透明度直接透出后方内容，不模糊。
 /// - `Mica`：Windows 系统壁纸 backdrop；由 DWM 合成，不含后方其他窗口。
+/// - `MicaAlt`：Mica 的更强色调变体，适合带标签栏的窗口。
 /// - `Aero`：实时模糊窗口**后方的真实内容**，并叠加 Win32 深色玻璃色调。
 /// - `Acrylic`：实时模糊 + tint/噪点/饱和度，最贵。
 pub enum BlurModeName {
     None,
     #[default]
     Mica,
+    MicaAlt,
     Aero,
     Acrylic,
 }
@@ -713,6 +716,7 @@ impl BlurModeName {
         match value.trim().to_ascii_lowercase().as_str() {
             "none" | "off" | "0" | "false" | "no" => Some(Self::None),
             "mica" => Some(Self::Mica),
+            "mica-alt" => Some(Self::MicaAlt),
             "aero" | "blurbehind" => Some(Self::Aero),
             "acrylic" => Some(Self::Acrylic),
             // 旧壳的布尔开关：`blur=1` 只表达"我要模糊"，并不表达要哪种材质。
@@ -727,6 +731,7 @@ impl BlurModeName {
         match self {
             Self::None => "none",
             Self::Mica => "mica",
+            Self::MicaAlt => "mica-alt",
             Self::Aero => "aero",
             Self::Acrylic => "acrylic",
         }
@@ -859,6 +864,8 @@ pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+`";
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 230.0;
 pub const MIN_SIDEBAR_WIDTH: f32 = 170.0;
 pub const MAX_SIDEBAR_WIDTH: f32 = 420.0;
+/// 系统材质启用且用户未明确设置透明度时，让基础层适度透出。
+const SYSTEM_MATERIAL_OPACITY: f32 = 0.82;
 
 impl RuntimeSettings {
     pub fn load() -> Self {
@@ -866,6 +873,23 @@ impl RuntimeSettings {
     }
 
     pub fn from_raw(raw: &RawSettings) -> Self {
+        let raw_blur = raw.value("blur");
+        let blur = raw_blur.and_then(BlurModeName::from_settings).unwrap_or_default();
+        let configured_opacity = raw.f32("opacity").map(|opacity| opacity.clamp(0.0, 1.0));
+        // 旧壳会把缺省值完整写成 `blur=1` + `opacity=1.00`。那不是用户主动
+        // 选择的实色覆盖，却会把迁移后的 Mica 完全盖住；只迁移这组旧记号，
+        // 新枚举值下显式设置的 1.00 仍保持全不透明。
+        let legacy_material_default = raw_blur.is_some_and(|value| {
+            matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+        }) && configured_opacity == Some(1.0);
+        let material_default = matches!(blur, BlurModeName::Mica | BlurModeName::MicaAlt)
+            && (configured_opacity.is_none() || legacy_material_default);
+        let opacity = if material_default {
+            SYSTEM_MATERIAL_OPACITY
+        } else {
+            configured_opacity.unwrap_or(1.0)
+        };
+
         Self {
             language: raw
                 .value("language")
@@ -919,8 +943,8 @@ impl RuntimeSettings {
             restore_session: raw.bool_on("restore_session").unwrap_or(true),
             resume_ai: raw.bool_on("resume_ai").unwrap_or(true),
             tray: raw.bool_on("tray").unwrap_or(true),
-            blur: raw.value("blur").and_then(BlurModeName::from_settings).unwrap_or_default(),
-            opacity: raw.f32("opacity").map(|o| o.clamp(0.0, 1.0)).unwrap_or(1.0),
+            blur,
+            opacity,
             background: raw.value("background").and_then(parse_hex_rgb),
             background_image: raw
                 .value("background_image")
@@ -1079,7 +1103,7 @@ mod tests {
         assert!(settings.resume_ai);
         assert!(settings.tray);
         assert_eq!(settings.blur, BlurModeName::Mica);
-        assert!((settings.opacity - 1.0).abs() < 1e-6);
+        assert!((settings.opacity - SYSTEM_MATERIAL_OPACITY).abs() < 1e-6);
         assert_eq!(settings.background, None);
         assert!(!settings.panel_resize);
         assert_eq!(settings.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
@@ -1103,10 +1127,11 @@ mod tests {
     }
 
     #[test]
-    fn blur_mode_parses_four_tiers_and_migrates_legacy_bool() {
+    fn blur_mode_parses_mica_alt_and_migrates_legacy_bool() {
         assert_eq!(BlurModeName::from_settings("none"), Some(BlurModeName::None));
         assert_eq!(BlurModeName::from_settings("off"), Some(BlurModeName::None));
         assert_eq!(BlurModeName::from_settings("mica"), Some(BlurModeName::Mica));
+        assert_eq!(BlurModeName::from_settings("mica-alt"), Some(BlurModeName::MicaAlt));
         assert_eq!(BlurModeName::from_settings("aero"), Some(BlurModeName::Aero));
         // 未公开 API 的名字（`ACCENT_ENABLE_BLURBEHIND`）也认，手改配置的人
         // 可能照着实现名写。
@@ -1122,6 +1147,16 @@ mod tests {
         assert_eq!(BlurModeName::from_settings("false"), Some(BlurModeName::None));
         assert_eq!(BlurModeName::from_settings("1"), Some(BlurModeName::Mica));
         assert_eq!(BlurModeName::from_settings("true"), Some(BlurModeName::Mica));
+        assert!(
+            (RuntimeSettings::from_raw(&RawSettings::from_text("blur=1\nopacity=1.00\n")).opacity
+                - SYSTEM_MATERIAL_OPACITY)
+                .abs()
+                < 1e-6
+        );
+        assert_eq!(
+            RuntimeSettings::from_raw(&RawSettings::from_text("blur=mica\nopacity=1.00\n")).opacity,
+            1.0
+        );
 
         // 认不出的值回落到缺省档，而不是把窗口留在无模糊状态。
         assert_eq!(
@@ -1135,14 +1170,19 @@ mod tests {
 
         // settings_value 与 from_settings 必须互为逆运算，否则设置页存盘后
         // 重开会掉档。
-        for mode in
-            [BlurModeName::None, BlurModeName::Mica, BlurModeName::Aero, BlurModeName::Acrylic]
-        {
+        for mode in [
+            BlurModeName::None,
+            BlurModeName::Mica,
+            BlurModeName::MicaAlt,
+            BlurModeName::Aero,
+            BlurModeName::Acrylic,
+        ] {
             assert_eq!(BlurModeName::from_settings(mode.settings_value()), Some(mode));
         }
 
         assert!(!BlurModeName::None.enabled());
         assert!(BlurModeName::Mica.enabled());
+        assert!(BlurModeName::MicaAlt.enabled());
         assert!(BlurModeName::Aero.enabled());
         assert!(BlurModeName::Acrylic.enabled());
     }

@@ -191,6 +191,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
+    # RtlGetVersion：系统 backdrop 只从 Windows 11 build 22621 起可用，
+    # 不能依赖会受兼容清单影响的旧版本查询 API。
+    "Wdk_System_SystemServices",
     "Win32_System_Registry",
     "Win32_System_Console",
     # Named pipe server for nebula-hook (AI-CLI turn events). IO/Security

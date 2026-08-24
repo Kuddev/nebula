@@ -613,13 +613,13 @@ impl SettingsPane {
             window,
             cx,
         );
-        // 四档按 DWM 每帧成本排列，不是质量递进；用户按性能预算选择。
+        // 五档按 DWM 每帧成本排列，不是质量递进；用户按性能预算选择。
         // Aero 是实时玻璃，Acrylic 是实时材质模糊；两者都会采样窗口后方真实内容。
-        // Mica 使用系统壁纸 backdrop，不由 Nebula 读取或重采样。
+        // Mica / Mica Alt 使用系统壁纸 backdrop，不由 Nebula 读取或重采样。
         add_select(
             "blur",
-            &["无", "Mica（低开销）", "Aero（玻璃）", "Acrylic（高开销）"],
-            &["none", "mica", "aero", "acrylic"],
+            &["无", "Mica（低开销）", "Mica Alt（低开销）", "Aero（玻璃）", "Acrylic（高开销）"],
+            &["none", "mica", "mica-alt", "aero", "acrylic"],
             runtime.blur.settings_value(),
             window,
             cx,
@@ -2248,7 +2248,7 @@ impl SettingsPane {
                 opacity,
                 cx,
             ))
-            .child(self.select_row("blur", "背景模糊", "四者是四套成本模型，不是越靠后越好：Mica 只取系统壁纸的色调、最省；Aero 与 Acrylic 每帧实时模糊窗口后方的真实内容，Acrylic 还多一层着色与噪点。", cx));
+            .child(self.select_row("blur", "背景模糊", "五者是五套成本模型，不是越靠后越好：Mica 只取系统壁纸的色调、最省；Aero 与 Acrylic 每帧实时模糊窗口后方的真实内容，Acrylic 还多一层着色与噪点。", cx));
         let terminal = self
             .group("终端外观", cx)
             .child(self.stepper_row(
