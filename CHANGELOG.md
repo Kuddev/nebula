@@ -14,6 +14,52 @@ No unreleased changes yet.
 
 暂无未发布改动。
 
+## 1.3.0 - 2026-08-24
+
+### English
+
+#### Added
+- **Paged title-bar tabs and pane headers** — overflowing top tabs expose previous/next controls with edge auto-scroll, while split panes receive their own draggable headers and can be detached back into tabs.
+- **Per-tab broadcast input** — one action can send text and control keys to every pane in the active tab, re-encoding the input for each pane's terminal mode.
+- **A semantic completion popup** — history, commands, directories, Rust, TOML, Markdown, and other files use distinct vector icons, source tags, and colors; the popup flips above the cursor near the bottom edge and shares one pixel geometry for painting, clicking, hovering, and scrolling.
+
+#### Fixed
+- **Finished AI commands no longer remain stuck in the running state** — process-tree evidence now disproves stale shell state after Codex or Claude has returned to an idle prompt. Addresses [#42](https://github.com/Kuddev/nebula/issues/42) and [#54](https://github.com/Kuddev/nebula/issues/54).
+- **Windows task switching uses the Nebula icon** — GPUI windows now set both native icon sizes, fixing the default white placeholder in taskbar previews and Alt+Tab. Addresses [#51](https://github.com/Kuddev/nebula/issues/51).
+- **The SSH host editor renders and scrolls its complete form** — the modal now has a measured responsive viewport, and its icon picker restores a bounded scrollbar without leaving empty space for short filtered lists.
+- **Native backdrop transparency stays synchronized** with wallpaper, terminal opacity, update dialogs, and the Windows material state.
+- **Settings selectors and font profiles refresh after changes**, including imported/private font installation and the SSH/sidebar/top-tab surfaces that consume those settings.
+- **WSL launches preserve the guest account's default shell**, and WSL file-tree paths map correctly between guest and UNC forms.
+- **AI completion notifications expire after 90 seconds** instead of accumulating indefinitely.
+
+#### Improved
+- **The product shell now targets GPUI v1.16.1** while retaining Nebula's resize, split-tree, mathematical layout, and PTY ownership contracts.
+- **Settings was rebuilt around a consistent two-column layout** with fixed control alignment, clearer descriptions, non-default markers, a copyable About view, and dedicated font and keymap pages.
+- **Nebula theme tokens now drive current component states** for buttons, sliders, switches, window chrome, transparency, and drag-time fast paths.
+- **Native Windows backdrop materials and split-pane chrome are integrated directly** instead of relying on a parallel legacy backdrop path.
+
+### 简体中文
+
+#### 新增
+- **可分页的标题栏标签与 pane 标题栏** — 顶部标签溢出后显示前后翻页控件并支持边缘自动滚动；分屏 pane 拥有独立的可拖动标题栏，也可以重新拖出为标签。
+- **按标签广播输入** — 一次操作可把文字与控制键发送到当前标签的全部 pane，并按每个 pane 自己的终端模式重新编码。
+- **语义化补齐弹窗** — 历史、命令、目录、Rust、TOML、Markdown 与普通文件使用各自的矢量图标、来源标签和颜色；光标靠近窗口底部时弹窗向上翻转，绘制、点击、悬停与滚动共用同一份像素几何。
+
+#### 修复
+- **AI 命令结束后不再错误保持“运行中”** — Codex 或 Claude 回到空闲提示符后，进程树证据会推翻过期的 shell 状态。对应 [#42](https://github.com/Kuddev/nebula/issues/42) 与 [#54](https://github.com/Kuddev/nebula/issues/54)。
+- **Windows 任务切换显示 Nebula 图标** — GPUI 窗口现在设置两种原生图标尺寸，修复任务栏悬停预览与 Alt+Tab 中的默认白框占位图。对应 [#51](https://github.com/Kuddev/nebula/issues/51)。
+- **SSH 主机编辑器完整显示并可滚动** — 弹窗使用经过测量的响应式视口；图标选择器恢复有界滚动条，过滤结果较少时也不会留下多余空白。
+- **原生背景材质透明度保持同步**，覆盖壁纸、终端不透明度、更新弹窗与 Windows material 状态。
+- **设置选择器与字体 profile 会在修改后刷新**，包括导入/私有字体安装，以及消费这些设置的 SSH、侧栏与顶部标签界面。
+- **WSL 启动保留来宾账号的默认 shell**，文件树路径也能在来宾路径与 UNC 形式之间正确映射。
+- **AI 完成通知会在 90 秒后自动消失**，不再无限堆积。
+
+#### 改进
+- **产品壳升级到 GPUI v1.16.1**，同时保留 Nebula 自有的 resize、split-tree、数学布局与 PTY 所属关系。
+- **设置页重建为一致的两列布局**，统一控件对齐、说明文字和非默认值标记，并提供可复制的 About 页面及独立的字体、按键映射页面。
+- **Nebula 主题 token 驱动当前组件状态**，覆盖按钮、滑块、开关、窗口 chrome、透明度与拖动快速路径。
+- **原生 Windows 背景材质与分屏边框直接整合**，不再维护一条平行的旧 backdrop 路径。
+
 ## 1.2.0 - 2026-08-21
 
 ### English
