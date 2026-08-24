@@ -190,11 +190,11 @@ impl Render for ComponentGallery {
                                             .outline()
                                             .label("打开 Dialog")
                                             .on_click(cx.listener(|_, _, window, cx| {
-                                                window.open_dialog(cx, |dialog, _, _| {
-                                                dialog.title("Nebula 组件 Dialog").alert().child(
-                                                    "Dialog、焦点和 Esc 关闭行为由组件库提供。",
-                                                )
-                                            });
+                                                window.open_alert_dialog(cx, |dialog, _, _| {
+                                                    dialog.title("Nebula 组件 Dialog").child(
+                                                        "Dialog、焦点和 Esc 关闭行为由组件库提供。",
+                                                    )
+                                                });
                                             })),
                                     ),
                             )
@@ -214,7 +214,7 @@ impl Render for ComponentGallery {
                                 h_flex()
                                     .h(px(190.0))
                                     .gap_3()
-                                    .child(Sidebar::left().w(px(180.0)).child(
+                                    .child(Sidebar::new("gallery-sidebar").w(px(180.0)).child(
                                         SidebarGroup::new("Nebula").child(
                                             SidebarMenu::new().children([
                                                 SidebarMenuItem::new("会话"),

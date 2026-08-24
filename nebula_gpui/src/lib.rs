@@ -12,7 +12,7 @@ use gpui_component_assets::Assets;
 
 /// 在当前线程启动 GPUI 运行时并打开组件验收窗口，阻塞直至 UI 退出。
 pub fn run_shell() {
-    gpui::Application::new().with_assets(Assets).run(|cx| {
+    gpui_platform::application().with_assets(Assets).run(|cx| {
         ui::bootstrap::init(cx);
         cx.activate(true);
         app::open_gallery_window(cx);
