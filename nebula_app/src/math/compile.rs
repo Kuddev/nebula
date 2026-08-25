@@ -60,11 +60,135 @@ pub(super) fn normalize_formula_source<'a>(
     if let Some(text) = repair_collapsed_row_breaks(normalized.as_ref()) {
         normalized = Cow::Owned(text);
     }
+    for _ in 0..MAX_ENTITY_DECODE_PASSES {
+        let Some(text) = brace_unbraced_fraction_arguments(normalized.as_ref()) else {
+            break;
+        };
+        normalized = Cow::Owned(text);
+    }
 
     if normalized.len() > limits.max_source_bytes {
         return Err(MathError::new(MathErrorKind::SourceTooLong, limits.max_source_bytes));
     }
     Ok(normalized)
+}
+
+/// `pulldown-latex` requires braces around `\frac` arguments, while TeX also
+/// accepts a single token (`\frac13`, `\frac\pi2`). Canonicalize that standard
+/// shorthand before parsing without changing already-grouped arguments.
+fn brace_unbraced_fraction_arguments(source: &str) -> Option<String> {
+    let mut normalized = String::with_capacity(source.len());
+    let mut copied_until = 0usize;
+    let mut offset = 0usize;
+    let mut changed = false;
+
+    while offset < source.len() {
+        if source.as_bytes()[offset] != b'\\' {
+            offset += source[offset..].chars().next()?.len_utf8();
+            continue;
+        }
+
+        let command_start = offset + 1;
+        let mut command_end = command_start;
+        while source.as_bytes().get(command_end).is_some_and(u8::is_ascii_alphabetic) {
+            command_end += 1;
+        }
+        if !matches!(&source[command_start..command_end], "frac" | "dfrac" | "tfrac") {
+            offset = command_end.max(offset + 1);
+            continue;
+        }
+
+        let Some((first, second)) = two_tex_arguments(source, command_end) else {
+            offset = command_end;
+            continue;
+        };
+        if first.2 && second.2 {
+            // Keep scanning inside grouped arguments: they may contain another
+            // shorthand fraction even though this outer command is canonical.
+            offset = command_end;
+            continue;
+        }
+
+        normalized.push_str(&source[copied_until..command_end]);
+        let mut cursor = command_end;
+        for (start, end, grouped) in [first, second] {
+            normalized.push_str(&source[cursor..start]);
+            if grouped {
+                normalized.push_str(&source[start..end]);
+            } else {
+                normalized.push('{');
+                normalized.push_str(&source[start..end]);
+                normalized.push('}');
+            }
+            cursor = end;
+        }
+        copied_until = cursor;
+        offset = cursor;
+        changed = true;
+    }
+
+    changed.then(|| {
+        normalized.push_str(&source[copied_until..]);
+        normalized
+    })
+}
+
+fn two_tex_arguments(
+    source: &str,
+    command_end: usize,
+) -> Option<((usize, usize, bool), (usize, usize, bool))> {
+    let first = tex_argument(source, command_end)?;
+    let second = tex_argument(source, first.1)?;
+    Some((first, second))
+}
+
+fn tex_argument(source: &str, mut offset: usize) -> Option<(usize, usize, bool)> {
+    while let Some(character) = source[offset..].chars().next() {
+        if !character.is_whitespace() {
+            break;
+        }
+        offset += character.len_utf8();
+    }
+    let first = source[offset..].chars().next()?;
+    if first == '{' {
+        return grouped_argument_end(source, offset).map(|end| (offset, end, true));
+    }
+    if first != '\\' {
+        return Some((offset, offset + first.len_utf8(), false));
+    }
+
+    let mut end = offset + 1;
+    let command_start = end;
+    while source.as_bytes().get(end).is_some_and(u8::is_ascii_alphabetic) {
+        end += 1;
+    }
+    if end == command_start {
+        end += source[end..].chars().next()?.len_utf8();
+    }
+    Some((offset, end, false))
+}
+
+fn grouped_argument_end(source: &str, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for (relative, character) in source[start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(start + relative + character.len_utf8());
+                }
+            },
+            _ => {},
+        }
+    }
+    None
 }
 
 fn decode_entities_once(source: &str) -> Option<String> {
@@ -239,6 +363,21 @@ mod tests {
 
         let layout = compile_formula(damaged, true, 18.0, 1.0, DEFAULT_LIMITS).unwrap();
         assert!(layout.text.iter().all(|operation| operation.character != '&'));
+    }
+
+    #[test]
+    fn unbraced_fraction_arguments_are_canonicalized_before_parsing() {
+        let source = r"\displaystyle \int_0^1 x^2\,dx=\frac13+\frac\pi2+\dfrac1{n}";
+        let normalized = normalize_formula_source(source, DEFAULT_LIMITS).unwrap();
+
+        assert_eq!(
+            normalized,
+            r"\displaystyle \int_0^1 x^2\,dx=\frac{1}{3}+\frac{\pi}{2}+\dfrac{1}{n}"
+        );
+        compile_formula(source, false, 18.0, 1.0, DEFAULT_LIMITS).unwrap();
+
+        let nested = normalize_formula_source(r"\frac{\frac12}{3}", DEFAULT_LIMITS).unwrap();
+        assert_eq!(nested, r"\frac{\frac{1}{2}}{3}");
     }
 
     /// 光学补偿必须真正到达 metrics：Latin Modern 的 x-height 是 0.431 em，

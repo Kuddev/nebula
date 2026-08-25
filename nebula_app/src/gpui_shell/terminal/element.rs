@@ -237,13 +237,6 @@ impl Element for TerminalElement {
                 let Some(term) = view.session.as_ref().map(|session| session.term.clone()) else {
                     return super::math_overlay::MathFrame::default();
                 };
-                // CommandStart / NEBULA| / hook 都写入 running_program；回合
-                // 结束后 hook 身份仍可能留在 ai_session.source（旧壳同事实源）。
-                view.math.observe_program(
-                    view.running_program
-                        .as_deref()
-                        .or(view.ai_session.as_ref().map(|session| session.source.as_str())),
-                );
                 let size_info =
                     super::math_overlay::grid_size_info(layout.cols, layout.rows, cell_w, line_h);
                 let term = term.lock();

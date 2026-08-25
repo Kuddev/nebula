@@ -6,7 +6,7 @@
 //! `math_view` 的位图管线上屏。
 //!
 //! 与旧壳 `draw_pane` 相同的门控：vi 模式 / 存在选区时整帧不覆盖（源码可
-//! 正常选择复制）。备用屏幕中的 AI TUI 会把光标留在回答末行，因此不能把
+//! 正常选择复制）。备用屏幕程序可能把光标留在静态内容末行，因此不能把
 //! 那一行当作正在编辑而排除。围栏过滤与前景色走同一条
 //! `scan_visible(..., rendered_cells)`
 //! 合同：从 term 网格构造等价 cell 列表（`bg_alpha` = 非默认 ANSI 背景或
@@ -61,16 +61,6 @@ impl MathFrame {
 }
 
 impl MathOverlay {
-    /// shell 集成上报的前台程序（AI CLI 名单解锁行内 `$…$`，与旧壳同门）。
-    ///
-    /// 身份先经 `extract_program` + `AgentKind` 归一成 slug（`claude-code` →
-    /// `claude`），再交给共享的 `is_ai_cli`。CommandStart / `NEBULA|` / hook
-    /// 三条路只要把同一串交给这里即可。
-    pub fn observe_program(&mut self, program: Option<&str>) {
-        let normalized = program.map(normalize_ai_program);
-        self.state.observe_program(normalized.as_deref());
-    }
-
     /// 每帧的扫描 + 预编 + 几何计划。必须在 term 锁内调用。
     ///
     /// `size` 以网格左上角为原点（padding = 0），行列必须与可见网格一致，
@@ -83,8 +73,7 @@ impl MathOverlay {
         font_pixel_size: f32,
         pixels_per_point: f32,
     ) -> MathFrame {
-        // Vi 模式与有效选择由终端自身接管，避免覆盖层遮住光标或选区。备用
-        // 屏幕不能一概排除：opencode 等 AI TUI 在其中输出 TeX 公式。
+        // Vi 模式与有效选择由终端自身接管，避免覆盖层遮住光标或选区。
         // 空选区 `to_range` 为 None，不会因为鼠标按下残留的零宽 Selection
         // 把公式关掉。
         if term.mode().intersects(TermMode::VI)
@@ -93,10 +82,9 @@ impl MathOverlay {
             return MathFrame::default();
         }
 
-        let allow_inline_dollar = self.state.inline_dollar_enabled();
         let origin = term.viewport_origin_for(size.screen_lines());
         // In a normal shell, the cursor row is active input and must keep its
-        // literal source. Full-screen AI TUIs commonly park that cursor on the
+        // literal source. Full-screen terminal apps commonly park that cursor on the
         // final answer row; passing it through would filter the very formula
         // we need to draw.
         let cursor = (!term.mode().contains(TermMode::ALT_SCREEN))
@@ -111,7 +99,6 @@ impl MathOverlay {
             term,
             size,
             &rendered_cells,
-            allow_inline_dollar,
             term.mode().contains(TermMode::ALT_SCREEN),
             cursor,
             default_foreground,
@@ -172,14 +159,6 @@ pub(crate) fn grid_size_info(
         0.0,
         false,
     )
-}
-
-fn normalize_ai_program(program: &str) -> String {
-    let extracted =
-        crate::display::extract_program(program).unwrap_or_else(|| program.trim().to_owned());
-    crate::ai_agents::AgentKind::parse(&extracted)
-        .map(|agent| agent.slug().to_owned())
-        .unwrap_or(extracted)
 }
 
 /// 旧壳 `RenderableContent` 迭代器的 GPUI 等价物：给 `scan_visible` 填
@@ -345,7 +324,7 @@ mod tests {
     use nebula_terminal::vte::ansi::Color;
     use nebula_terminal::{Term, index::Side};
 
-    use super::{MathOverlay, grid_size_info, normalize_ai_program, scan_cells_from_term};
+    use super::{MathOverlay, grid_size_info, scan_cells_from_term};
     use crate::display::color::Rgb;
 
     struct TestSize {
@@ -406,13 +385,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_ai_program_maps_claude_code_alias_to_is_ai_cli_slug() {
-        assert_eq!(normalize_ai_program("claude-code"), "claude");
-        assert_eq!(normalize_ai_program(r"D:\tools\Claude.EXE"), "claude");
-        assert_eq!(normalize_ai_program("codex-cli"), "codex");
-    }
-
-    #[test]
     fn scan_cells_keep_backslash_and_skip_default_background_spaces() {
         let term = term_with(16, 3, &[r"\[x\]", "tail"]);
         let size = grid_size_info(16, 3, 8.0, 16.0);
@@ -440,46 +412,42 @@ mod tests {
         let mut overlay = MathOverlay::default();
         let term = term_with(16, 4, &[r"\(x\)", "", "prompt"]);
         let frame = plan(&mut overlay, &term, 16, 4);
-        assert!(!frame.is_empty(), "\\(x\\) is inline and does not need inline_dollar");
+        assert!(!frame.is_empty(), "\\(x\\) is standard inline math");
         assert!(frame.covers(0, 0));
         assert_eq!(frame.formulas[0].source.as_ref(), "x");
         assert!(!frame.formulas[0].plan.display_style);
     }
 
     #[test]
-    fn inline_dollar_needs_ai_cli_identity() {
+    fn inline_dollar_uses_the_standard_formula_rule() {
         let mut overlay = MathOverlay::default();
         let term = term_with(16, 4, &["$x$", "", "prompt"]);
         let frame = plan(&mut overlay, &term, 16, 4);
-        assert!(frame.is_empty(), "bare $x$ must stay literal without AI CLI");
-
-        overlay.observe_program(Some("claude-code"));
-        let frame = plan(&mut overlay, &term, 16, 4);
-        assert!(!frame.is_empty(), "claude-code must normalize to claude and unlock $");
+        assert!(!frame.is_empty(), "$x$ is standard inline math without AI context");
         assert_eq!(frame.formulas[0].source.as_ref(), "x");
         assert!(!frame.formulas[0].plan.display_style);
     }
 
     #[test]
-    fn confirmed_display_formula_unlocks_inline_dollar() {
+    fn ansi_background_keeps_formula_source_literal() {
         let mut overlay = MathOverlay::default();
-        let display = term_with(16, 4, &[r"\[x\]", "", "prompt"]);
-        let _ = plan(&mut overlay, &display, 16, 4);
-
-        let inline = term_with(16, 4, &["$x$", "", "prompt"]);
-        let frame = plan(&mut overlay, &inline, 16, 4);
-        assert!(!frame.is_empty(), "a seen \\[ must unlock inline dollar like the old shell");
-    }
-
-    #[test]
-    fn ansi_background_fence_keeps_formula_source() {
-        let mut overlay = MathOverlay::default();
-        let mut term = term_with(16, 4, &[r"\[x\]", "", "prompt"]);
-        for col in 0..5 {
+        let mut term = term_with(16, 4, &["$x$", "", "prompt"]);
+        for col in 0..3 {
             term.grid_mut()[Line(0)][Column(col)].bg = Color::Indexed(4);
         }
         let frame = plan(&mut overlay, &term, 16, 4);
-        assert!(frame.is_empty(), "fenced ANSI background must not overlay, matching bg_alpha>0");
+        assert!(frame.is_empty(), "TUI- or code-owned backgrounds stay untouched");
+    }
+
+    #[test]
+    fn markdown_stripped_bare_delimiter_still_needs_ansi_context() {
+        let mut overlay = MathOverlay::default();
+        let mut term = term_with(24, 4, &[r"(\sqrt{x})", "", "prompt"]);
+        for col in 0..10 {
+            term.grid_mut()[Line(0)][Column(col)].bg = Color::Indexed(4);
+        }
+        let frame = plan(&mut overlay, &term, 24, 4);
+        assert!(frame.is_empty(), "bare parentheses remain ambiguous on an ANSI code surface");
     }
 
     #[test]
@@ -503,7 +471,7 @@ mod tests {
         assert!(!plan(&mut overlay, &term, 96, 4).is_empty());
         term.swap_alt();
         let frame = plan(&mut overlay, &term, 96, 4);
-        assert!(!frame.is_empty(), "alternate-screen AI TUI output must render TeX");
+        assert!(!frame.is_empty(), "alternate-screen output may use the common TeX path");
         assert_eq!(
             frame.formulas[0].source.as_ref(),
             r"n! \approx \sqrt{2\pi n}\left(\dfrac{n}{e}\right)^n"

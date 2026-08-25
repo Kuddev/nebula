@@ -8550,8 +8550,6 @@ impl Display {
         // splits, where panes occupy different vertical bands of the window.
         self.renderer.set_window_height(self.size_info.height());
 
-        pane_state.terminal_math.observe_program(pane_state.running_program.as_deref());
-
         // Collect renderable content before the terminal is dropped.
         let custom_background = self.nebula_background;
         let clickable_matches = hint::visible_clickable_matches(&terminal, config);
@@ -8609,19 +8607,13 @@ impl Display {
         // 打字（含 IME 组词）不影响网格内容，扫描保持开启；一旦这里随
         // preedit 关断，中文输入的每次拼音组合都会让全部公式闪回原文。
         //
-        // 扫描本身不按 AI CLI 探测门控：$$/\[ \]/\( \) 定界符加上
-        // plausible_math_source 已经足够抗误报，而 WSL/SSH 里跑的 AI CLI
-        // 在本机进程树上只留下 wsl.exe/ssh.exe，按进程门控会把远程会话的
-        // 公式全部关掉。裸 `$…$` 中包含明确 TeX 命令时也可安全渲染；只
-        // 有 `$x$` 这类紧凑形式才仍要求 AI CLI 上下文。
-        let allow_inline_dollar = pane_state.terminal_math.inline_dollar_enabled();
-        // opencode 等 AI TUI 使用备用屏幕；在这里排除 alt_screen 会让其中
-        // 的公式永远到不了扫描器。Vi、搜索和有效选区仍由终端自身接管。
+        // 扫描不按 AI CLI 进程名门控：WSL/SSH 中只能看到 wsl.exe/ssh.exe。
+        // 四类标准定界符使用同一内容判定；Vi、搜索和选区仍由终端接管。
         let terminal_math_overlays =
             if !vi_mode && search_state.regex().is_none() && selection_range.is_none() {
                 // In a regular shell the line containing the cursor is live input,
-                // so the scanner must leave it alone. Full-screen TUIs (opencode,
-                // codex, etc.) instead frequently leave the terminal cursor on the
+                // so the scanner must leave it alone. Full-screen terminal apps
+                // instead frequently leave the terminal cursor on the
                 // last rendered message. Treating that row as editable makes its
                 // formula disappear exactly while it is visible.
                 let visible_cursor = (!alt_screen)
@@ -8635,7 +8627,6 @@ impl Display {
                     &terminal,
                     &view,
                     &grid_cells,
-                    allow_inline_dollar,
                     alt_screen,
                     visible_cursor,
                     foreground_color,
@@ -8828,10 +8819,7 @@ impl Display {
             let cells = grid_cells.into_iter().filter_map(|mut cell| {
                 let source_point = cell.point;
                 // Hide formula source glyphs while retaining each terminal
-                // cell's resolved background. Full-screen TUIs such as
-                // opencode paint their own surface with ANSI backgrounds;
-                // dropping the entire cell exposes Nebula's card underneath
-                // and creates a differently coloured horizontal strip.
+                // cell's resolved background.
                 let formula_source =
                     !math_coverage.is_empty() && math_coverage.covers(source_point);
                 if formula_source {
