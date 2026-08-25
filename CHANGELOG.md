@@ -14,6 +14,46 @@ No unreleased changes yet.
 
 暂无未发布改动。
 
+## 1.3.1 - 2026-08-25
+
+### English
+
+#### Added
+- **Verified in-app Windows updates** — Nebula can download the exact official Windows x64 installer in the background, show progress, validate its size, PE header, and SHA-256, then wait for explicit confirmation before launching setup.
+
+#### Fixed
+- **Automatic update checks use the real GitHub latest release** and compare it with the running package version before showing a reminder; skipped versions and three-day reminders remain respected.
+- **Update notifications remain visible in the bottom-right corner** until handled, and download completion or failure replaces the original reminder with the appropriate next action.
+- **Update and confirmation dialogs match the established width, vertical position, and typography**, while overlay clicks, Escape, and cancel buttons consistently run the cancel action.
+- **Setting terminal opacity to 100% no longer returns to 82%** when legacy blur settings are normalized and reloaded.
+- **The keymap page no longer leaves a large empty gap** above its shortcut rows.
+- **The font group popup stays anchored to its selector**, and hovering a truncated font family reveals its complete name.
+- **The sidebar resize cursor and width calculation align with the visible divider**, so dragging starts directly on the baseline instead of several pixels to its left.
+- **PowerShell reports an absolute current directory to Files and Git integrations** while retaining `~` as the compact prompt display, restoring repository detection beneath the Windows home directory.
+
+#### Improved
+- **The update flow exposes download, retry, verified, install, and failure states** and revalidates a downloaded installer immediately before it is launched.
+- **Modal cancellation is consistent across workspace, pane, tab, file-tree, and settings confirmations** without removing the new component's click-outside behavior.
+
+### 简体中文
+
+#### 新增
+- **新增经过校验的应用内 Windows 更新** — Nebula 可在后台下载名称精确匹配的官方 Windows x64 安装包，显示进度，校验大小、PE 文件头与 SHA-256，并在明确确认后才启动安装。
+
+#### 修复
+- **自动更新改为读取真实的 GitHub 最新 Release**，与当前运行版本比较后才显示提醒，同时继续遵守跳过版本与三天后提醒设置。
+- **更新通知会持续显示在右下角**，直到用户处理；下载完成或失败后，原通知会被带有下一步操作的新状态替换。
+- **更新与确认弹窗恢复既有的宽度、垂直位置和字体大小**，同时让遮罩点击、Esc 与取消按钮一致执行取消逻辑。
+- **终端不透明度拉到 100% 后不再回到 82%**，旧版模糊设置在规范化和重载时不会再次覆盖用户选择。
+- **按键映射页不再在快捷键列表上方留下大块空白。**
+- **字体组弹层会持续贴住下拉框**，鼠标悬停在被截断的字体名称上时可查看完整名称。
+- **侧边栏拖拽光标和宽度计算与可见分隔线严格对齐**，无需把鼠标偏到基线左侧才能开始拖动。
+- **PowerShell 向文件与 Git 集成上报绝对当前目录**，提示符仍可用 `~` 紧凑显示，从而恢复 Windows 用户主目录下的仓库识别。
+
+#### 改进
+- **更新流程提供下载、重试、已校验、安装和失败状态**，并在启动安装包前立即执行二次校验。
+- **工作区、分栏、标签、文件树与设置确认框采用一致的取消行为**，同时保留新组件点击外部区域取消的特性。
+
 ## 1.3.0 - 2026-08-24
 
 ### English

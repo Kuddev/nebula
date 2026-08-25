@@ -8,8 +8,8 @@ IDI_ICON ICON "nebula.ico"
 APP_MANIFEST RT_MANIFEST nebula.manifest
 
 1 VERSIONINFO
-FILEVERSION 1,3,0,0
-PRODUCTVERSION 1,3,0,0
+FILEVERSION 1,3,1,0
+PRODUCTVERSION 1,3,1,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -22,11 +22,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Kuddev"
             VALUE "FileDescription", "Nebula Terminal"
-            VALUE "FileVersion", "1.3.0"
+            VALUE "FileVersion", "1.3.1"
             VALUE "InternalName", "nebula"
             VALUE "OriginalFilename", "nebula.exe"
             VALUE "ProductName", "Nebula Terminal"
-            VALUE "ProductVersion", "1.3.0"
+            VALUE "ProductVersion", "1.3.1"
         END
     END
     BLOCK "VarFileInfo"
