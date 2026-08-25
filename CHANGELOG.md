@@ -24,11 +24,11 @@ No unreleased changes yet.
 #### Fixed
 - **Automatic update checks use the real GitHub latest release** and compare it with the running package version before showing a reminder; skipped versions and three-day reminders remain respected.
 - **Update notifications remain visible in the bottom-right corner** until handled, and download completion or failure replaces the original reminder with the appropriate next action.
-- **Update and confirmation dialogs match the established width, vertical position, and typography**, while overlay clicks, Escape, and cancel buttons consistently run the cancel action.
-- **Setting terminal opacity to 100% no longer returns to 82%** when legacy blur settings are normalized and reloaded.
+- **Update and confirmation dialog actions, geometry, and typography are restored**: required confirmation actions are available and execute correctly, the dialogs match the established width, vertical position, and font sizing, and overlay clicks, Escape, and cancel buttons consistently run the cancel action. Addresses [#64](https://github.com/Kuddev/nebula/issues/64).
+- **Setting terminal opacity to 100% no longer returns to 82%** when legacy blur settings are normalized and reloaded. Addresses [#60](https://github.com/Kuddev/nebula/issues/60).
 - **The keymap page no longer leaves a large empty gap** above its shortcut rows.
 - **The font group popup stays anchored to its selector**, and hovering a truncated font family reveals its complete name.
-- **The sidebar resize cursor and width calculation align with the visible divider**, so dragging starts directly on the baseline instead of several pixels to its left.
+- **The sidebar resize cursor and width calculation align with the visible divider**, so dragging starts directly on the baseline instead of several pixels to its left. Addresses [#61](https://github.com/Kuddev/nebula/issues/61).
 - **PowerShell reports an absolute current directory to Files and Git integrations** while retaining `~` as the compact prompt display, restoring repository detection beneath the Windows home directory.
 
 #### Improved
@@ -43,11 +43,11 @@ No unreleased changes yet.
 #### 修复
 - **自动更新改为读取真实的 GitHub 最新 Release**，与当前运行版本比较后才显示提醒，同时继续遵守跳过版本与三天后提醒设置。
 - **更新通知会持续显示在右下角**，直到用户处理；下载完成或失败后，原通知会被带有下一步操作的新状态替换。
-- **更新与确认弹窗恢复既有的宽度、垂直位置和字体大小**，同时让遮罩点击、Esc 与取消按钮一致执行取消逻辑。
-- **终端不透明度拉到 100% 后不再回到 82%**，旧版模糊设置在规范化和重载时不会再次覆盖用户选择。
+- **更新与确认弹窗恢复必要操作以及既有的宽度、垂直位置和字体大小**；确认操作会正常显示并执行，同时让遮罩点击、Esc 与取消按钮一致执行取消逻辑。对应 [#64](https://github.com/Kuddev/nebula/issues/64)。
+- **终端不透明度拉到 100% 后不再回到 82%**，旧版模糊设置在规范化和重载时不会再次覆盖用户选择。对应 [#60](https://github.com/Kuddev/nebula/issues/60)。
 - **按键映射页不再在快捷键列表上方留下大块空白。**
 - **字体组弹层会持续贴住下拉框**，鼠标悬停在被截断的字体名称上时可查看完整名称。
-- **侧边栏拖拽光标和宽度计算与可见分隔线严格对齐**，无需把鼠标偏到基线左侧才能开始拖动。
+- **侧边栏拖拽光标和宽度计算与可见分隔线严格对齐**，无需把鼠标偏到基线左侧才能开始拖动。对应 [#61](https://github.com/Kuddev/nebula/issues/61)。
 - **PowerShell 向文件与 Git 集成上报绝对当前目录**，提示符仍可用 `~` 紧凑显示，从而恢复 Windows 用户主目录下的仓库识别。
 
 #### 改进
