@@ -9,10 +9,12 @@ pub use gpui_component::{
     ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, InteractiveElementExt as _,
     Selectable as _, Sizable as _, StyledExt as _, TitleBar,
     alert::{Alert, AlertVariant},
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
-    dialog::{Dialog, DialogAction, DialogButtonProps, DialogClose, DialogFooter},
+    dialog::{
+        Dialog, DialogAction, DialogButtonProps, DialogClose, DialogDescription, DialogFooter,
+    },
     dock::{
         DockArea, DockAreaState, DockItem, Panel, PanelControl, PanelEvent, PanelState, TabPanel,
     },
@@ -39,10 +41,97 @@ pub use gpui_component::WindowExt as _;
 // 现有的 glob 用法不受影响。
 pub use gpui_component::{ActiveTheme, Colorize};
 
-use gpui::{Window, px};
+use gpui::{ParentElement as _, SharedString, Styled as _, Window, div, px, relative};
 
-/// 保留旧壳确认框的 480px 内容宽度；位置和交互采用新版 Dialog。
-pub fn center_confirm_dialog(dialog: Dialog, _window: &Window) -> Dialog {
-    const DIALOG_W: f32 = 480.0;
-    dialog.width(px(DIALOG_W))
+const CONFIRM_DIALOG_WIDTH: f32 = 480.0;
+const CONFIRM_DIALOG_HORIZONTAL_PADDING: f32 = 26.0;
+const CONFIRM_DIALOG_TOP_PADDING: f32 = 26.0;
+const CONFIRM_DIALOG_BOTTOM_PADDING: f32 = 20.0;
+const CONFIRM_DIALOG_BASE_HEIGHT: f32 = 130.0;
+const CONFIRM_DIALOG_BODY_LINE_HEIGHT: f32 = 24.0;
+
+/// gpui-component 0.5.2 默认把 Dialog 放在视口高度的 1/10；旧 GPUI 壳则
+/// 使用 480px 内容宽度并垂直居中。这里集中恢复旧壳几何，同时保留窄窗口限幅。
+pub fn center_modal_dialog(dialog: Dialog, window: &Window, estimated_height: f32) -> Dialog {
+    let viewport = window.viewport_size();
+    let width = CONFIRM_DIALOG_WIDTH.min((f32::from(viewport.width) - 32.0).max(240.0));
+    let margin_top = ((f32::from(viewport.height) - estimated_height) * 0.5).max(16.0);
+
+    dialog
+        .width(px(width))
+        .margin_top(px(margin_top))
+        .pt(px(CONFIRM_DIALOG_TOP_PADDING))
+        .pb(px(CONFIRM_DIALOG_BOTTOM_PADDING))
+        .px(px(CONFIRM_DIALOG_HORIZONTAL_PADDING))
+}
+
+/// 构造与旧 GPUI 壳一致的确认框。显式 footer 是必要的：固定依赖版本的普通
+/// Dialog 不会仅凭 button_props 生成按钮；DialogAction/DialogClose 负责把鼠标
+/// 点击重新汇入 Enter/Esc 共用的确认与取消回调。
+pub fn confirm_dialog(
+    dialog: Dialog,
+    window: &mut Window,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    ok_text: impl Into<SharedString>,
+    cancel_text: impl Into<SharedString>,
+    ok_variant: ButtonVariant,
+) -> Dialog {
+    let title = title.into();
+    let description = description.into();
+    let ok_text = ok_text.into();
+    let cancel_text = cancel_text.into();
+
+    let text_style = window.text_style();
+    let body_width = if description.is_empty() {
+        0.0
+    } else {
+        f32::from(
+            window
+                .text_system()
+                .shape_line(
+                    description.clone(),
+                    px(16.0),
+                    &[text_style.to_run(description.len())],
+                    None,
+                )
+                .width,
+        )
+    };
+    let available_body_width =
+        (CONFIRM_DIALOG_WIDTH - CONFIRM_DIALOG_HORIZONTAL_PADDING * 2.0).max(1.0);
+    let body_lines = (body_width / available_body_width).ceil().max(1.0);
+    let estimated_height =
+        CONFIRM_DIALOG_BASE_HEIGHT + body_lines * CONFIRM_DIALOG_BODY_LINE_HEIGHT;
+
+    let content_description = description.clone();
+    center_modal_dialog(dialog, window, estimated_height)
+        .close_button(false)
+        .overlay_closable(false)
+        .title(div().text_lg().font_semibold().line_height(relative(1.0)).child(title))
+        .content(move |content, _, _| {
+            content.child(
+                DialogDescription::new()
+                    .text_base()
+                    .line_height(relative(1.5))
+                    .child(content_description.clone()),
+            )
+        })
+        .footer(
+            DialogFooter::new()
+                .child(
+                    DialogClose::new()
+                        .child(Button::new("confirm-cancel").label(cancel_text.clone())),
+                )
+                .child(DialogAction::new().child(
+                    Button::new("confirm-ok").label(ok_text.clone()).with_variant(ok_variant),
+                )),
+        )
+        .button_props(
+            DialogButtonProps::default()
+                .ok_text(ok_text)
+                .ok_variant(ok_variant)
+                .cancel_text(cancel_text)
+                .show_cancel(true),
+        )
 }

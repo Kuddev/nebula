@@ -1046,12 +1046,17 @@ impl SettingsPane {
         let pane = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, _cx| {
             let pane = pane.clone();
-            center_confirm_dialog(dialog, window)
-                .title("让背景图覆盖窗口控件区域？")
-                .button_props(DialogButtonProps::default().show_cancel(true).ok_text("开启").cancel_text("取消"))
-                .child(SharedString::from(
+            confirm_dialog(
+                dialog,
+                window,
+                "让背景图覆盖窗口控件区域？",
+                SharedString::from(
                     "背景图会延伸到标题栏、窗口按钮、Tab 与 SSH 侧栏下方，低对比度图片可能影响操作可见性；界面仍会保留最低不透明度保护。",
-                ))
+                ),
+                "开启",
+                "取消",
+                ButtonVariant::Primary,
+            )
                 .on_ok(move |_, _, cx| {
                     let _ = pane.update(cx, |this, cx| {
                         this.persist(&[("background_image_cover_chrome", "1".to_owned())], cx);
@@ -1145,7 +1150,15 @@ impl SettingsPane {
         // 成一次重绘，所以每帧调是安全的。
         cx.refresh_windows();
         cx.notify();
-        self.schedule_slider_persist("opacity", format!("{opacity:.2}"), cx);
+        // 用户拖动后 opacity 已是显式选择；同时把旧 blur=1 规范成枚举值，
+        // 否则共享迁移层会再次把 blur=1 + opacity=1.00 解读成默认 0.82。
+        self.schedule_slider_persist(
+            vec![
+                ("opacity", format!("{opacity:.2}")),
+                ("blur", self.runtime.blur.settings_value().to_owned()),
+            ],
+            cx,
+        );
     }
 
     /// 背景图透明度是**烘焙进纹理**的（decode + 长边压到 2560 + 逐像素乘
@@ -1158,26 +1171,28 @@ impl SettingsPane {
         }
         self.runtime.background_image_opacity = opacity;
         cx.notify();
-        self.schedule_slider_persist("background_image_opacity", format!("{opacity:.2}"), cx);
+        self.schedule_slider_persist(
+            vec![("background_image_opacity", format!("{opacity:.2}"))],
+            cx,
+        );
     }
 
-    /// 滑块停手后才落盘。滑块只有 `Change` 事件（组件库没有"松手"信号），
-    /// 所以用 debounce：每个新事件覆盖上一个待落盘任务，旧 `Task` drop 即取消。
+    /// `Change` 同时覆盖鼠标拖动和键盘调整，因此统一用 debounce 延后落盘：
+    /// 每个新事件覆盖上一个待落盘任务，旧 `Task` drop 即取消。
     ///
     /// 落盘那一次会走完整的 [`Self::persist`]（写盘 + 设置重载 + 每终端
     /// `apply_settings` + 主题重建 + 壁纸重烘焙），跑一次没问题；每帧跑就是
     /// 2026-08-21 报的"拖拽卡顿的要死"。
     fn schedule_slider_persist(
         &mut self,
-        key: &'static str,
-        value: String,
+        updates: Vec<(&'static str, String)>,
         cx: &mut Context<Self>,
     ) {
         let executor = cx.background_executor().clone();
         self.slider_persist = Some(cx.spawn(async move |this, cx| {
             executor.timer(Duration::from_millis(180)).await;
             let _ = this.update(cx, |this, cx| {
-                this.persist(&[(key, value)], cx);
+                this.persist(&updates, cx);
             });
         }));
     }

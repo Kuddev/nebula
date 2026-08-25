@@ -371,7 +371,6 @@ impl SettingsPane {
         // 占位「搜索动作或按键…」，下面再空 12px 才到冲突条 / 分组。
         v_flex()
             .w_full()
-            .gap(px(GROUP_GAP))
             // 捕获态的「点击任何位置先撤销」（旧壳 input/chrome.rs 的统一撤
             // 销合同）：行的 mouse_down 会 stop_propagation 自行处理转移/
             // 取消，搜索框这里显式撤销（旧壳点搜索框 = blur 捕获），其余

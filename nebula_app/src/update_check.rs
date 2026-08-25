@@ -118,6 +118,21 @@ pub fn spawn_gpui_once(sender: std::sync::mpsc::Sender<crate::gpui_shell::GpuiSh
         return;
     }
     let spawned = std::thread::Builder::new().name("update-check-gpui".into()).spawn(move || {
+        if cfg!(debug_assertions) {
+            // 调试包启动后强制走一次完整的“事件 -> 右下角通知 -> 详情弹窗”链路。
+            // STARTED 仍保证每进程仅一次；正式包的该条件恒为 false，不会触发。
+            std::thread::sleep(Duration::from_secs(2));
+            let current = env!("CARGO_PKG_VERSION").to_owned();
+            let result = UpdateCheckResult {
+                latest: format!("{current}-test"),
+                current,
+                update_available: true,
+            };
+            log::info!("update-check: forcing one GPUI update reminder in debug build");
+            let _ = sender.send(crate::gpui_shell::GpuiShellEvent::UpdateAvailable(result));
+            return;
+        }
+
         // 对齐旧壳：首屏和首个终端会话稳定后再联网。
         std::thread::sleep(Duration::from_secs(12));
         let result = match check_now() {

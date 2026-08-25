@@ -32,6 +32,9 @@ pub(crate) fn show_update_notification(
     let action_result = result.clone();
     let notification = Notification::warning(message)
         .title(title)
+        // 更新是需要用户明确处理的待办；保持到查看或手动关闭，避免短暂出现后
+        // 被误判为“没有右下角提示”。
+        .autohide(false)
         .w_auto()
         .min_w(px(300.0))
         .max_w(px(440.0))
@@ -129,10 +132,12 @@ pub(crate) fn open_update_dialog(
                     ),
             )
             .child(
-                div().text_sm().line_height(relative(1.55)).text_color(muted).child(hint.clone()),
+                div().text_base().line_height(relative(1.5)).text_color(muted).child(hint.clone()),
             );
-        center_confirm_dialog(dialog, window)
-            .title(title.clone())
+        center_modal_dialog(dialog, window, 250.0)
+            .close_button(false)
+            .overlay_closable(false)
+            .title(div().text_lg().font_semibold().line_height(relative(1.0)).child(title.clone()))
             .footer(
                 DialogFooter::new()
                     .child(

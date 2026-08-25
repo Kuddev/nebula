@@ -417,29 +417,28 @@ impl NebulaWorkspace {
         window.open_dialog(cx, move |dialog, window, _cx| {
             let workspace = workspace.clone();
             let path = path.clone();
-            center_confirm_dialog(dialog, window)
-                .title(title.clone())
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("删除")
-                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .child(body.clone())
-                .on_ok(move |_, _, cx| {
-                    let _ = workspace.update(cx, |this, cx| {
-                        match crate::display::send_to_recycle_bin(&path) {
-                            Ok(()) => {
-                                this.side_panel.request_refresh();
-                                this.sync_side_panel_to_active(false, cx);
-                            },
-                            Err(error) => this.side_panel.set_notice(format!("删除失败：{error}")),
-                        }
-                        cx.notify();
-                    });
-                    true
-                })
+            confirm_dialog(
+                dialog,
+                window,
+                title.clone(),
+                body.clone(),
+                "删除",
+                "取消",
+                ButtonVariant::Danger,
+            )
+            .on_ok(move |_, _, cx| {
+                let _ = workspace.update(cx, |this, cx| {
+                    match crate::display::send_to_recycle_bin(&path) {
+                        Ok(()) => {
+                            this.side_panel.request_refresh();
+                            this.sync_side_panel_to_active(false, cx);
+                        },
+                        Err(error) => this.side_panel.set_notice(format!("删除失败：{error}")),
+                    }
+                    cx.notify();
+                });
+                true
+            })
         });
     }
 }

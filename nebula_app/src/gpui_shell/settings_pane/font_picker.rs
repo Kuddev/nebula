@@ -209,8 +209,16 @@ impl SettingsPane {
             .child(
                 gpui::canvas(
                     move |bounds, _, cx| {
-                        let _ = picker.update(cx, |picker, _| {
+                        let _ = picker.update(cx, |picker, cx| {
+                            if picker.font_picker_trigger_bounds == Some(bounds) {
+                                return;
+                            }
                             picker.font_picker_trigger_bounds = Some(bounds);
+                            // anchored() 消费的是上一轮 render 拿到的窗口坐标；
+                            // 聚焦自动滚动后补一帧，弹层才会继续贴住输入框。
+                            if picker.font_picker_open {
+                                cx.notify();
+                            }
                         });
                     },
                     |_, _, _, _| {},
@@ -292,6 +300,8 @@ impl SettingsPane {
             .enumerate()
             .map(|(index, family)| {
                 let family_name: SharedString = family.clone().into();
+                let display_name: SharedString = font_display_name(family).into();
+                let tooltip_name = display_name.clone();
                 h_flex()
                     .id(SharedString::from(format!("font-chain-row-{index}")))
                     .h(px(38.0))
@@ -312,12 +322,17 @@ impl SettingsPane {
                     )
                     .child(
                         div()
+                            .id(("font-chain-name", index))
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_sm()
                             .font_family(family_name)
-                            .child(font_display_name(family)),
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(tooltip_name.clone())
+                                    .build(window, cx)
+                            })
+                            .child(display_name),
                     )
                     .when(index == 0, |row| row.child(badge("主", muted)))
                     .child(Self::chain_action(
@@ -358,6 +373,8 @@ impl SettingsPane {
                 let select_name = entry.name.clone();
                 let append_name = entry.name.clone();
                 let family: SharedString = entry.name.clone().into();
+                let display_name: SharedString = font_display_name(&entry.name).into();
+                let tooltip_name = display_name.clone();
                 let bundled = entry.source == FontSource::Bundled;
                 let already_selected =
                     families.iter().any(|family| family.eq_ignore_ascii_case(&entry.name));
@@ -374,12 +391,17 @@ impl SettingsPane {
                     .hover(|row| row.bg(hover_bg))
                     .child(
                         div()
+                            .id(("font-available-name", index))
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_sm()
                             .font_family(family)
-                            .child(font_display_name(&entry.name)),
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(tooltip_name.clone())
+                                    .build(window, cx)
+                            })
+                            .child(display_name),
                     )
                     .when(bundled, |row| row.child(badge("内置", muted)))
                     .when(entry.source == FontSource::Imported, |row| {

@@ -106,6 +106,10 @@ gpui::actions!(
 /// 不能挂全局：否则 CC/Codex 的终止对话键到不了 PTY。
 const PALETTE_KEY_CONTEXT: &str = "NebulaCommandPalette";
 
+/// 侧栏槽位右缘到正文卡可见左缘的 8px 卡缝；拖拽热区必须对准后者。
+const SIDEBAR_RESIZE_VISUAL_OFFSET: f32 = 8.0;
+const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
+
 /// 工作区静态默认绑定的 combo 集（[`init`] 的镜像）。撤销已失效的自定义
 /// 注入时要排除：gpui 的 NoAction 打在静态默认键上会误杀基础功能。
 const STATIC_DEFAULT_COMBOS: &[&str] = &[
@@ -1571,32 +1575,31 @@ impl NebulaWorkspace {
         window.open_dialog(cx, move |dialog, window, _cx| {
             let confirm_workspace = confirm_workspace.clone();
             let close_workspace = close_workspace.clone();
-            center_confirm_dialog(dialog, window)
-                .title("关闭窗口？")
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("关闭")
-                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .child(body.clone())
-                .on_ok(move |_, window, cx| {
-                    let _ = confirm_workspace.update(cx, |workspace, cx| {
-                        workspace.save_clean_window_session(cx);
-                        workspace.window_close_confirm_open = false;
-                        // `remove_window` 是确认后的最终动作，不会重新触发
-                        // should-close，从而避免再次弹出同一确认框。
-                        window.remove_window();
-                    });
-                    true
-                })
-                .on_close(move |_, _, cx| {
-                    let _ = close_workspace.update(cx, |workspace, cx| {
-                        workspace.window_close_confirm_open = false;
-                        cx.notify();
-                    });
-                })
+            confirm_dialog(
+                dialog,
+                window,
+                "关闭窗口？",
+                body.clone(),
+                "关闭",
+                "取消",
+                ButtonVariant::Danger,
+            )
+            .on_ok(move |_, window, cx| {
+                let _ = confirm_workspace.update(cx, |workspace, cx| {
+                    workspace.save_clean_window_session(cx);
+                    workspace.window_close_confirm_open = false;
+                    // `remove_window` 是确认后的最终动作，不会重新触发
+                    // should-close，从而避免再次弹出同一确认框。
+                    window.remove_window();
+                });
+                true
+            })
+            .on_close(move |_, _, cx| {
+                let _ = close_workspace.update(cx, |workspace, cx| {
+                    workspace.window_close_confirm_open = false;
+                    cx.notify();
+                });
+            })
         });
         false
     }
@@ -1616,22 +1619,21 @@ impl NebulaWorkspace {
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, _cx| {
             let workspace = workspace.clone();
-            center_confirm_dialog(dialog, window)
-                .title("关闭此分栏？")
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("关闭")
-                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .child(body.clone())
-                .on_ok(move |_, window, cx| {
-                    let _ = workspace.update(cx, |workspace, cx| {
-                        workspace.close_pane(tab_ix, pane_id, window, cx);
-                    });
-                    true
-                })
+            confirm_dialog(
+                dialog,
+                window,
+                "关闭此分栏？",
+                body.clone(),
+                "关闭",
+                "取消",
+                ButtonVariant::Danger,
+            )
+            .on_ok(move |_, window, cx| {
+                let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.close_pane(tab_ix, pane_id, window, cx);
+                });
+                true
+            })
         });
     }
 
@@ -1644,22 +1646,21 @@ impl NebulaWorkspace {
         let workspace = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, _cx| {
             let workspace = workspace.clone();
-            center_confirm_dialog(dialog, window)
-                .title("关闭此标签页？")
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text("关闭")
-                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text("取消")
-                        .show_cancel(true),
-                )
-                .child(body.clone())
-                .on_ok(move |_, window, cx| {
-                    let _ = workspace.update(cx, |workspace, cx| {
-                        workspace.close_tab(tab_ix, window, cx);
-                    });
-                    true
-                })
+            confirm_dialog(
+                dialog,
+                window,
+                "关闭此标签页？",
+                body.clone(),
+                "关闭",
+                "取消",
+                ButtonVariant::Danger,
+            )
+            .on_ok(move |_, window, cx| {
+                let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.close_tab(tab_ix, window, cx);
+                });
+                true
+            })
         });
     }
 
@@ -4508,8 +4509,11 @@ impl Render for NebulaWorkspace {
                                             .absolute()
                                             .top_0()
                                             .bottom_0()
-                                            .left(px(-3.0))
-                                            .w(px(6.0))
+                                            .left(px(
+                                                SIDEBAR_RESIZE_VISUAL_OFFSET
+                                                    - SIDEBAR_RESIZE_HANDLE_WIDTH * 0.5,
+                                            ))
+                                            .w(px(SIDEBAR_RESIZE_HANDLE_WIDTH))
                                             .cursor_col_resize()
                                             .on_mouse_down(
                                                 MouseButton::Left,
@@ -4621,10 +4625,12 @@ impl Render for NebulaWorkspace {
                         .occlude()
                         .cursor_col_resize()
                         .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                            let width = f32::from(event.position.x).clamp(
-                                nebula_settings::MIN_SIDEBAR_WIDTH,
-                                nebula_settings::MAX_SIDEBAR_WIDTH,
-                            );
+                            let width = (f32::from(event.position.x)
+                                - SIDEBAR_RESIZE_VISUAL_OFFSET)
+                                .clamp(
+                                    nebula_settings::MIN_SIDEBAR_WIDTH,
+                                    nebula_settings::MAX_SIDEBAR_WIDTH,
+                                );
                             if (width - this.sidebar_width).abs() >= 0.5 {
                                 this.sidebar_width = width;
                                 cx.notify();

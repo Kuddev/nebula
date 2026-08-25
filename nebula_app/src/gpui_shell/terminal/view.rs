@@ -33,9 +33,7 @@ use super::session::{self, TerminalSession};
 use super::suggest;
 use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
 use crate::gpui_shell::config::Settings;
-use crate::gpui_shell::prelude::{
-    ActiveTheme as _, Colorize as _, DialogButtonProps, center_confirm_dialog,
-};
+use crate::gpui_shell::prelude::{ActiveTheme as _, ButtonVariant, Colorize as _, confirm_dialog};
 use crate::{config::UiConfig, font_install::REQUIRED_FONT_FAMILY};
 use futures::StreamExt as _;
 
@@ -1398,19 +1396,19 @@ impl TerminalView {
         window.open_dialog(cx, move |dialog, window, _cx| {
             let text = text.clone();
             let view = view.clone();
-            center_confirm_dialog(dialog, window)
-                .title(title.clone())
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text(ok_text.clone())
-                        .cancel_text(cancel_text.clone())
-                        .show_cancel(true),
-                )
-                .child(body.clone())
-                .on_ok(move |_, _window, cx| {
-                    let _ = view.update(cx, |this, cx| this.paste_now(&text, cx));
-                    true
-                })
+            confirm_dialog(
+                dialog,
+                window,
+                title.clone(),
+                body.clone(),
+                ok_text.clone(),
+                cancel_text.clone(),
+                ButtonVariant::Primary,
+            )
+            .on_ok(move |_, _window, cx| {
+                let _ = view.update(cx, |this, cx| this.paste_now(&text, cx));
+                true
+            })
         });
     }
 
