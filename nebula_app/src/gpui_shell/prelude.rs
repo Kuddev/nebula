@@ -107,7 +107,9 @@ pub fn confirm_dialog(
     let content_description = description.clone();
     center_modal_dialog(dialog, window, estimated_height)
         .close_button(false)
-        .overlay_closable(false)
+        // 新 Dialog 的遮罩点击与 Esc 共用 on_cancel 合同，不能为了旧版几何
+        // 关闭这项交互，否则业务取消回调也不会执行。
+        .overlay_closable(true)
         .title(div().text_lg().font_semibold().line_height(relative(1.0)).child(title))
         .content(move |content, _, _| {
             content.child(

@@ -581,7 +581,7 @@ fn save_combined_session(cx: &mut App, clean: bool) {
     cx.global_mut::<WindowRegistry>().last_saved_session = Some(session);
 }
 
-fn quit_all(cx: &mut App) {
+pub(crate) fn quit_all(cx: &mut App) {
     save_combined_session(cx, true);
     let entries = entries_by_mru(cx);
     for entry in entries {

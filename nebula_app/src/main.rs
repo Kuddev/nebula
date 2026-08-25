@@ -92,6 +92,8 @@ mod sync;
 mod terminal_profiles;
 mod tray;
 mod update_check;
+#[cfg(feature = "gpui-shell")]
+mod update_download;
 mod ux;
 // pub(crate)：GPUI 壳复用 welcome 的 fastfetch 欢迎屏命令生成。
 pub(crate) mod window_context;

@@ -417,8 +417,11 @@ function global:prompt {
     }
     [Console]::Write("$e]133;D;$nebExit$([char]7)")
     $reset = "$e[0m"
-    $loc = (Get-Location).Path
+    $cwd = (Get-Location).Path
+    $loc = $cwd
     $hp = $env:USERPROFILE
+    # `loc` 只负责提示符的紧凑显示；功能协议必须发送绝对 cwd。否则 home
+    # 下的 `~\repo` 会被宿主文件树与 Git 当成无法解析的相对路径。
     if ($hp -and $loc.StartsWith($hp)) { $loc = '~' + $loc.Substring($hp.Length) }
     $branch = ''
     $b = git rev-parse --abbrev-ref HEAD 2>$null
@@ -445,7 +448,7 @@ function global:prompt {
 
     if (-not (Get-NebulaBoolSetting 'powerline' $true)) {
         $branchText = if ($branch) { " ($branch)" } else { "" }
-        $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$loc|$branch$([char]7)$e[38;5;19m$loc$branchText $e[35m$NebPromptArrow $reset"
+        $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$cwd|$branch$([char]7)$e[38;5;19m$loc$branchText $e[35m$NebPromptArrow $reset"
     } else {
         $segs = New-Object System.Collections.ArrayList
         [void]$segs.Add(@{ bg=16; fg=17; t=" $NebFolderIcon " })
@@ -466,7 +469,7 @@ function global:prompt {
                 $out += "$reset$e[38;5;$($s.bg)m$e[49m$NebRightRound$reset"
             }
         }
-        $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$loc|$branch$([char]7)$out`n`n$e[35m$NebPromptArrow $reset"
+        $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$cwd|$branch$([char]7)$out`n`n$e[35m$NebPromptArrow $reset"
     }
 
     try { Set-PSReadLineOption -ExtraPromptLineCount (($output | Measure-Object -Line).Lines - 1) } catch {}
@@ -1039,6 +1042,18 @@ mod test {
         assert!(
             !NEBULA_PROMPT_PS1.contains("return $output"),
             "an early return would skip common $? restoration"
+        );
+    }
+
+    #[test]
+    fn powershell_reports_absolute_cwd_while_displaying_home_as_tilde() {
+        assert!(NEBULA_PROMPT_PS1.contains("$cwd = (Get-Location).Path"));
+        assert!(NEBULA_PROMPT_PS1.contains("$loc = $cwd"));
+        assert!(NEBULA_PROMPT_PS1.contains("$loc = '~' + $loc.Substring($hp.Length)"));
+        assert!(NEBULA_PROMPT_PS1.contains("NEBULA|$cwd|$branch"));
+        assert!(
+            !NEBULA_PROMPT_PS1.contains("NEBULA|$loc|$branch"),
+            "the display-only tilde path must not leak into cwd consumers"
         );
     }
 

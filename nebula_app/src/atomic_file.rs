@@ -158,7 +158,7 @@ impl Drop for LifetimeFileLock {
 }
 
 #[cfg(windows)]
-fn replace(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -177,7 +177,7 @@ fn replace(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn replace(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn replace(source: &Path, destination: &Path) -> io::Result<()> {
     std::fs::rename(source, destination)?;
     // rename 只保证目录项切换是原子的；同步父目录后，掉电恢复时才不会
     // 出现“文件内容已落盘、文件名更新却丢失”的窗口。

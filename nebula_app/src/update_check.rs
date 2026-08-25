@@ -1,7 +1,7 @@
 //! Startup update check against GitHub Releases.
 //!
-//! Zero new dependencies: Windows 10+ ships `curl.exe`, so the probe is a
-//! short-lived child process instead of an HTTP stack baked into the binary.
+//! Zero new dependencies: Windows 10+ ships `curl.exe`, so the release metadata
+//! probe is a short-lived child process instead of another HTTP stack.
 //! Everything is best-effort — no network, no curl, malformed JSON, or a
 //! GitHub outage all degrade to "no banner", never to an error the user sees.
 
@@ -66,13 +66,48 @@ impl UpdatePromptState {
     }
 }
 
-/// 设置主页手动检查所需的完整结果。启动检查与手动检查共用这一份版本
-/// 比较，避免两处对预发布后缀或分段数字产生不同结论。
+/// 可由当前平台直接下载的 release 资产。名称与架构在解析 API 时已精确匹配，
+/// 下载器仍会再次验证 URL、文件名、大小与 SHA-256，避免 UI 数据被误用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateAsset {
+    pub version: String,
+    pub name: String,
+    pub download_url: String,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+}
+
+/// 设置主页手动检查所需的完整结果。启动检查与手动检查共用版本、资产选择
+/// 与校验元数据，避免两条入口下载到不同构建。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateCheckResult {
     pub current: String,
     pub latest: String,
     pub update_available: bool,
+    pub asset: Option<UpdateAsset>,
+}
+
+#[derive(Debug)]
+struct LatestRelease {
+    version: String,
+    asset: Option<UpdateAsset>,
+}
+
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+    digest: Option<String>,
 }
 
 /// Kick off the once-per-process background check. The result (if any)
@@ -86,13 +121,14 @@ pub fn spawn_once(proxy: EventLoopProxy<Event>) {
     let spawned = std::thread::Builder::new().name("update-check".into()).spawn(move || {
         // 等窗口与首个会话安顿好再查，别和启动抢磁盘/网络。
         std::thread::sleep(Duration::from_secs(12));
-        let latest = match fetch_latest_version() {
-            Ok(latest) => latest,
+        let release = match fetch_latest_release() {
+            Ok(release) => release,
             Err(error) => {
                 log::debug!("update-check: {error}");
                 return;
             },
         };
+        let latest = release.version;
         let current = env!("CARGO_PKG_VERSION");
         if !is_newer(&latest, current) {
             log::debug!("update-check: v{current} is current (latest v{latest})");
@@ -118,21 +154,6 @@ pub fn spawn_gpui_once(sender: std::sync::mpsc::Sender<crate::gpui_shell::GpuiSh
         return;
     }
     let spawned = std::thread::Builder::new().name("update-check-gpui".into()).spawn(move || {
-        if cfg!(debug_assertions) {
-            // 调试包启动后强制走一次完整的“事件 -> 右下角通知 -> 详情弹窗”链路。
-            // STARTED 仍保证每进程仅一次；正式包的该条件恒为 false，不会触发。
-            std::thread::sleep(Duration::from_secs(2));
-            let current = env!("CARGO_PKG_VERSION").to_owned();
-            let result = UpdateCheckResult {
-                latest: format!("{current}-test"),
-                current,
-                update_available: true,
-            };
-            log::info!("update-check: forcing one GPUI update reminder in debug build");
-            let _ = sender.send(crate::gpui_shell::GpuiShellEvent::UpdateAvailable(result));
-            return;
-        }
-
         // 对齐旧壳：首屏和首个终端会话稳定后再联网。
         std::thread::sleep(Duration::from_secs(12));
         let result = match check_now() {
@@ -160,9 +181,14 @@ pub fn spawn_gpui_once(sender: std::sync::mpsc::Sender<crate::gpui_shell::GpuiSh
 /// 立即检查 GitHub 最新 release；调用方必须把它放到后台执行器，避免
 /// `curl` 的网络等待阻塞 UI 线程。
 pub fn check_now() -> Result<UpdateCheckResult, String> {
-    let latest = fetch_latest_version()?;
+    let release = fetch_latest_release()?;
     let current = env!("CARGO_PKG_VERSION").to_owned();
-    Ok(UpdateCheckResult { update_available: is_newer(&latest, &current), current, latest })
+    Ok(UpdateCheckResult {
+        update_available: is_newer(&release.version, &current),
+        current,
+        latest: release.version,
+        asset: release.asset,
+    })
 }
 
 fn update_state_path() -> std::path::PathBuf {
@@ -225,7 +251,7 @@ pub fn skip_version(version: &str) -> Result<(), String> {
     update_prompt_state(|state| state.skip(version))
 }
 
-fn fetch_latest_version() -> Result<String, String> {
+fn fetch_latest_release() -> Result<LatestRelease, String> {
     let mut command = Command::new("curl");
     command.args([
         "-fsSL",
@@ -253,18 +279,69 @@ fn fetch_latest_version() -> Result<String, String> {
             format!("GitHub 请求失败：{detail}")
         });
     }
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("GitHub 返回了无效数据：{error}"))?;
-    let tag = json
-        .get("tag_name")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "GitHub release 缺少 tag_name".to_owned())?;
-    let version = tag.trim().trim_start_matches(['v', 'V']);
+    parse_latest_release(&output.stdout)
+}
+
+fn parse_latest_release(bytes: &[u8]) -> Result<LatestRelease, String> {
+    let release: GitHubRelease =
+        serde_json::from_slice(bytes).map_err(|error| format!("GitHub 返回了无效数据：{error}"))?;
+    let version = release.tag_name.trim().trim_start_matches(['v', 'V']);
     if version.is_empty() {
-        Err("GitHub release 的版本号为空".to_owned())
-    } else {
-        Ok(version.to_owned())
+        return Err("GitHub release 的版本号为空".to_owned());
     }
+    let version = version.to_owned();
+    let asset = select_windows_x64_installer(
+        &version,
+        release.body.as_deref().unwrap_or_default(),
+        release.assets,
+    );
+    Ok(LatestRelease { version, asset })
+}
+
+fn expected_windows_x64_installer_name(version: &str) -> String {
+    format!("NebulaTerminal-{version}-windows-x64-setup.exe")
+}
+
+fn select_windows_x64_installer(
+    version: &str,
+    release_body: &str,
+    assets: Vec<GitHubReleaseAsset>,
+) -> Option<UpdateAsset> {
+    if !cfg!(all(windows, target_arch = "x86_64")) {
+        return None;
+    }
+    let expected_name = expected_windows_x64_installer_name(version);
+    let asset = assets.into_iter().find(|asset| asset.name == expected_name)?;
+    let sha256 = asset
+        .digest
+        .as_deref()
+        .and_then(normalize_sha256)
+        .or_else(|| checksum_from_release_body(release_body, &expected_name));
+    Some(UpdateAsset {
+        version: version.to_owned(),
+        name: asset.name,
+        download_url: asset.browser_download_url,
+        size: (asset.size > 0).then_some(asset.size),
+        sha256,
+    })
+}
+
+fn normalize_sha256(value: &str) -> Option<String> {
+    let hex = value.trim().strip_prefix("sha256:")?;
+    (hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| hex.to_ascii_lowercase())
+}
+
+fn checksum_from_release_body(body: &str, asset_name: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        if !line.contains(&format!("`{asset_name}`")) {
+            return None;
+        }
+        line.split('`').find_map(|part| {
+            (part.len() == 64 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .then(|| part.to_ascii_lowercase())
+        })
+    })
 }
 
 /// Compare dotted numeric prefixes ("0.7.10" > "0.7.9"); anything after the
@@ -292,7 +369,10 @@ fn is_newer(latest: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{REMIND_LATER_SECS, UpdatePromptState, is_newer};
+    use super::{
+        REMIND_LATER_SECS, UpdatePromptState, checksum_from_release_body, is_newer,
+        parse_latest_release,
+    };
 
     #[test]
     fn version_comparison_is_numeric_per_segment() {
@@ -328,5 +408,61 @@ mod tests {
 
         state.remind_later("1.2.0", 1_000);
         assert_eq!(state.skipped_version, None, "稍后提醒应重新启用该版本");
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    fn release_parser_selects_only_the_exact_windows_installer() {
+        let json = br#"{
+            "tag_name": "v1.4.0",
+            "body": "",
+            "assets": [
+                {
+                    "name": "NebulaTerminal-v1.4.0-windows-x64.zip",
+                    "browser_download_url": "https://example.invalid/portable.zip",
+                    "size": 10,
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                {
+                    "name": "NebulaTerminal-1.4.0-windows-x64-setup.exe",
+                    "browser_download_url": "https://github.com/Kuddev/nebula/releases/download/v1.4.0/NebulaTerminal-1.4.0-windows-x64-setup.exe",
+                    "size": 42,
+                    "digest": "sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                }
+            ]
+        }"#;
+        let release = parse_latest_release(json).expect("valid release");
+        let asset = release.asset.expect("x64 installer");
+
+        assert_eq!(release.version, "1.4.0");
+        assert_eq!(asset.name, "NebulaTerminal-1.4.0-windows-x64-setup.exe");
+        assert_eq!(asset.size, Some(42));
+        let expected_hash = "b".repeat(64);
+        assert_eq!(asset.sha256.as_deref(), Some(expected_hash.as_str()));
+    }
+
+    #[test]
+    fn release_body_checksum_matches_the_exact_asset_name() {
+        let hash = "1234567890abcdef".repeat(4);
+        let portable_hash = "fedcba0987654321".repeat(4);
+        let installer = "NebulaTerminal-1.4.0-windows-x64-setup.exe";
+        let body = format!(
+            "**SHA256**\n- `NebulaTerminal-v1.4.0-windows-x64.zip`: `{portable_hash}`\n- `{installer}`: `{hash}`"
+        );
+
+        assert_eq!(checksum_from_release_body(&body, installer).as_deref(), Some(hash.as_str()));
+        assert_eq!(
+            checksum_from_release_body(&body, "NebulaTerminal-1.4.1-windows-x64-setup.exe"),
+            None
+        );
+    }
+
+    #[test]
+    fn release_parser_accepts_a_null_release_body() {
+        let json = br#"{"tag_name":"v1.4.0","body":null,"assets":[]}"#;
+        let release = parse_latest_release(json).expect("nullable GitHub release body");
+
+        assert_eq!(release.version, "1.4.0");
+        assert!(release.asset.is_none());
     }
 }
