@@ -83,16 +83,11 @@ impl MathOverlay {
         }
 
         let origin = term.viewport_origin_for(size.screen_lines());
-        // In a normal shell, the cursor row is active input and must keep its
-        // literal source. Full-screen terminal apps commonly park that cursor on the
-        // final answer row; passing it through would filter the very formula
-        // we need to draw.
-        let cursor = (!term.mode().contains(TermMode::ALT_SCREEN))
-            .then(|| {
-                nebula_terminal::term::point_to_viewport_from(origin, term.grid().cursor.point)
-            })
-            .flatten()
-            .filter(|point| point.line < size.screen_lines() && point.column.0 < size.columns());
+        // 光标所在行是活动输入，必须保留原文。备用屏幕里同样放过：编辑器
+        // 的光标压在你要改的那一行上，换成渲染图就没法编辑源码了。
+        let cursor =
+            nebula_terminal::term::point_to_viewport_from(origin, term.grid().cursor.point)
+                .filter(|point| point.line < size.screen_lines() && point.column.0 < size.columns());
         let rendered_cells = scan_cells_from_term(term, size, default_foreground);
         let overlays = terminal_math::scan_visible(
             &mut self.state,

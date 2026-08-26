@@ -8611,14 +8611,11 @@ impl Display {
         // 四类标准定界符使用同一内容判定；Vi、搜索和选区仍由终端接管。
         let terminal_math_overlays =
             if !vi_mode && search_state.regex().is_none() && selection_range.is_none() {
-                // In a regular shell the line containing the cursor is live input,
-                // so the scanner must leave it alone. Full-screen terminal apps
-                // instead frequently leave the terminal cursor on the
-                // last rendered message. Treating that row as editable makes its
-                // formula disappear exactly while it is visible.
-                let visible_cursor = (!alt_screen)
-                    .then(|| term::point_to_viewport_from(viewport_origin, cursor_point))
-                    .flatten()
+                // 光标所在逻辑行是活动输入，扫描必须放过它，否则正在敲的
+                // 命令会被当成公式替换掉。备用屏幕里同样要放过：编辑器
+                // （vim/nvim 看 .tex/.md）的光标就压在你要改的那一行上，
+                // 把它换成渲染图等于让人没法编辑自己的源码。
+                let visible_cursor = term::point_to_viewport_from(viewport_origin, cursor_point)
                     .filter(|point| {
                         point.line < view.screen_lines() && point.column.0 < view.columns()
                     });

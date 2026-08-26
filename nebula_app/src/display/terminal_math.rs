@@ -28,6 +28,26 @@ const MAX_VISIBLE_FORMULAS: usize = 64;
 const MAX_PERSISTED_FORMULAS: usize = 2_048;
 const PERSISTED_FORMULA_BUDGET: usize = 1024 * 1024;
 const MAX_HISTORY_FORMULA_ROWS: usize = 512;
+/// Row budget for the closing search of a **bare** delimiter (`(…)` / `[…]`
+/// left over after Markdown ate the backslashes). `MAX_VISIBLE_FORMULAS` caps
+/// how many formulas *succeed*, not how many candidates fail, and a bare opener
+/// carries no intent of its own — an unclosed `(` would scan to the end of the
+/// grid, once per `(`, inside the paint frame. A real display block spans a
+/// handful of rows; anything longer is not a formula that got wrapped.
+const BARE_PAREN_SEARCH_ROWS: usize = 8;
+/// Same budget for the multi-row `[` block. It may legitimately hold an
+/// `aligned` environment, so it gets more room than an inline paren.
+const BARE_BRACKET_SEARCH_ROWS: usize = 24;
+/// Cells the whole frame may spend on closing searches for **bare** delimiters.
+///
+/// The per-candidate row cap above is not enough on its own: one screen can hold
+/// a few thousand unclosed `(`, and 8 rows × 200 columns each still adds up to
+/// millions of cell visits per frame. This second gate keeps the frame's worst
+/// case proportional to the grid rather than to its square. Running out only
+/// costs literal text for the remaining bare candidates — every delimiter that
+/// states its own intent (`$$`, `\[`, `\(`, `$`) has an O(1) pre-filter and is
+/// never charged here.
+const BARE_SEARCH_CELL_BUDGET: usize = 4 * 1024;
 const FORMULA_INSET: f32 = 2.0;
 /// How many consecutive blank rows one side of a formula may lend it. Two is
 /// what an AI answer's `$$` block is normally surrounded by; taking more would
@@ -616,6 +636,15 @@ pub(crate) struct FormulaOverlay {
 }
 
 impl FormulaOverlay {
+    /// 归一化后的 TeX 源（GPUI 壳绘制/缓存键用）。
+    ///
+    /// PR #55 重写扫描器时把这个访问器删了，但 `gpui_shell` 的
+    /// `math_overlay.rs` 一直在调它——默认 features 不编译 gpui 壳，所以
+    /// `cargo build -p nebula` 看不出来。加 feature 才暴露。
+    pub(crate) fn source_arc(&self) -> Arc<str> {
+        Arc::clone(&self.source)
+    }
+
     fn contains(&self, point: Point<usize>) -> bool {
         self.spans.iter().any(|span| {
             usize::try_from(span.row) == Ok(point.line)
@@ -842,12 +871,70 @@ impl TextGrid {
         }
     }
 
+    /// Closing search for **display** delimiters: they own the rows between
+    /// them, so a real newline is part of the formula. Agent TUIs that hard-wrap
+    /// a block formula across rows are recovered by this path.
+    ///
+    /// The search is bounded only by the grid, so callers must have an O(1)
+    /// reason to believe the opener is real — see [`Self::find_closing_bounded`]
+    /// for the delimiters that do not.
     fn find_closing(&self, mut position: GridPosition, delimiter: &[char]) -> Option<GridPosition> {
         loop {
             if position.row >= self.rows.len() {
                 return None;
             }
             if self.starts_with(position, delimiter) && !self.is_escaped(position) {
+                return Some(position);
+            }
+            position = self.next(position)?;
+        }
+    }
+
+    /// Closing search for **inline** delimiters. Inline TeX may cross a
+    /// terminal's physical row only when that row was produced by a soft wrap:
+    /// a real newline still ends the span, so two separate terminal lines can
+    /// never accidentally become one formula.
+    fn find_closing_soft_wrap(
+        &self,
+        mut position: GridPosition,
+        delimiter: &[char],
+    ) -> Option<GridPosition> {
+        loop {
+            if position.row >= self.rows.len() {
+                return None;
+            }
+            if self.starts_with(position, delimiter) && !self.is_escaped(position) {
+                return Some(position);
+            }
+            let previous_row = position.row;
+            position = self.next(position)?;
+            if position.row != previous_row && !self.wrapped[previous_row] {
+                return None;
+            }
+        }
+    }
+
+    /// Closing search with an explicit row budget **and** a frame-wide cell
+    /// budget, for openers that carry no intent of their own. A bare `(` is the
+    /// densest character in ordinary terminal output (code, logs, JSON), and an
+    /// unclosed one would otherwise scan to the end of the grid — once per `(`,
+    /// every frame. Measured on a 50×200 grid of unclosed parens that is a 165×
+    /// regression against the same grid of plain text, so the budget is not
+    /// optional. `spent` is shared by every bare candidate in the frame.
+    fn find_closing_bounded(
+        &self,
+        mut position: GridPosition,
+        rows: usize,
+        spent: &mut usize,
+        mut matcher: impl FnMut(&Self, GridPosition) -> Option<bool>,
+    ) -> Option<GridPosition> {
+        let last_row = position.row.saturating_add(rows);
+        loop {
+            if position.row >= self.rows.len() || position.row > last_row || *spent == 0 {
+                return None;
+            }
+            *spent -= 1;
+            if matcher(self, position)? {
                 return Some(position);
             }
             position = self.next(position)?;
@@ -1154,6 +1241,8 @@ fn scan_grid_result(grid: &TextGrid) -> GridScanResult {
     let mut overlays = Vec::new();
     let mut unmatched_display = None;
     let mut position = GridPosition { row: 0, column: 0 };
+    // 只有裸定界符消费它：其余四类各自有 O(1) 前置闸。
+    let mut bare_budget = BARE_SEARCH_CELL_BUDGET;
 
     while position.row < grid.rows.len() && overlays.len() < MAX_VISIBLE_FORMULAS {
         let (candidate, incomplete_display) =
@@ -1189,9 +1278,9 @@ fn scan_grid_result(grid: &TextGrid) -> GridScanResult {
                     None,
                 )
             } else if grid.character(position) == Some('[') && !grid.is_escaped(position) {
-                (find_bare_bracket_formula(grid, position), None)
+                (find_bare_bracket_formula(grid, position, &mut bare_budget), None)
             } else if grid.character(position) == Some('(') && !grid.is_escaped(position) {
-                (find_bare_paren_formula(grid, position), None)
+                (find_bare_paren_formula(grid, position, &mut bare_budget), None)
             } else if grid.character(position) == Some('$') && !grid.is_escaped(position) {
                 (find_dollar_formula(grid, position), None)
             } else {
@@ -1225,7 +1314,14 @@ fn find_formula(
     kind: DelimiterKind,
 ) -> Option<(FormulaOverlay, GridPosition)> {
     let source_start = grid.after(open, opening.len());
-    let close = grid.find_closing(source_start, closing)?;
+    // Display delimiters own the rows between them, so they may cross a real
+    // newline. Inline delimiters live inside a line of prose: crossing a hard
+    // wrap there merges two unrelated terminal lines into one formula.
+    let close = if kind.is_display() {
+        grid.find_closing(source_start, closing)?
+    } else {
+        grid.find_closing_soft_wrap(source_start, closing)?
+    };
     let after = grid.after(close, closing.len());
     let source = grid.extract(source_start, close)?;
     let display = kind.is_display();
@@ -1240,22 +1336,45 @@ fn find_dollar_formula(
     open: GridPosition,
 ) -> Option<(FormulaOverlay, GridPosition)> {
     let source_start = grid.after(open, 1);
-    if grid.character(source_start)? == '$' {
+    let first = grid.character(source_start)?;
+    // `$ ` is how every sh-family prompt ends, and `$$` belongs to a display
+    // delimiter. Neither opens an inline formula.
+    if first.is_whitespace() || first == '$' {
         return None;
     }
 
-    let close = find_inline_dollar_closing(grid, source_start)?;
-    let after = grid.after(close, 1);
-    let source = grid.extract(source_start, close)?;
-    if !standard_formula_source(&source, false) {
-        return None;
+    let mut search = source_start;
+    while let Some(close) = find_inline_dollar_closing(grid, search) {
+        // TeX never puts a space right before the closing `$`, while a shell
+        // line routinely does (`$HOME $USER`). A following identifier
+        // character means this `$` opens the *next* variable rather than
+        // closing ours.
+        let previous = grid.previous(close).and_then(|position| grid.character(position));
+        let next = grid.next(close).and_then(|position| grid.character(position));
+        if previous.is_some_and(char::is_whitespace)
+            || next.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            search = grid.after(close, 1);
+            continue;
+        }
+
+        let after = grid.after(close, 1);
+        let source = grid.extract(source_start, close)?;
+        if standard_formula_source(&source, false) {
+            return Some((
+                make_overlay(grid, open, after, source, DelimiterKind::DollarInline),
+                after,
+            ));
+        }
+        search = after;
     }
-    Some((make_overlay(grid, open, after, source, DelimiterKind::DollarInline), after))
+    None
 }
 
 /// Find a single-dollar closer without borrowing either character from a
-/// `$$` display delimiter. This remains true across terminal rows: an unmatched
-/// shell/currency dollar above a display formula must not consume its opener.
+/// `$$` display delimiter, and without leaving the logical line: an inline
+/// formula may follow a soft wrap, but a real newline ends it. An unmatched
+/// shell/currency dollar must not reach across rows to consume another one.
 fn find_inline_dollar_closing(grid: &TextGrid, mut position: GridPosition) -> Option<GridPosition> {
     loop {
         if position.row >= grid.rows.len() {
@@ -1270,7 +1389,11 @@ fn find_inline_dollar_closing(grid: &TextGrid, mut position: GridPosition) -> Op
                 return Some(position);
             }
         }
+        let previous_row = position.row;
         position = grid.next(position)?;
+        if position.row != previous_row && !grid.wrapped[previous_row] {
+            return None;
+        }
     }
 }
 
@@ -1286,6 +1409,7 @@ fn find_inline_dollar_closing(grid: &TextGrid, mut position: GridPosition) -> Op
 fn find_bare_bracket_formula(
     grid: &TextGrid,
     open: GridPosition,
+    budget: &mut usize,
 ) -> Option<(FormulaOverlay, GridPosition)> {
     if !span_is_blank_or_markdown_list_marker(grid, open.row, open.column) {
         return None;
@@ -1294,17 +1418,22 @@ fn find_bare_bracket_formula(
     let multiline = grid.span_is_blank(open.row, open.column + 1, grid.columns);
     let close = if multiline {
         // 多行形态：`[` 独占一行，闭合 `]` 也必须独占一行。数学源码里
-        // `[0, 1]` 区间的 `]` 不具备闭合资格，跳过继续找。
-        let mut search = source_start;
-        loop {
-            let candidate = grid.find_closing(search, &[']'])?;
-            if grid.span_is_blank(candidate.row, 0, candidate.column)
-                && grid.span_is_blank(candidate.row, candidate.column + 1, grid.columns)
-            {
-                break candidate;
-            }
-            search = grid.next(candidate)?;
-        }
+        // `[0, 1]` 区间的 `]` 不具备闭合资格，跳过继续找。搜索同样带行
+        // 预算：屏幕底部一个没闭合的 `[` 不该每帧扫到网格末尾。
+        grid.find_closing_bounded(
+            source_start,
+            BARE_BRACKET_SEARCH_ROWS,
+            budget,
+            |grid, position| {
+                if grid.character(position) != Some(']') || grid.is_escaped(position) {
+                    return Some(false);
+                }
+                Some(
+                    grid.span_is_blank(position.row, 0, position.column)
+                        && grid.span_is_blank(position.row, position.column + 1, grid.columns),
+                )
+            },
+        )?
     } else {
         // 单行形态 `[ … ]`：闭合必须是本行最后一个非空白字符。
         let cells = grid.rows.get(open.row)?;
@@ -1346,23 +1475,26 @@ fn span_is_blank_or_markdown_list_marker(grid: &TextGrid, row: usize, end: usize
 fn find_bare_paren_formula(
     grid: &TextGrid,
     open: GridPosition,
+    budget: &mut usize,
 ) -> Option<(FormulaOverlay, GridPosition)> {
     let source_start = grid.after(open, 1);
     let mut depth = 1usize;
-    let mut position = source_start;
-    let close = loop {
-        match grid.character(position) {
-            Some('(') if !grid.is_escaped(position) => depth += 1,
-            Some(')') if !grid.is_escaped(position) => {
-                depth -= 1;
-                if depth == 0 {
-                    break position;
-                }
-            },
-            _ => {},
-        }
-        position = grid.next(position)?;
-    };
+    let close = grid.find_closing_bounded(
+        source_start,
+        BARE_PAREN_SEARCH_ROWS,
+        budget,
+        |grid, position| {
+            match grid.character(position) {
+                Some('(') if !grid.is_escaped(position) => depth += 1,
+                Some(')') if !grid.is_escaped(position) => {
+                    depth -= 1;
+                    return Some(depth == 0);
+                },
+                _ => {},
+            }
+            Some(false)
+        },
+    )?;
     let after = grid.after(close, 1);
     let source = grid.extract(source_start, close)?;
     if !bare_formula_source(&source, false) {
@@ -1633,16 +1765,184 @@ fn has_known_tex_command(source: &str) -> bool {
     false
 }
 
-/// Explicit TeX delimiters are the intent signal. Content validation belongs
-/// to the shared compiler; the terminal scanner only rejects an empty span.
-fn standard_formula_source(source: &str, _display: bool) -> bool {
-    !source.trim().is_empty()
+/// Delimiters state intent, content supplies evidence.
+///
+/// The intent statement alone is not enough: a terminal is full of dollars that
+/// are shell sigils, prompts and prices, so a scanner that accepts any non-empty
+/// span turns `echo $HOME $USER` into a formula. Display blocks (`$$…$$`,
+/// `\[…\]`) rarely occur outside real math, so lax evidence suffices; inline
+/// `$…$` and `\(…\)` collide with currency, shell variables and BRE capture
+/// groups, so their evidence must be structurally compact.
+fn standard_formula_source(source: &str, display: bool) -> bool {
+    let source = source.trim();
+    !obviously_non_math(source) && has_math_evidence(source, display)
+}
+
+/// Terminal noise that must never render as math regardless of delimiter
+/// strength: comments/URLs (`//`), Windows paths (`:\`), control bytes,
+/// currency amounts, and ALL_CAPS shell variables.
+fn obviously_non_math(source: &str) -> bool {
+    if source.is_empty()
+        || source.contains("//")
+        || source.contains(":\\")
+        || source
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return true;
+    }
+
+    // Currency and shell variables are the dominant terminal use of dollars.
+    let currency = source.chars().all(|character| {
+        character.is_ascii_digit()
+            || character.is_ascii_whitespace()
+            || ".,EURUSDCNYGBPJPY".contains(character)
+    });
+    let shell_identifier = source.chars().all(|character| {
+        character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+    });
+    currency || (shell_identifier && source.chars().count() > 1)
+}
+
+/// At least one structural sign of mathematics. `lax` (display blocks) lifts
+/// the compact-operand requirement on script bases so implicit products like
+/// `mc^2` qualify; inline keeps it so `$foo^bar$` stays literal text.
+fn has_math_evidence(source: &str, lax: bool) -> bool {
+    let chars: Vec<_> = source.chars().collect();
+    let single_variable = chars.len() == 1 && chars[0].is_alphabetic();
+    let tex_command = chars.windows(2).any(|pair| pair[0] == '\\' && pair[1].is_alphabetic());
+    let script = source.find(['^', '_']).is_some_and(|index| {
+        let (base, suffix) = source.split_at(index);
+        let suffix = &suffix[1..];
+        let base_qualifies = if lax { !base.trim().is_empty() } else { explicit_operand(base) };
+        base_qualifies && !suffix.trim().is_empty()
+    });
+    let relation = ["<=", ">=", "!=", "==", "=", "<", ">"].into_iter().any(|operator| {
+        source.find(operator).is_some_and(|index| {
+            relation_operand(&source[..index])
+                && relation_operand(&source[index + operator.len()..])
+        })
+    });
+    // `n!` / `\binom` 的裸写法：阶乘是后缀运算符，本身就是数学证据。
+    let factorial = source
+        .trim_end()
+        .strip_suffix('!')
+        .is_some_and(|base| explicit_operand(base) || implicit_product_operand(base));
+    let structural = script
+        || relation
+        || factorial
+        || source.chars().any(|character| {
+            matches!(
+                character,
+                '±' | '×'
+                    | '÷'
+                    | '√'
+                    | '∑'
+                    | '∏'
+                    | '∫'
+                    | '∞'
+                    | '≈'
+                    | '≠'
+                    | '≤'
+                    | '≥'
+                    | '∂'
+                    | '∇'
+                    | '∈'
+                    | '∉'
+                    | '⊂'
+                    | '⊆'
+                    | '∪'
+                    | '∩'
+                    | '→'
+                    | '↦'
+            )
+        });
+    let known_function = source.split(|character: char| !character.is_alphabetic()).any(|word| {
+        matches!(
+            word.to_ascii_lowercase().as_str(),
+            "sin" | "cos" | "tan" | "log" | "ln" | "exp" | "lim" | "det" | "max" | "min"
+        )
+    });
+    let function_application = source.find('(').is_some_and(|open| {
+        let name = source[..open].trim();
+        let arguments = source[open + 1..].strip_suffix(')').unwrap_or("").trim();
+        name.chars().count() == 1 && name.chars().all(char::is_alphabetic) && !arguments.is_empty()
+    });
+    let parenthesized_variable = source
+        .strip_prefix('(')
+        .and_then(|source| source.strip_suffix(')'))
+        .is_some_and(explicit_operand);
+    let compact_operator = ['+', '-', '*', '/'].into_iter().any(|operator| {
+        source.find(operator).is_some_and(|index| {
+            let (left, right) = source.split_at(index);
+            let right = &right[operator.len_utf8()..];
+            explicit_operand(left) && explicit_operand(right)
+        })
+    });
+
+    single_variable
+        || tex_command
+        || structural
+        || known_function
+        || function_application
+        || parenthesized_variable
+        || compact_operator
+}
+
+/// A single mathematical operand: one variable at most, optionally scripted.
+/// Multi-letter runs are rejected so `$foo^bar$` and `key=value` stay text.
+fn explicit_operand(operand: &str) -> bool {
+    let operand = operand.trim().trim_matches(['(', ')', '[', ']', '{', '}']);
+    if operand.is_empty() || operand.contains(char::is_whitespace) {
+        return false;
+    }
+    let alphabetic = operand.chars().filter(|character| character.is_alphabetic()).count();
+    alphabetic <= 1
+        && operand.chars().all(|character| {
+            character.is_alphanumeric() || matches!(character, '.' | ',' | '\\' | '^' | '_')
+        })
+}
+
+/// Physics writes products without a multiplication sign: `mc^2`, `nRT`, `ma`.
+/// [`explicit_operand`] caps identifiers at one letter and therefore rejects
+/// every one of them, which is why `$E=mc^2$` used to stay literal. Allow up to
+/// three letters here — still no whitespace and no punctuation beyond scripts,
+/// so `PATH=/tmp` (slash), `key=value` (five letters) and `npm install`
+/// (whitespace) remain outside the formula path.
+fn implicit_product_operand(operand: &str) -> bool {
+    let operand = operand.trim().trim_matches(['(', ')', '[', ']', '{', '}']);
+    if operand.is_empty() || operand.contains(char::is_whitespace) {
+        return false;
+    }
+    let alphabetic = operand.chars().filter(|character| character.is_alphabetic()).count();
+    (1..=3).contains(&alphabetic)
+        && operand
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '^' | '_' | '.'))
+}
+
+/// A relation may also be applied to a function call (`f(x)=0`) or to an
+/// implicit product (`E=mc^2`), neither of which is a single operand.
+fn relation_operand(operand: &str) -> bool {
+    let operand = operand.trim();
+    explicit_operand(operand)
+        || implicit_product_operand(operand)
+        || operand.find('(').is_some_and(|open| {
+            let name = operand[..open].trim();
+            let arguments = operand[open + 1..].strip_suffix(')').unwrap_or("").trim();
+            name.chars().count() == 1
+                && name.chars().all(char::is_alphabetic)
+                && !arguments.is_empty()
+        })
 }
 
 /// A bare bracket or parenthesis has no explicit TeX intent after Markdown has
 /// consumed the delimiter backslashes. Recover it only when the remaining
 /// source still carries TeX/equation evidence, and never reinterpret a Windows
 /// path as a formula merely because it contains a whitelisted command name.
+///
+/// Bare delimiters answer to both layers: the standard evidence above, plus
+/// their own stricter requirement of a known command or a compact equation.
 fn bare_formula_source(source: &str, display: bool) -> bool {
     standard_formula_source(source, display)
         && !source.contains(":\\")
@@ -2491,37 +2791,54 @@ mod tests {
         assert!(!formula_uses_reasoning_style(&final_answer));
     }
 
+    /// 行内定界符只跨软换行。跨真实换行会把互不相关的两行终端输出合成
+    /// 一个公式（`$x` / `$y` 两行、WSL bash 两个提示符之间的整段输出），
+    /// 代价是 Agent TUI 硬换行的**行内**公式恢复不了——那种情况保持原文，
+    /// 是安全的失败模式。块级公式仍然跨真实换行，见
+    /// [`display_math_can_cross_hard_terminal_rows`]。
     #[test]
-    fn explicit_inline_formulas_cross_terminal_rows() {
+    fn explicit_inline_formulas_cross_soft_wraps_only() {
         for mut grid in [
             TextGrid::from_rows(&["$e^    ", r"{i\pi}+1=0$"]),
             TextGrid::from_rows(&[r"\(e^    ", r"{i\pi}+1=0\)"]),
         ] {
-            for wrapped in [false, true] {
-                grid.wrapped[0] = wrapped;
-                let overlays = scan_grid(&grid);
-                assert_eq!(overlays.len(), 1);
-                assert!(overlays[0].source.contains("e^"));
-                assert!(overlays[0].source.contains(r"{i\pi}+1=0"));
-            }
+            grid.wrapped[0] = true;
+            let overlays = scan_grid(&grid);
+            assert_eq!(overlays.len(), 1, "软换行内要接起来");
+            assert!(overlays[0].source.contains("e^"));
+            assert!(overlays[0].source.contains(r"{i\pi}+1=0"));
+
+            grid.wrapped[0] = false;
+            assert!(scan_grid(&grid).is_empty(), "真实换行必须断开行内公式");
         }
     }
 
+    /// Agent TUI 的硬换行：**块级**形态（`\[ \]`、裸 `[`、`$$`）照旧恢复，
+    /// 行内形态保持原文。
     #[test]
-    fn screenshot_inline_formulas_survive_agent_hard_wraps() {
+    fn screenshot_display_formulas_survive_agent_hard_wraps() {
         for rows in [
-            vec![r"• (\displaystyle \frac{d}{dx}\sin", r"x=\cos x)，done"],
-            vec![r"• \(\displaystyle \frac{d}{dx}\sin", r"x=\cos x\)，done"],
-            vec![r"• $\lim_{x\to0}\frac{\sin", r"x}{x}=1$，$PV=nRT$"],
+            vec![r"\[\displaystyle \frac{d}{dx}\sin", r"x=\cos x\]"],
+            vec!["$$", r"\lim_{x\to0}\frac{\sin", r"x}{x}=1", "$$"],
         ] {
             let overlays = scan_grid(&TextGrid::from_rows(&rows));
             assert!(!overlays.is_empty(), "expected wrapped formula in {rows:?}");
             for overlay in overlays {
-                compile_formula(&overlay.source, false, 18.0, 1.0, DEFAULT_LIMITS).unwrap_or_else(
+                compile_formula(&overlay.source, true, 18.0, 1.0, DEFAULT_LIMITS).unwrap_or_else(
                     |error| panic!("wrapped formula failed: {:?}: {error:?}", overlay.source),
                 );
             }
         }
+        // 同一批内容的行内形态被硬换行拆开时保持原文，不再跨行拼接。
+        assert!(
+            scan_grid(&TextGrid::from_rows(&[
+                r"• $\lim_{x\to0}\frac{\sin",
+                r"x}{x}=1$，$PV=nRT$",
+            ]))
+            .iter()
+            .all(|overlay| !overlay.source.contains("lim")),
+            "行内公式不得跨真实换行拼接"
+        );
     }
 
     #[test]
@@ -2732,8 +3049,8 @@ d & -b \\
             vec![(r"\displaystyle F=ma".into(), false), (r"\displaystyle PV=nRT".into(), false),]
         );
 
-        assert_eq!(sources(&[r"\(key=value\)"]), vec![("key=value".into(), false)]);
-        assert_eq!(sources(&["$key=value$"]), vec![("key=value".into(), false)]);
+        assert_eq!(sources(&[r"\(key=value\)"]), Vec::new());
+        assert_eq!(sources(&["$key=value$"]), Vec::new());
         assert!(sources(&["setting (key=value)"]).is_empty());
     }
 
@@ -2747,18 +3064,111 @@ d & -b \\
         assert!(sources(&[r"path (C:\temp\frac) oops"]).is_empty());
     }
 
+    /// 定界符表明意图，内容提供证据——**两者都要**。只看定界符会把终端里
+    /// 满地的 shell sigil、提示符和价格全渲染成公式，所以这些形状必须保持
+    /// 原文。它们不是理论候选：`HOME`、`npm install`、`PATH=/tmp` 在
+    /// pulldown-latex 里都能成功解析成公式事件，判定放过就是真替换。
     #[test]
-    fn explicit_delimiters_accept_any_nonempty_source() {
+    fn explicit_delimiters_still_require_content_evidence() {
         assert!(sources(&[r"escaped \$x$"]).is_empty());
-        assert_eq!(sources(&["price $5$ and $12.50$"]).len(), 2);
-        assert_eq!(sources(&["env $LONG_VARIABLE$"]), vec![("LONG_VARIABLE".into(), false)]);
-        assert_eq!(sources(&["quote $USD 20$ today"]), vec![("USD 20".into(), false)]);
-        assert_eq!(sources(&["literal $hello$ text"]), vec![("hello".into(), false)]);
-        assert_eq!(sources(&["path $foo/bar$"]), vec![("foo/bar".into(), false)]);
-        assert_eq!(sources(&["config $PATH=/tmp$"]), vec![("PATH=/tmp".into(), false)]);
-        assert_eq!(sources(&[r"plain \(normal prose\)"]), vec![("normal prose".into(), false)]);
-        assert_eq!(sources(&["$$hello world$$"]), vec![("hello world".into(), true)]);
+        // 货币、全大写环境变量、散文、配置串：噪音否决层与证据层各管一段。
+        assert!(sources(&["price $5$ and $12.50$"]).is_empty());
+        assert!(sources(&["env $LONG_VARIABLE$"]).is_empty());
+        assert!(sources(&["quote $USD 20$ today"]).is_empty());
+        assert!(sources(&["literal $hello$ text"]).is_empty());
+        assert!(sources(&["config $PATH=/tmp$"]).is_empty());
+        assert!(sources(&[r"plain \(normal prose\)"]).is_empty());
         assert!(sources(&["$ $", r"\(  \)", "$$  $$"]).is_empty());
+        // 路径不是公式：`explicit_operand` 把标识符卡在一个字母，`foo/bar`
+        // 的两侧都不合格，所以 `/` 不构成紧凑运算符证据。
+        assert!(sources(&["path $foo/bar$"]).is_empty());
+        // 真数学照旧：display 块的 lax 证据。
+        assert_eq!(sources(&["$$E = mc^2$$"]), vec![("E = mc^2".into(), true)]);
+        assert_eq!(sources(&["$a/b$"]), vec![("a/b".into(), false)]);
+    }
+
+    /// 普通 shell 里真实出现过的形状，一个都不许变成公式。
+    /// 每一行都对应实测过的误报（见 PR #55 review）。
+    #[test]
+    fn ordinary_shell_output_stays_literal() {
+        // 变量 sigil 成对出现，中间那截会被当成源码。
+        assert!(sources(&["echo $HOME $USER"]).is_empty());
+        assert!(sources(&["echo $HOME"]).is_empty());
+        // sh 家族提示符以 `$ ` 结尾——`$` 后紧跟空白直接否决。
+        assert!(sources(&["$ npm install", "$ npm test"]).is_empty());
+        assert!(sources(&["user@host:~$ echo hello", "hello", "user@host:~$ ls"]).is_empty());
+        // 行内定界符不跨真实换行，两行各自的 `$` 不配对。
+        assert!(sources(&["$x", "$y"]).is_empty());
+        assert!(sources(&["export $FOO=1", "export $BAR=2"]).is_empty());
+        // 价格与提交信息。
+        assert!(sources(&["cost $5 vs $7 today"]).is_empty());
+        assert!(sources(&["fix: charge $9.99", "feat: refund $9.99"]).is_empty());
+        // BRE 捕获组：`\(…\)` 撞 sed/grep 的日常写法。
+        assert!(sources(&[r"sed 's/\(abc\)/x/' input.txt"]).is_empty());
+        assert!(sources(&[r"grep '\(foo\|bar\)' log.txt"]).is_empty());
+    }
+
+    /// 软换行仍要跨——这是行内公式在窄窗口里的正常形态；跨的是软换行，
+    /// 不是真实换行。
+    #[test]
+    fn inline_formula_crosses_soft_wrap_but_not_a_real_newline() {
+        let mut wrapped = TextGrid::from_rows(&["prefix $x^2", "+ y^2$ tail"]);
+        wrapped.wrapped[0] = true;
+        assert_eq!(scan_grid(&wrapped).len(), 1, "soft wrap 内的行内公式要接起来");
+
+        let hard = TextGrid::from_rows(&["prefix $x^2", "+ y^2$ tail"]);
+        assert!(scan_grid(&hard).is_empty(), "真实换行必须断开行内公式");
+    }
+
+    /// display 定界符照旧跨真实换行：`$$` / `\[ \]` 占住它们之间的整块，
+    /// Agent TUI 硬换行的块级公式靠这条恢复。
+    #[test]
+    fn display_formula_still_crosses_a_real_newline() {
+        assert_eq!(sources(&["$$", r"\frac{1}{2}", "$$"]).len(), 1);
+        assert_eq!(sources(&[r"\[", r"\sum_{i=1}^n i", r"\]"]).len(), 1);
+    }
+
+    /// 基线证据层漏掉的两个真公式。`explicit_operand` 把标识符卡在一个字母，
+    /// 物理里省略乘号的 `mc^2` / `nRT` 全被误杀；阶乘则压根没有证据项。
+    #[test]
+    fn implicit_products_and_factorials_are_math() {
+        assert_eq!(sources(&["$E=mc^2$"]), vec![("E=mc^2".into(), false)]);
+        assert_eq!(sources(&["$E = mc^2$"]), vec![("E = mc^2".into(), false)]);
+        assert_eq!(sources(&["$PV=nRT$"]), vec![("PV=nRT".into(), false)]);
+        assert_eq!(sources(&["$F=ma$"]), vec![("F=ma".into(), false)]);
+        assert_eq!(sources(&["$n!$"]), vec![("n!".into(), false)]);
+        assert_eq!(sources(&[r"\(E=mc^2\)"]), vec![("E=mc^2".into(), false)]);
+        // 放宽到三个字母不等于放开散文：这些仍然保持原文。
+        assert!(sources(&["$key=value$"]).is_empty());
+        assert!(sources(&["$PATH=/tmp$"]).is_empty());
+        assert!(sources(&["$npm install$"]).is_empty());
+        assert!(sources(&["$Hello!$"]).is_empty());
+    }
+
+    /// 失败候选必须有预算：`MAX_VISIBLE_FORMULAS` 只限成功数，不限失败数。
+    /// 满屏未闭合的 `(` 曾让单帧扫描从 ~2ms 涨到 ~322ms（50×200 debug）。
+    #[test]
+    fn unclosed_bare_delimiters_stay_within_budget() {
+        let dense: String = std::iter::repeat("(x ").take(66).collect();
+        let rows: Vec<&str> = std::iter::repeat(dense.as_str()).take(50).collect();
+        let grid = TextGrid::from_rows(&rows);
+        let plain: String = std::iter::repeat("plain text ").take(18).collect();
+        let plain_rows: Vec<&str> = std::iter::repeat(plain.as_str()).take(50).collect();
+        let baseline_grid = TextGrid::from_rows(&plain_rows);
+
+        let start = std::time::Instant::now();
+        assert!(scan_grid(&grid).is_empty(), "未闭合的裸括号不产生公式");
+        let dense_cost = start.elapsed();
+        let start = std::time::Instant::now();
+        assert!(scan_grid(&baseline_grid).is_empty());
+        let baseline_cost = start.elapsed();
+
+        // 预算把每个候选的搜索钉在常数行数上，于是总成本跟着格子数走而不是
+        // 格子数的平方。放宽到 12 倍是给 CI 抖动留的余量，回归会是三位数倍。
+        assert!(
+            dense_cost < baseline_cost * 12,
+            "未闭合括号扫描 {dense_cost:?} 相对基准 {baseline_cost:?} 退化成二次复杂度"
+        );
     }
 
     #[test]
