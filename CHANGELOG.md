@@ -8,11 +8,23 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### English
 
-No unreleased changes yet.
+#### Fixed
+- **Common formulas such as `$E=mc^2$` and `$n!$` are recognized without reinterpreting shell variables, prompts, prices, or `sed`/`grep` BRE groups as mathematics.** Inline delimiters may cross terminal soft wraps but no longer join unrelated hard lines.
+- **Resetting a settings drop-down immediately restores its displayed default value** instead of updating the saved setting while leaving the old selection visible.
+- **Rounded terminal panes no longer expose an outline or a gap along their top edge** in either light or dark themes; the shell paint now follows the pane's actual left, right, bottom, and zero-width top gutters.
+
+#### Improved
+- **Terminal TeX rendering now detects formulas from terminal content instead of a recognized AI process name**, so block formulas remain available through WSL, SSH, and full-screen agent interfaces. Standard `$...$`, `$$...$$`, `\(...\)`, and `\[...\]` forms, Markdown-damaged bare delimiters, compact fraction arguments such as `\frac13`, dimmed reasoning output, cell backgrounds, and overlapping persisted formulas are handled more reliably.
 
 ### 简体中文
 
-暂无未发布改动。
+#### 修复
+- **`$E=mc^2$`、`$n!$` 等常见公式可以被正确识别，同时不会把 shell 变量、提示符、价格或 `sed`/`grep` 的 BRE 分组误当成数学公式。** 行内定界符可以跨终端软换行，但不会再连接互不相关的真实换行。
+- **还原设置下拉框后会立即显示默认选项**，不再出现设置值已经写回、界面却仍停留在旧选项的情况。
+- **浅色与深色主题下，圆角终端 pane 四周不再露出线框或顶部缝隙**；壳层绘制现在严格采用 pane 真实的左、右、下卡缝以及零宽度上卡缝。
+
+#### 改进
+- **终端 TeX 渲染改为根据终端内容识别公式，不再依赖识别 AI 进程名称**，因此块级公式可继续用于 WSL、SSH 和全屏 Agent 界面。标准 `$...$`、`$$...$$`、`\(...\)`、`\[...\]`、Markdown 损坏后的裸定界符、`\frac13` 等紧凑分式参数、DIM 推理输出、单元格背景和持久化公式重叠都能得到更可靠的处理。
 
 ## 1.3.1 - 2026-08-25
 

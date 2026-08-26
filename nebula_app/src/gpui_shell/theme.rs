@@ -211,30 +211,51 @@ pub fn card_content_bg(cx: &App) -> Hsla {
 ///
 /// GPUI 没有凹圆角 primitive，因此四角按物理像素扫描圆外区域；卡本身的
 /// 抗锯齿圆角仍是唯一可见边，壳色不会侵入卡内形成第二次 alpha 叠加。
-pub fn paint_shell_around_card(bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
+///
+/// `insets` 必须是调用方**真实**的卡缝，四边分别给——不能在这里假设对称。
+/// 终端卡的上边距是零（08-26 裁定：侧栏 / 终端卡 / 右侧抽屉三列顶边都贴
+/// chrome 下沿），而左右和底部是 8px。这里若按四边 8px 推算，卡矩形整体
+/// 下移 8px：左右两条壳色带从 `y+8` 起画，卡真正的上两个圆角却在 `y`，
+/// 于是 `y..y+8` 里圆角外侧那两块三角没有任何人覆盖——深色主题下露的是
+/// 深色不易察觉，浅色主题下直接露出一圈白边和一道顶部白缝。
+pub fn paint_shell_around_card(
+    bounds: Bounds<Pixels>,
+    insets: gpui::Edges<f32>,
+    window: &mut Window,
+    cx: &App,
+) {
     let color = cx.theme().background;
     let width = f32::from(bounds.size.width);
     let height = f32::from(bounds.size.height);
-    let inset = 8.0_f32.min(width * 0.5).min(height * 0.5);
-    if width <= 0.0 || height <= 0.0 || inset <= 0.0 {
+    if width <= 0.0 || height <= 0.0 {
         return;
     }
 
+    // 逐边钳制，且后一边扣掉前一边已占的空间：窄窗口下两侧卡缝相加超过
+    // 容器宽度时，卡矩形不能退化成负尺寸。
+    let top = insets.top.clamp(0.0, height);
+    let bottom = insets.bottom.clamp(0.0, height - top);
+    let left = insets.left.clamp(0.0, width);
+    let right = insets.right.clamp(0.0, width - left);
+
     let x = f32::from(bounds.origin.x);
     let y = f32::from(bounds.origin.y);
-    let card_w = (width - inset * 2.0).max(0.0);
-    let card_h = (height - inset * 2.0).max(0.0);
+    let card_x = x + left;
+    let card_y = y + top;
+    let card_w = (width - left - right).max(0.0);
+    let card_h = (height - top - bottom).max(0.0);
     let paint = |window: &mut Window, x: f32, y: f32, w: f32, h: f32| {
         if w > 0.0 && h > 0.0 {
             window.paint_quad(fill(Bounds::new(point(px(x), px(y)), size(px(w), px(h))), color));
         }
     };
 
-    // 四条带互不重叠，每个像素只承受一次壳色 alpha。
-    paint(window, x, y, width, inset);
-    paint(window, x, y + height - inset, width, inset);
-    paint(window, x, y + inset, inset, card_h);
-    paint(window, x + width - inset, y + inset, inset, card_h);
+    // 四条带互不重叠，每个像素只承受一次壳色 alpha。某一边卡缝为零时
+    // 对应的带宽度为零，`paint` 直接跳过。
+    paint(window, x, y, width, top);
+    paint(window, x, y + height - bottom, width, bottom);
+    paint(window, x, card_y, left, card_h);
+    paint(window, x + width - right, card_y, right, card_h);
 
     let radius = crate::display::UI_SHELL_RADIUS_LOGICAL.min(card_w * 0.5).min(card_h * 0.5);
     if radius <= 0.0 {
@@ -242,8 +263,6 @@ pub fn paint_shell_around_card(bounds: Bounds<Pixels>, window: &mut Window, cx: 
     }
     let step = 1.0 / window.scale_factor().max(1.0);
     let rows = (radius / step).ceil() as usize;
-    let card_x = x + inset;
-    let card_y = y + inset;
     let card_right = card_x + card_w;
     let card_bottom = card_y + card_h;
     for row in 0..rows {

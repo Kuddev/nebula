@@ -392,7 +392,10 @@ pub struct SettingsPane {
     about_logo: Arc<Image>,
     about_update: AboutUpdateState,
     about_update_seq: u64,
-    selects: Vec<(&'static str, SharedSelect)>,
+    /// 每项还带着自己的 `values` 表：`SelectState` 只认索引，而从代码侧
+    /// 改设置（还原默认值、命令面板切换）时手里只有配置文件记号，没有
+    /// 这张表就没法把闭框的选中项拉回去。
+    selects: Vec<(&'static str, SharedSelect, &'static [&'static str])>,
     shell_select: SharedShellSelect,
     /// 外观页背景色：闭态 combobox + 开态 SV/色相/色板/hex 浮层（旧壳
     /// `SettingsDropdown::BackgroundColor`，不是组件库 ColorPicker）。
@@ -489,7 +492,7 @@ pub struct SettingsPane {
 impl SettingsPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let runtime = RuntimeSettings::load();
-        let mut selects: Vec<(&'static str, SharedSelect)> = Vec::new();
+        let mut selects: Vec<(&'static str, SharedSelect, &'static [&'static str])> = Vec::new();
         let mut subscriptions = Vec::new();
 
         let mut add_select = |key: &'static str,
@@ -523,7 +526,7 @@ impl SettingsPane {
                     }
                 },
             ));
-            selects.push((key, select));
+            selects.push((key, select, values));
         };
 
         let cursor_current =
@@ -1285,7 +1288,34 @@ impl SettingsPane {
     }
 
     pub(super) fn select_of(&self, key: &str) -> Option<SharedSelect> {
-        self.selects.iter().find(|(k, _)| *k == key).map(|(_, entity)| entity.clone())
+        self.selects.iter().find(|(k, _, _)| *k == key).map(|(_, entity, _)| entity.clone())
+    }
+
+    /// 从代码侧改掉某项设置后，把闭框的选中项拉回新值。
+    ///
+    /// `SelectState` 自己持有选中索引，而 [`Self::persist`] 只写设置文件和
+    /// `runtime`——两者之间没有任何联系。少了这一步，"还原为默认值"会把值
+    /// 真的写回去、撤销图标也如期消失，但闭框仍显示旧标签，看上去就是
+    /// 撤销按钮没反应。
+    ///
+    /// 值不在 `values` 里（光标形状的"未设置"写空串）时落到第 0 项，与
+    /// `add_select` 建初始索引时的同一条回落规则一致。
+    fn sync_select(
+        &mut self,
+        key: &str,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, select, values)) = self.selects.iter().find(|(k, _, _)| *k == key) else {
+            return;
+        };
+        let row = values.iter().position(|candidate| *candidate == value).unwrap_or(0);
+        // `set_selected_index` 只改索引和 `final_selected_index`，不发
+        // `Confirm`，所以不会绕回订阅里再 persist 一次。
+        select.clone().update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(row)), window, cx);
+        });
     }
 
     fn select_row(
@@ -1551,8 +1581,11 @@ impl SettingsPane {
                     label,
                     desc,
                     dirty,
-                    move |this, _, cx| {
+                    move |this, window, cx| {
                         this.persist(&[(key, factory.clone())], cx);
+                        // 开关行读 `runtime`，notify 就够；下拉框自己存索引，
+                        // 必须显式拉回，否则撤销只改了值不改显示。
+                        this.sync_select(key, &factory, window, cx);
                     },
                     control,
                     cx,

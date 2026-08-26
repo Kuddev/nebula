@@ -110,6 +110,11 @@ const PALETTE_KEY_CONTEXT: &str = "NebulaCommandPalette";
 const SIDEBAR_RESIZE_VISUAL_OFFSET: f32 = 8.0;
 const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
 
+/// 终端卡的左 / 右 / 下卡缝（上边为零，见卡容器处的裁定）。布局的 padding
+/// 与 `paint_shell_around_card` 的壳色带必须读同一个数——两边各写一份
+/// 字面量就是那圈白边的来源。
+const CARD_GUTTER: f32 = 8.0;
+
 /// 工作区静态默认绑定的 combo 集（[`init`] 的镜像）。撤销已失效的自定义
 /// 注入时要排除：gpui 的 NoAction 打在静态默认键上会误杀基础功能。
 const STATIC_DEFAULT_COMBOS: &[&str] = &[
@@ -4530,9 +4535,13 @@ impl Render for NebulaWorkspace {
                     .child(
                         // 终端卡（一体化外壳）：唯一的结构分界。圆角与旧壳卡
                         // 同源（UI_SHELL_RADIUS_LOGICAL=14），无描边——融合靠
-                        // 壳色包围圆角卡本身，不靠线框。侧栏模式四边保留旧壳
-                        // 8px 卡缝；顶部 tab 模式取消上边距，让 tab 底边与正文
-                        // 直接相接，左右和底部卡缝不变。
+                        // 壳色包围圆角卡本身，不靠线框。
+                        //
+                        // 上边距一律为零：侧栏 / 终端卡 / 右侧抽屉三列的顶边都贴
+                        // chrome 下沿（用户 08-26 裁定「pane 和左侧 tab 抬到和文件树
+                        // 顶部一致」）。左右和底部保留旧壳 8px 卡缝，抽屉在场时那条
+                        // 右卡缝就是它和终端之间的呼吸位，不再归零——归零后的观感是
+                        // 文件树压在终端上。
                         div()
                             .flex_1()
                             .min_w_0()
@@ -4541,16 +4550,28 @@ impl Render for NebulaWorkspace {
                                 gpui::canvas(
                                     |_, _, _| (),
                                     |bounds, _, window, cx| {
+                                        // 卡缝必须和下面的 `px_2` / `pb_2` 逐边
+                                        // 对上：上边距为零是上面那条裁定，壳色
+                                        // 若按四边对称推算，卡的上两个圆角外侧
+                                        // 会漏覆盖，浅色主题下露出一圈白边。
                                         crate::gpui_shell::theme::paint_shell_around_card(
-                                            bounds, window, cx,
+                                            bounds,
+                                            gpui::Edges {
+                                                top: 0.0,
+                                                right: CARD_GUTTER,
+                                                bottom: CARD_GUTTER,
+                                                left: CARD_GUTTER,
+                                            },
+                                            window,
+                                            cx,
                                         );
                                     },
                                 )
                                 .absolute()
                                 .inset_0(),
                             )
-                            .when(top_tabs, |card| card.px_2().pb(px(8.0)))
-                            .when(!top_tabs, |card| card.p_2())
+                            .px(px(CARD_GUTTER))
+                            .pb(px(CARD_GUTTER))
                             .child(
                             div()
                                 .size_full()
