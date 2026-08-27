@@ -82,6 +82,23 @@ fn selection_scroll_lines(y: f32, top: f32, bottom: f32, max_lines: i32) -> i32 
     }
 }
 
+fn cursor_blink_allowed(
+    terminal_blinking: bool,
+    vi_mode: bool,
+    show_cursor: bool,
+    ime_preedit: bool,
+    window_active: bool,
+    pane_focused: bool,
+) -> bool {
+    terminal_blinking && (vi_mode || show_cursor) && !ime_preedit && window_active && pane_focused
+}
+
+fn restart_cursor_blink_phase(cursor_visible: &mut bool, cursor_blink_epoch: &mut u64) -> u64 {
+    *cursor_visible = true;
+    *cursor_blink_epoch = cursor_blink_epoch.wrapping_add(1);
+    *cursor_blink_epoch
+}
+
 /// 粘贴体量按「落到终端算几行」数，不用 `str::lines`。
 ///
 /// `str::lines` 只认 `\n`，纯 `\r` 的剪贴板内容（老式 Mac 换行、部分 Windows
@@ -365,6 +382,11 @@ pub struct TerminalView {
     /// 光标是否允许闪烁仍由共享 `Term::cursor_style()` 裁定。
     cursor_visible: bool,
     cursor_blink_epoch: u64,
+    /// OS 窗口前台状态与 pane 内焦点是两层独立条件。缓存它们是因为 blink
+    /// timer 回调没有 `Window`，状态变化由 GPUI observer 立即重启相位。
+    cursor_window_active: bool,
+    cursor_pane_focused: bool,
+    _cursor_blink_subscriptions: [gpui::Subscription; 3],
     /// 最近一次由设置页下发的默认样式。只在它真正变化时清理 shell 的
     /// DECSCUSR/DEC mode 12 覆盖，避免无关设置变更打断 vim 等程序光标。
     default_cursor_style: CursorStyle,
@@ -435,7 +457,8 @@ impl TerminalView {
     /// 尾沿去抖窗口：视口静默这么久才向 Term/ConPTY 提交一次 resize。
     /// 见 `set_layout` 内的合同注释（conhost rewrap 漂移取证）。
     const RESIZE_SETTLE_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
-    const CURSOR_BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+    /// 与 legacy `config::cursor::Cursor::default().blink_interval` 保持一致。
+    const CURSOR_BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
 
     fn measure_cell_metrics(
         window: &Window,
@@ -741,10 +764,35 @@ impl TerminalView {
             None => (true, Default::default(), Default::default()),
         };
 
+        let focus_handle = cx.focus_handle();
+        let cursor_window_active = window.is_window_active();
+        let cursor_pane_focused = focus_handle.is_focused(window);
+        let cursor_blink_subscriptions = [
+            cx.observe_window_activation(window, |view, window, cx| {
+                let active = window.is_window_active();
+                if view.cursor_window_active != active {
+                    view.cursor_window_active = active;
+                    view.restart_cursor_blink(cx);
+                }
+            }),
+            cx.on_focus_in(&focus_handle, window, |view, _window, cx| {
+                if !view.cursor_pane_focused {
+                    view.cursor_pane_focused = true;
+                    view.restart_cursor_blink(cx);
+                }
+            }),
+            cx.on_focus_out(&focus_handle, window, |view, _event, _window, cx| {
+                if view.cursor_pane_focused {
+                    view.cursor_pane_focused = false;
+                    view.restart_cursor_blink(cx);
+                }
+            }),
+        ];
+
         let mut view = Self {
             pane_id,
             session,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             math: super::math_overlay::MathOverlay::default(),
             font: mono_font(&families[0], FontWeight::NORMAL, FontStyle::Normal),
             font_bold: mono_font(&families[1], FontWeight::BOLD, FontStyle::Normal),
@@ -811,6 +859,9 @@ impl TerminalView {
             last_report_point: None,
             cursor_visible: true,
             cursor_blink_epoch: 0,
+            cursor_window_active,
+            cursor_pane_focused,
+            _cursor_blink_subscriptions: cursor_blink_subscriptions,
             default_cursor_style,
             suggest: {
                 // `NebulaPaneState` 有几个 display 模块私有的字段，函数式更新
@@ -1099,14 +1150,21 @@ impl TerminalView {
     fn cursor_should_blink(&self) -> bool {
         self.session.as_ref().is_some_and(|session| {
             let term = session.term.lock();
-            term.cursor_style().blinking && term.mode().contains(TermMode::SHOW_CURSOR)
+            let mode = term.mode();
+            cursor_blink_allowed(
+                term.cursor_style().blinking,
+                mode.contains(TermMode::VI),
+                mode.contains(TermMode::SHOW_CURSOR),
+                self.marked_text.is_some(),
+                self.cursor_window_active,
+                self.cursor_pane_focused,
+            )
         })
     }
 
     fn restart_cursor_blink(&mut self, cx: &mut Context<Self>) {
-        self.cursor_visible = true;
-        self.cursor_blink_epoch = self.cursor_blink_epoch.wrapping_add(1);
-        let epoch = self.cursor_blink_epoch;
+        let epoch =
+            restart_cursor_blink_phase(&mut self.cursor_visible, &mut self.cursor_blink_epoch);
         self.schedule_cursor_blink_tick(epoch, cx);
         cx.notify();
     }
@@ -2752,8 +2810,11 @@ impl gpui::EntityInputHandler for TerminalView {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.marked_text = None;
-        cx.notify();
+        if self.marked_text.take().is_some() {
+            self.restart_cursor_blink(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn replace_text_in_range(
@@ -2763,13 +2824,15 @@ impl gpui::EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.marked_text = None;
+        let had_marked_text = self.marked_text.take().is_some();
         if !text.is_empty() && self.exited.is_none() {
             // 行镜像吃 IME 管道的字符（含中文提交与普通击键文本）。
             if !self.term_mode().contains(TermMode::ALT_SCREEN) {
                 crate::display::Display::nebula_input_text(&mut self.suggest, text);
             }
             self.write_user_text(text.to_owned(), false, text.as_bytes().to_vec(), cx);
+        } else if had_marked_text {
+            self.restart_cursor_blink(cx);
         }
         cx.notify();
     }
@@ -2782,8 +2845,13 @@ impl gpui::EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.marked_text = if new_text.is_empty() { None } else { Some(new_text.to_string()) };
-        cx.notify();
+        let marked_text = if new_text.is_empty() { None } else { Some(new_text.to_string()) };
+        if self.marked_text != marked_text {
+            self.marked_text = marked_text;
+            self.restart_cursor_blink(cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn bounds_for_range(
@@ -2955,9 +3023,38 @@ mod tests {
     use gpui::{FontStyle, FontWeight};
 
     use super::{
-        TermMode, TerminalView, mono_font, paste_line_count, paste_needs_confirmation,
-        selection_scroll_lines,
+        TermMode, TerminalView, cursor_blink_allowed, mono_font, paste_line_count,
+        paste_needs_confirmation, restart_cursor_blink_phase, selection_scroll_lines,
     };
+
+    #[test]
+    fn ime_preedit_stops_blinking_and_restores_visible_cursor() {
+        assert!(!cursor_blink_allowed(true, false, true, true, true, true));
+
+        let (mut visible, mut epoch) = (false, 7);
+        assert_eq!(restart_cursor_blink_phase(&mut visible, &mut epoch), 8);
+        assert!(visible);
+    }
+
+    #[test]
+    fn unfocused_cursor_does_not_blink_and_stays_visible() {
+        assert!(!cursor_blink_allowed(true, false, true, false, false, true));
+        assert!(!cursor_blink_allowed(true, false, true, false, true, false));
+
+        let (mut visible, mut epoch) = (false, 2);
+        restart_cursor_blink_phase(&mut visible, &mut epoch);
+        assert!(visible);
+    }
+
+    #[test]
+    fn restoring_focus_restarts_blinking_immediately() {
+        assert!(!cursor_blink_allowed(true, false, true, false, true, false));
+        assert!(cursor_blink_allowed(true, false, true, false, true, true));
+
+        let (mut visible, mut epoch) = (false, 11);
+        assert_eq!(restart_cursor_blink_phase(&mut visible, &mut epoch), 12);
+        assert!(visible, "restart must restore the visible phase before the next tick");
+    }
 
     /// 拖选自动回滚的判据（旧壳 `update_selection_scrolling` 的数值合同）：
     /// 网格内不滚，越过上边界往回滚历史、越过下边界往前滚，贴边 1 行、每远离

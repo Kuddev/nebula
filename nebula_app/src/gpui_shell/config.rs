@@ -25,6 +25,17 @@ use serde::Deserialize;
 
 use crate::gpui_shell::terminal::colors::Palette;
 
+/// GPUI 对齐 legacy 的产品默认：配置未写 `cursor_blink` 时光标闪烁。
+pub(crate) const DEFAULT_CURSOR_BLINK: bool = true;
+
+#[inline]
+pub(crate) const fn effective_cursor_blink(configured: Option<bool>) -> bool {
+    match configured {
+        Some(blinking) => blinking,
+        None => DEFAULT_CURSOR_BLINK,
+    }
+}
+
 /// 应用启动时装载一次的全局设置。
 pub struct Settings {
     pub font_family: String,
@@ -163,9 +174,7 @@ impl Settings {
         if let Some(shape) = self.cursor_shape {
             config.default_cursor_style.shape = shape;
         }
-        if let Some(blinking) = self.cursor_blink {
-            config.default_cursor_style.blinking = blinking;
-        }
+        config.default_cursor_style.blinking = effective_cursor_blink(self.cursor_blink);
         // 与旧壳 `UiConfig::term_options` 对齐的关键位（ui_config.rs）——
         // 裸默认在 ConPTY 下会出两类肉眼可见的错：
         // - 起桥 DA1 由 conpty 预应答过，Term 必须吞掉自己的重复应答，
@@ -572,7 +581,7 @@ fn build_palette(raw: &RawColors) -> Palette {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_theme, rgba8, runtime_background};
+    use super::{Settings, apply_theme, rgba8, runtime_background};
     use crate::gpui_shell::terminal::colors::Palette;
     use nebula_settings::ThemeName;
 
@@ -581,6 +590,16 @@ mod tests {
         let custom = Some([0x0f, 0x11, 0x1a]);
         assert_eq!(runtime_background(true, custom), None);
         assert_eq!(runtime_background(false, custom), custom);
+    }
+
+    #[test]
+    fn missing_cursor_blink_key_enables_term_blinking() {
+        let mut settings = Settings::load(ThemeName::Nebula);
+        settings.cursor_blink = None;
+        assert!(settings.term_config().default_cursor_style.blinking);
+
+        settings.cursor_blink = Some(false);
+        assert!(!settings.term_config().default_cursor_style.blinking);
     }
 
     #[test]

@@ -30,6 +30,7 @@ use design::GROUP_GAP;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::gpui_shell::config::{DEFAULT_CURSOR_BLINK, effective_cursor_blink};
 use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::widgets::NebulaButton;
 
@@ -1552,10 +1553,14 @@ impl SettingsPane {
             "bell" => pick!(bell),
             "blur" => pick!(blur),
             "ssh_proxy_mode" => pick!(ssh_proxy_mode),
-            // 光标两项是 Option：`None` = 键未写过，此时跟随主题/终端程序。
-            // 还原写空串即回到未设置，而不是写一个"看起来一样"的显式值。
+            // 光标两项是 Option：形状未写时沿用 Term 默认；闪烁未写时按产品默认 true。
+            // 还原写空串即回到各自的缺省语义，而不是写一个"看起来一样"的显式值。
             "cursor_shape" => Some((cur.cursor_shape != def.cursor_shape, String::new())),
-            "cursor_blink" => Some((cur.cursor_blink != def.cursor_blink, String::new())),
+            "cursor_blink" => Some((
+                effective_cursor_blink(cur.cursor_blink)
+                    != effective_cursor_blink(def.cursor_blink),
+                String::new(),
+            )),
             _ => None,
         }
     }
@@ -2290,7 +2295,7 @@ impl SettingsPane {
                 "cursor_blink",
                 "光标闪烁",
                 "关掉后光标常亮。长时间盯屏时不闪更省心，代价是光标在密集输出里没那么显眼。",
-                self.runtime.cursor_blink.unwrap_or(true),
+                self.runtime.cursor_blink.unwrap_or(DEFAULT_CURSOR_BLINK),
                 cx,
             ));
         let interface = self
