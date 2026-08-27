@@ -113,7 +113,8 @@ impl ProxyLink {
     }
 }
 
-fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+/// 忽略 ASCII 大小写剥离协议前缀；`get` 保证不会在非 ASCII 字符中间切片。
+pub(crate) fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     value
         .len()
         .checked_sub(prefix.len())

@@ -262,8 +262,8 @@ pub(crate) fn manual_proxy_parts(value: &str) -> (ManualProxyProtocol, &str) {
         ("socks://", ManualProxyProtocol::Socks5),
         ("http://", ManualProxyProtocol::Http),
     ] {
-        if value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
-            return (protocol, &value[prefix.len()..]);
+        if let Some(address) = crate::ssh_proxy::strip_prefix_ignore_case(value, prefix) {
+            return (protocol, address);
         }
     }
     // 兼容旧配置中的裸 `host:port`；不再显示含糊的“自动识别”，明确按
@@ -8489,7 +8489,7 @@ mod tests {
             (ManualProxyProtocol::Socks5, "127.0.0.1:1080")
         );
         assert_eq!(
-            manual_proxy_parts("http://proxy.lan:8080"),
+            manual_proxy_parts("HTTP://proxy.lan:8080"),
             (ManualProxyProtocol::Http, "proxy.lan:8080")
         );
         assert_eq!(
@@ -8501,6 +8501,13 @@ mod tests {
             "socks5://127.0.0.1:1080"
         );
         assert_eq!(manual_proxy_value(ManualProxyProtocol::Http, ""), "");
+    }
+
+    #[test]
+    fn manual_proxy_parts_accepts_non_ascii_without_slicing_inside_utf8() {
+        for value in ["127.0.0.1：", "：127.0.0.1", "127.0：0.1", "："] {
+            assert_eq!(manual_proxy_parts(value), (ManualProxyProtocol::Socks5, value));
+        }
     }
 
     #[test]
