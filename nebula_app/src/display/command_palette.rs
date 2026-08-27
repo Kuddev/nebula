@@ -286,12 +286,12 @@ const ITEMS: &[PaletteItem] = &[
         action: PaletteAction::OpenDirectoryPicker,
     },
     PaletteItem {
-        // 母命令：一个入口通向所有「名词」（AI 会话 / 目录 / SSH / 标签页），
-        // 而不是每加一个品类就往命令表里塞一条子命令——那样这张表迟早会被
-        // 名词淹掉。目前只列 AI 会话，其余品类随面板打磨一起接进来。
+        // GPUI 已把 Tabs、Panes、目录、SSH 与 AI 会话投影进同一个母入口；
+        // `OpenAiSessionPicker` 这个旧 action 名暂留给 legacy shell 兼容，避免
+        // 为两个壳复制第二份命令目录。
         label: "快速跳转…",
         hint: "Ctrl+Shift+O",
-        search: "快速跳转 恢复 AI 会话 open quickly jump resume ai session claude codex kuaisu tiaozhuan huifu",
+        search: "快速跳转 标签 分屏 目录 SSH AI 会话 open quickly jump tab pane directory ssh resume ai session claude codex kuaisu tiaozhuan biaoqian fenping mulu huifu",
         action: PaletteAction::OpenAiSessionPicker,
     },
     PaletteItem {
@@ -467,6 +467,18 @@ const ITEMS: &[PaletteItem] = &[
         hint: "",
         search: "主题 moss dark theme zhuti",
         action: PaletteAction::SelectTheme(NebulaTheme::MossDark),
+    },
+    PaletteItem {
+        label: "主题：Nord",
+        hint: "",
+        search: "主题 nord dark theme zhuti",
+        action: PaletteAction::SelectTheme(NebulaTheme::Nord),
+    },
+    PaletteItem {
+        label: "主题：Paper",
+        hint: "",
+        search: "主题 paper light theme zhuti",
+        action: PaletteAction::SelectTheme(NebulaTheme::Paper),
     },
 ];
 
@@ -1522,6 +1534,8 @@ fn localized_item_label(item: &PaletteItem, language: super::UiLanguage) -> &'st
         SelectTheme(NebulaTheme::CoalDark) => "Theme: Coal Dark",
         SelectTheme(NebulaTheme::LinenLight) => "Theme: Linen Light",
         SelectTheme(NebulaTheme::MossDark) => "Theme: Moss Dark",
+        SelectTheme(NebulaTheme::Nord) => "Theme: Nord",
+        SelectTheme(NebulaTheme::Paper) => "Theme: Paper",
         ExportWorkspace => "Export workspace...",
         ImportWorkspace => "Open workspace...",
         SyncPush => "Sync: push settings",

@@ -17,6 +17,7 @@ fn snapshot(state: RuntimeTaskState) -> RuntimeSnapshot {
                 kind: "shell".into(),
                 bell: false,
                 focused_pane_id: Some(3),
+                zoomed_pane_id: None,
                 layout: Some(RuntimeLayout::Pane { pane_id: 3 }),
                 panes: vec![RuntimePane {
                     id: 3,
@@ -88,6 +89,84 @@ fn prompt_rejects_terminal_control_sequences() {
     assert!(validate_prompt("please inspect the build").is_ok());
     assert!(validate_prompt("unsafe\u{1b}[2J").is_err());
     assert!(validate_prompt("two\nlines").is_err());
+}
+
+#[test]
+fn chat_message_allows_layout_whitespace_but_rejects_terminal_controls() {
+    assert!(validate_chat_message("> selected\n\nplease explain\tthis").is_ok());
+    assert!(validate_chat_message("unsafe\u{1b}[2J").is_err());
+    assert!(validate_chat_message(" \n\t ").is_err());
+}
+
+#[test]
+fn paste_accepts_layout_whitespace_but_not_terminal_control_sequences() {
+    assert!(validate_paste_text("first\r\nsecond\tvalue").is_ok());
+    assert!(validate_paste_text("unsafe\u{1b}[201~tail").is_err());
+    assert!(validate_paste_text("\0binary").is_err());
+    assert!(validate_paste_text(" \n\t ").is_err());
+
+    let pane = RuntimeCommand::from_request(&ApiRequest::new(
+        "token".into(),
+        "pane.paste",
+        json!({ "pane_id": 17, "text": "first\nsecond", "submit": false }),
+    ))
+    .expect("pane paste parses");
+    assert!(matches!(pane, RuntimeCommand::Paste { pane_id: 17, submit: false, .. }));
+
+    let agent = RuntimeCommand::from_request(&ApiRequest::new(
+        "token".into(),
+        "agent.paste",
+        json!({
+            "agent": "codex",
+            "generation": 9,
+            "text": "first\nsecond",
+            "submit": true
+        }),
+    ))
+    .expect("agent paste parses");
+    assert!(matches!(agent, RuntimeCommand::AgentPaste { generation: Some(9), submit: true, .. }));
+}
+
+#[test]
+fn layout_mutations_parse_and_enforce_their_bounds() {
+    let parse = |method: &str, params: Value| {
+        RuntimeCommand::from_request(&ApiRequest::new("token".into(), method, params))
+    };
+
+    assert!(matches!(
+        parse("window.close", json!({ "window_id": 7 })),
+        Ok(RuntimeCommand::CloseWindow { window_id: Some(7) })
+    ));
+    assert!(matches!(
+        parse("tab.close", json!({ "window_id": 7, "tab_index": 2 })),
+        Ok(RuntimeCommand::CloseTab { window_id: Some(7), tab_index: 2 })
+    ));
+    assert!(matches!(
+        parse("tab.rename", json!({ "window_id": 7, "tab_index": 2, "name": "tests" })),
+        Ok(RuntimeCommand::RenameTab { tab_index: 2, ref name, .. }) if name == "tests"
+    ));
+    assert!(matches!(
+        parse("tab.move", json!({ "window_id": 7, "tab_index": 2, "to_index": 0 }),),
+        Ok(RuntimeCommand::MoveTab { tab_index: 2, to_index: 0, .. })
+    ));
+    assert!(matches!(
+        parse("pane.close", json!({ "pane_id": 17 })),
+        Ok(RuntimeCommand::ClosePane { pane_id: 17, .. })
+    ));
+    assert!(matches!(
+        parse("pane.zoom", json!({ "pane_id": 17, "zoomed": false })),
+        Ok(RuntimeCommand::ZoomPane { pane_id: 17, zoomed: false, .. })
+    ));
+    assert!(matches!(
+        parse("pane.resize", json!({ "pane_id": 17, "ratio": 0.6 })),
+        Ok(RuntimeCommand::ResizePane { pane_id: 17, ratio, .. })
+            if (ratio - 0.6).abs() < f32::EPSILON
+    ));
+
+    // 名称和比例直接影响 UI 状态；服务端必须是所有客户端共享的权威边界。
+    assert!(parse("tab.rename", json!({ "tab_index": 0, "name": "bad\nname" })).is_err());
+    assert!(parse("pane.resize", json!({ "pane_id": 17, "ratio": 0.049 })).is_err());
+    assert!(parse("pane.resize", json!({ "pane_id": 17, "ratio": 0.951 })).is_err());
 }
 
 #[test]
@@ -561,6 +640,45 @@ fn run_requires_one_plain_shell_line() {
 }
 
 #[test]
+fn pane_exec_preserves_direct_argv_and_enforces_resource_bounds() {
+    let valid = ApiRequest::new(
+        "token".into(),
+        "pane.exec",
+        json!({
+            "window_id": 7,
+            "pane_id": 3,
+            "argv": ["cargo", "test", "--", "--nocapture"],
+            "timeout_ms": 45_000,
+            "max_output_bytes": 4096
+        }),
+    );
+    assert!(matches!(
+        RuntimeCommand::from_request(&valid),
+        Ok(RuntimeCommand::Exec {
+            window_id: Some(7),
+            pane_id: 3,
+            ref argv,
+            timeout_ms: 45_000,
+            max_output_bytes: 4096,
+        }) if argv == &["cargo", "test", "--", "--nocapture"]
+    ));
+
+    for params in [
+        json!({ "pane_id": 3, "argv": [] }),
+        json!({ "pane_id": 3, "argv": ["bad\0program"] }),
+        json!({ "pane_id": 3, "argv": ["cargo"], "timeout_ms": 0 }),
+        json!({
+            "pane_id": 3,
+            "argv": ["cargo"],
+            "max_output_bytes": MAX_EXEC_OUTPUT_BYTES + 1
+        }),
+    ] {
+        let request = ApiRequest::new("token".into(), "pane.exec", params);
+        assert_eq!(RuntimeCommand::from_request(&request).unwrap_err().code, "invalid_params");
+    }
+}
+
+#[test]
 fn run_outcome_requires_a_real_start_and_exit_code() {
     let submitted = RuntimePaneRun { run_id: 41, phase: RuntimeRunPhase::Submitted };
     let no_start = RuntimeRunOutcome::command_done(submitted, Some(0));
@@ -1001,7 +1119,11 @@ fn agent_stopped_on_a_blocking_screen_never_receives_its_initial_prompt() {
             &hub,
         )
         .unwrap();
-        assert_eq!(prompt_dispatches.load(Ordering::Relaxed), 0, "{blocked:?} must not be prompted");
+        assert_eq!(
+            prompt_dispatches.load(Ordering::Relaxed),
+            0,
+            "{blocked:?} must not be prompted"
+        );
         let error = &receipt["steps"][0]["error"];
         assert_eq!(error["code"], "agent_not_ready");
         assert_eq!(error["details"]["task_state"], serde_json::to_value(blocked).unwrap());
@@ -1206,8 +1328,9 @@ fn wait_step_takes_its_baseline_from_the_step_it_references() {
                 "action": { "window_id": window_id, "pane_id": pane_id },
                 "snapshot": sink_hub.current()
             }))),
-            RuntimeCommand::ReadPane { .. } => dispatch
-                .respond(Ok(json!({ "action": { "text": "› ", "returned_lines": 1 } }))),
+            RuntimeCommand::ReadPane { .. } => {
+                dispatch.respond(Ok(json!({ "action": { "text": "› ", "returned_lines": 1 } })))
+            },
             command => panic!("unexpected command: {command:?}"),
         }
     }));

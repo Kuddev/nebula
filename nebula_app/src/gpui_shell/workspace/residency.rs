@@ -10,10 +10,11 @@ use std::time::Duration;
 
 use gpui::{App, Context, Window};
 use nebula_split::{SplitDirection, SplitTree};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{NebulaWorkspace, WorkspaceTab};
 use crate::gpui_shell::GpuiShellEvent;
+use crate::gpui_shell::terminal::view::InputOrigin;
 use crate::runtime_api::{
     ApiError, RuntimeCommand, RuntimeDispatch, RuntimeLayout, RuntimePane, RuntimeSnapshot,
     RuntimeSplitDirection, RuntimeTab, RuntimeTaskState, RuntimeWindow,
@@ -25,6 +26,14 @@ use crate::runtime_api::{
 pub(super) enum ResidencyCloseAction {
     Hide,
     Close,
+}
+
+fn runtime_close_confirmation(process: String, details: Value) -> ApiError {
+    ApiError::new(
+        "confirmation_required",
+        format!("{process} is still running; refusing to close it without user confirmation"),
+    )
+    .details(details)
 }
 
 pub(super) fn residency_close_action(
@@ -89,18 +98,46 @@ impl NebulaWorkspace {
                     "the GPUI runtime currently owns one workspace window; window.create is unavailable",
                 )));
             },
+            RuntimeCommand::Exec {
+                pane_id,
+                argv,
+                timeout_ms,
+                max_output_bytes,
+                ..
+            } => {
+                match self.runtime_exec_context(*pane_id, cx) {
+                    Ok((context, cwd)) => crate::runtime_exec::spawn(
+                        dispatch.clone(),
+                        context,
+                        cwd,
+                        argv.clone(),
+                        *timeout_ms,
+                        *max_output_bytes,
+                    ),
+                    Err(error) => dispatch.respond(Err(error)),
+                }
+            },
             RuntimeCommand::Focus { .. }
             | RuntimeCommand::NewTab { .. }
             | RuntimeCommand::Split { .. }
             | RuntimeCommand::Prompt { .. }
+            | RuntimeCommand::Paste { .. }
             | RuntimeCommand::SendKey { .. }
             | RuntimeCommand::Run { .. }
             | RuntimeCommand::AgentStart { .. }
-            | RuntimeCommand::AgentPrompt { .. } => {
+            | RuntimeCommand::AgentPrompt { .. }
+            | RuntimeCommand::AgentPaste { .. } => {
                 self.reveal_session(cx);
                 self.runtime_pending.push(dispatch);
             },
             RuntimeCommand::Snapshot
+            | RuntimeCommand::CloseWindow { .. }
+            | RuntimeCommand::CloseTab { .. }
+            | RuntimeCommand::RenameTab { .. }
+            | RuntimeCommand::MoveTab { .. }
+            | RuntimeCommand::ClosePane { .. }
+            | RuntimeCommand::ZoomPane { .. }
+            | RuntimeCommand::ResizePane { .. }
             | RuntimeCommand::ReadPane { .. }
             | RuntimeCommand::Procs { .. }
             | RuntimeCommand::AgentRead { .. }
@@ -133,6 +170,36 @@ impl NebulaWorkspace {
                 "runtime_unavailable",
                 "window.create is not queued in the GPUI runtime",
             )),
+            RuntimeCommand::CloseWindow { window_id } => {
+                self.runtime_window_requested(*window_id)?;
+                if let Some(process) = self.busy_process_in_window(cx) {
+                    return Err(runtime_close_confirmation(
+                        process,
+                        json!({ "target": "window", "window_id": self.runtime_window_id }),
+                    ));
+                }
+                let tab_count = self.tabs.len();
+                if self.tabs.is_empty() {
+                    super::windowing::close_empty_workspace_window(
+                        self.runtime_window_id,
+                        window,
+                        cx,
+                    );
+                } else {
+                    while !self.tabs.is_empty() {
+                        self.close_tab(self.tabs.len() - 1, window, cx);
+                    }
+                }
+                let snapshot = super::windowing::publish_runtime_snapshot(cx);
+                Ok(json!({
+                    "action": {
+                        "window_id": self.runtime_window_id,
+                        "closed": true,
+                        "tabs_closed": tab_count
+                    },
+                    "snapshot": snapshot
+                }))
+            },
             RuntimeCommand::Focus { window_id, pane_id } => {
                 self.runtime_window_requested(*window_id)?;
                 if let Some(pane_id) = pane_id {
@@ -162,6 +229,84 @@ impl NebulaWorkspace {
                 let pane_id = self.add_terminal_at(cwd.clone(), None, window, cx);
                 self.runtime_result(
                     json!({ "window_id": self.runtime_window_id, "pane_id": pane_id }),
+                    window,
+                    cx,
+                )
+            },
+            RuntimeCommand::CloseTab { window_id, tab_index } => {
+                self.runtime_window_requested(*window_id)?;
+                if *tab_index >= self.tabs.len() {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("tab {tab_index} does not exist in window {}", self.runtime_window_id),
+                    ));
+                }
+                if let Some(process) = self.busy_process_in_tab(*tab_index, None, cx) {
+                    return Err(runtime_close_confirmation(
+                        process,
+                        json!({
+                            "target": "tab",
+                            "window_id": self.runtime_window_id,
+                            "tab_index": tab_index
+                        }),
+                    ));
+                }
+                self.close_tab(*tab_index, window, cx);
+                let action = json!({
+                    "window_id": self.runtime_window_id,
+                    "tab_index": tab_index,
+                    "closed": true
+                });
+                if self.tabs.is_empty() {
+                    let snapshot = super::windowing::publish_runtime_snapshot(cx);
+                    Ok(json!({ "action": action, "snapshot": snapshot }))
+                } else {
+                    self.runtime_result(action, window, cx)
+                }
+            },
+            RuntimeCommand::RenameTab { window_id, tab_index, name } => {
+                self.runtime_window_requested(*window_id)?;
+                if *tab_index >= self.tabs.len() {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("tab {tab_index} does not exist in window {}", self.runtime_window_id),
+                    ));
+                }
+                let Some(meta) = self.tab_meta.get_mut(*tab_index) else {
+                    return Err(ApiError::new("invalid_state", "tab metadata is unavailable"));
+                };
+                super::apply_commit_rename(meta, name);
+                let applied_name = meta.custom_name.clone();
+                cx.notify();
+                self.runtime_result(
+                    json!({
+                        "window_id": self.runtime_window_id,
+                        "tab_index": tab_index,
+                        "name": applied_name
+                    }),
+                    window,
+                    cx,
+                )
+            },
+            RuntimeCommand::MoveTab { window_id, tab_index, to_index } => {
+                self.runtime_window_requested(*window_id)?;
+                let len = self.tabs.len();
+                if *tab_index >= len || *to_index >= len {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!(
+                            "tab move {tab_index} -> {to_index} is outside window {} with {len} tabs",
+                            self.runtime_window_id
+                        ),
+                    ));
+                }
+                self.move_tab(*tab_index, *to_index, window, cx);
+                self.runtime_result(
+                    json!({
+                        "window_id": self.runtime_window_id,
+                        "tab_index": tab_index,
+                        "to_index": to_index
+                    }),
                     window,
                     cx,
                 )
@@ -214,6 +359,111 @@ impl NebulaWorkspace {
                     cx,
                 )
             },
+            RuntimeCommand::ClosePane { window_id, pane_id } => {
+                self.runtime_window_requested(*window_id)?;
+                let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("pane {pane_id} does not exist"),
+                    ));
+                };
+                if let Some(process) = self.busy_process_in_tab(tab_ix, Some(*pane_id), cx) {
+                    return Err(runtime_close_confirmation(
+                        process,
+                        json!({
+                            "target": "pane",
+                            "window_id": self.runtime_window_id,
+                            "pane_id": pane_id
+                        }),
+                    ));
+                }
+                self.close_pane(tab_ix, *pane_id, window, cx);
+                let action = json!({
+                    "window_id": self.runtime_window_id,
+                    "pane_id": pane_id,
+                    "closed": true
+                });
+                if self.tabs.is_empty() {
+                    let snapshot = super::windowing::publish_runtime_snapshot(cx);
+                    Ok(json!({ "action": action, "snapshot": snapshot }))
+                } else {
+                    self.runtime_result(action, window, cx)
+                }
+            },
+            RuntimeCommand::ZoomPane { window_id, pane_id, zoomed } => {
+                self.runtime_window_requested(*window_id)?;
+                let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("pane {pane_id} does not exist"),
+                    ));
+                };
+                let changed = {
+                    let Some(WorkspaceTab::Terminal { panes, focused, zoomed: current, .. }) =
+                        self.tabs.get_mut(tab_ix)
+                    else {
+                        return Err(ApiError::new("invalid_state", "only terminal panes can zoom"));
+                    };
+                    if *zoomed && panes.len() < 2 {
+                        return Err(ApiError::new(
+                            "invalid_state",
+                            "a single-pane tab is already full size and cannot be zoomed",
+                        ));
+                    }
+                    *focused = *pane_id;
+                    let changed = *current != *zoomed;
+                    *current = *zoomed;
+                    changed
+                };
+                self.active = tab_ix;
+                if changed {
+                    self.mark_structural_resize(tab_ix, cx);
+                }
+                self.focus_active(window, cx);
+                self.sync_side_panel_to_active(true, cx);
+                cx.notify();
+                self.runtime_result(
+                    json!({
+                        "window_id": self.runtime_window_id,
+                        "pane_id": pane_id,
+                        "zoomed": zoomed
+                    }),
+                    window,
+                    cx,
+                )
+            },
+            RuntimeCommand::ResizePane { window_id, pane_id, ratio } => {
+                self.runtime_window_requested(*window_id)?;
+                let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("pane {pane_id} does not exist"),
+                    ));
+                };
+                let resized = match self.tabs.get_mut(tab_ix) {
+                    Some(WorkspaceTab::Terminal { tree, .. }) => {
+                        tree.set_leaf_parent_ratio(*pane_id, *ratio)
+                    },
+                    _ => false,
+                };
+                if !resized {
+                    return Err(ApiError::new(
+                        "invalid_state",
+                        "pane.resize requires a pane with a direct parent split",
+                    ));
+                }
+                self.mark_structural_resize(tab_ix, cx);
+                cx.notify();
+                self.runtime_result(
+                    json!({
+                        "window_id": self.runtime_window_id,
+                        "pane_id": pane_id,
+                        "ratio": ratio
+                    }),
+                    window,
+                    cx,
+                )
+            },
             RuntimeCommand::Prompt { window_id, pane_id, text, submit } => {
                 self.runtime_window_requested(*window_id)?;
                 let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
@@ -235,6 +485,36 @@ impl NebulaWorkspace {
                         "window_id": self.runtime_window_id,
                         "pane_id": pane_id,
                         "submitted": submit
+                    }),
+                    window,
+                    cx,
+                )
+            },
+            RuntimeCommand::Paste { window_id, pane_id, text, submit } => {
+                self.runtime_window_requested(*window_id)?;
+                let Some(tab_ix) = self.tab_of_pane(*pane_id) else {
+                    return Err(ApiError::new(
+                        "target_not_found",
+                        format!("pane {pane_id} does not exist"),
+                    ));
+                };
+                let view = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                        .iter()
+                        .find(|pane| pane.id == *pane_id)
+                        .map(|pane| pane.view.clone()),
+                    _ => None,
+                }
+                .expect("tab_of_pane resolved a terminal pane");
+                view.update(cx, |view, cx| {
+                    view.runtime_paste(text.clone(), *submit, InputOrigin::Program, cx)
+                })?;
+                self.runtime_result(
+                    json!({
+                        "window_id": self.runtime_window_id,
+                        "pane_id": pane_id,
+                        "submitted": submit,
+                        "input": "paste"
                     }),
                     window,
                     cx,
@@ -341,6 +621,10 @@ impl NebulaWorkspace {
                     cx,
                 )
             },
+            RuntimeCommand::Exec { .. } => Err(ApiError::new(
+                "invalid_runtime_command",
+                "pane.exec must be prepared before entering the synchronous GPUI dispatcher",
+            )),
             RuntimeCommand::AgentStart {
                 window_id,
                 pane_id,
@@ -448,6 +732,38 @@ impl NebulaWorkspace {
                 view.update(cx, |view, cx| view.runtime_prompt(text.clone(), *submit, cx))?;
                 self.runtime_result(json!({ "agent": managed }), window, cx)
             },
+            RuntimeCommand::AgentPaste { agent, generation, text, submit } => {
+                let managed = self.runtime_hub.active_agent(agent, *generation)?;
+                self.runtime_window_requested(Some(managed.window_id))?;
+                let Some(tab_ix) = self.tab_of_pane(managed.pane_id) else {
+                    return Err(ApiError::new(
+                        "agent_closed",
+                        format!("agent {:?} no longer has a live pane", managed.name),
+                    ));
+                };
+                let view = match self.tabs.get(tab_ix) {
+                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                        .iter()
+                        .find(|pane| pane.id == managed.pane_id)
+                        .expect("tab_of_pane resolved a terminal pane")
+                        .view
+                        .clone(),
+                    _ => unreachable!("tab_of_pane only resolves terminal tabs"),
+                };
+                view.update(cx, |view, cx| {
+                    view.runtime_agent_paste(
+                        text.clone(),
+                        *submit,
+                        InputOrigin::Program,
+                        cx,
+                    )
+                })?;
+                self.runtime_result(
+                    json!({ "agent": managed, "input": "paste" }),
+                    window,
+                    cx,
+                )
+            },
             RuntimeCommand::AgentRead { agent, generation, lines } => {
                 let managed = self.runtime_hub.active_agent(agent, *generation)?;
                 self.runtime_window_requested(Some(managed.window_id))?;
@@ -520,8 +836,8 @@ impl NebulaWorkspace {
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                let (kind, focused_pane_id, layout, panes) = match tab {
-                    WorkspaceTab::Terminal { panes, tree, focused, .. } => {
+                let (kind, focused_pane_id, zoomed_pane_id, layout, panes) = match tab {
+                    WorkspaceTab::Terminal { panes, tree, focused, zoomed, .. } => {
                         let runtime_panes = panes
                             .iter()
                             .map(|pane| {
@@ -550,14 +866,15 @@ impl NebulaWorkspace {
                                 "shell"
                             },
                             Some(*focused),
+                            (*zoomed).then_some(*focused),
                             Some(runtime_layout(tree)),
                             runtime_panes,
                         )
                     },
-                    WorkspaceTab::Settings { .. } => ("settings", None, None, Vec::new()),
-                    WorkspaceTab::Image { .. } => ("image", None, None, Vec::new()),
-                    WorkspaceTab::Document { .. } => ("document", None, None, Vec::new()),
-                    WorkspaceTab::Code { .. } => ("code", None, None, Vec::new()),
+                    WorkspaceTab::Settings { .. } => ("settings", None, None, None, Vec::new()),
+                    WorkspaceTab::Image { .. } => ("image", None, None, None, Vec::new()),
+                    WorkspaceTab::Document { .. } => ("document", None, None, None, Vec::new()),
+                    WorkspaceTab::Code { .. } => ("code", None, None, None, Vec::new()),
                 };
                 RuntimeTab {
                     index,
@@ -566,6 +883,7 @@ impl NebulaWorkspace {
                     kind: kind.to_owned(),
                     bell: self.tab_meta.get(index).is_some_and(|meta| meta.has_bell),
                     focused_pane_id,
+                    zoomed_pane_id,
                     layout,
                     panes,
                 }
@@ -630,6 +948,41 @@ impl NebulaWorkspace {
             WorkspaceTab::Terminal { panes, .. } => panes.iter().any(|pane| pane.id == pane_id),
             _ => false,
         })
+    }
+
+    pub(crate) fn runtime_exec_context(
+        &self,
+        pane_id: u64,
+        cx: &App,
+    ) -> Result<(crate::runtime_exec::PaneExecContext, String), ApiError> {
+        let tab_ix = self.tab_of_pane(pane_id).ok_or_else(|| {
+            ApiError::new("target_not_found", format!("pane {pane_id} does not exist"))
+        })?;
+        let WorkspaceTab::Terminal { panes, .. } = &self.tabs[tab_ix] else {
+            return Err(ApiError::new(
+                "exec_context_unavailable",
+                "pane.exec requires a terminal pane",
+            ));
+        };
+        let pane = panes.iter().find(|pane| pane.id == pane_id).expect("tab owns pane");
+        let view = pane.view.read(cx);
+        if view.ssh_destination.is_some() {
+            return Err(ApiError::new(
+                "remote_exec_unsupported",
+                "pane.exec is local-only and cannot execute on an SSH pane",
+            )
+            .details(json!({
+                "pane_id": pane_id,
+                "ssh_destination": &view.ssh_destination
+            })));
+        }
+        let context = view.exec_context.clone().ok_or_else(|| {
+            ApiError::new(
+                "exec_context_unavailable",
+                "the target pane has no local process execution context",
+            )
+        })?;
+        Ok((context, view.cwd.clone()))
     }
 
     pub(super) fn reveal_if_tray_disabled(&mut self, cx: &mut Context<Self>) {

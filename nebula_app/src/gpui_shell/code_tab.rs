@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Window, div, px,
+    AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement as _, Render,
+    SharedString, Styled as _, Window, div, px, relative,
 };
 
 use crate::gpui_shell::prelude::*;
@@ -131,29 +131,55 @@ impl Render for CodeTabView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let border = theme.border;
+        let warning = theme.warning;
+        let mono_family = theme.mono_font_family.clone();
+        let mono_size = theme.mono_font_size;
         let path_label: SharedString = self.path.display().to_string().into();
+        let copy_path = self.path.display().to_string();
         let meta: SharedString = format!("{} 行", self.lines).into();
 
         v_flex()
             .size_full()
-            .p_3()
-            .gap_2()
+            .overflow_hidden()
             .child(
                 h_flex()
-                    .h(px(28.0))
+                    .h(px(32.0))
+                    .flex_shrink_0()
+                    .px(px(12.0))
                     .items_center()
-                    .gap_2()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(border)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_xs()
-                            .text_color(muted)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(path_label),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(Icon::new(IconName::File).xsmall().text_color(muted))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(mono_family.clone())
+                                    .text_size(px(12.0))
+                                    .text_color(muted)
+                                    .child(path_label),
+                            ),
                     )
-                    .child(div().text_xs().text_color(muted).child(meta))
+                    .child(div().text_size(px(11.0)).text_color(muted).child(meta))
+                    .child(
+                        Button::new("code-copy-path")
+                            .icon(IconName::Copy)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("复制文件路径")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                            })),
+                    )
                     .child(
                         Button::new("code-reload")
                             .icon(IconName::Redo2)
@@ -166,8 +192,32 @@ impl Render for CodeTabView {
                     ),
             )
             .when_some(self.notice.clone(), |root, notice| {
-                root.child(div().text_xs().text_color(theme.warning).child(notice))
+                root.child(
+                    h_flex()
+                        .min_h(px(28.0))
+                        .flex_shrink_0()
+                        .px(px(12.0))
+                        .py_1()
+                        .border_b_1()
+                        .border_color(border)
+                        .text_size(px(11.0))
+                        .text_color(warning)
+                        .child(notice),
+                )
             })
-            .child(div().flex_1().min_h_0().child(Input::new(&self.input).h_full()))
+            .child(
+                div().flex_1().min_h_0().child(
+                    Input::new(&self.input)
+                        .h_full()
+                        .bordered(false)
+                        .focus_bordered(false)
+                        .rounded(px(0.0))
+                        .font_family(mono_family)
+                        .text_size(mono_size)
+                        .line_height(relative(1.55))
+                        .px(px(14.0))
+                        .py(px(10.0)),
+                ),
+            )
     }
 }

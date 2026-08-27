@@ -64,17 +64,27 @@
             "agent.fork",
             "agent.get",
             "agent.prompt",
+            "agent.paste",
             "agent.read",
             "agent.wait",
             "window.create",
+            "window.close",
             "window.focus",
             "tab.new",
+            "tab.close",
+            "tab.rename",
+            "tab.move",
             "pane.split",
+            "pane.close",
+            "pane.zoom",
+            "pane.resize",
             "pane.prompt",
+            "pane.paste",
             "pane.read",
             "pane.procs",
             "pane.send_key",
             "pane.run",
+            "pane.exec",
             "pane.wait"
           ]
         },
@@ -117,6 +127,10 @@
           "then": { "properties": { "params": { "$ref": "#/$defs/agent_prompt_params" } } }
         },
         {
+          "if": { "properties": { "method": { "const": "agent.paste" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/agent_paste_params" } } }
+        },
+        {
           "if": { "properties": { "method": { "const": "agent.read" } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/agent_read_params" } } }
         },
@@ -129,23 +143,51 @@
           "then": { "properties": { "params": { "$ref": "#/$defs/focus_params" } } }
         },
         {
+          "if": { "properties": { "method": { "const": "window.close" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/window_params" } } }
+        },
+        {
           "if": { "properties": { "method": { "const": "tab.new" } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/tab_new_params" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "tab.close" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/tab_target_params" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "tab.rename" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/tab_rename_params" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "tab.move" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/tab_move_params" } } }
         },
         {
           "if": { "properties": { "method": { "const": "pane.split" } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/split_params" } } }
         },
         {
+          "if": { "properties": { "method": { "const": "pane.zoom" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/pane_zoom_params" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "pane.resize" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/pane_resize_params" } } }
+        },
+        {
           "if": { "properties": { "method": { "const": "pane.prompt" } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/prompt_params" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "pane.paste" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/paste_params" } } }
         },
         {
           "if": { "properties": { "method": { "const": "pane.read" } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/read_params" } } }
         },
         {
-          "if": { "properties": { "method": { "enum": ["pane.procs"] } } },
+          "if": { "properties": { "method": { "enum": ["pane.close", "pane.procs"] } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/pane_target_params" } } }
         },
         {
@@ -155,6 +197,10 @@
         {
           "if": { "properties": { "method": { "const": "pane.run" } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/run_params" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "pane.exec" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/exec_params" } } }
         },
         {
           "if": { "properties": { "method": { "const": "pane.wait" } } },
@@ -302,7 +348,7 @@
         "op": { "const": "agent_launch" },
         "target": { "$ref": "#/$defs/orchestrate_pane_target" },
         "name": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "kind": { "enum": ["claude", "codex"] },
+        "kind": { "$ref": "#/$defs/launch_agent_kind" },
         "resume_session_id": { "type": ["string", "null"] },
         "initial_prompt": { "type": "string", "minLength": 1, "maxLength": 32768 },
         "ready_timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000, "default": 10000 }
@@ -329,7 +375,7 @@
         "window_id": { "$ref": "#/$defs/nullable_window_id" },
         "pane_id": { "type": ["integer", "null"], "minimum": 0 },
         "name": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "kind": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/launch_agent_kind" },
         "cwd": { "type": ["string", "null"] },
         "resume_session_id": { "type": ["string", "null"] }
       },
@@ -343,7 +389,7 @@
         "source_pane_id": { "type": ["integer", "null"], "minimum": 0 },
         "source_cwd": { "type": ["string", "null"] },
         "name": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "kind": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/launch_agent_kind" },
         "resume_session_id": { "type": ["string", "null"] },
         "branch": { "type": ["string", "null"] },
         "base": { "type": ["string", "null"] },
@@ -356,6 +402,10 @@
       ],
       "additionalProperties": false
     },
+    "launch_agent_kind": {
+      "enum": ["claude", "codex", "opencode", "cursor", "pi", "omp", "kimi"],
+      "description": "Agent kinds with an officially verified interactive cold-start command."
+    },
     "agent_target_params": {
       "type": "object",
       "required": ["agent"],
@@ -366,6 +416,17 @@
       "additionalProperties": false
     },
     "agent_prompt_params": {
+      "type": "object",
+      "required": ["agent", "text"],
+      "properties": {
+        "agent": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "generation": { "type": ["integer", "null"], "minimum": 1 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "submit": { "type": "boolean", "default": true }
+      },
+      "additionalProperties": false
+    },
+    "agent_paste_params": {
       "type": "object",
       "required": ["agent", "text"],
       "properties": {
@@ -414,6 +475,40 @@
       },
       "additionalProperties": false
     },
+    "tab_target_params": {
+      "type": "object",
+      "required": ["tab_index"],
+      "properties": {
+        "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "tab_index": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "tab_rename_params": {
+      "type": "object",
+      "required": ["tab_index", "name"],
+      "properties": {
+        "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "tab_index": { "type": "integer", "minimum": 0 },
+        "name": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]*$",
+          "description": "The server additionally enforces a 256-byte UTF-8 limit. Empty restores the generated title."
+        }
+      },
+      "additionalProperties": false
+    },
+    "tab_move_params": {
+      "type": "object",
+      "required": ["tab_index", "to_index"],
+      "properties": {
+        "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "tab_index": { "type": "integer", "minimum": 0 },
+        "to_index": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
     "split_params": {
       "type": "object",
       "required": ["direction"],
@@ -425,6 +520,17 @@
       "additionalProperties": false
     },
     "prompt_params": {
+      "type": "object",
+      "required": ["pane_id", "text"],
+      "properties": {
+        "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "pane_id": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "submit": { "type": "boolean", "default": true }
+      },
+      "additionalProperties": false
+    },
+    "paste_params": {
       "type": "object",
       "required": ["pane_id", "text"],
       "properties": {
@@ -451,6 +557,26 @@
       "properties": {
         "window_id": { "$ref": "#/$defs/nullable_window_id" },
         "pane_id": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "pane_zoom_params": {
+      "type": "object",
+      "required": ["pane_id", "zoomed"],
+      "properties": {
+        "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "pane_id": { "type": "integer", "minimum": 0 },
+        "zoomed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "pane_resize_params": {
+      "type": "object",
+      "required": ["pane_id", "ratio"],
+      "properties": {
+        "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "pane_id": { "type": "integer", "minimum": 0 },
+        "ratio": { "type": "number", "minimum": 0.05, "maximum": 0.95 }
       },
       "additionalProperties": false
     },
@@ -491,6 +617,24 @@
         "command": { "type": "string", "minLength": 1, "maxLength": 32768 },
         "wait": { "type": "boolean", "default": true },
         "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000, "default": 30000 }
+      },
+      "additionalProperties": false
+    },
+    "exec_params": {
+      "type": "object",
+      "required": ["pane_id", "argv"],
+      "properties": {
+        "window_id": { "$ref": "#/$defs/nullable_window_id" },
+        "pane_id": { "type": "integer", "minimum": 0 },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "type": "string" },
+          "description": "Direct program argv; no shell expansion is performed. The server enforces a 32768-byte aggregate limit."
+        },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000, "default": 30000 },
+        "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216, "default": 1048576 }
       },
       "additionalProperties": false
     },
@@ -674,6 +818,7 @@
         "kind",
         "bell",
         "focused_pane_id",
+        "zoomed_pane_id",
         "layout",
         "panes"
       ],
@@ -703,6 +848,12 @@
           "type": "boolean"
         },
         "focused_pane_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "zoomed_pane_id": {
           "type": [
             "integer",
             "null"

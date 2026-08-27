@@ -22,9 +22,13 @@ pub struct Palette {
     pub dim_foreground: Rgba,
     /// 块状光标的填充色（主应用 NEBULA_DEFAULT_CURSOR 的 background）。
     pub cursor: Rgba,
+    /// 主题可为 bar/underline 光标指定与 block 不同的颜色（如 Nord）。
+    pub cursor_stroke: Option<Rgba>,
     /// 选区叠加色。主应用默认是反色语义；本壳以半透明叠加近似，
     /// 用户显式配置 `colors.selection.background` 时用不透明具体色。
     pub selection: Rgba,
+    /// 主题明确声明的选区文字色；普通 Nebula 主题保留原字色。
+    pub selection_foreground: Option<Rgba>,
     /// ANSI 0-15。
     pub ansi: [Rgba; 16],
     /// Dim 0-7。
@@ -41,7 +45,9 @@ impl Default for Palette {
             bright_foreground: rgb8(0xd6, 0xda, 0xea),
             dim_foreground: Self::dim_of(rgb8(0xd6, 0xda, 0xea)),
             cursor: rgb8(0x49, 0x4d, 0x72),
+            cursor_stroke: None,
             selection: Rgba { a: 0.60, ..rgb8(0x49, 0x4d, 0x72) },
+            selection_foreground: None,
             ansi: [
                 // normal
                 rgb8(0x1a, 0x1d, 0x2e), // black
@@ -81,6 +87,23 @@ impl Palette {
     /// 主应用的 dimming 系数。
     pub fn dim_of(color: Rgba) -> Rgba {
         Rgba { r: color.r * 0.66, g: color.g * 0.66, b: color.b * 0.66, a: color.a }
+    }
+
+    /// 默认背景算暗还是亮。喂给 DECSET 2031 的 `CSI ? 997;N n` 通知
+    /// （`Term::set_color_scheme`）。
+    ///
+    /// 判据取**当前背景色**而不是主题名：用户可以在浅色主题下单独把
+    /// `background=` 改成深色，程序也可以用 OSC 11 改默认底色。而 CLI 判断亮暗
+    /// 靠的就是 OSC 11 问到的这个值（[`Palette::query_reply`] 的同一个字段），
+    /// 两条渠道必须给同一个答案，否则 app 会在「你说是亮的、我量出来是暗的」
+    /// 之间反复横跳。
+    ///
+    /// 阈值与公式下沉到 `nebula_terminal::term::background_is_dark`，与旧壳共用
+    /// 同一判据。
+    pub fn is_dark(&self) -> bool {
+        let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let bg = self.background;
+        nebula_terminal::term::background_is_dark(to_u8(bg.r), to_u8(bg.g), to_u8(bg.b))
     }
 
     fn indexed_default(&self, index: u8) -> Rgba {

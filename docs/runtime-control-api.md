@@ -20,7 +20,87 @@ Nebula 的运行时控制面把 GUI、CLI、Agent 与未来插件统一到同一
 - GUI 与外部客户端看到同一份 snapshot 和单调 revision，问题可以复现和审计。
 - 后续插件、MCP、远程运行时可以在版本、权限和兼容错误已经明确的边界上继续建设。
 
+## 环境契约
+
+Nebula 打开的每个**本地** pane 都带上下面这些变量。pane 里的进程据此回答"我在哪、控制面在哪"，
+不必扫进程树、读端口文件或 grep 源码：
+
+| 变量 | 含义 |
+|---|---|
+| `TERM_PROGRAM=nebula` | 外面这层终端是 Nebula。与 `vscode` / `iTerm.app` / `WezTerm` 同一个事实标准入口，第三方工具的既有识别逻辑不必改代码 |
+| `TERM_PROGRAM_VERSION` | Nebula 版本 |
+| `NEBULA_PANE_ID` | 调用者所在 pane。AI hook 用同一个值给回合状态定位 tab 圆点 |
+| `NEBULA_CLI` | 提供控制面的那个可执行文件的绝对路径。便携版不一定在 `PATH` 上，所以给精确路径 |
+| `NEBULA_BIN_DIR` | 上者所在目录，同时被**前置**到 `PATH`，因此裸 `nebula` 也可用 |
+| `NEBULA_PANE_REMOTE=1` | 这是 SSH pane。见下 |
+
+实现在 `nebula_app/src/agent_env.rs`，两个壳共用同一个 `apply()`。三条设计约束：
+
+1. **只进本地 PTY。** SSH pane 注入的是 `NEBULA_PANE_REMOTE=1`，不给 `NEBULA_CLI`/`NEBULA_BIN_DIR`
+   ——远端主机上没有这个二进制，把本机绝对路径送过去只会造出一个"变量有了但永远执行不了"的伪能力，
+   还会绕开远端 pane 不得取用本地上下文的护栏。
+2. **幂等。** 在 Nebula 的 pane 里再开一个 Nebula 是常规操作（嵌套 shell、`wsl.exe`、隔离实例）。
+   `PATH` 前置与 `WSLENV` 追加都按值判重，套多少层环境块都不增长。
+3. **WSL 透传。** `WSLENV` 里带 `NEBULA_CLI/p`、`NEBULA_BIN_DIR/p`——`/p` 让 WSL 把 Windows
+   路径翻成 `/mnt/...`，否则来宾 shell 拿到的是一个执行不了的 `D:\…` 字面量。合并以环境表里的
+   现值为基准，因此与 `shell_detect::wsl_cwd_report_env` 的 cwd 上报条目互不覆盖。
+
+`runtime.describe` 的 `env` 段回报这份契约（变量名不必由客户端硬编码），并带
+`features: ["env.pane_identity", "cli.resource_verbs"]` 供旧版本探测后回落。
+
+环境契约解决的是**可达性**，不是**该不该调**。后者属于 Skill
+（`docs/skills/nebula-runtime/SKILL.md`）。两者不能互相替代：没有契约，Skill 里写的命令是空头
+承诺；把发现层全押在 Skill 上（用户得手工安装一段提示词）则是不可靠的单点——所以 `nebula env`
+本身也是发现入口，见下节。
+
 ## CLI
+
+### 资源 + 动词
+
+面向"模型在 pane 里临时要派个活儿"这一种用法。命名用 CLI 界的通用惯例（资源在前、动词在后，
+同 `kubectl` / `docker` / `gh`）而不是自造词：别人看一眼就知道在做什么，比"短"更重要。
+
+```powershell
+nebula env --pretty                              # 我是谁、控制面在哪、有哪些命令
+
+nebula pane list                                 # 所有 pane 压平成一维行
+nebula pane read 17 --lines 80                   # 读某个 pane 的 Grid 尾部
+nebula pane send 17 "cargo test" --wait          # 写一行并回车，然后等它跑完
+nebula pane paste 17 --from-file task.txt --wait # 以 bracketed paste 发送有界多行文本
+nebula pane wait 17 --after-seq 41               # 等某个 pane 静下来
+nebula pane exec 17 -- cargo test                # 独立非 TTY 子进程，不改交互 shell 状态
+nebula pane zoom 17 --zoomed true                # 显式缩放，不用 toggle
+nebula pane resize 17 0.60                       # 修改直接父分屏中的目标占比
+
+nebula agent list                                # 只有 AI CLI 的 pane
+nebula agent send codex "修复登录回归" --wait    # 派任务并提交，然后等这一轮结束
+nebula agent paste codex --from-file task.txt    # generation 绑定的多行任务输入
+nebula agent read codex --lines 80               # 读它最近打印了什么
+nebula agent wait codex --after-seq 41           # 等它这一轮结束
+
+nebula window close 3                            # 关闭空闲窗口
+nebula tab rename 2 tests --window 3             # 按窗口内零基索引重命名 tab
+nebula tab move 2 0 --window 3                   # 同一窗口内移动 tab
+```
+
+它们是完整协议的**薄别名**：同一个请求函数、同一套响应信封、同样的 generation 与 `after_seq`
+竞态保护，短的只是命令行，不是语义。
+
+`pane` 与 `agent` 分成两个资源不只是为了好读——它们走的是**不同**的协议方法。Agent 路径带
+generation 绑定（Codex 退出重开后不会把任务投给新会话），pane 路径没有这层保护。用两个资源名把
+这条边界摆在命令行上，比塞进一个参数再靠前缀区分要难错得多：pane 用 `nebula pane list` 给出的
+数字 id，Agent 用 `nebula agent list` 给出的名字或稳定 id。
+
+`nebula env` 是发现层的实体：环境那半段**不依赖 runtime**，即使控制面没起来、端口文件过期、
+或这根本不是 Nebula 的 pane，命令仍然成功返回并如实说明缺什么。一个探测命令若在"没连上"时整体
+失败，调用方唯一能学到的就是"不知道"，只好去猜。它还随响应回报完整命令清单，每条给**可直接
+复制执行**的样例而不是抽象签名——模型照抄一条完整命令的成功率远高于自己按参数表拼装。
+
+`--wait` 的基线取自提交后的那张快照。用它当 `after_seq` 才让随后的等待意味着"又静下来了"而
+不是"本来就是静的"，这正是把提交前的 idle 误判成"已完成"的那个经典竞态。`--no-submit` 与
+`--wait` 是逻辑矛盾（没提交等什么），由参数解析直接拒绝，不会执行一半再静默停下。
+
+### 完整协议
 
 ```powershell
 nebula ctl describe --pretty
@@ -36,6 +116,7 @@ nebula ctl read --window <WINDOW_ID> --pane <PANE_ID> --lines 120 --pretty
 nebula ctl procs --window <WINDOW_ID> --pane <PANE_ID> --pretty
 nebula ctl send-key --window <WINDOW_ID> --pane <PANE_ID> --key c --control --pretty
 nebula ctl run --window <WINDOW_ID> --pane <PANE_ID> --command "cargo test" --pretty
+nebula ctl exec-pane --window <WINDOW_ID> --pane <PANE_ID> -- cargo test --workspace
 nebula ctl focus --window <WINDOW_ID> --pane <PANE_ID>
 nebula ctl new-tab --window <WINDOW_ID>
 nebula ctl split --window <WINDOW_ID> --direction right
@@ -63,22 +144,37 @@ Pane ID 当前在 Window 内稳定，而不是进程内全局唯一。存在多�
 | `agent.fork` | 事务化创建独立 Git branch/worktree，再启动命名 Agent | `source_pane_id?`/`source_cwd?`, `name`, `kind`, `branch?`, `base?`, `path?`, `allow_dirty_source?` |
 | `agent.get` | 按稳定 id 或名称解析 Agent generation 与 worktree provenance | `agent`, `generation?` |
 | `agent.prompt` | 向同一 Agent generation 发送纯文本 Prompt | `agent`, `generation?`, `text`, `submit?` |
+| `agent.paste` | 向同一 Agent generation 发送受控 bracketed-paste 文本 | `agent`, `generation?`, `text`, `submit?` |
 | `agent.read` | 读取命名 Agent 所在 Pane 的真实 Grid 尾部 | `agent`, `generation?`, `lines?` |
 | `agent.wait` | 等待同一 Agent generation 的状态跃迁；被替换/退出即明确失败 | `agent`, `generation`, `state`, `timeout_ms`, `after_seq?` |
 | `window.create` | 创建新窗口 | 无 |
+| `window.close` | 关闭空闲窗口；忙碌 Pane 返回显式确认错误 | `window_id?` |
 | `window.focus` | 聚焦窗口或 Pane | `window_id?`, `pane_id?` |
 | `tab.new` | 创建默认 Shell 标签 | `window_id?` |
+| `tab.close` | 按窗口内零基索引关闭空闲 Tab | `window_id?`, `tab_index` |
+| `tab.rename` | 设置或清除 Tab 自定义名称 | `window_id?`, `tab_index`, `name` |
+| `tab.move` | 在同一窗口内移动 Tab | `window_id?`, `tab_index`, `to_index` |
 | `pane.split` | 从当前或指定 Pane 向右/向下分屏 | `window_id?`, `pane_id?`, `direction` |
+| `pane.close` | 关闭空闲 Pane；忙碌 Pane 返回显式确认错误 | `window_id?`, `pane_id` |
+| `pane.zoom` | 幂等设置 Pane 所在 Tab 的显式缩放状态 | `window_id?`, `pane_id`, `zoomed` |
+| `pane.resize` | 设置目标 Pane 在直接父分屏中的占比 | `window_id?`, `pane_id`, `ratio` |
 | `pane.prompt` | 写入一行纯文本，可追加 Enter | `window_id?`, `pane_id`, `text`, `submit` |
+| `pane.paste` | 通过 bracketed paste 写入有界 UTF-8 文本 | `window_id?`, `pane_id`, `text`, `submit` |
 | `pane.read` | 从真实终端 Grid 尾部读取最近逻辑行 | `window_id?`, `pane_id`, `lines` |
 | `pane.procs` | 读取本地 PTY shell 为根的真实进程树 | `window_id?`, `pane_id` |
 | `pane.send_key` | 按当前终端模式编码受限的命名控制键 | `window_id?`, `pane_id`, `key`, `modifiers?`, `repeat?` |
 | `pane.run` | 运行单行命令，并以 OSC 133 返回真实 exit code | `window_id?`, `pane_id`, `command`, `wait?`, `timeout_ms?` |
+| `pane.exec` | 在 Pane 的本地/WSL cwd 启动独立非 TTY argv 并捕获双流 | `window_id?`, `pane_id`, `argv`, `timeout_ms?`, `max_output_bytes?` |
 | `pane.wait` | 等待 Pane 到达语义状态 | `window_id?`, `pane_id`, `state`, `timeout_ms`, `after_seq?` |
 
 `pane.prompt` 有意拒绝换行、ESC 和其他控制字符，并限制为 32 KiB。它是 Prompt 接口，不是
 任意终端字节注入接口。控制键走 `pane.send_key`：只开放命名键，字母必须配
 `control=true`，`repeat` 上限 64；API 不接受任意 bytes 或 ANSI 字符串。
+
+`pane.paste` 专用于确实需要保留换行的输入：只接受 UTF-8，限制 32 KiB，拒绝 ESC、NUL
+与危险控制字符，并要求目标终端已启用 bracketed-paste。SSH Pane 明确拒绝本地文件/文本
+转发。资源 CLI 可从字面文本、`--stdin` 或 `--from-file` 读取，但协议边界始终只接收验证后的
+文本，不接收本地路径或句柄。
 
 ## 单请求编排
 
@@ -127,8 +223,10 @@ Runtime 先启动 workflow 中的所有 Agent，再并行等待各自被 registr
 
 ## 命名 Agent 与隔离 worktree
 
-`agent.start` 提供稳定的 `agent_id + generation + name`，目前冷启动只开放经过验证的 Codex
-与 Claude 命令。`agent.fork` 在此基础上增加 Git 隔离，完整顺序是：
+`agent.start` 提供稳定的 `agent_id + generation + name`。冷启动命令只开放经过各 Provider
+官方 CLI 文档核实的 `claude`、`codex`、`opencode`、`cursor`、`pi`、`omp` 与 `kimi`；其中
+Cursor 的实际可执行文件名是 `agent`。恢复/会话分叉只在对应 Provider 有已核实语法时出现，
+不会由显示名或检测 slug 猜命令。`agent.fork` 在此基础上增加 Git 隔离，完整顺序是：
 
 1. 由 `source_pane_id` 从 RuntimeHub 权威 snapshot 解析 cwd；没有 Pane 时必须提供绝对
    `source_cwd`。SSH Pane 明确返回 `remote_worktree_unsupported`。
@@ -157,6 +255,13 @@ Runtime 先启动 workflow 中的所有 Agent，再并行等待各自被 registr
 `pane.run` 依赖 Shell integration 的 OSC 133 `CommandStart`/`CommandDone`。只有观察到
 `CommandDone` 携带的真实 exit code 才返回 `finished`/`failed`；没有集成或没有 exit code 时
 返回 `exit_code_unavailable`、`run_start_timeout` 或 `run_aborted`，绝不把未知结果伪造成 0。
+
+`pane.exec` 与 `pane.run` 是两种刻意分开的执行语义：它直接接收 argv，不经过 shell 展开，
+在 Pane 当前上报的本地 cwd 中启动独立 non-TTY child，不写入 Grid、history 或交互 shell
+环境。WSL Pane 通过对应 distribution 和 guest cwd 执行；SSH Pane 返回
+`remote_exec_unsupported`。stdout/stderr 始终并行排水，每条默认最多保留 1 MiB、可配置上限
+16 MiB；响应的 `stdout`/`stderr` 是直接字符串，`capture` 分别报告 encoding、总字节数、保留
+字节数和截断状态。超时会回收整个子进程树，并保留已捕获输出与 `timed_out: true`。
 
 ## Agent 状态与终端读取
 

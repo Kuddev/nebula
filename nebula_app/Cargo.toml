@@ -189,6 +189,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_Variant",
     "Win32_System_Threading",
+    # pane.exec 隔离进程树；关闭 Job 时回收仍持有 stdout/stderr pipe 的后代。
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     # RtlGetVersion：系统 backdrop 只从 Windows 11 build 22621 起可用，

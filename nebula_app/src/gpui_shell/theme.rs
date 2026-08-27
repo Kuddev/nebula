@@ -17,6 +17,8 @@ fn chrome_theme(name: ThemeName) -> NebulaTheme {
         ThemeName::CoalDark => NebulaTheme::CoalDark,
         ThemeName::LinenLight => NebulaTheme::LinenLight,
         ThemeName::MossDark => NebulaTheme::MossDark,
+        ThemeName::Nord => NebulaTheme::Nord,
+        ThemeName::Paper => NebulaTheme::Paper,
     }
 }
 
@@ -30,6 +32,8 @@ fn settings_theme_name(theme: NebulaTheme) -> ThemeName {
         NebulaTheme::CoalDark => ThemeName::CoalDark,
         NebulaTheme::LinenLight => ThemeName::LinenLight,
         NebulaTheme::MossDark => ThemeName::MossDark,
+        NebulaTheme::Nord => ThemeName::Nord,
+        NebulaTheme::Paper => ThemeName::Paper,
     }
 }
 
@@ -186,10 +190,112 @@ fn shell_color(theme: NebulaTheme) -> Hsla {
     )
 }
 
-/// 终端卡圆角。权威值在旧壳：`draw_window_backdrop` 画卡用的是
-/// UI_SHELL_RADIUS_LOGICAL(=14)，不是控件那档 8——两壳必须同径。
-pub fn card_radius() -> Pixels {
-    px(crate::display::UI_SHELL_RADIUS_LOGICAL)
+/// 终端卡容器的几何。四个键一组：圆角、外间距、投影、竖线——「浮起的圆角卡」
+/// 与「铺满到窗口边」由此成为同一条渲染路径的两组取值，不是两套代码、更不是
+/// 两套页面。
+///
+/// 取值分两层：主题自带的 [`nebula_settings::ThemeCardGeometry`] 打底，用户在
+/// settings.txt 里的显式值覆盖它。于是切主题就换形态，而手调过的人不会被主题
+/// 夺回控制权。
+///
+/// 卡内壁到网格的内间距**不在这里**：那是 `SizeInfo` 的 `padding.x/y` 与
+/// `padding_right()`（`config/window.rs`），本来就可配。两处都给会双份叠加。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneCardStyle {
+    /// 卡圆角。0 与 `margin` 全零搭配即铺满形态。
+    pub radius: f32,
+    /// 卡与周围 chrome 的外间距，**逐边给**——不能假设对称，理由见
+    /// [`paint_shell_around_card`]。GPUI 侧它落在父容器的 padding 上（卡是子
+    /// 元素），所以读代码时别把它和网格内边距混起来。
+    pub margin: gpui::Edges<f32>,
+    /// 卡投影。
+    pub shadow: bool,
+    /// 侧栏与终端之间的竖线宽度，0 = 不画。
+    pub divider: f32,
+}
+
+impl Default for PaneCardStyle {
+    /// 全局设置还没装载时的回落：卡片形态 + 默认卡缝。
+    fn default() -> Self {
+        let gutter = nebula_settings::DEFAULT_PANE_CARD_GUTTER;
+        Self {
+            radius: nebula_settings::DEFAULT_PANE_CARD_RADIUS,
+            margin: gpui::Edges {
+                top: 0.0,
+                right: gutter,
+                bottom: gutter,
+                left: gutter,
+            },
+            shadow: false,
+            divider: 0.0,
+        }
+    }
+}
+
+impl PaneCardStyle {
+    /// 合并主题默认与用户覆盖。唯一的调用点是
+    /// [`crate::gpui_shell::config::Settings::load`]——那里同时握着**生效**主题
+    /// 与 `RuntimeSettings`，是唯一能正确合并两层的地方；别处自行读一遍
+    /// settings 就会在跟随系统主题时和 chrome 分家。
+    pub fn resolve(theme: ThemeName, runtime: &nebula_settings::RuntimeSettings) -> Self {
+        let geometry = theme.card_geometry();
+        let gutter = runtime.pane_card_gutter.unwrap_or(geometry.gutter);
+        Self {
+            radius: runtime.pane_card_radius.unwrap_or(geometry.radius),
+            // 上边恒零：08-26 裁定侧栏 / 终端卡 / 右侧抽屉三列顶边都贴 chrome
+            // 下沿。可配的那个数只作用于左 / 右 / 下三边。
+            margin: gpui::Edges {
+                top: 0.0,
+                right: gutter,
+                bottom: gutter,
+                left: gutter,
+            },
+            shadow: runtime.pane_card_shadow.unwrap_or(geometry.shadow),
+            divider: runtime.pane_card_divider.unwrap_or(geometry.divider),
+        }
+    }
+
+    /// 当前生效的卡几何。
+    pub fn current(cx: &App) -> Self {
+        cx.try_global::<crate::gpui_shell::config::Settings>()
+            .map(|settings| settings.card)
+            .unwrap_or_default()
+    }
+}
+
+/// 侧栏与终端之间那条竖线的颜色。从壳色推导而不新增 palette 色位：9 个主题
+/// 一个都不用改，而且亮暗自动反向——浅色主题压暗、深色主题提亮，两边都能
+/// 读作一条分界而不是一道亮缝。
+pub fn card_divider_color(cx: &App) -> Hsla {
+    let mut color = cx.theme().background;
+    let is_light = chrome_theme_resolved(cx).palette().is_light;
+    color.l = if is_light {
+        (color.l - 0.10).max(0.0)
+    } else {
+        (color.l + 0.10).min(1.0)
+    };
+    color
+}
+
+/// 终端卡圆角。默认值的权威在 `nebula_settings::DEFAULT_PANE_CARD_RADIUS`，
+/// 旧壳的 `UI_SHELL_RADIUS_LOGICAL` 引用同一个常量——两壳必须同径。
+pub fn card_radius(cx: &App) -> Pixels {
+    px(PaneCardStyle::current(cx).radius)
+}
+
+/// 卡投影。浅色主题压得更浅——同一组 alpha 落在浅底上会显脏而不是显深度。
+///
+/// 偏移只给 y、不给 x：光源当作正上方，卡在窗口里居中偏右时也不会出现
+/// 阴影朝一侧甩的违和感。
+pub fn card_shadow(cx: &App) -> gpui::BoxShadow {
+    let is_light = chrome_theme_resolved(cx).palette().is_light;
+    gpui::BoxShadow {
+        color: hsla(0.0, 0.0, 0.0, if is_light { 0.10 } else { 0.28 }),
+        offset: point(px(0.0), px(6.0)),
+        blur_radius: px(18.0),
+        spread_radius: px(0.0),
+        inset: false,
+    }
 }
 
 /// 卡内容层底色 = 当前生效的终端背景。终端 tab 之外的卡内容（设置页）
@@ -257,7 +363,10 @@ pub fn paint_shell_around_card(
     paint(window, x, card_y, left, card_h);
     paint(window, x + width - right, card_y, right, card_h);
 
-    let radius = crate::display::UI_SHELL_RADIUS_LOGICAL.min(card_w * 0.5).min(card_h * 0.5);
+    let radius = PaneCardStyle::current(cx)
+        .radius
+        .min(card_w * 0.5)
+        .min(card_h * 0.5);
     if radius <= 0.0 {
         return;
     }
@@ -405,7 +514,7 @@ pub fn settings_hover_bg(cx: &App, strong: bool) -> Hsla {
 
 /// 按运行时主题重建窗口 chrome：先切组件库深浅模式垫底（未映射的长尾
 /// token 落在正确的底色系上），再用旧壳 [`Skin`] 覆写全部关键 token——
-/// 七个主题（含浅色）共用同一条派生路径。启动、设置变更、系统外观变化
+/// 所有主题（含 Nord/Paper）共用同一条 token 应用路径。启动、设置变更、系统外观变化
 /// 都走这里；主题名先经 [`effective_theme_name`] 折算 follow_system。
 pub fn apply_chrome_theme(cx: &mut App) {
     // 视效（模糊/透明度/壁纸）与主题同一时机刷新：设置热应用、系统外观
@@ -633,6 +742,8 @@ mod tests {
             resolve_theme_name(ThemeName::SilverLight, false, false),
             ThemeName::SilverLight
         );
+        assert_eq!(resolve_theme_name(ThemeName::Nord, true, true), ThemeName::Paper);
+        assert_eq!(resolve_theme_name(ThemeName::Paper, true, false), ThemeName::Nord);
     }
 
     #[test]

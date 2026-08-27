@@ -44,6 +44,7 @@ pub struct RenderableContent<'a> {
     color_resolver: &'a mut TerminalColorResolver,
     theme_is_light: bool,
     themed_selection: bool,
+    exact_term_colors: Option<nebula_settings::ExactTermColors>,
 }
 
 impl<'a> RenderableContent<'a> {
@@ -72,6 +73,7 @@ impl<'a> RenderableContent<'a> {
             neutral_mix,
         );
         let themed_selection = config.colors.selection == InvertedCellColors::default();
+        let exact_term_colors = display.nebula_theme.exact_term_colors();
 
         // Find terminal cursor shape.
         let cursor_shape = if terminal_content.cursor.shape == CursorShape::Hidden
@@ -117,6 +119,7 @@ impl<'a> RenderableContent<'a> {
             color_resolver: &mut display.terminal_color_resolver,
             theme_is_light,
             themed_selection,
+            exact_term_colors,
         }
     }
 
@@ -169,7 +172,24 @@ impl<'a> RenderableContent<'a> {
         // 用户显式配置光标后才退出主题跟随，并继续尊重 OSC 覆盖。
         let follows_theme = cursor_follows_theme(color);
         let (cursor_color, text_color, opacity) = if follows_theme {
-            themed_cursor_style(self.cursor_shape, self.theme_is_light, self.theme_anchor, cell.fg)
+            if let Some(exact) = self.exact_term_colors.filter(|exact| exact.cursor.is_some()) {
+                let base = exact.cursor.expect("filtered above");
+                let cursor =
+                    if matches!(self.cursor_shape, CursorShape::Beam | CursorShape::Underline) {
+                        exact.cursor_stroke.unwrap_or(base)
+                    } else {
+                        base
+                    };
+                let text = exact.cursor_text.map(rgb8).unwrap_or(self.theme_background);
+                (rgb8(cursor), text, 1.0)
+            } else {
+                themed_cursor_style(
+                    self.cursor_shape,
+                    self.theme_is_light,
+                    self.theme_anchor,
+                    cell.fg,
+                )
+            }
         } else {
             let cursor_color = osc_cursor.map_or(color.background, CellRgb::Rgb);
             let text_color = color.foreground;
@@ -205,6 +225,10 @@ impl<'a> RenderableContent<'a> {
 
 fn cursor_follows_theme(color: InvertedCellColors) -> bool {
     color == NEBULA_DEFAULT_CURSOR
+}
+
+fn rgb8([r, g, b]: nebula_settings::Rgb8) -> Rgb {
+    Rgb::new(r, g, b)
 }
 
 pub(crate) fn themed_cursor_style(
@@ -377,7 +401,15 @@ impl RenderableCell {
 
             character = c.unwrap_or(character);
         } else if is_selected {
-            if content.themed_selection {
+            if let Some(exact) =
+                content.exact_term_colors.filter(|exact| exact.selection_background.is_some())
+            {
+                if let Some(selection_foreground) = exact.selection_foreground {
+                    fg = rgb8(selection_foreground);
+                }
+                bg = rgb8(exact.selection_background.expect("filtered above"));
+                bg_alpha = 1.0;
+            } else if content.themed_selection {
                 let opacity = if content.theme_is_light {
                     terminal_feedback::SELECTION_ALPHA_LIGHT
                 } else {
@@ -544,7 +576,10 @@ impl RenderableCell {
 
 /// Terminal graphics carry semantic/brand color in their glyph pixels; treating
 /// them as prose changes icons into a different image on light themes.
-fn is_terminal_graphic(character: char) -> bool {
+///
+/// GPUI 壳的终端元素走同一张表（`gpui_shell::terminal::element`）：同一个字符在
+/// 两个壳必须落在同一侧，否则同一份输出在两边被矫正得不一样。
+pub(crate) fn is_terminal_graphic(character: char) -> bool {
     matches!(
         character,
         '\u{2500}'..='\u{27bf}'

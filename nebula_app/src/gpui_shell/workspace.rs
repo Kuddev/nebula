@@ -30,11 +30,12 @@ use gpui::{
     Focusable as _, FontWeight, InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent,
     MouseButton, MouseDownEvent, ObjectFit, ParentElement as _, Pixels, Render, RenderImage,
     SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
-    Window, canvas, div, ease_out_quint, img, px, relative, size,
+    Window, canvas, div, ease_out_quint, fill, img, px, relative, size,
 };
 use image::Frame;
 
 use crate::display::color::Rgb;
+use crate::gpui_shell::doc_tabs::DocTabViewEvent;
 use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::settings_pane::{SettingsPane, SettingsPaneEvent};
 use crate::gpui_shell::terminal::view::{SidebarActivity, TerminalView, TerminalViewEvent};
@@ -47,7 +48,9 @@ mod agents;
 mod file_tree;
 mod key_actions;
 mod pane_header;
+mod quick_jump;
 mod residency;
+mod send_to_chat;
 mod sidebar;
 mod tab_drag;
 mod tab_menu;
@@ -109,11 +112,6 @@ const PALETTE_KEY_CONTEXT: &str = "NebulaCommandPalette";
 /// 侧栏槽位右缘到正文卡可见左缘的 8px 卡缝；拖拽热区必须对准后者。
 const SIDEBAR_RESIZE_VISUAL_OFFSET: f32 = 8.0;
 const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
-
-/// 终端卡的左 / 右 / 下卡缝（上边为零，见卡容器处的裁定）。布局的 padding
-/// 与 `paint_shell_around_card` 的壳色带必须读同一个数——两边各写一份
-/// 字面量就是那圈白边的来源。
-const CARD_GUTTER: f32 = 8.0;
 
 /// 工作区静态默认绑定的 combo 集（[`init`] 的镜像）。撤销已失效的自定义
 /// 注入时要排除：gpui 的 NoAction 打在静态默认键上会误杀基础功能。
@@ -281,6 +279,7 @@ enum WorkspaceTab {
     /// Markdown/文本文档 tab（文件树双击可读文本进入；旧壳 doc tab 同形态）。
     Document {
         view: Entity<crate::gpui_shell::doc_tabs::DocTabView>,
+        _subscription: Subscription,
     },
     /// 源码查看 tab（tree-sitter 高亮 + 行级虚拟化，只读）。
     Code {
@@ -433,7 +432,9 @@ fn dock_tree(target: SplitTree<u64>, source: SplitTree<u64>, nav: SplitNav) -> S
 /// `gap_2`(8px) 同源）；受约束拖拽按此步距换算让位槽位。
 pub(super) const TAB_ROW_H: f32 = 34.0;
 pub(super) const TAB_ROW_PITCH: f32 = TAB_ROW_H + 8.0;
-const SIDE_PANEL_SLOT_W: f32 = 328.0;
+/// 右侧抽屉槽位宽度 = 抽屉自身宽度。抽屉贴满右侧整条竖带（上下右都不留卡缝，
+/// 左侧直接抵住终端卡），所以槽位里不再有额外的卡缝要算进来。
+const SIDE_PANEL_SLOT_W: f32 = 320.0;
 
 /// 侧栏 tab 行的关闭按钮边长。旧壳 `chrome_tab_layout` 取
 /// `max(row_h * 0.58, 16)`；`Button::xsmall()` 的 `size_5` 恰好落在这个数上，
@@ -469,9 +470,31 @@ const TAB_LABEL_ICON_SIZE: f32 = 15.0;
 /// 拖拽启动阈值（逻辑 px）：按住不动/轻微抖动是点击，越过才进入拖拽。
 const TAB_DRAG_THRESHOLD: f32 = 4.0;
 
+// Palette 是一个随手打开的 popover，不是占满工作流的设置页。宽高与内部节奏
+// 单独命名，避免后续在渲染树里重新散落一批互不相干的魔数。
+const PALETTE_PANEL_WIDTH: f32 = 580.0;
+const PALETTE_PANEL_HEIGHT: f32 = 520.0;
+const PALETTE_METADATA_MAX_WIDTH: f32 = 260.0;
+/// 与 Shell 选择器的 launcher row 共用同一命中高度；不能只放大文字或底色，
+/// 否则 hover、点击和键盘选中会再次出现三套几何。
+const PALETTE_ROW_HEIGHT: f32 = 42.0;
+const PALETTE_GROUP_HEADER_HEIGHT: f32 = 26.0;
+const PALETTE_FILTER_BAR_HEIGHT: f32 = 26.0;
+const PALETTE_ROW_GAP: f32 = 4.0;
+const PALETTE_SCROLLBAR_CONTENT_GUTTER: f32 = 16.0;
+
 #[derive(Clone)]
 enum WorkspacePaletteAction {
     Shared(crate::display::command_palette::PaletteAction),
+    /// 聚焦已经存在的工作区标签，不创建副本。
+    FocusTab(usize),
+    /// 先激活标签，再把焦点交给其中的明确 pane。
+    FocusPane {
+        tab: usize,
+        pane: u64,
+    },
+    /// 在 frecency 目录中新建终端；已有目录中的 pane 由上面的 FocusPane 命中。
+    OpenDirectory(std::path::PathBuf),
     RunAiSession {
         command: String,
         cwd: Option<std::path::PathBuf>,
@@ -484,12 +507,104 @@ enum WorkspacePaletteAction {
     LaunchProfile(crate::config::ui_config::Profile),
 }
 
+#[derive(Clone, Copy)]
+enum WorkspacePaletteHintStyle {
+    /// 路径、会话来源、连接种类等补充身份信息。
+    Metadata,
+    /// 可直接触发该动作的键位；渲染为独立 keycap，不与普通说明混淆。
+    Shortcut,
+}
+
+/// Quick Jump 把不同数据源当成一等 scope，而不是把 `AI`、`SSH`
+/// 当搜索关键字。这里只有已经接通真实端到端动作的数据源；Recipe/Files 在
+/// 后端可执行前不展示空壳入口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickJumpFilter {
+    All,
+    Opened,
+    Folders,
+    Ssh,
+    Agents,
+}
+
+impl QuickJumpFilter {
+    const ALL: [Self; 5] = [Self::All, Self::Opened, Self::Folders, Self::Ssh, Self::Agents];
+
+    fn label(self, language: crate::display::UiLanguage) -> &'static str {
+        match self {
+            Self::All => language.pick("全部", "All"),
+            Self::Opened => language.pick("已打开", "Opened"),
+            Self::Folders => language.pick("文件夹", "Folders"),
+            Self::Ssh => "SSH",
+            Self::Agents => language.pick("智能体", "Agents"),
+        }
+    }
+
+    fn placeholder(self, language: crate::display::UiLanguage) -> &'static str {
+        match self {
+            Self::All => language.pick(
+                "搜索标签页、分屏、目录、SSH 或 AI 会话…",
+                "Search tabs, panes, folders, SSH or agent sessions...",
+            ),
+            Self::Opened => {
+                language.pick("搜索已打开的标签页和分屏…", "Search open tabs and panes...")
+            },
+            Self::Folders => language.pick("搜索常用文件夹…", "Search frequent folders..."),
+            Self::Ssh => language.pick("搜索 SSH 主机…", "Search SSH hosts..."),
+            Self::Agents => language.pick("搜索智能体会话…", "Search agent sessions..."),
+        }
+    }
+
+    fn matches(self, action: &WorkspacePaletteAction) -> bool {
+        match self {
+            Self::All => true,
+            Self::Opened => matches!(
+                action,
+                WorkspacePaletteAction::FocusTab(_) | WorkspacePaletteAction::FocusPane { .. }
+            ),
+            Self::Folders => matches!(action, WorkspacePaletteAction::OpenDirectory(_)),
+            Self::Ssh => matches!(action, WorkspacePaletteAction::LaunchSshHost(_)),
+            Self::Agents => matches!(action, WorkspacePaletteAction::RunAiSession { .. }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspacePaletteFilter {
+    Launcher(crate::display::command_palette::LauncherFilter),
+    QuickJump(QuickJumpFilter),
+}
+
+impl WorkspacePaletteFilter {
+    fn label(self, language: crate::display::UiLanguage) -> &'static str {
+        match self {
+            Self::Launcher(filter) => filter.label(language),
+            Self::QuickJump(filter) => filter.label(language),
+        }
+    }
+
+    fn placeholder(self, language: crate::display::UiLanguage) -> &'static str {
+        match self {
+            Self::Launcher(crate::display::command_palette::LauncherFilter::All) => language
+                .pick("搜索 Shell、配置和 SSH 主机…", "Search shells, profiles and SSH hosts..."),
+            Self::Launcher(crate::display::command_palette::LauncherFilter::Ssh) => {
+                language.pick("搜索 SSH 主机…", "Search SSH hosts...")
+            },
+            Self::Launcher(crate::display::command_palette::LauncherFilter::Shell) => {
+                language.pick("搜索 Shell 和配置…", "Search shells and profiles...")
+            },
+            Self::QuickJump(filter) => filter.placeholder(language),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct WorkspacePaletteRow {
     group_order: usize,
     group: String,
     label: String,
     hint: String,
+    hint_style: WorkspacePaletteHintStyle,
     search: String,
     action: WorkspacePaletteAction,
     /// 行首的彩色品牌图标（只有 shell/配置档行有）。旧壳的 shell 菜单同样
@@ -497,32 +612,69 @@ struct WorkspacePaletteRow {
     icon: Option<std::sync::Arc<gpui::RenderImage>>,
     /// SSH 主机行用 Nerd Font 码位（旧壳 `os_icons`），不是品牌 PNG。
     icon_glyph: Option<char>,
+    /// 通用名词行使用组件库的线性图标；与品牌图片、系统 Nerd Font 图标互斥。
+    icon_path: Option<SharedString>,
+}
+
+/// 启动外部文件管理器的 `Command` 底座。
+///
+/// 三条标准流必须显式置 null：Nebula 是 GUI 子系统进程，`GetStdHandle` 拿到的是
+/// 无效句柄，而 `Command` 默认的 `Stdio::inherit()` 会把它们填进 `STARTUPINFO`，
+/// `CreateProcess` 于是直接以 `ERROR_INVALID_HANDLE`（os error 6）失败。实测就是
+/// 「在资源管理器中打开点了没反应」的真凶——旧壳走 `daemon::spawn_daemon`（同样
+/// 三流置 null）或 `Command::output()`（自带管道）所以从来没露出这个坑。
+fn file_manager_command(program: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
 }
 
 fn open_in_file_manager(path: &Path) {
     #[cfg(windows)]
-    let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
+    let result = file_manager_command("explorer.exe").arg(path).spawn().map(|_| ());
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(path).spawn();
+    let result = file_manager_command("open").arg(path).spawn().map(|_| ());
     #[cfg(all(not(windows), not(target_os = "macos")))]
-    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    let result = file_manager_command("xdg-open").arg(path).spawn().map(|_| ());
+    log_file_manager_spawn("open", path, result);
+}
+
+/// 外部文件管理器的启动结果必须留痕。这两条路径此前都是 `let _ = …spawn()`：
+/// explorer 一旦没弹窗（复用后台窗口、路径不存在、拒绝启动）界面上零反馈，
+/// 只能靠猜——「点了没反应」的报障就是这么来的。
+fn log_file_manager_spawn(kind: &str, path: &Path, result: std::io::Result<()>) {
+    match result {
+        Ok(()) => crate::display::nebula_debug_log(format!(
+            "file_manager {kind} spawned path={}",
+            path.display()
+        )),
+        Err(err) => crate::display::nebula_debug_log(format!(
+            "file_manager {kind} FAILED path={} err={err}",
+            path.display()
+        )),
+    }
 }
 
 /// “在文件管理器中显示”与单纯打开路径不是一个动作。Windows 的
 /// `/select,` 必须和路径组成同一个 argv，避免空格与 Unicode 被二次解析。
 fn reveal_in_file_manager(path: &Path) {
     #[cfg(windows)]
-    {
+    let result = {
         let mut select = std::ffi::OsString::from("/select,");
         select.push(path.as_os_str());
-        let _ = std::process::Command::new("explorer.exe").arg(select).spawn();
-    }
+        file_manager_command("explorer.exe").arg(select).spawn().map(|_| ())
+    };
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").args(["-R"]).arg(path).spawn();
+    let result = file_manager_command("open").args(["-R"]).arg(path).spawn().map(|_| ());
     #[cfg(all(not(windows), not(target_os = "macos")))]
-    if let Some(parent) = path.parent() {
-        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
-    }
+    let result = match path.parent() {
+        Some(parent) => file_manager_command("xdg-open").arg(parent).spawn().map(|_| ()),
+        None => Ok(()),
+    };
+    log_file_manager_spawn("reveal", path, result);
 }
 
 fn workspace_ui_language() -> crate::display::UiLanguage {
@@ -572,6 +724,7 @@ fn shell_palette_rows(
                 group: if is_default { recommended.to_owned() } else { all_shells.to_owned() },
                 label: shell.name.clone(),
                 hint: shell.program.clone(),
+                hint_style: WorkspacePaletteHintStyle::Metadata,
                 search: format!("{} {} shell profile", shell.name, shell.id).to_lowercase(),
                 icon: crate::gpui_shell::widgets::shell_brand_image(
                     &shell.id,
@@ -579,6 +732,7 @@ fn shell_palette_rows(
                     scale_factor,
                 ),
                 icon_glyph: None,
+                icon_path: None,
                 action: WorkspacePaletteAction::LaunchShell(shell),
             }
         })
@@ -598,9 +752,11 @@ fn shell_palette_rows(
                 .to_lowercase(),
             label,
             hint,
+            hint_style: WorkspacePaletteHintStyle::Metadata,
             action: WorkspacePaletteAction::LaunchProfile(profile),
             icon,
             icon_glyph: None,
+            icon_path: None,
         })
     }));
     if let Some(position) = rows.iter().position(|row| row.group_order == 0) {
@@ -616,10 +772,12 @@ fn shell_palette_rows(
             group: ssh_group.to_owned(),
             label: host.clone(),
             hint: "SSH".to_owned(),
+            hint_style: WorkspacePaletteHintStyle::Metadata,
             search: format!("{host} ssh host remote lianjie 连接").to_lowercase(),
             action: WorkspacePaletteAction::LaunchSshHost(host),
             icon: None,
             icon_glyph: Some(glyph),
+            icon_path: None,
         }
     }));
     rows
@@ -775,6 +933,12 @@ pub struct NebulaWorkspace {
     /// 全部/SSH/Shell 芯片；Ctrl+Shift+P 的命令目录不走这条。
     shell_picker_open: bool,
     launcher_filter: crate::display::command_palette::LauncherFilter,
+    /// `Some` 表示当前是统一 Quick Jump；值就是 provider scope。
+    /// 命令面板与 Shell picker 必须保持 `None`，避免跨入口泄漏筛选状态。
+    quick_jump_filter: Option<QuickJumpFilter>,
+    /// 三种 palette 共用同一滚动位置，但每次打开/切 scope 都归零。显式 handle
+    /// 让键盘选择能自动揭示当前行，也允许在 Windows 上始终画出可拖动 thumb。
+    command_palette_scroll: gpui::ScrollHandle,
     _command_palette_subscription: Subscription,
     /// Shared old-shell drawer model. GPUI owns only presentation and polling;
     /// filesystem traversal, expansion state, ignore marking and throttling
@@ -782,11 +946,18 @@ pub struct NebulaWorkspace {
     side_panel: crate::display::side_panel::SidePanel,
     side_panel_polling: bool,
     side_panel_anim_armed: bool,
+    /// 文件树列表的滚动位置。抽屉走 `uniform_list` 虚拟化，滑块（组件库
+    /// `Scrollbar`）读的是同一个 handle——这是抽屉里**唯一**的滚动模型，
+    /// 旧壳那套行粒度 `SidePanel::scroll` 在 GPUI 侧恒为 0。
+    file_tree_scroll: gpui::UniformListScrollHandle,
     /// 文件树右键：画在 workspace 根上，不进抽屉子孙树。见 `file_tree.rs`。
     file_tree_menu: Option<file_tree::FileTreeContextMenu>,
     /// 标签右键：同样画在根上。挂进标签行会让每一行都渲染同一份菜单，
     /// popover 阴影按标签数叠厚。见 `tab_menu.rs` 模块头。
     tab_menu: Option<tab_menu::TabContextMenu>,
+    /// 终端/Markdown 选区右键：菜单必须在 workspace 根上唯一渲染；
+    /// Send to Chat 对话框再通过 Root 的 dialog layer 接管焦点。
+    selection_context_menu: Option<send_to_chat::SelectionContextMenu>,
     /// 复用旧壳随包分发的 AI 品牌图，不用近似字体图标替代。
     sidebar_logo_images: HashMap<(crate::display::AiLogo, bool), Arc<RenderImage>>,
     /// 品牌图缓存对应的整数物理像素边长；窗口跨 DPI 显示器时据此重建。
@@ -887,6 +1058,7 @@ impl NebulaWorkspace {
                 match event {
                     InputEvent::Change => {
                         this.command_palette_selected = 0;
+                        this.command_palette_scroll.scroll_to_item(0);
                         cx.notify();
                     },
                     InputEvent::PressEnter { .. } => {
@@ -941,12 +1113,16 @@ impl NebulaWorkspace {
             palette_override: None,
             shell_picker_open: false,
             launcher_filter: crate::display::command_palette::LauncherFilter::All,
+            quick_jump_filter: None,
+            command_palette_scroll: gpui::ScrollHandle::new(),
             _command_palette_subscription: command_palette_subscription,
             side_panel: crate::display::side_panel::SidePanel::new(),
             side_panel_polling: false,
             side_panel_anim_armed: false,
+            file_tree_scroll: gpui::UniformListScrollHandle::new(),
             file_tree_menu: None,
             tab_menu: None,
+            selection_context_menu: None,
             sidebar_logo_images: sidebar_logo_images(sidebar_logo_target_px),
             sidebar_logo_target_px,
             _appearance_sub: appearance_sub,
@@ -1484,10 +1660,30 @@ impl NebulaWorkspace {
         panes.push(pane);
         *focused = new_id;
         *zoomed = false;
+        self.mark_structural_resize(active, cx);
         self.focus_active(window, cx);
         self.sync_side_panel_to_active(true, cx);
         cx.notify();
         Ok(new_id)
+    }
+
+    /// 结构性布局变化：让 tab 内每个 pane 的下一次网格观测直接下发到 Term 与
+    /// ConPTY，不进尾沿去抖。
+    ///
+    /// 分屏创建/关闭、pane 替换、zoom 切换都属此列——几何只改一次，去抖没有
+    /// 可合并的后续帧，而多等的每一毫秒都是 Term（已按新网格渲染）与 ConPTY
+    /// （仍是旧几何）不一致的窗口期：这段时间到达的字节按旧宽度进网格，等提交
+    /// 时本地 reflow 与 conhost rewrap 各折一套行数，提示符与回显就此错开几行。
+    /// 旧壳 `window_context/split.rs` 的 `resize_active_layout()` 在同样的路径
+    /// 上同步下发 grid + PTY，这里复刻同一条合同。
+    fn mark_structural_resize(&mut self, tab_ix: usize, cx: &mut App) {
+        let Some(WorkspaceTab::Terminal { panes, .. }) = self.tabs.get(tab_ix) else {
+            return;
+        };
+        let views: Vec<_> = panes.iter().map(|pane| pane.view.clone()).collect();
+        for view in views {
+            view.update(cx, |view, _| view.mark_structural_resize());
+        }
     }
 
     /// 关一个 pane（pane 退出 / ctrl+shift+w）。树裁定结局：最后一个叶子
@@ -1528,6 +1724,7 @@ impl NebulaWorkspace {
                     }
                 }
                 self.pane_bounds.borrow_mut().remove(&pane_id);
+                self.mark_structural_resize(tab_ix, cx);
                 if tab_ix == self.active {
                     self.focus_active(window, cx);
                     self.sync_side_panel_to_active(true, cx);
@@ -1723,11 +1920,19 @@ impl NebulaWorkspace {
 
     /// ctrl+shift+enter：聚焦 pane 满卡缩放开关（旧壳 ToggleZoom）。
     fn toggle_zoom(&mut self, cx: &mut Context<Self>) {
-        if let Some(WorkspaceTab::Terminal { panes, zoomed, .. }) = self.tabs.get_mut(self.active) {
-            if panes.len() > 1 {
+        let active = self.active;
+        let toggled = match self.tabs.get_mut(active) {
+            Some(WorkspaceTab::Terminal { panes, zoomed, .. }) if panes.len() > 1 => {
                 *zoomed = !*zoomed;
-                cx.notify();
-            }
+                true
+            },
+            _ => false,
+        };
+        if toggled {
+            // 缩放把一个 pane 的几何从半卡拉到整卡（其余 pane 反之），是一次性
+            // 结构变化，同 split/close 走同步下发。
+            self.mark_structural_resize(active, cx);
+            cx.notify();
         }
     }
 
@@ -2013,19 +2218,20 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(ix) = self.tabs.iter().position(
-            |tab| matches!(tab, WorkspaceTab::Document { view } if view.read(cx).path == path),
+            |tab| matches!(tab, WorkspaceTab::Document { view, .. } if view.read(cx).path == path),
         ) {
-            if let Some(WorkspaceTab::Document { view }) = self.tabs.get(ix) {
+            if let Some(WorkspaceTab::Document { view, .. }) = self.tabs.get(ix) {
                 view.clone().update(cx, |view, cx| {
-                    view.reload();
+                    view.reload(cx);
                     cx.notify();
                 });
             }
             self.activate_tab(ix, window, cx);
             return;
         }
-        let view = cx.new(|_| crate::gpui_shell::doc_tabs::DocTabView::new(path));
-        self.insert_new_tab(WorkspaceTab::Document { view });
+        let view = cx.new(|cx| crate::gpui_shell::doc_tabs::DocTabView::new(path, cx));
+        let subscription = cx.subscribe_in(&view, window, Self::on_document_event);
+        self.insert_new_tab(WorkspaceTab::Document { view, _subscription: subscription });
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -2107,6 +2313,19 @@ impl NebulaWorkspace {
                 }
             },
             TerminalViewEvent::FontSizeChanged => self.apply_runtime_settings(cx),
+            // 任务栏是窗口级的，只反映**正被看着的那个 pane**：后台 tab 里的
+            // 构建进度投到同一个按钮上只会互相覆盖，读数还不如没有。
+            TerminalViewEvent::ProgressChanged(progress) => {
+                if let Some((tab_ix, pane_id)) = self.locate_pane(view.entity_id())
+                    && tab_ix == self.active
+                    && matches!(
+                        self.tabs.get(tab_ix),
+                        Some(WorkspaceTab::Terminal { focused, .. }) if *focused == pane_id
+                    )
+                {
+                    crate::taskbar::apply(windowing::native_hwnd(window).unwrap_or(0), *progress);
+                }
+            },
             TerminalViewEvent::Bell => {
                 if let Some((tab_ix, _)) = self.locate_pane(view.entity_id())
                     && tab_ix != self.active
@@ -2122,6 +2341,53 @@ impl NebulaWorkspace {
                 if let Some((_, pane_id)) = self.locate_pane(view.entity_id()) {
                     self.fan_out_broadcast(pane_id, input, cx);
                 }
+            },
+            TerminalViewEvent::AiAttention(attention) => {
+                if let Some((tab_ix, pane_id)) = self.locate_pane(view.entity_id()) {
+                    if tab_ix != self.active
+                        && let Some(meta) = self.tab_meta.get_mut(tab_ix)
+                    {
+                        meta.has_bell = true;
+                    }
+                    let body = attention.summary_for_pane(pane_id);
+                    crate::gpui_shell::toast::banner(
+                        window,
+                        cx,
+                        crate::display::ToastKind::Warning,
+                        format!("{} · {body}", attention.source),
+                    );
+                    if !window.is_window_active() {
+                        #[cfg(windows)]
+                        crate::notify::toast(&attention.source, &body);
+                    }
+                    cx.notify();
+                }
+            },
+            TerminalViewEvent::SelectionContextMenuRequested { position, text } => {
+                if let Some((_, pane_id)) = self.locate_pane(view.entity_id()) {
+                    self.open_terminal_selection_context_menu(
+                        view.clone(),
+                        pane_id,
+                        *position,
+                        text.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            },
+        }
+    }
+
+    fn on_document_event(
+        &mut self,
+        _: &Entity<crate::gpui_shell::doc_tabs::DocTabView>,
+        event: &DocTabViewEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            DocTabViewEvent::SelectionContextMenuRequested { position, text } => {
+                self.open_document_selection_context_menu(*position, text.clone(), window, cx);
             },
         }
     }
@@ -2419,10 +2685,12 @@ impl NebulaWorkspace {
                         group,
                         label: item.label.to_owned(),
                         hint: item.hint.to_owned(),
+                        hint_style: WorkspacePaletteHintStyle::Shortcut,
                         search: item.search.to_owned(),
                         action: WorkspacePaletteAction::Shared(item.action.clone()),
                         icon: None,
                         icon_glyph: None,
+                        icon_path: None,
                     }
                 })
                 .collect();
@@ -2441,10 +2709,12 @@ impl NebulaWorkspace {
                             group: language.pick("SSH 主机", "SSH HOSTS").to_owned(),
                             label: host.clone(),
                             hint: "SSH".to_owned(),
+                            hint_style: WorkspacePaletteHintStyle::Metadata,
                             search: format!("{host} ssh host remote lianjie 连接").to_lowercase(),
                             action: WorkspacePaletteAction::LaunchSshHost(host),
                             icon: None,
                             icon_glyph: Some(glyph),
+                            icon_path: None,
                         }
                     },
                 ),
@@ -2454,6 +2724,11 @@ impl NebulaWorkspace {
         let mut rows: Vec<_> = rows
             .into_iter()
             .filter(|row| {
+                if let Some(filter) = self.quick_jump_filter
+                    && !filter.matches(&row.action)
+                {
+                    return false;
+                }
                 if self.shell_picker_open {
                     let keep = match self.launcher_filter {
                         crate::display::command_palette::LauncherFilter::All => true,
@@ -2480,6 +2755,38 @@ impl NebulaWorkspace {
         rows
     }
 
+    fn reset_palette_query(
+        &self,
+        placeholder: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_palette_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        self.command_palette_input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, window, cx);
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+    }
+
+    /// 结果树里分组标题也是直接滚动子节点；键盘选中的是数据行，因此要把
+    /// 数据索引换成真实子节点索引，才能让 `ScrollHandle` 精确揭示当前行。
+    fn palette_scroll_node_index(rows: &[WorkspacePaletteRow], selected: usize) -> usize {
+        let mut node_ix = 0;
+        let mut previous_group: Option<&str> = None;
+        for (row_ix, row) in rows.iter().enumerate() {
+            if previous_group != Some(row.group.as_str()) {
+                previous_group = Some(row.group.as_str());
+                node_ix += 1;
+            }
+            if row_ix == selected {
+                return node_ix;
+            }
+            node_ix += 1;
+        }
+        0
+    }
+
     fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.command_palette_open {
             self.close_command_palette(window, cx);
@@ -2490,10 +2797,12 @@ impl NebulaWorkspace {
         self.palette_override = None;
         self.shell_picker_open = false;
         self.launcher_filter = crate::display::command_palette::LauncherFilter::All;
-        self.command_palette_input.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-            input.focus(window, cx);
-        });
+        self.quick_jump_filter = None;
+        self.reset_palette_query(
+            workspace_ui_language().pick("输入命令…", "Type a command..."),
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -2502,6 +2811,7 @@ impl NebulaWorkspace {
         self.palette_override = None;
         self.shell_picker_open = false;
         self.launcher_filter = crate::display::command_palette::LauncherFilter::All;
+        self.quick_jump_filter = None;
     }
 
     fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2517,12 +2827,17 @@ impl NebulaWorkspace {
         if !self.command_palette_open {
             return;
         }
-        let len = self.filtered_palette_rows(cx).len();
+        let rows = self.filtered_palette_rows(cx);
+        let len = rows.len();
         if len == 0 {
             self.command_palette_selected = 0;
         } else {
             self.command_palette_selected =
                 (self.command_palette_selected as isize + delta).rem_euclid(len as isize) as usize;
+            self.command_palette_scroll.scroll_to_item(Self::palette_scroll_node_index(
+                &rows,
+                self.command_palette_selected,
+            ));
         }
         cx.notify();
     }
@@ -2535,6 +2850,23 @@ impl NebulaWorkspace {
         let Some(action) = action else { return };
         match action {
             WorkspacePaletteAction::Shared(action) => self.run_palette_action(action, window, cx),
+            WorkspacePaletteAction::FocusTab(tab) => {
+                self.dismiss_palette_state();
+                self.activate_tab(tab, window, cx);
+                self.focus_active(window, cx);
+                cx.notify();
+            },
+            WorkspacePaletteAction::FocusPane { tab, pane } => {
+                self.dismiss_palette_state();
+                self.activate_tab(tab, window, cx);
+                self.focus_pane(tab, pane, window, cx);
+                self.focus_active(window, cx);
+                cx.notify();
+            },
+            WorkspacePaletteAction::OpenDirectory(path) => {
+                self.dismiss_palette_state();
+                self.add_terminal_at(Some(path), None, window, cx);
+            },
             WorkspacePaletteAction::RunAiSession { command, cwd } => {
                 self.dismiss_palette_state();
                 self.add_terminal_at(cwd, Some(command), window, cx);
@@ -2552,16 +2884,18 @@ impl NebulaWorkspace {
         }
     }
 
-    fn open_ai_session_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_quick_jump_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.shell_picker_open = false;
         self.launcher_filter = crate::display::command_palette::LauncherFilter::All;
-        self.palette_override = Some(ai_session_palette_rows(crate::ai_sessions::scan(30)));
+        self.quick_jump_filter = Some(QuickJumpFilter::All);
+        self.palette_override = Some(quick_jump::rows(self, cx));
         self.command_palette_open = true;
         self.command_palette_selected = 0;
-        self.command_palette_input.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-            input.focus(window, cx);
-        });
+        self.reset_palette_query(
+            QuickJumpFilter::All.placeholder(workspace_ui_language()),
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -2585,12 +2919,15 @@ impl NebulaWorkspace {
         self.palette_override = Some(rows);
         self.shell_picker_open = true;
         self.launcher_filter = crate::display::command_palette::LauncherFilter::All;
+        self.quick_jump_filter = None;
         self.command_palette_open = true;
         self.command_palette_selected = 0;
-        self.command_palette_input.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-            input.focus(window, cx);
-        });
+        self.reset_palette_query(
+            WorkspacePaletteFilter::Launcher(crate::display::command_palette::LauncherFilter::All)
+                .placeholder(language),
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -2602,16 +2939,31 @@ impl NebulaWorkspace {
         self.open_shell_palette(window, cx);
     }
 
-    fn set_launcher_filter(
+    fn set_workspace_palette_filter(
         &mut self,
-        filter: crate::display::command_palette::LauncherFilter,
+        filter: WorkspacePaletteFilter,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.shell_picker_open || self.launcher_filter == filter {
-            return;
+        match filter {
+            WorkspacePaletteFilter::Launcher(filter) => {
+                if !self.shell_picker_open || self.launcher_filter == filter {
+                    return;
+                }
+                self.launcher_filter = filter;
+            },
+            WorkspacePaletteFilter::QuickJump(filter) => {
+                if self.quick_jump_filter.is_none() || self.quick_jump_filter == Some(filter) {
+                    return;
+                }
+                self.quick_jump_filter = Some(filter);
+            },
         }
-        self.launcher_filter = filter;
         self.command_palette_selected = 0;
+        self.command_palette_scroll.scroll_to_item(0);
+        self.command_palette_input.update(cx, |input, cx| {
+            input.set_placeholder(filter.placeholder(workspace_ui_language()), window, cx);
+        });
         cx.notify();
     }
 
@@ -2639,6 +2991,14 @@ impl NebulaWorkspace {
             (LauncherFilter::Ssh, ssh),
             (LauncherFilter::Shell, shell),
         ]
+    }
+
+    fn quick_jump_chip_counts(&self) -> [(QuickJumpFilter, usize); 5] {
+        let rows = self.palette_override.as_deref().unwrap_or(&[]);
+        QuickJumpFilter::ALL.map(|filter| {
+            let count = rows.iter().filter(|row| filter.matches(&row.action)).count();
+            (filter, count)
+        })
     }
 
     /// 从弹窗选中的 shell 起一个新终端。走共享 v4 launch 身份，因此冷恢复
@@ -2691,7 +3051,7 @@ impl NebulaWorkspace {
         use crate::display::command_palette::PaletteAction;
 
         if action == PaletteAction::OpenAiSessionPicker {
-            self.open_ai_session_palette(window, cx);
+            self.open_quick_jump_palette(window, cx);
             return;
         }
         self.dismiss_palette_state();
@@ -2805,7 +3165,7 @@ impl NebulaWorkspace {
         match &self.tabs[ix] {
             WorkspaceTab::Settings { .. } => "设置".into(),
             WorkspaceTab::Image { view } => view.read(cx).title.clone().into(),
-            WorkspaceTab::Document { view } => view.read(cx).title.clone().into(),
+            WorkspaceTab::Document { view, .. } => view.read(cx).title.clone().into(),
             WorkspaceTab::Code { view } => view.read(cx).title.clone().into(),
             tab @ WorkspaceTab::Terminal { .. } => {
                 // 标签 = 聚焦 pane 的 cwd 末级目录名（旧壳 chrome_tab_label
@@ -2823,14 +3183,75 @@ impl NebulaWorkspace {
     }
 
     fn render_command_palette(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::display::ui::tokens::{control, radius, space};
+
         let theme = cx.theme();
+        let panel_bg = theme.popover;
+        let surface_bg = theme.muted;
         let selected_bg = theme.list_active;
         let hover_bg = theme.list_hover;
+        let accent = theme.primary;
+        let border = theme.border;
+        let foreground = theme.foreground;
         let muted = theme.muted_foreground;
+        let overlay = theme.overlay;
+        let mono_family = theme.mono_font_family.clone();
+        let language = workspace_ui_language();
+        let palette_filters = if self.shell_picker_open {
+            Some((
+                WorkspacePaletteFilter::Launcher(self.launcher_filter),
+                self.launcher_chip_counts()
+                    .into_iter()
+                    .map(|(filter, count)| (WorkspacePaletteFilter::Launcher(filter), count))
+                    .collect::<Vec<_>>(),
+            ))
+        } else {
+            self.quick_jump_filter.map(|selected| {
+                (
+                    WorkspacePaletteFilter::QuickJump(selected),
+                    self.quick_jump_chip_counts()
+                        .into_iter()
+                        .map(|(filter, count)| (WorkspacePaletteFilter::QuickJump(filter), count))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
         let items = self.filtered_palette_rows(cx);
         if self.command_palette_selected >= items.len() {
             self.command_palette_selected = items.len().saturating_sub(1);
         }
+        let has_filter_bar = palette_filters.is_some();
+        let item_count = items.len();
+        let mut group_count = 0;
+        let mut measured_group: Option<&str> = None;
+        for item in &items {
+            if measured_group != Some(item.group.as_str()) {
+                measured_group = Some(item.group.as_str());
+                group_count += 1;
+            }
+        }
+        let content_node_count = item_count + group_count;
+        let content_height = if item_count == 0 {
+            0.0
+        } else {
+            item_count as f32 * PALETTE_ROW_HEIGHT
+                + group_count as f32 * PALETTE_GROUP_HEADER_HEIGHT
+                + content_node_count.saturating_sub(1) as f32 * PALETTE_ROW_GAP
+        };
+        // 面板外框必须稳定：筛选结果变少时只留下空白，不能让居中的面板连同
+        // 搜索框一起上下跳。Command Palette 没有筛选条，结果视口自然多占一行。
+        let chrome_gap_count = if has_filter_bar { 2.0 } else { 1.0 };
+        let results_height = PALETTE_PANEL_HEIGHT
+            - space::XS * 2.0
+            - control::MIN_HIT_TARGET
+            - if has_filter_bar { PALETTE_FILTER_BAR_HEIGHT } else { 0.0 }
+            - space::XS * chrome_gap_count;
+        let results_scrollable = content_height > results_height;
+        // 同一份 picker 只要有一行带图标，就为全部行保留固定 icon rail；常规
+        // 命令目录没有图标时整列消失，不会凭空多出一层缩进。
+        let has_icon_rail = items.iter().any(|item| {
+            item.icon.is_some() || item.icon_glyph.is_some() || item.icon_path.is_some()
+        });
 
         let mut rows = Vec::new();
         let mut previous_group: Option<String> = None;
@@ -2839,85 +3260,304 @@ impl NebulaWorkspace {
                 previous_group = Some(item.group.clone());
                 rows.push(
                     h_flex()
-                        .h(px(26.0))
+                        .h(px(PALETTE_GROUP_HEADER_HEIGHT))
+                        .flex_shrink_0()
                         .px_3()
+                        .when(results_scrollable, |header| {
+                            header.pr(px(PALETTE_SCROLLBAR_CONTENT_GUTTER))
+                        })
+                        .gap(px(space::XS))
                         .items_center()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(item.group.clone())
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(muted)
+                                .child(item.group.clone()),
+                        )
+                        .child(div().h(px(control::HAIRLINE)).flex_1().bg(border))
                         .into_any_element(),
                 );
             }
-            let action = item.action.clone();
-            let selected = ix == self.command_palette_selected;
-            rows.push(
-                h_flex()
-                    .id(SharedString::from(format!("command-palette-row-{ix}")))
-                    .h(px(36.0))
-                    .w_full()
-                    .px_3()
-                    .gap_2()
-                    .items_center()
-                    .rounded_md()
-                    .when(selected, |row| row.bg(selected_bg))
-                    .hover(|row| row.bg(hover_bg))
-                    // 品牌图标只有 shell 行有；命令行不留空槽，否则整份
-                    // 命令目录会平白多出一列缩进。
-                    .when_some(item.icon.clone(), |row, image| {
-                        row.child(gpui::StyledImage::object_fit(
-                            img(image).size(px(22.0)).flex_shrink_0(),
-                            gpui::ObjectFit::Contain,
-                        ))
-                    })
-                    .when_some(item.icon_glyph, |row, glyph| {
-                        row.child(
-                            div()
-                                .size(px(22.0))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .font_family(crate::font_install::REQUIRED_FONT_FAMILY)
-                                .text_size(px(16.0))
-                                .child(glyph.to_string()),
+
+            let icon_content = if let Some(image) = item.icon.clone() {
+                Some(
+                    gpui::StyledImage::object_fit(
+                        img(image).size(px(22.0)),
+                        gpui::ObjectFit::Contain,
+                    )
+                    .into_any_element(),
+                )
+            } else if let Some(glyph) = item.icon_glyph {
+                Some(
+                    div()
+                        .size(px(22.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .font_family(crate::font_install::REQUIRED_FONT_FAMILY)
+                        .text_size(px(16.0))
+                        .text_color(foreground)
+                        .child(glyph.to_string())
+                        .into_any_element(),
+                )
+            } else {
+                item.icon_path.clone().map(|path| {
+                    div()
+                        .size(px(22.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::default().path(path).small().text_color(foreground))
+                        .into_any_element()
+                })
+            };
+            let icon_slot = has_icon_rail.then(|| {
+                let slot =
+                    div().size(px(22.0)).flex_shrink_0().flex().items_center().justify_center();
+                match icon_content {
+                    Some(icon) => slot.child(icon).into_any_element(),
+                    None => slot.into_any_element(),
+                }
+            });
+
+            let hint = if item.hint.is_empty() {
+                None
+            } else {
+                match item.hint_style {
+                    WorkspacePaletteHintStyle::Metadata => Some(
+                        div()
+                            .max_w(px(PALETTE_METADATA_MAX_WIDTH))
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .text_color(muted)
+                            .child(item.hint.clone())
+                            .into_any_element(),
+                    ),
+                    WorkspacePaletteHintStyle::Shortcut => {
+                        let keycaps = item
+                            .hint
+                            .split('+')
+                            .filter(|key| !key.is_empty())
+                            .map(|key| {
+                                h_flex()
+                                    .h(px(crate::display::ui::keycap::KEY_H))
+                                    .px(px(space::S / 2.0))
+                                    .items_center()
+                                    .rounded(px(radius::CHIP))
+                                    .border_1()
+                                    .border_color(border)
+                                    .bg(surface_bg)
+                                    .font_family(mono_family.clone())
+                                    .text_size(px(11.0))
+                                    .text_color(muted)
+                                    .child(key.to_owned())
+                            })
+                            .collect::<Vec<_>>();
+                        Some(
+                            h_flex()
+                                .max_w(px(PALETTE_METADATA_MAX_WIDTH))
+                                .gap(px(space::XXS))
+                                .children(keycaps)
+                                .into_any_element(),
                         )
-                    })
-                    .child(div().flex_1().text_sm().child(item.label))
-                    .when(!item.hint.is_empty(), |row| {
-                        row.child(div().text_xs().text_color(muted).child(item.hint))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.command_palette_selected = ix;
-                        match action.clone() {
-                            WorkspacePaletteAction::Shared(action) => {
-                                this.run_palette_action(action, window, cx);
-                            },
-                            WorkspacePaletteAction::RunAiSession { command, cwd } => {
-                                this.dismiss_palette_state();
-                                this.add_terminal_at(cwd, Some(command), window, cx);
-                            },
-                            WorkspacePaletteAction::LaunchSshHost(host) => {
-                                this.dismiss_palette_state();
-                                this.add_ssh_terminal(host, window, cx);
-                            },
-                            WorkspacePaletteAction::LaunchShell(detected) => {
-                                this.launch_palette_shell(detected, window, cx);
-                            },
-                            WorkspacePaletteAction::LaunchProfile(profile) => {
-                                this.launch_palette_profile(profile, window, cx);
-                            },
-                        }
-                    }))
+                    },
+                }
+            };
+
+            let action = item.action.clone();
+            let row_tooltip = item.label.clone();
+            let selected = ix == self.command_palette_selected;
+            let hover_group = SharedString::from(format!("command-palette-row-hover-{ix}"));
+            let row_content = h_flex()
+                .id(SharedString::from(format!("command-palette-row-{ix}")))
+                .group(hover_group.clone())
+                .h(px(PALETTE_ROW_HEIGHT))
+                .flex_shrink_0()
+                .w_full()
+                .px_2()
+                .when(results_scrollable, |row| row.pr(px(PALETTE_SCROLLBAR_CONTENT_GUTTER)))
+                .gap(px(space::XS))
+                .items_center()
+                .rounded(px(radius::CONTROL))
+                .cursor_pointer()
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(row_tooltip.clone()).build(window, cx)
+                })
+                .when(selected, |row| row.bg(selected_bg))
+                .when(!selected, |row| row.group_hover(hover_group.clone(), |row| row.bg(hover_bg)))
+                .when_some(icon_slot, |row, icon| row.child(icon))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .line_height(relative(1.0))
+                        .text_color(foreground)
+                        .child(item.label),
+                )
+                .when_some(hint, |row, hint| row.child(hint))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.command_palette_selected = ix;
+                    match action.clone() {
+                        WorkspacePaletteAction::Shared(action) => {
+                            this.run_palette_action(action, window, cx);
+                        },
+                        WorkspacePaletteAction::FocusTab(tab) => {
+                            this.dismiss_palette_state();
+                            this.activate_tab(tab, window, cx);
+                            this.focus_active(window, cx);
+                            cx.notify();
+                        },
+                        WorkspacePaletteAction::FocusPane { tab, pane } => {
+                            this.dismiss_palette_state();
+                            this.activate_tab(tab, window, cx);
+                            this.focus_pane(tab, pane, window, cx);
+                            this.focus_active(window, cx);
+                            cx.notify();
+                        },
+                        WorkspacePaletteAction::OpenDirectory(path) => {
+                            this.dismiss_palette_state();
+                            this.add_terminal_at(Some(path), None, window, cx);
+                        },
+                        WorkspacePaletteAction::RunAiSession { command, cwd } => {
+                            this.dismiss_palette_state();
+                            this.add_terminal_at(cwd, Some(command), window, cx);
+                        },
+                        WorkspacePaletteAction::LaunchSshHost(host) => {
+                            this.dismiss_palette_state();
+                            this.add_ssh_terminal(host, window, cx);
+                        },
+                        WorkspacePaletteAction::LaunchShell(detected) => {
+                            this.launch_palette_shell(detected, window, cx);
+                        },
+                        WorkspacePaletteAction::LaunchProfile(profile) => {
+                            this.launch_palette_profile(profile, window, cx);
+                        },
+                    }
+                }));
+
+            rows.push(row_content.into_any_element());
+        }
+
+        if rows.is_empty() {
+            rows.push(
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(space::XS))
+                    .text_color(muted)
+                    .child(Icon::new(IconName::Search).small())
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .child(language.pick("没有匹配结果", "No matching results")),
+                    )
                     .into_any_element(),
             );
         }
 
+        // 搜索框采用紧凑表面、低对比描边和前置搜索图标；边界只包住
+        // 输入本身，避免再用整行分隔线把面板切成多层容器。
+        let search_box = h_flex()
+            .w_full()
+            .h(px(control::MIN_HIT_TARGET))
+            .flex_shrink_0()
+            .rounded(px(radius::CONTROL))
+            .border_1()
+            .border_color(border)
+            .bg(surface_bg)
+            .overflow_hidden()
+            .child(
+                Input::new(&self.command_palette_input)
+                    .w_full()
+                    .appearance(false)
+                    .focus_bordered(false)
+                    .cleanable(true)
+                    .prefix(Icon::new(IconName::Search).xsmall().text_color(muted))
+                    .text_size(px(13.0)),
+            );
+
+        let filter_bar = palette_filters.map(|(selected_filter, counts)| {
+            let chips = counts
+                .into_iter()
+                .map(|(filter, count)| {
+                    let selected = selected_filter == filter;
+                    h_flex()
+                        .id(SharedString::from(format!("workspace-palette-filter-{filter:?}")))
+                        .h(px(26.0))
+                        .px_2()
+                        .gap(px(space::XXS))
+                        .items_center()
+                        .cursor_pointer()
+                        .rounded(px(radius::CONTROL))
+                        .when(selected, |chip| chip.bg(selected_bg))
+                        .when(!selected, |chip| chip.hover(|chip| chip.bg(hover_bg)))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(if selected { accent } else { foreground })
+                                .when(selected, |label| label.font_weight(FontWeight::MEDIUM))
+                                .child(filter.label(language)),
+                        )
+                        .child(
+                            div()
+                                .font_family(mono_family.clone())
+                                .text_size(px(11.0))
+                                .text_color(if selected { accent } else { muted })
+                                .child(count.to_string()),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.set_workspace_palette_filter(filter, window, cx);
+                        }))
+                })
+                .collect::<Vec<_>>();
+            h_flex()
+                .h(px(PALETTE_FILTER_BAR_HEIGHT))
+                .flex_shrink_0()
+                .w_full()
+                .px_1()
+                .gap_1()
+                .items_center()
+                .children(chips)
+                .into_any_element()
+        });
+
+        let scroll_handle = self.command_palette_scroll.clone();
+        let result_list = v_flex()
+            .id("workspace-palette-results-scroll")
+            .size_full()
+            .gap(px(PALETTE_ROW_GAP))
+            .overflow_y_scroll()
+            .track_scroll(&scroll_handle)
+            .children(rows);
+        let results = div()
+            .relative()
+            .h(px(results_height))
+            .flex_shrink_0()
+            .min_h_0()
+            .overflow_hidden()
+            .child(result_list)
+            .when(results_scrollable, |results| {
+                results.child(
+                    gpui_component::scroll::Scrollbar::vertical(&scroll_handle)
+                        .scrollbar_show(gpui_component::scroll::ScrollbarShow::Always),
+                )
+            });
+
         div()
             .absolute()
             .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
             .occlude()
             .key_context(PALETTE_KEY_CONTEXT)
-            .bg(theme.overlay)
+            .bg(overlay)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -2943,19 +3583,17 @@ impl NebulaWorkspace {
             }))
             .child(
                 v_flex()
-                    .absolute()
-                    .top(px(76.0))
-                    .left_1_2()
-                    .ml(px(-290.0))
-                    .w(px(580.0))
-                    .max_h(px(520.0))
-                    .p_2()
-                    .gap_2()
-                    .rounded_lg()
+                    .w(px(PALETTE_PANEL_WIDTH))
+                    .h(px(PALETTE_PANEL_HEIGHT))
+                    .max_h_full()
+                    .rounded(px(radius::OVERLAY))
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.popover)
+                    .border_color(border)
+                    .bg(panel_bg)
                     .shadow_lg()
+                    .p(px(space::XS))
+                    .gap(px(space::XS))
+                    .overflow_hidden()
                     .occlude()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -2963,45 +3601,9 @@ impl NebulaWorkspace {
                             cx.stop_propagation();
                         }),
                     )
-                    .child(Input::new(&self.command_palette_input))
-                    .when(self.shell_picker_open, |panel| {
-                        let language = workspace_ui_language();
-                        let selected_filter = self.launcher_filter;
-                        panel.child(
-                            h_flex().w_full().gap_1().px_1().children(
-                                self.launcher_chip_counts().into_iter().map(|(filter, count)| {
-                                    let selected = selected_filter == filter;
-                                    let label: SharedString =
-                                        format!("{} {count}", filter.label(language)).into();
-                                    h_flex()
-                                        .id(SharedString::from(format!(
-                                            "launcher-chip-{filter:?}"
-                                        )))
-                                        .h(px(26.0))
-                                        .px_2()
-                                        .items_center()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .when(selected, |chip| chip.bg(selected_bg))
-                                        .hover(|chip| chip.bg(hover_bg))
-                                        .child(div().text_xs().child(label))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.set_launcher_filter(filter, cx);
-                                        }))
-                                }),
-                            ),
-                        )
-                    })
-                    // gap 与行宽都要落在滚动区内层：`overflow_y_scrollbar` 把
-                    // 外层样式搬到它自建的容器上（详注见 settings_pane.rs 的
-                    // 设置正文），写在它之前的 gap_1 对行间距无效，行上的
-                    // w_full 也会回落 max-content 使每行宽度参差。
-                    .child(
-                        v_flex()
-                            .max_h(px(430.0))
-                            .overflow_y_scrollbar()
-                            .child(v_flex().w_full().gap_1().children(rows)),
-                    ),
+                    .child(search_box)
+                    .children(filter_bar)
+                    .child(results),
             )
             .into_any_element()
     }
@@ -3568,13 +4170,12 @@ impl NebulaWorkspace {
             .h_full()
             .w(px(320.0))
             .flex_shrink_0()
-            .my_2()
-            .mr_2()
             .p_2()
             .gap_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
+            // 与文件树共用抽屉接缝合同（见 `render_file_tree`）：圆角只给左侧两角，
+            // 右缘贴窗口边框不倒角，四边无描边。
+            .rounded_tl(crate::gpui_shell::theme::card_radius(cx))
+            .rounded_bl(crate::gpui_shell::theme::card_radius(cx))
             .bg(theme.popover)
             // 与文件树抽屉同一套紧凑投影，避免右侧抽屉语言再出现 shadow_lg。
             .shadow(gpui_component::popover_shadow(theme.is_dark()))
@@ -3647,7 +4248,38 @@ impl NebulaWorkspace {
             .justify_end()
             .flex_shrink_0()
             .overflow_hidden()
-            .child(panel)
+            // 槽位自己铺壳色：底部那 8px 间距与抽屉圆角的缺口露出来的必须是壳色，
+            // 和终端卡四周的卡缝同一底。workspace 根是透明的（Acrylic 要透到 DWM），
+            // 不铺这层的话缝里露的是系统背板——实测比壳色亮一档且靠窗边越亮
+            // （44,46,53 → 62,64,71 vs 壳色 33,37,46），就是"底部颜色不对"。
+            .bg(cx.theme().background)
+            .child(
+                // 抽屉整体从右缘推进来，而不是原地被擦出来。旧壳
+                // （side_panel.rs:1718）把 x 插值成
+                // `rest_x + (1-eased) * (w + margin)`——整块浮板在动；只动槽位宽度
+                // 的话内容一动不动，只有裁剪窗口在变宽，那就是"擦除"的观感来源。
+                // 槽位宽度仍然同步收放，正文（终端卡）才会跟着让位。
+                //
+                // 底部 8px 由槽位给（用户 08-26 裁定「文件树底部要留一段间距」，
+                // 此前抽屉直插窗口底边）：写成抽屉自己的 margin 会和它的 `h_full`
+                // 相加而溢出槽位、底部两角被 `overflow_hidden` 裁掉；写成父级
+                // padding 则 `h_full` 按内容框解析，正好矮 8px。上边贴 chrome 下沿、
+                // 右边贴窗口右缘不变，左边那条缝由终端卡的 `pr` 给。
+                div()
+                    .relative()
+                    .h_full()
+                    .flex_shrink_0()
+                    .pb_2()
+                    .child(panel)
+                    .with_animation(
+                        ("side-panel-push", open as usize),
+                        Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
+                        move |band, t| {
+                            let progress = if open { t } else { 1.0 - t };
+                            band.left(px(SIDE_PANEL_SLOT_W * (1.0 - progress)))
+                        },
+                    ),
+            )
             .with_animation(
                 ("side-panel-slide", open as usize),
                 Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
@@ -4237,6 +4869,9 @@ impl Render for NebulaWorkspace {
         if !cx.has_active_drag() {
             self.cross_window_dock = None;
         }
+        // 终端卡几何取一次，布局与壳色带共用同一个实例——两处各取一次也算
+        // 「各写一份」，主题在这一帧中途换掉就会出现半旧半新的卡缝。
+        let card_style = crate::gpui_shell::theme::PaneCardStyle::current(cx);
         let sidebar_logo_target_px =
             (TAB_LABEL_ICON_SIZE * window.scale_factor()).round().max(1.0) as u32;
         if sidebar_logo_target_px != self.sidebar_logo_target_px {
@@ -4253,7 +4888,7 @@ impl Render for NebulaWorkspace {
             Some(WorkspaceTab::Image { view }) => {
                 Some(gpui::IntoElement::into_any_element(view.clone()))
             },
-            Some(WorkspaceTab::Document { view }) => {
+            Some(WorkspaceTab::Document { view, .. }) => {
                 Some(gpui::IntoElement::into_any_element(view.clone()))
             },
             Some(WorkspaceTab::Code { view }) => {
@@ -4448,7 +5083,7 @@ impl Render for NebulaWorkspace {
                 window.toggle_fullscreen();
             }))
             .on_action(cx.listener(|this, _: &OpenQuickJump, window, cx| {
-                this.open_ai_session_palette(window, cx);
+                this.open_quick_jump_palette(window, cx);
             }))
             .child(
                 // 用户显式配置的背景图画在 chrome 之下；系统 Mica/Aero/Acrylic
@@ -4533,15 +5168,15 @@ impl Render for NebulaWorkspace {
                         )
                     })
                     .child(
-                        // 终端卡（一体化外壳）：唯一的结构分界。圆角与旧壳卡
-                        // 同源（UI_SHELL_RADIUS_LOGICAL=14），无描边——融合靠
-                        // 壳色包围圆角卡本身，不靠线框。
+                        // 终端卡（一体化外壳）：唯一的结构分界。圆角、卡缝、投影、
+                        // 竖线四项全部来自 `PaneCardStyle`（主题默认叠用户覆盖），
+                        // 所以「浮起的圆角卡」和「铺满到窗口边 + 一条竖线」是同一
+                        // 条渲染路径的两组取值，不是两套代码。无描边——融合靠壳色
+                        // 包围圆角卡本身，不靠线框。
                         //
                         // 上边距一律为零：侧栏 / 终端卡 / 右侧抽屉三列的顶边都贴
                         // chrome 下沿（用户 08-26 裁定「pane 和左侧 tab 抬到和文件树
-                        // 顶部一致」）。左右和底部保留旧壳 8px 卡缝，抽屉在场时那条
-                        // 右卡缝就是它和终端之间的呼吸位，不再归零——归零后的观感是
-                        // 文件树压在终端上。
+                        // 顶部一致」），这条写在 `PaneCardStyle::resolve` 里。
                         div()
                             .flex_1()
                             .min_w_0()
@@ -4550,33 +5185,55 @@ impl Render for NebulaWorkspace {
                                 gpui::canvas(
                                     |_, _, _| (),
                                     |bounds, _, window, cx| {
-                                        // 卡缝必须和下面的 `px_2` / `pb_2` 逐边
-                                        // 对上：上边距为零是上面那条裁定，壳色
-                                        // 若按四边对称推算，卡的上两个圆角外侧
-                                        // 会漏覆盖，浅色主题下露出一圈白边。
+                                        // 卡缝、圆角、竖线全部读同一个 style 实例：
+                                        // 布局的 padding 与这里的壳色带必须逐边对上，
+                                        // 两边各写一份字面量就是那圈白边的来源——壳色
+                                        // 若按四边对称推算，卡的上两个圆角外侧会漏
+                                        // 覆盖，浅色主题下直接露出一道顶部白缝。
+                                        let card =
+                                            crate::gpui_shell::theme::PaneCardStyle::current(cx);
                                         crate::gpui_shell::theme::paint_shell_around_card(
                                             bounds,
-                                            gpui::Edges {
-                                                top: 0.0,
-                                                right: CARD_GUTTER,
-                                                bottom: CARD_GUTTER,
-                                                left: CARD_GUTTER,
-                                            },
+                                            card.margin,
                                             window,
                                             cx,
                                         );
+                                        // 竖线：卡缝归零后侧栏与终端两块面板会糊成
+                                        // 一片，这条线是那种铺满形态下唯一的结构分界。
+                                        // 宽度吸附到物理像素整数，否则 1px 在高 DPI
+                                        // 下会栅格化成两条半亮的线。
+                                        if card.divider > 0.0 {
+                                            let scale = window.scale_factor().max(1.0);
+                                            let width =
+                                                (card.divider * scale).round().max(1.0) / scale;
+                                            window.paint_quad(fill(
+                                                Bounds::new(
+                                                    bounds.origin,
+                                                    size(px(width), bounds.size.height),
+                                                ),
+                                                crate::gpui_shell::theme::card_divider_color(cx),
+                                            ));
+                                        }
                                     },
                                 )
                                 .absolute()
                                 .inset_0(),
                             )
-                            .px(px(CARD_GUTTER))
-                            .pb(px(CARD_GUTTER))
+                            .pt(px(card_style.margin.top))
+                            .pr(px(card_style.margin.right))
+                            .pb(px(card_style.margin.bottom))
+                            .pl(px(card_style.margin.left))
                             .child(
                             div()
                                 .size_full()
-                                .rounded(crate::gpui_shell::theme::card_radius())
+                                .rounded(px(card_style.radius))
                                 .bg(crate::gpui_shell::theme::card_content_bg(cx))
+                                .when(card_style.shadow, |card| {
+                                    // 投影落在有圆角的这一层，才会跟着卡的形状走。
+                                    // 父容器没有 overflow_hidden，所以 blur 可以溢出
+                                    // 到卡缝之外——那正是「卡浮在壳上」的观感来源。
+                                    card.shadow(vec![crate::gpui_shell::theme::card_shadow(cx)])
+                                })
                                 .overflow_hidden()
                                 .child(
                                     // 壁纸层（卡底色之上、内容之下，覆盖整卡含
@@ -4606,7 +5263,7 @@ impl Render for NebulaWorkspace {
                         .top(px(y))
                         .w(px(w))
                         .h(px(h))
-                        .rounded(crate::gpui_shell::theme::card_radius())
+                        .rounded(crate::gpui_shell::theme::card_radius(cx))
                         // 旧壳是低透明青色水洗，不是高饱和实线框；描边只
                         // 提示落区边界，不能盖过终端内容成为视觉主体。
                         .border_1()
@@ -4705,6 +5362,9 @@ impl Render for NebulaWorkspace {
                 root.child(menu)
             })
             .when_some(self.render_tab_context_menu(), |root, menu| root.child(menu))
+            .when_some(self.render_selection_context_menu(), |root, menu| {
+                root.child(menu)
+            })
             // 组件库的模态/通知层不会自己上屏：`Root::render` 只画宿主视图，
             // dialog/notification 两层由宿主显式挂。挂在最外层链尾＝盖住命令
             // 面板和所有拖拽罩层；dialog 在下、notification 在上，确认框弹着

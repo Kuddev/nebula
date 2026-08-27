@@ -168,6 +168,13 @@ pub struct SnapCell {
     /// Base character plus any zero-width combining characters.
     pub text: String,
     pub fg: Color,
+    /// This cell's background, INVERSE already applied — the same value the
+    /// matching [`BgRun`] carries, repeated here because default backgrounds
+    /// are suppressed at the source and so have no run at all.
+    ///
+    /// 前端要它来算对比度：应用写死的前景色是否可读，取决于它**这一格**底下
+    /// 是什么颜色，不是取决于主题底色。
+    pub bg: Color,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
@@ -368,6 +375,7 @@ impl RenderSnapshot {
                 col,
                 text,
                 fg,
+                bg,
                 bold,
                 italic: flags.intersects(Flags::ITALIC),
                 underline: flags.intersects(Flags::ALL_UNDERLINES),

@@ -64,6 +64,9 @@ pub struct Settings {
     /// 保持宽容——任何用户配置都不能阻止启动——但错误必须有去处：
     /// 开窗后由工作区放进驻留消息栏（提示三层裁定：这是有待办的事）。
     pub load_notice: Option<String>,
+    /// 终端卡几何（圆角 / 卡缝 / 投影 / 竖线）。主题默认叠用户覆盖后的结果，
+    /// 放在全局里是因为每帧都要用——`RuntimeSettings::load()` 每次都读磁盘。
+    pub card: crate::gpui_shell::theme::PaneCardStyle,
 }
 
 impl Global for Settings {}
@@ -147,6 +150,10 @@ impl Settings {
             font_family: normal_family,
             source_path: path,
             load_notice,
+            // 这里是唯一能正确合并「主题自带几何」与「用户显式覆盖」的地方：
+            // `theme` 已是 follow_system 折算后的**生效**主题，runtime 是同一次
+            // 装载读到的设置。别处再读一遍就会在跟随系统时和 chrome 分家。
+            card: crate::gpui_shell::theme::PaneCardStyle::resolve(theme, &runtime),
         }
     }
 
@@ -195,13 +202,34 @@ fn runtime_background(
 }
 
 /// 主题叠加在 toml 配色之上（镜像旧壳 `apply_term_colors` 的范围与次序）：
-/// 背景永远替换；Powerline 槽位 16..=23 替换；浅色主题另替换前景与
-/// ANSI-16。dim 表与 bright_foreground 有意不动——与旧壳逐字段一致。
+/// 背景永远替换；Powerline 槽位 16..=23 替换。原有主题保持旧合同：仅浅色
+/// 主题替换前景与 ANSI-16；自带完整 palette 的主题（Nord/Paper）应用其明确色表。
 fn apply_theme(palette: &mut Palette, theme: nebula_settings::ThemeName) {
     let term = theme.term_theme();
     palette.background = rgba8(term.background);
     for (i, color) in term.powerline.into_iter().enumerate() {
         set_indexed(palette, nebula_settings::POWERLINE_SLOT0 + i as u8, rgba8(color));
+    }
+    if let Some(exact) = term.exact {
+        let foreground = rgba8(exact.foreground);
+        palette.foreground = foreground;
+        palette.bright_foreground = foreground;
+        palette.dim_foreground = Palette::dim_of(foreground);
+        for (i, color) in exact.ansi.into_iter().enumerate() {
+            palette.ansi[i] = rgba8(color);
+            if i < 8 {
+                palette.dim[i] = Palette::dim_of(palette.ansi[i]);
+            }
+        }
+        if let Some(cursor) = exact.cursor {
+            palette.cursor = rgba8(cursor);
+        }
+        palette.cursor_stroke = exact.cursor_stroke.map(rgba8);
+        if let Some(selection) = exact.selection_background {
+            palette.selection = rgba8(selection);
+        }
+        palette.selection_foreground = exact.selection_foreground.map(rgba8);
+        return;
     }
     if term.is_light {
         palette.foreground = rgba8(nebula_settings::LIGHT_FOREGROUND);
@@ -544,12 +572,51 @@ fn build_palette(raw: &RawColors) -> Palette {
 
 #[cfg(test)]
 mod tests {
-    use super::runtime_background;
+    use super::{apply_theme, rgba8, runtime_background};
+    use crate::gpui_shell::terminal::colors::Palette;
+    use nebula_settings::ThemeName;
 
     #[test]
     fn system_theme_owns_terminal_background_while_following_system() {
         let custom = Some([0x0f, 0x11, 0x1a]);
         assert_eq!(runtime_background(true, custom), None);
         assert_eq!(runtime_background(false, custom), custom);
+    }
+
+    #[test]
+    fn existing_dark_theme_keeps_user_terminal_colors() {
+        let mut palette = Palette::default();
+        palette.foreground = rgba8([1, 2, 3]);
+        palette.ansi[0] = rgba8([4, 5, 6]);
+        palette.cursor = rgba8([7, 8, 9]);
+
+        apply_theme(&mut palette, ThemeName::Nebula);
+
+        assert_eq!(palette.foreground, rgba8([1, 2, 3]));
+        assert_eq!(palette.ansi[0], rgba8([4, 5, 6]));
+        assert_eq!(palette.cursor, rgba8([7, 8, 9]));
+        assert_eq!(palette.selection_foreground, None);
+    }
+
+    #[test]
+    fn themes_apply_only_the_colors_they_declare() {
+        let mut nord = Palette::default();
+        apply_theme(&mut nord, ThemeName::Nord);
+        assert_eq!(nord.foreground, rgba8([0xf1, 0xf6, 0xff]));
+        assert_eq!(nord.ansi[15], rgba8([0xec, 0xef, 0xf4]));
+        assert_eq!(nord.cursor, rgba8([0xe5, 0xe9, 0xf0]));
+        assert_eq!(nord.cursor_stroke, Some(rgba8([0x88, 0xc0, 0xd0])));
+        assert_eq!(nord.selection, rgba8([0xe5, 0xe9, 0xf0]));
+        assert_eq!(nord.selection_foreground, Some(rgba8([0x2e, 0x34, 0x40])));
+
+        let mut paper = Palette::default();
+        let original_cursor = paper.cursor;
+        let original_selection = paper.selection;
+        apply_theme(&mut paper, ThemeName::Paper);
+        assert_eq!(paper.foreground, rgba8([0x1a, 0x1a, 0x1a]));
+        assert_eq!(paper.ansi[15], rgba8([0x2f, 0x2e, 0x2e]));
+        assert_eq!(paper.cursor, original_cursor);
+        assert_eq!(paper.selection, original_selection);
+        assert_eq!(paper.selection_foreground, None);
     }
 }

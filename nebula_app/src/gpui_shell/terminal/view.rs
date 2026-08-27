@@ -4,6 +4,7 @@ mod broadcast;
 mod runtime;
 
 pub use broadcast::TerminalInput;
+pub use runtime::InputOrigin;
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable,
@@ -48,15 +49,6 @@ fn mono_font(family: &str, weight: FontWeight, style: FontStyle) -> Font {
         ..crate::font_install::gpui_font_with_fallbacks(family)
     }
 }
-
-/// 粘贴确认阈值：一次粘进来达到这个行数，先弹模态问一句。
-///
-/// 旧壳的判据是「非 bracketed 且含任何换行」（`event.rs` 的 `paste`）。那条
-/// 规则对裸 shell 是对的——换行落地即执行——但 codex/vim/PSReadLine 这类自己
-/// 接管换行的应用也跟着挨弹窗，#35 因此给 bracketed 模式开了豁免；豁免之后
-/// 往 PSReadLine 里糊三十行反而一声不响。这里换成体量判据：值得再看一眼的
-/// 是「一次糊进来几十行」，与对端是否 bracketing 无关；两三行仍旧直接放行。
-const PASTE_CONFIRM_LINES: usize = 20;
 
 /// Overlay 滚动条的拇指宽度、最小高度与命中放宽量（逻辑 px；旧壳
 /// `scrollbar_geometry` 的 4/24/8 设备 px 在同一 DPI 语义下等值）。4px 的细条
@@ -103,6 +95,27 @@ fn paste_line_count(text: &str) -> usize {
     if text.ends_with('\n') || text.ends_with('\r') { breaks } else { breaks + 1 }
 }
 
+/// 只在粘贴可能被当前 shell 立即执行时确认。
+///
+/// Bracketed paste 与全屏 TUI 都会把内容作为应用输入处理；继续按行数拦截只会
+/// 给右键粘贴平添一层。裸 shell 则对换行、提权命令和控制字符保持保守，这与
+/// 与常见终端的 Paste Protection 风险模型一致。
+fn paste_needs_confirmation(text: &str, mode: TermMode) -> bool {
+    if mode.intersects(TermMode::BRACKETED_PASTE | TermMode::ALT_SCREEN) {
+        return false;
+    }
+
+    let has_line_break = text.contains(['\n', '\r']);
+    let has_unsafe_control = text.chars().any(|character| {
+        character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+    });
+    let starts_privileged_command = text.split(['\n', '\r']).any(|line| {
+        matches!(line.split_ascii_whitespace().next(), Some("sudo" | "su"))
+    });
+
+    has_line_break || has_unsafe_control || starts_privileged_command
+}
+
 /// 当前 UI 语言。`RuntimeSettings` 每次读盘，所以只在用户动作（复制提示、
 /// 粘贴确认）时取，不进渲染热路径。
 fn ui_language() -> crate::display::UiLanguage {
@@ -134,6 +147,15 @@ pub enum TerminalViewEvent {
     /// 用户语义输入。宿主可按 tab 的广播状态扇出；接收 pane 必须重新编码，
     /// 不能复用发送方已经受终端 mode 影响的字节。
     UserInput(TerminalInput),
+    /// Provider 明确上报的 permission/awaiting-input 上下文。宿主拥有 Window，
+    /// 由它负责驻留提示、后台 Tab 标记和系统通知；raw context 不进入文案。
+    AiAttention(crate::ai_hook::AttentionContext),
+    /// 非应用鼠标模式下右键命中真实终端选区。菜单由 workspace 根持有，
+    /// 避免每个 pane 都渲染一份带叠加阴影的 PopupMenu。
+    SelectionContextMenuRequested { position: Point<Pixels>, text: String },
+    /// 程序上报的任务进度（OSC 9;4）变了。任务栏是窗口级的，只有宿主知道
+    /// 哪个 pane 正被看着，所以映射到任务栏这件事必须由它做。
+    ProgressChanged(crate::taskbar::TaskProgress),
 }
 
 /// 会话种类：本地 shell 或 SSH 直连（russh，共享旧壳业务层）。
@@ -166,12 +188,26 @@ pub(crate) fn last_path_component(path: &str) -> Option<String> {
 /// 侧边栏只消费稳定的枚举态，不直接窥探终端/SSH 的内部错误字段。
 /// `Done`/`Attention` 是旧壳 `AgentStatus::Done`/`Blocked` 的呈现位：
 /// 回合结束≠会话结束，转圈必须停，但要留下「有结果没看」的痕迹。
+///
+/// 成员分两类，决定它在什么时候该消失（呈现规则在
+/// `workspace::sidebar::tab_presentation`，两种 tab 布局共用那一处）：
+///
+/// - **事件**（`Done`）——「刚发生了一件你不在场的事」。你到场就没有信息量了，
+///   所以当前 tab 一律不显示。
+/// - **状态**（`Running` / `WaitingInput` / `Attention` / `Failed`）——「此刻仍
+///   是这个样子」。你看不看它都还成立，所以永远显示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarActivity {
     Idle,
     Running,
-    /// Agent 回合完成，等待下一条指令（旧壳蓝点语义）。
+    /// Agent 回合完成，等待下一条指令（旧壳蓝点语义）。唯一的「事件」态。
     Done,
+    /// 命令停在交互提示上等人打字（`[y/n]`、口令、Press ENTER）。
+    ///
+    /// 与 `Attention` 拆开而不是合并：`Attention` 是 agent 被授权卡住，一个
+    /// 回合就此阻塞，值得用警示形状喊；停在 `[y/n]` 是常态，用警示色去喊会
+    /// 让真正要紧的那个失效。
+    WaitingInput,
     /// Agent 停在授权/提问上，需要用户表态（旧壳手掌语义）。
     Attention,
     Failed,
@@ -194,6 +230,13 @@ pub struct TerminalView {
     font_offset_x: f32,
     font_offset_y: f32,
     pub palette: Arc<Palette>,
+    /// 把**应用写死的**颜色按当前主题矫正（最低对比度 + 旧主题表面重映射）。
+    ///
+    /// 与旧壳 `Display::terminal_color_resolver` 是同一个类型、同一份缓存语义：
+    /// grid 里存的始终是 PTY 给的原色，只有**绘制结果**进缓存，所以换主题时连
+    /// 已经躺在 scrollback 里的历史输出也会跟着重算——这是修历史输出唯一的手段。
+    /// 每个 pane 一份：缓存键含底色，不同 pane 的底色可以不同。
+    pub color_resolver: crate::display::terminal_color::TerminalColorResolver,
     pub marked_text: Option<String>,
     pub ime_bounds: Bounds<Pixels>,
     pub title: String,
@@ -229,6 +272,13 @@ pub struct TerminalView {
     /// 本次前台 agent 会话是否收到过 hook（旧壳同名字段同语义）：屏幕
     /// 检测的空闲提示符不得降级 hook 报出的 Done/Blocked 精确终态。
     agent_hook_seen: bool,
+    /// 这个 pane 的主 agent 进程 pid（第一个报到的那个）。只有它能写 pane 的
+    /// 会话身份；嵌套 `claude -p` 子代理有自己的 pid，它那个短命 session id
+    /// 不能顶掉真正活着的会话。回到提示符（133;D）或 SessionEnd 时清空。
+    primary_agent_pid: Option<u32>,
+    /// 程序上报的任务进度（OSC 9;4）。存在 pane 上、由宿主投到任务栏：一个
+    /// 窗口只有一个任务栏按钮，谁被看着只有宿主知道。
+    pub progress: crate::taskbar::TaskProgress,
     /// 本 pane 的 agent 在当前回合有过活动（hook 派活、屏幕判 working、或
     /// Runtime 提交）。屏幕回到空闲提示符时据此区分「干完了、你还没看」
     /// （Done，蓝点）与「从没开工」（Idle，只显示 shell 标签）——消费点在
@@ -245,6 +295,8 @@ pub struct TerminalView {
     pending_notify: Vec<String>,
     /// SSH 直连目的地（`user@host[:port]`）；本地会话为 None。
     pub ssh_destination: Option<String>,
+    /// 创建本地 PTY 时冻结的受控环境，供独立 `pane.exec` child 复用。
+    pub(crate) exec_context: Option<crate::runtime_exec::PaneExecContext>,
     /// SSH 连接阶段（业务层上报）：Ready 前画连接横幅，Failed 驻留错误。
     ssh_stage: Option<crate::ssh_session::SshStage>,
     /// SSH 连接卡片状态（旧壳 `display::ssh_connect::SshConnectState` 的
@@ -265,9 +317,10 @@ pub struct TerminalView {
     line_height: Pixels,
     cols: usize,
     rows: usize,
-    /// Last geometry committed to both the terminal grid and ConPTY. During
-    /// an interactive resize `cols`/`rows` are the live visual viewport while
-    /// this remains at the last coalesced boundary.
+    /// 子进程已被告知的几何。`cols`/`rows`
+    /// 是屏幕上正在渲染的视口，交互式拖拽期间它每帧跟手、本地网格随之 reflow，
+    /// 而这里停在最后一次真正下发给 ConPTY 的边界上。判断"要不要通知子进程"
+    /// 只能拿这个字段比，拿 `cols`/`rows` 比会把每一帧都当成新几何。
     window_size: WindowSize,
     /// 启动稳定闸：开窗 resize 是异步落地的，首帧可能还是旧尺寸。闸门
     /// 关着时不向 Term/ConPTY 下发布局，直到布局命中 spawn 网格（零下发
@@ -279,7 +332,18 @@ pub struct TerminalView {
     spawn_at: std::time::Instant,
     viewports: ViewportTracker,
     /// Final visual viewport waiting for the trailing-edge resize commit.
+    /// 只等 PTY 那一半——网格已在观测当帧 reflow 过。
     pending_resize: Option<TerminalViewport>,
+    /// 下一次网格变化是"结构性"的，子进程立即知道、不进尾沿去抖。
+    ///
+    /// 旧壳 `resize_active_layout()`（split.rs 的 Full variant）在分屏创建/
+    /// 关闭、tab 新建这类一次性结构变化上同步下发 grid + PTY，只有交互式拖拽
+    /// 才走"先只改 grid、PTY 等 settle"的两段式；结构性变化则立即同步两边。
+    /// GPUI 壳原先把两者混成一条尾沿去抖路径，于是分屏后有 150ms
+    /// 窗口期：子进程仍按旧宽度输出，那些字节按旧几何进网格，等提交时本地
+    /// reflow 与 conhost rewrap 各折一套行数——提示符与回显从此错开几行（旧壳
+    /// 同样的分屏动作没有这个窗口期，所以不复现）。
+    structural_resize: bool,
     /// Invalidates older settle timers when a newer layout observation wins.
     resize_epoch: u64,
     scroll_px: f32,
@@ -517,8 +581,14 @@ impl TerminalView {
             },
             TerminalLaunch::Ssh { destination } => destination.clone(),
         };
-        let (ssh_destination, initial_title, intro_shell_name, suggest_env, spawned) = match launch
-        {
+        let (
+            ssh_destination,
+            initial_title,
+            intro_shell_name,
+            suggest_env,
+            exec_context,
+            spawned,
+        ) = match launch {
             TerminalLaunch::Local { cwd, shell: launch_shell, shell_name } => {
                 // 显式 launch（会话恢复/创建时冻结）优先；只有旧会话没有
                 // 身份时才回退当前设置。这正是共享 v4 的 Default 语义。
@@ -534,12 +604,16 @@ impl TerminalView {
                     .map_or(crate::display::SuggestEnv::Local, |distro| {
                         crate::display::SuggestEnv::Wsl { distro: distro.to_owned() }
                     });
+                let options = session::local_options(effective, pane_id, cwd);
+                let exec_context =
+                    crate::runtime_exec::PaneExecContext::from_pty_options(&options);
                 (
                     None,
                     String::from("shell"),
                     shell_name,
                     suggest_env,
-                    session::spawn(initial, term_config, effective, pane_id, cwd),
+                    Some(exec_context),
+                    session::spawn(initial, term_config, options),
                 )
             },
             TerminalLaunch::Ssh { destination } => (
@@ -547,6 +621,7 @@ impl TerminalView {
                 destination.clone(),
                 None,
                 crate::display::SuggestEnv::Ssh { destination: destination.clone() },
+                None,
                 session::spawn_ssh(destination, initial, term_config),
             ),
         };
@@ -680,6 +755,7 @@ impl TerminalView {
             font_offset_x,
             font_offset_y,
             palette,
+            color_resolver: Default::default(),
             marked_text: None,
             ime_bounds: Bounds::default(),
             title: initial_title,
@@ -696,12 +772,15 @@ impl TerminalView {
             agent_status_source: crate::ai_agents::AgentStatusSource::Unknown,
             agent_status_rule: None,
             agent_hook_seen: false,
+            primary_agent_pid: None,
+            progress: crate::taskbar::TaskProgress::None,
             agent_turn_active: false,
             idle_screen_streak: 0,
             agent_runtime_submit_pending: false,
             pending_runtime_submit: None,
             pending_notify: Vec::new(),
             ssh_destination,
+            exec_context,
             ssh_stage: None,
             ssh_connect: None,
             ssh_connect_last_step: std::time::Instant::now(),
@@ -719,6 +798,7 @@ impl TerminalView {
             spawn_at: std::time::Instant::now(),
             viewports: ViewportTracker::default(),
             pending_resize: None,
+            structural_resize: false,
             resize_epoch: 0,
             scroll_px: 0.0,
             selecting: false,
@@ -749,6 +829,12 @@ impl TerminalView {
             bell_flash_epoch: 0,
             pending_bell_notify: None,
         };
+        // 出生即把亮暗种进 Term：`Term::color_scheme_dark` 的默认值是「暗」，
+        // 浅色主题下启动的 pane 如果不种，第一个 DECSET 2031 的订阅方会拿到
+        // 一个错的初值，而且在用户下一次改主题之前都纠不回来。
+        if let Some(session) = &view.session {
+            session.term.lock().set_color_scheme(view.palette.is_dark());
+        }
         view.restart_cursor_blink(cx);
         view
     }
@@ -791,8 +877,17 @@ impl TerminalView {
                 cx.emit(TerminalViewEvent::TitleChanged);
                 cx.notify();
             },
-            TermEvent::PtyWrite(text) => self.write_bytes(text.into_bytes()),
-            TermEvent::ClipboardStore(_, text) => {
+            // OSC 9;4：程序自报任务进度。只在真的变了的时候上报——任务栏那条
+            // 路要过 COM，`cargo build` 每秒发好几次进度更新，逐条投过去纯属
+            // 浪费。
+            TermEvent::Progress { state, value } => {
+                let progress = crate::taskbar::TaskProgress::from_osc(state, value);
+                if progress != self.progress {
+                    self.progress = progress;
+                    cx.emit(TerminalViewEvent::ProgressChanged(progress));
+                }
+            },
+            TermEvent::PtyWrite(text) => self.write_bytes(text.into_bytes()),            TermEvent::ClipboardStore(_, text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             },
             TermEvent::ClipboardLoad(_, formatter) => {
@@ -864,6 +959,16 @@ impl TerminalView {
                     self.agent_status_rule = None;
                 }
                 self.mark_command_running();
+                // 首个词就是一个交互式 shell（`cmd`、`wsl`、裸 `bash`）：133;C
+                // 是真的，但这条「命令」其实是一个新提示符，133;D 永远不会来
+                // ——那个 shell 接管了终端，而我们的集成不在它里面。立刻按「已被
+                // 进程树反证」处理，转圈不必等 3 秒节流窗口。
+                //
+                // 这不是把状态钉死：后续对账双向纠正，真在那个 shell 里跑起活儿
+                // 会多出一个子进程，进程树看得见，状态会被拉回运行中。
+                if crate::process_tree::is_interactive_shell_command(&self.suggest.last_committed) {
+                    self.command_running_disproved = true;
+                }
                 if let Some(run) = &mut self.active_run
                     && run.phase == crate::runtime_api::RuntimeRunPhase::Submitted
                 {
@@ -889,6 +994,10 @@ impl TerminalView {
                 self.command_running_disproved = false;
                 self.command_started = None;
                 self.last_process_probe = None;
+                // 回到提示符 = 前台已经没有 agent 了。主 agent 的 pid 必须一起
+                // 作废，否则下一个 agent（用户 Ctrl+C 掉旧的再起一个，没有
+                // SessionEnd）会被当成子代理，会话身份再也写不进来。
+                self.primary_agent_pid = None;
                 if let Some(run) = self.active_run.take() {
                     self.last_run =
                         Some(crate::runtime_api::RuntimeRunOutcome::command_done(run, exit_code));
@@ -1073,6 +1182,12 @@ impl TerminalView {
         .detach();
     }
 
+    /// 宿主宣告：下一次网格变化来自结构性布局改动，直接提交、不去抖。
+    /// 见 `structural_resize` 字段注释。
+    pub fn mark_structural_resize(&mut self) {
+        self.structural_resize = true;
+    }
+
     /// 元素 prepaint 回写布局：内容矩形与度量交给渲染合同裁定网格。
     /// 网格变化时同步 Term 与 ConPTY；行列不变但像素口径变化也上报 PTY
     /// （应用可能关心像素度量）；稳态帧 observe 返回 None，零额外开销。
@@ -1130,16 +1245,49 @@ impl TerminalView {
         self.cols = viewport.cols as usize;
         self.rows = viewport.rows as usize;
 
+        // 本地网格立刻跟手，只有子进程那一半去抖（旧壳也通过
+        // `resize_active_layout_grids` 采用同一策略）。两半的代价完全不对称：客户端
+        // reflow 便宜且可逆，而每一次 `ResizePseudoConsole` 都让 conhost 重排
+        // 自己的缓冲区，那些重排累积出的光标行漂移事后无从察觉。让网格落后于
+        // 渲染就只能靠"视觉裁剪"预览未提交的几何，而裁剪只能裁行、无法重排列
+        // ——宽度一变预览就是错的，且 Term 与屏幕不一致的每一毫秒里到达的字节
+        // 都会按旧宽度进网格。
+        if change.grid_changed {
+            self.resize_grid_only(viewport);
+        }
+
+        // 结构性变化（分屏创建/关闭、zoom、面板开合）不去抖：它只来一次，没有
+        // 后续帧可以合并，多等的每一毫秒都是子进程按旧几何输出的窗口期。旧壳在
+        // 这些路径上走 `resize_active_layout()` 同步下发，这里复刻同一条合同。
+        if std::mem::take(&mut self.structural_resize) {
+            self.pending_resize = None;
+            self.resize_epoch = self.resize_epoch.wrapping_add(1);
+            self.commit_viewport(viewport);
+            return;
+        }
+
         // ConPTY 的直通式 conhost 在 resize 时零输出，指望终端侧 reflow 与
         // 它内部 buffer rewrap 一致；两者的换行语义存在路径依赖差异，每多
         // 一次中间宽度的 ResizePseudoConsole 就多攒一分光标行漂移（字节取
         // 证：13 次提交后 PSReadLine 的 CUP 行比真实提示行高 7 行）。旧壳
         // (winit) 的模态拖拽天然只在松手后送达一次 resize，从不累积。这里
-        // 复刻该合同：纯尾沿去抖——任何网格/像素变化都只进 pending，视口
-        // 静默 RESIZE_SETTLE_DELAY 后一次性提交。净零手势（挤压后拖回原宽）
-        // 最终提交同尺寸 no-op，rewrap 次数为零。
+        // 复刻该合同：子进程那一半纯尾沿去抖——只进 pending，视口静默
+        // RESIZE_SETTLE_DELAY 后一次性下发。净零手势（挤压后拖回原宽）最终
+        // 提交同尺寸 no-op，rewrap 次数为零；网格已在上面逐帧跟手，所以去抖
+        // 的代价只落在"子进程晚知道几十毫秒"，屏幕上看不出来。
         self.pending_resize = Some(viewport);
         self.schedule_settled_resize(cx);
+    }
+
+    /// 只让本地网格 reflow 到 `viewport`，子进程留在旧几何上。
+    ///
+    /// 走 `Msg::ResizeGrid` 而不是直接锁 `Term`：event_loop 的 resize 分支会先
+    /// 把旧几何下已可读的字节全部消化掉，绝对 CUP 序列因此不会被解析进新宽度
+    /// 的网格。UI 线程自己上锁 resize 就绕过了这道流边界保护。
+    fn resize_grid_only(&mut self, viewport: TerminalViewport) {
+        let Some(session) = &self.session else { return };
+        let mut notifier = nebula_terminal::event_loop::Notifier(session.notifier.0.clone());
+        notifier.on_resize_grid(viewport.window_size());
     }
 
     /// Commit one viewport in grid-before-PTY order. Output produced after
@@ -1259,12 +1407,27 @@ impl TerminalView {
         self.cell_width_mode = settings.cell_width_mode;
         self.font_offset_x = settings.font_offset_x;
         self.font_offset_y = settings.font_offset_y;
+        // 底色换了就把矫正缓存作废，并记下「旧底色 → 新底色」这一跳：应用当初
+        // 按旧主题底色画的连续表面（面板、状态栏）要跟着搬过去，否则浅色主题上
+        // 会留一整块旧的深色板。旧壳 `apply_nebula_theme` 同一时机做同一件事。
+        let previous_background = self.palette.background;
+        if previous_background != palette.background {
+            self.color_resolver.theme_changed(
+                super::element::rgb_from_rgba(previous_background),
+                super::element::rgb_from_rgba(palette.background),
+            );
+        }
         self.palette = palette;
         self.copy_on_select = copy_on_select;
         self.default_cursor_style = default_cursor_style;
         if let Some(session) = &self.session {
             let mut term = session.term.lock();
             term.set_default_cursor_style(default_cursor_style);
+            // 主题/底色变了要告诉订阅了 DECSET 2031 的子进程（`CSI ? 997;N n`）。
+            // 没有这一步，已经跑着的 codex/cc/nvim 只知道它启动那一刻用 OSC 11
+            // 问到的背景色：深色主题切成浅色之后，它继续用为深底挑的配色画在白
+            // 底上。`set_color_scheme` 自己做变化检测，这里无条件调。
+            term.set_color_scheme(self.palette.is_dark());
             if cursor_style_changed {
                 // 与旧壳 apply_default_cursor_style 同合同：用户显式改光标后，
                 // 立即解除 shell 启动阶段钉住的旧样式，让新默认当场可见。
@@ -1340,19 +1503,19 @@ impl TerminalView {
         true
     }
 
-    /// 读剪贴板并粘贴。体量达到 [`PASTE_CONFIRM_LINES`] 时先弹确认模态，确认
-    /// 后才走 [`Self::paste_now`]；小段粘贴一路直通，不打断手感。
+    /// 读剪贴板并粘贴。只有裸 shell 可能立即执行内容时才弹确认；支持
+    /// bracketed paste 的应用和全屏 TUI 一路直通，不给右键粘贴平添一层。
     pub fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
         let lines = paste_line_count(&text);
-        if lines >= PASTE_CONFIRM_LINES {
+        if paste_needs_confirmation(&text, self.term_mode()) {
             self.confirm_paste(text, lines, window, cx);
             return;
         }
         self.paste_now(&text, cx);
     }
 
-    /// 大批量粘贴的阻断式确认——提示三层里的「模态」：有待办动作、必须先决策。
+    /// 风险粘贴的阻断式确认——提示三层里的「模态」：有待办动作、必须先决策。
     ///
     /// 粘贴内容随模态一起快照，确认时不再回读剪贴板：弹窗期间用户完全可能又
     /// 复制了别的东西，回读会把「已经看过并确认的那一份」换成没人看过的内容。
@@ -2372,8 +2535,8 @@ impl TerminalView {
         true
     }
 
-    /// 右键（旧壳 Windows 惯例）：有选区 → 复制并清除；无选区 → 粘贴。
-    /// 应用接管鼠标时上报给应用。
+    /// 右键沿用 Windows 终端惯例：有选区直接复制，无选区直接粘贴。
+    /// Ctrl+右键保留选区菜单，供显式调用 Send to Chat。
     fn on_right_down(
         &mut self,
         event: &MouseDownEvent,
@@ -2390,7 +2553,7 @@ impl TerminalView {
         if self.session.is_none() {
             return;
         }
-        if self.mouse_mode_active(&event.modifiers) {
+        if self.mouse_mode_active(&event.modifiers) && !event.modifiers.control {
             self.send_mouse_report(
                 event.position,
                 mouse_protocol::BUTTON_RIGHT,
@@ -2399,23 +2562,28 @@ impl TerminalView {
             );
             return;
         }
-        let has_selection = self
+        let selected_text = self
             .session
             .as_ref()
-            .is_some_and(|s| s.term.lock().selection.as_ref().is_some_and(|sel| !sel.is_empty()));
-        if has_selection {
-            self.copy_selection(true, window, cx);
-            if let Some(session) = &self.session {
-                session.term.lock().selection = None;
+            .and_then(|session| session.term.lock().selection_to_string())
+            .filter(|text| !text.is_empty());
+        if let Some(text) = selected_text {
+            if event.modifiers.control {
+                cx.emit(TerminalViewEvent::SelectionContextMenuRequested {
+                    position: event.position,
+                    text,
+                });
+            } else {
+                self.copy_selection(true, window, cx);
             }
-            cx.notify();
+            cx.stop_propagation();
         } else {
             self.paste(window, cx);
         }
     }
 
     fn on_right_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.mouse_mode_active(&event.modifiers) {
+        if self.mouse_mode_active(&event.modifiers) && !event.modifiers.control {
             self.send_mouse_report(
                 event.position,
                 mouse_protocol::BUTTON_RIGHT,
@@ -2787,7 +2955,8 @@ mod tests {
     use gpui::{FontStyle, FontWeight};
 
     use super::{
-        PASTE_CONFIRM_LINES, TerminalView, mono_font, paste_line_count, selection_scroll_lines,
+        TermMode, TerminalView, mono_font, paste_line_count, paste_needs_confirmation,
+        selection_scroll_lines,
     };
 
     /// 拖选自动回滚的判据（旧壳 `update_selection_scrolling` 的数值合同）：
@@ -2813,7 +2982,7 @@ mod tests {
 
     /// 行数判据数的是「落到终端算几行」，不是 `str::lines`：CRLF 一次换行、
     /// 裸 CR 也是换行（`str::lines` 会把它整段算成 1 行）、末尾那个换行不多
-    /// 算一行。20 行确认弹窗的触发全靠这个函数，所以它就是那条合同。
+    /// 算一行。这个值用于风险粘贴确认文案。
     #[test]
     fn paste_line_count_counts_terminal_rows_not_str_lines() {
         assert_eq!(paste_line_count(""), 0);
@@ -2824,12 +2993,18 @@ mod tests {
         assert_eq!(paste_line_count("a\r\nb\r\n"), 2);
     }
 
-    /// 阈值边界：19 行直通、20 行拦下问一句。
     #[test]
-    fn paste_confirmation_triggers_at_the_threshold() {
-        let rows = |n: usize| "x\n".repeat(n);
-        assert!(paste_line_count(&rows(PASTE_CONFIRM_LINES - 1)) < PASTE_CONFIRM_LINES);
-        assert!(paste_line_count(&rows(PASTE_CONFIRM_LINES)) >= PASTE_CONFIRM_LINES);
+    fn paste_confirmation_follows_execution_risk_not_volume() {
+        let plain = TermMode::empty();
+        assert!(!paste_needs_confirmation("echo safe", plain));
+        assert!(paste_needs_confirmation("echo one\necho two", plain));
+        assert!(paste_needs_confirmation("sudo cargo test", plain));
+        assert!(paste_needs_confirmation("su -", plain));
+        assert!(paste_needs_confirmation("echo safe\u{3}", plain));
+
+        let many_lines = "echo safe\n".repeat(100);
+        assert!(!paste_needs_confirmation(&many_lines, TermMode::BRACKETED_PASTE));
+        assert!(!paste_needs_confirmation(&many_lines, TermMode::ALT_SCREEN));
     }
 
     #[test]

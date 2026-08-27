@@ -41,20 +41,30 @@ mod font_picker;
 mod keymap;
 
 /// 主题下拉（展示名 = 持久化名，与旧壳一致）。
-const THEME_VALUES: [&str; 7] =
-    ["Nebula", "SilverLight", "SteelDark", "LimestoneLight", "CoalDark", "LinenLight", "MossDark"];
+const THEME_VALUES: [&str; 9] = [
+    "Nebula",
+    "SilverLight",
+    "SteelDark",
+    "LimestoneLight",
+    "CoalDark",
+    "LinenLight",
+    "MossDark",
+    "Nord",
+    "Paper",
+];
 
 const REPOSITORY_URL: &str = "https://github.com/Kuddev/nebula";
 const BUG_REPORT_TEMPLATE: &str = "bug_report.yml";
 
-/// 左侧分区导航。主页承载应用身份、版本与支持入口；供应商和备份仍保留
-/// 业务实现，但不作为设置主导航入口，避免把旧壳没有的管理页塞进侧栏。
+/// 左侧分区导航。主页承载应用身份、版本与支持入口；其余页面都是已经完成的
+/// 设置能力，必须能从这里直接到达，不能把真实功能藏成“知道入口的人才能用”。
 const SECTIONS: [&str; 10] =
-    ["应用", "外观", "配置文件", "供应商", "SSH", "网络", "交互", "按键映射", "高级", "备份"];
+    ["应用", "外观", "配置文件", "AI 供应商", "SSH", "网络", "交互", "按键映射", "高级", "备份"];
 
-/// 左侧导航保留稳定的 [`SECTIONS`] 下标，只控制旧壳式显示顺序；AI
-/// 供应商（3）和备份（9）仍可由业务层复用，但不再出现在设置侧栏。
-const NAV_ORDER: [usize; 8] = [0, 1, 2, 6, 7, 4, 5, 8];
+/// 用接近性把十个入口拆成三块，降低线性扫描成本；数组里仍保存稳定的
+/// [`SECTIONS`] 下标，不复制设置状态或路由。
+const NAV_GROUPS: [(&str, &[usize]); 3] =
+    [("工作区", &[0, 1, 2, 6, 7]), ("连接与智能", &[3, 4, 5]), ("系统", &[8, 9])];
 
 // 这些几何值逐项来自旧壳 `display/settings.rs::settings_geometry`。GPUI
 // 设置页沿用同一节奏，避免组件默认间距把标题、分组和表单压成一条均匀列表。
@@ -69,7 +79,7 @@ const SETTINGS_ROW_GAP: f32 = 8.0;
 /// 标准设置选择器的实际宽度。字体输入与 Select 共用，避免同列控件漂移。
 const SETTINGS_SELECT_WIDTH: f32 = 220.0;
 
-const THEME_NAMES: [ThemeName; 7] = [
+const THEME_NAMES: [ThemeName; 9] = [
     ThemeName::Nebula,
     ThemeName::SilverLight,
     ThemeName::SteelDark,
@@ -77,6 +87,8 @@ const THEME_NAMES: [ThemeName; 7] = [
     ThemeName::CoalDark,
     ThemeName::LinenLight,
     ThemeName::MossDark,
+    ThemeName::Nord,
+    ThemeName::Paper,
 ];
 
 /// 列表/触发条上的展示名：族名偶尔带着导入文件后缀，界面上剥掉。
@@ -122,6 +134,8 @@ fn chrome_theme(theme: ThemeName) -> crate::display::NebulaTheme {
         ThemeName::CoalDark => NebulaTheme::CoalDark,
         ThemeName::LinenLight => NebulaTheme::LinenLight,
         ThemeName::MossDark => NebulaTheme::MossDark,
+        ThemeName::Nord => NebulaTheme::Nord,
+        ThemeName::Paper => NebulaTheme::Paper,
     }
 }
 
@@ -1038,8 +1052,7 @@ impl SettingsPane {
 
     /// 旧壳 `request_toggle_background_image_cover_chrome`：关→开要确认
     /// （壳变半透明、控件对比度下降）；开→关直接生效。
-    fn request_cover_chrome(&mut self, enable: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if !enable {
+    fn request_cover_chrome(&mut self, enable: bool, window: &mut Window, cx: &mut Context<Self>) {        if !enable {
             self.persist(&[("background_image_cover_chrome", "0".to_owned())], cx);
             return;
         }
@@ -3196,35 +3209,52 @@ impl SettingsPane {
             .gap(px(2.0))
             .border_r_1()
             .border_color(hairline);
-        for ix in NAV_ORDER {
-            let active = ix == self.active_section;
+        for (group_ix, (group, sections)) in NAV_GROUPS.iter().enumerate() {
             nav = nav.child(
                 div()
-                    .id(("settings-nav", ix))
-                    .px_2()
-                    .ml_2()
-                    .mr_1()
-                    .h(row_h)
+                    .h(px(if group_ix == 0 { 22.0 } else { 30.0 }))
+                    .px_4()
+                    .when(group_ix > 0, |label| label.pt_2())
                     .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(main_text_px))
-                    .font_weight(gpui::FontWeight::NORMAL)
-                    .when(active, |item| item.bg(active_bg).text_color(active_fg))
-                    .when(!active, |item| item.text_color(muted).hover(|s| s.bg(hover_bg)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.active_section = ix;
-                        cx.notify();
-                    }))
-                    .child(Icon::default().path(section_icon(ix)).small().text_color(if active {
-                        active_fg
-                    } else {
-                        muted
-                    }))
-                    .child(SECTIONS[ix]),
+                    .items_end()
+                    .text_size(px(main_text_px * 0.74))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(muted.opacity(0.78))
+                    .child(*group),
             );
+            for &ix in *sections {
+                let active = ix == self.active_section;
+                nav = nav.child(
+                    div()
+                        .id(("settings-nav", ix))
+                        .px_2()
+                        .ml_2()
+                        .mr_1()
+                        .h(row_h)
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_size(px(main_text_px))
+                        // 选中态同时改变底色、墨色和字重，余光扫过也能确认当前位置。
+                        .font_weight(if active {
+                            gpui::FontWeight::SEMIBOLD
+                        } else {
+                            gpui::FontWeight::NORMAL
+                        })
+                        .when(active, |item| item.bg(active_bg).text_color(active_fg))
+                        .when(!active, |item| item.text_color(muted).hover(|s| s.bg(hover_bg)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.active_section = ix;
+                            cx.notify();
+                        }))
+                        .child(Icon::default().path(section_icon(ix)).small().text_color(
+                            if active { active_fg } else { muted },
+                        ))
+                        .child(SECTIONS[ix]),
+                );
+            }
         }
         nav.into_any_element()
     }
@@ -3251,7 +3281,8 @@ impl Render for SettingsPane {
         let bg_picker_open = self.bg_picker_open && self.active_section == 1;
         let bg_dragging = self.bg_picker_drag.is_some();
         let ssh_editor_modal = self.ssh_editor_modal(cx);
-        let show_reset = !matches!(self.active_section, 0 | 4);
+        // 现有 reset 合同只覆盖外观键；其它页面显示同一个按钮会产生假承诺。
+        let show_reset = self.active_section == 1;
         let hairline = crate::gpui_shell::theme::settings_hairline(cx);
 
         div()
@@ -3293,7 +3324,7 @@ impl Render for SettingsPane {
             // 这层不透明底必须自带卡圆角：外层终端卡虽然 `overflow_hidden`，
             // 但 GPUI 的裁剪是矩形 content_mask、不跟圆角，方角底会直接盖掉
             // 卡的四个圆角——这就是设置页看着「四角是直角」的原因。
-            .rounded(crate::gpui_shell::theme::card_radius())
+            .rounded(crate::gpui_shell::theme::card_radius(cx))
             .bg(crate::gpui_shell::theme::settings_panel_bg(cx))
             .text_color(cx.theme().foreground)
             // 主文字的字号/字重从设置根向两栏继承；局部仅允许说明文字、
@@ -3350,7 +3381,7 @@ impl Render for SettingsPane {
                                                 .hover(|el| el.bg(cx.theme().list_hover))
                                                 .tooltip(|window, cx| {
                                                     gpui_component::tooltip::Tooltip::new(
-                                                        "还原此页为默认值",
+                                                        "还原外观为默认值",
                                                     )
                                                     .build(window, cx)
                                                 })

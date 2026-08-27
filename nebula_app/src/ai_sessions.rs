@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 
 /// 每个会话文件最多读多少字节找标题。
 const HEAD_BYTES: usize = 64 * 1024;
-/// 标题最长几个字符（超出截断加省略号）。
-const TITLE_CHARS: usize = 60;
+/// 防止 hook registry 被异常长标题撑大；这不是 UI 的视觉截断阈值。
+/// Palette 会按标题真实可用宽度做 ellipsis，正常会话名不会在数据层提前丢失。
+const TITLE_STORAGE_CHARS: usize = 512;
 
 pub type AiSessionSource = crate::ai_agents::AgentKind;
 
@@ -408,8 +409,8 @@ fn read_head(path: &Path, limit: usize) -> std::io::Result<String> {
 
 fn truncate_title(text: &str) -> String {
     let text = text.trim().replace(['\r', '\n'], " ");
-    let mut out: String = text.chars().take(TITLE_CHARS).collect();
-    if text.chars().count() > TITLE_CHARS {
+    let mut out: String = text.chars().take(TITLE_STORAGE_CHARS).collect();
+    if text.chars().count() > TITLE_STORAGE_CHARS {
         out.push('…');
     }
     out
@@ -640,10 +641,10 @@ mod tests {
 
     #[test]
     fn titles_collapse_newlines_and_cap_length() {
-        let long = "第一行\n第二行".to_owned() + &"字".repeat(80);
+        let long = "第一行\n第二行".to_owned() + &"字".repeat(TITLE_STORAGE_CHARS + 80);
         let title = truncate_title(&long);
         assert!(title.starts_with("第一行 第二行"));
         assert!(title.ends_with('…'));
-        assert!(title.chars().count() <= TITLE_CHARS + 1);
+        assert!(title.chars().count() <= TITLE_STORAGE_CHARS + 1);
     }
 }

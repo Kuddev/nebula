@@ -1,8 +1,8 @@
 //! Nebula theme system — the single source of truth for every chrome color.
 //!
 //! Everything visual that is NOT terminal-grid content reads from here:
-//! the seven built-in themes (from the low-saturation powerline design
-//! sheet: the deep-blue default plus three light/dark pairs), each theme's
+//! the built-in themes (the original seven low-saturation Nebula looks plus
+//! the additive Nord/Paper pair), each theme's
 //! chrome palette ([`NebulaPalette`]) and its full overlay ink set
 //! ([`Skin`]). The settings modal, confirm dialogs, the command palette,
 //! resize HUD, scrollbar and the tab/window chrome all pull their colors
@@ -28,9 +28,9 @@ use nebula_terminal::vte::ansi::NamedColor;
 /// TUIs — so hijacking eight slots stays invisible in practice.
 pub(crate) const POWERLINE_SLOT0: usize = 16;
 
-/// Built-in Nebula chrome themes exposed from the settings panel — the seven
-/// looks from the design sheet: the deep-blue default plus three light/dark
-/// low-saturation pairs (silver/steel, limestone/coal, linen/moss).
+/// Built-in chrome themes exposed from the settings panel. The original seven
+/// Nebula looks remain unchanged; Nord/Paper are an additive dark/light pair
+/// carrying their own complete palettes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NebulaTheme {
     Nebula,
@@ -40,6 +40,8 @@ pub enum NebulaTheme {
     CoalDark,
     LinenLight,
     MossDark,
+    Nord,
+    Paper,
 }
 
 impl Default for NebulaTheme {
@@ -66,6 +68,8 @@ impl NebulaTheme {
             (Self::LimestoneLight | Self::CoalDark, false) => Self::CoalDark,
             (Self::LinenLight | Self::MossDark, true) => Self::LinenLight,
             (Self::LinenLight | Self::MossDark, false) => Self::MossDark,
+            (Self::Paper | Self::Nord, true) => Self::Paper,
+            (Self::Paper | Self::Nord, false) => Self::Nord,
         }
     }
 
@@ -78,6 +82,8 @@ impl NebulaTheme {
             Self::CoalDark => "Coal Dark",
             Self::LinenLight => "Linen Light",
             Self::MossDark => "Moss Dark",
+            Self::Nord => "Nord",
+            Self::Paper => "Paper",
         }
     }
 
@@ -90,6 +96,8 @@ impl NebulaTheme {
             Self::CoalDark => "CoalDark",
             Self::LinenLight => "LinenLight",
             Self::MossDark => "MossDark",
+            Self::Nord => "Nord",
+            Self::Paper => "Paper",
         }
     }
 
@@ -104,6 +112,8 @@ impl NebulaTheme {
             "CoalDark" => Self::CoalDark,
             "LinenLight" => Self::LinenLight,
             "MossDark" => Self::MossDark,
+            "Nord" => Self::Nord,
+            "Paper" => Self::Paper,
             _ => return None,
         })
     }
@@ -117,6 +127,8 @@ impl NebulaTheme {
             Self::SteelDark => "Steel",
             Self::CoalDark => "Coal",
             Self::MossDark => "Moss",
+            Self::Nord => "Nord",
+            Self::Paper => "Paper",
             _ => self.label(),
         }
     }
@@ -136,6 +148,8 @@ impl NebulaTheme {
             Self::CoalDark => Rgb::new(212, 212, 212),
             Self::LinenLight => Rgb::new(95, 99, 95),
             Self::MossDark => Rgb::new(163, 179, 163),
+            Self::Nord => Rgb::new(0x88, 0xc0, 0xd0),
+            Self::Paper => Rgb::new(0x2b, 0x5a, 0x38),
         }
     }
 
@@ -149,12 +163,27 @@ impl NebulaTheme {
     /// at runtime — the cards use one fixed neutral stand-in so all dark cards
     /// preview alike regardless of the configured scheme.
     pub(crate) fn card_ink(self) -> CardInk {
+        match self {
+            Self::Nord => return CardInk { fg: Rgb::new(0xe5, 0xe9, 0xf0) },
+            Self::Paper => return CardInk { fg: Rgb::new(0x1a, 0x1a, 0x1a) },
+            _ => {},
+        }
         if self.palette().is_light {
             CardInk {
                 fg: Rgb::new(36, 41, 47), // = light Foreground (#24292f)
             }
         } else {
             CardInk { fg: Rgb::new(214, 219, 227) }
+        }
+    }
+
+    /// Nord and Paper carry a complete terminal palette. Keeping the
+    /// data in `nebula_settings` gives GPUI and the legacy renderer one source.
+    pub(crate) fn exact_term_colors(self) -> Option<nebula_settings::ExactTermColors> {
+        match self {
+            Self::Nord => nebula_settings::ThemeName::Nord.term_theme().exact,
+            Self::Paper => nebula_settings::ThemeName::Paper.term_theme().exact,
+            _ => None,
         }
     }
 
@@ -177,6 +206,51 @@ impl NebulaTheme {
         // draw time; truecolor is frozen the moment it is printed.
         for (i, rgb) in self.powerline_colors().into_iter().enumerate() {
             colors[POWERLINE_SLOT0 + i] = rgb;
+        }
+        if let Some(exact) = self.exact_term_colors() {
+            let foreground = rgb8(exact.foreground);
+            colors[NamedColor::Foreground] = foreground;
+            colors[NamedColor::BrightForeground] = foreground;
+            colors[NamedColor::DimForeground] = dim_rgb(foreground);
+
+            const ANSI_NAMES: [NamedColor; 16] = [
+                NamedColor::Black,
+                NamedColor::Red,
+                NamedColor::Green,
+                NamedColor::Yellow,
+                NamedColor::Blue,
+                NamedColor::Magenta,
+                NamedColor::Cyan,
+                NamedColor::White,
+                NamedColor::BrightBlack,
+                NamedColor::BrightRed,
+                NamedColor::BrightGreen,
+                NamedColor::BrightYellow,
+                NamedColor::BrightBlue,
+                NamedColor::BrightMagenta,
+                NamedColor::BrightCyan,
+                NamedColor::BrightWhite,
+            ];
+            const DIM_NAMES: [NamedColor; 8] = [
+                NamedColor::DimBlack,
+                NamedColor::DimRed,
+                NamedColor::DimGreen,
+                NamedColor::DimYellow,
+                NamedColor::DimBlue,
+                NamedColor::DimMagenta,
+                NamedColor::DimCyan,
+                NamedColor::DimWhite,
+            ];
+            for (name, color) in ANSI_NAMES.into_iter().zip(exact.ansi) {
+                colors[name] = rgb8(color);
+            }
+            for (name, color) in DIM_NAMES.into_iter().zip(exact.ansi[..8].iter().copied()) {
+                colors[name] = dim_rgb(rgb8(color));
+            }
+            if let Some(cursor) = exact.cursor {
+                colors[NamedColor::Cursor] = rgb8(cursor);
+            }
+            return;
         }
         if !p.is_light {
             return;
@@ -285,6 +359,26 @@ impl NebulaTheme {
                 Rgb::new(187, 247, 208),
                 Rgb::new(42, 47, 42),
                 Rgb::new(107, 114, 107),
+            ],
+            Self::Nord => [
+                Rgb::new(0x3b, 0x42, 0x52),
+                Rgb::new(0xec, 0xef, 0xf4),
+                Rgb::new(0x4c, 0x56, 0x6a),
+                Rgb::new(0xe5, 0xe9, 0xf0),
+                Rgb::new(0x43, 0x4c, 0x5e),
+                Rgb::new(0x88, 0xc0, 0xd0),
+                Rgb::new(0x2e, 0x34, 0x40),
+                Rgb::new(0x7b, 0x82, 0x94),
+            ],
+            Self::Paper => [
+                Rgb::new(0xe0, 0xdf, 0xd5),
+                Rgb::new(0x1a, 0x1a, 0x1a),
+                Rgb::new(0xf5, 0xf4, 0xf0),
+                Rgb::new(0x47, 0x46, 0x46),
+                Rgb::new(0xc1, 0xbe, 0xb5),
+                Rgb::new(0x2b, 0x5a, 0x38),
+                Rgb::new(0xfc, 0xfb, 0xf9),
+                Rgb::new(0x8c, 0x8a, 0x80),
             ],
         }
     }
@@ -418,12 +512,51 @@ impl NebulaTheme {
                 term_bg: Rgb::new(30, 33, 30),
                 shell_bg: Rgb::new(25, 28, 25),
             },
+            Self::Nord => NebulaPalette {
+                // `Nord`: panel/background #2E3440, elevated
+                // surface #3B4252, one cyan accent and no ambient glow.
+                panel: Rgba::new(0x2e, 0x34, 0x40, 255),
+                pill: Rgba::new(0x3b, 0x42, 0x52, 255),
+                tab_stroke_l: Rgba::new(255, 255, 255, 15),
+                tab_bg_l: Rgba::new(0x3b, 0x42, 0x52, 255),
+                tab_bg_r: Rgba::new(0x3b, 0x42, 0x52, 255),
+                edge_l: Rgba::new(0x88, 0xc0, 0xd0, 255),
+                edge_r: Rgba::new(0x88, 0xc0, 0xd0, 255),
+                edge_glow_l: Rgba::new(0x88, 0xc0, 0xd0, 0),
+                glow_l: Rgba::new(0x88, 0xc0, 0xd0, 0),
+                glow_r: Rgba::new(0x88, 0xc0, 0xd0, 0),
+                is_light: false,
+                term_bg: Rgb::new(0x2e, 0x34, 0x40),
+                shell_bg: Rgb::new(0x2e, 0x34, 0x40),
+            },
+            Self::Paper => NebulaPalette {
+                // `Paper`: warm panel #F5F4F0 around the
+                // #FCFBF9 terminal surface, with botanical green accent.
+                panel: Rgba::new(0xf5, 0xf4, 0xf0, 255),
+                pill: Rgba::new(0xfc, 0xfb, 0xf9, 255),
+                tab_stroke_l: Rgba::new(0xe0, 0xdf, 0xd5, 255),
+                tab_bg_l: Rgba::new(255, 255, 255, 255),
+                tab_bg_r: Rgba::new(255, 255, 255, 255),
+                edge_l: Rgba::new(0x2b, 0x5a, 0x38, 255),
+                edge_r: Rgba::new(0x2b, 0x5a, 0x38, 255),
+                edge_glow_l: Rgba::new(0x2b, 0x5a, 0x38, 0),
+                glow_l: Rgba::new(0x2b, 0x5a, 0x38, 0),
+                glow_r: Rgba::new(0x2b, 0x5a, 0x38, 0),
+                is_light: true,
+                term_bg: Rgb::new(0xfc, 0xfb, 0xf9),
+                shell_bg: Rgb::new(0xf5, 0xf4, 0xf0),
+            },
         }
     }
 
     /// Theme-derived ink/surface tokens for every floating chrome layer.
     /// See [`Skin`] for what each token means.
     pub(crate) fn skin(self) -> Skin {
+        match self {
+            Self::Nord => return nord_skin(),
+            Self::Paper => return paper_skin(),
+            _ => {},
+        }
         let p = self.palette();
         let a = self.accent();
         let t = p.term_bg;
@@ -595,6 +728,15 @@ impl NebulaTheme {
     }
 }
 
+fn rgb8([r, g, b]: nebula_settings::Rgb8) -> Rgb {
+    Rgb::new(r, g, b)
+}
+
+fn dim_rgb(color: Rgb) -> Rgb {
+    let dim = |channel: u8| (f32::from(channel) * 0.66).round() as u8;
+    Rgb::new(dim(color.r), dim(color.g), dim(color.b))
+}
+
 /// 把一个近中性色往它自身的色相推，亮度保持不动。
 ///
 /// 浅色主题的 accent 是刻意选的中性深灰（2026-07-31 裁定：浅底亮度高，饱和
@@ -726,6 +868,82 @@ pub(crate) struct Skin {
     pub(crate) is_light: bool,
 }
 
+fn nord_skin() -> Skin {
+    Skin {
+        panel: Rgba::new(0x2e, 0x34, 0x40, 255),
+        input: Rgba::new(0x3b, 0x42, 0x52, 255),
+        card: Rgba::new(0x3b, 0x42, 0x52, 255),
+        veil: Rgba::new(0x02, 0x06, 0x17, 92),
+        ink: Rgb::new(0xe5, 0xe9, 0xf0),
+        ink_dim: Rgb::new(0xc0, 0xc7, 0xd3),
+        ink_strong: Rgb::new(0xec, 0xef, 0xf4),
+        ink_faint: Rgb::new(0x7b, 0x82, 0x94),
+        ink_ignored: Rgb::new(0x7b, 0x82, 0x94),
+        ink_on_accent: Rgb::new(0x2e, 0x34, 0x40),
+        icon: Rgb::new(0xc0, 0xc7, 0xd3),
+        icon_hover: Rgb::new(0xec, 0xef, 0xf4),
+        accent: Rgb::new(0x88, 0xc0, 0xd0),
+        accent_soft: Rgba::new(0x88, 0xc0, 0xd0, 46),
+        danger: Rgba::new(0xbf, 0x61, 0x6a, 255),
+        ok: Rgba::new(0xa3, 0xbe, 0x8c, 255),
+        warn: Rgba::new(0xeb, 0xcb, 0x8b, 255),
+        hairline: Rgba::new(255, 255, 255, 15),
+        surface: Rgba::new(0x3b, 0x42, 0x52, 255),
+        hover: Rgba::new(255, 255, 255, 15),
+        hover_strong: Rgba::new(0x88, 0xc0, 0xd0, 46),
+        // Nord declares no dedicated switch/scrollbar keys. These
+        // Nebula-only controls stay inside Nord's surface/border/text ramp.
+        track_off: Rgba::new(0x7b, 0x82, 0x94, 90),
+        toggle_track_off: Rgba::new(0x3b, 0x42, 0x52, 255),
+        toggle_track_on: Rgba::new(0x88, 0xc0, 0xd0, 255),
+        toggle_border_off: Rgba::new(0x43, 0x4c, 0x5e, 255),
+        toggle_border_on: Rgba::new(0x88, 0xc0, 0xd0, 255),
+        knob_off: Rgba::new(0xc0, 0xc7, 0xd3, 255),
+        knob_on: Rgba::new(0xec, 0xef, 0xf4, 255),
+        scrollbar_thumb: Rgba::new(0x7b, 0x82, 0x94, 0),
+        is_light: false,
+    }
+}
+
+fn paper_skin() -> Skin {
+    Skin {
+        panel: Rgba::new(0xf5, 0xf4, 0xf0, 255),
+        input: Rgba::new(0xfc, 0xfb, 0xf9, 255),
+        card: Rgba::new(0xfc, 0xfb, 0xf9, 255),
+        veil: Rgba::new(0x1a, 0x1a, 0x1a, 48),
+        ink: Rgb::new(0x1a, 0x1a, 0x1a),
+        ink_dim: Rgb::new(0x8c, 0x8a, 0x80),
+        ink_strong: Rgb::new(0x1a, 0x1a, 0x1a),
+        ink_faint: Rgb::new(0xc1, 0xbe, 0xb5),
+        ink_ignored: Rgb::new(0xc1, 0xbe, 0xb5),
+        ink_on_accent: Rgb::new(0xfc, 0xfb, 0xf9),
+        icon: Rgb::new(0x8c, 0x8a, 0x80),
+        icon_hover: Rgb::new(0x1a, 0x1a, 0x1a),
+        accent: Rgb::new(0x2b, 0x5a, 0x38),
+        // Paper omits active-bg. Nebula still needs a selected-row wash, so
+        // reuse the same 18% accent rule the Nord skin uses.
+        accent_soft: Rgba::new(0x2b, 0x5a, 0x38, 46),
+        // Paper omits semantic tokens. Its normal ANSI red/green/yellow are
+        // the nearest declared semantic colors and keep the palette coherent.
+        danger: Rgba::new(0xa3, 0x3a, 0x3a, 255),
+        ok: Rgba::new(0x2b, 0x5a, 0x38, 255),
+        warn: Rgba::new(0xa8, 0x5a, 0x20, 255),
+        hairline: Rgba::new(0xe0, 0xdf, 0xd5, 255),
+        surface: Rgba::new(0xfc, 0xfb, 0xf9, 255),
+        hover: Rgba::new(0xeb, 0xea, 0xe5, 255),
+        hover_strong: Rgba::new(0x2b, 0x5a, 0x38, 46),
+        track_off: Rgba::new(0x8c, 0x8a, 0x80, 86),
+        toggle_track_off: Rgba::new(0xe0, 0xdf, 0xd5, 255),
+        toggle_track_on: Rgba::new(0x2b, 0x5a, 0x38, 255),
+        toggle_border_off: Rgba::new(0xc1, 0xbe, 0xb5, 255),
+        toggle_border_on: Rgba::new(0x2b, 0x5a, 0x38, 255),
+        knob_off: Rgba::new(0x8c, 0x8a, 0x80, 255),
+        knob_on: Rgba::new(0xfc, 0xfb, 0xf9, 255),
+        scrollbar_thumb: Rgba::new(0x8c, 0x8a, 0x80, 0),
+        is_light: true,
+    }
+}
+
 /// Publish the active theme for the shell prompt bridge: the powerline script
 /// polls `%TEMP%\nebula_theme.txt` and recolors its segments to match. Written
 /// atomically (tmp + rename) so readers never see a torn value.
@@ -760,5 +978,20 @@ mod tests {
         assert_eq!(NebulaTheme::CoalDark.for_system_appearance(true), NebulaTheme::LimestoneLight);
         assert_eq!(NebulaTheme::LinenLight.for_system_appearance(false), NebulaTheme::MossDark);
         assert_eq!(NebulaTheme::MossDark.for_system_appearance(true), NebulaTheme::LinenLight);
+        assert_eq!(NebulaTheme::Nord.for_system_appearance(true), NebulaTheme::Paper);
+        assert_eq!(NebulaTheme::Paper.for_system_appearance(false), NebulaTheme::Nord);
+    }
+
+    #[test]
+    fn nord_and_paper_chrome_use_their_declared_tokens() {
+        let nord = NebulaTheme::Nord.skin();
+        assert_eq!(nord.panel, crate::renderer::ui::Rgba::new(0x2e, 0x34, 0x40, 255));
+        assert_eq!(nord.card, crate::renderer::ui::Rgba::new(0x3b, 0x42, 0x52, 255));
+        assert_eq!(nord.accent, crate::display::color::Rgb::new(0x88, 0xc0, 0xd0));
+
+        let paper = NebulaTheme::Paper.skin();
+        assert_eq!(paper.panel, crate::renderer::ui::Rgba::new(0xf5, 0xf4, 0xf0, 255));
+        assert_eq!(paper.card, crate::renderer::ui::Rgba::new(0xfc, 0xfb, 0xf9, 255));
+        assert_eq!(paper.accent, crate::display::color::Rgb::new(0x2b, 0x5a, 0x38));
     }
 }

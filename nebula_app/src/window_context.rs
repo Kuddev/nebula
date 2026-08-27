@@ -488,8 +488,10 @@ impl WindowContext {
     ) -> Result<Pane, Box<dyn Error>> {
         // Per-pane identity for AI-CLI lifecycle hooks: nebula-hook.exe reads
         // it and stamps its pipe messages, so turn state lands on the right
-        // tab dot (see `ai_hook`).
-        pty_config.env.insert(crate::ai_hook::PANE_ENV.into(), pane_id.to_string());
+        // tab dot (see `ai_hook`). The same call also exports the terminal
+        // identity and control-plane path an in-pane agent needs to find us
+        // (see `agent_env`).
+        crate::agent_env::apply(&mut pty_config.env, pane_id);
 
         let window_route = Arc::new(AtomicU64::new(window_id.into()));
         let event_proxy = EventProxy::new_tab(proxy.clone(), window_route.clone(), pane_id);
@@ -518,6 +520,7 @@ impl WindowContext {
             .or_else(|| std::env::current_dir().ok())
             .map(|path| path.display().to_string())
             .unwrap_or_default();
+        let exec_context = crate::runtime_exec::PaneExecContext::from_pty_options(&pty_config);
 
         // The PTY forks the shell process and retains the master side.
         crate::boot_trace("conpty spawn begin");
@@ -558,6 +561,7 @@ impl WindowContext {
             inline_search_state: Default::default(),
             id: pane_id,
             title: String::from("shell"),
+            exec_context: Some(exec_context),
             ssh_destination: None,
             nebula_state,
             intro_cols: None,
@@ -602,6 +606,7 @@ impl WindowContext {
             inline_search_state: Default::default(),
             id: pane_id,
             title: String::from("ssh"),
+            exec_context: None,
             ssh_destination: Some(destination),
             nebula_state: NebulaPaneState::default(),
             intro_cols: None,
@@ -634,6 +639,7 @@ impl WindowContext {
             inline_search_state: Default::default(),
             id: DOC_PANE_ID,
             title: String::from("doc"),
+            exec_context: None,
             ssh_destination: None,
             nebula_state: NebulaPaneState::default(),
             intro_cols: None,
@@ -2222,6 +2228,35 @@ impl WindowContext {
         // to the focused pane of the first window asked.
         let pane_id = ev.pane.unwrap_or_else(|| self.focused_pane_id());
         let Some(idx) = self.pane_index(pane_id) else { return false };
+        // 路由第二因子：写管道那个进程必须真的跑在这个 pane 的进程树里。
+        // `NEBULA_PANE_ID` 是环境变量，任何进程都能设成别的 pane；祖先链不能
+        // 伪造。只有拿到明确反证时才拒绝，查不到证据（远端 OSC 通道、pane 还
+        // 没有本地 shell、helper 已退出）一律放行。
+        if let Some(client_pid) = ev.client_pid
+            && ev.pane == Some(pane_id)
+            && crate::process_tree::is_within_tree(client_pid, self.panes[idx].shell_pid)
+                == Some(false)
+        {
+            log::warn!(
+                "ai_hook: rejected event claiming pane {pane_id} from pid {client_pid} outside its \
+                 process tree (source={} kind={:?})",
+                ev.source,
+                ev.kind
+            );
+            return true;
+        }
+        let verdict = crate::ai_hook::accept_for_pane(ev, pane_id);
+        if !verdict.accepted() {
+            log::debug!(
+                "ai_hook: dropped event reason={verdict:?} source={} session={:?} pane={pane_id} \
+                 kind={:?} bridge_seq={:?}",
+                ev.source,
+                ev.session_id,
+                ev.kind,
+                ev.bridge_sequence
+            );
+            return true;
+        }
 
         // The hook names its client ("claude" / "codex") — ground truth for
         // the sidebar program icon, unlike the OSC 133 command-line sniffing
@@ -2281,6 +2316,16 @@ impl WindowContext {
                 // 继续（授权点头、队列消息）后状态还挂在 Done」的场景——
                 // 也就是用户看到的「还在执行却已经显示完成蓝点」。
                 state.agent_status = crate::ai_agents::AgentStatus::Working;
+                state.awaiting_input = false;
+                state.needs_attention = false;
+                state.finished_unseen = false;
+                state.command_started.get_or_insert_with(Instant::now);
+            },
+            crate::ai_hook::AiHookKind::TurnDone if ev.active_background_tasks() > 0 => {
+                let active = ev.active_background_tasks();
+                let state = &mut self.panes[idx].nebula_state;
+                state.agent_status = crate::ai_agents::AgentStatus::Working;
+                state.agent_status_rule = Some(format!("hook.background_tasks.active={active}"));
                 state.awaiting_input = false;
                 state.needs_attention = false;
                 state.finished_unseen = false;
@@ -2347,13 +2392,19 @@ impl WindowContext {
                 // window with the pane hidden in a background tab. The global
                 // toast throttle absorbs the BEL/OSC-9 double fire when
                 // claude's notif channel is active as well.
-                let attention = ev.kind == crate::ai_hook::AiHookKind::NeedsAttention;
+                let attention =
+                    ev.kind == crate::ai_hook::AiHookKind::NeedsAttention || screen_asks;
                 if !self.display.window.has_focus() || background_tab {
+                    let message = ev
+                        .attention
+                        .as_ref()
+                        .map(|context| context.summary_for_pane(pane_id))
+                        .or_else(|| ev.message.clone());
                     crate::notify::deliver(
                         &self.display.window,
                         &crate::notify::Notification::AiTurn {
                             program: ev.source.clone(),
-                            message: ev.message.clone(),
+                            message,
                             attention,
                         },
                         Some(pane_id),
@@ -3390,10 +3441,24 @@ impl WindowContext {
         if self.display.pending_update.terminal_colors_dirty() {
             // 主题切换必须覆盖所有 tab、分屏和文档占位终端。这里尚未取得焦点
             // terminal 的锁，可逐个清理 OSC 覆盖而不产生重复加锁死锁。
+            //
+            // 顺带告诉订阅了 DECSET 2031 的子进程新的亮暗（`CSI ? 997;N n`）：
+            // 上面那行 `reset_dynamic_colors` 只是让 OSC 11 **下次被问到**时报出
+            // 新背景，而已经跑着的 TUI 不会再问第二次。少了这条通知，深色切浅色
+            // 之后 nvim/codex 会继续用为深底挑的配色画在白底上。
+            let dark = {
+                let bg = self.display.colors[nebula_terminal::vte::ansi::NamedColor::Background];
+                nebula_terminal::term::background_is_dark(bg.r, bg.g, bg.b)
+            };
             for pane in &self.panes {
-                pane.terminal.lock().reset_dynamic_colors();
+                let mut terminal = pane.terminal.lock();
+                terminal.reset_dynamic_colors();
+                terminal.set_color_scheme(dark);
             }
-            self.doc_pane.terminal.lock().reset_dynamic_colors();
+            let mut doc = self.doc_pane.terminal.lock();
+            doc.reset_dynamic_colors();
+            doc.set_color_scheme(dark);
+            drop(doc);
             self.dirty = true;
         }
 

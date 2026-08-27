@@ -142,3 +142,21 @@ dist-pack-*/
 # 每次 A/B 对照都会开一个新的探针目录（.probe-pack、.probe-layout-daily、
 # .probe-tabmenu…），逐个补规则永远漏，所以整族忽略。
 .probe-*/
+
+# 隔离启动与运行取证的整族产物。`.run/` 只挡住了目录本身，而实际落地的是
+# `.run-release/`、`.run-release-cfg/`、`.run-check.out`、`.run-release-shot.png`
+# 这类带后缀的兄弟；隔离实例每次换一个日期/轮次后缀（NEBULA_CONFIG_DIR 全隔离，
+# 见 nebula-cursor-and-testing 的做法）。都是一次调试轮次的证据，永不入库。
+.run-*
+.isolated-*/
+
+# 一次性 DOM/标签计数校验脚本（数 HTML 原型里的标签配对），随原型一起废弃。
+.chk*.js
+
+# 截图取证：`probe_*.png` 之外还有 `.dock-probe.png` 这类点号前缀的命名。
+*-probe.png
+
+# 本地打包出的可分发目录与预览包（内含 nebula.exe 与 zip）：构建产物，
+# 发布走 scripts/package-release.ps1，不从工作区入库。
+NebulaTerminal-*/
+*-preview-package/

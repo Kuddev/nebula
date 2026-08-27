@@ -85,7 +85,10 @@ mod size_info;
 pub(crate) mod state;
 pub(crate) mod suggest_engine;
 mod surface_opacity;
-mod terminal_color;
+/// GPUI 壳的终端元素也用这里的 [`terminal_color::TerminalColorResolver`]：
+/// 「应用写死的颜色要不要按当前主题矫正」两个壳必须是同一个答案，否则同一份
+/// 输出在新旧壳读起来不一样。
+pub(crate) mod terminal_color;
 pub(crate) mod terminal_math;
 mod toast;
 
@@ -271,7 +274,11 @@ pub(crate) const UI_CORNER_RADIUS_LOGICAL: f32 = 8.0;
 /// `pub(crate)`: the GPUI shell's terminal card borrows this exact value
 /// (see `gpui_shell::theme::card_radius`) so both shells round the card
 /// identically.
-pub(crate) const UI_SHELL_RADIUS_LOGICAL: f32 = 14.0;
+///
+/// The number itself lives in `nebula_settings` — it is the default for the
+/// per-theme card geometry, and a second literal here would be exactly the
+/// "two copies of one number" that produced the white seam around the card.
+pub(crate) const UI_SHELL_RADIUS_LOGICAL: f32 = nebula_settings::DEFAULT_PANE_CARD_RADIUS;
 
 /// Gap between the terminal card and the window's right/bottom edges, in
 /// logical pixels — the visible "seam" of shell color that makes the terminal

@@ -50,6 +50,10 @@ pub enum Event {
     /// OSC 9 — free-text notification from a program (iTerm style).
     Notify(String),
 
+    /// OSC 9;4 — ConEmu 任务进度（`state` 原始码，`value` 为 0..=100）。
+    /// Windows 任务栏原生支持这套语义，映射在消费端。
+    Progress { state: u8, value: Option<u8> },
+
     /// 已通过 SSH 通道令牌校验的远端 AI Hook 原始信封。
     AiHookEnvelope(Vec<u8>),
 
@@ -114,6 +118,7 @@ impl Debug for Event {
                 write!(f, "UserVar({name}, {} chars)", value.chars().count())
             },
             Event::Notify(text) => write!(f, "Notify({text})"),
+            Event::Progress { state, value } => write!(f, "Progress({state}, {value:?})"),
             Event::AiHookEnvelope(envelope) => {
                 write!(f, "AiHookEnvelope({} bytes)", envelope.len())
             },

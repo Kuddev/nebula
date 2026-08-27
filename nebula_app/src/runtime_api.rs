@@ -10,6 +10,7 @@ mod cli;
 mod command;
 mod orchestrate;
 mod server;
+pub mod shortcuts;
 #[cfg(test)]
 mod tests;
 
@@ -19,7 +20,8 @@ use command::{
     validate_agent_name, validate_agent_selector, wait_matches,
 };
 pub(crate) use command::{
-    capture_process_tree, capture_terminal_tail, validate_command_line, validate_prompt,
+    capture_process_tree, capture_terminal_tail, validate_chat_message, validate_command_line,
+    validate_paste_text, validate_prompt,
 };
 use server::{Endpoint, endpoint_addr, read_endpoint};
 pub use server::{
@@ -62,9 +64,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_PROMPT_BYTES: usize = 32 * 1024;
+const MAX_TAB_NAME_BYTES: usize = 256;
 pub(crate) const MAX_KEY_REPEAT: u16 = 64;
 pub(crate) const DEFAULT_READ_LINES: usize = 120;
 pub(crate) const MAX_READ_LINES: usize = 2_000;
+pub(crate) const MIN_PANE_RATIO: f32 = 0.05;
+pub(crate) const MAX_PANE_RATIO: f32 = 0.95;
+pub(crate) const DEFAULT_EXEC_OUTPUT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_EXEC_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_CLIENTS: usize = 64;
 const MAX_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
@@ -361,6 +368,8 @@ pub struct RuntimeTab {
     pub kind: String,
     pub bell: bool,
     pub focused_pane_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zoomed_pane_id: Option<u64>,
     pub layout: Option<RuntimeLayout>,
     pub panes: Vec<RuntimePane>,
 }
@@ -682,6 +691,9 @@ pub enum RuntimeCommand {
         /// 普通启动 / Explorer 右键要求新开窗口时，把目标目录一路带到首个标签。
         cwd: Option<PathBuf>,
     },
+    CloseWindow {
+        window_id: Option<u64>,
+    },
     Focus {
         window_id: Option<u64>,
         pane_id: Option<u64>,
@@ -690,12 +702,46 @@ pub enum RuntimeCommand {
         window_id: Option<u64>,
         cwd: Option<PathBuf>,
     },
+    CloseTab {
+        window_id: Option<u64>,
+        tab_index: usize,
+    },
+    RenameTab {
+        window_id: Option<u64>,
+        tab_index: usize,
+        name: String,
+    },
+    MoveTab {
+        window_id: Option<u64>,
+        tab_index: usize,
+        to_index: usize,
+    },
     Split {
         window_id: Option<u64>,
         pane_id: Option<u64>,
         direction: RuntimeSplitDirection,
     },
+    ClosePane {
+        window_id: Option<u64>,
+        pane_id: u64,
+    },
+    ZoomPane {
+        window_id: Option<u64>,
+        pane_id: u64,
+        zoomed: bool,
+    },
+    ResizePane {
+        window_id: Option<u64>,
+        pane_id: u64,
+        ratio: f32,
+    },
     Prompt {
+        window_id: Option<u64>,
+        pane_id: u64,
+        text: String,
+        submit: bool,
+    },
+    Paste {
         window_id: Option<u64>,
         pane_id: u64,
         text: String,
@@ -724,6 +770,13 @@ pub enum RuntimeCommand {
         wait: bool,
         timeout_ms: u64,
     },
+    Exec {
+        window_id: Option<u64>,
+        pane_id: u64,
+        argv: Vec<String>,
+        timeout_ms: u64,
+        max_output_bytes: usize,
+    },
     AgentStart {
         window_id: Option<u64>,
         pane_id: Option<u64>,
@@ -748,6 +801,12 @@ pub enum RuntimeCommand {
         allow_dirty_source: bool,
     },
     AgentPrompt {
+        agent: String,
+        generation: Option<u64>,
+        text: String,
+        submit: bool,
+    },
+    AgentPaste {
         agent: String,
         generation: Option<u64>,
         text: String,
@@ -1768,17 +1827,27 @@ fn runtime_description() -> Value {
             "agent.fork",
             "agent.get",
             "agent.prompt",
+            "agent.paste",
             "agent.read",
             "agent.wait",
             "window.create",
+            "window.close",
             "window.focus",
             "tab.new",
+            "tab.close",
+            "tab.rename",
+            "tab.move",
             "pane.split",
+            "pane.close",
+            "pane.zoom",
+            "pane.resize",
             "pane.prompt",
+            "pane.paste",
             "pane.read",
             "pane.procs",
             "pane.send_key",
             "pane.run",
+            "pane.exec",
             "pane.wait"
         ],
         // Additive params cannot be detected from `capabilities`: an older
@@ -1793,7 +1862,33 @@ fn runtime_description() -> Value {
             "events.pane_lifecycle"
             ,"runtime.orchestrate.typed_steps"
             ,"runtime.orchestrate.agent_ready"
-        ]
+            ,"env.pane_identity"
+            ,"cli.resource_verbs"
+            ,"cli.paste_sources"
+            ,"layout.typed_mutations"
+            ,"pane.exec.non_tty"
+        ],
+        // 环境契约：pane 里的进程靠这些变量发现自己和控制面，不必扫进程或猜
+        // 端口。写进 describe 是为了让外部客户端能**探测**契约而不是硬编码变量
+        // 名——旧版本没有这一段，客户端据此回落到 `nebula ctl` 即可。
+        // 实现见 `crate::agent_env`。
+        "env": {
+            "term_program": crate::agent_env::TERM_PROGRAM,
+            "pane": crate::agent_env::PANE_ENV,
+            "cli": crate::agent_env::CLI_ENV,
+            "bin_dir": crate::agent_env::BIN_DIR_ENV,
+            // 远端 pane 只带身份、不带控制面路径：那台机器上没有这个二进制。
+            "remote_marker": "NEBULA_PANE_REMOTE",
+            "bin_dir_on_path": true
+        },
+        // 资源 + 动词命令是同一批能力的易发现入口，语义与 `capabilities` 完全一致。
+        "commands": {
+            "env": ["env"],
+            "window": ["close"],
+            "tab": ["close", "rename", "move"],
+            "pane": ["list", "read", "send", "paste", "wait", "exec", "close", "zoom", "resize"],
+            "agent": ["list", "send", "paste", "read", "wait"]
+        }
     })
 }
 
@@ -1996,10 +2091,25 @@ fn dispatch_connection(
                 text.len()
             );
         },
+        RuntimeCommand::AgentPaste { agent, generation, text, submit } => {
+            info!(
+                "runtime agent.paste request_id={} agent={} generation={generation:?} submit={submit} paste_bytes={}",
+                request.id,
+                agent,
+                text.len()
+            );
+        },
         RuntimeCommand::AgentRead { agent, generation, lines } => {
             info!(
                 "runtime agent.read request_id={} agent={} generation={generation:?} lines={lines}",
                 request.id, agent
+            );
+        },
+        RuntimeCommand::Exec { window_id, pane_id, argv, timeout_ms, max_output_bytes } => {
+            info!(
+                "runtime pane.exec request_id={} window_id={window_id:?} pane_id={pane_id} argv_len={} timeout_ms={timeout_ms} max_output_bytes={max_output_bytes}",
+                request.id,
+                argv.len()
             );
         },
         _ => {},
@@ -2025,6 +2135,12 @@ fn dispatch_runtime_command(
         },
         _ => None,
     };
+    let dispatch_timeout = match &command {
+        RuntimeCommand::Exec { timeout_ms, .. } => {
+            Duration::from_millis(*timeout_ms).saturating_add(Duration::from_secs(2))
+        },
+        _ => COMMAND_TIMEOUT,
+    };
     let (dispatch, receiver) = RuntimeDispatch::new(command);
     if !sink.emit_control(dispatch) {
         return Err(agent_api::rollback_prepared_worktree(
@@ -2032,7 +2148,7 @@ fn dispatch_runtime_command(
             worktree_transaction.take(),
         ));
     }
-    match receiver.recv_timeout(COMMAND_TIMEOUT) {
+    match receiver.recv_timeout(dispatch_timeout) {
         Ok(Ok(mut result)) => {
             if let Some(transaction) = worktree_transaction.take() {
                 let provenance = transaction.commit();
@@ -2047,8 +2163,7 @@ fn dispatch_runtime_command(
                 );
                 match target {
                     (Some(window_id), Some(pane_id), Some(run_id)) => {
-                        let run =
-                            wait_run_phased(hub, sink, window_id, pane_id, run_id, timeout)?;
+                        let run = wait_run_phased(hub, sink, window_id, pane_id, run_id, timeout)?;
                         Ok(json!({ "run": run, "snapshot": hub.current() }))
                     },
                     _ => Err(ApiError::new(

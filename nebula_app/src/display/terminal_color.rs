@@ -23,7 +23,7 @@ struct ColorPairKey {
 /// The terminal grid keeps the exact PTY colors. Only the draw-time result is
 /// cached, so changing the theme immediately recolors existing scrollback.
 #[derive(Default)]
-pub(super) struct TerminalColorResolver {
+pub(crate) struct TerminalColorResolver {
     cache: HashMap<ColorPairKey, Rgb>,
     surface_remaps: Vec<SurfaceRemap>,
 }
@@ -35,7 +35,7 @@ struct SurfaceRemap {
 }
 
 impl TerminalColorResolver {
-    pub(super) fn resolve_background(&self, background: Rgb, fixed_background: bool) -> Rgb {
+    pub(crate) fn resolve_background(&self, background: Rgb, fixed_background: bool) -> Rgb {
         if !fixed_background {
             return background;
         }
@@ -50,7 +50,7 @@ impl TerminalColorResolver {
             .map_or(background, |(_, resolved)| resolved)
     }
 
-    pub(super) fn resolve_foreground(
+    pub(crate) fn resolve_foreground(
         &mut self,
         foreground: Rgb,
         background: Rgb,
@@ -88,7 +88,7 @@ impl TerminalColorResolver {
         resolved
     }
 
-    pub(super) fn theme_changed(&mut self, old_background: Rgb, new_background: Rgb) {
+    pub(crate) fn theme_changed(&mut self, old_background: Rgb, new_background: Rgb) {
         self.cache.clear();
         for remap in &mut self.surface_remaps {
             remap.target = new_background;
@@ -138,7 +138,7 @@ fn is_light(color: Rgb) -> bool {
     luminance >= 128_000
 }
 
-pub(super) fn is_fixed_color(color: Color, overrides: &Colors) -> bool {
+pub(crate) fn is_fixed_color(color: Color, overrides: &Colors) -> bool {
     match color {
         Color::Spec(_) => true,
         Color::Named(name) => overrides[name].is_some(),

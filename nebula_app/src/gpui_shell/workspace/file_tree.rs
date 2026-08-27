@@ -1,5 +1,9 @@
 //! 侧栏文件树渲染（从 workspace.rs 拆出以守行数预算）。
+//!
+//! 几何与密度以旧 OpenGL 壳的 `display::side_panel::panel_layout`
+//! （side_panel.rs:1695）和它的行水洗（同文件 2712-2800）为基准，不自创数字。
 
+use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder as _;
@@ -7,13 +11,24 @@ use gpui::{
     Anchor, AppContext as _, ClipboardItem, Context, DismissEvent, Entity, Focusable as _,
     InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _,
     Pixels, Point, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, anchored, deferred, div, px,
+    Window, anchored, deferred, div, px, uniform_list,
 };
 use gpui_component::menu::PopupMenuItem;
 
 use crate::gpui_shell::prelude::*;
 
 use super::NebulaWorkspace;
+
+/// 行距（旧壳 `PanelLayout::row_h`）。
+const ROW_PITCH: f32 = 34.0;
+/// 行水洗高度（旧壳 `row_h - 4`）。行与行之间那条缝来自水洗比行距矮，
+/// **不是** flex gap——用 gap 会把每行推成一颗独立药丸，连续列表的读感就散了。
+const ROW_WASH_H: f32 = 30.0;
+/// 水洗相对抽屉内缘的额外内缩：旧壳的水洗从面板边缘缩 10px，而抽屉自身的
+/// `p_2` 已经占掉 8px。
+const ROW_WASH_INSET: f32 = 2.0;
+/// 抽屉内容左右留白（旧壳 `px + 12`：比水洗再多 2px）。
+const DRAWER_TEXT_INSET: f32 = 4.0;
 
 /// 文件树右键菜单的宿主：必须挂在 workspace 根上，不能当抽屉行的 child。
 ///
@@ -42,66 +57,72 @@ pub(super) fn wsl_terminal_launch_at(
 }
 
 impl NebulaWorkspace {
-    pub(super) fn render_file_tree(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let view_switch = self.render_side_panel_switch(cx).into_any_element();
+    /// 单行：34px 行距里画一张 30px 高的水洗（旧壳 side_panel.rs:2712-2800）。
+    fn render_file_tree_row(&self, visible_ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
+        let Some(row) = self.side_panel.file_rows().get(visible_ix).cloned() else {
+            return div().h(px(ROW_PITCH)).into_any_element();
+        };
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let hover = theme.list_hover;
-        let selected_bg = theme.list_active;
+        // 选中行穿「浮动药丸」那套语言（accent_soft），与左侧栏活动 tab、抽屉
+        // 页签同源——旧壳 side_panel.rs:2766 明确写了这一点。`list_active` 是
+        // 中性的 hover_strong，穿上去只像"悬停重了一点"，选中读不出来。
+        let selected_bg = theme.tab_active;
+        let selected_ring = theme.ring.opacity(0.16);
         // 文件树字位是内置 Nerd Font 图标；固定 Maple，不能让终端主字体
         // 改变折叠箭头和文件图标的 advance。
         let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
-        let selected_path = self.side_panel.selected.clone();
-        let scroll = self.side_panel.scroll;
-        let root = self
-            .side_panel
-            .root()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "等待终端上报工作目录…".to_owned());
-        let rows: Vec<_> = self.side_panel.file_rows().iter().skip(scroll).cloned().collect();
-        let rows_empty = rows.is_empty();
-        let snapshot_pending = self.side_panel.snapshot_pending();
-        let enumeration_failed = self.side_panel.enumeration_failed();
+        let selected = self.side_panel.selected.as_ref() == Some(&row.path);
+        let path = row.path.clone();
+        let open_path = path.clone();
+        let open_guest_path = row.guest_path.clone();
+        let menu_path = path.clone();
+        let guest_path = row.guest_path.clone();
+        let menu_guest_path = guest_path.clone();
+        let drag_guest_path = guest_path.clone();
+        let drag_path = path.clone();
+        let drag_name = row.name.clone();
+        let is_dir = row.is_dir;
+        let is_parent = row.is_parent;
+        let fg = if row.ignored { muted } else { theme.foreground };
+        let _chevron = if row.is_dir && !row.is_parent {
+            if row.expanded { "⌄" } else { "›" }
+        } else {
+            ""
+        };
+        let file_glyph =
+            (!row.is_dir).then(|| crate::display::side_panel::file_type_icon(&row.name));
+        let legacy_chevron = row
+            .is_dir
+            .then(|| {
+                (!row.is_parent).then(|| crate::display::side_panel::chevron_icon(row.expanded))
+            })
+            .flatten();
 
-        let row_elements = rows.into_iter().enumerate().map(|(visible_ix, row)| {
-            let path = row.path.clone();
-            let open_path = path.clone();
-            let open_guest_path = row.guest_path.clone();
-            let menu_path = path.clone();
-            let guest_path = row.guest_path.clone();
-            let menu_guest_path = guest_path.clone();
-            let drag_guest_path = guest_path.clone();
-            let drag_path = path.clone();
-            let drag_name = row.name.clone();
-            let is_dir = row.is_dir;
-            let is_parent = row.is_parent;
-            let selected = selected_path.as_ref() == Some(&path);
-            let fg = if row.ignored { muted } else { theme.foreground };
-            let _chevron = if row.is_dir && !row.is_parent {
-                if row.expanded { "⌄" } else { "›" }
-            } else {
-                ""
-            };
-            let file_glyph =
-                (!row.is_dir).then(|| crate::display::side_panel::file_type_icon(&row.name));
-            let legacy_chevron = row
-                .is_dir
-                .then(|| {
-                    (!row.is_parent).then(|| crate::display::side_panel::chevron_icon(row.expanded))
-                })
-                .flatten();
-
-            h_flex()
+        // 外层只占行距（34px），内层那张 30px 的水洗由它垂直居中——旧壳
+        // 就是这么分的：行距决定密度，水洗决定"被点中的那块"有多大。
+        h_flex()
+            .h(px(ROW_PITCH))
+            .w_full()
+            .px(px(ROW_WASH_INSET))
+            .child(
+                h_flex()
                 .id(SharedString::from(format!("file-tree-row-{visible_ix}")))
-                .h(px(30.0))
-                .w_full()
+                .h(px(ROW_WASH_H))
+                .flex_1()
+                .min_w_0()
                 .items_center()
                 .pr_2()
                 .pl(px(8.0 + row.depth as f32 * 16.0))
                 .gap_1()
-                .rounded_md()
+                .rounded(px(crate::display::UI_CORNER_RADIUS_LOGICAL))
+                // 每行都带 1px 边（未选中时透明）：只在选中时加边会让行内文字
+                // 横跳 1px。
+                .border_1()
+                .border_color(gpui::transparent_black())
                 .text_color(fg)
-                .when(selected, |item| item.bg(selected_bg))
+                .when(selected, |item| item.bg(selected_bg).border_color(selected_ring))
                 .hover(|item| item.bg(hover))
                 .child(
                     div()
@@ -198,20 +219,41 @@ impl NebulaWorkspace {
                             );
                         }),
                     )
-                })
-        });
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// 抽屉。贴满右侧整条竖带，四边不留卡缝（用户 08-26 裁定"无缝"）；行几何
+    /// 仍以旧壳 `panel_layout`（side_panel.rs:1695-1729）为基准。
+    pub(super) fn render_file_tree(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // 滚动只由 uniform_list 承担。旧壳那套行粒度 `scroll` 不再参与，否则
+        // `click_row` 的 `scroll + index` 会把点击算到别的行上。
+        self.side_panel.scroll = 0;
+        let view_switch = self.render_side_panel_switch(cx).into_any_element();
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let root_dir = self.side_panel.root().map(std::path::Path::to_path_buf);
+        let root = root_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "等待终端上报工作目录…".to_owned());
+        let row_count = self.side_panel.file_rows().len();
+        let empty = self.file_tree_empty_state();
+        let scroll_handle = self.file_tree_scroll.clone();
 
         v_flex()
             .h_full()
             .w(px(320.0))
             .flex_shrink_0()
-            .my_2()
-            .mr_2()
             .p_2()
             .gap_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
+            // 抽屉圆角只给左侧两角（用户 08-26 裁定「最右侧去掉圆角，左侧保留」）：
+            // 右缘贴住窗口边框，倒角只会在那里啃出两个壳色缺口；左缘隔着终端卡的
+            // 8px 卡缝、下缘隔着槽位的 8px，圆角落在壳色上才有浮板感。左侧也不画
+            // 发丝线——有卡缝就不需要线分界，只留一条线反而像把面板压在终端上。
+            .rounded_tl(crate::gpui_shell::theme::card_radius(cx))
+            .rounded_bl(crate::gpui_shell::theme::card_radius(cx))
             .bg(theme.popover)
             // 抽屉在窗口右侧；右键菜单常翻到左缘。Tailwind `shadow_lg`
             //（10px 下偏移 + 15px 模糊，再加一层）会垫在菜单周围，比 Tab
@@ -223,6 +265,7 @@ impl NebulaWorkspace {
             .child(
                 h_flex()
                     .h(px(30.0))
+                    .px(px(DRAWER_TEXT_INSET))
                     .items_center()
                     .gap_1()
                     .child(
@@ -236,11 +279,68 @@ impl NebulaWorkspace {
                             .child(root),
                     )
                     .child(
+                        Button::new("file-tree-terminal-here")
+                            .icon(IconName::SquareTerminal)
+                            .ghost()
+                            .xsmall()
+                            .disabled(root_dir.is_none())
+                            .tooltip("在此新建终端")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                // WSL 树根要开的是**来宾**终端：宿主那份拼写只是
+                                // 展开用的键，在来宾的 shell 里不存在。
+                                let wsl = this
+                                    .side_panel
+                                    .file_wsl_root()
+                                    .map(|root| (root.distro.clone(), root.guest.clone()));
+                                match wsl {
+                                    Some((distro, guest)) => {
+                                        this.add_wsl_terminal_at(distro, guest, window, cx)
+                                    },
+                                    None => {
+                                        let Some(dir) = this.side_panel.root().map(Into::into) else {
+                                            return;
+                                        };
+                                        this.add_terminal_at(Some(dir), None, window, cx);
+                                    },
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("file-tree-reveal")
+                            .icon(IconName::FolderOpen)
+                            .ghost()
+                            .xsmall()
+                            .disabled(root_dir.is_none())
+                            .tooltip("在资源管理器中打开")
+                            .on_click(cx.listener(|this, _, _, _cx| {
+                                let wsl = this
+                                    .side_panel
+                                    .file_wsl_root()
+                                    .map(|root| (root.distro.clone(), root.guest.clone()));
+                                let path = match wsl {
+                                    Some((distro, guest)) => {
+                                        crate::shell_detect::wsl_unc_path(&distro, &guest)
+                                    },
+                                    None => match this.side_panel.root() {
+                                        Some(root) => root.to_path_buf(),
+                                        None => return,
+                                    },
+                                };
+                                // 这颗钮是「打开这个目录」，不是「在父目录里选中它」。
+                                // 之前走 reveal（`explorer /select,<root>`）＝让资源
+                                // 管理器打开**父目录**并高亮该项：只要父目录的窗口已经
+                                // 开着（实测 `D:\` 常驻），explorer 就复用那个后台窗口
+                                // 重设选中项、既不新开也不前置，点击看上去毫无反应。
+                                // 行级右键的「在资源管理器中显示」才该用 reveal。
+                                super::open_in_file_manager(&path);
+                            })),
+                    )
+                    .child(
                         Button::new("file-tree-refresh")
                             .icon(IconName::Redo2)
                             .ghost()
                             .xsmall()
-                            .tooltip("刷新目录树")
+                            .tooltip("跟随当前终端并刷新 (Alt+R)")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.side_panel.request_refresh();
                                 // 刷新同时恢复“跟随当前 pane”；否则点过 `..` 后
@@ -264,38 +364,104 @@ impl NebulaWorkspace {
                 panel.child(div().text_xs().text_color(theme.warning).child(notice.to_owned()))
             })
             .child(
-                v_flex()
+                // 一套滚动模型。此前是 `file_rows().skip(scroll)` 先砍掉上面的行、
+                // 再套 `overflow_y_scrollbar` 滚剩下的，两套模型打架：滚动条滑块
+                // 按剩余行算长度，滚轮又同时动两边。改成 uniform_list 虚拟化
+                // ——它自己就是滚动容器，滑块交给组件库 Scrollbar 读同一个 handle。
+                div()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
+                    .relative()
+                    // 必须裁：`uniform_list` 会把行画到自己的 bounds 之外，没有这层
+                    // 末行就压过抽屉的下内边距、一直画到抽屉底边，把 8px 留白和下两
+                    // 角的圆角都盖掉（用户报的"圆角没了"）。右键菜单走 deferred 顶层
+                    // 绘制，不受这里的裁剪影响。
+                    .overflow_hidden()
                     .child(
-                        v_flex()
-                            .w_full()
-                            .gap_1()
-                            .children(row_elements)
-                            .when(rows_empty, |list| {
-                                list.child(
-                                    div()
-                                        .w_full()
-                                        .py_4()
-                                        .px_2()
-                                        .text_center()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(if snapshot_pending {
-                                            "正在读取目录…"
-                                        } else if enumeration_failed {
-                                            // 读不到 ≠ 目录是空的。WSL 冷启动可能
-                                            // 耗尽预算，那时必须给可重试的提示。
-                                            "读取目录失败，点上方刷新重试"
-                                        } else {
-                                            "此目录为空"
-                                        }),
-                                )
+                        uniform_list(
+                            "file-tree-rows",
+                            row_count,
+                            cx.processor(|this, range: Range<usize>, _window, cx| {
+                                range.map(|ix| this.render_file_tree_row(ix, cx)).collect()
                             }),
-                    ),
+                        )
+                        .w_full()
+                        .flex_grow_1()
+                        // 空态时让列表收缩到内容高度（通常只剩 `..` 一行），空态
+                        // 文案接在它下面——旧壳也是把文案画在 `..` 行之后。
+                        .when(empty.is_some(), |list| {
+                            list.with_sizing_behavior(gpui::ListSizingBehavior::Infer)
+                        })
+                        .when(empty.is_none(), |list| {
+                            list.size_full()
+                                .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+                        })
+                        .track_scroll(&scroll_handle),
+                    )
+                    // 滑块住在一个显式绝对定位的宿主里，和组件库自己的 Table 同构
+                    // （table/state.rs:2182）：直接当普通 child 塞进来它会参与常规
+                    // 布局、排在列表下面占掉一条高度，而不是浮在列表右缘。
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            // 组件库的 `Scrollbar::width()` 是 crate 私有的，值为
+                            // 轨道 8px + 两侧 4px 内缩（scroll/scrollbar.rs:17）。
+                            .w(px(16.0))
+                            .child(gpui_component::scroll::Scrollbar::vertical(&scroll_handle)),
+                    )
+                    .when_some(empty, |list, empty| {
+                        list.child(
+                            v_flex()
+                                .w_full()
+                                .px(px(DRAWER_TEXT_INSET + ROW_WASH_INSET))
+                                .py_2()
+                                .gap_1()
+                                .child(div().text_xs().text_color(theme.foreground).child(empty.title))
+                                .child(div().text_xs().text_color(muted).child(empty.reason))
+                                .child(div().text_xs().text_color(muted).child(empty.action)),
+                        )
+                    }),
             )
             .into_any_element()
+    }
+
+    /// 空态三段（标题 + 原因 + 可执行动作），文案与旧壳
+    /// side_panel.rs:3112-3131 同源。判据也照旧壳：`..` 不算内容，只剩它时这个
+    /// 目录仍然是空的；"读不到"和"确实是空的"必须分开说，否则用户没法判断该
+    /// 重试还是该换目录。
+    fn file_tree_empty_state(&self) -> Option<crate::ux::EmptyState> {
+        if self.side_panel.file_rows().iter().any(|row| !row.is_parent) {
+            return None;
+        }
+        Some(if self.side_panel.snapshot_pending() {
+            crate::ux::EmptyState::new(
+                "正在读取目录",
+                "还在枚举当前工作目录的内容。",
+                "稍等一下，或点右上角重新跟随。",
+            )
+        } else if self.side_panel.enumeration_failed() {
+            // 读不到 ≠ 目录是空的。WSL 冷启动可能耗尽预算，那时必须给可重试的提示。
+            crate::ux::EmptyState::new(
+                "读取目录失败",
+                "枚举这个目录时被系统拒绝，或超出了单次预算。",
+                "点右上角重新跟随重试，或换一个目录。",
+            )
+        } else if self.side_panel.root().is_none() {
+            crate::ux::EmptyState::new(
+                "没有可浏览的目录",
+                "当前终端尚未报告工作目录。",
+                "在终端中进入一个目录后点击右上角跟随。",
+            )
+        } else {
+            crate::ux::EmptyState::new(
+                "此目录为空",
+                "当前工作目录中没有可显示的文件。",
+                "在终端创建文件，或选择其他目录。",
+            )
+        })
     }
 
     fn open_file_tree_context_menu(

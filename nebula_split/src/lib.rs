@@ -225,6 +225,44 @@ impl<T: Copy + Eq> SplitTree<T> {
         Some(node)
     }
 
+    /// 设置 `target` 在直接父 Split 中占用的比例。
+    ///
+    /// 树内 ratio 永远描述第一个孩子，而 Runtime 的 pane.resize 描述目标
+    /// pane；目标在第二侧时必须写成 `1 - target_ratio`。递归到最近父节点再
+    /// 修改，避免嵌套 pane 的 resize 错改祖先 Split。
+    pub fn set_leaf_parent_ratio(&mut self, target: T, target_ratio: f32) -> bool {
+        let SplitTree::Split {
+            ratio,
+            preview_ratio,
+            dragging,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return false;
+        };
+
+        if matches!(first.as_ref(), SplitTree::Leaf(id) if *id == target) {
+            *ratio = target_ratio;
+            *preview_ratio = None;
+            *dragging = false;
+            return true;
+        }
+        if matches!(second.as_ref(), SplitTree::Leaf(id) if *id == target) {
+            *ratio = 1.0 - target_ratio;
+            *preview_ratio = None;
+            *dragging = false;
+            return true;
+        }
+
+        if first.contains(target) {
+            first.set_leaf_parent_ratio(target, target_ratio)
+        } else {
+            second.set_leaf_parent_ratio(target, target_ratio)
+        }
+    }
+
     /// 把树铺陈进 `viewport`：每个叶子得到自己的矩形，每个 Split 产出一条
     /// 分隔条。`use_preview` 时 Split 使用拖拽预览比例（分隔条随指针走），
     /// 否则使用提交比例（pane 内容保持稳定）。
@@ -616,5 +654,21 @@ mod tests {
         assert!(matches!(tree.node_mut(&[true]), Some(SplitTree::Split { .. })));
         assert!(matches!(tree.node_mut(&[true, false]), Some(SplitTree::Leaf(2))));
         assert!(tree.node_mut(&[false, false]).is_none());
+    }
+
+    #[test]
+    fn leaf_parent_ratio_is_local_and_target_relative() {
+        let mut tree = lr(0.5, SplitTree::Leaf(1), tb(0.5, SplitTree::Leaf(2), SplitTree::Leaf(3)));
+
+        assert!(tree.set_leaf_parent_ratio(3, 0.25));
+        let SplitTree::Split { ratio: root_ratio, second, .. } = &tree else {
+            panic!("root is split");
+        };
+        assert_eq!(*root_ratio, 0.5, "nested resize must not change its ancestor");
+        let SplitTree::Split { ratio, .. } = second.as_ref() else {
+            panic!("nested node is split");
+        };
+        assert_eq!(*ratio, 0.75, "second-child share is stored as one minus ratio");
+        assert!(!tree.set_leaf_parent_ratio(99, 0.4));
     }
 }

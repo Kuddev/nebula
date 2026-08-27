@@ -8,7 +8,11 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### English
 
+#### Added
+- **The terminal card's geometry is now one configurable group — corner radius, gutter, shadow, and the divider between the tab sidebar and the terminal — and it travels with the theme.** "A rounded card floating on the shell" and "the terminal filling the entire right-hand area, separated by a single hairline" are no longer two layouts or two code paths; they are two sets of values on one path. `Nord` is the first theme to take the second form: radius and gutter both drop to zero and a 1px divider carries the structural boundary, because once the gutter is gone the sidebar and the terminal read as one undivided slab. Every other theme keeps the floating card and deliberately draws *no* divider — with a gutter present, a line would be a second boundary saying the same thing. Explicit `pane_card_radius` / `pane_card_gutter` / `pane_card_shadow` / `pane_card_divider` keys in `nebula_settings.txt` override whatever the theme asks for, so switching themes changes the shape while anyone who has tuned it keeps control. The radius default also became a single source of truth: the old shell's `UI_SHELL_RADIUS_LOGICAL` and the new shell's card now reference the same constant instead of each carrying its own literal — two copies of one number is exactly what produced the white seam around the card.
+
 #### Fixed
+- **Output no longer stops mid-frame with the CLI's input box missing.** The 1.2.0 fix for the lost `piper` wakeup only closed half the race. It re-posted the readable event when the pipe still held bytes *at the moment the read returned* — but `drain_inner` takes the read waker **before** it copies any data, so "this read got something" already means "no waker is registered", regardless of whether the pipe happens to look empty now. An AI CLI's trailing bytes land in exactly that window: a screenful of diff pushes `pty_read` past its 64 KB `MAX_LOCKED_READ` break just as the pipe drains, and the few hundred bytes of input box and status bar printed right after find an empty waker, so their `wake()` is a no-op. Those bytes then sit in the pipe until a keystroke (which flips write interest, re-registers, and re-posts) or a resize (which force-drains) lets them out; dragging a tab does neither and never recovered. Live evidence from a stuck pane: one no-op arrow key released 527 stranded lines at once. The repost now keys only on "this read got data", which is self-converging — the following read finds the pipe empty and piper registers the waker again.
 - **Common formulas such as `$E=mc^2$` and `$n!$` are recognized without reinterpreting shell variables, prompts, prices, or `sed`/`grep` BRE groups as mathematics.** Inline delimiters may cross terminal soft wraps but no longer join unrelated hard lines.
 - **Resetting a settings drop-down immediately restores its displayed default value** instead of updating the saved setting while leaving the old selection visible.
 - **Rounded terminal panes no longer expose an outline or a gap along their top edge** in either light or dark themes; the shell paint now follows the pane's actual left, right, bottom, and zero-width top gutters.
@@ -18,7 +22,11 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### 简体中文
 
+#### 新增
+- **终端卡的几何收成了一组可配的键——圆角、卡缝、投影，以及左侧 Tab 栏与终端之间的竖线——并且跟随主题走。** 「浮在壳上的圆角卡」与「终端铺满整个右侧区域、靠一条细线分界」不再是两套布局、也不是两条渲染路径，而是同一条路径上的两组取值。`Nord` 是第一个采用后者的主题：圆角与卡缝双双归零，由一条 1px 竖线承担结构分界——卡缝一旦消失，侧栏与终端就会糊成一整块。其余主题保持浮起的卡片，并且刻意**不画**竖线：已经有卡缝了，再加一条线是在重复同一件事。`nebula_settings.txt` 里的 `pane_card_radius` / `pane_card_gutter` / `pane_card_shadow` / `pane_card_divider` 会覆盖主题的要求，于是切主题能换形态，而手调过的人不会被主题夺回控制权。圆角默认值同时收敛为单一真源：旧壳的 `UI_SHELL_RADIUS_LOGICAL` 与新壳的卡现在引用同一个常量，不再各自持有一份字面量——同一个数字存两份，正是那圈白边的来源。
+
 #### 修复
+- **输出不再停在半帧、缺 CLI 输入框。** 1.2.0 那次修 `piper` 丢唤醒只补了一半：它在「读取返回的那一刻管道仍有货」时补投 readable，但 `drain_inner` 是**在拷贝数据之前**就摘掉 read waker 的——因此「这次读到过数据」本身就意味着此刻没有 waker，与管道当下看起来空不空无关。AI CLI 的收尾字节恰好落在这个窗口里：先打完一屏 diff 把 `pty_read` 顶过 64 KB 的 `MAX_LOCKED_READ` 提前 break、管道刚好排空，紧随其后那几百字节的输入框与状态栏就撞上空 waker，它们的 `wake()` 成了空操作。这批字节于是滞留在管道里，直到一次按键（翻转写意图、触发 reregister 并补投）或一次 resize（走强制排空）才被放出来；而拖动标签两者都不做，所以永远不会自行恢复。卡住 pane 的活体取证：一个 no-op 方向键一次性放出了 527 行滞留输出。现在补投只以「这次读到过数据」为判据，并且自收敛——紧接着的那次读取会遇到空管道，piper 借此重新注册 waker。
 - **`$E=mc^2$`、`$n!$` 等常见公式可以被正确识别，同时不会把 shell 变量、提示符、价格或 `sed`/`grep` 的 BRE 分组误当成数学公式。** 行内定界符可以跨终端软换行，但不会再连接互不相关的真实换行。
 - **还原设置下拉框后会立即显示默认选项**，不再出现设置值已经写回、界面却仍停留在旧选项的情况。
 - **浅色与深色主题下，圆角终端 pane 四周不再露出线框或顶部缝隙**；壳层绘制现在严格采用 pane 真实的左、右、下卡缝以及零宽度上卡缝。

@@ -23,6 +23,39 @@ struct WindowParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WindowTargetParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TabTargetParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    tab_index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameTabParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    tab_index: usize,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveTabParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    tab_index: usize,
+    to_index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SplitParams {
     #[serde(default)]
     window_id: Option<u64>,
@@ -34,6 +67,17 @@ struct SplitParams {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PromptParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    pane_id: u64,
+    text: String,
+    #[serde(default = "default_true")]
+    submit: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasteParams {
     #[serde(default)]
     window_id: Option<u64>,
     pane_id: u64,
@@ -62,6 +106,24 @@ struct PaneParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ZoomPaneParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    pane_id: u64,
+    zoomed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResizePaneParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    pane_id: u64,
+    ratio: f32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendKeyParams {
     #[serde(default)]
     window_id: Option<u64>,
@@ -84,6 +146,19 @@ struct RunParams {
     wait: bool,
     #[serde(default = "default_run_timeout_ms")]
     timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecParams {
+    #[serde(default)]
+    window_id: Option<u64>,
+    pane_id: u64,
+    argv: Vec<String>,
+    #[serde(default = "default_run_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default = "default_exec_output_bytes")]
+    max_output_bytes: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +212,10 @@ fn default_run_timeout_ms() -> u64 {
     COMMAND_TIMEOUT.as_millis() as u64
 }
 
+fn default_exec_output_bytes() -> usize {
+    DEFAULT_EXEC_OUTPUT_BYTES
+}
+
 impl RuntimeCommand {
     pub(super) fn from_request(request: &ApiRequest) -> Result<Self, ApiError> {
         match request.method.as_str() {
@@ -144,6 +223,10 @@ impl RuntimeCommand {
             "window.create" => {
                 let params: WindowParams = parse_params(&request.params)?;
                 Ok(Self::NewWindow { cwd: params.cwd })
+            },
+            "window.close" => {
+                let params: WindowTargetParams = parse_params(&request.params)?;
+                Ok(Self::CloseWindow { window_id: params.window_id })
             },
             "window.focus" => {
                 let params: TargetParams = parse_params(&request.params)?;
@@ -153,6 +236,30 @@ impl RuntimeCommand {
                 let params: WindowParams = parse_params(&request.params)?;
                 Ok(Self::NewTab { window_id: params.window_id, cwd: params.cwd })
             },
+            "tab.close" => {
+                let params: TabTargetParams = parse_params(&request.params)?;
+                Ok(Self::CloseTab {
+                    window_id: params.window_id,
+                    tab_index: params.tab_index,
+                })
+            },
+            "tab.rename" => {
+                let params: RenameTabParams = parse_params(&request.params)?;
+                validate_tab_name(&params.name)?;
+                Ok(Self::RenameTab {
+                    window_id: params.window_id,
+                    tab_index: params.tab_index,
+                    name: params.name,
+                })
+            },
+            "tab.move" => {
+                let params: MoveTabParams = parse_params(&request.params)?;
+                Ok(Self::MoveTab {
+                    window_id: params.window_id,
+                    tab_index: params.tab_index,
+                    to_index: params.to_index,
+                })
+            },
             "pane.split" => {
                 let params: SplitParams = parse_params(&request.params)?;
                 Ok(Self::Split {
@@ -161,10 +268,47 @@ impl RuntimeCommand {
                     direction: params.direction,
                 })
             },
+            "pane.close" => {
+                let params: PaneParams = parse_params(&request.params)?;
+                Ok(Self::ClosePane { window_id: params.window_id, pane_id: params.pane_id })
+            },
+            "pane.zoom" => {
+                let params: ZoomPaneParams = parse_params(&request.params)?;
+                Ok(Self::ZoomPane {
+                    window_id: params.window_id,
+                    pane_id: params.pane_id,
+                    zoomed: params.zoomed,
+                })
+            },
+            "pane.resize" => {
+                let params: ResizePaneParams = parse_params(&request.params)?;
+                if !params.ratio.is_finite()
+                    || !(MIN_PANE_RATIO..=MAX_PANE_RATIO).contains(&params.ratio)
+                {
+                    return Err(ApiError::invalid_params(format!(
+                        "ratio must be between {MIN_PANE_RATIO} and {MAX_PANE_RATIO}"
+                    )));
+                }
+                Ok(Self::ResizePane {
+                    window_id: params.window_id,
+                    pane_id: params.pane_id,
+                    ratio: params.ratio,
+                })
+            },
             "pane.prompt" => {
                 let params: PromptParams = parse_params(&request.params)?;
                 validate_prompt(&params.text)?;
                 Ok(Self::Prompt {
+                    window_id: params.window_id,
+                    pane_id: params.pane_id,
+                    text: params.text,
+                    submit: params.submit,
+                })
+            },
+            "pane.paste" => {
+                let params: PasteParams = parse_params(&request.params)?;
+                validate_paste_text(&params.text)?;
+                Ok(Self::Paste {
                     window_id: params.window_id,
                     pane_id: params.pane_id,
                     text: params.text,
@@ -224,7 +368,28 @@ impl RuntimeCommand {
                     timeout_ms: params.timeout_ms,
                 })
             },
-            "agent.start" | "agent.fork" | "agent.prompt" | "agent.read" => {
+            "pane.exec" => {
+                let params: ExecParams = parse_params(&request.params)?;
+                validate_exec_argv(&params.argv)?;
+                if params.timeout_ms == 0 || Duration::from_millis(params.timeout_ms) > MAX_WAIT {
+                    return Err(ApiError::invalid_params(
+                        "timeout_ms must be between 1 and 86400000",
+                    ));
+                }
+                if !(1..=MAX_EXEC_OUTPUT_BYTES).contains(&params.max_output_bytes) {
+                    return Err(ApiError::invalid_params(format!(
+                        "max_output_bytes must be between 1 and {MAX_EXEC_OUTPUT_BYTES}"
+                    )));
+                }
+                Ok(Self::Exec {
+                    window_id: params.window_id,
+                    pane_id: params.pane_id,
+                    argv: params.argv,
+                    timeout_ms: params.timeout_ms,
+                    max_output_bytes: params.max_output_bytes,
+                })
+            },
+            "agent.start" | "agent.fork" | "agent.prompt" | "agent.paste" | "agent.read" => {
                 agent_api::command_from_request(request)
             },
             method => Err(ApiError::new(
@@ -339,6 +504,18 @@ pub(super) fn parse_params<T: DeserializeOwned>(value: &Value) -> Result<T, ApiE
         .map_err(|error| ApiError::invalid_params(format!("invalid method parameters: {error}")))
 }
 
+fn validate_tab_name(name: &str) -> Result<(), ApiError> {
+    if name.len() > MAX_TAB_NAME_BYTES {
+        return Err(ApiError::invalid_params(format!(
+            "tab name exceeds the {MAX_TAB_NAME_BYTES}-byte limit"
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ApiError::invalid_params("tab name contains control characters"));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_prompt(text: &str) -> Result<(), ApiError> {
     if text.is_empty() {
         return Err(ApiError::invalid_params("prompt text must not be empty"));
@@ -351,6 +528,35 @@ pub(crate) fn validate_prompt(text: &str) -> Result<(), ApiError> {
     if text.chars().any(char::is_control) {
         return Err(ApiError::invalid_params(
             "prompt text contains control characters; pane.prompt accepts one plain-text line",
+        ));
+    }
+    Ok(())
+}
+
+/// Send-to-Chat 需要保留引用块与评论的换行，但仍不能把 ESC/NUL 等终端控制
+/// 字符送进目标 pane。它不是公开的 `pane.prompt` 合同，不能借机放宽后者。
+pub(crate) fn validate_chat_message(text: &str) -> Result<(), ApiError> {
+    validate_multiline_text(text, "chat message")
+}
+
+/// Runtime paste preserves CR/LF/TAB as text inside a bracketed-paste block,
+/// while rejecting terminal control sequences and arbitrary byte injection.
+pub(crate) fn validate_paste_text(text: &str) -> Result<(), ApiError> {
+    validate_multiline_text(text, "paste text")
+}
+
+fn validate_multiline_text(text: &str, label: &str) -> Result<(), ApiError> {
+    if text.trim().is_empty() {
+        return Err(ApiError::invalid_params(format!("{label} must not be empty")));
+    }
+    if text.len() > MAX_PROMPT_BYTES {
+        return Err(ApiError::invalid_params(format!(
+            "{label} exceeds the {MAX_PROMPT_BYTES}-byte limit"
+        )));
+    }
+    if text.chars().any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t')) {
+        return Err(ApiError::invalid_params(
+            format!("{label} contains unsupported terminal control characters"),
         ));
     }
     Ok(())
@@ -369,6 +575,30 @@ pub(crate) fn validate_command_line(command: &str) -> Result<(), ApiError> {
         return Err(ApiError::invalid_params(
             "command contains control characters; pane.run accepts one plain-text shell line",
         ));
+    }
+    Ok(())
+}
+
+fn validate_exec_argv(argv: &[String]) -> Result<(), ApiError> {
+    if argv.is_empty() || argv[0].trim().is_empty() {
+        return Err(ApiError::invalid_params("argv must contain a non-empty program"));
+    }
+    if argv.len() > 256 {
+        return Err(ApiError::invalid_params("argv may contain at most 256 elements"));
+    }
+    let bytes = argv.iter().try_fold(0_usize, |total, arg| {
+        total.checked_add(arg.len()).and_then(|value| value.checked_add(1))
+    });
+    if bytes.is_none_or(|bytes| bytes > MAX_PROMPT_BYTES) {
+        return Err(ApiError::invalid_params(format!(
+            "argv exceeds the {MAX_PROMPT_BYTES}-byte limit"
+        )));
+    }
+    if argv.iter().any(|arg| arg.contains('\0')) {
+        return Err(ApiError::invalid_params("argv must not contain NUL bytes"));
+    }
+    if argv[0].chars().any(char::is_control) {
+        return Err(ApiError::invalid_params("argv program must not contain control characters"));
     }
     Ok(())
 }

@@ -68,6 +68,17 @@ struct AgentPromptParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AgentPasteParams {
+    agent: String,
+    #[serde(default)]
+    generation: Option<u64>,
+    text: String,
+    #[serde(default = "default_true")]
+    submit: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AgentReadParams {
     agent: String,
     #[serde(default)]
@@ -137,6 +148,17 @@ pub(super) fn command_from_request(request: &ApiRequest) -> Result<RuntimeComman
             validate_agent_selector(&params.agent)?;
             validate_prompt(&params.text)?;
             Ok(RuntimeCommand::AgentPrompt {
+                agent: params.agent,
+                generation: params.generation,
+                text: params.text,
+                submit: params.submit,
+            })
+        },
+        "agent.paste" => {
+            let params: AgentPasteParams = parse_params(&request.params)?;
+            validate_agent_selector(&params.agent)?;
+            validate_paste_text(&params.text)?;
+            Ok(RuntimeCommand::AgentPaste {
                 agent: params.agent,
                 generation: params.generation,
                 text: params.text,

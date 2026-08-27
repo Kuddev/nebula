@@ -534,7 +534,11 @@ fn truncate_tail(tail: &mut Value, budget: usize) {
         Value::String(slot) => {
             if truncated {
                 // 裸字符串没有地方挂元数据，就地说明比静默丢内容好。
-                *slot = format!("[truncated to last {} of {} bytes]\n{kept}", kept.len(), original.len());
+                *slot = format!(
+                    "[truncated to last {} of {} bytes]\n{kept}",
+                    kept.len(),
+                    original.len()
+                );
             } else {
                 *slot = kept;
             }
@@ -543,10 +547,7 @@ fn truncate_tail(tail: &mut Value, budget: usize) {
             object.insert("text".to_owned(), Value::String(kept.clone()));
             if truncated {
                 object.insert("truncated".to_owned(), Value::Bool(true));
-                object.insert(
-                    "original_bytes".to_owned(),
-                    Value::Number(original.len().into()),
-                );
+                object.insert("original_bytes".to_owned(), Value::Number(original.len().into()));
                 object.insert("returned_bytes".to_owned(), Value::Number(kept.len().into()));
             }
         },
@@ -666,12 +667,9 @@ fn execute_step(
                 Ok(StepOutcome::Complete(action))
             },
             // 等不到就把现场带回来：为什么没到达目标状态，只有屏幕说得清。
-            Err(error) => Err(attach_failure_evidence(
-                error,
-                sink,
-                hub,
-                lines.max(EVIDENCE_TAIL_LINES),
-            )),
+            Err(error) => {
+                Err(attach_failure_evidence(error, sink, hub, lines.max(EVIDENCE_TAIL_LINES)))
+            },
         };
     }
 
@@ -1088,9 +1086,7 @@ fn agent_not_ready(
 }
 
 fn agent_pane_hint(hub: &RuntimeHub, agent_id: &str, generation: u64) -> Option<(u64, u64)> {
-    hub.active_agent(agent_id, Some(generation))
-        .ok()
-        .map(|agent| (agent.window_id, agent.pane_id))
+    hub.active_agent(agent_id, Some(generation)).ok().map(|agent| (agent.window_id, agent.pane_id))
 }
 
 fn invalid_reference(step: &str, referenced: &str, message: &str) -> ApiError {

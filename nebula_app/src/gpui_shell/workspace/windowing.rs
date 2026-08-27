@@ -306,16 +306,26 @@ fn route_entry(command: &RuntimeCommand, cx: &mut App) -> Result<WindowEntry, Ap
         RuntimeCommand::Focus { window_id, pane_id }
         | RuntimeCommand::Split { window_id, pane_id, .. }
         | RuntimeCommand::AgentStart { window_id, pane_id, .. } => (*window_id, *pane_id),
-        RuntimeCommand::NewTab { window_id, .. } => (*window_id, None),
+        RuntimeCommand::NewTab { window_id, .. }
+        | RuntimeCommand::CloseWindow { window_id }
+        | RuntimeCommand::CloseTab { window_id, .. }
+        | RuntimeCommand::RenameTab { window_id, .. }
+        | RuntimeCommand::MoveTab { window_id, .. } => (*window_id, None),
         RuntimeCommand::Prompt { window_id, pane_id, .. }
+        | RuntimeCommand::Paste { window_id, pane_id, .. }
+        | RuntimeCommand::ClosePane { window_id, pane_id }
+        | RuntimeCommand::ZoomPane { window_id, pane_id, .. }
+        | RuntimeCommand::ResizePane { window_id, pane_id, .. }
         | RuntimeCommand::ReadPane { window_id, pane_id, .. }
         | RuntimeCommand::Procs { window_id, pane_id }
         | RuntimeCommand::SendKey { window_id, pane_id, .. }
-        | RuntimeCommand::Run { window_id, pane_id, .. } => (*window_id, Some(*pane_id)),
+        | RuntimeCommand::Run { window_id, pane_id, .. }
+        | RuntimeCommand::Exec { window_id, pane_id, .. } => (*window_id, Some(*pane_id)),
         RuntimeCommand::AgentFork { window_id, source_pane_id, .. } => {
             (*window_id, *source_pane_id)
         },
         RuntimeCommand::AgentPrompt { agent, generation, .. }
+        | RuntimeCommand::AgentPaste { agent, generation, .. }
         | RuntimeCommand::AgentRead { agent, generation, .. } => {
             let managed = runtime_hub.active_agent(agent, *generation)?;
             (Some(managed.window_id), Some(managed.pane_id))
@@ -369,11 +379,13 @@ pub(crate) fn dispatch_shell_events(events: Vec<GpuiShellEvent>, cx: &mut App) {
 }
 
 pub(crate) fn dispatch_ai_events(events: Vec<crate::ai_hook::AiHookEvent>, cx: &mut App) {
-    for event in events {
-        let target = event
-            .pane
-            .and_then(|pane_id| entry_with_pane(pane_id, cx))
-            .or_else(|| entries_by_mru(cx).into_iter().next());
+    for event in crate::ai_hook::reorder_batch(events) {
+        // 明确 pane id 是严格路由合同：pane 已关闭时，迟到 Hook 必须丢弃；
+        // 只有发送端确实没有 NEBULA_PANE_ID 时才允许落到 MRU 窗口。
+        let target = match event.pane {
+            Some(pane_id) => entry_with_pane(pane_id, cx),
+            None => entries_by_mru(cx).into_iter().next(),
+        };
         let Some(entry) = target else { continue };
         if let Some(workspace) = entry.workspace.upgrade() {
             let _ = workspace.update(cx, |workspace, cx| workspace.handle_ai_hook(event, cx));
@@ -421,6 +433,42 @@ fn dispatch_runtime(dispatch: Arc<RuntimeDispatch>, cx: &mut App) {
             return;
         },
         _ => {},
+    }
+
+    if let RuntimeCommand::Exec {
+        pane_id,
+        argv,
+        timeout_ms,
+        max_output_bytes,
+        ..
+    } = &dispatch.command
+    {
+        let entry = match route_entry(&dispatch.command, cx) {
+            Ok(entry) => entry,
+            Err(error) => {
+                dispatch.respond(Err(error));
+                return;
+            },
+        };
+        let Some(workspace) = entry.workspace.upgrade() else {
+            dispatch.respond(Err(ApiError::new(
+                "target_not_found",
+                "the target workspace no longer exists",
+            )));
+            return;
+        };
+        match workspace.read(cx).runtime_exec_context(*pane_id, cx) {
+            Ok((context, cwd)) => crate::runtime_exec::spawn(
+                dispatch.clone(),
+                context,
+                cwd,
+                argv.clone(),
+                *timeout_ms,
+                *max_output_bytes,
+            ),
+            Err(error) => dispatch.respond(Err(error)),
+        }
+        return;
     }
 
     let entry = match route_entry(&dispatch.command, cx) {
@@ -813,7 +861,7 @@ impl NebulaWorkspace {
 }
 
 #[cfg(windows)]
-fn native_hwnd(window: &Window) -> Option<isize> {
+pub(super) fn native_hwnd(window: &Window) -> Option<isize> {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let handle = HasWindowHandle::window_handle(window).ok()?;
     let RawWindowHandle::Win32(handle) = handle.as_raw() else { return None };
@@ -821,7 +869,7 @@ fn native_hwnd(window: &Window) -> Option<isize> {
 }
 
 #[cfg(not(windows))]
-fn native_hwnd(_window: &Window) -> Option<isize> {
+pub(super) fn native_hwnd(_window: &Window) -> Option<isize> {
     None
 }
 

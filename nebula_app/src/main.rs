@@ -27,6 +27,7 @@ use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 
 use nebula_terminal::tty;
 
+mod agent_env;
 mod ai_agents;
 mod ai_assistant;
 mod ai_hook;
@@ -72,6 +73,7 @@ mod process_tree;
 mod remote_dirs;
 mod renderer;
 mod runtime_api;
+mod runtime_exec;
 mod scheduler;
 mod session;
 mod shell_detect;
@@ -88,6 +90,7 @@ mod ssh_session;
 mod ssh_sftp;
 mod string;
 mod svn_status;
+mod taskbar;
 mod sync;
 mod terminal_profiles;
 mod tray;
@@ -144,13 +147,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Portable builds are not necessarily on PATH. Export the exact executable
     // before any PTY is created so Codex/Claude can call the supported control
     // plane directly instead of scanning processes, port files, or source code.
+    //
+    // This is the fallback layer: every terminal pane gets the full identity
+    // contract (`TERM_PROGRAM`, pane id, bin dir, `PATH`) from `agent_env`.
+    // Setting it on the process too covers children spawned outside a PTY,
+    // which never see `tty::Options::env`.
     #[cfg(windows)]
     if options.subcommands.is_none()
         && let Ok(executable) = env::current_exe()
     {
         // SAFETY: startup is still single-threaded here; all child PTYs are
         // created later and inherit this stable value.
-        unsafe { env::set_var("NEBULA_CLI", executable) };
+        unsafe { env::set_var(agent_env::CLI_ENV, executable) };
     }
 
     #[cfg(windows)]
@@ -197,6 +205,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match options.subcommands {
         Some(Subcommands::Ctl(options)) => runtime_api::run_cli(options)?,
+        // Resource-verb commands are thin aliases over `ctl`, speaking the same
+        // serialized protocol (see `runtime_api::shortcuts`).
+        Some(Subcommands::Env(options)) => runtime_api::shortcuts::env(options)?,
+        Some(Subcommands::Window(options)) => runtime_api::shortcuts::window(options)?,
+        Some(Subcommands::Tab(options)) => runtime_api::shortcuts::tab(options)?,
+        Some(Subcommands::Pane(options)) => runtime_api::shortcuts::pane(options)?,
+        Some(Subcommands::Agent(options)) => runtime_api::shortcuts::agent(options)?,
         #[cfg(unix)]
         Some(Subcommands::Msg(options)) => msg(options)?,
         Some(Subcommands::Migrate(options)) => migrate::migrate(options),

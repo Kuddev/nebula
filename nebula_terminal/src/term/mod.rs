@@ -86,6 +86,13 @@ bitflags! {
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
         /// Microsoft ConPTY Win32 input mode (DECSET 9001).
         const WIN32_INPUT_MODE        = 1 << 23;
+        /// DECSET 2031 — 订阅色彩方案（亮/暗）变更通知。
+        ///
+        /// 订阅方在终端翻主题时收到 `CSI ? 997 ; 1 n`（暗）/ `; 2 n`（亮），
+        /// 据此重挑自己的配色。没有这条，已经跑着的 TUI 只能停留在它启动那一刻
+        /// 用 OSC 11 问到的背景色上——用户把深色主题切成浅色，nvim/delta/codex
+        /// 会继续用为深底挑的颜色画在白底上。
+        const COLOR_SCHEME_UPDATES    = 1 << 24;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -132,6 +139,18 @@ impl Default for TermMode {
 #[inline]
 pub fn point_to_viewport(display_offset: usize, point: Point) -> Option<Point<usize>> {
     point_to_viewport_from(Line(-(display_offset as i32)), point)
+}
+
+/// 一个背景色算「暗」还是「亮」：Rec.709 感知加权亮度低于中点即为暗。
+///
+/// 两个壳共用同一判据（DECSET 2031 的 `CSI ? 997;N n`、[`Term::set_color_scheme`]），
+/// 否则同一个主题在新旧壳会报出不同的亮暗，而订阅方拿这个值去挑整套配色。
+///
+/// 用加权亮度而不是三通道平均：纯蓝 `#0000ff` 的平均值是 85（看着像中间调），
+/// 加权亮度只有 18，人眼看确实是深色。
+#[inline]
+pub fn background_is_dark(r: u8, g: u8, b: u8) -> bool {
+    0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b) < 127.5
 }
 
 /// Convert a terminal point to a viewport-relative point with an explicit top row.
@@ -236,6 +255,12 @@ pub struct Term<T> {
     /// `tty::windows::conpty`). Answering it again hits an already-unblocked
     /// host, which forwards the report to the shell as typed input.
     bringup_da1_pending: bool,
+
+    /// 当前默认背景是暗还是亮，供 DECSET 2031 的订阅方使用。
+    ///
+    /// 宿主在 palette 热应用时调用 [`Term::set_color_scheme`] 更新；判据必须与
+    /// OSC 11 回答的背景色同源，否则 CLI 从两条渠道问出两个答案。
+    color_scheme_dark: bool,
 
     /// Config directly for the terminal.
     config: Config,
@@ -445,6 +470,9 @@ impl<T> Term<T> {
             event_proxy,
             damage,
             bringup_da1_pending: config.suppress_bringup_da1,
+            // 默认按暗底起步：Nebula 的默认主题是深色，宿主在首次
+            // `set_color_scheme` 前不会有订阅方，值不会被读到。
+            color_scheme_dark: true,
             config,
             grid,
             tabs,
@@ -537,6 +565,38 @@ impl<T> Term<T> {
             self.cursor_blinking_override = None;
             self.mark_fully_damaged();
         }
+    }
+
+    /// 记录当前默认背景是暗还是亮，并在有 DECSET 2031 订阅时通知子进程。
+    ///
+    /// 宿主在终端 palette 热应用时调用（主题切换、跟随系统翻转、用户改
+    /// `background=`）。值没变就什么都不做：热应用路径每次设置改动都会整体走一
+    /// 遍，无条件上报会把重复字节塞进 PTY，落在 shell 提示符上就是一串垃圾。
+    pub fn set_color_scheme(&mut self, is_dark: bool)
+    where
+        T: EventListener,
+    {
+        if self.color_scheme_dark == is_dark {
+            return;
+        }
+        self.color_scheme_dark = is_dark;
+        self.report_color_scheme();
+    }
+
+    /// 发 `CSI ? 997 ; 1 n`（暗）/ `CSI ? 997 ; 2 n`（亮）。    ///
+    /// 编号来自 Contour 的 color-palette-update-notifications 提案，
+    /// kitty / wezterm / ghostty / alacritty 用的是同一套（kitty
+    /// `window.py`：`n = 1 if is_dark else 2`）。没订阅就不发——这个序列对没
+    /// 要求过它的程序来说是不认识的输入。
+    fn report_color_scheme(&mut self)
+    where
+        T: EventListener,
+    {
+        if !self.mode.contains(TermMode::COLOR_SCHEME_UPDATES) {
+            return;
+        }
+        let value = if self.color_scheme_dark { 1 } else { 2 };
+        self.event_proxy.send_event(Event::PtyWrite(format!("\x1b[?997;{value}n")));
     }
 
     /// Set new options for the [`Term`].
@@ -902,18 +962,28 @@ impl<T> Term<T> {
         self.mark_fully_damaged();
     }
 
-    /// ConPTY 对账重锚：把主屏光标搬到 `target` 视口行，多出的顶部行滚入
-    /// 历史、底部补空行。
+    /// ConPTY 对账重锚：把主屏光标搬到 `target` 视口行。
     ///
-    /// 背景（字节级取证，2026-08）：`ResizePseudoConsole` 之后 conhost 可能
-    /// 把自身缓冲区塌缩成"视口高、零回滚、内容顶端对齐"，其光标停在内容末
-    /// 行——高于视口底；而本地 reflow 保留完整历史、光标钉在视口底。此后
-    /// PSReadLine 按 conhost 坐标发出的绝对 CUP 会落进我们视口中部（回显
-    /// 砸在滚动输出上）。该塌缩在 conhost 内部且非确定性，事前无法预测，
-    /// conhost 也不重绘（直通模式零字节），唯一可靠做法是事后向 conhost
-    /// 要真值（`AttachConsole` + `GetConsoleScreenBufferInfo`，见
-    /// event_loop 的对账探针）并把本地网格滚到同一坐标系。滚动后两侧光标
-    /// 同行，后续输出同步推进，永久对齐；被滚走的行仍在历史里可回看。
+    /// 背景（字节级取证，2026-08）：`ResizePseudoConsole` 之后 conhost 的行
+    /// 坐标与本地 reflow 的结果会朝两个方向偏。
+    ///
+    /// 一、塌缩（顶端对齐）：conhost 把自身缓冲区压成"视口高、零回滚、内容
+    /// 顶端对齐"，光标停在内容末行——高于视口底；而本地 reflow 保留完整历史、
+    /// 光标钉在视口底。此时 `target < cursor`，多出的顶部行滚入历史。
+    ///
+    /// 二、变宽/变窄导致的折行差（分屏、拖分界、面板开合）：conhost 的 buffer
+    /// rewrap 与本地 reflow 的换行语义不同，同一批字节折出的行数可以差几行。
+    /// conhost 折得更多时它的视口顶部还留着我们已经推进历史的行，提示符相应
+    /// 更靠下，`target > cursor`；缺的行在光标上方补回，内容整体下移。
+    ///
+    /// 两个方向都必须处理：只修一边时另一边会让 PSReadLine 按 conhost 坐标
+    /// 发出的绝对 CUP 永久落在错行——提示符停在一处，回显砸在几行之下
+    /// （现场：分屏后 `prompts=[15]` 而 `cursor=19`）。该偏差在 conhost 内部
+    /// 且非确定性，事前无法预测，conhost 也不重绘（直通模式零字节），唯一可靠
+    /// 做法是事后向 conhost 要真值（`AttachConsole` +
+    /// `GetConsoleScreenBufferInfo`，见 event_loop 的对账探针）并把本地网格滚
+    /// 到同一坐标系。滚动后两侧光标同行，后续输出同步推进，永久对齐；被滚走
+    /// 的行仍在历史里可回看。
     pub fn conpty_realign(&mut self, target: usize) {
         if self.mode.contains(TermMode::ALT_SCREEN) {
             return;
@@ -922,16 +992,25 @@ impl<T> Term<T> {
         if cursor < 0 {
             return;
         }
-        let Some(delta) = (cursor as usize).checked_sub(target).filter(|d| *d > 0) else {
-            return;
-        };
-        if delta >= self.screen_lines() {
+        let cursor = cursor as usize;
+        let delta = cursor.abs_diff(target);
+        if delta == 0 || delta >= self.screen_lines() {
             return;
         }
         let region = Line(0)..Line(self.screen_lines() as i32);
-        self.selection = self.selection.take().and_then(|s| s.rotate(self, &region, delta as i32));
-        self.grid.scroll_up(&region, delta);
-        self.grid.cursor.point.line = self.grid.cursor.point.line - delta;
+        // 选区跟着内容走：`rotate` 的正负与内容位移同向（上滚为负）。
+        let rotation = if target < cursor { delta as i32 } else { -(delta as i32) };
+        self.selection = self.selection.take().and_then(|s| s.rotate(self, &region, rotation));
+        if target < cursor {
+            self.grid.scroll_up(&region, delta);
+            self.grid.cursor.point.line = self.grid.cursor.point.line - delta;
+        } else {
+            // 顶部补出的行是空的：被 conhost 留在视口里的那几行在我们这边
+            // 已经进了历史，取不回来。视觉代价是几行空白，换来的是此后每一
+            // 条绝对 CUP 都落在正确的行。
+            self.grid.scroll_down(&region, delta);
+            self.grid.cursor.point.line = self.grid.cursor.point.line + delta;
+        }
         self.mark_fully_damaged();
     }
 
@@ -2100,6 +2179,16 @@ impl<T: EventListener> Handler for Term<T> {
             self.mode.insert(TermMode::WIN32_INPUT_MODE);
             return;
         }
+        // DECSET 2031。订阅的同一刻先答一次当前值：规范里取初值靠 `CSI ? 996 n`
+        // 查询，但 vte 0.15 只把**没有** `?` 中间字节的 `CSI n` 路由到
+        // `device_status`，私有 DSR 根本到不了 handler，我们答不了那条查询。
+        // 订阅即回报把这个洞补上——多一条报告对订阅方无害（它本来就要处理这个
+        // 序列），少一条则意味着 app 在主题变化之前永远不知道当前是亮还是暗。
+        if matches!(mode, PrivateMode::Unknown(2031)) {
+            self.mode.insert(TermMode::COLOR_SCHEME_UPDATES);
+            self.report_color_scheme();
+            return;
+        }
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
             PrivateMode::Unknown(mode) => {
@@ -2164,6 +2253,10 @@ impl<T: EventListener> Handler for Term<T> {
     fn unset_private_mode(&mut self, mode: PrivateMode) {
         if matches!(mode, PrivateMode::Unknown(9001)) {
             self.mode.remove(TermMode::WIN32_INPUT_MODE);
+            return;
+        }
+        if matches!(mode, PrivateMode::Unknown(2031)) {
+            self.mode.remove(TermMode::COLOR_SCHEME_UPDATES);
             return;
         }
         let mode = match mode {
@@ -2653,6 +2746,120 @@ mod tests {
 
         term.unset_private_mode(PrivateMode::Unknown(9001));
         assert!(!term.mode().contains(TermMode::WIN32_INPUT_MODE));
+    }
+
+    /// 记录 `Event::PtyWrite` 的监听器：`send_event` 只拿 `&self`，所以要内部
+    /// 可变性。只留 PtyWrite——2031 的断言只关心回写 PTY 的字节。
+    #[derive(Clone, Default)]
+    struct WriteRecorder(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+    impl WriteRecorder {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.0.borrow_mut())
+        }
+    }
+
+    impl EventListener for WriteRecorder {
+        fn send_event(&self, event: Event) {
+            if let Event::PtyWrite(text) = event {
+                self.0.borrow_mut().push(text);
+            }
+        }
+    }
+
+    /// DECSET 2031 订阅的同一刻就要收到当前亮暗：规范里取初值靠
+    /// `CSI ? 996 n`，但 vte 0.15 不把私有 DSR 路由给 handler，我们答不了那条
+    /// 查询。订阅即回报是这个洞的替代品，掉了它 app 在下次换主题前无从得知。
+    #[test]
+    fn decset_2031_reports_the_current_scheme_immediately() {
+        let size = TermSize::new(5, 5);
+        let events = WriteRecorder::default();
+        let mut term = Term::new(Config::default(), &size, events.clone());
+
+        term.set_private_mode(PrivateMode::Unknown(2031));
+        assert!(term.mode().contains(TermMode::COLOR_SCHEME_UPDATES));
+        // 构造默认是暗底 → 1。
+        assert_eq!(events.take(), vec!["\x1b[?997;1n".to_owned()]);
+
+        term.unset_private_mode(PrivateMode::Unknown(2031));
+        assert!(!term.mode().contains(TermMode::COLOR_SCHEME_UPDATES));
+    }
+
+    /// 没订阅的程序不该收到这串字节——它会当成用户敲进来的输入。
+    #[test]
+    fn color_scheme_change_stays_quiet_without_a_subscriber() {
+        let size = TermSize::new(5, 5);
+        let events = WriteRecorder::default();
+        let mut term = Term::new(Config::default(), &size, events.clone());
+
+        term.set_color_scheme(false);
+        assert!(events.take().is_empty());
+    }
+
+    /// 热应用路径每次设置改动都整体走一遍，同值重复上报会把垃圾字节塞到
+    /// shell 提示符上，所以变化检测在 `set_color_scheme` 里。
+    #[test]
+    fn color_scheme_reports_only_on_a_real_flip() {
+        let size = TermSize::new(5, 5);
+        let events = WriteRecorder::default();
+        let mut term = Term::new(Config::default(), &size, events.clone());
+
+        term.set_private_mode(PrivateMode::Unknown(2031));
+        assert_eq!(events.take(), vec!["\x1b[?997;1n".to_owned()]);
+
+        // 暗 → 亮：一条 `;2n`。
+        term.set_color_scheme(false);
+        assert_eq!(events.take(), vec!["\x1b[?997;2n".to_owned()]);
+
+        // 同值再来两次：一条都不发。
+        term.set_color_scheme(false);
+        term.set_color_scheme(false);
+        assert!(events.take().is_empty());
+
+        // 翻回去要报。
+        term.set_color_scheme(true);
+        assert_eq!(events.take(), vec!["\x1b[?997;1n".to_owned()]);
+    }
+
+    #[test]
+    fn background_darkness_uses_perceptual_luminance_not_the_channel_mean() {
+        assert!(background_is_dark(0x0f, 0x11, 0x1a)); // Nebula 默认底
+        assert!(!background_is_dark(0xff, 0xff, 0xff)); // 纯白
+        // 纯蓝三通道平均是 85（<127.5，平均值也判暗），但纯绿的平均值同样是 85
+        // 而加权亮度到 182——这一对才是「平均值会判错」的地方。
+        assert!(background_is_dark(0x00, 0x00, 0xff));
+        assert!(!background_is_dark(0x00, 0xff, 0x00));
+    }
+
+    /// 端到端走**真实字节**，而不是直接调 handler。
+    ///
+    /// 2031 不在 vte 0.15 的 `NamedPrivateMode` 表里，它只能以
+    /// `PrivateMode::Unknown(2031)` 落到我们的 handler。上面那几个测试是直接调
+    /// `set_private_mode` 的，绕过了解析；如果解析器把 `\e[?2031h` 归到别处，
+    /// 整个功能是死的而单测照样全绿。这一条把那段路也钉住。
+    #[test]
+    fn decset_2031_survives_the_real_parser() {
+        let size = TermSize::new(5, 5);
+        let events = WriteRecorder::default();
+        let mut term = Term::new(Config::default(), &size, events.clone());
+        let mut parser: ansi::Processor = ansi::Processor::new();
+
+        parser.advance(&mut term, b"\x1b[?2031h");
+        assert!(
+            term.mode().contains(TermMode::COLOR_SCHEME_UPDATES),
+            "`\\e[?2031h` 必须经解析器落到 PrivateMode::Unknown(2031)"
+        );
+        assert_eq!(events.take(), vec!["\x1b[?997;1n".to_owned()]);
+
+        // 主题翻成浅色：订阅方收到 `;2n`。
+        term.set_color_scheme(false);
+        assert_eq!(events.take(), vec!["\x1b[?997;2n".to_owned()]);
+
+        // 退订之后不再收到。
+        parser.advance(&mut term, b"\x1b[?2031l");
+        assert!(!term.mode().contains(TermMode::COLOR_SCHEME_UPDATES));
+        term.set_color_scheme(true);
+        assert!(events.take().is_empty());
     }
 
     /// The visual-viewport crop previews the anchor of the deferred resize,
@@ -3178,6 +3385,46 @@ mod tests {
         assert_eq!(term.grid[Line(2)][Column(0)].c, 'e');
         assert_eq!(term.grid[Line(3)][Column(0)].c, ' ');
         assert_eq!(term.grid[Line(4)][Column(0)].c, ' ');
+    }
+
+    #[test]
+    fn conpty_realign_pushes_content_down_when_conhost_wrapped_more() {
+        // 反方向：conhost 的 rewrap 折出的行比本地 reflow 多，它的视口顶部还
+        // 留着我们已推进历史的行，提示符与光标都更靠下。缺的行必须在光标上方
+        // 补回，否则 PSReadLine 按 conhost 坐标发的绝对 CUP 会落在提示符下面
+        // 几行（现场：分屏后 prompts=[15] 而 cursor=19）。
+        let size = TermSize::new(8, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+
+        for (row, marker) in ['a', 'b', 'c', 'd', 'e'].into_iter().enumerate() {
+            term.grid[Line(row as i32)][Column(0)].c = marker;
+        }
+        term.grid.cursor.point = Point::new(Line(2), Column(0));
+
+        term.conpty_realign(4);
+
+        assert_eq!(term.grid.cursor.point, Point::new(Line(4), Column(0)));
+        assert_eq!(term.grid[Line(0)][Column(0)].c, ' ');
+        assert_eq!(term.grid[Line(1)][Column(0)].c, ' ');
+        assert_eq!(term.grid[Line(2)][Column(0)].c, 'a');
+        assert_eq!(term.grid[Line(3)][Column(0)].c, 'b');
+        assert_eq!(term.grid[Line(4)][Column(0)].c, 'c');
+    }
+
+    #[test]
+    fn conpty_realign_is_a_noop_when_both_sides_agree() {
+        let size = TermSize::new(8, 5);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        for (row, marker) in ['a', 'b', 'c', 'd', 'e'].into_iter().enumerate() {
+            term.grid[Line(row as i32)][Column(0)].c = marker;
+        }
+        term.grid.cursor.point = Point::new(Line(3), Column(0));
+
+        term.conpty_realign(3);
+
+        assert_eq!(term.grid.cursor.point, Point::new(Line(3), Column(0)));
+        assert_eq!(term.history_size(), 0);
+        assert_eq!(term.grid[Line(0)][Column(0)].c, 'a');
     }
 
     #[test]

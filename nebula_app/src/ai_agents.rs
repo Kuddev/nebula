@@ -151,7 +151,9 @@ impl AgentKind {
             Self::Amp => &["amp", "amp-local"],
             Self::OpenCode => &["opencode", "open-code"],
             Self::Copilot => &["copilot", "github-copilot", "ghcs"],
-            Self::Cursor => &["cursor", "cursor-agent"],
+            // Cursor's current CLI binary is `agent`; keep the historical
+            // labels so existing process snapshots still normalize correctly.
+            Self::Cursor => &["agent", "cursor", "cursor-agent"],
             Self::Goose => &["goose"],
             Self::Droid => &["droid"],
             Self::Pi => &["pi"],
@@ -198,7 +200,7 @@ impl AgentKind {
             Self::Gemini => format!("gemini --resume {session_id}"),
             Self::OpenCode => format!("opencode --session {session_id}"),
             Self::Amp => format!("amp threads continue {session_id}"),
-            Self::Cursor => format!("cursor-agent --resume {session_id}"),
+            Self::Cursor => format!("agent --resume={session_id}"),
             Self::Copilot => format!("copilot --resume {session_id}"),
             Self::Grok => format!("grok --resume {session_id}"),
             Self::Pi => format!("pi --session {session_id}"),
@@ -213,21 +215,26 @@ impl AgentKind {
             | Self::Qwen
             | Self::Cline
             | Self::Devin
-            | Self::Kimi
             | Self::Kiro
             | Self::Kilo
             | Self::Qoder
             | Self::Maki => return None,
+            Self::Kimi => format!("kimi --session {session_id}"),
         })
     }
 
-    /// Cold-start commands whose interactive CLI spelling is verified by the
-    /// existing Nebula integrations. Unsupported clients must not be guessed
-    /// from their detection slug.
+    /// Cold-start commands whose interactive CLI spelling is verified against
+    /// the provider's official CLI documentation. Unsupported clients must not
+    /// be guessed from their detection slug.
     pub fn start_command(self) -> Option<String> {
         match self {
             Self::Claude => Some("claude".to_owned()),
             Self::Codex => Some("codex".to_owned()),
+            Self::OpenCode => Some("opencode".to_owned()),
+            Self::Cursor => Some("agent".to_owned()),
+            Self::Pi => Some("pi".to_owned()),
+            Self::OhMyPi => Some("omp".to_owned()),
+            Self::Kimi => Some("kimi".to_owned()),
             _ => None,
         }
     }
@@ -240,7 +247,9 @@ impl AgentKind {
             Self::Codex => format!("codex fork {session_id}"),
             Self::OpenCode => format!("opencode --session {session_id} --fork"),
             Self::Grok => format!("grok --resume {session_id} --fork-session"),
+            Self::Pi => format!("pi --fork {session_id}"),
             Self::OhMyPi => format!("omp --fork {session_id}"),
+            Self::Kimi => format!("kimi --fork {session_id}"),
             _ => return None,
         })
     }
@@ -632,12 +641,35 @@ mod tests {
     fn commands_are_exact_and_injection_safe() {
         assert_eq!(AgentKind::Claude.start_command().as_deref(), Some("claude"));
         assert_eq!(AgentKind::Codex.start_command().as_deref(), Some("codex"));
+        assert_eq!(AgentKind::OpenCode.start_command().as_deref(), Some("opencode"));
+        assert_eq!(AgentKind::Cursor.start_command().as_deref(), Some("agent"));
+        assert_eq!(AgentKind::Pi.start_command().as_deref(), Some("pi"));
+        assert_eq!(AgentKind::OhMyPi.start_command().as_deref(), Some("omp"));
+        assert_eq!(AgentKind::Kimi.start_command().as_deref(), Some("kimi"));
         assert_eq!(AgentKind::Gemini.start_command(), None);
         assert_eq!(
             AgentKind::Claude.resume_command("abc-123").as_deref(),
             Some("claude --resume abc-123")
         );
         assert_eq!(AgentKind::Codex.fork_command("abc-123").as_deref(), Some("codex fork abc-123"));
+        assert_eq!(
+            AgentKind::OpenCode.fork_command("abc-123").as_deref(),
+            Some("opencode --session abc-123 --fork")
+        );
+        assert_eq!(
+            AgentKind::Cursor.resume_command("abc-123").as_deref(),
+            Some("agent --resume=abc-123")
+        );
+        assert_eq!(AgentKind::Pi.fork_command("abc-123").as_deref(), Some("pi --fork abc-123"));
+        assert_eq!(
+            AgentKind::OhMyPi.resume_command("abc-123").as_deref(),
+            Some("omp --resume abc-123")
+        );
+        assert_eq!(
+            AgentKind::Kimi.resume_command("abc-123").as_deref(),
+            Some("kimi --session abc-123")
+        );
+        assert_eq!(AgentKind::Kimi.fork_command("abc-123").as_deref(), Some("kimi --fork abc-123"));
         assert_eq!(AgentKind::Claude.resume_command("x; calc"), None);
         assert_eq!(AgentKind::Aider.resume_command("abc"), None);
     }

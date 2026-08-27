@@ -3,6 +3,34 @@ use super::*;
 /// 折叠箭头的固定布局槽。图标是 SVG，不应借任一字体的 advance 决定留白。
 const TABS_DISCLOSURE_SLOT_W: f32 = 24.0;
 
+/// `SidebarActivity::WaitingInput` 的字位：Nerd Font `nf-fa-hand_paper_o`（开掌）。
+/// 已核对打包字体 `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` 的 cmap 覆盖
+/// 这个码位；换字体前先核，否则会掉成豆腐块。
+const WAITING_INPUT_GLYPH: &str = "\u{f256}";
+
+/// 事件 vs 状态：一个 tab 此刻该显示哪个静息徽章。
+///
+/// - `Done` 是**事件**——「回合完成了，你不在场」。你正看着这个 tab 时它没有
+///   信息量了，还画一个点等于让用户去点掉自己刚亲眼看完的事，所以当前 tab
+///   一律降回 `Idle`。
+/// - 后台响铃补位到 `Done` 同理，只对非当前 tab 成立。`has_bell` 本身激活即清
+///   （见 `TabMeta::has_bell`），这里再挡一次是因为清除发生在激活事件里，同一帧
+///   内读到的可能还是旧值。
+/// - 其余都是**状态**（转圈、等输入、等授权、失败），描述「此刻仍然如此」，你看
+///   不看它都还成立，所以当前 tab 也照画。响铃补位的 `Idle` 前提保证了它不会
+///   盖掉这些。
+pub(super) fn resting_activity(
+    activity: SidebarActivity,
+    active: bool,
+    has_bell: bool,
+) -> SidebarActivity {
+    match activity {
+        SidebarActivity::Done if active => SidebarActivity::Idle,
+        SidebarActivity::Idle if !active && has_bell => SidebarActivity::Done,
+        other => other,
+    }
+}
+
 impl NebulaWorkspace {
     /// 侧栏标签的保守字宽：塑形一个 "M" 取 advance，供旧壳列数截断逻辑
     /// 估算。必须使用 UI 字体；终端字体变化不属于 chrome 的布局输入。
@@ -78,6 +106,32 @@ impl NebulaWorkspace {
         .size(px(11.0))
     }
 
+    /// 「命令停在交互提示上等人打字」的徽章：使用 Nerd Font 开掌
+    /// `nf-fa-hand_paper_o`（U+F256）表达交互等待状态。
+    ///
+    /// 用**字体字形**而不是旧壳 `display::ui::icons::push_hand`：那一版是手推
+    /// quad、五指靠挖空撑形，小尺寸下指缝糊成一团读不出「手」，用户 08-02 判掉
+    /// 了（`display/chrome.rs` 里那段注释和被注掉的调用还留着）。这个码位在打包
+    /// 字体 `MapleMonoNormal-NF-CN-Regular.ttf` 里是字体设计师画的描边轮廓，
+    /// 指缝属于轮廓本身、有正经笔重，缩到徽章尺寸不塌——和被否掉的那版不是同
+    /// 一种东西。
+    ///
+    /// 颜色取 `primary` 而不是 `Attention` 的 warning：颜色轴留给严重度——agent
+    /// 卡在授权上会阻塞整个回合，值得警示色；停在 `[y/n]` 是常态，抢了警示色会
+    /// 把真正要紧的那个喊废。语义交给形状。
+    pub(super) fn waiting_hand(
+        family: SharedString,
+        size_px: f32,
+        color: gpui::Hsla,
+    ) -> impl IntoElement {
+        div()
+            .font_family(family)
+            .text_size(px(size_px))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(color)
+            .child(WAITING_INPUT_GLYPH)
+    }
+
     pub(super) fn tab_presentation(&self, ix: usize, cx: &App, dark: bool) -> TabPresentation {
         let active = ix == self.active;
         let title = self.tab_title(ix, cx);
@@ -99,11 +153,9 @@ impl NebulaWorkspace {
                 (program, view.sidebar_activity())
             })
             .unwrap_or((None, SidebarActivity::Idle));
-        let activity = if !active && self.meta(ix).has_bell && activity == SidebarActivity::Idle {
-            SidebarActivity::Done
-        } else {
-            activity
-        };
+        // 事件 vs 状态的唯一裁定处（侧栏与顶栏共用这份 presentation），规则与
+        // 理由见 [`resting_activity`]。
+        let activity = resting_activity(activity, active, self.meta(ix).has_bell);
         let logo_image = program
             .as_deref()
             .and_then(crate::display::ai_logo_for_program)
@@ -244,6 +296,12 @@ impl NebulaWorkspace {
                     SidebarActivity::Done => Some(
                         div().size(px(6.0)).rounded_full().bg(theme.primary).into_any_element(),
                     ),
+                    // 停在 [y/n]/口令/Press ENTER 上：也要你动手，但这是常态，
+                    // 用 Attention 的警示形状去喊会把真正要紧的那个喊废。
+                    SidebarActivity::WaitingInput => Some(
+                        Self::waiting_hand(symbol_family.clone(), label_px, theme.primary)
+                            .into_any_element(),
+                    ),
                     // 停在授权/提问上：比「完成」更强，必须换形状而不是换色
                     // （旧壳教训：两态共用圆点在界面上根本分不出来）。
                     SidebarActivity::Attention => Some(
@@ -360,7 +418,7 @@ impl NebulaWorkspace {
                 })
                 // 行首图标的优先级：**先身份、后形态**。AI 品牌图 / 程序字位
                 // 表达「这个 tab 里在跑什么」，它必须跟随聚焦 pane（旧壳与
-                // Netcatty 同行为）；2×2 分屏标记只在没有身份可显示时补位。
+                // 2×2 分屏标记只在没有身份可显示时补位。
                 // 反过来（分屏就一律画 grid）会让 claude 分屏之后标签上再也
                 // 看不出跑着 claude——用户 08-23 报的「侧边 tab 不跟随激活
                 // tab 变化」就是这个。数量由尾部胶囊表达，不必和图标抢槽位。
@@ -560,7 +618,11 @@ impl NebulaWorkspace {
             // workspace 根保持透明，侧栏自己只铺一层壳色；否则终端卡会
             // 叠到根底色上，把 Acrylic 的目标透明度二次增浓。
             .bg(theme.background)
-            .p_2()
+            // 上边距为零：侧栏 / 终端卡 / 右侧抽屉三列顶边一律贴 chrome 下沿
+            // （用户 08-26 裁定「左侧 tab 抬到和文件树顶部一致」）。左右和底部
+            // 仍是旧壳的 8px。
+            .px_2()
+            .pb_2()
             .gap_2()
             // 待命阶段（未过阈值）的指针跟踪；激活后由根部罩层独占接管。
             .on_mouse_move(cx.listener(|this, event, window, cx| {
@@ -960,5 +1022,41 @@ impl NebulaWorkspace {
                     row.child(pane_header::split_badge(pane_count, label_px, dim, badge_fill))
                 }),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_dot_is_an_event_so_the_tab_you_are_watching_never_shows_it() {
+        // 你正盯着 agent 跑完：那个点在你眼前亮起没有任何信息量。
+        assert_eq!(resting_activity(SidebarActivity::Done, true, false), SidebarActivity::Idle);
+        // 后台跑完才留痕。
+        assert_eq!(resting_activity(SidebarActivity::Done, false, false), SidebarActivity::Done);
+    }
+
+    #[test]
+    fn ongoing_states_show_on_the_active_tab_too() {
+        // 状态描述「此刻仍然如此」，看不看都成立——当前 tab 一样要画。
+        for state in [
+            SidebarActivity::Running,
+            SidebarActivity::WaitingInput,
+            SidebarActivity::Attention,
+            SidebarActivity::Failed,
+        ] {
+            assert_eq!(resting_activity(state, true, false), state);
+            assert_eq!(resting_activity(state, false, false), state);
+            // 响铃补位只从 Idle 起跳，不能盖掉任何进行中的状态。
+            assert_eq!(resting_activity(state, false, true), state);
+        }
+    }
+
+    #[test]
+    fn background_bell_stands_in_for_a_finish_mark_but_only_while_unattended() {
+        assert_eq!(resting_activity(SidebarActivity::Idle, false, true), SidebarActivity::Done);
+        assert_eq!(resting_activity(SidebarActivity::Idle, true, true), SidebarActivity::Idle);
+        assert_eq!(resting_activity(SidebarActivity::Idle, false, false), SidebarActivity::Idle);
     }
 }

@@ -38,7 +38,10 @@ pub(super) fn request_once(
     Ok(serde_json::from_str(&line)?)
 }
 
-fn print_response(response: &ApiResponse, pretty: bool) -> Result<(), Box<dyn Error>> {
+pub(super) fn print_response(
+    response: &ApiResponse,
+    pretty: bool,
+) -> Result<(), Box<dyn Error>> {
     if pretty {
         println!("{}", serde_json::to_string_pretty(response)?);
     } else {
@@ -181,6 +184,19 @@ fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             )?;
             print_response(&response, options.pretty)
         },
+        CliCommand::AgentPaste { agent, generation, text, no_submit } => {
+            let response = request_once(
+                "agent.paste",
+                json!({
+                    "agent": agent,
+                    "generation": generation,
+                    "text": text,
+                    "submit": !no_submit
+                }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
         CliCommand::AgentRead { agent, generation, lines } => {
             let response = request_once(
                 "agent.read",
@@ -208,6 +224,11 @@ fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             let response = request_once("window.create", json!({}), timeout)?;
             print_response(&response, options.pretty)
         },
+        CliCommand::CloseWindow { window } => {
+            let response =
+                request_once("window.close", json!({ "window_id": window }), timeout)?;
+            print_response(&response, options.pretty)
+        },
         CliCommand::Focus { window, pane } => {
             let response = request_once(
                 "window.focus",
@@ -220,6 +241,34 @@ fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             let response = request_once("tab.new", json!({ "window_id": window }), timeout)?;
             print_response(&response, options.pretty)
         },
+        CliCommand::CloseTab { window, tab_index } => {
+            let response = request_once(
+                "tab.close",
+                json!({ "window_id": window, "tab_index": tab_index }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::RenameTab { window, tab_index, name } => {
+            let response = request_once(
+                "tab.rename",
+                json!({ "window_id": window, "tab_index": tab_index, "name": name }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::MoveTab { window, tab_index, to_index } => {
+            let response = request_once(
+                "tab.move",
+                json!({
+                    "window_id": window,
+                    "tab_index": tab_index,
+                    "to_index": to_index
+                }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
         CliCommand::Split { window, pane, direction } => {
             let direction = match direction {
                 ControlSplitDirection::Right => RuntimeSplitDirection::LeftRight,
@@ -228,6 +277,30 @@ fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             let response = request_once(
                 "pane.split",
                 json!({ "window_id": window, "pane_id": pane, "direction": direction }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::ClosePane { window, pane } => {
+            let response = request_once(
+                "pane.close",
+                json!({ "window_id": window, "pane_id": pane }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::ZoomPane { window, pane, zoomed } => {
+            let response = request_once(
+                "pane.zoom",
+                json!({ "window_id": window, "pane_id": pane, "zoomed": zoomed }),
+                timeout,
+            )?;
+            print_response(&response, options.pretty)
+        },
+        CliCommand::ResizePane { window, pane, ratio } => {
+            let response = request_once(
+                "pane.resize",
+                json!({ "window_id": window, "pane_id": pane, "ratio": ratio }),
                 timeout,
             )?;
             print_response(&response, options.pretty)
@@ -249,6 +322,23 @@ fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             // The prompt response carries the snapshot taken immediately after
             // submission. Using its counter as the baseline is what makes the
             // follow-up wait mean "settled again", not "already settled".
+            let baseline = pane_state_change_seq(&response, window, pane);
+            wait_cli(window, pane, wait.expect("checked above"), baseline, timeout, options.pretty)
+        },
+        CliCommand::Paste { window, pane, text, no_submit, wait } => {
+            let response = request_once(
+                "pane.paste",
+                json!({
+                    "window_id": window,
+                    "pane_id": pane,
+                    "text": text,
+                    "submit": !no_submit
+                }),
+                timeout,
+            )?;
+            if !response.ok || wait.is_none() {
+                return print_response(&response, options.pretty);
+            }
             let baseline = pane_state_change_seq(&response, window, pane);
             wait_cli(window, pane, wait.expect("checked above"), baseline, timeout, options.pretty)
         },
@@ -300,6 +390,20 @@ fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             )?;
             print_response(&response, options.pretty)
         },
+        CliCommand::ExecPane { window, pane, max_output_bytes, argv } => {
+            let response = request_once(
+                "pane.exec",
+                json!({
+                    "window_id": window,
+                    "pane_id": pane,
+                    "argv": argv,
+                    "timeout_ms": options.timeout_ms,
+                    "max_output_bytes": max_output_bytes
+                }),
+                timeout.saturating_add(Duration::from_secs(2)),
+            )?;
+            print_response(&response, options.pretty)
+        },
         CliCommand::Wait { window, pane, state, after_seq } => {
             wait_cli(window, pane, state, after_seq, timeout, options.pretty)
         },
@@ -342,7 +446,7 @@ fn wait_cli(
     print_response(&response, pretty)
 }
 
-fn wait_state_name(state: ControlWaitState) -> &'static str {
+pub(super) fn wait_state_name(state: ControlWaitState) -> &'static str {
     match state {
         ControlWaitState::Idle => "idle",
         ControlWaitState::Running => "running",
@@ -386,14 +490,18 @@ fn subscribe_cli(since: Option<u64>, timeout: Duration) -> Result<(), Box<dyn Er
 }
 
 #[derive(Debug)]
-struct CliError {
+pub(super) struct CliError {
     code: &'static str,
     message: String,
 }
 
 impl CliError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(super) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self { code, message: message.into() }
+    }
+
+    pub(super) fn code(&self) -> &'static str {
+        self.code
     }
 }
 
@@ -406,7 +514,7 @@ impl fmt::Display for CliError {
 impl Error for CliError {}
 
 #[derive(Debug)]
-struct PrintedCliError(String);
+pub(super) struct PrintedCliError(String);
 
 impl fmt::Display for PrintedCliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

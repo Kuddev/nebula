@@ -72,6 +72,25 @@ fn trace_terminal_state<U: EventListener>(stage: &str, terminal: &Term<U>) {
     );
 }
 
+/// One coalesced resize waiting at a stream boundary.
+///
+/// `notify_pty` records whether the child must see the resize: the geometry is
+/// the same either way, only the child's awareness of it differs.
+#[derive(Copy, Clone, Debug)]
+struct PendingResize {
+    window_size: WindowSize,
+    notify_pty: bool,
+}
+
+/// conhost 的一次光标真值读数。
+#[derive(Copy, Clone, Debug)]
+struct ConhostCursor {
+    /// 视口相对行（0 基）。
+    row: usize,
+    /// conhost 自己的视口高度，用来判断新尺寸有没有落地。
+    rows: u16,
+}
+
 /// 向 conhost 要光标真值：临时 `AttachConsole` 到 ConPTY 子进程的控制台，
 /// 读 `GetConsoleScreenBufferInfo`，换算成视口相对行（0 基）。
 ///
@@ -80,7 +99,7 @@ fn trace_terminal_state<U: EventListener>(stage: &str, terminal: &Term<U>) {
 /// （自身无控制台），detach 后回到无控制台状态，不影响任何组件。失败
 /// （子进程已退出、权限等）一律返回 None，对账静默放弃。
 #[cfg(windows)]
-fn conpty_cursor_viewport_row(pid: u32) -> Option<usize> {
+fn conpty_cursor_probe(pid: u32) -> Option<ConhostCursor> {
     use std::sync::Mutex;
 
     use windows_sys::Win32::Foundation::{
@@ -125,12 +144,16 @@ fn conpty_cursor_viewport_row(pid: u32) -> Option<usize> {
             return None;
         }
         let row = i32::from(info.dwCursorPosition.Y) - i32::from(info.srWindow.Top);
-        usize::try_from(row).ok()
+        let rows = i32::from(info.srWindow.Bottom) - i32::from(info.srWindow.Top) + 1;
+        Some(ConhostCursor {
+            row: usize::try_from(row).ok()?,
+            rows: u16::try_from(rows.max(0)).ok()?,
+        })
     }
 }
 
 #[cfg(not(windows))]
-fn conpty_cursor_viewport_row(_pid: u32) -> Option<usize> {
+fn conpty_cursor_probe(_pid: u32) -> Option<ConhostCursor> {
     None
 }
 
@@ -185,6 +208,9 @@ impl StreamProcessor {
                     event_proxy.send_event(Event::UserVar { name, value })
                 },
                 OscEvent::Notify(text) => event_proxy.send_event(Event::Notify(text)),
+                OscEvent::Progress { state, value } => {
+                    event_proxy.send_event(Event::Progress { state, value })
+                },
                 OscEvent::RemoteHook { token, envelope } => {
                     if self.remote_hook_token.as_deref() == Some(token.as_str()) {
                         event_proxy.send_event(Event::AiHookEnvelope(envelope));
@@ -237,6 +263,24 @@ pub enum Msg {
 
     /// Instruction to resize the PTY.
     Resize(WindowSize),
+
+    /// Reflow the local grid to a new geometry without telling the child.
+    ///
+    /// Keep local grid reflow separate from notifying the child. The legacy shell
+    /// has always done this (`window_context/split.rs`: grids every drag tick,
+    /// PTYs on settle). The
+    /// two halves have opposite cost profiles: a client-side reflow is cheap and
+    /// reversible, while every `ResizePseudoConsole` makes conhost rewrap its
+    /// own buffer, and those rewraps accumulate cursor-row drift that nothing
+    /// can undo. So the grid follows the pointer frame by frame — the viewport
+    /// on screen is always a real reflow of the real geometry — and only the
+    /// child is debounced.
+    ///
+    /// Goes through the same channel as `Resize` on purpose: the resize branch
+    /// drains everything readable against the old geometry first, so absolute
+    /// CUP sequences produced at the old width are never parsed into the new
+    /// grid. A UI thread reaching into `Term::resize` directly would skip that.
+    ResizeGrid(WindowSize),
 }
 
 /// The main event loop.
@@ -289,7 +333,7 @@ where
     ///
     /// Returns `Err(())` when a shutdown message was received; otherwise the
     /// last resize in this channel batch is returned for an ordered commit.
-    fn drain_recv_channel(&mut self, state: &mut State) -> Result<Option<WindowSize>, ()> {
+    fn drain_recv_channel(&mut self, state: &mut State) -> Result<Option<PendingResize>, ()> {
         // Resize storms (live window drags) queue faster than
         // ResizePseudoConsole drains them — the console host performs a full
         // viewport reflow per call. Within one drain only the newest size
@@ -297,16 +341,55 @@ where
         // supersedes them), and the final size is never dropped because it is
         // always the last one seen. The slower the host reflows, the more
         // sizes pile up per drain and the harder the coalescing works.
-        let mut resize = None;
+        //
+        // Grid-only and full resizes coalesce into the same slot, and a full
+        // resize never loses to a later grid-only one: the child must still be
+        // told about the geometry it is already producing output for. The
+        // reverse is fine — a full resize supersedes a pending grid-only one,
+        // because it reflows the grid too.
+        let mut resize: Option<PendingResize> = None;
         while let Some(msg) = self.rx.recv() {
             match msg {
                 Msg::Input(input) => state.write_list.push_back(input),
-                Msg::Resize(window_size) => resize = Some(window_size),
+                Msg::Resize(window_size) => {
+                    resize = Some(PendingResize { window_size, notify_pty: true })
+                },
+                Msg::ResizeGrid(window_size) => {
+                    let notify_pty = resize.is_some_and(|pending| pending.notify_pty);
+                    resize = Some(PendingResize { window_size, notify_pty });
+                },
                 Msg::Shutdown => return Err(()),
             }
         }
 
         Ok(resize)
+    }
+
+    /// 向 conhost 要光标真值并把本地网格滚到同一坐标系。
+    ///
+    /// `expect_rows` 非 None 时只采信视口高度已经等于该值的读数：
+    /// `ResizePseudoConsole` 之后 conhost 若还停在旧几何，它报的行号属于上一
+    /// 个坐标系，照它对账会把网格滚到更错的位置。宁可放弃这一次——死线上的
+    /// 兜底探针会再来一遍。
+    fn realign_to_conpty(&mut self, stage: &str, expect_rows: Option<u16>) {
+        let Some(probe) = self.pty.child_pid().and_then(conpty_cursor_probe) else {
+            return;
+        };
+        if resize_trace_enabled() {
+            eprintln!(
+                "[nebula:resize-trace] {stage} conhost row={} rows={} expect_rows={expect_rows:?}",
+                probe.row, probe.rows,
+            );
+        }
+        if expect_rows.is_some_and(|rows| rows != probe.rows) {
+            return;
+        }
+        let mut terminal = self.terminal.lock();
+        trace_terminal_state(&format!("before-{stage}"), &terminal);
+        terminal.conpty_realign(probe.row);
+        trace_terminal_state(&format!("after-{stage}"), &terminal);
+        drop(terminal);
+        self.event_proxy.send_event(Event::Wakeup);
     }
 
     #[inline]
@@ -472,18 +555,12 @@ where
                 }
 
                 // ConPTY 光标对账到点：向 conhost 要真值并把本地网格滚到同
-                // 一坐标系（机理见 `Term::conpty_realign`）。
+                // 一坐标系（机理见 `Term::conpty_realign`）。这是兜底的一次
+                // ——resize 边界上已经同步对过一次账，这里只补 conhost 事后
+                // 才塌缩的情况，所以不校验视口高度。
                 if state.align_at.is_some_and(|at| Instant::now() >= at) {
                     state.align_at = None;
-                    if let Some(target) = self.pty.child_pid().and_then(conpty_cursor_viewport_row)
-                    {
-                        let mut terminal = self.terminal.lock();
-                        trace_terminal_state("before-align", &terminal);
-                        terminal.conpty_realign(target);
-                        trace_terminal_state("after-align", &terminal);
-                        drop(terminal);
-                        self.event_proxy.send_event(Event::Wakeup);
-                    }
+                    self.realign_to_conpty("align", None);
                 }
 
                 // Handle synchronized update timeout. The align deadline can
@@ -503,7 +580,7 @@ where
                     Err(()) => break,
                 };
 
-                if let Some(window_size) = pending_resize {
+                if let Some(PendingResize { window_size, notify_pty }) = pending_resize {
                     // A resize is a stream boundary, not a UI-side property.
                     // Drain everything already readable while the grid still
                     // has the old geometry; otherwise old-width absolute CUP
@@ -530,14 +607,36 @@ where
                         let mut terminal = self.terminal.lock();
                         trace_terminal_state("before-resize", &terminal);
                         terminal.resize(window_size);
-                        trace_terminal_state("after-resize", &terminal);
+                        trace_terminal_state(
+                            if notify_pty { "after-resize" } else { "after-resize-grid" },
+                            &terminal,
+                        );
                     }
-                    self.pty.on_resize(window_size);
-                    state.stream.resize(window_size);
-                    // resize 尘埃落定后做一次 ConPTY 光标对账；新 resize 顺
-                    // 延死线，风暴天然合并成一次探针。
-                    state.align_at = Some(Instant::now() + ALIGN_DELAY);
-                    self.event_proxy.send_event(Event::Wakeup);
+                    // Grid-only: the child keeps the geometry it is producing
+                    // output for, so conhost's buffer is untouched and there is
+                    // nothing to reconcile against — skip both the
+                    // ResizePseudoConsole and the align probe. The reflow above
+                    // is what keeps the viewport on screen honest while a drag
+                    // is still in flight.
+                    if !notify_pty {
+                        self.event_proxy.send_event(Event::Wakeup);
+                    } else {
+                        self.pty.on_resize(window_size);
+                        state.stream.resize(window_size);
+                        // 对账的唯一可信时点就是这里：`ResizePseudoConsole` 是同步
+                        // 的，返回时 conhost 已按新宽度 rewrap 完毕，而本地网格还是
+                        // 纯 reflow 的结果——两侧都没有被重绘字节动过，行号差就是
+                        // 两种折行语义的真实差值。等到下面 pty_read 把 PSReadLine
+                        // 的绝对 CUP 解析进来，光标已经被搬到 conhost 的坐标上，
+                        // 差值归零，判据就永久丢失了（字节取证：分屏后 after-resize
+                        // 是 cursor=15/prompts=[15]，120ms 后的 before-align 已经变成
+                        // cursor=19/prompts=[15]——错位既成事实却测不出来）。
+                        self.realign_to_conpty("align-sync", Some(window_size.num_lines));
+                        // conhost 事后才做的塌缩/重锚探不到，留一次死线兜底；新
+                        // resize 顺延死线，风暴天然合并成一次探针。
+                        state.align_at = Some(Instant::now() + ALIGN_DELAY);
+                        self.event_proxy.send_event(Event::Wakeup);
+                    }
                 }
 
                 for event in events.iter() {
@@ -651,6 +750,14 @@ impl event::OnResize for Notifier {
     }
 }
 
+impl Notifier {
+    /// Reflow the grid to `window_size` and leave the child on its old size.
+    /// See [`Msg::ResizeGrid`] for why the two halves are split.
+    pub fn on_resize_grid(&mut self, window_size: WindowSize) {
+        let _ = self.0.send(Msg::ResizeGrid(window_size));
+    }
+}
+
 #[derive(Debug)]
 pub enum EventLoopSendError {
     /// Error polling the event loop.
@@ -716,7 +823,7 @@ pub struct State {
     writing: Option<Writing>,
     stream: StreamProcessor,
     /// ConPTY 光标对账的死线：resize 提交后 `ALIGN_DELAY` 触发，见
-    /// `conpty_cursor_viewport_row`。
+    /// `conpty_cursor_probe`。
     align_at: Option<Instant>,
 }
 

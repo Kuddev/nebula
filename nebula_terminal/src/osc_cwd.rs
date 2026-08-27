@@ -51,6 +51,14 @@ pub enum OscEvent {
     UserVar { name: String, value: String },
     /// OSC 9 — free-text program notification (iTerm style).
     Notify(String),
+    /// OSC 9;4 — ConEmu 任务进度。`state` 是原始状态码，`value` 是 0..=100 的
+    /// 百分比（只有 state 1 和 4 带值）。
+    ///
+    /// ConEmu 只定义 0 清除 / 1 正常 / 2 错误 / 3 不确定 / 4 暂停。这里不在解析
+    /// 层做语义收窄：部分 shell 集成实测会用规范外的 `9;4;5;0` 表示「成功完成」，
+    /// 把未知码当成非法而丢掉，等于让进度条卡在最后一个状态上
+    /// 永远不消失。映射交给消费端。
+    Progress { state: u8, value: Option<u8> },
     /// Nebula 远端 Hook 私有 OSC：随机通道令牌 + 原始 Hook 信封。
     RemoteHook { token: String, envelope: Vec<u8> },
     /// OSC 1337 `File=...inline=1:<base64>` — an iTerm2 inline image (PNG).
@@ -216,10 +224,19 @@ impl CwdSniffer {
         }
         if let Some(rest) = self.payload.strip_prefix(b"9;") {
             // OSC 9 family. `9;9;` (cwd) matched above; `9;4;` is ConEmu
-            // progress (no consumer yet); anything else is an iTerm-style
-            // text notification.
-            if rest.starts_with(b"4;") {
-                return None;
+            // progress; anything else is an iTerm-style text notification.
+            if let Some(progress) = rest.strip_prefix(b"4;") {
+                let mut fields = progress.split(|&b| b == b';');
+                let state = fields
+                    .next()
+                    .and_then(|field| std::str::from_utf8(field).ok())
+                    .and_then(|field| field.trim().parse::<u8>().ok())?;
+                let value = fields
+                    .next()
+                    .and_then(|field| std::str::from_utf8(field).ok())
+                    .and_then(|field| field.trim().parse::<u8>().ok())
+                    .map(|percent| percent.min(100));
+                return Some(OscEvent::Progress { state, value });
             }
             let text = String::from_utf8_lossy(rest).trim().to_owned();
             return (!text.is_empty()).then_some(OscEvent::Notify(text));
@@ -515,9 +532,29 @@ mod tests {
             events(b"\x1b]9;build done\x07"),
             vec![(15, OscEvent::Notify("build done".into()))]
         );
-        // ConEmu progress (9;4) is reserved; cwd (9;9) must keep precedence.
-        assert!(events(b"\x1b]9;4;1;50\x07").is_empty());
+        // `9;9;` (cwd) must keep precedence over the free-text notification.
         assert_eq!(one(b"\x1b]9;9;C:\\w\x07").as_deref(), Some("C:\\w"));
+    }
+
+    /// OSC 9;4 是 ConEmu 的任务进度，不是文本通知。状态码原样带出去，规范外的
+    /// 码也要带（部分 shell 集成会用 `9;4;5;0` 表示成功完成）：在解析层判非法
+    /// 会让进度条永远停在最后一个状态上，语义收窄留给消费端。
+    #[test]
+    fn osc9_4_reports_conemu_progress() {
+        assert_eq!(
+            events(b"\x1b]9;4;1;50\x07"),
+            vec![(11, OscEvent::Progress { state: 1, value: Some(50) })]
+        );
+        assert_eq!(
+            events(b"\x1b]9;4;3\x07"),
+            vec![(8, OscEvent::Progress { state: 3, value: None })]
+        );
+        assert_eq!(
+            events(b"\x1b]9;4;5;0\x07"),
+            vec![(10, OscEvent::Progress { state: 5, value: Some(0) })]
+        );
+        // 状态码读不出来就不是一条进度事件。
+        assert!(events(b"\x1b]9;4;x\x07").is_empty());
     }
 
     #[test]

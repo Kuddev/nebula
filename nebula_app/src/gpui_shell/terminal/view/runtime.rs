@@ -3,6 +3,7 @@
 use gpui::{Context, EventEmitter as _};
 use nebula_terminal::grid::Dimensions as _;
 use nebula_terminal::index::{Column, Line, Point as TermPoint};
+use nebula_terminal::term::TermMode;
 
 use super::{SidebarActivity, TerminalView, TerminalViewEvent};
 
@@ -32,8 +33,22 @@ impl TerminalView {
         // `command_running` 是 OSC 133 的忠实记录，但 133;D 会因为宿主 shell
         // 被 cmd/wsl/ssh 接管而永不到达；`command_running_disproved` 是进程树
         // 给出的反证，看门狗每 2 秒复核一次。
+        //
+        // `running_program` 必须接受同一条判据。它是推断出来的（PowerShell 用
+        // `NEBULA|` 标题上报、或从命令行首 token 提取），而接管终端的那个 shell
+        // 不会再更新标题，于是这个值会永远停在最后一次推断上。少了下面这层
+        // 判断，pane 就会一直转圈：`command_running` 那边早已被反证，Running
+        // 却从这条 OR 分支漏了出来。
+        //
+        // 前台是交互式 shell 只说明「有个已知程序占着终端」，不说明有活儿在跑。
+        // 真在那个 shell 里跑起活儿由上面 `command_running` 那条路负责——进程树
+        // 会看到多出来的子进程，撤销反证。
+        let program_is_work = self
+            .running_program
+            .as_deref()
+            .is_some_and(|program| !crate::process_tree::is_interactive_shell_command(program));
         if (self.command_running && !self.command_running_disproved)
-            || self.running_program.is_some()
+            || program_is_work
             || self
                 .ssh_stage
                 .as_ref()
@@ -52,6 +67,24 @@ impl TerminalView {
             .map(|identity| identity.source.as_str())
             .or(self.running_program.as_deref())?;
         let kind = crate::ai_agents::AgentKind::parse(raw)?;
+        Some(self.runtime_agent_for_kind(kind))
+    }
+
+    /// Send-to-Chat 只能投递给当前仍占据 pane 的 Agent。`ai_session` 会为会话
+    /// 恢复/分叉保留历史身份，不能单独证明 CLI 仍在前台；进程树已经反证命令
+    /// 结束时也必须立即排除，避免把多行引用送回普通 shell。
+    pub fn runtime_chat_agent(&self) -> Option<crate::runtime_api::RuntimeAgent> {
+        let kind = runtime_chat_agent_kind(
+            self.running_program.as_deref(),
+            self.command_running_disproved,
+        )?;
+        Some(self.runtime_agent_for_kind(kind))
+    }
+
+    fn runtime_agent_for_kind(
+        &self,
+        kind: crate::ai_agents::AgentKind,
+    ) -> crate::runtime_api::RuntimeAgent {
         let state_source = match self.agent_status_source {
             crate::ai_agents::AgentStatusSource::Hook => {
                 crate::runtime_api::RuntimeAgentStateSource::Hook
@@ -64,7 +97,7 @@ impl TerminalView {
                 crate::runtime_api::RuntimeAgentStateSource::Process
             },
         };
-        Some(crate::runtime_api::RuntimeAgent {
+        crate::runtime_api::RuntimeAgent {
             agent_id: None,
             generation: None,
             name: None,
@@ -75,17 +108,17 @@ impl TerminalView {
             state_source,
             state_rule: self.agent_status_rule.clone(),
             hook_seen: self.agent_hook_seen,
-        })
+        }
     }
 
     pub fn sidebar_activity(&self) -> SidebarActivity {
         match self.runtime_task_state() {
             crate::runtime_api::RuntimeTaskState::Running => SidebarActivity::Running,
+            crate::runtime_api::RuntimeTaskState::WaitingInput => SidebarActivity::WaitingInput,
             crate::runtime_api::RuntimeTaskState::Attention => SidebarActivity::Attention,
             crate::runtime_api::RuntimeTaskState::Finished => SidebarActivity::Done,
             crate::runtime_api::RuntimeTaskState::Failed => SidebarActivity::Failed,
-            crate::runtime_api::RuntimeTaskState::Idle
-            | crate::runtime_api::RuntimeTaskState::WaitingInput => SidebarActivity::Idle,
+            crate::runtime_api::RuntimeTaskState::Idle => SidebarActivity::Idle,
         }
     }
 
@@ -322,6 +355,139 @@ impl TerminalView {
         Ok(())
     }
 
+    /// 三层护栏里唯一强制的那一层。
+    ///
+    /// 另两层都能被绕过，所以都只是护栏：第一层是便利层，Send-to-Chat 的目标
+    /// 列表把远端 pane 明确标成远端主机，防的是手滑选错；第二层是自查层，远端
+    /// pane 的环境里带 `NEBULA_PANE_REMOTE=1`，愿意自查的被调方可以自己拒绝。
+    /// 这一层不同：判据是 pane 自己的身份，与调用方声明了什么无关，任何携带
+    /// 本地上下文的写入都必须先过它。
+    ///
+    /// 规则只有一条：**程序不得把本地内容自动送进远端 pane**。用户在对话框里
+    /// 当场选中一个 SSH pane 是知情的；agent 或 Recipe 把本地选区自动发到别人
+    /// 的主机上不是——那是一次数据外传，而且没有任何人在看着。
+    ///
+    /// 注意这里不拦纯指令（`pane.run` / `pane.prompt`）：对 SSH pane 下命令本身
+    /// 就是远端编排的正常用法，风险在于**内容**从本地流出，不在于写入动作。
+    fn ensure_local_context_allowed(
+        &self,
+        origin: InputOrigin,
+    ) -> Result<(), crate::runtime_api::ApiError> {
+        match local_context_refusal(origin, self.ssh_destination.as_deref()) {
+            Some(reason) => Err(crate::runtime_api::ApiError::new("remote_target_refused", reason)),
+            None => Ok(()),
+        }
+    }
+
+    /// 把受限 UTF-8 文本作为一整块 bracketed paste 写入 pane。Runtime API
+    /// 调用属于程序来源，本地内容不得自动流向 SSH 目标。
+    pub fn runtime_paste(
+        &mut self,
+        text: String,
+        submit: bool,
+        origin: InputOrigin,
+        cx: &mut Context<Self>,
+    ) -> Result<(), crate::runtime_api::ApiError> {
+        crate::runtime_api::validate_paste_text(&text)?;
+        self.runtime_paste_inner(text, submit, false, origin, cx)
+    }
+
+    /// Agent 版本额外要求目标仍是当前活跃会话；managed generation 的校验在
+    /// workspace 调度层完成，这里负责防止历史身份落回普通 shell。
+    pub fn runtime_agent_paste(
+        &mut self,
+        text: String,
+        submit: bool,
+        origin: InputOrigin,
+        cx: &mut Context<Self>,
+    ) -> Result<(), crate::runtime_api::ApiError> {
+        crate::runtime_api::validate_paste_text(&text)?;
+        self.runtime_paste_inner(text, submit, true, origin, cx)
+    }
+
+    /// Send-to-Chat 与公开 paste API 共享同一组终端安全边界；前者保留自己的
+    /// 文案校验，但不能拥有一条更宽松的字节写入旁路。
+    pub fn runtime_chat_message(
+        &mut self,
+        text: String,
+        origin: InputOrigin,
+        cx: &mut Context<Self>,
+    ) -> Result<(), crate::runtime_api::ApiError> {
+        crate::runtime_api::validate_chat_message(&text)?;
+        self.runtime_paste_inner(text, true, true, origin, cx)
+    }
+
+    fn runtime_paste_inner(
+        &mut self,
+        text: String,
+        submit: bool,
+        require_agent: bool,
+        origin: InputOrigin,
+        cx: &mut Context<Self>,
+    ) -> Result<(), crate::runtime_api::ApiError> {
+        self.ensure_local_context_allowed(origin)?;
+        let recognized_agent = self.runtime_chat_agent().is_some();
+        if require_agent && !recognized_agent {
+            return Err(crate::runtime_api::ApiError::new(
+                "invalid_target",
+                "multi-line Agent input requires a live Agent pane",
+            ));
+        }
+        if let Some(reason) = &self.exited {
+            return Err(crate::runtime_api::ApiError::new(
+                "invalid_state",
+                format!("pane has exited: {reason}"),
+            ));
+        }
+        self.ensure_runtime_readable()?;
+        if self.session.is_none() {
+            return Err(crate::runtime_api::ApiError::new(
+                "runtime_unavailable",
+                "terminal session is unavailable for this pane",
+            ));
+        }
+        if self.pending_runtime_submit.is_some() {
+            return Err(crate::runtime_api::ApiError::new(
+                "input_in_progress",
+                "the pane is still committing previous runtime input",
+            ));
+        }
+        if !self.term_mode().contains(TermMode::BRACKETED_PASTE) {
+            return Err(crate::runtime_api::ApiError::new(
+                "unsafe_input_mode",
+                "the target pane is not ready for safe multi-line input",
+            ));
+        }
+
+        if submit {
+            let submit_bytes = self.runtime_key_sequence(
+                crate::runtime_api::RuntimeKey::Enter,
+                crate::runtime_api::RuntimeKeyModifiers::default(),
+                1,
+            )?;
+            self.pending_runtime_submit = Some(crate::display::state::RuntimeSubmitBarrier {
+                baseline_screen: self.runtime_screen_snapshot().unwrap_or_default(),
+                submit_bytes,
+            });
+        }
+        self.paste_now_impl(&text, false, cx);
+        if submit {
+            self.awaiting_input = false;
+            self.mark_command_running();
+            if recognized_agent {
+                self.agent_status = crate::ai_agents::AgentStatus::Working;
+                self.agent_status_source = crate::ai_agents::AgentStatusSource::Process;
+                self.agent_status_rule = None;
+                self.agent_runtime_submit_pending = true;
+                self.agent_turn_active = true;
+                self.idle_screen_streak = 0;
+            }
+            cx.emit(TerminalViewEvent::TitleChanged);
+            cx.notify();
+        }
+        Ok(())
+    }
+
     pub fn ai_fork_command(&self) -> Option<String> {
         let identity = self.ai_session.as_ref()?;
         crate::ai_agents::AgentKind::parse(&identity.source)?.fork_command(&identity.session_id)
@@ -348,6 +514,43 @@ impl TerminalView {
         self.write_input(bytes, cx);
     }
 
+    /// 事件声明的 pane 与写管道进程的祖先链是否互相矛盾。
+    ///
+    /// 三种情况都返回 `false`（放行）：事件没有声明 pane（本就要回退焦点）、
+    /// 拿不到客户端 pid（远端 SSH 走 OSC 通道，没有本地进程）、这个 pane 还
+    /// 没有本地 shell，或者进程表给不出证据。只有明确证明「这个 pid 不在本
+    /// pane 树内」时才判为矛盾。
+    fn ai_hook_client_mismatched(&self, event: &crate::ai_hook::AiHookEvent) -> bool {
+        let Some(client_pid) = event.client_pid else { return false };
+        // 没有自报 pane 的事件不存在「声明与事实矛盾」，交给上层回退规则。
+        if event.pane != Some(self.pane_id) {
+            return false;
+        }
+        let Some(shell_pid) = self.session.as_ref().map(|session| session.shell_pid) else {
+            return false;
+        };
+        crate::process_tree::is_within_tree(client_pid, shell_pid) == Some(false)
+    }
+
+    /// 这条事件是不是来自这个 pane 的主 agent（而非它 spawn 的嵌套子代理）。
+    ///
+    /// 判据是 agent 的进程 pid：第一个报到的就是主 agent——子代理必须由主 agent
+    /// spawn，不可能先到。只有主 agent 能写 pane 的会话身份，子代理的状态边沿
+    /// 照常生效（它在干活，spinner 该转）。
+    ///
+    /// 拿不到 pid 时一律当主 agent：远端 SSH、旧版 bridge、快照竞态都会落到这
+    /// 里，宁可少一层区分，也不能把真实会话身份丢掉。
+    fn claim_primary_agent(&mut self, event: &crate::ai_hook::AiHookEvent) -> bool {
+        let Some(agent_pid) = event.agent_pid else { return true };
+        match self.primary_agent_pid {
+            Some(primary) => primary == agent_pid,
+            None => {
+                self.primary_agent_pid = Some(agent_pid);
+                true
+            },
+        }
+    }
+
     /// Apply one lifecycle event already routed to this pane by the workspace.
     ///
     /// 旧壳 `WindowContext::handle_ai_hook` 状态机的忠实移植：不能把所有
@@ -356,23 +559,66 @@ impl TerminalView {
         use crate::ai_agents::AgentStatus;
         use crate::ai_hook::AiHookKind;
 
+        // 路由第二因子：写管道那个进程必须真的跑在这个 pane 的进程树里。
+        // `NEBULA_PANE_ID` 是环境变量，任何进程都能设成别的 pane；祖先链不能
+        // 伪造。只有拿到明确反证时才拒绝，`None`（查不到、竞态）一律放行。
+        if self.ai_hook_client_mismatched(event) {
+            log::warn!(
+                "ai_hook: rejected event claiming pane {} from pid {:?} outside its process tree \
+                 (source={} kind={:?})",
+                self.pane_id,
+                event.client_pid,
+                event.source,
+                event.kind
+            );
+            return;
+        }
+
+        let verdict = crate::ai_hook::accept_for_pane(event, self.pane_id);
+        if !verdict.accepted() {
+            // 带原因：事件被静默丢掉是这条链路最难查的故障，用户只看到「通知
+            // 没出现」。原因字段直接对应事件门里的那一条规则。
+            log::debug!(
+                "ai_hook: dropped event reason={verdict:?} source={} session={:?} pane={} \
+                 kind={:?} bridge_seq={:?}",
+                event.source,
+                event.session_id,
+                self.pane_id,
+                event.kind,
+                event.bridge_sequence
+            );
+            return;
+        }
+
         // SessionEnd 可能是第一次携带最终权威 id 的事件；必须先落盘再清理
         // pane 现场，否则 CLI 正常退出后反而无法冷恢复。
-        if let Some(id) = event.session_id.as_deref() {
-            if let Err(error) =
+        //
+        // 但嵌套子代理的会话不能落盘也不能上位：`claude -p` 起的子代理有自己的
+        // 短命 session id，把它记成这个 pane 的身份，之后 `claude --resume` 就会
+        // 指向一个早已结束的会话，真正活着的那个反而丢了。第一个报到的 agent
+        // 进程就是主 agent（子代理必须由它 spawn，不可能先到）。
+        let from_primary_agent = self.claim_primary_agent(event);
+        if from_primary_agent
+            && let Some(id) = event.session_id.as_deref()
+            && let Err(error) =
                 crate::ai_sessions::record_hook_session(&event.source, id, &self.cwd, None)
-            {
-                log::warn!("agent session index: could not record {} {id}: {error}", event.source);
-            }
+        {
+            log::warn!("agent session index: could not record {} {id}: {error}", event.source);
         }
         match event.kind {
+            // 嵌套子代理结束了，主 agent 还在跑：绝不能清 pane 现场。这条 arm
+            // 排在前面就是为了把「谁的 SessionEnd」分开——子代理的退出对 pane
+            // 而言什么都不是。
+            AiHookKind::SessionEnd if !from_primary_agent => {},
             AiHookKind::SessionEnd => {
                 self.ai_session = None;
                 self.running_program = None;
+                self.primary_agent_pid = None;
                 self.agent_status = AgentStatus::Unknown;
                 self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
                 self.agent_status_rule = None;
                 self.agent_hook_seen = false;
+                self.agent_turn_active = false;
                 self.idle_screen_streak = 0;
                 self.agent_runtime_submit_pending = false;
             },
@@ -387,7 +633,9 @@ impl TerminalView {
                 if !matches!(kind, AiHookKind::SessionStart) {
                     self.agent_runtime_submit_pending = false;
                 }
-                if let Some(id) = event.session_id.as_deref() {
+                if from_primary_agent
+                    && let Some(id) = event.session_id.as_deref()
+                {
                     self.ai_session = Some(crate::display::AiSessionIdentity {
                         source: event.source.clone(),
                         session_id: id.to_owned(),
@@ -403,6 +651,13 @@ impl TerminalView {
                         self.agent_status = AgentStatus::Working;
                         self.agent_turn_active = true;
                     },
+                    AiHookKind::TurnDone if event.active_background_tasks() > 0 => {
+                        let active = event.active_background_tasks();
+                        self.agent_status = AgentStatus::Working;
+                        self.agent_turn_active = true;
+                        self.agent_status_rule =
+                            Some(format!("hook.background_tasks.active={active}"));
+                    },
                     AiHookKind::TurnDone | AiHookKind::NeedsAttention => {
                         let screen_asks =
                             event.kind == AiHookKind::TurnDone && self.screen_tail_asks();
@@ -416,6 +671,12 @@ impl TerminalView {
                     AiHookKind::SessionEnd => unreachable!("handled above"),
                 }
             },
+        }
+        if event.kind == AiHookKind::NeedsAttention
+            && let Some(mut attention) = event.attention.clone()
+        {
+            attention.pane_id = Some(self.pane_id);
+            cx.emit(TerminalViewEvent::AiAttention(attention));
         }
         cx.emit(TerminalViewEvent::TitleChanged);
         cx.notify();
@@ -608,6 +869,24 @@ impl TerminalView {
             self.command_running_disproved = disproved;
             cx.notify();
         }
+        // 反证成立时，把推断出来的 `running_program` 里已经过期的那部分作废。
+        // 它的来源都是推断（标题协议、命令行首 token），而进程树是客观事实：
+        // 树里没有活儿，这个值就是上一条命令留下的残留（`npm run dev` 被 Ctrl+C
+        // 掉、133;D 又没来，就是这种情形）。
+        //
+        // 交互式 shell 例外，不清：`cmd` 确实还占着这个 pane 的前台，那是要显示
+        // 给用户的正确信息，而它不算「活儿」已经由 `runtime_task_state` 里的
+        // `program_is_work` 判掉了。真在跑的 agent 也不会被误清——claude 等在提示
+        // 符上时进程仍在树里，`busy_child` 看得见，反证根本不成立。
+        if disproved
+            && self.running_program.as_deref().is_some_and(|program| {
+                !crate::process_tree::is_interactive_shell_command(program)
+            })
+        {
+            self.running_program = None;
+            cx.emit(TerminalViewEvent::TitleChanged);
+            cx.notify();
+        }
     }
 
     fn runtime_screen_snapshot(&self) -> Option<String> {
@@ -630,5 +909,73 @@ impl TerminalView {
         }
         let pending = self.pending_runtime_submit.take().expect("checked above");
         self.write_input(pending.submit_bytes, cx);
+    }
+}
+
+/// 一次写入是谁发起的。安全判定不看写了什么，看谁让写的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputOrigin {
+    /// 用户在 UI 里当场选定了目标（Send-to-Chat 对话框、右键菜单）。选择本身
+    /// 就是知情同意。
+    User,
+    /// 程序发起：runtime API、Recipe、agent 自己的 skill。没有人在看。
+    Program,
+}
+
+/// 携带本地上下文的写入是否要被拒绝，以及拒绝理由。
+///
+/// 抽成纯函数是为了能被测试钉住——这是三层护栏里唯一强制的那一条判据，不能
+/// 只存在于一个需要真实 `TerminalView` 才能触发的分支里。
+fn local_context_refusal(origin: InputOrigin, ssh_destination: Option<&str>) -> Option<String> {
+    let destination = ssh_destination?;
+    (origin == InputOrigin::Program).then(|| {
+        format!(
+            "pane targets the remote host {destination}; local context must not be sent there \
+             without an explicit user choice"
+        )
+    })
+}
+
+fn runtime_chat_agent_kind(
+    running_program: Option<&str>,
+    command_running_disproved: bool,
+) -> Option<crate::ai_agents::AgentKind> {
+    if command_running_disproved {
+        return None;
+    }
+    crate::ai_agents::AgentKind::parse(running_program?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InputOrigin, local_context_refusal, runtime_chat_agent_kind};
+
+    #[test]
+    fn historical_or_disproved_agent_is_not_a_chat_target() {
+        // `ai_session` 不进入这条判据：没有当前前台程序时，历史身份不能成为
+        // Send-to-Chat 目标。
+        assert_eq!(runtime_chat_agent_kind(None, false), None);
+        assert_eq!(runtime_chat_agent_kind(Some("codex"), true), None);
+        assert_eq!(
+            runtime_chat_agent_kind(Some("codex"), false),
+            Some(crate::ai_agents::AgentKind::Codex)
+        );
+    }
+
+    /// 强制层的判据：本地内容不得由程序自动送进远端 pane，用户当场选中则放行。
+    #[test]
+    fn program_writes_never_carry_local_context_to_a_remote_pane() {
+        // 本地 pane：两种来源都放行。
+        assert_eq!(local_context_refusal(InputOrigin::Program, None), None);
+        assert_eq!(local_context_refusal(InputOrigin::User, None), None);
+
+        // 远端 pane：用户当场选定是知情选择，放行。
+        assert_eq!(local_context_refusal(InputOrigin::User, Some("build@10.0.0.7")), None);
+
+        // 远端 pane + 程序发起：拒绝，且理由里必须点出是哪台主机——用户要能
+        // 一眼看出内容本来会流去哪儿。
+        let refusal = local_context_refusal(InputOrigin::Program, Some("build@10.0.0.7"))
+            .expect("program writes to a remote pane must be refused");
+        assert!(refusal.contains("build@10.0.0.7"), "拒绝理由要指名远端主机：{refusal}");
     }
 }

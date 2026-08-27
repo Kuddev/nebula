@@ -15,15 +15,16 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Bounds, ContentMask, Context, Corners, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, RenderImage,
-    ScrollWheelEvent, SharedString, Styled as _, Window, div, px,
+    AppContext as _, Bounds, ContentMask, Context, Corners, EventEmitter, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Point, Render, RenderImage, ScrollWheelEvent, SharedString, Styled as _, Window, div,
+    px,
 };
 use image::Frame;
 
 use crate::display::image_viewer::ImageView;
 use crate::gpui_shell::prelude::*;
-use gpui_component::text::{TextView, TextViewStyle};
+use gpui_component::text::{TextView, TextViewState, TextViewStyle};
 
 /// 双击路由：应用内能读的开 tab（图片/文档/源码），其余交系统处理器。
 /// 源码查看是 GPUI 壳新增能力，旧壳合同（`input/chrome.rs`）之上的超集。
@@ -227,50 +228,66 @@ impl Render for ImageTabView {
 pub struct DocTabView {
     pub path: PathBuf,
     pub title: String,
-    content: SharedString,
     notice: Option<String>,
-    /// TextView 的 keyed state 标识；同路径 reload 时递增换新，让组件重新
-    /// 解析而不是沿用旧缓存。
-    revision: u64,
+    /// 必须保留组件的 managed state：真实鼠标选区、跨块文本提取和 Ctrl+C
+    /// 都由 TextView 维护，宿主只在右键时读取已经成立的选区。
+    text_view: gpui::Entity<TextViewState>,
+}
+
+pub enum DocTabViewEvent {
+    SelectionContextMenuRequested { position: Point<Pixels>, text: String },
 }
 
 impl DocTabView {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
         let title = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        let mut this =
-            Self { path, title, content: SharedString::default(), notice: None, revision: 0 };
-        this.reload();
-        this
+        let (content, notice) = load_doc_content(&path);
+        let text_view = cx.new(|cx| TextViewState::markdown(content.as_ref(), cx));
+        Self { path, title, notice, text_view }
     }
 
-    pub fn reload(&mut self) {
-        self.revision = self.revision.wrapping_add(1);
-        match std::fs::read(&self.path) {
-            Ok(bytes) => {
-                let truncated = bytes.len() > MAX_DOC_BYTES;
-                let slice = if truncated { &bytes[..MAX_DOC_BYTES] } else { &bytes[..] };
-                let text = rewrite_doc_images(&String::from_utf8_lossy(slice), self.path.parent());
-                self.notice = truncated
-                    .then(|| format!("文件超过 {} KB，仅显示开头部分", MAX_DOC_BYTES / 1024));
-                self.content = text.into();
-            },
-            Err(error) => {
-                self.content = SharedString::default();
-                self.notice = Some(format!("无法读取 {}: {error}", self.path.display()));
-            },
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let (content, notice) = load_doc_content(&self.path);
+        self.notice = notice;
+        self.text_view.update(cx, |state, cx| state.set_text(content.as_ref(), cx));
+    }
+
+    fn on_right_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let text = self.text_view.read(cx).selected_text();
+        if text.trim().is_empty() {
+            return;
         }
+        cx.emit(DocTabViewEvent::SelectionContextMenuRequested { position: event.position, text });
+        cx.stop_propagation();
+    }
+}
+
+impl EventEmitter<DocTabViewEvent> for DocTabView {}
+
+fn load_doc_content(path: &Path) -> (SharedString, Option<String>) {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let truncated = bytes.len() > MAX_DOC_BYTES;
+            let slice = if truncated { &bytes[..MAX_DOC_BYTES] } else { &bytes[..] };
+            let text = rewrite_doc_images(&String::from_utf8_lossy(slice), path.parent());
+            let notice =
+                truncated.then(|| format!("文件超过 {} KB，仅显示开头部分", MAX_DOC_BYTES / 1024));
+            (text.into(), notice)
+        },
+        Err(error) => {
+            (SharedString::default(), Some(format!("无法读取 {}: {error}", path.display())))
+        },
     }
 }
 
 impl Render for DocTabView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let path_label: SharedString = self.path.display().to_string().into();
-        let doc_id = SharedString::from(format!("doc-tab-{}-{}", self.revision, self.title));
 
         v_flex()
             .size_full()
@@ -298,7 +315,7 @@ impl Render for DocTabView {
                             .xsmall()
                             .tooltip("重新读取文件")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.reload();
+                                this.reload(cx);
                                 cx.notify();
                             })),
                     ),
@@ -307,8 +324,11 @@ impl Render for DocTabView {
                 root.child(div().text_xs().text_color(theme.warning).child(notice))
             })
             .child(
-                div().flex_1().min_h_0().child(
-                    TextView::markdown(doc_id, self.content.clone())
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+                    .child(TextView::new(&self.text_view)
                         .selectable(true)
                         .scrollable(true)
                         // image_base：相对图片路径（README 的 logo/截图）按
@@ -318,8 +338,7 @@ impl Render for DocTabView {
                             highlight_theme: cx.theme().highlight_theme.clone(),
                             is_dark: cx.theme().is_dark(),
                             ..TextViewStyle::default()
-                        }),
-                ),
+                        })),
             )
     }
 }

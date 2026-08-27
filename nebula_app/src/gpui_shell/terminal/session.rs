@@ -79,12 +79,32 @@ pub type SpawnedSession =
 /// `shell`：设置里选定的默认 shell（`shell_detect::resolve_id` +
 /// `DetectedShell::shell()`，含各家集成注入）；`None` 走引擎默认
 /// （PowerShell + PTY 层集成）——语义与旧壳 `default_shell_launch` 一致。
-pub fn spawn(
-    window_size: WindowSize,
-    term_config: Config,
+pub(super) fn local_options(
     shell: Option<tty::Shell>,
     pane_id: u64,
     cwd: Option<std::path::PathBuf>,
+) -> tty::Options {
+    let mut options = tty::Options::default();
+    options.shell = shell;
+    options.working_directory = cwd;
+    // WSL tab 的 cwd 上报（OSC 7）：来宾登录 shell 默认不发，目录树与 Git 视图
+    // 因此永远停在"等待终端上报工作目录"。只对 `wsl.exe` 启动生效，见
+    // [`crate::shell_detect::wsl_cwd_report_env`]。
+    if let Some(launch) = &options.shell {
+        let program = launch.program().to_owned();
+        let args = launch.args().to_vec();
+        options.env.extend(crate::shell_detect::wsl_cwd_report_env(&program, &args));
+    }
+    // 身份契约必须最后写：它以环境表里 `WSLENV` 的现值为基准合并，才能同时
+    // 保住上面那段的 cwd 上报条目。见 [`crate::agent_env`]。
+    crate::agent_env::apply(&mut options.env, pane_id);
+    options
+}
+
+pub fn spawn(
+    window_size: WindowSize,
+    term_config: Config,
+    options: tty::Options,
 ) -> std::io::Result<SpawnedSession> {
     let (tx, rx) = unbounded();
     let (stage_tx, stage_rx) = unbounded();
@@ -96,18 +116,6 @@ pub fn spawn(
     };
     let term = Arc::new(FairMutex::new(Term::new(term_config, &grid, proxy.clone())));
 
-    let mut options = tty::Options::default();
-    options.shell = shell;
-    options.working_directory = cwd;
-    options.env.insert(crate::ai_hook::PANE_ENV.to_owned(), pane_id.to_string());
-    // WSL tab 的 cwd 上报（OSC 7）：来宾登录 shell 默认不发，目录树与 Git 视图
-    // 因此永远停在"等待终端上报工作目录"。只对 `wsl.exe` 启动生效，见
-    // [`crate::shell_detect::wsl_cwd_report_env`]。
-    if let Some(launch) = &options.shell {
-        let program = launch.program().to_owned();
-        let args = launch.args().to_vec();
-        options.env.extend(crate::shell_detect::wsl_cwd_report_env(&program, &args));
-    }
     tty::setup_env();
     let pty = tty::new(&options, window_size, 0)?;
     let shell_pid = pty.child_pid().unwrap_or(0);

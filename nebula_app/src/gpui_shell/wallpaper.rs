@@ -696,7 +696,7 @@ pub fn paint_wallpaper_card(bounds: Bounds<Pixels>, window: &mut Window, cx: &Ap
     let _ = window.paint_image(
         bounds,
         bounds,
-        Corners::all(crate::gpui_shell::theme::card_radius()),
+        Corners::all(crate::gpui_shell::theme::card_radius(cx)),
         image,
         0,
         false,

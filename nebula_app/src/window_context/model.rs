@@ -33,6 +33,8 @@ pub struct Pane {
     pub inline_search_state: InlineSearchState,
     pub id: PaneId,
     pub title: String,
+    /// 独立非 TTY child 可复用的创建时环境；SSH/文档 pane 没有本地上下文。
+    pub exec_context: Option<crate::runtime_exec::PaneExecContext>,
     /// 原生 SSH Pane 的稳定连接目标。文件面板必须依据会话身份路由到 SFTP，
     /// 不能从终端标题或用户刚输入的命令反推，否则分屏和全屏 TUI 都会误判。
     pub ssh_destination: Option<String>,

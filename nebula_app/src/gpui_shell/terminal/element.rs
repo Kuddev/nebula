@@ -22,10 +22,12 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 use nebula_terminal::grid::Dimensions as _;
 use nebula_terminal::render::{RenderSnapshot, SnapshotConfig, boxdraw};
+use nebula_terminal::term::color::Colors;
 #[cfg(windows)]
 use nebula_terminal::term::TermMode;
-use nebula_terminal::vte::ansi::{Color, CursorShape};
+use nebula_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
+use super::colors::Palette;
 use super::view::TerminalView;
 
 pub struct TerminalElement {
@@ -78,6 +80,37 @@ impl TerminalElement {
         let history = term.history_size();
         let dashed = super::osc_links::dashed_cells(&term, &hint_config, rows, cols);
         Some((snapshot, prompt_line, history, dashed))
+    }
+
+    /// 把**应用写死的**颜色按当前主题矫正，直接写回快照。
+    ///
+    /// 用的是旧壳那一个 `TerminalColorResolver`（`display::terminal_color`）：最低
+    /// 对比度 + 旧主题表面重映射，判据、缓存语义、`is_terminal_graphic` 白名单全
+    /// 部同源。没有这一步，codex/cc 用 truecolor 写死的配色在切主题后原样留在屏
+    /// 幕上——它们只在启动那一刻用 OSC 11 问过一次底色。
+    ///
+    /// 主题自己的颜色（ANSI 0-15、powerline 16-23）不进这条路：`is_fixed_color`
+    /// 把它们判成非 fixed，它们本来就跟着 palette 走。
+    ///
+    /// 三个实现选择：
+    /// - **写回 `Color::Spec` 而不是另开一张色表**：下游 `theme.resolve` 对 `Spec`
+    ///   原样透传，整条绘制路径一行都不用改。
+    /// - **一帧一次 `view.update`**：`resolve_foreground` 要 `&mut`（结果缓存），
+    ///   逐格去借实体比整帧借一次贵得多。
+    /// - **底色按 run 矫正，不带 `is_terminal_graphic` 守卫**（前景带）。旧壳对
+    ///   底色也上了那道守卫，于是一个框线字符的底不跟着搬、邻居跟着搬，浅色主题
+    ///   上会留一道缝。要逐字符复刻就得按字符切碎 bg run，代价远大于那点一致性，
+    ///   所以这里刻意不跟——前景才是那条注释真正在讲的东西。
+    fn resolve_app_colors(
+        &self,
+        snap: &mut RenderSnapshot,
+        theme: &Palette,
+        overrides: &Colors,
+        cx: &mut App,
+    ) {
+        self.view.update(cx, |view, _| {
+            resolve_app_colors_into(snap, theme, overrides, &mut view.color_resolver);
+        });
     }
 }
 
@@ -189,7 +222,7 @@ impl Element for TerminalElement {
         let focused = focus_handle.is_focused(window);
         // 旧壳只让光标本身参与闪烁；ghost、弹窗补齐和 IME 仍复用同一个坐标锚点。
         let cursor_visible = self.view.read(cx).cursor_visible();
-        let Some((snap, prompt_line, history, dashed)) =
+        let Some((mut snap, prompt_line, history, dashed)) =
             self.snapshot(layout.rows, layout.cols, cx)
         else {
             return;
@@ -203,6 +236,7 @@ impl Element for TerminalElement {
             view.drive_pending_remote_dir(cx);
         });
         let overrides = snap.color_overrides;
+        self.resolve_app_colors(&mut snap, &theme, &overrides, cx);
         let (theme_anchor, theme_is_light) = themed_anchor(&theme, cx);
         let host_cursor_follows_theme = is_default_host_cursor(&theme);
         let app_cursor = snap.cursor.as_ref().filter(|cursor| {
@@ -303,6 +337,14 @@ impl Element for TerminalElement {
                 selection_fill,
             ));
         }
+        let selection_foreground = theme.selection_foreground;
+        let selected_foreground = |row: u16, col: u16| -> Option<Rgba> {
+            let foreground = selection_foreground?;
+            snap.selection_runs
+                .iter()
+                .any(|run| run.row == row && run.start <= col && col < run.end)
+                .then_some(foreground)
+        };
 
         // 聚焦时的块状光标：旧壳默认主题走半透明 theme_anchor（浅色 0.20），
         // 叠在格子/壁纸上，不反色文字；用户显式配置光标才用实心色。
@@ -402,6 +444,8 @@ impl Element for TerminalElement {
                 app_cursor_color.unwrap_or_else(|| theme.resolve(glyph.fg, &overrides, glyph.bold))
             } else if cursor_inverts(glyph.row, glyph.col) {
                 theme.background
+            } else if let Some(foreground) = selected_foreground(glyph.row, glyph.col) {
+                foreground
             } else {
                 theme.resolve(glyph.fg, &overrides, glyph.bold)
             };
@@ -456,6 +500,8 @@ impl Element for TerminalElement {
                 }
                 let fg: Hsla = if cursor_inverts(seg.row, cell.col) {
                     theme.background.into()
+                } else if let Some(foreground) = selected_foreground(seg.row, cell.col) {
+                    foreground.into()
                 } else {
                     theme.resolve(cell.fg, &overrides, cell.bold).into()
                 };
@@ -584,7 +630,12 @@ impl Element for TerminalElement {
                 };
                 rgba_rgb(theme_anchor, alpha)
             } else {
-                theme.cursor
+                match cursor.shape {
+                    CursorShape::Beam | CursorShape::Underline => {
+                        theme.cursor_stroke.unwrap_or(theme.cursor)
+                    },
+                    _ => theme.cursor,
+                }
             };
             let width = if cursor.wide { 2 } else { 1 };
             let rect = cell_rect(cursor.row as usize, cursor.col as usize, width);
@@ -1350,12 +1401,55 @@ fn default_cursor_rgb() -> (u8, u8, u8) {
     }
 }
 
-fn rgb_from_rgba(color: Rgba) -> crate::display::color::Rgb {
+pub(super) fn rgb_from_rgba(color: Rgba) -> crate::display::color::Rgb {
     let (r, g, b) = rgba_channels(color);
     crate::display::color::Rgb::new(r, g, b)
 }
 
-fn rgba_rgb(color: crate::display::color::Rgb, alpha: f32) -> Rgba {
+/// [`TerminalElement::resolve_app_colors`] 的实际逻辑（脱开 GPUI 实体，可测）。
+fn resolve_app_colors_into(
+    snap: &mut RenderSnapshot,
+    theme: &Palette,
+    overrides: &Colors,
+    resolver: &mut crate::display::terminal_color::TerminalColorResolver,
+) {
+    use crate::display::content::is_terminal_graphic;
+    use crate::display::terminal_color::is_fixed_color;
+
+    let named = |name| rgb_from_rgba(theme.resolve(Color::Named(name), overrides, false));
+    let theme_fg = named(NamedColor::Foreground);
+    let theme_bg = named(NamedColor::Background);
+
+    for run in &mut snap.bg_runs {
+        let base = rgb_from_rgba(theme.resolve(run.color, overrides, false));
+        let resolved = resolver.resolve_background(base, is_fixed_color(run.color, overrides));
+        if resolved != base {
+            run.color = Color::Spec(resolved.0);
+        }
+    }
+    for cell in snap.segments.iter_mut().flat_map(|segment| segment.cells.iter_mut()) {
+        // 图形字符的颜色表达图形本身，不是正文对比度——图标被「矫正」成另一个
+        // 颜色就是另一张图了。
+        let graphic = cell.text.chars().next().is_some_and(is_terminal_graphic);
+        if graphic || !is_fixed_color(cell.fg, overrides) {
+            continue;
+        }
+        // 对比度是一对颜色的属性：这个前景可不可读，取决于它**这一格**底下是
+        // 什么，而不是主题底色。默认底色的格子没有 bg run，所以 `SnapCell::bg`
+        // 单独带着这个值。
+        let bg_base = rgb_from_rgba(theme.resolve(cell.bg, overrides, false));
+        let bg = resolver.resolve_background(bg_base, is_fixed_color(cell.bg, overrides));
+        // bold 提亮（0-7 → 8-15）必须发生在矫正**之前**，否则写回的 `Spec` 会把
+        // 提亮吃掉。
+        let base = rgb_from_rgba(theme.resolve(cell.fg, overrides, cell.bold));
+        let resolved = resolver.resolve_foreground(base, bg, true, theme_fg, theme_bg);
+        if resolved != base {
+            cell.fg = Color::Spec(resolved.0);
+        }
+    }
+}
+
+pub(super) fn rgba_rgb(color: crate::display::color::Rgb, alpha: f32) -> Rgba {
     Rgba {
         r: f32::from(color.r) / 255.0,
         g: f32::from(color.g) / 255.0,
@@ -1380,6 +1474,76 @@ fn themed_anchor(palette: &super::colors::Palette, cx: &App) -> (crate::display:
 mod tests {
     use super::completion_popup_layout;
     use crate::display::{NebulaCompletionItem, NebulaCompletionKind};
+
+    mod app_color_resolution {
+        use nebula_terminal::render::{RenderSnapshot, SnapshotConfig};
+        use nebula_terminal::term::color::Colors;
+        use nebula_terminal::term::test::TermSize;
+        use nebula_terminal::term::{Config, Term};
+        use nebula_terminal::vte::ansi::{self, Color, NamedColor};
+
+        use super::super::{Palette, resolve_app_colors_into, rgb_from_rgba};
+        use crate::display::terminal_color::TerminalColorResolver;
+        use crate::display::ui::tokens::terminal_feedback::FIXED_TEXT_MIN_CONTRAST;
+
+        /// 把一串字节喂进真终端再截快照——`RenderSnapshot` 只能这么造，顺带把
+        /// 「SGR 落到哪个 `Color` 变体」这段也一起钉住。
+        fn snapshot_of(bytes: &[u8]) -> RenderSnapshot {
+            let size = TermSize::new(40, 2);
+            let mut term = Term::new(Config::default(), &size, nebula_terminal::event::VoidListener);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(&mut term, bytes);
+            RenderSnapshot::capture(&term, &SnapshotConfig { rows: 2, cols: 40 })
+        }
+
+        fn first_cell_fg(snap: &RenderSnapshot) -> Color {
+            snap.segments.first().expect("应有一段文字").cells.first().expect("应有一格").fg
+        }
+
+        fn resolved(bytes: &[u8]) -> (Color, Palette) {
+            let theme = Palette::default();
+            let mut snap = snapshot_of(bytes);
+            let mut resolver = TerminalColorResolver::default();
+            resolve_app_colors_into(&mut snap, &theme, &Colors::default(), &mut resolver);
+            (first_cell_fg(&snap), theme)
+        }
+
+        /// 应用写死的 truecolor 在当前底色上读不出来，就得被拉到最低对比度。
+        /// 这是「深色主题下 codex 挑的配色、切成浅色主题后一片糊」的那条路。
+        #[test]
+        fn unreadable_truecolor_foreground_is_pulled_to_the_minimum_contrast() {
+            // #1a1d3a 压在默认底 #080a18 上，对比度远不到 4.5。
+            let (fg, theme) = resolved(b"\x1b[38;2;26;29;58mnearly invisible");
+            let Color::Spec(rgb) = fg else { panic!("写死色必须被矫正成具体色，实得 {fg:?}") };
+            let bg = rgb_from_rgba(theme.background);
+            assert!(
+                rgb.contrast(*bg) >= FIXED_TEXT_MIN_CONTRAST,
+                "矫正后仍不可读：{rgb:?} on {bg:?}"
+            );
+        }
+
+        /// 主题自己的 ANSI 色一根手指都不许动：它们本来就跟着 palette 走，
+        /// 换主题时会自动变。碰了就等于把用户的配色改掉。
+        #[test]
+        fn theme_owned_ansi_colors_are_left_alone() {
+            let (fg, _) = resolved(b"\x1b[31mred text");
+            assert_eq!(fg, Color::Named(NamedColor::Red));
+        }
+
+        /// 图形字符（Nerd Font 私用区、emoji）的颜色表达图形本身。哪怕它写死了
+        /// 一个在当前底色上很淡的色，也不能矫正——图标被改色就是另一张图了。
+        #[test]
+        fn graphic_glyphs_keep_their_own_color() {
+            let mut bytes = b"\x1b[38;2;26;29;58m".to_vec();
+            // U+F256 nf-fa-hand_paper_o，落在 is_terminal_graphic 的 PUA 区间。
+            bytes.extend("\u{f256}".as_bytes());
+            let (fg, _) = resolved(&bytes);
+            assert!(
+                matches!(fg, Color::Spec(rgb) if (rgb.r, rgb.g, rgb.b) == (26, 29, 58)),
+                "图形字符的写死色必须原样保留，实得 {fg:?}"
+            );
+        }
+    }
 
     #[test]
     fn popup_keeps_a_single_short_exact_command_visible() {

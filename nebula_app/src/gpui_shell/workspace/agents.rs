@@ -39,11 +39,18 @@ pub(super) fn restored_agent_command(
 pub(super) fn ai_session_palette_rows(
     sessions: impl IntoIterator<Item = crate::ai_sessions::AiSession>,
 ) -> Vec<WorkspacePaletteRow> {
-    let sessions: Vec<_> = sessions.into_iter().collect();
-    let lead_source = sessions.first().map(|session| session.source);
+    let mut source_order = std::collections::HashMap::new();
     let mut rows = Vec::new();
     for session in sessions {
-        let group_order = usize::from(lead_source.is_some_and(|source| source != session.source));
+        // scan() 已按最近使用排序；以 provider 首次出现顺序建立稳定分组，既让
+        // 最新 provider 置顶，也避免三种以上来源在时间序列中反复穿插表头。
+        let group_order = if let Some(order) = source_order.get(&session.source) {
+            *order
+        } else {
+            let order = source_order.len();
+            source_order.insert(session.source, order);
+            order
+        };
         let group = crate::display::command_palette::source_group_label(session.source);
         let place = session.place_label();
         let time = crate::ai_sessions::relative_label(session.modified);
@@ -59,10 +66,12 @@ pub(super) fn ai_session_palette_rows(
                 group: group.clone(),
                 label: session.title.clone(),
                 hint: format!("恢复 · {source} · {location}"),
+                hint_style: super::WorkspacePaletteHintStyle::Metadata,
                 search: format!("恢复 resume {search}"),
                 action: WorkspacePaletteAction::RunAiSession { command, cwd: cwd.clone() },
                 icon: None,
                 icon_glyph: None,
+                icon_path: None,
             });
         }
         if let Some(command) = session.fork_command() {
@@ -71,10 +80,12 @@ pub(super) fn ai_session_palette_rows(
                 group: group.clone(),
                 label: format!("分叉 · {}", session.title),
                 hint: format!("{source} · {location}"),
+                hint_style: super::WorkspacePaletteHintStyle::Metadata,
                 search: format!("分叉 fork {search}"),
                 action: WorkspacePaletteAction::RunAiSession { command, cwd: cwd.clone() },
                 icon: None,
                 icon_glyph: None,
+                icon_path: None,
             });
         }
     }

@@ -488,6 +488,12 @@ async fn run_session_async<H: SshEventHost>(
         .await?;
     let hook_token = remote_hook_token()?;
     channel.set_env(false, "NEBULA_REMOTE_HOOK_TOKEN", hook_token.clone()).await?;
+    // 三层护栏的第二层（自查层）：远端 pane 明确自我声明。愿意自查的被调方
+    // ——Recipe、skill、包装脚本——可以据此拒绝把本地内容往这条通道里送。这只是
+    // 护栏，不是强制：环境变量能被清掉。强制层在
+    // `TerminalView::ensure_local_context_allowed`，判据是 pane 自己的身份。
+    // `set_env` 取决于远端 sshd 的 AcceptEnv，失败不影响会话本身。
+    let _ = channel.set_env(false, "NEBULA_PANE_REMOTE", "1").await;
     channel.request_shell(true).await?;
     // Shell 已就绪：连接卡片到此让位给真实终端，持续重绘随之停止。此后再
     // 出错就是会话中途断开，不该复活卡片。
@@ -520,6 +526,9 @@ async fn run_session_async<H: SshEventHost>(
                         u32::from(size.cell_height) * u32::from(size.num_lines),
                     ).await?;
                 },
+                // 只改本地几何：远端保持旧尺寸，等去抖后的 `Resize` 才发
+                // `window_change`。交互式拖拽每帧都会来一条。
+                Some(Msg::ResizeGrid(size)) => stream.resize(size),
                 Some(Msg::Shutdown) | None => {
                     let _ = channel.eof().await;
                     break;

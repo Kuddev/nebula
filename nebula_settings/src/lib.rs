@@ -195,6 +195,10 @@ pub enum ThemeName {
     CoalDark,
     LinenLight,
     MossDark,
+    /// 深色：Nord 配色（Arctic Ice Studio 公开色板）。
+    Nord,
+    /// 浅色：暖纸面 Paper 配色。
+    Paper,
 }
 
 impl ThemeName {
@@ -207,6 +211,8 @@ impl ThemeName {
             "CoalDark" => Self::CoalDark,
             "LinenLight" => Self::LinenLight,
             "MossDark" => Self::MossDark,
+            "Nord" => Self::Nord,
+            "Paper" => Self::Paper,
             _ => return None,
         })
     }
@@ -220,6 +226,8 @@ impl ThemeName {
             Self::CoalDark => "CoalDark",
             Self::LinenLight => "LinenLight",
             Self::MossDark => "MossDark",
+            Self::Nord => "Nord",
+            Self::Paper => "Paper",
         }
     }
 
@@ -231,6 +239,7 @@ impl ThemeName {
             Self::Nebula => TermTheme {
                 background: [15, 17, 26],
                 is_light: false,
+                exact: None,
                 powerline: [
                     [57, 75, 112],
                     [192, 202, 245],
@@ -245,6 +254,7 @@ impl ThemeName {
             Self::SilverLight => TermTheme {
                 background: [255, 255, 255],
                 is_light: true,
+                exact: None,
                 powerline: [
                     [229, 231, 235],
                     [55, 65, 81],
@@ -259,6 +269,7 @@ impl ThemeName {
             Self::SteelDark => TermTheme {
                 background: [26, 28, 36],
                 is_light: false,
+                exact: None,
                 powerline: [
                     [71, 85, 105],
                     [241, 245, 249],
@@ -273,6 +284,7 @@ impl ThemeName {
             Self::LimestoneLight => TermTheme {
                 background: [255, 255, 255],
                 is_light: true,
+                exact: None,
                 powerline: [
                     [214, 211, 209],
                     [250, 250, 249],
@@ -287,6 +299,7 @@ impl ThemeName {
             Self::CoalDark => TermTheme {
                 background: [23, 23, 23],
                 is_light: false,
+                exact: None,
                 powerline: [
                     [82, 82, 82],
                     [245, 245, 245],
@@ -301,6 +314,7 @@ impl ThemeName {
             Self::LinenLight => TermTheme {
                 background: [255, 255, 255],
                 is_light: true,
+                exact: None,
                 powerline: [
                     [212, 212, 208],
                     [255, 255, 255],
@@ -315,6 +329,7 @@ impl ThemeName {
             Self::MossDark => TermTheme {
                 background: [30, 33, 30],
                 is_light: false,
+                exact: None,
                 powerline: [
                     [75, 85, 72],
                     [240, 253, 244],
@@ -326,16 +341,144 @@ impl ThemeName {
                     [107, 114, 107],
                 ],
             },
+            Self::Nord => TermTheme {
+                background: [0x2e, 0x34, 0x40],
+                is_light: false,
+                exact: Some(ExactTermColors {
+                    foreground: [0xf1, 0xf6, 0xff],
+                    ansi: [
+                        [0x3b, 0x42, 0x52],
+                        [0xbf, 0x61, 0x6a],
+                        [0xa3, 0xbe, 0x8c],
+                        [0xeb, 0xcb, 0x8b],
+                        [0x81, 0xa1, 0xc1],
+                        [0xb4, 0x8e, 0xad],
+                        [0x88, 0xc0, 0xd0],
+                        [0xe5, 0xe9, 0xf0],
+                        [0x4c, 0x56, 0x6a],
+                        [0xbf, 0x61, 0x6a],
+                        [0xa3, 0xbe, 0x8c],
+                        [0xeb, 0xcb, 0x8b],
+                        [0x81, 0xa1, 0xc1],
+                        [0xb4, 0x8e, 0xad],
+                        [0x8f, 0xbc, 0xbb],
+                        [0xec, 0xef, 0xf4],
+                    ],
+                    cursor: Some([0xe5, 0xe9, 0xf0]),
+                    cursor_text: Some([0x2e, 0x34, 0x40]),
+                    cursor_stroke: Some([0x88, 0xc0, 0xd0]),
+                    selection_foreground: Some([0x2e, 0x34, 0x40]),
+                    selection_background: Some([0xe5, 0xe9, 0xf0]),
+                }),
+                // Nord 色板没有 Nebula 的 Powerline 槽位；以下只用它的
+                // surface / ANSI / token 色为 Nebula 提示符保持同主题可读性。
+                powerline: [
+                    [0x3b, 0x42, 0x52],
+                    [0xec, 0xef, 0xf4],
+                    [0x4c, 0x56, 0x6a],
+                    [0xe5, 0xe9, 0xf0],
+                    [0x43, 0x4c, 0x5e],
+                    [0x88, 0xc0, 0xd0],
+                    [0x2e, 0x34, 0x40],
+                    [0x7b, 0x82, 0x94],
+                ],
+            },
+            Self::Paper => TermTheme {
+                background: [0xfc, 0xfb, 0xf9],
+                is_light: true,
+                exact: Some(ExactTermColors {
+                    foreground: [0x1a, 0x1a, 0x1a],
+                    ansi: [
+                        [0x1a, 0x1a, 0x1a],
+                        [0xa3, 0x3a, 0x3a],
+                        [0x2b, 0x5a, 0x38],
+                        [0xa8, 0x5a, 0x20],
+                        [0x4a, 0x7a, 0x8a],
+                        [0x4a, 0x3a, 0x6a],
+                        [0x3a, 0x7a, 0x6a],
+                        [0x47, 0x46, 0x46],
+                        [0x8c, 0x8a, 0x80],
+                        [0xc3, 0x6a, 0x6a],
+                        [0x6b, 0x9a, 0x78],
+                        [0xc8, 0x8a, 0x50],
+                        [0x7a, 0x9a, 0xaa],
+                        [0x8a, 0x7a, 0x9a],
+                        [0x6a, 0xba, 0xaa],
+                        [0x2f, 0x2e, 0x2e],
+                    ],
+                    // Paper 色板没有声明 cursor / selection；None 必须保留，
+                    // 不能把截图近似值冒充成主题自带数据。
+                    cursor: None,
+                    cursor_text: None,
+                    cursor_stroke: None,
+                    selection_foreground: None,
+                    selection_background: None,
+                }),
+                powerline: [
+                    [0xe0, 0xdf, 0xd5],
+                    [0x1a, 0x1a, 0x1a],
+                    [0xf5, 0xf4, 0xf0],
+                    [0x47, 0x46, 0x46],
+                    [0xc1, 0xbe, 0xb5],
+                    [0x2b, 0x5a, 0x38],
+                    [0xfc, 0xfb, 0xf9],
+                    [0x8c, 0x8a, 0x80],
+                ],
+            },
         }
     }
+
+    /// 主题自带的终端卡几何。
+    ///
+    /// 归属裁定：卡几何跟**主题**走，不跟全局设置走。于是「浮起的圆角卡」和
+    /// 「铺满到边 + 一条竖线」不是两条渲染路径、也不是两套页面，只是同一条
+    /// 路径在不同主题下的取值。切主题即换形态；用户的显式设置覆盖这里。
+    ///
+    /// [`ThemeName::Nord`] 是这套抽象的第一个实验者：半径与卡缝双双归零，
+    /// 终端铺满整个右侧区域，侧栏与终端之间靠一条 1px 竖线分界——卡缝归零后
+    /// 两块深色面板会糊成一片，竖线是这种形态下唯一的结构分界。
+    pub fn card_geometry(self) -> ThemeCardGeometry {
+        match self {
+            Self::Nord => ThemeCardGeometry {
+                radius: 0.0,
+                gutter: 0.0,
+                shadow: false,
+                divider: 1.0,
+            },
+            _ => ThemeCardGeometry {
+                radius: DEFAULT_PANE_CARD_RADIUS,
+                gutter: DEFAULT_PANE_CARD_GUTTER,
+                shadow: false,
+                // 有卡缝就已经把两块面板分开了，再加竖线是重复的分界。
+                divider: 0.0,
+            },
+        }
+    }
+}
+
+/// 主题明确携带的终端色表。`None` 字段表示主题没有声明该值，调用方应保留
+/// 用户配置或宿主默认值；这对没有 cursor/selection 数据的 Paper 很重要。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ExactTermColors {
+    pub foreground: Rgb8,
+    pub ansi: [Rgb8; 16],
+    pub cursor: Option<Rgb8>,
+    pub cursor_text: Option<Rgb8>,
+    pub cursor_stroke: Option<Rgb8>,
+    pub selection_foreground: Option<Rgb8>,
+    pub selection_background: Option<Rgb8>,
 }
 
 /// 一个主题对终端色表的影响。浅色主题额外用 [`LIGHT_FOREGROUND`] 与
 /// [`LIGHT_ANSI`] 替换前景与 ANSI-16（配置的暗底配色在浅底上不可读）。
 /// dim 表与 bright_foreground 有意不动——与旧壳逐字段一致。
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TermTheme {
     pub background: Rgb8,
     pub is_light: bool,
+    /// 只有自带完整终端 palette 的主题使用；现有七个主题保持 `None`，继续
+    /// 走原来的背景/浅色替换合同。
+    pub exact: Option<ExactTermColors>,
     /// Powerline 提示符段色，发布到 256 色表 [`POWERLINE_SLOT0`]`..+8`。
     pub powerline: [Rgb8; 8],
 }
@@ -857,6 +1000,34 @@ pub struct RuntimeSettings {
     pub ssh_proxy_url: String,
     pub ssh_proxy_no_proxy: String,
     pub quick_terminal_hotkey: String,
+    /// 终端卡圆角（逻辑像素）。`None` = 跟随主题自带的几何
+    /// （见 [`ThemeName::card_geometry`]）。两壳同径：旧壳的
+    /// `UI_SHELL_RADIUS_LOGICAL` 直接引用 [`DEFAULT_PANE_CARD_RADIUS`]，
+    /// 不再各写一份字面量。
+    pub pane_card_radius: Option<f32>,
+    /// 终端卡与周围 chrome 的卡缝（逻辑像素）。**只作用于左 / 右 / 下三边**，
+    /// 上边恒为零（08-26 裁定：侧栏 / 终端卡 / 右侧抽屉三列顶边都贴 chrome
+    /// 下沿）。四边各自的值由 GPUI 壳的 `PaneCardStyle::margin` 表达。
+    pub pane_card_gutter: Option<f32>,
+    /// 终端卡投影。`shadow` 关掉 + 半径与卡缝归零，就是「铺满到边」的形态。
+    pub pane_card_shadow: Option<bool>,
+    /// 侧栏与终端之间的竖线宽度（逻辑像素，0 = 不画）。卡缝归零后两块深色
+    /// 面板会糊成一片，竖线是那种铺满形态下唯一的结构分界；有卡缝时它是
+    /// 多余的，所以默认按主题给（见 [`ThemeName::card_geometry`]）。
+    pub pane_card_divider: Option<f32>,
+}
+
+/// 主题自带的终端卡几何。
+///
+/// 四个键一组：`radius`（圆角）、`gutter`（卡与周围 chrome 的外间距）、
+/// `shadow`（投影）、`divider`（侧栏与终端之间的竖线）。卡几何跟主题走：
+/// 切主题就换形态，不需要用户再去设置里调一次。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThemeCardGeometry {
+    pub radius: f32,
+    pub gutter: f32,
+    pub shadow: bool,
+    pub divider: f32,
 }
 
 /// 旧壳默认快速终端热键。
@@ -864,6 +1035,19 @@ pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+`";
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 230.0;
 pub const MIN_SIDEBAR_WIDTH: f32 = 170.0;
 pub const MAX_SIDEBAR_WIDTH: f32 = 420.0;
+/// 终端卡几何的单一真源。旧壳的 `UI_SHELL_RADIUS_LOGICAL` 与 GPUI 壳的
+/// `PaneCardStyle` 都从这里取默认值——半径曾经在 `display/mod.rs` 里写死、
+/// 卡缝曾经在 `workspace.rs` 里写死，两处各写一份字面量就是那圈白边的来源。
+///
+/// 上限 28 是让半径不超过卡最窄边一半之前的实用上界；0 与卡缝 0 搭配就是
+/// 「铺满到窗口边、无圆角」的形态（[`ThemeName::Nord`] 用的就是这组值）。
+pub const DEFAULT_PANE_CARD_RADIUS: f32 = 14.0;
+pub const MIN_PANE_CARD_RADIUS: f32 = 0.0;
+pub const MAX_PANE_CARD_RADIUS: f32 = 28.0;
+pub const DEFAULT_PANE_CARD_GUTTER: f32 = 8.0;
+pub const MIN_PANE_CARD_GUTTER: f32 = 0.0;
+pub const MAX_PANE_CARD_GUTTER: f32 = 32.0;
+pub const MAX_PANE_CARD_DIVIDER: f32 = 4.0;
 /// 系统材质启用且用户未明确设置透明度时，让基础层适度透出。
 const SYSTEM_MATERIAL_OPACITY: f32 = 0.82;
 
@@ -976,6 +1160,19 @@ impl RuntimeSettings {
                 .value("quick_terminal_hotkey")
                 .unwrap_or(DEFAULT_QUICK_TERMINAL_HOTKEY)
                 .to_owned(),
+            // 这四项一律保留 `Option`：`None` 就是「用户没设过」，让
+            // `ThemeName::card_geometry` 的主题默认生效。若在这里就 unwrap 成
+            // 具体数字，切主题便再也换不了形态——那正是要避免的。
+            pane_card_radius: raw
+                .f32("pane_card_radius")
+                .map(|r| r.clamp(MIN_PANE_CARD_RADIUS, MAX_PANE_CARD_RADIUS)),
+            pane_card_gutter: raw
+                .f32("pane_card_gutter")
+                .map(|g| g.clamp(MIN_PANE_CARD_GUTTER, MAX_PANE_CARD_GUTTER)),
+            pane_card_shadow: raw.bool_on("pane_card_shadow"),
+            pane_card_divider: raw
+                .f32("pane_card_divider")
+                .map(|d| d.clamp(0.0, MAX_PANE_CARD_DIVIDER)),
         }
     }
 }
@@ -1001,6 +1198,50 @@ pub fn format_hex_rgb(rgb: Rgb8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nord_carries_the_flush_card_geometry() {
+        // Nord 是卡几何抽象的第一个实验者：半径与卡缝双双归零、靠一条竖线分界。
+        // 这四个数一起构成「终端铺满整个右侧区域」的形态，任一项退回默认都会
+        // 让它变回浮起的圆角卡——所以逐项钉死，而不是只断言 radius。
+        let nord = ThemeName::Nord.card_geometry();
+        assert_eq!(nord.radius, 0.0);
+        assert_eq!(nord.gutter, 0.0);
+        assert_eq!(nord.divider, 1.0);
+        assert!(!nord.shadow);
+
+        // 其余主题保持卡片形态，且**不画**竖线：有卡缝时两块面板已经分开了，
+        // 再加一条线是重复的分界。
+        for theme in [ThemeName::Nebula, ThemeName::Paper, ThemeName::CoalDark] {
+            let geometry = theme.card_geometry();
+            assert_eq!(geometry.radius, DEFAULT_PANE_CARD_RADIUS);
+            assert_eq!(geometry.gutter, DEFAULT_PANE_CARD_GUTTER);
+            assert_eq!(geometry.divider, 0.0);
+        }
+    }
+
+    #[test]
+    fn card_geometry_keys_stay_none_until_the_user_sets_them() {
+        // `None` 的含义是「用户没设过」，主题默认因此能生效。若在解析处就
+        // unwrap 成具体数字，切主题便再也换不了形态——那是这套抽象的失效模式。
+        let untouched = RuntimeSettings::from_raw(&RawSettings::from_text("theme=Nord\n"));
+        assert_eq!(untouched.pane_card_radius, None);
+        assert_eq!(untouched.pane_card_gutter, None);
+        assert_eq!(untouched.pane_card_shadow, None);
+        assert_eq!(untouched.pane_card_divider, None);
+
+        // 显式值覆盖主题默认，且越界值按范围钳制而不是被丢弃。
+        let tuned = RuntimeSettings::from_raw(&RawSettings::from_text(
+            "pane_card_radius=999\n\
+             pane_card_gutter=12\n\
+             pane_card_shadow=on\n\
+             pane_card_divider=99\n",
+        ));
+        assert_eq!(tuned.pane_card_radius, Some(MAX_PANE_CARD_RADIUS));
+        assert_eq!(tuned.pane_card_gutter, Some(12.0));
+        assert_eq!(tuned.pane_card_shadow, Some(true));
+        assert_eq!(tuned.pane_card_divider, Some(MAX_PANE_CARD_DIVIDER));
+    }
 
     #[test]
     fn parses_real_settings_shape() {
@@ -1238,6 +1479,8 @@ mod tests {
             ThemeName::CoalDark,
             ThemeName::LinenLight,
             ThemeName::MossDark,
+            ThemeName::Nord,
+            ThemeName::Paper,
         ] {
             assert_eq!(ThemeName::from_prompt_name(theme.prompt_name()), Some(theme));
         }
@@ -1248,11 +1491,46 @@ mod tests {
         assert!(ThemeName::SilverLight.term_theme().is_light);
         assert!(ThemeName::LimestoneLight.term_theme().is_light);
         assert!(ThemeName::LinenLight.term_theme().is_light);
+        assert!(ThemeName::Paper.term_theme().is_light);
         assert!(!ThemeName::Nebula.term_theme().is_light);
         assert!(!ThemeName::SteelDark.term_theme().is_light);
+        assert!(!ThemeName::Nord.term_theme().is_light);
         // 浅色主题终端底全白，背景由主题裁定而非用户配色。
         assert_eq!(ThemeName::SilverLight.term_theme().background, [255, 255, 255]);
         assert_eq!(ThemeName::Nebula.term_theme().background, [15, 17, 26]);
+    }
+
+    #[test]
+    fn nord_and_paper_keep_their_declared_terminal_palettes() {
+        let nord = ThemeName::Nord.term_theme().exact.expect("Nord exact colors");
+        assert_eq!(nord.foreground, [0xf1, 0xf6, 0xff]);
+        assert_eq!(nord.ansi[0], [0x3b, 0x42, 0x52]);
+        assert_eq!(nord.ansi[15], [0xec, 0xef, 0xf4]);
+        assert_eq!(nord.cursor, Some([0xe5, 0xe9, 0xf0]));
+        assert_eq!(nord.cursor_stroke, Some([0x88, 0xc0, 0xd0]));
+        assert_eq!(nord.selection_background, Some([0xe5, 0xe9, 0xf0]));
+
+        let paper = ThemeName::Paper.term_theme().exact.expect("Paper exact colors");
+        assert_eq!(paper.foreground, [0x1a, 0x1a, 0x1a]);
+        assert_eq!(paper.ansi[0], [0x1a, 0x1a, 0x1a]);
+        assert_eq!(paper.ansi[15], [0x2f, 0x2e, 0x2e]);
+        assert_eq!(paper.cursor, None);
+        assert_eq!(paper.selection_background, None);
+    }
+
+    #[test]
+    fn existing_themes_keep_their_original_terminal_color_contract() {
+        for theme in [
+            ThemeName::Nebula,
+            ThemeName::SilverLight,
+            ThemeName::SteelDark,
+            ThemeName::LimestoneLight,
+            ThemeName::CoalDark,
+            ThemeName::LinenLight,
+            ThemeName::MossDark,
+        ] {
+            assert_eq!(theme.term_theme().exact, None, "{}", theme.prompt_name());
+        }
     }
 
     #[test]

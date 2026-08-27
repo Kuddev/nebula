@@ -160,6 +160,10 @@ impl NebulaWorkspace {
                     SidebarActivity::Done => Some(
                         div().size(px(6.0)).rounded_full().bg(theme.primary).into_any_element(),
                     ),
+                    SidebarActivity::WaitingInput => Some(
+                        Self::waiting_hand(symbol_family.clone(), label_px, theme.primary)
+                            .into_any_element(),
+                    ),
                     SidebarActivity::Attention => Some(
                         Icon::new(IconName::TriangleAlert)
                             .xsmall()

@@ -278,6 +278,18 @@ pub enum Subcommands {
     /// Agent-oriented terminal control: split panes, run commands, start Codex/Claude,
     /// send prompts, wait for state changes, and read verified terminal output.
     Ctl(ControlOptions),
+    /// Report this pane's terminal identity, the control-plane path, and every
+    /// command available to it. Answers even with no runtime reachable, so an
+    /// agent can always discover what it has instead of guessing.
+    Env(EnvOptions),
+    /// Control terminal windows.
+    Window(WindowResourceOptions),
+    /// Control tabs within one terminal window.
+    Tab(TabResourceOptions),
+    /// Inspect and drive terminal panes: list, read, send, paste, wait, and change layout.
+    Pane(PaneOptions),
+    /// Inspect and drive the AI agents running in panes: list, send, read, wait.
+    Agent(AgentOptions),
     #[cfg(unix)]
     Msg(MessageOptions),
     Migrate(MigrateOptions),
@@ -295,6 +307,518 @@ pub enum Subcommands {
     /// (claude, vim, cargo…). All arguments are forwarded to the system `ssh`.
     #[cfg(windows)]
     Ssh(SshOptions),
+}
+
+/// Query timeout shared by the short commands. Long enough to ride out a busy
+/// UI thread, short enough that a wedged runtime does not hang an agent.
+const SHORT_TIMEOUT_MS: u64 = 30_000;
+
+/// Default ceiling for `nebula pane wait` / `nebula agent wait`. Waiting on a
+/// coding agent is measured in minutes, so reusing the query timeout would turn
+/// a normal turn into a spurious `timeout` error.
+const SHORT_WAIT_TIMEOUT_MS: u64 = 600_000;
+
+/// Flags every short command accepts. Kept tiny on purpose: this surface exists
+/// so an agent can act without first learning a flag vocabulary.
+#[derive(Args, Debug)]
+pub struct ShortOutput {
+    /// Pretty-print the JSON response. Output is JSON either way.
+    #[clap(long)]
+    pub pretty: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct EnvOptions {
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    /// Maximum time to wait for the runtime probe. The environment half of the
+    /// answer is reported regardless.
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct WindowResourceOptions {
+    #[clap(subcommand)]
+    pub command: WindowCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WindowCommand {
+    /// Close an idle window. Busy panes require confirmation in the GUI instead.
+    Close(WindowCloseOptions),
+}
+
+#[derive(Args, Debug)]
+pub struct WindowCloseOptions {
+    /// Window id from `nebula pane list`.
+    pub window: u64,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct TabResourceOptions {
+    #[clap(subcommand)]
+    pub command: TabCommand,
+}
+
+/// Tab indices are scoped to one window, so `--window` is always required.
+#[derive(Subcommand, Debug)]
+pub enum TabCommand {
+    /// Close an idle tab.
+    Close(TabCloseOptions),
+    /// Set a tab's custom name. Pass an empty name to restore the generated title.
+    Rename(TabRenameOptions),
+    /// Move a tab to another index in the same window.
+    Move(TabMoveOptions),
+}
+
+#[derive(Args, Debug)]
+pub struct TabCloseOptions {
+    /// Zero-based tab index from the runtime snapshot.
+    pub tab: usize,
+
+    /// Window containing the tab.
+    #[clap(long)]
+    pub window: u64,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct TabRenameOptions {
+    /// Zero-based tab index from the runtime snapshot.
+    pub tab: usize,
+
+    /// New custom name. An empty string restores the generated title.
+    pub name: String,
+
+    /// Window containing the tab.
+    #[clap(long)]
+    pub window: u64,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct TabMoveOptions {
+    /// Current zero-based tab index.
+    pub tab: usize,
+
+    /// Destination zero-based tab index in the same window.
+    pub to: usize,
+
+    /// Window containing the tab.
+    #[clap(long)]
+    pub window: u64,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct PaneOptions {
+    #[clap(subcommand)]
+    pub command: PaneCommand,
+}
+
+/// Pane verbs. A pane is addressed by its numeric id from `nebula pane list`.
+#[derive(Subcommand, Debug)]
+pub enum PaneCommand {
+    /// List every pane with its id, task state, cwd, and Git branch.
+    List(ListOptions),
+    /// Read the tail of a pane's real terminal buffer.
+    Read(PaneReadOptions),
+    /// Write one line into a pane, submitting it with Enter by default.
+    Send(PaneSendOptions),
+    /// Paste bounded UTF-8 text as one bracketed block.
+    Paste(PanePasteOptions),
+    /// Block until a pane reaches a semantic task state.
+    Wait(PaneWaitOptions),
+    /// Execute an argv vector as an independent non-TTY child and capture both streams.
+    Exec(PaneExecOptions),
+    /// Close an idle pane.
+    Close(PaneCloseOptions),
+    /// Explicitly enable or disable focused-pane zoom for the pane's tab.
+    Zoom(PaneZoomOptions),
+    /// Set this pane's share of its direct parent split.
+    Resize(PaneResizeOptions),
+}
+
+#[derive(Args, Debug)]
+pub struct AgentOptions {
+    #[clap(subcommand)]
+    pub command: AgentCommand,
+}
+
+/// Agent verbs. An agent is addressed by the name or stable id from
+/// `nebula agent list` — not by pane, so a restarted session cannot silently
+/// inherit work aimed at the one it replaced.
+#[derive(Subcommand, Debug)]
+pub enum AgentCommand {
+    /// List the panes running an AI CLI, with session identity and generation.
+    List(ListOptions),
+    /// Hand one task to an agent and submit it.
+    Send(AgentSendOptions),
+    /// Paste bounded UTF-8 text into an agent as one bracketed block.
+    Paste(AgentPasteOptions),
+    /// Read the tail of what an agent printed.
+    Read(AgentReadOptions),
+    /// Block until an agent's turn ends.
+    Wait(AgentWaitOptions),
+}
+
+#[derive(Args, Debug)]
+pub struct ListOptions {
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    /// Restrict the listing to one window.
+    #[clap(long)]
+    pub window: Option<u64>,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct PaneReadOptions {
+    /// Pane id from `nebula pane list`.
+    pub pane: u64,
+
+    /// Logical terminal rows to read from the buffer tail.
+    #[clap(long, default_value_t = crate::runtime_api::DEFAULT_READ_LINES)]
+    pub lines: usize,
+
+    /// Disambiguate the pane when several windows are open.
+    #[clap(long)]
+    pub window: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct PaneSendOptions {
+    /// Pane id from `nebula pane list`.
+    pub pane: u64,
+
+    /// The line to write. Several words are joined with single spaces, so both
+    /// `send 17 "cargo test"` and `send 17 cargo test` work.
+    #[clap(required = true, num_args = 1..)]
+    pub text: Vec<String>,
+
+    /// Write the text without pressing Enter.
+    #[clap(long)]
+    pub no_submit: bool,
+
+    /// After submitting, block until the pane settles again. The baseline comes
+    /// from the submission response, so a pane that was already idle cannot
+    /// satisfy the wait immediately. Meaningless without submission, so it
+    /// conflicts with `--no-submit` rather than silently doing nothing.
+    #[clap(long, conflicts_with = "no_submit")]
+    pub wait: bool,
+
+    /// Ceiling for `--wait`.
+    #[clap(long, default_value_t = SHORT_WAIT_TIMEOUT_MS)]
+    pub wait_timeout_ms: u64,
+
+    #[clap(long)]
+    pub window: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+/// A paste has exactly one local source. Runtime requests receive only the
+/// validated UTF-8 payload; local paths and stdin handles never cross the
+/// control-plane boundary.
+#[derive(Args, Debug)]
+pub struct PasteSourceOptions {
+    /// Literal text. Multiple words are joined with single spaces.
+    #[clap(num_args = 0.., conflicts_with_all = ["stdin", "from_file"])]
+    pub text: Vec<String>,
+
+    /// Read the paste payload from standard input.
+    #[clap(long, conflicts_with = "from_file")]
+    pub stdin: bool,
+
+    /// Read the paste payload from a UTF-8 file.
+    #[clap(long, value_hint = ValueHint::FilePath)]
+    pub from_file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct PanePasteOptions {
+    /// Pane id from `nebula pane list`.
+    pub pane: u64,
+
+    #[clap(flatten)]
+    pub source: PasteSourceOptions,
+
+    /// Paste the block without pressing Enter.
+    #[clap(long)]
+    pub no_submit: bool,
+
+    /// After submitting, block until the pane settles again.
+    #[clap(long, conflicts_with = "no_submit")]
+    pub wait: bool,
+
+    /// Ceiling for `--wait`.
+    #[clap(long, default_value_t = SHORT_WAIT_TIMEOUT_MS)]
+    pub wait_timeout_ms: u64,
+
+    #[clap(long)]
+    pub window: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct PaneWaitOptions {
+    /// Pane id from `nebula pane list`.
+    pub pane: u64,
+
+    /// The state to wait for. `settled` covers finished, failed, and
+    /// waiting-input, which is what "the work is over" usually means.
+    #[clap(long, value_enum, default_value = "settled")]
+    pub state: ControlWaitState,
+
+    /// Require the pane's `state_change_seq` to advance past this value. Pass
+    /// the counter observed *before* dispatching work, otherwise a pane that is
+    /// already settled satisfies the wait immediately.
+    #[clap(long)]
+    pub after_seq: Option<u64>,
+
+    #[clap(long)]
+    pub window: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_WAIT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct PaneExecOptions {
+    /// Pane id from `nebula pane list`; its current cwd and local environment are reused.
+    pub pane: u64,
+
+    #[clap(long)]
+    pub window: Option<u64>,
+
+    /// Maximum bytes retained from each stream. Both streams are always fully drained.
+    #[clap(long, default_value_t = crate::runtime_api::DEFAULT_EXEC_OUTPUT_BYTES)]
+    pub max_output_bytes: usize,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    /// Child-process timeout.
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+
+    /// Program and arguments. `--` is required so child flags cannot be parsed by Nebula.
+    #[clap(last = true, required = true, num_args = 1.., value_name = "ARGV")]
+    pub argv: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct PaneCloseOptions {
+    /// Pane id from `nebula pane list`.
+    pub pane: u64,
+
+    #[clap(long)]
+    pub window: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct PaneZoomOptions {
+    /// Pane id from `nebula pane list`.
+    pub pane: u64,
+
+    /// Desired zoom state. Requiring the value keeps the command idempotent.
+    #[clap(
+        long,
+        required = true,
+        action = ArgAction::Set,
+        value_parser = clap::value_parser!(bool)
+    )]
+    pub zoomed: bool,
+
+    #[clap(long)]
+    pub window: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct PaneResizeOptions {
+    /// Pane id from `nebula pane list`.
+    pub pane: u64,
+
+    /// Desired share of the pane's direct parent split, from 0.05 through 0.95.
+    pub ratio: f32,
+
+    #[clap(long)]
+    pub window: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentSendOptions {
+    /// Agent name or stable id from `nebula agent list`.
+    pub agent: String,
+
+    /// The task itself. Several words are joined with single spaces, so both
+    /// `send codex "fix login"` and `send codex fix login` work.
+    #[clap(required = true, num_args = 1..)]
+    pub text: Vec<String>,
+
+    /// Write the task without submitting it.
+    #[clap(long)]
+    pub no_submit: bool,
+
+    /// After submitting, block until the turn ends. The baseline comes from the
+    /// submission response, so an idle agent cannot satisfy the wait
+    /// immediately. Conflicts with `--no-submit`, which never starts a turn.
+    #[clap(long, conflicts_with = "no_submit")]
+    pub wait: bool,
+
+    /// Ceiling for `--wait`.
+    #[clap(long, default_value_t = SHORT_WAIT_TIMEOUT_MS)]
+    pub wait_timeout_ms: u64,
+
+    /// Refuse the send unless the agent is still this generation.
+    #[clap(long)]
+    pub generation: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentPasteOptions {
+    /// Agent name or stable id from `nebula agent list`.
+    pub agent: String,
+
+    #[clap(flatten)]
+    pub source: PasteSourceOptions,
+
+    /// Paste the block without submitting it.
+    #[clap(long)]
+    pub no_submit: bool,
+
+    /// After submitting, block until the turn ends.
+    #[clap(long, conflicts_with = "no_submit")]
+    pub wait: bool,
+
+    /// Ceiling for `--wait`.
+    #[clap(long, default_value_t = SHORT_WAIT_TIMEOUT_MS)]
+    pub wait_timeout_ms: u64,
+
+    /// Refuse the paste unless the agent is still this generation.
+    #[clap(long)]
+    pub generation: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentReadOptions {
+    /// Agent name or stable id from `nebula agent list`.
+    pub agent: String,
+
+    /// Logical terminal rows to read from the buffer tail.
+    #[clap(long, default_value_t = crate::runtime_api::DEFAULT_READ_LINES)]
+    pub lines: usize,
+
+    #[clap(long)]
+    pub generation: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentWaitOptions {
+    /// Agent name or stable id from `nebula agent list`.
+    pub agent: String,
+
+    /// The state to wait for.
+    #[clap(long, value_enum, default_value = "settled")]
+    pub state: ControlWaitState,
+
+    /// Require the agent's `state_change_seq` to advance past this value. Pass
+    /// the counter observed *before* dispatching work, otherwise an agent that
+    /// is already idle satisfies the wait immediately.
+    #[clap(long)]
+    pub after_seq: Option<u64>,
+
+    /// Pin the wait to one generation. Without it, the currently active
+    /// generation is resolved first, so a session that was replaced in the
+    /// meantime fails loudly instead of being waited on by mistake.
+    #[clap(long)]
+    pub generation: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_WAIT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
 }
 
 #[derive(Args, Debug)]
@@ -468,6 +992,17 @@ pub enum ControlCommand {
         #[clap(long)]
         no_submit: bool,
     },
+    /// Paste one bounded UTF-8 block into a managed agent.
+    AgentPaste {
+        #[clap(long)]
+        agent: String,
+        #[clap(long)]
+        generation: Option<u64>,
+        #[clap(long)]
+        text: String,
+        #[clap(long)]
+        no_submit: bool,
+    },
     /// Read the terminal-buffer tail owned by a managed agent.
     AgentRead {
         #[clap(long)]
@@ -496,6 +1031,11 @@ pub enum ControlCommand {
     },
     /// Create and focus a new terminal window.
     NewWindow,
+    /// Close an idle window. Omitting --window targets the uniquely resolved window.
+    CloseWindow {
+        #[clap(long)]
+        window: Option<u64>,
+    },
     /// Focus a window or one of its panes.
     Focus {
         #[clap(long)]
@@ -508,6 +1048,31 @@ pub enum ControlCommand {
         #[clap(long)]
         window: Option<u64>,
     },
+    /// Close an idle tab by its zero-based index.
+    CloseTab {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long = "tab")]
+        tab_index: usize,
+    },
+    /// Set a tab's custom name. An empty value restores the generated title.
+    RenameTab {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long = "tab")]
+        tab_index: usize,
+        #[clap(long)]
+        name: String,
+    },
+    /// Move a tab to another index in the same window.
+    MoveTab {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long = "tab")]
+        tab_index: usize,
+        #[clap(long = "to")]
+        to_index: usize,
+    },
     /// Split the focused pane in the target window.
     Split {
         #[clap(long)]
@@ -517,6 +1082,36 @@ pub enum ControlCommand {
         pane: Option<u64>,
         #[clap(long, value_enum, default_value = "right")]
         direction: ControlSplitDirection,
+    },
+    /// Close an idle pane.
+    ClosePane {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+    },
+    /// Explicitly enable or disable focused-pane zoom for the pane's tab.
+    ZoomPane {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+        #[clap(
+            long,
+            required = true,
+            action = ArgAction::Set,
+            value_parser = clap::value_parser!(bool)
+        )]
+        zoomed: bool,
+    },
+    /// Set this pane's share of its direct parent split.
+    ResizePane {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+        #[clap(long)]
+        ratio: f32,
     },
     /// Send one plain-text prompt to a pane, optionally submitting it with Enter.
     Prompt {
@@ -530,6 +1125,21 @@ pub enum ControlCommand {
         #[clap(long)]
         no_submit: bool,
         /// After sending, wait until the pane reaches this task state.
+        #[clap(long, value_enum)]
+        wait: Option<ControlWaitState>,
+    },
+    /// Paste one bounded UTF-8 block into a pane using bracketed-paste mode.
+    Paste {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+        #[clap(long)]
+        text: String,
+        /// Paste the block without appending Enter.
+        #[clap(long)]
+        no_submit: bool,
+        /// After submitting, wait until the pane reaches this task state.
         #[clap(long, value_enum)]
         wait: Option<ControlWaitState>,
     },
@@ -579,6 +1189,19 @@ pub enum ControlCommand {
         /// Submit the command and return its run id without waiting for completion.
         #[clap(long)]
         no_wait: bool,
+    },
+    /// Execute argv as an independent non-TTY child and capture stdout/stderr separately.
+    ExecPane {
+        #[clap(long)]
+        window: Option<u64>,
+        #[clap(long)]
+        pane: u64,
+        /// Maximum bytes retained from each stream. Both streams are always fully drained.
+        #[clap(long, default_value_t = crate::runtime_api::DEFAULT_EXEC_OUTPUT_BYTES)]
+        max_output_bytes: usize,
+        /// Program and arguments. `--` is required so child flags remain untouched.
+        #[clap(last = true, required = true, num_args = 1.., value_name = "ARGV")]
+        argv: Vec<String>,
     },
     /// Wait until a pane reaches a semantic task state.
     Wait {
@@ -881,6 +1504,171 @@ mod tests {
                 })
             }))
         ));
+    }
+
+    #[test]
+    fn send_options_after_text_are_not_swallowed_by_the_positional() {
+        let agent = Options::try_parse_from([
+            "nebula",
+            "agent",
+            "send",
+            "codex",
+            "fix",
+            "login",
+            "--no-submit",
+            "--pretty",
+        ])
+        .unwrap();
+        let Some(Subcommands::Agent(AgentOptions { command: AgentCommand::Send(agent) })) =
+            agent.subcommands
+        else {
+            panic!("expected agent send");
+        };
+        assert_eq!(agent.text, ["fix", "login"]);
+        assert!(agent.no_submit);
+        assert!(agent.output.pretty);
+
+        let pane = Options::try_parse_from([
+            "nebula",
+            "pane",
+            "send",
+            "17",
+            "cargo",
+            "test",
+            "--no-submit",
+            "--pretty",
+        ])
+        .unwrap();
+        let Some(Subcommands::Pane(PaneOptions { command: PaneCommand::Send(pane) })) =
+            pane.subcommands
+        else {
+            panic!("expected pane send");
+        };
+        assert_eq!(pane.text, ["cargo", "test"]);
+        assert!(pane.no_submit);
+        assert!(pane.output.pretty);
+    }
+
+    #[test]
+    fn send_double_dash_preserves_hyphen_prefixed_text() {
+        let parsed = Options::try_parse_from([
+            "nebula",
+            "agent",
+            "send",
+            "codex",
+            "--no-submit",
+            "--",
+            "--fix",
+            "--pretty",
+        ])
+        .unwrap();
+        let Some(Subcommands::Agent(AgentOptions { command: AgentCommand::Send(options) })) =
+            parsed.subcommands
+        else {
+            panic!("expected agent send");
+        };
+        assert_eq!(options.text, ["--fix", "--pretty"]);
+        assert!(options.no_submit);
+        assert!(!options.output.pretty);
+    }
+
+    #[test]
+    fn paste_sources_are_explicit_and_mutually_exclusive() {
+        let parsed = Options::try_parse_from([
+            "nebula",
+            "pane",
+            "paste",
+            "17",
+            "first",
+            "line",
+            "--no-submit",
+        ])
+        .unwrap();
+        let Some(Subcommands::Pane(PaneOptions { command: PaneCommand::Paste(options) })) =
+            parsed.subcommands
+        else {
+            panic!("expected pane paste");
+        };
+        assert_eq!(options.source.text, ["first", "line"]);
+        assert!(!options.source.stdin);
+        assert_eq!(options.source.from_file, None);
+        assert!(options.no_submit);
+
+        let parsed =
+            Options::try_parse_from(["nebula", "agent", "paste", "codex", "--stdin", "--wait"])
+                .unwrap();
+        let Some(Subcommands::Agent(AgentOptions { command: AgentCommand::Paste(options) })) =
+            parsed.subcommands
+        else {
+            panic!("expected agent paste");
+        };
+        assert!(options.source.stdin);
+        assert!(options.source.text.is_empty());
+        assert!(options.wait);
+
+        assert!(
+            Options::try_parse_from([
+                "nebula",
+                "pane",
+                "paste",
+                "17",
+                "literal",
+                "--from-file",
+                "task.txt",
+            ])
+            .is_err()
+        );
+        assert!(
+            Options::try_parse_from([
+                "nebula",
+                "agent",
+                "paste",
+                "codex",
+                "--stdin",
+                "--from-file",
+                "task.txt",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn layout_resource_commands_keep_ids_and_explicit_zoom_state() {
+        let parsed = Options::try_parse_from([
+            "nebula", "tab", "move", "2", "0", "--window", "7", "--pretty",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.subcommands,
+            Some(Subcommands::Tab(TabResourceOptions {
+                command: TabCommand::Move(TabMoveOptions {
+                    tab: 2,
+                    to: 0,
+                    window: 7,
+                    output: ShortOutput { pretty: true },
+                    ..
+                })
+            }))
+        ));
+
+        let parsed = Options::try_parse_from([
+            "nebula", "pane", "zoom", "17", "--zoomed", "false", "--window", "7",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.subcommands,
+            Some(Subcommands::Pane(PaneOptions {
+                command: PaneCommand::Zoom(PaneZoomOptions {
+                    pane: 17,
+                    window: Some(7),
+                    zoomed: false,
+                    ..
+                })
+            }))
+        ));
+
+        // 省略状态不是“默认关闭”：调用方必须明确表达期望状态，才能安全重试。
+        assert!(Options::try_parse_from(["nebula", "pane", "zoom", "17"]).is_err());
     }
 
     #[test]

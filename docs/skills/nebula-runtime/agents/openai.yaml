@@ -1,4 +1,4 @@
 interface:
   display_name: "Nebula Runtime"
-  short_description: "Split panes and control Codex/Claude in Nebula"
-  default_prompt: "Use one typed Nebula runtime.orchestrate workflow for multi-step layout and first-task dispatch; use individual controls only for follow-up observation or recovery."
+  short_description: "Split panes, delegate tasks to Codex/Claude, and read their output in Nebula"
+  default_prompt: "Run `nebula env` first when you are unsure what pane or runtime you have; it answers even offline and lists every command with copy-ready examples. Use one typed Nebula runtime.orchestrate workflow for multi-step layout and first-task dispatch; use the resource verbs under `nebula window`, `tab`, `pane`, and `agent` for one-off actions. Prefer `pane exec` for finite direct argv that must not alter shell history, and `pane|agent paste` only for bounded multiline input. Resolve a delegation target with `nebula agent list` and ask when several match — never fall back to the current pane."

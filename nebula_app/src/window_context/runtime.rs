@@ -7,6 +7,8 @@
 use nebula_terminal::event::Notify;
 use nebula_terminal::grid::Dimensions;
 use nebula_terminal::index::{Column, Line, Point};
+use nebula_terminal::term::TermMode;
+use serde_json::{Value, json};
 
 use crate::display::SplitDirection;
 use crate::event::TabRequest;
@@ -44,6 +46,14 @@ fn runtime_screen_snapshot(pane: &super::Pane) -> Option<String> {
     let start = Point::new(Line(0), Column(0));
     let end = Point::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
     Some(term.bounds_to_string(start, end))
+}
+
+fn runtime_close_confirmation(process: String, details: Value) -> ApiError {
+    ApiError::new(
+        "confirmation_required",
+        format!("{process} is still running; refusing to close it without user confirmation"),
+    )
+    .details(details)
 }
 
 impl WindowContext {
@@ -91,6 +101,7 @@ impl WindowContext {
                     kind: tab_kind(&tab.launch).to_owned(),
                     bell: tab.has_bell,
                     focused_pane_id: (!special).then_some(tab.active_pane),
+                    zoomed_pane_id: self.zoom.filter(|pane_id| pane_ids.contains(pane_id)),
                     layout: (!special).then(|| runtime_layout(&tab.layout)),
                     panes,
                 }
@@ -202,6 +213,166 @@ impl WindowContext {
         Ok((source_pane_id, self.tabs[self.active_tab].active_pane))
     }
 
+    pub(crate) fn runtime_close_window(&mut self) -> Result<(), ApiError> {
+        let pane_ids: Vec<_> = self.panes.iter().map(|pane| pane.id).collect();
+        if let Some(process) = self.busy_process_in(&pane_ids) {
+            return Err(runtime_close_confirmation(
+                process,
+                json!({ "target": "window", "window_id": u64::from(self.id()) }),
+            ));
+        }
+        while !self.tabs.is_empty() {
+            let last = self.tabs.len() - 1;
+            self.close_tab(last);
+        }
+        self.display.window.hold = false;
+        Ok(())
+    }
+
+    pub(crate) fn runtime_close_tab(&mut self, tab_index: usize) -> Result<bool, ApiError> {
+        let Some(tab) = self.tabs.get(tab_index) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("tab {tab_index} does not exist in window {}", u64::from(self.id())),
+            ));
+        };
+        let mut pane_ids = Vec::new();
+        tab.layout.leaves(&mut pane_ids);
+        if let Some(process) = self.busy_process_in(&pane_ids) {
+            return Err(runtime_close_confirmation(
+                process,
+                json!({
+                    "target": "tab",
+                    "window_id": u64::from(self.id()),
+                    "tab_index": tab_index
+                }),
+            ));
+        }
+        Ok(self.close_tab(tab_index))
+    }
+
+    pub(crate) fn runtime_rename_tab(
+        &mut self,
+        tab_index: usize,
+        name: String,
+    ) -> Result<(), ApiError> {
+        let Some(tab) = self.tabs.get_mut(tab_index) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("tab {tab_index} does not exist in window {}", u64::from(self.id())),
+            ));
+        };
+        let name = name.trim();
+        tab.custom_name = (!name.is_empty()).then(|| name.to_owned());
+        self.sync_chrome_tabs();
+        self.dirty = true;
+        self.display.window.request_redraw();
+        Ok(())
+    }
+
+    pub(crate) fn runtime_move_tab(
+        &mut self,
+        tab_index: usize,
+        to_index: usize,
+    ) -> Result<(), ApiError> {
+        let len = self.tabs.len();
+        if tab_index >= len || to_index >= len {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!(
+                    "tab move {tab_index} -> {to_index} is outside window {} with {len} tabs",
+                    u64::from(self.id())
+                ),
+            ));
+        }
+        self.move_tab(tab_index, to_index);
+        self.display.window.request_redraw();
+        Ok(())
+    }
+
+    pub(crate) fn runtime_close_pane(&mut self, pane_id: u64) -> Result<bool, ApiError> {
+        if self.pane(pane_id).is_none() {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to the target window"),
+            ));
+        }
+        if let Some(process) = self.busy_process_in(&[pane_id]) {
+            return Err(runtime_close_confirmation(
+                process,
+                json!({
+                    "target": "pane",
+                    "window_id": u64::from(self.id()),
+                    "pane_id": pane_id
+                }),
+            ));
+        }
+        Ok(self.close_pane(pane_id))
+    }
+
+    pub(crate) fn runtime_set_zoom(
+        &mut self,
+        pane_id: u64,
+        zoomed: bool,
+    ) -> Result<(), ApiError> {
+        let Some(tab_index) = self.tabs.iter().position(|tab| {
+            let mut panes = Vec::new();
+            tab.layout.leaves(&mut panes);
+            panes.contains(&pane_id)
+        }) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to the target window"),
+            ));
+        };
+        if zoomed && !matches!(&self.tabs[tab_index].layout, Layout::Split { .. }) {
+            return Err(ApiError::new(
+                "invalid_state",
+                "a single-pane tab is already full size and cannot be zoomed",
+            ));
+        }
+
+        self.select_tab(tab_index);
+        self.tabs[tab_index].active_pane = pane_id;
+        let next = zoomed.then_some(pane_id);
+        if self.zoom != next {
+            self.zoom = next;
+            self.resize_active_layout();
+        }
+        self.dirty = true;
+        self.display.window.request_redraw();
+        Ok(())
+    }
+
+    pub(crate) fn runtime_resize_pane(
+        &mut self,
+        pane_id: u64,
+        ratio: f32,
+    ) -> Result<(), ApiError> {
+        let Some(tab_index) = self.tabs.iter().position(|tab| {
+            let mut panes = Vec::new();
+            tab.layout.leaves(&mut panes);
+            panes.contains(&pane_id)
+        }) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to the target window"),
+            ));
+        };
+        if !self.tabs[tab_index].layout.set_leaf_parent_ratio(pane_id, ratio) {
+            return Err(ApiError::new(
+                "invalid_state",
+                "pane.resize requires a pane with a direct parent split",
+            ));
+        }
+        if tab_index == self.active_tab {
+            self.resize_active_layout();
+        }
+        self.dirty = true;
+        self.display.window.request_redraw();
+        Ok(())
+    }
+
     pub(crate) fn runtime_prompt(
         &mut self,
         pane_id: u64,
@@ -256,6 +427,85 @@ impl WindowContext {
             pane.nebula_state.agent_runtime_submit_pending = true;
             pane.nebula_state.idle_screen_streak = 0;
             pane.nebula_state.command_started.get_or_insert_with(std::time::Instant::now);
+        }
+        self.dirty = true;
+        self.display.window.request_redraw();
+        Ok(())
+    }
+
+    pub(crate) fn runtime_paste(
+        &mut self,
+        pane_id: u64,
+        text: String,
+        submit: bool,
+        require_agent: bool,
+    ) -> Result<(), ApiError> {
+        crate::runtime_api::validate_paste_text(&text)?;
+        let Some(index) = self.pane_index(pane_id) else {
+            return Err(ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to the target window"),
+            ));
+        };
+        let pane = &mut self.panes[index];
+        if let Some(destination) = pane.ssh_destination.as_deref() {
+            return Err(ApiError::new(
+                "remote_target_refused",
+                format!(
+                    "program-provided local content cannot be sent automatically to remote pane {destination:?}"
+                ),
+            ));
+        }
+        let recognized_agent = runtime_agent(pane).is_some();
+        if require_agent && !recognized_agent {
+            return Err(ApiError::new(
+                "invalid_target",
+                "multi-line Agent input requires a live Agent pane",
+            ));
+        }
+        if pane.nebula_state.runtime_submit_barrier.is_some() {
+            return Err(ApiError::new(
+                "input_in_progress",
+                "the pane is still committing previous runtime input",
+            ));
+        }
+        let mode = *pane.terminal.lock().mode();
+        if !mode.contains(TermMode::BRACKETED_PASTE) {
+            return Err(ApiError::new(
+                "unsafe_input_mode",
+                "the target pane is not ready for safe multi-line input",
+            ));
+        }
+
+        let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+        let mut bytes = b"\x1b[200~".to_vec();
+        bytes.extend_from_slice(normalized.replace("\x1b[201~", "").as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        if submit {
+            let submit_bytes =
+                runtime_key_sequence(pane, RuntimeKey::Enter, RuntimeKeyModifiers::default(), 1)?;
+            pane.nebula_state.runtime_submit_barrier =
+                Some(crate::display::state::RuntimeSubmitBarrier {
+                    baseline_screen: runtime_screen_snapshot(pane).unwrap_or_default(),
+                    submit_bytes,
+                });
+        }
+        pane.notifier.notify(bytes);
+        pane.nebula_state.touched = true;
+        if submit {
+            pane.nebula_state.awaiting_input = false;
+            pane.nebula_state.needs_attention = false;
+            pane.nebula_state.finished_unseen = false;
+            pane.nebula_state.failed_unseen = false;
+            if recognized_agent {
+                pane.nebula_state.agent_status = crate::ai_agents::AgentStatus::Working;
+                pane.nebula_state.agent_status_source =
+                    crate::ai_agents::AgentStatusSource::Process;
+                pane.nebula_state.agent_status_rule = None;
+                pane.nebula_state.agent_runtime_submit_pending = true;
+                pane.nebula_state.idle_screen_streak = 0;
+                pane.nebula_state.command_started.get_or_insert_with(std::time::Instant::now);
+            }
         }
         self.dirty = true;
         self.display.window.request_redraw();
@@ -323,6 +573,35 @@ impl WindowContext {
         self.dirty = true;
         self.display.window.request_redraw();
         Ok(bytes_sent)
+    }
+
+    pub(crate) fn runtime_exec_context(
+        &self,
+        pane_id: u64,
+    ) -> Result<(crate::runtime_exec::PaneExecContext, String), ApiError> {
+        let pane = self.pane(pane_id).ok_or_else(|| {
+            ApiError::new(
+                "target_not_found",
+                format!("pane {pane_id} does not belong to the target window"),
+            )
+        })?;
+        if pane.ssh_destination.is_some() {
+            return Err(ApiError::new(
+                "remote_exec_unsupported",
+                "pane.exec is local-only and cannot execute on an SSH pane",
+            )
+            .details(json!({
+                "pane_id": pane_id,
+                "ssh_destination": &pane.ssh_destination
+            })));
+        }
+        let context = pane.exec_context.clone().ok_or_else(|| {
+            ApiError::new(
+                "exec_context_unavailable",
+                "the target pane has no local process execution context",
+            )
+        })?;
+        Ok((context, pane.nebula_state.cwd.clone()))
     }
 
     pub(crate) fn runtime_run(&mut self, pane_id: u64, command: String) -> Result<u64, ApiError> {

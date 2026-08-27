@@ -130,6 +130,38 @@ impl Layout {
         }
     }
 
+    /// 设置目标 pane 在最近父 Split 中占用的比例。内部 ratio 描述 first，
+    /// 因此 second 侧目标要换算成 `1 - target_ratio`。
+    pub(super) fn set_leaf_parent_ratio(&mut self, target: PaneId, target_ratio: f32) -> bool {
+        let Layout::Split {
+            ratio,
+            preview_ratio,
+            dragging,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return false;
+        };
+
+        if matches!(first.as_ref(), Layout::Leaf(id) if *id == target) {
+            *ratio = target_ratio;
+            *preview_ratio = None;
+            *dragging = false;
+            return true;
+        }
+        if matches!(second.as_ref(), Layout::Leaf(id) if *id == target) {
+            *ratio = 1.0 - target_ratio;
+            *preview_ratio = None;
+            *dragging = false;
+            return true;
+        }
+
+        first.set_leaf_parent_ratio(target, target_ratio)
+            || second.set_leaf_parent_ratio(target, target_ratio)
+    }
+
     /// Remove the `target` leaf, collapsing its parent so the sibling subtree
     /// takes over the freed space.
     fn remove_leaf(&mut self, target: PaneId) -> RemoveResult {
