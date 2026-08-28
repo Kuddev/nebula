@@ -57,6 +57,46 @@ fn gpui_binding_combo_maps_plus_minus_and_digits() {
 }
 
 #[test]
+fn pane_card_divider_reaches_the_window_top_without_moving_its_bottom() {
+    let card = Bounds::new(
+        gpui::point(px(230.0), px(48.0)),
+        size(px(850.0), px(672.0)),
+    );
+    let divider = pane_card_divider_bounds(card, 1.0, 1.5).expect("侧栏存在时必须画分界线");
+
+    assert_eq!(f32::from(divider.origin.x), 230.0);
+    assert_eq!(f32::from(divider.origin.y), 0.0);
+    assert_eq!(f32::from(divider.size.height), 720.0);
+    assert_eq!(
+        f32::from(divider.origin.y + divider.size.height),
+        f32::from(card.origin.y + card.size.height),
+        "向上延伸不能越过原来的正文底边"
+    );
+    assert!(
+        (f32::from(divider.size.width) * 1.5 - 2.0).abs() < f32::EPSILON,
+        "150% 缩放下 1px 线应吸附为两个物理像素"
+    );
+
+    let scale_one = pane_card_divider_bounds(card, 1.0, 1.0).unwrap();
+    assert_eq!(f32::from(scale_one.size.width), 1.0);
+}
+
+#[test]
+fn pane_card_divider_requires_both_width_and_a_real_sidebar_boundary() {
+    let no_sidebar = Bounds::new(
+        gpui::point(px(0.0), px(48.0)),
+        size(px(1080.0), px(672.0)),
+    );
+    assert!(pane_card_divider_bounds(no_sidebar, 1.0, 1.5).is_none());
+
+    let sidebar = Bounds::new(
+        gpui::point(px(230.0), px(48.0)),
+        size(px(850.0), px(672.0)),
+    );
+    assert!(pane_card_divider_bounds(sidebar, 0.0, 1.5).is_none());
+}
+
+#[test]
 fn ai_hook_routing_never_falls_back_for_a_stale_exact_pane() {
     let pane_ids = [7u64, 11];
     assert_eq!(ai_hook_target_pane(&pane_ids, Some(11), Some(7)), Some(11));

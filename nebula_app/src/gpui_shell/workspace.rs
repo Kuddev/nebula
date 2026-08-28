@@ -418,6 +418,26 @@ fn to_split_rect(bounds: &Bounds<Pixels>) -> nebula_split::Rect {
     )
 }
 
+/// 侧栏分界线在终端卡 canvas 里绘制，但视觉上属于整个窗口 chrome。
+/// 返回窗口坐标中的一条连续矩形，避免标题栏与正文各画一段产生缩放接缝。
+fn pane_card_divider_bounds(
+    bounds: Bounds<Pixels>,
+    divider: f32,
+    scale_factor: f32,
+) -> Option<Bounds<Pixels>> {
+    // x=0 表示终端左侧已经没有侧栏（顶部 tab 或折叠终态），贴边线没有分隔意义。
+    if divider <= 0.0 || bounds.origin.x <= px(0.0) {
+        return None;
+    }
+
+    let scale = scale_factor.max(1.0);
+    let width = (divider * scale).round().max(1.0) / scale;
+    let height = bounds.size.height + bounds.origin.y;
+    let mut origin = bounds.origin;
+    origin.y = px(0.0);
+    Some(Bounds::new(origin, size(px(width), height)))
+}
+
 /// 纯树手术（dock 的核心）：把 `source` 整树挂到 `target` 树的 `nav` 侧，
 /// 根级 50/50 分割（旧壳 `dock_tab_into_active` 的布局公式）。
 fn dock_tree(target: SplitTree<u64>, source: SplitTree<u64>, nav: SplitNav) -> SplitTree<u64> {
@@ -5192,7 +5212,7 @@ impl Render for NebulaWorkspace {
                                 gpui::canvas(
                                     |_, _, _| (),
                                     |bounds, _, window, cx| {
-                                        // 卡缝、圆角、竖线全部读同一个 style 实例：
+                                        // 卡缝、圆角、竖线全部读同一份 style 真源：
                                         // 布局的 padding 与这里的壳色带必须逐边对上，
                                         // 两边各写一份字面量就是那圈白边的来源——壳色
                                         // 若按四边对称推算，卡的上两个圆角外侧会漏
@@ -5205,22 +5225,6 @@ impl Render for NebulaWorkspace {
                                             window,
                                             cx,
                                         );
-                                        // 竖线：卡缝归零后侧栏与终端两块面板会糊成
-                                        // 一片，这条线是那种铺满形态下唯一的结构分界。
-                                        // 宽度吸附到物理像素整数，否则 1px 在高 DPI
-                                        // 下会栅格化成两条半亮的线。
-                                        if card.divider > 0.0 {
-                                            let scale = window.scale_factor().max(1.0);
-                                            let width =
-                                                (card.divider * scale).round().max(1.0) / scale;
-                                            window.paint_quad(fill(
-                                                Bounds::new(
-                                                    bounds.origin,
-                                                    size(px(width), bounds.size.height),
-                                                ),
-                                                crate::gpui_shell::theme::card_divider_color(cx),
-                                            ));
-                                        }
                                     },
                                 )
                                 .absolute()
@@ -5258,7 +5262,30 @@ impl Render for NebulaWorkspace {
                                     .inset_0(),
                                 )
                                 .children(content),
-                        ),
+                        )
+                            .child(
+                                // 竖线必须在卡内容之后覆盖绘制：内容底色带透明度，
+                                // 若只盖住正文段，会让同一条线在标题栏下沿变色。
+                                gpui::canvas(
+                                    |_, _, _| (),
+                                    |bounds, _, window, cx| {
+                                        let card =
+                                            crate::gpui_shell::theme::PaneCardStyle::current(cx);
+                                        if let Some(divider_bounds) = pane_card_divider_bounds(
+                                            bounds,
+                                            card.divider,
+                                            window.scale_factor(),
+                                        ) {
+                                            window.paint_quad(fill(
+                                                divider_bounds,
+                                                crate::gpui_shell::theme::card_divider_color(cx),
+                                            ));
+                                        }
+                                    },
+                                )
+                                .absolute()
+                                .inset_0(),
+                            ),
                     )
                     .child(self.render_side_panel_slot(cx)),
             )
