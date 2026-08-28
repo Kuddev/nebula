@@ -187,7 +187,6 @@ pub type Rgb8 = [u8; 3];
 /// 主题标识；`nebula_settings.txt` 里 `theme=` 持久化 [`Self::prompt_name`]。
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum ThemeName {
-    #[default]
     Nebula,
     SilverLight,
     SteelDark,
@@ -195,9 +194,14 @@ pub enum ThemeName {
     CoalDark,
     LinenLight,
     MossDark,
-    /// 深色：Nord 配色（Arctic Ice Studio 公开色板）。
+    /// 深色：Nord 配色（Arctic Ice Studio 公开色板）。出厂默认。
+    ///
+    /// 跟随系统外观时它的浅色对应是 [`Self::Paper`]（配对表在旧壳
+    /// `display/ui/theme.rs::for_system_appearance`，两壳同一来源），所以改这一个
+    /// `#[default]` 就同时定下了「默认深色 = Nord、默认浅色 = Paper」。
+    #[default]
     Nord,
-    /// 浅色：暖纸面 Paper 配色。
+    /// 浅色：暖纸面 Paper 配色。跟随系统时作为 [`Self::Nord`] 的浅色成员。
     Paper,
 }
 
@@ -1324,7 +1328,7 @@ mod tests {
         let settings = RuntimeSettings::from_raw(&RawSettings::from_text("theme=NoSuchTheme\n"));
         // 出厂默认逐项对照旧壳 nebula_settings_load。
         assert_eq!(settings.language, LanguagePref::System);
-        assert_eq!(settings.theme, ThemeName::Nebula);
+        assert_eq!(settings.theme, ThemeName::Nord);
         assert_eq!(settings.font_family, None);
         assert!(!settings.copy_on_select);
         assert!(settings.powerline);

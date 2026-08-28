@@ -45,8 +45,15 @@ pub enum NebulaTheme {
 }
 
 impl Default for NebulaTheme {
+    /// 出厂默认主题的唯一真源是 [`nebula_settings::ThemeName::default`]。
+    ///
+    /// 这里通过稳定的 prompt 名桥接而不是再写一份枚举映射：`ThemeName` 和
+    /// `NebulaTheme` 是两个 crate 里的两个枚举，各存一份字面量默认值就会在
+    /// 「改了出厂主题但只改了一处」时让两壳分家 —— 圆角默认值当初正是这样漏出
+    /// 一圈白边的。名字对不上时回落到 Nord，与真源当前的默认一致。
     fn default() -> Self {
-        Self::Nebula
+        Self::from_prompt_name(nebula_settings::ThemeName::default().prompt_name())
+            .unwrap_or(Self::Nord)
     }
 }
 
