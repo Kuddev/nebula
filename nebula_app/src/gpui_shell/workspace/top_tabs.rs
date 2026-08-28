@@ -408,17 +408,22 @@ impl NebulaWorkspace {
                                     .items_center()
                                     .invisible()
                                     .group_hover(hover_group, |slot| slot.visible())
-                                    .child(
-                                        Button::new(("top-close-tab", ix))
-                                            .icon(IconName::Close)
-                                            .ghost()
-                                            .xsmall()
-                                            .on_click(cx.listener(
-                                                move |this, _, window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.request_close_tab(ix, window, cx);
-                                                },
-                                            )),
+                                    .when(
+                                        nebula_settings::RuntimeSettings::load().tab_close_visible,
+                                        |slot| {
+                                            slot.child(
+                                                Button::new(("top-close-tab", ix))
+                                                    .icon(IconName::Close)
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            cx.stop_propagation();
+                                                            this.request_close_tab(ix, window, cx);
+                                                        },
+                                                    )),
+                                            )
+                                        },
                                     ),
                             ),
                     )

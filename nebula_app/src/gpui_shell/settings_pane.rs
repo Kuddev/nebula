@@ -2249,6 +2249,13 @@ impl SettingsPane {
             ));
         let interface = self
             .group("界面", cx)
+            .child(self.switch_row(
+                "tab_close_visible",
+                "显示标签关闭按钮",
+                "关闭后侧栏与顶栏的标签都不再渲染叉号，中键点标签仍可关闭。",
+                self.runtime.tab_close_visible,
+                cx,
+            ))
             .child(self.select_row(
                 "language",
                 "语言",
