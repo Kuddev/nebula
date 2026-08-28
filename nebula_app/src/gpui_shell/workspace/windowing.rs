@@ -714,6 +714,36 @@ fn focus_workspace_window(workspace: &mut NebulaWorkspace, window: &mut Window) 
     window.activate_window();
 }
 
+/// 快速终端热键的窗口副作用：把最近活跃的那扇窗叫出来，或者收回去。
+///
+/// 三态而不是两态。「可见但不在前台」必须走激活而不是隐藏——用户在别的应用里按下
+/// 热键时想要的是「把终端拿到眼前」，此时若按可见性判断就会把它藏起来，正好相反。
+///
+/// 这里的 `activate_window` 是用户主动动作，和 `RuntimeWindowPolicy::Focus` 同类；
+/// 它不受「runtime 命令不得抢前台」那条约束（见本文件顶部的策略表）。
+pub(crate) fn toggle_quick_terminal_window(cx: &mut App) {
+    let target = cx
+        .global::<WindowRegistry>()
+        .entries
+        .iter()
+        .max_by_key(|entry| entry.last_activated)
+        .map(|entry| (entry.handle, entry.workspace.clone()));
+    let Some((handle, workspace)) = target else { return };
+    let _ = handle.update(cx, move |_, window, cx| {
+        let _ = workspace.update(cx, |workspace, cx| {
+            if workspace.window_hidden {
+                focus_workspace_window(workspace, window);
+            } else if window.is_window_active() {
+                crate::gpui_shell::hide_native_window(window);
+                workspace.window_hidden = true;
+            } else {
+                window.activate_window();
+            }
+            cx.notify();
+        });
+    });
+}
+
 fn focus_entry(entry: &WindowEntry, pane_id: Option<u64>, cx: &mut App) {
     let workspace = entry.workspace.clone();
     let _ = entry.handle.update(cx, move |_, window, cx| {

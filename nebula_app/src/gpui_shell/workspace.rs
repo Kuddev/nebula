@@ -49,6 +49,7 @@ mod file_tree;
 mod key_actions;
 mod pane_header;
 mod quick_jump;
+mod quick_terminal;
 mod residency;
 mod send_to_chat;
 mod sidebar;
@@ -1196,6 +1197,8 @@ impl NebulaWorkspace {
         }
         if let Some(ai_events) = ai_events {
             Self::start_ai_hook_pump(ai_events, cx);
+            // 全局热键是进程级单例，只在承载 ai-hook 泵的那扇初始窗口注册一次。
+            Self::start_quick_terminal_hotkey(cx);
         }
         Self::start_agent_screen_watchdog(cx);
         if let Some(shell_events) = shell_events {
