@@ -912,8 +912,8 @@ fn open_quick_terminal_window(cx: &mut App) {
         motion,
         motion_clock: MotionClock::default(),
         animation_generation: 0,
-        // `NebulaWorkspace::new` 会异步发出一次普通窗口 resize；首个动画帧
-        // 再落最终几何，保证那次构造期任务不能把 40% 高度覆盖掉。
+        // `NebulaWorkspace::new` 会异步发出一次普通窗口 resize；首帧先落快速
+        // 终端几何，入场完成帧还会再确认一次，避免构造期任务晚到后覆盖 40% 高度。
         resize_next_frame: true,
         activate_next_frame: true,
     });
@@ -967,11 +967,14 @@ fn quick_terminal_animation_tick(generation: u64, cx: &mut App) -> bool {
         frame
     };
     let (handle, hwnd, geometry, hidden, resize, activate, target_visible, active) = frame;
+    // GPUI 构造期的异步 `window.resize` 可能晚于首个动画帧。入场完成时
+    // 只再重落一次宽高，既保证它是最后写入者，又不让每个 Y 帧触发 PTY resize。
+    let settle_geometry = target_visible && !active;
     if !super::quick_terminal::position_native_window(
         hwnd,
         geometry,
         hidden,
-        resize,
+        resize || settle_geometry,
         target_visible,
     ) {
         log::warn!("quick terminal native positioning failed");
