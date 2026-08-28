@@ -2,6 +2,50 @@
 
 use super::*;
 
+#[cfg(feature = "gpui-test-support")]
+mod title_bar_panel_control_tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext, point};
+
+    #[derive(Default)]
+    struct TitleBarPanelControlProbe {
+        parent_mouse_downs: usize,
+        panel_actions: usize,
+    }
+
+    impl Render for TitleBarPanelControlProbe {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.parent_mouse_downs += 1),
+                )
+                .child(
+                    div().w(px(64.0)).h(px(48.0)).child(
+                        title_bar_panel_controls().child(
+                            div()
+                                .id("title-bar-panel-control-probe")
+                                .size(px(32.0))
+                                .on_click(cx.listener(|this, _, _, _| this.panel_actions += 1)),
+                        ),
+                    ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn title_bar_panel_control_click_does_not_arm_parent_drag(cx: &mut TestAppContext) {
+        let (probe, cx) = cx.add_window_view(|_, _| TitleBarPanelControlProbe::default());
+        cx.simulate_click(point(px(16.0), px(24.0)), Modifiers::default());
+
+        let (parent_mouse_downs, panel_actions) =
+            probe.read_with(cx, |probe, _| (probe.parent_mouse_downs, probe.panel_actions));
+        assert_eq!(panel_actions, 1, "一次左键必须直接触发面板动作");
+        assert_eq!(parent_mouse_downs, 0, "面板按钮不得启动标题栏拖拽起手");
+    }
+}
+
 #[test]
 fn gpui_binding_combo_maps_plus_minus_and_digits() {
     assert_eq!(gpui_binding_combo("ctrl+plus"), "ctrl-+");

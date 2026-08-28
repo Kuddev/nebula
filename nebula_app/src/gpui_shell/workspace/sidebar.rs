@@ -927,11 +927,8 @@ impl NebulaWorkspace {
             )
             .child(self.render_collapsed_tab_title(cx))
             .child(
-                h_flex()
-                    .h_full()
-                    .items_center()
+                title_bar_panel_controls()
                     .gap_2()
-                    .occlude()
                     .child(
                         Button::new("toggle-file-tree")
                             .icon(if files_active {

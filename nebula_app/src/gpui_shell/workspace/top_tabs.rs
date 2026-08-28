@@ -19,7 +19,7 @@ use crate::gpui_shell::terminal::view::SidebarActivity;
 
 use super::{
     NebulaWorkspace, NewWindow, OpenSettings, TAB_LABEL_ICON_SIZE, TAB_LABEL_ICON_W, TabDrag,
-    TabDragAxis, TabPresentation, ToggleShellPicker, pane_header,
+    TabDragAxis, TabPresentation, ToggleShellPicker, pane_header, title_bar_panel_controls,
 };
 
 pub(super) const TOP_TAB_H: f32 = 34.0;
@@ -619,20 +619,27 @@ impl NebulaWorkspace {
             // 才是可拖拽标题栏，文件树与 Git 固定在其右侧。
             .child(div().h_full().flex_1().min_w_0())
             .child(
-                Button::new("top-toggle-file-tree")
-                    .icon(if files_active { IconName::FolderOpen } else { IconName::FolderClosed })
-                    .ghost()
-                    .selected(files_active)
-                    .tooltip("目录树 (Ctrl+Shift+F)")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_file_tree(cx))),
-            )
-            .child(
-                Button::new("top-toggle-git-tree")
-                    .icon(IconName::Github)
-                    .ghost()
-                    .selected(git_active)
-                    .tooltip("Git 状态 (Ctrl+Shift+G)")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_git_tree(cx))),
+                title_bar_panel_controls()
+                    .child(
+                        Button::new("top-toggle-file-tree")
+                            .icon(if files_active {
+                                IconName::FolderOpen
+                            } else {
+                                IconName::FolderClosed
+                            })
+                            .ghost()
+                            .selected(files_active)
+                            .tooltip("目录树 (Ctrl+Shift+F)")
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_file_tree(cx))),
+                    )
+                    .child(
+                        Button::new("top-toggle-git-tree")
+                            .icon(IconName::Github)
+                            .ghost()
+                            .selected(git_active)
+                            .tooltip("Git 状态 (Ctrl+Shift+G)")
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_git_tree(cx))),
+                    ),
             )
             .into_any_element()
     }

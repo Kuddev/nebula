@@ -113,6 +113,16 @@ const PALETTE_KEY_CONTEXT: &str = "NebulaCommandPalette";
 const SIDEBAR_RESIZE_VISUAL_OFFSET: f32 = 8.0;
 const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
 
+/// 标题栏里的文件树 / Git 工具必须同时挡住原生拖窗命中和父级拖拽起手。
+/// `occlude` 只屏蔽后方 hitbox，不会阻止 MouseDown 向 `TitleBar` 冒泡。
+fn title_bar_panel_controls() -> gpui::Div {
+    h_flex()
+        .h_full()
+        .items_center()
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
 /// 工作区静态默认绑定的 combo 集（[`init`] 的镜像）。撤销已失效的自定义
 /// 注入时要排除：gpui 的 NoAction 打在静态默认键上会误杀基础功能。
 const STATIC_DEFAULT_COMBOS: &[&str] = &[
