@@ -1400,7 +1400,9 @@ impl TerminalView {
                 }
                 let gate = Self::drag_gesture_active();
                 if std::env::var_os("NEBULA_RESIZE_TRACE").is_some() {
-                    eprintln!("[nebula:resize-trace] settle-timer gate={gate}");
+                    crate::gpui_shell::try_write_stderr(format_args!(
+                        "[nebula:resize-trace] settle-timer gate={gate}"
+                    ));
                 }
                 if gate {
                     // 手势未松开：净零手势（挤压后拖回原宽）最终提交同尺寸
@@ -1426,7 +1428,9 @@ impl TerminalView {
             return;
         }
         if let Err(err) = nebula_settings::persist_keys(&[("font_size", format!("{next:.2}"))]) {
-            eprintln!("[nebula:gpui] failed to persist font size: {err}");
+            crate::gpui_shell::try_write_stderr(format_args!(
+                "[nebula:gpui] failed to persist font size: {err}"
+            ));
             return;
         }
         let theme = crate::gpui_shell::theme::effective_theme_name(cx);

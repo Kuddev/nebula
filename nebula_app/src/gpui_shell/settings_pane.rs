@@ -1019,7 +1019,9 @@ impl SettingsPane {
     /// 写盘 → 重载单一事实源与全局 `Settings` → 通知宿主热应用。
     pub(super) fn persist(&mut self, updates: &[(&str, String)], cx: &mut Context<Self>) {
         if let Err(err) = persist_keys(updates) {
-            eprintln!("[nebula:gpui] failed to persist settings: {err}");
+            super::try_write_stderr(format_args!(
+                "[nebula:gpui] failed to persist settings: {err}"
+            ));
         }
         self.runtime = RuntimeSettings::load();
         let settings = crate::gpui_shell::config::Settings::load(

@@ -59,7 +59,9 @@ impl NebulaWorkspace {
             return;
         }
         if let Err(err) = nebula_settings::persist_keys(&[("font_size", format!("{next:.2}"))]) {
-            eprintln!("[nebula:gpui] failed to persist font size: {err}");
+            crate::gpui_shell::try_write_stderr(format_args!(
+                "[nebula:gpui] failed to persist font size: {err}"
+            ));
             return;
         }
         self.apply_runtime_settings(cx);

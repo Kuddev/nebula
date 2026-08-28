@@ -159,7 +159,9 @@ impl SettingsPane {
     /// gpui 键位表）。persist 走通用路径拿重载与事件，这里补镜像。
     fn persist_keybinds(&mut self, cx: &mut Context<Self>) {
         if let Err(err) = nebula_settings::persist_keybinds(&self.keymap_binds) {
-            eprintln!("[nebula:gpui] failed to persist keybinds: {err}");
+            crate::gpui_shell::try_write_stderr(format_args!(
+                "[nebula:gpui] failed to persist keybinds: {err}"
+            ));
         }
         self.keymap_binds = nebula_settings::keybind_pairs();
         self.runtime = RuntimeSettings::load();

@@ -69,8 +69,6 @@ pub struct Settings {
     /// 默认 shell 的稳定 id（`nebula_settings.txt` 的 `shell=`，如
     /// "pwsh" / "cmd" / "wsl:Ubuntu"）。None = 引擎默认。
     pub shell_id: Option<String>,
-    /// 实际加载的 toml 配置文件（诊断用；None 表示无 toml）。
-    pub source_path: Option<PathBuf>,
     /// 配置装载时吞掉的第一个错误（toml 解析失败/字段形状不符）。解析
     /// 保持宽容——任何用户配置都不能阻止启动——但错误必须有去处：
     /// 开窗后由工作区放进驻留消息栏（提示三层裁定：这是有待办的事）。
@@ -159,7 +157,6 @@ impl Settings {
             cjk_bold_regular: runtime.cjk_bold_regular,
             shell_id: runtime.shell.clone(),
             font_family: normal_family,
-            source_path: path,
             load_notice,
             // 这里是唯一能正确合并「主题自带几何」与「用户显式覆盖」的地方：
             // `theme` 已是 follow_system 折算后的**生效**主题，runtime 是同一次
@@ -337,7 +334,10 @@ fn load_merged_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
         if import_path.exists() {
             merged = merge_values(merged, read_toml(&import_path, notice));
         } else {
-            eprintln!("[nebula:gpui] config import not found: {}", import_path.display());
+            super::try_write_stderr(format_args!(
+                "[nebula:gpui] config import not found: {}",
+                import_path.display()
+            ));
         }
     }
     merge_values(merged, main)
@@ -347,7 +347,10 @@ fn read_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
-            eprintln!("[nebula:gpui] failed to read config {}: {err}", path.display());
+            super::try_write_stderr(format_args!(
+                "[nebula:gpui] failed to read config {}: {err}",
+                path.display()
+            ));
             notice.get_or_insert_with(|| format!("无法读取配置 {}: {err}", path.display()));
             return toml::Value::Table(Default::default());
         },
@@ -356,7 +359,10 @@ fn read_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
     match text.parse::<toml::Table>() {
         Ok(table) => toml::Value::Table(table),
         Err(err) => {
-            eprintln!("[nebula:gpui] failed to parse config {}: {err}", path.display());
+            super::try_write_stderr(format_args!(
+                "[nebula:gpui] failed to parse config {}: {err}",
+                path.display()
+            ));
             let first_line = err.to_string().lines().next().unwrap_or("解析失败").to_owned();
             notice.get_or_insert_with(|| format!("配置 {} 解析失败：{first_line}", path.display()));
             toml::Value::Table(Default::default())

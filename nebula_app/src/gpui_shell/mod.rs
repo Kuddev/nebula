@@ -10,6 +10,22 @@
 //! - `NEBULA_GPUI_SHELL=1`（需 gpui-shell 构建）：spike 形态——GPUI 跑在
 //!   专用线程，与 winit 旧壳同进程并存，仅用于双运行时验证，P3 完成后移除。
 
+// 父模块宏会覆盖所有外置子模块里的同名预导入宏，让普通 `cargo check`
+// 就能拦住会在 Windows GUI 无效标准句柄上 panic 的裸 print 调用。
+#[allow(unused_macros)]
+macro_rules! println {
+    ($($args:tt)*) => {
+        compile_error!("GPUI code must not use println!; use a fallible diagnostic sink")
+    };
+}
+
+#[allow(unused_macros)]
+macro_rules! eprintln {
+    ($($args:tt)*) => {
+        compile_error!("GPUI code must not use eprintln!; use try_write_stderr")
+    };
+}
+
 mod assets;
 pub mod code_tab;
 pub mod config;
@@ -35,6 +51,14 @@ use gpui::{App, AppContext as _};
 
 #[cfg(windows)]
 use std::borrow::Cow;
+
+/// GPUI 主窗没有可靠的标准错误句柄；保留父进程重定向诊断，但写失败不能
+/// 再把非致命错误升级成应用 panic。
+pub(crate) fn try_write_stderr(args: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+
+    let _ = writeln!(std::io::stderr(), "{args}");
+}
 
 /// GPUI 壳的跨线程唤醒：托盘、mux ATTACH、runtime 控制都汇到工作区 pump。
 pub(crate) enum GpuiShellEvent {
@@ -132,17 +156,9 @@ fn init(cx: &mut App) {
     terminal::init(cx);
     workspace::init(cx);
 
-    // 用户 nebula.toml + nebula_settings.txt，启动读一次；失败静默回退默认。
-    // 诊断走 stderr：GPUI 主窗形态在旧壳 logger 建立之前拉起。
+    // 用户 nebula.toml + nebula_settings.txt，启动读一次；失败回退默认，
+    // 具体错误由 config 的 notice 上浮，并在可用时写入 stderr。
     let settings = config::Settings::load(theme::effective_theme_name(cx));
-    match &settings.source_path {
-        Some(path) => eprintln!("[nebula:gpui] config loaded: {}", path.display()),
-        None if nebula_settings::settings_path().is_file() => eprintln!(
-            "[nebula:gpui] runtime settings loaded: {} (no nebula.toml)",
-            nebula_settings::settings_path().display()
-        ),
-        None => eprintln!("[nebula:gpui] no user config found, using defaults"),
-    }
     cx.set_global(settings);
 }
 
@@ -154,7 +170,9 @@ fn register_bundled_fonts(cx: &App) {
     if let Err(error) =
         cx.text_system().add_fonts(vec![Cow::Borrowed(crate::font_install::REQUIRED_FONT_BYTES)])
     {
-        eprintln!("[nebula:gpui] failed to register bundled Maple font: {error}");
+        try_write_stderr(format_args!(
+            "[nebula:gpui] failed to register bundled Maple font: {error}"
+        ));
     }
     // 用户导入的私有字体（设置页字体选择器写入的目录）：与旧壳
     // `refresh_private_fonts` 同源同径——启动一次性注册，选择器和终端
@@ -164,14 +182,17 @@ fn register_bundled_fonts(cx: &App) {
         match std::fs::read(path) {
             Ok(bytes) => {
                 if let Err(error) = cx.text_system().add_fonts(vec![Cow::Owned(bytes)]) {
-                    eprintln!(
+                    try_write_stderr(format_args!(
                         "[nebula:gpui] failed to register imported font {}: {error}",
                         path.display()
-                    );
+                    ));
                 }
             },
             Err(error) => {
-                eprintln!("[nebula:gpui] failed to read imported font {}: {error}", path.display())
+                try_write_stderr(format_args!(
+                    "[nebula:gpui] failed to read imported font {}: {error}",
+                    path.display()
+                ));
             },
         }
     }

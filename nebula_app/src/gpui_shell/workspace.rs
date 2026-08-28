@@ -2147,14 +2147,11 @@ impl NebulaWorkspace {
 
     /// 设置页是单例 tab（旧壳同形态）：已开则激活，未开则新建。
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // TODO(debug-layout): 临时诊断打点，定位设置页打不开的回归后删除。
-        eprintln!("[nebula:gpui] open_settings invoked");
         if let Some(ix) = self.tabs.iter().position(WorkspaceTab::is_settings) {
             self.activate_tab(ix, window, cx);
             return;
         }
         let view = cx.new(|cx| SettingsPane::new(window, cx));
-        eprintln!("[nebula:gpui] SettingsPane constructed");
         let subscription = cx.subscribe_in(&view, window, Self::on_settings_event);
         self.insert_new_tab(WorkspaceTab::Settings { view, _subscription: subscription });
         self.focus_active(window, cx);
