@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, App, Context, FontWeight, InteractiveElement as _,
+    Animation, AnimationExt as _, App, ClickEvent, Context, FontWeight, InteractiveElement as _,
     IntoElement as _, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, ParentElement as _,
     ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
     Window, div, ease_out_quint, img, px,
@@ -83,6 +83,20 @@ fn at_strip_end(x: f32, strip_w: f32, viewport_w: f32) -> bool {
 /// 分量更强时则保留它。
 fn horizontal_wheel_delta(x: f32, y: f32) -> f32 {
     if x.abs() > y.abs() { x } else { y }
+}
+
+/// 顶部加号的生产调用点与鼠标测试共用同一个元素构造，避免测试只证明
+/// `title_bar_panel_controls` 本身，却漏掉真实按钮没有接入它。
+pub(super) fn top_new_tab_control(
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Div {
+    title_bar_panel_controls().h_auto().child(
+        Button::new("top-new-tab")
+            .icon(IconName::Plus)
+            .ghost()
+            .tooltip("新建终端 (Ctrl+Shift+T)")
+            .on_click(on_click),
+    )
 }
 
 impl NebulaWorkspace {
@@ -486,21 +500,23 @@ impl NebulaWorkspace {
                     .when(overflow, |bar| {
                         bar.child(
                             div().h(px(TOP_TAB_H)).flex().items_center().child(
-                                Button::new("top-tabs-prev")
-                                    .icon(IconName::ChevronLeft)
-                                    .ghost()
-                                    .xsmall()
-                                    .disabled(at_strip_start(scroll_x))
-                                    .tooltip("向左翻标签")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.nudge_top_tabs(
-                                            -1.0,
-                                            pitch,
-                                            strip_w,
-                                            tab_viewport_w,
-                                            cx,
-                                        );
-                                    })),
+                                title_bar_panel_controls().h_auto().child(
+                                    Button::new("top-tabs-prev")
+                                        .icon(IconName::ChevronLeft)
+                                        .ghost()
+                                        .xsmall()
+                                        .disabled(at_strip_start(scroll_x))
+                                        .tooltip("向左翻标签")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.nudge_top_tabs(
+                                                -1.0,
+                                                pitch,
+                                                strip_w,
+                                                tab_viewport_w,
+                                                cx,
+                                            );
+                                        })),
+                                ),
                             ),
                         )
                     })
@@ -532,32 +548,30 @@ impl NebulaWorkspace {
                     .when(overflow, |bar| {
                         bar.child(
                             div().h(px(TOP_TAB_H)).flex().items_center().child(
-                                Button::new("top-tabs-next")
-                                    .icon(IconName::ChevronRight)
-                                    .ghost()
-                                    .xsmall()
-                                    .disabled(at_strip_end(scroll_x, strip_w, tab_viewport_w))
-                                    .tooltip("向右翻标签")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.nudge_top_tabs(
-                                            1.0,
-                                            pitch,
-                                            strip_w,
-                                            tab_viewport_w,
-                                            cx,
-                                        );
-                                    })),
+                                title_bar_panel_controls().h_auto().child(
+                                    Button::new("top-tabs-next")
+                                        .icon(IconName::ChevronRight)
+                                        .ghost()
+                                        .xsmall()
+                                        .disabled(at_strip_end(scroll_x, strip_w, tab_viewport_w))
+                                        .tooltip("向右翻标签")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.nudge_top_tabs(
+                                                1.0,
+                                                pitch,
+                                                strip_w,
+                                                tab_viewport_w,
+                                                cx,
+                                            );
+                                        })),
+                                ),
                             ),
                         )
                     })
                     .child(
-                        Button::new("top-new-tab")
-                            .icon(IconName::Plus)
-                            .ghost()
-                            .tooltip("新建终端 (Ctrl+Shift+T)")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.add_terminal(window, cx);
-                            })),
+                        top_new_tab_control(cx.listener(|this, _, window, cx| {
+                            this.add_terminal(window, cx);
+                        })),
                     )
                     .child(
                         Button::new("top-tabs-menu")
