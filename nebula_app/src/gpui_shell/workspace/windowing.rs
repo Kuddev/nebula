@@ -41,6 +41,54 @@ struct WindowEntry {
     native_hwnd: isize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeWindowPolicy {
+    Preserve,
+    CreateWithoutActivation,
+    Focus,
+}
+
+/// Runtime 命令的窗口副作用合同；新增命令必须在这个唯一判据里明确归类。
+///
+/// | 命令 | show | activate |
+/// | --- | --- | --- |
+/// | `focus`（包括 orchestrate `Focus`） | 仅窗口已隐藏时恢复 | 是 |
+/// | `new-window`、需要新窗的 `new-tab` | 创建可见窗口（`focus=false`） | 否 |
+/// | `snapshot`、`read`、`procs`、`agent-read`、`exec` | 否 | 否 |
+/// | `close-*`、`rename-tab`、`move-tab`、`split`、`zoom`、`resize` | 否 | 否 |
+/// | `prompt`、`paste`、`send-key`、`run`、`agent-*`、现有窗 `new-tab` | 否 | 否 |
+///
+/// `describe`、`agents`、`wait`、`subscribe` 在 runtime server 内直接应答，
+/// 不会进入此窗口分发器，因此天然不 show、不 activate。
+fn runtime_window_policy(command: &RuntimeCommand) -> RuntimeWindowPolicy {
+    match command {
+        RuntimeCommand::Focus { .. } => RuntimeWindowPolicy::Focus,
+        RuntimeCommand::NewWindow { .. } => RuntimeWindowPolicy::CreateWithoutActivation,
+        RuntimeCommand::Snapshot
+        | RuntimeCommand::CloseWindow { .. }
+        | RuntimeCommand::NewTab { .. }
+        | RuntimeCommand::CloseTab { .. }
+        | RuntimeCommand::RenameTab { .. }
+        | RuntimeCommand::MoveTab { .. }
+        | RuntimeCommand::Split { .. }
+        | RuntimeCommand::ClosePane { .. }
+        | RuntimeCommand::ZoomPane { .. }
+        | RuntimeCommand::ResizePane { .. }
+        | RuntimeCommand::Prompt { .. }
+        | RuntimeCommand::Paste { .. }
+        | RuntimeCommand::ReadPane { .. }
+        | RuntimeCommand::Procs { .. }
+        | RuntimeCommand::SendKey { .. }
+        | RuntimeCommand::Run { .. }
+        | RuntimeCommand::Exec { .. }
+        | RuntimeCommand::AgentStart { .. }
+        | RuntimeCommand::AgentFork { .. }
+        | RuntimeCommand::AgentPrompt { .. }
+        | RuntimeCommand::AgentPaste { .. }
+        | RuntimeCommand::AgentRead { .. } => RuntimeWindowPolicy::Preserve,
+    }
+}
+
 pub(crate) struct WindowRegistry {
     next_window_id: u64,
     activation_sequence: u64,
@@ -132,11 +180,11 @@ pub(crate) fn open_initial_window(
         Some(cwd) => WorkspaceStartup::NewTerminal { cwd: Some(cwd) },
         None => WorkspaceStartup::RestoreOrDefault,
     };
-    open_workspace_window(cx, startup, Some(ai_events), Some(shell_events))
+    open_workspace_window(cx, startup, Some(ai_events), Some(shell_events), true)
         .expect("failed to open Nebula GPUI window");
 }
 
-fn workspace_window_options(cx: &App) -> WindowOptions {
+fn workspace_window_options(cx: &App, focus: bool) -> WindowOptions {
     let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -144,6 +192,7 @@ fn workspace_window_options(cx: &App) -> WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
         app_id: Some("nebula".to_owned()),
         window_background: crate::gpui_shell::wallpaper::initial_background_appearance(),
+        focus,
         ..Default::default()
     }
 }
@@ -160,9 +209,10 @@ fn open_workspace_window(
     startup: WorkspaceStartup,
     ai_events: Option<std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>>,
     shell_events: Option<std::sync::mpsc::Receiver<GpuiShellEvent>>,
+    focus: bool,
 ) -> gpui::Result<(u64, Entity<NebulaWorkspace>)> {
     let (runtime_window_id, runtime_hub) = allocate_window(cx);
-    let options = workspace_window_options(cx);
+    let options = workspace_window_options(cx, focus);
     let workspace_slot = Rc::new(RefCell::new(None));
     let hwnd_slot = Rc::new(RefCell::new(0isize));
     let workspace_out = workspace_slot.clone();
@@ -213,7 +263,14 @@ fn open_workspace_window(
 
 pub(crate) fn open_new_window(cx: &mut App, cwd: Option<PathBuf>) -> gpui::Result<(u64, u64)> {
     let (window_id, workspace) =
-        open_workspace_window(cx, WorkspaceStartup::NewTerminal { cwd }, None, None)?;
+        open_workspace_window(cx, WorkspaceStartup::NewTerminal { cwd }, None, None, true)?;
+    let pane_id = workspace.read(cx).active_terminal_pane_id().unwrap_or_default();
+    Ok((window_id, pane_id))
+}
+
+fn open_runtime_window(cx: &mut App, cwd: Option<PathBuf>) -> gpui::Result<(u64, u64)> {
+    let (window_id, workspace) =
+        open_workspace_window(cx, WorkspaceStartup::NewTerminal { cwd }, None, None, false)?;
     let pane_id = workspace.read(cx).active_terminal_pane_id().unwrap_or_default();
     Ok((window_id, pane_id))
 }
@@ -394,6 +451,7 @@ pub(crate) fn dispatch_ai_events(events: Vec<crate::ai_hook::AiHookEvent>, cx: &
 }
 
 fn dispatch_runtime(dispatch: Arc<RuntimeDispatch>, cx: &mut App) {
+    let window_policy = runtime_window_policy(&dispatch.command);
     match &dispatch.command {
         RuntimeCommand::Snapshot => {
             let snapshot = publish_runtime_snapshot(cx);
@@ -404,7 +462,7 @@ fn dispatch_runtime(dispatch: Arc<RuntimeDispatch>, cx: &mut App) {
             return;
         },
         RuntimeCommand::NewWindow { cwd } => {
-            let response = open_new_window(cx, cwd.clone())
+            let response = open_runtime_window(cx, cwd.clone())
                 .map_err(|error| ApiError::new("window_create_failed", error.to_string()))
                 .map(|(window_id, pane_id)| {
                     let snapshot = publish_runtime_snapshot(cx);
@@ -420,7 +478,7 @@ fn dispatch_runtime(dispatch: Arc<RuntimeDispatch>, cx: &mut App) {
             if nebula_settings::RuntimeSettings::load().windowing_behavior
                 == nebula_settings::WindowingBehaviorName::UseNew =>
         {
-            let response = open_new_window(cx, cwd.clone())
+            let response = open_runtime_window(cx, cwd.clone())
                 .map_err(|error| ApiError::new("window_create_failed", error.to_string()))
                 .map(|(window_id, pane_id)| {
                     let snapshot = publish_runtime_snapshot(cx);
@@ -435,13 +493,8 @@ fn dispatch_runtime(dispatch: Arc<RuntimeDispatch>, cx: &mut App) {
         _ => {},
     }
 
-    if let RuntimeCommand::Exec {
-        pane_id,
-        argv,
-        timeout_ms,
-        max_output_bytes,
-        ..
-    } = &dispatch.command
+    if let RuntimeCommand::Exec { pane_id, argv, timeout_ms, max_output_bytes, .. } =
+        &dispatch.command
     {
         let entry = match route_entry(&dispatch.command, cx) {
             Ok(entry) => entry,
@@ -477,7 +530,7 @@ fn dispatch_runtime(dispatch: Arc<RuntimeDispatch>, cx: &mut App) {
             if matches!(dispatch.command, RuntimeCommand::NewTab { window_id: None, .. }) =>
         {
             let RuntimeCommand::NewTab { cwd, .. } = &dispatch.command else { unreachable!() };
-            let response = open_new_window(cx, cwd.clone())
+            let response = open_runtime_window(cx, cwd.clone())
                 .map_err(|create| {
                     ApiError::new(
                         "window_create_failed",
@@ -505,9 +558,8 @@ fn dispatch_runtime(dispatch: Arc<RuntimeDispatch>, cx: &mut App) {
     let command = dispatch.command.clone();
     let workspace = entry.workspace.clone();
     let result = entry.handle.update(cx, move |_, window, cx| {
-        crate::gpui_shell::show_native_window(window);
         workspace.update(cx, |workspace, cx| {
-            workspace.window_hidden = false;
+            apply_runtime_window_policy(window_policy, workspace, window);
             workspace.execute_runtime_command(&command, window, cx)
         })
     });
@@ -518,12 +570,33 @@ fn dispatch_runtime(dispatch: Arc<RuntimeDispatch>, cx: &mut App) {
     });
 }
 
+fn apply_runtime_window_policy(
+    policy: RuntimeWindowPolicy,
+    workspace: &mut NebulaWorkspace,
+    window: &mut Window,
+) {
+    match policy {
+        RuntimeWindowPolicy::Preserve => {},
+        RuntimeWindowPolicy::CreateWithoutActivation => {
+            debug_assert!(false, "window.create is handled before existing-window dispatch");
+        },
+        RuntimeWindowPolicy::Focus => focus_workspace_window(workspace, window),
+    }
+}
+
+fn focus_workspace_window(workspace: &mut NebulaWorkspace, window: &mut Window) {
+    if workspace.window_hidden {
+        crate::gpui_shell::reveal_native_window(window);
+        workspace.window_hidden = false;
+    }
+    window.activate_window();
+}
+
 fn focus_entry(entry: &WindowEntry, pane_id: Option<u64>, cx: &mut App) {
     let workspace = entry.workspace.clone();
     let _ = entry.handle.update(cx, move |_, window, cx| {
-        crate::gpui_shell::show_native_window(window);
         let _ = workspace.update(cx, |workspace, cx| {
-            workspace.window_hidden = false;
+            focus_workspace_window(workspace, window);
             if let Some(pane_id) = pane_id
                 && let Some(tab_ix) = workspace.tab_of_pane(pane_id)
             {
@@ -643,7 +716,7 @@ pub(crate) fn quit_all(cx: &mut App) {
 }
 
 pub(crate) fn move_tab_to_new_window(payload: CrossWindowTabDrag, cx: &mut App) {
-    let opened = open_workspace_window(cx, WorkspaceStartup::Empty, None, None);
+    let opened = open_workspace_window(cx, WorkspaceStartup::Empty, None, None, true);
     let Ok((target_window_id, target_workspace)) = opened else {
         log::warn!("failed to open a window for moved tab");
         return;
@@ -941,4 +1014,123 @@ fn is_window_on_current_virtual_desktop(hwnd: isize) -> Option<bool> {
         unsafe { CoUninitialize() };
     }
     (queried >= 0).then_some(on_current != 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai_agents::AgentKind;
+    use crate::runtime_api::{RuntimeKey, RuntimeKeyModifiers, RuntimeSplitDirection};
+
+    #[test]
+    fn runtime_window_policy_only_explicit_focus_activates() {
+        assert_eq!(
+            runtime_window_policy(&RuntimeCommand::Focus { window_id: Some(1), pane_id: Some(2) }),
+            RuntimeWindowPolicy::Focus
+        );
+        assert_eq!(
+            runtime_window_policy(&RuntimeCommand::NewWindow { cwd: None }),
+            RuntimeWindowPolicy::CreateWithoutActivation
+        );
+
+        let preserve = vec![
+            RuntimeCommand::Snapshot,
+            RuntimeCommand::CloseWindow { window_id: Some(1) },
+            RuntimeCommand::NewTab { window_id: Some(1), cwd: None },
+            RuntimeCommand::CloseTab { window_id: Some(1), tab_index: 0 },
+            RuntimeCommand::RenameTab {
+                window_id: Some(1),
+                tab_index: 0,
+                name: "renamed".to_owned(),
+            },
+            RuntimeCommand::MoveTab { window_id: Some(1), tab_index: 0, to_index: 1 },
+            RuntimeCommand::Split {
+                window_id: Some(1),
+                pane_id: Some(2),
+                direction: RuntimeSplitDirection::LeftRight,
+            },
+            RuntimeCommand::ClosePane { window_id: Some(1), pane_id: 2 },
+            RuntimeCommand::ZoomPane { window_id: Some(1), pane_id: 2, zoomed: true },
+            RuntimeCommand::ResizePane { window_id: Some(1), pane_id: 2, ratio: 0.5 },
+            RuntimeCommand::Prompt {
+                window_id: Some(1),
+                pane_id: 2,
+                text: "prompt".to_owned(),
+                submit: true,
+            },
+            RuntimeCommand::Paste {
+                window_id: Some(1),
+                pane_id: 2,
+                text: "paste".to_owned(),
+                submit: false,
+            },
+            RuntimeCommand::ReadPane { window_id: Some(1), pane_id: 2, lines: 20 },
+            RuntimeCommand::Procs { window_id: Some(1), pane_id: 2 },
+            RuntimeCommand::SendKey {
+                window_id: Some(1),
+                pane_id: 2,
+                key: RuntimeKey::Enter,
+                modifiers: RuntimeKeyModifiers::default(),
+                repeat: 1,
+            },
+            RuntimeCommand::Run {
+                window_id: Some(1),
+                pane_id: 2,
+                command: "echo ok".to_owned(),
+                wait: false,
+                timeout_ms: 1_000,
+            },
+            RuntimeCommand::Exec {
+                window_id: Some(1),
+                pane_id: 2,
+                argv: vec!["cmd".to_owned()],
+                timeout_ms: 1_000,
+                max_output_bytes: 1024,
+            },
+            RuntimeCommand::AgentStart {
+                window_id: Some(1),
+                pane_id: Some(2),
+                name: "agent".to_owned(),
+                kind: AgentKind::Codex,
+                cwd: None,
+                session_id: None,
+                command: "codex".to_owned(),
+                worktree: None,
+            },
+            RuntimeCommand::AgentFork {
+                window_id: Some(1),
+                source_pane_id: Some(2),
+                source_cwd: None,
+                name: "fork".to_owned(),
+                kind: AgentKind::Codex,
+                session_id: None,
+                command: "codex".to_owned(),
+                branch: None,
+                base: None,
+                path: None,
+                allow_dirty_source: false,
+            },
+            RuntimeCommand::AgentPrompt {
+                agent: "agent".to_owned(),
+                generation: Some(1),
+                text: "prompt".to_owned(),
+                submit: true,
+            },
+            RuntimeCommand::AgentPaste {
+                agent: "agent".to_owned(),
+                generation: Some(1),
+                text: "paste".to_owned(),
+                submit: false,
+            },
+            RuntimeCommand::AgentRead { agent: "agent".to_owned(), generation: Some(1), lines: 20 },
+        ];
+
+        for command in preserve {
+            assert_eq!(
+                runtime_window_policy(&command),
+                RuntimeWindowPolicy::Preserve,
+                "{command:?} must preserve foreground and visibility"
+            );
+        }
+    }
 }

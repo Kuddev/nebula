@@ -231,13 +231,19 @@ pub(crate) fn hide_native_window(window: &gpui::Window) {
     }
 }
 
-/// 托盘点击 / 关掉托盘后：把藏着的窗口捞回来。
-pub(crate) fn show_native_window(window: &gpui::Window) {
+/// 只恢复被 `SW_HIDE` 的 HWND，不改变当前前台窗口。
+///
+/// Windows 的 `SW_SHOW` 自带激活语义，不能用来处理后台 runtime 请求；
+/// 显式 focus 由调用方在恢复可见性后另行调用 `activate_window`。
+pub(crate) fn reveal_native_window(window: &gpui::Window) {
     #[cfg(windows)]
     {
         native_show(window, true);
     }
-    window.activate_window();
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+    }
 }
 
 /// 把藏起来的窗口全部显示出来。
@@ -257,7 +263,7 @@ pub(crate) fn reveal_all_windows(cx: &mut App) {
     cx.defer(|cx| {
         for handle in cx.windows() {
             if let Err(err) = handle.update(cx, |_, window, _| {
-                show_native_window(window);
+                reveal_native_window(window);
             }) {
                 log::warn!("failed to reveal window: {err}");
             }
@@ -319,7 +325,7 @@ fn native_show(window: &gpui::Window, show: bool) -> bool {
     };
     let hwnd = handle.hwnd.get() as *mut core::ffi::c_void;
     let cmd = if show {
-        windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW
+        windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE
     } else {
         windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE
     };
