@@ -43,6 +43,116 @@ mod title_bar_panel_control_tests {
         assert_eq!(tab_count, 2, "顶部加号一次左键必须创建一个新标签");
         assert_eq!(parent_mouse_downs, 0, "面板按钮不得启动标题栏拖拽起手");
     }
+
+    #[derive(Default)]
+    struct TopTabGeometryProbe;
+
+    impl Render for TopTabGeometryProbe {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            h_flex()
+                .w(px(400.0))
+                .h(px(48.0))
+                .items_end()
+                .child(
+                    div()
+                        .debug_selector(|| "top-tab-geometry-probe".to_owned())
+                        .w(px(160.0))
+                        .h(px(super::top_tabs::TOP_TAB_H)),
+                )
+                .child(super::top_tabs::top_tab_action_slot(
+                    super::top_tabs::top_new_tab_control(|_, _, _| {})
+                        .debug_selector(|| "top-new-tab-geometry-probe".to_owned()),
+                ))
+                .child(super::top_tabs::top_tab_action_slot(
+                    h_flex()
+                        .debug_selector(|| "top-tabs-menu-geometry-probe".to_owned())
+                        .child(super::top_tabs::top_tabs_menu_button(false)),
+                ))
+        }
+    }
+
+    fn vertical_center(bounds: Bounds<Pixels>) -> f32 {
+        f32::from(bounds.origin.y + bounds.size.height * 0.5)
+    }
+
+    #[gpui::test]
+    fn top_tab_action_buttons_share_the_tab_vertical_center(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|_, _| TopTabGeometryProbe);
+        let tab = cx.debug_bounds("top-tab-geometry-probe").expect("tab bounds");
+        let new_tab = cx.debug_bounds("top-new-tab-geometry-probe").expect("new-tab bounds");
+        let menu = cx.debug_bounds("top-tabs-menu-geometry-probe").expect("menu bounds");
+
+        assert_eq!(f32::from(tab.size.height), 34.0);
+        assert_eq!(f32::from(new_tab.size.height), 32.0);
+        assert_eq!(f32::from(menu.size.height), 32.0);
+        assert_eq!(vertical_center(new_tab), vertical_center(tab));
+        assert_eq!(vertical_center(menu), vertical_center(tab));
+    }
+}
+
+#[cfg(feature = "gpui-test-support")]
+mod sidebar_new_tab_tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext};
+
+    #[derive(Default)]
+    struct SidebarNewTabProbe {
+        parent_mouse_downs: usize,
+        parent_clicks: usize,
+        new_tabs: usize,
+    }
+
+    impl Render for SidebarNewTabProbe {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let hover_group: SharedString = "sidebar-new-tab-test-hover".into();
+            h_flex()
+                .id("sidebar-new-tab-test-parent")
+                .group(hover_group.clone())
+                .w(px(200.0))
+                .h(px(34.0))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, _| this.parent_mouse_downs += 1),
+                )
+                .on_click(cx.listener(|this, _, _, _| this.parent_clicks += 1))
+                .child(div().flex_1())
+                .child(
+                    super::sidebar::sidebar_new_tab_control(
+                        hover_group,
+                        cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.new_tabs += 1;
+                        }),
+                    )
+                    .debug_selector(|| "sidebar-new-tab-probe".to_owned())
+                    .child("+"),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn sidebar_new_tab_click_after_header_hover_reaches_the_real_call_site(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (probe, cx) = cx.add_window_view(|_, _| SidebarNewTabProbe::default());
+        let bounds = cx.debug_bounds("sidebar-new-tab-probe").expect("sidebar plus bounds");
+        let center = gpui::point(
+            bounds.origin.x + bounds.size.width * 0.5,
+            bounds.origin.y + bounds.size.height * 0.5,
+        );
+
+        cx.simulate_mouse_move(center, None, Modifiers::default());
+        cx.simulate_click(center, Modifiers::default());
+
+        let (parent_mouse_downs, parent_clicks, new_tabs) = probe.read_with(cx, |probe, _| {
+            (probe.parent_mouse_downs, probe.parent_clicks, probe.new_tabs)
+        });
+        assert_eq!(new_tabs, 1, "hover 后点击侧栏加号必须创建标签");
+        assert_eq!(parent_mouse_downs, 0, "加号按下不得给 TABS 分区标题上膛");
+        assert_eq!(parent_clicks, 0, "加号点击不得同时折叠 TABS 分区");
+    }
 }
 
 #[test]

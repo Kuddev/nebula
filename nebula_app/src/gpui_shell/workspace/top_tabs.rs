@@ -99,6 +99,21 @@ pub(super) fn top_new_tab_control(
     )
 }
 
+/// “更多”入口的生产按钮与几何探针共用同一个构造，避免测试用近似尺寸替代。
+pub(super) fn top_tabs_menu_button(settings_active: bool) -> Button {
+    Button::new("top-tabs-menu")
+        .icon(IconName::EllipsisVertical)
+        .ghost()
+        .selected(settings_active)
+        .tooltip("更多")
+}
+
+/// 紧邻 TabView 的操作按钮占满同一条 34px 行，再在槽内居中 32px 按钮。
+/// 外层仍贴标题栏底边，tab 与正文相接的既有布局不变。
+pub(super) fn top_tab_action_slot(child: impl gpui::IntoElement) -> gpui::Div {
+    h_flex().h(px(TOP_TAB_H)).items_center().child(child)
+}
+
 impl NebulaWorkspace {
     /// Shell 面板缓存打开时的候选；导入后只刷新现有面板，关闭态下次打开会读盘。
     pub(super) fn refresh_shell_if_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -569,17 +584,15 @@ impl NebulaWorkspace {
                         )
                     })
                     .child(
-                        top_new_tab_control(cx.listener(|this, _, window, cx| {
-                            this.add_terminal(window, cx);
-                        })),
+                        top_tab_action_slot(top_new_tab_control(cx.listener(
+                            |this, _, window, cx| {
+                                this.add_terminal(window, cx);
+                            },
+                        ))),
                     )
                     .child(
-                        Button::new("top-tabs-menu")
-                            .icon(IconName::EllipsisVertical)
-                            .ghost()
-                            .selected(settings_active)
-                            .tooltip("更多")
-                            .dropdown_menu_with_anchor(
+                        top_tab_action_slot(
+                            top_tabs_menu_button(settings_active).dropdown_menu_with_anchor(
                                 gpui::Anchor::TopRight,
                                 move |menu, _, _| {
                                     let shell_picker = menu_workspace.clone();
@@ -627,6 +640,7 @@ impl NebulaWorkspace {
                                         )
                                 },
                             ),
+                        ),
                     ),
             )
             // Windows Terminal 的新建 split button 紧跟 TabView；剩余空间

@@ -8,6 +8,26 @@ const TABS_DISCLOSURE_SLOT_W: f32 = 24.0;
 /// 这个码位；换字体前先核，否则会掉成豆腐块。
 const WAITING_INPUT_GLYPH: &str = "\u{f256}";
 
+/// 侧栏新建入口的生产命中区；鼠标测试直接复用，避免只验证一个近似按钮。
+pub(super) fn sidebar_new_tab_control(
+    header_group: SharedString,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    h_flex()
+        .id("sidebar-new-tab")
+        .size(px(SIDEBAR_PLUS_SIZE))
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .invisible()
+        .group_hover(header_group, |button| button.visible())
+        // 标题整行也可点击折叠；必须在按下阶段截断，不能等 Click
+        // 才处理，否则父行已经收到同一次起手。
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(on_click)
+}
+
 /// 事件 vs 状态：一个 tab 此刻该显示哪个静息徽章。
 ///
 /// - `Done` 是**事件**——「回合完成了，你不在场」。你正看着这个 tab 时它没有
@@ -708,17 +728,15 @@ impl NebulaWorkspace {
                             .child(
                                 // 旧壳 `ChromeHit::NewTab`：直接开设置里的默认
                                 // shell，不经过选择器。三点才是 NewTabMenu。
-                                h_flex()
-                                    .id("sidebar-new-tab")
-                                    .size(px(SIDEBAR_PLUS_SIZE))
-                                    .flex_shrink_0()
-                                    .items_center()
-                                    .justify_center()
+                                sidebar_new_tab_control(
+                                    header_group,
+                                    cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.add_terminal(window, cx);
+                                    }),
+                                )
                                     .rounded_md()
-                                    .cursor_pointer()
                                     .text_color(muted)
-                                    .invisible()
-                                    .group_hover(header_group, |button| button.visible())
                                     .hover(|button| button.bg(hover_bg).text_color(theme.foreground))
                                     .tooltip(|window, cx| {
                                         gpui_component::tooltip::Tooltip::new(
@@ -726,10 +744,6 @@ impl NebulaWorkspace {
                                         )
                                         .build(window, cx)
                                     })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.add_terminal(window, cx);
-                                    }))
                                     .child(
                                         Icon::new(IconName::Plus).with_size(px(SIDEBAR_HEADER_ICON)),
                                     ),
