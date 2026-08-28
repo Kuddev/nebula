@@ -57,15 +57,29 @@ const THEME_VALUES: [&str; 9] = [
 const REPOSITORY_URL: &str = "https://github.com/Kuddev/nebula";
 const BUG_REPORT_TEMPLATE: &str = "bug_report.yml";
 
-/// 左侧分区导航。主页承载应用身份、版本与支持入口；其余页面都是已经完成的
-/// 设置能力，必须能从这里直接到达，不能把真实功能藏成“知道入口的人才能用”。
+/// 左侧分区的稳定路由表。2026-08-28 产品裁定：默认 GPUI 导航收敛为常用项，
+/// 暂时隐藏“AI 供应商”和“备份”；页面实现与索引继续保留。后续恢复入口时只改
+/// [`HIDDEN_NAV_SECTIONS`]，不得删除或重排这里的条目。
 const SECTIONS: [&str; 10] =
     ["应用", "外观", "配置文件", "AI 供应商", "SSH", "网络", "交互", "按键映射", "高级", "备份"];
 
-/// 用接近性把十个入口拆成三块，降低线性扫描成本；数组里仍保存稳定的
-/// [`SECTIONS`] 下标，不复制设置状态或路由。
+const HIDDEN_NAV_SECTIONS: &[usize] = &[3, 9];
+
+/// 保留原来的分组展开顺序，组名不再渲染；数组里仍保存稳定的 [`SECTIONS`]
+/// 下标，不复制设置状态或路由。
 const NAV_GROUPS: [(&str, &[usize]); 3] =
     [("工作区", &[0, 1, 2, 6, 7]), ("连接与智能", &[3, 4, 5]), ("系统", &[8, 9])];
+
+fn is_nav_section_visible(index: usize) -> bool {
+    !HIDDEN_NAV_SECTIONS.contains(&index)
+}
+
+fn visible_nav_sections() -> impl Iterator<Item = usize> {
+    NAV_GROUPS
+        .iter()
+        .flat_map(|(_, sections)| sections.iter().copied())
+        .filter(|index| is_nav_section_visible(*index))
+}
 
 // 这些几何值逐项来自旧壳 `display/settings.rs::settings_geometry`。GPUI
 // 设置页沿用同一节奏，避免组件默认间距把标题、分组和表单压成一条均匀列表。
@@ -3216,52 +3230,38 @@ impl SettingsPane {
             .gap(px(2.0))
             .border_r_1()
             .border_color(hairline);
-        for (group_ix, (group, sections)) in NAV_GROUPS.iter().enumerate() {
+        for ix in visible_nav_sections() {
+            let active = ix == self.active_section;
             nav = nav.child(
                 div()
-                    .h(px(if group_ix == 0 { 22.0 } else { 30.0 }))
-                    .px_4()
-                    .when(group_ix > 0, |label| label.pt_2())
+                    .id(("settings-nav", ix))
+                    .px_2()
+                    .ml_2()
+                    .mr_1()
+                    .h(row_h)
                     .flex()
-                    .items_end()
-                    .text_size(px(main_text_px * 0.74))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(muted.opacity(0.78))
-                    .child(*group),
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(main_text_px))
+                    // 选中态同时改变底色、墨色和字重，余光扫过也能确认当前位置。
+                    .font_weight(if active {
+                        gpui::FontWeight::SEMIBOLD
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
+                    .when(active, |item| item.bg(active_bg).text_color(active_fg))
+                    .when(!active, |item| item.text_color(muted).hover(|s| s.bg(hover_bg)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.active_section = ix;
+                        cx.notify();
+                    }))
+                    .child(Icon::default().path(section_icon(ix)).small().text_color(
+                        if active { active_fg } else { muted },
+                    ))
+                    .child(SECTIONS[ix]),
             );
-            for &ix in *sections {
-                let active = ix == self.active_section;
-                nav = nav.child(
-                    div()
-                        .id(("settings-nav", ix))
-                        .px_2()
-                        .ml_2()
-                        .mr_1()
-                        .h(row_h)
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_size(px(main_text_px))
-                        // 选中态同时改变底色、墨色和字重，余光扫过也能确认当前位置。
-                        .font_weight(if active {
-                            gpui::FontWeight::SEMIBOLD
-                        } else {
-                            gpui::FontWeight::NORMAL
-                        })
-                        .when(active, |item| item.bg(active_bg).text_color(active_fg))
-                        .when(!active, |item| item.text_color(muted).hover(|s| s.bg(hover_bg)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.active_section = ix;
-                            cx.notify();
-                        }))
-                        .child(Icon::default().path(section_icon(ix)).small().text_color(
-                            if active { active_fg } else { muted },
-                        ))
-                        .child(SECTIONS[ix]),
-                );
-            }
         }
         nav.into_any_element()
     }
@@ -3528,5 +3528,36 @@ impl Render for SettingsPane {
                         ),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_nav_visibility_keeps_stable_routes_but_hides_two_entries() {
+        let visibility: Vec<_> = (0..SECTIONS.len()).map(is_nav_section_visible).collect();
+        assert_eq!(visibility, vec![true, true, true, false, true, true, true, true, true, false]);
+    }
+
+    #[test]
+    fn settings_nav_preserves_the_group_expansion_order_without_headings() {
+        let visible: Vec<_> = visible_nav_sections().collect();
+        assert_eq!(visible, vec![0, 1, 2, 6, 7, 4, 5, 8]);
+        let labels: Vec<_> = visible.into_iter().map(|index| SECTIONS[index]).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "应用",
+                "外观",
+                "配置文件",
+                "交互",
+                "按键映射",
+                "SSH",
+                "网络",
+                "高级"
+            ]
+        );
     }
 }
