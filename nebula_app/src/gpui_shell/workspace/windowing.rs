@@ -203,7 +203,14 @@ pub(crate) fn initialize(cx: &mut App, runtime_hub: crate::runtime_api::RuntimeH
     });
     let closed_subscription = cx.on_window_closed(|cx, _window_id| {
         prune_entries(cx);
-        if !cx.global::<WindowRegistry>().entries.is_empty() {
+        // 快速终端不能改变普通 session 的生命周期：最后一扇普通窗口关闭后，
+        // 即使隐藏的 Quake 窗口仍存活，也不能再补写一份空的普通 session。
+        if cx
+            .global::<WindowRegistry>()
+            .entries
+            .iter()
+            .any(|entry| entry.role == WindowRole::Regular)
+        {
             save_combined_session(cx, false);
         }
     });
@@ -1218,7 +1225,9 @@ pub(crate) fn close_empty_workspace_window(
     cx: &mut App,
 ) {
     unregister(runtime_window_id, cx);
-    if cx.global::<WindowRegistry>().entries.is_empty() {
+    let has_regular_window =
+        cx.global::<WindowRegistry>().entries.iter().any(|entry| entry.role == WindowRole::Regular);
+    if !has_regular_window {
         let mut empty = crate::session::Session::new(0, Vec::new());
         crate::session::save_final(&mut empty);
     } else {

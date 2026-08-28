@@ -263,6 +263,11 @@ pub(crate) fn reveal_native_window(window: &gpui::Window) {
 pub(crate) fn reveal_all_windows(cx: &mut App) {
     cx.defer(|cx| {
         for handle in cx.windows() {
+            // 快速终端由自己的显隐状态机管理；托盘设置变化只能恢复普通窗口，
+            // 否则一个已向上收起的 Quake 窗口会在后台被无动画地重新显示。
+            if workspace::windowing::is_quick_terminal_window(handle, cx) {
+                continue;
+            }
             if let Err(err) = handle.update(cx, |_, window, _| {
                 reveal_native_window(window);
             }) {
