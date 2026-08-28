@@ -332,8 +332,17 @@ impl RenderSnapshot {
             if bg != Color::Named(NamedColor::Background) {
                 push_bg(&mut snap.bg_runs, row, col, bg);
             }
-            if selection_range.is_some_and(|range| range.contains(indexed.point)) {
+            // 宽字符首格和占位格是一个可渲染单元：命中任一格都必须按整字高亮，
+            // 并且只由首格写入两列，避免占位格再生成一条重叠的 selection run。
+            let is_selected = !flags.contains(Flags::WIDE_CHAR_SPACER)
+                && selection_range.is_some_and(|range| {
+                    range.contains_cell(&indexed, content.cursor.point, cursor_shape)
+                });
+            if is_selected {
                 push_sel(&mut snap.selection_runs, row, col);
+                if flags.contains(Flags::WIDE_CHAR) && col as usize + 1 < cols {
+                    push_sel(&mut snap.selection_runs, row, col + 1);
+                }
             }
 
             if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -426,7 +435,8 @@ mod tests {
     use super::*;
     use crate::event::VoidListener;
     use crate::grid::Dimensions;
-    use crate::index::{Column, Line};
+    use crate::index::{Column, Line, Side};
+    use crate::selection::{Selection, SelectionType};
     use crate::term::Config;
 
     struct TestSize {
@@ -525,6 +535,56 @@ mod tests {
         // "ab" narrow at col 0, "中" wide at col 2 (spacer col 3 skipped),
         // "c" narrow resumes at col 4.
         assert_eq!(rows, vec![(0, 0, false, 2), (0, 2, true, 1), (0, 4, false, 1)]);
+    }
+
+    #[test]
+    fn capture_selects_complete_wide_cells_and_copy_keeps_complete_text() {
+        fn select_cell(term: &mut Term<VoidListener>, ty: SelectionType, col: usize) {
+            let point = crate::index::Point::new(Line(0), Column(col));
+            let mut selection = Selection::new(ty, point, Side::Left);
+            selection.update(point, Side::Right);
+            term.selection = Some(selection);
+        }
+
+        fn runs(term: &Term<VoidListener>) -> Vec<(u16, u16, u16)> {
+            RenderSnapshot::capture(term, &cfg(4, 8))
+                .selection_runs
+                .iter()
+                .map(|run| (run.row, run.start, run.end))
+                .collect()
+        }
+
+        // ASCII + 汉字 + 全角标点 + emoji + ASCII，宽字符分别位于 1..3、3..5、5..7。
+        let mut term = term_with(&["A光，🙂Z"]);
+        term.grid_mut().cursor.point = crate::index::Point::new(Line(1), Column(0));
+
+        for (leading, spacer, expected) in [(1, 2, "光"), (3, 4, "，"), (5, 6, "🙂")] {
+            for col in [leading, spacer] {
+                select_cell(&mut term, SelectionType::Simple, col);
+                assert_eq!(runs(&term), vec![(0, leading as u16, spacer as u16 + 1)]);
+                assert_eq!(term.selection_to_string().as_deref(), Some(expected));
+
+                select_cell(&mut term, SelectionType::Block, col);
+                assert_eq!(runs(&term), vec![(0, leading as u16, spacer as u16 + 1)]);
+                assert_eq!(term.selection_to_string().as_deref(), Some(expected));
+            }
+        }
+
+        term.selection = Some(Selection::new(
+            SelectionType::Semantic,
+            crate::index::Point::new(Line(0), Column(1)),
+            Side::Left,
+        ));
+        assert_eq!(runs(&term), vec![(0, 0, 8)]);
+        assert_eq!(term.selection_to_string().as_deref(), Some("A光，🙂Z"));
+
+        term.selection = Some(Selection::new(
+            SelectionType::Lines,
+            crate::index::Point::new(Line(0), Column(3)),
+            Side::Left,
+        ));
+        assert_eq!(runs(&term), vec![(0, 0, 8)]);
+        assert_eq!(term.selection_to_string().as_deref(), Some("A光，🙂Z\n"));
     }
 
     #[test]
