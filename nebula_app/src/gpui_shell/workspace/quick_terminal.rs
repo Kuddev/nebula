@@ -19,11 +19,9 @@ use gpui::{App, Context, Global};
 
 use super::NebulaWorkspace;
 
-/// 热键事件的排空节奏。80ms 是「按下到窗口出现」的可接受上限，且与 ai-hook 泵同量级。
-const POLL_INTERVAL: Duration = Duration::from_millis(80);
-
-/// 原生窗口位移动画的采样节奏。只在 90-120ms 的进出场期间运行，不常驻占帧。
-pub(super) const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
+/// 全局热键 channel 不会主动唤醒 GPUI；按一帧的节奏排空，避免旧实现最多
+/// 80ms 的可感知迟滞。窗口位移动画本身由 GPUI 帧回调驱动，不使用这个 timer。
+const POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 /// 旧壳 `Display::configure_quick_terminal` 的几何合同。
 #[cfg(windows)]
@@ -77,26 +75,23 @@ pub(super) fn native_geometry(anchor_hwnd: isize) -> Option<QuickTerminalGeometr
     Some(QuickTerminalGeometry { x: info.rcMonitor.left, y: info.rcMonitor.top, width, height })
 }
 
-/// 每帧只移动 Y；创建或跨屏重显时才重设宽高，避免动画连续触发 PTY resize。
+/// 创建时一次性设置旧壳的完整几何和 topmost，再把窗口显示在屏幕上缘之外。
+/// 后续动画不能再走这个入口，否则每帧重排 z-order/重复 SHOW 会造成明显卡顿。
 #[cfg(windows)]
-pub(super) fn position_native_window(
+pub(super) fn configure_native_window(
     hwnd: isize,
     geometry: QuickTerminalGeometry,
     hidden_fraction: f32,
-    resize: bool,
     show: bool,
 ) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos,
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
     };
 
     if hwnd == 0 {
         return false;
     }
     let mut flags = SWP_NOACTIVATE;
-    if !resize {
-        flags |= SWP_NOSIZE;
-    }
     if show {
         flags |= SWP_SHOWWINDOW;
     }
@@ -112,6 +107,46 @@ pub(super) fn position_native_window(
             geometry.height,
             flags,
         ) != 0
+    }
+}
+
+/// 对齐旧壳 `set_quick_terminal_slide`：动画帧只改变外窗 Y，既不改尺寸、
+/// 不改 topmost 层级，也不重复 show。PTY、GPUI swapchain 和 DComp surface
+/// 因此不会在 90-120ms 动画期间参与 resize。
+#[cfg(windows)]
+pub(super) fn slide_native_window(
+    hwnd: isize,
+    geometry: QuickTerminalGeometry,
+    hidden_fraction: f32,
+) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    };
+
+    if hwnd == 0 {
+        return false;
+    }
+    // SAFETY: HWND 由 GPUI 窗口注册表持有；失效时 SetWindowPos 安全失败。
+    unsafe {
+        SetWindowPos(
+            hwnd as *mut core::ffi::c_void,
+            std::ptr::null_mut(),
+            geometry.x,
+            geometry.animated_y(hidden_fraction),
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
+        ) != 0
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn show_native_window(hwnd: isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_SHOWNOACTIVATE, ShowWindow};
+
+    if hwnd != 0 {
+        // 激活只属于显式热键路径，由 GPUI `activate_window` 单独完成。
+        unsafe { ShowWindow(hwnd as *mut core::ffi::c_void, SW_SHOWNOACTIVATE) };
     }
 }
 
@@ -131,7 +166,7 @@ pub(super) fn hide_native_window(hwnd: isize) {
 /// 面向进程级单例的通知通道，而 GPUI 的内存全局 `config::Settings` 里也不存这个键。
 /// 与其为一个低频动作新加一条事件链，这里在后台按固定节拍回读——它不在渲染路径上，
 /// 每次只读一个不到 1KB 的设置文件。
-const RESYNC_EVERY: u32 = 25;
+const RESYNC_EVERY: u32 = 125;
 
 /// 当前注册状态。`GlobalHotKeyManager` 必须活到进程结束：它的 `Drop` 会向系统注销热键。
 struct QuickTerminalHotkey {

@@ -1012,6 +1012,9 @@ pub struct NebulaWorkspace {
     window_handle: gpui::AnyWindowHandle,
     /// 进程内稳定窗口 id，供 Runtime API、MRU 路由和跨窗迁移精确寻址。
     runtime_window_id: u64,
+    /// 快速终端复用工作区 UI，但不是普通会话窗口；关闭、初始尺寸和持久化
+    /// 必须继续遵守旧壳的 session-exempt 合同。
+    window_role: windowing::WindowRole,
     /// 与 RuntimeServer 共享同一状态中心，快照、wait、subscribe 与 agents.list
     /// 必须消费同一份 revision/state_change_seq 权威。
     runtime_hub: crate::runtime_api::RuntimeHub,
@@ -1062,13 +1065,19 @@ impl NebulaWorkspace {
         runtime_window_id: u64,
         runtime_hub: crate::runtime_api::RuntimeHub,
         startup: windowing::WorkspaceStartup,
+        window_role: windowing::WindowRole,
         cx: &mut Context<Self>,
     ) -> Self {
         // 启动相关设置只取样一次：本次开窗的恢复决策不能被恢复过程中的
         // 文件变化拆成互相矛盾的 restore/resume 状态。
         let runtime = nebula_settings::RuntimeSettings::load();
         let sidebar_width = runtime.sidebar_width;
-        let initial_grid = Self::size_window_to_default_grid(window, cx, sidebar_width);
+        let initial_grid = Self::prepare_initial_grid(
+            window,
+            cx,
+            sidebar_width,
+            window_role == windowing::WindowRole::Regular,
+        );
         let this = cx.entity().downgrade();
         let appearance_sub = window.observe_window_appearance(move |_, cx| {
             if let Some(workspace) = this.upgrade() {
@@ -1165,6 +1174,7 @@ impl NebulaWorkspace {
             window_hidden: false,
             window_handle: window.window_handle(),
             runtime_window_id,
+            window_role,
             runtime_hub,
             runtime_pending: Vec::new(),
         };
@@ -1225,10 +1235,11 @@ impl NebulaWorkspace {
     /// TITLE_BAR_HEIGHT）+ 卡缝 16 + 终端垂直内边距 16。各加 2px 余量让
     /// 浮点 floor 不缩行列；放不下的屏幕按 95% 工作区收拢（网格随之变小，
     /// 与旧壳"开不下就小"同义）。
-    fn size_window_to_default_grid(
+    fn prepare_initial_grid(
         window: &mut Window,
         cx: &mut App,
         sidebar_width: f32,
+        fit_window_to_default_grid: bool,
     ) -> (u16, u16) {
         let (cell_w, line_h) = TerminalView::cell_metrics(window, cx);
         let (startup_cell_w, startup_line_h) = TerminalView::startup_cell_metrics(window, cx);
@@ -1236,16 +1247,25 @@ impl NebulaWorkspace {
         // 顶栏模式仍保留与侧栏模式相同的横向预算，让两种模式启动时宽高一致。
         let chrome_w = sidebar_width + 16.0 + 24.0 + 2.0;
         let chrome_h = 34.0 + 16.0 + 16.0 + 2.0;
-        let mut w =
-            f32::from(TerminalView::DEFAULT_GRID_COLUMNS) * f32::from(startup_cell_w) + chrome_w;
-        let mut h =
-            f32::from(TerminalView::DEFAULT_GRID_LINES) * f32::from(startup_line_h) + chrome_h;
-        if let Some(display) = cx.primary_display() {
-            let bounds = display.bounds().size;
-            w = w.min(f32::from(bounds.width) * 0.95);
-            h = h.min(f32::from(bounds.height) * 0.95);
-        }
-        window.resize(size(px(w), px(h)));
+        let (w, h) = if fit_window_to_default_grid {
+            let mut w = f32::from(TerminalView::DEFAULT_GRID_COLUMNS) * f32::from(startup_cell_w)
+                + chrome_w;
+            let mut h =
+                f32::from(TerminalView::DEFAULT_GRID_LINES) * f32::from(startup_line_h) + chrome_h;
+            if let Some(display) = cx.primary_display() {
+                let bounds = display.bounds().size;
+                w = w.min(f32::from(bounds.width) * 0.95);
+                h = h.min(f32::from(bounds.height) * 0.95);
+            }
+            window.resize(size(px(w), px(h)));
+            (w, h)
+        } else {
+            // 快速终端的 WindowOptions 已经给出目标显示器全宽和 40% 高度。
+            // 再排队一次普通网格 resize 会与原生滑入竞争，首帧 DComp 表面只
+            // 覆盖旧宽度，右侧因此变黑。
+            let bounds = window.bounds().size;
+            (f32::from(bounds.width), f32::from(bounds.height))
+        };
         // 反推收拢后的目标网格：终端 spawn 直接用它，出生即最终几何，
         // 启动路径零 ConPTY resize（resize 竞态会打乱 shell 首屏输出的
         // 坐标缓存，参见 set_layout 的启动稳定闸）。
@@ -1792,11 +1812,14 @@ impl NebulaWorkspace {
     /// GPUI 的 should-close 回调必须同步返回：无繁忙进程时直接允许系统关闭；
     /// 有繁忙进程时先返回 false，再由对话框确认回调显式移除窗口。
     fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.keep_session_on_close(window, cx) {
+        let persist_session = self.window_role == windowing::WindowRole::Regular;
+        if persist_session && self.keep_session_on_close(window, cx) {
             return false;
         }
         let Some(process) = self.busy_process_in_window(cx) else {
-            self.save_clean_window_session(cx);
+            if persist_session {
+                self.save_clean_window_session(cx);
+            }
             return true;
         };
         if self.window_close_confirm_open {
@@ -1821,7 +1844,9 @@ impl NebulaWorkspace {
             )
             .on_ok(move |_, window, cx| {
                 let _ = confirm_workspace.update(cx, |workspace, cx| {
-                    workspace.save_clean_window_session(cx);
+                    if persist_session {
+                        workspace.save_clean_window_session(cx);
+                    }
                     workspace.window_close_confirm_open = false;
                     // `remove_window` 是确认后的最终动作，不会重新触发
                     // should-close，从而避免再次弹出同一确认框。

@@ -35,7 +35,7 @@ pub(crate) enum WorkspaceStartup {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WindowRole {
+pub(super) enum WindowRole {
     Regular,
     #[cfg(windows)]
     QuickTerminal,
@@ -61,8 +61,6 @@ struct QuickTerminalWindow {
     motion: Tween,
     motion_clock: MotionClock,
     animation_generation: u64,
-    resize_next_frame: bool,
-    activate_next_frame: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,7 +238,7 @@ pub(crate) fn open_initial_window(
     .expect("failed to open Nebula GPUI window");
 }
 
-fn workspace_window_options(cx: &App, focus: bool, role: WindowRole) -> WindowOptions {
+fn workspace_window_options(cx: &mut App, focus: bool, role: WindowRole) -> WindowOptions {
     match role {
         WindowRole::Regular => {
             let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
@@ -256,9 +254,12 @@ fn workspace_window_options(cx: &App, focus: bool, role: WindowRole) -> WindowOp
         },
         #[cfg(windows)]
         WindowRole::QuickTerminal => {
-            let display = cx.primary_display().map(|display| display.bounds());
-            let visible =
-                display.unwrap_or_else(|| Bounds::centered(None, size(px(1080.0), px(720.0)), cx));
+            let (display_id, visible) = quick_terminal_anchor_display(cx)
+                .map(|(id, bounds)| (Some(id), bounds))
+                .or_else(|| {
+                    cx.primary_display().map(|display| (Some(display.id()), display.bounds()))
+                })
+                .unwrap_or_else(|| (None, Bounds::centered(None, size(px(1080.0), px(720.0)), cx)));
             let height = px((f32::from(visible.size.height) * 0.4).round().max(1.0));
             let bounds = Bounds {
                 origin: point(visible.origin.x, visible.origin.y - height),
@@ -266,14 +267,14 @@ fn workspace_window_options(cx: &App, focus: bool, role: WindowRole) -> WindowOp
             };
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: None,
+                // 与旧壳一致：无系统标题栏，但保留 Nebula 自绘标题栏及三枚
+                // 窗口按钮。TitleBar options 负责 Windows 客户区命中测试。
+                titlebar: Some(TitleBar::title_bar_options()),
                 app_id: Some("nebula-quick-terminal".to_owned()),
                 window_background: crate::gpui_shell::wallpaper::initial_background_appearance(),
                 focus: false,
                 show: false,
-                is_movable: false,
-                is_resizable: false,
-                is_minimizable: false,
+                display_id,
                 ..Default::default()
             }
         },
@@ -313,6 +314,7 @@ fn open_workspace_window(
                 runtime_window_id,
                 runtime_hub,
                 startup,
+                role,
                 cx,
             )
         });
@@ -829,12 +831,16 @@ fn focus_workspace_window(workspace: &mut NebulaWorkspace, window: &mut Window) 
 #[cfg(windows)]
 pub(crate) fn toggle_quick_terminal_window(cx: &mut App) {
     prune_entries(cx);
-    let quick = cx
-        .global::<WindowRegistry>()
-        .quick_terminal
-        .as_ref()
-        .map(|quick| (quick.handle, quick.target_visible));
-    let Some((handle, target_visible)) = quick else {
+    let quick = cx.global::<WindowRegistry>().quick_terminal.as_ref().map(|quick| {
+        (
+            quick.handle,
+            quick.native_hwnd,
+            quick.geometry,
+            quick.target_visible,
+            quick.motion.is_active(),
+        )
+    });
+    let Some((handle, hwnd, geometry, target_visible, motion_active)) = quick else {
         open_quick_terminal_window(cx);
         return;
     };
@@ -846,21 +852,33 @@ pub(crate) fn toggle_quick_terminal_window(cx: &mut App) {
         return;
     }
 
-    let anchor_hwnd = quick_terminal_anchor_hwnd(cx);
-    let geometry = super::quick_terminal::native_geometry(anchor_hwnd);
-    let registry = cx.global_mut::<WindowRegistry>();
-    let Some(quick) = registry.quick_terminal.as_mut() else { return };
-    quick.motion_clock.reset();
     if target_visible {
+        let registry = cx.global_mut::<WindowRegistry>();
+        let Some(quick) = registry.quick_terminal.as_mut() else { return };
+        quick.motion_clock.reset();
         quick.target_visible = false;
         quick.motion.animate_role(1.0, MotionRole::Exit, MotionPolicy::Full);
     } else {
-        if let Some(geometry) = geometry {
-            quick.geometry = geometry;
+        // 对齐旧壳：完整隐藏后从屏幕外的 1.0 位置重新开始；若用户在退场
+        // 中反向切换，则保留当前进度，不跳回起点。
+        if !motion_active {
+            if !super::quick_terminal::slide_native_window(hwnd, geometry, 1.0) {
+                log::warn!("quick terminal could not prepare its hidden position");
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                cx.global_mut::<WindowRegistry>().quick_terminal = None;
+                return;
+            }
+            super::quick_terminal::show_native_window(hwnd);
+        }
+        // 显式热键显示与旧壳 `focus_window` 相同，激活发生在动画开始前。
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
+        let registry = cx.global_mut::<WindowRegistry>();
+        let Some(quick) = registry.quick_terminal.as_mut() else { return };
+        quick.motion_clock.reset();
+        if !motion_active {
+            quick.motion.snap_to(1.0);
         }
         quick.target_visible = true;
-        quick.resize_next_frame = true;
-        quick.activate_next_frame = true;
         quick.motion.animate_role(0.0, MotionRole::Enter, MotionPolicy::Full);
     }
     start_quick_terminal_animation(cx);
@@ -869,6 +887,18 @@ pub(crate) fn toggle_quick_terminal_window(cx: &mut App) {
 #[cfg(windows)]
 fn quick_terminal_anchor_hwnd(cx: &mut App) -> isize {
     entries_by_mru(cx).into_iter().next().map_or(0, |entry| entry.native_hwnd)
+}
+
+#[cfg(windows)]
+fn quick_terminal_anchor_display(cx: &mut App) -> Option<(gpui::DisplayId, Bounds<gpui::Pixels>)> {
+    let entry = entries_by_mru(cx).into_iter().next()?;
+    entry
+        .handle
+        .update(cx, |_, window, cx| {
+            window.display(cx).map(|display| (display.id(), display.bounds()))
+        })
+        .ok()
+        .flatten()
 }
 
 #[cfg(windows)]
@@ -901,6 +931,15 @@ fn open_quick_terminal_window(cx: &mut App) {
         return;
     };
 
+    // 首次显示前在屏幕外完成唯一一次 native 尺寸同步。窗口此时已经使用
+    // QuickTerminal 的 GPUI bounds 构造，且 workspace 不再排队普通网格
+    // resize；WM_SIZE/ResizeBuffers 会在用户看见任何像素之前完成。
+    if !super::quick_terminal::configure_native_window(entry.native_hwnd, geometry, 1.0, true) {
+        log::warn!("quick terminal initial native configuration failed");
+        let _ = entry.handle.update(cx, |_, window, _| window.remove_window());
+        return;
+    }
+
     let mut motion = Tween::new(1.0);
     motion.animate_role(0.0, MotionRole::Enter, MotionPolicy::Full);
     cx.global_mut::<WindowRegistry>().quick_terminal = Some(QuickTerminalWindow {
@@ -912,37 +951,38 @@ fn open_quick_terminal_window(cx: &mut App) {
         motion,
         motion_clock: MotionClock::default(),
         animation_generation: 0,
-        // `NebulaWorkspace::new` 会异步发出一次普通窗口 resize；首帧先落快速
-        // 终端几何，入场完成帧还会再确认一次，避免构造期任务晚到后覆盖 40% 高度。
-        resize_next_frame: true,
-        activate_next_frame: true,
     });
+    let _ = entry.handle.update(cx, |_, window, _| window.activate_window());
     start_quick_terminal_animation(cx);
 }
 
 #[cfg(windows)]
 fn start_quick_terminal_animation(cx: &mut App) {
-    let generation = {
+    let (generation, handle) = {
         let Some(quick) = cx.global_mut::<WindowRegistry>().quick_terminal.as_mut() else {
             return;
         };
         quick.animation_generation = quick.animation_generation.wrapping_add(1);
-        quick.animation_generation
+        (quick.animation_generation, quick.handle)
     };
-    let executor = cx.background_executor().clone();
-    cx.spawn(async move |cx| {
-        loop {
-            executor.timer(super::quick_terminal::ANIMATION_INTERVAL).await;
-            if !cx.update(|cx| quick_terminal_animation_tick(generation, cx)) {
-                break;
-            }
-        }
-    })
-    .detach();
+    let _ = handle.update(cx, move |_, window, _| {
+        window.on_next_frame(move |window, cx| {
+            quick_terminal_animation_frame(generation, window, cx);
+        });
+    });
 }
 
 #[cfg(windows)]
-fn quick_terminal_animation_tick(generation: u64, cx: &mut App) -> bool {
+fn quick_terminal_animation_frame(generation: u64, window: &mut Window, cx: &mut App) {
+    if quick_terminal_animation_tick(generation, window, cx) {
+        window.on_next_frame(move |window, cx| {
+            quick_terminal_animation_frame(generation, window, cx);
+        });
+    }
+}
+
+#[cfg(windows)]
+fn quick_terminal_animation_tick(generation: u64, window: &mut Window, cx: &mut App) -> bool {
     prune_entries(cx);
     let frame = {
         let Some(quick) = cx.global_mut::<WindowRegistry>().quick_terminal.as_mut() else {
@@ -952,39 +992,16 @@ fn quick_terminal_animation_tick(generation: u64, cx: &mut App) -> bool {
             return false;
         }
         let active = quick.motion.step(quick.motion_clock.tick());
-        let frame = (
-            quick.handle,
-            quick.native_hwnd,
-            quick.geometry,
-            quick.motion.value(),
-            quick.resize_next_frame,
-            quick.activate_next_frame,
-            quick.target_visible,
-            active,
-        );
-        quick.resize_next_frame = false;
-        quick.activate_next_frame = false;
+        let frame =
+            (quick.native_hwnd, quick.geometry, quick.motion.value(), quick.target_visible, active);
         frame
     };
-    let (handle, hwnd, geometry, hidden, resize, activate, target_visible, active) = frame;
-    // GPUI 构造期的异步 `window.resize` 可能晚于首个动画帧。入场完成时
-    // 只再重落一次宽高，既保证它是最后写入者，又不让每个 Y 帧触发 PTY resize。
-    let settle_geometry = target_visible && !active;
-    if !super::quick_terminal::position_native_window(
-        hwnd,
-        geometry,
-        hidden,
-        resize || settle_geometry,
-        target_visible,
-    ) {
+    let (hwnd, geometry, hidden, target_visible, active) = frame;
+    if !super::quick_terminal::slide_native_window(hwnd, geometry, hidden) {
         log::warn!("quick terminal native positioning failed");
-        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        window.remove_window();
         cx.global_mut::<WindowRegistry>().quick_terminal = None;
         return false;
-    }
-    if activate {
-        // 只有热键显式召回允许激活；动画帧的 SetWindowPos 始终 NOACTIVATE。
-        let _ = handle.update(cx, |_, window, _| window.activate_window());
     }
     if !active && !target_visible {
         super::quick_terminal::hide_native_window(hwnd);
