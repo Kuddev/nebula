@@ -58,21 +58,40 @@ const PATH_ENV: &str = "PATH";
 /// [`crate::shell_detect::wsl_cwd_report_env`] 也会往里追加条目，本函数以
 /// 环境表里的现值为基准合并，从而与调用顺序无关地保住两边的条目。
 pub fn apply(env: &mut HashMap<String, String>, pane_id: impl Display) {
-    env.insert(PANE_ENV.to_owned(), pane_id.to_string());
-    env.insert(TERM_PROGRAM_ENV.to_owned(), TERM_PROGRAM.to_owned());
-    env.insert(TERM_PROGRAM_VERSION_ENV.to_owned(), env!("VERSION").to_owned());
+    insert_env(env, PANE_ENV, pane_id.to_string());
+    insert_env(env, TERM_PROGRAM_ENV, TERM_PROGRAM.to_owned());
+    insert_env(env, TERM_PROGRAM_VERSION_ENV, env!("VERSION").to_owned());
 
     if let Some(executable) = executable() {
-        env.insert(CLI_ENV.to_owned(), executable.display().to_string());
+        insert_env(env, CLI_ENV, executable.display().to_string());
         if let Some(directory) = executable.parent() {
-            env.insert(BIN_DIR_ENV.to_owned(), directory.display().to_string());
-            if let Some(path) = prepended_path(directory, env.get(PATH_ENV).map(String::as_str)) {
-                env.insert(PATH_ENV.to_owned(), path);
+            insert_env(env, BIN_DIR_ENV, directory.display().to_string());
+            if let Some(path) = prepended_path(directory, env_value(env, PATH_ENV)) {
+                insert_env(env, PATH_ENV, path);
             }
         }
     }
 
     merge_wslenv(env);
+}
+
+fn env_value<'a>(env: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
+    #[cfg(windows)]
+    {
+        env.iter()
+            .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+    #[cfg(not(windows))]
+    {
+        env.get(name).map(String::as_str)
+    }
+}
+
+fn insert_env(env: &mut HashMap<String, String>, name: &str, value: String) {
+    #[cfg(windows)]
+    env.retain(|existing, _| !existing.eq_ignore_ascii_case(name));
+    env.insert(name.to_owned(), value);
 }
 
 /// 当前运行的 Nebula 可执行文件。
@@ -135,8 +154,10 @@ const WSLENV_ENTRIES: &[&str] =
 #[cfg(windows)]
 fn merge_wslenv(env: &mut HashMap<String, String>) {
     const WSLENV: &str = "WSLENV";
-    let existing =
-        env.get(WSLENV).cloned().or_else(|| std::env::var(WSLENV).ok()).unwrap_or_default();
+    let existing = env_value(env, WSLENV)
+        .map(str::to_owned)
+        .or_else(|| std::env::var(WSLENV).ok())
+        .unwrap_or_default();
     let mut entries: Vec<String> =
         existing.split(':').filter(|entry| !entry.is_empty()).map(str::to_owned).collect();
     for entry in WSLENV_ENTRIES {
@@ -147,7 +168,7 @@ fn merge_wslenv(env: &mut HashMap<String, String>) {
             entries.push((*entry).to_owned());
         }
     }
-    env.insert(WSLENV.to_owned(), entries.join(":"));
+    insert_env(env, WSLENV, entries.join(":"));
 }
 
 /// `WSLENV` 条目里的变量名部分（`NEBULA_CLI/p` → `NEBULA_CLI`）。
@@ -188,6 +209,22 @@ mod tests {
         let path = env.get("PATH").expect("PATH is rewritten when it lacks the bin dir");
         let first = std::env::split_paths(path).next().expect("first PATH entry");
         assert!(same_directory(&first, &bin_dir), "{first:?} should lead PATH");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn agent_path_uses_the_refreshed_environment() {
+        let fresh = PathBuf::from(r"C:\fresh-registry-path");
+        let mut env =
+            HashMap::from([("Path".to_owned(), fresh.as_os_str().to_string_lossy().into_owned())]);
+
+        apply(&mut env, 2);
+
+        let bin_dir = PathBuf::from(env.get(BIN_DIR_ENV).expect("bin dir"));
+        let entries: Vec<PathBuf> =
+            std::env::split_paths(env.get(PATH_ENV).expect("PATH")).collect();
+        assert_eq!(entries, vec![bin_dir, fresh]);
+        assert_eq!(env.keys().filter(|name| name.eq_ignore_ascii_case(PATH_ENV)).count(), 1);
     }
 
     #[test]

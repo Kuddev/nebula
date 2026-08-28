@@ -243,6 +243,8 @@ impl From<TerminalOptions> for PtyOptions {
             drain_on_exit: options.hold,
             env: HashMap::new(),
             #[cfg(target_os = "windows")]
+            env_is_complete: false,
+            #[cfg(target_os = "windows")]
             escape_args: false,
         }
     }

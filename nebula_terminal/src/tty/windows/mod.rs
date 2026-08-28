@@ -15,9 +15,11 @@ use crate::tty::{ChildEvent, EventedPty, EventedReadWrite, Options, Shell};
 mod blocking;
 mod child;
 mod conpty;
+mod environment;
 
 use blocking::{UnblockedReader, UnblockedWriter};
 use conpty::Conpty as Backend;
+pub use environment::refresh_environment;
 use miow::pipe::{AnonRead, AnonWrite};
 use polling::{Event, Poller};
 
@@ -1290,6 +1292,7 @@ restored=$?
             working_directory: None,
             drain_on_exit: true,
             env: Default::default(),
+            env_is_complete: false,
             escape_args: false,
         };
         assert_eq!(cmdline(&options), "echo hello world");

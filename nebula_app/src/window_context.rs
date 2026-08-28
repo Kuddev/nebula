@@ -486,6 +486,10 @@ impl WindowContext {
         proxy: &EventLoopProxy<Event>,
         pane_id: PaneId,
     ) -> Result<Pane, Box<dyn Error>> {
+        #[cfg(windows)]
+        if let Err(error) = tty::refresh_environment(&mut pty_config) {
+            log::warn!("Could not refresh the Windows environment for a new pane: {error}");
+        }
         // Per-pane identity for AI-CLI lifecycle hooks: nebula-hook.exe reads
         // it and stamps its pipe messages, so turn state lands on the right
         // tab dot (see `ai_hook`). The same call also exports the terminal

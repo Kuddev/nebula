@@ -35,6 +35,10 @@ pub struct Options {
     /// Extra environment variables.
     pub env: HashMap<String, String>,
 
+    /// 此环境表是完整子进程环境，不是需要与当前进程环境合并的增量覆盖。
+    #[cfg(target_os = "windows")]
+    pub env_is_complete: bool,
+
     /// Specifies whether the Windows shell arguments should be escaped.
     ///
     /// - When `true`: Arguments will be escaped according to the standard C runtime rules.

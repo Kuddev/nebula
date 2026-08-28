@@ -87,13 +87,26 @@ pub(super) fn local_options(
     let mut options = tty::Options::default();
     options.shell = shell;
     options.working_directory = cwd;
+    #[cfg(windows)]
+    if let Err(error) = tty::refresh_environment(&mut options) {
+        log::warn!("Could not refresh the Windows environment for a new pane: {error}");
+    }
     // WSL tab 的 cwd 上报（OSC 7）：来宾登录 shell 默认不发，目录树与 Git 视图
     // 因此永远停在"等待终端上报工作目录"。只对 `wsl.exe` 启动生效，见
     // [`crate::shell_detect::wsl_cwd_report_env`]。
     if let Some(launch) = &options.shell {
         let program = launch.program().to_owned();
         let args = launch.args().to_vec();
-        options.env.extend(crate::shell_detect::wsl_cwd_report_env(&program, &args));
+        let current_wslenv = options
+            .env
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("WSLENV"))
+            .map(|(_, value)| value.as_str());
+        let additions = crate::shell_detect::wsl_cwd_report_env(&program, &args, current_wslenv);
+        for (name, value) in additions {
+            options.env.retain(|existing, _| !existing.eq_ignore_ascii_case(&name));
+            options.env.insert(name, value);
+        }
     }
     // 身份契约必须最后写：它以环境表里 `WSLENV` 的现值为基准合并，才能同时
     // 保住上面那段的 cwd 上报条目。见 [`crate::agent_env`]。

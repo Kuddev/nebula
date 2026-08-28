@@ -1,6 +1,7 @@
 use log::{info, warn};
-use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::io::{Error, Result};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::IntoRawHandle;
@@ -8,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::{mem, ptr};
 
 use windows_sys::Win32::Foundation::{HANDLE, S_OK};
+use windows_sys::Win32::Globalization::{
+    CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal,
+};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
@@ -290,7 +294,7 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     let cmdline = win32_string(&cmdline(config));
     let cwd = config.working_directory.as_ref().map(win32_string);
     let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
-    let custom_env_block = convert_custom_env(&config.env);
+    let custom_env_block = convert_custom_env(&config.env, config.env_is_complete);
     let custom_env_block_pointer = match &custom_env_block {
         Some(custom_env_block) => {
             creation_flags |= CREATE_UNICODE_ENVIRONMENT;
@@ -334,43 +338,93 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
 // deduplicating environment variables, so do that here while converting.
 //
 // https://learn.microsoft.com/en-us/previous-versions/troubleshoot/windows/win32/createprocess-cannot-eliminate-duplicate-variables#environment-variables
-fn convert_custom_env(custom_env: &HashMap<String, String>) -> Option<Vec<u16>> {
+fn convert_custom_env(
+    custom_env: &HashMap<String, String>,
+    env_is_complete: bool,
+) -> Option<Vec<u16>> {
     // Windows inherits parent's env when no `lpEnvironment` parameter is specified.
-    if custom_env.is_empty() {
+    if custom_env.is_empty() && !env_is_complete {
         return None;
     }
 
-    let mut converted_block = Vec::new();
-    let mut all_env_keys = HashSet::new();
+    let mut environment = Vec::new();
     for (custom_key, custom_value) in custom_env {
-        let custom_key_os = OsStr::new(custom_key);
-        if all_env_keys.insert(custom_key_os.to_ascii_uppercase()) {
-            add_windows_env_key_value_to_block(
-                &mut converted_block,
-                custom_key_os,
-                OsStr::new(&custom_value),
-            );
-        } else {
+        environment.push(PendingEnvironmentVariable::new(
+            OsStr::new(custom_key),
+            OsStr::new(custom_value),
+        ));
+    }
+
+    if !env_is_complete {
+        // Pull the current process environment after, to avoid overwriting the user provided one.
+        for (inherited_key, inherited_value) in std::env::vars_os() {
+            environment.push(PendingEnvironmentVariable::new(&inherited_key, &inherited_value));
+        }
+    }
+
+    // CreateProcess 要求按大小写不敏感的 Unicode 顺序排列。稳定排序还会让自定义
+    // 项在同名继承项之前，从而保住覆盖优先级。
+    environment.sort_by(|left, right| compare_environment_names(&left.key_wide, &right.key_wide));
+
+    let mut converted_block = Vec::new();
+    let mut previous_key = None::<Vec<u16>>;
+    for variable in environment {
+        if previous_key.as_ref().is_some_and(|previous| {
+            compare_environment_names(previous, &variable.key_wide) == Ordering::Equal
+        }) {
             warn!(
-                "Omitting environment variable pair with duplicate key: \
-                 '{custom_key}={custom_value}'"
+                "Omitting environment variable pair with duplicate key: '{}={}'",
+                variable.key.to_string_lossy(),
+                variable.value.to_string_lossy()
             );
+            continue;
         }
+        add_windows_env_key_value_to_block(&mut converted_block, &variable.key, &variable.value);
+        previous_key = Some(variable.key_wide);
     }
 
-    // Pull the current process environment after, to avoid overwriting the user provided one.
-    for (inherited_key, inherited_value) in std::env::vars_os() {
-        if all_env_keys.insert(inherited_key.to_ascii_uppercase()) {
-            add_windows_env_key_value_to_block(
-                &mut converted_block,
-                &inherited_key,
-                &inherited_value,
-            );
-        }
+    // 即使调用方有意传空环境，环境块也必须以双 NUL 结尾。
+    if converted_block.is_empty() {
+        converted_block.push(0);
     }
-
     converted_block.push(0);
     Some(converted_block)
+}
+
+struct PendingEnvironmentVariable {
+    key: OsString,
+    value: OsString,
+    key_wide: Vec<u16>,
+}
+
+impl PendingEnvironmentVariable {
+    fn new(key: &OsStr, value: &OsStr) -> Self {
+        Self {
+            key: key.to_os_string(),
+            value: value.to_os_string(),
+            key_wide: key.encode_wide().collect(),
+        }
+    }
+}
+
+fn compare_environment_names(left: &[u16], right: &[u16]) -> Ordering {
+    let result = unsafe {
+        CompareStringOrdinal(
+            left.as_ptr(),
+            left.len() as i32,
+            right.as_ptr(),
+            right.len() as i32,
+            1,
+        )
+    };
+    match result {
+        CSTR_LESS_THAN => Ordering::Less,
+        CSTR_EQUAL => Ordering::Equal,
+        CSTR_GREATER_THAN => Ordering::Greater,
+        // 环境变量名受 CreateProcess 环境块上限约束，正常不会失败；异常时仍给出
+        // 全序，不能让排序过程 panic。
+        _ => left.cmp(right),
+    }
 }
 
 // According to the `lpEnvironment` parameter description:
@@ -410,7 +464,8 @@ impl From<WindowSize> for COORD {
 
 #[cfg(test)]
 mod runtime_asset_tests {
-    use super::bundled_conpty_dir;
+    use super::{bundled_conpty_dir, convert_custom_env};
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -472,5 +527,35 @@ mod runtime_asset_tests {
         std::fs::write(runtime.join("OpenConsole.exe"), b"host-only").unwrap();
 
         assert_eq!(bundled_conpty_dir(dir.path()), None);
+    }
+
+    #[test]
+    fn complete_environment_does_not_restore_parent_variables() {
+        let custom = HashMap::from([("NEBULA_REFRESH_TEST".to_owned(), "fresh".to_owned())]);
+        let block = convert_custom_env(&custom, true).expect("environment block");
+        let entries: Vec<String> = block
+            .split(|character| *character == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(String::from_utf16_lossy)
+            .collect();
+
+        assert_eq!(entries, vec!["NEBULA_REFRESH_TEST=fresh"]);
+    }
+
+    #[test]
+    fn complete_environment_block_is_sorted_case_insensitively() {
+        let custom = HashMap::from([
+            ("z-last".to_owned(), "3".to_owned()),
+            ("Middle".to_owned(), "2".to_owned()),
+            ("a-first".to_owned(), "1".to_owned()),
+        ]);
+        let block = convert_custom_env(&custom, true).expect("environment block");
+        let entries: Vec<String> = block
+            .split(|character| *character == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(String::from_utf16_lossy)
+            .collect();
+
+        assert_eq!(entries, vec!["a-first=1", "Middle=2", "z-last=3"]);
     }
 }

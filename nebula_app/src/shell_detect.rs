@@ -523,7 +523,11 @@ pub fn wsl_unc_cwd(located: &WslCwd) -> Option<std::path::PathBuf> {
 /// 尽力而为、失败无害：来宾默认 shell 是 zsh/fish（不认 `PROMPT_COMMAND`），
 /// 或用户自己在 rc 里直接赋值把它覆盖掉，都只是回到"不上报"的现状，不会影响
 /// shell 正常启动。
-pub fn wsl_cwd_report_env(program: &str, args: &[String]) -> Vec<(String, String)> {
+pub fn wsl_cwd_report_env(
+    program: &str,
+    args: &[String],
+    current_wslenv: Option<&str>,
+) -> Vec<(String, String)> {
     if wsl_launch_distro(program, args).is_none() {
         return Vec::new();
     }
@@ -532,7 +536,10 @@ pub fn wsl_cwd_report_env(program: &str, args: &[String]) -> Vec<(String, String
     // 都要跑一次，不能带 fork 开销。
     const REPORT: &str = r#"printf '\033]7;file://%s%s\007' "${HOSTNAME:-wsl}" "$PWD""#;
     // 宿主侧可能已经有 WSLENV（别的工具设的），必须追加而不是覆盖。
-    let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+    let mut wslenv = current_wslenv
+        .map(str::to_owned)
+        .or_else(|| std::env::var("WSLENV").ok())
+        .unwrap_or_default();
     if !wslenv.is_empty() && !wslenv.split(':').any(|entry| entry == "PROMPT_COMMAND") {
         wslenv.push(':');
     }
@@ -785,6 +792,22 @@ mod tests {
         let launched = detected("wsl:Ubuntu", "wsl.exe", &["-d", "Ubuntu"]).shell();
         assert_eq!(launched.program(), "wsl.exe");
         assert_eq!(launched.args(), &["-d".to_owned(), "Ubuntu".to_owned()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_cwd_report_preserves_the_refreshed_wslenv() {
+        let additions = wsl_cwd_report_env(
+            "wsl.exe",
+            &["-d".to_owned(), "Ubuntu".to_owned()],
+            Some("FRESH_REGISTRY_VALUE/u"),
+        );
+        let additions: std::collections::HashMap<_, _> = additions.into_iter().collect();
+
+        assert_eq!(
+            additions.get("WSLENV").map(String::as_str),
+            Some("FRESH_REGISTRY_VALUE/u:PROMPT_COMMAND")
+        );
     }
 
     #[test]
