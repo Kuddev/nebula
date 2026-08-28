@@ -269,6 +269,8 @@ impl NebulaWorkspace {
                             cx.stop_propagation();
                             this.tab_drag = Some(TabDrag {
                                 source: ix,
+                                cross_window: this.cross_window_drag_payload(ix, cx),
+                                cross_window_target: None,
                                 press_x: f32::from(event.position.x),
                                 press_y: f32::from(event.position.y),
                                 axis: TabDragAxis::Horizontal,

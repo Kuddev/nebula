@@ -116,6 +116,20 @@ impl CrossWindowTabDrag {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CrossWindowDropDestination {
+    pub(crate) window_id: u64,
+    pub(crate) dock: Option<SplitNav>,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeCursorTarget {
+    root_hwnd: isize,
+    client_x: i32,
+    client_y: i32,
+}
+
 pub(crate) struct TabDragPreview {
     title: SharedString,
 }
@@ -346,6 +360,114 @@ fn select_mru_window(
 
 fn entry_by_id(runtime_window_id: u64, cx: &mut App) -> Option<WindowEntry> {
     entries_by_mru(cx).into_iter().find(|entry| entry.runtime_window_id == runtime_window_id)
+}
+
+fn logical_client_position(client_x: i32, client_y: i32, scale_factor: f32) -> (f32, f32) {
+    debug_assert!(scale_factor.is_finite() && scale_factor > 0.0);
+    let scale_factor =
+        if scale_factor.is_finite() && scale_factor > 0.0 { scale_factor } else { 1.0 };
+    (client_x as f32 / scale_factor, client_y as f32 / scale_factor)
+}
+
+#[cfg(windows)]
+fn native_cursor_target() -> Option<NativeCursorTarget> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GA_ROOT, GetAncestor, GetCursorPos, WindowFromPoint,
+    };
+
+    let mut screen = POINT { x: 0, y: 0 };
+    // 这些调用都在 GPUI UI 线程的 DPI context 中完成。保留 POINT 的有符号
+    // i32，左侧或上侧副屏的负坐标不能经过 u32/LOWORD 截断。
+    if unsafe { GetCursorPos(&mut screen) } == 0 {
+        return None;
+    }
+    let hit = unsafe { WindowFromPoint(screen) };
+    if hit.is_null() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(hit, GA_ROOT) };
+    if root.is_null() {
+        return None;
+    }
+    let mut client = screen;
+    if unsafe { ScreenToClient(root, &mut client) } == 0 {
+        return None;
+    }
+    Some(NativeCursorTarget { root_hwnd: root as isize, client_x: client.x, client_y: client.y })
+}
+
+#[cfg(windows)]
+fn cursor_drop_target(
+    source_window_id: u64,
+    cx: &mut App,
+) -> Option<(WindowEntry, NativeCursorTarget)> {
+    let cursor = native_cursor_target()?;
+    let entry = entries_by_mru(cx).into_iter().find(|entry| {
+        entry.runtime_window_id != source_window_id
+            && entry.native_hwnd != 0
+            && entry.native_hwnd == cursor.root_hwnd
+    })?;
+    Some((entry, cursor))
+}
+
+pub(crate) fn clear_cross_window_drag_target(target_window_id: Option<u64>, cx: &mut App) {
+    let Some(target_window_id) = target_window_id else { return };
+    let Some(entry) = entry_by_id(target_window_id, cx) else { return };
+    let target = entry.workspace.clone();
+    let _ = entry.handle.update(cx, move |_, _window, cx| {
+        target.update(cx, |workspace, cx| {
+            if workspace.cross_window_dock.take().is_some() {
+                cx.notify();
+            }
+        })
+    });
+}
+
+#[cfg(windows)]
+pub(crate) fn update_cross_window_drag_target(
+    payload: &CrossWindowTabDrag,
+    previous_target: Option<u64>,
+    cx: &mut App,
+) -> Option<CrossWindowDropDestination> {
+    let resolved = cursor_drop_target(payload.source_window_id, cx);
+    let resolved_id = resolved.as_ref().map(|(entry, _)| entry.runtime_window_id);
+    if previous_target != resolved_id {
+        clear_cross_window_drag_target(previous_target, cx);
+    }
+    let Some((entry, cursor)) = resolved else { return None };
+    let target_window_id = entry.runtime_window_id;
+    let target = entry.workspace.clone();
+    let result = entry.handle.update(cx, move |_, window, cx| {
+        let (x, y) =
+            logical_client_position(cursor.client_x, cursor.client_y, window.scale_factor());
+        target.update(cx, |workspace, cx| {
+            let dock = workspace.dock_nav_at(x, y);
+            if workspace.cross_window_dock != dock {
+                workspace.cross_window_dock = dock;
+                cx.notify();
+            }
+            dock
+        })
+    });
+    match result {
+        Ok(Ok(dock)) => Some(CrossWindowDropDestination { window_id: target_window_id, dock }),
+        _ => {
+            clear_cross_window_drag_target(Some(target_window_id), cx);
+            None
+        },
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn update_cross_window_drag_target(
+    _payload: &CrossWindowTabDrag,
+    previous_target: Option<u64>,
+    cx: &mut App,
+) -> Option<CrossWindowDropDestination> {
+    clear_cross_window_drag_target(previous_target, cx);
+    None
 }
 
 fn entry_with_pane(pane_id: u64, cx: &mut App) -> Option<WindowEntry> {
@@ -734,6 +856,38 @@ pub(crate) fn move_tab_to_new_window(payload: CrossWindowTabDrag, cx: &mut App) 
     }
 }
 
+/// 把 mouse-up 时确认的跨窗目标作为一次延迟事务提交。目标窗口可能在释放
+/// 与 defer 执行之间关闭；必须先重新取得它的 handle/workspace，成功进入
+/// 目标窗口上下文后才允许 `accept_cross_window_tab` detach 源 tab。
+pub(crate) fn drop_tab_to_existing_window(
+    payload: CrossWindowTabDrag,
+    destination: CrossWindowDropDestination,
+    cx: &mut App,
+) -> bool {
+    let Some(entry) = entry_by_id(destination.window_id, cx) else {
+        log::debug!(
+            "cross-window tab drop cancelled: target window {} closed before commit",
+            destination.window_id
+        );
+        return false;
+    };
+    let target = entry.workspace.clone();
+    let result = entry.handle.update(cx, move |_, window, cx| {
+        target.update(cx, |workspace, cx| {
+            workspace.accept_cross_window_tab(&payload, destination.dock, window, cx)
+        })
+    });
+    if matches!(result, Ok(Ok(true))) {
+        true
+    } else {
+        log::debug!(
+            "cross-window tab drop cancelled: target window {} became unavailable",
+            destination.window_id
+        );
+        false
+    }
+}
+
 fn unregister(runtime_window_id: u64, cx: &mut App) {
     cx.global_mut::<WindowRegistry>()
         .entries
@@ -1021,6 +1175,17 @@ mod tests {
     use super::*;
     use crate::ai_agents::AgentKind;
     use crate::runtime_api::{RuntimeKey, RuntimeKeyModifiers, RuntimeSplitDirection};
+
+    #[test]
+    fn cross_window_client_position_uses_target_scale_factor() {
+        assert_eq!(logical_client_position(240, 180, 1.5), (160.0, 120.0));
+        assert_eq!(logical_client_position(240, 180, 2.0), (120.0, 90.0));
+    }
+
+    #[test]
+    fn cross_window_client_position_keeps_signed_coordinates() {
+        assert_eq!(logical_client_position(-120, -60, 1.5), (-80.0, -40.0));
+    }
 
     #[test]
     fn runtime_window_policy_only_explicit_focus_activates() {

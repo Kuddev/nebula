@@ -6,7 +6,10 @@
 use gpui::{Context, MouseButton, Pixels, Point, Window, px};
 use nebula_split::{SplitNav, SplitTree};
 
-use super::{NebulaWorkspace, TAB_DRAG_THRESHOLD, WorkspaceTab, dock_tree};
+use super::{
+    NebulaWorkspace, TAB_DRAG_THRESHOLD, WorkspaceTab, dock_tree,
+    windowing::{self, CrossWindowDropDestination, CrossWindowTabDrag},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TabDragAxis {
@@ -18,6 +21,10 @@ pub(super) enum TabDragAxis {
 /// 按最近边把整棵分屏树 dock 进去。
 pub(super) struct TabDrag {
     pub(super) source: usize,
+    /// 手势开始时冻结的 terminal pane 身份。跨窗提交不能在 mouse-up 时再按
+    /// source 下标猜，因为拖拽期间其它 tab 可能被关闭或重排。
+    pub(super) cross_window: Option<CrossWindowTabDrag>,
+    pub(super) cross_window_target: Option<u64>,
     pub(super) press_x: f32,
     pub(super) press_y: f32,
     pub(super) axis: TabDragAxis,
@@ -47,7 +54,9 @@ impl NebulaWorkspace {
         match self.tab_drag.as_ref().map(|drag| drag.active) {
             Some(true) => self.finish_tab_drag(window, cx),
             Some(false) => {
-                self.tab_drag = None;
+                if let Some(drag) = self.tab_drag.take() {
+                    windowing::clear_cross_window_drag_target(drag.cross_window_target, cx);
+                }
                 cx.notify();
             },
             None => {},
@@ -68,15 +77,32 @@ impl NebulaWorkspace {
         }
         self.update_tab_drag_position(f32::from(position.x), f32::from(position.y), cx);
         let active = self.tab_drag.as_ref().is_some_and(|drag| drag.active);
+        let destination = active.then(|| self.update_cross_window_drag_target(cx)).flatten();
+        if let Some(destination) = destination {
+            let drag = self.tab_drag.take().expect("active drag checked above");
+            windowing::clear_cross_window_drag_target(drag.cross_window_target, cx);
+            let payload = drag.cross_window.expect("only terminal tabs resolve a target window");
+            // source workspace 仍在当前 mouse-up 回调里借用。延迟到事件结束后再
+            // 进入目标窗口，避免 accept 回头 update 源 entity 时发生重入借用。
+            cx.defer(move |cx| {
+                windowing::drop_tab_to_existing_window(payload, destination, cx);
+            });
+            cx.notify();
+            return true;
+        }
         let viewport = window.viewport_size();
         let outside = position.x < px(0.0)
             || position.y < px(0.0)
             || position.x > viewport.width
             || position.y > viewport.height;
         if active && outside {
-            let source = self.tab_drag.take().map(|drag| drag.source);
-            if let Some(source) = source {
-                self.schedule_move_tab_to_new_window(source, cx);
+            if let Some(drag) = self.tab_drag.take() {
+                windowing::clear_cross_window_drag_target(drag.cross_window_target, cx);
+                if let Some(payload) = drag.cross_window {
+                    cx.defer(move |cx| windowing::move_tab_to_new_window(payload, cx));
+                } else {
+                    self.schedule_move_tab_to_new_window(drag.source, cx);
+                }
                 cx.notify();
                 return true;
             }
@@ -105,15 +131,32 @@ impl NebulaWorkspace {
             return;
         }
         self.update_tab_drag_position(f32::from(event.position.x), f32::from(event.position.y), cx);
+        let cross_window_target = self.update_cross_window_drag_target(cx).is_some();
         // 拖到 tab 视口边缘就自动滚（仅顶栏模式且真的溢出时生效）。放在位移
         // 换算之后：让位槽位仍按存储顺序算，滚动只改可视窗口。
-        if self
-            .tab_drag
-            .as_ref()
-            .is_some_and(|drag| drag.active && drag.axis == TabDragAxis::Horizontal)
+        if !cross_window_target
+            && self
+                .tab_drag
+                .as_ref()
+                .is_some_and(|drag| drag.active && drag.axis == TabDragAxis::Horizontal)
         {
             self.autoscroll_top_tabs_for_drag(f32::from(event.position.x), window, cx);
         }
+    }
+
+    fn update_cross_window_drag_target(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<CrossWindowDropDestination> {
+        let (payload, previous_target) =
+            self.tab_drag.as_ref().filter(|drag| drag.active).and_then(|drag| {
+                drag.cross_window.clone().map(|payload| (payload, drag.cross_window_target))
+            })?;
+        let destination = windowing::update_cross_window_drag_target(&payload, previous_target, cx);
+        if let Some(drag) = self.tab_drag.as_mut() {
+            drag.cross_window_target = destination.map(|target| target.window_id);
+        }
+        destination
     }
 
     fn update_tab_drag_position(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
@@ -143,6 +186,7 @@ impl NebulaWorkspace {
 
     pub(super) fn finish_tab_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = self.tab_drag.take() else { return };
+        windowing::clear_cross_window_drag_target(drag.cross_window_target, cx);
         if drag.active {
             if let Some(nav) = drag.dock {
                 self.dock_tab_into_active(drag.source, nav, window, cx);
