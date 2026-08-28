@@ -1,9 +1,8 @@
 //! 快速终端全局热键。
 //!
-//! 旧壳把它做成一扇独立的、从屏幕上缘滑入的窗口（`event.rs::toggle_quick_terminal`）。
-//! GPUI 壳这一版只做「叫出来 / 收起去」的核心语义，作用于最近活跃的工作区窗口：
-//! 独立滑入窗口要连带处理几何、多屏、DPI 和动画调度，规模远超「让热键能用」这件事，
-//! 那属于另一个任务。
+//! 与旧壳保持同一产品合同：进程内只有一扇独立窗口，位于最近活跃显示器
+//! 顶部、全宽、屏高 40%，显示/隐藏时从屏幕上缘滑入/滑出。窗口只隐藏不
+//! 销毁，因此 PTY 和终端状态跨切换保留。
 //!
 //! 缺的一直是**系统注册**这一层：`settings_pane/keymap.rs` 能捕获并持久化组合键，
 //! 但 GPUI 壳从未调用 `GlobalHotKeyManager::register`，所以用户设了键、按下去没反应。
@@ -22,6 +21,109 @@ use super::NebulaWorkspace;
 
 /// 热键事件的排空节奏。80ms 是「按下到窗口出现」的可接受上限，且与 ai-hook 泵同量级。
 const POLL_INTERVAL: Duration = Duration::from_millis(80);
+
+/// 原生窗口位移动画的采样节奏。只在 90-120ms 的进出场期间运行，不常驻占帧。
+pub(super) const ANIMATION_INTERVAL: Duration = Duration::from_millis(16);
+
+/// 旧壳 `Display::configure_quick_terminal` 的几何合同。
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct QuickTerminalGeometry {
+    pub(super) x: i32,
+    pub(super) y: i32,
+    pub(super) width: i32,
+    pub(super) height: i32,
+}
+
+#[cfg(windows)]
+impl QuickTerminalGeometry {
+    fn animated_y(self, hidden_fraction: f32) -> i32 {
+        self.y - (self.height as f32 * hidden_fraction.clamp(0.0, 1.0)).round() as i32
+    }
+}
+
+/// 以普通工作区 HWND 所在显示器为目标；没有锚点时 Win32 回退主显示器。
+#[cfg(windows)]
+pub(super) fn native_geometry(anchor_hwnd: isize) -> Option<QuickTerminalGeometry> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+        MonitorFromWindow,
+    };
+
+    let anchor = anchor_hwnd as *mut core::ffi::c_void;
+    let fallback =
+        if anchor.is_null() { MONITOR_DEFAULTTOPRIMARY } else { MONITOR_DEFAULTTONEAREST };
+    // SAFETY: anchor 来自当前进程已注册的 GPUI 窗口；失效或为空时 API 按
+    // fallback 选择主/最近显示器。失败统一返回 None，不解引用 HWND。
+    let monitor = unsafe { MonitorFromWindow(anchor, fallback) };
+    if monitor.is_null() {
+        return None;
+    }
+    let zero = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        rcMonitor: zero,
+        rcWork: zero,
+        dwFlags: 0,
+    };
+    // 旧壳使用 monitor.size/position，即完整屏幕而非扣掉任务栏的 work area。
+    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        return None;
+    }
+    let width = (info.rcMonitor.right - info.rcMonitor.left).max(1);
+    let monitor_height = (info.rcMonitor.bottom - info.rcMonitor.top).max(1);
+    let height = ((monitor_height as f64) * 0.4).round().max(1.0) as i32;
+    Some(QuickTerminalGeometry { x: info.rcMonitor.left, y: info.rcMonitor.top, width, height })
+}
+
+/// 每帧只移动 Y；创建或跨屏重显时才重设宽高，避免动画连续触发 PTY resize。
+#[cfg(windows)]
+pub(super) fn position_native_window(
+    hwnd: isize,
+    geometry: QuickTerminalGeometry,
+    hidden_fraction: f32,
+    resize: bool,
+    show: bool,
+) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos,
+    };
+
+    if hwnd == 0 {
+        return false;
+    }
+    let mut flags = SWP_NOACTIVATE;
+    if !resize {
+        flags |= SWP_NOSIZE;
+    }
+    if show {
+        flags |= SWP_SHOWWINDOW;
+    }
+    // SAFETY: HWND 由 GPUI 窗口创建回调发布；SetWindowPos 对已失效窗口安全
+    // 失败。SWP_NOACTIVATE 保证动画帧本身不反复抢前台，显式热键另行激活。
+    unsafe {
+        SetWindowPos(
+            hwnd as *mut core::ffi::c_void,
+            HWND_TOPMOST,
+            geometry.x,
+            geometry.animated_y(hidden_fraction),
+            geometry.width,
+            geometry.height,
+            flags,
+        ) != 0
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn hide_native_window(hwnd: isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+
+    if hwnd != 0 {
+        // SAFETY: HWND 由 GPUI 创建；窗口已关闭时 ShowWindow 只会安全失败。
+        unsafe { ShowWindow(hwnd as *mut core::ffi::c_void, SW_HIDE) };
+    }
+}
 
 /// 每多少次轮询回读一次设置里的组合键（约 2 秒）。
 ///
@@ -145,4 +247,18 @@ fn drain_pressed(cx: &mut App) -> bool {
         }
     }
     pressed
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::QuickTerminalGeometry;
+
+    #[test]
+    fn slide_geometry_handles_negative_monitor_origins() {
+        let geometry = QuickTerminalGeometry { x: -1920, y: -200, width: 1920, height: 480 };
+        assert_eq!(geometry.animated_y(0.0), -200);
+        assert_eq!(geometry.animated_y(0.5), -440);
+        assert_eq!(geometry.animated_y(1.0), -680);
+        assert_eq!(geometry.animated_y(2.0), -680);
+    }
 }

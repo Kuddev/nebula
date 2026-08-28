@@ -12,7 +12,7 @@ use std::sync::Arc;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
-    WindowBounds, WindowOptions, div, px, size,
+    WindowBounds, WindowOptions, div, point, px, size,
 };
 use gpui_component::{ActiveTheme as _, Root, TitleBar};
 use nebula_split::{SplitNav, SplitTree};
@@ -20,6 +20,8 @@ use serde_json::json;
 
 use super::{NebulaWorkspace, TabMeta, WorkspaceTab, dock_tree};
 use crate::gpui_shell::GpuiShellEvent;
+#[cfg(windows)]
+use crate::motion::{MotionClock, MotionPolicy, MotionRole, Tween};
 use crate::runtime_api::{
     ApiError, RuntimeCommand, RuntimeDispatch, RuntimeSnapshot, RuntimeWindow,
 };
@@ -32,6 +34,13 @@ pub(crate) enum WorkspaceStartup {
     Empty,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowRole {
+    Regular,
+    #[cfg(windows)]
+    QuickTerminal,
+}
+
 #[derive(Clone)]
 struct WindowEntry {
     runtime_window_id: u64,
@@ -39,6 +48,21 @@ struct WindowEntry {
     workspace: WeakEntity<NebulaWorkspace>,
     last_activated: u64,
     native_hwnd: isize,
+    role: WindowRole,
+}
+
+#[cfg(windows)]
+struct QuickTerminalWindow {
+    runtime_window_id: u64,
+    handle: AnyWindowHandle,
+    native_hwnd: isize,
+    geometry: super::quick_terminal::QuickTerminalGeometry,
+    target_visible: bool,
+    motion: Tween,
+    motion_clock: MotionClock,
+    animation_generation: u64,
+    resize_next_frame: bool,
+    activate_next_frame: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +119,8 @@ pub(crate) struct WindowRegistry {
     entries: Vec<WindowEntry>,
     runtime_hub: crate::runtime_api::RuntimeHub,
     last_saved_session: Option<crate::session::Session>,
+    #[cfg(windows)]
+    quick_terminal: Option<QuickTerminalWindow>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -166,6 +192,8 @@ pub(crate) fn initialize(cx: &mut App, runtime_hub: crate::runtime_api::RuntimeH
         entries: Vec::new(),
         runtime_hub,
         last_saved_session: None,
+        #[cfg(windows)]
+        quick_terminal: None,
         _subscriptions: Vec::new(),
     });
 
@@ -194,20 +222,54 @@ pub(crate) fn open_initial_window(
         Some(cwd) => WorkspaceStartup::NewTerminal { cwd: Some(cwd) },
         None => WorkspaceStartup::RestoreOrDefault,
     };
-    open_workspace_window(cx, startup, Some(ai_events), Some(shell_events), true)
-        .expect("failed to open Nebula GPUI window");
+    open_workspace_window(
+        cx,
+        startup,
+        Some(ai_events),
+        Some(shell_events),
+        true,
+        WindowRole::Regular,
+    )
+    .expect("failed to open Nebula GPUI window");
 }
 
-fn workspace_window_options(cx: &App, focus: bool) -> WindowOptions {
-    let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
-    WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(760.0), px(540.0))),
-        titlebar: Some(TitleBar::title_bar_options()),
-        app_id: Some("nebula".to_owned()),
-        window_background: crate::gpui_shell::wallpaper::initial_background_appearance(),
-        focus,
-        ..Default::default()
+fn workspace_window_options(cx: &App, focus: bool, role: WindowRole) -> WindowOptions {
+    match role {
+        WindowRole::Regular => {
+            let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(760.0), px(540.0))),
+                titlebar: Some(TitleBar::title_bar_options()),
+                app_id: Some("nebula".to_owned()),
+                window_background: crate::gpui_shell::wallpaper::initial_background_appearance(),
+                focus,
+                ..Default::default()
+            }
+        },
+        #[cfg(windows)]
+        WindowRole::QuickTerminal => {
+            let display = cx.primary_display().map(|display| display.bounds());
+            let visible =
+                display.unwrap_or_else(|| Bounds::centered(None, size(px(1080.0), px(720.0)), cx));
+            let height = px((f32::from(visible.size.height) * 0.4).round().max(1.0));
+            let bounds = Bounds {
+                origin: point(visible.origin.x, visible.origin.y - height),
+                size: size(visible.size.width, height),
+            };
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: None,
+                app_id: Some("nebula-quick-terminal".to_owned()),
+                window_background: crate::gpui_shell::wallpaper::initial_background_appearance(),
+                focus: false,
+                show: false,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            }
+        },
     }
 }
 
@@ -224,9 +286,10 @@ fn open_workspace_window(
     ai_events: Option<std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>>,
     shell_events: Option<std::sync::mpsc::Receiver<GpuiShellEvent>>,
     focus: bool,
+    role: WindowRole,
 ) -> gpui::Result<(u64, Entity<NebulaWorkspace>)> {
     let (runtime_window_id, runtime_hub) = allocate_window(cx);
-    let options = workspace_window_options(cx, focus);
+    let options = workspace_window_options(cx, focus, role);
     let workspace_slot = Rc::new(RefCell::new(None));
     let hwnd_slot = Rc::new(RefCell::new(0isize));
     let workspace_out = workspace_slot.clone();
@@ -270,30 +333,49 @@ fn open_workspace_window(
         workspace: workspace.downgrade(),
         last_activated,
         native_hwnd,
+        role,
     });
     crate::gpui_shell::wallpaper::refresh(cx);
     Ok((runtime_window_id, workspace))
 }
 
 pub(crate) fn open_new_window(cx: &mut App, cwd: Option<PathBuf>) -> gpui::Result<(u64, u64)> {
-    let (window_id, workspace) =
-        open_workspace_window(cx, WorkspaceStartup::NewTerminal { cwd }, None, None, true)?;
+    let (window_id, workspace) = open_workspace_window(
+        cx,
+        WorkspaceStartup::NewTerminal { cwd },
+        None,
+        None,
+        true,
+        WindowRole::Regular,
+    )?;
     let pane_id = workspace.read(cx).active_terminal_pane_id().unwrap_or_default();
     Ok((window_id, pane_id))
 }
 
 fn open_runtime_window(cx: &mut App, cwd: Option<PathBuf>) -> gpui::Result<(u64, u64)> {
-    let (window_id, workspace) =
-        open_workspace_window(cx, WorkspaceStartup::NewTerminal { cwd }, None, None, false)?;
+    let (window_id, workspace) = open_workspace_window(
+        cx,
+        WorkspaceStartup::NewTerminal { cwd },
+        None,
+        None,
+        false,
+        WindowRole::Regular,
+    )?;
     let pane_id = workspace.read(cx).active_terminal_pane_id().unwrap_or_default();
     Ok((window_id, pane_id))
 }
 
 pub(crate) fn mark_active(runtime_window_id: u64, cx: &mut App) {
     let registry = cx.global_mut::<WindowRegistry>();
+    if !registry.entries.iter().any(|entry| {
+        entry.runtime_window_id == runtime_window_id && entry.role == WindowRole::Regular
+    }) {
+        return;
+    }
     if registry
         .entries
         .iter()
+        .filter(|entry| entry.role == WindowRole::Regular)
         .max_by_key(|entry| entry.last_activated)
         .is_some_and(|entry| entry.runtime_window_id == runtime_window_id)
     {
@@ -310,15 +392,35 @@ pub(crate) fn mark_active(runtime_window_id: u64, cx: &mut App) {
 
 fn prune_entries(cx: &mut App) {
     let open = cx.windows();
-    cx.global_mut::<WindowRegistry>()
+    let registry = cx.global_mut::<WindowRegistry>();
+    registry
         .entries
         .retain(|entry| open.contains(&entry.handle) && entry.workspace.upgrade().is_some());
+    #[cfg(windows)]
+    {
+        let quick_is_open = registry.quick_terminal.as_ref().is_some_and(|quick| {
+            open.contains(&quick.handle)
+                && registry.entries.iter().any(|entry| {
+                    entry.runtime_window_id == quick.runtime_window_id
+                        && entry.role == WindowRole::QuickTerminal
+                })
+        });
+        if !quick_is_open {
+            registry.quick_terminal = None;
+        }
+    }
 }
 
 fn entries_by_mru(cx: &mut App) -> Vec<WindowEntry> {
     prune_entries(cx);
     let active = cx.active_window();
-    let mut entries = cx.global::<WindowRegistry>().entries.clone();
+    let mut entries = cx
+        .global::<WindowRegistry>()
+        .entries
+        .iter()
+        .filter(|entry| entry.role == WindowRole::Regular)
+        .cloned()
+        .collect::<Vec<_>>();
     entries.sort_by_key(|entry| {
         (active.is_some_and(|handle| handle == entry.handle), entry.last_activated)
     });
@@ -714,20 +816,175 @@ fn focus_workspace_window(workspace: &mut NebulaWorkspace, window: &mut Window) 
     window.activate_window();
 }
 
-/// 快速终端热键的窗口副作用：把最近活跃的那扇窗叫出来，或者收回去。
-///
-/// 三态而不是两态。「可见但不在前台」必须走激活而不是隐藏——用户在别的应用里按下
-/// 热键时想要的是「把终端拿到眼前」，此时若按可见性判断就会把它藏起来，正好相反。
-///
-/// 这里的 `activate_window` 是用户主动动作，和 `RuntimeWindowPolicy::Focus` 同类；
-/// 它不受「runtime 命令不得抢前台」那条约束（见本文件顶部的策略表）。
+/// 快速终端是独立窗口，不占用普通工作区的 MRU、runtime 路由或 session 恢复槽。
+/// 三态仍与旧壳一致：隐藏时显示并聚焦；可见但在后台时只聚焦；只有可见且
+/// 已在前台时才向上收起。
+#[cfg(windows)]
 pub(crate) fn toggle_quick_terminal_window(cx: &mut App) {
-    let target = cx
+    prune_entries(cx);
+    let quick = cx
+        .global::<WindowRegistry>()
+        .quick_terminal
+        .as_ref()
+        .map(|quick| (quick.handle, quick.target_visible));
+    let Some((handle, target_visible)) = quick else {
+        open_quick_terminal_window(cx);
+        return;
+    };
+
+    let is_active = handle.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false);
+    if target_visible && !is_active {
+        // 用户从其它应用按热键时是召回，不是把仍可见的快速终端反向隐藏。
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
+        return;
+    }
+
+    let anchor_hwnd = quick_terminal_anchor_hwnd(cx);
+    let geometry = super::quick_terminal::native_geometry(anchor_hwnd);
+    let registry = cx.global_mut::<WindowRegistry>();
+    let Some(quick) = registry.quick_terminal.as_mut() else { return };
+    quick.motion_clock.reset();
+    if target_visible {
+        quick.target_visible = false;
+        quick.motion.animate_role(1.0, MotionRole::Exit, MotionPolicy::Full);
+    } else {
+        if let Some(geometry) = geometry {
+            quick.geometry = geometry;
+        }
+        quick.target_visible = true;
+        quick.resize_next_frame = true;
+        quick.activate_next_frame = true;
+        quick.motion.animate_role(0.0, MotionRole::Enter, MotionPolicy::Full);
+    }
+    start_quick_terminal_animation(cx);
+}
+
+#[cfg(windows)]
+fn quick_terminal_anchor_hwnd(cx: &mut App) -> isize {
+    entries_by_mru(cx).into_iter().next().map_or(0, |entry| entry.native_hwnd)
+}
+
+#[cfg(windows)]
+fn open_quick_terminal_window(cx: &mut App) {
+    let anchor_hwnd = quick_terminal_anchor_hwnd(cx);
+    let Some(geometry) = super::quick_terminal::native_geometry(anchor_hwnd) else {
+        log::warn!("quick terminal could not resolve a target monitor");
+        return;
+    };
+    let opened = open_workspace_window(
+        cx,
+        WorkspaceStartup::NewTerminal { cwd: None },
+        None,
+        None,
+        false,
+        WindowRole::QuickTerminal,
+    );
+    let Ok((runtime_window_id, _)) = opened else {
+        log::warn!("quick terminal window creation failed: {}", opened.unwrap_err());
+        return;
+    };
+    let Some(entry) = cx
         .global::<WindowRegistry>()
         .entries
         .iter()
-        .max_by_key(|entry| entry.last_activated)
-        .map(|entry| (entry.handle, entry.workspace.clone()));
+        .find(|entry| entry.runtime_window_id == runtime_window_id)
+        .cloned()
+    else {
+        log::warn!("quick terminal window was not registered after creation");
+        return;
+    };
+
+    let mut motion = Tween::new(1.0);
+    motion.animate_role(0.0, MotionRole::Enter, MotionPolicy::Full);
+    cx.global_mut::<WindowRegistry>().quick_terminal = Some(QuickTerminalWindow {
+        runtime_window_id,
+        handle: entry.handle,
+        native_hwnd: entry.native_hwnd,
+        geometry,
+        target_visible: true,
+        motion,
+        motion_clock: MotionClock::default(),
+        animation_generation: 0,
+        // `NebulaWorkspace::new` 会异步发出一次普通窗口 resize；首个动画帧
+        // 再落最终几何，保证那次构造期任务不能把 40% 高度覆盖掉。
+        resize_next_frame: true,
+        activate_next_frame: true,
+    });
+    start_quick_terminal_animation(cx);
+}
+
+#[cfg(windows)]
+fn start_quick_terminal_animation(cx: &mut App) {
+    let generation = {
+        let Some(quick) = cx.global_mut::<WindowRegistry>().quick_terminal.as_mut() else {
+            return;
+        };
+        quick.animation_generation = quick.animation_generation.wrapping_add(1);
+        quick.animation_generation
+    };
+    let executor = cx.background_executor().clone();
+    cx.spawn(async move |cx| {
+        loop {
+            executor.timer(super::quick_terminal::ANIMATION_INTERVAL).await;
+            if !cx.update(|cx| quick_terminal_animation_tick(generation, cx)) {
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+#[cfg(windows)]
+fn quick_terminal_animation_tick(generation: u64, cx: &mut App) -> bool {
+    prune_entries(cx);
+    let frame = {
+        let Some(quick) = cx.global_mut::<WindowRegistry>().quick_terminal.as_mut() else {
+            return false;
+        };
+        if quick.animation_generation != generation {
+            return false;
+        }
+        let active = quick.motion.step(quick.motion_clock.tick());
+        let frame = (
+            quick.handle,
+            quick.native_hwnd,
+            quick.geometry,
+            quick.motion.value(),
+            quick.resize_next_frame,
+            quick.activate_next_frame,
+            quick.target_visible,
+            active,
+        );
+        quick.resize_next_frame = false;
+        quick.activate_next_frame = false;
+        frame
+    };
+    let (handle, hwnd, geometry, hidden, resize, activate, target_visible, active) = frame;
+    if !super::quick_terminal::position_native_window(
+        hwnd,
+        geometry,
+        hidden,
+        resize,
+        target_visible,
+    ) {
+        log::warn!("quick terminal native positioning failed");
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+        cx.global_mut::<WindowRegistry>().quick_terminal = None;
+        return false;
+    }
+    if activate {
+        // 只有热键显式召回允许激活；动画帧的 SetWindowPos 始终 NOACTIVATE。
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
+    }
+    if !active && !target_visible {
+        super::quick_terminal::hide_native_window(hwnd);
+    }
+    active
+}
+
+#[cfg(not(windows))]
+pub(crate) fn toggle_quick_terminal_window(cx: &mut App) {
+    let target = entries_by_mru(cx).into_iter().next().map(|entry| (entry.handle, entry.workspace));
     let Some((handle, workspace)) = target else { return };
     let _ = handle.update(cx, move |_, window, cx| {
         let _ = workspace.update(cx, |workspace, cx| {
@@ -742,6 +999,22 @@ pub(crate) fn toggle_quick_terminal_window(cx: &mut App) {
             cx.notify();
         });
     });
+}
+
+pub(crate) fn is_quick_terminal_window(handle: AnyWindowHandle, cx: &App) -> bool {
+    #[cfg(windows)]
+    {
+        return cx
+            .global::<WindowRegistry>()
+            .quick_terminal
+            .as_ref()
+            .is_some_and(|quick| quick.handle == handle);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (handle, cx);
+        false
+    }
 }
 
 fn focus_entry(entry: &WindowEntry, pane_id: Option<u64>, cx: &mut App) {
@@ -824,7 +1097,13 @@ pub(crate) fn autosave_tick(cx: &mut App) {
 
 fn combined_session(cx: &App) -> crate::session::Session {
     let active_handle = cx.active_window();
-    let mut entries = cx.global::<WindowRegistry>().entries.clone();
+    let mut entries = cx
+        .global::<WindowRegistry>()
+        .entries
+        .iter()
+        .filter(|entry| entry.role == WindowRole::Regular)
+        .cloned()
+        .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.runtime_window_id);
     let mut tabs = Vec::new();
     let mut active_tab = 0usize;
@@ -856,7 +1135,8 @@ fn save_combined_session(cx: &mut App, clean: bool) {
 
 pub(crate) fn quit_all(cx: &mut App) {
     save_combined_session(cx, true);
-    let entries = entries_by_mru(cx);
+    prune_entries(cx);
+    let entries = cx.global::<WindowRegistry>().entries.clone();
     for entry in entries {
         let workspace = entry.workspace.clone();
         let _ = entry.handle.update(cx, move |_, _window, cx| {
@@ -868,7 +1148,8 @@ pub(crate) fn quit_all(cx: &mut App) {
 }
 
 pub(crate) fn move_tab_to_new_window(payload: CrossWindowTabDrag, cx: &mut App) {
-    let opened = open_workspace_window(cx, WorkspaceStartup::Empty, None, None, true);
+    let opened =
+        open_workspace_window(cx, WorkspaceStartup::Empty, None, None, true, WindowRole::Regular);
     let Ok((target_window_id, target_workspace)) = opened else {
         log::warn!("failed to open a window for moved tab");
         return;
@@ -919,9 +1200,16 @@ pub(crate) fn drop_tab_to_existing_window(
 }
 
 fn unregister(runtime_window_id: u64, cx: &mut App) {
-    cx.global_mut::<WindowRegistry>()
-        .entries
-        .retain(|entry| entry.runtime_window_id != runtime_window_id);
+    let registry = cx.global_mut::<WindowRegistry>();
+    registry.entries.retain(|entry| entry.runtime_window_id != runtime_window_id);
+    #[cfg(windows)]
+    if registry
+        .quick_terminal
+        .as_ref()
+        .is_some_and(|quick| quick.runtime_window_id == runtime_window_id)
+    {
+        registry.quick_terminal = None;
+    }
 }
 
 pub(crate) fn close_empty_workspace_window(
