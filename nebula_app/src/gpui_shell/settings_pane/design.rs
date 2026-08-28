@@ -137,7 +137,11 @@ impl SettingsPane {
                 .group_hover(hover_group, |el| el.visible())
                 .hover(|el| el.bg(cx.theme().list_hover))
                 .tooltip(|window, cx| {
-                    gpui_component::tooltip::Tooltip::new("还原为默认值").build(window, cx)
+                    gpui_component::tooltip::Tooltip::new(
+                        crate::gpui_shell::config::ui_language(cx)
+                            .pick("还原为默认值", "Restore default"),
+                    )
+                    .build(window, cx)
                 })
                 .on_click(cx.listener(move |this, _, window, cx| on_reset(this, window, cx)))
                 .child(Icon::new(IconName::Undo2).xsmall())

@@ -18,7 +18,12 @@ impl SettingsPane {
             .map(|settings| settings.font_family.clone())
             .or(runtime_font_family)
             .unwrap_or_else(|| REQUIRED_FONT_FAMILY.to_owned());
-        cx.new(|cx| InputState::new(window, cx).placeholder("输入字体名称").default_value(initial))
+        let language = crate::gpui_shell::config::ui_language(cx);
+        cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(language.pick("输入字体名称", "Enter a font family"))
+                .default_value(initial)
+        })
     }
 
     /// 当前生效字体链（settings.txt 覆盖 toml 后的值，可能含逗号 fallback）。
@@ -190,6 +195,7 @@ impl SettingsPane {
     /// 与标准 Select 共用 220px 控件列。Input 自己负责长文本的单行滚动，
     /// 逗号链再长也只能在字段内部移动，不能反向撑开设置行。
     fn font_picker_row(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let picker = cx.entity().downgrade();
         let control = div()
             .id("font-family-input-shell")
@@ -203,7 +209,7 @@ impl SettingsPane {
                 Input::new(&self.font_family_input)
                     .w_full()
                     .cleanable(false)
-                    .aria_label("终端字体"),
+                    .aria_label(language.pick("终端字体", "Terminal font")),
             )
             // 弹层仍须取输入框的真实窗口坐标，才能正确处理滚动、缩放与 DPI。
             .child(
@@ -227,8 +233,8 @@ impl SettingsPane {
                 .size_full(),
             );
         self.row(
-            "终端字体",
-            "第 1 项优先显示；缺失字形依次使用后续字体，内置 Maple 是最终安全兜底。",
+            language.pick("终端字体", "Terminal font"),
+            language.tr("settings.font.fallback_description"),
             control,
             cx,
         )
@@ -260,6 +266,7 @@ impl SettingsPane {
         list_height: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let muted = cx.theme().muted_foreground;
         let hover_bg = cx.theme().list_hover;
         let selected_bg = cx.theme().list_active;
@@ -334,11 +341,11 @@ impl SettingsPane {
                             })
                             .child(display_name),
                     )
-                    .when(index == 0, |row| row.child(badge("主", muted)))
+                    .when(index == 0, |row| row.child(badge(language.pick("主", "Primary"), muted)))
                     .child(Self::chain_action(
                         SharedString::from(format!("font-chain-up-{index}")),
                         IconName::ArrowUp,
-                        "上移",
+                        language.pick("上移", "Move up"),
                         index == 0,
                         move |this, window, cx| {
                             this.move_font_family(index, -1, window, cx);
@@ -348,7 +355,7 @@ impl SettingsPane {
                     .child(Self::chain_action(
                         SharedString::from(format!("font-chain-down-{index}")),
                         IconName::ArrowDown,
-                        "下移",
+                        language.pick("下移", "Move down"),
                         index + 1 == family_count,
                         move |this, window, cx| {
                             this.move_font_family(index, 1, window, cx);
@@ -358,7 +365,7 @@ impl SettingsPane {
                     .child(Self::chain_action(
                         SharedString::from(format!("font-chain-delete-{index}")),
                         IconName::Delete,
-                        "移出字体组",
+                        language.pick("移出字体组", "Remove from font group"),
                         family_count == 1,
                         move |this, window, cx| this.remove_font_family(index, window, cx),
                         cx,
@@ -403,17 +410,19 @@ impl SettingsPane {
                             })
                             .child(display_name),
                     )
-                    .when(bundled, |row| row.child(badge("内置", muted)))
+                    .when(bundled, |row| row.child(badge(language.pick("内置", "Bundled"), muted)))
                     .when(entry.source == FontSource::Imported, |row| {
-                        row.child(badge("导入", muted))
+                        row.child(badge(language.pick("导入", "Imported"), muted))
                     })
-                    .when(!entry.monospaced, |row| row.child(badge("比例", warning)))
+                    .when(!entry.monospaced, |row| {
+                        row.child(badge(language.pick("比例", "Proportional"), warning))
+                    })
                     .child(
                         Button::new(SharedString::from(format!("font-add-{index}")))
                             .icon(IconName::Plus)
                             .ghost()
                             .xsmall()
-                            .tooltip("加入字体组")
+                            .tooltip(language.pick("加入字体组", "Add to font group"))
                             .disabled(already_selected)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -436,12 +445,17 @@ impl SettingsPane {
             .popover_style(cx)
             .occlude()
             .overflow_hidden()
-            .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("字体组"))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(language.pick("字体组", "Font group")),
+            )
             .child(
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child("第 1 项是主字体，其余按顺序回退"),
+                    .child(language.tr("settings.font.group_description")),
             )
             .when(self.font_loading, |panel| {
                 panel.child(
@@ -449,7 +463,12 @@ impl SettingsPane {
                         .gap_2()
                         .items_center()
                         .child(Spinner::new().xsmall())
-                        .child(div().text_sm().text_color(muted).child("正在枚举系统字体…")),
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(muted)
+                                .child(language.tr("settings.font.loading")),
+                        ),
                 )
             })
             .when(!self.font_loading, |panel| {
@@ -461,7 +480,13 @@ impl SettingsPane {
                         // 避免排序操作与候选行落进滚动条命中区而发生误触。
                         .pr(px(16.0))
                         .gap_1()
-                        .child(div().px_1().text_xs().text_color(muted).child("当前顺序"))
+                        .child(
+                            div()
+                                .px_1()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(language.pick("当前顺序", "Current order")),
+                        )
                         .children(selected_rows)
                         .child(
                             div()
@@ -472,12 +497,16 @@ impl SettingsPane {
                                 .px_1()
                                 .text_xs()
                                 .text_color(muted)
-                                .child("可用字体"),
+                                .child(language.pick("可用字体", "Available fonts")),
                         )
                         .children(available_rows)
                         .when(available_empty, |list| {
                             list.child(
-                                div().py_2().text_sm().text_color(muted).child("没有匹配的字体"),
+                                div()
+                                    .py_2()
+                                    .text_sm()
+                                    .text_color(muted)
+                                    .child(language.tr("settings.font.no_matches")),
                             )
                         }),
                 ))

@@ -5816,8 +5816,7 @@ impl Display {
         &mut self,
         request_id: u64,
         provider_id: &str,
-        ok: bool,
-        message: &str,
+        outcome: &crate::provider_test::ProviderTestOutcome,
         elapsed_ms: u64,
     ) {
         if request_id != self.nebula_provider_test_seq
@@ -5825,7 +5824,10 @@ impl Display {
         {
             return;
         }
-        self.nebula_provider_status = Some((format!("{message} · {elapsed_ms} ms"), !ok));
+        self.nebula_provider_status = Some((
+            format!("{} · {elapsed_ms} ms", self.ui_language().provider_test_message(outcome)),
+            !outcome.is_success(),
+        ));
         self.pending_update.dirty = true;
     }
 
@@ -5931,8 +5933,7 @@ impl Display {
     pub(crate) fn proxy_test_done(
         &mut self,
         request_id: u64,
-        ok: bool,
-        message: &str,
+        outcome: crate::proxy_test::ProxyTestOutcome,
         elapsed_ms: u64,
     ) {
         if request_id != self.nebula_proxy_test_seq
@@ -5940,11 +5941,7 @@ impl Display {
         {
             return;
         }
-        self.nebula_proxy_test_status = if ok {
-            settings::ProxyTestStatus::Success { elapsed_ms, route: message.to_owned() }
-        } else {
-            settings::ProxyTestStatus::Failed { message: message.to_owned() }
-        };
+        self.nebula_proxy_test_status = settings::ProxyTestStatus::Complete { outcome, elapsed_ms };
         self.pending_update.dirty = true;
         self.window.request_redraw();
     }

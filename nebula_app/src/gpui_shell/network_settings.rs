@@ -41,18 +41,13 @@ pub(super) fn apply_proxy_test_result(
     seq: u64,
     status: &ProxyTestStatus,
     request_id: u64,
-    ok: bool,
-    message: &str,
+    outcome: crate::proxy_test::ProxyTestOutcome,
     elapsed_ms: u64,
 ) -> Option<ProxyTestStatus> {
     if request_id != seq || !matches!(status, ProxyTestStatus::Running) {
         return None;
     }
-    Some(if ok {
-        ProxyTestStatus::Success { elapsed_ms, route: message.to_owned() }
-    } else {
-        ProxyTestStatus::Failed { message: message.to_owned() }
-    })
+    Some(ProxyTestStatus::Complete { outcome, elapsed_ms })
 }
 
 impl SettingsPane {
@@ -96,8 +91,11 @@ impl SettingsPane {
         let receiver = match crate::ssh_session::start_proxy_test(request_id) {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.proxy_test_status = ProxyTestStatus::Failed {
-                    message: format!("无法启动网络测试：{error}"),
+                self.proxy_test_status = ProxyTestStatus::Complete {
+                    outcome: crate::proxy_test::ProxyTestOutcome::Failed(
+                        crate::proxy_test::ProxyTestFailure::Start(error.to_string()),
+                    ),
+                    elapsed_ms: 0,
                 };
                 cx.notify();
                 return;
@@ -107,14 +105,20 @@ impl SettingsPane {
             let result = receiver.await;
             let _ = this.update(cx, |pane, cx| {
                 match result {
-                    Ok(result) => pane.finish_proxy_test(
-                        result.request_id,
-                        result.ok,
-                        &result.message,
-                        result.elapsed_ms,
-                    ),
+                    Ok(result) => {
+                        pane.finish_proxy_test(result.request_id, result.outcome, result.elapsed_ms)
+                    },
                     Err(_) => {
-                        pane.finish_proxy_test(request_id, false, "网络测试任务意外结束，请重试", 0)
+                        if request_id == pane.proxy_test_seq
+                            && matches!(pane.proxy_test_status, ProxyTestStatus::Running)
+                        {
+                            pane.proxy_test_status = ProxyTestStatus::Complete {
+                                outcome: crate::proxy_test::ProxyTestOutcome::Failed(
+                                    crate::proxy_test::ProxyTestFailure::UnexpectedEnd,
+                                ),
+                                elapsed_ms: 0,
+                            };
+                        }
                     },
                 }
                 cx.notify();
@@ -124,13 +128,17 @@ impl SettingsPane {
         cx.notify();
     }
 
-    fn finish_proxy_test(&mut self, request_id: u64, ok: bool, message: &str, elapsed_ms: u64) {
+    fn finish_proxy_test(
+        &mut self,
+        request_id: u64,
+        outcome: crate::proxy_test::ProxyTestOutcome,
+        elapsed_ms: u64,
+    ) {
         if let Some(status) = apply_proxy_test_result(
             self.proxy_test_seq,
             &self.proxy_test_status,
             request_id,
-            ok,
-            message,
+            outcome,
             elapsed_ms,
         ) {
             self.proxy_test_status = status;
@@ -145,7 +153,8 @@ impl SettingsPane {
 
     pub(super) fn section_network(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let custom = shows_manual_proxy_address(self.runtime.ssh_proxy_mode);
-        self.group("网络代理", cx)
+        let language = crate::gpui_shell::config::ui_language(cx);
+        self.group(language.tr("settings.network.title"), cx)
             .child(self.proxy_test_banner(cx))
             .child(div().h(px(PROXY_TEST_GAP)).w_full().flex_shrink_0())
             .child(self.proxy_mode_row(cx))
@@ -153,24 +162,27 @@ impl SettingsPane {
     }
 
     fn proxy_test_banner(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let theme = cx.theme();
         let running = matches!(self.proxy_test_status, ProxyTestStatus::Running);
         let (status, status_color) = match &self.proxy_test_status {
-            ProxyTestStatus::Idle => {
-                (SharedString::from("测试当前设置是否可以访问网络"), theme.muted_foreground)
-            },
-            ProxyTestStatus::Running => {
-                (SharedString::from("正在通过当前设置测试网络…"), theme.link)
-            },
-            ProxyTestStatus::Success { elapsed_ms, route } => (
-                SharedString::from(format!("网络连接正常 · {route} · {elapsed_ms} ms")),
-                theme.success,
+            ProxyTestStatus::Idle => (
+                SharedString::from(language.tr("settings.network.status.idle")),
+                theme.muted_foreground,
             ),
-            ProxyTestStatus::Failed { message } => {
-                (SharedString::from(format!("测试失败：{message}")), theme.danger)
+            ProxyTestStatus::Running => {
+                (SharedString::from(language.tr("settings.network.status.running")), theme.link)
             },
+            ProxyTestStatus::Complete { outcome, elapsed_ms } => (
+                SharedString::from(language.proxy_test_message(outcome, *elapsed_ms)),
+                if outcome.is_success() { theme.success } else { theme.danger },
+            ),
         };
-        let caption = if running { "测试中…" } else { "测试网络" };
+        let caption = if running {
+            language.tr("settings.network.action.testing")
+        } else {
+            language.tr("settings.network.action.test")
+        };
         h_flex()
             .w_full()
             .h(px(PROXY_TEST_BANNER_H))
@@ -200,9 +212,10 @@ impl SettingsPane {
     }
 
     fn proxy_mode_row(&self, cx: &Context<Self>) -> impl IntoElement {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let select = self.select_of("ssh_proxy_mode");
         self.row(
-            "代理方式",
+            language.tr("settings.network.mode.label"),
             "",
             div()
                 .w(px(PROXY_MODE_SELECT_W))
@@ -213,8 +226,9 @@ impl SettingsPane {
     }
 
     fn proxy_address_row(&self, cx: &Context<Self>) -> impl IntoElement {
+        let language = crate::gpui_shell::config::ui_language(cx);
         self.row(
-            "代理地址",
+            language.tr("settings.network.address.label"),
             "",
             h_flex()
                 .flex_1()
@@ -239,6 +253,7 @@ impl SettingsPane {
 mod tests {
     use super::{apply_proxy_test_result, shows_manual_proxy_address};
     use crate::display::ProxyTestStatus;
+    use crate::proxy_test::{ProxyTestFailure, ProxyTestOutcome, ProxyTestRoute};
     use nebula_settings::ProxyModeName;
 
     #[test]
@@ -252,18 +267,51 @@ mod tests {
     fn stale_proxy_test_results_are_discarded_after_invalidate() {
         let seq = 7;
         let running = ProxyTestStatus::Running;
-        assert_eq!(apply_proxy_test_result(seq, &running, 6, true, "直接连接", 12), None);
         assert_eq!(
-            apply_proxy_test_result(seq, &ProxyTestStatus::Idle, seq, true, "直接连接", 12),
+            apply_proxy_test_result(
+                seq,
+                &running,
+                6,
+                ProxyTestOutcome::Success(ProxyTestRoute::Direct),
+                12,
+            ),
             None
         );
         assert_eq!(
-            apply_proxy_test_result(seq, &running, seq, true, "直接连接", 41),
-            Some(ProxyTestStatus::Success { elapsed_ms: 41, route: "直接连接".into() })
+            apply_proxy_test_result(
+                seq,
+                &ProxyTestStatus::Idle,
+                seq,
+                ProxyTestOutcome::Success(ProxyTestRoute::Direct),
+                12,
+            ),
+            None
         );
         assert_eq!(
-            apply_proxy_test_result(seq, &running, seq, false, "连接被拒绝", 8),
-            Some(ProxyTestStatus::Failed { message: "连接被拒绝".into() })
+            apply_proxy_test_result(
+                seq,
+                &running,
+                seq,
+                ProxyTestOutcome::Success(ProxyTestRoute::Direct),
+                41,
+            ),
+            Some(ProxyTestStatus::Complete {
+                outcome: ProxyTestOutcome::Success(ProxyTestRoute::Direct),
+                elapsed_ms: 41
+            })
+        );
+        assert_eq!(
+            apply_proxy_test_result(
+                seq,
+                &running,
+                seq,
+                ProxyTestOutcome::Failed(ProxyTestFailure::Direct("refused".into())),
+                8,
+            ),
+            Some(ProxyTestStatus::Complete {
+                outcome: ProxyTestOutcome::Failed(ProxyTestFailure::Direct("refused".into())),
+                elapsed_ms: 8
+            })
         );
     }
 }

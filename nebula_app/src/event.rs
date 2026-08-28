@@ -510,10 +510,7 @@ impl Processor {
                 window.mark_session_dirty();
             }
         }
-        if self.windows.is_empty()
-            && self.detached.is_empty()
-            && !self.cli_options.daemon
-        {
+        if self.windows.is_empty() && self.detached.is_empty() && !self.cli_options.daemon {
             event_loop.exit();
         }
     }
@@ -802,13 +799,8 @@ impl Processor {
         event_loop: &ActiveEventLoop,
         dispatch: &std::sync::Arc<RuntimeDispatch>,
     ) {
-        if let RuntimeCommand::Exec {
-            window_id,
-            pane_id,
-            argv,
-            timeout_ms,
-            max_output_bytes,
-        } = &dispatch.command
+        if let RuntimeCommand::Exec { window_id, pane_id, argv, timeout_ms, max_output_bytes } =
+            &dispatch.command
         {
             let prepared = self.runtime_target_window(*window_id, Some(*pane_id)).and_then(|id| {
                 self.windows
@@ -1207,23 +1199,22 @@ impl ApplicationHandler<Event> for Processor {
                     window_context.display.window.request_redraw();
                 }
             },
-            (EventType::ProxyTestDone { request_id, ok, message, elapsed_ms }, Some(window_id)) => {
+            (EventType::ProxyTestDone { request_id, outcome, elapsed_ms }, Some(window_id)) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
-                    window_context.display.proxy_test_done(request_id, ok, &message, elapsed_ms);
+                    window_context.display.proxy_test_done(request_id, outcome, elapsed_ms);
                     window_context.dirty = true;
                     window_context.display.window.request_redraw();
                 }
             },
             (
-                EventType::ProviderTestDone { request_id, provider_id, ok, message, elapsed_ms },
+                EventType::ProviderTestDone { request_id, provider_id, outcome, elapsed_ms },
                 Some(window_id),
             ) => {
                 if let Some(window_context) = self.windows.get_mut(window_id) {
                     window_context.display.provider_test_done(
                         request_id,
                         &provider_id,
-                        ok,
-                        &message,
+                        &outcome,
                         elapsed_ms,
                     );
                     window_context.dirty = true;
@@ -2121,7 +2112,13 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             self.event_proxy.clone(),
             self.display.window.id(),
         ) {
-            self.display.proxy_test_done(request_id, false, &format!("无法启动网络测试：{err}"), 0);
+            self.display.proxy_test_done(
+                request_id,
+                crate::proxy_test::ProxyTestOutcome::Failed(
+                    crate::proxy_test::ProxyTestFailure::Start(err.to_string()),
+                ),
+                0,
+            );
         }
     }
 
@@ -2137,8 +2134,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             self.display.provider_test_done(
                 request_id,
                 &provider_id,
-                false,
-                &format!("无法启动供应商测试：{err}"),
+                &crate::provider_test::ProviderTestOutcome::StartFailed { error: err.to_string() },
                 0,
             );
         }
@@ -3323,9 +3319,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     // pane 场景里最后一次更新赢，读数不完美但不会互相打断。
                     TerminalEvent::Progress { state, value } => {
                         let progress = crate::taskbar::TaskProgress::from_osc(state, value);
-                        if let Some(hwnd) =
-                            self.ctx.display.window.native_window_handle_id()
-                        {
+                        if let Some(hwnd) = self.ctx.display.window.native_window_handle_id() {
                             crate::taskbar::apply(hwnd as isize, progress);
                         }
                     },

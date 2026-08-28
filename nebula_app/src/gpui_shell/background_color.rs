@@ -207,11 +207,15 @@ impl SettingsPane {
 
     /// 闭态 220×32 combobox + 开态右缘对齐浮层（行下 +6px）。
     pub(super) fn background_color_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let custom = self.runtime.background.is_some();
         let rgb = self.effective_background_rgb(cx);
         let hex = format_hex_rgb(rgb);
-        let label: SharedString =
-            if custom { hex.clone().into() } else { format!("主题默认  {hex}").into() };
+        let label: SharedString = if custom {
+            hex.clone().into()
+        } else {
+            format!("{}  {hex}", language.pick("主题默认", "Theme default")).into()
+        };
         let open = self.bg_picker_open;
         let sk = crate::gpui_shell::theme::chrome_theme_resolved(cx).skin();
         let accent = super::rgb_hsla(sk.accent.r, sk.accent.g, sk.accent.b);
@@ -285,8 +289,8 @@ impl SettingsPane {
         let panel = if open { Some(self.background_picker_panel(cx)) } else { None };
         let trigger_bounds = self.bg_picker_trigger_bounds;
         let row = self.row_with_reset(
-            "背景色",
-            "覆盖主题自带的终端底色。改了它，OSC 11 上报给程序的背景色也跟着变——TUI 判断明暗模式靠的就是这个值。",
+            language.pick("背景色", "Background color"),
+            language.tr("settings.appearance.background_color_description"),
             custom,
             |this, window, cx| {
                 this.persist(&[("background", String::new())], cx);

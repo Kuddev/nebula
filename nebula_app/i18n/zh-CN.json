@@ -1,0 +1,118 @@
+{
+  "language": {
+    "self_name": "简体中文",
+    "system": "跟随系统",
+    "zh_cn": "简体中文",
+    "en_us": "English"
+  },
+  "settings": {
+    "sidebar": {
+      "application": "应用",
+      "appearance": "外观",
+      "profiles": "配置文件",
+      "providers": "AI 供应商",
+      "ssh": "SSH",
+      "network": "网络",
+      "interaction": "交互",
+      "keymap": "按键映射",
+      "advanced": "高级",
+      "backup": "备份"
+    },
+    "network": {
+      "title": "网络代理",
+      "mode": {
+        "label": "代理方式",
+        "off": "不使用代理",
+        "system": "跟随系统",
+        "custom": "自定义代理"
+      },
+      "address": {
+        "label": "代理地址"
+      },
+      "status": {
+        "idle": "测试当前设置是否可以访问网络",
+        "running": "正在通过当前设置测试网络…",
+        "success": "网络连接正常 · {route} · {elapsed_ms} ms",
+        "failed": "测试失败：{error}",
+        "unexpected_end": "网络测试任务意外结束，请重试",
+        "start_failed": "无法启动网络测试：{error}"
+      },
+      "action": {
+        "test": "测试网络",
+        "testing": "测试中…"
+      },
+      "route": {
+        "direct": "直接连接",
+        "direct_address": "直连地址",
+        "custom_command": "自定义命令",
+        "proxy_server": "代理 {server}",
+        "ssh_jump": "SSH {target}"
+      },
+      "failure": {
+        "load_settings": "读取代理设置失败：{error}",
+        "invalid_settings": "代理设置无效：{error}",
+        "timeout": "网络测试超时（{seconds} 秒无响应）",
+        "send_request": "发送网页测试请求失败：{error}",
+        "read_response": "读取网页测试响应失败：{error}",
+        "invalid_http_status_line": "目标站点没有返回有效 HTTP 状态行：{line}",
+        "http_status": "目标站点返回 HTTP {status}",
+        "proxy_server": "经代理 {server} 出网失败：{error}",
+        "custom_command": "自定义代理命令出网失败：{error}",
+        "jump_task": "解析跳板任务失败：{error}",
+        "jump_resolve": "解析跳板 {target} 失败：{error}",
+        "jump_connect": "连接跳板 {target} 失败：{error}",
+        "jump_channel": "经跳板 {target} 打开出网通道失败：{error}",
+        "direct": "直接连接测试站点失败：{error}"
+      }
+    },
+    "appearance": {
+      "background_color_description": "覆盖主题自带的终端底色。改了它，OSC 11 上报给程序的背景色也跟着变——TUI 判断明暗模式靠的就是这个值。",
+      "background_cover_title": "让背景图覆盖窗口控件区域？",
+      "background_cover_description": "背景图会延伸到标题栏、窗口按钮、Tab 与 SSH 侧栏下方，低对比度图片可能影响操作可见性；界面仍会保留最低不透明度保护。"
+    },
+    "font": {
+      "fallback_description": "第 1 项优先显示；缺失字形依次使用后续字体，内置 Maple 是最终安全兜底。",
+      "group_description": "第 1 项是主字体，其余按顺序回退",
+      "loading": "正在枚举系统字体…",
+      "no_matches": "没有匹配的字体"
+    },
+    "keymap": {
+      "conflict": "{combo} 同时绑定了「{first}」与「{second}」——只有排前面的「{first}」会触发",
+      "help": "点击行改键 · Backspace 恢复默认 · Esc 取消"
+    },
+    "input": {
+      "backup_secret": "凭据只写入系统凭据管理器"
+    },
+    "ssh": {
+      "default_keys": "未指定，将用 IdentityFile 与默认 id_* 私钥",
+      "address_hint": "支持 user@host，也可粘贴 ssh://host:2222",
+      "auth_auto_description": "依次尝试可用私钥，失败再询问密码。多数情况选这个就行。",
+      "auth_interactive_description": "不预存任何凭据，连接时在终端里按提示输入（支持两步验证）。",
+      "save_password": "保存到 Windows 凭据管理器",
+      "hide_config_host": "隐藏（config 源不可删除）",
+      "empty_hint": "「+ 添加主机」或在 ~/.ssh/config 里维护别名",
+      "shared_data_hint": "与旧壳共用同一份数据；config 别名删除即隐藏，可恢复"
+    }
+  },
+  "provider": {
+    "test": {
+      "success": "连接成功（HTTP {status}）",
+      "invalid_endpoint": "请求地址必须以 http:// 或 https:// 开头",
+      "missing_model": "请先填写默认模型",
+      "missing_api_key": "请先保存 API Key",
+      "credential_read_failed": "无法从凭据管理器读取 API Key",
+      "invalid_credential_encoding": "凭据管理器中的 API Key 编码无效",
+      "timeout": "连接超时",
+      "host_not_found": "找不到服务器",
+      "connection_failed": "无法连接服务器",
+      "io_error": "网络错误：{kind}",
+      "tls_failed": "TLS 握手失败",
+      "request_failed": "请求失败",
+      "auth_failed": "鉴权失败（HTTP {status}），请检查 API Key",
+      "endpoint_not_found": "接口不存在（HTTP {status}），请检查请求地址",
+      "rate_limited": "服务限流（HTTP {status}），连接可达但当前无法验证额度",
+      "http_status": "服务返回 HTTP {status}",
+      "start_failed": "无法启动供应商测试：{error}"
+    }
+  }
+}

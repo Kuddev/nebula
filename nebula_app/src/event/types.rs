@@ -97,8 +97,7 @@ pub enum EventType {
     /// 设置→网络的真实出网测试完成。`request_id` 用于丢弃设置变化前的旧结果。
     ProxyTestDone {
         request_id: u64,
-        ok: bool,
-        message: String,
+        outcome: crate::proxy_test::ProxyTestOutcome,
         elapsed_ms: u64,
     },
     /// 设置→供应商的后台连通性测试结果。provider_id 与 request_id
@@ -106,8 +105,7 @@ pub enum EventType {
     ProviderTestDone {
         request_id: u64,
         provider_id: String,
-        ok: bool,
-        message: String,
+        outcome: crate::provider_test::ProviderTestOutcome,
         elapsed_ms: u64,
     },
     NebulaTick,

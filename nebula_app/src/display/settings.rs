@@ -233,12 +233,9 @@ pub(crate) enum ProxyTestStatus {
     #[default]
     Idle,
     Running,
-    Success {
+    Complete {
+        outcome: crate::proxy_test::ProxyTestOutcome,
         elapsed_ms: u64,
-        route: String,
-    },
-    Failed {
-        message: String,
     },
 }
 
@@ -7227,16 +7224,13 @@ pub(super) fn draw_text(
                             .to_owned(),
                         sk.accent,
                     ),
-                    ProxyTestStatus::Success { elapsed_ms, route } => (
-                        format!(
-                            "{} · {route} · {elapsed_ms} ms",
-                            language.pick("网络连接正常", "Network connection succeeded"),
-                        ),
-                        Rgb::new(sk.ok.r, sk.ok.g, sk.ok.b),
-                    ),
-                    ProxyTestStatus::Failed { message } => (
-                        format!("{}：{message}", language.pick("测试失败", "Test failed")),
-                        Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b),
+                    ProxyTestStatus::Complete { outcome, elapsed_ms } => (
+                        language.proxy_test_message(outcome, *elapsed_ms),
+                        if outcome.is_success() {
+                            Rgb::new(sk.ok.r, sk.ok.g, sk.ok.b)
+                        } else {
+                            Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b)
+                        },
                     ),
                 };
                 let available = (button.0 - banner.0 - s(28.0)).max(cell_w);

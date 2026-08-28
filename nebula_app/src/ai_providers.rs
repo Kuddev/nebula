@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::event::{Event, EventType};
+use crate::provider_test::ProviderTestOutcome;
 
 const STORE_FILE: &str = "nebula_providers.json";
 
@@ -221,8 +222,7 @@ pub struct ProviderTestRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderTestResult {
     pub provider_id: String,
-    pub ok: bool,
-    pub message: String,
+    pub outcome: ProviderTestOutcome,
     pub elapsed_ms: u64,
 }
 
@@ -400,10 +400,10 @@ pub fn load_api_key(id: &str) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-fn test_url(provider: &AiProvider) -> Result<String, String> {
+fn test_url(provider: &AiProvider) -> Result<String, ProviderTestOutcome> {
     let base = provider.base_url.trim().trim_end_matches('/');
     if !(base.starts_with("https://") || base.starts_with("http://")) {
-        return Err("请求地址必须以 http:// 或 https:// 开头".to_owned());
+        return Err(ProviderTestOutcome::InvalidEndpoint);
     }
     if provider.full_url {
         return Ok(base.to_owned());
@@ -417,16 +417,15 @@ fn test_url(provider: &AiProvider) -> Result<String, String> {
     })
 }
 
-fn sanitized_error(error: &ureq::Error) -> String {
-    let message = match error {
-        ureq::Error::Timeout(_) => "连接超时".to_owned(),
-        ureq::Error::HostNotFound => "找不到服务器".to_owned(),
-        ureq::Error::ConnectionFailed => "无法连接服务器".to_owned(),
-        ureq::Error::Io(err) => format!("网络错误：{}", err.kind()),
-        ureq::Error::Tls(_) => "TLS 握手失败".to_owned(),
-        _ => "请求失败".to_owned(),
-    };
-    message.chars().take(180).collect()
+fn semantic_error(error: &ureq::Error) -> ProviderTestOutcome {
+    match error {
+        ureq::Error::Timeout(_) => ProviderTestOutcome::Timeout,
+        ureq::Error::HostNotFound => ProviderTestOutcome::HostNotFound,
+        ureq::Error::ConnectionFailed => ProviderTestOutcome::ConnectionFailed,
+        ureq::Error::Io(err) => ProviderTestOutcome::Io { kind: err.kind().to_string() },
+        ureq::Error::Tls(_) => ProviderTestOutcome::Tls,
+        _ => ProviderTestOutcome::RequestFailed,
+    }
 }
 
 /// Blocking provider connectivity test shared by every UI runtime.
@@ -436,28 +435,27 @@ fn sanitized_error(error: &ureq::Error) -> String {
 pub fn test_provider(provider: &AiProvider) -> ProviderTestResult {
     let started = Instant::now();
     let elapsed = || started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    let finish = |ok: bool, message: String| ProviderTestResult {
+    let finish = |outcome: ProviderTestOutcome| ProviderTestResult {
         provider_id: provider.id.clone(),
-        ok,
-        message,
+        outcome,
         elapsed_ms: elapsed(),
     };
     let url = match test_url(provider) {
         Ok(url) => url,
-        Err(message) => return finish(false, message),
+        Err(outcome) => return finish(outcome),
     };
     if provider.model.trim().is_empty() {
-        return finish(false, "请先填写默认模型".to_owned());
+        return finish(ProviderTestOutcome::MissingModel);
     }
     let key = if provider.kind.requires_api_key() {
         let secret = match load_api_key(&provider.id) {
             Ok(Some(secret)) if !secret.is_empty() => secret,
-            Ok(_) => return finish(false, "请先保存 API Key".to_owned()),
-            Err(_) => return finish(false, "无法从凭据管理器读取 API Key".to_owned()),
+            Ok(_) => return finish(ProviderTestOutcome::MissingApiKey),
+            Err(_) => return finish(ProviderTestOutcome::CredentialReadFailed),
         };
         match String::from_utf8(secret) {
             Ok(key) => Zeroizing::new(key),
-            Err(_) => return finish(false, "凭据管理器中的 API Key 编码无效".to_owned()),
+            Err(_) => return finish(ProviderTestOutcome::InvalidCredentialEncoding),
         }
     } else {
         Zeroizing::new(String::new())
@@ -482,17 +480,17 @@ pub fn test_provider(provider: &AiProvider) -> ProviderTestResult {
     };
     let response = match request.call() {
         Ok(response) => response,
-        Err(error) => return finish(false, sanitized_error(&error)),
+        Err(error) => return finish(semantic_error(&error)),
     };
     let status = response.status().as_u16();
-    let (ok, message) = match status {
-        200..=299 => (true, format!("连接成功（HTTP {status}）")),
-        401 | 403 => (false, format!("鉴权失败（HTTP {status}），请检查 API Key")),
-        404 => (false, "接口不存在（HTTP 404），请检查请求地址".to_owned()),
-        429 => (false, "服务限流（HTTP 429），连接可达但当前无法验证额度".to_owned()),
-        _ => (false, format!("服务返回 HTTP {status}")),
+    let outcome = match status {
+        200..=299 => ProviderTestOutcome::Success { status },
+        401 | 403 => ProviderTestOutcome::AuthFailed { status },
+        404 => ProviderTestOutcome::EndpointNotFound { status },
+        429 => ProviderTestOutcome::RateLimited { status },
+        _ => ProviderTestOutcome::HttpStatus { status },
     };
-    finish(ok, message)
+    finish(outcome)
 }
 
 pub fn spawn_test(
@@ -508,8 +506,7 @@ pub fn spawn_test(
                 EventType::ProviderTestDone {
                     request_id: request.request_id,
                     provider_id: result.provider_id,
-                    ok: result.ok,
-                    message: result.message,
+                    outcome: result.outcome,
                     elapsed_ms: result.elapsed_ms,
                 },
                 window_id,
@@ -559,8 +556,7 @@ mod tests {
         provider.base_url = "not-a-url".into();
         let result = test_provider(&provider);
         assert_eq!(result.provider_id, "broken");
-        assert!(!result.ok);
-        assert!(result.message.contains("http://"));
+        assert_eq!(result.outcome, ProviderTestOutcome::InvalidEndpoint);
     }
 
     #[test]

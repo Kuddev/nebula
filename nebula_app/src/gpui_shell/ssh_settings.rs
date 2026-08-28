@@ -24,7 +24,7 @@ use gpui::{
 };
 
 use crate::gpui_shell::prelude::*;
-use crate::gpui_shell::settings_pane::{SettingsPane, SettingsPaneEvent};
+use crate::gpui_shell::settings_pane::{SettingsPane, SettingsPaneEvent, SshStatus};
 use crate::gpui_shell::widgets::NebulaButton;
 
 /// 删除撤销窗口时长，旧壳 Undo 条同值。
@@ -53,6 +53,60 @@ const SSH_EDITOR_FOOTER_H: f32 = 56.0;
 const SSH_HOST_ROW_H: f32 = 58.0;
 const SSH_HOST_GAP: f32 = 8.0;
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum SshValidationError {
+    InvalidPort,
+    MissingDestination,
+    UnsafeDestination,
+}
+
+impl SshValidationError {
+    pub(super) fn text(self, language: crate::display::UiLanguage) -> &'static str {
+        match self {
+            Self::InvalidPort => language
+                .pick("端口需要是 1–65535 之间的数字", "The port must be a number from 1 to 65535"),
+            Self::MissingDestination => language.pick(
+                "请输入 SSH 地址，例如 user@example.com",
+                "Enter an SSH address, for example user@example.com",
+            ),
+            Self::UnsafeDestination => language.pick(
+                "地址不能包含空白、控制字符或 shell 分隔符",
+                "The address cannot contain whitespace, control characters, or shell separators",
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum SshEditorTestStatus {
+    Connecting,
+    Succeeded(u64),
+    Failed(String),
+    TaskEnded,
+}
+
+impl SshEditorTestStatus {
+    fn is_error(&self) -> bool {
+        matches!(self, Self::Failed(_) | Self::TaskEnded)
+    }
+
+    fn text(&self, language: crate::display::UiLanguage) -> String {
+        match self {
+            Self::Connecting => language.pick("正在连接…", "Connecting...").into(),
+            Self::Succeeded(elapsed_ms) => {
+                format!("{} · {elapsed_ms} ms", language.pick("连接成功", "Connection succeeded"))
+            },
+            Self::Failed(message) => message.clone(),
+            Self::TaskEnded => language
+                .pick(
+                    "连接测试任务意外结束，请重试",
+                    "The connection test ended unexpectedly; try again",
+                )
+                .into(),
+        }
+    }
+}
+
 /// 设置页 SSH 添加/编辑面板的非文本草稿。文字实体常驻在 `SettingsPane`，
 /// 这样输入事件可以统一使测试结果失效；草稿只保存认证、密钥和编辑身份。
 #[derive(Clone)]
@@ -67,7 +121,7 @@ pub(super) struct SshEditorState {
     pub(super) show_password: bool,
     pub(super) revision: u64,
     pub(super) test_request_id: Option<u64>,
-    pub(super) test_status: Option<(String, bool)>,
+    pub(super) test_status: Option<SshEditorTestStatus>,
 }
 
 impl SshEditorState {
@@ -108,15 +162,15 @@ impl SettingsPane {
     pub(super) fn ssh_apply(
         &mut self,
         mutate: impl FnOnce(&mut crate::gpui_shell::ssh_hosts::SshHostLists),
-        status: &str,
+        status: SshStatus,
         cx: &mut Context<Self>,
     ) {
         // 列表将被改写，未决删除的快照会过期：先提交它。
         self.commit_pending_ssh_delete();
         mutate(&mut self.ssh_hosts);
         match self.ssh_hosts.persist() {
-            Ok(()) => self.ssh_status = Some((status.to_owned(), false)),
-            Err(err) => self.ssh_status = Some((format!("写入设置失败: {err}"), true)),
+            Ok(()) => self.ssh_status = Some(status),
+            Err(err) => self.ssh_status = Some(SshStatus::PersistFailed(err.to_string())),
         }
         self.ssh_delete_confirm = None;
         cx.notify();
@@ -133,7 +187,7 @@ impl SettingsPane {
         let mut hosts = self.ssh_hosts.clone();
         hosts.remove(host);
         if let Err(error) = hosts.persist() {
-            self.ssh_status = Some((format!("删除主机失败: {error}"), true));
+            self.ssh_status = Some(SshStatus::DeleteFailed(error.to_string()));
             self.ssh_delete_confirm = None;
             cx.notify();
             return;
@@ -180,20 +234,13 @@ impl SettingsPane {
         }
         #[cfg(windows)]
         if let Err(error) = crate::ssh_credentials::forget_password(&host) {
-            cleanup_errors.push(format!("凭据: {error}"));
+            cleanup_errors.push(format!("Credential: {error}"));
         }
 
         self.ssh_status = if cleanup_errors.is_empty() {
-            Some((
-                if undo.from_config {
-                    "已隐藏 config 别名，并清理 Nebula Profile 与凭据".to_owned()
-                } else {
-                    "已删除主机、Profile 与凭据".to_owned()
-                },
-                false,
-            ))
+            Some(SshStatus::DeleteCommitted { hidden_config: undo.from_config })
         } else {
-            Some((format!("主机已从列表移除，但部分清理失败: {}", cleanup_errors.join("；")), true))
+            Some(SshStatus::CleanupPartial(cleanup_errors.join("; ")))
         };
     }
 
@@ -201,12 +248,12 @@ impl SettingsPane {
     pub(super) fn undo_ssh_delete(&mut self, cx: &mut Context<Self>) {
         let Some(undo) = self.ssh_delete_undo.take() else { return };
         if let Err(error) = undo.lists_before.persist() {
-            self.ssh_status = Some((format!("撤销失败: {error}"), true));
+            self.ssh_status = Some(SshStatus::UndoFailed(error.to_string()));
             cx.notify();
             return;
         }
         self.ssh_hosts = undo.lists_before;
-        self.ssh_status = Some((format!("已恢复 {}", undo.host), false));
+        self.ssh_status = Some(SshStatus::Restored(undo.host));
         cx.notify();
     }
 
@@ -277,22 +324,25 @@ impl SettingsPane {
         cx.notify();
     }
 
-    pub(super) fn ssh_destination_from_draft(&self, cx: &gpui::App) -> Result<String, String> {
+    pub(super) fn ssh_destination_from_draft(
+        &self,
+        cx: &gpui::App,
+    ) -> Result<String, SshValidationError> {
         let port = self.ssh_port_input.read(cx).value().trim().to_string();
         if !port.is_empty() && !port.parse::<u16>().is_ok_and(|value| value > 0) {
             // en-dash 区间写法与旧壳一字不差。
-            return Err("端口需要是 1–65535 之间的数字".to_owned());
+            return Err(SshValidationError::InvalidPort);
         }
         let address = self.ssh_destination_input.read(cx).value().trim().to_string();
         let destination = crate::display::join_destination_port(&address, &port);
         if destination.is_empty() {
-            return Err("请输入 SSH 地址，例如 user@example.com".to_owned());
+            return Err(SshValidationError::MissingDestination);
         }
         if destination
             .chars()
             .any(|ch| ch.is_whitespace() || ch.is_control() || ";&|<>\"'`".contains(ch))
         {
-            return Err("地址不能包含空白、控制字符或 shell 分隔符".to_owned());
+            return Err(SshValidationError::UnsafeDestination);
         }
         Ok(destination)
     }
@@ -331,7 +381,7 @@ impl SettingsPane {
                             }
                         }
                     },
-                    Err(message) => this.ssh_status = Some((message, true)),
+                    Err(message) => this.ssh_status = Some(SshStatus::Error(message)),
                 }
                 cx.notify();
             });
@@ -342,8 +392,8 @@ impl SettingsPane {
     pub(super) fn test_ssh_editor(&mut self, cx: &mut Context<Self>) {
         let destination = match self.ssh_destination_from_draft(cx) {
             Ok(destination) => destination,
-            Err(message) => {
-                self.ssh_status = Some((message, true));
+            Err(error) => {
+                self.ssh_status = Some(SshStatus::Validation(error));
                 cx.notify();
                 return;
             },
@@ -368,14 +418,13 @@ impl SettingsPane {
         let receiver = match crate::ssh_session::start_test(request) {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.ssh_status = Some((format!("无法启动连接测试: {error}"), true));
+                self.ssh_status = Some(SshStatus::TestStartFailed(error.to_string()));
                 cx.notify();
                 return;
             },
         };
         editor.test_request_id = Some(request_id);
-        // 旧壳测试态文案。
-        editor.test_status = Some(("正在连接…".to_owned(), false));
+        editor.test_status = Some(SshEditorTestStatus::Connecting);
         self.ssh_status = None;
         cx.spawn(async move |this, cx| {
             let result = receiver.await;
@@ -386,11 +435,9 @@ impl SettingsPane {
                 }
                 editor.test_request_id = None;
                 editor.test_status = Some(match result {
-                    Ok(result) if result.ok => {
-                        (format!("连接成功 · {} ms", result.elapsed_ms), false)
-                    },
-                    Ok(result) => (result.message, true),
-                    Err(_) => ("连接测试任务意外结束，请重试".to_owned(), true),
+                    Ok(result) if result.ok => SshEditorTestStatus::Succeeded(result.elapsed_ms),
+                    Ok(result) => SshEditorTestStatus::Failed(result.message),
+                    Err(_) => SshEditorTestStatus::TaskEnded,
                 });
                 cx.notify();
             });
@@ -402,8 +449,8 @@ impl SettingsPane {
     pub(super) fn save_ssh_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let destination = match self.ssh_destination_from_draft(cx) {
             Ok(destination) => destination,
-            Err(message) => {
-                self.ssh_status = Some((message, true));
+            Err(error) => {
+                self.ssh_status = Some(SshStatus::Validation(error));
                 cx.notify();
                 return;
             },
@@ -414,7 +461,7 @@ impl SettingsPane {
         let mut profiles = match crate::ssh_profiles::SshProfiles::load(&profile_path) {
             Ok(profiles) => profiles,
             Err(error) => {
-                self.ssh_status = Some((format!("加载 SSH Profile 失败: {error}"), true));
+                self.ssh_status = Some(SshStatus::ProfileLoadFailed(error.to_string()));
                 self.ssh_editor = Some(editor);
                 cx.notify();
                 return;
@@ -430,7 +477,9 @@ impl SettingsPane {
             hosts.remove(original);
         }
         let label = match self.ssh_label_input.read(cx).value().trim() {
-            "" => profiles.next_default_label("主机"),
+            "" => profiles.next_default_label(
+                crate::gpui_shell::config::ui_language(cx).pick("主机", "Host"),
+            ),
             value => value.to_owned(),
         };
         profiles.upsert(crate::ssh_profiles::SshProfileAuth {
@@ -441,14 +490,14 @@ impl SettingsPane {
             icon: editor.icon.clone(),
         });
         if let Err(error) = profiles.save(&profile_path) {
-            self.ssh_status = Some((format!("保存 SSH Profile 失败: {error}"), true));
+            self.ssh_status = Some(SshStatus::ProfileSaveFailed(error.to_string()));
             self.ssh_editor = Some(editor);
             cx.notify();
             return;
         }
         hosts.remember(&destination);
         if let Err(error) = hosts.persist() {
-            self.ssh_status = Some((format!("保存主机列表失败: {error}"), true));
+            self.ssh_status = Some(SshStatus::HostListSaveFailed(error.to_string()));
             self.ssh_editor = Some(editor);
             cx.notify();
             return;
@@ -463,8 +512,7 @@ impl SettingsPane {
             if let Err(error) =
                 crate::ssh_credentials::store_password(&destination, password.as_bytes())
             {
-                self.ssh_status =
-                    Some((format!("Profile 已保存，但密码写入凭据管理器失败: {error}"), true));
+                self.ssh_status = Some(SshStatus::CredentialSaveFailed(error.to_string()));
                 self.ssh_editor = Some(editor);
                 cx.notify();
                 return;
@@ -491,8 +539,13 @@ impl SettingsPane {
         editor.private_keys.clear();
         self.ssh_editor = None;
         self.ssh_status = credential_cleanup_error.map_or_else(
-            || Some((format!("已保存 {destination}"), false)),
-            |error| Some((format!("已保存 {destination}，但旧地址凭据清理失败: {error}"), true)),
+            || Some(SshStatus::Saved(destination.clone())),
+            |error| {
+                Some(SshStatus::SavedWithCleanupError {
+                    destination: destination.clone(),
+                    error: error.to_string(),
+                })
+            },
         );
         window.focus(&self.focus_handle, cx);
         cx.notify();
@@ -501,6 +554,7 @@ impl SettingsPane {
     // ---- UI：添加/编辑弹窗 ----
 
     pub(super) fn ssh_editor_modal(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let editor = self.ssh_editor.as_ref()?.clone();
         // 头像与它的弹层先建好：两者都要 `&mut Context`（listener / 实体
         // 弱引用），而下面的 `cx.theme()` 会把 cx 借成不可变直到函数结束。
@@ -512,30 +566,29 @@ impl SettingsPane {
         let danger = theme.danger;
         let (shows_password, shows_keys) = crate::display::auth_sections(editor.auth);
         let title = if editor.original_destination.is_some() {
-            "编辑 SSH 主机"
+            language.pick("编辑 SSH 主机", "Edit SSH host")
         } else {
-            "添加 SSH 主机"
+            language.pick("添加 SSH 主机", "Add SSH host")
         };
-        let dest_error = self.ssh_status.as_ref().and_then(|(message, error)| {
-            (*error
-                && (message.contains("地址")
-                    || message.contains("端口")
-                    || message.contains("SSH 地址")))
-            .then_some(message.clone())
+        let dest_error = self.ssh_status.as_ref().and_then(|status| match status {
+            SshStatus::Validation(error) => Some(error.text(language).to_owned()),
+            _ => None,
         });
-        let status = editor.test_status.clone().or_else(|| {
-            self.ssh_status.clone().filter(|(message, error)| {
-                !(*error
-                    && (message.contains("地址")
-                        || message.contains("端口")
-                        || message.contains("SSH 地址")))
-            })
-        });
+        let status = editor
+            .test_status
+            .as_ref()
+            .map(|status| (status.text(language), status.is_error()))
+            .or_else(|| {
+                self.ssh_status.as_ref().and_then(|status| {
+                    (!matches!(status, SshStatus::Validation(_)))
+                        .then(|| (status.text(language), status.is_error()))
+                })
+            });
         let destination_preview: SharedString = {
             let address = self.ssh_destination_input.read(cx).value();
             let port = self.ssh_port_input.read(cx).value();
             if address.trim().is_empty() {
-                "未填地址".into()
+                language.pick("未填地址", "No address entered").into()
             } else {
                 crate::display::join_destination_port(address.trim(), port.trim()).into()
             }
@@ -595,7 +648,7 @@ impl SettingsPane {
                             .icon(IconName::Close)
                             .ghost()
                             .xsmall()
-                            .tooltip("移除私钥")
+                            .tooltip(language.pick("移除私钥", "Remove private key"))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(editor) = this.ssh_editor.as_mut() {
                                     if index < editor.private_keys.len() {
@@ -626,7 +679,7 @@ impl SettingsPane {
             .truncate()
             .cursor_pointer()
             .hover(|row| row.bg(theme.list_hover))
-            .child("未指定，将用 IdentityFile 与默认 id_* 私钥")
+            .child(language.tr("settings.ssh.default_keys"))
             .on_click(cx.listener(|this, _, window, cx| {
                 this.add_ssh_private_key(window, cx);
             }))
@@ -640,7 +693,7 @@ impl SettingsPane {
             .text_color(theme.primary)
             .cursor_pointer()
             .hover(|link| link.text_color(theme.foreground))
-            .child("+ 添加私钥")
+            .child(language.pick("+ 添加私钥", "+ Add private key"))
             .on_click(cx.listener(|this, _, window, cx| {
                 this.add_ssh_private_key(window, cx);
             }));
@@ -652,12 +705,12 @@ impl SettingsPane {
                 .child(div().w(px(SSH_EDITOR_LABEL_W)).flex_shrink_0().text_sm().child(label))
                 .child(div().flex_1().min_w_0().child(control))
         };
-        let dest_hint = dest_error.as_deref().unwrap_or("支持 user@host，也可粘贴 ssh://host:2222");
+        let dest_hint = dest_error.as_deref().unwrap_or(language.tr("settings.ssh.address_hint"));
         let dest_hint_color = if dest_error.is_some() { danger } else { muted };
         let auth_note = if editor.auth == crate::ssh_profiles::SshAuthMode::Auto {
-            "依次尝试可用私钥，失败再询问密码。多数情况选这个就行。"
+            language.tr("settings.ssh.auth_auto_description")
         } else {
-            "不预存任何凭据，连接时在终端里按提示输入（支持两步验证）。"
+            language.tr("settings.ssh.auth_interactive_description")
         };
 
         Some(
@@ -719,7 +772,7 @@ impl SettingsPane {
                                             Button::new("ssh-editor-close")
                                                 .icon(IconName::Close)
                                                 .ghost()
-                                                .tooltip("关闭")
+                                                .tooltip(language.pick("关闭", "Close"))
                                                 .on_click(cx.listener(|this, _, window, cx| {
                                                     this.close_ssh_editor(window, cx);
                                                 })),
@@ -785,7 +838,7 @@ impl SettingsPane {
                                                     div()
                                                         .text_sm()
                                                         .text_color(theme.group_box_foreground)
-                                                        .child("连接"),
+                                                        .child(language.pick("连接", "Connection")),
                                                 )
                                                 .child(
                                                     h_flex()
@@ -799,7 +852,7 @@ impl SettingsPane {
                                                                 .flex_shrink_0()
                                                                 .text_sm()
                                                                 .gap(px(2.0))
-                                                                .child("地址")
+                                                                .child(language.pick("地址", "Address"))
                                                                 .child(
                                                                     div().text_color(danger).child("*"),
                                                                 ),
@@ -829,7 +882,7 @@ impl SettingsPane {
                                                                 .w(px(SSH_EDITOR_LABEL_W))
                                                                 .flex_shrink_0()
                                                                 .text_sm()
-                                                                .child("端口"),
+                                                                .child(language.pick("端口", "Port")),
                                                         )
                                                         .child(
                                                             div()
@@ -840,7 +893,7 @@ impl SettingsPane {
                                                             div()
                                                                 .text_xs()
                                                                 .text_color(muted)
-                                                                .child("默认 22"),
+                                                                .child(language.pick("默认 22", "Default: 22")),
                                                         ),
                                                 ),
                                         )
@@ -857,10 +910,10 @@ impl SettingsPane {
                                                     div()
                                                         .text_sm()
                                                         .text_color(theme.group_box_foreground)
-                                                        .child("认证"),
+                                                        .child(language.pick("认证", "Authentication")),
                                                 )
                                                 .child(field_row(
-                                                    "方式",
+                                                    language.pick("方式", "Method"),
                                                     h_flex()
                                                         .w_full()
                                                         .h(px(SSH_EDITOR_CTL_H))
@@ -871,28 +924,28 @@ impl SettingsPane {
                                                         .bg(theme.input)
                                                         .child(mode_chip(
                                                             "ssh-auth-password",
-                                                            "密码",
+                                                            language.pick("密码", "Password"),
                                                             crate::ssh_profiles::SshAuthMode::Password,
                                                             editor.auth
                                                                 == crate::ssh_profiles::SshAuthMode::Password,
                                                         ))
                                                         .child(mode_chip(
                                                             "ssh-auth-key",
-                                                            "密钥",
+                                                            language.pick("密钥", "Key"),
                                                             crate::ssh_profiles::SshAuthMode::PublicKey,
                                                             editor.auth
                                                                 == crate::ssh_profiles::SshAuthMode::PublicKey,
                                                         ))
                                                         .child(mode_chip(
                                                             "ssh-auth-auto",
-                                                            "自动",
+                                                            language.pick("自动", "Auto"),
                                                             crate::ssh_profiles::SshAuthMode::Auto,
                                                             editor.auth
                                                                 == crate::ssh_profiles::SshAuthMode::Auto,
                                                         ))
                                                         .child(mode_chip(
                                                             "ssh-auth-interactive",
-                                                            "交互式",
+                                                            language.pick("交互式", "Interactive"),
                                                             crate::ssh_profiles::SshAuthMode::KeyboardInteractive,
                                                             editor.auth
                                                                 == crate::ssh_profiles::SshAuthMode::KeyboardInteractive,
@@ -912,7 +965,7 @@ impl SettingsPane {
                                                                         .w(px(SSH_EDITOR_LABEL_W))
                                                                         .flex_shrink_0()
                                                                         .text_sm()
-                                                                        .child("密码"),
+                                                                        .child(language.pick("密码", "Password")),
                                                                 )
                                                                 .child(
                                                                     div().flex_1().min_w_0().child(
@@ -931,7 +984,9 @@ impl SettingsPane {
                                                                     Checkbox::new("ssh-save-password")
                                                                         .small()
                                                                         .checked(editor.save_password)
-                                                                        .label("保存到 Windows 凭据管理器")
+                                                                        .label(language.tr(
+                                                                            "settings.ssh.save_password",
+                                                                        ))
                                                                         .on_click(cx.listener(
                                                                             |this, value: &bool, _, cx| {
                                                                                 if let Some(editor) =
@@ -965,7 +1020,7 @@ impl SettingsPane {
                                                                     .flex()
                                                                     .items_center()
                                                                     .text_sm()
-                                                                    .child("私钥"),
+                                                                    .child(language.pick("私钥", "Private keys")),
                                                             )
                                                             .child(
                                                                 v_flex()
@@ -1028,9 +1083,9 @@ impl SettingsPane {
                                         .child(
                                             NebulaButton::new("ssh-editor-test")
                                                 .label(if editor.testing() {
-                                                    "测试中…"
+                                                    language.pick("测试中…", "Testing...")
                                                 } else {
-                                                    "测试连接"
+                                                    language.pick("测试连接", "Test connection")
                                                 })
                                                 .outline()
                                                 .disabled(editor.testing())
@@ -1043,7 +1098,7 @@ impl SettingsPane {
                                                 .gap_2()
                                                 .child(
                                                     NebulaButton::new("ssh-editor-cancel")
-                                                        .label("取消")
+                                                        .label(language.pick("取消", "Cancel"))
                                                         .outline()
                                                         .on_click(cx.listener(|this, _, window, cx| {
                                                             this.close_ssh_editor(window, cx);
@@ -1051,7 +1106,7 @@ impl SettingsPane {
                                                 )
                                                 .child(
                                                     NebulaButton::new("ssh-editor-save")
-                                                        .label("保存")
+                                                        .label(language.pick("保存", "Save"))
                                                         .primary()
                                                         .on_click(cx.listener(|this, _, window, cx| {
                                                             this.save_ssh_editor(window, cx);
@@ -1170,6 +1225,7 @@ impl SettingsPane {
         if !self.ssh_icon_picker_open {
             return None;
         }
+        let language = crate::gpui_shell::config::ui_language(cx);
         let trigger = self.ssh_icon_trigger_bounds?;
         let theme = cx.theme();
         let muted = theme.muted_foreground;
@@ -1184,7 +1240,7 @@ impl SettingsPane {
         let query = self.ssh_icon_filter_input.read(cx).value().to_string();
         // 目录、分组标题与搜索匹配全部走共享的 `picker_rows`：两壳的选择器
         // 因此永远列出同一批图标、按同一种方式分组、对同一个词命中。
-        let picker_model = picker_rows(&query, true);
+        let picker_model = picker_rows(&query, language == crate::display::UiLanguage::ZhCn);
         let picker_content_h = picker_model
             .iter()
             .map(|row| match row {
@@ -1208,10 +1264,10 @@ impl SettingsPane {
                     .into_any_element(),
                 PickerRow::Option(option) => {
                     let (icon, name, id) = match option.and_then(|index| CATALOG.get(index)) {
-                        Some(icon) => (icon, icon.zh, Some(icon.id)),
+                        Some(icon) => (icon, language.pick(icon.zh, icon.en), Some(icon.id)),
                         // 未识别时头像本来就回落到 DEFAULT_ID；选择器也显示
                         // 同一张脸，避免挑选前后出现两枚不同的“终端”图标。
-                        None => (resolve(None), "自动识别", None),
+                        None => (resolve(None), language.pick("自动识别", "Auto detect"), None),
                     };
                     let icon_size = PICKER_ICON_BASE_SIZE
                         * scale_for(icon, PICKER_ICON_BASE_SIZE * 0.6, PICKER_ICON_INK_W);
@@ -1276,7 +1332,7 @@ impl SettingsPane {
                     .items_center()
                     .text_xs()
                     .text_color(muted)
-                    .child("没有匹配的图标")
+                    .child(language.pick("没有匹配的图标", "No matching icons"))
                     .into_any_element()
             } else {
                 // 滚动组件必须拿到确定高度；只设 max-height 时，它在自动高度
@@ -1308,6 +1364,7 @@ impl SettingsPane {
     /// 主机列表：一个圆角卡片，行间细分隔线，操作按钮 hover 显形（连接为
     /// 文本按钮，编辑/置顶/删除为图标按钮）。删除走 8 秒撤销窗口。
     pub(super) fn section_ssh(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let theme = cx.theme();
         let hover_bg = crate::gpui_shell::theme::settings_hover_bg(cx, false);
         let muted = theme.muted_foreground;
@@ -1434,14 +1491,14 @@ impl SettingsPane {
                 )
                 .child(
                     Button::new(SharedString::from(format!("ssh-connect-{ix}")))
-                        .label("连接")
+                        .label(language.pick("连接", "Connect"))
                         .small()
                         .primary()
                         .invisible()
                         .group_hover(row_group.clone(), |button| button.visible())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.emit(SettingsPaneEvent::LaunchSsh(connect_host.clone()));
-                            this.ssh_status = Some((format!("正在打开 {connect_host}…"), false));
+                            this.ssh_status = Some(SshStatus::Opening(connect_host.clone()));
                             cx.notify();
                         })),
                 )
@@ -1450,7 +1507,7 @@ impl SettingsPane {
                         .icon(IconName::Settings2)
                         .ghost()
                         .small()
-                        .tooltip("编辑主机")
+                        .tooltip(language.pick("编辑主机", "Edit host"))
                         .invisible()
                         .group_hover(row_group.clone(), |button| button.visible())
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -1462,13 +1519,17 @@ impl SettingsPane {
                         .icon(if pinned { IconName::StarOff } else { IconName::Star })
                         .ghost()
                         .small()
-                        .tooltip(if pinned { "取消置顶" } else { "置顶" })
+                        .tooltip(if pinned {
+                            language.pick("取消置顶", "Unpin")
+                        } else {
+                            language.pick("置顶", "Pin")
+                        })
                         .invisible()
                         .group_hover(row_group.clone(), |button| button.visible())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.ssh_apply(
                                 |lists| lists.toggle_pin(&pin_host),
-                                "置顶状态已更新",
+                                SshStatus::Pinned,
                                 cx,
                             );
                         })),
@@ -1477,16 +1538,19 @@ impl SettingsPane {
                     Button::new(SharedString::from(format!("ssh-delete-{ix}")))
                         .map(|button| {
                             if confirm {
-                                button.label("确认删除").danger().small()
+                                button
+                                    .label(language.pick("确认删除", "Confirm delete"))
+                                    .danger()
+                                    .small()
                             } else {
                                 button
                                     .icon(IconName::Delete)
                                     .ghost()
                                     .small()
                                     .tooltip(if from_config {
-                                        "隐藏（config 源不可删除）"
+                                        language.tr("settings.ssh.hide_config_host")
                                     } else {
-                                        "删除"
+                                        language.pick("删除", "Delete")
                                     })
                             }
                         })
@@ -1534,11 +1598,11 @@ impl SettingsPane {
                         )
                         .child(
                             NebulaButton::new(SharedString::from(format!("ssh-restore-{ix}")))
-                                .label("恢复")
+                                .label(language.pick("恢复", "Restore"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.ssh_apply(
                                         |lists| lists.restore_hidden(&restore_host),
-                                        "已恢复到主机列表",
+                                        SshStatus::Restored(restore_host.clone()),
                                         cx,
                                     );
                                 })),
@@ -1550,13 +1614,17 @@ impl SettingsPane {
         let hidden_count = self.ssh_hosts.hidden_hosts().len();
         let undo_bar = self.ssh_delete_undo.as_ref().map(|undo| (undo.host.clone(), undo.seq));
 
-        self.group("SSH 主机", cx)
+        self.group(language.pick("SSH 主机", "SSH hosts"), cx)
             .child(
                 h_flex()
                     .h(px(32.0))
                     .items_center()
                     .gap_2()
-                    .child(div().text_color(theme.foreground).child("已保存主机"))
+                    .child(
+                        div()
+                            .text_color(theme.foreground)
+                            .child(language.pick("已保存主机", "Saved hosts")),
+                    )
                     .when(host_count > 0, |header| {
                         header.child(
                             div()
@@ -1570,11 +1638,12 @@ impl SettingsPane {
                     })
                     .child(div().flex_1())
                     .child(
-                        NebulaButton::new("ssh-add-host").label("+ 添加主机").primary().on_click(
-                            cx.listener(|this, _, window, cx| {
+                        NebulaButton::new("ssh-add-host")
+                            .label(language.pick("+ 添加主机", "+ Add host"))
+                            .primary()
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_ssh_editor(None, window, cx);
-                            }),
-                        ),
+                            })),
                     ),
             )
             .child(div().h(px(SSH_HOST_GAP)))
@@ -1592,12 +1661,16 @@ impl SettingsPane {
                                 .py_6()
                                 .gap_1()
                                 .items_center()
-                                .child(div().text_color(muted).child("还没有保存的主机"))
+                                .child(
+                                    div().text_color(muted).child(
+                                        language.pick("还没有保存的主机", "No saved hosts yet"),
+                                    ),
+                                )
                                 .child(
                                     div()
                                         .text_xs()
                                         .text_color(muted)
-                                        .child("「+ 添加主机」或在 ~/.ssh/config 里维护别名"),
+                                        .child(language.tr("settings.ssh.empty_hint")),
                                 ),
                         )
                     }),
@@ -1607,23 +1680,29 @@ impl SettingsPane {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(NebulaButton::new("ssh-import").label("导入 ~/.ssh/config").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.ssh_hosts = crate::gpui_shell::ssh_hosts::SshHostLists::load();
-                            let count = crate::ssh::ssh_config_hosts().len();
-                            this.ssh_status =
-                                Some((format!("已导入，config 源共 {count} 个别名"), false));
-                            cx.notify();
-                        }),
-                    ))
+                    .child(
+                        NebulaButton::new("ssh-import")
+                            .label(language.pick("导入 ~/.ssh/config", "Import ~/.ssh/config"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.ssh_hosts = crate::gpui_shell::ssh_hosts::SshHostLists::load();
+                                let count = crate::ssh::ssh_config_hosts().len();
+                                this.ssh_status = Some(SshStatus::Imported(count));
+                                cx.notify();
+                            })),
+                    )
                     .when(hidden_count > 0, |row| {
                         let show = self.ssh_show_hidden;
                         row.child(
                             NebulaButton::new("ssh-toggle-hidden")
                                 .label(if show {
-                                    SharedString::from("收起已隐藏")
+                                    SharedString::from(
+                                        language.pick("收起已隐藏", "Collapse hidden"),
+                                    )
                                 } else {
-                                    SharedString::from(format!("已隐藏 {hidden_count} 项"))
+                                    SharedString::from(format!(
+                                        "{} {hidden_count}",
+                                        language.pick("已隐藏", "Hidden")
+                                    ))
                                 })
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.ssh_show_hidden = !this.ssh_show_hidden;
@@ -1636,7 +1715,7 @@ impl SettingsPane {
                         div()
                             .text_xs()
                             .text_color(muted)
-                            .child("与旧壳共用同一份数据；config 别名删除即隐藏，可恢复"),
+                            .child(language.tr("settings.ssh.shared_data_hint")),
                     ),
             )
             .when_some(hidden_rows, |group, rows| {
@@ -1661,17 +1740,22 @@ impl SettingsPane {
                         .bg(theme.muted)
                         .child(Icon::new(IconName::Undo2).xsmall().text_color(muted))
                         .child(div().flex_1().text_sm().child(SharedString::from(format!(
-                            "已删除 {host}，{SSH_DELETE_UNDO_SECS} 秒内可撤销"
+                            "{} {host}; {} {SSH_DELETE_UNDO_SECS} {}",
+                            language.pick("已删除", "Deleted"),
+                            language.pick("可在", "undo within"),
+                            language.pick("秒", "seconds")
                         ))))
                         .child(
                             NebulaButton::new("ssh-undo-delete")
-                                .label("撤销")
+                                .label(language.pick("撤销", "Undo"))
                                 .outline()
                                 .on_click(cx.listener(|this, _, _, cx| this.undo_ssh_delete(cx))),
                         ),
                 )
             })
-            .when_some(self.ssh_status.clone(), |group, (message, error)| {
+            .when_some(self.ssh_status.clone(), |group, status| {
+                let error = status.is_error();
+                let message = status.text(language);
                 group.child(
                     div()
                         .pt(px(6.0))

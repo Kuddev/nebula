@@ -18,11 +18,12 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::Global;
+use gpui::{App, Global};
 use nebula_settings::{CursorShapeName, RuntimeSettings};
 use nebula_terminal::vte::ansi::CursorShape;
 use serde::Deserialize;
 
+use crate::display::{LanguagePreference, UiLanguage};
 use crate::gpui_shell::terminal::colors::Palette;
 
 /// GPUI 对齐 legacy 的产品默认：配置未写 `cursor_blink` 时光标闪烁。
@@ -38,6 +39,8 @@ pub(crate) const fn effective_cursor_blink(configured: Option<bool>) -> bool {
 
 /// 应用启动时装载一次的全局设置。
 pub struct Settings {
+    /// 已解析的界面语言。GPUI 组件只读这个内存全局，渲染路径不得重复读盘。
+    pub ui_language: UiLanguage,
     pub font_family: String,
     pub font_bold_family: String,
     pub font_italic_family: String,
@@ -80,22 +83,42 @@ pub struct Settings {
 
 impl Global for Settings {}
 
+/// GPUI 壳唯一的界面语言入口。应用初始化会先注册 [`Settings`]；测试或极早期
+/// 回调若尚未注册则回退英文，不能为取语言把磁盘 I/O 带进渲染路径。
+pub(crate) fn ui_language(cx: &App) -> UiLanguage {
+    cx.try_global::<Settings>().map(|settings| settings.ui_language).unwrap_or(UiLanguage::EnUs)
+}
+
+#[inline]
+fn resolve_ui_language(preference: nebula_settings::LanguagePref) -> UiLanguage {
+    LanguagePreference::parse(preference.settings_value()).unwrap_or_default().resolved()
+}
+
 impl Settings {
     /// `theme`：**生效**主题（follow_system 折算后，见
     /// `theme::effective_theme_name`）。不在这里自行读 RuntimeSettings 的
     /// 原始主题，否则 chrome 层与终端 palette 会在跟随系统时分家。
     pub fn load(theme: nebula_settings::ThemeName) -> Self {
         let runtime = RuntimeSettings::load();
+        let ui_language = resolve_ui_language(runtime.language);
         let path = find_config_file();
         let mut load_notice = None;
         let raw = path
             .as_deref()
-            .map(|p| load_merged_toml(p, &mut load_notice))
+            .map(|p| load_merged_toml(p, &mut load_notice, ui_language))
             .unwrap_or_else(|| toml::Value::Table(Default::default()));
         let raw: RawConfig = match raw.try_into() {
             Ok(config) => config,
             Err(err) => {
-                load_notice.get_or_insert_with(|| format!("nebula.toml 字段解析失败：{err}"));
+                load_notice.get_or_insert_with(|| {
+                    format!(
+                        "{}: {err}",
+                        ui_language.pick(
+                            "nebula.toml 字段解析失败",
+                            "Failed to parse nebula.toml fields",
+                        )
+                    )
+                });
                 RawConfig::default()
             },
         };
@@ -127,6 +150,7 @@ impl Settings {
         }
 
         Settings {
+            ui_language,
             font_bold_family: secondary(&raw.font.bold),
             font_italic_family: secondary(&raw.font.italic),
             font_bold_italic_family: secondary(&raw.font.bold_italic),
@@ -316,8 +340,8 @@ fn find_config_file() -> Option<PathBuf> {
 
 /// 读取主文件并按主应用语义合并 imports：imports 先加载，主文件最后覆盖。
 /// 途中吞掉的第一个错误经 `notice` 上浮（宽容解析 + 有去处的错误）。
-fn load_merged_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
-    let main = read_toml(path, notice);
+fn load_merged_toml(path: &Path, notice: &mut Option<String>, language: UiLanguage) -> toml::Value {
+    let main = read_toml(path, notice, language);
 
     let imports: Vec<String> =
         [main.get("general").and_then(|g| g.get("import")), main.get("import")]
@@ -332,7 +356,7 @@ fn load_merged_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
     for import in imports {
         let import_path = resolve_import_path(&import, path);
         if import_path.exists() {
-            merged = merge_values(merged, read_toml(&import_path, notice));
+            merged = merge_values(merged, read_toml(&import_path, notice, language));
         } else {
             super::try_write_stderr(format_args!(
                 "[nebula:gpui] config import not found: {}",
@@ -343,7 +367,7 @@ fn load_merged_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
     merge_values(merged, main)
 }
 
-fn read_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
+fn read_toml(path: &Path, notice: &mut Option<String>, language: UiLanguage) -> toml::Value {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
@@ -351,7 +375,13 @@ fn read_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
                 "[nebula:gpui] failed to read config {}: {err}",
                 path.display()
             ));
-            notice.get_or_insert_with(|| format!("无法读取配置 {}: {err}", path.display()));
+            notice.get_or_insert_with(|| {
+                format!(
+                    "{} {}: {err}",
+                    language.pick("无法读取配置", "Failed to read configuration"),
+                    path.display()
+                )
+            });
             return toml::Value::Table(Default::default());
         },
     };
@@ -363,8 +393,19 @@ fn read_toml(path: &Path, notice: &mut Option<String>) -> toml::Value {
                 "[nebula:gpui] failed to parse config {}: {err}",
                 path.display()
             ));
-            let first_line = err.to_string().lines().next().unwrap_or("解析失败").to_owned();
-            notice.get_or_insert_with(|| format!("配置 {} 解析失败：{first_line}", path.display()));
+            let first_line = err
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or(language.pick("解析失败", "Parse failed"))
+                .to_owned();
+            notice.get_or_insert_with(|| {
+                format!(
+                    "{} {}: {first_line}",
+                    language.pick("配置解析失败", "Failed to parse configuration"),
+                    path.display()
+                )
+            });
             toml::Value::Table(Default::default())
         },
     }
@@ -587,9 +628,16 @@ fn build_palette(raw: &RawColors) -> Palette {
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, apply_theme, rgba8, runtime_background};
+    use super::{Settings, apply_theme, resolve_ui_language, rgba8, runtime_background};
+    use crate::display::UiLanguage;
     use crate::gpui_shell::terminal::colors::Palette;
-    use nebula_settings::ThemeName;
+    use nebula_settings::{LanguagePref, ThemeName};
+
+    #[test]
+    fn explicit_runtime_languages_resolve_without_reading_system_locale() {
+        assert_eq!(resolve_ui_language(LanguagePref::ZhCn), UiLanguage::ZhCn);
+        assert_eq!(resolve_ui_language(LanguagePref::EnUs), UiLanguage::EnUs);
+    }
 
     #[test]
     fn system_theme_owns_terminal_background_while_following_system() {

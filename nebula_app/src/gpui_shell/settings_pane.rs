@@ -60,15 +60,41 @@ const BUG_REPORT_TEMPLATE: &str = "bug_report.yml";
 /// 左侧分区的稳定路由表。2026-08-28 产品裁定：默认 GPUI 导航收敛为常用项，
 /// 暂时隐藏“AI 供应商”和“备份”；页面实现与索引继续保留。后续恢复入口时只改
 /// [`HIDDEN_NAV_SECTIONS`]，不得删除或重排这里的条目。
-const SECTIONS: [&str; 10] =
-    ["应用", "外观", "配置文件", "AI 供应商", "SSH", "网络", "交互", "按键映射", "高级", "备份"];
+const SECTION_IDS: [&str; 10] = [
+    "application",
+    "appearance",
+    "profiles",
+    "providers",
+    "ssh",
+    "network",
+    "interaction",
+    "keymap",
+    "advanced",
+    "backup",
+];
 
 const HIDDEN_NAV_SECTIONS: &[usize] = &[3, 9];
 
-/// 保留原来的分组展开顺序，组名不再渲染；数组里仍保存稳定的 [`SECTIONS`]
+/// 保留原来的分组展开顺序，组名不再渲染；数组里仍保存稳定的 [`SECTION_IDS`]
 /// 下标，不复制设置状态或路由。
 const NAV_GROUPS: [(&str, &[usize]); 3] =
-    [("工作区", &[0, 1, 2, 6, 7]), ("连接与智能", &[3, 4, 5]), ("系统", &[8, 9])];
+    [("workspace", &[0, 1, 2, 6, 7]), ("connections", &[3, 4, 5]), ("system", &[8, 9])];
+
+fn section_label(index: usize, language: crate::display::UiLanguage) -> &'static str {
+    match SECTION_IDS.get(index).copied() {
+        Some("application") => language.tr("settings.sidebar.application"),
+        Some("appearance") => language.tr("settings.sidebar.appearance"),
+        Some("profiles") => language.tr("settings.sidebar.profiles"),
+        Some("providers") => language.tr("settings.sidebar.providers"),
+        Some("ssh") => language.tr("settings.sidebar.ssh"),
+        Some("network") => language.tr("settings.sidebar.network"),
+        Some("interaction") => language.tr("settings.sidebar.interaction"),
+        Some("keymap") => language.tr("settings.sidebar.keymap"),
+        Some("advanced") => language.tr("settings.sidebar.advanced"),
+        Some("backup") => language.tr("settings.sidebar.backup"),
+        _ => "",
+    }
+}
 
 fn is_nav_section_visible(index: usize) -> bool {
     !HIDDEN_NAV_SECTIONS.contains(&index)
@@ -222,6 +248,124 @@ pub enum SettingsPaneEvent {
 pub(super) type SharedSelect = Entity<SelectState<Vec<SharedString>>>;
 type SharedShellSelect = Entity<SelectState<Vec<ShellSelectItem>>>;
 
+/// 固定下拉只在这里把稳定 value 映射为显示文案。创建和语言切换刷新共用
+/// 同一入口，避免 `SelectState` 留着构造时的旧语言。
+fn localized_select_labels(
+    key: &str,
+    values: &[&'static str],
+    language: crate::display::UiLanguage,
+) -> Vec<SharedString> {
+    let labels: Vec<&'static str> = match key {
+        "language" => vec![
+            language.tr("language.system"),
+            language.tr("language.zh_cn"),
+            language.tr("language.en_us"),
+        ],
+        "cursor_shape" => vec![
+            language.pick("条形（│）", "Bar (│)"),
+            language.pick("下划线（_）", "Underscore (_)"),
+            language.pick("实心框（█）", "Filled box (█)"),
+            language.pick("空心框（□）", "Empty box (□)"),
+        ],
+        "tabs_position" => {
+            vec![language.pick("左侧边栏", "Left sidebar"), language.pick("顶部", "Top")]
+        },
+        "tab_reveal" => vec![language.pick("滑动", "Slide"), language.pick("立即", "Instant")],
+        "density" => vec![language.pick("标准", "Standard"), language.pick("紧凑", "Compact")],
+        "new_tab_position" => vec![
+            language.pick("当前标签之后", "After current tab"),
+            language.pick("列表末尾", "End of list"),
+        ],
+        "windowing_behavior" => vec![
+            language.pick("创建新窗口", "Create a new window"),
+            language.pick("附加到最近使用的窗口", "Attach to the most recent window"),
+            language.pick(
+                "附加到此桌面最近使用的窗口",
+                "Attach to the most recent window on this desktop",
+            ),
+        ],
+        "vcs_display" => vec![
+            language.pick("自动检测", "Auto detect"),
+            language.pick("仅 Git", "Git only"),
+            language.pick("仅 SVN", "SVN only"),
+        ],
+        "cell_width_mode" => {
+            vec![language.pick("紧凑", "Compact"), language.pick("宽松", "Relaxed")]
+        },
+        "bell" => vec![
+            language.pick("关", "Off"),
+            language.pick("闪烁", "Visual"),
+            language.pick("声音", "Sound"),
+            language.pick("闪烁 + 声音", "Visual + sound"),
+        ],
+        "blur" => vec![
+            language.pick("无", "None"),
+            language.pick("Mica（低开销）", "Mica (low cost)"),
+            language.pick("Mica Alt（低开销）", "Mica Alt (low cost)"),
+            language.pick("Aero（玻璃）", "Aero (glass)"),
+            language.pick("Acrylic（高开销）", "Acrylic (high cost)"),
+        ],
+        "accept" => vec![
+            language.pick("右方向键", "Right arrow"),
+            "Tab",
+            language.pick("Tab 或右方向键", "Tab or Right arrow"),
+        ],
+        "completion_style" => {
+            vec![language.pick("行内灰字", "Inline ghost"), language.pick("弹窗列表", "Popup list")]
+        },
+        "background_image_fit" => vec![
+            language.pick("拉伸", "Fill"),
+            language.pick("适应", "Uniform"),
+            language.pick("填充", "Uniform to fill"),
+            language.pick("原始尺寸", "Original size"),
+        ],
+        "background_image_alignment" => vec![
+            language.pick("左上", "Top left"),
+            language.pick("顶部", "Top"),
+            language.pick("右上", "Top right"),
+            language.pick("左侧", "Left"),
+            language.pick("居中", "Center"),
+            language.pick("右侧", "Right"),
+            language.pick("左下", "Bottom left"),
+            language.pick("底部", "Bottom"),
+            language.pick("右下", "Bottom right"),
+        ],
+        "ssh_proxy_mode" => vec![
+            language.tr("settings.network.mode.off"),
+            language.tr("settings.network.mode.system"),
+            language.tr("settings.network.mode.custom"),
+        ],
+        _ => values.to_vec(),
+    };
+    debug_assert_eq!(labels.len(), values.len(), "localized select label/value mismatch: {key}");
+    labels.into_iter().map(SharedString::from).collect()
+}
+
+fn provider_input_placeholders(language: crate::display::UiLanguage) -> [&'static str; 5] {
+    [
+        language.pick("供应商名称", "Provider name"),
+        language.pick("备注（可包含空格）", "Note (spaces allowed)"),
+        language.pick("官方网站", "Official website"),
+        language.pick("API 请求地址", "API endpoint"),
+        language.pick("默认模型", "Default model"),
+    ]
+}
+
+fn localized_input_placeholder(key: &str, language: crate::display::UiLanguage) -> &'static str {
+    match key {
+        "ssh_label" => language.pick("给这台机器起个名字", "Name this host"),
+        "ssh_password" => language.pick("留空则连接时询问", "Leave empty to ask when connecting"),
+        "ssh_icon_filter" => language.pick("搜索图标…", "Search icons..."),
+        "font_family" => language.pick("输入字体名称", "Enter a font family"),
+        "backup_password" => {
+            language.pick("备份密码（至少 8 位）", "Backup password (at least 8 characters)")
+        },
+        "backup_secret" => language.tr("settings.input.backup_secret"),
+        "keymap_search" => language.pick("搜索动作或按键…", "Search actions or keys..."),
+        _ => "",
+    }
+}
+
 #[derive(Clone)]
 struct ShellSelectItem {
     id: String,
@@ -247,7 +391,321 @@ enum AboutUpdateState {
     Failed(String),
 }
 
-use super::ssh_settings::{SshDeleteUndo, SshEditorState};
+#[derive(Clone, Debug)]
+enum ProviderStatus {
+    Saved,
+    Added,
+    AtLeastOneRequired,
+    Deleted,
+    ApiKeySaved,
+    Testing,
+    TestResult { outcome: crate::provider_test::ProviderTestOutcome, elapsed_ms: u64 },
+    CodexConfirmation,
+    AppliedToCodex(std::path::PathBuf),
+    Error(String),
+}
+
+impl ProviderStatus {
+    fn is_error(&self) -> bool {
+        match self {
+            Self::AtLeastOneRequired | Self::Error(_) => true,
+            Self::TestResult { outcome, .. } => !outcome.is_success(),
+            _ => false,
+        }
+    }
+
+    fn text(&self, language: crate::display::UiLanguage) -> String {
+        match self {
+            Self::Saved => language.pick("供应商配置已保存", "Provider settings saved").into(),
+            Self::Added => language.pick("已添加自定义供应商", "Custom provider added").into(),
+            Self::AtLeastOneRequired => {
+                language.pick("至少保留一个供应商", "Keep at least one provider").into()
+            },
+            Self::Deleted => language
+                .pick("供应商及其凭据已删除", "Provider and its credentials deleted")
+                .into(),
+            Self::ApiKeySaved => language
+                .pick(
+                    "API Key 已保存到系统凭据管理器",
+                    "API key saved to the system credential manager",
+                )
+                .into(),
+            Self::Testing => language.pick("正在测试连接…", "Testing connection...").into(),
+            Self::TestResult { outcome, elapsed_ms } => {
+                format!("{} · {elapsed_ms} ms", language.provider_test_message(outcome))
+            },
+            Self::CodexConfirmation => language
+                .pick(
+                    "再次点击确认：API Key 将明文写入 Codex auth.json（原文件会备份）",
+                    "Click again to confirm: the API key will be written in plain text to Codex auth.json (the original file will be backed up)",
+                )
+                .into(),
+            Self::AppliedToCodex(path) => format!(
+                "{}: {}",
+                language.pick("已应用到 Codex", "Applied to Codex"),
+                path.display()
+            ),
+            Self::Error(error) => format!(
+                "{}: {error}",
+                language.pick("操作失败", "Operation failed")
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum BackupCompletion {
+    Exported(std::path::PathBuf),
+    Restored,
+    Pushed(String),
+    Pulled(String),
+}
+
+#[derive(Clone, Debug)]
+enum BackupStatus {
+    PassphraseTooShort,
+    SelectionRequired,
+    Processing,
+    RemoteConfigSaved,
+    CredentialEmpty,
+    CredentialUnsupported,
+    CredentialSaved,
+    Completed(BackupCompletion),
+    Error(String),
+}
+
+impl BackupStatus {
+    fn is_error(&self) -> bool {
+        matches!(
+            self,
+            Self::PassphraseTooShort
+                | Self::SelectionRequired
+                | Self::CredentialEmpty
+                | Self::CredentialUnsupported
+                | Self::Error(_)
+        )
+    }
+
+    fn text(&self, language: crate::display::UiLanguage) -> String {
+        match self {
+            Self::PassphraseTooShort => language
+                .pick("备份密码至少 8 位", "The backup password must be at least 8 characters")
+                .into(),
+            Self::SelectionRequired => language
+                .pick("请至少勾选一个备份类别", "Select at least one backup category")
+                .into(),
+            Self::Processing => language.pick("处理中…", "Processing...").into(),
+            Self::RemoteConfigSaved => {
+                language.pick("远端配置已保存", "Remote configuration saved").into()
+            },
+            Self::CredentialEmpty => {
+                language.pick("凭据不能为空", "Credentials cannot be empty").into()
+            },
+            Self::CredentialUnsupported => language
+                .pick(
+                    "当前协议不需要独立凭据",
+                    "The current protocol does not use a separate credential",
+                )
+                .into(),
+            Self::CredentialSaved => language
+                .pick(
+                    "凭据已写入系统凭据管理器",
+                    "Credential saved to the system credential manager",
+                )
+                .into(),
+            Self::Completed(BackupCompletion::Exported(path)) => format!(
+                "{}: {}",
+                language.pick("已导出加密备份", "Encrypted backup exported"),
+                path.display()
+            ),
+            Self::Completed(BackupCompletion::Restored) => language
+                .pick(
+                    "已从备份恢复（字体/托盘等部分设置重启后生效）",
+                    "Backup restored (some settings, including fonts and tray options, apply after restart)",
+                )
+                .into(),
+            Self::Completed(BackupCompletion::Pushed(location)) => {
+                format!("{} {location}", language.pick("已推送到", "Pushed to"))
+            },
+            Self::Completed(BackupCompletion::Pulled(name)) => format!(
+                "{} {name} {}",
+                language.pick("已从", "Restored from"),
+                language.pick("恢复（部分设置重启后生效）", "(some settings apply after restart)")
+            ),
+            Self::Error(error) => format!(
+                "{}: {error}",
+                language.pick("备份操作失败", "Backup operation failed")
+            ),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum TerminalImportError {
+    Scan(String),
+    NoSupportedTerminal,
+    Load(String),
+    Import(String),
+    Save(String),
+}
+
+impl TerminalImportError {
+    fn text(self, language: crate::display::UiLanguage) -> String {
+        match self {
+            Self::Scan(error) => format!(
+                "{}: {error}",
+                language.pick("无法扫描终端目录", "Could not scan the terminal directory")
+            ),
+            Self::NoSupportedTerminal => language
+                .pick(
+                    "目录中未找到受支持的终端程序",
+                    "No supported terminal program was found in the directory",
+                )
+                .into(),
+            Self::Load(error) => format!(
+                "{}: {error}",
+                language.pick("无法读取终端配置", "Could not read terminal profiles")
+            ),
+            Self::Import(error) => format!(
+                "{}: {error}",
+                language.pick("无法导入终端", "Could not import the terminal")
+            ),
+            Self::Save(error) => format!(
+                "{}: {error}",
+                language.pick("无法保存终端配置", "Could not save terminal profiles")
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum SshStatus {
+    Saved(String),
+    Pinned,
+    Imported(usize),
+    Opening(String),
+    DeleteCommitted { hidden_config: bool },
+    CleanupPartial(String),
+    Restored(String),
+    Validation(SshValidationError),
+    PersistFailed(String),
+    DeleteFailed(String),
+    UndoFailed(String),
+    TestStartFailed(String),
+    ProfileLoadFailed(String),
+    ProfileSaveFailed(String),
+    HostListSaveFailed(String),
+    CredentialSaveFailed(String),
+    SavedWithCleanupError { destination: String, error: String },
+    Error(String),
+}
+
+impl SshStatus {
+    pub(super) fn is_error(&self) -> bool {
+        matches!(
+            self,
+            Self::CleanupPartial(_)
+                | Self::Validation(_)
+                | Self::PersistFailed(_)
+                | Self::DeleteFailed(_)
+                | Self::UndoFailed(_)
+                | Self::TestStartFailed(_)
+                | Self::ProfileLoadFailed(_)
+                | Self::ProfileSaveFailed(_)
+                | Self::HostListSaveFailed(_)
+                | Self::CredentialSaveFailed(_)
+                | Self::SavedWithCleanupError { .. }
+                | Self::Error(_)
+        )
+    }
+
+    pub(super) fn text(&self, language: crate::display::UiLanguage) -> String {
+        match self {
+            Self::Saved(destination) => {
+                format!("{} {destination}", language.pick("已保存", "Saved"))
+            },
+            Self::Pinned => language.pick("置顶状态已更新", "Pin status updated").into(),
+            Self::Imported(count) => format!(
+                "{} {count} {}",
+                language.pick("已导入，config 源共", "Imported"),
+                language.pick("个别名", "config aliases")
+            ),
+            Self::Opening(host) => {
+                format!("{} {host}…", language.pick("正在打开", "Opening"))
+            },
+            Self::DeleteCommitted { hidden_config: true } => language
+                .pick(
+                    "已隐藏 config 别名，并清理 Nebula Profile 与凭据",
+                    "Config alias hidden; Nebula profile and credentials removed",
+                )
+                .into(),
+            Self::DeleteCommitted { hidden_config: false } => language
+                .pick(
+                    "已删除主机、Profile 与凭据",
+                    "Host, profile, and credentials deleted",
+                )
+                .into(),
+            Self::CleanupPartial(details) => format!(
+                "{}: {details}",
+                language.pick(
+                    "主机已从列表移除，但部分清理失败",
+                    "Host removed from the list, but some cleanup failed",
+                )
+            ),
+            Self::Restored(host) => {
+                format!("{} {host}", language.pick("已恢复", "Restored"))
+            },
+            Self::Validation(error) => error.text(language).into(),
+            Self::PersistFailed(error) => format!(
+                "{}: {error}",
+                language.pick("写入设置失败", "Failed to write settings")
+            ),
+            Self::DeleteFailed(error) => format!(
+                "{}: {error}",
+                language.pick("删除主机失败", "Failed to delete host")
+            ),
+            Self::UndoFailed(error) => {
+                format!("{}: {error}", language.pick("撤销失败", "Undo failed"))
+            },
+            Self::TestStartFailed(error) => format!(
+                "{}: {error}",
+                language.pick("无法启动连接测试", "Could not start the connection test")
+            ),
+            Self::ProfileLoadFailed(error) => format!(
+                "{}: {error}",
+                language.pick("加载 SSH Profile 失败", "Failed to load the SSH profile")
+            ),
+            Self::ProfileSaveFailed(error) => format!(
+                "{}: {error}",
+                language.pick("保存 SSH Profile 失败", "Failed to save the SSH profile")
+            ),
+            Self::HostListSaveFailed(error) => format!(
+                "{}: {error}",
+                language.pick("保存主机列表失败", "Failed to save the host list")
+            ),
+            Self::CredentialSaveFailed(error) => format!(
+                "{}: {error}",
+                language.pick(
+                    "Profile 已保存，但密码写入凭据管理器失败",
+                    "The profile was saved, but the password could not be written to the credential manager",
+                )
+            ),
+            Self::SavedWithCleanupError { destination, error } => format!(
+                "{} {destination}, {}: {error}",
+                language.pick("已保存", "Saved"),
+                language.pick(
+                    "但旧地址凭据清理失败",
+                    "but credentials for the previous address could not be removed",
+                )
+            ),
+            Self::Error(error) => {
+                format!("{}: {error}", language.pick("SSH 操作失败", "SSH operation failed"))
+            },
+        }
+    }
+}
+
+use super::ssh_settings::{SshDeleteUndo, SshEditorState, SshValidationError};
 
 impl ShellSelectItem {
     fn new(id: String, name: String, scale_factor: f32) -> Self {
@@ -259,10 +717,10 @@ impl ShellSelectItem {
     }
 
     /// 置顶的导入行。没有品牌贴图，[`Self::view`] 会给它文件夹图标。
-    fn import_action() -> Self {
+    fn import_action(language: crate::display::UiLanguage) -> Self {
         Self {
             id: SHELL_IMPORT_ACTION_ID.to_owned(),
-            name: "导入终端目录…".into(),
+            name: language.pick("导入终端目录…", "Import terminal directory...").into(),
             closed_image: None,
             row_image: None,
         }
@@ -299,7 +757,11 @@ impl ShellSelectItem {
 /// 顺序 = 置顶导入行 → 已安装 shell（`detect_shells` 菜单序）→ 用户导入的
 /// 终端 profile。导入项以 `profile:<家族>|<id>` 作设置值（[`Profile::settings_id`]
 /// 同一形状），品牌图标因此仍能按家族查到。
-fn shell_select_items(current: &str, scale_factor: f32) -> (Vec<ShellSelectItem>, usize) {
+fn shell_select_items(
+    current: &str,
+    scale_factor: f32,
+    language: crate::display::UiLanguage,
+) -> (Vec<ShellSelectItem>, usize) {
     let mut items: Vec<ShellSelectItem> = crate::shell_detect::detect_shells()
         .into_iter()
         .map(|shell| ShellSelectItem::new(shell.id, shell.name, scale_factor))
@@ -337,26 +799,28 @@ fn shell_select_items(current: &str, scale_factor: f32) -> (Vec<ShellSelectItem>
     }
     let selected = items.iter().position(|item| item.id == current).unwrap_or(0);
     // 导入行最后才插到首位：它不参与选中判定，所以选中行号整体后移一位。
-    items.insert(0, ShellSelectItem::import_action());
+    items.insert(0, ShellSelectItem::import_action(language));
     (items, selected + 1)
 }
 
 /// 扫描目录并落盘（阻塞 IO，调用方须放后台执行器）。
 /// 逻辑与旧壳 `Display::import_terminal_directory` 逐句对齐，只是把 toast
 /// 换成 `Result`，由 UI 线程决定怎么呈现。
-fn import_terminal_directory_blocking(directory: &std::path::Path) -> Result<usize, String> {
+fn import_terminal_directory_blocking(
+    directory: &std::path::Path,
+) -> Result<usize, TerminalImportError> {
     let found = crate::terminal_profiles::scan_directory(directory)
-        .map_err(|error| format!("无法扫描终端目录：{error}"))?;
+        .map_err(|error| TerminalImportError::Scan(error.to_string()))?;
     if found.is_empty() {
-        return Err("目录中未找到受支持的终端程序".to_owned());
+        return Err(TerminalImportError::NoSupportedTerminal);
     }
     let mut profiles = crate::terminal_profiles::TerminalProfiles::load()
-        .map_err(|error| format!("无法读取终端配置：{error}"))?;
+        .map_err(|error| TerminalImportError::Load(error.to_string()))?;
     let count = found.len();
     for profile in found {
-        profiles.upsert(profile).map_err(|error| format!("无法导入终端：{error}"))?;
+        profiles.upsert(profile).map_err(|error| TerminalImportError::Import(error.to_string()))?;
     }
-    profiles.save().map_err(|error| format!("无法保存终端配置：{error}"))?;
+    profiles.save().map_err(|error| TerminalImportError::Save(error.to_string()))?;
     Ok(count)
 }
 
@@ -447,7 +911,7 @@ pub struct SettingsPane {
     /// Name / note / website / endpoint / model. API keys deliberately do not
     /// use a GPUI text widget; the native credential dialog is write-only.
     provider_inputs: Vec<Entity<InputState>>,
-    provider_status: Option<(String, bool)>,
+    provider_status: Option<ProviderStatus>,
     provider_test_seq: u64,
     provider_test_running: bool,
     provider_codex_confirm: Option<String>,
@@ -469,14 +933,14 @@ pub struct SettingsPane {
     pub(super) ssh_editor: Option<SshEditorState>,
     pub(super) ssh_editor_seq: u64,
     pub(super) ssh_test_seq: u64,
-    pub(super) ssh_status: Option<(String, bool)>,
+    pub(super) ssh_status: Option<SshStatus>,
     pub(super) ssh_show_hidden: bool,
     /// 删除确认（二次点击生效，旧壳确认对话框的轻量对应）。
     pub(super) ssh_delete_confirm: Option<String>,
     /// 未决删除的撤销窗口（8 秒；见 `ssh_settings::SshDeleteUndo`）。
     pub(super) ssh_delete_undo: Option<SshDeleteUndo>,
     pub(super) ssh_undo_seq: u64,
-    /// 可直接编辑的字体链及其建议弹层；逗号分隔语义与 Windows Terminal 一致。
+    /// 可直接编辑的字体链及其建议弹层；逗号分隔主字体与 fallback 字体。
     pub(super) font_picker_open: bool,
     font_loading: bool,
     /// None = 尚未枚举；首次展开时在后台线程装配（几百字体的机器上
@@ -492,7 +956,7 @@ pub struct SettingsPane {
     backup_selection: crate::encrypted_backup::BackupSelection,
     /// 备份密码（masked；只在导出/恢复动作瞬时读取，不落任何配置）。
     backup_pass_input: Entity<InputState>,
-    backup_status: Option<(String, bool)>,
+    backup_status: Option<BackupStatus>,
     /// 导出/恢复/推送进行中（按钮禁用 + 忽略过期完成回调）。
     backup_busy: bool,
     backup_seq: u64,
@@ -521,11 +985,11 @@ pub struct SettingsPane {
 impl SettingsPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let runtime = RuntimeSettings::load();
+        let language = crate::gpui_shell::config::ui_language(cx);
         let mut selects: Vec<(&'static str, SharedSelect, &'static [&'static str])> = Vec::new();
         let mut subscriptions = Vec::new();
 
         let mut add_select = |key: &'static str,
-                              labels: &'static [&'static str],
                               values: &'static [&'static str],
                               current: &str,
                               window: &mut Window,
@@ -533,7 +997,7 @@ impl SettingsPane {
             let ix = values.iter().position(|v| *v == current).unwrap_or(0);
             let select = cx.new(|cx| {
                 SelectState::new(
-                    labels.iter().map(|l| SharedString::from(*l)).collect::<Vec<_>>(),
+                    localized_select_labels(key, values, language),
                     Some(IndexPath::default().row(ix)),
                     window,
                     cx,
@@ -545,12 +1009,16 @@ impl SettingsPane {
                 move |this: &mut Self,
                       entity: &SharedSelect,
                       event: &SelectEvent<Vec<SharedString>>,
-                      _window: &mut Window,
+                      window: &mut Window,
                       cx: &mut Context<Self>| {
                     if let SelectEvent::Confirm(Some(_)) = event {
                         let row = entity.read(cx).selected_index(cx).map(|path| path.row);
                         if let Some(value) = row.and_then(|row| values.get(row)) {
                             this.persist(&[(key, (*value).to_string())], cx);
+                            if key == "language" {
+                                this.refresh_localized_controls(window, cx);
+                                cx.refresh_windows();
+                            }
                         }
                     }
                 },
@@ -564,17 +1032,15 @@ impl SettingsPane {
 
         add_select(
             "language",
-            &["跟随系统", "简体中文", "English"],
             &["system", "zh-CN", "en-US"],
             runtime.language.settings_value(),
             window,
             cx,
         );
-        add_select("theme", &THEME_VALUES, &THEME_VALUES, runtime.theme.prompt_name(), window, cx);
+        add_select("theme", &THEME_VALUES, runtime.theme.prompt_name(), window, cx);
         // 选项顺序与文案照抄旧壳 `CURSOR_SHAPE_OPTIONS` / `cursor_shape_label`。
         add_select(
             "cursor_shape",
-            &["条形（│）", "下划线（_）", "实心框（█）", "空心框（□）"],
             &["beam", "underline", "block", "hollow"],
             cursor_current,
             window,
@@ -582,7 +1048,6 @@ impl SettingsPane {
         );
         add_select(
             "tabs_position",
-            &["左侧边栏", "顶部"],
             &["sidebar", "top"],
             runtime.tabs_position.settings_value(),
             window,
@@ -590,7 +1055,6 @@ impl SettingsPane {
         );
         add_select(
             "tab_reveal",
-            &["滑动", "立即"],
             &["slide", "instant"],
             runtime.tab_reveal.settings_value(),
             window,
@@ -598,7 +1062,6 @@ impl SettingsPane {
         );
         add_select(
             "density",
-            &["标准", "紧凑"],
             &["standard", "compact"],
             runtime.density.settings_value(),
             window,
@@ -606,7 +1069,6 @@ impl SettingsPane {
         );
         add_select(
             "new_tab_position",
-            &["当前标签之后", "列表末尾"],
             &["after_current", "end"],
             runtime.new_tab_position.settings_value(),
             window,
@@ -614,7 +1076,6 @@ impl SettingsPane {
         );
         add_select(
             "windowing_behavior",
-            &["创建新窗口", "附加到最近使用的窗口", "附加到此桌面最近使用的窗口"],
             &["use_new", "use_any_existing", "use_existing"],
             runtime.windowing_behavior.settings_value(),
             window,
@@ -622,7 +1083,6 @@ impl SettingsPane {
         );
         add_select(
             "vcs_display",
-            &["自动检测", "仅 Git", "仅 SVN"],
             &["auto", "git", "svn"],
             runtime.vcs_display.settings_value(),
             window,
@@ -630,7 +1090,6 @@ impl SettingsPane {
         );
         add_select(
             "cell_width_mode",
-            &["紧凑", "宽松"],
             &["compact", "relaxed"],
             runtime.cell_width_mode.settings_value(),
             window,
@@ -639,7 +1098,6 @@ impl SettingsPane {
         // 文案照抄旧壳 `accept_label` / `completion_style_label`。
         add_select(
             "bell",
-            &["关", "闪烁", "声音", "闪烁 + 声音"],
             &["none", "visual", "audible", "both"],
             runtime.bell.settings_value(),
             window,
@@ -650,7 +1108,6 @@ impl SettingsPane {
         // Mica / Mica Alt 使用系统壁纸 backdrop，不由 Nebula 读取或重采样。
         add_select(
             "blur",
-            &["无", "Mica（低开销）", "Mica Alt（低开销）", "Aero（玻璃）", "Acrylic（高开销）"],
             &["none", "mica", "mica-alt", "aero", "acrylic"],
             runtime.blur.settings_value(),
             window,
@@ -658,7 +1115,6 @@ impl SettingsPane {
         );
         add_select(
             "accept",
-            &["右方向键", "Tab", "Tab 或右方向键"],
             &["right", "tab", "both"],
             runtime.accept.settings_value(),
             window,
@@ -666,7 +1122,6 @@ impl SettingsPane {
         );
         add_select(
             "completion_style",
-            &["行内灰字", "弹窗列表"],
             &["inline", "popup"],
             runtime.completion_style.settings_value(),
             window,
@@ -682,7 +1137,6 @@ impl SettingsPane {
         // 顺序与文案照抄旧壳 `BACKGROUND_FIT_OPTIONS` / `background_image_fit_label`。
         add_select(
             "background_image_fit",
-            &["拉伸", "适应", "填充", "原始尺寸"],
             &["fill", "uniform", "uniform_to_fill", "none"],
             bgimg_fit,
             window,
@@ -696,7 +1150,6 @@ impl SettingsPane {
         // 九宫格顺序照抄旧壳 `BACKGROUND_ALIGNMENT_OPTIONS`（左上 → 右下）。
         add_select(
             "background_image_alignment",
-            &["左上", "顶部", "右上", "左侧", "居中", "右侧", "左下", "底部", "右下"],
             &[
                 "top_left",
                 "top",
@@ -714,7 +1167,6 @@ impl SettingsPane {
         );
         add_select(
             "ssh_proxy_mode",
-            &["不使用代理", "跟随系统", "自定义代理"],
             &["off", "system", "custom"],
             runtime.ssh_proxy_mode.settings_value(),
             window,
@@ -726,7 +1178,8 @@ impl SettingsPane {
         // 选项 = 彩色品牌 PNG（extra/shell-icons，与旧壳设置页/命令面板同
         // 一批资产）+ 名称，闭态与下拉同源（SelectItem::display_title/render）。
         let shell_icon_scale = window.scale_factor().max(0.5);
-        let (shell_items, shell_index) = shell_select_items(&shell_current, shell_icon_scale);
+        let (shell_items, shell_index) =
+            shell_select_items(&shell_current, shell_icon_scale, language);
         let shell_select = cx.new(|cx| {
             SelectState::new(shell_items, Some(IndexPath::default().row(shell_index)), window, cx)
         });
@@ -853,8 +1306,7 @@ impl SettingsPane {
             active_provider.base_url,
             active_provider.model,
         ];
-        let provider_placeholders =
-            ["供应商名称", "备注（可包含空格）", "官方网站", "API 请求地址", "默认模型"];
+        let provider_placeholders = provider_input_placeholders(language);
         let provider_inputs = provider_values
             .into_iter()
             .zip(provider_placeholders)
@@ -879,12 +1331,19 @@ impl SettingsPane {
                 .placeholder("22")
                 .pattern(regex::Regex::new(r"^\d{0,5}$").expect("static regex"))
         });
-        let ssh_label_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("给这台机器起个名字"));
-        let ssh_password_input =
-            cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("留空则连接时询问"));
-        let ssh_icon_filter_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索图标…"));
+        let ssh_label_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(localized_input_placeholder("ssh_label", language))
+        });
+        let ssh_password_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder(localized_input_placeholder("ssh_password", language))
+        });
+        let ssh_icon_filter_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(localized_input_placeholder("ssh_icon_filter", language))
+        });
         for input in [
             ssh_destination_input.clone(),
             ssh_port_input.clone(),
@@ -986,7 +1445,9 @@ impl SettingsPane {
             font_picker_trigger_bounds: None,
             backup_selection: crate::encrypted_backup::BackupSelection::default(),
             backup_pass_input: cx.new(|cx| {
-                InputState::new(window, cx).masked(true).placeholder("备份密码（至少 8 位）")
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder(localized_input_placeholder("backup_password", language))
             }),
             backup_status: None,
             backup_busy: false,
@@ -1001,10 +1462,15 @@ impl SettingsPane {
             },
             backup_remote_inputs,
             backup_secret_input: cx.new(|cx| {
-                InputState::new(window, cx).masked(true).placeholder("凭据只写入系统凭据管理器")
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder(localized_input_placeholder("backup_secret", language))
             }),
             keymap_search_input: {
-                let input = cx.new(|cx| InputState::new(window, cx).placeholder("搜索动作或按键…"));
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(localized_input_placeholder("keymap_search", language))
+                });
                 subscriptions.push(cx.subscribe_in(
                     &input,
                     window,
@@ -1041,11 +1507,46 @@ impl SettingsPane {
         let settings = crate::gpui_shell::config::Settings::load(
             crate::gpui_shell::theme::effective_theme_name(cx),
         );
+        gpui_component::set_locale(settings.ui_language.gpui_component_locale());
         cx.set_global(settings);
         if updates.iter().any(|(key, _)| matches!(*key, "ssh_proxy_mode" | "ssh_proxy_url")) {
             self.invalidate_proxy_test();
         }
         cx.emit(SettingsPaneEvent::Changed);
+        cx.notify();
+    }
+
+    /// 语言切换不重建输入/下拉实体：重建会丢焦点、编辑值、undo 和订阅。
+    /// 固定候选按稳定 value 保留索引，随后仅替换显示项与 placeholder。
+    fn refresh_localized_controls(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let language = crate::gpui_shell::config::ui_language(cx);
+        for (key, select, values) in &self.selects {
+            let selected = select.read(cx).selected_index(cx);
+            let items = localized_select_labels(key, values, language);
+            select.update(cx, |state, cx| {
+                state.set_items(items, window, cx);
+                state.set_selected_index(selected, window, cx);
+            });
+        }
+        self.refresh_shell_items(window, cx);
+
+        for (input, placeholder) in
+            self.provider_inputs.iter().zip(provider_input_placeholders(language))
+        {
+            input.update(cx, |state, cx| state.set_placeholder(placeholder, window, cx));
+        }
+        for (input, key) in [
+            (&self.ssh_label_input, "ssh_label"),
+            (&self.ssh_password_input, "ssh_password"),
+            (&self.ssh_icon_filter_input, "ssh_icon_filter"),
+            (&self.font_family_input, "font_family"),
+            (&self.backup_pass_input, "backup_password"),
+            (&self.backup_secret_input, "backup_secret"),
+            (&self.keymap_search_input, "keymap_search"),
+        ] {
+            let placeholder = localized_input_placeholder(key, language);
+            input.update(cx, |state, cx| state.set_placeholder(placeholder, window, cx));
+        }
         cx.notify();
     }
 
@@ -1069,33 +1570,33 @@ impl SettingsPane {
 
     /// 旧壳 `request_toggle_background_image_cover_chrome`：关→开要确认
     /// （壳变半透明、控件对比度下降）；开→关直接生效。
-    fn request_cover_chrome(&mut self, enable: bool, window: &mut Window, cx: &mut Context<Self>) {        if !enable {
+    fn request_cover_chrome(&mut self, enable: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !enable {
             self.persist(&[("background_image_cover_chrome", "0".to_owned())], cx);
             return;
         }
         if self.runtime.background_image_cover_chrome {
             return;
         }
+        let language = crate::gpui_shell::config::ui_language(cx);
         let pane = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, _cx| {
             let pane = pane.clone();
             confirm_dialog(
                 dialog,
                 window,
-                "让背景图覆盖窗口控件区域？",
-                SharedString::from(
-                    "背景图会延伸到标题栏、窗口按钮、Tab 与 SSH 侧栏下方，低对比度图片可能影响操作可见性；界面仍会保留最低不透明度保护。",
-                ),
-                "开启",
-                "取消",
+                language.tr("settings.appearance.background_cover_title"),
+                SharedString::from(language.tr("settings.appearance.background_cover_description")),
+                language.pick("开启", "Enable"),
+                language.pick("取消", "Cancel"),
                 ButtonVariant::Primary,
             )
-                .on_ok(move |_, _, cx| {
-                    let _ = pane.update(cx, |this, cx| {
-                        this.persist(&[("background_image_cover_chrome", "1".to_owned())], cx);
-                    });
-                    true
-                })
+            .on_ok(move |_, _, cx| {
+                let _ = pane.update(cx, |this, cx| {
+                    this.persist(&[("background_image_cover_chrome", "1".to_owned())], cx);
+                });
+                true
+            })
         });
         cx.notify();
     }
@@ -1238,15 +1739,23 @@ impl SettingsPane {
         // 用户点的是动作行，不是换 shell：先把闭态标题拨回真正生效的那项，
         // 否则扫描期间下拉会显示「导入终端目录…」，像是默认 shell 被改掉了。
         self.restore_shell_selection(window, cx);
+        let language = crate::gpui_shell::config::ui_language(cx);
 
         #[cfg(windows)]
-        let picked = pick_folder_with_wsl_places(window, "选择终端安装目录");
+        let picked = pick_folder_with_wsl_places(
+            window,
+            language.pick("选择终端安装目录", "Select a terminal installation directory"),
+        );
         #[cfg(not(windows))]
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("选择终端安装目录".into()),
+            prompt: Some(
+                language
+                    .pick("选择终端安装目录", "Select a terminal installation directory")
+                    .into(),
+            ),
         });
         cx.spawn_in(window, async move |this, cx| {
             #[cfg(windows)]
@@ -1270,17 +1779,23 @@ impl SettingsPane {
     /// 导入收尾：提示结果，成功则重建候选并广播配置变更。
     fn finish_terminal_import(
         &mut self,
-        outcome: Result<usize, String>,
+        outcome: Result<usize, TerminalImportError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match outcome {
             Ok(count) => {
+                let language = crate::gpui_shell::config::ui_language(cx);
+                let message = format!(
+                    "{} {count} {}",
+                    language.pick("已导入", "Imported"),
+                    language.pick("个终端，立即可用", "terminals; they are ready to use")
+                );
                 crate::gpui_shell::toast::toast(
                     window,
                     cx,
                     crate::display::ToastKind::Success,
-                    format!("已导入 {count} 个终端，立即可用"),
+                    message,
                 );
                 self.refresh_shell_items(window, cx);
                 // 新 profile 要立即进入 Tab 的 Shell 面板；它不是普通运行时
@@ -1288,7 +1803,8 @@ impl SettingsPane {
                 cx.emit(SettingsPaneEvent::TerminalProfilesChanged);
                 cx.notify();
             },
-            Err(message) => {
+            Err(error) => {
+                let message = error.text(crate::gpui_shell::config::ui_language(cx));
                 crate::gpui_shell::toast::toast(
                     window,
                     cx,
@@ -1302,7 +1818,11 @@ impl SettingsPane {
     /// 按当前设置值重建下拉候选（导入后新增行即时可见）。
     fn refresh_shell_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.runtime.shell.clone().unwrap_or_else(|| "powershell".into());
-        let (items, selected) = shell_select_items(&current, window.scale_factor().max(0.5));
+        let (items, selected) = shell_select_items(
+            &current,
+            window.scale_factor().max(0.5),
+            crate::gpui_shell::config::ui_language(cx),
+        );
         self.shell_select.update(cx, |state, cx| {
             state.set_items(items, window, cx);
             state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
@@ -1330,13 +1850,7 @@ impl SettingsPane {
     ///
     /// 值不在 `values` 里（光标形状的"未设置"写空串）时落到第 0 项，与
     /// `add_select` 建初始索引时的同一条回落规则一致。
-    fn sync_select(
-        &mut self,
-        key: &str,
-        value: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn sync_select(&mut self, key: &str, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some((_, select, values)) = self.selects.iter().find(|(k, _, _)| *k == key) else {
             return;
         };
@@ -1367,9 +1881,13 @@ impl SettingsPane {
     }
 
     fn shell_select_row(&self, cx: &Context<Self>) -> impl IntoElement {
+        let language = crate::gpui_shell::config::ui_language(cx);
         self.row(
-            "默认 Shell",
-            "新标签用哪个程序开。已经开着的标签不受影响——它们跟的是各自创建时的选择。",
+            language.pick("默认 Shell", "Default shell"),
+            language.pick(
+                "新标签用哪个程序开。已经开着的标签不受影响——它们跟的是各自创建时的选择。",
+                "Chooses the program used for new tabs. Existing tabs are unaffected because each retains the shell chosen when it was created.",
+            ),
             div()
                 .w(px(SETTINGS_SELECT_WIDTH))
                 .font_family(cx.theme().mono_font_family.clone())
@@ -1632,6 +2150,7 @@ impl SettingsPane {
     /// 旧壳启动目录：点路径打开选文件夹；空着显示「继承当前目录」；
     /// 有值时右侧「清除」。不是手填文本框。
     fn startup_directory_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let current = self
             .runtime
             .startup_directory
@@ -1639,12 +2158,19 @@ impl SettingsPane {
             .map(str::trim)
             .filter(|path| !path.is_empty());
         let has_dir = current.is_some();
-        let label: SharedString =
-            current.map(str::to_owned).unwrap_or_else(|| "继承当前目录".to_owned()).into();
+        let label: SharedString = current
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                language.pick("继承当前目录", "Inherit current directory").to_owned()
+            })
+            .into();
         let color = if has_dir { cx.theme().link } else { cx.theme().muted_foreground };
         self.row(
-            "启动目录",
-            "新标签落在哪个目录。不设则继承 Nebula 自己的工作目录，从资源管理器右键进来时就是那个文件夹。",
+            language.pick("启动目录", "Startup directory"),
+            language.pick(
+                "新标签落在哪个目录。不设则继承 Nebula 自己的工作目录，从资源管理器右键进来时就是那个文件夹。",
+                "Chooses the directory for new tabs. When unset, they inherit Nebula's working directory, such as the folder used to launch it from File Explorer.",
+            ),
             h_flex()
                 .gap_2()
                 .items_center()
@@ -1662,7 +2188,7 @@ impl SettingsPane {
                         })),
                 )
                 .when(has_dir, |row| {
-                    row.child(NebulaButton::new("startup-directory-clear").label("清除").on_click(
+                    row.child(NebulaButton::new("startup-directory-clear").label(language.pick("清除", "Clear")).on_click(
                         cx.listener(|this, _, _, cx| {
                             this.clear_startup_directory(cx);
                         }),
@@ -1673,14 +2199,20 @@ impl SettingsPane {
     }
 
     fn pick_startup_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let language = crate::gpui_shell::config::ui_language(cx);
         #[cfg(windows)]
-        let picked = pick_folder_with_wsl_places(window, "选择终端启动目录");
+        let picked = pick_folder_with_wsl_places(
+            window,
+            language.pick("选择终端启动目录", "Select the terminal startup directory"),
+        );
         #[cfg(not(windows))]
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("选择终端启动目录".into()),
+            prompt: Some(
+                language.pick("选择终端启动目录", "Select the terminal startup directory").into(),
+            ),
         });
         cx.spawn(async move |this, cx| {
             #[cfg(windows)]
@@ -1725,7 +2257,7 @@ impl SettingsPane {
                 .child(div().w(px(280.0)).child(Input::new(input)))
                 .child(
                     NebulaButton::new(SharedString::from(format!("save-{key}")))
-                        .label("保存")
+                        .label(crate::gpui_shell::config::ui_language(cx).pick("保存", "Save"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let value = state.read(cx).value().to_string();
                             this.persist(&[(key, value)], cx);
@@ -1798,11 +2330,14 @@ impl SettingsPane {
     }
 
     fn choose_background_image(&mut self, cx: &mut Context<Self>) {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("选择终端背景图片".into()),
+            prompt: Some(
+                language.pick("选择终端背景图片", "Select a terminal background image").into(),
+            ),
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else { return };
@@ -1816,6 +2351,7 @@ impl SettingsPane {
     }
 
     fn background_image_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let current = self.runtime.background_image.clone();
         let has_image = current.as_ref().is_some_and(|path| !path.trim().is_empty());
         let path_label: Option<SharedString> =
@@ -1828,8 +2364,11 @@ impl SettingsPane {
                     .into()
             });
         self.row_with_reset(
-            "背景图片",
-            "铺在终端文字后面。图片本身不参与配色，字色仍由主题决定；看不清就调下面的不透明度。",
+            language.pick("背景图片", "Background image"),
+            language.pick(
+                "铺在终端文字后面。图片本身不参与配色，字色仍由主题决定；看不清就调下面的不透明度。",
+                "Draws an image behind terminal text. The image does not affect colors; text colors still come from the theme. Reduce the opacity below if text is hard to read.",
+            ),
             has_image,
             |this, _, cx| {
                 this.persist(&[("background_image", String::new())], cx);
@@ -1837,7 +2376,7 @@ impl SettingsPane {
             h_flex()
                 .items_center()
                 .gap_2()
-                .child(NebulaButton::new("background-image-choose").label("选择图片").on_click(
+                .child(NebulaButton::new("background-image-choose").label(language.pick("选择图片", "Choose image")).on_click(
                     cx.listener(|this, _, _, cx| {
                         this.choose_background_image(cx);
                     }),
@@ -1899,11 +2438,11 @@ impl SettingsPane {
         crate::ai_providers::apply_metadata_draft(&mut self.provider_store.providers[index], draft);
         match crate::ai_providers::save(&self.provider_store) {
             Ok(()) => {
-                self.provider_status = Some(("供应商配置已保存".to_owned(), false));
+                self.provider_status = Some(ProviderStatus::Saved);
                 true
             },
             Err(error) => {
-                self.provider_status = Some((error.to_string(), true));
+                self.provider_status = Some(ProviderStatus::Error(error.to_string()));
                 false
             },
         }
@@ -1919,8 +2458,8 @@ impl SettingsPane {
         self.provider_store.active_id = id;
         self.provider_codex_confirm = None;
         match crate::ai_providers::save(&self.provider_store) {
-            Ok(()) => self.provider_status = Some(("已添加自定义供应商".to_owned(), false)),
-            Err(error) => self.provider_status = Some((error.to_string(), true)),
+            Ok(()) => self.provider_status = Some(ProviderStatus::Added),
+            Err(error) => self.provider_status = Some(ProviderStatus::Error(error.to_string())),
         }
         self.sync_provider_inputs(window, cx);
         cx.notify();
@@ -1929,18 +2468,18 @@ impl SettingsPane {
     fn delete_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.active_provider_index() else { return };
         if self.provider_store.providers.len() <= 1 {
-            self.provider_status = Some(("至少保留一个供应商".to_owned(), true));
+            self.provider_status = Some(ProviderStatus::AtLeastOneRequired);
             cx.notify();
             return;
         }
         let id = self.provider_store.providers[index].id.clone();
         match crate::ai_providers::remove_provider(&mut self.provider_store, &id) {
             Ok(()) => {
-                self.provider_status = Some(("供应商及其凭据已删除".to_owned(), false));
+                self.provider_status = Some(ProviderStatus::Deleted);
                 self.provider_codex_confirm = None;
                 self.sync_provider_inputs(window, cx);
             },
-            Err(error) => self.provider_status = Some((error.to_string(), true)),
+            Err(error) => self.provider_status = Some(ProviderStatus::Error(error.to_string())),
         }
         cx.notify();
     }
@@ -1956,7 +2495,7 @@ impl SettingsPane {
         }
         self.provider_codex_confirm = None;
         if let Err(error) = crate::ai_providers::save(&self.provider_store) {
-            self.provider_status = Some((error.to_string(), true));
+            self.provider_status = Some(ProviderStatus::Error(error.to_string()));
         }
         cx.notify();
     }
@@ -1966,13 +2505,13 @@ impl SettingsPane {
         let provider = &mut self.provider_store.providers[index];
         match crate::ai_providers::prompt_and_store_api_key(provider) {
             Ok(true) => {
-                self.provider_status = Some(("API Key 已保存到系统凭据管理器".to_owned(), false));
+                self.provider_status = Some(ProviderStatus::ApiKeySaved);
                 if let Err(error) = crate::ai_providers::save(&self.provider_store) {
-                    self.provider_status = Some((error.to_string(), true));
+                    self.provider_status = Some(ProviderStatus::Error(error.to_string()));
                 }
             },
             Ok(false) => {},
-            Err(error) => self.provider_status = Some((error.to_string(), true)),
+            Err(error) => self.provider_status = Some(ProviderStatus::Error(error.to_string())),
         }
         cx.notify();
     }
@@ -1986,7 +2525,7 @@ impl SettingsPane {
         self.provider_test_seq = self.provider_test_seq.wrapping_add(1);
         let sequence = self.provider_test_seq;
         self.provider_test_running = true;
-        self.provider_status = Some(("正在测试连接…".to_owned(), false));
+        self.provider_status = Some(ProviderStatus::Testing);
 
         let task = cx
             .background_executor()
@@ -2000,8 +2539,10 @@ impl SettingsPane {
                     return;
                 }
                 pane.provider_test_running = false;
-                pane.provider_status =
-                    Some((format!("{} · {} ms", result.message, result.elapsed_ms), !result.ok));
+                pane.provider_status = Some(ProviderStatus::TestResult {
+                    outcome: result.outcome,
+                    elapsed_ms: result.elapsed_ms,
+                });
                 cx.notify();
             });
         })
@@ -2017,17 +2558,14 @@ impl SettingsPane {
         let provider = self.provider_store.providers[index].clone();
         if self.provider_codex_confirm.as_deref() != Some(provider.id.as_str()) {
             self.provider_codex_confirm = Some(provider.id);
-            self.provider_status = Some((
-                "再次点击确认：API Key 将明文写入 Codex auth.json（原文件会备份）".to_owned(),
-                false,
-            ));
+            self.provider_status = Some(ProviderStatus::CodexConfirmation);
             cx.notify();
             return;
         }
         self.provider_codex_confirm = None;
         self.provider_status = Some(match crate::codex_config::apply_provider(&provider) {
-            Ok(path) => (format!("已应用到 Codex：{}", path.display()), false),
-            Err(error) => (error, true),
+            Ok(path) => ProviderStatus::AppliedToCodex(path),
+            Err(error) => ProviderStatus::Error(error),
         });
         cx.notify();
     }
@@ -2105,22 +2643,44 @@ impl SettingsPane {
     }
 
     fn section_home(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let checking = matches!(self.about_update, AboutUpdateState::Checking);
         let (status, status_color): (SharedString, Hsla) = match &self.about_update {
-            AboutUpdateState::Idle => ("通过 GitHub Releases 检查新版本。".into(), muted),
-            AboutUpdateState::Checking => ("正在检查更新…".into(), muted),
-            AboutUpdateState::UpToDate(latest) => {
-                (format!("已是最新版本（GitHub v{latest}）").into(), theme.success)
+            AboutUpdateState::Idle => (
+                language
+                    .pick(
+                        "通过 GitHub Releases 检查新版本。",
+                        "Check GitHub Releases for a newer version.",
+                    )
+                    .into(),
+                muted,
+            ),
+            AboutUpdateState::Checking => {
+                (language.pick("正在检查更新…", "Checking for updates...").into(), muted)
             },
-            AboutUpdateState::Available(latest) => {
-                (format!("发现新版本 v{latest}").into(), theme.warning)
-            },
-            AboutUpdateState::Failed(error) => (format!("检查失败：{error}").into(), theme.danger),
+            AboutUpdateState::UpToDate(latest) => (
+                format!("{} (GitHub v{latest})", language.pick("已是最新版本", "Up to date"))
+                    .into(),
+                theme.success,
+            ),
+            AboutUpdateState::Available(latest) => (
+                format!("{} v{latest}", language.pick("发现新版本", "New version available"))
+                    .into(),
+                theme.warning,
+            ),
+            AboutUpdateState::Failed(error) => (
+                format!("{}: {error}", language.pick("检查失败", "Update check failed")).into(),
+                theme.danger,
+            ),
         };
         let update_button = NebulaButton::new("about-check-updates")
-            .label(if checking { "正在检查…" } else { "检查更新" })
+            .label(if checking {
+                language.pick("正在检查…", "Checking...")
+            } else {
+                language.pick("检查更新", "Check for updates")
+            })
             .outline()
             .disabled(checking)
             .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx)));
@@ -2205,7 +2765,11 @@ impl SettingsPane {
                     .group_hover("about-transcript", |el| el.visible())
                     .hover(|el| el.bg(theme.list_hover))
                     .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new("复制这段信息").build(window, cx)
+                        gpui_component::tooltip::Tooltip::new(
+                            crate::gpui_shell::config::ui_language(cx)
+                                .pick("复制这段信息", "Copy this information"),
+                        )
+                        .build(window, cx)
                     })
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -2226,8 +2790,11 @@ impl SettingsPane {
             .child(Self::about_action_row(
                 "about-report-issue",
                 IconName::TriangleAlert,
-                "反馈问题",
-                "生成包含版本、平台与构建方式的预填 GitHub Issue",
+                language.pick("反馈问题", "Report an issue"),
+                language.pick(
+                    "生成包含版本、平台与构建方式的预填 GitHub Issue",
+                    "Open a prefilled GitHub issue with version, platform, and build details",
+                ),
                 issue_url(),
                 cx,
             ))
@@ -2235,15 +2802,18 @@ impl SettingsPane {
                 "about-github",
                 IconName::Github,
                 "GitHub",
-                "源代码",
+                language.pick("源代码", "Source code"),
                 REPOSITORY_URL.to_owned(),
                 cx,
             ))
             .child(Self::about_action_row(
                 "about-releases",
                 IconName::BookOpen,
-                "更新内容",
-                "查看发布说明并下载最新版本",
+                language.pick("更新内容", "Release notes"),
+                language.pick(
+                    "查看发布说明并下载最新版本",
+                    "View release notes and download the latest version",
+                ),
                 crate::update_check::RELEASES_PAGE.to_owned(),
                 cx,
             ));
@@ -2265,77 +2835,82 @@ impl SettingsPane {
     }
 
     fn section_appearance(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let language = crate::gpui_shell::config::ui_language(cx);
         // 旧壳 spinner 只显示整数（`{:.0}`）；步进也按整数走（见下）。
         let font_size: SharedString = format!("{:.0} px", self.terminal_font_size_px(cx)).into();
         let opacity: SharedString = format!("{:.0}%", self.runtime.opacity * 100.0).into();
         let wallpaper_opacity: SharedString =
             format!("{:.0}%", self.runtime.background_image_opacity * 100.0).into();
-        let preview = self.group("预览", cx).child(self.appearance_preview(cx));
-        let themes = self.group("主题", cx).child(self.theme_previews(cx));
-        let theme_mode = self.group("主题模式", cx).child(self.switch_row(
+        let preview =
+            self.group(language.pick("预览", "Preview"), cx).child(self.appearance_preview(cx));
+        let themes = self.group(language.pick("主题", "Theme"), cx).child(self.theme_previews(cx));
+        let theme_mode = self.group(language.pick("主题模式", "Theme mode"), cx).child(self.switch_row(
             "follow_system_theme",
-            "跟随系统明暗模式",
-            "开着时 Windows 切浅色/深色，Nebula 跟着换；上面手选的主题只在系统当前这个模式下生效。",
+            language.pick("跟随系统明暗模式", "Follow system light/dark mode"),
+            language.pick(
+                "开着时 Windows 切浅色/深色，Nebula 跟着换；上面手选的主题只在系统当前这个模式下生效。",
+                "When Windows changes between light and dark mode, Nebula follows it. The theme selected above applies to the system's current mode.",
+            ),
             self.runtime.follow_system_theme,
             cx,
         ));
         let custom_background = self
-            .group("自定义背景", cx)
+            .group(language.pick("自定义背景", "Custom background"), cx)
             .child(self.background_color_row(cx))
             .child(self.background_image_row(cx))
-            .child(self.select_row("background_image_fit", "背景图像拉伸模式", "拉伸会把图压变形；适应保持比例、四周留边；填充保持比例但裁掉溢出的部分；原始尺寸按图片自己的像素铺。", cx))
-            .child(self.select_row("background_image_alignment", "背景图像对齐", "图片没铺满或被裁掉时，保留哪一侧。壁纸类的图通常选顶部或居中，主体才不会被切走。", cx))
+            .child(self.select_row("background_image_fit", language.pick("背景图像拉伸模式", "Background image fit"), language.pick("拉伸会把图压变形；适应保持比例、四周留边；填充保持比例但裁掉溢出的部分；原始尺寸按图片自己的像素铺。", "Fill distorts the image; Uniform preserves its aspect ratio and may leave margins; Uniform to fill preserves the ratio but crops overflow; Original size uses the image's own pixels."), cx))
+            .child(self.select_row("background_image_alignment", language.pick("背景图像对齐", "Background image alignment"), language.pick("图片没铺满或被裁掉时，保留哪一侧。壁纸类的图通常选顶部或居中，主体才不会被切走。", "Choose which edge to preserve when the image does not fill the area or is cropped. Top or center usually keeps a wallpaper's subject visible."), cx))
             .child(self.slider_row(
-                "背景图像不透明度",
-                "压得越低文字越清楚。图片不参与配色，字色始终由主题决定。",
+                language.pick("背景图像不透明度", "Background image opacity"),
+                language.pick("压得越低文字越清楚。图片不参与配色，字色始终由主题决定。", "Lower values make text easier to read. The image does not affect colors; text colors always come from the theme."),
                 &self.wallpaper_opacity_slider,
                 wallpaper_opacity,
                 cx,
             ))
             .child(self.switch_row(
                 "background_image_cover_chrome",
-                "将背景图扩展到标题栏和侧边栏",
-                "开着时整窗一张图，界面和终端连成一片；关掉则图片只铺终端区域，侧栏与标题栏保持纯色、文字更稳。",
+                language.pick("将背景图扩展到标题栏和侧边栏", "Extend the background image into the title bar and sidebar"),
+                language.pick("开着时整窗一张图，界面和终端连成一片；关掉则图片只铺终端区域，侧栏与标题栏保持纯色、文字更稳。", "When enabled, one image covers the entire window. When disabled, it covers only the terminal while the sidebar and title bar keep a solid background."),
                 self.runtime.background_image_cover_chrome,
                 cx,
             ));
         let cursor = self
-            .group("光标", cx)
+            .group(language.pick("光标", "Cursor"), cx)
             .child(self.select_row(
                 "cursor_shape",
-                "光标形状",
-                "条形贴近编辑器的手感，实心框在满屏输出里最容易一眼找到。",
+                language.pick("光标形状", "Cursor shape"),
+                language.pick("条形贴近编辑器的手感，实心框在满屏输出里最容易一眼找到。", "A bar feels closer to an editor; a filled box is easiest to spot in dense terminal output."),
                 cx,
             ))
             .child(self.switch_row(
                 "cursor_blink",
-                "光标闪烁",
-                "关掉后光标常亮。长时间盯屏时不闪更省心，代价是光标在密集输出里没那么显眼。",
+                language.pick("光标闪烁", "Blink cursor"),
+                language.pick("关掉后光标常亮。长时间盯屏时不闪更省心，代价是光标在密集输出里没那么显眼。", "When disabled, the cursor stays lit. A steady cursor is calmer during long sessions but less visible in dense output."),
                 self.runtime.cursor_blink.unwrap_or(DEFAULT_CURSOR_BLINK),
                 cx,
             ));
         let interface = self
-            .group("界面", cx)
+            .group(language.pick("界面", "Interface"), cx)
             .child(self.select_row(
                 "language",
-                "语言",
-                "只改 Nebula 自己的界面。终端里程序输出什么语言由它们自己的环境变量决定，不受这里影响。",
+                language.pick("语言", "Language"),
+                language.pick("只改 Nebula 自己的界面。终端里程序输出什么语言由它们自己的环境变量决定，不受这里影响。", "Changes only Nebula's interface. Programs inside the terminal choose their language from their own environment and are not affected."),
                 cx,
             ))
-            .child(self.select_row("density", "界面外观", "紧凑会收窄标签行高与设置页行距这些界面留白。终端内容的行距不归它管，那是字体的事。", cx))
+            .child(self.select_row("density", language.pick("界面外观", "Interface density"), language.pick("紧凑会收窄标签行高与设置页行距这些界面留白。终端内容的行距不归它管，那是字体的事。", "Compact reduces interface spacing such as tab height and Settings row gaps. It does not change terminal line spacing, which is controlled by the font."), cx))
             .child(self.slider_row(
-                "终端正文不透明度",
-                "1 = 完全不透明。调低会透出后方窗口，配合下面的窗口模糊才不至于让文字压在杂乱内容上。",
+                language.pick("终端正文不透明度", "Terminal content opacity"),
+                language.pick("1 = 完全不透明。调低会透出后方窗口，配合下面的窗口模糊才不至于让文字压在杂乱内容上。", "1 is fully opaque. Lower values reveal windows behind Nebula; use window blur to keep terminal text readable over busy content."),
                 &self.opacity_slider,
                 opacity,
                 cx,
             ))
-            .child(self.select_row("blur", "背景模糊", "五者是五套成本模型，不是越靠后越好：Mica 只取系统壁纸的色调、最省；Aero 与 Acrylic 每帧实时模糊窗口后方的真实内容，Acrylic 还多一层着色与噪点。", cx));
+            .child(self.select_row("blur", language.pick("背景模糊", "Background blur"), language.pick("五者是五套成本模型，不是越靠后越好：Mica 只取系统壁纸的色调、最省；Aero 与 Acrylic 每帧实时模糊窗口后方的真实内容，Acrylic 还多一层着色与噪点。", "These are different performance models, not quality levels. Mica only samples the wallpaper tint and costs least; Aero and Acrylic blur live content behind the window every frame, and Acrylic adds tint and noise."), cx));
         let terminal = self
-            .group("终端外观", cx)
+            .group(language.pick("终端外观", "Terminal appearance"), cx)
             .child(self.stepper_row(
-                "终端字号（Ctrl+滚轮缩放）",
-                "只改终端网格。侧栏与设置页的文字锚在配置字号上，不会跟着一起放大。",
+                language.pick("终端字号（Ctrl+滚轮缩放）", "Terminal font size (Ctrl+wheel)"),
+                language.pick("只改终端网格。侧栏与设置页的文字锚在配置字号上，不会跟着一起放大。", "Changes only the terminal grid. Sidebar and Settings text stay anchored to the configured UI size."),
                 "font-size",
                 font_size, // 整数步进：分数字号（滚轮缩放遗留，如 15.30）先吸附回
                 // 最近的整数档，再继续 ±1——不会出现 15.3→14.3 这类漂移。
@@ -2349,18 +2924,18 @@ impl SettingsPane {
                 },
                 cx,
             ))
-            .child(self.select_row("cell_width_mode", "字体间距", "列宽的取整方式。紧凑向下取整、字更密；宽松向上补一像素，专治 `Maple Mono` 这类平均字宽带小数的字体把字形挤扁。只作用于终端网格。", cx))
+            .child(self.select_row("cell_width_mode", language.pick("字体间距", "Character spacing"), language.pick("列宽的取整方式。紧凑向下取整、字更密；宽松向上补一像素，专治 `Maple Mono` 这类平均字宽带小数的字体把字形挤扁。只作用于终端网格。", "Controls how terminal cell width is rounded. Compact rounds down for denser text; Relaxed adds a pixel to prevent fonts with fractional widths, such as `Maple Mono`, from looking squeezed. This affects only the terminal grid."), cx))
             .child(self.switch_row(
                 "fetch",
-                "启动欢迎信息",
-                "新会话开头跑一次 `fastfetch` 打印系统信息。默认关，因为开新标签会因此慢一拍。",
+                language.pick("启动欢迎信息", "Startup system information"),
+                language.pick("新会话开头跑一次 `fastfetch` 打印系统信息。默认关，因为开新标签会因此慢一拍。", "Runs `fastfetch` at the start of a new session. It is off by default because it adds a delay when opening a tab."),
                 self.runtime.fetch,
                 cx,
             ))
             .child(self.switch_row(
                 "powerline",
-                "Powerline 提示符",
-                "给 Nebula 注入的提示符加箭头分段。需要终端字体带 Powerline 字形，否则那些箭头会显示成方框。",
+                language.pick("Powerline 提示符", "Powerline prompt"),
+                language.pick("给 Nebula 注入的提示符加箭头分段。需要终端字体带 Powerline 字形，否则那些箭头会显示成方框。", "Adds arrow segments to Nebula's injected prompt. The terminal font must include Powerline glyphs or the arrows will render as boxes."),
                 self.runtime.powerline,
                 cx,
             ));
@@ -2378,43 +2953,45 @@ impl SettingsPane {
     }
 
     fn section_profiles(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let font_picker = self.font_picker_dropdown(window, cx);
         let terminal = self
-            .group("终端", cx)
+            .group(language.pick("终端", "Terminal"), cx)
             .child(self.shell_select_row(cx))
             .child(self.startup_directory_row(cx))
             .child(self.select_row(
                 "bell",
-                "终端铃声",
-                "程序发出 BEL 时的反应。开放工位上选闪烁，免得一次 Tab 补全失败响得整层楼都听见。",
+                language.pick("终端铃声", "Terminal bell"),
+                language.pick("程序发出 BEL 时的反应。开放工位上选闪烁，免得一次 Tab 补全失败响得整层楼都听见。", "Controls how Nebula responds to BEL. Visual feedback is useful in shared spaces where an audible bell would be disruptive."),
                 cx,
             ))
             .child(font_picker);
         let completion = self
-            .group("补全", cx)
+            .group(language.pick("补全", "Completion"), cx)
             .child(self.switch_row(
                 "ghost",
-                "启用命令补全",
-                "按历史在光标后给出灰色建议，按下接受键才真正写进命令行。关掉后不再出现任何建议。",
+                language.pick("启用命令补全", "Enable command completion"),
+                language.pick("按历史在光标后给出灰色建议，按下接受键才真正写进命令行。关掉后不再出现任何建议。", "Shows history-based suggestions after the cursor and inserts one only when the accept key is pressed. Disable this to hide all suggestions."),
                 self.runtime.ghost,
                 cx,
             ))
             .child(self.select_row(
                 "accept",
-                "补全接受键",
-                "用哪个键把灰色建议收下。Tab 在不少 shell 里已经绑了原生补全，撞车时改成右方向键。",
+                language.pick("补全接受键", "Completion accept key"),
+                language.pick("用哪个键把灰色建议收下。Tab 在不少 shell 里已经绑了原生补全，撞车时改成右方向键。", "Chooses the key that accepts a suggestion. Many shells already use Tab for native completion; use Right arrow if they conflict."),
                 cx,
             ))
             .child(self.select_row(
                 "completion_style",
-                "补全样式",
-                "行内灰字续在光标后，不挡住下方输出；弹窗列表能一次看到多个候选，代价是会盖住一片终端内容。",
+                language.pick("补全样式", "Completion style"),
+                language.pick("行内灰字续在光标后，不挡住下方输出；弹窗列表能一次看到多个候选，代价是会盖住一片终端内容。", "Inline ghost text follows the cursor without covering output. A popup shows several candidates at once but obscures part of the terminal."),
                 cx,
             ));
         v_flex().w_full().gap(px(GROUP_GAP)).child(terminal).child(completion)
     }
 
     fn section_providers(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let theme = cx.theme();
         let hover_bg = crate::gpui_shell::theme::settings_hover_bg(cx, false);
         let active_index = self.active_provider_index().unwrap_or(0);
@@ -2454,14 +3031,18 @@ impl SettingsPane {
         if let Some(provider) = active {
             let key_status: SharedString = if provider.api_key_set {
                 if provider.api_key_hint.is_empty() {
-                    "已保存在系统凭据管理器".into()
+                    language
+                        .pick("已保存在系统凭据管理器", "Saved in the system credential manager")
+                        .into()
                 } else {
                     provider.api_key_hint.clone().into()
                 }
             } else if provider.kind.requires_api_key() {
-                "未设置".into()
+                language.pick("未设置", "Not set").into()
             } else {
-                "此供应商不需要 API Key".into()
+                language
+                    .pick("此供应商不需要 API Key", "This provider does not require an API key")
+                    .into()
             };
             let enabled = provider.enabled;
             let goals = provider.codex_goals;
@@ -2469,8 +3050,11 @@ impl SettingsPane {
             editor = editor
                 .child(
                     self.row(
-                        "启用",
-                        "关掉后这个供应商不再出现在 AI 启动器里，配置和密钥都留着，随时可以开回来。",
+                        language.pick("启用", "Enabled"),
+                        language.pick(
+                            "关掉后这个供应商不再出现在 AI 启动器里，配置和密钥都留着，随时可以开回来。",
+                            "When disabled, this provider is hidden from the AI launcher. Its settings and key are kept so it can be enabled again later.",
+                        ),
                         crate::gpui_shell::widgets::NebulaSwitch::new("provider-enabled")
                             .checked(enabled)
                             .on_click(cx.listener(|this, value: &bool, _, cx| {
@@ -2480,39 +3064,48 @@ impl SettingsPane {
                     ),
                 )
                 .child(self.row(
-                    "名称",
+                    language.pick("名称", "Name"),
                     "",
                     div().w(px(330.0)).child(Input::new(&self.provider_inputs[0])),
                     cx,
                 ))
                 .child(self.row(
-                    "备注",
+                    language.pick("备注", "Note"),
                     "",
                     div().w(px(330.0)).child(Input::new(&self.provider_inputs[1])),
                     cx,
                 ))
                 .child(self.row(
-                    "官方网站",
+                    language.pick("官方网站", "Official website"),
                     "",
                     div().w(px(330.0)).child(Input::new(&self.provider_inputs[2])),
                     cx,
                 ))
                 .child(self.row(
-                    "API 请求地址",
-                    "供应商的 API 根地址，多数以 `/v1` 结尾。这里填错不会在保存时报错，而是等到第一次对话请求才失败。",
+                    language.pick("API 请求地址", "API endpoint"),
+                    language.pick(
+                        "供应商的 API 根地址，多数以 `/v1` 结尾。这里填错不会在保存时报错，而是等到第一次对话请求才失败。",
+                        "The provider's API base URL, usually ending in `/v1`. An invalid address is detected by the first conversation request, not when these settings are saved.",
+                    ),
                     div().w(px(330.0)).child(Input::new(&self.provider_inputs[3])),
                     cx,
                 ))
                 .child(self.row(
-                    "默认模型",
-                    "新会话默认用的模型名，按供应商文档里的写法逐字填——名字对不上时同样是发起请求那一刻才报错。",
+                    language.pick("默认模型", "Default model"),
+                    language.pick(
+                        "新会话默认用的模型名，按供应商文档里的写法逐字填——名字对不上时同样是发起请求那一刻才报错。",
+                        "The model name used for new conversations. Enter it exactly as documented by the provider; an invalid name is detected when a request is sent.",
+                    ),
                     div().w(px(330.0)).child(Input::new(&self.provider_inputs[4])),
                     cx,
                 ))
                 .child(
                     self.row(
                         "API Key",
-                        "密钥不写进设置文件，这里只显示它是否已经设过。换一把新的直接点替换，旧的会被覆盖。",
+                        language.pick(
+                            "密钥不写进设置文件，这里只显示它是否已经设过。换一把新的直接点替换，旧的会被覆盖。",
+                            "The key is not written to the settings file. This row only shows whether one is stored; replacing it overwrites the old key.",
+                        ),
                         h_flex()
                             .gap_2()
                             .items_center()
@@ -2525,9 +3118,9 @@ impl SettingsPane {
                             .child(
                                 NebulaButton::new("provider-set-key")
                                     .label(if provider.api_key_set {
-                                        "替换…"
+                                        language.pick("替换…", "Replace...")
                                     } else {
-                                        "设置…"
+                                        language.pick("设置…", "Set...")
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.prompt_provider_key(cx);
@@ -2539,7 +3132,10 @@ impl SettingsPane {
                 .child(
                     self.row(
                         "Codex Goals",
-                        "写进 `~/.codex/config.toml` 的 `features.goals`。这是 Codex 自己的特性开关，Nebula 只负责把它落到配置里，其它供应商不受影响。",
+                        language.pick(
+                            "写进 `~/.codex/config.toml` 的 `features.goals`。这是 Codex 自己的特性开关，Nebula 只负责把它落到配置里，其它供应商不受影响。",
+                            "Writes `features.goals` to `~/.codex/config.toml`. This is a Codex feature flag; Nebula only persists it and other providers are unaffected.",
+                        ),
                         crate::gpui_shell::widgets::NebulaSwitch::new("provider-codex-goals")
                             .checked(goals)
                             .on_click(cx.listener(|this, value: &bool, _, cx| {
@@ -2550,8 +3146,11 @@ impl SettingsPane {
                 )
                 .child(
                     self.row(
-                        "Codex 远程压缩",
-                        "同上，对应 `features.remote_compaction_v2`。同样只在用 Codex 时生效。",
+                        language.pick("Codex 远程压缩", "Codex remote compaction"),
+                        language.pick(
+                            "同上，对应 `features.remote_compaction_v2`。同样只在用 Codex 时生效。",
+                            "As above, this controls `features.remote_compaction_v2` and only applies to Codex.",
+                        ),
                         crate::gpui_shell::widgets::NebulaSwitch::new("provider-codex-remote")
                             .checked(remote)
                             .on_click(cx.listener(|this, value: &bool, _, cx| {
@@ -2563,7 +3162,7 @@ impl SettingsPane {
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(NebulaButton::new("provider-save").label("保存").on_click(
+                        .child(NebulaButton::new("provider-save").label(language.pick("保存", "Save")).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.save_provider_metadata(cx);
                                 cx.notify();
@@ -2572,22 +3171,22 @@ impl SettingsPane {
                         .child(
                             NebulaButton::new("provider-test")
                                 .label(if self.provider_test_running {
-                                    "测试中…"
+                                    language.pick("测试中…", "Testing...")
                                 } else {
-                                    "测试连接"
+                                    language.pick("测试连接", "Test connection")
                                 })
                                 .disabled(self.provider_test_running)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.test_provider(cx);
                                 })),
                         )
-                        .child(NebulaButton::new("provider-codex").label("应用到 Codex").on_click(
+                        .child(NebulaButton::new("provider-codex").label(language.pick("应用到 Codex", "Apply to Codex")).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.apply_provider_to_codex(cx);
                             }),
                         ))
                         .child(
-                            NebulaButton::new("provider-delete").label("删除").danger().on_click(
+                            NebulaButton::new("provider-delete").label(language.pick("删除", "Delete")).danger().on_click(
                                 cx.listener(|this, _, window, cx| {
                                     this.delete_provider(window, cx);
                                 }),
@@ -2595,10 +3194,14 @@ impl SettingsPane {
                         ),
                 );
         } else {
-            editor = editor.child(div().text_color(theme.muted_foreground).child("没有供应商配置"));
+            editor = editor.child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child(language.pick("没有供应商配置", "No provider configured")),
+            );
         }
 
-        self.group("供应商", cx)
+        self.group(language.pick("供应商", "Providers"), cx)
             .child(
                 h_flex()
                     .w_full()
@@ -2613,16 +3216,18 @@ impl SettingsPane {
                             .overflow_y_scrollbar()
                             .children(provider_rows)
                             .child(
-                                NebulaButton::new("provider-add").label("+ 自定义供应商").on_click(
-                                    cx.listener(|this, _, window, cx| {
+                                NebulaButton::new("provider-add")
+                                    .label(language.pick("+ 自定义供应商", "+ Custom provider"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.add_provider(window, cx);
-                                    }),
-                                ),
+                                    })),
                             ),
                     )
                     .child(editor),
             )
-            .when_some(self.provider_status.clone(), |group, (message, error)| {
+            .when_some(self.provider_status.clone(), |group, status| {
+                let error = status.is_error();
+                let message = status.text(language);
                 group.child(
                     div()
                         .text_color(if error { theme.danger } else { theme.success })
@@ -2638,23 +3243,23 @@ impl SettingsPane {
     fn backup_passphrase(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let pass = self.backup_pass_input.read(cx).value().to_string();
         if pass.chars().count() < 8 {
-            self.backup_status = Some(("备份密码至少 8 位".to_owned(), true));
+            self.backup_status = Some(BackupStatus::PassphraseTooShort);
             cx.notify();
             return None;
         }
         Some(pass)
     }
 
-    /// 后台执行一段备份计算并把结果写回状态行。`Ok` 文案由任务给出。
+    /// 后台任务只返回语义结果，显示语言在渲染时决定，切换语言不会留下旧文案。
     fn backup_run_async(
         &mut self,
-        task: impl std::future::Future<Output = Result<String, String>> + Send + 'static,
+        task: impl std::future::Future<Output = Result<BackupCompletion, String>> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         self.backup_seq = self.backup_seq.wrapping_add(1);
         let seq = self.backup_seq;
         self.backup_busy = true;
-        self.backup_status = Some(("处理中…".to_owned(), false));
+        self.backup_status = Some(BackupStatus::Processing);
         let task = cx.background_executor().spawn(task);
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -2664,8 +3269,8 @@ impl SettingsPane {
                 }
                 pane.backup_busy = false;
                 pane.backup_status = Some(match result {
-                    Ok(message) => (message, false),
-                    Err(error) => (error, true),
+                    Ok(completion) => BackupStatus::Completed(completion),
+                    Err(error) => BackupStatus::Error(error),
                 });
                 cx.notify();
             });
@@ -2681,7 +3286,7 @@ impl SettingsPane {
         }
         let Some(pass) = self.backup_passphrase(cx) else { return };
         if self.backup_selection.is_empty() {
-            self.backup_status = Some(("请至少勾选一个备份类别".to_owned(), true));
+            self.backup_status = Some(BackupStatus::SelectionRequired);
             cx.notify();
             return;
         }
@@ -2704,7 +3309,7 @@ impl SettingsPane {
                         let packet = crate::encrypted_backup::seal(&archive, &pass)?;
                         std::fs::write(&path, packet)
                             .map_err(|err| format!("写入备份文件失败：{err}"))?;
-                        Ok(format!("已导出加密备份：{}", path.display()))
+                        Ok(BackupCompletion::Exported(path))
                     },
                     cx,
                 );
@@ -2723,7 +3328,11 @@ impl SettingsPane {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("选择 Nebula 加密备份".into()),
+            prompt: Some(
+                crate::gpui_shell::config::ui_language(cx)
+                    .pick("选择 Nebula 加密备份", "Select an encrypted Nebula backup")
+                    .into(),
+            ),
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else { return };
@@ -2734,7 +3343,7 @@ impl SettingsPane {
                         let packet = std::fs::read(&path)
                             .map_err(|err| format!("读取备份文件失败：{err}"))?;
                         crate::encrypted_backup::restore(&packet, &pass)?;
-                        Ok("已从备份恢复（字体/托盘等部分设置重启后生效）".to_owned())
+                        Ok(BackupCompletion::Restored)
                     },
                     cx,
                 );
@@ -2774,8 +3383,8 @@ impl SettingsPane {
             input_ix += 1;
         }
         self.backup_status = Some(match self.backup_remote.save() {
-            Ok(()) => ("远端配置已保存".to_owned(), false),
-            Err(err) => (err, true),
+            Ok(()) => BackupStatus::RemoteConfigSaved,
+            Err(err) => BackupStatus::Error(err),
         });
         cx.notify();
     }
@@ -2785,7 +3394,7 @@ impl SettingsPane {
         self.save_remote_config(cx);
         let secret = self.backup_secret_input.read(cx).value().to_string();
         if secret.is_empty() {
-            self.backup_status = Some(("凭据不能为空".to_owned(), true));
+            self.backup_status = Some(BackupStatus::CredentialEmpty);
             cx.notify();
             return;
         }
@@ -2799,11 +3408,15 @@ impl SettingsPane {
             crate::backup_remote::BackupProtocol::S3 => {
                 crate::backup_remote::store_s3_secret(&self.backup_remote.s3_access_key, &secret)
             },
-            _ => Err("当前协议不需要独立凭据".to_owned()),
+            _ => {
+                self.backup_status = Some(BackupStatus::CredentialUnsupported);
+                cx.notify();
+                return;
+            },
         };
         self.backup_status = Some(match result {
-            Ok(()) => ("凭据已写入系统凭据管理器".to_owned(), false),
-            Err(err) => (err, true),
+            Ok(()) => BackupStatus::CredentialSaved,
+            Err(err) => BackupStatus::Error(err),
         });
         self.backup_secret_input.update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
@@ -2817,7 +3430,7 @@ impl SettingsPane {
         let Some(pass) = self.backup_passphrase(cx) else { return };
         self.save_remote_config(cx);
         if self.backup_selection.is_empty() {
-            self.backup_status = Some(("请至少勾选一个备份类别".to_owned(), true));
+            self.backup_status = Some(BackupStatus::SelectionRequired);
             cx.notify();
             return;
         }
@@ -2828,7 +3441,7 @@ impl SettingsPane {
                 let archive = crate::encrypted_backup::collect(selection)?;
                 let packet = crate::encrypted_backup::seal(&archive, &pass)?;
                 let location = crate::backup_remote::push(&packet)?;
-                Ok(format!("已推送到 {location}"))
+                Ok(BackupCompletion::Pushed(location))
             },
             cx,
         );
@@ -2846,7 +3459,7 @@ impl SettingsPane {
                 crate::backup_remote::validate()?;
                 let (name, packet) = crate::backup_remote::pull_latest()?;
                 crate::encrypted_backup::restore(&packet, &pass)?;
-                Ok(format!("已从 {name} 恢复（部分设置重启后生效）"))
+                Ok(BackupCompletion::Pulled(name))
             },
             cx,
         );
@@ -2890,6 +3503,7 @@ impl SettingsPane {
 
     fn section_backup(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         use crate::backup_remote::BackupProtocol;
+        let language = crate::gpui_shell::config::ui_language(cx);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let busy = self.backup_busy;
@@ -2897,25 +3511,70 @@ impl SettingsPane {
 
         // 类别开关（与共享 `BackupSelection` 一一对应）。
         let categories: [(&'static str, &'static str, bool, fn(&mut Self, bool)); 9] = [
-            ("bk-appearance", "外观与主题", selection.appearance, |s, v| {
-                s.backup_selection.appearance = v;
-            }),
-            ("bk-config", "终端配置", selection.config, |s, v| s.backup_selection.config = v),
-            ("bk-ssh", "SSH 主机（脱敏）", selection.ssh, |s, v| s.backup_selection.ssh = v),
-            ("bk-sync", "同步配置", selection.sync, |s, v| s.backup_selection.sync = v),
-            ("bk-assistant", "AI 助手配置", selection.assistant, |s, v| {
-                s.backup_selection.assistant = v;
-            }),
-            ("bk-session", "会话与工作区", selection.session, |s, v| {
-                s.backup_selection.session = v;
-            }),
-            ("bk-dirhist", "目录历史", selection.directory_history, |s, v| {
-                s.backup_selection.directory_history = v;
-            }),
-            ("bk-cmdhist", "命令历史", selection.command_history, |s, v| {
-                s.backup_selection.command_history = v;
-            }),
-            ("bk-fonts", "自装字体", selection.fonts, |s, v| s.backup_selection.fonts = v),
+            (
+                "bk-appearance",
+                language.pick("外观与主题", "Appearance and themes"),
+                selection.appearance,
+                |s, v| {
+                    s.backup_selection.appearance = v;
+                },
+            ),
+            (
+                "bk-config",
+                language.pick("终端配置", "Terminal configuration"),
+                selection.config,
+                |s, v| s.backup_selection.config = v,
+            ),
+            (
+                "bk-ssh",
+                language.pick("SSH 主机（脱敏）", "SSH hosts (redacted)"),
+                selection.ssh,
+                |s, v| s.backup_selection.ssh = v,
+            ),
+            (
+                "bk-sync",
+                language.pick("同步配置", "Sync configuration"),
+                selection.sync,
+                |s, v| s.backup_selection.sync = v,
+            ),
+            (
+                "bk-assistant",
+                language.pick("AI 助手配置", "AI assistant configuration"),
+                selection.assistant,
+                |s, v| {
+                    s.backup_selection.assistant = v;
+                },
+            ),
+            (
+                "bk-session",
+                language.pick("会话与工作区", "Sessions and workspaces"),
+                selection.session,
+                |s, v| {
+                    s.backup_selection.session = v;
+                },
+            ),
+            (
+                "bk-dirhist",
+                language.pick("目录历史", "Directory history"),
+                selection.directory_history,
+                |s, v| {
+                    s.backup_selection.directory_history = v;
+                },
+            ),
+            (
+                "bk-cmdhist",
+                language.pick("命令历史", "Command history"),
+                selection.command_history,
+                |s, v| {
+                    s.backup_selection.command_history = v;
+                },
+            ),
+            (
+                "bk-fonts",
+                language.pick("自装字体", "Installed fonts"),
+                selection.fonts,
+                |s, v| s.backup_selection.fonts = v,
+            ),
         ];
         // 这九行是一份勾选清单，不逐项写说明：清单的价值在于一眼扫完，
         // 每行挂两行小字会把它撑成九屏。范围与边界由组顶部那句统一交代
@@ -2936,8 +3595,8 @@ impl SettingsPane {
 
         let protocol = self.backup_remote.protocol;
         let protocol_buttons = [
-            (BackupProtocol::Off, "关闭"),
-            (BackupProtocol::Folder, "目录"),
+            (BackupProtocol::Off, language.pick("关闭", "Off")),
+            (BackupProtocol::Folder, language.pick("目录", "Folder")),
             (BackupProtocol::WebDav, "WebDAV"),
             (BackupProtocol::S3, "S3"),
             (BackupProtocol::Sftp, "SFTP"),
@@ -2956,10 +3615,18 @@ impl SettingsPane {
         // 非密文槽位标签（顺序 = `BackupRemoteConfig::slot` 的下标序）。
         let slot_labels: &[&'static str] = match protocol {
             BackupProtocol::Off => &[],
-            BackupProtocol::Folder => &["目标目录"],
-            BackupProtocol::WebDav => &["WebDAV 地址", "用户名"],
-            BackupProtocol::S3 => &["Endpoint", "Region", "桶/前缀", "Access Key"],
-            BackupProtocol::Sftp => &["SSH 目的地 (user@host)", "远端目录"],
+            BackupProtocol::Folder => &[language.pick("目标目录", "Target folder")],
+            BackupProtocol::WebDav => &[
+                language.pick("WebDAV 地址", "WebDAV address"),
+                language.pick("用户名", "Username"),
+            ],
+            BackupProtocol::S3 => {
+                &["Endpoint", "Region", language.pick("桶/前缀", "Bucket/prefix"), "Access Key"]
+            },
+            BackupProtocol::Sftp => &[
+                language.pick("SSH 目的地 (user@host)", "SSH destination (user@host)"),
+                language.pick("远端目录", "Remote directory"),
+            ],
         };
         let slot_rows = slot_labels.iter().enumerate().map(|(ix, label)| {
             let input = self.backup_remote_inputs.get(ix).cloned();
@@ -2973,16 +3640,18 @@ impl SettingsPane {
 
         let secret_ready = crate::backup_remote::protocol_secret_set(protocol);
         let secret_label = match protocol {
-            BackupProtocol::WebDav => Some("WebDAV 密码"),
+            BackupProtocol::WebDav => Some(language.pick("WebDAV 密码", "WebDAV password")),
             BackupProtocol::S3 => Some("S3 Secret Key"),
             _ => None,
         };
 
         let mut remote_group = self
-            .group("远端同步", cx)
+            .group(language.pick("远端同步", "Remote sync"), cx)
             .child(div().text_xs().text_color(muted).child(
-                "推送 = 当前勾选类别加密打包后上传；恢复最新 = 拉取远端最新包解密落盘。\
-                 SFTP 复用上方 SSH 主机的认证。",
+                language.pick(
+                    "推送 = 当前勾选类别加密打包后上传；恢复最新 = 拉取远端最新包解密落盘。SFTP 复用上方 SSH 主机的认证。",
+                    "Push encrypts and uploads the selected categories. Restore latest downloads, decrypts, and applies the newest remote archive. SFTP reuses SSH host authentication configured above.",
+                ),
             ))
             .child(h_flex().gap_2().children(protocol_buttons))
             .children(slot_rows);
@@ -2995,16 +3664,18 @@ impl SettingsPane {
                         .gap_2()
                         .items_center()
                         .child(div().text_xs().text_color(muted).child(if secret_ready {
-                            "已设置"
+                            language.pick("已设置", "Set")
                         } else {
-                            "未设置"
+                            language.pick("未设置", "Not set")
                         }))
                         .child(div().w(px(220.0)).child(Input::new(&self.backup_secret_input)))
-                        .child(NebulaButton::new("bk-store-secret").label("保存凭据").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.store_remote_secret(window, cx);
-                            }),
-                        )),
+                        .child(
+                            NebulaButton::new("bk-store-secret")
+                                .label(language.pick("保存凭据", "Save credential"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.store_remote_secret(window, cx);
+                                })),
+                        ),
                     cx,
                 ),
             );
@@ -3013,41 +3684,51 @@ impl SettingsPane {
             remote_group = remote_group.child(
                 h_flex()
                     .gap_2()
-                    .child(NebulaButton::new("bk-save-remote").label("保存配置").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.save_remote_config(cx);
-                        }),
-                    ))
+                    .child(
+                        NebulaButton::new("bk-save-remote")
+                            .label(language.pick("保存配置", "Save configuration"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.save_remote_config(cx);
+                            })),
+                    )
                     .child(
                         NebulaButton::new("bk-push")
-                            .label(if busy { "处理中…" } else { "立即推送" })
+                            .label(if busy {
+                                language.pick("处理中…", "Processing...")
+                            } else {
+                                language.pick("立即推送", "Push now")
+                            })
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.push_remote(cx);
                             })),
                     )
                     .child(
-                        NebulaButton::new("bk-pull").label("恢复最新备份").disabled(busy).on_click(
-                            cx.listener(|this, _, _, cx| {
+                        NebulaButton::new("bk-pull")
+                            .label(language.pick("恢复最新备份", "Restore latest backup"))
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 this.pull_remote(cx);
-                            }),
-                        ),
+                            })),
                     ),
             );
         }
 
         let local_group = self
-            .group("加密备份", cx)
+            .group(language.pick("加密备份", "Encrypted backup"), cx)
             .child(
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child("端到端加密（密码不落盘）；SSH 私钥永不进包，主机列表脱敏导出。"),
+                    .child(language.pick(
+                        "端到端加密（密码不落盘）；SSH 私钥永不进包，主机列表脱敏导出。",
+                        "End-to-end encrypted; the password is never persisted. SSH private keys are never included and host lists are exported with sensitive data removed.",
+                    )),
             )
             .children(category_rows)
             .child(self.row(
-                "备份密码",
-                "导出时用它加密整个包，恢复时要一模一样的一串。密码不落盘、也无从找回——忘了这份备份就打不开了。",
+                language.pick("备份密码", "Backup password"),
+                language.pick("导出时用它加密整个包，恢复时要一模一样的一串。密码不落盘、也无从找回——忘了这份备份就打不开了。", "This password encrypts the entire export and the exact same value is required to restore it. It is neither persisted nor recoverable; losing it makes the backup unreadable."),
                 div().w(px(300.0)).child(Input::new(&self.backup_pass_input)),
                 cx,
             ))
@@ -3056,7 +3737,11 @@ impl SettingsPane {
                     .gap_2()
                     .child(
                         NebulaButton::new("bk-export")
-                            .label(if busy { "处理中…" } else { "导出到文件…" })
+                            .label(if busy {
+                                language.pick("处理中…", "Processing...")
+                            } else {
+                                language.pick("导出到文件…", "Export to file...")
+                            })
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.export_backup(cx);
@@ -3064,7 +3749,7 @@ impl SettingsPane {
                     )
                     .child(
                         NebulaButton::new("bk-restore")
-                            .label("从文件恢复…")
+                            .label(language.pick("从文件恢复…", "Restore from file..."))
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.restore_backup(cx);
@@ -3074,7 +3759,9 @@ impl SettingsPane {
 
         v_flex().w_full().gap(px(GROUP_GAP)).child(local_group).child(remote_group).when_some(
             self.backup_status.clone(),
-            |page, (message, error)| {
+            |page, status| {
+                let error = status.is_error();
+                let message = status.text(language);
                 page.child(
                     div()
                         .pt_4()
@@ -3086,97 +3773,99 @@ impl SettingsPane {
     }
 
     fn section_interaction(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let language = crate::gpui_shell::config::ui_language(cx);
         // 分区名已经写在页头上，组标题再叫一遍"交互"就是同一个词说两遍。
         // 拆成两组反而各自有了名字：一组管鼠标怎么用，一组管标签往哪放。
         v_flex()
             .w_full()
             .gap(px(GROUP_GAP))
             .child(
-                self.group("鼠标与选区", cx)
+                self.group(language.pick("鼠标与选区", "Mouse and selection"), cx)
                     .child(self.switch_row(
                         "copy_on_select",
-                        "选中即复制（关 = 右键复制/粘贴）",
-                        "开着时松开鼠标就进剪贴板，右键直接粘贴。关掉后选中不复制，右键弹菜单——Windows 终端的老习惯。",
+                        language.pick("选中即复制（关 = 右键复制/粘贴）", "Copy on select (off = right-click copy/paste)"),
+                        language.pick("开着时松开鼠标就进剪贴板，右键直接粘贴。关掉后选中不复制，右键弹出复制/粘贴菜单。", "When enabled, releasing the mouse copies the selection and right-click pastes. When disabled, selection does not copy and right-click opens a copy/paste menu."),
                         self.runtime.copy_on_select,
                         cx,
                     ))
                     .child(self.switch_row(
                         "panel_resize",
-                        "拖拽调节侧栏宽度",
-                        "关掉后侧栏与面板的分界线钉死，拖不动；宽度仍可在别处改，只是不会被误拖。",
+                        language.pick("拖拽调节侧栏宽度", "Drag to resize the sidebar"),
+                        language.pick("关掉后侧栏与面板的分界线钉死，拖不动；宽度仍可在别处改，只是不会被误拖。", "When disabled, the divider between the sidebar and panel cannot be dragged. The width can still be changed elsewhere without accidental resizing."),
                         self.runtime.panel_resize,
                         cx,
                     ))
                     .child(self.switch_row(
                         "cjk_bold_regular",
-                        "CJK 粗体使用常规字形（提亮不加粗）",
-                        "中日韩字形笔画密，字体引擎合成的伪粗体会糊成一团。开着时这些字改用提亮表达加粗，拉丁字母照旧走真粗体。",
+                        language.pick("CJK 粗体使用常规字形（提亮不加粗）", "Use regular glyphs for CJK bold (brighten without thickening)"),
+                        language.pick("中日韩字形笔画密，字体引擎合成的伪粗体会糊成一团。开着时这些字改用提亮表达加粗，拉丁字母照旧走真粗体。", "Synthetic bold can blur dense CJK glyphs. When enabled, CJK bold is represented by brighter regular glyphs while Latin text still uses true bold."),
                         self.runtime.cjk_bold_regular,
                         cx,
                     )),
             )
             .child(
-                self.group("标签与窗口", cx)
+                self.group(language.pick("标签与窗口", "Tabs and windows"), cx)
                     .child(self.select_row(
                         "tabs_position",
-                        "标签栏位置",
-                        "左侧边栏放得下完整路径和分屏结构，顶部则把纵向空间全留给终端。",
+                        language.pick("标签栏位置", "Tab bar position"),
+                        language.pick("左侧边栏放得下完整路径和分屏结构，顶部则把纵向空间全留给终端。", "The left sidebar can show full paths and split structure; the top position reserves all vertical space for the terminal."),
                         cx,
                     ))
                     .child(self.select_row(
                         "tab_reveal",
-                        "标签展开动效",
-                        "滑动=新标签带位移动画；即时=直接出现。远程桌面或低配机上选即时能少掉一次重绘。",
+                        language.pick("标签展开动效", "Tab reveal animation"),
+                        language.pick("滑动=新标签带位移动画；即时=直接出现。远程桌面或低配机上选即时能少掉一次重绘。", "Slide animates new tabs into place; Instant shows them immediately. Instant avoids an extra redraw on remote desktops or slower computers."),
                         cx,
                     ))
                     .child(self.select_row(
                         "new_tab_position",
-                        "新标签位置",
-                        "只管新建的标签插在哪。会话恢复与工作区导入按各自记录的顺序排，不看这一项。",
+                        language.pick("新标签位置", "New tab position"),
+                        language.pick("只管新建的标签插在哪。会话恢复与工作区导入按各自记录的顺序排，不看这一项。", "Controls only where newly created tabs are inserted. Restored sessions and imported workspaces retain their recorded order."),
                         cx,
                     ))
                     .child(self.select_row(
                         "windowing_behavior",
-                        "新建实例行为",
-                        "从桌面或命令行再启动一次 Nebula 时：另开一个窗口，还是把它作为新标签并进已有窗口。",
+                        language.pick("新建实例行为", "New instance behavior"),
+                        language.pick("从桌面或命令行再启动一次 Nebula 时：另开一个窗口，还是把它作为新标签并进已有窗口。", "When Nebula is launched again from the desktop or command line, choose whether to open a new window or attach the request as a tab in an existing window."),
                         cx,
                     ))
                     .child(self.select_row(
                         "vcs_display",
-                        "侧栏版本控制（Git/SVN）",
-                        "侧栏那块状态读哪种仓库。自动检测按目录里的 `.git` / `.svn` 判断，只有两者并存时才需要手动指定。",
+                        language.pick("侧栏版本控制（Git/SVN）", "Sidebar version control (Git/SVN)"),
+                        language.pick("侧栏那块状态读哪种仓库。自动检测按目录里的 `.git` / `.svn` 判断，只有两者并存时才需要手动指定。", "Chooses which repository the sidebar status reads. Auto detect checks `.git` and `.svn`; manual selection is only needed when both are present."),
                         cx,
                     )),
             )
     }
 
     fn section_advanced(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        self.group("会话生命周期", cx)
+        let language = crate::gpui_shell::config::ui_language(cx);
+        self.group(language.pick("会话生命周期", "Session lifecycle"), cx)
             .child(self.switch_row(
                 "keep_session",
-                "关窗后保留后台会话",
-                "开着时点 × 只是把窗口收走，里面的 shell 继续在常驻进程里跑、可以再附着回来；关掉则连 shell 一起杀，未保存的东西会丢。",
+                language.pick("关窗后保留后台会话", "Keep sessions running after the window closes"),
+                language.pick("开着时点 × 只是把窗口收走，里面的 shell 继续在常驻进程里跑、可以再附着回来；关掉则连 shell 一起杀，未保存的东西会丢。", "When enabled, closing the window leaves its shells running in the resident process so they can be reattached. When disabled, closing the window terminates them and unsaved work is lost."),
                 self.runtime.keep_session,
                 cx,
             ))
             .child(self.switch_row(
                 "restore_session",
-                "启动时恢复上次标签",
-                "重开时按上次的标签与分屏布局重建，工作目录一起回来。进程不会续命——恢复出来的是新 shell。",
+                language.pick("启动时恢复上次标签", "Restore previous tabs at startup"),
+                language.pick("重开时按上次的标签与分屏布局重建，工作目录一起回来。进程不会续命——恢复出来的是新 shell。", "Rebuilds the previous tab and split layout, including working directories. Processes are not resumed; restored tabs start new shells."),
                 self.runtime.restore_session,
                 cx,
             ))
             .child(self.switch_row(
                 "resume_ai",
-                "恢复会话时自动接续 AI 对话",
-                "恢复出来的 AI 标签接着上次那段对话，而不是开一段新的。",
+                language.pick("恢复会话时自动接续 AI 对话", "Resume AI conversations when restoring sessions"),
+                language.pick("恢复出来的 AI 标签接着上次那段对话，而不是开一段新的。", "Restored AI tabs continue their previous conversation instead of starting a new one."),
                 self.runtime.resume_ai,
                 cx,
             ))
             .child(self.switch_row(
                 "tray",
-                "常驻系统托盘图标",
-                "在通知区域留一个图标，正在跑的 AI 会话从那里能直接看到状态。",
+                language.pick("常驻系统托盘图标", "Keep an icon in the system tray"),
+                language.pick("在通知区域留一个图标，正在跑的 AI 会话从那里能直接看到状态。", "Keeps an icon in the notification area where the status of running AI sessions is visible."),
                 self.runtime.tray,
                 cx,
             ))
@@ -3201,6 +3890,7 @@ impl SettingsPane {
 
     fn render_nav(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui::IntoElement as _;
+        let language = crate::gpui_shell::config::ui_language(cx);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         // 选中底直接取 workspace 侧栏那一枚 token。两处都是"当前在哪"的
@@ -3260,7 +3950,7 @@ impl SettingsPane {
                     .child(Icon::default().path(section_icon(ix)).small().text_color(
                         if active { active_fg } else { muted },
                     ))
-                    .child(SECTIONS[ix]),
+                    .child(section_label(ix, language)),
             );
         }
         nav.into_any_element()
@@ -3277,6 +3967,7 @@ impl Focusable for SettingsPane {
 
 impl Render for SettingsPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = crate::gpui_shell::config::ui_language(cx);
         let nav = self.render_nav(cx);
         let content = self.section_content(window, cx);
         // 这里**不再**挂 font_family。旧壳设置页整页走终端 mono，是因为自绘
@@ -3373,7 +4064,7 @@ impl Render for SettingsPane {
                                             // 的锚点，允许它比正文大一档。
                                             .text_size(px(base_px * 1.2))
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child(SECTIONS[self.active_section]),
+                                            .child(section_label(self.active_section, language)),
                                     )
                                     .when(show_reset, |header| {
                                         header.child(
@@ -3387,8 +4078,12 @@ impl Render for SettingsPane {
                                                 .cursor_pointer()
                                                 .hover(|el| el.bg(cx.theme().list_hover))
                                                 .tooltip(|window, cx| {
+                                                    let language = crate::gpui_shell::config::ui_language(cx);
                                                     gpui_component::tooltip::Tooltip::new(
-                                                        "还原外观为默认值",
+                                                        language.pick(
+                                                            "还原外观为默认值",
+                                                            "Restore appearance defaults",
+                                                        ),
                                                     )
                                                     .build(window, cx)
                                                 })
@@ -3537,27 +4232,90 @@ mod tests {
 
     #[test]
     fn settings_nav_visibility_keeps_stable_routes_but_hides_two_entries() {
-        let visibility: Vec<_> = (0..SECTIONS.len()).map(is_nav_section_visible).collect();
+        let visibility: Vec<_> = (0..SECTION_IDS.len()).map(is_nav_section_visible).collect();
         assert_eq!(visibility, vec![true, true, true, false, true, true, true, true, true, false]);
+        assert_eq!(
+            SECTION_IDS,
+            [
+                "application",
+                "appearance",
+                "profiles",
+                "providers",
+                "ssh",
+                "network",
+                "interaction",
+                "keymap",
+                "advanced",
+                "backup",
+            ]
+        );
     }
 
     #[test]
     fn settings_nav_preserves_the_group_expansion_order_without_headings() {
         let visible: Vec<_> = visible_nav_sections().collect();
         assert_eq!(visible, vec![0, 1, 2, 6, 7, 4, 5, 8]);
-        let labels: Vec<_> = visible.into_iter().map(|index| SECTIONS[index]).collect();
+        let zh_labels: Vec<_> = visible
+            .iter()
+            .map(|index| section_label(*index, crate::display::UiLanguage::ZhCn))
+            .collect();
         assert_eq!(
-            labels,
+            zh_labels,
+            vec!["应用", "外观", "配置文件", "交互", "按键映射", "SSH", "网络", "高级"]
+        );
+        let en_labels: Vec<_> = visible
+            .iter()
+            .map(|index| section_label(*index, crate::display::UiLanguage::EnUs))
+            .collect();
+        assert_eq!(
+            en_labels,
             vec![
-                "应用",
-                "外观",
-                "配置文件",
-                "交互",
-                "按键映射",
+                "Application",
+                "Appearance",
+                "Profiles",
+                "Interaction",
+                "Key Bindings",
                 "SSH",
-                "网络",
-                "高级"
+                "Network",
+                "Advanced",
             ]
         );
+    }
+
+    #[test]
+    fn localized_select_labels_keep_stable_value_cardinality() {
+        let cases: &[(&str, &[&str])] = &[
+            ("language", &["system", "zh-CN", "en-US"]),
+            ("cursor_shape", &["beam", "underline", "block", "hollow"]),
+            ("tabs_position", &["sidebar", "top"]),
+            ("bell", &["off", "visual", "sound", "both"]),
+        ];
+        for (key, values) in cases {
+            for language in [crate::display::UiLanguage::ZhCn, crate::display::UiLanguage::EnUs] {
+                assert_eq!(localized_select_labels(key, values, language).len(), values.len());
+            }
+        }
+        assert_eq!(
+            localized_select_labels("tabs_position", cases[2].1, crate::display::UiLanguage::EnUs),
+            vec![SharedString::from("Left sidebar"), SharedString::from("Top")]
+        );
+    }
+
+    #[test]
+    fn cached_semantic_statuses_render_in_the_current_language() {
+        let provider = ProviderStatus::Saved;
+        assert_eq!(provider.text(crate::display::UiLanguage::ZhCn), "供应商配置已保存");
+        assert_eq!(provider.text(crate::display::UiLanguage::EnUs), "Provider settings saved");
+
+        let backup = BackupStatus::CredentialSaved;
+        assert_eq!(backup.text(crate::display::UiLanguage::ZhCn), "凭据已写入系统凭据管理器");
+        assert_eq!(
+            backup.text(crate::display::UiLanguage::EnUs),
+            "Credential saved to the system credential manager"
+        );
+
+        let ssh = SshStatus::Opening("server.example".to_owned());
+        assert_eq!(ssh.text(crate::display::UiLanguage::ZhCn), "正在打开 server.example…");
+        assert_eq!(ssh.text(crate::display::UiLanguage::EnUs), "Opening server.example…");
     }
 }

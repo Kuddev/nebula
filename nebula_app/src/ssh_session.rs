@@ -25,6 +25,7 @@ use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::event::EventProxy;
+use crate::proxy_test::{ProxyTestFailure, ProxyTestOutcome, ProxyTestResult, ProxyTestRoute};
 
 type SessionError = Box<dyn std::error::Error + Send + Sync>;
 type ClientSession = client::Handle<ClientHandler>;
@@ -964,33 +965,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> NetworkTestStream for T {}
 
 /// 一次出网测试的完成数据。旧 winit 壳经事件投递；GPUI 设置页走 oneshot，
 /// 握手与 HTTP 探测仍是 [`proxy_test_once`] 这一条路径。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProxyTestResult {
-    pub request_id: u64,
-    pub ok: bool,
-    pub message: String,
-    pub elapsed_ms: u64,
-}
-
-fn proxy_test_timeout_message() -> String {
-    format!("网络测试超时（{} 秒无响应）", TEST_TIMEOUT.as_secs())
-}
-
 fn proxy_test_pair(
-    outcome: Result<Result<String, SessionError>, tokio::time::error::Elapsed>,
-) -> (bool, String) {
+    outcome: Result<Result<ProxyTestRoute, ProxyTestFailure>, tokio::time::error::Elapsed>,
+) -> ProxyTestOutcome {
     match outcome {
-        Ok(Ok(route)) => (true, route),
-        Ok(Err(err)) => (false, err.to_string()),
-        Err(_) => (false, proxy_test_timeout_message()),
+        Ok(Ok(route)) => ProxyTestOutcome::Success(route),
+        Ok(Err(error)) => ProxyTestOutcome::Failed(error),
+        Err(_) => {
+            ProxyTestOutcome::Failed(ProxyTestFailure::Timeout { seconds: TEST_TIMEOUT.as_secs() })
+        },
     }
 }
 
 async fn run_proxy_test(request_id: u64) -> ProxyTestResult {
     let started = std::time::Instant::now();
-    let (ok, message) =
-        proxy_test_pair(tokio::time::timeout(TEST_TIMEOUT, proxy_test_once()).await);
-    ProxyTestResult { request_id, ok, message, elapsed_ms: started.elapsed().as_millis() as u64 }
+    let outcome = proxy_test_pair(tokio::time::timeout(TEST_TIMEOUT, proxy_test_once()).await);
+    ProxyTestResult { request_id, outcome, elapsed_ms: started.elapsed().as_millis() as u64 }
 }
 
 /// 启动出网测试并交给调用方异步等待。GPUI 没有 winit `EventLoopProxy`，
@@ -1019,8 +1009,7 @@ pub fn spawn_proxy_test(
         let _ = proxy.send_event(crate::event::Event::new(
             crate::event::EventType::ProxyTestDone {
                 request_id: result.request_id,
-                ok: result.ok,
-                message: result.message,
+                outcome: result.outcome,
                 elapsed_ms: result.elapsed_ms,
             },
             window_id,
@@ -1029,18 +1018,21 @@ pub fn spawn_proxy_test(
     Ok(())
 }
 
-async fn proxy_test_once() -> Result<String, SessionError> {
+async fn proxy_test_once() -> Result<ProxyTestRoute, ProxyTestFailure> {
     let global = tokio::task::spawn_blocking(crate::ssh_proxy::SshProxyConfig::load_global)
         .await
-        .map_err(|err| format!("读取代理设置失败: {err}"))?;
-    let link =
-        global.resolve(None, NETWORK_TEST_HOST).map_err(|err| format!("代理设置无效: {err}"))?;
+        .map_err(|error| ProxyTestFailure::LoadSettings(error.to_string()))?;
+    let link = global
+        .resolve(None, NETWORK_TEST_HOST)
+        .map_err(|error| ProxyTestFailure::InvalidSettings(error.to_string()))?;
     let route = match &link {
-        Some(crate::ssh_proxy::ProxyLink::Server(server)) => server.display(),
-        Some(crate::ssh_proxy::ProxyLink::Jump(target)) => format!("SSH {target}"),
-        Some(crate::ssh_proxy::ProxyLink::Command(_)) => "自定义命令".to_owned(),
-        None if global.mode == crate::ssh_proxy::ProxyMode::Custom => "直连地址".to_owned(),
-        None => "直接连接".to_owned(),
+        Some(crate::ssh_proxy::ProxyLink::Server(server)) => {
+            ProxyTestRoute::ProxyServer(server.display())
+        },
+        Some(crate::ssh_proxy::ProxyLink::Jump(target)) => ProxyTestRoute::SshJump(target.clone()),
+        Some(crate::ssh_proxy::ProxyLink::Command(_)) => ProxyTestRoute::CustomCommand,
+        None if global.mode == crate::ssh_proxy::ProxyMode::Custom => ProxyTestRoute::DirectAddress,
+        None => ProxyTestRoute::Direct,
     };
     let mut stream = proxy_test_stream(link.as_ref()).await?;
     stream
@@ -1048,14 +1040,16 @@ async fn proxy_test_once() -> Result<String, SessionError> {
             b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nUser-Agent: Nebula-Network-Test\r\n\r\n",
         )
         .await
-        .map_err(|err| format!("发送网页测试请求失败: {err}"))?;
-    stream.flush().await.map_err(|err| format!("发送网页测试请求失败: {err}"))?;
+        .map_err(|error| ProxyTestFailure::SendRequest(error.to_string()))?;
+    stream.flush().await.map_err(|error| ProxyTestFailure::SendRequest(error.to_string()))?;
 
     let mut response = Vec::with_capacity(1024);
     let mut chunk = [0u8; 512];
     while response.len() < 2048 && !response.windows(2).any(|part| part == b"\r\n") {
-        let read =
-            stream.read(&mut chunk).await.map_err(|err| format!("读取网页测试响应失败: {err}"))?;
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| ProxyTestFailure::ReadResponse(error.to_string()))?;
         if read == 0 {
             break;
         }
@@ -1067,47 +1061,59 @@ async fn proxy_test_once() -> Result<String, SessionError> {
         .split_whitespace()
         .nth(1)
         .and_then(|value| value.parse::<u16>().ok())
-        .ok_or_else(|| format!("目标站点没有返回有效 HTTP 状态行: {status_line}"))?;
+        .ok_or_else(|| ProxyTestFailure::InvalidHttpStatusLine(status_line.to_owned()))?;
     if !(200..500).contains(&status) {
-        return Err(format!("目标站点返回 HTTP {status}").into());
+        return Err(ProxyTestFailure::HttpStatus { status });
     }
     Ok(route)
 }
 
 async fn proxy_test_stream(
     link: Option<&crate::ssh_proxy::ProxyLink>,
-) -> Result<Box<dyn NetworkTestStream>, SessionError> {
+) -> Result<Box<dyn NetworkTestStream>, ProxyTestFailure> {
     use crate::ssh_proxy::ProxyLink;
     match link {
         Some(ProxyLink::Server(server)) => {
             crate::ssh_proxy::connect(server, NETWORK_TEST_HOST, NETWORK_TEST_PORT)
                 .await
                 .map(|stream| Box::new(stream) as Box<dyn NetworkTestStream>)
-                .map_err(|err| format!("经代理 {} 出网失败: {err}", server.display()).into())
+                .map_err(|error| ProxyTestFailure::ProxyServer {
+                    server: server.display(),
+                    error: error.to_string(),
+                })
         },
         Some(ProxyLink::Command(command)) => {
             crate::ssh_proxy::connect_command(command, NETWORK_TEST_HOST, NETWORK_TEST_PORT)
                 .await
                 .map(|stream| Box::new(stream) as Box<dyn NetworkTestStream>)
-                .map_err(|err| format!("自定义代理命令出网失败: {err}").into())
+                .map_err(|error| ProxyTestFailure::CustomCommand(error.to_string()))
         },
         Some(ProxyLink::Jump(spec)) => {
             let (jump_destination, jump_profile) = tokio::task::spawn_blocking({
                 let spec = spec.clone();
                 move || {
-                    let destination = SshDestination::resolve(&spec)?;
+                    let destination = SshDestination::resolve(&spec).map_err(|error| {
+                        ProxyTestFailure::JumpResolve {
+                            target: spec.clone(),
+                            error: error.to_string(),
+                        }
+                    })?;
                     let path = crate::display::nebula_data_dir().join("ssh_profiles.json");
                     let profile = crate::ssh_profiles::SshProfiles::load(&path)
                         .unwrap_or_default()
                         .for_destination(&spec);
-                    Ok::<_, io::Error>((destination, profile))
+                    Ok::<_, ProxyTestFailure>((destination, profile))
                 }
             })
             .await
-            .map_err(|err| format!("解析跳板任务失败: {err}"))??;
+            .map_err(|error| ProxyTestFailure::JumpTask(error.to_string()))??;
             let jump =
                 authenticated_session_at::<EventProxy>(&jump_destination, &jump_profile, None, 1)
-                    .await?;
+                    .await
+                    .map_err(|error| ProxyTestFailure::JumpConnect {
+                        target: spec.clone(),
+                        error: error.to_string(),
+                    })?;
             let channel = {
                 let session = jump.lock().await;
                 session
@@ -1118,14 +1124,17 @@ async fn proxy_test_stream(
                         0,
                     )
                     .await
-                    .map_err(|err| format!("经跳板 {spec} 打开出网通道失败: {err}"))?
+                    .map_err(|error| ProxyTestFailure::JumpChannel {
+                        target: spec.clone(),
+                        error: error.to_string(),
+                    })?
             };
             Ok(Box::new(channel.into_stream()))
         },
         None => tokio::net::TcpStream::connect((NETWORK_TEST_HOST, NETWORK_TEST_PORT))
             .await
             .map(|stream| Box::new(stream) as Box<dyn NetworkTestStream>)
-            .map_err(|err| format!("直接连接测试站点失败: {err}").into()),
+            .map_err(|error| ProxyTestFailure::Direct(error.to_string())),
     }
 }
 

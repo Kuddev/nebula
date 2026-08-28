@@ -1,0 +1,118 @@
+{
+  "language": {
+    "self_name": "English",
+    "system": "Follow system",
+    "zh_cn": "Simplified Chinese",
+    "en_us": "English"
+  },
+  "settings": {
+    "sidebar": {
+      "application": "Application",
+      "appearance": "Appearance",
+      "profiles": "Profiles",
+      "providers": "AI Providers",
+      "ssh": "SSH",
+      "network": "Network",
+      "interaction": "Interaction",
+      "keymap": "Key Bindings",
+      "advanced": "Advanced",
+      "backup": "Backup"
+    },
+    "network": {
+      "title": "Network proxy",
+      "mode": {
+        "label": "Proxy mode",
+        "off": "No proxy",
+        "system": "Follow system",
+        "custom": "Custom proxy"
+      },
+      "address": {
+        "label": "Proxy address"
+      },
+      "status": {
+        "idle": "Test whether the current settings can access the network",
+        "running": "Testing network access with the current settings...",
+        "success": "Network connection succeeded via {route} in {elapsed_ms} ms",
+        "failed": "Test failed: {error}",
+        "unexpected_end": "The network test ended unexpectedly; try again",
+        "start_failed": "Could not start the network test: {error}"
+      },
+      "action": {
+        "test": "Test network",
+        "testing": "Testing..."
+      },
+      "route": {
+        "direct": "Direct connection",
+        "direct_address": "Direct address",
+        "custom_command": "Custom command",
+        "proxy_server": "Proxy {server}",
+        "ssh_jump": "SSH {target}"
+      },
+      "failure": {
+        "load_settings": "Could not read proxy settings: {error}",
+        "invalid_settings": "The proxy settings are invalid: {error}",
+        "timeout": "The network test timed out after {seconds} seconds",
+        "send_request": "Could not send the test request: {error}",
+        "read_response": "Could not read the test response: {error}",
+        "invalid_http_status_line": "The test site did not return a valid HTTP status line: {line}",
+        "http_status": "The test site returned HTTP {status}",
+        "proxy_server": "Could not reach the network through proxy {server}: {error}",
+        "custom_command": "The custom proxy command failed: {error}",
+        "jump_task": "Could not prepare the SSH jump host: {error}",
+        "jump_resolve": "Could not resolve SSH jump host {target}: {error}",
+        "jump_connect": "Could not connect to SSH jump host {target}: {error}",
+        "jump_channel": "Could not open an outbound channel through SSH jump host {target}: {error}",
+        "direct": "Could not connect directly to the test site: {error}"
+      }
+    },
+    "appearance": {
+      "background_color_description": "Overrides the terminal background supplied by the theme. This also changes the color reported to applications by OSC 11, which TUIs use to choose light or dark mode.",
+      "background_cover_title": "Extend the background image beneath window controls?",
+      "background_cover_description": "The image will extend beneath the title bar, window buttons, tabs, and SSH sidebar. Low-contrast images may make controls harder to see; the interface retains a minimum-opacity safeguard."
+    },
+    "font": {
+      "fallback_description": "The first family is preferred; missing glyphs fall back through the remaining families, with bundled Maple as the final safe fallback.",
+      "group_description": "The first family is primary; the rest are used in fallback order.",
+      "loading": "Enumerating system fonts...",
+      "no_matches": "No matching fonts"
+    },
+    "keymap": {
+      "conflict": "{combo} is assigned to both \"{first}\" and \"{second}\"; only the earlier \"{first}\" action will run.",
+      "help": "Click a row to rebind · Backspace restores the default · Esc cancels"
+    },
+    "input": {
+      "backup_secret": "Credentials are stored only in the system credential manager"
+    },
+    "ssh": {
+      "default_keys": "If unspecified, IdentityFile and the default id_* private keys are used.",
+      "address_hint": "Supports user@host; you can also paste ssh://host:2222",
+      "auth_auto_description": "Tries available private keys first, then asks for a password. This is the best choice in most cases.",
+      "auth_interactive_description": "Stores no credentials and prompts in the terminal when connecting, including two-factor authentication.",
+      "save_password": "Save in Windows Credential Manager",
+      "hide_config_host": "Hide (config sources cannot be deleted)",
+      "empty_hint": "Use \"+ Add host\" or maintain aliases in ~/.ssh/config",
+      "shared_data_hint": "Uses the same data as the legacy shell. Deleting a config alias hides it and it can be restored."
+    }
+  },
+  "provider": {
+    "test": {
+      "success": "Connection succeeded (HTTP {status})",
+      "invalid_endpoint": "The endpoint must start with http:// or https://",
+      "missing_model": "Enter a default model first",
+      "missing_api_key": "Save an API key first",
+      "credential_read_failed": "Could not read the API key from the credential manager",
+      "invalid_credential_encoding": "The API key in the credential manager has invalid encoding",
+      "timeout": "Connection timed out",
+      "host_not_found": "Server not found",
+      "connection_failed": "Could not connect to the server",
+      "io_error": "Network error: {kind}",
+      "tls_failed": "TLS handshake failed",
+      "request_failed": "Request failed",
+      "auth_failed": "Authentication failed (HTTP {status}); check the API key",
+      "endpoint_not_found": "Endpoint not found (HTTP {status}); check the API endpoint",
+      "rate_limited": "Service rate limited (HTTP {status}); it is reachable but quota cannot be verified now",
+      "http_status": "Service returned HTTP {status}",
+      "start_failed": "Could not start the provider test: {error}"
+    }
+  }
+}

@@ -70,6 +70,8 @@ mod platform;
 #[cfg(unix)]
 mod polling;
 mod process_tree;
+mod provider_test;
+mod proxy_test;
 mod remote_dirs;
 mod renderer;
 mod runtime_api;

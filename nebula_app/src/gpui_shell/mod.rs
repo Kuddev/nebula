@@ -159,6 +159,7 @@ fn init(cx: &mut App) {
     // 用户 nebula.toml + nebula_settings.txt，启动读一次；失败回退默认，
     // 具体错误由 config 的 notice 上浮，并在可用时写入 stderr。
     let settings = config::Settings::load(theme::effective_theme_name(cx));
+    gpui_component::set_locale(settings.ui_language.gpui_component_locale());
     cx.set_global(settings);
 }
 

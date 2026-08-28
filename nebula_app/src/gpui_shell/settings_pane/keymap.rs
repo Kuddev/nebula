@@ -47,7 +47,7 @@ impl SettingsPane {
 
     /// 冲突检测（旧壳 `keymap_clash_info` 同义）：同一 combo 多动作 → 逐行
     /// 标记 + 只报第一组的提示条。
-    fn keymap_clashes(&self) -> (Vec<bool>, Option<String>) {
+    fn keymap_clashes(&self, language: crate::display::UiLanguage) -> (Vec<bool>, Option<String>) {
         use crate::display::keymap;
         let total = keymap::editable_row_count();
         let custom = keymap::build_bindings(&self.keymap_binds);
@@ -65,11 +65,11 @@ impl SettingsPane {
         }
         let name = |flat: usize| -> String {
             if flat == keymap::QUICK_TERMINAL_ROW {
-                "快速终端".to_owned()
+                language.pick("快速终端", "Quick terminal").to_owned()
             } else {
                 keymap::EDITABLE_ACTIONS
                     .get(flat - 1)
-                    .map(|(_, zh, _)| (*zh).to_owned())
+                    .map(|(_, zh, en)| language.pick(zh, en).to_owned())
                     .unwrap_or_default()
             }
         };
@@ -86,8 +86,9 @@ impl SettingsPane {
                 rows[b] = true;
                 if note.is_none() {
                     let (a_name, b_name) = (name(a), name(b));
-                    note = Some(format!(
-                        "{combo_a} 同时绑定了「{a_name}」与「{b_name}」——只有排前面的「{a_name}」会触发"
+                    note = Some(language.tr_args(
+                        "settings.keymap.conflict",
+                        &[("combo", &combo_a), ("first", &a_name), ("second", &b_name)],
                     ));
                 }
             }
@@ -208,7 +209,9 @@ impl SettingsPane {
                 chip.border_1().border_color(theme.border).text_color(color)
             })
             .child(if text.is_empty() && !capturing {
-                SharedString::from("未绑定")
+                SharedString::from(
+                    crate::gpui_shell::config::ui_language(cx).pick("未绑定", "Unbound"),
+                )
             } else {
                 SharedString::from(text.to_owned())
             })
@@ -217,13 +220,14 @@ impl SettingsPane {
     /// 一行「动作 + 键帽」。点击行进入捕获态（旧壳点行即捕获）。
     fn keymap_row(&self, flat: usize, clash: bool, cx: &Context<Self>) -> impl IntoElement {
         use crate::display::keymap;
+        let language = crate::gpui_shell::config::ui_language(cx);
         let custom = keymap::build_bindings(&self.keymap_binds);
         let label: SharedString = if flat == keymap::QUICK_TERMINAL_ROW {
-            "快速终端".into()
+            language.pick("快速终端", "Quick terminal").into()
         } else {
             keymap::EDITABLE_ACTIONS
                 .get(flat - 1)
-                .map(|(_, zh, _)| (*zh).to_owned())
+                .map(|(_, zh, en)| language.pick(zh, en).to_owned())
                 .unwrap_or_default()
                 .into()
         };
@@ -242,7 +246,7 @@ impl SettingsPane {
         let capturing = self.keymap_capture == Some(flat);
         let cap_text = if capturing {
             if self.keymap_capture_preview.is_empty() {
-                "按新按键…".to_owned()
+                language.pick("按新按键…", "Press a new key...").to_owned()
             } else {
                 format!("{}…", self.keymap_capture_preview)
             }
@@ -287,14 +291,15 @@ impl SettingsPane {
     pub(super) fn section_keymap(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         use crate::display::keymap;
 
+        let language = crate::gpui_shell::config::ui_language(cx);
         let visible = self.keymap_visible(cx);
-        let (clash_rows, clash_note) = self.keymap_clashes();
+        let (clash_rows, clash_note) = self.keymap_clashes(language);
 
         // 分组渲染（旧壳无框分组裁定）：组内可见行为空的组整组隐藏；组
         // 标题 0.86× 小字压在行块上方。
         let mut groups_block = v_flex().w_full().gap_1();
         let mut start = 0usize;
-        for (zh, _en, count) in keymap::GROUPS {
+        for (zh, en, count) in keymap::GROUPS {
             let end = start + count;
             let rows: Vec<_> = visible
                 .iter()
@@ -308,7 +313,7 @@ impl SettingsPane {
                         .pb_1()
                         .text_size(px(self.font_size_px(cx) * 0.86))
                         .text_color(cx.theme().muted_foreground)
-                        .child(*zh),
+                        .child(language.pick(zh, en)),
                 );
                 for row in rows {
                     groups_block = groups_block.child(row);
@@ -332,9 +337,9 @@ impl SettingsPane {
                     .pb_1()
                     .text_size(px(self.font_size_px(cx) * 0.86))
                     .text_color(cx.theme().muted_foreground)
-                    .child("只读"),
+                    .child(language.pick("只读", "Read-only")),
             );
-            for (zh, _en, combo) in readonly {
+            for (zh, en, combo) in readonly {
                 groups_block = groups_block.child(
                     h_flex()
                         .w_full()
@@ -348,7 +353,7 @@ impl SettingsPane {
                                 .min_w_0()
                                 .pl_4()
                                 .text_color(crate::gpui_shell::theme::faint_ink(cx))
-                                .child(*zh),
+                                .child(language.pick(zh, en)),
                         )
                         .child(
                             div()
@@ -407,7 +412,7 @@ impl SettingsPane {
                     .pt_4()
                     .text_size(px(self.font_size_px(cx) * 0.86))
                     .text_color(cx.theme().muted_foreground)
-                    .child("点击行改键 · Backspace 恢复默认 · Esc 取消"),
+                    .child(language.tr("settings.keymap.help")),
             )
     }
 }
