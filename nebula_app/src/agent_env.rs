@@ -35,8 +35,8 @@ use std::path::{Path, PathBuf};
 pub(crate) use crate::ai_hook::PANE_ENV;
 
 /// `TERM_PROGRAM` 的取值。这是程序判断"我跑在哪个终端里"的事实标准入口，
-/// 其它终端（`vscode`、`iTerm.app`、`WezTerm`…）都用同一个变量，所以第三方
-/// 工具的既有识别逻辑不需要为 Nebula 改代码。
+/// 终端生态普遍使用同一个变量，所以第三方工具的既有识别逻辑不需要为 Nebula
+/// 改代码。
 pub const TERM_PROGRAM: &str = "nebula";
 
 /// Nebula 可执行文件的绝对路径。

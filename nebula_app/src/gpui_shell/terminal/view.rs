@@ -2597,7 +2597,7 @@ impl TerminalView {
         true
     }
 
-    /// 右键沿用 Windows 终端惯例：有选区直接复制，无选区直接粘贴。
+    /// 右键行为：有选区直接复制，无选区直接粘贴。
     /// Ctrl+右键保留选区菜单，供显式调用 Send to Chat。
     fn on_right_down(
         &mut self,

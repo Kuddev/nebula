@@ -4323,7 +4323,7 @@ impl NebulaWorkspace {
 
     /// 复制标签页：另开一个**同身份**的 Tab，不克隆活动 PTY 也不克隆分屏树
     /// （旧壳 `window_context::duplicate_tab` 同合同——副本是新进程/新会话，
-    /// 与 Windows Terminal 一致，也避开 PTY 共享所有权）。
+    /// 也避开 PTY 共享所有权）。
     ///
     /// 关键是继承 launch 身份。WSL / Git Bash / Nushell 这类 Tab 的
     /// program+args 记在 [`TabMeta::launch`]，而此前这里一律走

@@ -505,8 +505,8 @@ impl NebulaWorkspace {
             .min_w_0()
             .items_center()
             .child(
-                // Windows Terminal 的 TabView 贴住标题栏底边；只让 tab 与其
-                // 相邻操作按钮下沉，标题栏两侧的独立工具仍保持垂直居中。
+                // TabView 贴住标题栏底边；只让 tab 与其相邻操作按钮下沉，
+                // 标题栏两侧的独立工具仍保持垂直居中。
                 h_flex()
                     .h_full()
                     .flex_shrink(1.0)
@@ -645,8 +645,8 @@ impl NebulaWorkspace {
                         ),
                     ),
             )
-            // Windows Terminal 的新建 split button 紧跟 TabView；剩余空间
-            // 才是可拖拽标题栏，文件树与 Git 固定在其右侧。
+            // 新建 split button 紧跟 TabView；剩余空间才是可拖拽标题栏，
+            // 文件树与 Git 固定在其右侧。
             .child(div().h_full().flex_1().min_w_0())
             .child(
                 title_bar_panel_controls()

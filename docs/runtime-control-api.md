@@ -27,7 +27,7 @@ Nebula 打开的每个**本地** pane 都带上下面这些变量。pane 里的�
 
 | 变量 | 含义 |
 |---|---|
-| `TERM_PROGRAM=nebula` | 外面这层终端是 Nebula。与 `vscode` / `iTerm.app` / `WezTerm` 同一个事实标准入口，第三方工具的既有识别逻辑不必改代码 |
+| `TERM_PROGRAM=nebula` | 外面这层终端是 Nebula。沿用终端生态的事实标准入口，第三方工具的既有识别逻辑不必改代码 |
 | `TERM_PROGRAM_VERSION` | Nebula 版本 |
 | `NEBULA_PANE_ID` | 调用者所在 pane。AI hook 用同一个值给回合状态定位 tab 圆点 |
 | `NEBULA_CLI` | 提供控制面的那个可执行文件的绝对路径。便携版不一定在 `PATH` 上，所以给精确路径 |

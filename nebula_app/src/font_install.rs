@@ -125,7 +125,7 @@ pub fn normalize_font_family_chain(value: &str) -> String {
 }
 
 /// 用建议项替换输入框最后一个逗号段。用户先键入尾逗号即可追加 fallback；
-/// 没有逗号时则替换主字体，这与 Windows Terminal 的 AutoSuggestBox 一致。
+/// 没有逗号时则替换主字体，保持单值输入时的直接替换语义。
 pub fn complete_font_family_input(value: &str, completion: &str) -> String {
     let completion = completion.trim();
     if completion.is_empty() {

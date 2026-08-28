@@ -584,10 +584,9 @@ impl<T> Term<T> {
     }
 
     /// 发 `CSI ? 997 ; 1 n`（暗）/ `CSI ? 997 ; 2 n`（亮）。    ///
-    /// 编号来自 Contour 的 color-palette-update-notifications 提案，
-    /// kitty / wezterm / ghostty / alacritty 用的是同一套（kitty
-    /// `window.py`：`n = 1 if is_dark else 2`）。没订阅就不发——这个序列对没
-    /// 要求过它的程序来说是不认识的输入。
+    /// 编号来自 color-palette-update-notifications 提案；主流终端实现采用
+    /// 同一套应答格式。没订阅就不发——这个序列对没要求过它的程序来说是
+    /// 不认识的输入。
     fn report_color_scheme(&mut self)
     where
         T: EventListener,
