@@ -3034,6 +3034,13 @@ impl SettingsPane {
                         cx,
                     ))
                     .child(self.switch_row(
+                        "multiline_paste_confirm",
+                        "多行粘贴前询问（关 = 永久直接粘贴）",
+                        "开：粘贴 ≥20 行时弹确认框；关：不弹直接粘贴。",
+                        self.runtime.multiline_paste_confirm,
+                        cx,
+                    ))
+                    .child(self.switch_row(
                         "panel_resize",
                         "拖拽调节侧栏宽度",
                         "关掉后侧栏与面板的分界线钉死，拖不动；宽度仍可在别处改，只是不会被误拖。",
