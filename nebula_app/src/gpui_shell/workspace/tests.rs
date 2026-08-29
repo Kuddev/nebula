@@ -511,6 +511,28 @@ fn tab_chrome_cancel_leaves_custom_name() {
 
 /// 旧壳 `chrome_tab_label`：有 cwd 就用末级目录名，不用 OSC 标题 / `NEBULA|` 整串。
 #[test]
+
+/// 侧栏拖宽热区必须对准主题真正画出来的那条分界。Nord 是铺满形态（卡缝 0 +
+/// 1px 竖线，线贴在侧栏槽位右缘），其余主题是浮起圆角卡（卡缝 8 + 无竖线，
+/// 分界是卡的可见左缘）。写死一个 8.0 只能照顾后者：Nord 下热区会整整偏右
+/// 7.5px，鼠标停在线上不出现拖拽光标。
+#[test]
+fn sidebar_resize_hot_zone_follows_the_theme_boundary() {
+    let nord = nebula_settings::ThemeName::Nord.card_geometry();
+    assert_eq!((nord.gutter, nord.divider), (0.0, 1.0), "Nord 是铺满 + 竖线形态");
+    assert_eq!(sidebar_resize_offset_for(nord.divider, nord.gutter), 0.5, "对准 1px 线心");
+
+    let floating = nebula_settings::ThemeName::Nebula.card_geometry();
+    assert_eq!((floating.gutter, floating.divider), (8.0, 0.0), "其余主题是浮起圆角卡");
+    assert_eq!(
+        sidebar_resize_offset_for(floating.divider, floating.gutter),
+        8.0,
+        "没有竖线时对准卡缝右侧的卡可见左缘"
+    );
+
+    // 热区宽度足以盖住线：线心两侧各 3px。
+    assert!(SIDEBAR_RESIZE_HANDLE_WIDTH * 0.5 > nord.divider);
+}
 fn tab_chrome_label_uses_cwd_last_component() {
     use crate::gpui_shell::terminal::view::last_path_component;
 

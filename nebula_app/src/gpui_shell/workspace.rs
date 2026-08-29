@@ -110,9 +110,24 @@ gpui::actions!(
 /// 不能挂全局：否则 CC/Codex 的终止对话键到不了 PTY。
 const PALETTE_KEY_CONTEXT: &str = "NebulaCommandPalette";
 
-/// 侧栏槽位右缘到正文卡可见左缘的 8px 卡缝；拖拽热区必须对准后者。
-const SIDEBAR_RESIZE_VISUAL_OFFSET: f32 = 8.0;
+/// 侧栏拖宽热区的宽度。热区中心由 [`sidebar_resize_offset_for`] 决定。
 const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
+
+/// 侧栏槽位右缘到「用户眼里那条分界」的距离，热区与拖拽换算都用它。
+///
+/// 两种形态的分界不在同一个位置：主题画了竖线（Nord 这类铺满布局，卡缝 0 +
+/// 1px 竖线）时分界就是那条线，它贴在槽位右缘上；没画线的浮起圆角卡（卡缝 8
+/// + 无竖线）里分界是卡缝右侧的卡可见左缘。原来这里写死 8.0 只对后者成立，
+/// Nord 成为出厂默认之后热区整整偏右 7.5px——鼠标停在线上不变形，得往右挪
+/// 半个字符宽才拖得动。
+fn sidebar_resize_offset_for(divider: f32, gutter: f32) -> f32 {
+    if divider > 0.0 { divider * 0.5 } else { gutter }
+}
+
+fn sidebar_resize_visual_offset(cx: &App) -> f32 {
+    let card = crate::gpui_shell::theme::PaneCardStyle::current(cx);
+    sidebar_resize_offset_for(card.divider, card.margin.left)
+}
 
 /// 标题栏里的文件树 / Git 工具必须同时挡住原生拖窗命中和父级拖拽起手。
 /// `occlude` 只屏蔽后方 hitbox，不会阻止 MouseDown 向 `TitleBar` 冒泡。
@@ -5205,7 +5220,7 @@ impl Render for NebulaWorkspace {
                                             .top_0()
                                             .bottom_0()
                                             .left(px(
-                                                SIDEBAR_RESIZE_VISUAL_OFFSET
+                                                sidebar_resize_visual_offset(cx)
                                                     - SIDEBAR_RESIZE_HANDLE_WIDTH * 0.5,
                                             ))
                                             .w(px(SIDEBAR_RESIZE_HANDLE_WIDTH))
@@ -5365,8 +5380,10 @@ impl Render for NebulaWorkspace {
                         .occlude()
                         .cursor_col_resize()
                         .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                            // 分界跟着指针走：换算用的偏移必须与热区同源，
+                            // 否则抓住线之后线会甩在指针后面。
                             let width = (f32::from(event.position.x)
-                                - SIDEBAR_RESIZE_VISUAL_OFFSET)
+                                - sidebar_resize_visual_offset(cx))
                                 .clamp(
                                     nebula_settings::MIN_SIDEBAR_WIDTH,
                                     nebula_settings::MAX_SIDEBAR_WIDTH,
