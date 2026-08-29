@@ -220,12 +220,7 @@ impl Default for PaneCardStyle {
         let gutter = nebula_settings::DEFAULT_PANE_CARD_GUTTER;
         Self {
             radius: nebula_settings::DEFAULT_PANE_CARD_RADIUS,
-            margin: gpui::Edges {
-                top: 0.0,
-                right: gutter,
-                bottom: gutter,
-                left: gutter,
-            },
+            margin: gpui::Edges { top: 0.0, right: gutter, bottom: gutter, left: gutter },
             shadow: false,
             divider: 0.0,
         }
@@ -244,12 +239,7 @@ impl PaneCardStyle {
             radius: runtime.pane_card_radius.unwrap_or(geometry.radius),
             // 上边恒零：08-26 裁定侧栏 / 终端卡 / 右侧抽屉三列顶边都贴 chrome
             // 下沿。可配的那个数只作用于左 / 右 / 下三边。
-            margin: gpui::Edges {
-                top: 0.0,
-                right: gutter,
-                bottom: gutter,
-                left: gutter,
-            },
+            margin: gpui::Edges { top: 0.0, right: gutter, bottom: gutter, left: gutter },
             shadow: runtime.pane_card_shadow.unwrap_or(geometry.shadow),
             divider: runtime.pane_card_divider.unwrap_or(geometry.divider),
         }
@@ -269,11 +259,7 @@ impl PaneCardStyle {
 pub fn card_divider_color(cx: &App) -> Hsla {
     let mut color = cx.theme().background;
     let is_light = chrome_theme_resolved(cx).palette().is_light;
-    color.l = if is_light {
-        (color.l - 0.10).max(0.0)
-    } else {
-        (color.l + 0.10).min(1.0)
-    };
+    color.l = if is_light { (color.l - 0.10).max(0.0) } else { (color.l + 0.10).min(1.0) };
     color
 }
 
@@ -363,10 +349,7 @@ pub fn paint_shell_around_card(
     paint(window, x, card_y, left, card_h);
     paint(window, x + width - right, card_y, right, card_h);
 
-    let radius = PaneCardStyle::current(cx)
-        .radius
-        .min(card_w * 0.5)
-        .min(card_h * 0.5);
+    let radius = PaneCardStyle::current(cx).radius.min(card_w * 0.5).min(card_h * 0.5);
     if radius <= 0.0 {
         return;
     }

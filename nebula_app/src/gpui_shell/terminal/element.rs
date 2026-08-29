@@ -22,9 +22,9 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 use nebula_terminal::grid::Dimensions as _;
 use nebula_terminal::render::{RenderSnapshot, SnapshotConfig, boxdraw};
-use nebula_terminal::term::color::Colors;
 #[cfg(windows)]
 use nebula_terminal::term::TermMode;
+use nebula_terminal::term::color::Colors;
 use nebula_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 
 use super::colors::Palette;
@@ -1526,7 +1526,8 @@ mod tests {
         /// 「SGR 落到哪个 `Color` 变体」这段也一起钉住。
         fn snapshot_of(bytes: &[u8]) -> RenderSnapshot {
             let size = TermSize::new(40, 2);
-            let mut term = Term::new(Config::default(), &size, nebula_terminal::event::VoidListener);
+            let mut term =
+                Term::new(Config::default(), &size, nebula_terminal::event::VoidListener);
             let mut parser: ansi::Processor = ansi::Processor::new();
             parser.advance(&mut term, bytes);
             RenderSnapshot::capture(&term, &SnapshotConfig { rows: 2, cols: 40 })
@@ -1550,7 +1551,9 @@ mod tests {
         fn unreadable_truecolor_foreground_is_pulled_to_the_minimum_contrast() {
             // #1a1d3a 压在默认底 #080a18 上，对比度远不到 4.5。
             let (fg, theme) = resolved(b"\x1b[38;2;26;29;58mnearly invisible");
-            let Color::Spec(rgb) = fg else { panic!("写死色必须被矫正成具体色，实得 {fg:?}") };
+            let Color::Spec(rgb) = fg else {
+                panic!("写死色必须被矫正成具体色，实得 {fg:?}")
+            };
             let bg = rgb_from_rgba(theme.background);
             assert!(
                 rgb.contrast(*bg) >= FIXED_TEXT_MIN_CONTRAST,

@@ -98,13 +98,7 @@ impl NebulaWorkspace {
                     "the GPUI runtime currently owns one workspace window; window.create is unavailable",
                 )));
             },
-            RuntimeCommand::Exec {
-                pane_id,
-                argv,
-                timeout_ms,
-                max_output_bytes,
-                ..
-            } => {
+            RuntimeCommand::Exec { pane_id, argv, timeout_ms, max_output_bytes, .. } => {
                 match self.runtime_exec_context(*pane_id, cx) {
                     Ok((context, cwd)) => crate::runtime_exec::spawn(
                         dispatch.clone(),
@@ -238,7 +232,10 @@ impl NebulaWorkspace {
                 if *tab_index >= self.tabs.len() {
                     return Err(ApiError::new(
                         "target_not_found",
-                        format!("tab {tab_index} does not exist in window {}", self.runtime_window_id),
+                        format!(
+                            "tab {tab_index} does not exist in window {}",
+                            self.runtime_window_id
+                        ),
                     ));
                 }
                 if let Some(process) = self.busy_process_in_tab(*tab_index, None, cx) {
@@ -269,7 +266,10 @@ impl NebulaWorkspace {
                 if *tab_index >= self.tabs.len() {
                     return Err(ApiError::new(
                         "target_not_found",
-                        format!("tab {tab_index} does not exist in window {}", self.runtime_window_id),
+                        format!(
+                            "tab {tab_index} does not exist in window {}",
+                            self.runtime_window_id
+                        ),
                     ));
                 }
                 let Some(meta) = self.tab_meta.get_mut(*tab_index) else {
@@ -499,10 +499,9 @@ impl NebulaWorkspace {
                     ));
                 };
                 let view = match self.tabs.get(tab_ix) {
-                    Some(WorkspaceTab::Terminal { panes, .. }) => panes
-                        .iter()
-                        .find(|pane| pane.id == *pane_id)
-                        .map(|pane| pane.view.clone()),
+                    Some(WorkspaceTab::Terminal { panes, .. }) => {
+                        panes.iter().find(|pane| pane.id == *pane_id).map(|pane| pane.view.clone())
+                    },
                     _ => None,
                 }
                 .expect("tab_of_pane resolved a terminal pane");
@@ -751,18 +750,9 @@ impl NebulaWorkspace {
                     _ => unreachable!("tab_of_pane only resolves terminal tabs"),
                 };
                 view.update(cx, |view, cx| {
-                    view.runtime_agent_paste(
-                        text.clone(),
-                        *submit,
-                        InputOrigin::Program,
-                        cx,
-                    )
+                    view.runtime_agent_paste(text.clone(), *submit, InputOrigin::Program, cx)
                 })?;
-                self.runtime_result(
-                    json!({ "agent": managed, "input": "paste" }),
-                    window,
-                    cx,
-                )
+                self.runtime_result(json!({ "agent": managed, "input": "paste" }), window, cx)
             },
             RuntimeCommand::AgentRead { agent, generation, lines } => {
                 let managed = self.runtime_hub.active_agent(agent, *generation)?;

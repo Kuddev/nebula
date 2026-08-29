@@ -167,10 +167,7 @@ fn gpui_binding_combo_maps_plus_minus_and_digits() {
 
 #[test]
 fn pane_card_divider_reaches_the_window_top_without_moving_its_bottom() {
-    let card = Bounds::new(
-        gpui::point(px(230.0), px(48.0)),
-        size(px(850.0), px(672.0)),
-    );
+    let card = Bounds::new(gpui::point(px(230.0), px(48.0)), size(px(850.0), px(672.0)));
     let divider = pane_card_divider_bounds(card, 1.0, 1.5).expect("侧栏存在时必须画分界线");
 
     assert_eq!(f32::from(divider.origin.x), 230.0);
@@ -192,16 +189,10 @@ fn pane_card_divider_reaches_the_window_top_without_moving_its_bottom() {
 
 #[test]
 fn pane_card_divider_requires_both_width_and_a_real_sidebar_boundary() {
-    let no_sidebar = Bounds::new(
-        gpui::point(px(0.0), px(48.0)),
-        size(px(1080.0), px(672.0)),
-    );
+    let no_sidebar = Bounds::new(gpui::point(px(0.0), px(48.0)), size(px(1080.0), px(672.0)));
     assert!(pane_card_divider_bounds(no_sidebar, 1.0, 1.5).is_none());
 
-    let sidebar = Bounds::new(
-        gpui::point(px(230.0), px(48.0)),
-        size(px(850.0), px(672.0)),
-    );
+    let sidebar = Bounds::new(gpui::point(px(230.0), px(48.0)), size(px(850.0), px(672.0)));
     assert!(pane_card_divider_bounds(sidebar, 0.0, 1.5).is_none());
 }
 
@@ -511,6 +502,15 @@ fn tab_chrome_cancel_leaves_custom_name() {
 
 /// 旧壳 `chrome_tab_label`：有 cwd 就用末级目录名，不用 OSC 标题 / `NEBULA|` 整串。
 #[test]
+fn tab_chrome_label_uses_cwd_last_component() {
+    use crate::gpui_shell::terminal::view::last_path_component;
+
+    assert_eq!(last_path_component(r"D:\work\nebula").as_deref(), Some("nebula"));
+    assert_eq!(last_path_component("/home/me/src/").as_deref(), Some("src"));
+    assert_eq!(last_path_component(r"C:\Users\me\").as_deref(), Some("me"));
+    assert_eq!(last_path_component("").as_deref(), None);
+    assert_eq!(last_path_component("///").as_deref(), None);
+}
 
 /// 侧栏拖宽热区必须对准主题真正画出来的那条分界。Nord 是铺满形态（卡缝 0 +
 /// 1px 竖线，线贴在侧栏槽位右缘），其余主题是浮起圆角卡（卡缝 8 + 无竖线，
@@ -532,13 +532,4 @@ fn sidebar_resize_hot_zone_follows_the_theme_boundary() {
 
     // 热区宽度足以盖住线：线心两侧各 3px。
     assert!(SIDEBAR_RESIZE_HANDLE_WIDTH * 0.5 > nord.divider);
-}
-fn tab_chrome_label_uses_cwd_last_component() {
-    use crate::gpui_shell::terminal::view::last_path_component;
-
-    assert_eq!(last_path_component(r"D:\work\nebula").as_deref(), Some("nebula"));
-    assert_eq!(last_path_component("/home/me/src/").as_deref(), Some("src"));
-    assert_eq!(last_path_component(r"C:\Users\me\").as_deref(), Some("me"));
-    assert_eq!(last_path_component("").as_deref(), None);
-    assert_eq!(last_path_component("///").as_deref(), None);
 }

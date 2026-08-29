@@ -127,12 +127,12 @@ fn paste_needs_confirmation(text: &str, mode: TermMode) -> bool {
     }
 
     let has_line_break = text.contains(['\n', '\r']);
-    let has_unsafe_control = text.chars().any(|character| {
-        character.is_control() && !matches!(character, '\n' | '\r' | '\t')
-    });
-    let starts_privileged_command = text.split(['\n', '\r']).any(|line| {
-        matches!(line.split_ascii_whitespace().next(), Some("sudo" | "su"))
-    });
+    let has_unsafe_control = text
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'));
+    let starts_privileged_command = text
+        .split(['\n', '\r'])
+        .any(|line| matches!(line.split_ascii_whitespace().next(), Some("sudo" | "su")));
 
     has_line_break || has_unsafe_control || starts_privileged_command
 }
@@ -626,50 +626,44 @@ impl TerminalView {
             },
             TerminalLaunch::Ssh { destination } => destination.clone(),
         };
-        let (
-            ssh_destination,
-            initial_title,
-            intro_shell_name,
-            suggest_env,
-            exec_context,
-            spawned,
-        ) = match launch {
-            TerminalLaunch::Local { cwd, shell: launch_shell, shell_name } => {
-                // 显式 launch（会话恢复/创建时冻结）优先；只有旧会话没有
-                // 身份时才回退当前设置。这正是共享 v4 的 Default 语义。
-                let effective = launch_shell.or(shell);
-                // 补齐要知道这个 pane 面对**哪台机器**：`wsl.exe -d <发行版>`
-                // 启动的 tab，文件系统和命令集都在来宾里，本进程的 `std::fs`
-                // 和 PATH 描述的是另一台机器。
-                let suggest_env = effective
-                    .as_ref()
-                    .and_then(|shell| {
-                        crate::shell_detect::wsl_launch_distro(shell.program(), shell.args())
-                    })
-                    .map_or(crate::display::SuggestEnv::Local, |distro| {
-                        crate::display::SuggestEnv::Wsl { distro: distro.to_owned() }
-                    });
-                let options = session::local_options(effective, pane_id, cwd);
-                let exec_context =
-                    crate::runtime_exec::PaneExecContext::from_pty_options(&options);
-                (
+        let (ssh_destination, initial_title, intro_shell_name, suggest_env, exec_context, spawned) =
+            match launch {
+                TerminalLaunch::Local { cwd, shell: launch_shell, shell_name } => {
+                    // 显式 launch（会话恢复/创建时冻结）优先；只有旧会话没有
+                    // 身份时才回退当前设置。这正是共享 v4 的 Default 语义。
+                    let effective = launch_shell.or(shell);
+                    // 补齐要知道这个 pane 面对**哪台机器**：`wsl.exe -d <发行版>`
+                    // 启动的 tab，文件系统和命令集都在来宾里，本进程的 `std::fs`
+                    // 和 PATH 描述的是另一台机器。
+                    let suggest_env = effective
+                        .as_ref()
+                        .and_then(|shell| {
+                            crate::shell_detect::wsl_launch_distro(shell.program(), shell.args())
+                        })
+                        .map_or(crate::display::SuggestEnv::Local, |distro| {
+                            crate::display::SuggestEnv::Wsl { distro: distro.to_owned() }
+                        });
+                    let options = session::local_options(effective, pane_id, cwd);
+                    let exec_context =
+                        crate::runtime_exec::PaneExecContext::from_pty_options(&options);
+                    (
+                        None,
+                        String::from("shell"),
+                        shell_name,
+                        suggest_env,
+                        Some(exec_context),
+                        session::spawn(initial, term_config, options),
+                    )
+                },
+                TerminalLaunch::Ssh { destination } => (
+                    Some(destination.clone()),
+                    destination.clone(),
                     None,
-                    String::from("shell"),
-                    shell_name,
-                    suggest_env,
-                    Some(exec_context),
-                    session::spawn(initial, term_config, options),
-                )
-            },
-            TerminalLaunch::Ssh { destination } => (
-                Some(destination.clone()),
-                destination.clone(),
-                None,
-                crate::display::SuggestEnv::Ssh { destination: destination.clone() },
-                None,
-                session::spawn_ssh(destination, initial, term_config),
-            ),
-        };
+                    crate::display::SuggestEnv::Ssh { destination: destination.clone() },
+                    None,
+                    session::spawn_ssh(destination, initial, term_config),
+                ),
+            };
         let is_ssh = ssh_destination.is_some();
         let (session, error) = match spawned {
             Ok((session, mut rx, mut stage_rx)) => {
@@ -892,15 +886,15 @@ impl TerminalView {
                 let mut state = crate::display::NebulaPaneState::default();
                 state.suggest_env = suggest_env;
                 state
-            last_command_failed: false,
-            completed_at: None,
-            last_task_state: None,
             },
             suggest_anchor: None,
             ghost_enabled,
             accept,
             completion_style,
             awaiting_input: false,
+            last_command_failed: false,
+            completed_at: None,
+            last_task_state: None,
             bell_flash: false,
             bell_flash_epoch: 0,
             pending_bell_notify: None,
@@ -963,7 +957,8 @@ impl TerminalView {
                     cx.emit(TerminalViewEvent::ProgressChanged(progress));
                 }
             },
-            TermEvent::PtyWrite(text) => self.write_bytes(text.into_bytes()),            TermEvent::ClipboardStore(_, text) => {
+            TermEvent::PtyWrite(text) => self.write_bytes(text.into_bytes()),
+            TermEvent::ClipboardStore(_, text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             },
             TermEvent::ClipboardLoad(_, formatter) => {
@@ -1057,12 +1052,12 @@ impl TerminalView {
             // 属于上一轮/初始化的那个边沿不能改写徽章。
             TermEvent::CommandDone { exit_code } => {
                 // 新 PTY 初始化提示符也可能先发一个 CommandDone。Runtime
-                self.last_command_failed = exit_code.is_some_and(|code| code != 0);
                 // 文本还在等待回显 barrier 时，这个边沿属于上一轮/初始化，
                 // 不能清掉尚未发送的 Enter 或把新请求提前投影成 idle。
                 if self.pending_runtime_submit.is_some() {
                     return;
                 }
+                self.last_command_failed = exit_code.is_some_and(|code| code != 0);
                 // 旧壳同款收尾：CLI 退回提示符后，它不再是这个 pane 的前台
                 // 事实——hook 稍后若仍在跑会重新点亮（handle_ai_hook 覆写）。
                 if self.running_program.take().is_some() || self.ai_session.take().is_some() {
@@ -1219,6 +1214,11 @@ impl TerminalView {
         .detach();
     }
 
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
+    }
+
+    fn on_bell(&mut self, cx: &mut Context<Self>) {
         // 「有人在等你」的兜底与响铃的**提示方式**无关：`BellMode::None` 关掉的
         // 是声音和闪屏，不该把徽章一起关掉，所以这一段排在那道闸之前。
         //
@@ -1229,11 +1229,6 @@ impl TerminalView {
             self.awaiting_input = true;
             cx.notify();
         }
-    pub fn cursor_visible(&self) -> bool {
-        self.cursor_visible
-    }
-
-    fn on_bell(&mut self, cx: &mut Context<Self>) {
         let mode = nebula_settings::RuntimeSettings::load().bell;
         if mode == nebula_settings::BellModeName::None {
             return;
@@ -1912,11 +1907,12 @@ impl TerminalView {
         if plain {
             if suggest::popup_active(&self.suggest) {
                 match ks.key.as_str() {
-                    "down" | "up" | "tab" => {
-                        suggest::popup_move(
-                            &mut self.suggest,
-                            if ks.key.as_str() == "up" { -1 } else { 1 },
-                        );
+                    // 候选自动出现时保持未选中，让 Up/Down 继续交给 shell
+                    // 历史；Tab 或鼠标先建立选中态后，方向键才导航列表。
+                    key @ ("tab" | "down" | "up")
+                        if key == "tab" || self.suggest.completion_selected.is_some() =>
+                    {
+                        suggest::popup_move(&mut self.suggest, if key == "up" { -1 } else { 1 });
                         cx.notify();
                         cx.stop_propagation();
                         return;

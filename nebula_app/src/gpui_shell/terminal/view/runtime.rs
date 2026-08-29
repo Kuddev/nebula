@@ -679,9 +679,7 @@ impl TerminalView {
                 if !matches!(kind, AiHookKind::SessionStart) {
                     self.agent_runtime_submit_pending = false;
                 }
-                if from_primary_agent
-                    && let Some(id) = event.session_id.as_deref()
-                {
+                if from_primary_agent && let Some(id) = event.session_id.as_deref() {
                     self.ai_session = Some(crate::display::AiSessionIdentity {
                         source: event.source.clone(),
                         session_id: id.to_owned(),
@@ -848,20 +846,20 @@ impl TerminalView {
         }
     }
 
+    /// `command_running` 的统一置位口：进程树探测的节流窗口从这里起算，
+    /// 上一条命令的反证同时作废（新命令开始，「树里没活儿」不再成立）。
     ///
     /// 上一条命令的失败标记与「刚完成」的对勾也在这里作废：新命令一起跑，旧结果
     /// 就不再是这个 pane 的现状。
-    /// `command_running` 的统一置位口：进程树探测的节流窗口从这里起算，
-    /// 上一条命令的反证同时作废（新命令开始，「树里没活儿」不再成立）。
     pub(super) fn mark_command_running(&mut self) {
         if !self.command_running {
             self.command_started = Some(std::time::Instant::now());
             self.last_process_probe = None;
         }
-        self.last_command_failed = false;
-        self.completed_at = None;
         self.command_running = true;
         self.command_running_disproved = false;
+        self.last_command_failed = false;
+        self.completed_at = None;
     }
 
     /// 进程树对账：补 agent 身份、给 `command_running` 做反证。
@@ -930,9 +928,10 @@ impl TerminalView {
         // `program_is_work` 判掉了。真在跑的 agent 也不会被误清——claude 等在提示
         // 符上时进程仍在树里，`busy_child` 看得见，反证根本不成立。
         if disproved
-            && self.running_program.as_deref().is_some_and(|program| {
-                !crate::process_tree::is_interactive_shell_command(program)
-            })
+            && self
+                .running_program
+                .as_deref()
+                .is_some_and(|program| !crate::process_tree::is_interactive_shell_command(program))
         {
             self.running_program = None;
             cx.emit(TerminalViewEvent::TitleChanged);
