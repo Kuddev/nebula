@@ -1557,7 +1557,16 @@ mod tests {
 
     #[test]
     fn proxy_test_timeout_copy_matches_shared_budget() {
-        assert_eq!(super::proxy_test_timeout_message(), "网络测试超时（12 秒无响应）");
+        // 353bc17 把这条文案搬进 i18n 目录，秒数改由 `ProxyTestFailure` 携带
+        // （旧的 `proxy_test_timeout_message` 随之删除，这个测试的引用被漏下
+        // 了）。判据不变：用户看到的文案必须和共享的超时预算是同一个数。
+        let timeout = crate::proxy_test::ProxyTestOutcome::Failed(
+            crate::proxy_test::ProxyTestFailure::Timeout { seconds: super::TEST_TIMEOUT.as_secs() },
+        );
+        assert_eq!(
+            crate::display::UiLanguage::ZhCn.proxy_test_message(&timeout, 0),
+            "网络测试超时（12 秒无响应）"
+        );
         assert_eq!(super::TEST_TIMEOUT.as_secs(), 12);
     }
 
