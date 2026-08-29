@@ -101,7 +101,7 @@ pub(super) fn broadcast_targets(order: &[u64], source: u64) -> Vec<u64> {
     order.iter().copied().filter(|id| *id != source).collect()
 }
 
-/// 2×2 描边小方块（Netcatty workspace tab 的 `LayoutGrid` 位）：分屏 tab 的行首
+/// 2×2 描边小方块：分屏 tab 的行首
 /// 图标。四个描边格是内容本身，不是给图标套的方框——与图标语言的"禁方盒"
 /// 不冲突。
 pub(super) fn split_glyph(size_px: f32, color: Hsla) -> impl IntoElement {
@@ -114,7 +114,7 @@ pub(super) fn split_glyph(size_px: f32, color: Hsla) -> impl IntoElement {
     v_flex().gap(px(gap)).child(row()).child(row())
 }
 
-/// 分屏数量胶囊。规格对齐 Netcatty 的 workspace tab 徽章
+/// 分屏数量胶囊，与同一标题栏的紧凑状态徽章保持一致。
 /// （`top-tabs/TopTabItems.tsx:998-1006`：`text-[10px] px-1.5 rounded-full
 /// min-w-[22px]`、前景 18% 描边、背景 60% 半透明底），但尺寸按 chrome 字号
 /// 等比推导而不是钉死 10px——侧栏字号跟随配置字号，钉死会在大字号下缩成
