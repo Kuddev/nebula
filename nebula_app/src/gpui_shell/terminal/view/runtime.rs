@@ -20,15 +20,20 @@ impl TerminalView {
         if self.agent_status == AgentStatus::Blocked {
             return RuntimeTaskState::Attention;
         }
-        if self.awaiting_input {
-            return RuntimeTaskState::WaitingInput;
-        }
+        // 权威判定排在响铃兜底之前。`awaiting_input` 只由 BEL 置位，而 CC /
+        // codex 回合结束同样响铃——原来它压在这段 match 之上，于是 hook 明确报
+        // 出的 `Done` 每次都被改写成 `WaitingInput`，tab 上显示「在问你」。
+        // 置位那头也有同一条闸（`AgentStatus::is_decided`），这里再挡一次是为了
+        // 历史遗留的旗子改不了新判定。
         match self.agent_status {
             AgentStatus::Working => return RuntimeTaskState::Running,
             AgentStatus::Done => return RuntimeTaskState::Finished,
             AgentStatus::Idle => return RuntimeTaskState::Idle,
             AgentStatus::Blocked => unreachable!("handled above"),
             AgentStatus::Unknown => {},
+        }
+        if self.awaiting_input {
+            return RuntimeTaskState::WaitingInput;
         }
         // `command_running` 是 OSC 133 的忠实记录，但 133;D 会因为宿主 shell
         // 被 cmd/wsl/ssh 接管而永不到达；`command_running_disproved` 是进程树
@@ -112,13 +117,54 @@ impl TerminalView {
     }
 
     pub fn sidebar_activity(&self) -> SidebarActivity {
-        match self.runtime_task_state() {
+        let state = self.runtime_task_state();
+        // 「上一条命令失败」盖在完成/空闲之上：那两个说的是「没在忙」，而退出码
+        // 非 0 是一个你可能要处理的结果。真在跑就不画（`mark_command_running`
+        // 起跑时已经清了旗子），pane 级故障走下面的 `Failed`，更严重。
+        if self.last_command_failed
+            && matches!(
+                state,
+                crate::runtime_api::RuntimeTaskState::Idle
+                    | crate::runtime_api::RuntimeTaskState::Finished
+            )
+        {
+            return SidebarActivity::CommandFailed;
+        }
+        match state {
             crate::runtime_api::RuntimeTaskState::Running => SidebarActivity::Running,
             crate::runtime_api::RuntimeTaskState::WaitingInput => SidebarActivity::WaitingInput,
             crate::runtime_api::RuntimeTaskState::Attention => SidebarActivity::Attention,
-            crate::runtime_api::RuntimeTaskState::Finished => SidebarActivity::Done,
+            // 刚完成的那一小会儿画对勾，之后沉降为圆点。
+            crate::runtime_api::RuntimeTaskState::Finished => {
+                if self.completed_at.is_some() {
+                    SidebarActivity::Completed
+                } else {
+                    SidebarActivity::Done
+                }
+            },
             crate::runtime_api::RuntimeTaskState::Failed => SidebarActivity::Failed,
             crate::runtime_api::RuntimeTaskState::Idle => SidebarActivity::Idle,
+        }
+    }
+
+    /// 认出「刚刚进入完成」这个边沿，并让对勾在闪现窗口结束后自己沉降为圆点。
+    ///
+    /// 由 1Hz 的 agent 看门狗调用（`workspace::agents::start_agent_screen_watchdog`）：
+    /// 那里本来就每秒遍历所有 pane，不用再养一个计时器。代价是边沿最多晚 1 秒
+    /// 被看到、对勾实际停留 `COMPLETION_FLASH`..+1s——「短暂闪现」这个语义容得下
+    /// 这个精度，换来的是零新增定时器。
+    pub(crate) fn sync_activity_badges(&mut self, cx: &mut Context<Self>) {
+        let state = self.runtime_task_state();
+        if self.last_task_state != Some(state) {
+            self.last_task_state = Some(state);
+            self.completed_at = (state == crate::runtime_api::RuntimeTaskState::Finished)
+                .then(std::time::Instant::now);
+            cx.notify();
+            return;
+        }
+        if self.completed_at.is_some_and(|at| at.elapsed() >= super::COMPLETION_FLASH) {
+            self.completed_at = None;
+            cx.notify();
         }
     }
 
@@ -802,6 +848,9 @@ impl TerminalView {
         }
     }
 
+    ///
+    /// 上一条命令的失败标记与「刚完成」的对勾也在这里作废：新命令一起跑，旧结果
+    /// 就不再是这个 pane 的现状。
     /// `command_running` 的统一置位口：进程树探测的节流窗口从这里起算，
     /// 上一条命令的反证同时作废（新命令开始，「树里没活儿」不再成立）。
     pub(super) fn mark_command_running(&mut self) {
@@ -809,6 +858,8 @@ impl TerminalView {
             self.command_started = Some(std::time::Instant::now());
             self.last_process_probe = None;
         }
+        self.last_command_failed = false;
+        self.completed_at = None;
         self.command_running = true;
         self.command_running_disproved = false;
     }

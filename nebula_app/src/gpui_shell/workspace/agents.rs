@@ -140,7 +140,12 @@ impl NebulaWorkspace {
                         .map(|pane| pane.view.clone())
                         .collect();
                     for view in views {
-                        view.update(cx, |view, cx| view.refresh_agent_screen_state(cx));
+                        view.update(cx, |view, cx| {
+                            view.refresh_agent_screen_state(cx);
+                            // 徽章的时间轴也挂在这一拍上：认出「刚进入完成」的
+                            // 边沿、并让对勾在闪现窗口结束后沉降为圆点。
+                            view.sync_activity_badges(cx);
+                        });
                     }
                     workspace.publish_tray_agents(cx);
                 });

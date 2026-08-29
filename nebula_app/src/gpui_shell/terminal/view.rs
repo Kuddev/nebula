@@ -64,6 +64,10 @@ const SCROLLBAR_SLOP: f32 = 8.0;
 const SELECTION_SCROLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(15);
 const SELECTION_SCROLL_STEP: f32 = 20.0;
 
+/// 「刚成功」的对勾停留多久再沉降为圆点。看门狗按 1Hz 复核，所以实际停留是
+/// 这个值到 +1s；取 1.2s 是为了让它至少跨过一个复核点，不会一闪就没。
+pub(super) const COMPLETION_FLASH: std::time::Duration = std::time::Duration::from_millis(1200);
+
 /// 一次自动回滚该滚几行：指针在网格上方为正（往回滚历史）、下方为负，网格
 /// 内为 0。贴边即 1 行，之后每远离 `SELECTION_SCROLL_STEP` 像素加一档。
 ///
@@ -209,23 +213,32 @@ pub(crate) fn last_path_component(path: &str) -> Option<String> {
 /// 成员分两类，决定它在什么时候该消失（呈现规则在
 /// `workspace::sidebar::tab_presentation`，两种 tab 布局共用那一处）：
 ///
-/// - **事件**（`Done`）——「刚发生了一件你不在场的事」。你到场就没有信息量了，
-///   所以当前 tab 一律不显示。
-/// - **状态**（`Running` / `WaitingInput` / `Attention` / `Failed`）——「此刻仍
-///   是这个样子」。你看不看它都还成立，所以永远显示。
+/// - **事件**（`Done` / `Completed`）——「刚发生了一件你不在场的事」。你到场就
+///   没有信息量了，所以当前 tab 一律不显示。
+/// - **状态**（`Running` / `WaitingInput` / `Attention` / `CommandFailed` /
+///   `Failed`）——「此刻仍是这个样子」。你看不看它都还成立，所以永远显示。
+///   `CommandFailed` 归到这一类：命令失败是需要你处理的结果，不是「未读输出」，
+///   看一眼不等于处理完了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarActivity {
     Idle,
     Running,
     /// Agent 回合完成，等待下一条指令（旧壳蓝点语义）。唯一的「事件」态。
     Done,
+    /// 刚刚完成（`COMPLETION_FLASH` 之内）：闪一个对勾再沉降为 [`Self::Done`]
+    /// 的圆点。与 `Done` 同属「事件」，当前 tab 一样不显示。
+    Completed,
+    /// 上一条命令以非 0 退出（OSC 133;D）。与 [`Self::Failed`] 不是一件事：这条
+    /// 说「最近那条命令失败了」，下一条命令起跑即清；`Failed` 说「这个 pane 本身
+    /// 坏了」（进程没了、SSH 连不上），不会自己好。
+    CommandFailed,
     /// 命令停在交互提示上等人打字（`[y/n]`、口令、Press ENTER）。
     ///
-    /// 与 `Attention` 拆开而不是合并：`Attention` 是 agent 被授权卡住，一个
-    /// 回合就此阻塞，值得用警示形状喊；停在 `[y/n]` 是常态，用警示色去喊会
-    /// 让真正要紧的那个失效。
+    /// 与 `Attention` 拆开而不是合并：两者都画开掌（要求用户做的事是同一件），
+    /// 差别走颜色轴——`Attention` 是 agent 被授权卡住、整个回合就此阻塞，取
+    /// warning；停在 `[y/n]` 是常态，取 primary，不抢警示色。
     WaitingInput,
-    /// Agent 停在授权/提问上，需要用户表态（旧壳手掌语义）。
+    /// Agent 停在授权/提问上，需要用户表态（旧壳手掌语义，现在形状也回到手掌）。
     Attention,
     Failed,
 }
@@ -403,6 +416,15 @@ pub struct TerminalView {
     completion_style: crate::display::CompletionStyle,
     /// BEL 后暂停侧栏转圈，直到用户再往 PTY 打字（旧壳 `awaiting_input`）。
     awaiting_input: bool,
+    /// 上一条命令的退出码非 0（OSC 133;D 报的）。下一条命令起跑即作废
+    /// （`mark_command_running`）——徽章说的是「最近那条失败了」，不是「这个
+    /// pane 坏了」，后者是 `SidebarActivity::Failed`。
+    last_command_failed: bool,
+    /// 进入 `Finished` 的时刻。`COMPLETION_FLASH` 之内画对勾，之后沉降为圆点
+    /// 两段式反馈先确认「刚成功」，再退化成「有结果没看」。
+    completed_at: Option<std::time::Instant>,
+    /// 上一次看门狗观察到的任务状态，用来认出「刚刚进入完成」这个边沿。
+    last_task_state: Option<crate::runtime_api::RuntimeTaskState>,
     /// BEL 视觉闪烁：整 pane 盖一层前景 12%，约 150ms。
     pub(super) bell_flash: bool,
     bell_flash_epoch: u64,
@@ -870,6 +892,9 @@ impl TerminalView {
                 let mut state = crate::display::NebulaPaneState::default();
                 state.suggest_env = suggest_env;
                 state
+            last_command_failed: false,
+            completed_at: None,
+            last_task_state: None,
             },
             suggest_anchor: None,
             ghost_enabled,
@@ -1027,10 +1052,12 @@ impl TerminalView {
                 }
                 cx.notify();
             },
-            // 退出码先只用来结束「运行中」；失败命令的未读标记要等
-            // `SidebarActivity` 扩出未读态再接，现在记下来也没有呈现位置。
+            // 退出码接到「上一条命令失败」的未读徽章上（⚠ 三角）；`Some(0)` 与
+            // `None`（没带退出码的 133;D）都算过关。记在下面那道 barrier 之后：
+            // 属于上一轮/初始化的那个边沿不能改写徽章。
             TermEvent::CommandDone { exit_code } => {
                 // 新 PTY 初始化提示符也可能先发一个 CommandDone。Runtime
+                self.last_command_failed = exit_code.is_some_and(|code| code != 0);
                 // 文本还在等待回显 barrier 时，这个边沿属于上一轮/初始化，
                 // 不能清掉尚未发送的 Enter 或把新请求提前投影成 idle。
                 if self.pending_runtime_submit.is_some() {
@@ -1192,6 +1219,16 @@ impl TerminalView {
         .detach();
     }
 
+        // 「有人在等你」的兜底与响铃的**提示方式**无关：`BellMode::None` 关掉的
+        // 是声音和闪屏，不该把徽章一起关掉，所以这一段排在那道闸之前。
+        //
+        // 兜底只在没有权威判定时成立（见 `AgentStatus::is_decided`）：CC /
+        // codex 回合结束也会响铃，让响铃压过 hook / 屏幕规则报出的 `Done`，
+        // 屏幕上就会把「完成」显示成「在问你」。
+        if self.running_program.is_some() && !self.agent_status.is_decided() {
+            self.awaiting_input = true;
+            cx.notify();
+        }
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
     }
@@ -1204,9 +1241,6 @@ impl TerminalView {
         let audible_ok = if mode.audible() { Self::ring_audible() } else { false };
         if mode.visual() || (mode.audible() && !audible_ok) {
             self.flash_bell(cx);
-        }
-        if self.running_program.is_some() {
-            self.awaiting_input = true;
         }
         let program = self.running_program.clone();
         self.pending_bell_notify = Some(match program {

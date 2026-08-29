@@ -273,6 +273,20 @@ pub enum AgentStatus {
     Unknown,
 }
 
+impl AgentStatus {
+    /// 这个 pane 是否已经有权威判定。`Unknown` 表示 hook 与屏幕规则都没认领它
+    /// （普通 shell，或还没识别出 agent）。
+    ///
+    /// BEL 的兜底资格看这一位。响铃的含义是「有事发生」，不是「停下来等你输
+    /// 入」：CC / codex 在**回合结束**时同样响铃（终端自己的通知文案就写着
+    /// 「任务完成，等待输入」，两个概念当初就被焊在一起）。一旦让响铃去表示等
+    /// 待输入，agent 每做完一件事都会显示成「在问你」——所以有权威判定时响铃
+    /// 不得改写它，只在没有判定时兜底。
+    pub const fn is_decided(self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+}
+
 /// Why the current pane status has its value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AgentStatusSource {
@@ -672,6 +686,19 @@ mod tests {
         assert_eq!(AgentKind::Kimi.fork_command("abc-123").as_deref(), Some("kimi --fork abc-123"));
         assert_eq!(AgentKind::Claude.resume_command("x; calc"), None);
         assert_eq!(AgentKind::Aider.resume_command("abc"), None);
+    }
+
+    /// 响铃只能在没人认领这个 pane 时兜底。CC / codex 在回合结束时也响铃，所以
+    /// 一旦让它压过 hook / 屏幕规则的判定，「完成」会在 tab 上显示成「在问你」
+    /// ——这就是终端徽章那条「结束了却画手掌」的病根。
+    #[test]
+    fn bell_may_only_speak_for_panes_no_rule_has_claimed() {
+        for decided in
+            [AgentStatus::Idle, AgentStatus::Working, AgentStatus::Blocked, AgentStatus::Done]
+        {
+            assert!(decided.is_decided(), "{decided:?} 是权威判定，响铃不得改写");
+        }
+        assert!(!AgentStatus::Unknown.is_decided(), "没有判定时才轮到响铃兜底");
     }
 
     #[test]

@@ -3,9 +3,10 @@ use super::*;
 /// 折叠箭头的固定布局槽。图标是 SVG，不应借任一字体的 advance 决定留白。
 const TABS_DISCLOSURE_SLOT_W: f32 = 24.0;
 
-/// `SidebarActivity::WaitingInput` 的字位：Nerd Font `nf-fa-hand_paper_o`（开掌）。
-/// 已核对打包字体 `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` 的 cmap 覆盖
-/// 这个码位；换字体前先核，否则会掉成豆腐块。
+/// `SidebarActivity::WaitingInput` / `Attention` 共用的字位：Nerd Font
+/// `nf-fa-hand_paper_o`（开掌）。已核对打包字体
+/// `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` 的 cmap 覆盖这个码位；换字体
+/// 前先核，否则会掉成豆腐块。
 const WAITING_INPUT_GLYPH: &str = "\u{f256}";
 
 /// 侧栏新建入口的生产命中区；鼠标测试直接复用，避免只验证一个近似按钮。
@@ -45,7 +46,7 @@ pub(super) fn resting_activity(
     has_bell: bool,
 ) -> SidebarActivity {
     match activity {
-        SidebarActivity::Done if active => SidebarActivity::Idle,
+        SidebarActivity::Done | SidebarActivity::Completed if active => SidebarActivity::Idle,
         SidebarActivity::Idle if !active && has_bell => SidebarActivity::Done,
         other => other,
     }
@@ -126,8 +127,9 @@ impl NebulaWorkspace {
         .size(px(11.0))
     }
 
-    /// 「命令停在交互提示上等人打字」的徽章：使用 Nerd Font 开掌
-    /// `nf-fa-hand_paper_o`（U+F256）表达交互等待状态。
+    /// 「有人在等你动手」的徽章：使用 Nerd Font 开掌 `nf-fa-hand_paper_o`
+    /// （U+F256）。`WaitingInput`（命令停在交互提示）与 `Attention`（agent 卡在
+    /// 授权/提问）共用这一个形状，因为它们要求用户做的事是同一件。
     ///
     /// 用**字体字形**而不是旧壳 `display::ui::icons::push_hand`：那一版是手推
     /// quad、五指靠挖空撑形，小尺寸下指缝糊成一团读不出「手」，用户 08-02 判掉
@@ -136,9 +138,9 @@ impl NebulaWorkspace {
     /// 指缝属于轮廓本身、有正经笔重，缩到徽章尺寸不塌——和被否掉的那版不是同
     /// 一种东西。
     ///
-    /// 颜色取 `primary` 而不是 `Attention` 的 warning：颜色轴留给严重度——agent
-    /// 卡在授权上会阻塞整个回合，值得警示色；停在 `[y/n]` 是常态，抢了警示色会
-    /// 把真正要紧的那个喊废。语义交给形状。
+    /// 形状表达语义、颜色表达严重度：停在 `[y/n]` 是常态，取 `primary`；agent
+    /// 卡在授权上会把整个回合堵住，取 `warning`。警示形状（⚠ 三角）留给失败，
+    /// 不能拿去表示「问你一句」。
     pub(super) fn waiting_hand(
         family: SharedString,
         size_px: f32,
@@ -316,18 +318,34 @@ impl NebulaWorkspace {
                     SidebarActivity::Done => Some(
                         div().size(px(6.0)).rounded_full().bg(theme.primary).into_any_element(),
                     ),
+                    // 刚完成：先闪一个对勾做确认，`COMPLETION_FLASH` 之后沉降
+                    // 成上面那个圆点（同一件事的两个阶段，不是两种语义）。
+                    SidebarActivity::Completed => Some(
+                        Icon::new(IconName::Check)
+                            .xsmall()
+                            .text_color(theme.success)
+                            .into_any_element(),
+                    ),
+                    // 上一条命令非 0 退出：⚠ 三角就是给失败的，形状本身在所有
+                    // 终端/编辑器里都这么读。pane 级故障用下面的 ✕，两者不同。
+                    SidebarActivity::CommandFailed => Some(
+                        Icon::new(IconName::TriangleAlert)
+                            .xsmall()
+                            .text_color(theme.danger)
+                            .into_any_element(),
+                    ),
                     // 停在 [y/n]/口令/Press ENTER 上：也要你动手，但这是常态，
                     // 用 Attention 的警示形状去喊会把真正要紧的那个喊废。
                     SidebarActivity::WaitingInput => Some(
                         Self::waiting_hand(symbol_family.clone(), label_px, theme.primary)
                             .into_any_element(),
                     ),
-                    // 停在授权/提问上：比「完成」更强，必须换形状而不是换色
-                    // （旧壳教训：两态共用圆点在界面上根本分不出来）。
+                    // 停在授权/提问上：同样是「有人在等你」，所以跟
+                    // `WaitingInput` 用同一个手掌——形状表达语义。差别走颜色轴：
+                    // 它会把整个回合卡住，值得 warning。⚠ 三角留给失败，拿它表
+                    // 示「问你一句」会跟所有终端/编辑器的既有读法冲突。
                     SidebarActivity::Attention => Some(
-                        Icon::new(IconName::TriangleAlert)
-                            .xsmall()
-                            .text_color(theme.warning)
+                        Self::waiting_hand(symbol_family.clone(), label_px, theme.warning)
                             .into_any_element(),
                     ),
                     SidebarActivity::Failed => Some(
@@ -1057,6 +1075,7 @@ mod tests {
             SidebarActivity::Running,
             SidebarActivity::WaitingInput,
             SidebarActivity::Attention,
+            SidebarActivity::CommandFailed,
             SidebarActivity::Failed,
         ] {
             assert_eq!(resting_activity(state, true, false), state);
@@ -1064,6 +1083,24 @@ mod tests {
             // 响铃补位只从 Idle 起跳，不能盖掉任何进行中的状态。
             assert_eq!(resting_activity(state, false, true), state);
         }
+    }
+
+    /// 对勾是「完成」的第一阶段，跟圆点同属事件：当前 tab 一律不画。命令失败
+    /// 不是事件——看一眼不等于处理完了，所以它留在当前 tab 上。
+    #[test]
+    fn completion_flash_follows_the_same_unattended_rule_as_the_dot() {
+        assert_eq!(
+            resting_activity(SidebarActivity::Completed, true, false),
+            SidebarActivity::Idle
+        );
+        assert_eq!(
+            resting_activity(SidebarActivity::Completed, false, false),
+            SidebarActivity::Completed
+        );
+        assert_eq!(
+            resting_activity(SidebarActivity::CommandFailed, true, false),
+            SidebarActivity::CommandFailed
+        );
     }
 
     #[test]

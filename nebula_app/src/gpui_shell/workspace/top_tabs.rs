@@ -189,14 +189,24 @@ impl NebulaWorkspace {
                     SidebarActivity::Done => Some(
                         div().size(px(6.0)).rounded_full().bg(theme.primary).into_any_element(),
                     ),
+                    SidebarActivity::Completed => Some(
+                        Icon::new(IconName::Check)
+                            .xsmall()
+                            .text_color(theme.success)
+                            .into_any_element(),
+                    ),
+                    SidebarActivity::CommandFailed => Some(
+                        Icon::new(IconName::TriangleAlert)
+                            .xsmall()
+                            .text_color(theme.danger)
+                            .into_any_element(),
+                    ),
                     SidebarActivity::WaitingInput => Some(
                         Self::waiting_hand(symbol_family.clone(), label_px, theme.primary)
                             .into_any_element(),
                     ),
                     SidebarActivity::Attention => Some(
-                        Icon::new(IconName::TriangleAlert)
-                            .xsmall()
-                            .text_color(theme.warning)
+                        Self::waiting_hand(symbol_family.clone(), label_px, theme.warning)
                             .into_any_element(),
                     ),
                     SidebarActivity::Failed => Some(
