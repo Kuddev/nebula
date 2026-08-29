@@ -133,6 +133,8 @@ serde_json = "1"
 
 [dev-dependencies]
 clap_complete = "4.2.3"
+rand = "0.10"
+rsa = "0.10.0-rc.18"
 
 [target.'cfg(not(windows))'.dependencies]
 xdg = "3.0.0"

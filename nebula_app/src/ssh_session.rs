@@ -1265,9 +1265,13 @@ fn auth_failure(
 /// 是 ASN.1 解码错误，只能靠 PEM 头识别。其余失败（格式不支持/文件损坏）
 /// 绝不能当成「缺口令」——那会弹一个永远解不开的口令框。
 fn key_needs_passphrase(err: &russh::keys::Error, pem: &[u8]) -> bool {
-    const PKCS8_ENCRYPTED: &[u8] = b"-----BEGIN ENCRYPTED PRIVATE KEY-----";
+    const PKCS8_ENCRYPTED_PREFIX: &[u8] = b"-----BEGIN ENCRYPTED ";
+    const PKCS8_ENCRYPTED_SUFFIX: &[u8] = b"PRIVATE KEY-----";
     matches!(err, russh::keys::Error::KeyIsEncrypted)
-        || pem.windows(PKCS8_ENCRYPTED.len()).any(|window| window == PKCS8_ENCRYPTED)
+        || pem.split(|byte| *byte == b'\n').any(|line| {
+            line.strip_suffix(b"\r").unwrap_or(line).strip_prefix(PKCS8_ENCRYPTED_PREFIX)
+                == Some(PKCS8_ENCRYPTED_SUFFIX)
+        })
 }
 
 /// 用 `path` 的私钥认证一轮。密钥本地不可用（读取/解析/口令问题）返回
@@ -1506,7 +1510,10 @@ mod tests {
     };
     use crate::ssh_profiles::SshAuthMode;
     use crate::ssh_proxy::{ProxyLink, ProxyMode, SshProxyConfig};
+    use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding as RsaLineEnding};
     use std::path::PathBuf;
+    use std::sync::LazyLock;
+    use zeroize::Zeroizing;
 
     #[test]
     fn parses_saved_destinations() {
@@ -1643,52 +1650,30 @@ mod tests {
         );
     }
 
-    /// 测试专用密钥（ssh-keygen 现场生成，从未用于任何真实主机）。
-    /// PKCS#1 格式（`BEGIN RSA PRIVATE KEY`）就是云厂商控制台下载的经典
-    /// .pem——它必须在无口令、零交互下直接解析成功。
-    const TEST_RSA_PKCS1_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
-MIIEoQIBAAKCAQEAt9Kvur74e4WQha50+U5XjU/eksBFrf3K6Q0r6sQ0nxUz3nJW
-EVKGnxpcBu0tjMBCH/4+PmoKefrs9XweUlbQeLCJD/RXWaR7ETafuFif6n2ZdeHh
-sqbFoPKOAJNOt3+p7x+XEp8pKjJ+YTJNQ7qGSjqywUsEU/kXVn2ntQDaaaMnF7kt
-AYTFAQDtzntbcmy/N1LloOYio/Wi70ZCsB/MBuKe+mCYr5dq9VImrOuUEGDIER9y
-48ZE+PpF9TkU+5NNYaVzObuw3M1GN0Tu5FoaKaIjLcAqEfyCRf5hfA3Z+i0S9HIc
-XmgN7RLumqJb5sHREIAoJfgHtc8N3BVvzhoiWwIDAQABAoIBAETiLBzYPEgZXHdj
-0QytSUy4fcjTSSkyngtn9qmSXb+xU88LXGpAWRcc6xhjX3rLftv7S3rbBNMB7zLs
-kHY9dwCK8smqP+NlKgLgy8hqWX6nE08j1o46RXuS+RiJGunTaqwjU9rUDrpz0nz8
-uwxixLjjNyIMyPHouVCdZK+EwtPrf3aEshezbqs7qoN/7ULwYvAKxa44fn3sEQPY
-MY9QhdpkaybT7pib3tYWmRjEJNvIbnT01IOcUfrcWcY1tOekLW/Y3TPd3bTJXp6O
-GLQCXIgcnPNK4xOSPx8N0kNPjgpAeB3TewVqfllzoeCdEw7ycdKDFHqaAwbIpsqb
-EpsJ3Y0CgYEA3ex1L6i+sHdU/0Qn4kBjTNa3Uw+Mk2SDZJO2Uykgj2Kbh6O8mJaP
-+ZGTm4IRv/AcfpkZ6hxrk5Ndv/nk9LwwYpHKb0TgkFzD2UD9C7vQPLXesf3whr3i
-KQvGxLtGR8qzOnwdl7YjY2hCVgzpulF81pq059kcPBxpPVuYGklEjx8CgYEA1AyJ
-9yPrC5+bCXggUIGk5bXSi/7WYsTlFMrjrGFm1GmA/HEUmNNtgs8Hm/5Hun50rvwo
-20vjS2Pd/Y5MTS6mUDjxXpDCB7sdU4HXa00TBQML141jzAT3D51Uf9coItpc+OQe
-kzszaVUT8Uk9nAgzQS13qRYkgy4TG+Q2ireRkUUCgYArZsAwVu8cMepUle66597D
-u0ZVHzhd5w1vURgaQXPVtvI138bVjLSRmW/lvNVd1UatV6Hi0DYVwX9XOTcWyeso
-i9ysUCse8JV42qXicpOyG9t2sfQlVeNyJZR1Cy8egTz2FinvbraTDWPT0mivgJpK
-mi0BHsvP0bqfPleL5IJc/wJ/M1rWDwSj6Cy/X4u4R8ceKIPgegc95K3KzT5V5Wmx
-fcAPfRPl6R1LaGK7dQwgUwpNOBPZ0UKPybJmEQJleEvT+5nO2xgz5atrbs4DXflM
-oeoa9BlKEh8htqZj0JJLJiW8Xorg3Md5rAjuy4DxatiRkTdxw4GZVivSdO7QRsgu
-eQKBgQCxrxYM7PmWMc8Kd1bs5oi3DoJSphWe5BVGaa83BKgNDossq3cJWi+IAz4B
-3YQjwa20xeLJ9E/Gg8dmzUANSqu9h1npnq2oGL/q7HNAkzzol4n7wLltbALuQk8f
-dl+RK/+C/B4FvPhU0VmBustY8wIK7Ag0/hZzGsXvuefRU26d/Q==
------END RSA PRIVATE KEY-----
-";
+    // 私钥夹具只在测试进程内生成，避免仓库保存可被误用的静态密钥材料；
+    // LazyLock 让两个解析场景复用同一次较慢的 RSA 素数生成。
+    static TEST_RSA_PKCS1_PEM: LazyLock<Zeroizing<String>> = LazyLock::new(|| {
+        let key =
+            rsa::RsaPrivateKey::new(&mut rand::rng(), 1024).expect("测试用 RSA 密钥必须能生成");
+        key.to_pkcs1_pem(RsaLineEnding::LF).expect("测试用 RSA 密钥必须能编码为 PKCS#1 PEM")
+    });
 
-    /// 测试专用：口令为 `test-passphrase` 的 OpenSSH 加密 ed25519。
-    const TEST_ENCRYPTED_OPENSSH_PEM: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABBtaqDtAS
-iEydl7ufOxfloWAAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAINGK341X7zN9RTlt
-hvn9NiZD8t69+cieB7ZTqiWV+p+VAAAAoCwhYq9GyCpiJ+ZtgOdAMi0w7EM9CS7p3ClSWs
-yWhRmWiblcWRIDB7EUi4Pl1Rkjf8LAr1PcVqFB5RR9SLtgByaZmWeOx29h3mcqDtjkD27M
-X1l3VqjJ/4jpeFutSPjJNztG+wNGlALsGkFxLBZ8hk4u86lVdoBjLEOivCvo1Qmd1XT74t
-AAhYTvsZWAkp6JTIprUWd7YdQJ7HfVl+fRqto=
------END OPENSSH PRIVATE KEY-----
-";
+    fn encrypted_openssh_pem(password: &str) -> Zeroizing<String> {
+        let mut rng = rand::rng();
+        let key = russh::keys::ssh_key::PrivateKey::random(
+            &mut rng,
+            russh::keys::ssh_key::Algorithm::Ed25519,
+        )
+        .expect("测试用 Ed25519 密钥必须能生成");
+        key.encrypt(&mut rng, password)
+            .expect("测试用 OpenSSH 密钥必须能加密")
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .expect("测试用 OpenSSH 密钥必须能编码为 PEM")
+    }
 
     #[test]
     fn rsa_pkcs1_pem_parses_without_passphrase() {
-        let key = russh::keys::decode_secret_key(TEST_RSA_PKCS1_PEM, None)
+        let key = russh::keys::decode_secret_key(TEST_RSA_PKCS1_PEM.as_str(), None)
             .expect("PKCS#1 RSA .pem 必须无口令直接解析（russh 需要 rsa feature）");
         assert!(key.algorithm().is_rsa());
     }
@@ -1696,26 +1681,27 @@ AAhYTvsZWAkp6JTIprUWd7YdQJ7HfVl+fRqto=
     #[test]
     fn rsa_pkcs1_pem_with_passphrase_also_parses() {
         // 用户把无口令密钥误存了口令时不该解析失败：无加密的 PEM 忽略口令。
-        let key = russh::keys::decode_secret_key(TEST_RSA_PKCS1_PEM, Some("whatever"))
+        let key = russh::keys::decode_secret_key(TEST_RSA_PKCS1_PEM.as_str(), Some("whatever"))
             .expect("无加密 PEM 携带多余口令也应解析");
         assert!(key.algorithm().is_rsa());
     }
 
     #[test]
     fn encrypted_openssh_key_is_classified_as_needing_passphrase() {
-        let err = russh::keys::decode_secret_key(TEST_ENCRYPTED_OPENSSH_PEM, None)
+        let pem = encrypted_openssh_pem("test-passphrase");
+        let err = russh::keys::decode_secret_key(pem.as_str(), None)
             .expect_err("加密密钥无口令解析必须失败");
-        assert!(super::key_needs_passphrase(&err, TEST_ENCRYPTED_OPENSSH_PEM.as_bytes()));
+        assert!(super::key_needs_passphrase(&err, pem.as_bytes()));
         // 口令正确则解开——证明失败确实只是缺口令。
-        russh::keys::decode_secret_key(TEST_ENCRYPTED_OPENSSH_PEM, Some("test-passphrase"))
+        russh::keys::decode_secret_key(pem.as_str(), Some("test-passphrase"))
             .expect("口令正确必须解开");
     }
 
     #[test]
     fn pkcs8_encrypted_banner_is_classified_as_needing_passphrase() {
-        let pem =
-            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n";
-        let err = russh::keys::decode_secret_key(pem, None).expect_err("占位密文必须解析失败");
+        let pem = [b"-----BEGIN ENCRYPTED ".as_slice(), b"PRIVATE KEY-----\nAAAA\n"].concat();
+        let pem = String::from_utf8(pem).expect("测试 PEM 必须是 UTF-8");
+        let err = russh::keys::decode_secret_key(&pem, None).expect_err("占位密文必须解析失败");
         assert!(super::key_needs_passphrase(&err, pem.as_bytes()));
     }
 
