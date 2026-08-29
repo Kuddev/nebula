@@ -26,7 +26,8 @@ pub(crate) fn parse_formula(
     validate(source.as_ref(), limits)?;
 
     let style = if display { MathStyle::Display } else { MathStyle::Text };
-    let normalized_source = normalize_ascii_math_arrows(source.as_ref());
+    let arrows = normalize_ascii_math_arrows(source.as_ref());
+    let normalized_source = substitute_unsupported_presentation(arrows.as_ref());
     // pulldown-latex intentionally rejects `\\` outside an alignment
     // environment. Markdown math blocks commonly use it directly, so wrap
     // only formulas that contain an environment-external line break in a
@@ -60,6 +61,102 @@ fn normalize_ascii_math_arrows(source: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(source)
     }
+}
+
+/// Rewrite presentation-only commands `pulldown-latex` does not implement.
+///
+/// An unknown primitive aborts the whole parse, so a single `\boxed{…}` — the
+/// shape reasoning models put their final answer in — leaves the entire
+/// equation on screen as raw TeX. Both rewrites keep the mathematics and drop
+/// only decoration:
+///
+/// * `\boxed{X}` -> `X`. A real frame needs a layout node we do not have; an
+///   unframed equation beats an unrendered one.
+/// * `\tag{n}` -> `\quad(n)`. The number stays beside the equation instead of
+///   being pushed to the margin, which would need equation-level numbering.
+///
+/// Anything else passes through untouched, so an unsupported command still
+/// fails the parse and keeps its source literal.
+fn substitute_unsupported_presentation(source: &str) -> Cow<'_, str> {
+    if !source.contains(r"\boxed") && !source.contains(r"\tag") {
+        return Cow::Borrowed(source);
+    }
+
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    while let Some(offset) = source[cursor..].find('\\') {
+        let command = cursor + offset;
+        let name_start = command + 1;
+        let name_end = name_start
+            + source[name_start..]
+                .find(|character: char| !character.is_ascii_alphabetic())
+                .unwrap_or(source.len() - name_start);
+        let (prefix, suffix) = match &source[name_start..name_end] {
+            "boxed" => ("", ""),
+            "tag" => (r"\quad(", ")"),
+            // Every other command passes through. An empty name is an escaped
+            // character whose second `char` must be consumed here, or `\\`
+            // would be rescanned as the start of a command.
+            _ => {
+                let end = if name_end == name_start {
+                    source[name_start..]
+                        .char_indices()
+                        .nth(1)
+                        .map_or(source.len(), |(index, _)| name_start + index)
+                } else {
+                    name_end
+                };
+                output.push_str(&source[cursor..end]);
+                cursor = end;
+                continue;
+            },
+        };
+        let Some(argument) = brace_group(source, name_end) else {
+            output.push_str(&source[cursor..name_end]);
+            cursor = name_end;
+            continue;
+        };
+        output.push_str(&source[cursor..command]);
+        output.push_str(prefix);
+        // The argument may hold another one of these commands; recursion depth
+        // is bounded by the group depth `validate` already enforces.
+        output.push_str(&substitute_unsupported_presentation(&source[argument.clone()]));
+        output.push_str(suffix);
+        cursor = argument.end + 1;
+    }
+    output.push_str(&source[cursor..]);
+    Cow::Owned(output)
+}
+
+/// Byte range of the contents of the `{…}` group at or after `at`, skipping
+/// whitespace only. An escaped brace neither opens nor closes a group.
+fn brace_group(source: &str, at: usize) -> Option<std::ops::Range<usize>> {
+    let offset = source[at..].find(|character: char| !character.is_whitespace())?;
+    let open = at + offset;
+    if !source[open..].starts_with('{') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for (index, character) in source[open..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + 1..open + index);
+                }
+            },
+            _ => {},
+        }
+    }
+    None
 }
 
 /// Detect `\\` outside `\begin{...}` environments in one linear scan.
@@ -770,6 +867,34 @@ mod tests {
     fn root_children(formula: &ParsedFormula) -> &[NodeId] {
         let MathNode::Row(range) = formula.arena.node(formula.root) else { panic!() };
         formula.arena.children(*range)
+    }
+
+    #[test]
+    fn presentation_only_commands_do_not_abort_the_parse() {
+        // `pulldown-latex` 0.7.1 has no `\boxed` / `\tag` primitive, and an
+        // unknown primitive fails the whole formula — one `\boxed` used to keep
+        // an entire answer as raw TeX on screen.
+        assert_eq!(substitute_unsupported_presentation(r"\boxed{E=mc^2}").as_ref(), "E=mc^2");
+        assert_eq!(substitute_unsupported_presentation(r"x=1 \tag{3}").as_ref(), r"x=1 \quad(3)");
+        assert_eq!(
+            substitute_unsupported_presentation(r"\boxed{\boxed{\frac{1}{2}}}").as_ref(),
+            r"\frac{1}{2}",
+            "nested decoration unwraps completely"
+        );
+        // Untouched sources keep borrowing, and an unrelated command with a
+        // `\\` row break in front of it must not be rescanned as a command.
+        assert!(matches!(
+            substitute_unsupported_presentation(r"\frac{1}{2} \\ \sqrt{x}"),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(
+            substitute_unsupported_presentation(r"\\\boxed{x} \tagged{y}").as_ref(),
+            r"\\x \tagged{y}"
+        );
+
+        let numbered =
+            concat!(r"\boxed{\nabla\cdot\mathbf{E}=\frac{\rho}{\varepsilon_0}}", "\n", r"\tag{1}");
+        assert!(parse_formula(numbered, true, DEFAULT_LIMITS).is_ok());
     }
 
     #[test]

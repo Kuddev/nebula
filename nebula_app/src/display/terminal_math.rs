@@ -875,9 +875,16 @@ impl TextGrid {
     /// them, so a real newline is part of the formula. Agent TUIs that hard-wrap
     /// a block formula across rows are recovered by this path.
     ///
-    /// The search is bounded only by the grid, so callers must have an O(1)
-    /// reason to believe the opener is real — see [`Self::find_closing_bounded`]
-    /// for the delimiters that do not.
+    /// A **blank row ends the search**. TeX forbids a paragraph break inside
+    /// math mode and Markdown ends a math block at a blank line, so no real
+    /// formula spans one — while `$$` is its own closer, so the scanner cannot
+    /// otherwise tell an opener from a closer whose partner has scrolled off the
+    /// top of the viewport. Without this barrier that orphan closer pairs with
+    /// the *next* block's delimiter and swallows every paragraph and formula in
+    /// between into one giant candidate, which then compiles (prose renders as
+    /// math identifiers) and covers the whole region with one image. Stopping at
+    /// the blank row leaves it unmatched instead, which is what hands it to the
+    /// history reconstruction in [`TerminalMathState::scan_visible_grid`].
     fn find_closing(&self, mut position: GridPosition, delimiter: &[char]) -> Option<GridPosition> {
         loop {
             if position.row >= self.rows.len() {
@@ -886,7 +893,11 @@ impl TextGrid {
             if self.starts_with(position, delimiter) && !self.is_escaped(position) {
                 return Some(position);
             }
+            let previous_row = position.row;
             position = self.next(position)?;
+            if position.row != previous_row && self.span_is_blank(position.row, 0, self.columns) {
+                return None;
+            }
         }
     }
 
@@ -1314,10 +1325,17 @@ fn find_formula(
     kind: DelimiterKind,
 ) -> Option<(FormulaOverlay, GridPosition)> {
     let source_start = grid.after(open, opening.len());
-    // Display delimiters own the rows between them, so they may cross a real
-    // newline. Inline delimiters live inside a line of prose: crossing a hard
-    // wrap there merges two unrelated terminal lines into one formula.
-    let close = if kind.is_display() {
+    // A display delimiter owns the rows between it and its closer, so it may
+    // cross a real newline — but only when it *opens* its row the way a block
+    // delimiter does. A `$$` reached in the middle of a line of prose is being
+    // quoted, not opened: an agent echoing back a question about `$$`, or a
+    // sentence that names the delimiter. Letting that one search across real
+    // newlines makes it pair with the *opening* delimiter of the next real
+    // block and swallow every formula in between — the scan resumes after the
+    // match (see `scan_grid_result`), so those rows are never even considered.
+    // Inline delimiters follow the same rule for the same reason: crossing a
+    // hard wrap merges two unrelated terminal lines into one formula.
+    let close = if kind.is_display() && opens_a_block(grid, open) {
         grid.find_closing(source_start, closing)?
     } else {
         grid.find_closing_soft_wrap(source_start, closing)?
@@ -1329,6 +1347,19 @@ fn find_formula(
         return None;
     }
     Some((make_overlay(grid, open, after, source, kind), after))
+}
+
+/// Whether a display delimiter opens its row: nothing but blanks — or a
+/// Markdown list marker — precedes it. Agents emit `$$` / `\[` that way even
+/// when they hard-wrap the formula that follows on the same row, while a
+/// sentence that merely mentions the delimiter always has prose in front of it.
+/// The prefix is the whole judgement: requiring a blank *tail* as well would
+/// reject `\[\displaystyle …` wrapped across rows, which is a real shape
+/// (see `screenshot_display_formulas_survive_agent_hard_wraps`). Mirrors the
+/// leading-blank half of the standalone rule [`find_bare_bracket_formula`]
+/// applies to a bare `[` block.
+fn opens_a_block(grid: &TextGrid, open: GridPosition) -> bool {
+    span_is_blank_or_markdown_list_marker(grid, open.row, open.column)
 }
 
 fn find_dollar_formula(
@@ -1419,12 +1450,20 @@ fn find_bare_bracket_formula(
     let close = if multiline {
         // 多行形态：`[` 独占一行，闭合 `]` 也必须独占一行。数学源码里
         // `[0, 1]` 区间的 `]` 不具备闭合资格，跳过继续找。搜索同样带行
-        // 预算：屏幕底部一个没闭合的 `[` 不该每帧扫到网格末尾。
+        // 预算：屏幕底部一个没闭合的 `[` 不该每帧扫到网格末尾。空行按
+        // 与 `find_closing` 同一条理由收尾（数学模式里没有分段），否则一个
+        // 没闭合的 `[` 会把下面一整段正文连同它自己的公式吞成一条候选。
         grid.find_closing_bounded(
             source_start,
             BARE_BRACKET_SEARCH_ROWS,
             budget,
             |grid, position| {
+                if position.column == 0
+                    && position.row > open.row
+                    && grid.span_is_blank(position.row, 0, grid.columns)
+                {
+                    return None;
+                }
                 if grid.character(position) != Some(']') || grid.is_escaped(position) {
                     return Some(false);
                 }
@@ -2860,6 +2899,138 @@ mod tests {
         assert_eq!(multiline.len(), 1);
         assert!(multiline[0].0.contains('\n'));
         assert!(multiline[0].1);
+    }
+
+    #[test]
+    fn stray_display_opener_in_prose_does_not_swallow_following_formulas() {
+        let screen = [
+            "行内，$$,\\[等公式都输出一些",
+            "",
+            "• 行内公式：质能方程 (E = mc^2)，二次方程的求根公式是 (x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a})。",
+            "单美元符号行内公式：欧拉公式 $e^{ix}=\\cos x+i\\sin x$。",
+            "双美元符号块级公式：",
+            "$$",
+            "\\int_{-\\infty}^{+\\infty} e^{-x^2},dx=\\sqrt{\\pi}",
+            "$$",
+            "方括号块级公式：",
+            "\\[",
+            "\\sum_{n=1}^{\\infty}\\frac{1}{n^2}=\\frac{\\pi^2}{6}",
+            "\\]",
+            "带编号的公式：",
+            "[",
+            "\\boxed{\\nabla\\cdot\\mathbf{E}=\\frac{\\rho}{\\varepsilon_0}}",
+            "\\tag{1}",
+            "]",
+        ];
+        let expected = vec![
+            ("E = mc^2".into(), false),
+            (r"x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}".into(), false),
+            (r"e^{ix}=\cos x+i\sin x".into(), false),
+            (r"\int_{-\infty}^{+\infty} e^{-x^2},dx=\sqrt{\pi}".into(), true),
+            (r"\sum_{n=1}^{\infty}\frac{1}{n^2}=\frac{\pi^2}{6}".into(), true),
+            (
+                // The row break inside the block survives extraction; it is
+                // collapsed together with the padding below because TeX treats
+                // every run of whitespace alike.
+                concat!(
+                    r"\boxed{\nabla\cdot\mathbf{E}=\frac{\rho}{\varepsilon_0}}",
+                    " ",
+                    r"\tag{1}",
+                )
+                .into(),
+                true,
+            ),
+        ];
+
+        // `extract` only trims the whole span, so a multi-row source still
+        // carries each row's blank padding before the newline. Whitespace is
+        // insignificant to TeX, so compare on collapsed runs instead of
+        // pinning the terminal width into the expectation.
+        let extracted: Vec<(String, bool)> = sources(&screen)
+            .into_iter()
+            .map(|(source, display)| {
+                (source.split_whitespace().collect::<Vec<_>>().join(" "), display)
+            })
+            .collect();
+        assert_eq!(extracted, expected);
+        assert!(sources(&screen)[5].0.contains('\n'), "the block keeps its real row break");
+        assert!(
+            scan_grid(&TextGrid::from_rows(&screen))
+                .iter()
+                .flat_map(|overlay| overlay.spans.iter())
+                .all(|span| span.row != 0),
+            "prose on the first row must stay literal",
+        );
+    }
+
+    /// `cat math.txt`：块的开头 `$$` 滚出视口顶部之后，视口里第一个 `$$` 是
+    /// **闭合**。它曾经跟下面那个块的定界符配对，把 27 行正文、三个方括号块
+    /// 连同末尾的 `$$` 块吞成一条候选——而且编译成功，于是整片区域被一张渲染
+    /// 图盖掉，中文正文以数学字形出现在图里。
+    #[test]
+    fn orphan_display_closer_at_the_viewport_top_stops_at_the_blank_row() {
+        let screen = [
+            "  $$",
+            "",
+            "  方括号块级公式：",
+            "",
+            "  [",
+            r"  \sum_{n=1}^{\infty}\frac{1}{n^2}=\frac{\pi^2}{6}",
+            "  ]",
+            "",
+            "  带编号的公式：",
+            "",
+            "  [",
+            r"  \boxed{\nabla\cdot\mathbf{E}=\frac{\rho}{\varepsilon_0}}",
+            r"  \tag{1}",
+            "  ]",
+            "",
+            "",
+            r"$$(F, D_{\text{few}}) \xrightarrow{\text{Prompting}} \boxed{C}",
+            r"  \boxed{(F_{\text{ref}}, F_{\text{neg}})} \xrightarrow{\text{ToT Search}}$$",
+        ];
+        let expected = [
+            r"\sum_{n=1}^{\infty}\frac{1}{n^2}=\frac{\pi^2}{6}",
+            r"\boxed{\nabla\cdot\mathbf{E}=\frac{\rho}{\varepsilon_0}} \tag{1}",
+            concat!(
+                r"(F, D_{\text{few}}) \xrightarrow{\text{Prompting}} \boxed{C} ",
+                r"\boxed{(F_{\text{ref}}, F_{\text{neg}})} \xrightarrow{\text{ToT Search}}",
+            ),
+        ];
+
+        let extracted = sources(&screen);
+        let collapsed: Vec<String> = extracted
+            .iter()
+            .map(|(source, _)| source.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        assert_eq!(collapsed, expected, "正文和孤立闭合必须保持原文");
+        assert!(extracted.iter().all(|(_, display)| *display));
+
+        // 孤立闭合要留成 pending，历史回看才有机会把滚出去的真公式配回来。
+        let scan = scan_grid_result(&TextGrid::from_rows(&screen));
+        assert!(
+            matches!(
+                scan.unmatched_display,
+                Some((position, DisplayDelimiterKind::Dollars)) if position.row == 0
+            ),
+            "orphan closer must stay pending, got {:?}",
+            scan.unmatched_display
+        );
+    }
+
+    #[test]
+    fn long_display_formula_with_trailing_literal_dollar_remains_renderable() {
+        let source = concat!(
+            r"(F, D_{few}) \xrightarrow{\text{Prompting}} \boxed{C} ",
+            r"\xrightarrow{\text{MultiAgent}} \boxed{(F_{ref}, F_{neg})} ",
+            r"\xrightarrow{\text{ToT Search}} ",
+        );
+        let line = format!("$${source}$$$");
+
+        assert_eq!(sources(&[&line]), vec![(source.trim_end().into(), true)]);
+        let layout = compile_formula(source, true, 18.0, 1.0, DEFAULT_LIMITS)
+            .expect("the long display formula must reach native layout");
+        assert!(layout.metrics.width > 0.0 && layout.metrics.height > 0.0);
     }
 
     #[test]
