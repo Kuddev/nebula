@@ -2134,16 +2134,13 @@ impl TerminalView {
         let col = (rel_x.floor().max(0.0) as usize).min(self.cols.saturating_sub(1));
         let row = (rel_y.floor().max(0.0) as usize).min(self.rows.saturating_sub(1));
         let side = if rel_x.fract() > 0.5 { Side::Right } else { Side::Left };
-        let point = self.session.as_ref().map_or_else(
-            || TermPoint::new(Line(row as i32), Column(col)),
-            |session| {
-                session
-                    .term
-                    .lock()
-                    .visual_viewport_to_point(self.rows, TermPoint::new(row, Column(col)))
-            },
-        );
-        (point, side)
+        let Some(session) = self.session.as_ref() else {
+            return (TermPoint::new(Line(row as i32), Column(col)), side);
+        };
+        let term = session.term.lock();
+        let viewport_origin = term.viewport_origin_for(self.rows);
+        let point = term.visual_viewport_to_point(self.rows, TermPoint::new(row, Column(col)));
+        self.math.source_point(point, side, viewport_origin)
     }
 
     fn selection_is_empty(&self) -> bool {

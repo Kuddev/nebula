@@ -133,10 +133,20 @@ impl TerminalMathState {
         prepared: &[Option<PreparedFormula>],
         reflow_inline: bool,
     ) {
+        let _ = self.update_projection_with_survivors(overlays, prepared, reflow_inline);
+    }
+
+    pub(crate) fn update_projection_with_survivors(
+        &mut self,
+        overlays: &[FormulaOverlay],
+        prepared: &[Option<PreparedFormula>],
+        reflow_inline: bool,
+    ) -> Vec<bool> {
         if reflow_inline {
-            self.projection.rebuild(overlays, prepared);
+            self.projection.rebuild(overlays, prepared)
         } else {
             self.projection.spans.clear();
+            vec![true; overlays.len()]
         }
     }
 
@@ -150,6 +160,12 @@ impl TerminalMathState {
         columns: usize,
     ) -> Option<Point<usize>> {
         self.projection.project_formula_background(point, columns)
+    }
+
+    /// 冻结当前帧的稀疏投影给锁外渲染使用。GPUI 的 term 快照与数学扫描在
+    /// 同一次锁内完成，后续背景/字形绘制不能再回头读取可能已经变化的状态。
+    pub(crate) fn projection_snapshot(&self) -> LineProjection {
+        self.projection.clone()
     }
 
     /// Convert the visual mouse cell back to the immutable terminal-grid cell.
@@ -2050,6 +2066,7 @@ pub(crate) struct PreparedFormula {
 
 #[derive(Clone, Copy, Debug)]
 struct ProjectionSpan {
+    source_index: usize,
     row: usize,
     source_start: usize,
     source_end: usize,
@@ -2061,17 +2078,24 @@ struct ProjectionSpan {
 /// Sparse source-to-screen mapping for compact inline formulas in the current
 /// viewport. One entry represents one formula; no per-cell objects are built.
 #[derive(Clone, Debug, Default)]
-struct LineProjection {
+pub(crate) struct LineProjection {
     spans: Vec<ProjectionSpan>,
 }
 
 impl LineProjection {
-    fn rebuild(&mut self, overlays: &[FormulaOverlay], prepared: &[Option<PreparedFormula>]) {
+    /// 返回与 `overlays` 对齐的存活表。流式输出可能短暂产生重叠公式，调用方
+    /// 必须和投影采用同一裁决，否则位图、coverage 与后续文字会落在三套坐标上。
+    fn rebuild(
+        &mut self,
+        overlays: &[FormulaOverlay],
+        prepared: &[Option<PreparedFormula>],
+    ) -> Vec<bool> {
         self.spans.clear();
+        let mut retained = vec![true; overlays.len()];
         // `reserve` after `clear` reuses the existing allocation on stable
         // frames and grows at most with the visible formula count.
         self.spans.reserve(overlays.len());
-        for (overlay, prepared) in overlays.iter().zip(prepared) {
+        for (source_index, (overlay, prepared)) in overlays.iter().zip(prepared).enumerate() {
             let Some(visual_cells) = prepared.and_then(|prepared| prepared.compact_cells) else {
                 continue;
             };
@@ -2081,6 +2105,7 @@ impl LineProjection {
                 continue;
             }
             self.spans.push(ProjectionSpan {
+                source_index,
                 row,
                 source_start: span.start,
                 source_end: span.end,
@@ -2107,6 +2132,7 @@ impl LineProjection {
                 retained_end = 0;
             }
             if span.source_start < retained_end {
+                retained[span.source_index] = false;
                 return false;
             }
             retained_end = span.source_end;
@@ -2125,12 +2151,13 @@ impl LineProjection {
             shift = shift.saturating_add(span.visual_cells as isize - source_cells as isize);
             span.shift_after = shift;
         }
+        retained
     }
 
     #[cfg(test)]
     fn build(overlays: &[FormulaOverlay], prepared: &[Option<PreparedFormula>]) -> Self {
         let mut projection = Self::default();
-        projection.rebuild(overlays, prepared);
+        let _ = projection.rebuild(overlays, prepared);
         projection
     }
 
@@ -2148,7 +2175,7 @@ impl LineProjection {
             .map_or(0, |span| span.shift_after)
     }
 
-    fn project_cell(&self, point: Point<usize>, columns: usize) -> Option<Point<usize>> {
+    pub(crate) fn project_cell(&self, point: Point<usize>, columns: usize) -> Option<Point<usize>> {
         let spans = self.row_spans(point.line);
         let preceding = spans.partition_point(|span| span.source_start <= point.column.0);
         let shift = match preceding.checked_sub(1).and_then(|index| spans.get(index)) {
@@ -2163,7 +2190,7 @@ impl LineProjection {
     /// Map blanked source cells onto the compact visual box so their resolved
     /// ANSI background remains behind an inline formula. Surplus source cells
     /// are discarded when TeX is wider than the rendered formula.
-    fn project_formula_background(
+    pub(crate) fn project_formula_background(
         &self,
         point: Point<usize>,
         columns: usize,
@@ -2759,12 +2786,18 @@ mod tests {
         let mut inner = outer.clone();
         inner.spans[0].start += 1;
         inner.spans[0].end -= 1;
-        let projection =
-            LineProjection::build(&[inner, outer], &[compact_prepared(1), compact_prepared(2)]);
+        let mut state = TerminalMathState::default();
+        let retained = state.update_projection_with_survivors(
+            &[inner, outer],
+            &[compact_prepared(1), compact_prepared(2)],
+            true,
+        );
+        let projection = state.projection_snapshot();
 
         assert_eq!(projection.spans.len(), 1);
         assert_eq!(projection.spans[0].source_start, outer_span.start);
         assert_eq!(projection.spans[0].source_end, outer_span.end);
+        assert_eq!(retained, [false, true], "GPUI must drop the same overlapping candidate");
     }
 
     #[test]
@@ -2797,6 +2830,36 @@ mod tests {
             projection.source_from_visual(Point::new(0, Column(span.start + 1)), Side::Right);
         assert_eq!((left.column.0, left_side), (span.start, Side::Left));
         assert_eq!((right.column.0, right_side), (span.end - 1, Side::Right));
+    }
+
+    #[test]
+    fn formula_hit_testing_preserves_nonzero_viewport_origin() {
+        let grid = TextGrid::from_rows(&["pre $x^2$ suffix"]);
+        let overlays = scan_grid(&grid);
+        let span = overlays[0].spans[0];
+        let mut state = TerminalMathState::default();
+        state.update_projection(&overlays, &[compact_prepared(2)], true);
+        let viewport_origin = Line(-7);
+
+        let (left, left_side) = state.source_point(
+            Point::new(viewport_origin, Column(span.start)),
+            Side::Left,
+            viewport_origin,
+        );
+        let (suffix, suffix_side) = state.source_point(
+            Point::new(viewport_origin, Column(span.start + 2)),
+            Side::Left,
+            viewport_origin,
+        );
+
+        assert_eq!(
+            (left.line, left.column.0, left_side),
+            (viewport_origin, span.start, Side::Left)
+        );
+        assert_eq!(
+            (suffix.line, suffix.column.0, suffix_side),
+            (viewport_origin, span.end, Side::Left)
+        );
     }
 
     fn remember_visible(state: &mut TerminalMathState, grid: &TextGrid) {

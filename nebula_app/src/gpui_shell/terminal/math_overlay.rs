@@ -12,13 +12,13 @@
 //! 合同：从 term 网格构造等价 cell 列表（`bg_alpha` = 非默认 ANSI 背景或
 //! 反色），不再把空切片丢进去再另用 `bg_runs` 事后过滤。
 
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use gpui::{App, Bounds, Pixels, Rgba, SharedString, Window, point, px, size};
 use nebula_terminal::Term;
 use nebula_terminal::event::EventListener;
 use nebula_terminal::grid::Dimensions as _;
-use nebula_terminal::index::{Column, Point};
+use nebula_terminal::index::{Column, Line, Point, Side};
 use nebula_terminal::term::TermMode;
 use nebula_terminal::term::cell::Flags;
 use nebula_terminal::vte::ansi::{Color, NamedColor};
@@ -26,7 +26,10 @@ use nebula_terminal::vte::ansi::{Color, NamedColor};
 use crate::display::SizeInfo;
 use crate::display::color::Rgb;
 use crate::display::content::RenderableCell;
-use crate::display::terminal_math::{self, CoverageMask, OverlayDrawPlan, TerminalMathState};
+use crate::display::terminal_math::{
+    self, CoverageMask, FormulaOverlay, LineProjection, OverlayDrawPlan, PreparedFormula,
+    TerminalMathState,
+};
 use crate::gpui_shell::math_view;
 
 /// 每 pane 一份的覆盖层状态（`TerminalView` 持有）。内部的持久锚点/缓存
@@ -45,11 +48,35 @@ pub struct PlannedFormula {
     spans: Vec<(usize, usize, usize)>,
 }
 
+/// 扫描/fit 已通过、等待位图预检的公式。预检只依赖公式内容、字号和颜色，
+/// 不依赖最终屏幕原点；因此先在空投影下生成候选，过滤完成后再统一重算位置。
+struct FormulaCandidate {
+    overlay: FormulaOverlay,
+    prepared: PreparedFormula,
+    plan: OverlayDrawPlan,
+}
+
+/// term 锁内产生、锁外消费的候选帧。`MathAssets` 不能在 term 锁内访问，
+/// 否则字体/位图缓存的工作会把 PTY 网格锁拖进渲染慢路径。
+pub struct PendingMathFrame {
+    candidates: Vec<FormulaCandidate>,
+    size: SizeInfo,
+    pixels_per_point: f32,
+    reflow_inline: bool,
+}
+
+impl PendingMathFrame {
+    fn empty(size: SizeInfo, pixels_per_point: f32) -> Self {
+        Self { candidates: Vec::new(), size, pixels_per_point, reflow_inline: false }
+    }
+}
+
 /// 一帧的覆盖产物：绘制清单 + 源格跳过掩码。
 #[derive(Default)]
 pub struct MathFrame {
     formulas: Vec<PlannedFormula>,
     coverage: CoverageMask,
+    projection: LineProjection,
 }
 
 impl MathFrame {
@@ -62,46 +89,74 @@ impl MathFrame {
         self.formulas.is_empty()
     }
 
-    /// 位图预检：合成不出位图的公式一律不覆盖源格。
-    ///
-    /// 旧壳 [`terminal_math::draw_overlays`] 在 `draw_math` 失败时会补画
-    /// fallback 源格；GPUI 壳的格子在本函数之后才画，所以「不留洞」这条保证只
-    /// 能在这里落实——否则一个字形合成失败就是屏幕上一片空白（源格已被掩码
-    /// 藏掉，公式又没画出来），比留着原文严重得多。
-    ///
-    /// 必须在 term 锁外调用（要取 `MathAssets` 全局）。命中的位图进缓存，
-    /// [`paint_frame`] 随后取的是同一份。
-    pub fn retain_paintable(
-        mut self,
-        pixels_per_point: f32,
-        raster_scale: f32,
-        cx: &mut App,
-    ) -> Self {
-        if self.formulas.is_empty() {
-            return self;
+    /// 普通格的源列映射到这一帧的视觉列；公式源格以及越过右边界的格返回
+    /// `None`。调用方仍以源坐标决定颜色、链接和光标语义。
+    pub fn project_cell(&self, row: usize, source_column: usize, columns: usize) -> Option<usize> {
+        self.projection
+            .project_cell(Point::new(row, Column(source_column)), columns)
+            .map(|point| point.column.0)
+    }
+
+    /// 公式源码格的 ANSI 背景映射。视觉公式盒之外的多余源码格会被丢弃，
+    /// 避免压缩后仍留下一条源宽度的背景色带。
+    pub fn project_formula_background(
+        &self,
+        row: usize,
+        source_column: usize,
+        columns: usize,
+    ) -> Option<usize> {
+        self.projection
+            .project_formula_background(Point::new(row, Column(source_column)), columns)
+            .map(|point| point.column.0)
+    }
+
+    /// 光标/浮层锚点优先按普通格投影；极端情况下锚点落进公式源区，则退到
+    /// 公式视觉背景能承载的位置。活动编辑行本来就不投影，这个分支主要防御
+    /// 历史链接锚点。
+    pub fn visual_column(&self, row: usize, source_column: usize, columns: usize) -> usize {
+        self.project_cell(row, source_column, columns)
+            .or_else(|| self.project_formula_background(row, source_column, columns))
+            .unwrap_or_else(|| source_column.min(columns.saturating_sub(1)))
+    }
+
+    /// 把源 run 投影成若干连续视觉 run。背景跨过公式时必须逐源格映射，
+    /// 但最终仍合并相邻视觉格，避免给每个背景 cell 单独提交一个 quad。
+    pub fn projected_runs(
+        &self,
+        row: usize,
+        source: Range<usize>,
+        columns: usize,
+        formula_background: bool,
+    ) -> Vec<Range<usize>> {
+        let mut runs = Vec::new();
+        let mut current: Option<Range<usize>> = None;
+        for source_column in source {
+            let target = if formula_background && self.covers(row, source_column) {
+                self.project_formula_background(row, source_column, columns)
+            } else {
+                self.project_cell(row, source_column, columns)
+            };
+            match target {
+                Some(column) if current.as_ref().is_some_and(|run| run.end == column) => {
+                    current.as_mut().expect("current visual run").end += 1;
+                },
+                Some(column) => {
+                    if let Some(run) = current.take() {
+                        runs.push(run);
+                    }
+                    current = Some(column..column + 1);
+                },
+                None => {
+                    if let Some(run) = current.take() {
+                        runs.push(run);
+                    }
+                },
+            }
         }
-        // 字体加载失败：整帧不覆盖，`\[` 源码留在屏幕上。
-        if !cx
-            .try_global::<math_view::MathAssets>()
-            .is_some_and(math_view::MathAssets::can_rasterize)
-        {
-            return Self::default();
+        if let Some(run) = current {
+            runs.push(run);
         }
-        self.formulas.retain(|formula| {
-            let source: SharedString = formula.source.to_string().into();
-            cx.global_mut::<math_view::MathAssets>().can_compose(
-                &source,
-                formula.plan.display_style,
-                formula.plan.fitted_pixel_size,
-                pixels_per_point,
-                raster_scale,
-                plan_color(&formula.plan),
-            )
-        });
-        let spans: Vec<(usize, usize, usize)> =
-            self.formulas.iter().flat_map(|formula| formula.spans.iter().copied()).collect();
-        self.coverage = CoverageMask::from_spans(spans);
-        self
+        runs
     }
 }
 
@@ -117,6 +172,13 @@ fn plan_color(plan: &OverlayDrawPlan) -> Rgba {
 }
 
 impl MathOverlay {
+    /// session 暂不可用时也要立即清掉上一帧投影；输入命中发生在 paint 之外，
+    /// 不能等下一次有 term 的扫描再修正旧坐标。
+    pub fn clear_frame(&mut self, size: &SizeInfo, pixels_per_point: f32) -> PendingMathFrame {
+        self.state.update_projection(&[], &[], false);
+        PendingMathFrame::empty(*size, pixels_per_point)
+    }
+
     /// 每帧的扫描 + 预编 + 几何计划。必须在 term 锁内调用。
     ///
     /// `size` 以网格左上角为原点（padding = 0），行列必须与可见网格一致，
@@ -128,14 +190,15 @@ impl MathOverlay {
         default_foreground: Rgb,
         font_pixel_size: f32,
         pixels_per_point: f32,
-    ) -> MathFrame {
+    ) -> PendingMathFrame {
+        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
         // Vi 模式与有效选择由终端自身接管，避免覆盖层遮住光标或选区。
         // 空选区 `to_range` 为 None，不会因为鼠标按下残留的零宽 Selection
         // 把公式关掉。
         if term.mode().intersects(TermMode::VI)
             || term.selection.as_ref().and_then(|selection| selection.to_range(term)).is_some()
         {
-            return MathFrame::default();
+            return self.clear_frame(size, pixels_per_point);
         }
 
         let origin = term.viewport_origin_for(size.screen_lines());
@@ -151,7 +214,7 @@ impl MathOverlay {
             term,
             size,
             &rendered_cells,
-            term.mode().contains(TermMode::ALT_SCREEN),
+            alt_screen,
             cursor,
             default_foreground,
         );
@@ -163,35 +226,137 @@ impl MathOverlay {
             font_pixel_size,
             pixels_per_point,
         );
-        // 不调用 `update_projection`：GPUI 格子绘制不按 compact 公式左移
-        // 后续字形；若这里重建投影，`plan_overlay_draw` 会把公式原点挪到
-        // 源码左侧，叠到前一段正文上。
-        let mut plans: Vec<Option<OverlayDrawPlan>> = Vec::with_capacity(overlays.len());
-        for (overlay, prepared) in overlays.iter().zip(&prepared) {
-            plans.push(prepared.as_ref().and_then(|prepared| {
-                terminal_math::plan_overlay_draw(
+        // 候选计划必须在空投影下生成。位图预检会淘汰无法合成的公式；若先把
+        // 它们计入累计 shift，后续存活公式的原点就会沿用一个不存在的压缩量。
+        self.state.update_projection(&[], &[], false);
+        let candidates = overlays
+            .into_iter()
+            .zip(prepared)
+            .filter_map(|(overlay, prepared)| {
+                let prepared = prepared?;
+                let plan = terminal_math::plan_overlay_draw(
                     &mut self.state,
-                    overlay,
-                    prepared,
+                    &overlay,
+                    &prepared,
                     size,
                     pixels_per_point,
-                )
-            }));
-        }
-        // 掩码按"真的会画"的公式构建：计划失败的公式保留原文，不留洞。
-        let coverage = CoverageMask::build(&overlays, &plans);
-        let formulas = overlays
-            .iter()
-            .zip(&plans)
-            .filter_map(|(overlay, plan)| {
-                plan.map(|plan| PlannedFormula {
-                    source: overlay.source_arc(),
-                    plan,
-                    spans: overlay.covered_spans().collect(),
-                })
+                )?;
+                Some(FormulaCandidate { overlay, prepared, plan })
             })
             .collect();
-        MathFrame { formulas, coverage }
+        PendingMathFrame {
+            candidates,
+            size: *size,
+            pixels_per_point,
+            // 与旧壳一致：TUI/备用屏继续拥有固定列坐标，但公式覆盖本身仍可用。
+            reflow_inline: !alt_screen,
+        }
+    }
+
+    /// 位图预检并完成一帧。必须在 term 锁外调用；成功图像会在这里进入缓存，
+    /// [`paint_frame`] 随后消费相同键，不会重复合成。
+    pub fn finalize_frame(
+        &mut self,
+        pending: PendingMathFrame,
+        raster_scale: f32,
+        cx: &mut App,
+    ) -> MathFrame {
+        let can_rasterize = cx
+            .try_global::<math_view::MathAssets>()
+            .is_some_and(math_view::MathAssets::can_rasterize);
+        let pixels_per_point = pending.pixels_per_point;
+        self.finalize_frame_with(pending, |source, plan| {
+            if !can_rasterize {
+                return false;
+            }
+            let source: SharedString = source.to_string().into();
+            cx.global_mut::<math_view::MathAssets>().can_compose(
+                &source,
+                plan.display_style,
+                plan.fitted_pixel_size,
+                pixels_per_point,
+                raster_scale,
+                plan_color(plan),
+            )
+        })
+    }
+
+    /// 预检策略与几何收敛拆开，测试可以用确定的存活集合验证 projection，
+    /// 不需要启动 GPUI 字体后端。
+    fn finalize_frame_with(
+        &mut self,
+        mut pending: PendingMathFrame,
+        mut paintable: impl FnMut(&Arc<str>, &OverlayDrawPlan) -> bool,
+    ) -> MathFrame {
+        pending.candidates.retain(|candidate| {
+            let source = candidate.overlay.source_arc();
+            paintable(&source, &candidate.plan)
+        });
+
+        // plan 也可能在最终横向 shift 后退化。每淘汰一条就重新建立共享
+        // LineProjection，直到 projection、coverage、draw plan 使用同一集合。
+        loop {
+            let overlays: Vec<FormulaOverlay> =
+                pending.candidates.iter().map(|candidate| candidate.overlay.clone()).collect();
+            let prepared: Vec<Option<PreparedFormula>> =
+                pending.candidates.iter().map(|candidate| Some(candidate.prepared)).collect();
+            let retained = self.state.update_projection_with_survivors(
+                &overlays,
+                &prepared,
+                pending.reflow_inline,
+            );
+
+            if retained.iter().any(|keep| !keep) {
+                let mut index = 0usize;
+                pending.candidates.retain(|_| {
+                    let keep = retained[index];
+                    index += 1;
+                    keep
+                });
+                continue;
+            }
+
+            let before = pending.candidates.len();
+            pending.candidates.retain_mut(|candidate| {
+                let Some(plan) = terminal_math::plan_overlay_draw(
+                    &mut self.state,
+                    &candidate.overlay,
+                    &candidate.prepared,
+                    &pending.size,
+                    pending.pixels_per_point,
+                ) else {
+                    return false;
+                };
+                candidate.plan = plan;
+                true
+            });
+            if pending.candidates.len() == before {
+                break;
+            }
+        }
+
+        let formulas: Vec<PlannedFormula> = pending
+            .candidates
+            .into_iter()
+            .map(|candidate| PlannedFormula {
+                source: candidate.overlay.source_arc(),
+                plan: candidate.plan,
+                spans: candidate.overlay.covered_spans().collect(),
+            })
+            .collect();
+        let spans: Vec<(usize, usize, usize)> =
+            formulas.iter().flat_map(|formula| formula.spans.iter().copied()).collect();
+        MathFrame {
+            coverage: CoverageMask::from_spans(spans),
+            projection: self.state.projection_snapshot(),
+            formulas,
+        }
+    }
+
+    /// GPUI 所有 terminal-cell 输入的反投影入口。调用方传入与当前 term 锁
+    /// 同源的 viewport origin，避免滚动或 resize commit 时把视觉行映错。
+    pub fn source_point(&self, point: Point, side: Side, viewport_origin: Line) -> (Point, Side) {
+        self.state.source_point(point, side, viewport_origin)
     }
 }
 
@@ -422,7 +587,8 @@ mod tests {
         rows: usize,
     ) -> super::MathFrame {
         let size = grid_size_info(cols, rows, 8.0, 16.0);
-        overlay.plan_frame(term, &size, Rgb::new(0xd6, 0xda, 0xea), 16.0, 1.0)
+        let pending = overlay.plan_frame(term, &size, Rgb::new(0xd6, 0xda, 0xea), 16.0, 1.0);
+        overlay.finalize_frame_with(pending, |_, _| true)
     }
 
     #[test]
@@ -480,6 +646,56 @@ mod tests {
     }
 
     #[test]
+    fn main_screen_compacts_inline_suffix_without_changing_source_columns() {
+        let mut overlay = MathOverlay::default();
+        let term = term_with(20, 4, &["$x$ suffix", "", "prompt"]);
+        let frame = plan(&mut overlay, &term, 20, 4);
+        let source_suffix = 3;
+        let visual_suffix =
+            frame.project_cell(0, source_suffix, 20).expect("suffix remains inside the viewport");
+        assert!(visual_suffix < source_suffix, "inline suffix must move into the compact gap");
+        assert!(frame.covers(0, 0));
+        assert!(frame.covers(0, 2));
+        assert_eq!(term.grid()[Line(0)][Column(source_suffix)].c, ' ');
+    }
+
+    #[test]
+    fn failed_formula_does_not_shift_later_survivors() {
+        let line = "a $x$ b $y^2$ c";
+        let term = term_with(32, 4, &[line, "", "prompt"]);
+        let size = grid_size_info(32, 4, 8.0, 16.0);
+
+        let mut all_overlay = MathOverlay::default();
+        let all_pending =
+            all_overlay.plan_frame(&term, &size, Rgb::new(0xd6, 0xda, 0xea), 16.0, 1.0);
+        let all = all_overlay.finalize_frame_with(all_pending, |_, _| true);
+
+        let mut filtered_overlay = MathOverlay::default();
+        let filtered_pending =
+            filtered_overlay.plan_frame(&term, &size, Rgb::new(0xd6, 0xda, 0xea), 16.0, 1.0);
+        let filtered = filtered_overlay
+            .finalize_frame_with(filtered_pending, |source, _| source.as_ref() != "x");
+
+        assert!(!filtered.covers(0, 2), "failed first formula must leave its source visible");
+        assert!(filtered.covers(0, 8), "later paintable formula still overlays");
+        assert_eq!(filtered.formulas.len(), 1);
+        assert_eq!(
+            filtered.project_formula_background(0, 8, 32),
+            Some(8),
+            "the surviving formula must not inherit the failed formula's shift"
+        );
+        let source_suffix = 13;
+        let filtered_suffix =
+            filtered.project_cell(0, source_suffix, 32).expect("filtered suffix remains visible");
+        let all_suffix =
+            all.project_cell(0, source_suffix, 32).expect("unfiltered suffix remains visible");
+        assert!(
+            filtered_suffix > all_suffix,
+            "the failed formula must not contribute a stale cumulative shift"
+        );
+    }
+
+    #[test]
     fn ansi_background_keeps_formula_source_literal() {
         let mut overlay = MathOverlay::default();
         let mut term = term_with(16, 4, &["$x$", "", "prompt"]);
@@ -512,6 +728,40 @@ mod tests {
     }
 
     #[test]
+    fn effective_selection_clears_existing_projection() {
+        let mut overlay = MathOverlay::default();
+        let mut term = term_with(20, 4, &["$x^2$ suffix", "", "prompt"]);
+        let source_suffix = 5;
+        let projected = plan(&mut overlay, &term, 20, 4);
+        assert!(projected.project_cell(0, source_suffix, 20).unwrap() < source_suffix);
+
+        let mut selection =
+            Selection::new(SelectionType::Simple, Point::new(Line(0), Column(0)), Side::Left);
+        selection.update(Point::new(Line(0), Column(2)), Side::Right);
+        term.selection = Some(selection);
+        let selected = plan(&mut overlay, &term, 20, 4);
+
+        assert!(selected.is_empty(), "source text must stay visible while selecting");
+        assert_eq!(selected.project_cell(0, source_suffix, 20), Some(source_suffix));
+    }
+
+    #[test]
+    fn explicit_empty_frame_clears_existing_projection() {
+        let mut overlay = MathOverlay::default();
+        let term = term_with(20, 4, &["$x^2$ suffix", "", "prompt"]);
+        let source_suffix = 5;
+        let projected = plan(&mut overlay, &term, 20, 4);
+        assert!(projected.project_cell(0, source_suffix, 20).unwrap() < source_suffix);
+
+        let size = grid_size_info(20, 4, 8.0, 16.0);
+        let pending = overlay.clear_frame(&size, 1.0);
+        let cleared = overlay.finalize_frame_with(pending, |_, _| true);
+
+        assert!(cleared.is_empty());
+        assert_eq!(cleared.project_cell(0, source_suffix, 20), Some(source_suffix));
+    }
+
+    #[test]
     fn alt_screen_renders_agent_math() {
         let mut overlay = MathOverlay::default();
         let mut term = term_with(
@@ -519,13 +769,27 @@ mod tests {
             4,
             &[r"$n! \approx \sqrt{2\pi n}\left(\dfrac{n}{e}\right)^n$", "", "prompt"],
         );
-        assert!(!plan(&mut overlay, &term, 96, 4).is_empty());
+        let main_frame = plan(&mut overlay, &term, 96, 4);
+        let source_end = r"$n! \approx \sqrt{2\pi n}\left(\dfrac{n}{e}\right)^n$".chars().count();
+        assert!(main_frame.project_cell(0, source_end, 96).unwrap() < source_end);
         term.swap_alt();
+        // `swap_alt` 按终端语义先清空备用网格；测试内容必须写进交换后的活动
+        // 网格，才能验证 ALT_SCREEN 的覆盖与固定列合同。
+        for (column, character) in
+            r"$n! \approx \sqrt{2\pi n}\left(\dfrac{n}{e}\right)^n$".chars().enumerate()
+        {
+            term.grid_mut()[Line(0)][Column(column)].c = character;
+        }
         let frame = plan(&mut overlay, &term, 96, 4);
         assert!(!frame.is_empty(), "alternate-screen output may use the common TeX path");
         assert_eq!(
             frame.formulas[0].source.as_ref(),
             r"n! \approx \sqrt{2\pi n}\left(\dfrac{n}{e}\right)^n"
+        );
+        assert_eq!(
+            frame.project_cell(0, source_end, 96),
+            Some(source_end),
+            "alternate-screen formulas may overlay but must keep fixed TUI columns"
         );
     }
 

@@ -257,7 +257,7 @@ impl Element for TerminalElement {
         // 探测/fit/几何合同全部由共享的 display::terminal_math 裁定。
         let scale_factor = window.scale_factor();
         let math_pixels_per_point = crate::math::pixels_per_point(scale_factor);
-        let math_frame = {
+        let pending_math_frame = {
             let cell_w = layout.cell_width.as_f32();
             let line_h = layout.line_height.as_f32();
             let font_px = f32::from(self.view.read(cx).font_size);
@@ -268,11 +268,11 @@ impl Element for TerminalElement {
                 (fg.b * 255.0).round() as u8,
             );
             self.view.update(cx, |view, _| {
-                let Some(term) = view.session.as_ref().map(|session| session.term.clone()) else {
-                    return super::math_overlay::MathFrame::default();
-                };
                 let size_info =
                     super::math_overlay::grid_size_info(layout.cols, layout.rows, cell_w, line_h);
+                let Some(term) = view.session.as_ref().map(|session| session.term.clone()) else {
+                    return view.math.clear_frame(&size_info, math_pixels_per_point);
+                };
                 let term = term.lock();
                 view.math.plan_frame(&term, &size_info, foreground, font_px, math_pixels_per_point)
             })
@@ -280,7 +280,9 @@ impl Element for TerminalElement {
         // 位图预检必须在格子绘制之前、term 锁之外：合成不出位图的公式不能进
         // 覆盖掩码，否则源格被藏掉而公式又没画出来，屏幕上就是一片空白。旧壳
         // 的 draw_overlays 靠失败后补画 fallback 达到同一保证。
-        let math_frame = math_frame.retain_paintable(math_pixels_per_point, scale_factor, cx);
+        let math_frame = self
+            .view
+            .update(cx, |view, cx| view.math.finalize_frame(pending_math_frame, scale_factor, cx));
 
         let cell_rect = |row: usize, start: usize, count: usize| -> Bounds<Pixels> {
             Bounds::new(
@@ -291,6 +293,9 @@ impl Element for TerminalElement {
                 size(layout.cell_width * count as f32, layout.line_height),
             )
         };
+        let visual_column = |row: u16, source_column: u16| {
+            math_frame.visual_column(row as usize, source_column as usize, layout.cols)
+        };
 
         for run in &snap.bg_runs {
             let mut paint = |start: u16, end: u16, color: Color| {
@@ -298,10 +303,17 @@ impl Element for TerminalElement {
                     return;
                 }
                 let color = theme.resolve(color, &overrides, false);
-                window.paint_quad(fill(
-                    cell_rect(run.row as usize, start as usize, (end - start) as usize),
-                    color,
-                ));
+                for visual in math_frame.projected_runs(
+                    run.row as usize,
+                    start as usize..end as usize,
+                    layout.cols,
+                    true,
+                ) {
+                    window.paint_quad(fill(
+                        cell_rect(run.row as usize, visual.start, visual.len()),
+                        color,
+                    ));
+                }
             };
             if let Some(cursor) = app_cursor {
                 if run.row == cursor.row {
@@ -326,10 +338,17 @@ impl Element for TerminalElement {
             theme.selection
         };
         for run in &snap.selection_runs {
-            window.paint_quad(fill(
-                cell_rect(run.row as usize, run.start as usize, (run.end - run.start) as usize),
-                selection_fill,
-            ));
+            for visual in math_frame.projected_runs(
+                run.row as usize,
+                run.start as usize..run.end as usize,
+                layout.cols,
+                false,
+            ) {
+                window.paint_quad(fill(
+                    cell_rect(run.row as usize, visual.start, visual.len()),
+                    selection_fill,
+                ));
+            }
         }
         let selection_foreground = theme.selection_foreground;
         let selected_foreground = |row: u16, col: u16| -> Option<Rgba> {
@@ -356,7 +375,7 @@ impl Element for TerminalElement {
                     theme.cursor
                 };
                 window.paint_quad(fill(
-                    cell_rect(cursor.row as usize, cursor.col as usize, width),
+                    cell_rect(cursor.row as usize, visual_column(cursor.row, cursor.col), width),
                     fill_color,
                 ));
             }
@@ -383,7 +402,11 @@ impl Element for TerminalElement {
                 if let Some(color) = app_cursor_color {
                     let width = if cursor.wide { 2 } else { 1 };
                     window.paint_quad(fill(
-                        cell_rect(cursor.row as usize, cursor.col as usize, width),
+                        cell_rect(
+                            cursor.row as usize,
+                            visual_column(cursor.row, cursor.col),
+                            width,
+                        ),
                         color,
                     ));
                 }
@@ -432,6 +455,14 @@ impl Element for TerminalElement {
         // —— CJK 字体下的框线错位就此根治。
         let scale = window.scale_factor();
         for glyph in &snap.box_glyphs {
+            if math_frame.covers(glyph.row as usize, glyph.col as usize) {
+                continue;
+            }
+            let Some(visual_col) =
+                math_frame.project_cell(glyph.row as usize, glyph.col as usize, layout.cols)
+            else {
+                continue;
+            };
             let fg = if app_cursor
                 .is_some_and(|cursor| cursor.row == glyph.row && cursor.col == glyph.col)
             {
@@ -453,7 +484,7 @@ impl Element for TerminalElement {
                 continue;
             };
             let origin = point(
-                bounds.origin.x + layout.cell_width * glyph.col as f32,
+                bounds.origin.x + layout.cell_width * visual_col as f32,
                 bounds.origin.y + layout.line_height * glyph.row as f32,
             );
             let at = |p: &[f32; 2]| point(origin.x + px(p[0]), origin.y + px(p[1]));
@@ -492,6 +523,11 @@ impl Element for TerminalElement {
                 if math_frame.covers(seg.row as usize, cell.col as usize) {
                     continue;
                 }
+                let Some(visual_col) =
+                    math_frame.project_cell(seg.row as usize, cell.col as usize, layout.cols)
+                else {
+                    continue;
+                };
                 let fg: Hsla = if cursor_inverts(seg.row, cell.col) {
                     theme.background.into()
                 } else if let Some(foreground) = selected_foreground(seg.row, cell.col) {
@@ -517,7 +553,7 @@ impl Element for TerminalElement {
                     strikethrough,
                 };
                 let origin = point(
-                    bounds.origin.x + layout.cell_width * cell.col as f32,
+                    bounds.origin.x + layout.cell_width * visual_col as f32,
                     bounds.origin.y + layout.line_height * seg.row as f32,
                 );
                 paint_cell_text(
@@ -555,6 +591,7 @@ impl Element for TerminalElement {
         }
 
         if let Some(cursor) = &snap.cursor {
+            let cursor_visual_col = visual_column(cursor.row, cursor.col);
             // 内联 ghost 余量与弹窗补全：结果由 view 在本帧 render 时算好
             // （引擎与旧壳共享），元素只负责画。IME 组合中让位给 preedit，
             // 与旧壳同一抑制条件；窗口失焦不灭（对齐旧壳 draw_pane）。
@@ -577,7 +614,7 @@ impl Element for TerminalElement {
             if ghost_text.is_some() || !popup_items.is_empty() {
                 let colors = crate::gpui_shell::theme::completion_colors(cx, theme.background);
                 if let Some(ghost) = &ghost_text {
-                    let avail = layout.cols.saturating_sub(cursor.col as usize);
+                    let avail = layout.cols.saturating_sub(cursor_visual_col);
                     if avail > 0 {
                         grid_text(
                             window,
@@ -587,7 +624,7 @@ impl Element for TerminalElement {
                             font_size,
                             colors.ghost,
                             point(
-                                bounds.origin.x + layout.cell_width * cursor.col as f32,
+                                bounds.origin.x + layout.cell_width * cursor_visual_col as f32,
                                 bounds.origin.y + layout.line_height * cursor.row as f32,
                             ),
                             layout.cell_width,
@@ -603,7 +640,7 @@ impl Element for TerminalElement {
                         &popup_items,
                         popup_selected,
                         cursor.row as usize,
-                        cursor.col as usize,
+                        cursor_visual_col,
                         layout,
                         &bounds,
                         &colors,
@@ -632,7 +669,7 @@ impl Element for TerminalElement {
                 }
             };
             let width = if cursor.wide { 2 } else { 1 };
-            let rect = cell_rect(cursor.row as usize, cursor.col as usize, width);
+            let rect = cell_rect(cursor.row as usize, cursor_visual_col, width);
             if !focused || cursor_visible {
                 match (focused, cursor.shape) {
                     (true, CursorShape::Block) => {}, // 已在文字层下方填充
@@ -660,7 +697,7 @@ impl Element for TerminalElement {
             }
 
             // IME 组合文本锚点与预编辑串：跟随光标单元格。
-            let anchor = cell_rect(cursor.row as usize, cursor.col as usize, 1);
+            let anchor = cell_rect(cursor.row as usize, cursor_visual_col, 1);
             let marked = self.view.read(cx).marked_text.clone();
             self.view.update(cx, |view, _| view.ime_bounds = anchor);
             if let Some(marked) = marked.filter(|m| !m.is_empty()) {
@@ -723,12 +760,17 @@ impl Element for TerminalElement {
         }
         if let Some(hover) = link_hover {
             window.set_cursor_style(CursorStyle::PointingHand, &layout.hitbox);
+            let anchor_col = math_frame.visual_column(
+                hover.anchor_row as usize,
+                hover.anchor_col as usize,
+                layout.cols,
+            );
             paint_link_preview(
                 window,
                 cx,
                 &hover.preview,
                 hover.anchor_row as usize,
-                hover.anchor_col as usize,
+                anchor_col,
                 layout,
                 &bounds,
                 &font,
