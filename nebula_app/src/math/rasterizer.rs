@@ -69,7 +69,11 @@ impl MathGlyphRasterizer {
             .outline(glyph, &mut outline)
             .map_err(|_| MathError::new(MathErrorKind::Font, 0))?;
         if bounds.is_none() {
-            return Err(MathError::new(MathErrorKind::MissingGlyph, 0));
+            // 没有轮廓 ≠ 缺字。`\text{ToT Search}` 里的空格就是一个合法的
+            // 无墨字形，ttf-parser 对它的 outline 返回 None。它的 advance 早
+            // 已算进布局，所以这里交一张空位图；报错会让整条公式一个字形都
+            // 画不出来（合成器遇到失败就整张放弃）。
+            return Ok(RasterizedMathGlyph::default());
         }
 
         let pixel_count = (width as usize)
@@ -188,6 +192,18 @@ mod tests {
         assert_eq!(image.rgba.len(), image.width as usize * image.height as usize * 4);
         assert!(image.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0));
         assert!(image.rgba.chunks_exact(4).all(|pixel| pixel[..3] == [255, 255, 255]));
+    }
+
+    #[test]
+    fn ink_free_glyphs_rasterize_to_an_empty_bitmap() {
+        // `\text{…}` 里的空格是合法的无墨字形。把它当缺字报错，会让合成器
+        // 放弃整张位图——公式源格已经被覆盖掩码藏掉，屏幕上只剩一个空洞。
+        let font = MathFont::load().unwrap();
+        let space = font.glyph_id(' ').unwrap();
+        let rasterizer = MathGlyphRasterizer::new().unwrap();
+        let image = rasterizer.rasterize(space.0, 20.0).expect("a space is ink-free, not missing");
+        assert_eq!((image.width, image.height), (0, 0));
+        assert!(image.rgba.is_empty());
     }
 
     #[test]

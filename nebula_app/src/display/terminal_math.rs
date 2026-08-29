@@ -645,6 +645,14 @@ impl FormulaOverlay {
         Arc::clone(&self.source)
     }
 
+    /// 源格跨度 `(行, 起, 止)`。GPUI 壳在位图预检之后要按存活的公式重建覆盖
+    /// 掩码，因此这里把跨度交出去，而不是让它去猜 `spans` 的内部表示。
+    pub(crate) fn covered_spans(&self) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
+        self.spans.iter().filter_map(|span| {
+            usize::try_from(span.row).ok().map(|row| (row, span.start, span.end))
+        })
+    }
+
     fn contains(&self, point: Point<usize>) -> bool {
         self.spans.iter().any(|span| {
             usize::try_from(span.row) == Ok(point.line)
@@ -2421,15 +2429,21 @@ impl CoverageMask {
     /// 掩码）。旧壳传 `Option<PreparedFormula>`，GPUI 壳传
     /// `Option<OverlayDrawPlan>`——覆盖判定与各自的回退路径保持一致。
     pub(crate) fn build<T>(overlays: &[FormulaOverlay], gates: &[Option<T>]) -> Self {
+        Self::from_spans(
+            overlays
+                .iter()
+                .zip(gates)
+                .filter(|(_, gate)| gate.is_some())
+                .flat_map(|(overlay, _)| overlay.covered_spans()),
+        )
+    }
+
+    /// 由调用方自己挑出的源格跨度重建掩码。GPUI 壳在位图预检之后用它：那一步
+    /// 之前拿不到位图的公式还留在 `build` 的结果里，必须整条剔除。
+    pub(crate) fn from_spans(spans: impl IntoIterator<Item = (usize, usize, usize)>) -> Self {
         let mut rows: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
-        for (overlay, gate) in overlays.iter().zip(gates) {
-            if gate.is_none() {
-                continue;
-            }
-            for span in &overlay.spans {
-                let Ok(row) = usize::try_from(span.row) else { continue };
-                rows.entry(row).or_default().push((span.start, span.end));
-            }
+        for (row, start, end) in spans {
+            rows.entry(row).or_default().push((start, end));
         }
         Self { rows }
     }

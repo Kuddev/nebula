@@ -122,6 +122,21 @@ impl MathAssets {
         self.rasterizer.is_some()
     }
 
+    /// 这条公式能不能真的合成出位图。终端覆盖层在跳过源格**之前**问一次：
+    /// 位图合成失败（缺字形、超出位图上限）时源格必须留在屏幕上，否则那块
+    /// 区域既没有原文也没有公式。命中的位图进缓存，随后的绘制取同一份。
+    pub(crate) fn can_compose(
+        &mut self,
+        source: &SharedString,
+        display: bool,
+        pixel_size: f32,
+        pixels_per_point: f32,
+        raster_scale: f32,
+        color: Rgba,
+    ) -> bool {
+        self.image(source, display, pixel_size, pixels_per_point, raster_scale, color).is_some()
+    }
+
     /// 编排（含负缓存：失败公式不逐帧重试）。
     pub(crate) fn layout(
         &mut self,

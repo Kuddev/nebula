@@ -393,4 +393,35 @@ mod tests {
             layout.metrics.height,
         );
     }
+
+    /// 每个字形都必须能落到位图上：合成器（`math_view::compose_image`）遇到
+    /// 一个失败字形就整张放弃，而那时源格已经被覆盖掩码藏掉，屏幕上只剩空洞。
+    /// `\text{ToT Search}` 里那个空格就是这么把一整条流水线公式吃掉的。
+    #[test]
+    fn every_glyph_of_a_text_annotated_formula_rasterizes() {
+        let source = concat!(
+            r"(F, D_{\text{few}}) \xrightarrow{\text{Prompting}} \boxed{C} ",
+            r"\xrightarrow{\text{MultiAgent}}",
+            "\n",
+            r"  \boxed{(F_{\text{ref}}, F_{\text{neg}})} \xrightarrow{\text{ToT Search}}",
+        );
+        let rasterizer = crate::math::rasterizer::MathGlyphRasterizer::new().expect("math font");
+        for pixel_size in [20.0_f32, 14.0, 9.0] {
+            let layout = compile_formula(source, true, pixel_size, 1.0, DEFAULT_LIMITS)
+                .unwrap_or_else(|error| panic!("compile failed at {pixel_size}: {error:?}"));
+            assert!(!layout.glyphs.is_empty());
+            for scale in [1.0_f32, 1.5, 2.0] {
+                for op in &layout.glyphs {
+                    rasterizer.rasterize(op.glyph_id, op.pixel_size * scale).unwrap_or_else(
+                        |error| {
+                            panic!(
+                                "glyph {} at {:.1}px (scale {scale}) failed: {error:?}",
+                                op.glyph_id, op.pixel_size
+                            )
+                        },
+                    );
+                }
+            }
+        }
+    }
 }

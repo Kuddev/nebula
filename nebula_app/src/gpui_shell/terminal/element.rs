@@ -277,16 +277,10 @@ impl Element for TerminalElement {
                 view.math.plan_frame(&term, &size_info, foreground, font_px, math_pixels_per_point)
             })
         };
-        // 栅格器不可用时不能跳源格：旧壳 draw_math 失败会补画 fallback，
-        // GPUI 格子已经画过，只能整帧不覆盖，让 `\[` 源码留在屏幕上。
-        let math_frame = if cx
-            .try_global::<crate::gpui_shell::math_view::MathAssets>()
-            .is_some_and(|assets| assets.can_rasterize())
-        {
-            math_frame
-        } else {
-            super::math_overlay::MathFrame::default()
-        };
+        // 位图预检必须在格子绘制之前、term 锁之外：合成不出位图的公式不能进
+        // 覆盖掩码，否则源格被藏掉而公式又没画出来，屏幕上就是一片空白。旧壳
+        // 的 draw_overlays 靠失败后补画 fallback 达到同一保证。
+        let math_frame = math_frame.retain_paintable(math_pixels_per_point, scale_factor, cx);
 
         let cell_rect = |row: usize, start: usize, count: usize| -> Bounds<Pixels> {
             Bounds::new(

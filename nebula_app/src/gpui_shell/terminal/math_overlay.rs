@@ -40,6 +40,9 @@ pub struct MathOverlay {
 pub struct PlannedFormula {
     source: Arc<str>,
     plan: OverlayDrawPlan,
+    /// 本条公式盖住的源格跨度 `(行, 起, 止)`：位图预检剔除公式之后要按存活
+    /// 的公式重建掩码。
+    spans: Vec<(usize, usize, usize)>,
 }
 
 /// 一帧的覆盖产物：绘制清单 + 源格跳过掩码。
@@ -57,6 +60,59 @@ impl MathFrame {
 
     pub fn is_empty(&self) -> bool {
         self.formulas.is_empty()
+    }
+
+    /// 位图预检：合成不出位图的公式一律不覆盖源格。
+    ///
+    /// 旧壳 [`terminal_math::draw_overlays`] 在 `draw_math` 失败时会补画
+    /// fallback 源格；GPUI 壳的格子在本函数之后才画，所以「不留洞」这条保证只
+    /// 能在这里落实——否则一个字形合成失败就是屏幕上一片空白（源格已被掩码
+    /// 藏掉，公式又没画出来），比留着原文严重得多。
+    ///
+    /// 必须在 term 锁外调用（要取 `MathAssets` 全局）。命中的位图进缓存，
+    /// [`paint_frame`] 随后取的是同一份。
+    pub fn retain_paintable(
+        mut self,
+        pixels_per_point: f32,
+        raster_scale: f32,
+        cx: &mut App,
+    ) -> Self {
+        if self.formulas.is_empty() {
+            return self;
+        }
+        // 字体加载失败：整帧不覆盖，`\[` 源码留在屏幕上。
+        if !cx
+            .try_global::<math_view::MathAssets>()
+            .is_some_and(math_view::MathAssets::can_rasterize)
+        {
+            return Self::default();
+        }
+        self.formulas.retain(|formula| {
+            let source: SharedString = formula.source.to_string().into();
+            cx.global_mut::<math_view::MathAssets>().can_compose(
+                &source,
+                formula.plan.display_style,
+                formula.plan.fitted_pixel_size,
+                pixels_per_point,
+                raster_scale,
+                plan_color(&formula.plan),
+            )
+        });
+        let spans: Vec<(usize, usize, usize)> =
+            self.formulas.iter().flat_map(|formula| formula.spans.iter().copied()).collect();
+        self.coverage = CoverageMask::from_spans(spans);
+        self
+    }
+}
+
+/// 计划里的前景色（`paint_frame` 与位图预检必须用同一个值，否则缓存键不同、
+/// 预检的那张图白合成一遍）。
+fn plan_color(plan: &OverlayDrawPlan) -> Rgba {
+    Rgba {
+        r: plan.foreground.r as f32 / 255.0,
+        g: plan.foreground.g as f32 / 255.0,
+        b: plan.foreground.b as f32 / 255.0,
+        a: 1.0,
     }
 }
 
@@ -86,8 +142,9 @@ impl MathOverlay {
         // 光标所在行是活动输入，必须保留原文。备用屏幕里同样放过：编辑器
         // 的光标压在你要改的那一行上，换成渲染图就没法编辑源码了。
         let cursor =
-            nebula_terminal::term::point_to_viewport_from(origin, term.grid().cursor.point)
-                .filter(|point| point.line < size.screen_lines() && point.column.0 < size.columns());
+            nebula_terminal::term::point_to_viewport_from(origin, term.grid().cursor.point).filter(
+                |point| point.line < size.screen_lines() && point.column.0 < size.columns(),
+            );
         let rendered_cells = scan_cells_from_term(term, size, default_foreground);
         let overlays = terminal_math::scan_visible(
             &mut self.state,
@@ -127,7 +184,11 @@ impl MathOverlay {
             .iter()
             .zip(&plans)
             .filter_map(|(overlay, plan)| {
-                plan.map(|plan| PlannedFormula { source: overlay.source_arc(), plan })
+                plan.map(|plan| PlannedFormula {
+                    source: overlay.source_arc(),
+                    plan,
+                    spans: overlay.covered_spans().collect(),
+                })
             })
             .collect();
         MathFrame { formulas, coverage }
@@ -228,12 +289,7 @@ pub fn paint_frame(
 ) {
     for formula in &frame.formulas {
         let plan = &formula.plan;
-        let color = Rgba {
-            r: plan.foreground.r as f32 / 255.0,
-            g: plan.foreground.g as f32 / 255.0,
-            b: plan.foreground.b as f32 / 255.0,
-            a: 1.0,
-        };
+        let color = plan_color(plan);
         let source: SharedString = formula.source.to_string().into();
 
         // 裁剪跟随 bleed 预算（与旧壳 MathClip 同一矩形），交给 GPUI 的
