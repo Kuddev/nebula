@@ -8,15 +8,45 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### English
 
-#### Fixed
-- **Claude no longer reports a failed Nebula hook, with unreadable characters attached, on session start, prompt submit, and conversation switching.** Nebula's entries in `~/.claude/settings.json` described the bridge as a single quoted command string, and claude hands hook strings to a shell — on Windows that is PowerShell, which reads a leading quoted path as a *string expression* and therefore rejects the following `claude` argument as an unexpected token. Because those entries are global, the same failure appeared in the system console, not only inside Nebula. The unreadable characters were PowerShell's own localized parser message, written in the console code page and read back as UTF-8. The entries now use claude's exec form — the executable in `command`, the subcommand in `args` — so the bridge is started directly and no shell parses the path in any configuration; entries written by earlier versions are repaired in place on the next launch instead of being duplicated. Addresses [#80](https://github.com/Kuddev/nebula/issues/80).
-- **A prompt installed by the user's PowerShell profile stays visible.** `$PROFILE` was already loading, but Nebula drew its own powerline prompt over whatever the profile had installed, so an oh-my-posh, starship, or hand-written prompt disappeared and the profile looked as if it had never run. Nebula now contributes only the shell-integration markers — prompt start, command status, and the window title carrying cwd and branch — in front of a user prompt, and keeps its own powerline for shells that have none. Sourcing `$PROFILE` again mid-session re-attaches the integration instead of silently ending command-state reporting. Git Bash follows the same rule: a `PS1` exported by `~/.bashrc`, or rewritten on every prompt by starship, is no longer overwritten.
+No unreleased changes yet.
 
 ### 简体中文
 
+暂无未发布改动。
+
+## 1.4.1 - 2026-08-30
+
+### English
+
+#### Added
+- Added `agent.delegate` to the Runtime control API, allowing a managed Agent to delegate work to a verified target and receive the bounded result back in the originating session.
+
+#### Fixed
+- Fixed Claude hooks failing under PowerShell on Windows by installing them in exec form and repairing older shell-form entries in place.
+- Fixed user-defined PowerShell and Git Bash prompts being overwritten while preserving Nebula's shell-integration markers.
+- Fixed Windows environment expansion leaving literal `%USERPROFILE%` paths that could create a `%USERPROFILE%` folder in the launch directory. Contributed by [@Mikachu2333](https://github.com/Mikachu2333) in [#86](https://github.com/Kuddev/nebula/pull/86).
+- Fixed GPUI confirmation and cancellation buttons not responding to mouse clicks, and stopped terminal right-click paste from propagating into overlapping UI layers.
+- Fixed `Ctrl+V` in a focused tab-rename field also pasting the clipboard into the terminal behind it.
+
+#### Improved
+- Improved tab and sidebar activity badges with OSC 9;4 running, paused, and error states without overriding managed-Agent hook state.
+- Improved running activity spinners by scheduling them on GPUI display frames instead of an approximately 12.5 FPS timer, while retaining visibility and window-activity gating.
+
+### 简体中文
+
+#### 新增
+- Runtime 控制 API 新增 `agent.delegate`，托管 Agent 可以把任务委派给经过核实的目标，并在原会话中收到长度受限的执行结果。
+
 #### 修复
-- **Claude 不再在会话启动、提交提示词和切换对话时报告 Nebula hook 失败并附带乱码。** Nebula 写进 `~/.claude/settings.json` 的条目把桥接程序描述成一整条带引号的命令字符串，而 claude 会把 hook 字符串交给 shell 执行——Windows 上是 PowerShell，它把开头的带引号路径解析成*字符串表达式*，于是后面的 `claude` 参数成了意外的标记。由于这些条目是全局的，同一个报错在系统自带控制台里也会出现，不只是在 Nebula 内。那段乱码本身就是 PowerShell 的本地化解析错误：它按控制台代码页输出，又被按 UTF-8 读回。现在条目改用 claude 的 exec 形式——可执行文件放 `command`，子命令放 `args`——桥接程序被直接启动，任何配置下都不再有 shell 解析这条路径；旧版本写下的条目会在下次启动时就地修好，而不是再追加一条。对应 [#80](https://github.com/Kuddev/nebula/issues/80)。
-- **PowerShell 配置文件里的提示符不再被覆盖。** `$PROFILE` 本来就已经加载，但 Nebula 会把自己的 powerline 提示符画在配置文件安装的提示符之上，于是 oh-my-posh、starship 或手写的提示符消失不见，看起来就像配置文件根本没执行。现在 Nebula 只在用户提示符前面补上 shell 集成标记——提示符起点、命令状态，以及携带 cwd 与分支的窗口标题——没有用户提示符的 shell 依旧使用 Nebula 自己的 powerline。会话中途再 source 一次 `$PROFILE` 会把集成重新挂回去，而不是让命令状态上报静默失效。Git Bash 遵循同一条规则：`~/.bashrc` 导出的 `PS1`、以及 starship 那类每轮重写的 `PS1`，都不再被覆盖。
+- 修复 Windows PowerShell 下 Claude hook 执行失败；hook 改用 exec 形式安装，并会就地修复旧的 shell 形式配置。
+- 修复用户自定义 PowerShell 与 Git Bash 提示符被覆盖，同时继续保留 Nebula 的 shell 集成标记。
+- 修复 Windows 环境展开留下字面量 `%USERPROFILE%` 路径、进而可能在启动目录创建 `%USERPROFILE%` 文件夹。由 [@Mikachu2333](https://github.com/Mikachu2333) 在 [#86](https://github.com/Kuddev/nebula/pull/86) 中贡献。
+- 修复 GPUI 确认框的确认与取消按钮无法响应鼠标点击，并阻止终端右键粘贴继续传播到重叠的界面层。
+- 修复标签重命名输入框聚焦时按 `Ctrl+V` 还会把剪贴板内容粘贴到背后终端的问题。
+
+#### 改进
+- 改进标签与侧栏活动徽章，支持 OSC 9;4 的运行、暂停和错误状态，同时不覆盖托管 Agent hook 的权威状态。
+- 改进运行态转圈动画，改由 GPUI 显示帧调度，不再使用约 12.5 FPS 的定时器，同时保留可见性与窗口激活门控。
 
 ## 1.4.0 - 2026-08-29
 
