@@ -2,8 +2,8 @@
 //!
 //! OSC 9;4 是 ConEmu 定的序列，Windows 任务栏原生就有这套语义
 //! （`ITaskbarList3::SetProgressState` / `SetProgressValue`），所以这条链路在
-//! Windows 上几乎是零成本：shell 集成在命令开始时发一次、结束时发一次，任务栏
-//! 就有了真实进度——`cargo build` 跑着，切到别的窗口也看得见。
+//! Windows 上几乎是零成本：程序在任务开始、进度变化和结束时各发一次，任务栏
+//! 就有了真实进度——支持该协议的构建工具跑着，切到别的窗口也看得见。
 //!
 //! 状态映射刻意宽容：解析层不收窄状态码（见 `osc_cwd::OscEvent::Progress`），
 //! 这里把规范外的码一律当成「清除」。部分 shell 集成实测会发 `9;4;5;0` 表示

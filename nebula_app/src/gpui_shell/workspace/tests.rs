@@ -155,6 +155,77 @@ mod sidebar_new_tab_tests {
     }
 }
 
+#[cfg(feature = "gpui-test-support")]
+mod tab_rename_paste_tests {
+    use super::*;
+    use gpui::{ClipboardItem, TestAppContext};
+    use gpui_component::input::{Input, InputState};
+
+    struct TabRenamePasteProbe {
+        input: Entity<InputState>,
+        workspace_paste_actions: usize,
+        terminal_pastes: usize,
+    }
+
+    impl Render for TabRenamePasteProbe {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let input = self.input.clone();
+            div()
+                .size_full()
+                .on_action(cx.listener(move |this, _: &PasteClipboard, window, cx| {
+                    this.workspace_paste_actions += 1;
+                    if input.read(cx).focus_handle(cx).is_focused(window) {
+                        cx.propagate();
+                    } else {
+                        this.terminal_pastes += 1;
+                    }
+                }))
+                .child(Input::new(&self.input))
+        }
+    }
+
+    #[gpui::test]
+    fn focused_tab_rename_ctrl_v_reaches_input_without_pasting_terminal(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            super::init(cx);
+        });
+        let mut probe = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            input.update(cx, |state, cx| {
+                state.set_value("old-tab", window, cx);
+                state.focus(window, cx);
+            });
+            let view = cx.new(|_| TabRenamePasteProbe {
+                input,
+                workspace_paste_actions: 0,
+                terminal_pastes: 0,
+            });
+            probe = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let probe = probe.expect("test window must publish the rename probe");
+        cx.update(|window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("renamed-tab".to_owned()));
+            window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
+        });
+
+        cx.simulate_keystrokes("ctrl-v");
+
+        let (value, workspace_paste_actions, terminal_pastes) = probe.read_with(cx, |probe, cx| {
+            (
+                probe.input.read(cx).value().to_owned(),
+                probe.workspace_paste_actions,
+                probe.terminal_pastes,
+            )
+        });
+        assert_eq!(value, "renamed-tab", "Ctrl+V 必须替换重命名框当前选区");
+        assert_eq!(workspace_paste_actions, 1, "后注册的工作区绑定应先命中一次");
+        assert_eq!(terminal_pastes, 0, "重命名框聚焦时不得向背后的终端粘贴");
+    }
+}
+
 #[test]
 fn gpui_binding_combo_maps_plus_minus_and_digits() {
     assert_eq!(gpui_binding_combo("ctrl+plus"), "ctrl-+");

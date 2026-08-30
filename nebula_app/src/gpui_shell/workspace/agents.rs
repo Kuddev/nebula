@@ -93,41 +93,35 @@ pub(super) fn ai_session_palette_rows(
 }
 
 impl NebulaWorkspace {
-    /// 只为当前可见的运行态徽章挂一拍。下一拍必须由随后的实际 render 续期，
+    /// 只为当前可见的运行态徽章挂一帧。下一帧必须由随后的实际 render 续期，
     /// 因此任务结束、窗口失焦/隐藏或徽章滚出视口时会自然断链，不留下常驻
-    /// animation loop。80ms × 10 帧仍保持 800ms 一圈。
-    pub(super) fn arm_activity_spinner_tick(&self, cx: &mut Context<Self>) {
-        const TICK: Duration = Duration::from_millis(80);
+    /// animation loop；由 GPUI 的帧源调度，才能跟随显示器刷新节奏。
+    pub(super) fn arm_activity_spinner_frame(&self, window: &mut Window, cx: &mut Context<Self>) {
         const PERIOD_SECS: f32 = 0.8;
 
-        if self.spinner_tick_pending.get()
+        if self.spinner_frame_pending.get()
             || !self.spinner_window_active
             || self.window_hidden
             || !self.spinner_visible.get()
         {
             return;
         }
-        self.spinner_tick_pending.set(true);
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
-            executor.timer(TICK).await;
-            let _ = this.update(cx, |workspace, cx| {
-                workspace.spinner_tick_pending.set(false);
-                if !workspace.spinner_window_active
-                    || workspace.window_hidden
-                    || !workspace.spinner_visible.get()
-                {
-                    return;
-                }
-                let now = std::time::Instant::now();
-                let delta = now.saturating_duration_since(workspace.spinner_last);
-                workspace.spinner_last = now;
-                workspace.spinner_phase =
-                    (workspace.spinner_phase + delta.as_secs_f32() / PERIOD_SECS).rem_euclid(1.0);
-                cx.notify();
-            });
-        })
-        .detach();
+        self.spinner_frame_pending.set(true);
+        cx.on_next_frame(window, |workspace, _, cx| {
+            workspace.spinner_frame_pending.set(false);
+            if !workspace.spinner_window_active
+                || workspace.window_hidden
+                || !workspace.spinner_visible.get()
+            {
+                return;
+            }
+            let now = std::time::Instant::now();
+            let delta = now.saturating_duration_since(workspace.spinner_last);
+            workspace.spinner_last = now;
+            workspace.spinner_phase =
+                (workspace.spinner_phase + delta.as_secs_f32() / PERIOD_SECS).rem_euclid(1.0);
+            cx.notify();
+        });
     }
 
     pub(super) fn start_ai_hook_pump(

@@ -1010,19 +1010,18 @@ pub struct NebulaWorkspace {
     sidebar_logo_target_px: u32,
     /// 跟随系统深浅：OS 外观切换的监听（旧壳 ThemeChanged 的对应物）。
     _appearance_sub: Subscription,
-    /// spinner 在窗口失焦时冻结为静态状态；重新聚焦后由一次 render 恢复按需 tick。
+    /// spinner 在窗口失焦时冻结为静态状态；重新聚焦后由一次 render 恢复按需帧循环。
     spinner_window_active: bool,
     _spinner_activation_sub: Subscription,
     /// 本会话已注入的自定义键位 combo（gpui 绑定串）。键位表没有删除
     /// API，撤销只能靠后注的 NoAction 盖掉；这份清单就是撤销的依据。
     custom_keybinds_applied: Vec<String>,
     /// 侧栏「运行中」spinner 的相位（0..1，旧壳 `SPINNER_PERIOD` 800ms 一
-    /// 圈）与上次时钟时刻。侧栏和顶栏共用低频时钟，避免带系统材质的窗口
-    /// 持续逐帧重绘。
+    /// 圈）与上次帧时刻。侧栏和顶栏共用 GPUI 屏幕帧时钟。
     spinner_phase: f32,
     spinner_last: std::time::Instant,
-    /// render 与 one-shot timer 之间的单槽门闩：防止其他 UI 更新重复挂 tick。
-    spinner_tick_pending: std::cell::Cell<bool>,
+    /// render 与 next-frame 回调之间的单槽门闩：防止其他 UI 更新重复挂帧。
+    spinner_frame_pending: std::cell::Cell<bool>,
     /// 上一次 render 是否真的画出了运行态徽章；滚出视口后不应继续唤醒窗口。
     spinner_visible: std::cell::Cell<bool>,
     /// 最近一次写盘的会话快照（1 Hz 自动保存的去重 + 退出收尾的素材）。
@@ -1204,7 +1203,7 @@ impl NebulaWorkspace {
             custom_keybinds_applied: Vec::new(),
             spinner_phase: 0.0,
             spinner_last: std::time::Instant::now(),
-            spinner_tick_pending: std::cell::Cell::new(false),
+            spinner_frame_pending: std::cell::Cell::new(false),
             spinner_visible: std::cell::Cell::new(false),
             last_saved_session: None,
             window_close_confirm_open: false,
@@ -2417,6 +2416,9 @@ impl NebulaWorkspace {
                 {
                     crate::taskbar::apply(windowing::native_hwnd(window).unwrap_or(0), *progress);
                 }
+                // 后台 pane 也要刷新自己的 tab badge；一次协议事件只触发一次
+                // workspace render，只有 Running 状态会在 render 后续接共享时钟。
+                cx.notify();
             },
             TerminalViewEvent::Bell => {
                 if let Some((tab_ix, _)) = self.locate_pane(view.entity_id())
@@ -5169,7 +5171,16 @@ impl Render for NebulaWorkspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &PasteClipboard, window, cx| {
-                this.paste_focused_terminal(window, cx);
+                let rename_has_focus = this.tab_rename.as_ref().is_some_and(|rename| {
+                    rename.input.read(cx).focus_handle(cx).is_focused(window)
+                });
+                if rename_has_focus {
+                    // 工作区的无上下文绑定注册得更晚，会先于 Input 的 Paste 命中；
+                    // 继续分发同一次按键，才能让重命名框接管，而不是写进背后的 PTY。
+                    cx.propagate();
+                } else {
+                    this.paste_focused_terminal(window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &ToggleFullscreen, window, _cx| {
                 window.toggle_fullscreen();

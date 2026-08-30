@@ -174,8 +174,8 @@ pub enum TerminalViewEvent {
     /// 非应用鼠标模式下右键命中真实终端选区。菜单由 workspace 根持有，
     /// 避免每个 pane 都渲染一份带叠加阴影的 PopupMenu。
     SelectionContextMenuRequested { position: Point<Pixels>, text: String },
-    /// 程序上报的任务进度（OSC 9;4）变了。任务栏是窗口级的，只有宿主知道
-    /// 哪个 pane 正被看着，所以映射到任务栏这件事必须由它做。
+    /// 程序上报的任务进度（OSC 9;4）变了。宿主把 pane 级状态投到 tab badge，
+    /// 并且只把当前聚焦 pane 投到窗口级任务栏。
     ProgressChanged(crate::taskbar::TaskProgress),
 }
 
@@ -215,14 +215,17 @@ pub(crate) fn last_path_component(path: &str) -> Option<String> {
 ///
 /// - **事件**（`Done` / `Completed`）——「刚发生了一件你不在场的事」。你到场就
 ///   没有信息量了，所以当前 tab 一律不显示。
-/// - **状态**（`Running` / `WaitingInput` / `Attention` / `CommandFailed` /
-///   `Failed`）——「此刻仍是这个样子」。你看不看它都还成立，所以永远显示。
+/// - **状态**（`Running` / `Paused` / `WaitingInput` / `Attention` /
+///   `CommandFailed` / `Failed`）——「此刻仍是这个样子」。你看不看它都还成立，
+///   所以永远显示。
 ///   `CommandFailed` 归到这一类：命令失败是需要你处理的结果，不是「未读输出」，
 ///   看一眼不等于处理完了。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarActivity {
     Idle,
     Running,
+    /// 程序通过 OSC 9;4 报告暂停。它仍是进行中状态，但不应继续驱动 spinner。
+    Paused,
     /// Agent 回合完成，等待下一条指令（旧壳蓝点语义）。唯一的「事件」态。
     Done,
     /// 刚刚完成（`COMPLETION_FLASH` 之内）：闪一个对勾再沉降为 [`Self::Done`]
@@ -2668,6 +2671,7 @@ impl TerminalView {
             cx.stop_propagation();
         } else {
             self.paste(window, cx);
+            cx.stop_propagation();
         }
     }
 

@@ -185,6 +185,12 @@ impl NebulaWorkspace {
                             crate::gpui_shell::theme::sidebar_spinner_colors(cx, active);
                         Some(Self::spinner(self.spinner_phase, track, head).into_any_element())
                     },
+                    SidebarActivity::Paused => Some(
+                        Icon::new(IconName::Pause)
+                            .xsmall()
+                            .text_color(theme.warning)
+                            .into_any_element(),
+                    ),
                     SidebarActivity::Done => Some(
                         div().size(px(6.0)).rounded_full().bg(theme.primary).into_any_element(),
                     ),
@@ -498,7 +504,7 @@ impl NebulaWorkspace {
             .collect::<Vec<_>>();
         self.spinner_visible.set(items_running.get());
         if items_running.get() {
-            self.arm_activity_spinner_tick(cx);
+            self.arm_activity_spinner_frame(window, cx);
         }
 
         let menu_workspace = cx.entity().downgrade();

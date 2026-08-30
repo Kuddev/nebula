@@ -7,6 +7,25 @@ use nebula_terminal::term::TermMode;
 
 use super::{SidebarActivity, TerminalView, TerminalViewEvent};
 
+/// OSC 9;4 是程序对自身状态的明确声明，比 BEL/标题/进程树推断可靠；但 Agent
+/// hook 对 Claude/Codex 回合有更完整的语义，不能被遗留的进度码覆盖。
+fn progress_sidebar_activity(
+    progress: crate::taskbar::TaskProgress,
+    agent_status: crate::ai_agents::AgentStatus,
+) -> Option<SidebarActivity> {
+    if agent_status != crate::ai_agents::AgentStatus::Unknown {
+        return None;
+    }
+    match progress {
+        crate::taskbar::TaskProgress::None => None,
+        crate::taskbar::TaskProgress::Indeterminate | crate::taskbar::TaskProgress::Value(_) => {
+            Some(SidebarActivity::Running)
+        },
+        crate::taskbar::TaskProgress::Error(_) => Some(SidebarActivity::CommandFailed),
+        crate::taskbar::TaskProgress::Paused(_) => Some(SidebarActivity::Paused),
+    }
+}
+
 impl TerminalView {
     pub fn runtime_task_state(&self) -> crate::runtime_api::RuntimeTaskState {
         use crate::ai_agents::AgentStatus;
@@ -118,6 +137,14 @@ impl TerminalView {
 
     pub fn sidebar_activity(&self) -> SidebarActivity {
         let state = self.runtime_task_state();
+        // pane 级故障永远优先；普通 CLI 才允许 OSC 9;4 覆盖弱推断。这里只改变
+        // badge，不改变 RuntimeTaskState，避免进度协议干扰 agent.wait/自动回传。
+        if state == crate::runtime_api::RuntimeTaskState::Failed {
+            return SidebarActivity::Failed;
+        }
+        if let Some(activity) = progress_sidebar_activity(self.progress, self.agent_status) {
+            return activity;
+        }
         // 「上一条命令失败」盖在完成/空闲之上：那两个说的是「没在忙」，而退出码
         // 非 0 是一个你可能要处理的结果。真在跑就不画（`mark_command_running`
         // 起跑时已经清了旗子），pane 级故障走下面的 `Failed`，更严重。
@@ -142,7 +169,7 @@ impl TerminalView {
                     SidebarActivity::Done
                 }
             },
-            crate::runtime_api::RuntimeTaskState::Failed => SidebarActivity::Failed,
+            crate::runtime_api::RuntimeTaskState::Failed => unreachable!("handled above"),
             crate::runtime_api::RuntimeTaskState::Idle => SidebarActivity::Idle,
         }
     }
@@ -1003,7 +1030,43 @@ fn runtime_chat_agent_kind(
 
 #[cfg(test)]
 mod tests {
-    use super::{InputOrigin, local_context_refusal, runtime_chat_agent_kind};
+    use super::{
+        InputOrigin, SidebarActivity, local_context_refusal, progress_sidebar_activity,
+        runtime_chat_agent_kind,
+    };
+
+    #[test]
+    fn osc_progress_drives_cli_badges_but_never_overrides_agent_hooks() {
+        use crate::ai_agents::AgentStatus;
+        use crate::taskbar::TaskProgress;
+
+        assert_eq!(
+            progress_sidebar_activity(TaskProgress::Value(42), AgentStatus::Unknown),
+            Some(SidebarActivity::Running)
+        );
+        assert_eq!(
+            progress_sidebar_activity(TaskProgress::Indeterminate, AgentStatus::Unknown),
+            Some(SidebarActivity::Running)
+        );
+        assert_eq!(
+            progress_sidebar_activity(TaskProgress::Error(None), AgentStatus::Unknown),
+            Some(SidebarActivity::CommandFailed)
+        );
+        assert_eq!(
+            progress_sidebar_activity(TaskProgress::Paused(Some(7)), AgentStatus::Unknown),
+            Some(SidebarActivity::Paused)
+        );
+        assert_eq!(progress_sidebar_activity(TaskProgress::None, AgentStatus::Unknown), None);
+        for status in
+            [AgentStatus::Working, AgentStatus::Done, AgentStatus::Idle, AgentStatus::Blocked]
+        {
+            assert_eq!(
+                progress_sidebar_activity(TaskProgress::Indeterminate, status),
+                None,
+                "hook state {status:?} must remain authoritative"
+            );
+        }
+    }
 
     #[test]
     fn historical_or_disproved_agent_is_not_a_chat_target() {

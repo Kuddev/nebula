@@ -312,6 +312,12 @@ impl NebulaWorkspace {
                             crate::gpui_shell::theme::sidebar_spinner_colors(cx, active);
                         Some(Self::spinner(self.spinner_phase, track, head).into_any_element())
                     },
+                    SidebarActivity::Paused => Some(
+                        Icon::new(IconName::Pause)
+                            .xsmall()
+                            .text_color(theme.warning)
+                            .into_any_element(),
+                    ),
                     // 回合完成、等下一条指令：旧壳蓝点语义——不转圈，留一个
                     // 「有结果没看」的痕迹。
                     SidebarActivity::Done => Some(
@@ -797,7 +803,7 @@ impl NebulaWorkspace {
             .child(self.render_tabs_section(items, cx));
         self.spinner_visible.set(items_running.get());
         if items_running.get() {
-            self.arm_activity_spinner_tick(cx);
+            self.arm_activity_spinner_frame(window, cx);
         }
         sidebar
     }
@@ -1065,6 +1071,7 @@ mod tests {
         // 状态描述「此刻仍然如此」，看不看都成立——当前 tab 一样要画。
         for state in [
             SidebarActivity::Running,
+            SidebarActivity::Paused,
             SidebarActivity::WaitingInput,
             SidebarActivity::Attention,
             SidebarActivity::CommandFailed,

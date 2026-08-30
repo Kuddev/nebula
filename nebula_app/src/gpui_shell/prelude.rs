@@ -41,7 +41,11 @@ pub use gpui_component::WindowExt as _;
 // 现有的 glob 用法不受影响。
 pub use gpui_component::{ActiveTheme, Colorize};
 
-use gpui::{ParentElement as _, SharedString, Styled as _, Window, div, px, relative};
+use gpui::{
+    InteractiveElement as _, ParentElement as _, SharedString, Styled as _, Window, div, px,
+    relative,
+};
+use gpui_component::dialog::{CancelDialog, ConfirmDialog};
 
 const CONFIRM_DIALOG_WIDTH: f32 = 480.0;
 const CONFIRM_DIALOG_HORIZONTAL_PADDING: f32 = 26.0;
@@ -66,8 +70,8 @@ pub fn center_modal_dialog(dialog: Dialog, window: &Window, estimated_height: f3
 }
 
 /// 构造与旧 GPUI 壳一致的确认框。显式 footer 是必要的：固定依赖版本的普通
-/// Dialog 不会仅凭 button_props 生成按钮；DialogAction/DialogClose 负责把鼠标
-/// 点击重新汇入 Enter/Esc 共用的确认与取消回调。
+/// Dialog 不会仅凭 button_props 生成按钮。动作必须绑在真实 Button 上；该版本
+/// Button 在按下时会 prevent_default，依赖父容器 click 会让鼠标确认和取消都失效。
 pub fn confirm_dialog(
     dialog: Dialog,
     window: &mut Window,
@@ -121,13 +125,26 @@ pub fn confirm_dialog(
         })
         .footer(
             DialogFooter::new()
+                .w_full()
                 .child(
-                    DialogClose::new()
-                        .child(Button::new("confirm-cancel").label(cancel_text.clone())),
+                    Button::new("confirm-cancel")
+                        .debug_selector(|| "confirm-dialog-cancel".to_owned())
+                        .flex_1()
+                        .label(cancel_text.clone())
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(CancelDialog), cx);
+                        }),
                 )
-                .child(DialogAction::new().child(
-                    Button::new("confirm-ok").label(ok_text.clone()).with_variant(ok_variant),
-                )),
+                .child(
+                    Button::new("confirm-ok")
+                        .debug_selector(|| "confirm-dialog-ok".to_owned())
+                        .flex_1()
+                        .label(ok_text.clone())
+                        .with_variant(ok_variant)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ConfirmDialog), cx);
+                        }),
+                ),
         )
         .button_props(
             DialogButtonProps::default()
@@ -136,4 +153,95 @@ pub fn confirm_dialog(
                 .cancel_text(cancel_text)
                 .show_cancel(true),
         )
+}
+
+#[cfg(all(test, feature = "gpui-test-support"))]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{
+        AppContext as _, Context, IntoElement, Modifiers, Render, TestAppContext, Window, div,
+        point,
+    };
+    use gpui_component::{Root, WindowExt as _};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct ConfirmDialogProbe;
+
+    impl Render for ConfirmDialogProbe {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+            div().size_full().children(Root::render_dialog_layer(window, cx))
+        }
+    }
+
+    #[gpui::test]
+    fn confirm_dialog_mouse_buttons_dispatch_cancel_and_confirm(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| ConfirmDialogProbe);
+            Root::new(view, window, cx)
+        });
+
+        let confirmed = Rc::new(Cell::new(false));
+        let cancelled = Rc::new(Cell::new(false));
+        let open_dialog = |cx: &mut gpui::VisualTestContext| {
+            let confirmed = confirmed.clone();
+            let cancelled = cancelled.clone();
+            cx.update(|window, cx| {
+                window.open_dialog(cx, move |dialog, window, _| {
+                    confirm_dialog(
+                        dialog,
+                        window,
+                        "Confirm action?",
+                        "Choose an action.",
+                        "Confirm",
+                        "Cancel",
+                        ButtonVariant::Primary,
+                    )
+                    .on_ok({
+                        let confirmed = confirmed.clone();
+                        move |_, _, _| {
+                            confirmed.set(true);
+                            true
+                        }
+                    })
+                    .on_cancel({
+                        let cancelled = cancelled.clone();
+                        move |_, _, _| {
+                            cancelled.set(true);
+                            true
+                        }
+                    })
+                });
+            });
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+
+        open_dialog(cx);
+        let cancel = cx.debug_bounds("confirm-dialog-cancel").expect("cancel button bounds");
+        let ok = cx.debug_bounds("confirm-dialog-ok").expect("confirm button bounds");
+        let width_delta = (f32::from(cancel.size.width) - f32::from(ok.size.width)).abs();
+        assert!(width_delta <= 2.0, "确认框按钮只能有像素吸附造成的微小宽度差异");
+        cx.simulate_click(
+            point(
+                cancel.origin.x + cancel.size.width * 0.5,
+                cancel.origin.y + cancel.size.height * 0.5,
+            ),
+            Modifiers::default(),
+        );
+        assert!(cancelled.get(), "鼠标点击取消必须派发 Dialog 的取消动作");
+        assert!(!confirmed.get());
+
+        open_dialog(cx);
+        let ok = cx.debug_bounds("confirm-dialog-ok").expect("confirm button bounds");
+        cx.simulate_click(
+            point(ok.origin.x + ok.size.width * 0.5, ok.origin.y + ok.size.height * 0.5),
+            Modifiers::default(),
+        );
+        assert!(confirmed.get(), "鼠标点击确认必须派发 Dialog 的确认动作");
+    }
 }
