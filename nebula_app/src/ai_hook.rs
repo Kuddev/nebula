@@ -90,6 +90,12 @@ pub const HOOK_EXE_ENV: &str = "NEBULA_HOOK_EXE";
 /// helper's name so entries survive Nebula moving to a new absolute path.
 const HELPER_MARK: &str = "nebula-hook";
 
+/// The hook entry's argv tail. `claude` is the source discriminator
+/// `nebula-hook` reads from `args[0]`, and it must travel as a real argument:
+/// appended to the command string instead, some shell has to re-parse the whole
+/// line, which is exactly what broke in #80.
+const HELPER_ARGS: [&str; 1] = ["claude"];
+
 /// Claude hook events we subscribe to. Session boundaries carry the id needed
 /// for resume/fork; PostToolUse lets a stale permission state return to working
 /// before the whole turn completes.
@@ -1342,7 +1348,7 @@ mod win {
     use serde_json::{Value, json};
     use winit::event_loop::EventLoopProxy;
 
-    use super::{CLAUDE_EVENTS, HELPER_MARK, HOOK_EXE_ENV, PIPE_ENV, parse_envelope};
+    use super::{CLAUDE_EVENTS, HELPER_ARGS, HELPER_MARK, HOOK_EXE_ENV, PIPE_ENV, parse_envelope};
     use crate::event::{Event, EventType};
 
     // ─── pipe server ────────────────────────────────────────────────────────
@@ -2018,17 +2024,28 @@ export default function (pi: ExtensionAPI) {
                         continue;
                     }
                     found = true;
-                    if cmd.get("command").and_then(Value::as_str) != Some(command) {
-                        if let Some(entry) = cmd.as_object_mut() {
-                            entry.insert("command".into(), json!(command));
-                            changed = true;
-                        }
+                    let Some(entry) = cmd.as_object_mut() else { continue };
+                    if entry.get("command").and_then(Value::as_str) != Some(command) {
+                        entry.insert("command".into(), json!(command));
+                        changed = true;
+                    }
+                    // 1.4.0 及更早写的是 shell 形式（引号路径 + 拼在字符串里的
+                    // 子命令）。healing 必须补上 args：只改 command 会留下一条
+                    // 没有 argv 的裸路径，claude 仍旧交给 shell 解析（#80）。
+                    if entry.get("args") != Some(&json!(HELPER_ARGS)) {
+                        entry.insert("args".into(), json!(HELPER_ARGS));
+                        changed = true;
                     }
                 }
             }
             if !found {
                 matchers.push(json!({
-                    "hooks": [{ "type": "command", "command": command, "timeout": 10 }]
+                    "hooks": [{
+                        "type": "command",
+                        "command": command,
+                        "args": HELPER_ARGS,
+                        "timeout": 10,
+                    }]
                 }));
                 changed = true;
             }
@@ -2154,7 +2171,9 @@ export default function (pi: ExtensionAPI) {
             return i32::from(failed);
         }
         match helper_command() {
-            Some(command) => println!("hook 命令：{command}"),
+            Some(command) => {
+                println!("hook 命令：{command} {}（exec 形式，不经 shell 解析）", HELPER_ARGS[0])
+            },
             None => {
                 eprintln!("runtime/ 和 nebula.exe 同目录中均未找到 nebula-hook.exe，无法安装。");
                 return 1;
@@ -2561,12 +2580,22 @@ export default function (pi: ExtensionAPI) {
             .find(|path| path.is_file())
     }
 
-    /// The quoted claude hook command. Forward slashes on purpose: they
-    /// survive every shell claude may run hooks through (cmd, PowerShell,
-    /// git-bash).
+    /// The hook entry's `command`: nothing but the helper's absolute path.
+    ///
+    /// Claude runs a hook in *exec form* whenever the entry carries `args` —
+    /// it spawns the executable directly, so no shell ever re-parses the path.
+    /// That is the only shape that holds on Windows: claude routes shell-form
+    /// hooks through PowerShell (or Git Bash / cmd, depending on version and
+    /// per-hook `shell`), and PowerShell parses a leading quoted token as a
+    /// *string expression* — `"C:/…/nebula-hook.exe" claude` therefore dies
+    /// with `UnexpectedToken: claude` (#80). The garbled text next to that
+    /// error is the same failure: PowerShell writes its localized parser
+    /// message in the console codepage and claude reads it back as UTF-8.
+    ///
+    /// Forward slashes stay: `CreateProcess` accepts them and they keep the
+    /// entry readable when the user opens `settings.json`.
     fn helper_command() -> Option<String> {
-        let helper = helper_path()?;
-        Some(format!("\"{}\" claude", helper.display().to_string().replace('\\', "/")))
+        Some(helper_path()?.display().to_string().replace('\\', "/"))
     }
 
     /// Write via tmp + rename (MoveFileEx REPLACE_EXISTING under the hood):
@@ -2591,15 +2620,62 @@ export default function (pi: ExtensionAPI) {
 
         use super::{CLAUDE_EVENTS, OPENCODE_PLUGIN_JS, PI_EXTENSION_TS, install_into};
 
+        const HELPER: &str = "C:/Program Files/Nebula Terminal/runtime/nebula-hook.exe";
+
         #[test]
         fn claude_install_includes_permission_requests_and_remains_idempotent() {
             let mut root = json!({});
-            assert_eq!(install_into(&mut root, "nebula-hook claude"), Some(true));
+            assert_eq!(install_into(&mut root, HELPER), Some(true));
             assert!(CLAUDE_EVENTS.contains(&"PermissionRequest"));
             for event in CLAUDE_EVENTS {
                 assert_eq!(root["hooks"][event].as_array().map(Vec::len), Some(1));
             }
-            assert_eq!(install_into(&mut root, "nebula-hook claude"), Some(false));
+            assert_eq!(install_into(&mut root, HELPER), Some(false));
+        }
+
+        /// #80: the command string used to be `"<path>" claude`, and claude
+        /// hands hook strings to a shell. PowerShell reads the leading quoted
+        /// token as a string expression, so `claude` became an unexpected
+        /// token and every hook failed. Exec form (`command` + `args`) is
+        /// spawned directly, so no shell parses the path at all.
+        #[test]
+        fn claude_hooks_use_exec_form_so_no_shell_parses_the_path() {
+            let mut root = json!({});
+            assert_eq!(install_into(&mut root, HELPER), Some(true));
+            for event in CLAUDE_EVENTS {
+                let entry = &root["hooks"][event][0]["hooks"][0];
+                assert_eq!(entry["type"], json!("command"));
+                assert_eq!(entry["command"], json!(HELPER), "command 必须是可直接 spawn 的路径");
+                assert_eq!(entry["args"], json!(["claude"]), "子命令必须走 argv");
+                let command = entry["command"].as_str().expect("command is a string");
+                assert!(!command.contains('"'), "exec form 不能带引号：{command}");
+                assert!(!command.contains(" claude"), "子命令不能拼进命令字符串：{command}");
+            }
+        }
+
+        /// 1.4.0 装出去的坏条目必须被就地修好，而不是再追加一条——两条 hook
+        /// 会让每个事件上报两次。
+        #[test]
+        fn legacy_shell_form_entries_are_healed_in_place() {
+            let mut root = json!({
+                "hooks": {
+                    "SessionStart": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": format!("\"{HELPER}\" claude"),
+                            "timeout": 10,
+                        }]
+                    }]
+                }
+            });
+            assert_eq!(install_into(&mut root, HELPER), Some(true));
+            let start = root["hooks"]["SessionStart"].as_array().expect("matchers");
+            assert_eq!(start.len(), 1, "不得为同一事件追加第二条 hook");
+            let entry = &start[0]["hooks"][0];
+            assert_eq!(entry["command"], json!(HELPER));
+            assert_eq!(entry["args"], json!(["claude"]));
+            assert_eq!(entry["timeout"], json!(10), "既有字段不能被 healing 丢掉");
+            assert_eq!(install_into(&mut root, HELPER), Some(false));
         }
 
         #[test]

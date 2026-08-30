@@ -8,11 +8,13 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### English
 
-No unreleased changes yet.
+#### Fixed
+- **Claude no longer reports a failed Nebula hook, with unreadable characters attached, on session start, prompt submit, and conversation switching.** Nebula's entries in `~/.claude/settings.json` described the bridge as a single quoted command string, and claude hands hook strings to a shell — on Windows that is PowerShell, which reads a leading quoted path as a *string expression* and therefore rejects the following `claude` argument as an unexpected token. Because those entries are global, the same failure appeared in the system console, not only inside Nebula. The unreadable characters were PowerShell's own localized parser message, written in the console code page and read back as UTF-8. The entries now use claude's exec form — the executable in `command`, the subcommand in `args` — so the bridge is started directly and no shell parses the path in any configuration; entries written by earlier versions are repaired in place on the next launch instead of being duplicated. Addresses [#80](https://github.com/Kuddev/nebula/issues/80).
 
 ### 简体中文
 
-暂无未发布改动。
+#### 修复
+- **Claude 不再在会话启动、提交提示词和切换对话时报告 Nebula hook 失败并附带乱码。** Nebula 写进 `~/.claude/settings.json` 的条目把桥接程序描述成一整条带引号的命令字符串，而 claude 会把 hook 字符串交给 shell 执行——Windows 上是 PowerShell，它把开头的带引号路径解析成*字符串表达式*，于是后面的 `claude` 参数成了意外的标记。由于这些条目是全局的，同一个报错在系统自带控制台里也会出现，不只是在 Nebula 内。那段乱码本身就是 PowerShell 的本地化解析错误：它按控制台代码页输出，又被按 UTF-8 读回。现在条目改用 claude 的 exec 形式——可执行文件放 `command`，子命令放 `args`——桥接程序被直接启动，任何配置下都不再有 shell 解析这条路径；旧版本写下的条目会在下次启动时就地修好，而不是再追加一条。对应 [#80](https://github.com/Kuddev/nebula/issues/80)。
 
 ## 1.4.0 - 2026-08-29
 
