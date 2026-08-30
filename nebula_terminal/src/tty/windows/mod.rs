@@ -359,11 +359,29 @@ function global:Get-NebulaBoolSetting {
     }
 }
 
+# 用户自己的提示符（$PROFILE 里的 oh-my-posh / starship / 手写 prompt）是不是
+# 已经就位。判据只能看函数体：PowerShell 内置 prompt 固定引用
+# $executionContext.SessionState.Path.CurrentLocation；而 oh-my-posh 那一类是经
+# Invoke-Expression 装进来的，ScriptBlock.File 为空，靠 File 判断会把它们全部
+# 误判成内置提示符。
+function global:Test-NebulaUserPrompt {
+    param($ScriptBlock)
+
+    if (-not $ScriptBlock) { return $false }
+    $body = $ScriptBlock.ToString()
+    # 重复 source 本脚本时看到的是 Nebula 自己的 wrapper，它不算用户提示符。
+    if ($body.Contains('NebulaPreviousPrompt')) { return $false }
+    return -not $body.Contains('$executionContext.SessionState.Path.CurrentLocation')
+}
+
 # 脚本可能在已有集成之后被 source。只在第一次安装时保存原 prompt，
 # 之后重载 Nebula 脚本也不能把自己的 wrapper 当成“用户 prompt”递归调用。
 if (-not $global:NebulaPromptInstalled) {
     $existingPrompt = Get-Command prompt -CommandType Function -ErrorAction SilentlyContinue
     $global:NebulaPreviousPrompt = if ($existingPrompt) { $existingPrompt.ScriptBlock } else { $null }
+    # 视觉归属。用户已经有提示符时，Nebula 只补协议标记，不画自己的 powerline：
+    # 终端只负责补充协议标记，不替 shell 决定提示符外观。
+    $global:NebulaUserOwnsPrompt = Test-NebulaUserPrompt $global:NebulaPreviousPrompt
     $global:NebulaPromptInstalled = $true
 }
 
@@ -389,8 +407,10 @@ function global:prompt {
         }
     } catch {}
 
-    # 保留旧 prompt 的环境管理器、历史或目录 hook 等副作用，但丢弃它返回
-    # 的视觉字符串；Nebula 在最后统一渲染，避免两个 prompt 叠在一起。
+    # 旧 prompt 的环境管理器、历史或目录 hook 等副作用要保留。它的视觉输出则
+    # 分两种：用户自己的提示符继续可见（Nebula 只在它前面补协议标记），内置的
+    # 默认提示符才丢掉、由 Nebula 渲染——否则两个提示符会叠在一起。
+    $userPrompt = ''
     if ($global:NebulaPreviousPrompt -and -not $global:NebulaPreviousPromptRunning) {
         $global:NebulaPreviousPromptRunning = $true
         try {
@@ -398,7 +418,11 @@ function global:prompt {
             if (-not $originalDollarQuestion) {
                 Write-Error '' -ErrorAction Ignore
             }
-            $null = & $global:NebulaPreviousPrompt
+            $previousOutput = & $global:NebulaPreviousPrompt
+            if ($global:NebulaUserOwnsPrompt) {
+                # 提示符函数可以返回多个对象，宿主是按顺序拼起来显示的。
+                $userPrompt = (@($previousOutput) | ForEach-Object { [string]$_ }) -join ''
+            }
         } catch {
         } finally {
             $global:NebulaPreviousPromptRunning = $false
@@ -448,7 +472,11 @@ function global:prompt {
     # theme switch recolors every prompt already in scrollback — truecolor
     # (the old scheme) is frozen the moment it prints. No theme file, no polling.
 
-    if (-not (Get-NebulaBoolSetting 'powerline' $true)) {
+    if ($userPrompt) {
+        # 视觉全部来自用户提示符；Nebula 只补协议：133;A 标出提示符起点，标题
+        # 里带上宿主需要的绝对 cwd 与分支。换行留给用户提示符自己决定。
+        $output = "$e]133;A$([char]7)$e]2;NEBULA|$cwd|$branch$([char]7)$userPrompt"
+    } elseif (-not (Get-NebulaBoolSetting 'powerline' $true)) {
         $branchText = if ($branch) { " ($branch)" } else { "" }
         $output = "$leadingNewline$e]133;A$([char]7)$e]2;NEBULA|$cwd|$branch$([char]7)$e[38;5;19m$loc$branchText $e[35m$NebPromptArrow $reset"
     } else {
@@ -488,6 +516,10 @@ function global:prompt {
         }
     }
 }
+
+# 重新安装用的引用：下面的 ReadLine wrapper 发现 prompt 被别人换掉时，用它把
+# Nebula 的 wrapper 包回去。
+$global:NebulaPromptScriptBlock = (Get-Command prompt -CommandType Function).ScriptBlock
 
 # Build a spec-correct file:// URI from a Windows path for OSC 8 hyperlinks.
 # RFC 3986: escape every segment (UTF-8 + surrogate pairs via EscapeDataString),
@@ -672,6 +704,20 @@ if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue) {
     }
 
     function global:PSConsoleHostReadLine {
+        # 会话里再 source 一次 $PROFILE（或手动跑 oh-my-posh init）会用它们的
+        # prompt 覆盖 Nebula 的 wrapper：OSC 133;A/D 从此不再发出，宿主侧的命令
+        # 状态、耗时与历史定位就此静默失效。ReadLine 仍然是我们的，所以在这里把
+        # prompt 包回去，并把刚出现的用户提示符记成视觉所有者。
+        try {
+            $installed = Get-Command prompt -CommandType Function -ErrorAction SilentlyContinue
+            if ($global:NebulaPromptScriptBlock -and $installed -and
+                -not $installed.ScriptBlock.ToString().Contains('NebulaPreviousPrompt')) {
+                $global:NebulaPreviousPrompt = $installed.ScriptBlock
+                $global:NebulaUserOwnsPrompt = Test-NebulaUserPrompt $installed.ScriptBlock
+                Set-Item -Path function:global:prompt -Value $global:NebulaPromptScriptBlock
+            }
+        } catch {}
+
         $line = $null
         if ($global:NebulaPreviousPSConsoleHostReadLine -and -not $global:NebulaPreviousReadLineRunning) {
             $global:NebulaPreviousReadLineRunning = $true
@@ -732,6 +778,9 @@ fn nebula_prompt_script_path() -> Option<std::path::PathBuf> {
 const NEBULA_BASH_RC: &str = r#"
 # Nebula Bash integration. Source the user's bashrc first, then keep the
 # terminal-visible prompt/title/cwd contract stable for tabs and splits.
+# 先记下 source 之前的 PS1：系统级 rc（Git Bash 的 /etc/bash.bashrc）此刻已经跑
+# 过，所以之后出现的差异只可能来自用户自己的配置。
+__nebula_ps1_before="${PS1-}"
 if [ -f "$HOME/.bashrc" ] && [ -z "${NEBULA_BASHRC_SOURCED:-}" ]; then
     export NEBULA_BASHRC_SOURCED=1
     . "$HOME/.bashrc"
@@ -840,9 +889,14 @@ __nebula_precmd() {
     # 对“上一条命令已经结束”的判断。退出码供助手的错误恢复判定。
     printf '\033]133;D;%s\007' "$cmd_status"
 
-    # 旧 PROMPT_COMMAND 的非视觉副作用（历史、环境管理器、目录 hook）
-    # 仍然执行；Nebula 在它之后设置 PS1，保证最终视觉输出只有一个来源。
+    # 旧 PROMPT_COMMAND 的非视觉副作用（历史、环境管理器、目录 hook）仍然执行。
+    local ps1_before_hooks="${PS1-}"
     __nebula_run_saved_prompt_command "$cmd_status"
+    # starship 一类是在自己的 precmd 里每轮重写 PS1 的，rc 加载时看不出来；
+    # 一旦发现它改了 PS1，视觉就归它，Nebula 只留 OSC 标记与标题。
+    if [[ ${PS1-} != "$ps1_before_hooks" ]]; then
+        __nebula_user_ps1=1
+    fi
 
     local cwd="$PWD" branch="" loc="${PWD/#$HOME/~}"
     if command -v git >/dev/null 2>&1; then
@@ -853,11 +907,13 @@ __nebula_precmd() {
     printf '\033]133;A\007'
     printf '\033]2;NEBULA|%s|%s\007' "$cwd" "$branch"
 
-    if __nebula_bool_on "$(__nebula_setting powerline 1)"; then
-        # ANSI-16 only: 35=Magenta 提示符（同 PowerShell 侧），主题表决定实际色值。
-        PS1='\[\033[35m\]❯ \[\033[0m\]'
-    else
-        PS1='\[\033[90m\]\w \[\033[35m\]❯ \[\033[0m\]'
+    if [[ -z ${__nebula_user_ps1-} ]]; then
+        if __nebula_bool_on "$(__nebula_setting powerline 1)"; then
+            # ANSI-16 only: 35=Magenta 提示符（同 PowerShell 侧），主题表决定实际色值。
+            PS1='\[\033[35m\]❯ \[\033[0m\]'
+        else
+            PS1='\[\033[90m\]\w \[\033[35m\]❯ \[\033[0m\]'
+        fi
     fi
 
     # PROMPT_COMMAND 自身的最终状态会成为交互式 shell 下一次看到的 $?。
@@ -867,6 +923,11 @@ __nebula_precmd() {
 
 if [[ -z ${NEBULA_PROMPT_INSTALLED-} ]]; then
     NEBULA_PROMPT_INSTALLED=1
+    # 用户 rc 自己设过 PS1（手写提示符、oh-my-posh 之类）就把视觉留给它，
+    # Nebula 只通过 PROMPT_COMMAND 补 OSC 标记和标题。
+    if [[ ${PS1-} != "${__nebula_ps1_before-}" ]]; then
+        __nebula_user_ps1=1
+    fi
     __nebula_prompt_decl="$(declare -p PROMPT_COMMAND 2>/dev/null || :)"
     if [[ $__nebula_prompt_decl == declare\ -a* ]]; then
         __nebula_saved_prompt_kind=array
@@ -1047,6 +1108,23 @@ mod test {
         );
     }
 
+    /// 用户提示符的归属判据必须留在脚本里：靠 `ScriptBlock.File` 判断会把
+    /// oh-my-posh（经 Invoke-Expression 装载）误判成 PowerShell 内置提示符。
+    #[test]
+    fn powershell_prompt_detects_a_user_prompt_by_its_body() {
+        assert!(NEBULA_PROMPT_PS1.contains("function global:Test-NebulaUserPrompt"));
+        assert!(
+            NEBULA_PROMPT_PS1
+                .contains("$body.Contains('$executionContext.SessionState.Path.CurrentLocation')"),
+            "内置提示符的判据只能是函数体"
+        );
+        assert!(NEBULA_PROMPT_PS1.contains("$global:NebulaUserOwnsPrompt"));
+        assert!(
+            NEBULA_PROMPT_PS1.contains("Set-Item -Path function:global:prompt"),
+            "prompt 被会话中途替换后必须能重新包回来"
+        );
+    }
+
     #[test]
     fn powershell_reports_absolute_cwd_while_displaying_home_as_tilde() {
         assert!(NEBULA_PROMPT_PS1.contains("$cwd = (Get-Location).Path"));
@@ -1149,12 +1227,118 @@ mod test {
             "return \"$cmd_status\"",
             "__nebula_saved_ps0=\"${PS0-}\"",
             "-v fallback=\"$default\"",
+            // 视觉归属：用户设过 PS1 就不再覆盖（rc 阶段和 precmd 阶段各一处判据）。
+            "__nebula_ps1_before=\"${PS1-}\"",
+            "if [[ -z ${__nebula_user_ps1-} ]]; then",
         ] {
             assert!(
                 NEBULA_BASH_RC.contains(required),
                 "missing Bash lifecycle contract: {required}"
             );
         }
+    }
+
+    /// 真跑一遍嵌入的 PowerShell 脚本。提示符归属的判据在 PowerShell 语义里，
+    /// 字符串断言证明不了"用户提示符还看得见"，所以这里和 Bash 侧一样起进程。
+    fn run_powershell_integration_case(prelude: &str, checks: &str) {
+        static PS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = PS_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path =
+            std::env::temp_dir().join(format!("nebula-ps-integration-{}.ps1", std::process::id()));
+        // Windows PowerShell 5.1 把无 BOM 的 UTF-8 当本地代码页；脚本里有中文
+        // 注释和 ❯，必须带 BOM（与 nebula_prompt_script_path 同理）。
+        let mut script = vec![0xEF, 0xBB, 0xBF];
+        script.extend_from_slice(format!("{prelude}\n{NEBULA_PROMPT_PS1}\n{checks}\n").as_bytes());
+        std::fs::write(&path, &script).expect("write the PowerShell integration script");
+        let output = Command::new("powershell")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&path)
+            .output();
+        let _ = std::fs::remove_file(&path);
+        // 沙箱里可能起不了 powershell.exe；结构断言仍然覆盖脚本内容。
+        let Ok(output) = output else { return };
+        assert!(
+            output.status.success(),
+            "PowerShell integration failed ({}):\nstdout: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// 每个用例都指向一个不存在的配置目录，这样 powerline 等设置一律取默认值，
+    /// 不受开发机上真实 nebula_settings.txt 的影响。
+    ///
+    /// 另外补一个占位的 `Set-PSReadLineOption`：脚本里的 ReadLine wrapper 由
+    /// `Get-Command Set-PSReadLineOption` 门控，而非交互的 powershell.exe 看不到
+    /// 真正的 PSReadLine —— 不占位，整段 wrapper 就不会安装，用例会静默跳过。
+    const PS_PRELUDE: &str = r#"
+$env:NEBULA_CONFIG_DIR = Join-Path ([System.IO.Path]::GetTempPath()) 'nebula-ps-test-no-config'
+function global:Set-PSReadLineOption { }
+"#;
+
+    /// #80 的第二半：用户 `$PROFILE` 里的提示符（oh-my-posh/starship/手写）会
+    /// 正常加载，但过去被 Nebula 的 powerline 盖掉，看起来就像 profile 没生效。
+    #[test]
+    fn powershell_keeps_a_user_prompt_visible_and_only_adds_the_markers() {
+        run_powershell_integration_case(
+            &format!("{PS_PRELUDE}function global:prompt {{ 'USER-PROMPT> ' }}\n"),
+            r#"
+if (-not $global:NebulaUserOwnsPrompt) { exit 30 }
+$rendered = prompt
+if ($rendered -notlike '*USER-PROMPT> *') { exit 31 }
+if ($rendered -notlike "*$([char]27)]133;A*") { exit 32 }
+if ($rendered -notlike '*NEBULA|*') { exit 33 }
+if ($rendered -like '*❯*') { exit 34 }
+exit 0
+"#,
+        );
+    }
+
+    /// 没有用户提示符时，Nebula 自己的 powerline 依旧是开箱观感。
+    #[test]
+    fn powershell_renders_its_own_prompt_when_the_shell_has_no_user_prompt() {
+        run_powershell_integration_case(
+            PS_PRELUDE,
+            r#"
+if ($global:NebulaUserOwnsPrompt) { exit 40 }
+$rendered = prompt
+if ($rendered -notlike '*❯*') { exit 41 }
+if ($rendered -notlike "*$([char]27)]133;A*") { exit 42 }
+if ($rendered -notlike '*NEBULA|*') { exit 43 }
+exit 0
+"#,
+        );
+    }
+
+    /// 会话中途再 source 一次 `$PROFILE` 会用用户的 prompt 覆盖 Nebula 的
+    /// wrapper，OSC 133 从此静默失效。ReadLine wrapper 负责把它包回去。
+    #[test]
+    fn powershell_rewraps_a_prompt_replaced_mid_session() {
+        run_powershell_integration_case(
+            PS_PRELUDE,
+            r#"
+if (-not (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction SilentlyContinue)) { exit 49 }
+function global:prompt { 'LATE-PROMPT> ' }
+$global:NebulaPreviousPSConsoleHostReadLine = { 'echo test' }
+$line = PSConsoleHostReadLine
+if ($line -ne 'echo test') { exit 50 }
+$installed = (Get-Command prompt -CommandType Function).ScriptBlock.ToString()
+if (-not $installed.Contains('NebulaPreviousPrompt')) { exit 51 }
+if (-not $global:NebulaUserOwnsPrompt) { exit 52 }
+$rendered = prompt
+if ($rendered -notlike '*LATE-PROMPT> *') { exit 53 }
+if ($rendered -notlike "*$([char]27)]133;A*") { exit 54 }
+exit 0
+"#,
+        );
     }
 
     fn run_bash_integration_case(prelude: &str, checks: &str) {
@@ -1198,7 +1382,7 @@ PROMPT_COMMAND='user_prompt_hook'
 PS0='user-ps0'
 hook_count=0
 observed_status=99
-user_prompt_hook() { observed_status=$?; hook_count=$((hook_count + 1)); PS1='user'; }
+user_prompt_hook() { observed_status=$?; hook_count=$((hook_count + 1)); }
 "#,
             r#"
 [[ "$(__nebula_setting powerline 1)" == 1 ]] || exit 10
@@ -1215,6 +1399,51 @@ restored=$?
 false | true
 __nebula_precmd >/dev/null
 [[ ${NEBULA_PIPE_STATUS[0]} -eq 1 && ${NEBULA_PIPE_STATUS[1]} -eq 0 ]] || exit 17
+"#,
+        );
+    }
+
+    /// 用户自己的提示符（starship / oh-my-posh 那类在 PROMPT_COMMAND 里每轮
+    /// 重写 PS1 的，以及 `~/.bashrc` 里直接写死 PS1 的）必须继续可见：Nebula
+    /// 只补 OSC 标记和标题，不再覆盖 PS1。
+    #[test]
+    fn bash_prompt_leaves_a_user_supplied_ps1_visible() {
+        run_bash_integration_case(
+            r#"
+PATH=/usr/bin:/mingw64/bin:$PATH
+NEBULA_BASHRC_SOURCED=1
+HOME=/__nebula_test_missing_home__
+APPDATA=
+PROMPT_COMMAND='fake_starship_precmd'
+fake_starship_precmd() { PS1='starship-ps1'; }
+"#,
+            r#"
+observed="$(__nebula_precmd)"
+[[ $observed == *$'\033]133;A\a'* ]] || exit 31
+[[ $observed == *'NEBULA|'* ]] || exit 32
+__nebula_precmd >/dev/null
+[[ $PS1 == 'starship-ps1' ]] || exit 33
+[[ $PS1 != *'❯'* ]] || exit 34
+"#,
+        );
+    }
+
+    /// `~/.bashrc` 在 source 阶段就写死 PS1 的情形：判据来自 rc 加载前后的快照，
+    /// 顺带钉住"用户 bashrc 仍然会被 source"这个前提。
+    #[test]
+    fn bash_prompt_detects_a_ps1_set_by_the_user_bashrc() {
+        run_bash_integration_case(
+            r#"
+PATH=/usr/bin:/mingw64/bin:$PATH
+APPDATA=
+HOME="$(mktemp -d)"
+printf 'PS1="user-rc-ps1"\n' > "$HOME/.bashrc"
+"#,
+            r#"
+[[ $PS1 == 'user-rc-ps1' ]] || exit 41
+__nebula_precmd >/dev/null
+[[ $PS1 == 'user-rc-ps1' ]] || exit 42
+rm -rf "$HOME"
 "#,
         );
     }
