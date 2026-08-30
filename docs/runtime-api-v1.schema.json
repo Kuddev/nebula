@@ -63,6 +63,7 @@
             "agent.start",
             "agent.fork",
             "agent.get",
+            "agent.delegate",
             "agent.prompt",
             "agent.paste",
             "agent.read",
@@ -125,6 +126,10 @@
         {
           "if": { "properties": { "method": { "const": "agent.prompt" } } },
           "then": { "properties": { "params": { "$ref": "#/$defs/agent_prompt_params" } } }
+        },
+        {
+          "if": { "properties": { "method": { "const": "agent.delegate" } } },
+          "then": { "properties": { "params": { "$ref": "#/$defs/agent_delegate_params" } } }
         },
         {
           "if": { "properties": { "method": { "const": "agent.paste" } } },
@@ -423,6 +428,17 @@
         "generation": { "type": ["integer", "null"], "minimum": 1 },
         "text": { "type": "string", "minLength": 1, "maxLength": 32768 },
         "submit": { "type": "boolean", "default": true }
+      },
+      "additionalProperties": false
+    },
+    "agent_delegate_params": {
+      "type": "object",
+      "required": ["agent", "text", "origin_pane_id"],
+      "properties": {
+        "agent": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "generation": { "type": ["integer", "null"], "minimum": 1 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "origin_pane_id": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     },

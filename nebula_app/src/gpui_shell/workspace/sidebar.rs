@@ -251,9 +251,8 @@ impl NebulaWorkspace {
             .as_ref()
             .filter(|d| d.active && d.axis == TabDragAxis::Vertical)
             .map(|d| (d.source, Self::drag_slot(d, self.tabs.len()), d.offset));
-
-        // 本次渲染里是否有「运行中」行（spinner 帧循环的开关）。
         let items_running = std::cell::Cell::new(false);
+
         // 折叠只裁剪槽位，不改窗口算法：旧壳 `tabs_avail` 与 `tabs_open`
         // 分开——折起来时行矩形为零，但可用高度仍按面板剩余算。
         let (tabs_scroll, tabs_show) = self.tabs_visible_window();
@@ -796,16 +795,9 @@ impl NebulaWorkspace {
                     ),
             )
             .child(self.render_tabs_section(items, cx));
-        // spinner 帧循环（旧壳 motion frame 的对应物）：有任何行在
-        // 「运行中」时推进相位；notify → 下一次 render 再续帧。
+        self.spinner_visible.set(items_running.get());
         if items_running.get() {
-            cx.on_next_frame(window, |this, _, cx| {
-                let now = std::time::Instant::now();
-                let dt = now - this.spinner_last;
-                this.spinner_last = now;
-                this.spinner_phase = (this.spinner_phase + dt.as_secs_f32() / 0.8).rem_euclid(1.0);
-                cx.notify();
-            });
+            self.arm_activity_spinner_tick(cx);
         }
         sidebar
     }

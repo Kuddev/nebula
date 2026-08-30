@@ -479,6 +479,8 @@ pub enum AgentCommand {
     List(ListOptions),
     /// Hand one task to an agent and submit it.
     Send(AgentSendOptions),
+    /// Delegate one task and route the Agent's final answer back to this Agent pane.
+    Delegate(AgentDelegateOptions),
     /// Paste bounded UTF-8 text into an agent as one bracketed block.
     Paste(AgentPasteOptions),
     /// Read the tail of what an agent printed.
@@ -735,6 +737,26 @@ pub struct AgentSendOptions {
     pub wait_timeout_ms: u64,
 
     /// Refuse the send unless the agent is still this generation.
+    #[clap(long)]
+    pub generation: Option<u64>,
+
+    #[clap(flatten)]
+    pub output: ShortOutput,
+
+    #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentDelegateOptions {
+    /// Agent name or stable id from `nebula agent list`.
+    pub agent: String,
+
+    /// The delegated task. Several words are joined with single spaces.
+    #[clap(required = true, num_args = 1..)]
+    pub text: Vec<String>,
+
+    /// Refuse the delegation unless the target is still this generation.
     #[clap(long)]
     pub generation: Option<u64>,
 

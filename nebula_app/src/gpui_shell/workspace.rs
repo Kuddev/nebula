@@ -1010,13 +1010,21 @@ pub struct NebulaWorkspace {
     sidebar_logo_target_px: u32,
     /// 跟随系统深浅：OS 外观切换的监听（旧壳 ThemeChanged 的对应物）。
     _appearance_sub: Subscription,
+    /// spinner 在窗口失焦时冻结为静态状态；重新聚焦后由一次 render 恢复按需 tick。
+    spinner_window_active: bool,
+    _spinner_activation_sub: Subscription,
     /// 本会话已注入的自定义键位 combo（gpui 绑定串）。键位表没有删除
     /// API，撤销只能靠后注的 NoAction 盖掉；这份清单就是撤销的依据。
     custom_keybinds_applied: Vec<String>,
     /// 侧栏「运行中」spinner 的相位（0..1，旧壳 `SPINNER_PERIOD` 800ms 一
-    /// 圈）与上一帧时刻。旧壳吃共享 motion frame，GPUI 用下一帧回调推进。
+    /// 圈）与上次时钟时刻。侧栏和顶栏共用低频时钟，避免带系统材质的窗口
+    /// 持续逐帧重绘。
     spinner_phase: f32,
     spinner_last: std::time::Instant,
+    /// render 与 one-shot timer 之间的单槽门闩：防止其他 UI 更新重复挂 tick。
+    spinner_tick_pending: std::cell::Cell<bool>,
+    /// 上一次 render 是否真的画出了运行态徽章；滚出视口后不应继续唤醒窗口。
+    spinner_visible: std::cell::Cell<bool>,
     /// 最近一次写盘的会话快照（1 Hz 自动保存的去重 + 退出收尾的素材）。
     last_saved_session: Option<crate::session::Session>,
     /// 系统关闭按钮可能连续送来多次 should-close；确认框在场时只保留一份。
@@ -1099,6 +1107,16 @@ impl NebulaWorkspace {
                 workspace.update(cx, |workspace, cx| workspace.apply_runtime_settings(cx));
             }
         });
+        let spinner_window_active = window.is_window_active();
+        let spinner_activation_sub =
+            cx.observe_window_activation(window, |workspace, window, cx| {
+                let active = window.is_window_active();
+                if workspace.spinner_window_active != active {
+                    workspace.spinner_window_active = active;
+                    workspace.spinner_last = std::time::Instant::now();
+                    cx.notify();
+                }
+            });
         let command_palette_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索命令…"));
         let git_commit_input = cx.new(|cx| InputState::new(window, cx).placeholder("提交信息…"));
@@ -1181,9 +1199,13 @@ impl NebulaWorkspace {
             sidebar_logo_images: sidebar_logo_images(sidebar_logo_target_px),
             sidebar_logo_target_px,
             _appearance_sub: appearance_sub,
+            spinner_window_active,
+            _spinner_activation_sub: spinner_activation_sub,
             custom_keybinds_applied: Vec::new(),
             spinner_phase: 0.0,
             spinner_last: std::time::Instant::now(),
+            spinner_tick_pending: std::cell::Cell::new(false),
+            spinner_visible: std::cell::Cell::new(false),
             last_saved_session: None,
             window_close_confirm_open: false,
             window_hidden: false,

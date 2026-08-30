@@ -74,6 +74,7 @@ nebula pane resize 17 0.60                       # 修改直接父分屏中的�
 
 nebula agent list                                # 只有 AI CLI 的 pane
 nebula agent send codex "修复登录回归" --wait    # 派任务并提交，然后等这一轮结束
+nebula agent delegate codex "检查 vc skill"       # 派任务，完成后自动回传到当前 Agent 会话
 nebula agent paste codex --from-file task.txt    # generation 绑定的多行任务输入
 nebula agent read codex --lines 80               # 读它最近打印了什么
 nebula agent wait codex --after-seq 41           # 等它这一轮结束
@@ -99,6 +100,12 @@ generation 绑定（Codex 退出重开后不会把任务投给新会话），pan
 `--wait` 的基线取自提交后的那张快照。用它当 `after_seq` 才让随后的等待意味着"又静下来了"而
 不是"本来就是静的"，这正是把提交前的 idle 误判成"已完成"的那个经典竞态。`--no-submit` 与
 `--wait` 是逻辑矛盾（没提交等什么），由参数解析直接拒绝，不会执行一半再静默停下。
+
+`agent send` 与 `agent delegate` 的结果合同不同：前者只负责投递（可选同步等待），后者从
+`NEBULA_PANE_ID` 记录调用 Agent 的位置和会话身份，登记并提交成功后立即返回。目标 Agent 的
+完成 Hook 到达后，Nebula 把最多 4000 字符的结构化最终消息作为不可信 `worker_output` 自动提交
+给原 Agent，由它向用户总结。回传只认原 pane 中的同一 managed generation，或普通 Agent 的
+同一 provider session；不会退回当前焦点，也不会把旧任务交给同 pane 中后来启动的新会话。
 
 ### 完整协议
 
@@ -143,6 +150,7 @@ Pane ID 当前在 Window 内稳定，而不是进程内全局唯一。存在多�
 | `agent.start` | 在新 Tab 或指定既有 Pane 中启动命名 Agent | `window_id?`, `pane_id?`, `name`, `kind`, `cwd?`, `resume_session_id?` |
 | `agent.fork` | 事务化创建独立 Git branch/worktree，再启动命名 Agent | `source_pane_id?`/`source_cwd?`, `name`, `kind`, `branch?`, `base?`, `path?`, `allow_dirty_source?` |
 | `agent.get` | 按稳定 id 或名称解析 Agent generation 与 worktree provenance | `agent`, `generation?` |
+| `agent.delegate` | 绑定调用方身份派发任务，并在目标回合完成后自动回传最终消息 | `agent`, `generation?`, `text`, `origin_pane_id` |
 | `agent.prompt` | 向同一 Agent generation 发送纯文本 Prompt | `agent`, `generation?`, `text`, `submit?` |
 | `agent.paste` | 向同一 Agent generation 发送受控 bracketed-paste 文本 | `agent`, `generation?`, `text`, `submit?` |
 | `agent.read` | 读取命名 Agent 所在 Pane 的真实 Grid 尾部 | `agent`, `generation?`, `lines?` |
@@ -247,6 +255,14 @@ Cursor 的实际可执行文件名是 `agent`。恢复/会话分叉只在对应 
 再用 `agent.prompt` 派活、`agent.wait` 等状态、`agent.read` 取结果；这样 CC 或另一个 Agent 能把
 多个独立 worktree 作为并行工位调度，而不会让它们同时修改同一个工作树。
 
+`agent.delegate` 是 Agent 间需要自动回传时的专用方法。服务端先验证 `origin_pane_id` 当前确实
+运行着可稳定识别的 Agent，再把目标解析成精确 `agent_id + generation`，最后复用
+`agent.prompt` 的真实 PTY 投递路径。Provider 的完成 Hook 不含 Nebula task id，因此同一目标
+generation 同时只允许一个委派；重复完成事件在首个事件消费 pending task 后不会再次回传。
+回调若早于发起方自己的回合结束，会先排队并由 Agent 状态看门狗重试；`running` 会继续等待，
+`attention`/`waiting_input` 不会被自动输入覆盖。发起 pane 关闭、provider session 被替换或
+managed generation 改变时，旧回调直接丢弃，不会寻找替代 pane。
+
 ## 进程、控制键与真实命令结果
 
 `pane.procs` 在 Windows 通过 Toolhelp 从 PTY shell pid 遍历真实后代进程。原生 SSH 只看得到
@@ -335,6 +351,8 @@ Shell/hook 结束事件归位；因此即使命令在 120ms Runtime pump 的两�
 - `action_failed`：窗口、Shell 或 Pane 创建失败。
 - `agent_name_conflict` / `agent_identity_mismatch`：名称已被活跃 Agent 使用，或 generation 已变化。
 - `agent_exited` / `agent_replaced`：等待的稳定 Agent 身份已退出或被同 Pane 中的新会话替换。
+- `origin_not_agent` / `origin_identity_unavailable`：委派来源不是 Agent，或尚无可绑定的 generation/session。
+- `delegation_in_progress`：同一目标 generation 已有一个等待完成 Hook 的委派。
 - `agent_ready_timeout`：Agent 未在期限内完成进程身份观察与启动就绪握手。
 - `dirty_source`：`agent.fork` 的源工作树有未提交变更，且调用者未显式允许。
 - `branch_conflict` / `worktree_path_conflict`：目标分支或目录已存在；Nebula 不覆盖。

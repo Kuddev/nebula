@@ -669,6 +669,7 @@ pub(crate) fn dispatch_shell_events(events: Vec<GpuiShellEvent>, cx: &mut App) {
 }
 
 pub(crate) fn dispatch_ai_events(events: Vec<crate::ai_hook::AiHookEvent>, cx: &mut App) {
+    let mut handled = Vec::new();
     for event in crate::ai_hook::reorder_batch(events) {
         // 明确 pane id 是严格路由合同：pane 已关闭时，迟到 Hook 必须丢弃；
         // 只有发送端确实没有 NEBULA_PANE_ID 时才允许落到 MRU 窗口。
@@ -678,8 +679,74 @@ pub(crate) fn dispatch_ai_events(events: Vec<crate::ai_hook::AiHookEvent>, cx: &
         };
         let Some(entry) = target else { continue };
         if let Some(workspace) = entry.workspace.upgrade() {
-            let _ = workspace.update(cx, |workspace, cx| workspace.handle_ai_hook(event, cx));
+            let routed = event.clone();
+            if workspace.update(cx, |workspace, cx| workspace.handle_ai_hook(event, cx)) {
+                handled.push(routed);
+            }
         }
+    }
+    if handled.is_empty() {
+        return;
+    }
+    publish_runtime_snapshot(cx);
+    let hub = cx.global::<WindowRegistry>().runtime_hub.clone();
+    for event in &handled {
+        hub.complete_delegations_for_turn(event);
+    }
+    dispatch_ready_delegation_callbacks(cx);
+}
+
+/// Try callbacks after every relevant state refresh. A completion can arrive
+/// while the origin Agent is still finishing its own turn, so hook delivery
+/// alone is not a sufficient retry clock.
+pub(crate) fn dispatch_ready_delegation_callbacks(cx: &mut App) {
+    let hub = cx.global::<WindowRegistry>().runtime_hub.clone();
+    let callbacks = hub.take_ready_delegation_callbacks();
+    let mut delivered = false;
+    for callback in callbacks {
+        let Some(entry) = entry_with_pane(callback.origin.pane_id, cx) else {
+            log::warn!(
+                "delegation callback dropped task_id={} origin_pane={} reason=origin_closed",
+                callback.task_id,
+                callback.origin.pane_id
+            );
+            continue;
+        };
+        let Some(workspace) = entry.workspace.upgrade() else { continue };
+        match workspace
+            .update(cx, |workspace, cx| workspace.deliver_delegation_callback(&callback, cx))
+        {
+            Ok(()) => {
+                delivered = true;
+                log::info!(
+                    "delegation callback delivered task_id={} origin_pane={}",
+                    callback.task_id,
+                    callback.origin.pane_id
+                );
+            },
+            Err(error)
+                if matches!(error.code.as_str(), "input_in_progress" | "origin_not_ready") =>
+            {
+                log::debug!(
+                    "delegation callback deferred task_id={} origin_pane={} reason={}",
+                    callback.task_id,
+                    callback.origin.pane_id,
+                    error.code
+                );
+                hub.requeue_delegation_callback(callback);
+            },
+            Err(error) => {
+                log::warn!(
+                    "delegation callback dropped task_id={} origin_pane={} reason={}",
+                    callback.task_id,
+                    callback.origin.pane_id,
+                    error.code
+                );
+            },
+        }
+    }
+    if delivered {
+        publish_runtime_snapshot(cx);
     }
 }
 

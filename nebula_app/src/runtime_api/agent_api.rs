@@ -68,6 +68,16 @@ struct AgentPromptParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AgentDelegateParams {
+    agent: String,
+    #[serde(default)]
+    generation: Option<u64>,
+    text: String,
+    origin_pane_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AgentPasteParams {
     agent: String,
     #[serde(default)]
@@ -417,6 +427,61 @@ pub(super) fn agent_get_connection(
         stream,
         &ApiResponse::success(request.id, json!({ "agent": agent, "pane": pane })),
     )
+}
+
+pub(super) fn agent_delegate_connection(
+    stream: &mut TcpStream,
+    request: ApiRequest,
+    sink: &EventSink,
+    hub: &RuntimeHub,
+) -> Result<(), IoError> {
+    let params: AgentDelegateParams = match parse_params(&request.params) {
+        Ok(params) => params,
+        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
+    };
+    if let Err(error) = validate_agent_selector(&params.agent) {
+        return write_response(stream, &ApiResponse::failure(request.id, error));
+    }
+    if let Err(error) = validate_prompt(&params.text) {
+        return write_response(stream, &ApiResponse::failure(request.id, error));
+    }
+    let target = match hub.active_agent(&params.agent, params.generation) {
+        Ok(target) => target,
+        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
+    };
+    let mut delegation = match hub.begin_delegation(params.origin_pane_id, &target) {
+        Ok(delegation) => delegation,
+        Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
+    };
+    info!(
+        "runtime agent.delegate request_id={} task_id={} origin_pane={} target_agent={} generation={}",
+        request.id, delegation.task_id, params.origin_pane_id, target.agent_id, target.generation
+    );
+    let command = RuntimeCommand::AgentPrompt {
+        agent: target.agent_id.clone(),
+        generation: Some(target.generation),
+        text: params.text,
+        submit: true,
+    };
+    let response = match dispatch_runtime_command(command, sink, hub) {
+        Ok(mut result) => {
+            delegation.status = "submitted".to_owned();
+            if let Some(object) = result.as_object_mut() {
+                object.insert(
+                    "delegation".to_owned(),
+                    serde_json::to_value(&delegation).unwrap_or(Value::Null),
+                );
+            } else {
+                result = json!({ "result": result, "delegation": delegation });
+            }
+            ApiResponse::success(request.id, result)
+        },
+        Err(error) => {
+            hub.cancel_delegation(&delegation.task_id);
+            ApiResponse::failure(request.id, error)
+        },
+    };
+    write_response(stream, &response)
 }
 
 pub(super) fn agent_wait_connection(

@@ -93,6 +93,43 @@ pub(super) fn ai_session_palette_rows(
 }
 
 impl NebulaWorkspace {
+    /// 只为当前可见的运行态徽章挂一拍。下一拍必须由随后的实际 render 续期，
+    /// 因此任务结束、窗口失焦/隐藏或徽章滚出视口时会自然断链，不留下常驻
+    /// animation loop。80ms × 10 帧仍保持 800ms 一圈。
+    pub(super) fn arm_activity_spinner_tick(&self, cx: &mut Context<Self>) {
+        const TICK: Duration = Duration::from_millis(80);
+        const PERIOD_SECS: f32 = 0.8;
+
+        if self.spinner_tick_pending.get()
+            || !self.spinner_window_active
+            || self.window_hidden
+            || !self.spinner_visible.get()
+        {
+            return;
+        }
+        self.spinner_tick_pending.set(true);
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(TICK).await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.spinner_tick_pending.set(false);
+                if !workspace.spinner_window_active
+                    || workspace.window_hidden
+                    || !workspace.spinner_visible.get()
+                {
+                    return;
+                }
+                let now = std::time::Instant::now();
+                let delta = now.saturating_duration_since(workspace.spinner_last);
+                workspace.spinner_last = now;
+                workspace.spinner_phase =
+                    (workspace.spinner_phase + delta.as_secs_f32() / PERIOD_SECS).rem_euclid(1.0);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn start_ai_hook_pump(
         receiver: std::sync::mpsc::Receiver<crate::ai_hook::AiHookEvent>,
         cx: &mut Context<Self>,
@@ -128,7 +165,7 @@ impl NebulaWorkspace {
         cx.spawn(async move |this, cx| {
             loop {
                 executor.timer(Duration::from_millis(1000)).await;
-                let alive = this.update(cx, |workspace, cx| {
+                let retry_callbacks = this.update(cx, |workspace, cx| {
                     let views: Vec<_> = workspace
                         .tabs
                         .iter()
@@ -148,9 +185,18 @@ impl NebulaWorkspace {
                         });
                     }
                     workspace.publish_tray_agents(cx);
+                    workspace.runtime_hub.has_pending_delegation_callbacks()
                 });
-                if alive.is_err() {
-                    return;
+                let Ok(retry_callbacks) = retry_callbacks else { return };
+                if retry_callbacks {
+                    cx.update(|cx| {
+                    // 回调可能早于发起方自己的 TurnDone 到达；每秒重投一次只会
+                    // 释放身份仍匹配且已回到 Idle/Finished 的发起方。
+                    crate::gpui_shell::workspace::windowing::publish_runtime_snapshot(cx);
+                    crate::gpui_shell::workspace::windowing::dispatch_ready_delegation_callbacks(
+                        cx,
+                    );
+                    });
                 }
             }
         })
@@ -161,7 +207,7 @@ impl NebulaWorkspace {
         &mut self,
         event: crate::ai_hook::AiHookEvent,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let pane_ids: Vec<u64> = self
             .tabs
             .iter()
@@ -177,7 +223,7 @@ impl NebulaWorkspace {
             _ => None,
         });
         let Some(target_id) = ai_hook_target_pane(&pane_ids, event.pane, active_focused) else {
-            return;
+            return false;
         };
         let target = self.tabs.iter().find_map(|tab| match tab {
             WorkspaceTab::Terminal { panes, .. } => {
@@ -185,9 +231,61 @@ impl NebulaWorkspace {
             },
             _ => None,
         });
-        if let Some(view) = target {
-            view.update(cx, |view, cx| view.handle_ai_hook(&event, cx));
-        }
+        target.is_some_and(|view| view.update(cx, |view, cx| view.handle_ai_hook(&event, cx)))
+    }
+
+    pub(crate) fn deliver_delegation_callback(
+        &mut self,
+        callback: &crate::runtime_api::RuntimeDelegationCallback,
+        cx: &mut Context<Self>,
+    ) -> Result<(), crate::runtime_api::ApiError> {
+        let pane_id = callback.origin.pane_id;
+        let Some(tab_ix) = self.tab_of_pane(pane_id) else {
+            return Err(crate::runtime_api::ApiError::new(
+                "origin_closed",
+                format!("delegation origin pane {pane_id} no longer exists"),
+            ));
+        };
+        let view = match self.tabs.get(tab_ix) {
+            Some(WorkspaceTab::Terminal { panes, .. }) => panes
+                .iter()
+                .find(|pane| pane.id == pane_id)
+                .expect("tab_of_pane resolved a terminal pane")
+                .view
+                .clone(),
+            _ => unreachable!("tab_of_pane only resolves terminal tabs"),
+        };
+        view.update(cx, |view, cx| {
+            let agent = view.runtime_chat_agent().ok_or_else(|| {
+                crate::runtime_api::ApiError::new(
+                    "origin_replaced",
+                    "the delegation origin is no longer occupied by an Agent",
+                )
+            })?;
+            if agent.kind != callback.origin.kind
+                || callback
+                    .origin
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|expected| agent.session_id.as_deref() != Some(expected))
+            {
+                return Err(crate::runtime_api::ApiError::new(
+                    "origin_replaced",
+                    "the delegation origin now belongs to a different Agent session",
+                ));
+            }
+            match view.runtime_task_state() {
+                crate::runtime_api::RuntimeTaskState::Idle
+                | crate::runtime_api::RuntimeTaskState::Finished => {},
+                state => {
+                    return Err(crate::runtime_api::ApiError::new(
+                        "origin_not_ready",
+                        format!("the delegation origin cannot accept a callback while {state:?}"),
+                    ));
+                },
+            }
+            view.runtime_prompt(callback.prompt.clone(), true, cx)
+        })
     }
 
     /// 在新 tab 里继续一段进行中的 AI 会话（旧壳 `fork_ai_session` 合同）：

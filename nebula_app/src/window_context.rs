@@ -149,19 +149,20 @@ fn preferred_initial_cwd(
     cli.or(restored).or(startup).or(configured)
 }
 
-/// Keep idle/editor redraw costs low while giving active task spinners a
-/// display-rate clock. This changes only the timer cadence; no worker thread or
-/// per-frame allocation is introduced.
+/// Keep idle redraw costs low while giving editor and spinner chrome a 12.5 Hz
+/// clock. At an 800 ms revolution that gives the spinner exactly ten positions,
+/// while avoiding display-rate redraw of a window with a system backdrop.
 #[inline]
 fn chrome_clock_interval(
+    window_focused: bool,
     spinner_running: bool,
     editor_active: bool,
     chrome_animating: bool,
 ) -> Duration {
-    if spinner_running {
-        Duration::from_micros(16_667)
-    } else if editor_active || chrome_animating {
-        Duration::from_millis(125)
+    if !window_focused {
+        Duration::from_secs(1)
+    } else if spinner_running || editor_active || chrome_animating {
+        Duration::from_millis(80)
     } else {
         Duration::from_secs(1)
     }
@@ -2847,11 +2848,11 @@ impl WindowContext {
         self.display.nebula_focused_cwd = panel_cwd.clone();
         self.display.side_panel_sync(panel_cwd);
 
-        // Chrome clock: 1 Hz idle, 8 fps for finite UI transitions, and
-        // display-rate only while a task spinner is running. Re-arm whenever
-        // the cadence class changes.
+        // Chrome clock: unfocused/idle windows keep only the 1 Hz state watchdog;
+        // visible animations use 12.5 fps. Re-arm whenever the cadence class changes.
         let clock_timer = TimerId::new(Topic::NebulaClock, self.display.window.id());
         let interval = chrome_clock_interval(
+            self.display.window.has_focus(),
             self.display.any_tab_running()
                 || self.display.ssh_test_running()
                 || self.display.any_tab_flashing(),
@@ -3749,20 +3750,27 @@ mod startup_shell_tests {
     }
 
     #[test]
-    fn chrome_clock_uses_fast_cadence_only_for_running_tabs() {
+    fn chrome_clock_bounds_running_tabs_to_chrome_cadence() {
         assert_eq!(
-            chrome_clock_interval(true, false, false),
-            std::time::Duration::from_micros(16_667)
+            chrome_clock_interval(true, true, false, false),
+            std::time::Duration::from_millis(80)
         );
         assert_eq!(
-            chrome_clock_interval(false, true, false),
-            std::time::Duration::from_millis(125)
+            chrome_clock_interval(true, false, true, false),
+            std::time::Duration::from_millis(80)
         );
         assert_eq!(
-            chrome_clock_interval(false, false, true),
-            std::time::Duration::from_millis(125)
+            chrome_clock_interval(true, false, false, true),
+            std::time::Duration::from_millis(80)
         );
-        assert_eq!(chrome_clock_interval(false, false, false), std::time::Duration::from_secs(1));
+        assert_eq!(
+            chrome_clock_interval(true, false, false, false),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            chrome_clock_interval(false, true, true, true),
+            std::time::Duration::from_secs(1)
+        );
     }
 
     #[test]

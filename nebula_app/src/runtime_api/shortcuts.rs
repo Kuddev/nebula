@@ -32,12 +32,12 @@
 use super::cli::{CliError, PrintedCliError, print_response, request_once, wait_state_name};
 use super::*;
 use crate::cli::{
-    AgentCommand, AgentOptions, AgentPasteOptions, AgentReadOptions, AgentSendOptions,
-    AgentWaitOptions, EnvOptions, ListOptions, PaneCloseOptions, PaneCommand, PaneExecOptions,
-    PaneOptions, PanePasteOptions, PaneReadOptions, PaneResizeOptions, PaneSendOptions,
-    PaneWaitOptions, PaneZoomOptions, PasteSourceOptions, TabCloseOptions, TabCommand,
-    TabMoveOptions, TabRenameOptions, TabResourceOptions, WindowCloseOptions, WindowCommand,
-    WindowResourceOptions,
+    AgentCommand, AgentDelegateOptions, AgentOptions, AgentPasteOptions, AgentReadOptions,
+    AgentSendOptions, AgentWaitOptions, EnvOptions, ListOptions, PaneCloseOptions, PaneCommand,
+    PaneExecOptions, PaneOptions, PanePasteOptions, PaneReadOptions, PaneResizeOptions,
+    PaneSendOptions, PaneWaitOptions, PaneZoomOptions, PasteSourceOptions, TabCloseOptions,
+    TabCommand, TabMoveOptions, TabRenameOptions, TabResourceOptions, WindowCloseOptions,
+    WindowCommand, WindowResourceOptions,
 };
 use std::fs::File;
 use std::io::Read as _;
@@ -136,6 +136,10 @@ pub fn agent(options: AgentOptions) -> Result<(), Box<dyn Error>> {
         AgentCommand::Send(options) => {
             let pretty = options.output.pretty;
             finish(pretty, agent_send(options))
+        },
+        AgentCommand::Delegate(options) => {
+            let pretty = options.output.pretty;
+            finish(pretty, agent_delegate(options))
         },
         AgentCommand::Paste(options) => {
             let pretty = options.output.pretty;
@@ -416,6 +420,13 @@ fn command_catalog() -> Value {
             "example": "nebula agent send codex \"fix the login regression in auth/\" --wait",
         },
         {
+            "command": "nebula agent delegate <agent> <task>",
+            "purpose": "Delegate one task and automatically route the target Agent's final answer \
+                        back to the calling Agent pane. Requires NEBULA_PANE_ID and a stable \
+                        caller session identity.",
+            "example": "nebula agent delegate codex \"review the vc skill and report the result\"",
+        },
+        {
             "command": "nebula agent paste <agent> [text|--stdin|--from-file]",
             "purpose": "Paste a bounded multi-line task into the same managed-agent generation.",
             "example": "Get-Content task.md | nebula agent paste codex --stdin --wait",
@@ -640,6 +651,30 @@ fn agent_send(options: AgentSendOptions) -> Result<(), Box<dyn Error>> {
             "after_seq": baseline,
         }),
         wait_timeout.saturating_add(Duration::from_secs(1)),
+    )?;
+    print_response(&response, options.output.pretty)
+}
+
+fn agent_delegate(options: AgentDelegateOptions) -> Result<(), Box<dyn Error>> {
+    let timeout = validated_timeout(options.timeout_ms)?;
+    let origin_pane_id = std::env::var(crate::agent_env::PANE_ENV)
+        .ok()
+        .and_then(|pane| pane.parse::<u64>().ok())
+        .ok_or_else(|| {
+            CliError::new(
+                "runtime_unavailable",
+                "agent delegation must be started inside a local Nebula Agent pane with NEBULA_PANE_ID",
+            )
+        })?;
+    let response = request_once(
+        "agent.delegate",
+        json!({
+            "agent": options.agent,
+            "generation": options.generation,
+            "text": joined(&options.text),
+            "origin_pane_id": origin_pane_id,
+        }),
+        timeout,
     )?;
     print_response(&response, options.output.pretty)
 }

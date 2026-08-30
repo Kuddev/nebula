@@ -601,7 +601,11 @@ impl TerminalView {
     ///
     /// 旧壳 `WindowContext::handle_ai_hook` 状态机的忠实移植：不能把所有
     /// 非 SessionEnd 事件压平成 running，否则 TurnDone 后 spinner 不会停。
-    pub fn handle_ai_hook(&mut self, event: &crate::ai_hook::AiHookEvent, cx: &mut Context<Self>) {
+    pub fn handle_ai_hook(
+        &mut self,
+        event: &crate::ai_hook::AiHookEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
         use crate::ai_agents::AgentStatus;
         use crate::ai_hook::AiHookKind;
 
@@ -617,7 +621,7 @@ impl TerminalView {
                 event.source,
                 event.kind
             );
-            return;
+            return false;
         }
 
         let verdict = crate::ai_hook::accept_for_pane(event, self.pane_id);
@@ -633,7 +637,7 @@ impl TerminalView {
                 event.kind,
                 event.bridge_sequence
             );
-            return;
+            return false;
         }
 
         // SessionEnd 可能是第一次携带最终权威 id 的事件；必须先落盘再清理
@@ -724,6 +728,7 @@ impl TerminalView {
         }
         cx.emit(TerminalViewEvent::TitleChanged);
         cx.notify();
+        true
     }
 
     /// TurnDone 到达时，屏幕上是否真的还挂着一个等人表态的框。

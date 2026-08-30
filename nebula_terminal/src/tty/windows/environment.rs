@@ -124,14 +124,30 @@ impl EnvironmentState {
     ) -> CaseInsensitiveEnv {
         let current_keys = snapshot.keys();
         let mut environment = self.inherited.clone();
+        let mut expansion_environment = self.inherited.clone();
 
         // 进程环境里混有启动时的注册表值。记住历次出现过的键，才能让运行期间
         // 被删除的注册表变量从新 pane 消失，同时保住从父进程继承的私有变量。
         for name in self.registry_keys.iter().chain(&current_keys) {
             environment.remove_normalized(name);
+            expansion_environment.remove_normalized(name);
+        }
+
+        // HKCU\Environment 里的 REG_EXPAND_SZ 经常引用稍后才从 Volatile
+        // Environment 读到的 USERPROFILE。先收集各键最终生效的普通字符串，
+        // 让展开不再依赖 hive 的读取顺序；实际输出仍按原顺序叠加，以保留
+        // machine/user/volatile 的覆盖及 PATH 追加语义。
+        let final_plain_values = snapshot.final_plain_values();
+        for entry in final_plain_values.entries.values() {
+            expansion_environment.insert(entry.name.clone(), entry.value.clone());
         }
         for hive in snapshot.hives {
-            apply_registry_hive(&mut environment, &hive);
+            apply_registry_hive(
+                &mut environment,
+                &mut expansion_environment,
+                &final_plain_values,
+                &hive,
+            );
         }
         for entry in overrides.entries.into_values() {
             environment.insert(entry.name, entry.value);
@@ -170,6 +186,26 @@ impl RegistrySnapshot {
     fn keys(&self) -> HashSet<String> {
         self.hives.iter().flatten().map(|value| normalize_name(&value.name)).collect()
     }
+
+    fn final_plain_values(&self) -> CaseInsensitiveEnv {
+        let mut final_values = BTreeMap::<String, &RegistryValue>::new();
+        for value in self.hives.iter().flatten() {
+            if value.kind != RegistryValueKind::Unsupported
+                && !value.value.is_empty()
+                && !is_path_variable(&value.name)
+            {
+                final_values.insert(normalize_name(&value.name), value);
+            }
+        }
+
+        let mut environment = CaseInsensitiveEnv::default();
+        for value in final_values.into_values() {
+            if value.kind == RegistryValueKind::String {
+                environment.insert(value.name.clone(), value.value.clone());
+            }
+        }
+        environment
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,7 +222,12 @@ struct RegistryValue {
     kind: RegistryValueKind,
 }
 
-fn apply_registry_hive(environment: &mut CaseInsensitiveEnv, values: &[RegistryValue]) {
+fn apply_registry_hive(
+    environment: &mut CaseInsensitiveEnv,
+    expansion_environment: &mut CaseInsensitiveEnv,
+    final_plain_values: &CaseInsensitiveEnv,
+    values: &[RegistryValue],
+) {
     // REG_SZ 先落表，随后 REG_EXPAND_SZ 才能引用同一 hive 中已经载入的变量。
     for expand_pass in [false, true] {
         for registry_value in values {
@@ -199,7 +240,7 @@ fn apply_registry_hive(environment: &mut CaseInsensitiveEnv, values: &[RegistryV
             }
 
             let value = if is_expand {
-                expand_environment_variables(&registry_value.value, environment)
+                expand_environment_variables(&registry_value.value, expansion_environment)
             } else {
                 registry_value.value.clone()
             };
@@ -207,9 +248,15 @@ fn apply_registry_hive(environment: &mut CaseInsensitiveEnv, values: &[RegistryV
                 continue;
             }
             if is_path {
-                environment.append_path(registry_value.name.clone(), value);
+                environment.append_path(registry_value.name.clone(), value.clone());
+                expansion_environment.append_path(registry_value.name.clone(), value);
             } else {
-                environment.insert(registry_value.name.clone(), value);
+                environment.insert(registry_value.name.clone(), value.clone());
+                // 最终由普通字符串覆盖的键已提前装入展开上下文。早期 hive
+                // 不得把它改回旧值，否则 TEMP 又会看不到后置 USERPROFILE。
+                if final_plain_values.get(&registry_value.name).is_none() {
+                    expansion_environment.insert(registry_value.name.clone(), value);
+                }
             }
         }
     }
@@ -439,6 +486,34 @@ mod tests {
         );
 
         assert_eq!(merged.get("SDK"), Some(r"C:\tools\sdk"));
+    }
+
+    #[test]
+    fn expandable_values_see_plain_values_from_later_hives() {
+        let mut state = EnvironmentState::new(CaseInsensitiveEnv::default());
+        let merged = state.merge(
+            snapshot(vec![
+                vec![expanded("TEMP", r"%USERPROFILE%\AppData\Local\Temp")],
+                vec![plain("USERPROFILE", r"C:\Users\test")],
+            ]),
+            CaseInsensitiveEnv::default(),
+        );
+
+        assert_eq!(merged.get("TEMP"), Some(r"C:\Users\test\AppData\Local\Temp"));
+    }
+
+    #[test]
+    fn later_plain_value_still_overrides_an_earlier_expanded_value() {
+        let mut state = EnvironmentState::new(environment(&[("ROOT", r"C:\base")]));
+        let merged = state.merge(
+            snapshot(vec![
+                vec![expanded("PROFILE", r"%ROOT%\machine")],
+                vec![plain("PROFILE", r"C:\Users\test")],
+            ]),
+            CaseInsensitiveEnv::default(),
+        );
+
+        assert_eq!(merged.get("PROFILE"), Some(r"C:\Users\test"));
     }
 
     #[test]

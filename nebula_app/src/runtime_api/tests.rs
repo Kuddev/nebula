@@ -53,6 +53,109 @@ fn detected_agent(kind: &str, session_id: Option<&str>) -> RuntimeAgent {
     }
 }
 
+const TEST_CODEX_SESSION: &str = "b5f6c1c2-1111-2222-3333-444455556666";
+
+fn delegation_snapshot(
+    origin_state: RuntimeTaskState,
+    target_state: RuntimeTaskState,
+    origin_session: Option<&str>,
+) -> RuntimeSnapshot {
+    let pane = |id: u64,
+                active: bool,
+                title: &str,
+                agent: Option<RuntimeAgent>,
+                task_state: RuntimeTaskState| RuntimePane {
+        id,
+        active,
+        title: title.into(),
+        cwd: "D:/work".into(),
+        branch: "main".into(),
+        ssh_destination: None,
+        running_program: agent.as_ref().map(|agent: &RuntimeAgent| agent.kind.clone()),
+        agent,
+        task_state,
+        state_change_seq: 0,
+        active_run: None,
+        last_run: None,
+    };
+    RuntimeSnapshot::new(
+        0,
+        vec![RuntimeWindow {
+            id: 7,
+            focused: true,
+            session_exempt: false,
+            active_tab: 0,
+            focused_pane_id: Some(3),
+            tabs: vec![
+                RuntimeTab {
+                    index: 0,
+                    active: true,
+                    label: "origin".into(),
+                    kind: "shell".into(),
+                    bell: false,
+                    focused_pane_id: Some(3),
+                    zoomed_pane_id: None,
+                    layout: Some(RuntimeLayout::Pane { pane_id: 3 }),
+                    panes: vec![pane(
+                        3,
+                        true,
+                        "claude",
+                        Some(detected_agent("claude", origin_session)),
+                        origin_state,
+                    )],
+                },
+                RuntimeTab {
+                    index: 1,
+                    active: false,
+                    label: "worker".into(),
+                    kind: "shell".into(),
+                    bell: false,
+                    focused_pane_id: Some(4),
+                    zoomed_pane_id: None,
+                    layout: Some(RuntimeLayout::Pane { pane_id: 4 }),
+                    panes: vec![pane(
+                        4,
+                        true,
+                        "codex",
+                        Some(detected_agent("codex", Some(TEST_CODEX_SESSION))),
+                        target_state,
+                    )],
+                },
+            ],
+        }],
+    )
+}
+
+fn delegation_hub(origin_state: RuntimeTaskState) -> (RuntimeHub, RuntimeManagedAgent) {
+    let hub = RuntimeHub::new();
+    let target = hub
+        .register_agent(
+            "worker".into(),
+            crate::ai_agents::AgentKind::Codex,
+            7,
+            4,
+            Some(TEST_CODEX_SESSION.into()),
+            None,
+        )
+        .unwrap();
+    hub.publish(delegation_snapshot(
+        origin_state,
+        RuntimeTaskState::Finished,
+        Some("claude-session-1"),
+    ));
+    (hub, target)
+}
+
+fn codex_turn_done(message: &str) -> crate::ai_hook::AiHookEvent {
+    let payload = json!({
+        "type": "agent-turn-complete",
+        "thread-id": TEST_CODEX_SESSION,
+        "last-assistant-message": message,
+    });
+    let raw = format!("nebula-hook/1 source=codex pane=4\n{payload}");
+    crate::ai_hook::parse_remote_envelope(raw.as_bytes(), Some(4)).unwrap()
+}
+
 fn call_wait_connection(hub: &RuntimeHub, request: ApiRequest) -> ApiResponse {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -466,6 +569,158 @@ fn managed_identity_requires_real_agent_and_session_evidence() {
     assert_eq!(
         hub.active_agent(&managed.agent_id, Some(managed.generation)).unwrap_err().code,
         "agent_replaced"
+    );
+}
+
+#[test]
+fn delegation_completion_returns_one_json_escaped_callback() {
+    let (hub, target) = delegation_hub(RuntimeTaskState::Finished);
+    let receipt = hub.begin_delegation(3, &target).unwrap();
+    let result = "fixed \"vc\" skill\nall checks passed";
+    let event = codex_turn_done(result);
+
+    hub.complete_delegations_for_turn(&event);
+    let callbacks = hub.take_ready_delegation_callbacks();
+    assert_eq!(callbacks.len(), 1);
+    assert_eq!(callbacks[0].task_id, receipt.task_id);
+    assert!(callbacks[0].prompt.contains(&format!("[nebula {}]", receipt.task_id)));
+    let encoded = callbacks[0].prompt.split_once("worker_output=").unwrap().1;
+    assert_eq!(serde_json::from_str::<String>(encoded).unwrap(), result);
+
+    // Provider hooks have no Nebula task id. Consuming the pending record on
+    // the first accepted completion is the exactly-once boundary.
+    hub.complete_delegations_for_turn(&event);
+    assert!(hub.take_ready_delegation_callbacks().is_empty());
+}
+
+#[test]
+fn agent_delegate_dispatches_a_generation_bound_prompt() {
+    let (hub, target) = delegation_hub(RuntimeTaskState::Finished);
+    let expected_agent_id = target.agent_id.clone();
+    let expected_generation = target.generation;
+    let dispatched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatched_for_sink = dispatched.clone();
+    let sink = EventSink::Callback(Arc::new(move |callback| {
+        if let RuntimeCallback::Control(dispatch) = callback {
+            assert!(matches!(
+                &dispatch.command,
+                RuntimeCommand::AgentPrompt {
+                    agent,
+                    generation: Some(generation),
+                    text,
+                    submit: true,
+                } if agent == &expected_agent_id
+                    && *generation == expected_generation
+                    && text == "inspect the vc skill"
+            ));
+            dispatched_for_sink.store(true, std::sync::atomic::Ordering::SeqCst);
+            dispatch.respond(Ok(json!({ "submitted": true })));
+        }
+    }));
+    let request = ApiRequest::new(
+        "token".into(),
+        "agent.delegate",
+        json!({
+            "agent": target.agent_id,
+            "generation": target.generation,
+            "text": "inspect the vc skill",
+            "origin_pane_id": 3,
+        }),
+    );
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    agent_api::agent_delegate_connection(&mut server, request, &sink, &hub).unwrap();
+    let mut line = String::new();
+    BufReader::new(&mut client).read_line(&mut line).unwrap();
+    let response: ApiResponse = serde_json::from_str(&line).unwrap();
+
+    assert!(response.ok);
+    assert!(dispatched.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(response.result.unwrap()["delegation"]["status"], "submitted");
+}
+
+#[test]
+fn delegation_callback_waits_for_the_original_agent_to_finish() {
+    let (hub, target) = delegation_hub(RuntimeTaskState::Running);
+    hub.begin_delegation(3, &target).unwrap();
+    hub.complete_delegations_for_turn(&codex_turn_done("done"));
+    assert!(hub.take_ready_delegation_callbacks().is_empty());
+
+    hub.publish(delegation_snapshot(
+        RuntimeTaskState::Attention,
+        RuntimeTaskState::Finished,
+        Some("claude-session-1"),
+    ));
+    assert!(hub.take_ready_delegation_callbacks().is_empty());
+
+    hub.publish(delegation_snapshot(
+        RuntimeTaskState::Finished,
+        RuntimeTaskState::Finished,
+        Some("claude-session-1"),
+    ));
+    assert_eq!(hub.take_ready_delegation_callbacks().len(), 1);
+}
+
+#[test]
+fn delegation_callback_never_moves_to_a_replacement_origin_session() {
+    let (hub, target) = delegation_hub(RuntimeTaskState::Running);
+    hub.begin_delegation(3, &target).unwrap();
+    hub.complete_delegations_for_turn(&codex_turn_done("done"));
+
+    hub.publish(delegation_snapshot(
+        RuntimeTaskState::Finished,
+        RuntimeTaskState::Finished,
+        Some("claude-session-2"),
+    ));
+    assert!(hub.take_ready_delegation_callbacks().is_empty());
+
+    // A callback rejected for an identity mismatch is dropped, not retained
+    // until an older session id happens to appear again.
+    hub.publish(delegation_snapshot(
+        RuntimeTaskState::Finished,
+        RuntimeTaskState::Finished,
+        Some("claude-session-1"),
+    ));
+    assert!(hub.take_ready_delegation_callbacks().is_empty());
+}
+
+#[test]
+fn delegation_rejects_ambiguous_correlation_and_unstable_origins() {
+    let (hub, target) = delegation_hub(RuntimeTaskState::Finished);
+    hub.begin_delegation(3, &target).unwrap();
+    assert_eq!(hub.begin_delegation(3, &target).unwrap_err().code, "delegation_in_progress");
+
+    let empty_origin_hub = RuntimeHub::new();
+    let empty_target = empty_origin_hub
+        .register_agent(
+            "worker".into(),
+            crate::ai_agents::AgentKind::Codex,
+            7,
+            4,
+            Some(TEST_CODEX_SESSION.into()),
+            None,
+        )
+        .unwrap();
+    let mut no_origin = delegation_snapshot(
+        RuntimeTaskState::Finished,
+        RuntimeTaskState::Finished,
+        Some("claude-session-1"),
+    );
+    no_origin.windows[0].tabs[0].panes[0].agent = None;
+    empty_origin_hub.publish(no_origin);
+    assert_eq!(
+        empty_origin_hub.begin_delegation(3, &empty_target).unwrap_err().code,
+        "origin_not_agent"
+    );
+
+    let mut anonymous =
+        delegation_snapshot(RuntimeTaskState::Finished, RuntimeTaskState::Finished, None);
+    anonymous.windows[0].tabs[0].panes[0].agent = Some(detected_agent("claude", None));
+    empty_origin_hub.publish(anonymous);
+    assert_eq!(
+        empty_origin_hub.begin_delegation(3, &empty_target).unwrap_err().code,
+        "origin_identity_unavailable"
     );
 }
 

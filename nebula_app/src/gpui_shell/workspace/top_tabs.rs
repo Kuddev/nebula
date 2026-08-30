@@ -161,7 +161,6 @@ impl NebulaWorkspace {
             .filter(|drag| drag.active && drag.axis == TabDragAxis::Horizontal)
             .map(|drag| (drag.source, Self::drag_slot(drag, self.tabs.len()), drag.offset));
         let items_running = std::cell::Cell::new(false);
-
         let items = (0..self.tabs.len())
             .map(|ix| {
                 let active = ix == self.active;
@@ -497,15 +496,9 @@ impl NebulaWorkspace {
                 }
             })
             .collect::<Vec<_>>();
-
+        self.spinner_visible.set(items_running.get());
         if items_running.get() {
-            cx.on_next_frame(window, |this, _, cx| {
-                let now = std::time::Instant::now();
-                let dt = now - this.spinner_last;
-                this.spinner_last = now;
-                this.spinner_phase = (this.spinner_phase + dt.as_secs_f32() / 0.8).rem_euclid(1.0);
-                cx.notify();
-            });
+            self.arm_activity_spinner_tick(cx);
         }
 
         let menu_workspace = cx.entity().downgrade();

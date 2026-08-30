@@ -104,6 +104,10 @@ const CLAUDE_EVENTS: [&str; 7] = [
 ];
 
 const MESSAGE_MAX_CHARS: usize = 300;
+/// Codex's structured final answer feeds Agent delegation callbacks. Keep a
+/// larger bounded copy than the notification preview so the origin Agent can
+/// summarize a useful result without reading the target terminal again.
+const TURN_RESULT_MAX_CHARS: usize = 4_000;
 const ID_MAX_CHARS: usize = 512;
 const CONTEXT_STRING_MAX_CHARS: usize = 1_024;
 const RAW_CONTEXT_MAX_BYTES: usize = 16 * 1_024;
@@ -669,7 +673,7 @@ fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
                 payload
                     .get("last-assistant-message")
                     .and_then(Value::as_str)
-                    .map(|m| truncate(m, MESSAGE_MAX_CHARS)),
+                    .map(|m| truncate(m, TURN_RESULT_MAX_CHARS)),
             ),
             _ => return None,
         },
