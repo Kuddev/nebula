@@ -490,16 +490,29 @@ mod tests {
 
     #[test]
     fn expandable_values_see_plain_values_from_later_hives() {
-        let mut state = EnvironmentState::new(CaseInsensitiveEnv::default());
+        // Volatile Environment 排在 HKCU\Environment 之后：TEMP 引用的
+        // USERPROFILE 不能按枚举顺序展开，否则 pane 的 TEMP/TMP 会保留字面量，
+        // shell 一写临时文件就在启动目录下建出 %USERPROFILE% 文件夹。
+        // 用户目录随电脑而不同，直接从当前进程取真实 USERPROFILE，断言值
+        // 也由它推导，避免把某台机器的用户名写进测试导致其他电脑失败。
+        let profile = std::env::var_os("USERPROFILE")
+            .expect("USERPROFILE must be set in the test process")
+            .to_string_lossy()
+            .into_owned();
+        let temp = format!(r"%USERPROFILE%\AppData\Local\Temp");
+        let mut state = EnvironmentState::new(environment(&[("USERPROFILE", profile.as_str())]));
         let merged = state.merge(
             snapshot(vec![
-                vec![expanded("TEMP", r"%USERPROFILE%\AppData\Local\Temp")],
-                vec![plain("USERPROFILE", r"C:\Users\test")],
+                Vec::new(),
+                vec![expanded("TEMP", temp.as_str())],
+                vec![plain("USERPROFILE", profile.as_str())],
             ]),
             CaseInsensitiveEnv::default(),
         );
 
-        assert_eq!(merged.get("TEMP"), Some(r"C:\Users\test\AppData\Local\Temp"));
+        let expected_temp = format!(r"{profile}\AppData\Local\Temp");
+        assert_eq!(merged.get("TEMP"), Some(expected_temp.as_str()));
+        assert_eq!(merged.get("USERPROFILE"), Some(profile.as_str()));
     }
 
     #[test]
