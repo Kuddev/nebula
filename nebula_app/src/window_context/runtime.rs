@@ -310,11 +310,7 @@ impl WindowContext {
         Ok(self.close_pane(pane_id))
     }
 
-    pub(crate) fn runtime_set_zoom(
-        &mut self,
-        pane_id: u64,
-        zoomed: bool,
-    ) -> Result<(), ApiError> {
+    pub(crate) fn runtime_set_zoom(&mut self, pane_id: u64, zoomed: bool) -> Result<(), ApiError> {
         let Some(tab_index) = self.tabs.iter().position(|tab| {
             let mut panes = Vec::new();
             tab.layout.leaves(&mut panes);
@@ -344,11 +340,7 @@ impl WindowContext {
         Ok(())
     }
 
-    pub(crate) fn runtime_resize_pane(
-        &mut self,
-        pane_id: u64,
-        ratio: f32,
-    ) -> Result<(), ApiError> {
+    pub(crate) fn runtime_resize_pane(&mut self, pane_id: u64, ratio: f32) -> Result<(), ApiError> {
         let Some(tab_index) = self.tabs.iter().position(|tab| {
             let mut panes = Vec::new();
             tab.layout.leaves(&mut panes);

@@ -280,10 +280,11 @@ mod tests {
         assert!(!begin_fetch(&env, "/tmp/a"), "已经在拉了");
         assert!(begin_fetch(&env, "/tmp/b"), "另一个目录不受影响");
 
-        finish_fetch(&env, "/tmp/a", Some(vec![RemoteEntry {
-            name: "x".to_owned(),
-            is_dir: false,
-        }]));
+        finish_fetch(
+            &env,
+            "/tmp/a",
+            Some(vec![RemoteEntry { name: "x".to_owned(), is_dir: false }]),
+        );
         assert!(lookup(&env, "/tmp/a").is_some(), "落了缓存");
         assert!(begin_fetch(&env, "/tmp/a"), "拉完就解锁");
     }

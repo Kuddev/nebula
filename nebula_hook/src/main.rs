@@ -244,9 +244,7 @@ fn base64_encode(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FOREIGN_HOOK_RUNNERS, Outcome, base64_encode, foreign_hook_runner, outcome_line,
-    };
+    use super::{FOREIGN_HOOK_RUNNERS, Outcome, base64_encode, foreign_hook_runner, outcome_line};
 
     #[test]
     fn encodes_remote_hook_payload() {

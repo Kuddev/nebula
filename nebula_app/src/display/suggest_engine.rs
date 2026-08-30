@@ -235,8 +235,7 @@ pub(crate) fn suggest_update(
     // 远端目录是异步拉回来的，那一刻 cwd 与行都没变——少了这个代际，拉到的
     // 条目要等用户再多打一个字符才会显形。
     let remote_generation = crate::remote_dirs::generation();
-    let key =
-        format!("{}\u{0}{line}\u{0}{command_generation}\u{0}{remote_generation}", state.cwd);
+    let key = format!("{}\u{0}{line}\u{0}{command_generation}\u{0}{remote_generation}", state.cwd);
     if state.completion_suppressed_line.as_deref() == Some(line.as_str()) {
         state.suggestion_key = key;
         state.suggestion.clear();

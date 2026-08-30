@@ -38,10 +38,7 @@ pub(super) fn request_once(
     Ok(serde_json::from_str(&line)?)
 }
 
-pub(super) fn print_response(
-    response: &ApiResponse,
-    pretty: bool,
-) -> Result<(), Box<dyn Error>> {
+pub(super) fn print_response(response: &ApiResponse, pretty: bool) -> Result<(), Box<dyn Error>> {
     if pretty {
         println!("{}", serde_json::to_string_pretty(response)?);
     } else {
@@ -225,8 +222,7 @@ fn run_cli_inner(options: ControlOptions) -> Result<(), Box<dyn Error>> {
             print_response(&response, options.pretty)
         },
         CliCommand::CloseWindow { window } => {
-            let response =
-                request_once("window.close", json!({ "window_id": window }), timeout)?;
+            let response = request_once("window.close", json!({ "window_id": window }), timeout)?;
             print_response(&response, options.pretty)
         },
         CliCommand::Focus { window, pane } => {

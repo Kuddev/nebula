@@ -443,11 +443,8 @@ impl ThemeName {
     /// 两块深色面板会糊成一片，竖线是这种形态下唯一的结构分界。
     pub fn card_geometry(self) -> ThemeCardGeometry {
         match self {
-            Self::Nord => ThemeCardGeometry {
-                radius: 0.0,
-                gutter: 0.0,
-                shadow: false,
-                divider: 1.0,
+            Self::Nord => {
+                ThemeCardGeometry { radius: 0.0, gutter: 0.0, shadow: false, divider: 1.0 }
             },
             _ => ThemeCardGeometry {
                 radius: DEFAULT_PANE_CARD_RADIUS,

@@ -114,7 +114,10 @@ fn snapshot() -> Result<std::collections::HashMap<u32, (u32, String)>, String> {
 
     let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if handle == INVALID_HANDLE_VALUE {
-        return Err(format!("CreateToolhelp32Snapshot failed: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "CreateToolhelp32Snapshot failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
 
     let mut processes: HashMap<u32, (u32, String)> = HashMap::new();
@@ -381,9 +384,7 @@ mod tests {
 
     /// 带自定义可执行名的进程表，用来构造「helper 上面隔着一层 shell」的链。
     fn named_table(rows: &[(u32, u32, &str)]) -> HashMap<u32, (u32, String)> {
-        rows.iter()
-            .map(|&(pid, parent, exe)| (pid, (parent, exe.to_owned())))
-            .collect()
+        rows.iter().map(|&(pid, parent, exe)| (pid, (parent, exe.to_owned()))).collect()
     }
 
     /// hook helper 的父进程往往不是 agent 本身：Windows 上 claude 通过

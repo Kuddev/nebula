@@ -231,15 +231,7 @@ impl<T: Copy + Eq> SplitTree<T> {
     /// pane；目标在第二侧时必须写成 `1 - target_ratio`。递归到最近父节点再
     /// 修改，避免嵌套 pane 的 resize 错改祖先 Split。
     pub fn set_leaf_parent_ratio(&mut self, target: T, target_ratio: f32) -> bool {
-        let SplitTree::Split {
-            ratio,
-            preview_ratio,
-            dragging,
-            first,
-            second,
-            ..
-        } = self
-        else {
+        let SplitTree::Split { ratio, preview_ratio, dragging, first, second, .. } = self else {
             return false;
         };
 

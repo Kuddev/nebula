@@ -238,10 +238,7 @@ impl RuntimeCommand {
             },
             "tab.close" => {
                 let params: TabTargetParams = parse_params(&request.params)?;
-                Ok(Self::CloseTab {
-                    window_id: params.window_id,
-                    tab_index: params.tab_index,
-                })
+                Ok(Self::CloseTab { window_id: params.window_id, tab_index: params.tab_index })
             },
             "tab.rename" => {
                 let params: RenameTabParams = parse_params(&request.params)?;
@@ -555,9 +552,9 @@ fn validate_multiline_text(text: &str, label: &str) -> Result<(), ApiError> {
         )));
     }
     if text.chars().any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t')) {
-        return Err(ApiError::invalid_params(
-            format!("{label} contains unsupported terminal control characters"),
-        ));
+        return Err(ApiError::invalid_params(format!(
+            "{label} contains unsupported terminal control characters"
+        )));
     }
     Ok(())
 }

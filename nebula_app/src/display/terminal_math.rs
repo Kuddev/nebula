@@ -2947,10 +2947,9 @@ mod tests {
         }
         // 同一批内容的行内形态被硬换行拆开时保持原文，不再跨行拼接。
         assert!(
-            scan_grid(&TextGrid::from_rows(&[
-                r"• $\lim_{x\to0}\frac{\sin",
-                r"x}{x}=1$，$PV=nRT$",
-            ]))
+            scan_grid(&TextGrid::from_rows(
+                &[r"• $\lim_{x\to0}\frac{\sin", r"x}{x}=1$，$PV=nRT$",]
+            ))
             .iter()
             .all(|overlay| !overlay.source.contains("lim")),
             "行内公式不得跨真实换行拼接"

@@ -392,10 +392,7 @@ mod tests {
         let template_iterations = 200_000u128;
         let template_started = Instant::now();
         for _ in 0..template_iterations {
-            black_box(UiLanguage::EnUs.tr_args(
-                "provider.test.success",
-                &[("status", "200")],
-            ));
+            black_box(UiLanguage::EnUs.tr_args("provider.test.success", &[("status", "200")]));
         }
         let template_ns = template_started.elapsed().as_nanos() / template_iterations;
 

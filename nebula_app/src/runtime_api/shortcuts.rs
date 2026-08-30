@@ -34,9 +34,10 @@ use super::*;
 use crate::cli::{
     AgentCommand, AgentOptions, AgentPasteOptions, AgentReadOptions, AgentSendOptions,
     AgentWaitOptions, EnvOptions, ListOptions, PaneCloseOptions, PaneCommand, PaneExecOptions,
-    PaneOptions, PanePasteOptions, PaneReadOptions, PaneResizeOptions, PaneSendOptions, PaneWaitOptions,
-    PaneZoomOptions, PasteSourceOptions, TabCloseOptions, TabCommand, TabMoveOptions,
-    TabRenameOptions, TabResourceOptions, WindowCloseOptions, WindowCommand, WindowResourceOptions,
+    PaneOptions, PanePasteOptions, PaneReadOptions, PaneResizeOptions, PaneSendOptions,
+    PaneWaitOptions, PaneZoomOptions, PasteSourceOptions, TabCloseOptions, TabCommand,
+    TabMoveOptions, TabRenameOptions, TabResourceOptions, WindowCloseOptions, WindowCommand,
+    WindowResourceOptions,
 };
 use std::fs::File;
 use std::io::Read as _;
@@ -153,11 +154,7 @@ pub fn agent(options: AgentOptions) -> Result<(), Box<dyn Error>> {
 
 fn window_close(options: WindowCloseOptions) -> Result<(), Box<dyn Error>> {
     let timeout = validated_timeout(options.timeout_ms)?;
-    let response = request_once(
-        "window.close",
-        json!({ "window_id": options.window }),
-        timeout,
-    )?;
+    let response = request_once("window.close", json!({ "window_id": options.window }), timeout)?;
     print_response(&response, options.output.pretty)
 }
 
@@ -776,19 +773,15 @@ fn read_paste_source(source: PasteSourceOptions) -> Result<String, Box<dyn Error
     } else {
         joined(&text)
     };
-    validate_paste_text(&value)
-        .map_err(|error| CliError::new("invalid_params", error.message))?;
+    validate_paste_text(&value).map_err(|error| CliError::new("invalid_params", error.message))?;
     Ok(value)
 }
 
 fn read_paste_utf8(reader: impl Read, label: &str) -> Result<String, Box<dyn Error>> {
     let mut bytes = Vec::new();
-    reader
-        .take((MAX_PROMPT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            CliError::new("input_read_error", format!("could not read paste input {label}: {error}"))
-        })?;
+    reader.take((MAX_PROMPT_BYTES + 1) as u64).read_to_end(&mut bytes).map_err(|error| {
+        CliError::new("input_read_error", format!("could not read paste input {label}: {error}"))
+    })?;
     if bytes.len() > MAX_PROMPT_BYTES {
         return Err(CliError::new(
             "invalid_params",
@@ -797,11 +790,8 @@ fn read_paste_utf8(reader: impl Read, label: &str) -> Result<String, Box<dyn Err
         .into());
     }
     String::from_utf8(bytes).map_err(|error| {
-        CliError::new(
-            "invalid_utf8",
-            format!("paste input {label} is not valid UTF-8: {error}"),
-        )
-        .into()
+        CliError::new("invalid_utf8", format!("paste input {label} is not valid UTF-8: {error}"))
+            .into()
     })
 }
 
@@ -907,16 +897,13 @@ mod tests {
 
     #[test]
     fn paste_reader_is_strict_utf8_and_bounded() {
-        let text = read_paste_utf8(std::io::Cursor::new("first\nsecond"), "memory")
-            .expect("valid UTF-8");
+        let text =
+            read_paste_utf8(std::io::Cursor::new("first\nsecond"), "memory").expect("valid UTF-8");
         assert_eq!(text, "first\nsecond");
         assert!(read_paste_utf8(std::io::Cursor::new([0xff]), "memory").is_err());
         assert!(
-            read_paste_utf8(
-                std::io::Cursor::new(vec![b'x'; MAX_PROMPT_BYTES + 1]),
-                "memory",
-            )
-            .is_err()
+            read_paste_utf8(std::io::Cursor::new(vec![b'x'; MAX_PROMPT_BYTES + 1]), "memory",)
+                .is_err()
         );
     }
 

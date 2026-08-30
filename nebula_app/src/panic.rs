@@ -25,9 +25,8 @@ pub fn attach_handler() {
         // MessageBox 的模态消息泵不能运行在发生 panic 的 GPUI 线程上，否则
         // 会重入 AppCell 并把原始 panic 升级成无诊断信息的 double panic。
         // 等待专用线程结束可保证主线程 unwind 退出前用户仍能看到并复制错误。
-        if let Ok(dialog_thread) = thread::Builder::new()
-            .name("panic-dialog".into())
-            .spawn(move || unsafe {
+        if let Ok(dialog_thread) =
+            thread::Builder::new().name("panic-dialog".into()).spawn(move || unsafe {
                 MessageBoxW(
                     ptr::null_mut(),
                     dialog_message.as_ptr(),

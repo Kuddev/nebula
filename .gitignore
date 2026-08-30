@@ -30,8 +30,8 @@ tocodex-docs/
 .codex/
 *.internal.md
 
-# Local commit hooks are machine-specific policy and must never be published.
-/.local-hooks/
+# Local commit policy is machine-specific and must never be published.
+/.pre-commit-config.yaml
 
 # `docs/` is private by default. Public documentation must be reviewed and
 # explicitly added to this file one path at a time; never allowlist another subtree.

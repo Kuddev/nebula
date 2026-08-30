@@ -727,7 +727,8 @@ fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         message: message.clone(),
         selection: context_string(&payload, &["selection", "selected_text", "selectedText"]),
         raw_context: sanitized_raw_context(&payload),
-    });    Some(AiHookEvent {
+    });
+    Some(AiHookEvent {
         pane,
         source,
         kind,
@@ -1250,11 +1251,15 @@ mod remote_tests {
         };
         let mut gate = AiHookEventGate::default();
 
-        let done = event("{\"kind\":\"done\",\"session_id\":\"s\",\"bridge_sequence\":3,\"event_id\":\"s:3\"}");
+        let done = event(
+            "{\"kind\":\"done\",\"session_id\":\"s\",\"bridge_sequence\":3,\"event_id\":\"s:3\"}",
+        );
         assert_eq!(gate.verdict(&done, 3), GateVerdict::Accepted);
         assert_eq!(gate.verdict(&done, 3), GateVerdict::DuplicateEventId);
 
-        let older = event("{\"kind\":\"prompt\",\"session_id\":\"s\",\"bridge_sequence\":2,\"event_id\":\"s:2\"}");
+        let older = event(
+            "{\"kind\":\"prompt\",\"session_id\":\"s\",\"bridge_sequence\":2,\"event_id\":\"s:2\"}",
+        );
         assert_eq!(gate.verdict(&older, 3), GateVerdict::StaleSequence);
 
         // 无序号但带 provider 时间戳：走时间判据。
