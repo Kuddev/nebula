@@ -131,7 +131,7 @@ impl EnvironmentState {
             environment.remove_normalized(name);
         }
         for hive in snapshot.hives {
-            apply_registry_hive(&mut environment, &hive);
+            apply_registry_hive(&mut environment, &self.inherited, &hive);
         }
         for entry in overrides.entries.into_values() {
             environment.insert(entry.name, entry.value);
@@ -186,8 +186,16 @@ struct RegistryValue {
     kind: RegistryValueKind,
 }
 
-fn apply_registry_hive(environment: &mut CaseInsensitiveEnv, values: &[RegistryValue]) {
-    // REG_SZ 先落表，随后 REG_EXPAND_SZ 才能引用同一 hive 中已经载入的变量。
+/// `inherited` 是删除注册表键之前的进程原始环境，用作展开兜底：`USERPROFILE`
+/// 等登录期变量只存于 Volatile Environment，在该 hive 落表之前展开
+/// `%USERPROFILE%` 引用必须回退到它，否则子进程拿到字面量相对路径。
+fn apply_registry_hive(
+    environment: &mut CaseInsensitiveEnv,
+    inherited: &CaseInsensitiveEnv,
+    values: &[RegistryValue],
+) {
+    // REG_SZ 先落表，随后 REG_EXPAND_SZ 才能引用同一 hive 中已经载入的变量，
+    // 引用尚未落表的 hive 间变量时回退 `inherited`。
     for expand_pass in [false, true] {
         for registry_value in values {
             let is_path = is_path_variable(&registry_value.name);
@@ -199,7 +207,7 @@ fn apply_registry_hive(environment: &mut CaseInsensitiveEnv, values: &[RegistryV
             }
 
             let value = if is_expand {
-                expand_environment_variables(&registry_value.value, environment)
+                expand_environment_variables(&registry_value.value, environment, inherited)
             } else {
                 registry_value.value.clone()
             };
@@ -215,14 +223,18 @@ fn apply_registry_hive(environment: &mut CaseInsensitiveEnv, values: &[RegistryV
     }
 }
 
-fn expand_environment_variables(input: &str, environment: &CaseInsensitiveEnv) -> String {
+fn expand_environment_variables(
+    input: &str,
+    environment: &CaseInsensitiveEnv,
+    inherited: &CaseInsensitiveEnv,
+) -> String {
     let mut output = String::with_capacity(input.len());
     let mut variable = None::<String>;
 
     for character in input.chars() {
         if character == '%' {
             if let Some(name) = variable.take() {
-                if let Some(value) = environment.get(&name) {
+                if let Some(value) = environment.get(&name).or_else(|| inherited.get(&name)) {
                     output.push_str(value);
                 } else {
                     output.push('%');
@@ -439,6 +451,34 @@ mod tests {
         );
 
         assert_eq!(merged.get("SDK"), Some(r"C:\tools\sdk"));
+    }
+
+    #[test]
+    fn expandable_values_fall_back_to_the_process_environment() {
+        // Volatile Environment 排在 HKCU\Environment 之后：TEMP 引用的
+        // USERPROFILE 展开时还没落表，且已在 merge 开头从继承环境中删除，
+        // 必须回退进程启动环境，否则 pane 的 TEMP/TMP 变成字面量相对路径，
+        // shell 一写临时文件就在启动目录下建出 %USERPROFILE% 文件夹。
+        // 用户目录随电脑而不同，直接从当前进程取真实 USERPROFILE，断言值
+        // 也由它推导，避免把某台机器的用户名写进测试导致其他电脑失败。
+        let profile = std::env::var_os("USERPROFILE")
+            .expect("USERPROFILE must be set in the test process")
+            .to_string_lossy()
+            .into_owned();
+        let temp = format!(r"%USERPROFILE%\AppData\Local\Temp");
+        let mut state = EnvironmentState::new(environment(&[("USERPROFILE", profile.as_str())]));
+        let merged = state.merge(
+            snapshot(vec![
+                Vec::new(),
+                vec![expanded("TEMP", temp.as_str())],
+                vec![plain("USERPROFILE", profile.as_str())],
+            ]),
+            CaseInsensitiveEnv::default(),
+        );
+
+        let expected_temp = format!(r"{profile}\AppData\Local\Temp");
+        assert_eq!(merged.get("TEMP"), Some(expected_temp.as_str()));
+        assert_eq!(merged.get("USERPROFILE"), Some(profile.as_str()));
     }
 
     #[test]
