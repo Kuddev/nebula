@@ -29,6 +29,14 @@ pub(super) fn pick_file_with_hwnd(
     pick_files_inner_hwnd(hwnd, title, filters, false).into_iter().next()
 }
 
+pub(super) fn pick_files_with_hwnd(
+    hwnd: HWND,
+    title: &str,
+    filters: &[FileFilter],
+) -> Vec<PathBuf> {
+    pick_files_inner_hwnd(hwnd, title, filters, true)
+}
+
 pub(super) fn pick_folder(owner: &Window, title: &str) -> Option<PathBuf> {
     windows_folder::pick(owner.raw_window_handle(), title)
 }

@@ -1,12 +1,13 @@
 pub(crate) mod limits;
 pub(crate) mod remote_cwd;
+mod transaction;
 mod transfer;
 
 use std::collections::HashSet;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -14,13 +15,18 @@ use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileType, OpenFlags};
 use tokio::io::AsyncWriteExt;
 
+use transaction::FileStamp;
 use transfer::TransferObserver;
 
 type SftpError = Box<dyn std::error::Error + Send + Sync>;
 type SftpResult<T> = Result<T, SftpError>;
 
 const MAX_RECURSIVE_ENTRIES: usize = 100_000;
+const CANCEL_REQUESTED: usize = 1;
+const PUBLISHER_UNIT: usize = 2;
 static TRANSFER_NONCE: AtomicU64 = AtomicU64::new(1);
+
+type TaskControl = Arc<AtomicUsize>;
 
 /// UI 层被通知"状态变了，该重画了"的方式。
 ///
@@ -29,6 +35,25 @@ static TRANSFER_NONCE: AtomicU64 = AtomicU64::new(1);
 /// 闭包而不是具体的事件代理类型，是因为不同的宿主唤醒自己的方式完全不同，
 /// 而这个模块对它们应当一视同仁。
 pub(crate) type WakeFn = Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SftpConflictPolicy {
+    Overwrite,
+    Skip,
+    KeepBoth,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SftpTransferOptions {
+    pub conflict: SftpConflictPolicy,
+    pub skip_unchanged: bool,
+}
+
+impl Default for SftpTransferOptions {
+    fn default() -> Self {
+        Self { conflict: SftpConflictPolicy::Overwrite, skip_unchanged: false }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SftpEntryKind {
@@ -92,7 +117,7 @@ pub struct SftpSnapshot {
 #[derive(Clone)]
 pub struct SftpController {
     state: Arc<Mutex<SftpSnapshot>>,
-    cancel: Arc<AtomicBool>,
+    task_control: Arc<Mutex<TaskControl>>,
     generation: Arc<AtomicU64>,
     wake: WakeFn,
     pending_uploads: Arc<Mutex<Vec<PathBuf>>>,
@@ -102,11 +127,22 @@ pub struct SftpController {
 #[derive(Clone)]
 struct TaskContext {
     state: Arc<Mutex<SftpSnapshot>>,
-    cancel: Arc<AtomicBool>,
+    task_control: TaskControl,
     generation: Arc<AtomicU64>,
     task_generation: u64,
     wake: WakeFn,
     last_wake: Arc<Mutex<Instant>>,
+}
+
+struct PublishGuard {
+    task_control: TaskControl,
+}
+
+impl Drop for PublishGuard {
+    fn drop(&mut self) {
+        let previous = self.task_control.fetch_sub(PUBLISHER_UNIT, Ordering::AcqRel);
+        debug_assert!(previous & !CANCEL_REQUESTED >= PUBLISHER_UNIT);
+    }
 }
 
 impl SftpEntry {
@@ -126,23 +162,32 @@ impl SftpEntry {
 
 impl SftpController {
     pub fn new(destination: impl Into<String>, wake: WakeFn) -> io::Result<Self> {
+        Self::new_at(destination, ".", wake)
+    }
+
+    pub(crate) fn new_at(
+        destination: impl Into<String>,
+        initial_path: impl Into<String>,
+        wake: WakeFn,
+    ) -> io::Result<Self> {
         crate::ssh_session::runtime()?;
+        let initial_path = initial_path.into();
         let controller = Self {
             state: Arc::new(Mutex::new(SftpSnapshot {
                 destination: destination.into(),
-                path: ".".to_owned(),
+                path: initial_path.clone(),
                 entries: Vec::new(),
                 phase: SftpPhase::Connecting,
                 error: None,
                 progress: None,
             })),
-            cancel: Arc::new(AtomicBool::new(false)),
+            task_control: Arc::new(Mutex::new(Arc::new(AtomicUsize::new(0)))),
             generation: Arc::new(AtomicU64::new(0)),
             wake,
             pending_uploads: Arc::new(Mutex::new(Vec::new())),
             upload_debounce_active: Arc::new(AtomicBool::new(false)),
         };
-        controller.refresh(".");
+        controller.refresh(initial_path);
         Ok(controller)
     }
 
@@ -184,6 +229,22 @@ impl SftpController {
     }
 
     fn start_upload_paths(&self, local_paths: Vec<PathBuf>) {
+        self.start_upload_paths_with_options(local_paths, SftpTransferOptions::default());
+    }
+
+    pub(crate) fn upload_paths_with_options(
+        &self,
+        local_paths: Vec<PathBuf>,
+        options: SftpTransferOptions,
+    ) {
+        self.start_upload_paths_with_options(local_paths, options);
+    }
+
+    fn start_upload_paths_with_options(
+        &self,
+        local_paths: Vec<PathBuf>,
+        options: SftpTransferOptions,
+    ) {
         if local_paths.is_empty() {
             return;
         }
@@ -203,7 +264,7 @@ impl SftpController {
             Some(TransferProgress::new(label, 0)),
             move |context| async move {
                 let sftp = crate::ssh_session::open_sftp(&destination).await?;
-                upload_local_paths(&sftp, local_paths, &remote_dir, &context).await?;
+                upload_local_paths(&sftp, local_paths, &remote_dir, options, &context).await?;
                 let entries = read_remote_dir(&sftp, &remote_dir).await?;
                 Ok((remote_dir, entries))
             },
@@ -211,14 +272,43 @@ impl SftpController {
     }
 
     pub fn download(&self, entry: SftpEntry, local_directory: PathBuf) {
+        self.download_with_options(entry, local_directory, SftpTransferOptions::default());
+    }
+
+    pub(crate) fn download_with_options(
+        &self,
+        entry: SftpEntry,
+        local_directory: PathBuf,
+        options: SftpTransferOptions,
+    ) {
         let snapshot = self.snapshot();
         let destination = snapshot.destination;
         let path = snapshot.path;
         let progress = TransferProgress::new(entry.name.clone(), entry.size);
         self.start_job(SftpPhase::Working, Some(progress), move |context| async move {
             let sftp = crate::ssh_session::open_sftp(&destination).await?;
-            download_remote_entry(&sftp, entry, local_directory, &context).await?;
+            download_remote_entry(&sftp, entry, local_directory, options, &context).await?;
             let entries = read_remote_dir(&sftp, &path).await?;
+            Ok((path, entries))
+        });
+    }
+
+    pub(crate) fn copy_from(
+        &self,
+        source_destination: String,
+        entry: SftpEntry,
+        options: SftpTransferOptions,
+    ) {
+        let snapshot = self.snapshot();
+        let destination = snapshot.destination;
+        let path = snapshot.path;
+        let progress =
+            TransferProgress::new(format!("复制 {}", entry.name), entry.size.saturating_mul(2));
+        self.start_job(SftpPhase::Working, Some(progress), move |context| async move {
+            let source = crate::ssh_session::open_sftp(&source_destination).await?;
+            let target = crate::ssh_session::open_sftp(&destination).await?;
+            copy_remote_entry(&source, &target, entry, &path, options, &context).await?;
+            let entries = read_remote_dir(&target, &path).await?;
             Ok((path, entries))
         });
     }
@@ -266,10 +356,16 @@ impl SftpController {
     }
 
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::Release);
+        let task_control = lock(&self.task_control).clone();
+        let previous = task_control.fetch_or(CANCEL_REQUESTED, Ordering::AcqRel);
+        let publishing = previous & !CANCEL_REQUESTED != 0;
         let mut state = lock(&self.state);
         if state.phase == SftpPhase::Working {
-            state.error = Some("正在取消传输…".to_owned());
+            state.error = Some(if publishing {
+                "正在完成已进入发布阶段的文件，随后取消…".to_owned()
+            } else {
+                "正在取消传输…".to_owned()
+            });
         }
         drop(state);
         (self.wake)();
@@ -280,8 +376,15 @@ impl SftpController {
         J: FnOnce(TaskContext) -> F + Send + 'static,
         F: Future<Output = SftpResult<(String, Vec<SftpEntry>)>> + Send + 'static,
     {
-        self.cancel.store(false, Ordering::Release);
-        let task_generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let task_control = Arc::new(AtomicUsize::new(0));
+        let task_generation = {
+            // 新任务必须换一枚独立令牌；旧任务的发布 guard 可能晚些才释放，若
+            // 复用同一原子值，它会错误扣减新任务的发布计数。
+            let mut current = lock(&self.task_control);
+            let task_generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            *current = task_control.clone();
+            task_generation
+        };
         {
             let mut state = lock(&self.state);
             state.phase = phase;
@@ -292,7 +395,7 @@ impl SftpController {
 
         let context = TaskContext {
             state: self.state.clone(),
-            cancel: self.cancel.clone(),
+            task_control,
             generation: self.generation.clone(),
             task_generation,
             wake: self.wake.clone(),
@@ -320,7 +423,7 @@ impl TransferObserver for TaskContext {
     }
 
     fn cancelled(&self) -> bool {
-        self.cancel.load(Ordering::Acquire) || !self.is_current()
+        self.task_control.load(Ordering::Acquire) & CANCEL_REQUESTED != 0 || !self.is_current()
     }
 }
 
@@ -333,6 +436,39 @@ impl TaskContext {
         }
     }
 
+    /// 把最终发布声明成不可拆分区间。
+    ///
+    /// 目录传输会并发发布多个文件，因此高位保存发布者计数；取消位与计数通过
+    /// 同一个 CAS 竞争，保证取消先到时不会再开始 rename，发布先到时则允许该
+    /// 笔备份/替换/恢复事务完整收尾。
+    fn begin_publish(&self) -> SftpResult<PublishGuard> {
+        self.check_cancelled()?;
+        let mut current = self.task_control.load(Ordering::Acquire);
+        loop {
+            if current & CANCEL_REQUESTED != 0 || !self.is_current() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "操作已取消").into());
+            }
+            let next = current
+                .checked_add(PUBLISHER_UNIT)
+                .ok_or_else(|| io::Error::other("同时发布的文件数量超出系统限制"))?;
+            match self.task_control.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if !self.is_current() {
+                        self.task_control.fetch_sub(PUBLISHER_UNIT, Ordering::AcqRel);
+                        return Err(io::Error::new(io::ErrorKind::Interrupted, "操作已取消").into());
+                    }
+                    return Ok(PublishGuard { task_control: self.task_control.clone() });
+                },
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     fn set_total(&self, total: u64) {
         if !self.is_current() {
             return;
@@ -342,6 +478,16 @@ impl TaskContext {
             progress.transferred = progress.transferred.min(total);
         }
         self.wake_throttled(true);
+    }
+
+    fn set_label(&self, label: impl Into<String>) {
+        if !self.is_current() {
+            return;
+        }
+        if let Some(progress) = lock(&self.state).progress.as_mut() {
+            progress.label = label.into();
+        }
+        self.wake_throttled(false);
     }
 
     fn is_current(&self) -> bool {
@@ -467,28 +613,161 @@ async fn read_remote_dir(sftp: &SftpSession, path: &str) -> SftpResult<Vec<SftpE
 #[derive(Debug)]
 struct UploadPlan {
     directories: Vec<String>,
-    files: Vec<(PathBuf, String, u64)>,
+    files: Vec<UploadFile>,
     total: u64,
 }
 
-fn build_upload_plan(local_paths: Vec<PathBuf>, remote_dir: String) -> SftpResult<UploadPlan> {
+#[derive(Debug)]
+struct UploadFile {
+    local: PathBuf,
+    remote: String,
+    stamp: FileStamp,
+}
+
+#[derive(Debug)]
+struct UploadRoot {
+    local: PathBuf,
+    remote: String,
+    is_directory: bool,
+    stamp: Option<FileStamp>,
+}
+
+fn inspect_upload_roots(
+    local_paths: Vec<PathBuf>,
+    remote_dir: String,
+) -> SftpResult<Vec<UploadRoot>> {
+    let mut roots = Vec::with_capacity(local_paths.len());
+    for local in local_paths {
+        let name = local
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "本地路径缺少有效名称"))?;
+        validate_name(name)
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+        let metadata = std::fs::symlink_metadata(&local)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("暂不上传本地符号链接: {}", local.display()),
+            )
+            .into());
+        }
+        if !metadata.is_dir() && !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("本地源不是普通文件或目录: {}", local.display()),
+            )
+            .into());
+        }
+        roots.push(UploadRoot {
+            remote: normalize_remote_path(&remote_dir, name),
+            stamp: metadata.is_file().then(|| FileStamp::read(&local)).transpose()?,
+            local,
+            is_directory: metadata.is_dir(),
+        });
+    }
+    Ok(roots)
+}
+
+async fn resolve_upload_roots(
+    sftp: &SftpSession,
+    local_paths: Vec<PathBuf>,
+    remote_dir: &str,
+    options: SftpTransferOptions,
+) -> SftpResult<Vec<UploadRoot>> {
+    let remote_dir = remote_dir.to_owned();
+    let roots = tokio::task::spawn_blocking(move || inspect_upload_roots(local_paths, remote_dir))
+        .await
+        .map_err(|error| format!("扫描上传入口失败: {error}"))??;
+    let mut resolved = Vec::with_capacity(roots.len());
+    let mut reserved = HashSet::with_capacity(roots.len());
+    for mut root in roots {
+        let existing = transaction::remote_metadata_optional(sftp, &root.remote).await?;
+        let collides_with_batch = reserved.contains(&root.remote);
+        if existing.is_none() && !collides_with_batch {
+            reserved.insert(root.remote.clone());
+            resolved.push(root);
+            continue;
+        }
+
+        if options.skip_unchanged
+            && !collides_with_batch
+            && !root.is_directory
+            && root.stamp.is_some_and(|stamp| {
+                existing
+                    .as_ref()
+                    .is_some_and(|metadata| transaction::remote_unchanged(stamp, metadata))
+            })
+        {
+            continue;
+        }
+        match options.conflict {
+            SftpConflictPolicy::Skip => continue,
+            SftpConflictPolicy::KeepBoth => {
+                root.remote =
+                    duplicate_remote_root_path(sftp, &root.remote, root.is_directory, &reserved)
+                        .await?;
+            },
+            SftpConflictPolicy::Overwrite => {
+                if collides_with_batch {
+                    return Err(io::Error::other(format!(
+                        "批量上传包含多个同名根项目，不能同时覆盖: {}",
+                        root.remote
+                    ))
+                    .into());
+                }
+                let metadata = existing.as_ref().expect("remote collision checked above");
+                let compatible = (root.is_directory && metadata.is_dir())
+                    || (!root.is_directory && (metadata.is_regular() || metadata.is_symlink()));
+                if !compatible {
+                    return Err(io::Error::other(format!(
+                        "远端同名目标类型不同，不能直接覆盖: {}",
+                        root.remote
+                    ))
+                    .into());
+                }
+            },
+        }
+        reserved.insert(root.remote.clone());
+        resolved.push(root);
+    }
+    Ok(resolved)
+}
+
+/// 保留两者时既要避开服务器现有名称，也要避开本批次已经预留、但还没真正
+/// 创建的名称；否则两个本地根项目会在并发阶段写到同一个远端目标。
+async fn duplicate_remote_root_path(
+    sftp: &SftpSession,
+    destination: &str,
+    is_directory: bool,
+    reserved: &HashSet<String>,
+) -> SftpResult<String> {
+    let normalized = normalize_remote_path("/", destination);
+    let (parent, name) = normalized.rsplit_once('/').unwrap_or(("", normalized.as_str()));
+    let parent = if parent.is_empty() { "/" } else { parent };
+    for index in 1..1000 {
+        let candidate =
+            normalize_remote_path(parent, &transaction::duplicate_name(name, is_directory, index));
+        if !reserved.contains(&candidate)
+            && transaction::remote_metadata_optional(sftp, &candidate).await?.is_none()
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(io::Error::other(format!("无法为同名项目生成可用名称: {destination}")).into())
+}
+
+fn build_upload_plan(roots: Vec<UploadRoot>) -> SftpResult<UploadPlan> {
     let mut directories = Vec::new();
     let mut files = Vec::new();
     let mut total = 0u64;
     let mut stack = Vec::new();
 
-    for local in local_paths.into_iter().rev() {
-        let name = local
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "本地路径缺少有效名称"))?
-            .to_owned();
-        validate_name(&name)
-            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
-        stack.push((local, normalize_remote_path(&remote_dir, &name)));
+    for root in roots.into_iter().rev() {
+        stack.push((root.local, root.remote, root.stamp));
     }
 
-    while let Some((local, remote)) = stack.pop() {
+    while let Some((local, remote, known_stamp)) = stack.pop() {
         if files.len() + directories.len() >= MAX_RECURSIVE_ENTRIES {
             return Err(io::Error::other("上传目录超过 100000 项，已停止").into());
         }
@@ -508,11 +787,12 @@ fn build_upload_plan(local_paths: Vec<PathBuf>, remote_dir: String) -> SftpResul
                 let name = child.file_name().to_string_lossy().into_owned();
                 validate_name(&name)
                     .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
-                stack.push((child.path(), normalize_remote_path(&remote, &name)));
+                stack.push((child.path(), normalize_remote_path(&remote, &name), None));
             }
         } else if metadata.is_file() {
-            total = total.saturating_add(metadata.len());
-            files.push((local, remote, metadata.len()));
+            let stamp = known_stamp.map(Ok).unwrap_or_else(|| FileStamp::read(&local))?;
+            total = total.saturating_add(stamp.len);
+            files.push(UploadFile { local, remote, stamp });
         }
     }
 
@@ -523,33 +803,52 @@ async fn upload_local_paths(
     sftp: &SftpSession,
     local_paths: Vec<PathBuf>,
     remote_dir: &str,
+    options: SftpTransferOptions,
     context: &TaskContext,
 ) -> SftpResult<()> {
-    let remote_dir = remote_dir.to_owned();
-    let plan = tokio::task::spawn_blocking(move || build_upload_plan(local_paths, remote_dir))
+    let roots = resolve_upload_roots(sftp, local_paths, remote_dir, options).await?;
+    let plan = tokio::task::spawn_blocking(move || build_upload_plan(roots))
         .await
         .map_err(|err| format!("扫描上传目录失败: {err}"))??;
     context.set_total(plan.total);
 
+    execute_upload_plan(sftp, plan, options, context).await
+}
+
+async fn execute_upload_plan(
+    sftp: &SftpSession,
+    plan: UploadPlan,
+    options: SftpTransferOptions,
+    context: &TaskContext,
+) -> SftpResult<()> {
     // 目录必须串行建，而且必须按计划里的顺序：计划是先序遍历产出的，父目录
     // 排在子目录之前。并发建目录会让子目录的 MKDIR 抢在父目录之前发出去，
     // 撞上"父路径不存在"而失败。这一步是元数据操作，串行的代价也小。
     for directory in plan.directories {
         context.check_cancelled()?;
-        // 递归上传允许目标目录已存在。
-        let _ = sftp.create_dir(directory).await;
+        if let Err(create_error) = sftp.create_dir(directory.clone()).await {
+            let existing = transaction::remote_metadata_optional(sftp, &directory).await?;
+            if !existing.is_some_and(|metadata| metadata.is_dir()) {
+                return Err(create_error.into());
+            }
+        }
     }
     // 文件之间没有顺序依赖，可以并发。这是目录上传最大的一笔性能：一个几百
     // 个小文件的目录，串行传等于把几百条往返链首尾相接，而每条链的时间几乎
     // 全是等待。
-    transfer::run_bounded(
-        &plan.files,
-        limits::DIRECTORY_FILE_CONCURRENCY,
-        |(local, remote, _)| async move {
-            context.check_cancelled()?;
-            upload_file_atomic(sftp, local, remote, context).await
-        },
-    )
+    transfer::run_bounded(&plan.files, limits::DIRECTORY_FILE_CONCURRENCY, |file| async move {
+        context.check_cancelled()?;
+        context.set_label(file.remote.rsplit('/').next().unwrap_or(file.remote.as_str()));
+        transaction::upload_file(
+            sftp,
+            &file.local,
+            &file.remote,
+            file.stamp,
+            options.skip_unchanged,
+            context,
+        )
+        .await
+    })
     .await?;
     Ok(())
 }
@@ -645,41 +944,19 @@ pub fn upload_clipboard_image(
     });
 }
 
-/// 上传一个文件并原子替换目标。
-///
-/// 先写同目录下的隐藏临时文件，全部落地后再改名顶上去。目标路径在任何时刻
-/// 要么是完整的旧内容、要么是完整的新内容，绝不会是半个文件——中途断线、
-/// 取消、进程被杀都不会让对端看到截断的数据。
-async fn upload_file_atomic(
-    sftp: &SftpSession,
-    local: &Path,
-    destination: &str,
-    context: &TaskContext,
-) -> SftpResult<()> {
-    let nonce = TRANSFER_NONCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = temporary_upload_path(destination, nonce);
-    let result = async {
-        transfer::upload_stream(sftp, local, &temporary, context).await?;
-        // SFTP v3 的 rename 通常不覆盖已存在的目标，所以要先让路。删除和改名
-        // 之间存在一个窗口：这一刻目标路径不存在。真正的可退替换（先把旧文件
-        // 挪到备份名、改名失败再挪回来）需要目标属性检查配合，留给替换事务。
-        let _ = sftp.remove_file(destination.to_owned()).await;
-        sftp.rename(temporary.clone(), destination.to_owned()).await?;
-        Ok::<_, SftpError>(())
-    }
-    .await;
-
-    if result.is_err() {
-        let _ = sftp.remove_file(temporary).await;
-    }
-    result
-}
-
 #[derive(Debug)]
 struct DownloadPlan {
     directories: Vec<PathBuf>,
-    files: Vec<(String, PathBuf, u64)>,
+    files: Vec<DownloadFile>,
     total: u64,
+}
+
+#[derive(Debug)]
+struct DownloadFile {
+    remote: String,
+    local: PathBuf,
+    size: u64,
+    modified: u64,
 }
 
 async fn build_download_plan(
@@ -714,16 +991,16 @@ async fn build_download_plan(
             validate_name(&entry.name)
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
             let local = parent.join(&entry.name);
-            let (remote, kind, size) = if entry.kind == SftpEntryKind::Symlink {
+            let (remote, kind, size, modified) = if entry.kind == SftpEntryKind::Symlink {
                 let target = sftp.read_link(entry.path.clone()).await?;
                 let parent = entry.path.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("/");
                 let target = normalize_remote_path(parent, &target);
                 let metadata = sftp.metadata(target.clone()).await?;
                 let kind =
                     if metadata.is_dir() { SftpEntryKind::Directory } else { SftpEntryKind::File };
-                (target, kind, metadata.len())
+                (target, kind, metadata.len(), u64::from(metadata.mtime.unwrap_or(0)))
             } else {
-                (entry.path, entry.kind, entry.size)
+                (entry.path, entry.kind, entry.size, entry.modified)
             };
 
             if kind == SftpEntryKind::Directory {
@@ -736,7 +1013,7 @@ async fn build_download_plan(
                 to_list.push((remote, local));
             } else {
                 total = total.saturating_add(size);
-                files.push((remote, local, size));
+                files.push(DownloadFile { remote, local, size, modified });
             }
         }
 
@@ -760,12 +1037,83 @@ async fn build_download_plan(
 
 async fn download_remote_entry(
     sftp: &SftpSession,
-    entry: SftpEntry,
+    mut entry: SftpEntry,
     local_directory: PathBuf,
+    options: SftpTransferOptions,
     context: &TaskContext,
 ) -> SftpResult<()> {
+    let mut root_is_directory = entry.kind == SftpEntryKind::Directory;
+    let mut root_size = entry.size;
+    let mut root_modified = entry.modified;
+    if entry.kind == SftpEntryKind::Symlink {
+        let target = sftp.read_link(entry.path.clone()).await?;
+        let parent = entry.path.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("/");
+        let metadata = sftp.metadata(normalize_remote_path(parent, &target)).await?;
+        root_is_directory = metadata.is_dir();
+        root_size = metadata.len();
+        root_modified = u64::from(metadata.mtime.unwrap_or(0));
+    }
+    let desired = local_directory.join(&entry.name);
+    let existing = match tokio::fs::symlink_metadata(&desired).await {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if existing.is_some() {
+        if options.skip_unchanged
+            && !root_is_directory
+            && transaction::local_unchanged(&desired, root_size, root_modified).await?
+        {
+            context.set_total(root_size);
+            context.advance(root_size);
+            return Ok(());
+        }
+        match options.conflict {
+            SftpConflictPolicy::Skip => {
+                context.set_total(root_size);
+                context.advance(root_size);
+                return Ok(());
+            },
+            SftpConflictPolicy::KeepBoth => {
+                let duplicate =
+                    transaction::duplicate_local_path(&desired, root_is_directory).await?;
+                entry.name = duplicate
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| io::Error::other("重命名后的本地目标缺少有效文件名"))?
+                    .to_owned();
+            },
+            SftpConflictPolicy::Overwrite => {
+                let target_is_directory =
+                    existing.as_ref().is_some_and(|metadata| metadata.is_dir());
+                let target_is_file = existing.as_ref().is_some_and(|metadata| {
+                    metadata.is_file() || metadata.file_type().is_symlink()
+                });
+                if (root_is_directory && !target_is_directory)
+                    || (!root_is_directory && !target_is_file)
+                {
+                    return Err(io::Error::other(format!(
+                        "本地同名目标类型不同，不能直接覆盖: {}",
+                        desired.display()
+                    ))
+                    .into());
+                }
+            },
+        }
+    }
+
     let plan = build_download_plan(sftp, entry, local_directory, context).await?;
     context.set_total(plan.total);
+
+    execute_download_plan(sftp, plan, options.skip_unchanged, context).await
+}
+
+async fn execute_download_plan(
+    sftp: &SftpSession,
+    plan: DownloadPlan,
+    skip_unchanged: bool,
+    context: &TaskContext,
+) -> SftpResult<()> {
     // 与上传对称：目录串行建（`create_dir_all` 自己会补父级，但保持顺序仍然
     // 让失败信息指向真正出问题的那一层），文件并发传。
     for directory in plan.directories {
@@ -777,12 +1125,99 @@ async fn download_remote_entry(
     // 提前摊薄成四分之一。
     let files = plan.files.len().min(limits::DIRECTORY_FILE_CONCURRENCY).max(1);
     let window = limits::window_per_file(files);
-    transfer::run_bounded(&plan.files, files, |(remote, local, size)| async move {
+    transfer::run_bounded(&plan.files, files, |file| async move {
         context.check_cancelled()?;
-        download_file_atomic(sftp, remote, *size, local, window, context).await
+        context.set_label(
+            file.local
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| file.remote.clone()),
+        );
+        download_file_atomic(
+            sftp,
+            &file.remote,
+            file.size,
+            file.modified,
+            &file.local,
+            window,
+            skip_unchanged,
+            context,
+        )
+        .await
     })
     .await?;
     Ok(())
+}
+
+fn transfer_staging_root() -> SftpResult<PathBuf> {
+    let base = std::env::temp_dir();
+    if !base.is_absolute() {
+        return Err(io::Error::other(format!(
+            "系统临时目录不是绝对路径，已拒绝跨主机复制: {}",
+            base.display()
+        ))
+        .into());
+    }
+    let nonce = TRANSFER_NONCE.fetch_add(1, Ordering::Relaxed);
+    Ok(base.join(format!("nebula-sftp-copy-{nonce:016x}")))
+}
+
+async fn copy_remote_entry(
+    source: &SftpSession,
+    target: &SftpSession,
+    entry: SftpEntry,
+    target_directory: &str,
+    options: SftpTransferOptions,
+    context: &TaskContext,
+) -> SftpResult<()> {
+    if options.skip_unchanged {
+        let source_metadata = if entry.kind == SftpEntryKind::Symlink {
+            source.metadata(entry.path.clone()).await?
+        } else {
+            source.symlink_metadata(entry.path.clone()).await?
+        };
+        if source_metadata.is_regular() {
+            let target_path = normalize_remote_path(target_directory, &entry.name);
+            if transaction::remote_metadata_optional(target, &target_path).await?.is_some_and(
+                |target_metadata| {
+                    target_metadata.is_regular()
+                        && target_metadata.len() == source_metadata.len()
+                        && source_metadata.mtime.is_some()
+                        && target_metadata.mtime == source_metadata.mtime
+                },
+            ) {
+                context.set_total(source_metadata.len());
+                context.advance(source_metadata.len());
+                return Ok(());
+            }
+        }
+    }
+
+    let staging_root = transfer_staging_root()?;
+    tokio::fs::create_dir_all(&staging_root).await?;
+    let staged_entry = staging_root.join(&entry.name);
+    let result = async {
+        let download = build_download_plan(source, entry, staging_root.clone(), context).await?;
+        let source_bytes = download.total;
+        context.set_total(source_bytes.saturating_mul(2));
+        execute_download_plan(source, download, false, context).await?;
+
+        let roots =
+            resolve_upload_roots(target, vec![staged_entry], target_directory, options).await?;
+        let upload = tokio::task::spawn_blocking(move || build_upload_plan(roots))
+            .await
+            .map_err(|error| format!("扫描跨主机复制 staging 失败: {error}"))??;
+        context.set_total(source_bytes.saturating_add(upload.total));
+        execute_upload_plan(target, upload, options, context).await
+    }
+    .await;
+
+    if let Err(error) = tokio::fs::remove_dir_all(&staging_root).await
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        log::warn!("跨主机复制 staging 清理失败（{}）: {error}", staging_root.display());
+    }
+    result
 }
 
 /// 下载一个文件并原子替换本地目标。
@@ -797,8 +1232,10 @@ async fn download_file_atomic(
     sftp: &SftpSession,
     remote: &str,
     total: u64,
+    modified: u64,
     destination: &Path,
     window: usize,
+    skip_unchanged: bool,
     context: &TaskContext,
 ) -> SftpResult<()> {
     if let Some(parent) = destination.parent() {
@@ -810,18 +1247,21 @@ async fn download_file_atomic(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "下载路径缺少有效文件名"))?;
     let nonce = TRANSFER_NONCE.fetch_add(1, Ordering::Relaxed);
     let temporary = destination.with_file_name(format!(".{name}.nebula-download-{nonce:016x}"));
-    let result = async {
-        transfer::download_segmented(sftp, remote, total, &temporary, window, context).await?;
-        let _ = tokio::fs::remove_file(destination).await;
-        tokio::fs::rename(&temporary, destination).await?;
-        Ok::<_, SftpError>(())
+    if skip_unchanged && transaction::local_unchanged(destination, total, modified).await? {
+        context.advance(total);
+        return Ok(());
     }
-    .await;
-
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(temporary).await;
+    if let Err(error) =
+        transfer::download_segmented(sftp, remote, total, &temporary, window, context).await
+    {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error);
     }
-    result
+    if let Err(error) = context.check_cancelled() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error);
+    }
+    transaction::publish_local_file(temporary, destination, modified, context).await
 }
 
 async fn delete_remote_entry(

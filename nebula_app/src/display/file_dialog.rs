@@ -142,6 +142,15 @@ pub(crate) fn pick_folder_with_hwnd(
     platform::pick_folder_with_hwnd(hwnd, title)
 }
 
+/// GPUI SFTP 上传用：允许多选，并把 Win32 模态框挂到当前 GPUI 窗口。
+/// 调用方必须放到专用线程，避免对话框消息泵重入 GPUI 的 update 借用。
+#[cfg(windows)]
+pub(crate) fn pick_upload_files_with_hwnd(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+) -> Vec<PathBuf> {
+    platform::pick_files_with_hwnd(hwnd, "选择要上传的文件", &[ALL_FILES_FILTER])
+}
+
 /// Validate a path selected by a non-winit UI shell. The legacy picker and GPUI
 /// both use this exact classifier so a `.pub` file can never silently enter a
 /// profile just because the shell used a different native file-dialog API.
