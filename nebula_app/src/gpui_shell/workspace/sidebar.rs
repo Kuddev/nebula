@@ -962,6 +962,19 @@ impl NebulaWorkspace {
                 title_bar_panel_controls()
                     .gap_2()
                     .child(
+                        Button::new("toggle-command-manager")
+                            .icon(
+                                Icon::new(Icon::empty())
+                                    .path(crate::gpui_shell::assets::nav::COMMAND_MANAGER),
+                            )
+                            .ghost()
+                            .selected(self.command_manager_open)
+                            .tooltip("命令列表")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_command_manager(window, cx);
+                            })),
+                    )
+                    .child(
                         Button::new("toggle-file-tree")
                             .icon(if files_active {
                                 IconName::FolderOpen

@@ -24,7 +24,7 @@ macro_rules! icons {
     };
 }
 
-const NEBULA_ICONS: &[(&str, &[u8])] = icons!["keymap"];
+const NEBULA_ICONS: &[(&str, &[u8])] = icons!["command-manager", "keymap", "pencil", "trash-2"];
 
 /// 先查本仓库，未命中再交给组件库。
 pub struct NebulaAssets;
@@ -51,6 +51,12 @@ impl AssetSource for NebulaAssets {
 
 /// 自带图标的路径。走路径而不是 `IconName`：扩展那个枚举等于改 fork。
 pub mod nav {
+    /// 保存命令列表。闪电表达快捷执行，右侧三横线表达可管理的命令集合。
+    pub const COMMAND_MANAGER: &str = "icons/nebula-command-manager.svg";
     /// 键盘。lucide 没有，而「按键映射」原来错挂在字号图标上。
     pub const KEYMAP: &str = "icons/nebula-keymap.svg";
+    /// Lucide pencil；固定组件资产集未收录，命令行内编辑动作需要明确图形语义。
+    pub const PENCIL: &str = "icons/nebula-pencil.svg";
+    /// Lucide trash-2；删除保存命令不能借用表示 Backspace 的 `IconName::Delete`。
+    pub const TRASH: &str = "icons/nebula-trash-2.svg";
 }

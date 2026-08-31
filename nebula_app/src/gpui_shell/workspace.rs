@@ -45,6 +45,7 @@ use gpui_component::notification::Notification;
 use nebula_split::{DIVIDER_GAP, HIT_SLOP, RemoveOutcome, SplitDirection, SplitNav, SplitTree};
 
 mod agents;
+mod command_manager;
 mod file_tree;
 mod key_actions;
 mod pane_header;
@@ -968,6 +969,14 @@ pub struct NebulaWorkspace {
     command_palette_open: bool,
     command_palette_input: Entity<InputState>,
     command_palette_selected: usize,
+    /// 用户命令管理器贴在右侧覆盖显示，不占终端布局宽度，也不复用应用动作
+    /// 命令面板的状态，避免两种“命令”语义互相污染。
+    command_manager_open: bool,
+    command_manager_input: Entity<InputState>,
+    command_manager_selected: usize,
+    command_manager_scroll: gpui::ScrollHandle,
+    saved_commands: crate::saved_commands::SavedCommands,
+    _command_manager_subscription: Subscription,
     /// Git/SVN 提交信息输入（GPUI 输入组件）；提交动作直达共享模型
     /// `vcs_commit_message`，不经旧壳的内部输入状态机。
     git_commit_input: Entity<InputState>,
@@ -1126,6 +1135,8 @@ impl NebulaWorkspace {
             });
         let command_palette_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索命令…"));
+        let command_manager_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("搜索已保存命令…"));
         let git_commit_input = cx.new(|cx| InputState::new(window, cx).placeholder("提交信息…"));
         let command_palette_subscription = cx.subscribe_in(
             &command_palette_input,
@@ -1143,6 +1154,27 @@ impl NebulaWorkspace {
                     },
                     InputEvent::PressEnter { .. } => {
                         this.run_selected_palette_action(window, cx);
+                    },
+                    _ => {},
+                }
+            },
+        );
+        let command_manager_subscription = cx.subscribe_in(
+            &command_manager_input,
+            window,
+            |this: &mut Self,
+             _: &Entity<InputState>,
+             event: &InputEvent,
+             window: &mut Window,
+             cx: &mut Context<'_, Self>| {
+                match event {
+                    InputEvent::Change => {
+                        this.command_manager_selected = 0;
+                        this.command_manager_scroll.scroll_to_item(0);
+                        cx.notify();
+                    },
+                    InputEvent::PressEnter { .. } => {
+                        this.run_selected_saved_command(window, cx);
                     },
                     _ => {},
                 }
@@ -1188,6 +1220,12 @@ impl NebulaWorkspace {
             command_palette_open: false,
             command_palette_input,
             command_palette_selected: 0,
+            command_manager_open: false,
+            command_manager_input,
+            command_manager_selected: 0,
+            command_manager_scroll: gpui::ScrollHandle::new(),
+            saved_commands: crate::saved_commands::SavedCommands::load().unwrap_or_default(),
+            _command_manager_subscription: command_manager_subscription,
             git_commit_input,
             vcs_discard_confirm: None,
             palette_override: None,
@@ -2903,6 +2941,7 @@ impl NebulaWorkspace {
             self.close_command_palette(window, cx);
             return;
         }
+        self.command_manager_open = false;
         self.command_palette_open = true;
         self.command_palette_selected = 0;
         self.palette_override = None;
@@ -2996,6 +3035,7 @@ impl NebulaWorkspace {
     }
 
     fn open_quick_jump_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_manager_open = false;
         self.shell_picker_open = false;
         self.launcher_filter = crate::display::command_palette::LauncherFilter::All;
         self.quick_jump_filter = Some(QuickJumpFilter::All);
@@ -3012,6 +3052,7 @@ impl NebulaWorkspace {
 
     /// 三点 / Ctrl+K：旧壳 `NewTabMenu` → `open_shell_menu` → `PaletteMode::Profiles`。
     fn open_shell_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_manager_open = false;
         let default_shell_id = cx
             .try_global::<crate::gpui_shell::config::Settings>()
             .and_then(|settings| settings.shell_id.clone())
@@ -4886,6 +4927,9 @@ impl Render for NebulaWorkspace {
             )
             .when(self.command_palette_open, |root| {
                 root.child(self.render_command_palette(cx))
+            })
+            .when(self.command_manager_open, |root| {
+                root.child(self.render_command_manager(window, cx))
             })
             .when_some(self.render_file_tree_context_menu(), |root, menu| {
                 root.child(menu)

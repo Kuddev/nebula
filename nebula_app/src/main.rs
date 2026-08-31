@@ -88,6 +88,7 @@ mod renderer;
 mod renderer;
 mod runtime_api;
 mod runtime_exec;
+mod saved_commands;
 mod scheduler;
 mod session;
 mod shell_detect;

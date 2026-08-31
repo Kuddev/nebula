@@ -33,9 +33,9 @@ const TOP_TAB_MIN_W: f32 = 160.0;
 const TOP_TAB_MAX_W: f32 = 220.0;
 const TOP_TAB_GAP: f32 = 4.0;
 const TOP_TAB_STATUS_W: f32 = 28.0;
-/// 标题栏中不属于 tab 视口的固定预算：左内边距、四枚 32px 操作按钮、
+/// 标题栏中不属于 tab 视口的固定预算：左内边距、五枚 32px 操作按钮、
 /// 三枚 34px 窗口按钮，以及至少 72px 的可拖拽空白。
-const TOP_TAB_RESERVED_W: f32 = TOP_TAB_LEFT_INSET + 32.0 * 4.0 + 34.0 * 3.0 + 72.0;
+const TOP_TAB_RESERVED_W: f32 = TOP_TAB_LEFT_INSET + 32.0 * 5.0 + 34.0 * 3.0 + 72.0;
 /// 溢出翻页按钮（WT 的 TabView 在 tab 溢出时于两端给 `‹ ›`）单枚占的宽。
 const TOP_TAB_NUDGE_W: f32 = 22.0;
 /// 拖拽越界自动滚的触发带宽：指针进到视口左/右这么近就开始滚。
@@ -659,6 +659,20 @@ impl NebulaWorkspace {
             .child(div().h_full().flex_1().min_w_0())
             .child(
                 title_bar_panel_controls()
+                    .child(
+                        Button::new("top-toggle-command-manager")
+                            .icon(
+                                Icon::new(Icon::empty()).path(
+                                    crate::gpui_shell::assets::nav::COMMAND_MANAGER,
+                                ),
+                            )
+                            .ghost()
+                            .selected(self.command_manager_open)
+                            .tooltip("命令列表")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_command_manager(window, cx);
+                            })),
+                    )
                     .child(
                         Button::new("top-toggle-file-tree")
                             .icon(if files_active {
