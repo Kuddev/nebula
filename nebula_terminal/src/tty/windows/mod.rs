@@ -683,6 +683,9 @@ if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue) {
         # the whole command in one chord, matching the expected shell UX.
         Set-PSReadLineKeyHandler -Key Ctrl+u -Function BackwardDeleteLine -ErrorAction SilentlyContinue
         Set-PSReadLineKeyHandler -Key Ctrl+k -Function ForwardDeleteLine -ErrorAction SilentlyContinue
+        # gpui keymap 在传统 VT 路径把 Ctrl+Backspace 编成 \x17（Ctrl+W）：
+        # 绑成 BackwardKillWord 才能让物理按键落到一次词删除。
+        Set-PSReadLineKeyHandler -Key Ctrl+w -Function BackwardKillWord -ErrorAction SilentlyContinue
     } catch {}
 
     # OSC 133;C — wrap PSConsoleHostReadLine (the shell integration protocol's
@@ -1093,6 +1096,16 @@ mod test {
     #[test]
     fn powershell_cat_defaults_to_utf8() {
         assert!(NEBULA_PROMPT_PS1.contains("PSDefaultParameterValues['Get-Content:Encoding']"));
+    }
+
+    /// gpui keymap 在传统 VT 路径把 Ctrl+Backspace 编成 \x17（Ctrl+W）；
+    /// 托管 PowerShell 必须把它绑到 BackwardKillWord，否则仍是单字符退格。
+    #[test]
+    fn powershell_ctrl_backspace_binds_backward_kill_word_in_the_managed_prompt() {
+        assert!(
+            NEBULA_PROMPT_PS1
+                .contains("Set-PSReadLineKeyHandler -Key Ctrl+w -Function BackwardKillWord")
+        );
     }
 
     #[test]
