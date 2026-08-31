@@ -2758,12 +2758,11 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             return false;
         };
         if let Some(destination) = self.ssh_destination {
-            crate::ssh_sftp::upload_clipboard_image(
-                destination.to_owned(),
-                png,
-                self.pane_id,
-                self.event_proxy.clone(),
-            );
+            let proxy = self.event_proxy.clone();
+            let pane_id = self.pane_id;
+            crate::ssh_sftp::upload_clipboard_image(destination.to_owned(), png, move |remote| {
+                crate::runtime_api::dispatch_prompt(&proxy, pane_id, remote);
+            });
             return true;
         }
         let stamp = std::time::SystemTime::now()

@@ -815,6 +815,76 @@ async fn authenticate(
     Err(auth_failure(profile.auth, key_count, &local_key_errors).into())
 }
 
+/// 在目标主机上跑一条命令并收集它的标准输出，脚本经标准输入送入。
+///
+/// 走连接池里已认证的传输，所以不会触发第二次认证或 MFA；开的是独立 exec
+/// 通道，交互终端里**不会**出现任何回显——用户看不到我们在后台问了什么。
+///
+/// `script` 作为被执行程序的标准输入。这样命令行里就不必嵌任何引号，脚本
+/// 含 `'`、`$` 都无需转义（拼命令行做两层转义，错一个字符就是难查的静默
+/// 失败）。
+///
+/// `budget` 到点即放弃：远端可能因为负载或磁盘卡住不回话，而调用方是 UI，
+/// 不能无限等。超时返回错误而不是空字符串——"问不到"和"答案是空"必须分开。
+pub(crate) async fn exec_capture(
+    raw_destination: &str,
+    command: &str,
+    script: &[u8],
+    budget: Duration,
+) -> Result<String, SessionError> {
+    let profiles_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
+    let raw = raw_destination.to_owned();
+    let (destination, profile) = tokio::task::spawn_blocking(move || {
+        let destination = SshDestination::resolve(&raw)?;
+        let profiles = crate::ssh_profiles::SshProfiles::load(&profiles_path)
+            .unwrap_or_else(|_| crate::ssh_profiles::SshProfiles::default());
+        Ok::<_, io::Error>((destination, profiles.for_destination(&raw)))
+    })
+    .await
+    .map_err(|err| format!("SSH 地址解析任务失败: {err}"))??;
+
+    let session = authenticated_session(&destination, &profile, None::<&EventProxy>).await?;
+    let mut channel = {
+        let session = session.lock().await;
+        session.channel_open_session().await?
+    };
+    channel.exec(true, command).await?;
+    if !script.is_empty() {
+        channel.data_bytes(script.to_vec()).await?;
+        // 不发 EOF 的话远端 `sh` 会一直等更多输入，命令永远不结束。
+        channel.eof().await?;
+    }
+
+    let collect = async {
+        let mut stdout = Vec::new();
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                // 标准错误只当诊断线索，不混进结果——远端的 `ps: not found`
+                // 之类抱怨不该被当成路径。
+                ChannelMsg::ExtendedData { data, .. } => {
+                    if let Ok(text) = std::str::from_utf8(&data) {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            log::debug!("远端命令 stderr（{raw_destination}）: {text}");
+                        }
+                    }
+                },
+                ChannelMsg::Eof | ChannelMsg::Close => break,
+                _ => {},
+            }
+        }
+        stdout
+    };
+
+    match tokio::time::timeout(budget, collect).await {
+        // 远端文件名和路径未必是合法 UTF-8。有损转换让"大部分能读"胜过
+        // "整次探测失败"；真正需要字节精度的路径操作走 SFTP，不走这里。
+        Ok(stdout) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
+        Err(_) => Err(format!("远端命令超过 {} 秒未返回", budget.as_secs()).into()),
+    }
+}
+
 /// 在现有认证连接上打开独立 SFTP 子系统；连接池和认证策略仍只有一份。
 pub(crate) async fn open_sftp(
     raw_destination: &str,
@@ -846,7 +916,14 @@ pub(crate) async fn open_sftp(
         session.channel_open_session().await?
     };
     channel.request_subsystem(true, "sftp").await?;
-    Ok(russh_sftp::client::SftpSession::new(channel.into_stream()).await?)
+    // 显式给参数而不是用上游默认值：默认单包 256 KiB 会让每个 READ/WRITE 都
+    // 顶满一个巨型请求（部分服务端在这个尺寸上会静默出错），而默认在途写
+    // 请求只有 8 个，高时延链路上填不满管道。判据见 `ssh_sftp::limits`。
+    Ok(russh_sftp::client::SftpSession::new_with_config(
+        channel.into_stream(),
+        crate::ssh_sftp::limits::session_config(),
+    )
+    .await?)
 }
 
 // ---- 「测试连接」（SSH 编辑器页脚，spec ui-redesign 稿一） ----

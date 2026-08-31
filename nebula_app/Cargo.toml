@@ -79,8 +79,8 @@ bitflags = "2.2.1"
 chrono = "0.4.45"
 clap = { version = "4.2.7", features = ["derive", "env"] }
 copypasta = { version = "0.10.1", default-features = false }
-crossfont = "0.9.0"
-glutin = { version = "0.32.2", default-features = false, features = ["egl", "wgl"] }
+crossfont = { version = "0.9.0", optional = true }
+glutin = { version = "0.32.2", optional = true, default-features = false, features = ["egl", "wgl"] }
 # 远程备份的 S3 SigV4 签名（backup_remote）。0.13 配 sha2 0.11 的 digest
 # 世代；lock 里已有该版本，零新增下载。
 hmac = "0.13"
@@ -128,7 +128,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha1 = "0.11.0"
 
 [build-dependencies]
-gl_generator = "0.14.0"
+gl_generator = { version = "0.14.0", optional = true }
 serde_json = "1"
 
 [dev-dependencies]
@@ -223,7 +223,16 @@ windows-sys = { version = "0.59", features = [
 embed-resource = "3.0.2"
 
 [features]
-default = ["wayland", "x11"]
+# 正式产品只有 GPUI 壳。旧 winit/glutin/crossfont 壳只在显式请求
+# `legacy-shell` 时进入依赖图，不能再被 workspace 默认构建误打进发布包。
+default = ["gpui-shell"]
+legacy-shell = [
+    "dep:crossfont",
+    "dep:glutin",
+    "dep:gl_generator",
+    "wayland",
+    "x11",
+]
 x11 = [
     "copypasta/x11",
     "winit/x11",
@@ -243,9 +252,8 @@ wayland = [
 ]
 nightly = []
 wgpu-foundation = ["dep:pollster", "dep:wgpu"]
-# GPUI UI 层（产品代码在 src/gpui_shell/）。默认关闭，不影响常规构建。
-# 带此 feature 的发布包：双击 / 无参 GUI 即进 GPUI；`--legacy-shell` 回旧壳。
-# `--gpui` 仍可用。NEBULA_GPUI_SHELL=1 是旧的 spike 并存形态。
+# GPUI UI 层（产品代码在 src/gpui_shell/），也是默认与正式发布 UI。
+# `--gpui` 作为兼容参数保留；旧壳只存在于显式 `legacy-shell` 构建。
 gpui-shell = [
     "dep:gpui",
     "dep:gpui_platform",

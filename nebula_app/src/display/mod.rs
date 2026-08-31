@@ -7219,7 +7219,16 @@ impl Display {
             return Ok(());
         }
         let was_open = self.nebula_side_panel.open;
-        let controller = crate::ssh_sftp::SftpController::new(destination, proxy, self.window.id())
+        // 控制器只拿一个"响一声"的闭包；把事件代理和窗口 id 捆进闭包是宿主的
+        // 活儿，远端浏览器本身对消息循环一无所知。
+        let window_id = self.window.id();
+        let wake: crate::ssh_sftp::WakeFn = std::sync::Arc::new(move || {
+            let _ = proxy.send_event(crate::event::Event::new(
+                crate::event::EventType::SftpUpdated,
+                window_id,
+            ));
+        });
+        let controller = crate::ssh_sftp::SftpController::new(destination, wake)
             .map_err(|err| format!("无法打开 SFTP: {err}"))?;
         self.nebula_side_panel.search_unfocus(false);
         self.nebula_side_panel.commit_unfocus();

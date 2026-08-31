@@ -50,6 +50,7 @@ mod key_actions;
 mod pane_header;
 mod quick_jump;
 mod quick_terminal;
+mod remote_files;
 mod residency;
 mod send_to_chat;
 mod sidebar;
@@ -58,6 +59,7 @@ mod tab_menu;
 mod tab_scroll;
 mod top_tabs;
 mod update_dialog;
+mod vcs_panel;
 pub(crate) mod windowing;
 
 // 调用点分散在设置页与窗口层，原样再导出以免拆分波及它们。
@@ -998,6 +1000,12 @@ pub struct NebulaWorkspace {
     file_tree_scroll: gpui::UniformListScrollHandle,
     /// 文件树右键：画在 workspace 根上，不进抽屉子孙树。见 `file_tree.rs`。
     file_tree_menu: Option<file_tree::FileTreeContextMenu>,
+    /// 抽屉在 SSH pane 上的远端形态。与 `side_panel` 并存而不是替换它：
+    /// 用户在远端 tab 和本地 tab 之间来回切时，两边的浏览位置都该留着。
+    remote_browser: remote_files::RemoteBrowser,
+    /// 远端列表的滚动位置。与本地树各用一个 handle：共用会让切换 pane 时
+    /// 滚动条停在上一个列表的位置上，看起来像是列表内容对不上。
+    remote_files_scroll: gpui::UniformListScrollHandle,
     /// 标签右键：同样画在根上。挂进标签行会让每一行都渲染同一份菜单，
     /// popover 阴影按标签数叠厚。见 `tab_menu.rs` 模块头。
     tab_menu: Option<tab_menu::TabContextMenu>,
@@ -1193,6 +1201,8 @@ impl NebulaWorkspace {
             side_panel_anim_armed: false,
             file_tree_scroll: gpui::UniformListScrollHandle::new(),
             file_tree_menu: None,
+            remote_browser: remote_files::RemoteBrowser::default(),
+            remote_files_scroll: gpui::UniformListScrollHandle::new(),
             tab_menu: None,
             selection_context_menu: None,
             sidebar_logo_images: sidebar_logo_images(sidebar_logo_target_px),
@@ -2645,6 +2655,13 @@ impl NebulaWorkspace {
         if !self.side_panel.open {
             return false;
         }
+        // 远端 pane 的位置不在本机文件系统里。不早退的话，`side_panel_follow`
+        // 会拿远端路径去问宿主 `is_dir`（必然为假），于是本地树保留上一个有效
+        // 根——用户在 SSH tab 上看到的是**上一个本地目录**的内容，而且没有任何
+        // 提示。这正是"远端浏览器识别不到"的观感来源。
+        if self.remote_browser.active() {
+            return false;
+        }
         let (cwd, wsl) = self.side_panel_follow(cx);
         let cleared = reset_browse_root && self.side_panel.clear_custom_root();
         self.side_panel.sync_at(cwd, wsl) || cleared
@@ -3717,622 +3734,22 @@ impl NebulaWorkspace {
         cx.notify();
     }
 
-    fn render_side_panel_switch(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::display::side_panel::PanelView;
-
-        let files = self.side_panel.view == PanelView::Files;
-        let git = self.side_panel.view == PanelView::Git;
-        let git_count = self
-            .side_panel
-            .git()
-            .map(|snapshot| snapshot.unstaged.len() + snapshot.staged.len())
-            .unwrap_or(0);
-        let vcs_name = match self.side_panel.vcs() {
-            Some(crate::display::side_panel::VcsKind::Svn)
-            | Some(crate::display::side_panel::VcsKind::SvnRepository) => "SVN",
-            _ => "Git",
-        };
-        let is_git_vcs = vcs_name == "Git";
-        h_flex()
-            .gap_1()
-            .child(
-                Button::new("side-panel-files")
-                    .icon(IconName::FolderClosed)
-                    .label("文件")
-                    .small()
-                    .selected(files)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.select_side_panel_view(PanelView::Files, cx);
-                    })),
-            )
-            .child(
-                Button::new("side-panel-git")
-                    .label(vcs_name)
-                    .when(is_git_vcs, |button| button.icon(IconName::Github))
-                    .small()
-                    .selected(git)
-                    .when(git_count > 0, |button| button.label(format!("{vcs_name} {git_count}")))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.select_side_panel_view(PanelView::Git, cx);
-                    })),
-            )
-    }
-
-    fn render_git_tree(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let view_switch = self.render_side_panel_switch(cx).into_any_element();
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let hover = theme.list_hover;
-        let selected_bg = theme.list_active;
-        let symbol: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
-        // Git 视图看的是终端当前目录，不是目录树浏览到的位置（`vcs_root`）。
-        let root = self.side_panel.vcs_root().map(Path::to_path_buf);
-        let selected = self.side_panel.selected.clone();
-        let git = self.side_panel.git().cloned();
-        let vcs = git.as_ref().map(|info| info.vcs);
-        let op_running = self.side_panel.op_running();
-        let op_error = self.side_panel.op_error();
-        let mut rows = Vec::new();
-
-        if let Some(info) = git.as_ref() {
-            use crate::display::side_panel::VcsKind;
-            /// 分组决定行内操作（VS Code 的 SCM 行合同）。
-            #[derive(Clone, Copy, PartialEq)]
-            enum RowOps {
-                /// 变更组：暂存 + 丢弃（untracked 不给丢弃——restore 不删新文件）。
-                Unstaged,
-                /// 已暂存组：取消暂存。
-                Staged,
-                /// Git 冲突组：当前只展示状态。
-                None,
-                /// SVN 无暂存区，具体操作由状态字母决定。
-                Svn,
-            }
-            let is_git = info.vcs == VcsKind::Git;
-            let conflict_paths: std::collections::HashSet<&str> =
-                info.conflicts.iter().map(|(_, path)| path.as_str()).collect();
-            // VS Code 三组模型：合并冲突 → 已暂存 → 变更。冲突路径从后两组
-            // 过滤（数据层为旧壳兼容把它们同时留在原列表里）。
-            let mut sections: Vec<(&str, Vec<&(char, String)>, RowOps)> = Vec::new();
-            if !info.conflicts.is_empty() {
-                sections.push((
-                    "合并冲突",
-                    info.conflicts.iter().collect(),
-                    if is_git { RowOps::None } else { RowOps::Svn },
-                ));
-            }
-            let not_conflicted =
-                |(_, path): &&(char, String)| !conflict_paths.contains(path.as_str());
-            match info.vcs {
-                VcsKind::Git => {
-                    sections.push((
-                        "已暂存",
-                        info.staged.iter().filter(not_conflicted).collect(),
-                        RowOps::Staged,
-                    ));
-                    sections.push((
-                        "变更",
-                        info.unstaged.iter().filter(not_conflicted).collect(),
-                        RowOps::Unstaged,
-                    ));
-                },
-                VcsKind::Svn => sections.push((
-                    "修改",
-                    info.unstaged.iter().filter(not_conflicted).collect(),
-                    RowOps::Svn,
-                )),
-                VcsKind::SvnRepository => {},
-            }
-            let clean = sections.iter().all(|(_, entries, _)| entries.is_empty());
-            if clean && info.vcs != VcsKind::SvnRepository {
-                rows.push(
-                    div()
-                        .py_2()
-                        .px_2()
-                        .text_sm()
-                        .text_color(muted)
-                        .child("没有更改")
-                        .into_any_element(),
-                );
-            }
-            let discard_confirm = self.vcs_discard_confirm.clone();
-            for (section, entries, ops) in sections {
-                if entries.is_empty() {
-                    continue;
-                }
-                rows.push(
-                    h_flex()
-                        .h(px(26.0))
-                        .px_2()
-                        .items_center()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(section)
-                        .child(div().ml_2().child(entries.len().to_string()))
-                        .into_any_element(),
-                );
-                for (index, (status, relative_path)) in entries.into_iter().enumerate() {
-                    let path = root
-                        .as_ref()
-                        .map(|root| root.join(relative_path))
-                        .unwrap_or_else(|| std::path::PathBuf::from(relative_path));
-                    let selected_row = selected.as_ref() == Some(&path);
-                    let status_color = match status {
-                        'A' | '?' => theme.success,
-                        'D' | '!' => theme.danger,
-                        'C' | 'U' => theme.danger,
-                        _ => theme.warning,
-                    };
-                    // VS Code 式路径拆分：文件名主体 + 灰色父目录。
-                    let (file_name, parent) = match relative_path.rfind('/') {
-                        Some(pos) => {
-                            (relative_path[pos + 1..].to_owned(), relative_path[..pos].to_owned())
-                        },
-                        None => (relative_path.clone(), String::new()),
-                    };
-                    let row_group =
-                        SharedString::from(format!("vcs-row-actions-{section}-{index}"));
-                    let open_path = path.clone();
-                    let stage_path = relative_path.clone();
-                    let svn_add_path = relative_path.clone();
-                    let unstage_path = relative_path.clone();
-                    let discard_path = relative_path.clone();
-                    let resolve_path = relative_path.clone();
-                    let diff_path = relative_path.clone();
-                    let discard_armed = discard_confirm.as_deref() == Some(relative_path.as_str());
-                    let git_discard = ops == RowOps::Unstaged && *status != '?';
-                    let svn_revert = ops == RowOps::Svn && !matches!(*status, '?' | 'C');
-                    let can_discard = git_discard || svn_revert;
-                    let svn_add = ops == RowOps::Svn && *status == '?';
-                    let svn_resolve = ops == RowOps::Svn && *status == 'C';
-                    let svn_diff = ops == RowOps::Svn && !matches!(*status, '?' | '!');
-                    rows.push(
-                        h_flex()
-                            .id(SharedString::from(format!(
-                                "git-tree-row-{section}-{index}-{relative_path}"
-                            )))
-                            .group(row_group.clone())
-                            .h(px(30.0))
-                            .w_full()
-                            .px_2()
-                            .gap_2()
-                            .items_center()
-                            .rounded_md()
-                            .when(selected_row, |row| row.bg(selected_bg))
-                            .hover(|row| row.bg(hover))
-                            .child(
-                                div()
-                                    .w(px(14.0))
-                                    .flex_shrink_0()
-                                    .font_family(symbol.clone())
-                                    .text_sm()
-                                    .text_color(status_color)
-                                    .child(status.to_string()),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(div().flex_shrink_0().text_sm().child(file_name.clone()))
-                                    .when(!parent.is_empty(), |line| {
-                                        line.child(
-                                            div()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_xs()
-                                                .text_color(muted)
-                                                .child(parent.clone()),
-                                        )
-                                    }),
-                            )
-                            .when(can_discard, |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "vcs-discard-{section}-{index}"
-                                    )))
-                                    .map(|button| {
-                                        if discard_armed {
-                                            button
-                                                .label(if svn_revert {
-                                                    "确认还原"
-                                                } else {
-                                                    "确认丢弃"
-                                                })
-                                                .danger()
-                                                .xsmall()
-                                        } else {
-                                            button.icon(IconName::Undo2).ghost().xsmall().tooltip(
-                                                if svn_revert {
-                                                    "还原 SVN 改动"
-                                                } else {
-                                                    "丢弃改动"
-                                                },
-                                            )
-                                        }
-                                    })
-                                    .when(!discard_armed, |button| {
-                                        button
-                                            .invisible()
-                                            .group_hover(row_group.clone(), |button| {
-                                                button.visible()
-                                            })
-                                    })
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            if this.vcs_discard_confirm.as_deref()
-                                                == Some(discard_path.as_str())
-                                            {
-                                                this.vcs_discard_confirm = None;
-                                                if svn_revert {
-                                                    this.side_panel.svn_revert_path(&discard_path);
-                                                } else {
-                                                    this.side_panel.git_discard_path(&discard_path);
-                                                }
-                                            } else {
-                                                this.vcs_discard_confirm =
-                                                    Some(discard_path.clone());
-                                            }
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(ops == RowOps::Unstaged && is_git, |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "vcs-stage-{section}-{index}"
-                                    )))
-                                    .icon(IconName::Plus)
-                                    .ghost()
-                                    .xsmall()
-                                    .tooltip("暂存")
-                                    .invisible()
-                                    .group_hover(row_group.clone(), |button| button.visible())
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.vcs_discard_confirm = None;
-                                            this.side_panel.git_stage_path(&stage_path);
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(svn_add, |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "svn-add-{section}-{index}"
-                                    )))
-                                    .icon(IconName::Plus)
-                                    .ghost()
-                                    .xsmall()
-                                    .tooltip("添加到 SVN")
-                                    .invisible()
-                                    .group_hover(row_group.clone(), |button| button.visible())
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.vcs_discard_confirm = None;
-                                            this.side_panel.svn_add_path(&svn_add_path);
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(svn_resolve, |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "svn-resolve-{section}-{index}"
-                                    )))
-                                    .label("解决")
-                                    .ghost()
-                                    .xsmall()
-                                    .tooltip("保留当前内容并标记冲突已解决")
-                                    .invisible()
-                                    .group_hover(row_group.clone(), |button| button.visible())
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.vcs_discard_confirm = None;
-                                            this.side_panel.svn_resolve_path(&resolve_path);
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(ops == RowOps::Staged, |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "vcs-unstage-{section}-{index}"
-                                    )))
-                                    .icon(IconName::Minus)
-                                    .ghost()
-                                    .xsmall()
-                                    .tooltip("取消暂存")
-                                    .invisible()
-                                    .group_hover(row_group.clone(), |button| button.visible())
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.vcs_discard_confirm = None;
-                                            this.side_panel.git_unstage_path(&unstage_path);
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.side_panel.selected = Some(path.clone());
-                                cx.notify();
-                            }))
-                            .on_double_click(cx.listener(move |this, _, window, cx| {
-                                if !svn_diff || !this.side_panel.svn_diff_path(&diff_path) {
-                                    // Git 与未版本化 SVN 文件仍走现有文档路由。
-                                    this.open_document_path(open_path.clone(), window, cx);
-                                }
-                            }))
-                            .into_any_element(),
-                    );
-                }
-            }
-        }
-
-        use crate::display::side_panel::VcsKind;
-        let summary = git.as_ref().map(|info| {
-            h_flex()
-                .h(px(30.0))
-                .items_center()
-                .gap_2()
-                .child(div().font_family(symbol).text_sm().text_color(muted).child("\u{ea68}"))
-                .child(div().flex_1().min_w_0().text_sm().truncate().child(
-                    if info.branch.is_empty() {
-                        "(no branch)".to_owned()
-                    } else {
-                        info.branch.clone()
-                    },
-                ))
-                .when(info.vcs != VcsKind::SvnRepository && info.ahead > 0, |row| {
-                    row.child(
-                        div().text_xs().text_color(theme.primary).child(format!("↑{}", info.ahead)),
-                    )
-                })
-                .when(info.vcs != VcsKind::SvnRepository, |row| {
-                    row.child(
-                        div().text_xs().text_color(theme.success).child(format!("+{}", info.plus)),
-                    )
-                    .child(
-                        div().text_xs().text_color(theme.danger).child(format!("−{}", info.minus)),
-                    )
-                })
-        });
-
-        let repository_notice =
-            git.as_ref().filter(|info| info.vcs == VcsKind::SvnRepository).map(|info| {
-                let path = info
-                    .repository_root
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default();
-                v_flex()
-                    .gap_1()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("这是服务端 SVN 版本库，需要先检出为工作副本。")
-                    .child(div().text_xs().truncate().child(path))
-            });
-
-        // Git 保留暂存/拉取/推送；SVN 显式提供添加/更新/日志/清理。
-        // 服务端仓库只有浏览与检出，避免把无效工作副本命令暴露给用户。
-        let (unstaged_len, staged_len, ahead) = git
-            .as_ref()
-            .map(|info| (info.unstaged.len(), info.staged.len(), info.ahead))
-            .unwrap_or((0, 0, 0));
-        let commit_ready = !op_running
-            && git.as_ref().is_some_and(|info| match info.vcs {
-                VcsKind::Git => staged_len > 0,
-                VcsKind::Svn => info.svn_commit_ready(),
-                VcsKind::SvnRepository => false,
-            });
-        let svn_add_ready = git.as_ref().is_some_and(|info| info.svn_add_ready());
-        let commit_row = git.as_ref().filter(|info| info.vcs != VcsKind::SvnRepository).map(|_| {
-            h_flex()
-                .gap_1()
-                .items_center()
-                .child(div().flex_1().min_w_0().child(Input::new(&self.git_commit_input)))
-                .child(
-                    Button::new("vcs-commit")
-                        .label("提交")
-                        .small()
-                        .disabled(!commit_ready)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.submit_vcs_commit(window, cx);
-                        })),
-                )
-        });
-        let action_strip = match vcs {
-            Some(VcsKind::Git) => Some(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(
-                        Button::new("git-stage-all")
-                            .label("全部暂存")
-                            .small()
-                            .disabled(op_running || unstaged_len == 0)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_panel.git_stage_all();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("git-pull")
-                            .label("拉取")
-                            .small()
-                            .disabled(op_running)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_panel.git_pull();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("git-push")
-                            .label(if ahead > 0 {
-                                SharedString::from(format!("推送 ↑{ahead}"))
-                            } else {
-                                SharedString::from("推送")
-                            })
-                            .small()
-                            .disabled(op_running || ahead == 0)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_panel.git_push();
-                                cx.notify();
-                            })),
-                    )
-                    .when(op_running, |row| row.child(Spinner::new().xsmall()))
-                    .into_any_element(),
-            ),
-            Some(VcsKind::Svn) => Some(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(
-                        Button::new("svn-add-all")
-                            .label("添加")
-                            .small()
-                            .disabled(op_running || !svn_add_ready)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_panel.svn_add_all();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("svn-update")
-                            .label("更新")
-                            .small()
-                            .disabled(op_running)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_panel.git_pull();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("svn-log").label("日志").small().disabled(op_running).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.side_panel.svn_log();
-                                cx.notify();
-                            }),
-                        ),
-                    )
-                    .child(
-                        Button::new("svn-cleanup")
-                            .label("清理")
-                            .small()
-                            .disabled(op_running)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_panel.svn_cleanup();
-                                cx.notify();
-                            })),
-                    )
-                    .when(op_running, |row| row.child(Spinner::new().xsmall()))
-                    .into_any_element(),
-            ),
-            Some(VcsKind::SvnRepository) => Some(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(Button::new("svn-browse-repository").label("浏览仓库").small().on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.side_panel.svn_browse_repository();
-                            cx.notify();
-                        }),
-                    ))
-                    .child(
-                        Button::new("svn-checkout-repository")
-                            .label("检出工作副本")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_panel.svn_checkout_repository();
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element(),
-            ),
-            None => None,
-        };
-        let vcs_label =
-            if matches!(vcs, Some(VcsKind::Svn | VcsKind::SvnRepository)) { "SVN" } else { "Git" };
-
-        v_flex()
-            .h_full()
-            .w(px(320.0))
-            .flex_shrink_0()
-            .p_2()
-            .gap_2()
-            // 与文件树共用抽屉接缝合同（见 `render_file_tree`）：圆角只给左侧两角，
-            // 右缘贴窗口边框不倒角，四边无描边。
-            .rounded_tl(crate::gpui_shell::theme::card_radius(cx))
-            .rounded_bl(crate::gpui_shell::theme::card_radius(cx))
-            .bg(theme.popover)
-            // 与文件树抽屉同一套紧凑投影，避免右侧抽屉语言再出现 shadow_lg。
-            .shadow(gpui_component::popover_shadow(theme.is_dark()))
-            .occlude()
-            .child(view_switch)
-            .when_some(summary, |panel, summary| panel.child(summary))
-            .when_some(repository_notice, |panel, notice| panel.child(notice))
-            .when_some(op_error, |panel, error| {
-                panel.child(div().text_xs().text_color(theme.danger).child(error))
-            })
-            .when_some(commit_row, |panel, row| panel.child(row))
-            .when_some(action_strip, |panel, row| panel.child(row))
-            .when(git.is_none(), |panel| {
-                panel.child(
-                    div().py_3().text_sm().text_color(muted).child("当前目录不在 Git/SVN 仓库中"),
-                )
-            })
-            .when_some(self.side_panel.root_notice(), |panel, notice| {
-                panel.child(div().text_xs().text_color(theme.warning).child(notice.to_owned()))
-            })
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(v_flex().w_full().gap_1().children(rows)),
-            )
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_1()
-                    .child(
-                        Button::new("git-tree-refresh")
-                            .icon(IconName::Redo2)
-                            .ghost()
-                            .xsmall()
-                            .tooltip(format!("刷新 {vcs_label} 状态"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_panel.request_refresh();
-                                this.sync_side_panel_to_active(false, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("git-tree-close")
-                            .icon(IconName::Close)
-                            .ghost()
-                            .xsmall()
-                            .tooltip(format!("关闭 {vcs_label} 状态"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_git_tree(cx);
-                            })),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_side_panel_slot(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_side_panel_slot(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         if !self.side_panel_anim_armed && !self.side_panel.open {
             return div().into_any_element();
         }
         let open = self.side_panel.open;
+        // 路由每帧都做，而且必须在挑渲染分支之前：聚焦 pane 可能刚从本地切到
+        // 远端（或反过来），这一帧就该画对。
+        let remote = self.side_panel.open && self.route_remote_browser(window, cx);
         let panel = match self.side_panel.view {
+            // "文件"视图画谁由聚焦 pane 的身份决定，不是一个用户要自己选的
+            // 页签——用户想看的永远是"当前这台机器上的文件"。
+            crate::display::side_panel::PanelView::Files if remote => self.render_remote_files(cx),
             crate::display::side_panel::PanelView::Files => self.render_file_tree(cx),
             crate::display::side_panel::PanelView::Git => self.render_git_tree(cx),
         };
@@ -5363,7 +4780,7 @@ impl Render for NebulaWorkspace {
                                 .inset_0(),
                             ),
                     )
-                    .child(self.render_side_panel_slot(cx)),
+                    .child(self.render_side_panel_slot(window, cx)),
             )
             .when_some(dock_preview, |root, (x, y, w, h)| {
                 root.child(

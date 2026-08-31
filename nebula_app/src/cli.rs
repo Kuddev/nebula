@@ -42,7 +42,7 @@ pub struct Options {
     pub gpui: bool,
 
     /// Launch the legacy winit shell instead of GPUI.
-    #[cfg(feature = "gpui-shell")]
+    #[cfg(all(feature = "gpui-shell", feature = "legacy-shell"))]
     #[clap(long = "legacy-shell")]
     pub legacy_shell: bool,
 

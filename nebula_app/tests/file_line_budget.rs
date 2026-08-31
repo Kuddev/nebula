@@ -16,9 +16,8 @@ const MAX_LINES: usize = 2000;
 const GRANDFATHERED: &[(&str, usize)] = &[
     ("nebula_app/src/display/mod.rs", 12000),
     ("nebula_app/src/display/settings.rs", 8650),
-    // 2026-08-17 上调（4850 → 5150）：git 树 VS Code 化 + 源码 tab 接线；
-    // 下一步应把 VCS 面板拆成独立文件后下调。
-    ("nebula_app/src/gpui_shell/workspace.rs", 5150),
+    // 2026-08-31 下调（5150 → 4980）：VCS 抽屉页搬到 workspace/vcs_panel.rs。
+    ("nebula_app/src/gpui_shell/workspace.rs", 4980),
     // 2026-08-17 下调（3600 → 3550）：网络区拆到 network_settings.rs。
     ("nebula_app/src/gpui_shell/settings_pane.rs", 3550),
     ("nebula_app/src/display/command_palette.rs", 3980),
@@ -27,8 +26,8 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("nebula_terminal/src/term/mod.rs", 3650),
     // 2026-08-17 上调（2900 → 2970）：draw_overlays 几何抽成两壳共享的 plan。
     ("nebula_app/src/display/terminal_math.rs", 2970),
-    // 2026-08-17 上调（2680 → 2760）：SVN wc.db 回退 + 单文件 stage/discard。
-    ("nebula_app/src/display/side_panel.rs", 2760),
+    // 2026-08-31 条目删除：side_panel.rs（4031 行）拆成 side_panel/{mod,vcs,
+    // enumerate,render,tests}.rs，最大的 render.rs 也只有 869 行，全部在红线内。
     ("nebula_app/src/gpui_shell/terminal/view.rs", 2540),
     ("nebula_app/src/display/chrome.rs", 2550),
     ("nebula_app/src/display/markdown_view.rs", 2150),

@@ -1,3 +1,7 @@
+pub(crate) mod limits;
+pub(crate) mod remote_cwd;
+mod transfer;
+
 use std::collections::HashSet;
 use std::future::Future;
 use std::io;
@@ -8,18 +12,23 @@ use std::time::{Duration, Instant};
 
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileType, OpenFlags};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use winit::event_loop::EventLoopProxy;
-use winit::window::WindowId;
+use tokio::io::AsyncWriteExt;
 
-use crate::event::{Event, EventType};
+use transfer::TransferObserver;
 
 type SftpError = Box<dyn std::error::Error + Send + Sync>;
 type SftpResult<T> = Result<T, SftpError>;
 
-const TRANSFER_CHUNK: usize = 256 * 1024;
 const MAX_RECURSIVE_ENTRIES: usize = 100_000;
 static TRANSFER_NONCE: AtomicU64 = AtomicU64::new(1);
+
+/// UI 层被通知"状态变了，该重画了"的方式。
+///
+/// 传输跑在网络 runtime 上，而画面归 UI 层。两者之间只需要一个"响一声"的
+/// 信号——控制器绝不该知道 UI 是哪一套窗口系统、消息循环长什么样。做成
+/// 闭包而不是具体的事件代理类型，是因为不同的宿主唤醒自己的方式完全不同，
+/// 而这个模块对它们应当一视同仁。
+pub(crate) type WakeFn = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SftpEntryKind {
@@ -85,8 +94,7 @@ pub struct SftpController {
     state: Arc<Mutex<SftpSnapshot>>,
     cancel: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
-    proxy: EventLoopProxy<Event>,
-    window_id: WindowId,
+    wake: WakeFn,
     pending_uploads: Arc<Mutex<Vec<PathBuf>>>,
     upload_debounce_active: Arc<AtomicBool>,
 }
@@ -97,8 +105,7 @@ struct TaskContext {
     cancel: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     task_generation: u64,
-    proxy: EventLoopProxy<Event>,
-    window_id: WindowId,
+    wake: WakeFn,
     last_wake: Arc<Mutex<Instant>>,
 }
 
@@ -118,11 +125,7 @@ impl SftpEntry {
 }
 
 impl SftpController {
-    pub fn new(
-        destination: impl Into<String>,
-        proxy: EventLoopProxy<Event>,
-        window_id: WindowId,
-    ) -> io::Result<Self> {
+    pub fn new(destination: impl Into<String>, wake: WakeFn) -> io::Result<Self> {
         crate::ssh_session::runtime()?;
         let controller = Self {
             state: Arc::new(Mutex::new(SftpSnapshot {
@@ -135,8 +138,7 @@ impl SftpController {
             })),
             cancel: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
-            proxy,
-            window_id,
+            wake,
             pending_uploads: Arc::new(Mutex::new(Vec::new())),
             upload_debounce_active: Arc::new(AtomicBool::new(false)),
         };
@@ -270,7 +272,7 @@ impl SftpController {
             state.error = Some("正在取消传输…".to_owned());
         }
         drop(state);
-        wake(&self.proxy, self.window_id);
+        (self.wake)();
     }
 
     fn start_job<J, F>(&self, phase: SftpPhase, progress: Option<TransferProgress>, job: J)
@@ -286,15 +288,14 @@ impl SftpController {
             state.error = None;
             state.progress = progress;
         }
-        wake(&self.proxy, self.window_id);
+        (self.wake)();
 
         let context = TaskContext {
             state: self.state.clone(),
             cancel: self.cancel.clone(),
             generation: self.generation.clone(),
             task_generation,
-            proxy: self.proxy.clone(),
-            window_id: self.window_id,
+            wake: self.wake.clone(),
             last_wake: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1))),
         };
         let completion = context.clone();
@@ -307,9 +308,25 @@ impl SftpController {
     }
 }
 
+impl TransferObserver for TaskContext {
+    fn advance(&self, bytes: u64) {
+        if !self.is_current() {
+            return;
+        }
+        if let Some(progress) = lock(&self.state).progress.as_mut() {
+            progress.advance(bytes);
+        }
+        self.wake_throttled(false);
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Acquire) || !self.is_current()
+    }
+}
+
 impl TaskContext {
     fn check_cancelled(&self) -> SftpResult<()> {
-        if self.cancel.load(Ordering::Acquire) || !self.is_current() {
+        if self.cancelled() {
             Err(io::Error::new(io::ErrorKind::Interrupted, "操作已取消").into())
         } else {
             Ok(())
@@ -327,16 +344,6 @@ impl TaskContext {
         self.wake_throttled(true);
     }
 
-    fn advance(&self, bytes: u64) {
-        if !self.is_current() {
-            return;
-        }
-        if let Some(progress) = lock(&self.state).progress.as_mut() {
-            progress.advance(bytes);
-        }
-        self.wake_throttled(false);
-    }
-
     fn is_current(&self) -> bool {
         self.generation.load(Ordering::Acquire) == self.task_generation
     }
@@ -345,7 +352,7 @@ impl TaskContext {
         let mut last = lock(&self.last_wake);
         if force || last.elapsed() >= Duration::from_millis(50) {
             *last = Instant::now();
-            wake(&self.proxy, self.window_id);
+            (self.wake)();
         }
     }
 
@@ -369,16 +376,12 @@ impl TaskContext {
             },
         }
         drop(state);
-        wake(&self.proxy, self.window_id);
+        (self.wake)();
     }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn wake(proxy: &EventLoopProxy<Event>, window_id: WindowId) {
-    let _ = proxy.send_event(Event::new(EventType::SftpUpdated, window_id));
 }
 
 pub fn normalize_remote_path(base: &str, path: &str) -> String {
@@ -528,20 +531,49 @@ async fn upload_local_paths(
         .map_err(|err| format!("扫描上传目录失败: {err}"))??;
     context.set_total(plan.total);
 
+    // 目录必须串行建，而且必须按计划里的顺序：计划是先序遍历产出的，父目录
+    // 排在子目录之前。并发建目录会让子目录的 MKDIR 抢在父目录之前发出去，
+    // 撞上"父路径不存在"而失败。这一步是元数据操作，串行的代价也小。
     for directory in plan.directories {
         context.check_cancelled()?;
         // 递归上传允许目标目录已存在。
         let _ = sftp.create_dir(directory).await;
     }
-    for (local, remote, _) in plan.files {
-        context.check_cancelled()?;
-        upload_file_atomic(sftp, &local, &remote, context).await?;
-    }
+    // 文件之间没有顺序依赖，可以并发。这是目录上传最大的一笔性能：一个几百
+    // 个小文件的目录，串行传等于把几百条往返链首尾相接，而每条链的时间几乎
+    // 全是等待。
+    transfer::run_bounded(
+        &plan.files,
+        limits::DIRECTORY_FILE_CONCURRENCY,
+        |(local, remote, _)| async move {
+            context.check_cancelled()?;
+            upload_file_atomic(sftp, local, remote, context).await
+        },
+    )
+    .await?;
     Ok(())
 }
 
-/// 剪贴板截图 → 远端 `/tmp` 的一次性 PNG 上传（SSH pane 的图片粘贴）。
-/// 成功后经 runtime Prompt 通道把远端路径作为输入敲进
+/// 列一个远端目录，供不带状态机的浏览器直接使用。
+///
+/// 与 [`SftpController::refresh`] 的区别在职责：那个驱动一整套面板状态机
+/// （phase / error / 当前路径都要更新，还要唤醒宿主重画），这里只回答"这个
+/// 目录里有什么"，让调用方自己决定怎么呈现。相对路径先经 `canonicalize`
+/// 落成绝对路径，否则"上一级"这类操作没有可靠的起点。
+///
+/// 错误以文案返回而不是 `Box<dyn Error>`：调用方是界面，它要的是能直接显示
+/// 给用户的一句话，而不是一条需要再加工的错误链。
+pub(crate) async fn list_dir(destination: &str, path: &str) -> Result<Vec<SftpEntry>, String> {
+    let sftp = crate::ssh_session::open_sftp(destination)
+        .await
+        .map_err(|err| format!("无法连接 {destination}：{err}"))?;
+    let resolved = sftp
+        .canonicalize(path.to_owned())
+        .await
+        .map_err(|err| format!("无法解析路径 {path}：{err}"))?;
+    read_remote_dir(&sftp, &resolved).await.map_err(|err| format!("无法读取目录 {resolved}：{err}"))
+}
+
 /// 为补齐列一个远端目录，`(是否目录, 名字)`。
 ///
 /// 与 [`SftpController::refresh`] 的区别在职责：那个驱动 SFTP 面板的状态机
@@ -572,13 +604,15 @@ pub async fn list_dir_for_completion(destination: &str, dir: &str) -> Option<Vec
     }
 }
 
-/// 目标 pane——上传在 SSH runtime 上异步进行，UI 线程零阻塞；失败只留日志，
-/// 绝不把错误文本粘进终端。
+/// 把剪贴板截图上传到远端临时目录，成功后把远端路径交给 `on_uploaded`。
+///
+/// 上传在 SSH runtime 上异步进行，UI 线程零阻塞；失败只留日志，绝不把错误
+/// 文本粘进终端。回调而不是事件代理：这个模块不该知道"路径最终怎么送到
+/// 那个 pane 的输入里"，宿主自己清楚。
 pub fn upload_clipboard_image(
     destination: String,
     png: Vec<u8>,
-    pane_id: u64,
-    proxy: EventLoopProxy<Event>,
+    on_uploaded: impl FnOnce(String) + Send + 'static,
 ) {
     let Ok(runtime) = crate::ssh_session::runtime() else {
         return;
@@ -588,7 +622,7 @@ pub fn upload_clipboard_image(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis())
             .unwrap_or(0);
-        // `/tmp` 而不是远端 cwd：绝对路径对 codex/claude 一样可读，且不往
+        // `/tmp` 而不是远端 cwd：绝对路径对远端的命令行工具一样可读，且不往
         // 用户的项目目录里排泄粘贴产物；`~` 需要展开，这里没有 shell。
         let remote = format!("/tmp/nebula-paste-{stamp}.png");
         let result = async {
@@ -605,12 +639,17 @@ pub fn upload_clipboard_image(
         }
         .await;
         match result {
-            Ok(()) => crate::runtime_api::dispatch_prompt(&proxy, pane_id, remote),
+            Ok(()) => on_uploaded(remote),
             Err(err) => log::warn!("剪贴板图片上传失败（{destination}）: {err}"),
         }
     });
 }
 
+/// 上传一个文件并原子替换目标。
+///
+/// 先写同目录下的隐藏临时文件，全部落地后再改名顶上去。目标路径在任何时刻
+/// 要么是完整的旧内容、要么是完整的新内容，绝不会是半个文件——中途断线、
+/// 取消、进程被杀都不会让对端看到截断的数据。
 async fn upload_file_atomic(
     sftp: &SftpSession,
     local: &Path,
@@ -620,26 +659,10 @@ async fn upload_file_atomic(
     let nonce = TRANSFER_NONCE.fetch_add(1, Ordering::Relaxed);
     let temporary = temporary_upload_path(destination, nonce);
     let result = async {
-        let mut source = tokio::fs::File::open(local).await?;
-        let mut target = sftp
-            .open_with_flags(
-                temporary.clone(),
-                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-            )
-            .await?;
-        let mut buffer = vec![0u8; TRANSFER_CHUNK];
-        loop {
-            context.check_cancelled()?;
-            let count = source.read(&mut buffer).await?;
-            if count == 0 {
-                break;
-            }
-            target.write_all(&buffer[..count]).await?;
-            context.advance(count as u64);
-        }
-        target.shutdown().await?;
-
-        // SFTP v3 rename 通常不覆盖：先删除旧目标，再替换临时文件。
+        transfer::upload_stream(sftp, local, &temporary, context).await?;
+        // SFTP v3 的 rename 通常不覆盖已存在的目标，所以要先让路。删除和改名
+        // 之间存在一个窗口：这一刻目标路径不存在。真正的可退替换（先把旧文件
+        // 挪到备份名、改名失败再挪回来）需要目标属性检查配合，留给替换事务。
         let _ = sftp.remove_file(destination.to_owned()).await;
         sftp.rename(temporary.clone(), destination.to_owned()).await?;
         Ok::<_, SftpError>(())
@@ -670,43 +693,65 @@ async fn build_download_plan(
     let mut directories = Vec::new();
     let mut files = Vec::new();
     let mut total = 0u64;
-    let mut stack = vec![(entry, local_directory)];
+    let mut pending = vec![(entry, local_directory)];
     let mut visited_directories = HashSet::new();
 
-    while let Some((entry, parent)) = stack.pop() {
+    // 按层推进而不是深度优先逐个问：SFTP 没有递归 LIST，一棵树的规模全靠一层
+    // 层问出来。串行问的话，"算出总共多少字节"这件事本身就要花掉和传输相当的
+    // 时间——用户看到的是进度条迟迟不动，以为卡住了。同一层的目录之间没有
+    // 依赖，可以并发列。
+    while !pending.is_empty() {
         context.check_cancelled()?;
         if files.len() + directories.len() >= MAX_RECURSIVE_ENTRIES {
             return Err(io::Error::other("下载目录超过 100000 项，已停止").into());
         }
-        validate_name(&entry.name)
-            .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
-        let local = parent.join(&entry.name);
-        let (remote, kind, size) = if entry.kind == SftpEntryKind::Symlink {
-            let target = sftp.read_link(entry.path.clone()).await?;
-            let parent = entry.path.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("/");
-            let target = normalize_remote_path(parent, &target);
-            let metadata = sftp.metadata(target.clone()).await?;
-            let kind =
-                if metadata.is_dir() { SftpEntryKind::Directory } else { SftpEntryKind::File };
-            (target, kind, metadata.len())
-        } else {
-            (entry.path, entry.kind, entry.size)
-        };
 
-        if kind == SftpEntryKind::Directory {
-            if !visited_directories.insert(remote.clone()) {
-                return Err(
-                    io::Error::other(format!("检测到远端符号链接目录循环: {remote}")).into()
-                );
+        // 先把这一层解析成"要列的目录"和"要传的文件"。符号链接的解析和环路
+        // 检测都在这里串行做完：环路判定依赖已访问集合，并发写它会让"这个
+        // 目录是不是第一次见"的答案取决于调度顺序。
+        let mut to_list = Vec::new();
+        for (entry, parent) in std::mem::take(&mut pending) {
+            validate_name(&entry.name)
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
+            let local = parent.join(&entry.name);
+            let (remote, kind, size) = if entry.kind == SftpEntryKind::Symlink {
+                let target = sftp.read_link(entry.path.clone()).await?;
+                let parent = entry.path.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("/");
+                let target = normalize_remote_path(parent, &target);
+                let metadata = sftp.metadata(target.clone()).await?;
+                let kind =
+                    if metadata.is_dir() { SftpEntryKind::Directory } else { SftpEntryKind::File };
+                (target, kind, metadata.len())
+            } else {
+                (entry.path, entry.kind, entry.size)
+            };
+
+            if kind == SftpEntryKind::Directory {
+                if !visited_directories.insert(remote.clone()) {
+                    return Err(
+                        io::Error::other(format!("检测到远端符号链接目录循环: {remote}")).into()
+                    );
+                }
+                directories.push(local.clone());
+                to_list.push((remote, local));
+            } else {
+                total = total.saturating_add(size);
+                files.push((remote, local, size));
             }
-            directories.push(local.clone());
-            let children = read_remote_dir(sftp, &remote).await?;
-            for child in children.into_iter().rev() {
-                stack.push((child, local.clone()));
+        }
+
+        // 这一层的目录并发列。结果按输入顺序回来，所以子目录的排列和串行
+        // 遍历时一致——上传/下载的顺序不该因为并发而变得不可预期。
+        let listings = transfer::map_bounded(
+            &to_list,
+            limits::DIRECTORY_LISTING_CONCURRENCY,
+            |(remote, _)| async move { read_remote_dir(sftp, remote).await },
+        )
+        .await?;
+        for ((_, local), children) in to_list.iter().zip(listings) {
+            for child in children {
+                pending.push((child, local.clone()));
             }
-        } else {
-            total = total.saturating_add(size);
-            files.push((remote, local, size));
         }
     }
 
@@ -721,21 +766,39 @@ async fn download_remote_entry(
 ) -> SftpResult<()> {
     let plan = build_download_plan(sftp, entry, local_directory, context).await?;
     context.set_total(plan.total);
+    // 与上传对称：目录串行建（`create_dir_all` 自己会补父级，但保持顺序仍然
+    // 让失败信息指向真正出问题的那一层），文件并发传。
     for directory in plan.directories {
         context.check_cancelled()?;
         tokio::fs::create_dir_all(directory).await?;
     }
-    for (remote, local, _) in plan.files {
+    // 并发度取"计划里真有几个文件"和上限的较小值，窗口再按它摊。单个大文件
+    // （最常见、也最吃窗口的场景）因此拿到完整窗口，而不是被目录传输的上限
+    // 提前摊薄成四分之一。
+    let files = plan.files.len().min(limits::DIRECTORY_FILE_CONCURRENCY).max(1);
+    let window = limits::window_per_file(files);
+    transfer::run_bounded(&plan.files, files, |(remote, local, size)| async move {
         context.check_cancelled()?;
-        download_file_atomic(sftp, &remote, &local, context).await?;
-    }
+        download_file_atomic(sftp, remote, *size, local, window, context).await
+    })
+    .await?;
     Ok(())
 }
 
+/// 下载一个文件并原子替换本地目标。
+///
+/// 和上传对称：先写同目录下的隐藏临时文件，完整落地后再改名。中断留下的是
+/// 一个可识别的临时文件而不是半个正常文件——用户不会拿着截断的下载结果
+/// 当完整文件用。
+///
+/// `total` 是远端报告的长度，交给引擎切分段并发；`window` 是这个文件可用的
+/// 在途请求数（目录传输里要和别的文件分摊）。
 async fn download_file_atomic(
     sftp: &SftpSession,
     remote: &str,
+    total: u64,
     destination: &Path,
+    window: usize,
     context: &TaskContext,
 ) -> SftpResult<()> {
     if let Some(parent) = destination.parent() {
@@ -748,20 +811,7 @@ async fn download_file_atomic(
     let nonce = TRANSFER_NONCE.fetch_add(1, Ordering::Relaxed);
     let temporary = destination.with_file_name(format!(".{name}.nebula-download-{nonce:016x}"));
     let result = async {
-        let mut source = sftp.open(remote.to_owned()).await?;
-        let mut target = tokio::fs::File::create(&temporary).await?;
-        let mut buffer = vec![0u8; TRANSFER_CHUNK];
-        loop {
-            context.check_cancelled()?;
-            let count = source.read(&mut buffer).await?;
-            if count == 0 {
-                break;
-            }
-            target.write_all(&buffer[..count]).await?;
-            context.advance(count as u64);
-        }
-        target.flush().await?;
-        target.shutdown().await?;
+        transfer::download_segmented(sftp, remote, total, &temporary, window, context).await?;
         let _ = tokio::fs::remove_file(destination).await;
         tokio::fs::rename(&temporary, destination).await?;
         Ok::<_, SftpError>(())

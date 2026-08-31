@@ -1562,6 +1562,17 @@ impl TerminalView {
         path.is_dir().then_some(path)
     }
 
+    /// 这个 pane 的远端身份，仅当会话**已经就绪**时才给。
+    ///
+    /// 两个条件都必须成立：既要是 SSH pane，又要已经握手认证完成。只看
+    /// `ssh_destination` 的话，连接卡片还在转圈时远端浏览器就会去开 SFTP
+    /// 通道，撞上一个还没建立的传输——用户看到的是文件面板先报一个错，然后
+    /// 终端才连上。
+    pub fn ready_ssh_destination(&self) -> Option<&str> {
+        let destination = self.ssh_destination.as_deref()?;
+        matches!(self.ssh_stage, Some(crate::ssh_session::SshStage::Ready)).then_some(destination)
+    }
+
     fn term_mode(&self) -> TermMode {
         self.session.as_ref().map(|s| *s.term.lock().mode()).unwrap_or_default()
     }

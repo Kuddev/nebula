@@ -301,6 +301,205 @@ fn is_modified(
     actual != expected
 }
 
+/// 服务端版本库的摘要。全部从 `db/` 下的纯文本文件读出，不 spawn 任何进程、
+/// 不解 svndiff——所以对 280 KB 的空库和 20 GB 的老库开销一样，都是几次小
+/// 文件读。
+///
+/// 为什么需要它：`svnadmin create`（TortoiseSVN 的"在此创建版本库"）出来的
+/// 目录，此前只能显示一句"这是服务端版本库"。而 HEAD 修订号、UUID、格式号、
+/// 最后一条提交日志全都躺在纯文本文件里，不读白不读。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RepositorySummary {
+    /// HEAD 修订号（`db/current`）。
+    pub head: Option<u64>,
+    /// 仓库 UUID（`db/uuid` **首行**——SVN 1.10 起第二行是 instance id，
+    /// 整文件读进来会带上它，那不是 UUID）。
+    pub uuid: Option<String>,
+    /// FSFS 格式号（`db/format` 首行）。
+    pub fs_format: Option<u32>,
+    /// 版本库格式号（`format`）。
+    pub repository_format: Option<u32>,
+    /// `db/` 的物理体积。
+    pub size_bytes: u64,
+    /// 顶层路径名（见 [`top_level_paths`] 的取样范围说明）。
+    pub top_level: Vec<String>,
+    /// HEAD 那次提交的作者 / 时间 / 日志首行（`db/revprops/…`）。
+    pub last_author: Option<String>,
+    pub last_date: Option<String>,
+    pub last_log: Option<String>,
+}
+
+impl RepositorySummary {
+    /// 是否已经是 trunk/branches/tags 标准布局（三者齐备）。
+    pub fn has_standard_layout(&self) -> bool {
+        ["trunk", "branches", "tags"]
+            .iter()
+            .all(|wanted| self.top_level.iter().any(|name| name == wanted))
+    }
+}
+
+/// 读版本库摘要。任何单项读失败都只让那一项为 `None`，不影响其余——半张
+/// 摘要也比"这是服务端版本库"一句话有用。
+pub fn repository_summary(root: &Path) -> RepositorySummary {
+    let db = root.join("db");
+    let head = read_trimmed_line(&db.join("current")).and_then(|line| {
+        // 老格式（format < 4）的 `current` 是 "REV NODE-ID COPY-ID" 三段。
+        line.split_whitespace().next().and_then(|value| value.parse().ok())
+    });
+    RepositorySummary {
+        head,
+        uuid: read_trimmed_line(&db.join("uuid")),
+        fs_format: read_trimmed_line(&db.join("format")).and_then(|line| line.parse().ok()),
+        repository_format: read_trimmed_line(&root.join("format"))
+            .and_then(|line| line.parse().ok()),
+        size_bytes: directory_size(&db, 0).0,
+        top_level: head.map(|head| top_level_paths(&db, head)).unwrap_or_default(),
+        last_author: head.and_then(|head| revision_property(&db, head, "svn:author")),
+        last_date: head.and_then(|head| revision_property(&db, head, "svn:date")),
+        last_log: head.and_then(|head| revision_property(&db, head, "svn:log")).map(|log| {
+            log.lines().find(|line| !line.trim().is_empty()).unwrap_or_default().to_owned()
+        }),
+    }
+}
+
+fn read_trimmed_line(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let first = text.lines().next()?.trim();
+    (!first.is_empty()).then(|| first.to_owned())
+}
+
+/// 递归累加目录体积。`depth` 兜住异常深的结构，返回值第二项是"是否完整
+/// 走完"——体积用于展示，走不完就当近似值，不值得为它报错。
+fn directory_size(dir: &Path, depth: usize) -> (u64, bool) {
+    if depth > 8 {
+        return (0, false);
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return (0, false) };
+    let mut total = 0;
+    let mut complete = true;
+    for entry in entries.flatten() {
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {
+                let (size, ok) = directory_size(&entry.path(), depth + 1);
+                total += size;
+                complete &= ok;
+            },
+            Ok(kind) if kind.is_file() => match entry.metadata() {
+                Ok(metadata) => total += metadata.len(),
+                Err(_) => complete = false,
+            },
+            // 符号链接不跟随（环安全），也不计体积。
+            _ => {},
+        }
+    }
+    (total, complete)
+}
+
+/// `db/format` 第二行形如 `layout sharded 1000`；`linear` 或缺行都表示老的
+/// 平铺布局。返回 `None` = 平铺（`db/revs/<rev>`），`Some(n)` = 分片
+/// （`db/revs/<rev/n>/<rev>`）。
+fn shard_size(db: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(db.join("format")).ok()?;
+    let layout = text.lines().nth(1)?;
+    let mut parts = layout.split_whitespace();
+    (parts.next() == Some("layout") && parts.next() == Some("sharded"))
+        .then(|| parts.next()?.parse().ok())
+        .flatten()
+        .filter(|size| *size > 0)
+}
+
+/// 某个修订在 `db/<kind>/` 下的文件路径（自动适配分片/平铺）。
+fn revision_file(db: &Path, kind: &str, revision: u64) -> PathBuf {
+    match shard_size(db) {
+        Some(shard) => {
+            db.join(kind).join((revision / shard).to_string()).join(revision.to_string())
+        },
+        None => db.join(kind).join(revision.to_string()),
+    }
+}
+
+/// 读一条修订属性（`db/revprops/…` 是 SVN 的 hash-dump 明文格式）。
+///
+/// 打包过的 revprop（`min-unpacked-revprop` 之前的修订）读不到，返回 `None`
+/// 而不是猜——摘要少一行好过显示错的作者。
+fn revision_property(db: &Path, revision: u64, key: &str) -> Option<String> {
+    let bytes = std::fs::read(revision_file(db, "revprops", revision)).ok()?;
+    parse_hash_dump(&bytes, key)
+}
+
+/// `K <len>\n<键>\nV <len>\n<值>\n…END`。按**字节长度**取值，所以多行
+/// 日志、中文和空值都不会被行拆坏。
+fn parse_hash_dump(bytes: &[u8], key: &str) -> Option<String> {
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let line_end = bytes[cursor..].iter().position(|byte| *byte == b'\n')? + cursor;
+        let line = &bytes[cursor..line_end];
+        if line == b"END" {
+            return None;
+        }
+        let Some(rest) = line.strip_prefix(b"K ") else { return None };
+        let key_len: usize = std::str::from_utf8(rest).ok()?.trim().parse().ok()?;
+        let key_start = line_end + 1;
+        let found = bytes.get(key_start..key_start + key_len)? == key.as_bytes();
+        // 键之后跳过换行，读 `V <len>` 头。
+        let value_header = key_start + key_len + 1;
+        let header_end =
+            bytes[value_header..].iter().position(|byte| *byte == b'\n')? + value_header;
+        let rest = bytes[value_header..header_end].strip_prefix(b"V ")?;
+        let value_len: usize = std::str::from_utf8(rest).ok()?.trim().parse().ok()?;
+        let value_start = header_end + 1;
+        let value = bytes.get(value_start..value_start + value_len)?;
+        if found {
+            return Some(String::from_utf8_lossy(value).into_owned());
+        }
+        cursor = value_start + value_len + 1;
+    }
+    None
+}
+
+/// 顶层路径名，取自 r1 与 HEAD 两个修订文件里的 `cpath:` 记录。
+///
+/// **这是取样，不是 HEAD 的完整目录快照。** 拿完整快照要解开根目录的
+/// svndiff（FSFS 里除 r0 外基本都是 `DELTA` 压缩），实现量和出错面都远超
+/// 收益——而这里唯一要回答的问题是"trunk/branches/tags 建过没有"，答案就
+/// 写在建立它们的那次修订里：标准布局几乎总是初始导入（r1）时一次建成，
+/// 所以 r1 + HEAD 两次取样足够。要看真实的完整树，走「浏览版本库」。
+fn top_level_paths(db: &Path, head: u64) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for revision in if head <= 1 { vec![head] } else { vec![1, head] } {
+        let Some(bytes) = read_tail(&revision_file(db, "revs", revision), 512 * 1024) else {
+            continue;
+        };
+        for line in bytes.split(|byte| *byte == b'\n') {
+            let Some(path) = line.strip_prefix(b"cpath: /") else { continue };
+            if path.is_empty() || path.contains(&b'/') {
+                continue; // 根自身和深层路径都不是顶层条目。
+            }
+            let name = String::from_utf8_lossy(path).trim().to_owned();
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+/// 读文件末尾至多 `limit` 字节。FSFS 修订文件把 noderev 记录放在 rep 数据
+/// 之后，所以尾部取样在提交了大文件的修订上也能命中；整读一个几百 MB 的
+/// 修订文件只为找几行 `cpath:` 是不可接受的。
+fn read_tail(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let take = length.min(limit);
+    file.seek(SeekFrom::Start(length - take)).ok()?;
+    let mut bytes = Vec::with_capacity(take as usize);
+    file.take(take).read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +653,111 @@ mod tests {
         assert_eq!(state_of(&changes, "missing.txt").unwrap().state, SvnState::Missing);
         assert_eq!(state_of(&changes, "conflict.txt").unwrap().state, SvnState::Conflicted);
         assert_eq!(state_of(&changes, "stray.txt").unwrap().state, SvnState::Unversioned);
+    }
+
+    /// 按 `svnadmin create` 的真实产物构造：分片布局、两行 uuid、r1 里
+    /// 一次建好 trunk/branches/tags。
+    fn fake_repository(root: &Path) {
+        for sub in ["conf", "hooks", "locks"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::fs::create_dir_all(root.join("db").join("revs").join("0")).unwrap();
+        std::fs::create_dir_all(root.join("db").join("revprops").join("0")).unwrap();
+        std::fs::write(root.join("format"), "5\n").unwrap();
+        let db = root.join("db");
+        std::fs::write(db.join("format"), "8\nlayout sharded 1000\naddressing logical\n").unwrap();
+        std::fs::write(db.join("current"), "1\n").unwrap();
+        std::fs::write(db.join("fs-type"), "fsfs\n").unwrap();
+        // SVN 1.10 起第二行是 instance id：整文件读会把它当成 UUID 的一部分。
+        std::fs::write(
+            db.join("uuid"),
+            "4427b649-8f42-e044-aa7b-38be25dc73ba\ne4e6e72b-c21d-d34d-a50c-aa7fe6fa1f9b\n",
+        )
+        .unwrap();
+        std::fs::write(
+            db.join("revs").join("0").join("1"),
+            "id: 0-1.0.r1/3\ntype: dir\ncpath: /branches\n\
+             id: 2-1.0.r1/4\ntype: dir\ncpath: /tags\n\
+             id: 3-1.0.r1/5\ntype: dir\ncpath: /trunk\n\
+             id: 0.0.r1/2\ntype: dir\ncpath: /\ncpath: /trunk/README.txt\n",
+        )
+        .unwrap();
+        std::fs::write(
+            db.join("revprops").join("0").join("1"),
+            "K 10\nsvn:author\nV 4\ntest\nK 8\nsvn:date\nV 27\n\
+             2026-08-16T11:06:10.119661Z\nK 7\nsvn:log\nV 34\n\
+             导入目录结构\n第二行说明\nEND\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn repository_summary_reads_head_uuid_layout_and_last_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fake_repository(root);
+
+        let summary = repository_summary(root);
+
+        assert_eq!(summary.head, Some(1));
+        assert_eq!(
+            summary.uuid.as_deref(),
+            Some("4427b649-8f42-e044-aa7b-38be25dc73ba"),
+            "uuid 必须只取首行，第二行是 instance id"
+        );
+        assert_eq!(summary.fs_format, Some(8));
+        assert_eq!(summary.repository_format, Some(5));
+        assert!(summary.size_bytes > 0, "db/ 体积应当被累加");
+        assert_eq!(summary.top_level, vec!["branches", "tags", "trunk"], "深层路径不算顶层");
+        assert!(summary.has_standard_layout());
+        assert_eq!(summary.last_author.as_deref(), Some("test"));
+        assert_eq!(summary.last_date.as_deref(), Some("2026-08-16T11:06:10.119661Z"));
+        assert_eq!(
+            summary.last_log.as_deref(),
+            Some("导入目录结构"),
+            "日志只取首个非空行，多行日志不能把摘要撑开"
+        );
+    }
+
+    #[test]
+    fn repository_summary_survives_a_bare_unreadable_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        // 只有骨架、没有 db 内容：每一项各自缺失，不能整体失败。
+        std::fs::create_dir_all(temp.path().join("db")).unwrap();
+        let summary = repository_summary(temp.path());
+        assert_eq!(summary, RepositorySummary::default());
+        assert!(!summary.has_standard_layout());
+    }
+
+    #[test]
+    fn hash_dump_values_are_read_by_byte_length() {
+        // 值里含换行和中文：按行切会读坏，按字节长度才对。
+        let dump = "K 3\nabc\nV 9\nline1\nx=2\nK 1\nz\nV 6\n中文\nEND\n";
+        assert_eq!(parse_hash_dump(dump.as_bytes(), "abc").as_deref(), Some("line1\nx=2"));
+        assert_eq!(parse_hash_dump(dump.as_bytes(), "z").as_deref(), Some("中文"));
+        assert_eq!(parse_hash_dump(dump.as_bytes(), "missing"), None);
+        assert_eq!(parse_hash_dump(b"END\n", "abc"), None);
+        assert_eq!(parse_hash_dump(b"garbage", "abc"), None);
+    }
+
+    #[test]
+    fn revision_files_follow_the_declared_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path();
+        std::fs::write(db.join("format"), "8\nlayout sharded 1000\n").unwrap();
+        assert_eq!(revision_file(db, "revs", 1), db.join("revs").join("0").join("1"));
+        assert_eq!(revision_file(db, "revs", 2500), db.join("revs").join("2").join("2500"));
+        std::fs::write(db.join("format"), "3\nlayout linear\n").unwrap();
+        assert_eq!(revision_file(db, "revs", 2500), db.join("revs").join("2500"));
+    }
+
+    #[test]
+    fn tail_reader_returns_the_end_of_a_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("rev");
+        std::fs::write(&path, "0123456789").unwrap();
+        assert_eq!(read_tail(&path, 4).unwrap(), b"6789");
+        assert_eq!(read_tail(&path, 99).unwrap(), b"0123456789");
+        assert!(read_tail(&temp.path().join("missing"), 4).is_none());
     }
 }

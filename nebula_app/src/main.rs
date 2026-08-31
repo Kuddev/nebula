@@ -9,7 +9,10 @@
 // See https://msdn.microsoft.com/en-us/library/4cc7ya5b.aspx for more details.
 #![windows_subsystem = "windows"]
 
-#[cfg(not(any(feature = "x11", feature = "wayland", target_os = "macos", windows)))]
+#[cfg(all(
+    feature = "legacy-shell",
+    not(any(feature = "x11", feature = "wayland", target_os = "macos", windows))
+))]
 compile_error!(r#"at least one of the "x11"/"wayland" features must be enabled"#);
 
 use std::error::Error;
@@ -21,6 +24,7 @@ use std::{env, fs};
 use log::info;
 #[cfg(windows)]
 use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, FreeConsole};
+#[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoop;
 #[cfg(all(feature = "x11", not(any(target_os = "macos", windows))))]
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
@@ -42,12 +46,16 @@ mod config;
 mod config_cli;
 mod daemon;
 mod directory_history;
+#[cfg(feature = "legacy-shell")]
+mod display;
+#[cfg(all(feature = "gpui-shell", not(feature = "legacy-shell")))]
+#[path = "product_ui/mod.rs"]
 mod display;
 mod encrypted_backup;
+#[cfg(feature = "legacy-shell")]
 mod event;
 #[cfg(windows)]
 mod file_uri;
-#[cfg(windows)]
 mod font_install;
 mod git_worktree;
 #[cfg(feature = "gpui-shell")]
@@ -73,22 +81,21 @@ mod process_tree;
 mod provider_test;
 mod proxy_test;
 mod remote_dirs;
+#[cfg(feature = "legacy-shell")]
+mod renderer;
+#[cfg(all(feature = "gpui-shell", not(feature = "legacy-shell")))]
+#[path = "product_renderer.rs"]
 mod renderer;
 mod runtime_api;
 mod runtime_exec;
 mod scheduler;
 mod session;
 mod shell_detect;
-#[cfg(windows)]
 mod ssh;
-#[cfg(windows)]
 mod ssh_credentials;
-#[cfg(windows)]
 mod ssh_profiles;
 mod ssh_proxy;
-#[cfg(windows)]
 mod ssh_session;
-#[cfg(windows)]
 mod ssh_sftp;
 mod string;
 mod svn_status;
@@ -104,6 +111,7 @@ mod ux;
 pub(crate) mod window_context;
 mod window_transition;
 
+#[cfg(feature = "legacy-shell")]
 mod gl {
     #![allow(clippy::all, unsafe_op_in_unsafe_fn)]
     include!(concat!(env!("OUT_DIR"), "/gl_bindings.rs"));
@@ -116,6 +124,7 @@ use crate::cli::SocketMessage;
 use crate::cli::{Options, Subcommands};
 use crate::config::UiConfig;
 use crate::config::monitor::ConfigMonitor;
+#[cfg(feature = "legacy-shell")]
 use crate::event::{Event, Processor};
 #[cfg(target_os = "macos")]
 use crate::macos::locale;
@@ -226,7 +235,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
         #[cfg(windows)]
         Some(Subcommands::Ssh(options)) => std::process::exit(crate::ssh::run(options.args)),
-        None => nebula(options)?,
+        None => {
+            #[cfg(feature = "legacy-shell")]
+            nebula(options)?;
+            #[cfg(not(feature = "legacy-shell"))]
+            return Err("the requested legacy-only mode is unavailable in this GPUI build".into());
+        },
     }
 
     Ok(())
@@ -247,12 +261,14 @@ fn msg(mut options: MessageOptions) -> Result<(), Box<dyn Error>> {
 /// Temporary files stored for Nebula.
 ///
 /// This stores temporary files to automate their destruction through its `Drop` implementation.
+#[cfg(feature = "legacy-shell")]
 struct TemporaryFiles {
     #[cfg(unix)]
     socket_path: Option<PathBuf>,
     log_file: Option<PathBuf>,
 }
 
+#[cfg(feature = "legacy-shell")]
 impl Drop for TemporaryFiles {
     fn drop(&mut self) {
         // Clean up the IPC socket file.
@@ -288,6 +304,7 @@ pub(crate) fn boot_trace(label: &str) {
 ///
 /// Creates a window, the terminal state, PTY, I/O event loop, input processor,
 /// config change monitor, and runs the main display loop.
+#[cfg(feature = "legacy-shell")]
 fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     // WebDAV 启动自动拉取（spec 003）：守门函数一次文件读判断是否配置；
     // 未配置的用户到此为止，加密/网络代码一行不跑。结果静默（warn log），
@@ -459,7 +476,11 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
 /// `--legacy-shell` 仍走旧路径。`--gpui` 只是显式同义开关。
 #[cfg(feature = "gpui-shell")]
 fn wants_gpui_shell(options: &Options) -> bool {
-    if options.legacy_shell || options.subcommands.is_some() || options.daemon || options.ref_test {
+    #[cfg(feature = "legacy-shell")]
+    if options.legacy_shell {
+        return false;
+    }
+    if options.subcommands.is_some() || options.daemon || options.ref_test {
         return false;
     }
     true

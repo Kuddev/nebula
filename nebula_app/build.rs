@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
 use std::env;
-use std::fs::File;
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(feature = "legacy-shell")]
 use gl_generator::{Api, Fallbacks, GlobalGenerator, Profile, Registry};
+#[cfg(feature = "legacy-shell")]
+use std::fs::File;
 
 fn main() {
     validate_i18n_catalogs();
@@ -15,18 +17,8 @@ fn main() {
     }
     println!("cargo:rustc-env=VERSION={version}");
 
-    let dest = env::var("OUT_DIR").unwrap();
-    let mut file = File::create(Path::new(&dest).join("gl_bindings.rs")).unwrap();
-
-    Registry::new(
-        Api::Gl,
-        (3, 3),
-        Profile::Core,
-        Fallbacks::All,
-        ["GL_ARB_blend_func_extended", "GL_KHR_robustness", "GL_KHR_debug"],
-    )
-    .write_bindings(GlobalGenerator, &mut file)
-    .unwrap();
+    #[cfg(feature = "legacy-shell")]
+    generate_legacy_gl_bindings();
 
     #[cfg(windows)]
     {
@@ -42,6 +34,22 @@ fn main() {
 
         deploy_conpty();
     }
+}
+
+#[cfg(feature = "legacy-shell")]
+fn generate_legacy_gl_bindings() {
+    let dest = env::var("OUT_DIR").unwrap();
+    let mut file = File::create(Path::new(&dest).join("gl_bindings.rs")).unwrap();
+
+    Registry::new(
+        Api::Gl,
+        (3, 3),
+        Profile::Core,
+        Fallbacks::All,
+        ["GL_ARB_blend_func_extended", "GL_KHR_robustness", "GL_KHR_debug"],
+    )
+    .write_bindings(GlobalGenerator, &mut file)
+    .unwrap();
 }
 
 fn validate_i18n_catalogs() {
