@@ -788,4 +788,111 @@ mod tests {
         assert!(svn_relative_target(root, "../outside.txt").is_none());
         assert!(svn_relative_target(root, r"D:\outside.txt").is_none());
     }
+
+    // ---- 手动忽略 ----
+
+    #[test]
+    fn gitignore_entries_are_anchored_typed_and_escaped() {
+        let root = Path::new(r"D:\repo");
+        // 锚定：不带前导 `/` 的规则会匹配仓库里每一个同名文件，而用户点的是
+        // 这一个。
+        assert_eq!(
+            gitignore_entry(root, &root.join("src").join("main.rs"), false).as_deref(),
+            Some("/src/main.rs")
+        );
+        // 目录带尾斜杠，才不会连同名文件一起吃掉。
+        assert_eq!(gitignore_entry(root, &root.join("target"), true).as_deref(), Some("/target/"));
+        // glob 元字符必须转义，否则 `a[1].psd` 变成字符集：既漏本文件又误伤 a1。
+        assert_eq!(
+            gitignore_entry(root, &root.join("art").join("a[1].psd"), false).as_deref(),
+            Some("/art/a\\[1\\].psd")
+        );
+        assert_eq!(
+            gitignore_entry(root, &root.join("weird*name?.txt"), false).as_deref(),
+            Some("/weird\\*name\\?.txt")
+        );
+        // 行尾空格会被 gitignore 丢掉，得转义。
+        assert_eq!(
+            gitignore_entry(root, &root.join("trailing "), false).as_deref(),
+            Some("/trailing\\ ")
+        );
+        // 仓库根自己、以及跑到仓库外面的路径，都不该产出规则。
+        assert!(gitignore_entry(root, root, true).is_none());
+        assert!(gitignore_entry(root, Path::new(r"D:\elsewhere\x.txt"), false).is_none());
+    }
+
+    #[test]
+    fn appending_to_gitignore_creates_dedupes_and_keeps_the_line_ending() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        let noise = repo.join("target").join("debug.log");
+        std::fs::write(&noise, "noise").unwrap();
+
+        // 没有 .gitignore 时新建。
+        let outcome = append_to_gitignore(&noise, false).unwrap();
+        assert_eq!(
+            outcome,
+            IgnoreOutcome::Added {
+                entry: "/target/debug.log".to_owned(),
+                file: repo.join(".gitignore"),
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
+            "/target/debug.log\n"
+        );
+
+        // 同一条不重复写。
+        assert_eq!(
+            append_to_gitignore(&noise, false).unwrap(),
+            IgnoreOutcome::AlreadyPresent { entry: "/target/debug.log".to_owned() }
+        );
+
+        // 目录规则是另一条，照常追加。
+        append_to_gitignore(&repo.join("target"), true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
+            "/target/debug.log\n/target/\n"
+        );
+    }
+
+    #[test]
+    fn appending_follows_crlf_and_repairs_a_missing_final_newline() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        // 已有 CRLF 且末行没有换行——两个坑同时踩：混行尾会让 git diff 把整个
+        // 文件报成改动，缺换行会让新规则和末行拼成一行。
+        std::fs::write(repo.join(".gitignore"), "/build\r\n/dist").unwrap();
+        std::fs::write(repo.join("secret.env"), "x").unwrap();
+
+        append_to_gitignore(&repo.join("secret.env"), false).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
+            "/build\r\n/dist\r\n/secret.env\r\n"
+        );
+    }
+
+    #[test]
+    fn repository_root_walks_up_and_accepts_a_gitdir_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let nested = repo.join("src").join("deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert_eq!(git_repository_root(&nested).as_deref(), Some(repo.as_path()));
+
+        let file = nested.join("main.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+        assert_eq!(git_repository_root(&file).as_deref(), Some(repo.as_path()), "文件从父目录起步");
+
+        // worktree / submodule 的 `.git` 是文件而不是目录，同样算仓库。
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(linked.join(".git"), "gitdir: ../repo/.git/worktrees/linked").unwrap();
+        assert_eq!(git_repository_root(&linked).as_deref(), Some(linked.as_path()));
+    }
 }

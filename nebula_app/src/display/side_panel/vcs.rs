@@ -242,6 +242,116 @@ pub(crate) fn svn_relative_target(root: &Path, relative: &str) -> Option<PathBuf
     Some(root.join(relative))
 }
 
+// ---- 手动忽略（写 `.gitignore`）----
+
+/// 追加一条忽略规则的结果。区分这两种是因为 UI 要说不同的话：真写进去了要
+/// 报出写的是哪一行，本来就有则什么都没动——把后者说成"已加入"会让用户以为
+/// 文件被改了。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum IgnoreOutcome {
+    Added { entry: String, file: PathBuf },
+    AlreadyPresent { entry: String },
+}
+
+/// 从 `path` 往上找 Git 仓库根（含 `.git` 的目录）。
+///
+/// 不 spawn `git rev-parse --show-toplevel`：这里的判据只是"有没有 `.git`"，
+/// 走文件系统就够，而这个函数在**构建右键菜单**时同步调用——起一个进程会让
+/// 菜单弹出可感知地慢。`.git` 是目录（普通仓库）或文件（worktree 与 submodule
+/// 的 gitdir 指针）都算。
+pub(crate) fn git_repository_root(path: &Path) -> Option<PathBuf> {
+    // 文件的规则要写进它所在目录的仓库，所以从父目录起步。
+    let start = if path.is_dir() { path } else { path.parent()? };
+    let mut probe = Some(start);
+    while let Some(current) = probe {
+        if current.join(".git").exists() {
+            return Some(current.to_owned());
+        }
+        probe = current.parent();
+    }
+    None
+}
+
+/// 一条 gitignore 规则。
+///
+/// 三个刻意的选择：
+/// - **锚定到仓库根**（前置 `/`）。不锚定的 `foo.txt` 会匹配仓库里**每一个**
+///   同名文件；用户点的是这一个，忽略范围就该只有这一个。
+/// - **目录带尾斜杠**，这样规则只匹配目录，不会连同名文件一起吃掉。
+/// - **转义 glob 元字符**。`a[1].psd` 这种名字（Windows 上完全合法）不转义就
+///   成了字符集，既漏掉本文件、又误伤 `a1.psd`。
+///
+/// 逐段走 [`Component`] 而不是对整个路径做 `replace('\\', "/")`：后者会把
+/// 文件名里的反斜杠（Unix 上合法）也当成分隔符。
+pub(crate) fn gitignore_entry(root: &Path, path: &Path, is_dir: bool) -> Option<String> {
+    use std::path::Component;
+
+    let relative = path.strip_prefix(root).ok()?;
+    let mut segments = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) => segments.push(escape_gitignore(&name.to_string_lossy())),
+            // `..`、盘符、根目录都不该出现在仓库内的相对路径里。
+            _ => return None,
+        }
+    }
+    if segments.is_empty() {
+        return None; // 仓库根自己不能忽略。
+    }
+    let mut entry = format!("/{}", segments.join("/"));
+    if is_dir {
+        entry.push('/');
+    }
+    Some(entry)
+}
+
+fn escape_gitignore(name: &str) -> String {
+    let mut escaped = String::with_capacity(name.len());
+    for character in name.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[' | ']') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    // gitignore 丢弃行尾空白，除非转义。名字以空格结尾时不转义就等于写错行。
+    if escaped.ends_with(' ') {
+        escaped.pop();
+        escaped.push_str("\\ ");
+    }
+    escaped
+}
+
+/// 把 `path` 追加到所在 Git 仓库根的 `.gitignore`。
+///
+/// 行尾跟随原文件：已有 CRLF 的 `.gitignore` 继续写 CRLF。混行尾会让
+/// `git diff` 把整个文件报成改动（见 hard lessons 里的 CRLF 假 diff 一案），
+/// 而这个功能一次只该动一行。
+pub(crate) fn append_to_gitignore(path: &Path, is_dir: bool) -> Result<IgnoreOutcome, String> {
+    let root = git_repository_root(path).ok_or("这个位置不在 Git 仓库里")?;
+    let entry =
+        gitignore_entry(&root, path, is_dir).ok_or("无法为这条路径生成忽略规则".to_owned())?;
+    let file = root.join(".gitignore");
+    let existing = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("读 .gitignore 失败：{error}")),
+    };
+    if existing.lines().any(|line| line.trim() == entry) {
+        return Ok(IgnoreOutcome::AlreadyPresent { entry });
+    }
+    let newline = if existing.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut next = existing;
+    // 末行没有换行符时先补一个，否则新规则会和它拼成一行。
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push_str(newline);
+    }
+    next.push_str(&entry);
+    next.push_str(newline);
+    crate::atomic_file::write(&file, next.as_bytes())
+        .map_err(|error| format!("写 .gitignore 失败：{error}"))?;
+    Ok(IgnoreOutcome::Added { entry, file })
+}
+
 impl SidePanel {
     // ---- git mutations (add / commit / pull / push) ----
 

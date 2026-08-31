@@ -1,11 +1,14 @@
-//! 用户保存命令的右侧覆盖面板。
+//! 用户保存命令的右上角紧凑弹窗。
 //!
 //! 顶栏闪电列表只负责打开管理器；行内动作才表达执行、复制、编辑和删除。
-//! 面板覆盖在终端之上而不参与主布局，避免为了短时管理命令永久压缩 PTY。
+//! 弹窗覆盖在终端之上而不参与主布局，避免为了短时管理命令永久压缩 PTY。
 
 use super::*;
 
-const PANEL_MAX_WIDTH: f32 = 480.0;
+const PANEL_MAX_WIDTH: f32 = 420.0;
+const PANEL_MAX_HEIGHT: f32 = 440.0;
+const PANEL_MIN_HEIGHT: f32 = 232.0;
+const PANEL_CHROME_HEIGHT: f32 = 104.0;
 const PANEL_MARGIN: f32 = 8.0;
 // 覆盖层从自绘标题栏下沿开始；固定组件依赖当前将该区域定义为 34px。
 const WINDOW_TITLE_BAR_HEIGHT: f32 = 34.0;
@@ -516,8 +519,8 @@ impl NebulaWorkspace {
         let viewport = window.viewport_size();
         let panel_width =
             PANEL_MAX_WIDTH.min((f32::from(viewport.width) - PANEL_MARGIN * 2.0).max(0.0));
-        let panel_height =
-            (f32::from(viewport.height) - WINDOW_TITLE_BAR_HEIGHT - PANEL_MARGIN).max(0.0);
+        let available_height =
+            (f32::from(viewport.height) - WINDOW_TITLE_BAR_HEIGHT - PANEL_MARGIN * 2.0).max(0.0);
 
         let commands = self.filtered_saved_commands(cx);
         if self.command_manager_selected >= commands.len() {
@@ -525,7 +528,15 @@ impl NebulaWorkspace {
         }
         let command_count = self.saved_commands.commands().len();
         let selected_index = self.command_manager_selected;
-        let list_scrollable = commands.len() as f32 * ROW_HEIGHT > (panel_height - 104.0).max(0.0);
+        // 少量命令保持原型中的小弹窗形态；条目增多时只扩到上限，随后由列表滚动。
+        let desired_height = if commands.is_empty() {
+            PANEL_MIN_HEIGHT
+        } else {
+            (PANEL_CHROME_HEIGHT + commands.len() as f32 * ROW_HEIGHT).max(PANEL_MIN_HEIGHT)
+        };
+        let panel_height = desired_height.min(PANEL_MAX_HEIGHT).min(available_height);
+        let list_scrollable =
+            commands.len() as f32 * ROW_HEIGHT > (panel_height - PANEL_CHROME_HEIGHT).max(0.0);
 
         let mut rows = Vec::with_capacity(commands.len());
         for (index, command) in commands.into_iter().enumerate() {
@@ -795,7 +806,7 @@ impl NebulaWorkspace {
             .child(
                 v_flex()
                     .absolute()
-                    .top(px(WINDOW_TITLE_BAR_HEIGHT))
+                    .top(px(WINDOW_TITLE_BAR_HEIGHT + PANEL_MARGIN))
                     .right(px(PANEL_MARGIN))
                     .w(px(panel_width))
                     .h(px(panel_height))

@@ -607,6 +607,30 @@ impl NebulaWorkspace {
             })
         });
     }
+    /// 把一条路径写进仓库根的 `.gitignore`。
+    ///
+    /// 不弹确认框：这是追加一行、随时能删掉的动作，代价远低于多一次点击的
+    /// 摩擦。但**必须回报写了什么**——忽略规则的语义（锚定到根、目录带尾斜杠、
+    /// 元字符转义过）和用户点的那个文件名并不一字不差，看不到写进去的那一行
+    /// 就没法判断范围对不对。
+    fn ignore_file_tree_path(&mut self, path: PathBuf, is_dir: bool, cx: &mut Context<Self>) {
+        use crate::display::side_panel::IgnoreOutcome;
+
+        match crate::display::side_panel::append_to_gitignore(&path, is_dir) {
+            Ok(IgnoreOutcome::Added { entry, .. }) => {
+                self.side_panel.set_notice(format!("已写入 .gitignore：{entry}"));
+                // 忽略状态由 `git check-ignore` 现算，所以重跑一次快照这一行
+                // 就会转成灰色——用户能立刻看到规则生效了。
+                self.side_panel.request_refresh();
+                self.sync_side_panel_to_active(false, cx);
+            },
+            Ok(IgnoreOutcome::AlreadyPresent { entry }) => {
+                self.side_panel.set_notice(format!(".gitignore 已有这条规则：{entry}"));
+            },
+            Err(error) => self.side_panel.set_notice(error),
+        }
+        cx.notify();
+    }
 }
 
 fn file_tree_popup_menu(
@@ -689,6 +713,21 @@ fn file_tree_popup_menu(
     };
     let reveal_path = path.clone();
     let copy_path = path.clone();
+    // 只有真在 Git 仓库里才给这一项。判据不花钱（沿祖先看 `.git` 在不在，见
+    // `git_repository_root` 里为什么不 spawn git），而在 SVN 工作副本或普通
+    // 目录上摆一个"加入 .gitignore"是纯误导——SVN 的忽略入口在 VCS 面板的
+    // 行内菜单里。
+    let ignore_item = crate::display::side_panel::git_repository_root(&path).map(|_| {
+        let ignore = workspace.clone();
+        let ignore_path = path.clone();
+        PopupMenuItem::new("加入 .gitignore").icon(IconName::EyeOff).on_click(move |_, _, cx| {
+            if let Some(workspace) = ignore.upgrade() {
+                workspace.update(cx, |this, cx| {
+                    this.ignore_file_tree_path(ignore_path.clone(), is_dir, cx);
+                });
+            }
+        })
+    });
     let delete = workspace;
     menu.item(first)
         .item(PopupMenuItem::new("在资源管理器中显示").icon(IconName::FolderOpen).on_click(
@@ -700,6 +739,8 @@ fn file_tree_popup_menu(
             cx.write_to_clipboard(ClipboardItem::new_string(copy_path.display().to_string()));
         }))
         .separator()
+        // 忽略在删除上面：两者都改工作区，但删除不可逆，危险的排最后。
+        .when_some(ignore_item, |menu, item| menu.item(item))
         .item(PopupMenuItem::new("删除").icon(IconName::Delete).on_click(move |_, window, cx| {
             if let Some(workspace) = delete.upgrade() {
                 workspace.update(cx, |this, cx| {
