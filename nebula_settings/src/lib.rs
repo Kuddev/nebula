@@ -953,9 +953,9 @@ pub struct RuntimeSettings {
     pub cursor_shape: Option<CursorShapeName>,
     pub cursor_blink: Option<bool>,
     pub copy_on_select: bool,
-    /// Whether risky multi-line pastes require confirmation before reaching the shell.
+    /// 裸 shell 风险粘贴确认：开 = 换行、提权命令或控制字符先确认；关 = 直接粘贴。
     pub multiline_paste_confirm: bool,
-    /// Whether tab close buttons are rendered in the sidebar and top tab strip.
+    /// 标签页关闭按钮（叉号）是否渲染：关 = 不渲染，仍可用中键关闭。
     pub tab_close_visible: bool,
     pub powerline: bool,
     /// 默认 shell 的原始 id（`shell=` 原文：powershell/bash/cmd/pwsh/WSL
@@ -1338,8 +1338,8 @@ mod tests {
         assert_eq!(settings.theme, ThemeName::Nord);
         assert_eq!(settings.font_family, None);
         assert!(!settings.copy_on_select);
-        assert!(settings.multiline_paste_confirm);
-        assert!(settings.tab_close_visible);
+        assert!(settings.multiline_paste_confirm, "多行粘贴确认默认开（上游兼容）");
+        assert!(settings.tab_close_visible, "标签关闭按钮默认可见（上游兼容）");
         assert!(settings.powerline);
         assert!(settings.ghost);
         assert_eq!(settings.accept, AcceptKeyName::Both);

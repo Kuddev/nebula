@@ -2918,8 +2918,8 @@ impl SettingsPane {
                 "tab_close_visible",
                 language.pick("显示标签关闭按钮", "Show tab close buttons"),
                 language.pick(
-                    "关闭后侧栏与顶栏标签不再显示关闭按钮，中键关闭仍然可用。",
-                    "Hides close buttons in the sidebar and top tab strip. Middle-click close remains available.",
+                    "关闭后侧栏与顶栏的标签都不再显示关闭按钮；中键点击标签仍可关闭。",
+                    "Hides close buttons in both sidebar and top tabs. Middle-click still closes a tab.",
                 ),
                 self.runtime.tab_close_visible,
                 cx,
@@ -3823,10 +3823,13 @@ impl SettingsPane {
                     ))
                     .child(self.switch_row(
                         "multiline_paste_confirm",
-                        language.pick("多行粘贴前询问", "Confirm multi-line paste"),
                         language.pick(
-                            "关闭后，可能被 shell 逐行执行的长文本会直接粘贴，不再显示确认框。",
-                            "When disabled, long text that a shell may execute line by line is pasted without confirmation.",
+                            "粘贴多行或高风险内容前询问",
+                            "Ask before multiline or risky pastes",
+                        ),
+                        language.pick(
+                            "在裸 shell 中粘贴换行、提权命令或控制字符时先确认。Bracketed paste 与全屏程序不受影响；关闭后直接粘贴。",
+                            "Confirms line breaks, privileged commands, or control characters pasted into a plain shell. Bracketed paste and full-screen apps are unaffected; disabling this pastes directly.",
                         ),
                         self.runtime.multiline_paste_confirm,
                         cx,
