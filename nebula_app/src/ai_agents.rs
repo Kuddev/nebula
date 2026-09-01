@@ -190,6 +190,38 @@ impl AgentKind {
         Self::ALL.into_iter().find(|agent| agent.aliases().contains(&raw))
     }
 
+    /// Resolve an agent from a submitted shell command, including common
+    /// interpreter and package-runner launch forms used inside WSL.
+    pub fn parse_command(command: &str) -> Option<Self> {
+        let mut tokens = command
+            .split_whitespace()
+            .map(|token| token.trim_matches(['"', '\'']))
+            .filter(|token| !token.is_empty());
+        let mut launcher = tokens.next()?;
+        if launcher == "&" {
+            launcher = tokens.next()?;
+        }
+        while is_env_assignment(launcher) {
+            launcher = tokens.next()?;
+        }
+
+        if launcher_stem(launcher) == "env" {
+            launcher = tokens
+                .by_ref()
+                .find(|token| !token.starts_with('-') && !is_env_assignment(token))?;
+        }
+        if let Some(agent) = Self::parse(launcher) {
+            return Some(agent);
+        }
+        if !is_agent_interpreter(launcher) {
+            return None;
+        }
+
+        tokens.filter(|token| !token.starts_with('-')).find_map(|token| {
+            token.split(['/', '\\']).find_map(Self::parse)
+        })
+    }
+
     /// Shell-safe resume command. Session ids are untrusted hook/file input,
     /// so an unsupported shape returns `None` instead of being quoted.
     pub fn resume_command(self, session_id: &str) -> Option<String> {
@@ -262,6 +294,48 @@ fn valid_session_id(id: &str) -> Option<()> {
     .then_some(())
 }
 
+fn is_env_assignment(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else { return false };
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn launcher_stem(token: &str) -> String {
+    let basename = token
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(token);
+    let lower = basename.to_ascii_lowercase();
+    [".exe", ".cmd", ".bat", ".ps1", ".com"]
+        .into_iter()
+        .find_map(|suffix| lower.strip_suffix(suffix).map(str::to_owned))
+        .unwrap_or(lower)
+}
+
+fn is_agent_interpreter(token: &str) -> bool {
+    matches!(
+        launcher_stem(token).as_str(),
+        "node"
+            | "nodejs"
+            | "bun"
+            | "deno"
+            | "npx"
+            | "npm"
+            | "pnpm"
+            | "pnpx"
+            | "yarn"
+            | "bunx"
+            | "python"
+            | "python3"
+            | "ruby"
+            | "pipx"
+            | "uv"
+            | "uvx"
+    )
+}
+
 /// Semantic state inferred from live application chrome.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AgentStatus {
@@ -310,6 +384,8 @@ struct Manifest {
     id: String,
     #[serde(default)]
     aliases: Vec<String>,
+    #[serde(default)]
+    identity: Vec<Gate>,
     rules: Vec<Rule>,
 }
 
@@ -371,6 +447,7 @@ impl From<RuleState> for AgentStatus {
 #[derive(Debug)]
 struct CompiledManifest {
     manifest: Manifest,
+    identity: Vec<CompiledGate>,
     rules: Vec<CompiledGate>,
     override_mtime: Option<SystemTime>,
 }
@@ -524,6 +601,28 @@ pub fn detect(program: &str, screen: &str) -> Option<Detection> {
     best.map(|(rule, _)| Detection { agent, status: rule.state.into(), rule_id: rule.id.clone() })
 }
 
+/// Establish an agent identity from brand-specific terminal chrome.
+///
+/// This is deliberately separate from [`detect`]: generic status chrome such
+/// as a prompt glyph or an interrupt hint can refine a known agent, but must
+/// never invent one. The fallback matters most on Windows-hosted WSL panes,
+/// where Toolhelp can see `wsl.exe` but not the Linux `codex` process behind it.
+pub fn identify(screen: &str) -> Option<AgentKind> {
+    refresh_overrides_if_needed();
+    let guard = cache().read().ok()?;
+    let mut found = None;
+    for (agent, loaded) in &guard.manifests {
+        if !loaded.identity.iter().any(|gate| gate.matches(screen)) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(*agent);
+    }
+    found
+}
+
 fn compile_manifest(
     source: &str,
     override_mtime: Option<SystemTime>,
@@ -541,7 +640,8 @@ fn compile_manifest(
         .iter()
         .map(|rule| compile_gate(&rule.gate))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(CompiledManifest { manifest, rules, override_mtime })
+    let identity = manifest.identity.iter().map(compile_gate).collect::<Result<Vec<_>, _>>()?;
+    Ok(CompiledManifest { manifest, identity, rules, override_mtime })
 }
 
 /// Rules every agent manifest inherits. Parsed once; see `_shared.toml`.
@@ -652,6 +752,28 @@ mod tests {
     }
 
     #[test]
+    fn submitted_commands_resolve_agents_across_wsl_launch_forms() {
+        for agent in AgentKind::ALL {
+            assert_eq!(AgentKind::parse_command(agent.slug()), Some(agent), "{}", agent.slug());
+        }
+        assert_eq!(
+            AgentKind::parse_command("FOO=1 npx --yes @openai/codex --model o3"),
+            Some(AgentKind::Codex)
+        );
+        assert_eq!(
+            AgentKind::parse_command("env DEBUG=1 node /opt/@anthropic-ai/claude-code/cli.js"),
+            Some(AgentKind::Claude)
+        );
+        assert_eq!(
+            AgentKind::parse_command("npm exec @google/gemini-cli"),
+            Some(AgentKind::Gemini)
+        );
+        assert_eq!(AgentKind::parse_command("uvx aider-chat"), Some(AgentKind::Aider));
+        assert_eq!(AgentKind::parse_command("cat codex.md"), None);
+        assert_eq!(AgentKind::parse_command("node server.js"), None);
+    }
+
+    #[test]
     fn commands_are_exact_and_injection_safe() {
         assert_eq!(AgentKind::Claude.start_command().as_deref(), Some("claude"));
         assert_eq!(AgentKind::Codex.start_command().as_deref(), Some("codex"));
@@ -710,6 +832,13 @@ mod tests {
         assert_eq!(working.status, AgentStatus::Working);
         let idle = detect("claude", "────────────────\n❯ ").unwrap();
         assert_eq!(idle.status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn branded_screen_chrome_identifies_codex_without_a_visible_host_process() {
+        let screen = "OpenAI Codex (v0.42.0)\n\n› Ask Codex to do anything";
+        assert_eq!(identify(screen), Some(AgentKind::Codex));
+        assert_eq!(identify("› generic shell prompt"), None);
     }
 
     /// 下面四段都是 2026-08-22 用 runtime `pane.read` 从真实窗口抓的原文，

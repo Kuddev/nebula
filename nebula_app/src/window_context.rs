@@ -2449,12 +2449,6 @@ impl WindowContext {
             self.runtime_flush_pending_submit(Some(pane_id));
         }
         for pane in &mut self.panes {
-            let Some(program) = pane.nebula_state.running_program.clone() else {
-                continue;
-            };
-            if crate::ai_agents::AgentKind::parse(&program).is_none() {
-                continue;
-            }
             let screen = {
                 let term = pane.terminal.lock();
                 let lines = term.screen_lines();
@@ -2467,6 +2461,28 @@ impl WindowContext {
                     Point::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
                 term.bounds_to_string(start, end)
             };
+            let program = match pane.nebula_state.running_program.clone() {
+                Some(program) => program,
+                None => {
+                    let Some(agent) = crate::ai_agents::identify(&screen) else {
+                        pane.nebula_state.idle_screen_streak = 0;
+                        continue;
+                    };
+                    let program = agent.slug().to_owned();
+                    log::debug!(
+                        "agent identity from screen: pane={} program={program}",
+                        pane.id
+                    );
+                    pane.nebula_state.running_program = Some(program.clone());
+                    pane.nebula_state.agent_status_source =
+                        crate::ai_agents::AgentStatusSource::Screen;
+                    pane.nebula_state.agent_status_rule = None;
+                    program
+                },
+            };
+            if crate::ai_agents::AgentKind::parse(&program).is_none() {
+                continue;
+            }
             let Some(detection) = crate::ai_agents::detect(&program, &screen) else {
                 continue;
             };

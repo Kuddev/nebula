@@ -783,13 +783,6 @@ impl TerminalView {
         // 进程树对账必须排在下面那道早退之前：身份认不出来就早退，等于让
         // 这个 pane 永远退出屏幕检测。
         self.reconcile_shell_activity(cx);
-        let Some(program) = self.running_program.clone() else {
-            self.idle_screen_streak = 0;
-            return;
-        };
-        if crate::ai_agents::AgentKind::parse(&program).is_none() {
-            return;
-        }
         let Some(session) = &self.session else { return };
         let screen = {
             let term = session.term.lock();
@@ -803,6 +796,29 @@ impl TerminalView {
                 TermPoint::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
             term.bounds_to_string(start, end)
         };
+        let program = match self.running_program.clone() {
+            Some(program) => program,
+            None => {
+                let Some(agent) = crate::ai_agents::identify(&screen) else {
+                    self.idle_screen_streak = 0;
+                    return;
+                };
+                let program = agent.slug().to_owned();
+                log::debug!(
+                    "agent identity from screen: pane={} program={program}",
+                    self.pane_id
+                );
+                self.running_program = Some(program.clone());
+                self.agent_status_source = crate::ai_agents::AgentStatusSource::Screen;
+                self.agent_status_rule = None;
+                cx.emit(TerminalViewEvent::TitleChanged);
+                cx.notify();
+                program
+            },
+        };
+        if crate::ai_agents::AgentKind::parse(&program).is_none() {
+            return;
+        }
         let Some(detection) = crate::ai_agents::detect(&program, &screen) else { return };
 
         if detection.status == AgentStatus::Idle && self.agent_runtime_submit_pending {

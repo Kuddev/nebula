@@ -10501,10 +10501,22 @@ impl Display {
         // Kept for CommandStart (OSC 133;C): by the time it arrives from the
         // PTY these buffers are already cleared, so the program identity for
         // the tab icon has to be captured here. Fall back to the keystroke
-        // buffer so the icon still resolves when the grid read failed — its
-        // first token is good enough for program identity.
+        // buffer so the icon still resolves when the grid read failed. Agent
+        // parsing also understands package runners such as npx/uvx.
         state.last_committed =
             if line.is_empty() { state.line_buf.trim().to_owned() } else { line };
+        if let Some(agent) = crate::ai_agents::AgentKind::parse_command(&state.last_committed) {
+            state.running_program = Some(agent.slug().to_owned());
+            state.command_started = Some(std::time::Instant::now());
+            state.agent_status = crate::ai_agents::AgentStatus::Working;
+            state.agent_status_source = crate::ai_agents::AgentStatusSource::Process;
+            state.agent_status_rule = None;
+            state.agent_hook_seen = false;
+            state.idle_screen_streak = 0;
+            state.awaiting_input = false;
+            state.finished_unseen = false;
+            state.needs_attention = false;
+        }
         Self::nebula_clear_line(state);
     }
 

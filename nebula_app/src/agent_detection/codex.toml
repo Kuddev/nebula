@@ -1,6 +1,13 @@
 # Screen-chrome evidence for this CLI (idle / working / blocked).
 id = "codex"
 
+# High-confidence startup chrome. This is the cross-host fallback for panes
+# whose real process lives behind WSL/SSH and cannot appear in the Windows
+# Toolhelp tree. Keep identity signatures brand-specific: status rules such as
+# the bare `›` prompt are intentionally too generic to establish identity.
+[[identity]]
+contains = ["openai codex"]
+
 [[rules]]
 id = "strong_blocker"
 state = "blocked"

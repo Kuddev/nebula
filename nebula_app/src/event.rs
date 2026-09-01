@@ -3391,6 +3391,31 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             self.ctx.display.nebula_record_directory(&cwd);
                             *self.ctx.dirty = true;
                         }
+                        if matches!(
+                            self.ctx.nebula_state.agent_status_source,
+                            crate::ai_agents::AgentStatusSource::Screen
+                                | crate::ai_agents::AgentStatusSource::Process
+                        ) && !self.ctx.nebula_state.agent_hook_seen
+                            && self
+                                .ctx
+                                .nebula_state
+                                .running_program
+                                .as_deref()
+                                .and_then(crate::ai_agents::AgentKind::parse)
+                                .is_some()
+                        {
+                            self.ctx.nebula_state.running_program = None;
+                            self.ctx.nebula_state.agent_status =
+                                crate::ai_agents::AgentStatus::Unknown;
+                            self.ctx.nebula_state.agent_status_source =
+                                crate::ai_agents::AgentStatusSource::Unknown;
+                            self.ctx.nebula_state.agent_status_rule = None;
+                            self.ctx.nebula_state.idle_screen_streak = 0;
+                            self.ctx.nebula_state.command_started = None;
+                            self.ctx.nebula_state.awaiting_input = false;
+                            self.ctx.nebula_state.needs_attention = false;
+                            *self.ctx.dirty = true;
+                        }
                     },
                     TerminalEvent::InlineImage { png, abs_line, width, height } => {
                         // Decode off the PTY thread (here, on the UI loop) and
@@ -3437,12 +3462,15 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         // Program identity for the sidebar tab icon, from the
                         // line captured at Enter (buffers are cleared by now).
                         self.ctx.nebula_state.running_program =
-                            crate::display::extract_program(&self.ctx.nebula_state.last_committed)
-                                .map(|program| {
-                                    crate::ai_agents::AgentKind::parse(&program)
-                                        .map(|agent| agent.slug().to_owned())
-                                        .unwrap_or(program)
-                                });
+                            crate::ai_agents::AgentKind::parse_command(
+                                &self.ctx.nebula_state.last_committed,
+                            )
+                            .map(|agent| agent.slug().to_owned())
+                            .or_else(|| {
+                                crate::display::extract_program(
+                                    &self.ctx.nebula_state.last_committed,
+                                )
+                            });
                         self.ctx.nebula_state.agent_hook_seen = false;
                         self.ctx.nebula_state.agent_status_rule = None;
                         self.ctx.nebula_state.agent_status_source =

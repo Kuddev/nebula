@@ -1006,18 +1006,45 @@ impl TerminalView {
                     cx.emit(TerminalViewEvent::TitleChanged);
                     cx.notify();
                 }
+                // WSL agent identity comes from the submitted command or
+                // branded screen chrome because Linux processes are invisible
+                // to Windows Toolhelp. Its injected PROMPT_COMMAND reports OSC
+                // 7 when the guest shell regains control, providing the
+                // lifecycle edge that clears the icon.
+                if matches!(
+                    self.agent_status_source,
+                    crate::ai_agents::AgentStatusSource::Screen
+                        | crate::ai_agents::AgentStatusSource::Process
+                ) && !self.agent_hook_seen
+                    && self
+                        .running_program
+                        .as_deref()
+                        .and_then(crate::ai_agents::AgentKind::parse)
+                        .is_some()
+                {
+                    self.running_program = None;
+                    self.agent_status = crate::ai_agents::AgentStatus::Unknown;
+                    self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
+                    self.agent_status_rule = None;
+                    self.agent_turn_active = false;
+                    self.idle_screen_streak = 0;
+                    self.command_running = false;
+                    self.command_running_disproved = false;
+                    self.command_started = None;
+                    self.last_process_probe = None;
+                    cx.emit(TerminalViewEvent::TitleChanged);
+                    cx.notify();
+                }
             },
             TermEvent::CommandStart => {
-                // 程序身份（旧壳 event.rs CommandStart 分支原样）：从 Enter
-                // 时捕获的命令行提取首 token，AgentKind 认得的归一成 slug。
-                // 这是侧栏 AI 图标对「直接敲 codex/grok 而没装 hook」的
-                // 会话也点亮的那条路——hook 信封只是更准的覆盖层。
-                let identity =
-                    crate::display::extract_program(&self.suggest.last_committed).map(|program| {
-                        crate::ai_agents::AgentKind::parse(&program)
-                            .map(|agent| agent.slug().to_owned())
-                            .unwrap_or(program)
-                    });
+                // 程序身份来自 Enter 时捕获的完整命令行；直接启动和
+                // npx/node/uvx 等包装启动都会归一成 Agent slug。它是 WSL
+                // 看不见来宾进程时的主通道，hook 信封仍是更准的覆盖层。
+                let identity = crate::ai_agents::AgentKind::parse_command(
+                    &self.suggest.last_committed,
+                )
+                .map(|agent| agent.slug().to_owned())
+                .or_else(|| crate::display::extract_program(&self.suggest.last_committed));
                 if identity != self.running_program {
                     self.running_program = identity;
                     cx.emit(TerminalViewEvent::TitleChanged);
@@ -1711,7 +1738,7 @@ impl TerminalView {
     /// 行镜像。读法与旧壳 `nebula_commit_line` 的 Windows 契约一致：无提示
     /// 箭头（cmd/ssh/REPL）或中线编辑读不到就宁缺毋滥——键击重构的
     /// line_buf 在光标移动/Tab 补全后就是拼接垃圾，不能进历史。
-    fn commit_line(&mut self) {
+    fn commit_line(&mut self, cx: &mut Context<Self>) {
         #[cfg(windows)]
         if let Some(session) = &self.session {
             let term = session.term.lock();
@@ -1726,6 +1753,20 @@ impl TerminalView {
             }
         }
         suggest::commit_line(&mut self.suggest);
+        if let Some(agent) =
+            crate::ai_agents::AgentKind::parse_command(&self.suggest.last_committed)
+        {
+            self.running_program = Some(agent.slug().to_owned());
+            self.agent_status = crate::ai_agents::AgentStatus::Working;
+            self.agent_status_source = crate::ai_agents::AgentStatusSource::Process;
+            self.agent_status_rule = None;
+            self.agent_hook_seen = false;
+            self.agent_turn_active = true;
+            self.idle_screen_streak = 0;
+            self.command_started = Some(std::time::Instant::now());
+            cx.emit(TerminalViewEvent::TitleChanged);
+            cx.notify();
+        }
     }
 
     /// 用元素在网格快照同一次 `Term` 锁内取得的提示行重算 ghost/弹窗。
@@ -1832,14 +1873,19 @@ impl TerminalView {
         }
     }
 
-    fn track_encoded_key(&mut self, ks: &gpui::Keystroke, mode: &TermMode) {
+    fn track_encoded_key(
+        &mut self,
+        ks: &gpui::Keystroke,
+        mode: &TermMode,
+        cx: &mut Context<Self>,
+    ) {
         if self.marked_text.is_some() || mode.contains(TermMode::ALT_SCREEN) {
             return;
         }
         let mods = &ks.modifiers;
         let plain_mods = !mods.control && !mods.alt && !mods.platform;
         match ks.key.as_str() {
-            "enter" => self.commit_line(),
+            "enter" => self.commit_line(cx),
             "backspace" if mods.control && !mods.alt && !mods.platform => {
                 crate::display::Display::nebula_input_delete_word(&mut self.suggest);
             },
@@ -1995,7 +2041,7 @@ impl TerminalView {
         // 可打印字符走 IME 管道、在 replace_text_in_range 镜像；这里只看
         // 编码器处理的键。凡是让 shell 编辑器偏离"直排追加"假设的键（方向、
         // Tab、Esc、Home、Ctrl+C……）一律作废本行镜像与提示，宁缺毋滥。
-        self.track_encoded_key(ks, &mode);
+        self.track_encoded_key(ks, &mode, cx);
 
         if let Some(bytes) = keymap::encode(ks, &mode) {
             self.write_user_key(ks.clone(), bytes, cx);
