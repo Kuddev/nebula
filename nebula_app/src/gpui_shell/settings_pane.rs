@@ -3789,6 +3789,19 @@ impl SettingsPane {
                         cx,
                     ))
                     .child(self.switch_row(
+                        "multiline_paste_confirm",
+                        language.pick(
+                            "粘贴多行或高风险内容前询问",
+                            "Ask before multiline or risky pastes",
+                        ),
+                        language.pick(
+                            "在裸 shell 中粘贴换行、提权命令或控制字符时先确认。Bracketed paste 与全屏程序不受影响；关闭后直接粘贴。",
+                            "Confirms line breaks, privileged commands, or control characters pasted into a plain shell. Bracketed paste and full-screen apps are unaffected; disabling this pastes directly.",
+                        ),
+                        self.runtime.multiline_paste_confirm,
+                        cx,
+                    ))
+                    .child(self.switch_row(
                         "panel_resize",
                         language.pick("拖拽调节侧栏宽度", "Drag to resize the sidebar"),
                         language.pick("关掉后侧栏与面板的分界线钉死，拖不动；宽度仍可在别处改，只是不会被误拖。", "When disabled, the divider between the sidebar and panel cannot be dragged. The width can still be changed elsewhere without accidental resizing."),

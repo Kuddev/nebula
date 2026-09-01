@@ -13,7 +13,9 @@ use gpui::{
     Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _,
     Styled as _, TextRun, UTF16Selection, Window, div, point, px,
 };
+use gpui_component::Sizable as _;
 use gpui_component::WindowExt as _;
+use gpui_component::checkbox::Checkbox;
 use nebula_settings::CellWidthModeName;
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
 use nebula_terminal::event_loop::Msg;
@@ -1602,7 +1604,9 @@ impl TerminalView {
     pub fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
         let lines = paste_line_count(&text);
-        if paste_needs_confirmation(&text, self.term_mode()) {
+        if nebula_settings::RuntimeSettings::load().multiline_paste_confirm
+            && paste_needs_confirmation(&text, self.term_mode())
+        {
             self.confirm_paste(text, lines, window, cx);
             return;
         }
@@ -1650,22 +1654,54 @@ impl TerminalView {
         // pane」的 view 释放不掉。
         let text = Arc::new(text);
         let view = cx.entity().downgrade();
+        let never_ask_again = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ok_text2 = ok_text.clone();
+        let cancel_text2 = cancel_text.clone();
+        let title2 = title.clone();
+        let body2 = body.clone();
         window.open_dialog(cx, move |dialog, window, _cx| {
             let text = text.clone();
             let view = view.clone();
-            confirm_dialog(
+            let never_ask_again2 = never_ask_again.clone();
+            let dialog = confirm_dialog(
                 dialog,
                 window,
-                title.clone(),
-                body.clone(),
-                ok_text.clone(),
-                cancel_text.clone(),
+                title2.clone(),
+                body2.clone(),
+                ok_text2.clone(),
+                cancel_text2.clone(),
                 ButtonVariant::Primary,
-            )
-            .on_ok(move |_, _window, cx| {
-                let _ = view.update(cx, |this, cx| this.paste_now(&text, cx));
-                true
-            })
+            );
+            let checkbox_state = never_ask_again2.clone();
+            let view_c = view.clone();
+            dialog
+                .child(
+                    Checkbox::new("nebula-paste-never-ask")
+                        .label(match language {
+                            crate::display::UiLanguage::EnUs => "Don't ask again",
+                            _ => "不再询问",
+                        })
+                        .checked(never_ask_again2.load(std::sync::atomic::Ordering::Relaxed))
+                        .small()
+                        .on_click(move |checked, window, _cx| {
+                            checkbox_state.store(*checked, std::sync::atomic::Ordering::Relaxed);
+                            window.refresh();
+                        }),
+                )
+                .on_ok({
+                    let never_ask_again = never_ask_again2.clone();
+                    let view = view_c;
+                    move |_, _window, cx| {
+                        if never_ask_again.load(std::sync::atomic::Ordering::Relaxed) {
+                            let _ = nebula_settings::persist_keys(&[(
+                                "multiline_paste_confirm",
+                                "0".to_string(),
+                            )]);
+                        }
+                        let _ = view.update(cx, |this, cx| this.paste_now(&text, cx));
+                        true
+                    }
+                })
         });
     }
 

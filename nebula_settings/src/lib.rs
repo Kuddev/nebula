@@ -953,6 +953,8 @@ pub struct RuntimeSettings {
     pub cursor_shape: Option<CursorShapeName>,
     pub cursor_blink: Option<bool>,
     pub copy_on_select: bool,
+    /// 裸 shell 风险粘贴确认：开 = 换行、提权命令或控制字符先确认；关 = 直接粘贴。
+    pub multiline_paste_confirm: bool,
     pub powerline: bool,
     /// 默认 shell 的原始 id（`shell=` 原文：powershell/bash/cmd/pwsh/WSL
     /// 发行版等）。解析归 shell 检测层，这里只做持久化往返。
@@ -1087,6 +1089,7 @@ impl RuntimeSettings {
             cursor_shape: raw.value("cursor_shape").and_then(CursorShapeName::from_settings),
             cursor_blink: raw.bool_on("cursor_blink"),
             copy_on_select: raw.bool_on("copy_on_select").unwrap_or(false),
+            multiline_paste_confirm: raw.bool_on("multiline_paste_confirm").unwrap_or(true),
             powerline: raw.bool_on("powerline").unwrap_or(true),
             shell: raw.value("shell").or_else(|| raw.value("executor")).map(str::to_owned),
             startup_directory: raw.value("startup_directory").map(str::to_owned),
@@ -1328,6 +1331,7 @@ mod tests {
         assert_eq!(settings.theme, ThemeName::Nord);
         assert_eq!(settings.font_family, None);
         assert!(!settings.copy_on_select);
+        assert!(settings.multiline_paste_confirm, "多行粘贴确认默认开（上游兼容）");
         assert!(settings.powerline);
         assert!(settings.ghost);
         assert_eq!(settings.accept, AcceptKeyName::Both);
