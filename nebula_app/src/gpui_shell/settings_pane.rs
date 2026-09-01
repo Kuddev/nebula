@@ -2891,6 +2891,16 @@ impl SettingsPane {
             ));
         let interface = self
             .group(language.pick("界面", "Interface"), cx)
+            .child(self.switch_row(
+                "tab_close_visible",
+                language.pick("显示标签关闭按钮", "Show tab close buttons"),
+                language.pick(
+                    "关闭后侧栏与顶栏的标签都不再显示关闭按钮；中键点击标签仍可关闭。",
+                    "Hides close buttons in both sidebar and top tabs. Middle-click still closes a tab.",
+                ),
+                self.runtime.tab_close_visible,
+                cx,
+            ))
             .child(self.select_row(
                 "language",
                 language.pick("语言", "Language"),

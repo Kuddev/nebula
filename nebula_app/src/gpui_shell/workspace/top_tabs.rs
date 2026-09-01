@@ -137,6 +137,10 @@ impl NebulaWorkspace {
         let hover_bg = theme.list_hover;
         let dark = theme.is_dark();
         let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
+        let tab_close_visible = settings.map(|settings| settings.tab_close_visible).unwrap_or(true);
+        let tab_reveal = settings
+            .map(|settings| settings.tab_reveal)
+            .unwrap_or(nebula_settings::TabRevealName::Slide);
         let chrome_family = theme.mono_font_family.clone();
         let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         let label_px = settings.map(|settings| settings.base_font_size_px).unwrap_or(15.0);
@@ -458,18 +462,20 @@ impl NebulaWorkspace {
                                     .items_center()
                                     .invisible()
                                     .group_hover(hover_group, |slot| slot.visible())
-                                    .child(
-                                        Button::new(("top-close-tab", ix))
-                                            .icon(IconName::Close)
-                                            .ghost()
-                                            .xsmall()
-                                            .on_click(cx.listener(
-                                                move |this, _, window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.request_close_tab(ix, window, cx);
-                                                },
-                                            )),
-                                    ),
+                                    .when(tab_close_visible, |slot| {
+                                        slot.child(
+                                            Button::new(("top-close-tab", ix))
+                                                .icon(IconName::Close)
+                                                .ghost()
+                                                .xsmall()
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        this.request_close_tab(ix, window, cx);
+                                                    },
+                                                )),
+                                        )
+                                    }),
                             ),
                     )
                     .when_some(cross_window_drag, |row, payload| {
@@ -484,9 +490,7 @@ impl NebulaWorkspace {
                     )
                     .into_any_element()
                 } else if shift != 0.0 {
-                    if nebula_settings::RuntimeSettings::load().tab_reveal
-                        == nebula_settings::TabRevealName::Instant
-                    {
+                    if tab_reveal == nebula_settings::TabRevealName::Instant {
                         row.left(px(shift)).into_any_element()
                     } else {
                         row.with_animation(

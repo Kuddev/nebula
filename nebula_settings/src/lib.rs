@@ -955,6 +955,8 @@ pub struct RuntimeSettings {
     pub copy_on_select: bool,
     /// 裸 shell 风险粘贴确认：开 = 换行、提权命令或控制字符先确认；关 = 直接粘贴。
     pub multiline_paste_confirm: bool,
+    /// 标签页关闭按钮（叉号）是否渲染：关 = 不渲染，仍可用中键关闭。
+    pub tab_close_visible: bool,
     pub powerline: bool,
     /// 默认 shell 的原始 id（`shell=` 原文：powershell/bash/cmd/pwsh/WSL
     /// 发行版等）。解析归 shell 检测层，这里只做持久化往返。
@@ -1090,6 +1092,7 @@ impl RuntimeSettings {
             cursor_blink: raw.bool_on("cursor_blink"),
             copy_on_select: raw.bool_on("copy_on_select").unwrap_or(false),
             multiline_paste_confirm: raw.bool_on("multiline_paste_confirm").unwrap_or(true),
+            tab_close_visible: raw.bool_on("tab_close_visible").unwrap_or(true),
             powerline: raw.bool_on("powerline").unwrap_or(true),
             shell: raw.value("shell").or_else(|| raw.value("executor")).map(str::to_owned),
             startup_directory: raw.value("startup_directory").map(str::to_owned),
@@ -1332,6 +1335,7 @@ mod tests {
         assert_eq!(settings.font_family, None);
         assert!(!settings.copy_on_select);
         assert!(settings.multiline_paste_confirm, "多行粘贴确认默认开（上游兼容）");
+        assert!(settings.tab_close_visible, "标签关闭按钮默认可见（上游兼容）");
         assert!(settings.powerline);
         assert!(settings.ghost);
         assert_eq!(settings.accept, AcceptKeyName::Both);
