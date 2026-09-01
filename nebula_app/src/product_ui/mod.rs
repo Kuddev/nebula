@@ -6,10 +6,17 @@
 
 #[path = "../display/color.rs"]
 pub mod color;
+#[path = "../display/hint.rs"]
+pub(crate) mod hint;
 #[path = "../display/i18n.rs"]
 mod i18n;
+#[path = "../display/keymap.rs"]
+pub(crate) mod keymap;
 #[path = "../display/size_info.rs"]
 mod size_info;
+#[path = "../display/terminal_color.rs"]
+pub(crate) mod terminal_color;
+pub mod ui;
 
 pub use i18n::{LanguagePreference, UiLanguage};
 pub use size_info::SizeInfo;

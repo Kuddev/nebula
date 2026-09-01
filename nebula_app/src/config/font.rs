@@ -1,6 +1,7 @@
 use std::fmt;
 
-use crossfont::Size as FontSize;
+#[cfg(feature = "legacy-shell")]
+use crossfont::Size as CrossfontSize;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -46,8 +47,9 @@ pub struct Font {
 
 impl Font {
     /// Get a font clone with a size modification.
-    pub fn with_size(self, size: FontSize) -> Font {
-        Font { size: Size(size), ..self }
+    #[cfg(feature = "legacy-shell")]
+    pub fn with_size(self, size: CrossfontSize) -> Font {
+        Font { size: Size(FontSize::new(size.as_pt())), ..self }
     }
 
     /// Override the primary family while preserving size and spacing. The
@@ -60,8 +62,9 @@ impl Font {
     }
 
     #[inline]
-    pub fn size(&self) -> FontSize {
-        self.size.0
+    #[cfg(feature = "legacy-shell")]
+    pub fn size(&self) -> CrossfontSize {
+        CrossfontSize::new(self.size.0.as_pt())
     }
 
     /// Get normal font description.
@@ -152,6 +155,24 @@ impl SecondaryFontDescription {
             family: self.family.clone().unwrap_or_else(|| fallback.family.clone()),
             style: self.style.clone(),
         }
+    }
+}
+
+/// 配置层使用与旧栅格器相同的定点语义保存 pt，避免共享配置模型依赖具体 UI 后端。
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct FontSize(u32);
+
+impl FontSize {
+    const FACTOR: f32 = 1_000_000.0;
+    const MAX_POINTS: f32 = 3999.0;
+
+    fn new(points: f32) -> Self {
+        let points = points.clamp(1.0, Self::MAX_POINTS);
+        Self((points * Self::FACTOR) as u32)
+    }
+
+    fn as_pt(self) -> f32 {
+        (f64::from(self.0) / f64::from(Self::FACTOR)) as f32
     }
 }
 
