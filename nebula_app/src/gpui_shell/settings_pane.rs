@@ -2087,6 +2087,7 @@ impl SettingsPane {
             "copy_on_select" => flag!(copy_on_select),
             "multiline_paste_confirm" => flag!(multiline_paste_confirm),
             "tab_close_visible" => flag!(tab_close_visible),
+            "terminal_proxy" => flag!(terminal_proxy),
             "powerline" => flag!(powerline),
             "ghost" => flag!(ghost),
             "cjk_bold_regular" => flag!(cjk_bold_regular),
@@ -2122,7 +2123,8 @@ impl SettingsPane {
         }
     }
 
-    fn switch_row(
+    /// 斗隔 union 里 network_settings.rs 也用它。
+    pub(super) fn switch_row(
         &self,
         key: &'static str,
         label: &'static str,
