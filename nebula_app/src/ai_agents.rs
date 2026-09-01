@@ -217,9 +217,9 @@ impl AgentKind {
             return None;
         }
 
-        tokens.filter(|token| !token.starts_with('-')).find_map(|token| {
-            token.split(['/', '\\']).find_map(Self::parse)
-        })
+        tokens
+            .filter(|token| !token.starts_with('-'))
+            .find_map(|token| token.split(['/', '\\']).find_map(Self::parse))
     }
 
     /// Shell-safe resume command. Session ids are untrusted hook/file input,
@@ -302,11 +302,7 @@ fn is_env_assignment(token: &str) -> bool {
 }
 
 fn launcher_stem(token: &str) -> String {
-    let basename = token
-        .trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(token);
+    let basename = token.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(token);
     let lower = basename.to_ascii_lowercase();
     [".exe", ".cmd", ".bat", ".ps1", ".com"]
         .into_iter()

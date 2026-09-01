@@ -68,7 +68,7 @@ impl TerminalView {
             return;
         }
         let mode = self.term_mode();
-        self.track_encoded_key(keystroke, &mode);
+        self.track_encoded_key(keystroke, &mode, cx);
         if let Some(bytes) = keymap::encode(keystroke, &mode) {
             self.write_input(bytes, cx);
         }

@@ -804,10 +804,7 @@ impl TerminalView {
                     return;
                 };
                 let program = agent.slug().to_owned();
-                log::debug!(
-                    "agent identity from screen: pane={} program={program}",
-                    self.pane_id
-                );
+                log::debug!("agent identity from screen: pane={} program={program}", self.pane_id);
                 self.running_program = Some(program.clone());
                 self.agent_status_source = crate::ai_agents::AgentStatusSource::Screen;
                 self.agent_status_rule = None;

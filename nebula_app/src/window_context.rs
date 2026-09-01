@@ -2469,10 +2469,7 @@ impl WindowContext {
                         continue;
                     };
                     let program = agent.slug().to_owned();
-                    log::debug!(
-                        "agent identity from screen: pane={} program={program}",
-                        pane.id
-                    );
+                    log::debug!("agent identity from screen: pane={} program={program}", pane.id);
                     pane.nebula_state.running_program = Some(program.clone());
                     pane.nebula_state.agent_status_source =
                         crate::ai_agents::AgentStatusSource::Screen;

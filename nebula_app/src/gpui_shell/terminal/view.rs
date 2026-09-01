@@ -1040,11 +1040,10 @@ impl TerminalView {
                 // 程序身份来自 Enter 时捕获的完整命令行；直接启动和
                 // npx/node/uvx 等包装启动都会归一成 Agent slug。它是 WSL
                 // 看不见来宾进程时的主通道，hook 信封仍是更准的覆盖层。
-                let identity = crate::ai_agents::AgentKind::parse_command(
-                    &self.suggest.last_committed,
-                )
-                .map(|agent| agent.slug().to_owned())
-                .or_else(|| crate::display::extract_program(&self.suggest.last_committed));
+                let identity =
+                    crate::ai_agents::AgentKind::parse_command(&self.suggest.last_committed)
+                        .map(|agent| agent.slug().to_owned())
+                        .or_else(|| crate::display::extract_program(&self.suggest.last_committed));
                 if identity != self.running_program {
                     self.running_program = identity;
                     cx.emit(TerminalViewEvent::TitleChanged);
@@ -1873,12 +1872,7 @@ impl TerminalView {
         }
     }
 
-    fn track_encoded_key(
-        &mut self,
-        ks: &gpui::Keystroke,
-        mode: &TermMode,
-        cx: &mut Context<Self>,
-    ) {
+    fn track_encoded_key(&mut self, ks: &gpui::Keystroke, mode: &TermMode, cx: &mut Context<Self>) {
         if self.marked_text.is_some() || mode.contains(TermMode::ALT_SCREEN) {
             return;
         }
