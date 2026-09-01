@@ -4,11 +4,7 @@
 //! 住在本模块，`nebula_gpui` crate 只是组件验收的实验场，不承载产品代码
 //! （ROADMAP 终局形态第 1 条）。
 //!
-//! 两种拉起形态：
-//! - `nebula --gpui`：GPUI 主窗形态——主线程直接进 GPUI 消息循环，winit
-//!   旧壳完全不启动。P3 的产品验收形态；三闸门复测都在这里做。
-//! - `NEBULA_GPUI_SHELL=1`（需 gpui-shell 构建）：spike 形态——GPUI 跑在
-//!   专用线程，与 winit 旧壳同进程并存，仅用于双运行时验证，P3 完成后移除。
+//! `nebula --gpui` 从主线程直接进入 GPUI 消息循环；旧壳不会同时启动。
 
 // 父模块宏会覆盖所有外置子模块里的同名预导入宏，让普通 `cargo check`
 // 就能拦住会在 Windows GUI 无效标准句柄上 panic 的裸 print 调用。

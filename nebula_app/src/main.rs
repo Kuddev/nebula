@@ -15,11 +15,15 @@
 ))]
 compile_error!(r#"at least one of the "x11"/"wayland" features must be enabled"#);
 
+use std::env;
 use std::error::Error;
 use std::fmt::Write as _;
+#[cfg(feature = "legacy-shell")]
+use std::fs;
+#[cfg(feature = "legacy-shell")]
 use std::io::{self, Write};
+#[cfg(feature = "legacy-shell")]
 use std::path::PathBuf;
-use std::{env, fs};
 
 use log::info;
 #[cfg(windows)]
@@ -60,6 +64,10 @@ mod font_install;
 mod git_worktree;
 #[cfg(feature = "gpui-shell")]
 mod gpui_shell;
+#[cfg(feature = "legacy-shell")]
+mod input;
+#[cfg(all(feature = "gpui-shell", not(feature = "legacy-shell")))]
+#[path = "product_input.rs"]
 mod input;
 mod logging;
 #[cfg(target_os = "macos")]
@@ -108,8 +116,12 @@ mod update_check;
 #[cfg(feature = "gpui-shell")]
 mod update_download;
 mod ux;
-// pub(crate)：GPUI 壳复用 welcome 的 fastfetch 欢迎屏命令生成。
+#[cfg(feature = "legacy-shell")]
 pub(crate) mod window_context;
+#[cfg(all(feature = "gpui-shell", not(feature = "legacy-shell")))]
+#[path = "product_window_context.rs"]
+pub(crate) mod window_context;
+#[cfg(feature = "legacy-shell")]
 mod window_transition;
 
 #[cfg(feature = "legacy-shell")]
@@ -202,17 +214,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter(|path| path.is_dir());
         gpui_shell::run_shell(initial_cwd);
         return Ok(());
-    }
-
-    // C 路线 spike：GPUI UI 层跑在专用线程，拥有自己的消息循环与窗口；
-    // 与主线程的 winit 循环互不接管。仅在显式设置环境变量时启动，
-    // 用于验证双 UI 运行时共存（焦点/IME/DPI）；P3 主窗接管完成后移除。
-    #[cfg(feature = "gpui-shell")]
-    if std::env::var_os("NEBULA_GPUI_SHELL").is_some() {
-        std::thread::Builder::new()
-            .name("gpui-shell".into())
-            .spawn(|| gpui_shell::run_shell(None))
-            .expect("spawn gpui-shell thread");
     }
 
     match options.subcommands {

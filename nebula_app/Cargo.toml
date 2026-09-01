@@ -35,6 +35,11 @@ optional = true
 workspace = true
 optional = true
 
+[target.'cfg(target_os = "linux")'.dependencies.gpui_platform]
+workspace = true
+optional = true
+features = ["wayland", "x11"]
+
 [dependencies.gpui-component]
 version = "=0.5.2"
 optional = true
