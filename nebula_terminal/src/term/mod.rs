@@ -249,6 +249,9 @@ pub struct Term<T> {
     /// stale entries are pruned lazily. Primary screen only.
     nebula_prompt_marks: VecDeque<usize>,
 
+    /// Whether OSC 133 currently identifies this pane as accepting shell input.
+    nebula_prompt_active: bool,
+
     /// One-shot suppression of the next primary-DA answer: the side-loaded
     /// ConPTY host's bring-up DA1 query was already answered by the response
     /// pre-primed into conin before the host spawned (see
@@ -405,6 +408,15 @@ impl<T> Term<T> {
         }
 
         self.nebula_prompt_marks.push_back(abs);
+        self.nebula_prompt_active = true;
+    }
+
+    pub fn nebula_end_prompt(&mut self) {
+        self.nebula_prompt_active = false;
+    }
+
+    pub fn nebula_prompt_active(&self) -> bool {
+        self.nebula_prompt_active && !self.mode.contains(TermMode::ALT_SCREEN)
     }
 
     /// Scroll the viewport to the previous (`up`) or next shell prompt mark.
@@ -479,6 +491,7 @@ impl<T> Term<T> {
             inactive_keyboard_mode_stack: Default::default(),
             keyboard_mode_stack: Default::default(),
             nebula_prompt_marks: Default::default(),
+            nebula_prompt_active: false,
             active_charset: Default::default(),
             vi_mode_cursor: Default::default(),
             cursor_style: Default::default(),
@@ -2082,6 +2095,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.reset();
         self.inactive_grid.reset();
         self.nebula_prompt_marks.clear();
+        self.nebula_prompt_active = false;
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();

@@ -83,7 +83,7 @@ impl TerminalView {
             self.paste_now_impl(text, false, cx);
         } else {
             if !self.term_mode().contains(TermMode::ALT_SCREEN) {
-                crate::display::Display::nebula_input_text(&mut self.suggest, text);
+                crate::display::nebula_input_text(&mut self.suggest, text);
             }
             self.write_input(text.as_bytes().to_vec(), cx);
         }

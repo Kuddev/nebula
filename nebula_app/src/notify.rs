@@ -23,21 +23,28 @@
 //! crash. A small global throttle keeps a bell-happy background job from
 //! flooding the Action Center.
 
+#[cfg(feature = "legacy-shell")]
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoopProxy;
+#[cfg(feature = "legacy-shell")]
 use winit::window::WindowId;
 
+#[cfg(feature = "legacy-shell")]
 use crate::display::window::Window;
+#[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
 
 /// Event-loop proxy for toast click handlers. A click lands on a WinRT
 /// threadpool thread, which can only talk to the app through user events.
 /// Set once at boot, before the first toast can exist.
+#[cfg(feature = "legacy-shell")]
 static PROXY: OnceLock<EventLoopProxy<Event>> = OnceLock::new();
 
 /// Install the proxy used by toast activation (click-to-focus).
+#[cfg(feature = "legacy-shell")]
 pub fn init_proxy(proxy: EventLoopProxy<Event>) {
     let _ = PROXY.set(proxy);
 }
@@ -121,6 +128,7 @@ const TOAST_THROTTLE: Duration = Duration::from_secs(3);
 ///
 /// `pane` names the pane the event came from, when known: clicking the toast
 /// then focuses the window AND surfaces that pane's tab (mac-style).
+#[cfg(feature = "legacy-shell")]
 pub fn deliver(window: &Window, notification: &Notification, pane: Option<u64>) {
     // Taskbar flash / attention request (winit wraps FlashWindowEx). Always
     // fires: it is idempotent, silent, and the shell coalesces repeats.
@@ -147,6 +155,7 @@ pub fn deliver(window: &Window, notification: &Notification, pane: Option<u64>) 
 }
 
 /// Global toast rate limit. Returns true when this one should be dropped.
+#[cfg(feature = "legacy-shell")]
 fn throttled() -> bool {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     // A poisoned lock only means some thread panicked mid-check; the state is
@@ -164,9 +173,14 @@ fn throttled() -> bool {
 /// Raise a native system toast. Best-effort: any failure is logged and
 /// swallowed (the taskbar flash already fired, so the user is not left with
 /// nothing). Runs on the toast worker thread, never on the event loop.
-#[cfg(windows)]
+#[cfg(all(windows, feature = "legacy-shell"))]
 pub(crate) fn toast(title: &str, body: &str) {
     toast_clickable(title, body, None);
+}
+
+#[cfg(all(windows, not(feature = "legacy-shell")))]
+pub(crate) fn toast(title: &str, body: &str) {
+    toast_clickable(title, body);
 }
 
 /// [`toast`], optionally wired for click-to-focus: activating the banner (or
@@ -175,7 +189,11 @@ pub(crate) fn toast(title: &str, body: &str) {
 /// protocol registration. The one trade-off: clicks after Nebula exited do
 /// nothing, which is exactly right (there is nothing left to focus).
 #[cfg(windows)]
-fn toast_clickable(title: &str, body: &str, focus: Option<(WindowId, Option<u64>)>) {
+fn toast_clickable(
+    title: &str,
+    body: &str,
+    #[cfg(feature = "legacy-shell")] focus: Option<(WindowId, Option<u64>)>,
+) {
     use tauri_winrt_notification::{IconCrop, Toast};
 
     // Attribute the toast to the Nebula AUMID so it reads "Nebula" instead of
@@ -192,6 +210,7 @@ fn toast_clickable(title: &str, body: &str, focus: Option<(WindowId, Option<u64>
     if let Some(icon) = win::icon_path() {
         toast = toast.icon(&icon, IconCrop::Square, "Nebula");
     }
+    #[cfg(feature = "legacy-shell")]
     if let Some((window, pane)) = focus {
         if let Some(proxy) = PROXY.get() {
             let proxy = proxy.clone();
@@ -211,7 +230,7 @@ fn toast_clickable(title: &str, body: &str, focus: Option<(WindowId, Option<u64>
 #[cfg(not(windows))]
 pub(crate) fn toast(_title: &str, _body: &str) {}
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), feature = "legacy-shell"))]
 fn toast_clickable(_title: &str, _body: &str, _focus: Option<(WindowId, Option<u64>)>) {}
 
 /// `nebula notify-test` entrypoint: run the full toast pipeline synchronously

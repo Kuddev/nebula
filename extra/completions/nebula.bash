@@ -52,6 +52,9 @@ _nebula() {
             nebula,window)
                 cmd="nebula__window"
                 ;;
+            nebula__agent,delegate)
+                cmd="nebula__agent__delegate"
+                ;;
             nebula__agent,help)
                 cmd="nebula__agent__help"
                 ;;
@@ -69,6 +72,9 @@ _nebula() {
                 ;;
             nebula__agent,wait)
                 cmd="nebula__agent__wait"
+                ;;
+            nebula__agent__help,delegate)
+                cmd="nebula__agent__help__delegate"
                 ;;
             nebula__agent__help,help)
                 cmd="nebula__agent__help__help"
@@ -334,6 +340,9 @@ _nebula() {
             nebula__help,window)
                 cmd="nebula__help__window"
                 ;;
+            nebula__help__agent,delegate)
+                cmd="nebula__help__agent__delegate"
+                ;;
             nebula__help__agent,list)
                 cmd="nebula__help__agent__list"
                 ;;
@@ -590,7 +599,7 @@ _nebula() {
 
     case "${cmd}" in
         nebula)
-            opts="-q -v -e -T -o -h -V --print-events --ref-test --embed --gpui --legacy-shell --config-file --daemon --working-directory --hold --command --title --class --option --help --version ctl env window tab pane agent migrate config notify-test setup-ai ssh help"
+            opts="-q -v -e -T -o -h -V --print-events --ref-test --embed --gpui --config-file --daemon --working-directory --hold --command --title --class --option --help --version ctl env window tab pane agent migrate config notify-test setup-ai ssh help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -666,7 +675,7 @@ _nebula() {
             return 0
             ;;
         nebula__agent)
-            opts="-h --help list send paste read wait help"
+            opts="-h --help list send delegate paste read wait help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -679,9 +688,45 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__help)
-            opts="list send paste read wait help"
+        nebula__agent__delegate)
+            opts="-h --generation --pretty --timeout-ms --help <AGENT> <TEXT>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --generation)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --timeout-ms)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        nebula__agent__help)
+            opts="list send delegate paste read wait help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        nebula__agent__help__delegate)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -2468,8 +2513,22 @@ _nebula() {
             return 0
             ;;
         nebula__help__agent)
-            opts="list send paste read wait"
+            opts="list send delegate paste read wait"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        nebula__help__agent__delegate)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi

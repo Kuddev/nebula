@@ -18,6 +18,7 @@ pub mod debug;
 pub mod font;
 pub mod general;
 pub mod lua;
+#[cfg(feature = "legacy-shell")]
 pub mod monitor;
 pub mod reload;
 pub mod scrolling;

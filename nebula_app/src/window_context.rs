@@ -2425,6 +2425,7 @@ impl WindowContext {
                 state.agent_runtime_submit_pending = false;
                 state.ai_session = None;
                 state.running_program = None;
+                state.pending_command_prompt = None;
                 state.awaiting_input = false;
                 state.needs_attention = false;
             },
@@ -2449,18 +2450,60 @@ impl WindowContext {
             self.runtime_flush_pending_submit(Some(pane_id));
         }
         for pane in &mut self.panes {
-            let screen = {
+            let (prompt_restored, screen) = {
                 let term = pane.terminal.lock();
                 let lines = term.screen_lines();
                 if lines == 0 || term.columns() == 0 {
                     continue;
                 }
+                let prompt_restored =
+                    pane.nebula_state.pending_command_prompt.as_deref().is_some_and(|expected| {
+                        crate::display::nebula_shell_prompt_restored_from_raw_grid(
+                            &term,
+                            expected,
+                            &pane.nebula_state.suggest_env,
+                        )
+                    });
                 let take = lines.min(24);
                 let start = Point::new(Line((lines - take) as i32), Column(0));
                 let end =
                     Point::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
-                term.bounds_to_string(start, end)
+                (prompt_restored, term.bounds_to_string(start, end))
             };
+            if prompt_restored
+                && pane
+                    .nebula_state
+                    .running_program
+                    .as_deref()
+                    .and_then(crate::ai_agents::AgentKind::parse)
+                    .is_some()
+            {
+                log::debug!(
+                    "agent lifecycle: submitted shell prompt restored pane={} program={:?}",
+                    pane.id,
+                    pane.nebula_state.running_program
+                );
+                let state = &mut pane.nebula_state;
+                if let Some(run) = state.active_run.take() {
+                    state.last_run =
+                        Some(crate::runtime_api::RuntimeRunOutcome::command_done(run, None));
+                }
+                state.running_program = None;
+                state.ai_session = None;
+                state.agent_status = crate::ai_agents::AgentStatus::Unknown;
+                state.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
+                state.agent_status_rule = None;
+                state.agent_hook_seen = false;
+                state.idle_screen_streak = 0;
+                state.agent_runtime_submit_pending = false;
+                state.runtime_submit_barrier = None;
+                state.command_started = None;
+                state.pending_command_prompt = None;
+                state.awaiting_input = false;
+                state.finished_unseen = false;
+                state.needs_attention = false;
+                continue;
+            }
             let program = match pane.nebula_state.running_program.clone() {
                 Some(program) => program,
                 None => {

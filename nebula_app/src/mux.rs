@@ -23,8 +23,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use log::{info, warn};
+#[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoopProxy;
 
+#[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(400);
@@ -82,6 +84,7 @@ impl MuxServer {
     /// Start serving attach requests, unless a live server already owns the
     /// port file (then this instance stays client-only and returns `None`).
     #[allow(dead_code)]
+    #[cfg(feature = "legacy-shell")]
     pub fn spawn(proxy: EventLoopProxy<Event>) -> Option<Self> {
         Self::spawn_callback(move || {
             let _ = proxy.send_event(Event::new(EventType::NebulaAttach, None));

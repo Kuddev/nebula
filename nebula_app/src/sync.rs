@@ -514,24 +514,47 @@ fn settings_file_path() -> PathBuf {
     crate::display::nebula_data_dir().join("nebula_settings.txt")
 }
 
-fn history_file_path() -> PathBuf {
-    crate::display::nebula_data_dir().join("nebula_history.jsonl")
+fn history_file_path(file_name: &str) -> PathBuf {
+    crate::display::nebula_data_dir().join(file_name)
 }
 
 /// 本地历史尾部（最近 [`HISTORY_SYNC_CAP`] 行）。
 fn history_tail() -> Vec<String> {
-    let text = std::fs::read_to_string(history_file_path()).unwrap_or_default();
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut lines = Vec::new();
+    for file_name in crate::nebula_history::history_file_names() {
+        let text = std::fs::read_to_string(history_file_path(file_name)).unwrap_or_default();
+        lines.extend(
+            text.lines()
+                .filter(|line| crate::nebula_history::record_category_file(line).is_some())
+                .map(str::to_owned),
+        );
+    }
+    lines.sort_by_key(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|value| value["ts"].as_u64())
+            .unwrap_or(0)
+    });
     let start = lines.len().saturating_sub(HISTORY_SYNC_CAP);
-    lines[start..].iter().map(|l| (*l).to_owned()).collect()
+    lines.drain(0..start);
+    lines
 }
 
 fn write_history(lines: &[String]) -> Result<(), String> {
-    let mut text = lines.join("\n");
-    if !text.is_empty() {
-        text.push('\n');
+    let mut categories: HashMap<&'static str, Vec<&str>> = HashMap::new();
+    for line in lines {
+        let Some(file_name) = crate::nebula_history::record_category_file(line) else { continue };
+        categories.entry(file_name).or_default().push(line);
     }
-    std::fs::write(history_file_path(), text).map_err(|err| format!("写入历史失败：{err}"))
+    for file_name in crate::nebula_history::history_file_names() {
+        let mut text = categories.remove(file_name).unwrap_or_default().join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        std::fs::write(history_file_path(file_name), text)
+            .map_err(|err| format!("写入历史失败：{err}"))?;
+    }
+    Ok(())
 }
 
 // ---- 网络 ----

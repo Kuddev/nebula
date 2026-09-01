@@ -24,7 +24,15 @@ macro_rules! icons {
     };
 }
 
-const NEBULA_ICONS: &[(&str, &[u8])] = icons!["command-manager", "keymap", "pencil", "trash-2"];
+const NEBULA_ICONS: &[(&str, &[u8])] = icons![
+    "command-manager",
+    "keymap",
+    "pencil",
+    "trash-2",
+    "vcs-changes",
+    "vcs-history",
+    "vcs-conflict",
+];
 
 /// 先查本仓库，未命中再交给组件库。
 pub struct NebulaAssets;
@@ -59,4 +67,10 @@ pub mod nav {
     pub const PENCIL: &str = "icons/nebula-pencil.svg";
     /// Lucide trash-2；删除保存命令不能借用表示 Backspace 的 `IconName::Delete`。
     pub const TRASH: &str = "icons/nebula-trash-2.svg";
+    /// IDEA Commit 工具窗口同语义的“基线 + 提交节点”：工作区变更入口。
+    pub const VCS_CHANGES: &str = "icons/nebula-vcs-changes.svg";
+    /// 带分叉节点的提交线路：版本历史入口。
+    pub const VCS_HISTORY: &str = "icons/nebula-vcs-history.svg";
+    /// 两侧分支汇入结果并在交点标出冲突：三栏冲突解决入口。
+    pub const VCS_CONFLICT: &str = "icons/nebula-vcs-conflict.svg";
 }

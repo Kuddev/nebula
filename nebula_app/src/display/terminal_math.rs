@@ -21,7 +21,9 @@ use crate::display::content::RenderableCell;
 use crate::math::cache::{FormulaCacheKey, MathLayoutCache};
 use crate::math::layout::{MathLayout, MathMetrics};
 use crate::math::{DEFAULT_LIMITS, MIN_READABLE_MATH_PX, compile_formula};
+#[cfg(feature = "legacy-shell")]
 use crate::renderer::math::MathClip;
+#[cfg(feature = "legacy-shell")]
 use crate::renderer::{GlyphCache, Renderer};
 
 const MAX_VISIBLE_FORMULAS: usize = 64;
@@ -2591,6 +2593,7 @@ pub(crate) fn plan_overlay_draw(
 /// replaced source glyphs with spaces while retaining their resolved terminal
 /// backgrounds, so no opaque cover quad is needed here.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "legacy-shell")]
 pub(crate) fn draw_overlays(
     renderer: &mut Renderer,
     glyph_cache: &mut GlyphCache,

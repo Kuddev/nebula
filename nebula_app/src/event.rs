@@ -2016,22 +2016,22 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 
     #[inline]
     fn nebula_input_char(&mut self, c: char) {
-        Display::nebula_input_char(self.nebula_state, c);
+        crate::display::nebula_input_char(self.nebula_state, c);
     }
 
     #[inline]
     fn nebula_input_text(&mut self, text: &str) {
-        Display::nebula_input_text(self.nebula_state, text);
+        crate::display::nebula_input_text(self.nebula_state, text);
     }
 
     #[inline]
     fn nebula_input_backspace(&mut self) {
-        Display::nebula_input_backspace(self.nebula_state);
+        crate::display::nebula_input_backspace(self.nebula_state);
     }
 
     #[inline]
     fn nebula_delete_word(&mut self) {
-        Display::nebula_input_delete_word(self.nebula_state);
+        crate::display::nebula_input_delete_word(self.nebula_state);
     }
 
     #[inline]
@@ -2040,16 +2040,37 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         // hasn't processed the newline yet, so the row still shows the full
         // line, while the cached `screen_line` is one draw behind and commits
         // a truncated command on type-fast-then-Enter.
+        let agent_already_active = self
+            .nebula_state
+            .running_program
+            .as_deref()
+            .and_then(crate::ai_agents::AgentKind::parse)
+            .is_some();
+        if !agent_already_active {
+            self.nebula_state.pending_command_prompt = None;
+        }
         #[cfg(windows)]
-        if !self.terminal.mode().intersects(TermMode::ALT_SCREEN | TermMode::VI)
+        if !agent_already_active
+            && !self.terminal.mode().intersects(TermMode::ALT_SCREEN | TermMode::VI)
             && self.search_state.regex().is_none()
         {
             let cursor = self.terminal.grid().cursor.point;
-            match Display::nebula_input_from_raw_grid(self.terminal, cursor) {
-                Some(line) => self.nebula_state.screen_line = line,
+            match crate::display::nebula_prompt_line_from_raw_grid(
+                self.terminal,
+                cursor,
+                &self.nebula_state.line_buf,
+                &self.nebula_state.suggest_env,
+            ) {
+                Some(line) => {
+                    self.nebula_state.screen_line = line.input;
+                    self.nebula_state.pending_command_prompt = Some(line.prompt);
+                },
                 // A failed read means the cached copy is stale too — an
                 // earlier partial line must not get recorded as this command.
-                None => self.nebula_state.screen_line.clear(),
+                None => {
+                    self.nebula_state.screen_line.clear();
+                    self.nebula_state.pending_command_prompt = None;
+                },
             }
         }
         self.display.nebula_commit_line(self.nebula_state);
@@ -2057,7 +2078,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
 
     #[inline]
     fn nebula_clear_line(&mut self) {
-        Display::nebula_clear_line(self.nebula_state);
+        crate::display::nebula_clear_line(self.nebula_state);
     }
 
     fn nebula_tab(&self, request: TabRequest) {
@@ -3391,31 +3412,6 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                             self.ctx.display.nebula_record_directory(&cwd);
                             *self.ctx.dirty = true;
                         }
-                        if matches!(
-                            self.ctx.nebula_state.agent_status_source,
-                            crate::ai_agents::AgentStatusSource::Screen
-                                | crate::ai_agents::AgentStatusSource::Process
-                        ) && !self.ctx.nebula_state.agent_hook_seen
-                            && self
-                                .ctx
-                                .nebula_state
-                                .running_program
-                                .as_deref()
-                                .and_then(crate::ai_agents::AgentKind::parse)
-                                .is_some()
-                        {
-                            self.ctx.nebula_state.running_program = None;
-                            self.ctx.nebula_state.agent_status =
-                                crate::ai_agents::AgentStatus::Unknown;
-                            self.ctx.nebula_state.agent_status_source =
-                                crate::ai_agents::AgentStatusSource::Unknown;
-                            self.ctx.nebula_state.agent_status_rule = None;
-                            self.ctx.nebula_state.idle_screen_streak = 0;
-                            self.ctx.nebula_state.command_started = None;
-                            self.ctx.nebula_state.awaiting_input = false;
-                            self.ctx.nebula_state.needs_attention = false;
-                            *self.ctx.dirty = true;
-                        }
                     },
                     TerminalEvent::InlineImage { png, abs_line, width, height } => {
                         // Decode off the PTY thread (here, on the UI loop) and
@@ -3518,6 +3514,10 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                         self.ctx.nebula_state.agent_status_source =
                             crate::ai_agents::AgentStatusSource::Unknown;
                         self.ctx.nebula_state.agent_status_rule = None;
+                        self.ctx.nebula_state.pending_command_prompt = None;
+                        self.ctx.nebula_state.agent_runtime_submit_pending = false;
+                        self.ctx.nebula_state.runtime_submit_barrier = None;
+                        self.ctx.nebula_state.idle_screen_streak = 0;
                         let pending_ssh = self.ctx.nebula_state.pending_ssh_host.take();
                         self.ctx.nebula_state.awaiting_input = false;
                         if let Some(run) = self.ctx.nebula_state.active_run.take() {

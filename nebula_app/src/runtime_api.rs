@@ -23,9 +23,11 @@ pub(crate) use command::{
     capture_process_tree, capture_terminal_tail, validate_chat_message, validate_command_line,
     validate_paste_text, validate_prompt,
 };
+#[cfg(feature = "legacy-shell")]
+pub use server::dispatch_prompt;
 use server::{Endpoint, endpoint_addr, read_endpoint};
 pub use server::{
-    RuntimeServer, dispatch_prompt, try_open_default_tab_existing, try_open_directory_existing,
+    RuntimeServer, try_open_default_tab_existing, try_open_directory_existing,
     try_open_window_existing,
 };
 
@@ -43,6 +45,7 @@ use log::{info, warn};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoopProxy;
 
 use nebula_terminal::event::EventListener;
@@ -53,6 +56,7 @@ use nebula_terminal::term::Term;
 use crate::cli::{
     ControlCommand as CliCommand, ControlOptions, ControlSplitDirection, ControlWaitState,
 };
+#[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
 
 pub const PROTOCOL_NAME: &str = "nebula.runtime";
@@ -907,6 +911,7 @@ pub enum RuntimeCallback {
 
 #[derive(Clone)]
 enum EventSink {
+    #[cfg(feature = "legacy-shell")]
     Winit(EventLoopProxy<Event>),
     Callback(Arc<dyn Fn(RuntimeCallback) + Send + Sync>),
 }
@@ -914,6 +919,7 @@ enum EventSink {
 impl EventSink {
     fn emit_attach(&self) {
         match self {
+            #[cfg(feature = "legacy-shell")]
             Self::Winit(proxy) => {
                 let _ = proxy.send_event(Event::new(EventType::NebulaAttach, None));
             },
@@ -923,6 +929,7 @@ impl EventSink {
 
     fn emit_control(&self, dispatch: Arc<RuntimeDispatch>) -> bool {
         match self {
+            #[cfg(feature = "legacy-shell")]
             Self::Winit(proxy) => {
                 proxy.send_event(Event::new(EventType::RuntimeControl(dispatch), None)).is_ok()
             },

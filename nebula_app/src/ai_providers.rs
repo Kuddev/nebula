@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+#[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
 use crate::provider_test::ProviderTestOutcome;
 
@@ -493,6 +494,7 @@ pub fn test_provider(provider: &AiProvider) -> ProviderTestResult {
     finish(outcome)
 }
 
+#[cfg(feature = "legacy-shell")]
 pub fn spawn_test(
     request: ProviderTestRequest,
     proxy: winit::event_loop::EventLoopProxy<Event>,

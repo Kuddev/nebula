@@ -2,8 +2,11 @@ use std::path::PathBuf;
 
 use rfd::FileDialog;
 
-use super::{FileFilter, Window};
+use super::FileFilter;
+#[cfg(feature = "legacy-shell")]
+use super::Window;
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_file(owner: &Window, title: &str, filters: &[FileFilter]) -> Option<PathBuf> {
     dialog(owner, title, filters).pick_file()
 }
@@ -16,14 +19,17 @@ pub(super) fn pick_file_unowned(title: &str, filters: &[FileFilter]) -> Option<P
     dialog.pick_file()
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_files(owner: &Window, title: &str, filters: &[FileFilter]) -> Vec<PathBuf> {
     dialog(owner, title, filters).pick_files().unwrap_or_default()
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_folder(owner: &Window, title: &str) -> Option<PathBuf> {
     dialog(owner, title, &[]).pick_folder()
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn save_file(
     owner: &Window,
     title: &str,
@@ -33,6 +39,7 @@ pub(super) fn save_file(
     dialog(owner, title, filters).set_file_name(default_name).save_file()
 }
 
+#[cfg(feature = "legacy-shell")]
 fn dialog(owner: &Window, title: &str, filters: &[FileFilter]) -> FileDialog {
     let mut dialog = FileDialog::new().set_title(title).set_parent(owner.native_window());
     for filter in filters {

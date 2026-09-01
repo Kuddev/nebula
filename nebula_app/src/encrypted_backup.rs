@@ -201,7 +201,9 @@ fn collect_from(root: &Path, selection: BackupSelection) -> Result<BackupArchive
                 add_file(root, category, "directory_history.json", &mut entries, identity)
             },
             BackupCategory::CommandHistory => {
-                add_file(root, category, "nebula_history.jsonl", &mut entries, identity)
+                for file_name in crate::nebula_history::history_file_names() {
+                    add_file(root, category, file_name, &mut entries, identity);
+                }
             },
             BackupCategory::Fonts => add_fonts(root, &mut entries)?,
         }
@@ -384,7 +386,9 @@ fn validate_archive(archive: &BackupArchive) -> Result<(), String> {
             BackupCategory::Assistant => entry.name == "nebula_assistant.txt",
             BackupCategory::Session => entry.name == "session.json",
             BackupCategory::DirectoryHistory => entry.name == "directory_history.json",
-            BackupCategory::CommandHistory => entry.name == "nebula_history.jsonl",
+            BackupCategory::CommandHistory => {
+                crate::nebula_history::history_file_names().contains(&entry.name.as_str())
+            },
             BackupCategory::Fonts => {
                 entry.name.starts_with("fonts/") && entry.name.len() > "fonts/".len()
             },
@@ -470,6 +474,38 @@ mod tests {
             collected.entries.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
             vec!["nebula.lua", "terminal_profiles.json"]
         );
+    }
+
+    #[test]
+    fn command_history_collection_and_restore_include_all_scopes() {
+        let source = tempdir().unwrap();
+        for (index, file_name) in
+            crate::nebula_history::history_file_names().into_iter().enumerate()
+        {
+            fs::write(source.path().join(file_name), format!("history-{index}")).unwrap();
+        }
+        let selection = BackupSelection {
+            appearance: false,
+            command_history: true,
+            ..BackupSelection::default()
+        };
+
+        let archive = collect_from(source.path(), selection).unwrap();
+        assert_eq!(
+            archive.entries.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
+            crate::nebula_history::history_file_names()
+        );
+
+        let restored = tempdir().unwrap();
+        restore_to(restored.path(), &archive).unwrap();
+        for (index, file_name) in
+            crate::nebula_history::history_file_names().into_iter().enumerate()
+        {
+            assert_eq!(
+                fs::read_to_string(restored.path().join(file_name)).unwrap(),
+                format!("history-{index}")
+            );
+        }
     }
 
     #[test]

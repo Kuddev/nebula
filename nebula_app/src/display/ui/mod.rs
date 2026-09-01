@@ -50,14 +50,19 @@
 //! 那一步的收益是编译器强制单向依赖 + 独立编译单元（改 UI 不再重编译整个 app）。
 
 pub mod caret;
+mod color_math;
 pub mod guardrails;
+pub(crate) mod geometry;
 pub mod icons;
 pub mod keycap;
+mod keycap_model;
 pub mod os_icons;
 pub mod overlay_list;
+mod scrollbar;
 pub mod surface;
 pub mod text_field;
 pub mod theme;
 pub mod toast;
+mod toast_kind;
 pub mod tokens;
 pub mod widgets;

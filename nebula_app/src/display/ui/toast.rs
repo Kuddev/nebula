@@ -16,6 +16,8 @@ use super::tokens::{Density, radius, space};
 use crate::display::color::Rgb;
 use crate::renderer::ui::{Rgba, UiQuad};
 
+pub use super::toast_kind::ToastKind;
+
 pub(crate) type Rect = (f32, f32, f32, f32);
 
 /// 单条高度的下限（逻辑像素）。实际高度还要保证容得下一行文字。
@@ -28,17 +30,6 @@ const MAX_W: f32 = 560.0;
 const RAIL_W: f32 = 3.0;
 /// 入场时先压低这么多再浮上来；淡出时反向沉下去。
 const RISE: f32 = 10.0;
-
-/// 提示的语气。语义色只花在左边那根细条上——强调色与渐变的预算不动。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToastKind {
-    /// 中性信息。
-    Info,
-    /// 已经办成的事：恢复成功、保存成功。
-    Success,
-    /// 值得知道，但不需要动手。真正要用户处理的仍然走消息栏。
-    Warning,
-}
 
 impl ToastKind {
     fn rail(self, sk: &Skin) -> Rgba {

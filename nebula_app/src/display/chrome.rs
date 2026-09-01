@@ -10,6 +10,7 @@
 
 #![allow(clippy::wildcard_imports)]
 
+use super::text_path_model::truncate_tab_label;
 use super::ui::{icons, tokens, widgets};
 use super::*;
 
@@ -159,34 +160,6 @@ pub(crate) struct SidebarModel {
 
 pub(super) fn contains_rect((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f32) -> bool {
     x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
-}
-
-/// Truncate `label` so its terminal display width fits within `max_cols`
-/// columns, appending an ellipsis when clipped. CJK glyphs count as two columns,
-/// matching how `draw_chrome_text` lays them out — callers already compute
-/// `max_cols` as the available pixel span divided by `cell_w`, i.e. columns.
-pub(crate) fn truncate_tab_label(label: &str, max_cols: usize) -> String {
-    let total: usize = label.chars().map(|c| c.width().unwrap_or(0)).sum();
-    if total <= max_cols {
-        return label.to_owned();
-    }
-    if max_cols <= 1 {
-        return "…".to_owned();
-    }
-    // Reserve one column for the trailing ellipsis.
-    let budget = max_cols - 1;
-    let mut used = 0usize;
-    let mut text = String::new();
-    for ch in label.chars() {
-        let w = ch.width().unwrap_or(0);
-        if used + w > budget {
-            break;
-        }
-        used += w;
-        text.push(ch);
-    }
-    text.push('…');
-    text
 }
 
 /// 分组标题文本的 y——chip、数字、标题共用的**唯一事实源**。

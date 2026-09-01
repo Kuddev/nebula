@@ -7,14 +7,19 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST,
     OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
+#[cfg(feature = "legacy-shell")]
 use winit::raw_window_handle::RawWindowHandle;
 
-use super::{FileFilter, Window, windows_folder};
+#[cfg(feature = "legacy-shell")]
+use super::Window;
+use super::{FileFilter, windows_folder};
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_file(owner: &Window, title: &str, filters: &[FileFilter]) -> Option<PathBuf> {
     pick_files_inner_hwnd(owner_hwnd(owner), title, filters, false).into_iter().next()
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_files(owner: &Window, title: &str, filters: &[FileFilter]) -> Vec<PathBuf> {
     pick_files_inner_hwnd(owner_hwnd(owner), title, filters, true)
 }
@@ -37,6 +42,7 @@ pub(super) fn pick_files_with_hwnd(
     pick_files_inner_hwnd(hwnd, title, filters, true)
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_folder(owner: &Window, title: &str) -> Option<PathBuf> {
     windows_folder::pick(owner.raw_window_handle(), title)
 }
@@ -45,6 +51,7 @@ pub(super) fn pick_folder_with_hwnd(hwnd: HWND, title: &str) -> Option<PathBuf> 
     windows_folder::pick_with_hwnd(hwnd, title)
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn save_file(
     owner: &Window,
     title: &str,
@@ -75,6 +82,7 @@ pub(super) fn save_file(
     parse_open_file_buffer(&file_buffer).into_iter().next()
 }
 
+#[cfg(feature = "legacy-shell")]
 fn owner_hwnd(owner: &Window) -> HWND {
     match owner.raw_window_handle() {
         RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,

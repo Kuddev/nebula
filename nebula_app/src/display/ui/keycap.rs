@@ -14,8 +14,7 @@ use super::tokens::radius;
 use crate::display::color::Rgb;
 use crate::renderer::ui::{Rgba, UiQuad};
 
-/// Chip height in logical px（与 palette 底栏既有键帽一致）。
-pub const KEY_H: f32 = 20.0;
+pub use super::keycap_model::KEY_H;
 
 /// 每颗键帽内的左右呼吸缝。单键也要留出足够边距，避免文字贴住轮廓。
 const PAD_X: f32 = 7.0;

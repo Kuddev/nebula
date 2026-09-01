@@ -67,7 +67,12 @@ impl TerminalElement {
             None
         } else {
             let cursor = term.grid().cursor.point;
-            crate::display::Display::nebula_input_from_raw_grid(&term, cursor)
+            crate::display::nebula_input_from_raw_grid(
+                &term,
+                cursor,
+                &view.suggest.line_buf,
+                &view.suggest.suggest_env,
+            )
         };
         #[cfg(not(windows))]
         let prompt_line = None;

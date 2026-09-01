@@ -953,6 +953,10 @@ pub struct RuntimeSettings {
     pub cursor_shape: Option<CursorShapeName>,
     pub cursor_blink: Option<bool>,
     pub copy_on_select: bool,
+    /// Whether risky multi-line pastes require confirmation before reaching the shell.
+    pub multiline_paste_confirm: bool,
+    /// Whether tab close buttons are rendered in the sidebar and top tab strip.
+    pub tab_close_visible: bool,
     pub powerline: bool,
     /// 默认 shell 的原始 id（`shell=` 原文：powershell/bash/cmd/pwsh/WSL
     /// 发行版等）。解析归 shell 检测层，这里只做持久化往返。
@@ -1087,6 +1091,8 @@ impl RuntimeSettings {
             cursor_shape: raw.value("cursor_shape").and_then(CursorShapeName::from_settings),
             cursor_blink: raw.bool_on("cursor_blink"),
             copy_on_select: raw.bool_on("copy_on_select").unwrap_or(false),
+            multiline_paste_confirm: raw.bool_on("multiline_paste_confirm").unwrap_or(true),
+            tab_close_visible: raw.bool_on("tab_close_visible").unwrap_or(true),
             powerline: raw.bool_on("powerline").unwrap_or(true),
             shell: raw.value("shell").or_else(|| raw.value("executor")).map(str::to_owned),
             startup_directory: raw.value("startup_directory").map(str::to_owned),
@@ -1259,6 +1265,8 @@ mod tests {
              cursor_shape=beam\n\
              cursor_blink=1\n\
              copy_on_select=1\n\
+             multiline_paste_confirm=0\n\
+             tab_close_visible=0\n\
              bell=audible\n\
              cjk_bold_regular=1\n\
              tabs_position=top\n\
@@ -1292,6 +1300,8 @@ mod tests {
         assert_eq!(settings.cursor_shape, Some(CursorShapeName::Beam));
         assert_eq!(settings.cursor_blink, Some(true));
         assert!(settings.copy_on_select);
+        assert!(!settings.multiline_paste_confirm);
+        assert!(!settings.tab_close_visible);
         assert_eq!(settings.bell, BellModeName::Audible);
         assert!(!settings.powerline);
         assert_eq!(settings.shell.as_deref(), Some("pwsh"));
@@ -1328,6 +1338,8 @@ mod tests {
         assert_eq!(settings.theme, ThemeName::Nord);
         assert_eq!(settings.font_family, None);
         assert!(!settings.copy_on_select);
+        assert!(settings.multiline_paste_confirm);
+        assert!(settings.tab_close_visible);
         assert!(settings.powerline);
         assert!(settings.ghost);
         assert_eq!(settings.accept, AcceptKeyName::Both);

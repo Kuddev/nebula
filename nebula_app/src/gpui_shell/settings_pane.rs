@@ -919,10 +919,15 @@ pub struct SettingsPane {
     /// SSH 区的行为实现拆在 `ssh_settings.rs`（同类型第二个 impl 块）。
     pub(super) ssh_hosts: crate::gpui_shell::ssh_hosts::SshHostLists,
     /// SSH 编辑器的文本字段常驻，以便所有文本改动都能使进行中的测试失效。
+    pub(super) ssh_username_input: Entity<InputState>,
     pub(super) ssh_destination_input: Entity<InputState>,
     pub(super) ssh_port_input: Entity<InputState>,
     pub(super) ssh_label_input: Entity<InputState>,
     pub(super) ssh_password_input: Entity<InputState>,
+    /// 用户名输入框本身可自由编辑；候选层只提供最近使用值，不把输入约束成
+    /// 固定枚举。锚点跟随输入框，滚动/DPI 变化后仍贴在其下方。
+    pub(super) ssh_username_picker_open: bool,
+    pub(super) ssh_username_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     /// 身份条头像的图标选择器（旧壳 `SshEditorHit::Avatar` + `icon_popup`）：
     /// 点头像展开，顶部一个正经搜索框，下面是分组过的目录。不做成右上角
     /// 的下拉框——图标属于头像那件事，摆成独立字段就成了可填可不填的杂项。
@@ -1322,9 +1327,11 @@ impl SettingsPane {
         let backup_remote_inputs: Vec<Entity<InputState>> =
             (0..4).map(|_| cx.new(|cx| InputState::new(window, cx))).collect();
 
-        // 占位文案与旧壳 `ssh_editor_render` 一字不差（对齐合同）。
+        let ssh_username_input = cx.new(|cx| InputState::new(window, cx).placeholder("root"));
+        // 地址框现在只承担 host/IP；仍兼容粘贴整段 user@host，由共享 helper
+        // 在保存/测试时拆出内嵌用户名。
         let ssh_destination_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("user@example.com"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("example.com / 192.0.2.1"));
         // 端口键入即过滤：至多 5 位数字（旧壳同规则；范围校验在保存/测试时做）。
         let ssh_port_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -1345,6 +1352,7 @@ impl SettingsPane {
                 .placeholder(localized_input_placeholder("ssh_icon_filter", language))
         });
         for input in [
+            ssh_username_input.clone(),
             ssh_destination_input.clone(),
             ssh_port_input.clone(),
             ssh_label_input.clone(),
@@ -1360,6 +1368,16 @@ impl SettingsPane {
                 },
             ));
         }
+        subscriptions.push(cx.subscribe_in(
+            &ssh_username_input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, _, cx: &mut Context<Self>| {
+                if matches!(event, InputEvent::Focus) && this.ssh_editor.is_some() {
+                    this.ssh_username_picker_open = true;
+                    cx.notify();
+                }
+            },
+        ));
 
         let font_family_input =
             Self::new_font_family_input(runtime.font_family.clone(), window, cx);
@@ -1422,10 +1440,13 @@ impl SettingsPane {
             provider_test_running: false,
             provider_codex_confirm: None,
             ssh_hosts: crate::gpui_shell::ssh_hosts::SshHostLists::load(),
+            ssh_username_input,
             ssh_destination_input,
             ssh_port_input,
             ssh_label_input,
             ssh_password_input,
+            ssh_username_picker_open: false,
+            ssh_username_trigger_bounds: None,
             ssh_icon_picker_open: false,
             ssh_icon_filter_input,
             ssh_icon_trigger_bounds: None,
@@ -2064,6 +2085,8 @@ impl SettingsPane {
         match key {
             "follow_system_theme" => flag!(follow_system_theme),
             "copy_on_select" => flag!(copy_on_select),
+            "multiline_paste_confirm" => flag!(multiline_paste_confirm),
+            "tab_close_visible" => flag!(tab_close_visible),
             "powerline" => flag!(powerline),
             "ghost" => flag!(ghost),
             "cjk_bold_regular" => flag!(cjk_bold_regular),
@@ -2891,6 +2914,16 @@ impl SettingsPane {
             ));
         let interface = self
             .group(language.pick("界面", "Interface"), cx)
+            .child(self.switch_row(
+                "tab_close_visible",
+                language.pick("显示标签关闭按钮", "Show tab close buttons"),
+                language.pick(
+                    "关闭后侧栏与顶栏标签不再显示关闭按钮，中键关闭仍然可用。",
+                    "Hides close buttons in the sidebar and top tab strip. Middle-click close remains available.",
+                ),
+                self.runtime.tab_close_visible,
+                cx,
+            ))
             .child(self.select_row(
                 "language",
                 language.pick("语言", "Language"),
@@ -3786,6 +3819,16 @@ impl SettingsPane {
                         language.pick("选中即复制（关 = 右键复制/粘贴）", "Copy on select (off = right-click copy/paste)"),
                         language.pick("开着时松开鼠标就进剪贴板，右键直接粘贴。关掉后选中不复制，右键弹出复制/粘贴菜单。", "When enabled, releasing the mouse copies the selection and right-click pastes. When disabled, selection does not copy and right-click opens a copy/paste menu."),
                         self.runtime.copy_on_select,
+                        cx,
+                    ))
+                    .child(self.switch_row(
+                        "multiline_paste_confirm",
+                        language.pick("多行粘贴前询问", "Confirm multi-line paste"),
+                        language.pick(
+                            "关闭后，可能被 shell 逐行执行的长文本会直接粘贴，不再显示确认框。",
+                            "When disabled, long text that a shell may execute line by line is pasted without confirmation.",
+                        ),
+                        self.runtime.multiline_paste_confirm,
                         cx,
                     ))
                     .child(self.switch_row(

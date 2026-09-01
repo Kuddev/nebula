@@ -465,7 +465,14 @@ impl SidePanel {
         };
         let Some(root) = self.vcs_root().map(Path::to_path_buf) else { return false };
         let mut command = std::process::Command::new(program);
-        command.args(visual.tortoise_args()).current_dir(root);
+        // GUI 子系统进程没有可继承的有效标准句柄；显式置 null，避免 Windows
+        // CreateProcess 因 STARTUPINFO 中的无效句柄返回 ERROR_INVALID_HANDLE。
+        command
+            .args(visual.tortoise_args())
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -1027,7 +1034,55 @@ pub(crate) fn collect_git_info(run: impl Fn(&[&str]) -> Option<String>) -> Optio
             }
         }
     }
+    // `%x1e` 标出提交记录的起点，`%x1f` 分字段。完整对象 ID 和父提交列表
+    // 交给显示层生成真实拓扑；不读取 `--graph` 字符画，也就不会产生空的
+    // 拓扑过渡行。时间取 Unix 秒，显示层再按当前时间生成中文相对时间。
+    info.history = run(&[
+        "log",
+        "--all",
+        "--date-order",
+        "--decorate=full",
+        "--max-count=128",
+        "--format=%x1e%H%x1f%h%x1f%D%x1f%s%x1f%an%x1f%ct%x1f%P",
+    ])
+    .map(|output| parse_git_history(&output))
+    .unwrap_or_default();
     Some(info)
+}
+
+/// Parse the delimiter-based format emitted above. Subjects and author names
+/// may contain ordinary punctuation, spaces, or non-ASCII text; field
+/// delimiters keep those values intact.
+pub(crate) fn parse_git_history(output: &str) -> Vec<GitCommit> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end_matches('\r');
+            let record_at = line.find('\x1e')?;
+            let mut fields = line[record_at + 1..].split('\x1f');
+            let full_hash = fields.next()?.to_owned();
+            let short_hash = fields.next()?.to_owned();
+            let decorations = fields.next().unwrap_or_default().trim().to_owned();
+            let subject = fields.next().unwrap_or_default().to_owned();
+            let author = fields.next().unwrap_or_default().to_owned();
+            let timestamp = fields.next().and_then(|value| value.parse().ok()).unwrap_or(0);
+            let parent_hashes = fields
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect();
+            Some(GitCommit {
+                full_hash,
+                short_hash,
+                decorations,
+                subject,
+                author,
+                timestamp,
+                parent_hashes,
+            })
+        })
+        .collect()
 }
 
 /// Cheap preference hint for nested checkouts. `read_svn` still runs the

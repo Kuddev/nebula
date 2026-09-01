@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use super::{NebulaTheme, SizeInfo};
+use super::ui::geometry as layout_geometry;
 use crate::config::ui_config::Profile;
 use crate::shell_detect::DetectedShell;
 use unicode_width::UnicodeWidthChar;
@@ -1975,9 +1976,9 @@ pub(crate) fn palette_layout_with_workspace_bounds(
     };
     let top = launcher.then_some(96.0);
     let pane = workspace_bounds.map_or_else(
-        || widgets::pane_geometry(win_w, win_h, scale, desired_pw, ph, 8.0, 12.0, top),
+        || layout_geometry::pane_geometry(win_w, win_h, scale, desired_pw, ph, 8.0, 12.0, top),
         |bounds| {
-            widgets::pane_geometry_in_horizontal_bounds(
+            layout_geometry::pane_geometry_in_horizontal_bounds(
                 win_w, win_h, scale, desired_pw, ph, 8.0, 12.0, top, bounds,
             )
         },
@@ -2006,7 +2007,7 @@ pub(crate) fn palette_layout_with_workspace_bounds(
     if let Some((band_x, band_y, _, band_h)) = chip_band {
         // 胶囊属于整条分组背景带，必须在带内居中；直接拿 band_y 会把全部
         // 10px 留白压到底部，文字虽在胶囊内居中，整组仍会显得向上漂。
-        let chip_y = widgets::centered_y(band_y, band_h, chip_h);
+        let chip_y = layout_geometry::centered_y(band_y, band_h, chip_h);
         let mut chip_x = band_x;
         for (filter, count) in model.launcher_chip_counts() {
             let label = filter.label(model.language);
@@ -2080,10 +2081,15 @@ pub(crate) fn palette_layout_with_workspace_bounds(
 // ---- rendering (the parent `display::mod` hands in the model + renderer;
 // this module owns the palette's pixels — same split as `side_panel.rs`) ----
 
+#[cfg(feature = "legacy-shell")]
 use super::ui::overlay_list::{self, RowState};
+#[cfg(feature = "legacy-shell")]
 use super::ui::surface;
+#[cfg(feature = "legacy-shell")]
 use super::ui::widgets::{self, ChipState};
+#[cfg(feature = "legacy-shell")]
 use crate::renderer::ui::{Rgba, UiQuad};
+#[cfg(feature = "legacy-shell")]
 use crate::renderer::{GlyphCache, Renderer};
 
 /// 卡片列的左右内边距，也是**右侧基准线**：输入框的 Ctrl+K 键帽、推荐卡
@@ -2092,21 +2098,27 @@ use crate::renderer::{GlyphCache, Renderer};
 ///
 /// 2026-07-29：此前这里散着 10/12/14 三个值，底栏还错用了 panel 坐标
 /// （`px + pw - s(16)`，实际只内缩 4px），右侧看着毛糙且随字号漂移。
+#[cfg(feature = "legacy-shell")]
 const GUTTER: f32 = 14.0;
 
 /// 标签右缘与右侧信息列之间的最小呼吸缝。挤不下就整列让位，绝不重叠。
+#[cfg(feature = "legacy-shell")]
 const HINT_GAP: f32 = 24.0;
 
 /// 文字与相邻 chip（推荐卡的 ↵）之间的缝——比 [`HINT_GAP`] 窄，因为 chip
 /// 自带视觉边界，不需要靠空白来分隔。
+#[cfg(feature = "legacy-shell")]
 const CHIP_GAP: f32 = 12.0;
 
 /// 输入框与列表行共用的左内边距。列表文字必须与查询文字**左缘对齐**，
 /// 否则输入框读起来像悬在列表外面的另一个控件。
+#[cfg(feature = "legacy-shell")]
 const INPUT_PAD_X: f32 = 14.0;
 
 const PICKER_ICON_BOX: f32 = 28.0;
+#[cfg(feature = "legacy-shell")]
 const PICKER_ICON_GAP: f32 = 11.0;
+#[cfg(feature = "legacy-shell")]
 const PICKER_ICON_INDENT: f32 = PICKER_ICON_BOX + PICKER_ICON_GAP;
 
 /// Launcher 搜索区与 icon tile 外框共用的基础内容线。
@@ -2122,6 +2134,7 @@ fn launcher_icon_ink_span(tile_left: f32, scale: f32) -> (f32, f32) {
 
 /// 把实际栅格墨迹 `(left, top, width, height)` 映射到目标左线和行中心。
 /// 返回 glyph cell 的绘制锚点与缩放，而不是墨迹框本身。
+#[cfg(feature = "legacy-shell")]
 fn fit_glyph_ink(
     ink: (f32, f32, f32, f32),
     target_left: f32,
@@ -2147,17 +2160,20 @@ fn fit_glyph_ink(
 
 /// Group captions are structure, not content. Keeping them below body size
 /// preserves the HTML reference's quiet scan path through the rows.
+#[cfg(feature = "legacy-shell")]
 const LAUNCHER_GROUP_TEXT_SCALE: f32 = 0.8;
 const LAUNCHER_GROUP_HEADER_H: f32 = 28.0;
 
 /// 搜索图标占的列数（图标一列 + 一列缝）。按 cell 列而不是固定 px 计量：
 /// 固定 px 的缝隙在字号变化时会与字形脱节——大字号显挤、小字号显空。
+#[cfg(feature = "legacy-shell")]
 const SEARCH_SLOT_COLS: f32 = 2.0;
 
 /// Push the palette's background quads: a dim veil over the window, the glass
 /// panel (glow + gradient border + solid fill, matching the settings modal),
 /// the query input box, and the selected-row
 /// highlight. No-op while closed.
+#[cfg(feature = "legacy-shell")]
 pub(super) fn push_quads(
     model: &CommandPalette,
     theme: &NebulaTheme,
@@ -2453,6 +2469,7 @@ pub(super) fn push_quads(
 /// it for the post-text image pass (a textured quad can't be interleaved with
 /// glyph batches). Rows whose id has no brand asset draw the Nerd Font glyph
 /// here and contribute nothing to the returned list.
+#[cfg(feature = "legacy-shell")]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_text(
     model: &CommandPalette,
@@ -2807,6 +2824,7 @@ pub(super) fn draw_text(
 ///
 /// 三条的锚点分别是左缘、居中、右缘——与列表列同一套 `ix`/`iw`/`GUTTER`，
 /// 所以右缘和上面的快捷键 chip 连成一条竖线。
+#[cfg(feature = "legacy-shell")]
 #[allow(clippy::too_many_arguments)]
 fn draw_footer_hints(
     r: &mut Renderer,
@@ -2870,6 +2888,7 @@ fn draw_footer_hints(
 
 /// 键帽文字：chip 内水平居中整串键位；几何来自 `keycap::layout_combo`，
 /// 与 quad pass 同源。
+#[cfg(feature = "legacy-shell")]
 fn draw_combo_text(
     r: &mut Renderer,
     gc: &mut GlyphCache,
@@ -3734,6 +3753,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-shell")]
     fn fitted_launcher_glyph_maps_real_ink_to_shared_chip_line() {
         let ink = (2.0, 5.0, 20.0, 12.0);
         let target_left = 100.0;

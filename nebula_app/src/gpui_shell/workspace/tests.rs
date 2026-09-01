@@ -221,7 +221,7 @@ mod tab_rename_paste_tests {
             )
         });
         assert_eq!(value, "renamed-tab", "Ctrl+V 必须替换重命名框当前选区");
-        assert_eq!(workspace_paste_actions, 1, "后注册的工作区绑定应先命中一次");
+        assert_eq!(workspace_paste_actions, 0, "输入框上下文不得命中终端粘贴动作");
         assert_eq!(terminal_pastes, 0, "重命名框聚焦时不得向背后的终端粘贴");
     }
 }
@@ -234,6 +234,32 @@ fn gpui_binding_combo_maps_plus_minus_and_digits() {
     assert!(
         custom_workspace_binding("ctrl+shift+e", &crate::config::Action::CreateNewWindow).is_some()
     );
+}
+
+#[test]
+fn paste_keymap_keeps_component_inputs_and_terminals_in_separate_contexts() {
+    use gpui::{KeyContext, Keymap, Keystroke};
+
+    let keymap = Keymap::new(vec![
+        KeyBinding::new("ctrl-v", PasteClipboard, Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-v", gpui_component::input::Paste, Some("Input")),
+    ]);
+    let key = [Keystroke::parse("ctrl-v").unwrap()];
+
+    let input = [KeyContext::parse("Root").unwrap(), KeyContext::parse("Input").unwrap()];
+    let (bindings, pending) = keymap.bindings_for_input(&key, &input);
+    assert!(!pending);
+    assert_eq!(bindings.len(), 1);
+    assert!(bindings[0].action().as_any().is::<gpui_component::input::Paste>());
+
+    let terminal = [
+        KeyContext::parse("Root").unwrap(),
+        KeyContext::parse(crate::gpui_shell::terminal::KEY_CONTEXT).unwrap(),
+    ];
+    let (bindings, pending) = keymap.bindings_for_input(&key, &terminal);
+    assert!(!pending);
+    assert_eq!(bindings.len(), 1);
+    assert!(bindings[0].action().as_any().is::<PasteClipboard>());
 }
 
 #[test]
@@ -265,6 +291,45 @@ fn pane_card_divider_requires_both_width_and_a_real_sidebar_boundary() {
 
     let sidebar = Bounds::new(gpui::point(px(230.0), px(48.0)), size(px(850.0), px(672.0)));
     assert!(pane_card_divider_bounds(sidebar, 0.0, 1.5).is_none());
+}
+
+#[test]
+fn split_drag_preview_moves_only_the_overlay_divider() {
+    let viewport = nebula_split::Rect::new(100.0, 40.0, 802.0, 500.0);
+    let visual = split_drag_visual_geometry(SplitDirection::LeftRight, viewport, 0.25, None);
+
+    assert_eq!(visual.divider, nebula_split::Rect::new(300.0, 40.0, 2.0, 500.0));
+    assert_eq!(visual.close_area, None);
+
+    let vertical = split_drag_visual_geometry(
+        SplitDirection::TopBottom,
+        nebula_split::Rect::new(20.0, 30.0, 700.0, 402.0),
+        0.75,
+        None,
+    );
+    assert_eq!(vertical.divider, nebula_split::Rect::new(20.0, 330.0, 700.0, 2.0));
+}
+
+#[test]
+fn split_drag_close_preview_marks_only_the_squeezed_child() {
+    let viewport = nebula_split::Rect::new(100.0, 40.0, 802.0, 500.0);
+    let first = split_drag_visual_geometry(
+        SplitDirection::LeftRight,
+        viewport,
+        nebula_split::preview_ratio(0.01),
+        nebula_split::drag_close_target(0.01),
+    );
+    assert_eq!(first.divider, nebula_split::Rect::new(116.0, 40.0, 2.0, 500.0));
+    assert_eq!(first.close_area, Some(nebula_split::Rect::new(100.0, 40.0, 16.0, 500.0)));
+
+    let second = split_drag_visual_geometry(
+        SplitDirection::TopBottom,
+        nebula_split::Rect::new(20.0, 30.0, 700.0, 402.0),
+        nebula_split::preview_ratio(0.99),
+        nebula_split::drag_close_target(0.99),
+    );
+    assert_eq!(second.divider, nebula_split::Rect::new(20.0, 422.0, 700.0, 2.0));
+    assert_eq!(second.close_area, Some(nebula_split::Rect::new(20.0, 424.0, 700.0, 8.0)));
 }
 
 #[test]

@@ -27,8 +27,7 @@ _nebula() {
 '*--option=[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
 '--print-events[Print all events to STDOUT]' \
 '(--daemon)--ref-test[Generates ref test]' \
-'(--legacy-shell)--gpui[Launch the GPUI UI shell as the main window]' \
-'--legacy-shell[Launch the legacy winit shell instead of GPUI]' \
+'--gpui[Launch the GPUI UI shell as the main window]' \
 '(-v)*-q[Reduces the level of verbosity (the min level is -qq)]' \
 '(-q)*-v[Increases the level of verbosity (the max level is -vvv)]' \
 '--daemon[Do not spawn an initial window]' \
@@ -940,6 +939,17 @@ _arguments "${_arguments_options[@]}" : \
 '*::text -- The task itself. Several words are joined with single spaces, so both `send codex "fix login"` and `send codex fix login` work:_default' \
 && ret=0
 ;;
+(delegate)
+_arguments "${_arguments_options[@]}" : \
+'--generation=[Refuse the delegation unless the target is still this generation]:GENERATION:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':agent -- Agent name or stable id from `nebula agent list`:_default' \
+'*::text -- The delegated task. Several words are joined with single spaces:_default' \
+&& ret=0
+;;
 (paste)
 _arguments "${_arguments_options[@]}" : \
 '--from-file=[Read the paste payload from a UTF-8 file]:FROM_FILE:_files' \
@@ -1002,6 +1012,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (send)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delegate)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1402,6 +1416,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(delegate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (paste)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1494,6 +1512,7 @@ _nebula__agent_commands() {
     local commands; commands=(
 'list:List the panes running an AI CLI, with session identity and generation' \
 'send:Hand one task to an agent and submit it' \
+'delegate:Delegate one task and route the Agent'\''s final answer back to this Agent pane' \
 'paste:Paste bounded UTF-8 text into an agent as one bracketed block' \
 'read:Read the tail of what an agent printed' \
 'wait:Block until an agent'\''s turn ends' \
@@ -1501,17 +1520,28 @@ _nebula__agent_commands() {
     )
     _describe -t commands 'nebula agent commands' commands "$@"
 }
+(( $+functions[_nebula__agent__delegate_commands] )) ||
+_nebula__agent__delegate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent delegate commands' commands "$@"
+}
 (( $+functions[_nebula__agent__help_commands] )) ||
 _nebula__agent__help_commands() {
     local commands; commands=(
 'list:List the panes running an AI CLI, with session identity and generation' \
 'send:Hand one task to an agent and submit it' \
+'delegate:Delegate one task and route the Agent'\''s final answer back to this Agent pane' \
 'paste:Paste bounded UTF-8 text into an agent as one bracketed block' \
 'read:Read the tail of what an agent printed' \
 'wait:Block until an agent'\''s turn ends' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'nebula agent help commands' commands "$@"
+}
+(( $+functions[_nebula__agent__help__delegate_commands] )) ||
+_nebula__agent__help__delegate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent help delegate commands' commands "$@"
 }
 (( $+functions[_nebula__agent__help__help_commands] )) ||
 _nebula__agent__help__help_commands() {
@@ -2030,11 +2060,17 @@ _nebula__help__agent_commands() {
     local commands; commands=(
 'list:List the panes running an AI CLI, with session identity and generation' \
 'send:Hand one task to an agent and submit it' \
+'delegate:Delegate one task and route the Agent'\''s final answer back to this Agent pane' \
 'paste:Paste bounded UTF-8 text into an agent as one bracketed block' \
 'read:Read the tail of what an agent printed' \
 'wait:Block until an agent'\''s turn ends' \
     )
     _describe -t commands 'nebula help agent commands' commands "$@"
+}
+(( $+functions[_nebula__help__agent__delegate_commands] )) ||
+_nebula__help__agent__delegate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help agent delegate commands' commands "$@"
 }
 (( $+functions[_nebula__help__agent__list_commands] )) ||
 _nebula__help__agent__list_commands() {

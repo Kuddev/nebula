@@ -27,6 +27,31 @@ fn progress_sidebar_activity(
 }
 
 impl TerminalView {
+    /// Clear foreground Agent identity after an authoritative command end or
+    /// after the submitted shell prompt is observed again. OSC 133;D remains
+    /// the primary edge; the cached-prompt path calls the same reset so the two
+    /// lifecycle routes cannot drift apart.
+    pub(super) fn clear_foreground_agent_state(&mut self) -> bool {
+        let title_changed =
+            self.running_program.take().is_some() || self.ai_session.take().is_some();
+        self.primary_agent_pid = None;
+        self.agent_status = crate::ai_agents::AgentStatus::Unknown;
+        self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
+        self.agent_status_rule = None;
+        self.agent_hook_seen = false;
+        self.agent_turn_active = false;
+        self.idle_screen_streak = 0;
+        self.agent_runtime_submit_pending = false;
+        self.command_running = false;
+        self.command_running_disproved = false;
+        self.command_started = None;
+        self.last_process_probe = None;
+        self.pending_runtime_submit = None;
+        self.suggest.pending_command_prompt = None;
+        self.awaiting_input = false;
+        title_changed
+    }
+
     pub fn runtime_task_state(&self) -> crate::runtime_api::RuntimeTaskState {
         use crate::ai_agents::AgentStatus;
         use crate::runtime_api::RuntimeTaskState;
@@ -688,16 +713,7 @@ impl TerminalView {
             // 而言什么都不是。
             AiHookKind::SessionEnd if !from_primary_agent => {},
             AiHookKind::SessionEnd => {
-                self.ai_session = None;
-                self.running_program = None;
-                self.primary_agent_pid = None;
-                self.agent_status = AgentStatus::Unknown;
-                self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
-                self.agent_status_rule = None;
-                self.agent_hook_seen = false;
-                self.agent_turn_active = false;
-                self.idle_screen_streak = 0;
-                self.agent_runtime_submit_pending = false;
+                self.clear_foreground_agent_state();
             },
             kind => {
                 self.running_program = Some(event.source.clone());
@@ -784,18 +800,49 @@ impl TerminalView {
         // 这个 pane 永远退出屏幕检测。
         self.reconcile_shell_activity(cx);
         let Some(session) = &self.session else { return };
-        let screen = {
+        let (prompt_restored, screen) = {
             let term = session.term.lock();
             let lines = term.screen_lines();
             if lines == 0 || term.columns() == 0 {
                 return;
             }
+            let prompt_restored =
+                self.suggest.pending_command_prompt.as_deref().is_some_and(|expected| {
+                    crate::display::nebula_shell_prompt_restored_from_raw_grid(
+                        &term,
+                        expected,
+                        &self.suggest.suggest_env,
+                    )
+                });
             let take = lines.min(24);
             let start = TermPoint::new(Line((lines - take) as i32), Column(0));
             let end =
                 TermPoint::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
-            term.bounds_to_string(start, end)
+            (prompt_restored, term.bounds_to_string(start, end))
         };
+        if prompt_restored
+            && self
+                .running_program
+                .as_deref()
+                .and_then(crate::ai_agents::AgentKind::parse)
+                .is_some()
+        {
+            log::debug!(
+                "agent lifecycle: submitted shell prompt restored pane={} program={:?}",
+                self.pane_id,
+                self.running_program
+            );
+            if let Some(run) = self.active_run.take() {
+                self.last_run =
+                    Some(crate::runtime_api::RuntimeRunOutcome::command_done(run, None));
+            }
+            let title_changed = self.clear_foreground_agent_state();
+            if title_changed {
+                cx.emit(TerminalViewEvent::TitleChanged);
+            }
+            cx.notify();
+            return;
+        }
         let program = match self.running_program.clone() {
             Some(program) => program,
             None => {

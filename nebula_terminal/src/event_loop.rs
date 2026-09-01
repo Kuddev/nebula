@@ -200,8 +200,12 @@ impl StreamProcessor {
         for (offset, event) in osc_events {
             match event {
                 OscEvent::Cwd(cwd) => latest_cwd = Some(cwd),
-                OscEvent::CommandStart => event_proxy.send_event(Event::CommandStart),
+                OscEvent::CommandStart => {
+                    terminal.nebula_end_prompt();
+                    event_proxy.send_event(Event::CommandStart);
+                },
                 OscEvent::CommandDone { exit_code } => {
+                    terminal.nebula_end_prompt();
                     event_proxy.send_event(Event::CommandDone { exit_code })
                 },
                 OscEvent::UserVar { name, value } => {
@@ -905,5 +909,34 @@ impl<T> PeekableReceiver<T> {
                 res => res.ok(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::event::VoidListener;
+    use crate::term::Config;
+    use crate::term::test::TermSize;
+
+    #[test]
+    fn shell_semantic_events_track_the_active_prompt() {
+        let size = TermSize::new(80, 24);
+        let mut terminal = Term::new(Config::default(), &size, VoidListener);
+        let listener = VoidListener;
+        let mut stream = StreamProcessor::default();
+
+        stream.feed(&mut terminal, &listener, b"\x1b]133;A\x07custom prompt :: ");
+        assert!(terminal.nebula_prompt_active());
+
+        stream.feed(&mut terminal, &listener, b"\x1b]133;C\x07");
+        assert!(!terminal.nebula_prompt_active());
+
+        stream.feed(&mut terminal, &listener, b"\x1b]133;A\x07next prompt :: ");
+        assert!(terminal.nebula_prompt_active());
+
+        stream.feed(&mut terminal, &listener, b"\x1b]133;D;0\x07");
+        assert!(!terminal.nebula_prompt_active());
     }
 }

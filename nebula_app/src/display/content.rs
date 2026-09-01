@@ -1,24 +1,47 @@
+#[cfg(feature = "legacy-shell")]
 use std::borrow::Cow;
+#[cfg(feature = "legacy-shell")]
 use std::num::NonZeroU32;
+#[cfg(feature = "legacy-shell")]
 use std::ops::Deref;
+#[cfg(feature = "legacy-shell")]
 use std::{cmp, mem};
 
+#[cfg(feature = "legacy-shell")]
 use nebula_terminal::event::EventListener;
+#[cfg(feature = "legacy-shell")]
 use nebula_terminal::grid::{Dimensions, Indexed};
-use nebula_terminal::index::{Column, Line, Point};
+use nebula_terminal::index::Point;
+#[cfg(feature = "legacy-shell")]
+use nebula_terminal::index::{Column, Line};
+#[cfg(feature = "legacy-shell")]
 use nebula_terminal::selection::SelectionRange;
-use nebula_terminal::term::cell::{Cell, Flags, Hyperlink};
+#[cfg(feature = "legacy-shell")]
+use nebula_terminal::term::cell::Cell;
+use nebula_terminal::term::cell::{Flags, Hyperlink};
+#[cfg(feature = "legacy-shell")]
 use nebula_terminal::term::search::{Match, RegexSearch};
+#[cfg(feature = "legacy-shell")]
 use nebula_terminal::term::{self, RenderableContent as TerminalContent, Term, TermMode};
-use nebula_terminal::vte::ansi::{Color, CursorShape, NamedColor};
+#[cfg(feature = "legacy-shell")]
+use nebula_terminal::vte::ansi::NamedColor;
+use nebula_terminal::vte::ansi::{Color, CursorShape};
 
+#[cfg(feature = "legacy-shell")]
 use crate::config::UiConfig;
 use crate::config::color::{InvertedCellColors, NEBULA_DEFAULT_CURSOR};
-use crate::display::color::{CellRgb, DIM_FACTOR, List, Rgb};
+use crate::display::color::Rgb;
+#[cfg(feature = "legacy-shell")]
+use crate::display::color::{CellRgb, DIM_FACTOR, List};
+#[cfg(feature = "legacy-shell")]
 use crate::display::hint::{self, HintState};
-use crate::display::terminal_color::{TerminalColorResolver, is_fixed_color};
+#[cfg(feature = "legacy-shell")]
+use crate::display::terminal_color::TerminalColorResolver;
+use crate::display::terminal_color::is_fixed_color;
 use crate::display::ui::tokens::terminal_feedback;
+#[cfg(feature = "legacy-shell")]
 use crate::display::{Display, SizeInfo};
+#[cfg(feature = "legacy-shell")]
 use crate::event::SearchState;
 
 /// Minimum contrast between a fixed cursor color and the cell's background.
@@ -27,6 +50,7 @@ pub const MIN_CURSOR_CONTRAST: f64 = 1.5;
 /// Renderable terminal content.
 ///
 /// This provides the terminal cursor and an iterator over all non-empty cells.
+#[cfg(feature = "legacy-shell")]
 pub struct RenderableContent<'a> {
     terminal_content: TerminalContent<'a>,
     cursor: RenderableCursor,
@@ -47,6 +71,7 @@ pub struct RenderableContent<'a> {
     exact_term_colors: Option<nebula_settings::ExactTermColors>,
 }
 
+#[cfg(feature = "legacy-shell")]
 impl<'a> RenderableContent<'a> {
     pub fn new<T: EventListener>(
         config: &'a UiConfig,
@@ -227,6 +252,7 @@ fn cursor_follows_theme(color: InvertedCellColors) -> bool {
     color == NEBULA_DEFAULT_CURSOR
 }
 
+#[cfg(feature = "legacy-shell")]
 fn rgb8([r, g, b]: nebula_settings::Rgb8) -> Rgb {
     Rgb::new(r, g, b)
 }
@@ -252,6 +278,7 @@ pub(crate) fn themed_cursor_style(
     (theme_anchor, cell_foreground, opacity)
 }
 
+#[cfg(feature = "legacy-shell")]
 impl Iterator for RenderableContent<'_> {
     type Item = RenderableCell;
 
@@ -313,6 +340,7 @@ pub struct RenderableCellExtra {
     pub hyperlink: Option<Hyperlink>,
 }
 
+#[cfg(feature = "legacy-shell")]
 impl RenderableCell {
     fn new(content: &mut RenderableContent<'_>, cell: Indexed<&Cell>) -> Self {
         let overrides = content.terminal_content.colors;
@@ -654,6 +682,7 @@ pub(crate) fn mix_rgb(color: Rgb, neutral: Rgb, neutral_amount: f32) -> Rgb {
 
 /// Cursor storing all information relevant for rendering.
 #[derive(Debug, PartialEq, Copy, Clone)]
+#[cfg(feature = "legacy-shell")]
 pub struct RenderableCursor {
     shape: CursorShape,
     cursor_color: Rgb,
@@ -663,6 +692,7 @@ pub struct RenderableCursor {
     opacity: f32,
 }
 
+#[cfg(feature = "legacy-shell")]
 impl RenderableCursor {
     fn new_hidden() -> Self {
         let shape = CursorShape::Hidden;
@@ -674,6 +704,7 @@ impl RenderableCursor {
     }
 }
 
+#[cfg(feature = "legacy-shell")]
 impl RenderableCursor {
     pub fn new(
         point: Point<usize>,
@@ -814,6 +845,7 @@ mod tests {
 }
 
 /// Regex hints for keyboard shortcuts.
+#[cfg(feature = "legacy-shell")]
 struct Hint<'a> {
     /// Hint matches and position.
     matches: HintMatches<'a>,
@@ -822,6 +854,7 @@ struct Hint<'a> {
     labels: &'a Vec<Vec<char>>,
 }
 
+#[cfg(feature = "legacy-shell")]
 impl Hint<'_> {
     /// Advance the hint iterator.
     ///
@@ -866,6 +899,7 @@ impl Hint<'_> {
     }
 }
 
+#[cfg(feature = "legacy-shell")]
 impl<'a> From<&'a HintState> for Hint<'a> {
     fn from(hint_state: &'a HintState) -> Self {
         let matches = HintMatches::new(hint_state.matches());
@@ -875,6 +909,7 @@ impl<'a> From<&'a HintState> for Hint<'a> {
 
 /// Visible hint match tracking.
 #[derive(Default)]
+#[cfg(feature = "legacy-shell")]
 struct HintMatches<'a> {
     /// All visible matches.
     matches: Cow<'a, [Match]>,
@@ -883,6 +918,7 @@ struct HintMatches<'a> {
     index: usize,
 }
 
+#[cfg(feature = "legacy-shell")]
 impl<'a> HintMatches<'a> {
     /// Create new renderable matches iterator..
     fn new(matches: impl Into<Cow<'a, [Match]>>) -> Self {
@@ -912,6 +948,7 @@ impl<'a> HintMatches<'a> {
     }
 }
 
+#[cfg(feature = "legacy-shell")]
 impl Deref for HintMatches<'_> {
     type Target = [Match];
 

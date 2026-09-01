@@ -24,6 +24,8 @@ use super::theme::Skin;
 use super::tokens::{Density, control, elevation, radius};
 use crate::renderer::ui::{Rgba, UiQuad};
 
+pub use super::color_math::{fade, over};
+
 /// `(x, y, width, height)`，逻辑像素。
 pub type Rect = (f32, f32, f32, f32);
 
@@ -78,27 +80,6 @@ pub enum CardState {
     /// 当前选中项。强调色预算一屏只花一次，就花在这里——
     /// 不要同时给推荐卡、导航 pill 也染色。
     Selected,
-}
-
-/// 按入场进度衰减 alpha。`progress` 取 0..1，1 为完全不透明。
-#[inline]
-pub fn fade(color: Rgba, progress: f32) -> Rgba {
-    if progress >= 1.0 {
-        return color;
-    }
-    Rgba::new(color.r, color.g, color.b, (color.a as f32 * progress.clamp(0.0, 1.0)).round() as u8)
-}
-
-/// `top` 压在 `base` 上的合成色，alpha 取 `base` 的。
-///
-/// 用来把"半透明叠加色 + 不透明底"预先算成一个色，画一个 quad 而不是两个。
-/// 这不只是省一次绘制：见 [`push_group`]，中间那层必须不透明，否则底下的
-/// 描边环会从整块面板里渗出来。
-#[inline]
-pub fn over(top: Rgba, base: Rgba) -> Rgba {
-    let a = top.a as f32 / 255.0;
-    let mix = |t: u8, b: u8| (t as f32 * a + b as f32 * (1.0 - a)).round().clamp(0.0, 255.0) as u8;
-    Rgba::new(mix(top.r, base.r), mix(top.g, base.g), mix(top.b, base.b), base.a)
 }
 
 /// 发丝描边环。替代散落各处的手写 `(x-1, y-1, w+2, h+2)`。

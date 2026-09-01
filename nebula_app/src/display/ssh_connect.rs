@@ -14,14 +14,20 @@ use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthChar;
 
+use super::SizeInfo;
 use super::color::Rgb;
 use super::i18n::UiLanguage;
+#[cfg(feature = "legacy-shell")]
 use super::ui::icons;
 use super::ui::tokens::{Density, radius, space, type_scale};
-use super::{NebulaTheme, SizeInfo};
+#[cfg(feature = "legacy-shell")]
+use super::NebulaTheme;
+#[cfg(feature = "legacy-shell")]
 use crate::renderer::ui::{Gradient, Rgba, UiQuad};
+#[cfg(feature = "legacy-shell")]
 use crate::renderer::{GlyphCache, Renderer};
 use crate::ssh_session::SshStage;
+#[cfg(feature = "legacy-shell")]
 use nebula_terminal::term::cell::Flags;
 
 /// 低于这个耗时的连接完全不显示卡片。
@@ -428,6 +434,7 @@ fn lerp_rgb(a: Rgb, b: Rgb, k: f32) -> Rgb {
     Rgb::new(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b))
 }
 
+#[cfg(feature = "legacy-shell")]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_quads(
     state: &SshConnectState,
@@ -761,6 +768,7 @@ pub(super) fn push_quads(
 
 /// 按钮底：主按钮实心 accent，次按钮 card 底 + hairline 描边。hover 只改
 /// 亮度，不改尺寸——动效纪律里"不加装饰动效"的直接后果。
+#[cfg(feature = "legacy-shell")]
 fn push_button_frame(
     quads: &mut Vec<UiQuad>,
     rect: (f32, f32, f32, f32),
@@ -798,6 +806,7 @@ fn push_button_frame(
     }
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn rgb_of(c: Rgba) -> Rgb {
     Rgb::new(c.r, c.g, c.b)
 }
@@ -841,6 +850,7 @@ pub(crate) fn truncate_cols(text: &str, max_cols: usize) -> String {
     out
 }
 
+#[cfg(feature = "legacy-shell")]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_text(
     state: &SshConnectState,
@@ -1091,7 +1101,7 @@ pub(crate) fn wrap(text: &str, per_line: usize) -> Vec<String> {
     lines
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-shell"))]
 mod tests {
     use super::*;
 

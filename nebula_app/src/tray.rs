@@ -41,12 +41,14 @@ pub struct TrayAgent {
     pub needs_attention: bool,
 }
 
+#[cfg(all(windows, feature = "legacy-shell"))]
+pub use win::init;
 #[cfg(all(windows, feature = "gpui-shell"))]
 pub use win::init_gpui;
 #[cfg(windows)]
-pub use win::{init, set_enabled, shutdown, update};
+pub use win::{set_enabled, shutdown, update};
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), feature = "legacy-shell"))]
 pub fn init(_proxy: winit::event_loop::EventLoopProxy<crate::event::Event>) {}
 #[cfg(not(windows))]
 pub fn init_gpui(_on_command: impl Fn(GpuiTrayCommand) + Send + Sync + 'static) {}
@@ -63,9 +65,11 @@ mod win {
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
     use std::sync::{Mutex, OnceLock};
 
+    #[cfg(feature = "legacy-shell")]
     use winit::event_loop::EventLoopProxy;
 
     use super::TrayAgent;
+    #[cfg(feature = "legacy-shell")]
     use crate::event::{Event, EventType};
 
     /// 与 notify.rs 的 toast 图标同一份官方 logo，托盘不会出现第二个品牌形态。
@@ -93,6 +97,7 @@ mod win {
         enabled: bool,
     }
 
+    #[cfg(feature = "legacy-shell")]
     static PROXY: OnceLock<EventLoopProxy<Event>> = OnceLock::new();
     /// GPUI 主窗没有 winit `EventLoopProxy`：点击托盘时走命令回调。
     static GPUI_COMMAND: OnceLock<Box<dyn Fn(super::GpuiTrayCommand) + Send + Sync>> =
@@ -108,6 +113,7 @@ mod win {
     }
 
     /// 装好事件代理。真正的线程按需（首次启用）才起。
+    #[cfg(feature = "legacy-shell")]
     pub fn init(proxy: EventLoopProxy<Event>) {
         let _ = PROXY.set(proxy);
     }
@@ -303,16 +309,19 @@ mod win {
             command(super::GpuiTrayCommand::Focus(agent.as_ref().map(|agent| agent.pane)));
             return;
         }
-        let Some(proxy) = PROXY.get() else { return };
-        let event = match agent {
-            Some(agent) => {
-                Event::new(EventType::FocusWindow { pane: Some(agent.pane) }, agent.window)
-            },
-            // 没有 agent：把第一扇窗捞到前台（processor 对 None 窗口 id 的
-            // FocusWindow 就是这个语义）。
-            None => Event::new(EventType::FocusWindow { pane: None }, None),
-        };
-        let _ = proxy.send_event(event);
+        #[cfg(feature = "legacy-shell")]
+        {
+            let Some(proxy) = PROXY.get() else { return };
+            let event = match agent {
+                Some(agent) => {
+                    Event::new(EventType::FocusWindow { pane: Some(agent.pane) }, agent.window)
+                },
+                // 没有 agent：把第一扇窗捞到前台（processor 对 None 窗口 id 的
+                // FocusWindow 就是这个语义）。
+                None => Event::new(EventType::FocusWindow { pane: None }, None),
+            };
+            let _ = proxy.send_event(event);
+        }
     }
 
     fn show_menu(hwnd: windows_sys::Win32::Foundation::HWND) {

@@ -7,6 +7,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 const PROFILE_VERSION: u32 = 1;
+const USERNAME_HISTORY_CAP: usize = 12;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,11 +60,15 @@ pub struct SshProfiles {
     version: u32,
     #[serde(default)]
     profiles: Vec<SshProfileAuth>,
+    /// 最近使用的 SSH 用户名，最新在前。它不含密码或主机，因此可以和
+    /// Profile 一起持久化；旧文件缺少字段时由 `serde(default)` 读成空列表。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    usernames: Vec<String>,
 }
 
 impl Default for SshProfiles {
     fn default() -> Self {
-        Self { version: PROFILE_VERSION, profiles: Vec::new() }
+        Self { version: PROFILE_VERSION, profiles: Vec::new(), usernames: Vec::new() }
     }
 }
 
@@ -79,6 +84,7 @@ impl SshProfiles {
         for profile in &mut profiles.profiles {
             deduplicate_key_paths(&mut profile.private_keys);
         }
+        normalize_usernames(&mut profiles.usernames);
         profiles.version = PROFILE_VERSION;
         Ok(profiles)
     }
@@ -135,6 +141,31 @@ impl SshProfiles {
             .collect()
     }
 
+    /// 可编辑用户名下拉的候选。显式历史保持 MRU 次序；旧版本没有历史字段，
+    /// 因而再从现有 `user@host` Profile 补齐，升级后第一次打开就有可选项。
+    pub fn usernames(&self) -> Vec<String> {
+        let mut usernames = self.usernames.clone();
+        for profile in &self.profiles {
+            if let Some(username) = destination_username(&profile.destination) {
+                push_unique_username(&mut usernames, username);
+            }
+        }
+        usernames.truncate(USERNAME_HISTORY_CAP);
+        usernames
+    }
+
+    /// 记录一次实际保存过的用户名。大小写不同可能代表不同远端账号，去重只做
+    /// 精确比较；重新使用会被提升到最前面。
+    pub fn remember_username(&mut self, username: &str) {
+        let username = username.trim();
+        if !valid_username_history_entry(username) {
+            return;
+        }
+        self.usernames.retain(|existing| existing != username);
+        self.usernames.insert(0, username.to_owned());
+        self.usernames.truncate(USERNAME_HISTORY_CAP);
+    }
+
     /// 下一个可用的默认标签，形如「主机 6」。
     ///
     /// 取现有默认标签里**编号的最大值 +1**，而不是条目总数：删掉中间几台之后
@@ -184,6 +215,34 @@ impl SshProfiles {
 
 fn profile_version() -> u32 {
     PROFILE_VERSION
+}
+
+fn destination_username(destination: &str) -> Option<&str> {
+    let address = destination.trim().strip_prefix("ssh://").unwrap_or(destination.trim());
+    let (username, host) = address.rsplit_once('@')?;
+    (valid_username_history_entry(username) && !host.is_empty()).then_some(username)
+}
+
+fn valid_username_history_entry(username: &str) -> bool {
+    !username.is_empty()
+        && !username
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || "@;&|<>\"'`".contains(ch))
+}
+
+fn push_unique_username(usernames: &mut Vec<String>, username: &str) {
+    if valid_username_history_entry(username) && !usernames.iter().any(|entry| entry == username) {
+        usernames.push(username.to_owned());
+    }
+}
+
+fn normalize_usernames(usernames: &mut Vec<String>) {
+    let mut normalized = Vec::with_capacity(usernames.len().min(USERNAME_HISTORY_CAP));
+    for username in std::mem::take(usernames) {
+        push_unique_username(&mut normalized, username.trim());
+    }
+    normalized.truncate(USERNAME_HISTORY_CAP);
+    *usernames = normalized;
 }
 
 fn deduplicate_key_paths(paths: &mut Vec<PathBuf>) {
@@ -242,6 +301,7 @@ mod tests {
         assert_eq!(profile.label.as_deref(), Some("生产库"));
         assert_eq!(profile.icon, None, "没写过图标 = 自动识别");
         assert!(profiles.icons().is_empty());
+        assert_eq!(profiles.usernames(), vec!["root"], "旧 Profile 也应补出用户名候选");
     }
 
     /// 「自动识别」不落盘。存一个 `"auto"` 进去也能工作，但那样配置文件里
@@ -393,5 +453,25 @@ mod tests {
 
         let loaded = SshProfiles::load(&path).unwrap();
         assert_eq!(loaded.for_destination("dev@example.com").auth, SshAuthMode::Auto);
+    }
+
+    #[test]
+    fn username_history_is_recent_first_bounded_and_backward_compatible() {
+        let mut profiles = SshProfiles::default();
+        profiles.remember_username("root");
+        profiles.remember_username("deploy");
+        profiles.remember_username("root");
+        profiles.remember_username("bad user");
+
+        assert_eq!(profiles.usernames(), vec!["root", "deploy"]);
+        let json = serde_json::to_string(&profiles).expect("serialize");
+        let loaded: SshProfiles = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(loaded.usernames(), vec!["root", "deploy"]);
+
+        let legacy: SshProfiles = serde_json::from_str(
+            r#"{"version":1,"profiles":[{"destination":"admin@example.com"}]}"#,
+        )
+        .expect("旧文件缺少 usernames 时仍应可读");
+        assert_eq!(legacy.usernames(), vec!["admin"]);
     }
 }

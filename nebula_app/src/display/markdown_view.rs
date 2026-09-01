@@ -39,14 +39,7 @@ use super::SizeInfo;
 use super::ui::theme::Skin;
 use super::ui::widgets::{self, OverlayScrollbar};
 
-/// Extensions the viewer opens (double-click in the file tree). Everything
-/// else keeps the tree's default activation behaviour.
-pub fn viewable_file(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
-        Some("md" | "markdown" | "json" | "jsonl" | "ndjson" | "txt" | "log")
-    )
-}
+pub use super::document_model::viewable_file;
 
 // ---- layout constants (logical px, multiplied by scale at use sites) ----
 

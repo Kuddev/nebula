@@ -1,88 +1,90 @@
-//! Persistent, indexed command history backing Nebula's fish-style ghost-text
-//! hint.
+//! Persistent, scoped command history backing Nebula's fish-style suggestions.
 //!
-//! Commands are appended to `nebula_history.jsonl` (one `{ts,cwd,cmd}` record
-//! per line) and held in memory newest-last. A prefix index keeps the hint
-//! lookup at `O(log n + k)` instead of scanning the whole list on every
-//! keystroke — important once the history grows into the thousands.
+//! Local Windows shells share one pool. WSL commands are isolated by distro,
+//! and SSH commands by destination, so a valid command on one machine never
+//! becomes a misleading suggestion on another.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::PathBuf;
 
-/// Max commands kept in memory.
 const HISTORY_MAX: usize = 5_000;
+pub(crate) const LOCAL_HISTORY_FILE: &str = "nebula_history.jsonl";
+pub(crate) const WSL_HISTORY_FILE: &str = "nebula_history_wsl.jsonl";
+pub(crate) const SSH_HISTORY_FILE: &str = "nebula_history_ssh.jsonl";
 
-/// An indexed, deduplicated command history.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum HistoryScope {
+    #[default]
+    Local,
+    Wsl(String),
+    Ssh(String),
+}
+
+impl HistoryScope {
+    fn normalized(self) -> Self {
+        match self {
+            Self::Local => Self::Local,
+            Self::Wsl(distro) => Self::Wsl(normalize_identity(&distro)),
+            Self::Ssh(destination) => Self::Ssh(normalize_ssh_identity(&destination)),
+        }
+    }
+
+    fn file_name(&self) -> &'static str {
+        match self {
+            Self::Local => LOCAL_HISTORY_FILE,
+            Self::Wsl(_) => WSL_HISTORY_FILE,
+            Self::Ssh(_) => SSH_HISTORY_FILE,
+        }
+    }
+
+    fn identity(&self) -> Option<&str> {
+        match self {
+            Self::Local => None,
+            Self::Wsl(identity) | Self::Ssh(identity) => Some(identity),
+        }
+    }
+}
+
+fn normalize_identity(identity: &str) -> String {
+    identity.trim().to_ascii_lowercase()
+}
+
+fn normalize_ssh_identity(destination: &str) -> String {
+    let destination = destination.trim();
+    match destination.rsplit_once('@') {
+        Some((user, host)) => format!("{user}@{}", host.to_ascii_lowercase()),
+        None => destination.to_ascii_lowercase(),
+    }
+}
+
 #[derive(Debug, Default)]
-pub struct NebulaHistory {
-    /// Commands in recency order, oldest first, newest last. Deduplicated:
-    /// re-running a command moves it to the end rather than adding a copy.
+struct HistoryIndex {
     entries: Vec<String>,
-    /// Prefix index: `command -> position in `entries``. A `BTreeMap` so a
-    /// prefix query becomes a range scan over the small matching window rather
-    /// than a full linear pass. Values are kept in sync with `entries`.
     index: BTreeMap<String, usize>,
 }
 
-impl NebulaHistory {
-    /// Load history from disk, newest-last, capped at [`HISTORY_MAX`].
-    pub fn load() -> Self {
-        let mut history = Self::default();
-        history.load_nebula_history();
-        history_debug_log(format!("history_load entries={}", history.entries.len()));
-        history
-    }
-
-    /// Record a freshly run command: persist it and update the in-memory index.
-    /// No-ops for blank input or an immediate repeat of the last command.
-    pub fn record(&mut self, cmd: &str, cwd: &str) {
-        let cmd = cmd.trim();
-        if cmd.is_empty() {
-            return;
-        }
-        if self.entries.last().map(String::as_str) == Some(cmd) {
-            history_debug_log(format!("history_record_skip_repeat cmd={cmd:?} cwd={cwd:?}"));
-            return;
-        }
-        append(cmd, cwd);
-        self.insert(cmd.to_owned());
-        history_debug_log(format!(
-            "history_record cmd={cmd:?} cwd={cwd:?} entries={}",
-            self.entries.len()
-        ));
-    }
-
-    /// The newest command that begins with `prefix` and strictly extends it,
-    /// returning only the remainder (the part past `prefix`). `None` when
-    /// nothing matches. Uses the prefix index, so cost scales with the number
-    /// of matches, not the history size.
-    pub fn hint(&self, prefix: &str) -> Option<&str> {
+impl HistoryIndex {
+    fn hint(&self, prefix: &str) -> Option<&str> {
         if prefix.is_empty() {
             return None;
         }
-        // All keys with `prefix` as a prefix form a contiguous BTreeMap range
-        // `[prefix, prefix++)`, where `prefix++` is `prefix` with its last code
-        // unit bumped. Scan that window and keep the most-recent (highest pos).
         let mut best: Option<(usize, &str)> = None;
         for (cmd, &pos) in self.index.range(prefix.to_owned()..) {
             if !cmd.starts_with(prefix) {
                 break;
             }
             if cmd.len() == prefix.len() {
-                continue; // exact match — nothing to hint
+                continue;
             }
-            if best.is_none_or(|(bp, _)| pos > bp) {
+            if best.is_none_or(|(best_pos, _)| pos > best_pos) {
                 best = Some((pos, &cmd[prefix.len()..]));
             }
         }
-        best.map(|(_, rem)| rem)
+        best.map(|(_, remainder)| remainder)
     }
 
-    /// Up to `limit` commands beginning with `prefix` (strict extensions
-    /// only), newest first, as `(full_command, remainder)` pairs. Same indexed
-    /// range scan as [`Self::hint`]; feeds the popup completion list.
-    pub fn hints(&self, prefix: &str, limit: usize) -> Vec<(&str, &str)> {
+    fn hints(&self, prefix: &str, limit: usize) -> Vec<(&str, &str)> {
         if prefix.is_empty() || limit == 0 {
             return Vec::new();
         }
@@ -91,30 +93,23 @@ impl NebulaHistory {
             if !cmd.starts_with(prefix) {
                 break;
             }
-            if cmd.len() == prefix.len() {
-                continue; // exact match — nothing to complete
+            if cmd.len() != prefix.len() {
+                matches.push((pos, cmd.as_str()));
             }
-            matches.push((pos, cmd.as_str()));
         }
         matches.sort_unstable_by(|a, b| b.0.cmp(&a.0));
         matches.into_iter().take(limit).map(|(_, cmd)| (cmd, &cmd[prefix.len()..])).collect()
     }
 
-    /// Insert a command, deduplicating and rebuilding the index when an old
-    /// copy is displaced, and trimming to [`HISTORY_MAX`].
     fn insert(&mut self, cmd: String) {
         if let Some(&old) = self.index.get(&cmd) {
-            // Move an existing command to the front of recency: drop the old
-            // slot and re-push. Positions after it shift, so reindex.
             self.entries.remove(old);
             self.entries.push(cmd);
             self.reindex();
             return;
         }
         self.entries.push(cmd.clone());
-        let pos = self.entries.len() - 1;
-        self.index.insert(cmd, pos);
-
+        self.index.insert(cmd, self.entries.len() - 1);
         if self.entries.len() > HISTORY_MAX {
             let drop = self.entries.len() - HISTORY_MAX;
             self.entries.drain(0..drop);
@@ -122,30 +117,80 @@ impl NebulaHistory {
         }
     }
 
-    /// Rebuild the prefix index from `entries`. Called only on the rare
-    /// dedup/trim paths, not on the common append.
     fn reindex(&mut self) {
         self.index.clear();
-        for (i, cmd) in self.entries.iter().enumerate() {
-            self.index.insert(cmd.clone(), i);
-        }
-    }
-
-    fn load_nebula_history(&mut self) {
-        if let Ok(data) = std::fs::read_to_string(history_path()) {
-            for line in data.lines() {
-                if let Some((cmd, _cwd)) = parse_record(line) {
-                    self.insert(cmd);
-                }
-            }
+        for (position, command) in self.entries.iter().enumerate() {
+            self.index.insert(command.clone(), position);
         }
     }
 }
 
-/// Path to `nebula_history.jsonl` under the user data dir, creating the
-/// directory if needed.
-fn history_path() -> PathBuf {
-    crate::platform::dirs::data_dir().join("nebula_history.jsonl")
+#[derive(Debug, Default)]
+pub struct NebulaHistory {
+    pools: HashMap<HistoryScope, HistoryIndex>,
+}
+
+impl NebulaHistory {
+    pub fn load() -> Self {
+        let mut history = Self::default();
+        history.load_file(&HistoryScope::Local);
+        history.load_file(&HistoryScope::Wsl(String::new()));
+        history.load_file(&HistoryScope::Ssh(String::new()));
+        history_debug_log(format!(
+            "history_load scopes={} entries={}",
+            history.pools.len(),
+            history.pools.values().map(|pool| pool.entries.len()).sum::<usize>()
+        ));
+        history
+    }
+
+    pub fn record(&mut self, scope: &HistoryScope, cmd: &str, cwd: &str) {
+        let scope = scope.clone().normalized();
+        let cmd = cmd.trim();
+        if cmd.is_empty() {
+            return;
+        }
+        let pool = self.pools.entry(scope.clone()).or_default();
+        if pool.entries.last().map(String::as_str) == Some(cmd) {
+            history_debug_log(format!(
+                "history_record_skip_repeat scope={scope:?} cmd={cmd:?} cwd={cwd:?}"
+            ));
+            return;
+        }
+        append(&scope, cmd, cwd);
+        pool.insert(cmd.to_owned());
+        history_debug_log(format!(
+            "history_record scope={scope:?} cmd={cmd:?} cwd={cwd:?} entries={}",
+            pool.entries.len()
+        ));
+    }
+
+    pub fn hint(&self, scope: &HistoryScope, prefix: &str) -> Option<&str> {
+        self.pools.get(&scope.clone().normalized())?.hint(prefix)
+    }
+
+    pub fn hints(&self, scope: &HistoryScope, prefix: &str, limit: usize) -> Vec<(&str, &str)> {
+        self.pools
+            .get(&scope.clone().normalized())
+            .map_or_else(Vec::new, |pool| pool.hints(prefix, limit))
+    }
+
+    fn load_file(&mut self, category: &HistoryScope) {
+        let path = history_path(category.file_name());
+        let Ok(data) = std::fs::read_to_string(path) else { return };
+        for line in data.lines() {
+            let Some((scope, cmd)) = parse_record(category, line) else { continue };
+            self.pools.entry(scope).or_default().insert(cmd);
+        }
+    }
+}
+
+pub(crate) fn history_file_names() -> [&'static str; 3] {
+    [LOCAL_HISTORY_FILE, WSL_HISTORY_FILE, SSH_HISTORY_FILE]
+}
+
+fn history_path(file_name: &str) -> PathBuf {
+    crate::platform::dirs::data_dir().join(file_name)
 }
 
 #[cfg(test)]
@@ -162,94 +207,212 @@ fn history_debug_log(message: impl AsRef<str>) {
     }) {
         return;
     }
-
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()))
+        .map(|duration| format!("{}.{:03}", duration.as_secs(), duration.subsec_millis()))
         .unwrap_or_else(|_| "0.000".to_owned());
-    if let Some(dir) = history_path().parent().map(PathBuf::from) {
-        let path = dir.join("nebula_debug.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "[{ts}] {}", message.as_ref());
-        }
+    let path = history_path(LOCAL_HISTORY_FILE).with_file_name("nebula_debug.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "[{ts}] {}", message.as_ref());
     }
 }
 
-/// Append one `{ts,cwd,cmd}` JSONL record. Best-effort; failures are ignored so
-/// persistence never blocks the prompt.
-fn append(cmd: &str, cwd: &str) {
+fn append(scope: &HistoryScope, cmd: &str, cwd: &str) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let record = serde_json::json!({ "ts": ts, "cwd": cwd, "cmd": cmd });
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(history_path()) {
-        let _ = writeln!(f, "{record}");
+    let mut record = serde_json::json!({ "ts": ts, "cwd": cwd, "cmd": cmd });
+    if let Some(identity) = scope.identity() {
+        record["scope"] = serde_json::Value::String(
+            match scope {
+                HistoryScope::Wsl(_) => "wsl",
+                HistoryScope::Ssh(_) => "ssh",
+                HistoryScope::Local => unreachable!(),
+            }
+            .to_owned(),
+        );
+        record["target"] = serde_json::Value::String(identity.to_owned());
+    }
+    let path = history_path(scope.file_name());
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{record}");
     }
 }
 
-/// Extract the `cmd` and optional `cwd` fields from one JSONL line, skipping
-/// malformed lines.
-fn parse_record(line: &str) -> Option<(String, Option<String>)> {
+fn parse_record(category: &HistoryScope, line: &str) -> Option<(HistoryScope, String)> {
     let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
-    let cmd = value.get("cmd")?.as_str()?.to_owned();
-    let cwd = value.get("cwd").and_then(|v| v.as_str()).map(str::to_owned);
-    Some((cmd, cwd))
+    let cmd = value.get("cmd")?.as_str()?.trim();
+    if cmd.is_empty() {
+        return None;
+    }
+    let record_scope = value.get("scope").and_then(serde_json::Value::as_str);
+    let target = value.get("target").and_then(serde_json::Value::as_str).unwrap_or_default();
+    let scope = match category {
+        HistoryScope::Local if record_scope.is_none() => HistoryScope::Local,
+        HistoryScope::Wsl(_) if record_scope == Some("wsl") && !target.trim().is_empty() => {
+            HistoryScope::Wsl(target.to_owned())
+        },
+        HistoryScope::Ssh(_) if record_scope == Some("ssh") && !target.trim().is_empty() => {
+            HistoryScope::Ssh(target.to_owned())
+        },
+        _ => return None,
+    }
+    .normalized();
+    Some((scope, cmd.to_owned()))
+}
+
+pub(crate) fn record_category_file(line: &str) -> Option<&'static str> {
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if value.get("cmd")?.as_str()?.trim().is_empty() {
+        return None;
+    }
+    match value.get("scope") {
+        None => Some(LOCAL_HISTORY_FILE),
+        Some(scope) => {
+            let target = value.get("target")?.as_str()?.trim();
+            if target.is_empty() {
+                return None;
+            }
+            match scope.as_str()? {
+                "wsl" => Some(WSL_HISTORY_FILE),
+                "ssh" => Some(SSH_HISTORY_FILE),
+                _ => None,
+            }
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn hist(cmds: &[&str]) -> NebulaHistory {
-        let mut h = NebulaHistory::default();
-        for c in cmds {
-            h.insert((*c).to_owned());
+    fn hist(scope: HistoryScope, cmds: &[&str]) -> NebulaHistory {
+        let mut history = NebulaHistory::default();
+        let pool = history.pools.entry(scope.normalized()).or_default();
+        for command in cmds {
+            pool.insert((*command).to_owned());
         }
-        h
+        history
     }
 
     #[test]
     fn hint_returns_remainder_of_newest_match() {
-        let h = hist(&["cargo build", "cargo test", "git status"]);
-        assert_eq!(h.hint("cargo "), Some("test"));
-        assert_eq!(h.hint("git "), Some("status"));
+        let scope = HistoryScope::Local;
+        let history = hist(scope.clone(), &["cargo build", "cargo test", "git status"]);
+        assert_eq!(history.hint(&scope, "cargo "), Some("test"));
+        assert_eq!(history.hint(&scope, "git "), Some("status"));
     }
 
     #[test]
-    fn no_hint_for_exact_or_missing() {
-        let h = hist(&["cargo build"]);
-        assert_eq!(h.hint("cargo build"), None); // exact, nothing to add
-        assert_eq!(h.hint("npm "), None); // no match
-        assert_eq!(h.hint(""), None); // empty prefix
+    fn exact_missing_and_empty_prefixes_have_no_hint() {
+        let scope = HistoryScope::Local;
+        let history = hist(scope.clone(), &["cargo build"]);
+        assert_eq!(history.hint(&scope, "cargo build"), None);
+        assert_eq!(history.hint(&scope, "npm "), None);
+        assert_eq!(history.hint(&scope, ""), None);
     }
 
     #[test]
-    fn dedup_moves_to_newest() {
-        // Re-running "ls" should make it win over the later "ll" for prefix "l".
-        let h = hist(&["ls", "ll", "ls"]);
-        assert_eq!(h.hint("l"), Some("s"));
+    fn rerunning_a_command_moves_it_to_the_newest_position() {
+        let scope = HistoryScope::Local;
+        let history = hist(scope.clone(), &["ls", "ll", "ls"]);
+        assert_eq!(history.hint(&scope, "l"), Some("s"));
     }
 
     #[test]
-    fn prefix_range_does_not_bleed() {
-        let h = hist(&["git push", "gitk"]);
-        // "git " must not match "gitk" (no space).
-        assert_eq!(h.hint("git "), Some("push"));
+    fn prefix_ranges_do_not_bleed_into_adjacent_commands() {
+        let scope = HistoryScope::Local;
+        let history = hist(scope.clone(), &["git push", "gitk"]);
+        assert_eq!(history.hint(&scope, "git "), Some("push"));
     }
 
     #[test]
-    fn hints_lists_matches_newest_first_and_caps_at_limit() {
-        let h = hist(&["git pull", "git push", "git status", "ls"]);
-        assert_eq!(h.hints("git ", 2), vec![("git status", "status"), ("git push", "push")]);
-        assert_eq!(h.hints("git ", 8).len(), 3);
-        assert!(h.hints("npm ", 8).is_empty());
-        assert!(h.hints("", 8).is_empty());
+    fn scopes_do_not_leak_commands() {
+        let local = HistoryScope::Local;
+        let wsl = HistoryScope::Wsl("Ubuntu".to_owned());
+        let ssh = HistoryScope::Ssh("root@example.com".to_owned());
+        let mut history = NebulaHistory::default();
+        history
+            .pools
+            .entry(local.clone().normalized())
+            .or_default()
+            .insert("dir windows".to_owned());
+        history
+            .pools
+            .entry(wsl.clone().normalized())
+            .or_default()
+            .insert("sudo apt update".to_owned());
+        history
+            .pools
+            .entry(ssh.clone().normalized())
+            .or_default()
+            .insert("systemctl restart api".to_owned());
+
+        assert_eq!(history.hint(&local, "dir "), Some("windows"));
+        assert_eq!(history.hint(&wsl, "sudo "), Some("apt update"));
+        assert_eq!(history.hint(&ssh, "systemctl "), Some("restart api"));
+        assert_eq!(history.hint(&local, "sudo "), None);
+        assert_eq!(history.hint(&wsl, "systemctl "), None);
     }
 
     #[test]
-    fn hints_skips_the_exact_match_like_hint_does() {
-        let h = hist(&["cargo build", "cargo b"]);
-        assert_eq!(h.hints("cargo b", 8), vec![("cargo build", "uild")]);
+    fn remote_identity_is_case_insensitive() {
+        let stored = HistoryScope::Wsl("ubuntu".to_owned());
+        let queried = HistoryScope::Wsl("Ubuntu".to_owned());
+        let history = hist(stored, &["apt update"]);
+        assert_eq!(history.hint(&queried, "apt "), Some("update"));
+    }
+
+    #[test]
+    fn ssh_normalization_preserves_case_sensitive_user_names() {
+        assert_eq!(
+            HistoryScope::Ssh("BuildUser@EXAMPLE.COM:22".to_owned()).normalized(),
+            HistoryScope::Ssh("BuildUser@example.com:22".to_owned())
+        );
+        assert_ne!(
+            HistoryScope::Ssh("BuildUser@example.com".to_owned()).normalized(),
+            HistoryScope::Ssh("builduser@example.com".to_owned()).normalized()
+        );
+    }
+
+    #[test]
+    fn hints_list_matches_newest_first_and_skip_exact() {
+        let scope = HistoryScope::Local;
+        let history = hist(scope.clone(), &["git pull", "git push", "git status", "git p"]);
+        assert_eq!(
+            history.hints(&scope, "git p", 2),
+            vec![("git push", "ush"), ("git pull", "ull")]
+        );
+    }
+
+    #[test]
+    fn sync_records_route_back_to_their_category_files() {
+        assert_eq!(record_category_file(r#"{"cmd":"dir"}"#), Some(LOCAL_HISTORY_FILE));
+        assert_eq!(
+            record_category_file(r#"{"scope":"wsl","target":"ubuntu","cmd":"ls"}"#),
+            Some(WSL_HISTORY_FILE)
+        );
+        assert_eq!(
+            record_category_file(r#"{"scope":"ssh","target":"me@box","cmd":"pwd"}"#),
+            Some(SSH_HISTORY_FILE)
+        );
+        assert_eq!(record_category_file(r#"{"scope":"ssh","cmd":"pwd"}"#), None);
+        assert_eq!(record_category_file(r#"{"scope":"future","cmd":"pwd"}"#), None);
+        assert_eq!(record_category_file(r#"{"cmd":"  "}"#), None);
+        assert_eq!(record_category_file("not json"), None);
+    }
+
+    #[test]
+    fn category_files_reject_mismatched_record_scopes() {
+        let wsl_file = HistoryScope::Wsl(String::new());
+        let ssh_record = r#"{"scope":"ssh","target":"me@box","cmd":"pwd"}"#;
+        assert_eq!(parse_record(&wsl_file, ssh_record), None);
+
+        let local_record = r#"{"cmd":"dir"}"#;
+        assert_eq!(
+            parse_record(&HistoryScope::Local, local_record),
+            Some((HistoryScope::Local, "dir".to_owned()))
+        );
     }
 }

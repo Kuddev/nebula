@@ -12,6 +12,7 @@ use windows_sys::Win32::UI::Shell::{
     FOS_PICKFOLDERS, FileOpenDialog, SHCreateItemFromParsingName, SIGDN, SIGDN_FILESYSPATH,
 };
 use windows_sys::core::{GUID, HRESULT, PCWSTR, PWSTR};
+#[cfg(feature = "legacy-shell")]
 use winit::raw_window_handle::RawWindowHandle;
 
 const FILE_OPEN_DIALOG_IID: GUID = GUID::from_u128(0xd57c7288_d4ad_4768_be02_9d969532d960);
@@ -152,6 +153,7 @@ impl Drop for TaskMemWide {
     }
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick(owner: RawWindowHandle, title: &str) -> Option<PathBuf> {
     let owner = match owner {
         RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,

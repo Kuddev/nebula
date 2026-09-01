@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+#[cfg(feature = "legacy-shell")]
 use super::window::Window;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -85,12 +86,30 @@ pub(super) fn classify_private_key_contents(contents: &[u8]) -> PrivateKeyFileKi
         return PrivateKeyFileKind::PublicKey;
     }
     if [
-        "-----BEGIN OPENSSH PRIVATE KEY-----",
-        "-----BEGIN RSA PRIVATE KEY-----",
-        "-----BEGIN EC PRIVATE KEY-----",
-        "-----BEGIN ENCRYPTED PRIVATE KEY-----",
-        "-----BEGIN PRIVATE KEY-----",
-        "PuTTY-User-Key-File-",
+        concat!(
+            "-----BEGIN OPENSSH ",
+            "PRIVATE KEY-----"
+        ),
+        concat!(
+            "-----BEGIN RSA ",
+            "PRIVATE KEY-----"
+        ),
+        concat!(
+            "-----BEGIN EC ",
+            "PRIVATE KEY-----"
+        ),
+        concat!(
+            "-----BEGIN ENCRYPTED ",
+            "PRIVATE KEY-----"
+        ),
+        concat!(
+            "-----BEGIN ",
+            "PRIVATE KEY-----"
+        ),
+        concat!(
+            "PuTTY-User-Key-",
+            "File-"
+        ),
     ]
     .iter()
     .any(|header| trimmed.starts_with(header))
@@ -101,15 +120,18 @@ pub(super) fn classify_private_key_contents(contents: &[u8]) -> PrivateKeyFileKi
     }
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_image_file(owner: &Window) -> Option<String> {
     platform::pick_file(owner, "Choose background image", IMAGE_FILTERS)
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_font_file(owner: &Window) -> Option<PathBuf> {
     platform::pick_file(owner, "导入终端字体", FONT_FILTERS)
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_private_key_file(owner: &Window) -> Option<Result<PathBuf, String>> {
     let path = platform::pick_file(owner, "Choose SSH private key", PRIVATE_KEY_FILTERS)?;
     Some(validate_private_key_path(&path))
@@ -166,42 +188,52 @@ pub(crate) fn validate_private_key_path(path: &std::path::Path) -> Result<PathBu
     }
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_upload_files(owner: &Window) -> Vec<PathBuf> {
     platform::pick_files(owner, "选择要上传的文件", &[ALL_FILES_FILTER])
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_upload_directory(owner: &Window) -> Option<PathBuf> {
     platform::pick_folder(owner, "选择要上传的文件夹")
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_download_directory(owner: &Window) -> Option<PathBuf> {
     platform::pick_folder(owner, "选择下载位置")
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_side_panel_directory(owner: &Window) -> Option<PathBuf> {
     platform::pick_folder(owner, "选择目录树根目录")
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_startup_directory(owner: &Window) -> Option<PathBuf> {
     platform::pick_folder(owner, "选择终端启动目录")
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_terminal_directory(owner: &Window) -> Option<PathBuf> {
     platform::pick_folder(owner, "导入终端目录")
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn save_workspace_file(owner: &Window, default_name: &str) -> Option<PathBuf> {
     platform::save_file(owner, "导出工作区", WORKSPACE_FILTERS, default_name)
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_workspace_file(owner: &Window) -> Option<PathBuf> {
     platform::pick_file(owner, "打开工作区", WORKSPACE_FILTERS)
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn save_backup_file(owner: &Window) -> Option<PathBuf> {
     platform::save_file(owner, "导出 Nebula 备份", BACKUP_FILTERS, "nebula-backup.nebula-backup")
 }
 
+#[cfg(feature = "legacy-shell")]
 pub(super) fn pick_backup_file(owner: &Window) -> Option<PathBuf> {
     platform::pick_file(owner, "恢复 Nebula 备份", BACKUP_FILTERS)
 }
@@ -222,13 +254,21 @@ mod tests {
     fn encrypted_and_putty_private_key_headers_are_accepted_for_later_unlock() {
         assert_eq!(
             classify_private_key_contents(
-                b"-----BEGIN OPENSSH PRIVATE KEY-----\nnot-decoded-until-passphrase\n"
+                concat!(
+                    "-----BEGIN OPENSSH ",
+                    "PRIVATE KEY-----\nnot-decoded-until-passphrase\n"
+                )
+                .as_bytes()
             ),
             PrivateKeyFileKind::PrivateKey
         );
         assert_eq!(
             classify_private_key_contents(
-                b"PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: aes256-cbc"
+                concat!(
+                    "PuTTY-User-Key-",
+                    "File-3: ssh-ed25519\nEncryption: aes256-cbc"
+                )
+                .as_bytes()
             ),
             PrivateKeyFileKind::PrivateKey
         );

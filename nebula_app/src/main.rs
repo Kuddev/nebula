@@ -97,6 +97,7 @@ mod renderer;
 mod runtime_api;
 mod runtime_exec;
 mod saved_commands;
+#[cfg(feature = "legacy-shell")]
 mod scheduler;
 mod session;
 mod shell_detect;
@@ -136,6 +137,7 @@ use crate::cli::MessageOptions;
 use crate::cli::SocketMessage;
 use crate::cli::{Options, Subcommands};
 use crate::config::UiConfig;
+#[cfg(feature = "legacy-shell")]
 use crate::config::monitor::ConfigMonitor;
 #[cfg(feature = "legacy-shell")]
 use crate::event::{Event, Processor};
@@ -203,6 +205,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // （ATTACH），不能再拉一套 PTY。
     #[cfg(feature = "gpui-shell")]
     if wants_gpui_shell(&options) {
+        let _log_file = logging::initialize(&options).expect("Unable to initialize logger");
         #[cfg(windows)]
         if try_hand_over_to_resident(&options) {
             return Ok(());
@@ -337,7 +340,7 @@ fn nebula(mut options: Options) -> Result<(), Box<dyn Error>> {
     boot_trace("event loop built");
 
     // Initialize the logger as soon as possible as to capture output from other subsystems.
-    let log_file = logging::initialize(&options, window_event_loop.create_proxy())
+    let log_file = logging::initialize_legacy(&options, window_event_loop.create_proxy())
         .expect("Unable to initialize logger");
 
     info!("Welcome to Nebula");

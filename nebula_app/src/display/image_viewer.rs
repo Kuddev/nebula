@@ -2,8 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "legacy-shell")]
 use crate::display::SizeInfo;
+#[cfg(feature = "legacy-shell")]
 use crate::renderer::Renderer;
+#[cfg(feature = "legacy-shell")]
 use crate::renderer::image::{BackgroundImageAlignment, BackgroundImageFit};
 
 const MIN_ZOOM: f32 = 0.25;
@@ -106,6 +109,7 @@ impl ImageView {
         self.dimensions
     }
 
+    #[cfg(feature = "legacy-shell")]
     pub fn draw(
         &self,
         renderer: &mut Renderer,
@@ -177,6 +181,7 @@ fn contains(area: (f32, f32, f32, f32), point: (f32, f32)) -> bool {
 }
 
 /// Draw an image path for standalone image tabs and Markdown image blocks.
+#[cfg(feature = "legacy-shell")]
 pub fn draw_path(
     renderer: &mut Renderer,
     size: &SizeInfo,

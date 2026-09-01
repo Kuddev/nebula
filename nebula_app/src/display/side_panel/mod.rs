@@ -23,7 +23,10 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
 mod enumerate;
+mod icons;
+#[cfg(feature = "legacy-shell")]
 mod render;
+mod search;
 #[cfg(test)]
 mod tests;
 mod vcs;
@@ -31,7 +34,10 @@ mod vcs;
 // 子模块的项一律 `pub(crate)`：本 crate 是 bin，没有下游用户，所以拆分不必
 // 把内部实现抬到 `pub`。glob 转发让 `display::side_panel::X` 这层路径不变。
 pub(crate) use enumerate::*;
+pub(crate) use icons::*;
+#[cfg(feature = "legacy-shell")]
 pub(crate) use render::*;
+pub(crate) use search::*;
 pub(crate) use vcs::*;
 
 /// Which view the drawer shows.
@@ -41,6 +47,37 @@ pub enum PanelView {
     Files,
     /// Git branch + working-tree changes of the enclosing repository.
     Git,
+}
+
+/// Git 抽屉内部的三个等宽入口。它与 [`PanelView`] 分层：后者只负责文件/VCS
+/// 工具切换，这一层才负责提交、线路和冲突三种版本控制工作流。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GitPanelView {
+    #[default]
+    Changes,
+    History,
+    Conflicts,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitCommit {
+    /// 完整对象 ID 用来建立真实父子关系；短哈希只用于界面显示。
+    pub full_hash: String,
+    pub short_hash: String,
+    pub decorations: String,
+    pub subject: String,
+    pub author: String,
+    pub timestamp: i64,
+    /// 按 Git 记录顺序保存父提交：第一个是主线，后续父提交是合并进来的线路。
+    pub parent_hashes: Vec<String>,
+}
+
+/// 三栏合并器运行 Git 的位置。WSL 仓库必须留在来宾中执行，不能把 `/home`
+/// 一类路径误交给宿主文件 API。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitLocation {
+    Local { root: PathBuf },
+    Wsl { distro: String, root: String },
 }
 
 /// One flattened row of the directory tree.
@@ -97,6 +134,9 @@ pub struct GitInfo {
     /// 在 `staged`/`unstaged` 里：旧壳视图零改动照常显示，GPUI 壳按本列表
     /// 单独分组并从另两组过滤（VS Code 的 Merge Changes 合同）。
     pub conflicts: Vec<(char, String)>,
+    /// `git log --all --date-order` 的最近提交。显示层依据对象 ID 和父提交
+    /// 生成连续轨道，不把 `git --graph` 的字符画当成视觉数据。
+    pub history: Vec<GitCommit>,
     /// 仅 [`VcsKind::SvnRepository`] 使用；工作副本和 Git 的操作目录取
     /// [`SidePanel::vcs_root`]，服务端仓库必须保留祖先扫描得到的真实根。
     pub repository_root: Option<PathBuf>,
@@ -255,6 +295,8 @@ const SEARCH_SKIP_DIRS: &[&str] =
 pub struct SidePanel {
     pub open: bool,
     pub view: PanelView,
+    /// Git 抽屉内部当前页；切换文件/VCS 抽屉不会丢掉用户上次所在的页。
+    pub git_view: GitPanelView,
     /// Root the tree/git snapshot was built from (the focused pane's cwd).
     root: Option<PathBuf>,
     /// Latest focused pane cwd, retained while a custom root is active so the
@@ -273,6 +315,10 @@ pub struct SidePanel {
     root_notice: Option<String>,
     /// Flattened visible tree rows for the Files view.
     rows: Vec<FileRow>,
+    /// Last unfiltered tree snapshot. Search results replace `rows`, but
+    /// clearing the query restores this cache immediately instead of walking
+    /// the filesystem (or starting another WSL command) on the UI thread.
+    tree_rows: Vec<FileRow>,
     /// Directories the user expanded (persists across refreshes).
     expanded: HashSet<PathBuf>,
     /// Git snapshot, `None` when the root isn't inside a work tree.
@@ -285,11 +331,15 @@ pub struct SidePanel {
     /// Whether the filter box owns the keyboard.
     pub search_focus: bool,
     search_selection: super::text_input::SelectAllState,
-    /// Flat, budget-bounded index of the tree used by the filter. Built ONCE
-    /// on the first filtering keystroke and reused for the rest of the query
-    /// (each keystroke then only string-matches in memory); dropped whenever
-    /// the root changes or a refresh rebuilds the snapshot.
-    search_index: Option<Vec<FileRow>>,
+    /// Everything-style, root-scoped filename index. It owns a worker thread;
+    /// rendering only submits queries and harvests generation-checked rows.
+    file_index: EmbeddedFileIndex,
+    search_options: FileSearchOptions,
+    search_generation: u64,
+    search_applied_generation: u64,
+    search_index_epoch: u64,
+    search_total: usize,
+    search_error: Option<String>,
     /// Commit-message input (Git view): buffer + focus, same modal keyboard
     /// contract as the Files filter box.
     pub commit_msg: String,
@@ -359,6 +409,7 @@ impl SidePanel {
         Self {
             open: false,
             view: PanelView::Files,
+            git_view: GitPanelView::Changes,
             root: None,
             followed_cwd: None,
             followed_wsl: None,
@@ -366,13 +417,20 @@ impl SidePanel {
             custom_wsl_root: None,
             root_notice: None,
             rows: Vec::new(),
+            tree_rows: Vec::new(),
             expanded: HashSet::new(),
             git: None,
             scroll: 0,
             search: String::new(),
             search_focus: false,
             search_selection: Default::default(),
-            search_index: None,
+            file_index: EmbeddedFileIndex::new(),
+            search_options: FileSearchOptions::default(),
+            search_generation: 0,
+            search_applied_generation: 0,
+            search_index_epoch: 0,
+            search_total: 0,
+            search_error: None,
             commit_msg: String::new(),
             commit_focus: false,
             commit_selection: Default::default(),
@@ -430,7 +488,8 @@ impl SidePanel {
         }
         // 先收割落地的后台快照——旧内容在工人跑动期间一直显示，这里一次
         // 性换成新内容（先显示旧的、再更新，VSCode 的树刷新模式）。
-        let changed = self.harvest_snapshot();
+        let mut changed = self.harvest_snapshot();
+        changed |= self.harvest_file_search();
         // 聚焦 pane 报不出位置时（SSH、shell 尚未发 OSC）保留最后一个有效根；
         // 有明确新位置时则恢复实时跟随，树内点 `..` 产生的浏览覆盖不能继续压住
         // 新 pane/cwd。相同 cwd 上的手动浏览仍保留，直到位置真的变化或用户刷新。
@@ -525,11 +584,6 @@ impl SidePanel {
     /// Fold a finished background snapshot into the visible state. Returns
     /// whether anything on screen changed.
     fn harvest_snapshot(&mut self) -> bool {
-        // 过滤查询激活时不收割：树快照会覆盖过滤视图。快照留在槽里，查询
-        // 清空后的下一帧照常落地。
-        if !self.search.trim().is_empty() {
-            return false;
-        }
         let snapshot = match self.snapshot_slot.lock() {
             Ok(mut slot) => slot.take(),
             Err(_) => None,
@@ -544,13 +598,30 @@ impl SidePanel {
             self.needs_refresh = true;
             return false;
         }
-        self.rows = snapshot.rows;
+        self.tree_rows = snapshot.rows;
+        if self.search.trim().is_empty() {
+            self.rows.clone_from(&self.tree_rows);
+        }
         self.enumeration_failed = !snapshot.enumeration_ok;
         if let Some(git) = snapshot.git {
             self.git = git;
         }
-        // New snapshot → the filter index is stale; rebuild lazily on demand.
-        self.search_index = None;
+        true
+    }
+
+    fn harvest_file_search(&mut self) -> bool {
+        let Some(result) = self.file_index.take_result() else { return false };
+        if result.generation != self.search_generation
+            || result.query != self.search
+            || result.options != self.search_options
+        {
+            return false;
+        }
+        self.rows = result.rows;
+        self.search_total = result.total;
+        self.search_error = result.error;
+        self.search_applied_generation = result.generation;
+        self.scroll = 0;
         true
     }
 
@@ -646,6 +717,26 @@ impl SidePanel {
         self.custom_root.as_deref().or(self.followed_cwd.as_deref()).or(self.root.as_deref())
     }
 
+    /// 当前 Git 仓库的执行位置，供工作区里的三栏合并 Tab 使用。
+    pub fn git_location(&self) -> Option<GitLocation> {
+        if self.vcs() != Some(VcsKind::Git) {
+            return None;
+        }
+        if let Some(located) = self.followed_wsl.as_ref() {
+            return Some(GitLocation::Wsl {
+                distro: located.distro.clone(),
+                root: located.guest.clone(),
+            });
+        }
+        self.vcs_root().map(|root| GitLocation::Local { root: root.to_path_buf() })
+    }
+
+    pub fn select_git_view(&mut self, view: GitPanelView) {
+        self.git_view = view;
+        self.selected = None;
+        self.scroll = 0;
+    }
+
     pub fn root_notice(&self) -> Option<&str> {
         self.root_notice.as_deref()
     }
@@ -683,8 +774,10 @@ impl SidePanel {
         let Some(root) = self.root.clone() else {
             // 没有根：清空是即时且无成本的，不需要工人。
             self.rows.clear();
+            self.tree_rows.clear();
             self.git = None;
-            self.search_index = None;
+            self.search_index_epoch = self.search_index_epoch.wrapping_add(1);
+            self.file_index.rebuild(None, self.search_index_epoch, None);
             return;
         };
         // 快照工人一次只跑一个：fs 遍历 + 三个 git 子进程在渲染线程上曾是
@@ -696,6 +789,19 @@ impl SidePanel {
         }
         let expanded = self.expanded.clone();
         let files_wsl = self.file_wsl_root().cloned();
+        self.search_index_epoch = self.search_index_epoch.wrapping_add(1);
+        let index_root = files_wsl
+            .clone()
+            .map(FileIndexRoot::Wsl)
+            .unwrap_or_else(|| FileIndexRoot::Local(root.clone()));
+        let active_query = if self.search.trim().is_empty() {
+            None
+        } else {
+            self.search_generation = self.search_generation.wrapping_add(1);
+            self.search_error = None;
+            Some((self.search_generation, self.search.clone(), self.search_options))
+        };
+        self.file_index.rebuild(Some(index_root), self.search_index_epoch, active_query);
         // VCS 状态跟着 [`Self::vcs_root`]：显式浏览定位优先，其次终端 cwd。
         // 在树里点 `..` 往上翻也算显式定位，所以翻到仓库外面时视图会变空——
         // 那条回头路由 VCS 视图自己画的「跟随当前目录」入口负责（此前它只
@@ -766,59 +872,104 @@ impl SidePanel {
     /// Rebuild only the flattened rows (tree shape / filter changes; the git
     /// snapshot stays).
     fn rebuild_rows(&mut self) {
-        self.rows.clear();
         let Some(root) = self.root.clone() else { return };
-        let needle = self.search.trim().to_lowercase();
-        if needle.is_empty() {
-            match self.file_wsl_root() {
-                Some(located) => {
-                    let (rows, ok) = Self::tree_rows_wsl(located, &self.expanded);
-                    self.rows = rows;
-                    self.enumeration_failed = !ok;
-                },
-                None => {
-                    self.rows = Self::tree_rows(&root, &self.expanded);
-                    self.enumeration_failed = false;
-                },
-            }
+        if !self.search.trim().is_empty() {
+            self.queue_file_search();
             return;
         }
-        // Filter mode: string-match against the cached flat index. The index
-        // is built at most once per snapshot (budget-bounded walk); each
-        // keystroke after that is pure in-memory filtering — walking the tree
-        // per keystroke froze the UI on big checkouts.
-        if self.search_index.is_none() {
-            let mut index = Vec::new();
-            let mut budget = SEARCH_VISIT_BUDGET;
-            if let Some(located) = self.file_wsl_root() {
-                build_wsl_search_index(located, &mut index, &mut budget);
-            } else {
-                build_search_index(&root, 0, &mut index, &mut budget);
-                Self::mark_ignored(&root, &mut index);
-            }
-            self.search_index = Some(index);
+        match self.file_wsl_root() {
+            Some(located) => {
+                let (rows, ok) = Self::tree_rows_wsl(located, &self.expanded);
+                self.tree_rows = rows;
+                self.enumeration_failed = !ok;
+            },
+            None => {
+                self.tree_rows = Self::tree_rows(&root, &self.expanded);
+                self.enumeration_failed = false;
+            },
         }
-        let index = self.search_index.as_ref().unwrap();
-        self.rows.extend(
-            index
-                .iter()
-                .filter(|row| row.name.to_lowercase().contains(&needle))
-                .take(MAX_ROWS)
-                .cloned(),
-        );
+        self.rows.clone_from(&self.tree_rows);
+    }
+
+    fn queue_file_search(&mut self) {
+        self.scroll = 0;
+        self.search_error = None;
+        self.search_total = 0;
+        self.search_generation = self.search_generation.wrapping_add(1);
+        if self.search.trim().is_empty() {
+            self.rows.clone_from(&self.tree_rows);
+            self.search_applied_generation = self.search_generation;
+            return;
+        }
+        self.file_index.query(self.search_generation, self.search.clone(), self.search_options);
+    }
+
+    /// Replace the GPUI Files query. The input component owns caret/IME state;
+    /// the shared model owns only sanitized text and indexed results.
+    pub fn set_file_search_query(&mut self, mut query: String) {
+        query.retain(|character| !matches!(character, '\r' | '\n'));
+        if self.search == query {
+            return;
+        }
+        self.search = query;
+        self.search_selection.clear();
+        self.queue_file_search();
+    }
+
+    pub fn file_search_options(&self) -> FileSearchOptions {
+        self.search_options
+    }
+
+    pub fn toggle_file_search_match_case(&mut self) {
+        self.search_options.match_case = !self.search_options.match_case;
+        self.queue_file_search();
+    }
+
+    pub fn toggle_file_search_whole_word(&mut self) {
+        self.search_options.whole_word = !self.search_options.whole_word;
+        self.queue_file_search();
+    }
+
+    pub fn toggle_file_search_regex(&mut self) {
+        self.search_options.regex = !self.search_options.regex;
+        self.queue_file_search();
+    }
+
+    pub fn file_search_pending(&self) -> bool {
+        !self.search.trim().is_empty()
+            && (self.file_index.status() == FileIndexStatus::Building
+                || self.search_applied_generation != self.search_generation)
+    }
+
+    pub fn file_index_status(&self) -> FileIndexStatus {
+        self.file_index.status()
+    }
+
+    pub fn file_indexed_count(&self) -> usize {
+        self.file_index.indexed_count()
+    }
+
+    pub fn file_index_truncated(&self) -> bool {
+        self.file_index.truncated()
+    }
+
+    pub fn file_search_total(&self) -> usize {
+        self.search_total
+    }
+
+    pub fn file_search_error(&self) -> Option<&str> {
+        self.search_error.as_deref()
     }
 
     /// Append typed text to the filter query and re-derive the rows.
     pub fn search_input(&mut self, text: &str) {
         self.search_selection.insert(&mut self.search, text);
-        self.scroll = 0;
-        self.rebuild_rows();
+        self.queue_file_search();
     }
 
     pub fn search_backspace(&mut self) {
         self.search_selection.backspace(&mut self.search);
-        self.scroll = 0;
-        self.rebuild_rows();
+        self.queue_file_search();
     }
 
     pub fn search_select_all(&mut self) {
@@ -839,8 +990,7 @@ impl SidePanel {
         self.search_selection.clear();
         if clear && !self.search.is_empty() {
             self.search.clear();
-            self.scroll = 0;
-            self.rebuild_rows();
+            self.queue_file_search();
         }
     }
 
@@ -1082,6 +1232,23 @@ impl SidePanel {
         // Re-flatten only (no git re-run): tree shape changed, content didn't.
         self.rebuild_rows();
         true
+    }
+
+    /// Open a directory returned by the flat search list as this drawer's
+    /// window-local browse root. The caller clears its visible input after a
+    /// successful navigation, which restores the normal tree snapshot.
+    pub fn browse_search_directory(&mut self, path: PathBuf, guest_path: Option<String>) -> bool {
+        if self.search.trim().is_empty() {
+            return false;
+        }
+        if let Some(guest) = guest_path {
+            let Some(distro) = self.file_wsl_root().map(|root| root.distro.clone()) else {
+                return false;
+            };
+            self.set_custom_wsl_root(crate::shell_detect::WslCwd { distro, guest })
+        } else {
+            self.set_custom_root(path)
+        }
     }
 
     /// Complete the plain-click half of a pending directory drag. The source

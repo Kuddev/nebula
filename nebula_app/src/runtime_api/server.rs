@@ -50,6 +50,7 @@ pub fn try_open_default_tab_existing() -> bool {
 }
 
 /// 后台任务把一行文本作为输入敲进某个 pane（不回车）。
+#[cfg(feature = "legacy-shell")]
 pub fn dispatch_prompt(proxy: &EventLoopProxy<Event>, pane_id: u64, text: String) {
     let (dispatch, _receiver) = RuntimeDispatch::new(RuntimeCommand::Prompt {
         window_id: None,
@@ -118,6 +119,7 @@ pub struct RuntimeServer {
 }
 
 impl RuntimeServer {
+    #[cfg(feature = "legacy-shell")]
     pub fn spawn(proxy: EventLoopProxy<Event>, hub: RuntimeHub) -> Option<Self> {
         Self::spawn_with_sink(EventSink::Winit(proxy), hub)
     }

@@ -38,7 +38,8 @@ pub struct Options {
     /// Optional on 1.1.0+ `gpui-shell` builds: the GUI already defaults to
     /// GPUI. Kept so existing launchers and scripts keep working.
     #[cfg(feature = "gpui-shell")]
-    #[clap(long, conflicts_with = "legacy_shell")]
+    #[cfg_attr(feature = "legacy-shell", clap(long, conflicts_with = "legacy_shell"))]
+    #[cfg_attr(not(feature = "legacy-shell"), clap(long))]
     pub gpui: bool,
 
     /// Launch the legacy winit shell instead of GPUI.

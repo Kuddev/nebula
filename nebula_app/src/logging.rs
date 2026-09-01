@@ -13,10 +13,13 @@ use std::time::Instant;
 use std::{env, process};
 
 use log::{Level, LevelFilter};
+#[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoopProxy;
 
 use crate::cli::Options;
+#[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
+#[cfg(feature = "legacy-shell")]
 use crate::message_bar::{Message, MessageType};
 
 /// Logging target for IPC config error messages.
@@ -35,6 +38,29 @@ pub const LOG_TARGET_WINIT: &str = "nebula_winit_event";
 ///
 /// The targets are semicolon separated.
 const NEBULA_EXTRA_LOG_TARGETS_ENV: &str = "NEBULA_EXTRA_LOG_TARGETS";
+
+pub(crate) fn debug_log(message: impl AsRef<str>) {
+    use std::io::Write as _;
+
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| {
+        env::var("NEBULA_DEBUG_LOG").is_ok_and(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+    }) {
+        return;
+    }
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| format!("{}.{:03}", duration.as_secs(), duration.subsec_millis()))
+        .unwrap_or_else(|_| "0.000".to_owned());
+    let path = crate::platform::dirs::data_dir().join("nebula_debug.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "[{timestamp} pid={}] {}", process::id(), message.as_ref());
+    }
+}
 
 /// User configurable extra log targets to include.
 fn extra_log_targets() -> &'static [String] {
@@ -58,13 +84,25 @@ const ALLOWED_TARGETS: &[&str] = &[
 ];
 
 /// Initialize the logger to its defaults.
-pub fn initialize(
+pub fn initialize(options: &Options) -> Result<Option<PathBuf>, log::SetLoggerError> {
+    initialize_logger(options, Logger::new())
+}
+
+/// Initialize the logger with the legacy shell's message-bar event sink.
+#[cfg(feature = "legacy-shell")]
+pub fn initialize_legacy(
     options: &Options,
     event_proxy: EventLoopProxy<Event>,
 ) -> Result<Option<PathBuf>, log::SetLoggerError> {
+    initialize_logger(options, Logger::new_legacy(event_proxy))
+}
+
+fn initialize_logger(
+    options: &Options,
+    logger: Logger,
+) -> Result<Option<PathBuf>, log::SetLoggerError> {
     log::set_max_level(options.log_level());
 
-    let logger = Logger::new(event_proxy);
     let path = logger.file_path();
     log::set_boxed_logger(Box::new(logger))?;
 
@@ -74,16 +112,30 @@ pub fn initialize(
 pub struct Logger {
     logfile: Mutex<OnDemandLogFile>,
     stdout: Mutex<LineWriter<Stdout>>,
-    event_proxy: Mutex<EventLoopProxy<Event>>,
+    #[cfg(feature = "legacy-shell")]
+    event_proxy: Option<Mutex<EventLoopProxy<Event>>>,
     start: Instant,
 }
 
 impl Logger {
-    fn new(event_proxy: EventLoopProxy<Event>) -> Self {
+    fn new() -> Self {
         let logfile = Mutex::new(OnDemandLogFile::new());
         let stdout = Mutex::new(LineWriter::new(io::stdout()));
 
-        Logger { logfile, stdout, event_proxy: Mutex::new(event_proxy), start: Instant::now() }
+        Logger {
+            logfile,
+            stdout,
+            #[cfg(feature = "legacy-shell")]
+            event_proxy: None,
+            start: Instant::now(),
+        }
+    }
+
+    #[cfg(feature = "legacy-shell")]
+    fn new_legacy(event_proxy: EventLoopProxy<Event>) -> Self {
+        let mut logger = Self::new();
+        logger.event_proxy = Some(Mutex::new(event_proxy));
+        logger
     }
 
     fn file_path(&self) -> Option<PathBuf> {
@@ -92,6 +144,7 @@ impl Logger {
     }
 
     /// Log a record to the message bar.
+    #[cfg(feature = "legacy-shell")]
     fn message_bar_log(&self, record: &log::Record<'_>, logfile_path: &str) {
         let message_type = match record.level() {
             Level::Error => MessageType::Error,
@@ -99,7 +152,8 @@ impl Logger {
             _ => return,
         };
 
-        let event_proxy = match self.event_proxy.lock() {
+        let Some(event_proxy) = self.event_proxy.as_ref() else { return };
+        let event_proxy = match event_proxy.lock() {
             Ok(event_proxy) => event_proxy,
             Err(_) => return,
         };
@@ -150,6 +204,7 @@ impl log::Log for Logger {
             let _ = logfile.write_all(message.as_ref());
 
             // Log relevant entries to message bar.
+            #[cfg(feature = "legacy-shell")]
             self.message_bar_log(record, &logfile.path.to_string_lossy());
         }
 

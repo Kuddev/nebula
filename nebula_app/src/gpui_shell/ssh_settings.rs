@@ -43,6 +43,7 @@ const SSH_EDITOR_SPACE_S: f32 = 12.0;
 const SSH_EDITOR_SPACE_M: f32 = 16.0;
 const SSH_EDITOR_SPACE_XL: f32 = 32.0;
 const SSH_EDITOR_CTL_H: f32 = 32.0;
+const SSH_EDITOR_USERNAME_W: f32 = 118.0;
 const SSH_EDITOR_PORT_W: f32 = 76.0;
 const SSH_EDITOR_KEY_ROW_H: f32 = 30.0;
 const SSH_EDITOR_KEY_ROWS_MAX: usize = 4;
@@ -52,6 +53,13 @@ const SSH_EDITOR_SAVE_H: f32 = 26.0;
 const SSH_EDITOR_FOOTER_H: f32 = 56.0;
 const SSH_HOST_ROW_H: f32 = 58.0;
 const SSH_HOST_GAP: f32 = 8.0;
+
+fn push_username_suggestion(suggestions: &mut Vec<String>, username: &str) {
+    let username = username.trim();
+    if !username.is_empty() && !suggestions.iter().any(|existing| existing == username) {
+        suggestions.push(username.to_owned());
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum SshValidationError {
@@ -119,6 +127,9 @@ pub(super) struct SshEditorState {
     pub(super) private_keys: Vec<std::path::PathBuf>,
     pub(super) save_password: bool,
     pub(super) show_password: bool,
+    /// 最近使用用户名 + 已保存/config 主机里解析出的用户名。只作候选，不
+    /// 限制自由输入；最终仍拼回原有 destination 存储合同。
+    pub(super) username_suggestions: Vec<String>,
     pub(super) revision: u64,
     pub(super) test_request_id: Option<u64>,
     pub(super) test_status: Option<SshEditorTestStatus>,
@@ -136,6 +147,7 @@ impl SshEditorState {
             private_keys: Vec::new(),
             save_password: true,
             show_password: false,
+            username_suggestions: Vec::new(),
             revision: 0,
             test_request_id: None,
             test_status: None,
@@ -280,6 +292,7 @@ impl SettingsPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let adding = destination.is_none();
         let profile_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
         let profiles =
             crate::ssh_profiles::SshProfiles::load(&profile_path).unwrap_or_else(|err| {
@@ -287,16 +300,29 @@ impl SettingsPane {
                 crate::ssh_profiles::SshProfiles::default()
             });
         let profile = destination.as_deref().map(|host| profiles.for_destination(host));
-        let (address, port) =
+        let (address_with_user, port) =
             destination.as_deref().map(crate::display::split_destination_port).unwrap_or_default();
+        let (mut username, address) = crate::display::split_destination_user(&address_with_user);
+        // 新增主机的常用服务器账号直接给出可编辑实值；placeholder 不会参与
+        // destination 拼装，用户只填 IP 时此前实际会退回本机账号。
+        if adding {
+            username = "root".to_owned();
+        }
         self.ssh_editor_seq = self.ssh_editor_seq.wrapping_add(1).max(1);
         let mut editor = SshEditorState::new(self.ssh_editor_seq, destination);
+        editor.username_suggestions = profiles.usernames();
+        for host in self.ssh_hosts.merged() {
+            let (address, _) = crate::display::split_destination_port(&host);
+            let (username, _) = crate::display::split_destination_user(&address);
+            push_username_suggestion(&mut editor.username_suggestions, &username);
+        }
         if let Some(profile) = profile.as_ref() {
             editor.auth = profile.auth;
             editor.icon = profile.icon.clone();
             editor.private_keys = profile.private_keys.clone();
         }
         let label = profile.and_then(|profile| profile.label).unwrap_or_default();
+        self.ssh_username_input.update(cx, |input, cx| input.set_value(username, window, cx));
         self.ssh_destination_input.update(cx, |input, cx| input.set_value(address, window, cx));
         self.ssh_port_input.update(cx, |input, cx| input.set_value(port, window, cx));
         self.ssh_label_input.update(cx, |input, cx| input.set_value(label, window, cx));
@@ -306,6 +332,8 @@ impl SettingsPane {
         // 留在框里，下一台打开时列表看着像被莫名筛过。
         self.ssh_icon_picker_open = false;
         self.ssh_icon_trigger_bounds = None;
+        self.ssh_username_picker_open = false;
+        self.ssh_username_trigger_bounds = None;
         self.ssh_icon_filter_input.update(cx, |input, cx| input.set_value("", window, cx));
         // 弹层只能有一个；字体目录若还开着会用它的页面级拦截层盖住
         // SSH 编辑器，因此先把它收起。
@@ -313,12 +341,14 @@ impl SettingsPane {
         self.ssh_editor = Some(editor);
         self.ssh_status = None;
         self.set_ssh_editor_masking(window, cx);
-        self.ssh_destination_input.update(cx, |input, cx| input.focus(window, cx));
+        self.ssh_username_input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
     pub(super) fn close_ssh_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ssh_editor = None;
+        self.ssh_username_picker_open = false;
+        self.ssh_username_trigger_bounds = None;
         self.ssh_password_input.update(cx, |input, cx| input.set_value("", window, cx));
         window.focus(&self.focus_handle, cx);
         cx.notify();
@@ -333,7 +363,13 @@ impl SettingsPane {
             // en-dash 区间写法与旧壳一字不差。
             return Err(SshValidationError::InvalidPort);
         }
+        let username = self.ssh_username_input.read(cx).value().trim().to_string();
         let address = self.ssh_destination_input.read(cx).value().trim().to_string();
+        let (_, host) = crate::display::split_destination_user(&address);
+        if host.is_empty() {
+            return Err(SshValidationError::MissingDestination);
+        }
+        let address = crate::display::join_destination_user(&username, &address);
         let destination = crate::display::join_destination_port(&address, &port);
         if destination.is_empty() {
             return Err(SshValidationError::MissingDestination);
@@ -482,6 +518,9 @@ impl SettingsPane {
             ),
             value => value.to_owned(),
         };
+        let (address, _) = crate::display::split_destination_port(&destination);
+        let (username, _) = crate::display::split_destination_user(&address);
+        profiles.remember_username(&username);
         profiles.upsert(crate::ssh_profiles::SshProfileAuth {
             destination: destination.clone(),
             auth: editor.auth,
@@ -561,6 +600,8 @@ impl SettingsPane {
         let icon = crate::display::ui::os_icons::resolve(editor.icon.as_deref());
         let avatar = self.ssh_avatar(icon, cx);
         let icon_popup = self.ssh_icon_popup(cx);
+        let username_control = self.ssh_username_control(cx);
+        let username_popup = self.ssh_username_popup(cx);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let danger = theme.danger;
@@ -585,12 +626,15 @@ impl SettingsPane {
                 })
             });
         let destination_preview: SharedString = {
+            let username = self.ssh_username_input.read(cx).value();
             let address = self.ssh_destination_input.read(cx).value();
             let port = self.ssh_port_input.read(cx).value();
             if address.trim().is_empty() {
                 language.pick("未填地址", "No address entered").into()
             } else {
-                crate::display::join_destination_port(address.trim(), port.trim()).into()
+                let address =
+                    crate::display::join_destination_user(username.trim(), address.trim());
+                crate::display::join_destination_port(&address, port.trim()).into()
             }
         };
         let select_auth = |mode: crate::ssh_profiles::SshAuthMode| {
@@ -725,6 +769,9 @@ impl SettingsPane {
                     // 意思是「不选了」，不是「关掉整个编辑器」。
                     if this.ssh_icon_picker_open {
                         this.toggle_ssh_icon_picker(window, cx);
+                    } else if this.ssh_username_picker_open {
+                        this.ssh_username_picker_open = false;
+                        cx.notify();
                     }
                 }))
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -733,6 +780,9 @@ impl SettingsPane {
                         // Esc 一层一层退：图标选择器开着就只收它。
                         if this.ssh_icon_picker_open {
                             this.toggle_ssh_icon_picker(window, cx);
+                        } else if this.ssh_username_picker_open {
+                            this.ssh_username_picker_open = false;
+                            cx.notify();
                         } else {
                             this.close_ssh_editor(window, cx);
                         }
@@ -859,7 +909,25 @@ impl SettingsPane {
                                                         )
                                                         .child(
                                                             div().flex_1().min_w_0().child(
-                                                                Input::new(&self.ssh_destination_input),
+                                                                h_flex()
+                                                                    .w_full()
+                                                                    .gap_2()
+                                                                    .items_center()
+                                                                    .child(username_control)
+                                                                    .child(
+                                                                        div()
+                                                                            .flex_shrink_0()
+                                                                            .text_sm()
+                                                                            .text_color(muted)
+                                                                            .child("@"),
+                                                                    )
+                                                                    .child(
+                                                                        div().flex_1().min_w_0().child(
+                                                                            Input::new(
+                                                                                &self.ssh_destination_input,
+                                                                            ),
+                                                                        ),
+                                                                    ),
                                                             ),
                                                         ),
                                                 )
@@ -895,7 +963,8 @@ impl SettingsPane {
                                                                 .text_color(muted)
                                                                 .child(language.pick("默认 22", "Default: 22")),
                                                         ),
-                                                ),
+                                                )
+                                                .children(username_popup),
                                         )
                                         .child(
                                             v_flex()
@@ -1117,6 +1186,151 @@ impl SettingsPane {
                         ),
                 )
                 .into_any_element(),
+        )
+    }
+
+    // ---- UI：可编辑用户名历史 ----
+
+    fn ssh_username_control(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let pane = cx.entity().downgrade();
+        let open = self.ssh_username_picker_open;
+        h_flex()
+            .relative()
+            .w(px(SSH_EDITOR_USERNAME_W))
+            .flex_shrink_0()
+            // 输入框/下拉按钮都属于弹层触发器；阻止鼠标冒泡到模态遮罩，
+            // 否则聚焦刚把候选打开，同一次点击又会被遮罩立即关闭。
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().flex_1().min_w_0().child(Input::new(&self.ssh_username_input)))
+            .child(
+                Button::new("ssh-username-history")
+                    .icon(if open { IconName::ChevronUp } else { IconName::ChevronDown })
+                    .ghost()
+                    .xsmall()
+                    .tooltip(crate::gpui_shell::config::ui_language(cx).pick(
+                        "最近使用的用户名",
+                        "Recently used usernames",
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_ssh_username_picker(window, cx);
+                    })),
+            )
+            .child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        let _ = pane.update(cx, |pane, cx| {
+                            if pane.ssh_username_trigger_bounds == Some(bounds) {
+                                return;
+                            }
+                            pane.ssh_username_trigger_bounds = Some(bounds);
+                            if pane.ssh_username_picker_open {
+                                cx.notify();
+                            }
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
+    fn toggle_ssh_username_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ssh_username_picker_open = !self.ssh_username_picker_open;
+        self.ssh_username_input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    fn select_ssh_username(
+        &mut self,
+        username: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ssh_username_input.update(cx, |input, cx| {
+            input.set_value(username, window, cx);
+            input.focus(window, cx);
+        });
+        self.ssh_username_picker_open = false;
+        cx.notify();
+    }
+
+    fn ssh_username_popup(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.ssh_username_picker_open {
+            return None;
+        }
+        let trigger = self.ssh_username_trigger_bounds?;
+        let language = crate::gpui_shell::config::ui_language(cx);
+        let theme = cx.theme();
+        let query = self.ssh_username_input.read(cx).value().trim().to_ascii_lowercase();
+        let current = self.ssh_username_input.read(cx).value().trim().to_owned();
+        let suggestions = self.ssh_editor.as_ref()?.username_suggestions.clone();
+        let rows: Vec<gpui::AnyElement> = suggestions
+            .into_iter()
+            .filter(|username| query.is_empty() || username.to_ascii_lowercase().contains(&query))
+            .take(8)
+            .enumerate()
+            .map(|(index, username)| {
+                let selected = username == current;
+                let picked = username.clone();
+                h_flex()
+                    .id(SharedString::from(format!("ssh-username-row-{index}")))
+                    .h(px(30.0))
+                    .w_full()
+                    .px_2()
+                    .items_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(theme.list_active))
+                    .hover(|row| row.bg(theme.list_hover))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(username))
+                    .when(selected, |row| row.child(Icon::new(IconName::CircleCheck).xsmall()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_ssh_username(picked.clone(), window, cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let row_count = rows.len();
+        let panel = v_flex()
+            .w(px(SSH_EDITOR_USERNAME_W + 28.0))
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(if rows.is_empty() {
+                div()
+                    .h(px(30.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(language.pick("没有匹配的历史用户名", "No matching usernames"))
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .h(px((row_count as f32 * 30.0).min(240.0)))
+                    .overflow_y_scrollbar()
+                    .children(rows)
+                    .into_any_element()
+            });
+        Some(
+            deferred(
+                anchored()
+                    .anchor(gpui::Anchor::TopLeft)
+                    .position(trigger.bottom_left())
+                    .offset(gpui::point(px(0.0), px(6.0)))
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(panel),
+            )
+            .with_priority(3)
+            .into_any_element(),
         )
     }
 

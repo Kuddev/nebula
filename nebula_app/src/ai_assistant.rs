@@ -14,10 +14,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use log::{info, warn};
+#[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoopProxy;
 use zeroize::Zeroizing;
 
 use crate::ai_providers::ProviderKind;
+#[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
 
 /// 配置文件名（位于 `nebula_data_dir()`）。独立于 `nebula_settings.txt`：
@@ -301,6 +303,7 @@ fix exists, reply {\"command\":\"\",\"explain\":\"<one-line reason>\",\"danger\"
 
 /// Fire one fix request on a background thread; the outcome (a fix, or None
 /// for "stay silent") lands back on the main loop as [`EventType::AiFixReady`].
+#[cfg(feature = "legacy-shell")]
 pub fn spawn_fix_request(proxy: EventLoopProxy<Event>, cfg: AssistantConfig, req: FixRequest) {
     let spawned = std::thread::Builder::new().name("nebula-ai-fix".into()).spawn(move || {
         let fix = request_fix(&cfg, &req);

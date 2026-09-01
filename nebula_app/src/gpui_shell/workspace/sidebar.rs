@@ -188,7 +188,7 @@ impl NebulaWorkspace {
             .map(crate::display::program_icon)
             .or_else(|| match &self.tabs[ix] {
                 WorkspaceTab::Document { .. } => Some("\u{eb1d}"),
-                WorkspaceTab::Code { view } => {
+                WorkspaceTab::Code { view, .. } => {
                     Some(crate::display::side_panel::file_type_icon(&view.read(cx).title))
                 },
                 WorkspaceTab::Image { view } => {
@@ -236,6 +236,10 @@ impl NebulaWorkspace {
         // 标题/标签走稳定的 UI 字体；程序图标是 Nerd Font 字位，固定走随
         // 安装包提供的 Maple。用户设置的终端字体不得改变 chrome 几何。
         let settings = cx.try_global::<crate::gpui_shell::config::Settings>();
+        let tab_close_visible = settings.map(|settings| settings.tab_close_visible).unwrap_or(true);
+        let tab_reveal = settings
+            .map(|settings| settings.tab_reveal)
+            .unwrap_or(nebula_settings::TabRevealName::Slide);
         let chrome_family = theme.mono_font_family.clone();
         let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         // 旧壳合同（display/mod.rs `ui_font_px`）：chrome 锚定**配置字号**
@@ -596,16 +600,20 @@ impl NebulaWorkspace {
                                 .items_center()
                                 .invisible()
                                 .group_hover(hover_group, |slot| slot.visible())
-                                .child(
-                                    Button::new(("close-tab", ix))
-                                        .icon(IconName::Close)
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.request_close_tab(ix, window, cx);
-                                        })),
-                                ),
+                                .when(tab_close_visible, |slot| {
+                                        slot.child(
+                                            Button::new(("close-tab", ix))
+                                                .icon(IconName::Close)
+                                                .ghost()
+                                                .xsmall()
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        this.request_close_tab(ix, window, cx);
+                                                    },
+                                                )),
+                                        )
+                                    }),
                         ),
                 )
                 // 右键只记锚点：菜单由 workspace 根上唯一一份宿主画。挂
@@ -634,9 +642,7 @@ impl NebulaWorkspace {
                     // 让位滑动：进位方向 ease-out 滑入（旧壳是双向弹簧；回位
                     // 这里先直落，违和再补逐帧插值）。设置「标签动画=立即」时
                     // 直接落位（旧壳 TabRevealMotion::Instant 的 Snap 语义）。
-                    if nebula_settings::RuntimeSettings::load().tab_reveal
-                        == nebula_settings::TabRevealName::Instant
-                    {
+                    if tab_reveal == nebula_settings::TabRevealName::Instant {
                         row.top(px(shift)).into_any_element()
                     } else {
                         row.with_animation(

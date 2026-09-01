@@ -35,6 +35,7 @@ use gpui::{
 use image::Frame;
 
 use crate::display::color::Rgb;
+use crate::gpui_shell::code_tab::CodeTabViewEvent;
 use crate::gpui_shell::doc_tabs::DocTabViewEvent;
 use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::settings_pane::{SettingsPane, SettingsPaneEvent};
@@ -205,7 +206,11 @@ fn custom_workspace_binding(combo: &str, action: &crate::config::Action) -> Opti
         Action::DecreaseFontSize => Some(KeyBinding::new(&combo, DecreaseFontSize, None)),
         Action::ResetFontSize => Some(KeyBinding::new(&combo, ResetFontSize, None)),
         Action::Copy => Some(KeyBinding::new(&combo, CopySelection, None)),
-        Action::Paste => Some(KeyBinding::new(&combo, PasteClipboard, None)),
+        Action::Paste => Some(KeyBinding::new(
+            &combo,
+            PasteClipboard,
+            Some(crate::gpui_shell::terminal::KEY_CONTEXT),
+        )),
         Action::ToggleFullscreen => Some(KeyBinding::new(&combo, ToggleFullscreen, None)),
         Action::OpenQuickJump => Some(KeyBinding::new(&combo, OpenQuickJump, None)),
         // `none` 禁用键：gpui 的 NoAction 绑定在最高优先级命中时吞掉按键，
@@ -266,8 +271,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl--", DecreaseFontSize, None),
         KeyBinding::new("ctrl-0", ResetFontSize, None),
         KeyBinding::new("ctrl-shift-c", CopySelection, None),
-        KeyBinding::new("ctrl-v", PasteClipboard, None),
-        KeyBinding::new("ctrl-shift-v", PasteClipboard, None),
+        // 终端粘贴只在终端焦点路径命中。Input 自己带 `Input -> Paste`；这里若
+        // 无上下文，会因注册更晚而抢走弹窗/设置页输入框的 Ctrl+V。
+        KeyBinding::new("ctrl-v", PasteClipboard, Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
+        KeyBinding::new(
+            "ctrl-shift-v",
+            PasteClipboard,
+            Some(crate::gpui_shell::terminal::KEY_CONTEXT),
+        ),
+        KeyBinding::new("ctrl-shift-v", gpui_component::input::Paste, Some("Input")),
         KeyBinding::new("alt-enter", ToggleFullscreen, None),
         KeyBinding::new("ctrl-shift-o", OpenQuickJump, None),
     ]);
@@ -313,6 +325,7 @@ enum WorkspaceTab {
     /// 源码查看 tab（tree-sitter 高亮 + 行级虚拟化，只读）。
     Code {
         view: Entity<crate::gpui_shell::code_tab::CodeTabView>,
+        _subscription: Subscription,
     },
 }
 
@@ -343,6 +356,11 @@ struct SplitDrag {
     tab: usize,
     path: Vec<bool>,
     direction: SplitDirection,
+    /// Lightweight visual preview. The pane flex tree keeps using its committed
+    /// ratio until mouse-up, so dragging never reflows terminal grids.
+    preview_ratio: f32,
+    close_target: Option<bool>,
+    last_notified: std::time::Instant,
 }
 
 /// Split 视口 / pane 矩形的帧记录（canvas prepaint 回写，`Rc<RefCell>`
@@ -435,6 +453,57 @@ fn to_split_rect(bounds: &Bounds<Pixels>) -> nebula_split::Rect {
         f32::from(bounds.size.width),
         f32::from(bounds.size.height),
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SplitDragVisual {
+    divider: nebula_split::Rect,
+    close_area: Option<nebula_split::Rect>,
+}
+
+/// Compute the cheap split-drag overlay without changing either pane's layout.
+/// `close_target` uses [`nebula_split::drag_close_target`] semantics: `false`
+/// is the first (left/top) child, `true` the second (right/bottom) child.
+fn split_drag_visual_geometry(
+    direction: SplitDirection,
+    viewport: nebula_split::Rect,
+    preview_ratio: f32,
+    close_target: Option<bool>,
+) -> SplitDragVisual {
+    let usable = match direction {
+        SplitDirection::LeftRight => (viewport.w - DIVIDER_GAP).max(0.0),
+        SplitDirection::TopBottom => (viewport.h - DIVIDER_GAP).max(0.0),
+    };
+    let split = usable * preview_ratio.clamp(0.0, 1.0);
+    let divider = match direction {
+        SplitDirection::LeftRight => {
+            nebula_split::Rect::new(viewport.x + split, viewport.y, DIVIDER_GAP, viewport.h)
+        },
+        SplitDirection::TopBottom => {
+            nebula_split::Rect::new(viewport.x, viewport.y + split, viewport.w, DIVIDER_GAP)
+        },
+    };
+    let close_area = close_target.map(|second| match (direction, second) {
+        (SplitDirection::LeftRight, false) => {
+            nebula_split::Rect::new(viewport.x, viewport.y, split, viewport.h)
+        },
+        (SplitDirection::LeftRight, true) => nebula_split::Rect::new(
+            divider.x + divider.w,
+            viewport.y,
+            (viewport.w - split - divider.w).max(0.0),
+            viewport.h,
+        ),
+        (SplitDirection::TopBottom, false) => {
+            nebula_split::Rect::new(viewport.x, viewport.y, viewport.w, split)
+        },
+        (SplitDirection::TopBottom, true) => nebula_split::Rect::new(
+            viewport.x,
+            divider.y + divider.h,
+            viewport.w,
+            (viewport.h - split - divider.h).max(0.0),
+        ),
+    });
+    SplitDragVisual { divider, close_area }
 }
 
 /// 侧栏分界线在终端卡 canvas 里绘制，但视觉上属于整个窗口 chrome。
@@ -1003,6 +1072,10 @@ pub struct NebulaWorkspace {
     side_panel: crate::display::side_panel::SidePanel,
     side_panel_polling: bool,
     side_panel_anim_armed: bool,
+    /// Files drawer search reuses the same real GPUI input as the Shell
+    /// selector, including caret, selection, clipboard and IME behavior.
+    file_tree_search_input: Entity<InputState>,
+    _file_tree_search_subscription: Subscription,
     /// 文件树列表的滚动位置。抽屉走 `uniform_list` 虚拟化，滑块（组件库
     /// `Scrollbar`）读的是同一个 handle——这是抽屉里**唯一**的滚动模型，
     /// 旧壳那套行粒度 `SidePanel::scroll` 在 GPUI 侧恒为 0。
@@ -1137,6 +1210,11 @@ impl NebulaWorkspace {
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索命令…"));
         let command_manager_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索已保存命令…"));
+        let file_tree_search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(
+                workspace_ui_language().pick("搜索文件和文件夹…", "Search files and folders..."),
+            )
+        });
         let git_commit_input = cx.new(|cx| InputState::new(window, cx).placeholder("提交信息…"));
         let command_palette_subscription = cx.subscribe_in(
             &command_palette_input,
@@ -1180,6 +1258,8 @@ impl NebulaWorkspace {
                 }
             },
         );
+        let file_tree_search_subscription =
+            cx.subscribe_in(&file_tree_search_input, window, Self::on_file_tree_search_event);
         let sidebar_logo_target_px =
             (TAB_LABEL_ICON_SIZE * window.scale_factor()).round().max(1.0) as u32;
         let process_dispatcher = shell_events.is_some();
@@ -1237,6 +1317,8 @@ impl NebulaWorkspace {
             side_panel: crate::display::side_panel::SidePanel::new(),
             side_panel_polling: false,
             side_panel_anim_armed: false,
+            file_tree_search_input,
+            _file_tree_search_subscription: file_tree_search_subscription,
             file_tree_scroll: gpui::UniformListScrollHandle::new(),
             file_tree_menu: None,
             remote_browser: remote_files::RemoteBrowser::default(),
@@ -1860,6 +1942,7 @@ impl NebulaWorkspace {
                         *broadcast = false;
                     }
                 }
+                self.remote_browser.forget(pane_id);
                 self.pane_bounds.borrow_mut().remove(&pane_id);
                 self.mark_structural_resize(tab_ix, cx);
                 if tab_ix == self.active {
@@ -2382,16 +2465,50 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(ix) = self.tabs.iter().position(
-            |tab| matches!(tab, WorkspaceTab::Code { view } if view.read(cx).path == path),
+            |tab| matches!(tab, WorkspaceTab::Code { view, .. } if view.read(cx).is_regular_path(&path)),
         ) {
-            if let Some(WorkspaceTab::Code { view }) = self.tabs.get(ix) {
+            if let Some(WorkspaceTab::Code { view, .. }) = self.tabs.get(ix) {
                 view.clone().update(cx, |view, cx| view.reload(window, cx));
             }
             self.activate_tab(ix, window, cx);
             return;
         }
         let view = cx.new(|cx| crate::gpui_shell::code_tab::CodeTabView::new(path, window, cx));
-        self.insert_new_tab(WorkspaceTab::Code { view });
+        let subscription = cx.subscribe(&view, Self::on_code_tab_event);
+        self.insert_new_tab(WorkspaceTab::Code { view, _subscription: subscription });
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
+    /// 冲突文件仍属于代码 Tab，但以三栏合并形态打开；同一仓库、同一路径复用
+    /// 已有 Tab，避免用户从冲突列表连续点击后堆出多个独立结果缓冲区。
+    fn open_git_merge_tab(
+        &mut self,
+        relative_path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(location) = self.side_panel.git_location() else { return };
+        if let Some(ix) = self.tabs.iter().position(|tab| {
+            matches!(tab, WorkspaceTab::Code { view, .. }
+                if view.read(cx).matches_git_merge(&location, &relative_path))
+        }) {
+            if let Some(WorkspaceTab::Code { view, .. }) = self.tabs.get(ix) {
+                view.clone().update(cx, |view, cx| view.reload_git_merge(window, cx));
+            }
+            self.activate_tab(ix, window, cx);
+            return;
+        }
+        let view = cx.new(|cx| {
+            crate::gpui_shell::code_tab::CodeTabView::new_git_merge(
+                location,
+                relative_path,
+                window,
+                cx,
+            )
+        });
+        let subscription = cx.subscribe(&view, Self::on_code_tab_event);
+        self.insert_new_tab(WorkspaceTab::Code { view, _subscription: subscription });
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -2534,6 +2651,20 @@ impl NebulaWorkspace {
         }
     }
 
+    fn on_code_tab_event(
+        &mut self,
+        _: Entity<crate::gpui_shell::code_tab::CodeTabView>,
+        event: &CodeTabViewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            CodeTabViewEvent::GitConflictResolved => {
+                self.side_panel.request_refresh();
+                cx.notify();
+            },
+        }
+    }
+
     /// 热应用设置页变更，并把 SSH 连接请求转为新标签。
     fn on_settings_event(
         &mut self,
@@ -2564,6 +2695,7 @@ impl NebulaWorkspace {
             for pane in panes {
                 self.runtime_hub.record_pane_closed(self.runtime_window_id, pane.id);
                 pane.view.read(cx).shutdown();
+                self.remote_browser.forget(pane.id);
                 bounds.remove(&pane.id);
             }
         }
@@ -3318,7 +3450,7 @@ impl NebulaWorkspace {
             WorkspaceTab::Settings { .. } => "设置".into(),
             WorkspaceTab::Image { view } => view.read(cx).title.clone().into(),
             WorkspaceTab::Document { view, .. } => view.read(cx).title.clone().into(),
-            WorkspaceTab::Code { view } => view.read(cx).title.clone().into(),
+            WorkspaceTab::Code { view, .. } => view.read(cx).title.clone().into(),
             tab @ WorkspaceTab::Terminal { .. } => {
                 // 标签 = 聚焦 pane 的 cwd 末级目录名（旧壳 chrome_tab_label
                 // 规则）。分屏计数**不拼在这里**：这份字符串还要喂给 runtime
@@ -4174,9 +4306,12 @@ impl NebulaWorkspace {
                     )
                     .into_any_element()
             },
-            SplitTree::Split { direction, ratio, preview_ratio, dragging, first, second } => {
+            SplitTree::Split { direction, ratio, dragging, first, second, .. } => {
                 let direction = *direction;
-                let show_ratio = (*preview_ratio).unwrap_or(*ratio);
+                // Interactive drag uses a lightweight overlay. Keeping the
+                // committed ratio here avoids rebuilding/reflowing both terminal
+                // grids for every high-frequency pointer event.
+                let show_ratio = *ratio;
                 let dragging = *dragging;
                 let key = (tab_ix, path.clone());
                 let store = self.split_bounds.clone();
@@ -4217,6 +4352,7 @@ impl NebulaWorkspace {
                 path.pop();
 
                 let drag_path = path.clone();
+                let drag_start_ratio = *ratio;
                 let divider_id =
                     SharedString::from(format!("split-divider-{tab_ix}-{drag_path:?}"));
                 let bar_color =
@@ -4242,8 +4378,22 @@ impl NebulaWorkspace {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            this.split_drag =
-                                Some(SplitDrag { tab: tab_ix, path: drag_path.clone(), direction });
+                            this.split_drag = Some(SplitDrag {
+                                tab: tab_ix,
+                                path: drag_path.clone(),
+                                direction,
+                                preview_ratio: drag_start_ratio,
+                                close_target: None,
+                                last_notified: std::time::Instant::now(),
+                            });
+                            if let Some(WorkspaceTab::Terminal { tree, .. }) =
+                                this.tabs.get_mut(tab_ix)
+                                && let Some(SplitTree::Split { preview_ratio, dragging, .. }) =
+                                    tree.node_mut(&drag_path)
+                            {
+                                *preview_ratio = None;
+                                *dragging = true;
+                            }
                             cx.notify();
                         }),
                     );
@@ -4283,16 +4433,18 @@ impl NebulaWorkspace {
         }
     }
 
-    /// 分隔条拖拽的指针移动：指针位置 → 原始比例 → 预览曲线（常规带跟手、
-    /// 关闭区钉边示意"松手即关"）。PTY 尺寸不追预览——`set_layout` 的
-    /// resize 合并合同把拖拽期间的矩形变化收敛到松手后一次提交。
+    /// 分隔条拖拽的指针移动：指针位置 → 原始比例 → 轻量预览线（常规带跟手、
+    /// 关闭区钉边示意"松手即关"）。pane flex、终端网格与 PTY 都不追预览，
+    /// 松手后才做一次结构提交。高频鼠标事件最多按 120Hz 通知绘制。
     fn update_split_drag(
         &mut self,
         event: &gpui::MouseMoveEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = &self.split_drag else { return };
+        if self.split_drag.is_none() {
+            return;
+        }
         if event.pressed_button != Some(MouseButton::Left) {
             let position = event.position;
             self.finish_split_drag(position, window, cx);
@@ -4302,14 +4454,60 @@ impl NebulaWorkspace {
             Some(raw) => raw,
             None => return,
         };
-        let (tab, path) = (drag.tab, drag.path.clone());
-        if let Some(WorkspaceTab::Terminal { tree, .. }) = self.tabs.get_mut(tab) {
-            if let Some(SplitTree::Split { preview_ratio, dragging, .. }) = tree.node_mut(&path) {
-                *preview_ratio = Some(nebula_split::preview_ratio(raw));
-                *dragging = true;
-                cx.notify();
-            }
+        let preview_ratio = nebula_split::preview_ratio(raw);
+        let close_target = nebula_split::drag_close_target(raw);
+        let Some(drag) = self.split_drag.as_mut() else { return };
+        let changed = (drag.preview_ratio - preview_ratio).abs() > f32::EPSILON
+            || drag.close_target != close_target;
+        if !changed {
+            return;
         }
+        let close_changed = drag.close_target != close_target;
+        drag.preview_ratio = preview_ratio;
+        drag.close_target = close_target;
+        if close_changed || drag.last_notified.elapsed() >= Duration::from_millis(8) {
+            drag.last_notified = std::time::Instant::now();
+            cx.notify();
+        }
+    }
+
+    /// Visual-only divider/close preview. It lives above the stable pane tree,
+    /// so moving it does not invoke `TerminalElement::prepaint` with new bounds.
+    fn split_drag_visual(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let drag = self.split_drag.as_ref()?;
+        let viewport = self.split_bounds.borrow().get(&(drag.tab, drag.path.clone())).copied()?;
+        let visual = split_drag_visual_geometry(
+            drag.direction,
+            to_split_rect(&viewport),
+            drag.preview_ratio,
+            drag.close_target,
+        );
+        let line = visual.divider;
+        let close = visual.close_area.map(|area| {
+            div()
+                .absolute()
+                .left(px(area.x))
+                .top(px(area.y))
+                .w(px(area.w))
+                .h(px(area.h))
+                .bg(cx.theme().warning.opacity(0.12))
+        });
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .children(close)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(line.x))
+                        .top(px(line.y))
+                        .w(px(line.w))
+                        .h(px(line.h))
+                        .bg(cx.theme().primary.opacity(0.88)),
+                )
+                .into_any_element(),
+        )
     }
 
     /// 当前拖拽的指针位置 → 未钳制原始比例（依赖上一帧节点视口记录）。
@@ -4368,7 +4566,15 @@ impl NebulaWorkspace {
             }
         }
         if let Some(pane_id) = close_target {
-            // remove_leaf 会顺带塌缩本 Split 节点；预览状态随节点一起消亡。
+            // 繁忙 pane 会先弹确认框而不会立刻 remove_leaf；必须先清掉拖拽态，
+            // 否则确认框背后会残留一条永久高亮的分隔线。
+            if let Some(WorkspaceTab::Terminal { tree, .. }) = self.tabs.get_mut(drag.tab)
+                && let Some(SplitTree::Split { preview_ratio, dragging, .. }) =
+                    tree.node_mut(&drag.path)
+            {
+                *preview_ratio = None;
+                *dragging = false;
+            }
             self.request_close_pane(drag.tab, pane_id, window, cx);
             cx.notify();
             return;
@@ -4443,7 +4649,7 @@ impl Render for NebulaWorkspace {
             Some(WorkspaceTab::Document { view, .. }) => {
                 Some(gpui::IntoElement::into_any_element(view.clone()))
             },
-            Some(WorkspaceTab::Code { view }) => {
+            Some(WorkspaceTab::Code { view, .. }) => {
                 Some(gpui::IntoElement::into_any_element(view.clone()))
             },
             None => None,
@@ -4629,16 +4835,7 @@ impl Render for NebulaWorkspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &PasteClipboard, window, cx| {
-                let rename_has_focus = this.tab_rename.as_ref().is_some_and(|rename| {
-                    rename.input.read(cx).focus_handle(cx).is_focused(window)
-                });
-                if rename_has_focus {
-                    // 工作区的无上下文绑定注册得更晚，会先于 Input 的 Paste 命中；
-                    // 继续分发同一次按键，才能让重命名框接管，而不是写进背后的 PTY。
-                    cx.propagate();
-                } else {
-                    this.paste_focused_terminal(window, cx);
-                }
+                this.paste_focused_terminal(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleFullscreen, window, _cx| {
                 window.toggle_fullscreen();
@@ -4861,6 +5058,7 @@ impl Render for NebulaWorkspace {
             })
             .children(self.tabs_scrollbar_drag_overlay(cx))
             .children(self.pane_drag_overlay(cx))
+            .children(self.split_drag_visual(cx))
             .when(self.sidebar_resizing, |root| {
                 // 侧栏拖宽罩层（同 split_drag 的指针捕获模式）：移动实时改宽
                 // （夹在共享层的 170..420 之间），松手写盘 `sidebar_w`。

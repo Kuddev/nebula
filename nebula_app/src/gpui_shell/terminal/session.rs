@@ -91,9 +91,9 @@ pub(super) fn local_options(
     if let Err(error) = tty::refresh_environment(&mut options) {
         log::warn!("Could not refresh the Windows environment for a new pane: {error}");
     }
-    // WSL tab 的 cwd 上报（OSC 7）：来宾登录 shell 默认不发，目录树与 Git 视图
-    // 因此永远停在"等待终端上报工作目录"。只对 `wsl.exe` 启动生效，见
-    // [`crate::shell_detect::wsl_cwd_report_env`]。
+    // WSL tab 的命令边界（OSC 133;D/A）与 cwd（OSC 7）：来宾登录 shell 默认
+    // 不发，Agent 生命周期、目录树与 Git 视图都会失去来宾侧事实。只对
+    // `wsl.exe` 启动生效，见 [`crate::shell_detect::wsl_cwd_report_env`]。
     if let Some(launch) = &options.shell {
         let program = launch.program().to_owned();
         let args = launch.args().to_vec();

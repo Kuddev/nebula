@@ -4,51 +4,6 @@
 
 use super::*;
 
-/// Budget-bounded deep walk building the flat filter index. `budget` counts
-/// every entry VISITED (not kept), so a huge build tree can't stall the UI;
-/// bulk directories (`target/`, `node_modules/`, …) are skipped outright, and
-/// symlinks/junctions are never followed (cycle safety).
-pub(crate) fn build_search_index(
-    dir: &Path,
-    depth: usize,
-    index: &mut Vec<FileRow>,
-    budget: &mut usize,
-) {
-    if *budget == 0 || depth > 8 || index.len() >= SEARCH_INDEX_CAP {
-        return;
-    }
-    let Ok(read) = std::fs::read_dir(dir) else { return };
-    for entry in read.flatten() {
-        if *budget == 0 || index.len() >= SEARCH_INDEX_CAP {
-            return;
-        }
-        *budget -= 1;
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_symlink() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let is_dir = ft.is_dir();
-        if is_dir && (name.starts_with('.') || SEARCH_SKIP_DIRS.contains(&name.as_str())) {
-            continue;
-        }
-        let path = entry.path();
-        index.push(FileRow {
-            path: path.clone(),
-            guest_path: None,
-            name,
-            depth: 0,
-            is_dir,
-            expanded: false,
-            is_parent: false,
-            ignored: false,
-        });
-        if is_dir {
-            build_search_index(&path, depth + 1, index, budget);
-        }
-    }
-}
-
 pub(crate) fn wsl_root_key(located: &crate::shell_detect::WslCwd) -> PathBuf {
     PathBuf::from(normalize_wsl_guest_path(&located.guest))
 }

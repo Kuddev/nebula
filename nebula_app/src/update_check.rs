@@ -11,9 +11,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoopProxy;
 
+#[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
+#[cfg(feature = "legacy-shell")]
 use crate::message_bar::{Message, MessageType};
 
 const RELEASES_API: &str = "https://api.github.com/repos/Kuddev/nebula/releases/latest";
@@ -113,6 +116,7 @@ struct GitHubReleaseAsset {
 /// Kick off the once-per-process background check. The result (if any)
 /// arrives as a regular [`EventType::Message`] banner, which the message bar
 /// already knows how to display, deduplicate and dismiss.
+#[cfg(feature = "legacy-shell")]
 pub fn spawn_once(proxy: EventLoopProxy<Event>) {
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::SeqCst) {

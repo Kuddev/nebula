@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_nebula_global_optspecs
-	string join \n print-events ref-test embed= gpui legacy-shell config-file= q v daemon working-directory= hold e/command= T/title= class= o/option= h/help V/version
+	string join \n print-events ref-test embed= gpui config-file= q v daemon working-directory= hold e/command= T/title= class= o/option= h/help V/version
 end
 
 function __fish_nebula_needs_command
@@ -34,7 +34,6 @@ complete -c nebula -n "__fish_nebula_needs_command" -s o -l option -d 'Override 
 complete -c nebula -n "__fish_nebula_needs_command" -l print-events -d 'Print all events to STDOUT'
 complete -c nebula -n "__fish_nebula_needs_command" -l ref-test -d 'Generates ref test'
 complete -c nebula -n "__fish_nebula_needs_command" -l gpui -d 'Launch the GPUI UI shell as the main window'
-complete -c nebula -n "__fish_nebula_needs_command" -l legacy-shell -d 'Launch the legacy winit shell instead of GPUI'
 complete -c nebula -n "__fish_nebula_needs_command" -s q -d 'Reduces the level of verbosity (the min level is -qq)'
 complete -c nebula -n "__fish_nebula_needs_command" -s v -d 'Increases the level of verbosity (the max level is -vvv)'
 complete -c nebula -n "__fish_nebula_needs_command" -l daemon -d 'Do not spawn an initial window'
@@ -440,13 +439,14 @@ complete -c nebula -n "__fish_nebula_using_subcommand pane; and __fish_seen_subc
 complete -c nebula -n "__fish_nebula_using_subcommand pane; and __fish_seen_subcommand_from help" -f -a "zoom" -d 'Explicitly enable or disable focused-pane zoom for the pane\'s tab'
 complete -c nebula -n "__fish_nebula_using_subcommand pane; and __fish_seen_subcommand_from help" -f -a "resize" -d 'Set this pane\'s share of its direct parent split'
 complete -c nebula -n "__fish_nebula_using_subcommand pane; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send paste read wait help" -s h -l help -d 'Print help'
-complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send paste read wait help" -f -a "list" -d 'List the panes running an AI CLI, with session identity and generation'
-complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send paste read wait help" -f -a "send" -d 'Hand one task to an agent and submit it'
-complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send paste read wait help" -f -a "paste" -d 'Paste bounded UTF-8 text into an agent as one bracketed block'
-complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send paste read wait help" -f -a "read" -d 'Read the tail of what an agent printed'
-complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send paste read wait help" -f -a "wait" -d 'Block until an agent\'s turn ends'
-complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send paste read wait help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send delegate paste read wait help" -s h -l help -d 'Print help'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send delegate paste read wait help" -f -a "list" -d 'List the panes running an AI CLI, with session identity and generation'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send delegate paste read wait help" -f -a "send" -d 'Hand one task to an agent and submit it'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send delegate paste read wait help" -f -a "delegate" -d 'Delegate one task and route the Agent\'s final answer back to this Agent pane'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send delegate paste read wait help" -f -a "paste" -d 'Paste bounded UTF-8 text into an agent as one bracketed block'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send delegate paste read wait help" -f -a "read" -d 'Read the tail of what an agent printed'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send delegate paste read wait help" -f -a "wait" -d 'Block until an agent\'s turn ends'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and not __fish_seen_subcommand_from list send delegate paste read wait help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from list" -l window -d 'Restrict the listing to one window' -r
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from list" -l timeout-ms -r
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from list" -l pretty -d 'Pretty-print the JSON response. Output is JSON either way'
@@ -458,6 +458,10 @@ complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_sub
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from send" -l wait -d 'After submitting, block until the turn ends. The baseline comes from the submission response, so an idle agent cannot satisfy the wait immediately. Conflicts with `--no-submit`, which never starts a turn'
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from send" -l pretty -d 'Pretty-print the JSON response. Output is JSON either way'
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from send" -s h -l help -d 'Print help'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from delegate" -l generation -d 'Refuse the delegation unless the target is still this generation' -r
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from delegate" -l timeout-ms -r
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from delegate" -l pretty -d 'Pretty-print the JSON response. Output is JSON either way'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from delegate" -s h -l help -d 'Print help'
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from paste" -l from-file -d 'Read the paste payload from a UTF-8 file' -r -F
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from paste" -l wait-timeout-ms -d 'Ceiling for `--wait`' -r
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from paste" -l generation -d 'Refuse the paste unless the agent is still this generation' -r
@@ -486,6 +490,7 @@ complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_sub
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from wait" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from help" -f -a "list" -d 'List the panes running an AI CLI, with session identity and generation'
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from help" -f -a "send" -d 'Hand one task to an agent and submit it'
+complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from help" -f -a "delegate" -d 'Delegate one task and route the Agent\'s final answer back to this Agent pane'
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from help" -f -a "paste" -d 'Paste bounded UTF-8 text into an agent as one bracketed block'
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from help" -f -a "read" -d 'Read the tail of what an agent printed'
 complete -c nebula -n "__fish_nebula_using_subcommand agent; and __fish_seen_subcommand_from help" -f -a "wait" -d 'Block until an agent\'s turn ends'
@@ -573,6 +578,7 @@ complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subc
 complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from pane" -f -a "resize" -d 'Set this pane\'s share of its direct parent split'
 complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from agent" -f -a "list" -d 'List the panes running an AI CLI, with session identity and generation'
 complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from agent" -f -a "send" -d 'Hand one task to an agent and submit it'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from agent" -f -a "delegate" -d 'Delegate one task and route the Agent\'s final answer back to this Agent pane'
 complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from agent" -f -a "paste" -d 'Paste bounded UTF-8 text into an agent as one bracketed block'
 complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from agent" -f -a "read" -d 'Read the tail of what an agent printed'
 complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from agent" -f -a "wait" -d 'Block until an agent\'s turn ends'

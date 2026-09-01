@@ -24,12 +24,19 @@ use russh::keys::ssh_key;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[cfg(feature = "legacy-shell")]
 use crate::event::EventProxy;
 use crate::proxy_test::{ProxyTestFailure, ProxyTestOutcome, ProxyTestResult, ProxyTestRoute};
 
 type SessionError = Box<dyn std::error::Error + Send + Sync>;
 type ClientSession = client::Handle<ClientHandler>;
 type SharedSession = Arc<tokio::sync::Mutex<ClientSession>>;
+
+struct AcquiredSession {
+    key: String,
+    session: SharedSession,
+    reused: bool,
+}
 
 /// 直连 SSH 会话的宿主回调抽象：终端事件泵（[`EventListener`]）+ 连接
 /// 阶段上报。旧壳 `EventProxy`（winit 事件循环）与 GPUI 会话代理都实现
@@ -46,6 +53,7 @@ pub trait SshEventHost:
     }
 }
 
+#[cfg(feature = "legacy-shell")]
 impl SshEventHost for EventProxy {
     fn ssh_stage(&self, stage: SshStage) {
         // [`EventProxy`] 自带 `tab_id`，后台 runtime 不需要知道 pane id
@@ -53,6 +61,12 @@ impl SshEventHost for EventProxy {
         self.send_event(crate::event::EventType::SshConnect(stage));
     }
 }
+
+#[derive(Clone)]
+struct NoopSshEventHost;
+
+impl nebula_terminal::event::EventListener for NoopSshEventHost {}
+impl SshEventHost for NoopSshEventHost {}
 
 /// 直连 SSH 会话的连接阶段。
 ///
@@ -94,6 +108,14 @@ enum AuthMethod {
     PromptPassword,
 }
 
+#[derive(Debug, Default)]
+struct KeyboardInteractiveAttempt {
+    success: bool,
+    prompted: bool,
+    prompt_required: bool,
+    used_password: bool,
+}
+
 fn authentication_plan(
     mode: crate::ssh_profiles::SshAuthMode,
     explicit_keys: &[PathBuf],
@@ -131,7 +153,14 @@ fn authentication_plan(
             methods
         },
         SshAuthMode::Password => {
-            vec![AuthMethod::StoredPassword, AuthMethod::PromptPassword]
+            // 一些 sshd/PAM 只公布 keyboard-interactive，即使提示本质上仍是
+            // 登录密码。已输入的密码必须先复用到这个单提示流程，不能直接再
+            // 弹一次系统凭据窗口。
+            vec![
+                AuthMethod::StoredPassword,
+                AuthMethod::KeyboardInteractive,
+                AuthMethod::PromptPassword,
+            ]
         },
         SshAuthMode::PublicKey => key_methods(),
         SshAuthMode::KeyboardInteractive => vec![AuthMethod::KeyboardInteractive],
@@ -470,32 +499,37 @@ async fn run_session_async<H: SshEventHost>(
     receiver: Receiver<Msg>,
     ready: Arc<AtomicBool>,
 ) -> Result<(), SessionError> {
-    let session = authenticated_session(&destination, &profile, Some(&event_proxy)).await?;
+    let mut acquired =
+        authenticated_session_at(&destination, &profile, Some(&event_proxy), 0).await?;
     report_stage(Some(&event_proxy), SshStage::OpenShell);
-    let mut channel = {
-        let session = session.lock().await;
-        session.channel_open_session().await?
+    let shell = open_shell_channel(&acquired.session, initial_size).await;
+    let (mut channel, hook_token) = match shell {
+        Ok(shell) => shell,
+        Err(first_error) if acquired.reused => {
+            // `Handle::is_closed` 只反映已完成的关闭；TCP reset 与 channel-open
+            // 失败之间存在窗口。复用对象打不开首个 channel 时精确淘汰并只重试
+            // 一次，新连接失败则把真实错误交给连接卡片。
+            evict_pooled_session(&acquired.key, &acquired.session).await;
+            info!("复用 SSH transport 打开 channel 失败，重建连接: {first_error}");
+            acquired =
+                authenticated_session_at(&destination, &profile, Some(&event_proxy), 0).await?;
+            report_stage(Some(&event_proxy), SshStage::OpenShell);
+            match open_shell_channel(&acquired.session, initial_size).await {
+                Ok(shell) => shell,
+                Err(retry_error) => {
+                    evict_pooled_session(&acquired.key, &acquired.session).await;
+                    return Err(format!(
+                        "SSH channel 打开失败（复用连接错误: {first_error}；重建后错误: {retry_error}）"
+                    )
+                    .into());
+                },
+            }
+        },
+        Err(error) => {
+            evict_pooled_session(&acquired.key, &acquired.session).await;
+            return Err(error);
+        },
     };
-    channel
-        .request_pty(
-            true,
-            "xterm-256color",
-            u32::from(initial_size.num_cols),
-            u32::from(initial_size.num_lines),
-            u32::from(initial_size.cell_width) * u32::from(initial_size.num_cols),
-            u32::from(initial_size.cell_height) * u32::from(initial_size.num_lines),
-            &[],
-        )
-        .await?;
-    let hook_token = remote_hook_token()?;
-    channel.set_env(false, "NEBULA_REMOTE_HOOK_TOKEN", hook_token.clone()).await?;
-    // 三层护栏的第二层（自查层）：远端 pane 明确自我声明。愿意自查的被调方
-    // ——Recipe、skill、包装脚本——可以据此拒绝把本地内容往这条通道里送。这只是
-    // 护栏，不是强制：环境变量能被清掉。强制层在
-    // `TerminalView::ensure_local_context_allowed`，判据是 pane 自己的身份。
-    // `set_env` 取决于远端 sshd 的 AcceptEnv，失败不影响会话本身。
-    let _ = channel.set_env(false, "NEBULA_PANE_REMOTE", "1").await;
-    channel.request_shell(true).await?;
     // Shell 已就绪：连接卡片到此让位给真实终端，持续重绘随之停止。此后再
     // 出错就是会话中途断开，不该复活卡片。
     ready.store(true, Ordering::Relaxed);
@@ -513,43 +547,87 @@ async fn run_session_async<H: SshEventHost>(
     let mut stream = StreamProcessor::default();
     stream.resize(initial_size);
     stream.set_remote_hook_token(hook_token);
-    loop {
-        let sync_deadline = stream.next_sync_timeout();
-        tokio::select! {
-            message = input_rx.recv() => match message {
-                Some(Msg::Input(bytes)) => channel.data(bytes.as_ref()).await?,
-                Some(Msg::Resize(size)) => {
-                    stream.resize(size);
-                    channel.window_change(
-                        u32::from(size.num_cols),
-                        u32::from(size.num_lines),
-                        u32::from(size.cell_width) * u32::from(size.num_cols),
-                        u32::from(size.cell_height) * u32::from(size.num_lines),
-                    ).await?;
+    let result: Result<(), SessionError> = async {
+        loop {
+            let sync_deadline = stream.next_sync_timeout();
+            tokio::select! {
+                message = input_rx.recv() => match message {
+                    Some(Msg::Input(bytes)) => channel.data(bytes.as_ref()).await?,
+                    Some(Msg::Resize(size)) => {
+                        stream.resize(size);
+                        channel.window_change(
+                            u32::from(size.num_cols),
+                            u32::from(size.num_lines),
+                            u32::from(size.cell_width) * u32::from(size.num_cols),
+                            u32::from(size.cell_height) * u32::from(size.num_lines),
+                        ).await?;
+                    },
+                    // 只改本地几何：远端保持旧尺寸，等去抖后的 `Resize` 才发
+                    // `window_change`。交互式拖拽每帧都会来一条。
+                    Some(Msg::ResizeGrid(size)) => stream.resize(size),
+                    Some(Msg::Shutdown) | None => {
+                        let _ = channel.eof().await;
+                        break;
+                    },
                 },
-                // 只改本地几何：远端保持旧尺寸，等去抖后的 `Resize` 才发
-                // `window_change`。交互式拖拽每帧都会来一条。
-                Some(Msg::ResizeGrid(size)) => stream.resize(size),
-                Some(Msg::Shutdown) | None => {
-                    let _ = channel.eof().await;
-                    break;
+                message = channel.wait() => match message {
+                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        stream.feed(&mut *terminal.lock(), &event_proxy, data.as_ref());
+                        event_proxy.send_event(TerminalEvent::Wakeup);
+                    },
+                    Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | None => break,
+                    _ => {},
                 },
-            },
-            message = channel.wait() => match message {
-                Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                    stream.feed(&mut *terminal.lock(), &event_proxy, data.as_ref());
+                _ = wait_for_sync(sync_deadline), if sync_deadline.is_some() => {
+                    stream.stop_sync(&mut *terminal.lock());
                     event_proxy.send_event(TerminalEvent::Wakeup);
                 },
-                Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | None => break,
-                _ => {},
-            },
-            _ = wait_for_sync(sync_deadline), if sync_deadline.is_some() => {
-                stream.stop_sync(&mut *terminal.lock());
-                event_proxy.send_event(TerminalEvent::Wakeup);
-            },
+            }
         }
+        Ok(())
     }
-    Ok(())
+    .await;
+    let transport_closed = acquired.session.lock().await.is_closed();
+    if result.is_err() || transport_closed {
+        evict_pooled_session(&acquired.key, &acquired.session).await;
+    }
+    result
+}
+
+async fn open_shell_channel(
+    session: &SharedSession,
+    initial_size: WindowSize,
+) -> Result<(russh::Channel<client::Msg>, String), SessionError> {
+    let channel = {
+        let session = session.lock().await;
+        session.channel_open_session().await?
+    };
+    channel
+        .request_pty(
+            true,
+            "xterm-256color",
+            u32::from(initial_size.num_cols),
+            u32::from(initial_size.num_lines),
+            u32::from(initial_size.cell_width) * u32::from(initial_size.num_cols),
+            u32::from(initial_size.cell_height) * u32::from(initial_size.num_lines),
+            &[],
+        )
+        .await?;
+    let hook_token = remote_hook_token()?;
+    channel.set_env(false, "NEBULA_REMOTE_HOOK_TOKEN", hook_token.clone()).await?;
+    // 远端 pane 的自声明是安全护栏而非连接前提；AcceptEnv 未放行时忽略。
+    let _ = channel.set_env(false, "NEBULA_PANE_REMOTE", "1").await;
+    channel.request_shell(true).await?;
+    Ok((channel, hook_token))
+}
+
+async fn evict_pooled_session(key: &str, session: &SharedSession) -> bool {
+    let mut pool = connection_pool().lock().await;
+    let matches = pool.get(key).is_some_and(|pooled| Arc::ptr_eq(pooled, session));
+    if matches {
+        pool.remove(key);
+    }
+    matches
 }
 
 async fn wait_for_sync(deadline: Option<std::time::Instant>) {
@@ -563,7 +641,7 @@ async fn authenticated_session<H: SshEventHost>(
     profile: &crate::ssh_profiles::SshProfileAuth,
     progress: Option<&H>,
 ) -> Result<SharedSession, SessionError> {
-    authenticated_session_at(destination, profile, progress, 0).await
+    Ok(authenticated_session_at(destination, profile, progress, 0).await?.session)
 }
 
 /// [`authenticated_session`] 的带深度版本。`depth` 是当前跳板层级：目标连接
@@ -574,7 +652,7 @@ async fn authenticated_session_at<H: SshEventHost>(
     profile: &crate::ssh_profiles::SshProfileAuth,
     progress: Option<&H>,
     depth: u8,
-) -> Result<SharedSession, SessionError> {
+) -> Result<AcquiredSession, SessionError> {
     // 代理决策先于连接池查找：pool key 必须带上代理身份，否则改完代理设置
     // 还在复用旧代理建立的连接，表现为「改了设置没生效」。配置写错在这里
     // 直接报错——静默直连会把配置问题伪装成网络问题。
@@ -592,7 +670,7 @@ async fn authenticated_session_at<H: SshEventHost>(
             info!("复用已认证 SSH 连接: {key}");
             // 复用不上报 Connect/Authenticate：这条路径是瞬时的，交给
             // 350ms 门槛把卡片整个吃掉，用户看到的就是直接出 prompt。
-            return Ok(existing);
+            return Ok(AcquiredSession { key, session: existing, reused: true });
         }
         connection_pool().lock().await.remove(&key);
     }
@@ -613,11 +691,11 @@ async fn authenticated_session_at<H: SshEventHost>(
     let mut pool = connection_pool().lock().await;
     if let Some(existing) = pool.get(&key).cloned() {
         if !existing.lock().await.is_closed() {
-            return Ok(existing);
+            return Ok(AcquiredSession { key, session: existing, reused: true });
         }
     }
-    pool.insert(key, session.clone());
-    Ok(session)
+    pool.insert(key.clone(), session.clone());
+    Ok(AcquiredSession { key, session, reused: false })
 }
 
 /// SSH/SFTP 的唯一 Nebula 代理决策入口。主机编辑器不再维护第二套代理；
@@ -637,7 +715,7 @@ fn authenticated_session_boxed<'a, H: SshEventHost>(
     progress: Option<&'a H>,
     depth: u8,
 ) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<SharedSession, SessionError>> + Send + 'a>,
+    Box<dyn std::future::Future<Output = Result<AcquiredSession, SessionError>> + Send + 'a>,
 > {
     Box::pin(authenticated_session_at(destination, profile, progress, depth))
 }
@@ -692,11 +770,12 @@ async fn open_transport(
             let jump_session = authenticated_session_boxed(
                 &jump_destination,
                 &jump_profile,
-                None::<&EventProxy>,
+                None::<&NoopSshEventHost>,
                 depth + 1,
             )
             .await
-            .map_err(|err| format!("连接跳板 {spec} 失败: {err}"))?;
+            .map_err(|err| format!("连接跳板 {spec} 失败: {err}"))?
+            .session;
             let channel = {
                 let session = jump_session.lock().await;
                 session
@@ -753,6 +832,7 @@ async fn authenticate(
     let mut reusable_password = None;
     let mut loaded_stored_password = false;
     let mut stored_password_was_present = false;
+    let mut interactive_prompt_was_shown = false;
     let mut local_key_errors = Vec::new();
     for method in plan {
         match method {
@@ -778,14 +858,26 @@ async fn authenticate(
                 }
             },
             AuthMethod::KeyboardInteractive => {
-                if try_keyboard_interactive(session, destination, reusable_password.as_deref())
-                    .await?
-                {
+                let attempt = try_keyboard_interactive(
+                    session,
+                    destination,
+                    reusable_password.as_deref(),
+                    true,
+                )
+                .await?;
+                interactive_prompt_was_shown |= attempt.prompted;
+                if attempt.success {
                     clear_secret(&mut reusable_password);
                     return Ok(());
                 }
             },
             AuthMethod::PromptPassword => {
+                // 同一轮里已经用过保存密码，或 keyboard-interactive 已经向用户
+                // 问过一次，就直接报告失败。再次弹相同密码框只会制造重复认证
+                // 尝试，严重时还会触发服务端 MaxAuthTries/限流。
+                if stored_password_was_present || interactive_prompt_was_shown {
+                    continue;
+                }
                 if let Some((mut password, save)) =
                     prompt_secret(destination.original.clone(), None, true).await?
                 {
@@ -843,7 +935,7 @@ pub(crate) async fn exec_capture(
     .await
     .map_err(|err| format!("SSH 地址解析任务失败: {err}"))??;
 
-    let session = authenticated_session(&destination, &profile, None::<&EventProxy>).await?;
+    let session = authenticated_session(&destination, &profile, None::<&NoopSshEventHost>).await?;
     let mut channel = {
         let session = session.lock().await;
         session.channel_open_session().await?
@@ -910,7 +1002,7 @@ pub(crate) async fn open_sftp(
     }
 
     // SFTP 面板自己有加载态，不参与终端 pane 的连接卡片。
-    let session = authenticated_session(&destination, &profile, None::<&EventProxy>).await?;
+    let session = authenticated_session(&destination, &profile, None::<&NoopSshEventHost>).await?;
     let channel = {
         let session = session.lock().await;
         session.channel_open_session().await?
@@ -956,7 +1048,8 @@ pub struct SshTestResult {
     pub elapsed_ms: u64,
 }
 
-/// 执行一次无人值守的草稿测试。绝不弹 AskPass：交互式方法在测试中一律跳过
+/// 执行一次无人值守的草稿测试。绝不弹 AskPass：草稿/已存密码可以回答明确的
+/// keyboard-interactive 密码问题，OTP 等真正需要用户参与的问题则留给正式连接
 /// （见 [`test_authenticate`]）。
 async fn run_test(request: SshTestRequest) -> SshTestResult {
     let started = std::time::Instant::now();
@@ -1011,6 +1104,7 @@ pub fn start_test(
 
 /// 旧 winit 壳的事件投递适配器。测试实现本身在 [`run_test`]，避免两个壳
 /// 各自维护解析、代理和认证的近似副本。
+#[cfg(feature = "legacy-shell")]
 pub fn spawn_test(
     request: SshTestRequest,
     proxy: winit::event_loop::EventLoopProxy<crate::event::Event>,
@@ -1076,6 +1170,7 @@ pub fn start_proxy_test(
 /// 使用与 SSH 新连接相同的全局配置解析和代理握手建立字节流，再请求一个
 /// 真实 HTTP 页面。只探测代理端口并不能证明代理有出网能力，所以这里必须
 /// 收到目标站点的 HTTP 状态行才算成功。
+#[cfg(feature = "legacy-shell")]
 pub fn spawn_proxy_test(
     request_id: u64,
     proxy: winit::event_loop::EventLoopProxy<crate::event::Event>,
@@ -1185,14 +1280,19 @@ async fn proxy_test_stream(
             .await
             .map_err(|error| ProxyTestFailure::JumpTask(error.to_string()))??;
             let jump =
-                authenticated_session_at::<EventProxy>(&jump_destination, &jump_profile, None, 1)
+                authenticated_session_at::<NoopSshEventHost>(
+                    &jump_destination,
+                    &jump_profile,
+                    None,
+                    1,
+                )
                     .await
                     .map_err(|error| ProxyTestFailure::JumpConnect {
                         target: spec.clone(),
                         error: error.to_string(),
                     })?;
             let channel = {
-                let session = jump.lock().await;
+                let session = jump.session.lock().await;
                 session
                     .channel_open_direct_tcpip(
                         NETWORK_TEST_HOST,
@@ -1233,8 +1333,9 @@ async fn test_connect(
     test_authenticate(&mut session, destination, request).await
 }
 
-/// 无人值守版认证：none → 草稿密码 → 密钥/已存密码计划。keyboard-interactive
-/// 与「连接时询问」在这里跳过——测试不能弹框，也不能把交互失败误报成配置错。
+/// 无人值守版认证：none → 草稿密码 → 密钥/已存密码计划。明确的
+/// keyboard-interactive 密码问题可以复用已有密码；OTP 与「连接时询问」在这里
+/// 跳过——测试不能弹框，也不能把真实的二次验证误报成配置错误。
 async fn test_authenticate(
     session: &mut ClientSession,
     destination: &SshDestination,
@@ -1256,6 +1357,7 @@ async fn test_authenticate(
     let mut stored_password = None;
     let mut loaded_stored_password = false;
     let mut local_key_errors = Vec::new();
+    let mut credential_was_attempted = has_draft_password;
     for method in plan {
         match method {
             AuthMethod::PrivateKey(path) => {
@@ -1281,14 +1383,33 @@ async fn test_authenticate(
                     loaded_stored_password = true;
                 }
                 if let Some(password) = stored_password.as_deref() {
+                    credential_was_attempted = true;
                     if authenticate_password(session, &destination.user, password).await? {
                         clear_secret(&mut stored_password);
                         return Ok(());
                     }
                 }
             },
-            AuthMethod::KeyboardInteractive | AuthMethod::PromptPassword => {
-                interactive_skipped = true;
+            AuthMethod::KeyboardInteractive => {
+                let password = request
+                    .password
+                    .as_deref()
+                    .filter(|password| !password.is_empty())
+                    .map(str::as_bytes)
+                    .or_else(|| stored_password.as_deref());
+                let attempt =
+                    try_keyboard_interactive(session, destination, password, false).await?;
+                credential_was_attempted |= attempt.used_password;
+                interactive_skipped |= attempt.prompt_required;
+                if attempt.success {
+                    clear_secret(&mut stored_password);
+                    return Ok(());
+                }
+            },
+            AuthMethod::PromptPassword => {
+                // 已经拿草稿/存储密码试过时，继续弹框不会让这次“无人值守测试”
+                // 更可信；直接报告认证失败。完全没有凭据时才说明正式连接需要询问。
+                interactive_skipped |= !credential_was_attempted;
             },
         }
     }
@@ -1456,29 +1577,37 @@ async fn try_keyboard_interactive(
     session: &mut ClientSession,
     destination: &SshDestination,
     password: Option<&[u8]>,
-) -> Result<bool, SessionError> {
+    allow_prompt: bool,
+) -> Result<KeyboardInteractiveAttempt, SessionError> {
+    let mut attempt = KeyboardInteractiveAttempt::default();
     let mut state =
         session.authenticate_keyboard_interactive_start(&destination.user, None::<String>).await?;
     for _ in 0..8 {
         match state {
-            KeyboardInteractiveAuthResponse::Success => return Ok(true),
-            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            KeyboardInteractiveAuthResponse::Success => {
+                attempt.success = true;
+                return Ok(attempt);
+            },
+            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(attempt),
             KeyboardInteractiveAuthResponse::InfoRequest { name, instructions, prompts } => {
                 let mut responses = Vec::with_capacity(prompts.len());
                 for prompt in prompts {
-                    if !prompt.echo
-                        && prompt.prompt.to_ascii_lowercase().contains("password")
-                        && password.is_some()
-                    {
+                    if !prompt.echo && is_password_prompt(&prompt.prompt) && password.is_some() {
+                        attempt.used_password = true;
                         responses.push(String::from_utf8_lossy(password.unwrap()).into_owned());
                         continue;
+                    }
+                    if !allow_prompt {
+                        attempt.prompt_required = true;
+                        return Ok(attempt);
                     }
                     let label = format!(
                         "{} - {} {} {}",
                         destination.original, name, instructions, prompt.prompt
                     );
+                    attempt.prompted = true;
                     let Some((mut response, _)) = prompt_secret(label, None, false).await? else {
-                        return Ok(false);
+                        return Ok(attempt);
                     };
                     responses.push(String::from_utf8_lossy(&response).into_owned());
                     response.fill(0);
@@ -1487,7 +1616,12 @@ async fn try_keyboard_interactive(
             },
         }
     }
-    Ok(false)
+    Ok(attempt)
+}
+
+fn is_password_prompt(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    ["password", "passphrase", "密码", "口令"].iter().any(|marker| lower.contains(marker))
 }
 
 async fn prompt_secret(
@@ -1582,7 +1716,7 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthMethod, SshDestination, authentication_plan, parse_resolved_config,
+        AuthMethod, SshDestination, authentication_plan, is_password_prompt, parse_resolved_config,
         resolve_network_proxy, ssh_config_probe_target,
     };
     use crate::ssh_profiles::SshAuthMode;
@@ -1693,15 +1827,29 @@ mod tests {
     }
 
     #[test]
-    fn password_mode_never_falls_back_to_other_methods() {
+    fn password_mode_supports_pam_without_falling_back_to_keys() {
         assert_eq!(
             authentication_plan(
                 SshAuthMode::Password,
                 &[PathBuf::from(r"C:\Keys\ignored")],
                 &[PathBuf::from(r"C:\Keys\ignored-config")],
             ),
-            vec![AuthMethod::StoredPassword, AuthMethod::PromptPassword]
+            vec![
+                AuthMethod::StoredPassword,
+                AuthMethod::KeyboardInteractive,
+                AuthMethod::PromptPassword,
+            ]
         );
+    }
+
+    #[test]
+    fn keyboard_interactive_reuses_password_only_for_password_prompts() {
+        for prompt in ["Password:", "Enter passphrase:", "密码：", "请输入口令："] {
+            assert!(is_password_prompt(prompt), "应识别密码问题: {prompt}");
+        }
+        for prompt in ["Verification code:", "OTP:", "Token:", "Duo choice:"] {
+            assert!(!is_password_prompt(prompt), "二次验证不得自动填登录密码: {prompt}");
+        }
     }
 
     #[test]

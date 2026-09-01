@@ -24,7 +24,13 @@ use crate::renderer::image::{BackgroundImageAlignment, BackgroundImageFit};
 use crate::renderer::ui::{Rgba, UiQuad};
 use crate::renderer::{GlyphCache, Renderer};
 
+pub use super::background_color_model::BgPickerPart;
+pub(crate) use super::background_color_model::{BACKGROUND_SWATCHES, hsv_to_rgb, rgb_to_hsv};
 use super::keymap;
+pub(crate) use super::network_proxy_model::{
+    MANUAL_PROXY_PROTOCOL_OPTIONS, ManualProxyProtocol, ProxyTestStatus, manual_proxy_parts,
+    manual_proxy_value,
+};
 use super::ui::theme::Skin;
 use super::ui::{icons, os_icons, surface, text_field, tokens, widgets};
 use super::{
@@ -143,23 +149,6 @@ pub enum SettingsDropdown {
     BackgroundColor,
 }
 
-/// 背景色色盘的预设色板（2 行 × 6 列）。前排偏星云/终端惯用暗底，尾部
-/// 提供近黑与亮底；任意颜色可用下方的 16 进制输入框手动指定。
-pub(crate) const BACKGROUND_SWATCHES: [Rgb; 12] = [
-    Rgb::new(8, 10, 24),
-    Rgb::new(12, 16, 28),
-    Rgb::new(18, 14, 32),
-    Rgb::new(24, 24, 37),
-    Rgb::new(0, 43, 54),
-    Rgb::new(6, 26, 28),
-    Rgb::new(40, 42, 54),
-    Rgb::new(30, 30, 30),
-    Rgb::new(12, 12, 12),
-    Rgb::new(0, 0, 0),
-    Rgb::new(253, 246, 227),
-    Rgb::new(255, 255, 255),
-];
-
 pub(super) const BACKGROUND_FIT_OPTIONS: [BackgroundImageFit; 4] = [
     BackgroundImageFit::Fill,
     BackgroundImageFit::Uniform,
@@ -216,29 +205,6 @@ fn ssh_proxy_mode_label(mode: crate::ssh_proxy::ProxyMode, language: UiLanguage)
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ManualProxyProtocol {
-    #[default]
-    Socks5,
-    Http,
-}
-
-pub(crate) const MANUAL_PROXY_PROTOCOL_OPTIONS: [ManualProxyProtocol; 2] =
-    [ManualProxyProtocol::Socks5, ManualProxyProtocol::Http];
-
-/// 网络页“测试网络”的窗口态。结果只代表发起测试时已经落盘的那份设置；
-/// 用户随后改动模式或地址时会回到 `Idle`，避免旧成功状态冒充新配置有效。
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) enum ProxyTestStatus {
-    #[default]
-    Idle,
-    Running,
-    Complete {
-        outcome: crate::proxy_test::ProxyTestOutcome,
-        elapsed_ms: u64,
-    },
-}
-
 fn manual_proxy_protocol_label(
     protocol: ManualProxyProtocol,
     _language: UiLanguage,
@@ -246,36 +212,6 @@ fn manual_proxy_protocol_label(
     match protocol {
         ManualProxyProtocol::Socks5 => "SOCKS5",
         ManualProxyProtocol::Http => "HTTP",
-    }
-}
-
-/// 把持久化 URL 拆成协议选择与可编辑地址。协议前缀由下拉框负责，输入框
-/// 只显示地址正文，避免用户在两个控件里重复维护同一份信息。
-pub(crate) fn manual_proxy_parts(value: &str) -> (ManualProxyProtocol, &str) {
-    let value = value.trim();
-    for (prefix, protocol) in [
-        ("socks5://", ManualProxyProtocol::Socks5),
-        ("socks5h://", ManualProxyProtocol::Socks5),
-        ("socks://", ManualProxyProtocol::Socks5),
-        ("http://", ManualProxyProtocol::Http),
-    ] {
-        if let Some(address) = crate::ssh_proxy::strip_prefix_ignore_case(value, prefix) {
-            return (protocol, address);
-        }
-    }
-    // 兼容旧配置中的裸 `host:port`；不再显示含糊的“自动识别”，明确按
-    // 历史规则作为 SOCKS5 处理。
-    (ManualProxyProtocol::Socks5, value)
-}
-
-pub(crate) fn manual_proxy_value(protocol: ManualProxyProtocol, address: &str) -> String {
-    let address = address.trim();
-    if address.is_empty() {
-        return String::new();
-    }
-    match protocol {
-        ManualProxyProtocol::Socks5 => format!("socks5://{address}"),
-        ManualProxyProtocol::Http => format!("http://{address}"),
     }
 }
 
@@ -2218,55 +2154,6 @@ pub(super) fn background_color_popup(
     }
     let hex = (x + pad, grid_y + grid_h + gap, w - 2.0 * pad, hex_h);
     BackgroundColorPopup { rect: (x, y, w, h), sv, hue, swatch, hex }
-}
-
-/// HSV → RGB。`h` 度（任意实数，内部归一到 [0,360)），`s`/`v` ∈ [0,1]。
-pub(crate) fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Rgb {
-    let h = h.rem_euclid(360.0);
-    let s = s.clamp(0.0, 1.0);
-    let v = v.clamp(0.0, 1.0);
-    let c = v * s;
-    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
-    let m = v - c;
-    let (r, g, b) = match h {
-        _ if h < 60.0 => (c, x, 0.0),
-        _ if h < 120.0 => (x, c, 0.0),
-        _ if h < 180.0 => (0.0, c, x),
-        _ if h < 240.0 => (0.0, x, c),
-        _ if h < 300.0 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let to = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    Rgb::new(to(r), to(g), to(b))
-}
-
-/// RGB → HSV。灰色（s = 0）时 h 报 0；调用方要在拖动中保住既有色相，
-/// 别用本函数的返回覆盖它（见 `Display::open_background_color_picker`）。
-pub(crate) fn rgb_to_hsv(color: Rgb) -> (f32, f32, f32) {
-    let r = color.r as f32 / 255.0;
-    let g = color.g as f32 / 255.0;
-    let b = color.b as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let delta = max - min;
-    let h = if delta <= f32::EPSILON {
-        0.0
-    } else if max == r {
-        60.0 * (((g - b) / delta).rem_euclid(6.0))
-    } else if max == g {
-        60.0 * ((b - r) / delta + 2.0)
-    } else {
-        60.0 * ((r - g) / delta + 4.0)
-    };
-    let s = if max <= f32::EPSILON { 0.0 } else { delta / max };
-    (h, s, max)
-}
-
-/// 调色盘拖拽的目标部件。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BgPickerPart {
-    Sv,
-    Hue,
 }
 
 /// 字体弹层的总行数：候选行 + 顶部那个搜索框。
@@ -8085,47 +7972,17 @@ pub(super) fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::{
-        CELL_WIDTH_MODE_OPTIONS, CellWidthMode, KeymapPaneState, ManualProxyProtocol,
-        NEW_TAB_POSITION_OPTIONS, NebulaSettingsSection, NewTabPosition, ProxyChoice,
-        ProxyPaneState, Rgb, SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS,
-        STANDARD_ROW_ACTION_W, SettingsHit, TabRevealMotion, UiLanguage, advanced_content_end,
-        background_color_popup, cell_width_mode_label, font_popup_row_count, font_popup_slot,
-        hsv_to_rgb, manual_proxy_parts, manual_proxy_value, new_tab_position_label,
-        opacity_from_pointer, proxy_section_title_y, rgb_to_hsv, row_action_rect,
-        settings_geometry, settings_hit, ssh_proxy_manual_controls, ssh_proxy_mode_control,
-        ssh_proxy_test_button,
+        CELL_WIDTH_MODE_OPTIONS, CellWidthMode, KeymapPaneState, NEW_TAB_POSITION_OPTIONS,
+        NebulaSettingsSection, NewTabPosition, ProxyChoice, ProxyPaneState,
+        SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS, STANDARD_ROW_ACTION_W, SettingsHit,
+        TabRevealMotion, UiLanguage, advanced_content_end, background_color_popup,
+        cell_width_mode_label, font_popup_row_count, font_popup_slot, new_tab_position_label,
+        opacity_from_pointer, proxy_section_title_y, row_action_rect, settings_geometry,
+        settings_hit, ssh_proxy_manual_controls, ssh_proxy_mode_control, ssh_proxy_test_button,
     };
     use crate::display::SizeInfo;
     use crate::display::ui::tokens::Density;
     use crate::display::ui::widgets;
-
-    #[test]
-    fn hsv_rgb_round_trip_and_gray_hue_convention() {
-        // 三原色与灰阶的锚点值。
-        assert_eq!(hsv_to_rgb(0.0, 1.0, 1.0), Rgb::new(255, 0, 0));
-        assert_eq!(hsv_to_rgb(120.0, 1.0, 1.0), Rgb::new(0, 255, 0));
-        assert_eq!(hsv_to_rgb(240.0, 1.0, 1.0), Rgb::new(0, 0, 255));
-        assert_eq!(hsv_to_rgb(0.0, 0.0, 1.0), Rgb::new(255, 255, 255));
-        assert_eq!(hsv_to_rgb(123.0, 0.7, 0.0), Rgb::new(0, 0, 0));
-        // 负角度与超圈角度归一（拖拽把手不夹角度）。
-        assert_eq!(hsv_to_rgb(360.0, 1.0, 1.0), hsv_to_rgb(0.0, 1.0, 1.0));
-        assert_eq!(hsv_to_rgb(-120.0, 1.0, 1.0), hsv_to_rgb(240.0, 1.0, 1.0));
-
-        // 往返：RGB → HSV → RGB 在 8bit 量化内闭合。
-        for color in [Rgb::new(8, 10, 24), Rgb::new(253, 246, 227), Rgb::new(40, 42, 54)] {
-            let (h, s, v) = rgb_to_hsv(color);
-            let back = hsv_to_rgb(h, s, v);
-            assert!(
-                (back.r as i32 - color.r as i32).abs() <= 1
-                    && (back.g as i32 - color.g as i32).abs() <= 1
-                    && (back.b as i32 - color.b as i32).abs() <= 1,
-                "{color:?} -> ({h},{s},{v}) -> {back:?}"
-            );
-        }
-        // 灰色的色相按约定报 0，饱和度 0。
-        assert_eq!(rgb_to_hsv(Rgb::new(128, 128, 128)).0, 0.0);
-        assert_eq!(rgb_to_hsv(Rgb::new(128, 128, 128)).1, 0.0);
-    }
 
     #[test]
     fn color_picker_popup_keeps_sv_hue_and_swatches_disjoint() {
@@ -8474,34 +8331,6 @@ mod tests {
             hit(ssh_proxy_test_button(geometry.ssh_proxy_test, 1.0)),
             SettingsHit::SshProxyTest
         );
-    }
-
-    #[test]
-    fn manual_proxy_protocol_and_address_round_trip_without_duplicate_prefixes() {
-        assert_eq!(
-            manual_proxy_parts("SOCKS5://127.0.0.1:1080"),
-            (ManualProxyProtocol::Socks5, "127.0.0.1:1080")
-        );
-        assert_eq!(
-            manual_proxy_parts("HTTP://proxy.lan:8080"),
-            (ManualProxyProtocol::Http, "proxy.lan:8080")
-        );
-        assert_eq!(
-            manual_proxy_parts("127.0.0.1:7890"),
-            (ManualProxyProtocol::Socks5, "127.0.0.1:7890")
-        );
-        assert_eq!(
-            manual_proxy_value(ManualProxyProtocol::Socks5, "127.0.0.1:1080"),
-            "socks5://127.0.0.1:1080"
-        );
-        assert_eq!(manual_proxy_value(ManualProxyProtocol::Http, ""), "");
-    }
-
-    #[test]
-    fn manual_proxy_parts_accepts_non_ascii_without_slicing_inside_utf8() {
-        for value in ["127.0.0.1：", "：127.0.0.1", "127.0：0.1", "："] {
-            assert_eq!(manual_proxy_parts(value), (ManualProxyProtocol::Socks5, value));
-        }
     }
 
     #[test]

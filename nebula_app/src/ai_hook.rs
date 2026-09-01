@@ -1330,8 +1330,10 @@ fn truncate(s: &str, max_chars: usize) -> String {
     format!("{cut}…")
 }
 
+#[cfg(all(windows, feature = "legacy-shell"))]
+pub use win::spawn_server;
 #[cfg(windows)]
-pub use win::{setup_ai_cli, spawn_config_guard, spawn_gpui_server, spawn_server};
+pub use win::{setup_ai_cli, spawn_config_guard, spawn_gpui_server};
 
 #[cfg(not(windows))]
 pub fn spawn_gpui_server() -> std::sync::mpsc::Receiver<AiHookEvent> {
@@ -1346,15 +1348,18 @@ mod win {
     use std::time::Duration;
 
     use serde_json::{Value, json};
+    #[cfg(feature = "legacy-shell")]
     use winit::event_loop::EventLoopProxy;
 
     use super::{CLAUDE_EVENTS, HELPER_ARGS, HELPER_MARK, HOOK_EXE_ENV, PIPE_ENV, parse_envelope};
+    #[cfg(feature = "legacy-shell")]
     use crate::event::{Event, EventType};
 
     // ─── pipe server ────────────────────────────────────────────────────────
 
     /// Create the per-instance pipe, export its name to future children, and
     /// start the accept loop. Must run before the first PTY spawns.
+    #[cfg(feature = "legacy-shell")]
     pub fn spawn_server(proxy: EventLoopProxy<Event>) {
         spawn_pipe_server(move |event| {
             proxy.send_event(Event::new(EventType::AiHook(event), None)).is_ok()

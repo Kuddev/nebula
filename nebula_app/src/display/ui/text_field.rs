@@ -22,8 +22,11 @@
 //! 成"落在末尾"，而不是 panic。
 
 use super::caret;
+#[cfg(feature = "legacy-shell")]
 use super::theme::Skin;
+#[cfg(feature = "legacy-shell")]
 use super::tokens::{radius, space};
+#[cfg(feature = "legacy-shell")]
 use crate::renderer::ui::{Rgba, UiQuad};
 use unicode_width::UnicodeWidthChar;
 
@@ -243,6 +246,7 @@ pub fn index_at(text: &str, offset_x: f32, cell_w: f32) -> usize {
 ///
 /// `text_x` 由调用方给，因为对齐方式是调用方的事（端口居中、其余靠左）——
 /// 组件层只负责让光标落在与文字同一套换算上。
+#[cfg(feature = "legacy-shell")]
 #[allow(clippy::too_many_arguments)]
 pub fn push_cursor(
     quads: &mut Vec<UiQuad>,

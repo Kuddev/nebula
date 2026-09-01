@@ -65,13 +65,13 @@ pub fn update(
 pub fn commit_line(state: &mut NebulaPaneState) {
     let line = state.screen_line.trim().to_owned();
     if !line.is_empty() {
-        shared().history.record(&line, &state.cwd);
+        shared().history.record(&state.suggest_env.history_scope(), &line, &state.cwd);
     }
     // 旧壳 `nebula_commit_line` 同一条：OSC 133;C 到达时 PTY 已把行缓冲清
     // 空，程序身份（侧栏 tab 图标）必须在 Enter 这一刻从屏幕真值捕获。
     // grid 读失败时退回按键镜像——取首 token 做身份已足够。
     state.last_committed = if line.is_empty() { state.line_buf.trim().to_owned() } else { line };
-    crate::display::Display::nebula_clear_line(state);
+    crate::display::nebula_clear_line(state);
 }
 
 /// shell 集成上报 cwd 时喂目录 frecency（旧壳 `nebula_record_directory`）。

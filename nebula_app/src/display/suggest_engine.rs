@@ -209,6 +209,16 @@ impl SuggestEnv {
     pub fn is_this_machine(&self) -> bool {
         matches!(self, Self::Local)
     }
+
+    pub(crate) fn history_scope(&self) -> crate::nebula_history::HistoryScope {
+        match self {
+            Self::Local => crate::nebula_history::HistoryScope::Local,
+            Self::Wsl { distro } => crate::nebula_history::HistoryScope::Wsl(distro.clone()),
+            Self::Ssh { destination } => {
+                crate::nebula_history::HistoryScope::Ssh(destination.clone())
+            },
+        }
+    }
 }
 
 /// Refresh the inline ghost remainder or the popup candidate list for the
@@ -269,7 +279,7 @@ pub(crate) fn suggest_update(
 
     // History first: newest command that extends the whole line (indexed
     // prefix lookup — scales with matches, not history size).
-    if let Some(rem) = sources.history.hint(&line) {
+    if let Some(rem) = sources.history.hint(&state.suggest_env.history_scope(), &line) {
         state.suggestion = clamp_ghost(rem);
         nebula_debug_log(format!("suggest_result kind=history rem={:?}", state.suggestion));
         return;
@@ -461,7 +471,7 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
     };
 
     // Whole-line history matches, newest first.
-    for (full, rem) in sources.history.hints(line, 3) {
+    for (full, rem) in sources.history.hints(&state.suggest_env.history_scope(), line, 3) {
         push(
             &mut items,
             NebulaCompletionItem {

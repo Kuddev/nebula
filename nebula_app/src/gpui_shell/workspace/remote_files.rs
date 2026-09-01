@@ -37,26 +37,37 @@ use crate::ssh_sftp::{
 };
 
 use super::NebulaWorkspace;
+use super::file_tree::{DRAWER_TEXT_INSET, ROW_PITCH, ROW_WASH_H, ROW_WASH_INSET};
 
-/// 行距，与本地文件树同源——同一个抽屉里两种列表的行高不一致，切换时整列
-/// 文字会跳一下。
-const ROW_PITCH: f32 = 34.0;
-/// 抽屉内容左右留白，同样与本地树对齐。
-const TEXT_INSET: f32 = 4.0;
+/// 工具栏与说明文字沿用本地树的抽屉内边距。
+const TEXT_INSET: f32 = DRAWER_TEXT_INSET;
+
+#[derive(Clone)]
+struct RemoteDirectorySnapshot {
+    destination: String,
+    path: String,
+    entries: Vec<SftpEntry>,
+    error: Option<String>,
+    selected: Option<String>,
+}
 
 /// 远端浏览器的状态。
 ///
-/// 一份状态服务所有 pane：连接是按目的地复用的，为每个 pane 存一套列表只会
-/// 让同一台机器的同一个目录被列多次。按 pane 区分的只有"浏览到哪儿了"。
+/// 当前可见状态只有一份，但每个 pane 都保留最近一次已确认的目录快照与滚动
+/// 句柄。切 tab 只是换回这份快照，不触发网络列目录；连接池是否复用仍由下层
+/// 按目的地裁定，与 UI 缓存的所有权互不混淆。
 #[derive(Default)]
 pub(super) struct RemoteBrowser {
     /// 当前绑定的 pane。`None` 表示抽屉此刻不该画远端内容。
     pane: Option<u64>,
     /// 当前绑定的远端目的地，用于标题和后续请求。
     destination: String,
-    /// 每个 pane 各自浏览到的目录。切回这个 pane 时直接复原，不用重新导航
-    /// 到家目录——用户在两个 tab 之间来回看两个目录是常态。
-    visited: HashMap<u64, String>,
+    /// 每个 pane 最近一次已确认的列表。不能只记路径：切回来再按路径列一次，
+    /// 本质上仍是 tab 激活触发刷新，也会丢掉选择和瞬时滚动上下文。
+    snapshots: HashMap<u64, RemoteDirectorySnapshot>,
+    /// uniform_list 的 handle 内含滚动位置；每个 pane 各持一个，避免 A 主机的
+    /// 长目录把 B 主机顶到同一个偏移。
+    scrolls: HashMap<u64, gpui::UniformListScrollHandle>,
     /// 当前列出的目录。
     path: String,
     entries: Vec<SftpEntry>,
@@ -105,13 +116,80 @@ impl RemoteBrowser {
         self.pane.is_some()
     }
 
-    /// 解绑：聚焦回本地 pane 时调用。
-    ///
-    /// 只清"当前显示什么"，不清 `visited`——那是每个 pane 的浏览位置，下次
-    /// 切回来还要用。连接本身由下层按目的地缓存，这里也不去动它。
+    fn park_active(&mut self) {
+        let Some(pane) = self.pane else { return };
+        if self.path.is_empty() {
+            return;
+        }
+        self.snapshots.insert(
+            pane,
+            RemoteDirectorySnapshot {
+                destination: self.destination.clone(),
+                path: self.path.clone(),
+                entries: self.entries.clone(),
+                error: self.error.clone(),
+                selected: self.selected.clone(),
+            },
+        );
+    }
+
+    /// 绑定 pane。返回 `true` 表示已有完整快照，调用方不得再列目录。
+    fn bind(&mut self, pane: u64, destination: String) -> bool {
+        self.park_active();
+        self.generation = self.generation.wrapping_add(1);
+        self.pane = Some(pane);
+        self.destination = destination.clone();
+        self.loading = false;
+        self.scrolls.entry(pane).or_insert_with(gpui::UniformListScrollHandle::new);
+
+        let snapshot = self
+            .snapshots
+            .get(&pane)
+            .filter(|snapshot| snapshot.destination == destination)
+            .cloned();
+        if let Some(snapshot) = snapshot {
+            self.path = snapshot.path;
+            self.entries = snapshot.entries;
+            self.error = snapshot.error;
+            self.selected = snapshot.selected;
+            return true;
+        }
+
+        // 同一个 pane 重新连到另一个目的地时，旧主机快照不能复用。
+        self.snapshots.remove(&pane);
+        self.path.clear();
+        self.entries.clear();
+        self.error = None;
+        self.selected = None;
+        false
+    }
+
+    fn scroll_for(&mut self, pane: u64) -> gpui::UniformListScrollHandle {
+        self.scrolls.entry(pane).or_insert_with(gpui::UniformListScrollHandle::new).clone()
+    }
+
+    pub(super) fn forget(&mut self, pane: u64) {
+        self.snapshots.remove(&pane);
+        self.scrolls.remove(&pane);
+        if self.pane == Some(pane) {
+            self.pane = None;
+            self.destination.clear();
+            self.path.clear();
+            self.entries.clear();
+            self.error = None;
+            self.loading = false;
+            self.selected = None;
+            self.generation = self.generation.wrapping_add(1);
+        }
+    }
+
+    /// 解绑：聚焦回本地 pane 时调用。目录、选择和滚动位置先按 pane 停放；
+    /// 连接本身由下层按目的地缓存，这里不触碰 transport。
     fn detach(&mut self) {
+        self.park_active();
         self.pane = None;
         self.destination.clear();
+        self.path.clear();
         self.entries.clear();
         self.error = None;
         self.loading = false;
@@ -170,19 +248,15 @@ impl NebulaWorkspace {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.remote_browser.pane = Some(pane);
-        self.remote_browser.destination = destination.clone();
-        self.remote_browser.entries.clear();
-        self.remote_browser.error = None;
-        self.remote_browser.selected = None;
-
-        // 起点优先用这个 pane 上次看到哪儿；第一次进来则问终端当前在哪个
-        // 目录，问不到再退到根。直接从根开始是最差的选择：用户在终端里
-        // `cd` 到很深的地方，浏览器却从 `/` 开始，等于每次都要重新点进去。
-        if let Some(previous) = self.remote_browser.visited.get(&pane).cloned() {
-            self.navigate_remote(previous, cx);
+        let restored = self.remote_browser.bind(pane, destination.clone());
+        self.remote_files_scroll = self.remote_browser.scroll_for(pane);
+        if restored {
+            cx.notify();
             return;
         }
+
+        // 第一次进入才问终端当前在哪个目录，问不到再退到根。切回已有 pane
+        // 已在上面恢复完整快照，绝不能走到这里制造一次隐式刷新。
         self.navigate_remote_to_shell_cwd(pane, destination, cx);
     }
 
@@ -255,7 +329,6 @@ impl NebulaWorkspace {
                     Some(Ok(entries)) => {
                         workspace.remote_browser.entries = entries;
                         workspace.remote_browser.path = path.clone();
-                        workspace.remote_browser.visited.insert(pane, path);
                         workspace.remote_browser.error = None;
                         workspace.remote_browser.selected = None;
                     },
@@ -376,7 +449,6 @@ impl NebulaWorkspace {
                     if self.remote_browser.path == snapshot.path {
                         self.remote_browser.entries = snapshot.entries.clone();
                         self.remote_browser.selected = None;
-                        self.remote_browser.visited.insert(pane, snapshot.path.clone());
                     }
                     self.remote_browser.error = None;
                 },
@@ -1127,7 +1199,7 @@ impl NebulaWorkspace {
         // 像两套产品。
         let (icon, ink) = match row.kind {
             SftpEntryKind::Directory => {
-                (crate::display::side_panel::folder_icon(false), theme.accent_foreground)
+                (crate::display::side_panel::folder_icon(false), theme.foreground)
             },
             SftpEntryKind::Symlink => ("\u{ea71}", theme.muted_foreground),
             SftpEntryKind::File => {
@@ -1138,23 +1210,31 @@ impl NebulaWorkspace {
         let label = row.name.clone();
         let activate = row.clone();
 
-        div()
+        h_flex()
             .h(px(ROW_PITCH))
-            .flex()
-            .items_center()
+            .w_full()
+            .px(px(ROW_WASH_INSET))
             .child(
                 h_flex()
                     .id(SharedString::from(format!("remote-row-{}", row.path)))
-                    .h(px(ROW_PITCH - 4.0))
-                    .w_full()
-                    .px(px(TEXT_INSET + 2.0))
+                    .h(px(ROW_WASH_H))
+                    .flex_1()
+                    .min_w_0()
                     .items_center()
-                    .gap_2()
-                    .rounded(px(6.0))
-                    .when(selected, |row| row.bg(theme.tab_active))
+                    .pr_2()
+                    .pl(px(8.0))
+                    .gap_1()
+                    .rounded(px(crate::display::UI_CORNER_RADIUS_LOGICAL))
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .when(selected, |row| {
+                        row.bg(theme.tab_active).border_color(theme.ring.opacity(0.16))
+                    })
                     .hover(|row| row.bg(theme.list_hover))
+                    .child(div().w(px(12.0)).flex_shrink_0())
                     .child(
                         div()
+                            .w(px(16.0))
                             .font_family(symbol_family)
                             .text_color(ink)
                             .flex_shrink_0()
@@ -1164,7 +1244,7 @@ impl NebulaWorkspace {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_xs()
+                            .text_sm()
                             .text_color(theme.foreground)
                             .overflow_hidden()
                             .whitespace_nowrap()
@@ -1287,7 +1367,53 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::format_transfer_bytes;
+    use super::{RemoteBrowser, SftpEntry, SftpEntryKind, format_transfer_bytes};
+
+    fn entry(name: &str, path: &str) -> SftpEntry {
+        SftpEntry {
+            name: name.to_owned(),
+            path: path.to_owned(),
+            kind: SftpEntryKind::File,
+            size: 12,
+            modified: 34,
+            permissions: "rw-r--r--".to_owned(),
+            is_parent: false,
+        }
+    }
+
+    #[test]
+    fn switching_remote_panes_restores_listing_selection_and_scroll_owner_without_reload() {
+        let mut browser = RemoteBrowser::default();
+
+        assert!(!browser.bind(11, "alice@alpha".to_owned()));
+        browser.path = "/srv/alpha".to_owned();
+        browser.entries = vec![entry("alpha.txt", "/srv/alpha/alpha.txt")];
+        browser.selected = Some("/srv/alpha/alpha.txt".to_owned());
+
+        assert!(!browser.bind(22, "bob@beta".to_owned()));
+        browser.path = "/home/bob".to_owned();
+        browser.entries = vec![entry("beta.txt", "/home/bob/beta.txt")];
+        assert_eq!(browser.scrolls.len(), 2, "每个 pane 必须持有独立滚动句柄");
+
+        assert!(browser.bind(11, "alice@alpha".to_owned()));
+        assert_eq!(browser.path, "/srv/alpha");
+        assert_eq!(browser.entries, vec![entry("alpha.txt", "/srv/alpha/alpha.txt")]);
+        assert_eq!(browser.selected.as_deref(), Some("/srv/alpha/alpha.txt"));
+        assert!(!browser.loading);
+    }
+
+    #[test]
+    fn changing_a_panes_destination_discards_the_old_host_snapshot() {
+        let mut browser = RemoteBrowser::default();
+        assert!(!browser.bind(7, "root@old-host".to_owned()));
+        browser.path = "/root".to_owned();
+        browser.entries = vec![entry("old", "/root/old")];
+
+        assert!(!browser.bind(7, "root@new-host".to_owned()));
+        assert!(browser.path.is_empty());
+        assert!(browser.entries.is_empty());
+        assert!(browser.selected.is_none());
+    }
 
     #[test]
     fn transfer_byte_counts_use_binary_units() {

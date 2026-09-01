@@ -49,6 +49,8 @@ mod tests {
         assert!(!panel.custom_root_active());
         assert_eq!(panel.root(), Some(next_cwd.as_path()));
 
+        panel.wait_snapshot();
+        panel.file_index.release_for_test();
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -72,6 +74,8 @@ mod tests {
         assert_eq!(panel.root(), Some(cwd.as_path()));
         assert_eq!(panel.root_notice(), Some("所选目录不可用，已跟随当前目录"));
 
+        panel.wait_snapshot();
+        panel.file_index.release_for_test();
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -340,6 +344,7 @@ mod tests {
         assert_eq!(rows[2].name, "inner.txt");
         assert_eq!(rows[2].depth, 1);
 
+        p.file_index.release_for_test();
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -396,6 +401,7 @@ mod tests {
         assert_eq!(panel.root(), Some(base.as_path()));
         assert!(panel.custom_root_active(), "upward navigation is window-local");
 
+        panel.file_index.release_for_test();
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -425,6 +431,7 @@ mod tests {
         stale.source_row = 2;
         assert!(!panel.click_drag_source(&stale), "a changed source row must be ignored");
 
+        panel.file_index.release_for_test();
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -474,6 +481,7 @@ mod tests {
             unstaged: vec![('?', "one.txt".into()), ('M', "two.txt".into())],
             staged: vec![('A', "three.txt".into())],
             conflicts: Vec::new(),
+            history: Vec::new(),
             repository_root: None,
             repository: None,
         });
@@ -570,6 +578,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-shell")]
     fn git_action_strip_has_four_equal_buttons() {
         let rects = git_button_rects(10.0, 430.0, 10.0);
         assert_eq!(rects.len(), 4);
@@ -895,4 +904,23 @@ mod tests {
         std::fs::write(linked.join(".git"), "gitdir: ../repo/.git/worktrees/linked").unwrap();
         assert_eq!(git_repository_root(&linked).as_deref(), Some(linked.as_path()));
     }
+}
+
+#[test]
+fn git_history_parser_keeps_commit_identity_parents_and_fields() {
+    let output = concat!(
+        "\u{1e}aaaaaaaa\u{1f}a1b2c3d\u{1f}HEAD -> refs/heads/main, tag: refs/tags/v1\u{1f}ship it\u{1f}Alice\u{1f}1700000000\u{1f}1111111 2222222\n",
+        "\u{1e}dddddddd\u{1f}d4e5f6a\u{1f}refs/heads/topic\u{1f}side work\u{1f}Bob\u{1f}1699999000\u{1f}3333333\n",
+    );
+    let commits = parse_git_history(output);
+    assert_eq!(commits.len(), 2);
+    let first = &commits[0];
+    assert_eq!(first.full_hash, "aaaaaaaa");
+    assert_eq!(first.short_hash, "a1b2c3d");
+    assert_eq!(first.decorations, "HEAD -> refs/heads/main, tag: refs/tags/v1");
+    assert_eq!(first.subject, "ship it");
+    assert_eq!(first.author, "Alice");
+    assert_eq!(first.timestamp, 1_700_000_000);
+    assert_eq!(first.parent_hashes, ["1111111", "2222222"]);
+    assert_eq!(commits[1].subject, "side work");
 }

@@ -506,7 +506,8 @@ pub fn wsl_unc_cwd(located: &WslCwd) -> Option<std::path::PathBuf> {
     path.is_dir().then_some(path)
 }
 
-/// 让 WSL 来宾在每个提示符前上报 cwd（OSC 7）所需的环境变量；非 WSL 启动返回空。
+/// 让 WSL 来宾在每个提示符前上报命令完成、cwd 与新提示符边界所需的环境变量；
+/// 非 WSL 启动返回空。
 ///
 /// # 为什么只能走环境变量
 ///
@@ -516,9 +517,10 @@ pub fn wsl_unc_cwd(located: &WslCwd) -> Option<std::path::PathBuf> {
 /// bash 每画一次提示符都会执行 `$PROMPT_COMMAND`，而 `WSLENV` 会把点名的宿主
 /// 变量原样送进来宾。
 ///
-/// 少了这条，WSL tab 永远停在"等待终端上报工作目录"——目录树与 Git 视图都是
-/// 靠 shell 上报的 cwd 驱动的（`TermEvent::CwdReport`），而 Debian/Ubuntu 的
-/// 默认 `.bashrc` 只设 OSC 0 窗口标题，不发 OSC 7（实测 `PROMPT_COMMAND` 为空）。
+/// OSC 133;D/A 与终端 shell 状态机同序：`D` 是命令完成的权威边沿，`A`
+/// 标记接下来绘制的提示符；OSC 7 只负责 cwd，绝不再兼任 Agent 生命周期信号。
+/// Debian/Ubuntu 的默认 `.bashrc` 只设 OSC 0 窗口标题，不发这些标记（实测
+/// `PROMPT_COMMAND` 为空）。
 ///
 /// 尽力而为、失败无害：来宾默认 shell 是 zsh/fish（不认 `PROMPT_COMMAND`），
 /// 或用户自己在 rc 里直接赋值把它覆盖掉，都只是回到"不上报"的现状，不会影响
@@ -531,10 +533,10 @@ pub fn wsl_cwd_report_env(
     if wsl_launch_distro(program, args).is_none() {
         return Vec::new();
     }
-    // OSC 7 = `ESC ] 7 ; file://<host><path> BEL`。host 会被解析端丢掉（取第一个
-    // `/` 之后的部分），给个兜底值就够。用 `$PWD` 而不是 `$(pwd)`：每个提示符
-    // 都要跑一次，不能带 fork 开销。
-    const REPORT: &str = r#"printf '\033]7;file://%s%s\007' "${HOSTNAME:-wsl}" "$PWD""#;
+    // 用 `$PWD` 而不是 `$(pwd)`，整个 PROMPT_COMMAND 只有变量赋值与一个
+    // builtin printf：每个提示符都执行也不 fork。初始提示符多发的 D 无害，
+    // Runtime submit barrier 会拒绝把它错配给尚未真正提交的新命令。
+    const REPORT: &str = r#"__nebula_status=$?; printf '\033]133;D;%s\007\033]7;file://%s%s\007\033]133;A\007' "$__nebula_status" "${HOSTNAME:-wsl}" "$PWD""#;
     // 宿主侧可能已经有 WSLENV（别的工具设的），必须追加而不是覆盖。
     let mut wslenv = current_wslenv
         .map(str::to_owned)
@@ -808,6 +810,10 @@ mod tests {
             additions.get("WSLENV").map(String::as_str),
             Some("FRESH_REGISTRY_VALUE/u:PROMPT_COMMAND")
         );
+        let prompt_command = additions.get("PROMPT_COMMAND").expect("WSL prompt integration");
+        assert!(prompt_command.contains("]133;D;%s"));
+        assert!(prompt_command.contains("]7;file://%s%s"));
+        assert!(prompt_command.contains("]133;A"));
     }
 
     #[test]

@@ -20,15 +20,15 @@ use crate::gpui_shell::prelude::*;
 use super::NebulaWorkspace;
 
 /// 行距（旧壳 `PanelLayout::row_h`）。
-const ROW_PITCH: f32 = 34.0;
+pub(super) const ROW_PITCH: f32 = 34.0;
 /// 行水洗高度（旧壳 `row_h - 4`）。行与行之间那条缝来自水洗比行距矮，
 /// **不是** flex gap——用 gap 会把每行推成一颗独立药丸，连续列表的读感就散了。
-const ROW_WASH_H: f32 = 30.0;
+pub(super) const ROW_WASH_H: f32 = 30.0;
 /// 水洗相对抽屉内缘的额外内缩：旧壳的水洗从面板边缘缩 10px，而抽屉自身的
 /// `p_2` 已经占掉 8px。
-const ROW_WASH_INSET: f32 = 2.0;
+pub(super) const ROW_WASH_INSET: f32 = 2.0;
 /// 抽屉内容左右留白（旧壳 `px + 12`：比水洗再多 2px）。
-const DRAWER_TEXT_INSET: f32 = 4.0;
+pub(super) const DRAWER_TEXT_INSET: f32 = 4.0;
 
 /// 文件树右键菜单的宿主：必须挂在 workspace 根上，不能当抽屉行的 child。
 ///
@@ -57,6 +57,20 @@ pub(super) fn wsl_terminal_launch_at(
 }
 
 impl NebulaWorkspace {
+    pub(super) fn on_file_tree_search_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if matches!(event, InputEvent::Change) {
+            self.file_tree_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+            self.side_panel.set_file_search_query(input.read(cx).value().to_string());
+            cx.notify();
+        }
+    }
+
     /// 单行：34px 行距里画一张 30px 高的水洗（旧壳 side_panel.rs:2712-2800）。
     fn render_file_tree_row(&self, visible_ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
         let Some(row) = self.side_panel.file_rows().get(visible_ix).cloned() else {
@@ -74,6 +88,29 @@ impl NebulaWorkspace {
         // 改变折叠箭头和文件图标的 advance。
         let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         let selected = self.side_panel.selected.as_ref() == Some(&row.path);
+        let searching = !self.side_panel.search.trim().is_empty();
+        let path_hint = searching.then(|| {
+            if let Some(guest) = row.guest_path.as_deref() {
+                let root =
+                    self.side_panel.file_wsl_root().map(|root| root.guest.as_str()).unwrap_or("/");
+                guest
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent)
+                    .unwrap_or("")
+                    .strip_prefix(root)
+                    .unwrap_or(guest)
+                    .trim_matches('/')
+                    .to_owned()
+            } else {
+                row.path
+                    .parent()
+                    .and_then(|parent| {
+                        self.side_panel.root().and_then(|root| parent.strip_prefix(root).ok())
+                    })
+                    .map(|parent| parent.display().to_string())
+                    .unwrap_or_default()
+            }
+        });
         let path = row.path.clone();
         let open_path = path.clone();
         let open_guest_path = row.guest_path.clone();
@@ -163,9 +200,24 @@ impl NebulaWorkspace {
                         .whitespace_nowrap()
                         .child(row.name),
                 )
+                .when_some(path_hint.filter(|hint| !hint.is_empty()), |item, hint| {
+                    item.child(
+                        div()
+                            .max_w(px(108.0))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(muted)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(hint),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if is_dir {
                         if this.side_panel.click_row(visible_ix) {
+                            cx.notify();
+                        } else {
+                            this.side_panel.selected = Some(path.clone());
                             cx.notify();
                         }
                     } else {
@@ -173,8 +225,22 @@ impl NebulaWorkspace {
                         cx.notify();
                     }
                 }))
-                .when(!is_dir && !is_parent, |item| {
+                .when(!is_parent, |item| {
                     item.on_double_click(cx.listener(move |this, _, window, cx| {
+                        if is_dir {
+                            if this.side_panel.browse_search_directory(
+                                open_path.clone(),
+                                open_guest_path.clone(),
+                            ) {
+                                this.file_tree_search_input.update(cx, |input, cx| {
+                                    input.set_value("", window, cx);
+                                });
+                                this.file_tree_scroll
+                                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                                cx.notify();
+                            }
+                            return;
+                        }
                         // 与旧壳 chrome 同合同：应用内能读的（图片/可读文本）
                         // 开查看 tab，其余交系统处理器。WSL 行先映射为官方 UNC
                         // 形式，不能把 `/home/...` 直接交给 Windows 文件 API。
@@ -227,12 +293,134 @@ impl NebulaWorkspace {
     /// 抽屉。贴满右侧整条竖带，四边不留卡缝（用户 08-26 裁定"无缝"）；行几何
     /// 仍以旧壳 `panel_layout`（side_panel.rs:1695-1729）为基准。
     pub(super) fn render_file_tree(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use crate::display::ui::tokens::{control, radius};
+
         // 滚动只由 uniform_list 承担。旧壳那套行粒度 `scroll` 不再参与，否则
         // `click_row` 的 `scroll + index` 会把点击算到别的行上。
         self.side_panel.scroll = 0;
         let view_switch = self.render_side_panel_switch(cx).into_any_element();
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let language = super::workspace_ui_language();
+        let search_options = self.side_panel.file_search_options();
+        let search_active = !self.side_panel.search.trim().is_empty();
+        let search_pending = self.side_panel.file_search_pending();
+        let search_error = self.side_panel.file_search_error().is_some();
+        let indexed_count = self.side_panel.file_indexed_count();
+        let indexed_more = if self.side_panel.file_index_truncated() { "+" } else { "" };
+        let search_status = if search_active {
+            Some(if search_error {
+                language.pick("正则表达式无效", "Invalid regular expression").to_owned()
+            } else if self.side_panel.file_index_status()
+                == crate::display::side_panel::FileIndexStatus::Building
+            {
+                language.pick("正在建立文件索引…", "Building file index...").to_owned()
+            } else if search_pending {
+                language.pick("正在搜索…", "Searching...").to_owned()
+            } else {
+                match language {
+                    crate::display::UiLanguage::ZhCn => format!(
+                        "{} 个结果 · 已索引 {}{} 项",
+                        self.side_panel.file_search_total(),
+                        indexed_count,
+                        indexed_more
+                    ),
+                    crate::display::UiLanguage::EnUs => format!(
+                        "{} results · {}{} indexed",
+                        self.side_panel.file_search_total(),
+                        indexed_count,
+                        indexed_more
+                    ),
+                }
+            })
+        } else {
+            None
+        };
+        let search_box = v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .h(px(control::MIN_HIT_TARGET))
+                    .flex_shrink_0()
+                    .rounded(px(radius::CONTROL))
+                    .border_1()
+                    .border_color(if search_error { theme.danger } else { theme.border })
+                    .bg(theme.muted)
+                    .overflow_hidden()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.file_tree_search_input)
+                                .w_full()
+                                .appearance(false)
+                                .focus_bordered(false)
+                                .cleanable(true)
+                                .prefix(Icon::new(IconName::Search).xsmall().text_color(muted))
+                                .text_size(px(13.0)),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .pr_1()
+                            .gap(px(2.0))
+                            .child(
+                                Button::new("file-search-match-case")
+                                    .label("Aa")
+                                    .ghost()
+                                    .xsmall()
+                                    .selected(search_options.match_case)
+                                    .tooltip(language.pick("区分大小写", "Match case"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.side_panel.toggle_file_search_match_case();
+                                        this.file_tree_scroll
+                                            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("file-search-whole-word")
+                                    .label("ab")
+                                    .ghost()
+                                    .xsmall()
+                                    .selected(search_options.whole_word)
+                                    .tooltip(language.pick("全词匹配", "Match whole word"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.side_panel.toggle_file_search_whole_word();
+                                        this.file_tree_scroll
+                                            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("file-search-regex")
+                                    .label(".*")
+                                    .ghost()
+                                    .xsmall()
+                                    .selected(search_options.regex)
+                                    .tooltip(
+                                        language.pick("使用正则表达式", "Use regular expression"),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.side_panel.toggle_file_search_regex();
+                                        this.file_tree_scroll
+                                            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .when_some(search_status, |search, status| {
+                search.child(
+                    div()
+                        .h(px(18.0))
+                        .px(px(DRAWER_TEXT_INSET))
+                        .text_xs()
+                        .text_color(if search_error { theme.danger } else { muted })
+                        .child(status),
+                )
+            });
         let root_dir = self.side_panel.root().map(std::path::Path::to_path_buf);
         let root = root_dir
             .as_ref()
@@ -363,6 +551,7 @@ impl NebulaWorkspace {
             .when_some(self.side_panel.root_notice(), |panel, notice| {
                 panel.child(div().text_xs().text_color(theme.warning).child(notice.to_owned()))
             })
+            .child(search_box)
             .child(
                 // 一套滚动模型。此前是 `file_rows().skip(scroll)` 先砍掉上面的行、
                 // 再套 `overflow_y_scrollbar` 滚剩下的，两套模型打架：滚动条滑块
@@ -435,6 +624,27 @@ impl NebulaWorkspace {
     fn file_tree_empty_state(&self) -> Option<crate::ux::EmptyState> {
         if self.side_panel.file_rows().iter().any(|row| !row.is_parent) {
             return None;
+        }
+        if !self.side_panel.search.trim().is_empty() {
+            return Some(if let Some(error) = self.side_panel.file_search_error() {
+                crate::ux::EmptyState::new(
+                    "正则表达式无效",
+                    error.to_owned(),
+                    "修改表达式，或关闭右侧的 .* 选项。",
+                )
+            } else if self.side_panel.file_search_pending() {
+                crate::ux::EmptyState::new(
+                    "正在建立索引",
+                    "文件名索引正在后台准备，界面仍可继续使用。",
+                    "索引完成后会自动显示当前查询的结果。",
+                )
+            } else {
+                crate::ux::EmptyState::new(
+                    "没有匹配的文件",
+                    "当前目录的索引中没有符合条件的文件或文件夹。",
+                    "修改查询，或关闭大小写、全词、正则选项后重试。",
+                )
+            });
         }
         Some(if self.side_panel.snapshot_pending() {
             crate::ux::EmptyState::new(

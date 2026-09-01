@@ -79,6 +79,32 @@ pub fn split_destination_port(destination: &str) -> (String, String) {
     (address, if port == "22" { String::new() } else { port.to_owned() })
 }
 
+/// 把不含端口的 SSH 地址拆成独立用户名与主机字段。
+///
+/// 存盘合同仍是 `user@host`；这里只服务编辑器。无用户名的 OpenSSH config
+/// 别名返回空用户名，让解析层继续从 config 或系统账号补全，不能擅自改写别名。
+pub fn split_destination_user(address: &str) -> (String, String) {
+    let trimmed = address.trim();
+    let rest = trimmed.strip_prefix("ssh://").unwrap_or(trimmed);
+    match rest.rsplit_once('@') {
+        Some((user, host)) if !user.is_empty() && !host.is_empty() => {
+            (user.to_owned(), host.to_owned())
+        },
+        _ => (String::new(), rest.to_owned()),
+    }
+}
+
+/// 把编辑器里的用户名与主机重新拼回稳定的 destination 地址。
+///
+/// 主机框仍接受整段 `user@host` 粘贴；显式用户名优先，否则沿用粘贴内容里的
+/// 用户名。这样拆分 UI 不会牺牲原来“一次粘完整地址”的快速路径。
+pub fn join_destination_user(username: &str, address: &str) -> String {
+    let (embedded_user, host) = split_destination_user(address);
+    let user = username.trim();
+    let user = if user.is_empty() { embedded_user.as_str() } else { user };
+    if user.is_empty() { host } else { format!("{user}@{host}") }
+}
+
 /// 拼回存盘用的地址串。地址框里自带的端口优先——用户刚粘进去的那个才是意图，
 /// 端口框里的可能是上一台主机的残留。
 pub fn join_destination_port(address: &str, port: &str) -> String {
@@ -87,6 +113,23 @@ pub fn join_destination_port(address: &str, port: &str) -> String {
     // 默认端口不写进地址：给每台主机都缀上 `:22` 只是噪音，而且会让同一台
     // 机器出现 `host` 和 `host:22` 两条记录、各自一份凭据。
     if port.is_empty() || port == "22" { base } else { format!("{base}:{port}") }
+}
+
+/// Merge Nebula-saved hosts with OpenSSH aliases, then float pinned entries
+/// in pin order while preserving the stable order of every other host.
+pub(crate) fn merge_ssh_hosts(
+    saved: &[String],
+    pinned: &[String],
+    hidden: &[String],
+) -> Vec<String> {
+    let mut hosts: Vec<_> = saved.iter().filter(|host| !hidden.contains(host)).cloned().collect();
+    for host in crate::ssh::ssh_config_hosts() {
+        if !hidden.contains(&host) && !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts.sort_by_key(|host| pinned.iter().position(|pinned| pinned == host).unwrap_or(usize::MAX));
+    hosts
 }
 
 #[derive(Debug)]
@@ -408,7 +451,7 @@ impl SshEditorRects {
 mod tests {
     use super::{
         SshEditorField, SshEditorSlot, auth_sections, editor_slots, join_destination_port,
-        push_private_key, split_destination_port,
+        join_destination_user, push_private_key, split_destination_port, split_destination_user,
     };
     use crate::ssh_profiles::SshAuthMode;
     use std::path::PathBuf;
@@ -489,5 +532,21 @@ mod tests {
         assert_eq!(join_destination_port("dev@example.com", "22"), "dev@example.com");
         // 地址框里粘进来的端口压过端口框里的旧值。
         assert_eq!(join_destination_port("dev@example.com:2022", "2222"), "dev@example.com:2022");
+    }
+
+    #[test]
+    fn destination_user_is_editable_without_changing_the_storage_contract() {
+        assert_eq!(
+            split_destination_user("ssh://deploy@example.com"),
+            ("deploy".to_owned(), "example.com".to_owned())
+        );
+        assert_eq!(split_destination_user("prod"), (String::new(), "prod".to_owned()));
+        assert_eq!(join_destination_user("root", "192.0.2.10"), "root@192.0.2.10");
+        assert_eq!(
+            join_destination_user("", "deploy@example.com"),
+            "deploy@example.com",
+            "完整地址粘贴仍应保留其中的用户名"
+        );
+        assert_eq!(join_destination_user("admin", "deploy@example.com"), "admin@example.com");
     }
 }

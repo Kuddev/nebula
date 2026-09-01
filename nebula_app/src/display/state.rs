@@ -233,6 +233,10 @@ pub struct NebulaPaneState {
     pub(crate) completion_suppressed_line: Option<String>,
     pub line_buf: String,
     pub(crate) screen_line: String,
+    /// Shell prompt captured with the command submitted from this pane. It is
+    /// retained while an Agent owns the foreground so WSL/SSH sessions without
+    /// a reliable OSC 133;D can prove that the real shell prompt returned.
+    pub(crate) pending_command_prompt: Option<String>,
     pub touched: bool,
     pub inline_images: Vec<NebulaInlineImage>,
     pub command_started: Option<std::time::Instant>,

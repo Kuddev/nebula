@@ -13,7 +13,7 @@ use gpui::{
     Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _,
     Styled as _, TextRun, UTF16Selection, Window, div, point, px,
 };
-use gpui_component::WindowExt as _;
+use gpui_component::{Sizable as _, WindowExt as _, checkbox::Checkbox};
 use nebula_settings::CellWidthModeName;
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
 use nebula_terminal::event_loop::Msg;
@@ -1006,35 +1006,6 @@ impl TerminalView {
                     cx.emit(TerminalViewEvent::TitleChanged);
                     cx.notify();
                 }
-                // WSL agent identity comes from the submitted command or
-                // branded screen chrome because Linux processes are invisible
-                // to Windows Toolhelp. Its injected PROMPT_COMMAND reports OSC
-                // 7 when the guest shell regains control, providing the
-                // lifecycle edge that clears the icon.
-                if matches!(
-                    self.agent_status_source,
-                    crate::ai_agents::AgentStatusSource::Screen
-                        | crate::ai_agents::AgentStatusSource::Process
-                ) && !self.agent_hook_seen
-                    && self
-                        .running_program
-                        .as_deref()
-                        .and_then(crate::ai_agents::AgentKind::parse)
-                        .is_some()
-                {
-                    self.running_program = None;
-                    self.agent_status = crate::ai_agents::AgentStatus::Unknown;
-                    self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
-                    self.agent_status_rule = None;
-                    self.agent_turn_active = false;
-                    self.idle_screen_streak = 0;
-                    self.command_running = false;
-                    self.command_running_disproved = false;
-                    self.command_started = None;
-                    self.last_process_probe = None;
-                    cx.emit(TerminalViewEvent::TitleChanged);
-                    cx.notify();
-                }
             },
             TermEvent::CommandStart => {
                 // 程序身份来自 Enter 时捕获的完整命令行；直接启动和
@@ -1089,29 +1060,13 @@ impl TerminalView {
                 self.last_command_failed = exit_code.is_some_and(|code| code != 0);
                 // 旧壳同款收尾：CLI 退回提示符后，它不再是这个 pane 的前台
                 // 事实——hook 稍后若仍在跑会重新点亮（handle_ai_hook 覆写）。
-                if self.running_program.take().is_some() || self.ai_session.take().is_some() {
+                if self.clear_foreground_agent_state() {
                     cx.emit(TerminalViewEvent::TitleChanged);
                 }
-                self.command_running = false;
-                self.command_running_disproved = false;
-                self.command_started = None;
-                self.last_process_probe = None;
-                // 回到提示符 = 前台已经没有 agent 了。主 agent 的 pid 必须一起
-                // 作废，否则下一个 agent（用户 Ctrl+C 掉旧的再起一个，没有
-                // SessionEnd）会被当成子代理，会话身份再也写不进来。
-                self.primary_agent_pid = None;
                 if let Some(run) = self.active_run.take() {
                     self.last_run =
                         Some(crate::runtime_api::RuntimeRunOutcome::command_done(run, exit_code));
                 }
-                self.agent_status = crate::ai_agents::AgentStatus::Unknown;
-                self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
-                self.agent_status_rule = None;
-                self.agent_hook_seen = false;
-                self.agent_turn_active = false;
-                self.idle_screen_streak = 0;
-                self.agent_runtime_submit_pending = false;
-                self.pending_runtime_submit = None;
                 cx.notify();
             },
             TermEvent::Notify(body) => {
@@ -1147,6 +1102,7 @@ impl TerminalView {
     /// `Exited` 只对宿主发一次；重复的退出信号（ChildExit 之后必然跟 Exit）只更新文案。
     fn mark_exited(&mut self, message: String, cx: &mut Context<Self>) {
         self.pending_runtime_submit = None;
+        self.suggest.pending_command_prompt = None;
         if self.exited.is_none() {
             self.exited = Some(message);
             cx.emit(TerminalViewEvent::Exited);
@@ -1639,7 +1595,9 @@ impl TerminalView {
     pub fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
         let lines = paste_line_count(&text);
-        if paste_needs_confirmation(&text, self.term_mode()) {
+        if nebula_settings::RuntimeSettings::load().multiline_paste_confirm
+            && paste_needs_confirmation(&text, self.term_mode())
+        {
             self.confirm_paste(text, lines, window, cx);
             return;
         }
@@ -1687,9 +1645,13 @@ impl TerminalView {
         // pane」的 view 释放不掉。
         let text = Arc::new(text);
         let view = cx.entity().downgrade();
+        let never_ask_again = Arc::new(std::sync::atomic::AtomicBool::new(false));
         window.open_dialog(cx, move |dialog, window, _cx| {
             let text = text.clone();
             let view = view.clone();
+            let checked = never_ask_again.load(std::sync::atomic::Ordering::Relaxed);
+            let checkbox_state = never_ask_again.clone();
+            let persist_state = never_ask_again.clone();
             confirm_dialog(
                 dialog,
                 window,
@@ -1699,7 +1661,23 @@ impl TerminalView {
                 cancel_text.clone(),
                 ButtonVariant::Primary,
             )
+            .child(
+                Checkbox::new("nebula-paste-never-ask")
+                    .label(language.pick("不再询问", "Don't ask again"))
+                    .checked(checked)
+                    .small()
+                    .on_click(move |checked, window, _| {
+                        checkbox_state.store(*checked, std::sync::atomic::Ordering::Relaxed);
+                        window.refresh();
+                    }),
+            )
             .on_ok(move |_, _window, cx| {
+                if persist_state.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = nebula_settings::persist_keys(&[(
+                        "multiline_paste_confirm",
+                        "0".to_owned(),
+                    )]);
+                }
                 let _ = view.update(cx, |this, cx| this.paste_now(&text, cx));
                 true
             })
@@ -1715,7 +1693,7 @@ impl TerminalView {
         // 行镜像吃粘贴的字面文本；多行/控制字符由引擎侧作废（与旧壳
         // `nebula_input_text` 的防注入契约一致）。
         if !self.term_mode().contains(TermMode::ALT_SCREEN) {
-            crate::display::Display::nebula_input_text(&mut self.suggest, &normalized);
+            crate::display::nebula_input_text(&mut self.suggest, &normalized);
         }
         let bytes = if self.term_mode().contains(TermMode::BRACKETED_PASTE) {
             let mut b = b"\x1b[200~".to_vec();
@@ -1734,21 +1712,39 @@ impl TerminalView {
     }
 
     /// Enter 提交：从 grid 读回显真值（screen truth）记入共享历史，然后清
-    /// 行镜像。读法与旧壳 `nebula_commit_line` 的 Windows 契约一致：无提示
-    /// 箭头（cmd/ssh/REPL）或中线编辑读不到就宁缺毋滥——键击重构的
-    /// line_buf 在光标移动/Tab 补全后就是拼接垃圾，不能进历史。
+    /// 行镜像。读法与旧壳 `nebula_commit_line` 的 Windows 契约一致：无法证明
+    /// 是提示符的 REPL 行或中线编辑读不到就宁缺毋滥——键击重构的
+    /// line_buf 在光标移动/Tab 补全后就是拼接垃圾，不能进历史。Agent 已在
+    /// 前台时保留最初 shell 提示符，内部交互的 Enter 不得覆盖退出证据。
     fn commit_line(&mut self, cx: &mut Context<Self>) {
+        let agent_already_active =
+            self.running_program.as_deref().and_then(crate::ai_agents::AgentKind::parse).is_some();
+        if !agent_already_active {
+            self.suggest.pending_command_prompt = None;
+        }
         #[cfg(windows)]
-        if let Some(session) = &self.session {
+        if !agent_already_active && let Some(session) = &self.session {
             let term = session.term.lock();
             if !term.mode().intersects(TermMode::ALT_SCREEN | TermMode::VI) {
                 let cursor = term.grid().cursor.point;
-                match crate::display::Display::nebula_input_from_raw_grid(&term, cursor) {
-                    Some(line) => self.suggest.screen_line = line,
-                    None => self.suggest.screen_line.clear(),
+                match crate::display::nebula_prompt_line_from_raw_grid(
+                    &term,
+                    cursor,
+                    &self.suggest.line_buf,
+                    &self.suggest.suggest_env,
+                ) {
+                    Some(line) => {
+                        self.suggest.screen_line = line.input;
+                        self.suggest.pending_command_prompt = Some(line.prompt);
+                    },
+                    None => {
+                        self.suggest.screen_line.clear();
+                        self.suggest.pending_command_prompt = None;
+                    },
                 }
             } else {
                 self.suggest.screen_line.clear();
+                self.suggest.pending_command_prompt = None;
             }
         }
         suggest::commit_line(&mut self.suggest);
@@ -1881,10 +1877,10 @@ impl TerminalView {
         match ks.key.as_str() {
             "enter" => self.commit_line(cx),
             "backspace" if mods.control && !mods.alt && !mods.platform => {
-                crate::display::Display::nebula_input_delete_word(&mut self.suggest);
+                crate::display::nebula_input_delete_word(&mut self.suggest);
             },
             "backspace" if plain_mods => {
-                crate::display::Display::nebula_input_backspace(&mut self.suggest);
+                crate::display::nebula_input_backspace(&mut self.suggest);
             },
             key => {
                 let is_modifier = matches!(
@@ -1894,7 +1890,7 @@ impl TerminalView {
                 // key_char 非空 = 平台判定它产生文本（随后从 IME 管道到达）。
                 let produces_text = ks.key_char.as_deref().is_some_and(|text| !text.is_empty());
                 if !is_modifier && !produces_text {
-                    crate::display::Display::nebula_clear_line(&mut self.suggest);
+                    crate::display::nebula_clear_line(&mut self.suggest);
                 }
             },
         }
@@ -2002,7 +1998,7 @@ impl TerminalView {
                 // 无提示时穿透给 shell 自己的补全（encode 兜底）。
                 let ghost = std::mem::take(&mut self.suggest.suggestion);
                 for c in ghost.chars() {
-                    crate::display::Display::nebula_input_char(&mut self.suggest, c);
+                    crate::display::nebula_input_char(&mut self.suggest, c);
                 }
                 self.write_user_text(ghost.clone(), false, ghost.into_bytes(), cx);
                 cx.stop_propagation();
@@ -2338,7 +2334,7 @@ impl TerminalView {
             self.suggest.screen_line.clone()
         };
         for c in insert.chars() {
-            crate::display::Display::nebula_input_char(&mut self.suggest, c);
+            crate::display::nebula_input_char(&mut self.suggest, c);
         }
         self.suggest.completion_suppressed_line = Some(format!("{before}{insert}"));
         if !insert.is_empty() {
@@ -2914,7 +2910,7 @@ impl gpui::EntityInputHandler for TerminalView {
         if !text.is_empty() && self.exited.is_none() {
             // 行镜像吃 IME 管道的字符（含中文提交与普通击键文本）。
             if !self.term_mode().contains(TermMode::ALT_SCREEN) {
-                crate::display::Display::nebula_input_text(&mut self.suggest, text);
+                crate::display::nebula_input_text(&mut self.suggest, text);
             }
             self.write_user_text(text.to_owned(), false, text.as_bytes().to_vec(), cx);
         } else if had_marked_text {

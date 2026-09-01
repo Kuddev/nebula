@@ -2,7 +2,6 @@
 //! GPU drawing.
 
 use std::cmp;
-use std::collections::HashSet;
 use std::fmt::{self, Formatter};
 use std::mem::{self, ManuallyDrop};
 use std::num::NonZeroU32;
@@ -31,16 +30,11 @@ use nebula_terminal::event::{EventListener, OnResize};
 use nebula_terminal::grid::Dimensions as TermDimensions;
 use nebula_terminal::index::{Column, Direction, Line, Point};
 use nebula_terminal::selection::Selection;
-#[cfg(windows)]
-use nebula_terminal::term::cell::Cell;
 use nebula_terminal::term::cell::Flags;
 use nebula_terminal::term::{
     self, LineDamageBounds, MIN_COLUMNS, MIN_SCREEN_LINES, Term, TermDamage, TermMode,
 };
 use nebula_terminal::vte::ansi::{CursorShape, NamedColor};
-
-use nebula_completions::file::complete_item;
-use nebula_completions::{CompletionOptions, Span};
 
 use crate::config::UiConfig;
 use crate::config::debug::RendererPreference;
@@ -65,20 +59,28 @@ use crate::renderer::{self, GlyphCache, Renderer, platform};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::string::{ShortenDirection, StrShortener};
 
+mod background_color_model;
 pub mod color;
+mod command_completion;
 pub mod content;
 pub mod cursor;
 pub mod hint;
 pub mod image_viewer;
+mod input_state;
 pub mod ui;
 pub mod window;
 
 mod chrome;
 pub mod command_palette;
 pub(crate) mod context_menu;
+mod context_menu_model;
+mod document_model;
+mod file_operations;
 mod i18n;
 pub mod markdown_view;
 mod message_queue_entry;
+mod network_proxy_model;
+mod program_identity;
 pub mod sftp_panel;
 pub mod side_panel;
 mod size_info;
@@ -90,6 +92,7 @@ mod surface_opacity;
 /// 输出在新旧壳读起来不一样。
 pub(crate) mod terminal_color;
 pub(crate) mod terminal_math;
+mod text_path_model;
 mod toast;
 
 /// Processor uses the same persisted value before the first window exists so
@@ -98,20 +101,39 @@ pub(crate) fn quick_terminal_hotkey_from_settings(config: &UiConfig) -> String {
     settings::nebula_settings_load(config).quick_terminal_hotkey
 }
 
+pub use background_color_model::BgPickerPart;
+pub(crate) use background_color_model::{BACKGROUND_SWATCHES, hsv_to_rgb, rgb_to_hsv};
 pub(crate) use chrome::chrome_settings_button_rect;
-// GPUI 壳的侧栏共用同一套「按列截断 + 省略号」规则：省略号是合同的一部分，
-// 两个壳各写一份必然漂移（GPUI 曾靠字符数上限截断，末尾直接吃掉）。
-pub(crate) use chrome::truncate_tab_label;
 pub use chrome::{ChromeHit, TabDropAction, in_chrome_bar, resize_edge};
 use chrome::{ChromeTabLayout, TabDrag, chrome_hit_with_tabs, chrome_tab_layout, contains_rect};
-pub use context_menu::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
+pub(crate) use command_completion::{
+    NEBULA_GHOST_MAX, extract_program, nebula_command_hint, nebula_command_hints,
+    nebula_commands_handle, nebula_is_command_position, nebula_path_wants_directory,
+};
+pub use context_menu_model::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
+pub(crate) use file_operations::send_to_recycle_bin;
 pub use i18n::{LanguagePreference, UiLanguage};
+pub(crate) use input_state::{
+    nebula_clear_line, nebula_input_backspace, nebula_input_char, nebula_input_delete_word,
+    nebula_input_text, nebula_shell_prompt_restored_from_raw_grid,
+};
+#[cfg(windows)]
+pub(crate) use input_state::{
+    nebula_input_from_raw_grid, nebula_prompt_line_from_raw_grid, nebula_raw_grid_row_preview,
+};
+pub use program_identity::AiLogo;
+pub(crate) use program_identity::{
+    ai_logo, ai_logo_for_program, prepare_ai_logo_texture, program_icon,
+};
 pub use size_info::SizeInfo;
 pub use state::{
     AcceptKey, AiSessionIdentity, CompletionStyle, NebulaCompletionItem, NebulaCompletionKind,
     NebulaConfirm, NebulaInlineImage, NebulaPaneState, NebulaShell, SplitDirection, SplitNav,
 };
 pub use suggest_engine::SuggestEnv;
+pub(crate) use text_path_model::{
+    fit_tail, percent_decode_lossy, strip_file_scheme, truncate_tab_label,
+};
 pub use toast::ToastKind;
 
 pub(crate) mod file_dialog;
@@ -124,9 +146,11 @@ mod ssh_ui;
 mod text_input;
 
 use ssh_ui::SshDeleteUndo;
+pub(crate) use ssh_ui::merge_ssh_hosts;
 pub use ssh_ui::{
     SSH_DELETE_UNDO_DURATION, SshEditorField, SshEditorHit, SshEditorRects, SshHostEditor,
-    auth_sections, join_destination_port, push_private_key, split_destination_port,
+    auth_sections, join_destination_port, join_destination_user, push_private_key,
+    split_destination_port, split_destination_user,
 };
 pub use ui::theme::NebulaTheme;
 pub(crate) use ui::theme::write_nebula_prompt_theme;
@@ -159,18 +183,13 @@ pub(crate) struct RemoteBackupRequest {
 pub(crate) fn caret_blink_on() -> bool {
     ui::caret::is_on()
 }
-pub(crate) use settings::{
-    BACKGROUND_SWATCHES, CellWidthMode, NewTabPosition, SettingsOpacityTarget, hsv_to_rgb,
-    rgb_to_hsv,
-};
-pub use settings::{
-    BgPickerPart, NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit,
-};
 #[cfg(feature = "gpui-shell")]
-pub(crate) use settings::{
+pub(crate) use network_proxy_model::{
     MANUAL_PROXY_PROTOCOL_OPTIONS, ManualProxyProtocol, ProxyTestStatus, manual_proxy_parts,
     manual_proxy_value,
 };
+pub use settings::{NebulaSettingsSection, SettingsDropdown, SettingsHit, settings_hit};
+pub(crate) use settings::{NewTabPosition, SettingsOpacityTarget};
 
 /// 按显示列宽贪心断行（确认框正文等 UI 段落用）：CJK 逐字可断，行首空
 /// 格吞掉；零宽字符跟随前一个字。不做拉丁连词回退——正文以中文为主，
@@ -222,18 +241,6 @@ const NEBULA_GIT_BRANCH_ICON_MARKER: char = '\u{E101}';
 
 /// Color which is used to highlight damaged rects when debugging.
 const DAMAGE_RECT_COLOR: Rgb = Rgb::new(255, 0, 255);
-
-/// Cap on ghost-text length so a deeply-nested path can never spill across the
-/// whole row and clobber the chrome.
-const NEBULA_GHOST_MAX: usize = 96;
-
-/// Prompt arrow injected by the Windows PowerShell profile (`U+276F`, `NebPromptArrow`).
-/// The active input line is rendered as `❯ <input>`, so on Windows the real,
-/// echoed input can be read straight off the grid instead of being guessed from
-/// keystrokes — that is the only source that never desyncs from the shell's own
-/// line editor (PSReadLine).
-#[cfg(windows)]
-const NEBULA_PROMPT_ARROW: char = '\u{276F}';
 
 /// Visible split divider gap. The drag hit target is intentionally wider.
 pub(crate) const NEBULA_SPLIT_DIVIDER_GAP: f32 = 2.0;
@@ -672,27 +679,6 @@ struct NebulaPowerlineIcon {
     point: Point<usize>,
 }
 
-/// Sidebar SSH HOSTS content: auto-saved destinations (most recent first) +
-/// `~/.ssh/config` aliases (file order), deduped, pinned entries floated to
-/// the top in pin order. One function so startup and settings hot-reload
-/// build the exact same list — the GPUI shell reads the same authority
-/// (`pub(crate)`) instead of growing a second ordering policy.
-pub(crate) fn merge_ssh_hosts(
-    saved: &[String],
-    pinned: &[String],
-    hidden: &[String],
-) -> Vec<String> {
-    let mut hosts: Vec<_> = saved.iter().filter(|host| !hidden.contains(host)).cloned().collect();
-    for host in crate::ssh::ssh_config_hosts() {
-        if !hidden.contains(&host) && !hosts.contains(&host) {
-            hosts.push(host);
-        }
-    }
-    // Stable sort: pinned first in pin order, the rest keep saved→config order.
-    hosts.sort_by_key(|h| pinned.iter().position(|p| p == h).unwrap_or(usize::MAX));
-    hosts
-}
-
 /// Remove one destination while recording exactly enough list state for Undo.
 /// Kept independent from rendering and Credential Manager so the destructive
 /// state transition can be regression-tested without touching real secrets.
@@ -741,22 +727,6 @@ fn restore_ssh_host_to_lists(
     }
 }
 
-/// First word of a committed command line, normalized to a program identity
-/// for the sidebar icon: lowercased, path prefix and Windows launcher
-/// extensions stripped. `D:\tools\Claude.EXE --resume` → `claude`.
-pub(crate) fn extract_program(line: &str) -> Option<String> {
-    let first = line.trim().split_whitespace().next()?;
-    let base = first.trim_matches('"').rsplit(['/', '\\']).next().unwrap_or(first);
-    let mut name = base.to_ascii_lowercase();
-    for ext in [".exe", ".cmd", ".bat", ".ps1", ".com"] {
-        if let Some(stripped) = name.strip_suffix(ext) {
-            name = stripped.to_owned();
-            break;
-        }
-    }
-    (!name.is_empty()).then_some(name)
-}
-
 /// Log replay commands can contain terminal query sequences captured from a
 /// different process. Replying writes those answers into the shell's stdin,
 /// where they become the next command after the replay process exits.
@@ -782,26 +752,6 @@ pub(crate) fn replays_untrusted_terminal_output(line: &str) -> bool {
     ) || matches!(words.as_slice(), [journalctl, ..] if journalctl == "journalctl")
 }
 
-/// Sidebar icon for a running program — Nerd Font glyphs (the chrome text
-/// layer renders with Maple NF). AI CLIs get distinct marks; everything else
-/// shares a generic "running" play sign.
-/// AI clients whose REAL brand mark is drawn in the sidebar as a textured
-/// quad (embedded PNG), instead of a lookalike Nerd Font glyph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AiLogo {
-    /// Anthropic's coral starburst.
-    Claude,
-    /// OpenAI's blossom knot (codex).
-    OpenAi,
-    /// opencode's terminal-frame mark (sst). Two-tone: bright frame + dimmer
-    /// inner screen block, encoded as luma and multiplied by the theme ink.
-    OpenCode,
-    /// Pi's block-built `pi` mark from pi.dev.
-    Pi,
-    /// xAI's Grok mark.
-    Grok,
-}
-
 /// Embedded brand logo assets, kept at their source pixel dimensions.
 const AI_LOGO_CLAUDE_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_claude.png");
 const AI_LOGO_GROK_DARK_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_grok_dark.png");
@@ -815,181 +765,6 @@ const AI_LOGO_PI_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_pi.png");
 /// Texture ids for chrome logos live far above the inline-image counter
 /// (which starts at 1), so the two id spaces can share the renderer cache.
 const AI_LOGO_ID_BASE: u64 = 1 << 62;
-
-pub(crate) fn prepare_ai_logo_texture(
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-    target_size: u32,
-) -> (Vec<u8>, u32, u32) {
-    use image::imageops::FilterType;
-
-    let target_size = target_size.max(1);
-    let source = image::RgbaImage::from_raw(width, height, rgba.to_vec())
-        .expect("decoded logo dimensions must match its RGBA buffer");
-    let resized = image::imageops::resize(&source, target_size, target_size, FilterType::Lanczos3);
-    let pixels = resized.as_raw();
-    let (mass, weighted_x, weighted_y) = pixels.chunks_exact(4).enumerate().fold(
-        (0.0, 0.0, 0.0),
-        |(mass, weighted_x, weighted_y), (index, pixel)| {
-            let alpha = f64::from(pixel[3]);
-            let x = (index as u32 % target_size) as f64 + 0.5;
-            let y = (index as u32 / target_size) as f64 + 0.5;
-            (mass + alpha, weighted_x + x * alpha, weighted_y + y * alpha)
-        },
-    );
-    if mass == 0.0 {
-        return (resized.into_raw(), target_size, target_size);
-    }
-
-    let center = f64::from(target_size) / 2.0;
-    let shift_x = (center - weighted_x / mass).round() as i32;
-    let shift_y = (center - weighted_y / mass).round() as i32;
-    if shift_x == 0 && shift_y == 0 {
-        return (resized.into_raw(), target_size, target_size);
-    }
-
-    let mut centered = vec![0; pixels.len()];
-    for y in 0..target_size as i32 {
-        for x in 0..target_size as i32 {
-            let dest_x = x + shift_x;
-            let dest_y = y + shift_y;
-            if !(0..target_size as i32).contains(&dest_x)
-                || !(0..target_size as i32).contains(&dest_y)
-            {
-                continue;
-            }
-            let source_index = ((y as u32 * target_size + x as u32) * 4) as usize;
-            let dest_index = ((dest_y as u32 * target_size + dest_x as u32) * 4) as usize;
-            centered[dest_index..dest_index + 4]
-                .copy_from_slice(&pixels[source_index..source_index + 4]);
-        }
-    }
-    (centered, target_size, target_size)
-}
-
-/// Real-logo mapping for AI clients; everything else falls back to the
-/// [`program_icon`] glyph. Gated on PNG support: without it there is no
-/// texture to draw and the glyph must stay.
-pub(crate) fn ai_logo_for_program(program: &str) -> Option<AiLogo> {
-    let normalized =
-        extract_program(program).unwrap_or_else(|| program.trim().to_ascii_lowercase());
-    match normalized.as_str() {
-        "claude" => Some(AiLogo::Claude),
-        "codex" => Some(AiLogo::OpenAi),
-        "opencode" => Some(AiLogo::OpenCode),
-        "pi" => Some(AiLogo::Pi),
-        "grok" | "grok-cli" => Some(AiLogo::Grok),
-        _ => None,
-    }
-}
-
-pub(crate) fn ai_logo(program: &str) -> Option<AiLogo> {
-    if cfg!(any(not(feature = "png"), target_os = "macos")) {
-        return None;
-    }
-    ai_logo_for_program(program)
-}
-
-/// Drop a `file://` / `file:///` scheme so a local link reads as a plain
-/// path in the hover tooltip. On Windows `file:///D:/x` → `D:/x` (the slash
-/// before the drive letter goes too); non-`file:` URIs pass through.
-///
-/// 2026-07-26 用户反馈：`ls --hyperlink` 会把非 ASCII 文件名 percent-encode
-/// （一个汉字 → `%E6%98%9F` 九列），48 列预算被编码噪声吃光后再截尾，提示
-/// "显示不全"。file 路径解码后再展示；其他 scheme 保持原样（URL 的编码
-/// 属于其身份，不替它翻译）。
-pub(crate) fn strip_file_scheme(uri: &str) -> String {
-    match uri.strip_prefix("file:///").or_else(|| uri.strip_prefix("file://")) {
-        // `file:///D:/x` yields `D:/x`; a UNC-ish `file://host/x` keeps `host/x`.
-        Some(rest) => percent_decode_lossy(rest),
-        None => uri.to_owned(),
-    }
-}
-
-/// Decode `%XX` escapes as UTF-8 bytes for DISPLAY. Malformed escapes pass
-/// through verbatim; if the decoded bytes are not valid UTF-8 the original
-/// string is returned unchanged — a tooltip must never invent mojibake.
-fn percent_decode_lossy(s: &str) -> String {
-    if !s.contains('%') {
-        return s.to_owned();
-    }
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let decoded = (bytes[i] == b'%' && i + 2 < bytes.len())
-            .then(|| {
-                let hi = (bytes[i + 1] as char).to_digit(16)?;
-                let lo = (bytes[i + 2] as char).to_digit(16)?;
-                Some((hi * 16 + lo) as u8)
-            })
-            .flatten();
-        match decoded {
-            Some(byte) => {
-                out.push(byte);
-                i += 3;
-            },
-            None => {
-                out.push(bytes[i]);
-                i += 1;
-            },
-        }
-    }
-    String::from_utf8(out).unwrap_or_else(|_| s.to_owned())
-}
-
-/// Truncate `s` to at most `budget` display columns (CJK counts as 2), keeping
-/// the TAIL and prefixing `…` when cut — the filename end is what a hover
-/// tooltip most needs. Returns a string whose display width is `<= budget`.
-pub(crate) fn fit_tail(s: &str, budget: usize) -> String {
-    let width = |c: char| c.width().unwrap_or(0);
-    let total: usize = s.chars().map(width).sum();
-    if total <= budget {
-        return s.to_owned();
-    }
-    if budget == 0 {
-        return String::new();
-    }
-    // Reserve one column for the ellipsis, then take chars from the end until
-    // the reserved room fills up.
-    let room = budget.saturating_sub(1);
-    let mut kept = std::collections::VecDeque::new();
-    let mut used = 0;
-    for c in s.chars().rev() {
-        let w = width(c);
-        if used + w > room {
-            break;
-        }
-        used += w;
-        kept.push_front(c);
-    }
-    let mut out = String::with_capacity(kept.len() + 1);
-    out.push('…');
-    out.extend(kept);
-    out
-}
-
-pub(crate) fn program_icon(program: &str) -> &'static str {
-    match program {
-        "claude" => "\u{f0ce5}", // md-star-four-points (Claude spark)
-        "codex" => "\u{f02d8}",  // md-hexagon (OpenAI mark)
-        "gemini" => "\u{f0ce6}", // md-star-four-points-outline
-        "copilot" => "\u{f4b8}", // oct-copilot
-        "cursor" | "cursor-agent" => "\u{f0ec3}", // md-cursor-default-outline
-        "aider" | "goose" | "crush" | "ollama" => "\u{f06a9}", // md-robot
-        "opencode" => "\u{f489}", // oct-terminal
-        "pi" => "\u{f135}",      // fa-code
-        "git" | "gh" | "lazygit" => "\u{f418}", // oct-git-branch
-        "vim" | "nvim" | "vi" | "hx" | "nano" => "\u{e62b}", // custom-vim
-        "ssh" | "mosh" => "\u{f489}", // oct-terminal (remote)
-        "cargo" | "rustc" => "\u{e7a8}", // dev-rust
-        "node" | "npm" | "pnpm" | "yarn" | "bun" | "deno" => "\u{e718}", // dev-nodejs
-        "python" | "python3" | "pip" | "uv" => "\u{e73c}", // dev-python
-        "docker" | "podman" => "\u{e7b0}", // dev-docker
-        _ => "\u{f04b}",         // fa-play (generic busy)
-    }
-}
 
 /// The UI font role: the size chrome
 /// typography rasterizes at and the cell chrome layout steps by. Anchored to
@@ -1005,26 +780,7 @@ struct NebulaUiFont {
 }
 
 pub(crate) fn nebula_debug_log(message: impl AsRef<str>) {
-    use std::io::Write as _;
-
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ENABLED.get_or_init(|| {
-        std::env::var("NEBULA_DEBUG_LOG").is_ok_and(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-    }) {
-        return;
-    }
-
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()))
-        .unwrap_or_else(|_| "0.000".to_owned());
-    let path = nebula_data_dir().join("nebula_debug.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "[{ts} pid={}] {}", std::process::id(), message.as_ref());
-    }
+    crate::logging::debug_log(message);
 }
 
 /// Unconditional variant of [`nebula_debug_log`] for the link-click diagnosis:
@@ -1084,247 +840,6 @@ pub(crate) fn tray_enabled() -> bool {
         .unwrap_or(true)
 }
 
-#[cfg(windows)]
-fn nebula_pathexts() -> Vec<String> {
-    std::env::var("PATHEXT")
-        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.PS1".to_owned())
-        .split(';')
-        .filter_map(|ext| {
-            let ext = ext.trim();
-            if ext.is_empty() {
-                None
-            } else if ext.starts_with('.') {
-                Some(ext.to_ascii_lowercase())
-            } else {
-                Some(format!(".{}", ext.to_ascii_lowercase()))
-            }
-        })
-        .collect()
-}
-
-#[cfg(windows)]
-fn nebula_command_name(path: &Path, pathexts: &[String]) -> Option<String> {
-    let ext = path.extension()?.to_str()?;
-    let ext = format!(".{}", ext).to_ascii_lowercase();
-    if !pathexts.iter().any(|known| known == &ext) {
-        return None;
-    }
-    path.file_stem()?.to_str().filter(|name| !name.is_empty()).map(ToOwned::to_owned)
-}
-
-#[cfg(not(windows))]
-fn nebula_command_name(path: &Path) -> Option<String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if path.metadata().ok()?.permissions().mode() & 0o111 == 0 {
-            return None;
-        }
-    }
-    path.file_name()?.to_str().filter(|name| !name.is_empty()).map(ToOwned::to_owned)
-}
-
-fn nebula_path_commands() -> Vec<String> {
-    let Some(path_env) = std::env::var_os("PATH") else {
-        return Vec::new();
-    };
-
-    let mut commands = Vec::new();
-    let mut seen = HashSet::new();
-    #[cfg(windows)]
-    let pathexts = nebula_pathexts();
-
-    for dir in std::env::split_paths(&path_env).filter(|dir| !dir.as_os_str().is_empty()) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_file() {
-                continue;
-            }
-
-            #[cfg(windows)]
-            let command = nebula_command_name(&entry.path(), &pathexts);
-            #[cfg(not(windows))]
-            let command = nebula_command_name(&entry.path());
-
-            if let Some(command) = command {
-                #[cfg(windows)]
-                let key = command.to_ascii_lowercase();
-                #[cfg(not(windows))]
-                let key = command.clone();
-
-                // PATH 里同名 shim/真实可执行文件经常重复；这里只保留第一个，
-                // 避免每次输入首 token 时 ghost 在等价候选间跳动。
-                if seen.insert(key) {
-                    commands.push(command);
-                }
-            }
-        }
-    }
-
-    commands.sort_by(|a, b| {
-        #[cfg(windows)]
-        {
-            a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()).then(a.cmp(b))
-        }
-        #[cfg(not(windows))]
-        {
-            a.cmp(b)
-        }
-    });
-    commands
-}
-
-/// Collect external-shell command names: PATH executables plus, on Windows, the
-/// running shell's cmdlets / functions / aliases (which never appear on PATH).
-/// Merged and de-duplicated (case-insensitively on Windows).
-fn nebula_collect_commands() -> Vec<String> {
-    let mut commands = nebula_path_commands();
-
-    #[cfg(windows)]
-    {
-        let mut seen: HashSet<String> = commands.iter().map(|c| c.to_ascii_lowercase()).collect();
-        for command in nebula_powershell_commands() {
-            if seen.insert(command.to_ascii_lowercase()) {
-                commands.push(command);
-            }
-        }
-        commands.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()).then(a.cmp(b)));
-    }
-
-    commands
-}
-
-/// PowerShell cmdlets / functions / aliases via a one-shot `Get-Command`, run
-/// with `-NoProfile` to avoid the user's profile cost. Best-effort: any failure
-/// (no PowerShell, error, parse problem) yields an empty list.
-#[cfg(windows)]
-fn nebula_powershell_commands() -> Vec<String> {
-    // CREATE_NO_WINDOW: Nebula is a GUI-subsystem process, so a console child
-    // would otherwise pop up (and instantly vanish) a visible PowerShell
-    // window at startup.
-    use std::os::windows::process::CommandExt;
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-Command -CommandType Cmdlet,Function,Alias -ErrorAction SilentlyContinue \
-             | Select-Object -ExpandProperty Name",
-        ])
-        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Process-wide handle to the command list, populated once on a background
-/// thread so the (PowerShell-invoking) collection never blocks window startup.
-/// Readers see an empty list until collection finishes, then the merged set.
-pub(crate) fn nebula_commands_handle() -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
-    static COMMANDS: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<Vec<String>>>> =
-        std::sync::OnceLock::new();
-    COMMANDS
-        .get_or_init(|| {
-            let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let bg = shared.clone();
-            std::thread::spawn(move || {
-                let commands = nebula_collect_commands();
-                if let Ok(mut guard) = bg.lock() {
-                    *guard = commands;
-                }
-            });
-            shared
-        })
-        .clone()
-}
-
-fn nebula_command_hint<'a>(commands: &'a [String], prefix: &str) -> Option<&'a str> {
-    if prefix.is_empty() {
-        return None;
-    }
-
-    // 完整命令已经可执行时必须停止补全；否则 `claude` 会跳过自身，继续
-    // 命中 `claude-agent-acp` 这类更长的 PATH 邻居。
-    #[cfg(windows)]
-    let exact = commands.iter().any(|command| command.eq_ignore_ascii_case(prefix));
-    #[cfg(not(windows))]
-    let exact = commands.iter().any(|command| command == prefix);
-    if exact {
-        return None;
-    }
-
-    commands.iter().find_map(|command| {
-        if command.len() <= prefix.len() || !command.is_char_boundary(prefix.len()) {
-            return None;
-        }
-        let (head, rem) = command.split_at(prefix.len());
-        #[cfg(windows)]
-        let matches = head.eq_ignore_ascii_case(prefix);
-        #[cfg(not(windows))]
-        let matches = head == prefix;
-
-        matches.then_some(rem)
-    })
-}
-
-/// Multi-candidate variant of [`nebula_command_hint`] for the popup list: up
-/// to `limit` full command names extending `prefix`. Unlike the ghost variant
-/// an exact match does NOT suppress the longer neighbors — listing `claude`
-/// alongside `claude-agent-acp` is exactly what a chooser is for.
-fn nebula_command_hints<'a>(commands: &'a [String], prefix: &str, limit: usize) -> Vec<&'a str> {
-    if prefix.is_empty() || limit == 0 {
-        return Vec::new();
-    }
-    let mut out: Vec<&'a str> = Vec::new();
-
-    // 精确命令先列出来：用户输入 `ls` 时，第一感知应该是“这个命令可以
-    // 直接接受”，而不是从 `LsaIso` 开始的一串较长邻居。命令表通常已排
-    // 序，但这里不能把 UX 合同寄托在数据源顺序上，所以显式分两趟。
-    for exact_only in [true, false] {
-        for command in commands {
-            if command.len() < prefix.len() || !command.is_char_boundary(prefix.len()) {
-                continue;
-            }
-            let head = &command[..prefix.len()];
-            let exact = command.len() == prefix.len();
-            if exact != exact_only {
-                continue;
-            }
-            #[cfg(windows)]
-            let matches = head.eq_ignore_ascii_case(prefix);
-            #[cfg(not(windows))]
-            let matches = head == prefix;
-
-            #[cfg(windows)]
-            let duplicate = out.iter().any(|seen| seen.eq_ignore_ascii_case(command));
-            #[cfg(not(windows))]
-            let duplicate = out.iter().any(|seen| *seen == command.as_str());
-
-            if matches && !duplicate {
-                out.push(command);
-                if out.len() == limit {
-                    return out;
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Truncate/pad `text` to exactly `width` display cells (wide chars count 2;
 /// a wide char that would straddle the boundary is dropped and padded over).
 fn nebula_pad_to_cells(text: &str, width: usize) -> String {
@@ -1345,20 +860,6 @@ fn nebula_pad_to_cells(text: &str, width: usize) -> String {
         out.push(' ');
     }
     out
-}
-
-fn nebula_is_command_position(line: &str) -> bool {
-    !line.contains([' ', '\t'])
-        && !line.contains(['/', '\\'])
-        && line.as_bytes().get(1) != Some(&b':')
-}
-
-fn nebula_path_wants_directory(line: &str) -> bool {
-    let command = line.split([' ', '\t']).next().unwrap_or("");
-    matches!(
-        command.to_ascii_lowercase().as_str(),
-        "cd" | "chdir" | "pushd" | "sl" | "set-location"
-    )
 }
 
 #[derive(Debug)]
@@ -2020,51 +1521,6 @@ fn alt_screen_vertical_padding_bands(
     };
 
     [top, band(grid_bottom, bottom_limit)]
-}
-
-/// 本地文件/目录送回收站（Windows：`SHFileOperationW` + `FOF_ALLOWUNDO`）。
-/// 不弹系统确认（Nebula 自己的确认弹窗已经问过了），不弹系统错误框——
-/// 失败以 Err 返回给面板提示条。
-#[cfg(windows)]
-pub(crate) fn send_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-
-    use windows_sys::Win32::UI::Shell::{
-        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW,
-        SHFileOperationW,
-    };
-
-    if !path.exists() {
-        return Err("路径已不存在".to_owned());
-    }
-    // pFrom 是双 NUL 结尾的路径列表。
-    let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
-    from.push(0);
-    from.push(0);
-    let mut op = SHFILEOPSTRUCTW {
-        hwnd: std::ptr::null_mut(),
-        wFunc: FO_DELETE as u32,
-        pFrom: from.as_ptr(),
-        pTo: std::ptr::null(),
-        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI) as u16,
-        fAnyOperationsAborted: 0,
-        hNameMappings: std::ptr::null_mut(),
-        lpszProgressTitle: std::ptr::null(),
-    };
-    let code = unsafe { SHFileOperationW(&mut op) };
-    if code == 0 && op.fAnyOperationsAborted == 0 {
-        Ok(())
-    } else {
-        Err(format!("系统拒绝（代码 {code}）"))
-    }
-}
-
-#[cfg(not(windows))]
-pub(crate) fn send_to_recycle_bin(path: &std::path::Path) -> Result<(), String> {
-    // 非 Windows 暂无回收站集成：递归删除前置确认已由弹窗承担。
-    let result =
-        if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
-    result.map_err(|err| err.to_string())
 }
 
 /// Prefer the event loop's system-wide appearance over the window theme.
@@ -8608,13 +8064,18 @@ impl Display {
         let line_override = if alt_screen || vi_mode || search_state.regex().is_some() {
             None
         } else {
-            Self::nebula_input_from_raw_grid(&terminal, cursor_point)
+            nebula_input_from_raw_grid(
+                &terminal,
+                cursor_point,
+                &pane_state.line_buf,
+                &pane_state.suggest_env,
+            )
         };
         #[cfg(windows)]
         let row_preview = if alt_screen || vi_mode || search_state.regex().is_some() {
             None
         } else {
-            Some(Self::nebula_raw_grid_row_preview(&terminal, cursor_point))
+            Some(nebula_raw_grid_row_preview(&terminal, cursor_point))
         };
 
         // 打字（含 IME 组词）不影响网格内容，扫描保持开启；一旦这里随
@@ -10418,58 +9879,6 @@ impl Display {
         dirty
     }
 
-    #[inline(never)]
-    /// Append a typed character to the prompt-line buffer that backs the
-    /// history hint.
-    pub fn nebula_input_char(state: &mut NebulaPaneState, c: char) {
-        state.line_buf.push(c);
-        state.touched = true;
-        state.suggestion.clear();
-        state.suggestion_key.clear();
-        state.completion_items.clear();
-        state.completion_selected = None;
-        nebula_debug_log(format!("input_char c={c:?} line_buf={:?}", state.line_buf));
-    }
-
-    /// Drop the last character (Backspace) from the prompt-line buffer.
-    pub fn nebula_input_backspace(state: &mut NebulaPaneState) {
-        state.line_buf.pop();
-        state.touched = true;
-        state.clear_completion_hints();
-        nebula_debug_log(format!("input_backspace line_buf={:?}", state.line_buf));
-    }
-
-    /// Drop the previous whitespace-delimited token, matching the common
-    /// Ctrl+W/Ctrl+Backspace shell behavior closely enough for prompt hints.
-    pub fn nebula_input_delete_word(state: &mut NebulaPaneState) {
-        state.touched = true;
-        while state.line_buf.ends_with(char::is_whitespace) {
-            state.line_buf.pop();
-        }
-        while state.line_buf.chars().last().is_some_and(|c| !c.is_whitespace()) {
-            state.line_buf.pop();
-        }
-        state.clear_completion_hints();
-        nebula_debug_log(format!("input_delete_word line_buf={:?}", state.line_buf));
-    }
-
-    /// Merge pasted literal text into the prompt-line buffer. Multi-line or
-    /// escape-bearing paste can execute commands or move the cursor, so we
-    /// invalidate instead of guessing; Nushell avoids this class of bug by
-    /// owning the editor buffer directly via Reedline.
-    pub fn nebula_input_text(state: &mut NebulaPaneState, text: &str) {
-        if text.contains(['\r', '\n']) || text.chars().any(|c| c.is_control() && c != '\t') {
-            nebula_debug_log(format!("input_text_clear text={text:?}"));
-            Self::nebula_clear_line(state);
-            return;
-        }
-
-        state.line_buf.push_str(text);
-        state.touched = true;
-        state.clear_completion_hints();
-        nebula_debug_log(format!("input_text text={text:?} line_buf={:?}", state.line_buf));
-    }
-
     /// Commit the current line to history (on Enter) and reset the buffer.
     ///
     /// `screen_line` (the input read off the grid, i.e. what the shell's own
@@ -10497,7 +9906,7 @@ impl Display {
             "input_commit cwd={:?} line={line:?} line_buf={:?} screen_line={:?}",
             state.cwd, state.line_buf, state.screen_line
         ));
-        self.nebula_history.record(&line, &state.cwd);
+        self.nebula_history.record(&state.suggest_env.history_scope(), &line, &state.cwd);
         // Kept for CommandStart (OSC 133;C): by the time it arrives from the
         // PTY these buffers are already cleared, so the program identity for
         // the tab icon has to be captured here. Fall back to the keystroke
@@ -10517,134 +9926,12 @@ impl Display {
             state.finished_unseen = false;
             state.needs_attention = false;
         }
-        Self::nebula_clear_line(state);
+        nebula_clear_line(state);
     }
 
     /// Feed the shared directory model from an authoritative shell report.
     pub fn nebula_record_directory(&self, cwd: &str) {
         self.directory_history.record(cwd);
-    }
-
-    /// Reset the prompt-line buffer (Enter, Ctrl-C, or any non-text key).
-    pub fn nebula_clear_line(state: &mut NebulaPaneState) {
-        if !state.line_buf.is_empty() || !state.suggestion.is_empty() {
-            nebula_debug_log(format!(
-                "input_clear line_buf={:?} suggestion={:?}",
-                state.line_buf, state.suggestion
-            ));
-        }
-        state.line_buf.clear();
-        state.screen_line.clear();
-        state.completion_suppressed_line = None;
-        state.clear_completion_hints();
-    }
-
-    /// Read the real, echoed input off the cursor's grid row on Windows.
-    ///
-    /// The PowerShell profile renders the active input line as `❯ <input>`, so
-    /// the user's current input is exactly the run of cells from just past the
-    /// last prompt arrow up to the cursor column. Reading the grid (the screen
-    /// truth PSReadLine itself produced) sidesteps the keystroke-reconstructed
-    /// `line_buf`, which desyncs the instant the cursor moves, Tab-completes or
-    /// recalls history — the "hint flickers in and out" bug.
-    ///
-    /// Returns `None` (suppressing the hint) when no prompt arrow precedes the
-    /// cursor, or when non-space cells sit after the cursor on the same row —
-    /// i.e. a mid-line edit, where a trailing ghost would be misplaced (fish and
-    /// PSReadLine suppress the hint there too).
-    #[cfg(windows)]
-    fn nebula_raw_grid_row_preview<T: EventListener>(terminal: &Term<T>, cursor: Point) -> String {
-        let grid = terminal.grid();
-        let columns = grid.columns();
-        let mut text = String::with_capacity(columns);
-        let mut arrow_cols = Vec::new();
-
-        for col in 0..columns {
-            let cell: &Cell = &grid[cursor.line][Column(col)];
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                continue;
-            }
-            if cell.c == NEBULA_PROMPT_ARROW {
-                arrow_cols.push(col);
-            }
-            text.push(cell.c);
-        }
-
-        while text.ends_with(' ') {
-            text.pop();
-        }
-
-        format!(
-            "line={} col={} arrows={arrow_cols:?} text={text:?}",
-            cursor.line.0, cursor.column.0
-        )
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn nebula_input_from_raw_grid<T: EventListener>(
-        terminal: &Term<T>,
-        cursor: Point,
-    ) -> Option<String> {
-        let grid = terminal.grid();
-        let columns = grid.columns();
-        let cursor_col = cursor.column.0.min(columns);
-
-        // A cursor mid-wrap means the input continues on the row below (a
-        // mid-line edit); a hint anchored here would be wrong.
-        if grid[cursor.line][Column(columns - 1)].flags.contains(Flags::WRAPLINE) {
-            return None;
-        }
-
-        // Suppress when anything non-space follows the cursor on this row.
-        for col in cursor_col..columns {
-            let cell: &Cell = &grid[cursor.line][Column(col)];
-            if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                continue;
-            }
-            if !cell.c.is_whitespace() {
-                return None;
-            }
-        }
-
-        // A long input soft-wraps — CJK paths hit the margin fast at two
-        // columns per char — leaving the prompt arrow rows ABOVE the cursor.
-        // Walk up while the row above ends in WRAPLINE to the logical line's
-        // first row (bounded, so a pathological grid can't spin every frame).
-        let topmost = grid.topmost_line().0;
-        let mut first_row = cursor.line.0;
-        while first_row > topmost
-            && cursor.line.0 - first_row < 64
-            && grid[Line(first_row - 1)][Column(columns - 1)].flags.contains(Flags::WRAPLINE)
-        {
-            first_row -= 1;
-        }
-
-        // Rebuild the logical line from its first row down to the cursor,
-        // remembering the last prompt arrow before it. This deliberately reads
-        // the raw terminal grid, not RenderableCell: renderables omit
-        // default-background spaces, and that was collapsing `cd D:\te` into
-        // `cdD:\te`, making directory-history hints impossible to parse.
-        let mut text = String::with_capacity(columns);
-        let mut arrow_pos = None;
-        for row in first_row..=cursor.line.0 {
-            let row_end = if row == cursor.line.0 { cursor_col } else { columns };
-            for col in 0..row_end {
-                let cell: &Cell = &grid[Line(row)][Column(col)];
-                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    continue;
-                }
-                if cell.c == NEBULA_PROMPT_ARROW {
-                    arrow_pos = Some(text.len());
-                }
-                text.push(cell.c);
-            }
-        }
-
-        let input = &text[arrow_pos? + NEBULA_PROMPT_ARROW.len_utf8()..];
-
-        // Drop the single space that follows the arrow.
-        Some(input.strip_prefix(' ').unwrap_or(input).to_owned())
     }
 
     /// Recompute the inline ghost-text suggestion. `line_override` carries the
@@ -11630,10 +10917,9 @@ mod nebula_ux_tests {
     use winit::window::Theme as WinitTheme;
 
     use super::{
-        AI_LOGO_GROK_DARK_PNG, AI_LOGO_GROK_LIGHT_PNG, AiLogo, Display, NebulaConfirm, SizeInfo,
-        ai_logo, alt_screen_vertical_padding_bands, compute_cell_size, extract_program,
-        nebula_command_hint, nebula_command_hints, nebula_pad_to_cells, percent_decode_lossy,
-        prepare_ai_logo_texture, program_icon, remove_ssh_host_from_lists,
+        AI_LOGO_GROK_DARK_PNG, AI_LOGO_GROK_LIGHT_PNG, AiLogo, NebulaConfirm, SizeInfo, ai_logo,
+        alt_screen_vertical_padding_bands, compute_cell_size, extract_program, nebula_pad_to_cells,
+        percent_decode_lossy, prepare_ai_logo_texture, program_icon, remove_ssh_host_from_lists,
         replays_untrusted_terminal_output, restore_ssh_host_to_lists, strip_file_scheme,
         system_theme_snapshot,
     };
@@ -11823,29 +11109,6 @@ mod nebula_ux_tests {
         for command in ["docker run app", "kubectl exec pod -- sh", "cargo test", "nvim"] {
             assert!(!replays_untrusted_terminal_output(command), "{command}");
         }
-    }
-
-    #[test]
-    fn exact_path_command_suppresses_longer_neighbor_completion() {
-        let commands = strings(&["claude", "claude-agent-acp"]);
-        assert_eq!(nebula_command_hint(&commands, "clau"), Some("de"));
-        assert_eq!(nebula_command_hint(&commands, "claude"), None);
-
-        #[cfg(windows)]
-        assert_eq!(nebula_command_hint(&commands, "CLAUDE"), None);
-    }
-
-    #[test]
-    fn popup_command_hints_keep_longer_neighbors_and_dedup() {
-        let commands = strings(&["claude", "claude-agent-acp", "claude", "cargo"]);
-        // 弹窗列表与 ghost 相反：精确命令置顶，同时保留更长的邻居。
-        assert_eq!(
-            nebula_command_hints(&commands, "claude", 8),
-            vec!["claude", "claude-agent-acp"]
-        );
-        assert_eq!(nebula_command_hints(&commands, "c", 2), vec!["claude", "claude-agent-acp"]);
-        assert_eq!(nebula_command_hints(&strings(&["LsaIso", "lsass", "ls"]), "ls", 8)[0], "ls");
-        assert!(nebula_command_hints(&commands, "", 8).is_empty());
     }
 
     #[test]
