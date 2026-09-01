@@ -5,14 +5,14 @@
 
 use super::*;
 
-const PANEL_MAX_WIDTH: f32 = 420.0;
-const PANEL_MAX_HEIGHT: f32 = 440.0;
-const PANEL_MIN_HEIGHT: f32 = 232.0;
-const PANEL_CHROME_HEIGHT: f32 = 104.0;
+const PANEL_MAX_WIDTH: f32 = 430.0;
+const PANEL_MAX_HEIGHT: f32 = 360.0;
+const PANEL_EMPTY_HEIGHT: f32 = 196.0;
+const PANEL_FIXED_HEIGHT: f32 = 108.0;
 const PANEL_MARGIN: f32 = 8.0;
 // 覆盖层从自绘标题栏下沿开始；固定组件依赖当前将该区域定义为 34px。
 const WINDOW_TITLE_BAR_HEIGHT: f32 = 34.0;
-const PANEL_HEADER_HEIGHT: f32 = 48.0;
+const PANEL_FOOTER_HEIGHT: f32 = 44.0;
 const ROW_HEIGHT: f32 = 62.0;
 const EDITOR_DIALOG_HEIGHT: f32 = 430.0;
 const DELETE_DIALOG_HEIGHT: f32 = 230.0;
@@ -528,15 +528,15 @@ impl NebulaWorkspace {
         }
         let command_count = self.saved_commands.commands().len();
         let selected_index = self.command_manager_selected;
-        // 少量命令保持原型中的小弹窗形态；条目增多时只扩到上限，随后由列表滚动。
+        // 固定区域只保留搜索和新增入口；命令增多时仅滚动中间列表，避免退化成大面板。
         let desired_height = if commands.is_empty() {
-            PANEL_MIN_HEIGHT
+            PANEL_EMPTY_HEIGHT
         } else {
-            (PANEL_CHROME_HEIGHT + commands.len() as f32 * ROW_HEIGHT).max(PANEL_MIN_HEIGHT)
+            PANEL_FIXED_HEIGHT + commands.len() as f32 * ROW_HEIGHT
         };
         let panel_height = desired_height.min(PANEL_MAX_HEIGHT).min(available_height);
         let list_scrollable =
-            commands.len() as f32 * ROW_HEIGHT > (panel_height - PANEL_CHROME_HEIGHT).max(0.0);
+            commands.len() as f32 * ROW_HEIGHT > (panel_height - PANEL_FIXED_HEIGHT).max(0.0);
 
         let mut rows = Vec::with_capacity(commands.len());
         for (index, command) in commands.into_iter().enumerate() {
@@ -739,18 +739,6 @@ impl NebulaWorkspace {
                 } else {
                     language.pick("还没有保存命令", "No saved commands yet")
                 }))
-                .when(!has_saved_commands, |empty| {
-                    empty.child(
-                        Button::new("saved-command-empty-add")
-                            .icon(IconName::Plus)
-                            .label(language.pick("新增命令", "Add command"))
-                            .primary()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.open_saved_command_editor(None, window, cx);
-                            })),
-                    )
-                })
                 .into_any_element()
         } else {
             let scroll_handle = self.command_manager_scroll.clone();
@@ -821,60 +809,30 @@ impl NebulaWorkspace {
                         MouseButton::Left,
                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
                     )
+                    .child(div().w_full().flex_shrink_0().p_2().child(search_box))
+                    .child(div().flex_1().min_h_0().px_2().pb_2().child(list_content))
                     .child(
                         h_flex()
-                            .h(px(PANEL_HEADER_HEIGHT))
+                            .id("saved-command-add")
                             .w_full()
+                            .h(px(PANEL_FOOTER_HEIGHT))
                             .flex_shrink_0()
                             .items_center()
                             .gap_2()
                             .px_3()
-                            .border_b_1()
+                            .border_t_1()
                             .border_color(border)
-                            .child(command_manager_icon().small().text_color(accent))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(foreground)
-                                    .child(language.pick("命令列表", "Command List")),
-                            )
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .font_family(mono_family)
-                                    .text_size(px(11.0))
-                                    .text_color(muted)
-                                    .child(command_count.to_string()),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Button::new("saved-command-add")
-                                    .icon(IconName::Plus)
-                                    .ghost()
-                                    .xsmall()
-                                    .tooltip(language.pick("新增命令", "Add command"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.open_saved_command_editor(None, window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("saved-command-close")
-                                    .icon(IconName::Close)
-                                    .ghost()
-                                    .xsmall()
-                                    .tooltip(language.pick("关闭命令列表", "Close command list"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.close_command_manager(window, cx);
-                                    })),
-                            ),
-                    )
-                    .child(div().w_full().flex_shrink_0().p_2().child(search_box))
-                    .child(div().flex_1().min_h_0().px_2().pb_2().child(list_content)),
+                            .text_sm()
+                            .text_color(muted)
+                            .cursor_pointer()
+                            .hover(move |row| row.bg(hover_bg).text_color(foreground))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.open_saved_command_editor(None, window, cx);
+                            }))
+                            .child(Icon::new(IconName::Plus).xsmall())
+                            .child(language.pick("新增命令", "Command")),
+                    ),
             )
             .into_any_element()
     }
