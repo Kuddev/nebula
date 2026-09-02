@@ -92,27 +92,46 @@ pub(super) fn ai_session_palette_rows(
     rows
 }
 
+/// 最小化查询。GPUI 只暴露 `is_window_active`（在不在前台），没有「像素还
+/// 到不到屏幕」这一问，所以 Windows 直接问平台。非 Windows 退回只认显式
+/// 隐藏：那里的帧回调由各自 compositor 在窗口不可见时自然停发。
+#[cfg(windows)]
+fn window_minimized(window: &Window) -> bool {
+    let Some(hwnd) = super::windowing::native_hwnd(window) else { return false };
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::IsIconic(hwnd as *mut std::ffi::c_void) != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn window_minimized(_window: &Window) -> bool {
+    false
+}
+
 impl NebulaWorkspace {
     /// 只为当前可见的运行态徽章挂一帧。下一帧必须由随后的实际 render 续期，
-    /// 因此任务结束、窗口失焦/隐藏或徽章滚出视口时会自然断链，不留下常驻
+    /// 因此任务结束、窗口不可见或徽章滚出视口时会自然断链，不留下常驻
     /// animation loop；由 GPUI 的帧源调度，才能跟随显示器刷新节奏。
+    ///
+    /// 断链判据是「像素到不了屏幕」而不是「窗口没聚焦」：一边看 Agent 跑、
+    /// 一边在浏览器或编辑器里干活，正是这个转圈唯一的用武之地；失焦即冻结
+    /// 会让它在最需要的场景里失效，而窗口就在旁边亮着不动，用户只能读成
+    /// 「Agent 卡死了」。非活跃窗口的开销由 GPUI 帧循环自己压到 30fps
+    /// （`next_frame_callbacks` 非空 + 窗口非活跃即节流），不必在这里再停
+    /// 一次。
     pub(super) fn arm_activity_spinner_frame(&self, window: &mut Window, cx: &mut Context<Self>) {
         const PERIOD_SECS: f32 = 0.8;
 
         if self.spinner_frame_pending.get()
-            || !self.spinner_window_active
-            || self.window_hidden
             || !self.spinner_visible.get()
+            || self.spinner_offscreen(window)
         {
             return;
         }
         self.spinner_frame_pending.set(true);
-        cx.on_next_frame(window, |workspace, _, cx| {
+        cx.on_next_frame(window, |workspace, window, cx| {
             workspace.spinner_frame_pending.set(false);
-            if !workspace.spinner_window_active
-                || workspace.window_hidden
-                || !workspace.spinner_visible.get()
-            {
+            if !workspace.spinner_visible.get() || workspace.spinner_offscreen(window) {
                 return;
             }
             let now = std::time::Instant::now();
@@ -122,6 +141,13 @@ impl NebulaWorkspace {
                 (workspace.spinner_phase + delta.as_secs_f32() / PERIOD_SECS).rem_euclid(1.0);
             cx.notify();
         });
+    }
+
+    /// 转圈没有观众只有两种情况：托盘隐藏（Nebula 自己记账）和最小化。
+    /// 活跃窗口不可能是最小化的，用 `spinner_window_active` 作门控省掉常态
+    /// 下那次 user32 调用；这个标志脏成 false 也只是多问一次平台，不会误停。
+    fn spinner_offscreen(&self, window: &Window) -> bool {
+        self.window_hidden || (!self.spinner_window_active && window_minimized(window))
     }
 
     pub(super) fn start_ai_hook_pump(
