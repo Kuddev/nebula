@@ -173,6 +173,7 @@ const STATIC_DEFAULT_COMBOS: &[&str] = &[
     "ctrl--",
     "ctrl-0",
     "ctrl-shift-c",
+    "ctrl-c",
     "ctrl-v",
     "ctrl-shift-v",
     "alt-enter",
@@ -205,7 +206,11 @@ fn custom_workspace_binding(combo: &str, action: &crate::config::Action) -> Opti
         Action::IncreaseFontSize => Some(KeyBinding::new(&combo, IncreaseFontSize, None)),
         Action::DecreaseFontSize => Some(KeyBinding::new(&combo, DecreaseFontSize, None)),
         Action::ResetFontSize => Some(KeyBinding::new(&combo, ResetFontSize, None)),
-        Action::Copy => Some(KeyBinding::new(&combo, CopySelection, None)),
+        Action::Copy => Some(KeyBinding::new(
+            &combo,
+            CopySelection,
+            Some(crate::gpui_shell::terminal::KEY_CONTEXT),
+        )),
         Action::Paste => Some(KeyBinding::new(
             &combo,
             PasteClipboard,
@@ -235,7 +240,12 @@ fn gpui_binding_combo(combo: &str) -> String {
 
 /// 注册工作区快捷键；在 `gpui_component::init` 之后调用一次。
 pub fn init(cx: &mut App) {
-    cx.bind_keys([
+    cx.bind_keys(default_workspace_bindings());
+}
+
+/// 工作区静态默认键位表；与 [`STATIC_DEFAULT_COMBOS`] 互为镜像。
+fn default_workspace_bindings() -> Vec<KeyBinding> {
+    [
         KeyBinding::new("ctrl-shift-t", NewTerminal, None),
         KeyBinding::new("ctrl-shift-e", NewWindow, None),
         KeyBinding::new("ctrl-shift-w", CloseActiveTerminal, None),
@@ -271,6 +281,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl--", DecreaseFontSize, None),
         KeyBinding::new("ctrl-0", ResetFontSize, None),
         KeyBinding::new("ctrl-shift-c", CopySelection, None),
+        // 复制优先（WT 语义）：终端聚焦时有选区复制并清选区，无选区经 handler
+        // 的 `cx.propagate()` 落成 ^C。带终端上下文，重命名/输入框聚焦时
+        // ctrl+c 归输入框自己（Input -> Copy）。
+        KeyBinding::new("ctrl-c", CopySelection, Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
         // 终端粘贴只在终端焦点路径命中。Input 自己带 `Input -> Paste`；这里若
         // 无上下文，会因注册更晚而抢走弹窗/设置页输入框的 Ctrl+V。
         KeyBinding::new("ctrl-v", PasteClipboard, Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
@@ -282,7 +296,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-v", gpui_component::input::Paste, Some("Input")),
         KeyBinding::new("alt-enter", ToggleFullscreen, None),
         KeyBinding::new("ctrl-shift-o", OpenQuickJump, None),
-    ]);
+    ]
+    .into()
 }
 
 /// 一个终端 pane：视图实体 + 宿主订阅。id 即 `TerminalView::pane_id`
