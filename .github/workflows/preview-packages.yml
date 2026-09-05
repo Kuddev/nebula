@@ -151,7 +151,7 @@ jobs:
         run: python3 -m unittest scripts.tests.test_shell_integration -v
 
       - name: Test SSH confirmation and password dialogs
-        run: cargo test --locked -p nebula --features gpui-test-support ssh_dialog
+        run: cargo test --locked -p nebula --features gpui-test-support dialog
 
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
@@ -306,7 +306,7 @@ jobs:
         run: python3 -m unittest scripts.tests.test_shell_integration -v
 
       - name: Test SSH confirmation and password dialogs
-        run: cargo test --locked -p nebula --features gpui-test-support ssh_dialog
+        run: cargo test --locked -p nebula --features gpui-test-support dialog
 
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
@@ -439,7 +439,7 @@ jobs:
       - name: Test workspace natively
         run: cargo test --locked --workspace
       - name: Test SSH confirmation and password dialogs
-        run: cargo test --locked -p nebula --features gpui-test-support ssh_dialog
+        run: cargo test --locked -p nebula --features gpui-test-support dialog
       - name: Build GPUI comparison binary
         run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
       - name: Run Windows conformance

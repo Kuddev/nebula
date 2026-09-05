@@ -92,6 +92,9 @@ winit = { path = "third_party/winit-0.30.13" }
 #   Kuddev/gpui-component nebula-v1.16.1-math
 #     @ c20dbef8ed0d4c0fbebbf2e8f02d39e4fa0ac0a7
 #     （4eb39176 owned base + 数学薄桥、GFM TextView 语义和紧凑阴影 helper）
+#   Kuddev/gpui-component nebula-v1.16.1-test-support
+#     @ fa3763c681dba5b3ea028395148488e1281d478d
+#     （c20dbef8 基线 + 下游虚拟窗口测试支持）
 #
 # 所有 Zed 依赖统一使用 Kuddev URL：Cargo 的 source identity 包含 URL，应用
 # 与 component 内部若混用官方/自有 URL，即使 SHA 相同也会解析成两套 gpui
@@ -151,7 +154,13 @@ winit = { path = "third_party/winit-0.30.13" }
 #      update_scroll_offset，边界 clamp 现成）。补丁 4 修的是键盘移动那条路，
 #      这条修的是鼠标拖选，两者都要。上游 PR 候选，合并即撤。
 #
-# 当前精确引用已包含补丁 1-3；Input 补丁 4-5 仍保持独立，尚未带入本次升级。
+#   6. 下游虚拟窗口测试支持（2026-09-05）：crates/ui/Cargo.toml 增加显式
+#      test-support feature；src/lib.rs 与 src/root.rs 在该模式下不安装需要
+#      原生窗口句柄的 macOS 无障碍转发器。普通构建的无障碍接线不变。
+#      tests/root_test_window.rs 验证以依赖方式编译的 Root 可使用虚拟窗口；
+#      上游提供等价的下游 headless 测试支持后撤销本补丁。
+#
+# 当前精确引用已包含补丁 1-3 与 6；Input 补丁 4-5 仍保持独立，尚未带入本次升级。
 gpui = { git = "https://github.com/Kuddev/zed", rev = "eb8e1c8b5502b7007465fbbc465f4a736fa39210", version = "=0.2.2" }
-gpui-component = { git = "https://github.com/Kuddev/gpui-component", rev = "c20dbef8ed0d4c0fbebbf2e8f02d39e4fa0ac0a7", version = "=0.5.2" }
-gpui-component-assets = { git = "https://github.com/Kuddev/gpui-component", rev = "c20dbef8ed0d4c0fbebbf2e8f02d39e4fa0ac0a7", version = "=0.5.1" }
+gpui-component = { git = "https://github.com/Kuddev/gpui-component", rev = "fa3763c681dba5b3ea028395148488e1281d478d", version = "=0.5.2" }
+gpui-component-assets = { git = "https://github.com/Kuddev/gpui-component", rev = "fa3763c681dba5b3ea028395148488e1281d478d", version = "=0.5.1" }

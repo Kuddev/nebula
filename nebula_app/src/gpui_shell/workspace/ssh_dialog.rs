@@ -129,10 +129,15 @@ mod tests {
         });
         cx.update(|window, cx| {
             show(request, window, cx);
+        });
+        cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
         click(cx, "confirm-dialog-cancel");
-        assert!(matches!(response.try_recv(), Ok(PromptResponse::Cancel)));
+        assert_eq!(
+            response.try_recv().map(|response| matches!(response, PromptResponse::Cancel)),
+            Ok(true)
+        );
     }
 
     #[gpui::test]
@@ -148,6 +153,8 @@ mod tests {
         });
         cx.update(|window, cx| {
             show(request, window, cx);
+        });
+        cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
         cx.simulate_input("test-secret");

@@ -284,4 +284,4 @@ gpui-shell = [
 ]
 # 真实 GPUI hitbox / 鼠标路由测试显式启用；不能放进 dev-dependencies，
 # 否则不带 gpui-shell 的默认 `cargo test -p nebula` 也会编译整棵 GPUI。
-gpui-test-support = ["gpui-shell", "gpui/test-support"]
+gpui-test-support = ["gpui-shell", "gpui/test-support", "gpui-component/test-support"]

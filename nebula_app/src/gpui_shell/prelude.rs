@@ -54,11 +54,41 @@ const CONFIRM_DIALOG_BOTTOM_PADDING: f32 = 20.0;
 const CONFIRM_DIALOG_BASE_HEIGHT: f32 = 130.0;
 const CONFIRM_DIALOG_BODY_LINE_HEIGHT: f32 = 24.0;
 
+fn modal_dialog_width(window: &Window) -> f32 {
+    CONFIRM_DIALOG_WIDTH.min((f32::from(window.viewport_size().width) - 32.0).max(240.0))
+}
+
+fn confirm_body_height(description: SharedString, window: &Window) -> f32 {
+    let available_width =
+        (modal_dialog_width(window) - CONFIRM_DIALOG_HORIZONTAL_PADDING * 2.0).max(1.0);
+    let text_style = window.text_style();
+    window
+        .text_system()
+        .shape_text(
+            description.clone(),
+            px(16.0),
+            &[text_style.to_run(description.len())],
+            Some(px(available_width)),
+            None,
+        )
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| f32::from(line.size(px(CONFIRM_DIALOG_BODY_LINE_HEIGHT)).height))
+                .sum::<f32>()
+                .max(CONFIRM_DIALOG_BODY_LINE_HEIGHT)
+        })
+        .unwrap_or_else(|error| {
+            log::warn!("Could not measure confirmation text: {error}");
+            description.lines().count().max(1) as f32 * CONFIRM_DIALOG_BODY_LINE_HEIGHT
+        })
+}
+
 /// gpui-component 0.5.2 默认把 Dialog 放在视口高度的 1/10；旧 GPUI 壳则
 /// 使用 480px 内容宽度并垂直居中。这里集中恢复旧壳几何，同时保留窄窗口限幅。
 pub fn center_modal_dialog(dialog: Dialog, window: &Window, estimated_height: f32) -> Dialog {
     let viewport = window.viewport_size();
-    let width = CONFIRM_DIALOG_WIDTH.min((f32::from(viewport.width) - 32.0).max(240.0));
+    let width = modal_dialog_width(window);
     let margin_top = ((f32::from(viewport.height) - estimated_height) * 0.5).max(16.0);
 
     dialog
@@ -86,27 +116,8 @@ pub fn confirm_dialog(
     let ok_text = ok_text.into();
     let cancel_text = cancel_text.into();
 
-    let text_style = window.text_style();
-    let body_width = if description.is_empty() {
-        0.0
-    } else {
-        f32::from(
-            window
-                .text_system()
-                .shape_line(
-                    description.clone(),
-                    px(16.0),
-                    &[text_style.to_run(description.len())],
-                    None,
-                )
-                .width,
-        )
-    };
-    let available_body_width =
-        (CONFIRM_DIALOG_WIDTH - CONFIRM_DIALOG_HORIZONTAL_PADDING * 2.0).max(1.0);
-    let body_lines = (body_width / available_body_width).ceil().max(1.0);
     let estimated_height =
-        CONFIRM_DIALOG_BASE_HEIGHT + body_lines * CONFIRM_DIALOG_BODY_LINE_HEIGHT;
+        CONFIRM_DIALOG_BASE_HEIGHT + confirm_body_height(description.clone(), window);
 
     let content_description = description.clone();
     center_modal_dialog(dialog, window, estimated_height)
@@ -195,7 +206,7 @@ mod tests {
                         dialog,
                         window,
                         "Confirm action?",
-                        "Choose an action.",
+                        "example.test:22\n\nSHA256:verify-me\n\nChoose an action.",
                         "Confirm",
                         "Cancel",
                         ButtonVariant::Primary,
@@ -243,5 +254,26 @@ mod tests {
             Modifiers::default(),
         );
         assert!(confirmed.get(), "鼠标点击确认必须派发 Dialog 的确认动作");
+    }
+
+    #[gpui::test]
+    fn confirm_dialog_measurement_preserves_explicit_and_wrapped_lines(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| ConfirmDialogProbe);
+            Root::new(view, window, cx)
+        });
+        cx.update(|window, _| {
+            assert_eq!(confirm_body_height("".into(), window), CONFIRM_DIALOG_BODY_LINE_HEIGHT);
+            assert_eq!(confirm_body_height("Host".into(), window), CONFIRM_DIALOG_BODY_LINE_HEIGHT);
+            for description in ["Host\n\nFingerprint", "Host\r\n\r\nFingerprint"] {
+                assert_eq!(
+                    confirm_body_height(description.into(), window),
+                    3.0 * CONFIRM_DIALOG_BODY_LINE_HEIGHT,
+                );
+            }
+            let wrapped = "Verify this fingerprint through a trusted channel. ".repeat(20);
+            assert!(confirm_body_height(wrapped.into(), window) > CONFIRM_DIALOG_BODY_LINE_HEIGHT);
+        });
     }
 }

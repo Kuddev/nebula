@@ -86,7 +86,7 @@ class ShellIntegrationTests(unittest.TestCase):
             wrapper.mkdir()
             for source, target in [("zshenv", ".zshenv"), ("zprofile", ".zprofile"), ("zshrc", ".zshrc")]:
                 shutil.copyfile(SCRIPTS / source, wrapper / target)
-            args = ["-l", "-i"]
+            args = ["-d", "-l", "-i"]
             env = {"ZDOTDIR": str(wrapper), "NEBULA_ZSH_INTEGRATION": str(wrapper),
                    "NEBULA_ZDOTDIR_WAS_SET": "1" if original_zdotdir else "0"}
             if original_zdotdir:
@@ -110,6 +110,11 @@ class ShellIntegrationTests(unittest.TestCase):
 
     def test_zsh_command_status_and_utf8_cwd(self) -> None:
         self.check_protocol("zsh")
+
+    def test_zsh_loads_user_rcs_without_host_global_rcs(self) -> None:
+        session = self.start("zsh")
+        session.command('print -r -- "RCS=$options[rcs] GLOBAL_RCS=$options[globalrcs]"',
+                        b"RCS=on GLOBAL_RCS=off")
 
     def test_bash_preserves_prompt_command(self) -> None:
         session = self.start("bash", "PROMPT_COMMAND=\"printf 'USER_PROMPT\\\\n'\"\n")
