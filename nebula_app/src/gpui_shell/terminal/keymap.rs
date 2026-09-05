@@ -181,7 +181,16 @@ fn unicode_char_of(ks: &Keystroke) -> u16 {
         "escape" => 0x1b,
         "enter" => b'\r' as u16,
         "tab" => b'\t' as u16,
-        "backspace" => 0x08,
+        // 真实控制台的 Ctrl+Backspace 记录携带 Uc=DEL（0x7f，WM_CHAR 语义），
+        // PSReadLine 的原生 Ctrl+Backspace=BackwardKillWord 绑定按此匹配。
+        // 给 0x08 会跌进 KeyChar 分发被当成 Ctrl+H——只删一个字符。
+        "backspace" => {
+            if ks.modifiers.control {
+                0x7f
+            } else {
+                0x08
+            }
+        },
         "space" => b' ' as u16,
         _ => 0,
     }
@@ -236,15 +245,20 @@ fn win32_press_and_release(ks: &Keystroke) -> Option<Vec<u8>> {
     Some(sequence)
 }
 
-/// 子进程要过 kitty 键盘标志时，Esc 必须是 `CSI 27u`，不是裸 `\x1b`。
-/// 口径同旧壳 `kitty_disambiguate_escape_is_csi_27_u`。
-fn kitty_escape(ks: &Keystroke, mode: &TermMode) -> Option<Vec<u8>> {
-    let kitty = mode.intersects(
+/// 子进程是否请求过 kitty 键盘协议（三位标志任一）。kitty 是线上合同，
+/// 压过 DECSET 9001——口径同旧壳 `input/terminal_input.rs`。
+fn kitty_keyboard_active(mode: &TermMode) -> bool {
+    mode.intersects(
         TermMode::REPORT_ALL_KEYS_AS_ESC
             | TermMode::DISAMBIGUATE_ESC_CODES
             | TermMode::REPORT_EVENT_TYPES,
-    );
-    if !kitty || ks.key.as_str() != "escape" {
+    )
+}
+
+/// 子进程要过 kitty 键盘标志时，Esc 必须是 `CSI 27u`，不是裸 `\x1b`。
+/// 口径同旧壳 `kitty_disambiguate_escape_is_csi_27_u`。
+fn kitty_escape(ks: &Keystroke, mode: &TermMode) -> Option<Vec<u8>> {
+    if !kitty_keyboard_active(mode) || ks.key.as_str() != "escape" {
         return None;
     }
     let param = modifier_param(ks);
@@ -276,7 +290,16 @@ pub fn encode(ks: &Keystroke, mode: &TermMode) -> Option<Vec<u8>> {
             return Some(if mods.alt { b"\x1b\r".to_vec() } else { b"\r".to_vec() });
         },
         "backspace" => {
-            let byte: u8 = if mods.control { 0x08 } else { 0x7f };
+            // kitty 合同下带 Ctrl 的 Backspace 走 CSI u（127 = kitty 的 Backspace
+            // keysym）：pi 等 kitty 应用以此区分 ctrl+backspace 与普通退格；
+            // 裸 \x08 会被当成单字符退格，删不了词。
+            if kitty_keyboard_active(mode) && mods.control {
+                let param = modifier_param(ks);
+                return Some(format!("\x1b[127;{param}u").into_bytes());
+            }
+            // 传统 VT 路径：Ctrl+Backspace 出 \x17（Ctrl+W）；托管 PowerShell
+            // 把 Ctrl+w 绑成了 BackwardKillWord（tty/windows/mod.rs）。
+            let byte: u8 = if mods.control { 0x17 } else { 0x7f };
             return Some(if mods.alt { vec![0x1b, byte] } else { vec![byte] });
         },
         "tab" => {
@@ -432,5 +455,60 @@ mod tests {
         assert_eq!(virtual_key_of("capslock"), None);
         // 方向键在 win32 模式下仍要出记录（它们有确定的 VK）。
         assert!(win32_input_record(&keystroke("up"), true).is_some());
+    }
+
+    /// 9001 记录路径与真实控制台同构：Ctrl+Backspace 的记录 Uc=DEL（0x7f），
+    /// 与旧壳 winit 期一致（`ctrl_space_and_ctrl_backspace_report_real_key_event_chars`）。
+    /// PSReadLine 原生绑定 Ctrl+Backspace=BackwardKillWord 按 0x7f 命中。
+    #[cfg(windows)]
+    #[test]
+    fn ctrl_backspace_record_carries_del_like_a_real_console() {
+        let mut ks = keystroke("backspace");
+        ks.modifiers.control = true;
+        assert_eq!(
+            win32_press_and_release(&ks),
+            Some(b"\x1b[8;14;127;1;8;1_\x1b[8;14;127;0;8;1_".to_vec())
+        );
+    }
+
+    /// kitty 键盘协议下 Ctrl+Backspace 必须是 CSI u（127 是 kitty 的
+    /// Backspace keysym，修饰参数 5=Ctrl）。pi 靠它识别 ctrl+backspace；
+    /// 发裸 `\x08` 会被当成普通退格，只删一个字符。
+    #[test]
+    fn kitty_ctrl_backspace_is_csi_u() {
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let mut ks = keystroke("backspace");
+        ks.modifiers.control = true;
+        assert_eq!(encode(&ks, &mode), Some(b"\x1b[127;5u".to_vec()));
+    }
+
+    /// kitty 的修饰参数约定（shift=1、alt=2、ctrl=4 从 1 起算）在
+    /// backspace 上同样成立。
+    #[test]
+    fn kitty_ctrl_alt_backspace_reports_both_modifiers() {
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let mut ks = keystroke("backspace");
+        ks.modifiers.control = true;
+        ks.modifiers.alt = true;
+        assert_eq!(encode(&ks, &mode), Some(b"\x1b[127;7u".to_vec()));
+    }
+
+    /// 传统 VT 路径 Ctrl+Backspace 出 `\x17`（Ctrl+W），托管 PowerShell
+    /// 把它绑成 BackwardKillWord；kitty 未开时不走 CSI u。
+    #[test]
+    fn legacy_ctrl_backspace_emits_ctrl_w() {
+        let mode = TermMode::default();
+        let mut ks = keystroke("backspace");
+        ks.modifiers.control = true;
+        assert_eq!(encode(&ks, &mode), Some(b"\x17".to_vec()));
+    }
+
+    /// 普通退格语义不变：两种路径都还是单个删除字节。
+    #[test]
+    fn plain_backspace_stays_a_single_delete_byte() {
+        let mode = TermMode::default();
+        assert_eq!(encode(&keystroke("backspace"), &mode), Some(b"\x7f".to_vec()));
+        let kitty = TermMode::DISAMBIGUATE_ESC_CODES;
+        assert_eq!(encode(&keystroke("backspace"), &kitty), Some(b"\x7f".to_vec()));
     }
 }
