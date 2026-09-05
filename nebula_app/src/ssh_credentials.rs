@@ -384,30 +384,6 @@ pub fn store_password(destination: &str, password: &[u8]) -> std::io::Result<()>
 }
 
 #[cfg(windows)]
-pub fn load_stored_password(destination: &str) -> std::io::Result<Option<Vec<u8>>> {
-    windows_store::load_password(destination)
-}
-
-#[cfg(windows)]
-pub fn store_private_key_passphrase(private_key: &[u8], passphrase: &[u8]) -> std::io::Result<()> {
-    windows_store::save_secret(
-        &private_key_credential_target(private_key),
-        "private-key",
-        passphrase,
-    )
-}
-
-#[cfg(windows)]
-pub fn load_private_key_passphrase(private_key: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
-    windows_store::load_secret(&private_key_credential_target(private_key))
-}
-
-#[cfg(windows)]
-pub fn forget_private_key_passphrase(private_key: &[u8]) -> std::io::Result<()> {
-    windows_store::delete_secret(&private_key_credential_target(private_key))
-}
-
-#[cfg(windows)]
 pub fn prompt_password(
     destination: &str,
     initial: Option<&[u8]>,
@@ -416,32 +392,60 @@ pub fn prompt_password(
     windows_store::prompt_password(destination, initial, allow_save)
 }
 
-#[cfg(not(windows))]
-pub fn load_stored_password(_destination: &str) -> std::io::Result<Option<Vec<u8>>> {
-    Ok(None)
+pub fn load_stored_password(destination: &str) -> std::io::Result<Option<Vec<u8>>> {
+    crate::platform::credentials::load(&credential_target(destination))
 }
 
-#[cfg(windows)]
+#[cfg(not(windows))]
+pub fn store_password(destination: &str, password: &[u8]) -> std::io::Result<()> {
+    crate::platform::credentials::store(&credential_target(destination), password)
+}
+
 pub fn forget_password(destination: &str) -> std::io::Result<()> {
-    windows_store::delete_password(destination)
+    crate::platform::credentials::delete(&credential_target(destination))
+}
+
+pub fn store_private_key_passphrase(
+    private_key: &[u8],
+    passphrase: &[u8],
+) -> std::io::Result<()> {
+    crate::platform::credentials::store_with_username(
+        &private_key_credential_target(private_key),
+        "private-key",
+        passphrase,
+    )
+}
+
+pub fn load_private_key_passphrase(private_key: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
+    crate::platform::credentials::load(&private_key_credential_target(private_key))
+}
+
+pub fn forget_private_key_passphrase(private_key: &[u8]) -> std::io::Result<()> {
+    crate::platform::credentials::delete(&private_key_credential_target(private_key))
+}
+
+#[cfg(not(windows))]
+pub fn prompt_password(
+    _destination: &str,
+    _initial: Option<&[u8]>,
+    _allow_save: bool,
+) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    Err(std::io::Error::new(std::io::ErrorKind::NotConnected, "SSH application window unavailable"))
 }
 
 /// Generic credential-manager primitives used by non-SSH features. Keeping
 /// the target namespace at the caller makes the secret store reusable without
 /// duplicating Windows API code or ever exposing the value to UI state.
-#[cfg(windows)]
 pub fn store_generic_secret(target: &str, secret: &[u8]) -> std::io::Result<()> {
-    windows_store::save_secret(target, "Nebula", secret)
+    crate::platform::credentials::store(target, secret)
 }
 
-#[cfg(windows)]
 pub fn load_generic_secret(target: &str) -> std::io::Result<Option<Vec<u8>>> {
-    windows_store::load_secret(target)
+    crate::platform::credentials::load(target)
 }
 
-#[cfg(windows)]
 pub fn delete_generic_secret(target: &str) -> std::io::Result<()> {
-    windows_store::delete_secret(target)
+    crate::platform::credentials::delete(target)
 }
 
 #[cfg(windows)]

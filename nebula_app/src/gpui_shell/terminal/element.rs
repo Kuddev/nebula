@@ -15,9 +15,9 @@
 use std::collections::HashSet;
 
 use gpui::{
-    App, Bounds, CursorStyle, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, LayoutId, PathBuilder, Pixels, Rgba, SharedString, Style, TextRun,
-    UnderlineStyle, Window, fill, outline, point, px, relative, size,
+    App, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId, GlobalElementId, Hitbox,
+    HitboxBehavior, Hsla, InspectorElementId, LayoutId, PathBuilder, Pixels, Rgba, SharedString,
+    Style, TextRun, UnderlineStyle, Window, fill, outline, point, px, relative, size,
 };
 use gpui_component::ActiveTheme as _;
 use nebula_terminal::grid::Dimensions as _;
@@ -57,7 +57,7 @@ impl TerminalElement {
         rows: usize,
         cols: usize,
         cx: &App,
-    ) -> Option<(RenderSnapshot, Option<String>, usize, HashSet<(u16, u16)>)> {
+    ) -> Option<(RenderSnapshot, Option<String>, usize, HashSet<(u16, u16)>, usize, i64)> {
         let view = self.view.read(cx);
         let session = view.session.as_ref()?;
         let hint_config = view.hint_config.clone();
@@ -84,7 +84,10 @@ impl TerminalElement {
         );
         let history = term.history_size();
         let dashed = super::osc_links::dashed_cells(&term, &hint_config, rows, cols);
-        Some((snapshot, prompt_line, history, dashed))
+        let scrollback_floor = term.grid().scrolled_out();
+        let image_anchor = scrollback_floor.saturating_add(history) as i64;
+        let viewport_top_abs = image_anchor + i64::from(term.viewport_origin_for(rows).0);
+        Some((snapshot, prompt_line, history, dashed, scrollback_floor, viewport_top_abs))
     }
 
     /// 把**应用写死的**颜色按当前主题矫正，直接写回快照。
@@ -227,7 +230,7 @@ impl Element for TerminalElement {
         let focused = focus_handle.is_focused(window);
         // 旧壳只让光标本身参与闪烁；ghost、弹窗补齐和 IME 仍复用同一个坐标锚点。
         let cursor_visible = self.view.read(cx).cursor_visible();
-        let Some((mut snap, prompt_line, history, dashed)) =
+        let Some((mut snap, prompt_line, history, dashed, scrollback_floor, viewport_top_abs)) =
             self.snapshot(layout.rows, layout.cols, cx)
         else {
             return;
@@ -275,6 +278,9 @@ impl Element for TerminalElement {
             self.view.update(cx, |view, _| {
                 let size_info =
                     super::math_overlay::grid_size_info(layout.cols, layout.rows, cell_w, line_h);
+                if view.uses_source_reader_math() {
+                    return view.math.clear_frame(&size_info, math_pixels_per_point);
+                }
                 let Some(term) = view.session.as_ref().map(|session| session.term.clone()) else {
                     return view.math.clear_frame(&size_info, math_pixels_per_point);
                 };
@@ -593,6 +599,46 @@ impl Element for TerminalElement {
                 window,
                 cx,
             );
+        }
+
+        // Terminal images are ordinary scrollback content: the PTY reader
+        // reserved rows when it saw the protocol sequence, while this pass
+        // paints only images intersecting the current viewport. GPUI caches
+        // each RenderImage texture by ID, so steady-state scrolling is one
+        // clipped textured quad rather than a repeated decode/upload.
+        let inline_images =
+            self.view.update(cx, |view, _| view.inline_images.frame_images(scrollback_floor));
+        if !inline_images.is_empty() {
+            let device_scale = window.scale_factor().max(0.1);
+            let viewport_top = bounds.origin.y.as_f32();
+            let viewport_bottom = viewport_top + bounds.size.height.as_f32();
+            for inline in inline_images {
+                let y = bounds.origin.y
+                    + layout.line_height * (inline.abs_line as i64 - viewport_top_abs) as f32;
+                let mut width = inline.display_width / device_scale;
+                let mut height = inline.display_height / device_scale;
+                let fit = (bounds.size.width.as_f32() / width.max(1.0)).min(1.0);
+                width *= fit;
+                height *= fit;
+                let image_top = y.as_f32();
+                if image_top + height <= viewport_top || image_top >= viewport_bottom {
+                    continue;
+                }
+                let target = Bounds::new(
+                    point(bounds.origin.x, y),
+                    size(px(width.max(1.0)), px(height.max(1.0))),
+                );
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    let _ = window.paint_image(
+                        target,
+                        target,
+                        Corners::all(px(0.0)),
+                        inline.image,
+                        0,
+                        false,
+                    );
+                });
+            }
         }
 
         if let Some(cursor) = &snap.cursor {

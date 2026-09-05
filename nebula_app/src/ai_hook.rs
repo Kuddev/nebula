@@ -319,6 +319,8 @@ impl AttentionContext {
 /// A typed AI-CLI lifecycle event, parsed from one pipe connection.
 #[derive(Debug, Clone)]
 pub struct AiHookEvent {
+    pub answer: Option<crate::assistant_answer::AssistantAnswer>,
+    pub answer_cwd: Option<std::path::PathBuf>,
     /// Pane hosting the CLI (from `NEBULA_PANE_ID`); `None` falls back to the
     /// focused pane (only happens when the env was stripped along the way).
     pub pane: Option<u64>,
@@ -560,6 +562,7 @@ fn event_fingerprint(event: &AiHookEvent) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     event.kind.hash(&mut hasher);
     event.message.hash(&mut hasher);
+    event.answer.hash(&mut hasher);
     event.background_tasks.hash(&mut hasher);
     if let Some(attention) = event.attention.as_ref() {
         attention.cwd.hash(&mut hasher);
@@ -738,7 +741,14 @@ fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         selection: context_string(&payload, &["selection", "selected_text", "selectedText"]),
         raw_context: sanitized_raw_context(&payload),
     });
+    let answer = crate::assistant_answer::AssistantAnswer::from_hook(&source, &payload);
+    let answer_cwd = payload.get("cwd").and_then(Value::as_str)
+        .filter(|path| path.len() <= 4096 && !path.chars().any(char::is_control))
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute());
     Some(AiHookEvent {
+        answer,
+        answer_cwd,
         pane,
         source,
         kind,
@@ -1173,6 +1183,24 @@ mod remote_tests {
     }
 
     #[test]
+    fn distinct_original_answers_are_not_swallowed_by_preview_deduplication() {
+        for provider in ["claude", "codex"] {
+            let mut gate = AiHookEventGate::default();
+            for ending in ["first", "second"] {
+                let answer = format!("{}{ending}", "shared preview ".repeat(500));
+                let payload = if provider == "claude" {
+                    serde_json::json!({"hook_event_name": "Stop", "session_id": "session", "last_assistant_message": answer})
+                } else {
+                    serde_json::json!({"type": "agent-turn-complete", "thread-id": "session", "last-assistant-message": answer})
+                };
+                let raw = format!("nebula-hook/1 source={provider} pane=3\n{payload}");
+                let event = parse_remote_envelope(raw.as_bytes(), Some(3)).unwrap();
+                assert!(gate.accept(&event, 3));
+            }
+        }
+    }
+
+    #[test]
     fn event_gate_rejects_duplicates_and_out_of_order_provider_events() {
         let mut gate = AiHookEventGate::default();
         let done = parse_remote_envelope(
@@ -1465,10 +1493,10 @@ mod win {
                     }
                     buf.extend_from_slice(&chunk[..read as usize]);
                     if buf.len() > (1 << 20) {
-                        break; // hard cap: nothing legitimate is this big
+                        break;
                     }
                 }
-                if let Some(mut event) = parse_envelope(&buf) {
+                if buf.len() <= (1 << 20) && let Some(mut event) = parse_envelope(&buf) {
                     event.client_pid = client_pid;
                     // agent 的进程身份：helper 的父进程往往是执行 hook 命令的
                     // shell，agent 在更上一层，所以要沿祖先链找。用它区分嵌套

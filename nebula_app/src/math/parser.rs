@@ -28,15 +28,37 @@ pub(crate) fn parse_formula(
     let style = if display { MathStyle::Display } else { MathStyle::Text };
     let arrows = normalize_ascii_math_arrows(source.as_ref());
     let normalized_source = substitute_unsupported_presentation(arrows.as_ref());
+    parse_normalized_formula(normalized_source.as_ref(), display, style, limits)
+}
+
+pub(crate) fn parse_formula_source(
+    source: &str,
+    display: bool,
+    limits: MathLimits,
+) -> Result<ParsedFormula, MathError> {
+    validate(source, limits)?;
+    let source = super::compile::brace_unbraced_fraction_arguments(source)
+        .map(Cow::Owned)
+        .unwrap_or(Cow::Borrowed(source));
+    let style = if display { MathStyle::Display } else { MathStyle::Text };
+    parse_normalized_formula(source.as_ref(), display, style, limits)
+}
+
+fn parse_normalized_formula(
+    source: &str,
+    display: bool,
+    style: MathStyle,
+    limits: MathLimits,
+) -> Result<ParsedFormula, MathError> {
     // pulldown-latex intentionally rejects `\\` outside an alignment
     // environment. Markdown math blocks commonly use it directly, so wrap
     // only formulas that contain an environment-external line break in a
     // one-column gathered environment. Existing matrix/align rows retain
     // their own scope and are not double-wrapped.
-    let parser_source = if display && has_unscoped_line_break(normalized_source.as_ref()) {
-        Cow::Owned(format!(r"\begin{{gathered}}{}\end{{gathered}}", normalized_source.as_ref()))
+    let parser_source = if display && has_unscoped_line_break(source) {
+        Cow::Owned(format!(r"\begin{{gathered}}{}\end{{gathered}}", source))
     } else {
-        Cow::Borrowed(normalized_source.as_ref())
+        Cow::Borrowed(source)
     };
     let storage = Storage::new();
     let mut builder = Builder::new(style, limits);
@@ -67,18 +89,28 @@ fn normalize_ascii_math_arrows(source: &str) -> Cow<'_, str> {
 ///
 /// An unknown primitive aborts the whole parse, so a single `\boxed{…}` — the
 /// shape reasoning models put their final answer in — leaves the entire
-/// equation on screen as raw TeX. Both rewrites keep the mathematics and drop
+/// equation on screen as raw TeX. These rewrites keep the mathematics and drop
 /// only decoration:
 ///
 /// * `\boxed{X}` -> `X`. A real frame needs a layout node we do not have; an
 ///   unframed equation beats an unrendered one.
-/// * `\tag{n}` -> `\quad(n)`. The number stays beside the equation instead of
-///   being pushed to the margin, which would need equation-level numbering.
+/// * `\tag{n}` -> `\quad(n)` and `\tag*{n}` -> `\quad n`. The number stays
+///   beside the equation instead of being pushed to the margin, which would
+///   need equation-level numbering.
+/// * `\label{name}` disappears, while unresolved `\ref{name}` and
+///   `\eqref{name}` remain readable as `name` and `(name)`. Resolving labels
+///   across terminal output would require document-level state; preserving a
+///   useful formula is preferable to rejecting the entire expression.
+/// * `\leftroot` and `\uproot` (amsmath's cosmetic root-index offsets) and
+///   their numeric argument disappear. The root itself remains renderable.
 ///
 /// Anything else passes through untouched, so an unsupported command still
 /// fails the parse and keeps its source literal.
 fn substitute_unsupported_presentation(source: &str) -> Cow<'_, str> {
-    if !source.contains(r"\boxed") && !source.contains(r"\tag") {
+    if ![r"\boxed", r"\tag", r"\label", r"\ref", r"\eqref", r"\leftroot", r"\uproot"]
+        .iter()
+        .any(|command| source.contains(command))
+    {
         return Cow::Borrowed(source);
     }
 
@@ -91,9 +123,22 @@ fn substitute_unsupported_presentation(source: &str) -> Cow<'_, str> {
             + source[name_start..]
                 .find(|character: char| !character.is_ascii_alphabetic())
                 .unwrap_or(source.len() - name_start);
-        let (prefix, suffix) = match &source[name_start..name_end] {
-            "boxed" => ("", ""),
-            "tag" => (r"\quad(", ")"),
+        let name = &source[name_start..name_end];
+        if matches!(name, "leftroot" | "uproot") {
+            output.push_str(&source[cursor..command]);
+            cursor = root_adjustment_end(source, name_end);
+            continue;
+        }
+
+        let starred = name == "tag" && source[name_end..].starts_with('*');
+        let argument_at = name_end + usize::from(starred);
+        let (prefix, suffix, keep_argument) = match name {
+            "boxed" => ("", "", true),
+            "tag" if starred => (r"\quad ", "", true),
+            "tag" => (r"\quad(", ")", true),
+            "label" => ("", "", false),
+            "ref" => (r"\text{", "}", true),
+            "eqref" => (r"\text{(", ")}", true),
             // Every other command passes through. An empty name is an escaped
             // character whose second `char` must be consumed here, or `\\`
             // would be rescanned as the start of a command.
@@ -111,21 +156,61 @@ fn substitute_unsupported_presentation(source: &str) -> Cow<'_, str> {
                 continue;
             },
         };
-        let Some(argument) = brace_group(source, name_end) else {
-            output.push_str(&source[cursor..name_end]);
-            cursor = name_end;
+        let Some(argument) = brace_group(source, argument_at) else {
+            output.push_str(&source[cursor..argument_at]);
+            cursor = argument_at;
             continue;
         };
         output.push_str(&source[cursor..command]);
         output.push_str(prefix);
-        // The argument may hold another one of these commands; recursion depth
-        // is bounded by the group depth `validate` already enforces.
-        output.push_str(&substitute_unsupported_presentation(&source[argument.clone()]));
+        if keep_argument {
+            // The argument may hold another one of these commands; recursion
+            // depth is bounded by the group depth `validate` already enforces.
+            output.push_str(&substitute_unsupported_presentation(&source[argument.clone()]));
+        }
         output.push_str(suffix);
         cursor = argument.end + 1;
     }
     output.push_str(&source[cursor..]);
     Cow::Owned(output)
+}
+
+/// Consume the optional signed integer accepted by amsmath's root-index
+/// positioning commands. Non-numeric content is left in place so compatibility
+/// rewriting cannot silently discard arbitrary formula source.
+fn root_adjustment_end(source: &str, command_end: usize) -> usize {
+    let Some(relative) = source[command_end..].find(|character: char| !character.is_whitespace())
+    else {
+        return command_end;
+    };
+    let argument_start = command_end + relative;
+
+    if source[argument_start..].starts_with('{') {
+        if let Some(argument) = brace_group(source, argument_start) {
+            let value = source[argument.clone()].trim();
+            if !value.is_empty()
+                && value
+                    .strip_prefix(['+', '-'])
+                    .unwrap_or(value)
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+            {
+                return argument.end + 1;
+            }
+        }
+        return command_end;
+    }
+
+    let bytes = source.as_bytes();
+    let mut end = argument_start;
+    if matches!(bytes.get(end), Some(b'+') | Some(b'-')) {
+        end += 1;
+    }
+    let digits_start = end;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if end > digits_start { end } else { command_end }
 }
 
 /// Byte range of the contents of the `{…}` group at or after `at`, skipping
@@ -876,6 +961,7 @@ mod tests {
         // an entire answer as raw TeX on screen.
         assert_eq!(substitute_unsupported_presentation(r"\boxed{E=mc^2}").as_ref(), "E=mc^2");
         assert_eq!(substitute_unsupported_presentation(r"x=1 \tag{3}").as_ref(), r"x=1 \quad(3)");
+        assert_eq!(substitute_unsupported_presentation(r"x=1 \tag*{A}").as_ref(), r"x=1 \quad A");
         assert_eq!(
             substitute_unsupported_presentation(r"\boxed{\boxed{\frac{1}{2}}}").as_ref(),
             r"\frac{1}{2}",
@@ -895,6 +981,36 @@ mod tests {
         let numbered =
             concat!(r"\boxed{\nabla\cdot\mathbf{E}=\frac{\rho}{\varepsilon_0}}", "\n", r"\tag{1}");
         assert!(parse_formula(numbered, true, DEFAULT_LIMITS).is_ok());
+    }
+
+    #[test]
+    fn cross_references_and_root_offsets_degrade_without_losing_the_formula() {
+        assert_eq!(
+            substitute_unsupported_presentation(
+                r"y=Hx.\label{eq:conv} \quad \eqref{eq:conv}=\ref{eq:conv}"
+            )
+            .as_ref(),
+            r"y=Hx. \quad \text{(eq:conv)}=\text{eq:conv}"
+        );
+        assert_eq!(
+            substitute_unsupported_presentation(
+                r"\sqrt[\leftroot-2\uproot{2} n]{x} + \leftroot{x}"
+            )
+            .as_ref(),
+            r"\sqrt[ n]{x} + {x}",
+            "only numeric root adjustments are consumed"
+        );
+
+        for source in [
+            r"y=Hx.\label{eq:conv} \tag{5}",
+            r"\eqref{eq:conv}=\ref{eq:conv}",
+            r"\sqrt[\leftroot-2\uproot2 n]{x}",
+        ] {
+            assert!(
+                parse_formula(source, true, DEFAULT_LIMITS).is_ok(),
+                "compatibility source should render: {source:?}"
+            );
+        }
     }
 
     #[test]

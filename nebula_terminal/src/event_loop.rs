@@ -225,7 +225,7 @@ impl StreamProcessor {
                     advanced = offset;
                     terminal.nebula_add_prompt_mark();
                 },
-                OscEvent::InlineImage { png, width, height } => {
+                OscEvent::InlineImage { data, width, height } => {
                     self.parser.advance(terminal, &bytes[advanced..offset]);
                     advanced = offset;
                     let (cell_w, cell_h) = self.window_size.map_or((9.0, 20.0), |ws| {
@@ -241,7 +241,7 @@ impl StreamProcessor {
                         self.parser.advance(terminal, b"\r\n");
                     }
                     event_proxy.send_event(Event::InlineImage {
-                        png: std::sync::Arc::new(png),
+                        data: std::sync::Arc::new(data),
                         abs_line,
                         width: disp_w,
                         height: disp_h,

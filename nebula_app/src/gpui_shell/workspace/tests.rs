@@ -2,6 +2,12 @@
 
 use super::*;
 
+#[test]
+fn settings_only_fold_the_sidebar_in_sidebar_tab_mode() {
+    assert!(settings_should_fold_sidebar(nebula_settings::TabsPositionName::Sidebar));
+    assert!(!settings_should_fold_sidebar(nebula_settings::TabsPositionName::Top));
+}
+
 #[cfg(feature = "gpui-test-support")]
 mod title_bar_panel_control_tests {
     use super::*;

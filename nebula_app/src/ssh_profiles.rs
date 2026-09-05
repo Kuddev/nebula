@@ -2,9 +2,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
-use windows_sys::Win32::Storage::FileSystem::{
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-};
+
+mod connection;
+pub use connection::{SshConnectionOptions, SshHostJumpMode, SshHostProxyMode};
+pub(crate) use connection::validate_ssh_destination;
 
 const PROFILE_VERSION: u32 = 1;
 const USERNAME_HISTORY_CAP: usize = 12;
@@ -52,6 +53,8 @@ pub struct SshProfileAuth {
     /// 码位——码位属于某一个字体文件，换字体就作废；id 是我们自己的稳定键。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    #[serde(default, skip_serializing_if = "SshConnectionOptions::is_default")]
+    pub connection: SshConnectionOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +117,7 @@ impl SshProfiles {
                 private_keys: Vec::new(),
                 label: None,
                 icon: None,
+                connection: SshConnectionOptions::default(),
             })
     }
 
@@ -201,15 +205,33 @@ impl SshProfiles {
         self.profiles.retain(|profile| profile.destination != destination);
     }
 
+    pub fn jump_dependents(&self, destination: &str) -> Vec<String> {
+        self.profiles
+            .iter()
+            .filter(|profile| {
+                profile.destination != destination
+                    && profile.connection.jump_mode == SshHostJumpMode::Host
+                    && profile.connection.jump_host.trim() == destination
+            })
+            .map(|profile| profile.destination.clone())
+            .collect()
+    }
+
     pub fn rename(&mut self, old: &str, new: &str) {
-        let Some(mut profile) =
+        if let Some(mut profile) =
             self.profiles.iter().find(|profile| profile.destination == old).cloned()
-        else {
-            return;
-        };
-        self.remove(old);
-        profile.destination = new.to_owned();
-        self.upsert(profile);
+        {
+            self.remove(old);
+            profile.destination = new.to_owned();
+            self.upsert(profile);
+        }
+        for profile in &mut self.profiles {
+            if profile.connection.jump_mode == SshHostJumpMode::Host
+                && profile.connection.jump_host.trim() == old
+            {
+                profile.connection.jump_host = new.to_owned();
+            }
+        }
     }
 }
 
@@ -258,22 +280,10 @@ fn deduplicate_key_paths(paths: &mut Vec<PathBuf>) {
     });
 }
 
+/// 原子替换走 [`crate::atomic_file::replace`]：Windows `MoveFileExW`、Unix
+/// `rename`，两端语义同为「目标要么旧要么新」。此前这里复制了一份 Windows 版。
 fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    let source = wide_path(source);
-    let destination = wide_path(destination);
-    let ok = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
-}
-
-fn wide_path(path: &Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    crate::atomic_file::replace(source, destination)
 }
 
 #[cfg(test)]
@@ -318,6 +328,7 @@ mod tests {
                 private_keys: Vec::new(),
                 label: None,
                 icon,
+                connection: Default::default(),
             });
         }
         let json = serde_json::to_string(&profiles).expect("serialize");
@@ -343,6 +354,7 @@ mod tests {
                 private_keys: Vec::new(),
                 label: Some(label),
                 icon: None,
+                connection: Default::default(),
             });
         }
         profiles.remove("root@10.0.0.1");
@@ -361,6 +373,7 @@ mod tests {
             private_keys: Vec::new(),
             label: Some("生产数据库".to_owned()),
             icon: None,
+            connection: Default::default(),
         });
 
         assert_eq!(profiles.next_default_label("主机"), "主机 1");
@@ -377,6 +390,7 @@ mod tests {
             private_keys: vec![PathBuf::from(r"C:\Keys\first"), PathBuf::from(r"C:\Keys\second")],
             label: None,
             icon: None,
+            connection: Default::default(),
         });
         profiles.save(&path).unwrap();
 
@@ -402,6 +416,7 @@ mod tests {
             ],
             label: None,
             icon: None,
+            connection: Default::default(),
         });
 
         assert_eq!(
@@ -419,6 +434,7 @@ mod tests {
             private_keys: vec![PathBuf::from(r"C:\Keys\id_ed25519")],
             label: None,
             icon: None,
+            connection: Default::default(),
         });
 
         profiles.rename("old@example.com", "new@example.com");

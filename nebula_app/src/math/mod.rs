@@ -12,7 +12,7 @@ pub(crate) mod rasterizer;
 pub(crate) mod spacing;
 pub(crate) mod validate;
 
-pub(crate) use compile::compile_formula;
+pub(crate) use compile::{compile_formula, compile_formula_source};
 pub(crate) use parser::parse_formula;
 pub(crate) use validate::validate;
 

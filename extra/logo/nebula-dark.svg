@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">Nebula graphite violet app icon</title>
+  <defs>
+    <mask id="prompt-cut" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="white"/>
+      <path d="M39 52L52 65L39 78M69 80H86" fill="none" stroke="black" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    </mask>
+    <symbol id="mark" viewBox="0 0 128 128">
+      <path d="M73 17C98 17 112 35 112 61C112 92 88 112 59 112C34 112 16 96 16 73C16 47 44 17 73 17Z" fill="currentColor" mask="url(#prompt-cut)"/>
+    </symbol>
+  </defs>
+  <rect x="5" y="5" width="118" height="118" rx="32" fill="#25262D" stroke="#777986" stroke-width="2"/>
+  <use href="#mark" x="19" y="19" width="90" height="90" color="#CFD0E8"/>
+</svg>

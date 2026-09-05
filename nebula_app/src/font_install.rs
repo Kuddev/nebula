@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-#[cfg(windows)]
 use sha2::{Digest, Sha256};
 
 pub const REQUIRED_FONT_FAMILY: &str = "Maple Mono Normal NF CN";
@@ -8,7 +7,6 @@ pub const REQUIRED_FONT_FAMILY: &str = "Maple Mono Normal NF CN";
 /// The bundled face is shared by the legacy rasterizer and the GPUI text
 /// system. Keeping one static byte slice avoids letting the two shells drift
 /// to different font revisions.
-#[cfg(windows)]
 pub static REQUIRED_FONT_BYTES: &[u8] =
     include_bytes!("../../assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf");
 
@@ -262,10 +260,8 @@ pub fn probe_font_file_families(path: &Path) -> Result<Vec<String>, String> {
     Ok(families)
 }
 
-#[cfg(windows)]
 const MAX_IMPORTED_FONT_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(windows)]
 pub struct StoredFont {
     pub path: PathBuf,
     pub created: bool,
@@ -275,16 +271,15 @@ pub struct StoredFont {
 /// `create_dir_all` 并把失败报给用户，读取侧（`imported_font_files`）容忍
 /// 目录不存在。这里若顺手创建，既让读路径每次多一次无谓 IO，也会让写侧
 /// 那条错误提示永不触发。
-#[cfg(windows)]
 pub fn imported_font_directory() -> PathBuf {
     crate::platform::dirs::data_dir().join("fonts")
 }
 
-#[cfg(windows)]
 pub fn imported_font_files() -> Vec<PathBuf> {
     let mut files = font_files_in(&imported_font_directory());
     // 隔离启动把 `data_dir` 指到临时配置时，用户以前导入到
     // `%APPDATA%\Nebula\fonts` 的字体会「消失」。探测实例仍应能看见它们。
+    #[cfg(windows)]
     if std::env::var_os("NEBULA_CONFIG_DIR").is_some() {
         if let Some(appdata) = std::env::var_os("APPDATA") {
             let user_fonts = PathBuf::from(appdata).join("Nebula").join("fonts");
@@ -298,7 +293,6 @@ pub fn imported_font_files() -> Vec<PathBuf> {
     files
 }
 
-#[cfg(windows)]
 fn font_files_in(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     entries
@@ -308,7 +302,6 @@ fn font_files_in(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg(windows)]
 pub fn store_imported_font(source: &Path) -> Result<StoredFont, String> {
     if !supported_font_extension(source) {
         return Err("只支持 .ttf、.otf、.ttc 和 .otc 字体文件".to_owned());
@@ -370,7 +363,6 @@ pub fn bundled_font_directory() -> PathBuf {
 /// 「安装字体」提示要打开的目录，保证里面真有 ttf 可装。1.1.0 起 zip 不再
 /// 附带 20MB 字体副本（exe 内嵌同一字节），此时把内嵌字体落到数据目录，
 /// 与包内副本完全等价。落盘失败（只读盘等）退回原目录，提示仍可关闭。
-#[cfg(windows)]
 pub fn ensure_bundled_font_on_disk() -> PathBuf {
     let directory = bundled_font_directory();
     if directory.join(REQUIRED_FONT_FILE).is_file() {

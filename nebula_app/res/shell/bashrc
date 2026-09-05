@@ -1,0 +1,55 @@
+if [[ -r $HOME/.bashrc ]]; then
+    source "$HOME/.bashrc"
+fi
+
+_nebula_cwd() {
+    local LC_ALL=C cwd_value=$PWD encoded='' character ordinal index
+    for ((index=0; index<${#cwd_value}; index++)); do
+        character=${cwd_value:index:1}
+        case $character in
+            [a-zA-Z0-9/._~-]) encoded+=$character ;;
+            *) printf -v ordinal '%02X' "'$character"; encoded+="%$ordinal" ;;
+        esac
+    done
+    printf '\e]7;file://localhost%s\a' "$encoded"
+}
+
+_nebula_preexec() {
+    if [[ ${_nebula_at_prompt:-0} == 1 && $BASH_COMMAND != _nebula_capture_status* ]]; then
+        _nebula_at_prompt=0
+        _nebula_command_running=1
+        printf '\e]133;C\a'
+    fi
+}
+
+_nebula_capture_status() {
+    _nebula_last_status=$?
+    if [[ ${_nebula_native_preexec:-0} == 1 ]]; then
+        _nebula_command_running=${_nebula_at_prompt:-0}
+    fi
+    _nebula_at_prompt=0
+    return "$_nebula_last_status"
+}
+
+_nebula_precmd() {
+    if [[ ${_nebula_command_running:-0} == 1 ]]; then
+        printf '\e]133;D;%s\a' "$_nebula_last_status"
+    fi
+    _nebula_command_running=0
+    _nebula_cwd
+    printf '\e]133;A\a'
+    _nebula_at_prompt=1
+    return "$_nebula_last_status"
+}
+
+if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))); then
+    _nebula_native_preexec=1
+    PS0=$'\e]133;C\a'${PS0-}
+elif [[ -z $(trap -p DEBUG) ]]; then
+    trap '_nebula_preexec' DEBUG
+fi
+if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a '* ]]; then
+    PROMPT_COMMAND=(_nebula_capture_status "${PROMPT_COMMAND[@]}" _nebula_precmd)
+else
+    PROMPT_COMMAND="_nebula_capture_status;${PROMPT_COMMAND:+$PROMPT_COMMAND;}_nebula_precmd"
+fi

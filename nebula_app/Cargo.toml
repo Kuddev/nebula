@@ -100,6 +100,7 @@ polling = "3.11.0"
 # Markdown viewer: CommonMark + GFM (tables / task lists / strikethrough)
 # event parser; `display::markdown_view` renders the folded block AST.
 pulldown-cmark = { version = "0.13", default-features = false }
+markdown = "=1.0.0"
 pulldown-latex = "=0.7.1"
 # rsa 不能省：云厂商控制台下载的 .pem（PKCS#1）与 OpenSSH 容器里的 RSA
 # 私钥都靠它解析；缺失时 load_secret_key 直接 UnsupportedKeyType。
@@ -129,6 +130,10 @@ getrandom = "0.3.3"
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "25.0.2", optional = true }
 regex = "1.13.1"
+# `image` 被 GPUI 壳的壁纸、文档 tab、行内图片、数学视图无条件使用，必须是
+# 无条件依赖；此前按 `cfg(not(target_os = "macos"))` 排除会让 macOS 目标在
+# 编译期找不到 crate（2026-09-02 交叉 check 首个暴露的问题）。
+image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha1 = "0.11.0"
 
@@ -146,17 +151,26 @@ xdg = "3.0.0"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rfd = "0.17.2"
+notify-rust = "=4.18.0"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# GPUI 壳只把 winit 当类型库（EventLoopProxy / WindowId / ModifiersState），
+# 不启动它的事件循环；但 winit 在 Linux 上没有任何后端 feature 就拒绝编译
+# （platform_impl/mod.rs "platform not supported"）。dlopen 变体不引入链接期
+# 依赖，运行时缺库也只是旧壳不可用。
+winit = { version = "0.30.9", default-features = false, features = ["x11", "wayland", "wayland-dlopen"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 png = { version = "0.17.5", default-features = false, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "=3.7.0"
 objc2 = "0.6.1"
 objc2-foundation = { version = "0.3.1", default-features = false, features = [
     "std",
     "NSString",
     "NSLocale",
+    "NSBundle",
     "NSUserDefaults",
 ] }
 objc2-app-kit = { version = "0.3.1", default-features = false, features = [
@@ -187,6 +201,7 @@ windows-sys = { version = "0.59", features = [
     # WinEvent hook (SetWinEventHook) for native move/size stage tracking:
     # WM_ENTER/EXITSIZEMOVE are sent messages that never reach a msg hook.
     "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
     # COM + Shell: build the Start-menu shortcut that carries our AUMID so the
     # toast is attributed to Nebula (IShellLink + IPersistFile + IPropertyStore).
     "Win32_System_Com",

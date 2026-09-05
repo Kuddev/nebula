@@ -32,8 +32,8 @@ use gpui::{
 
 use crate::gpui_shell::prelude::*;
 use crate::ssh_sftp::{
-    SftpConflictPolicy, SftpController, SftpEntry, SftpEntryKind, SftpPhase, SftpSnapshot,
-    SftpTransferOptions,
+    SftpBrowseSession, SftpConflictPolicy, SftpController, SftpEntry, SftpEntryKind, SftpPhase,
+    SftpSnapshot, SftpTransferOptions,
 };
 
 use super::NebulaWorkspace;
@@ -65,6 +65,9 @@ pub(super) struct RemoteBrowser {
     /// 每个 pane 最近一次已确认的列表。不能只记路径：切回来再按路径列一次，
     /// 本质上仍是 tab 激活触发刷新，也会丢掉选择和瞬时滚动上下文。
     snapshots: HashMap<u64, RemoteDirectorySnapshot>,
+    /// One interactive SFTP subsystem per SSH pane. Bulk transfers deliberately
+    /// use `transfer` below so a large copy cannot head-of-line block browsing.
+    browse_sessions: HashMap<u64, SftpBrowseSession>,
     /// uniform_list 的 handle 内含滚动位置；每个 pane 各持一个，避免 A 主机的
     /// 长目录把 B 主机顶到同一个偏移。
     scrolls: HashMap<u64, gpui::UniformListScrollHandle>,
@@ -141,6 +144,13 @@ impl RemoteBrowser {
         self.destination = destination.clone();
         self.loading = false;
         self.scrolls.entry(pane).or_insert_with(gpui::UniformListScrollHandle::new);
+        let replace_session = self
+            .browse_sessions
+            .get(&pane)
+            .is_none_or(|session| session.destination() != destination);
+        if replace_session {
+            self.browse_sessions.insert(pane, SftpBrowseSession::new(destination.clone()));
+        }
 
         let snapshot = self
             .snapshots
@@ -171,6 +181,7 @@ impl RemoteBrowser {
     pub(super) fn forget(&mut self, pane: u64) {
         self.snapshots.remove(&pane);
         self.scrolls.remove(&pane);
+        self.browse_sessions.remove(&pane);
         if self.pane == Some(pane) {
             self.pane = None;
             self.destination.clear();
@@ -196,6 +207,18 @@ impl RemoteBrowser {
         self.selected = None;
         // 世代号往前走一格：已经在路上的响应回来时会发现自己过期了。
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Last confirmed remote path for duplicate-tab. It remains available
+    /// while the drawer is closed because `park_active` stores it per pane.
+    pub(super) fn path_for(&self, pane: u64, destination: &str) -> Option<&str> {
+        if self.pane == Some(pane) && self.destination == destination && !self.path.is_empty() {
+            return Some(&self.path);
+        }
+        self.snapshots
+            .get(&pane)
+            .filter(|snapshot| snapshot.destination == destination && !snapshot.path.is_empty())
+            .map(|snapshot| snapshot.path.as_str())
     }
 }
 
@@ -304,18 +327,19 @@ impl NebulaWorkspace {
     /// 列出一个远端目录并显示它。
     pub(super) fn navigate_remote(&mut self, path: String, cx: &mut Context<'_, Self>) {
         let Some(pane) = self.remote_browser.pane else { return };
-        let destination = self.remote_browser.destination.clone();
+        let Some(session) = self.remote_browser.browse_sessions.get(&pane).cloned() else {
+            self.remote_browser.loading = false;
+            self.remote_browser.error = Some("远端浏览会话不可用，请重新打开文件抽屉".to_owned());
+            cx.notify();
+            return;
+        };
         let generation = self.bump_remote_generation();
         self.remote_browser.loading = true;
         cx.notify();
 
         let target = path.clone();
         cx.spawn(async move |this, cx| {
-            let listed =
-                remote_call(
-                    || async move { crate::ssh_sftp::list_dir(&destination, &target).await },
-                )
-                .await;
+            let listed = remote_call(|| async move { session.list_dir(&target).await }).await;
             let _ = this.update(cx, |workspace, cx| {
                 // 世代号和 pane 都要对：前者防乱序，后者防用户在等待期间切到
                 // 别的 pane（那时这份结果属于另一台机器）。
@@ -1399,6 +1423,7 @@ mod tests {
         assert_eq!(browser.path, "/srv/alpha");
         assert_eq!(browser.entries, vec![entry("alpha.txt", "/srv/alpha/alpha.txt")]);
         assert_eq!(browser.selected.as_deref(), Some("/srv/alpha/alpha.txt"));
+        assert_eq!(browser.path_for(11, "alice@alpha"), Some("/srv/alpha"));
         assert!(!browser.loading);
     }
 
@@ -1413,6 +1438,7 @@ mod tests {
         assert!(browser.path.is_empty());
         assert!(browser.entries.is_empty());
         assert!(browser.selected.is_none());
+        assert_eq!(browser.path_for(7, "root@old-host"), None);
     }
 
     #[test]

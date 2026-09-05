@@ -102,9 +102,9 @@ pub fn icon_for_id(id: &str) -> &'static str {
     match id.as_str() {
         "pwsh" | "powershell" => "\u{ebc7}", // codicon terminal-powershell
         "cmd" => "\u{ebc4}",                 // codicon terminal-cmd
-        "bash" | "git-bash" | "gitbash" => "\u{e795}", // devicon bash/terminal
-        "nu" => "\u{f489}",                  // generic terminal glyph
-        _ => "\u{ea85}",                     // codicon terminal (fallback)
+        "bash" | "git-bash" | "gitbash" | "zsh" | "sh" | "dash" => "\u{e795}", // devicon bash/terminal
+        "fish" | "nu" => "\u{f489}", // generic terminal glyph
+        _ => "\u{ea85}",             // codicon terminal (fallback)
     }
 }
 
@@ -186,7 +186,11 @@ pub fn display_name_for_id(id: &str) -> String {
         "pwsh" => "PowerShell 7".into(),
         "powershell" | "ps" => "PowerShell".into(),
         "cmd" => "CMD".into(),
-        "bash" | "git-bash" | "gitbash" => "Git Bash".into(),
+        // Windows 上 `bash` id 只可能是 Git Bash；Unix 上就是系统 Bash。
+        "bash" => crate::platform::shell::bash_display_name().into(),
+        "git-bash" | "gitbash" => "Git Bash".into(),
+        "zsh" => "Zsh".into(),
+        "fish" => "Fish".into(),
         "nu" => "Nushell".into(),
         _ => trimmed.to_owned(),
     }
@@ -200,8 +204,7 @@ fn env_path(var: &str) -> Option<PathBuf> {
     std::env::var_os(var).map(PathBuf::from)
 }
 
-/// Detect every installed shell, menu order. Non-Windows builds return an
-/// empty list (the dropdown then shows only config profiles).
+/// Detect every installed shell, menu order.
 pub fn detect_shells() -> Vec<DetectedShell> {
     #[cfg(windows)]
     {
@@ -209,7 +212,56 @@ pub fn detect_shells() -> Vec<DetectedShell> {
     }
     #[cfg(not(windows))]
     {
-        Vec::new()
+        detect_unix()
+    }
+}
+
+/// Unix：`$SHELL` 排第一（它就是用户的登录 shell，也是没选择时的默认），
+/// 其余按 `/etc/shells` 的顺序去重列出。id 取可执行文件名（`zsh`、`bash`、
+/// `fish`），与 Windows 侧的 `bash` id 同名以便设置文件跨平台复用。
+/// 这里只负责「有什么」，不注入 rcfile——Unix 的 OSC 133 集成另行实现。
+#[cfg(not(windows))]
+fn detect_unix() -> Vec<DetectedShell> {
+    let mut shells: Vec<DetectedShell> = Vec::new();
+    let mut push = |program: PathBuf| {
+        let Some(id) = program.file_name().and_then(|name| name.to_str()) else { return };
+        if !program.is_file() || shells.iter().any(|known| known.id == id) {
+            return;
+        }
+        shells.push(DetectedShell {
+            name: unix_shell_label(id),
+            id: id.to_owned(),
+            program: program.display().to_string(),
+            args: crate::platform::shell::interactive_args(id),
+        });
+    };
+    if let Ok(login) = nebula_terminal::tty::default_shell_program() {
+        push(PathBuf::from(login));
+    }
+    if let Ok(list) = std::fs::read_to_string("/etc/shells") {
+        for line in list.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            push(PathBuf::from(line));
+        }
+    }
+    shells
+}
+
+#[cfg(not(windows))]
+fn unix_shell_label(id: &str) -> String {
+    match id {
+        "zsh" => "Zsh".to_owned(),
+        "bash" => "Bash".to_owned(),
+        "fish" => "Fish".to_owned(),
+        "nu" => "Nushell".to_owned(),
+        "sh" => "sh".to_owned(),
+        "dash" => "Dash".to_owned(),
+        "tcsh" | "csh" => id.to_owned(),
+        "pwsh" => "PowerShell 7".to_owned(),
+        other => other.to_owned(),
     }
 }
 
@@ -222,17 +274,14 @@ pub fn resolve_id(id: &str) -> Option<DetectedShell> {
         return None;
     }
     let lower = id.to_ascii_lowercase();
-    if is_pty_integrated_id(&lower) {
+    if crate::platform::shell::uses_legacy_pty_bootstrap(&lower) {
         return None;
     }
     detect_shells().into_iter().find(|shell| shell.id.eq_ignore_ascii_case(id))
 }
 
 pub fn is_pty_integrated_id(id: &str) -> bool {
-    matches!(
-        id.trim().to_ascii_lowercase().as_str(),
-        "powershell" | "ps" | "bash" | "git-bash" | "gitbash"
-    )
+    crate::platform::shell::uses_legacy_pty_bootstrap(id)
 }
 
 #[cfg(windows)]
@@ -842,17 +891,25 @@ mod tests {
 
     #[test]
     fn resolve_rejects_pty_integrated_ids() {
-        // These two ids belong to the PTY layer's executor bootstrap; the
-        // resolver must never shadow them with a raw spawn.
-        assert_eq!(resolve_id("powershell"), None);
-        assert_eq!(resolve_id("bash"), None);
+        // Only Windows owns the legacy PowerShell/Git Bash bootstrap. Unix
+        // must resolve an explicit `shell=bash` instead of silently launching
+        // the login shell.
+        if crate::platform::shell::uses_legacy_pty_bootstrap("bash") {
+            assert_eq!(resolve_id("powershell"), None);
+            assert_eq!(resolve_id("bash"), None);
+        } else if std::path::Path::new("/bin/bash").is_file()
+            || std::path::Path::new("/usr/bin/bash").is_file()
+        {
+            assert_eq!(resolve_id("bash").as_ref().map(|shell| shell.id.as_str()), Some("bash"));
+        }
         assert_eq!(resolve_id(""), None);
     }
 
     #[test]
     fn powershell_seven_is_not_the_windows_powershell_integration() {
-        assert!(is_pty_integrated_id("powershell"));
-        assert!(is_pty_integrated_id("bash"));
+        let legacy = cfg!(windows);
+        assert_eq!(is_pty_integrated_id("powershell"), legacy);
+        assert_eq!(is_pty_integrated_id("bash"), legacy);
         assert!(!is_pty_integrated_id("pwsh"));
         assert!(!is_pty_integrated_id("cmd"));
         assert!(!is_pty_integrated_id("nu"));

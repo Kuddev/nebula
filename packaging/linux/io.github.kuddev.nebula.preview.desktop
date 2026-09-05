@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Nebula Terminal Preview
+GenericName=Terminal Emulator
+Comment=GPU-accelerated terminal for local and remote workflows
+Exec=nebula
+Icon=io.github.kuddev.nebula.preview
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;prompt;ssh;
+StartupNotify=true
+StartupWMClass=Nebula

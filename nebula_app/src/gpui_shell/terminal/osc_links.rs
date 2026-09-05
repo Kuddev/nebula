@@ -109,14 +109,14 @@ pub(super) fn open_hint<T: EventListener>(hint: &HintMatch, term: &Term<T>, cx: 
     let Some(text) = hint.text(term) else { return };
     #[cfg(windows)]
     if let Some(path) = crate::file_uri::file_uri_to_local_path(&text) {
-        let _ = crate::daemon::spawn_daemon("explorer.exe", &[path.as_os_str()]);
+        let _ = crate::daemon::spawn_detached("explorer.exe", &[path.as_os_str()]);
         return;
     }
     match hint.action() {
         HintAction::Command(command) => {
             let mut args = command.args().to_vec();
             args.push(text.into_owned());
-            let _ = crate::daemon::spawn_daemon(command.program(), &args);
+            let _ = crate::daemon::spawn_detached(command.program(), &args);
         },
         HintAction::Action(HintInternalAction::Copy) => {
             cx.write_to_clipboard(ClipboardItem::new_string(text.into_owned()));

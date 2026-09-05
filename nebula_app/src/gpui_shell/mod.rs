@@ -45,7 +45,6 @@ pub mod workspace;
 use assets::NebulaAssets;
 use gpui::{App, AppContext as _};
 
-#[cfg(windows)]
 use std::borrow::Cow;
 
 /// GPUI 主窗没有可靠的标准错误句柄；保留父进程重定向诊断，但写失败不能
@@ -63,6 +62,7 @@ pub(crate) enum GpuiShellEvent {
     MuxAttach,
     RuntimeControl(std::sync::Arc<crate::runtime_api::RuntimeDispatch>),
     UpdateAvailable(crate::update_check::UpdateCheckResult),
+    SshPrompt(std::sync::Arc<crate::ssh_prompt::Prompt>),
 }
 
 /// 在当前线程启动 GPUI 运行时并打开主窗口，阻塞直至 UI 退出。
@@ -71,6 +71,10 @@ pub(crate) enum GpuiShellEvent {
 /// spike 形态从专用线程调用。一个进程内只允许调用一次。
 pub fn run_shell(initial_cwd: Option<std::path::PathBuf>) {
     let (shell_tx, shell_rx) = std::sync::mpsc::channel();
+    crate::ssh_prompt::install({
+        let sender = shell_tx.clone();
+        move |request| sender.send(GpuiShellEvent::SshPrompt(request)).is_ok()
+    });
     crate::update_check::spawn_gpui_once(shell_tx.clone());
     let runtime_hub = crate::runtime_api::RuntimeHub::new();
     crate::tray::init_gpui({
@@ -122,22 +126,29 @@ pub fn run_shell(initial_cwd: Option<std::path::PathBuf>) {
         }
     }
     let _runtime_server = runtime_server;
-    gpui_platform::application().with_assets(NebulaAssets).run(move |cx| {
-        // GPUI is the only event loop in `--gpui` mode, so it owns the same
-        // per-process hook pipe before the first TerminalView spawns.
-        let ai_events = crate::ai_hook::spawn_gpui_server();
-        #[cfg(windows)]
-        crate::ai_hook::spawn_config_guard();
-        init(cx);
-        cx.activate(true);
-        open_main_window(cx, ai_events, shell_rx, runtime_hub, initial_cwd);
-    });
+    // GPUI 默认只有 macOS 在最后一扇窗关掉后仍驻留（Dock 里留个没有窗口的
+    // 进程）。Nebula 没有 Dock 重开入口，也没法在 Mac 上验证那个无窗状态，
+    // 首版三端统一：最后一扇窗关闭即退出（驻留另有 keep_session 能力位管）。
+    gpui_platform::application()
+        .with_assets(NebulaAssets)
+        .with_quit_mode(gpui::QuitMode::LastWindowClosed)
+        .run(move |cx| {
+            // GPUI is the only event loop in `--gpui` mode, so it owns the same
+            // per-process hook pipe before the first TerminalView spawns.
+            let ai_events = crate::ai_hook::spawn_gpui_server();
+            #[cfg(windows)]
+            crate::ai_hook::spawn_config_guard();
+            init(cx);
+            cx.activate(true);
+            open_main_window(cx, ai_events, shell_rx, runtime_hub, initial_cwd);
+        });
     crate::tray::shutdown();
 }
 
 /// 组件库/主题/快捷键/用户配置的一次性初始化。
 fn init(cx: &mut App) {
-    #[cfg(windows)]
+    // 三端都注册内嵌 Maple：Linux/macOS 的系统等宽字体没有 NF 图标码点，
+    // 侧栏与提示符会出方框；字形同源也是跨平台截图能互相比对的前提。
     register_bundled_fonts(cx);
 
     // 组件库必须只初始化一次，否则全局 action、菜单和主题状态会重复注册。
@@ -159,7 +170,6 @@ fn init(cx: &mut App) {
     cx.set_global(settings);
 }
 
-#[cfg(windows)]
 fn register_bundled_fonts(cx: &App) {
     // GPUI resolves a family through the system collection first and silently
     // falls back when it is absent. Add Maple before any component/window can
@@ -278,19 +288,10 @@ pub(crate) fn reveal_all_windows(cx: &mut App) {
 /// exe 资源里有图标（`windows/nebula.rc` 的 `IDI_ICON`），任务栏按钮因此
 /// 是对的；但 GPUI 注册窗口类时不带 `hIcon`，也从不发 `WM_SETICON`，于是
 /// 悬停预览角标和 Alt+Tab 走系统默认白框占位图（用户 #51）。开窗后把资源
-/// 图标按系统尺寸各挂一份即可，`LR_SHARED` 句柄由系统缓存、无需释放。
+/// 图标按窗口 DPI 各挂一份，资源与句柄缓存由 `app_icon` 管理。
 #[cfg(windows)]
 pub(crate) fn set_native_window_icon(window: &gpui::Window) {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_SHARED, LoadImageW, SM_CXICON,
-        SM_CXSMICON, SendMessageW, WM_SETICON,
-    };
-
-    /// `windows/nebula.rc` 里的 `IDI_ICON`。
-    const IDI_ICON: u16 = 0x101;
 
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
@@ -300,19 +301,23 @@ pub(crate) fn set_native_window_icon(window: &gpui::Window) {
     };
     let hwnd = handle.hwnd.get() as *mut core::ffi::c_void;
 
-    // SAFETY: 模块句柄取自身；LoadImageW 按 MAKEINTRESOURCE 约定接受资源序号，
-    // 失败返回 null；SendMessageW 对 null 图标只是清除该槽位，均安全失败。
-    unsafe {
-        let module = GetModuleHandleW(std::ptr::null());
-        let resource = IDI_ICON as usize as *const u16;
-        for (slot, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
-            let size = GetSystemMetrics(metric);
-            let icon = LoadImageW(module, resource, IMAGE_ICON, size, size, LR_SHARED);
-            if !icon.is_null() {
-                SendMessageW(hwnd, WM_SETICON, slot as usize, icon as isize);
+    crate::app_icon::windows::set_window(hwnd, crate::app_icon::selected());
+}
+
+pub(crate) fn apply_app_icon(variant: nebula_settings::AppIconName, cx: &mut App) {
+    if !crate::app_icon::set_selected(variant) {
+        return;
+    }
+    crate::tray::refresh_app_icon();
+    #[cfg(windows)]
+    cx.defer(|cx| {
+        for handle in cx.windows() {
+            if let Err(error) = handle.update(cx, |_, window, _| set_native_window_icon(window)) {
+                log::warn!("failed to update window icon: {error}");
             }
         }
-    }
+    });
+    cx.refresh_windows();
 }
 
 #[cfg(windows)]

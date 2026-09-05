@@ -124,6 +124,17 @@ pub struct SftpController {
     upload_debounce_active: Arc<AtomicBool>,
 }
 
+/// Long-lived SFTP channel used only by interactive directory browsing.
+///
+/// Each browser session owns a stable channel, separate from bulk transfers.
+/// This handle is cheap to clone into UI jobs, serializes directory requests
+/// on one SFTP subsystem, and is never shared with upload/download workers.
+#[derive(Clone)]
+pub(crate) struct SftpBrowseSession {
+    destination: Arc<str>,
+    session: Arc<tokio::sync::Mutex<Option<SftpSession>>>,
+}
+
 #[derive(Clone)]
 struct TaskContext {
     state: Arc<Mutex<SftpSnapshot>>,
@@ -408,6 +419,47 @@ impl SftpController {
                 completion.finish(result);
             },
         );
+    }
+}
+
+impl SftpBrowseSession {
+    pub(crate) fn new(destination: impl Into<String>) -> Self {
+        Self {
+            destination: Arc::from(destination.into()),
+            session: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    pub(crate) fn destination(&self) -> &str {
+        &self.destination
+    }
+
+    /// List an absolute browser path on the existing subsystem. Browser paths
+    /// already come from an absolute cwd, a returned entry, or normalized `..`;
+    /// calling `canonicalize` before every `readdir` adds a full network RTT
+    /// without changing the result.
+    pub(crate) async fn list_dir(&self, path: &str) -> Result<Vec<SftpEntry>, String> {
+        let path = normalize_remote_path("/", path);
+        let mut slot = self.session.lock().await;
+        if slot.is_none() {
+            *slot = Some(
+                crate::ssh_session::open_sftp(&self.destination)
+                    .await
+                    .map_err(|err| format!("无法连接 {}：{err}", self.destination))?,
+            );
+        }
+
+        let result =
+            read_remote_dir(slot.as_ref().expect("SFTP browser session initialized"), &path)
+                .await
+                .map_err(|err| format!("无法读取目录 {path}：{err}"));
+        if result.is_err() {
+            // A dead subsystem must not poison every later click. Permission
+            // and missing-path errors also clear the channel; the next user
+            // action reopens it through the already pooled SSH transport.
+            *slot = None;
+        }
+        result
     }
 }
 

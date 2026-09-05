@@ -16,11 +16,11 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, Image,
-    ImageFormat, InteractiveElement as _, IntoElement, KeyDownEvent, ModifiersChangedEvent,
-    MouseButton, MouseMoveEvent, ParentElement as _, Render, RenderImage, Rgba as GpuiRgba,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
-    anchored, deferred, div, img, px,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ModifiersChangedEvent, MouseButton,
+    MouseMoveEvent, ParentElement as _, Render, RenderImage, Rgba as GpuiRgba, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, anchored, deferred,
+    div, img, px,
 };
 use gpui_component::input::InputEvent;
 use gpui_component::select::{SelectEvent, SelectItem};
@@ -34,6 +34,7 @@ use crate::gpui_shell::config::{DEFAULT_CURSOR_BLINK, effective_cursor_blink};
 use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::widgets::NebulaButton;
 
+mod app_icon;
 #[path = "background_color.rs"]
 mod background_color;
 mod design;
@@ -73,6 +74,22 @@ const SECTION_IDS: [&str; 10] = [
     "backup",
 ];
 
+/// Bilingual search aliases for the stable section routes. Search is a route
+/// finder, so a query such as "font", "opacity", or "更新" lands on the
+/// section that owns the control instead of merely filtering the current page.
+const SECTION_SEARCH_TERMS: [&str; 10] = [
+    "application app 应用 update 更新 version 版本 github support 支持",
+    "appearance 外观 theme 主题 font 字体 opacity 透明度 background 背景 cursor 光标 icon 图标",
+    "profiles 配置文件 shell terminal 终端 completion 补全 startup 启动",
+    "providers provider ai 供应商 模型 api",
+    "ssh host 主机 remote 远程 connection 连接",
+    "network 网络 proxy 代理 connectivity 连接",
+    "interaction 交互 copy 复制 paste 粘贴 tab 标签 panel 面板",
+    "keymap key binding shortcut 按键映射 快捷键",
+    "advanced 高级 session 会话 tray 托盘 restore 恢复",
+    "backup 备份 export 导出 restore 恢复",
+];
+
 const HIDDEN_NAV_SECTIONS: &[usize] = &[3, 9];
 
 /// 保留原来的分组展开顺序，组名不再渲染；数组里仍保存稳定的 [`SECTION_IDS`]
@@ -109,8 +126,8 @@ fn visible_nav_sections() -> impl Iterator<Item = usize> {
 
 // 这些几何值逐项来自旧壳 `display/settings.rs::settings_geometry`。GPUI
 // 设置页沿用同一节奏，避免组件默认间距把标题、分组和表单压成一条均匀列表。
-const SETTINGS_NAV_WIDTH: f32 = 196.0;
-const SETTINGS_HEADER_HEIGHT: f32 = 48.0;
+const SETTINGS_NAV_WIDTH: f32 = 232.0;
+const SETTINGS_HEADER_HEIGHT: f32 = 52.0;
 
 const SETTINGS_GROUP_GAP: f32 = 32.0;
 const SETTINGS_GROUP_TITLE_HEIGHT: f32 = 26.0;
@@ -238,6 +255,8 @@ fn issue_url() -> String {
 
 /// 宿主（workspace）监听：设置已写盘 / 终端目录已变 / 请求打开 SSH 会话。
 pub enum SettingsPaneEvent {
+    /// Return to the workspace. Settings is a window-level page, not a tab.
+    Close,
     Changed,
     /// 导入 Profile 已落盘；Tab 的 Shell 面板若正打开，需要重建候选快照。
     TerminalProfilesChanged,
@@ -353,8 +372,11 @@ fn provider_input_placeholders(language: crate::display::UiLanguage) -> [&'stati
 
 fn localized_input_placeholder(key: &str, language: crate::display::UiLanguage) -> &'static str {
     match key {
-        "ssh_label" => language.pick("给这台机器起个名字", "Name this host"),
+        "ssh_label" => language.pick("例如：开发服务器", "e.g. Development server"),
         "ssh_password" => language.pick("留空则连接时询问", "Leave empty to ask when connecting"),
+        "ssh_proxy_username" => language.pick("可选", "Optional"),
+        "ssh_proxy_password" => language.pick("留空则保留已存密码", "Leave empty to keep the saved password"),
+        "ssh_jump_host" => language.pick("user@bastion:22 或 SSH config 别名", "user@bastion:22 or SSH config alias"),
         "ssh_icon_filter" => language.pick("搜索图标…", "Search icons..."),
         "font_family" => language.pick("输入字体名称", "Enter a font family"),
         "backup_password" => {
@@ -882,9 +904,11 @@ pub struct SettingsPane {
     pub(super) runtime: RuntimeSettings,
     /// 当前分区（`SECTIONS` 下标）；默认落在应用主页。
     active_section: usize,
-    about_logo: Arc<Image>,
     about_update: AboutUpdateState,
     about_update_seq: u64,
+    about_last_checked: Option<String>,
+    settings_search_input: Entity<InputState>,
+    settings_search_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     /// 每项还带着自己的 `values` 表：`SelectState` 只认索引，而从代码侧
     /// 改设置（还原默认值、命令面板切换）时手里只有配置文件记号，没有
     /// 这张表就没法把闭框的选中项拉回去。
@@ -924,6 +948,11 @@ pub struct SettingsPane {
     pub(super) ssh_port_input: Entity<InputState>,
     pub(super) ssh_label_input: Entity<InputState>,
     pub(super) ssh_password_input: Entity<InputState>,
+    pub(super) ssh_proxy_host_input: Entity<InputState>,
+    pub(super) ssh_proxy_port_input: Entity<InputState>,
+    pub(super) ssh_proxy_username_input: Entity<InputState>,
+    pub(super) ssh_proxy_password_input: Entity<InputState>,
+    pub(super) ssh_jump_host_input: Entity<InputState>,
     /// 用户名输入框本身可自由编辑；候选层只提供最近使用值，不把输入约束成
     /// 固定枚举。锚点跟随输入框，滚动/DPI 变化后仍贴在其下方。
     pub(super) ssh_username_picker_open: bool,
@@ -936,6 +965,7 @@ pub struct SettingsPane {
     /// 头像上一帧的窗口坐标，供弹层锚定（同字体目录的做法）。
     pub(super) ssh_icon_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     pub(super) ssh_editor: Option<SshEditorState>,
+    pub(super) ssh_editor_focus_handle: FocusHandle,
     pub(super) ssh_editor_seq: u64,
     pub(super) ssh_test_seq: u64,
     pub(super) ssh_status: Option<SshStatus>,
@@ -1351,12 +1381,33 @@ impl SettingsPane {
             InputState::new(window, cx)
                 .placeholder(localized_input_placeholder("ssh_icon_filter", language))
         });
+        let ssh_proxy_host_input = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
+        let ssh_proxy_port_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("1080")
+                .pattern(regex::Regex::new(r"^\d{0,5}$").expect("static regex"))
+        });
+        let ssh_proxy_username_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(localized_input_placeholder("ssh_proxy_username", language))
+        });
+        let ssh_proxy_password_input = cx.new(|cx| {
+            InputState::new(window, cx).masked(true)
+                .placeholder(localized_input_placeholder("ssh_proxy_password", language))
+        });
+        let ssh_jump_host_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(localized_input_placeholder("ssh_jump_host", language))
+        });
         for input in [
             ssh_username_input.clone(),
             ssh_destination_input.clone(),
             ssh_port_input.clone(),
             ssh_label_input.clone(),
             ssh_password_input.clone(),
+            ssh_proxy_host_input.clone(),
+            ssh_proxy_port_input.clone(),
+            ssh_proxy_username_input.clone(),
+            ssh_proxy_password_input.clone(),
+            ssh_jump_host_input.clone(),
         ] {
             subscriptions.push(cx.subscribe_in(
                 &input,
@@ -1368,17 +1419,6 @@ impl SettingsPane {
                 },
             ));
         }
-        subscriptions.push(cx.subscribe_in(
-            &ssh_username_input,
-            window,
-            |this: &mut Self, _, event: &InputEvent, _, cx: &mut Context<Self>| {
-                if matches!(event, InputEvent::Focus) && this.ssh_editor.is_some() {
-                    this.ssh_username_picker_open = true;
-                    cx.notify();
-                }
-            },
-        ));
-
         let font_family_input =
             Self::new_font_family_input(runtime.font_family.clone(), window, cx);
         subscriptions.push(cx.subscribe_in(
@@ -1406,16 +1446,35 @@ impl SettingsPane {
         });
         subscriptions.push(cx.intercept_keystrokes(keymap_interceptor));
 
+        let settings_search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(language.pick(
+                "搜索全部设置，例如「字号」「透明度」「更新」",
+                "Search all settings, e.g. font, opacity, update",
+            ))
+        });
+        subscriptions.push(cx.subscribe_in(
+            &settings_search_input,
+            window,
+            |_this: &mut Self,
+             _: &Entity<InputState>,
+             event: &InputEvent,
+             _: &mut Window,
+             cx: &mut Context<Self>| {
+                if matches!(event, InputEvent::Change | InputEvent::Focus | InputEvent::Blur) {
+                    cx.notify();
+                }
+            },
+        ));
+
         Self {
             focus_handle: cx.focus_handle(),
             runtime,
             active_section: 0,
-            about_logo: Arc::new(Image::from_bytes(
-                ImageFormat::Png,
-                include_bytes!("../../../extra/logo/nebula.png").to_vec(),
-            )),
             about_update: AboutUpdateState::Idle,
             about_update_seq: 0,
+            about_last_checked: None,
+            settings_search_input,
+            settings_search_trigger_bounds: None,
             selects,
             shell_select,
             bg_picker_open: false,
@@ -1445,12 +1504,18 @@ impl SettingsPane {
             ssh_port_input,
             ssh_label_input,
             ssh_password_input,
+            ssh_proxy_host_input,
+            ssh_proxy_port_input,
+            ssh_proxy_username_input,
+            ssh_proxy_password_input,
+            ssh_jump_host_input,
             ssh_username_picker_open: false,
             ssh_username_trigger_bounds: None,
             ssh_icon_picker_open: false,
             ssh_icon_filter_input,
             ssh_icon_trigger_bounds: None,
             ssh_editor: None,
+            ssh_editor_focus_handle: cx.focus_handle(),
             ssh_editor_seq: 0,
             ssh_test_seq: 0,
             ssh_status: None,
@@ -1559,6 +1624,9 @@ impl SettingsPane {
         for (input, key) in [
             (&self.ssh_label_input, "ssh_label"),
             (&self.ssh_password_input, "ssh_password"),
+            (&self.ssh_proxy_username_input, "ssh_proxy_username"),
+            (&self.ssh_proxy_password_input, "ssh_proxy_password"),
+            (&self.ssh_jump_host_input, "ssh_jump_host"),
             (&self.ssh_icon_filter_input, "ssh_icon_filter"),
             (&self.font_family_input, "font_family"),
             (&self.backup_pass_input, "backup_password"),
@@ -1568,6 +1636,16 @@ impl SettingsPane {
             let placeholder = localized_input_placeholder(key, language);
             input.update(cx, |state, cx| state.set_placeholder(placeholder, window, cx));
         }
+        self.settings_search_input.update(cx, |state, cx| {
+            state.set_placeholder(
+                language.pick(
+                    "搜索全部设置，例如「字号」「透明度」「更新」",
+                    "Search all settings, e.g. font, opacity, update",
+                ),
+                window,
+                cx,
+            )
+        });
         cx.notify();
     }
 
@@ -1651,6 +1729,7 @@ impl SettingsPane {
         self.persist(
             &[
                 ("theme", "Nebula".to_owned()),
+                ("app_icon", nebula_settings::AppIconName::default().settings_value().to_owned()),
                 ("follow_system_theme", "0".to_owned()),
                 ("opacity", "1".to_owned()),
                 ("background", String::new()),
@@ -2611,6 +2690,8 @@ impl SettingsPane {
                 if pane.about_update_seq != sequence {
                     return;
                 }
+                pane.about_last_checked =
+                    Some(chrono::Local::now().format("%Y-%m-%d %H:%M").to_string());
                 pane.about_update = match result {
                     Ok(result) if result.update_available => {
                         AboutUpdateState::Available(result.latest)
@@ -2634,7 +2715,6 @@ impl SettingsPane {
         id: &'static str,
         icon: IconName,
         title: &'static str,
-        subtitle: &'static str,
         url: String,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
@@ -2643,9 +2723,8 @@ impl SettingsPane {
         h_flex()
             .id(id)
             .w_full()
-            .min_h(px(52.0))
-            .px_3()
-            .py_2()
+            .h(px(48.0))
+            .px_1()
             .gap_3()
             .items_center()
             .rounded_md()
@@ -2653,49 +2732,56 @@ impl SettingsPane {
             .hover(move |row| row.bg(hover))
             .on_click(move |_, _, cx| cx.open_url(&url))
             .child(Icon::new(icon).small().text_color(muted))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(2.0))
-                    .child(div().child(title))
-                    .child(div().text_xs().text_color(muted).truncate().child(subtitle)),
-            )
+            .child(div().flex_1().min_w_0().child(title))
             .child(Icon::new(IconName::ExternalLink).xsmall().text_color(muted))
             .into_any_element()
+    }
+
+    fn about_value_row(
+        label: &'static str,
+        value: impl IntoElement,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
+        h_flex()
+            .w_full()
+            .min_h(px(48.0))
+            .py_2()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .child(div().flex_1().min_w_0().text_color(cx.theme().foreground).child(label))
+            .child(value)
     }
 
     fn section_home(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let language = crate::gpui_shell::config::ui_language(cx);
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let ink = theme.foreground;
+        let hairline = theme.border;
+        let success = theme.success;
+        let warning = theme.warning;
+        let danger = theme.danger;
+        let base_px = self.font_size_px(cx);
         let checking = matches!(self.about_update, AboutUpdateState::Checking);
         let (status, status_color): (SharedString, Hsla) = match &self.about_update {
-            AboutUpdateState::Idle => (
-                language
-                    .pick(
-                        "通过 GitHub Releases 检查新版本。",
-                        "Check GitHub Releases for a newer version.",
-                    )
-                    .into(),
-                muted,
-            ),
+            AboutUpdateState::Idle => (language.pick("尚未检查", "Not checked yet").into(), muted),
             AboutUpdateState::Checking => {
                 (language.pick("正在检查更新…", "Checking for updates...").into(), muted)
             },
             AboutUpdateState::UpToDate(latest) => (
                 format!("{} (GitHub v{latest})", language.pick("已是最新版本", "Up to date"))
                     .into(),
-                theme.success,
+                success,
             ),
             AboutUpdateState::Available(latest) => (
                 format!("{} v{latest}", language.pick("发现新版本", "New version available"))
                     .into(),
-                theme.warning,
+                warning,
             ),
             AboutUpdateState::Failed(error) => (
                 format!("{}: {error}", language.pick("检查失败", "Update check failed")).into(),
-                theme.danger,
+                danger,
             ),
         };
         let update_button = NebulaButton::new("about-check-updates")
@@ -2704,128 +2790,164 @@ impl SettingsPane {
             } else {
                 language.pick("检查更新", "Check for updates")
             })
-            .outline()
+            .primary()
             .disabled(checking)
             .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx)));
-        // 关于页做成一段终端输出，不是因为好看：这几行正是报 issue 时要贴的
-        // 东西（版本、平台、构建方式、配置在哪）。做成可读又可整段复制的一
-        // 块，比藏在"生成预填 Issue"按钮背后让人无从核对要诚实。
-        //
-        // 这也是全页 mono 的另一处正当用途——它标记的仍然是机器可读的字面量。
-        let mono: SharedString = cx.theme().mono_font_family.clone();
-        let base_px = self.font_size_px(cx);
-        let ink = theme.foreground;
-        let accent = theme.primary;
-        let build = if cfg!(debug_assertions) { "debug" } else { "release" };
-        let config_path = nebula_settings::settings_path().display().to_string();
-        let facts: [(&'static str, String); 3] = [
-            ("build", build.to_owned()),
-            ("platform", format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)),
-            ("config", config_path),
-        ];
-        // 复制走的文本与屏幕上逐字一致，粘进 issue 不用再改。
-        let transcript = format!(
-            "Nebula {}
-{}",
-            env!("CARGO_PKG_VERSION"),
-            facts.iter().map(|(key, value)| format!("  {key:<9}{value}")).collect::<Vec<_>>().join(
-                "
-"
-            ),
-        );
-        let fact_rows = facts.into_iter().map(|(key, value)| {
+
+        let status_badge = h_flex()
+            .min_w_0()
+            .max_w(px(360.0))
+            .gap_1()
+            .items_center()
+            .text_size(px(base_px * 0.82))
+            .text_color(status_color)
+            .when(matches!(self.about_update, AboutUpdateState::UpToDate(_)), |badge| {
+                badge.child(Icon::new(IconName::Check).xsmall())
+            })
+            .child(div().min_w_0().truncate().child(status));
+        let identity =
             h_flex()
-                .gap_2()
-                .items_start()
+                .w_full()
+                .items_center()
+                .gap(px(24.0))
+                .pb(px(64.0))
+                .when_some(crate::app_icon::preview(crate::app_icon::selected()), |row, logo| {
+                    row.child(img(logo).size(px(96.0)).flex_shrink_0())
+                })
                 .child(
-                    // 固定键列宽，值才对齐成一列——这是等宽字体在这里的全部
-                    // 意义，不然用 sans 就够了。
-                    div().w(px(76.0)).flex_shrink_0().text_color(muted).child(key),
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(7.0))
+                        .child(
+                            div()
+                                .text_size(px(base_px * 2.15))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(ink)
+                                .child("Nebula"),
+                        )
+                        .child(div().text_color(muted).child(
+                            language.pick(
+                                "GPU 加速终端 · Windows",
+                                "GPU-accelerated terminal · Windows",
+                            ),
+                        ))
+                        .child(
+                            h_flex()
+                                .mt(px(12.0))
+                                .items_center()
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .text_size(px(base_px * 0.88))
+                                        .text_color(muted)
+                                        .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                                )
+                                .child(status_badge),
+                        ),
                 )
-                .child(div().min_w_0().text_color(ink).child(value))
-                .into_any_element()
-        });
-        let banner = v_flex()
-            .id("about-transcript")
-            .group("about-transcript")
-            .relative()
-            .flex_1()
-            .min_w(px(300.0))
-            .gap(px(3.0))
-            .p_4()
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(crate::gpui_shell::theme::settings_hairline(cx))
-            .bg(theme.background)
-            .font_family(mono)
-            .text_size(px(base_px * 0.92))
+                .child(div().flex_shrink_0().child(update_button));
+
+        let auto_update_switch =
+            crate::gpui_shell::widgets::NebulaSwitch::new("auto-check-updates")
+                .checked(self.runtime.auto_check_updates)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                    this.persist(&[("auto_check_updates", (*checked as u8).to_string())], cx);
+                }));
+        let auto_update = h_flex()
+            .items_center()
+            .gap_2()
+            .child(div().text_size(px(base_px * 0.78)).text_color(muted).child(
+                if self.runtime.auto_check_updates {
+                    language.pick("开启", "On")
+                } else {
+                    language.pick("关闭", "Off")
+                },
+            ))
+            .child(auto_update_switch);
+        let last_checked: SharedString = self
+            .about_last_checked
+            .clone()
+            .unwrap_or_else(|| language.pick("尚未检查", "Not checked yet").to_owned())
+            .into();
+        let section_title = |title: &'static str| {
+            div()
+                .h(px(30.0))
+                .text_size(px(base_px * 0.85))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(muted)
+                .child(title)
+        };
+        let version_overview = h_flex()
+            .w_full()
+            .items_end()
+            .justify_between()
+            .gap_4()
+            .pt(px(2.0))
+            .pb_4()
+            .border_b_1()
+            .border_color(hairline)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(base_px * 2.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(ink)
+                            .child(env!("CARGO_PKG_VERSION")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(base_px * 0.72))
+                            .text_color(muted)
+                            .child("Stable · Release"),
+                    ),
+            )
             .child(
                 h_flex()
-                    .gap_2()
                     .items_center()
-                    .child(div().text_color(accent).child("❯"))
-                    .child(div().text_color(muted).child("nebula --version")),
-            )
-            .child(div().mt_1().text_color(ink).child(format!(
-                "Nebula {}",
-                env!("CARGO_PKG_VERSION")
-            )))
-            .children(fact_rows)
-            // 复制是动作，按需出现（与设置行的 ↶ 同一条规矩）。
-            .child(
-                div()
-                    .id("about-copy")
-                    .absolute()
-                    .top(px(8.0))
-                    .right(px(8.0))
-                    .size(px(24.0))
-                    .rounded_md()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .invisible()
-                    .group_hover("about-transcript", |el| el.visible())
-                    .hover(|el| el.bg(theme.list_hover))
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new(
-                            crate::gpui_shell::config::ui_language(cx)
-                                .pick("复制这段信息", "Copy this information"),
-                        )
-                        .build(window, cx)
-                    })
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                            transcript.clone(),
-                        ));
-                    })
-                    .child(Icon::new(IconName::Copy).xsmall().text_color(muted)),
+                    .gap_1()
+                    .text_size(px(base_px * 0.75))
+                    .text_color(success)
+                    .child(Icon::new(IconName::Check).xsmall())
+                    .child(language.pick("当前版本", "Current version")),
             );
-        let identity = h_flex()
-            .w_full()
-            .gap(px(18.0))
-            .items_start()
-            .child(img(self.about_logo.clone()).size(px(68.0)).rounded(px(12.0)).flex_shrink_0())
-            .child(banner);
+        let update_column = v_flex()
+            .flex_1()
+            .min_w(px(280.0))
+            .child(section_title(language.pick("版本与更新", "Version and updates")))
+            .child(version_overview)
+            .child(Self::about_value_row(
+                language.pick("自动检查更新", "Automatically check for updates"),
+                auto_update,
+                cx,
+            ))
+            .child(Self::about_value_row(
+                language.pick("更新通道", "Update channel"),
+                div().text_color(muted).child("Stable"),
+                cx,
+            ))
+            .child(Self::about_value_row(
+                language.pick("上次检查", "Last checked"),
+                div().text_color(muted).child(last_checked),
+                cx,
+            ));
         let actions = v_flex()
-            .w_full()
-            .gap(px(2.0))
+            .flex_1()
+            .min_w(px(280.0))
+            .child(section_title(language.pick("项目与支持", "Project and support")))
             .child(Self::about_action_row(
                 "about-report-issue",
                 IconName::TriangleAlert,
                 language.pick("反馈问题", "Report an issue"),
-                language.pick(
-                    "生成包含版本、平台与构建方式的预填 GitHub Issue",
-                    "Open a prefilled GitHub issue with version, platform, and build details",
-                ),
                 issue_url(),
                 cx,
             ))
             .child(Self::about_action_row(
                 "about-github",
                 IconName::Github,
-                "GitHub",
-                language.pick("源代码", "Source code"),
+                language.pick("GitHub 仓库", "GitHub repository"),
                 REPOSITORY_URL.to_owned(),
                 cx,
             ))
@@ -2833,28 +2955,19 @@ impl SettingsPane {
                 "about-releases",
                 IconName::BookOpen,
                 language.pick("更新内容", "Release notes"),
-                language.pick(
-                    "查看发布说明并下载最新版本",
-                    "View release notes and download the latest version",
-                ),
                 crate::update_check::RELEASES_PAGE.to_owned(),
                 cx,
             ));
 
-        v_flex()
-            .w_full()
-            .gap(px(GROUP_GAP))
-            .child(identity)
-            // 检查更新紧跟在版本信息下面：它回答的正是那一行提出的问题。
-            .child(
-                h_flex()
-                    .mt_5()
-                    .gap_3()
-                    .items_center()
-                    .child(update_button)
-                    .child(div().text_xs().text_color(status_color).child(status)),
-            )
-            .child(actions)
+        v_flex().w_full().child(identity).child(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .items_start()
+                .gap(px(64.0))
+                .child(update_column)
+                .child(actions),
+        )
     }
 
     fn section_appearance(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -2977,6 +3090,7 @@ impl SettingsPane {
             .w_full()
             .gap(px(GROUP_GAP))
             .child(preview)
+            .child(self.app_icon_previews(cx))
             .child(themes)
             .child(theme_mode)
             .child(custom_background)
@@ -3886,14 +4000,17 @@ impl SettingsPane {
 
     fn section_advanced(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let language = crate::gpui_shell::config::ui_language(cx);
+        // 平台没实现的开关整行不画：开着却没效果比没有更糟（见
+        // `platform::capabilities` 的说明）。
+        let caps = crate::platform::CAPABILITIES;
         self.group(language.pick("会话生命周期", "Session lifecycle"), cx)
-            .child(self.switch_row(
+            .when(caps.hide_window_on_close, |group| group.child(self.switch_row(
                 "keep_session",
                 language.pick("关窗后保留后台会话", "Keep sessions running after the window closes"),
                 language.pick("开着时点 × 只是把窗口收走，里面的 shell 继续在常驻进程里跑、可以再附着回来；关掉则连 shell 一起杀，未保存的东西会丢。", "When enabled, closing the window leaves its shells running in the resident process so they can be reattached. When disabled, closing the window terminates them and unsaved work is lost."),
                 self.runtime.keep_session,
                 cx,
-            ))
+            )))
             .child(self.switch_row(
                 "restore_session",
                 language.pick("启动时恢复上次标签", "Restore previous tabs at startup"),
@@ -3908,13 +4025,13 @@ impl SettingsPane {
                 self.runtime.resume_ai,
                 cx,
             ))
-            .child(self.switch_row(
+            .when(caps.system_tray, |group| group.child(self.switch_row(
                 "tray",
                 language.pick("常驻系统托盘图标", "Keep an icon in the system tray"),
                 language.pick("在通知区域留一个图标，正在跑的 AI 会话从那里能直接看到状态。", "Keeps an icon in the notification area where the status of running AI sessions is visible."),
                 self.runtime.tray,
                 cx,
-            ))
+            )))
     }
 
     fn section_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -3943,9 +4060,11 @@ impl SettingsPane {
         // 指示，中间只隔着一条 hairline，用两种蓝会读成两套系统。
         let active_bg = theme.sidebar_accent;
         let active_fg = theme.sidebar_accent_foreground;
+        let active_icon = theme.primary;
+        let foreground = theme.foreground;
         let hover_bg = crate::gpui_shell::theme::settings_hover_bg(cx, false);
         let hairline = crate::gpui_shell::theme::settings_hairline(cx);
-        let row_h = px(32.0);
+        let back_row_h = px(34.0);
         // 设置导航、内容和 workspace 左侧 tab 共享这一个主文字字号。
         let main_text_px = self.font_size_px(cx);
 
@@ -3953,7 +4072,7 @@ impl SettingsPane {
         // 不额外添加卡片或分组标题。
         // 顶上不再画「设置」二字：右栏页头已经写着当前分区名，两者叠在同一
         // 视线高度上就是同一件事说两遍；这个页面是不是设置页，窗口和 tab 早
-        // 就说明了。省下的 72px 直接归还给导航项。
+        // 就说明了。省下的标题块空间直接归还给导航项。
         //
         // 分栏靠一条 hairline 而不是留白：留白只说明"这两块不挨着"，线才说明
         // "这是两个区"——导航是全局的，右栏是当前分区的，二者不是同一层。
@@ -3962,22 +4081,41 @@ impl SettingsPane {
             .h_full()
             .flex_shrink_0()
             .px_2()
-            .py(px(8.0))
+            .pt(px(12.0))
+            .pb(px(8.0))
             .gap(px(2.0))
             .border_r_1()
-            .border_color(hairline);
+            .border_color(hairline)
+            .child(
+                div()
+                    .id("settings-back")
+                    .mx_1()
+                    .mb(px(24.0))
+                    .h(back_row_h)
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_color(muted)
+                    .hover(move |item| item.bg(hover_bg).text_color(foreground))
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsPaneEvent::Close)))
+                    .child(Icon::new(IconName::ArrowLeft).small())
+                    .child(language.pick("返回工作区", "Back to workspace")),
+            );
         for ix in visible_nav_sections() {
             let active = ix == self.active_section;
             nav = nav.child(
                 div()
                     .id(("settings-nav", ix))
-                    .px_2()
-                    .ml_2()
+                    .px_3()
+                    .ml_1()
                     .mr_1()
-                    .h(row_h)
+                    .h(px(40.0))
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_3()
                     .rounded_md()
                     .cursor_pointer()
                     .text_size(px(main_text_px))
@@ -3994,7 +4132,7 @@ impl SettingsPane {
                         cx.notify();
                     }))
                     .child(Icon::default().path(section_icon(ix)).small().text_color(
-                        if active { active_fg } else { muted },
+                        if active { active_icon } else { muted },
                     ))
                     .child(section_label(ix, language)),
             );
@@ -4028,6 +4166,59 @@ impl Render for SettingsPane {
         // 现有 reset 合同只覆盖外观键；其它页面显示同一个按钮会产生假承诺。
         let show_reset = self.active_section == 1;
         let hairline = crate::gpui_shell::theme::settings_hairline(cx);
+        let search_hover = cx.theme().list_hover;
+        let reset_hover = cx.theme().list_hover;
+        let search_query = self.settings_search_input.read(cx).value().trim().to_lowercase();
+        let search_results: Vec<usize> = if search_query.is_empty() {
+            Vec::new()
+        } else {
+            visible_nav_sections()
+                .filter(|index| {
+                    SECTION_SEARCH_TERMS[*index].contains(&search_query)
+                        || section_label(*index, language).to_lowercase().contains(&search_query)
+                })
+                .take(6)
+                .collect()
+        };
+        let search_focused =
+            self.settings_search_input.read(cx).focus_handle(cx).is_focused(window);
+        let search_panel = (search_focused && !search_results.is_empty()).then(|| {
+            v_flex()
+                .w(self
+                    .settings_search_trigger_bounds
+                    .map(|bounds| bounds.size.width)
+                    .unwrap_or(px(680.0)))
+                .p_1()
+                .gap_1()
+                .rounded_md()
+                .border_1()
+                .border_color(hairline)
+                .bg(crate::gpui_shell::theme::settings_panel_bg(cx))
+                .shadow_lg()
+                .occlude()
+                .children(search_results.into_iter().map(|index| {
+                    h_flex()
+                        .id(("settings-search-result", index))
+                        .h(px(36.0))
+                        .px_2()
+                        .gap_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(move |row| row.bg(search_hover))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.active_section = index;
+                            this.settings_search_input.update(cx, |input, cx| {
+                                input.set_value("", window, cx);
+                            });
+                            cx.notify();
+                        }))
+                        .child(Icon::default().path(section_icon(index)).small())
+                        .child(section_label(index, language))
+                }))
+        });
+
+        let search_trigger = cx.entity().downgrade();
+        let search_trigger_bounds = self.settings_search_trigger_bounds;
 
         div()
             .size_full()
@@ -4083,7 +4274,7 @@ impl Render for SettingsPane {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    // 旧壳标题栏固定 72px；正文单独滚动，滚动设置时仍能知道
+                    // 页头固定高度；正文单独滚动，滚动设置时仍能知道
                     // 自己在哪个分区，也不会让标题与首组的距离随内容变化。
                     .child(
                         div()
@@ -4101,10 +4292,11 @@ impl Render for SettingsPane {
                                 h_flex()
                                     .flex_1()
                                     .items_center()
-                                    .justify_between()
-                                    .gap_2()
+                                    .gap_3()
                                     .child(
                                         div()
+                                            .w(px(180.0))
+                                            .flex_shrink_0()
                                             // 全页唯一放大的一处文字。层级本该
                                             // 靠字重和位置做，但页头是页面唯一
                                             // 的锚点，允许它比正文大一档。
@@ -4112,33 +4304,119 @@ impl Render for SettingsPane {
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .child(section_label(self.active_section, language)),
                                     )
-                                    .when(show_reset, |header| {
-                                        header.child(
-                                            div()
-                                                .id("settings-reset")
-                                                .size(px(24.0))
-                                                .rounded_md()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_pointer()
-                                                .hover(|el| el.bg(cx.theme().list_hover))
-                                                .tooltip(|window, cx| {
-                                                    let language = crate::gpui_shell::config::ui_language(cx);
-                                                    gpui_component::tooltip::Tooltip::new(
-                                                        language.pick(
-                                                            "还原外观为默认值",
-                                                            "Restore appearance defaults",
-                                                        ),
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .justify_center()
+                                            .child(
+                                                div()
+                                                    .relative()
+                                                    .w_full()
+                                                    .max_w(px(680.0))
+                                                    .child(
+                                                        Input::new(&self.settings_search_input)
+                                                            .cleanable(true)
+                                                            .prefix(
+                                                                Icon::new(IconName::Search)
+                                                                    .xsmall()
+                                                                    .text_color(
+                                                                        cx.theme()
+                                                                            .muted_foreground,
+                                                                    ),
+                                                            )
+                                                            .aria_label(language.pick(
+                                                                "在全部设置中搜索",
+                                                                "Search all settings",
+                                                            )),
                                                     )
-                                                    .build(window, cx)
-                                                })
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.reset_appearance(window, cx);
-                                                }))
-                                                .child(Icon::new(IconName::Undo2)),
-                                        )
-                                    }),
+                                                    .child(
+                                                        gpui::canvas(
+                                                            move |bounds, _, cx| {
+                                                                let _ = search_trigger.update(
+                                                                    cx,
+                                                                    |pane, cx| {
+                                                                        if pane
+                                                                            .settings_search_trigger_bounds
+                                                                            == Some(bounds)
+                                                                        {
+                                                                            return;
+                                                                        }
+                                                                        pane.settings_search_trigger_bounds =
+                                                                            Some(bounds);
+                                                                        cx.notify();
+                                                                    },
+                                                                );
+                                                            },
+                                                            |_, _, _, _| {},
+                                                        )
+                                                        .absolute()
+                                                        .size_full(),
+                                                    )
+                                                    .when_some(
+                                                        search_panel.zip(search_trigger_bounds),
+                                                        |search, (panel, bounds)| {
+                                                            search.child(
+                                                                deferred(
+                                                                    anchored()
+                                                                        .anchor(
+                                                                            gpui::Anchor::TopLeft,
+                                                                        )
+                                                                        .position(
+                                                                            bounds.bottom_left(),
+                                                                        )
+                                                                        .offset(gpui::point(
+                                                                            px(0.0),
+                                                                            px(6.0),
+                                                                        ))
+                                                                        .snap_to_window_with_margin(
+                                                                            px(8.0),
+                                                                        )
+                                                                        .child(panel),
+                                                                )
+                                                                .with_priority(3),
+                                                            )
+                                                        },
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(180.0))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .justify_end()
+                                            .when(show_reset, |slot| {
+                                                slot.child(
+                                                    div()
+                                                        .id("settings-reset")
+                                                        .size(px(24.0))
+                                                        .rounded_md()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .cursor_pointer()
+                                                        .hover(move |el| el.bg(reset_hover))
+                                                        .tooltip(|window, cx| {
+                                                            let language = crate::gpui_shell::config::ui_language(cx);
+                                                            gpui_component::tooltip::Tooltip::new(
+                                                                language.pick(
+                                                                    "还原外观为默认值",
+                                                                    "Restore appearance defaults",
+                                                                ),
+                                                            )
+                                                            .build(window, cx)
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.reset_appearance(window, cx);
+                                                            },
+                                                        ))
+                                                        .child(Icon::new(IconName::Undo2)),
+                                                )
+                                            }),
+                                    ),
                             ),
                     )
                     .child(
@@ -4181,7 +4459,13 @@ impl Render for SettingsPane {
                             // 边。没有它时标签在最左、值在最右，1080px 宽的窗口
                             // 里眼睛要横跨一整屏才能把"这一项"和"它现在是什么"
                             // 配上，扫到第三行就串行。窗口再宽只是两侧留白变多。
-                            .child(v_flex().w_full().child(content)),
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .justify_center()
+                                    .child(v_flex().w_full().max_w(px(960.0)).child(content)),
+                            ),
                     ),
             )
             .when_some(ssh_editor_modal, |root, modal| root.child(modal))

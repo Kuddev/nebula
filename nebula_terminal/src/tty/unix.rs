@@ -158,6 +158,10 @@ impl ShellUser {
     }
 }
 
+pub fn default_shell_program() -> Result<String> {
+    ShellUser::from_env().map(|user| user.shell)
+}
+
 #[cfg(not(target_os = "macos"))]
 fn default_shell_command(shell: &str, _user: &str, _home: &str) -> Command {
     Command::new(shell)
@@ -400,6 +404,11 @@ impl EventedPty for Pty {
             Ok(None) => None,
             Ok(exit_status) => Some(ChildEvent::Exited(exit_status)),
         }
+    }
+
+    #[inline]
+    fn child_pid(&self) -> Option<u32> {
+        Some(self.child.id())
     }
 }
 

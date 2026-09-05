@@ -481,8 +481,10 @@ pub(crate) fn capture_process_tree(
     let processes = entries
         .into_iter()
         .map(|entry| {
-            let agent_kind = crate::ai_agents::AgentKind::parse(&entry.executable)
-                .map(|kind| kind.slug().to_owned());
+            let agent_kind = crate::ai_agents::AgentKind::parse(
+                &crate::process_tree::display_name(&entry.executable),
+            )
+            .map(|kind| kind.slug().to_owned());
             RuntimeProcess {
                 pid: entry.pid,
                 parent_pid: (entry.pid != root_pid).then_some(entry.parent_pid),

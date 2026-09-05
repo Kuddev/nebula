@@ -87,6 +87,9 @@ pub(super) fn local_options(
     let mut options = tty::Options::default();
     options.shell = shell;
     options.working_directory = cwd;
+    if let Err(error) = crate::platform::shell_integration::prepare(&mut options) {
+        log::warn!("Could not prepare shell integration: {error}");
+    }
     #[cfg(windows)]
     if let Err(error) = tty::refresh_environment(&mut options) {
         log::warn!("Could not refresh the Windows environment for a new pane: {error}");
@@ -148,6 +151,7 @@ pub fn spawn(
 /// 业务层写进 grid，阶段流交给视图画连接横幅。
 pub fn spawn_ssh(
     destination: String,
+    initial_remote_cwd: Option<String>,
     window_size: WindowSize,
     term_config: Config,
 ) -> std::io::Result<SpawnedSession> {
@@ -160,8 +164,13 @@ pub fn spawn_ssh(
         screen_lines: window_size.num_lines as usize,
     };
     let term = Arc::new(FairMutex::new(Term::new(term_config, &grid, proxy.clone())));
-    let sender =
-        crate::ssh_session::spawn_session(destination, window_size, Arc::clone(&term), proxy)?;
+    let sender = crate::ssh_session::spawn_session_at(
+        destination,
+        initial_remote_cwd,
+        window_size,
+        Arc::clone(&term),
+        proxy,
+    )?;
 
     Ok((TerminalSession { term, notifier: Notifier(sender), shell_pid: 0 }, rx, stage_rx))
 }

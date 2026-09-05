@@ -41,6 +41,8 @@ mod ai_assistant;
 mod ai_hook;
 mod ai_providers;
 mod ai_sessions;
+mod app_icon;
+mod assistant_answer;
 mod atomic_file;
 mod backup_remote;
 mod cli;
@@ -83,7 +85,7 @@ mod notify;
 #[cfg(windows)]
 mod panic;
 mod platform;
-#[cfg(unix)]
+#[cfg(all(unix, feature = "legacy-shell"))]
 mod polling;
 mod process_tree;
 mod provider_test;
@@ -104,6 +106,7 @@ mod shell_detect;
 mod ssh;
 mod ssh_credentials;
 mod ssh_profiles;
+mod ssh_prompt;
 mod ssh_proxy;
 mod ssh_session;
 mod ssh_sftp;
@@ -143,7 +146,9 @@ use crate::config::monitor::ConfigMonitor;
 use crate::event::{Event, Processor};
 #[cfg(target_os = "macos")]
 use crate::macos::locale;
-#[cfg(unix)]
+// 旧壳的 Unix socket IPC 与信号轮询；GPUI 壳的控制面走 runtime_api 自己的
+// 传输，不再依赖这套 winit `Event` 代理。
+#[cfg(all(unix, feature = "legacy-shell"))]
 use crate::polling::{IoListener, ipc};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -205,16 +210,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     // （ATTACH），不能再拉一套 PTY。
     #[cfg(feature = "gpui-shell")]
     if wants_gpui_shell(&options) {
+        let initial_cwd = options
+            .window_options
+            .terminal_options
+            .resolved_working_directory()
+            .filter(|path| path.is_dir())
+            .and_then(|path| std::path::absolute(path).ok());
+        platform::startup::prepare_gui();
         let _log_file = logging::initialize(&options).expect("Unable to initialize logger");
         #[cfg(windows)]
         if try_hand_over_to_resident(&options) {
             return Ok(());
         }
-        let initial_cwd = options
-            .window_options
-            .terminal_options
-            .resolved_working_directory()
-            .filter(|path| path.is_dir());
         gpui_shell::run_shell(initial_cwd);
         return Ok(());
     }
@@ -228,7 +235,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(Subcommands::Tab(options)) => runtime_api::shortcuts::tab(options)?,
         Some(Subcommands::Pane(options)) => runtime_api::shortcuts::pane(options)?,
         Some(Subcommands::Agent(options)) => runtime_api::shortcuts::agent(options)?,
-        #[cfg(unix)]
+        #[cfg(all(unix, feature = "legacy-shell"))]
         Some(Subcommands::Msg(options)) => msg(options)?,
         Some(Subcommands::Migrate(options)) => migrate::migrate(options),
         Some(Subcommands::Config(options)) => std::process::exit(config_cli::run(options)),
@@ -252,7 +259,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 /// `msg` subcommand entrypoint.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "legacy-shell"))]
 #[allow(unused_mut)]
 fn msg(mut options: MessageOptions) -> Result<(), Box<dyn Error>> {
     #[cfg(not(any(target_os = "macos", windows)))]

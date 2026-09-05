@@ -8,8 +8,8 @@
 //!
 //! 与旧壳的行为对齐要点：
 //! - 文案合同（占位符/状态行）跟随旧壳 `ssh_editor_render`；
-//! - 添加/编辑弹窗的高度与组内间距按旧壳 `editor_layout` 移植；
-//! - 密钥模式是虚线空态框 + 路径框 +「+ 添加私钥」，文件对话框用旧壳
+//! - 添加/编辑弹窗采用基本与高级两页，正文独立滚动，底部操作始终可见；
+//! - 密钥模式保留文件列表与「添加私钥」，文件对话框用旧壳
 //!   同一套 `pem` / `key` / `ppk` / `id_*` 过滤器；
 //! - 系统口令弹窗修复在 `ssh_session`：解析失败不再误判为「缺口令」；
 //! - 删除主机先移出列表并开一个 8 秒撤销窗口，窗口结束才清理 Profile 与
@@ -27,30 +27,14 @@ use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::settings_pane::{SettingsPane, SettingsPaneEvent, SshStatus};
 use crate::gpui_shell::widgets::NebulaButton;
 
+mod editor;
+mod advanced;
+
 /// 删除撤销窗口时长，旧壳 Undo 条同值。
 const SSH_DELETE_UNDO_SECS: u64 = 8;
 
-/// 对齐旧壳 `display/ssh_editor_render.rs` 的 `editor_layout` 几何。
-const SSH_EDITOR_W: f32 = 440.0;
-/// 默认密码表单约 490px；多留一档呼吸，超出窗口时由 max-height 收缩正文。
-const SSH_EDITOR_H: f32 = 520.0;
-const SSH_EDITOR_HEAD_H: f32 = 48.0;
-const SSH_EDITOR_LABEL_W: f32 = 84.0;
-const SSH_EDITOR_FIELD_GAP: f32 = 6.0;
-const SSH_EDITOR_SPACE_XXS: f32 = 4.0;
-const SSH_EDITOR_SPACE_XS: f32 = 8.0;
-const SSH_EDITOR_SPACE_S: f32 = 12.0;
-const SSH_EDITOR_SPACE_M: f32 = 16.0;
-const SSH_EDITOR_SPACE_XL: f32 = 32.0;
-const SSH_EDITOR_CTL_H: f32 = 32.0;
-const SSH_EDITOR_USERNAME_W: f32 = 118.0;
-const SSH_EDITOR_PORT_W: f32 = 76.0;
-const SSH_EDITOR_KEY_ROW_H: f32 = 30.0;
-const SSH_EDITOR_KEY_ROWS_MAX: usize = 4;
-const SSH_EDITOR_AVATAR_H: f32 = 46.0;
-const SSH_EDITOR_IDENT_NAME_H: f32 = 30.0;
-const SSH_EDITOR_SAVE_H: f32 = 26.0;
-const SSH_EDITOR_FOOTER_H: f32 = 56.0;
+const SSH_EDITOR_CTL_H: f32 = 36.0;
+const SSH_EDITOR_AVATAR_H: f32 = 44.0;
 const SSH_HOST_ROW_H: f32 = 58.0;
 const SSH_HOST_GAP: f32 = 8.0;
 
@@ -122,6 +106,12 @@ pub(super) struct SshEditorState {
     /// 每次打开递增。文件选择器等异步回调只可写回发起它的编辑会话。
     pub(super) id: u64,
     pub(super) original_destination: Option<String>,
+    pub(super) advanced: bool,
+    pub(super) connection: crate::ssh_profiles::SshConnectionOptions,
+    pub(super) original_connection: crate::ssh_profiles::SshConnectionOptions,
+    pub(super) clear_proxy_password: bool,
+    pub(super) jump_picker_open: bool,
+    pub(super) jump_choices: Vec<(String, String)>,
     pub(super) auth: crate::ssh_profiles::SshAuthMode,
     pub(super) icon: Option<String>,
     pub(super) private_keys: Vec<std::path::PathBuf>,
@@ -140,12 +130,18 @@ impl SshEditorState {
         Self {
             id,
             original_destination,
+            advanced: false,
+            connection: crate::ssh_profiles::SshConnectionOptions::default(),
+            original_connection: crate::ssh_profiles::SshConnectionOptions::default(),
+            clear_proxy_password: false,
+            jump_picker_open: false,
+            jump_choices: Vec::new(),
             // 与旧壳新增主机一致：第一次通常有密码，默认密码模式避免让
             // 新用户先因 Auto 没有可用私钥而得到一次无意义的认证失败。
             auth: crate::ssh_profiles::SshAuthMode::Password,
             icon: None,
             private_keys: Vec::new(),
-            save_password: true,
+            save_password: crate::platform::credentials::can_store(),
             show_password: false,
             username_suggestions: Vec::new(),
             revision: 0,
@@ -191,6 +187,31 @@ impl SettingsPane {
     /// 二次确认后的删除：立刻移出列表并写盘，但 Profile 与凭据留到 8 秒
     /// 撤销窗口结束（旧壳 Undo 合同——期内撤销可完整恢复）。
     pub(super) fn delete_ssh_host(&mut self, host: &str, cx: &mut Context<Self>) {
+        let profile_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
+        let profiles = match crate::ssh_profiles::SshProfiles::load(&profile_path) {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                self.ssh_status = Some(SshStatus::ProfileLoadFailed(error.to_string()));
+                self.ssh_delete_confirm = None;
+                cx.notify();
+                return;
+            },
+        };
+        let dependents = profiles.jump_dependents(host);
+        if !dependents.is_empty() {
+            let language = crate::gpui_shell::config::ui_language(cx);
+            self.ssh_status = Some(SshStatus::Error(format!(
+                "{}: {}",
+                language.pick(
+                    "此主机仍被用作跳板，请先修改以下主机的高级设置后再删除",
+                    "This host is still used as a jump host. Update these hosts' advanced settings before deleting it",
+                ),
+                dependents.join(", "),
+            )));
+            self.ssh_delete_confirm = None;
+            cx.notify();
+            return;
+        }
         // 一次只挂一个撤销窗口：新删除先提交上一个。
         self.commit_pending_ssh_delete();
 
@@ -237,9 +258,14 @@ impl SettingsPane {
         let profile_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
         match crate::ssh_profiles::SshProfiles::load(&profile_path) {
             Ok(mut profiles) => {
+                let proxy_credential = profiles.for_destination(&host).connection.proxy_credential_target(&host);
                 profiles.remove(&host);
                 if let Err(error) = profiles.save(&profile_path) {
                     cleanup_errors.push(format!("Profile: {error}"));
+                } else if let Some(target) = proxy_credential {
+                    if let Err(error) = crate::ssh_credentials::delete_generic_secret(&target) {
+                        cleanup_errors.push(format!("Proxy credential: {error}"));
+                    }
                 }
             },
             Err(error) => cleanup_errors.push(format!("Profile: {error}")),
@@ -311,6 +337,14 @@ impl SettingsPane {
         self.ssh_editor_seq = self.ssh_editor_seq.wrapping_add(1).max(1);
         let mut editor = SshEditorState::new(self.ssh_editor_seq, destination);
         editor.username_suggestions = profiles.usernames();
+        let labels = profiles.labels();
+        editor.jump_choices = self.ssh_hosts.merged().into_iter()
+            .filter(|host| editor.original_destination.as_deref() != Some(host))
+            .map(|host| {
+                let label = labels.get(&host).cloned().unwrap_or_else(|| host.clone());
+                (host, label)
+            })
+            .collect();
         for host in self.ssh_hosts.merged() {
             let (address, _) = crate::display::split_destination_port(&host);
             let (username, _) = crate::display::split_destination_user(&address);
@@ -320,14 +354,36 @@ impl SettingsPane {
             editor.auth = profile.auth;
             editor.icon = profile.icon.clone();
             editor.private_keys = profile.private_keys.clone();
+            editor.connection = profile.connection.clone();
+            editor.original_connection = profile.connection.clone();
         }
+        let connection = &editor.connection;
+        self.ssh_proxy_host_input.update(cx, |input, cx| input.set_value(connection.proxy_host.clone(), window, cx));
+        self.ssh_proxy_port_input.update(cx, |input, cx| {
+            input.set_value(connection.proxy_port.map(|port| port.to_string()).unwrap_or_default(), window, cx);
+            input.set_placeholder(connection.effective_proxy_port().to_string(), window, cx);
+        });
+        self.ssh_proxy_username_input.update(cx, |input, cx| input.set_value(connection.proxy_username.clone(), window, cx));
+        self.ssh_proxy_password_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_masked(true, window, cx);
+        });
+        self.ssh_jump_host_input.update(cx, |input, cx| input.set_value(connection.jump_host.clone(), window, cx));
         let label = profile.and_then(|profile| profile.label).unwrap_or_default();
         self.ssh_username_input.update(cx, |input, cx| input.set_value(username, window, cx));
         self.ssh_destination_input.update(cx, |input, cx| input.set_value(address, window, cx));
         self.ssh_port_input.update(cx, |input, cx| input.set_value(port, window, cx));
         self.ssh_label_input.update(cx, |input, cx| input.set_value(label, window, cx));
         // 存储的秘密绝不回填文本框；空值意味着编辑已有主机时保留原凭据。
-        self.ssh_password_input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.ssh_password_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            let language = crate::gpui_shell::config::ui_language(cx);
+            input.set_placeholder(if adding {
+                language.pick("留空则连接时询问", "Leave empty to ask when connecting")
+            } else {
+                language.pick("留空则保留原有凭据", "Leave empty to keep existing credentials")
+            }, window, cx);
+        });
         // 图标选择器每次开编辑器都从收起、无搜索词开始：上一台主机的搜索词
         // 留在框里，下一台打开时列表看着像被莫名筛过。
         self.ssh_icon_picker_open = false;
@@ -341,7 +397,7 @@ impl SettingsPane {
         self.ssh_editor = Some(editor);
         self.ssh_status = None;
         self.set_ssh_editor_masking(window, cx);
-        self.ssh_username_input.update(cx, |input, cx| input.focus(window, cx));
+        self.ssh_destination_input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -350,6 +406,12 @@ impl SettingsPane {
         self.ssh_username_picker_open = false;
         self.ssh_username_trigger_bounds = None;
         self.ssh_password_input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.ssh_proxy_password_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_masked(true, window, cx);
+        });
+        self.ssh_icon_picker_open = false;
+        self.ssh_icon_trigger_bounds = None;
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -429,7 +491,29 @@ impl SettingsPane {
         let destination = match self.ssh_destination_from_draft(cx) {
             Ok(destination) => destination,
             Err(error) => {
+                if let Some(editor) = self.ssh_editor.as_mut() {
+                    editor.advanced = false;
+                }
                 self.ssh_status = Some(SshStatus::Validation(error));
+                cx.notify();
+                return;
+            },
+        };
+        let connection = match self.ssh_connection_from_draft(&destination, cx) {
+            Ok(connection) => connection,
+            Err(error) => {
+                if let Some(editor) = self.ssh_editor.as_mut() {
+                    editor.advanced = true;
+                }
+                self.ssh_status = Some(SshStatus::Error(error));
+                cx.notify();
+                return;
+            },
+        };
+        let (proxy_password, password) = match self.ssh_test_passwords(&destination, &connection, cx) {
+            Ok(passwords) => passwords,
+            Err(error) => {
+                self.ssh_status = Some(SshStatus::Error(error.to_string()));
                 cx.notify();
                 return;
             },
@@ -446,10 +530,9 @@ impl SettingsPane {
             destination: destination.clone(),
             auth: editor.auth,
             private_keys: editor.private_keys.clone(),
-            password: crate::display::auth_sections(editor.auth)
-                .0
-                .then(|| self.ssh_password_input.read(cx).value().to_string())
-                .filter(|password| !password.is_empty()),
+            connection,
+            proxy_password,
+            password,
         };
         let receiver = match crate::ssh_session::start_test(request) {
             Ok(receiver) => receiver,
@@ -486,11 +569,39 @@ impl SettingsPane {
         let destination = match self.ssh_destination_from_draft(cx) {
             Ok(destination) => destination,
             Err(error) => {
+                if let Some(editor) = self.ssh_editor.as_mut() {
+                    editor.advanced = false;
+                }
                 self.ssh_status = Some(SshStatus::Validation(error));
                 cx.notify();
                 return;
             },
         };
+        let connection = match self.ssh_connection_from_draft(&destination, cx) {
+            Ok(connection) => connection,
+            Err(error) => {
+                if let Some(editor) = self.ssh_editor.as_mut() {
+                    editor.advanced = true;
+                }
+                self.ssh_status = Some(SshStatus::Error(error));
+                cx.notify();
+                return;
+            },
+        };
+        let proxy_password = self.ssh_proxy_password_from_draft(cx);
+        if proxy_password.as_deref().is_some_and(|password| !password.is_empty())
+            && !crate::platform::credentials::can_store()
+        {
+            self.ssh_status = Some(SshStatus::Error(crate::gpui_shell::config::ui_language(cx).pick(
+                "系统凭据库不可用，无法安全保存代理密码。请先启用系统凭据库。",
+                "The system credential store is unavailable. Enable it before saving a proxy password.",
+            ).to_owned()));
+            if let Some(editor) = self.ssh_editor.as_mut() {
+                editor.advanced = true;
+            }
+            cx.notify();
+            return;
+        }
         let Some(mut editor) = self.ssh_editor.take() else { return };
         let original = editor.original_destination.clone();
         let profile_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
@@ -503,6 +614,7 @@ impl SettingsPane {
                 return;
             },
         };
+        let previous_connection = original.as_deref().map(|_| editor.original_connection.clone());
         // 保存会改列表：未决删除的快照过期，先提交。
         self.commit_pending_ssh_delete();
         // 先在副本里计算新列表，直到 Profile 与 settings 两份数据都写成功
@@ -527,6 +639,7 @@ impl SettingsPane {
             private_keys: editor.private_keys.clone(),
             label: Some(label),
             icon: editor.icon.clone(),
+            connection: connection.clone(),
         });
         if let Err(error) = profiles.save(&profile_path) {
             self.ssh_status = Some(SshStatus::ProfileSaveFailed(error.to_string()));
@@ -542,12 +655,52 @@ impl SettingsPane {
             return;
         }
         self.ssh_hosts = hosts;
-        let password = self.ssh_password_input.read(cx).value().to_string();
+        if let Err(error) = advanced::save_proxy_credential(
+            &destination,
+            &connection,
+            original.as_deref().zip(previous_connection.as_ref()),
+            proxy_password,
+        ) {
+            let language = crate::gpui_shell::config::ui_language(cx);
+            self.ssh_status = Some(SshStatus::Error(format!("{}: {error}", language.pick(
+                "主机信息已保存，但代理凭据更新失败，请重试",
+                "Host details were saved, but proxy credentials could not be updated; try again",
+            ))));
+            editor.advanced = true;
+            self.ssh_editor = Some(editor);
+            cx.notify();
+            return;
+        }
+        let mut password = zeroize::Zeroizing::new(self.ssh_password_input.read(cx).value().to_string());
+        if password.is_empty() && editor.save_password && crate::display::auth_sections(editor.auth).0 {
+            if let Some(original) = original.as_deref().filter(|old| *old != destination) {
+                match crate::ssh_credentials::load_stored_password(original) {
+                    Ok(Some(secret)) => {
+                        let secret = zeroize::Zeroizing::new(secret);
+                        match std::str::from_utf8(&secret) {
+                            Ok(secret) => *password = secret.to_owned(),
+                            Err(error) => {
+                                self.ssh_status = Some(SshStatus::CredentialSaveFailed(error.to_string()));
+                                self.ssh_editor = Some(editor);
+                                cx.notify();
+                                return;
+                            },
+                        }
+                    },
+                    Ok(None) => {},
+                    Err(error) => {
+                        self.ssh_status = Some(SshStatus::CredentialSaveFailed(error.to_string()));
+                        self.ssh_editor = Some(editor);
+                        cx.notify();
+                        return;
+                    },
+                }
+            }
+        }
         if crate::display::auth_sections(editor.auth).0
             && editor.save_password
             && !password.is_empty()
         {
-            #[cfg(windows)]
             if let Err(error) =
                 crate::ssh_credentials::store_password(&destination, password.as_bytes())
             {
@@ -560,21 +713,19 @@ impl SettingsPane {
         // Credential Manager 以 destination 为键。重命名后旧键既不会被新
         // 连接使用，也不应无限留下；与旧壳一致，在配置和列表都成功写入后
         // 才删除它，避免前面的落盘失败反而丢掉仍可用的凭据。
-        let credential_cleanup_error =
-            original.as_deref().filter(|old| *old != destination).and_then(|old| {
-                #[cfg(windows)]
-                {
-                    crate::ssh_credentials::forget_password(old).err()
-                }
-                #[cfg(not(windows))]
-                {
-                    let _ = old;
-                    None
-                }
-            });
+        let credential_cleanup_error = original
+            .as_deref()
+            .filter(|old| *old != destination)
+            .and_then(|old| crate::ssh_credentials::forget_password(old).err());
         // 只在落盘流程结束后清掉明文；编辑已有主机且密码框为空时不触碰
         // 当前 destination 的凭据。
         self.ssh_password_input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.ssh_proxy_password_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_masked(true, window, cx);
+        });
+        self.ssh_icon_picker_open = false;
+        self.ssh_username_picker_open = false;
         editor.private_keys.clear();
         self.ssh_editor = None;
         self.ssh_status = credential_cleanup_error.map_or_else(
@@ -592,618 +743,25 @@ impl SettingsPane {
 
     // ---- UI：添加/编辑弹窗 ----
 
-    pub(super) fn ssh_editor_modal(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let language = crate::gpui_shell::config::ui_language(cx);
-        let editor = self.ssh_editor.as_ref()?.clone();
-        // 头像与它的弹层先建好：两者都要 `&mut Context`（listener / 实体
-        // 弱引用），而下面的 `cx.theme()` 会把 cx 借成不可变直到函数结束。
-        let icon = crate::display::ui::os_icons::resolve(editor.icon.as_deref());
-        let avatar = self.ssh_avatar(icon, cx);
-        let icon_popup = self.ssh_icon_popup(cx);
-        let username_control = self.ssh_username_control(cx);
-        let username_popup = self.ssh_username_popup(cx);
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let danger = theme.danger;
-        let (shows_password, shows_keys) = crate::display::auth_sections(editor.auth);
-        let title = if editor.original_destination.is_some() {
-            language.pick("编辑 SSH 主机", "Edit SSH host")
-        } else {
-            language.pick("添加 SSH 主机", "Add SSH host")
-        };
-        let dest_error = self.ssh_status.as_ref().and_then(|status| match status {
-            SshStatus::Validation(error) => Some(error.text(language).to_owned()),
-            _ => None,
-        });
-        let status = editor
-            .test_status
-            .as_ref()
-            .map(|status| (status.text(language), status.is_error()))
-            .or_else(|| {
-                self.ssh_status.as_ref().and_then(|status| {
-                    (!matches!(status, SshStatus::Validation(_)))
-                        .then(|| (status.text(language), status.is_error()))
-                })
-            });
-        let destination_preview: SharedString = {
-            let username = self.ssh_username_input.read(cx).value();
-            let address = self.ssh_destination_input.read(cx).value();
-            let port = self.ssh_port_input.read(cx).value();
-            if address.trim().is_empty() {
-                language.pick("未填地址", "No address entered").into()
-            } else {
-                let address =
-                    crate::display::join_destination_user(username.trim(), address.trim());
-                crate::display::join_destination_port(&address, port.trim()).into()
-            }
-        };
-        let select_auth = |mode: crate::ssh_profiles::SshAuthMode| {
-            cx.listener(move |this, _, _, cx| {
-                if let Some(editor) = this.ssh_editor.as_mut() {
-                    editor.auth = mode;
-                    editor.revision = editor.revision.wrapping_add(1);
-                    editor.test_request_id = None;
-                    editor.test_status = None;
-                }
-                this.ssh_status = None;
-                cx.notify();
-            })
-        };
-        let mode_chip = |id: &'static str,
-                         label: &'static str,
-                         mode: crate::ssh_profiles::SshAuthMode,
-                         selected: bool| {
-            div()
-                .id(id)
-                .flex_1()
-                .h(px(SSH_EDITOR_CTL_H - 4.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(4.0))
-                .cursor_pointer()
-                .when(selected, |chip| {
-                    chip.bg(theme.background).font_weight(gpui::FontWeight::MEDIUM)
-                })
-                .when(!selected, |chip| {
-                    chip.text_color(muted).hover(|chip| chip.bg(theme.list_hover))
-                })
-                .child(label)
-                .on_click(select_auth(mode))
-        };
-        let visible_start = editor.private_keys.len().saturating_sub(SSH_EDITOR_KEY_ROWS_MAX);
-        let key_rows =
-            editor.private_keys.iter().enumerate().skip(visible_start).map(|(index, path)| {
-                let shown: SharedString = ssh_key_path_tail(path, 36).into();
-                h_flex()
-                    .id(SharedString::from(format!("ssh-key-{index}")))
-                    .w_full()
-                    .h(px(SSH_EDITOR_KEY_ROW_H))
-                    .px(px(SSH_EDITOR_SPACE_XS))
-                    .gap_2()
-                    .items_center()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.input)
-                    .child(div().flex_1().min_w_0().text_xs().truncate().child(shown))
-                    .child(
-                        Button::new(SharedString::from(format!("ssh-key-remove-{index}")))
-                            .icon(IconName::Close)
-                            .ghost()
-                            .xsmall()
-                            .tooltip(language.pick("移除私钥", "Remove private key"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(editor) = this.ssh_editor.as_mut() {
-                                    if index < editor.private_keys.len() {
-                                        editor.private_keys.remove(index);
-                                        editor.revision = editor.revision.wrapping_add(1);
-                                        editor.test_request_id = None;
-                                        editor.test_status = None;
-                                    }
-                                }
-                                this.ssh_status = None;
-                                cx.notify();
-                            })),
-                    )
-            });
-        let empty_key_box = div()
-            .id("ssh-key-empty")
-            .w_full()
-            .h(px(SSH_EDITOR_KEY_ROW_H))
-            .px(px(SSH_EDITOR_SPACE_XS))
-            .flex()
-            .items_center()
-            .rounded(px(6.0))
-            .border_1()
-            .border_dashed()
-            .border_color(theme.border)
-            .text_xs()
-            .text_color(muted)
-            .truncate()
-            .cursor_pointer()
-            .hover(|row| row.bg(theme.list_hover))
-            .child(language.tr("settings.ssh.default_keys"))
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.add_ssh_private_key(window, cx);
-            }))
-            .into_any_element();
-        let add_key_link = div()
-            .id("ssh-add-private-key")
-            .h(px(SSH_EDITOR_CTL_H))
-            .flex()
-            .items_center()
-            .text_xs()
-            .text_color(theme.primary)
-            .cursor_pointer()
-            .hover(|link| link.text_color(theme.foreground))
-            .child(language.pick("+ 添加私钥", "+ Add private key"))
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.add_ssh_private_key(window, cx);
-            }));
-        let field_row = |label: &'static str, control: gpui::AnyElement| {
-            h_flex()
-                .h(px(SSH_EDITOR_CTL_H))
-                .gap(px(SSH_EDITOR_SPACE_S))
-                .items_center()
-                .child(div().w(px(SSH_EDITOR_LABEL_W)).flex_shrink_0().text_sm().child(label))
-                .child(div().flex_1().min_w_0().child(control))
-        };
-        let dest_hint = dest_error.as_deref().unwrap_or(language.tr("settings.ssh.address_hint"));
-        let dest_hint_color = if dest_error.is_some() { danger } else { muted };
-        let auth_note = if editor.auth == crate::ssh_profiles::SshAuthMode::Auto {
-            language.tr("settings.ssh.auth_auto_description")
-        } else {
-            language.tr("settings.ssh.auth_interactive_description")
-        };
-
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .occlude()
-                .bg(theme.overlay)
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                    cx.stop_propagation();
-                    // 遮罩上的点击先收图标选择器：弹层开着时，点它外面的
-                    // 意思是「不选了」，不是「关掉整个编辑器」。
-                    if this.ssh_icon_picker_open {
-                        this.toggle_ssh_icon_picker(window, cx);
-                    } else if this.ssh_username_picker_open {
-                        this.ssh_username_picker_open = false;
-                        cx.notify();
-                    }
-                }))
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if event.keystroke.key.eq_ignore_ascii_case("escape") {
-                        cx.stop_propagation();
-                        // Esc 一层一层退：图标选择器开着就只收它。
-                        if this.ssh_icon_picker_open {
-                            this.toggle_ssh_icon_picker(window, cx);
-                        } else if this.ssh_username_picker_open {
-                            this.ssh_username_picker_open = false;
-                            cx.notify();
-                        } else {
-                            this.close_ssh_editor(window, cx);
-                        }
-                    }
-                }))
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .p(px(SSH_EDITOR_SPACE_XL))
-                        .child(
-                            v_flex()
-                                .w(px(SSH_EDITOR_W))
-                                .h(px(SSH_EDITOR_H))
-                                .max_w(gpui::relative(1.0))
-                                .max_h(gpui::relative(1.0))
-                                .flex_none()
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.popover)
-                                .shadow_md()
-                                .overflow_hidden()
-                                .child(
-                                    h_flex()
-                                        .h(px(SSH_EDITOR_HEAD_H))
-                                        .flex_shrink_0()
-                                        .px(px(SSH_EDITOR_SPACE_M))
-                                        .items_center()
-                                        .border_b_1()
-                                        .border_color(theme.border)
-                                        .child(div().flex_1().text_lg().child(title))
-                                        .child(
-                                            Button::new("ssh-editor-close")
-                                                .icon(IconName::Close)
-                                                .ghost()
-                                                .tooltip(language.pick("关闭", "Close"))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.close_ssh_editor(window, cx);
-                                                })),
-                                        ),
-                                )
-                                .child(
-                                    // 面板有明确高度后，正文才能可靠拿到标题栏与底栏
-                                    // 之外的剩余空间；小窗口和长密钥列表只滚动这里。
-                                    v_flex()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .overflow_y_scrollbar()
-                                        .px(px(SSH_EDITOR_SPACE_M))
-                                        .pt(px(SSH_EDITOR_SPACE_S))
-                                        .pb(px(SSH_EDITOR_SPACE_S))
-                                        .child(
-                                            h_flex()
-                                                .relative()
-                                                .gap(px(SSH_EDITOR_SPACE_S))
-                                                .items_start()
-                                                .child(avatar)
-                                                .child(
-                                                    v_flex()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .h(px(SSH_EDITOR_AVATAR_H))
-                                                        .child(
-                                                            div().h(px(SSH_EDITOR_IDENT_NAME_H)).w_full().child(
-                                                                Input::new(&self.ssh_label_input)
-                                                                    .appearance(false)
-                                                                    .bordered(false)
-                                                                    .focus_bordered(false),
-                                                            ),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .pt(px(2.0))
-                                                                .text_xs()
-                                                                .text_color(muted)
-                                                                .truncate()
-                                                                .child(destination_preview),
-                                                        ),
-                                                )
-                                                .children(icon_popup),
-                                        )
-                                        .child(
-                                            div()
-                                                .mt(px(SSH_EDITOR_SPACE_XS))
-                                                .w_full()
-                                                .h(px(1.0))
-                                                .bg(theme.border),
-                                        )
-                                        .child(
-                                            v_flex()
-                                                .w_full()
-                                                .mt(px(SSH_EDITOR_SPACE_XS))
-                                                .p(px(SSH_EDITOR_SPACE_S))
-                                                .rounded(px(8.0))
-                                                .border_1()
-                                                .border_color(theme.border)
-                                                .bg(theme.group_box)
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(theme.group_box_foreground)
-                                                        .child(language.pick("连接", "Connection")),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .mt(px(SSH_EDITOR_SPACE_XS))
-                                                        .h(px(SSH_EDITOR_CTL_H))
-                                                        .gap(px(SSH_EDITOR_SPACE_S))
-                                                        .items_center()
-                                                        .child(
-                                                            h_flex()
-                                                                .w(px(SSH_EDITOR_LABEL_W))
-                                                                .flex_shrink_0()
-                                                                .text_sm()
-                                                                .gap(px(2.0))
-                                                                .child(language.pick("地址", "Address"))
-                                                                .child(
-                                                                    div().text_color(danger).child("*"),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            div().flex_1().min_w_0().child(
-                                                                h_flex()
-                                                                    .w_full()
-                                                                    .gap_2()
-                                                                    .items_center()
-                                                                    .child(username_control)
-                                                                    .child(
-                                                                        div()
-                                                                            .flex_shrink_0()
-                                                                            .text_sm()
-                                                                            .text_color(muted)
-                                                                            .child("@"),
-                                                                    )
-                                                                    .child(
-                                                                        div().flex_1().min_w_0().child(
-                                                                            Input::new(
-                                                                                &self.ssh_destination_input,
-                                                                            ),
-                                                                        ),
-                                                                    ),
-                                                            ),
-                                                        ),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .mt(px(SSH_EDITOR_SPACE_XXS))
-                                                        .pl(px(SSH_EDITOR_LABEL_W + SSH_EDITOR_SPACE_S))
-                                                        .text_xs()
-                                                        .text_color(dest_hint_color)
-                                                        .child(dest_hint.to_owned()),
-                                                )
-                                                .child(
-                                                    h_flex()
-                                                        .mt(px(SSH_EDITOR_FIELD_GAP))
-                                                        .h(px(SSH_EDITOR_CTL_H))
-                                                        .gap(px(SSH_EDITOR_SPACE_S))
-                                                        .items_center()
-                                                        .child(
-                                                            div()
-                                                                .w(px(SSH_EDITOR_LABEL_W))
-                                                                .flex_shrink_0()
-                                                                .text_sm()
-                                                                .child(language.pick("端口", "Port")),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .w(px(SSH_EDITOR_PORT_W))
-                                                                .child(Input::new(&self.ssh_port_input)),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(muted)
-                                                                .child(language.pick("默认 22", "Default: 22")),
-                                                        ),
-                                                )
-                                                .children(username_popup),
-                                        )
-                                        .child(
-                                            v_flex()
-                                                .w_full()
-                                                .mt(px(SSH_EDITOR_SPACE_S))
-                                                .p(px(SSH_EDITOR_SPACE_S))
-                                                .rounded(px(8.0))
-                                                .border_1()
-                                                .border_color(theme.border)
-                                                .bg(theme.group_box)
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(theme.group_box_foreground)
-                                                        .child(language.pick("认证", "Authentication")),
-                                                )
-                                                .child(field_row(
-                                                    language.pick("方式", "Method"),
-                                                    h_flex()
-                                                        .w_full()
-                                                        .h(px(SSH_EDITOR_CTL_H))
-                                                        .p(px(2.0))
-                                                        .rounded(px(6.0))
-                                                        .border_1()
-                                                        .border_color(theme.border)
-                                                        .bg(theme.input)
-                                                        .child(mode_chip(
-                                                            "ssh-auth-password",
-                                                            language.pick("密码", "Password"),
-                                                            crate::ssh_profiles::SshAuthMode::Password,
-                                                            editor.auth
-                                                                == crate::ssh_profiles::SshAuthMode::Password,
-                                                        ))
-                                                        .child(mode_chip(
-                                                            "ssh-auth-key",
-                                                            language.pick("密钥", "Key"),
-                                                            crate::ssh_profiles::SshAuthMode::PublicKey,
-                                                            editor.auth
-                                                                == crate::ssh_profiles::SshAuthMode::PublicKey,
-                                                        ))
-                                                        .child(mode_chip(
-                                                            "ssh-auth-auto",
-                                                            language.pick("自动", "Auto"),
-                                                            crate::ssh_profiles::SshAuthMode::Auto,
-                                                            editor.auth
-                                                                == crate::ssh_profiles::SshAuthMode::Auto,
-                                                        ))
-                                                        .child(mode_chip(
-                                                            "ssh-auth-interactive",
-                                                            language.pick("交互式", "Interactive"),
-                                                            crate::ssh_profiles::SshAuthMode::KeyboardInteractive,
-                                                            editor.auth
-                                                                == crate::ssh_profiles::SshAuthMode::KeyboardInteractive,
-                                                        ))
-                                                        .into_any_element(),
-                                                ).mt(px(SSH_EDITOR_SPACE_XS)))
-                                                .when(shows_password, |section| {
-                                                    section
-                                                        .child(
-                                                            h_flex()
-                                                                .mt(px(SSH_EDITOR_FIELD_GAP))
-                                                                .h(px(SSH_EDITOR_CTL_H))
-                                                                .gap(px(SSH_EDITOR_SPACE_S))
-                                                                .items_center()
-                                                                .child(
-                                                                    div()
-                                                                        .w(px(SSH_EDITOR_LABEL_W))
-                                                                        .flex_shrink_0()
-                                                                        .text_sm()
-                                                                        .child(language.pick("密码", "Password")),
-                                                                )
-                                                                .child(
-                                                                    div().flex_1().min_w_0().child(
-                                                                        Input::new(&self.ssh_password_input)
-                                                                            .mask_toggle(),
-                                                                    ),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            h_flex()
-                                                                .mt(px(SSH_EDITOR_SPACE_XS))
-                                                                .h(px(SSH_EDITOR_SAVE_H))
-                                                                .pl(px(SSH_EDITOR_LABEL_W + SSH_EDITOR_SPACE_S))
-                                                                .items_center()
-                                                                .child(
-                                                                    Checkbox::new("ssh-save-password")
-                                                                        .small()
-                                                                        .checked(editor.save_password)
-                                                                        .label(language.tr(
-                                                                            "settings.ssh.save_password",
-                                                                        ))
-                                                                        .on_click(cx.listener(
-                                                                            |this, value: &bool, _, cx| {
-                                                                                if let Some(editor) =
-                                                                                    this.ssh_editor.as_mut()
-                                                                                {
-                                                                                    editor.save_password = *value;
-                                                                                    editor.revision = editor
-                                                                                        .revision
-                                                                                        .wrapping_add(1);
-                                                                                    editor.test_request_id = None;
-                                                                                    editor.test_status = None;
-                                                                                }
-                                                                                this.ssh_status = None;
-                                                                                cx.notify();
-                                                                            },
-                                                                        )),
-                                                                ),
-                                                        )
-                                                })
-                                                .when(shows_keys, |section| {
-                                                    section.child(
-                                                        h_flex()
-                                                            .mt(px(SSH_EDITOR_FIELD_GAP))
-                                                            .gap(px(SSH_EDITOR_SPACE_S))
-                                                            .items_start()
-                                                            .child(
-                                                                div()
-                                                                    .w(px(SSH_EDITOR_LABEL_W))
-                                                                    .h(px(SSH_EDITOR_KEY_ROW_H))
-                                                                    .flex_shrink_0()
-                                                                    .flex()
-                                                                    .items_center()
-                                                                    .text_sm()
-                                                                    .child(language.pick("私钥", "Private keys")),
-                                                            )
-                                                            .child(
-                                                                v_flex()
-                                                                    .flex_1()
-                                                                    .min_w_0()
-                                                                    .gap(px(SSH_EDITOR_FIELD_GAP))
-                                                                    .child(if editor.private_keys.is_empty() {
-                                                                        empty_key_box
-                                                                    } else {
-                                                                        v_flex()
-                                                                            .gap(px(SSH_EDITOR_FIELD_GAP))
-                                                                            .children(key_rows)
-                                                                            .into_any_element()
-                                                                    })
-                                                                    .child(add_key_link),
-                                                            ),
-                                                    )
-                                                })
-                                                .when(!shows_password && !shows_keys, |section| {
-                                                    section.child(
-                                                        div()
-                                                            .mt(px(SSH_EDITOR_SPACE_XS))
-                                                            .text_xs()
-                                                            .text_color(muted)
-                                                            .child(auth_note),
-                                                    )
-                                                }),
-                                        ),
-                                )
-                                .when_some(status, |card, (message, error)| {
-                                    card.child(
-                                        h_flex()
-                                            .flex_shrink_0()
-                                            .px(px(SSH_EDITOR_SPACE_M))
-                                            .py(px(SSH_EDITOR_SPACE_XS))
-                                            .gap_2()
-                                            .items_center()
-                                            .border_t_1()
-                                            .border_color(theme.border)
-                                            .text_color(if error { danger } else { theme.success })
-                                            .child(if error {
-                                                Icon::new(IconName::CircleX).xsmall()
-                                            } else if editor.testing() {
-                                                Icon::new(IconName::Loader).xsmall()
-                                            } else {
-                                                Icon::new(IconName::CircleCheck).xsmall()
-                                            })
-                                            .child(div().text_xs().child(message)),
-                                    )
-                                })
-                                .child(
-                                    h_flex()
-                                        .h(px(SSH_EDITOR_FOOTER_H))
-                                        .flex_shrink_0()
-                                        .px(px(SSH_EDITOR_SPACE_M))
-                                        .items_center()
-                                        .justify_between()
-                                        .border_t_1()
-                                        .border_color(theme.border)
-                                        .child(
-                                            NebulaButton::new("ssh-editor-test")
-                                                .label(if editor.testing() {
-                                                    language.pick("测试中…", "Testing...")
-                                                } else {
-                                                    language.pick("测试连接", "Test connection")
-                                                })
-                                                .outline()
-                                                .disabled(editor.testing())
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.test_ssh_editor(cx)
-                                                })),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .child(
-                                                    NebulaButton::new("ssh-editor-cancel")
-                                                        .label(language.pick("取消", "Cancel"))
-                                                        .outline()
-                                                        .on_click(cx.listener(|this, _, window, cx| {
-                                                            this.close_ssh_editor(window, cx);
-                                                        })),
-                                                )
-                                                .child(
-                                                    NebulaButton::new("ssh-editor-save")
-                                                        .label(language.pick("保存", "Save"))
-                                                        .primary()
-                                                        .on_click(cx.listener(|this, _, window, cx| {
-                                                            this.save_ssh_editor(window, cx);
-                                                        })),
-                                                ),
-                                        ),
-                                ),
-                        ),
-                )
-                .into_any_element(),
-        )
-    }
-
     // ---- UI：可编辑用户名历史 ----
 
     fn ssh_username_control(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let pane = cx.entity().downgrade();
         let open = self.ssh_username_picker_open;
+        let language = crate::gpui_shell::config::ui_language(cx);
         h_flex()
             .relative()
-            .w(px(SSH_EDITOR_USERNAME_W))
-            .flex_shrink_0()
+            .w_full()
             // 输入框/下拉按钮都属于弹层触发器；阻止鼠标冒泡到模态遮罩，
             // 否则聚焦刚把候选打开，同一次点击又会被遮罩立即关闭。
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(div().flex_1().min_w_0().child(Input::new(&self.ssh_username_input)))
             .child(
-                Button::new("ssh-username-history")
+                Input::new(&self.ssh_username_input)
+                    .h(px(SSH_EDITOR_CTL_H))
+                    .text_sm()
+                    .aria_label(language.pick("用户名", "Username"))
+                    .bg(cx.theme().popover)
+                    .suffix(Button::new("ssh-username-history")
                     .icon(if open { IconName::ChevronUp } else { IconName::ChevronDown })
                     .ghost()
                     .xsmall()
@@ -1213,7 +771,7 @@ impl SettingsPane {
                     ))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_ssh_username_picker(window, cx);
-                    })),
+                    }))),
             )
             .child(
                 gpui::canvas(
@@ -1294,7 +852,7 @@ impl SettingsPane {
             .collect();
         let row_count = rows.len();
         let panel = v_flex()
-            .w(px(SSH_EDITOR_USERNAME_W + 28.0))
+            .w(trigger.size.width.max(px(200.0)))
             .p_2()
             .rounded_lg()
             .border_1()
@@ -1355,12 +913,12 @@ impl SettingsPane {
         div()
             .id("ssh-icon-avatar")
             .relative()
-            .size(px(46.0))
+            .size(px(SSH_EDITOR_AVATAR_H))
             .flex_shrink_0()
-            .rounded(px(6.0))
+            .rounded(px(10.0))
             .border_1()
             .border_color(if open { theme.primary } else { theme.border })
-            .bg(theme.input)
+            .bg(theme.group_box)
             .flex()
             .items_center()
             .justify_center()

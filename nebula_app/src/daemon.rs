@@ -112,6 +112,46 @@ where
     }
 }
 
+/// 与 PTY 无关的后台启动：给 GPUI 壳的「点链接/打开目录」用，两端签名一致。
+///
+/// Windows 直接是 [`spawn_daemon`]；Unix 版不需要旧壳那套「从前台进程组
+/// 复制 cwd」（GPUI 壳的调用方手里没有 master_fd），只做 fork + setsid 脱离。
+#[cfg(windows)]
+pub fn spawn_detached<I, S>(program: &str, args: I) -> io::Result<()>
+where
+    I: IntoIterator<Item = S> + Copy,
+    S: AsRef<OsStr>,
+{
+    spawn_daemon(program, args)
+}
+
+#[cfg(not(windows))]
+pub fn spawn_detached<I, S>(program: &str, args: I) -> io::Result<()>
+where
+    I: IntoIterator<Item = S> + Copy,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    unsafe {
+        command
+            .pre_exec(|| {
+                match libc::fork() {
+                    -1 => return Err(io::Error::last_os_error()),
+                    0 => (),
+                    _ => libc::_exit(0),
+                }
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            })
+            .spawn()?
+            .wait()
+            .map(|_| ())
+    }
+}
+
 /// Get working directory of controlling process.
 #[cfg(not(any(windows, target_os = "openbsd")))]
 pub fn foreground_process_path(

@@ -46,7 +46,7 @@ pub use win::init;
 #[cfg(all(windows, feature = "gpui-shell"))]
 pub use win::init_gpui;
 #[cfg(windows)]
-pub use win::{set_enabled, shutdown, update};
+pub use win::{refresh_app_icon, set_enabled, shutdown, update};
 
 #[cfg(all(not(windows), feature = "legacy-shell"))]
 pub fn init(_proxy: winit::event_loop::EventLoopProxy<crate::event::Event>) {}
@@ -58,6 +58,8 @@ pub fn set_enabled(_enabled: bool) {}
 pub fn update(_agents: Vec<TrayAgent>) {}
 #[cfg(not(windows))]
 pub fn shutdown() {}
+#[cfg(not(windows))]
+pub fn refresh_app_icon() {}
 
 #[cfg(windows)]
 mod win {
@@ -72,9 +74,6 @@ mod win {
     #[cfg(feature = "legacy-shell")]
     use crate::event::{Event, EventType};
 
-    /// 与 notify.rs 的 toast 图标同一份官方 logo，托盘不会出现第二个品牌形态。
-    const LOGO_PNG: &[u8] = include_bytes!("../../extra/logo/nebula.png");
-
     /// 托盘回调（lParam 携带鼠标消息；未 SETVERSION 的经典 v0 语义，
     /// Win7 至今行为一致，不依赖 v4 的坐标打包）。
     const WM_APP_TRAY: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
@@ -84,6 +83,7 @@ mod win {
     const WM_APP_SET: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 3;
     /// 进程收尾：删图标 + 退出消息泵（不删的话图标要等用户悬停才消失）。
     const WM_APP_SHUTDOWN: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 4;
+    const WM_APP_ICON: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 5;
 
     /// 菜单命令 id 的起点；`MENU_AGENT_BASE + i` = 聚焦第 i 个 agent。
     const MENU_AGENT_BASE: usize = 1000;
@@ -151,6 +151,10 @@ mod win {
         post(WM_APP_SHUTDOWN);
     }
 
+    pub fn refresh_app_icon() {
+        post(WM_APP_ICON);
+    }
+
     fn post(message: u32) {
         let hwnd = HWND.load(Ordering::Acquire);
         if hwnd != 0 {
@@ -180,6 +184,15 @@ mod win {
         normal: isize,
         attention: isize,
         added: bool,
+    }
+
+    impl Drop for Icons {
+        fn drop(&mut self) {
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(self.normal as _);
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyIcon(self.attention as _);
+            }
+        }
     }
 
     thread_local! {
@@ -277,6 +290,10 @@ mod win {
             },
             WM_APP_SET => {
                 apply_enabled(hwnd);
+                0
+            },
+            WM_APP_ICON => {
+                replace_app_icon(hwnd);
                 0
             },
             WM_APP_SHUTDOWN => {
@@ -491,6 +508,18 @@ mod win {
 
     // ─── 图标像素 ────────────────────────────────────────────────────────
 
+    fn replace_app_icon(hwnd: windows_sys::Win32::Foundation::HWND) {
+        let (normal, attention) = build_icons();
+        let replacement =
+            Icons { normal: normal as isize, attention: attention as isize, added: false };
+        if normal.is_null() || attention.is_null() {
+            return;
+        }
+        remove_icon(hwnd);
+        ICONS.with(|slot| *slot.borrow_mut() = Some(replacement));
+        apply_enabled(hwnd);
+    }
+
     /// 从内嵌 logo 造两个 HICON：常态 + attention（右下角橙点）。
     /// 失败退化为空句柄——Shell_NotifyIconW 会用系统默认图标，托盘仍可用。
     fn build_icons() -> (
@@ -501,7 +530,8 @@ mod win {
 
         // SAFETY: GetSystemMetrics 无前置条件。
         let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64) as u32;
-        let Ok(decoded) = image::load_from_memory(LOGO_PNG) else {
+        let bytes = crate::app_icon::png(crate::app_icon::selected(), size).unwrap_or_default();
+        let Ok(decoded) = image::load_from_memory(bytes) else {
             log::warn!("tray: embedded logo failed to decode");
             return (std::ptr::null_mut(), std::ptr::null_mut());
         };

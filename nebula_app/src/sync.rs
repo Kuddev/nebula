@@ -34,6 +34,7 @@ const HISTORY_SYNC_CAP: usize = 2000;
 const SYNC_KEYS: &[&str] = &[
     "language",
     "theme",
+    "app_icon",
     "follow_system_theme",
     "ghost",
     "accept",

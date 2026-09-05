@@ -40,7 +40,10 @@ impl SettingsPane {
     fn keymap_visible(&self, cx: &App) -> Vec<usize> {
         use crate::display::keymap;
         let query = self.keymap_search_input.read(cx).value().trim().to_lowercase();
+        // 快速终端热键在没实现该功能的平台上不列出：改了也没有效果。
+        let quick_terminal = crate::platform::CAPABILITIES.quick_terminal_hotkey;
         (0..keymap::editable_row_count())
+            .filter(|flat| quick_terminal || *flat != keymap::QUICK_TERMINAL_ROW)
             .filter(|flat| query.is_empty() || self.keymap_row_haystack(*flat).contains(&query))
             .collect()
     }

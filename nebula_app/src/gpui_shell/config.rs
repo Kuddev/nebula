@@ -289,18 +289,7 @@ fn rgba8(color: nebula_settings::Rgb8) -> gpui::Rgba {
 }
 
 fn default_font_family() -> &'static str {
-    #[cfg(windows)]
-    {
-        "Maple Mono Normal NF CN"
-    }
-    #[cfg(target_os = "macos")]
-    {
-        "Menlo"
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        "monospace"
-    }
+    crate::font_install::REQUIRED_FONT_FAMILY
 }
 
 /// 查找配置文件；顺序与 `nebula_app::config::installed_config` 一致。
@@ -637,6 +626,11 @@ mod tests {
     use crate::display::UiLanguage;
     use crate::gpui_shell::terminal::colors::Palette;
     use nebula_settings::{LanguagePref, ThemeName};
+
+    #[test]
+    fn default_terminal_font_is_bundled_on_every_platform() {
+        assert_eq!(super::default_font_family(), crate::font_install::REQUIRED_FONT_FAMILY);
+    }
 
     #[test]
     fn explicit_runtime_languages_resolve_without_reading_system_locale() {

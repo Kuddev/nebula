@@ -228,10 +228,14 @@ fn toast_clickable(
 }
 
 #[cfg(not(windows))]
-pub(crate) fn toast(_title: &str, _body: &str) {}
+pub(crate) fn toast(title: &str, body: &str) {
+    crate::platform::notifications::show(title, body);
+}
 
 #[cfg(all(not(windows), feature = "legacy-shell"))]
-fn toast_clickable(_title: &str, _body: &str, _focus: Option<(WindowId, Option<u64>)>) {}
+fn toast_clickable(title: &str, body: &str, _focus: Option<(WindowId, Option<u64>)>) {
+    toast(title, body);
+}
 
 /// `nebula notify-test` entrypoint: run the full toast pipeline synchronously
 /// (registration + show), printing per-step diagnostics to the console. Skips
@@ -295,7 +299,7 @@ pub fn notify_test() -> i32 {
 #[cfg(windows)]
 mod win {
     use std::path::PathBuf;
-    use std::sync::OnceLock;
+    use std::sync::Mutex;
 
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
@@ -304,32 +308,33 @@ mod win {
     /// so the system shows "Nebula" instead of "PowerShell" / "cmd.exe".
     pub const AUMID: &str = "com.nebula.terminal";
 
-    /// Embedded toast icon. `IconUri` must point at a real file on disk, so
-    /// this is materialized to the Nebula data dir on first registration —
-    /// works for a portable exe with no installer. (Some terminals solve this
-    /// problem with an installer-created Start-menu shortcut; we don't have
-    /// an installer to lean on.)
-    const ICON_PNG: &[u8] = include_bytes!("../../extra/logo/nebula.png");
-
     /// Ensure the AUMID is registered. Best-effort, cached per process: the
     /// write itself is a few syscalls, there is just no point repeating them
     /// for every toast.
     pub fn ensure_aumid() {
-        static DONE: OnceLock<()> = OnceLock::new();
-        DONE.get_or_init(|| {
-            if let Err(err) = register_aumid() {
+        static REGISTERED: Mutex<Option<nebula_settings::AppIconName>> = Mutex::new(None);
+        let variant = crate::app_icon::selected();
+        let mut registered = REGISTERED.lock().unwrap_or_else(|error| error.into_inner());
+        if *registered != Some(variant) {
+            if let Err(err) = register_icon(variant) {
                 log::warn!("notify: AUMID registration failed (toast may not appear): {err}");
+            } else {
+                *registered = Some(variant);
             }
-        });
+        }
     }
 
     /// Write `DisplayName` + `IconUri` under the AUMID key. `RegSetKeyValueW`
     /// creates the missing subkey chain itself. The icon is best-effort: a
     /// failed write only costs the logo, never the toast.
     pub fn register_aumid() -> Result<(), String> {
+        register_icon(crate::app_icon::selected())
+    }
+
+    fn register_icon(variant: nebula_settings::AppIconName) -> Result<(), String> {
         let subkey = format!(r"Software\Classes\AppUserModelId\{AUMID}");
         set_reg_sz(&subkey, "DisplayName", "Nebula")?;
-        match ensure_icon_file() {
+        match ensure_icon_file(variant) {
             Some(icon) => set_reg_sz(&subkey, "IconUri", &icon.display().to_string())?,
             None => log::debug!("notify: toast icon not materialized; banner shows no logo"),
         }
@@ -338,19 +343,17 @@ mod win {
 
     /// The materialized icon path, for diagnostics (`nebula notify-test`).
     pub fn icon_path() -> Option<PathBuf> {
-        ensure_icon_file()
+        ensure_icon_file(crate::app_icon::selected())
     }
 
-    /// Write the embedded logo to `toast_icon.png` in the user data dir
-    /// (idempotent; refreshed when the embedded bytes change size, e.g. after a
-    /// logo swap).
-    fn ensure_icon_file() -> Option<PathBuf> {
-        let path = crate::platform::dirs::data_dir().join("toast_icon.png");
-        let stale = std::fs::metadata(&path)
-            .map(|meta| meta.len() != ICON_PNG.len() as u64)
-            .unwrap_or(true);
+    fn ensure_icon_file(variant: nebula_settings::AppIconName) -> Option<PathBuf> {
+        let bytes = crate::app_icon::png(variant, 256)?;
+        let directory = crate::platform::dirs::data_dir();
+        let path = directory.join(format!("toast_icon-{}.png", variant.settings_value()));
+        let stale = std::fs::read(&path).ok().as_deref() != Some(bytes);
         if stale {
-            std::fs::write(&path, ICON_PNG).ok()?;
+            std::fs::create_dir_all(directory).ok()?;
+            std::fs::write(&path, bytes).ok()?;
         }
         Some(path)
     }

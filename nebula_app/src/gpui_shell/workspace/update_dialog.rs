@@ -233,6 +233,14 @@ pub(crate) fn open_update_dialog(
                     "Nebula will download and verify the installer, then wait for your confirmation before installing.",
                 )
                 .into(),
+            // 非 Windows 目前没有自动安装路径（能力表 `self_update_install`）：
+            // 不说「缺 Windows 安装包」，那对 Mac/Linux 用户是句错话。
+            _ if !crate::platform::CAPABILITIES.self_update_install => language
+                .pick(
+                    "此平台暂不支持应用内自动更新；请到发布页下载对应的安装包。",
+                    "In-app automatic updates are not available on this platform yet. Download the matching package from the Releases page.",
+                )
+                .into(),
             _ => language
                 .pick(
                     "此 release 没有可验证的 Windows x64 安装包，已禁用自动执行；可打开发布页手动处理。",

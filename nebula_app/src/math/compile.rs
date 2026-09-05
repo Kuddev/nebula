@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 
 use super::layout::{MathLayout, layout_formula};
-use super::parser::parse_formula;
+use super::parser::{parse_formula, parse_formula_source};
 use super::{MathError, MathErrorKind, MathLimits};
 
 const MAX_ENTITY_DECODE_PASSES: usize = 4;
@@ -23,6 +23,17 @@ pub(crate) fn compile_formula(
     let formula = parse_formula(source, display, limits)?;
     // 光学补偿在这一个入口做：调用方传名义字号（终端/正文字号），缓存键也用
     // 名义字号，返回的 metrics 已是补偿后的真实几何，fit 逻辑自然吸收。
+    layout_formula(&formula, pixel_size * super::OPTICAL_SCALE, pixels_per_point, limits)
+}
+
+pub(crate) fn compile_formula_source(
+    source: &str,
+    display: bool,
+    pixel_size: f32,
+    pixels_per_point: f32,
+    limits: MathLimits,
+) -> Result<MathLayout, MathError> {
+    let formula = parse_formula_source(source, display, limits)?;
     layout_formula(&formula, pixel_size * super::OPTICAL_SCALE, pixels_per_point, limits)
 }
 
@@ -76,7 +87,7 @@ pub(super) fn normalize_formula_source<'a>(
 /// `pulldown-latex` requires braces around `\frac` arguments, while TeX also
 /// accepts a single token (`\frac13`, `\frac\pi2`). Canonicalize that standard
 /// shorthand before parsing without changing already-grouped arguments.
-fn brace_unbraced_fraction_arguments(source: &str) -> Option<String> {
+pub(super) fn brace_unbraced_fraction_arguments(source: &str) -> Option<String> {
     let mut normalized = String::with_capacity(source.len());
     let mut copied_until = 0usize;
     let mut offset = 0usize;
@@ -283,12 +294,62 @@ fn is_tex_dimension(source: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_formula, normalize_formula_source};
+    use super::{compile_formula, compile_formula_source, normalize_formula_source};
     use crate::math::DEFAULT_LIMITS;
 
     const QUADRATIC: &str = r"x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}";
     const CASES: &str = r"f(x)=\begin{cases}x^2,&x\geq 0\\-x,&x<0\end{cases}";
     const MATRIX: &str = r"A=\begin{pmatrix}1&2&3\\4&5&6\\7&8&9\end{pmatrix}";
+
+    #[test]
+    fn original_multiline_formulas_keep_operators_and_alignment_rows() {
+        let integral =
+            "\\widehat{f}(\\xi)\n=\n+ \\int_{-\\infty}^{\\infty} f(x)e^{-2\\pi i x\\xi}\\,dx";
+        let aligned = "\\begin{aligned}\na&=b+c\\\\\nd&=e-f\n\\end{aligned}";
+        for source in [QUADRATIC, CASES, MATRIX, integral, aligned, r"\frac13+\frac\pi2"] {
+            let original = compile_formula_source(source, true, 18.0, 1.0, DEFAULT_LIMITS)
+                .unwrap_or_else(|error| panic!("original formula failed: {source:?}: {error:?}"));
+            let expected = compile_formula(source, true, 18.0, 1.0, DEFAULT_LIMITS).unwrap();
+            assert_eq!(original, expected);
+            assert!(!original.glyphs.is_empty());
+        }
+    }
+
+    #[test]
+    fn original_source_never_decodes_entities_or_guesses_missing_row_breaks() {
+        let encoded = r"\begin{pmatrix}a&amp;b\\c&amp;d\end{pmatrix}";
+        let expected = compile_formula(
+            r"\begin{pmatrix}a&b\\c&d\end{pmatrix}",
+            true,
+            18.0,
+            1.0,
+            DEFAULT_LIMITS,
+        )
+        .unwrap();
+        if let Ok(original) = compile_formula_source(encoded, true, 18.0, 1.0, DEFAULT_LIMITS) {
+            assert_ne!(original, expected);
+        }
+        let damaged = "\\begin{aligned}\na&=b \\\nc&=d\n\\end{aligned}";
+        let repaired = compile_formula(damaged, true, 18.0, 1.0, DEFAULT_LIMITS).unwrap();
+        if let Ok(original) = compile_formula_source(damaged, true, 18.0, 1.0, DEFAULT_LIMITS) {
+            assert_ne!(original, repaired);
+        }
+    }
+
+    #[test]
+    fn original_source_does_not_silently_rewrite_arrows_or_drop_commands() {
+        let original = compile_formula_source("a->b", true, 18.0, 1.0, DEFAULT_LIMITS).unwrap();
+        let substituted = compile_formula("a->b", true, 18.0, 1.0, DEFAULT_LIMITS).unwrap();
+        assert_ne!(original, substituted);
+        assert!(
+            compile_formula_source(r"\unsupportedNebulaMacro{x}", true, 18.0, 1.0, DEFAULT_LIMITS)
+                .is_err()
+        );
+        assert!(
+            compile_formula_source(r"\input{private.tex}", true, 18.0, 1.0, DEFAULT_LIMITS)
+                .is_err()
+        );
+    }
 
     #[test]
     fn screenshot_formulas_share_one_successful_compile_path() {

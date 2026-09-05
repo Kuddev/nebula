@@ -29,12 +29,12 @@ pub enum Event {
     /// bundled PowerShell prompt emits).
     CwdReport(String),
 
-    /// An iTerm2 OSC 1337 inline image (PNG), sniffed out of the PTY stream.
+    /// An iTerm2 OSC 1337 inline image, sniffed out of the PTY stream.
     ///
     /// `abs_line` anchors the image's top row in the grid's absolute line
     /// numbering (see `Grid::scrolled_out`); `width`/`height` are the display
     /// size in pixels, already scaled to fit the terminal width.
-    InlineImage { png: Arc<Vec<u8>>, abs_line: usize, width: f32, height: f32 },
+    InlineImage { data: Arc<Vec<u8>>, abs_line: usize, width: f32, height: f32 },
 
     /// OSC 133;C — a command started executing in this pane.
     CommandStart,
@@ -109,8 +109,8 @@ impl Debug for Event {
             Event::PtyWrite(text) => write!(f, "PtyWrite({text})"),
             Event::Title(title) => write!(f, "Title({title})"),
             Event::CwdReport(cwd) => write!(f, "CwdReport({cwd})"),
-            Event::InlineImage { png, abs_line, width, height } => {
-                write!(f, "InlineImage({} bytes @{abs_line}, {width}x{height})", png.len())
+            Event::InlineImage { data, abs_line, width, height } => {
+                write!(f, "InlineImage({} bytes @{abs_line}, {width}x{height})", data.len())
             },
             Event::CommandStart => write!(f, "CommandStart"),
             Event::CommandDone { exit_code } => write!(f, "CommandDone({exit_code:?})"),

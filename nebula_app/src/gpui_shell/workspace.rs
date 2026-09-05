@@ -56,6 +56,7 @@ mod remote_files;
 mod residency;
 mod send_to_chat;
 mod sidebar;
+mod ssh_dialog;
 mod tab_drag;
 mod tab_menu;
 mod tab_scroll;
@@ -282,6 +283,45 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-v", gpui_component::input::Paste, Some("Input")),
         KeyBinding::new("alt-enter", ToggleFullscreen, None),
         KeyBinding::new("ctrl-shift-o", OpenQuickJump, None),
+    ]);
+    #[cfg(target_os = "macos")]
+    bind_macos_command_keys(cx);
+}
+
+/// macOS 的原生修饰键是 ⌘：在 Ctrl 绑定之外**追加**一套 ⌘ 绑定，不替换。
+/// 追加而非替换有两个原因：Ctrl+Shift 组合在 Mac 终端里没有别的含义，留着
+/// 不碍事；而 ⌘C/⌘V 必须存在，否则 Mac 用户第一反应就是「复制粘贴坏了」。
+/// 终端里的 Ctrl+C 仍然是 SIGINT——这里只绑 ⌘，不碰 Ctrl 的语义。
+#[cfg(target_os = "macos")]
+fn bind_macos_command_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-t", NewTerminal, None),
+        KeyBinding::new("cmd-n", NewWindow, None),
+        KeyBinding::new("cmd-w", CloseActiveTerminal, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-shift-p", ToggleCommandPalette, None),
+        KeyBinding::new("cmd-k", ToggleShellPicker, None),
+        KeyBinding::new("cmd-shift-f", ToggleFileTree, None),
+        KeyBinding::new("cmd-d", SplitRight, None),
+        KeyBinding::new("cmd-shift-d", SplitDown, None),
+        KeyBinding::new("cmd-shift-enter", ToggleZoom, None),
+        KeyBinding::new("cmd-alt-left", FocusPaneLeft, None),
+        KeyBinding::new("cmd-alt-right", FocusPaneRight, None),
+        KeyBinding::new("cmd-alt-up", FocusPaneUp, None),
+        KeyBinding::new("cmd-alt-down", FocusPaneDown, None),
+        KeyBinding::new("cmd-shift-]", SelectNextTab, None),
+        KeyBinding::new("cmd-shift-[", SelectPreviousTab, None),
+        KeyBinding::new("cmd-shift-g", ToggleGitPanel, None),
+        KeyBinding::new("cmd-=", IncreaseFontSize, None),
+        KeyBinding::new("cmd-+", IncreaseFontSize, None),
+        KeyBinding::new("cmd--", DecreaseFontSize, None),
+        KeyBinding::new("cmd-0", ResetFontSize, None),
+        KeyBinding::new("cmd-c", CopySelection, Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
+        KeyBinding::new("cmd-v", PasteClipboard, Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
+        KeyBinding::new("cmd-v", gpui_component::input::Paste, Some("Input")),
+        KeyBinding::new("cmd-ctrl-f", ToggleFullscreen, None),
+        KeyBinding::new("cmd-shift-o", OpenQuickJump, None),
     ]);
 }
 
@@ -818,6 +858,10 @@ fn new_tab_insert_index(
     }
 }
 
+fn settings_should_fold_sidebar(tabs_position: nebula_settings::TabsPositionName) -> bool {
+    tabs_position == nebula_settings::TabsPositionName::Sidebar
+}
+
 /// 新建终端弹窗的行：已检测 shell + SSH 主机，分组对照旧壳
 /// `CommandPalette::open_profiles`（推荐 / 所有 Shell / SSH 主机）。
 /// 三点菜单与 Ctrl+K 打开的是这份列表，不是通用命令面板。
@@ -990,6 +1034,14 @@ pub struct NebulaWorkspace {
     tab_rename: Option<TabRename>,
     next_pane_id: u64,
     active: usize,
+    /// Window-level Settings surface. It intentionally lives outside `tabs`:
+    /// opening preferences must not alter tab order, session state, or PTYs.
+    settings_surface: Option<(Entity<SettingsPane>, Subscription)>,
+    settings_open: bool,
+    /// Sidebar state sampled on entry. `None` means top-tab mode, where there
+    /// is no left rail to fold and the setting must remain untouched.
+    settings_restore_sidebar_collapsed: Option<bool>,
+    settings_restore_side_panel_open: bool,
     sidebar_collapsed: bool,
     /// 只折叠 TABS 分区，不影响整个左栏；与旧壳分区标题的 chevron 同义。
     tabs_section_collapsed: bool,
@@ -1184,6 +1236,17 @@ impl NebulaWorkspace {
         // 文件变化拆成互相矛盾的 restore/resume 状态。
         let runtime = nebula_settings::RuntimeSettings::load();
         let sidebar_width = runtime.sidebar_width;
+        #[cfg(windows)]
+        {
+            let mut icon_scale = window.scale_factor();
+            cx.observe_window_bounds(window, move |_, window, _| {
+                if icon_scale != window.scale_factor() {
+                    icon_scale = window.scale_factor();
+                    crate::gpui_shell::set_native_window_icon(window);
+                }
+            })
+            .detach();
+        }
         let initial_grid = Self::prepare_initial_grid(
             window,
             cx,
@@ -1274,6 +1337,10 @@ impl NebulaWorkspace {
                 .saturating_mul(1u64 << 32)
                 .saturating_add(1),
             active: 0,
+            settings_surface: None,
+            settings_open: false,
+            settings_restore_sidebar_collapsed: None,
+            settings_restore_side_panel_open: false,
             sidebar_collapsed: false,
             tabs_section_collapsed: false,
             tabs_position: runtime.tabs_position,
@@ -1447,7 +1514,7 @@ impl NebulaWorkspace {
     /// 重新读取设置，只会让右侧短标漂成新的默认值，和仍在运行/恢复出来的
     /// 进程身份相互矛盾。
     fn default_shell_tag() -> SharedString {
-        crate::shell_detect::shell_short_tag("powershell").into()
+        crate::shell_detect::shell_short_tag(&crate::platform::shell::default_shell_id()).into()
     }
 
     /// 冻结“新建这一刻”的默认 Shell 为共享 v4 launch 身份。
@@ -1527,7 +1594,9 @@ impl NebulaWorkspace {
                     shell_name: profile.shell_id.clone().or_else(|| Some(profile.name.clone())),
                 }
             },
-            LaunchSession::Ssh { host } => TerminalLaunch::Ssh { destination: host.clone() },
+            LaunchSession::Ssh { host } => {
+                TerminalLaunch::Ssh { destination: host.clone(), cwd: None }
+            },
         }
     }
 
@@ -1598,6 +1667,7 @@ impl NebulaWorkspace {
         }
         crate::gpui_shell::theme::apply_chrome_theme(cx);
         let runtime = nebula_settings::RuntimeSettings::load();
+        crate::gpui_shell::apply_app_icon(runtime.app_icon, cx);
         self.sidebar_width = runtime.sidebar_width;
         self.tabs_position = runtime.tabs_position;
         self.sidebar_resizing = false;
@@ -1687,6 +1757,9 @@ impl NebulaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> u64 {
+        if self.settings_open {
+            self.close_settings(window, cx);
+        }
         let shell_tag = Self::launch_shell_tag(&launch_session);
         let grid = self.inherited_grid(cx);
         let launch = Self::terminal_launch_from_session(&launch_session, cwd);
@@ -1723,6 +1796,19 @@ impl NebulaWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.add_ssh_terminal_at(destination, None, window, cx);
+    }
+
+    fn add_ssh_terminal_at(
+        &mut self,
+        destination: String,
+        remote_cwd: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_open {
+            self.close_settings(window, cx);
+        }
         {
             let mut lists = crate::gpui_shell::ssh_hosts::SshHostLists::load();
             if !lists.is_from_config(&destination) {
@@ -1735,6 +1821,7 @@ impl NebulaWorkspace {
         let grid = self.inherited_grid(cx);
         let launch = crate::gpui_shell::terminal::view::TerminalLaunch::Ssh {
             destination: destination.clone(),
+            cwd: remote_cwd,
         };
         let pane = self.new_pane(grid, launch, None, window, cx);
         let focused = pane.id;
@@ -1786,6 +1873,7 @@ impl NebulaWorkspace {
 
         let launch = crate::gpui_shell::terminal::view::TerminalLaunch::Ssh {
             destination: destination.clone(),
+            cwd: None,
         };
         let replacement = self.new_pane(grid, launch, None, window, cx);
         let replacement_id = replacement.id;
@@ -2360,17 +2448,74 @@ impl NebulaWorkspace {
         .detach();
     }
 
-    /// 设置页是单例 tab（旧壳同形态）：已开则激活，未开则新建。
+    /// Open Settings as a window-level page while preserving the active tab.
+    /// Side-tab mode folds its real left rail; top-tab mode has no such rail,
+    /// so touching `sidebar_collapsed` there would only create hidden state.
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.tabs.iter().position(WorkspaceTab::is_settings) {
-            self.activate_tab(ix, window, cx);
+        if self.settings_open {
+            if let Some((view, _)) = self.settings_surface.as_ref() {
+                let focus = view.read(cx).focus_handle(cx);
+                window.defer(cx, move |window, cx| window.focus(&focus, cx));
+            }
             return;
         }
-        let view = cx.new(|cx| SettingsPane::new(window, cx));
-        let subscription = cx.subscribe_in(&view, window, Self::on_settings_event);
-        self.insert_new_tab(WorkspaceTab::Settings { view, _subscription: subscription });
+
+        if self.settings_surface.is_none() {
+            let view = cx.new(|cx| SettingsPane::new(window, cx));
+            let subscription = cx.subscribe_in(&view, window, Self::on_settings_event);
+            self.settings_surface = Some((view, subscription));
+        }
+
+        self.settings_restore_sidebar_collapsed =
+            settings_should_fold_sidebar(self.tabs_position).then_some(self.sidebar_collapsed);
+        if self.settings_restore_sidebar_collapsed == Some(false) {
+            self.sidebar_collapsed = true;
+            self.sidebar_fold_armed = true;
+        }
+
+        self.settings_restore_side_panel_open = self.side_panel.open;
+        if self.side_panel.open {
+            self.side_panel.open = false;
+            self.side_panel_anim_armed = true;
+            self.file_tree_menu = None;
+        }
+
+        self.settings_open = true;
+        if let Some((view, _)) = self.settings_surface.as_ref() {
+            let focus = view.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, cx| window.focus(&focus, cx));
+        }
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.settings_open {
+            return;
+        }
+        self.settings_open = false;
+
+        if let Some(collapsed) = self.settings_restore_sidebar_collapsed.take() {
+            if self.sidebar_collapsed != collapsed {
+                self.sidebar_collapsed = collapsed;
+                self.sidebar_fold_armed = true;
+            }
+        }
+
+        let restore_side_panel = std::mem::take(&mut self.settings_restore_side_panel_open);
+        if restore_side_panel && !self.side_panel.open {
+            let view = self.side_panel.view;
+            self.toggle_side_panel(view, cx);
+        }
         self.focus_active(window, cx);
         cx.notify();
+    }
+
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.close_settings(window, cx);
+        } else {
+            self.open_settings(window, cx);
+        }
     }
 
     /// 调试/验收后门：`NEBULA_GPUI_OPEN_DOC=路径` 时启动即打开该文档，
@@ -2616,7 +2761,6 @@ impl NebulaWorkspace {
                         format!("{} · {body}", attention.source),
                     );
                     if !window.is_window_active() {
-                        #[cfg(windows)]
                         crate::notify::toast(&attention.source, &body);
                     }
                     cx.notify();
@@ -2674,6 +2818,7 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            SettingsPaneEvent::Close => self.close_settings(window, cx),
             SettingsPaneEvent::Changed => {
                 self.apply_runtime_settings(cx);
                 // 键位编辑器可能改了 keybind= 表：注入/撤销随之热更新。
@@ -2722,6 +2867,9 @@ impl NebulaWorkspace {
     }
 
     fn activate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.close_settings(window, cx);
+        }
         if ix < self.tabs.len() && ix != self.active {
             self.active = ix;
             if let Some(meta) = self.tab_meta.get_mut(ix) {
@@ -2737,6 +2885,10 @@ impl NebulaWorkspace {
     /// ctrl+shift+w（对齐旧壳 CloseTab 语义）：tab 有分屏时关聚焦 pane，
     /// 单 pane 时关整个 tab；设置 tab 直接关 tab。
     fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.close_settings(window, cx);
+            return;
+        }
         match self.tabs.get(self.active) {
             Some(WorkspaceTab::Terminal { panes, focused, .. }) if panes.len() > 1 => {
                 let (tab_ix, pane_id) = (self.active, *focused);
@@ -2751,9 +2903,16 @@ impl NebulaWorkspace {
     }
 
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            if let Some((view, _)) = self.settings_surface.as_ref() {
+                let focus = view.read(cx).focus_handle(cx);
+                window.defer(cx, move |window, cx| window.focus(&focus, cx));
+            }
+            return;
+        }
         let focus = match self.tabs.get(self.active) {
             Some(tab @ WorkspaceTab::Terminal { .. }) => match tab.focused_view() {
-                Some(view) => view.read(cx).focus_handle.clone(),
+                Some(view) => view.read(cx).focus_handle(cx),
                 None => return,
             },
             Some(WorkspaceTab::Settings { view, .. }) => view.read(cx).focus_handle(cx),
@@ -3988,13 +4147,16 @@ impl NebulaWorkspace {
     fn duplicate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(ix) else { return };
         let Some(view) = tab.focused_view() else { return };
-        let (ssh, cwd) = {
+        let (ssh, cwd, remote_cwd, pane_id) = {
             let view = view.read(cx);
-            (view.ssh_destination.clone(), view.local_cwd())
+            (view.ssh_destination.clone(), view.local_cwd(), view.remote_cwd(), view.pane_id)
         };
         let meta = self.meta(ix);
         if let Some(destination) = ssh {
-            self.add_ssh_terminal(destination, window, cx);
+            let remote_cwd = remote_cwd.or_else(|| {
+                self.remote_browser.path_for(pane_id, &destination).map(ToOwned::to_owned)
+            });
+            self.add_ssh_terminal_at(destination, remote_cwd, window, cx);
         } else {
             let launch = match meta.launch {
                 None | Some(crate::session::LaunchSession::Default) => {
@@ -4145,7 +4307,8 @@ impl NebulaWorkspace {
                 }
             })
             .collect();
-        let directory = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let directory =
+            crate::platform::dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
         let prompt =
             cx.prompt_for_new_path(&directory, Some(&format!("{stem}.nebula-workspace.json")));
         cx.spawn_in(window, async move |this, cx| {
@@ -4638,28 +4801,35 @@ impl Render for NebulaWorkspace {
             self.sidebar_logo_images = sidebar_logo_images(sidebar_logo_target_px);
             self.sidebar_logo_target_px = sidebar_logo_target_px;
         }
-        let content: Option<gpui::AnyElement> = match self.tabs.get(self.active) {
-            Some(WorkspaceTab::Terminal { .. }) => Some(self.render_terminal_tab(self.active, cx)),
-            Some(WorkspaceTab::Settings { view, .. }) => {
-                Some(gpui::IntoElement::into_any_element(view.clone()))
-            },
-            Some(WorkspaceTab::Image { view }) => {
-                Some(gpui::IntoElement::into_any_element(view.clone()))
-            },
-            Some(WorkspaceTab::Document { view, .. }) => {
-                Some(gpui::IntoElement::into_any_element(view.clone()))
-            },
-            Some(WorkspaceTab::Code { view, .. }) => {
-                Some(gpui::IntoElement::into_any_element(view.clone()))
-            },
-            None => None,
+        let content: Option<gpui::AnyElement> = if self.settings_open {
+            self.settings_surface
+                .as_ref()
+                .map(|(view, _)| gpui::IntoElement::into_any_element(view.clone()))
+        } else {
+            match self.tabs.get(self.active) {
+                Some(WorkspaceTab::Terminal { .. }) => {
+                    Some(self.render_terminal_tab(self.active, cx))
+                },
+                Some(WorkspaceTab::Settings { view, .. }) => {
+                    Some(gpui::IntoElement::into_any_element(view.clone()))
+                },
+                Some(WorkspaceTab::Image { view }) => {
+                    Some(gpui::IntoElement::into_any_element(view.clone()))
+                },
+                Some(WorkspaceTab::Document { view, .. }) => {
+                    Some(gpui::IntoElement::into_any_element(view.clone()))
+                },
+                Some(WorkspaceTab::Code { view, .. }) => {
+                    Some(gpui::IntoElement::into_any_element(view.clone()))
+                },
+                None => None,
+            }
         };
         let files_active = self.side_panel.open
             && self.side_panel.view == crate::display::side_panel::PanelView::Files;
         let git_active = self.side_panel.open
             && self.side_panel.view == crate::display::side_panel::PanelView::Git;
-        let settings_active =
-            matches!(self.tabs.get(self.active), Some(WorkspaceTab::Settings { .. }));
+        let settings_active = self.settings_open;
         let top_tabs = self.tabs_position == nebula_settings::TabsPositionName::Top;
         // dock 预览：被拖 tab 悬于终端区时高亮目标半区（松手即挂到那侧）。
         let dock_preview = self
@@ -4758,7 +4928,7 @@ impl Render for NebulaWorkspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.open_settings(window, cx);
+                this.toggle_settings(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);

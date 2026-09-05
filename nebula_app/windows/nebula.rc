@@ -1,6 +1,8 @@
 #define IDI_ICON 0x101
 
 IDI_ICON ICON "nebula.ico"
+258 ICON "nebula-dark.ico"
+259 ICON "nebula-titanium.ico"
 
 #define RT_MANIFEST 24
 #define APP_MANIFEST 1

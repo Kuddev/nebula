@@ -27,7 +27,7 @@ use image::Frame;
 
 use crate::math::layout::MathLayout;
 use crate::math::rasterizer::MathGlyphRasterizer;
-use crate::math::{DEFAULT_LIMITS, MIN_READABLE_MATH_PX, compile_formula};
+use crate::math::{DEFAULT_LIMITS, MIN_READABLE_MATH_PX, compile_formula, compile_formula_source};
 
 /// 探针编译字号：注册的渲染闭包用它判定"这条公式能否编译"，失败即让
 /// 组件库走源码文本回退。解析/预算类失败与字号无关，任意正值等价。
@@ -57,7 +57,7 @@ const FIT_MARGIN: f32 = 0.98;
 pub fn register(cx: &mut App) {
     cx.set_global(MathAssets::new());
     gpui_component::text::set_math_renderer(cx, |spec, _, cx| {
-        let assets = cx.global_mut::<MathAssets>();
+        let assets = source_assets(cx);
         if assets.rasterizer.is_none() {
             return None;
         }
@@ -98,6 +98,7 @@ struct ImageGeometry {
 }
 
 pub(crate) struct MathAssets {
+    verbatim_source: bool,
     /// 字体解析失败时为 None：探针直接失败，所有公式回退源码文本。
     rasterizer: Option<MathGlyphRasterizer>,
     layouts: HashMap<LayoutKey, Option<Arc<MathLayout>>>,
@@ -107,9 +108,21 @@ pub(crate) struct MathAssets {
 
 impl gpui::Global for MathAssets {}
 
+struct SourceMathAssets(MathAssets);
+
+impl gpui::Global for SourceMathAssets {}
+
+fn source_assets(cx: &mut App) -> &mut MathAssets {
+    if cx.try_global::<SourceMathAssets>().is_none() {
+        cx.set_global(SourceMathAssets(MathAssets { verbatim_source: true, ..MathAssets::new() }));
+    }
+    &mut cx.global_mut::<SourceMathAssets>().0
+}
+
 impl MathAssets {
     fn new() -> Self {
         Self {
+            verbatim_source: false,
             rasterizer: MathGlyphRasterizer::new().ok(),
             layouts: HashMap::new(),
             images: HashMap::new(),
@@ -155,15 +168,12 @@ impl MathAssets {
             if self.layouts.len() >= MAX_LAYOUTS {
                 self.layouts.clear();
             }
-            let compiled = compile_formula(
-                source.as_ref(),
-                display,
-                pixel_size,
-                pixels_per_point,
-                DEFAULT_LIMITS,
-            )
-            .ok()
-            .map(Arc::new);
+            let compile =
+                if self.verbatim_source { compile_formula_source } else { compile_formula };
+            let compiled =
+                compile(source.as_ref(), display, pixel_size, pixels_per_point, DEFAULT_LIMITS)
+                    .ok()
+                    .map(Arc::new);
             self.layouts.insert(key.clone(), compiled);
         }
         self.layouts.get(&key).and_then(Clone::clone)
@@ -406,6 +416,8 @@ impl Element for MathView {
         let display = self.display;
         let nominal_px = f32::from(font_size);
         let pixels_per_point = crate::math::pixels_per_point(window.scale_factor());
+        let raster_scale = window.scale_factor();
+        let color = Rgba::from(text_style.color);
         let measure_slot = slot.clone();
         let style = Style { flex_shrink: 0.0, ..Style::default() };
         let layout_id = window.request_measured_layout(style, move |_, available, window, cx| {
@@ -413,8 +425,20 @@ impl Element for MathView {
                 AvailableSpace::Definite(width) => f32::from(width).max(8.0),
                 AvailableSpace::MinContent | AvailableSpace::MaxContent => f32::INFINITY,
             };
-            let assets = cx.global_mut::<MathAssets>();
-            match assets.fit(&source, display, nominal_px, pixels_per_point, max_width) {
+            let assets = source_assets(cx);
+            let fitted = assets
+                .fit(&source, display, nominal_px, pixels_per_point, max_width)
+                .filter(|(_, pixel_size)| {
+                    assets.can_compose(
+                        &source,
+                        display,
+                        *pixel_size,
+                        pixels_per_point,
+                        raster_scale,
+                        color,
+                    )
+                });
+            match fitted {
                 Some((layout, pixel_size)) => {
                     let bottom_pad = if display {
                         0.0
@@ -480,7 +504,7 @@ impl Element for MathView {
                 if layout.metrics.width > bounds_width + 0.5 {
                     let nominal = f32::from(text_style.font_size.to_pixels(window.rem_size()));
                     let pixels_per_point = crate::math::pixels_per_point(window.scale_factor());
-                    let assets = cx.global_mut::<MathAssets>();
+                    let assets = source_assets(cx);
                     let Some((layout, pixel_size)) = assets.fit(
                         &self.source,
                         self.display,
@@ -488,6 +512,7 @@ impl Element for MathView {
                         pixels_per_point,
                         bounds_width,
                     ) else {
+                        self.paint_source(bounds, window, cx);
                         return;
                     };
                     let baseline = bounds.bottom() - px(layout.metrics.depth);
@@ -503,6 +528,24 @@ impl Element for MathView {
 }
 
 impl MathView {
+    fn paint_source(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let style = window.text_style();
+        let line = window.text_system().shape_line(
+            self.source.clone(),
+            style.font_size.to_pixels(window.rem_size()),
+            &[style.to_run(self.source.len())],
+            None,
+        );
+        let _ = line.paint(
+            bounds.origin,
+            style.line_height_in_pixels(window.rem_size()),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+
     /// 位图贴到基线上（物理像素吸附），数学字体缺字的字符用 gpui 文本
     /// 按各自字号补画在同一条基线上。
     fn paint_math(
@@ -516,17 +559,20 @@ impl MathView {
     ) {
         let text_style = window.text_style();
         let color = Rgba::from(text_style.color);
-        paint_formula_image(
+        let raster_scale = window.scale_factor();
+        let image = source_assets(cx).image(
             &self.source,
             self.display,
             pixel_size,
-            crate::math::pixels_per_point(window.scale_factor()),
-            bounds.left(),
-            baseline,
+            crate::math::pixels_per_point(raster_scale),
+            raster_scale,
             color,
-            window,
-            cx,
         );
+        if image.is_none() {
+            self.paint_source(bounds, window, cx);
+            return;
+        }
+        paint_cached_image(image, bounds.left(), baseline, window);
 
         for op in &layout.text {
             let mut buffer = [0u8; 4];
@@ -569,11 +615,20 @@ pub(crate) fn paint_formula_image(
 ) {
     let raster_scale = window.scale_factor();
     let assets = cx.global_mut::<MathAssets>();
-    let Some((render_image, geometry)) =
-        assets.image(source, display, pixel_size, pixels_per_point, raster_scale, color)
-    else {
+    let image = assets.image(source, display, pixel_size, pixels_per_point, raster_scale, color);
+    paint_cached_image(image, left, baseline, window);
+}
+
+fn paint_cached_image(
+    image: Option<(Arc<gpui::RenderImage>, ImageGeometry)>,
+    left: Pixels,
+    baseline: Pixels,
+    window: &mut Window,
+) {
+    let Some((render_image, geometry)) = image else {
         return;
     };
+    let raster_scale = window.scale_factor();
     // 位图物理像素与屏幕 1:1：原点在物理网格上取整后再折回逻辑坐标。
     let left_physical = (f32::from(left) * raster_scale).round();
     let baseline_physical = (f32::from(baseline) * raster_scale).round();

@@ -663,6 +663,18 @@ pub(crate) fn dispatch_shell_events(events: Vec<GpuiShellEvent>, cx: &mut App) {
                     super::show_update_notification(result, window, cx);
                 });
             },
+            GpuiShellEvent::SshPrompt(request) => {
+                let Some(entry) = entries_by_mru(cx).into_iter().next() else {
+                    request.respond(crate::ssh_prompt::PromptResponse::Cancel);
+                    continue;
+                };
+                let pending = request.clone();
+                if entry.handle.update(cx, move |_, window, cx| {
+                    super::ssh_dialog::show(pending, window, cx);
+                }).is_err() {
+                    request.respond(crate::ssh_prompt::PromptResponse::Cancel);
+                }
+            },
         }
     }
     publish_runtime_snapshot(cx);

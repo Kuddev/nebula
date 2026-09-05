@@ -20,13 +20,18 @@ fn main() {
     #[cfg(feature = "legacy-shell")]
     generate_legacy_gl_bindings();
 
+    // build script 里的 `cfg(windows)` 是**宿主**平台；交叉到 macOS/Linux 时
+    // 宿主仍是 Windows，必须再看目标（`CARGO_CFG_WINDOWS` 只在目标是 Windows
+    // 时设置），否则会往 Mach-O/ELF 里嵌 .rc 资源、给 Unix 包部署 ConPTY。
     #[cfg(windows)]
-    {
+    if env::var_os("CARGO_CFG_WINDOWS").is_some() {
         // Re-embed the icon whenever the .ico OR .rc changes. `embed_resource`
         // emits a rerun-if-changed for the .rc only, which pins Cargo to that
         // file and makes it silently skip .ico-only updates — leaving the stale
         // Nebula icon embedded in the exe. Declaring the .ico here fixes that.
         println!("cargo:rerun-if-changed=windows/nebula.ico");
+        println!("cargo:rerun-if-changed=windows/nebula-dark.ico");
+        println!("cargo:rerun-if-changed=windows/nebula-titanium.ico");
         println!("cargo:rerun-if-changed=windows/nebula.rc");
         embed_resource::compile("./windows/nebula.rc", embed_resource::NONE)
             .manifest_required()

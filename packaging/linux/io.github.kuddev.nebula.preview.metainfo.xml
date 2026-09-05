@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.kuddev.nebula.preview</id>
+  <name>Nebula Terminal Preview</name>
+  <summary>GPU-accelerated terminal for local and remote workflows</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer_name>Kuddev</developer_name>
+  <description>
+    <p>
+      Nebula Terminal combines GPU-accelerated terminal rendering, local and
+      SSH sessions, file workflows, and command-line agent integrations.
+      Preview packages are intended for cross-platform testing before a stable
+      release.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.kuddev.nebula.preview.desktop</launchable>
+  <provides>
+    <binary>nebula</binary>
+  </provides>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <url type="homepage">https://github.com/Kuddev/nebula</url>
+  <url type="bugtracker">https://github.com/Kuddev/nebula/issues</url>
+  <content_rating type="oars-1.1" />
+</component>

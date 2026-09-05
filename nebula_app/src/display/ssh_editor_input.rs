@@ -542,6 +542,8 @@ impl Display {
             auth: editor.auth,
             private_keys: editor.private_keys.clone(),
             password: (!editor.password.is_empty()).then(|| editor.password.clone()),
+            connection: Default::default(),
+            proxy_password: None,
         });
     }
 
@@ -790,6 +792,7 @@ impl Display {
             label: Some(label),
             // 空串 = 自动识别，不落盘；配置里只存用户明确选过的形状。
             icon: (!editor.icon.is_empty()).then(|| editor.icon.clone()),
+            connection: profiles.for_destination(&destination).connection,
         });
         if let Err(err) = profiles.save(&profile_path) {
             editor.error = Some(format!("保存 SSH Profile 失败: {err}"));

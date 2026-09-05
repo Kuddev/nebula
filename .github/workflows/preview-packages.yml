@@ -1,0 +1,548 @@
+name: Cross-platform Preview packages
+
+run-name: >-
+  Cross-platform Preview (${{ inputs.preview_id || format('run-{0}', github.run_number) }})
+
+on:
+  pull_request:
+    paths: ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "nebula_app/res/**", "assets/**", "packaging/**", "scripts/**", ".github/workflows/preview-packages.yml"]
+  push:
+    branches: [main]
+    paths: ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "nebula_app/res/**", "assets/**", "packaging/**", "scripts/**", ".github/workflows/preview-packages.yml"]
+  workflow_dispatch:
+    inputs:
+      preview_id:
+        description: Optional short Preview id; defaults to the Actions run and attempt numbers
+        required: false
+        type: string
+      publish:
+        description: Create a public GitHub prerelease after every package and conformance job passes
+        required: true
+        default: false
+        type: boolean
+      macos_signing:
+        description: Developer ID mode requires the Apple signing and notarization secrets
+        type: choice
+        options: [adhoc, developer-id]
+        default: adhoc
+
+concurrency:
+  group: preview-${{ github.ref }}-${{ inputs.publish || false }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RUST_TOOLCHAIN: "1.97.1"
+  MACOS_SIGNING: ${{ inputs.macos_signing || 'adhoc' }}
+  PYTHONUTF8: "1"
+
+jobs:
+  prepare:
+    name: Validate Preview inputs
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      preview_id: ${{ steps.metadata.outputs.preview_id }}
+      asset_version: ${{ steps.metadata.outputs.asset_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve package metadata
+        id: metadata
+        env:
+          REQUESTED_PREVIEW_ID: ${{ inputs.preview_id }}
+          PUBLIC_PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+        run: |
+          version="$(python3 scripts/preview_release.py \
+            --print-package-version nebula_app/Cargo.toml)"
+
+          preview_id="$REQUESTED_PREVIEW_ID"
+          if [[ -z "$preview_id" ]]; then
+            if [[ "$PUBLIC_PREVIEW" == true ]]; then
+              echo "public Preview requires an explicit preview_id and committed release notes" >&2
+              exit 1
+            fi
+            preview_id="${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          fi
+          VERSION="$version" PREVIEW_ID="$preview_id" python3 - <<'PY'
+          import os
+          from scripts.preview_release import validate_labels
+
+          validate_labels(os.environ["VERSION"], os.environ["PREVIEW_ID"])
+          PY
+
+          {
+            echo "version=$version"
+            echo "preview_id=$preview_id"
+            echo "asset_version=$version-preview.$preview_id"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Require synchronized release notes before a public Preview build
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+        env:
+          PACKAGE_VERSION: ${{ steps.metadata.outputs.version }}
+          PREVIEW_ID: ${{ steps.metadata.outputs.preview_id }}
+        run: >-
+          python3 scripts/preview_release.py --check-reviewed-notes
+          --version "$PACKAGE_VERSION" --preview-id "$PREVIEW_ID"
+          --macos-signing "$MACOS_SIGNING"
+
+      - name: Check platform cfg budget
+        run: python3 scripts/check_platform_cfg.py
+
+      - name: Test packaging and conformance harnesses
+        run: >-
+          python3 -m unittest
+          scripts.tests.test_preview_release
+          scripts.tests.test_platform_cfg
+          scripts.conformance.tests.test_harness
+
+      - name: Compile Python helpers
+        run: python3 -m compileall -q scripts/preview_release.py scripts/conformance
+
+      - name: Parse packaging scripts
+        run: bash -n scripts/package-linux.sh scripts/package-macos.sh
+
+  linux:
+    name: Linux x86_64 Preview
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+      PREVIEW_ID: ${{ needs.prepare.outputs.preview_id }}
+      ASSET_VERSION: ${{ needs.prepare.outputs.asset_version }}
+      LINUXDEPLOY_VERSION: 1-alpha-20251107-1
+      LINUXDEPLOY_SHA256: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build, package, and headless runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            appstream build-essential cmake curl desktop-file-utils dpkg-dev \
+            imagemagick libasound2-dev libdbus-1-dev libegl1-mesa-dev \
+            libfontconfig1-dev libfreetype6-dev libgl1-mesa-dev libudev-dev \
+            libvulkan1 libwayland-dev libx11-dev libx11-xcb-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxcb-xinput-dev libxcb-xkb-dev libxcb1-dev libxi-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev mesa-vulkan-drivers \
+            patchelf pkg-config weston xauth xvfb zsh
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test workspace natively
+        run: cargo test --locked --workspace
+
+      - name: Test real Bash and Zsh startup contracts
+        run: python3 -m unittest scripts.tests.test_shell_integration -v
+
+      - name: Test SSH confirmation and password dialogs
+        run: cargo test --locked -p nebula --features gpui-test-support ssh_dialog
+
+      - name: Build GPUI release binary
+        run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
+
+      - name: Download pinned linuxdeploy
+        env:
+          LINUXDEPLOY: ${{ runner.temp }}/linuxdeploy-x86_64.AppImage
+        run: |
+          curl --fail --location --retry 3 --retry-all-errors --show-error \
+            --output "$LINUXDEPLOY" \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/$LINUXDEPLOY_VERSION/linuxdeploy-x86_64.AppImage"
+          echo "$LINUXDEPLOY_SHA256  $LINUXDEPLOY" | sha256sum --check --strict
+          chmod 0755 "$LINUXDEPLOY"
+          echo "LINUXDEPLOY=$LINUXDEPLOY" >>"$GITHUB_ENV"
+
+      - name: Package AppImage, tar.gz, and Debian Preview
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          export SOURCE_DATE_EPOCH
+          bash scripts/package-linux.sh \
+            --binary target/release/nebula \
+            --version "$PACKAGE_VERSION" \
+            --preview-id "$PREVIEW_ID" \
+            --output-directory dist \
+            --linuxdeploy "$LINUXDEPLOY" \
+            --force
+
+      - name: Verify portable archive layout
+        run: |
+          archive="dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.tar.gz"
+          root="NebulaTerminal-v$ASSET_VERSION-linux-x86_64"
+          tar -tzf "$archive" "$root/AppRun"
+          tar -tzf "$archive" "$root/usr/share/applications/io.github.kuddev.nebula.preview.desktop"
+
+      - name: Run AppImage conformance under X11
+        run: |
+          xvfb-run -a -s "-screen 0 1600x1000x24" \
+            python3 scripts/conformance/run.py \
+              --app "dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.AppImage" \
+              --platform linux-x86_64-appimage \
+              --output dist/conformance/linux-appimage-report.json
+
+      - name: Run AppImage conformance under Wayland
+        run: |
+          runtime_directory="$RUNNER_TEMP/nebula-wayland-runtime"
+          mkdir -p "$runtime_directory" dist/conformance
+          chmod 0700 "$runtime_directory"
+          XDG_RUNTIME_DIR="$runtime_directory" \
+            weston \
+              --backend=headless-backend.so \
+              --socket=wayland-nebula \
+              --width=1600 \
+              --height=1000 \
+              --idle-time=0 \
+              --log=dist/conformance/weston.log &
+          weston_pid=$!
+          cleanup_weston() {
+            kill "$weston_pid" >/dev/null 2>&1 || true
+            wait "$weston_pid" >/dev/null 2>&1 || true
+          }
+          trap cleanup_weston EXIT
+
+          for _ in $(seq 1 100); do
+            if [[ -S "$runtime_directory/wayland-nebula" ]]; then
+              break
+            fi
+            if ! kill -0 "$weston_pid" >/dev/null 2>&1; then
+              echo "Weston exited before creating its Wayland socket" >&2
+              exit 1
+            fi
+            sleep 0.1
+          done
+          test -S "$runtime_directory/wayland-nebula"
+
+          DISPLAY='' \
+          XDG_RUNTIME_DIR="$runtime_directory" \
+          WAYLAND_DISPLAY=wayland-nebula \
+            python3 scripts/conformance/run.py \
+              --app "dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.AppImage" \
+              --platform linux-x86_64-appimage-wayland \
+              --output dist/conformance/linux-appimage-wayland-report.json
+
+      - name: Install and run Debian package conformance under X11
+        run: |
+          sudo apt-get install -y \
+            "./dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.deb"
+          test "$(dpkg-query -W -f='${Status}' nebula-terminal-preview)" = \
+            "install ok installed"
+          xvfb-run -a -s "-screen 0 1600x1000x24" \
+            python3 scripts/conformance/run.py \
+              --app /usr/bin/nebula \
+              --platform linux-x86_64-deb \
+              --output dist/conformance/linux-deb-report.json
+
+      - name: Upload Linux Preview packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-package-linux-x86_64
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Linux conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-evidence-linux-x86_64
+          path: dist/conformance
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos:
+    name: macOS ${{ matrix.architecture }} Preview
+    needs: prepare
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: aarch64
+            native_architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+            native_architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    env:
+      PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+      PREVIEW_ID: ${{ needs.prepare.outputs.preview_id }}
+      ASSET_VERSION: ${{ needs.prepare.outputs.asset_version }}
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify native runner architecture
+        run: test "$(uname -m)" = "${{ matrix.native_architecture }}"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test workspace natively
+        run: cargo test --locked --workspace
+
+      - name: Test native shell startup contracts
+        run: python3 -m unittest scripts.tests.test_shell_integration -v
+
+      - name: Test SSH confirmation and password dialogs
+        run: cargo test --locked -p nebula --features gpui-test-support ssh_dialog
+
+      - name: Build GPUI release binary
+        run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
+
+      - name: Import signing credentials into a temporary keychain
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_signing == 'developer-id' }}
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          export SIGNING_DIRECTORY="$RUNNER_TEMP/nebula-signing"
+          mkdir -m 0700 "$SIGNING_DIRECTORY"
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+          required = ["APPLE_CERTIFICATE_BASE64", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY",
+                      "APPLE_API_KEY_BASE64", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"]
+          for name in required:
+              if not os.environ.get(name):
+                  raise SystemExit(f"missing required signing secret: {name}")
+          root = Path(os.environ["SIGNING_DIRECTORY"])
+          for name, filename in [("APPLE_CERTIFICATE_BASE64", "certificate.p12"), ("APPLE_API_KEY_BASE64", "AuthKey.p8")]:
+              path = root / filename
+              path.write_bytes(base64.b64decode(os.environ[name], validate=True))
+              path.chmod(0o600)
+          PY
+          keychain="$SIGNING_DIRECTORY/preview.keychain-db"
+          password="$(openssl rand -hex 32)"
+          echo "::add-mask::$password"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$SIGNING_DIRECTORY/certificate.p12" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          xcrun notarytool store-credentials nebula-preview --keychain "$keychain" \
+            --key "$SIGNING_DIRECTORY/AuthKey.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
+          echo "NEBULA_SIGNING_KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+
+      - name: Package Preview DMG with the requested signing mode
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          signing_args=()
+          if [[ "$MACOS_SIGNING" == developer-id ]]; then
+            test -n "$NEBULA_SIGNING_KEYCHAIN"
+            signing_args=(--sign-identity "$APPLE_SIGNING_IDENTITY" --notary-profile nebula-preview \
+              --signing-keychain "$NEBULA_SIGNING_KEYCHAIN")
+          fi
+          bash scripts/package-macos.sh \
+            --binary target/release/nebula \
+            --version "$PACKAGE_VERSION" \
+            --preview-id "$PREVIEW_ID" \
+            --architecture "${{ matrix.architecture }}" \
+            --build-number "$GITHUB_RUN_NUMBER" \
+            --output-directory dist \
+            --force "${signing_args[@]}"
+
+      - name: Mount final DMG and run conformance
+        run: |
+          dmg="dist/NebulaTerminal-v$ASSET_VERSION-macos-${{ matrix.architecture }}.dmg"
+          mount_point="$RUNNER_TEMP/nebula-preview-${{ matrix.architecture }}"
+          mkdir -p "$mount_point"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point"
+          cleanup_mount() {
+            hdiutil detach "$mount_point" || hdiutil detach "$mount_point" -force
+          }
+          trap cleanup_mount EXIT
+
+          app="$mount_point/Nebula Terminal Preview.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          plutil -lint "$app/Contents/Info.plist"
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")" = \
+            "io.github.kuddev.nebula.preview"
+          test "$(lipo -archs "$app/Contents/MacOS/nebula")" = \
+            "${{ matrix.native_architecture }}"
+          python3 scripts/conformance/run.py \
+            --app "$app" \
+            --platform "macos-${{ matrix.architecture }}" \
+            --output "dist/conformance/macos-${{ matrix.architecture }}-report.json"
+          python3 scripts/conformance/macos_launch.py \
+            --app "$app" \
+            --output "dist/conformance/macos-${{ matrix.architecture }}-launch.json"
+
+      - name: Remove temporary signing credentials
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.macos_signing == 'developer-id' }}
+        run: |
+          directory="$RUNNER_TEMP/nebula-signing"
+          if [[ -f "$directory/preview.keychain-db" ]]; then
+            security delete-keychain "$directory/preview.keychain-db"
+          fi
+          if [[ -d "$directory" ]]; then
+            rm -rf -- "$directory"
+          fi
+
+      - name: Upload macOS Preview package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-package-macos-${{ matrix.architecture }}
+          path: dist/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload macOS conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-evidence-macos-${{ matrix.architecture }}
+          path: dist/conformance
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows:
+    name: Windows same-commit conformance baseline
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Test workspace natively
+        run: cargo test --locked --workspace
+      - name: Test SSH confirmation and password dialogs
+        run: cargo test --locked -p nebula --features gpui-test-support ssh_dialog
+      - name: Build GPUI comparison binary
+        run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
+      - name: Run Windows conformance
+        run: >-
+          python scripts/conformance/run.py --app target/release/nebula.exe
+          --platform windows-x86_64 --output dist/conformance/windows-report.json
+      - name: Upload Windows conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-evidence-windows-x86_64
+          path: dist/conformance
+          if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    name: Compare native evidence and verify Preview packages
+    needs: [prepare, linux, macos, windows]
+    runs-on: ubuntu-22.04
+    env:
+      PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+      PREVIEW_ID: ${{ needs.prepare.outputs.preview_id }}
+      ASSET_VERSION: ${{ needs.prepare.outputs.asset_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: preview-package-*
+          merge-multiple: true
+          path: release-dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: preview-evidence-*
+          merge-multiple: true
+          path: preview-evidence
+
+      - name: Validate exact package manifest and generate checksums
+        env:
+          PUBLIC_PREVIEW: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+        run: |
+          notes_args=()
+          if [[ "$PUBLIC_PREVIEW" == true ]]; then
+            notes_args=(--use-reviewed-notes)
+          fi
+          python3 scripts/preview_release.py release-dist \
+            --version "$PACKAGE_VERSION" \
+            --preview-id "$PREVIEW_ID" \
+            --write-checksums release-dist/SHA256SUMS \
+            --write-notes release-dist/PREVIEW_NOTES.md \
+            --repository "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --evidence-dir preview-evidence \
+            --macos-signing "$MACOS_SIGNING" "${notes_args[@]}"
+
+      - name: Upload complete Preview set
+        uses: actions/upload-artifact@v4
+        with:
+          name: NebulaTerminal-v${{ needs.prepare.outputs.asset_version }}
+          path: release-dist
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish verified Preview only on explicit request
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+    needs: [prepare, aggregate]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+      PREVIEW_ID: ${{ needs.prepare.outputs.preview_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: NebulaTerminal-v${{ needs.prepare.outputs.asset_version }}
+          path: release-dist
+      - name: Create public GitHub prerelease
+        run: |
+          tag="preview-v$PACKAGE_VERSION-$PREVIEW_ID"
+          title="Nebula Terminal $PACKAGE_VERSION Preview $PREVIEW_ID"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "refusing to replace existing Preview release: $tag" >&2
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "refusing to reuse existing Preview tag: $tag" >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            release-dist/*.AppImage \
+            release-dist/*.deb \
+            release-dist/*.dmg \
+            release-dist/*.tar.gz \
+            release-dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "$title" \
+            --notes-file release-dist/PREVIEW_NOTES.md \
+            --prerelease --latest=false
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" >"$RUNNER_TEMP/preview-release.json"
+          tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)"
+          python3 scripts/preview_release.py release-dist \
+            --version "$PACKAGE_VERSION" --preview-id "$PREVIEW_ID" --commit "$GITHUB_SHA" \
+            --verify-release "$RUNNER_TEMP/preview-release.json" --tag-commit "$tag_commit"
+          gh release view "$tag" --json url --jq .url

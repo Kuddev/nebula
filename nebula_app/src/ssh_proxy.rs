@@ -345,13 +345,26 @@ pub enum ProxyScheme {
 }
 
 /// 一台已解析好的代理服务器。密码只活在内存里，不进连接池 key。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProxyServer {
     pub scheme: ProxyScheme,
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyServer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProxyServer")
+            .field("scheme", &self.scheme)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 impl ProxyServer {
@@ -361,7 +374,7 @@ impl ProxyServer {
         let url = url.trim();
         let (scheme, rest) = url
             .split_once("://")
-            .ok_or_else(|| format!("代理地址缺少协议前缀（socks5:// 或 http://）: {url}"))?;
+            .ok_or_else(|| "代理地址缺少协议前缀（socks5:// 或 http://）".to_owned())?;
         let (scheme, default_port) = match scheme.to_ascii_lowercase().as_str() {
             "socks5" | "socks5h" | "socks" => (ProxyScheme::Socks5, 1080),
             "http" => (ProxyScheme::HttpConnect, 8080),
@@ -384,7 +397,7 @@ impl ProxyServer {
         };
         let (host, port) = split_host_port(host_port, default_port)?;
         if host.is_empty() {
-            return Err(format!("代理地址缺少主机名: {url}"));
+            return Err("代理地址缺少主机名".to_owned());
         }
         Ok(Self { scheme, host, port, username, password })
     }
@@ -637,6 +650,11 @@ pub async fn connect(
     target_host: &str,
     target_port: u16,
 ) -> io::Result<TcpStream> {
+    if proxy.port == 0 || target_port == 0 {
+        return Err(proxy_err("代理和目标端口必须在 1–65535 之间"));
+    }
+    crate::ssh_profiles::validate_ssh_destination(target_host)
+        .map_err(|_| proxy_err("代理目标主机名无效"))?;
     tokio::time::timeout(PROXY_CONNECT_TIMEOUT, async {
         let mut stream = TcpStream::connect((proxy.host.as_str(), proxy.port)).await?;
         // russh 的 connect 会给自己的 socket 设 nodelay；走 connect_stream
@@ -680,7 +698,7 @@ async fn socks5_handshake(
     }
     match reply[1] {
         0x00 => {},
-        0x02 => {
+        0x02 if has_auth => {
             let username = proxy.username.as_deref().unwrap_or_default().as_bytes();
             let password = proxy.password.as_deref().unwrap_or_default().as_bytes();
             if username.len() > 255 || password.len() > 255 {
@@ -695,7 +713,7 @@ async fn socks5_handshake(
             stream.write_all(&request).await?;
             let mut auth_reply = [0u8; 2];
             stream.read_exact(&mut auth_reply).await?;
-            if auth_reply[1] != 0x00 {
+            if auth_reply[0] != 0x01 || auth_reply[1] != 0x00 {
                 return Err(proxy_err("SOCKS5 代理拒绝了用户名/密码"));
             }
         },
@@ -728,6 +746,9 @@ async fn socks5_handshake(
 
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).await?;
+    if head[0] != 0x05 || head[2] != 0x00 {
+        return Err(proxy_err("SOCKS5 CONNECT 应答格式无效"));
+    }
     if head[1] != 0x00 {
         return Err(proxy_err(socks5_reply_message(head[1])));
     }
@@ -796,12 +817,17 @@ async fn http_connect_handshake(
     }
     let head = String::from_utf8_lossy(&response);
     let status_line = head.lines().next().unwrap_or_default();
-    let status = status_line.split_whitespace().nth(1).and_then(|code| code.parse::<u16>().ok());
+    let mut status_parts = status_line.split_whitespace();
+    let protocol = status_parts.next();
+    let status = status_parts.next().and_then(|code| code.parse::<u16>().ok());
+    if !matches!(protocol, Some("HTTP/1.0" | "HTTP/1.1")) {
+        return Err(proxy_err("HTTP 代理应答协议无效"));
+    }
     match status {
         Some(200..=299) => Ok(()),
         Some(407) => Err(proxy_err("HTTP 代理要求认证（407），请检查用户名/密码")),
         Some(code) => Err(proxy_err(&format!("HTTP 代理拒绝建立隧道（{code}）"))),
-        None => Err(proxy_err(&format!("HTTP 代理应答无法解析: {status_line}"))),
+        None => Err(proxy_err("HTTP 代理应答无法解析")),
     }
 }
 

@@ -648,7 +648,7 @@ impl NebulaWorkspace {
                                                 .on_click(move |_, window, cx| {
                                                     if let Some(workspace) = settings.upgrade() {
                                                         workspace.update(cx, |this, cx| {
-                                                            this.open_settings(window, cx);
+                                                            this.toggle_settings(window, cx);
                                                         });
                                                     }
                                                 }),

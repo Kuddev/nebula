@@ -40,6 +40,11 @@ const BARE_PAREN_SEARCH_ROWS: usize = 8;
 /// Same budget for the multi-row `[` block. It may legitimately hold an
 /// `aligned` environment, so it gets more room than an inline paren.
 const BARE_BRACKET_SEARCH_ROWS: usize = 24;
+/// How far below its opener a standalone display block may still close once
+/// the search has had to step over a TUI paragraph gap (see
+/// [`TextGrid::find_closing`]). Bridging a gap is a guess, so unlike the plain
+/// search it is not allowed to run to the bottom of the grid.
+const DISPLAY_BLOCK_GAP_SEARCH_ROWS: usize = BARE_BRACKET_SEARCH_ROWS;
 /// Cells the whole frame may spend on closing searches for **bare** delimiters.
 ///
 /// The per-candidate row cap above is not enough on its own: one screen can hold
@@ -911,20 +916,114 @@ impl TextGrid {
     /// math identifiers) and covers the whole region with one image. Stopping at
     /// the blank row leaves it unmatched instead, which is what hands it to the
     /// history reconstruction in [`TerminalMathState::scan_visible_grid`].
-    fn find_closing(&self, mut position: GridPosition, delimiter: &[char]) -> Option<GridPosition> {
+    ///
+    /// One blank row is **not** a paragraph break, though: the *TUI's* one. The
+    /// agent CLIs run the answer through a Markdown renderer that does not know
+    /// `$$`, and two of its rules split a display block with a blank row:
+    ///
+    /// * Claude Code (09-03 screenshot, see
+    ///   `claude_code_display_blocks_from_screenshot_pair_and_compile`): a row
+    ///   holding only `=` is a setext underline, so the row above becomes a
+    ///   heading, the `=` disappears and a blank row is emitted in its place.
+    /// * Codex (`codex-rs/tui/src/markdown_render.rs`, verified in source, not
+    ///   observed): a formula row starting with `- ` / `+ ` / `* ` interrupts
+    ///   the paragraph as a list item (pulldown-cmark `firstpass.rs`,
+    ///   `scan_paragraph_interrupt_no_table`), `start_list` pushes a blank
+    ///   line in front of it and `start_item` renders the marker as `- `
+    ///   with the rest of the block, closer included, indented two cells.
+    ///
+    /// `open` is the opener's position; when it stands alone on its row the
+    /// search may step over such a gap, under four conditions that together
+    /// keep the orphan-closer case above on the pending path:
+    ///
+    /// 1. the block already has content above the gap — an orphan closer is
+    ///    followed by its blank row immediately;
+    /// 2. the gap is a single row — two blank rows are a real section break;
+    /// 3. the row after the gap carries math evidence of its own — prose does
+    ///    not, so the swallowed-paragraph shape stops right there;
+    /// 4. past a gap the closer must stand alone on its row, and lie within
+    ///    [`DISPLAY_BLOCK_GAP_SEARCH_ROWS`] of the opener.
+    fn find_closing(
+        &self,
+        open: GridPosition,
+        mut position: GridPosition,
+        delimiter: &[char],
+    ) -> Option<GridPosition> {
+        let standalone_opener = self.span_is_blank(open.row, position.column, self.columns)
+            && open.row == position.row;
+        let last_row = open.row.saturating_add(DISPLAY_BLOCK_GAP_SEARCH_ROWS);
+        let mut content_rows = 0usize;
+        let mut bridged = false;
+        // 上一行是刚跨过的空行：这一行要先自证是公式，搜索才继续。
+        let mut gap_pending = false;
         loop {
             if position.row >= self.rows.len() {
                 return None;
             }
-            if self.starts_with(position, delimiter) && !self.is_escaped(position) {
+            if self.starts_with(position, delimiter)
+                && !self.is_escaped(position)
+                && (!bridged || self.delimiter_owns_row(position, delimiter.len()))
+            {
                 return Some(position);
             }
             let previous_row = position.row;
             position = self.next(position)?;
-            if position.row != previous_row && self.span_is_blank(position.row, 0, self.columns) {
+            if position.row == previous_row {
+                continue;
+            }
+            if self.span_is_blank(position.row, 0, self.columns) {
+                if !standalone_opener || content_rows == 0 || gap_pending {
+                    return None;
+                }
+                gap_pending = true;
+                bridged = true;
+                continue;
+            }
+            content_rows += 1;
+            if bridged && position.row > last_row {
                 return None;
             }
+            if gap_pending {
+                gap_pending = false;
+                if !self.row_is_only(position.row, delimiter)
+                    && !self.row_has_math_evidence(position.row)
+                {
+                    return None;
+                }
+            }
         }
+    }
+
+    /// Whether the delimiter at `position` is the only ink on its row.
+    fn delimiter_owns_row(&self, position: GridPosition, length: usize) -> bool {
+        self.span_is_blank(position.row, 0, position.column)
+            && self.span_is_blank(position.row, position.column + length, self.columns)
+    }
+
+    fn row_text(&self, row: usize) -> String {
+        self.rows.get(row).into_iter().flat_map(|cells| cells.iter().flatten()).collect()
+    }
+
+    /// Whether `row` holds nothing but `delimiter`.
+    fn row_is_only(&self, row: usize, delimiter: &[char]) -> bool {
+        self.row_text(row).trim().chars().eq(delimiter.iter().copied())
+    }
+
+    /// Row-level version of the source test, for rows a bridged search has to
+    /// vouch for on their own. In the Codex shape the row after the gap is a
+    /// list item in the renderer's eyes, so its leading sign is also read as
+    /// the list marker it became: `- 2xy` has no evidence as a whole, but a
+    /// compact operand behind the marker is one, while `- 修复 SSH 重连` (a
+    /// real list item) is not.
+    fn row_has_math_evidence(&self, row: usize) -> bool {
+        let text = self.row_text(row);
+        let text = text.trim();
+        if standard_formula_source(text, true) {
+            return true;
+        }
+        let body = text.trim_start_matches(['-', '+', '*']).trim_start();
+        body.len() != text.len()
+            && (implicit_product_operand(body) || standard_formula_source(body, true))
     }
 
     /// Closing search for **inline** delimiters. Inline TeX may cross a
@@ -1362,7 +1461,7 @@ fn find_formula(
     // Inline delimiters follow the same rule for the same reason: crossing a
     // hard wrap merges two unrelated terminal lines into one formula.
     let close = if kind.is_display() && opens_a_block(grid, open) {
-        grid.find_closing(source_start, closing)?
+        grid.find_closing(open, source_start, closing)?
     } else {
         grid.find_closing_soft_wrap(source_start, closing)?
     };
@@ -1478,25 +1577,36 @@ fn find_bare_bracket_formula(
         // `[0, 1]` 区间的 `]` 不具备闭合资格，跳过继续找。搜索同样带行
         // 预算：屏幕底部一个没闭合的 `[` 不该每帧扫到网格末尾。空行按
         // 与 `find_closing` 同一条理由收尾（数学模式里没有分段），否则一个
-        // 没闭合的 `[` 会把下面一整段正文连同它自己的公式吞成一条候选。
+        // 没闭合的 `[` 会把下面一整段正文连同它自己的公式吞成一条候选——
+        // 也按同一套条件放行 TUI 塞进来的那一行空行：吃掉 `\[` 的正是
+        // 这个 Markdown 渲染器，它切开 `$$` 块的手法在这里一模一样。
+        let mut content_rows = 0usize;
+        let mut gap_pending = false;
         grid.find_closing_bounded(
             source_start,
             BARE_BRACKET_SEARCH_ROWS,
             budget,
             |grid, position| {
-                if position.column == 0
-                    && position.row > open.row
-                    && grid.span_is_blank(position.row, 0, grid.columns)
-                {
-                    return None;
+                if position.column == 0 && position.row > open.row {
+                    if grid.span_is_blank(position.row, 0, grid.columns) {
+                        if content_rows == 0 || gap_pending {
+                            return None;
+                        }
+                        gap_pending = true;
+                        return Some(false);
+                    }
+                    content_rows += 1;
+                    if std::mem::take(&mut gap_pending)
+                        && !grid.row_is_only(position.row, &[']'])
+                        && !grid.row_has_math_evidence(position.row)
+                    {
+                        return None;
+                    }
                 }
                 if grid.character(position) != Some(']') || grid.is_escaped(position) {
                     return Some(false);
                 }
-                Some(
-                    grid.span_is_blank(position.row, 0, position.column)
-                        && grid.span_is_blank(position.row, position.column + 1, grid.columns),
-                )
+                Some(grid.delimiter_owns_row(position, 1))
             },
         )?
     } else {
@@ -3097,6 +3207,252 @@ mod tests {
         );
     }
 
+    /// Codex 的形状，按源码推导而非截图：`codex-rs/tui/src/markdown_render.rs`
+    /// 只开 strikethrough/tables，不认识 `$$`；块里以 `- ` / `+ ` / `* ` 起行
+    /// 的公式行被 pulldown-cmark 当成打断段落的列表项，`start_list` 在前面插
+    /// 一行空行，`start_item` 把记号一律画成 `- `，后续行（含闭合 `$$`）作为
+    /// 列表项续行缩进两格。「空行终止搜索」的规则会把这些块全判成孤立开头。
+    /// （09-02 那张截图后来确认是 Claude Code，其形状见
+    /// `claude_code_display_blocks_from_screenshot_pair_and_compile`。）
+    #[test]
+    fn tui_paragraph_gap_inside_a_standalone_display_block_is_bridged() {
+        let cases: [(&[&str], &str); 5] = [
+            (
+                &[
+                    "$$",
+                    r"R_{\mu\nu} - \frac{1}{2} R g_{\mu\nu}",
+                    "",
+                    r"- \Lambda g_{\mu\nu} = \frac{8\pi G}{c^4} T_{\mu\nu}",
+                    "  $$",
+                ],
+                r"R_{\mu\nu} - \frac{1}{2} R g_{\mu\nu} - \Lambda g_{\mu\nu} = \frac{8\pi G}{c^4} T_{\mu\nu}",
+            ),
+            (
+                &[
+                    "  $$",
+                    r"  i\hbar \frac{\partial}{\partial t} \Psi",
+                    "",
+                    r"  - \frac{\hbar^2}{2m} \nabla^2 \Psi + V \Psi = 0",
+                    "    $$",
+                ],
+                r"i\hbar \frac{\partial}{\partial t} \Psi - \frac{\hbar^2}{2m} \nabla^2 \Psi + V \Psi = 0",
+            ),
+            // 列表项之后还有普通续行：`\end{aligned}` 和闭合都缩进两格。
+            (
+                &[
+                    "$$",
+                    r"\begin{aligned}",
+                    r"F &= ma \\",
+                    "",
+                    r"- \nabla V &= m \ddot{x}",
+                    r"  \end{aligned}",
+                    "  $$",
+                ],
+                r"\begin{aligned} F &= ma \\ - \nabla V &= m \ddot{x} \end{aligned}",
+            ),
+            // 两次被切：块里有两行以减号开头。
+            (
+                &[
+                    "$$",
+                    r"x^2",
+                    "",
+                    r"- 2xy",
+                    "",
+                    r"- y^2 = (x - y)^2 - 2y^2",
+                    "  $$",
+                ],
+                r"x^2 - 2xy - y^2 = (x - y)^2 - 2y^2",
+            ),
+            // 没有反斜杠命令也要认：`a^2` 的上标就是证据。
+            (
+                &["$$", r"a^2 + b^2", "", r"- c^2 = 0", "  $$"],
+                r"a^2 + b^2 - c^2 = 0",
+            ),
+        ];
+
+        for (screen, expected) in cases {
+            let extracted = sources(screen);
+            assert_eq!(extracted.len(), 1, "{screen:?} must yield one display formula");
+            let (source, display) = &extracted[0];
+            assert!(display);
+            assert_eq!(source.split_whitespace().collect::<Vec<_>>().join(" "), expected);
+            compile_formula(source, true, 18.0, 1.0, DEFAULT_LIMITS)
+                .unwrap_or_else(|error| panic!("{expected} must compile: {error:?}"));
+            let scan = scan_grid_result(&TextGrid::from_rows(screen));
+            assert!(scan.unmatched_display.is_none(), "{screen:?} left a pending delimiter");
+        }
+    }
+
+    /// 桥接空行的四道闸，每道各一个反例。松开任何一道，`cat math.txt`
+    /// 那种孤立闭合就会重新把下面的正文吞进公式。
+    #[test]
+    fn display_block_gap_bridging_stops_at_prose_double_gaps_and_inline_closers() {
+        // 空行后面是正文：没有数学证据，搜索到此为止。
+        let prose: &[&str] = &["$$", r"x^2", "", "所以上式成立。", "$$"];
+        // 连续两行空行是真正的分段，不是 TUI 塞的列表间距。
+        let double_gap: &[&str] = &["$$", r"x^2", "", "", r"- y^2", "  $$"];
+        // 跨过空行之后闭合必须独占一行。
+        let inline_closer: &[&str] = &["$$", r"x^2", "", r"- y^2 = z$$", "后文"];
+        // 开头不独占一行（单行块被硬折行）不享受桥接。
+        let inline_opener: &[&str] = &[r"$$x^2 +", "", r"- y^2", "  $$"];
+        // 开头后面紧跟空行：块里还没有内容，这是孤立闭合的形状。
+        let empty_head: &[&str] = &["$$", "", r"- y^2", "  $$"];
+        for screen in [prose, double_gap, inline_closer, inline_opener, empty_head] {
+            let scan = scan_grid_result(&TextGrid::from_rows(screen));
+            assert!(
+                scan.overlays.is_empty(),
+                "{screen:?} must not bridge the gap, got {:?}",
+                scan.overlays.iter().map(|overlay| overlay.source.as_ref()).collect::<Vec<_>>()
+            );
+            assert!(scan.unmatched_display.is_some(), "{screen:?} must stay pending");
+        }
+    }
+
+    /// 桥接有行预算：闭合离开头太远就当没有。预算和裸 `[` 块共用同一个数。
+    #[test]
+    fn display_block_gap_bridging_has_a_row_budget() {
+        // 闭合落在第 DISPLAY_BLOCK_GAP_SEARCH_ROWS + 1 行：超出一行。
+        let mut screen: Vec<String> = vec!["$$".into(), r"x^2".into(), String::new()];
+        screen.extend((0..DISPLAY_BLOCK_GAP_SEARCH_ROWS - 2).map(|index| format!("- y_{index}")));
+        screen.push("  $$".into());
+        let rows: Vec<&str> = screen.iter().map(String::as_str).collect();
+        assert!(sources(&rows).is_empty(), "closer past the row budget must not pair");
+
+        // 少一行内容，闭合正好落在预算内。
+        screen.truncate(screen.len() - 2);
+        screen.push("  $$".into());
+        let rows: Vec<&str> = screen.iter().map(String::as_str).collect();
+        assert_eq!(sources(&rows).len(), 1, "closer inside the row budget pairs");
+    }
+
+    /// 同一个渲染器把 `\[` 吃成 `[`，再用同一手法切块：裸方括号块走同样的桥。
+    #[test]
+    fn tui_paragraph_gap_inside_a_bare_bracket_block_is_bridged() {
+        let screen = [
+            "[",
+            r"\nabla \cdot \mathbf{E} = \frac{\rho}{\varepsilon_0}",
+            "",
+            r"- \nabla \times \mathbf{B} = 0",
+            "  ]",
+        ];
+        let extracted = sources(&screen);
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].1);
+        assert_eq!(
+            extracted[0].0.split_whitespace().collect::<Vec<_>>().join(" "),
+            r"\nabla \cdot \mathbf{E} = \frac{\rho}{\varepsilon_0} - \nabla \times \mathbf{B} = 0",
+        );
+
+        // 反例同 `$$`：空行后是正文就停。
+        let prose = ["[", r"\nabla \cdot \mathbf{E} = 0", "", "其中 E 是电场。", "  ]"];
+        assert!(sources(&prose).is_empty());
+    }
+
+    /// 用户 09-03 截图（图 #10，Claude Code 输出）里七个 `$$` 块在终端网格上的
+    /// 原样。Claude Code 的 Markdown 渲染器留下两种形状：
+    /// * 独占一行的 `=` 是 setext 标题下划线，被吃掉后只剩一行空行（傅里叶、
+    ///   Attention）；
+    /// * 反斜杠转义被消费：`\\` 变成 `\`（cases / pmatrix / aligned 的行尾），
+    ///   `\,` 变成 `,`（高斯、傅里叶）。
+    /// 前者的 `=` 在网格里已不存在，这里只要求块被完整配对并能编译；后者的
+    /// 行尾单 `\` 必须仍能编译成换行。
+    #[test]
+    fn claude_code_display_blocks_from_screenshot_pair_and_compile() {
+        let cases: [(&[&str], &str); 7] = [
+            (&["$$", r"e^{i\pi}+1=0", "$$"], r"e^{i\pi}+1=0"),
+            (
+                &["$$", r"\int_{-\infty}^{+\infty} e^{-x^2},dx=\sqrt{\pi}", "$$"],
+                r"\int_{-\infty}^{+\infty} e^{-x^2},dx=\sqrt{\pi}",
+            ),
+            (
+                &[
+                    "$$",
+                    r"\widehat{f}(\xi)",
+                    "",
+                    r"\int_{-\infty}^{+\infty}",
+                    r"f(x)e^{-2\pi i x\xi},dx",
+                    "$$",
+                ],
+                r"\widehat{f}(\xi) \int_{-\infty}^{+\infty} f(x)e^{-2\pi i x\xi},dx",
+            ),
+            (
+                &[
+                    "$$",
+                    r"\operatorname{Attention}(Q,K,V)",
+                    "",
+                    r"\operatorname{softmax}\left(",
+                    r"\frac{QK^{\mathsf T}}{\sqrt{d_k}}",
+                    r"\right)V",
+                    "$$",
+                ],
+                r"\operatorname{Attention}(Q,K,V) \operatorname{softmax}\left( \frac{QK^{\mathsf T}}{\sqrt{d_k}} \right)V",
+            ),
+            (
+                &[
+                    "$$",
+                    r"\phi(x)=",
+                    r"\begin{cases}",
+                    r"x, & x\ge 0,\",
+                    r"\alpha(e^x-1), & x<0.",
+                    r"\end{cases}",
+                    "$$",
+                ],
+                r"\phi(x)= \begin{cases} x, & x\ge 0,\ \alpha(e^x-1), & x<0. \end{cases}",
+            ),
+            (
+                &[
+                    "$$",
+                    "A=",
+                    r"\begin{pmatrix}",
+                    r"a_{11} & a_{12} & \cdots & a_{1n}\",
+                    r"a_{21} & a_{22} & \cdots & a_{2n}\",
+                    r"\vdots & \vdots & \ddots & \vdots\",
+                    r"a_{m1} & a_{m2} & \cdots & a_{mn}",
+                    r"\end{pmatrix}",
+                    "$$",
+                ],
+                concat!(
+                    r"A= \begin{pmatrix} a_{11} & a_{12} & \cdots & a_{1n}\ ",
+                    r"a_{21} & a_{22} & \cdots & a_{2n}\ \vdots & \vdots & \ddots & \vdots\ ",
+                    r"a_{m1} & a_{m2} & \cdots & a_{mn} \end{pmatrix}",
+                ),
+            ),
+            (
+                &[
+                    "$$",
+                    r"\begin{aligned}",
+                    r"(a+b)^3",
+                    r"&=(a+b)(a+b)^2\",
+                    r"&=(a+b)(a^2+2ab+b^2)\",
+                    r"&=a^3+3a^2b+3ab^2+b^3",
+                    r"\end{aligned}",
+                    "$$",
+                ],
+                concat!(
+                    r"\begin{aligned} (a+b)^3 &=(a+b)(a+b)^2\ &=(a+b)(a^2+2ab+b^2)\ ",
+                    r"&=a^3+3a^2b+3ab^2+b^3 \end{aligned}",
+                ),
+            ),
+        ];
+
+        for (screen, expected) in cases {
+            // Claude Code 把回答整体缩进两格；缩进与否都必须配对。
+            let indented: Vec<String> = screen.iter().map(|row| format!("  {row}")).collect();
+            let indented: Vec<&str> = indented.iter().map(String::as_str).collect();
+            for rows in [screen, indented.as_slice()] {
+                let extracted = sources(rows);
+                assert_eq!(extracted.len(), 1, "{rows:?} must yield one display formula");
+                let (source, display) = &extracted[0];
+                assert!(display);
+                assert_eq!(source.split_whitespace().collect::<Vec<_>>().join(" "), expected);
+                compile_formula(source, true, 18.0, 1.0, DEFAULT_LIMITS)
+                    .unwrap_or_else(|error| panic!("{expected} must compile: {error:?}"));
+                let scan = scan_grid_result(&TextGrid::from_rows(rows));
+                assert!(scan.unmatched_display.is_none(), "{rows:?} left a pending delimiter");
+            }
+        }
+    }
+
     #[test]
     fn long_display_formula_with_trailing_literal_dollar_remains_renderable() {
         let source = concat!(
@@ -4064,6 +4420,62 @@ d & -b \\
                 budget_width,
                 budget_height,
             );
+        }
+    }
+
+    /// 每帧扫描与冷编译的量尺，不是断言。跑法：
+    /// `cargo test -p nebula --bin nebula terminal_math::tests::measure_scan -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing probe, run by hand"]
+    fn measure_scan_and_compile_cost() {
+        use std::time::Instant;
+
+        // 50×200 的视口，塞满带 `$`、`[`、`(` 的正文：每个候选都触发一次搜索
+        // 却没有一个能成公式，是扫描器最贵的形状。
+        let prose = "price is $5 and $HOME/bin (see [1]) costs 3 (x) dollars $ USD [a, b] ";
+        let row: String = prose.repeat(200 / prose.chars().count() + 1).chars().take(200).collect();
+        let rows: Vec<&str> = (0..50).map(|_| row.as_str()).collect();
+        let grid = TextGrid::from_rows(&rows);
+        let iterations = 200;
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let scan = scan_grid_result(&grid);
+            assert!(scan.overlays.is_empty());
+        }
+        let per_scan = start.elapsed() / iterations;
+        println!("scan 50x200 prose (worst case, 0 formulas): {per_scan:?} per frame");
+
+        // 同样尺寸，塞满能命中的行内公式：每帧的公式上限是 MAX_VISIBLE_FORMULAS。
+        let formula_row = "the energy $E = mc^2$ and $\\int_0^1 x\\,dx = \\frac{1}{2}$ hold; ";
+        let row: String =
+            formula_row.repeat(200 / formula_row.chars().count() + 1).chars().take(200).collect();
+        let rows: Vec<&str> = (0..50).map(|_| row.as_str()).collect();
+        let grid = TextGrid::from_rows(&rows);
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let scan = scan_grid_result(&grid);
+            assert_eq!(scan.overlays.len(), MAX_VISIBLE_FORMULAS);
+        }
+        let per_scan = start.elapsed() / iterations;
+        println!("scan 50x200 inline formulas (capped at {MAX_VISIBLE_FORMULAS}): {per_scan:?} per frame");
+
+        let screenshot: [&str; 7] = [
+            r"e^{i\pi}+1=0",
+            r"\int_{-\infty}^{+\infty} e^{-x^2},dx=\sqrt{\pi}",
+            "\\widehat{f}(\\xi)\n\n\\int_{-\\infty}^{+\\infty}\nf(x)e^{-2\\pi i x\\xi},dx",
+            "\\operatorname{Attention}(Q,K,V)\n\n\\operatorname{softmax}\\left(\n\\frac{QK^{\\mathsf T}}{\\sqrt{d_k}}\n\\right)V",
+            "\\phi(x)=\n\\begin{cases}\nx, & x\\ge 0,\\\n\\alpha(e^x-1), & x<0.\n\\end{cases}",
+            "A=\n\\begin{pmatrix}\na_{11} & a_{12} & \\cdots & a_{1n}\\\na_{21} & a_{22} & \\cdots & a_{2n}\\\n\\vdots & \\vdots & \\ddots & \\vdots\\\na_{m1} & a_{m2} & \\cdots & a_{mn}\n\\end{pmatrix}",
+            "\\begin{aligned}\n(a+b)^3\n&=(a+b)(a+b)^2\\\n&=(a+b)(a^2+2ab+b^2)\\\n&=a^3+3a^2b+3ab^2+b^3\n\\end{aligned}",
+        ];
+        for source in screenshot {
+            let start = Instant::now();
+            for _ in 0..iterations {
+                compile_formula(source, true, 18.0, 1.0, DEFAULT_LIMITS).expect("compiles");
+            }
+            let per_compile = start.elapsed() / iterations;
+            let head: String = source.chars().take(28).map(|c| if c == '\n' { ' ' } else { c }).collect();
+            println!("compile {head:<30} {per_compile:?} cold (cache hit is a map lookup)");
         }
     }
 }

@@ -182,7 +182,11 @@ impl Global for QuickTerminalHotkey {}
 impl NebulaWorkspace {
     /// 注册快速终端热键并启动事件泵。只应由初始窗口调用一次。
     pub(super) fn start_quick_terminal_hotkey(cx: &mut Context<Self>) {
-        if cx.has_global::<QuickTerminalHotkey>() {
+        // 窗口显隐/贴边几何只有 Windows 实现；其余平台先不注册热键，
+        // 免得热键响应了却没有窗口出来。
+        if !crate::platform::CAPABILITIES.quick_terminal_hotkey
+            || cx.has_global::<QuickTerminalHotkey>()
+        {
             return;
         }
         let manager = match GlobalHotKeyManager::new() {

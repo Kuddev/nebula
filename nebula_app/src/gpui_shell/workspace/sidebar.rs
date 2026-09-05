@@ -959,7 +959,7 @@ impl NebulaWorkspace {
                             })
                             .tooltip("设置 (Ctrl+,)")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_settings(window, cx);
+                                this.toggle_settings(window, cx);
                             })),
                     ),
             )

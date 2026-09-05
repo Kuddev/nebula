@@ -193,6 +193,9 @@ pub enum TerminalLaunch {
     },
     Ssh {
         destination: String,
+        /// Remote cwd inherited by duplicate-tab. `None` starts in the
+        /// account's ordinary login directory.
+        cwd: Option<String>,
     },
 }
 
@@ -247,6 +250,9 @@ pub enum SidebarActivity {
 }
 
 pub struct TerminalView {
+    pub(super) answers: crate::assistant_answer::AnswerInbox,
+    pub(super) answer_reader: Option<gpui::Entity<super::answer_reader::AnswerReader>>,
+    preserve_agent_math_source: bool,
     pub pane_id: u64,
     pub session: Option<TerminalSession>,
     pub focus_handle: FocusHandle,
@@ -326,6 +332,9 @@ pub struct TerminalView {
     pending_runtime_submit: Option<crate::display::state::RuntimeSubmitBarrier>,
     /// OSC 9 程序通知，攒到 render（那里才有 `Window` 判聚焦）再呈现。
     pending_notify: Vec<String>,
+    /// OSC 1337 图片的串行后台解码队列和有界像素缓存。图片不进入字符网格，
+    /// 只用事件携带的绝对行锚定到对应的 scrollback 位置。
+    pub(super) inline_images: super::inline_image::InlineImageStore,
     /// SSH 直连目的地（`user@host[:port]`）；本地会话为 None。
     pub ssh_destination: Option<String>,
     /// 创建本地 PTY 时冻结的受控环境，供独立 `pane.exec` child 复用。
@@ -627,7 +636,9 @@ impl TerminalView {
             TerminalLaunch::Local { cwd, .. } => {
                 cwd.as_ref().map(|path| path.to_string_lossy().into_owned()).unwrap_or_default()
             },
-            TerminalLaunch::Ssh { destination } => destination.clone(),
+            TerminalLaunch::Ssh { destination, cwd } => {
+                cwd.clone().unwrap_or_else(|| destination.clone())
+            },
         };
         let (ssh_destination, initial_title, intro_shell_name, suggest_env, exec_context, spawned) =
             match launch {
@@ -658,13 +669,13 @@ impl TerminalView {
                         session::spawn(initial, term_config, options),
                     )
                 },
-                TerminalLaunch::Ssh { destination } => (
+                TerminalLaunch::Ssh { destination, cwd } => (
                     Some(destination.clone()),
                     destination.clone(),
                     None,
                     crate::display::SuggestEnv::Ssh { destination: destination.clone() },
                     None,
-                    session::spawn_ssh(destination, initial, term_config),
+                    session::spawn_ssh(destination, cwd, initial, term_config),
                 ),
             };
         let is_ssh = ssh_destination.is_some();
@@ -683,7 +694,9 @@ impl TerminalView {
                         .or(runtime.shell.as_deref())
                         .unwrap_or_default()
                         .to_ascii_lowercase();
-                    let intro_shell = if id.contains("wsl") || id.contains("bash") {
+                    // Unix 没有 PowerShell 版欢迎脚本：一律走 fastfetch 回退链。
+                    let intro_shell = if !cfg!(windows) || id.contains("wsl") || id.contains("bash")
+                    {
                         crate::display::NebulaShell::Bash
                     } else {
                         crate::display::NebulaShell::PowerShell
@@ -813,6 +826,9 @@ impl TerminalView {
             session,
             focus_handle,
             math: super::math_overlay::MathOverlay::default(),
+            answers: crate::assistant_answer::AnswerInbox::default(),
+            answer_reader: None,
+            preserve_agent_math_source: false,
             font: mono_font(&families[0], FontWeight::NORMAL, FontStyle::Normal),
             font_bold: mono_font(&families[1], FontWeight::BOLD, FontStyle::Normal),
             font_italic: mono_font(&families[2], FontWeight::NORMAL, FontStyle::Italic),
@@ -846,6 +862,7 @@ impl TerminalView {
             agent_runtime_submit_pending: false,
             pending_runtime_submit: None,
             pending_notify: Vec::new(),
+            inline_images: super::inline_image::InlineImageStore::default(),
             ssh_destination,
             exec_context,
             ssh_stage: None,
@@ -1007,7 +1024,16 @@ impl TerminalView {
                     cx.notify();
                 }
             },
+            TermEvent::InlineImage { data, abs_line, width, height } => {
+                let cell_height = f32::from(self.window_size.cell_height.max(1));
+                let row_span = (height / cell_height).ceil().max(1.0) as usize;
+                match self.inline_images.enqueue(data, abs_line, width, height, row_span) {
+                    Ok(()) => self.drive_inline_image_decode(cx),
+                    Err(error) => log::warn!("terminal image dropped: {error}"),
+                }
+            },
             TermEvent::CommandStart => {
+                self.answers.begin_command();
                 // 程序身份来自 Enter 时捕获的完整命令行；直接启动和
                 // npx/node/uvx 等包装启动都会归一成 Agent slug。它是 WSL
                 // 看不见来宾进程时的主通道，hook 信封仍是更准的覆盖层。
@@ -1093,10 +1119,27 @@ impl TerminalView {
                 }
             },
             TermEvent::Bell => self.on_bell(cx),
-            // 仍未接线：内联图片（要图片管线把 abs_line 锚到网格）、OSC 1337
-            // UserVar（AI 查询拦截）。
+            // 仍未接线：OSC 1337 UserVar（AI 查询拦截）。
             _ => {},
         }
+    }
+
+    fn drive_inline_image_decode(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.inline_images.start_next() else { return };
+        let decode = cx
+            .background_executor()
+            .spawn(async move { super::inline_image::decode(pending) });
+        cx.spawn(async move |this, cx| {
+            let result = decode.await;
+            let _ = this.update(cx, |view, cx| {
+                if let Err(error) = view.inline_images.finish(result) {
+                    log::warn!("terminal image dropped: {error}");
+                }
+                view.drive_inline_image_decode(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// `Exited` 只对宿主发一次；重复的退出信号（ChildExit 之后必然跟 Exit）只更新文案。
@@ -1544,6 +1587,15 @@ impl TerminalView {
         path.is_dir().then_some(path)
     }
 
+    /// Absolute remote cwd reported by OSC 7/title integration. Unlike
+    /// [`Self::local_cwd`], this deliberately does not consult the host
+    /// filesystem; a POSIX path belongs to the SSH endpoint.
+    pub fn remote_cwd(&self) -> Option<String> {
+        self.ssh_destination.as_ref()?;
+        let path = self.cwd.trim();
+        (path.starts_with('/') && !path.chars().any(char::is_control)).then(|| path.to_owned())
+    }
+
     /// 这个 pane 的远端身份，仅当会话**已经就绪**时才给。
     ///
     /// 两个条件都必须成立：既要是 SSH pane，又要已经握手认证完成。只看
@@ -1897,7 +1949,7 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.exited.is_some() {
+        if self.exited.is_some() || self.answer_reader.is_some() {
             return;
         }
         // 旧壳 `keyboard.rs`：IME 组合中不编码、不拦截。GPUI Windows 在
@@ -2856,8 +2908,8 @@ impl Drop for TerminalView {
 }
 
 impl Focusable for TerminalView {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.answer_reader.as_ref().map_or_else(|| self.focus_handle.clone(), |reader| reader.read(cx).focus_handle.clone())
     }
 }
 
@@ -2906,6 +2958,9 @@ impl gpui::EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.answer_reader.is_some() {
+            return;
+        }
         let had_marked_text = self.marked_text.take().is_some();
         if !text.is_empty() && self.exited.is_none() {
             // 行镜像吃 IME 管道的字符（含中文提交与普通击键文本）。
@@ -2927,6 +2982,9 @@ impl gpui::EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.answer_reader.is_some() {
+            return;
+        }
         let marked_text = if new_text.is_empty() { None } else { Some(new_text.to_string()) };
         if self.marked_text != marked_text {
             self.marked_text = marked_text;
@@ -2958,6 +3016,9 @@ impl gpui::EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(reader) = &self.answer_reader {
+            return div().size_full().child(reader.clone()).into_any_element();
+        }
         // OSC 9 程序通知：旧壳只在窗口没聚焦时递出去，聚焦时用户本来就在看这
         // 个 pane。这里是最早能同时拿到 `Window` 和 view 可变引用的地方。用驻留
         // 式 banner 而不是 toast——人不在看的时候弹一条 5 秒自动消失的提示等于
@@ -2979,7 +3040,6 @@ impl Render for TerminalView {
         }
         if let Some((title, body)) = self.pending_bell_notify.take() {
             if !window.is_window_active() {
-                #[cfg(windows)]
                 crate::notify::toast(&title, &body);
                 window.defer(cx, move |window, cx| {
                     crate::gpui_shell::toast::banner(
@@ -3096,7 +3156,47 @@ impl Render for TerminalView {
                 );
             }
         }
-        root
+        if let Some(answer) = self.answers.latest.clone() {
+            let provider = if answer.provider == "claude" { "Claude Code" } else { "Codex" };
+            return div().size_full().relative()
+                .child(root)
+                .child(crate::gpui_shell::prelude::h_flex().absolute().top_0().right_2().px_2().gap_2().items_center()
+                    .bg(cx.theme().background)
+                    .child(div().text_xs().child(format!("{provider} · 回答")))
+                    .child(crate::gpui_shell::prelude::Button::new("answer-open")
+                        .label("阅读").small()
+                        .on_click(cx.listener(|view, _, window, cx| view.open_answer(window, cx)))))
+                .into_any_element();
+        }
+        root.into_any_element()
+    }
+}
+
+impl TerminalView {
+    fn open_answer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.answers.latest.clone() else { return };
+        let reader = cx.new(|cx| super::answer_reader::AnswerReader::new(snapshot, cx));
+        if self.agent_status == crate::ai_agents::AgentStatus::Blocked {
+            reader.update(cx, |reader, cx| reader.needs_attention(cx));
+        }
+        cx.subscribe_in(&reader, window, |view, _, _: &super::answer_reader::ReaderEvent, window, cx| {
+            view.answer_reader = None;
+            window.focus(&view.focus_handle, cx);
+            cx.notify();
+        }).detach();
+        let focus = reader.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+        self.answer_reader = Some(reader);
+        cx.notify();
+    }
+
+    pub(super) fn uses_source_reader_math(&mut self) -> bool {
+        self.preserve_agent_math_source |= self.running_program.as_deref().is_some_and(|program| {
+            matches!(program, "claude" | "codex")
+        }) || self.ai_session.as_ref().is_some_and(|session| {
+            matches!(session.source.as_str(), "claude" | "codex")
+        });
+        self.preserve_agent_math_source
     }
 }
 

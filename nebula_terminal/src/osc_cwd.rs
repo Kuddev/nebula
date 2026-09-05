@@ -26,9 +26,13 @@
 /// shorter; anything longer is not a directory report and gets dropped.
 const MAX_PAYLOAD: usize = 4096;
 
-/// Cap for OSC 1337 inline-image payloads (base64 PNG). Anything larger is
-/// dropped rather than buffered forever.
+/// Cap for OSC 1337 inline-image payloads (metadata plus base64). Anything
+/// larger is dropped while it is still arriving rather than buffered forever.
 const MAX_IMAGE_PAYLOAD: usize = 12 * 1024 * 1024;
+/// A compressed image can expand by orders of magnitude. Keep a 4K screenshot
+/// comfortably inside the budget, but reject image bombs before a decoder sees
+/// them. The frontend repeats this check as a defense-in-depth boundary.
+const MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
 /// 远端 Hook JSON 使用 Base64 传输；上限阻止伪造 OSC 长时间占用内存。
 const MAX_HOOK_PAYLOAD: usize = 96 * 1024;
 
@@ -61,9 +65,11 @@ pub enum OscEvent {
     Progress { state: u8, value: Option<u8> },
     /// Nebula 远端 Hook 私有 OSC：随机通道令牌 + 原始 Hook 信封。
     RemoteHook { token: String, envelope: Vec<u8> },
-    /// OSC 1337 `File=...inline=1:<base64>` — an iTerm2 inline image (PNG).
-    /// `width`/`height` come from the PNG header, in pixels.
-    InlineImage { png: Vec<u8>, width: u32, height: u32 },
+    /// OSC 1337 `File=...inline=1:<base64>` — an iTerm2 inline image.
+    /// Only static PNG/JPEG/GIF input is accepted; animated GIFs are rendered
+    /// as their first frame by the frontend.
+    /// `width`/`height` come from the encoded image header, in pixels.
+    InlineImage { data: Vec<u8>, width: u32, height: u32 },
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -292,8 +298,9 @@ fn parse_remote_hook(rest: &[u8]) -> Option<OscEvent> {
 }
 
 /// Parse an OSC 1337 body (`File=key=value;...:<base64>`) into an inline
-/// image event. Only `inline=1` PNG payloads are accepted; `width`/`height`
-/// come straight from the PNG IHDR, so broken/foreign params can't lie.
+/// image event. Only `inline=1` PNG/JPEG/GIF payloads are accepted;
+/// `width`/`height` come from the encoded file rather than terminal params, so
+/// broken or hostile metadata cannot lie about the allocation size.
 fn parse_osc1337_image(rest: &[u8]) -> Option<OscEvent> {
     use base64::Engine as _;
 
@@ -307,7 +314,7 @@ fn parse_osc1337_image(rest: &[u8]) -> Option<OscEvent> {
         return None;
     }
 
-    let png = base64::engine::general_purpose::STANDARD
+    let data = base64::engine::general_purpose::STANDARD
         .decode(data)
         .or_else(|_| {
             // Some emitters wrap base64 in whitespace/newlines; strip and retry.
@@ -317,11 +324,21 @@ fn parse_osc1337_image(rest: &[u8]) -> Option<OscEvent> {
         })
         .ok()?;
 
-    let (width, height) = png_dimensions(&png)?;
-    Some(OscEvent::InlineImage { png, width, height })
+    let (width, height) = image_dimensions(&data)?;
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    if pixels > MAX_IMAGE_PIXELS {
+        return None;
+    }
+    Some(OscEvent::InlineImage { data, width, height })
 }
 
-/// Read a PNG's pixel dimensions from its IHDR without decoding the image.
+/// Read dimensions from the supported formats without allocating their pixel
+/// buffers. This is deliberately a small sniffer, not a decoder: the frontend
+/// still validates and decodes the bytes in a bounded background job.
+fn image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    png_dimensions(data).or_else(|| gif_dimensions(data)).or_else(|| jpeg_dimensions(data))
+}
+
 fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
     const MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
     if png.len() < 24 || !png.starts_with(MAGIC) || &png[12..16] != b"IHDR" {
@@ -329,7 +346,70 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
     }
     let width = u32::from_be_bytes(png[16..20].try_into().ok()?);
     let height = u32::from_be_bytes(png[20..24].try_into().ok()?);
-    (width > 0 && height > 0 && width <= 16384 && height <= 16384).then_some((width, height))
+    valid_dimensions(width, height)
+}
+
+fn gif_dimensions(gif: &[u8]) -> Option<(u32, u32)> {
+    if gif.len() < 10 || !(gif.starts_with(b"GIF87a") || gif.starts_with(b"GIF89a")) {
+        return None;
+    }
+    let width = u16::from_le_bytes(gif[6..8].try_into().ok()?) as u32;
+    let height = u16::from_le_bytes(gif[8..10].try_into().ok()?) as u32;
+    valid_dimensions(width, height)
+}
+
+fn jpeg_dimensions(jpeg: &[u8]) -> Option<(u32, u32)> {
+    if jpeg.len() < 4 || !jpeg.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+
+    let mut offset = 2;
+    while offset < jpeg.len() {
+        while jpeg.get(offset) == Some(&0xff) {
+            offset += 1;
+        }
+        let marker = *jpeg.get(offset)?;
+        offset += 1;
+
+        // Standalone markers have no length field.
+        if marker == 0xd8 || marker == 0xd9 || marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+
+        let segment_len =
+            u16::from_be_bytes(jpeg.get(offset..offset + 2)?.try_into().ok()?) as usize;
+        if segment_len < 2 || offset.checked_add(segment_len)? > jpeg.len() {
+            return None;
+        }
+
+        let is_start_of_frame = matches!(
+            marker,
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
+        );
+        if is_start_of_frame {
+            if segment_len < 7 {
+                return None;
+            }
+            let height =
+                u16::from_be_bytes(jpeg.get(offset + 3..offset + 5)?.try_into().ok()?) as u32;
+            let width =
+                u16::from_be_bytes(jpeg.get(offset + 5..offset + 7)?.try_into().ok()?) as u32;
+            return valid_dimensions(width, height);
+        }
+
+        // Start-of-scan is followed by entropy-coded data; a valid dimensions
+        // marker must have appeared before it.
+        if marker == 0xda {
+            return None;
+        }
+        offset += segment_len;
+    }
+    None
+}
+
+fn valid_dimensions(width: u32, height: u32) -> Option<(u32, u32)> {
+    (width > 0 && height > 0 && u64::from(width) * u64::from(height) <= MAX_IMAGE_PIXELS)
+        .then_some((width, height))
 }
 
 /// Decode an OSC 7 body (`file://HOST/PATH`) into a native path.
@@ -603,8 +683,12 @@ mod tests {
     ];
 
     fn tiny_png_osc() -> Vec<u8> {
+        inline_image_osc(TINY_PNG)
+    }
+
+    fn inline_image_osc(data: &[u8]) -> Vec<u8> {
         use base64::Engine as _;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(TINY_PNG);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(data);
         let mut seq = b"\x1b]1337;File=name=eC5wbmc=;size=70;inline=1:".to_vec();
         seq.extend_from_slice(b64.as_bytes());
         seq.push(0x07);
@@ -618,8 +702,8 @@ mod tests {
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].0, seq.len());
         match &ev[0].1 {
-            OscEvent::InlineImage { png, width, height } => {
-                assert_eq!((png.as_slice(), *width, *height), (TINY_PNG, 1, 1));
+            OscEvent::InlineImage { data, width, height } => {
+                assert_eq!((data.as_slice(), *width, *height), (TINY_PNG, 1, 1));
             },
             other => panic!("expected InlineImage, got {other:?}"),
         }
@@ -642,5 +726,37 @@ mod tests {
         let ev = s.feed(b);
         assert_eq!(ev.len(), 1);
         assert!(matches!(ev[0].1, OscEvent::InlineImage { width: 1, height: 1, .. }));
+    }
+
+    #[test]
+    fn osc1337_accepts_jpeg_and_gif_headers() {
+        // Minimal SOF0 segment declaring a 3x2 image. The protocol layer only
+        // sniffs dimensions; the frontend decoder still rejects truncated data.
+        let jpeg = [
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x02, 0x00, 0x03, 0x03, 0x01, 0x11,
+            0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+        ];
+        let jpeg_events = events(&inline_image_osc(&jpeg));
+        assert!(matches!(
+            jpeg_events.as_slice(),
+            [(_, OscEvent::InlineImage { width: 3, height: 2, .. })]
+        ));
+
+        let gif = b"GIF89a\x04\x00\x05\x00";
+        let gif_events = events(&inline_image_osc(gif));
+        assert!(matches!(
+            gif_events.as_slice(),
+            [(_, OscEvent::InlineImage { width: 4, height: 5, .. })]
+        ));
+    }
+
+    #[test]
+    fn osc1337_rejects_video_unknown_formats_and_pixel_bombs() {
+        assert!(events(&inline_image_osc(b"\0\0\0\x18ftypmp42not-an-image")).is_empty());
+
+        let mut oversized = TINY_PNG.to_vec();
+        oversized[16..20].copy_from_slice(&5000u32.to_be_bytes());
+        oversized[20..24].copy_from_slice(&5000u32.to_be_bytes());
+        assert!(events(&inline_image_osc(&oversized)).is_empty());
     }
 }

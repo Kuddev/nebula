@@ -86,7 +86,8 @@ fn is_shell_executable(path: &str) -> bool {
 /// （`busy_process_in` 优先用 pane 已知的 `running_program`）；这里只负责
 /// 没有那份身份信息时把名字擦干净。
 pub fn display_name(exe: &str) -> String {
-    exe.strip_suffix(".exe").or_else(|| exe.strip_suffix(".EXE")).unwrap_or(exe).to_owned()
+    let name = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
+    name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name).to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +96,36 @@ pub struct ProcessEntry {
     pub parent_pid: u32,
     pub executable: String,
     pub depth: u32,
+}
+
+fn is_stateless_process(executable: &str) -> bool {
+    let name = executable.rsplit(['/', '\\']).next().unwrap_or(executable).to_ascii_lowercase();
+    if STATELESS.contains(&name.as_str()) {
+        return true;
+    }
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
+    INTERACTIVE_SHELLS.contains(&stem) || stem == "git"
+}
+
+/// Parse the stable three-column `ps` output used by Unix snapshots. The
+/// command column is the remainder so executable paths containing spaces are
+/// not split into a fake fourth field.
+#[allow(dead_code)]
+fn parse_ps_line(line: &str) -> Option<(u32, u32, String)> {
+    fn field(input: &str) -> Option<(&str, &str)> {
+        let input = input.trim_start();
+        let end = input.find(char::is_whitespace).unwrap_or(input.len());
+        let value = &input[..end];
+        (!value.is_empty()).then(|| (value, &input[end..]))
+    }
+
+    let (pid, rest) = field(line)?;
+    let (parent_pid, executable) = field(rest)?;
+    let executable = executable.trim();
+    if executable.is_empty() {
+        return None;
+    }
+    Some((pid.parse().ok()?, parent_pid.parse().ok()?, executable.to_owned()))
 }
 
 /// One Toolhelp pass over every process on the machine: `pid -> (parent, exe)`.
@@ -143,11 +174,39 @@ fn snapshot() -> Result<std::collections::HashMap<u32, (u32, String)>, String> {
     Ok(processes)
 }
 
+/// Unix has no Toolhelp equivalent shared by Linux and macOS. `ps` is part of
+/// both base systems and this path only runs for explicit process inspection
+/// or a throttled identity check, never on the render loop.
+#[cfg(not(windows))]
+fn snapshot() -> Result<std::collections::HashMap<u32, (u32, String)>, String> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,comm="])
+        .output()
+        .map_err(|error| format!("could not launch ps: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ps exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let mut processes = std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some((pid, parent_pid, executable)) = parse_ps_line(line) {
+            processes.insert(pid, (parent_pid, executable));
+        }
+    }
+    if processes.is_empty() {
+        return Err("ps returned no process rows".to_owned());
+    }
+    Ok(processes)
+}
+
 /// Snapshot the real local descendants owned by one terminal shell. The root
 /// is included at depth zero so clients can distinguish the PTY owner from the
 /// commands below it. Toolhelp is intentionally sampled on demand; running it
 /// on the 1 Hz UI state pump would scan the whole machine continuously.
-#[cfg(windows)]
 pub fn descendants(root_pid: u32) -> Result<Vec<ProcessEntry>, String> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -193,24 +252,12 @@ pub fn descendants(root_pid: u32) -> Result<Vec<ProcessEntry>, String> {
     Ok(result)
 }
 
-#[cfg(not(windows))]
-pub fn descendants(_root_pid: u32) -> Result<Vec<ProcessEntry>, String> {
-    Err("pane.procs is not implemented on this platform".to_owned())
-}
-
 /// First non-stateless process under `root_pid` (the pane's shell), or `None`
 /// when the whole tree is safe to kill. The name is used in the confirm modal.
-#[cfg(windows)]
 pub fn busy_child(root_pid: u32) -> Option<String> {
     descendants(root_pid).ok()?.into_iter().skip(1).find_map(|process| {
-        let lower = process.executable.to_ascii_lowercase();
-        (!STATELESS.contains(&lower.as_str())).then_some(process.executable)
+        (!is_stateless_process(&process.executable)).then_some(process.executable)
     })
-}
-
-#[cfg(not(windows))]
-pub fn busy_child(_root_pid: u32) -> Option<String> {
-    None
 }
 
 /// First descendant that `AgentKind` recognizes as an AI CLI, as its slug.
@@ -225,21 +272,15 @@ pub fn busy_child(_root_pid: u32) -> Option<String> {
 /// 输入框，但 `running_program` 是 None，于是 1 Hz 屏幕看门狗在入口处早退，
 /// 没有任何机制去看那块屏幕，转圈一直挂着。命令行首 token 是脆弱推断（会话
 /// 恢复、别名、`npx codex` 都会落空），进程树才是客观事实。
-#[cfg(windows)]
 pub fn agent_child(root_pid: u32) -> Option<String> {
     descendants(root_pid).ok()?.into_iter().skip(1).find_map(|process| {
-        crate::ai_agents::AgentKind::parse(&process.executable).map(|kind| kind.slug().to_owned())
+        crate::ai_agents::AgentKind::parse(&display_name(&process.executable))
+            .map(|kind| kind.slug().to_owned())
     })
-}
-
-#[cfg(not(windows))]
-pub fn agent_child(_root_pid: u32) -> Option<String> {
-    None
 }
 
 /// 上溯上限。真实的 pane 进程链是 shell → 解释器 → agent → 子进程，个位数
 /// 深度；给足余量同时保证快照里的父指针成环时一定会停。
-#[cfg_attr(not(windows), allow(dead_code))]
 const MAX_ANCESTRY_DEPTH: u32 = 64;
 
 /// `pid` 是否落在 `root_pid` 的进程树内（含 `root_pid` 自身）。
@@ -247,7 +288,6 @@ const MAX_ANCESTRY_DEPTH: u32 = 64;
 /// 纯函数形态，便于用构造出来的进程表覆盖分叉、成环和缺链三种情况。
 /// `None` 的含义是「拿不到证据」，绝不能当成校验失败——见
 /// [`is_within_tree`] 的说明。
-#[cfg_attr(not(windows), allow(dead_code))]
 fn resolve_within_tree(
     processes: &std::collections::HashMap<u32, (u32, String)>,
     pid: u32,
@@ -283,7 +323,6 @@ fn resolve_within_tree(
 /// 带 TTL 的全机进程快照，供路由校验和祖先链查询共用。
 ///
 /// 用闭包而不是把表交出去：调用方只需要读，克隆整张进程表纯属浪费。
-#[cfg(windows)]
 fn with_cached_snapshot<T>(
     read: impl FnOnce(&std::collections::HashMap<u32, (u32, String)>) -> T,
 ) -> Option<T> {
@@ -316,20 +355,13 @@ fn with_cached_snapshot<T>(
 /// 快照在 [`SNAPSHOT_TTL`] 内复用：一个回合里 hook 事件是成批到达的（每个
 /// tool call 一条），逐条扫描全机进程表会把校验本身变成开销。过期的表只会让
 /// 刚起的 helper 查不到而返回 `None`（放行），不会误判成伪造。
-#[cfg(windows)]
 pub fn is_within_tree(pid: u32, root_pid: u32) -> Option<bool> {
     with_cached_snapshot(|processes| resolve_within_tree(processes, pid, root_pid)).flatten()
 }
 
 /// 快照复用窗口。取值只需覆盖「同一回合内成批到达的 hook」，不需要更长：
 /// 表越旧，查不到新 helper 的概率越高，校验就越容易退化成放行。
-#[cfg(windows)]
 const SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_millis(250);
-
-#[cfg(not(windows))]
-pub fn is_within_tree(_pid: u32, _root_pid: u32) -> Option<bool> {
-    None
-}
 
 /// 沿 `pid` 的祖先链找最近的 AI CLI 进程，返回它的 pid 与 slug。
 ///
@@ -340,18 +372,11 @@ pub fn is_within_tree(_pid: u32, _root_pid: u32) -> Option<bool> {
 /// 这个 pid 是 agent 的**进程身份**，比 session id 稳：嵌套 `claude -p` 子代理
 /// 有自己的 pid，但它的 session id 是短命的，一旦被当成 pane 的会话身份，就会
 /// 把真正活着的那个顶掉（`claude --resume` 之后指向一个已经结束的会话）。
-#[cfg(windows)]
 pub fn nearest_agent_ancestor(pid: u32) -> Option<(u32, String)> {
     with_cached_snapshot(|processes| resolve_agent_ancestor(processes, pid)).flatten()
 }
 
-#[cfg(not(windows))]
-pub fn nearest_agent_ancestor(_pid: u32) -> Option<(u32, String)> {
-    None
-}
-
 /// [`nearest_agent_ancestor`] 的纯函数内核。
-#[cfg_attr(not(windows), allow(dead_code))]
 fn resolve_agent_ancestor(
     processes: &std::collections::HashMap<u32, (u32, String)>,
     pid: u32,
@@ -359,7 +384,7 @@ fn resolve_agent_ancestor(
     let mut current = pid;
     for _ in 0..MAX_ANCESTRY_DEPTH {
         let (parent, executable) = processes.get(&current)?;
-        if let Some(kind) = crate::ai_agents::AgentKind::parse(executable) {
+        if let Some(kind) = crate::ai_agents::AgentKind::parse(&display_name(executable)) {
             return Some((current, kind.slug().to_owned()));
         }
         if *parent == 0 || *parent == current {
@@ -375,8 +400,18 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        display_name, is_interactive_shell_command, resolve_agent_ancestor, resolve_within_tree,
+        display_name, is_interactive_shell_command, parse_ps_line, resolve_agent_ancestor,
+        resolve_within_tree,
     };
+
+    #[test]
+    fn unix_process_rows_keep_the_complete_command_column() {
+        assert_eq!(
+            parse_ps_line("  42     7 /Applications/Nebula Preview/bin/zsh"),
+            Some((42, 7, "/Applications/Nebula Preview/bin/zsh".to_owned()))
+        );
+        assert_eq!(parse_ps_line("header"), None);
+    }
 
     fn table(rows: &[(u32, u32)]) -> HashMap<u32, (u32, String)> {
         rows.iter().map(|&(pid, parent)| (pid, (parent, format!("p{pid}.exe")))).collect()
@@ -423,6 +458,7 @@ mod tests {
     fn display_name_drops_exe_suffix() {
         assert_eq!(display_name("node.exe"), "node");
         assert_eq!(display_name("CARGO.EXE"), "CARGO");
+        assert_eq!(display_name("/bin/bash"), "bash");
         // Unix names and dotted names that are not suffixes stay intact.
         assert_eq!(display_name("cargo"), "cargo");
         assert_eq!(display_name("python3.11"), "python3.11");

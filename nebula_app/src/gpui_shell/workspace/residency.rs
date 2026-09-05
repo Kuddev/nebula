@@ -85,7 +85,7 @@ impl NebulaWorkspace {
                 },
                 // 更新通知由进程级 windowing dispatcher 选择 MRU 窗口；这个
                 // 旧的 workspace-local 分发器没有 Window，不能在此打开 Dialog。
-                GpuiShellEvent::UpdateAvailable(_) => {},
+                GpuiShellEvent::UpdateAvailable(_) | GpuiShellEvent::SshPrompt(_) => {},
             }
         }
     }
@@ -988,8 +988,11 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let runtime = nebula_settings::RuntimeSettings::load();
+        // 平台藏不了窗口就没有「驻留」可言：不拦关闭，否则 Unix 上会变成
+        // 既不关也不藏（设置页那一行也按同一能力位隐藏）。
+        let can_hide = crate::platform::CAPABILITIES.hide_window_on_close;
         if residency_close_action(
-            runtime.keep_session,
+            runtime.keep_session && can_hide,
             self.has_live_terminal_panes(),
             runtime.tray,
         ) != ResidencyCloseAction::Hide

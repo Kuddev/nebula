@@ -1,0 +1,21 @@
+{
+  "volatile": {
+    "build.*": "validated separately against the release commit by the Preview gate",
+    "cases.*.duration_ms": "wall-clock timing",
+    "cases.boot.startup_ms": "startup timing",
+    "cases.resize.*columns*": "window and font geometry",
+    "cases.scrollback.history_available": "viewport geometry",
+    "cases.session.restart_ms": "startup timing",
+    "cases.paste.outcome": "the target application may not advertise bracketed-paste mode",
+    "cases.paste.multiline_roundtrip": "true only when the target advertises bracketed-paste mode",
+    "cases.close.exit_ms": "shutdown timing"
+  },
+  "cross_platform": {
+    "platform": "runner and architecture identity",
+    "cases.boot.shell_category": "platform default shell",
+    "cases.boot.cwd_shape": "native path syntax",
+    "summary.passed": "optional service availability",
+    "summary.skipped": "optional service availability",
+    "cases.ssh_loop.*": "SSH Runtime API and service availability"
+  }
+}

@@ -16,18 +16,44 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// 设置目录：`NEBULA_CONFIG_DIR` 覆盖（便携/测试隔离，指向目录本身）→
-/// `%APPDATA%\Nebula` → `$HOME/.config/Nebula` → 临时目录。
-/// 与引擎 tty 层、旧壳、注入的 shell 提示符脚本使用同一套解析。
+/// Settings/data directory shared by every shell and renderer.
+///
+/// Resolution: `NEBULA_CONFIG_DIR` override, then `%APPDATA%\Nebula` on
+/// Windows, `~/Library/Application Support/Nebula` on macOS, and
+/// `$XDG_CONFIG_HOME/nebula` (or `~/.config/nebula`) on Linux. Relative XDG
+/// paths are ignored as required by the specification.
 pub fn settings_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("NEBULA_CONFIG_DIR").filter(|p| !p.is_empty()) {
         return PathBuf::from(path);
     }
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Nebula")
+
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Nebula")
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Library").join("Application Support"))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Nebula")
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("nebula")
+    }
 }
 
 pub fn settings_path() -> PathBuf {
@@ -938,12 +964,42 @@ impl ProxyModeName {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum AppIconName {
+    #[default]
+    SilverViolet,
+    GraphiteViolet,
+    Titanium,
+}
+
+impl AppIconName {
+    pub const ALL: [Self; 3] = [Self::SilverViolet, Self::GraphiteViolet, Self::Titanium];
+
+    pub fn from_settings(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "silver-violet" => Some(Self::SilverViolet),
+            "graphite-violet" => Some(Self::GraphiteViolet),
+            "titanium" => Some(Self::Titanium),
+            _ => None,
+        }
+    }
+
+    pub const fn settings_value(self) -> &'static str {
+        match self {
+            Self::SilverViolet => "silver-violet",
+            Self::GraphiteViolet => "graphite-violet",
+            Self::Titanium => "titanium",
+        }
+    }
+}
+
 /// 新 UI 消费的运行时设置。字段与出厂默认逐项对照旧壳
 /// `nebula_settings_load`；`Option` 字段的 `None` = 键未设置，调用方自选
 /// 回退（如 font_family 回落 nebula.toml）。
 pub struct RuntimeSettings {
     pub language: LanguagePref,
     pub theme: ThemeName,
+    pub app_icon: AppIconName,
     /// 系统外观变化时自动在主题家族的深浅成员间切换（默认关，尊重显式选择）。
     pub follow_system_theme: bool,
     pub font_family: Option<String>,
@@ -980,6 +1036,9 @@ pub struct RuntimeSettings {
     pub bell: BellModeName,
     /// 新会话欢迎屏 fastfetch（默认关：启动速度优先于观感，旧壳裁定）。
     pub fetch: bool,
+    /// Check GitHub Releases after startup. Manual checks remain available
+    /// from the Application settings page when this is disabled.
+    pub auto_check_updates: bool,
     pub keep_session: bool,
     pub restore_session: bool,
     pub resume_ai: bool,
@@ -1085,6 +1144,10 @@ impl RuntimeSettings {
                 .and_then(LanguagePref::from_settings)
                 .unwrap_or_default(),
             theme: raw.value("theme").and_then(ThemeName::from_prompt_name).unwrap_or_default(),
+            app_icon: raw
+                .value("app_icon")
+                .and_then(AppIconName::from_settings)
+                .unwrap_or_default(),
             follow_system_theme: raw.bool_on("follow_system_theme").unwrap_or(false),
             font_family: raw.value("font_family").map(str::to_owned),
             font_size_px: raw.f32("font_size").map(|size| size.clamp(4.0, 96.0)),
@@ -1130,6 +1193,7 @@ impl RuntimeSettings {
                 .unwrap_or_default(),
             bell: raw.value("bell").and_then(BellModeName::from_settings).unwrap_or_default(),
             fetch: raw.bool_on("fetch").unwrap_or(false),
+            auto_check_updates: raw.bool_on("auto_check_updates").unwrap_or(true),
             keep_session: raw.bool_on("keep_session").unwrap_or(false),
             restore_session: raw.bool_on("restore_session").unwrap_or(true),
             resume_ai: raw.bool_on("resume_ai").unwrap_or(true),
@@ -1205,6 +1269,31 @@ pub fn format_hex_rgb(rgb: Rgb8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_icon_defaults_and_unknown_values_use_silver_violet() {
+        for text in ["", "app_icon=\n", "app_icon=night-mint\n", "app_icon=../custom.ico\n"] {
+            let settings = RuntimeSettings::from_raw(&RawSettings::from_text(text));
+            assert_eq!(settings.app_icon, AppIconName::SilverViolet);
+        }
+    }
+
+    #[test]
+    fn curated_app_icons_round_trip_without_changing_other_settings() {
+        for variant in AppIconName::ALL {
+            let text = apply_updates(
+                "# keep\ntheme=Nord\ncustom=preserved\napp_icon=silver-violet\n",
+                &[("app_icon", variant.settings_value().to_owned())],
+            );
+            let settings = RuntimeSettings::from_raw(&RawSettings::from_text(&text));
+            assert_eq!(settings.app_icon, variant);
+            assert_eq!(settings.theme, ThemeName::Nord);
+            assert!(text.contains("custom=preserved"));
+            assert!(text.contains("# keep"));
+            assert_eq!(text.matches("app_icon=").count(), 1);
+        }
+        assert_eq!(AppIconName::from_settings(" TITANIUM "), Some(AppIconName::Titanium));
+    }
 
     #[test]
     fn nord_carries_the_flush_card_geometry() {
@@ -1352,6 +1441,7 @@ mod tests {
         assert_eq!(settings.windowing_behavior, WindowingBehaviorName::UseAnyExisting);
         assert_eq!(settings.cell_width_mode, CellWidthModeName::Compact);
         assert!(!settings.fetch);
+        assert!(settings.auto_check_updates);
         assert!(!settings.keep_session);
         assert!(settings.restore_session);
         assert!(settings.resume_ai);
@@ -1364,6 +1454,19 @@ mod tests {
         assert_eq!(settings.ssh_proxy_mode, ProxyModeName::Off);
         assert_eq!(settings.quick_terminal_hotkey, DEFAULT_QUICK_TERMINAL_HOTKEY);
         assert_eq!(settings.bell, BellModeName::Both);
+    }
+
+    #[test]
+    fn automatic_update_checks_can_be_disabled_without_changing_the_default() {
+        assert!(RuntimeSettings::from_raw(&RawSettings::default()).auto_check_updates);
+        assert!(
+            RuntimeSettings::from_raw(&RawSettings::from_text("auto_check_updates=1\n"))
+                .auto_check_updates
+        );
+        assert!(
+            !RuntimeSettings::from_raw(&RawSettings::from_text("auto_check_updates=0\n"))
+                .auto_check_updates
+        );
     }
 
     #[test]

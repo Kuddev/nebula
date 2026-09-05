@@ -4,7 +4,9 @@
 //! GPUI 类型。会话生命周期归 `session`，绘制归 `element`，交互归 `view`。
 
 pub mod colors;
+mod answer_reader;
 pub mod element;
+mod inline_image;
 pub mod keymap;
 pub mod math_overlay;
 pub mod mouse_protocol;

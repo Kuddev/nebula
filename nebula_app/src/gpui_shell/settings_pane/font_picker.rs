@@ -90,14 +90,14 @@ impl SettingsPane {
         if self.font_system.is_some() || self.font_loading {
             return;
         }
-        #[cfg(windows)]
         {
             self.font_loading = true;
+            let text_system = cx.text_system().clone();
             let task = cx.background_executor().spawn(async move {
-                let system = crate::font_install::enumerate_system_font_families();
+                let system = crate::platform::fonts::system_families(text_system);
                 let imported: Vec<String> = crate::font_install::imported_font_files()
                     .iter()
-                    .filter_map(|path| crate::font_install::probe_font_file_families(path).ok())
+                    .filter_map(|path| crate::platform::fonts::file_families(path).ok())
                     .flatten()
                     .collect();
                 (system, imported)
@@ -120,10 +120,6 @@ impl SettingsPane {
                 });
             })
             .detach();
-        }
-        #[cfg(not(windows))]
-        {
-            self.font_system = Some(Vec::new());
         }
     }
 

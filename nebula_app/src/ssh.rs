@@ -393,7 +393,7 @@ fn already_has_tty(args: &[String]) -> bool {
 /// you can click to connect to. Missing/unreadable config → empty list
 /// (the section simply doesn't render).
 pub fn ssh_config_hosts() -> Vec<String> {
-    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let Some(home) = crate::platform::dirs::home_dir() else { return Vec::new() };
     let Ok(data) = std::fs::read_to_string(home.join(".ssh").join("config")) else {
         return Vec::new();
     };

@@ -43,6 +43,7 @@ tocodex-docs/
 !/docs/math-rendering-test.md
 !/docs/runtime-control-api.md
 !/docs/runtime-api-v1.schema.json
+!/docs/preview-release-checklist.md
 !/docs/skills/
 !/docs/skills/nebula-runtime/
 !/docs/skills/nebula-runtime/SKILL.md

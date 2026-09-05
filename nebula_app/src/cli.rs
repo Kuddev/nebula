@@ -293,7 +293,8 @@ pub enum Subcommands {
     Pane(PaneOptions),
     /// Inspect and drive the AI agents running in panes: list, send, read, wait.
     Agent(AgentOptions),
-    #[cfg(unix)]
+    /// 旧壳的 Unix socket IPC；GPUI 壳的控制面是 `ctl` 与资源动词命令。
+    #[cfg(all(unix, feature = "legacy-shell"))]
     Msg(MessageOptions),
     Migrate(MigrateOptions),
     /// Validate or create the Nebula configuration.

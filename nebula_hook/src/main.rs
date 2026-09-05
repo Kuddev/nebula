@@ -37,6 +37,8 @@
 
 use std::io::{Read, Write};
 
+const MAX_PAYLOAD_BYTES: usize = 1 << 20;
+
 /// 其他 agent 的 hook runner 独有的环境变量。
 ///
 /// 这些 CLI 会主动读取并信任 `~/.claude/settings.json`，于是我们装在那里的
@@ -67,6 +69,7 @@ fn foreign_hook_runner() -> Option<&'static str> {
 
 /// 一次调用的去向。写进侧信道日志，用来回答「通知为什么没出现」。
 enum Outcome {
+    PayloadTooLarge,
     /// 写进了本地命名管道。
     Sent,
     /// 写进了远端 OSC 通道（SSH pane）。
@@ -83,6 +86,7 @@ enum Outcome {
 impl Outcome {
     fn as_str(&self) -> &'static str {
         match self {
+            Self::PayloadTooLarge => "payload-too-large",
             Self::Sent => "sent",
             Self::RemoteOsc => "remote-osc",
             Self::NotHosted => "not-hosted",
@@ -149,6 +153,17 @@ fn main() {
     let _ = std::panic::catch_unwind(run);
 }
 
+fn read_payload(mut reader: impl Read) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::with_capacity(4096);
+    reader.by_ref().take((MAX_PAYLOAD_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PAYLOAD_BYTES {
+        std::io::copy(&mut reader, &mut std::io::sink())?;
+        Ok(None)
+    } else {
+        Ok(Some(bytes))
+    }
+}
+
 fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(source) =
@@ -160,11 +175,13 @@ fn run() {
     // Payload: claude streams JSON on stdin; codex and opencode append it as
     // the last arg.
     let payload = match source.as_str() {
-        "claude" => {
-            let mut buf = Vec::with_capacity(4096);
-            // Cap far above any real payload; claude closes stdin right away.
-            let _ = std::io::stdin().lock().take(1 << 20).read_to_end(&mut buf);
-            buf
+        "claude" => match read_payload(std::io::stdin().lock()) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                log_outcome(source, "", MAX_PAYLOAD_BYTES + 1, &Outcome::PayloadTooLarge);
+                return;
+            },
+            Err(_) => return,
         },
         _ => args.last().cloned().unwrap_or_default().into_bytes(),
     };
@@ -245,6 +262,18 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{FOREIGN_HOOK_RUNNERS, Outcome, base64_encode, foreign_hook_runner, outcome_line};
+
+    #[test]
+    fn oversized_stdin_is_drained_but_never_forwarded_as_truncated_json() {
+        let bytes = vec![b'x'; super::MAX_PAYLOAD_BYTES * 2];
+        let mut input = std::io::Cursor::new(&bytes);
+        assert!(super::read_payload(&mut input).unwrap().is_none());
+        assert_eq!(input.position(), bytes.len() as u64);
+        assert_eq!(
+            super::read_payload(&b"{\"answer\":\"ok\"}"[..]).unwrap().unwrap(),
+            b"{\"answer\":\"ok\"}"
+        );
+    }
 
     #[test]
     fn encodes_remote_hook_payload() {

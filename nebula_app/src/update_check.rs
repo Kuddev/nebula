@@ -153,6 +153,10 @@ pub fn spawn_once(proxy: EventLoopProxy<Event>) {
 /// 轻通知，再由用户决定是否打开更新详情弹窗。
 #[cfg(feature = "gpui-shell")]
 pub fn spawn_gpui_once(sender: std::sync::mpsc::Sender<crate::gpui_shell::GpuiShellEvent>) {
+    if !nebula_settings::RuntimeSettings::load().auto_check_updates {
+        log::debug!("update-check: automatic checks disabled in settings");
+        return;
+    }
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::SeqCst) {
         return;

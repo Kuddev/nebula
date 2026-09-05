@@ -1,0 +1,42 @@
+if [[ $NEBULA_ZDOTDIR_WAS_SET == 1 ]]; then
+    ZDOTDIR=$NEBULA_ORIGINAL_ZDOTDIR
+else
+    unset ZDOTDIR
+fi
+if [[ -r ${ZDOTDIR-$HOME}/.zshrc ]]; then
+    source "${ZDOTDIR-$HOME}/.zshrc"
+fi
+unset NEBULA_ZDOTDIR_WAS_SET NEBULA_ORIGINAL_ZDOTDIR NEBULA_ZSH_INTEGRATION
+
+_nebula_cwd() {
+    emulate -L zsh
+    local LC_ALL=C cwd_value=$PWD encoded='' character ordinal index
+    for ((index=1; index<=${#cwd_value}; index++)); do
+        character=${cwd_value[index]}
+        case $character in
+            [a-zA-Z0-9/._~-]) encoded+=$character ;;
+            *) printf -v ordinal '%02X' "'$character"; encoded+="%$ordinal" ;;
+        esac
+    done
+    printf '\e]7;file://localhost%s\a' "$encoded"
+}
+
+_nebula_preexec() {
+    _nebula_command_running=1
+    printf '\e]133;C\a'
+}
+
+_nebula_precmd() {
+    local status_code=$?
+    if [[ ${_nebula_command_running:-0} == 1 ]]; then
+        printf '\e]133;D;%s\a' "$status_code"
+    fi
+    _nebula_command_running=0
+    _nebula_cwd
+    printf '\e]133;A\a'
+    return "$status_code"
+}
+
+autoload -Uz add-zsh-hook
+add-zsh-hook preexec _nebula_preexec
+precmd_functions=(_nebula_precmd ${precmd_functions:#_nebula_precmd})

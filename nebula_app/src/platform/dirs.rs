@@ -65,41 +65,11 @@ pub fn data_dir() -> &'static Path {
 }
 
 fn resolve_data_dir() -> PathBuf {
-    if let Some(raw) = std::env::var_os(DIR_OVERRIDE_ENV) {
-        let path = PathBuf::from(raw);
-        if !path.as_os_str().is_empty() {
-            return path;
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        // 与改造前逐字节一致：`%APPDATA%\Nebula`。
-        std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .or_else(home_dir)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("Nebula")
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        home_dir()
-            .map(|home| home.join("Library").join("Application Support"))
-            .unwrap_or_else(std::env::temp_dir)
-            .join("Nebula")
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        // XDG 规定：相对路径的 XDG_CONFIG_HOME 必须当作未设置。
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .or_else(|| home_dir().map(|home| home.join(".config")))
-            .unwrap_or_else(std::env::temp_dir)
-            .join("nebula")
-    }
+    // `nebula_settings.txt`, runtime discovery, sessions, history, and imported
+    // fonts must share one directory. The zero-dependency settings crate owns
+    // the environment/OS resolution so consumers outside `nebula_app` cannot
+    // accidentally revive the old Linux/macOS paths.
+    nebula_settings::settings_dir()
 }
 
 #[cfg(test)]
