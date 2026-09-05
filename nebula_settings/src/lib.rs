@@ -1013,6 +1013,9 @@ pub struct RuntimeSettings {
     pub multiline_paste_confirm: bool,
     /// 标签页关闭按钮（叉号）是否渲染：关 = 不渲染，仍可用中键关闭。
     pub tab_close_visible: bool,
+    /// 终端网络代理：新会话启动时把当前系统代理写入 HTTP_PROXY/HTTPS_PROXY。
+    /// 上游默认关 (false) —— fork 侧另起本地 commit 翻成默认开。
+    pub terminal_proxy: bool,
     pub powerline: bool,
     /// 默认 shell 的原始 id（`shell=` 原文：powershell/bash/cmd/pwsh/WSL
     /// 发行版等）。解析归 shell 检测层，这里只做持久化往返。
@@ -1156,6 +1159,7 @@ impl RuntimeSettings {
             copy_on_select: raw.bool_on("copy_on_select").unwrap_or(false),
             multiline_paste_confirm: raw.bool_on("multiline_paste_confirm").unwrap_or(true),
             tab_close_visible: raw.bool_on("tab_close_visible").unwrap_or(true),
+            terminal_proxy: raw.bool_on("terminal_proxy").unwrap_or(false),
             powerline: raw.bool_on("powerline").unwrap_or(true),
             shell: raw.value("shell").or_else(|| raw.value("executor")).map(str::to_owned),
             startup_directory: raw.value("startup_directory").map(str::to_owned),
@@ -1429,6 +1433,7 @@ mod tests {
         assert!(!settings.copy_on_select);
         assert!(settings.multiline_paste_confirm, "多行粘贴确认默认开（上游兼容）");
         assert!(settings.tab_close_visible, "标签关闭按钮默认可见（上游兼容）");
+        assert!(!settings.terminal_proxy, "终端网络代理上游默认关（兼容）");
         assert!(settings.powerline);
         assert!(settings.ghost);
         assert_eq!(settings.accept, AcceptKeyName::Both);
