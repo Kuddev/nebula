@@ -8,11 +8,21 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### English
 
-No unreleased changes yet.
+#### Added
+- Added an application icon picker with 25 color palettes and light/dark previews.
+
+#### Improved
+- Made Titanium the default application icon and adjusted small-size proportions, prompt strokes, and transparent edges.
+- Adopted Pebrel as the display name in the application, notifications, and installer. Local Pebrel-named packages retain `nebula.exe`, existing configuration paths, installer identity, and the Nebula update feed; this is not a new published release.
 
 ### 简体中文
 
-暂无未发布改动。
+#### 新增
+- 新增应用图标选择器，提供 25 款配色及浅色、深色背景预览。
+
+#### 改进
+- 将钛银设为默认应用图标，并调整小尺寸比例、提示符笔画与透明边缘。
+- 应用、通知和安装器采用 Pebrel 展示名称。本地 Pebrel 命名包保留 `nebula.exe`、现有配置路径、安装标识及 Nebula 更新源；这不代表新的已发布版本。
 
 ## 1.5.0 - 2026-09-01
 

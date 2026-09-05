@@ -99,6 +99,9 @@ jobs:
           python3 -m unittest
           scripts.tests.test_preview_release
           scripts.tests.test_platform_cfg
+          scripts.tests.test_windows_resources
+          scripts.tests.test_pebrel_branding
+          scripts.tests.test_app_icons
           scripts.conformance.tests.test_harness
 
       - name: Compile Python helpers

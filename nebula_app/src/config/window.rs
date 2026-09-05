@@ -13,8 +13,8 @@ use nebula_config_derive::{ConfigDeserialize, SerdeReplace};
 use crate::config::LOG_TARGET_CONFIG;
 use crate::config::ui_config::{Delta, Percentage};
 
-/// Default Nebula Terminal name, used for the window title.
-pub const DEFAULT_NAME: &str = "Nebula Terminal";
+/// Default application display name, used for the window title.
+pub const DEFAULT_NAME: &str = crate::brand::NAME;
 
 /// Default window class / instance (WM_CLASS), a single identifier without spaces.
 pub const DEFAULT_CLASS: &str = "Nebula";

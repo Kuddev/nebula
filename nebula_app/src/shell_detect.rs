@@ -483,7 +483,8 @@ pub fn shell_short_tag(name_or_id: &str) -> String {
 ///
 /// 旧壳 `window_context::focused_wsl_cwd` 的判定原样固化在这里，两壳共用。
 pub fn wsl_launch_distro<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
-    let stem = std::path::Path::new(program)
+    let filename = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = std::path::Path::new(filename)
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or_default()

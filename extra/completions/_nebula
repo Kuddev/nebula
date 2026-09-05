@@ -15,13 +15,14 @@ _nebula() {
 
     local context curcontext="$curcontext" state line
     _arguments "${_arguments_options[@]}" : \
-'--embed=[X11 window ID to embed Nebula within (decimal or hexadecimal with "0x" prefix)]:EMBED:_default' \
-'--config-file=[Specify alternative configuration file \[default\: %APPDATA%\\nebula\\nebula.toml\]]:CONFIG_FILE:_files' \
+'--embed=[X11 window ID to embed Pebrel within (decimal or hexadecimal with "0x" prefix)]:EMBED:_default' \
+'--config-file=[Specify an alternative configuration file.]:CONFIG_FILE:_files' \
+'--socket=[Path for IPC socket creation]:SOCKET:_files' \
 '--working-directory=[Start the shell in the specified working directory]:WORKING_DIRECTORY:_files' \
 '*-e+[Command and args to execute (must be last argument)]:COMMAND:_default' \
 '*--command=[Command and args to execute (must be last argument)]:COMMAND:_default' \
-'-T+[Defines the window title \[default\: Nebula Terminal\]]:TITLE:_default' \
-'--title=[Defines the window title \[default\: Nebula Terminal\]]:TITLE:_default' \
+'-T+[Defines the window title \[default\: Pebrel\]]:TITLE:_default' \
+'--title=[Defines the window title \[default\: Pebrel\]]:TITLE:_default' \
 '--class=[Defines window class/app_id on X11/Wayland \[default\: Nebula\]]:general> | <general>,<instance:_default' \
 '*-o+[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
 '*--option=[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
@@ -37,10 +38,10 @@ _nebula() {
 '-V[Print version]' \
 '--version[Print version]' \
 ":: :_nebula_commands" \
-"*::: :->nebula" \
+"*::: :->Pebrel" \
 && ret=0
     case $state in
-    (nebula)
+    (Pebrel)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:nebula-command-$line[1]:"
@@ -1120,26 +1121,6 @@ esac
     ;;
 esac
 ;;
-(notify-test)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-&& ret=0
-;;
-(setup-ai)
-_arguments "${_arguments_options[@]}" : \
-'--remove[Remove Nebula'\''s hooks from claude'\''s settings.json instead of installing them]' \
-'-h[Print help]' \
-'--help[Print help]' \
-&& ret=0
-;;
-(ssh)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-'*::args -- All arguments forwarded verbatim to `ssh` (destination and flags):_default' \
-&& ret=0
-;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_nebula__help_commands" \
@@ -1464,18 +1445,6 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
-(notify-test)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(setup-ai)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(ssh)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1500,9 +1469,6 @@ _nebula_commands() {
 'agent:Inspect and drive the AI agents running in panes\: list, send, read, wait' \
 'migrate:Migrate the configuration file' \
 'config:Validate or create the Nebula configuration' \
-'notify-test:Test system notification (toast) delivery' \
-'setup-ai:Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code' \
-'ssh:SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'nebula commands' commands "$@"
@@ -2048,9 +2014,6 @@ _nebula__help_commands() {
 'agent:Inspect and drive the AI agents running in panes\: list, send, read, wait' \
 'migrate:Migrate the configuration file' \
 'config:Validate or create the Nebula configuration' \
-'notify-test:Test system notification (toast) delivery' \
-'setup-ai:Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code' \
-'ssh:SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'nebula help commands' commands "$@"
@@ -2322,11 +2285,6 @@ _nebula__help__migrate_commands() {
     local commands; commands=()
     _describe -t commands 'nebula help migrate commands' commands "$@"
 }
-(( $+functions[_nebula__help__notify-test_commands] )) ||
-_nebula__help__notify-test_commands() {
-    local commands; commands=()
-    _describe -t commands 'nebula help notify-test commands' commands "$@"
-}
 (( $+functions[_nebula__help__pane_commands] )) ||
 _nebula__help__pane_commands() {
     local commands; commands=(
@@ -2387,16 +2345,6 @@ _nebula__help__pane__zoom_commands() {
     local commands; commands=()
     _describe -t commands 'nebula help pane zoom commands' commands "$@"
 }
-(( $+functions[_nebula__help__setup-ai_commands] )) ||
-_nebula__help__setup-ai_commands() {
-    local commands; commands=()
-    _describe -t commands 'nebula help setup-ai commands' commands "$@"
-}
-(( $+functions[_nebula__help__ssh_commands] )) ||
-_nebula__help__ssh_commands() {
-    local commands; commands=()
-    _describe -t commands 'nebula help ssh commands' commands "$@"
-}
 (( $+functions[_nebula__help__tab_commands] )) ||
 _nebula__help__tab_commands() {
     local commands; commands=(
@@ -2437,11 +2385,6 @@ _nebula__help__window__close_commands() {
 _nebula__migrate_commands() {
     local commands; commands=()
     _describe -t commands 'nebula migrate commands' commands "$@"
-}
-(( $+functions[_nebula__notify-test_commands] )) ||
-_nebula__notify-test_commands() {
-    local commands; commands=()
-    _describe -t commands 'nebula notify-test commands' commands "$@"
 }
 (( $+functions[_nebula__pane_commands] )) ||
 _nebula__pane_commands() {
@@ -2569,16 +2512,6 @@ _nebula__pane__wait_commands() {
 _nebula__pane__zoom_commands() {
     local commands; commands=()
     _describe -t commands 'nebula pane zoom commands' commands "$@"
-}
-(( $+functions[_nebula__setup-ai_commands] )) ||
-_nebula__setup-ai_commands() {
-    local commands; commands=()
-    _describe -t commands 'nebula setup-ai commands' commands "$@"
-}
-(( $+functions[_nebula__ssh_commands] )) ||
-_nebula__ssh_commands() {
-    local commands; commands=()
-    _describe -t commands 'nebula ssh commands' commands "$@"
 }
 (( $+functions[_nebula__tab_commands] )) ||
 _nebula__tab_commands() {

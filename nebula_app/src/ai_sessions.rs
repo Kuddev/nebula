@@ -557,7 +557,7 @@ mod tests {
             source: AiSessionSource::Codex,
             id: "x".into(),
             title: String::new(),
-            project: r"D:\temp_build\nebula".into(),
+            project: Path::new("projects").join("nebula").to_string_lossy().into_owned(),
             modified: SystemTime::UNIX_EPOCH,
             path: None,
         };

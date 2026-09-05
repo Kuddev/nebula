@@ -45,6 +45,7 @@ mod app_icon;
 mod assistant_answer;
 mod atomic_file;
 mod backup_remote;
+mod brand;
 mod cli;
 mod clipboard;
 mod codex_config;

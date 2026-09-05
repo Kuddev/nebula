@@ -180,7 +180,7 @@ pub(crate) fn open_update_dialog(
     let dialog_result = result.clone();
     window.open_dialog(cx, move |dialog, window, cx| {
         let language = workspace_ui_language();
-        let title: SharedString = language.pick("Nebula 更新", "Nebula Update").into();
+        let title: SharedString = language.pick("Pebrel 更新", "Pebrel Update").into();
         let current_label: SharedString = language.pick("当前版本", "Current").into();
         let latest_label: SharedString = language.pick("最新版本", "Latest").into();
         let current_version: SharedString = format!("v{}", dialog_result.current).into();
@@ -217,8 +217,8 @@ pub(crate) fn open_update_dialog(
                 .into(),
             (DownloadStatus::Ready { .. }, _) => language
                 .pick(
-                    "安装包已通过 SHA-256 校验。点击“安装更新”后将启动安装向导并退出当前 Nebula。",
-                    "The installer passed SHA-256 verification. Install Update starts the setup wizard and exits this Nebula instance.",
+                    "安装包已通过 SHA-256 校验。点击“安装更新”后将启动安装向导并退出当前 Pebrel。",
+                    "The installer passed SHA-256 verification. Install Update starts the setup wizard and exits this Pebrel instance.",
                 )
                 .into(),
             (DownloadStatus::Failed(_), _) => language
@@ -229,8 +229,8 @@ pub(crate) fn open_update_dialog(
                 .into(),
             (_, Some(_)) if verified_asset => language
                 .pick(
-                    "Nebula 将自动下载并校验安装包；校验完成后由你确认安装。",
-                    "Nebula will download and verify the installer, then wait for your confirmation before installing.",
+                    "Pebrel 将自动下载并校验安装包；校验完成后由你确认安装。",
+                    "Pebrel will download and verify the installer, then wait for your confirmation before installing.",
                 )
                 .into(),
             // 非 Windows 目前没有自动安装路径（能力表 `self_update_install`）：

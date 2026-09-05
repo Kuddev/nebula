@@ -10,6 +10,10 @@
   #define Configuration "release"
 #endif
 
+#ifndef PackageBrand
+  #define PackageBrand "NebulaTerminal"
+#endif
+
 #define RepoRoot ".."
 #ifndef BuildRoot
   #define BuildRoot RepoRoot + "\target\" + Configuration
@@ -17,9 +21,9 @@
 
 [Setup]
 AppId={{61022144-7D0A-4E54-94F2-C329A8F58656}
-AppName=Nebula Terminal
+AppName=Pebrel
 AppVersion={#AppVersion}
-AppVerName=Nebula Terminal {#AppVersion}
+AppVerName=Pebrel {#AppVersion}
 AppPublisher=Kuddev
 AppPublisherURL=https://github.com/Kuddev/nebula
 AppSupportURL=https://github.com/Kuddev/nebula/issues
@@ -27,12 +31,12 @@ AppUpdatesURL=https://github.com/Kuddev/nebula/releases
 VersionInfoVersion={#NumericVersion}
 VersionInfoTextVersion={#AppVersion}
 VersionInfoCompany=Kuddev
-VersionInfoDescription=Nebula Terminal Installer
-VersionInfoProductName=Nebula Terminal
+VersionInfoDescription=Pebrel Installer
+VersionInfoProductName=Pebrel
 VersionInfoProductVersion={#NumericVersion}
 VersionInfoProductTextVersion={#AppVersion}
 DefaultDirName={localappdata}\Programs\Nebula Terminal
-DefaultGroupName=Nebula Terminal
+DefaultGroupName=Pebrel
 DisableProgramGroupPage=yes
 DisableWelcomePage=no
 DisableDirPage=no
@@ -44,7 +48,7 @@ LicenseFile={#RepoRoot}\LICENSE
 SetupIconFile={#RepoRoot}\nebula_app\windows\nebula.ico
 UninstallDisplayIcon={app}\nebula.exe
 OutputDir={#RepoRoot}\dist
-OutputBaseFilename=NebulaTerminal-{#AppVersion}-windows-x64-setup
+OutputBaseFilename={#PackageBrand}-{#AppVersion}-windows-x64-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -61,19 +65,19 @@ Name: "chinesesimplified"; MessagesFile: "{#RepoRoot}\target\installer-tools\Chi
 
 [CustomMessages]
 english.DesktopIcon=Create a desktop shortcut
-english.AutoStart=Start Nebula Terminal when I sign in to Windows
+english.AutoStart=Start Pebrel when I sign in to Windows
 english.InstallFont=Install Maple Mono font for the current user
-english.AddToPath=Add Nebula Terminal to the user PATH
-english.OpenInNebula=Open in Nebula
-english.LaunchProgram=Launch Nebula Terminal
-english.UninstallProgram=Uninstall Nebula Terminal
+english.AddToPath=Add Pebrel to the user PATH
+english.OpenInNebula=Open in Pebrel
+english.LaunchProgram=Launch Pebrel
+english.UninstallProgram=Uninstall Pebrel
 chinesesimplified.DesktopIcon=创建桌面快捷方式
-chinesesimplified.AutoStart=登录 Windows 后启动 Nebula Terminal
+chinesesimplified.AutoStart=登录 Windows 后启动 Pebrel
 chinesesimplified.InstallFont=为当前用户安装 Maple Mono 字体
-chinesesimplified.AddToPath=将 Nebula Terminal 添加到当前用户 PATH
-chinesesimplified.OpenInNebula=在 Nebula 中打开
-chinesesimplified.LaunchProgram=启动 Nebula Terminal
-chinesesimplified.UninstallProgram=卸载 Nebula Terminal
+chinesesimplified.AddToPath=将 Pebrel 添加到当前用户 PATH
+chinesesimplified.OpenInNebula=在 Pebrel 中打开
+chinesesimplified.LaunchProgram=启动 Pebrel
+chinesesimplified.UninstallProgram=卸载 Pebrel
 
 [Tasks]
 Name: "installfont"; Description: "{cm:InstallFont}"
@@ -102,10 +106,10 @@ Source: "{#RepoRoot}\licenses\LICENSE-MLUA"; DestDir: "{app}\licenses"; Flags: i
 Source: "{#RepoRoot}\THIRD-PARTY-NOTICES"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Nebula Terminal"; Filename: "{app}\nebula.exe"; Parameters: "--gpui"; WorkingDir: "{%USERPROFILE}"
+Name: "{group}\Pebrel"; Filename: "{app}\nebula.exe"; Parameters: "--gpui"; WorkingDir: "{%USERPROFILE}"
 Name: "{group}\{cm:UninstallProgram}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Nebula Terminal"; Filename: "{app}\nebula.exe"; Parameters: "--gpui"; WorkingDir: "{%USERPROFILE}"; Tasks: desktopicon
-Name: "{userstartup}\Nebula Terminal"; Filename: "{app}\nebula.exe"; Parameters: "--gpui"; WorkingDir: "{%USERPROFILE}"; Tasks: autostart
+Name: "{autodesktop}\Pebrel"; Filename: "{app}\nebula.exe"; Parameters: "--gpui"; WorkingDir: "{%USERPROFILE}"; Tasks: desktopicon
+Name: "{userstartup}\Pebrel"; Filename: "{app}\nebula.exe"; Parameters: "--gpui"; WorkingDir: "{%USERPROFILE}"; Tasks: autostart
 
 [Registry]
 Root: HKCU; Subkey: "Software\Nebula Terminal"; ValueType: dword; ValueName: "InstallerAddedToPath"; ValueData: "1"; Tasks: addtopath; Check: NeedsAddToPath; Flags: uninsdeletevalue uninsdeletekeyifempty

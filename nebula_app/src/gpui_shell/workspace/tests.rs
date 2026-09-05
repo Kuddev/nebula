@@ -394,12 +394,10 @@ fn moving_a_tab_stops_at_both_ends_instead_of_wrapping() {
 fn default_launch_tag_does_not_follow_later_default_shell_changes() {
     use crate::session::LaunchSession;
 
-    // `Default` 的实际 PTY 启动是引擎默认 PowerShell；标签必须只由这个
-    // 已保存身份决定，不能在恢复时重新采样可变的用户设置。引擎默认的
-    // 那台是系统自带的 Windows PowerShell 5.1，短标 `ps`（7 才是 pwsh）。
+    let default_shell = crate::platform::shell::default_shell_id();
     assert_eq!(
         NebulaWorkspace::launch_shell_tag(&LaunchSession::Default).map(|tag| tag.to_string()),
-        Some("ps".to_owned())
+        Some(crate::shell_detect::shell_short_tag(&default_shell))
     );
 }
 

@@ -540,8 +540,9 @@ mod tests {
 
     #[test]
     fn packaged_font_directory_is_next_to_the_executable() {
-        let executable = Path::new(r"C:\Nebula\nebula.exe");
-        assert_eq!(packaged_font_directory(executable), PathBuf::from(r"C:\Nebula\fonts"));
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("nebula");
+        assert_eq!(packaged_font_directory(&executable), directory.path().join("fonts"));
     }
 
     #[test]

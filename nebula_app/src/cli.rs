@@ -1,5 +1,4 @@
 use std::cmp::max;
-use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -19,7 +18,14 @@ use crate::logging::LOG_TARGET_IPC_CONFIG;
 
 /// CLI options for the main Nebula executable.
 #[derive(Parser, Default, Debug)]
-#[clap(author, about, version = env!("VERSION"))]
+#[clap(
+    name = crate::brand::NAME,
+    bin_name = "nebula",
+    display_name = crate::brand::NAME,
+    author,
+    about = crate::brand::DESCRIPTION,
+    version = env!("VERSION")
+)]
 pub struct Options {
     /// Print all events to STDOUT.
     #[clap(long)]
@@ -29,7 +35,7 @@ pub struct Options {
     #[clap(long, conflicts_with("daemon"))]
     pub ref_test: bool,
 
-    /// X11 window ID to embed Nebula within (decimal or hexadecimal with "0x" prefix).
+    /// X11 window ID to embed Pebrel within (decimal or hexadecimal with "0x" prefix).
     #[clap(long)]
     pub embed: Option<String>,
 
@@ -47,20 +53,7 @@ pub struct Options {
     #[clap(long = "legacy-shell")]
     pub legacy_shell: bool,
 
-    /// Specify alternative configuration file [default:
-    /// $XDG_CONFIG_HOME/nebula/nebula.toml].
-    #[cfg(not(any(target_os = "macos", windows)))]
-    #[clap(long, value_hint = ValueHint::FilePath)]
-    pub config_file: Option<PathBuf>,
-
-    /// Specify alternative configuration file [default: %APPDATA%\nebula\nebula.toml].
-    #[cfg(windows)]
-    #[clap(long, value_hint = ValueHint::FilePath)]
-    pub config_file: Option<PathBuf>,
-
-    /// Specify alternative configuration file [default: $HOME/.config/nebula/nebula.toml].
-    #[cfg(target_os = "macos")]
-    #[clap(long, value_hint = ValueHint::FilePath)]
+    #[clap(long, value_hint = ValueHint::FilePath, help = "Specify an alternative configuration file.")]
     pub config_file: Option<PathBuf>,
 
     /// Path for IPC socket creation.
@@ -242,11 +235,7 @@ impl From<TerminalOptions> for PtyOptions {
             working_directory,
             shell: options.command().map(Into::into),
             drain_on_exit: options.hold,
-            env: HashMap::new(),
-            #[cfg(target_os = "windows")]
-            env_is_complete: false,
-            #[cfg(target_os = "windows")]
-            escape_args: false,
+            ..PtyOptions::default()
         }
     }
 }
@@ -254,7 +243,7 @@ impl From<TerminalOptions> for PtyOptions {
 /// Window specific cli options which can be passed to new windows via IPC.
 #[derive(Serialize, Deserialize, Args, Default, Debug, Clone, PartialEq, Eq)]
 pub struct WindowIdentity {
-    /// Defines the window title [default: Nebula Terminal].
+    /// Defines the window title [default: Pebrel].
     #[clap(short = 'T', short_alias('t'), long)]
     pub title: Option<String>,
 
@@ -1698,6 +1687,11 @@ mod tests {
     }
 
     #[test]
+    fn default_terminal_options_preserve_platform_pty_defaults() {
+        assert_eq!(PtyOptions::from(TerminalOptions::default()), PtyOptions::default());
+    }
+
+    #[test]
     fn float_option_as_value() {
         let value: Value = toml::from_str("float=3.4").unwrap();
 
@@ -1774,10 +1768,19 @@ mod tests {
             let generated = String::from_utf8_lossy(&generated);
 
             let mut completion = String::new();
-            let mut file = File::open(format!("../extra/completions/{file}")).unwrap();
+            let mut file = File::open(completion_directory().join(file)).unwrap();
             file.read_to_string(&mut completion).unwrap();
 
             assert_eq!(generated, completion);
+        }
+    }
+
+    fn completion_directory() -> PathBuf {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../extra/completions");
+        if crate::platform::Platform::current() == crate::platform::Platform::Windows {
+            root.join("windows")
+        } else {
+            root
         }
     }
 
@@ -1785,12 +1788,16 @@ mod tests {
     #[ignore = "maintenance command: rewrites checked-in shell completions"]
     fn regenerate_completions() {
         let mut clap = Options::command();
+        let directory = std::env::var_os("NEBULA_COMPLETION_OUTPUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(completion_directory);
+        std::fs::create_dir_all(&directory).expect("create completion directory");
         for (shell, file) in
             &[(Shell::Bash, "nebula.bash"), (Shell::Fish, "nebula.fish"), (Shell::Zsh, "_nebula")]
         {
             let mut generated = Vec::new();
             clap_complete::generate(*shell, &mut clap, "nebula", &mut generated);
-            File::create(format!("../extra/completions/{file}"))
+            File::create(directory.join(file))
                 .and_then(|mut file| file.write_all(&generated))
                 .expect("write generated completion");
         }

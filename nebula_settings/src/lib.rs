@@ -16,6 +16,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+mod app_icon;
+pub use app_icon::{AppIconName, AppIconPalette};
+
 /// Settings/data directory shared by every shell and renderer.
 ///
 /// Resolution: `NEBULA_CONFIG_DIR` override, then `%APPDATA%\Nebula` on
@@ -964,35 +967,6 @@ impl ProxyModeName {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub enum AppIconName {
-    #[default]
-    SilverViolet,
-    GraphiteViolet,
-    Titanium,
-}
-
-impl AppIconName {
-    pub const ALL: [Self; 3] = [Self::SilverViolet, Self::GraphiteViolet, Self::Titanium];
-
-    pub fn from_settings(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "silver-violet" => Some(Self::SilverViolet),
-            "graphite-violet" => Some(Self::GraphiteViolet),
-            "titanium" => Some(Self::Titanium),
-            _ => None,
-        }
-    }
-
-    pub const fn settings_value(self) -> &'static str {
-        match self {
-            Self::SilverViolet => "silver-violet",
-            Self::GraphiteViolet => "graphite-violet",
-            Self::Titanium => "titanium",
-        }
-    }
-}
-
 /// 新 UI 消费的运行时设置。字段与出厂默认逐项对照旧壳
 /// `nebula_settings_load`；`Option` 字段的 `None` = 键未设置，调用方自选
 /// 回退（如 font_family 回落 nebula.toml）。
@@ -1271,15 +1245,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_icon_defaults_and_unknown_values_use_silver_violet() {
-        for text in ["", "app_icon=\n", "app_icon=night-mint\n", "app_icon=../custom.ico\n"] {
+    fn app_icon_defaults_and_unknown_values_use_titanium() {
+        for text in ["", "app_icon=\n", "app_icon=unknown\n", "app_icon=../custom.ico\n"] {
             let settings = RuntimeSettings::from_raw(&RawSettings::from_text(text));
-            assert_eq!(settings.app_icon, AppIconName::SilverViolet);
+            assert_eq!(settings.app_icon, AppIconName::Titanium);
         }
     }
 
     #[test]
-    fn curated_app_icons_round_trip_without_changing_other_settings() {
+    fn all_app_icons_round_trip_without_changing_other_settings() {
         for variant in AppIconName::ALL {
             let text = apply_updates(
                 "# keep\ntheme=Nord\ncustom=preserved\napp_icon=silver-violet\n",
@@ -1293,6 +1267,10 @@ mod tests {
             assert_eq!(text.matches("app_icon=").count(), 1);
         }
         assert_eq!(AppIconName::from_settings(" TITANIUM "), Some(AppIconName::Titanium));
+        assert_eq!(AppIconName::from_settings("night-mint"), Some(AppIconName::NightMint));
+        let numbers: std::collections::HashSet<_> =
+            AppIconName::ALL.into_iter().map(|variant| variant.palette().number).collect();
+        assert_eq!(numbers.len(), 25);
     }
 
     #[test]

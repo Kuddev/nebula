@@ -1,0 +1,266 @@
+{
+  "default": "titanium",
+  "sizes": [
+    16,
+    20,
+    24,
+    28,
+    32,
+    40,
+    48,
+    56,
+    64,
+    80,
+    96,
+    112,
+    128,
+    256
+  ],
+  "atlasSizes": [
+    16,
+    20,
+    24,
+    28,
+    32,
+    40,
+    48,
+    56,
+    64,
+    80,
+    96,
+    112,
+    128,
+    256,
+    512
+  ],
+  "atlasWidth": 512,
+  "atlasHeight": 1512,
+  "payloadBytes": 80402,
+  "palettes": [
+    {
+      "key": "titanium",
+      "number": "21",
+      "nameZh": "钛银",
+      "nameEn": "Titanium",
+      "tile": "#D9DFE6",
+      "mark": "#374151",
+      "border": "#909BA9"
+    },
+    {
+      "key": "glacier",
+      "number": "01",
+      "nameZh": "冰川白",
+      "nameEn": "Glacier",
+      "tile": "#EEF4FC",
+      "mark": "#234B85",
+      "border": "#93AEC9"
+    },
+    {
+      "key": "ice-blue",
+      "number": "02",
+      "nameZh": "冰蓝雾",
+      "nameEn": "Ice blue",
+      "tile": "#DCEBFF",
+      "mark": "#2353BA",
+      "border": "#839DC8"
+    },
+    {
+      "key": "cobalt",
+      "number": "03",
+      "nameZh": "钴蓝",
+      "nameEn": "Cobalt",
+      "tile": "#275DDF",
+      "mark": "#F3F7FF",
+      "border": "#1C45AC"
+    },
+    {
+      "key": "midnight-blue",
+      "number": "04",
+      "nameZh": "午夜蓝",
+      "nameEn": "Midnight blue",
+      "tile": "#101D3A",
+      "mark": "#DBEAFE",
+      "border": "#647DAA"
+    },
+    {
+      "key": "steel-blue",
+      "number": "05",
+      "nameZh": "钢蓝",
+      "nameEn": "Steel blue",
+      "tile": "#CBD8E8",
+      "mark": "#334A68",
+      "border": "#879BAF"
+    },
+    {
+      "key": "glass-blue",
+      "number": "06",
+      "nameZh": "琉璃蓝",
+      "nameEn": "Glass blue",
+      "tile": "#4668CF",
+      "mark": "#F5F7FF",
+      "border": "#3152B2"
+    },
+    {
+      "key": "porcelain-blue",
+      "number": "07",
+      "nameZh": "蓝瓷",
+      "nameEn": "Porcelain blue",
+      "tile": "#F5F7FC",
+      "mark": "#1D4ED8",
+      "border": "#ADBBD7"
+    },
+    {
+      "key": "deep-blue",
+      "number": "08",
+      "nameZh": "深海电蓝",
+      "nameEn": "Deep blue",
+      "tile": "#101827",
+      "mark": "#8BB9FF",
+      "border": "#5578A6"
+    },
+    {
+      "key": "mist-violet",
+      "number": "09",
+      "nameZh": "雾紫",
+      "nameEn": "Mist violet",
+      "tile": "#EDE9FE",
+      "mark": "#6640B4",
+      "border": "#AD9BCD"
+    },
+    {
+      "key": "violet",
+      "number": "10",
+      "nameZh": "紫罗兰",
+      "nameEn": "Violet",
+      "tile": "#6C47C9",
+      "mark": "#F6F0FF",
+      "border": "#5235A2"
+    },
+    {
+      "key": "night-violet",
+      "number": "11",
+      "nameZh": "冷夜紫",
+      "nameEn": "Night violet",
+      "tile": "#251D3C",
+      "mark": "#D9C7FF",
+      "border": "#78668F"
+    },
+    {
+      "key": "silver-violet",
+      "number": "12",
+      "nameZh": "银紫",
+      "nameEn": "Silver violet",
+      "tile": "#E6E7F4",
+      "mark": "#585B89",
+      "border": "#AAACC3"
+    },
+    {
+      "key": "ice-cyan",
+      "number": "13",
+      "nameZh": "冰青",
+      "nameEn": "Ice cyan",
+      "tile": "#DEF6FA",
+      "mark": "#0C657A",
+      "border": "#79ABB7"
+    },
+    {
+      "key": "cyan",
+      "number": "14",
+      "nameZh": "青蓝",
+      "nameEn": "Cyan",
+      "tile": "#087E9A",
+      "mark": "#ECFDFF",
+      "border": "#085E76"
+    },
+    {
+      "key": "polar-cyan",
+      "number": "15",
+      "nameZh": "极夜青",
+      "nameEn": "Polar cyan",
+      "tile": "#102B36",
+      "mark": "#9FE5EE",
+      "border": "#4D8B97"
+    },
+    {
+      "key": "cool-mint",
+      "number": "16",
+      "nameZh": "冷薄荷",
+      "nameEn": "Cool mint",
+      "tile": "#DAF5E9",
+      "mark": "#17644E",
+      "border": "#81B9A4"
+    },
+    {
+      "key": "emerald",
+      "number": "17",
+      "nameZh": "冷翡翠",
+      "nameEn": "Emerald",
+      "tile": "#116953",
+      "mark": "#ECFFF5",
+      "border": "#0B4C3E"
+    },
+    {
+      "key": "night-mint",
+      "number": "18",
+      "nameZh": "夜薄荷",
+      "nameEn": "Night mint",
+      "tile": "#112A28",
+      "mark": "#A5EDD6",
+      "border": "#527F76"
+    },
+    {
+      "key": "porcelain",
+      "number": "19",
+      "nameZh": "冷瓷白",
+      "nameEn": "Porcelain",
+      "tile": "#F4F5F7",
+      "mark": "#252A33",
+      "border": "#A5ACB7"
+    },
+    {
+      "key": "graphite",
+      "number": "20",
+      "nameZh": "石墨",
+      "nameEn": "Graphite",
+      "tile": "#232730",
+      "mark": "#F1F3F7",
+      "border": "#717984"
+    },
+    {
+      "key": "monochrome",
+      "number": "22",
+      "nameZh": "纯黑白",
+      "nameEn": "Monochrome",
+      "tile": "#111318",
+      "mark": "#FFFFFF",
+      "border": "#737982"
+    },
+    {
+      "key": "sage-light",
+      "number": "23",
+      "nameZh": "原版浅苔",
+      "nameEn": "Original light sage",
+      "tile": "#E4EBDD",
+      "mark": "#263A32",
+      "border": "#819581"
+    },
+    {
+      "key": "sage-dark",
+      "number": "24",
+      "nameZh": "原版深苔",
+      "nameEn": "Original dark sage",
+      "tile": "#18231F",
+      "mark": "#E8EFE2",
+      "border": "#819581"
+    },
+    {
+      "key": "graphite-violet",
+      "number": "25",
+      "nameZh": "石墨紫",
+      "nameEn": "Graphite violet",
+      "tile": "#25262D",
+      "mark": "#CFD0E8",
+      "border": "#777986"
+    }
+  ]
+}

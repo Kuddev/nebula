@@ -2,25 +2,29 @@
 
 ## Nebula App Icon
 
-The rounded, asymmetric symbol and cutout prompt are shared by three curated
-colorways. The product name remains Nebula.
+The rounded, asymmetric symbol and cutout prompt are shared by 25 colorways.
+Titanium (palette 21) is the default application and README identity. The
+display name is Pebrel; asset paths retain Nebula for compatibility. The original 01–24 palettes are available as
+personal choices, with graphite violet retained as palette 25.
 
 | Setting | Source | Role |
 | --- | --- | --- |
-| `silver-violet` | `nebula-light.svg` | Default identity; palette 12 |
-| `graphite-violet` | `nebula-dark.svg` | Graphite tile with restrained gray-violet mark |
-| `titanium` | `nebula-titanium.svg` | Neutral, high-contrast alternative; palette 21 |
+| `titanium` | `nebula-titanium.svg` | Default identity; palette 21 |
+| `silver-violet` | `nebula-light.svg` | Optional silver-violet colorway; palette 12 |
+| `graphite-violet` | `nebula-dark.svg` | Optional graphite / gray-violet colorway; palette 25 |
 
-The default is silver violet: it retains the soft character without a bright
-candy color or a generic black-and-white tool identity. The dark alternative
-uses graphite rather than saturated purple. These are design judgments, not
-claims of exclusive colors or completed trademark clearance.
+`nebula_settings/src/app_icon.rs` is the canonical catalog of stable setting
+keys, original palette numbers, bilingual names and colors. The renderer
+exports `icon-catalog.json` from it. Personal color options do not imply
+exclusive colors or completed trademark clearance.
 
 ### Switching
 
 GPUI Settings → Appearance → App icon writes `app_icon=` to
-`nebula_settings.txt`. Missing, invalid and retired values fall back to silver
-violet. Appearance reset restores the default; appearance backup includes the
+`nebula_settings.txt`. Missing or invalid values fall back to Titanium.
+Existing valid selections remain unchanged. The picker initially shows the
+three colorways above and the current selection, with a button to show all 25.
+Appearance reset restores the default; appearance backup includes the
 selection. Icon selection is independent of terminal/system theme selection.
 
 On Windows, selection updates open window icons (including Alt+Tab), the
@@ -33,28 +37,39 @@ their Dock/launcher icon remains the packaged default.
 
 ### Clarity and resource budget
 
-Each ICO contains directly rendered 32-bit RGBA PNG frames at 16, 20, 24, 32,
-40, 48, 64, 96, 128 and 256 physical pixels. The 16/20/24 frames use a slightly
-larger mark (100 rather than 90 SVG units) and an 11-unit rather than 10-unit
-cutout stroke. The tile bounds and symbol paths are unchanged. This is optical
-sizing, not upscaling a small bitmap. Higher sizes preserve the master geometry.
+The default ICO contains 32-bit RGBA PNG frames at 16, 20, 24, 28, 32, 40, 48,
+56, 64, 80, 96, 112, 128 and 256 physical pixels. The shared coverage atlas
+contains these sizes plus a 512px frame. Below 64px, the mark gradually
+increases from 90 to 108 SVG units, with a pixel-fitted prompt and a minimum
+1.5px cutout stroke. The underline is aligned to the physical pixel grid.
+The tile and outer symbol paths stay unchanged; 64px and larger preserve
+the original master geometry.
 
-PNG IDAT data is recompressed losslessly; no palette quantization or alpha
-reduction is used. All three ICOs together must remain below 64 KiB, enforced
-by the generator and tests. Native icon handles are reused in a bounded cache
-and owned tray handles are destroyed when replaced.
+The generator renders at 8× resolution for 16–64px and 4× above that, then
+averages premultiplied coverage before applying colors. This avoids colored
+transparent fringes and sharpening halos. Nonstandard sizes resample coverage
+with a non-ringing triangle filter before colorization. In-app previews request
+their actual logical size times the window scale factor; the tray receives
+exact-size RGBA pixels without a second resize. Antialiasing still produces
+partially covered edge pixels, and shell/browser scaling can affect appearance.
 
-Windows embeds exactly three icon groups. In-app, tray and notification PNG
-bytes are read from those same native resources, not a second embedded PNG
-collection. Non-Windows builds embed the same three ICOs. `nebula.png` and
-the three 1024px PNG exports are packaging/design assets, not extra GPUI
-runtime embeds. `nebula.ico` is a byte-identical alias of `nebula-light.ico`;
-only the former is linked as the default icon group.
+Windows embeds one default icon group and one shared coverage atlas, not 25
+complete ICOs or PNG collections. Palette colors are applied at runtime using
+the existing image dependency. Non-Windows in-app previews use the same atlas.
+The combined Windows image payload is 80,402 bytes (78.52 KiB), below the
+96 KiB budget enforced by the generator and tests. This measures image data,
+not installer growth. PNG/preview caches have a 128-entry limit; native window
+icon handles are reused, and owned tray handles are destroyed when replaced.
+
+`nebula.ico` is byte-identical to `nebula-titanium.ico`, and `nebula.png` to
+`nebula-titanium.png`. Alternate ICOs and 1024px PNG exports are design assets,
+not extra GPUI runtime embeds.
 
 Regenerate using Node.js 24+ with `@resvg/resvg-js` (verified with 2.6.2):
 
 ```sh
 node scripts/render-app-icons.mjs /path/to/renderer/package.json
+node scripts/render-app-icons.mjs /path/to/renderer/package.json --check
 python3 -m unittest scripts.tests.test_app_icons -v
 cargo test -p nebula-settings --offline --locked
 cargo test -p nebula --bin nebula --features gpui-shell app_icon::tests
@@ -62,16 +77,18 @@ cargo test -p nebula --bin nebula --features gpui-shell app_icon::tests
 
 The renderer is development-only; it adds no application dependency. The
 optional argument locates a separate renderer installation. The default
-`nebula.ico` and `nebula.png` exports always remain silver violet.
+`nebula.ico` and `nebula.png` exports always remain Titanium.
 
 ### Design archive
 
-The 24-color exploration remains in
-`docs/design/icon-color-lab-2026-09-05/index.html`. Original sage SVG masters
-remain in `docs/design/icon-final-2026-09-05/archive/`. Neither archive is
-embedded or copied by the Windows release asset manifest. Strong-green,
-saturated confectionery-purple and other low-value recolors are deliberately
-absent from the application picker, not deleted from the design history.
+The local 24-color exploration remains in
+`docs/design/icon-color-lab-2026-09-05/index.html`. The updated local preview at
+`docs/design/icon-all-palettes-2026-09-05/index.html` shows all 25 choices on
+light/dark surfaces and a before/after small-size comparison. These are PNG
+contact sheets, not native taskbar screenshots. Original sage SVG masters
+remain in `docs/design/icon-final-2026-09-05/archive/`. The historical pages
+do not define the current default. These local design archives are ignored
+by Git and are not required by the asset tests.
 
 ## Third-Party Logo Assets
 

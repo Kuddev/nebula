@@ -30,12 +30,11 @@ fn main() {
         // file and makes it silently skip .ico-only updates — leaving the stale
         // Nebula icon embedded in the exe. Declaring the .ico here fixes that.
         println!("cargo:rerun-if-changed=windows/nebula.ico");
-        println!("cargo:rerun-if-changed=windows/nebula-dark.ico");
-        println!("cargo:rerun-if-changed=windows/nebula-titanium.ico");
         println!("cargo:rerun-if-changed=windows/nebula.rc");
-        embed_resource::compile("./windows/nebula.rc", embed_resource::NONE)
-            .manifest_required()
-            .unwrap();
+        println!("cargo:rerun-if-changed=windows/nebula.manifest");
+        let defines: &[&str] =
+            if cfg!(feature = "gpui-shell") { &["NEBULA_GPUI_MANIFEST"] } else { &[] };
+        embed_resource::compile("./windows/nebula.rc", defines).manifest_required().unwrap();
 
         deploy_conpty();
     }

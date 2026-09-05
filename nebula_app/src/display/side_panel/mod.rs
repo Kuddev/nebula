@@ -6,9 +6,9 @@
 //! The panel is an overlay drawer: it floats above the terminal's right edge
 //! instead of reflowing the PTY, so toggling it never resizes the shell.
 //!
-//! Refresh model: cheap and synchronous, but *only* on toggle, on a cwd/root
-//! change, or when the throttle window (a few seconds) has elapsed — never on
-//! every frame. `git --no-optional-locks` keeps the status call from touching
+//! Tree/Git snapshots refresh in the background on toggle, root changes, or
+//! explicit refresh. The filename index survives those snapshots and follows
+//! filesystem notifications. `git --no-optional-locks` avoids touching
 //! the index lock, so it can't corrupt or stall a concurrent git operation.
 //!
 //! 2026-08-31 拆分（原单文件 4031 行，远超 2000 行红线）：本模块留面板状态机，
@@ -338,6 +338,8 @@ pub struct SidePanel {
     search_generation: u64,
     search_applied_generation: u64,
     search_index_epoch: u64,
+    search_index_root: Option<FileIndexRoot>,
+    search_index_refresh_requested: bool,
     search_total: usize,
     search_error: Option<String>,
     /// Commit-message input (Git view): buffer + focus, same modal keyboard
@@ -429,6 +431,8 @@ impl SidePanel {
             search_generation: 0,
             search_applied_generation: 0,
             search_index_epoch: 0,
+            search_index_root: None,
+            search_index_refresh_requested: false,
             search_total: 0,
             search_error: None,
             commit_msg: String::new(),
@@ -464,8 +468,8 @@ impl SidePanel {
         self.needs_refresh = true;
     }
 
-    /// Adopt the focused pane's cwd, refreshing when the root changed, a
-    /// refresh was requested (toggle), or the throttle window has elapsed.
+    /// Adopt the focused pane's cwd, refreshing when the root changed or a
+    /// refresh was requested (toggle).
     /// Called once per drawn frame from the window context; cheap when nothing
     /// changed. Returns whether the snapshot was rebuilt (i.e. needs redraw).
     ///
@@ -541,7 +545,7 @@ impl SidePanel {
         // A finished git mutation forces a refresh so the new state (staged
         // list, ahead count) shows on the next frame.
         if self.op_done.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            self.needs_refresh = true;
+            self.request_refresh();
         }
         // 目录内容**不做定时重扫**。这里原先有一条 `stale`（每 4 秒无条件重跑
         // 工人），代价是每 4 秒重新拉一遍 WSL 子进程 + 三个 git 子进程；配上 WSL
@@ -611,7 +615,9 @@ impl SidePanel {
 
     fn harvest_file_search(&mut self) -> bool {
         let Some(result) = self.file_index.take_result() else { return false };
-        if result.generation != self.search_generation
+        if result.epoch != self.search_index_epoch
+            || self.search_index_root != self.current_index_root()
+            || result.generation != self.search_generation
             || result.query != self.search
             || result.options != self.search_options
         {
@@ -761,11 +767,44 @@ impl SidePanel {
     /// 外部（右键菜单删除等文件系统变更）请求下一帧重建快照。
     pub fn request_refresh(&mut self) {
         self.needs_refresh = true;
+        self.search_index_refresh_requested = true;
     }
 
     /// 面板顶部的一句话提示（复用根目录不可用的同一条 UI）。
     pub fn set_notice(&mut self, message: String) {
         self.root_notice = Some(message);
+    }
+
+    fn current_index_root(&self) -> Option<FileIndexRoot> {
+        self.root.as_ref().map(|root| {
+            self.file_wsl_root()
+                .cloned()
+                .map(FileIndexRoot::Wsl)
+                .unwrap_or_else(|| FileIndexRoot::Local(root.clone()))
+        })
+    }
+
+    fn sync_file_index(&mut self) {
+        let root = self.current_index_root();
+        let refresh_requested = std::mem::take(&mut self.search_index_refresh_requested);
+        if self.search_index_root == root {
+            if refresh_requested {
+                self.file_index.refresh(self.search_index_epoch);
+            }
+            return;
+        }
+        self.search_index_root = root.clone();
+        self.search_index_epoch = self.search_index_epoch.wrapping_add(1);
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_error = None;
+        self.search_total = 0;
+        let active_query = if self.search.trim().is_empty() {
+            None
+        } else {
+            self.rows.clear();
+            Some((self.search_generation, self.search.clone(), self.search_options))
+        };
+        self.file_index.rebuild(root, self.search_index_epoch, active_query);
     }
 
     /// Rebuild the tree and git snapshot from `root`.
@@ -776,8 +815,7 @@ impl SidePanel {
             self.rows.clear();
             self.tree_rows.clear();
             self.git = None;
-            self.search_index_epoch = self.search_index_epoch.wrapping_add(1);
-            self.file_index.rebuild(None, self.search_index_epoch, None);
+            self.sync_file_index();
             return;
         };
         // 快照工人一次只跑一个：fs 遍历 + 三个 git 子进程在渲染线程上曾是
@@ -789,19 +827,7 @@ impl SidePanel {
         }
         let expanded = self.expanded.clone();
         let files_wsl = self.file_wsl_root().cloned();
-        self.search_index_epoch = self.search_index_epoch.wrapping_add(1);
-        let index_root = files_wsl
-            .clone()
-            .map(FileIndexRoot::Wsl)
-            .unwrap_or_else(|| FileIndexRoot::Local(root.clone()));
-        let active_query = if self.search.trim().is_empty() {
-            None
-        } else {
-            self.search_generation = self.search_generation.wrapping_add(1);
-            self.search_error = None;
-            Some((self.search_generation, self.search.clone(), self.search_options))
-        };
-        self.file_index.rebuild(Some(index_root), self.search_index_epoch, active_query);
+        self.sync_file_index();
         // VCS 状态跟着 [`Self::vcs_root`]：显式浏览定位优先，其次终端 cwd。
         // 在树里点 `..` 往上翻也算显式定位，所以翻到仓库外面时视图会变空——
         // 那条回头路由 VCS 视图自己画的「跟随当前目录」入口负责（此前它只
@@ -897,11 +923,17 @@ impl SidePanel {
         self.search_total = 0;
         self.search_generation = self.search_generation.wrapping_add(1);
         if self.search.trim().is_empty() {
+            self.file_index.clear_query();
             self.rows.clone_from(&self.tree_rows);
             self.search_applied_generation = self.search_generation;
             return;
         }
-        self.file_index.query(self.search_generation, self.search.clone(), self.search_options);
+        self.file_index.query(
+            self.search_index_epoch,
+            self.search_generation,
+            self.search.clone(),
+            self.search_options,
+        );
     }
 
     /// Replace the GPUI Files query. The input component owns caret/IME state;

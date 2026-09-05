@@ -33,7 +33,7 @@ fn nebula_fastfetch_text(narrow: bool) -> String {
         .unwrap_or_else(|| ".".to_owned());
     let art = super::nebula_fetch_art::NEBULA_STAR_ART;
     let info = [
-        format!("{white}Welcome to {green}Nebula Terminal{white},{reset}"),
+        format!("{white}Welcome to {green}{}{white},{reset}", crate::brand::NAME),
         format!(
             "{white}a fast terminal workspace for {cyan}tabs{white}, {cyan}splits{white} and shells.{reset}"
         ),
@@ -156,7 +156,7 @@ pub(super) fn nebula_fastfetch_intro_command() -> Vec<u8> {
 #[cfg(windows)]
 pub(crate) fn nebula_fastfetch_intro_command_for(columns: usize, shell: NebulaShell) -> Vec<u8> {
     if shell == NebulaShell::Bash {
-        return b"clear; if command -v fastfetch >/dev/null 2>&1; then fastfetch; else printf '\\033[36mNebula Terminal\\033[0m\\n'; uname -a; fi\n".to_vec();
+        return b"clear; if command -v fastfetch >/dev/null 2>&1; then fastfetch; else printf '\\033[36mPebrel\\033[0m\\n'; uname -a; fi\n".to_vec();
     }
 
     // 新 tab 必须秒出：所有系统信息在 Rust 侧一次性缓存；交给 PowerShell 的
@@ -173,7 +173,7 @@ pub(crate) fn nebula_fastfetch_intro_command_for(columns: usize, shell: NebulaSh
 /// Bytes to send to a freshly spawned shell so it prints the Nebula intro.
 #[cfg(not(windows))]
 pub(super) fn nebula_fastfetch_intro_command() -> Vec<u8> {
-    b"clear; if command -v fastfetch >/dev/null 2>&1; then fastfetch; else printf '\\033[36mNebula Terminal\\033[0m\\n'; uname -a; fi\n".to_vec()
+    b"clear; if command -v fastfetch >/dev/null 2>&1; then fastfetch; else printf '\\033[36mPebrel\\033[0m\\n'; uname -a; fi\n".to_vec()
 }
 
 /// Width-aware variant; the Unix intro delegates to fastfetch, which already

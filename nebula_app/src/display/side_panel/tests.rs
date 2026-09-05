@@ -25,6 +25,59 @@ mod tests {
     }
 
     #[test]
+    fn reopening_and_refreshing_the_same_root_reuses_the_file_index() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("needle.txt"), b"").unwrap();
+        let root = directory.path().to_owned();
+        let mut panel = SidePanel::new();
+        panel.toggle(PanelView::Files);
+        panel.sync(Some(root.clone()));
+        panel.wait_snapshot();
+        panel.set_file_search_query("needle".to_owned());
+        let epoch = panel.search_index_epoch;
+        let generation = panel.search_generation;
+
+        panel.toggle(PanelView::Files);
+        panel.toggle(PanelView::Files);
+        panel.sync(Some(root.clone()));
+        panel.wait_snapshot();
+        assert_eq!(panel.search_index_epoch, epoch);
+        assert_eq!(panel.search_generation, generation);
+
+        panel.toggle(PanelView::Git);
+        panel.sync(Some(root.clone()));
+        panel.wait_snapshot();
+        panel.request_refresh();
+        panel.sync(Some(root));
+        panel.wait_snapshot();
+        assert_eq!(panel.search_index_epoch, epoch);
+        assert_eq!(panel.search_generation, generation);
+        panel.file_index.release_for_test();
+    }
+
+    #[test]
+    fn search_root_changes_invalidate_queries_but_tree_refreshes_do_not() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut panel = SidePanel::new();
+        panel.root = Some(first.path().to_owned());
+        panel.search = "needle".to_owned();
+        panel.sync_file_index();
+        let epoch = panel.search_index_epoch;
+        let generation = panel.search_generation;
+        panel.sync_file_index();
+        assert_eq!(panel.search_index_epoch, epoch);
+        assert_eq!(panel.search_generation, generation);
+
+        panel.root = Some(second.path().to_owned());
+        panel.sync_file_index();
+        assert_ne!(panel.search_index_epoch, epoch);
+        assert_ne!(panel.search_generation, generation);
+        assert!(panel.rows.is_empty());
+        panel.file_index.release_for_test();
+    }
+
+    #[test]
     fn custom_root_survives_same_cwd_but_releases_when_terminal_moves() {
         let base =
             std::env::temp_dir().join(format!("nebula-panel-root-test-{}", std::process::id()));
@@ -792,10 +845,13 @@ mod tests {
 
     #[test]
     fn svn_relative_targets_cannot_escape_the_visible_root() {
-        let root = Path::new(r"D:\checkout");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
         assert_eq!(svn_relative_target(root, "src/main.rs"), Some(root.join("src/main.rs")));
         assert!(svn_relative_target(root, "../outside.txt").is_none());
-        assert!(svn_relative_target(root, r"D:\outside.txt").is_none());
+        assert!(svn_relative_target(root, &root.join("outside.txt").to_string_lossy()).is_none());
+        assert!(svn_relative_target(root, "").is_none());
+        assert!(svn_relative_target(root, "src/../../outside.txt").is_none());
     }
 
     // ---- 手动忽略 ----

@@ -1,0 +1,2674 @@
+#compdef nebula
+
+autoload -U is-at-least
+
+_nebula() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'--embed=[X11 window ID to embed Pebrel within (decimal or hexadecimal with "0x" prefix)]:EMBED:_default' \
+'--config-file=[Specify an alternative configuration file.]:CONFIG_FILE:_files' \
+'--working-directory=[Start the shell in the specified working directory]:WORKING_DIRECTORY:_files' \
+'*-e+[Command and args to execute (must be last argument)]:COMMAND:_default' \
+'*--command=[Command and args to execute (must be last argument)]:COMMAND:_default' \
+'-T+[Defines the window title \[default\: Pebrel\]]:TITLE:_default' \
+'--title=[Defines the window title \[default\: Pebrel\]]:TITLE:_default' \
+'--class=[Defines window class/app_id on X11/Wayland \[default\: Nebula\]]:general> | <general>,<instance:_default' \
+'*-o+[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
+'*--option=[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
+'--print-events[Print all events to STDOUT]' \
+'(--daemon)--ref-test[Generates ref test]' \
+'--gpui[Launch the GPUI UI shell as the main window]' \
+'(-v)*-q[Reduces the level of verbosity (the min level is -qq)]' \
+'(-q)*-v[Increases the level of verbosity (the max level is -vvv)]' \
+'--daemon[Do not spawn an initial window]' \
+'--hold[Remain open after child process exit]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_nebula_commands" \
+"*::: :->Pebrel" \
+&& ret=0
+    case $state in
+    (Pebrel)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-command-$line[1]:"
+        case $line[1] in
+            (ctl)
+_arguments "${_arguments_options[@]}" : \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_nebula__ctl_commands" \
+"*::: :->ctl" \
+&& ret=0
+
+    case $state in
+    (ctl)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-ctl-command-$line[1]:"
+        case $line[1] in
+            (describe)
+_arguments "${_arguments_options[@]}" : \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(snapshot)
+_arguments "${_arguments_options[@]}" : \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(orchestrate)
+_arguments "${_arguments_options[@]}" : \
+'(--file)--spec=[Inline UTF-8 JSON object containing steps and on_error]:SPEC:_default' \
+'(--spec)--file=[Read the UTF-8 workflow JSON object from a file]:FILE:_files' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(agents)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(agent-start)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--name=[]:NAME:_default' \
+'--kind=[]:KIND:_default' \
+'--cwd=[]:CWD:_files' \
+'--resume-session-id=[]:RESUME_SESSION_ID:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(agent-fork)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--source-pane=[]:SOURCE_PANE:_default' \
+'--source-cwd=[]:SOURCE_CWD:_files' \
+'--name=[]:NAME:_default' \
+'--kind=[]:KIND:_default' \
+'--resume-session-id=[]:RESUME_SESSION_ID:_default' \
+'--branch=[]:BRANCH:_default' \
+'--base=[]:BASE:_default' \
+'--path=[]:PATH:_files' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--allow-dirty-source[]' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(agent-get)
+_arguments "${_arguments_options[@]}" : \
+'--agent=[]:AGENT:_default' \
+'--generation=[]:GENERATION:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(agent-prompt)
+_arguments "${_arguments_options[@]}" : \
+'--agent=[]:AGENT:_default' \
+'--generation=[]:GENERATION:_default' \
+'--text=[]:TEXT:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--no-submit[]' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(agent-paste)
+_arguments "${_arguments_options[@]}" : \
+'--agent=[]:AGENT:_default' \
+'--generation=[]:GENERATION:_default' \
+'--text=[]:TEXT:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--no-submit[]' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(agent-read)
+_arguments "${_arguments_options[@]}" : \
+'--agent=[]:AGENT:_default' \
+'--generation=[]:GENERATION:_default' \
+'--lines=[]:LINES:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(agent-wait)
+_arguments "${_arguments_options[@]}" : \
+'--agent=[]:AGENT:_default' \
+'--generation=[]:GENERATION:_default' \
+'--state=[]:STATE:((idle\:""
+running\:""
+waiting-input\:""
+attention\:""
+finished\:""
+failed\:""
+settled\:"Any non-running terminal state"))' \
+'--after-seq=[]:AFTER_SEQ:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(subscribe)
+_arguments "${_arguments_options[@]}" : \
+'--since=[Resume after this revision; the current snapshot is sent when newer]:SINCE:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(new-window)
+_arguments "${_arguments_options[@]}" : \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(close-window)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(focus)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(new-tab)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(close-tab)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--tab=[]:TAB_INDEX:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(rename-tab)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--tab=[]:TAB_INDEX:_default' \
+'--name=[]:NAME:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(move-tab)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--tab=[]:TAB_INDEX:_default' \
+'--to=[]:TO_INDEX:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(split)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[Split this pane instead of the currently focused pane]:PANE:_default' \
+'--direction=[]:DIRECTION:((right\:"Create the new pane to the right of the focused pane"
+down\:"Create the new pane below the focused pane"))' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(close-pane)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(zoom-pane)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--zoomed=[]:ZOOMED:(true false)' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(resize-pane)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--ratio=[]:RATIO:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(prompt)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--text=[]:TEXT:_default' \
+'--wait=[After sending, wait until the pane reaches this task state]:WAIT:((idle\:""
+running\:""
+waiting-input\:""
+attention\:""
+finished\:""
+failed\:""
+settled\:"Any non-running terminal state"))' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--no-submit[Write the text without appending Enter]' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(paste)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--text=[]:TEXT:_default' \
+'--wait=[After submitting, wait until the pane reaches this task state]:WAIT:((idle\:""
+running\:""
+waiting-input\:""
+attention\:""
+finished\:""
+failed\:""
+settled\:"Any non-running terminal state"))' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--no-submit[Paste the block without appending Enter]' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--lines=[Number of logical terminal rows to read from the buffer tail]:LINES:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(procs)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(send-key)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--key=[Named key\: escape, enter, arrows, navigation, f1-f12, or a-z with --control]:KEY:_default' \
+'--repeat=[]:REPEAT:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--shift[]' \
+'--alt[]' \
+'--control[]' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(run)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--command=[]:COMMAND:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--no-wait[Submit the command and return its run id without waiting for completion]' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(exec-pane)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--max-output-bytes=[Maximum bytes retained from each stream. Both streams are always fully drained]:MAX_OUTPUT_BYTES:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::argv -- Program and arguments. `--` is required so child flags remain untouched:_default' \
+&& ret=0
+;;
+(wait)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--pane=[]:PANE:_default' \
+'--state=[]:STATE:((idle\:""
+running\:""
+waiting-input\:""
+attention\:""
+finished\:""
+failed\:""
+settled\:"Any non-running terminal state"))' \
+'--after-seq=[Require the pane'\''s state_change_seq to advance past this value. Pass the value observed before sending work so an already-settled pane does not satisfy the wait immediately]:AFTER_SEQ:_default' \
+'--timeout-ms=[Maximum time to wait for a command response]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__ctl__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-ctl-help-command-$line[1]:"
+        case $line[1] in
+            (describe)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(snapshot)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(orchestrate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agents)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-start)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-fork)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-get)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-prompt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-paste)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-read)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-wait)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(subscribe)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(new-window)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(close-window)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(focus)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(new-tab)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(close-tab)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rename-tab)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(move-tab)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(split)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(close-pane)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(zoom-pane)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(resize-pane)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prompt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(paste)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(procs)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(send-key)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(exec-pane)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(wait)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(env)
+_arguments "${_arguments_options[@]}" : \
+'--timeout-ms=[Maximum time to wait for the runtime probe. The environment half of the answer is reported regardless]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(window)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_nebula__window_commands" \
+"*::: :->window" \
+&& ret=0
+
+    case $state in
+    (window)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-window-command-$line[1]:"
+        case $line[1] in
+            (close)
+_arguments "${_arguments_options[@]}" : \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':window -- Window id from `nebula pane list`:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__window__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-window-help-command-$line[1]:"
+        case $line[1] in
+            (close)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(tab)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_nebula__tab_commands" \
+"*::: :->tab" \
+&& ret=0
+
+    case $state in
+    (tab)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-tab-command-$line[1]:"
+        case $line[1] in
+            (close)
+_arguments "${_arguments_options[@]}" : \
+'--window=[Window containing the tab]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':tab -- Zero-based tab index from the runtime snapshot:_default' \
+&& ret=0
+;;
+(rename)
+_arguments "${_arguments_options[@]}" : \
+'--window=[Window containing the tab]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':tab -- Zero-based tab index from the runtime snapshot:_default' \
+':name -- New custom name. An empty string restores the generated title:_default' \
+&& ret=0
+;;
+(move)
+_arguments "${_arguments_options[@]}" : \
+'--window=[Window containing the tab]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':tab -- Current zero-based tab index:_default' \
+':to -- Destination zero-based tab index in the same window:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__tab__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-tab-help-command-$line[1]:"
+        case $line[1] in
+            (close)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rename)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(move)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(pane)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_nebula__pane_commands" \
+"*::: :->pane" \
+&& ret=0
+
+    case $state in
+    (pane)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-pane-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--window=[Restrict the listing to one window]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+'--lines=[Logical terminal rows to read from the buffer tail]:LINES:_default' \
+'--window=[Disambiguate the pane when several windows are open]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':pane -- Pane id from `nebula pane list`:_default' \
+&& ret=0
+;;
+(send)
+_arguments "${_arguments_options[@]}" : \
+'--wait-timeout-ms=[Ceiling for \`--wait\`]:WAIT_TIMEOUT_MS:_default' \
+'--window=[]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--no-submit[Write the text without pressing Enter]' \
+'(--no-submit)--wait[After submitting, block until the pane settles again. The baseline comes from the submission response, so a pane that was already idle cannot satisfy the wait immediately. Meaningless without submission, so it conflicts with \`--no-submit\` rather than silently doing nothing]' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':pane -- Pane id from `nebula pane list`:_default' \
+'*::text -- The line to write. Several words are joined with single spaces, so both `send 17 "cargo test"` and `send 17 cargo test` work:_default' \
+&& ret=0
+;;
+(paste)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[Read the paste payload from a UTF-8 file]:FROM_FILE:_files' \
+'--wait-timeout-ms=[Ceiling for \`--wait\`]:WAIT_TIMEOUT_MS:_default' \
+'--window=[]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'(--from-file)--stdin[Read the paste payload from standard input]' \
+'--no-submit[Paste the block without pressing Enter]' \
+'(--no-submit)--wait[After submitting, block until the pane settles again]' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':pane -- Pane id from `nebula pane list`:_default' \
+'*::text -- Literal text. Multiple words are joined with single spaces:_default' \
+&& ret=0
+;;
+(wait)
+_arguments "${_arguments_options[@]}" : \
+'--state=[The state to wait for. \`settled\` covers finished, failed, and waiting-input, which is what "the work is over" usually means]:STATE:((idle\:""
+running\:""
+waiting-input\:""
+attention\:""
+finished\:""
+failed\:""
+settled\:"Any non-running terminal state"))' \
+'--after-seq=[Require the pane'\''s \`state_change_seq\` to advance past this value. Pass the counter observed *before* dispatching work, otherwise a pane that is already settled satisfies the wait immediately]:AFTER_SEQ:_default' \
+'--window=[]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':pane -- Pane id from `nebula pane list`:_default' \
+&& ret=0
+;;
+(exec)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--max-output-bytes=[Maximum bytes retained from each stream. Both streams are always fully drained]:MAX_OUTPUT_BYTES:_default' \
+'--timeout-ms=[Child-process timeout]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':pane -- Pane id from `nebula pane list`; its current cwd and local environment are reused:_default' \
+'*::argv -- Program and arguments. `--` is required so child flags cannot be parsed by Nebula:_default' \
+&& ret=0
+;;
+(close)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':pane -- Pane id from `nebula pane list`:_default' \
+&& ret=0
+;;
+(zoom)
+_arguments "${_arguments_options[@]}" : \
+'--zoomed=[Desired zoom state. Requiring the value keeps the command idempotent]:ZOOMED:(true false)' \
+'--window=[]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':pane -- Pane id from `nebula pane list`:_default' \
+&& ret=0
+;;
+(resize)
+_arguments "${_arguments_options[@]}" : \
+'--window=[]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':pane -- Pane id from `nebula pane list`:_default' \
+':ratio -- Desired share of the pane'\''s direct parent split, from 0.05 through 0.95:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__pane__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-pane-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(send)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(paste)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(wait)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(exec)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(close)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(zoom)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(resize)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(agent)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_nebula__agent_commands" \
+"*::: :->agent" \
+&& ret=0
+
+    case $state in
+    (agent)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-agent-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--window=[Restrict the listing to one window]:WINDOW:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(send)
+_arguments "${_arguments_options[@]}" : \
+'--wait-timeout-ms=[Ceiling for \`--wait\`]:WAIT_TIMEOUT_MS:_default' \
+'--generation=[Refuse the send unless the agent is still this generation]:GENERATION:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--no-submit[Write the task without submitting it]' \
+'(--no-submit)--wait[After submitting, block until the turn ends. The baseline comes from the submission response, so an idle agent cannot satisfy the wait immediately. Conflicts with \`--no-submit\`, which never starts a turn]' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':agent -- Agent name or stable id from `nebula agent list`:_default' \
+'*::text -- The task itself. Several words are joined with single spaces, so both `send codex "fix login"` and `send codex fix login` work:_default' \
+&& ret=0
+;;
+(delegate)
+_arguments "${_arguments_options[@]}" : \
+'--generation=[Refuse the delegation unless the target is still this generation]:GENERATION:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':agent -- Agent name or stable id from `nebula agent list`:_default' \
+'*::text -- The delegated task. Several words are joined with single spaces:_default' \
+&& ret=0
+;;
+(paste)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[Read the paste payload from a UTF-8 file]:FROM_FILE:_files' \
+'--wait-timeout-ms=[Ceiling for \`--wait\`]:WAIT_TIMEOUT_MS:_default' \
+'--generation=[Refuse the paste unless the agent is still this generation]:GENERATION:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'(--from-file)--stdin[Read the paste payload from standard input]' \
+'--no-submit[Paste the block without submitting it]' \
+'(--no-submit)--wait[After submitting, block until the turn ends]' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':agent -- Agent name or stable id from `nebula agent list`:_default' \
+'*::text -- Literal text. Multiple words are joined with single spaces:_default' \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+'--lines=[Logical terminal rows to read from the buffer tail]:LINES:_default' \
+'--generation=[]:GENERATION:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':agent -- Agent name or stable id from `nebula agent list`:_default' \
+&& ret=0
+;;
+(wait)
+_arguments "${_arguments_options[@]}" : \
+'--state=[The state to wait for]:STATE:((idle\:""
+running\:""
+waiting-input\:""
+attention\:""
+finished\:""
+failed\:""
+settled\:"Any non-running terminal state"))' \
+'--after-seq=[Require the agent'\''s \`state_change_seq\` to advance past this value. Pass the counter observed *before* dispatching work, otherwise an agent that is already idle satisfies the wait immediately]:AFTER_SEQ:_default' \
+'--generation=[Pin the wait to one generation. Without it, the currently active generation is resolved first, so a session that was replaced in the meantime fails loudly instead of being waited on by mistake]:GENERATION:_default' \
+'--timeout-ms=[]:TIMEOUT_MS:_default' \
+'--pretty[Pretty-print the JSON response. Output is JSON either way]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':agent -- Agent name or stable id from `nebula agent list`:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__agent__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-agent-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(send)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delegate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(paste)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(wait)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(migrate)
+_arguments "${_arguments_options[@]}" : \
+'-c+[Path to the configuration file]:CONFIG_FILE:_files' \
+'--config-file=[Path to the configuration file]:CONFIG_FILE:_files' \
+'-d[Only output TOML config to STDOUT]' \
+'--dry-run[Only output TOML config to STDOUT]' \
+'-i[Do not recurse over imports]' \
+'--skip-imports[Do not recurse over imports]' \
+'--skip-renames[Do not move renamed fields to their new location]' \
+'-s[Do not output to STDOUT]' \
+'--silent[Do not output to STDOUT]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_nebula__config_commands" \
+"*::: :->config" \
+&& ret=0
+
+    case $state in
+    (config)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-config-command-$line[1]:"
+        case $line[1] in
+            (check)
+_arguments "${_arguments_options[@]}" : \
+'--config-file=[Configuration file to validate; otherwise use normal discovery]:CONFIG_FILE:_files' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(init)
+_arguments "${_arguments_options[@]}" : \
+'--config-file=[Lua configuration path; otherwise use the platform user config directory]:CONFIG_FILE:_files' \
+'--language=[Comment language for the generated template]:LANGUAGE:(system zh-CN en-US)' \
+'--force[Back up and replace an existing configuration]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__config__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-config-help-command-$line[1]:"
+        case $line[1] in
+            (check)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(init)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(notify-test)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(setup-ai)
+_arguments "${_arguments_options[@]}" : \
+'--remove[Remove Nebula'\''s hooks from claude'\''s settings.json instead of installing them]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(ssh)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::args -- All arguments forwarded verbatim to `ssh` (destination and flags):_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-help-command-$line[1]:"
+        case $line[1] in
+            (ctl)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__help__ctl_commands" \
+"*::: :->ctl" \
+&& ret=0
+
+    case $state in
+    (ctl)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-help-ctl-command-$line[1]:"
+        case $line[1] in
+            (describe)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(snapshot)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(orchestrate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agents)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-start)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-fork)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-get)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-prompt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-paste)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-read)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(agent-wait)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(subscribe)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(new-window)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(close-window)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(focus)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(new-tab)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(close-tab)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rename-tab)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(move-tab)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(split)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(close-pane)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(zoom-pane)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(resize-pane)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prompt)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(paste)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(procs)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(send-key)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(exec-pane)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(wait)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(env)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(window)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__help__window_commands" \
+"*::: :->window" \
+&& ret=0
+
+    case $state in
+    (window)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-help-window-command-$line[1]:"
+        case $line[1] in
+            (close)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(tab)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__help__tab_commands" \
+"*::: :->tab" \
+&& ret=0
+
+    case $state in
+    (tab)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-help-tab-command-$line[1]:"
+        case $line[1] in
+            (close)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rename)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(move)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(pane)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__help__pane_commands" \
+"*::: :->pane" \
+&& ret=0
+
+    case $state in
+    (pane)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-help-pane-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(send)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(paste)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(wait)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(exec)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(close)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(zoom)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(resize)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(agent)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__help__agent_commands" \
+"*::: :->agent" \
+&& ret=0
+
+    case $state in
+    (agent)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-help-agent-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(send)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delegate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(paste)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(read)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(wait)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(migrate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+":: :_nebula__help__config_commands" \
+"*::: :->config" \
+&& ret=0
+
+    case $state in
+    (config)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:nebula-help-config-command-$line[1]:"
+        case $line[1] in
+            (check)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(init)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(notify-test)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(setup-ai)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ssh)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_nebula_commands] )) ||
+_nebula_commands() {
+    local commands; commands=(
+'ctl:Agent-oriented terminal control\: split panes, run commands, start Codex/Claude, send prompts, wait for state changes, and read verified terminal output' \
+'env:Report this pane'\''s terminal identity, the control-plane path, and every command available to it. Answers even with no runtime reachable, so an agent can always discover what it has instead of guessing' \
+'window:Control terminal windows' \
+'tab:Control tabs within one terminal window' \
+'pane:Inspect and drive terminal panes\: list, read, send, paste, wait, and change layout' \
+'agent:Inspect and drive the AI agents running in panes\: list, send, read, wait' \
+'migrate:Migrate the configuration file' \
+'config:Validate or create the Nebula configuration' \
+'notify-test:Test system notification (toast) delivery' \
+'setup-ai:Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code' \
+'ssh:SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula commands' commands "$@"
+}
+(( $+functions[_nebula__agent_commands] )) ||
+_nebula__agent_commands() {
+    local commands; commands=(
+'list:List the panes running an AI CLI, with session identity and generation' \
+'send:Hand one task to an agent and submit it' \
+'delegate:Delegate one task and route the Agent'\''s final answer back to this Agent pane' \
+'paste:Paste bounded UTF-8 text into an agent as one bracketed block' \
+'read:Read the tail of what an agent printed' \
+'wait:Block until an agent'\''s turn ends' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula agent commands' commands "$@"
+}
+(( $+functions[_nebula__agent__delegate_commands] )) ||
+_nebula__agent__delegate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent delegate commands' commands "$@"
+}
+(( $+functions[_nebula__agent__help_commands] )) ||
+_nebula__agent__help_commands() {
+    local commands; commands=(
+'list:List the panes running an AI CLI, with session identity and generation' \
+'send:Hand one task to an agent and submit it' \
+'delegate:Delegate one task and route the Agent'\''s final answer back to this Agent pane' \
+'paste:Paste bounded UTF-8 text into an agent as one bracketed block' \
+'read:Read the tail of what an agent printed' \
+'wait:Block until an agent'\''s turn ends' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula agent help commands' commands "$@"
+}
+(( $+functions[_nebula__agent__help__delegate_commands] )) ||
+_nebula__agent__help__delegate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent help delegate commands' commands "$@"
+}
+(( $+functions[_nebula__agent__help__help_commands] )) ||
+_nebula__agent__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent help help commands' commands "$@"
+}
+(( $+functions[_nebula__agent__help__list_commands] )) ||
+_nebula__agent__help__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent help list commands' commands "$@"
+}
+(( $+functions[_nebula__agent__help__paste_commands] )) ||
+_nebula__agent__help__paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent help paste commands' commands "$@"
+}
+(( $+functions[_nebula__agent__help__read_commands] )) ||
+_nebula__agent__help__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent help read commands' commands "$@"
+}
+(( $+functions[_nebula__agent__help__send_commands] )) ||
+_nebula__agent__help__send_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent help send commands' commands "$@"
+}
+(( $+functions[_nebula__agent__help__wait_commands] )) ||
+_nebula__agent__help__wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent help wait commands' commands "$@"
+}
+(( $+functions[_nebula__agent__list_commands] )) ||
+_nebula__agent__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent list commands' commands "$@"
+}
+(( $+functions[_nebula__agent__paste_commands] )) ||
+_nebula__agent__paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent paste commands' commands "$@"
+}
+(( $+functions[_nebula__agent__read_commands] )) ||
+_nebula__agent__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent read commands' commands "$@"
+}
+(( $+functions[_nebula__agent__send_commands] )) ||
+_nebula__agent__send_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent send commands' commands "$@"
+}
+(( $+functions[_nebula__agent__wait_commands] )) ||
+_nebula__agent__wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula agent wait commands' commands "$@"
+}
+(( $+functions[_nebula__config_commands] )) ||
+_nebula__config_commands() {
+    local commands; commands=(
+'check:Validate a Lua, TOML, or YAML configuration without opening the GUI' \
+'init:Create an annotated Lua configuration template' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula config commands' commands "$@"
+}
+(( $+functions[_nebula__config__check_commands] )) ||
+_nebula__config__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula config check commands' commands "$@"
+}
+(( $+functions[_nebula__config__help_commands] )) ||
+_nebula__config__help_commands() {
+    local commands; commands=(
+'check:Validate a Lua, TOML, or YAML configuration without opening the GUI' \
+'init:Create an annotated Lua configuration template' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula config help commands' commands "$@"
+}
+(( $+functions[_nebula__config__help__check_commands] )) ||
+_nebula__config__help__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula config help check commands' commands "$@"
+}
+(( $+functions[_nebula__config__help__help_commands] )) ||
+_nebula__config__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula config help help commands' commands "$@"
+}
+(( $+functions[_nebula__config__help__init_commands] )) ||
+_nebula__config__help__init_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula config help init commands' commands "$@"
+}
+(( $+functions[_nebula__config__init_commands] )) ||
+_nebula__config__init_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula config init commands' commands "$@"
+}
+(( $+functions[_nebula__ctl_commands] )) ||
+_nebula__ctl_commands() {
+    local commands; commands=(
+'describe:Describe the protocol version, runtime version, and available capabilities' \
+'snapshot:Read the authoritative window, tab, pane, and task-state projection' \
+'orchestrate:Execute one typed multi-step terminal workflow in a single Runtime request' \
+'agents:List only panes Nebula recognizes as AI agents, with semantic state and session identity' \
+'agent-start:Start a verified AI CLI in a new terminal tab and assign a stable name' \
+'agent-fork:Create an isolated Git worktree, then start a named AI CLI in that checkout' \
+'agent-get:Resolve one managed agent by stable id or active name' \
+'agent-prompt:Send one plain-text prompt to a managed agent' \
+'agent-paste:Paste one bounded UTF-8 block into a managed agent' \
+'agent-read:Read the terminal-buffer tail owned by a managed agent' \
+'agent-wait:Wait for the same managed-agent generation to reach a semantic state' \
+'subscribe:Stream state snapshots whenever their semantic content changes' \
+'new-window:Create and focus a new terminal window' \
+'close-window:Close an idle window. Omitting --window targets the uniquely resolved window' \
+'focus:Focus a window or one of its panes' \
+'new-tab:Create a default-shell tab in the target window' \
+'close-tab:Close an idle tab by its zero-based index' \
+'rename-tab:Set a tab'\''s custom name. An empty value restores the generated title' \
+'move-tab:Move a tab to another index in the same window' \
+'split:Split the focused pane in the target window' \
+'close-pane:Close an idle pane' \
+'zoom-pane:Explicitly enable or disable focused-pane zoom for the pane'\''s tab' \
+'resize-pane:Set this pane'\''s share of its direct parent split' \
+'prompt:Send one plain-text prompt to a pane, optionally submitting it with Enter' \
+'paste:Paste one bounded UTF-8 block into a pane using bracketed-paste mode' \
+'read:Read the latest logical lines from a pane'\''s real terminal buffer' \
+'procs:List the real local process tree rooted at a pane'\''s PTY shell' \
+'send-key:Send a restricted named control key using the pane'\''s active terminal mode' \
+'run:Run one shell command and return its real OSC 133 exit status' \
+'exec-pane:Execute argv as an independent non-TTY child and capture stdout/stderr separately' \
+'wait:Wait until a pane reaches a semantic task state' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula ctl commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__agent-fork_commands] )) ||
+_nebula__ctl__agent-fork_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl agent-fork commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__agent-get_commands] )) ||
+_nebula__ctl__agent-get_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl agent-get commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__agent-paste_commands] )) ||
+_nebula__ctl__agent-paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl agent-paste commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__agent-prompt_commands] )) ||
+_nebula__ctl__agent-prompt_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl agent-prompt commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__agent-read_commands] )) ||
+_nebula__ctl__agent-read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl agent-read commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__agent-start_commands] )) ||
+_nebula__ctl__agent-start_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl agent-start commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__agent-wait_commands] )) ||
+_nebula__ctl__agent-wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl agent-wait commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__agents_commands] )) ||
+_nebula__ctl__agents_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl agents commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__close-pane_commands] )) ||
+_nebula__ctl__close-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl close-pane commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__close-tab_commands] )) ||
+_nebula__ctl__close-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl close-tab commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__close-window_commands] )) ||
+_nebula__ctl__close-window_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl close-window commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__describe_commands] )) ||
+_nebula__ctl__describe_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl describe commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__exec-pane_commands] )) ||
+_nebula__ctl__exec-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl exec-pane commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__focus_commands] )) ||
+_nebula__ctl__focus_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl focus commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help_commands] )) ||
+_nebula__ctl__help_commands() {
+    local commands; commands=(
+'describe:Describe the protocol version, runtime version, and available capabilities' \
+'snapshot:Read the authoritative window, tab, pane, and task-state projection' \
+'orchestrate:Execute one typed multi-step terminal workflow in a single Runtime request' \
+'agents:List only panes Nebula recognizes as AI agents, with semantic state and session identity' \
+'agent-start:Start a verified AI CLI in a new terminal tab and assign a stable name' \
+'agent-fork:Create an isolated Git worktree, then start a named AI CLI in that checkout' \
+'agent-get:Resolve one managed agent by stable id or active name' \
+'agent-prompt:Send one plain-text prompt to a managed agent' \
+'agent-paste:Paste one bounded UTF-8 block into a managed agent' \
+'agent-read:Read the terminal-buffer tail owned by a managed agent' \
+'agent-wait:Wait for the same managed-agent generation to reach a semantic state' \
+'subscribe:Stream state snapshots whenever their semantic content changes' \
+'new-window:Create and focus a new terminal window' \
+'close-window:Close an idle window. Omitting --window targets the uniquely resolved window' \
+'focus:Focus a window or one of its panes' \
+'new-tab:Create a default-shell tab in the target window' \
+'close-tab:Close an idle tab by its zero-based index' \
+'rename-tab:Set a tab'\''s custom name. An empty value restores the generated title' \
+'move-tab:Move a tab to another index in the same window' \
+'split:Split the focused pane in the target window' \
+'close-pane:Close an idle pane' \
+'zoom-pane:Explicitly enable or disable focused-pane zoom for the pane'\''s tab' \
+'resize-pane:Set this pane'\''s share of its direct parent split' \
+'prompt:Send one plain-text prompt to a pane, optionally submitting it with Enter' \
+'paste:Paste one bounded UTF-8 block into a pane using bracketed-paste mode' \
+'read:Read the latest logical lines from a pane'\''s real terminal buffer' \
+'procs:List the real local process tree rooted at a pane'\''s PTY shell' \
+'send-key:Send a restricted named control key using the pane'\''s active terminal mode' \
+'run:Run one shell command and return its real OSC 133 exit status' \
+'exec-pane:Execute argv as an independent non-TTY child and capture stdout/stderr separately' \
+'wait:Wait until a pane reaches a semantic task state' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula ctl help commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__agent-fork_commands] )) ||
+_nebula__ctl__help__agent-fork_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help agent-fork commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__agent-get_commands] )) ||
+_nebula__ctl__help__agent-get_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help agent-get commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__agent-paste_commands] )) ||
+_nebula__ctl__help__agent-paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help agent-paste commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__agent-prompt_commands] )) ||
+_nebula__ctl__help__agent-prompt_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help agent-prompt commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__agent-read_commands] )) ||
+_nebula__ctl__help__agent-read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help agent-read commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__agent-start_commands] )) ||
+_nebula__ctl__help__agent-start_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help agent-start commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__agent-wait_commands] )) ||
+_nebula__ctl__help__agent-wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help agent-wait commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__agents_commands] )) ||
+_nebula__ctl__help__agents_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help agents commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__close-pane_commands] )) ||
+_nebula__ctl__help__close-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help close-pane commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__close-tab_commands] )) ||
+_nebula__ctl__help__close-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help close-tab commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__close-window_commands] )) ||
+_nebula__ctl__help__close-window_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help close-window commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__describe_commands] )) ||
+_nebula__ctl__help__describe_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help describe commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__exec-pane_commands] )) ||
+_nebula__ctl__help__exec-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help exec-pane commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__focus_commands] )) ||
+_nebula__ctl__help__focus_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help focus commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__help_commands] )) ||
+_nebula__ctl__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help help commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__move-tab_commands] )) ||
+_nebula__ctl__help__move-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help move-tab commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__new-tab_commands] )) ||
+_nebula__ctl__help__new-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help new-tab commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__new-window_commands] )) ||
+_nebula__ctl__help__new-window_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help new-window commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__orchestrate_commands] )) ||
+_nebula__ctl__help__orchestrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help orchestrate commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__paste_commands] )) ||
+_nebula__ctl__help__paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help paste commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__procs_commands] )) ||
+_nebula__ctl__help__procs_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help procs commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__prompt_commands] )) ||
+_nebula__ctl__help__prompt_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help prompt commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__read_commands] )) ||
+_nebula__ctl__help__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help read commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__rename-tab_commands] )) ||
+_nebula__ctl__help__rename-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help rename-tab commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__resize-pane_commands] )) ||
+_nebula__ctl__help__resize-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help resize-pane commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__run_commands] )) ||
+_nebula__ctl__help__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help run commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__send-key_commands] )) ||
+_nebula__ctl__help__send-key_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help send-key commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__snapshot_commands] )) ||
+_nebula__ctl__help__snapshot_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help snapshot commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__split_commands] )) ||
+_nebula__ctl__help__split_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help split commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__subscribe_commands] )) ||
+_nebula__ctl__help__subscribe_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help subscribe commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__wait_commands] )) ||
+_nebula__ctl__help__wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help wait commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__help__zoom-pane_commands] )) ||
+_nebula__ctl__help__zoom-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl help zoom-pane commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__move-tab_commands] )) ||
+_nebula__ctl__move-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl move-tab commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__new-tab_commands] )) ||
+_nebula__ctl__new-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl new-tab commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__new-window_commands] )) ||
+_nebula__ctl__new-window_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl new-window commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__orchestrate_commands] )) ||
+_nebula__ctl__orchestrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl orchestrate commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__paste_commands] )) ||
+_nebula__ctl__paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl paste commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__procs_commands] )) ||
+_nebula__ctl__procs_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl procs commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__prompt_commands] )) ||
+_nebula__ctl__prompt_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl prompt commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__read_commands] )) ||
+_nebula__ctl__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl read commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__rename-tab_commands] )) ||
+_nebula__ctl__rename-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl rename-tab commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__resize-pane_commands] )) ||
+_nebula__ctl__resize-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl resize-pane commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__run_commands] )) ||
+_nebula__ctl__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl run commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__send-key_commands] )) ||
+_nebula__ctl__send-key_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl send-key commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__snapshot_commands] )) ||
+_nebula__ctl__snapshot_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl snapshot commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__split_commands] )) ||
+_nebula__ctl__split_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl split commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__subscribe_commands] )) ||
+_nebula__ctl__subscribe_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl subscribe commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__wait_commands] )) ||
+_nebula__ctl__wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl wait commands' commands "$@"
+}
+(( $+functions[_nebula__ctl__zoom-pane_commands] )) ||
+_nebula__ctl__zoom-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ctl zoom-pane commands' commands "$@"
+}
+(( $+functions[_nebula__env_commands] )) ||
+_nebula__env_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula env commands' commands "$@"
+}
+(( $+functions[_nebula__help_commands] )) ||
+_nebula__help_commands() {
+    local commands; commands=(
+'ctl:Agent-oriented terminal control\: split panes, run commands, start Codex/Claude, send prompts, wait for state changes, and read verified terminal output' \
+'env:Report this pane'\''s terminal identity, the control-plane path, and every command available to it. Answers even with no runtime reachable, so an agent can always discover what it has instead of guessing' \
+'window:Control terminal windows' \
+'tab:Control tabs within one terminal window' \
+'pane:Inspect and drive terminal panes\: list, read, send, paste, wait, and change layout' \
+'agent:Inspect and drive the AI agents running in panes\: list, send, read, wait' \
+'migrate:Migrate the configuration file' \
+'config:Validate or create the Nebula configuration' \
+'notify-test:Test system notification (toast) delivery' \
+'setup-ai:Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code' \
+'ssh:SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula help commands' commands "$@"
+}
+(( $+functions[_nebula__help__agent_commands] )) ||
+_nebula__help__agent_commands() {
+    local commands; commands=(
+'list:List the panes running an AI CLI, with session identity and generation' \
+'send:Hand one task to an agent and submit it' \
+'delegate:Delegate one task and route the Agent'\''s final answer back to this Agent pane' \
+'paste:Paste bounded UTF-8 text into an agent as one bracketed block' \
+'read:Read the tail of what an agent printed' \
+'wait:Block until an agent'\''s turn ends' \
+    )
+    _describe -t commands 'nebula help agent commands' commands "$@"
+}
+(( $+functions[_nebula__help__agent__delegate_commands] )) ||
+_nebula__help__agent__delegate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help agent delegate commands' commands "$@"
+}
+(( $+functions[_nebula__help__agent__list_commands] )) ||
+_nebula__help__agent__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help agent list commands' commands "$@"
+}
+(( $+functions[_nebula__help__agent__paste_commands] )) ||
+_nebula__help__agent__paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help agent paste commands' commands "$@"
+}
+(( $+functions[_nebula__help__agent__read_commands] )) ||
+_nebula__help__agent__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help agent read commands' commands "$@"
+}
+(( $+functions[_nebula__help__agent__send_commands] )) ||
+_nebula__help__agent__send_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help agent send commands' commands "$@"
+}
+(( $+functions[_nebula__help__agent__wait_commands] )) ||
+_nebula__help__agent__wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help agent wait commands' commands "$@"
+}
+(( $+functions[_nebula__help__config_commands] )) ||
+_nebula__help__config_commands() {
+    local commands; commands=(
+'check:Validate a Lua, TOML, or YAML configuration without opening the GUI' \
+'init:Create an annotated Lua configuration template' \
+    )
+    _describe -t commands 'nebula help config commands' commands "$@"
+}
+(( $+functions[_nebula__help__config__check_commands] )) ||
+_nebula__help__config__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help config check commands' commands "$@"
+}
+(( $+functions[_nebula__help__config__init_commands] )) ||
+_nebula__help__config__init_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help config init commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl_commands] )) ||
+_nebula__help__ctl_commands() {
+    local commands; commands=(
+'describe:Describe the protocol version, runtime version, and available capabilities' \
+'snapshot:Read the authoritative window, tab, pane, and task-state projection' \
+'orchestrate:Execute one typed multi-step terminal workflow in a single Runtime request' \
+'agents:List only panes Nebula recognizes as AI agents, with semantic state and session identity' \
+'agent-start:Start a verified AI CLI in a new terminal tab and assign a stable name' \
+'agent-fork:Create an isolated Git worktree, then start a named AI CLI in that checkout' \
+'agent-get:Resolve one managed agent by stable id or active name' \
+'agent-prompt:Send one plain-text prompt to a managed agent' \
+'agent-paste:Paste one bounded UTF-8 block into a managed agent' \
+'agent-read:Read the terminal-buffer tail owned by a managed agent' \
+'agent-wait:Wait for the same managed-agent generation to reach a semantic state' \
+'subscribe:Stream state snapshots whenever their semantic content changes' \
+'new-window:Create and focus a new terminal window' \
+'close-window:Close an idle window. Omitting --window targets the uniquely resolved window' \
+'focus:Focus a window or one of its panes' \
+'new-tab:Create a default-shell tab in the target window' \
+'close-tab:Close an idle tab by its zero-based index' \
+'rename-tab:Set a tab'\''s custom name. An empty value restores the generated title' \
+'move-tab:Move a tab to another index in the same window' \
+'split:Split the focused pane in the target window' \
+'close-pane:Close an idle pane' \
+'zoom-pane:Explicitly enable or disable focused-pane zoom for the pane'\''s tab' \
+'resize-pane:Set this pane'\''s share of its direct parent split' \
+'prompt:Send one plain-text prompt to a pane, optionally submitting it with Enter' \
+'paste:Paste one bounded UTF-8 block into a pane using bracketed-paste mode' \
+'read:Read the latest logical lines from a pane'\''s real terminal buffer' \
+'procs:List the real local process tree rooted at a pane'\''s PTY shell' \
+'send-key:Send a restricted named control key using the pane'\''s active terminal mode' \
+'run:Run one shell command and return its real OSC 133 exit status' \
+'exec-pane:Execute argv as an independent non-TTY child and capture stdout/stderr separately' \
+'wait:Wait until a pane reaches a semantic task state' \
+    )
+    _describe -t commands 'nebula help ctl commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__agent-fork_commands] )) ||
+_nebula__help__ctl__agent-fork_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl agent-fork commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__agent-get_commands] )) ||
+_nebula__help__ctl__agent-get_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl agent-get commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__agent-paste_commands] )) ||
+_nebula__help__ctl__agent-paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl agent-paste commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__agent-prompt_commands] )) ||
+_nebula__help__ctl__agent-prompt_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl agent-prompt commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__agent-read_commands] )) ||
+_nebula__help__ctl__agent-read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl agent-read commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__agent-start_commands] )) ||
+_nebula__help__ctl__agent-start_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl agent-start commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__agent-wait_commands] )) ||
+_nebula__help__ctl__agent-wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl agent-wait commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__agents_commands] )) ||
+_nebula__help__ctl__agents_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl agents commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__close-pane_commands] )) ||
+_nebula__help__ctl__close-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl close-pane commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__close-tab_commands] )) ||
+_nebula__help__ctl__close-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl close-tab commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__close-window_commands] )) ||
+_nebula__help__ctl__close-window_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl close-window commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__describe_commands] )) ||
+_nebula__help__ctl__describe_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl describe commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__exec-pane_commands] )) ||
+_nebula__help__ctl__exec-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl exec-pane commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__focus_commands] )) ||
+_nebula__help__ctl__focus_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl focus commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__move-tab_commands] )) ||
+_nebula__help__ctl__move-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl move-tab commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__new-tab_commands] )) ||
+_nebula__help__ctl__new-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl new-tab commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__new-window_commands] )) ||
+_nebula__help__ctl__new-window_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl new-window commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__orchestrate_commands] )) ||
+_nebula__help__ctl__orchestrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl orchestrate commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__paste_commands] )) ||
+_nebula__help__ctl__paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl paste commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__procs_commands] )) ||
+_nebula__help__ctl__procs_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl procs commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__prompt_commands] )) ||
+_nebula__help__ctl__prompt_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl prompt commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__read_commands] )) ||
+_nebula__help__ctl__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl read commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__rename-tab_commands] )) ||
+_nebula__help__ctl__rename-tab_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl rename-tab commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__resize-pane_commands] )) ||
+_nebula__help__ctl__resize-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl resize-pane commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__run_commands] )) ||
+_nebula__help__ctl__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl run commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__send-key_commands] )) ||
+_nebula__help__ctl__send-key_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl send-key commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__snapshot_commands] )) ||
+_nebula__help__ctl__snapshot_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl snapshot commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__split_commands] )) ||
+_nebula__help__ctl__split_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl split commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__subscribe_commands] )) ||
+_nebula__help__ctl__subscribe_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl subscribe commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__wait_commands] )) ||
+_nebula__help__ctl__wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl wait commands' commands "$@"
+}
+(( $+functions[_nebula__help__ctl__zoom-pane_commands] )) ||
+_nebula__help__ctl__zoom-pane_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ctl zoom-pane commands' commands "$@"
+}
+(( $+functions[_nebula__help__env_commands] )) ||
+_nebula__help__env_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help env commands' commands "$@"
+}
+(( $+functions[_nebula__help__help_commands] )) ||
+_nebula__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help help commands' commands "$@"
+}
+(( $+functions[_nebula__help__migrate_commands] )) ||
+_nebula__help__migrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help migrate commands' commands "$@"
+}
+(( $+functions[_nebula__help__notify-test_commands] )) ||
+_nebula__help__notify-test_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help notify-test commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane_commands] )) ||
+_nebula__help__pane_commands() {
+    local commands; commands=(
+'list:List every pane with its id, task state, cwd, and Git branch' \
+'read:Read the tail of a pane'\''s real terminal buffer' \
+'send:Write one line into a pane, submitting it with Enter by default' \
+'paste:Paste bounded UTF-8 text as one bracketed block' \
+'wait:Block until a pane reaches a semantic task state' \
+'exec:Execute an argv vector as an independent non-TTY child and capture both streams' \
+'close:Close an idle pane' \
+'zoom:Explicitly enable or disable focused-pane zoom for the pane'\''s tab' \
+'resize:Set this pane'\''s share of its direct parent split' \
+    )
+    _describe -t commands 'nebula help pane commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane__close_commands] )) ||
+_nebula__help__pane__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help pane close commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane__exec_commands] )) ||
+_nebula__help__pane__exec_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help pane exec commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane__list_commands] )) ||
+_nebula__help__pane__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help pane list commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane__paste_commands] )) ||
+_nebula__help__pane__paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help pane paste commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane__read_commands] )) ||
+_nebula__help__pane__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help pane read commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane__resize_commands] )) ||
+_nebula__help__pane__resize_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help pane resize commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane__send_commands] )) ||
+_nebula__help__pane__send_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help pane send commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane__wait_commands] )) ||
+_nebula__help__pane__wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help pane wait commands' commands "$@"
+}
+(( $+functions[_nebula__help__pane__zoom_commands] )) ||
+_nebula__help__pane__zoom_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help pane zoom commands' commands "$@"
+}
+(( $+functions[_nebula__help__setup-ai_commands] )) ||
+_nebula__help__setup-ai_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help setup-ai commands' commands "$@"
+}
+(( $+functions[_nebula__help__ssh_commands] )) ||
+_nebula__help__ssh_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help ssh commands' commands "$@"
+}
+(( $+functions[_nebula__help__tab_commands] )) ||
+_nebula__help__tab_commands() {
+    local commands; commands=(
+'close:Close an idle tab' \
+'rename:Set a tab'\''s custom name. Pass an empty name to restore the generated title' \
+'move:Move a tab to another index in the same window' \
+    )
+    _describe -t commands 'nebula help tab commands' commands "$@"
+}
+(( $+functions[_nebula__help__tab__close_commands] )) ||
+_nebula__help__tab__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help tab close commands' commands "$@"
+}
+(( $+functions[_nebula__help__tab__move_commands] )) ||
+_nebula__help__tab__move_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help tab move commands' commands "$@"
+}
+(( $+functions[_nebula__help__tab__rename_commands] )) ||
+_nebula__help__tab__rename_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help tab rename commands' commands "$@"
+}
+(( $+functions[_nebula__help__window_commands] )) ||
+_nebula__help__window_commands() {
+    local commands; commands=(
+'close:Close an idle window. Busy panes require confirmation in the GUI instead' \
+    )
+    _describe -t commands 'nebula help window commands' commands "$@"
+}
+(( $+functions[_nebula__help__window__close_commands] )) ||
+_nebula__help__window__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula help window close commands' commands "$@"
+}
+(( $+functions[_nebula__migrate_commands] )) ||
+_nebula__migrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula migrate commands' commands "$@"
+}
+(( $+functions[_nebula__notify-test_commands] )) ||
+_nebula__notify-test_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula notify-test commands' commands "$@"
+}
+(( $+functions[_nebula__pane_commands] )) ||
+_nebula__pane_commands() {
+    local commands; commands=(
+'list:List every pane with its id, task state, cwd, and Git branch' \
+'read:Read the tail of a pane'\''s real terminal buffer' \
+'send:Write one line into a pane, submitting it with Enter by default' \
+'paste:Paste bounded UTF-8 text as one bracketed block' \
+'wait:Block until a pane reaches a semantic task state' \
+'exec:Execute an argv vector as an independent non-TTY child and capture both streams' \
+'close:Close an idle pane' \
+'zoom:Explicitly enable or disable focused-pane zoom for the pane'\''s tab' \
+'resize:Set this pane'\''s share of its direct parent split' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula pane commands' commands "$@"
+}
+(( $+functions[_nebula__pane__close_commands] )) ||
+_nebula__pane__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane close commands' commands "$@"
+}
+(( $+functions[_nebula__pane__exec_commands] )) ||
+_nebula__pane__exec_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane exec commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help_commands] )) ||
+_nebula__pane__help_commands() {
+    local commands; commands=(
+'list:List every pane with its id, task state, cwd, and Git branch' \
+'read:Read the tail of a pane'\''s real terminal buffer' \
+'send:Write one line into a pane, submitting it with Enter by default' \
+'paste:Paste bounded UTF-8 text as one bracketed block' \
+'wait:Block until a pane reaches a semantic task state' \
+'exec:Execute an argv vector as an independent non-TTY child and capture both streams' \
+'close:Close an idle pane' \
+'zoom:Explicitly enable or disable focused-pane zoom for the pane'\''s tab' \
+'resize:Set this pane'\''s share of its direct parent split' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula pane help commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__close_commands] )) ||
+_nebula__pane__help__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help close commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__exec_commands] )) ||
+_nebula__pane__help__exec_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help exec commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__help_commands] )) ||
+_nebula__pane__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help help commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__list_commands] )) ||
+_nebula__pane__help__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help list commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__paste_commands] )) ||
+_nebula__pane__help__paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help paste commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__read_commands] )) ||
+_nebula__pane__help__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help read commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__resize_commands] )) ||
+_nebula__pane__help__resize_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help resize commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__send_commands] )) ||
+_nebula__pane__help__send_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help send commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__wait_commands] )) ||
+_nebula__pane__help__wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help wait commands' commands "$@"
+}
+(( $+functions[_nebula__pane__help__zoom_commands] )) ||
+_nebula__pane__help__zoom_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane help zoom commands' commands "$@"
+}
+(( $+functions[_nebula__pane__list_commands] )) ||
+_nebula__pane__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane list commands' commands "$@"
+}
+(( $+functions[_nebula__pane__paste_commands] )) ||
+_nebula__pane__paste_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane paste commands' commands "$@"
+}
+(( $+functions[_nebula__pane__read_commands] )) ||
+_nebula__pane__read_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane read commands' commands "$@"
+}
+(( $+functions[_nebula__pane__resize_commands] )) ||
+_nebula__pane__resize_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane resize commands' commands "$@"
+}
+(( $+functions[_nebula__pane__send_commands] )) ||
+_nebula__pane__send_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane send commands' commands "$@"
+}
+(( $+functions[_nebula__pane__wait_commands] )) ||
+_nebula__pane__wait_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane wait commands' commands "$@"
+}
+(( $+functions[_nebula__pane__zoom_commands] )) ||
+_nebula__pane__zoom_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula pane zoom commands' commands "$@"
+}
+(( $+functions[_nebula__setup-ai_commands] )) ||
+_nebula__setup-ai_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula setup-ai commands' commands "$@"
+}
+(( $+functions[_nebula__ssh_commands] )) ||
+_nebula__ssh_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula ssh commands' commands "$@"
+}
+(( $+functions[_nebula__tab_commands] )) ||
+_nebula__tab_commands() {
+    local commands; commands=(
+'close:Close an idle tab' \
+'rename:Set a tab'\''s custom name. Pass an empty name to restore the generated title' \
+'move:Move a tab to another index in the same window' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula tab commands' commands "$@"
+}
+(( $+functions[_nebula__tab__close_commands] )) ||
+_nebula__tab__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula tab close commands' commands "$@"
+}
+(( $+functions[_nebula__tab__help_commands] )) ||
+_nebula__tab__help_commands() {
+    local commands; commands=(
+'close:Close an idle tab' \
+'rename:Set a tab'\''s custom name. Pass an empty name to restore the generated title' \
+'move:Move a tab to another index in the same window' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula tab help commands' commands "$@"
+}
+(( $+functions[_nebula__tab__help__close_commands] )) ||
+_nebula__tab__help__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula tab help close commands' commands "$@"
+}
+(( $+functions[_nebula__tab__help__help_commands] )) ||
+_nebula__tab__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula tab help help commands' commands "$@"
+}
+(( $+functions[_nebula__tab__help__move_commands] )) ||
+_nebula__tab__help__move_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula tab help move commands' commands "$@"
+}
+(( $+functions[_nebula__tab__help__rename_commands] )) ||
+_nebula__tab__help__rename_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula tab help rename commands' commands "$@"
+}
+(( $+functions[_nebula__tab__move_commands] )) ||
+_nebula__tab__move_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula tab move commands' commands "$@"
+}
+(( $+functions[_nebula__tab__rename_commands] )) ||
+_nebula__tab__rename_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula tab rename commands' commands "$@"
+}
+(( $+functions[_nebula__window_commands] )) ||
+_nebula__window_commands() {
+    local commands; commands=(
+'close:Close an idle window. Busy panes require confirmation in the GUI instead' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula window commands' commands "$@"
+}
+(( $+functions[_nebula__window__close_commands] )) ||
+_nebula__window__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula window close commands' commands "$@"
+}
+(( $+functions[_nebula__window__help_commands] )) ||
+_nebula__window__help_commands() {
+    local commands; commands=(
+'close:Close an idle window. Busy panes require confirmation in the GUI instead' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'nebula window help commands' commands "$@"
+}
+(( $+functions[_nebula__window__help__close_commands] )) ||
+_nebula__window__help__close_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula window help close commands' commands "$@"
+}
+(( $+functions[_nebula__window__help__help_commands] )) ||
+_nebula__window__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'nebula window help help commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_nebula" ]; then
+    _nebula "$@"
+else
+    compdef _nebula nebula
+fi

@@ -17,6 +17,7 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 const MAX_INDEX_ENTRIES: usize = 500_000;
 const MAX_SEARCH_RESULTS: usize = 1_000;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(80);
+const WATCH_QUEUE_CAPACITY: usize = 4096;
 
 const INDEX_IDLE: u8 = 0;
 const INDEX_BUILDING: u8 = 1;
@@ -44,6 +45,7 @@ pub(crate) enum FileIndexRoot {
 
 #[derive(Clone)]
 struct SearchRequest {
+    epoch: u64,
     generation: u64,
     query: String,
     options: FileSearchOptions,
@@ -55,13 +57,17 @@ enum IndexCommand {
         epoch: u64,
         query: Option<SearchRequest>,
     },
-    Query(SearchRequest),
+    Query(Option<SearchRequest>),
+    Refresh {
+        epoch: u64,
+    },
     #[cfg(test)]
     ReleaseForTest(mpsc::SyncSender<()>),
 }
 
 #[derive(Debug)]
 pub(crate) struct FileSearchResult {
+    pub(crate) epoch: u64,
     pub(crate) generation: u64,
     pub(crate) query: String,
     pub(crate) options: FileSearchOptions,
@@ -127,14 +133,41 @@ impl EmbeddedFileIndex {
         query: Option<(u64, String, FileSearchOptions)>,
     ) {
         self.desired_epoch.store(epoch, Ordering::Release);
-        let query =
-            query.map(|(generation, query, options)| SearchRequest { generation, query, options });
+        let query = query.map(|(generation, query, options)| SearchRequest {
+            epoch,
+            generation,
+            query,
+            options,
+        });
+        if let Ok(mut slot) = self.result.lock() {
+            *slot = None;
+        }
+        self.status
+            .store(if root.is_some() { INDEX_BUILDING } else { INDEX_IDLE }, Ordering::Release);
         let _ = self.command_tx.send(IndexCommand::Rebuild { root, epoch, query });
     }
 
-    pub(crate) fn query(&self, generation: u64, query: String, options: FileSearchOptions) {
-        let _ =
-            self.command_tx.send(IndexCommand::Query(SearchRequest { generation, query, options }));
+    pub(crate) fn query(
+        &self,
+        epoch: u64,
+        generation: u64,
+        query: String,
+        options: FileSearchOptions,
+    ) {
+        let _ = self.command_tx.send(IndexCommand::Query(Some(SearchRequest {
+            epoch,
+            generation,
+            query,
+            options,
+        })));
+    }
+
+    pub(crate) fn clear_query(&self) {
+        let _ = self.command_tx.send(IndexCommand::Query(None));
+    }
+
+    pub(crate) fn refresh(&self, epoch: u64) {
+        let _ = self.command_tx.send(IndexCommand::Refresh { epoch });
     }
 
     pub(crate) fn take_result(&self) -> Option<FileSearchResult> {
@@ -170,6 +203,12 @@ impl EmbeddedFileIndex {
     }
 }
 
+impl Drop for EmbeddedFileIndex {
+    fn drop(&mut self) {
+        self.desired_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 fn run_index_worker(
     command_rx: mpsc::Receiver<IndexCommand>,
     result_slot: Arc<Mutex<Option<FileSearchResult>>>,
@@ -178,27 +217,32 @@ fn run_index_worker(
     indexed_count: Arc<AtomicUsize>,
     truncated: Arc<AtomicBool>,
 ) {
-    let (watch_tx, watch_rx) = mpsc::channel();
+    let (watch_tx, watch_rx) = mpsc::sync_channel(WATCH_QUEUE_CAPACITY);
+    let rescan_requested = Arc::new(AtomicBool::new(false));
     let mut watcher: Option<RecommendedWatcher> = None;
     let mut root: Option<FileIndexRoot> = None;
     let mut epoch = 0;
     let mut entries = Vec::new();
     let mut current_query: Option<SearchRequest> = None;
     let mut pending_command = None;
+    let mut last_watch_check = Instant::now();
 
     loop {
-        let received = pending_command
-            .take()
-            .map(Ok)
-            .unwrap_or_else(|| command_rx.recv_timeout(WATCH_DEBOUNCE));
+        let received = pending_command.take().map(Ok).unwrap_or_else(|| {
+            command_rx.recv_timeout(WATCH_DEBOUNCE.saturating_sub(last_watch_check.elapsed()))
+        });
         match received {
             Ok(IndexCommand::Rebuild { root: next_root, epoch: next_epoch, query }) => {
+                if desired_epoch.load(Ordering::Acquire) != next_epoch {
+                    continue;
+                }
                 root = next_root;
                 epoch = next_epoch;
                 current_query = query;
                 entries.clear();
                 watcher = None;
                 while watch_rx.try_recv().is_ok() {}
+                rescan_requested.store(false, Ordering::Release);
                 indexed_count.store(0, Ordering::Release);
                 truncated.store(false, Ordering::Release);
 
@@ -210,9 +254,28 @@ fn run_index_worker(
 
                 if let FileIndexRoot::Local(local_root) = index_root {
                     let callback_tx = watch_tx.clone();
-                    watcher = notify::recommended_watcher(move |event| {
-                        let _ = callback_tx.send(event);
-                    })
+                    let callback_rescan = Arc::clone(&rescan_requested);
+                    let callback_root = local_root.clone();
+                    watcher = notify::recommended_watcher(
+                        move |mut event: notify::Result<notify::Event>| {
+                            if let Ok(event) = &mut event
+                                && !event.need_rescan()
+                            {
+                                if !event_changes_names(&event.kind) {
+                                    return;
+                                }
+                                event
+                                    .paths
+                                    .retain(|path| indexable_local_path(&callback_root, path));
+                                if event.paths.is_empty() {
+                                    return;
+                                }
+                            }
+                            if let Err(mpsc::TrySendError::Full(_)) = callback_tx.try_send(event) {
+                                callback_rescan.store(true, Ordering::Release);
+                            }
+                        },
+                    )
                     .ok();
                     if let Some(active_watcher) = watcher.as_mut()
                         && let Err(error) =
@@ -254,26 +317,31 @@ fn run_index_worker(
                 while let Ok(next) = command_rx.try_recv() {
                     match next {
                         IndexCommand::Query(next_request) => request = next_request,
-                        rebuild @ IndexCommand::Rebuild { .. } => {
-                            pending_command = Some(rebuild);
-                            break;
-                        },
-                        #[cfg(test)]
-                        release @ IndexCommand::ReleaseForTest(_) => {
-                            pending_command = Some(release);
+                        command => {
+                            pending_command = Some(command);
                             break;
                         },
                     }
                 }
-                current_query = Some(request);
+                current_query = request.filter(|request| request.epoch == epoch);
                 if status.load(Ordering::Acquire) == INDEX_READY
                     && desired_epoch.load(Ordering::Acquire) == epoch
+                    && let Some(request) = current_query.as_ref()
                 {
-                    publish_search_result(
-                        &entries,
-                        current_query.as_ref().expect("query was just set"),
-                        &result_slot,
-                    );
+                    publish_search_result(&entries, request, &result_slot);
+                }
+            },
+            Ok(IndexCommand::Refresh { epoch: requested_epoch }) => {
+                if requested_epoch == epoch
+                    && desired_epoch.load(Ordering::Acquire) == epoch
+                    && root.is_some()
+                    && watcher.is_none()
+                {
+                    pending_command = Some(IndexCommand::Rebuild {
+                        root: root.clone(),
+                        epoch,
+                        query: current_query.clone(),
+                    });
                 }
             },
             #[cfg(test)]
@@ -287,43 +355,60 @@ fn run_index_worker(
                 status.store(INDEX_IDLE, Ordering::Release);
                 let _ = released.send(());
             },
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let Some(FileIndexRoot::Local(local_root)) = root.as_ref() else { continue };
-                // Reading the handle here is intentional: keeping the watcher
-                // alive is what keeps platform notifications subscribed.
-                if watcher.is_none() {
-                    continue;
-                }
-                if status.load(Ordering::Acquire) != INDEX_READY {
-                    continue;
-                }
-                let mut changed_paths = Vec::new();
-                while let Ok(event) = watch_rx.try_recv() {
-                    match event {
-                        Ok(event) if event_changes_names(&event.kind) => {
-                            changed_paths.extend(event.paths);
-                        },
-                        Ok(_) => {},
-                        Err(error) => log::debug!("file-search watcher error: {error}"),
-                    }
-                }
-                if changed_paths.is_empty() {
-                    continue;
-                }
-                patch_local_index(
-                    local_root,
-                    &mut entries,
-                    changed_paths,
-                    epoch,
-                    &desired_epoch,
-                    &indexed_count,
-                );
-                truncated.store(entries.len() >= MAX_INDEX_ENTRIES, Ordering::Release);
-                if let Some(request) = current_query.as_ref() {
-                    publish_search_result(&entries, request, &result_slot);
-                }
-            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {},
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
+        if last_watch_check.elapsed() < WATCH_DEBOUNCE {
+            continue;
+        }
+        last_watch_check = Instant::now();
+        let Some(FileIndexRoot::Local(local_root)) = root.as_ref() else { continue };
+        if watcher.is_none()
+            || status.load(Ordering::Acquire) != INDEX_READY
+            || desired_epoch.load(Ordering::Acquire) != epoch
+        {
+            continue;
+        }
+        let mut changed_paths = Vec::new();
+        let mut rescan = rescan_requested.swap(false, Ordering::AcqRel);
+        for event in watch_rx.try_iter().take(WATCH_QUEUE_CAPACITY) {
+            match event {
+                Ok(event) if event.need_rescan() => rescan = true,
+                Ok(event) if event_changes_names(&event.kind) => {
+                    changed_paths.extend(event.paths);
+                },
+                Ok(_) => {},
+                Err(error) => {
+                    log::debug!("file-search watcher error: {error}");
+                    rescan = true;
+                },
+            }
+        }
+        if rescan {
+            pending_command = Some(IndexCommand::Rebuild {
+                root: root.clone(),
+                epoch,
+                query: current_query.clone(),
+            });
+            continue;
+        }
+        if changed_paths.is_empty() {
+            continue;
+        }
+        patch_local_index(
+            local_root,
+            &mut entries,
+            changed_paths,
+            epoch,
+            &desired_epoch,
+            &indexed_count,
+        );
+        if desired_epoch.load(Ordering::Acquire) != epoch {
+            continue;
+        }
+        truncated.store(entries.len() >= MAX_INDEX_ENTRIES, Ordering::Release);
+        if let Some(request) = current_query.as_ref() {
+            publish_search_result(&entries, request, &result_slot);
         }
     }
 }
@@ -348,6 +433,9 @@ fn collect_local_path(
     desired_epoch: &AtomicU64,
     entries: &mut Vec<IndexedPath>,
 ) {
+    if !indexable_local_path(root, start) {
+        return;
+    }
     let mut directories = VecDeque::new();
     if include_start {
         let Ok(file_type) = start.symlink_metadata().map(|metadata| metadata.file_type()) else {
@@ -372,7 +460,8 @@ fn collect_local_path(
         }
         let Ok(read) = std::fs::read_dir(&directory) else { continue };
         for child in read.flatten() {
-            if entries.len() >= MAX_INDEX_ENTRIES {
+            if entries.len() >= MAX_INDEX_ENTRIES || desired_epoch.load(Ordering::Acquire) != epoch
+            {
                 return;
             }
             let Ok(file_type) = child.file_type() else { continue };
@@ -382,7 +471,7 @@ fn collect_local_path(
             let name = child.file_name();
             // The normal tree intentionally hides Git's object database; the
             // search index follows that same user-visible boundary.
-            if file_type.is_dir() && name == ".git" {
+            if name == ".git" {
                 continue;
             }
             let path = child.path();
@@ -447,6 +536,12 @@ fn event_changes_names(kind: &EventKind) -> bool {
     )
 }
 
+fn indexable_local_path(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root).is_ok_and(|relative| {
+        !relative.components().any(|component| component.as_os_str() == ".git")
+    })
+}
+
 fn patch_local_index(
     root: &Path,
     entries: &mut Vec<IndexedPath>,
@@ -455,24 +550,29 @@ fn patch_local_index(
     desired_epoch: &AtomicU64,
     indexed_count: &AtomicUsize,
 ) {
-    paths.retain(|path| path.starts_with(root));
-    paths.sort_by_key(|path| path.components().count());
+    if desired_epoch.load(Ordering::Acquire) != epoch {
+        return;
+    }
+    paths.retain(|path| indexable_local_path(root, path));
+    paths.sort();
     paths.dedup();
     let mut roots: Vec<PathBuf> = Vec::new();
     for path in paths {
-        if !roots.iter().any(|parent| path.starts_with(parent)) {
+        if roots.last().is_none_or(|parent| !path.starts_with(parent)) {
             roots.push(path);
         }
     }
-    if roots.len() > 64 || roots.iter().any(|path| path == root) {
+    if roots.iter().any(|path| path == root) {
         entries.clear();
         let _ = build_local_index(root, epoch, desired_epoch, indexed_count, entries);
         return;
     }
 
-    entries.retain(|entry| {
-        !roots.iter().any(|changed| entry.path == *changed || entry.path.starts_with(changed))
-    });
+    if roots.is_empty() {
+        return;
+    }
+    let changed_roots: HashSet<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    entries.retain(|entry| !entry.path.ancestors().any(|path| changed_roots.contains(path)));
     for changed in roots {
         if entries.len() >= MAX_INDEX_ENTRIES {
             break;
@@ -552,16 +652,12 @@ fn is_word_char(character: char) -> bool {
 }
 
 fn result_score(entry: &IndexedPath, query: &str, match_case: bool) -> u8 {
-    let (name, query) = if match_case {
-        (entry.name.as_str(), query.to_owned())
-    } else {
-        (entry.name_folded.as_str(), query.to_lowercase())
-    };
+    let name = if match_case { &entry.name } else { &entry.name_folded };
     if name == query {
         0
-    } else if name.starts_with(&query) {
+    } else if name.starts_with(query) {
         1
-    } else if name.contains(&query) {
+    } else if name.contains(query) {
         2
     } else {
         3
@@ -573,6 +669,7 @@ fn search_entries(entries: &[IndexedPath], request: &SearchRequest) -> FileSearc
         Ok(matcher) => matcher,
         Err(error) => {
             return FileSearchResult {
+                epoch: request.epoch,
                 generation: request.generation,
                 query: request.query.clone(),
                 options: request.options,
@@ -582,10 +679,15 @@ fn search_entries(entries: &[IndexedPath], request: &SearchRequest) -> FileSearc
             };
         },
     };
+    let ranking_query = if request.options.match_case {
+        request.query.clone()
+    } else {
+        request.query.to_lowercase()
+    };
     let mut matches: Vec<(u8, &IndexedPath)> = entries
         .iter()
         .filter(|entry| matcher.matches(entry))
-        .map(|entry| (result_score(entry, &request.query, request.options.match_case), entry))
+        .map(|entry| (result_score(entry, &ranking_query, request.options.match_case), entry))
         .collect();
     let total = matches.len();
     let compare = |(left_score, left): &(u8, &IndexedPath),
@@ -616,6 +718,7 @@ fn search_entries(entries: &[IndexedPath], request: &SearchRequest) -> FileSearc
         })
         .collect();
     FileSearchResult {
+        epoch: request.epoch,
         generation: request.generation,
         query: request.query.clone(),
         options: request.options,
@@ -646,6 +749,7 @@ mod search_tests {
     fn plain_search_is_case_insensitive_and_ands_terms() {
         let entries = [entry("src/FileTree/SearchIndex.rs"), entry("docs/search.md")];
         let request = SearchRequest {
+            epoch: 1,
             generation: 1,
             query: "TREE index".to_owned(),
             options: FileSearchOptions::default(),
@@ -659,6 +763,7 @@ mod search_tests {
     fn case_whole_word_and_regex_options_share_one_matcher() {
         let entries = [entry("src/Foo.rs"), entry("src/foo_bar.rs"), entry("src/food.rs")];
         let whole_word = SearchRequest {
+            epoch: 1,
             generation: 1,
             query: "foo".to_owned(),
             options: FileSearchOptions { whole_word: true, ..Default::default() },
@@ -666,6 +771,7 @@ mod search_tests {
         assert_eq!(search_entries(&entries, &whole_word).total, 1);
 
         let case_sensitive = SearchRequest {
+            epoch: 1,
             generation: 2,
             query: "Foo".to_owned(),
             options: FileSearchOptions { match_case: true, ..Default::default() },
@@ -673,6 +779,7 @@ mod search_tests {
         assert_eq!(search_entries(&entries, &case_sensitive).total, 1);
 
         let regex = SearchRequest {
+            epoch: 1,
             generation: 3,
             query: r"foo(?:d|_bar)".to_owned(),
             options: FileSearchOptions { regex: true, ..Default::default() },
@@ -685,6 +792,7 @@ mod search_tests {
         let result = search_entries(
             &[entry("src/main.rs")],
             &SearchRequest {
+                epoch: 1,
                 generation: 7,
                 query: "[".to_owned(),
                 options: FileSearchOptions { regex: true, ..Default::default() },
@@ -731,5 +839,142 @@ mod search_tests {
         assert!(!entries.iter().any(|entry| entry.name == "old.txt"));
         assert!(entries.iter().any(|entry| entry.key == "new/fresh.txt"));
         assert_eq!(count.load(Ordering::Acquire), entries.len());
+    }
+
+    #[test]
+    fn large_change_batches_preserve_unrelated_index_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let epoch = AtomicU64::new(2);
+        let count = AtomicUsize::new(0);
+        let untouched = temp.path().join("untouched.txt");
+        let mut entries = vec![indexed_local_path(temp.path(), &untouched, false).unwrap()];
+        let paths: Vec<_> = (0..128)
+            .map(|number| {
+                let path = temp.path().join(format!("changed-{number}.txt"));
+                std::fs::write(&path, b"").unwrap();
+                path
+            })
+            .collect();
+        patch_local_index(temp.path(), &mut entries, paths, 2, &epoch, &count);
+
+        assert!(entries.iter().any(|entry| entry.path == untouched));
+        assert_eq!(entries.len(), 129);
+        assert_eq!(count.load(Ordering::Acquire), 129);
+    }
+
+    #[test]
+    fn local_patch_deduplicates_overlapping_paths_and_hides_git_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("src/nested");
+        let source = nested.join("needle.rs");
+        let sibling = temp.path().join("src-other");
+        let git_object = temp.path().join(".git/objects/hidden");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::create_dir_all(git_object.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"").unwrap();
+        std::fs::write(&git_object, b"").unwrap();
+        let epoch = AtomicU64::new(1);
+        let count = AtomicUsize::new(0);
+        let mut entries = Vec::new();
+        patch_local_index(
+            temp.path(),
+            &mut entries,
+            vec![
+                source.clone(),
+                sibling.clone(),
+                nested,
+                temp.path().join("src"),
+                source.clone(),
+                temp.path().join(".git"),
+                git_object,
+            ],
+            1,
+            &epoch,
+            &count,
+        );
+
+        assert_eq!(entries.iter().filter(|entry| entry.path == source).count(), 1);
+        assert!(entries.iter().any(|entry| entry.path == sibling));
+        assert!(!entries.iter().any(|entry| entry.key.contains(".git")));
+        assert_eq!(entries.len(), 4);
+    }
+
+    #[test]
+    fn cancelled_patch_leaves_index_intact() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("original.txt");
+        let mut entries = vec![indexed_local_path(temp.path(), &original, false).unwrap()];
+        let count = AtomicUsize::new(1);
+        patch_local_index(
+            temp.path(),
+            &mut entries,
+            vec![original.clone()],
+            1,
+            &AtomicU64::new(2),
+            &count,
+        );
+        assert_eq!(entries[0].path, original);
+        assert_eq!(count.load(Ordering::Acquire), 1);
+    }
+
+    fn wait_for_result(
+        index: &EmbeddedFileIndex,
+        matches: impl Fn(&FileSearchResult) -> bool,
+    ) -> FileSearchResult {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if let Some(result) = index.take_result()
+                && matches(&result)
+            {
+                return result;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("file index did not publish the expected result");
+    }
+
+    #[test]
+    fn watched_index_tracks_create_rename_delete_without_rebuilding() {
+        let temp = tempfile::tempdir().unwrap();
+        let index = EmbeddedFileIndex::new();
+        index.rebuild(
+            Some(FileIndexRoot::Local(temp.path().to_owned())),
+            1,
+            Some((1, "needle".to_owned(), FileSearchOptions::default())),
+        );
+        wait_for_result(&index, |result| result.total == 0);
+
+        let created = temp.path().join("needle.txt");
+        std::fs::write(&created, b"").unwrap();
+        wait_for_result(&index, |result| result.total == 1);
+        let renamed = temp.path().join("needle-renamed.txt");
+        std::fs::rename(&created, &renamed).unwrap();
+        wait_for_result(&index, |result| result.total == 1 && result.rows[0].path == renamed);
+        std::fs::remove_file(&renamed).unwrap();
+        wait_for_result(&index, |result| result.total == 0);
+        assert_eq!(index.desired_epoch.load(Ordering::Acquire), 1);
+        index.release_for_test();
+    }
+
+    #[test]
+    fn switching_roots_discards_queued_old_queries() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(first.path().join("needle-first.txt"), b"").unwrap();
+        std::fs::write(second.path().join("needle-second.txt"), b"").unwrap();
+        let index = EmbeddedFileIndex::new();
+        index.rebuild(Some(FileIndexRoot::Local(first.path().to_owned())), 1, None);
+        index.query(1, 1, "needle".to_owned(), FileSearchOptions::default());
+        index.rebuild(
+            Some(FileIndexRoot::Local(second.path().to_owned())),
+            2,
+            Some((2, "needle".to_owned(), FileSearchOptions::default())),
+        );
+        let result = wait_for_result(&index, |result| result.epoch == 2);
+        assert_eq!(result.generation, 2);
+        assert_eq!(result.total, 1);
+        assert_eq!(result.rows[0].name, "needle-second.txt");
+        index.release_for_test();
     }
 }

@@ -28,17 +28,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake pkg-config \
+            build-essential cmake pkg-config libasound2-dev libdbus-1-dev libudev-dev \
             libfontconfig1-dev libfreetype6-dev \
             libegl1-mesa-dev libgl1-mesa-dev \
-            libwayland-dev libxkbcommon-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libxcb1-dev libxcb-render0-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev
+            libxcb-shape0-dev libxcb-xfixes0-dev libxcb-xinput-dev libxcb-xkb-dev libxi-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
       - name: Test Lua configuration on Wayland and X11 build
-        run: cargo test -p nebula config::
+        run: |
+          cargo test --locked -p nebula config::
       - name: Check Linux release build
         run: cargo check --workspace --release

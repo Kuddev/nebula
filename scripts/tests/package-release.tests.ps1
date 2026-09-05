@@ -94,7 +94,22 @@ try {
         throw "ZIP root must contain only README.md and nebula.exe"
     }
 
-    Write-Output "package-release.tests.ps1: PASS ($($actual.Count) files)"
+    & $packageScript -Version 'unreleased' -PackageBrand Pebrel -SkipBuild -AllowStale -OutputDirectory $resolvedOutput
+    $pebrelPath = Join-Path $resolvedOutput 'Pebrel-vunreleased-windows-x64.zip'
+    $pebrelArchive = [System.IO.Compression.ZipFile]::OpenRead($pebrelPath)
+    try {
+        $pebrelFiles = @($pebrelArchive.Entries |
+            Where-Object { -not $_.FullName.EndsWith('/') } |
+            ForEach-Object { $_.FullName.Replace('\', '/') } |
+            Sort-Object)
+        if (@(Compare-Object -ReferenceObject $expected -DifferenceObject $pebrelFiles).Count -ne 0) {
+            throw 'Pebrel local packages must retain the compatible runtime layout.'
+        }
+    } finally {
+        $pebrelArchive.Dispose()
+    }
+
+    Write-Output "package-release.tests.ps1: PASS ($($actual.Count) files, both package brands)"
 } finally {
     if (Test-Path -LiteralPath $resolvedOutput) {
         Remove-Item -LiteralPath $resolvedOutput -Recurse -Force

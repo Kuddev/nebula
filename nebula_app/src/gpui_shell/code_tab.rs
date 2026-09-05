@@ -824,22 +824,17 @@ mod tests {
     use super::*;
 
     fn git(root: &Path, args: &[&str]) -> std::process::Output {
-        Command::new("git").arg("-C").arg(root).args(args).output().expect("run git")
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "user.name=Nebula Test", "-c", "user.email=nebula@example.invalid"])
+            .args(args)
+            .output()
+            .expect("run git")
     }
 
     fn commit(root: &Path, message: &str) {
-        let output = git(
-            root,
-            &[
-                "-c",
-                "user.name=Nebula Test",
-                "-c",
-                "user.email=nebula@example.invalid",
-                "commit",
-                "-m",
-                message,
-            ],
-        );
+        let output = git(root, &["commit", "-m", message]);
         assert!(
             output.status.success(),
             "git commit failed: {}",
@@ -887,6 +882,13 @@ mod tests {
 
         let merge = git(root, &["merge", "incoming"]);
         assert!(!merge.status.success(), "merge unexpectedly succeeded");
+        let unmerged = git(root, &["ls-files", "-u", "--", "conflict.txt"]);
+        assert!(
+            unmerged.status.success() && !unmerged.stdout.is_empty(),
+            "merge did not create conflict stages: {} {}",
+            String::from_utf8_lossy(&merge.stdout),
+            String::from_utf8_lossy(&merge.stderr)
+        );
 
         let key = MergeKey {
             location: GitLocation::Local { root: root.to_path_buf() },

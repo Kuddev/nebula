@@ -199,11 +199,13 @@ impl SettingsPane {
             .w(px(SETTINGS_SELECT_WIDTH))
             .min_w_0()
             .h(px(32.0))
+            .when(self.active_section == 1, |control| control.w_full().h(px(36.0)))
             .flex_shrink_0()
             .overflow_hidden()
             .child(
                 Input::new(&self.font_family_input)
                     .w_full()
+                    .when(self.active_section == 1, |input| input.h(px(36.0)))
                     .cleanable(false)
                     .aria_label(language.pick("终端字体", "Terminal font")),
             )
@@ -228,6 +230,9 @@ impl SettingsPane {
                 .absolute()
                 .size_full(),
             );
+        if self.active_section == 1 {
+            return control.into_any_element();
+        }
         self.row(
             language.pick("终端字体", "Terminal font"),
             language.tr("settings.font.fallback_description"),

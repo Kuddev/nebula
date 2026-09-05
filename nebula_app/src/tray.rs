@@ -374,12 +374,12 @@ mod win {
                 AppendMenuW(menu, MF_STRING, MENU_AGENT_BASE + index, text.as_ptr());
             }
             AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-            let show = wide("显示 Nebula");
+            let show = wide(&format!("显示 {}", crate::brand::NAME));
             AppendMenuW(menu, MF_STRING, MENU_SHOW, show.as_ptr());
             // 旧壳没有托盘「退出」：真退出是 window+detached 都空。GPUI hide
             // 之后可能只剩托盘，所以只在 GPUI 回调路径上加这一项。
             if GPUI_COMMAND.get().is_some() {
-                let quit = wide("退出 Nebula");
+                let quit = wide(&format!("退出 {}", crate::brand::NAME));
                 AppendMenuW(menu, MF_STRING, MENU_QUIT, quit.as_ptr());
             }
 
@@ -440,11 +440,11 @@ mod win {
             data.uFlags = NIF_ICON | NIF_TIP;
             data.hIcon = (if attention_count > 0 { icons.attention } else { icons.normal }) as _;
             let tip = if agent_count == 0 {
-                "Nebula".to_owned()
+                crate::brand::NAME.to_owned()
             } else if attention_count > 0 {
-                format!("Nebula — {attention_count} 个 agent 等待输入")
+                format!("{} — {attention_count} 个 agent 等待输入", crate::brand::NAME)
             } else {
-                format!("Nebula — {agent_count} 个 agent 运行中")
+                format!("{} — {agent_count} 个 agent 运行中", crate::brand::NAME)
             };
             copy_tip(&mut data.szTip, &tip);
             // SAFETY: data 完整初始化且 hwnd 属于本线程。
@@ -466,7 +466,7 @@ mod win {
                 data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
                 data.uCallbackMessage = WM_APP_TRAY;
                 data.hIcon = icons.normal as _;
-                copy_tip(&mut data.szTip, "Nebula");
+                copy_tip(&mut data.szTip, crate::brand::NAME);
                 // SAFETY: 同上；失败（如 explorer 未起）留 added=false，
                 // 下一次 WM_APP_SET 重试。
                 if unsafe { Shell_NotifyIconW(NIM_ADD, &data) } != 0 {
@@ -530,17 +530,10 @@ mod win {
 
         // SAFETY: GetSystemMetrics 无前置条件。
         let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64) as u32;
-        let bytes = crate::app_icon::png(crate::app_icon::selected(), size).unwrap_or_default();
-        let Ok(decoded) = image::load_from_memory(bytes) else {
+        let Some(base) = crate::app_icon::rgba(crate::app_icon::selected(), size) else {
             log::warn!("tray: embedded logo failed to decode");
             return (std::ptr::null_mut(), std::ptr::null_mut());
         };
-        let base = image::imageops::resize(
-            &decoded.to_rgba8(),
-            size,
-            size,
-            image::imageops::FilterType::Lanczos3,
-        );
         let normal = create_icon(size, base.as_raw());
 
         let mut attention_pixels = base.clone();

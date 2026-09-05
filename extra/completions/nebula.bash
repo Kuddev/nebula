@@ -34,17 +34,8 @@ _nebula() {
             nebula,migrate)
                 cmd="nebula__migrate"
                 ;;
-            nebula,notify-test)
-                cmd="nebula__notify__test"
-                ;;
             nebula,pane)
                 cmd="nebula__pane"
-                ;;
-            nebula,setup-ai)
-                cmd="nebula__setup__ai"
-                ;;
-            nebula,ssh)
-                cmd="nebula__ssh"
                 ;;
             nebula,tab)
                 cmd="nebula__tab"
@@ -322,17 +313,8 @@ _nebula() {
             nebula__help,migrate)
                 cmd="nebula__help__migrate"
                 ;;
-            nebula__help,notify-test)
-                cmd="nebula__help__notify__test"
-                ;;
             nebula__help,pane)
                 cmd="nebula__help__pane"
-                ;;
-            nebula__help,setup-ai)
-                cmd="nebula__help__setup__ai"
-                ;;
-            nebula__help,ssh)
-                cmd="nebula__help__ssh"
                 ;;
             nebula__help,tab)
                 cmd="nebula__help__tab"
@@ -599,7 +581,7 @@ _nebula() {
 
     case "${cmd}" in
         nebula)
-            opts="-q -v -e -T -o -h -V --print-events --ref-test --embed --gpui --config-file --daemon --working-directory --hold --command --title --class --option --help --version ctl env window tab pane agent migrate config notify-test setup-ai ssh help"
+            opts="-q -v -e -T -o -h -V --print-events --ref-test --embed --gpui --config-file --socket --daemon --working-directory --hold --command --title --class --option --help --version ctl env window tab pane agent migrate config help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -610,6 +592,21 @@ _nebula() {
                     return 0
                     ;;
                 --config-file)
+                    local oldifs
+                    if [ -n "${IFS+x}" ]; then
+                        oldifs="$IFS"
+                    fi
+                    IFS=$'\n'
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    if [ -n "${oldifs+x}" ]; then
+                        IFS="$oldifs"
+                    fi
+                    if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then
+                        compopt -o filenames
+                    fi
+                    return 0
+                    ;;
+                --socket)
                     local oldifs
                     if [ -n "${IFS+x}" ]; then
                         oldifs="$IFS"
@@ -2499,7 +2496,7 @@ _nebula() {
             return 0
             ;;
         nebula__help)
-            opts="ctl env window tab pane agent migrate config notify-test setup-ai ssh help"
+            opts="ctl env window tab pane agent migrate config help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3142,20 +3139,6 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__notify__test)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         nebula__help__pane)
             opts="list read send paste wait exec close zoom resize"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -3296,34 +3279,6 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__setup__ai)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        nebula__help__ssh)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         nebula__help__tab)
             opts="close rename move"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -3445,20 +3400,6 @@ _nebula() {
                     fi
                     return 0
                     ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        nebula__notify__test)
-            opts="-h --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
                 *)
                     COMPREPLY=()
                     ;;
@@ -3868,34 +3809,6 @@ _nebula() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        nebula__setup__ai)
-            opts="-h --remove --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        nebula__ssh)
-            opts="-h --help [ARGS]..."
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
                 *)
                     COMPREPLY=()
                     ;;

@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_nebula_global_optspecs
-	string join \n print-events ref-test embed= gpui config-file= q v daemon working-directory= hold e/command= T/title= class= o/option= h/help V/version
+	string join \n print-events ref-test embed= gpui config-file= socket= q v daemon working-directory= hold e/command= T/title= class= o/option= h/help V/version
 end
 
 function __fish_nebula_needs_command
@@ -24,11 +24,12 @@ function __fish_nebula_using_subcommand
 	contains -- $cmd[1] $argv
 end
 
-complete -c nebula -n "__fish_nebula_needs_command" -l embed -d 'X11 window ID to embed Nebula within (decimal or hexadecimal with "0x" prefix)' -r
-complete -c nebula -n "__fish_nebula_needs_command" -l config-file -d 'Specify alternative configuration file [default: %APPDATA%\\nebula\\nebula.toml]' -r -F
+complete -c nebula -n "__fish_nebula_needs_command" -l embed -d 'X11 window ID to embed Pebrel within (decimal or hexadecimal with "0x" prefix)' -r
+complete -c nebula -n "__fish_nebula_needs_command" -l config-file -d 'Specify an alternative configuration file.' -r -F
+complete -c nebula -n "__fish_nebula_needs_command" -l socket -d 'Path for IPC socket creation' -r -F
 complete -c nebula -n "__fish_nebula_needs_command" -l working-directory -d 'Start the shell in the specified working directory' -r -F
 complete -c nebula -n "__fish_nebula_needs_command" -s e -l command -d 'Command and args to execute (must be last argument)' -r
-complete -c nebula -n "__fish_nebula_needs_command" -s T -l title -d 'Defines the window title [default: Nebula Terminal]' -r
+complete -c nebula -n "__fish_nebula_needs_command" -s T -l title -d 'Defines the window title [default: Pebrel]' -r
 complete -c nebula -n "__fish_nebula_needs_command" -l class -d 'Defines window class/app_id on X11/Wayland [default: Nebula]' -r
 complete -c nebula -n "__fish_nebula_needs_command" -s o -l option -d 'Override configuration file options [example: \'cursor.style="Beam"\']' -r
 complete -c nebula -n "__fish_nebula_needs_command" -l print-events -d 'Print all events to STDOUT'
@@ -48,9 +49,6 @@ complete -c nebula -n "__fish_nebula_needs_command" -f -a "pane" -d 'Inspect and
 complete -c nebula -n "__fish_nebula_needs_command" -f -a "agent" -d 'Inspect and drive the AI agents running in panes: list, send, read, wait'
 complete -c nebula -n "__fish_nebula_needs_command" -f -a "migrate" -d 'Migrate the configuration file'
 complete -c nebula -n "__fish_nebula_needs_command" -f -a "config" -d 'Validate or create the Nebula configuration'
-complete -c nebula -n "__fish_nebula_needs_command" -f -a "notify-test" -d 'Test system notification (toast) delivery'
-complete -c nebula -n "__fish_nebula_needs_command" -f -a "setup-ai" -d 'Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code'
-complete -c nebula -n "__fish_nebula_needs_command" -f -a "ssh" -d 'SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system `ssh`'
 complete -c nebula -n "__fish_nebula_needs_command" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c nebula -n "__fish_nebula_using_subcommand ctl; and not __fish_seen_subcommand_from describe snapshot orchestrate agents agent-start agent-fork agent-get agent-prompt agent-paste agent-read agent-wait subscribe new-window close-window focus new-tab close-tab rename-tab move-tab split close-pane zoom-pane resize-pane prompt paste read procs send-key run exec-pane wait help" -l timeout-ms -d 'Maximum time to wait for a command response' -r
 complete -c nebula -n "__fish_nebula_using_subcommand ctl; and not __fish_seen_subcommand_from describe snapshot orchestrate agents agent-start agent-fork agent-get agent-prompt agent-paste agent-read agent-wait subscribe new-window close-window focus new-tab close-tab rename-tab move-tab split close-pane zoom-pane resize-pane prompt paste read procs send-key run exec-pane wait help" -l pretty -d 'Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines'
@@ -516,22 +514,15 @@ complete -c nebula -n "__fish_nebula_using_subcommand config; and __fish_seen_su
 complete -c nebula -n "__fish_nebula_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "check" -d 'Validate a Lua, TOML, or YAML configuration without opening the GUI'
 complete -c nebula -n "__fish_nebula_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "init" -d 'Create an annotated Lua configuration template'
 complete -c nebula -n "__fish_nebula_using_subcommand config; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c nebula -n "__fish_nebula_using_subcommand notify-test" -s h -l help -d 'Print help'
-complete -c nebula -n "__fish_nebula_using_subcommand setup-ai" -l remove -d 'Remove Nebula\'s hooks from claude\'s settings.json instead of installing them'
-complete -c nebula -n "__fish_nebula_using_subcommand setup-ai" -s h -l help -d 'Print help'
-complete -c nebula -n "__fish_nebula_using_subcommand ssh" -s h -l help -d 'Print help'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "ctl" -d 'Agent-oriented terminal control: split panes, run commands, start Codex/Claude, send prompts, wait for state changes, and read verified terminal output'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "env" -d 'Report this pane\'s terminal identity, the control-plane path, and every command available to it. Answers even with no runtime reachable, so an agent can always discover what it has instead of guessing'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "window" -d 'Control terminal windows'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "tab" -d 'Control tabs within one terminal window'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "pane" -d 'Inspect and drive terminal panes: list, read, send, paste, wait, and change layout'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "agent" -d 'Inspect and drive the AI agents running in panes: list, send, read, wait'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "migrate" -d 'Migrate the configuration file'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "config" -d 'Validate or create the Nebula configuration'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "notify-test" -d 'Test system notification (toast) delivery'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "setup-ai" -d 'Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "ssh" -d 'SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system `ssh`'
-complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config notify-test setup-ai ssh help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config help" -f -a "ctl" -d 'Agent-oriented terminal control: split panes, run commands, start Codex/Claude, send prompts, wait for state changes, and read verified terminal output'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config help" -f -a "env" -d 'Report this pane\'s terminal identity, the control-plane path, and every command available to it. Answers even with no runtime reachable, so an agent can always discover what it has instead of guessing'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config help" -f -a "window" -d 'Control terminal windows'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config help" -f -a "tab" -d 'Control tabs within one terminal window'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config help" -f -a "pane" -d 'Inspect and drive terminal panes: list, read, send, paste, wait, and change layout'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config help" -f -a "agent" -d 'Inspect and drive the AI agents running in panes: list, send, read, wait'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config help" -f -a "migrate" -d 'Migrate the configuration file'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config help" -f -a "config" -d 'Validate or create the Nebula configuration'
+complete -c nebula -n "__fish_nebula_using_subcommand help; and not __fish_seen_subcommand_from ctl env window tab pane agent migrate config help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from ctl" -f -a "describe" -d 'Describe the protocol version, runtime version, and available capabilities'
 complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from ctl" -f -a "snapshot" -d 'Read the authoritative window, tab, pane, and task-state projection'
 complete -c nebula -n "__fish_nebula_using_subcommand help; and __fish_seen_subcommand_from ctl" -f -a "orchestrate" -d 'Execute one typed multi-step terminal workflow in a single Runtime request'

@@ -17,18 +17,18 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("nebula_app/src/display/mod.rs", 12000),
     ("nebula_app/src/display/settings.rs", 8650),
     // 2026-08-31 下调（5150 → 4980）：VCS 抽屉页搬到 workspace/vcs_panel.rs。
-    ("nebula_app/src/gpui_shell/workspace.rs", 4980),
+    ("nebula_app/src/gpui_shell/workspace.rs", 4920),
     // 2026-08-17 下调（3600 → 3550）：网络区拆到 network_settings.rs。
-    ("nebula_app/src/gpui_shell/settings_pane.rs", 3550),
+    ("nebula_app/src/gpui_shell/settings_pane.rs", 3120),
     ("nebula_app/src/display/command_palette.rs", 3980),
-    ("nebula_app/src/window_context.rs", 3800),
-    ("nebula_app/src/event.rs", 3780),
-    ("nebula_terminal/src/term/mod.rs", 3650),
+    ("nebula_app/src/window_context.rs", 3750),
+    ("nebula_app/src/event.rs", 3620),
+    ("nebula_terminal/src/term/mod.rs", 2760),
     // 2026-08-17 上调（2900 → 2970）：draw_overlays 几何抽成两壳共享的 plan。
-    ("nebula_app/src/display/terminal_math.rs", 2970),
+    ("nebula_app/src/display/terminal_math.rs", 2800),
     // 2026-08-31 条目删除：side_panel.rs（4031 行）拆成 side_panel/{mod,vcs,
     // enumerate,render,tests}.rs，最大的 render.rs 也只有 869 行，全部在红线内。
-    ("nebula_app/src/gpui_shell/terminal/view.rs", 2540),
+    ("nebula_app/src/gpui_shell/terminal/view.rs", 2460),
     ("nebula_app/src/display/chrome.rs", 2550),
     ("nebula_app/src/display/markdown_view.rs", 2150),
 ];

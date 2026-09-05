@@ -677,7 +677,7 @@ mod tests {
 
         assert_eq!(
             fixture.ghost(SuggestEnv::Local, &cwd, "ls host-only-"),
-            "dir\\",
+            format!("dir{}", std::path::MAIN_SEPARATOR),
             "本机 tab 的 std::fs 就是这个 pane 的文件系统（补到目录带尾分隔符）"
         );
         for env in [

@@ -34,11 +34,18 @@ use crate::gpui_shell::config::{DEFAULT_CURSOR_BLINK, effective_cursor_blink};
 use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::widgets::NebulaButton;
 
+mod about;
 mod app_icon;
+mod appearance;
+mod appearance_advanced;
+mod appearance_picker;
 #[path = "background_color.rs"]
 mod background_color;
+mod backup;
 mod design;
 mod font_picker;
+mod providers;
+mod theme_picker;
 
 mod keymap;
 
@@ -137,18 +144,6 @@ const SETTINGS_ROW_GAP: f32 = 8.0;
 /// 标准设置选择器的实际宽度。字体输入与 Select 共用，避免同列控件漂移。
 const SETTINGS_SELECT_WIDTH: f32 = 220.0;
 
-const THEME_NAMES: [ThemeName; 9] = [
-    ThemeName::Nebula,
-    ThemeName::SilverLight,
-    ThemeName::SteelDark,
-    ThemeName::LimestoneLight,
-    ThemeName::CoalDark,
-    ThemeName::LinenLight,
-    ThemeName::MossDark,
-    ThemeName::Nord,
-    ThemeName::Paper,
-];
-
 /// 列表/触发条上的展示名：族名偶尔带着导入文件后缀，界面上剥掉。
 fn font_display_name(name: &str) -> String {
     let trimmed = name.trim();
@@ -234,7 +229,9 @@ fn issue_url() -> String {
     };
     let build = if cfg!(debug_assertions) { "debug" } else { "release" };
     let logs = format!(
-        "Reported from Nebula Settings (Nebula {version}).\n\nPlatform: {} {}\nBuild: {build}",
+        "Reported from {} Settings ({} {version}).\n\nPlatform: {} {}\nBuild: {build}",
+        crate::brand::NAME,
+        crate::brand::NAME,
         std::env::consts::OS,
         std::env::consts::ARCH,
     );
@@ -375,8 +372,11 @@ fn localized_input_placeholder(key: &str, language: crate::display::UiLanguage) 
         "ssh_label" => language.pick("例如：开发服务器", "e.g. Development server"),
         "ssh_password" => language.pick("留空则连接时询问", "Leave empty to ask when connecting"),
         "ssh_proxy_username" => language.pick("可选", "Optional"),
-        "ssh_proxy_password" => language.pick("留空则保留已存密码", "Leave empty to keep the saved password"),
-        "ssh_jump_host" => language.pick("user@bastion:22 或 SSH config 别名", "user@bastion:22 or SSH config alias"),
+        "ssh_proxy_password" => {
+            language.pick("留空则保留已存密码", "Leave empty to keep the saved password")
+        },
+        "ssh_jump_host" => language
+            .pick("user@bastion:22 或 SSH config 别名", "user@bastion:22 or SSH config alias"),
         "ssh_icon_filter" => language.pick("搜索图标…", "Search icons..."),
         "font_family" => language.pick("输入字体名称", "Enter a font family"),
         "backup_password" => {
@@ -657,8 +657,8 @@ impl SshStatus {
             },
             Self::DeleteCommitted { hidden_config: true } => language
                 .pick(
-                    "已隐藏 config 别名，并清理 Nebula Profile 与凭据",
-                    "Config alias hidden; Nebula profile and credentials removed",
+                    "已隐藏 config 别名，并清理 Pebrel Profile 与凭据",
+                    "Config alias hidden; Pebrel profile and credentials removed",
                 )
                 .into(),
             Self::DeleteCommitted { hidden_config: false } => language
@@ -904,6 +904,11 @@ pub struct SettingsPane {
     pub(super) runtime: RuntimeSettings,
     /// 当前分区（`SECTIONS` 下标）；默认落在应用主页。
     active_section: usize,
+    appearance_picker: Option<appearance_picker::AppearancePicker>,
+    theme_picker_trigger: FocusHandle,
+    icon_picker_trigger: FocusHandle,
+    typography_expanded: bool,
+    appearance_advanced_expanded: bool,
     about_update: AboutUpdateState,
     about_update_seq: u64,
     about_last_checked: Option<String>,
@@ -1381,21 +1386,25 @@ impl SettingsPane {
             InputState::new(window, cx)
                 .placeholder(localized_input_placeholder("ssh_icon_filter", language))
         });
-        let ssh_proxy_host_input = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
+        let ssh_proxy_host_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
         let ssh_proxy_port_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("1080")
                 .pattern(regex::Regex::new(r"^\d{0,5}$").expect("static regex"))
         });
         let ssh_proxy_username_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(localized_input_placeholder("ssh_proxy_username", language))
+            InputState::new(window, cx)
+                .placeholder(localized_input_placeholder("ssh_proxy_username", language))
         });
         let ssh_proxy_password_input = cx.new(|cx| {
-            InputState::new(window, cx).masked(true)
+            InputState::new(window, cx)
+                .masked(true)
                 .placeholder(localized_input_placeholder("ssh_proxy_password", language))
         });
         let ssh_jump_host_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(localized_input_placeholder("ssh_jump_host", language))
+            InputState::new(window, cx)
+                .placeholder(localized_input_placeholder("ssh_jump_host", language))
         });
         for input in [
             ssh_username_input.clone(),
@@ -1445,6 +1454,8 @@ impl SettingsPane {
             }
         });
         subscriptions.push(cx.intercept_keystrokes(keymap_interceptor));
+        let appearance_interceptor = cx.listener(Self::intercept_appearance_picker);
+        subscriptions.push(cx.intercept_keystrokes(appearance_interceptor));
 
         let settings_search_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(language.pick(
@@ -1470,6 +1481,11 @@ impl SettingsPane {
             focus_handle: cx.focus_handle(),
             runtime,
             active_section: 0,
+            appearance_picker: None,
+            theme_picker_trigger: cx.focus_handle(),
+            icon_picker_trigger: cx.focus_handle(),
+            typography_expanded: false,
+            appearance_advanced_expanded: false,
             about_update: AboutUpdateState::Idle,
             about_update_seq: 0,
             about_last_checked: None,
@@ -1584,11 +1600,19 @@ impl SettingsPane {
 
     /// 写盘 → 重载单一事实源与全局 `Settings` → 通知宿主热应用。
     pub(super) fn persist(&mut self, updates: &[(&str, String)], cx: &mut Context<Self>) {
-        if let Err(err) = persist_keys(updates) {
+        if let Err(err) = self.try_persist(updates, cx) {
             super::try_write_stderr(format_args!(
                 "[nebula:gpui] failed to persist settings: {err}"
             ));
         }
+    }
+
+    fn try_persist(
+        &mut self,
+        updates: &[(&str, String)],
+        cx: &mut Context<Self>,
+    ) -> std::io::Result<()> {
+        persist_keys(updates)?;
         self.runtime = RuntimeSettings::load();
         let settings = crate::gpui_shell::config::Settings::load(
             crate::gpui_shell::theme::effective_theme_name(cx),
@@ -1600,6 +1624,7 @@ impl SettingsPane {
         }
         cx.emit(SettingsPaneEvent::Changed);
         cx.notify();
+        Ok(())
     }
 
     /// 语言切换不重建输入/下拉实体：重建会丢焦点、编辑值、undo 和订阅。
@@ -1726,10 +1751,13 @@ impl SettingsPane {
 
     /// 旧壳“恢复默认设置”只重置外观，不触碰 Shell、SSH、快捷键等业务配置。
     fn reset_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_font_picker(window, false, cx);
         self.persist(
             &[
                 ("theme", "Nebula".to_owned()),
                 ("app_icon", nebula_settings::AppIconName::default().settings_value().to_owned()),
+                ("font_family", String::new()),
+                ("font_size", String::new()),
                 ("follow_system_theme", "0".to_owned()),
                 ("opacity", "1".to_owned()),
                 ("background", String::new()),
@@ -1741,6 +1769,9 @@ impl SettingsPane {
             ],
             cx,
         );
+        self.typography_expanded = false;
+        let family = self.current_font_chain(cx);
+        self.font_family_input.update(cx, |input, cx| input.set_value(family, window, cx));
         self.sync_background_color_picker(window, cx);
     }
 
@@ -1997,139 +2028,6 @@ impl SettingsPane {
         )
     }
 
-    fn appearance_preview(&self, cx: &Context<Self>) -> gpui::Div {
-        let theme = chrome_theme(crate::gpui_shell::theme::effective_theme_name(cx));
-        let palette = theme.palette();
-        let ink = theme.card_ink().fg;
-        let background = if self.runtime.follow_system_theme {
-            [palette.term_bg.r, palette.term_bg.g, palette.term_bg.b]
-        } else {
-            self.runtime.background.unwrap_or([
-                palette.term_bg.r,
-                palette.term_bg.g,
-                palette.term_bg.b,
-            ])
-        };
-        let family = cx
-            .try_global::<crate::gpui_shell::config::Settings>()
-            .map(|settings| settings.font_family.clone())
-            .unwrap_or_else(|| crate::font_install::REQUIRED_FONT_FAMILY.to_owned());
-        let size = self.terminal_font_size_px(cx).clamp(11.0, 20.0);
-        let foreground = rgb_hsla(ink.r, ink.g, ink.b);
-        let accent = theme.accent();
-
-        v_flex()
-            .w_full()
-            .h(px(150.0))
-            .p_4()
-            .gap_1()
-            .rounded_lg()
-            .bg(rgb_hsla(background[0], background[1], background[2]))
-            .font(crate::font_install::gpui_font_with_fallbacks(&family))
-            .text_size(px(size))
-            .text_color(foreground)
-            .child("user@nebula ~ $ nebula --version")
-            .child(format!(
-                "Nebula Terminal · {} · {:.0}px",
-                self.runtime
-                    .font_family
-                    .as_deref()
-                    .unwrap_or(crate::font_install::REQUIRED_FONT_FAMILY),
-                size
-            ))
-            .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(div().text_color(rgb_hsla(accent.r, accent.g, accent.b)).child("❯"))
-                    .child(div().w(px(8.0)).h(px(size)).bg(foreground)),
-            )
-    }
-
-    fn theme_previews(&self, cx: &mut Context<Self>) -> gpui::Div {
-        h_flex().w_full().flex_wrap().gap(px(20.0)).children(THEME_NAMES.into_iter().map(|name| {
-            let theme = chrome_theme(name);
-            let palette = theme.palette();
-            let accent = theme.accent();
-            let selected = crate::gpui_shell::theme::effective_theme_name(cx) == name;
-            v_flex()
-                .id(SharedString::from(format!("theme-preview-{}", name.prompt_name())))
-                .w(px(170.0))
-                .h(px(92.0))
-                .gap_2()
-                .cursor_pointer()
-                .child(
-                    v_flex()
-                        .h(px(64.0))
-                        .flex_shrink_0()
-                        .p_2()
-                        .gap_1()
-                        .rounded_lg()
-                        .bg(rgb_hsla(palette.shell_bg.r, palette.shell_bg.g, palette.shell_bg.b))
-                        .when(selected, |card| {
-                            card.border_1().border_color(rgb_hsla(accent.r, accent.g, accent.b))
-                        })
-                        .when(!selected, |card| card.hover(|style| style.shadow_md()))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .p_2()
-                                .gap_1()
-                                .rounded_md()
-                                .bg(rgb_hsla(
-                                    palette.term_bg.r,
-                                    palette.term_bg.g,
-                                    palette.term_bg.b,
-                                ))
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .w(px(10.0))
-                                                .h(px(4.0))
-                                                .rounded_full()
-                                                .bg(rgb_hsla(accent.r, accent.g, accent.b)),
-                                        )
-                                        .child(div().w(px(52.0)).h(px(4.0)).rounded_full().bg(
-                                            rgb_hsla(
-                                                theme.card_ink().fg.r,
-                                                theme.card_ink().fg.g,
-                                                theme.card_ink().fg.b,
-                                            ),
-                                        )),
-                                )
-                                .child(div().w(px(82.0)).h(px(4.0)).rounded_full().bg(rgb_hsla(
-                                    palette.edge_l.r,
-                                    palette.edge_l.g,
-                                    palette.edge_l.b,
-                                )))
-                                .child(div().w(px(58.0)).h(px(4.0)).rounded_full().bg(rgb_hsla(
-                                    palette.edge_r.r,
-                                    palette.edge_r.g,
-                                    palette.edge_r.b,
-                                ))),
-                        ),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .text_xs()
-                        .text_center()
-                        .text_color(if selected {
-                            rgb_hsla(accent.r, accent.g, accent.b)
-                        } else {
-                            cx.theme().muted_foreground
-                        })
-                        .child(theme.short_label()),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.persist(&crate::gpui_shell::theme::theme_card_persist_updates(name), cx);
-                    this.sync_background_color_picker(window, cx);
-                }))
-        }))
-    }
-
     /// 布尔项 = 滑动开关（旧壳设置的液态胶囊 toggle），不是勾选框。
     /// 四通道动画对照 `SettingsToggleAnim`（LiquidToggle 过冲 / 按住拉伸 / recoil）。
 
@@ -2270,8 +2168,8 @@ impl SettingsPane {
         self.row(
             language.pick("启动目录", "Startup directory"),
             language.pick(
-                "新标签落在哪个目录。不设则继承 Nebula 自己的工作目录，从资源管理器右键进来时就是那个文件夹。",
-                "Chooses the directory for new tabs. When unset, they inherit Nebula's working directory, such as the folder used to launch it from File Explorer.",
+                "新标签落在哪个目录。不设则继承 Pebrel 自己的工作目录，从资源管理器右键进来时就是那个文件夹。",
+                "Chooses the directory for new tabs. When unset, they inherit Pebrel's working directory, such as the folder used to launch it from File Explorer.",
             ),
             h_flex()
                 .gap_2()
@@ -2363,41 +2261,6 @@ impl SettingsPane {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let value = state.read(cx).value().to_string();
                             this.persist(&[(key, value)], cx);
-                        })),
-                ),
-            cx,
-        )
-    }
-
-    fn stepper_row(
-        &self,
-        label: &'static str,
-        desc: &'static str,
-        id: &'static str,
-        display: SharedString,
-        on_minus: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        on_plus: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        self.row(
-            label,
-            desc,
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(
-                    NebulaButton::new(SharedString::from(format!("minus-{id}")))
-                        .label("−")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            on_minus(this, cx);
-                        })),
-                )
-                .child(div().min_w(px(64.0)).child(display))
-                .child(
-                    NebulaButton::new(SharedString::from(format!("plus-{id}")))
-                        .label("+")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            on_plus(this, cx);
                         })),
                 ),
             cx,
@@ -2497,183 +2360,6 @@ impl SettingsPane {
         )
     }
 
-    fn active_provider_index(&self) -> Option<usize> {
-        self.provider_store
-            .providers
-            .iter()
-            .position(|provider| provider.id == self.provider_store.active_id)
-            .or_else(|| (!self.provider_store.providers.is_empty()).then_some(0))
-    }
-
-    fn sync_provider_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self.active_provider_index() else { return };
-        let draft =
-            crate::ai_providers::ProviderMetadataDraft::from(&self.provider_store.providers[index]);
-        let values = [draft.name, draft.note, draft.website_url, draft.base_url, draft.model];
-        for (input, value) in self.provider_inputs.iter().zip(values) {
-            input.update(cx, |input, cx| input.set_value(value, window, cx));
-        }
-    }
-
-    fn select_provider(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.provider_store.providers.iter().any(|provider| provider.id == id) {
-            self.provider_store.active_id = id;
-            let _ = crate::ai_providers::save(&self.provider_store);
-            self.provider_codex_confirm = None;
-            self.provider_status = None;
-            self.sync_provider_inputs(window, cx);
-            cx.notify();
-        }
-    }
-
-    fn save_provider_metadata(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(index) = self.active_provider_index() else { return false };
-        let values: Vec<String> =
-            self.provider_inputs.iter().map(|input| input.read(cx).value().to_string()).collect();
-        let draft = crate::ai_providers::ProviderMetadataDraft {
-            name: values[0].clone(),
-            note: values[1].clone(),
-            website_url: values[2].clone(),
-            base_url: values[3].clone(),
-            model: values[4].clone(),
-        };
-        crate::ai_providers::apply_metadata_draft(&mut self.provider_store.providers[index], draft);
-        match crate::ai_providers::save(&self.provider_store) {
-            Ok(()) => {
-                self.provider_status = Some(ProviderStatus::Saved);
-                true
-            },
-            Err(error) => {
-                self.provider_status = Some(ProviderStatus::Error(error.to_string()));
-                false
-            },
-        }
-    }
-
-    fn add_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.save_provider_metadata(cx);
-        let id = crate::ai_providers::next_custom_id(&self.provider_store);
-        self.provider_store.providers.push(crate::ai_providers::AiProvider::preset(
-            crate::ai_providers::ProviderKind::Custom,
-            &id,
-        ));
-        self.provider_store.active_id = id;
-        self.provider_codex_confirm = None;
-        match crate::ai_providers::save(&self.provider_store) {
-            Ok(()) => self.provider_status = Some(ProviderStatus::Added),
-            Err(error) => self.provider_status = Some(ProviderStatus::Error(error.to_string())),
-        }
-        self.sync_provider_inputs(window, cx);
-        cx.notify();
-    }
-
-    fn delete_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self.active_provider_index() else { return };
-        if self.provider_store.providers.len() <= 1 {
-            self.provider_status = Some(ProviderStatus::AtLeastOneRequired);
-            cx.notify();
-            return;
-        }
-        let id = self.provider_store.providers[index].id.clone();
-        match crate::ai_providers::remove_provider(&mut self.provider_store, &id) {
-            Ok(()) => {
-                self.provider_status = Some(ProviderStatus::Deleted);
-                self.provider_codex_confirm = None;
-                self.sync_provider_inputs(window, cx);
-            },
-            Err(error) => self.provider_status = Some(ProviderStatus::Error(error.to_string())),
-        }
-        cx.notify();
-    }
-
-    fn toggle_provider_flag(&mut self, flag: &'static str, value: bool, cx: &mut Context<Self>) {
-        let Some(index) = self.active_provider_index() else { return };
-        let provider = &mut self.provider_store.providers[index];
-        match flag {
-            "enabled" => provider.enabled = value,
-            "codex_goals" => provider.codex_goals = value,
-            "codex_remote_compaction" => provider.codex_remote_compaction = value,
-            _ => return,
-        }
-        self.provider_codex_confirm = None;
-        if let Err(error) = crate::ai_providers::save(&self.provider_store) {
-            self.provider_status = Some(ProviderStatus::Error(error.to_string()));
-        }
-        cx.notify();
-    }
-
-    fn prompt_provider_key(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.active_provider_index() else { return };
-        let provider = &mut self.provider_store.providers[index];
-        match crate::ai_providers::prompt_and_store_api_key(provider) {
-            Ok(true) => {
-                self.provider_status = Some(ProviderStatus::ApiKeySaved);
-                if let Err(error) = crate::ai_providers::save(&self.provider_store) {
-                    self.provider_status = Some(ProviderStatus::Error(error.to_string()));
-                }
-            },
-            Ok(false) => {},
-            Err(error) => self.provider_status = Some(ProviderStatus::Error(error.to_string())),
-        }
-        cx.notify();
-    }
-
-    fn test_provider(&mut self, cx: &mut Context<Self>) {
-        if self.provider_test_running || !self.save_provider_metadata(cx) {
-            return;
-        }
-        let Some(index) = self.active_provider_index() else { return };
-        let provider = self.provider_store.providers[index].clone();
-        self.provider_test_seq = self.provider_test_seq.wrapping_add(1);
-        let sequence = self.provider_test_seq;
-        self.provider_test_running = true;
-        self.provider_status = Some(ProviderStatus::Testing);
-
-        let task = cx
-            .background_executor()
-            .spawn(async move { crate::ai_providers::test_provider(&provider) });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |pane, cx| {
-                if sequence != pane.provider_test_seq
-                    || result.provider_id != pane.provider_store.active_id
-                {
-                    return;
-                }
-                pane.provider_test_running = false;
-                pane.provider_status = Some(ProviderStatus::TestResult {
-                    outcome: result.outcome,
-                    elapsed_ms: result.elapsed_ms,
-                });
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn apply_provider_to_codex(&mut self, cx: &mut Context<Self>) {
-        if !self.save_provider_metadata(cx) {
-            return;
-        }
-        let Some(index) = self.active_provider_index() else { return };
-        let provider = self.provider_store.providers[index].clone();
-        if self.provider_codex_confirm.as_deref() != Some(provider.id.as_str()) {
-            self.provider_codex_confirm = Some(provider.id);
-            self.provider_status = Some(ProviderStatus::CodexConfirmation);
-            cx.notify();
-            return;
-        }
-        self.provider_codex_confirm = None;
-        self.provider_status = Some(match crate::codex_config::apply_provider(&provider) {
-            Ok(path) => ProviderStatus::AppliedToCodex(path),
-            Err(error) => ProviderStatus::Error(error),
-        });
-        cx.notify();
-    }
-
-    // ---- 分区内容（归属对照旧壳各 section）----
-
     fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.about_update, AboutUpdateState::Checking) {
             return;
@@ -2711,394 +2397,6 @@ impl SettingsPane {
         cx.notify();
     }
 
-    fn about_action_row(
-        id: &'static str,
-        icon: IconName,
-        title: &'static str,
-        url: String,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let hover = cx.theme().list_hover;
-        h_flex()
-            .id(id)
-            .w_full()
-            .h(px(48.0))
-            .px_1()
-            .gap_3()
-            .items_center()
-            .rounded_md()
-            .cursor_pointer()
-            .hover(move |row| row.bg(hover))
-            .on_click(move |_, _, cx| cx.open_url(&url))
-            .child(Icon::new(icon).small().text_color(muted))
-            .child(div().flex_1().min_w_0().child(title))
-            .child(Icon::new(IconName::ExternalLink).xsmall().text_color(muted))
-            .into_any_element()
-    }
-
-    fn about_value_row(
-        label: &'static str,
-        value: impl IntoElement,
-        cx: &Context<Self>,
-    ) -> gpui::Div {
-        h_flex()
-            .w_full()
-            .min_h(px(48.0))
-            .py_2()
-            .items_center()
-            .justify_between()
-            .gap_4()
-            .child(div().flex_1().min_w_0().text_color(cx.theme().foreground).child(label))
-            .child(value)
-    }
-
-    fn section_home(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let language = crate::gpui_shell::config::ui_language(cx);
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let ink = theme.foreground;
-        let hairline = theme.border;
-        let success = theme.success;
-        let warning = theme.warning;
-        let danger = theme.danger;
-        let base_px = self.font_size_px(cx);
-        let checking = matches!(self.about_update, AboutUpdateState::Checking);
-        let (status, status_color): (SharedString, Hsla) = match &self.about_update {
-            AboutUpdateState::Idle => (language.pick("尚未检查", "Not checked yet").into(), muted),
-            AboutUpdateState::Checking => {
-                (language.pick("正在检查更新…", "Checking for updates...").into(), muted)
-            },
-            AboutUpdateState::UpToDate(latest) => (
-                format!("{} (GitHub v{latest})", language.pick("已是最新版本", "Up to date"))
-                    .into(),
-                success,
-            ),
-            AboutUpdateState::Available(latest) => (
-                format!("{} v{latest}", language.pick("发现新版本", "New version available"))
-                    .into(),
-                warning,
-            ),
-            AboutUpdateState::Failed(error) => (
-                format!("{}: {error}", language.pick("检查失败", "Update check failed")).into(),
-                danger,
-            ),
-        };
-        let update_button = NebulaButton::new("about-check-updates")
-            .label(if checking {
-                language.pick("正在检查…", "Checking...")
-            } else {
-                language.pick("检查更新", "Check for updates")
-            })
-            .primary()
-            .disabled(checking)
-            .on_click(cx.listener(|this, _, window, cx| this.check_for_updates(window, cx)));
-
-        let status_badge = h_flex()
-            .min_w_0()
-            .max_w(px(360.0))
-            .gap_1()
-            .items_center()
-            .text_size(px(base_px * 0.82))
-            .text_color(status_color)
-            .when(matches!(self.about_update, AboutUpdateState::UpToDate(_)), |badge| {
-                badge.child(Icon::new(IconName::Check).xsmall())
-            })
-            .child(div().min_w_0().truncate().child(status));
-        let identity =
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap(px(24.0))
-                .pb(px(64.0))
-                .when_some(crate::app_icon::preview(crate::app_icon::selected()), |row, logo| {
-                    row.child(img(logo).size(px(96.0)).flex_shrink_0())
-                })
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(7.0))
-                        .child(
-                            div()
-                                .text_size(px(base_px * 2.15))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(ink)
-                                .child("Nebula"),
-                        )
-                        .child(div().text_color(muted).child(
-                            language.pick(
-                                "GPU 加速终端 · Windows",
-                                "GPU-accelerated terminal · Windows",
-                            ),
-                        ))
-                        .child(
-                            h_flex()
-                                .mt(px(12.0))
-                                .items_center()
-                                .gap_4()
-                                .child(
-                                    div()
-                                        .text_size(px(base_px * 0.88))
-                                        .text_color(muted)
-                                        .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
-                                )
-                                .child(status_badge),
-                        ),
-                )
-                .child(div().flex_shrink_0().child(update_button));
-
-        let auto_update_switch =
-            crate::gpui_shell::widgets::NebulaSwitch::new("auto-check-updates")
-                .checked(self.runtime.auto_check_updates)
-                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                    this.persist(&[("auto_check_updates", (*checked as u8).to_string())], cx);
-                }));
-        let auto_update = h_flex()
-            .items_center()
-            .gap_2()
-            .child(div().text_size(px(base_px * 0.78)).text_color(muted).child(
-                if self.runtime.auto_check_updates {
-                    language.pick("开启", "On")
-                } else {
-                    language.pick("关闭", "Off")
-                },
-            ))
-            .child(auto_update_switch);
-        let last_checked: SharedString = self
-            .about_last_checked
-            .clone()
-            .unwrap_or_else(|| language.pick("尚未检查", "Not checked yet").to_owned())
-            .into();
-        let section_title = |title: &'static str| {
-            div()
-                .h(px(30.0))
-                .text_size(px(base_px * 0.85))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(muted)
-                .child(title)
-        };
-        let version_overview = h_flex()
-            .w_full()
-            .items_end()
-            .justify_between()
-            .gap_4()
-            .pt(px(2.0))
-            .pb_4()
-            .border_b_1()
-            .border_color(hairline)
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(base_px * 2.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(ink)
-                            .child(env!("CARGO_PKG_VERSION")),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(base_px * 0.72))
-                            .text_color(muted)
-                            .child("Stable · Release"),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .text_size(px(base_px * 0.75))
-                    .text_color(success)
-                    .child(Icon::new(IconName::Check).xsmall())
-                    .child(language.pick("当前版本", "Current version")),
-            );
-        let update_column = v_flex()
-            .flex_1()
-            .min_w(px(280.0))
-            .child(section_title(language.pick("版本与更新", "Version and updates")))
-            .child(version_overview)
-            .child(Self::about_value_row(
-                language.pick("自动检查更新", "Automatically check for updates"),
-                auto_update,
-                cx,
-            ))
-            .child(Self::about_value_row(
-                language.pick("更新通道", "Update channel"),
-                div().text_color(muted).child("Stable"),
-                cx,
-            ))
-            .child(Self::about_value_row(
-                language.pick("上次检查", "Last checked"),
-                div().text_color(muted).child(last_checked),
-                cx,
-            ));
-        let actions = v_flex()
-            .flex_1()
-            .min_w(px(280.0))
-            .child(section_title(language.pick("项目与支持", "Project and support")))
-            .child(Self::about_action_row(
-                "about-report-issue",
-                IconName::TriangleAlert,
-                language.pick("反馈问题", "Report an issue"),
-                issue_url(),
-                cx,
-            ))
-            .child(Self::about_action_row(
-                "about-github",
-                IconName::Github,
-                language.pick("GitHub 仓库", "GitHub repository"),
-                REPOSITORY_URL.to_owned(),
-                cx,
-            ))
-            .child(Self::about_action_row(
-                "about-releases",
-                IconName::BookOpen,
-                language.pick("更新内容", "Release notes"),
-                crate::update_check::RELEASES_PAGE.to_owned(),
-                cx,
-            ));
-
-        v_flex().w_full().child(identity).child(
-            h_flex()
-                .w_full()
-                .flex_wrap()
-                .items_start()
-                .gap(px(64.0))
-                .child(update_column)
-                .child(actions),
-        )
-    }
-
-    fn section_appearance(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let language = crate::gpui_shell::config::ui_language(cx);
-        // 旧壳 spinner 只显示整数（`{:.0}`）；步进也按整数走（见下）。
-        let font_size: SharedString = format!("{:.0} px", self.terminal_font_size_px(cx)).into();
-        let opacity: SharedString = format!("{:.0}%", self.runtime.opacity * 100.0).into();
-        let wallpaper_opacity: SharedString =
-            format!("{:.0}%", self.runtime.background_image_opacity * 100.0).into();
-        let preview =
-            self.group(language.pick("预览", "Preview"), cx).child(self.appearance_preview(cx));
-        let themes = self.group(language.pick("主题", "Theme"), cx).child(self.theme_previews(cx));
-        let theme_mode = self.group(language.pick("主题模式", "Theme mode"), cx).child(self.switch_row(
-            "follow_system_theme",
-            language.pick("跟随系统明暗模式", "Follow system light/dark mode"),
-            language.pick(
-                "开着时 Windows 切浅色/深色，Nebula 跟着换；上面手选的主题只在系统当前这个模式下生效。",
-                "When Windows changes between light and dark mode, Nebula follows it. The theme selected above applies to the system's current mode.",
-            ),
-            self.runtime.follow_system_theme,
-            cx,
-        ));
-        let custom_background = self
-            .group(language.pick("自定义背景", "Custom background"), cx)
-            .child(self.background_color_row(cx))
-            .child(self.background_image_row(cx))
-            .child(self.select_row("background_image_fit", language.pick("背景图像拉伸模式", "Background image fit"), language.pick("拉伸会把图压变形；适应保持比例、四周留边；填充保持比例但裁掉溢出的部分；原始尺寸按图片自己的像素铺。", "Fill distorts the image; Uniform preserves its aspect ratio and may leave margins; Uniform to fill preserves the ratio but crops overflow; Original size uses the image's own pixels."), cx))
-            .child(self.select_row("background_image_alignment", language.pick("背景图像对齐", "Background image alignment"), language.pick("图片没铺满或被裁掉时，保留哪一侧。壁纸类的图通常选顶部或居中，主体才不会被切走。", "Choose which edge to preserve when the image does not fill the area or is cropped. Top or center usually keeps a wallpaper's subject visible."), cx))
-            .child(self.slider_row(
-                language.pick("背景图像不透明度", "Background image opacity"),
-                language.pick("压得越低文字越清楚。图片不参与配色，字色始终由主题决定。", "Lower values make text easier to read. The image does not affect colors; text colors always come from the theme."),
-                &self.wallpaper_opacity_slider,
-                wallpaper_opacity,
-                cx,
-            ))
-            .child(self.switch_row(
-                "background_image_cover_chrome",
-                language.pick("将背景图扩展到标题栏和侧边栏", "Extend the background image into the title bar and sidebar"),
-                language.pick("开着时整窗一张图，界面和终端连成一片；关掉则图片只铺终端区域，侧栏与标题栏保持纯色、文字更稳。", "When enabled, one image covers the entire window. When disabled, it covers only the terminal while the sidebar and title bar keep a solid background."),
-                self.runtime.background_image_cover_chrome,
-                cx,
-            ));
-        let cursor = self
-            .group(language.pick("光标", "Cursor"), cx)
-            .child(self.select_row(
-                "cursor_shape",
-                language.pick("光标形状", "Cursor shape"),
-                language.pick("条形贴近编辑器的手感，实心框在满屏输出里最容易一眼找到。", "A bar feels closer to an editor; a filled box is easiest to spot in dense terminal output."),
-                cx,
-            ))
-            .child(self.switch_row(
-                "cursor_blink",
-                language.pick("光标闪烁", "Blink cursor"),
-                language.pick("关掉后光标常亮。长时间盯屏时不闪更省心，代价是光标在密集输出里没那么显眼。", "When disabled, the cursor stays lit. A steady cursor is calmer during long sessions but less visible in dense output."),
-                self.runtime.cursor_blink.unwrap_or(DEFAULT_CURSOR_BLINK),
-                cx,
-            ));
-        let interface = self
-            .group(language.pick("界面", "Interface"), cx)
-            .child(self.switch_row(
-                "tab_close_visible",
-                language.pick("显示标签关闭按钮", "Show tab close buttons"),
-                language.pick(
-                    "关闭后侧栏与顶栏的标签都不再显示关闭按钮；中键点击标签仍可关闭。",
-                    "Hides close buttons in both sidebar and top tabs. Middle-click still closes a tab.",
-                ),
-                self.runtime.tab_close_visible,
-                cx,
-            ))
-            .child(self.select_row(
-                "language",
-                language.pick("语言", "Language"),
-                language.pick("只改 Nebula 自己的界面。终端里程序输出什么语言由它们自己的环境变量决定，不受这里影响。", "Changes only Nebula's interface. Programs inside the terminal choose their language from their own environment and are not affected."),
-                cx,
-            ))
-            .child(self.select_row("density", language.pick("界面外观", "Interface density"), language.pick("紧凑会收窄标签行高与设置页行距这些界面留白。终端内容的行距不归它管，那是字体的事。", "Compact reduces interface spacing such as tab height and Settings row gaps. It does not change terminal line spacing, which is controlled by the font."), cx))
-            .child(self.slider_row(
-                language.pick("终端正文不透明度", "Terminal content opacity"),
-                language.pick("1 = 完全不透明。调低会透出后方窗口，配合下面的窗口模糊才不至于让文字压在杂乱内容上。", "1 is fully opaque. Lower values reveal windows behind Nebula; use window blur to keep terminal text readable over busy content."),
-                &self.opacity_slider,
-                opacity,
-                cx,
-            ))
-            .child(self.select_row("blur", language.pick("背景模糊", "Background blur"), language.pick("五者是五套成本模型，不是越靠后越好：Mica 只取系统壁纸的色调、最省；Aero 与 Acrylic 每帧实时模糊窗口后方的真实内容，Acrylic 还多一层着色与噪点。", "These are different performance models, not quality levels. Mica only samples the wallpaper tint and costs least; Aero and Acrylic blur live content behind the window every frame, and Acrylic adds tint and noise."), cx));
-        let terminal = self
-            .group(language.pick("终端外观", "Terminal appearance"), cx)
-            .child(self.stepper_row(
-                language.pick("终端字号（Ctrl+滚轮缩放）", "Terminal font size (Ctrl+wheel)"),
-                language.pick("只改终端网格。侧栏与设置页的文字锚在配置字号上，不会跟着一起放大。", "Changes only the terminal grid. Sidebar and Settings text stay anchored to the configured UI size."),
-                "font-size",
-                font_size, // 整数步进：分数字号（滚轮缩放遗留，如 15.30）先吸附回
-                // 最近的整数档，再继续 ±1——不会出现 15.3→14.3 这类漂移。
-                |this, cx| {
-                    let size = (this.terminal_font_size_px(cx).ceil() - 1.0).round();
-                    this.set_font_size(size, cx);
-                },
-                |this, cx| {
-                    let size = (this.terminal_font_size_px(cx).floor() + 1.0).round();
-                    this.set_font_size(size, cx);
-                },
-                cx,
-            ))
-            .child(self.select_row("cell_width_mode", language.pick("字体间距", "Character spacing"), language.pick("列宽的取整方式。紧凑向下取整、字更密；宽松向上补一像素，专治 `Maple Mono` 这类平均字宽带小数的字体把字形挤扁。只作用于终端网格。", "Controls how terminal cell width is rounded. Compact rounds down for denser text; Relaxed adds a pixel to prevent fonts with fractional widths, such as `Maple Mono`, from looking squeezed. This affects only the terminal grid."), cx))
-            .child(self.switch_row(
-                "fetch",
-                language.pick("启动欢迎信息", "Startup system information"),
-                language.pick("新会话开头跑一次 `fastfetch` 打印系统信息。默认关，因为开新标签会因此慢一拍。", "Runs `fastfetch` at the start of a new session. It is off by default because it adds a delay when opening a tab."),
-                self.runtime.fetch,
-                cx,
-            ))
-            .child(self.switch_row(
-                "powerline",
-                language.pick("Powerline 提示符", "Powerline prompt"),
-                language.pick("给 Nebula 注入的提示符加箭头分段。需要终端字体带 Powerline 字形，否则那些箭头会显示成方框。", "Adds arrow segments to Nebula's injected prompt. The terminal font must include Powerline glyphs or the arrows will render as boxes."),
-                self.runtime.powerline,
-                cx,
-            ));
-
-        v_flex()
-            .w_full()
-            .gap(px(GROUP_GAP))
-            .child(preview)
-            .child(self.app_icon_previews(cx))
-            .child(themes)
-            .child(theme_mode)
-            .child(custom_background)
-            .child(cursor)
-            .child(interface)
-            .child(terminal)
-    }
-
     fn section_profiles(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let language = crate::gpui_shell::config::ui_language(cx);
         let font_picker = self.font_picker_dropdown(window, cx);
@@ -3109,7 +2407,7 @@ impl SettingsPane {
             .child(self.select_row(
                 "bell",
                 language.pick("终端铃声", "Terminal bell"),
-                language.pick("程序发出 BEL 时的反应。开放工位上选闪烁，免得一次 Tab 补全失败响得整层楼都听见。", "Controls how Nebula responds to BEL. Visual feedback is useful in shared spaces where an audible bell would be disruptive."),
+                language.pick("程序发出 BEL 时的反应。开放工位上选闪烁，免得一次 Tab 补全失败响得整层楼都听见。", "Controls how Pebrel responds to BEL. Visual feedback is useful in shared spaces where an audible bell would be disruptive."),
                 cx,
             ))
             .child(font_picker);
@@ -3135,788 +2433,6 @@ impl SettingsPane {
                 cx,
             ));
         v_flex().w_full().gap(px(GROUP_GAP)).child(terminal).child(completion)
-    }
-
-    fn section_providers(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let language = crate::gpui_shell::config::ui_language(cx);
-        let theme = cx.theme();
-        let hover_bg = crate::gpui_shell::theme::settings_hover_bg(cx, false);
-        let active_index = self.active_provider_index().unwrap_or(0);
-        let active = self.provider_store.providers.get(active_index).cloned();
-        let active_id = active.as_ref().map(|provider| provider.id.clone()).unwrap_or_default();
-        let provider_rows = self.provider_store.providers.iter().map(|provider| {
-            let id = provider.id.clone();
-            let selected = provider.id == active_id;
-            let name = provider.name.clone();
-            let kind = provider.kind.label();
-            h_flex()
-                .id(SharedString::from(format!("provider-row-{}", provider.id)))
-                .h(px(34.0))
-                .w_full()
-                .px_2()
-                .gap_2()
-                .items_center()
-                .rounded_md()
-                .when(selected, |row| row.bg(theme.list_active))
-                .hover(move |row| row.bg(hover_bg))
-                .child(Icon::new(IconName::Bot).xsmall().text_color(theme.muted_foreground))
-                .child(div().flex_1().min_w_0().truncate().child(name))
-                .child(
-                    div()
-                        .max_w(px(78.0))
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .truncate()
-                        .child(kind),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.select_provider(id.clone(), window, cx);
-                }))
-        });
-
-        let mut editor = v_flex().flex_1().min_w_0().gap_3();
-        if let Some(provider) = active {
-            let key_status: SharedString = if provider.api_key_set {
-                if provider.api_key_hint.is_empty() {
-                    language
-                        .pick("已保存在系统凭据管理器", "Saved in the system credential manager")
-                        .into()
-                } else {
-                    provider.api_key_hint.clone().into()
-                }
-            } else if provider.kind.requires_api_key() {
-                language.pick("未设置", "Not set").into()
-            } else {
-                language
-                    .pick("此供应商不需要 API Key", "This provider does not require an API key")
-                    .into()
-            };
-            let enabled = provider.enabled;
-            let goals = provider.codex_goals;
-            let remote = provider.codex_remote_compaction;
-            editor = editor
-                .child(
-                    self.row(
-                        language.pick("启用", "Enabled"),
-                        language.pick(
-                            "关掉后这个供应商不再出现在 AI 启动器里，配置和密钥都留着，随时可以开回来。",
-                            "When disabled, this provider is hidden from the AI launcher. Its settings and key are kept so it can be enabled again later.",
-                        ),
-                        crate::gpui_shell::widgets::NebulaSwitch::new("provider-enabled")
-                            .checked(enabled)
-                            .on_click(cx.listener(|this, value: &bool, _, cx| {
-                                this.toggle_provider_flag("enabled", *value, cx);
-                            })),
-                        cx,
-                    ),
-                )
-                .child(self.row(
-                    language.pick("名称", "Name"),
-                    "",
-                    div().w(px(330.0)).child(Input::new(&self.provider_inputs[0])),
-                    cx,
-                ))
-                .child(self.row(
-                    language.pick("备注", "Note"),
-                    "",
-                    div().w(px(330.0)).child(Input::new(&self.provider_inputs[1])),
-                    cx,
-                ))
-                .child(self.row(
-                    language.pick("官方网站", "Official website"),
-                    "",
-                    div().w(px(330.0)).child(Input::new(&self.provider_inputs[2])),
-                    cx,
-                ))
-                .child(self.row(
-                    language.pick("API 请求地址", "API endpoint"),
-                    language.pick(
-                        "供应商的 API 根地址，多数以 `/v1` 结尾。这里填错不会在保存时报错，而是等到第一次对话请求才失败。",
-                        "The provider's API base URL, usually ending in `/v1`. An invalid address is detected by the first conversation request, not when these settings are saved.",
-                    ),
-                    div().w(px(330.0)).child(Input::new(&self.provider_inputs[3])),
-                    cx,
-                ))
-                .child(self.row(
-                    language.pick("默认模型", "Default model"),
-                    language.pick(
-                        "新会话默认用的模型名，按供应商文档里的写法逐字填——名字对不上时同样是发起请求那一刻才报错。",
-                        "The model name used for new conversations. Enter it exactly as documented by the provider; an invalid name is detected when a request is sent.",
-                    ),
-                    div().w(px(330.0)).child(Input::new(&self.provider_inputs[4])),
-                    cx,
-                ))
-                .child(
-                    self.row(
-                        "API Key",
-                        language.pick(
-                            "密钥不写进设置文件，这里只显示它是否已经设过。换一把新的直接点替换，旧的会被覆盖。",
-                            "The key is not written to the settings file. This row only shows whether one is stored; replacing it overwrites the old key.",
-                        ),
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(key_status),
-                            )
-                            .child(
-                                NebulaButton::new("provider-set-key")
-                                    .label(if provider.api_key_set {
-                                        language.pick("替换…", "Replace...")
-                                    } else {
-                                        language.pick("设置…", "Set...")
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.prompt_provider_key(cx);
-                                    })),
-                            ),
-                        cx,
-                    ),
-                )
-                .child(
-                    self.row(
-                        "Codex Goals",
-                        language.pick(
-                            "写进 `~/.codex/config.toml` 的 `features.goals`。这是 Codex 自己的特性开关，Nebula 只负责把它落到配置里，其它供应商不受影响。",
-                            "Writes `features.goals` to `~/.codex/config.toml`. This is a Codex feature flag; Nebula only persists it and other providers are unaffected.",
-                        ),
-                        crate::gpui_shell::widgets::NebulaSwitch::new("provider-codex-goals")
-                            .checked(goals)
-                            .on_click(cx.listener(|this, value: &bool, _, cx| {
-                                this.toggle_provider_flag("codex_goals", *value, cx);
-                            })),
-                        cx,
-                    ),
-                )
-                .child(
-                    self.row(
-                        language.pick("Codex 远程压缩", "Codex remote compaction"),
-                        language.pick(
-                            "同上，对应 `features.remote_compaction_v2`。同样只在用 Codex 时生效。",
-                            "As above, this controls `features.remote_compaction_v2` and only applies to Codex.",
-                        ),
-                        crate::gpui_shell::widgets::NebulaSwitch::new("provider-codex-remote")
-                            .checked(remote)
-                            .on_click(cx.listener(|this, value: &bool, _, cx| {
-                                this.toggle_provider_flag("codex_remote_compaction", *value, cx);
-                            })),
-                        cx,
-                    ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(NebulaButton::new("provider-save").label(language.pick("保存", "Save")).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.save_provider_metadata(cx);
-                                cx.notify();
-                            }),
-                        ))
-                        .child(
-                            NebulaButton::new("provider-test")
-                                .label(if self.provider_test_running {
-                                    language.pick("测试中…", "Testing...")
-                                } else {
-                                    language.pick("测试连接", "Test connection")
-                                })
-                                .disabled(self.provider_test_running)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.test_provider(cx);
-                                })),
-                        )
-                        .child(NebulaButton::new("provider-codex").label(language.pick("应用到 Codex", "Apply to Codex")).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.apply_provider_to_codex(cx);
-                            }),
-                        ))
-                        .child(
-                            NebulaButton::new("provider-delete").label(language.pick("删除", "Delete")).danger().on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.delete_provider(window, cx);
-                                }),
-                            ),
-                        ),
-                );
-        } else {
-            editor = editor.child(
-                div()
-                    .text_color(theme.muted_foreground)
-                    .child(language.pick("没有供应商配置", "No provider configured")),
-            );
-        }
-
-        self.group(language.pick("供应商", "Providers"), cx)
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_start()
-                    .gap_4()
-                    .child(
-                        v_flex()
-                            .w(px(210.0))
-                            .flex_shrink_0()
-                            .h(px(420.0))
-                            .gap_1()
-                            .overflow_y_scrollbar()
-                            .children(provider_rows)
-                            .child(
-                                NebulaButton::new("provider-add")
-                                    .label(language.pick("+ 自定义供应商", "+ Custom provider"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_provider(window, cx);
-                                    })),
-                            ),
-                    )
-                    .child(editor),
-            )
-            .when_some(self.provider_status.clone(), |group, status| {
-                let error = status.is_error();
-                let message = status.text(language);
-                group.child(
-                    div()
-                        .text_color(if error { theme.danger } else { theme.success })
-                        .child(message),
-                )
-            })
-    }
-
-    // ---- 备份（本地加密导出/恢复 + 远端同步）----
-
-    /// 读备份密码并预检（真正的强度校验在 `encrypted_backup` 内部再做一
-    /// 次；这里只提前给出友好提示）。
-    fn backup_passphrase(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let pass = self.backup_pass_input.read(cx).value().to_string();
-        if pass.chars().count() < 8 {
-            self.backup_status = Some(BackupStatus::PassphraseTooShort);
-            cx.notify();
-            return None;
-        }
-        Some(pass)
-    }
-
-    /// 后台任务只返回语义结果，显示语言在渲染时决定，切换语言不会留下旧文案。
-    fn backup_run_async(
-        &mut self,
-        task: impl std::future::Future<Output = Result<BackupCompletion, String>> + Send + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        self.backup_seq = self.backup_seq.wrapping_add(1);
-        let seq = self.backup_seq;
-        self.backup_busy = true;
-        self.backup_status = Some(BackupStatus::Processing);
-        let task = cx.background_executor().spawn(task);
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |pane, cx| {
-                if seq != pane.backup_seq {
-                    return;
-                }
-                pane.backup_busy = false;
-                pane.backup_status = Some(match result {
-                    Ok(completion) => BackupStatus::Completed(completion),
-                    Err(error) => BackupStatus::Error(error),
-                });
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// 导出：先弹保存对话框（取消则零成本），再后台 collect + seal + 写盘。
-    fn export_backup(&mut self, cx: &mut Context<Self>) {
-        if self.backup_busy {
-            return;
-        }
-        let Some(pass) = self.backup_passphrase(cx) else { return };
-        if self.backup_selection.is_empty() {
-            self.backup_status = Some(BackupStatus::SelectionRequired);
-            cx.notify();
-            return;
-        }
-        let selection = self.backup_selection;
-        let start_dir = std::env::var_os("USERPROFILE")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let picked =
-            cx.prompt_for_new_path(&start_dir, Some(&format!("nebula-{stamp}.nebula-backup")));
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(path))) = picked.await else { return };
-            let _ = this.update(cx, |pane, cx| {
-                pane.backup_run_async(
-                    async move {
-                        let archive = crate::encrypted_backup::collect(selection)?;
-                        let packet = crate::encrypted_backup::seal(&archive, &pass)?;
-                        std::fs::write(&path, packet)
-                            .map_err(|err| format!("写入备份文件失败：{err}"))?;
-                        Ok(BackupCompletion::Exported(path))
-                    },
-                    cx,
-                );
-            });
-        })
-        .detach();
-    }
-
-    /// 恢复：选文件 → 后台解密落盘 → 热应用（设置/主机列表随之重载）。
-    fn restore_backup(&mut self, cx: &mut Context<Self>) {
-        if self.backup_busy {
-            return;
-        }
-        let Some(pass) = self.backup_passphrase(cx) else { return };
-        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some(
-                crate::gpui_shell::config::ui_language(cx)
-                    .pick("选择 Nebula 加密备份", "Select an encrypted Nebula backup")
-                    .into(),
-            ),
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = picked.await else { return };
-            let Some(path) = paths.into_iter().next() else { return };
-            let _ = this.update(cx, |pane, cx| {
-                pane.backup_run_async(
-                    async move {
-                        let packet = std::fs::read(&path)
-                            .map_err(|err| format!("读取备份文件失败：{err}"))?;
-                        crate::encrypted_backup::restore(&packet, &pass)?;
-                        Ok(BackupCompletion::Restored)
-                    },
-                    cx,
-                );
-                // 恢复覆盖了 settings/主机列表等文件：立即重载并通知宿主
-                // 热应用。后台任务完成前 UI 短暂显示旧值，可接受。
-                pane.reload_after_restore(cx);
-            });
-        })
-        .detach();
-    }
-
-    /// 恢复后的单一重载入口（设置/SSH 主机/远端配置）。
-    fn reload_after_restore(&mut self, cx: &mut Context<Self>) {
-        self.runtime = RuntimeSettings::load();
-        self.ssh_hosts = crate::gpui_shell::ssh_hosts::SshHostLists::load();
-        self.backup_remote = crate::backup_remote::BackupRemoteConfig::load();
-        let settings = crate::gpui_shell::config::Settings::load(
-            crate::gpui_shell::theme::effective_theme_name(cx),
-        );
-        cx.set_global(settings);
-        cx.emit(SettingsPaneEvent::Changed);
-        cx.notify();
-    }
-
-    /// 远端配置写盘（读当前协议的非密文槽位输入）。
-    fn save_remote_config(&mut self, cx: &mut Context<Self>) {
-        let protocol = self.backup_remote.protocol;
-        let secret_slot = crate::backup_remote::secret_field(protocol);
-        let mut input_ix = 0usize;
-        for slot in 0..crate::backup_remote::field_count(protocol) {
-            if Some(slot) == secret_slot {
-                continue;
-            }
-            let Some(input) = self.backup_remote_inputs.get(input_ix) else { break };
-            let value = input.read(cx).value().trim().to_string();
-            self.backup_remote.set_slot(slot, value);
-            input_ix += 1;
-        }
-        self.backup_status = Some(match self.backup_remote.save() {
-            Ok(()) => BackupStatus::RemoteConfigSaved,
-            Err(err) => BackupStatus::Error(err),
-        });
-        cx.notify();
-    }
-
-    /// 密文槽写入系统凭据管理器（WebDAV 密码 / S3 Secret），随后清空输入。
-    fn store_remote_secret(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.save_remote_config(cx);
-        let secret = self.backup_secret_input.read(cx).value().to_string();
-        if secret.is_empty() {
-            self.backup_status = Some(BackupStatus::CredentialEmpty);
-            cx.notify();
-            return;
-        }
-        let result = match self.backup_remote.protocol {
-            crate::backup_remote::BackupProtocol::WebDav => {
-                crate::backup_remote::store_webdav_password(
-                    &self.backup_remote.webdav_username,
-                    &secret,
-                )
-            },
-            crate::backup_remote::BackupProtocol::S3 => {
-                crate::backup_remote::store_s3_secret(&self.backup_remote.s3_access_key, &secret)
-            },
-            _ => {
-                self.backup_status = Some(BackupStatus::CredentialUnsupported);
-                cx.notify();
-                return;
-            },
-        };
-        self.backup_status = Some(match result {
-            Ok(()) => BackupStatus::CredentialSaved,
-            Err(err) => BackupStatus::Error(err),
-        });
-        self.backup_secret_input.update(cx, |input, cx| input.set_value("", window, cx));
-        cx.notify();
-    }
-
-    /// 立即推送：collect + seal + 按配置协议上传（全部后台）。
-    fn push_remote(&mut self, cx: &mut Context<Self>) {
-        if self.backup_busy {
-            return;
-        }
-        let Some(pass) = self.backup_passphrase(cx) else { return };
-        self.save_remote_config(cx);
-        if self.backup_selection.is_empty() {
-            self.backup_status = Some(BackupStatus::SelectionRequired);
-            cx.notify();
-            return;
-        }
-        let selection = self.backup_selection;
-        self.backup_run_async(
-            async move {
-                crate::backup_remote::validate()?;
-                let archive = crate::encrypted_backup::collect(selection)?;
-                let packet = crate::encrypted_backup::seal(&archive, &pass)?;
-                let location = crate::backup_remote::push(&packet)?;
-                Ok(BackupCompletion::Pushed(location))
-            },
-            cx,
-        );
-    }
-
-    /// 恢复最新：按配置协议拉取最新备份并解密落盘（全部后台）。
-    fn pull_remote(&mut self, cx: &mut Context<Self>) {
-        if self.backup_busy {
-            return;
-        }
-        let Some(pass) = self.backup_passphrase(cx) else { return };
-        self.save_remote_config(cx);
-        self.backup_run_async(
-            async move {
-                crate::backup_remote::validate()?;
-                let (name, packet) = crate::backup_remote::pull_latest()?;
-                crate::encrypted_backup::restore(&packet, &pass)?;
-                Ok(BackupCompletion::Pulled(name))
-            },
-            cx,
-        );
-    }
-
-    /// 协议切换：字段独立保存（来回切换不丢配置），槽位输入随协议回填。
-    fn select_backup_protocol(
-        &mut self,
-        protocol: crate::backup_remote::BackupProtocol,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // 先把当前协议的输入落到内存配置，再切换（不写盘，写盘归保存钮）。
-        let secret_slot = crate::backup_remote::secret_field(self.backup_remote.protocol);
-        let mut input_ix = 0usize;
-        for slot in 0..crate::backup_remote::field_count(self.backup_remote.protocol) {
-            if Some(slot) == secret_slot {
-                continue;
-            }
-            if let Some(input) = self.backup_remote_inputs.get(input_ix) {
-                let value = input.read(cx).value().trim().to_string();
-                self.backup_remote.set_slot(slot, value);
-            }
-            input_ix += 1;
-        }
-        self.backup_remote.protocol = protocol;
-        let secret_slot = crate::backup_remote::secret_field(protocol);
-        let mut input_ix = 0usize;
-        for slot in 0..crate::backup_remote::field_count(protocol) {
-            if Some(slot) == secret_slot {
-                continue;
-            }
-            let value = self.backup_remote.slot(slot).unwrap_or_default().to_owned();
-            if let Some(input) = self.backup_remote_inputs.get(input_ix) {
-                input.update(cx, |input, cx| input.set_value(value, window, cx));
-            }
-            input_ix += 1;
-        }
-        cx.notify();
-    }
-
-    fn section_backup(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        use crate::backup_remote::BackupProtocol;
-        let language = crate::gpui_shell::config::ui_language(cx);
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let busy = self.backup_busy;
-        let selection = self.backup_selection;
-
-        // 类别开关（与共享 `BackupSelection` 一一对应）。
-        let categories: [(&'static str, &'static str, bool, fn(&mut Self, bool)); 9] = [
-            (
-                "bk-appearance",
-                language.pick("外观与主题", "Appearance and themes"),
-                selection.appearance,
-                |s, v| {
-                    s.backup_selection.appearance = v;
-                },
-            ),
-            (
-                "bk-config",
-                language.pick("终端配置", "Terminal configuration"),
-                selection.config,
-                |s, v| s.backup_selection.config = v,
-            ),
-            (
-                "bk-ssh",
-                language.pick("SSH 主机（脱敏）", "SSH hosts (redacted)"),
-                selection.ssh,
-                |s, v| s.backup_selection.ssh = v,
-            ),
-            (
-                "bk-sync",
-                language.pick("同步配置", "Sync configuration"),
-                selection.sync,
-                |s, v| s.backup_selection.sync = v,
-            ),
-            (
-                "bk-assistant",
-                language.pick("AI 助手配置", "AI assistant configuration"),
-                selection.assistant,
-                |s, v| {
-                    s.backup_selection.assistant = v;
-                },
-            ),
-            (
-                "bk-session",
-                language.pick("会话与工作区", "Sessions and workspaces"),
-                selection.session,
-                |s, v| {
-                    s.backup_selection.session = v;
-                },
-            ),
-            (
-                "bk-dirhist",
-                language.pick("目录历史", "Directory history"),
-                selection.directory_history,
-                |s, v| {
-                    s.backup_selection.directory_history = v;
-                },
-            ),
-            (
-                "bk-cmdhist",
-                language.pick("命令历史", "Command history"),
-                selection.command_history,
-                |s, v| {
-                    s.backup_selection.command_history = v;
-                },
-            ),
-            (
-                "bk-fonts",
-                language.pick("自装字体", "Installed fonts"),
-                selection.fonts,
-                |s, v| s.backup_selection.fonts = v,
-            ),
-        ];
-        // 这九行是一份勾选清单，不逐项写说明：清单的价值在于一眼扫完，
-        // 每行挂两行小字会把它撑成九屏。范围与边界由组顶部那句统一交代
-        // （端到端加密、私钥永不进包）。
-        let category_rows = categories.map(|(id, label, checked, apply)| {
-            self.row(
-                label,
-                "",
-                crate::gpui_shell::widgets::NebulaSwitch::new(id).checked(checked).on_click(
-                    cx.listener(move |this, value: &bool, _, cx| {
-                        apply(this, *value);
-                        cx.notify();
-                    }),
-                ),
-                cx,
-            )
-        });
-
-        let protocol = self.backup_remote.protocol;
-        let protocol_buttons = [
-            (BackupProtocol::Off, language.pick("关闭", "Off")),
-            (BackupProtocol::Folder, language.pick("目录", "Folder")),
-            (BackupProtocol::WebDav, "WebDAV"),
-            (BackupProtocol::S3, "S3"),
-            (BackupProtocol::Sftp, "SFTP"),
-        ]
-        .map(|(value, label)| {
-            let selected = value == protocol;
-            Button::new(SharedString::from(format!("bk-protocol-{}", value.settings_value())))
-                .label(label)
-                .small()
-                .when(selected, |b| b.primary())
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.select_backup_protocol(value, window, cx);
-                }))
-        });
-
-        // 非密文槽位标签（顺序 = `BackupRemoteConfig::slot` 的下标序）。
-        let slot_labels: &[&'static str] = match protocol {
-            BackupProtocol::Off => &[],
-            BackupProtocol::Folder => &[language.pick("目标目录", "Target folder")],
-            BackupProtocol::WebDav => &[
-                language.pick("WebDAV 地址", "WebDAV address"),
-                language.pick("用户名", "Username"),
-            ],
-            BackupProtocol::S3 => {
-                &["Endpoint", "Region", language.pick("桶/前缀", "Bucket/prefix"), "Access Key"]
-            },
-            BackupProtocol::Sftp => &[
-                language.pick("SSH 目的地 (user@host)", "SSH destination (user@host)"),
-                language.pick("远端目录", "Remote directory"),
-            ],
-        };
-        let slot_rows = slot_labels.iter().enumerate().map(|(ix, label)| {
-            let input = self.backup_remote_inputs.get(ix).cloned();
-            self.row(
-                label,
-                "",
-                div().w(px(300.0)).children(input.map(|input| Input::new(&input))),
-                cx,
-            )
-        });
-
-        let secret_ready = crate::backup_remote::protocol_secret_set(protocol);
-        let secret_label = match protocol {
-            BackupProtocol::WebDav => Some(language.pick("WebDAV 密码", "WebDAV password")),
-            BackupProtocol::S3 => Some("S3 Secret Key"),
-            _ => None,
-        };
-
-        let mut remote_group = self
-            .group(language.pick("远端同步", "Remote sync"), cx)
-            .child(div().text_xs().text_color(muted).child(
-                language.pick(
-                    "推送 = 当前勾选类别加密打包后上传；恢复最新 = 拉取远端最新包解密落盘。SFTP 复用上方 SSH 主机的认证。",
-                    "Push encrypts and uploads the selected categories. Restore latest downloads, decrypts, and applies the newest remote archive. SFTP reuses SSH host authentication configured above.",
-                ),
-            ))
-            .child(h_flex().gap_2().children(protocol_buttons))
-            .children(slot_rows);
-        if let Some(label) = secret_label {
-            remote_group = remote_group.child(
-                self.row(
-                    label,
-                    "",
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(div().text_xs().text_color(muted).child(if secret_ready {
-                            language.pick("已设置", "Set")
-                        } else {
-                            language.pick("未设置", "Not set")
-                        }))
-                        .child(div().w(px(220.0)).child(Input::new(&self.backup_secret_input)))
-                        .child(
-                            NebulaButton::new("bk-store-secret")
-                                .label(language.pick("保存凭据", "Save credential"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.store_remote_secret(window, cx);
-                                })),
-                        ),
-                    cx,
-                ),
-            );
-        }
-        if protocol != BackupProtocol::Off {
-            remote_group = remote_group.child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        NebulaButton::new("bk-save-remote")
-                            .label(language.pick("保存配置", "Save configuration"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.save_remote_config(cx);
-                            })),
-                    )
-                    .child(
-                        NebulaButton::new("bk-push")
-                            .label(if busy {
-                                language.pick("处理中…", "Processing...")
-                            } else {
-                                language.pick("立即推送", "Push now")
-                            })
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.push_remote(cx);
-                            })),
-                    )
-                    .child(
-                        NebulaButton::new("bk-pull")
-                            .label(language.pick("恢复最新备份", "Restore latest backup"))
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.pull_remote(cx);
-                            })),
-                    ),
-            );
-        }
-
-        let local_group = self
-            .group(language.pick("加密备份", "Encrypted backup"), cx)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(language.pick(
-                        "端到端加密（密码不落盘）；SSH 私钥永不进包，主机列表脱敏导出。",
-                        "End-to-end encrypted; the password is never persisted. SSH private keys are never included and host lists are exported with sensitive data removed.",
-                    )),
-            )
-            .children(category_rows)
-            .child(self.row(
-                language.pick("备份密码", "Backup password"),
-                language.pick("导出时用它加密整个包，恢复时要一模一样的一串。密码不落盘、也无从找回——忘了这份备份就打不开了。", "This password encrypts the entire export and the exact same value is required to restore it. It is neither persisted nor recoverable; losing it makes the backup unreadable."),
-                div().w(px(300.0)).child(Input::new(&self.backup_pass_input)),
-                cx,
-            ))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        NebulaButton::new("bk-export")
-                            .label(if busy {
-                                language.pick("处理中…", "Processing...")
-                            } else {
-                                language.pick("导出到文件…", "Export to file...")
-                            })
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.export_backup(cx);
-                            })),
-                    )
-                    .child(
-                        NebulaButton::new("bk-restore")
-                            .label(language.pick("从文件恢复…", "Restore from file..."))
-                            .disabled(busy)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.restore_backup(cx);
-                            })),
-                    ),
-            );
-
-        v_flex().w_full().gap(px(GROUP_GAP)).child(local_group).child(remote_group).when_some(
-            self.backup_status.clone(),
-            |page, status| {
-                let error = status.is_error();
-                let message = status.text(language);
-                page.child(
-                    div()
-                        .pt_4()
-                        .text_color(if error { theme.danger } else { theme.success })
-                        .child(message),
-                )
-            },
-        )
     }
 
     fn section_interaction(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -3986,7 +2502,7 @@ impl SettingsPane {
                     .child(self.select_row(
                         "windowing_behavior",
                         language.pick("新建实例行为", "New instance behavior"),
-                        language.pick("从桌面或命令行再启动一次 Nebula 时：另开一个窗口，还是把它作为新标签并进已有窗口。", "When Nebula is launched again from the desktop or command line, choose whether to open a new window or attach the request as a tab in an existing window."),
+                        language.pick("从桌面或命令行再启动一次 Pebrel 时：另开一个窗口，还是把它作为新标签并进已有窗口。", "When Pebrel is launched again from the desktop or command line, choose whether to open a new window or attach the request as a tab in an existing window."),
                         cx,
                     ))
                     .child(self.select_row(
@@ -4037,8 +2553,8 @@ impl SettingsPane {
     fn section_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui::IntoElement as _;
         match self.active_section {
-            0 => self.section_home(cx),
-            1 => self.section_appearance(cx),
+            0 => self.section_home(window, cx),
+            1 => self.section_appearance(window, cx),
             2 => self.section_profiles(window, cx),
             3 => self.section_providers(cx),
             4 => self.section_ssh(cx),
@@ -4163,8 +2679,11 @@ impl Render for SettingsPane {
         let bg_picker_open = self.bg_picker_open && self.active_section == 1;
         let bg_dragging = self.bg_picker_drag.is_some();
         let ssh_editor_modal = self.ssh_editor_modal(cx);
+        let appearance_picker_modal = self.appearance_picker_modal(window, cx);
         // 现有 reset 合同只覆盖外观键；其它页面显示同一个按钮会产生假承诺。
         let show_reset = self.active_section == 1;
+        let appearance_header = show_reset.then(|| self.appearance_page_header(cx));
+        let appearance_colors = appearance_picker::AppearanceColors::current(cx);
         let hairline = crate::gpui_shell::theme::settings_hairline(cx);
         let search_hover = cx.theme().list_hover;
         let reset_hover = cx.theme().list_hover;
@@ -4262,6 +2781,7 @@ impl Render for SettingsPane {
             .rounded(crate::gpui_shell::theme::card_radius(cx))
             .bg(crate::gpui_shell::theme::settings_panel_bg(cx))
             .text_color(cx.theme().foreground)
+            .when(show_reset, |root| root.bg(appearance_colors.surface))
             // 主文字的字号/字重从设置根向两栏继承；局部仅允许说明文字、
             // 徽标等语义上的次级信息覆盖为更小字号。
             .text_size(px(base_px))
@@ -4276,7 +2796,8 @@ impl Render for SettingsPane {
                     .h_full()
                     // 页头固定高度；正文单独滚动，滚动设置时仍能知道
                     // 自己在哪个分区，也不会让标题与首组的距离随内容变化。
-                    .child(
+                    .when_some(appearance_header, |main, header| main.child(header))
+                    .when(!show_reset, |main| main.child(
                         div()
                             .h(px(SETTINGS_HEADER_HEIGHT))
                             .flex_shrink_0()
@@ -4418,7 +2939,7 @@ impl Render for SettingsPane {
                                             }),
                                     ),
                             ),
-                    )
+                    ))
                     .child(
                         v_flex()
                             .flex_1()
@@ -4430,6 +2951,7 @@ impl Render for SettingsPane {
                             // 页（按键映射开头是搜索框）就会直接贴到线上。
                             .pt(px(20.0))
                             .pb(px(22.0))
+                            .when(show_reset, |content| content.px(px(40.0)).pt(px(28.0)).pb(px(30.0)))
                             // 注意这层包装 `v_flex` 的 `w_full` 不能删（2026-08-23
                             // 又栽了一次）：`overflow_y_scrollbar` 把内容层清成
                             // `Display::Block`，而 flex 容器在 block 父里
@@ -4464,11 +2986,12 @@ impl Render for SettingsPane {
                                     .w_full()
                                     .flex()
                                     .justify_center()
-                                    .child(v_flex().w_full().max_w(px(960.0)).child(content)),
+                                    .child(v_flex().w_full().when(!show_reset, |content| content.max_w(px(960.0))).child(content)),
                             ),
                     ),
             )
             .when_some(ssh_editor_modal, |root, modal| root.child(modal))
+            .when_some(appearance_picker_modal, |root, modal| root.child(modal))
             .when(font_picker_open, |root| {
                 root
                     // 搜索框是当前焦点时 Escape 仍沿元素树冒泡到设置根；
@@ -4557,95 +3080,7 @@ impl Render for SettingsPane {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[test]
-    fn settings_nav_visibility_keeps_stable_routes_but_hides_two_entries() {
-        let visibility: Vec<_> = (0..SECTION_IDS.len()).map(is_nav_section_visible).collect();
-        assert_eq!(visibility, vec![true, true, true, false, true, true, true, true, true, false]);
-        assert_eq!(
-            SECTION_IDS,
-            [
-                "application",
-                "appearance",
-                "profiles",
-                "providers",
-                "ssh",
-                "network",
-                "interaction",
-                "keymap",
-                "advanced",
-                "backup",
-            ]
-        );
-    }
-
-    #[test]
-    fn settings_nav_preserves_the_group_expansion_order_without_headings() {
-        let visible: Vec<_> = visible_nav_sections().collect();
-        assert_eq!(visible, vec![0, 1, 2, 6, 7, 4, 5, 8]);
-        let zh_labels: Vec<_> = visible
-            .iter()
-            .map(|index| section_label(*index, crate::display::UiLanguage::ZhCn))
-            .collect();
-        assert_eq!(
-            zh_labels,
-            vec!["应用", "外观", "配置文件", "交互", "按键映射", "SSH", "网络", "高级"]
-        );
-        let en_labels: Vec<_> = visible
-            .iter()
-            .map(|index| section_label(*index, crate::display::UiLanguage::EnUs))
-            .collect();
-        assert_eq!(
-            en_labels,
-            vec![
-                "Application",
-                "Appearance",
-                "Profiles",
-                "Interaction",
-                "Key Bindings",
-                "SSH",
-                "Network",
-                "Advanced",
-            ]
-        );
-    }
-
-    #[test]
-    fn localized_select_labels_keep_stable_value_cardinality() {
-        let cases: &[(&str, &[&str])] = &[
-            ("language", &["system", "zh-CN", "en-US"]),
-            ("cursor_shape", &["beam", "underline", "block", "hollow"]),
-            ("tabs_position", &["sidebar", "top"]),
-            ("bell", &["off", "visual", "sound", "both"]),
-        ];
-        for (key, values) in cases {
-            for language in [crate::display::UiLanguage::ZhCn, crate::display::UiLanguage::EnUs] {
-                assert_eq!(localized_select_labels(key, values, language).len(), values.len());
-            }
-        }
-        assert_eq!(
-            localized_select_labels("tabs_position", cases[2].1, crate::display::UiLanguage::EnUs),
-            vec![SharedString::from("Left sidebar"), SharedString::from("Top")]
-        );
-    }
-
-    #[test]
-    fn cached_semantic_statuses_render_in_the_current_language() {
-        let provider = ProviderStatus::Saved;
-        assert_eq!(provider.text(crate::display::UiLanguage::ZhCn), "供应商配置已保存");
-        assert_eq!(provider.text(crate::display::UiLanguage::EnUs), "Provider settings saved");
-
-        let backup = BackupStatus::CredentialSaved;
-        assert_eq!(backup.text(crate::display::UiLanguage::ZhCn), "凭据已写入系统凭据管理器");
-        assert_eq!(
-            backup.text(crate::display::UiLanguage::EnUs),
-            "Credential saved to the system credential manager"
-        );
-
-        let ssh = SshStatus::Opening("server.example".to_owned());
-        assert_eq!(ssh.text(crate::display::UiLanguage::ZhCn), "正在打开 server.example…");
-        assert_eq!(ssh.text(crate::display::UiLanguage::EnUs), "Opening server.example…");
-    }
-}
+#[cfg(test)]
+mod appearance_picker_tests;

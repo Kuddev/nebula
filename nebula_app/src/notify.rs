@@ -78,7 +78,7 @@ impl Notification {
         match self {
             Self::Bell { program } => match program {
                 Some(p) => (p.clone(), "任务完成，等待输入".to_owned()),
-                None => ("Nebula".to_owned(), "终端响铃".to_owned()),
+                None => (crate::brand::NAME.to_owned(), "终端响铃".to_owned()),
             },
             Self::CommandDone { duration, program } => {
                 let secs = duration.as_secs();
@@ -89,12 +89,12 @@ impl Notification {
                 };
                 match program {
                     Some(p) => (p.clone(), format!("命令完成，用时 {human}")),
-                    None => ("Nebula".to_owned(), format!("命令完成，用时 {human}")),
+                    None => (crate::brand::NAME.to_owned(), format!("命令完成，用时 {human}")),
                 }
             },
             Self::Text { body, program } => match program {
                 Some(p) => (p.clone(), body.clone()),
-                None => ("Nebula".to_owned(), body.clone()),
+                None => (crate::brand::NAME.to_owned(), body.clone()),
             },
             Self::AiTurn { program, message, attention } => {
                 let body = message.clone().unwrap_or_else(|| {
@@ -208,7 +208,7 @@ fn toast_clickable(
     // cache stale), embed the logo per-toast as appLogoOverride so the banner
     // always carries the Nebula mark next to the message.
     if let Some(icon) = win::icon_path() {
-        toast = toast.icon(&icon, IconCrop::Square, "Nebula");
+        toast = toast.icon(&icon, IconCrop::Square, crate::brand::NAME);
     }
     #[cfg(feature = "legacy-shell")]
     if let Some((window, pane)) = focus {
@@ -260,18 +260,21 @@ pub fn notify_test() -> i32 {
 
     println!("[2/2] Showing toast ...");
     let mut toast = tauri_winrt_notification::Toast::new(win::AUMID)
-        .title("Nebula")
+        .title(crate::brand::NAME)
         .text1("通知链路正常：nebula notify-test")
         .duration(tauri_winrt_notification::Duration::Short);
     if let Some(icon) = win::icon_path() {
-        toast = toast.icon(&icon, tauri_winrt_notification::IconCrop::Square, "Nebula");
+        toast = toast.icon(&icon, tauri_winrt_notification::IconCrop::Square, crate::brand::NAME);
     }
     match toast.show() {
         Ok(()) => {
             println!("      OK  — a toast should be on screen now.");
             println!();
             println!("If nothing appeared, check Windows Settings > System > Notifications:");
-            println!("the global toggle, Do Not Disturb / Focus Assist, and the Nebula entry.");
+            println!(
+                "the global toggle, Do Not Disturb / Focus Assist, and the {} entry.",
+                crate::brand::NAME
+            );
             0
         },
         Err(err) => {
@@ -333,7 +336,7 @@ mod win {
 
     fn register_icon(variant: nebula_settings::AppIconName) -> Result<(), String> {
         let subkey = format!(r"Software\Classes\AppUserModelId\{AUMID}");
-        set_reg_sz(&subkey, "DisplayName", "Nebula")?;
+        set_reg_sz(&subkey, "DisplayName", crate::brand::NAME)?;
         match ensure_icon_file(variant) {
             Some(icon) => set_reg_sz(&subkey, "IconUri", &icon.display().to_string())?,
             None => log::debug!("notify: toast icon not materialized; banner shows no logo"),
@@ -350,7 +353,7 @@ mod win {
         let bytes = crate::app_icon::png(variant, 256)?;
         let directory = crate::platform::dirs::data_dir();
         let path = directory.join(format!("toast_icon-{}.png", variant.settings_value()));
-        let stale = std::fs::read(&path).ok().as_deref() != Some(bytes);
+        let stale = std::fs::read(&path).ok().as_deref() != Some(bytes.as_ref());
         if stale {
             std::fs::create_dir_all(directory).ok()?;
             std::fs::write(&path, bytes).ok()?;

@@ -1,9 +1,14 @@
-use std::sync::OnceLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use image::{ImageEncoder as _, RgbaImage};
 use nebula_settings::AppIconName;
 
-pub const FRAME_SIZES: [u32; 10] = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256];
+pub const FRAME_SIZES: [u32; 14] = [16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 256];
+const ATLAS_WIDTH: u32 = 512;
+const COVERAGE_PNG: &[u8] = include_bytes!("../../extra/logo/nebula-coverage.png");
+const CACHE_LIMIT: usize = 128;
 
 fn selection() -> &'static AtomicU8 {
     static SELECTION: OnceLock<AtomicU8> = OnceLock::new();
@@ -19,56 +24,97 @@ pub fn set_selected(variant: AppIconName) -> bool {
 }
 
 pub fn frame_size(requested: u32) -> u32 {
-    FRAME_SIZES.into_iter().find(|size| *size >= requested).unwrap_or(256)
+    FRAME_SIZES
+        .into_iter()
+        .chain([ATLAS_WIDTH])
+        .find(|size| *size >= requested)
+        .unwrap_or(ATLAS_WIDTH)
 }
 
-#[cfg(windows)]
-pub fn png(variant: AppIconName, requested: u32) -> Option<&'static [u8]> {
-    windows::png(variant, frame_size(requested))
+fn coverage(requested: u32) -> Option<RgbaImage> {
+    static ATLAS: OnceLock<Option<RgbaImage>> = OnceLock::new();
+    let atlas = ATLAS
+        .get_or_init(|| {
+            let image = image::load_from_memory(COVERAGE_PNG).ok()?.to_rgba8();
+            let expected_height = FRAME_SIZES.iter().sum::<u32>() + ATLAS_WIDTH;
+            (image.dimensions() == (ATLAS_WIDTH, expected_height)).then_some(image)
+        })
+        .as_ref()?;
+    let size = requested.clamp(16, ATLAS_WIDTH);
+    let stored_size = frame_size(size);
+    let top: u32 = FRAME_SIZES.into_iter().take_while(|stored| *stored < stored_size).sum();
+    let pixels = image::imageops::crop_imm(atlas, 0, top, stored_size, stored_size).to_image();
+    Some(if stored_size == size {
+        pixels
+    } else {
+        image::imageops::resize(&pixels, size, size, image::imageops::FilterType::Triangle)
+    })
 }
 
-#[cfg(not(windows))]
-pub fn png(variant: AppIconName, requested: u32) -> Option<&'static [u8]> {
-    let bytes: &[u8] = match variant {
-        AppIconName::SilverViolet => include_bytes!("../windows/nebula.ico"),
-        AppIconName::GraphiteViolet => include_bytes!("../windows/nebula-dark.ico"),
-        AppIconName::Titanium => include_bytes!("../windows/nebula-titanium.ico"),
-    };
-    ico_png(bytes, requested)
-}
-
-#[cfg(any(not(windows), test))]
-fn ico_png(bytes: &[u8], requested: u32) -> Option<&[u8]> {
-    if bytes.get(..4)? != [0, 0, 1, 0] {
-        return None;
-    }
-    let count = u16::from_le_bytes(bytes.get(4..6)?.try_into().ok()?) as usize;
-    let size = frame_size(requested);
-    for index in 0..count {
-        let entry = bytes.get(6 + index * 16..22 + index * 16)?;
-        let width = if entry[0] == 0 { 256 } else { u32::from(entry[0]) };
-        if width != size || entry[0] != entry[1] {
+pub fn rgba(variant: AppIconName, requested: u32) -> Option<RgbaImage> {
+    let mut pixels = coverage(requested)?;
+    let palette = variant.palette();
+    let colors = [palette.tile, palette.border, palette.mark];
+    for pixel in pixels.pixels_mut() {
+        let weights = [u32::from(pixel[0]), u32::from(pixel[1]), u32::from(pixel[2])];
+        let total: u32 = weights.iter().sum();
+        if total == 0 || pixel[3] == 0 {
+            pixel.0 = [0; 4];
             continue;
         }
-        let length = u32::from_le_bytes(entry[8..12].try_into().ok()?) as usize;
-        let offset = u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize;
-        let frame = bytes.get(offset..offset.checked_add(length)?)?;
-        return frame.starts_with(b"\x89PNG\r\n\x1a\n").then_some(frame);
+        for (channel, shift) in [16, 8, 0].into_iter().enumerate() {
+            let mixed: u32 = colors
+                .iter()
+                .zip(weights)
+                .map(|(color, weight)| ((color >> shift) & 255) * weight)
+                .sum();
+            pixel[channel] = ((mixed + total / 2) / total) as u8;
+        }
     }
-    None
+    Some(pixels)
+}
+
+pub fn png(variant: AppIconName, requested: u32) -> Option<Arc<[u8]>> {
+    static PNGS: OnceLock<Mutex<HashMap<(AppIconName, u32), Arc<[u8]>>>> = OnceLock::new();
+    let size = requested.clamp(16, ATLAS_WIDTH);
+    let mut cache =
+        PNGS.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(bytes) = cache.get(&(variant, size)) {
+        return Some(bytes.clone());
+    }
+    let pixels = rgba(variant, size)?;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut bytes,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    )
+    .write_image(pixels.as_raw(), size, size, image::ExtendedColorType::Rgba8)
+    .ok()?;
+    let bytes: Arc<[u8]> = bytes.into();
+    if cache.len() >= CACHE_LIMIT {
+        cache.clear();
+    }
+    cache.insert((variant, size), bytes.clone());
+    Some(bytes)
 }
 
 #[cfg(feature = "gpui-shell")]
-pub fn preview(variant: AppIconName) -> Option<std::sync::Arc<gpui::Image>> {
-    static IMAGES: OnceLock<[Option<std::sync::Arc<gpui::Image>>; 3]> = OnceLock::new();
-    IMAGES.get_or_init(|| {
-        AppIconName::ALL.map(|variant| {
-            png(variant, 256).map(|bytes| {
-                std::sync::Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes.to_vec()))
-            })
-        })
-    })[variant as usize]
-        .clone()
+pub fn preview(variant: AppIconName, requested: u32) -> Option<Arc<gpui::Image>> {
+    static IMAGES: OnceLock<Mutex<HashMap<(AppIconName, u32), Arc<gpui::Image>>>> = OnceLock::new();
+    let size = requested.clamp(16, ATLAS_WIDTH);
+    let mut cache =
+        IMAGES.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(image) = cache.get(&(variant, size)) {
+        return Some(image.clone());
+    }
+    let bytes = png(variant, size)?;
+    let image = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, bytes.to_vec()));
+    if cache.len() >= CACHE_LIMIT {
+        cache.clear();
+    }
+    cache.insert((variant, size), image.clone());
+    Some(image)
 }
 
 #[cfg(windows)]
@@ -78,14 +124,10 @@ pub mod windows {
 
     use nebula_settings::AppIconName;
     use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::System::LibraryLoader::{
-        FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
-    };
     use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DestroyIcon, HICON, ICON_BIG, ICON_SMALL, IMAGE_ICON, LoadImageW,
-        LookupIconIdFromDirectoryEx, RT_GROUP_ICON, RT_ICON, SM_CXICON, SM_CXSMICON, SendMessageW,
-        WM_SETICON,
+        CreateIconFromResourceEx, DestroyIcon, HICON, ICON_BIG, ICON_SMALL, SM_CXICON, SM_CXSMICON,
+        SendMessageW, WM_SETICON,
     };
 
     struct NativeIcon(HICON);
@@ -100,62 +142,26 @@ pub mod windows {
         static ICONS: RefCell<HashMap<(AppIconName, u32), NativeIcon>> = RefCell::new(HashMap::new());
     }
 
-    fn resource_id(variant: AppIconName) -> u16 {
-        0x101 + variant as u16
-    }
-
-    fn resource_bytes(identifier: u16, kind: *const u16) -> Option<&'static [u8]> {
-        unsafe {
-            let module = GetModuleHandleW(std::ptr::null());
-            if module.is_null() {
-                return None;
-            }
-            let resource = FindResourceW(module, identifier as usize as *const u16, kind);
-            if resource.is_null() {
-                return None;
-            }
-            let length = SizeofResource(module, resource) as usize;
-            let loaded = LoadResource(module, resource);
-            if loaded.is_null() || length == 0 {
-                return None;
-            }
-            let pointer = LockResource(loaded) as *const u8;
-            if pointer.is_null() {
-                return None;
-            }
-            Some(std::slice::from_raw_parts(pointer, length))
-        }
-    }
-
-    pub(super) fn png(variant: AppIconName, size: u32) -> Option<&'static [u8]> {
-        let group = resource_bytes(resource_id(variant), RT_GROUP_ICON)?;
-        let identifier =
-            unsafe { LookupIconIdFromDirectoryEx(group.as_ptr(), 1, size as i32, size as i32, 0) };
-        if identifier <= 0 {
-            return None;
-        }
-        let bytes = resource_bytes(identifier as u16, RT_ICON)?;
-        bytes.starts_with(b"\x89PNG\r\n\x1a\n").then_some(bytes)
-    }
-
     pub fn set_window(hwnd: HWND, variant: AppIconName) {
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
         ICONS.with(|cache| {
             let mut cache = cache.borrow_mut();
             for (slot, metric) in [(ICON_SMALL, SM_CXSMICON), (ICON_BIG, SM_CXICON)] {
-                let requested = unsafe { GetSystemMetricsForDpi(metric, dpi) }.max(16) as u32;
-                let size = super::frame_size(requested);
+                let size = unsafe { GetSystemMetricsForDpi(metric, dpi) }.clamp(16, 256) as u32;
                 let icon = cache.entry((variant, size)).or_insert_with(|| {
-                    NativeIcon(unsafe {
-                        LoadImageW(
-                            GetModuleHandleW(std::ptr::null()),
-                            resource_id(variant) as usize as *const u16,
-                            IMAGE_ICON,
-                            size as i32,
-                            size as i32,
-                            0,
-                        )
-                    })
+                    let handle =
+                        super::png(variant, size).map_or(std::ptr::null_mut(), |bytes| unsafe {
+                            CreateIconFromResourceEx(
+                                bytes.as_ptr(),
+                                bytes.len() as u32,
+                                1,
+                                0x00030000,
+                                size as i32,
+                                size as i32,
+                                0,
+                            )
+                        });
+                    NativeIcon(handle)
                 });
                 if !icon.0.is_null() {
                     unsafe { SendMessageW(hwnd, WM_SETICON, slot as usize, icon.0 as isize) };
@@ -169,58 +175,83 @@ pub mod windows {
 mod tests {
     use super::*;
 
-    #[test]
-    fn frame_selection_never_undersamples_within_budget() {
-        for size in FRAME_SIZES {
-            assert_eq!(frame_size(size), size);
+    fn ico_png(bytes: &[u8], size: u32) -> &[u8] {
+        let count = u16::from_le_bytes(bytes[4..6].try_into().unwrap()) as usize;
+        for index in 0..count {
+            let entry = &bytes[6 + index * 16..22 + index * 16];
+            let width = if entry[0] == 0 { 256 } else { u32::from(entry[0]) };
+            if width == size {
+                let length = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;
+                let offset = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as usize;
+                return &bytes[offset..offset + length];
+            }
         }
-        assert_eq!(frame_size(17), 20);
-        assert_eq!(frame_size(25), 32);
-        assert_eq!(frame_size(144), 256);
-        assert_eq!(frame_size(512), 256);
+        panic!("missing frame {size}");
     }
 
     #[test]
-    fn all_presets_have_exact_png_frames_and_fit_budget() {
-        let assets: [&[u8]; 3] = [
-            include_bytes!("../windows/nebula.ico"),
-            include_bytes!("../windows/nebula-dark.ico"),
-            include_bytes!("../windows/nebula-titanium.ico"),
-        ];
-        assert!(assets.iter().map(|bytes| bytes.len()).sum::<usize>() <= 64 * 1024);
-        for bytes in assets {
+    fn all_25_palettes_share_a_small_coverage_atlas() {
+        assert_eq!(AppIconName::ALL.len(), 25);
+        assert_eq!(AppIconName::default(), AppIconName::Titanium);
+        assert!(COVERAGE_PNG.len() + include_bytes!("../windows/nebula.ico").len() <= 96 * 1024);
+        for variant in AppIconName::ALL {
             for size in FRAME_SIZES {
-                let frame = ico_png(bytes, size).expect("exact PNG frame");
-                let decoded = image::load_from_memory(frame).expect("valid PNG");
-                assert_eq!((decoded.width(), decoded.height()), (size, size));
-                assert_eq!(decoded.to_rgba8().get_pixel(0, 0)[3], 0);
+                let pixels = rgba(variant, size).expect("palette image");
+                assert_eq!(pixels.dimensions(), (size, size));
+                assert_eq!(pixels.get_pixel(0, 0).0, [0; 4]);
+                assert!(pixels.pixels().any(|pixel| pixel[3] > 0 && pixel[3] < 255));
             }
         }
     }
 
     #[test]
-    fn corrupt_ico_is_rejected() {
-        for length in 0..22 {
-            assert!(ico_png(&vec![0; length], 16).is_none());
+    fn runtime_pixels_match_the_default_and_legacy_exports() {
+        for (variant, bytes) in [
+            (AppIconName::Titanium, include_bytes!("../windows/nebula.ico").as_slice()),
+            (AppIconName::SilverViolet, include_bytes!("../windows/nebula-light.ico").as_slice()),
+            (AppIconName::GraphiteViolet, include_bytes!("../windows/nebula-dark.ico").as_slice()),
+        ] {
+            for size in FRAME_SIZES {
+                let expected = image::load_from_memory(ico_png(bytes, size)).unwrap().to_rgba8();
+                assert_eq!(rgba(variant, size).unwrap(), expected);
+            }
         }
-        let mut bytes = include_bytes!("../windows/nebula.ico").to_vec();
-        bytes[18..22].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(ico_png(&bytes, 16).is_none());
     }
 
-    #[cfg(windows)]
     #[test]
-    fn executable_resources_match_presets_without_duplicate_pngs() {
-        let assets: [&[u8]; 3] = [
-            include_bytes!("../windows/nebula.ico"),
-            include_bytes!("../windows/nebula-dark.ico"),
-            include_bytes!("../windows/nebula-titanium.ico"),
-        ];
-        for (variant, bytes) in AppIconName::ALL.into_iter().zip(assets) {
-            for size in FRAME_SIZES {
-                assert_eq!(png(variant, size), ico_png(bytes, size));
-                assert!(png(variant, size).is_some());
+    fn fractional_scale_sizes_are_exact_and_have_no_color_overshoot() {
+        for variant in AppIconName::ALL {
+            let palette = variant.palette();
+            for size in [18, 25, 35, 50, 60, 72, 100, 144, 192, 288, 384] {
+                let pixels = rgba(variant, size).unwrap();
+                assert_eq!(pixels.dimensions(), (size, size));
+                for pixel in pixels.pixels() {
+                    if pixel[3] == 0 {
+                        assert_eq!(pixel.0, [0; 4]);
+                        continue;
+                    }
+                    for (channel, shift) in [16, 8, 0].into_iter().enumerate() {
+                        let values = [palette.tile, palette.border, palette.mark]
+                            .map(|color| ((color >> shift) & 255) as u8);
+                        assert!(
+                            (*values.iter().min().unwrap()..=*values.iter().max().unwrap())
+                                .contains(&pixel[channel])
+                        );
+                    }
+                }
             }
+        }
+    }
+
+    #[test]
+    fn encoded_png_is_lossless_and_cached() {
+        for variant in AppIconName::ALL {
+            let first = png(variant, 32).unwrap();
+            assert!(Arc::ptr_eq(&first, &png(variant, 32).unwrap()));
+            assert_eq!(
+                image::load_from_memory(&first).unwrap().to_rgba8(),
+                rgba(variant, 32).unwrap()
+            );
         }
     }
 
@@ -259,6 +290,7 @@ mod tests {
                 assert!(handles.iter().all(|handle| *handle != 0));
                 assert_ne!(handles[0], handles[1]);
                 if iteration == 0 {
+                    assert!(!cached.contains(&handles));
                     cached.push(handles);
                     let sizes = handles.map(|handle| unsafe {
                         let mut info: ICONINFO = std::mem::zeroed();
@@ -283,8 +315,6 @@ mod tests {
                 }
             }
         }
-        assert_ne!(cached[0], cached[1]);
-        assert_ne!(cached[1], cached[2]);
         unsafe { DestroyWindow(hwnd) };
     }
 }
