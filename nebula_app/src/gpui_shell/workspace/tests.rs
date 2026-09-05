@@ -268,6 +268,54 @@ fn paste_keymap_keeps_component_inputs_and_terminals_in_separate_contexts() {
     assert!(bindings[0].action().as_any().is::<PasteClipboard>());
 }
 
+/// 复制与粘贴同型分流：ctrl-c 在终端上下文命中 CopySelection（有选区复制、
+/// 无选区经 handler propagate 落成 ^C），在输入框上下文命中 Input 自己的 Copy——
+/// 重命名/设置页输入框的 ctrl-c 复制框内文本，不会拷终端选区。
+#[test]
+fn copy_keymap_keeps_component_inputs_and_terminals_in_separate_contexts() {
+    use gpui::{KeyContext, Keymap, Keystroke};
+
+    let keymap = Keymap::new(vec![
+        KeyBinding::new("ctrl-c", CopySelection, Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
+        KeyBinding::new("ctrl-c", gpui_component::input::Copy, Some("Input")),
+    ]);
+    let key = [Keystroke::parse("ctrl-c").unwrap()];
+
+    let input = [KeyContext::parse("Root").unwrap(), KeyContext::parse("Input").unwrap()];
+    let (bindings, pending) = keymap.bindings_for_input(&key, &input);
+    assert!(!pending);
+    assert_eq!(bindings.len(), 1);
+    assert!(bindings[0].action().as_any().is::<gpui_component::input::Copy>());
+
+    let terminal = [
+        KeyContext::parse("Root").unwrap(),
+        KeyContext::parse(crate::gpui_shell::terminal::KEY_CONTEXT).unwrap(),
+    ];
+    let (bindings, pending) = keymap.bindings_for_input(&key, &terminal);
+    assert!(!pending);
+    assert_eq!(bindings.len(), 1);
+    assert!(bindings[0].action().as_any().is::<CopySelection>());
+
+    // 默认表与镜像清单同步：ctrl-c 必须真的注册在默认绑定里。
+    let bindings = default_workspace_bindings();
+    let binding = bindings.iter().find(|binding| {
+        binding
+            .keystrokes()
+            .first()
+            .is_some_and(|stroke| stroke.inner() == &Keystroke::parse("ctrl-c").unwrap())
+    });
+    if cfg!(target_os = "macos") {
+        assert!(binding.is_none());
+        assert!(!STATIC_DEFAULT_COMBOS.contains(&"ctrl-c"));
+        return;
+    }
+    let Some(binding) = binding else {
+        panic!("ctrl-c 缺省必须绑到 CopySelection");
+    };
+    assert!(binding.action().name().ends_with("CopySelection"), "ctrl-c 应映射到 CopySelection");
+    assert!(STATIC_DEFAULT_COMBOS.contains(&"ctrl-c"), "静态默认键清单也要同步增 ctrl-c");
+}
+
 #[test]
 fn pane_card_divider_reaches_the_window_top_without_moving_its_bottom() {
     let card = Bounds::new(gpui::point(px(230.0), px(48.0)), size(px(850.0), px(672.0)));

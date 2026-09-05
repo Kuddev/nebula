@@ -12,6 +12,7 @@
 pub mod capabilities;
 pub mod credentials;
 pub mod dirs;
+pub mod file_manager;
 #[cfg(feature = "gpui-shell")]
 pub mod fonts;
 pub mod notifications;

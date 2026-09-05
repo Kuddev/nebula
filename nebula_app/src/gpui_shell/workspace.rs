@@ -175,6 +175,8 @@ const STATIC_DEFAULT_COMBOS: &[&str] = &[
     "ctrl--",
     "ctrl-0",
     "ctrl-shift-c",
+    #[cfg(not(target_os = "macos"))]
+    "ctrl-c",
     "ctrl-v",
     "ctrl-shift-v",
     "alt-enter",
@@ -207,7 +209,11 @@ fn custom_workspace_binding(combo: &str, action: &crate::config::Action) -> Opti
         Action::IncreaseFontSize => Some(KeyBinding::new(&combo, IncreaseFontSize, None)),
         Action::DecreaseFontSize => Some(KeyBinding::new(&combo, DecreaseFontSize, None)),
         Action::ResetFontSize => Some(KeyBinding::new(&combo, ResetFontSize, None)),
-        Action::Copy => Some(KeyBinding::new(&combo, CopySelection, None)),
+        Action::Copy => Some(KeyBinding::new(
+            &combo,
+            CopySelection,
+            Some(crate::gpui_shell::terminal::KEY_CONTEXT),
+        )),
         Action::Paste => Some(KeyBinding::new(
             &combo,
             PasteClipboard,
@@ -237,7 +243,14 @@ fn gpui_binding_combo(combo: &str) -> String {
 
 /// 注册工作区快捷键；在 `gpui_component::init` 之后调用一次。
 pub fn init(cx: &mut App) {
-    cx.bind_keys([
+    cx.bind_keys(default_workspace_bindings());
+    #[cfg(target_os = "macos")]
+    bind_macos_command_keys(cx);
+}
+
+/// 工作区静态默认键位表；与 [`STATIC_DEFAULT_COMBOS`] 互为镜像。
+fn default_workspace_bindings() -> Vec<KeyBinding> {
+    [
         KeyBinding::new("ctrl-shift-t", NewTerminal, None),
         KeyBinding::new("ctrl-shift-e", NewWindow, None),
         KeyBinding::new("ctrl-shift-w", CloseActiveTerminal, None),
@@ -273,6 +286,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl--", DecreaseFontSize, None),
         KeyBinding::new("ctrl-0", ResetFontSize, None),
         KeyBinding::new("ctrl-shift-c", CopySelection, None),
+        // 复制优先（WT 语义）：终端聚焦时有选区复制并清选区，无选区经 handler
+        // 的 `cx.propagate()` 落成 ^C。带终端上下文，重命名/输入框聚焦时
+        // ctrl+c 归输入框自己（Input -> Copy）。
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-c", CopySelection, Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
         // 终端粘贴只在终端焦点路径命中。Input 自己带 `Input -> Paste`；这里若
         // 无上下文，会因注册更晚而抢走弹窗/设置页输入框的 Ctrl+V。
         KeyBinding::new("ctrl-v", PasteClipboard, Some(crate::gpui_shell::terminal::KEY_CONTEXT)),
@@ -284,9 +302,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-v", gpui_component::input::Paste, Some("Input")),
         KeyBinding::new("alt-enter", ToggleFullscreen, None),
         KeyBinding::new("ctrl-shift-o", OpenQuickJump, None),
-    ]);
-    #[cfg(target_os = "macos")]
-    bind_macos_command_keys(cx);
+    ]
+    .into()
 }
 
 /// macOS 的原生修饰键是 ⌘：在 Ctrl 绑定之外**追加**一套 ⌘ 绑定，不替换。
@@ -775,30 +792,8 @@ struct WorkspacePaletteRow {
     icon_path: Option<SharedString>,
 }
 
-/// 启动外部文件管理器的 `Command` 底座。
-///
-/// 三条标准流必须显式置 null：Nebula 是 GUI 子系统进程，`GetStdHandle` 拿到的是
-/// 无效句柄，而 `Command` 默认的 `Stdio::inherit()` 会把它们填进 `STARTUPINFO`，
-/// `CreateProcess` 于是直接以 `ERROR_INVALID_HANDLE`（os error 6）失败。实测就是
-/// 「在资源管理器中打开点了没反应」的真凶——旧壳走 `daemon::spawn_daemon`（同样
-/// 三流置 null）或 `Command::output()`（自带管道）所以从来没露出这个坑。
-fn file_manager_command(program: &str) -> std::process::Command {
-    let mut command = std::process::Command::new(program);
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    command
-}
-
 fn open_in_file_manager(path: &Path) {
-    #[cfg(windows)]
-    let result = file_manager_command("explorer.exe").arg(path).spawn().map(|_| ());
-    #[cfg(target_os = "macos")]
-    let result = file_manager_command("open").arg(path).spawn().map(|_| ());
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let result = file_manager_command("xdg-open").arg(path).spawn().map(|_| ());
-    log_file_manager_spawn("open", path, result);
+    log_file_manager_spawn("open", path, crate::platform::file_manager::open(path));
 }
 
 /// 外部文件管理器的启动结果必须留痕。这两条路径此前都是 `let _ = …spawn()`：
@@ -820,20 +815,7 @@ fn log_file_manager_spawn(kind: &str, path: &Path, result: std::io::Result<()>) 
 /// “在文件管理器中显示”与单纯打开路径不是一个动作。Windows 的
 /// `/select,` 必须和路径组成同一个 argv，避免空格与 Unicode 被二次解析。
 fn reveal_in_file_manager(path: &Path) {
-    #[cfg(windows)]
-    let result = {
-        let mut select = std::ffi::OsString::from("/select,");
-        select.push(path.as_os_str());
-        file_manager_command("explorer.exe").arg(select).spawn().map(|_| ())
-    };
-    #[cfg(target_os = "macos")]
-    let result = file_manager_command("open").args(["-R"]).arg(path).spawn().map(|_| ());
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    let result = match path.parent() {
-        Some(parent) => file_manager_command("xdg-open").arg(parent).spawn().map(|_| ()),
-        None => Ok(()),
-    };
-    log_file_manager_spawn("reveal", path, result);
+    log_file_manager_spawn("reveal", path, crate::platform::file_manager::reveal(path));
 }
 
 fn workspace_ui_language() -> crate::display::UiLanguage {

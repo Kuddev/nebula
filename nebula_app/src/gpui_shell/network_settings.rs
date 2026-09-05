@@ -159,6 +159,13 @@ impl SettingsPane {
             .child(div().h(px(PROXY_TEST_GAP)).w_full().flex_shrink_0())
             .child(self.proxy_mode_row(cx))
             .when(custom, |page| page.child(self.proxy_address_row(cx)))
+            .child(self.switch_row(
+                "terminal_proxy",
+                "系统代理",
+                "启用时，新建终端的 HTTP(S)_PROXY 会接入系统代理。",
+                self.runtime.terminal_proxy,
+                cx,
+            ))
     }
 
     fn proxy_test_banner(&self, cx: &mut Context<Self>) -> gpui::Div {

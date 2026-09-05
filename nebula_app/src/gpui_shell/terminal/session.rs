@@ -94,6 +94,16 @@ pub(super) fn local_options(
     if let Err(error) = tty::refresh_environment(&mut options) {
         log::warn!("Could not refresh the Windows environment for a new pane: {error}");
     }
+    // 终端网络代理开启时，把当前系统代理同步给新会话（HTTP(S)_PROXY 变量），
+    // 让会话里的 curl/git/npm 等不必重复设。系统代理探不到则什么都不做。
+    // 放在环境重建之后：注入值作为 pane 专属覆盖，不被注册表快照冲掉。
+    #[cfg(windows)]
+    if ::nebula_settings::RuntimeSettings::load().terminal_proxy
+        && let Some((url, _)) = crate::ssh_proxy::probe_system_proxy()
+    {
+        options.env.insert("HTTP_PROXY".into(), url.clone());
+        options.env.insert("HTTPS_PROXY".into(), url);
+    }
     // WSL tab 的命令边界（OSC 133;D/A）与 cwd（OSC 7）：来宾登录 shell 默认
     // 不发，Agent 生命周期、目录树与 Git 视图都会失去来宾侧事实。只对
     // `wsl.exe` 启动生效，见 [`crate::shell_detect::wsl_cwd_report_env`]。
