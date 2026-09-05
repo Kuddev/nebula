@@ -920,4 +920,80 @@ mod tests {
             assert_eq!(found.status, AgentStatus::Blocked, "{agent} rule={}", found.rule_id);
         }
     }
+
+    #[test]
+    fn real_antigravity_working_chrome_reads_working() {
+        let screen = "  ⠋ Thinking... (8s)\n\
+                      ────────────────────────────────────────\n\
+                      › \n\
+                      ────────────────────────────────────────\n\
+                      \x20 Plan mode: research & plan only (shift+tab to cycle) · Press esc to interrupt generation";
+        let detection = detect("antigravity", screen).unwrap();
+        assert_eq!(detection.status, AgentStatus::Working, "rule={}", detection.rule_id);
+    }
+
+    #[test]
+    fn real_antigravity_idle_chrome_reads_idle() {
+        let screen = "  I have completed the task and updated the configuration.\n\
+                      ────────────────────────────────────────\n\
+                      › \n\
+                      ────────────────────────────────────────\n\
+                      \x20 Plan mode: research & plan only (shift+tab to cycle) · ? for shortcuts";
+        let detection = detect("antigravity", screen).unwrap();
+        assert_eq!(detection.status, AgentStatus::Idle, "rule={}", detection.rule_id);
+    }
+
+    #[test]
+    fn antigravity_old_scrollback_spinner_does_not_prevent_idle() {
+        // 历史滚屏中留有上一轮的思考转圈符号；region 限制在底部后不能把已结束的回合误判为 Working。
+        let screen = "  ⠋ Thinking... (from previous turn 5m ago)\n\
+                      \x20 Result: success\n\
+                      \x20 Line 1\n\
+                      \x20 Line 2\n\
+                      \x20 Line 3\n\
+                      \x20 Line 4\n\
+                      \x20 Line 5\n\
+                      \x20 Line 6\n\
+                      \x20 Line 7\n\
+                      \x20 Line 8\n\
+                      \x20 Line 9\n\
+                      \x20 Line 10\n\
+                      ────────────────────────────────────────\n\
+                      › \n\
+                      ────────────────────────────────────────\n\
+                      \x20 Accept-edits mode: file edits auto-approved (shift+tab to cycle)";
+        let detection = detect("antigravity", screen).unwrap();
+        assert_eq!(detection.status, AgentStatus::Idle, "rule={}", detection.rule_id);
+    }
+
+    #[test]
+    fn real_antigravity_permission_form_reads_blocked() {
+        let screen = " requesting permission for:\n\
+                      \x20 Run command: cargo test\n\
+                      \x20 Do you want to proceed?\n\
+                      \x20 › 1. Yes, allow\n\
+                      \x20   2. No, deny access\n\
+                      \x20 esc to cancel · tab amend";
+        let detection = detect("antigravity", screen).unwrap();
+        assert_eq!(detection.status, AgentStatus::Blocked, "rule={}", detection.rule_id);
+    }
+
+    #[test]
+    fn antigravity_prose_mentioning_approval_while_idle_reads_idle() {
+        // 回答正文中提及 "needs approval for ..."，但此时已完成并显示空闲提示符，
+        // 不得误判为 Blocked。
+        for phrase in ["needs approval for", "requesting approval for", "requesting permission for:"] {
+            let screen = format!(
+                "│ The tool {phrase} operations outside the workspace.\n\
+                 │ Please confirm your settings if you plan to enable this.\n\
+                 ────────────────────────────────────────\n\
+                 › \n\
+                 ────────────────────────────────────────\n\
+                 \x20 Plan mode: research & plan only (shift+tab to cycle) · ? for shortcuts"
+            );
+            let detection = detect("antigravity", &screen).unwrap();
+            assert_eq!(detection.status, AgentStatus::Idle, "{phrase}: rule={}", detection.rule_id);
+        }
+    }
 }
+

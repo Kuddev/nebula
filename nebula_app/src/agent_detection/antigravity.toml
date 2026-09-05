@@ -5,24 +5,67 @@ aliases = ["agy", "antigravity-cli"]
 [[rules]]
 id = "permission_prompt"
 state = "blocked"
-priority = 300
-region = "whole_recent"
-contains = ["requesting permission for:"]
+priority = 900
+region = "bottom_non_empty_lines(12)"
 any = [
-  { contains = ["do you want to proceed?"] },
+  { contains = ["requesting approval"], any = [
+    { contains = ["[y]"] },
+    { contains = ["(y/n)"] },
+    { contains = ["[y/n]"] },
+    { contains = ["always allow"] },
+    { contains = ["esc to cancel"] },
+    { contains = ["enter to confirm"] },
+  ]},
+  { contains = ["needs approval"], any = [
+    { contains = ["[y]"] },
+    { contains = ["(y/n)"] },
+    { contains = ["[y/n]"] },
+    { contains = ["always allow"] },
+    { contains = ["esc to cancel"] },
+    { contains = ["enter to confirm"] },
+  ]},
+  { contains = ["requesting permission"], any = [
+    { contains = ["[y]"] },
+    { contains = ["(y/n)"] },
+    { contains = ["[y/n]"] },
+    { contains = ["always allow"] },
+    { contains = ["esc to cancel"] },
+    { contains = ["enter to confirm"] },
+  ]},
   { contains = ["tab amend", "edit command"] },
+  { contains = ["tab to amend"] },
 ]
 
 [[rules]]
 id = "spinner_working"
 state = "working"
-priority = 100
-region = "whole_recent"
+priority = 400
+region = "bottom_non_empty_lines(8)"
 line_regex = ['^\s*[\u2800-\u28FF]+\s+\p{Alphabetic}+\w*ing\b']
 
 [[rules]]
 id = "background_tasks_working"
 state = "working"
-priority = 90
+priority = 380
 region = "bottom_non_empty_lines(5)"
 line_regex = ['(?i)·\s*[1-9][0-9]*\s+task']
+
+[[rules]]
+id = "prompt_idle"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(6)"
+any = [
+  { contains = ["shift+tab to cycle"] },
+  { contains = ["? for shortcuts"] },
+  { line_regex = ['^\s*[›❯>](?:\s|$)'] },
+]
+not = [
+  { contains = ["esc to interrupt"] },
+  { contains = ["esc to cancel"] },
+  { contains = ["requesting approval"], any = [{ contains = ["[y]"] }, { contains = ["(y/n)"] }, { contains = ["[y/n]"] }, { contains = ["always allow"] }] },
+  { contains = ["needs approval"], any = [{ contains = ["[y]"] }, { contains = ["(y/n)"] }, { contains = ["[y/n]"] }, { contains = ["always allow"] }] },
+  { contains = ["requesting permission"], any = [{ contains = ["[y]"] }, { contains = ["(y/n)"] }, { contains = ["[y/n]"] }, { contains = ["always allow"] }] },
+]
+
+
