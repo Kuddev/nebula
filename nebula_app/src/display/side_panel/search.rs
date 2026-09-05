@@ -256,6 +256,8 @@ fn run_index_worker(
                     let callback_tx = watch_tx.clone();
                     let callback_rescan = Arc::clone(&rescan_requested);
                     let callback_root = local_root.clone();
+                    let canonical_root =
+                        local_root.canonicalize().unwrap_or_else(|_| local_root.clone());
                     watcher = notify::recommended_watcher(
                         move |mut event: notify::Result<notify::Event>| {
                             if let Ok(event) = &mut event
@@ -264,9 +266,15 @@ fn run_index_worker(
                                 if !event_changes_names(&event.kind) {
                                     return;
                                 }
-                                event
-                                    .paths
-                                    .retain(|path| indexable_local_path(&callback_root, path));
+                                event.paths.retain_mut(|path| {
+                                    let Some(mapped) =
+                                        watched_local_path(&callback_root, &canonical_root, path)
+                                    else {
+                                        return false;
+                                    };
+                                    *path = mapped;
+                                    true
+                                });
                                 if event.paths.is_empty() {
                                     return;
                                 }
@@ -540,6 +548,12 @@ fn indexable_local_path(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root).is_ok_and(|relative| {
         !relative.components().any(|component| component.as_os_str() == ".git")
     })
+}
+
+fn watched_local_path(root: &Path, canonical_root: &Path, path: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(root).or_else(|_| path.strip_prefix(canonical_root)).ok()?;
+    let visible_path = root.join(relative);
+    indexable_local_path(root, &visible_path).then_some(visible_path)
 }
 
 fn patch_local_index(
@@ -932,6 +946,34 @@ mod search_tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("file index did not publish the expected result");
+    }
+
+    #[test]
+    fn canonical_watch_events_keep_the_visible_root_for_create_rename_and_delete() {
+        let root = Path::new("visible").join("checkout");
+        let canonical = Path::new("resolved").join("checkout");
+        for relative in ["needle.txt", "needle-renamed.txt", "deleted.txt"] {
+            let visible = root.join(relative);
+            assert_eq!(
+                watched_local_path(&root, &canonical, &canonical.join(relative)),
+                Some(visible.clone())
+            );
+            assert_eq!(watched_local_path(&root, &canonical, &visible), Some(visible));
+        }
+        assert_eq!(watched_local_path(&root, &canonical, &canonical), Some(root));
+    }
+
+    #[test]
+    fn canonical_watch_events_still_reject_other_roots_and_git_internals() {
+        let root = Path::new("visible").join("checkout");
+        let canonical = Path::new("resolved").join("checkout");
+        for path in [
+            root.join(".git/objects/hidden"),
+            canonical.join(".git/objects/hidden"),
+            Path::new("resolved").join("checkout-other/needle.txt"),
+        ] {
+            assert!(watched_local_path(&root, &canonical, &path).is_none());
+        }
     }
 
     #[test]

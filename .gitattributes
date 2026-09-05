@@ -1,0 +1,2 @@
+nebula_terminal/tests/ref/**/*.recording binary
+extra/completions/** text eol=lf
