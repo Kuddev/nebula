@@ -4,9 +4,7 @@
 
 <h1 align="center">Pebrel</h1>
 
-> **Local branding preview / 本地品牌预览** — Pebrel is the new display name of Nebula Terminal. This worktree keeps version 1.5.0, `nebula.exe`, existing configuration paths, installer identity, and the Nebula update feed for compatibility. Pebrel-named packages are local test artifacts, not a new GitHub Release. Installing the setup package targets the existing Nebula installation; use the ZIP with isolated configuration for side-by-side testing.
->
-> Pebrel 是 Nebula Terminal 的新展示名称。本工作区保留 1.5.0 版本、`nebula.exe`、现有配置路径、安装标识和 Nebula 更新源，以维持兼容。Pebrel 命名的包仅用于本地测试，不代表新的 GitHub Release。安装器沿用现有 Nebula 安装身份；需要并行测试时，请使用 ZIP 并配置隔离目录。
+
 
 <p align="center">
   <b>A GPU-accelerated terminal for Windows that keeps your sessions alive — close the window, your <code>claude</code> conversation survives.</b><br/>
