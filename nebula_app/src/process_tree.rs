@@ -104,7 +104,12 @@ fn is_stateless_process(executable: &str) -> bool {
         return true;
     }
     let stem = name.strip_suffix(".exe").unwrap_or(&name);
-    INTERACTIVE_SHELLS.contains(&stem) || stem == "git"
+    // POSIX login shells can expose argv[0] as `-bash`/`-zsh` in ps output.
+    // Apply this convention only to a known shell, never to the git/plumbing
+    // exemptions or Windows executable names. Command parsing stays separate.
+    let login_shell = !name.ends_with(".exe")
+        && stem.strip_prefix('-').is_some_and(|shell| INTERACTIVE_SHELLS.contains(&shell));
+    INTERACTIVE_SHELLS.contains(&stem) || login_shell || stem == "git"
 }
 
 /// Parse the stable three-column `ps` output used by Unix snapshots. The
@@ -255,7 +260,11 @@ pub fn descendants(root_pid: u32) -> Result<Vec<ProcessEntry>, String> {
 /// First non-stateless process under `root_pid` (the pane's shell), or `None`
 /// when the whole tree is safe to kill. The name is used in the confirm modal.
 pub fn busy_child(root_pid: u32) -> Option<String> {
-    descendants(root_pid).ok()?.into_iter().skip(1).find_map(|process| {
+    busy_descendant(descendants(root_pid).ok()?)
+}
+
+fn busy_descendant(processes: Vec<ProcessEntry>) -> Option<String> {
+    processes.into_iter().skip(1).find_map(|process| {
         (!is_stateless_process(&process.executable)).then_some(process.executable)
     })
 }
@@ -400,9 +409,38 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        display_name, is_interactive_shell_command, parse_ps_line, resolve_agent_ancestor,
-        resolve_within_tree,
+        ProcessEntry, busy_descendant, display_name, is_interactive_shell_command,
+        is_stateless_process, parse_ps_line, resolve_agent_ancestor, resolve_within_tree,
     };
+
+    #[test]
+    fn login_shell_process_names_are_stateless_without_exempting_other_programs() {
+        for name in ["-bash", "-zsh", "-sh", "-fish", "/bin/-bash"] {
+            assert!(is_stateless_process(name), "{name}");
+        }
+        for name in ["-vim", "-python", "-git", "--bash", "-bash.exe", "-bash script.sh"] {
+            assert!(!is_stateless_process(name), "{name}");
+        }
+        assert!(!is_interactive_shell_command("-bash"));
+    }
+
+    #[test]
+    fn login_shell_nodes_do_not_hide_a_busy_descendant() {
+        let entries = |commands: &[&str]| {
+            commands
+                .iter()
+                .enumerate()
+                .map(|(depth, command)| ProcessEntry {
+                    pid: depth as u32 + 1,
+                    parent_pid: depth as u32,
+                    executable: (*command).to_owned(),
+                    depth: depth as u32,
+                })
+                .collect()
+        };
+        assert_eq!(busy_descendant(entries(&["login", "-bash"])), None);
+        assert_eq!(busy_descendant(entries(&["login", "-bash", "vim"])), Some("vim".to_owned()));
+    }
 
     #[test]
     fn unix_process_rows_keep_the_complete_command_column() {
